@@ -174,6 +174,15 @@ describe('recordLlmUsage', () => {
     expect(event!.keyOwnerType).toBe('HADRON_SERVER');
   });
 
+  it('openai-compatible is recorded UNPRICED even when a price row exists, so it is never debited at another host\'s rate (#1389 review)', async () => {
+    vi.stubEnv('BILLING_DEBIT_ENABLED', 'true');
+    await mkPrice('openai-compatible', 'claude-m', new Date('2026-01-01'));
+    const event = await recordLlmUsage(db, { ...base, provider: 'openai-compatible', organizationId: orgId, keyOwnerType: 'HADRON_SERVER' });
+    expect(event!.costMicroCents).toBeNull();
+    expect(await db.creditLedgerEntry.count()).toBe(0);
+    vi.unstubAllEnvs();
+  });
+
   it('stores a null cost for an unpriced pair (and never blocks)', async () => {
     const event = await recordLlmUsage(db, { ...base, organizationId: orgId });
     expect(event).not.toBeNull();

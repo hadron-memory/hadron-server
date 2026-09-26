@@ -13,10 +13,21 @@
 
 import { z } from 'zod';
 
-import type { AiServiceConfig, PrismaClient } from '../generated/prisma/index.js';
+import type { AiServiceConfig, Prisma, PrismaClient } from '../generated/prisma/index.js';
 import { encryptToken } from './tokenCrypto.js';
 
 // ── Typed errors (Constitution S2 — resolver layer maps name → extensions.code) ──
+
+/**
+ * Lock an AI config's row for the rest of the transaction and read it as it
+ * is NOW (#1389 review). Write-time invariants (endpoint and key required,
+ * a provider change clearing a stale endpoint/style) are judged on this row,
+ * so a concurrent edit can't slip between the check and the write.
+ */
+export async function lockAiServiceConfig(tx: Prisma.TransactionClient, id: string): Promise<AiServiceConfig | null> {
+  await tx.$queryRaw`SELECT 1 FROM "ai_service_configs" WHERE "id" = ${id} FOR UPDATE`;
+  return tx.aiServiceConfig.findUnique({ where: { id } });
+}
 
 export class AiServiceConfigNotFoundError extends Error {
   constructor(public ref: string) {

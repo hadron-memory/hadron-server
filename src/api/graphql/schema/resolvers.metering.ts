@@ -17,6 +17,7 @@ import {
   clearPriceCache,
   creditBalance,
   grantCredits,
+  HOST_PRICED_PROVIDERS,
   IdempotencyConflictError,
   InvalidLedgerAmountError,
   PRICE_TIER_DEFAULT,
@@ -182,6 +183,11 @@ export const meteringMutations = {
     const provider = input.provider.trim();
     const model = input.model.trim();
     if (!provider || !model) throw badInput('provider and model are required.');
+    // A price that metering would never read: `openai-compatible` spend is
+    // recorded unpriced until prices can name the serving host (#1389 review).
+    if (HOST_PRICED_PROVIDERS.has(provider)) {
+      throw badInput(`"${provider}" is priced by the host that serves it, which a price row cannot name yet; its usage is recorded unpriced.`);
+    }
     const tier = input.tier ?? PRICE_TIER_DEFAULT;
     if (!Number.isInteger(tier) || tier < PRICE_TIER_MIN || tier > PRICE_TIER_MAX) {
       throw badInput(`tier must be an integer ${PRICE_TIER_MIN}-${PRICE_TIER_MAX}.`);

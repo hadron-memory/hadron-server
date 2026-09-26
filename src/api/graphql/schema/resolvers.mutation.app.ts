@@ -9,6 +9,8 @@ import {
   DEFAULT_AI_CONFIG_NAME,
   apiKeyWriteFields,
   apiKeyPreviewOf,
+  AiServiceConfigNotFoundError,
+  lockAiServiceConfig,
   validateProviderAndParams,
 } from '../../../lib/aiConfig.js';
 import {
@@ -700,20 +702,34 @@ export const appMutations = {
             }
             const keyFields = apiKeyWriteFields(aiApiKey);
             if (existing) {
-              await ctx.db.aiServiceConfig.update({
-                where: { id: existing.id },
-                data: {
-                  provider,
-                  model,
-                  ...keyFields,
-                  // #1380 review: a legacy surface can express neither a style nor
-                  // an endpoint, and both were chosen for the OLD provider. Any
-                  // provider change clears both, so the new provider starts
-                  // from its own defaults and the new key never goes to the
-                  // old host.
-                  ...(provider !== existing.provider ? { endpoint: null, apiStyle: null } : {}),
-                  updatedBy: ctx.userId ?? null,
-                },
+              // Re-judged on the LOCKED row (#1389 review): a concurrent edit
+              // after the read above must not let this write keep a provider
+              // whose endpoint or key was cleared in between.
+              await ctx.db.$transaction(async (tx) => {
+                const cur = await lockAiServiceConfig(tx, existing.id);
+                if (!cur) throw new AiServiceConfigNotFoundError(existing.id);
+                try {
+                  const keptEndpoint = cur.provider === provider ? cur.endpoint : null;
+                  requireEndpointFor(provider, keptEndpoint);
+                  requireKeyFor({ provider, endpoint: keptEndpoint }, aiApiKey === undefined ? !!cur.apiKeyEncrypted : !!aiApiKey, 'APP');
+                } catch (e) {
+                  rethrowAiConfigTyped(e);
+                }
+                await tx.aiServiceConfig.update({
+                  where: { id: cur.id },
+                  data: {
+                    provider,
+                    model,
+                    ...keyFields,
+                    // #1380 review: a legacy surface can express neither a style nor
+                    // an endpoint, and both were chosen for the OLD provider. Any
+                    // provider change clears both, so the new provider starts
+                    // from its own defaults and the new key never goes to the
+                    // old host.
+                    ...(provider !== cur.provider ? { endpoint: null, apiStyle: null } : {}),
+                    updatedBy: ctx.userId ?? null,
+                  },
+                });
               });
             } else {
               await ctx.db.aiServiceConfig.create({
