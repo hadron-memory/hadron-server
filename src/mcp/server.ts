@@ -3937,42 +3937,7 @@ export function createMcpServerInstance(
         const projectionInclude = readProjectionInclude;
 
         const nodeByRef = new Map<string, ReadProjectionNode & { id: string }>();
-        // A moved node's historical address is a fallback only after the
-        // direct, live address misses. Re-resolve under the CURRENT memory's
-        // gate; the old memory conveys no authority (cor:urn:030:02).
-        const resolveMovedRef = async (r: UrnRef) => {
-          const aliasRefs = r.literalLoc && fragmentByRef.has(r.raw)
-            ? [r.raw, r.raw.slice(0, r.raw.lastIndexOf('#'))]
-            : [r.raw];
-          let id: string | undefined;
-          for (const aliasRef of aliasRefs) {
-            try {
-              ({ id } = await resolveNodeRef(db, aliasRef));
-              if (aliasRef === r.raw && r.literalLoc) fragmentByRef.delete(r.raw);
-              break;
-            } catch (e) {
-              if (e instanceof NodeNotFoundError) continue;
-              throw e;
-            }
-          }
-          if (!id) {
-            unavailable.push(r.raw);
-            return;
-          }
-          const target = await db.node.findFirst({
-            where: { id, deletedAt: null }, select: { memoryId: true },
-          });
-          if (!target || !(await canReadMemory(db, auth, target.memoryId))) {
-            unavailable.push(r.raw);
-            return;
-          }
-          const row = await db.node.findFirst({
-            where: { id, memoryId: target.memoryId, deletedAt: null },
-            include: projectionInclude,
-          });
-          if (row) nodeByRef.set(r.raw, row as unknown as ReadProjectionNode & { id: string });
-          else unavailable.push(r.raw);
-        };
+        const movedFallbacks: UrnRef[] = [];
 
         // URN refs: group by memory so each distinct memory is gated + fetched
         // once (not N findFirsts).
@@ -3985,7 +3950,7 @@ export function createMcpServerInstance(
         for (const [mu, group] of byMemory) {
           const mem = await resolveMemoryByUrn(mu);
           if (!mem || !(await canReadMemory(db, auth, mem.id))) {
-            for (const r of group) await resolveMovedRef(r);
+            movedFallbacks.push(...group);
             continue;
           }
           // Both candidates for a fragmented ref, in ONE query: the literal
@@ -4007,13 +3972,69 @@ export function createMcpServerInstance(
             const literal = r.literalLoc ? rowByLoc.get(r.literalLoc) : undefined;
             const row = literal ?? rowByLoc.get(r.loc);
             if (!row) {
-              await resolveMovedRef(r);
+              movedFallbacks.push(r);
               continue;
             }
             // A literal match resolved nothing away, so it carries no notice.
             if (literal) fragmentByRef.delete(r.raw);
             nodeByRef.set(r.raw, row as unknown as ReadProjectionNode & { id: string });
           }
+        }
+
+        // #1391: old addresses are a fallback only after the grouped live
+        // lookup missed. Bound resolver concurrency, then coalesce the target
+        // liveness probes, memory gates and projections for the WHOLE fallback
+        // set. Without this, 200 historical refs did their target gate and
+        // projection serially, turning a batch read back into N+1 round trips.
+        const movedIdByRef = new Map<string, string>();
+        let nextFallback = 0;
+        const resolveFallbackWorker = async () => {
+          while (nextFallback < movedFallbacks.length) {
+            const r = movedFallbacks[nextFallback++];
+            const aliasRefs = r.literalLoc && fragmentByRef.has(r.raw)
+              ? [r.raw, r.raw.slice(0, r.raw.lastIndexOf('#'))]
+              : [r.raw];
+            for (const aliasRef of aliasRefs) {
+              try {
+                const { id } = await resolveNodeRef(db, aliasRef);
+                movedIdByRef.set(r.raw, id);
+                if (aliasRef === r.raw && r.literalLoc) fragmentByRef.delete(r.raw);
+                break;
+              } catch (e) {
+                if (e instanceof NodeNotFoundError) continue;
+                throw e;
+              }
+            }
+          }
+        };
+        await Promise.all(Array.from(
+          { length: Math.min(8, movedFallbacks.length) },
+          () => resolveFallbackWorker(),
+        ));
+        const movedIds = [...new Set(movedIdByRef.values())];
+        const movedProbes = movedIds.length
+          ? await db.node.findMany({
+              where: { id: { in: movedIds }, deletedAt: null, memory: { deletedAt: null } },
+              select: { id: true, memoryId: true },
+            })
+          : [];
+        const readableMemory = new Map<string, boolean>();
+        await Promise.all([...new Set(movedProbes.map((n) => n.memoryId))].map(async (memoryId) => {
+          readableMemory.set(memoryId, await canReadMemory(db, auth, memoryId));
+        }));
+        const allowedProbes = movedProbes.filter((n) => readableMemory.get(n.memoryId));
+        const movedRows = allowedProbes.length
+          ? await db.node.findMany({
+              where: { OR: allowedProbes.map((n) => ({ id: n.id, memoryId: n.memoryId })), deletedAt: null },
+              include: projectionInclude,
+            })
+          : [];
+        const movedRowById = new Map(movedRows.map((n) => [n.id, n]));
+        for (const r of movedFallbacks) {
+          const id = movedIdByRef.get(r.raw);
+          const row = id && movedRowById.get(id);
+          if (row) nodeByRef.set(r.raw, row as unknown as ReadProjectionNode & { id: string });
+          else unavailable.push(r.raw);
         }
 
         // PK refs: gate BEFORE fetching the projection, mirroring the URN path

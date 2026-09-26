@@ -238,6 +238,33 @@ describe('node move URN aliases', () => {
       .toContain('Memory not found');
   });
 
+  it('coalesces projections when a batch reads many moved descendant addresses', async () => {
+    const root = await createNode(source.id, 'bulk');
+    const oldRefs = [nodeUrn(source, 'bulk')];
+    for (let i = 0; i < 12; i++) {
+      const loc = `bulk:c${String(i).padStart(2, '0')}`;
+      await createNode(source.id, loc);
+      oldRefs.push(nodeUrn(source, loc));
+    }
+    await resolvers.Mutation.moveNode(null, {
+      sourceRef: root.id, targetUrn: nodeUrn(source, 'new'),
+    }, graphCtx());
+
+    const projectionQueries = vi.spyOn(db.node, 'findMany');
+    try {
+      const text = await createTestableMcpServer(mcpAuth()).callToolText('hadron_get_nodes', {
+        refs: oldRefs,
+      });
+      expect(text).toContain('returned 13 node(s)');
+      expect(text).toContain('body of bulk:c11');
+      expect(projectionQueries.mock.calls.filter(([arg]) =>
+        arg?.where && 'OR' in arg.where && arg.include && 'outgoingEdges' in arg.include,
+      )).toHaveLength(1);
+    } finally {
+      projectionQueries.mockRestore();
+    }
+  });
+
   it('does not persist aliases on a refused move and does not resurrect a deleted target', async () => {
     const root = await createNode(source.id, 'old');
     await createNode(source.id, 'occupied');
