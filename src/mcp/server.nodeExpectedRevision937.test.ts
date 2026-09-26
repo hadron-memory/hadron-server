@@ -194,8 +194,14 @@ describe('MCP expectedRevision (#937)', () => {
   it('never replays a precondition through a governed create door', () => {
     expect(mcpDoorCanReplay({ expectedRevision: 3 }, 'task', 'update')).toBe(true);
     expect(mcpDoorCanReplay({ expectedRevision: 3 }, 'review', 'update')).toBe(true);
-    expect(mcpDoorCanReplay({ expectedRevision: 3 }, 'task', 'create')).toBe(false);
-    expect(mcpDoorCanReplay({ expectedRevision: 3 }, 'review', 'create')).toBe(false);
+    // `name` is supplied on the create cases on purpose: without it the
+    // trailing create-needs-a-name rule returns false anyway, and the test
+    // would pass no matter what the precondition rule did.
+    expect(mcpDoorCanReplay({ expectedRevision: 3, name: 'n' }, 'task', 'create')).toBe(false);
+    expect(mcpDoorCanReplay({ expectedRevision: 3, name: 'n' }, 'review', 'create')).toBe(false);
+    // Control: the same create WITHOUT a precondition is replayable, so the
+    // refusal above is attributable to the precondition and nothing else.
+    expect(mcpDoorCanReplay({ name: 'n', isRunnable: true }, 'task', 'create')).toBe(true);
   });
 
   it.each(['hadron_update_node', 'hadron_update_task', 'hadron_update_review'])(
