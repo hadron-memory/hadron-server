@@ -140,6 +140,13 @@ describe('testAiServiceConfig (#1378)', () => {
     expect(JSON.stringify(r)).not.toContain(SAVED_KEY);
   });
 
+  it('override: null is the same as omitting it: the saved config, every field SAVED (portal#950 contract)', async () => {
+    const cfg = await mkConfig({ organizationId: org.id });
+    const r = await test(cfg.id, ctxFor(admin.id), null as never);
+    expect(r).toMatchObject({ ok: true, used: { provider: 'SAVED', model: 'SAVED', endpoint: 'SAVED', apiStyle: 'SAVED', key: 'SAVED' } });
+    expect(captured[0].auth).toBe(`Bearer ${SAVED_KEY}`);
+  });
+
   it('an override tests edited values without saving them, and says so field by field', async () => {
     const cfg = await mkConfig({ organizationId: org.id });
     const r = await test(cfg.id, ctxFor(admin.id), { model: 'GLM-5.4', apiKey: OVERRIDE_KEY, endpoint: `${origin}/other/v4` });
