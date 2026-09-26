@@ -188,6 +188,32 @@ describe('read-state', () => {
     sessionKeyCache.clear();
   });
 
+  it('an attendee\'s own broadcast is not attention for it; someone else\'s is (#1362 review)', async () => {
+    await db.registerEntry.updateMany({ where: { appId: app.id }, data: { mentionOnly: true } });
+    const enc = await getMemoryEncryptionInfo(db, channel.memoryId);
+    const postAs = (body: string, mentions: string[], authorWorkerId?: string) =>
+      appendChatMessage(
+        db,
+        { id: channel.chatRootNodeId, memoryId: channel.memoryId, loc: channel.loc },
+        enc,
+        async ({ tx, seq, msgNum }) =>
+          tx.node.create({
+            data: {
+              id: generateId(), memoryId: channel.memoryId, loc: `${channel.loc}:messages:${msgNum}`, name: msgNum,
+              nodeType: 'chat-message', seq, content: body,
+              data: { mentions, ...(authorWorkerId ? { authorWorkerId } : {}) },
+            },
+          }),
+        { asChannel: true },
+      );
+    // Iris is cast from this run's Agent: her team-wide post is the attendee's own.
+    await postAs('@all heads up', ['all'], worker.id);
+    const run = await mintAppRun(db, { organizationId: org.id, appId: app.id, agentId: agent.id, userId: admin.id, triggerKind: 'MANUAL', entryNodeUrn: entry, publish: false });
+    expect((await renderAttentionSection(db, run)).text).toContain('nothing new for you (mention-only; channel is at 1)');
+    await postAs('@all from a human', ['all']);
+    expect((await renderAttentionSection(db, run)).text).toContain('1 new mention of you since seq 0 (channel is at 2)');
+  });
+
   it('a cleanly reused Channel has no phantom attention and its next message clears old cursors (#1226)', async () => {
     await post('old one');
     await post('old two');

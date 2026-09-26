@@ -82,6 +82,18 @@ export async function attendeeMentionTokens(db: Db, attendee: RegisterAttendee):
   ])];
 }
 
+/**
+ * The Workers whose posts are the attendee's OWN — never attention for it
+ * (#1362 review, Codex P2): with the broadcast tokens counted as mentions, a
+ * Worker's own post to the whole team would otherwise wake its own Agent's
+ * run. Retired Workers included: their posts are still the attendee's own.
+ */
+async function attendeeWorkerIds(db: Db, attendee: RegisterAttendee): Promise<string[]> {
+  if ('workerId' in attendee) return [attendee.workerId];
+  const workers = await db.worker.findMany({ where: { agentId: attendee.agentId, appId: attendee.appId }, select: { id: true } });
+  return workers.map((w) => w.id);
+}
+
 export interface AttentionSection {
   /** The rendered `## Channels (attention)` block; '' when the run has no attendee or no rows. */
   text: string;
@@ -133,6 +145,7 @@ export async function renderAttentionSection(
   if (channels.length === 0) return none;
   const mentionRows = snap.rows.filter((r) => r.mentionOnly);
   const tokens = mentionRows.length ? await attendeeMentionTokens(db, attendee) : [];
+  const ownWorkerIds = mentionRows.length ? await attendeeWorkerIds(db, attendee) : [];
   const captured = new Map<string, number>();
   const lines: string[] = [];
   for (const c of channels) {
@@ -156,8 +169,8 @@ export async function renderAttentionSection(
     if (row.mentionOnly) {
       // Only new messages that name the attendee count — a small indexed
       // query over the (seen, lastSeq] window, content never injected.
-      const mentions = tokens.length
-        ? await db.node.count({
+      const hits = tokens.length
+        ? await db.node.findMany({
             where: {
               memoryId: c.memoryId,
               loc: { startsWith: escapePrismaLikePattern(`${c.loc}:messages:`) },
@@ -166,8 +179,17 @@ export async function renderAttentionSection(
               seq: { gt: seen, lte: c.lastSeq },
               OR: tokens.map((t) => ({ data: { path: ['mentions'], array_contains: [t] } })),
             },
+            select: { data: true },
           })
-        : 0;
+        : [];
+      // Own posts are never attention, broadcast or not. Filtered here, not in
+      // SQL: a JSON-path NOT over a message with no authorWorkerId is SQL NULL
+      // and would drop every human post along with the Worker's own.
+      const own = new Set(ownWorkerIds);
+      const mentions = hits.filter((h) => {
+        const author = (h.data as { authorWorkerId?: unknown } | null)?.authorWorkerId;
+        return !(typeof author === 'string' && own.has(author));
+      }).length;
       lines.push(
         mentions > 0
           ? `- ${c.name} (${where}): ${mentions} new mention${mentions === 1 ? '' : 's'} of you since seq ${seen} (channel is at ${c.lastSeq})`
