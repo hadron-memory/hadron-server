@@ -956,6 +956,22 @@ describe('spec 017 — chat scope (US2 shared path)', () => {
     expect(sent.systemMessage).toBe(' | Y ONLY | GLOBAL | ');
   });
 
+  it('does not restore an uninstalled Agent when sending to its retained shared chat', async () => {
+    const app = await db.app.findFirstOrThrow({ where: { urn: `${orgA.urn}:research-app` } });
+    await db.appMember.create({ data: { appId: app.id, userId: adminUser.id, role: 'member' } });
+    const start = await resolvers.Mutation.startChat(
+      {}, { agentId: agent.id, scope: 'shared' }, userCtx(adminUser.id),
+    );
+    expect(start.systemMessage).toContain('Scope the research.');
+    await db.appAgent.delete({ where: { appId_agentId: { appId: app.id, agentId: agent.id } } });
+
+    const sent = await resolvers.Mutation.sendChatMessage(
+      {}, { chatId: start.chatId, userMessage: 'after uninstall' }, userCtx(adminUser.id),
+    );
+    expect(sent.systemMessage).toBe('');
+    expect(sent.tools).toBeNull();
+  });
+
   it("creates a shared chat in an app-class memory, idempotent on a second call", async () => {
     await makeAppMember(`${orgA.urn}:research-app`, adminUser.id);
     const r1 = await resolvers.Mutation.startChat(

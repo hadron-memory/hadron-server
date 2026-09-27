@@ -617,8 +617,8 @@ function holdsContentReadIndependently(ctx: Context, memoryId: string): Promise<
  *  - **knowledge / group only**, and never a user-owned row — never a
  *    strict-owner shape;
  *  - **`read` only**, mirroring provisioning, which links App knowledge `read`
- *    and leaves writes with the org admin. A same-App `read-write` still needs
- *    the caller's own write capability, unchanged.
+ *    and leaves writes with the org admin. This also holds for a platform
+ *    admin, whose independent read capability must not bypass App scope.
  *
  * The row this admits confers no ambient authority of its own: the access fold
  * (`admissibleFoldRows`) confines an App-scoped row to its own App, so the new
@@ -723,10 +723,10 @@ export async function requireAgentMemoryGrant(
   // Also a KNOWN mutation survivor (harness #8), for #7's reason: `self` feeds
   // only the write check below, which no reachable caller depends on today.
   const self = userPrincipalOnly(ctx);
-  const canRead =
-    (await holdsContentReadIndependently(ctx, memory.id)) ||
-    // The ONE route by which App reach may admit an attach (#1357).
-    (asked === 'read' && (await sameAppAttachAdmitted(ctx, agent.id, memory)));
+  const independentlyReadable = await holdsContentReadIndependently(ctx, memory.id);
+  // The ONE route by which App reach may admit an attach (#1357).
+  const sameAppRead = asked === 'read' && (await sameAppAttachAdmitted(ctx, agent.id, memory));
+  const canRead = independentlyReadable || sameAppRead;
   // Existence-hiding first: every refusal below this line is addressed to
   // someone who already knows the memory exists.
   if (!canRead) throw new MemoryNotFoundError(ref);
@@ -754,6 +754,15 @@ export async function requireAgentMemoryGrant(
     });
   }
   const role = parseAgentMemoryRole(rawRole);
+  // Platform ADMIN can independently read App-scoped knowledge through its
+  // global branch, but the row is still App-internal. Its grant must satisfy
+  // the same live-install, App-admin and read-only rule as every other caller.
+  if (memory.appId != null && memory.ownerUserId == null &&
+      (memory.class === 'knowledge' || memory.class === 'group') && !sameAppRead) {
+    throw new GraphQLError('App-scoped knowledge can only be attached read-only to an agent installed in its App.', {
+      extensions: { code: 'FORBIDDEN', reason: 'APP_SCOPED_ATTACH' },
+    });
+  }
 
   const sameTenant =
     (agent.organizationId != null && agent.organizationId === memory.organizationId) ||
@@ -787,21 +796,9 @@ export async function requireAgentMemoryGrant(
     // this guard: a foreign App key, holding only an AgentOrgGrant on the
     // published agent, overwrote the publisher's node. Same-tenant ownership
     // does not make that safe — the audience, not the tenancy, is what widens.
-    // NOT covered-set-excluded here, unlike `assertAgentPublicAllowed`, and
-    // that asymmetry is deliberate (@codex raised it on PR #1357 as an
-    // order-dependence; measured, the order-dependence does not exist).
-    //
-    // The premise was that attaching an app-scoped memory read-write to a
-    // non-PUBLIC agent and then publishing succeeds, while publishing first and
-    // then attaching is refused here. The first half does not happen: an
-    // app-scoped memory is content-unreadable by every user principal in its
-    // own right — #653 keeps it out of the org gates and the App fold is
-    // excluded by design above — so the attach is refused at the READ gate,
-    // before this guard is reached, whichever order the caller picks. Both
-    // paths refuse; the invariant is single-valued.
-    //
-    // Loosening this guard on that premise would have been a change made for a
-    // case that cannot occur, so it stays strict.
+    // The App-scoped grant rule above admits read only, including for platform
+    // admins. Legacy writable App-scoped links remain outside the PUBLIC
+    // covered set, but this mutation cannot create or escalate one.
     // Only for a COVERED memory, exactly as publication judges it (@codex,
     // PR #1357): an App-scoped or strict-owner memory is not part of any
     // public surface — the fold confines it to its own App — so

@@ -503,6 +503,10 @@ export const memoryQueries = {
           for (const item of aa.agent.memoryItems) {
             if (classSet ? !classSet.has(item.memory.class) : item.memory.class === 'system') continue;
             if (f.visibility && item.memory.visibility !== f.visibility) continue;
+            // AgentMemoryItem is global to the Agent. An App-scoped memory
+            // contributes only to its own App, even when the same Agent is
+            // installed elsewhere (#1357 review).
+            if (item.memory.appId != null && item.memory.appId !== ctx.appId) continue;
             if (foreignUserOwned(item.memory.ownerUserId)) continue;
             memoryMap.set(item.memory.id, item.memory);
           }

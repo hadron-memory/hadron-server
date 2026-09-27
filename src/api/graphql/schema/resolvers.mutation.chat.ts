@@ -687,6 +687,22 @@ export const chatMutations = {
         });
         agent = legacyAgents.find((a) => (a as any).systemMemoryId) ?? null;
       }
+      // Uninstall leaves the App's shared chat memory in place. Its historical
+      // Agent pointer is not a live grant: after uninstall, participants may
+      // still post to the chat, but its old system prompt and linked knowledge
+      // must not re-enter template retrieval.
+      if (memory.class === 'app' && agent) {
+        const installed = memory.appId && await ctx.db.appAgent.findFirst({
+          where: {
+            appId: memory.appId,
+            agentId: agent.id,
+            app: { deletedAt: null, uninstalledAt: null },
+            agent: { deletedAt: null },
+          },
+          select: { agentId: true },
+        });
+        if (!installed) agent = null;
+      }
       const systemMemoryId = agent ? (agent as any).systemMemoryId as string : null;
 
       // Pin to version: if the chat was started with a published revision,

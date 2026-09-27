@@ -101,8 +101,8 @@ run "2 re-role gate removed" "$M" \
 run "3 role validation disabled" "$H" \
   "  if (!(AGENT_MEMORY_ROLES as readonly string[]).includes(value)) {" "  if (false) {"
 run "4 content gate -> record gate" "$H" \
-  "    (await holdsContentReadIndependently(ctx, memory.id)) ||" \
-  "    (await canReadMemoryRecord(userPrincipalOnly(ctx), memory)) ||"
+  "  const independentlyReadable = await holdsContentReadIndependently(ctx, memory.id);" \
+  "  const independentlyReadable = await canReadMemoryRecord(userPrincipalOnly(ctx), memory);"
 run "5 tenancy check dropped" "$H" \
   "  if (!sameTenant && !publicRead) {" "  if (false) {"
 run "6 PUBLIC allowed read-write cross-tenant" "$H" \
@@ -213,9 +213,11 @@ run "33 locked other-claimant re-check removed" "$AG" \
 
 # ── #1357 same-App attach (Holger's ruling, 2026-09-26) ──────────────────
 run "34 same-App branch removed" "$H" \
-  "    (asked === 'read' && (await sameAppAttachAdmitted(ctx, agent.id, memory)));" "    false;"
+  "  const sameAppRead = asked === 'read' && (await sameAppAttachAdmitted(ctx, agent.id, memory));" \
+  "  const sameAppRead = false;"
 run "35 same-App branch admits read-write" "$H" \
-  "    (asked === 'read' && (await sameAppAttachAdmitted(ctx, agent.id, memory)));" "    (await sameAppAttachAdmitted(ctx, agent.id, memory));"
+  "  const sameAppRead = asked === 'read' && (await sameAppAttachAdmitted(ctx, agent.id, memory));" \
+  "  const sameAppRead = await sameAppAttachAdmitted(ctx, agent.id, memory);"
 run "36 same-App install check removed (cross-App shortcut)" "$H" \
   "  if (installed.length === 0) return false;" ""
 run "37 same-App App gate removed" "$H" \
@@ -277,6 +279,11 @@ run "60 re-role bypasses PUBLIC knowledge congruence" "$H" \
 # becomes same-tenant on transfer and must still be revoked.
 run "61 transfer retains a destination PUBLIC-agent writer" "$A" \
   "    return !sameTenant || publicAgentWriter;" "    return !sameTenant;"
+# #1357 round 13 (@copilot): platform ADMIN's independent read must not bypass
+# the same-App live-install/read-only constraint on App-scoped grants.
+run "62 platform ADMIN bypasses App-scoped grant rule" "$H" \
+  "      (memory.class === 'knowledge' || memory.class === 'group') && !sameAppRead) {" \
+  "      (memory.class === 'knowledge' || memory.class === 'group') && false) {"
 run "42 a foreign PUBLIC agent vetoes the narrowing again" "$A" \
   "      OR: sameTenant," ""
 run "43 sweep keys on the raw PUBLIC column" "$A" \

@@ -254,7 +254,7 @@ export async function revokeLinksForeignToTenant(
     // that link merely because the transfer makes the agent same-tenant.
     const publicAgentWriter =
       l.role === 'read-write' && l.agent.visibility === 'PUBLIC' &&
-      memory.class === 'knowledge' && !isExcludedFromCoveredSet(memory);
+      !isExcludedFromCoveredSet(memory);
     return !sameTenant || publicAgentWriter;
   });
   if (invalid.length === 0) return 0;

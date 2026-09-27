@@ -444,6 +444,28 @@ describe('apps (the uniform member list, #473)', () => {
 // ---------------------------------------------------------------------------
 
 describe('memories — App-key orgId', () => {
+  it('lists an App-scoped memory only through its own App when the Agent is shared', async () => {
+    const { app: appA } = await createDbAppWithKey(db, 'memory-list-a', orgId);
+    const { app: appB } = await createDbAppWithKey(db, 'memory-list-b', orgId);
+    await db.appAgent.createMany({ data: [
+      { appId: appA.id, agentId }, { appId: appB.id, agentId },
+    ] });
+    const internal = await db.memory.create({
+      data: {
+        id: generateId(), organizationId: orgId, appId: appA.id,
+        urn: `${orgId}:memory-list-internal`, name: 'A internal',
+        class: 'knowledge', visibility: 'ORGANIZATION',
+      },
+    });
+    await db.agentMemoryItem.create({ data: { agentId, memoryId: internal.id, role: 'read' } });
+
+    const a = await resolvers.Query.memories({}, {}, ctx({ appId: appA.id }));
+    const b = await resolvers.Query.memories({}, {}, ctx({ appId: appB.id }));
+    expect(a.items.map((m: { id: string }) => m.id)).toContain(internal.id);
+    expect(b.items.map((m: { id: string }) => m.id)).not.toContain(internal.id);
+    expect(b.items.map((m: { id: string }) => m.id)).toContain(memoryId);
+  });
+
   it('scopes to the App own org: match → its memories, any other org → empty page', async () => {
     const { app } = await createDbAppWithKey(db, 'mm-appkey', orgId);
     await db.appAgent.create({ data: { appId: app.id, agentId } });

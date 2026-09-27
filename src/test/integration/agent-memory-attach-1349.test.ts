@@ -479,20 +479,21 @@ describe('#1349 — the checks are serialized with the writes they depend on (@c
     expect(await readsContent(readerKey, 'pubmove')).not.toBeNull();
   });
 
-  it('transfer clears a legacy writable link on a destination PUBLIC agent', async () => {
-    const srcOrg = await db.organization.create({ data: { id: generateId(), name: 'legacy-src', urn: `legacy-src-${suffix}` } });
-    const dstOrg = await db.organization.create({ data: { id: generateId(), name: 'legacy-dst', urn: `legacy-dst-${suffix}` } });
-    const mover = await db.user.create({ data: { id: generateId(), handle: `legacy-mover-${suffix}`, githubUsername: `legacy-mover-${suffix}` } });
+  it('transfer clears a legacy knowledge writer on a destination PUBLIC agent', async () => {
+    const memoryClass = 'knowledge';
+    const srcOrg = await db.organization.create({ data: { id: generateId(), name: `legacy-src-${memoryClass}`, urn: `legacy-src-${memoryClass}-${suffix}` } });
+    const dstOrg = await db.organization.create({ data: { id: generateId(), name: `legacy-dst-${memoryClass}`, urn: `legacy-dst-${memoryClass}-${suffix}` } });
+    const mover = await db.user.create({ data: { id: generateId(), handle: `legacy-mover-${memoryClass}-${suffix}`, githubUsername: `legacy-mover-${memoryClass}-${suffix}` } });
     await db.orgMember.create({ data: { organizationId: srcOrg.id, userId: mover.id, role: 'ADMIN' } });
     await db.orgMember.create({ data: { organizationId: dstOrg.id, userId: mover.id, role: 'ADMIN' } });
     const moverKey = (await mintUserApiKey(db, { userId: mover.id, label: 'k', createdBy: mover.id, issuedVia: 'test', oauthScopes: ['account'] })).rawKey;
     const moving = await db.memory.create({
       data: {
         id: generateId(), organizationId: srcOrg.id, urn: `${srcOrg.urn}:legacy-public`,
-        name: 'legacy-public', class: 'knowledge', visibility: 'PUBLIC',
+        name: 'legacy-public', class: memoryClass, visibility: 'PUBLIC',
       } as never,
     });
-    const { agentId } = await agentWithApp(dstOrg.id, 'legacy-public-dst');
+    const { agentId } = await agentWithApp(dstOrg.id, `legacy-public-dst-${memoryClass}`);
     await db.agent.update({ where: { id: agentId }, data: { visibility: 'PUBLIC' } });
     const link = await db.agentMemoryItem.create({
       data: { id: generateId(), agentId, memoryId: moving.id, role: 'read-write' },
@@ -501,6 +502,26 @@ describe('#1349 — the checks are serialized with the writes they depend on (@c
     const moved = await gql(moverKey, `mutation($id: ID!, $o: ID!) { updateMemory(id: $id, organizationId: $o) { id visibility } }`, { id: moving.id, o: dstOrg.id });
     expect(moved.errors, JSON.stringify(moved.errors)).toBeUndefined();
     expect((await db.agentMemoryItem.findUniqueOrThrow({ where: { id: link.id } })).deletedAt).not.toBeNull();
+  });
+
+  it('a GROUP memory cannot transfer into a tenant whose PUBLIC agent links it', async () => {
+    // chk_memory_group_visibility requires GROUP, never PUBLIC. The
+    // post-transfer congruence check refuses the transfer before cleanup.
+    const src = await db.organization.create({ data: { id: generateId(), name: 'group-src', urn: `group-src-${suffix}` } });
+    const dst = await db.organization.create({ data: { id: generateId(), name: 'group-dst', urn: `group-dst-${suffix}` } });
+    const mover = await db.user.create({ data: { id: generateId(), handle: `group-mover-${suffix}`, githubUsername: `group-mover-${suffix}` } });
+    await db.orgMember.create({ data: { organizationId: src.id, userId: mover.id, role: 'ADMIN' } });
+    await db.orgMember.create({ data: { organizationId: dst.id, userId: mover.id, role: 'ADMIN' } });
+    const moverKey = (await mintUserApiKey(db, { userId: mover.id, label: 'k', createdBy: mover.id, issuedVia: 'test', oauthScopes: ['account'] })).rawKey;
+    const group = await db.memory.create({
+      data: { id: generateId(), organizationId: src.id, urn: `${src.urn}:group`, name: 'group', class: 'group', visibility: 'GROUP' } as never,
+    });
+    const { agentId } = await agentWithApp(dst.id, 'group-dst-public');
+    await db.agent.update({ where: { id: agentId }, data: { visibility: 'PUBLIC' } });
+    await db.agentMemoryItem.create({ data: { id: generateId(), agentId, memoryId: group.id, role: 'read-write' } });
+    const moved = await gql(moverKey, `mutation($id: ID!, $o: ID!) { updateMemory(id: $id, organizationId: $o) { id } }`, { id: group.id, o: dst.id });
+    expect(moved.errors?.[0]?.message ?? '').toMatch(/knowledge of the PUBLIC agent/);
+    expect((await db.memory.findUniqueOrThrow({ where: { id: group.id } })).organizationId).toBe(src.id);
   });
 
   it('a refused publication does not mutate a system memory on the way out', async () => {
@@ -1026,6 +1047,28 @@ describe("#1357 — the same-App attach (Holger's ruling, 2026-09-26)", () => {
     expect(await writes(appXKey, 'appX')).toBe(false);
   });
 
+  it('a platform admin cannot bypass the live same-App and read-only limits', async () => {
+    const admin = await db.user.create({
+      data: { id: generateId(), handle: `same-app-platform-${suffix}`, githubUsername: `same-app-platform-${suffix}`, roles: ['ADMIN'] },
+    });
+    const adminKey = (await mintUserApiKey(db, {
+      userId: admin.id, label: 'k', createdBy: admin.id, issuedVia: 'test', oauthScopes: ['account'],
+    })).rawKey;
+    const installed = await db.agent.create({
+      data: { id: generateId(), organizationId: attackerOrgId, name: 'platform-installed', urn: `attacker-${suffix}:platform-installed` } as never,
+    });
+    await createDbAppAgent(db, appX.id, installed.id);
+    const write = await gql(adminKey, ATTACH, { g: installed.id, m: mem.appX!.urn, r: 'read-write' });
+    expect(code(write)).toBe('FORBIDDEN');
+    expect(write.errors![0]!.extensions?.reason).toBe('APP_SCOPED_ATTACH');
+
+    const elsewhere = await agentWithApp(attackerOrgId, 'platform-elsewhere');
+    const cross = await gql(adminKey, ATTACH, { g: elsewhere.agentId, m: mem.appX!.urn, r: 'read' });
+    expect(code(cross)).toBe('FORBIDDEN');
+    expect(cross.errors![0]!.extensions?.reason).toBe('APP_SCOPED_ATTACH');
+    expect(await db.agentMemoryItem.count({ where: { agentId: { in: [installed.id, elsewhere.agentId] }, memoryId: mem.appX!.id } })).toBe(0);
+  });
+
   it('a same-App read row cannot be re-roled to read-write through the same branch', async () => {
     const r = await gql(key.attacker!, SET_ROLE, { g: secondAgentId, m: mem.appX!.urn, r: 'read-write' });
     expect(r.errors).toHaveLength(1);
@@ -1434,10 +1477,9 @@ describe('#1357 round 5 (@codex, PR #1357)', () => {
     expect((await db.memory.findUniqueOrThrow({ where: { id: sys.id } })).urn).toBe(`${base}:ren-c-system`);
   });
 
-  it('a PUBLIC agent may hold READ-WRITE on an App-scoped memory — the same answer in either order', async () => {
-    // A platform admin can read and write an App-scoped memory, so both orders
-    // are reachable. App-scoped links are outside the covered set, which is how
-    // publication judges them; the attach guard now agrees.
+  it('a legacy App-scoped writer does not block publication, but no new writer can be attached', async () => {
+    // App-scoped links are outside the PUBLIC covered set. Keep legacy links
+    // on publication, while the new same-App grant rule admits read only.
     const admin = await db.user.create({
       data: { id: generateId(), handle: `padmin2-${suffix}`, githubUsername: `padmin2-${suffix}`, roles: ['ADMIN'] },
     });
@@ -1449,15 +1491,14 @@ describe('#1357 round 5 (@codex, PR #1357)', () => {
     const urn = `hrn:mem:attacker-${suffix}:covered-order`;
     // Order A: attach to a non-public agent, then publish it.
     const a = await db.agent.create({ data: { id: generateId(), organizationId: attackerOrgId, name: 'co-a', urn: `attacker-${suffix}:co-a` } as never });
-    const attachA = await gql(adminKey, ATTACH, { g: a.id, m: urn, r: 'read-write' });
-    expect(attachA.errors, JSON.stringify(attachA.errors)).toBeUndefined();
+    await db.agentMemoryItem.create({ data: { id: generateId(), agentId: a.id, memoryId: scoped.id, role: 'read-write' } });
     const publish = await gql(adminKey, `mutation($r: ID!) { updateAgent(ref: $r, visibility: PUBLIC) { visibility } }`, { r: a.id });
     expect(publish.errors, JSON.stringify(publish.errors)).toBeUndefined();
     // Order B: attach to an already-PUBLIC agent.
     const b = await db.agent.create({ data: { id: generateId(), organizationId: attackerOrgId, name: 'co-b', urn: `attacker-${suffix}:co-b`, visibility: 'PUBLIC' } as never });
     const attachB = await gql(adminKey, ATTACH, { g: b.id, m: urn, r: 'read-write' });
-    expect(attachB.errors, JSON.stringify(attachB.errors)).toBeUndefined();
-    expect(await db.agentMemoryItem.count({ where: { memoryId: scoped.id, role: 'read-write', deletedAt: null } })).toBe(2);
+    expect(attachB.errors?.[0]?.extensions?.reason).toBe('APP_SCOPED_ATTACH');
+    expect(await db.agentMemoryItem.count({ where: { memoryId: scoped.id, role: 'read-write', deletedAt: null } })).toBe(1);
   });
 
   it('control: the PUBLIC-agent read-write guard still applies to a COVERED memory', async () => {
