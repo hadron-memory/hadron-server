@@ -1641,7 +1641,12 @@ async function updateNodeCore(
  *   than guessing from the data whether an `exports` value is a declaration.
  */
 export async function updateNodePropertiesWith(
-  { nodeRef, properties, reason }: { nodeRef: string; properties: unknown; reason?: string | null },
+  { nodeRef, properties, reason, authoredWith }: {
+    nodeRef: string;
+    properties: unknown;
+    reason?: string | null;
+    authoredWith?: { task: string; revision: number } | null;
+  },
   ctx: Context,
   // `governedContext`: set by `updateNodeProperties` only. `updateObject`
   // shares this body but its refusal must not send a reader to the NODE
@@ -1754,6 +1759,7 @@ export async function updateNodePropertiesWith(
         memoryId: meta.memoryId,
         loc: fresh.loc,
         properties: merged,
+        authoredWith,
         ...(fresh.ownerRepo != null ? { ownerRepo: fresh.ownerRepo } : {}),
         ...(reason != null ? { reason } : {}),
       },
@@ -1847,7 +1853,12 @@ export const nodeMutations = {
     // merged plaintext.
     updateNodeData: async (
       _: unknown,
-      { nodeRef, data, reason }: { nodeRef: string; data: unknown; reason?: string | null },
+      { nodeRef, data, reason, authoredWith }: {
+        nodeRef: string;
+        data: unknown;
+        reason?: string | null;
+        authoredWith?: { task: string; revision: number } | null;
+      },
       ctx: Context,
     ) => {
       // The patch must be a JSON object — the operation merges keys, so an
@@ -1956,6 +1967,7 @@ export const nodeMutations = {
           memoryId: meta.memoryId,
           loc: row.loc,
           data: merged,
+          authoredWith,
           ...(row.ownerRepo != null ? { ownerRepo: row.ownerRepo } : {}),
           // #88: thread the edit rationale through to the revision snapshot.
           ...(reason != null ? { reason } : {}),
@@ -1981,7 +1993,12 @@ export const nodeMutations = {
     // runs enforceNodeSchemaOnWrite on the MERGED result and rejects a violation.
     updateNodeProperties: (
       _: unknown,
-      args: { nodeRef: string; properties: unknown; reason?: string | null },
+      args: {
+        nodeRef: string;
+        properties: unknown;
+        reason?: string | null;
+        authoredWith?: { task: string; revision: number } | null;
+      },
       ctx: Context,
     ) => updateNodePropertiesWith(args, ctx, { mergeExports: true, governedContext: 'node-write' }),
 

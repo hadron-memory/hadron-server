@@ -7075,9 +7075,10 @@ export const typeDefs = `#graphql
     verbatim. 'data' must be a JSON object (not an array or scalar). 'nodeRef'
     is a node ID or fully-qualified URN. Honors the same single-write
     invariants as updateNode (per-memory write auth, encryption, revision
-    history, git mirror). Returns the updated node.
+    history, git mirror). Pass authoredWith for a role requiring an author task.
+    Returns the updated node.
     """
-    updateNodeData(nodeRef: ID!, data: JSON!, reason: String): Node!
+    updateNodeData(nodeRef: ID!, data: JSON!, reason: String, authoredWith: AuthoredWithInput): Node!
 
     """
     #742 - Shallow-merge a JSON patch into a node's structured 'properties'
@@ -7104,9 +7105,10 @@ export const typeDefs = `#graphql
     at rest (never encrypted), so the merge + conformance check need no key —
     but the write still honors the same single-write invariants as updateNode
     (per-memory write auth, an active session on an encrypted memory, revision
-    history, git mirror). Returns the updated node.
+    history, git mirror). Pass authoredWith for a role requiring an author task.
+    Returns the updated node.
     """
-    updateNodeProperties(nodeRef: ID!, properties: JSON!, reason: String): Node!
+    updateNodeProperties(nodeRef: ID!, properties: JSON!, reason: String, authoredWith: AuthoredWithInput): Node!
 
     """
     #745 — Object store: the legible sugar surface over structured storage.

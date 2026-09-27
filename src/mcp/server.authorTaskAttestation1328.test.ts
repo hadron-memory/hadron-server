@@ -65,4 +65,19 @@ describe('#1328 MCP author-task parity', () => {
       urn: urn('review'), content: 'check again', authoredWith: { task: taskId, revision: 1 },
     })).toMatch(/review node updated/);
   });
+
+  it('the data-merge tool passes a current author-task assertion to the GraphQL write seam', async () => {
+    const target = await db.node.create({
+      data: { id: generateId(), memoryId, loc: 'merge', name: 'Merge', role: 'guide', data: { before: true } },
+    });
+    const srv = createTestableMcpServer(auth());
+    expect(await srv.callToolText('hadron_update_node_data', { nodeUrn: urn('merge'), data: { after: true } }))
+      .toMatch(/requires authoredWith/);
+    expect((await db.node.findUniqueOrThrow({ where: { id: target.id } })).data).toEqual({ before: true });
+    expect(await srv.callToolText('hadron_update_node_data', {
+      nodeUrn: urn('merge'), data: { after: true }, authoredWith: { task: taskId, revision: 1 },
+    })).toMatch(/Node data merged/);
+    expect(await db.node.findUniqueOrThrow({ where: { id: target.id } }))
+      .toMatchObject({ data: { before: true, after: true }, authoredByTask: taskId, authoredByRevision: 1 });
+  });
 });

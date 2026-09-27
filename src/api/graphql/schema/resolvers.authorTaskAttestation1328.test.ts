@@ -5,6 +5,7 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { writeNodeCore } from './resolvers.mutation.node.js';
+import { resolvers } from './resolvers.js';
 import { lockMemoryConfigExclusive } from '../../../lib/governedRole.js';
 import { waitForLockWaiters } from '../../../test/lockWait.js';
 import type { Context } from './resolvers.js';
@@ -72,6 +73,23 @@ describe('#1328 author-task attestation at writeNodeCore', () => {
     // Legacy upsert snapshots even an unchanged row; the attestation gate
     // itself must still preserve its live stamp instead of minting a claim.
     expect(await db.nodeRevision.count({ where: { nodeId: first.id } })).toBe(2);
+  });
+
+  it('data and properties merge mutations require and carry the current assertion', async () => {
+    const first = await create('merges', { authoredWith: { task: taskId, revision: 1 } });
+    const claim = { task: taskId, revision: 1 };
+    const dataArgs = { nodeRef: first.id, data: { key: 'value' } };
+    expect(await codeOf(resolvers.Mutation.updateNodeData({}, dataArgs, ctx()))).toBe('AUTHOR_TASK_MISSING');
+    expect(await db.nodeRevision.count({ where: { nodeId: first.id } })).toBe(0);
+    await resolvers.Mutation.updateNodeData({}, { ...dataArgs, authoredWith: claim }, ctx());
+    expect(await db.node.findUniqueOrThrow({ where: { id: first.id } }))
+      .toMatchObject({ data: { key: 'value' }, authoredByTask: taskId, authoredByRevision: 1 });
+
+    const propertiesArgs = { nodeRef: first.id, properties: { title: 'New title' } };
+    expect(await codeOf(resolvers.Mutation.updateNodeProperties({}, propertiesArgs, ctx()))).toBe('AUTHOR_TASK_MISSING');
+    await resolvers.Mutation.updateNodeProperties({}, { ...propertiesArgs, authoredWith: claim }, ctx());
+    expect(await db.node.findUniqueOrThrow({ where: { id: first.id } }))
+      .toMatchObject({ properties: { title: 'New title' }, authoredByTask: taskId, authoredByRevision: 1 });
   });
 
   it('requires the prior task when changing to an unrelated role; conflicting task rules refuse a one-step switch', async () => {
