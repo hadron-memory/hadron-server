@@ -664,14 +664,33 @@ async function planSkills(input: SkillPlanInput, ctx: Context, selectedRefs?: st
       // that node's lock: a bypass writer landing after reconciliation must not
       // pair newer fields with the older revSeq in one exported artifact.
       const liveRows: typeof declaredRows = [];
+      let liveMetadataBytes = 0n;
       const candidateMemory = new Map(candidates.map((r) => [r.id, r.memoryId]));
       for (const id of candidates.map((r) => r.id).sort()) {
         const live = await ctx.db.$transaction(
           async (tx) => {
             if (selectedRefs !== undefined) {
               // A named task may have no declaration for this host. Recheck
-              // access and its properties before touching revision/content;
-              // the SKIP needs metadata only, even for a very large body.
+              // access, then bound the live JSON before deserializing it. A
+              // writer can enlarge properties after the candidate snapshot;
+              // REPEATABLE READ holds this check and fetch to one snapshot.
+              const authorized = await tx.node.findFirst({
+                where: { AND: [declaredWhere, { id }] } as never,
+                select: { id: true },
+              });
+              if (authorized === null) return null;
+              const sizes = await tx.$queryRaw<{ bytes: bigint }[]>`
+                SELECT COALESCE(octet_length(properties::text), 0)::bigint AS bytes
+                FROM nodes WHERE id = ${id}
+              `;
+              const nextBytes = liveMetadataBytes + (sizes[0]?.bytes ?? 0n);
+              if (nextBytes > BigInt(SKILL_PLAN_MAX_SELECTED_PROPERTIES_BYTES)) {
+                throw new GraphQLError('selectedSkillFilePlan: selected task properties exceed the safe byte ceiling.', {
+                  extensions: { code: 'BAD_USER_INPUT' },
+                });
+              }
+              liveMetadataBytes = nextBytes;
+              // The SKIP needs metadata only, even for a very large body.
               const metadata = await tx.node.findFirst({
                 where: { AND: [declaredWhere, { id }] } as never,
                 select: declaredMetadataSelect,
@@ -695,7 +714,11 @@ async function planSkills(input: SkillPlanInput, ctx: Context, selectedRefs?: st
               select: declaredSelect,
             });
           },
-          { timeout: 60_000, maxWait: 15_000 },
+          {
+            timeout: 60_000,
+            maxWait: 15_000,
+            ...(selectedRefs !== undefined ? { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead } : {}),
+          },
         );
         if (live != null) liveRows.push(live);
       }

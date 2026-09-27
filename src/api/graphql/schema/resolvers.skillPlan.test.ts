@@ -2002,6 +2002,32 @@ describe('#1406 selected individual skill files', () => {
     });
   }, 30_000);
 
+  it('rechecks the properties bound when a selected node grows after the candidate snapshot', async () => {
+    const codexOnly = await mkNode('tasks:growing-selected-properties', {
+      properties: forHost('codexSkill', 'growing-selected-properties'),
+    });
+    const transaction = db.$transaction.bind(db);
+    const transactionSpy = vi.spyOn(db, '$transaction');
+    transactionSpy.mockImplementationOnce((async (...args: unknown[]) => {
+      const candidates = await (transaction as (...args: unknown[]) => Promise<unknown>)(...args);
+      await db.node.update({
+        where: { id: codexOnly.id },
+        data: { properties: {
+          ...forHost('codexSkill', 'growing-selected-properties'),
+          unrelatedPayload: 'x'.repeat(33 * 1024 * 1024),
+        } },
+      });
+      return candidates;
+    }) as typeof db.$transaction);
+    try {
+      await expect(selectedPlan({ nodes: [codexOnly.id], host: 'claudeSkill' })).rejects.toMatchObject({
+        extensions: { code: 'BAD_USER_INPUT' },
+      });
+    } finally {
+      transactionSpy.mockRestore();
+    }
+  }, 30_000);
+
   it.each(['claudeSkill', 'codexSkill'] as const)('%s: preserves other files, local edits and duplicate selected installations', async (host) => {
     const selected = await mkNode(`tasks:${host}`, { properties: forHost(host, `${host.toLowerCase()}-new`) });
     const other = await mkNode(`tasks:${host}-other`, { properties: forHost(host, `${host.toLowerCase()}-other`) });
