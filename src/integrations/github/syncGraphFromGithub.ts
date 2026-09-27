@@ -172,6 +172,12 @@ export const syncGraphFromGithub = async (
    * is kept as it was; every other file still syncs.
    */
   skippedUndeclaredRoles?: SkippedUndeclaredRole[];
+  /**
+   * #1330 — files left for the next sync because the node they would write
+   * arrived after this sync locked its rows (`loc (node <id>)`). Only while
+   * the sync holds the rulebook lock.
+   */
+  deferredLateRows?: string[];
 }> => {
   try {
     const graphName = graph.urn;
@@ -264,6 +270,7 @@ export const syncGraphFromGithub = async (
     const skippedProtected: string[] = [];
     const skippedObjectTypes: string[] = [];
     const skippedUndeclaredRoles: SkippedUndeclaredRole[] = [];
+    const deferredLateRows: string[] = [];
 
     // #1226 / PR #1257 — collect every memory whose node may become an edge
     // endpoint in this transaction BEFORE taking any Channel-memory key. Git
@@ -397,8 +404,9 @@ export const syncGraphFromGithub = async (
       // a rule write holds its referenced nodes FOR SHARE and then waits for
       // that lock exclusively. A sync writes many rows, so it takes every row
       // lock in this memory FIRST, in id order, and only then the rulebook lock.
-      // Rows it later updates or parks are already its own. Skipped when no
-      // file carries a role, which nothing then needs to judge.
+      // Every row it later updates, parks or deletes must be one of these; a
+      // row that arrives after the scan is left for the next sync (below).
+      // Skipped when no file carries a role, which nothing then needs to judge.
       //
       // `prelockedIds` also BOUNDS the cleanup pass below: a row inserted after
       // this scan is not locked, and deleting it would wait on a row while
@@ -413,11 +421,29 @@ export const syncGraphFromGithub = async (
         const rows = await tx.$queryRaw<Array<{ id: string }>>`
           SELECT "id" FROM "nodes" WHERE "memory_id" = ${graph.id} ORDER BY "id" FOR UPDATE`;
         prelockedIds = rows.map((r) => r.id);
+        // And this memory's rule rows: deleting a node a rule references fires
+        // that rule's ON DELETE SET NULL, a row a rule writer may hold FOR
+        // UPDATE while it waits for the rulebook lock. Nodes, then rules, then
+        // the rulebook: the order every rule writer takes them in.
+        await tx.$queryRaw`
+          SELECT r."id" FROM "node_role_rules" r
+          JOIN "memory_configs" c ON c."id" = r."config_id"
+          WHERE c."memory_id" = ${graph.id}
+          ORDER BY r."id" FOR UPDATE OF r`;
         await lockMemoryConfigShared(tx, graph.id);
       }
       // Locs of files refused for their role: nothing of theirs is written,
       // including the edges they declare.
       const refusedRoleLocs = new Set<string>();
+      // Rows the scan did not lock, which arrived after it. While the sync holds
+      // the rulebook lock it must not wait on one, so a file whose write would
+      // touch such a row is DEFERRED to the next sync, which locks it from the
+      // start (@codex P2, PR #1411: a root loc has no ancestor lock to keep a
+      // concurrent create out). Its edges are deferred with it.
+      const prelockedIdSet = prelockedIds ? new Set(prelockedIds) : null;
+      const isLateRow = (row: { id: string } | null | undefined): boolean =>
+        prelockedIdSet !== null && row != null && !prelockedIdSet.has(row.id);
+      const deferredLocs = new Set<string>();
 
       // #1224 — files whose path cannot be a loc, resolved to the rows they
       // name. @copilot on PR #1229: the cleanup pass keys on the SURVIVING
@@ -569,6 +595,12 @@ export const syncGraphFromGithub = async (
         // 2026-09-27). `prior` is the row the file would write, current under
         // the locks above; a file with no role key assigns nothing. A refused
         // file is skipped and reported, and its row survives the cleanup pass.
+        const defer = (late: { id: string }, keep?: { id: string }): true => {
+          deferredLateRows.push(`${loc} (node ${late.id})`);
+          deferredLocs.add(loc);
+          if (keep) protectedRowIds.add(keep.id);
+          return true;
+        };
         const refusesRole = async (prior: Node | null): Promise<boolean> => {
           const signals = governedSignalsFromMirror(node);
           if (signals.role == null) return false;
@@ -600,6 +632,7 @@ export const syncGraphFromGithub = async (
             protectedRowIds.add(byId.id);
             continue;
           }
+          if (isLateRow(byId) && defer(byId)) continue;
           if (await refusesRole(byId)) continue;
           if (byId.loc !== loc) {
             // Moving into a loc another row currently holds: repo-wins — the
@@ -628,6 +661,7 @@ export const syncGraphFromGithub = async (
               protectedRowIds.add(byId.id);
               continue;
             }
+            if (occupant && occupant.id !== byId.id && isLateRow(occupant) && defer(occupant, byId)) continue;
             if (occupant && occupant.id !== byId.id) {
               await tx.$queryRaw`SELECT "id" FROM "nodes" WHERE "id" = ${occupant.id} FOR UPDATE`;
               await ensureCurrentNodeRevisionInTransaction(tx, occupant.id, { expectedMemoryId: graph.id });
@@ -663,6 +697,7 @@ export const syncGraphFromGithub = async (
           const existingAtLoc = await tx.node.findUnique({
             where: { loc_memoryId: { loc, memoryId: graph.id } },
           });
+          if (isLateRow(existingAtLoc) && defer(existingAtLoc!)) continue;
           if (await refusesRole(existingAtLoc)) continue;
           if (existingAtLoc) {
             await updateNodeFromGitSync(
@@ -807,7 +842,7 @@ export const syncGraphFromGithub = async (
       }
 
       for (const edge of edges) {
-        if (refusedRoleLocs.has(edge.sourceLoc)) continue;
+        if (refusedRoleLocs.has(edge.sourceLoc) || deferredLocs.has(edge.sourceLoc)) continue;
         // Resolve endpoints through the remaps: the source is always a file
         // in this repo (by loc); the target prefers this repo's claimant of
         // the referenced id, else stays raw (a cross-repo target).
@@ -910,12 +945,17 @@ export const syncGraphFromGithub = async (
         `Sync of "${graphName}": kept the stored objectType of ${skippedObjectTypes.length} node(s) whose file's value would violate the memory schema: ${skippedObjectTypes.join('; ')}`,
       );
     }
+    if (deferredLateRows.length > 0) {
+      console.warn(
+        `Sync of "${graphName}": deferred ${deferredLateRows.length} file(s) to the next sync, whose node arrived while this one ran: ${deferredLateRows.join('; ')}`,
+      );
+    }
     if (skippedUndeclaredRoles.length > 0) {
       console.warn(
         `Sync of "${graphName}": skipped ${skippedUndeclaredRoles.length} file(s) whose role is not declared under a strict parent (ROLE_NOT_DECLARED): ${skippedUndeclaredRoles.map(describeSkippedUndeclaredRole).join('; ')}`,
       );
     }
-    return { nodeCount: fsGraph.nodes.length, writtenNodes, skippedProtected, skippedObjectTypes, skippedUndeclaredRoles };
+    return { nodeCount: fsGraph.nodes.length, writtenNodes, skippedProtected, skippedObjectTypes, skippedUndeclaredRoles, deferredLateRows };
   } catch (error) {
     // Update sync status to ERROR
     await db.memory.update({
