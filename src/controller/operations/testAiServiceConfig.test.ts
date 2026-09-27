@@ -325,6 +325,30 @@ describe('testAiServiceConfig (#1378)', () => {
       expect(JSON.stringify(r)).not.toContain(AMBIENT);
     });
 
+    it('with no process credential set, it is NO_API_KEY before anything is charged (#1385 review)', async () => {
+      vi.stubEnv('OPENAI_API_KEY', '');
+      vi.stubEnv('OPENAI_BASE_URL', `${origin}/v1`);
+      const host = await db.hadronServer.create({ data: { id: generateId(), url: 'https://test.hadron.local' } });
+      const cfg = await mkConfig({ ...keyless, hadronServerId: host.id });
+      const r = await test(cfg.id, ctxFor(admin.id, { roles: ['ADMIN'], organizationId: org.id }));
+      expect(r).toMatchObject({ ok: false, used: { key: 'NONE' }, error: { code: 'NO_API_KEY' } });
+      expect(r.error.message).toMatch(/server has no OPENAI_API_KEY/);
+      expect(captured).toEqual([]);
+      expect(await db.usageEvent.count({ where: { type: 'ai-config-test' } })).toBe(0);
+      expect(await db.quotaCounter.count()).toBe(0);
+      expect(aiConfigTestLimiterSize()).toBe(0);
+    });
+
+    it('an operator base URL is reported sanitized: no userinfo, query or fragment (#1385 review)', async () => {
+      ambient();
+      vi.stubEnv('OPENAI_BASE_URL', `http://user:hunter2@${origin.replace('http://', '')}/v1?token=s3cret#frag`);
+      const host = await db.hadronServer.create({ data: { id: generateId(), url: 'https://test.hadron.local' } });
+      const cfg = await mkConfig({ ...keyless, hadronServerId: host.id });
+      const r = await test(cfg.id, ctxFor(admin.id, { roles: ['ADMIN'] }));
+      expect(r.endpoint).toBe(`${origin}/v1`);
+      expect(JSON.stringify(r)).not.toMatch(/hunter2|s3cret/);
+    });
+
     it('an org config never tests on the platform credential: NO_API_KEY, no call', async () => {
       ambient();
       const cfg = await mkConfig({ ...keyless, organizationId: org.id });

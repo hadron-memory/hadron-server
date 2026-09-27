@@ -178,10 +178,29 @@ function bedrockRegionOf(rawKey: string | null): string | null {
   }
 }
 
+/**
+ * Whether the process credential a keyless platform config would use exists.
+ * OpenAI and Anthropic read one variable. Bedrock's AWS default chain (a
+ * role, a profile, the metadata service) can't be known without resolving
+ * it, so it's assumed present and a real failure surfaces from the call.
+ */
+function processCredentialPresent(provider: string, env: NodeJS.ProcessEnv): boolean {
+  if (provider === 'openai') return !!env.OPENAI_API_KEY;
+  if (provider === 'anthropic') return !!env.ANTHROPIC_API_KEY;
+  return true;
+}
+
 function processSecrets(env: NodeJS.ProcessEnv): string[] {
-  return ['OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_SESSION_TOKEN', 'AWS_BEARER_TOKEN_BEDROCK']
+  const keys = ['OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_SESSION_TOKEN', 'AWS_BEARER_TOKEN_BEDROCK']
     .map((name) => env[name] ?? '')
     .filter((v) => v.length > 0);
+  // An operator base URL carrying userinfo, a query or a fragment may hold a
+  // secret, and SDK errors echo the URL verbatim (#1385 review). A plain one
+  // stays readable, since it's the most useful fact in a connection error.
+  const urls = ['OPENAI_BASE_URL', 'ANTHROPIC_BASE_URL']
+    .map((name) => env[name] ?? '')
+    .filter((v) => /[@?#]/.test(v));
+  return [...keys, ...urls];
 }
 
 /**
@@ -194,7 +213,18 @@ function processSecrets(env: NodeJS.ProcessEnv): string[] {
 function probeTarget(config: { provider: string; endpoint?: string | null }, bedrockRegion: string | null, env: NodeJS.ProcessEnv): string | null {
   const explicit = explicitEndpoint(config);
   if (explicit) return explicit;
-  const trimmed = (v: string | undefined) => (v ? v.replace(/\/+$/, '') : null);
+  // An operator's base URL is reported sanitized: origin and path only. A
+  // deployment value carrying userinfo or a query token must not surface in
+  // a GraphQL result (#1385 review). Unparsable is reported as unknown.
+  const trimmed = (v: string | undefined) => {
+    if (!v) return null;
+    try {
+      const u = new URL(v);
+      return `${u.origin}${u.pathname}`.replace(/\/+$/, '');
+    } catch {
+      return null;
+    }
+  };
   switch (config.provider) {
     case 'openai':
       return trimmed(env.OPENAI_BASE_URL) ?? defaultEndpoint('openai');
@@ -301,10 +331,14 @@ export async function testAiServiceConfig(
     : !keyCleared && row.apiKeyEncrypted
       ? 'SAVED'
       : // The run's own rule (modelFor): only the platform's own config may
-        // run on the platform's credential (#1390).
-        usesProcessCredential(tested, owner.ownerType)
+        // run on the platform's credential (#1390), and only if the server
+        // HAS one: the SDKs load it lazily at call time, so a missing key
+        // would otherwise pass every check and charge for a call that
+        // never leaves (#1385 review).
+        usesProcessCredential(tested, owner.ownerType) && processCredentialPresent(provider, process.env)
         ? 'PLATFORM'
         : 'NONE';
+  const noServerCredential = keySource === 'NONE' && !keyCleared && usesProcessCredential(tested, owner.ownerType);
   const used: AiConfigTestResult['used'] = {
     // Presence, not truthiness: an empty model is still what gets sent.
     provider: override.provider != null ? 'OVERRIDE' : 'SAVED',
@@ -331,7 +365,9 @@ export async function testAiServiceConfig(
         code: 'NO_API_KEY',
         message: keyCleared
           ? 'The edit clears this config\'s key; supply one to test with.'
-          : 'This config has no stored key; supply one to test with.',
+          : noServerCredential
+            ? `This config has no stored key, and the server has no ${provider === 'anthropic' ? 'ANTHROPIC_API_KEY' : 'OPENAI_API_KEY'} to fall back on; supply a key to test with.`
+            : 'This config has no stored key; supply one to test with.',
         transient: false,
       },
     };
