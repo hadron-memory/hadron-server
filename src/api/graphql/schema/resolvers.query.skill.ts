@@ -605,24 +605,45 @@ async function planSkills(input: SkillPlanInput, ctx: Context, selectedRefs?: st
         memory: { select: { urn: true } },
         revSeq: true,
     } as const;
+    const { content: _content, ...declaredMetadataSelect } = declaredSelect;
     const candidates = await ctx.db.node.findMany({
       where: declaredWhere,
-      select: declaredSelect,
+      select: declaredMetadataSelect,
       take: SKILL_PLAN_MAX_NODES + 1,
       orderBy: [{ memoryId: 'asc' }, { loc: 'asc' }],
     });
-    let declaredRows = candidates;
-    if (candidates.length <= SKILL_PLAN_MAX_NODES) {
+    if (candidates.length > SKILL_PLAN_MAX_NODES) {
+      throw new GraphQLError(
+        `skillPlan: more than ${SKILL_PLAN_MAX_NODES} nodes are in scope. Narrow \`memories\`; this surface does not silently truncate.`,
+        { extensions: { code: 'BAD_USER_INPUT' } },
+      );
+    }
+    let declaredRows: Prisma.NodeGetPayload<{ select: typeof declaredSelect }>[] = [];
+    if (candidates.length > 0) {
       // One short transaction per node: retaining every FOR UPDATE lock until
       // the whole plan commits can deadlock a Git sync that visits the same
       // rows in filesystem order. Fetch the final projection BEFORE releasing
       // that node's lock: a bypass writer landing after reconciliation must not
       // pair newer fields with the older revSeq in one exported artifact.
-      const liveRows: typeof candidates = [];
+      const liveRows: typeof declaredRows = [];
       const candidateMemory = new Map(candidates.map((r) => [r.id, r.memoryId]));
       for (const id of candidates.map((r) => r.id).sort()) {
         const live = await ctx.db.$transaction(
           async (tx) => {
+            if (selectedRefs !== undefined) {
+              // A named task may have no declaration for this host. Recheck
+              // access and its properties before touching revision/content;
+              // the SKIP needs metadata only, even for a very large body.
+              const metadata = await tx.node.findFirst({
+                where: { AND: [declaredWhere, { id }] } as never,
+                select: declaredMetadataSelect,
+              });
+              if (metadata === null) return null;
+              const { declaration, malformed } = classifyDeclaration(metadata.properties, host);
+              if (declaration === null && malformed.length === 0) {
+                return { ...metadata, content: null };
+              }
+            }
             // Never reconcile a row that left the memory it was discovered in
             // (@codex P1, PR #1339) — the refetch below would drop it anyway,
             // but only after a revision had been written into another tenant.
@@ -642,12 +663,6 @@ async function planSkills(input: SkillPlanInput, ctx: Context, selectedRefs?: st
       }
       declaredRows = liveRows.sort(
         (a, b) => a.memoryId.localeCompare(b.memoryId) || a.loc.localeCompare(b.loc),
-      );
-    }
-    if (declaredRows.length > SKILL_PLAN_MAX_NODES) {
-      throw new GraphQLError(
-        `skillPlan: more than ${SKILL_PLAN_MAX_NODES} nodes are in scope. Narrow \`memories\`; this surface does not silently truncate.`,
-        { extensions: { code: 'BAD_USER_INPUT' } },
       );
     }
     if (selectedRefs !== undefined) {

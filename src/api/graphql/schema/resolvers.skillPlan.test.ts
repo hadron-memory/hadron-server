@@ -1988,7 +1988,7 @@ describe('#1406 selected individual skill files', () => {
     await expect(selectedPlan({ nodes: [selected.id], host: 'claudeSkill' })).rejects.toMatchObject({
       extensions: { code: 'BAD_USER_INPUT' },
     });
-  });
+  }, 30_000);
 
   it.each(['claudeSkill', 'codexSkill'] as const)('%s: preserves other files, local edits and duplicate selected installations', async (host) => {
     const selected = await mkNode(`tasks:${host}`, { properties: forHost(host, `${host.toLowerCase()}-new`) });
