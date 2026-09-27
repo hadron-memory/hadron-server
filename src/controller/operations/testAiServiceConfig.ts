@@ -226,10 +226,12 @@ function probeTarget(config: { provider: string; endpoint?: string | null }, bed
     }
   };
   switch (config.provider) {
+    // Set-but-unparsable is reported as unknown (null), never as the catalog
+    // host the SDK is not actually calling (#1385 review).
     case 'openai':
-      return trimmed(env.OPENAI_BASE_URL) ?? defaultEndpoint('openai');
+      return env.OPENAI_BASE_URL ? trimmed(env.OPENAI_BASE_URL) : defaultEndpoint('openai');
     case 'anthropic':
-      return trimmed(env.ANTHROPIC_BASE_URL) ?? defaultEndpoint('anthropic');
+      return env.ANTHROPIC_BASE_URL ? trimmed(env.ANTHROPIC_BASE_URL) : defaultEndpoint('anthropic');
     case 'bedrock': {
       const region = bedrockRegion ?? env.AWS_REGION ?? null;
       return region ? `https://bedrock-runtime.${region}.amazonaws.com` : null;

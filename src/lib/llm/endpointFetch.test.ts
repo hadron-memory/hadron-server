@@ -46,6 +46,16 @@ describe('connect-time resolution failures', () => {
     expect(Date.now() - started).toBeLessThan(2_000);
   });
 
+  it('an already-aborted request never starts the DNS lookup (#1385 review)', async () => {
+    lookupMock.mockClear();
+    lookupMock.mockImplementation(async () => [{ address: '93.184.216.34', family: 4 }]);
+    const ctrl = new AbortController();
+    ctrl.abort(new Error('gave up'));
+    const err = await guardedEndpointFetch()('https://llm.example.test/v4/chat/completions', { signal: ctrl.signal }).catch((e) => e);
+    expect((err as Error).message).toBe('gave up');
+    expect(lookupMock).not.toHaveBeenCalled();
+  });
+
   it('a host that does not exist (ENOTFOUND) is a permanent refusal', async () => {
     failLookupWith('ENOTFOUND');
     await expect(guardedEndpointFetch()('https://llm.example.test/v4/chat/completions')).rejects.toBeInstanceOf(AiEndpointForbiddenError);
