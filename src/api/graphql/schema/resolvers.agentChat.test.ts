@@ -586,6 +586,34 @@ describe('myChats', () => {
 // ---------------------------------------------------------------------------
 
 describe('chatHistory', () => {
+  it('extracted chat data cannot rewrite an author-task-governed data node', async () => {
+    const start = await resolvers.Mutation.startChat(
+      {}, { agentId: agent.id }, userCtx(adminUser.id),
+    );
+    const chat = await chatNodeByLocOrThrow(db, start.chatId);
+    const task = await db.node.create({
+      data: { id: generateId(), memoryId: chat.memoryId, loc: 'tasks:author', name: 'Author', isRunnable: true },
+    });
+    const config = await db.memoryConfig.create({
+      data: { id: generateId(), memoryId: chat.memoryId },
+    });
+    await db.nodeRoleRule.create({
+      data: { id: generateId(), configId: config.id, role: 'guide', authorTaskId: task.id, authorTaskRequired: true },
+    });
+    const target = await db.node.create({
+      data: { id: generateId(), memoryId: chat.memoryId, loc: 'data', name: 'data', role: 'guide', data: { existing: true } },
+    });
+
+    await expect(resolvers.Mutation.processChatResponse(
+      {},
+      { chatId: start.chatId, toolResponse: { message: 'response', data: { extracted: true } } },
+      userCtx(adminUser.id),
+    )).rejects.toMatchObject({ extensions: { code: 'AUTHOR_TASK_MISSING' } });
+    expect(await db.node.findUniqueOrThrow({ where: { id: target.id } }))
+      .toMatchObject({ role: 'guide', data: { existing: true } });
+    expect(await db.nodeRevision.count({ where: { nodeId: target.id } })).toBe(0);
+  });
+
   it('returns messages in order with correct role attribution', async () => {
     const start = await resolvers.Mutation.startChat(
       {},

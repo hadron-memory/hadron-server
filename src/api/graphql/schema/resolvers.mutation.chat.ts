@@ -36,6 +36,7 @@ import {
 } from './chat-scope.js';
 import { chatLocFilter, pickChatNode } from '../../../lib/chatLoc.js';
 import { recordNodeUsage, recordNodeWrite } from '../../../lib/usageRecorder.js';
+import { writeNodeCore } from './resolvers.mutation.node.js';
 import {
   type Context,
   type SnapshotNode,
@@ -1074,7 +1075,10 @@ export const chatMutations = {
       recordNodeUsage(ctx.db, 'write', assistantMsgRef ? [assistantMsgRef] : [], ctx);
       chatData = allocatedChatData;
 
-      // Save extracted data to memory's default data node
+      // Save extracted data to the memory's default data node. This is an
+      // authored Node write, even though the assistant message above is a
+      // platform-created record: the shared seam must check an existing
+      // node's author-task rule, preserve history, and invalidate attribution.
       if (data && Object.keys(data).length > 0) {
         const dataNode = await ctx.db.node.findFirst({
           where: { loc: 'data', memoryId: chatNode.memoryId, deletedAt: null },
@@ -1083,33 +1087,17 @@ export const chatMutations = {
           if (memEncInfo.isEncrypted) decryptNodeFields(dataNode, memEncInfo);
           const existingData = (dataNode.data as Record<string, unknown>) ?? {};
           const merged = { ...existingData, ...data };
-          const encData = encryptNodeFields({ content: null, data: merged }, memEncInfo);
-          await ctx.db.node.update({
-            where: { id: dataNode.id },
-            data: { data: (encData.data ?? null) as InputJsonValue },
-          });
-          // #1061 — folding extracted data into the memory's `data` node
-          // rewrites a real node, so it is its own write.
-          recordNodeWrite(
-            ctx.db,
-            { id: dataNode.id, loc: dataNode.loc, memoryId: dataNode.memoryId },
+          await writeNodeCore(
+            { memoryId: chatNode.memoryId, loc: dataNode.loc, data: merged },
             ctx,
+            'update',
+            { targetNodeId: dataNode.id },
           );
         } else {
-          const encNew = encryptNodeFields({ content: null, data }, memEncInfo);
-          const dataNodeId = generateId();
-          await ctx.db.node.create({
-            data: {
-              id: dataNodeId, memoryId: chatNode.memoryId,
-              loc: 'data', name: 'data', nodeType: 'info',
-              data: (encNew.data ?? null) as InputJsonValue,
-            },
-          });
-          // #1061 — first extraction into this memory mints the `data` node.
-          recordNodeWrite(
-            ctx.db,
-            { id: dataNodeId, loc: 'data', memoryId: chatNode.memoryId },
+          await writeNodeCore(
+            { memoryId: chatNode.memoryId, loc: 'data', name: 'data', nodeType: 'info', data },
             ctx,
+            'create',
           );
         }
       }
@@ -1500,4 +1488,3 @@ export const chatMutations = {
     // ── App management (org ADMIN) ──────────────────────────────────
 
 };
-
