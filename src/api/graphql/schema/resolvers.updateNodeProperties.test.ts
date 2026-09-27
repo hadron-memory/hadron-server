@@ -13,9 +13,11 @@
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
+import { PrismaClient } from '../../../generated/prisma/index.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { resolvers, type Context } from './resolvers.js';
 import { generateId } from '../../../lib/id.js';
+import { clearNodeWrittenLocalHandlers, registerNodeWrittenLocalHandler } from '../../../lib/events/nodeWritten.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -28,6 +30,12 @@ let memory: { id: string; urn: string };
 
 function ctx(overrides: Partial<Context> = {}): Context {
   return { db, roles: ['ADMIN'], userId: admin.id, ...overrides };
+}
+
+function twoConnectionDb(): PrismaClient {
+  const url = new URL(process.env.DATABASE_URL!);
+  url.searchParams.set('connection_limit', '2');
+  return new PrismaClient({ datasourceUrl: url.toString() });
 }
 
 async function makeNode(loc: string, properties: unknown | null, objectType?: string) {
@@ -89,6 +97,43 @@ describe('updateNodeProperties — merge semantics', () => {
     await Promise.all([call(node.id, { x: 1 }), call(node.id, { y: 2 })]);
     const reread = await db.node.findUnique({ where: { id: node.id } });
     expect(reread!.properties).toEqual({ base: 0, x: 1, y: 2 });
+  });
+
+  it('completes a burst on distinct nodes with a two-connection pool (#1279)', async () => {
+    const nodes = await Promise.all(['pool-a', 'pool-b', 'pool-c'].map((loc) => makeNode(loc, { base: loc })));
+    const limitedDb = twoConnectionDb();
+    try {
+      const results = await Promise.all(nodes.map((node, index) => call(node.id, { patched: index }, ctx({ db: limitedDb }))));
+      for (const [index, result] of results.entries()) {
+        expect(result.properties).toEqual({ base: nodes[index]!.loc, patched: index });
+      }
+    } finally {
+      await limitedDb.$disconnect();
+    }
+  });
+
+  it('dispatches effects after commit on the pooled client (#1279)', async () => {
+    const node = await makeNode('effects', { before: true });
+    await db.memory.update({ where: { id: memory.id }, data: { vectorIndexEnabled: true } });
+    let observed: unknown;
+    registerNodeWrittenLocalHandler('pool-regression', async (event) => {
+      if (event.nodeId !== node.id) return;
+      const committed = await db.node.findUniqueOrThrow({ where: { id: node.id } });
+      observed = committed.properties;
+    });
+    const limitedDb = twoConnectionDb();
+    try {
+      await call(node.id, { after: true }, ctx({ db: limitedDb }));
+      await vi.waitFor(() => expect(observed).toEqual({ before: true, after: true }));
+      await vi.waitFor(async () => {
+        const stamped = await db.node.findUniqueOrThrow({ where: { id: node.id } });
+        expect(stamped.embeddingPendingAt).not.toBeNull();
+        expect(await db.usageEvent.count({ where: { nodeId: node.id, type: 'write' } })).toBe(1);
+      });
+    } finally {
+      clearNodeWrittenLocalHandlers();
+      await limitedDb.$disconnect();
+    }
   });
 
   it('leaves `data` untouched (properties and data are distinct columns)', async () => {
