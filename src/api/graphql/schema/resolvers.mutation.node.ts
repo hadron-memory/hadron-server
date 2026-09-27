@@ -253,6 +253,8 @@ export async function writeNodeCore(
      * redesign unrelated write surfaces while #1220 remains separately scoped.
      */
     concealUnreadable?: { entity: 'memory' | 'node'; ref: string };
+    /** #1326 — an internal clone carries the source's already-stored stamp. */
+    copiedAuthorship?: NodeAuthorshipStamp;
     /**
      * #1330 — a node the SERVER writes on its own account, exempt from the
      * strict-sub-role refusal (`assertRoleDeclaredForWrite`). Only server code
@@ -260,8 +262,6 @@ export async function writeNodeCore(
      * trustworthy. No caller needs it yet: no platform writer sets a role.
      */
     platformWrite?: boolean;
-    /** #1326 — an internal clone carries the source's already-stored stamp. */
-    copiedAuthorship?: NodeAuthorshipStamp;
   },
 ) {
       // Keep the historical `input` name so the body below stays a
@@ -1335,8 +1335,11 @@ export async function writeNodeCore(
               create: { ...upsertArgs.create, ...(verifiedAuthorship ?? {}) },
               update: {
                 ...upsertArgs.update,
+                // A create-mode copy reaches this arm only by resurrecting a
+                // tombstone. Omitted copied fields survive there, so the
+                // source's stamp cannot describe the resulting mixed state.
                 ...(opts?.copiedAuthorship
-                  ? carryNodeAuthorship(opts.copiedAuthorship)
+                  ? clearNodeAuthorship()
                   : verifiedAuthorship
                     ? verifiedAuthorship
                     : authoritative && (mode === 'create' || authoredContentChanged(authoritativeChanges))
@@ -3905,6 +3908,15 @@ export const nodeMutations = {
         // restoring its uncaptured fields would wipe the live values to
         // NULL rather than "restore" anything.
         const writeData: Record<string, unknown> = { ...restoreFields };
+        // #1326 — a legacy pre-#620 snapshot captured no authorship, so it has
+        // no stamp to restore. If the restore rewrites authored fields, keeping
+        // the live stamp would attribute that older state to the current
+        // author: clear it to unknown. An unchanged restore keeps its verified
+        // stamp — the same rule as the agent-snapshot restore (#1397).
+        if (!('authorshipKind' in restoreFields)
+          && authoredContentChanged(diffNodeChanges(current, restoreFields))) {
+          Object.assign(writeData, clearNodeAuthorship());
+        }
         if ('properties' in writeData) {
           writeData.properties = jsonOrDbNull(writeData.properties as never);
         }

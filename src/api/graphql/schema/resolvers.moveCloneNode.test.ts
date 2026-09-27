@@ -457,6 +457,37 @@ describe('cloneNode (#564)', () => {
     expect(clone.id).not.toBe(alpha.id);
   });
 
+  it('clears copied attribution when the clone resurrects a tombstone at the destination (#1326)', async () => {
+    // The clone omits source-null fields, so a resurrected tombstone keeps its
+    // own leftovers (here `data`): the row is no longer the source's authored
+    // state, and must not carry the source's claim.
+    const task = await createDbNode(db, { loc: 'tomb-task', memoryId: memA.id });
+    const source = await db.node.create({
+      data: {
+        id: generateId(), memoryId: memA.id, loc: 'tomb-source', name: 'Source', content: 'source body',
+        authorshipKind: 'TASK', authoredByTask: task.id, authoredByRevision: 2,
+        authoredAt: new Date('2026-09-26T20:00:00Z'),
+      },
+    });
+    await db.node.create({
+      data: {
+        id: generateId(), memoryId: memA.id, loc: 'tomb-dest', name: 'Old', content: 'old body',
+        data: { leftover: true }, deletedAt: new Date('2026-09-25T00:00:00Z'),
+      },
+    });
+    const resurrected = await M.cloneNode(null, { sourceRef: source.id, targetUrn: urnA('tomb-dest') }, asUser());
+    const row = await db.node.findUniqueOrThrow({ where: { id: resurrected.id } });
+    expect(row.deletedAt).toBeNull();
+    expect(row.data).toEqual({ leftover: true });
+    expect(row).toMatchObject({
+      authorshipKind: null, authoredByTask: null, authoredByRevision: null, authoredByHuman: null, authoredAt: null,
+    });
+
+    // Control: the same source cloned onto a FRESH loc still carries the claim.
+    const fresh = await M.cloneNode(null, { sourceRef: source.id, targetUrn: urnA('tomb-fresh') }, asUser());
+    expect(fresh).toMatchObject({ authorshipKind: 'TASK', authoredByTask: task.id, authoredByRevision: 2 });
+  });
+
   it('copies the authored fields that are part of the task stamp', async () => {
     const task = await createDbNode(db, { loc: 'copy-task', memoryId: memA.id });
     const source = await db.node.create({

@@ -105,6 +105,59 @@ describe('#1326 content provenance reads', () => {
     expect(await db.nodeRevision.count({ where: { nodeId } })).toBe(revisions + 1);
   });
 
+  it('clears a live stamp when a LEGACY (pre-#620) revision restores different content, keeps it when unchanged', async () => {
+    // A legacy snapshot (nodeType NULL) captured no authorship. Restoring its
+    // older content must not leave the current task credited for it.
+    const memory = await db.memory.findUniqueOrThrow({ where: { id: nodeMemoryId } });
+    await db.orgMember.update({
+      where: { organizationId_userId: { organizationId: memory.organizationId!, userId: readerId } },
+      data: { role: 'ADMIN' },
+    });
+    const admin = { db, userId: readerId, roles: ['ADMIN'] } as Context;
+    const legacy = (content: string, revNo: number) => db.nodeRevision.create({
+      data: {
+        id: generateId(), nodeId, memoryId: nodeMemoryId, loc: 'authored', name: 'Authored',
+        tags: [], changes: [], revNo, content, nodeType: null,
+      },
+    });
+
+    const same = await legacy('body', -2);
+    await resolvers.Mutation.restoreNodeRevision({}, { revisionId: same.id }, admin);
+    expect(await db.node.findUniqueOrThrow({ where: { id: nodeId } })).toMatchObject({
+      content: 'body', authorshipKind: 'TASK', authoredByTask: taskId,
+    });
+
+    const older = await legacy('an older body', -1);
+    await resolvers.Mutation.restoreNodeRevision({}, { revisionId: older.id }, admin);
+    expect(await db.node.findUniqueOrThrow({ where: { id: nodeId } })).toMatchObject({
+      content: 'an older body', authorshipKind: null, authoredByTask: null,
+      authoredByRevision: null, authoredByHuman: null, authoredAt: null,
+    });
+  });
+
+  it('verifies a TEMPLATED node against its stored content, so default reads keep authorship', async () => {
+    // node(ref:) without `raw` hands field resolvers rendered Mustache output.
+    // Reconciliation must compare the STORED template, or every stamped
+    // templated node reads as unattributed (Codex on #1397 138e8185).
+    await db.node.update({
+      where: { id: nodeId },
+      data: {
+        content: 'Hello {{who}}', data: { who: 'world' },
+        revisionContentHash: revisionStateHashRefreshMarker(),
+      },
+    });
+    const parent = await resolvers.Query.node(null, { ref: nodeId }, reader());
+    expect(parent?.content).toBe('Hello world');
+    expect(await typeResolvers.Node.authorship(parent as never, null, reader())).toMatchObject({
+      kind: 'TASK', authoredAt: at,
+    });
+    const raw = await resolvers.Query.node(null, { ref: nodeId, raw: true }, reader());
+    expect(raw?.content).toBe('Hello {{who}}');
+    expect(await typeResolvers.Node.authorship(raw as never, null, reader())).toMatchObject({ kind: 'TASK' });
+    // The stored template never reaches the wire: symbol keys do not serialize.
+    expect(JSON.stringify(parent)).not.toContain('{{who}}');
+  });
+
   it('keeps a task stamp and creates no revision for an identical save', async () => {
     const memory = await db.memory.findUniqueOrThrow({ where: { id: nodeMemoryId } });
     await db.orgMember.update({
