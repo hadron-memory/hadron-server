@@ -1295,8 +1295,14 @@ export async function writeNodeCore(
               ...upsertArgs,
               update: {
                 ...upsertArgs.update,
+                // #1326 — this arm OVERWRITES an existing row. For a copy
+                // (`create` mode, which refuses a live occupant above) that row
+                // is a resurrected tombstone whose fields the copy omitted
+                // survive, so the copied claim describes the source, not the
+                // mixture. A copied stamp is carried only on the fresh insert
+                // (the create arm); here it clears (Codex on #1397 f650be49).
                 ...(opts?.copiedAuthorship
-                  ? carryNodeAuthorship(opts.copiedAuthorship)
+                  ? clearNodeAuthorship()
                   : authoritative && (mode === 'create' || authoredContentChanged(authoritativeChanges))
                     ? clearNodeAuthorship() : {}),
                 revisionContentHash: revisionStateHashRefreshMarker(),
