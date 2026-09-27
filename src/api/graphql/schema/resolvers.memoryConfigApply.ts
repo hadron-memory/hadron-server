@@ -137,6 +137,29 @@ export async function applyMemoryConfigTemplate(
       const target = await tx.$queryRaw<Array<{ id: string }>>`
         SELECT id FROM "memories" WHERE "id" = ${memory.id} AND "deleted_at" IS NULL FOR KEY SHARE`;
       if (!target[0]) throw new MemoryNotFoundError(args.memoryRef);
+      // The template's OWNER row, FOR KEY SHARE, before the template itself
+      // (#1399 review): account deletion hard-deletes the owner's memories —
+      // the cascade holds every referenced node — and only later deletes
+      // their templates, so an apply holding the template FOR SHARE and then
+      // waiting on a referenced node would cycle with it (an aborted
+      // transaction, not a hang). The owner row is deletion's FIRST lock, so
+      // KEY SHARE here serializes the whole apply against the whole deletion:
+      // a deletion already running holds it and we wait owning nothing it
+      // needs; one that commits first leaves us answering the concealing
+      // not-found, here or at the live re-read. App-owned templates take the
+      // same barrier on the App row: the App cascade removes app-scoped
+      // memories and their templates in one statement. Org- and server-owned
+      // templates are only soft-deleted, and that cascade touches no node or
+      // template rows, so they need no owner lock.
+      if (template.ownerUserId) {
+        const owner = await tx.$queryRaw<Array<{ id: string }>>`
+          SELECT id FROM "users" WHERE "id" = ${template.ownerUserId} AND "deleted_at" IS NULL FOR KEY SHARE`;
+        if (!owner[0]) throw notFoundTemplate();
+      } else if (template.appId) {
+        const owner = await tx.$queryRaw<Array<{ id: string }>>`
+          SELECT id FROM "apps" WHERE "id" = ${template.appId} AND "deleted_at" IS NULL FOR KEY SHARE`;
+        if (!owner[0]) throw notFoundTemplate();
+      }
       await tx.$queryRaw`SELECT 1 FROM "memory_config_templates" WHERE "id" = ${template.id} FOR SHARE`;
       const live = await tx.memoryConfigTemplate.findFirst({ where: { id: template.id, deletedAt: null } });
       if (!live) throw notFoundTemplate();

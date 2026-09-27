@@ -414,4 +414,41 @@ describe('apply under concurrency (#1399 review)', () => {
     await h.release();
     expect(code(await pending)).toBe('MEMORY_NOT_FOUND');
   });
+
+  it('racing account deletion of the template OWNER: the apply waits on the owner row, never a deadlock (#1399 review)', async () => {
+    // The deleted user owns the template AND the memory its rule references;
+    // the target is the org memory, which the deletion never touches. Without
+    // the owner-row barrier the apply holds the template FOR SHARE, queues on
+    // the cascade-deleted node, and the deletion queues on the template — a
+    // real cycle, an aborted transaction.
+    const ptask = await db.node.create({ data: { id: generateId(), memoryId: personal.id, loc: 'tasks:sign', name: 'Sign', isRunnable: true } });
+    await db.orgMember.updateMany({ where: { organizationId: org.id, userId: personalOwner }, data: { role: 'ADMIN' } });
+    const t = await tpl(as(personalOwner), 'USER', null, { name: 'mine', rules: [{ role: 'spec', authorTaskRef: ptask.id }] });
+    // deleteUserAccount's opening for this user, in shape: the user row FOR
+    // UPDATE first, then the hard delete of their memories (the cascade takes
+    // the referenced node). Its LATER statement — the user-owned template
+    // deleteMany — runs only once the apply is already queued.
+    let held!: () => void;
+    const holding = new Promise<void>((r) => (held = r));
+    let open!: () => void;
+    const gate = new Promise<void>((r) => (open = r));
+    const done = db.$transaction(
+      async (tx) => {
+        await tx.$queryRaw`SELECT 1 FROM users WHERE id = ${personalOwner} AND deleted_at IS NULL FOR UPDATE`;
+        await tx.memory.deleteMany({ where: { OR: [{ userId: personalOwner }, { ownerUserId: personalOwner }] } });
+        held();
+        await gate;
+        await tx.memoryConfigTemplate.deleteMany({ where: { ownerUserId: personalOwner } });
+      },
+      { timeout: 15_000 },
+    );
+    await holding;
+    const pending = apply(as(personalOwner), t.id, mem.id);
+    await waitForLockWaiters(db); // queued on the owner row; on an unfixed tree, on the deleted node with the template held
+    open();
+    const r = await pending;
+    await done;
+    expect(code(r)).toBe('MEMORY_CONFIG_TEMPLATE_NOT_FOUND');
+    expect(await rulesOf(mem.id)).toEqual([]);
+  });
 });
