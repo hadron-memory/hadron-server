@@ -161,6 +161,16 @@ describe('#1398 — model attribution on worklog milestones', () => {
     expect(page.items[0].model).toBeNull();
   });
 
+  it('an over-long SESSION model refuses the record rather than storing oversized (Codex P2)', async () => {
+    await db.session.update({ where: { id: session.id }, data: { llmModel: 'm'.repeat(121) } });
+    await expect(record()).rejects.toMatchObject({
+      extensions: { code: 'BAD_USER_INPUT' },
+    });
+    // An explicit model still attributes the milestone over a broken session value.
+    const item = await record({ model: 'glm-5.3' });
+    expect(item.model).toBe('glm-5.3');
+  });
+
   it('a legacy record without the key reads back null, and the pre-model declaration converges', async () => {
     // First record bootstraps the canonical declaration (now WITH model).
     await record({ ref: 'o/r#1' });

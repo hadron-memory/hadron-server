@@ -755,7 +755,21 @@ export const teamWorkMutations = {
     // stored row alone and survive every receipt-only assertion (Ella, #1401).
     // An empty-string session model normalizes to null here too, so the
     // receipt and the read-back can never disagree (Ella nit 3).
-    const modelAttribution: string | null = reportedModel ?? (llmModel?.trim() ? llmModel : null);
+    // The 120-char storage bound applies to BOTH sources (Codex P2 on
+    // cc13fd64): an over-long SESSION model must not slip past the limit the
+    // explicit report is held to. Refusing the record — not truncating —
+    // keeps every attribution whole; the caller passes an explicit model.
+    let modelAttribution: string | null = null;
+    if (reportedModel != null) {
+      modelAttribution = reportedModel;
+    } else if (llmModel != null && llmModel.trim() !== '') {
+      if (llmModel.trim().length > 120) {
+        throw badInput(
+          `the session's llmModel exceeds 120 characters — pass an explicit model to attribute this milestone`,
+        );
+      }
+      modelAttribution = llmModel;
+    }
 
     const root = (await locateWorklogRoot(ctx, appId)) ?? (await bootstrapWorklog(ctx, app));
     await ensureWorklogSchema(ctx, root.memoryId);
