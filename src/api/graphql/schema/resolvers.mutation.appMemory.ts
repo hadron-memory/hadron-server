@@ -14,8 +14,8 @@
  *
  * Split auth model (matches the App membership model, cf. requireAiConfigPicker
  * Access):
- *   - class='app' and class='knowledge' are shared data → org OWNER/ADMIN
- *     (requireOrgRole). #653: an app-scoped knowledge memory is App-internal
+ *   - class='app' and class='knowledge' are shared data → App tenant owner
+ *     (user owner or org OWNER/ADMIN). #653: an app-scoped knowledge memory is App-internal
  *     shared reference content — it is linked to the App's agent (AgentMemoryItem)
  *     so agents read it via the App surface, and is excluded from every org-wide
  *     read/write grant (getOrgReadableMemoryIds / requireMemoryWriteAccess).
@@ -45,7 +45,7 @@ type AppMemoryClass = 'app' | 'knowledge' | 'personal' | 'private';
 
 /**
  * Load the target App, reject an uninstalled one, and enforce the class-split
- * authorization. Returns the loaded App (id, urn, organizationId, and the
+ * authorization. Returns the loaded App (id, urn, tenant owner, and the
  * org's urn — eagerly loaded so the createMemoryInApp URN derivation needs no
  * second query).
  */
@@ -53,7 +53,13 @@ async function loadAppAndAuthorize(
   ctx: Context,
   appRef: string,
   klass: AppMemoryClass,
-): Promise<{ id: string; urn: string; organizationId: string | null; organizationUrn: string | null }> {
+): Promise<{
+  id: string;
+  urn: string;
+  organizationId: string | null;
+  ownerUserId: string | null;
+  organizationUrn: string | null;
+}> {
   const { id: appId } = await resolveAppRef(ctx.db, appRef);
   const app = await ctx.db.app.findUniqueOrThrow({
     where: { id: appId },
@@ -101,6 +107,7 @@ async function loadAppAndAuthorize(
     id: app.id,
     urn: app.urn,
     organizationId: app.organizationId,
+    ownerUserId: app.ownerUserId,
     organizationUrn: app.organization?.urn ?? null,
   };
 }
@@ -199,9 +206,8 @@ export const appMemoryMutations = {
     // #697 Stage 3: mint a FLAT single-atom v2 urn (`<root>:<slug>`). The
     // app-user/app-mem scope lives in the row columns (class/appId/userId/
     // userMemoryOfAgentId), not the URN path, so node URNs in the memory
-    // round-trip through splitNodeUrn. Root is the owning ORG (Task A FK-rooting;
-    // create sets `organizationId: app.organizationId`), falling back to the
-    // app's own root atom for a user-owned App.
+    // round-trip through splitNodeUrn. Root is the owning org or user (from
+    // the App URN); the Memory inherits the matching tenant-owner column.
     const memRoot = app.organizationUrn ?? app.urn.split(':')[0]!;
     // Recreate-after-delete keeps its clean slug: hard-delete an EXACT
     // soft-deleted collision on the desired slug before minting, so the mint
@@ -231,6 +237,7 @@ export const appMemoryMutations = {
         data: {
           id: generateId(),
           organizationId: app.organizationId,
+          ownerUserId: app.ownerUserId,
           urn: memoryUrn,
           name,
           shortDescription,
@@ -244,8 +251,8 @@ export const appMemoryMutations = {
           visibility: klass === 'knowledge' ? 'ORGANIZATION' : null,
           class: klass,
           appId: app.id,
-          // app/knowledge are agent-scoped-by-URN only (no owner, no agent
-          // pivot); personal/private carry the (app, user, agent) pivot required
+          // app/knowledge have no strict user owner or agent pivot;
+          // personal/private carry the (app, user, agent) pivot required
           // by chk_memory_personal_agent_id + chk_personal_visibility_user.
           userMemoryOfAgentId: isUserOwned ? agent.id : null,
           userId: isUserOwned ? ctx.userId : null,
