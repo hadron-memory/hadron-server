@@ -1511,7 +1511,14 @@ export function createMcpServerInstance(
       restrictToOrgId: auth.impersonation?.orgId,
     });
 
-  /** Member orgs as `- <urn> (<name>)` lines, for refusals that must say what IS available. */
+  /**
+   * Member orgs as `- <urn> (<name>)` lines, for surfaces that must say what IS
+   * available. #1412 review hardening: `Organization.name` accepts CR/LF, and
+   * these lines ride inside line-parsed diagnostic output (`server_info`, the
+   * ORG_REQUIRED/org_not_found refusals) — a tenant-editable name must never be
+   * able to forge an extra line (e.g. a second `server:` row), so control
+   * characters collapse to a space and one org stays one line.
+   */
   const renderMemberOrgs = async (orgIds: string[]): Promise<string> => {
     if (orgIds.length === 0) return '  (no organization memberships)';
     const orgs = await db.organization.findMany({
@@ -1519,7 +1526,8 @@ export function createMcpServerInstance(
       select: { urn: true, name: true },
       orderBy: { name: 'asc' },
     });
-    return orgs.map((o) => `  - ${safeEmitEntityUrnV2('org', o.urn)} (${o.name})`).join('\n');
+    const oneLine = (name: string) => name.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, ' ');
+    return orgs.map((o) => `  - ${safeEmitEntityUrnV2('org', o.urn)} (${oneLine(o.name)})`).join('\n');
   };
 
   // Spec 026 — has the session called `hadron_list_apps` or `hadron_set_active_app`,
@@ -2198,7 +2206,11 @@ export function createMcpServerInstance(
   // without needing to issue any other tool calls. Doesn't require an
   // active App, doesn't require an active memory, doesn't even require
   // read access on any memory — it returns server identity only, never
-  // any per-tenant data.
+  // any per-tenant data. The one #1372 exception: an authenticated
+  // caller with memberships and no resolved active org also gets their
+  // OWN selectable organizations (urn + display name, the same
+  // authorized candidate set hadron_set_active_org refuses with), so
+  // discovery doesn't require a deliberately wrong selection.
   //
   // Auth layering — the tool itself does NOT add gating because the MCP
   // transport already requires a valid AuthContext (App Key, User API Key,
@@ -2218,7 +2230,7 @@ export function createMcpServerInstance(
 
   server.tool(
     'hadron_server_info',
-    'Returns the identity of the hadron-server this MCP session is bound to: deployment URL, server version, the CAPABILITY tokens this build supports, and whether this connection was re-established. Useful when a caller has two MCP namespaces wired up and needs to know which one a tool call landed on (#190), and to check a feature is actually present BEFORE relying on it — a deployment behind the docs silently ignores arguments it does not know (#1006). Test for a capability token, not a version number; if the capabilities line is missing entirely the server predates this field and should not be trusted to bind workers. No arguments. Returns plain key:value pairs. Does NOT require an active App or any memory access.',
+    'Returns the identity of the hadron-server this MCP session is bound to: deployment URL, server version, the CAPABILITY tokens this build supports, and whether this connection was re-established. Useful when a caller has two MCP namespaces wired up and needs to know which one a tool call landed on (#190), and to check a feature is actually present BEFORE relying on it — a deployment behind the docs silently ignores arguments it does not know (#1006). Test for a capability token, not a version number; if the capabilities line is missing entirely the server predates this field and should not be trusted to bind workers. No arguments. Returns plain key:value lines — plus, for an authenticated caller whose active organization is unresolved (several memberships, none selected), a `Your memberships:` block listing the selectable organizations as `- <org URN> (<display name>)` per line: the happy-path discovery surface feeding hadron_set_active_org (#1372). Does NOT require an active App or any memory access.',
     {},
     async () => {
       const dep = getDeploymentInfo();
@@ -2423,7 +2435,7 @@ export function createMcpServerInstance(
 
   server.tool(
     'hadron_set_active_org',
-    'Set — or with clear:true, drop — the active ORGANIZATION for this client (spec 049 / D-2026-09-13-003): the tenancy an org-scoped read runs against (the cor:api:100 org view), persisted per client instance like hadron_set_active_app. You need it only when you belong to SEVERAL organizations and neither the call nor an org-owned active App names one; the resolution ladder is: an org named in the call › the active App\'s organization when that App is org-owned (a personal App has none) › this selection › your single membership › no membership at all ⇒ your own user-owned memories. With two or more memberships and none of those, org-scoped reads refuse with ORG_REQUIRED and list your memberships. Selecting an organization is not a search scope and attaches nothing: the org picks the tenancy, a scope (spec 049 Phase 3) picks the view. AppKey callers carry their org in the credential and cannot use this. hadron_server_info reports the currently resolved organization and which rung chose it.',
+    'Set — or with clear:true, drop — the active ORGANIZATION for this client (spec 049 / D-2026-09-13-003): the tenancy an org-scoped read runs against (the cor:api:100 org view), persisted per client instance like hadron_set_active_app. You need it only when you belong to SEVERAL organizations and neither the call nor an org-owned active App names one; the resolution ladder is: an org named in the call › the active App\'s organization when that App is org-owned (a personal App has none) › this selection › your single membership › no membership at all ⇒ your own user-owned memories. With two or more memberships and none of those, org-scoped reads refuse with ORG_REQUIRED and list your memberships. Selecting an organization is not a search scope and attaches nothing: the org picks the tenancy, a scope (spec 049 Phase 3) picks the view. AppKey callers carry their org in the credential and cannot use this. hadron_server_info reports the currently resolved organization and which rung chose it — and, while yours is unresolved, lists your selectable organizations (#1372).',
     {
       org: z
         .string()
