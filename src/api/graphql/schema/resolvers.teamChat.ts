@@ -66,7 +66,6 @@ import { escapePrismaLikePattern } from '../../../lib/literalLocPrefix.js';
 import { nodeUrnRoundTrips, safeNodeUrnV2 } from '../../../lib/urnEmit.js';
 import {
   maybeAdvanceOwnChannelRead,
-  teamAttentionPilotOperatorEnabled,
 } from '../../../lib/teamAttention.js';
 
 // The team-chat locs moved to src/lib/teamChatLoc.ts (#1030): the agent-chat
@@ -1251,14 +1250,16 @@ export const teamChatQueries = {
     // One gate, two entry points: the convenience runs the same host-memory
     // point check the Channel-addressed read runs (Copilot on PR #1169).
     if (!(await hostMemoryReadable(ctx, root.memoryId, app))) return { items: [], total: 0 };
-    // The pilot changes ordinary-read semantics only for an allowlisted
-    // operator and an exact Worker session. Outside that boundary this extra
-    // lookup is not even made.
-    // The Worker session may belong to a different pilot App that registered
-    // this App's Channel. The helper verifies that session's App allowlist and
-    // register entry before advancing; the Channel host is not the pilot key.
+    // The attention capture changes ordinary-read semantics only for a
+    // caller's exact Worker session. Outside that boundary this extra lookup
+    // is not even made (#1353: the pilot operator allowlist is gone; the
+    // session-scoped guards below are the boundary).
+    // The Worker session may belong to a different App that registered
+    // this App's Channel. The helper verifies that session's App
+    // participation and register entry before advancing; the Channel host
+    // is not the key.
     const pilotChannel =
-      ctx.sessionId && teamAttentionPilotOperatorEnabled(ctx.userId)
+      ctx.sessionId
         ? await ctx.db.channel.findFirst({
             where: { chatRootNodeId: root.id, deletedAt: null },
             select: { id: true, lastSeq: true },
@@ -1300,7 +1301,7 @@ export const teamChatQueries = {
   ): Promise<{ items: TeamChatMessageOut[]; total: number }> => {
     const target = await resolveChannelTarget(ctx, channelRef, 'read');
     const page = await readChannelRoot(ctx, target.app?.id ?? null, target.root, args);
-    if (ctx.sessionId && teamAttentionPilotOperatorEnabled(ctx.userId)) {
+    if (ctx.sessionId) {
       try {
         await maybeAdvanceOwnChannelRead(ctx, {
           channelId: target.channelId,
