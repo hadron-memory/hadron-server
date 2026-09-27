@@ -187,7 +187,7 @@ import { locateTeamChatChannel } from '../api/graphql/schema/resolvers.teamChat.
 // reconnect recovery admits exactly whom startSession admitted, rather than a
 // narrower member-row copy that would drift from it.
 import { isAppParticipant, getAccessibleMemoryIds as gqlAccessibleMemoryIds } from '../api/graphql/schema/resolvers.helpers.js';
-import { loadAppWorkerActivity } from '../api/graphql/schema/resolvers.worker.js';
+import { composeWorkerPrompt, loadAppWorkerActivity } from '../api/graphql/schema/resolvers.worker.js';
 import { splitNodeUrnTolerant, nodeFragmentRefusal } from '../lib/splitNodeUrnTolerant.js';
 import { safeEqual } from '../lib/constantTime.js';
 
@@ -7744,7 +7744,13 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         if (session.workerId) {
           try {
             const worker = await db.worker.findUnique({ where: { id: session.workerId } });
-            const prompt = worker ? await resolvers.Worker.prompt(worker, {}, mcpCtx) : null;
+            // #1090: the composition itself carries the freshness facts, so
+            // the stamps describe the text printed below (one agent read — no
+            // parallel lookup that could race a template edit).
+            const briefing = worker
+              ? await composeWorkerPrompt(mcpCtx, worker)
+              : { text: null as string | null, renderedAt: null as Date | null, roleAgentUpdatedAt: null as Date | null };
+            const prompt = briefing.text;
             // #1029: the previous stint's handoff, delivered with the briefing
             // rather than left to be discovered. A fresh session does not know
             // there is anything to look for, so a design that requires it to go
@@ -7773,7 +7779,10 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
               // A worker whose agent carries no template and who has no override
               // has no briefing — say so, rather than emitting a bare heading.
               (prompt
-                ? `\n\nBoot briefing — adopt this for the rest of the session:\n\n${prompt}`
+                ? `\n\nBoot briefing — adopt this for the rest of the session:` +
+                  `\nrendered at: ${briefing.renderedAt!.toISOString()}` +
+                  `\nrole Agent updated at: ${briefing.roleAgentUpdatedAt ? briefing.roleAgentUpdatedAt.toISOString() : 'not recorded'} (generic Agent row update — no per-override mtime is tracked)` +
+                  `\n\n${prompt}`
                 : '\n\n(No boot briefing: the role agent carries no personaPrompt template and this worker has no promptOverride.)') +
               renderWorkerContinuity(continuity as RenderableContinuity | null);
           } catch {
@@ -9240,8 +9249,10 @@ function ageOf(at: Date, now: Date = new Date()): string {
         // through it cannot widen access. Rendering live is the whole point:
         // a copied briefing goes stale silently the moment a role agent's
         // template changes, which is why the contract forbids caching it.
-        const [prompt, workerUrn, agent, override, continuity] = await Promise.all([
-          resolvers.Worker.prompt(worker, {}, ctx),
+        // #1090: one composition supplies the text AND its freshness facts —
+        // the stamps below describe exactly this rendering.
+        const [briefing, workerUrn, agent, override, continuity] = await Promise.all([
+          composeWorkerPrompt(ctx, worker),
           resolvers.Worker.urn(worker, {}, ctx),
           resolvers.Worker.agent(worker, {}, ctx),
           // The RAW override, separate from the composed briefing (PR #1019
@@ -9258,6 +9269,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
           // reader to know one exists.
           resolvers.Worker.continuity(worker, {}, ctx),
         ]);
+        const prompt = briefing.text;
         const agentName = (agent as { name?: string } | null)?.name ?? null;
         const readUrl = workerPortalUrl(workerUrn as string | null);
 
@@ -9362,7 +9374,10 @@ function ageOf(at: Date, now: Date = new Date()): string {
               ? `\nPrompt override (the editable part — pass THIS text, amended, to hadron_update_worker; the briefing below is it composed with the shared template):\n\n${override}\n`
               : '') +
             (prompt
-              ? `\nBoot briefing — adopt this for the rest of the session:\n\n${prompt}`
+              ? `\nBoot briefing — adopt this for the rest of the session:` +
+                `\nrendered at: ${briefing.renderedAt.toISOString()}` +
+                `\nrole Agent updated at: ${briefing.roleAgentUpdatedAt ? briefing.roleAgentUpdatedAt.toISOString() : 'not recorded'} (generic Agent row update — no per-override mtime is tracked)` +
+                `\n\n${prompt}`
               : '\n(No boot briefing: the role agent carries no personaPrompt template and this worker has no promptOverride.)') +
             renderWorkerContinuity(continuity as RenderableContinuity | null),
         );

@@ -1738,6 +1738,46 @@ export async function loadAppWorkerActivity(
  * deny (the #552 posture applied field-level, like Worker.app/agent).
  * Memoized per request+App: one gate check covers a whole session page.
  */
+/**
+ * #1090 — one composition of a worker's boot prompt, with the freshness facts
+ * a holder needs to tell whether the text is current. `renderedAt` is the
+ * instant this composition began; `roleAgentUpdatedAt` comes from the SAME
+ * agent read that supplied the template, so the stamp describes the template
+ * actually rendered — a parallel agent read could race an edit and label an
+ * older prompt with a newer time (Andi, #2853). It is the Agent row's generic
+ * `updatedAt` (nullable), NOT a proven persona-template edit time; no separate
+ * prompt-override mtime exists, and none is invented here. Text is null when
+ * there is no template and no override — in that case callers show no stamps.
+ */
+export async function composeWorkerPrompt(
+  ctx: Context,
+  worker: { id: string; appId: string; agentId: string; name: string; role: string | null; promptOverride: string | null },
+): Promise<{ text: string | null; renderedAt: Date; roleAgentUpdatedAt: Date | null }> {
+  const renderedAt = new Date();
+  // Working-state path: the composed boot prompt embeds the agent's persona
+  // template, which this loads WITHOUT the Agent read gate — so every caller
+  // must sit behind the worker read gate itself (#983 review; see
+  // maySeeWorkerInternals).
+  if (!(await maySeeWorkerInternals(ctx, worker.appId))) {
+    return { text: null, renderedAt, roleAgentUpdatedAt: null };
+  }
+  const agent = await ctx.db.agent.findUnique({
+    where: { id: worker.agentId },
+    select: { personaPrompt: true, personaRole: true, updatedAt: true },
+  });
+  const template = agent?.personaPrompt ?? null;
+  const role = worker.role ?? agent?.personaRole ?? '';
+  const bound = template ? applyPersonaTemplate(template, worker.name, role) : null;
+  const authored = bound && worker.promptOverride ? `${bound}\n\n${worker.promptOverride}` : (worker.promptOverride ?? bound);
+  // Spec 049 Phase 6: the register block is DERIVED data appended through the
+  // one composition point (`renderDerivedBlocks`), never authored prompt text
+  // — evaluated for the reader, so a briefing says what THIS driver may read
+  // and post, and re-renders live like the rest.
+  const derived = renderDerivedBlocks(await resolveRegister(ctx.db, { attendee: { workerId: worker.id }, actor: ctx }));
+  const text = !derived ? authored : authored ? `${authored}\n\n${derived}` : derived;
+  return { text, renderedAt, roleAgentUpdatedAt: agent?.updatedAt ?? null };
+}
+
 async function maySeeWorkerInternals(ctx: Context, appId: string): Promise<boolean> {
   type Cache = Map<string, Promise<boolean>>;
   const holder = ctx as Context & { workerInternalsCache?: Cache };
@@ -2201,28 +2241,7 @@ export const workerFieldResolvers = {
       worker: { id: string; appId: string; agentId: string; name: string; role: string | null; promptOverride: string | null },
       _: unknown,
       ctx: Context,
-    ) => {
-      // Working-state field: the composed boot prompt embeds the agent's
-      // persona template, which this resolver loads WITHOUT the Agent read
-      // gate — so it must sit behind the worker read gate itself (#983
-      // review; see maySeeWorkerInternals).
-      if (!(await maySeeWorkerInternals(ctx, worker.appId))) return null;
-      const agent = await ctx.db.agent.findUnique({
-        where: { id: worker.agentId },
-        select: { personaPrompt: true, personaRole: true },
-      });
-      const template = agent?.personaPrompt ?? null;
-      const role = worker.role ?? agent?.personaRole ?? '';
-      const bound = template ? applyPersonaTemplate(template, worker.name, role) : null;
-      const authored = bound && worker.promptOverride ? `${bound}\n\n${worker.promptOverride}` : (worker.promptOverride ?? bound);
-      // Spec 049 Phase 6: the register block is DERIVED data appended through
-      // the one composition point (`renderDerivedBlocks`), never authored
-      // prompt text — evaluated for the reader, so a briefing says what THIS
-      // driver may read and post, and re-renders live like the rest.
-      const derived = renderDerivedBlocks(await resolveRegister(ctx.db, { attendee: { workerId: worker.id }, actor: ctx }));
-      if (!derived) return authored;
-      return authored ? `${authored}\n\n${derived}` : derived;
-    },
+    ) => (await composeWorkerPrompt(ctx, worker)).text,
     /**
      * #1029 — what a fresh binding inherits from the previous stint.
      *
