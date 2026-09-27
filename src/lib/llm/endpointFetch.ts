@@ -92,15 +92,19 @@ async function allowedAddresses(url: URL, forbidden: (ip: string) => boolean): P
  */
 async function untilAborted<T>(start: () => Promise<T>, signal: AbortSignal | null | undefined): Promise<T> {
   if (!signal) return start();
-  signal.throwIfAborted();
-  const work = start();
-  work.catch(() => {});
+  // The listener goes on BEFORE the work starts, so an abort landing between
+  // the check and the start can't be missed (AbortSignal doesn't replay the
+  // event to a late listener; #1385 review).
   let onAbort = () => {};
   const aborted = new Promise<never>((_, reject) => {
     onAbort = () => reject(signal.reason);
     signal.addEventListener('abort', onAbort, { once: true });
   });
+  aborted.catch(() => {}); // the work may win; the losing branch is handled
   try {
+    signal.throwIfAborted();
+    const work = start();
+    work.catch(() => {});
     return await Promise.race([work, aborted]);
   } finally {
     signal.removeEventListener('abort', onAbort);

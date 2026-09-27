@@ -225,36 +225,39 @@ export async function reserveQuota(
   action: QuotaAction,
   defaultLimit: number,
   amount: number,
-  /** Test seam: the clock both the rollover and the expiry check read. */
+  /** Test seam: the clock the rollover reads. */
   clock: () => Date = () => new Date(),
 ): Promise<{ resetAt: string } | null> {
-  // Bounded retry: the window can expire between the rollover check and the
-  // reservation (midnight in between). A reservation that landed in an
-  // EXPIRED window is undone and retried after the rollover, never kept: a
-  // later rollover would erase it without it ever counting against the new
-  // day (#1385 review). Expiry is judged through Prisma, the same way
-  // ensureQuotaRow judges it, so both agree on time zones.
-  for (let attempt = 0; attempt < 3; attempt++) {
-    await ensureQuotaRow(db, scopeKind, scopeId, action, defaultLimit, clock());
+  // Rollover and reservation are ONE step, under the counter row's lock
+  // (#1385 review). Separately, midnight could fall between them: the
+  // reservation landed in the expired window and a concurrent rollover then
+  // erased it (so it never counted against the new day), or an expired
+  // window without headroom refused a probe the new day had room for. Every
+  // other counter writer UPDATEs this row, so it waits for this transaction,
+  // and ensureQuotaRow's rollover afterwards finds the window current.
+  await ensureQuotaRow(db, scopeKind, scopeId, action, defaultLimit, clock());
+  return db.$transaction(async (tx) => {
+    const locked = await tx.$queryRaw<Array<{ id: string }>>`
+      SELECT id FROM quota_counters
+      WHERE scope_kind = ${scopeKind} AND scope_id = ${scopeId}
+        AND action = ${action} AND "window" = ${QUOTA_WINDOW}
+      FOR UPDATE`;
+    if (!locked[0]) return null;
+    // Expiry judged through Prisma, exactly as ensureQuotaRow judges it, so
+    // both agree on time zones.
+    await tx.quotaCounter.updateMany({
+      where: { id: locked[0].id, resetAt: { lte: clock() } },
+      data: { used: 0, resetAt: nextUtcMidnight() },
+    });
     // The generation as the DATABASE's own text: reset_at is a timestamp
     // without time zone, and a JS Date parameter would be converted through
     // the session's zone before comparing, so it could never match.
-    const rows = await db.$queryRaw<Array<{ reset_at: string }>>`
+    const rows = await tx.$queryRaw<Array<{ reset_at: string }>>`
       UPDATE quota_counters SET used = used + ${amount}
-      WHERE scope_kind = ${scopeKind} AND scope_id = ${scopeId}
-        AND action = ${action} AND "window" = ${QUOTA_WINDOW}
-        AND used + ${amount} <= "limit"
+      WHERE id = ${locked[0].id} AND used + ${amount} <= "limit"
       RETURNING reset_at::text AS reset_at`;
-    if (!rows[0]) return null;
-    const reservation = { resetAt: rows[0].reset_at };
-    const expired = await db.quotaCounter.findFirst({
-      where: { scopeKind, scopeId, action, window: QUOTA_WINDOW, resetAt: { lte: clock() } },
-      select: { id: true },
-    });
-    if (!expired) return reservation;
-    await settleReservation(db, scopeKind, scopeId, action, -amount, reservation);
-  }
-  return null;
+    return rows[0] ? { resetAt: rows[0].reset_at } : null;
+  });
 }
 
 /**

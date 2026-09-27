@@ -490,6 +490,36 @@ describe('testAiServiceConfig (#1378)', () => {
     expect(row.resetAt.getTime()).toBeGreaterThan(t0 + 1000);
   });
 
+  it('an expired window with no headroom is rolled, not refused: the new day has room (#1385 review)', async () => {
+    const t0 = Date.now();
+    await db.quotaCounter.create({
+      data: { id: generateId(), scopeKind: 'org', scopeId: org.id, action: 'llm.tokens', window: 'day', used: 10_000, limit: 10_000, resetAt: new Date(t0 + 1) },
+    });
+    let calls = 0;
+    const clock = () => new Date(calls++ === 0 ? t0 : t0 + 2); // midnight after the pre-check
+    expect(await reserveQuota(db, 'org', org.id, 'llm.tokens', 10_000, 64, clock)).not.toBeNull();
+    expect((await db.quotaCounter.findFirstOrThrow({ where: { scopeId: org.id, action: 'llm.tokens' } })).used).toBe(64);
+  });
+
+  it('encoded query secrets are redacted raw and decoded, and a value that fails to decode still is (#1385 review)', async () => {
+    vi.stubEnv('OPENAI_API_KEY', 'sk-SERVER-AMBIENT-0123');
+    vi.stubEnv('OPENAI_BASE_URL', 'https://llm.example.test/v1?token=%73ecretX&odd=%E0%A4%A');
+    vi.stubGlobal('fetch', async () =>
+      new Response(JSON.stringify({ error: { message: 'raw %73ecretX decoded secretX odd %E0%A4%A', type: 'invalid_request_error' } }), {
+        status: 401,
+        headers: { 'content-type': 'application/json' },
+      }),
+    );
+    try {
+      const host = await db.hadronServer.create({ data: { id: generateId(), url: 'https://test.hadron.local' } });
+      const cfg = await mkConfig({ hadronServerId: host.id, provider: 'openai', endpoint: null, apiStyle: 'CHAT_COMPLETIONS', apiKeyEncrypted: null, apiKeyPreview: null });
+      const r = await test(cfg.id, ctxFor(admin.id, { roles: ['ADMIN'] }));
+      expect(JSON.stringify(r)).not.toMatch(/%73ecretX|secretX|%E0%A4%A/);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it('secret parts of an operator base URL are redacted one by one, even when echoed alone (#1385 review)', async () => {
     vi.stubEnv('OPENAI_API_KEY', 'sk-SERVER-AMBIENT-0123');
     vi.stubEnv('OPENAI_BASE_URL', 'https://user:hunter2@llm.example.test/v1?token=s3cret');

@@ -203,15 +203,25 @@ function processSecrets(env: NodeJS.ProcessEnv): string[] {
   // …and each secret part on its own: a provider can echo just the
   // password or a query value, which the whole-URL match would miss
   // (#1385 review).
+  // Raw AND decoded, and one bad decode never drops the other form.
+  const safeDecode = (v: string) => {
+    try {
+      return decodeURIComponent(v.replace(/\+/g, ' '));
+    } catch {
+      return v;
+    }
+  };
   const parts: string[] = [];
   for (const raw of urls) {
+    let u: URL;
     try {
-      const u = new URL(raw);
-      for (const v of [u.username, u.password, u.hash.slice(1), ...u.searchParams.values()]) {
-        if (v) parts.push(v, decodeURIComponent(v));
-      }
+      u = new URL(raw);
     } catch {
-      // unparsable: the whole-string match above is all there is
+      continue; // unparsable: the whole-string match above is all there is
+    }
+    const rawQueryValues = u.search.slice(1).split('&').map((kv) => kv.slice(kv.indexOf('=') + 1));
+    for (const v of [u.username, u.password, u.hash.slice(1), ...rawQueryValues, ...u.searchParams.values()]) {
+      if (v) parts.push(v, safeDecode(v));
     }
   }
   return [...keys, ...urls, ...parts];
