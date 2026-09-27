@@ -397,13 +397,22 @@ export const syncGraphFromGithub = async (
       // a rule write holds its referenced nodes FOR SHARE and then waits for
       // that lock exclusively. A sync writes many rows, so it takes every row
       // lock in this memory FIRST, in id order, and only then the rulebook lock.
-      // Rows it later updates, parks or deletes are already its own. Skipped
-      // when no file carries a role, which nothing then needs to judge.
+      // Rows it later updates or parks are already its own. Skipped when no
+      // file carries a role, which nothing then needs to judge.
+      //
+      // `prelockedIds` also BOUNDS the cleanup pass below: a row inserted after
+      // this scan is not locked, and deleting it would wait on a row while
+      // holding the rulebook lock, a deadlock Anne reproduced (#1411 review).
+      // Such a late row survives this sync and is pruned by the next one, the
+      // deferrable direction.
       const judgesRoles = fsGraph.nodes.some(
         (n) => !isProtected(n.loc!) && governedSignalsFromMirror(n).role != null,
       );
+      let prelockedIds: string[] | null = null;
       if (judgesRoles) {
-        await tx.$queryRaw`SELECT "id" FROM "nodes" WHERE "memory_id" = ${graph.id} ORDER BY "id" FOR UPDATE`;
+        const rows = await tx.$queryRaw<Array<{ id: string }>>`
+          SELECT "id" FROM "nodes" WHERE "memory_id" = ${graph.id} ORDER BY "id" FOR UPDATE`;
+        prelockedIds = rows.map((r) => r.id);
         await lockMemoryConfigShared(tx, graph.id);
       }
       // Locs of files refused for their role: nothing of theirs is written,
@@ -769,7 +778,11 @@ export const syncGraphFromGithub = async (
         const cleanupWhere: Prisma.NodeWhereInput = {
           ownerRepo,
           memoryId: graph.id,
-          id: { notIn: [...upsertedIds, ...protectedRowIds, ...skippedRowIds] },
+          id: {
+            notIn: [...upsertedIds, ...protectedRowIds, ...skippedRowIds],
+            // #1330 — only rows this sync already holds, once it holds the rulebook lock.
+            ...(prelockedIds ? { in: prelockedIds } : {}),
+          },
           ...(deletionFilter.notClauses.length
             ? { NOT: { OR: deletionFilter.notClauses as Prisma.NodeWhereInput[] } }
             : {}),

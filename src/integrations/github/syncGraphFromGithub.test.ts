@@ -1434,4 +1434,42 @@ describe('#1330 — strict sub-roles through git sync', () => {
     expect(result.skippedUndeclaredRoles).toEqual([expect.objectContaining({ loc: 'a' })]);
     expect(await stored('z')).toMatchObject({ content: expect.stringContaining('new') });
   });
+
+  it('a row inserted AFTER the up-front lock is left for the next sync, not deleted under the rulebook lock (#1411 review)', async () => {
+    await rules({ role: 'doc', strictSubRoles: true });
+    frontmatter('a', { name: 'A', role: 'doc.unknown' });
+    const release = <T,>() => {
+      let open!: (v: T) => void;
+      return { gate: new Promise<T>((r) => (open = r)), open };
+    };
+    // 1. Hold the rulebook lock so the sync stops right after its row scan.
+    const holdSignal = release<void>();
+    const holdGate = release<void>();
+    const holder = db.$transaction(async (tx) => {
+      await lockMemoryConfigExclusive(tx, dbGraphId);
+      holdSignal.open();
+      await holdGate.gate;
+    }, { timeout: 15_000 });
+    await holdSignal.gate;
+    const syncing = syncGraphFromGithub(makeGraph());
+    await waitForLockWaiters('advisory', 1);
+    // 2. A repo-owned row the cleanup would select, inserted after the scan.
+    const lateId = generateId();
+    await db.node.create({ data: { id: lateId, memoryId: dbGraphId, loc: 'late', name: 'Late', ownerRepo: 'test/repo' } });
+    // 3. A rule write: that row FOR SHARE, then the rulebook lock exclusively.
+    const ruleWrite = db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT "id" FROM "nodes" WHERE "id" = ${lateId} FOR SHARE`;
+      await lockMemoryConfigExclusive(tx, dbGraphId);
+    }, { timeout: 15_000 });
+    await waitForLockWaiters('advisory', 2);
+    holdGate.open();
+    await holder;
+    const [result] = await Promise.all([syncing, ruleWrite]);
+    expect(result.error).toBeUndefined();
+    expect(result.skippedUndeclaredRoles).toEqual([expect.objectContaining({ loc: 'a' })]);
+    expect(await db.node.findUnique({ where: { id: lateId } })).not.toBeNull();
+    // The next sync owns it from the start, and prunes it as usual.
+    await sync();
+    expect(await db.node.findUnique({ where: { id: lateId } })).toBeNull();
+  });
 });
