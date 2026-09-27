@@ -5,6 +5,9 @@ import { resolvers, type Context } from './resolvers.js';
 import { generateId } from '../../../lib/id.js';
 import { generateDataKey } from '../../../lib/crypto.js';
 import { sessionKeyCache } from '../../../lib/sessionKeyCache.js';
+import { computeContentHash } from '../../../lib/contentHash.js';
+import { encryptNodeFields } from '../../../lib/nodeCrypto.js';
+import { writeNodeCore } from './resolvers.mutation.node.js';
 
 // Prevent git writes
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
@@ -293,6 +296,43 @@ describe('createNode with encryption', () => {
       sessionCtx,
     );
     expect(read?.abstract).toBe(ABSTRACT_PLAINTEXT);
+  });
+
+  it('re-affirms against the locked encrypted body after an interleaved edit', async () => {
+    const key = generateDataKey().raw.toString('base64');
+    const session = await resolvers.Mutation.startAgentSession(
+      {}, { agentId: agent.id, externalUserId: 'mm-locked-reaffirm', dataKey: key }, appCtx(secretApp.id),
+    );
+    const sessionCtx = appCtx(secretApp.id, { sessionId: session.id, roles: ['ADMIN'] });
+    const node = await resolvers.Mutation.createNode({}, {
+      input: { memoryId: session.memoryId!, loc: 'locked-reaffirm', name: 'locked-reaffirm',
+        abstract: 'Summary', content: 'Original body' },
+    }, sessionCtx);
+
+    const findUnique = db.node.findUnique.bind(db.node);
+    let changedAfterProbe = false;
+    const probe = vi.spyOn(db.node, 'findUnique').mockImplementation((async (args: Parameters<typeof findUnique>[0]) => {
+      const result = await findUnique(args);
+      if (!changedAfterProbe && 'loc_memoryId' in args.where &&
+          args.where.loc_memoryId?.loc === 'locked-reaffirm') {
+        changedAfterProbe = true;
+        const content = encryptNodeFields(
+          { content: 'Revised body' }, { id: session.memoryId!, isEncrypted: true },
+        ).content;
+        await db.node.update({ where: { id: node.id }, data: { content } });
+      }
+      return result;
+    }) as never);
+    try {
+      await writeNodeCore({ memoryId: session.memoryId!, loc: 'locked-reaffirm',
+        abstract: 'Summary' }, sessionCtx, 'update');
+    } finally {
+      probe.mockRestore();
+    }
+    expect(changedAfterProbe).toBe(true);
+    const stored = await db.node.findUniqueOrThrow({ where: { id: node.id } });
+    expect(stored.abstractOriginHash).toBe(computeContentHash('Revised body'));
+    expect(stored.content?.startsWith('enc:v1:')).toBe(true);
   });
 
   it('throws when writing to an encrypted memory without an active session', async () => {
