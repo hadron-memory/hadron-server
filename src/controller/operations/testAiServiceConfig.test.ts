@@ -629,9 +629,9 @@ describe('testAiServiceConfig override.params (#2504 evidence)', () => {
     // params.baseUrl refusal), used for the call, and never written back.
     expect(typeDefs).toMatch(/input AiServiceConfigTestOverride \{[\s\S]*?params: JSON/);
     const cfg = await mkConfig({ organizationId: org.id, params: { maxTokens: 32 } });
-    const r = await test(cfg.id, ctxFor(admin.id), { params: { maxTokens: 999 } });
+    const r = await test(cfg.id, ctxFor(admin.id), { params: { maxTokens: 64 } });
     expect(r.used).toMatchObject({ params: 'OVERRIDE' });
-    expect(captured[0].body).toMatchObject({ max_tokens: 999 });
+    expect(captured[0].body).toMatchObject({ max_tokens: 64 });
     expect((await db.aiServiceConfig.findUnique({ where: { id: cfg.id } }))?.params).toEqual({ maxTokens: 32 });
   });
 
@@ -667,5 +667,34 @@ describe('testAiServiceConfig override.params null/clear semantics (#1413)', () 
       test(cfg.id, ctxFor(admin.id), { provider: 'openai', params: { maxTokens: 1.5 } }),
     ).rejects.toMatchObject({ extensions: { code: 'UnknownAiProviderError' } });
     expect(captured).toHaveLength(1); // no second call
+  });
+});
+
+describe('testAiServiceConfig override.params review round (#1415)', () => {
+  it('a corrected override can TEST A REPAIR of stale invalid saved params, as updateAiServiceConfig accepts it', async () => {
+    // Raw-created row bypassing save validation: a legacy pair no save would
+    // accept today. The override is the edit that fixes it — the test must
+    // judge the RESULTING pair, not refuse on the saved one.
+    const cfg = await mkConfig({ organizationId: org.id, params: { maxTokens: 1.5 } });
+    const r = await test(cfg.id, ctxFor(admin.id), { params: { maxTokens: 64 } });
+    expect(r.used).toMatchObject({ params: 'OVERRIDE' });
+    expect(captured[0].body).toMatchObject({ max_tokens: 64 });
+    expect((await db.aiServiceConfig.findUnique({ where: { id: cfg.id } }))?.params).toEqual({ maxTokens: 1.5 });
+  });
+
+  it('the probe output is HARD-CAPPED regardless of the edited or saved maxTokens', async () => {
+    for (const params of [{ maxTokens: 99999 }, undefined]) {
+      captured.length = 0;
+      const cfg = await mkConfig({ organizationId: org.id, ...(params ? { params } : {}) });
+      const ovr = params ? { params: { maxTokens: 99999 } } : { params: { maxTokens: 99999 } };
+      const r = await test(cfg.id, ctxFor(admin.id), ovr);
+      expect(r.ok).toBe(true);
+      expect(captured[0].body).toMatchObject({ max_tokens: 256 });
+    }
+    // Saved-only path too: the saved value is capped on the wire the same way.
+    captured.length = 0;
+    const cfg = await mkConfig({ organizationId: org.id, params: { maxTokens: 99999 } });
+    await test(cfg.id, ctxFor(admin.id));
+    expect(captured[0].body).toMatchObject({ max_tokens: 256 });
   });
 });

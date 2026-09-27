@@ -102,6 +102,17 @@ export const AI_CONFIG_TEST_REQUEST: LlmRequest = {
   maxTokens: 16,
 };
 
+/**
+ * #1413: the probe's hard output cap, independent of the params under test —
+ * the effective maxTokens may raise the default 16 up to here, never beyond.
+ * A model that ignores the one-word instruction is bounded by this, not by
+ * the edited runtime value; the platform-funded reservation below scales to
+ * cover prompt plus this cap, so a test cannot overshoot what it reserved.
+ * Like the probe's one-word prompt, the cap is the probe's own, not part of
+ * the config being tested.
+ */
+export const AI_CONFIG_TEST_PROBE_MAX_TOKENS = 256;
+
 // ── Rate limit ───────────────────────────────────────────────────────────
 // A test is a real provider call, so the button must not be a free relay.
 // Per caller per config, in-process: the server runs as one instance today;
@@ -349,18 +360,31 @@ export async function testAiServiceConfig(
   // validated exactly as a write would validate them.
   const provider = override.provider ?? row.provider;
   const model = override.model ?? row.model;
-  // The RESULTING pair, as a save would judge it: a test that passes must be
-  // an edit that can be saved (#1385 review, Codex).
-  validateProviderAndParams(provider, row.params ?? null);
-  // #1413: an edited params override is judged by the same rule — Save's own
-  // two checks against the EFFECTIVE provider, the legacy params.baseUrl
-  // refusal first so it never reaches a provider — and then only the CALL
-  // sees it: the stored row is never written.
-  if (override.params !== undefined) {
+  // #1413: the effective params — saved, or the edit under test — validated
+  // ONCE, as a save judges the RESULTING pair (#1385 review, Codex): a
+  // corrected override must be able to test a repair of stale invalid saved
+  // params, exactly as updateAiServiceConfig would accept that edit. The
+  // override runs Save's own two checks (the legacy params.baseUrl refusal
+  // first, so it never reaches a provider) against the EFFECTIVE provider;
+  // the no-override path keeps judging the saved pair only — its own save
+  // time validated it, and legacy rows test as they run. Either way the
+  // params reach the CALL, never the stored row.
+  const params = override.params === undefined ? row.params : override.params;
+  if (override.params === undefined) {
+    validateProviderAndParams(provider, row.params ?? null);
+  } else {
     refuseLegacyBaseUrl(override.params);
     validateProviderAndParams(provider, override.params);
   }
-  const params = override.params === undefined ? row.params : override.params;
+  // #1413: the probe's output cap — the effective params' maxTokens (saved,
+  // or the edit under test) bounded by the probe's hard cap, defaulting to
+  // the probe's own 16. Used by both the call and the platform-funded
+  // reservation, so a test can never spend past what it reserved.
+  const paramsMaxTokens =
+    params && typeof params === 'object' && 'maxTokens' in params
+      ? (params as { maxTokens?: number }).maxTokens
+      : undefined;
+  const probeMaxTokens = Math.min(paramsMaxTokens ?? AI_CONFIG_TEST_REQUEST.maxTokens ?? 16, AI_CONFIG_TEST_PROBE_MAX_TOKENS);
   const endpoint =
     override.endpoint === undefined ? row.endpoint : override.endpoint ? validateEndpoint(override.endpoint) : null;
   const apiStyle = override.apiStyle === undefined ? row.apiStyle : override.apiStyle;
@@ -482,10 +506,13 @@ export async function testAiServiceConfig(
 
   // A platform-funded probe RESERVES its tokens from the org's allowance
   // before the call, atomically (#1385 review): a check followed by a later
-  // record let concurrent tests all pass and overshoot. Settled after.
+  // record let concurrent tests all pass and overshoot. Settled after. The
+  // reservation covers prompt margin plus the probe's actual output cap, so
+  // an edited maxTokens can never overshoot what was reserved (#1413).
   const quotaScope = keyOwnerType === 'HADRON_SERVER' && organizationId ? organizationId : null;
+  const reserveTokens = AI_CONFIG_TEST_TOKEN_RESERVE + (probeMaxTokens - (AI_CONFIG_TEST_REQUEST.maxTokens ?? 16));
   const reservation = quotaScope
-    ? await reserveQuota(ctx.db, 'org', quotaScope, 'llm.tokens', defaultQuotaLimit('org', 'llm.tokens'), AI_CONFIG_TEST_TOKEN_RESERVE)
+    ? await reserveQuota(ctx.db, 'org', quotaScope, 'llm.tokens', defaultQuotaLimit('org', 'llm.tokens'), reserveTokens)
     : null;
   if (quotaScope && !reservation) {
     return {
@@ -506,7 +533,7 @@ export async function testAiServiceConfig(
   // must not use up the caller's allowance either (#1385 review, Codex).
   const retryAfter = admitTest(`${ctx.userId}:${row.id}`, deps.now());
   if (retryAfter != null) {
-    if (quotaScope && reservation) await settleReservation(ctx.db, 'org', quotaScope, 'llm.tokens', -AI_CONFIG_TEST_TOKEN_RESERVE, reservation);
+    if (quotaScope && reservation) await settleReservation(ctx.db, 'org', quotaScope, 'llm.tokens', -reserveTokens, reservation);
     throw new GraphQLError(`Too many tests of this config; try again in ${retryAfter}s.`, {
       extensions: { code: 'RATE_LIMITED', retryAfterSeconds: retryAfter },
     });
@@ -516,17 +543,12 @@ export async function testAiServiceConfig(
   let out: LlmResult | null = null;
   let error: AiConfigTestResult['error'] = null;
   try {
-    // #1413: the probe's own maxTokens pin is a DEFAULT, not an override —
-    // the effective params (saved, or the edit under test) may set their own
-    // cap, and the test must send what the edit says. Cost stays bounded:
-    // max_tokens caps output, and the probe's prompt still asks for one word.
-    const paramsMaxTokens =
-      params && typeof params === 'object' && 'maxTokens' in params
-        ? (params as { maxTokens?: number }).maxTokens
-        : undefined;
+    // #1413: the probe's capped maxTokens (computed above, shared with the
+    // reservation) — the wire carries min(edit, hard cap); validation
+    // exercised the edit's real value.
     out = await deps.generate(resolved, {
       ...AI_CONFIG_TEST_REQUEST,
-      ...(paramsMaxTokens != null ? { maxTokens: paramsMaxTokens } : {}),
+      maxTokens: probeMaxTokens,
       timeoutMs: deps.timeoutMs,
     });
   } catch (e) {
@@ -564,7 +586,7 @@ export async function testAiServiceConfig(
   if (quotaScope && reservation) {
     // Settled in the reservation's own window only: a rollover mid-probe
     // neither refunds into nor charges excess to the new day (#1385 review).
-    await settleReservation(ctx.db, 'org', quotaScope, 'llm.tokens', tokensIn + tokensOut - AI_CONFIG_TEST_TOKEN_RESERVE, reservation);
+    await settleReservation(ctx.db, 'org', quotaScope, 'llm.tokens', tokensIn + tokensOut - reserveTokens, reservation);
   }
 
   return {
