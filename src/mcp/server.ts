@@ -3,6 +3,8 @@ import { createHmac, randomUUID } from 'crypto';
 import { assertLocWritable, LocProtectedError } from '../lib/protectedLoc.js';
 import {
   assertGovernedWrite,
+  assertRoleDeclaredForWrite,
+  RoleNotDeclaredError,
   governedKindsOf,
   roleIsOrDescendsFrom,
   type GovernedKind,
@@ -5018,6 +5020,19 @@ export function createMcpServerInstance(
           if (authoritative && !authoritative.deletedAt) throw LIVE_LOC_CONFLICT;
 
           const pre = await snapshotOverwrittenNode(tx);
+
+          // #1330 — H1 strict sub-roles, as writeNodeCore judges them (this
+          // handler is its parity implementation, so the gate is repeated here).
+          // Judged on `pre`, the tombstone as LOCKED by the snapshot, not on the
+          // unlocked `authoritative` read: a writer that takes no loc lock (git
+          // sync) could change the tombstone's role in between, and a stale
+          // prior role would make an undeclared one read as unchanged (#1400
+          // review). A refusal rolls the snapshot back with everything else.
+          await assertRoleDeclaredForWrite(tx, memoryId, {
+            role: role === undefined ? (pre?.role ?? null) : role,
+            priorRole: pre?.role ?? null,
+            runnableAfter: mergedGovernedState(pre, { role, isRunnable }).isRunnable,
+          });
           const written = await tx.node.upsert({
             ...upsertArgs,
             // Resurrect (#543) on the authoritative row, not the stale probe: a
@@ -5044,6 +5059,7 @@ export function createMcpServerInstance(
         if (e === LIVE_LOC_CONFLICT) {
           return textResult(`Node already exists at "${rawUrn}" — use hadron_update_node.`);
         }
+        if (e instanceof RoleNotDeclaredError) return textResult(`[role_not_declared] ${e.message}`);
         if (e instanceof InlineEdgeEndpointError) return textResult(e.message);
         throw e;
       }
@@ -5414,6 +5430,12 @@ export function createMcpServerInstance(
                 { extensions: { code: 'NODE_WRITE_CONFLICT', loc, memoryId: memory.id } },
               );
             }
+            // #1330 — H1 strict sub-roles on the locked row, as writeNodeCore.
+            await assertRoleDeclaredForWrite(tx, memory.id, {
+              role: role === undefined ? current.role : role,
+              priorRole: current.role,
+              runnableAfter: mergedGovernedState(current, { role, isRunnable }).isRunnable,
+            });
             // A guard-only call is a useful no-op check and must not manufacture
             // a history row or advance the live revision.
             if (Object.keys(data).length === 0 && resolvedEdges === null) return;
@@ -5459,6 +5481,7 @@ export function createMcpServerInstance(
           if (e instanceof LocProtectedError) return textResult(`[loc_protected] ${e.message}`);
           if (e instanceof NodeMovedDuringWriteError) return textResult(e.message);
           if (e instanceof InlineEdgeEndpointError) return textResult(e.message);
+          if (e instanceof RoleNotDeclaredError) return textResult(`[role_not_declared] ${e.message}`);
           if (e instanceof ScopeGraphQLError && e.extensions?.code === 'NODE_WRITE_CONFLICT') {
             return textResult(`[node_write_conflict] ${e.message}`);
           }

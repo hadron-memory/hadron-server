@@ -31,6 +31,7 @@ import { Prisma, type MemoryConfigTemplateRule, type NodeRoleRule } from '../../
 import { type Context, withoutRequestCaches } from './resolvers.helpers.js';
 import { MemoryNotFoundError } from '../../../lib/entityRef/errors.js';
 import { generateId } from '../../../lib/id.js';
+import { lockMemoryConfigExclusive } from '../../../lib/governedRole.js';
 import {
   conflict,
   hasLockAuthority,
@@ -173,6 +174,14 @@ export async function applyMemoryConfigTemplate(
         else plan.push({ rule, outcome: 'REPLACED', current });
       }
       const writes = !dryRun && plan.some((p) => p.outcome === 'APPLIED' || p.outcome === 'REPLACED');
+      // The rulebook lock (#1400), exclusively, BEFORE the config row, the
+      // gate re-checks and any insert (#1399 review). Every rule writer takes
+      // it before inserting a rule (createNodeRoleRule, via materializeConfig),
+      // so an APPLIED insert can no longer wait on, or deadlock with, a
+      // concurrent create of the same role: it is refused as CONFLICT
+      // instead. Taken after the rule row locks, as every rule writer
+      // takes it, so the order is the same everywhere.
+      if (writes) await lockMemoryConfigExclusive(tx, memory.id);
       const configId = writes ? (found?.id ?? (await materializeConfig(tx, memory.id, actor))) : null;
       // The config row, locked now so that `touchConfig` below cannot wait:
       // every lock that can block is taken before the gates are re-asked.

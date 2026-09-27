@@ -12,6 +12,7 @@ import { typeDefs } from './typeDefs.js';
 import { resolvers, type Context } from './resolvers.js';
 import { formatGraphQLError } from '../formatError.js';
 import { waitForLockWaiters } from '../../../test/lockWait.js';
+import { lockMemoryConfigExclusive } from '../../../lib/governedRole.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
@@ -272,5 +273,38 @@ describe('apply under concurrency (#1399 review)', () => {
     await h.release();
     expect(code(await pending)).toBe('MEMORY_NOT_FOUND');
     expect((await rulesOf(mem.id)).map((x) => x.role)).toEqual(['notes']);
+  });
+
+  it('a rulebook writer in flight is waited for BEFORE the gates are re-asked: a demotion meanwhile refuses the apply (#1399 review)', async () => {
+    await gql(as(orgAdmin), CREATE_RULE, { m: mem.id, i: { role: 'notes' } });
+    const t = await tpl(as(orgAdmin), 'ORGANIZATION', org.id, { name: 'base', rules: [{ role: 'spec' }] });
+    // A createNodeRoleRule in flight holds the rulebook lock (taken before its insert).
+    const h = holder(async (tx) => {
+      await lockMemoryConfigExclusive(tx, mem.id);
+    });
+    await h.holding;
+    const pending = apply(as(orgAdmin), t.id, mem.id);
+    await waitForLockWaiters(db); // queued on the rulebook lock
+    await db.orgMember.updateMany({ where: { organizationId: org.id, userId: orgAdmin }, data: { role: 'CONTRIBUTOR' } });
+    await h.release();
+    expect(code(await pending)).toBe('MEMORY_NOT_FOUND');
+    expect((await rulesOf(mem.id)).map((x) => x.role)).toEqual(['notes']);
+  });
+
+  it('racing a create of the same absent role is a clean CONFLICT, never a deadlock (#1399 review)', async () => {
+    await gql(as(orgAdmin), CREATE_RULE, { m: mem.id, i: { role: 'notes' } });
+    const config = await db.memoryConfig.findUniqueOrThrow({ where: { memoryId: mem.id } });
+    const t = await tpl(as(orgAdmin), 'ORGANIZATION', org.id, { name: 'base', rules: [{ role: 'aaa' }, { role: 'spec' }] });
+    // createNodeRoleRule's order: the rulebook lock, then the insert.
+    const h = holder(async (tx) => {
+      await lockMemoryConfigExclusive(tx, mem.id);
+      await tx.nodeRoleRule.create({ data: { id: generateId(), configId: config.id, role: 'spec' } });
+    });
+    await h.holding;
+    const pending = apply(as(orgAdmin), t.id, mem.id);
+    await waitForLockWaiters(db);
+    await h.release();
+    expect(code(await pending)).toBe('CONFLICT');
+    expect((await rulesOf(mem.id)).map((x) => x.role)).toEqual(['notes', 'spec']);
   });
 });

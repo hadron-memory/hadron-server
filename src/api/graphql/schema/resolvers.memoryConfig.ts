@@ -66,7 +66,7 @@ import {
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { resolveNodeRef } from '../../../lib/entityRef/nodeRef.js';
 import { EntityNotFoundError, MemoryNotFoundError, NodeNotFoundError } from '../../../lib/entityRef/errors.js';
-import { assertValidRuleRole } from '../../../lib/governedRole.js';
+import { assertValidRuleRole, lockMemoryConfigExclusive } from '../../../lib/governedRole.js';
 import { nodeUrnRoundTrips, safeNodeUrnV2 } from '../../../lib/urnEmit.js';
 import { generateId } from '../../../lib/id.js';
 
@@ -346,6 +346,10 @@ export async function lockRule(tx: Prisma.TransactionClient, id: string): Promis
  * (#1360 review). `updatedAt` is Prisma's `@updatedAt`.
  */
 export async function touchConfig(tx: Prisma.TransactionClient, configId: string, actor: string): Promise<void> {
+  // #1400: every rule change holds the memory's config lock exclusively, so
+  // node writes judging a role against this rulebook serialize with it.
+  const { memoryId } = await tx.memoryConfig.findUniqueOrThrow({ where: { id: configId }, select: { memoryId: true } });
+  await lockMemoryConfigExclusive(tx, memoryId);
   await tx.memoryConfig.update({ where: { id: configId }, data: { updatedBy: actor } });
 }
 
@@ -366,6 +370,9 @@ export function assertValidateByHasTask(state: { validateBy: Validator | null; v
 
 /** Create the config row if absent — race-safe, never a second row, never an aborted transaction. */
 export async function materializeConfig(tx: Prisma.TransactionClient, memoryId: string, actor: string): Promise<string> {
+  // #1400: taken BEFORE the row can exist, so a node write that found no
+  // config either commits first or sees this memory's first rules.
+  await lockMemoryConfigExclusive(tx, memoryId);
   await tx.$executeRaw`
     INSERT INTO "memory_configs" ("id", "memory_id", "created_by", "updated_by")
     VALUES (${generateId()}, ${memoryId}, ${actor}, ${actor})

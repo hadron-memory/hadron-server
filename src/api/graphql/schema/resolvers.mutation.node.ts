@@ -12,6 +12,7 @@ import {
 import { lockMemoryForChannelChange } from '../../../lib/channels.js';
 import {
   assertGovernedWrite,
+  assertRoleDeclaredForWrite,
   mergedGovernedState,
   governedKindsOf,
   GOVERNED_KINDS,
@@ -255,6 +256,13 @@ export async function writeNodeCore(
      * redesign unrelated write surfaces while #1220 remains separately scoped.
      */
     concealUnreadable?: { entity: 'memory' | 'node'; ref: string };
+    /**
+     * #1330 — a node the SERVER writes on its own account, exempt from the
+     * strict-sub-role refusal (`assertRoleDeclaredForWrite`). Only server code
+     * can pass it, never a client, which is what makes the exemption
+     * trustworthy. No caller needs it yet: no platform writer sets a role.
+     */
+    platformWrite?: boolean;
   },
 ) {
       // Keep the historical `input` name so the body below stays a
@@ -1022,6 +1030,19 @@ export async function writeNodeCore(
               if (!current) return { conflict: false, node: null };
             }
 
+            // #1330 — H1 strict sub-roles, judged on the locked row: a role the
+            // write assigns must be declared under a strict parent.
+            await assertRoleDeclaredForWrite(
+              tx,
+              input.memoryId,
+              {
+                role: input.role === undefined ? current.role : input.role,
+                priorRole: current.role,
+                runnableAfter: mergedGovernedState(current, { role: input.role, isRunnable: input.isRunnable }).isRunnable,
+              },
+              { platformWrite: opts?.platformWrite },
+            );
+
             const changes = diffNodeChanges(current, suppliedForDiff);
             const changesUnversionedField =
               input.ownerRepo !== undefined && input.ownerRepo !== current.ownerRepo;
@@ -1252,6 +1273,19 @@ export async function writeNodeCore(
                 }),
               });
             }
+
+            // #1330 — H1 strict sub-roles, against the AUTHORITATIVE row: a
+            // resurrection keeps the tombstone's role unless the write names one.
+            await assertRoleDeclaredForWrite(
+              tx,
+              input.memoryId,
+              {
+                role: input.role === undefined ? (authoritative?.role ?? null) : input.role,
+                priorRole: authoritative?.role ?? null,
+                runnableAfter: mergedGovernedState(authoritative, { role: input.role, isRunnable: input.isRunnable }).isRunnable,
+              },
+              { platformWrite: opts?.platformWrite },
+            );
 
             // #1183 — resurrect from the AUTHORITATIVE row, not the stale
             // probe. `updateExtras` above was built from `existing`, which may
