@@ -34,9 +34,11 @@
  * Throws `NodeNotFoundError` for any unresolvable ref. Throws
  * `UrnNotQualifiedError` when a non-ID, non-context-relative input
  * lacks the org+memory+loc shape. Soft-deleted nodes are treated as
- * not-existing — including a node reached through a soft-deleted memory
- * prefix. Pass `{ includeDeleted: true }` to ignore soft-delete state along
- * the whole resolution path (the target node AND the memory that locates it),
+ * not-existing — including a node still inside a soft-deleted memory. A
+ * deleted historical memory may translate an old prefix to a NODE alias
+ * whose target is live in another memory; only the target's liveness matters
+ * there. Pass `{ includeDeleted: true }` to ignore soft-delete state along
+ * the direct resolution path (the target node AND the memory that locates it),
  * matching `memoryRef`'s opt-in (e.g. a `deleteNode` re-delete for idempotency).
  *
  * Why this lives next to `memoryRef.ts` and friends: spec 007's
@@ -80,17 +82,16 @@ async function findMovedNodes(
   return [...live.values()];
 }
 
-/** Find every live historical holder of one memory prefix before checking nodes. */
+/** Find historical prefix holders, including deleted ones that may translate a moved NODE alias. */
 async function findHistoricalMemories(
   db: Pick<PrismaClient, 'memory' | 'urnAlias'>,
   urns: readonly string[],
-  includeDeleted = false,
-): Promise<Array<{ id: string; urn: string }>> {
+): Promise<Array<{ id: string; urn: string; deletedAt: Date | null }>> {
   for (const urn of urns) {
     const rows = await findLiveUrnAliasTargets(db, 'MEMORY', urn, (ids) =>
       db.memory.findMany({
-        where: { id: { in: ids }, ...(includeDeleted ? {} : { deletedAt: null }) },
-        select: { id: true, urn: true },
+        where: { id: { in: ids } },
+        select: { id: true, urn: true, deletedAt: true },
       }),
       { all: true },
     );
@@ -242,10 +243,13 @@ export async function resolveNodeRef(
     // move stored the NODE alias under that memory's CURRENT URN, while a
     // newly re-used old memory may have no node at the requested loc. The
     // old prefix itself conveys no authority; callers gate the resolved node.
-    const historicalMemories = await findHistoricalMemories(
-      db, memoryUrnCandidates, options?.includeDeleted,
-    );
-    const historicalIds = historicalMemories.map((m) => m.id).filter((id) => id !== memory?.id);
+    const historicalMemories = await findHistoricalMemories(db, memoryUrnCandidates);
+    // A deleted Memory can translate its old prefix to a NODE alias whose
+    // current target lives elsewhere; it cannot make a node still inside that
+    // deleted Memory reachable by loc.
+    const historicalIds = historicalMemories
+      .filter((m) => (options?.includeDeleted || !m.deletedAt) && m.id !== memory?.id)
+      .map((m) => m.id);
     const historicalNodes = historicalIds.length
       ? await db.node.findMany({
           where: {
