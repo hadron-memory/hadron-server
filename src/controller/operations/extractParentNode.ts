@@ -269,6 +269,7 @@ export async function extractParentNodeGraph(
         id: idMap.get(n.id)!,
         memoryId,
         nodeType: n.nodeType,
+        objectType: n.objectType,
         name: n.name,
         alias: n.alias,
         loc: newLocById.get(n.id)!,

@@ -457,6 +457,35 @@ describe('cloneNode (#564)', () => {
     expect(clone.id).not.toBe(alpha.id);
   });
 
+  it('copies the authored fields that are part of the task stamp', async () => {
+    const task = await createDbNode(db, { loc: 'copy-task', memoryId: memA.id });
+    const source = await db.node.create({
+      data: {
+        id: generateId(), memoryId: memA.id, loc: 'copy-fields', name: 'Fields',
+        alias: 'shortcut', isLink: true, llmModel: 'model-x', aiAgent: 'agent-x',
+        authorshipKind: 'TASK', authoredByTask: task.id, authoredByRevision: 1,
+        authoredAt: new Date('2026-09-26T20:00:00Z'),
+      },
+    });
+    const clone = await M.cloneNode(null, { sourceRef: source.id, targetUrn: urnA('copy-fields-new') }, asUser());
+    expect(clone).toMatchObject({
+      alias: 'shortcut', isLink: true, llmModel: 'model-x', aiAgent: 'agent-x',
+      authorshipKind: 'TASK', authoredByTask: task.id,
+    });
+  });
+
+  it('clears attribution when the generic clone omits a governed role', async () => {
+    const source = await db.node.create({
+      data: {
+        id: generateId(), memoryId: memA.id, loc: 'copy-role', name: 'Role', role: 'task',
+        authorshipKind: 'TASK', authoredByTask: generateId(), authoredByRevision: 1,
+        authoredAt: new Date('2026-09-26T20:00:00Z'),
+      },
+    });
+    const clone = await M.cloneNode(null, { sourceRef: source.id, targetUrn: urnA('copy-role-new') }, asUser());
+    expect(clone).toMatchObject({ role: null, authorshipKind: null, authoredByTask: null });
+  });
+
   it('clones fields to a NEW node (fresh id), leaving the source intact', async () => {
     const alpha = await createDbNode(db, { loc: 'alpha', memoryId: memA.id, content: 'hello' });
     const clone = await M.cloneNode(null, { sourceRef: alpha.id, targetUrn: urnA('alpha-copy') }, asUser());

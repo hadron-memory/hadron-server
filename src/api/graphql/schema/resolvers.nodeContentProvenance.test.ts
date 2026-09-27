@@ -188,6 +188,34 @@ describe('#1326 content provenance reads', () => {
     }
   });
 
+  it('batches task authors across sibling Node.authorship fields', async () => {
+    const secondTask = await db.node.create({
+      data: { id: generateId(), memoryId: taskMemoryId, loc: 'second-task', name: 'Second task', nodeType: 'task' },
+    });
+    const second = await db.node.create({
+      data: {
+        id: generateId(), memoryId: nodeMemoryId, loc: 'second-authored', name: 'Second authored',
+        authorshipKind: 'TASK', authoredByTask: secondTask.id, authoredByRevision: 1, authoredAt: at,
+      },
+    });
+    const parents = [await db.node.findUniqueOrThrow({ where: { id: nodeId } }), second];
+    const context = { db, userId: readerId, roles: ['ADMIN'] } as Context;
+    const taskLoads = vi.spyOn(db.node, 'findMany');
+    try {
+      const authors = await Promise.all(parents.map((parent) => typeResolvers.Node.authorship(parent, null, context)));
+      expect(authors.map((author) => author?.taskRef)).toEqual([
+        'hrn:node:provenance-other:mem:author-task',
+        'hrn:node:provenance-other:mem:second-task',
+      ]);
+      expect(taskLoads.mock.calls.filter(([args]) =>
+        typeof args?.where?.id === 'object' && 'in' in args.where.id && args.where.deletedAt === null &&
+        args.select?.loc === true && args.select?.memoryId === true,
+      )).toHaveLength(1);
+    } finally {
+      taskLoads.mockRestore();
+    }
+  });
+
   it('offers no public GraphQL setter for system-owned attribution or validation', () => {
     const schema = buildSchema(typeDefs);
     for (const name of ['NodeInput', 'CreateNodeInput', 'UpdateNodeInput']) {

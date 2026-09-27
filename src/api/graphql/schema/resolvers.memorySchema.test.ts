@@ -104,12 +104,12 @@ describe('Memory.schema — carried through a memory clone', () => {
       authoredByRevision: 1,
       authoredAt: new Date('2026-09-26T20:00:00Z'),
     };
-    const make = (loc: string, content: string) => db.node.create({
-      data: { id: generateId(), memoryId: memId, loc, name: loc, content, ...stamp },
+    const make = (loc: string, content: string, objectType?: string) => db.node.create({
+      data: { id: generateId(), memoryId: memId, loc, name: loc, content, objectType, ...stamp },
     });
     const rewritten = await make('rewritten', 'See ms-org:intel:guide');
     const drifted = await make('drifted', 'old body');
-    await make('unchanged', 'stable body');
+    await make('unchanged', 'stable body', 'competitor');
     await db.node.update({ where: { id: drifted.id }, data: { content: 'raw edited body' } });
     const orgId = (await db.memory.findUniqueOrThrow({ where: { id: memId } })).organizationId!;
     const { memoryId: cloneId } = await cloneMemoryGraph(db, {
@@ -120,7 +120,7 @@ describe('Memory.schema — carried through a memory clone', () => {
     const byLoc = new Map(copies.map((n) => [n.loc, n]));
     expect(byLoc.get('rewritten')).toMatchObject({ content: 'See ms-org:intel-copy:guide', authorshipKind: null });
     expect(byLoc.get('drifted')).toMatchObject({ content: 'raw edited body', authorshipKind: null });
-    expect(byLoc.get('unchanged')).toMatchObject({ content: 'stable body', ...stamp });
+    expect(byLoc.get('unchanged')).toMatchObject({ content: 'stable body', objectType: 'competitor', ...stamp });
     expect(await db.node.findUniqueOrThrow({ where: { id: rewritten.id } })).toMatchObject(stamp);
     expect(await db.node.findUniqueOrThrow({ where: { id: drifted.id } })).toMatchObject({ authorshipKind: null, revSeq: 2 });
   });

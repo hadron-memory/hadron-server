@@ -3173,14 +3173,18 @@ export const nodeMutations = {
         loc: destLoc,
         name: srcPlain.name,
         nodeType: srcPlain.nodeType,
+        isLink: srcPlain.isLink,
         objectType: srcPlain.objectType ?? undefined, // #725 — carry the collection through a clone
         isRunnable: srcPlain.isRunnable,
+        alias: srcPlain.alias ?? undefined,
         description: srcPlain.description ?? undefined,
         abstract: srcPlain.abstract ?? undefined,
         content: srcPlain.content ?? undefined,
         data: (srcPlain.data as Record<string, unknown> | null) ?? undefined,
         tags: deserializeTags(srcPlain.tags),
         properties: (srcPlain.properties as Record<string, unknown> | null) ?? undefined,
+        llmModel: srcPlain.llmModel ?? undefined,
+        aiAgent: srcPlain.aiAgent ?? undefined,
         seq: srcPlain.seq ?? undefined,
         edges,
       };
@@ -3188,7 +3192,15 @@ export const nodeMutations = {
       // caller (a read of the SOURCE memory, which may differ from the
       // destination's) and writeNodeCore records the write of the new node.
       recordNodeRead(ctx.db, toUsageNodeRef(source), ctx);
-      return writeNodeCore(input, ctx, 'create', { copiedAuthorship: carryNodeAuthorship(source) });
+      // The generic clone currently does not copy role (the governed clone
+      // contract is handled separately in #1324). A stale abstract is also
+      // re-fingerprinted by writeNodeCore. Either change makes the copied
+      // authored state different, so it cannot inherit the source claim.
+      const copiedAuthorship = srcPlain.role == null && (
+        srcPlain.abstract == null ||
+        srcPlain.abstractOriginHash === computeContentHash(srcPlain.content)
+      ) ? carryNodeAuthorship(source) : clearNodeAuthorship();
+      return writeNodeCore(input, ctx, 'create', { copiedAuthorship });
     },
 
     // Fold a source node into a target node, returning the updated target.
