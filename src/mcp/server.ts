@@ -1519,28 +1519,33 @@ export function createMcpServerInstance(
    *   line-parsed output (`server_info`, the ORG_REQUIRED/org_not_found
    *   refusals) — control characters collapse to a space so one org can never
    *   forge an extra line (e.g. a second `server:` row).
-   * - Memberships and names are unbounded, so the block is capped: at most
-   *   MEMBER_ORG_LINES lines (name-ascending, deterministic), each name at
-   *   ORG_NAME_RENDER_MAX chars, with an explicit omitted count.
+   * - Memberships and names are unbounded, so the block AND its query are
+   *   capped: findMany takes MEMBER_ORG_LINES rows (name-ascending,
+   *   deterministic) with a sibling count() for the exact omitted figure,
+   *   each name at ORG_NAME_RENDER_MAX chars — a connection-time diagnostic
+   *   must not scale its database transfer with the membership count.
    */
   const MEMBER_ORG_LINES = 10;
   const ORG_NAME_RENDER_MAX = 100;
   const renderMemberOrgs = async (orgIds: string[]): Promise<string> => {
     if (orgIds.length === 0) return '  (no organization memberships)';
-    const orgs = await db.organization.findMany({
-      where: { id: { in: orgIds }, deletedAt: null },
-      select: { urn: true, name: true },
-      orderBy: { name: 'asc' },
-    });
+    const where = { id: { in: orgIds }, deletedAt: null };
+    const [orgs, total] = await Promise.all([
+      db.organization.findMany({
+        where,
+        select: { urn: true, name: true },
+        orderBy: { name: 'asc' },
+        take: MEMBER_ORG_LINES,
+      }),
+      db.organization.count({ where }),
+    ]);
     const oneLine = (name: string) => {
       const flat = name.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, ' ');
       return flat.length > ORG_NAME_RENDER_MAX ? `${flat.slice(0, ORG_NAME_RENDER_MAX - 1)}…` : flat;
     };
-    const lines = orgs
-      .slice(0, MEMBER_ORG_LINES)
-      .map((o) => `  - ${safeEmitEntityUrnV2('org', o.urn)} (${oneLine(o.name)})`);
-    if (orgs.length > MEMBER_ORG_LINES) {
-      lines.push(`  … and ${orgs.length - MEMBER_ORG_LINES} more not shown`);
+    const lines = orgs.map((o) => `  - ${safeEmitEntityUrnV2('org', o.urn)} (${oneLine(o.name)})`);
+    if (total > orgs.length) {
+      lines.push(`  … and ${total - orgs.length} more not shown`);
     }
     return lines.join('\n');
   };
