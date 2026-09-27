@@ -7225,6 +7225,7 @@ export const typeDefs = `#graphql
     refusal rather than an unknown-field error.
     """
     replaceSubtree(ownerRepo: String!, memoryId: String!, nodes: [NodeInput!]!, edges: [EdgeInput!]!): Int!
+      @deprecated(reason: "Retired (#454): every authorized call refuses with REPLACE_SUBTREE_RETIRED and writes nothing. Use the canonical node write mutations.")
 
     # Edge CRUD — a GROUP note covering create/update/delete, which is why it
     # is allow-listed rather than published on createEdge alone (#1232).

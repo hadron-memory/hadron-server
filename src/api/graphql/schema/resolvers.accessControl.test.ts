@@ -8,6 +8,8 @@ import {
   createDbAppAgent,
 } from '../../../test/helpers.js';
 import { resolvers, type Context } from './resolvers.js';
+import { buildSchema } from 'graphql';
+import { typeDefs } from './typeDefs.js';
 
 // Prevent git writes
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
@@ -398,6 +400,15 @@ describe('Mutation.moveNode access control (#564 sourceRef/targetUrn)', () => {
 // ---------------------------------------------------------------------------
 
 describe('Mutation.replaceSubtree retirement (#454)', () => {
+  it('advertises the retirement to introspection and codegen via @deprecated', () => {
+    // The field is kept so old clients get a typed refusal rather than an
+    // unknown-field error; @deprecated is what tells codegen and GraphQL
+    // tooling not to build new callers against it.
+    const field = buildSchema(typeDefs).getMutationType()!.getFields().replaceSubtree;
+    expect(field).toBeDefined();
+    expect(field.deprecationReason).toContain('REPLACE_SUBTREE_RETIRED');
+  });
+
   it('refuses authorized ID and URN calls before any node, edge, or history change', async () => {
     const ownerRepo = 'org-a/repo';
     const ordinary = await createDbNode(db, {
