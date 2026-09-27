@@ -72,7 +72,8 @@ const SERIALIZATION_RETRIES = 3;
  *    tokens; their ConnectionGrants cascade), grantor-side ConnectionGrants,
  *    PrincipalGrants, MemoryShares (granted and received), MemoryMembers,
  *    AppMembers, AgentSubscriptions, DashboardWidgets, DashboardWidgetPresets,
- *    PendingSetup, and user-scoped Secrets are deleted.
+ *    user-owned MemoryConfigTemplates (with their rules), PendingSetup, and
+ *    user-scoped Secrets are deleted.
  * 4. **Scrubs + soft-deletes the User row:** identity/PII fields nulled, the
  *    handle replaced with a fresh non-identifying `deleted-<12 hex>` value (so
  *    the old handle frees up under the case-insensitive unique index), the
@@ -312,6 +313,10 @@ async function runDeletionTxn(
       await tx.agentSubscription.deleteMany({ where: { userId: targetUserId } });
       await tx.dashboardWidget.deleteMany({ where: { userId: targetUserId } });
       await tx.dashboardWidgetPreset.deleteMany({ where: { userId: targetUserId } });
+      // #1325 part (c): the user's own config templates (their rules cascade).
+      // The FK is ON DELETE CASCADE, but the User row is only SOFT-deleted, so
+      // it never fires; App-owned templates already go with the App above.
+      await tx.memoryConfigTemplate.deleteMany({ where: { ownerUserId: targetUserId } });
       await tx.pendingSetup.deleteMany({ where: { userId: targetUserId } });
       await deleteSecretsForOwner(tx, 'user', targetUserId);
 

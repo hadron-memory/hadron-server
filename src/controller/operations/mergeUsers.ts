@@ -62,6 +62,104 @@ const AUDIT_USER_COLUMNS: Readonly<Record<string, readonly string[]>> = {
   memory_config_templates: ['created_by', 'updated_by', 'deleted_by'],
 };
 
+/**
+ * A merge that lost a race with a concurrent write and must be re-run from a
+ * fresh snapshot. The one raised here: a USER template renamed after the merge
+ * planned its collision renames, so a planned name is now taken (#1369 review,
+ * Codex P2). Template update/delete do not take the owner-row lock the merge
+ * holds, so the plan can go stale; re-planning is the fix, not a stronger lock.
+ */
+class MergeRaceError extends Error {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = 'MergeRaceError';
+  }
+}
+
+/**
+ * How many times the SERIALIZABLE merge is re-run after a serialization abort
+ * (P2034) or a {@link MergeRaceError}. The body touches only the database, so
+ * a bounded re-run is safe (conventions:count-then-act-serializable-txn, as in
+ * deleteUserAccount).
+ */
+const MERGE_RETRIES = 3;
+
+/** A unique violation from a raw statement (Prisma wraps it as P2010 / SQLSTATE 23505). */
+function isUniqueViolation(e: unknown): boolean {
+  if (!(e instanceof Prisma.PrismaClientKnownRequestError)) return false;
+  if (e.code === 'P2002') return true;
+  return e.code === 'P2010' && ((e.meta as { code?: string } | undefined)?.code === '23505' || /23505/.test(e.message));
+}
+
+/** The template-name grammar's length cap (`validateAiConfigName`). */
+const TEMPLATE_NAME_MAX = 64;
+
+/**
+ * A deterministic, grammar-valid template name not in `taken`: `<name>-merged`,
+ * then `<name>-merged-2`, `-3`, … The base is trimmed so the result stays
+ * within the name grammar's 64 characters; a trimmed base keeps only grammar
+ * characters, so the result is always a valid name (#1325 part c, Holger's
+ * collision ruling 2026-09-26).
+ */
+export function collisionFreeTemplateName(name: string, taken: ReadonlySet<string>): string {
+  for (let n = 1; ; n++) {
+    const suffix = n === 1 ? '-merged' : `-merged-${n}`;
+    const candidate = name.slice(0, TEMPLATE_NAME_MAX - suffix.length) + suffix;
+    if (!taken.has(candidate)) return candidate;
+  }
+}
+
+/**
+ * Move the source's USER-owned config templates to the target (#1325 part c).
+ * Audit-stamp reassignment alone would leave them owned by a tombstone.
+ *
+ * Holger's collision ruling (2026-09-26): preserve both. The target's template
+ * keeps its name; an incoming LIVE template whose name the target already uses
+ * is renamed deterministically (`collisionFreeTemplateName`). Ids, rules and
+ * copied-config provenance are untouched. Uniqueness covers live rows only, so
+ * soft-deleted templates move as they are. Org/App/Server-owned templates are
+ * never re-owned here — only `owner_user_id` rows move.
+ *
+ * Race-free under the merge transaction: both user rows are held FOR UPDATE,
+ * and a template create takes its owner's row FOR SHARE first
+ * (`lockLiveOwner`), so neither account can gain a template mid-merge.
+ */
+async function mergeUserOwnedTemplates(
+  tx: Prisma.TransactionClient,
+  sourceUserId: string,
+  targetUserId: string,
+): Promise<void> {
+  const [incoming, existing] = await Promise.all([
+    tx.memoryConfigTemplate.findMany({
+      where: { ownerUserId: sourceUserId, deletedAt: null },
+      select: { id: true, name: true },
+      orderBy: [{ name: 'asc' }, { id: 'asc' }],
+    }),
+    tx.memoryConfigTemplate.findMany({ where: { ownerUserId: targetUserId, deletedAt: null }, select: { name: true } }),
+  ]);
+  const targetNames = new Set(existing.map((t) => t.name));
+  // Every live name on EITHER side is taken, so a rename can never land on a
+  // source template's own name that moves later in this loop.
+  const taken = new Set([...targetNames, ...incoming.map((t) => t.name)]);
+  for (const t of incoming) {
+    const name = targetNames.has(t.name) ? collisionFreeTemplateName(t.name, taken) : t.name;
+    taken.add(name);
+    try {
+      await tx.$executeRaw`UPDATE memory_config_templates
+        SET owner_user_id = ${targetUserId}, name = ${name}, revision = revision + 1, updated_at = now()
+        WHERE id = ${t.id}`;
+    } catch (e) {
+      // The plan was built from this transaction's snapshot; a unique hit
+      // means a concurrent write took a planned name. Re-plan, don't fail.
+      if (isUniqueViolation(e)) throw new MergeRaceError(`template name '${name}' was taken concurrently`, { cause: e });
+      throw e;
+    }
+  }
+  await tx.$executeRaw`UPDATE memory_config_templates
+    SET owner_user_id = ${targetUserId}, revision = revision + 1, updated_at = now()
+    WHERE owner_user_id = ${sourceUserId} AND deleted_at IS NOT NULL`;
+}
+
 export interface MergeUsersArgs {
   sourceUserId: string;
   targetUserId: string;
@@ -99,6 +197,23 @@ export async function mergeUsers(
   if (sourceUserId === targetUserId) {
     throw new Error('mergeUsers: source and target must be different users');
   }
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await runMergeTxn(db, { sourceUserId, targetUserId, actorUserId, mergeGlobalRoles });
+    } catch (e) {
+      const retryable =
+        e instanceof MergeRaceError ||
+        (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2034');
+      if (!retryable || attempt > MERGE_RETRIES) throw e;
+    }
+  }
+}
+
+/** The single SERIALIZABLE merge transaction {@link mergeUsers} retries. */
+async function runMergeTxn(
+  db: PrismaClient,
+  { sourceUserId, targetUserId, actorUserId, mergeGlobalRoles = false }: MergeUsersArgs,
+): Promise<User> {
   return db.$transaction(async (tx) => {
     // Serialize two merges involving either account. Ref resolution happens
     // in the GraphQL layer, but the rows are rechecked after the lock so a
@@ -179,6 +294,8 @@ export async function mergeUsers(
       targetHandle: target.handle ?? source.handle,
       sourceHandle: source.handle,
     });
+
+    await mergeUserOwnedTemplates(tx, sourceUserId, targetUserId);
 
     // Fixed-identifier statements use parameterized tagged `$executeRaw`
     // (review:raw-sql-mutations): the two user ids interpolate as BOUND params,
