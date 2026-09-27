@@ -45,7 +45,7 @@
  */
 
 import type { PrismaClient } from '../../generated/prisma/index.js';
-import { isAgentInstalledAndLicensed } from '../appAgent.js';
+import { isAgentInstalledAndLicensed, isGrantedAgentMemoryRole } from '../appAgent.js';
 import { isActiveAgentSubscription } from '../agentSubscription.js';
 
 /**
@@ -65,9 +65,12 @@ export async function sessionScopedMemoryIds(
 ): Promise<string[]> {
   const app = await db.app.findUnique({
     where: { id: appId },
-    select: { deletedAt: true, uninstalledAt: true },
+    select: {
+      deletedAt: true, uninstalledAt: true,
+      organization: { select: { deletedAt: true } },
+    },
   });
-  if (!app || app.deletedAt || app.uninstalledAt) return [];
+  if (!app || app.deletedAt || app.uninstalledAt || app.organization?.deletedAt) return [];
   const session = await db.session.findUnique({
     where: { id: sessionId },
     select: {
@@ -110,14 +113,13 @@ export async function sessionScopedMemoryIds(
     const tiedToApp = mem.appId === appId;
     const isAgentsOwnMemory =
       session.agentId !== null && mem.userMemoryOfAgentId === session.agentId;
-    const isAgentLinked =
-      !tiedToApp &&
-      !isAgentsOwnMemory &&
-      session.agentId !== null &&
-      (await db.agentMemoryItem.findFirst({
-        where: { agentId: session.agentId, memoryId: mem.id, deletedAt: null },
-        select: { id: true },
-      })) !== null;
+    const agentLink = !tiedToApp && !isAgentsOwnMemory && session.agentId !== null
+      ? await db.agentMemoryItem.findFirst({
+          where: { agentId: session.agentId, memoryId: mem.id, deletedAt: null },
+          select: { role: true },
+        })
+      : null;
+    const isAgentLinked = agentLink !== null && isGrantedAgentMemoryRole(agentLink.role);
     if ((tiedToApp || isAgentsOwnMemory || isAgentLinked) && (await identityMemoryLicensed(db, session, mem))) {
       ids.push(mem.id);
     }

@@ -38,6 +38,17 @@ export async function hasActiveAgentInstallLicense(
   app: { organizationId: string | null; ownerUserId: string | null },
   agent: { id: string; organizationId: string | null; ownerUserId: string | null },
 ): Promise<boolean> {
+  // Soft deletion leaves Apps, Agents, and AppAgent joins behind. A retained
+  // same-org join cannot license an install after its owning org is deleted.
+  const orgIds = [...new Set(
+    [app.organizationId, agent.organizationId].filter((id): id is string => id != null),
+  )];
+  if (orgIds.length > 0) {
+    const liveOrgCount = await db.organization.count({
+      where: { id: { in: orgIds }, deletedAt: null },
+    });
+    if (liveOrgCount !== orgIds.length) return false;
+  }
   if (app.organizationId == null) {
     if (app.ownerUserId == null) return false;
     // A personal App needs no subscription to its owner's own Agent. Every

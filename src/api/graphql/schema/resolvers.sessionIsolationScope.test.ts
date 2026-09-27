@@ -152,6 +152,19 @@ describe('#945 — the agent leg rides on the INSTALL, not the binding', () => {
     await db.app.update({ where: { id: app.id }, data: { uninstalledAt: new Date() } });
     expect(await sessionScopedMemoryIds(db, app.id, session.id)).toEqual([]);
   });
+
+  it('drops the whole session scope when its organization is soft-deleted', async () => {
+    await createDbAgentSubscription(db, user.id, ownAgent.id);
+    const mem = await provisionedMemory(ownAgent.id, app.id);
+    const session = await db.session.create({
+      data: { id: generateId(), appId: app.id, userId: user.id, agentId: ownAgent.id, memoryId: mem.id },
+    });
+    expect(new Set(await sessionScopedMemoryIds(db, app.id, session.id))).toEqual(
+      new Set([mem.id, ownAgent.systemMemoryId]),
+    );
+    await db.organization.update({ where: { id: org.id }, data: { deletedAt: new Date() } });
+    expect(await sessionScopedMemoryIds(db, app.id, session.id)).toEqual([]);
+  });
 });
 
 describe('#945 — the memory leg must be tied to this App or this session\'s agent', () => {
@@ -194,6 +207,26 @@ describe('#945 — the memory leg must be tied to this App or this session\'s ag
     const ids = await getAccessibleMemoryIds(appKeyCtx(app.id, session.id));
     expect(ids).not.toContain(strangerMem.id);
     expect(ids).toEqual([ownAgent.systemMemoryId]);
+  });
+
+  it('does not treat a malformed AgentMemoryItem role as a session read grant', async () => {
+    const memory = await db.memory.create({
+      data: {
+        id: generateId(), organizationId: org.id, urn: `${org.urn}:invalid-link`,
+        name: 'invalid link', class: 'knowledge',
+      },
+    });
+    const link = await db.agentMemoryItem.create({
+      data: { agentId: ownAgent.id, memoryId: memory.id, role: 'bogus' },
+    });
+    const session = await db.session.create({
+      data: { id: generateId(), appId: app.id, userId: user.id, agentId: ownAgent.id, memoryId: memory.id },
+    });
+    expect(await sessionScopedMemoryIds(db, app.id, session.id)).toEqual([ownAgent.systemMemoryId]);
+    await db.agentMemoryItem.update({ where: { id: link.id }, data: { role: 'read' } });
+    expect(new Set(await sessionScopedMemoryIds(db, app.id, session.id))).toEqual(
+      new Set([memory.id, ownAgent.systemMemoryId]),
+    );
   });
 
   it('keeps the onlyMemoryId scoping honest for an inadmissible target', async () => {

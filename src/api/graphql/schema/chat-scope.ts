@@ -21,6 +21,7 @@
 import { GraphQLError } from 'graphql';
 import { Prisma, type PrismaClient } from '../../../generated/prisma/index.js';
 import { mintMemoryUrnV2 } from '../../../lib/mintMemoryUrnV2.js';
+import { isGrantedAgentMemoryRole } from '../../../lib/appAgent.js';
 import { agentSlugFromUrn, normalizeUrnForLookup } from '../../../lib/urn.js';
 import {
   agentSlugCandidates,
@@ -73,10 +74,11 @@ export async function sharedChatKnowledgeMemoryIds(
       // userMemoryOfAgentId still makes it per-user, never shared-chat context.
       memory: { class: 'knowledge', deletedAt: null, userMemoryOfAgentId: null },
     },
-    select: { memoryId: true, memory: { select: { appId: true, ownerUserId: true } } },
+    select: { memoryId: true, role: true, memory: { select: { appId: true, ownerUserId: true } } },
   });
   return items
-    .filter(({ memory }) =>
+    .filter(({ role, memory }) =>
+      isGrantedAgentMemoryRole(role) &&
       (memory.appId == null || memory.appId === appId) &&
       (memory.ownerUserId == null || memory.ownerUserId === callerUserId),
     )

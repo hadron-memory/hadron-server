@@ -933,6 +933,11 @@ describe('spec 017 — chat scope (US2 shared path)', () => {
     await makeKnowledge(appX.id, 'x-secret', 'X ONLY');
     await makeKnowledge(appY.id, 'y-secret', 'Y ONLY');
     await makeKnowledge(null, 'global-note', 'GLOBAL');
+    const invalid = await makeKnowledge(null, 'invalid-note', 'INVALID ROLE');
+    await db.agentMemoryItem.update({
+      where: { agentId_memoryId: { agentId: agent.id, memoryId: invalid.id } },
+      data: { role: 'bogus' },
+    });
     const holding = await db.memory.create({
       data: {
         id: generateId(), name: 'user-holding', urn: `${orgA.urn}:user-holding`,
@@ -952,17 +957,17 @@ describe('spec 017 — chat scope (US2 shared path)', () => {
     await db.agentMemoryItem.create({ data: { id: generateId(), agentId: agent.id, memoryId: owned.id, role: 'read' } });
     await db.node.update({
       where: { loc_memoryId: { loc: 'prompts:research:scope', memoryId: systemMemory.id } },
-      data: { content: '{{> x-secret}} | {{> y-secret}} | {{> global-note}} | {{> owner-note}} | {{> user-holding}}' },
+      data: { content: '{{> x-secret}} | {{> y-secret}} | {{> global-note}} | {{> owner-note}} | {{> user-holding}} | {{> invalid-note}}' },
     });
 
     const start = await resolvers.Mutation.startChat(
       {}, { agentId: agent.id, scope: 'shared' }, userCtx(adminUser.id),
     );
-    expect(start.systemMessage).toBe(' | Y ONLY | GLOBAL | OWNER ONLY | ');
+    expect(start.systemMessage).toBe(' | Y ONLY | GLOBAL | OWNER ONLY |  | ');
     const sent = await resolvers.Mutation.sendChatMessage(
       {}, { chatId: start.chatId, userMessage: 'hello' }, userCtx(otherUser.id),
     );
-    expect(sent.systemMessage).toBe(' | Y ONLY | GLOBAL |  | ');
+    expect(sent.systemMessage).toBe(' | Y ONLY | GLOBAL |  |  | ');
   });
 
   it('does not restore an uninstalled Agent when sending to its retained shared chat', async () => {

@@ -102,6 +102,7 @@ export async function getAppMemoryAccess(
     select: {
       id: true,
       organizationId: true,
+      organization: { select: { deletedAt: true } },
       ownerUserId: true,
       deletedAt: true,
       uninstalledAt: true,
@@ -130,7 +131,7 @@ export async function getAppMemoryAccess(
       },
     },
   });
-  if (!app || app.deletedAt || app.uninstalledAt) return new Map();
+  if (!app || app.deletedAt || app.uninstalledAt || app.organization?.deletedAt) return new Map();
 
   const access = await getPrimaryAgentAccess(db, app);
 

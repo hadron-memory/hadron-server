@@ -162,6 +162,15 @@ describe('getAppMemoryAccess (App-key principal)', () => {
     expect(await canReadMemory(db, { appId: app.id, organizationId: orgId }, knowledgeMemoryId)).toBe(false);
   });
 
+  it('drops a same-org install when its organization is soft-deleted', async () => {
+    const { app } = await createDbAppWithKey(db, 'app-deleted-org', orgId);
+    await createDbAppAgent(db, app.id, agentId);
+    expect((await getAppMemoryAccess(db, app.id)).has(knowledgeMemoryId)).toBe(true);
+    await db.organization.update({ where: { id: orgId }, data: { deletedAt: new Date() } });
+    expect((await getAppMemoryAccess(db, app.id)).size).toBe(0);
+    expect(await canReadMemory(db, { appId: app.id, organizationId: orgId }, knowledgeMemoryId)).toBe(false);
+  });
+
   it('does not fold a legacy per-user holding into a foreign App key through a PUBLIC Agent', async () => {
     const creator = await db.user.create({ data: { id: generateId(), name: 'Holding creator' } });
     const holding = await db.memory.create({
