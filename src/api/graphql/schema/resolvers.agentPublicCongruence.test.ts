@@ -76,6 +76,18 @@ describe('updateAgent → PUBLIC', () => {
     });
     expect((await M.updateAgent({}, { ref: agent.id, visibility: 'PUBLIC' }, ctx())).visibility).toBe('PUBLIC');
   });
+
+  it('a legacy per-user holding is outside the PUBLIC covered set even when its column is non-public', async () => {
+    const holding = await db.memory.create({
+      data: {
+        id: generateId(), organizationId: org.id, urn: `${org.urn}:covered-holding`,
+        name: 'Covered holding', class: 'knowledge', visibility: 'ORGANIZATION',
+        userMemoryOfAgentId: agent.id, createdBy: admin.id,
+      },
+    });
+    await db.agentMemoryItem.create({ data: { agentId: agent.id, memoryId: holding.id, role: 'read-write' } });
+    expect((await M.updateAgent({}, { ref: agent.id, visibility: 'PUBLIC' }, ctx())).visibility).toBe('PUBLIC');
+  });
 });
 
 describe('addMemoryToAgent onto a PUBLIC agent', () => {

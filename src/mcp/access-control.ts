@@ -87,9 +87,7 @@ export function foldAgentIntoAccessMap(agent: AgentLike): Map<string, string> {
  * installed Agent to evaluate — is the US1 work; this legacy path keeps
  * single-Agent semantics until then.
  *
- * Cross-org gate: if the App's org and the Agent's org differ, an active
- * AgentOrgGrant(App.organization_id, primary-agent.id) is required.
- * Same-org installations auto-pass.
+ * The Agent path requires a live App, Agent, and install license.
  */
 export async function getAppMemoryAccess(
   db: PrismaClient,
@@ -102,6 +100,8 @@ export async function getAppMemoryAccess(
       id: true,
       organizationId: true,
       ownerUserId: true,
+      deletedAt: true,
+      uninstalledAt: true,
       appAgents: {
         orderBy: { createdAt: 'asc' },
         take: 1,
@@ -115,7 +115,11 @@ export async function getAppMemoryAccess(
               deletedAt: true,
               memoryItems: {
                 where: { deletedAt: null, memory: { deletedAt: null } },
-                select: { memoryId: true, role: true, memory: { select: { ownerUserId: true } } },
+                select: {
+                  memoryId: true,
+                  role: true,
+                  memory: { select: { class: true, ownerUserId: true, appId: true, userMemoryOfAgentId: true } },
+                },
               },
             },
           },
@@ -123,7 +127,7 @@ export async function getAppMemoryAccess(
       },
     },
   });
-  if (!app) return new Map();
+  if (!app || app.deletedAt || app.uninstalledAt) return new Map();
 
   const access = await getPrimaryAgentAccess(db, app);
 
@@ -155,6 +159,8 @@ type AppAccessRow = {
   id: string;
   organizationId: string | null;
   ownerUserId: string | null;
+  deletedAt: Date | null;
+  uninstalledAt: Date | null;
   appAgents: Array<{
     agent: {
       id: string;
@@ -165,7 +171,7 @@ type AppAccessRow = {
       memoryItems: Array<{
         memoryId: string;
         role: string | null;
-        memory: { ownerUserId: string | null } | null;
+        memory: { class: string; ownerUserId: string | null; appId: string | null; userMemoryOfAgentId: string | null } | null;
       }>;
     } | null;
   }>;
@@ -313,7 +319,13 @@ async function getPrimaryAgentAccess(
 
   const systemMemoryId = foreignUserOwned(primary.ownerUserId) ? null : primary.systemMemoryId;
   const memoryItems = primary.memoryItems
-    .filter((item) => !foreignUserOwned((item as { memory?: { ownerUserId: string | null } }).memory?.ownerUserId))
+    .filter((item) => item.memory != null &&
+      // Personal/private rows remain candidates for appNodes' per-memory
+      // owner + subscription gate; legacy knowledge/app holdings never do.
+      (item.memory.userMemoryOfAgentId == null ||
+        item.memory.class === 'personal' || item.memory.class === 'private') &&
+      (item.memory.appId == null || item.memory.appId === app.id) &&
+      !foreignUserOwned(item.memory.ownerUserId))
     .map((item) => ({
       memoryId: item.memoryId,
       role: (item as { role?: string | null }).role ?? 'read',
@@ -530,7 +542,11 @@ async function participantTeamSpaceFolds(
  * principal (no `userId`) never matches an owner, and is denied by the point
  * gates for exactly that reason, so it is denied here too.
  *
- * **3. Strict-owner classes.** `personal`/`private` never enter an App-derived
+ * **3. Legacy per-user holdings.** A `userMemoryOfAgentId` pointer confines
+ * a row to its creating user even when its class is knowledge and its
+ * visibility column is PUBLIC. An App-derived fold never grants that user.
+ *
+ * **4. Strict-owner classes.** `personal`/`private` never enter an App-derived
  * map. Their identity, selected-App and subscription checks live in the
  * canonical per-memory gate; discovery callers consume this map directly and
  * cannot safely reproduce those checks. `hadron_list_memories` folds the
@@ -547,9 +563,10 @@ async function admissibleFoldRows(
 
   const rows = await db.memory.findMany({
     where: { id: { in: ids } },
-    select: { id: true, class: true, appId: true, ownerUserId: true },
+    select: { id: true, class: true, appId: true, ownerUserId: true, userMemoryOfAgentId: true },
   });
   for (const row of rows) {
+    if (row.userMemoryOfAgentId != null) continue;
     // Rule 3 — a fold is never authority for a strict-owner class.
     if (row.class === 'personal' || row.class === 'private') continue;
     // Rule 2 — strict ownership admits the owner alone, nobody else, and no

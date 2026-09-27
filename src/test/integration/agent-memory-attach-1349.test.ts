@@ -317,6 +317,44 @@ describe('#1349 — the actor stamp on a re-role (@Ada, chat #1825)', () => {
 });
 
 describe('#1349 — the agent\'s AUDIENCE, not just the memory\'s tenancy (@codex, PR #1357)', () => {
+  it('a legacy per-user holding marked PUBLIC cannot cross tenants by attachment or a retained link', async () => {
+    const source = await agentWithApp(victimOrgId, 'holding-source');
+    const holding = await db.memory.create({
+      data: {
+        id: generateId(), organizationId: victimOrgId,
+        urn: `victim-${suffix}:holding-public`, name: 'holding-public',
+        class: 'knowledge', visibility: 'PUBLIC',
+        userMemoryOfAgentId: source.agentId, createdBy: dualUserId,
+      } as never,
+    });
+    const node = await db.node.create({
+      data: { id: generateId(), memoryId: holding.id, loc: 'secret', name: 'secret', content: 'HOLDING SECRET' },
+    });
+    const ownRead = await gql(key.dual!, READ, { r: node.id });
+    expect(ownRead.data?.node?.content, JSON.stringify(ownRead.errors)).toBe('HOLDING SECRET');
+
+    const foreign = await agentWithApp(dualOrgId, 'holding-foreign');
+    const refused = await gql(key.dual!, ATTACH, { g: foreign.agentId, m: holding.urn, r: 'read' });
+    expect(code(refused)).toBe('FORBIDDEN');
+    expect(refused.errors?.[0]?.extensions?.reason).toBe('CROSS_TENANT_ATTACH');
+    expect(await db.agentMemoryItem.count({ where: { agentId: foreign.agentId, memoryId: holding.id } })).toBe(0);
+
+    // Model a pre-gate row, then prove the installed PUBLIC Agent cannot
+    // deliver this per-user holding to a foreign App key either.
+    const legacyAgent = await db.agent.create({
+      data: {
+        id: generateId(), organizationId: attackerOrgId,
+        urn: `attacker-${suffix}:holding-public-agent`, name: 'holding-public-agent', visibility: 'PUBLIC',
+      } as never,
+    });
+    await db.agentMemoryItem.create({ data: { agentId: legacyAgent.id, memoryId: holding.id, role: 'read' } });
+    const { app, rawKey } = await createDbAppWithKey(db, 'holding-foreign-public', dualOrgId);
+    await createDbAppAgent(db, app.id, legacyAgent.id);
+    await db.agentOrgGrant.create({ data: { orgId: dualOrgId, agentId: legacyAgent.id, activatedAt: new Date() } });
+    const leaked = await gql(rawKey, READ, { r: node.id });
+    expect(leaked.data?.node).toBeNull();
+  });
+
   it('P1: a PUBLIC agent may not hold read-write knowledge, even its owner\'s own', async () => {
     // A PUBLIC agent's audience is every org that installs it, and PUBLIC is a
     // READ audience. Measured before this guard: a foreign App key holding only

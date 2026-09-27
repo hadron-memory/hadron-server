@@ -8,6 +8,8 @@
  *   - per-user personal/private (`class IN ('personal','private')`) — owner-only
  *     by class, never PUBLIC;
  *   - user-owned (`ownerUserId != null`) — strict-owner, never publicly readable;
+ *   - legacy per-user holdings (`userMemoryOfAgentId != null`) — scoped to
+ *     their creator even if visibility is PUBLIC;
  *   - app-scoped (`appId != null`) — App-internal even at `visibility=PUBLIC`
  *     (#653: `effectiveAccess` blocks public read via `!isAppScopedShared`), so
  *     it is never publicly readable regardless of its visibility value.
@@ -42,12 +44,14 @@ export function isExcludedFromCoveredSet(memory: {
   class: string;
   appId: string | null;
   ownerUserId: string | null;
+  userMemoryOfAgentId: string | null;
 }): boolean {
   return (
     memory.class === 'personal' ||
     memory.class === 'private' ||
     memory.appId != null ||
-    memory.ownerUserId != null
+    memory.ownerUserId != null ||
+    memory.userMemoryOfAgentId != null
   );
 }
 
@@ -65,6 +69,7 @@ export async function nonPublicLinkedMemories(
       class: { notIn: ['personal', 'private'] }, // per-user owner-only: excluded
       appId: null, // app-scoped: App-internal even if PUBLIC (#653) — excluded
       ownerUserId: null, // spec-047 user-owned: strict-owner even if PUBLIC
+      userMemoryOfAgentId: null, // legacy per-user holding: creator-only
       visibility: { not: 'PUBLIC' },
       agentItems: { some: { agentId, deletedAt: null } },
     },
@@ -103,6 +108,7 @@ export async function assertAgentPublicAllowed(db: Db, agentId: string): Promise
         class: { notIn: ['personal', 'private'] },
         appId: null,
         ownerUserId: null,
+        userMemoryOfAgentId: null,
       },
     },
     select: { memory: { select: { name: true } } },
@@ -140,6 +146,7 @@ export async function assertMemoryVisibilityChangeAllowed(
     appId: string | null;
     organizationId: string | null;
     ownerUserId: string | null;
+    userMemoryOfAgentId: string | null;
   },
   nextVisibility: string | null | undefined,
 ): Promise<void> {
@@ -213,6 +220,7 @@ export async function revokeLinksForeignToTenant(
     visibility: string | null;
     class: string;
     appId: string | null;
+    userMemoryOfAgentId: string | null;
   },
   actor: string | null,
 ): Promise<number> {
@@ -272,7 +280,7 @@ export async function revokeLinksForeignToTenant(
  */
 export async function assertLinkAllowedForPublicAgent(
   agentVisibility: string | null,
-  memory: { class: string; appId: string | null; ownerUserId: string | null; visibility: string | null },
+  memory: { class: string; appId: string | null; ownerUserId: string | null; userMemoryOfAgentId: string | null; visibility: string | null },
 ): Promise<void> {
   if (agentVisibility !== 'PUBLIC') return;
   if (isExcludedFromCoveredSet(memory)) return; // strict-owner / app-scoped: allowed
