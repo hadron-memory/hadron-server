@@ -13,6 +13,7 @@ import {
   bestEffortFlatNodeUrn,
 } from '../../../lib/urnEmit.js';
 import { portalUrlForUrn } from '../../../lib/portalUrl.js';
+import { nodeContentValidationState } from '../../../lib/nodeContentValidation.js';
 // Spec 049 Phase 3b — AppRun.scope: the mint snapshot as the caller may read it.
 import { parseRunScopeSnapshot, resolveRunScope, scopeInfoOf } from '../../../lib/scopes.js';
 import { parseRunRegisterSnapshot, resolveRegister, snapshotRowsAsEntries, toGqlRegisterRows } from '../../../lib/resolveRegister.js';
@@ -316,6 +317,74 @@ function resolveRevisionEditor(
   })();
 }
 
+type AuthoredState = {
+  authorshipKind?: 'TASK' | 'HUMAN' | null;
+  authoredByTask?: string | null;
+  authoredByRevision?: number | null;
+  authoredByHuman?: string | null;
+  authoredAt?: Date | null;
+};
+
+async function readableTaskRef(ctx: Context, taskId: string | null | undefined): Promise<string | null> {
+  if (!taskId) return null;
+  const task = await ctx.db.node.findUnique({
+    where: { id: taskId },
+    select: { loc: true, memoryId: true, deletedAt: true },
+  });
+  if (!task || task.deletedAt || !(await isMemoryReadableCached(ctx, task.memoryId))) return null;
+  return resolveNodeUrnField(task, ctx);
+}
+
+async function resolveAuthorship(state: AuthoredState, ctx: Context) {
+  if (!state.authorshipKind || !state.authoredAt) return null;
+  const taskRef = state.authorshipKind === 'TASK'
+    ? await readableTaskRef(ctx, state.authoredByTask)
+    : null;
+  return {
+    kind: state.authorshipKind,
+    taskRef,
+    // Task identity and revision are a single claim; never reveal only half.
+    taskRevision: taskRef ? state.authoredByRevision : null,
+    human: state.authorshipKind === 'HUMAN'
+      ? await resolveRevisionEditor(ctx, [state.authoredByHuman])
+      : null,
+    authoredAt: state.authoredAt,
+  };
+}
+
+async function resolveContentValidation(
+  state: { id?: string; nodeId?: string; memoryId?: string | null; revSeq?: number; revNo?: number | null },
+  ctx: Context,
+) {
+  const nodeRevision = state.revSeq ?? state.revNo;
+  if (nodeRevision == null) return { state: 'UNVALIDATED', latestReport: null };
+  const nodeId = state.nodeId ?? state.id;
+  if (!nodeId) return { state: 'UNVALIDATED', latestReport: null };
+  // Legacy snapshots lacked memoryId. Their parent query already gated the
+  // current memory; use that only for this legacy case.
+  const memoryId = state.memoryId ?? (await ctx.db.node.findUnique({
+    where: { id: nodeId }, select: { memoryId: true },
+  }))?.memoryId;
+  if (!memoryId) return { state: 'UNVALIDATED', latestReport: null };
+  // A report captured in another memory is not exposed by moving the node.
+  const report = await ctx.db.nodeContentValidationReport.findFirst({
+    where: { nodeId, memoryId, nodeRevSeq: { lte: nodeRevision } },
+    orderBy: [{ nodeRevSeq: 'desc' }, { reportedAt: 'desc' }, { id: 'desc' }],
+  });
+  if (!report) return { state: 'UNVALIDATED', latestReport: null };
+  const taskRef = await readableTaskRef(ctx, report.validationTaskId);
+  return {
+    state: nodeContentValidationState(nodeRevision, report),
+    latestReport: {
+      nodeRevision: report.nodeRevSeq,
+      validationTaskRef: taskRef,
+      validationTaskRevision: taskRef ? report.validationTaskRevSeq : null,
+      outcome: report.outcome,
+      reportedAt: report.reportedAt,
+    },
+  };
+}
+
 export const typeResolvers = {
   McpServer: {
     // headersEncrypted is not in the GraphQL type at all; readers get only
@@ -331,6 +400,17 @@ export const typeResolvers = {
     from: (s: { fromAddress: string }) => s.fromAddress,
   },
   Node: {
+    authorship: (n: AuthoredState, _: unknown, ctx: Context) => resolveAuthorship(n, ctx),
+    contentValidation: async (
+      n: SnapshotSourceNode & { revSeq: number; revisionContentHash: string | null },
+      _: unknown,
+      ctx: Context,
+    ) => {
+      // Match Node.revision's lazy raw-writer reconcile, so a response cannot
+      // display the advanced revision beside validation for the old number.
+      const revSeq = await typeResolvers.Node.revision(n, _, ctx);
+      return resolveContentValidation({ ...n, revSeq }, ctx);
+    },
     revision: async (
       n: SnapshotSourceNode & {
         revSeq: number;
@@ -496,6 +576,12 @@ export const typeResolvers = {
     },
   },
   NodeRevision: {
+    authorship: (nv: AuthoredState, _: unknown, ctx: Context) => resolveAuthorship(nv, ctx),
+    contentValidation: (
+      nv: { nodeId: string; memoryId: string | null; revNo: number | null },
+      _: unknown,
+      ctx: Context,
+    ) => resolveContentValidation(nv, ctx),
     // #696 — the computed end-anchored noderev URN. Null for legacy rows with
     // no revNo, and for the rare multi-segment per-user memory the flat shape
     // can't express (the compose helper throws → served as null, never crashes).

@@ -102,6 +102,7 @@ import {
   toUsageNodeRefs,
 } from '../../../lib/usageRecorder.js';
 import { nextSiblingSeq } from '../../../lib/nodeSeq.js';
+import { authoredContentChanged, carryNodeAuthorship, clearNodeAuthorship, type NodeAuthorshipStamp } from '../../../lib/nodeAuthorship.js';
 import { mergePropertiesPatch } from '../../../lib/skilldoc/exportsMerge.js';
 import {
   ancestorLocs,
@@ -263,6 +264,8 @@ export async function writeNodeCore(
      * trustworthy. No caller needs it yet: no platform writer sets a role.
      */
     platformWrite?: boolean;
+    /** #1326 — an internal clone carries the source's already-stored stamp. */
+    copiedAuthorship?: NodeAuthorshipStamp;
   },
 ) {
       // Keep the historical `input` name so the body below stays a
@@ -1097,6 +1100,9 @@ export async function writeNodeCore(
 
             const data = {
               ...updatePayload,
+              // The snapshot above keeps the old author. The new live content
+              // has no verified author until the attestation/human gates land.
+              ...(authoredContentChanged(changes) ? clearNodeAuthorship() : {}),
               revisionContentHash: revisionStateHashRefreshMarker(),
             } as Prisma.NodeUncheckedUpdateInput;
 
@@ -1156,6 +1162,7 @@ export async function writeNodeCore(
             where: { loc_memoryId: { loc: input.loc, memoryId: input.memoryId } },
             create: {
               ...nodeFieldsClean,
+              ...(opts?.copiedAuthorship ? carryNodeAuthorship(opts.copiedAuthorship) : {}),
               id,
               tags,
               createdBy,
@@ -1300,6 +1307,10 @@ export async function writeNodeCore(
               ...upsertArgs,
               update: {
                 ...upsertArgs.update,
+                ...(opts?.copiedAuthorship
+                  ? carryNodeAuthorship(opts.copiedAuthorship)
+                  : authoritative && (mode === 'create' || authoredContentChanged(diffNodeChanges(authoritative, suppliedForDiff)))
+                    ? clearNodeAuthorship() : {}),
                 revisionContentHash: revisionStateHashRefreshMarker(),
                 // create-ONLY, matching the `isResurrect` it corrects. Widening
                 // it to `upsert` would let an importer revive a soft-deleted
@@ -2309,6 +2320,7 @@ export const nodeMutations = {
           }
           data.revisionContentHash = revisionStateHashRefreshMarker();
 
+          Object.assign(data, clearNodeAuthorship());
           await tx.node.update({ where: { id: raw.id }, data });
         }
       });
@@ -3127,7 +3139,7 @@ export const nodeMutations = {
       // caller (a read of the SOURCE memory, which may differ from the
       // destination's) and writeNodeCore records the write of the new node.
       recordNodeRead(ctx.db, toUsageNodeRef(source), ctx);
-      return writeNodeCore(input, ctx, 'create');
+      return writeNodeCore(input, ctx, 'create', { copiedAuthorship: carryNodeAuthorship(source) });
     },
 
     // Fold a source node into a target node, returning the updated target.
@@ -3398,7 +3410,7 @@ export const nodeMutations = {
         );
 
         if (Object.keys(changed).length > 0) {
-          await tx.node.update({ where: { id: target.id }, data: writeData });
+          await tx.node.update({ where: { id: target.id }, data: { ...writeData, ...clearNodeAuthorship() } });
         }
 
         if (fields.has('EDGES')) {

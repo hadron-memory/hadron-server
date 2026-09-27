@@ -17,7 +17,7 @@
  * captured as `revLabel` — it previously squatted in `editedBy`.
  */
 
-import { Prisma } from '../generated/prisma/index.js';
+import { Prisma, type NodeAuthorshipKind } from '../generated/prisma/index.js';
 import type { PrismaClient } from '../generated/prisma/index.js';
 import { generateId } from './id.js';
 
@@ -48,6 +48,11 @@ export interface SnapshotSourceNode {
   role: string | null;
   llmModel: string | null;
   aiAgent: string | null;
+  authorshipKind: NodeAuthorshipKind | null;
+  authoredByTask: string | null;
+  authoredByRevision: number | null;
+  authoredByHuman: string | null;
+  authoredAt: Date | null;
 }
 
 /** Editor identity split per #620 — see module doc. */
@@ -125,6 +130,11 @@ export function buildNodeRevisionSnapshot(
     role: node.role,
     llmModel: node.llmModel,
     aiAgent: node.aiAgent,
+    authorshipKind: node.authorshipKind,
+    authoredByTask: node.authoredByTask,
+    authoredByRevision: node.authoredByRevision,
+    authoredByHuman: node.authoredByHuman,
+    authoredAt: node.authoredAt,
     editedBy: editor.userId ?? null,
     editedByInfo: editor.userId ? null : editor.info ?? null,
     revLabel: opts?.revLabel != null ? opts.revLabel.slice(0, REV_LABEL_MAX_LEN) : null,
@@ -352,6 +362,11 @@ export const TRACKED_NODE_FIELDS = [
   'role',
   'llmModel',
   'aiAgent',
+  'authorshipKind',
+  'authoredByTask',
+  'authoredByRevision',
+  'authoredByHuman',
+  'authoredAt',
 ] as const satisfies readonly (keyof SnapshotSourceNode)[];
 
 /**
@@ -440,6 +455,11 @@ export function restorableNodeFields(revision: {
   role: string | null;
   llmModel: string | null;
   aiAgent: string | null;
+  authorshipKind: NodeAuthorshipKind | null;
+  authoredByTask: string | null;
+  authoredByRevision: number | null;
+  authoredByHuman: string | null;
+  authoredAt: Date | null;
 }): Record<string, unknown> {
   const base: Record<string, unknown> = {
     name: revision.name,
@@ -468,5 +488,10 @@ export function restorableNodeFields(revision: {
     role: revision.role,
     llmModel: revision.llmModel,
     aiAgent: revision.aiAgent,
+    authorshipKind: revision.authorshipKind,
+    authoredByTask: revision.authoredByTask,
+    authoredByRevision: revision.authoredByRevision,
+    authoredByHuman: revision.authoredByHuman,
+    authoredAt: revision.authoredAt,
   };
 }

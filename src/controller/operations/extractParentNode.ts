@@ -4,6 +4,7 @@ import { Prisma } from '../../generated/prisma/index.js';
 import { generateId } from '../../lib/id.js';
 import { jsonOrDbNull } from '../../lib/nodeRevisionSnapshot.js';
 import { carryGovernedSignals } from '../../lib/governedSignals.js';
+import { carryNodeAuthorship } from '../../lib/nodeAuthorship.js';
 import { deriveEdgeLoc } from '../../lib/edgeLoc.js';
 import type { MemoryClass, MemoryVisibility } from '../../generated/prisma/index.js';
 
@@ -285,6 +286,9 @@ export async function extractParentNodeGraph(
         // back to `n` keeps the copy correct if a row vanished from the
         // re-read.
         ...carryGovernedSignals(freshSignals?.get(n.loc) ?? n),
+        // Content and attribution both come from `n`; the fresh governed
+        // signal read above prevents a kind downgrade during the copy.
+        ...carryNodeAuthorship(n),
         llmModel: n.llmModel,
         aiAgent: n.aiAgent,
         tokens: n.tokens,

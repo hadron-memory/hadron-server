@@ -29,6 +29,7 @@ import {
   editorFromAuth,
   diffNodeChanges,
 } from '../lib/nodeRevisionSnapshot.js';
+import { authoredContentChanged, clearNodeAuthorship } from '../lib/nodeAuthorship.js';
 import {
   parseUrnInput,
   assertFullyQualifiedUrn,
@@ -49,6 +50,8 @@ import {
   type SafeUrnEmission,
 } from '../lib/urnEmit.js';
 import { portalUrlForUrn } from '../lib/portalUrl.js';
+import { userUrn } from '../lib/userHandle.js';
+import { nodeContentValidationState } from '../lib/nodeContentValidation.js';
 import { findLiveUrnAliasTargets, dedupeById } from '../lib/urnAlias.js';
 import { validateParentRel, InvalidParentRelError } from '../lib/parentRel.js';
 import type { NodeWhere } from '../lib/retrieval/nodeWhere.js';
@@ -1184,6 +1187,11 @@ async function isMemoryHiddenFrom(
 type ReadProjectionNode = {
   id: string;
   revSeq: number;
+  authorshipKind: 'TASK' | 'HUMAN' | null;
+  authoredByTask: string | null;
+  authoredByRevision: number | null;
+  authoredByHuman: string | null;
+  authoredAt: Date | null;
   name: string;
   loc: string;
   memoryId: string;
@@ -1253,7 +1261,7 @@ function mcpDecryptOrMark(
 async function renderNodeReadProjection(
   node: ReadProjectionNode,
   scope: 'content' | 'abstract' | 'all',
-  opts: { locked?: boolean } = {},
+  opts: { locked?: boolean; auth?: AuthContext } = {},
 ): Promise<string> {
   const revision = node.revSeq;
   const { urn, fellBack: urnFellBack } = await nodeUrnResult(node.loc, node.memoryId);
@@ -1306,6 +1314,39 @@ async function renderNodeReadProjection(
   // URL: a link that points somewhere other than the node is worse than none.
   const portalUrl = urnFellBack ? null : portalUrlForUrn(urn);
 
+  // #1326: a source node may be readable while its author/validator task
+  // lives in another tenant's memory. Resolve task addresses only after that
+  // memory's own content gate; never print the stored task id as a fallback.
+  const readableTask = async (id: string | null): Promise<string | null> => {
+    if (!id || !opts.auth) return null;
+    const task = await db.node.findUnique({
+      where: { id }, select: { loc: true, memoryId: true, deletedAt: true },
+    });
+    if (!task || task.deletedAt || !(await canReadMemory(db, opts.auth, task.memoryId))) return null;
+    return nodeUrn(task.loc, task.memoryId);
+  };
+  let authorshipLine = '';
+  if (node.authorshipKind === 'TASK') {
+    const taskRef = await readableTask(node.authoredByTask);
+    authorshipLine = taskRef && node.authoredByRevision != null
+      ? `Authored by task: ${taskRef} @ revision ${node.authoredByRevision}`
+      : 'Authored by task: restricted';
+  } else if (node.authorshipKind === 'HUMAN' && node.authoredByHuman) {
+    const person = await db.user.findFirst({
+      where: { id: node.authoredByHuman, deletedAt: null }, select: { handle: true },
+    });
+    authorshipLine = person?.handle ? `Authored by human: ${userUrn(person.handle)}` : 'Authored by human';
+  }
+  const report = await db.nodeContentValidationReport.findFirst({
+    where: { nodeId: node.id, memoryId: node.memoryId, nodeRevSeq: { lte: revision } },
+    orderBy: [{ nodeRevSeq: 'desc' }, { reportedAt: 'desc' }, { id: 'desc' }],
+  });
+  const validationState = nodeContentValidationState(revision, report);
+  const validatorRef = report ? await readableTask(report.validationTaskId) : null;
+  const validationLine = report
+    ? `Validation: ${validationState.toLowerCase()} (node revision ${report.nodeRevSeq}; validator ${validatorRef ? `${validatorRef} @ revision ${report.validationTaskRevSeq}` : 'restricted'})`
+    : 'Validation: unvalidated';
+
   // #186: surface nodeType so callers can tell `parent` from `info`.
   const meta = [
     `**${node.name}**`,
@@ -1316,6 +1357,8 @@ async function renderNodeReadProjection(
     `ID: ${node.id}`,
     `Revision: ${revision}`,
     portalUrl ? `URL: ${portalUrl}` : '',
+    authorshipLine,
+    validationLine,
     node.description ? `> ${node.description}` : '',
     `Type: ${node.nodeType}`,
     // #1201 (@codex P2, PR #1203). Without these a governed node reads as an
@@ -3077,6 +3120,7 @@ export function createMcpServerInstance(
             where: { loc_memoryId: { loc, memoryId } },
             select: { id: true, deletedAt: true },
           });
+          let sectionChanged = false;
           if (prior && !prior.deletedAt) {
             await tx.$queryRaw`SELECT "id" FROM "nodes" WHERE "id" = ${prior.id} FOR UPDATE`;
             // Reconcile only while the row is still in this memory.
@@ -3090,6 +3134,7 @@ export function createMcpServerInstance(
               );
             }
             const changes = diffNodeChanges(current, upsertArgs.update);
+            sectionChanged = authoredContentChanged(changes);
             if (changes.length > 0) {
               await createNodeRevision(tx, {
                 id: generateId(),
@@ -3099,7 +3144,7 @@ export function createMcpServerInstance(
           }
           const row = await tx.node.upsert({
             ...upsertArgs,
-            update: { ...upsertArgs.update, revisionContentHash: revisionStateHashRefreshMarker() },
+            update: { ...upsertArgs.update, ...(sectionChanged ? clearNodeAuthorship() : {}), revisionContentHash: revisionStateHashRefreshMarker() },
           });
           return row.id;
         });
@@ -3720,6 +3765,7 @@ export function createMcpServerInstance(
       // drift between the single-read and batch-read surfaces (cor:api:040:01).
       const projection = await renderNodeReadProjection(current, scope, {
         locked: lockState === 'locked',
+        auth,
       });
 
       // Record usage event (fire-and-forget), AFTER the projection is in hand:
@@ -4041,6 +4087,7 @@ export function createMcpServerInstance(
         const lockState = mcpDecryptOrMark(n); // spec 041 — same posture as hadron_get_node
         const projection = await renderNodeReadProjection(n, scope, {
           locked: lockState === 'locked',
+          auth,
         });
         // Measured on the ANNOTATED block, which is what actually ships: sizing
         // the bare projection and pushing the annotated one lets a block cross
@@ -5040,6 +5087,7 @@ export function createMcpServerInstance(
             // deleted while taking the new content.
             update: {
               ...upsertArgs.update,
+              ...(pre ? clearNodeAuthorship() : {}),
               ...(pre?.deletedAt ? { deletedAt: null, deletedBy: null } : {}),
             } as any,
           });
@@ -5439,6 +5487,7 @@ export function createMcpServerInstance(
             // A guard-only call is a useful no-op check and must not manufacture
             // a history row or advance the live revision.
             if (Object.keys(data).length === 0 && resolvedEdges === null) return;
+            const changedFields = diffNodeChanges(current, data);
             await createNodeRevision(tx, {
               id: generateId(),
               ...buildNodeRevisionSnapshot(current, editorFromAuth(auth), {
@@ -5462,6 +5511,7 @@ export function createMcpServerInstance(
                 }),
               }),
             });
+            if (authoredContentChanged(changedFields)) Object.assign(data, clearNodeAuthorship());
             data.revisionContentHash = revisionStateHashRefreshMarker();
             const updated = Object.keys(data).length > 0
               ? await tx.node.update({ where: { id: existing.id }, data })
