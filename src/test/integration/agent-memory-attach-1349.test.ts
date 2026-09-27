@@ -1748,6 +1748,57 @@ describe('#1357 round 7 — first-attach promotion and renames (@copilot, PR #13
 });
 
 describe('#1357 round 8 — the same-App install check holds a lock (@copilot, PR #1357)', () => {
+  it('checks and locks a cross-org install license before an App-scoped grant', async () => {
+    const { requireAgentMemoryGrant } = await import('../../api/graphql/schema/resolvers.helpers.js');
+    const actor = await db.user.create({
+      data: { id: generateId(), name: 'license-admin', handle: `license-admin-${suffix}` },
+    });
+    for (const organizationId of [attackerOrgId, victimOrgId]) {
+      await db.orgMember.create({ data: { organizationId, userId: actor.id, role: 'ADMIN' } });
+    }
+    const { app } = await createDbAppWithKey(db, 'license-lock-app', attackerOrgId);
+    const agent = await db.agent.create({
+      data: { id: generateId(), organizationId: victimOrgId, name: 'licensed agent', urn: `victim-${suffix}:licensed-agent` } as never,
+    });
+    await createDbAppAgent(db, app.id, agent.id);
+    await db.agentOrgGrant.create({ data: { orgId: attackerOrgId, agentId: agent.id, activatedAt: new Date() } });
+    // Legacy mismatch: the scoped row names this App but retains its former
+    // org. That keeps the Agent/memory tenancy equal so the install license is
+    // the deciding gate; normal new writes align memory and App orgs.
+    const memory = await db.memory.create({
+      data: {
+        id: generateId(), organizationId: victimOrgId, appId: app.id,
+        urn: `victim-${suffix}:licensed-app-know`, name: 'licensed-app-know',
+        class: 'knowledge', visibility: 'ORGANIZATION',
+      } as never,
+    });
+    const agentArg = { id: agent.id, organizationId: victimOrgId, ownerUserId: null, visibility: 'ORGANIZATION' };
+    const memoryArg = {
+      id: memory.id, class: 'knowledge', visibility: 'ORGANIZATION', userId: null,
+      ownerUserId: null, organizationId: victimOrgId, appId: app.id, userMemoryOfAgentId: null,
+    };
+    await db.$transaction(async (tx) => {
+      expect(await requireAgentMemoryGrant(
+        { db: tx, userId: actor.id, roles: [] } as never, agentArg, memoryArg, 'read', 'license-lock-ref',
+      )).toBe('read');
+      const revoke = await db.$transaction(async (other) => {
+        await other.$executeRaw`SET LOCAL lock_timeout = '300ms'`;
+        await other.agentOrgGrant.update({
+          where: { orgId_agentId: { orgId: attackerOrgId, agentId: agent.id } },
+          data: { revokedAt: new Date() },
+        });
+      }).then(() => 'committed', (error: Error) => error.message);
+      expect(revoke).toMatch(/lock timeout|canceling statement/i);
+    }, { timeout: 15_000 });
+    await db.agentOrgGrant.update({
+      where: { orgId_agentId: { orgId: attackerOrgId, agentId: agent.id } },
+      data: { revokedAt: new Date() },
+    });
+    await expect(requireAgentMemoryGrant(
+      { db, userId: actor.id, roles: [] } as never, agentArg, memoryArg, 'read', 'license-lock-ref',
+    )).rejects.toThrow();
+  });
+
   it.each(['App', 'organization'] as const)('a concurrent %s deletion waits behind an App-scoped grant', async (target) => {
     const { requireAgentMemoryGrant } = await import('../../api/graphql/schema/resolvers.helpers.js');
     const { app } = await createDbAppWithKey(db, `lifecycle-${target}`, attackerOrgId);

@@ -213,6 +213,19 @@ describe('Agent.memoryItems — non-public linked memories are gated (#759)', ()
     expect(creator.map((i: { memoryId: string }) => i.memoryId)).toContain(holding.id);
   });
 
+  it('does not admit a null creator to a caller-less App context', async () => {
+    const holding = await db.memory.create({
+      data: {
+        id: generateId(), organizationId: org.id, urn: `${org.urn}:null-creator-holding`,
+        name: 'Null creator holding', class: 'knowledge', visibility: 'PUBLIC',
+        userMemoryOfAgentId: pubAgent.id, createdBy: null,
+      },
+    });
+    await db.agentMemoryItem.create({ data: { agentId: pubAgent.id, memoryId: holding.id } });
+    const items = await A.memoryItems(await eagerAgent(), {}, { db, roles: [], userId: null } as unknown as Context);
+    expect(items.map((i: { memoryId: string }) => i.memoryId)).not.toContain(holding.id);
+  });
+
   // PR #846 review (Copilot): this said "org member" but used ctx() — a
   // platform ADMIN, whose bypass masked the very regression the reviewers
   // found. An ORDINARY org member must still see the app-scoped memory, since

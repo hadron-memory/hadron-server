@@ -652,7 +652,7 @@ describe('appNodes', () => {
       },
     });
     await db.agentMemoryItem.create({
-      data: { id: generateId(), agentId: secondAgent.id, memoryId: secondMemory.id, role: 'READ_WRITE' },
+      data: { id: generateId(), agentId: secondAgent.id, memoryId: secondMemory.id, role: 'read-write' },
     });
     await db.node.create({
       data: {
@@ -712,7 +712,7 @@ describe('appNodes', () => {
       },
     });
     await db.agentMemoryItem.create({
-      data: { id: generateId(), agentId, memoryId: personal.id, role: 'READ_WRITE' },
+      data: { id: generateId(), agentId, memoryId: personal.id, role: 'read-write' },
     });
     await db.node.create({
       data: {
@@ -783,7 +783,7 @@ describe('appNodes', () => {
       },
     });
     await db.agentMemoryItem.create({
-      data: { id: generateId(), agentId, memoryId: personalInA.id, role: 'READ_WRITE' },
+      data: { id: generateId(), agentId, memoryId: personalInA.id, role: 'read-write' },
     });
     await db.node.create({
       data: {
@@ -843,7 +843,7 @@ describe('appNodes', () => {
       },
     });
     await db.agentMemoryItem.create({
-      data: { id: generateId(), agentId, memoryId: knowledgeInA.id, role: 'READ_WRITE' },
+      data: { id: generateId(), agentId, memoryId: knowledgeInA.id, role: 'read-write' },
     });
     await db.node.create({
       data: {
@@ -910,7 +910,7 @@ describe('appNodes', () => {
       },
     });
     await db.agentMemoryItem.create({
-      data: { id: generateId(), agentId, memoryId: knowledgeInA.id, role: 'READ_WRITE' },
+      data: { id: generateId(), agentId, memoryId: knowledgeInA.id, role: 'read-write' },
     });
     await db.node.create({
       data: {
@@ -963,7 +963,7 @@ describe('appNodes', () => {
       },
     });
     await db.agentMemoryItem.create({
-      data: { id: generateId(), agentId, memoryId: personal.id, role: 'READ_WRITE' },
+      data: { id: generateId(), agentId, memoryId: personal.id, role: 'read-write' },
     });
     await db.node.create({
       data: {
@@ -1047,7 +1047,7 @@ describe('appNodes', () => {
       },
     });
     await db.agentMemoryItem.create({
-      data: { id: generateId(), agentId, memoryId: knowledgeInA.id, role: 'READ_WRITE' },
+      data: { id: generateId(), agentId, memoryId: knowledgeInA.id, role: 'read-write' },
     });
     await db.node.create({
       data: {

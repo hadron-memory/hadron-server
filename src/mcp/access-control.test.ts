@@ -122,6 +122,19 @@ describe('getAppMemoryAccess (App-key principal)', () => {
     expect(access.get(localKnId)).toBe('READ_WRITE');
   });
 
+  it('treats a malformed legacy memoryItem role as no grant', async () => {
+    const { app } = await createDbAppWithKey(db, 'app-invalid-role', orgId);
+    await createDbAppAgent(db, app.id, agentId);
+    const invalid = await db.memory.create({
+      data: { id: generateId(), name: 'invalid role', urn: `${orgId}:invalid-role`, organizationId: orgId, class: 'knowledge' },
+    });
+    await db.agentMemoryItem.create({ data: { agentId, memoryId: invalid.id, role: 'bogus' } });
+    const auth: AuthContext = { appId: app.id, organizationId: orgId };
+    expect((await getAppMemoryAccess(db, app.id)).get(knowledgeMemoryId)).toBe('READ_ONLY');
+    expect((await getAppMemoryAccess(db, app.id)).has(invalid.id)).toBe(false);
+    expect(await canReadMemory(db, auth, invalid.id)).toBe(false);
+  });
+
   it('returns an empty map when the App is orphan (agent_id IS NULL)', async () => {
     const { app } = await createDbAppWithKey(db, 'app-orphan', orgId);
 

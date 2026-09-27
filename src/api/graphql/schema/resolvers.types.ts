@@ -1522,7 +1522,7 @@ export const typeResolvers = {
         // Legacy per-user holding rows can carry PUBLIC visibility while
         // ownerUserId is null. Their audience is the creating user alone.
         if (mem.userMemoryOfAgentId != null) {
-          if (!ctx.impersonation && ctx.userId === mem.createdBy) kept.push(item);
+          if (!ctx.impersonation && ctx.userId != null && ctx.userId === mem.createdBy) kept.push(item);
           continue;
         }
         // Readable by anyone only for the genuine public audience. #653 keeps

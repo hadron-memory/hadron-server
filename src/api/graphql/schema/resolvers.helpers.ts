@@ -59,6 +59,7 @@ import { MemoryNotFoundError } from '../../../lib/asset/gate.js';
 import { assertLinkAllowedForPublicAgent, isExcludedFromCoveredSet } from '../../../lib/agentPublicCongruence.js';
 import type { ImpersonationContext } from '../../../lib/auth/impersonation.js';
 import { GraphQLError } from 'graphql';
+import { isLifecycleActive, type LifecycleLike } from '@hadron-memory/access-control';
 import {
   Prisma,
   type PrismaClient,
@@ -626,7 +627,7 @@ function holdsContentReadIndependently(ctx: Context, memoryId: string): Promise<
  */
 async function sameAppAttachAdmitted(
   ctx: Context,
-  agentId: string,
+  agent: { id: string; organizationId: string | null; ownerUserId: string | null },
   memory: { appId: string | null; class: string; ownerUserId: string | null },
 ): Promise<boolean> {
   if (memory.appId == null) return false;
@@ -660,9 +661,28 @@ async function sameAppAttachAdmitted(
   // wait for this transaction instead. No deadlock: uninstall takes no memory
   // or agent lock.
   const installed = await ctx.db.$queryRaw<{ app_id: string }[]>`
-    SELECT app_id FROM app_agents WHERE app_id = ${app.id} AND agent_id = ${agentId} FOR KEY SHARE
+    SELECT app_id FROM app_agents WHERE app_id = ${app.id} AND agent_id = ${agent.id} FOR KEY SHARE
   `;
   if (installed.length === 0) return false;
+  // The join can outlive a revoked/expired install license. Lock that row and
+  // evaluate the same lifecycle predicate as the App access fold, so a revoke
+  // cannot commit between this decision and the attached grant.
+  if (app.organizationId == null) {
+    if (app.ownerUserId == null) return false;
+    if (app.ownerUserId !== agent.ownerUserId) {
+      const license = await ctx.db.$queryRaw<LifecycleLike[]>`
+        SELECT activated_at AS "activatedAt", revoked_at AS "revokedAt", expires_at AS "expiresAt"
+        FROM agent_subscriptions WHERE user_id = ${app.ownerUserId} AND agent_id = ${agent.id} FOR SHARE
+      `;
+      if (!license[0] || !isLifecycleActive(license[0])) return false;
+    }
+  } else if (app.organizationId !== agent.organizationId) {
+    const license = await ctx.db.$queryRaw<LifecycleLike[]>`
+      SELECT activated_at AS "activatedAt", revoked_at AS "revokedAt", expires_at AS "expiresAt"
+      FROM agent_org_grants WHERE org_id = ${app.organizationId} AND agent_id = ${agent.id} FOR SHARE
+    `;
+    if (!license[0] || !isLifecycleActive(license[0])) return false;
+  }
   try {
     await requireOwnerOrOrgRole(ctx, app, 'ADMIN');
   } catch (error) {
@@ -733,7 +753,7 @@ export async function requireAgentMemoryGrant(
   const self = userPrincipalOnly(ctx);
   const independentlyReadable = await holdsContentReadIndependently(ctx, memory.id);
   // The ONE route by which App reach may admit an attach (#1357).
-  const sameAppRead = asked === 'read' && (await sameAppAttachAdmitted(ctx, agent.id, memory));
+  const sameAppRead = asked === 'read' && (await sameAppAttachAdmitted(ctx, agent, memory));
   const canRead = independentlyReadable || sameAppRead;
   // Existence-hiding first: every refusal below this line is addressed to
   // someone who already knows the memory exists.

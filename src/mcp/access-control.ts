@@ -62,6 +62,9 @@ export function foldAgentIntoAccessMap(agent: AgentLike): Map<string, string> {
 
   for (const item of agent.memoryItems) {
     const agentRole = item.role ?? 'read';
+    // The persisted column is a free string. A malformed legacy value is no
+    // grant at all; mapping it to READ_ONLY would make invalid rows readable.
+    if (agentRole !== 'read' && agentRole !== 'read-write') continue;
     const effective = agentRole === 'read-write' ? 'READ_WRITE' : 'READ_ONLY';
     const existing = access.get(item.memoryId);
     if (!existing || effective === 'READ_WRITE') {
