@@ -512,7 +512,7 @@ export const memoryQueries = {
             // contributes only to its own App, even when the same Agent is
             // installed elsewhere (#1357 review).
             if (item.memory.appId != null && item.memory.appId !== ctx.appId) continue;
-            if (item.memory.userMemoryOfAgentId != null && item.memory.ownerUserId == null) continue;
+            if (item.memory.userMemoryOfAgentId != null) continue;
             if (foreignUserOwned(item.memory.ownerUserId)) continue;
             memoryMap.set(item.memory.id, item.memory);
           }

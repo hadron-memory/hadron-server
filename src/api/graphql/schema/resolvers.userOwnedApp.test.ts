@@ -123,6 +123,25 @@ describe('createApp — user-owned (no orgId), installing a PUBLIC agent', () =>
     expect((await list()).items.map((m: { id: string }) => m.id)).not.toContain(memory.id);
   });
 
+  it('does not list the owner’s legacy holding to a pure personal App key', async () => {
+    const holding = await db.memory.create({
+      data: {
+        id: generateId(), class: 'knowledge', name: 'Owner holding',
+        urn: `@appowner:holding-${generateId()}`, ownerUserId: ownerId,
+        visibility: 'PUBLIC', userMemoryOfAgentId: publicAgentId, createdBy: ownerId,
+      },
+    });
+    await db.agentMemoryItem.create({ data: { agentId: publicAgentId, memoryId: holding.id, role: 'read' } });
+    const app = await resolvers.Mutation.createApp(
+      {}, { agentRef: publicAgentId, name: 'Holding App' }, ctx({ userId: ownerId, roles: ['READER'] }),
+    );
+    const page = await resolvers.Query.memories(
+      null, { filter: { memoryClasses: ['knowledge'] } }, ctx({ appId: app.id }),
+    );
+    expect(page.items.map((m: { id: string }) => m.id)).not.toContain(holding.id);
+    expect((await getAppMemoryAccess(db, app.id)).has(holding.id)).toBe(false);
+  });
+
   it('rejects an empty-string orgId', async () => {
     await expect(
       resolvers.Mutation.createApp({}, { orgRef: '', agentRef: publicAgentId, name: 'X' }, ctx({ userId: ownerId })),
