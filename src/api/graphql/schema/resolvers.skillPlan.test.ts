@@ -1975,6 +1975,21 @@ describe('#1406 selected individual skill files', () => {
     expect(disabled.id).not.toBe(free.id);
   });
 
+  it('refuses a collision census whose unrelated properties exceed the byte ceiling', async () => {
+    const selected = await mkNode('tasks:small-selection', {
+      properties: forHost('claudeSkill', 'small-selection'),
+    });
+    await mkNode('tasks:large-properties', {
+      properties: {
+        ...forHost('codexSkill', 'other-host'),
+        unrelatedPayload: 'x'.repeat(33 * 1024 * 1024),
+      },
+    });
+    await expect(selectedPlan({ nodes: [selected.id], host: 'claudeSkill' })).rejects.toMatchObject({
+      extensions: { code: 'BAD_USER_INPUT' },
+    });
+  });
+
   it.each(['claudeSkill', 'codexSkill'] as const)('%s: preserves other files, local edits and duplicate selected installations', async (host) => {
     const selected = await mkNode(`tasks:${host}`, { properties: forHost(host, `${host.toLowerCase()}-new`) });
     const other = await mkNode(`tasks:${host}-other`, { properties: forHost(host, `${host.toLowerCase()}-other`) });

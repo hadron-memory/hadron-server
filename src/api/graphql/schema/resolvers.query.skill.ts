@@ -127,6 +127,10 @@ export interface SkillSelectionResult {
 const SKILL_PLAN_MAX_NODES = 500;
 /** A selected plan fails loud if its collision census cannot finish within this bound. */
 const SKILL_PLAN_MAX_COLLISION_CENSUS_NODES = 50_000;
+// The census reads arbitrary JSON, so a row count alone cannot bound its
+// transfer or deserialization cost. Check JSON byte size in PostgreSQL before
+// fetching each page's properties.
+const SKILL_PLAN_MAX_COLLISION_CENSUS_BYTES = 32 * 1024 * 1024;
 
 /**
  * The DISCOVERY predicate: a node carrying any declaration key at all.
@@ -1139,32 +1143,55 @@ async function selectedFileCollisions(
   }
   let cursor: string | undefined;
   let scanned = 0;
+  let loadedBytes = 0n;
   while (true) {
-    const page = await ctx.db.node.findMany({
-      where: {
-        deletedAt: null,
-        OR: DISCOVERY_OR,
-        AND: [access, { memory: { deletedAt: null } }],
-      } as never,
-      select: { id: true, properties: true },
-      orderBy: { id: 'asc' },
-      take: 200,
-      ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
-    });
-    scanned += page.length;
-    if (scanned > SKILL_PLAN_MAX_COLLISION_CENSUS_NODES) {
-      throw new GraphQLError('selectedSkillFilePlan: the collision census is too large to complete safely.', {
-        extensions: { code: 'BAD_USER_INPUT' },
+    // Keep ID discovery, the DB-side byte check and the JSON fetch in one
+    // snapshot. Otherwise a row growing between the check and fetch could
+    // transfer an unbounded body, or a moved row could bypass the access gate.
+    const { pageIds, page } = await ctx.db.$transaction(async (tx) => {
+      const ids = await tx.node.findMany({
+        where: {
+          deletedAt: null,
+          OR: DISCOVERY_OR,
+          AND: [access, { memory: { deletedAt: null } }],
+        } as never,
+        select: { id: true },
+        orderBy: { id: 'asc' },
+        take: 200,
+        ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
       });
-    }
+      if (scanned + ids.length > SKILL_PLAN_MAX_COLLISION_CENSUS_NODES) {
+        throw new GraphQLError('selectedSkillFilePlan: the collision census is too large to complete safely.', {
+          extensions: { code: 'BAD_USER_INPUT' },
+        });
+      }
+      const pageIds = ids.map((row) => row.id);
+      if (pageIds.length === 0) return { pageIds, page: [] as { id: string; properties: Prisma.JsonValue | null }[] };
+      const sizes = await tx.$queryRaw<{ bytes: bigint }[]>`
+        SELECT COALESCE(SUM(octet_length(properties::text)), 0)::bigint AS bytes
+        FROM nodes WHERE id IN (${Prisma.join(pageIds)})
+      `;
+      loadedBytes += sizes[0]?.bytes ?? 0n;
+      if (loadedBytes > BigInt(SKILL_PLAN_MAX_COLLISION_CENSUS_BYTES)) {
+        throw new GraphQLError('selectedSkillFilePlan: the collision census properties exceed the safe byte ceiling.', {
+          extensions: { code: 'BAD_USER_INPUT' },
+        });
+      }
+      const page = await tx.node.findMany({
+        where: { id: { in: pageIds }, deletedAt: null, AND: [access, { memory: { deletedAt: null } }] } as never,
+        select: { id: true, properties: true },
+      });
+      return { pageIds, page };
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead });
+    scanned += pageIds.length;
     for (const row of page) {
       if (selectedIds.has(row.id)) continue;
       const declaration = declaredSkill(row.properties, host);
       if (declaration?.enable !== true || !names.has(declaration.name)) continue;
       claimantCounts.set(declaration.name, Math.min(2, (claimantCounts.get(declaration.name) ?? 0) + 1));
     }
-    if (page.length < 200) break;
-    cursor = page[page.length - 1]!.id;
+    if (pageIds.length < 200) break;
+    cursor = pageIds[pageIds.length - 1]!;
   }
   return selected.flatMap((node) => {
     const declaration = declaredSkill(node.properties, host);
