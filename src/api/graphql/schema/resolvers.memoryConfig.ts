@@ -160,24 +160,32 @@ export async function hasLockAuthority(ctx: Context, memory: MemoryGateRow): Pro
   }
 }
 
-/** #1334 — a locked rule moved by someone without lock authority. The rule is readable to them, so this reveals nothing. */
-export function ruleLocked(rule: Pick<NodeRoleRule, 'id' | 'role' | 'sourceTemplateId'>): GraphQLError {
+/**
+ * #1334 — an ordinary edit or delete of a LOCKED rule. Holger's ruling
+ * (2026-09-27, option 2): nobody changes a locked rule casually, not even an
+ * admin. It takes the deliberate step of `unlockNodeRoleRule` (lock authority
+ * required) or re-applying a required template. The rule is readable to
+ * whoever manages it, so this reveals nothing.
+ */
+export function ruleLocked(rule: Pick<NodeRoleRule, 'id' | 'role' | 'sourceTemplateId'>, reason?: string): GraphQLError {
   return new GraphQLError(
-    `The rule for role "${rule.role}" is locked by a required template; only an org admin can change or remove it.`,
+    reason ??
+      `The rule for role "${rule.role}" is locked by a required template. Unlock it first (unlockNodeRoleRule, org admin) or re-apply the template.`,
     { extensions: { code: 'RULE_LOCKED', ruleId: rule.id, role: rule.role, sourceTemplateId: rule.sourceTemplateId } },
   );
 }
 
-/** The lock check, asked fresh inside the write transaction on the memory row as it reads now. */
-export async function assertMayMoveLock(
+/** Lock authority, asked fresh inside the write transaction on the memory row as it reads now. */
+async function assertLockAuthority(
   ctx: Context,
   tx: Prisma.TransactionClient,
   memoryId: string,
   rule: NodeRoleRule,
 ): Promise<void> {
-  if (!rule.locked) return;
   const memory = await tx.memory.findFirst({ where: { id: memoryId }, select: MEMORY_GATE_SELECT });
-  if (!memory || !(await hasLockAuthority(withoutRequestCaches(ctx, tx), memory))) throw ruleLocked(rule);
+  if (!memory || !(await hasLockAuthority(withoutRequestCaches(ctx, tx), memory))) {
+    throw ruleLocked(rule, `Only an org admin can unlock the rule for role "${rule.role}".`);
+  }
 }
 
 /** Resolve a memory ref the caller may MANAGE, or throw the missing-memory answer. */
@@ -521,7 +529,7 @@ export const memoryConfigMutations = {
       await lockMemoryConfigExclusive(tx, memoryId);
       await reassertManage(ctx, tx, memoryId, () => new NodeRoleRuleNotFoundError(ref));
       if (expectedRevision != null && current.revision !== expectedRevision) throw conflict(current.revision);
-      await assertMayMoveLock(ctx, tx, memoryId, current);
+      if (current.locked) throw ruleLocked(current);
       assertValidateByHasTask({
         validateBy: ('validateBy' in data ? data.validateBy : current.validateBy) as Validator | null,
         validationTaskId: ('validationTaskId' in refs ? refs.validationTaskId : current.validationTaskId) as string | null,
@@ -551,11 +559,42 @@ export const memoryConfigMutations = {
       await lockMemoryConfigExclusive(tx, memoryId);
       await reassertManage(ctx, tx, memoryId, () => new NodeRoleRuleNotFoundError(ref));
       if (expectedRevision != null && current.revision !== expectedRevision) throw conflict(current.revision);
-      await assertMayMoveLock(ctx, tx, memoryId, current);
+      if (current.locked) throw ruleLocked(current);
       await tx.nodeRoleRule.delete({ where: { id } });
       await touchConfig(tx, current.configId, actor);
     });
     return true;
+  },
+
+  /**
+   * #1334 (Holger, 2026-09-27, option 2): the deliberate step before a locked
+   * rule can be edited or deleted. It needs lock authority, and it is visible:
+   * it bumps `revision` and stamps `updatedBy`/`updatedAt`. Unlocking an
+   * unlocked rule changes nothing.
+   */
+  unlockNodeRoleRule: async (
+    _: unknown,
+    { ref, expectedRevision }: { ref: string; expectedRevision?: number | null },
+    ctx: Context,
+  ) => {
+    const actor = requireWriter(ctx);
+    const { id, memoryId } = await managedRule(ctx, ref);
+    const rule = await ctx.db.$transaction(async (tx) => {
+      const current = await lockRule(tx, id);
+      if (!current) throw new NodeRoleRuleNotFoundError(ref);
+      await lockMemoryConfigExclusive(tx, memoryId);
+      await reassertManage(ctx, tx, memoryId, () => new NodeRoleRuleNotFoundError(ref));
+      if (expectedRevision != null && current.revision !== expectedRevision) throw conflict(current.revision);
+      if (!current.locked) return current;
+      await assertLockAuthority(ctx, tx, memoryId, current);
+      const after = await tx.nodeRoleRule.update({
+        where: { id },
+        data: { locked: false, updatedBy: actor, revision: { increment: 1 } },
+      });
+      await touchConfig(tx, current.configId, actor);
+      return after;
+    });
+    return { rule, warnings: [] };
   },
 };
 

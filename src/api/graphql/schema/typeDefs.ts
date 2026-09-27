@@ -2717,7 +2717,7 @@ export const typeDefs = `#graphql
     writers: NodeRoleWriters!
     validateBy: ContentValidator
     enabled: Boolean!
-    "Set by applying a required template (#1334)."
+    "Set by applying a required template (#1334). A locked rule refuses every ordinary edit and delete (RULE_LOCKED); unlockNodeRoleRule is the deliberate step."
     locked: Boolean!
     "The template this rule was copied from, if any (provenance only; no live link)."
     sourceTemplateId: ID
@@ -8322,13 +8322,24 @@ export const typeDefs = `#graphql
     you read it is refused CONFLICT (extensions.currentRevision) and nothing is
     written; omitted, the last writer wins. A rule you may not manage reads as
     NOT_FOUND. A LOCKED rule (#1334) is refused with RULE_LOCKED (extensions
-    ruleId, role, sourceTemplateId) for anyone without lock authority; see
-    deleteNodeRoleRule.
+    ruleId, role, sourceTemplateId) for EVERY caller: unlock it first
+    (unlockNodeRoleRule) or re-apply its required template.
     """
     updateNodeRoleRule(ref: ID!, input: UpdateNodeRoleRuleInput!, expectedRevision: Int): NodeRoleRulePayload!
 
-    "#1325 — delete a rule by its id; expectedRevision as for updateNodeRoleRule. A LOCKED rule (#1334) is refused with RULE_LOCKED for anyone without lock authority (an org ADMIN/OWNER of the memory's org; on a personal/private or org-less memory, its manager)."
+    "#1325 — delete a rule by its id; expectedRevision as for updateNodeRoleRule. A LOCKED rule (#1334) is refused with RULE_LOCKED for every caller: unlock it first (unlockNodeRoleRule)."
     deleteNodeRoleRule(ref: ID!, expectedRevision: Int): Boolean!
+
+    """
+    #1334 — the deliberate step before a rule a required template LOCKED can be
+    edited or deleted (Holger, 2026-09-27: nobody changes a locked rule through
+    an ordinary edit). Needs lock authority: an org ADMIN/OWNER of the memory's
+    org; on a personal/private or org-less memory, its manager. Anyone else who
+    manages the memory gets RULE_LOCKED. Visible: bumps revision and stamps
+    updatedBy. Unlocking an unlocked rule changes nothing. expectedRevision as
+    for updateNodeRoleRule.
+    """
+    unlockNodeRoleRule(ref: ID!, expectedRevision: Int): NodeRoleRulePayload!
 
     """
     #1334 — copy a template's rules into ONE memory's config. A one-off copy:
@@ -8344,7 +8355,7 @@ export const typeDefs = `#graphql
 
     When the memory already has a rule for a role, a non-required template
     skips it and a required template replaces it. A LOCKED rule is only
-    replaced by a caller with lock authority (see deleteNodeRoleRule);
+    replaced by a caller with lock authority (see unlockNodeRoleRule);
     otherwise SKIPPED_LOCKED. Rules written by a required template are locked.
 
     expectedTemplateRevision: CONFLICT (with currentRevision) if the template

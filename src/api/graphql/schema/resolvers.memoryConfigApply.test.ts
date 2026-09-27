@@ -42,6 +42,7 @@ const UPDATE_TPL = `mutation($r: ID!, $i: UpdateMemoryConfigTemplateInput!) { up
 const CREATE_RULE = `mutation($m: ID!, $i: CreateNodeRoleRuleInput!) { createNodeRoleRule(memoryRef: $m, input: $i) { rule { ${RULE} } } }`;
 const UPDATE_RULE = `mutation($r: ID!, $i: UpdateNodeRoleRuleInput!) { updateNodeRoleRule(ref: $r, input: $i) { rule { ${RULE} } } }`;
 const DELETE_RULE = `mutation($r: ID!) { deleteNodeRoleRule(ref: $r) }`;
+const UNLOCK = `mutation($r: ID!, $v: Int) { unlockNodeRoleRule(ref: $r, expectedRevision: $v) { rule { ${RULE} } } }`;
 
 let org: { id: string };
 let orgAdmin: string, contributor: string, personalOwner: string;
@@ -197,23 +198,56 @@ describe('applyMemoryConfigTemplate (#1334 slice 1)', () => {
   });
 });
 
-describe('RULE_LOCKED (#1334 slice 1)', () => {
-  it('a locked rule stays editable by its org admins, who hold lock authority; the lock is kept', async () => {
+describe('RULE_LOCKED: nobody edits a locked rule casually (Holger, 2026-09-27, option 2)', () => {
+  const lockedRule = async () => {
     const policy = await tpl(as(orgAdmin), 'ORGANIZATION', org.id, { name: 'policy', required: true, rules: [{ role: 'spec', writers: 'ADMIN' }] });
     const [entry] = (await apply(as(orgAdmin), policy.id, mem.id)).data!.applyMemoryConfigTemplate.entries;
-    const upd = await gql(as(orgAdmin), UPDATE_RULE, { r: entry.rule.id, i: { writers: 'OWNER' } });
-    expect(upd.errors).toBeUndefined();
-    expect(upd.data!.updateNodeRoleRule.rule).toMatchObject({ writers: 'OWNER', locked: true, sourceTemplateId: policy.id, revision: 2 });
-    expect((await gql(as(orgAdmin), DELETE_RULE, { r: entry.rule.id })).data!.deleteNodeRoleRule).toBe(true);
+    return { policy, id: entry.rule.id as string };
+  };
+
+  it('an ordinary edit or delete is refused for EVERY caller, org admins included; the rule is untouched', async () => {
+    const { policy, id } = await lockedRule();
+    const upd = await gql(as(orgAdmin), UPDATE_RULE, { r: id, i: { writers: 'OWNER' } });
+    expect(code(upd)).toBe('RULE_LOCKED');
+    expect(upd.errors![0].extensions).toMatchObject({ ruleId: id, role: 'spec', sourceTemplateId: policy.id });
+    expect(code(await gql(as(orgAdmin), DELETE_RULE, { r: id }))).toBe('RULE_LOCKED');
+    expect((await rulesOf(mem.id))[0]).toMatchObject({ writers: 'ADMIN', locked: true, revision: 1 });
   });
 
-  it('a personal/private memory: its strict owner is the only manager, so also the lock authority', async () => {
+  it('unlockNodeRoleRule is the deliberate step: visible (revision + updatedBy), then the rule edits normally', async () => {
+    const { id } = await lockedRule();
+    const r = await gql(as(orgAdmin), UNLOCK, { r: id, v: 1 });
+    expect(r.errors).toBeUndefined();
+    expect(r.data!.unlockNodeRoleRule.rule).toMatchObject({ locked: false, revision: 2 });
+    expect((await db.nodeRoleRule.findUniqueOrThrow({ where: { id } })).updatedBy).toBe(orgAdmin);
+    expect((await gql(as(orgAdmin), UPDATE_RULE, { r: id, i: { writers: 'OWNER' } })).data!.updateNodeRoleRule.rule).toMatchObject({ writers: 'OWNER', locked: false, revision: 3 });
+    // Unlocking an unlocked rule changes nothing.
+    expect((await gql(as(orgAdmin), UNLOCK, { r: id })).data!.unlockNodeRoleRule.rule).toMatchObject({ revision: 3 });
+  });
+
+  it('unlock is gated: a stale revision is CONFLICT, a caller who cannot manage the memory sees NOT_FOUND', async () => {
+    const { id } = await lockedRule();
+    const stale = await gql(as(orgAdmin), UNLOCK, { r: id, v: 7 });
+    expect(code(stale)).toBe('CONFLICT');
+    expect(code(await gql(as(contributor), UNLOCK, { r: id }))).toBe('NOT_FOUND');
+    expect((await db.nodeRoleRule.findUniqueOrThrow({ where: { id } })).locked).toBe(true);
+  });
+
+  it('re-applying a required template is the other deliberate route: it replaces and re-locks', async () => {
+    const { policy, id } = await lockedRule();
+    await gql(as(orgAdmin), UNLOCK, { r: id });
+    await gql(as(orgAdmin), UPDATE_RULE, { r: id, i: { writers: 'ALL' } });
+    const again = await apply(as(orgAdmin), policy.id, mem.id);
+    expect(again.data!.applyMemoryConfigTemplate.entries[0]).toMatchObject({ outcome: 'REPLACED', rule: { writers: 'ADMIN', locked: true } });
+  });
+
+  it('a personal/private memory: its strict owner unlocks too, and an org admin does not manage it at all (H3)', async () => {
     const mine = await tpl(as(personalOwner), 'USER', null, { name: 'mine', required: true, rules: [{ role: 'spec', writers: 'ADMIN' }] });
     const [entry] = (await apply(as(personalOwner), mine.id, personal.id)).data!.applyMemoryConfigTemplate.entries;
-    expect(entry.rule).toMatchObject({ locked: true });
+    expect(code(await gql(as(personalOwner), UPDATE_RULE, { r: entry.rule.id, i: { writers: 'ALL' } }))).toBe('RULE_LOCKED');
+    expect(code(await gql(as(orgAdmin), UNLOCK, { r: entry.rule.id }))).toBe('NOT_FOUND');
+    expect((await gql(as(personalOwner), UNLOCK, { r: entry.rule.id })).data!.unlockNodeRoleRule.rule).toMatchObject({ locked: false });
     expect((await gql(as(personalOwner), UPDATE_RULE, { r: entry.rule.id, i: { writers: 'ALL' } })).errors).toBeUndefined();
-    // An org admin does not manage a private memory's config at all (H3).
-    expect(code(await gql(as(orgAdmin), UPDATE_RULE, { r: entry.rule.id, i: { writers: 'OWNER' } }))).toBe('NOT_FOUND');
   });
 });
 
