@@ -2023,6 +2023,25 @@ describe('#1406 selected individual skill files', () => {
     expect(removed.entries[0]).toMatchObject({ class: 'disabled', exportPlan: { action: 'REMOVE' } });
   });
 
+  it('does not charge a large other-host no-op against the selected host body ceiling', async () => {
+    const codexOnly = await mkNode('tasks:huge-codex-only', {
+      properties: forHost('codexSkill', 'huge-codex-only'), content: 'x'.repeat(1_100_000),
+    });
+    const claude = await mkNode('tasks:small-claude', {
+      properties: forHost('claudeSkill', 'small-claude'),
+    });
+    const got = await selectedPlan({ nodes: [codexOnly.id, claude.id], host: 'claudeSkill' });
+    expect(got.entries).toHaveLength(1);
+    expect(got.entries[0]).toMatchObject({ nodeId: claude.id, exportPlan: { action: 'WRITE' } });
+    expect(got.selectionResults).toMatchObject([{ ref: codexOnly.id, action: 'SKIP', reason: { code: 'host-not-declared' } }]);
+    expect(got.scanned).toBe(2);
+    expect(got.judged).toBe(1);
+
+    await expect(selectedPlan({ nodes: [codexOnly.id], host: 'codexSkill' })).rejects.toMatchObject({
+      extensions: { code: 'BAD_USER_INPUT' },
+    });
+  });
+
   it('never renders a selected locked source, even with force', async () => {
     const locked = await mkNode('tasks:selected-locked', {
       properties: forHost('claudeSkill', 'selected-locked'), content: 'enc:v1:AAAA:BBBB:CCCC',

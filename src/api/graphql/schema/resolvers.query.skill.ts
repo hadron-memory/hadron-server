@@ -666,14 +666,24 @@ async function planSkills(input: SkillPlanInput, ctx: Context, selectedRefs?: st
         }
       }
     }
-    await decryptNodesBatch(ctx.db, declaredRows);
+    // A selected node with no declaration for this host is a reported no-op.
+    // Keep it in the scanned population and metadata reports, but its body is
+    // outside this export. In particular, it must not consume the decryption
+    // work or content-byte budget for the selected host.
+    const actionableRows = selectedRefs === undefined
+      ? declaredRows
+      : declaredRows.filter((row) => {
+          const { declaration, malformed } = classifyDeclaration(row.properties, host);
+          return declaration !== null || malformed.length > 0;
+        });
+    await decryptNodesBatch(ctx.db, actionableRows);
 
     // The byte ceiling belongs HERE, not on the response (@copilot, PR #1240).
     // Capping only the rendered bodies left LINT and STATUS with no byte limit
     // at all — they return no body, and 500 arbitrarily large nodes are still
     // decrypted, hashed and linted first. The cost is paid at load, so the
     // refusal belongs at load, and it applies to every intent.
-    const loadedBytes = declaredRows.reduce(
+    const loadedBytes = actionableRows.reduce(
       (n, r) => n + (r.content ? Buffer.byteLength(r.content, 'utf8') : 0),
       0,
     );
@@ -700,10 +710,10 @@ async function planSkills(input: SkillPlanInput, ctx: Context, selectedRefs?: st
     // outranks every other class, which is exactly right here: nothing below
     // it is knowable.
     const lockedIds = new Set(
-      declaredRows.filter((r) => isCiphertext(r.content)).map((r) => r.id),
+      actionableRows.filter((r) => isCiphertext(r.content)).map((r) => r.id),
     );
 
-    const skillNodes = declaredRows
+    const skillNodes = actionableRows
       .map((r) => ({
         // NEVER hand-built. `${memory.urn}:${loc}` looks right and is wrong for
         // a memory stored in a compound or legacy spelling — and this URN is
