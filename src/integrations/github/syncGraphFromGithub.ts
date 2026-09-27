@@ -419,7 +419,14 @@ export const syncGraphFromGithub = async (
       // shared rulebook lock. A rule writer holds its referenced node FOR
       // SHARE before waiting for the rulebook EXCLUSIVE lock; taking a later
       // node lock after this one would make a real 40P01 cycle.
-      await tx.$queryRaw`SELECT "id" FROM "nodes" WHERE "memory_id" = ${graph.id} ORDER BY "id" FOR UPDATE`;
+      // The captured IDs also BOUND the cleanup pass below: a row inserted after
+      // this scan is not locked, and deleting it would wait on a row while
+      // holding the rulebook lock, a deadlock Anne reproduced (#1411 review).
+      // Such a late row survives this sync and is pruned by the next one, the
+      // deferrable direction.
+      const prelockedRows = await tx.$queryRaw<Array<{ id: string }>>`
+        SELECT "id" FROM "nodes" WHERE "memory_id" = ${graph.id} ORDER BY "id" FOR UPDATE`;
+      const prelockedIds = prelockedRows.map((row) => row.id);
       await lockMemoryConfigShared(tx, graph.id);
       // Locs of files refused for their role: nothing of theirs is written,
       // including the edges they declare.
@@ -793,7 +800,11 @@ export const syncGraphFromGithub = async (
         const cleanupWhere: Prisma.NodeWhereInput = {
           ownerRepo,
           memoryId: graph.id,
-          id: { notIn: [...upsertedIds, ...protectedRowIds, ...skippedRowIds] },
+          id: {
+            notIn: [...upsertedIds, ...protectedRowIds, ...skippedRowIds],
+            // #1330 — only rows this sync already holds, once it holds the rulebook lock.
+            in: prelockedIds,
+          },
           ...(deletionFilter.notClauses.length
             ? { NOT: { OR: deletionFilter.notClauses as Prisma.NodeWhereInput[] } }
             : {}),
