@@ -38,7 +38,7 @@ import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { agentSlugFromUrn, deriveSlugFromName } from '../../../lib/urn.js';
 import { createNode } from '../../../controller/operations/createNode.js';
-import { type Context, requireOwnerOrOrgRole, MEMORY_INCLUDE } from './resolvers.helpers.js';
+import { type Context, requireOwnerOrOrgRole, MEMORY_INCLUDE, concealUnreadableDenial } from './resolvers.helpers.js';
 
 /** App-associable memory classes (the DB CHECK forbids app_id only on system). */
 type AppMemoryClass = 'app' | 'knowledge' | 'personal' | 'private';
@@ -307,11 +307,14 @@ export const appMemoryMutations = {
     // app-scoped state. Attach is owner-only, so a non-owner must get a uniform
     // FORBIDDEN whatever the memory is; leaking class/appId here would let any
     // caller enumerate other users' (incl. private) memories.
-    if (!ctx.userId || memory.userId !== ctx.userId) {
-      throw new GraphQLError('You can only attach a memory you own.', {
-        extensions: { code: 'FORBIDDEN' },
-      });
-    }
+    // #1381: a caller who cannot open this memory gets resolveMemoryRef's miss.
+    await concealUnreadableDenial(ctx, memoryId, memoryRef, async () => {
+      if (!ctx.userId || memory.userId !== ctx.userId) {
+        throw new GraphQLError('You can only attach a memory you own.', {
+          extensions: { code: 'FORBIDDEN' },
+        });
+      }
+    });
 
     // Attach only applies to the owner-owned free-standing classes.
     if (memory.class !== 'personal' && memory.class !== 'private') {
