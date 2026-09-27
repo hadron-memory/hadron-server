@@ -90,6 +90,16 @@ export async function sessionScopedMemoryIds(
   if (!session) return [];
 
   const ids: string[] = [];
+  // Both Agent-derived legs need the same live install license. Cache it so a
+  // linked session memory and system memory do not repeat that database walk.
+  let licensedInstall: boolean | undefined;
+  const hasLicensedInstall = async (): Promise<boolean> => {
+    if (session.agentId === null) return false;
+    if (licensedInstall === undefined) {
+      licensedInstall = await isAgentInstalledAndLicensed(db, appId, session.agentId);
+    }
+    return licensedInstall;
+  };
 
   // The session memory is admissible when it is tied to THIS App or to THIS
   // session's agent. Three legitimate provenances, matching the three ways a
@@ -126,7 +136,8 @@ export async function sessionScopedMemoryIds(
           select: { role: true },
         })
       : null;
-    const isAgentLinked = agentLink !== null && isGrantedAgentMemoryRole(agentLink.role);
+    const isAgentLinked = agentLink !== null && isGrantedAgentMemoryRole(agentLink.role) &&
+      (await hasLicensedInstall());
     if ((tiedToApp || isAgentsOwnMemory || isAgentLinked) && (await identityMemoryLicensed(db, session, mem))) {
       ids.push(mem.id);
     }
@@ -143,7 +154,7 @@ export async function sessionScopedMemoryIds(
     session.agentId &&
     session.agent?.systemMemoryId &&
     session.agent.deletedAt === null &&
-    (await isAgentInstalledAndLicensed(db, appId, session.agentId))
+    (await hasLicensedInstall())
   ) {
     ids.push(session.agent.systemMemoryId);
   }

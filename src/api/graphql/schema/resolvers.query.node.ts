@@ -72,7 +72,7 @@ import {
   isMemoryReadableCached,
   loadMemoryUrn,
 } from './resolvers.helpers.js';
-import { getAppMemoryAccess, canReadMemory } from '../../../mcp/access-control.js';
+import { getAppMemoryAccess, filterReadableMemoryIds } from '../../../mcp/access-control.js';
 import { type AuthContext } from '../../../middleware/auth.js';
 import { getMemberOrgIds } from '../../../lib/auth/memberOrgIds.js';
 import {
@@ -2134,11 +2134,9 @@ export const nodeQueries = {
       const scopedAuth = {
         userId: ctx.userId, appId: resolvedAppId, roles: ctx.roles,
       } as AuthContext;
-      const agentMemoryIds = (await Promise.all(
-        [...installedAccess.keys()].map(async (id) =>
-          (await canReadMemory(ctx.db as never, scopedAuth, id, { access: installedAccess })) ? id : null,
-        ),
-      )).filter((id): id is string => id !== null);
+      const agentMemoryIds = [...await filterReadableMemoryIds(
+        ctx.db as never, scopedAuth, installedAccess.keys(), { access: installedAccess },
+      )];
 
       // #1031 — the App's own TEAM SPACE, which is structurally unreachable
       // through the installed-agent walk above: it is an app-class memory keyed

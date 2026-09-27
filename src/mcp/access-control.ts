@@ -889,11 +889,13 @@ export async function canReadMemory(
  * personal/private side lookups (legacy AppAgent installs and subscriptions).
  * The final decision stays in `canReadMemoryRow`, so discovery surfaces cannot
  * replace the real gate with an ownership-only predicate.
+ * Callers with a narrower or multi-Agent App fold may pass it as `opts.access`.
  */
 export async function filterReadableMemoryIds(
   db: PrismaClient,
   auth: AuthContext,
   memoryIds: Iterable<string>,
+  opts: { access?: Map<string, string> } = {},
 ): Promise<Set<string>> {
   const ids = [...new Set(memoryIds)];
   if (ids.length === 0) return new Set();
@@ -911,7 +913,7 @@ export async function filterReadableMemoryIds(
   });
 
   const isPlatformAdmin = auth.roles?.includes('ADMIN') || auth.roles?.includes('OWNER');
-  const access = isPlatformAdmin ? undefined : await getMemoryAccess(db, auth);
+  const access = opts.access ?? (isPlatformAdmin ? undefined : await getMemoryAccess(db, auth));
   let installedAgentIds: Set<string> | undefined;
   let subscriptionsByAgentId: Map<string, SubscriptionReadRow> | undefined;
 

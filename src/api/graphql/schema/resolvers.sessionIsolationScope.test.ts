@@ -339,6 +339,37 @@ describe('#945 review — lifecycle, not just structure', () => {
     );
   });
 
+  it('drops linked knowledge with the same revoked cross-org install license', async () => {
+    await db.appAgent.create({ data: { appId: app.id, agentId: foreignAgent.id } });
+    await createDbAgentOrgGrant(db, org.id, foreignAgent.id);
+    const knowledge = await db.memory.create({
+      data: {
+        id: generateId(), organizationId: foreignOrg.id,
+        urn: `${foreignOrg.urn}:licensed-knowledge`, name: 'licensed knowledge',
+        class: 'knowledge', visibility: 'PUBLIC',
+      },
+    });
+    await db.agentMemoryItem.create({
+      data: { agentId: foreignAgent.id, memoryId: knowledge.id, role: 'read' },
+    });
+    const session = await db.session.create({
+      data: {
+        id: generateId(), appId: app.id, userId: user.id,
+        agentId: foreignAgent.id, memoryId: knowledge.id,
+      },
+    });
+    const reachable = () => getAccessibleMemoryIds(appKeyCtx(app.id, session.id));
+    expect(await reachable()).toContain(knowledge.id);
+    expect(await reachable()).toContain(foreignAgent.systemMemoryId);
+
+    await db.agentOrgGrant.update({
+      where: { orgId_agentId: { orgId: org.id, agentId: foreignAgent.id } },
+      data: { revokedAt: new Date() },
+    });
+    expect(await reachable()).not.toContain(knowledge.id);
+    expect(await reachable()).not.toContain(foreignAgent.systemMemoryId);
+  });
+
   it('a same-org install needs no grant row (the auto-pass path)', async () => {
     const session = await db.session.create({
       data: { id: generateId(), appId: app.id, userId: user.id, agentId: ownAgent.id },
