@@ -298,9 +298,12 @@ describe('getAppMemoryAccess — blocker 2 (foreign user-owned memory never fold
    * #758 — the GraphQL twin of the same blocker. The #676 fix landed only in
    * `getAppMemoryAccess` (MCP); the App-key branch of `Query.memories` folded
    * every `appAgents[].agent.memoryItems` row with no owner filter, so the same
-   * foreign user-owned memory was listed to an App-key caller.
+   * foreign user-owned memory was listed to an App-key caller. The older
+   * expectation that the App owner's row was listable by a pure App key was
+   * also too broad: strict ownership requires a user principal, even when
+   * the App and Memory share an owner.
    */
-  it('Query.memories (App-key) excludes a foreign user-owned memory, keeps the owner’s', async () => {
+  it('Query.memories (App-key) excludes both foreign and owner-owned memories', async () => {
     const foreignMem = await db.memory.create({
       data: { id: generateId(), class: 'knowledge', name: 'foreign', urn: `@appother:foreign-${generateId()}`, ownerUserId: otherId },
     });
@@ -323,7 +326,7 @@ describe('getAppMemoryAccess — blocker 2 (foreign user-owned memory never fold
     );
     const ids = page.items.map((m: { id: string }) => m.id);
     expect(ids).not.toContain(foreignMem.id);
-    expect(ids).toContain(ownMem.id);
+    expect(ids).not.toContain(ownMem.id);
   });
 
   it('Query.memories (App-key) still lists an ORG-owned memory (no regression)', async () => {
