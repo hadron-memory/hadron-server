@@ -108,6 +108,59 @@ describe('#1404 mergeMemories node aliases', () => {
     expect(await aliasesFor(folded.id)).toEqual([]);
   });
 
+  it('does not record the mirror root empty loc as a published node address', async () => {
+    const root = await makeNode(source.id, '');
+    await merge();
+
+    expect((await db.node.findUniqueOrThrow({ where: { id: root.id } })).memoryId)
+      .toBe(target.id);
+    expect(await aliasesFor(root.id)).toEqual([]);
+  });
+
+  it('reads the source URN after a concurrent Memory rename commits', async () => {
+    const node = await makeNode(source.id, 'renamed-memory');
+    const oldMemoryUrn = source.urn;
+    const newMemoryUrn = 'merge-alias-source.example:renamed';
+    let signalLocked!: () => void;
+    const locked = new Promise<void>((resolve) => { signalLocked = resolve; });
+    let releaseRename!: () => void;
+    const held = new Promise<void>((resolve) => { releaseRename = resolve; });
+    const rename = db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM memories WHERE id = ${source.id} FOR UPDATE`;
+      await recordUrnRename(tx, {
+        entityType: 'MEMORY', entityId: source.id,
+        oldUrn: oldMemoryUrn, newUrn: newMemoryUrn,
+      });
+      await tx.memory.update({ where: { id: source.id }, data: { urn: newMemoryUrn } });
+      signalLocked();
+      await held;
+    });
+    await locked;
+
+    const merging = merge();
+    try {
+      await vi.waitFor(async () => {
+        const waiting = await db.$queryRaw<Array<{ pid: number }>>`
+          SELECT pid FROM pg_stat_activity
+          WHERE datname = current_database() AND wait_event_type = 'Lock'
+            AND query LIKE '%FROM memories WHERE id%' AND query LIKE '%FOR NO KEY UPDATE%'
+        `;
+        expect(waiting.length).toBeGreaterThan(0);
+      }, { timeout: 5_000, interval: 25 });
+    } finally {
+      releaseRename();
+    }
+    await rename;
+    await merging;
+
+    expect((await aliasesFor(node.id)).map((a) => a.urn))
+      .toEqual([`${newMemoryUrn}:${node.loc}`]);
+    expect(await resolveNodeRef(db, `hrn:node:${newMemoryUrn}:${node.loc}`))
+      .toEqual({ id: node.id });
+    expect(await resolveNodeRef(db, `hrn:node:${oldMemoryUrn}:${node.loc}`))
+      .toEqual({ id: node.id });
+  });
+
   it('uses the relocated target gate and gives a new live occupant precedence', async () => {
     const node = await makeNode(source.id, 'reused');
     const old = nodeUrn(source, node.loc);
