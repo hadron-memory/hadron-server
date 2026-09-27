@@ -16,7 +16,7 @@ import {
 import { resolvers, type Context } from './resolvers.js';
 import { generateId } from '../../../lib/id.js';
 import { getOrgReadableMemoryIds } from '../../../lib/auth/orgReadableMemory.js';
-import { getAppMemoryAccess } from '../../../mcp/access-control.js';
+import { canReadMemory, getAppMemoryAccess } from '../../../mcp/access-control.js';
 import { requireMemoryWriteAccess, getAccessibleMemoryIds } from './resolvers.helpers.js';
 
 // Prevent git writes (createMemoryInApp creates a root node).
@@ -79,6 +79,8 @@ describe('createMemoryInApp', () => {
       asUser(adminUser.id),
     );
     expect(mem.class).toBe('app');
+    expect(mem.organizationId).toBe(org.id);
+    expect(mem.ownerUserId).toBeNull();
     expect(mem.appId).toBe(app.id);
     expect(mem.userId).toBeNull();
     expect(mem.userMemoryOfAgentId).toBeNull();
@@ -128,6 +130,8 @@ describe('createMemoryInApp', () => {
       asUser(adminUser.id),
     );
     expect(mem.class).toBe('knowledge');
+    expect(mem.organizationId).toBe(org.id);
+    expect(mem.ownerUserId).toBeNull();
     expect(mem.appId).toBe(app.id);
     expect(mem.userId).toBeNull();
     expect(mem.userMemoryOfAgentId).toBeNull();
@@ -241,6 +245,81 @@ describe('createMemoryInApp', () => {
         throw new Error(code(e));
       }),
     ).rejects.toThrow('UNAUTHENTICATED');
+  });
+});
+
+describe('#1405 — createMemoryInApp inherits a user-owned App tenant', () => {
+  let owner: { id: string; handle: string };
+  let ownedAgent: { id: string };
+  let ownedApp: { id: string };
+
+  beforeEach(async () => {
+    owner = await db.user.create({
+      data: { githubId: 10, githubUsername: 'personal-owner', handle: 'personal-owner' },
+    });
+    ownedAgent = await db.agent.create({
+      data: { id: generateId(), name: 'Personal agent', urn: `${owner.handle}:agent`, ownerUserId: owner.id },
+    });
+    ownedApp = await db.app.create({
+      data: { id: generateId(), name: 'Personal app', urn: `${owner.handle}:app`, ownerUserId: owner.id },
+    });
+    await createDbAppAgent(db, ownedApp.id, ownedAgent.id);
+    await createDbAppMember(db, ownedApp.id, owner.id, 'owner');
+  });
+
+  it.each(['app', 'knowledge'] as const)(
+    'creates %s under the App owner and keeps owner-only read/write access',
+    async (memoryClass) => {
+      const mem = await createMemoryInApp(
+        null,
+        { appRef: ownedApp.id, agentRef: ownedAgent.id, memoryClass, name: `${memoryClass} notes` },
+        asUser(owner.id),
+      );
+      const stored = await db.memory.findUniqueOrThrow({ where: { id: mem.id } });
+      expect(stored).toMatchObject({
+        class: memoryClass,
+        appId: ownedApp.id,
+        organizationId: null,
+        ownerUserId: owner.id,
+        userId: null,
+      });
+      expect(stored.urn).toBe(`${owner.handle}:${memoryClass}-notes`);
+      expect(await db.node.count({ where: { memoryId: mem.id } })).toBe(1);
+
+      expect(await resolvers.Query.memory(null, { ref: mem.id }, asUser(owner.id))).toMatchObject({ id: mem.id });
+      expect(await resolvers.Query.memory(null, { ref: mem.id }, asUser(outsiderUser.id))).toBeNull();
+      expect(await resolvers.Query.memory(null, { ref: mem.id }, { ...asUser(outsiderUser.id), roles: ['ADMIN'] })).toBeNull();
+      expect(await getAccessibleMemoryIds(asUser(owner.id))).toContain(mem.id);
+      expect(await getAccessibleMemoryIds(asUser(outsiderUser.id))).not.toContain(mem.id);
+      await expect(requireMemoryWriteAccess(asUser(owner.id), mem.id)).resolves.toBeUndefined();
+      await expect(requireMemoryWriteAccess(asUser(outsiderUser.id), mem.id)).rejects.toThrow(/Forbidden/);
+
+      const link = await db.agentMemoryItem.findUnique({
+        where: { agentId_memoryId: { agentId: ownedAgent.id, memoryId: mem.id } },
+      });
+      expect(link?.role ?? null).toBe(memoryClass === 'knowledge' ? 'read' : null);
+      expect((await getAppMemoryAccess(db, ownedApp.id, { callerUserId: owner.id })).get(mem.id)).toBe('READ_ONLY');
+      expect(await canReadMemory(db, { userId: owner.id, roles: [] }, mem.id)).toBe(true);
+      expect(await canReadMemory(db, { userId: outsiderUser.id, roles: ['ADMIN'] }, mem.id)).toBe(false);
+      expect(await canReadMemory(db, { appId: ownedApp.id, roles: [] }, mem.id)).toBe(false);
+    },
+  );
+
+  it.each(['app', 'knowledge'] as const)('refuses %s creation by a non-owner, including a platform admin', async (memoryClass) => {
+    const args = { appRef: ownedApp.id, agentRef: ownedAgent.id, memoryClass, name: 'Forbidden notes' };
+    await expect(createMemoryInApp(null, args, asUser(outsiderUser.id))).rejects.toThrow(/Forbidden/);
+    await expect(createMemoryInApp(null, args, { ...asUser(outsiderUser.id), roles: ['ADMIN'] })).rejects.toThrow(/Forbidden/);
+    expect(await db.memory.count({ where: { appId: ownedApp.id, name: args.name } })).toBe(0);
+  });
+
+  it.each(['personal', 'private'] as const)('keeps %s unsupported in a user-owned App', async (memoryClass) => {
+    await expect(
+      createMemoryInApp(
+        null,
+        { appRef: ownedApp.id, agentRef: ownedAgent.id, memoryClass, name: 'Unsupported notes' },
+        asUser(owner.id),
+      ),
+    ).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
   });
 });
 
