@@ -8885,7 +8885,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       'hadron_team_attention',
       'RETIRED (#1384): the v1 one-shot poll scanned an encrypted Channel\'s whole unread backlog inside one request and now answers UPGRADE_REQUIRED. Use hadron_team_attention_page — the bounded paged successor; your existing since token is accepted there and carries your watermark forward.',
       {
-        app: z.string().optional().describe('The pilot App — an App URN or ID. Omit to use the selected App.'),
+        app: z.string().optional().describe('The App — an App URN or ID. Omit to use the selected App.'),
         since: z.string().optional().describe('Opaque token returned by the preceding successful poll. Do not pass "now".'),
       },
       async ({ app, since }) => {
@@ -8970,10 +8970,10 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
 
     server.tool(
       'hadron_team_chat_mark_read',
-      'INTERNAL PILOT (#1353): explicitly advance the Worker bound to your live session on one registered Channel. Use after filtered reads, which intentionally never auto-advance. Monotonic; a lower seq is a no-op and a seq beyond the Channel head is refused.',
+      'Explicitly advance the Worker bound to your live session on one registered Channel. Use after filtered reads, which intentionally never auto-advance. Monotonic; a lower seq is a no-op and a seq beyond the Channel head is refused.',
       {
         session: z.string().describe('Your live Worker session; selects the Worker whose own cursor advances.'),
-        app: z.string().optional().describe('The pilot App. Omit to recover it from session or the active selection.'),
+        app: z.string().optional().describe('The App. Omit to recover it from session or the active selection.'),
         channel: z.string().optional().describe('Channel id or address. Omit for the team Channel hadron_team_chat_read serves for the App.'),
         seq: z.number().int().min(0).describe('Read through this exact sequence.'),
       },
