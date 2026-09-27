@@ -635,16 +635,24 @@ async function sameAppAttachAdmitted(
   // owner already holds content read in their own right and never needs this
   // branch; anyone else must not get it through an App admin role.
   if (memory.ownerUserId != null) return false;
-  const app = await ctx.db.app.findFirst({
-    where: {
-      id: memory.appId,
-      deletedAt: null,
-      uninstalledAt: null,
-      OR: [{ organizationId: null }, { organization: { deletedAt: null } }],
-    },
+  const app = await ctx.db.app.findUnique({
+    where: { id: memory.appId },
     select: { id: true, organizationId: true, ownerUserId: true },
   });
   if (!app) return false;
+  // deleteApp and App uninstall update the App row without removing the
+  // AppAgent join. Lock and recheck lifecycle inside the attach transaction:
+  // the earlier lookup identifies the row, not its authoritative live state.
+  const liveApp = await ctx.db.$queryRaw<{ id: string }[]>`
+    SELECT id FROM apps WHERE id = ${app.id} AND deleted_at IS NULL AND uninstalled_at IS NULL FOR SHARE
+  `;
+  if (liveApp.length === 0) return false;
+  if (app.organizationId != null) {
+    const liveOrg = await ctx.db.$queryRaw<{ id: string }[]>`
+      SELECT id FROM organizations WHERE id = ${app.organizationId} AND deleted_at IS NULL FOR SHARE
+    `;
+    if (liveOrg.length === 0) return false;
+  }
   // FOR KEY SHARE, not a plain read (@copilot, PR #1357): uninstalling DELETES
   // this join row without locking the agent or the memory, so a snapshot could
   // pass here and the uninstall commit before the grant — leaving a latent row

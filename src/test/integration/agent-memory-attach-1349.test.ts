@@ -1543,6 +1543,31 @@ describe('#1357 round 6 (@copilot, PR #1357)', () => {
     return { spy, wasStaged: () => staged };
   };
 
+  it('first system-memory attach refuses a target deleted before the locked promotion', async () => {
+    const { agentId } = await agentWithApp(attackerOrgId, 'deleted-system-target');
+    const target = await db.memory.create({
+      data: {
+        id: generateId(), organizationId: attackerOrgId,
+        urn: `attacker-${suffix}:deleted-system-target`, name: 'deleted-system-target',
+        class: 'knowledge', visibility: 'ORGANIZATION',
+      } as never,
+    });
+    const { spy, wasStaged } = stageBeforeTx(() =>
+      db.memory.update({ where: { id: target.id }, data: { deletedAt: new Date() } }),
+    );
+    try {
+      const r = await gql(key.attacker!, `mutation($r: ID!, $m: String!) { updateAgent(ref: $r, systemMemoryId: $m) { id } }`, { r: agentId, m: target.id });
+      expect(wasStaged()).toBe(true);
+      expect(code(r)).toBe('MEMORY_NOT_FOUND');
+      const after = await db.memory.findUniqueOrThrow({ where: { id: target.id } });
+      expect(after.class).toBe('knowledge');
+      expect(after.deletedAt).not.toBeNull();
+      expect((await db.agent.findUniqueOrThrow({ where: { id: agentId } })).systemMemoryId).toBeNull();
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it('an APP-class memory is refused for every caller — a platform admin included', async () => {
     const admin = await db.user.create({
       data: { id: generateId(), handle: `padmin3-${suffix}`, githubUsername: `padmin3-${suffix}`, roles: ['ADMIN'] },
@@ -1685,6 +1710,41 @@ describe('#1357 round 7 — first-attach promotion and renames (@copilot, PR #13
 });
 
 describe('#1357 round 8 — the same-App install check holds a lock (@copilot, PR #1357)', () => {
+  it.each(['App', 'organization'] as const)('a concurrent %s deletion waits behind an App-scoped grant', async (target) => {
+    const { requireAgentMemoryGrant } = await import('../../api/graphql/schema/resolvers.helpers.js');
+    const { app } = await createDbAppWithKey(db, `lifecycle-${target}`, attackerOrgId);
+    const memory = await db.memory.create({
+      data: {
+        id: generateId(), organizationId: attackerOrgId, appId: app.id,
+        urn: `attacker-${suffix}:lifecycle-${target}`, name: `lifecycle-${target}`,
+        class: 'knowledge', visibility: 'ORGANIZATION',
+      } as never,
+    });
+    const agent = await db.agent.create({
+      data: { id: generateId(), organizationId: attackerOrgId, name: `lifecycle-${target}`, urn: `attacker-${suffix}:lifecycle-agent-${target}` } as never,
+    });
+    await createDbAppAgent(db, app.id, agent.id);
+    let deletion = '';
+    await db.$transaction(async (tx) => {
+      await requireAgentMemoryGrant(
+        { db: tx, userId: attackerUserId, roles: [] } as never,
+        { id: agent.id, organizationId: attackerOrgId, ownerUserId: null, visibility: 'PERSONAL' },
+        { id: memory.id, class: 'knowledge', visibility: 'ORGANIZATION', userId: null, ownerUserId: null, organizationId: attackerOrgId, appId: app.id, userMemoryOfAgentId: null },
+        'read', 'lock-ref',
+      );
+      deletion = await db.$transaction(async (other) => {
+        await other.$executeRaw`SET LOCAL lock_timeout = '300ms'`;
+        if (target === 'App') {
+          await other.app.update({ where: { id: app.id }, data: { deletedAt: new Date() } });
+        } else {
+          await other.organization.update({ where: { id: attackerOrgId }, data: { deletedAt: new Date() } });
+        }
+        return 'committed';
+      }).then(String, (error: Error) => error.message);
+    }, { timeout: 15_000 });
+    expect(deletion).toMatch(/lock timeout|canceling statement/i);
+  });
+
   it('an uninstall cannot commit between the install check and the grant: it waits on the lock', async () => {
     const { requireAgentMemoryGrant } = await import('../../api/graphql/schema/resolvers.helpers.js');
     const { app } = await createDbAppWithKey(db, 'lock-app', attackerOrgId);

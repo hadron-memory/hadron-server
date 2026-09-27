@@ -67,7 +67,12 @@ export async function sharedChatKnowledgeMemoryIds(
   callerUserId: string,
 ): Promise<string[]> {
   const items = await db.agentMemoryItem.findMany({
-    where: { agentId, deletedAt: null, memory: { class: 'knowledge', deletedAt: null } },
+    where: {
+      agentId, deletedAt: null,
+      // A legacy user holding can be class='knowledge' with ownerUserId NULL.
+      // userMemoryOfAgentId still makes it per-user, never shared-chat context.
+      memory: { class: 'knowledge', deletedAt: null, userMemoryOfAgentId: null },
+    },
     select: { memoryId: true, memory: { select: { appId: true, ownerUserId: true } } },
   });
   return items

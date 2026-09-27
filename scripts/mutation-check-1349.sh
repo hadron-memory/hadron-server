@@ -231,12 +231,12 @@ run "37 same-App App gate removed" "$H" \
 run "38 same-App class restriction removed" "$H" \
   "  if (memory.class !== 'knowledge' && memory.class !== 'group') return false;" ""
 run "39 same-App admits an uninstalled App" "$H" \
-  "      uninstalledAt: null," ""
+  "AND uninstalled_at IS NULL FOR SHARE" "FOR SHARE"
 run "40 same-App admits a deleted App" "$H" \
-  "      deletedAt: null,
-      uninstalledAt: null," "      uninstalledAt: null,"
+  "AND deleted_at IS NULL AND uninstalled_at IS NULL FOR SHARE" \
+  "AND uninstalled_at IS NULL FOR SHARE"
 run "41 same-App admits an App in a soft-deleted org" "$H" \
-  "      OR: [{ organizationId: null }, { organization: { deletedAt: null } }]," ""
+  "AND deleted_at IS NULL FOR SHARE" "FOR SHARE"
 run "45 role parsed before concealment" "$H" \
   "  const asked = rawRole ?? 'read';" "  const asked = parseAgentMemoryRole(rawRole);"
 run "46 narrowing judged against the pre-transfer tenant (fail-fast)" "$M" \
@@ -284,6 +284,14 @@ run "61 transfer retains a destination PUBLIC-agent writer" "$A" \
 run "62 platform ADMIN bypasses App-scoped grant rule" "$H" \
   "      (memory.class === 'knowledge' || memory.class === 'group') && !sameAppRead) {" \
   "      (memory.class === 'knowledge' || memory.class === 'group') && false) {"
+# #1357 round 15: the locked target must remain live, and the App/org lifecycle
+# rows must stay locked until the App-scoped grant commits.
+run "63 locked system-memory target liveness removed" "$AG" \
+  "          if (lockedTarget.deletedAt) {" "          if (false) {"
+run "64 App lifecycle row lock removed" "$H" \
+  "AND uninstalled_at IS NULL FOR SHARE" "AND uninstalled_at IS NULL"
+run "65 org lifecycle row lock removed" "$H" \
+  "AND deleted_at IS NULL FOR SHARE" "AND deleted_at IS NULL"
 run "42 a foreign PUBLIC agent vetoes the narrowing again" "$A" \
   "      OR: sameTenant," ""
 run "43 sweep keys on the raw PUBLIC column" "$A" \

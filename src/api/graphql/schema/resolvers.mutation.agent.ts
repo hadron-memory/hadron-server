@@ -498,6 +498,9 @@ export const agentMutations = {
           // and uploads disabled, attached to nothing. Deferring the write is
           // what makes the refusal and the promotion succeed or fail together.
           const target = await ctx.db.memory.findUniqueOrThrow({ where: { id: incoming } });
+          if (target.deletedAt) {
+            throw new GraphQLError('Memory not found', { extensions: { code: 'MEMORY_NOT_FOUND' } });
+          }
           // #949: was a bare `target.organizationId !== agent.organizationId`,
           // which for a USER-owned agent compares `null !== null` ⇒ false and
           // waves through ANOTHER user's memory
@@ -668,8 +671,11 @@ export const agentMutations = {
           }
           const lockedTarget = await tx.memory.findUniqueOrThrow({
             where: { id: promoteSystemMemoryId },
-            select: { organizationId: true, ownerUserId: true, id: true },
+            select: { organizationId: true, ownerUserId: true, id: true, deletedAt: true },
           });
+          if (lockedTarget.deletedAt) {
+            throw new GraphQLError('Memory not found', { extensions: { code: 'MEMORY_NOT_FOUND' } });
+          }
           assertSystemMemoryOwner(lockedAgent, {
             organizationId: lockedTarget.organizationId,
             ownerUserId: lockedTarget.ownerUserId,
