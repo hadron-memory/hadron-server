@@ -339,7 +339,7 @@ export interface TestableMcpServer {
  * pins every entry to the registered door schemas, so the two cannot drift.
  */
 export const GOVERNED_MCP_DOOR_FIELDS: readonly string[] = [
-  'name', 'description', 'abstract', 'content', 'tags', 'nodeType', 'seq', 'properties', 'data',
+  'name', 'description', 'abstract', 'content', 'tags', 'nodeType', 'seq', 'properties', 'data', 'authoredWith',
 ];
 
 /**
@@ -5736,6 +5736,7 @@ export function createMcpServerInstance(
     seq: z.number().optional().describe('Sort order among siblings (lower values first)'),
     properties: z.record(z.string(), z.unknown()).optional().describe('Structured key-value properties'),
     data: z.record(z.string(), z.unknown()).optional().describe('Runtime data bag'),
+    authoredWith: z.object({ task: z.string(), revision: z.number().int().positive() }).optional().describe('For a role governed by an author task: its stable Node.id and current revision.'),
   };
 
   /** One handler shape for all four tools — the kind and the mode are the only variables. */

@@ -45,4 +45,24 @@ describe('#1328 MCP author-task parity', () => {
     expect(await db.node.findUniqueOrThrow({ where: { id: first.id } }))
       .toMatchObject({ content: 'two', authoredByTask: taskId, authoredByRevision: 2 });
   });
+
+  it('the governed review door accepts the same assertion rather than trapping agents behind the generic gate', async () => {
+    const config = await db.memoryConfig.findUniqueOrThrow({ where: { memoryId } });
+    await db.nodeRoleRule.create({ data: {
+      id: generateId(), configId: config.id, role: 'review', authorTaskId: taskId, authorTaskRequired: true,
+    } });
+    const srv = createTestableMcpServer(auth());
+    expect(await srv.callToolText('hadron_create_review', { urn: urn('review'), name: 'Review', content: 'check' }))
+      .toMatch(/^\[author_task_missing\]/);
+    expect(await srv.callToolText('hadron_create_review', {
+      urn: urn('review'), name: 'Review', content: 'check', authoredWith: { task: taskId, revision: 1 },
+    })).toMatch(/review node created/);
+    expect(await db.node.findFirstOrThrow({ where: { memoryId, loc: 'review' } }))
+      .toMatchObject({ role: 'review', authorshipKind: 'TASK', authoredByTask: taskId, authoredByRevision: 1 });
+    expect(await srv.callToolText('hadron_update_review', { urn: urn('review'), content: 'check again' }))
+      .toMatch(/^\[author_task_missing\]/);
+    expect(await srv.callToolText('hadron_update_review', {
+      urn: urn('review'), content: 'check again', authoredWith: { task: taskId, revision: 1 },
+    })).toMatch(/review node updated/);
+  });
 });
