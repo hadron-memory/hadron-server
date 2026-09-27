@@ -285,6 +285,37 @@ describe('locked vs unlocked writes', () => {
     });
   });
 
+  it('persists a same-abstract accuracy reset through GraphQL on an encrypted node and keeps its stamp', async () => {
+    // Decrypting for the diff makes the abstract compare equal, so the DERIVED
+    // hash must be in the diff too, or the reset is skipped as a no-op
+    // (Codex on #1397 dbf7cdce). MCP's twin is the test below.
+    const server = mcp(ownerAuth());
+    await server.callToolText('hadron_unlock_memory', { memoryUrn, passphrase: PASS });
+    const context = { db, roles: ['ADMIN'], userId: owner.id } as Context;
+    await writeNodeCore(
+      { memoryId, loc: 'secret-note', content: 'the plaintext secret', abstract: 'A secret summary.' },
+      context, 'update',
+    );
+    const initial = await db.node.findFirstOrThrow({ where: { memoryId, loc: 'secret-note' } });
+    const taskId = generateId();
+    await db.node.update({
+      where: { id: initial.id },
+      data: {
+        authorshipKind: 'TASK', authoredByTask: taskId, authoredByRevision: 1,
+        authoredAt: new Date('2026-09-26T20:00:00Z'),
+        abstractOriginHash: computeContentHash('an older secret'),
+        revisionContentHash: revisionStateHashRefreshMarker(),
+      },
+    });
+    const revisions = await db.nodeRevision.count({ where: { nodeId: initial.id } });
+    await writeNodeCore({ memoryId, loc: 'secret-note', abstract: 'A secret summary.' }, context, 'update');
+    expect(await db.node.findUniqueOrThrow({ where: { id: initial.id } })).toMatchObject({
+      abstractOriginHash: computeContentHash('the plaintext secret'),
+      authorshipKind: 'TASK', authoredByTask: taskId, authoredByRevision: 1,
+    });
+    expect(await db.nodeRevision.count({ where: { nodeId: initial.id } })).toBe(revisions + 1);
+  });
+
   it('keeps authorship when an identical abstract only refreshes its derived hash', async () => {
     const server = mcp(ownerAuth());
     await server.callToolText('hadron_unlock_memory', { memoryUrn, passphrase: PASS });
