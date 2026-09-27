@@ -48,6 +48,7 @@ import {
   validateApiStyle,
   usesProcessCredential,
   validateEndpoint,
+  refuseLegacyBaseUrl,
   type AiApiStyle,
 } from '../../lib/aiEndpoint.js';
 import { assertModelBuildable, generateText, LlmInvocationError, type LlmRequest, type LlmResult } from '../../lib/llm/index.js';
@@ -68,6 +69,15 @@ export interface AiConfigTestOverride {
    * reads them (it clears the key), so an edit that removes the key tests as one.
    */
   apiKey?: string | null;
+  /**
+   * Edited params to test instead of the saved ones (#1413), validated
+   * exactly as a save validates them — including the legacy params.baseUrl
+   * refusal — against the EFFECTIVE provider, before anything outbound.
+   * Used for the call, never stored. Omitted = the saved params; null = the
+   * edit clears them (the provider defaults), as updateAiServiceConfig
+   * reads params.
+   */
+  params?: unknown;
 }
 
 type Source = 'SAVED' | 'OVERRIDE';
@@ -80,7 +90,7 @@ export interface AiConfigTestResult {
   model: string;
   endpoint: string | null;
   apiStyle: AiApiStyle | null;
-  used: { provider: Source; model: Source; endpoint: Source; apiStyle: Source; key: KeySource };
+  used: { provider: Source; model: Source; endpoint: Source; apiStyle: Source; params: Source; key: KeySource };
   latencyMs: number;
   reply: string | null;
   error: { code: string; message: string; transient: boolean } | null;
@@ -342,6 +352,15 @@ export async function testAiServiceConfig(
   // The RESULTING pair, as a save would judge it: a test that passes must be
   // an edit that can be saved (#1385 review, Codex).
   validateProviderAndParams(provider, row.params ?? null);
+  // #1413: an edited params override is judged by the same rule — Save's own
+  // two checks against the EFFECTIVE provider, the legacy params.baseUrl
+  // refusal first so it never reaches a provider — and then only the CALL
+  // sees it: the stored row is never written.
+  if (override.params !== undefined) {
+    refuseLegacyBaseUrl(override.params);
+    validateProviderAndParams(provider, override.params);
+  }
+  const params = override.params === undefined ? row.params : override.params;
   const endpoint =
     override.endpoint === undefined ? row.endpoint : override.endpoint ? validateEndpoint(override.endpoint) : null;
   const apiStyle = override.apiStyle === undefined ? row.apiStyle : override.apiStyle;
@@ -371,6 +390,9 @@ export async function testAiServiceConfig(
     model: override.model != null ? 'OVERRIDE' : 'SAVED',
     endpoint: override.endpoint === undefined ? 'SAVED' : 'OVERRIDE',
     apiStyle: override.apiStyle === undefined ? 'SAVED' : 'OVERRIDE',
+    // #1413: presence again — a null params override (the edit clears them)
+    // is still the override, and is what gets sent.
+    params: override.params === undefined ? 'SAVED' : 'OVERRIDE',
     key: keySource,
   };
   const base = {
@@ -430,6 +452,8 @@ export async function testAiServiceConfig(
       model,
       endpoint,
       apiStyle,
+      // #1413: the effective params — saved, or the edit under test.
+      params,
       // PLATFORM runs keyless even when the edit is what cleared the key.
       apiKeyEncrypted: overrideKey ? encryptToken(overrideKey) : keySource === 'SAVED' ? row.apiKeyEncrypted : null,
     },
@@ -492,7 +516,19 @@ export async function testAiServiceConfig(
   let out: LlmResult | null = null;
   let error: AiConfigTestResult['error'] = null;
   try {
-    out = await deps.generate(resolved, { ...AI_CONFIG_TEST_REQUEST, timeoutMs: deps.timeoutMs });
+    // #1413: the probe's own maxTokens pin is a DEFAULT, not an override —
+    // the effective params (saved, or the edit under test) may set their own
+    // cap, and the test must send what the edit says. Cost stays bounded:
+    // max_tokens caps output, and the probe's prompt still asks for one word.
+    const paramsMaxTokens =
+      params && typeof params === 'object' && 'maxTokens' in params
+        ? (params as { maxTokens?: number }).maxTokens
+        : undefined;
+    out = await deps.generate(resolved, {
+      ...AI_CONFIG_TEST_REQUEST,
+      ...(paramsMaxTokens != null ? { maxTokens: paramsMaxTokens } : {}),
+      timeoutMs: deps.timeoutMs,
+    });
   } catch (e) {
     error = {
       code: 'LLM_CALL_FAILED',

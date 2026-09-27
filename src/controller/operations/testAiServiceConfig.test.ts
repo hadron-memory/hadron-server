@@ -10,6 +10,7 @@ import type { AddressInfo } from 'node:net';
 import { GraphQLError } from 'graphql';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../../test/helpers.js';
+import { typeDefs } from '../../api/graphql/schema/typeDefs.js';
 import { generateId } from '../../lib/id.js';
 import { encryptToken } from '../../lib/tokenCrypto.js';
 import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
@@ -151,7 +152,7 @@ describe('testAiServiceConfig (#1378)', () => {
   it('an override tests edited values without saving them, and says so field by field', async () => {
     const cfg = await mkConfig({ organizationId: org.id });
     const r = await test(cfg.id, ctxFor(admin.id), { model: 'GLM-5.4', apiKey: OVERRIDE_KEY, endpoint: `${origin}/other/v4` });
-    expect(r.used).toEqual({ provider: 'SAVED', model: 'OVERRIDE', endpoint: 'OVERRIDE', apiStyle: 'SAVED', key: 'OVERRIDE' });
+    expect(r.used).toEqual({ provider: 'SAVED', model: 'OVERRIDE', endpoint: 'OVERRIDE', apiStyle: 'SAVED', params: 'SAVED', key: 'OVERRIDE' });
     expect(captured[0]).toMatchObject({ path: '/other/v4/chat/completions', auth: `Bearer ${OVERRIDE_KEY}` });
     expect(JSON.stringify(r)).not.toContain(OVERRIDE_KEY);
     const row = await db.aiServiceConfig.findUniqueOrThrow({ where: { id: cfg.id } });
@@ -617,5 +618,54 @@ describe('testAiServiceConfig (#1378)', () => {
     }
     expect(caught?.extensions).toMatchObject({ code: 'RATE_LIMITED' });
     expect(captured).toHaveLength(AI_CONFIG_TEST_LIMIT);
+  });
+});
+
+describe('testAiServiceConfig override.params (#2504 evidence)', () => {
+  it('an edited params override is TESTED, not the saved ones, and is never stored', async () => {
+    // The contract the portal needs (Gil #2504): an admin edits Parameters
+    // (maxTokens, toolCalling, …) and presses Test — the override must carry
+    // them, validated exactly as a save validates params (including the
+    // params.baseUrl refusal), used for the call, and never written back.
+    expect(typeDefs).toMatch(/input AiServiceConfigTestOverride \{[\s\S]*?params: JSON/);
+    const cfg = await mkConfig({ organizationId: org.id, params: { maxTokens: 32 } });
+    const r = await test(cfg.id, ctxFor(admin.id), { params: { maxTokens: 999 } });
+    expect(r.used).toMatchObject({ params: 'OVERRIDE' });
+    expect(captured[0].body).toMatchObject({ max_tokens: 999 });
+    expect((await db.aiServiceConfig.findUnique({ where: { id: cfg.id } }))?.params).toEqual({ maxTokens: 32 });
+  });
+
+  it('an override params.baseUrl is refused exactly as a save refuses it', async () => {
+    const cfg = await mkConfig({ organizationId: org.id, params: { maxTokens: 32 } });
+    await expect(test(cfg.id, ctxFor(admin.id), { params: { baseUrl: 'https://evil.example' } })).rejects.toMatchObject({
+      message: expect.stringMatching(/baseUrl is no longer read/),
+      extensions: { code: 'AiConfigValidationError' },
+    });
+    expect(captured).toEqual([]);
+  });
+});
+
+describe('testAiServiceConfig override.params null/clear semantics (#1413)', () => {
+  it('params: null tests the edit that CLEARS them: provider defaults sent, used.params = OVERRIDE, row untouched', async () => {
+    const cfg = await mkConfig({ organizationId: org.id, params: { maxTokens: 32 } });
+    const r = await test(cfg.id, ctxFor(admin.id), { params: null });
+    expect(r.used).toMatchObject({ params: 'OVERRIDE' });
+    // 16 is the client default; the saved 32 must NOT be sent.
+    expect(captured[0].body).toMatchObject({ max_tokens: 16 });
+    expect((await db.aiServiceConfig.findUnique({ where: { id: cfg.id } }))?.params).toEqual({ maxTokens: 32 });
+  });
+
+  it('omitted params keep testing the SAVED ones, and an invalid edited params pair is refused as a save would', async () => {
+    const cfg = await mkConfig({ organizationId: org.id, params: { maxTokens: 32 } });
+    const r = await test(cfg.id, ctxFor(admin.id));
+    expect(r.used).toMatchObject({ params: 'SAVED' });
+    expect(captured[0].body).toMatchObject({ max_tokens: 32 });
+    // Validated against the EFFECTIVE provider: an anthropic override meets
+    // anthropic's schema, an openai override meets openai's (maxTokens is
+    // well-known and type-checked for every provider).
+    await expect(
+      test(cfg.id, ctxFor(admin.id), { provider: 'openai', params: { maxTokens: 1.5 } }),
+    ).rejects.toMatchObject({ extensions: { code: 'UnknownAiProviderError' } });
+    expect(captured).toHaveLength(1); // no second call
   });
 });

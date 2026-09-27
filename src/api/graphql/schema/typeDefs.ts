@@ -3124,6 +3124,8 @@ export const typeDefs = `#graphql
     apiStyle: AiApiStyle
     "A key to test with instead of the stored one. Never stored, never echoed."
     apiKey: String
+    "Edited params to test instead of the saved ones (#1413): validated exactly as a save validates them, including the params.baseUrl refusal, against the effective provider — before anything outbound. Used for the call, never stored. Omitted = the saved params; null = the edit clears them (the provider defaults)."
+    params: JSON
   }
 
   "#1378: per field, whether the test used the saved value or the override."
@@ -3132,6 +3134,7 @@ export const typeDefs = `#graphql
     model: AiConfigTestValueSource!
     endpoint: AiConfigTestValueSource!
     apiStyle: AiConfigTestValueSource!
+    params: AiConfigTestValueSource!
     key: AiConfigTestKeySource!
   }
 
