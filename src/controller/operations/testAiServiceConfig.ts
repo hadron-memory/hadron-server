@@ -104,14 +104,14 @@ export const AI_CONFIG_TEST_REQUEST: LlmRequest = {
 
 /**
  * #1413: the probe's hard output cap, independent of the params under test —
- * the effective maxTokens may raise the default 16 up to here, never beyond.
- * A model that ignores the one-word instruction is bounded by this, not by
- * the edited runtime value; the platform-funded reservation below scales to
- * cover prompt plus this cap, so a test cannot overshoot what it reserved.
- * Like the probe's one-word prompt, the cap is the probe's own, not part of
- * the config being tested.
+ * the effective maxTokens may not exceed it. Held at #1378's original 16
+ * pending an explicit cost ruling on raising it (QA #2596): the one argument
+ * for more is that thinking models spend reasoning tokens against
+ * max_tokens, so 16 can truncate a healthy config's single-word reply into
+ * a false failure. Like the probe's one-word prompt, the cap is the probe's
+ * own, not part of the config being tested.
  */
-export const AI_CONFIG_TEST_PROBE_MAX_TOKENS = 256;
+export const AI_CONFIG_TEST_PROBE_MAX_TOKENS = 16;
 
 // ── Rate limit ───────────────────────────────────────────────────────────
 // A test is a real provider call, so the button must not be a free relay.
@@ -507,10 +507,11 @@ export async function testAiServiceConfig(
   // A platform-funded probe RESERVES its tokens from the org's allowance
   // before the call, atomically (#1385 review): a check followed by a later
   // record let concurrent tests all pass and overshoot. Settled after. The
-  // reservation covers prompt margin plus the probe's actual output cap, so
-  // an edited maxTokens can never overshoot what was reserved (#1413).
+  // reservation covers prompt margin PLUS the probe's capped output (#1413,
+  // QA #2596: base + cap, so a realistic prompt and the full capped reply
+  // settle inside what was reserved).
   const quotaScope = keyOwnerType === 'HADRON_SERVER' && organizationId ? organizationId : null;
-  const reserveTokens = AI_CONFIG_TEST_TOKEN_RESERVE + (probeMaxTokens - (AI_CONFIG_TEST_REQUEST.maxTokens ?? 16));
+  const reserveTokens = AI_CONFIG_TEST_TOKEN_RESERVE + probeMaxTokens;
   const reservation = quotaScope
     ? await reserveQuota(ctx.db, 'org', quotaScope, 'llm.tokens', defaultQuotaLimit('org', 'llm.tokens'), reserveTokens)
     : null;
