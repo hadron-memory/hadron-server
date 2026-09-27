@@ -683,6 +683,11 @@ async function sameAppAttachAdmitted(
     `;
     if (!license[0] || !isLifecycleActive(license[0])) return false;
   }
+  // Mutation #37 is an expected survivor under today's other gates: an
+  // administrator of a same-org Agent is also an administrator of this App;
+  // a foreign Agent owner fails the subsequent memory/Agent tenant check.
+  // Keep the explicit App-admin check as this branch's local contract if
+  // either surrounding gate changes.
   try {
     await requireOwnerOrOrgRole(ctx, app, 'ADMIN');
   } catch (error) {

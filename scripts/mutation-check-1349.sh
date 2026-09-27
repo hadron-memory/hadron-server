@@ -220,7 +220,7 @@ run "35 same-App branch admits read-write" "$H" \
   "  const sameAppRead = await sameAppAttachAdmitted(ctx, agent, memory);"
 run "36 same-App install check removed (cross-App shortcut)" "$H" \
   "  if (installed.length === 0) return false;" ""
-run "37 same-App App gate removed" "$H" \
+run "37 same-App App gate removed (expected survivor)" "$H" \
   "  try {
     await requireOwnerOrOrgRole(ctx, app, 'ADMIN');
   } catch (error) {
