@@ -59,6 +59,7 @@ import type { Prisma } from '../generated/prisma/index.js';
 import { normalizeObjectType } from './enforceNodeSchema.js';
 import { validateNodeAgainstSchema, NodeSchemaViolation } from './validateNodeAgainstSchema.js';
 import type { MemorySchema } from './memorySchema.js';
+import { clearNodeAuthorship } from './nodeAuthorship.js';
 import {
   buildNodeRevisionSnapshot,
   createNodeRevision,
@@ -411,7 +412,11 @@ export async function moveNodeSubtree(
     );
     await tx.node.update({
       where: { id: n.id },
-      data: { ...changed, revisionContentHash: revisionStateHashRefreshMarker() },
+      data: {
+        ...changed,
+        ...(rename && n.name !== leaf ? clearNodeAuthorship() : {}),
+        revisionContentHash: revisionStateHashRefreshMarker(),
+      },
     });
   }
 

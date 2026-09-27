@@ -7,6 +7,7 @@ import { typeResolvers } from './resolvers.types.js';
 import type { Context } from './resolvers.js';
 import { typeDefs } from './typeDefs.js';
 import { writeNodeCore } from './resolvers.mutation.node.js';
+import { ensureCurrentNodeRevisionInTransaction } from '../../../lib/nodeRevisionSnapshot.js';
 
 const at = new Date('2026-09-26T20:00:00Z');
 let nodeMemoryId: string;
@@ -89,6 +90,23 @@ describe('#1326 content provenance reads', () => {
       authorshipKind: 'TASK', authoredByTask: taskId, authoredByRevision: 4, authoredAt: at,
     });
     expect(await db.nodeRevision.count({ where: { nodeId } })).toBe(0);
+  });
+
+  it('clears a stale stamp from both live and reconciled state after an unrevisioned raw content edit', async () => {
+    // A legacy row with no fingerprint first establishes its baseline; only
+    // the later raw data edit is detectable drift.
+    await db.$transaction((tx) => ensureCurrentNodeRevisionInTransaction(tx, nodeId, { expectedMemoryId: nodeMemoryId }));
+    await db.node.update({ where: { id: nodeId }, data: { data: { raw: 'new content' } } });
+    await db.$transaction((tx) => ensureCurrentNodeRevisionInTransaction(tx, nodeId, { expectedMemoryId: nodeMemoryId }));
+    expect(await db.node.findUniqueOrThrow({ where: { id: nodeId } })).toMatchObject({
+      authorshipKind: null, authoredByTask: null, authoredByRevision: null, authoredAt: null,
+    });
+    const reconciled = await db.nodeRevision.findFirstOrThrow({ where: { nodeId }, orderBy: { revNo: 'desc' } });
+    expect(reconciled).toMatchObject({
+      data: { raw: 'new content' }, authorshipKind: null, authoredByTask: null, authoredByRevision: null,
+    });
+    await db.$transaction((tx) => ensureCurrentNodeRevisionInTransaction(tx, nodeId, { expectedMemoryId: nodeMemoryId }));
+    expect(await db.nodeRevision.count({ where: { nodeId } })).toBe(1);
   });
 
   it('offers no public GraphQL setter for system-owned attribution or validation', () => {
