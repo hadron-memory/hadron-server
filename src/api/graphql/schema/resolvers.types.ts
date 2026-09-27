@@ -4,6 +4,7 @@ import { isLifecycleActive } from '@hadron-memory/access-control';
 import {
   getPrimaryAgent,
   getPrimaryAgentId,
+  isGrantedAgentMemoryRole,
 } from '../../../lib/appAgent.js';
 import {
   emitNodeUrnV2,
@@ -1502,7 +1503,7 @@ export const typeResolvers = {
         userMemoryOfAgentId: string | null;
         createdBy: string | null;
       };
-      type Item = { memoryId: string; memory?: Mem | null };
+      type Item = { memoryId: string; role: string | null; memory?: Mem | null };
       const eager = a.memoryItems as Item[] | undefined;
       // Fall back to a query when the field wasn't eager-loaded AT ALL, and
       // also when it was loaded WITHOUT its `memory` relation — otherwise every
@@ -1517,6 +1518,10 @@ export const typeResolvers = {
         : eager;
       const kept: Item[] = [];
       for (const item of items) {
+        // A malformed persisted role grants no audience, even when the linked
+        // Memory itself is PUBLIC. The public fast path must honor the same
+        // link semantics as the App access fold.
+        if (!isGrantedAgentMemoryRole(item.role)) continue;
         const mem = item.memory;
         if (!mem) continue;
         // Legacy per-user holding rows can carry PUBLIC visibility while

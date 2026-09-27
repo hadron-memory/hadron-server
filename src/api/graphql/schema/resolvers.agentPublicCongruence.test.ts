@@ -205,6 +205,17 @@ describe('Agent.memoryItems — non-public linked memories are gated (#759)', ()
     expect(items.map((i: { memoryId: string }) => i.memoryId)).toEqual([pubMem.id]);
   });
 
+  it('a malformed link role does not expose a PUBLIC memory through either load path', async () => {
+    await db.agentMemoryItem.update({
+      where: { agentId_memoryId: { agentId: pubAgent.id, memoryId: pubMem.id } },
+      data: { role: 'bogus' },
+    });
+    const eager = await A.memoryItems(await eagerAgent(), {}, anon());
+    const fetched = await A.memoryItems({ id: pubAgent.id }, {}, outsider(stranger.id));
+    expect(eager.map((i: { memoryId: string }) => i.memoryId)).not.toContain(pubMem.id);
+    expect(fetched.map((i: { memoryId: string }) => i.memoryId)).not.toContain(pubMem.id);
+  });
+
   it('the app-scoped memory’s scalars are unreachable to an outsider', async () => {
     const items = await A.memoryItems(await eagerAgent(), {}, outsider(stranger.id));
     const descriptions = items.map((i: { memory?: { description?: string | null } }) => i.memory?.description);
