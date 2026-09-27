@@ -360,9 +360,14 @@ async function resolveAuthorship(state: AuthoredState, ctx: Context) {
 async function reconciledNodeForParent(
   n: SnapshotSourceNode & { revSeq: number },
   ctx: Context,
-  matches: (parent: SnapshotSourceNode, current: SnapshotSourceNode) => boolean,
 ): Promise<(SnapshotSourceNode & { revSeq: number }) | null> {
-  return ctx.db.$transaction(async (tx) => {
+  // Sibling GraphQL fields resolve independently, often concurrently. Cache
+  // by the selected parent OBJECT, not node id: two mutation fields in one
+  // request may return different states of the same node.
+  const cache = ctx.nodeReconcileCache ??= new WeakMap();
+  const existing = cache.get(n);
+  if (existing) return existing;
+  const pending = ctx.db.$transaction(async (tx) => {
     // A newer number is safe only when every intervening revision came from
     // another reader's reconcile. An authored or edge write may have changed
     // the parent's state even when its tracked fields happen to look equal.
@@ -380,8 +385,10 @@ async function reconciledNodeForParent(
     if (!current) return null;
     const key = sessionKeyCache.getByMemoryId(current.memoryId);
     if (key) decryptNodeFieldsWithKey(current, key);
-    return matches(n, current) ? current : null;
+    return revisionStateMatchesWithoutAuthorship(n, current) ? current : null;
   });
+  cache.set(n, pending);
+  return pending;
 }
 
 /** The read resolver corrects a stale stamp without changing authored content. */
@@ -447,7 +454,7 @@ export const typeResolvers = {
       // no other GraphQL field is guaranteed to run first. Compare the
       // parent's content after ignoring its stale stamp; a concurrent
       // supported edit must not lend its new authorship to this old parent.
-      const current = await reconciledNodeForParent(n, ctx, revisionStateMatchesWithoutAuthorship);
+      const current = await reconciledNodeForParent(n, ctx);
       // If the selected parent no longer matches a reconcilable live state,
       // its stamp cannot be verified here. An absent claim is safer than
       // attributing raw drift that a concurrent writer has since overwritten.
@@ -477,7 +484,7 @@ export const typeResolvers = {
       // then use the new number only when the selected content still matches.
       // The reconcile itself may clear a stale authorship stamp; the field
       // resolver presents that corrected stamp, so its change is allowed here.
-      const current = await reconciledNodeForParent(n, ctx, revisionStateMatchesWithoutAuthorship);
+      const current = await reconciledNodeForParent(n, ctx);
       return current?.revSeq ?? n.revSeq;
     },
     tags: (node: { tags: string | string[] }) => deserializeTags(node.tags),

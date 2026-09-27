@@ -3083,11 +3083,28 @@ export const nodeMutations = {
       { sourceRef, targetUrn, targetMemoryRef }: { sourceRef: string; targetUrn?: string | null; targetMemoryRef?: string | null },
       ctx: Context,
     ) => {
-      const source = await resolveExistingNode(ctx, sourceRef);
+      const selectedSource = await resolveExistingNode(ctx, sourceRef);
       // Cloning READS the source's content — require read access to the source
       // memory, or the URN-widened input becomes a cross-tenant exfiltration
       // path (review:entity-ref-args #3). Denial reads as not-found (no oracle).
-      if (!(await canReadMemory(ctx.db, ctx, source.memoryId))) {
+      if (!(await canReadMemory(ctx.db, ctx, selectedSource.memoryId))) {
+        throw new GraphQLError(`Node not found: "${sourceRef}"`, {
+          extensions: { code: 'NODE_NOT_FOUND', ref: sourceRef },
+        });
+      }
+      // A raw writer may have changed the source's content while leaving its
+      // old task/human stamp. Reconcile under the source row lock and copy the
+      // resulting state; the clone's own fingerprint would otherwise certify
+      // the stale stamp permanently. A concurrent move or delete is a miss in
+      // the memory this caller was authorized to read.
+      const source = await ctx.db.$transaction(async (tx) => {
+        if ((await ensureCurrentNodeRevisionInTransaction(tx, selectedSource.id, {
+          expectedMemoryId: selectedSource.memoryId,
+        })) == null) return null;
+        const current = await tx.node.findUnique({ where: { id: selectedSource.id } });
+        return current && !current.deletedAt && current.loc === selectedSource.loc ? current : null;
+      });
+      if (!source) {
         throw new GraphQLError(`Node not found: "${sourceRef}"`, {
           extensions: { code: 'NODE_NOT_FOUND', ref: sourceRef },
         });

@@ -3,6 +3,7 @@
 // by the GraphQL resolver map. No behavior change. The `Context` interface
 // lives here and is re-exported from resolvers.ts for existing importers.
 import type { NodeMergeField } from '../../../lib/nodeMerge.js';
+import type { SnapshotSourceNode } from '../../../lib/nodeRevisionSnapshot.js';
 import { sharedUrnAgentSlug } from '../../../lib/sharedMemoryLegacyKey.js';
 // Spec 049 Phase 5 — the install-created register row (D2) and its removal on uninstall.
 import { ensureInstallRegisterRows, removeRegisterRowsForUninstall } from '../../../lib/registerInstall.js';
@@ -112,6 +113,10 @@ export interface Context {
   // response's nodes/edges overwhelmingly share a memory, so the memory-urn
   // lookup is memoized per request (lazily created; see loadMemoryUrn).
   memoryUrnCache?: Map<string, Promise<string | null>>;
+  // Request-scoped per-parent reconciliation. Node.revision,
+  // Node.contentValidation and Node.authorship can all resolve on one GraphQL
+  // Node object; share its locked read without mixing distinct parent states.
+  nodeReconcileCache?: WeakMap<object, Promise<(SnapshotSourceNode & { revSeq: number }) | null>>;
   // Request-scoped memo for AppRun.urn composition (#696) — a run-list response
   // often shares one App across many runs, so the app-urn lookup is memoized per
   // request (lazily created; see loadAppUrn).
