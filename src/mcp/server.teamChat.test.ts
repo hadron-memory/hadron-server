@@ -133,6 +133,28 @@ describe('hadron_team_chat_post / hadron_team_chat_read (#939)', () => {
     expect(readBack).toContain('for the automation');
   });
 
+  it('an App key bound to a session cannot widen its team-chat read with an explicit session', async () => {
+    const member = createTestableMcpServer(hybridAuth(admin.id));
+    await member.callToolText('hadron_team_chat_post', { body: 'team-only message' });
+    const { agentId } = await db.appAgent.findFirstOrThrow({ where: { appId: app.id }, select: { agentId: true } });
+    const sessionMemory = await db.memory.create({
+      data: {
+        id: generateId(), organizationId: org.id, urn: `${org.urn}:session`,
+        name: 'session', class: 'app', appId: app.id, userMemoryOfAgentId: agentId,
+      },
+    });
+    const session = await db.session.create({
+      data: { id: generateId(), appId: app.id, agentId, memoryId: sessionMemory.id },
+    });
+    const appKey = createTestableMcpServer({ appId: app.id, sessionId: session.id, clientId: `app:${app.id}` });
+
+    for (const args of [{}, { session: session.id }]) {
+      const readBack = await appKey.callToolText('hadron_team_chat_read', args);
+      expect(readBack).toContain('no matching messages');
+      expect(readBack).not.toContain('team-only message');
+    }
+  });
+
   it('surfaces typed refusals as tool text', async () => {
     const srv = createTestableMcpServer(hybridAuth(admin.id));
     const out = await srv.callToolText('hadron_team_chat_post', { body: 'reply', replyToSeq: 42 });

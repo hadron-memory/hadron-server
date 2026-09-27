@@ -358,13 +358,16 @@ describe('Mutation.moveNode access control (#564 sourceRef/targetUrn)', () => {
   });
 
   it('App cannot move nodes in inaccessible memories', async () => {
+    // #1381: the App can neither write nor read this memory, so its node
+    // answers as a missing one — `Forbidden` confirmed that it exists.
+    const sourceRef = await nodeBId();
     await expect(
       resolvers.Mutation.moveNode(
         null,
-        { sourceRef: await nodeBId(), targetUrn: targetInB('org-b.repo.moved') },
+        { sourceRef, targetUrn: targetInB('org-b.repo.moved') },
         ctx({ appId: appContributor.id }),
       ),
-    ).rejects.toThrow('Forbidden');
+    ).rejects.toThrow(`Node not found: "${sourceRef}"`);
   });
 
   // 007-entity-id-or-urn: sourceRef accepts a fully-qualified URN, not just a PK.
@@ -462,7 +465,8 @@ describe('Mutation.replaceSubtree access control', () => {
         },
         ctx({ appId: appContributor.id }),
       ),
-    ).rejects.toThrow('Forbidden');
+      // #1381: an inaccessible memory answers as a missing one.
+    ).rejects.toThrow(`MEMORY_NOT_FOUND: ${graphB.id}`);
   });
 
   // Regression: edge target resolution must be scoped to the memory. `loc` is

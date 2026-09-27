@@ -181,7 +181,7 @@ export async function resolveRefArg(
       extensions: { code: 'BAD_USER_INPUT' },
     });
   }
-  const chosen = ref || id;
+  const chosen = chosenRefArg(args);
   if (!chosen) {
     throw new GraphQLError(
       `A ${args.label} is required: pass ${args.label}Ref (or the deprecated ${args.label}Id).`,
@@ -192,11 +192,7 @@ export async function resolveRefArg(
     const { id: resolvedId } = await resolve(db, chosen);
     return resolvedId;
   } catch (e) {
-    if (isEntityNotFound(e)) {
-      throw new GraphQLError(`No match for ${args.label}Ref "${chosen}".`, {
-        extensions: { code: 'NOT_FOUND' },
-      });
-    }
+    if (isEntityNotFound(e)) throw refArgNotFoundError(args.label, chosen);
     if (e instanceof AmbiguousUserRefError) {
       throw new GraphQLError(
         `${args.label}Ref "${chosen}" matches more than one account (differing only by email case). Use the exact-case email, the handle, or the id.`,
@@ -205,6 +201,20 @@ export async function resolveRefArg(
     }
     throw e;
   }
+}
+
+/** The ref `resolveRefArg` resolves: the trimmed `<label>Ref`, else the deprecated `<label>Id`. */
+export function chosenRefArg(args: { ref?: string | null; id?: string | null }): string | undefined {
+  return args.ref?.trim() || args.id?.trim();
+}
+
+/**
+ * `resolveRefArg`'s answer for a ref that resolves to nothing. Exported so a
+ * surface that CONCEALS an unreadable target (#1381, `cor:api:140:03`) throws
+ * the identical error rather than a copy that could drift.
+ */
+export function refArgNotFoundError(label: string, chosen: string): GraphQLError {
+  return new GraphQLError(`No match for ${label}Ref "${chosen}".`, { extensions: { code: 'NOT_FOUND' } });
 }
 
 /** #764 — per-entity `resolveRefArg` wrappers (label = the ref arg's name). */
@@ -501,27 +511,84 @@ export async function concealUnreadableDenial(
   memoryId: string,
   ref: string,
   authorize: () => Promise<void>,
+  // #1381 — the surface's own missing-memory error, for the surfaces whose
+  // miss is not `MemoryNotFoundError` (the `<label>Ref` arguments answer
+  // `refArgNotFoundError`). Only an identical answer conceals anything.
+  missing: () => Error = () => new MemoryNotFoundError(ref),
 ): Promise<void> {
   try {
     await authorize();
   } catch (error) {
     if (!isAuthorizationDenial(error)) throw error;
-    const record = await ctx.db.memory.findUnique({
-      where: { id: memoryId },
-      select: {
-        id: true,
-        class: true,
-        userId: true,
-        ownerUserId: true,
-        organizationId: true,
-        appId: true,
-        userMemoryOfAgentId: true,
-        deletedAt: true,
-      },
-    });
-    if (record && !record.deletedAt && (await canReadMemoryRecord(ctx, record))) throw error;
-    throw new MemoryNotFoundError(ref);
+    if (await canOpenMemoryRecordById(ctx, memoryId)) throw error;
+    throw missing();
   }
+}
+
+/**
+ * The record gate by id: may this caller open the memory's record? A
+ * soft-deleted or absent memory is never openable. Reads EVERY field
+ * `canReadMemoryRecord` requires — omitting one can fail it open (#1104).
+ */
+export async function canOpenMemoryRecordById(ctx: Context, memoryId: string): Promise<boolean> {
+  const record = await ctx.db.memory.findUnique({
+    where: { id: memoryId },
+    select: {
+      id: true,
+      class: true,
+      userId: true,
+      ownerUserId: true,
+      organizationId: true,
+      appId: true,
+      userMemoryOfAgentId: true,
+      deletedAt: true,
+    },
+  });
+  return !!record && !record.deletedAt && (await canReadMemoryRecord(ctx, record));
+}
+
+/**
+ * Resolve a memory ref that a mutation will WRITE, concealing it at the moment
+ * it resolves (#1381): a memory this caller can neither write nor open answers
+ * `MemoryNotFoundError(ref)`, exactly as `resolveMemoryRef` answers a miss.
+ *
+ * For surfaces that resolve SEVERAL refs before authorizing any of them
+ * (`moveNode`, `mergeMemories`, …). Wrapping only the later write gate is not
+ * enough there: a missing ref refuses at resolution, so the ORDER in which the
+ * refs refuse becomes the oracle — an unreadable source paired with a missing
+ * destination answered differently from a missing source.
+ *
+ * A caller who may open the record gets the memory back and meets the
+ * surface's own write denial later, in the same order as before; a writer is
+ * never narrowed. Malformed refs and faults propagate.
+ */
+export async function resolveMemoryRefForWrite(ctx: Context, ref: string): Promise<{ id: string }> {
+  const { id } = await resolveMemoryRef(ctx.db, ref);
+  if (await isMemoryHiddenForWrite(ctx, id, 'record')) throw new MemoryNotFoundError(ref);
+  return { id };
+}
+
+/**
+ * True when this caller can neither write the memory nor read it — the only
+ * case an existence-concealing surface may answer as "missing" (#1381).
+ * `gate` picks the read half: `'record'` for a memory-addressed surface,
+ * `'node'` (the node-content gate `Query.node` uses) for a node-addressed one.
+ * Only an ordinary denial counts as "cannot write"; any other error propagates.
+ */
+export async function isMemoryHiddenForWrite(
+  ctx: Context,
+  memoryId: string,
+  gate: 'record' | 'node',
+): Promise<boolean> {
+  try {
+    await requireMemoryWriteAccess(ctx, memoryId);
+    return false;
+  } catch (error) {
+    if (!isAuthorizationDenial(error)) throw error;
+  }
+  return gate === 'node'
+    ? !(await isMemoryReadableCached(ctx, memoryId))
+    : !(await canOpenMemoryRecordById(ctx, memoryId));
 }
 
 /**
