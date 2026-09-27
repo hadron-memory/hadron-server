@@ -11,7 +11,7 @@ import { mergeOwnerNamespacedUrns } from '../../lib/mergeOwnerNamespacedUrns.js'
  * Values such as `app:<id>` / `github:<login>` are untouched because every
  * update below matches the source User.id exactly.
  */
-const AUDIT_USER_COLUMNS: Readonly<Record<string, readonly string[]>> = {
+export const AUDIT_USER_COLUMNS: Readonly<Record<string, readonly string[]>> = {
   org_members: ['created_by', 'updated_by', 'deleted_by'],
   memories: ['created_by', 'updated_by', 'deleted_by'],
   nodes: ['created_by', 'updated_by', 'deleted_by'],
@@ -60,6 +60,18 @@ const AUDIT_USER_COLUMNS: Readonly<Record<string, readonly string[]>> = {
   memory_configs: ['created_by', 'updated_by'],
   node_role_rules: ['created_by', 'updated_by'],
   memory_config_templates: ['created_by', 'updated_by', 'deleted_by'],
+  channels: ['created_by', 'updated_by', 'deleted_by'],
+  dashboard_widgets: ['created_by', 'updated_by'],
+  // Organization.createdBy identifies the hidden personal workspace and must
+  // remain on its original User; the other org audit stamps follow identity.
+  organizations: ['updated_by', 'deleted_by'],
+  register_entries: ['created_by', 'updated_by', 'deleted_by'],
+  resend_senders: ['created_by', 'updated_by'],
+  scopes: ['created_by', 'updated_by', 'deleted_by'],
+  secrets: ['created_by', 'updated_by'],
+  urn_aliases: ['created_by'],
+  users: ['created_by', 'updated_by', 'deleted_by'],
+  workers: ['created_by', 'updated_by'],
 };
 
 /**
