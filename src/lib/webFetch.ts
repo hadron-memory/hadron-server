@@ -115,7 +115,12 @@ export function isForbiddenAddress(ip: string): boolean {
       (g[0] & 0xfe00) === 0xfc00 || // fc00::/7 ULA
       (g[0] & 0xffc0) === 0xfe80 || // fe80::/10 link-local
       (g[0] & 0xffc0) === 0xfec0 || // fec0::/10 site-local (deprecated, still routable on some hosts)
-      (g[0] & 0xff00) === 0xff00 // ff00::/8 multicast
+      (g[0] & 0xff00) === 0xff00 || // ff00::/8 multicast
+      // Everything outside global unicast (2000::/3) is unallocated or
+      // special, and a network may route it internally, so it is refused by
+      // default (#1380 review). The translated forms that legitimately reach
+      // public IPv4 were judged above by their embedded address.
+      (g[0] & 0xe000) !== 0x2000
     );
   }
   // Not an IP at all — callers pass resolver output, so treat as forbidden.
