@@ -270,8 +270,8 @@ run "58 same-App install check read without the lock" "$H" \
 # #1357 round 10 (@codex): user-owned PUBLIC is not a public Agent.memoryItems
 # audience, even when the legacy link is excluded from congruence checks.
 run "59 Agent.memoryItems bypasses the owner record gate" "$AT" \
-  "if (mem.visibility === 'PUBLIC' && mem.appId == null && mem.ownerUserId == null) {" \
-  "if (mem.visibility === 'PUBLIC' && mem.appId == null) {"
+  "if (mem.visibility === 'PUBLIC' && mem.appId == null && mem.ownerUserId == null && mem.userMemoryOfAgentId == null) {" \
+  "if (mem.visibility === 'PUBLIC' && mem.appId == null && mem.userMemoryOfAgentId == null) {"
 # #1357 round 11 (@copilot): legacy re-role must share the PUBLIC link gate.
 run "60 re-role bypasses PUBLIC knowledge congruence" "$H" \
   "  await assertLinkAllowedForPublicAgent(agent.visibility, memory);" ""
