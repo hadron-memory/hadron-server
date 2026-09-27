@@ -28,8 +28,8 @@ vi.mock('../../integrations/github/syncGraphFromGithub.js', () => ({
 const M = resolvers.Mutation as any;
 
 const RECORD = `
-  mutation Record($appRef: ID!, $sessionRef: ID!, $tool: String!, $kind: String!, $ref: String!, $action: String!, $detail: JSON) {
-    recordTeamWork(appRef: $appRef, sessionRef: $sessionRef, tool: $tool, kind: $kind, ref: $ref, action: $action, detail: $detail) {
+  mutation Record($appRef: ID!, $sessionRef: ID!, $tool: String!, $kind: String!, $ref: String!, $action: String!, $detail: JSON, $model: String) {
+    recordTeamWork(appRef: $appRef, sessionRef: $sessionRef, tool: $tool, kind: $kind, ref: $ref, action: $action, detail: $detail, model: $model) {
       nodeId
       sessionId
       workerName
@@ -40,6 +40,7 @@ const RECORD = `
       action
       at
       detail
+      model
     }
   }
 `;
@@ -48,7 +49,7 @@ const ITEMS = `
   query Items($appRef: ID!, $ref: String, $sessionRef: ID, $tool: String, $kind: String, $limit: Int, $offset: Int) {
     teamWorkItems(appRef: $appRef, ref: $ref, sessionRef: $sessionRef, tool: $tool, kind: $kind, limit: $limit, offset: $offset) {
       total
-      items { nodeId sessionId workerName workerId ref kind action }
+      items { nodeId sessionId workerName workerId ref kind action model }
     }
   }
 `;
@@ -182,6 +183,51 @@ describe('team worklog on the wire (#947)', () => {
       action: 'opened',
     });
     expect(body.errors?.[0]?.extensions?.code).toBe('SESSION_NOT_IN_APP');
+  });
+
+  it('model round-trips over the POST wire: explicit on record, snapshot on read (#1401)', async () => {
+    const recorded = await gql(RECORD, {
+      appRef: app.id,
+      sessionRef: session.id,
+      tool: 'github',
+      kind: 'pr',
+      ref: 'o/r#4',
+      action: 'opened',
+      detail: null,
+      model: 'glm-5.3',
+    });
+    expect(recorded.errors).toBeUndefined();
+    expect(recorded.data?.recordTeamWork?.model).toBe('glm-5.3');
+
+    const listed = await gql(ITEMS, { appRef: app.id, ref: 'o/r#4' });
+    expect(listed.errors).toBeUndefined();
+    expect(listed.data?.teamWorkItems?.items?.[0]?.model).toBe('glm-5.3');
+  });
+
+  it('omitting model over the wire stores nothing, and an empty string is refused (#1401)', async () => {
+    const recorded = await gql(RECORD, {
+      appRef: app.id,
+      sessionRef: session.id,
+      tool: 'github',
+      kind: 'pr',
+      ref: 'o/r#5',
+      action: 'opened',
+      detail: null,
+    });
+    expect(recorded.errors).toBeUndefined();
+    expect(recorded.data?.recordTeamWork?.model).toBeNull();
+
+    const refused = await gql(RECORD, {
+      appRef: app.id,
+      sessionRef: session.id,
+      tool: 'github',
+      kind: 'pr',
+      ref: 'o/r#6',
+      action: 'opened',
+      detail: null,
+      model: '',
+    });
+    expect(refused.errors?.[0]?.extensions?.code).toBe('BAD_USER_INPUT');
   });
 
   it('an unknown session carries SESSION_NOT_FOUND as extensions.code', async () => {
