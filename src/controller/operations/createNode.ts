@@ -4,6 +4,7 @@ import { generateId } from '../../lib/id.js';
 import { db } from '../../integrations/db/client.js';
 import { serializeTags } from '../../integrations/db/provider.js';
 import { authoredContentChanged, clearNodeAuthorship } from '../../lib/nodeAuthorship.js';
+import { assertRoleDeclaredForWrite, type AuthoredWithTask } from '../../lib/governedRole.js';
 import { saveNodeToFs } from '../../integrations/localFs/saveNodeToFs.js';
 import {
   ensureCurrentNodeRevisionInTransaction,
@@ -24,18 +25,13 @@ import {
  */
 export const createNode = async (
   node: Partial<Node> & { memoryId: string },
+  opts?: { authoredWith?: AuthoredWithTask },
 ): Promise<Node> => {
   if (!node.loc || !node.name || !node.memoryId) {
     throw new Error('Node requires loc, name, and memoryId');
   }
   const loc = node.loc;
   const name = node.name;
-
-  // Save to filesystem
-  const fsResult = await saveNodeToFs(node, GRAPHS_PATH);
-  if (fsResult.error) {
-    throw new Error(`Failed to save node to filesystem: ${fsResult.error}`);
-  }
 
   const id = node.id ?? generateId();
   const tags = serializeTags(node.tags ?? []) as string[];
@@ -77,9 +73,28 @@ export const createNode = async (
       throw new Error(`createNode: the node at "${loc}" moved during the write; retry.`);
     }
     let authoredEdit = false;
+    let changes: string[] = [];
     if (existing) {
-      const changes = diffNodeChanges(existing, fields);
+      changes = diffNodeChanges(existing, fields);
       authoredEdit = authoredContentChanged(changes);
+    }
+    const verifiedAuthorship = await assertRoleDeclaredForWrite(tx, node.memoryId, {
+      role: existing?.role ?? null,
+      priorRole: existing?.role ?? null,
+      runnableAfter: existing?.isRunnable ?? null,
+      authoredChange: !existing || authoredEdit,
+      authoredWith: opts?.authoredWith,
+    });
+
+    // A refused author-task claim must not leave a filesystem copy that a
+    // later import can replay. Keep the pre-existing save-before-DB-write
+    // ordering for an accepted call, now behind the transactional gate.
+    const fsResult = await saveNodeToFs(node, GRAPHS_PATH);
+    if (fsResult.error) {
+      throw new Error(`Failed to save node to filesystem: ${fsResult.error}`);
+    }
+
+    if (existing) {
       // An identical re-save is not a revision (@codex P2, PR #1339): a
       // snapshot here would manufacture history on every idempotent save and
       // evict real revisions under maxRevCount.
@@ -102,11 +117,12 @@ export const createNode = async (
         memoryId: node.memoryId,
         loc,
         ...fields,
+        ...(verifiedAuthorship ?? {}),
         revisionContentHash: revisionStateHashRefreshMarker(),
       },
       update: {
         ...fields,
-        ...(authoredEdit ? clearNodeAuthorship() : {}),
+        ...(authoredEdit ? (verifiedAuthorship ?? clearNodeAuthorship()) : {}),
         revisionContentHash: revisionStateHashRefreshMarker(),
       },
       include: {
