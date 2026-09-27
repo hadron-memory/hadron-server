@@ -965,9 +965,7 @@ describe('updateAiServiceConfig judges the provider/style pair on the locked row
       () => null,
       (e: unknown) => e,
     );
-    // Whether the write is already waiting on the lock or has not reached it
-    // yet, it must judge the provider the holder commits.
-    await new Promise((r) => setTimeout(r, 200));
+    await waitForLockWaiters(db); // the write has passed its pre-check and waits on the lock
     release();
     await holder;
     expect(((await write) as GraphQLError | null)?.extensions?.code).toBe('AiConfigValidationError');
@@ -1024,5 +1022,36 @@ describe('the legacy writers clear a stale endpoint/style against the LOCKED row
       resolvers.Mutation.updateApp({}, { ref: app.id, aiProvider: 'openai', aiModel: 'gpt-2' } as never, ctxFor(admin.id)),
     );
     expect(await db.aiServiceConfig.findUniqueOrThrow({ where: { id: c.id } })).toMatchObject({ provider: 'openai', endpoint: null, apiStyle: null });
+  });
+});
+
+describe('updateApp legacy: omitted provider/model come from the LOCKED row (#1380 review)', () => {
+  it('a concurrent model change is not overwritten by the value read before the lock', async () => {
+    const c = await resolvers.Mutation.createAiServiceConfig(
+      {},
+      { ownerType: 'APP', ownerId: app.id, name: 'default', provider: 'openai', model: 'gpt-old', apiKey: 'k-1' },
+      ctxFor(admin.id),
+    );
+    let locked!: () => void;
+    const holding = new Promise<void>((r) => (locked = r));
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const holder = db.$transaction(
+      async (tx) => {
+        await tx.$queryRaw`SELECT 1 FROM "ai_service_configs" WHERE "id" = ${c.id} FOR UPDATE`;
+        await tx.aiServiceConfig.update({ where: { id: c.id }, data: { model: 'gpt-new' } });
+        locked();
+        await gate;
+      },
+      { timeout: 15_000 },
+    );
+    await holding;
+    // Only the key changes; provider and model are omitted.
+    const pending = resolvers.Mutation.updateApp({}, { ref: app.id, aiApiKey: 'k-2' } as never, ctxFor(admin.id));
+    await waitForLockWaiters(db);
+    release();
+    await holder;
+    await pending;
+    expect(await db.aiServiceConfig.findUniqueOrThrow({ where: { id: c.id } })).toMatchObject({ provider: 'openai', model: 'gpt-new' });
   });
 });

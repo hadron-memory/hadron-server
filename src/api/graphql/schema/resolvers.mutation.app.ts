@@ -687,18 +687,28 @@ export const appMutations = {
               await ctx.db.$transaction(async (tx) => {
                 const cur = await lockAiServiceConfig(tx, existing.id);
                 if (!cur) throw new AiServiceConfigNotFoundError(existing.id);
+                // Omitted args keep what the row holds NOW, not what the read
+                // above saw (#1380 review), and the resulting provider is
+                // validated again.
+                const lockedProvider = aiProvider ?? cur.provider;
+                const lockedModel = aiModel ?? cur.model;
+                try {
+                  validateProviderAndParams(lockedProvider, null);
+                } catch (e) {
+                  rethrowAiConfigTyped(e);
+                }
                 await tx.aiServiceConfig.update({
                   where: { id: cur.id },
                   data: {
-                    provider,
-                    model,
+                    provider: lockedProvider,
+                    model: lockedModel,
                     ...keyFields,
                     // #1380 review: a legacy surface can express neither a style nor
                     // an endpoint, and both were chosen for the OLD provider. Any
                     // provider change clears both, so the new provider starts
                     // from its own defaults and the new key never goes to the
                     // old host.
-                    ...(provider !== cur.provider ? { endpoint: null, apiStyle: null } : {}),
+                    ...(lockedProvider !== cur.provider ? { endpoint: null, apiStyle: null } : {}),
                     updatedBy: ctx.userId ?? null,
                   },
                 });
