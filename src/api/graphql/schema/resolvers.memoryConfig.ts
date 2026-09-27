@@ -59,19 +59,26 @@ import {
   type Context,
   isMemoryReadableCached,
   isMemoryReadableFresh,
+  requireOrgRole,
   requireOwnerOrOrgRole,
   withoutRequestCaches,
 } from './resolvers.helpers.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { resolveNodeRef } from '../../../lib/entityRef/nodeRef.js';
 import { EntityNotFoundError, MemoryNotFoundError, NodeNotFoundError } from '../../../lib/entityRef/errors.js';
-import { assertValidRuleRole } from '../../../lib/governedRole.js';
+import { assertValidRuleRole, lockMemoryConfigExclusive } from '../../../lib/governedRole.js';
 import { nodeUrnRoundTrips, safeNodeUrnV2 } from '../../../lib/urnEmit.js';
 import { generateId } from '../../../lib/id.js';
 
-type Writers = 'ALL' | 'OWNER' | 'ADMIN';
-type Validator = 'AGENT' | 'PLATFORM';
+export type Writers = 'ALL' | 'OWNER' | 'ADMIN';
+export type Validator = 'AGENT' | 'PLATFORM';
 type RefState = 'NONE' | 'OK' | 'BROKEN' | 'UNREADABLE';
+
+/** The reference columns a node-role rule and a template rule share (#1325 part c). */
+export type RuleRefRow = Pick<
+  NodeRoleRule,
+  'authorTaskId' | 'authorTaskRequired' | 'validationTaskId' | 'validationTaskRequired' | 'descriptionNodeId'
+>;
 
 export interface CreateNodeRoleRuleInput {
   role: string;
@@ -95,7 +102,7 @@ export class NodeRoleRuleNotFoundError extends EntityNotFoundError {
   }
 }
 
-type MemoryGateRow = {
+export type MemoryGateRow = {
   id: string;
   class: string;
   userId: string | null;
@@ -114,7 +121,7 @@ type MemoryGateRow = {
  * the config exactly as its target would — `requireOrgRole` already confines it
  * to the one shared org — and `requireWriter` refuses every mutation.
  */
-async function canManageMemoryConfig(ctx: Context, memory: MemoryGateRow): Promise<boolean> {
+export async function canManageMemoryConfig(ctx: Context, memory: MemoryGateRow): Promise<boolean> {
   if (memory.class === 'personal' || memory.class === 'private') {
     return !ctx.impersonation && !!ctx.userId && memory.userId === ctx.userId;
   }
@@ -127,10 +134,62 @@ async function canManageMemoryConfig(ctx: Context, memory: MemoryGateRow): Promi
   }
 }
 
-const MEMORY_GATE_SELECT = { id: true, class: true, userId: true, organizationId: true, ownerUserId: true } as const;
+export const MEMORY_GATE_SELECT = { id: true, class: true, userId: true, organizationId: true, ownerUserId: true } as const;
+
+/**
+ * #1334 — LOCK authority over a memory's locked rules: the existing
+ * admin/owner hierarchy. On an org memory, an org ADMIN/OWNER
+ * (`requireOrgRole`, which admits a platform admin); a memory's user owner
+ * who is not also an org admin manages the config but cannot move a lock.
+ * A personal/private memory's config has exactly one manager, its strict
+ * owner (H3), and a memory with no org is managed by its user owner alone, so
+ * for both the manager IS the lock authority. Boolean, refusal-only, like the
+ * MANAGE gate.
+ */
+export async function hasLockAuthority(ctx: Context, memory: MemoryGateRow): Promise<boolean> {
+  if (memory.class === 'personal' || memory.class === 'private' || !memory.organizationId) {
+    return canManageMemoryConfig(ctx, memory);
+  }
+  if (ctx.impersonation) return false;
+  try {
+    await requireOrgRole(ctx, memory.organizationId, 'ADMIN');
+    return true;
+  } catch (e) {
+    if (e instanceof Error && e.message === 'Forbidden') return false;
+    throw e;
+  }
+}
+
+/**
+ * #1334 — an ordinary edit or delete of a LOCKED rule. Holger's ruling
+ * (2026-09-27, option 2): nobody changes a locked rule casually, not even an
+ * admin. It takes the deliberate step of `unlockNodeRoleRule` (lock authority
+ * required) or re-applying a required template. The rule is readable to
+ * whoever manages it, so this reveals nothing.
+ */
+export function ruleLocked(rule: Pick<NodeRoleRule, 'id' | 'role' | 'sourceTemplateId'>, reason?: string): GraphQLError {
+  return new GraphQLError(
+    reason ??
+      `The rule for role "${rule.role}" is locked by a required template. Unlock it first (unlockNodeRoleRule, org admin) or re-apply the template.`,
+    { extensions: { code: 'RULE_LOCKED', ruleId: rule.id, role: rule.role, sourceTemplateId: rule.sourceTemplateId } },
+  );
+}
+
+/** Lock authority, asked fresh inside the write transaction on the memory row as it reads now. */
+async function assertLockAuthority(
+  ctx: Context,
+  tx: Prisma.TransactionClient,
+  memoryId: string,
+  rule: NodeRoleRule,
+): Promise<void> {
+  const memory = await tx.memory.findFirst({ where: { id: memoryId }, select: MEMORY_GATE_SELECT });
+  if (!memory || !(await hasLockAuthority(withoutRequestCaches(ctx, tx), memory))) {
+    throw ruleLocked(rule, `Only an org admin can unlock the rule for role "${rule.role}".`);
+  }
+}
 
 /** Resolve a memory ref the caller may MANAGE, or throw the missing-memory answer. */
-async function managedMemory(ctx: Context, memoryRef: string): Promise<MemoryGateRow> {
+export async function managedMemory(ctx: Context, memoryRef: string): Promise<MemoryGateRow> {
   const { id } = await resolveMemoryRef(ctx.db, memoryRef);
   const memory = await ctx.db.memory.findFirst({ where: { id, deletedAt: null }, select: MEMORY_GATE_SELECT });
   if (!memory || !(await canManageMemoryConfig(ctx, memory))) throw new MemoryNotFoundError(memoryRef);
@@ -151,7 +210,7 @@ async function managedMemory(ctx: Context, memoryRef: string): Promise<MemoryGat
  * every authorize-then-write surface's; this keeps our own lock waits from
  * widening it.
  */
-async function reassertManage(
+export async function reassertManage(
   ctx: Context,
   tx: Prisma.TransactionClient,
   memoryId: string,
@@ -176,7 +235,7 @@ async function managedRule(ctx: Context, ref: string): Promise<NodeRoleRule & { 
 }
 
 /** Mutations stamp the actor; impersonation is read-only (#876). */
-function requireWriter(ctx: Context): string {
+export function requireWriter(ctx: Context): string {
   if (ctx.impersonation) throw new Error('Forbidden');
   if (!ctx.userId) throw new Error('Unauthenticated');
   return ctx.userId;
@@ -209,7 +268,7 @@ const REF_COLUMNS: Record<RefKind, { id: 'authorTaskId' | 'validationTaskId' | '
   descriptionNode: { id: 'descriptionNodeId' },
 };
 
-type ResolvedRef = { kind: RefKind; id: string; ref: string };
+export type ResolvedRef = { kind: RefKind; id: string; ref: string };
 
 /**
  * The column writes for the references present in `input`. A given ref sets
@@ -217,7 +276,7 @@ type ResolvedRef = { kind: RefKind; id: string; ref: string };
  * ref is an explicit clear and drops both. An omitted ref yields nothing.
  * `resolved` lists the refs that were set, for {@link lockRuleRefs}.
  */
-async function refWrites(
+export async function refWrites(
   ctx: Context,
   input: UpdateNodeRoleRuleInput,
 ): Promise<{ cols: Partial<Record<string, string | boolean | null>>; resolved: ResolvedRef[] }> {
@@ -253,7 +312,7 @@ async function refWrites(
  * BEFORE the rule's row lock: a hard node delete locks the node and then SET
  * NULLs the rule, so the same order here cannot deadlock against it.
  */
-async function lockRuleRefs(ctx: Context, tx: Prisma.TransactionClient, resolved: ResolvedRef[]): Promise<void> {
+export async function lockRuleRefs(ctx: Context, tx: Prisma.TransactionClient, resolved: ResolvedRef[]): Promise<void> {
   if (resolved.length === 0) return;
   const ids = [...new Set(resolved.map((r) => r.id))].sort();
   // The node rows ALONE: a join here would be re-checked by Postgres against
@@ -285,7 +344,7 @@ function notATask(kind: RefKind): GraphQLError {
 }
 
 /** Lock a rule's row for the rest of the transaction and read it, or null when it is gone. */
-async function lockRule(tx: Prisma.TransactionClient, id: string): Promise<NodeRoleRule | null> {
+export async function lockRule(tx: Prisma.TransactionClient, id: string): Promise<NodeRoleRule | null> {
   await tx.$queryRaw`SELECT 1 FROM "node_role_rules" WHERE "id" = ${id} FOR UPDATE`;
   return tx.nodeRoleRule.findUnique({ where: { id } });
 }
@@ -294,7 +353,11 @@ async function lockRule(tx: Prisma.TransactionClient, id: string): Promise<NodeR
  * Stamp the config's audit fields: a rule change IS a change to the config
  * (#1360 review). `updatedAt` is Prisma's `@updatedAt`.
  */
-async function touchConfig(tx: Prisma.TransactionClient, configId: string, actor: string): Promise<void> {
+export async function touchConfig(tx: Prisma.TransactionClient, configId: string, actor: string): Promise<void> {
+  // #1400: every rule change holds the memory's config lock exclusively, so
+  // node writes judging a role against this rulebook serialize with it.
+  const { memoryId } = await tx.memoryConfig.findUniqueOrThrow({ where: { id: configId }, select: { memoryId: true } });
+  await lockMemoryConfigExclusive(tx, memoryId);
   await tx.memoryConfig.update({ where: { id: configId }, data: { updatedBy: actor } });
 }
 
@@ -305,7 +368,7 @@ async function touchConfig(tx: Prisma.TransactionClient, configId: string, actor
  * must not block an unrelated edit to the rule; #1328 refuses writes of that
  * role until a manager repoints it.
  */
-function assertValidateByHasTask(state: { validateBy: Validator | null; validationTaskId: string | null; validationTaskRequired: boolean }): void {
+export function assertValidateByHasTask(state: { validateBy: Validator | null; validationTaskId: string | null; validationTaskRequired: boolean }): void {
   if (state.validateBy != null && state.validationTaskId == null && !state.validationTaskRequired) {
     throw new GraphQLError('`validateBy` needs a validation task: set `validationTaskRef`, or clear `validateBy`.', {
       extensions: { code: 'BAD_USER_INPUT', field: 'validateBy', reason: 'VALIDATION_TASK_REQUIRED' },
@@ -314,7 +377,10 @@ function assertValidateByHasTask(state: { validateBy: Validator | null; validati
 }
 
 /** Create the config row if absent — race-safe, never a second row, never an aborted transaction. */
-async function materializeConfig(tx: Prisma.TransactionClient, memoryId: string, actor: string): Promise<string> {
+export async function materializeConfig(tx: Prisma.TransactionClient, memoryId: string, actor: string): Promise<string> {
+  // #1400: taken BEFORE the row can exist, so a node write that found no
+  // config either commits first or sees this memory's first rules.
+  await lockMemoryConfigExclusive(tx, memoryId);
   await tx.$executeRaw`
     INSERT INTO "memory_configs" ("id", "memory_id", "created_by", "updated_by")
     VALUES (${generateId()}, ${memoryId}, ${actor}, ${actor})
@@ -323,7 +389,7 @@ async function materializeConfig(tx: Prisma.TransactionClient, memoryId: string,
   return row.id;
 }
 
-function translateRoleTaken(e: unknown, role: string): never {
+export function translateRoleTaken(e: unknown, role: string): never {
   if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') {
     throw new GraphQLError(`This memory's config already has a rule for role "${role}"; update it instead.`, {
       extensions: { code: 'NODE_ROLE_RULE_EXISTS', role },
@@ -347,7 +413,7 @@ async function configForManagedMemory(db: PrismaClient, memoryId: string) {
  */
 type RefView = { urn: string | null; id: string | null; state: RefState };
 const refViewCache = new WeakMap<object, Map<string, Promise<RefView>>>();
-function refViewOnce(ctx: Context, rule: NodeRoleRule, kind: RefKind): Promise<RefView> {
+function refViewOnce(ctx: Context, rule: RuleRefRow, kind: RefKind): Promise<RefView> {
   let perRule = refViewCache.get(rule);
   if (!perRule) refViewCache.set(rule, (perRule = new Map()));
   let pending = perRule.get(kind);
@@ -404,6 +470,9 @@ export const memoryConfigMutations = {
     try {
       const rule = await ctx.db.$transaction(async (tx) => {
         await lockRuleRefs(ctx, tx, resolved);
+        // #1400 review: the rulebook lock BEFORE the gate is re-asked, so no
+        // lock wait follows it (materializeConfig/touchConfig re-take it, re-entrant).
+        await lockMemoryConfigExclusive(tx, memory.id);
         await reassertManage(ctx, tx, memory.id, () => new MemoryNotFoundError(memoryRef));
         const configId = await materializeConfig(tx, memory.id, actor);
         const created = await tx.nodeRoleRule.create({
@@ -455,8 +524,12 @@ export const memoryConfigMutations = {
       await lockRuleRefs(ctx, tx, resolved);
       const current = await lockRule(tx, id);
       if (!current) throw new NodeRoleRuleNotFoundError(ref);
+      // #1400 review: the rulebook lock BEFORE the gate is re-asked, so no
+      // lock wait follows it (touchConfig re-takes it, re-entrant).
+      await lockMemoryConfigExclusive(tx, memoryId);
       await reassertManage(ctx, tx, memoryId, () => new NodeRoleRuleNotFoundError(ref));
       if (expectedRevision != null && current.revision !== expectedRevision) throw conflict(current.revision);
+      if (current.locked) throw ruleLocked(current);
       assertValidateByHasTask({
         validateBy: ('validateBy' in data ? data.validateBy : current.validateBy) as Validator | null,
         validationTaskId: ('validationTaskId' in refs ? refs.validationTaskId : current.validationTaskId) as string | null,
@@ -481,20 +554,78 @@ export const memoryConfigMutations = {
     await ctx.db.$transaction(async (tx) => {
       const current = await lockRule(tx, id);
       if (!current) throw new NodeRoleRuleNotFoundError(ref);
+      // #1400 review: the rulebook lock BEFORE the gate is re-asked, so no
+      // lock wait follows it (touchConfig re-takes it, re-entrant).
+      await lockMemoryConfigExclusive(tx, memoryId);
       await reassertManage(ctx, tx, memoryId, () => new NodeRoleRuleNotFoundError(ref));
       if (expectedRevision != null && current.revision !== expectedRevision) throw conflict(current.revision);
+      if (current.locked) throw ruleLocked(current);
       await tx.nodeRoleRule.delete({ where: { id } });
       await touchConfig(tx, current.configId, actor);
     });
     return true;
   },
+
+  /**
+   * #1334 (Holger, 2026-09-27, option 2): the deliberate step before a locked
+   * rule can be edited or deleted. It needs lock authority, and it is visible:
+   * it bumps `revision` and stamps `updatedBy`/`updatedAt`. Unlocking an
+   * unlocked rule changes nothing.
+   */
+  unlockNodeRoleRule: async (
+    _: unknown,
+    { ref, expectedRevision }: { ref: string; expectedRevision?: number | null },
+    ctx: Context,
+  ) => {
+    const actor = requireWriter(ctx);
+    const { id, memoryId } = await managedRule(ctx, ref);
+    const rule = await ctx.db.$transaction(async (tx) => {
+      const current = await lockRule(tx, id);
+      if (!current) throw new NodeRoleRuleNotFoundError(ref);
+      await lockMemoryConfigExclusive(tx, memoryId);
+      await reassertManage(ctx, tx, memoryId, () => new NodeRoleRuleNotFoundError(ref));
+      if (expectedRevision != null && current.revision !== expectedRevision) throw conflict(current.revision);
+      if (!current.locked) return current;
+      await assertLockAuthority(ctx, tx, memoryId, current);
+      const after = await tx.nodeRoleRule.update({
+        where: { id },
+        data: { locked: false, updatedBy: actor, revision: { increment: 1 } },
+      });
+      await touchConfig(tx, current.configId, actor);
+      return after;
+    });
+    return { rule, warnings: [] };
+  },
 };
 
-function conflict(currentRevision: number): GraphQLError {
-  return new GraphQLError('The rule changed since you read it; re-read it and retry.', {
+export function conflict(currentRevision: number, what = 'rule'): GraphQLError {
+  return new GraphQLError(`The ${what} changed since you read it; re-read it and retry.`, {
     extensions: { code: 'CONFLICT', currentRevision },
   });
 }
+
+/**
+ * The reference fields of a rule, for a node-role rule and a template rule
+ * alike. The `*Id` fields shadow the row's own columns ON PURPOSE: the default
+ * resolver would hand out the stored id whatever the state, including the
+ * UNREADABLE node whose URN is withheld.
+ */
+export const ruleRefFieldResolvers = {
+  authorTaskId: async (r: RuleRefRow, _: unknown, ctx: Context) => (await refViewOnce(ctx, r, 'authorTask')).id,
+  validationTaskId: async (r: RuleRefRow, _: unknown, ctx: Context) => (await refViewOnce(ctx, r, 'validationTask')).id,
+  descriptionNodeId: async (r: RuleRefRow, _: unknown, ctx: Context) => (await refViewOnce(ctx, r, 'descriptionNode')).id,
+  authorTask: async (r: RuleRefRow, _: unknown, ctx: Context) => (await refViewOnce(ctx, r, 'authorTask')).urn,
+  authorTaskState: async (r: RuleRefRow, _: unknown, ctx: Context) => (await refViewOnce(ctx, r, 'authorTask')).state,
+  validationTask: async (r: RuleRefRow, _: unknown, ctx: Context) => (await refViewOnce(ctx, r, 'validationTask')).urn,
+  validationTaskState: async (r: RuleRefRow, _: unknown, ctx: Context) =>
+    (await refViewOnce(ctx, r, 'validationTask')).state,
+  descriptionNode: async (r: RuleRefRow, _: unknown, ctx: Context) => (await refViewOnce(ctx, r, 'descriptionNode')).urn,
+  // A description node is documentation, not procedure: losing it is NONE, never BROKEN.
+  descriptionNodeState: async (r: RuleRefRow, _: unknown, ctx: Context) => {
+    const v = await refViewOnce(ctx, r, 'descriptionNode');
+    return v.state === 'BROKEN' ? 'NONE' : v.state;
+  },
+};
 
 export const memoryConfigFieldResolvers = {
   Memory: {
@@ -516,23 +647,7 @@ export const memoryConfigFieldResolvers = {
         : ctx.db.nodeRoleRule.findMany({ where: { configId: config.id }, orderBy: { role: 'asc' } }),
   },
   NodeRoleRule: {
-    // The `*Id` fields shadow the row's own columns ON PURPOSE: the default
-    // resolver would hand out the stored id whatever the state, including the
-    // UNREADABLE node whose URN is withheld.
-    authorTaskId: async (r: NodeRoleRule, _: unknown, ctx: Context) => (await refViewOnce(ctx, r, 'authorTask')).id,
-    validationTaskId: async (r: NodeRoleRule, _: unknown, ctx: Context) => (await refViewOnce(ctx, r, 'validationTask')).id,
-    descriptionNodeId: async (r: NodeRoleRule, _: unknown, ctx: Context) => (await refViewOnce(ctx, r, 'descriptionNode')).id,
-    authorTask: async (r: NodeRoleRule, _: unknown, ctx: Context) => (await refViewOnce(ctx, r, 'authorTask')).urn,
-    authorTaskState: async (r: NodeRoleRule, _: unknown, ctx: Context) => (await refViewOnce(ctx, r, 'authorTask')).state,
-    validationTask: async (r: NodeRoleRule, _: unknown, ctx: Context) => (await refViewOnce(ctx, r, 'validationTask')).urn,
-    validationTaskState: async (r: NodeRoleRule, _: unknown, ctx: Context) =>
-      (await refViewOnce(ctx, r, 'validationTask')).state,
-    descriptionNode: async (r: NodeRoleRule, _: unknown, ctx: Context) => (await refViewOnce(ctx, r, 'descriptionNode')).urn,
-    // A description node is documentation, not procedure: losing it is NONE, never BROKEN.
-    descriptionNodeState: async (r: NodeRoleRule, _: unknown, ctx: Context) => {
-      const v = await refViewOnce(ctx, r, 'descriptionNode');
-      return v.state === 'BROKEN' ? 'NONE' : v.state;
-    },
+    ...ruleRefFieldResolvers,
     sourceTemplate: async (r: NodeRoleRule, _: unknown, ctx: Context) => {
       if (r.sourceTemplateId == null) return null;
       const t = await ctx.db.memoryConfigTemplate.findUnique({

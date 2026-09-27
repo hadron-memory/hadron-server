@@ -34,6 +34,11 @@ const NODE: SnapshotSourceNode = {
   isRunnable: null,
   llmModel: null,
   aiAgent: 'claude-code',
+  authorshipKind: null,
+  authoredByTask: null,
+  authoredByRevision: null,
+  authoredByHuman: null,
+  authoredAt: null,
 };
 
 describe('editorFromAuth (#620)', () => {
@@ -109,6 +114,21 @@ describe('buildNodeRevisionSnapshot (#620)', () => {
     expect(snap.editedBy).toBeNull();
     expect(snap.editedByInfo).toBe('app:app-9');
     expect(snap.createdBy).toBe('app:app-9');
+  });
+
+  it('keeps the author of pre-edit content separate from the actor taking the snapshot (#1326)', () => {
+    const authoredAt = new Date('2026-09-26T20:00:00Z');
+    const snap = buildNodeRevisionSnapshot({
+      ...NODE,
+      authorshipKind: 'TASK',
+      authoredByTask: 'task-1',
+      authoredByRevision: 7,
+      authoredAt,
+    }, { userId: 'later-editor' });
+    expect(snap).toMatchObject({
+      authorshipKind: 'TASK', authoredByTask: 'task-1', authoredByRevision: 7,
+      authoredByHuman: null, authoredAt, editedBy: 'later-editor',
+    });
   });
 });
 

@@ -6,6 +6,7 @@
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { GraphQLError } from 'graphql';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { resolvers, type Context } from './resolvers.js';
@@ -57,6 +58,38 @@ beforeEach(async () => {
 });
 
 describe('mergeMemories — partition (collide vs relocate)', () => {
+  it('carries a relocated stamp, clears a changed collision, and retains a no-op collision stamp', async () => {
+    const task = await makeNode(tgtMem.id, 'author-task', { nodeType: 'task' });
+    const authoredAt = new Date('2026-09-26T20:00:00Z');
+    const stamp = {
+      authorshipKind: 'TASK' as const,
+      authoredByTask: task.id,
+      authoredByRevision: 3,
+      authoredAt,
+    };
+    const relocated = await makeNode(srcMem.id, 'relocated', { content: 'source body', ...stamp });
+    await makeNode(srcMem.id, 'changed', { content: 'source addition' });
+    const changedTarget = await makeNode(tgtMem.id, 'changed', { content: 'target body', ...stamp });
+    await makeNode(srcMem.id, 'unchanged');
+    const unchangedTarget = await makeNode(tgtMem.id, 'unchanged', { content: 'keep body', ...stamp });
+
+    await merge({ source: srcMem.id, target: tgtMem.id, include: ['CONTENT'] });
+
+    expect(await db.node.findUniqueOrThrow({ where: { id: relocated.id } })).toMatchObject({
+      memoryId: tgtMem.id, content: 'source body', ...stamp,
+    });
+    expect(await db.node.findUniqueOrThrow({ where: { id: changedTarget.id } })).toMatchObject({
+      content: 'target body\n\nsource addition', authorshipKind: null,
+      authoredByTask: null, authoredByRevision: null, authoredByHuman: null, authoredAt: null,
+    });
+    expect(await db.nodeRevision.findFirstOrThrow({ where: { nodeId: changedTarget.id } })).toMatchObject({
+      content: 'target body', ...stamp,
+    });
+    expect(await db.node.findUniqueOrThrow({ where: { id: unchangedTarget.id } })).toMatchObject({
+      content: 'keep body', ...stamp,
+    });
+  });
+
   it('folds colliding nodes and relocates the rest, emptying the source', async () => {
     await makeNode(srcMem.id, 'shared', { content: 'from source', tags: ['s'] });
     await makeNode(srcMem.id, 'srconly', { content: 'only in source' });
@@ -357,5 +390,68 @@ describe('mergeMemories — guards', () => {
     // class='system' forbids app_id and requires visibility null (CHECK constraints).
     await db.memory.update({ where: { id: srcMem.id }, data: { class: 'system', visibility: null } });
     await expect(merge({ source: srcMem.id, target: tgtMem.id })).rejects.toThrow(/class=/i);
+  });
+});
+
+// ───── #1117 — abstract-cap refusal through the mergeMemories adapter ─────
+
+describe('mergeMemories — abstract-cap refusal (#1117)', () => {
+  it('reports the target length, delta and headroom in message AND extensions, tagged with the target loc', async () => {
+    // Colliding loc: combineText joins with a blank line → 1500 + 2 + 1500 = 3002.
+    await makeNode(srcMem.id, 'shared', { abstract: 'b'.repeat(1500) });
+    await makeNode(tgtMem.id, 'shared', { abstract: 'a'.repeat(1500) });
+    let caught: unknown;
+    try {
+      await merge({ source: srcMem.id, target: tgtMem.id });
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(GraphQLError);
+    const err = caught as GraphQLError;
+    expect(err.extensions?.code).toBe('NodeAbstractTooLongError');
+    expect(err.message).toMatch(
+      /This edit takes a 1500-character abstract to 3002 \(\+1502\); 500 characters were available\./,
+    );
+    expect(err.extensions).toMatchObject({
+      length: 3002,
+      max: 2000,
+      currentLength: 1500,
+      available: 500,
+      loc: 'shared',
+    });
+  });
+
+  it('an empty-string target abstract (raw row) is a full replacement — bare message, no invented current', async () => {
+    // Caps are validation, not invariants, so a raw row can exceed the cap;
+    // combineText adopts the source wholesale when the target is empty ('').
+    await makeNode(srcMem.id, 'grow', { abstract: 'x'.repeat(2500) });
+    await makeNode(tgtMem.id, 'grow', { abstract: '' });
+    let caught: unknown;
+    try {
+      await merge({ source: srcMem.id, target: tgtMem.id });
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(GraphQLError);
+    const err = caught as GraphQLError;
+    expect(err.message).toContain('got 2500 chars');
+    expect(err.message).not.toContain('This edit takes');
+    expect(err.extensions?.currentLength).toBeUndefined();
+  });
+
+  it('an absent target abstract is likewise a full replacement — bare message', async () => {
+    await makeNode(srcMem.id, 'fresh', { abstract: 'y'.repeat(2100) });
+    await makeNode(tgtMem.id, 'fresh', {});
+    let caught: unknown;
+    try {
+      await merge({ source: srcMem.id, target: tgtMem.id });
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(GraphQLError);
+    const err = caught as GraphQLError;
+    expect(err.message).toContain('got 2100 chars');
+    expect(err.message).not.toContain('This edit takes');
+    expect(err.extensions?.currentLength).toBeUndefined();
   });
 });

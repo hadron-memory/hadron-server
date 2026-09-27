@@ -82,11 +82,10 @@ export async function listMemoryAssets(
     },
     memoryId,
   );
+  // #1381 (`cor:api:140:03`): a memory the caller cannot read answers
+  // exactly as a missing one — PERMISSION_DENIED confirmed that it exists.
   if (!readOk) {
-    throw new AssetUploadError(
-      'PERMISSION_DENIED',
-      'caller does not have read access to memory',
-    );
+    throw new AssetUploadError('NOT_FOUND', 'memory not found');
   }
 
   const where = {

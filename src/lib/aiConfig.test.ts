@@ -56,9 +56,11 @@ describe('validateProviderAndParams', () => {
     expect(() => validateProviderAndParams('anthropic', { effort: 'extreme' })).toThrow(
       UnknownAiProviderError,
     );
-    expect(() => validateProviderAndParams('openai', { baseUrl: 'not-a-url' })).toThrow(
+    expect(() => validateProviderAndParams('openai', { reasoningEffort: 'extreme' })).toThrow(
       UnknownAiProviderError,
     );
+    // #1373 D2: baseUrl is no longer a params key — the endpoint column
+    // replaced it, and writing one is refused by refuseLegacyBaseUrl.
   });
 });
 

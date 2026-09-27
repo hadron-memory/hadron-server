@@ -692,6 +692,67 @@ export const typeDefs = `#graphql
     updatedAt: DateTime!
   }
 
+  "#1353 — compact unread metadata for one Worker/Channel pair. No message body is returned."
+  type TeamAttentionChannel {
+    channel: ID!
+    name: String!
+    unread: Int!
+    unreadMentions: Int!
+    firstUnreadSeq: Int
+    lastSeq: Int!
+  }
+
+  "#1353 — one live Worker that has relevant unread attention after the supplied token."
+  type TeamAttentionWorker {
+    worker: ID!
+    name: String!
+    urn: String
+    live: Boolean!
+    channels: [TeamAttentionChannel!]!
+  }
+
+  type TeamAttentionResult {
+    "Opaque signed snapshot. Adopt it only after every listed nudge is accepted."
+    token: String!
+    workers: [TeamAttentionWorker!]!
+  }
+
+  type TeamAttentionSwitchoverChannel {
+    channel: ID!
+    name: String!
+    fromSeq: Int!
+    throughSeq: Int!
+    unread: Int!
+    unreadMentions: Int!
+  }
+
+  type TeamAttentionSwitchoverWorker {
+    worker: ID!
+    name: String!
+    urn: String
+    channels: [TeamAttentionSwitchoverChannel!]!
+  }
+
+  type TeamAttentionSwitchoverPreview {
+    "Short-lived proof binding the exact operator, App, Workers, registers, cursors and heads shown here."
+    proof: String!
+    expiresAt: DateTime!
+    workers: [TeamAttentionSwitchoverWorker!]!
+  }
+
+  type TeamAttentionSwitchoverResult {
+    applied: Boolean!
+    workersAdvanced: Int!
+    channelsAdvanced: Int!
+  }
+
+  "#1353 — the exact Worker/Channel cursor advanced by markOwnTeamChatRead."
+  type OwnTeamChatReadState {
+    workerId: ID!
+    channelId: ID!
+    lastSeenSeq: Int!
+  }
+
   "Spec 049 Phase 5 — what an Agent's install-created register row is made with (plan §3.5)."
   type RegisterDefaults {
     mentionOnly: Boolean!
@@ -1134,6 +1195,10 @@ export const typeDefs = `#graphql
     id: ID!
     "#1323 — current live revision. Creation is revision 1; each committed authoring change advances it. NodeRevision.revNo N is the retained snapshot of this node when revision N was current, before the edit that advanced it."
     revision: Int!
+    "#1326 — attribution of this content state. Null means legacy or unknown. Task identity is redacted unless its memory is independently readable."
+    authorship: NodeAuthorship
+    "#1326 — advisory validation for this exact revision. A report for an older revision is STALE."
+    contentValidation: NodeContentValidationStatus!
     memoryId: String!
     """
     The PLATFORM-kind axis (info / task / prompt / record / …). Load-bearing for
@@ -1432,6 +1497,29 @@ export const typeDefs = `#graphql
     urn: String
   }
 
+  enum NodeAuthorshipKind { TASK HUMAN }
+  type NodeAuthorship {
+    kind: NodeAuthorshipKind!
+    taskRef: String
+    taskRevision: Int
+    human: NodeRevisionEditor
+    authoredAt: DateTime!
+  }
+
+  enum NodeContentValidationOutcome { PASS FAIL ERROR }
+  enum NodeContentValidationState { UNVALIDATED STALE PASS FAIL ERROR }
+  type NodeContentValidationReport {
+    nodeRevision: Int!
+    validationTaskRef: String
+    validationTaskRevision: Int
+    outcome: NodeContentValidationOutcome!
+    reportedAt: DateTime!
+  }
+  type NodeContentValidationStatus {
+    state: NodeContentValidationState!
+    latestReport: NodeContentValidationReport
+  }
+
   """
   046-usage-metering: effective-dated provider rate row. Prices are
   micro-cents (1e-8 USD) per MILLION tokens, as base-10 integer strings.
@@ -1531,6 +1619,10 @@ export const typeDefs = `#graphql
 
   type NodeRevision {
     id: ID!
+    "#1326 — attribution of the content captured before the next edit."
+    authorship: NodeAuthorship
+    "#1326 — advisory validation at this historical revision."
+    contentValidation: NodeContentValidationStatus!
     "Computed end-anchored URN hrn:noderev:<root>:<mem>:<loc...>:<rev> (#696). Null for legacy rows without a revNo, and for multi-segment per-user memories the flat shape cannot express."
     urn: String
     "Per-node monotonic revision number (#696). Null on legacy rows predating the counter (backfilled by the migration)."
@@ -2656,7 +2748,7 @@ export const typeDefs = `#graphql
     writers: NodeRoleWriters!
     validateBy: ContentValidator
     enabled: Boolean!
-    "Set by applying a required template (#1334)."
+    "Set by applying a required template (#1334). A locked rule refuses every ordinary edit and delete (RULE_LOCKED); unlockNodeRoleRule is the deliberate step."
     locked: Boolean!
     "The template this rule was copied from, if any (provenance only; no live link)."
     sourceTemplateId: ID
@@ -2685,6 +2777,131 @@ export const typeDefs = `#graphql
     taskState: NodeRoleRuleRefState
   }
 
+  "#1325 part (c) — which entity owns a MemoryConfigTemplate. Exactly one per template."
+  enum MemoryConfigTemplateOwnerType {
+    HADRON_SERVER
+    ORGANIZATION
+    USER
+    APP
+  }
+
+  """
+  #1325 part (c) — a reusable rulebook with exactly one owner, COPIED into a
+  memory's config when applied (never live-linked). Read and managed only by
+  its owner's managers: a platform admin (server), an org ADMIN/OWNER
+  (organization), the user themselves (user), the App's owner or org
+  ADMIN/OWNER (App). For anyone else it does not exist.
+  """
+  type MemoryConfigTemplate {
+    id: ID!
+    "Unique per owner among live templates; 1-64 lower-case letters, digits, '-' or '_'."
+    name: String!
+    description: String
+    "Applied as locked rules (#1334)."
+    required: Boolean!
+    ownerType: MemoryConfigTemplateOwnerType!
+    "ID of the owning organization, user or App; null for the server."
+    ownerId: ID
+    "Role-ascending."
+    rules: [MemoryConfigTemplateRule!]!
+    "Optimistic-concurrency token for the template AND its rules."
+    revision: Int!
+    createdAt: DateTime!
+    createdBy: ID
+    updatedAt: DateTime
+    updatedBy: ID
+  }
+
+  "#1325 part (c) — one rule of a template: a node-role rule without the config-only fields."
+  type MemoryConfigTemplateRule {
+    role: String!
+    authorTask: String
+    authorTaskId: ID
+    authorTaskState: NodeRoleRuleRefState!
+    validationTask: String
+    validationTaskId: ID
+    validationTaskState: NodeRoleRuleRefState!
+    "Documentation, not procedure: a deleted description node reads as NONE, never BROKEN."
+    descriptionNode: String
+    descriptionNodeId: ID
+    descriptionNodeState: NodeRoleRuleRefState!
+    strictSubRoles: Boolean!
+    writers: NodeRoleWriters!
+    validateBy: ContentValidator
+    enabled: Boolean!
+  }
+
+  type MemoryConfigTemplatesPage {
+    items: [MemoryConfigTemplate!]!
+    total: Int!
+  }
+
+  "Filter for memoryConfigTemplates(). Narrows the templates you manage; it never widens them."
+  input MemoryConfigTemplateFilter {
+    ownerType: MemoryConfigTemplateOwnerType
+    "ID or URN of the owner (with ownerType). An owner you do not manage matches nothing."
+    ownerRef: ID
+  }
+
+  "#1325 part (c) — a new template. \`rules\` are validated as a whole before anything is written."
+  input CreateMemoryConfigTemplateInput {
+    name: String!
+    description: String
+    required: Boolean
+    "Each role at most once (NODE_ROLE_RULE_EXISTS)."
+    rules: [CreateNodeRoleRuleInput!]
+  }
+
+  """
+  #1325 part (c) — change a template. An omitted field is unchanged;
+  description null clears it. \`rules\`, when given, REPLACES the template's
+  rules in one transaction.
+  """
+  input UpdateMemoryConfigTemplateInput {
+    name: String
+    description: String
+    required: Boolean
+    rules: [CreateNodeRoleRuleInput!]
+  }
+
+  type MemoryConfigTemplatePayload {
+    template: MemoryConfigTemplate!
+    "Empty until #1327 adds its visibility warnings."
+    warnings: [MemoryConfigWarning!]!
+  }
+
+  "#1334 — what applying a template did (or, on a dry run, would do) for one role."
+  enum MemoryConfigApplyOutcome {
+    "The memory had no rule for the role; the template's was copied in (locked if the template is required)."
+    APPLIED
+    "The memory already had a rule for the role, and a non-required template never overrides one."
+    SKIPPED_CONFLICT
+    "The memory's rule for the role was overwritten by a required template's, and is now locked."
+    REPLACED
+    "A required template met a LOCKED rule that you have no authority to move; the rule stands."
+    SKIPPED_LOCKED
+  }
+
+  type MemoryConfigApplyEntry {
+    role: String!
+    outcome: MemoryConfigApplyOutcome!
+    "The rule in force for this role afterwards. On a dry run, the existing rule, or null for a would-be APPLIED."
+    rule: NodeRoleRule
+  }
+
+  type MemoryConfigApplyResult {
+    memoryId: ID!
+    template: NodeRoleRuleSourceTemplate!
+    "The template revision that was applied; pass it back as expectedTemplateRevision to apply exactly what a dry run showed."
+    templateRevision: Int!
+    required: Boolean!
+    dryRun: Boolean!
+    "One per template rule, role-ascending."
+    entries: [MemoryConfigApplyEntry!]!
+    "Empty until #1327 adds its visibility warnings."
+    warnings: [MemoryConfigWarning!]!
+  }
+
   type NodeRoleRulePayload {
     rule: NodeRoleRule!
     "Empty until #1327 adds its visibility warnings."
@@ -2692,7 +2909,8 @@ export const typeDefs = `#graphql
   }
 
   """
-  #1325 — a new rule. Task and description references are node IDs or URNs you
+  #1325 — a new rule, in a memory's config or in a template's rule list.
+  Task and description references are node IDs or URNs you
   can read; a node you cannot read is refused exactly like a missing one
   (NODE_NOT_FOUND), and a task reference must be a runnable task (NOT_A_TASK).
   """
@@ -2840,7 +3058,7 @@ export const typeDefs = `#graphql
     ownerType: AiConfigOwnerType!
     "ID of the owning HadronServer / Organization / App / Agent."
     ownerId: ID!
-    "Provider identifier; v1 known: 'anthropic' | 'openai' | 'glm' | 'bedrock'."
+    "Provider identifier; known: 'anthropic' | 'openai' | 'glm' | 'bedrock' | 'openai-compatible' (any OpenAI-wire host; endpoint required)."
     provider: String!
     "Model identifier, passed verbatim to the provider."
     model: String!
@@ -2849,10 +3067,106 @@ export const typeDefs = `#graphql
     apiKeyPreview: String
     "Provider-specific knobs (maxTokens, thinking, effort, baseUrl, ...)."
     params: JSON
+    """
+    #1373: the base URL this config's requests are sent to, as stored. Null =
+    the provider's default (see effectiveEndpoint and aiProviderEndpoints).
+    """
+    endpoint: String
+    """
+    #1373: where a request for this config actually goes: endpoint, else the
+    provider default. Null only for bedrock, whose endpoint is derived from
+    its region.
+    """
+    effectiveEndpoint: String
+    "#1373: the wire protocol as stored; null = the provider default. OpenAI-compatible providers only."
+    apiStyle: AiApiStyle
+    "#1373: the wire protocol a request actually uses (apiStyle, else the provider default); null for single-protocol providers."
+    effectiveApiStyle: AiApiStyle
     "Disabled configs are skipped by resolution (the walk continues outward)."
     enabled: Boolean!
     createdAt: DateTime!
     updatedAt: DateTime
+  }
+
+  "#1373: the wire protocol of an OpenAI-compatible provider."
+  enum AiApiStyle {
+    "POST {endpoint}/chat/completions — what most OpenAI-compatible hosts serve (the glm default)."
+    CHAT_COMPLETIONS
+    "POST {endpoint}/responses — OpenAI's Responses API (the openai default)."
+    RESPONSES
+  }
+
+  "#1378: where a tested value came from."
+  enum AiConfigTestValueSource {
+    SAVED
+    OVERRIDE
+  }
+
+  "#1378: which key a test used; NONE when there was none to use."
+  enum AiConfigTestKeySource {
+    SAVED
+    OVERRIDE
+    "A HADRON_SERVER config with no stored key: the server's own credential for that provider served the call, as it serves a run (#1385)."
+    PLATFORM
+    NONE
+  }
+
+  """
+  #1378: values to test INSTEAD of the saved ones — e.g. an edited form before
+  it is saved. Never stored. Each is validated exactly as a write would be.
+  """
+  input AiServiceConfigTestOverride {
+    provider: String
+    model: String
+    "Omitted = the saved endpoint; null or empty = the provider default."
+    endpoint: String
+    "Omitted = the saved style; null = the provider default."
+    apiStyle: AiApiStyle
+    "A key to test with instead of the stored one. Never stored, never echoed."
+    apiKey: String
+  }
+
+  "#1378: per field, whether the test used the saved value or the override."
+  type AiServiceConfigTestUsed {
+    provider: AiConfigTestValueSource!
+    model: AiConfigTestValueSource!
+    endpoint: AiConfigTestValueSource!
+    apiStyle: AiConfigTestValueSource!
+    key: AiConfigTestKeySource!
+  }
+
+  type AiServiceConfigTestError {
+    "NO_API_KEY | KEY_UNREADABLE (the stored key cannot be decrypted here; re-enter it) | CONFIG_INVALID (the config cannot be built at all, e.g. a malformed Bedrock key; no call made) | QUOTA_EXCEEDED (a platform-funded test with the org's daily token allowance used up; no call made) | LLM_CALL_FAILED (the provider call failed or timed out; see transient)"
+    code: String!
+    "Provider error text, scrubbed of the key and truncated."
+    message: String!
+    transient: Boolean!
+  }
+
+  "#1378: one test call, made through the same client and endpoint a run uses."
+  type AiServiceConfigTestResult {
+    ok: Boolean!
+    provider: String!
+    model: String!
+    "The endpoint the request actually went to: the explicit endpoint, else the host the SDK chose (OPENAI_BASE_URL / ANTHROPIC_BASE_URL when the server sets one, Bedrock's regional host), else the catalog default. Null when it can't be known (Bedrock with no region)."
+    endpoint: String
+    "The wire protocol the request actually used."
+    apiStyle: AiApiStyle
+    used: AiServiceConfigTestUsed!
+    latencyMs: Int!
+    "The model's reply, truncated."
+    reply: String
+    error: AiServiceConfigTestError
+  }
+
+  "#1373: one known endpoint for a provider, from the server's single suggestion list."
+  type AiProviderEndpoint {
+    url: String!
+    label: String!
+    "The endpoint a config with no endpoint uses."
+    isDefault: Boolean!
+    "What the URL does not say: billing, terms."
+    note: String
   }
 
   """
@@ -2874,6 +3188,10 @@ export const typeDefs = `#graphql
     """
     apiKey: String!
     params: JSON
+    "#1373: where requests for this config go (see AiServiceConfig.effectiveEndpoint)."
+    effectiveEndpoint: String
+    "#1373: the wire protocol requests use (see AiServiceConfig.effectiveApiStyle)."
+    effectiveApiStyle: AiApiStyle
   }
 
   """
@@ -6119,6 +6437,15 @@ export const typeDefs = `#graphql
     """
     memoryConfig(memoryRef: ID!): MemoryConfig!
 
+    "#1325 part (c) — one template you manage, by id; null for anything else, including a missing or deleted one."
+    memoryConfigTemplate(ref: ID!): MemoryConfigTemplate
+
+    """
+    #1325 part (c) — the templates you manage, name-ascending. Default page 50,
+    at most 200; limit 0 returns the count only.
+    """
+    memoryConfigTemplates(filter: MemoryConfigTemplateFilter, limit: Int, offset: Int): MemoryConfigTemplatesPage!
+
     """
     Spec 049 Phase 2 — paginated list of the scopes you may read, optionally
     narrowed by owner, by an App's resolution context, by name, and by the
@@ -6186,6 +6513,25 @@ export const typeDefs = `#graphql
     channelReadState(attendeeRef: ID!, appRef: ID, channelRef: ID!): ChannelReadState
 
     """
+    #1353 internal pilot: compact attention for this operator's LIVE Workers.
+    The signed token is a pure poll watermark and never changes read state.
+    Omit since for all current unread. since:"now" is refused: discarding a
+    backlog requires the separate preview + confirmed switchover.
+
+    A router must adopt the returned token only after EVERY listed nudge was
+    accepted. On any partial failure retain the prior token; retries can
+    duplicate a nudge but cannot silently lose one.
+    """
+    teamAttention(appRef: ID!, since: String): TeamAttentionResult!
+
+    """
+    Preview the explicit baseline switchover for the operator's current live
+    Workers. Read-only: inspect the exact cursors, heads and unread counts,
+    then pass proof to confirmTeamAttentionSwitchover within ten minutes.
+    """
+    teamAttentionSwitchoverPreview(appRef: ID!): TeamAttentionSwitchoverPreview!
+
+    """
     036-ai-service-config: resolve a config name for an execution context
     and return the DECRYPTED credentials (privileged; successor to
     agentAIConfig/appAIConfig).
@@ -6204,6 +6550,15 @@ export const typeDefs = `#graphql
     appRef/agentRef accept the entity's ID or URN.
     """
     resolveAIConfig(name: String, appRef: ID, agentRef: ID): ResolvedAiConfig!
+
+    """
+    #1373: the known endpoints for a provider — the server's single suggestion
+    list, so the portal and the CLI render the same choices and neither
+    hardcodes a URL. Empty for an unknown provider and for bedrock (its
+    endpoint comes from the region). Public reference data (vendor URLs), so
+    it needs no auth.
+    """
+    aiProviderEndpoints(provider: String!): [AiProviderEndpoint!]!
 
     """
     036-ai-service-config: the MASKED set of configs RESOLVABLE in an
@@ -6253,6 +6608,12 @@ export const typeDefs = `#graphql
     It is the mirror of teamChatMessages' sinceSeq: pass the OLDEST seq you
     hold, as you would pass the newest to page forward. Omit it for the tail.
 
+    There is no total -- the field returns the page and nothing else. A
+    page SHORTER than the limit is a truthful end-of-data under that cursor,
+    and only here: this resolver applies every filter inside the query and
+    never drops a row after the database take, so the take IS the page. Do
+    not carry the same-looking inference to reads that overfetch and
+    post-filter; there a short page can still mean rows were removed.
     Two boundaries worth knowing before you build on it:
       - A message with NO seq is older than every numbered one
         (cor:cht:050:02), so every cursor includes such messages. They are
@@ -8041,9 +8402,17 @@ export const typeDefs = `#graphql
     """
     036-ai-service-config: create a named AI config on an owner entity.
 
-    apiKey semantics: omitted = stored without a key (unusable for
-    execution until one is set); non-empty = encrypted at rest with a
-    masked preview. Name must be 1-64 lower-case [a-z0-9_-], unique per
+    apiKey semantics: non-empty = encrypted at rest with a masked preview.
+    Omitted is accepted only where a run may use the server's own
+    credential: a HADRON_SERVER config for openai, anthropic or bedrock at
+    their default host (no endpoint). Every ORGANIZATION, APP and AGENT
+    config needs its own key: the platform credential is platform spend
+    (#1390). Any other provider (glm, openai-compatible), and any config
+    with an endpoint, needs one too, because the SDK would otherwise send
+    the server's credential to a host that didn't issue it (#1389). All of
+    these are refused with AiConfigValidationError. A host that checks no
+    key takes any placeholder.
+    Name must be 1-64 lower-case [a-z0-9_-], unique per
     owner. provider must be a known provider; params are validated per
     provider.
 
@@ -8058,6 +8427,10 @@ export const typeDefs = `#graphql
       model: String!
       apiKey: String
       params: JSON
+      "#1373: base URL; https only, no query/fragment/credentials. Omit for the provider default."
+      endpoint: String
+      "#1373: OpenAI-compatible providers only; omit for the provider default."
+      apiStyle: AiApiStyle
       enabled: Boolean
     ): AiServiceConfig!
 
@@ -8065,7 +8438,9 @@ export const typeDefs = `#graphql
     036-ai-service-config: update a named AI config. All fields optional.
 
     apiKey semantics: omitted = keep the stored key; empty string =
-    clear it; non-empty = replace (encrypted, preview recomputed).
+    clear it; non-empty = replace (encrypted, preview recomputed). The
+    RESULTING config is held to createAiServiceConfig's key rule, so
+    clearing the key of a config that needs one is refused.
 
     Auth: admin rights on the owning entity (as aiServiceConfigs).
     """
@@ -8076,8 +8451,23 @@ export const typeDefs = `#graphql
       model: String
       apiKey: String
       params: JSON
+      "#1373: omitted = unchanged; null or empty string = clear (provider default)."
+      endpoint: String
+      "#1373: omitted = unchanged; null = clear (provider default)."
+      apiStyle: AiApiStyle
       enabled: Boolean
     ): AiServiceConfig!
+
+    """
+    #1378: test a SAVED config by id with one small real call, through the same
+    client, endpoint and egress guard a run uses; the stored key never leaves
+    the server. The override argument tests edited values without saving them. Auth: as
+    updateAiServiceConfig; refused under impersonation. Every test that
+    reaches the provider is metered (usage type ai-config-test); NO_API_KEY
+    and KEY_UNREADABLE make no call and record nothing. The call is bounded
+    by a 20s timeout. Rate-limited per caller and config (RATE_LIMITED).
+    """
+    testAiServiceConfig(id: ID!, override: AiServiceConfigTestOverride): AiServiceConfigTestResult!
 
     """
     036-ai-service-config: delete a named AI config (hard delete; the
@@ -8106,12 +8496,71 @@ export const typeDefs = `#graphql
     #1325 — change a rule by its id. With expectedRevision, a rule changed since
     you read it is refused CONFLICT (extensions.currentRevision) and nothing is
     written; omitted, the last writer wins. A rule you may not manage reads as
-    NOT_FOUND.
+    NOT_FOUND. A LOCKED rule (#1334) is refused with RULE_LOCKED (extensions
+    ruleId, role, sourceTemplateId) for EVERY caller: unlock it first
+    (unlockNodeRoleRule) or re-apply its required template.
     """
     updateNodeRoleRule(ref: ID!, input: UpdateNodeRoleRuleInput!, expectedRevision: Int): NodeRoleRulePayload!
 
-    "#1325 — delete a rule by its id; expectedRevision as for updateNodeRoleRule."
+    "#1325 — delete a rule by its id; expectedRevision as for updateNodeRoleRule. A LOCKED rule (#1334) is refused with RULE_LOCKED for every caller: unlock it first (unlockNodeRoleRule)."
     deleteNodeRoleRule(ref: ID!, expectedRevision: Int): Boolean!
+
+    """
+    #1334 — the deliberate step before a rule a required template LOCKED can be
+    edited or deleted (Holger, 2026-09-27: nobody changes a locked rule through
+    an ordinary edit). Needs lock authority: an org ADMIN/OWNER of the memory's
+    org; on a personal/private or org-less memory, its manager. Anyone else who
+    manages the memory gets RULE_LOCKED. Visible: bumps revision and stamps
+    updatedBy. Unlocking an unlocked rule changes nothing. expectedRevision as
+    for updateNodeRoleRule.
+    """
+    unlockNodeRoleRule(ref: ID!, expectedRevision: Int): NodeRoleRulePayload!
+
+    """
+    #1334 — copy a template's rules into ONE memory's config. A one-off copy:
+    later template edits never reach this memory, and re-applying is explicit.
+
+    Needs MANAGE on the memory (else MemoryNotFound) and on the template,
+    which exists for you only if you manage its owner (else
+    MEMORY_CONFIG_TEMPLATE_NOT_FOUND). The rules are validated as a whole,
+    under a share lock, as createNodeRoleRule validates a new rule's
+    references (NODE_NOT_FOUND for one you cannot read, NOT_A_TASK), and a
+    template rule whose task was deleted refuses the whole apply
+    (NODE_ROLE_RULE_REF_BROKEN). All-or-nothing per memory.
+
+    When the memory already has a rule for a role, a non-required template
+    skips it and a required template replaces it. A LOCKED rule is only
+    replaced by a caller with lock authority (see unlockNodeRoleRule);
+    otherwise SKIPPED_LOCKED. Rules written by a required template are locked.
+
+    expectedTemplateRevision: CONFLICT (with currentRevision) if the template
+    changed since you read it. dryRun: the same report with nothing written.
+    """
+    applyMemoryConfigTemplate(templateRef: ID!, memoryRef: ID!, expectedTemplateRevision: Int, dryRun: Boolean): MemoryConfigApplyResult!
+
+    """
+    #1325 part (c) — create a template. ownerRef names the organization, user
+    or App; omit it for HADRON_SERVER (platform admins only; refused
+    HADRON_SERVER_NOT_CONFIGURED when this server has no row) and for USER
+    (yourself — you own templates for no one else). A second live template of
+    the same name under the same owner is MEMORY_CONFIG_TEMPLATE_EXISTS.
+    """
+    createMemoryConfigTemplate(
+      ownerType: MemoryConfigTemplateOwnerType!
+      ownerRef: ID
+      input: CreateMemoryConfigTemplateInput!
+    ): MemoryConfigTemplatePayload!
+
+    """
+    #1325 part (c) — change a template by its id. With expectedRevision, a
+    template changed since you read it is refused CONFLICT
+    (extensions.currentRevision) and nothing is written. A template you may not
+    manage reads as MEMORY_CONFIG_TEMPLATE_NOT_FOUND.
+    """
+    updateMemoryConfigTemplate(ref: ID!, input: UpdateMemoryConfigTemplateInput!, expectedRevision: Int): MemoryConfigTemplatePayload!
+
+    "#1325 part (c) — soft-delete a template. Configs it was applied to keep their copies."
+    deleteMemoryConfigTemplate(ref: ID!, expectedRevision: Int): Boolean!
 
     "Spec 049 Phase 2 — update a scope you may write (auth as createScope). memoryRefs replaces the ordered list."
     updateScope(ref: ID!, input: UpdateScopeInput!): Scope!
@@ -8162,6 +8611,23 @@ export const typeDefs = `#graphql
     channelRef: the Channel's id or its address (\`Channel.chatRootUrn\`, #1171).
     """
     advanceChannelReadState(attendeeRef: ID!, appRef: ID, channelRef: ID!, seq: Int!): ChannelReadState!
+
+    """
+    #1353 internal pilot: explicitly advance the cursor owned by one exact,
+    caller-owned live Worker session on one readable registered Channel.
+    Shares the MCP mark-read gate; unlike advanceChannelReadState this door is
+    operator+App pilot-gated and session-pinned. Monotonic; a seq beyond the
+    captured Channel watermark is refused.
+    """
+    markOwnTeamChatRead(appRef: ID!, sessionRef: ID!, channelRef: ID!, seq: Int!): OwnTeamChatReadState!
+
+    """
+    Explicitly confirm a previously previewed #1353 switchover. The proof is
+    actor/App/scope-bound; any live-Worker, register or cursor drift rejects
+    the whole transaction. It advances only through the heads captured by the
+    preview, so messages arriving afterward remain unread.
+    """
+    confirmTeamAttentionSwitchover(appRef: ID!, proof: String!): TeamAttentionSwitchoverResult!
 
     # Chatbot revisions (org ADMIN)
     """
@@ -8256,6 +8722,7 @@ export const typeDefs = `#graphql
       agentTools: [String!]
       aiProvider: String
       aiModel: String
+      "036 legacy shim over the App's 'default' AI config; held to createAiServiceConfig's key rule (#1389)."
       aiApiKey: String
       expiresAt: String
       surfaces: [String!]
@@ -8291,6 +8758,7 @@ export const typeDefs = `#graphql
       agentTools: [String!]
       aiProvider: String
       aiModel: String
+      "036 legacy shim over the App's 'default' AI config; held to createAiServiceConfig's key rule (#1389)."
       aiApiKey: String
       expiresAt: String
       surfaces: [String!]

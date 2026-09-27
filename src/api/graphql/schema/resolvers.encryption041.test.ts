@@ -111,7 +111,9 @@ describe('encryptMemory — passphrase path (spec 041)', () => {
         { memoryId, passphrase: 'pw' },
         { db, roles: ['READER'], userId: stranger.id } as Context,
       ),
-    ).rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
+      // #1381: the stranger cannot open this private memory, so it answers as a
+      // missing one; FORBIDDEN confirmed that it exists.
+    ).rejects.toMatchObject({ code: 'MEMORY_NOT_FOUND', ref: memoryId });
   });
 
   it('rejects both-or-neither key inputs', async () => {

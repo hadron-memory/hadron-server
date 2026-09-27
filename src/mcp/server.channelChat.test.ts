@@ -70,6 +70,31 @@ describe('Channel-addressed chat tools', () => {
     expect(await s.callToolText('hadron_channel_post', { channel: release.id, body: 'x' })).toMatch(/^\[channel_not_found\]/);
     expect(await server(admin.id).callToolText('hadron_channel_read', { channel: 'nope' })).toMatch(/^\[channel_not_found\]/);
   });
+
+  it('an App key with a bound session keeps that memory scope when read names a Worker session', async () => {
+    const agent = await db.agent.findFirstOrThrow({ where: { organizationId: org.id } });
+    const sessionMemory = await db.memory.create({
+      data: {
+        id: generateId(), organizationId: org.id, urn: `${org.urn}:session`,
+        name: 'session', class: 'app', appId: app.id, userMemoryOfAgentId: agent.id,
+      },
+    });
+    const ownChannel = (await ensureChannelWithRoot(db, {
+      memoryId: sessionMemory.id, loc: 'chats:session', name: 'session', createdBy: admin.id,
+    })).channel;
+    const session = await db.session.create({
+      data: { id: generateId(), appId: app.id, agentId: agent.id, memoryId: sessionMemory.id },
+    });
+    const appKey = createTestableMcpServer(
+      { appId: app.id, sessionId: session.id, roles: [] } as AuthContext,
+      { sessionId: `ccm-app-${generateId()}`, cachedAppResolution: { kind: 'multi-app' } },
+    );
+
+    expect(await appKey.callToolText('hadron_channel_read', { channel: ownChannel.id, session: session.id }))
+      .toContain('no matching messages');
+    expect(await appKey.callToolText('hadron_channel_read', { channel: release.id, session: session.id }))
+      .toMatch(/^\[channel_not_found\]/);
+  });
 });
 
 describe('#1171 — the address on the MCP channel tools', () => {

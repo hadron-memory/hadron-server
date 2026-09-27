@@ -197,7 +197,9 @@ describe('listMemoryAssets', () => {
     ).rejects.toMatchObject({ code: 'NOT_FOUND' });
   });
 
-  it('rejects with PERMISSION_DENIED when caller is not the personal-memory owner', async () => {
+  // #1381: a caller who cannot read the memory gets the missing answer —
+  // PERMISSION_DENIED confirmed that it exists.
+  it('rejects as NOT_FOUND when caller is not the personal-memory owner', async () => {
     const otherUser = await db.user.create({
       data: { githubId: 9502, githubUsername: 'list-other', roles: ['READER'] },
     });
@@ -207,7 +209,7 @@ describe('listMemoryAssets', () => {
         { userId: otherUser.id },
         { memoryId: memory.id },
       ),
-    ).rejects.toMatchObject({ code: 'PERMISSION_DENIED' });
+    ).rejects.toMatchObject({ code: 'NOT_FOUND', message: 'memory not found' });
   });
 
   // ── The gate is the memory's read access; `mine` is only a filter ──

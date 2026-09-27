@@ -38,6 +38,26 @@ src/test/integration/spec-hierarchy-neutral-1312.test.ts"
 
 BAD=0
 SURVIVORS=0
+
+# Baseline on the unmutated tree: every spec green, and the TOTAL test count
+# every mutant run must reproduce. A run reporting fewer tests (files that
+# failed to load, a crashed worker, an exhausted DB) did not test the mutant,
+# and must not read as a survivor — the third way this harness lied (PR #1383:
+# a partial run of 13 tests was reported as SURVIVED).
+# shellcheck disable=SC2086
+# The EXIT STATUS counts too (@codex, PR #1383): a suite that fails to load
+# can leave a `Tests … passed (N)` line with no "failed" in it, and a baseline
+# measured on that would validate every mutant against a reduced count.
+base_raw=$(TEST_DATABASE_URL="$TEST_DATABASE_URL" pnpm vitest run $SPECS 2>&1 | sed 's/\x1b\[[0-9;]*m//g')
+base_status=$?
+base_line=$(echo "$base_raw" | grep -E '^ *Tests ')
+BASELINE=$(echo "$base_line" | sed -nE 's/.*\(([0-9]+)\).*/\1/p')
+if [ "$base_status" -ne 0 ] || [ -z "$BASELINE" ] || echo "$base_raw" | grep -qE '^ *(Tests|Test Files) .*failed'; then
+  echo "REFUSING: the baseline is not green (vitest exit $base_status) — $base_line"
+  echo "$base_raw" | tail -5 | sed 's/^/            /'
+  exit 1
+fi
+echo "baseline: $BASELINE tests, all passing"
 run() { # name file old new [occurrence, 1-based]
   python3 - "$2" "$3" "$4" "${5:-1}" <<'PY' || { echo "STALE     $1 — pattern no longer matches the implementation"; BAD=$((BAD+1)); return; }
 import sys
@@ -51,6 +71,7 @@ open(p, 'w').write(s[:at] + new + s[at + len(old):])
 PY
   # shellcheck disable=SC2086
   raw=$(TEST_DATABASE_URL="$TEST_DATABASE_URL" pnpm vitest run $SPECS 2>&1 | sed 's/\x1b\[[0-9;]*m//g')
+  status=$?
   out=$(echo "$raw" | grep -E '^ *Tests ')
   git checkout -q -- "$2"
   if [ -z "$out" ]; then
@@ -59,7 +80,21 @@ PY
     BAD=$((BAD+1))
     return
   fi
+  total=$(echo "$out" | sed -nE 's/.*\(([0-9]+)\).*/\1/p')
+  if [ "$total" != "$BASELINE" ]; then
+    echo "ERRORED   $1 — partial run: $total of $BASELINE tests reported ($(echo "$out" | tr -s ' '))"
+    BAD=$((BAD+1))
+    return
+  fi
+  # A nonzero exit with NO failed test is an operational failure (teardown,
+  # an unhandled error), not a verdict on the mutant (@codex/@copilot, PR #1383).
+  if [ "$status" -ne 0 ] && ! echo "$out" | grep -q failed; then
+    echo "ERRORED   $1 — vitest exited $status without a failed test ($(echo "$out" | tr -s ' '))"
+    BAD=$((BAD+1))
+    return
+  fi
   if echo "$out" | grep -q failed; then echo "KILLED    $1 — $(echo "$out" | tr -s ' ')"
+  elif [[ "$1" == *"(expected survivor)"* ]]; then echo "SURVIVED  $1 — $(echo "$out" | tr -s ' ')"
   else echo "SURVIVED  $1 — $(echo "$out" | tr -s ' ')"; SURVIVORS=$((SURVIVORS+1)); fi
 }
 
@@ -148,5 +183,8 @@ run "26 writeNodeCore node-addressed door" "$N" \
   "        await authorizeWrite();"
 
 echo
-echo "survivors: $SURVIVORS (1 expected: #4)   stale/errored: $BAD"
-[ "$BAD" -eq 0 ]
+echo "unexpected survivors: $SURVIVORS (#4 is expected and not counted)   stale/errored: $BAD"
+# An unexpected survivor is a guard no test pins — a failure, not a note
+# (@codex, PR #1383). Only a mutant NAMED "(expected survivor)", with its
+# reason documented at the line it mutates, may survive.
+[ "$BAD" -eq 0 ] && [ "$SURVIVORS" -eq 0 ]
