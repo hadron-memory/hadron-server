@@ -37,10 +37,12 @@
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { GraphQLError } from 'graphql';
+import { ApolloServer } from '@apollo/server';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../helpers.js';
 import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
 import { writeNodeCore } from '../../api/graphql/schema/resolvers.mutation.node.js';
+import { typeDefs } from '../../api/graphql/schema/typeDefs.js';
 import { generateId } from '../../lib/id.js';
 
 // The write core fires writeNodeToGit asynchronously; pin to a
@@ -55,6 +57,7 @@ interface Fixture {
 }
 
 let fx: Fixture;
+const gqlServer = new ApolloServer<Context>({ typeDefs, resolvers });
 
 const SHORT_ABSTRACT = 'A short summary paragraph.';
 const REVISED_ABSTRACT = 'A revised summary.';
@@ -365,7 +368,7 @@ describe('restoreNodeRevision — abstract round-trips through history', () => {
 
 // ─── Spec 032 — abstractOriginHash via GraphQL ──────────────────────────
 
-import { computeContentHash } from '../../lib/contentHash.js';
+import { computeContentHash, isAbstractUnverified } from '../../lib/contentHash.js';
 
 async function persistedHash(loc: string): Promise<string | null> {
   const node = await db.node.findFirst({
@@ -376,6 +379,36 @@ async function persistedHash(loc: string): Promise<string | null> {
 }
 
 describe('spec 032 — upsertNode maintains abstractOriginHash', () => {
+  it.each(['portal', 'cli'] as const)(
+    '%s-shaped GraphQL re-affirmation persists the hash and clears staleness',
+    async (caller) => {
+      const loc = `s3-wire-${caller}`;
+      const created = await upsertNode({ loc, name: loc, abstract: 'A', content: 'B' });
+      const update = async (fields: Record<string, unknown>) => {
+        const response = await gqlServer.executeOperation({
+          query: 'mutation($input: UpdateNodeInput!) { updateNode(input: $input) { id revision abstract abstractOriginHash content } }',
+          variables: { input: { id: created.id, ...fields } },
+        }, { contextValue: fx.ctx });
+        if (response.body.kind !== 'single') throw new Error('unexpected incremental response');
+        expect(response.body.singleResult.errors).toBeUndefined();
+        return response.body.singleResult.data?.updateNode;
+      };
+      await update({ content: "B'" });
+      expect(await persistedHash(loc)).toBe(computeContentHash('B'));
+
+      const result = await update(caller === 'portal'
+        ? { abstract: 'A' }
+        : { abstract: 'A', content: "B'" });
+      expect(result).toMatchObject({
+        id: created.id, revision: 3, abstract: 'A', content: "B'",
+        abstractOriginHash: computeContentHash("B'"),
+      });
+      const stored = await db.node.findUniqueOrThrow({ where: { id: created.id } });
+      expect(stored.abstractOriginHash).toBe(computeContentHash(stored.content));
+      expect(isAbstractUnverified(stored)).toBe(false);
+    },
+  );
+
   it('fresh abstract + content: hash = computeContentHash(content)', async () => {
     await upsertNode({ loc: 's1', name: 's1', abstract: 'A', content: 'B' });
     expect(await persistedHash('s1')).toBe(computeContentHash('B'));
@@ -394,6 +427,70 @@ describe('spec 032 — upsertNode maintains abstractOriginHash', () => {
     // refresh abstract; expected to reset hash to current content's hash
     await upsertNode({ loc: 's3', name: 's3', abstract: "A'" });
     expect(await persistedHash('s3')).toBe(computeContentHash("B'"));
+  });
+
+  it.each(['update', 'upsert'] as const)(
+    '%s re-affirmation hashes the authoritative body after an interleaved edit',
+    async (mode) => {
+      const loc = `s3-race-${mode}`;
+      const created = await upsertNode({ loc, name: loc, abstract: 'A', content: 'B' });
+      const findUnique = db.node.findUnique.bind(db.node);
+      let changedAfterProbe = false;
+      const probe = vi.spyOn(db.node, 'findUnique').mockImplementation((async (args: Parameters<typeof findUnique>[0]) => {
+        const result = await findUnique(args);
+        if (!changedAfterProbe && 'loc_memoryId' in args.where &&
+            args.where.loc_memoryId?.loc === loc) {
+          changedAfterProbe = true;
+          await db.node.update({ where: { id: created.id }, data: { content: "B'" } });
+        }
+        return result;
+      }) as never);
+      try {
+        await writeNodeCore({ memoryId: fx.memory.id, loc, name: loc, abstract: 'A' }, fx.ctx, mode);
+      } finally {
+        probe.mockRestore();
+      }
+      expect(changedAfterProbe).toBe(true);
+      const stored = await db.node.findUniqueOrThrow({ where: { id: created.id } });
+      expect(stored.content).toBe("B'");
+      expect(stored.abstractOriginHash).toBe(computeContentHash("B'"));
+      const history = await db.nodeRevision.findMany({
+        where: { nodeId: created.id }, orderBy: { revNo: 'asc' },
+      });
+      expect(history).toHaveLength(2); // raw-body drift, then the re-affirmation
+      expect(history[1]?.changes).toEqual(['abstractOriginHash']);
+    },
+  );
+
+  it('rolls back a guarded re-affirmation after an interleaved body edit', async () => {
+    const loc = 's3-race-guarded';
+    const created = await upsertNode({ loc, name: loc, abstract: 'A', content: 'B' });
+    const findUnique = db.node.findUnique.bind(db.node);
+    let changedAfterProbe = false;
+    const probe = vi.spyOn(db.node, 'findUnique').mockImplementation((async (args: Parameters<typeof findUnique>[0]) => {
+      const result = await findUnique(args);
+      if (!changedAfterProbe && 'loc_memoryId' in args.where &&
+          args.where.loc_memoryId?.loc === loc) {
+        changedAfterProbe = true;
+        await db.node.update({ where: { id: created.id }, data: { content: "B'" } });
+      }
+      return result;
+    }) as never);
+    try {
+      await expect(writeNodeCore(
+        { memoryId: fx.memory.id, loc, abstract: 'A' }, fx.ctx, 'update', { guardRevSeq: 1 },
+      )).rejects.toSatisfy(
+        (error: unknown) => error instanceof GraphQLError && error.extensions.code === 'NODE_WRITE_CONFLICT',
+      );
+    } finally {
+      probe.mockRestore();
+    }
+    expect(changedAfterProbe).toBe(true);
+    const stored = await db.node.findUniqueOrThrow({ where: { id: created.id } });
+    expect(stored.content).toBe("B'");
+    expect(stored.abstractOriginHash).toBe(computeContentHash('B'));
+    expect(stored.revSeq).toBe(1);
+    expect(await db.nodeRevision.count({ where: { nodeId: created.id } })).toBe(0);
   });
 
   it('abstract cleared: hash cleared', async () => {

@@ -726,6 +726,17 @@ export async function writeNodeCore(
         suppliedForDiff.abstractOriginHash = nextAbstractOriginHash;
       }
 
+      /** Recompute against the locked row when an abstract-only write follows a concurrent body edit. */
+      const hashAgainstLockedContent = (lockedContent: string | null): string | null | undefined => {
+        if (input.abstract === undefined) return undefined;
+        if (input.abstract === null) return null;
+        if (input.content !== undefined) return computeContentHash(input.content);
+        const plaintext = memEncInfo.isEncrypted
+          ? decryptNodeFields({ content: lockedContent }, memEncInfo).content ?? null
+          : lockedContent;
+        return computeContentHash(plaintext);
+      };
+
       if (memEncInfo.isEncrypted) {
         const key = sessionKeyCache.getByMemoryId(memEncInfo.id);
         if (!key) {
@@ -1049,7 +1060,10 @@ export async function writeNodeCore(
             const currentForDiff = memEncInfo.isEncrypted
               ? decryptNodeFields({ ...current }, memEncInfo)
               : current;
-            const changes = diffNodeChanges(currentForDiff, suppliedForDiff);
+            const lockedAbstractHash = hashAgainstLockedContent(current.content);
+            const changes = diffNodeChanges(currentForDiff, {
+              ...suppliedForDiff, abstractOriginHash: lockedAbstractHash,
+            });
             // #1330 — H1 strict sub-roles, judged on the locked row: a role the
             // write assigns must be declared under a strict parent.
             const authoredChange = authoredContentChanged(changes);
@@ -1122,6 +1136,7 @@ export async function writeNodeCore(
               // The snapshot above keeps the old author. The new live content
               // has no verified author until the attestation/human gates land.
               ...(authoredChange ? (verifiedAuthorship ?? clearNodeAuthorship()) : {}),
+              ...(lockedAbstractHash !== undefined ? { abstractOriginHash: lockedAbstractHash } : {}),
               revisionContentHash: revisionStateHashRefreshMarker(),
             } as Prisma.NodeUncheckedUpdateInput;
 
@@ -1275,6 +1290,7 @@ export async function writeNodeCore(
             // the #976 defect. `upsert` mode reaches here for a live row too,
             // deliberately: that mode is either-way by contract.
             let authoritativeChanges: string[] = [];
+            let authoritativeAbstractHash = nextAbstractOriginHash;
             if (authoritative) {
               // Row lock + drift reconciled as its own revision BEFORE this
               // snapshot (@copilot, PR #1339): the address lock binds only
@@ -1296,7 +1312,10 @@ export async function writeNodeCore(
               const authoritativeForDiff = memEncInfo.isEncrypted
                 ? decryptNodeFields({ ...authoritative }, memEncInfo)
                 : authoritative;
-              authoritativeChanges = diffNodeChanges(authoritativeForDiff, suppliedForDiff);
+              authoritativeAbstractHash = hashAgainstLockedContent(authoritative.content);
+              authoritativeChanges = diffNodeChanges(authoritativeForDiff, {
+                ...suppliedForDiff, abstractOriginHash: authoritativeAbstractHash,
+              });
               await createNodeRevision(tx, {
                 ...buildNodeRevisionSnapshot(authoritative, editorFromAuth(ctx), {
                   revLabel: input.reason,
@@ -1346,6 +1365,8 @@ export async function writeNodeCore(
                     : authoritative && (mode === 'create' || authoredContentChanged(authoritativeChanges))
                       ? clearNodeAuthorship()
                       : {}),
+                ...(authoritativeAbstractHash !== undefined
+                  ? { abstractOriginHash: authoritativeAbstractHash } : {}),
                 revisionContentHash: revisionStateHashRefreshMarker(),
                 // create-ONLY, matching the `isResurrect` it corrects. Widening
                 // it to `upsert` would let an importer revive a soft-deleted
