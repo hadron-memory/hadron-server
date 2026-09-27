@@ -7,7 +7,7 @@ import { typeResolvers } from './resolvers.types.js';
 import type { Context } from './resolvers.js';
 import { typeDefs } from './typeDefs.js';
 import { writeNodeCore } from './resolvers.mutation.node.js';
-import { ensureCurrentNodeRevisionInTransaction } from '../../../lib/nodeRevisionSnapshot.js';
+import { ensureCurrentNodeRevisionInTransaction, revisionStateHashRefreshMarker } from '../../../lib/nodeRevisionSnapshot.js';
 
 const at = new Date('2026-09-26T20:00:00Z');
 let nodeMemoryId: string;
@@ -109,6 +109,42 @@ describe('#1326 content provenance reads', () => {
     expect(await db.nodeRevision.count({ where: { nodeId } })).toBe(1);
   });
 
+  it('reconciles a stamped raw edit when authorship is the only selected Node field', async () => {
+    await db.$transaction((tx) => ensureCurrentNodeRevisionInTransaction(tx, nodeId, { expectedMemoryId: nodeMemoryId }));
+    await db.node.update({ where: { id: nodeId }, data: { data: { raw: 'edited' } } });
+    const parent = await db.node.findUniqueOrThrow({ where: { id: nodeId } });
+    expect(parent.authorshipKind).toBe('TASK'); // the raw writer left a stale stamp
+
+    expect(await typeResolvers.Node.authorship(parent, null, reader())).toBeNull();
+    expect((await db.node.findUniqueOrThrow({ where: { id: nodeId } })).authorshipKind).toBeNull();
+    expect((await db.nodeRevision.findFirstOrThrow({ where: { nodeId } })).authorshipKind).toBeNull();
+    expect(await db.nodeRevision.count({ where: { nodeId } })).toBe(1);
+    expect(await typeResolvers.Node.revision(parent, null, reader())).toBe(parent.revSeq + 1);
+
+    // A second reader may reconcile first after this parent was selected.
+    // Its unchanged authored content still must not inherit the old stamp.
+    expect(await typeResolvers.Node.authorship(parent, null, reader())).toBeNull();
+    expect(await db.nodeRevision.count({ where: { nodeId } })).toBe(1);
+  });
+
+  it('does not return an unverifiable parent stamp after a concurrent authored edit', async () => {
+    await db.$transaction((tx) => ensureCurrentNodeRevisionInTransaction(tx, nodeId, { expectedMemoryId: nodeMemoryId }));
+    await db.node.update({ where: { id: nodeId }, data: { data: { raw: 'edited' } } });
+    const staleParent = await db.node.findUniqueOrThrow({ where: { id: nodeId } });
+    const memory = await db.memory.findUniqueOrThrow({ where: { id: nodeMemoryId } });
+    await db.orgMember.update({
+      where: { organizationId_userId: { organizationId: memory.organizationId!, userId: readerId } },
+      data: { role: 'ADMIN' },
+    });
+    await writeNodeCore(
+      { memoryId: nodeMemoryId, loc: 'authored', content: 'newer body' },
+      { db, userId: readerId, roles: ['ADMIN'] } as Context,
+      'update',
+    );
+
+    expect(await typeResolvers.Node.authorship(staleParent, null, reader())).toBeNull();
+  });
+
   it('offers no public GraphQL setter for system-owned attribution or validation', () => {
     const schema = buildSchema(typeDefs);
     for (const name of ['NodeInput', 'CreateNodeInput', 'UpdateNodeInput']) {
@@ -145,7 +181,7 @@ describe('#1326 content provenance reads', () => {
       where: { id: nodeId },
       data: {
         authorshipKind: 'HUMAN', authoredByTask: null, authoredByRevision: null,
-        authoredByHuman: readerId,
+        authoredByHuman: readerId, revisionContentHash: revisionStateHashRefreshMarker(),
       },
     });
     const node = await db.node.findUniqueOrThrow({ where: { id: nodeId } });

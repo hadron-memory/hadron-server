@@ -25,6 +25,7 @@ import {
   revisionStateMatches,
   type SnapshotSourceNode,
 } from '../../../lib/nodeRevisionSnapshot.js';
+import { clearNodeAuthorship } from '../../../lib/nodeAuthorship.js';
 import { decryptNodeFieldsWithKey } from '../../../lib/nodeCrypto.js';
 import { sessionKeyCache } from '../../../lib/sessionKeyCache.js';
 import { composeAppRunUrn } from '../../../lib/entityRef/appRunRef.js';
@@ -352,6 +353,45 @@ async function resolveAuthorship(state: AuthoredState, ctx: Context) {
   };
 }
 
+/**
+ * Reconcile a raw writer's drift for a Node parent without mixing a later
+ * writer's state into the GraphQL object already selected by the caller.
+ */
+async function reconciledNodeForParent(
+  n: SnapshotSourceNode & { revSeq: number },
+  ctx: Context,
+  matches: (parent: SnapshotSourceNode, current: SnapshotSourceNode) => boolean,
+): Promise<(SnapshotSourceNode & { revSeq: number }) | null> {
+  return ctx.db.$transaction(async (tx) => {
+    // A newer number is safe only when every intervening revision came from
+    // another reader's reconcile. An authored or edge write may have changed
+    // the parent's state even when its tracked fields happen to look equal.
+    await tx.$queryRaw`SELECT "id" FROM "nodes" WHERE "id" = ${n.id} FOR UPDATE`;
+    const pre = await tx.node.findUnique({ where: { id: n.id }, select: { memoryId: true, revSeq: true } });
+    if (!pre || pre.memoryId !== n.memoryId || pre.revSeq < n.revSeq) return null;
+    if (pre.revSeq > n.revSeq) {
+      const reconciles = await tx.nodeRevision.count({
+        where: { nodeId: n.id, revNo: { gte: n.revSeq, lt: pre.revSeq }, editedByInfo: RECONCILE_EDITOR_INFO },
+      });
+      if (reconciles !== pre.revSeq - n.revSeq) return null;
+    }
+    if ((await ensureCurrentNodeRevisionInTransaction(tx, n.id, { expectedMemoryId: n.memoryId })) == null) return null;
+    const current = await tx.node.findUnique({ where: { id: n.id } });
+    if (!current) return null;
+    const key = sessionKeyCache.getByMemoryId(current.memoryId);
+    if (key) decryptNodeFieldsWithKey(current, key);
+    return matches(n, current) ? current : null;
+  });
+}
+
+/** The read resolver corrects a stale stamp without changing authored content. */
+function revisionStateMatchesWithoutAuthorship(parent: SnapshotSourceNode, current: SnapshotSourceNode): boolean {
+  return revisionStateMatches(
+    { ...parent, ...clearNodeAuthorship() },
+    { ...current, ...clearNodeAuthorship() },
+  );
+}
+
 async function resolveContentValidation(
   state: { id?: string; nodeId?: string; memoryId?: string | null; revSeq?: number; revNo?: number | null },
   ctx: Context,
@@ -400,7 +440,19 @@ export const typeResolvers = {
     from: (s: { fromAddress: string }) => s.fromAddress,
   },
   Node: {
-    authorship: (n: AuthoredState, _: unknown, ctx: Context) => resolveAuthorship(n, ctx),
+    authorship: async (n: SnapshotSourceNode & { revSeq: number }, _: unknown, ctx: Context) => {
+      if (!n.authorshipKind || !n.authoredAt) return null;
+      // A raw writer can change authored content without refreshing its
+      // fingerprint. Reconcile even when the client selects only authorship:
+      // no other GraphQL field is guaranteed to run first. Compare the
+      // parent's content after ignoring its stale stamp; a concurrent
+      // supported edit must not lend its new authorship to this old parent.
+      const current = await reconciledNodeForParent(n, ctx, revisionStateMatchesWithoutAuthorship);
+      // If the selected parent no longer matches a reconcilable live state,
+      // its stamp cannot be verified here. An absent claim is safer than
+      // attributing raw drift that a concurrent writer has since overwritten.
+      return current ? resolveAuthorship(current, ctx) : null;
+    },
     contentValidation: async (
       n: SnapshotSourceNode & { revSeq: number; revisionContentHash: string | null },
       _: unknown,
@@ -422,40 +474,11 @@ export const typeResolvers = {
       // Raw writers are detected lazily. The canonical fingerprint is computed
       // by PostgreSQL because the revision state includes JSON/array fields
       // whose text encoding is not portable across runtimes. Reconcile + refetch under one lock,
-      // then use the new number ONLY when the complete revisioned state still
-      // matches the parent object. If a concurrent supported write changed the
-      // row, the parent's own number remains the only self-consistent answer.
-      return ctx.db.$transaction(async (tx) => {
-        // A NEWER number is only ever returned for this call's own reconcile
-        // of drift the parent already reflects. If any revisioned write landed
-        // since the parent was read — an edge-only update advances revSeq
-        // without touching a tracked field — the parent's edges/fields may be
-        // stale, and its own number is the only self-consistent answer
-        // (@codex P1, PR #1339).
-        await tx.$queryRaw`SELECT "id" FROM "nodes" WHERE "id" = ${n.id} FOR UPDATE`;
-        const pre = await tx.node.findUnique({ where: { id: n.id }, select: { memoryId: true, revSeq: true } });
-        if (!pre || pre.memoryId !== n.memoryId || pre.revSeq < n.revSeq) return n.revSeq;
-        if (pre.revSeq > n.revSeq) {
-          // Advances since the parent was read are harmless ONLY if every one
-          // is a server reconcile (another reader's — reconciles never touch
-          // edges): the parent is then still current, and must get the SAME
-          // number that reader got (@codex P1, PR #1339). Any authoring or
-          // edge write in between, or pruned history we cannot see, keeps the
-          // parent's own number.
-          const reconciles = await tx.nodeRevision.count({
-            where: { nodeId: n.id, revNo: { gte: n.revSeq, lt: pre.revSeq }, editedByInfo: RECONCILE_EDITOR_INFO },
-          });
-          if (reconciles !== pre.revSeq - n.revSeq) return n.revSeq;
-        }
-        // Only while the row is still in the memory the parent was read from
-        // (@codex P1, PR #1339): never reconcile into another tenant.
-        if ((await ensureCurrentNodeRevisionInTransaction(tx, n.id, { expectedMemoryId: n.memoryId })) == null) return n.revSeq;
-        const current = await tx.node.findUnique({ where: { id: n.id } });
-        if (!current) return n.revSeq;
-        const key = sessionKeyCache.getByMemoryId(current.memoryId);
-        if (key) decryptNodeFieldsWithKey(current, key);
-        return revisionStateMatches(n, current) ? current.revSeq : n.revSeq;
-      });
+      // then use the new number only when the selected content still matches.
+      // The reconcile itself may clear a stale authorship stamp; the field
+      // resolver presents that corrected stamp, so its change is allowed here.
+      const current = await reconciledNodeForParent(n, ctx, revisionStateMatchesWithoutAuthorship);
+      return current?.revSeq ?? n.revSeq;
     },
     tags: (node: { tags: string | string[] }) => deserializeTags(node.tags),
     // The referenced asset for a `reference` node carrying data.asset
