@@ -108,6 +108,73 @@ export async function hasActiveAgentInstallLicense(
   return (await activeAgentInstallLicenseIds(db, app, [agent])).has(agent.id);
 }
 
+/** Resolve one Agent's live licenses across candidate Apps in bounded queries. */
+export async function activeAppInstallLicenseIdsForAgent(
+  db: PrismaClient,
+  agentId: string,
+  appIds: string[],
+): Promise<Set<string>> {
+  const licensed = new Set<string>();
+  if (appIds.length === 0) return licensed;
+  const installs = await db.appAgent.findMany({
+    where: { agentId, appId: { in: appIds } },
+    select: {
+      appId: true,
+      app: { select: { organizationId: true, ownerUserId: true, deletedAt: true, uninstalledAt: true } },
+      agent: { select: { organizationId: true, ownerUserId: true, deletedAt: true } },
+    },
+  });
+  if (installs.length === 0 || installs[0]!.agent.deletedAt !== null) return licensed;
+  const agent = installs[0]!.agent;
+  const orgIds = [...new Set(
+    [agent.organizationId, ...installs.map((row) => row.app.organizationId)]
+      .filter((id): id is string => id !== null),
+  )];
+  const orgRows = orgIds.length
+    ? await db.organization.findMany({
+        where: { id: { in: orgIds }, deletedAt: null }, select: { id: true },
+      })
+    : [];
+  const liveOrgs = new Set(orgRows.map((row) => row.id));
+  if (agent.organizationId !== null && !liveOrgs.has(agent.organizationId)) return licensed;
+
+  const foreignOrgIds = [...new Set(installs
+    .filter((row) => row.app.organizationId !== null && row.app.organizationId !== agent.organizationId)
+    .map((row) => row.app.organizationId!))];
+  const foreignOwnerIds = [...new Set(installs
+    .filter((row) => row.app.organizationId === null && row.app.ownerUserId !== agent.ownerUserId)
+    .map((row) => row.app.ownerUserId)
+    .filter((id): id is string => id !== null))];
+  const [grants, subscriptions] = await Promise.all([
+    foreignOrgIds.length
+      ? db.agentOrgGrant.findMany({ where: { agentId, orgId: { in: foreignOrgIds } } })
+      : [],
+    foreignOwnerIds.length
+      ? db.agentSubscription.findMany({ where: { agentId, userId: { in: foreignOwnerIds } } })
+      : [],
+  ]);
+  const now = new Date();
+  const activeOrgGrants = new Set(
+    grants.filter((row) => isLifecycleActive(row, now)).map((row) => row.orgId),
+  );
+  const activeSubscriptions = new Set(
+    subscriptions.filter((row) => isLifecycleActive(row, now)).map((row) => row.userId),
+  );
+  for (const { appId, app } of installs) {
+    if (app.deletedAt || app.uninstalledAt) continue;
+    if (app.organizationId !== null) {
+      if (!liveOrgs.has(app.organizationId)) continue;
+      if (app.organizationId === agent.organizationId || activeOrgGrants.has(app.organizationId)) {
+        licensed.add(appId);
+      }
+    } else if (app.ownerUserId !== null &&
+      (app.ownerUserId === agent.ownerUserId || activeSubscriptions.has(app.ownerUserId))) {
+      licensed.add(appId);
+    }
+  }
+  return licensed;
+}
+
 /** A retained AppAgent pointer is authority only while its install is live. */
 export async function isAgentInstalledAndLicensed(
   db: PrismaClient,

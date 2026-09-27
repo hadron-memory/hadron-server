@@ -25,7 +25,7 @@ import {
 import { getMemberOrgIds } from '../../../lib/auth/memberOrgIds.js';
 import { validateMemoryNodes } from '../../../lib/memoryValidation.js';
 import { emitNodeUrnV2 } from '../../../lib/urnEmit.js';
-import { isAgentInstalledAndLicensed, isGrantedAgentMemoryRole } from '../../../lib/appAgent.js';
+import { activeAgentInstallLicenseIds, isGrantedAgentMemoryRole } from '../../../lib/appAgent.js';
 
 /** Compose a node URN, tolerating a memory urn the flat v2 shape can't express. */
 function safeCanonicalNodeUrn(memoryUrn: string, loc: string): string | null {
@@ -480,6 +480,8 @@ export const memoryQueries = {
           select: {
             organizationId: true,
             ownerUserId: true,
+            deletedAt: true,
+            uninstalledAt: true,
             appAgents: {
               select: {
                 agent: {
@@ -494,7 +496,7 @@ export const memoryQueries = {
             },
           },
         });
-        if (!app || app.appAgents.length === 0) return empty;
+        if (!app || app.deletedAt || app.uninstalledAt || app.appAgents.length === 0) return empty;
         // #758 — the twin of the #676 blocker-2 fix, which landed only in the
         // MCP `getAppMemoryAccess`. spec 047: a USER-owned memory is strictly
         // owner-only, so one owned by someone other than this App's owner must
@@ -502,9 +504,13 @@ export const memoryQueries = {
         // (ownerUserId NULL) are unaffected.
         const foreignUserOwned = (owner: string | null | undefined): boolean =>
           owner != null && owner !== app.ownerUserId;
+        const licensedAgentIds = await activeAgentInstallLicenseIds(
+          ctx.db, app,
+          app.appAgents.map((row) => row.agent).filter((agent) => agent.deletedAt === null),
+        );
         const memoryMap = new Map<string, any>();
         for (const aa of app.appAgents) {
-          if (!(await isAgentInstalledAndLicensed(ctx.db, ctx.appId, aa.agent.id))) continue;
+          if (!licensedAgentIds.has(aa.agent.id)) continue;
           for (const item of aa.agent.memoryItems) {
             if (!isGrantedAgentMemoryRole(item.role)) continue;
             if (classSet ? !classSet.has(item.memory.class) : item.memory.class === 'system') continue;

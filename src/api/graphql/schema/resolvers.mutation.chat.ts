@@ -25,7 +25,7 @@ import {
 } from '../../../lib/edge-conditions/index.js';
 import { buildPrismaMemoryLayer } from '../../../lib/edge-conditions/prisma-memory-layer.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
-import { isAgentInstalledAndLicensed } from '../../../lib/appAgent.js';
+import { activeAppInstallLicenseIdsForAgent, isAgentInstalledAndLicensed } from '../../../lib/appAgent.js';
 import { GraphQLError } from 'graphql';
 import { type InputJsonValue } from '../../../generated/prisma/runtime/library.js';
 import { type MemoryVisibility } from '../../../generated/prisma/index.js';
@@ -244,9 +244,12 @@ export const chatMutations = {
             "Cannot create a shared chat — you are not a member of any App that installs this Agent.",
           );
         }
+        const licensedAppIds = await activeAppInstallLicenseIdsForAgent(
+          ctx.db, resolvedAgentId, memberships.map((membership) => membership.app.id),
+        );
         let selectedApp: (typeof memberships)[number]['app'] | null = null;
         for (const membership of memberships) {
-          if (await isAgentInstalledAndLicensed(ctx.db, membership.app.id, resolvedAgentId)) {
+          if (licensedAppIds.has(membership.app.id)) {
             selectedApp = membership.app;
             break;
           }
