@@ -298,6 +298,8 @@ run "43 sweep keys on the raw PUBLIC column" "$A" \
   "    memory.visibility === 'PUBLIC' && !isExcludedFromCoveredSet(memory) && memory.ownerUserId == null;" "    memory.visibility === 'PUBLIC';"
 run "44 same-App admits a user-owned row" "$H" \
   "  if (memory.ownerUserId != null) return false;" ""
+run "66 same-App admits a creator-scoped holding" "$H" \
+  "  if (memory.userMemoryOfAgentId != null) return false;" ""
 
 # A stale pattern is a FAILED run, not a skipped line. Counting only
 # KILLED/SURVIVED lines once let two stale mutants — the attach gate and the

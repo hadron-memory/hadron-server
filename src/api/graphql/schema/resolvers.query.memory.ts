@@ -515,6 +515,13 @@ export const memoryQueries = {
             if (item.memory.appId != null && item.memory.appId !== ctx.appId) continue;
             if (item.memory.userMemoryOfAgentId != null) continue;
             if (foreignUserOwned(item.memory.ownerUserId)) continue;
+            // A pure App key has no user principal for strict-owner records.
+            // If this is a user-bound App context, use the record gate for the
+            // rare personal/private or spec-047 owner-owned row.
+            if (item.memory.ownerUserId != null ||
+                item.memory.class === 'personal' || item.memory.class === 'private') {
+              if (!ctx.userId || !(await canReadMemoryRecord(ctx, item.memory))) continue;
+            }
             memoryMap.set(item.memory.id, item.memory);
           }
         }

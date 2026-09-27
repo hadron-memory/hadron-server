@@ -628,10 +628,13 @@ function holdsContentReadIndependently(ctx: Context, memoryId: string): Promise<
 async function sameAppAttachAdmitted(
   ctx: Context,
   agent: { id: string; organizationId: string | null; ownerUserId: string | null },
-  memory: { appId: string | null; class: string; ownerUserId: string | null },
+  memory: { appId: string | null; class: string; ownerUserId: string | null; userMemoryOfAgentId: string | null },
 ): Promise<boolean> {
   if (memory.appId == null) return false;
   if (memory.class !== 'knowledge' && memory.class !== 'group') return false;
+  // Legacy knowledge/group holdings with this pointer are creator-scoped,
+  // even when the App owns their namespace and ownerUserId is null.
+  if (memory.userMemoryOfAgentId != null) return false;
   // A spec-047 USER-owned row is strictly owner-only (@copilot, PR #1357). Its
   // owner already holds content read in their own right and never needs this
   // branch; anyone else must not get it through an App admin role.

@@ -444,6 +444,42 @@ describe('apps (the uniform member list, #473)', () => {
 // ---------------------------------------------------------------------------
 
 describe('memories — App-key orgId', () => {
+  it('does not list strict-owner metadata through a pure App key', async () => {
+    const app = await db.app.create({
+      data: { id: generateId(), name: 'owner-app', urn: `u-${user.id}:owner-app`, ownerUserId: user.id },
+    });
+    const agent = await db.agent.create({
+      data: { id: generateId(), name: 'owner-agent', urn: `u-${user.id}:owner-agent`, ownerUserId: user.id },
+    });
+    await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
+    const owned = await db.memory.create({
+      data: {
+        id: generateId(), name: 'owner-only knowledge', urn: `u-${user.id}:owner-only-knowledge`,
+        ownerUserId: user.id, class: 'knowledge', visibility: 'PUBLIC',
+      },
+    });
+    const personal = await db.memory.create({
+      data: {
+        id: generateId(), name: 'personal', urn: `${orgId}:personal-appkey-leak`,
+        organizationId: orgId, userId: user.id, class: 'personal',
+      },
+    });
+    await db.agentMemoryItem.createMany({ data: [
+      { agentId: agent.id, memoryId: owned.id, role: 'read' },
+      { agentId: agent.id, memoryId: personal.id, role: 'read' },
+    ] });
+    const appContext = ctx({ appId: app.id });
+    expect(await canReadMemoryRecord(appContext, owned)).toBe(false);
+    expect(await canReadMemoryRecord(appContext, personal)).toBe(false);
+    const page = await resolvers.Query.memories({}, {}, appContext);
+    expect(page.items.map((m: { id: string }) => m.id)).not.toContain(owned.id);
+    expect(page.items.map((m: { id: string }) => m.id)).not.toContain(personal.id);
+    const ownerPage = await resolvers.Query.memories({}, {}, ctx({ appId: app.id, userId: user.id }));
+    expect(ownerPage.items.map((m: { id: string }) => m.id)).toEqual(
+      expect.arrayContaining([owned.id, personal.id]),
+    );
+  });
+
   it('does not list a memory linked only through a malformed stored role', async () => {
     const { app } = await createDbAppWithKey(db, 'invalid-role-list', orgId);
     await db.appAgent.create({ data: { appId: app.id, agentId } });

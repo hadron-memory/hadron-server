@@ -1085,6 +1085,22 @@ describe("#1357 — the same-App attach (Holger's ruling, 2026-09-26)", () => {
     expect(await readsContent(appXKey, 'appX')).toBe('APP X KNOWLEDGE');
   });
 
+  it('does not treat a creator-scoped legacy holding as App knowledge', async () => {
+    const holding = await db.memory.create({
+      data: {
+        id: generateId(), organizationId: attackerOrgId, appId: appX.id,
+        urn: `attacker-${suffix}:same-app-holding`, name: 'same-app-holding',
+        class: 'knowledge', visibility: 'ORGANIZATION',
+        userMemoryOfAgentId: secondAgentId, createdBy: reader2UserId,
+      } as never,
+    });
+    const result = await gql(key.attacker!, ATTACH, {
+      g: secondAgentId, m: `hrn:mem:attacker-${suffix}:same-app-holding`, r: 'read',
+    });
+    expect(code(result)).toBe('MEMORY_NOT_FOUND');
+    expect(await db.agentMemoryItem.count({ where: { agentId: secondAgentId, memoryId: holding.id } })).toBe(0);
+  });
+
   it('the row confers no ambient authority: App Y, where the same agent is installed, still cannot read it', async () => {
     expect(await db.agentMemoryItem.count({ where: { agentId: secondAgentId, memoryId: mem.appX!.id } })).toBe(1);
     expect(await readsContent(appYKey, 'appX')).toBeNull();
