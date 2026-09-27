@@ -2986,9 +2986,8 @@ export interface NodeEdgeInput {
 }
 
 /**
- * Bulk-import node shape — used only by replaceSubtree (git-sync) since the
- * spec-039 Phase 0 split retired upsertNode. Single-node writes use
- * CreateNodeInput / UpdateNodeInput below.
+ * Legacy bulk-import node shape retained by the refused replaceSubtree field.
+ * Single-node writes use CreateNodeInput / UpdateNodeInput below.
  */
 export interface NodeInput {
   id?: string;
