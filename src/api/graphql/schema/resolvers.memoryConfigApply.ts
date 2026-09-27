@@ -132,6 +132,12 @@ export async function applyMemoryConfigTemplate(
       await tx.$queryRaw`SELECT 1 FROM "memory_config_templates" WHERE "id" = ${template.id} FOR SHARE`;
       const live = await tx.memoryConfigTemplate.findFirst({ where: { id: template.id, deletedAt: null } });
       if (!live) throw notFoundTemplate();
+      // Re-asked as soon as the template lock is held, before anything about
+      // the template (its revision, its rules' refusals) can be answered: a
+      // caller whose access was revoked while this waited on a template
+      // update gets the same concealing not-found (#1399 review). Asked again
+      // after the last lock below, before any write.
+      await reassertManageOwner(ctx, tx, live, notFoundTemplate);
       if (args.expectedTemplateRevision != null && live.revision !== args.expectedTemplateRevision) {
         throw conflict(live.revision, 'template');
       }

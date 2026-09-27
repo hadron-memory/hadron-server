@@ -384,4 +384,20 @@ describe('apply under concurrency (#1399 review)', () => {
     expect(code(await pending)).toBe('NODE_NOT_FOUND');
     expect(await rulesOf(mem.id)).toEqual([]);
   });
+
+  it('template access is re-asked right after the template lock: a revoked caller gets not-found, not the revision (#1399 review)', async () => {
+    const t = await tpl(as(orgAdmin), 'ORGANIZATION', org.id, { name: 'base', rules: [{ role: 'spec' }] });
+    // A template update in flight holds the template row.
+    const h = holder(async (tx) => {
+      await tx.$queryRaw`SELECT 1 FROM "memory_config_templates" WHERE "id" = ${t.id} FOR UPDATE`;
+    });
+    await h.holding;
+    const pending = apply(as(orgAdmin), t.id, mem.id, { v: 99 }); // stale revision
+    await waitForLockWaiters(db);
+    await db.orgMember.updateMany({ where: { organizationId: org.id, userId: orgAdmin }, data: { role: 'CONTRIBUTOR' } });
+    await h.release();
+    const r = await pending;
+    expect(code(r)).toBe('MEMORY_CONFIG_TEMPLATE_NOT_FOUND');
+    expect(JSON.stringify(r.errors)).not.toContain('currentRevision');
+  });
 });
