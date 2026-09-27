@@ -552,6 +552,43 @@ describe('appNodes', () => {
     expect(nodes[0].loc).toBe('org.test.node');
   });
 
+  it('uses live links and valid roles across every installed Agent', async () => {
+    const { app } = await createDbAppWithKey(db, 'app-nodes-live-links', orgId);
+    await db.appAgent.create({ data: { appId: app.id, agentId } });
+    await db.appAgent.create({ data: { appId: app.id, agentId: secondAgentId } });
+    const secondMemory = await db.memory.create({
+      data: {
+        id: generateId(), organizationId: orgId, urn: `${orgId}:second-app-memory`,
+        name: 'Second Agent memory', class: 'knowledge', visibility: 'ORGANIZATION',
+      },
+    });
+    const link = await db.agentMemoryItem.create({
+      data: { id: generateId(), agentId: secondAgentId, memoryId: secondMemory.id, role: 'read' },
+    });
+    await db.node.create({
+      data: {
+        id: generateId(), memoryId: secondMemory.id, loc: 'second.live.node',
+        name: 'Second Agent node', isLink: false, tags: [],
+      },
+    });
+    const locs = async () => (await resolvers.Query.appNodes({}, { appRef: app.id }, adminCtx()))
+      .map((node: { loc: string }) => node.loc);
+
+    expect(await locs()).toEqual(expect.arrayContaining(['org.test.node', 'second.live.node']));
+    await db.agentMemoryItem.update({ where: { id: link.id }, data: { deletedAt: new Date() } });
+    expect(await locs()).not.toContain('second.live.node');
+    await db.agentMemoryItem.update({ where: { id: link.id }, data: { deletedAt: null, role: 'bogus' } });
+    expect(await locs()).not.toContain('second.live.node');
+  });
+
+  it('does not enumerate nodes from a deleted owning organization', async () => {
+    const { app } = await createDbAppWithKey(db, 'app-nodes-deleted-org', orgId);
+    await db.appAgent.create({ data: { appId: app.id, agentId } });
+    expect((await resolvers.Query.appNodes({}, { appRef: app.id }, adminCtx())).length).toBe(1);
+    await db.organization.update({ where: { id: orgId }, data: { deletedAt: new Date() } });
+    expect(await resolvers.Query.appNodes({}, { appRef: app.id }, adminCtx())).toEqual([]);
+  });
+
   // ── #1031: the App's own TEAM SPACE ──────────────────────────────────────
   //
   // Structurally unreachable through the installed-agent walk (it is keyed by

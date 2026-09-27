@@ -94,7 +94,9 @@ export async function participantAppWhere(
     .map((m) => m.organizationId);
 
   const arms: Prisma.AppWhereInput[] = [];
-  if (contributorOrgIds.length > 0) arms.push({ organizationId: { in: contributorOrgIds } });
+  if (contributorOrgIds.length > 0) arms.push({
+    organizationId: { in: contributorOrgIds }, organization: { is: { deletedAt: null } },
+  });
   // Identity-scoped, so never via impersonation.
   if (!principal.impersonation) arms.push({ ownerUserId: userId });
   // `ownerUserId: null` is load-bearing, not tidiness (@copilot round 4).
@@ -107,7 +109,10 @@ export async function participantAppWhere(
   // disagreement was reachable: a non-owner who joins a user-owned App could
   // append to its chat. A user-owned App is reachable here ONLY through the
   // owner arm above.
-  if (opts.includeMemberships) arms.push({ members: { some: { userId } }, ownerUserId: null });
+  if (opts.includeMemberships) arms.push({
+    members: { some: { userId } }, ownerUserId: null,
+    organization: { is: { deletedAt: null } },
+  });
   if (arms.length === 0) return null;
 
   return {

@@ -1334,6 +1334,12 @@ export async function isAppParticipant(
   // The owner arm above denies outright for the SAME rule, not a different one:
   // a user-owned App has no org, so it can never satisfy this bound.
   if (ctx.impersonation && app.organizationId !== ctx.impersonation.orgId) return false;
+  if (app.organizationId !== null) {
+    const liveOrg = await ctx.db.organization.findFirst({
+      where: { id: app.organizationId, deletedAt: null }, select: { id: true },
+    });
+    if (!liveOrg) return false;
+  }
   const member = await ctx.db.appMember.findUnique({
     where: { appId_userId: { appId: app.id, userId: ctx.userId } },
     select: { userId: true },

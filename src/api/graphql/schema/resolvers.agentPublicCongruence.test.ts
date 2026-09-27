@@ -47,6 +47,13 @@ describe('updateAgent → PUBLIC', () => {
     expect((await setVisibility(agent.id))?.visibility).toBe('ORGANIZATION'); // unchanged
   });
 
+  it('ignores a stored link whose role grants no read when publishing the Agent', async () => {
+    await db.agentMemoryItem.create({
+      data: { id: generateId(), agentId: agent.id, memoryId: orgMem.id, role: 'bogus' },
+    });
+    expect((await M.updateAgent({}, { ref: agent.id, visibility: 'PUBLIC' }, ctx())).visibility).toBe('PUBLIC');
+  });
+
   it('allows when there are no links, or all linked knowledge is PUBLIC', async () => {
     // no links → congruent
     expect((await M.updateAgent({}, { ref: agent.id, visibility: 'PUBLIC' }, ctx())).visibility).toBe('PUBLIC');
@@ -135,6 +142,15 @@ describe('updateMemory un-PUBLIC-ing knowledge of a PUBLIC agent', () => {
     // once the agent is no longer PUBLIC, the memory can change freely
     await M.updateAgent({}, { ref: agent.id, visibility: 'ORGANIZATION' }, ctx());
     expect((await M.updateMemory({}, { id: pubMem.id, visibility: 'ORGANIZATION' }, ctx())).visibility).toBe('ORGANIZATION');
+  });
+
+  it('ignores a stored link whose role grants no read when narrowing the Memory', async () => {
+    await M.updateAgent({}, { ref: agent.id, visibility: 'PUBLIC' }, ctx());
+    await db.agentMemoryItem.create({
+      data: { id: generateId(), agentId: agent.id, memoryId: pubMem.id, role: 'bogus' },
+    });
+    expect((await M.updateMemory({}, { id: pubMem.id, visibility: 'ORGANIZATION' }, ctx())).visibility)
+      .toBe('ORGANIZATION');
   });
 });
 

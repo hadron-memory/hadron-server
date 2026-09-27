@@ -95,7 +95,7 @@ export function foldAgentIntoAccessMap(agent: AgentLike): Map<string, string> {
 export async function getAppMemoryAccess(
   db: PrismaClient,
   appId: string,
-  opts: { includeTeamSpace?: boolean; callerUserId?: string | null } = {},
+  opts: { includeTeamSpace?: boolean; callerUserId?: string | null; allAgents?: boolean } = {},
 ): Promise<Map<string, string>> {
   const app = await db.app.findUnique({
     where: { id: appId },
@@ -108,7 +108,7 @@ export async function getAppMemoryAccess(
       uninstalledAt: true,
       appAgents: {
         orderBy: { createdAt: 'asc' },
-        take: 1,
+        ...(opts.allAgents ? {} : { take: 1 }),
         select: {
           agent: {
             select: {
@@ -133,7 +133,13 @@ export async function getAppMemoryAccess(
   });
   if (!app || app.deletedAt || app.uninstalledAt || app.organization?.deletedAt) return new Map();
 
-  const access = await getPrimaryAgentAccess(db, app);
+  const access = new Map<string, string>();
+  for (const install of app.appAgents) {
+    const agentAccess = await getPrimaryAgentAccess(db, { ...app, appAgents: [install] });
+    for (const [memoryId, level] of agentAccess) {
+      if (level === 'READ_WRITE' || !access.has(memoryId)) access.set(memoryId, level);
+    }
+  }
 
   // ── #1003: the App's OWN team space ─────────────────────────────────────
   // Folded in AFTER, and independently of, the agent walk above — the team

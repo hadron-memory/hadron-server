@@ -71,7 +71,7 @@ export async function nonPublicLinkedMemories(
       ownerUserId: null, // spec-047 user-owned: strict-owner even if PUBLIC
       userMemoryOfAgentId: null, // legacy per-user holding: creator-only
       visibility: { not: 'PUBLIC' },
-      agentItems: { some: { agentId, deletedAt: null } },
+      agentItems: { some: { agentId, deletedAt: null, role: { in: ['read', 'read-write'] } } },
     },
     select: { id: true, name: true },
   });
@@ -166,7 +166,7 @@ export async function assertMemoryVisibilityChangeAllowed(
       deletedAt: null,
       visibility: 'PUBLIC',
       OR: sameTenant,
-      memoryItems: { some: { memoryId: memory.id, deletedAt: null } },
+      memoryItems: { some: { memoryId: memory.id, deletedAt: null, role: { in: ['read', 'read-write'] } } },
     },
     select: { name: true },
   });
