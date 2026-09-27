@@ -441,6 +441,76 @@ describe('moveNode subtree cascade (#768)', () => {
 });
 
 describe('cloneNode (#564)', () => {
+  it.each([
+    { role: null, isRunnable: null },
+    { role: 'weather', isRunnable: false },
+    { role: 'weather.widget', isRunnable: null },
+  ])('preserves ungoverned signals in same- and cross-memory clones: %j', async ({ role, isRunnable }) => {
+    const source = await createDbNode(db, { loc: 'alpha', memoryId: memA.id });
+    await db.node.update({ where: { id: source.id }, data: { role, isRunnable } });
+
+    const same = await M.cloneNode(null, { sourceRef: source.id, targetUrn: urnA('alpha-copy') }, asUser());
+    const cross = await M.cloneNode(null, { sourceRef: source.id, targetMemoryRef: memB.id }, asUser());
+    for (const clone of [same, cross]) {
+      expect({ role: clone.role, isRunnable: clone.isRunnable }).toEqual({ role, isRunnable });
+    }
+    expect((await db.node.findUniqueOrThrow({ where: { id: source.id } })).role).toBe(role);
+  });
+
+  it.each([
+    { role: 'spec', isRunnable: null },
+    { role: 'spec.rule', isRunnable: null },
+    { role: 'review', isRunnable: null },
+    { role: null, isRunnable: true },
+  ])('refuses a generic clone of governed signals without stripping them: %j', async ({ role, isRunnable }) => {
+    const source = await createDbNode(db, { loc: 'alpha', memoryId: memA.id });
+    await db.node.update({ where: { id: source.id }, data: { role, isRunnable } });
+
+    await expect(M.cloneNode(null, { sourceRef: source.id, targetUrn: urnA('alpha-copy') }, asUser()))
+      .rejects.toMatchObject({ extensions: { code: 'ROLE_GOVERNED' } });
+    await expect(M.cloneNode(null, { sourceRef: source.id, targetMemoryRef: memB.id }, asUser()))
+      .rejects.toMatchObject({ extensions: { code: 'ROLE_GOVERNED' } });
+    expect(await db.node.findFirst({ where: { memoryId: memA.id, loc: 'alpha-copy' } })).toBeNull();
+    expect(await db.node.findFirst({ where: { memoryId: memB.id, loc: 'alpha' } })).toBeNull();
+    expect(await db.node.findUniqueOrThrow({ where: { id: source.id } }))
+      .toMatchObject({ role, isRunnable });
+  });
+
+  it('clones only the named node, leaving a descendant at its original loc', async () => {
+    const source = await createDbNode(db, { loc: 'parent', memoryId: memA.id });
+    const child = await createDbNode(db, { loc: 'parent:child', memoryId: memA.id });
+    await db.node.update({ where: { id: source.id }, data: { role: 'weather.widget' } });
+    await db.node.update({ where: { id: child.id }, data: { role: 'spec.rule' } });
+
+    const clone = await M.cloneNode(null, { sourceRef: source.id, targetUrn: urnA('copy') }, asUser());
+    expect(clone.role).toBe('weather.widget');
+    expect(await db.node.findFirst({ where: { memoryId: memA.id, loc: 'copy:child' } })).toBeNull();
+    expect((await db.node.findUniqueOrThrow({ where: { id: child.id } })).role).toBe('spec.rule');
+  });
+
+  it('refuses a clone into a loc holding a soft-deleted governed node (resurrection merge)', async () => {
+    // The clone's carried signals are EXPLICIT (null-normalized by
+    // carryGovernedSignals), not omitted — which is exactly the input shape
+    // that could differ from an ordinary create in the #1203 resurrection
+    // merge. An ungoverned source over a governed tombstone must refuse on
+    // the tombstone's role, and the tombstone must stay a tombstone.
+    // (Andi's non-blocking coverage suggestion from the #1382 comparison;
+    // the generic-create route is pinned in governedRole1201.test.ts.)
+    const source = await createDbNode(db, { loc: 'live', memoryId: memA.id });
+    await db.node.update({ where: { id: source.id }, data: { role: 'weather', isRunnable: false } });
+    const dead = await createDbNode(db, { loc: 'grave', memoryId: memA.id, content: 'gone' });
+    await db.node.update({ where: { id: dead.id }, data: { role: 'review', deletedAt: new Date() } });
+
+    await expect(
+      M.cloneNode(null, { sourceRef: source.id, targetUrn: urnA('grave') }, asUser()),
+    ).rejects.toMatchObject({ extensions: { code: 'ROLE_GOVERNED' } });
+
+    const row = await db.node.findUniqueOrThrow({ where: { id: dead.id } });
+    expect(row.deletedAt).not.toBeNull();
+    expect(row.role).toBe('review');
+    expect(row.content).toBe('gone');
+  });
+
   it('carries already-stored task attribution without minting a new task claim (#1326)', async () => {
     const task = await createDbNode(db, { loc: 'author-task', memoryId: memA.id });
     const authoredAt = new Date('2026-09-26T20:00:00Z');
@@ -505,16 +575,16 @@ describe('cloneNode (#564)', () => {
     });
   });
 
-  it('clears attribution when the generic clone omits a governed role', async () => {
+  it('carries attribution with an open role because the authored fields are copied', async () => {
     const source = await db.node.create({
       data: {
-        id: generateId(), memoryId: memA.id, loc: 'copy-role', name: 'Role', role: 'task',
+        id: generateId(), memoryId: memA.id, loc: 'copy-role', name: 'Role', role: 'weather',
         authorshipKind: 'TASK', authoredByTask: generateId(), authoredByRevision: 1,
         authoredAt: new Date('2026-09-26T20:00:00Z'),
       },
     });
     const clone = await M.cloneNode(null, { sourceRef: source.id, targetUrn: urnA('copy-role-new') }, asUser());
-    expect(clone).toMatchObject({ role: null, authorshipKind: null, authoredByTask: null });
+    expect(clone).toMatchObject({ role: 'weather', authorshipKind: 'TASK', authoredByTask: source.authoredByTask });
   });
 
   it('clones fields to a NEW node (fresh id), leaving the source intact', async () => {

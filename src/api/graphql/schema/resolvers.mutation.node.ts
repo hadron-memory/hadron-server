@@ -20,6 +20,7 @@ import {
   type GovernedContext,
   type GovernedMerge,
 } from '../../../lib/governedRole.js';
+import { carryGovernedSignals } from '../../../lib/governedSignals.js';
 import { computeContentHash } from '../../../lib/contentHash.js';
 import {
   buildNodeRevisionSnapshot,
@@ -3180,7 +3181,10 @@ export const nodeMutations = {
         nodeType: srcPlain.nodeType,
         isLink: srcPlain.isLink,
         objectType: srcPlain.objectType ?? undefined, // #725 — carry the collection through a clone
-        isRunnable: srcPlain.isRunnable,
+        // Keep the complete governed signal set together. The ordinary
+        // writeNodeCore gate still refuses governed results from this generic
+        // clone path; it must never succeed by silently dropping a signal.
+        ...carryGovernedSignals(srcPlain),
         alias: srcPlain.alias ?? undefined,
         description: srcPlain.description ?? undefined,
         abstract: srcPlain.abstract ?? undefined,
@@ -3197,11 +3201,10 @@ export const nodeMutations = {
       // caller (a read of the SOURCE memory, which may differ from the
       // destination's) and writeNodeCore records the write of the new node.
       recordNodeRead(ctx.db, toUsageNodeRef(source), ctx);
-      // The generic clone currently does not copy role (the governed clone
-      // contract is handled separately in #1324). A stale abstract is also
-      // re-fingerprinted by writeNodeCore. Either change makes the copied
-      // authored state different, so it cannot inherit the source claim.
-      const copiedAuthorship = srcPlain.role == null && (
+      // The generic write refuses governed signals, while open roles and all
+      // other authored fields are copied. A stale abstract is re-fingerprinted
+      // by writeNodeCore, so only that case changes the copied authored state.
+      const copiedAuthorship = (
         srcPlain.abstract == null ||
         srcPlain.abstractOriginHash === computeContentHash(srcPlain.content)
       ) ? carryNodeAuthorship(source) : clearNodeAuthorship();
