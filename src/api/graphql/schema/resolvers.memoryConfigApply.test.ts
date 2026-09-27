@@ -363,4 +363,25 @@ describe('apply under concurrency (#1399 review)', () => {
     expect(Date.now() - started).toBeLessThan(5_000);
     await h.release();
   });
+
+  it('reference readability is re-asked after the last lock wait: access revoked while queued refuses the apply (#1399 review)', async () => {
+    // A task in ANOTHER org's memory, readable to orgAdmin only through a revocable membership there.
+    const other = await db.organization.create({ data: { id: generateId(), name: 'other', urn: 'other.com' } });
+    await db.orgMember.create({ data: { organizationId: other.id, userId: orgAdmin, role: 'READER' } });
+    const shared = await db.memory.create({
+      data: { id: generateId(), organizationId: other.id, urn: 'other.com:tasks', name: 'tasks', class: 'knowledge', visibility: 'ORGANIZATION' },
+    });
+    const remote = await db.node.create({ data: { id: generateId(), memoryId: shared.id, loc: 'tasks:remote', name: 'Remote', isRunnable: true } });
+    const t = await tpl(as(orgAdmin), 'ORGANIZATION', org.id, { name: 'base', rules: [{ role: 'spec', authorTaskRef: remote.id }] });
+    const h = holder(async (tx) => {
+      await lockMemoryConfigExclusive(tx, mem.id);
+    });
+    await h.holding;
+    const pending = apply(as(orgAdmin), t.id, mem.id);
+    await waitForLockWaiters(db); // queued on the rulebook lock, past its first reference check
+    await db.orgMember.deleteMany({ where: { organizationId: other.id, userId: orgAdmin } });
+    await h.release();
+    expect(code(await pending)).toBe('NODE_NOT_FOUND');
+    expect(await rulesOf(mem.id)).toEqual([]);
+  });
 });

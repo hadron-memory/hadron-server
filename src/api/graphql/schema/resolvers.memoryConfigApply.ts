@@ -196,6 +196,11 @@ export async function applyMemoryConfigTemplate(
       // behind another rule write must not still authorize it (#1399 review).
       await reassertManage(ctx, tx, memory.id, () => new MemoryNotFoundError(args.memoryRef));
       await reassertManageOwner(ctx, tx, live, notFoundTemplate);
+      // …and the template's REFERENCES too (#1399 review): access to a
+      // referenced node's memory can be revoked while this queued. The node
+      // rows are already share-locked by this transaction, so this re-check
+      // waits for nothing; it only re-asks readability, fresh.
+      await lockRuleRefs(ctx, tx, resolved);
 
       const entries: ApplyEntry[] = [];
       for (const { rule, outcome, current } of plan) {
