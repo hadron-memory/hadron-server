@@ -654,6 +654,14 @@ async function sameAppAttachAdmitted(
     `;
     if (liveOrg.length === 0) return false;
   }
+  // A foreign Agent's owning org can be deleted while its AppAgent and grant
+  // survive. Hold that lifecycle row through the attach decision too.
+  if (agent.organizationId != null && agent.organizationId !== app.organizationId) {
+    const liveAgentOrg = await ctx.db.$queryRaw<{ id: string }[]>`
+      SELECT id FROM organizations WHERE id = ${agent.organizationId} AND deleted_at IS NULL FOR SHARE
+    `;
+    if (liveAgentOrg.length === 0) return false;
+  }
   // FOR KEY SHARE, not a plain read (@copilot, PR #1357): uninstalling DELETES
   // this join row without locking the agent or the memory, so a snapshot could
   // pass here and the uninstall commit before the grant — leaving a latent row

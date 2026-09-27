@@ -96,9 +96,9 @@ export async function sessionScopedMemoryIds(
   // session memory legitimately comes to be:
   //
   //   1. provisioned BY this App (`startAgentSession` stamps `appId`);
-  //   2. the per-user / anonymous memory OF this session's agent — which also
-  //      covers the REUSE case, where a memory keyed on (agent, user) was first
-  //      provisioned by a DIFFERENT App that installed the same agent;
+  //   2. the per-user / anonymous memory OF this session's agent — including
+  //      the existing personal-memory REUSE case, where startAgentSession
+  //      keys on (agent, user) without the App;
   //   3. a memory this session's agent is LINKED to (`AgentMemoryItem`) — the
   //      schema's "active write-memory for this session" case, which is how a
   //      session names an org knowledge memory rather than a per-user one.
@@ -110,10 +110,17 @@ export async function sessionScopedMemoryIds(
   // A soft-deleted memory leaves the session row pointing at it (`deleteMemory`
   // stamps only the Memory), so a stale session would keep it readable.
   if (mem && mem.deletedAt === null) {
+    // AgentMemoryItem is global to an Agent. An App B session cannot use it
+    // (or the agent-own pointer) to read App A's knowledge or scratch memory.
+    // Keep the existing personal/private reuse path: startAgentSession itself
+    // reuses those rows by (agent, user), even when their appId names another
+    // App. The owner + subscription check below still applies.
+    const foreignAppScoped = mem.appId !== null && mem.appId !== appId &&
+      mem.class !== 'personal' && mem.class !== 'private';
     const tiedToApp = mem.appId === appId;
     const isAgentsOwnMemory =
-      session.agentId !== null && mem.userMemoryOfAgentId === session.agentId;
-    const agentLink = !tiedToApp && !isAgentsOwnMemory && session.agentId !== null
+      !foreignAppScoped && session.agentId !== null && mem.userMemoryOfAgentId === session.agentId;
+    const agentLink = !foreignAppScoped && !tiedToApp && !isAgentsOwnMemory && session.agentId !== null
       ? await db.agentMemoryItem.findFirst({
           where: { agentId: session.agentId, memoryId: mem.id, deletedAt: null },
           select: { role: true },

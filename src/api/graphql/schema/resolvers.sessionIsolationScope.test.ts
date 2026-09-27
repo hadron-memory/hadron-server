@@ -229,6 +229,34 @@ describe('#945 — the memory leg must be tied to this App or this session\'s ag
     );
   });
 
+  it('does not import another App’s linked knowledge or agent-owned scratch memory', async () => {
+    const otherApp = await db.app.create({
+      data: { id: generateId(), organizationId: org.id, name: 'Other', urn: `${org.urn}:other` },
+    });
+    const knowledge = await db.memory.create({
+      data: {
+        id: generateId(), organizationId: org.id, appId: otherApp.id,
+        urn: `${org.urn}:other-knowledge`, name: 'other knowledge', class: 'knowledge',
+      },
+    });
+    await db.agentMemoryItem.create({
+      data: { agentId: ownAgent.id, memoryId: knowledge.id, role: 'read' },
+    });
+    const scratch = await db.memory.create({
+      data: {
+        id: generateId(), organizationId: org.id, appId: otherApp.id,
+        urn: `${org.urn}:other-scratch`, name: 'other scratch', class: 'app',
+        userMemoryOfAgentId: ownAgent.id,
+      },
+    });
+    for (const memoryId of [knowledge.id, scratch.id]) {
+      const session = await db.session.create({
+        data: { id: generateId(), appId: app.id, userId: user.id, agentId: ownAgent.id, memoryId },
+      });
+      expect(await sessionScopedMemoryIds(db, app.id, session.id)).toEqual([ownAgent.systemMemoryId]);
+    }
+  });
+
   it('keeps the onlyMemoryId scoping honest for an inadmissible target', async () => {
     const session = await db.session.create({
       data: { id: generateId(), appId: app.id, userId: user.id, agentId: foreignAgent.id },
