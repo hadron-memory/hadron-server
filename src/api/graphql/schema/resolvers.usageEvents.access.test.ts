@@ -120,9 +120,13 @@ describe('usageEvents access control — scoped (memoryId) path', () => {
     expect(locsOf(r)).toEqual(new Set(['a-loc']));
   });
 
-  it('member cannot read a memory in an org they don\'t belong to → [] (no leak)', async () => {
-    const r = await resolvers.Query.usageEvents(null, { memoryId: memB.id }, asMember());
-    expect(r).toEqual([]);
+  // #1381 (`cor:api:140:03`): an unreadable memory answers exactly as a missing
+  // one. The old `[]` was the leak — a MISSING memory throws, so an empty page
+  // meant "exists, not yours".
+  it('member cannot read a memory in an org they don\'t belong to → MEMORY_NOT_FOUND, as if missing', async () => {
+    await expect(resolvers.Query.usageEvents(null, { memoryId: memB.id }, asMember())).rejects.toThrow(
+      `MEMORY_NOT_FOUND: ${memB.id}`,
+    );
   });
 
   it('owner can read their private memory\'s events', async () => {
@@ -130,16 +134,18 @@ describe('usageEvents access control — scoped (memoryId) path', () => {
     expect(locsOf(r)).toEqual(new Set(['p-loc']));
   });
 
-  it('non-owner cannot read someone else\'s private memory → []', async () => {
-    const r = await resolvers.Query.usageEvents(null, { memoryId: privMem.id }, asOther());
-    expect(r).toEqual([]);
+  it('non-owner cannot read someone else\'s private memory → MEMORY_NOT_FOUND, as if missing', async () => {
+    await expect(resolvers.Query.usageEvents(null, { memoryId: privMem.id }, asOther())).rejects.toThrow(
+      `MEMORY_NOT_FOUND: ${privMem.id}`,
+    );
   });
 
   it('accepts a URN memoryId and still enforces access', async () => {
     const allowed = await resolvers.Query.usageEvents(null, { memoryId: memA.urn }, asMember());
     expect(locsOf(allowed)).toEqual(new Set(['a-loc']));
-    const denied = await resolvers.Query.usageEvents(null, { memoryId: memB.urn }, asMember());
-    expect(denied).toEqual([]);
+    await expect(resolvers.Query.usageEvents(null, { memoryId: memB.urn }, asMember())).rejects.toThrow(
+      `MEMORY_NOT_FOUND: ${memB.urn}`,
+    );
   });
 });
 

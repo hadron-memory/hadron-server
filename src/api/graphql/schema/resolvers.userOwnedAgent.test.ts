@@ -206,15 +206,16 @@ describe('user-owned agent — read/list/audit surfaces are owner-only', () => {
     expect(asOwner.canRead).toBe(true);
     expect(asOwner.canManage).toBe(true);
 
-    // A platform admin auditing the owner's access to their OWN agent still
-    // reports the owner's grants (the caller-audit is allowed for admins), but
-    // auditing the ADMIN's OWN access must show nothing (strict ownership).
-    const adminSelf = await resolvers.Query.effectiveAccess(
-      null,
-      { user: otherId, resource: agentUrn },
-      ctx({ userId: otherId, roles: ['ADMIN'] }),
-    );
-    expect(adminSelf.canRead).toBe(false);
-    expect(adminSelf.canManage).toBe(false);
+    // A platform admin auditing their OWN access to someone else's user-owned
+    // agent: before #1381 this reported "no access"; since the 2026-09-26
+    // amendment of cor:acl:060:01 a self-audit of a resource the caller cannot
+    // OPEN answers as missing — and a user-owned agent is owner-only to open.
+    await expect(
+      resolvers.Query.effectiveAccess(
+        null,
+        { user: otherId, resource: agentUrn },
+        ctx({ userId: otherId, roles: ['ADMIN'] }),
+      ),
+    ).rejects.toThrow('Resource not found');
   });
 });

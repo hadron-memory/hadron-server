@@ -3036,10 +3036,43 @@ export const typeDefs = `#graphql
     apiKeyPreview: String
     "Provider-specific knobs (maxTokens, thinking, effort, baseUrl, ...)."
     params: JSON
+    """
+    #1373: the base URL this config's requests are sent to, as stored. Null =
+    the provider's default (see effectiveEndpoint and aiProviderEndpoints).
+    """
+    endpoint: String
+    """
+    #1373: where a request for this config actually goes: endpoint, else the
+    provider default. Null only for bedrock, whose endpoint is derived from
+    its region.
+    """
+    effectiveEndpoint: String
+    "#1373: the wire protocol as stored; null = the provider default. OpenAI-compatible providers only."
+    apiStyle: AiApiStyle
+    "#1373: the wire protocol a request actually uses (apiStyle, else the provider default); null for single-protocol providers."
+    effectiveApiStyle: AiApiStyle
     "Disabled configs are skipped by resolution (the walk continues outward)."
     enabled: Boolean!
     createdAt: DateTime!
     updatedAt: DateTime
+  }
+
+  "#1373: the wire protocol of an OpenAI-compatible provider."
+  enum AiApiStyle {
+    "POST {endpoint}/chat/completions — what most OpenAI-compatible hosts serve (the glm default)."
+    CHAT_COMPLETIONS
+    "POST {endpoint}/responses — OpenAI's Responses API (the openai default)."
+    RESPONSES
+  }
+
+  "#1373: one known endpoint for a provider, from the server's single suggestion list."
+  type AiProviderEndpoint {
+    url: String!
+    label: String!
+    "The endpoint a config with no endpoint uses."
+    isDefault: Boolean!
+    "What the URL does not say: billing, terms."
+    note: String
   }
 
   """
@@ -3061,6 +3094,10 @@ export const typeDefs = `#graphql
     """
     apiKey: String!
     params: JSON
+    "#1373: where requests for this config go (see AiServiceConfig.effectiveEndpoint)."
+    effectiveEndpoint: String
+    "#1373: the wire protocol requests use (see AiServiceConfig.effectiveApiStyle)."
+    effectiveApiStyle: AiApiStyle
   }
 
   """
@@ -6421,6 +6458,15 @@ export const typeDefs = `#graphql
     resolveAIConfig(name: String, appRef: ID, agentRef: ID): ResolvedAiConfig!
 
     """
+    #1373: the known endpoints for a provider — the server's single suggestion
+    list, so the portal and the CLI render the same choices and neither
+    hardcodes a URL. Empty for an unknown provider and for bedrock (its
+    endpoint comes from the region). Public reference data (vendor URLs), so
+    it needs no auth.
+    """
+    aiProviderEndpoints(provider: String!): [AiProviderEndpoint!]!
+
+    """
     036-ai-service-config: the MASKED set of configs RESOLVABLE in an
     execution context — every distinct config name a chat in this context
     could select. Populates a config picker in the chatbot UI.
@@ -6468,6 +6514,12 @@ export const typeDefs = `#graphql
     It is the mirror of teamChatMessages' sinceSeq: pass the OLDEST seq you
     hold, as you would pass the newest to page forward. Omit it for the tail.
 
+    There is no total -- the field returns the page and nothing else. A
+    page SHORTER than the limit is a truthful end-of-data under that cursor,
+    and only here: this resolver applies every filter inside the query and
+    never drops a row after the database take, so the take IS the page. Do
+    not carry the same-looking inference to reads that overfetch and
+    post-filter; there a short page can still mean rows were removed.
     Two boundaries worth knowing before you build on it:
       - A message with NO seq is older than every numbered one
         (cor:cht:050:02), so every cursor includes such messages. They are
@@ -8273,6 +8325,10 @@ export const typeDefs = `#graphql
       model: String!
       apiKey: String
       params: JSON
+      "#1373: base URL; https only, no query/fragment/credentials. Omit for the provider default."
+      endpoint: String
+      "#1373: OpenAI-compatible providers only; omit for the provider default."
+      apiStyle: AiApiStyle
       enabled: Boolean
     ): AiServiceConfig!
 
@@ -8291,6 +8347,10 @@ export const typeDefs = `#graphql
       model: String
       apiKey: String
       params: JSON
+      "#1373: omitted = unchanged; null or empty string = clear (provider default)."
+      endpoint: String
+      "#1373: omitted = unchanged; null = clear (provider default)."
+      apiStyle: AiApiStyle
       enabled: Boolean
     ): AiServiceConfig!
 
