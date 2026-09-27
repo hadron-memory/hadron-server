@@ -131,6 +131,59 @@ function readNode(urn: string, contentScope: 'content' | 'abstract' | 'all') {
 // ───── explicit-set form ──────────────────────────────────────────────────
 
 describe('hadron_get_nodes — explicit set', () => {
+  it('shows revision-bound validation without disclosing a task in an unreadable memory (#1326)', async () => {
+    const task = await db.node.create({
+      data: { id: generateId(), memoryId: fx.pmem.id, loc: 'hidden-task', name: 'Hidden task', nodeType: 'task' },
+    });
+    const node = await db.node.create({
+      data: {
+        id: generateId(), memoryId: fx.memory.id, loc: 'provenance', name: 'Provenance',
+        authorshipKind: 'TASK', authoredByTask: task.id, authoredByRevision: 1,
+        authoredAt: new Date('2026-09-26T20:00:00Z'),
+      },
+    });
+    await db.nodeContentValidationReport.create({
+      data: {
+        nodeId: node.id, memoryId: fx.memory.id, nodeRevSeq: 1,
+        validationTaskId: task.id, validationTaskRevSeq: 1, outcome: 'FAIL',
+      },
+    });
+    const single = await readNode(nodeUrn('provenance'), 'content');
+    const batch = await batchRead({ refs: [nodeUrn('provenance')] });
+    for (const output of [single, batch]) {
+      expect(output).toContain('Authored by task: restricted');
+      expect(output).toContain('Validation: fail (node revision 1; validator restricted)');
+      expect(output).not.toContain('hidden-task');
+      expect(output).not.toContain(task.id);
+    }
+  });
+
+  it('prefetches latest eligible reports once for the batch, preserving each node revision cutoff', async () => {
+    const task = await db.node.create({ data: { id: generateId(), memoryId: fx.memory.id, loc: 'validator', name: 'Validator', isRunnable: true } });
+    const one = await db.node.create({ data: { id: generateId(), memoryId: fx.memory.id, loc: 'one', name: 'One', revSeq: 2 } });
+    const two = await db.node.create({ data: { id: generateId(), memoryId: fx.memory.id, loc: 'two', name: 'Two', revSeq: 1 } });
+    for (const [nodeId, nodeRevSeq, outcome] of [
+      [one.id, 1, 'FAIL'], [one.id, 2, 'PASS'],
+      [two.id, 1, 'FAIL'], [two.id, 3, 'PASS'],
+    ] as const) {
+      await db.nodeContentValidationReport.create({ data: {
+        nodeId, memoryId: fx.memory.id, nodeRevSeq,
+        validationTaskId: task.id, validationTaskRevSeq: 1, outcome,
+      } });
+    }
+    const perNodeLookup = vi.spyOn(db.nodeContentValidationReport, 'findFirst');
+    try {
+      const output = await batchRead({ refs: [nodeUrn('one'), nodeUrn('two')] });
+      expect(output).toContain('**One**');
+      expect(output).toContain('**Two**');
+      expect(output).toMatch(/\*\*One\*\*[\s\S]*?Validation: pass \(node revision 2; validator [^\n]*\)/);
+      expect(output).toMatch(/\*\*Two\*\*[\s\S]*?Validation: fail \(node revision 1; validator [^\n]*\)/);
+      expect(perNodeLookup).not.toHaveBeenCalled();
+    } finally {
+      perNodeLookup.mockRestore();
+    }
+  });
+
   it('returns all nodes with content + edges, in INPUT order', async () => {
     await addNode({ loc: 'beta', name: 'NodeBeta', content: 'beta body' });
     await addNode({ loc: 'alpha', name: 'NodeAlpha', content: 'alpha body', edges: [{ targetUrn: nodeUrn('beta'), name: 'links-to' }] });

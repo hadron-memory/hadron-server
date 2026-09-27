@@ -96,6 +96,34 @@ describe('Memory.schema — carried through a memory clone', () => {
     const clone = await db.memory.findUniqueOrThrow({ where: { id: cloneId } });
     expect((clone.schema as any).objectTypes.competitor.fields.name).toEqual({ type: 'text', required: true });
   });
+
+  it('carries only verified, unchanged authorship through rewritten and raw-edited clones', async () => {
+    const stamp = {
+      authorshipKind: 'TASK' as const,
+      authoredByTask: generateId(),
+      authoredByRevision: 1,
+      authoredAt: new Date('2026-09-26T20:00:00Z'),
+    };
+    const make = (loc: string, content: string, objectType?: string) => db.node.create({
+      data: { id: generateId(), memoryId: memId, loc, name: loc, content, objectType, ...stamp },
+    });
+    const rewritten = await make('rewritten', 'See ms-org:intel:guide');
+    const drifted = await make('drifted', 'old body');
+    await make('unchanged', 'stable body', 'competitor');
+    await db.node.update({ where: { id: drifted.id }, data: { content: 'raw edited body' } });
+    const orgId = (await db.memory.findUniqueOrThrow({ where: { id: memId } })).organizationId!;
+    const { memoryId: cloneId } = await cloneMemoryGraph(db, {
+      sourceMemoryId: memId, name: 'intel-copy', newUrn: 'ms-org:intel-copy',
+      targetOrganizationId: orgId, ownerUserId: null, groupOwnerUserId: null, actorId: adminId,
+    });
+    const copies = await db.node.findMany({ where: { memoryId: cloneId } });
+    const byLoc = new Map(copies.map((n) => [n.loc, n]));
+    expect(byLoc.get('rewritten')).toMatchObject({ content: 'See ms-org:intel-copy:guide', authorshipKind: null });
+    expect(byLoc.get('drifted')).toMatchObject({ content: 'raw edited body', authorshipKind: null });
+    expect(byLoc.get('unchanged')).toMatchObject({ content: 'stable body', objectType: 'competitor', ...stamp });
+    expect(await db.node.findUniqueOrThrow({ where: { id: rewritten.id } })).toMatchObject(stamp);
+    expect(await db.node.findUniqueOrThrow({ where: { id: drifted.id } })).toMatchObject({ authorshipKind: null, revSeq: 2 });
+  });
 });
 
 describe('Memory.schema — MCP discovery (read-only)', () => {

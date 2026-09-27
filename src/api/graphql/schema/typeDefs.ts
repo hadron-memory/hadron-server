@@ -1195,6 +1195,10 @@ export const typeDefs = `#graphql
     id: ID!
     "#1323 — current live revision. Creation is revision 1; each committed authoring change advances it. NodeRevision.revNo N is the retained snapshot of this node when revision N was current, before the edit that advanced it."
     revision: Int!
+    "#1326 — attribution of this content state. Null means legacy or unknown. Task identity is redacted unless its memory is independently readable."
+    authorship: NodeAuthorship
+    "#1326 — advisory validation for this exact revision. A report for an older revision is STALE."
+    contentValidation: NodeContentValidationStatus!
     memoryId: String!
     """
     The PLATFORM-kind axis (info / task / prompt / record / …). Load-bearing for
@@ -1493,6 +1497,29 @@ export const typeDefs = `#graphql
     urn: String
   }
 
+  enum NodeAuthorshipKind { TASK HUMAN }
+  type NodeAuthorship {
+    kind: NodeAuthorshipKind!
+    taskRef: String
+    taskRevision: Int
+    human: NodeRevisionEditor
+    authoredAt: DateTime!
+  }
+
+  enum NodeContentValidationOutcome { PASS FAIL ERROR }
+  enum NodeContentValidationState { UNVALIDATED STALE PASS FAIL ERROR }
+  type NodeContentValidationReport {
+    nodeRevision: Int!
+    validationTaskRef: String
+    validationTaskRevision: Int
+    outcome: NodeContentValidationOutcome!
+    reportedAt: DateTime!
+  }
+  type NodeContentValidationStatus {
+    state: NodeContentValidationState!
+    latestReport: NodeContentValidationReport
+  }
+
   """
   046-usage-metering: effective-dated provider rate row. Prices are
   micro-cents (1e-8 USD) per MILLION tokens, as base-10 integer strings.
@@ -1592,6 +1619,10 @@ export const typeDefs = `#graphql
 
   type NodeRevision {
     id: ID!
+    "#1326 — attribution of the content captured before the next edit."
+    authorship: NodeAuthorship
+    "#1326 — advisory validation at this historical revision."
+    contentValidation: NodeContentValidationStatus!
     "Computed end-anchored URN hrn:noderev:<root>:<mem>:<loc...>:<rev> (#696). Null for legacy rows without a revNo, and for multi-segment per-user memories the flat shape cannot express."
     urn: String
     "Per-node monotonic revision number (#696). Null on legacy rows predating the counter (backfilled by the migration)."
@@ -2717,7 +2748,7 @@ export const typeDefs = `#graphql
     writers: NodeRoleWriters!
     validateBy: ContentValidator
     enabled: Boolean!
-    "Set by applying a required template (#1334)."
+    "Set by applying a required template (#1334). A locked rule refuses every ordinary edit and delete (RULE_LOCKED); unlockNodeRoleRule is the deliberate step."
     locked: Boolean!
     "The template this rule was copied from, if any (provenance only; no live link)."
     sourceTemplateId: ID
@@ -2835,6 +2866,38 @@ export const typeDefs = `#graphql
 
   type MemoryConfigTemplatePayload {
     template: MemoryConfigTemplate!
+    "Empty until #1327 adds its visibility warnings."
+    warnings: [MemoryConfigWarning!]!
+  }
+
+  "#1334 — what applying a template did (or, on a dry run, would do) for one role."
+  enum MemoryConfigApplyOutcome {
+    "The memory had no rule for the role; the template's was copied in (locked if the template is required)."
+    APPLIED
+    "The memory already had a rule for the role, and a non-required template never overrides one."
+    SKIPPED_CONFLICT
+    "The memory's rule for the role was overwritten by a required template's, and is now locked."
+    REPLACED
+    "A required template met a LOCKED rule that you have no authority to move; the rule stands."
+    SKIPPED_LOCKED
+  }
+
+  type MemoryConfigApplyEntry {
+    role: String!
+    outcome: MemoryConfigApplyOutcome!
+    "The rule in force for this role afterwards. On a dry run, the existing rule, or null for a would-be APPLIED."
+    rule: NodeRoleRule
+  }
+
+  type MemoryConfigApplyResult {
+    memoryId: ID!
+    template: NodeRoleRuleSourceTemplate!
+    "The template revision that was applied; pass it back as expectedTemplateRevision to apply exactly what a dry run showed."
+    templateRevision: Int!
+    required: Boolean!
+    dryRun: Boolean!
+    "One per template rule, role-ascending."
+    entries: [MemoryConfigApplyEntry!]!
     "Empty until #1327 adds its visibility warnings."
     warnings: [MemoryConfigWarning!]!
   }
@@ -8433,12 +8496,47 @@ export const typeDefs = `#graphql
     #1325 — change a rule by its id. With expectedRevision, a rule changed since
     you read it is refused CONFLICT (extensions.currentRevision) and nothing is
     written; omitted, the last writer wins. A rule you may not manage reads as
-    NOT_FOUND.
+    NOT_FOUND. A LOCKED rule (#1334) is refused with RULE_LOCKED (extensions
+    ruleId, role, sourceTemplateId) for EVERY caller: unlock it first
+    (unlockNodeRoleRule) or re-apply its required template.
     """
     updateNodeRoleRule(ref: ID!, input: UpdateNodeRoleRuleInput!, expectedRevision: Int): NodeRoleRulePayload!
 
-    "#1325 — delete a rule by its id; expectedRevision as for updateNodeRoleRule."
+    "#1325 — delete a rule by its id; expectedRevision as for updateNodeRoleRule. A LOCKED rule (#1334) is refused with RULE_LOCKED for every caller: unlock it first (unlockNodeRoleRule)."
     deleteNodeRoleRule(ref: ID!, expectedRevision: Int): Boolean!
+
+    """
+    #1334 — the deliberate step before a rule a required template LOCKED can be
+    edited or deleted (Holger, 2026-09-27: nobody changes a locked rule through
+    an ordinary edit). Needs lock authority: an org ADMIN/OWNER of the memory's
+    org; on a personal/private or org-less memory, its manager. Anyone else who
+    manages the memory gets RULE_LOCKED. Visible: bumps revision and stamps
+    updatedBy. Unlocking an unlocked rule changes nothing. expectedRevision as
+    for updateNodeRoleRule.
+    """
+    unlockNodeRoleRule(ref: ID!, expectedRevision: Int): NodeRoleRulePayload!
+
+    """
+    #1334 — copy a template's rules into ONE memory's config. A one-off copy:
+    later template edits never reach this memory, and re-applying is explicit.
+
+    Needs MANAGE on the memory (else MemoryNotFound) and on the template,
+    which exists for you only if you manage its owner (else
+    MEMORY_CONFIG_TEMPLATE_NOT_FOUND). The rules are validated as a whole,
+    under a share lock, as createNodeRoleRule validates a new rule's
+    references (NODE_NOT_FOUND for one you cannot read, NOT_A_TASK), and a
+    template rule whose task was deleted refuses the whole apply
+    (NODE_ROLE_RULE_REF_BROKEN). All-or-nothing per memory.
+
+    When the memory already has a rule for a role, a non-required template
+    skips it and a required template replaces it. A LOCKED rule is only
+    replaced by a caller with lock authority (see unlockNodeRoleRule);
+    otherwise SKIPPED_LOCKED. Rules written by a required template are locked.
+
+    expectedTemplateRevision: CONFLICT (with currentRevision) if the template
+    changed since you read it. dryRun: the same report with nothing written.
+    """
+    applyMemoryConfigTemplate(templateRef: ID!, memoryRef: ID!, expectedTemplateRevision: Int, dryRun: Boolean): MemoryConfigApplyResult!
 
     """
     #1325 part (c) — create a template. ownerRef names the organization, user

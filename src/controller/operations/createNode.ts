@@ -3,6 +3,7 @@ import { GRAPHS_PATH } from '../../config.js';
 import { generateId } from '../../lib/id.js';
 import { db } from '../../integrations/db/client.js';
 import { serializeTags } from '../../integrations/db/provider.js';
+import { authoredContentChanged, clearNodeAuthorship } from '../../lib/nodeAuthorship.js';
 import { saveNodeToFs } from '../../integrations/localFs/saveNodeToFs.js';
 import {
   ensureCurrentNodeRevisionInTransaction,
@@ -75,8 +76,10 @@ export const createNode = async (
     if (prior && (!existing || existing.loc !== loc || existing.memoryId !== node.memoryId)) {
       throw new Error(`createNode: the node at "${loc}" moved during the write; retry.`);
     }
+    let authoredEdit = false;
     if (existing) {
       const changes = diffNodeChanges(existing, fields);
+      authoredEdit = authoredContentChanged(changes);
       // An identical re-save is not a revision (@codex P2, PR #1339): a
       // snapshot here would manufacture history on every idempotent save and
       // evict real revisions under maxRevCount.
@@ -103,6 +106,7 @@ export const createNode = async (
       },
       update: {
         ...fields,
+        ...(authoredEdit ? clearNodeAuthorship() : {}),
         revisionContentHash: revisionStateHashRefreshMarker(),
       },
       include: {

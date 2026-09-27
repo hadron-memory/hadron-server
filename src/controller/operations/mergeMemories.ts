@@ -2,6 +2,7 @@ import type { PrismaClient } from '../../generated/prisma/index.js';
 import { assertBatchMutable, assertMemoryBulkMutable, assertNoProtectedReach } from '../../lib/bulkMutationGate.js';
 import { lockMemoryForChannelChange } from '../../lib/channels.js';
 import { computeContentHash } from '../../lib/contentHash.js';
+import { clearNodeAuthorship } from '../../lib/nodeAuthorship.js';
 import {
   ensureCurrentNodeRevisionInTransaction,
   buildNodeRevisionSnapshot,
@@ -430,7 +431,15 @@ export async function mergeMemoryGraph(
         if (Object.keys(merged.changed).length > 0) {
           // #725/#737 — the folded target must still satisfy its collection.
           assertConformsAgainst(batchSchema, tgt.objectType, 'properties' in merged.changed ? merged.changed.properties : tgt.properties);
-          const writeData: Record<string, unknown> = { ...merged.changed, updatedBy: actorId };
+          // A collision fold authors a new target content state. Keep the
+          // target's old stamp in its pre-fold NodeRevision above; the live
+          // combination has no single verified author. Unchanged folds never
+          // enter this branch, and relocations preserve their source stamp.
+          const writeData: Record<string, unknown> = {
+            ...merged.changed,
+            ...clearNodeAuthorship(),
+            updatedBy: actorId,
+          };
           if (merged.abstractChanged) {
             writeData.abstractOriginHash = computeContentHash(
               merged.contentChanged ? (merged.changed.content as string | null) : tgt.content,

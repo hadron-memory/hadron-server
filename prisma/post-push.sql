@@ -501,7 +501,40 @@ CREATE UNIQUE INDEX IF NOT EXISTS channel_read_states_agent_app_channel_uniq
 
 -- #1323 — every newly inserted Node gets a complete at-rest state baseline, including
 -- raw/createMany writers Prisma cannot route through an application helper.
--- Keep in lockstep with 20260925010000_trustworthy_node_revisions.
+-- Keep in lockstep with 20260925010000_trustworthy_node_revisions and
+-- 20260926220000_node_content_provenance.
+ALTER TABLE "nodes" DROP CONSTRAINT IF EXISTS "chk_nodes_authorship_shape";
+ALTER TABLE "nodes" ADD CONSTRAINT "chk_nodes_authorship_shape" CHECK (CASE
+  WHEN "authorship_kind" IS NULL THEN
+    "authored_by_task" IS NULL AND "authored_by_revision" IS NULL AND "authored_by_human" IS NULL AND "authored_at" IS NULL
+  WHEN "authorship_kind" = 'TASK' THEN
+    "authored_by_task" IS NOT NULL AND "authored_by_revision" IS NOT NULL AND "authored_by_revision" > 0 AND "authored_by_human" IS NULL AND "authored_at" IS NOT NULL
+  WHEN "authorship_kind" = 'HUMAN' THEN
+    "authored_by_task" IS NULL AND "authored_by_revision" IS NULL AND "authored_by_human" IS NOT NULL AND "authored_at" IS NOT NULL
+  ELSE false END);
+ALTER TABLE "node_revisions" DROP CONSTRAINT IF EXISTS "chk_node_revisions_authorship_shape";
+ALTER TABLE "node_revisions" ADD CONSTRAINT "chk_node_revisions_authorship_shape" CHECK (CASE
+  WHEN "authorship_kind" IS NULL THEN
+    "authored_by_task" IS NULL AND "authored_by_revision" IS NULL AND "authored_by_human" IS NULL AND "authored_at" IS NULL
+  WHEN "authorship_kind" = 'TASK' THEN
+    "authored_by_task" IS NOT NULL AND "authored_by_revision" IS NOT NULL AND "authored_by_revision" > 0 AND "authored_by_human" IS NULL AND "authored_at" IS NOT NULL
+  WHEN "authorship_kind" = 'HUMAN' THEN
+    "authored_by_task" IS NULL AND "authored_by_revision" IS NULL AND "authored_by_human" IS NOT NULL AND "authored_at" IS NOT NULL
+  ELSE false END);
+ALTER TABLE "node_content_validation_reports" DROP CONSTRAINT IF EXISTS "chk_node_content_validation_revisions_positive";
+ALTER TABLE "node_content_validation_reports" ADD CONSTRAINT "chk_node_content_validation_revisions_positive"
+  CHECK ("node_rev_seq" > 0 AND "validation_task_rev_seq" > 0);
+
+-- Preserve a pre-existing drift mismatch when widening the fingerprint. On a
+-- fresh DB the old function is absent, so there is no old hash to translate.
+CREATE TEMP TABLE node_revision_hash_before_1326 (id TEXT, stored_hash TEXT, old_actual_hash TEXT);
+DO $$ BEGIN
+  IF to_regprocedure('hadron_node_revision_state_hash(nodes)') IS NOT NULL THEN
+    EXECUTE 'INSERT INTO node_revision_hash_before_1326
+      SELECT n.id, n.revision_content_hash, hadron_node_revision_state_hash(n) FROM nodes n';
+  END IF;
+END $$;
+
 -- `prisma db push` adds the nullable column without running the migration, so
 -- upgrade every row still carrying that one-time marker to the new LIVE-state
 -- counter semantics before clearing it. Re-running post-push is then a no-op.
@@ -515,9 +548,17 @@ IMMUTABLE AS $$
     node_row."content", to_jsonb(node_row."tags"), node_row."node_type",
     node_row."object_type", node_row."is_link", node_row."properties",
     node_row."data", node_row."seq", node_row."is_runnable", node_row."role",
-    node_row."llm_model", node_row."ai_agent"
+    node_row."llm_model", node_row."ai_agent", node_row."authorship_kind",
+    node_row."authored_by_task", node_row."authored_by_revision",
+    node_row."authored_by_human", node_row."authored_at"
   )::text)
 $$;
+
+UPDATE "nodes" n SET "revision_content_hash" = hadron_node_revision_state_hash(n)
+FROM node_revision_hash_before_1326 old
+WHERE n.id = old.id AND old.stored_hash IS NOT NULL
+  AND old.stored_hash = old.old_actual_hash;
+DROP TABLE node_revision_hash_before_1326;
 
 UPDATE "nodes"
 SET "rev_seq" = "rev_seq" + 1,

@@ -364,6 +364,36 @@ describe('syncGraphFromGithub', () => {
     expect(await db.nodeRevision.count({ where: { nodeId } })).toBe(0);
   });
 
+  it('carries attribution through a path move but clears it when Git rewrites content', async () => {
+    const task = await db.node.create({
+      data: { id: generateId(), memoryId: dbGraphId, loc: 'author-task', name: 'Author task', nodeType: 'task' },
+    });
+    const authoredAt = new Date('2026-09-26T20:00:00Z');
+    const original = await db.node.create({
+      data: {
+        id: generateId(), memoryId: dbGraphId, loc: 'old-path', name: 'Authored', content: 'old body',
+        authorshipKind: 'TASK', authoredByTask: task.id, authoredByRevision: 1, authoredAt,
+      },
+    });
+    await db.$transaction((tx) => updateNodeFromGitSync(tx, original, { loc: 'new-path' }, undefined, dbGraphId));
+    const moved = await db.node.findUniqueOrThrow({ where: { id: original.id } });
+    expect(moved).toMatchObject({
+      loc: 'new-path', authorshipKind: 'TASK', authoredByTask: task.id, authoredByRevision: 1, authoredAt,
+    });
+
+    await db.$transaction((tx) => updateNodeFromGitSync(tx, moved, { content: 'new body' }, undefined, dbGraphId));
+    expect(await db.node.findUniqueOrThrow({ where: { id: original.id } })).toMatchObject({
+      content: 'new body', authorshipKind: null, authoredByTask: null,
+      authoredByRevision: null, authoredAt: null,
+    });
+    const history = await db.nodeRevision.findMany({ where: { nodeId: original.id }, orderBy: { revNo: 'asc' } });
+    expect(history).toHaveLength(2);
+    expect(history[1]).toMatchObject({
+      content: 'old body', authorshipKind: 'TASK', authoredByTask: task.id,
+      authoredByRevision: 1, authoredAt,
+    });
+  });
+
   it('re-sync replaces old nodes with the new set', async () => {
     const nodeA = join(mockSources, 'test-org', 'test/repo', 'nodeA');
     mkdirSync(nodeA, { recursive: true });
