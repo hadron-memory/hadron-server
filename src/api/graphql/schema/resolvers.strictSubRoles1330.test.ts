@@ -13,6 +13,7 @@ import { writeNodeCore } from './resolvers.mutation.node.js';
 import { generateId } from '../../../lib/id.js';
 import { lockMemoryConfigExclusive, lockMemoryConfigShared } from '../../../lib/governedRole.js';
 import { resolvers } from './resolvers.js';
+import { waitForLockWaiters } from '../../../test/lockWait.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -157,5 +158,36 @@ describe('#1330 — strictSubRoles at writeNodeCore', () => {
     release();
     await nodeSide;
     await expect(created).resolves.toMatchObject({ rule: { role: 'doc', strictSubRoles: true } });
+  });
+
+  it('rule writers take the rulebook lock BEFORE re-asking their gate: a demotion while queued is refused (#1400 review)', async () => {
+    const hold = () => {
+      let held!: () => void;
+      const holding = new Promise<void>((r) => (held = r));
+      let release!: () => void;
+      const gate = new Promise<void>((r) => (release = r));
+      const done = db.$transaction(async (tx) => { await lockMemoryConfigShared(tx, memoryId); held(); await gate; }, { timeout: 15_000 });
+      return { holding, release: () => { release(); return done; } };
+    };
+    const M = resolvers.Mutation as any;
+    const errCode = (p: Promise<unknown>) => p.then(() => null, (e: any) => e?.extensions?.code ?? e?.name ?? String(e));
+    const { rule } = await M.createNodeRoleRule({}, { memoryRef: memoryId, input: { role: 'doc' } }, ctx());
+    for (const [label, write] of [
+      ['create', () => M.createNodeRoleRule({}, { memoryRef: memoryId, input: { role: 'memo' } }, ctx())],
+      ['update', () => M.updateNodeRoleRule({}, { ref: rule.id, input: { strictSubRoles: true } }, ctx())],
+      ['delete', () => M.deleteNodeRoleRule({}, { ref: rule.id }, ctx())],
+    ] as const) {
+      await db.orgMember.updateMany({ where: { userId: admin.id }, data: { role: 'ADMIN' } });
+      const h = hold(); // a node write holds the shared side
+      await h.holding;
+      const pending = errCode(write());
+      await waitForLockWaiters(db);
+      await db.orgMember.updateMany({ where: { userId: admin.id }, data: { role: 'CONTRIBUTOR' } });
+      await h.release();
+      expect(await pending, label).not.toBeNull();
+    }
+    expect(await db.nodeRoleRule.findMany({ where: { config: { memoryId } }, select: { role: true, strictSubRoles: true } })).toEqual([
+      { role: 'doc', strictSubRoles: false },
+    ]);
   });
 });
