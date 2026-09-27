@@ -8858,9 +8858,9 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
   if (auth.userId && !auth.impersonation) {
     server.tool(
       'hadron_team_attention',
-      'INTERNAL PILOT (#1353): return compact unread counts for this operator\'s LIVE Workers and an opaque signed poll token; never reads message bodies and never changes ChannelReadState. Omit since for all unread. Adopt the returned token only after every listed nudge is accepted; after any partial failure retain the prior token so retry may duplicate but cannot lose a nudge. since:"now" is refused — use the explicit switchover preview/apply tool.',
+      'Return compact unread counts for this operator\'s LIVE Workers and an opaque signed poll token; never reads message bodies and never changes ChannelReadState. Omit since for all unread. Adopt the returned token only after every listed nudge is accepted; after any partial failure retain the prior token so retry may duplicate but cannot lose a nudge. since:"now" is refused — use the explicit switchover preview/apply tool.',
       {
-        app: z.string().optional().describe('The pilot App — an App URN or ID. Omit to use the selected App.'),
+        app: z.string().optional().describe('The App — an App URN or ID. Omit to use the selected App.'),
         since: z.string().optional().describe('Opaque token returned by the preceding successful poll. Do not pass "now".'),
       },
       async ({ app, since }) => {
@@ -8882,9 +8882,9 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
 
     server.tool(
       'hadron_team_attention_switchover',
-      'INTERNAL PILOT (#1353): explicitly baseline every current live Worker through captured Channel heads. preview is read-only and returns exact counts plus a short-lived proof. apply requires that proof and atomically refuses if the operator, App, live-Worker scope, effective register or cursor changed. Messages arriving after preview remain unread. This is the only supported way to discard the pre-router backlog.',
+      'Explicitly baseline every current live Worker through captured Channel heads. preview is read-only and returns exact counts plus a short-lived proof. apply requires that proof and atomically refuses if the operator, App, live-Worker scope, effective register or cursor changed. Messages arriving after preview remain unread. This is the only supported way to discard the pre-router backlog.',
       {
-        app: z.string().optional().describe('The pilot App — an App URN or ID. Omit to use the selected App.'),
+        app: z.string().optional().describe('The App — an App URN or ID. Omit to use the selected App.'),
         action: z.enum(['preview', 'apply']).describe('preview makes no writes; apply requires the exact preview proof.'),
         proof: z.string().optional().describe('Required for action:"apply"; returned by preview.'),
       },
@@ -8911,10 +8911,10 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
 
     server.tool(
       'hadron_team_chat_mark_read',
-      'INTERNAL PILOT (#1353): explicitly advance the Worker bound to your live session on one registered Channel. Use after filtered reads, which intentionally never auto-advance. Monotonic; a lower seq is a no-op and a seq beyond the Channel head is refused.',
+      'Explicitly advance the Worker bound to your live session on one registered Channel. Use after filtered reads, which intentionally never auto-advance. Monotonic; a lower seq is a no-op and a seq beyond the Channel head is refused.',
       {
         session: z.string().describe('Your live Worker session; selects the Worker whose own cursor advances.'),
-        app: z.string().optional().describe('The pilot App. Omit to recover it from session or the active selection.'),
+        app: z.string().optional().describe('The App. Omit to recover it from session or the active selection.'),
         channel: z.string().optional().describe('Channel id or address. Omit for the team Channel hadron_team_chat_read serves for the App.'),
         seq: z.number().int().min(0).describe('Read through this exact sequence.'),
       },

@@ -6,9 +6,10 @@
  * listed nudge has been accepted; retaining the previous token after a
  * partial failure deliberately causes duplicates rather than loss.
  *
- * The feature is dark unless BOTH the operator and App are explicitly
- * allowlisted. This matters for `maybeAdvanceOwnChannelRead`: outside the
- * pilot an ordinary transcript read is byte-for-byte the old read-only act.
+ * The feature is open to every ordinary user principal; what bounds it is
+ * the caller's own live Worker session and current App participation. This
+ * matters for `maybeAdvanceOwnChannelRead`: without a matching session an
+ * ordinary transcript read is byte-for-byte the old read-only act.
  */
 
 import { createHmac } from 'node:crypto';
