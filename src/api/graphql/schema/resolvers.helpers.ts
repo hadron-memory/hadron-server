@@ -3004,6 +3004,7 @@ export interface SearchReplaceInNodesInput {
   caseInsensitive?: boolean;
   regex?: boolean;
   dryRun?: boolean;
+  authoredWith?: NodeInput['authoredWith'];
   /** Why this change was made — stored in revision history (NodeRevision.revLabel, #620). Issue #88. */
   reason?: string | null;
 }

@@ -6088,8 +6088,10 @@ export function createMcpServerInstance(
       caseInsensitive: z.boolean().optional().describe('Match case-insensitively (default false).'),
       regex: z.boolean().optional().describe('Treat oldText as a regular-expression source and newText as a replacement pattern (default false).'),
       dryRun: z.boolean().optional().describe('Preview only: report per-node match counts WITHOUT writing anything. Strongly recommended before a real run.'),
+      authoredWith: z.object({ task: z.string(), revision: z.number().int().positive() }).optional()
+        .describe('Current author-task assertion for a role that requires one; a multi-node write must satisfy every changed node.'),
     },
-    async ({ oldText, newText, nodeUrns, memoryUrns, prefix, fields, caseInsensitive, regex, dryRun }) => {
+    async ({ oldText, newText, nodeUrns, memoryUrns, prefix, fields, caseInsensitive, regex, dryRun, authoredWith }) => {
       // Build a GraphQL Context from the MCP auth. Include appId + sessionId so
       // app-keyed write authorization (requireMemoryWriteAccess) resolves the
       // same way it does for hadron_create_node / hadron_update_node.
@@ -6119,6 +6121,7 @@ export function createMcpServerInstance(
               caseInsensitive: caseInsensitive ?? false,
               regex: regex ?? false,
               dryRun: dryRun ?? false,
+              authoredWith,
             },
           } as never,
           ctx,

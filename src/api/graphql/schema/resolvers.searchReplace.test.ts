@@ -5,10 +5,12 @@
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { GraphQLError, buildSchema, type GraphQLInputObjectType } from 'graphql';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { resolvers, type Context } from './resolvers.js';
 import { generateId } from '../../../lib/id.js';
+import { typeDefs } from './typeDefs.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -212,5 +214,45 @@ describe('searchReplaceInNodes — guards', () => {
     await expect(
       call({ oldText: '(', newText: 'b', memoryIds: [memory.id], fields: ['content'], regex: true }),
     ).rejects.toThrow(/invalid search pattern/i);
+  });
+});
+
+describe('searchReplaceInNodes — author-task attestation (#1328)', () => {
+  it('refuses a batch with a required task unless its current revision is asserted, then stamps that node', async () => {
+    const task = await makeNode('author-task', { isRunnable: true, content: 'instructions' });
+    const config = await db.memoryConfig.create({ data: { id: generateId(), memoryId: memory.id } });
+    await db.nodeRoleRule.create({
+      data: { id: generateId(), configId: config.id, role: 'guide', authorTaskId: task.id, authorTaskRequired: true },
+    });
+    const guided = await makeNode('guided', { role: 'guide', content: 'cat' });
+    const plain = await makeNode('plain', { content: 'cat' });
+    const input = { oldText: 'cat', newText: 'dog', nodeIds: [guided.id, plain.id], fields: ['content'] };
+    const codeOf = async (extra: Record<string, unknown>) => {
+      const error = await call({ ...input, ...extra }).then(() => null, (e: unknown) => e);
+      expect(error).toBeInstanceOf(GraphQLError);
+      return (error as GraphQLError).extensions.code;
+    };
+
+    expect(await codeOf({})).toBe('AUTHOR_TASK_MISSING');
+    expect(await codeOf({ authoredWith: { task: generateId(), revision: 1 } })).toBe('AUTHOR_TASK_WRONG_TASK');
+    expect(await codeOf({ authoredWith: { task: task.id, revision: 2 } })).toBe('AUTHOR_TASK_STALE_REVISION');
+    expect(await db.node.findUniqueOrThrow({ where: { id: plain.id } })).toMatchObject({ content: 'cat' });
+    expect(await db.nodeRevision.count({ where: { nodeId: plain.id } })).toBe(0);
+
+    const preview = await call({ ...input, dryRun: true });
+    expect(preview.nodesChanged).toBe(2);
+    const result = await call({ ...input, authoredWith: { task: task.id, revision: 1 } });
+    expect(result.nodesChanged).toBe(2);
+    expect(await db.node.findUniqueOrThrow({ where: { id: guided.id } })).toMatchObject({
+      content: 'dog', authorshipKind: 'TASK', authoredByTask: task.id, authoredByRevision: 1,
+    });
+    expect(await db.node.findUniqueOrThrow({ where: { id: plain.id } })).toMatchObject({
+      content: 'dog', authorshipKind: null,
+    });
+  });
+
+  it('exposes authoredWith on the GraphQL bulk replace input', () => {
+    const fields = (buildSchema(typeDefs).getType('SearchReplaceInNodesInput') as GraphQLInputObjectType).getFields();
+    expect(fields.authoredWith?.type.toString()).toBe('AuthoredWithInput');
   });
 });

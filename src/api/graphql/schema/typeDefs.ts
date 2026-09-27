@@ -4726,6 +4726,8 @@ export const typeDefs = `#graphql
     regex: Boolean = false
     "When true, report matches without writing anything."
     dryRun: Boolean = false
+    "Current author-task assertion for roles that require one."
+    authoredWith: AuthoredWithInput
     """
     Why this change was made — recorded on each changed node's revision-history
     snapshot (NodeRevision.revLabel, #620; historically it squatted in

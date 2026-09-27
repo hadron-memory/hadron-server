@@ -2289,6 +2289,20 @@ export const nodeMutations = {
             );
           }
         }
+        // This direct bulk writer bypasses writeNodeCore. Attest every
+        // authored result against its current role while the selected rows
+        // are locked; one assertion must satisfy every changed node or the
+        // transaction rolls back the entire batch.
+        const verifiedAuthorship = new Map<string, Awaited<ReturnType<typeof assertRoleDeclaredForWrite>>>();
+        for (const p of plans) {
+          verifiedAuthorship.set(p.raw.id, await assertRoleDeclaredForWrite(tx, p.raw.memoryId, {
+            role: p.raw.role,
+            priorRole: p.raw.role,
+            runnableAfter: p.raw.isRunnable,
+            authoredChange: true,
+            authoredWith: input.authoredWith,
+          }));
+        }
         for (const p of plans) {
           const raw = p.raw;
           // #88: the bulk-edit rationale rides in revLabel (#620); `changes`
@@ -2332,7 +2346,7 @@ export const nodeMutations = {
           }
           data.revisionContentHash = revisionStateHashRefreshMarker();
 
-          Object.assign(data, clearNodeAuthorship());
+          Object.assign(data, verifiedAuthorship.get(raw.id) ?? clearNodeAuthorship());
           await tx.node.update({ where: { id: raw.id }, data });
         }
       });
