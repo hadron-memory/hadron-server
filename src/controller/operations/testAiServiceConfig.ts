@@ -53,7 +53,7 @@ import {
 import { assertModelBuildable, generateText, LlmInvocationError, type LlmRequest, type LlmResult } from '../../lib/llm/index.js';
 import { recordLlmUsage } from '../../lib/metering/index.js';
 import { decryptToken, encryptToken } from '../../lib/tokenCrypto.js';
-import { defaultQuotaLimit, recordQuotaUsage, releaseQuota, reserveQuota } from '../../jobs/appRuns.js';
+import { defaultQuotaLimit, reserveQuota, settleReservation } from '../../jobs/appRuns.js';
 
 export interface AiConfigTestOverride {
   provider?: string | null;
@@ -458,7 +458,7 @@ export async function testAiServiceConfig(
   // must not use up the caller's allowance either (#1385 review, Codex).
   const retryAfter = admitTest(`${ctx.userId}:${row.id}`, deps.now());
   if (retryAfter != null) {
-    if (quotaScope && reservation) await releaseQuota(ctx.db, 'org', quotaScope, 'llm.tokens', AI_CONFIG_TEST_TOKEN_RESERVE, reservation);
+    if (quotaScope && reservation) await settleReservation(ctx.db, 'org', quotaScope, 'llm.tokens', -AI_CONFIG_TEST_TOKEN_RESERVE, reservation);
     throw new GraphQLError(`Too many tests of this config; try again in ${retryAfter}s.`, {
       extensions: { code: 'RATE_LIMITED', retryAfterSeconds: retryAfter },
     });
@@ -502,12 +502,9 @@ export async function testAiServiceConfig(
   });
   // Settle the reservation to what the probe really spent.
   if (quotaScope && reservation) {
-    const spent = tokensIn + tokensOut;
-    if (spent > AI_CONFIG_TEST_TOKEN_RESERVE) {
-      await recordQuotaUsage(ctx.db, 'org', quotaScope, 'llm.tokens', defaultQuotaLimit('org', 'llm.tokens'), spent - AI_CONFIG_TEST_TOKEN_RESERVE);
-    } else {
-      await releaseQuota(ctx.db, 'org', quotaScope, 'llm.tokens', AI_CONFIG_TEST_TOKEN_RESERVE - spent, reservation);
-    }
+    // Settled in the reservation's own window only: a rollover mid-probe
+    // neither refunds into nor charges excess to the new day (#1385 review).
+    await settleReservation(ctx.db, 'org', quotaScope, 'llm.tokens', tokensIn + tokensOut - AI_CONFIG_TEST_TOKEN_RESERVE, reservation);
   }
 
   return {

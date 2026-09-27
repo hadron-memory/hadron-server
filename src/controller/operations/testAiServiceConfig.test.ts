@@ -473,6 +473,41 @@ describe('testAiServiceConfig (#1378)', () => {
     expect(r.ok).toBe(true);
   });
 
+  it('excess beyond the reservation is charged to the reservation\'s window only, never to a new day (#1385 review)', async () => {
+    const host = await db.hadronServer.create({ data: { id: generateId(), url: 'https://test.hadron.local' } });
+    const cfg = await mkConfig({ hadronServerId: host.id });
+    // The day turns mid-probe (new-day usage 50), and the provider then
+    // reports MORE than the reservation.
+    const heavy = async () => {
+      await db.quotaCounter.updateMany({
+        where: { scopeId: org.id, action: 'llm.tokens' },
+        data: { used: 50, resetAt: new Date(Date.now() + 2 * 86_400_000) },
+      });
+      return { text: 'OK', tokensIn: AI_CONFIG_TEST_TOKEN_RESERVE + 30, tokensOut: 10, provider: 'glm', model: 'GLM-5.3' } as never;
+    };
+    const r = await testAiServiceConfig(ctxFor(admin.id, { roles: ['ADMIN'], organizationId: org.id }), cfg.id, {}, {
+      generate: heavy,
+      now: () => Date.now(),
+      timeoutMs: 5_000,
+      preflight: () => {},
+    });
+    expect(r.ok).toBe(true);
+    expect((await db.quotaCounter.findFirstOrThrow({ where: { scopeId: org.id, action: 'llm.tokens' } })).used).toBe(50);
+  });
+
+  it('excess within the same window is charged (#1385 review)', async () => {
+    const host = await db.hadronServer.create({ data: { id: generateId(), url: 'https://test.hadron.local' } });
+    const cfg = await mkConfig({ hadronServerId: host.id });
+    const heavy = async () => ({ text: 'OK', tokensIn: AI_CONFIG_TEST_TOKEN_RESERVE + 30, tokensOut: 10, provider: 'glm', model: 'GLM-5.3' }) as never;
+    await testAiServiceConfig(ctxFor(admin.id, { roles: ['ADMIN'], organizationId: org.id }), cfg.id, {}, {
+      generate: heavy,
+      now: () => Date.now(),
+      timeoutMs: 5_000,
+      preflight: () => {},
+    });
+    expect((await db.quotaCounter.findFirstOrThrow({ where: { scopeId: org.id, action: 'llm.tokens' } })).used).toBe(AI_CONFIG_TEST_TOKEN_RESERVE + 40);
+  });
+
   it('a reservation is only released into the window it was taken from: a rollover mid-probe keeps the new day\'s usage (#1385 review)', async () => {
     const host = await db.hadronServer.create({ data: { id: generateId(), url: 'https://test.hadron.local' } });
     const cfg = await mkConfig({ hadronServerId: host.id });

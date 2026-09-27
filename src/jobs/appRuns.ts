@@ -239,22 +239,24 @@ export async function reserveQuota(
 }
 
 /**
- * Give back part of a reservation once the real cost is known, but only to
- * the window it came from (#1385 review). If the counter has rolled over
- * since (a new day, `used` reset), the old reservation is gone with the old
- * day, and subtracting it would erase the new day's usage. Floored at zero.
+ * Settle a reservation to the real cost, in the window it came from and only
+ * there (#1385 review). `delta` is actual minus reserved: negative gives back
+ * the unused part, positive charges the excess. If the counter has rolled
+ * over since (a new day, `used` reset), the old day is gone, and applying
+ * either direction would bleed into the new day's usage, so nothing is
+ * applied. Floored at zero.
  */
-export async function releaseQuota(
+export async function settleReservation(
   db: PrismaClient,
   scopeKind: 'app' | 'org',
   scopeId: string,
   action: QuotaAction,
-  amount: number,
+  delta: number,
   reservation: { resetAt: string },
 ): Promise<void> {
-  if (amount <= 0) return;
+  if (delta === 0) return;
   await db.$executeRaw`
-    UPDATE quota_counters SET used = GREATEST(used - ${amount}, 0)
+    UPDATE quota_counters SET used = GREATEST(used + ${delta}, 0)
     WHERE scope_kind = ${scopeKind} AND scope_id = ${scopeId}
       AND action = ${action} AND "window" = ${QUOTA_WINDOW}
       AND reset_at::text = ${reservation.resetAt}`;
