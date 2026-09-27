@@ -213,11 +213,11 @@ run "33 locked other-claimant re-check removed" "$AG" \
 
 # ── #1357 same-App attach (Holger's ruling, 2026-09-26) ──────────────────
 run "34 same-App branch removed" "$H" \
-  "  const sameAppRead = asked === 'read' && (await sameAppAttachAdmitted(ctx, agent.id, memory));" \
+  "  const sameAppRead = asked === 'read' && (await sameAppAttachAdmitted(ctx, agent, memory));" \
   "  const sameAppRead = false;"
 run "35 same-App branch admits read-write" "$H" \
-  "  const sameAppRead = asked === 'read' && (await sameAppAttachAdmitted(ctx, agent.id, memory));" \
-  "  const sameAppRead = await sameAppAttachAdmitted(ctx, agent.id, memory);"
+  "  const sameAppRead = asked === 'read' && (await sameAppAttachAdmitted(ctx, agent, memory));" \
+  "  const sameAppRead = await sameAppAttachAdmitted(ctx, agent, memory);"
 run "36 same-App install check removed (cross-App shortcut)" "$H" \
   "  if (installed.length === 0) return false;" ""
 run "37 same-App App gate removed" "$H" \
@@ -266,7 +266,7 @@ run "56 promotion names the memory from the pre-transaction snapshot" "$AG" \
 run "57 syncs gated on the pre-read systemMemoryId" "$AG" \
   "      const committedSystemMemoryId = published?.systemMemoryId ?? agent.systemMemoryId;" "      const committedSystemMemoryId = agent.systemMemoryId;"
 run "58 same-App install check read without the lock" "$H" \
-  "    SELECT app_id FROM app_agents WHERE app_id = \${app.id} AND agent_id = \${agentId} FOR KEY SHARE" "    SELECT app_id FROM app_agents WHERE app_id = \${app.id} AND agent_id = \${agentId}"
+  "    SELECT app_id FROM app_agents WHERE app_id = \${app.id} AND agent_id = \${agent.id} FOR KEY SHARE" "    SELECT app_id FROM app_agents WHERE app_id = \${app.id} AND agent_id = \${agent.id}"
 # #1357 round 10 (@codex): user-owned PUBLIC is not a public Agent.memoryItems
 # audience, even when the legacy link is excluded from congruence checks.
 run "59 Agent.memoryItems bypasses the owner record gate" "$AT" \
