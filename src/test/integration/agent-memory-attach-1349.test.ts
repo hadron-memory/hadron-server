@@ -850,6 +850,30 @@ describe("#1349 — the caller must hold it in their OWN right (@codex, PR #1357
     );
   });
 
+  it('the strict owner may attach their memory read-write to their own PUBLIC agent', async () => {
+    // Covered-set exclusion is an audience rule, not only a publication rule:
+    // this user-owned Agent has no foreign App audience for the owner's memory.
+    const ownedAgent = await db.agent.create({
+      data: {
+        id: generateId(), ownerUserId: attackerUserId, organizationId: null,
+        name: 'owned-public-writer', urn: `attacker-${suffix}:owned-public-writer`, visibility: 'PUBLIC',
+      } as never,
+    });
+    const ownedMemory = await db.memory.create({
+      data: {
+        id: generateId(), ownerUserId: attackerUserId, organizationId: null,
+        name: 'owned-writable', urn: `attacker-${suffix}:owned-writable`,
+        class: 'knowledge', visibility: 'PUBLIC',
+      } as never,
+    });
+    const r = await gql(key.attacker!, ATTACH, { g: ownedAgent.id, m: ownedMemory.id, r: 'read-write' });
+    expect(r.errors, JSON.stringify(r.errors)).toBeUndefined();
+    expect(await db.agentMemoryItem.findFirst({
+      where: { agentId: ownedAgent.id, memoryId: ownedMemory.id, deletedAt: null },
+      select: { role: true },
+    })).toEqual({ role: 'read-write' });
+  });
+
   it('a PUBLIC read-write app-scoped link does not block publishing the agent', async () => {
     // The mirror image, and a FALSE REFUSAL rather than a hole: the covered-set
     // exclusions keep app-scoped links out of a PUBLIC agent's public surface,

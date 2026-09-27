@@ -29,8 +29,7 @@ import type { AgentSubscription, Memory, PrismaClient } from '../generated/prism
 import type { AuthContext } from '../middleware/auth.js';
 import { isActiveAgentSubscription } from '../lib/agentSubscription.js';
 import { participantAppIds } from '../lib/auth/appParticipation.js';
-import { isLifecycleActive } from '@hadron-memory/access-control';
-import { isAgentInstalled } from '../lib/appAgent.js';
+import { hasActiveAgentInstallLicense, isAgentInstalled } from '../lib/appAgent.js';
 import { resolveUserApps } from '../auth/user-app-resolution.js';
 import { getOrgReadableMemoryIds } from '../lib/auth/orgReadableMemory.js';
 
@@ -301,10 +300,9 @@ async function getPrimaryAgentAccess(
   // has no org — its install license rides the owner's AgentSubscription
   // (Phase 2c-2), so the org-grant gate doesn't apply.
   if (app.organizationId !== null && app.organizationId !== primary.organizationId) {
-    const grant = await db.agentOrgGrant.findUnique({
-      where: { orgId_agentId: { orgId: app.organizationId, agentId: primary.id } },
-    });
-    if (!grant || !isLifecycleActive(grant)) return new Map();
+    if (!(await hasActiveAgentInstallLicense(db, app.organizationId, primary.organizationId, primary.id))) {
+      return new Map();
+    }
   }
 
   // spec 047 (blocker 2, #676 review): a USER-owned memory folds into an App's

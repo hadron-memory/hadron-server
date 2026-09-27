@@ -25,6 +25,7 @@ import {
 } from '../../../lib/edge-conditions/index.js';
 import { buildPrismaMemoryLayer } from '../../../lib/edge-conditions/prisma-memory-layer.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
+import { isAgentInstalledAndLicensed } from '../../../lib/appAgent.js';
 import { GraphQLError } from 'graphql';
 import { type InputJsonValue } from '../../../generated/prisma/runtime/library.js';
 import { type MemoryVisibility } from '../../../generated/prisma/index.js';
@@ -240,6 +241,12 @@ export const chatMutations = {
           throw new ChatScopeError(
             'SHARED_CHAT_REQUIRES_APP_CONTEXT',
             "Cannot create a shared chat — you are not a member of any App that installs this Agent.",
+          );
+        }
+        if (!(await isAgentInstalledAndLicensed(ctx.db, membership.app.id, resolvedAgentId))) {
+          throw new ChatScopeError(
+            'SHARED_CHAT_REQUIRES_APP_CONTEXT',
+            'Cannot create a shared chat — the Agent is no longer active in this App.',
           );
         }
         sharedAppId = membership.app.id;
@@ -692,15 +699,7 @@ export const chatMutations = {
       // still post to the chat, but its old system prompt and linked knowledge
       // must not re-enter template retrieval.
       if (memory.class === 'app' && agent) {
-        const installed = memory.appId && await ctx.db.appAgent.findFirst({
-          where: {
-            appId: memory.appId,
-            agentId: agent.id,
-            app: { deletedAt: null, uninstalledAt: null },
-            agent: { deletedAt: null },
-          },
-          select: { agentId: true },
-        });
+        const installed = memory.appId && await isAgentInstalledAndLicensed(ctx.db, memory.appId, agent.id);
         if (!installed) agent = null;
       }
       const systemMemoryId = agent ? (agent as any).systemMemoryId as string : null;

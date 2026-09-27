@@ -972,6 +972,39 @@ describe('spec 017 — chat scope (US2 shared path)', () => {
     expect(sent.tools).toBeNull();
   });
 
+  it('does not restore a cross-org Agent after its App grant is revoked', async () => {
+    const orgB = await db.organization.create({
+      data: { id: generateId(), name: 'chat-license-b', urn: 'chat-license-b' },
+    });
+    const appB = await db.app.create({
+      data: {
+        id: generateId(), name: 'chat-license-app', urn: `${orgB.urn}:chat-license-app`,
+        organizationId: orgB.id, appAgents: { create: { agentId: agent.id } },
+      },
+    });
+    await db.appMember.create({ data: { appId: appB.id, userId: adminUser.id, role: 'member' } });
+    const grant = await db.agentOrgGrant.create({
+      data: { orgId: orgB.id, agentId: agent.id, activatedAt: new Date() },
+    });
+    const start = await resolvers.Mutation.startChat(
+      {}, { agentId: agent.id, scope: 'shared' }, userCtx(adminUser.id),
+    );
+    expect(start.systemMessage).toContain('Scope the research.');
+    await db.agentOrgGrant.update({
+      where: { orgId_agentId: { orgId: grant.orgId, agentId: grant.agentId } },
+      data: { revokedAt: new Date() },
+    });
+
+    const sent = await resolvers.Mutation.sendChatMessage(
+      {}, { chatId: start.chatId, userMessage: 'after revocation' }, userCtx(adminUser.id),
+    );
+    expect(sent.systemMessage).toBe('');
+    expect(sent.tools).toBeNull();
+    await expect(resolvers.Mutation.startChat(
+      {}, { agentId: agent.id, scope: 'shared' }, userCtx(adminUser.id),
+    )).rejects.toThrow(/no longer active/);
+  });
+
   it("creates a shared chat in an app-class memory, idempotent on a second call", async () => {
     await makeAppMember(`${orgA.urn}:research-app`, adminUser.id);
     const r1 = await resolvers.Mutation.startChat(
