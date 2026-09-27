@@ -1030,6 +1030,15 @@ export const typeDefs = `#graphql
     force: Boolean
   }
 
+  """Plan installed individual skill files for explicit task refs; plugin exports use skillPlan."""
+  input SelectedSkillFilePlanInput {
+    """Nonempty node IDs or fully qualified node URNs. Relative locs are refused."""
+    nodes: [String!]!
+    host: String
+    files: [SkillFileFactsInput!]
+    force: Boolean
+  }
+
   """One lint result, carrying the node and memory so a renderer never looks them back up."""
   type SkillFinding {
     urn: String!
@@ -1107,9 +1116,21 @@ export const typeDefs = `#graphql
     nodeId: String
   }
 
+  """A named task that cannot produce a host entry. An unavailable ref reveals no node metadata."""
+  type SkillSelectionResult {
+    ref: String!
+    nodeId: String
+    action: SkillExportAction!
+    reason: SkillExportReason!
+  }
+
   type SkillPlan {
     entries: [SkillPlanEntry!]!
     orphans: [SkillOrphan!]!
+    """True for explicit individual-file selection: unselected files are not classified as orphans."""
+    orphanAssessmentSkipped: Boolean!
+    """Opaque unavailable refs and selected nodes with no declaration for this host."""
+    selectionResults: [SkillSelectionResult!]!
     """
     How many nodes carrying ANY declaration key were in scope. A plan over an
     empty corpus and a plan the caller cannot see are otherwise the same empty
@@ -5591,6 +5612,8 @@ export const typeDefs = `#graphql
     body, so a client cannot write a file the server judged broken.
     """
     skillPlan(input: SkillPlanInput!): SkillPlan!
+    """Selected individual skill files only. Plugin bundles cannot use node selectors."""
+    selectedSkillFilePlan(input: SelectedSkillFilePlanInput!): SkillPlan!
 
     """
     DEPRECATED: use usageEvents(loc: <loc>). Carried for source-compat;

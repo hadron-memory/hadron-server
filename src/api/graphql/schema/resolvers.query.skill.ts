@@ -45,6 +45,10 @@ import type { Context } from './resolvers.helpers.js';
 import { getAccessibleMemoryIds, memoryAccessFilter } from './resolvers.helpers.js';
 import { decryptNodesBatch } from '../../../lib/nodeCrypto.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
+import { resolveNodeRef } from '../../../lib/entityRef/nodeRef.js';
+import { NodeNotFoundError } from '../../../lib/entityRef/errors.js';
+import { isId } from '../../../lib/entityRef/shape.js';
+import { assertFullyQualifiedUrn, splitNodeUrn } from '../../../lib/urn.js';
 import { safeNodeUrnV2 } from '../../../lib/urnEmit.js';
 import { isCiphertext } from '../../../lib/crypto.js';
 import { recordNodeUsage, toUsageNodeRefs } from '../../../lib/usageRecorder.js';
@@ -96,6 +100,20 @@ export interface SkillPlanInput {
   host?: string | null;
   files?: SkillFileFactsInput[] | null;
   force?: boolean | null;
+}
+
+export interface SelectedSkillFilePlanInput {
+  nodes: string[];
+  host?: string | null;
+  files?: SkillFileFactsInput[] | null;
+  force?: boolean | null;
+}
+
+export interface SkillSelectionResult {
+  ref: string;
+  nodeId: string | null;
+  action: 'FAIL' | 'SKIP';
+  reason: SkillExportReason;
 }
 
 /**
@@ -440,19 +458,27 @@ function buildExportPlan(args: {
   };
 }
 
-export const skillQueries = {
-  /**
-   * Judge a corpus of declared nodes against the files a client found.
-   *
-   * `memories` scopes the scan; omitted means every memory the caller can
-   * read. `files` is what the client saw on disk — empty for `lint`, which
-   * touches no disk at all.
-   */
-  skillPlan: async (
-    _: unknown,
-    { input }: { input: SkillPlanInput },
-    ctx: Context,
-  ) => {
+/** The existing plugin/unscoped plan and the selected individual-file plan share judgment. */
+async function planSkills(input: SkillPlanInput, ctx: Context, selectedRefs?: string[]) {
+    if (selectedRefs !== undefined) {
+      if (selectedRefs.length === 0 || selectedRefs.length > SKILL_PLAN_MAX_NODES) {
+        throw new GraphQLError(`selectedSkillFilePlan: nodes must contain 1–${SKILL_PLAN_MAX_NODES} refs.`, {
+          extensions: { code: 'BAD_USER_INPUT' },
+        });
+      }
+      for (const ref of selectedRefs) {
+        try {
+          if (!isId(ref)) {
+            assertFullyQualifiedUrn(ref, 'node');
+            if (splitNodeUrn(ref).fragment) throw new Error('Node fragments do not name a skill source.');
+          }
+        } catch {
+          throw new GraphQLError('selectedSkillFilePlan: each node must be an ID or fully qualified node URN.', {
+            extensions: { code: 'BAD_USER_INPUT' },
+          });
+        }
+      }
+    }
     if (input.force === true && input.intent !== 'EXPORT') {
       throw new GraphQLError('skillPlan: force is valid only with EXPORT intent.', {
         extensions: { code: 'BAD_USER_INPUT' },
@@ -478,6 +504,39 @@ export const skillQueries = {
 
     // ── Scope, through the shared gate ───────────────────────────────────
     const access = await memoryAccessFilter(ctx);
+    const selectionResults: SkillSelectionResult[] = [];
+    const selectedIdToRef = new Map<string, string>();
+    if (selectedRefs !== undefined) {
+      const unavailable = new Set<string>();
+      for (const ref of selectedRefs) {
+        let id: string;
+        try {
+          ({ id } = await resolveNodeRef(ctx.db, ref));
+        } catch (error) {
+          if (!(error instanceof NodeNotFoundError)) throw error;
+          unavailable.add(ref);
+          continue;
+        }
+        // The resolver above is identity lookup, not an access gate. Apply the
+        // same shared predicate as the declared scan, and conceal missing and
+        // unreadable refs with one outward result (cor:api:140:03).
+        const readable = await ctx.db.node.findFirst({
+          where: { id, deletedAt: null, memory: { deletedAt: null }, AND: [access] } as never,
+          select: { id: true },
+        });
+        if (!readable) {
+          unavailable.add(ref);
+          continue;
+        }
+        if (!selectedIdToRef.has(id)) selectedIdToRef.set(id, ref);
+      }
+      for (const ref of unavailable) {
+        selectionResults.push({
+          ref, nodeId: null, action: 'FAIL',
+          reason: { code: 'node-unavailable', message: 'The named task is unavailable.' },
+        });
+      }
+    }
     let memoryIds: string[] | null = null;
     if (input.memories && input.memories.length > 0) {
       const accessible = await getAccessibleMemoryIds(ctx);
@@ -513,7 +572,7 @@ export const skillQueries = {
     // Declared is the opt-in (§4.1: "declared, not merely runnable").
     const declaredWhere = {
         deletedAt: null,
-        OR: DISCOVERY_OR,
+        ...(selectedRefs === undefined ? { OR: DISCOVERY_OR } : {}),
         // INTERSECTED, not spread (@copilot, PR #1240). `memoryAccessFilter`
         // returns `{ memoryId: { in: … } }`, so spreading it beside the
         // requested scope made the LAST key win and silently dropped the
@@ -521,7 +580,11 @@ export const skillQueries = {
         // Not a leak — the caller could read them anyway — but a plan wider
         // than the one asked for, which a client running `--prune` against a
         // single memory would act on for files it never meant to touch.
-        AND: [access, ...(memoryIds ? [{ memoryId: { in: memoryIds } }] : [])],
+        AND: [
+          access,
+          ...(memoryIds ? [{ memoryId: { in: memoryIds } }] : []),
+          ...(selectedRefs !== undefined ? [{ id: { in: [...selectedIdToRef.keys()] } }, { memory: { deletedAt: null } }] : []),
+        ],
     } as never;
     const declaredSelect = {
         id: true,
@@ -580,6 +643,26 @@ export const skillQueries = {
         `skillPlan: more than ${SKILL_PLAN_MAX_NODES} nodes are in scope. Narrow \`memories\`; this surface does not silently truncate.`,
         { extensions: { code: 'BAD_USER_INPUT' } },
       );
+    }
+    if (selectedRefs !== undefined) {
+      const liveIds = new Set(declaredRows.map((r) => r.id));
+      for (const [id, ref] of selectedIdToRef) {
+        if (!liveIds.has(id)) {
+          selectionResults.push({
+            ref, nodeId: null, action: 'FAIL',
+            reason: { code: 'node-unavailable', message: 'The named task is unavailable.' },
+          });
+        }
+      }
+      for (const row of declaredRows) {
+        const { declaration, malformed } = classifyDeclaration(row.properties, host);
+        if (declaration === null && malformed.length === 0) {
+          selectionResults.push({
+            ref: selectedIdToRef.get(row.id)!, nodeId: row.id, action: 'SKIP',
+            reason: { code: 'host-not-declared', message: 'This task has no declaration for this host; its installed files are unchanged.' },
+          });
+        }
+      }
     }
     await decryptNodesBatch(ctx.db, declaredRows);
 
@@ -659,7 +742,9 @@ export const skillQueries = {
     }
     // Per host: one name on a node's Claude and Codex declarations is by
     // design, and two nodes sharing a Codex name collide only for Codex.
-    const collisions = lintCollisions(skillNodes, host);
+    const collisions = selectedRefs === undefined
+      ? lintCollisions(skillNodes, host)
+      : await selectedFileCollisions(ctx, access, skillNodes, host);
     // A collision finding names its node by URN AND memory (lint sets
     // `memory: node.memoryUrn`). The URN alone can name two nodes; within one
     // memory it cannot, so the pair is exact. Attaching by URN alone handed a
@@ -705,6 +790,7 @@ export const skillQueries = {
     });
 
     const fileFor = new Map<string, FileFacts>();
+    const duplicateSelectedFiles = new Set<string>();
     /** Directory names that paired with a node AND were selected for it. */
     const selectedDirs = new Set<string>();
     // Sorted so the selection is a property of the DATA rather than of the
@@ -736,7 +822,10 @@ export const skillQueries = {
       // maintain, which is what an orphan IS operationally and what `--prune`
       // acts on. The class table does not name this case; reported to @Eli
       // rather than invented as a tenth class.
-      if (fileFor.has(paired.id)) continue;
+      if (fileFor.has(paired.id)) {
+        if (selectedRefs !== undefined) duplicateSelectedFiles.add(paired.id);
+        continue;
+      }
       fileFor.set(paired.id, facts);
       selectedDirs.add(f.dirName);
     }
@@ -801,6 +890,7 @@ export const skillQueries = {
         ((WRITES_A_FILE.has(verdict.class) && !protectsLocalEdit && !missingProvenanceId) ||
           ((forceLocalEdit || forceMissingProvenance) && forcedAction !== 'REMOVE')) &&
         !hasError &&
+        !duplicateSelectedFiles.has(nf.id) &&
         !ambiguousFilesystemAlias &&
         !targetOccupied;
 
@@ -828,7 +918,16 @@ export const skillQueries = {
 
       const exportPlan =
         input.intent === 'EXPORT'
-          ? buildExportPlan({
+          ? duplicateSelectedFiles.has(nf.id)
+            ? {
+                action: 'REFUSE' as const,
+                preservesExistingFile: true,
+                reasons: [{
+                  code: 'multiple-installed-files',
+                  message: 'More than one installed directory names this task. Resolve the duplicates before exporting; this plan changes neither file.',
+                }],
+              }
+            : buildExportPlan({
               driftClass: verdict.class ?? null,
               parseFailure: verdict.parseFailure === true,
               hasFile: selectedFile !== null,
@@ -941,7 +1040,7 @@ export const skillQueries = {
     // (@codex P1, PR #1318). Matched by filesystem equivalence, not `toLowerCase`
     // (`isHostReservedName`; @copilot, PR #1318): an alias of the name is the same directory.
     const hostRow = requireSkillHost(host);
-    const orphans = files
+    const orphans = (selectedRefs === undefined ? files : [])
       .filter((f) => !selectedDirs.has(f.dirName))
       .filter((f) => !isHostReservedName(hostRow, f.dirName))
       .map((f) => ({
@@ -965,14 +1064,84 @@ export const skillQueries = {
       // overstated the population this plan judged. Reporting only `judged`
       // would hide that the read saw more. Both, and the gap between them is
       // a fact about the corpus rather than a discrepancy in the report.
-      scanned: declaredRows.length,
+      scanned: selectedRefs === undefined
+        ? declaredRows.length
+        : declaredRows.filter((row) => hasDeclarationKey(row.properties)).length,
       judged: skillNodes.length,
       unrecognized,
+      orphanAssessmentSkipped: selectedRefs !== undefined,
+      selectionResults,
     };
-  },
+}
+
+export const skillQueries = {
+  /** Existing unscoped and memory-scoped plan; plugin callers stay on this operation. */
+  skillPlan: (_: unknown, { input }: { input: SkillPlanInput }, ctx: Context) => planSkills(input, ctx),
+  /** Individual installed skill files only; plugin bundles have no node selector. */
+  selectedSkillFilePlan: (
+    _: unknown,
+    { input }: { input: SelectedSkillFilePlanInput },
+    ctx: Context,
+  ) => planSkills({ intent: 'EXPORT', host: input.host, files: input.files, force: input.force }, ctx, input.nodes),
 };
 
 /** The node body for a urn, read from the already-loaded set. */
 function findContent(nodes: SkillNode[], id: string): string {
   return nodes.find((n) => (n as SkillNode & { _id: string })._id === id)?.content ?? '';
+}
+
+function hasDeclarationKey(properties: unknown): boolean {
+  return typeof properties === 'object' && properties !== null && !Array.isArray(properties) &&
+    DECLARATION_KEYS.some((key) => Object.prototype.hasOwnProperty.call(properties, key));
+}
+
+/**
+ * A selected export still competes for names with EVERY readable enabled
+ * declaration for its host. This scan is metadata-only and paged to the end;
+ * the 500-node/body cap applies to selected content, never to collision proof.
+ * A failed page rejects the whole query, so an incomplete census cannot yield
+ * an executable WRITE or MOVE.
+ */
+async function selectedFileCollisions(
+  ctx: Context,
+  access: Awaited<ReturnType<typeof memoryAccessFilter>>,
+  selected: (SkillNode & { _id: string })[],
+  host: string,
+): Promise<Finding[]> {
+  const names = new Set(selected.flatMap((node) => {
+    const declaration = declaredSkill(node.properties, host);
+    return declaration?.enable === true && storedName(declaration) !== '' ? [declaration.name] : [];
+  }));
+  if (names.size === 0) return [];
+
+  const matching: SkillNode[] = [];
+  let cursor: string | undefined;
+  while (true) {
+    const page = await ctx.db.node.findMany({
+      where: {
+        deletedAt: null,
+        OR: DISCOVERY_OR,
+        AND: [access, { memory: { deletedAt: null } }],
+      } as never,
+      select: { id: true, loc: true, properties: true, memory: { select: { urn: true } } },
+      orderBy: { id: 'asc' },
+      take: 200,
+      ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
+    });
+    for (const row of page) {
+      const declaration = declaredSkill(row.properties, host);
+      if (declaration?.enable !== true || !names.has(declaration.name)) continue;
+      matching.push({
+        urn: safeNodeUrnV2(row.memory.urn, row.loc),
+        memoryUrn: row.memory.urn,
+        loc: row.loc,
+        properties: row.properties,
+        isRunnable: false,
+        content: '',
+      });
+    }
+    if (page.length < 200) break;
+    cursor = page[page.length - 1]!.id;
+  }
+  return lintCollisions(matching, host);
 }
