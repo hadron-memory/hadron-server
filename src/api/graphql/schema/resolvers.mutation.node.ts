@@ -3412,6 +3412,18 @@ export const nodeMutations = {
             extensions: { code: 'NODE_WRITE_CONFLICT' },
           });
         }
+        // The fold authors a new target state only when merged fields change.
+        // Check its current role's author task under the same transaction as
+        // the snapshot and update; an edge-only or no-op merge carries the
+        // existing stamp instead of minting new authorship.
+        const authoredChange = Object.keys(changed).length > 0;
+        const verifiedAuthorship = await assertRoleDeclaredForWrite(tx, target.memoryId, {
+          role: lockedTarget.role,
+          priorRole: lockedTarget.role,
+          runnableAfter: lockedTarget.isRunnable,
+          authoredChange,
+          authoredWith: input.authoredWith,
+        });
         await createNodeRevision(
           tx,
           buildNodeRevisionSnapshot(target, editorFromAuth(ctx), {
@@ -3421,8 +3433,11 @@ export const nodeMutations = {
           }),
         );
 
-        if (Object.keys(changed).length > 0) {
-          await tx.node.update({ where: { id: target.id }, data: { ...writeData, ...clearNodeAuthorship() } });
+        if (authoredChange) {
+          await tx.node.update({
+            where: { id: target.id },
+            data: { ...writeData, ...(verifiedAuthorship ?? clearNodeAuthorship()) },
+          });
         }
 
         if (fields.has('EDGES')) {

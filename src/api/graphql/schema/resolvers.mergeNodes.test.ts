@@ -6,13 +6,14 @@
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { GraphQLError } from 'graphql';
+import { GraphQLError, buildSchema, type GraphQLInputObjectType } from 'graphql';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { resolvers, type Context } from './resolvers.js';
 import { generateId } from '../../../lib/id.js';
 import { generateDataKey } from '../../../lib/crypto.js';
 import { sessionKeyCache } from '../../../lib/sessionKeyCache.js';
+import { typeDefs } from './typeDefs.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -120,6 +121,48 @@ describe('mergeNodes — field merge', () => {
 
     expect(out.data).toBeNull();
     expect(out.properties).toBeNull();
+  });
+});
+
+describe('mergeNodes — author-task attestation (#1328)', () => {
+  it('requires the target role task at its current revision and stamps only a changed fold', async () => {
+    const task = await makeNode('author-task', { isRunnable: true, content: 'instructions' });
+    const config = await db.memoryConfig.create({ data: { id: generateId(), memoryId: memory.id } });
+    await db.nodeRoleRule.create({
+      data: { id: generateId(), configId: config.id, role: 'guide', authorTaskId: task.id, authorTaskRequired: true },
+    });
+    const src = await makeNode('src', { content: 'source' });
+    const tgt = await makeNode('tgt', {
+      role: 'guide', content: 'target', authorshipKind: 'TASK', authoredByTask: task.id,
+      authoredByRevision: 1, authoredAt: new Date('2026-09-26T20:00:00Z'),
+    });
+
+    const codeOf = async (input: Record<string, unknown>) => {
+      const error = await merge({ source: src.id, target: tgt.id, include: ['CONTENT'], ...input })
+        .then(() => null, (e: unknown) => e);
+      expect(error).toBeInstanceOf(GraphQLError);
+      return (error as GraphQLError).extensions.code;
+    };
+    expect(await codeOf({})).toBe('AUTHOR_TASK_MISSING');
+    expect(await codeOf({ authoredWith: { task: generateId(), revision: 1 } })).toBe('AUTHOR_TASK_WRONG_TASK');
+    expect(await codeOf({ authoredWith: { task: task.id, revision: 2 } })).toBe('AUTHOR_TASK_STALE_REVISION');
+    expect(await db.node.findUniqueOrThrow({ where: { id: tgt.id } })).toMatchObject({ content: 'target', revSeq: 1 });
+    expect(await db.nodeRevision.count({ where: { nodeId: tgt.id } })).toBe(0);
+
+    const merged = await merge({ source: src.id, target: tgt.id, include: ['CONTENT'], authoredWith: { task: task.id, revision: 1 } });
+    expect(merged).toMatchObject({ content: 'target\n\nsource', authorshipKind: 'TASK', authoredByTask: task.id, authoredByRevision: 1 });
+    expect(await db.nodeRevision.findFirstOrThrow({ where: { nodeId: tgt.id } })).toMatchObject({
+      content: 'target', authorshipKind: 'TASK', authoredByTask: task.id,
+    });
+
+    // Edge-only work changes no authored field, so no new attestation is needed.
+    const carried = await merge({ source: src.id, target: tgt.id, include: ['EDGES'] });
+    expect(carried).toMatchObject({ authorshipKind: 'TASK', authoredByTask: task.id, authoredByRevision: 1 });
+  });
+
+  it('exposes authoredWith on the GraphQL merge input', () => {
+    const fields = (buildSchema(typeDefs).getType('MergeNodesInput') as GraphQLInputObjectType).getFields();
+    expect(fields.authoredWith?.type.toString()).toBe('AuthoredWithInput');
   });
 });
 

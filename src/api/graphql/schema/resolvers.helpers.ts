@@ -3026,6 +3026,8 @@ export interface MergeNodesInput {
   target: string;
   /** Which fields to merge. Omitted/null = every mergeable field. */
   include?: NodeMergeField[] | null;
+  /** Assertion for an authored change to the surviving target. */
+  authoredWith?: NodeInput['authoredWith'];
   /** Hard-delete the source node after a successful merge. */
   deleteSource?: boolean | null;
 }

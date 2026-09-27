@@ -4796,6 +4796,8 @@ export const typeDefs = `#graphql
     target: String!
     "Fields to merge. Omit (or null) to merge every mergeable field."
     include: [NodeMergeField!]
+    "Required when the surviving target's role rule names an author task and the merge changes authored content."
+    authoredWith: AuthoredWithInput
     "Hard-delete the source node after a successful merge."
     deleteSource: Boolean = false
   }
