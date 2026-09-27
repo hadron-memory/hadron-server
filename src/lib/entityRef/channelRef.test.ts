@@ -70,6 +70,28 @@ describe('resolveChannelRefId', () => {
     expect(channelA.id).not.toBe(channelB.id);
   });
 
+  it('filters ambiguous node history to live Channel roots', async () => {
+    const oldUrn = `${memA.urn}:old-chat`;
+    const rootA = (await db.channel.findUniqueOrThrow({ where: { id: channelA.id } })).chatRootNodeId;
+    const rootB = (await db.channel.findUniqueOrThrow({ where: { id: channelB.id } })).chatRootNodeId;
+    const plain = await db.node.create({
+      data: { id: generateId(), memoryId: memB.id, loc: 'notes:plain', name: 'plain' },
+    });
+    await db.urnAlias.createMany({ data: [rootA, plain.id].map((entityId) => ({
+      urn: oldUrn, entityType: 'NODE' as const, entityId,
+      reason: 'RENAME' as const, replacedByUrn: `${memA.urn}:new-chat`,
+    })) });
+    // The unrelated node claimant cannot make a Channel address ambiguous.
+    expect(await resolveChannelRefId(db, `hrn:node:${oldUrn}`)).toBe(channelA.id);
+    await db.urnAlias.create({ data: {
+      urn: oldUrn, entityType: 'NODE', entityId: rootB,
+      reason: 'RENAME', replacedByUrn: `${memB.urn}:chats:team`,
+    } });
+    // Two Channel claimants cannot be selected without a product rule. The
+    // Channel surface gives its uniform missing result, never a node error.
+    expect(await resolveChannelRefId(db, `hrn:node:${oldUrn}`)).toBeNull();
+  });
+
   it('follows a memory RENAME, because the node resolver does', async () => {
     // A published address outlives the slug it was published under (#1079).
     // This is what delegating to resolveNodeRef buys that a hand-split of the

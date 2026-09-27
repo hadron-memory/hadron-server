@@ -291,6 +291,18 @@ export async function resolveNodeRef(
     where: { loc_memoryId: { loc: normalized, memoryId: contextMemoryId } },
     select: { id: true, deletedAt: true },
   });
-  if (!node || (!options?.includeDeleted && node.deletedAt)) throw new NodeNotFoundError(ref);
-  return { id: node.id };
+  if (node && (options?.includeDeleted || !node.deletedAt)) return { id: node.id };
+  // Internal edge/write callers may pass a short loc pinned to a context
+  // memory. Its live occupant still wins; on a miss, compose that memory's
+  // current URN and consult the same NODE aliases as a full reference.
+  const contextMemory = await db.memory.findUnique({
+    where: { id: contextMemoryId }, select: { urn: true, deletedAt: true },
+  });
+  if (!contextMemory || (!options?.includeDeleted && contextMemory.deletedAt)) {
+    throw new NodeNotFoundError(ref);
+  }
+  const moved = await findMovedNodes(db, [`${contextMemory.urn}:${normalized}`], options?.includeDeleted);
+  if (moved.length > 1) throw new AmbiguousLegacyUrnError(ref, moved.map((n) => n.id));
+  if (moved.length === 1) return moved[0]!;
+  throw new NodeNotFoundError(ref);
 }

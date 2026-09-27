@@ -37,10 +37,11 @@
  * folds that into its own uniform denial (`cor:api:140:02`). It deliberately
  * does NOT surface `resolveNodeRef`'s typed `NODE_NOT_FOUND` /
  * `UrnNotQualifiedError`: either one would answer, about a Channel, the
- * question its gate refuses to answer. Those two classes are the WHOLE of what
- * "names nothing" means here, and nothing else is swallowed — a Prisma failure
- * propagates, because an outage reported as a missing Channel is an outage
- * nobody goes looking for.
+ * question its gate refuses to answer. Ambiguous NODE aliases are filtered to
+ * live Channel roots first; zero or several Channel claimants also return
+ * null, so unrelated node history cannot become a Channel existence oracle.
+ * A Prisma failure still propagates: an outage reported as a missing Channel
+ * is an outage nobody goes looking for.
  *
  * **Liveness stays with the caller.** This returns an id, never a row, so each
  * site keeps its own `deletedAt: null` filter and its own read gate — the
@@ -51,7 +52,7 @@
 
 import type { PrismaClient } from '../../generated/prisma/index.js';
 import { isId } from './shape.js';
-import { NodeNotFoundError, UrnNotQualifiedError } from './errors.js';
+import { AmbiguousLegacyUrnError, NodeNotFoundError, UrnNotQualifiedError } from './errors.js';
 import { resolveNodeRef } from './nodeRef.js';
 
 type ChannelRefDb = Pick<PrismaClient, 'channel' | 'node' | 'memory' | 'urnAlias'>;
@@ -78,6 +79,17 @@ export async function resolveChannelRefId(db: ChannelRefDb, ref: string): Promis
     // `NodeNotFoundError` — and both leave here as the same `null`.
     nodeId = (await resolveNodeRef(db, trimmed)).id;
   } catch (e) {
+    if (e instanceof AmbiguousLegacyUrnError && e.candidateNodeIds) {
+      // A node address is only a Channel address when its CURRENT node is a
+      // live chat root. Filter the ambiguous node candidates to Channels
+      // before deciding this ref. Multiple Channel claimants stay unresolved;
+      // the caller's normal gate still conceals an unreadable sole Channel.
+      const channels = await db.channel.findMany({
+        where: { chatRootNodeId: { in: [...e.candidateNodeIds] }, deletedAt: null },
+        select: { id: true },
+      });
+      return channels.length === 1 ? channels[0]!.id : null;
+    }
     // Anything else is the DATABASE failing, not the ref missing (Copilot on
     // PR #1172). `resolveNodeRef` reads Prisma, so a blanket catch would turn
     // a connection error or a timeout into "no such Channel" — an outage

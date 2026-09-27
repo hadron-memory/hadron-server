@@ -72,12 +72,14 @@ describe('node move URN aliases', () => {
     expect((await aliasesFor(child.id)).map((a) => a.urn)).toEqual([`${source.urn}:old:child`]);
     expect(await resolveNodeRef(db, oldRoot)).toEqual({ id: root.id });
     expect(await resolveNodeRef(db, oldChild)).toEqual({ id: child.id });
+    expect(await resolveNodeRef(db, 'old', source.id)).toEqual({ id: root.id });
     expect((await resolvers.Query.node(null, { ref: oldChild }, graphCtx()))?.id).toBe(child.id);
     expect(await resolvers.Query.resolveUrn(null, { urn: oldChild }, graphCtx()))
       .toMatchObject({ kind: 'node', id: child.id, memoryId: source.id });
 
     const occupant = await createNode(source.id, 'old');
     expect(await resolveNodeRef(db, oldRoot)).toEqual({ id: occupant.id });
+    expect(await resolveNodeRef(db, 'old', source.id)).toEqual({ id: occupant.id });
     expect((await resolvers.Query.node(null, { ref: oldRoot }, graphCtx()))?.id).toBe(occupant.id);
   });
 
@@ -277,6 +279,7 @@ describe('node move URN aliases', () => {
     const outsider = graphCtx(reader.id);
     expect(await resolvers.Query.node(null, { ref: old }, outsider)).toBeNull();
     expect(await resolvers.Query.node(null, { ref: absent }, outsider)).toBeNull();
+    expect(await resolvers.Query.channel(null, { ref: old }, outsider)).toBeNull();
     for (const ref of [old, absent]) {
       await expect(resolvers.Mutation.updateNode(null, {
         input: { id: ref, content: 'probe' },
@@ -292,6 +295,8 @@ describe('node move URN aliases', () => {
     const denied = await outsiderMcp.callToolText('hadron_get_node', { urn: old });
     const missing = await outsiderMcp.callToolText('hadron_get_node', { urn: absent });
     expect(denied.replace(old, '<ref>')).toBe(missing.replace(absent, '<ref>'));
+    expect(await outsiderMcp.callToolText('hadron_channel_read', { channel: old }))
+      .toContain('channel_not_found');
     for (const auth of [mcpAuth(), mcpAuth(reader.id)]) {
       const batch = await createTestableMcpServer(auth).callToolText('hadron_get_nodes', {
         refs: [old, nodeUrn(source, 'safe')],
@@ -349,6 +354,24 @@ describe('node move URN aliases', () => {
     expect(batch).toContain('body of safe');
     await expect(resolvers.Mutation.deleteNode(null, { nodeRef: published }, graphCtx(reader.id)))
       .rejects.toMatchObject({ extensions: { code: 'NODE_NOT_FOUND' } });
+  });
+
+  it('conceals an unreadable Channel among ambiguous node alias claimants', async () => {
+    const old = nodeUrn(source, 'old-channel');
+    const channelRoot = await createNode(target.id, 'chats:one');
+    const other = await createNode(target.id, 'notes:other');
+    await db.channel.create({ data: {
+      id: generateId(), memoryId: target.id, loc: 'chats:one', name: 'one',
+      chatRootNodeId: channelRoot.id,
+    } });
+    await db.urnAlias.createMany({ data: [channelRoot.id, other.id].map((entityId) => ({
+      urn: `${source.urn}:old-channel`, entityType: 'NODE' as const, entityId,
+      reason: 'RENAME' as const, replacedByUrn: `${target.urn}:chats:one`,
+    })) });
+    expect(await resolvers.Query.channel(null, { ref: old }, graphCtx(reader.id))).toBeNull();
+    expect(await createTestableMcpServer(mcpAuth(reader.id)).callToolText(
+      'hadron_channel_read', { channel: old },
+    )).toContain('channel_not_found');
   });
 
   it('coalesces projections when a batch reads many moved descendant addresses', async () => {

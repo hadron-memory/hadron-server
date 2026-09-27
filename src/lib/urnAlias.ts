@@ -234,7 +234,12 @@ export async function findLiveUrnAliasTargets<T extends { id: string }>(
     if (!options?.all && live.length >= 2) break;
     if (ids.length < ALIAS_PAGE_SIZE) break;
     if (page === ALIAS_MAX_PAGES - 1) {
-      throw new Error(`URN alias walk exceeded ${ALIAS_MAX_PAGES} pages for ${entityType}`);
+      const beyond = await findUrnAliasTargetIds(db, entityType, lookupUrn, {
+        skip: ALIAS_MAX_PAGES * ALIAS_PAGE_SIZE, take: 1,
+      });
+      if (beyond.length) {
+        throw new Error(`URN alias walk exceeded ${ALIAS_MAX_PAGES} pages for ${entityType}`);
+      }
     }
   }
   return live;
