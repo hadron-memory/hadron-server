@@ -43,6 +43,8 @@ export interface ImportNodeInput {
   name?: string | null;
   nodeType?: string | null;
   properties?: Record<string, unknown> | null;
+  /** Current author-task assertion when importing over a role-governed node. Distinct from post-import taskRef. */
+  authoredWith?: { task: string; revision: number } | null;
   // #528 — post-import task run. When `taskRef` is set, the stored node is
   // handed to that task via a MANUAL AppRun (async; poll appRun(ref:)).
   /** Task node to run against the imported node — PK or fully-qualified URN. */
@@ -225,6 +227,7 @@ export const importNodeMutations = {
         contentType,
         nodeType: input.nodeType ?? defaultNodeType,
         properties,
+        authoredWith: input.authoredWith,
       },
       ctx,
       name === undefined ? 'update' : 'upsert',

@@ -49,6 +49,9 @@ export interface NodeForGit {
    */
   role: string | null;
   isRunnable: boolean | null;
+  authorshipKind: 'TASK' | 'HUMAN' | null;
+  authoredByTask: string | null;
+  authoredByRevision: number | null;
   outgoingEdges: Array<{
     target: { id: string; loc?: string | null };
     name: string | null;
@@ -105,6 +108,9 @@ export function writeNodeFile(localPath: string, node: NodeForGit): void {
     // through the path it is written by most often.
     role: node.role,
     isRunnable: node.isRunnable,
+    authorshipKind: node.authorshipKind,
+    authoredByTask: node.authoredByTask,
+    authoredByRevision: node.authoredByRevision,
   }, node.outgoingEdges);
   preserveUnmanagedFrontmatter(frontmatter, mdPath);
 

@@ -4150,8 +4150,9 @@ export const typeDefs = `#graphql
   }
 
   """
-  Bulk-import node shape, used only by replaceSubtree (git-sync). Single-node
-  writes use CreateNodeInput / UpdateNodeInput (spec 039 Phase 0 D1).
+  Legacy bulk-import node shape retained for replaceSubtree compatibility.
+  replaceSubtree now refuses without writing; single-node writes use
+  CreateNodeInput / UpdateNodeInput (spec 039 Phase 0 D1).
   """
   input NodeInput {
     "Forced PK (importer-supplied UUIDv7 from node.yaml, stable across moves). Omit to mint."
@@ -4201,6 +4202,13 @@ export const typeDefs = `#graphql
   is create-only — a live node at (memoryId, loc) rejects with
   NodeLocConflictError (spec 039 Phase 0 D1/D4).
   """
+  input AuthoredWithInput {
+    "Stable Node.id of the author task. The server checks its current revision."
+    task: ID!
+    "The task's current Node.revision when this content was authored."
+    revision: Int!
+  }
+
   input CreateNodeInput {
     "Forced PK (importer/sync use case, e.g. a stable UUIDv7). Only ever a create-id here — never a selector (D2). Omit to mint."
     id: String
@@ -4225,6 +4233,8 @@ export const typeDefs = `#graphql
     generic createNode refuses it.
     """
     role: String
+    "Required when the applicable enabled role rule names an author task."
+    authoredWith: AuthoredWithInput
     alias: String
     description: String
     "Paragraph-length summary of this node — see Node.abstract for the surfacing contract. Optional. Empty + whitespace-only normalize to null. Cap is 2000 characters."
@@ -4281,6 +4291,8 @@ export const typeDefs = `#graphql
     ALREADY carries one: the gate reads the resulting state, not the change.
     """
     role: String
+    "Required for an authored change governed by an author task."
+    authoredWith: AuthoredWithInput
     alias: String
     description: String
     "Paragraph-length summary of this node — see Node.abstract for the surfacing contract. Omit to preserve; null to clear; string to replace. Empty + whitespace-only normalize to null. Cap is 2000 characters."
@@ -4333,6 +4345,8 @@ export const typeDefs = `#graphql
     nodeType: String
     "Merged provenance metadata; the server sets properties.url on the url path when absent (properties.title is filled from the extracted title by the write seam)."
     properties: JSON
+    "Author-task assertion for writing a role-governed target. This attests the import itself; taskRef separately starts a task after import."
+    authoredWith: AuthoredWithInput
     "Task node to run against the imported node once stored (#528) — PK or fully-qualified URN. Presence triggers a MANUAL app run; the result envelope is FETCH_PENDING + jobId (poll appRun(ref:)). The imported node's URN is passed to the task as eventData.importedNodeUrn."
     taskRef: ID
     "Extra template args merged into the task run's eventData (only meaningful with taskRef)."
@@ -4868,6 +4882,8 @@ export const typeDefs = `#graphql
     regex: Boolean = false
     "When true, report matches without writing anything."
     dryRun: Boolean = false
+    "Current author-task assertion for roles that require one."
+    authoredWith: AuthoredWithInput
     """
     Why this change was made — recorded on each changed node's revision-history
     snapshot (NodeRevision.revLabel, #620; historically it squatted in
@@ -4938,6 +4954,8 @@ export const typeDefs = `#graphql
     target: String!
     "Fields to merge. Omit (or null) to merge every mergeable field."
     include: [NodeMergeField!]
+    "Required when the surviving target's role rule names an author task and the merge changes authored content."
+    authoredWith: AuthoredWithInput
     "Hard-delete the source node after a successful merge."
     deleteSource: Boolean = false
   }
@@ -4949,6 +4967,8 @@ export const typeDefs = `#graphql
     target: String!
     "Field strategy for source nodes whose loc collides with an existing target node (folded via the mergeNodes rules). Omit (or null) = every mergeable field. Nodes with no target counterpart move over unchanged (loc preserved)."
     include: [NodeMergeField!]
+    "Required when a collision fold changes authored content on a target whose role rule names an author task. One claim must satisfy every changed target in this merge."
+    authoredWith: AuthoredWithInput
     "Delete the (now-empty) source memory after a successful merge."
     deleteSourceMem: Boolean = false
   }
@@ -7228,9 +7248,10 @@ export const typeDefs = `#graphql
     verbatim. 'data' must be a JSON object (not an array or scalar). 'nodeRef'
     is a node ID or fully-qualified URN. Honors the same single-write
     invariants as updateNode (per-memory write auth, encryption, revision
-    history, git mirror). Returns the updated node.
+    history, git mirror). Pass authoredWith for a role requiring an author task.
+    Returns the updated node.
     """
-    updateNodeData(nodeRef: ID!, data: JSON!, reason: String): Node!
+    updateNodeData(nodeRef: ID!, data: JSON!, reason: String, authoredWith: AuthoredWithInput): Node!
 
     """
     #742 - Shallow-merge a JSON patch into a node's structured 'properties'
@@ -7257,9 +7278,10 @@ export const typeDefs = `#graphql
     at rest (never encrypted), so the merge + conformance check need no key —
     but the write still honors the same single-write invariants as updateNode
     (per-memory write auth, an active session on an encrypted memory, revision
-    history, git mirror). Returns the updated node.
+    history, git mirror). Pass authoredWith for a role requiring an author task.
+    Returns the updated node.
     """
-    updateNodeProperties(nodeRef: ID!, properties: JSON!, reason: String): Node!
+    updateNodeProperties(nodeRef: ID!, properties: JSON!, reason: String, authoredWith: AuthoredWithInput): Node!
 
     """
     #745 — Object store: the legible sugar surface over structured storage.
@@ -7414,9 +7436,12 @@ export const typeDefs = `#graphql
     mergeMemories(input: MergeMemoriesInput!): Memory!
 
     """
-    Replace all nodes owned by a repo within a memory (collection tool)
+    Retired. Calls return REPLACE_SUBTREE_RETIRED without changing nodes or
+    edges. The field remains temporarily so existing clients get a clear
+    refusal rather than an unknown-field error.
     """
     replaceSubtree(ownerRepo: String!, memoryId: String!, nodes: [NodeInput!]!, edges: [EdgeInput!]!): Int!
+      @deprecated(reason: "Retired (#454): every authorized call refuses with REPLACE_SUBTREE_RETIRED and writes nothing. Use the canonical node write mutations.")
 
     # Edge CRUD — a GROUP note covering create/update/delete, which is why it
     # is allow-listed rather than published on createEdge alone (#1232).

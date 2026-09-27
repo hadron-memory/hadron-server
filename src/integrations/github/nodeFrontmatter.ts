@@ -37,6 +37,9 @@ export interface FrontmatterNodeFields {
    */
   role?: string | null;
   isRunnable?: boolean | null;
+  authorshipKind?: 'TASK' | 'HUMAN' | null;
+  authoredByTask?: string | null;
+  authoredByRevision?: number | null;
 }
 
 /**
@@ -134,6 +137,11 @@ export function buildNodeFrontmatter(
   // mirrored (measured), so no file on disk gains a key today.
   if (node.role != null) frontmatter.role = node.role;
   if (node.isRunnable != null) frontmatter.runnable = node.isRunnable;
+  // #1328 — only a verified task stamp can become an assertion on a future
+  // repo-wins sync. Human stamps are not a client-controlled exemption.
+  if (node.authorshipKind === 'TASK' && node.authoredByTask && node.authoredByRevision != null) {
+    frontmatter.authoredWith = { task: node.authoredByTask, revision: node.authoredByRevision };
+  }
   // Node-level JSON — not importer-consumed yet, but part of a faithful mirror.
   if (node.data != null) frontmatter.data = node.data;
   if (node.properties != null) frontmatter.properties = node.properties;

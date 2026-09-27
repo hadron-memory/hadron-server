@@ -1,12 +1,11 @@
 import { readdirSync, existsSync } from 'fs';
 import { join } from 'path';
-import type { Node } from '../../index.d.js';
-import { InvalidNodeLocError, loadNodeFromFs } from './loadNodeFromFs.js';
+import { InvalidNodeLocError, loadNodeFromFs, type LoadedNode } from './loadNodeFromFs.js';
 
 interface FsGraph {
   name: string;
   ownerRepo: string;
-  nodes: Partial<Node>[];
+  nodes: LoadedNode[];
 }
 
 /**
@@ -55,7 +54,7 @@ export const loadGraphFromFs = async (
   graphName: string,
   ownerRepo: string,
 ): Promise<{ graph: FsGraph; edges: GraphEdge[]; skippedInvalidLoc: SkippedFile[] }> => {
-  const nodes: Partial<Node>[] = [];
+  const nodes: LoadedNode[] = [];
   const edges: GraphEdge[] = [];
   // Files skipped for an unusable path (#1224). The caller must keep the rows
   // they name ALIVE: sync is repo-wins, so a row absent from the loaded graph

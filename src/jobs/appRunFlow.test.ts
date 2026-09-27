@@ -264,6 +264,31 @@ describe('3-node flow through production deps (§10)', () => {
     expect(appended.content).toContain('---'); // append separator
   });
 
+  it('generated output cannot overwrite a role-governed target without an author-task assertion', async () => {
+    await db.node.update({
+      where: { loc_memoryId: { loc: 'flow:act', memoryId } },
+      data: { data: { output: { writeTo: `${ORG_URN}::flowmem::flow:alerts`, mode: 'append' } } as never },
+    });
+    const task = await db.node.create({
+      data: { id: generateId(), memoryId, loc: 'tasks:author', name: 'Author', isRunnable: true },
+    });
+    const config = await db.memoryConfig.create({ data: { id: generateId(), memoryId } });
+    await db.nodeRoleRule.create({
+      data: { id: generateId(), configId: config.id, role: 'guide', authorTaskId: task.id, authorTaskRequired: true },
+    });
+    const target = await db.node.create({
+      data: { id: generateId(), memoryId, loc: 'flow:alerts', name: 'Alerts', role: 'guide', content: 'original' },
+    });
+
+    const run = await mintFlow();
+    expect(await executeAppRun(db, run.id, flowDeps(0.92).deps)).toBe('failed');
+    expect((await db.appRun.findUniqueOrThrow({ where: { id: run.id } })).failure)
+      .toMatchObject({ code: 'OUTPUT_WRITE_FAILED' });
+    expect(await db.node.findUniqueOrThrow({ where: { id: target.id } }))
+      .toMatchObject({ content: 'original', role: 'guide' });
+    expect(await db.nodeRevision.count({ where: { nodeId: target.id } })).toBe(0);
+  });
+
   it('a flow routed into an ENCRYPTED memory fails at that hop (PR-532 Codex P2)', async () => {
     // The launch gate only checks the entry — the guard must also fire on
     // routed hops, where the run has no session key.
@@ -456,6 +481,34 @@ describe('3-node flow through production deps (§10)', () => {
     await expect(
       hadronReadNode.execute(toolCtx, { urn: `${ORG_URN}::vault2::notes:x` }),
     ).rejects.toThrow(/encrypted/);
+  });
+
+  it('run node-tool update requires a current author-task assertion for governed content', async () => {
+    const run = await mintFlow();
+    const r = (await db.appRun.findUniqueOrThrow({ where: { id: run.id } })) as AppRun;
+    const toolCtx = { log: vi.fn(), db, run: r, principal: runContext(db, r) };
+    const task = await db.node.create({
+      data: { id: generateId(), memoryId, loc: 'tasks:author', name: 'Author', isRunnable: true },
+    });
+    const config = await db.memoryConfig.create({ data: { id: generateId(), memoryId } });
+    await db.nodeRoleRule.create({
+      data: { id: generateId(), configId: config.id, role: 'guide', authorTaskId: task.id, authorTaskRequired: true },
+    });
+    const target = await db.node.create({
+      data: { id: generateId(), memoryId, loc: 'notes:governed', name: 'Guide', role: 'guide', content: 'original' },
+    });
+    const urn = `${ORG_URN}::flowmem::notes:governed`;
+
+    await expect(hadronUpdateNode.execute(toolCtx, { urn, content: 'replacement' }))
+      .rejects.toMatchObject({ extensions: { code: 'AUTHOR_TASK_MISSING' } });
+    await expect(hadronUpdateNode.execute(toolCtx, { urn, content: 'replacement', authoredWith: { task: task.id, revision: 2 } }))
+      .rejects.toMatchObject({ extensions: { code: 'AUTHOR_TASK_STALE_REVISION' } });
+    expect((await db.node.findUniqueOrThrow({ where: { id: target.id } })).content).toBe('original');
+    expect(await db.nodeRevision.count({ where: { nodeId: target.id } })).toBe(0);
+
+    await hadronUpdateNode.execute(toolCtx, { urn, content: 'replacement', authoredWith: { task: task.id, revision: 1 } });
+    expect(await db.node.findUniqueOrThrow({ where: { id: target.id } }))
+      .toMatchObject({ content: 'replacement', authoredByTask: task.id, authoredByRevision: 1 });
   });
 
   it('a defer-branch flow can still route into another memory later (URN shape sanity)', async () => {

@@ -3,6 +3,7 @@ import { assertBatchMutable, assertMemoryBulkMutable, assertNoProtectedReach } f
 import { lockMemoryForChannelChange } from '../../lib/channels.js';
 import { computeContentHash } from '../../lib/contentHash.js';
 import { clearNodeAuthorship } from '../../lib/nodeAuthorship.js';
+import { assertRoleDeclaredForWrite, type AuthoredWithTask } from '../../lib/governedRole.js';
 import {
   ensureCurrentNodeRevisionInTransaction,
   buildNodeRevisionSnapshot,
@@ -100,6 +101,8 @@ export interface MergeMemoryArgs {
   /** Audit attribution for version/edit/update columns (#620: user PK vs
    *  fallback principal info are captured separately). */
   editor: SnapshotEditor;
+  /** One author-task claim for changed collision folds; pure carries need none. */
+  authoredWith?: AuthoredWithTask | null;
   /** Nodes folded / edges drained per inner transaction. Test seam; defaults to MERGE_BATCH_SIZE. */
   batchSize?: number;
   /** Source nodes scanned per classify+relocate page. Test seam; defaults to CLASSIFY_PAGE. */
@@ -120,7 +123,7 @@ export async function mergeMemoryGraph(
   db: PrismaClient,
   args: MergeMemoryArgs,
 ): Promise<MergeMemoryResult> {
-  const { sourceMemoryId, targetMemoryId, fields, deleteSourceMem, editor } = args;
+  const { sourceMemoryId, targetMemoryId, fields, deleteSourceMem, editor, authoredWith } = args;
   const actorId = editor.userId ?? editor.info ?? null;
   // Clamp to >= 1: a zero/negative batchSize (the test seam is public) would
   // never advance the fold loop and spin forever.
@@ -422,13 +425,26 @@ export async function mergeMemoryGraph(
           if (e instanceof NodeAbstractTooLongError) (e as AbstractTooLongAtLoc).loc = tgt.loc;
           throw e;
         }
+        const changedFields = Object.keys(merged.changed);
+        // Relocation and unchanged folds carry content. A changed collision
+        // authors a new target state and must satisfy its current author-task
+        // rule under this batch's row locks, before any snapshot or write.
+        const verifiedAuthorship = changedFields.length > 0
+          ? await assertRoleDeclaredForWrite(tx, targetMemoryId, {
+              role: tgt.role,
+              priorRole: tgt.role,
+              runnableAfter: tgt.isRunnable,
+              authoredChange: true,
+              authoredWith,
+            })
+          : null;
         await createNodeRevision(
           tx,
           buildNodeRevisionSnapshot(tgt, editor, {
-            changes: Object.keys(merged.changed),
+            changes: changedFields,
           }),
         );
-        if (Object.keys(merged.changed).length > 0) {
+        if (changedFields.length > 0) {
           // #725/#737 — the folded target must still satisfy its collection.
           assertConformsAgainst(batchSchema, tgt.objectType, 'properties' in merged.changed ? merged.changed.properties : tgt.properties);
           // A collision fold authors a new target content state. Keep the
@@ -437,7 +453,7 @@ export async function mergeMemoryGraph(
           // enter this branch, and relocations preserve their source stamp.
           const writeData: Record<string, unknown> = {
             ...merged.changed,
-            ...clearNodeAuthorship(),
+            ...(verifiedAuthorship ?? clearNodeAuthorship()),
             updatedBy: actorId,
           };
           if (merged.abstractChanged) {

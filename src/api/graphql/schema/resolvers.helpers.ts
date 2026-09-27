@@ -3029,9 +3029,8 @@ export interface NodeEdgeInput {
 }
 
 /**
- * Bulk-import node shape — used only by replaceSubtree (git-sync) since the
- * spec-039 Phase 0 split retired upsertNode. Single-node writes use
- * CreateNodeInput / UpdateNodeInput below.
+ * Legacy bulk-import node shape retained by the refused replaceSubtree field.
+ * Single-node writes use CreateNodeInput / UpdateNodeInput below.
  */
 export interface NodeInput {
   id?: string;
@@ -3049,6 +3048,8 @@ export interface NodeInput {
    * inert. Omit preserves on update; null clears.
    */
   role?: string | null;
+  /** Assertion checked against the applicable author task in the write transaction. */
+  authoredWith?: { task: string; revision: number } | null;
   loc: string;
   name: string;
   alias?: string;
@@ -3109,6 +3110,7 @@ export interface SearchReplaceInNodesInput {
   caseInsensitive?: boolean;
   regex?: boolean;
   dryRun?: boolean;
+  authoredWith?: NodeInput['authoredWith'];
   /** Why this change was made — stored in revision history (NodeRevision.revLabel, #620). Issue #88. */
   reason?: string | null;
 }
@@ -3136,6 +3138,8 @@ export interface MergeNodesInput {
   target: string;
   /** Which fields to merge. Omitted/null = every mergeable field. */
   include?: NodeMergeField[] | null;
+  /** Assertion for an authored change to the surviving target. */
+  authoredWith?: NodeInput['authoredWith'];
   /** Hard-delete the source node after a successful merge. */
   deleteSource?: boolean | null;
 }
@@ -3147,6 +3151,8 @@ export interface MergeMemoriesInput {
   target: string;
   /** Field strategy for source nodes that collide (same loc) in the target. Omitted/null = every mergeable field. */
   include?: NodeMergeField[] | null;
+  /** One assertion for changed collision folds into task-governed targets. */
+  authoredWith?: NodeInput['authoredWith'];
   /** Delete the (now-empty) source memory after a successful merge. */
   deleteSourceMem?: boolean | null;
 }

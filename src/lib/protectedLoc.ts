@@ -320,8 +320,8 @@ function ancestorsOf(loc: string): string[] {
 
 /**
  * The exclusion a DELETING bulk surface must apply so it never removes a
- * protected row — git-sync cleanup and `replaceSubtree` both delete by
- * `ownerRepo`, not by the locs they were handed, so checking the INCOMING locs
+ * protected row — git-sync cleanup deletes by `ownerRepo` (as the retired
+ * `replaceSubtree` did before #454), not by the locs it was handed, so checking the INCOMING locs
  * protects nothing on the way out.
  *
  * THE WHOLE POINT OF THIS LIVING HERE: a consumer that rebuilds the predicate
@@ -344,7 +344,7 @@ export function protectedDeletionFilter(protectedLocs: ProtectedLoc[]): {
   //
   // #1226 — this is a DELETION filter, so the tombstone carve-out applies here
   // exactly as it does in `assertLocWritable`. Without it, cleanup through git
-  // sync or `replaceSubtree` stayed blocked while the single-loc path allowed
+  // sync (or the since-retired `replaceSubtree`, #454) stayed blocked while the single-loc path allowed
   // it: the same rule enforced differently by two callers of the same module,
   // which is what its header warns about in the other direction (@codex, PR
   // #1257). Filtering HERE rather than at the two call sites is the point —

@@ -295,6 +295,28 @@ describe('importNode — url path (sync v1)', () => {
 // ───── conflict semantics ───────────────────────────────────────────────────
 
 describe('importNode — update in place (handoff decision 3)', () => {
+  it('requires the current author task when re-importing a role-governed node', async () => {
+    const task = await db.node.create({
+      data: { id: generateId(), memoryId, loc: 'tasks:import', name: 'Import task', isRunnable: true },
+    });
+    const config = await db.memoryConfig.create({ data: { id: generateId(), memoryId } });
+    await db.nodeRoleRule.create({
+      data: { id: generateId(), configId: config.id, role: 'guide', authorTaskId: task.id, authorTaskRequired: true },
+    });
+    const target = await db.node.create({
+      data: { id: generateId(), memoryId, loc: 'clips:governed', name: 'Guide', role: 'guide', content: 'original' },
+    });
+    const input = { memoryId, loc: target.loc, content: 'replacement', contentType: 'text/markdown' };
+
+    await expectCode(importNode(input), 'AUTHOR_TASK_MISSING');
+    await expectCode(importNode({ ...input, authoredWith: { task: task.id, revision: 2 } }), 'AUTHOR_TASK_STALE_REVISION');
+    expect((await db.node.findUniqueOrThrow({ where: { id: target.id } })).content).toBe('original');
+    expect(await db.nodeRevision.count({ where: { nodeId: target.id } })).toBe(0);
+
+    const stored = await importNode({ ...input, authoredWith: { task: task.id, revision: 1 } });
+    expect(stored.node).toMatchObject({ id: target.id, content: 'replacement', authoredByTask: task.id, authoredByRevision: 1 });
+  });
+
   it('re-import overwrites content, snapshots a NodeRevision, preserves the curated name', async () => {
     const created = await resolvers.Mutation.createNode(
       {},

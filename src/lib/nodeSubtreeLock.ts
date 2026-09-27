@@ -228,7 +228,7 @@ export async function lockAncestorsForCreate(
 
 /**
  * Batch form of {@link lockAncestorsForCreate} for a BULK insert of many nodes
- * (e.g. `replaceSubtree`, a git-graph sync). Dedupes the ancestor set across all
+ * (e.g. a git-graph sync; `replaceSubtree` was one until #454 retired it). Dedupes the ancestor set across all
  * `locs` and acquires each lock exactly once in a single sorted (root→leaf)
  * pass — the same consistent global order the single-loc helper uses, so a bulk
  * insert can't deadlock against a concurrent create/delete or another bulk

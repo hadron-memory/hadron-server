@@ -10,6 +10,7 @@ import { ensureChannelWithRoot, lockMemoryForChannelChange } from '../../lib/cha
 import { generateId } from '../../lib/id.js';
 import { acquireLockSet, ancestorLocs, lockAncestorsForCreate } from '../../lib/nodeSubtreeLock.js';
 import { moveNodeSubtree } from '../../lib/nodeSubtreeMove.js';
+import { lockMemoryConfigExclusive } from '../../lib/governedRole.js';
 import { deriveEdgeLoc } from '../../lib/edgeLoc.js';
 
 // ---------------------------------------------------------------------------
@@ -391,6 +392,69 @@ describe('syncGraphFromGithub', () => {
       content: 'old body', authorshipKind: 'TASK', authoredByTask: task.id,
       authoredByRevision: 1, authoredAt,
     });
+  });
+
+  it('requires current author-task frontmatter for a changed configured role', async () => {
+    const task = await db.node.create({
+      data: { id: generateId(), memoryId: dbGraphId, loc: 'author-task', name: 'Author task', isRunnable: true },
+    });
+    const config = await db.memoryConfig.create({ data: { id: generateId(), memoryId: dbGraphId } });
+    await db.nodeRoleRule.create({
+      data: { id: generateId(), configId: config.id, role: 'guide', authorTaskId: task.id, authorTaskRequired: true },
+    });
+    const row = await db.node.create({
+      data: { id: generateId(), memoryId: dbGraphId, loc: 'guided', name: 'Guided', role: 'guide', content: 'old body' },
+    });
+    const write = (claim?: { task: string; revision: number }) =>
+      db.$transaction((tx) => updateNodeFromGitSync(tx, row, { content: 'new body' }, undefined, dbGraphId, undefined, claim));
+    await expect(write()).rejects.toMatchObject({ extensions: { code: 'AUTHOR_TASK_MISSING' } });
+    await expect(write({ task: generateId(), revision: 1 })).rejects.toMatchObject({ extensions: { code: 'AUTHOR_TASK_WRONG_TASK' } });
+    await expect(write({ task: task.id, revision: 2 })).rejects.toMatchObject({ extensions: { code: 'AUTHOR_TASK_STALE_REVISION' } });
+    expect(await db.node.findUniqueOrThrow({ where: { id: row.id } })).toMatchObject({ content: 'old body', revSeq: 1 });
+    await write({ task: task.id, revision: 1 });
+    expect(await db.node.findUniqueOrThrow({ where: { id: row.id } })).toMatchObject({
+      content: 'new body', authorshipKind: 'TASK', authoredByTask: task.id, authoredByRevision: 1,
+    });
+  });
+
+  it('imports author-task assertions from legacy YAML and frontmatter without treating absent metadata as a new claim', async () => {
+    const task = await db.node.create({
+      data: { id: generateId(), memoryId: dbGraphId, loc: 'author-task', name: 'Author task', isRunnable: true },
+    });
+    const config = await db.memoryConfig.create({ data: { id: generateId(), memoryId: dbGraphId } });
+    await db.nodeRoleRule.create({
+      data: { id: generateId(), configId: config.id, role: 'guide', authorTaskId: task.id, authorTaskRequired: true },
+    });
+    const repo = join(mockSources, 'test-org', 'test/repo');
+    const legacy = join(repo, 'legacy');
+    writeNodeFiles(legacy, { name: 'Legacy', role: 'guide' }, 'legacy body');
+    expect((await syncGraphFromGithub(makeGraph())).error).toMatch(/requires authoredWith/);
+    expect(await db.node.count({ where: { memoryId: dbGraphId, loc: 'legacy' } })).toBe(0);
+
+    writeNodeFiles(legacy, { name: 'Legacy', role: 'guide', authoredWith: { task: task.id, revision: 1 } }, 'legacy body');
+    writeFrontmatterNode(join(repo, 'modern.md'), {
+      name: 'Modern', role: 'guide', authoredWith: { task: task.id, revision: 1 },
+    }, 'modern body');
+    expect((await syncGraphFromGithub(makeGraph())).error).toBeUndefined();
+    for (const loc of ['legacy', 'modern']) {
+      expect(await db.node.findFirstOrThrow({ where: { memoryId: dbGraphId, loc } })).toMatchObject({
+        role: 'guide', authorshipKind: 'TASK', authoredByTask: task.id, authoredByRevision: 1,
+      });
+    }
+    // A repo file predating the assertion field may be re-read unchanged;
+    // absence does not erase the existing verified stamp.
+    writeNodeFiles(legacy, { name: 'Legacy', role: 'guide' }, 'legacy body');
+    expect((await syncGraphFromGithub(makeGraph())).error).toBeUndefined();
+    expect(await db.node.findFirstOrThrow({ where: { memoryId: dbGraphId, loc: 'legacy' } }))
+      .toMatchObject({ authorshipKind: 'TASK', authoredByTask: task.id });
+
+    // A malformed claim reaches the transactional gate. Throwing in the
+    // loader would skip this file and let repo-wins cleanup delete its row.
+    writeFileSync(join(legacy, '.node', 'node.yaml'),
+      `id: ${generateId()}\nname: Legacy\nrole: guide\nauthoredWith:\n  task: ${task.id}\n  revision: bad\n`);
+    expect((await syncGraphFromGithub(makeGraph())).error).toMatch(/positive integer revision/);
+    expect(await db.node.findFirstOrThrow({ where: { memoryId: dbGraphId, loc: 'legacy' } }))
+      .toMatchObject({ authorshipKind: 'TASK', authoredByTask: task.id, content: 'legacy body' });
   });
 
   it('re-sync replaces old nodes with the new set', async () => {
@@ -1302,5 +1366,325 @@ describe('#1348 — objectType through git sync', () => {
     await sync();
     expect(await stored('r')).toEqual({ objectType: 'insight', role: 'review' });
     expect(await stored('s')).toEqual({ objectType: 'insight', role: 'review' });
+  });
+});
+
+describe('#1330 — strict sub-roles through git sync', () => {
+  const repoRoot = () => join(mockSources, 'test-org', 'test/repo');
+  const frontmatter = (loc: string, meta: Parameters<typeof writeFrontmatterNode>[1], body = 'Body.') =>
+    writeFrontmatterNode(join(repoRoot(), `${loc}.md`), meta, body);
+  const stored = (loc: string) =>
+    db.node.findFirst({ where: { loc, memoryId: dbGraphId }, select: { id: true, role: true, content: true } });
+  const rules = async (...rs: Array<{ role: string; strictSubRoles?: boolean }>) => {
+    const config = await db.memoryConfig.create({ data: { id: generateId(), memoryId: dbGraphId } });
+    for (const r of rs) await db.nodeRoleRule.create({ data: { id: generateId(), configId: config.id, ...r } });
+  };
+  const sync = async () => {
+    const result = await syncGraphFromGithub(makeGraph());
+    expect(result.error).toBeUndefined();
+    return result;
+  };
+
+  it('a file creating an undeclared sub-role is skipped and reported; the rest of the memory syncs', async () => {
+    await rules({ role: 'doc', strictSubRoles: true }, { role: 'doc.guide' });
+    frontmatter('bad', { name: 'Bad', role: 'doc.unknown' });
+    frontmatter('guide', { name: 'Guide', role: 'doc.guide' });
+    frontmatter('parent', { name: 'Parent', role: 'doc' });
+    frontmatter('other', { name: 'Other', role: 'notes.anything' });
+    frontmatter('plain', { name: 'Plain' });
+    const result = await sync();
+    expect(result.skippedUndeclaredRoles).toEqual([
+      { loc: 'bad', role: 'doc.unknown', strictParent: 'doc', code: 'ROLE_NOT_DECLARED' },
+    ]);
+    expect(await stored('bad')).toBeNull();
+    for (const loc of ['guide', 'parent', 'other', 'plain']) expect(await stored(loc)).not.toBeNull();
+    expect(result.writtenNodes!.map((n) => n.loc).sort()).toEqual(['guide', 'other', 'parent', 'plain']);
+  });
+
+  it('a file ASSIGNING an undeclared role to an existing row leaves that row exactly as it was, and the cleanup keeps it', async () => {
+    const id = generateId();
+    await db.node.create({ data: { id, memoryId: dbGraphId, loc: 'a', name: 'A', content: 'old', role: 'doc.legacy', ownerRepo: 'test/repo' } });
+    await rules({ role: 'doc', strictSubRoles: true });
+    frontmatter('a', { id, name: 'A', role: 'doc.other' }, 'new');
+    const result = await sync();
+    expect(result.skippedUndeclaredRoles).toEqual([expect.objectContaining({ loc: 'a', role: 'doc.other', strictParent: 'doc' })]);
+    expect(await stored('a')).toEqual({ id, role: 'doc.legacy', content: 'old' });
+  });
+
+  it('the same refusal on the LOC-KEYED path (file id unknown to this memory)', async () => {
+    const id = generateId();
+    await db.node.create({ data: { id, memoryId: dbGraphId, loc: 'a', name: 'A', content: 'old', role: 'doc.legacy', ownerRepo: 'test/repo' } });
+    await rules({ role: 'doc', strictSubRoles: true });
+    frontmatter('a', { name: 'A', role: 'doc.other' }, 'new');
+    const result = await sync();
+    expect(result.skippedUndeclaredRoles).toHaveLength(1);
+    expect(await stored('a')).toEqual({ id, role: 'doc.legacy', content: 'old' });
+  });
+
+  it('an ID-FIRST MOVE that assigns an undeclared role does not move the node', async () => {
+    const id = generateId();
+    await db.node.create({ data: { id, memoryId: dbGraphId, loc: 'old', name: 'N', content: 'x', ownerRepo: 'test/repo' } });
+    await rules({ role: 'doc', strictSubRoles: true });
+    frontmatter('new', { id, name: 'N', role: 'doc.unknown' });
+    const result = await sync();
+    expect(result.skippedUndeclaredRoles).toEqual([expect.objectContaining({ loc: 'new' })]);
+    expect(await db.node.findUniqueOrThrow({ where: { id } })).toMatchObject({ loc: 'old', role: null });
+  });
+
+  it('no retroactive effect: a file keeping a now-undeclared role still syncs its other changes', async () => {
+    const id = generateId();
+    await db.node.create({ data: { id, memoryId: dbGraphId, loc: 'a', name: 'A', content: 'old', role: 'doc.legacy', ownerRepo: 'test/repo' } });
+    await rules({ role: 'doc', strictSubRoles: true });
+    frontmatter('a', { id, name: 'A', role: 'doc.legacy' }, 'new');
+    const result = await sync();
+    expect(result.skippedUndeclaredRoles).toEqual([]);
+    expect(await stored('a')).toMatchObject({ role: 'doc.legacy', content: expect.stringContaining('new') });
+  });
+
+  it('exempt: a file whose node is runnable after the sync', async () => {
+    await rules({ role: 'doc', strictSubRoles: true });
+    frontmatter('t', { name: 'T', role: 'doc.task', isRunnable: true });
+    const result = await sync();
+    expect(result.skippedUndeclaredRoles).toEqual([]);
+    expect(await stored('t')).toMatchObject({ role: 'doc.task' });
+  });
+
+  it('a refused file declares no edges, and does not fail the sync over them', async () => {
+    await rules({ role: 'doc', strictSubRoles: true });
+    const bId = generateId();
+    mkdirSync(join(repoRoot(), 'a'), { recursive: true });
+    mkdirSync(join(repoRoot(), 'b'), { recursive: true });
+    writeNodeFiles(join(repoRoot(), 'a'), { name: 'a', role: 'doc.unknown', nodes: [{ id: bId, rel: 'uses' }] });
+    writeNodeFiles(join(repoRoot(), 'b'), { id: bId, name: 'b' });
+    const result = await sync();
+    expect(result.skippedUndeclaredRoles).toEqual([expect.objectContaining({ loc: 'a' })]);
+    expect(await stored('b')).not.toBeNull();
+    expect(await db.edge.count()).toBe(0);
+    expect(await db.pendingEdge.count()).toBe(0);
+  });
+
+  it('takes its row locks BEFORE the rulebook lock: a rule write holding a node the sync updates does not deadlock it', async () => {
+    await rules({ role: 'doc', strictSubRoles: true });
+    const zId = generateId();
+    await db.node.create({ data: { id: zId, memoryId: dbGraphId, loc: 'z', name: 'Z', content: 'old', ownerRepo: 'test/repo' } });
+    // The judged file sorts BEFORE the row the rule write holds, so a sync
+    // taking the rulebook lock at its first judgement would then wait on `z`
+    // while holding it.
+    frontmatter('a', { name: 'A', role: 'doc.unknown' });
+    frontmatter('z', { id: zId, name: 'Z' }, 'new');
+    let held!: () => void;
+    const holding = new Promise<void>((r) => (held = r));
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    // The shape of a rule write (#1400 / #1399): its referenced node FOR
+    // SHARE first, the memory's rulebook lock exclusively after.
+    const ruleWrite = db.$transaction(
+      async (tx) => {
+        await tx.$queryRaw`SELECT "id" FROM "nodes" WHERE "id" = ${zId} FOR SHARE`;
+        held();
+        await gate;
+        await lockMemoryConfigExclusive(tx, dbGraphId);
+      },
+      { timeout: 15_000 },
+    );
+    await holding;
+    const syncing = syncGraphFromGithub(makeGraph());
+    await waitForLockWaiters('transactionid', 1);
+    release();
+    await ruleWrite;
+    const result = await syncing;
+    expect(result.error).toBeUndefined();
+    expect(result.skippedUndeclaredRoles).toEqual([expect.objectContaining({ loc: 'a' })]);
+    expect(await stored('z')).toMatchObject({ content: expect.stringContaining('new') });
+  });
+
+  it('#1328 prelocks rows when a file omits role but edits a task-governed row', async () => {
+    const task = await db.node.create({
+      data: { id: generateId(), memoryId: dbGraphId, loc: 'task', name: 'Task', isRunnable: true },
+    });
+    const config = await db.memoryConfig.create({ data: { id: generateId(), memoryId: dbGraphId } });
+    await db.nodeRoleRule.create({
+      data: { id: generateId(), configId: config.id, role: 'guide', authorTaskId: task.id, authorTaskRequired: true },
+    });
+    const aId = generateId();
+    const zId = generateId();
+    await db.node.create({ data: { id: aId, memoryId: dbGraphId, loc: 'a', name: 'A', role: 'guide', content: 'old', ownerRepo: 'test/repo' } });
+    await db.node.create({ data: { id: zId, memoryId: dbGraphId, loc: 'z', name: 'Z', content: 'old', ownerRepo: 'test/repo' } });
+    // Neither file assigns a role. The first still needs the rulebook for its
+    // stored role's author task; the later row is held by a rule writer.
+    frontmatter('a', { id: aId, name: 'A', authoredWith: { task: task.id, revision: 1 } }, 'new');
+    frontmatter('z', { id: zId, name: 'Z' }, 'new');
+    let held!: () => void;
+    const holding = new Promise<void>((r) => (held = r));
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const ruleWrite = db.$transaction(
+      async (tx) => {
+        await tx.$queryRaw`SELECT "id" FROM "nodes" WHERE "id" = ${zId} FOR SHARE`;
+        held();
+        await gate;
+        await lockMemoryConfigExclusive(tx, dbGraphId);
+      },
+      { timeout: 15_000 },
+    );
+    await holding;
+    const syncing = syncGraphFromGithub(makeGraph());
+    await waitForLockWaiters('transactionid', 1);
+    release();
+    await ruleWrite;
+    const result = await syncing;
+    expect(result.error).toBeUndefined();
+    expect(await stored('a')).toMatchObject({ role: 'guide', content: expect.stringContaining('new') });
+    expect(await stored('z')).toMatchObject({ content: expect.stringContaining('new') });
+  });
+
+  it('a row inserted AFTER the up-front lock is left for the next sync, not deleted under the rulebook lock (#1411 review)', async () => {
+    await rules({ role: 'doc', strictSubRoles: true });
+    frontmatter('a', { name: 'A', role: 'doc.unknown' });
+    const release = <T,>() => {
+      let open!: (v: T) => void;
+      return { gate: new Promise<T>((r) => (open = r)), open };
+    };
+    // 1. Hold the rulebook lock so the sync stops right after its row scan.
+    const holdSignal = release<void>();
+    const holdGate = release<void>();
+    const holder = db.$transaction(async (tx) => {
+      await lockMemoryConfigExclusive(tx, dbGraphId);
+      holdSignal.open();
+      await holdGate.gate;
+    }, { timeout: 15_000 });
+    await holdSignal.gate;
+    const syncing = syncGraphFromGithub(makeGraph());
+    await waitForLockWaiters('advisory', 1);
+    // 2. A repo-owned row the cleanup would select, inserted after the scan.
+    const lateId = generateId();
+    await db.node.create({ data: { id: lateId, memoryId: dbGraphId, loc: 'late', name: 'Late', ownerRepo: 'test/repo' } });
+    // 3. A rule write: that row FOR SHARE, then the rulebook lock exclusively.
+    const ruleWrite = db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT "id" FROM "nodes" WHERE "id" = ${lateId} FOR SHARE`;
+      await lockMemoryConfigExclusive(tx, dbGraphId);
+    }, { timeout: 15_000 });
+    await waitForLockWaiters('advisory', 2);
+    holdGate.open();
+    await holder;
+    const [result] = await Promise.all([syncing, ruleWrite]);
+    expect(result.error).toBeUndefined();
+    expect(result.skippedUndeclaredRoles).toEqual([expect.objectContaining({ loc: 'a' })]);
+    expect(await db.node.findUnique({ where: { id: lateId } })).not.toBeNull();
+    // The next sync owns it from the start, and prunes it as usual.
+    await sync();
+    expect(await db.node.findUnique({ where: { id: lateId } })).toBeNull();
+  });
+
+  /**
+   * The late-row schedule: the sync scans and queues for the rulebook lock;
+   * then a row is created, a rule write holds it FOR SHARE and queues for the
+   * lock exclusively, and the first holder releases.
+   */
+  async function raceLateRow(createLate: () => Promise<string>) {
+    const signal = (() => { let open!: () => void; const gate = new Promise<void>((r) => (open = r)); return { gate, open }; });
+    const held = signal();
+    const done = signal();
+    const holder = db.$transaction(async (tx) => {
+      await lockMemoryConfigExclusive(tx, dbGraphId);
+      held.open();
+      await done.gate;
+    }, { timeout: 15_000 });
+    await held.gate;
+    const syncing = syncGraphFromGithub(makeGraph());
+    await waitForLockWaiters('advisory', 1);
+    const lateId = await createLate();
+    const ruleWrite = db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT "id" FROM "nodes" WHERE "id" = ${lateId} FOR SHARE`;
+      await lockMemoryConfigExclusive(tx, dbGraphId);
+    }, { timeout: 15_000 });
+    await waitForLockWaiters('advisory', 2);
+    done.open();
+    await holder;
+    const [result] = await Promise.all([syncing, ruleWrite]);
+    expect(result.error).toBeUndefined();
+    return { result, lateId };
+  }
+
+  it('a node CREATED at a file\'s root loc after the up-front lock defers that file to the next sync (@codex P2, #1411)', async () => {
+    await rules({ role: 'doc', strictSubRoles: true });
+    frontmatter('r', { name: 'R', role: 'doc.unknown' });
+    frontmatter('late', { name: 'Late' }, 'from-file');
+    const { result, lateId } = await raceLateRow(async () => {
+      const id = generateId();
+      await db.node.create({ data: { id, memoryId: dbGraphId, loc: 'late', name: 'Late', content: 'concurrent', ownerRepo: 'test/repo' } });
+      return id;
+    });
+    expect(result.deferredLateRows).toEqual([`late (node ${lateId})`]);
+    expect(result.writtenNodes!.map((n) => n.loc)).not.toContain('late');
+    expect(await stored('late')).toMatchObject({ id: lateId, content: 'concurrent' });
+    const next = await sync();
+    expect(next.deferredLateRows).toEqual([]);
+    expect(await stored('late')).toMatchObject({ id: lateId, content: expect.stringContaining('from-file') });
+  });
+
+  it('a MOVE into a loc whose occupant arrived after the up-front lock is deferred, and the mover is kept', async () => {
+    await rules({ role: 'doc', strictSubRoles: true });
+    const moverId = generateId();
+    await db.node.create({ data: { id: moverId, memoryId: dbGraphId, loc: 'old', name: 'M', content: 'x', ownerRepo: 'test/repo' } });
+    frontmatter('r', { name: 'R', role: 'doc.unknown' });
+    frontmatter('dest', { id: moverId, name: 'M' });
+    const { result, lateId } = await raceLateRow(async () => {
+      const id = generateId();
+      await db.node.create({ data: { id, memoryId: dbGraphId, loc: 'dest', name: 'Occupant', ownerRepo: 'test/repo' } });
+      return id;
+    });
+    expect(result.deferredLateRows).toEqual([`dest (node ${lateId})`]);
+    expect(await db.node.findUniqueOrThrow({ where: { id: moverId } })).toMatchObject({ loc: 'old', deletedAt: null });
+    expect(await db.node.findUniqueOrThrow({ where: { id: lateId } })).toMatchObject({ loc: 'dest' });
+    await sync();
+    expect(await db.node.findUniqueOrThrow({ where: { id: moverId } })).toMatchObject({ loc: 'dest' });
+  });
+
+  it('a node carrying the file\'s id that arrived after the up-front lock is deferred too (id-first path)', async () => {
+    await rules({ role: 'doc', strictSubRoles: true });
+    const fileId = generateId();
+    frontmatter('r', { name: 'R', role: 'doc.unknown' });
+    frontmatter('x', { id: fileId, name: 'X' }, 'from-file');
+    const { result } = await raceLateRow(async () => {
+      await db.node.create({ data: { id: fileId, memoryId: dbGraphId, loc: 'elsewhere', name: 'X', content: 'concurrent', ownerRepo: 'test/repo' } });
+      return fileId;
+    });
+    expect(result.deferredLateRows).toEqual([`x (node ${fileId})`]);
+    expect(await db.node.findUniqueOrThrow({ where: { id: fileId } })).toMatchObject({ loc: 'elsewhere', content: 'concurrent' });
+    await sync();
+    expect(await db.node.findUniqueOrThrow({ where: { id: fileId } })).toMatchObject({ loc: 'x' });
+  });
+
+  it('locks the memory\'s rule rows before the rulebook lock: a pruned node a rule references cannot deadlock a rule writer (SET NULL)', async () => {
+    const taskId = generateId();
+    await db.node.create({ data: { id: taskId, memoryId: dbGraphId, loc: 'gone', name: 'Gone', ownerRepo: 'test/repo' } });
+    const config = await db.memoryConfig.create({ data: { id: generateId(), memoryId: dbGraphId } });
+    const rule = await db.nodeRoleRule.create({
+      data: { id: generateId(), configId: config.id, role: 'doc', strictSubRoles: true, descriptionNodeId: taskId },
+    });
+    // No file for `gone`: the cleanup prunes it, and its FK sets the rule's
+    // descriptionNodeId to NULL.
+    // #1328 takes this lock even when no file assigns a role.
+    frontmatter('r', { name: 'R' });
+    let held!: () => void;
+    const holding = new Promise<void>((r) => (held = r));
+    let go!: () => void;
+    const gate = new Promise<void>((r) => (go = r));
+    // A rule writer's shape: its rule row FOR UPDATE, then the rulebook lock.
+    const ruleWrite = db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT "id" FROM "node_role_rules" WHERE "id" = ${rule.id} FOR UPDATE`;
+      held();
+      await gate;
+      await lockMemoryConfigExclusive(tx, dbGraphId);
+    }, { timeout: 15_000 });
+    await holding;
+    const syncing = syncGraphFromGithub(makeGraph());
+    await waitForLockWaiters('transactionid', 1);
+    go();
+    const [result] = await Promise.all([syncing, ruleWrite]);
+    expect(result.error).toBeUndefined();
+    expect(await db.node.findUnique({ where: { id: taskId } })).toBeNull();
+    expect((await db.nodeRoleRule.findUniqueOrThrow({ where: { id: rule.id } })).descriptionNodeId).toBeNull();
   });
 });
