@@ -144,7 +144,7 @@ async function canManageOwner(ctx: Context, owner: OwnerColumns): Promise<boolea
  * connection, refused with the pre-check's own answer. The same residual as
  * there: a revocation committing after this read and before commit still saves.
  */
-async function reassertManageOwner(
+export async function reassertManageOwner(
   ctx: Context,
   tx: Prisma.TransactionClient,
   owner: OwnerColumns,
@@ -213,7 +213,7 @@ async function resolveOwnerForWrite(ctx: Context, ownerType: TemplateOwnerType, 
 }
 
 /** Resolve a template ref (its id) the caller may MANAGE, or throw the missing-template answer. */
-async function managedTemplate(ctx: Context, ref: string): Promise<MemoryConfigTemplate> {
+export async function managedTemplate(ctx: Context, ref: string): Promise<MemoryConfigTemplate> {
   const t = await ctx.db.memoryConfigTemplate.findFirst({ where: { id: ref.trim(), deletedAt: null } });
   if (!t || !(await canManageOwner(ctx, t))) throw new MemoryConfigTemplateNotFoundError(ref);
   return t;
@@ -329,7 +329,7 @@ async function lockLiveOwner(tx: Prisma.TransactionClient, owner: OwnerColumns):
 }
 
 /** Lock a template's row for the rest of the transaction and read it, or null when it is gone. */
-async function lockTemplate(tx: Prisma.TransactionClient, id: string): Promise<MemoryConfigTemplate | null> {
+export async function lockTemplate(tx: Prisma.TransactionClient, id: string): Promise<MemoryConfigTemplate | null> {
   await tx.$queryRaw`SELECT 1 FROM "memory_config_templates" WHERE "id" = ${id} FOR UPDATE`;
   return tx.memoryConfigTemplate.findFirst({ where: { id, deletedAt: null } });
 }

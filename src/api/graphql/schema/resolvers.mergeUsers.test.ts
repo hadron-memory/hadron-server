@@ -445,7 +445,7 @@ describe('Mutation.mergeUsers — relationships', () => {
     ).toMatchObject({ role: 'READER', deletedAt: null });
     expect(await db.orgMember.count({ where: { userId: source.id } })).toBe(0);
     expect(await db.organization.findUniqueOrThrow({ where: { id: orgB.id } })).toMatchObject({
-      createdBy: source.id,
+      createdBy: target.id,
     });
 
     expect(
