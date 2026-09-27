@@ -6544,6 +6544,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
                   loc: toLoc,
                   name: newName,
                   memoryId: toMemory.id,
+                  ...clearNodeAuthorship(),
                   revisionContentHash: revisionStateHashRefreshMarker(),
                 },
               });

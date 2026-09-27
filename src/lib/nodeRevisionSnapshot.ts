@@ -20,6 +20,7 @@
 import { Prisma, type NodeAuthorshipKind } from '../generated/prisma/index.js';
 import type { PrismaClient } from '../generated/prisma/index.js';
 import { generateId } from './id.js';
+import { clearNodeAuthorship } from './nodeAuthorship.js';
 
 /**
  * The curated subset of Node fields every snapshot captures. On encrypted
@@ -229,7 +230,12 @@ export async function ensureCurrentNodeRevisionInTransaction(
   await createNodeRevision(
     tx,
     buildNodeRevisionSnapshot(
-      node,
+      // The old authored content is already gone: an out-of-band writer
+      // changed the live row without a predecessor snapshot. The reconciled
+      // state cannot truthfully inherit its old task/human stamp, either in
+      // this new revision or on the live row. Known structural writers keep
+      // their stamp by refreshing the fingerprint in their own transaction.
+      { ...node, ...clearNodeAuthorship() },
       { userId: null, info: RECONCILE_EDITOR_INFO },
       {
         revLabel: 'Reconciled state changed outside a revisioned writer (#1323)',
@@ -239,7 +245,9 @@ export async function ensureCurrentNodeRevisionInTransaction(
   );
   await tx.node.update({
     where: { id: node.id },
-    data: { revisionContentHash: actual },
+    // The fingerprint computed above included the stale stamp. Recompute it
+    // from the cleared live state, or the next read sees a second false drift.
+    data: { ...clearNodeAuthorship(), revisionContentHash: revisionStateHashRefreshMarker() },
   });
   return node.revSeq + 1;
 }
