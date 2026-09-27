@@ -131,6 +131,9 @@ const SKILL_PLAN_MAX_COLLISION_CENSUS_NODES = 50_000;
 // transfer or deserialization cost. Check JSON byte size in PostgreSQL before
 // fetching each page's properties.
 const SKILL_PLAN_MAX_COLLISION_CENSUS_BYTES = 32 * 1024 * 1024;
+// Selected metadata has the same arbitrary-JSON risk even when no declaration
+// exists for the requested host and the collision census never runs.
+const SKILL_PLAN_MAX_SELECTED_PROPERTIES_BYTES = SKILL_PLAN_MAX_COLLISION_CENSUS_BYTES;
 
 /**
  * The DISCOVERY predicate: a node carrying any declaration key at all.
@@ -606,12 +609,47 @@ async function planSkills(input: SkillPlanInput, ctx: Context, selectedRefs?: st
         revSeq: true,
     } as const;
     const { content: _content, ...declaredMetadataSelect } = declaredSelect;
-    const candidates = await ctx.db.node.findMany({
-      where: declaredWhere,
-      select: declaredMetadataSelect,
-      take: SKILL_PLAN_MAX_NODES + 1,
-      orderBy: [{ memoryId: 'asc' }, { loc: 'asc' }],
-    });
+    const candidateOrder = [{ memoryId: 'asc' }, { loc: 'asc' }] as const;
+    const candidates = selectedRefs === undefined
+      ? await ctx.db.node.findMany({
+          where: declaredWhere,
+          select: declaredMetadataSelect,
+          take: SKILL_PLAN_MAX_NODES + 1,
+          orderBy: [...candidateOrder],
+        })
+      : await ctx.db.$transaction(async (tx) => {
+          // A metadata-only Prisma select still transfers the entire JSON
+          // value. Read gated IDs first, check bytes in PostgreSQL, then read
+          // properties from the same snapshot so no row can grow past the cap
+          // between the check and deserialization.
+          const ids = await tx.node.findMany({
+            where: declaredWhere,
+            select: { id: true },
+            take: SKILL_PLAN_MAX_NODES + 1,
+            orderBy: [...candidateOrder],
+          });
+          if (ids.length === 0) return [];
+          if (ids.length > SKILL_PLAN_MAX_NODES) {
+            throw new GraphQLError(`selectedSkillFilePlan: more than ${SKILL_PLAN_MAX_NODES} nodes are in scope.`, {
+              extensions: { code: 'BAD_USER_INPUT' },
+            });
+          }
+          const candidateIds = ids.map((row) => row.id);
+          const sizes = await tx.$queryRaw<{ bytes: bigint }[]>`
+            SELECT COALESCE(SUM(octet_length(properties::text)), 0)::bigint AS bytes
+            FROM nodes WHERE id IN (${Prisma.join(candidateIds)})
+          `;
+          if ((sizes[0]?.bytes ?? 0n) > BigInt(SKILL_PLAN_MAX_SELECTED_PROPERTIES_BYTES)) {
+            throw new GraphQLError('selectedSkillFilePlan: selected task properties exceed the safe byte ceiling.', {
+              extensions: { code: 'BAD_USER_INPUT' },
+            });
+          }
+          return tx.node.findMany({
+            where: { AND: [declaredWhere, { id: { in: candidateIds } }] } as never,
+            select: declaredMetadataSelect,
+            orderBy: [...candidateOrder],
+          });
+        }, { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead });
     if (candidates.length > SKILL_PLAN_MAX_NODES) {
       throw new GraphQLError(
         `skillPlan: more than ${SKILL_PLAN_MAX_NODES} nodes are in scope. Narrow \`memories\`; this surface does not silently truncate.`,
