@@ -249,6 +249,42 @@ describe('locked vs unlocked writes', () => {
     expect(await db.nodeRevision.count({ where: { nodeId: initial.id } })).toBe(revisions);
   });
 
+  it('keeps a verified stamp on an identical encrypted UPSERT of a live row (authoritative branch)', async () => {
+    // `upsert` reaches writeNodeCore's authoritative snapshot branch for a live
+    // row, which diffs separately from the `update` path above. Its revision is
+    // unconditional by contract; the stamp must still survive unchanged plaintext.
+    const server = mcp(ownerAuth());
+    await server.callToolText('hadron_unlock_memory', { memoryUrn, passphrase: PASS });
+    const context = { db, roles: ['ADMIN'], userId: owner.id } as Context;
+    const initial = await db.node.findFirstOrThrow({ where: { memoryId, loc: 'secret-note' } });
+    const taskId = generateId();
+    await db.node.update({
+      where: { id: initial.id },
+      data: {
+        authorshipKind: 'TASK', authoredByTask: taskId, authoredByRevision: 1,
+        authoredAt: new Date('2026-09-26T20:00:00Z'),
+        revisionContentHash: revisionStateHashRefreshMarker(),
+      },
+    });
+
+    await writeNodeCore(
+      { memoryId, loc: 'secret-note', name: initial.name, content: 'the plaintext secret' },
+      context, 'upsert',
+    );
+    expect(await db.node.findUniqueOrThrow({ where: { id: initial.id } })).toMatchObject({
+      authorshipKind: 'TASK', authoredByTask: taskId, authoredByRevision: 1,
+    });
+
+    // Control: a real plaintext change through the same branch still clears.
+    await writeNodeCore(
+      { memoryId, loc: 'secret-note', name: initial.name, content: 'a different plaintext secret' },
+      context, 'upsert',
+    );
+    expect(await db.node.findUniqueOrThrow({ where: { id: initial.id } })).toMatchObject({
+      authorshipKind: null, authoredByTask: null, authoredByRevision: null,
+    });
+  });
+
   it('keeps authorship when an identical abstract only refreshes its derived hash', async () => {
     const server = mcp(ownerAuth());
     await server.callToolText('hadron_unlock_memory', { memoryUrn, passphrase: PASS });
