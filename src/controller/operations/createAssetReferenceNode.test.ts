@@ -109,6 +109,28 @@ describe('assetIdFromRef', () => {
 });
 
 describe('createAssetReferenceNode', () => {
+  it('does not replace an existing role-governed node at the requested reference loc', async () => {
+    await seedAsset();
+    const task = await db.node.create({
+      data: { id: generateId(), memoryId: memory.id, loc: 'tasks:author', name: 'Author', isRunnable: true },
+    });
+    const config = await db.memoryConfig.create({ data: { id: generateId(), memoryId: memory.id } });
+    await db.nodeRoleRule.create({
+      data: { id: generateId(), configId: config.id, role: 'guide', authorTaskId: task.id, authorTaskRequired: true },
+    });
+    const target = await db.node.create({
+      data: { id: generateId(), memoryId: memory.id, loc: 'files:plan', name: 'Guide', role: 'guide', content: 'original' },
+    });
+
+    await expect(createAssetReferenceNode(
+      db, callerFor(user.id), ctxFor(user.id),
+      { assetRef: assetId, nodeUrn: `hrn:node:${org.urn}:docs:files:plan` },
+    )).rejects.toMatchObject({ extensions: { code: 'NodeLocConflictError' } });
+    expect(await db.node.findUniqueOrThrow({ where: { id: target.id } }))
+      .toMatchObject({ content: 'original', role: 'guide', nodeType: 'info' });
+    expect(await db.nodeRevision.count({ where: { nodeId: target.id } })).toBe(0);
+  });
+
   it('creates a reference node carrying the asset pointer', async () => {
     await seedAsset();
     const node = await createAssetReferenceNode(
