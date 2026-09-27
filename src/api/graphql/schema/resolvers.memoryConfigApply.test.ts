@@ -307,4 +307,22 @@ describe('apply under concurrency (#1399 review)', () => {
     expect(code(await pending)).toBe('CONFLICT');
     expect((await rulesOf(mem.id)).map((x) => x.role)).toEqual(['notes', 'spec']);
   });
+
+  it('no cycle with createNodeRoleRule on an EXISTING role: its insert fails at once on the committed row, whatever holds it (#1399 review)', async () => {
+    await gql(as(orgAdmin), CREATE_RULE, { m: mem.id, i: { role: 'spec' } });
+    const rule = (await rulesOf(mem.id))[0];
+    // Apply's position: the existing rule row held FOR UPDATE, uncommitted.
+    const h = holder(async (tx) => {
+      await tx.$queryRaw`SELECT 1 FROM "node_role_rules" WHERE "id" = ${rule.id} FOR UPDATE`;
+    });
+    await h.holding;
+    // A unique-index insert conflicts with the COMMITTED row immediately; a
+    // row lock on it makes the insert wait for nothing. So the create answers
+    // while the holder still holds, with no wait to join a cycle through.
+    const started = Date.now();
+    const r = await gql(as(orgAdmin), CREATE_RULE, { m: mem.id, i: { role: 'spec' } });
+    expect(code(r)).toBe('NODE_ROLE_RULE_EXISTS');
+    expect(Date.now() - started).toBeLessThan(5_000);
+    await h.release();
+  });
 });
