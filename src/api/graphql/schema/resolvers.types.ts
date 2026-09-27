@@ -63,6 +63,7 @@ import {
   assetUrn,
   resolveAppTeamSpaceMemoryIds,
   getAccessibleMemoryIds,
+  STORED_NODE_CONTENT,
 } from './resolvers.helpers.js';
 import { getMemberOrgIds } from '../../../lib/auth/memberOrgIds.js';
 import { publicReadableMemoryWhere } from '../../../lib/orgDiscoverability.js';
@@ -424,7 +425,12 @@ async function reconciledNodeForParent(
     if (!current) return null;
     const key = sessionKeyCache.getByMemoryId(current.memoryId);
     if (key) decryptNodeFieldsWithKey(current, key);
-    return revisionStateMatchesWithoutAuthorship(n, current) ? current : null;
+    // Verify against what was STORED: a templated read hands field resolvers
+    // rendered `content`, which would never match the row.
+    const stored = STORED_NODE_CONTENT in n
+      ? { ...n, content: (n as { [STORED_NODE_CONTENT]?: string | null })[STORED_NODE_CONTENT] ?? null }
+      : n;
+    return revisionStateMatchesWithoutAuthorship(stored, current) ? current : null;
   });
   cache.set(n, pending);
   return pending;

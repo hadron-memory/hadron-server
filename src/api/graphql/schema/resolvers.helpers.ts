@@ -64,6 +64,16 @@ import {
   type PrismaClient,
 } from '../../../generated/prisma/index.js';
 
+/**
+ * The STORED (uncompiled) content of a Node whose `content` a read resolver
+ * replaced with rendered Mustache output (`node(ref:)` / `nextNode` without
+ * `raw`). Field resolvers that verify the parent against the database —
+ * `Node.authorship`'s and `Node.revision`'s reconcile — must compare stored
+ * state, not presentation. A Symbol key is never serialized by GraphQL, so the
+ * wire shape is unchanged (#1326 review, Codex on #1397 `138e8185`).
+ */
+export const STORED_NODE_CONTENT: unique symbol = Symbol('storedNodeContent');
+
 export interface Context {
   db: PrismaClient;
   /**

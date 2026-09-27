@@ -135,6 +135,29 @@ describe('#1326 content provenance reads', () => {
     });
   });
 
+  it('verifies a TEMPLATED node against its stored content, so default reads keep authorship', async () => {
+    // node(ref:) without `raw` hands field resolvers rendered Mustache output.
+    // Reconciliation must compare the STORED template, or every stamped
+    // templated node reads as unattributed (Codex on #1397 138e8185).
+    await db.node.update({
+      where: { id: nodeId },
+      data: {
+        content: 'Hello {{who}}', data: { who: 'world' },
+        revisionContentHash: revisionStateHashRefreshMarker(),
+      },
+    });
+    const parent = await resolvers.Query.node(null, { ref: nodeId }, reader());
+    expect(parent?.content).toBe('Hello world');
+    expect(await typeResolvers.Node.authorship(parent as never, null, reader())).toMatchObject({
+      kind: 'TASK', authoredAt: at,
+    });
+    const raw = await resolvers.Query.node(null, { ref: nodeId, raw: true }, reader());
+    expect(raw?.content).toBe('Hello {{who}}');
+    expect(await typeResolvers.Node.authorship(raw as never, null, reader())).toMatchObject({ kind: 'TASK' });
+    // The stored template never reaches the wire: symbol keys do not serialize.
+    expect(JSON.stringify(parent)).not.toContain('{{who}}');
+  });
+
   it('keeps a task stamp and creates no revision for an identical save', async () => {
     const memory = await db.memory.findUniqueOrThrow({ where: { id: nodeMemoryId } });
     await db.orgMember.update({
