@@ -267,6 +267,17 @@ describe('#1398 — model attribution on worklog milestones', () => {
     }
   });
 
+  it('the worklog-model capability is advertised, with client-detection guidance (#1401)', async () => {
+    // Advertisement: the token is in the surface capabilities and renders in
+    // server_info, so a client can gate an explicit model report on it.
+    const srv = createTestableMcpServer({ userId: contrib.id, appId: app.id, roles: ['READER'], clientId: 'x' } as never);
+    const info = await srv.callToolText('hadron_server_info', {});
+    expect(info).toContain('worklog-model');
+    // Detection guidance: the tool description itself tells a lagging client
+    // what a dropped argument would do.
+    expect(srv.toolDescription('hadron_record_work')).toContain('worklog-model');
+  });
+
   it('MCP parity: hadron_record_work takes model; hadron_team_work_items renders it', async () => {
     const auth: AuthContext = { userId: contrib.id, appId: app.id, roles: ['READER'], clientId: `user:${contrib.id}` };
     const srv = createTestableMcpServer(auth);
