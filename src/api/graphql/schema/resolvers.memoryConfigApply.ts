@@ -129,6 +129,14 @@ export async function applyMemoryConfigTemplate(
       // The template row under a SHARE lock: its rules cannot change until we
       // commit (an update takes it FOR UPDATE), while two applies of the same
       // template proceed side by side.
+      // The TARGET memory first, FOR KEY SHARE (#1399 review): the config row
+      // apply may create references it, so a concurrent hard delete (account
+      // deletion removes a user's memories before their templates) either
+      // finishes first and we answer MEMORY_NOT_FOUND, or waits for us.
+      // Taken before the template lock, so the two can't form a cycle.
+      const target = await tx.$queryRaw<Array<{ id: string }>>`
+        SELECT id FROM "memories" WHERE "id" = ${memory.id} AND "deleted_at" IS NULL FOR KEY SHARE`;
+      if (!target[0]) throw new MemoryNotFoundError(args.memoryRef);
       await tx.$queryRaw`SELECT 1 FROM "memory_config_templates" WHERE "id" = ${template.id} FOR SHARE`;
       const live = await tx.memoryConfigTemplate.findFirst({ where: { id: template.id, deletedAt: null } });
       if (!live) throw notFoundTemplate();

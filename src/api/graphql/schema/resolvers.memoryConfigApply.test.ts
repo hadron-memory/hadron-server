@@ -400,4 +400,18 @@ describe('apply under concurrency (#1399 review)', () => {
     expect(code(r)).toBe('MEMORY_CONFIG_TEMPLATE_NOT_FOUND');
     expect(JSON.stringify(r.errors)).not.toContain('currentRevision');
   });
+
+  it('the target memory is locked first: a concurrent hard delete ends in MEMORY_NOT_FOUND, not a foreign-key error (#1399 review)', async () => {
+    const t = await tpl(as(orgAdmin), 'ORGANIZATION', org.id, { name: 'base', rules: [{ role: 'spec' }] });
+    // A deletion in flight (as account deletion does): holds the memory row, then removes it.
+    const h = holder(async (tx) => {
+      await tx.$queryRaw`SELECT 1 FROM "memories" WHERE "id" = ${mem.id} FOR UPDATE`;
+      await tx.memory.delete({ where: { id: mem.id } });
+    });
+    await h.holding;
+    const pending = apply(as(orgAdmin), t.id, mem.id);
+    await waitForLockWaiters(db);
+    await h.release();
+    expect(code(await pending)).toBe('MEMORY_NOT_FOUND');
+  });
 });
