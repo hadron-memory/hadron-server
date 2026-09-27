@@ -4048,6 +4048,13 @@ export const typeDefs = `#graphql
   is create-only — a live node at (memoryId, loc) rejects with
   NodeLocConflictError (spec 039 Phase 0 D1/D4).
   """
+  input AuthoredWithInput {
+    "Stable Node.id of the author task. The server checks its current revision."
+    task: ID!
+    "The task's current Node.revision when this content was authored."
+    revision: Int!
+  }
+
   input CreateNodeInput {
     "Forced PK (importer/sync use case, e.g. a stable UUIDv7). Only ever a create-id here — never a selector (D2). Omit to mint."
     id: String
@@ -4072,6 +4079,8 @@ export const typeDefs = `#graphql
     generic createNode refuses it.
     """
     role: String
+    "Required when the applicable enabled role rule names an author task."
+    authoredWith: AuthoredWithInput
     alias: String
     description: String
     "Paragraph-length summary of this node — see Node.abstract for the surfacing contract. Optional. Empty + whitespace-only normalize to null. Cap is 2000 characters."
@@ -4128,6 +4137,8 @@ export const typeDefs = `#graphql
     ALREADY carries one: the gate reads the resulting state, not the change.
     """
     role: String
+    "Required for an authored change governed by an author task."
+    authoredWith: AuthoredWithInput
     alias: String
     description: String
     "Paragraph-length summary of this node — see Node.abstract for the surfacing contract. Omit to preserve; null to clear; string to replace. Empty + whitespace-only normalize to null. Cap is 2000 characters."

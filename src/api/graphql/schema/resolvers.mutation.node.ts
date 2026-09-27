@@ -641,6 +641,7 @@ export async function writeNodeCore(
       // Tags need the serialized form for a faithful compare; other input
       // fields map 1:1 onto node columns.
       const suppliedForDiff: Record<string, unknown> = { ...input };
+      delete suppliedForDiff.authoredWith;
       if (input.tags !== undefined) {
         suppliedForDiff.tags = serializeTags(input.tags ?? []);
       }
@@ -667,6 +668,7 @@ export async function writeNodeCore(
         edges: _edges,
         tags: _tags,
         reason: _reason,
+        authoredWith: _authoredWith,
         ...nodeFields
       } = input;
       const createdBy = ctx.userId ?? ctx.clientId ?? null;
@@ -1035,18 +1037,21 @@ export async function writeNodeCore(
 
             // #1330 — H1 strict sub-roles, judged on the locked row: a role the
             // write assigns must be declared under a strict parent.
-            await assertRoleDeclaredForWrite(
+            const changes = diffNodeChanges(current, suppliedForDiff);
+            const authoredChange = authoredContentChanged(changes);
+            const verifiedAuthorship = await assertRoleDeclaredForWrite(
               tx,
               input.memoryId,
               {
                 role: input.role === undefined ? current.role : input.role,
                 priorRole: current.role,
                 runnableAfter: mergedGovernedState(current, { role: input.role, isRunnable: input.isRunnable }).isRunnable,
+                authoredChange,
+                authoredWith: input.authoredWith,
               },
-              { platformWrite: opts?.platformWrite },
+              { platformWrite: opts?.platformWrite, carryAuthorship: !!opts?.copiedAuthorship },
             );
 
-            const changes = diffNodeChanges(current, suppliedForDiff);
             const changesUnversionedField =
               input.ownerRepo !== undefined && input.ownerRepo !== current.ownerRepo;
             // ownerRepo deliberately remains outside restorable node history,
@@ -1102,7 +1107,7 @@ export async function writeNodeCore(
               ...updatePayload,
               // The snapshot above keeps the old author. The new live content
               // has no verified author until the attestation/human gates land.
-              ...(authoredContentChanged(changes) ? clearNodeAuthorship() : {}),
+              ...(authoredChange ? (verifiedAuthorship ?? clearNodeAuthorship()) : {}),
               revisionContentHash: revisionStateHashRefreshMarker(),
             } as Prisma.NodeUncheckedUpdateInput;
 
@@ -1283,15 +1288,19 @@ export async function writeNodeCore(
 
             // #1330 — H1 strict sub-roles, against the AUTHORITATIVE row: a
             // resurrection keeps the tombstone's role unless the write names one.
-            await assertRoleDeclaredForWrite(
+            const authoredChange = mode === 'create' || !authoritative
+              || authoredContentChanged(diffNodeChanges(authoritative, suppliedForDiff));
+            const verifiedAuthorship = await assertRoleDeclaredForWrite(
               tx,
               input.memoryId,
               {
                 role: input.role === undefined ? (authoritative?.role ?? null) : input.role,
                 priorRole: authoritative?.role ?? null,
                 runnableAfter: mergedGovernedState(authoritative, { role: input.role, isRunnable: input.isRunnable }).isRunnable,
+                authoredChange,
+                authoredWith: input.authoredWith,
               },
-              { platformWrite: opts?.platformWrite },
+              { platformWrite: opts?.platformWrite, carryAuthorship: !!opts?.copiedAuthorship },
             );
 
             // #1183 — resurrect from the AUTHORITATIVE row, not the stale
@@ -1305,10 +1314,13 @@ export async function writeNodeCore(
             // overrides the same way (src/mcp/server.ts).
             const upserted = await tx.node.upsert({
               ...upsertArgs,
+              create: { ...upsertArgs.create, ...(verifiedAuthorship ?? {}) },
               update: {
                 ...upsertArgs.update,
                 ...(opts?.copiedAuthorship
                   ? carryNodeAuthorship(opts.copiedAuthorship)
+                  : verifiedAuthorship
+                    ? verifiedAuthorship
                   : authoritative && (mode === 'create' || authoredContentChanged(diffNodeChanges(authoritative, suppliedForDiff)))
                     ? clearNodeAuthorship() : {}),
                 revisionContentHash: revisionStateHashRefreshMarker(),

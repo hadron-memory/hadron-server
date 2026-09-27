@@ -2937,6 +2937,8 @@ export interface NodeInput {
    * inert. Omit preserves on update; null clears.
    */
   role?: string | null;
+  /** Assertion checked against the applicable author task in the write transaction. */
+  authoredWith?: { task: string; revision: number } | null;
   loc: string;
   name: string;
   alias?: string;

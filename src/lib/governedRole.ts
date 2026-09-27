@@ -66,6 +66,7 @@
 
 import { GraphQLError } from 'graphql';
 import type { NodeRoleRule, Prisma, PrismaClient } from '../generated/prisma/index.js';
+import type { NodeAuthorshipStamp } from './nodeAuthorship.js';
 
 /** The closed governed subset of `Node.role` plus the capability-gated kind. */
 export type GovernedKind = 'task' | 'review' | 'spec';
@@ -410,6 +411,29 @@ export class RoleNotDeclaredError extends GraphQLError {
   }
 }
 
+export interface AuthoredWithTask {
+  task: string;
+  revision: number;
+}
+
+export class AuthorTaskAttestationError extends GraphQLError {
+  constructor(
+    public readonly reason: 'MISSING' | 'WRONG_TASK' | 'STALE_REVISION' | 'BROKEN_TASK' | 'RULE_CHANGED' | 'CONFLICTING_TASKS',
+    role: string,
+  ) {
+    const messages = {
+      MISSING: `Role "${role}" requires authoredWith { task: Node.id, revision: current task revision }.`,
+      WRONG_TASK: `The authoredWith task does not match the author task configured for role "${role}". Re-read the role rule and retry.`,
+      STALE_REVISION: `The authoredWith revision is no longer the current author-task revision for role "${role}". Re-read the task and retry.`,
+      BROKEN_TASK: `The author task configured for role "${role}" is unavailable or no longer runnable. Ask a memory manager to repair the rule.`,
+      RULE_CHANGED: `The author-task rule for role "${role}" changed during this write. Re-read the rule and retry.`,
+      CONFLICTING_TASKS: `This role change crosses two different required author tasks. Split it into separately attested writes.`,
+    };
+    super(messages[reason], { extensions: { code: `AUTHOR_TASK_${reason}`, role } });
+    this.name = 'AuthorTaskAttestationError';
+  }
+}
+
 /**
  * #1330 — the H1 strict-sub-role refusal at the shared write boundary, called
  * by `writeNodeCore` inside its write transaction.
@@ -422,7 +446,7 @@ export class RoleNotDeclaredError extends GraphQLError {
  * Exempt: a node that is runnable after the write, and a platform write, which
  * only server code can claim (a function argument, never client input).
  *
- * The memory's config lock is taken SHARED first (`lockMemoryConfigShared`).
+ * Candidate task rows are locked before the memory's SHARED config lock.
  * Every rule write takes it EXCLUSIVELY, including the one that first
  * materializes the config, so a concurrent strictness change serializes
  * against this check rather than racing it. That holds even when the memory
@@ -431,15 +455,81 @@ export class RoleNotDeclaredError extends GraphQLError {
 export async function assertRoleDeclaredForWrite(
   tx: Prisma.TransactionClient,
   memoryId: string,
-  write: { role: string | null | undefined; priorRole: string | null | undefined; runnableAfter: boolean | null | undefined },
-  opts: { platformWrite?: boolean } = {},
-): Promise<void> {
+  write: {
+    role: string | null | undefined;
+    priorRole: string | null | undefined;
+    runnableAfter: boolean | null | undefined;
+    /** Only an authored content change (or a create) needs a new stamp. */
+    authoredChange?: boolean;
+    authoredWith?: AuthoredWithTask | null;
+  },
+  opts: { platformWrite?: boolean; carryAuthorship?: boolean } = {},
+): Promise<NodeAuthorshipStamp | null> {
   const role = write.role;
-  if (!role || role === (write.priorRole ?? null)) return;
-  if (write.runnableAfter === true || opts.platformWrite === true) return;
+  const judgeDeclaration = !!role && role !== (write.priorRole ?? null)
+    && write.runnableAfter !== true && opts.platformWrite !== true;
+  const authoredRole = role || write.priorRole || '';
+  const rolesToCheck = [...new Set([write.priorRole, role].filter((r): r is string => !!r))];
+  const judgeAuthorTask = write.authoredChange === true && rolesToCheck.length > 0 && opts.carryAuthorship !== true;
+  if (!judgeDeclaration && !judgeAuthorTask) return null;
+
+  // Lock a candidate task BEFORE the rulebook lock. Task edits hold their
+  // node row FOR UPDATE before reaching this gate; reversing these two locks
+  // would cycle against a concurrent task edit that also assigns a role.
+  // The rulebook is re-read under its shared lock below. If it changed which
+  // task applies while we waited, refuse and let the caller retry in a new tx.
+  const before = new Map<string, string | null>();
+  if (judgeAuthorTask) {
+    for (const checkedRole of rolesToCheck) {
+      const resolution = await resolveMemoryNodeRoleRule(tx, memoryId, checkedRole);
+      before.set(checkedRole, resolution.kind === 'RULE' ? resolution.rule.authorTaskId : null);
+    }
+  }
+  const candidateTaskIds = [...new Set([...before.values()].filter((id): id is string => !!id))].sort();
+  for (const candidateTaskId of candidateTaskIds) {
+    await tx.$queryRaw`SELECT "id" FROM "nodes" WHERE "id" = ${candidateTaskId} FOR SHARE`;
+  }
   await lockMemoryConfigShared(tx, memoryId);
-  const resolution = await resolveMemoryNodeRoleRule(tx, memoryId, role);
-  if (resolution.kind === 'UNDECLARED_UNDER_STRICT') throw new RoleNotDeclaredError(role, resolution.ancestor.role);
+  if (judgeDeclaration) {
+    const resolution = await resolveMemoryNodeRoleRule(tx, memoryId, role);
+    if (resolution.kind === 'UNDECLARED_UNDER_STRICT') throw new RoleNotDeclaredError(role!, resolution.ancestor.role);
+  }
+  if (!judgeAuthorTask) return null;
+  const required: NodeRoleRule[] = [];
+  for (const checkedRole of rolesToCheck) {
+    const current = await resolveMemoryNodeRoleRule(tx, memoryId, checkedRole);
+    const rule = current.kind === 'RULE' ? current.rule : null;
+    if ((rule?.authorTaskId ?? null) !== before.get(checkedRole)) {
+      throw new AuthorTaskAttestationError('RULE_CHANGED', checkedRole);
+    }
+    if (rule?.authorTaskRequired || rule?.authorTaskId) required.push(rule);
+  }
+  if (required.length === 0) return null;
+  if (required.some((rule) => !rule.authorTaskId)) throw new AuthorTaskAttestationError('BROKEN_TASK', authoredRole);
+  const requiredTaskIds = [...new Set(required.map((rule) => rule.authorTaskId))];
+  if (requiredTaskIds.length > 1) throw new AuthorTaskAttestationError('CONFLICTING_TASKS', authoredRole);
+  const requiredTaskId = requiredTaskIds[0]!;
+  if (!write.authoredWith) throw new AuthorTaskAttestationError('MISSING', authoredRole);
+  if (write.authoredWith.task !== requiredTaskId) {
+    throw new AuthorTaskAttestationError('WRONG_TASK', authoredRole);
+  }
+  const task = await tx.node.findUnique({
+    where: { id: requiredTaskId },
+    select: { id: true, revSeq: true, isRunnable: true, deletedAt: true },
+  });
+  if (!task || task.deletedAt || task.isRunnable !== true) {
+    throw new AuthorTaskAttestationError('BROKEN_TASK', authoredRole);
+  }
+  if (!Number.isInteger(write.authoredWith.revision) || write.authoredWith.revision !== task.revSeq) {
+    throw new AuthorTaskAttestationError('STALE_REVISION', authoredRole);
+  }
+  return {
+    authorshipKind: 'TASK',
+    authoredByTask: task.id,
+    authoredByRevision: task.revSeq,
+    authoredByHuman: null,
+    authoredAt: new Date(),
+  };
 }
 
 export class RoleGovernedError extends GraphQLError {

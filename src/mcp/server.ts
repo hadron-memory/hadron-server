@@ -5,6 +5,7 @@ import {
   assertGovernedWrite,
   assertRoleDeclaredForWrite,
   RoleNotDeclaredError,
+  AuthorTaskAttestationError,
   governedKindsOf,
   roleIsOrDescendsFrom,
   type GovernedKind,
@@ -4628,6 +4629,7 @@ export function createMcpServerInstance(
       objectType: z.string().optional().describe('#725 — collection this node belongs to (the domain-object discriminator, e.g. "competitor" / "insight"), orthogonal to nodeType. On a memory with a property schema, it MUST name a declared collection and the node\'s properties are validated against it; free-form on an unschema\'d memory. Omit for an ordinary node.'),
       isRunnable: z.boolean().optional().describe('#1201 — REFUSED on this tool if true: a write producing a runnable node must go through hadron_create_task, because authoring something the platform will EXECUTE is not the same act as writing prose. Accepted only as false/omitted (the default). Independent of nodeType — a runnable node may carry any nodeType.'),
       role: z.string().optional().describe('#1201/#1322 — what this node is FOR (open string). NOT nodeType (the platform-kind axis) and NOT objectType (the collection discriminator); role does not affect default ranking, though hadron_find_nodes can filter by its dotted family. Most values are inert, but the GOVERNED families — "review" / "review.*" and "spec" / "spec.*" — are refused on this tool. Use hadron_create_review for a review; a spec is authored with the `hadron spec` CLI, its only authoring surface. The same applies to isRunnable — this tool cannot create a runnable node; use hadron_create_task.'),
+      authoredWith: z.object({ task: z.string(), revision: z.number().int().positive() }).optional().describe('For a role governed by an author task: its stable Node.id and current revision. The server verifies both in the write transaction.'),
       description: z.string().optional().describe('Short description'),
       abstract: z.string().optional().describe('Paragraph-length summary (max 2000 chars). Opt-in on hadron_get_node via the contentScope parameter. (hadron_find_nodes preview surfacing of abstract ships in spec 031 US2 — not yet live.) Empty + whitespace-only values normalize to null. Spec 031.'),
       content: z.string().optional().describe('Markdown content'),
@@ -4645,7 +4647,7 @@ export function createMcpServerInstance(
         isRunnable: z.boolean().optional().describe('Whether this edge can be run/executed (task/conversation flows)'),
       })).optional().describe('Outgoing edges (replaces the full set on the source node)'),
     },
-    async ({ urn: rawUrn, name, nodeType, objectType, isRunnable, role, description, abstract, content, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges }) => {
+    async ({ urn: rawUrn, name, nodeType, objectType, isRunnable, role, authoredWith, description, abstract, content, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges }) => {
       // Spec 022: enforce qualification at the API boundary. Relative-form
       // URNs (e.g., `review:sort-imports` without org+memory) reject here
       // before any DB lookup runs.
@@ -5075,19 +5077,22 @@ export function createMcpServerInstance(
           // sync) could change the tombstone's role in between, and a stale
           // prior role would make an undeclared one read as unchanged (#1400
           // review). A refusal rolls the snapshot back with everything else.
-          await assertRoleDeclaredForWrite(tx, memoryId, {
+          const verifiedAuthorship = await assertRoleDeclaredForWrite(tx, memoryId, {
             role: role === undefined ? (pre?.role ?? null) : role,
             priorRole: pre?.role ?? null,
             runnableAfter: mergedGovernedState(pre, { role, isRunnable }).isRunnable,
+            authoredChange: true,
+            authoredWith,
           });
           const written = await tx.node.upsert({
             ...upsertArgs,
+            create: { ...upsertArgs.create, ...(verifiedAuthorship ?? {}) },
             // Resurrect (#543) on the authoritative row, not the stale probe: a
             // tombstone that appeared after it would otherwise stay flagged
             // deleted while taking the new content.
             update: {
               ...upsertArgs.update,
-              ...(pre ? clearNodeAuthorship() : {}),
+              ...(pre ? (verifiedAuthorship ?? clearNodeAuthorship()) : {}),
               ...(pre?.deletedAt ? { deletedAt: null, deletedBy: null } : {}),
             } as any,
           });
@@ -5108,6 +5113,7 @@ export function createMcpServerInstance(
           return textResult(`Node already exists at "${rawUrn}" — use hadron_update_node.`);
         }
         if (e instanceof RoleNotDeclaredError) return textResult(`[role_not_declared] ${e.message}`);
+        if (e instanceof AuthorTaskAttestationError) return textResult(`[${String(e.extensions.code).toLowerCase()}] ${e.message}`);
         if (e instanceof InlineEdgeEndpointError) return textResult(e.message);
         throw e;
       }
@@ -5168,6 +5174,7 @@ export function createMcpServerInstance(
       objectType: z.string().optional().describe('#725 — collection this node belongs to (e.g. "competitor" / "insight"), orthogonal to nodeType. On a schema-governed memory it must name a declared collection and the resulting properties are validated against it. Omit to preserve.'),
       isRunnable: z.boolean().optional().describe('#1201 — REFUSED on this tool: making a node runnable, and RETIRING a runnable one, both go through hadron_update_task. Editing a node that is already runnable is refused here too, whatever this field says, because the result is still a runnable node. Omit to preserve. Independent of nodeType — retyping the node never changes this flag.'),
       role: z.string().nullable().optional().describe('#1201/#1322 — what this node is FOR (open string). NOT nodeType and NOT objectType. Omit to preserve; null to clear. GOVERNED families ("review" / "review.*", "spec" / "spec.*") are refused here — use hadron_update_review, or the `hadron spec` CLI for a spec — and so is EDITING a node that already carries one — the gate reads the resulting state, not the change — because a governed node must not be rewritable through the generic surface.'),
+      authoredWith: z.object({ task: z.string(), revision: z.number().int().positive() }).optional().describe('For an authored change governed by an author task: its stable Node.id and current revision.'),
       description: z.string().optional().describe('New short description'),
       abstract: z.string().nullable().optional().describe('New paragraph-length summary (max 2000 chars). Pass `null` to clear; omit to preserve. Empty + whitespace-only normalize to null. Surfaced on hadron_get_node via contentScope; hadron_find_nodes preview surfacing ships in spec 031 US2. STALENESS: the abstract is fingerprinted against the content AS OF THIS CALL, so passing `abstract` and `content` TOGETHER keeps them in sync and needs no ordering. If you instead change `content` in a LATER call, this abstract is marked `abstract-stale` on read until you re-save it (re-sending the identical text is enough) or assert `abstractStillAccurate`. It also arms for an abstract that was NEVER fingerprinted — one saved against an empty node, where a body arrived later (#1128). Read the ABSENCE of the marker narrowly: it means "checked against this exact content" ONLY on a read that could have shown it — `contentScope` of `abstract` or `all`, on a memory that is unencrypted or unlocked. Under the default `content` scope, or on a locked memory, no marker is emitted either way and its absence says nothing at all. Spec 031/032.'),
       content: z.string().nullable().optional().describe('New markdown content. Pass `null` to clear; omit to preserve. Spec 032 widened the schema from string-only to allow null per the consistent partial-update convention; clearing content interacts with abstractOriginHash maintenance (FR-006/FR-007). Changing content WITHOUT also passing `abstract` arms the `abstract-stale` marker on this node — that is intended (the abstract was written against the old content and may no longer describe it). Pass both together, or assert `abstractStillAccurate` if you have re-read the abstract and it survives the edit.'),
@@ -5187,7 +5194,7 @@ export function createMcpServerInstance(
       })).optional().describe('REPLACES the node\'s ENTIRE outgoing edge set — it does NOT merge. Any existing edge you do not re-supply here is DELETED, silently and without a diff. Unlike every other argument on this tool (omit `content` and content is preserved, omit `tags` and tags are preserved), omitting an edge does not preserve it. To change ONE edge, use hadron_update_edge instead; to add one without touching the others, use hadron_create_edge. If you must use this argument, read the node first and re-supply every edge you want to keep.'),
       reason: z.string().optional().describe('Why this change was made (stored in revision history)'),
     },
-    async ({ urn: rawUrn, expectedRevision, name, nodeType, objectType, isRunnable, role, description, abstract, content, abstractStillAccurate, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges, reason }) => {
+    async ({ urn: rawUrn, expectedRevision, name, nodeType, objectType, isRunnable, role, authoredWith, description, abstract, content, abstractStillAccurate, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges, reason }) => {
       // Spec 022: qualification at the API boundary.
       try {
         assertFullyQualifiedUrn(rawUrn, 'node');
@@ -5479,15 +5486,17 @@ export function createMcpServerInstance(
               );
             }
             // #1330 — H1 strict sub-roles on the locked row, as writeNodeCore.
-            await assertRoleDeclaredForWrite(tx, memory.id, {
+            const changedFields = diffNodeChanges(current, data);
+            const verifiedAuthorship = await assertRoleDeclaredForWrite(tx, memory.id, {
               role: role === undefined ? current.role : role,
               priorRole: current.role,
               runnableAfter: mergedGovernedState(current, { role, isRunnable }).isRunnable,
+              authoredChange: authoredContentChanged(changedFields),
+              authoredWith,
             });
             // A guard-only call is a useful no-op check and must not manufacture
             // a history row or advance the live revision.
             if (Object.keys(data).length === 0 && resolvedEdges === null) return;
-            const changedFields = diffNodeChanges(current, data);
             await createNodeRevision(tx, {
               id: generateId(),
               ...buildNodeRevisionSnapshot(current, editorFromAuth(auth), {
@@ -5511,7 +5520,7 @@ export function createMcpServerInstance(
                 }),
               }),
             });
-            if (authoredContentChanged(changedFields)) Object.assign(data, clearNodeAuthorship());
+            if (authoredContentChanged(changedFields)) Object.assign(data, verifiedAuthorship ?? clearNodeAuthorship());
             data.revisionContentHash = revisionStateHashRefreshMarker();
             const updated = Object.keys(data).length > 0
               ? await tx.node.update({ where: { id: existing.id }, data })
@@ -5532,6 +5541,7 @@ export function createMcpServerInstance(
           if (e instanceof NodeMovedDuringWriteError) return textResult(e.message);
           if (e instanceof InlineEdgeEndpointError) return textResult(e.message);
           if (e instanceof RoleNotDeclaredError) return textResult(`[role_not_declared] ${e.message}`);
+          if (e instanceof AuthorTaskAttestationError) return textResult(`[${String(e.extensions.code).toLowerCase()}] ${e.message}`);
           if (e instanceof ScopeGraphQLError && e.extensions?.code === 'NODE_WRITE_CONFLICT') {
             return textResult(`[node_write_conflict] ${e.message}`);
           }
