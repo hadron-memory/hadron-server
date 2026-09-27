@@ -96,6 +96,9 @@ describe('covered-set exclusions — app-scoped memories (#610 review / cor:acl:
     // excluded from the covered set — the createMemoryInApp path can't leave a
     // PUBLIC agent "linked to non-public data" in a way that matters.
     const app = await db.app.create({ data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:app`, name: 'app' } });
+    // The current attach gate admits App-scoped knowledge only read-only to
+    // an Agent installed in that same App. Keep this a supported-path control.
+    await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
     const appMem = await db.memory.create({
       data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:app-know`, name: 'app-know', class: 'knowledge', visibility: 'ORGANIZATION', appId: app.id },
     });
@@ -179,6 +182,23 @@ describe('Agent.memoryItems — non-public linked memories are gated (#759)', ()
     const descriptions = items.map((i: { memory?: { description?: string | null } }) => i.memory?.description);
     expect(descriptions).not.toContain('SECRET-DESCRIPTION');
     expect(items.map((i: { memoryId: string }) => i.memoryId)).toEqual([pubMem.id]);
+  });
+
+  it('does not publish legacy per-user holding metadata through a PUBLIC Agent', async () => {
+    const holding = await db.memory.create({
+      data: {
+        id: generateId(), organizationId: org.id, urn: `${org.urn}:legacy-holding`,
+        name: 'Legacy Holding', class: 'knowledge', visibility: 'PUBLIC',
+        userMemoryOfAgentId: pubAgent.id, createdBy: admin.id,
+      },
+    });
+    await db.agentMemoryItem.create({ data: { agentId: pubAgent.id, memoryId: holding.id } });
+    const anonymous = await A.memoryItems(await eagerAgent(), {}, anon());
+    const outside = await A.memoryItems(await eagerAgent(), {}, outsider(stranger.id));
+    const creator = await A.memoryItems(await eagerAgent(), {}, outsider(admin.id));
+    expect(anonymous.map((i: { memoryId: string }) => i.memoryId)).not.toContain(holding.id);
+    expect(outside.map((i: { memoryId: string }) => i.memoryId)).not.toContain(holding.id);
+    expect(creator.map((i: { memoryId: string }) => i.memoryId)).toContain(holding.id);
   });
 
   // PR #846 review (Copilot): this said "org member" but used ctx() — a

@@ -29,14 +29,23 @@ import { isLifecycleActive } from '@hadron-memory/access-control';
 /** The same cross-org install license used by the App access fold. */
 export async function hasActiveAgentInstallLicense(
   db: PrismaClient,
-  appOrganizationId: string | null,
-  agentOrganizationId: string | null,
-  agentId: string,
+  app: { organizationId: string | null; ownerUserId: string | null },
+  agent: { id: string; organizationId: string | null; ownerUserId: string | null },
 ): Promise<boolean> {
-  // User-owned Apps have no org grant; same-org installs are implicit.
-  if (appOrganizationId == null || appOrganizationId === agentOrganizationId) return true;
+  if (app.organizationId == null) {
+    if (app.ownerUserId == null) return false;
+    // A personal App needs no subscription to its owner's own Agent. Every
+    // other Agent is licensed by the App owner's live AgentSubscription.
+    if (app.ownerUserId === agent.ownerUserId) return true;
+    const subscription = await db.agentSubscription.findUnique({
+      where: { userId_agentId: { userId: app.ownerUserId, agentId: agent.id } },
+    });
+    return subscription != null && isLifecycleActive(subscription);
+  }
+  // Same-org installations are implicit; foreign Agents need an org grant.
+  if (app.organizationId === agent.organizationId) return true;
   const grant = await db.agentOrgGrant.findUnique({
-    where: { orgId_agentId: { orgId: appOrganizationId, agentId } },
+    where: { orgId_agentId: { orgId: app.organizationId, agentId: agent.id } },
   });
   return grant != null && isLifecycleActive(grant);
 }
@@ -50,14 +59,12 @@ export async function isAgentInstalledAndLicensed(
   const install = await db.appAgent.findUnique({
     where: { appId_agentId: { appId, agentId } },
     select: {
-      app: { select: { organizationId: true, deletedAt: true, uninstalledAt: true } },
-      agent: { select: { organizationId: true, deletedAt: true } },
+      app: { select: { organizationId: true, ownerUserId: true, deletedAt: true, uninstalledAt: true } },
+      agent: { select: { organizationId: true, ownerUserId: true, deletedAt: true } },
     },
   });
   if (!install || install.app.deletedAt || install.app.uninstalledAt || install.agent.deletedAt) return false;
-  return hasActiveAgentInstallLicense(
-    db, install.app.organizationId, install.agent.organizationId, agentId,
-  );
+  return hasActiveAgentInstallLicense(db, install.app, { id: agentId, ...install.agent });
 }
 
 export async function getPrimaryAgentId(

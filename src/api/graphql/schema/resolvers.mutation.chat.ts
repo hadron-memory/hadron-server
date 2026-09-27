@@ -223,9 +223,9 @@ export const chatMutations = {
         }
         // 023-app-shape Phase 2b: App↔Agent is N:M via AppAgent. Find an
         // App that the user is an AppMember of AND that has this Agent
-        // installed. With multi-Agent Apps, this may return any App that
-        // matches both conditions; today it returns at most one.
-        const membership = await ctx.db.appMember.findFirst({
+        // installed. Pick the first live licensed App in a stable order: a
+        // retained install in one App must not hide another usable App.
+        const memberships = await ctx.db.appMember.findMany({
           where: {
             userId: ctx.userId,
             app: {
@@ -236,34 +236,42 @@ export const chatMutations = {
           select: {
             app: { select: { id: true, urn: true, name: true, organizationId: true, ownerUserId: true } },
           },
+          orderBy: { appId: 'asc' },
         });
-        if (!membership?.app) {
+        if (memberships.length === 0) {
           throw new ChatScopeError(
             'SHARED_CHAT_REQUIRES_APP_CONTEXT',
             "Cannot create a shared chat — you are not a member of any App that installs this Agent.",
           );
         }
-        if (!(await isAgentInstalledAndLicensed(ctx.db, membership.app.id, resolvedAgentId))) {
+        let selectedApp: (typeof memberships)[number]['app'] | null = null;
+        for (const membership of memberships) {
+          if (await isAgentInstalledAndLicensed(ctx.db, membership.app.id, resolvedAgentId)) {
+            selectedApp = membership.app;
+            break;
+          }
+        }
+        if (!selectedApp) {
           throw new ChatScopeError(
             'SHARED_CHAT_REQUIRES_APP_CONTEXT',
             'Cannot create a shared chat — the Agent is no longer active in this App.',
           );
         }
-        sharedAppId = membership.app.id;
+        sharedAppId = selectedApp.id;
         // Idempotent: first shared chat under the (App, Agent) pair
         // provisions the app-class memory; subsequent calls reuse it.
         // Keyed per-agent (not per-app) so multi-Agent Apps — the model
         // the 2026-05-12-user-installing-app session settled on — get
         // one shared memory per installed Agent.
         targetMemoryId = await findOrCreateAppClassMemory({
-          appId: membership.app.id,
-          appUrn: membership.app.urn,
-          appName: membership.app.name,
+          appId: selectedApp.id,
+          appUrn: selectedApp.urn,
+          appName: selectedApp.name,
           agentId: resolvedAgentId,
           agentUrn: agent.urn,
           agentName: agent.name,
-          organizationId: membership.app.organizationId,
-          ownerUserId: membership.app.ownerUserId,
+          organizationId: selectedApp.organizationId,
+          ownerUserId: selectedApp.ownerUserId,
           actingUserId: ctx.userId,
           db: ctx.db,
         });

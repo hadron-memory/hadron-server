@@ -25,6 +25,7 @@ import {
 import { getMemberOrgIds } from '../../../lib/auth/memberOrgIds.js';
 import { validateMemoryNodes } from '../../../lib/memoryValidation.js';
 import { emitNodeUrnV2 } from '../../../lib/urnEmit.js';
+import { isAgentInstalledAndLicensed } from '../../../lib/appAgent.js';
 
 /** Compose a node URN, tolerating a memory urn the flat v2 shape can't express. */
 function safeCanonicalNodeUrn(memoryUrn: string, loc: string): string | null {
@@ -483,7 +484,10 @@ export const memoryQueries = {
               select: {
                 agent: {
                   include: {
-                    memoryItems: { include: { memory: { include: MEMORY_INCLUDE } } },
+                    memoryItems: {
+                      where: { deletedAt: null, memory: { deletedAt: null } },
+                      include: { memory: { include: MEMORY_INCLUDE } },
+                    },
                   },
                 },
               },
@@ -500,6 +504,7 @@ export const memoryQueries = {
           owner != null && owner !== app.ownerUserId;
         const memoryMap = new Map<string, any>();
         for (const aa of app.appAgents) {
+          if (!(await isAgentInstalledAndLicensed(ctx.db, ctx.appId, aa.agent.id))) continue;
           for (const item of aa.agent.memoryItems) {
             if (classSet ? !classSet.has(item.memory.class) : item.memory.class === 'system') continue;
             if (f.visibility && item.memory.visibility !== f.visibility) continue;
@@ -507,6 +512,7 @@ export const memoryQueries = {
             // contributes only to its own App, even when the same Agent is
             // installed elsewhere (#1357 review).
             if (item.memory.appId != null && item.memory.appId !== ctx.appId) continue;
+            if (item.memory.userMemoryOfAgentId != null && item.memory.ownerUserId == null) continue;
             if (foreignUserOwned(item.memory.ownerUserId)) continue;
             memoryMap.set(item.memory.id, item.memory);
           }

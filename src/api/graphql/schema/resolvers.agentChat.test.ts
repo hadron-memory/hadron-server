@@ -981,6 +981,28 @@ describe('spec 017 — chat scope (US2 shared path)', () => {
     expect(sent.tools).toBeNull();
   });
 
+  it('chooses a licensed App when an earlier member App has a retained inactive install', async () => {
+    const original = await db.app.findFirstOrThrow({ where: { urn: `${orgA.urn}:research-app` } });
+    const second = await db.app.create({
+      data: {
+        id: generateId(), name: 'second-app', urn: `${orgA.urn}:second-app`,
+        organizationId: orgA.id, appAgents: { create: { agentId: agent.id } },
+      },
+    });
+    for (const app of [original, second]) {
+      await db.appMember.create({ data: { appId: app.id, userId: adminUser.id, role: 'member' } });
+    }
+    const [inactive, active] = [original, second].sort((a, b) => a.id.localeCompare(b.id));
+    await db.app.update({ where: { id: inactive.id }, data: { uninstalledAt: new Date() } });
+
+    const start = await resolvers.Mutation.startChat(
+      {}, { agentId: agent.id, scope: 'shared' }, userCtx(adminUser.id),
+    );
+    const chat = await chatNodeByLocOrThrow(db, start.chatId);
+    const memory = await db.memory.findUniqueOrThrow({ where: { id: chat.memoryId } });
+    expect(memory.appId).toBe(active.id);
+  });
+
   it('does not restore a cross-org Agent after its App grant is revoked', async () => {
     const orgB = await db.organization.create({
       data: { id: generateId(), name: 'chat-license-b', urn: 'chat-license-b' },

@@ -444,6 +444,39 @@ describe('apps (the uniform member list, #473)', () => {
 // ---------------------------------------------------------------------------
 
 describe('memories — App-key orgId', () => {
+  it('drops a cross-org Agent’s linked memories when its App grant is revoked', async () => {
+    const foreignOrg = await db.organization.create({
+      data: { id: generateId(), name: 'foreign-publisher', urn: `foreign-${generateId()}` },
+    });
+    const linked = await db.memory.create({
+      data: {
+        id: generateId(), name: 'foreign note', urn: `${foreignOrg.urn}:note`,
+        organizationId: foreignOrg.id, class: 'knowledge', visibility: 'PUBLIC',
+      },
+    });
+    const foreignAgent = await db.agent.create({
+      data: {
+        id: generateId(), name: 'foreign agent', urn: `${foreignOrg.urn}:agent`,
+        organizationId: foreignOrg.id, visibility: 'PUBLIC',
+        memoryItems: { create: { memoryId: linked.id, role: 'read' } },
+      },
+    });
+    const { app } = await createDbAppWithKey(db, 'grant-list-app', orgId);
+    await db.appAgent.create({ data: { appId: app.id, agentId: foreignAgent.id } });
+    await db.agentOrgGrant.create({
+      data: { orgId, agentId: foreignAgent.id, activatedAt: new Date() },
+    });
+    const list = () => resolvers.Query.memories(
+      {}, { filter: { memoryClasses: ['knowledge'] } }, ctx({ appId: app.id }),
+    );
+    expect((await list()).items.map((m: { id: string }) => m.id)).toContain(linked.id);
+    await db.agentOrgGrant.update({
+      where: { orgId_agentId: { orgId, agentId: foreignAgent.id } },
+      data: { revokedAt: new Date() },
+    });
+    expect((await list()).items.map((m: { id: string }) => m.id)).not.toContain(linked.id);
+  });
+
   it('lists an App-scoped memory only through its own App when the Agent is shared', async () => {
     const { app: appA } = await createDbAppWithKey(db, 'memory-list-a', orgId);
     const { app: appB } = await createDbAppWithKey(db, 'memory-list-b', orgId);

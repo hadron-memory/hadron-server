@@ -1500,6 +1500,7 @@ export const typeResolvers = {
         ownerUserId: string | null;
         organizationId: string | null;
         userMemoryOfAgentId: string | null;
+        createdBy: string | null;
       };
       type Item = { memoryId: string; memory?: Mem | null };
       const eager = a.memoryItems as Item[] | undefined;
@@ -1518,10 +1519,16 @@ export const typeResolvers = {
       for (const item of items) {
         const mem = item.memory;
         if (!mem) continue;
+        // Legacy per-user holding rows can carry PUBLIC visibility while
+        // ownerUserId is null. Their audience is the creating user alone.
+        if (mem.userMemoryOfAgentId != null) {
+          if (!ctx.impersonation && ctx.userId === mem.createdBy) kept.push(item);
+          continue;
+        }
         // Readable by anyone only for the genuine public audience. #653 keeps
         // App-scoped rows internal; spec-047 keeps user-owned rows strict-owner
         // even if their visibility column says PUBLIC.
-        if (mem.visibility === 'PUBLIC' && mem.appId == null && mem.ownerUserId == null) {
+        if (mem.visibility === 'PUBLIC' && mem.appId == null && mem.ownerUserId == null && mem.userMemoryOfAgentId == null) {
           kept.push(item);
           continue;
         }

@@ -282,8 +282,8 @@ async function getAppTeamSpaceAccess(
 
 /**
  * The agent-derived half of {@link getAppMemoryAccess} — the App's primary
- * installed Agent's system memory + memoryItems, behind the cross-org
- * AgentOrgGrant gate. Empty when the App's primary Agent doesn't resolve.
+ * installed Agent's system memory + memoryItems, behind the active install
+ * license. Empty when the App's primary Agent doesn't resolve.
  */
 async function getPrimaryAgentAccess(
   db: PrismaClient,
@@ -292,17 +292,11 @@ async function getPrimaryAgentAccess(
   const primary = app.appAgents[0]?.agent ?? null;
   if (!primary || primary.deletedAt) return new Map();
 
-  // Cross-org gate: require active AgentOrgGrant when App and Agent live in
-  // different orgs. Same-org installs auto-pass — the Agent owner has implicit
-  // license to deploy it. The active-status predicate is shared across
-  // AgentSubscription + AgentOrgGrant via isLifecycleActive (008 R-2).
-  // spec 047: the cross-org AgentOrgGrant gate is org-scoped. A user-owned App
-  // has no org — its install license rides the owner's AgentSubscription
-  // (Phase 2c-2), so the org-grant gate doesn't apply.
-  if (app.organizationId !== null && app.organizationId !== primary.organizationId) {
-    if (!(await hasActiveAgentInstallLicense(db, app.organizationId, primary.organizationId, primary.id))) {
-      return new Map();
-    }
+  // Org Apps require a live AgentOrgGrant for a foreign Agent; personal Apps
+  // require their owner's live AgentSubscription for a foreign Agent. Both
+  // license shapes share isLifecycleActive (008 R-2).
+  if (!(await hasActiveAgentInstallLicense(db, app, primary))) {
+    return new Map();
   }
 
   // spec 047 (blocker 2, #676 review): a USER-owned memory folds into an App's
