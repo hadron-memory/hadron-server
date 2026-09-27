@@ -1303,13 +1303,13 @@ async function batchReadableTaskRefs(
     where: { id: { in: ids }, deletedAt: null },
     select: { id: true, loc: true, memoryId: true },
   });
-  const readable = new Map<string, boolean>();
-  await Promise.all([...new Set(tasks.map((task) => task.memoryId))].map(async (memoryId) => {
-    readable.set(memoryId, await canReadMemory(db, auth, memoryId));
-  }));
+  // Resolve all referenced memories through the shared bulk gate. Calling
+  // canReadMemory once per task memory rebuilds the caller's access map for
+  // every distinct memory in a large batch.
+  const readable = await filterReadableMemoryIds(db, auth, tasks.map((task) => task.memoryId));
   const refs = await Promise.all(tasks.map(async (task) => [
     task.id,
-    readable.get(task.memoryId) ? await nodeUrn(task.loc, task.memoryId) : null,
+    readable.has(task.memoryId) ? await nodeUrn(task.loc, task.memoryId) : null,
   ] as const));
   return new Map(refs);
 }
