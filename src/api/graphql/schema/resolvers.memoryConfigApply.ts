@@ -129,24 +129,19 @@ export async function applyMemoryConfigTemplate(
       // The template row under a SHARE lock: its rules cannot change until we
       // commit (an update takes it FOR UPDATE), while two applies of the same
       // template proceed side by side.
-      // The TARGET memory first, FOR KEY SHARE (#1399 review): the config row
-      // apply may create references it, so a concurrent hard delete (account
-      // deletion removes a user's memories before their templates) either
-      // finishes first and we answer MEMORY_NOT_FOUND, or waits for us.
-      // Taken before the template lock, so the two can't form a cycle.
-      const target = await tx.$queryRaw<Array<{ id: string }>>`
-        SELECT id FROM "memories" WHERE "id" = ${memory.id} AND "deleted_at" IS NULL FOR KEY SHARE`;
-      if (!target[0]) throw new MemoryNotFoundError(args.memoryRef);
-      // The template's OWNER row, FOR KEY SHARE, before the template itself
+      // The template's OWNER row, FOR KEY SHARE, before ANY other lock
       // (#1399 review): account deletion hard-deletes the owner's memories —
-      // the cascade holds every referenced node — and only later deletes
-      // their templates, so an apply holding the template FOR SHARE and then
-      // waiting on a referenced node would cycle with it (an aborted
-      // transaction, not a hang). The owner row is deletion's FIRST lock, so
-      // KEY SHARE here serializes the whole apply against the whole deletion:
-      // a deletion already running holds it and we wait owning nothing it
-      // needs; one that commits first leaves us answering the concealing
-      // not-found, here or at the live re-read. App-owned templates take the
+      // the TARGET of this apply and a REFERENCED node alike, the cascade
+      // holds both — and only later deletes their templates. An apply that
+      // locks the target memory first and then waits here cycles with a
+      // deletion holding the user row and queuing on that same target row;
+      // one that holds the template FOR SHARE and queues on a referenced
+      // node cycles with the deletion queuing on the template. The owner row
+      // is deletion's FIRST lock, so KEY SHARE here — as ours — serializes
+      // the whole apply against the whole deletion: a deletion already
+      // running holds it and we wait owning nothing it needs, and one that
+      // commits first leaves us answering a concealing not-found here, at the
+      // target re-read, or at the live re-read. App-owned templates take the
       // same barrier on the App row: the App cascade removes app-scoped
       // memories and their templates in one statement. Org- and server-owned
       // templates are only soft-deleted, and that cascade touches no node or
@@ -160,6 +155,13 @@ export async function applyMemoryConfigTemplate(
           SELECT id FROM "apps" WHERE "id" = ${template.appId} AND "deleted_at" IS NULL FOR KEY SHARE`;
         if (!owner[0]) throw notFoundTemplate();
       }
+      // The TARGET memory, FOR KEY SHARE (#1399 review): the config row this
+      // apply may create references it, and a deletion that got past the
+      // barrier has already committed by the time we get here, leaving this
+      // re-read to answer MEMORY_NOT_FOUND.
+      const target = await tx.$queryRaw<Array<{ id: string }>>`
+        SELECT id FROM "memories" WHERE "id" = ${memory.id} AND "deleted_at" IS NULL FOR KEY SHARE`;
+      if (!target[0]) throw new MemoryNotFoundError(args.memoryRef);
       await tx.$queryRaw`SELECT 1 FROM "memory_config_templates" WHERE "id" = ${template.id} FOR SHARE`;
       const live = await tx.memoryConfigTemplate.findFirst({ where: { id: template.id, deletedAt: null } });
       if (!live) throw notFoundTemplate();

@@ -451,4 +451,37 @@ describe('apply under concurrency (#1399 review)', () => {
     expect(code(r)).toBe('MEMORY_CONFIG_TEMPLATE_NOT_FOUND');
     expect(await rulesOf(mem.id)).toEqual([]);
   });
+
+  it('racing account deletion that also erases the TARGET: the owner barrier is the FIRST lock, never a deadlock (#1399 review)', async () => {
+    // The same user owns the template, the referenced task's memory AND the
+    // target. Deletion locks only the user row to start, so the apply must
+    // queue on the OWNER row while owning nothing: with the barrier after the
+    // target lock it instead holds the target FOR KEY SHARE and queues on the
+    // user row while the deletion queues on the target row — a cycle.
+    const ptask = await db.node.create({ data: { id: generateId(), memoryId: personal.id, loc: 'tasks:sign2', name: 'Sign2', isRunnable: true } });
+    const t = await tpl(as(personalOwner), 'USER', null, { name: 'mine2', rules: [{ role: 'spec', authorTaskRef: ptask.id }] });
+    let held!: () => void;
+    const holding = new Promise<void>((r) => (held = r));
+    let open!: () => void;
+    const gate = new Promise<void>((r) => (open = r));
+    const done = db.$transaction(
+      async (tx) => {
+        await tx.$queryRaw`SELECT 1 FROM users WHERE id = ${personalOwner} AND deleted_at IS NULL FOR UPDATE`;
+        held();
+        await gate;
+        // Both later statements of the deletion, run once the apply is queued.
+        await tx.memory.deleteMany({ where: { OR: [{ userId: personalOwner }, { ownerUserId: personalOwner }] } });
+        await tx.memoryConfigTemplate.deleteMany({ where: { ownerUserId: personalOwner } });
+      },
+      { timeout: 15_000 },
+    );
+    await holding;
+    const pending = apply(as(personalOwner), t.id, personal.id);
+    await waitForLockWaiters(db); // queued on the owner row; with a late barrier, on the user row HOLDING the target
+    open();
+    const r = await pending;
+    await done;
+    expect(code(r)).toBe('MEMORY_NOT_FOUND');
+    expect(await rulesOf(mem.id)).toEqual([]);
+  });
 });
