@@ -3035,10 +3035,106 @@ export const typeDefs = `#graphql
     apiKeyPreview: String
     "Provider-specific knobs (maxTokens, thinking, effort, baseUrl, ...)."
     params: JSON
+    """
+    #1373: the base URL this config's requests are sent to, as stored. Null =
+    the provider's default (see effectiveEndpoint and aiProviderEndpoints).
+    """
+    endpoint: String
+    """
+    #1373: where a request for this config actually goes: endpoint, else the
+    provider default. Null only for bedrock, whose endpoint is derived from
+    its region.
+    """
+    effectiveEndpoint: String
+    "#1373: the wire protocol as stored; null = the provider default. OpenAI-compatible providers only."
+    apiStyle: AiApiStyle
+    "#1373: the wire protocol a request actually uses (apiStyle, else the provider default); null for single-protocol providers."
+    effectiveApiStyle: AiApiStyle
     "Disabled configs are skipped by resolution (the walk continues outward)."
     enabled: Boolean!
     createdAt: DateTime!
     updatedAt: DateTime
+  }
+
+  "#1373: the wire protocol of an OpenAI-compatible provider."
+  enum AiApiStyle {
+    "POST {endpoint}/chat/completions — what most OpenAI-compatible hosts serve (the glm default)."
+    CHAT_COMPLETIONS
+    "POST {endpoint}/responses — OpenAI's Responses API (the openai default)."
+    RESPONSES
+  }
+
+  "#1378: where a tested value came from."
+  enum AiConfigTestValueSource {
+    SAVED
+    OVERRIDE
+  }
+
+  "#1378: which key a test used; NONE when there was none to use."
+  enum AiConfigTestKeySource {
+    SAVED
+    OVERRIDE
+    "A HADRON_SERVER config with no stored key: the server's own credential for that provider served the call, as it serves a run (#1385)."
+    PLATFORM
+    NONE
+  }
+
+  """
+  #1378: values to test INSTEAD of the saved ones — e.g. an edited form before
+  it is saved. Never stored. Each is validated exactly as a write would be.
+  """
+  input AiServiceConfigTestOverride {
+    provider: String
+    model: String
+    "Omitted = the saved endpoint; null or empty = the provider default."
+    endpoint: String
+    "Omitted = the saved style; null = the provider default."
+    apiStyle: AiApiStyle
+    "A key to test with instead of the stored one. Never stored, never echoed."
+    apiKey: String
+  }
+
+  "#1378: per field, whether the test used the saved value or the override."
+  type AiServiceConfigTestUsed {
+    provider: AiConfigTestValueSource!
+    model: AiConfigTestValueSource!
+    endpoint: AiConfigTestValueSource!
+    apiStyle: AiConfigTestValueSource!
+    key: AiConfigTestKeySource!
+  }
+
+  type AiServiceConfigTestError {
+    "NO_API_KEY | KEY_UNREADABLE (the stored key cannot be decrypted here; re-enter it) | CONFIG_INVALID (the config cannot be built at all, e.g. a malformed Bedrock key; no call made) | QUOTA_EXCEEDED (a platform-funded test with the org's daily token allowance used up; no call made) | LLM_CALL_FAILED (the provider call failed or timed out; see transient)"
+    code: String!
+    "Provider error text, scrubbed of the key and truncated."
+    message: String!
+    transient: Boolean!
+  }
+
+  "#1378: one test call, made through the same client and endpoint a run uses."
+  type AiServiceConfigTestResult {
+    ok: Boolean!
+    provider: String!
+    model: String!
+    "The endpoint the request actually went to: the explicit endpoint, else the host the SDK chose (OPENAI_BASE_URL / ANTHROPIC_BASE_URL when the server sets one, Bedrock's regional host), else the catalog default. Null when it can't be known (Bedrock with no region)."
+    endpoint: String
+    "The wire protocol the request actually used."
+    apiStyle: AiApiStyle
+    used: AiServiceConfigTestUsed!
+    latencyMs: Int!
+    "The model's reply, truncated."
+    reply: String
+    error: AiServiceConfigTestError
+  }
+
+  "#1373: one known endpoint for a provider, from the server's single suggestion list."
+  type AiProviderEndpoint {
+    url: String!
+    label: String!
+    "The endpoint a config with no endpoint uses."
+    isDefault: Boolean!
+    "What the URL does not say: billing, terms."
+    note: String
   }
 
   """
@@ -3060,6 +3156,10 @@ export const typeDefs = `#graphql
     """
     apiKey: String!
     params: JSON
+    "#1373: where requests for this config go (see AiServiceConfig.effectiveEndpoint)."
+    effectiveEndpoint: String
+    "#1373: the wire protocol requests use (see AiServiceConfig.effectiveApiStyle)."
+    effectiveApiStyle: AiApiStyle
   }
 
   """
@@ -6438,6 +6538,15 @@ export const typeDefs = `#graphql
     resolveAIConfig(name: String, appRef: ID, agentRef: ID): ResolvedAiConfig!
 
     """
+    #1373: the known endpoints for a provider — the server's single suggestion
+    list, so the portal and the CLI render the same choices and neither
+    hardcodes a URL. Empty for an unknown provider and for bedrock (its
+    endpoint comes from the region). Public reference data (vendor URLs), so
+    it needs no auth.
+    """
+    aiProviderEndpoints(provider: String!): [AiProviderEndpoint!]!
+
+    """
     036-ai-service-config: the MASKED set of configs RESOLVABLE in an
     execution context — every distinct config name a chat in this context
     could select. Populates a config picker in the chatbot UI.
@@ -8301,6 +8410,10 @@ export const typeDefs = `#graphql
       model: String!
       apiKey: String
       params: JSON
+      "#1373: base URL; https only, no query/fragment/credentials. Omit for the provider default."
+      endpoint: String
+      "#1373: OpenAI-compatible providers only; omit for the provider default."
+      apiStyle: AiApiStyle
       enabled: Boolean
     ): AiServiceConfig!
 
@@ -8319,8 +8432,23 @@ export const typeDefs = `#graphql
       model: String
       apiKey: String
       params: JSON
+      "#1373: omitted = unchanged; null or empty string = clear (provider default)."
+      endpoint: String
+      "#1373: omitted = unchanged; null = clear (provider default)."
+      apiStyle: AiApiStyle
       enabled: Boolean
     ): AiServiceConfig!
+
+    """
+    #1378: test a SAVED config by id with one small real call, through the same
+    client, endpoint and egress guard a run uses; the stored key never leaves
+    the server. The override argument tests edited values without saving them. Auth: as
+    updateAiServiceConfig; refused under impersonation. Every test that
+    reaches the provider is metered (usage type ai-config-test); NO_API_KEY
+    and KEY_UNREADABLE make no call and record nothing. The call is bounded
+    by a 20s timeout. Rate-limited per caller and config (RATE_LIMITED).
+    """
+    testAiServiceConfig(id: ID!, override: AiServiceConfigTestOverride): AiServiceConfigTestResult!
 
     """
     036-ai-service-config: delete a named AI config (hard delete; the

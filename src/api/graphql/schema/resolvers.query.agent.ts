@@ -1,5 +1,6 @@
 // agentQueries — extracted from resolvers.ts Query (split step 3). No behavior change.
 import { decryptToken } from '../../../lib/tokenCrypto.js';
+import { AI_PROVIDER_ENDPOINTS, effectiveApiStyle, effectiveEndpoint } from '../../../lib/aiEndpoint.js';
 import {
   NoAiConfigAvailableError,
   DEFAULT_AI_CONFIG_NAME,
@@ -19,6 +20,7 @@ import {
   resolveOrgScope,
   isPlatformAdmin,
   toGqlAiServiceConfig,
+  toGqlAiServiceConfigForPicker,
   requireAiConfigOwnerAdmin,
   requireAiConfigPickerAccess,
   rethrowAiConfigTyped,
@@ -341,11 +343,19 @@ export const agentQueries = {
           model: config.model,
           apiKey: decryptToken(config.apiKeyEncrypted),
           params: config.params ?? null,
+          effectiveEndpoint: effectiveEndpoint(config),
+          effectiveApiStyle: effectiveApiStyle(config),
         };
       } catch (e) {
         rethrowAiConfigTyped(e);
       }
     },
+
+    aiProviderEndpoints: async (_: unknown, { provider }: { provider: string }) =>
+      (Object.hasOwn(AI_PROVIDER_ENDPOINTS, provider)
+        ? AI_PROVIDER_ENDPOINTS[provider as keyof typeof AI_PROVIDER_ENDPOINTS]
+        : []
+      ).map((e) => ({ ...e })),
 
     resolveAiServiceConfigs: async (
       _: unknown,
@@ -364,7 +374,7 @@ export const agentQueries = {
           appId: resolvedAppId,
           agentId: resolvedAgentId,
         });
-        return resolved.map((r) => toGqlAiServiceConfig(r.config));
+        return resolved.map((r) => toGqlAiServiceConfigForPicker(r.config));
       } catch (e) {
         rethrowAiConfigTyped(e);
       }

@@ -9,6 +9,8 @@ import {
   DEFAULT_AI_CONFIG_NAME,
   apiKeyWriteFields,
   apiKeyPreviewOf,
+  AiServiceConfigNotFoundError,
+  lockAiServiceConfig,
   validateProviderAndParams,
 } from '../../../lib/aiConfig.js';
 import {
@@ -680,9 +682,36 @@ export const appMutations = {
             }
             const keyFields = apiKeyWriteFields(aiApiKey);
             if (existing) {
-              await ctx.db.aiServiceConfig.update({
-                where: { id: existing.id },
-                data: { provider, model, ...keyFields, updatedBy: ctx.userId ?? null },
+              // Decided on the LOCKED row (#1380 review): the clearing below
+              // compares against the provider as it is now, not as read above.
+              await ctx.db.$transaction(async (tx) => {
+                const cur = await lockAiServiceConfig(tx, existing.id);
+                if (!cur) throw new AiServiceConfigNotFoundError(existing.id);
+                // Omitted args keep what the row holds NOW, not what the read
+                // above saw (#1380 review), and the resulting provider is
+                // validated again.
+                const lockedProvider = aiProvider ?? cur.provider;
+                const lockedModel = aiModel ?? cur.model;
+                try {
+                  validateProviderAndParams(lockedProvider, null);
+                } catch (e) {
+                  rethrowAiConfigTyped(e);
+                }
+                await tx.aiServiceConfig.update({
+                  where: { id: cur.id },
+                  data: {
+                    provider: lockedProvider,
+                    model: lockedModel,
+                    ...keyFields,
+                    // #1380 review: a legacy surface can express neither a style nor
+                    // an endpoint, and both were chosen for the OLD provider. Any
+                    // provider change clears both, so the new provider starts
+                    // from its own defaults and the new key never goes to the
+                    // old host.
+                    ...(lockedProvider !== cur.provider ? { endpoint: null, apiStyle: null } : {}),
+                    updatedBy: ctx.userId ?? null,
+                  },
+                });
               });
             } else {
               await ctx.db.aiServiceConfig.create({

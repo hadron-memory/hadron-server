@@ -18,6 +18,7 @@ import {
   DEFAULT_AI_CONFIG_NAME,
   type AiConfigOwnerType,
 } from '../../../lib/aiConfig.js';
+import { effectiveApiStyle, effectiveEndpoint } from '../../../lib/aiEndpoint.js';
 import {
   canWriteToMemory,
   filterReadableMemoryIds,
@@ -1128,6 +1129,9 @@ export interface AiServiceConfigRow {
   apiKeyEncrypted: string | null;
   apiKeyPreview: string | null;
   params: unknown;
+  /** #1373 — optional so a row read before the columns existed still maps. */
+  endpoint?: string | null;
+  apiStyle?: string | null;
   enabled: boolean;
   createdAt: Date | string;
   updatedAt?: Date | string | null;
@@ -1141,6 +1145,24 @@ export function aiConfigOwnerOf(c: AiServiceConfigRow): { ownerType: AiConfigOwn
 }
 
 /** Masked management view — never carries key material beyond the preview. */
+/**
+ * #1380 review (Codex P2): the MEMBER-visible picker (resolveAiServiceConfigs)
+ * — any App member, not just the owner's admins — must not learn an explicit
+ * endpoint, which under the self-hosted private-network opt-in can be an
+ * internal hostname or address. The endpoint is withheld, and
+ * effectiveEndpoint is shown only when it is the public provider default.
+ */
+export function toGqlAiServiceConfigForPicker(c: AiServiceConfigRow) {
+  const full = toGqlAiServiceConfig(c);
+  // A legacy row may still carry params.baseUrl (D2: no migration): it is no
+  // longer read, but it names a host all the same, so members don't see it.
+  const params =
+    full.params && typeof full.params === 'object' && !Array.isArray(full.params) && 'baseUrl' in full.params
+      ? Object.fromEntries(Object.entries(full.params as Record<string, unknown>).filter(([k]) => k !== 'baseUrl'))
+      : full.params;
+  return { ...full, params, endpoint: null, effectiveEndpoint: c.endpoint ? null : full.effectiveEndpoint };
+}
+
 export function toGqlAiServiceConfig(c: AiServiceConfigRow) {
   return {
     id: c.id,
@@ -1151,6 +1173,10 @@ export function toGqlAiServiceConfig(c: AiServiceConfigRow) {
     hasApiKey: !!c.apiKeyEncrypted,
     apiKeyPreview: c.apiKeyPreview,
     params: c.params ?? null,
+    endpoint: c.endpoint ?? null,
+    effectiveEndpoint: effectiveEndpoint(c),
+    apiStyle: c.apiStyle ?? null,
+    effectiveApiStyle: effectiveApiStyle(c),
     enabled: c.enabled,
     createdAt: toISO(c.createdAt)!,
     updatedAt: toISO(c.updatedAt ?? null),

@@ -1,5 +1,7 @@
 // agentMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
 import { encryptToken } from '../../../lib/tokenCrypto.js';
+import { refuseLegacyBaseUrl, validateApiStyle, validateEndpoint } from '../../../lib/aiEndpoint.js';
+import { testAiServiceConfig, type AiConfigTestOverride } from '../../../controller/operations/testAiServiceConfig.js';
 import { assertAgentPublicAllowed } from '../../../lib/agentPublicCongruence.js';
 import {
   assertSystemMemoryOwner,
@@ -12,6 +14,7 @@ import {
   DEFAULT_AI_CONFIG_NAME,
   apiKeyWriteFields,
   apiKeyPreviewOf,
+  lockAiServiceConfig,
   validateAiConfigName,
   validateProviderAndParams,
   type AiConfigOwnerType,
@@ -872,9 +875,30 @@ export const agentMutations = {
         );
       }
       if (existing) {
-        await ctx.db.aiServiceConfig.update({
-          where: { id: existing.id },
-          data: { provider, model, ...keyData, updatedBy: ctx.userId ?? null },
+        // Decided on the LOCKED row (#1380 review): a concurrent modern update
+        // may have switched the provider (and its endpoint/style) since the
+        // read above, and the clearing below must compare against that.
+        await ctx.db.$transaction(async (tx) => {
+          const cur = await lockAiServiceConfig(tx, existing.id);
+          if (!cur) throw new AiServiceConfigNotFoundError(existing.id);
+          if (!apiKey && !cur.apiKeyEncrypted) {
+            rethrowAiConfigTyped(new AiConfigValidationError('API key is required when no key is saved yet'));
+          }
+          await tx.aiServiceConfig.update({
+            where: { id: cur.id },
+            data: {
+              provider,
+              model,
+              ...keyData,
+              // #1380 review: this legacy surface can express neither a style nor
+              // an endpoint, and both were chosen for the OLD provider (its host,
+              // its protocol). Any provider change clears both, so the new
+              // provider starts from its own defaults and the new key never goes
+              // to the old host.
+              ...(provider !== cur.provider ? { endpoint: null, apiStyle: null } : {}),
+              updatedBy: ctx.userId ?? null,
+            },
+          });
         });
       } else {
         // apiKey is guaranteed non-blank here (guard above); P2002 from a
@@ -932,6 +956,8 @@ export const agentMutations = {
         model: string;
         apiKey?: string | null;
         params?: unknown;
+        endpoint?: string | null;
+        apiStyle?: string | null;
         enabled?: boolean | null;
       },
       ctx: Context,
@@ -940,6 +966,9 @@ export const agentMutations = {
         const { ownerWhere } = await requireAiConfigOwnerAdmin(ctx, args.ownerType, args.ownerId);
         const name = validateAiConfigName(args.name);
         validateProviderAndParams(args.provider, args.params ?? null);
+        refuseLegacyBaseUrl(args.params);
+        const endpoint = args.endpoint ? validateEndpoint(args.endpoint) : null;
+        validateApiStyle(args.provider, args.apiStyle);
         // No upsert: a P2002 from the partial unique (owner, name) index is
         // the duplicate-name typed error, not a retry (upsert is not
         // race-safe on the cold path).
@@ -959,6 +988,8 @@ export const agentMutations = {
               args.params === undefined || args.params === null
                 ? undefined
                 : (args.params as InputJsonValue),
+            endpoint,
+            apiStyle: args.apiStyle ?? null,
             enabled: args.enabled ?? true,
             createdBy: ctx.userId ?? null,
           },
@@ -982,6 +1013,8 @@ export const agentMutations = {
         model?: string | null;
         apiKey?: string | null;
         params?: unknown;
+        endpoint?: string | null;
+        apiStyle?: string | null;
         enabled?: boolean | null;
       },
       ctx: Context,
@@ -991,10 +1024,29 @@ export const agentMutations = {
         if (!existing) throw new AiServiceConfigNotFoundError(args.id);
         const owner = aiConfigOwnerOf(existing);
         await requireAiConfigOwnerAdmin(ctx, owner.ownerType, owner.ownerId);
-        const provider = args.provider ?? existing.provider;
-        const params = args.params === undefined ? existing.params : args.params;
-        validateProviderAndParams(provider, params ?? null);
-        const config = await ctx.db.aiServiceConfig.update({
+        if (args.params !== undefined) refuseLegacyBaseUrl(args.params);
+        // Omitted = unchanged; null or '' = clear back to the provider default.
+        const endpoint =
+          args.endpoint === undefined ? undefined : args.endpoint ? validateEndpoint(args.endpoint) : null;
+        // The RESULTING config, judged against a base row: a provider change
+        // must not strand a style the new provider has no use for.
+        const judge = (base: typeof existing) => {
+          const provider = args.provider ?? base.provider;
+          const params = args.params === undefined ? base.params : args.params;
+          validateProviderAndParams(provider, params ?? null);
+          validateApiStyle(provider, args.apiStyle === undefined ? base.apiStyle : args.apiStyle);
+          return provider;
+        };
+        judge(existing);
+        // …and again on the LOCKED row, in the write's transaction (#1380
+        // review): two concurrent updates (one changing the provider, one the
+        // style) each passed on the old row and together wrote a pair neither
+        // judged.
+        const config = await ctx.db.$transaction(async (tx) => {
+          const cur = await lockAiServiceConfig(tx, existing.id);
+          if (!cur) throw new AiServiceConfigNotFoundError(args.id);
+          const provider = judge(cur);
+          return tx.aiServiceConfig.update({
           where: { id: existing.id },
           data: {
             ...(args.name != null ? { name: validateAiConfigName(args.name) } : {}),
@@ -1004,9 +1056,12 @@ export const agentMutations = {
             ...(args.params === undefined
               ? {}
               : { params: args.params === null ? Prisma.DbNull : (args.params as InputJsonValue) }),
+            ...(endpoint === undefined ? {} : { endpoint }),
+            ...(args.apiStyle === undefined ? {} : { apiStyle: args.apiStyle }),
             ...(args.enabled == null ? {} : { enabled: args.enabled }),
             updatedBy: ctx.userId ?? null,
           },
+          });
         });
         return toGqlAiServiceConfig(config);
       } catch (e: unknown) {
@@ -1015,6 +1070,18 @@ export const agentMutations = {
           // args.name is set; trim to match the canonical stored form.
           rethrowAiConfigTyped(new DuplicateAiServiceConfigNameError((args.name ?? '').trim()));
         }
+        rethrowAiConfigTyped(e);
+      }
+    },
+
+    testAiServiceConfig: async (
+      _: unknown,
+      { id, override }: { id: string; override?: AiConfigTestOverride | null },
+      ctx: Context,
+    ) => {
+      try {
+        return await testAiServiceConfig(ctx, id, override ?? {});
+      } catch (e) {
         rethrowAiConfigTyped(e);
       }
     },

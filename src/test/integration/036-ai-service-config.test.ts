@@ -19,6 +19,7 @@
 
 import { describe, it, expect, beforeEach } from 'vitest';
 import { GraphQLError } from 'graphql';
+import { waitForLockWaiters } from '../lockWait.js';
 
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../helpers.js';
@@ -313,6 +314,20 @@ describe('resolveAiServiceConfigs (masked picker)', () => {
       expect('apiKey' in c).toBe(false);
       expect('apiKeyEncrypted' in c).toBe(false);
     }
+  });
+
+  it('withholds an explicit endpoint from members; a public provider default stays visible (#1380 review)', async () => {
+    const orgCfg = await createConfig({ organizationId: org.id }, 'lan', { provider: 'glm', apiKey: 'sk-lan' });
+    await db.aiServiceConfig.update({ where: { id: orgCfg.id }, data: { endpoint: 'http://10.1.2.3:11434/v1' } });
+    await createConfig({ organizationId: org.id }, 'default', { provider: 'glm', apiKey: 'sk-def' });
+    const listed = await resolvers.Query.resolveAiServiceConfigs({}, { appRef: app.id }, ctxFor(member.id));
+    const lan = listed.find((c) => c.name === 'lan')!;
+    const dflt = listed.find((c) => c.name === 'default')!;
+    expect([lan.endpoint, lan.effectiveEndpoint]).toEqual([null, null]);
+    expect(JSON.stringify(listed)).not.toContain('10.1.2.3');
+    expect(dflt.effectiveEndpoint).toBe('https://api.z.ai/api/paas/v4');
+    // The owner's admins still see it through the management read.
+    expect((await resolvers.Query.aiServiceConfig({}, { ref: orgCfg.id }, ctxFor(admin.id)))!.endpoint).toBe('http://10.1.2.3:11434/v1');
   });
 
   it('does NOT include configs owned by sibling Agents in the same App', async () => {
@@ -771,5 +786,272 @@ describe('consumer name references (US4)', () => {
     expect(caught?.extensions?.code).toBe('NoAiConfigAvailableError');
     expect(caught?.message).toContain('frontier');
     expect(caught?.message).not.toMatch(/sk-/);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────
+// #1373 — AiServiceConfig.endpoint: stored, validated, cleared, resolved
+// ─────────────────────────────────────────────────────────────────────────
+
+describe('AiServiceConfig.endpoint (#1373)', () => {
+  const mk = (extra: Record<string, unknown>) =>
+    resolvers.Mutation.createAiServiceConfig(
+      {},
+      { ownerType: 'ORGANIZATION', ownerId: org.id, name: 'zai', provider: 'glm', model: 'GLM-5.3', apiKey: 'k-1234', ...extra },
+      ctxFor(admin.id),
+    );
+
+  it('stores a valid endpoint without its trailing slash, and reports it as the effective endpoint', async () => {
+    const c = await mk({ endpoint: 'https://api.z.ai/api/paas/v4/' });
+    expect(c).toMatchObject({ endpoint: 'https://api.z.ai/api/paas/v4', effectiveEndpoint: 'https://api.z.ai/api/paas/v4' });
+    expect((await db.aiServiceConfig.findUniqueOrThrow({ where: { id: c.id } })).endpoint).toBe('https://api.z.ai/api/paas/v4');
+  });
+
+  it('with no endpoint the effective endpoint is the provider default, and resolveAIConfig reports the same', async () => {
+    const c = await mk({});
+    expect(c).toMatchObject({ endpoint: null, effectiveEndpoint: 'https://api.z.ai/api/paas/v4' });
+    const resolved = await resolvers.Query.resolveAIConfig({}, { name: 'zai', appRef: app.id }, ctxFor(admin.id));
+    expect(resolved).toMatchObject({ effectiveEndpoint: 'https://api.z.ai/api/paas/v4', effectiveApiStyle: 'CHAT_COMPLETIONS' });
+  });
+
+  it('refuses an invalid endpoint with the typed validation error and writes nothing', async () => {
+    for (const bad of ['http://api.z.ai/v4', 'https://u:p@api.z.ai/v4', 'https://api.z.ai/v4?x=1', 'https://10.0.0.5/v1', 'not a url']) {
+      let caught: GraphQLError | null = null;
+      try {
+        await mk({ endpoint: bad });
+      } catch (e) {
+        caught = e as GraphQLError;
+      }
+      expect(caught?.extensions?.code, bad).toBe('AiConfigValidationError');
+    }
+    expect(await db.aiServiceConfig.count()).toBe(0);
+  });
+
+  it('update: omitted keeps the endpoint, a new value replaces it, null and "" clear it', async () => {
+    const c = await mk({ endpoint: 'https://api.z.ai/api/paas/v4' });
+    const upd = (endpoint?: string | null) =>
+      resolvers.Mutation.updateAiServiceConfig({}, { id: c.id, ...(endpoint === undefined ? {} : { endpoint }) }, ctxFor(admin.id));
+    expect((await upd()).endpoint).toBe('https://api.z.ai/api/paas/v4');
+    expect((await upd('https://api.z.ai/api/coding/paas/v4')).endpoint).toBe('https://api.z.ai/api/coding/paas/v4');
+    expect((await upd(null)).endpoint).toBeNull();
+    await upd('https://api.z.ai/api/paas/v4');
+    expect((await upd('')).endpoint).toBeNull();
+  });
+
+  it('apiStyle round-trips for an OpenAI-compatible provider and is refused for a single-protocol one (D3)', async () => {
+    const c = await mk({ apiStyle: 'RESPONSES' });
+    expect(c).toMatchObject({ apiStyle: 'RESPONSES', effectiveApiStyle: 'RESPONSES' });
+    const cleared = await resolvers.Mutation.updateAiServiceConfig({}, { id: c.id, apiStyle: null }, ctxFor(admin.id));
+    expect(cleared).toMatchObject({ apiStyle: null, effectiveApiStyle: 'CHAT_COMPLETIONS' });
+    await resolvers.Mutation.updateAiServiceConfig({}, { id: c.id, apiStyle: 'RESPONSES' }, ctxFor(admin.id));
+    // A provider change is judged with the style it would strand.
+    let caught: GraphQLError | null = null;
+    try {
+      await resolvers.Mutation.updateAiServiceConfig({}, { id: c.id, provider: 'anthropic' }, ctxFor(admin.id));
+    } catch (e) {
+      caught = e as GraphQLError;
+    }
+    expect(caught?.extensions?.code).toBe('AiConfigValidationError');
+    expect((await db.aiServiceConfig.findUniqueOrThrow({ where: { id: c.id } })).provider).toBe('glm');
+  });
+
+  it('a legacy provider change drops a style the new provider cannot use (#1380 review)', async () => {
+    const legacy = await createConfig({ agentId: agent.id }, 'default', { provider: 'openai' });
+    await db.aiServiceConfig.update({ where: { id: legacy.id }, data: { apiStyle: 'CHAT_COMPLETIONS' } });
+    // Same provider: the style survives the legacy write.
+    await resolvers.Mutation.updateAgentAIConfig({}, { agentId: agent.id, provider: 'openai', model: 'gpt-x' }, ctxFor(admin.id));
+    expect((await db.aiServiceConfig.findUniqueOrThrow({ where: { id: legacy.id } })).apiStyle).toBe('CHAT_COMPLETIONS');
+    // A provider with one protocol: the stranded style is cleared.
+    await resolvers.Mutation.updateAgentAIConfig({}, { agentId: agent.id, provider: 'anthropic', model: 'claude-x' }, ctxFor(admin.id));
+    const row = await db.aiServiceConfig.findUniqueOrThrow({ where: { id: legacy.id } });
+    expect([row.provider, row.apiStyle]).toEqual(['anthropic', null]);
+    // …and the modern surface can edit it again without tripping the pair check.
+    await expect(resolvers.Mutation.updateAiServiceConfig({}, { id: legacy.id, enabled: false }, ctxFor(admin.id))).resolves.toMatchObject({ enabled: false });
+  });
+
+  it('a legacy provider change clears the endpoint too: the new key never goes to the old host (#1380 review)', async () => {
+    const legacy = await createConfig({ agentId: agent.id }, 'default', { provider: 'openai' });
+    await db.aiServiceConfig.update({ where: { id: legacy.id }, data: { endpoint: 'https://api.openai.com/v1' } });
+    await resolvers.Mutation.updateAgentAIConfig({}, { agentId: agent.id, provider: 'openai', model: 'gpt-y' }, ctxFor(admin.id));
+    expect((await db.aiServiceConfig.findUniqueOrThrow({ where: { id: legacy.id } })).endpoint).toBe('https://api.openai.com/v1');
+    await resolvers.Mutation.updateAgentAIConfig({}, { agentId: agent.id, provider: 'anthropic', model: 'claude-x', apiKey: 'sk-new' }, ctxFor(admin.id));
+    expect((await db.aiServiceConfig.findUniqueOrThrow({ where: { id: legacy.id } })).endpoint).toBeNull();
+
+    const appCfg = await createConfig({ appId: app.id }, 'default', { provider: 'openai' });
+    await db.aiServiceConfig.update({ where: { id: appCfg.id }, data: { endpoint: 'https://api.openai.com/v1' } });
+    await resolvers.Mutation.updateApp({}, { ref: app.id, aiProvider: 'glm', aiModel: 'GLM-5.3' } as never, ctxFor(admin.id));
+    expect((await db.aiServiceConfig.findUniqueOrThrow({ where: { id: appCfg.id } })).endpoint).toBeNull();
+  });
+
+  it('a legacy provider change resets even a style the new provider supports (#1380 review)', async () => {
+    const legacy = await createConfig({ agentId: agent.id }, 'default', { provider: 'openai' });
+    await db.aiServiceConfig.update({ where: { id: legacy.id }, data: { apiStyle: 'RESPONSES' } });
+    // glm supports apiStyle, but RESPONSES was chosen for OpenAI; Z.ai serves chat.
+    await resolvers.Mutation.updateAgentAIConfig({}, { agentId: agent.id, provider: 'glm', model: 'GLM-5.3', apiKey: 'k' }, ctxFor(admin.id));
+    const row = await db.aiServiceConfig.findUniqueOrThrow({ where: { id: legacy.id } });
+    expect([row.provider, row.apiStyle]).toEqual(['glm', null]);
+  });
+
+  it('the member picker drops a legacy params.baseUrl (#1380 review)', async () => {
+    const member = await db.user.create({ data: { id: generateId(), handle: 'cfg-member2', githubId: 36009, name: 'M2' } });
+    await db.appMember.create({ data: { appId: app.id, userId: member.id, role: 'member' } });
+    const legacy = await createConfig({ organizationId: org.id }, 'legacy-url', { provider: 'glm' });
+    await db.aiServiceConfig.update({ where: { id: legacy.id }, data: { params: { baseUrl: 'http://10.9.9.9/v4', maxTokens: 50 } } });
+    const listed = await resolvers.Query.resolveAiServiceConfigs({}, { appRef: app.id }, ctxFor(member.id));
+    const row = listed.find((c) => c.name === 'legacy-url')!;
+    expect(row.params).toEqual({ maxTokens: 50 });
+    expect(JSON.stringify(listed)).not.toContain('10.9.9.9');
+  });
+
+  it('the legacy App AI arguments drop a stranded style too (#1380 review)', async () => {
+    const legacy = await createConfig({ appId: app.id }, 'default', { provider: 'openai' });
+    await db.aiServiceConfig.update({ where: { id: legacy.id }, data: { apiStyle: 'CHAT_COMPLETIONS' } });
+    await resolvers.Mutation.updateApp({}, { ref: app.id, aiProvider: 'anthropic', aiModel: 'claude-x' } as never, ctxFor(admin.id));
+    const row = await db.aiServiceConfig.findUniqueOrThrow({ where: { id: legacy.id } });
+    expect([row.provider, row.apiStyle]).toEqual(['anthropic', null]);
+  });
+
+  it('writing params.baseUrl is refused, but a legacy row carrying one can still be edited (D2)', async () => {
+    let caught: GraphQLError | null = null;
+    try {
+      await mk({ params: { baseUrl: 'https://api.z.ai/api/paas/v4' } });
+    } catch (e) {
+      caught = e as GraphQLError;
+    }
+    expect(caught?.extensions?.code).toBe('AiConfigValidationError');
+    const legacy = await createConfig({ organizationId: org.id }, 'legacy', { provider: 'glm' });
+    await db.aiServiceConfig.update({ where: { id: legacy.id }, data: { params: { baseUrl: 'https://legacy.example/v4' } } });
+    const edited = await resolvers.Mutation.updateAiServiceConfig({}, { id: legacy.id, enabled: false }, ctxFor(admin.id));
+    expect(edited).toMatchObject({ enabled: false, effectiveEndpoint: 'https://api.z.ai/api/paas/v4' });
+  });
+
+  it('aiProviderEndpoints serves the single suggestion list: one default per listed provider, none for bedrock or an unknown provider', async () => {
+    const glm = await resolvers.Query.aiProviderEndpoints({}, { provider: 'glm' });
+    expect(glm.map((e) => e.url)).toEqual([
+      'https://api.z.ai/api/paas/v4',
+      'https://api.z.ai/api/coding/paas/v4',
+      'https://open.bigmodel.cn/api/paas/v4',
+    ]);
+    expect(glm[0].isDefault).toBe(true);
+    expect(glm.filter((e) => e.isDefault)).toHaveLength(1);
+    expect(await resolvers.Query.aiProviderEndpoints({}, { provider: 'bedrock' })).toEqual([]);
+    expect(await resolvers.Query.aiProviderEndpoints({}, { provider: 'toString' })).toEqual([]);
+  });
+});
+
+describe('updateAiServiceConfig judges the provider/style pair on the locked row (#1380 review)', () => {
+  it('a concurrent provider switch between the read and the write refuses a style the new provider has no use for', async () => {
+    const c = await resolvers.Mutation.createAiServiceConfig(
+      {},
+      { ownerType: 'ORGANIZATION', ownerId: org.id, name: 'oa', provider: 'openai', model: 'gpt', apiKey: 'k-1' },
+      ctxFor(admin.id),
+    );
+    let locked!: () => void;
+    const holding = new Promise<void>((r) => (locked = r));
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    // Another admin's update: holds the row, then switches the provider.
+    const holder = db.$transaction(
+      async (tx) => {
+        await tx.$queryRaw`SELECT 1 FROM "ai_service_configs" WHERE "id" = ${c.id} FOR UPDATE`;
+        locked();
+        await gate;
+        await tx.aiServiceConfig.update({ where: { id: c.id }, data: { provider: 'anthropic' } });
+      },
+      { timeout: 15_000 },
+    );
+    await holding; // the row is locked before our write starts
+    const write = resolvers.Mutation.updateAiServiceConfig({}, { id: c.id, apiStyle: 'RESPONSES' }, ctxFor(admin.id)).then(
+      () => null,
+      (e: unknown) => e,
+    );
+    await waitForLockWaiters(db); // the write has passed its pre-check and waits on the lock
+    release();
+    await holder;
+    expect(((await write) as GraphQLError | null)?.extensions?.code).toBe('AiConfigValidationError');
+    expect(await db.aiServiceConfig.findUniqueOrThrow({ where: { id: c.id } })).toMatchObject({ provider: 'anthropic', apiStyle: null });
+  });
+});
+
+describe('the legacy writers clear a stale endpoint/style against the LOCKED row (#1380 review)', () => {
+  async function holdAndSwitch(id: string, write: () => Promise<unknown>) {
+    let locked!: () => void;
+    const holding = new Promise<void>((r) => (locked = r));
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    // A concurrent modern update: switches the row to GLM with a GLM endpoint and style.
+    const holder = db.$transaction(
+      async (tx) => {
+        await tx.$queryRaw`SELECT 1 FROM "ai_service_configs" WHERE "id" = ${id} FOR UPDATE`;
+        await tx.aiServiceConfig.update({
+          where: { id },
+          data: { provider: 'glm', endpoint: 'https://open.bigmodel.cn/api/paas/v4', apiStyle: 'CHAT_COMPLETIONS' },
+        });
+        locked();
+        await gate;
+      },
+      { timeout: 15_000 },
+    );
+    await holding;
+    const pending = write();
+    await waitForLockWaiters(db); // the legacy write has read the OLD row and is now waiting on the lock
+    release();
+    await holder;
+    await pending;
+  }
+
+  it('updateAgentAIConfig switching back to openai clears the GLM endpoint and style', async () => {
+    const c = await resolvers.Mutation.createAiServiceConfig(
+      {},
+      { ownerType: 'AGENT', ownerId: agent.id, name: 'default', provider: 'openai', model: 'gpt', apiKey: 'k-1' },
+      ctxFor(admin.id),
+    );
+    await holdAndSwitch(c.id, () =>
+      resolvers.Mutation.updateAgentAIConfig({}, { agentId: agent.id, provider: 'openai', model: 'gpt-2', apiKey: 'k-2' }, ctxFor(admin.id)),
+    );
+    expect(await db.aiServiceConfig.findUniqueOrThrow({ where: { id: c.id } })).toMatchObject({ provider: 'openai', endpoint: null, apiStyle: null });
+  });
+
+  it('updateApp (legacy aiProvider) switching back to openai clears them too', async () => {
+    const c = await resolvers.Mutation.createAiServiceConfig(
+      {},
+      { ownerType: 'APP', ownerId: app.id, name: 'default', provider: 'openai', model: 'gpt', apiKey: 'k-1' },
+      ctxFor(admin.id),
+    );
+    await holdAndSwitch(c.id, () =>
+      resolvers.Mutation.updateApp({}, { ref: app.id, aiProvider: 'openai', aiModel: 'gpt-2' } as never, ctxFor(admin.id)),
+    );
+    expect(await db.aiServiceConfig.findUniqueOrThrow({ where: { id: c.id } })).toMatchObject({ provider: 'openai', endpoint: null, apiStyle: null });
+  });
+});
+
+describe('updateApp legacy: omitted provider/model come from the LOCKED row (#1380 review)', () => {
+  it('a concurrent model change is not overwritten by the value read before the lock', async () => {
+    const c = await resolvers.Mutation.createAiServiceConfig(
+      {},
+      { ownerType: 'APP', ownerId: app.id, name: 'default', provider: 'openai', model: 'gpt-old', apiKey: 'k-1' },
+      ctxFor(admin.id),
+    );
+    let locked!: () => void;
+    const holding = new Promise<void>((r) => (locked = r));
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const holder = db.$transaction(
+      async (tx) => {
+        await tx.$queryRaw`SELECT 1 FROM "ai_service_configs" WHERE "id" = ${c.id} FOR UPDATE`;
+        await tx.aiServiceConfig.update({ where: { id: c.id }, data: { model: 'gpt-new' } });
+        locked();
+        await gate;
+      },
+      { timeout: 15_000 },
+    );
+    await holding;
+    // Only the key changes; provider and model are omitted.
+    const pending = resolvers.Mutation.updateApp({}, { ref: app.id, aiApiKey: 'k-2' } as never, ctxFor(admin.id));
+    await waitForLockWaiters(db);
+    release();
+    await holder;
+    await pending;
+    expect(await db.aiServiceConfig.findUniqueOrThrow({ where: { id: c.id } })).toMatchObject({ provider: 'openai', model: 'gpt-new' });
   });
 });

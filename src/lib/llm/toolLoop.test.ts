@@ -28,7 +28,7 @@ import { hadronLog, hadronFail, AuthorFailError, type RunToolDef } from '../runn
 
 const mockedGenerate = aiGenerateText as unknown as ReturnType<typeof vi.fn>;
 
-const resolved = { config: { provider: 'anthropic', model: 'test' } } as never;
+const resolved = { ownerType: 'HADRON_SERVER', config: { provider: 'anthropic', model: 'test' } } as never;
 const stubCtx = (log = vi.fn()) => ({ log, db: {} as never, run: {} as never, principal: {} as never });
 
 const req = { prompt: 'do the thing' };
