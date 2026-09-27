@@ -158,6 +158,32 @@ describe('hadron_get_nodes — explicit set', () => {
     }
   });
 
+  it('prefetches latest eligible reports once for the batch, preserving each node revision cutoff', async () => {
+    const task = await db.node.create({ data: { id: generateId(), memoryId: fx.memory.id, loc: 'validator', name: 'Validator', isRunnable: true } });
+    const one = await db.node.create({ data: { id: generateId(), memoryId: fx.memory.id, loc: 'one', name: 'One', revSeq: 2 } });
+    const two = await db.node.create({ data: { id: generateId(), memoryId: fx.memory.id, loc: 'two', name: 'Two', revSeq: 1 } });
+    for (const [nodeId, nodeRevSeq, outcome] of [
+      [one.id, 1, 'FAIL'], [one.id, 2, 'PASS'],
+      [two.id, 1, 'FAIL'], [two.id, 3, 'PASS'],
+    ] as const) {
+      await db.nodeContentValidationReport.create({ data: {
+        nodeId, memoryId: fx.memory.id, nodeRevSeq,
+        validationTaskId: task.id, validationTaskRevSeq: 1, outcome,
+      } });
+    }
+    const perNodeLookup = vi.spyOn(db.nodeContentValidationReport, 'findFirst');
+    try {
+      const output = await batchRead({ refs: [nodeUrn('one'), nodeUrn('two')] });
+      expect(output).toContain('**One**');
+      expect(output).toContain('**Two**');
+      expect(output).toMatch(/\*\*One\*\*[\s\S]*?Validation: pass \(node revision 2; validator [^\n]*\)/);
+      expect(output).toMatch(/\*\*Two\*\*[\s\S]*?Validation: fail \(node revision 1; validator [^\n]*\)/);
+      expect(perNodeLookup).not.toHaveBeenCalled();
+    } finally {
+      perNodeLookup.mockRestore();
+    }
+  });
+
   it('returns all nodes with content + edges, in INPUT order', async () => {
     await addNode({ loc: 'beta', name: 'NodeBeta', content: 'beta body' });
     await addNode({ loc: 'alpha', name: 'NodeAlpha', content: 'alpha body', edges: [{ targetUrn: nodeUrn('beta'), name: 'links-to' }] });
