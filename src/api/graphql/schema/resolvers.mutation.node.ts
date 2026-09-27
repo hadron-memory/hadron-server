@@ -12,6 +12,7 @@ import {
 import { lockMemoryForChannelChange } from '../../../lib/channels.js';
 import {
   assertGovernedWrite,
+  assertRoleDeclaredForWrite,
   mergedGovernedState,
   governedKindsOf,
   GOVERNED_KINDS,
@@ -128,6 +129,8 @@ import {
   concealUnreadableDenial,
   concealUnreadableNodeDenial,
   nodeNotFoundError,
+  resolveMemoryRefForWrite,
+  isMemoryHiddenForWrite,
   type NodeInput,
   type NodeEdgeInput,
   type CreateNodeInput,
@@ -258,6 +261,13 @@ export async function writeNodeCore(
     concealUnreadable?: { entity: 'memory' | 'node'; ref: string };
     /** #1326 — an internal clone carries the source's already-stored stamp. */
     copiedAuthorship?: NodeAuthorshipStamp;
+    /**
+     * #1330 — a node the SERVER writes on its own account, exempt from the
+     * strict-sub-role refusal (`assertRoleDeclaredForWrite`). Only server code
+     * can pass it, never a client, which is what makes the exemption
+     * trustworthy. No caller needs it yet: no platform writer sets a role.
+     */
+    platformWrite?: boolean;
   },
 ) {
       // Keep the historical `input` name so the body below stays a
@@ -1036,6 +1046,19 @@ export async function writeNodeCore(
               if (!current) return { conflict: false, node: null };
             }
 
+            // #1330 — H1 strict sub-roles, judged on the locked row: a role the
+            // write assigns must be declared under a strict parent.
+            await assertRoleDeclaredForWrite(
+              tx,
+              input.memoryId,
+              {
+                role: input.role === undefined ? current.role : input.role,
+                priorRole: current.role,
+                runnableAfter: mergedGovernedState(current, { role: input.role, isRunnable: input.isRunnable }).isRunnable,
+              },
+              { platformWrite: opts?.platformWrite },
+            );
+
             // The snapshot uses the at-rest row, but the caller supplied
             // plaintext. Diff a decrypted COPY so an identical encrypted save
             // neither manufactures a revision nor clears valid attribution.
@@ -1282,6 +1305,19 @@ export async function writeNodeCore(
               });
             }
 
+            // #1330 — H1 strict sub-roles, against the AUTHORITATIVE row: a
+            // resurrection keeps the tombstone's role unless the write names one.
+            await assertRoleDeclaredForWrite(
+              tx,
+              input.memoryId,
+              {
+                role: input.role === undefined ? (authoritative?.role ?? null) : input.role,
+                priorRole: authoritative?.role ?? null,
+                runnableAfter: mergedGovernedState(authoritative, { role: input.role, isRunnable: input.isRunnable }).isRunnable,
+              },
+              { platformWrite: opts?.platformWrite },
+            );
+
             // #1183 — resurrect from the AUTHORITATIVE row, not the stale
             // probe. `updateExtras` above was built from `existing`, which may
             // have seen nothing while another caller created AND soft-deleted
@@ -1429,7 +1465,7 @@ export async function writeNodeCore(
  * genuine miss and a soft-deleted row map to the same not-found (no existence
  * oracle), while a malformed URN propagates as UrnNotQualifiedError (spec 022).
  */
-async function resolveExistingNode(ctx: Context, ref: string) {
+async function resolveExistingNode(ctx: Context, ref: string, opts?: { forWrite?: boolean }) {
   let id: string;
   try {
     ({ id } = await resolveNodeRef(ctx.db, ref));
@@ -1445,6 +1481,12 @@ async function resolveExistingNode(ctx: Context, ref: string) {
     throw new GraphQLError(`Node not found: "${ref}"`, {
       extensions: { code: 'NODE_NOT_FOUND', ref },
     });
+  // #1381: a node the caller will WRITE, in a memory it can neither write nor
+  // read, answers here — at resolution — exactly as a missing one. Refusing at
+  // the later write gate leaks through ORDER (see resolveMemoryRefForWrite).
+  if (opts?.forWrite && (await isMemoryHiddenForWrite(ctx, node.memoryId, 'node'))) {
+    throw nodeNotFoundError(ref);
+  }
   return node;
 }
 
@@ -1479,9 +1521,10 @@ async function resolveRelocationTarget(
   if (hasUrn) {
     const { memoryUrn, loc } = splitWholeNodeUrn(targetUrn as string);
     destLoc = loc;
-    ({ id: destMemoryId } = await resolveMemoryRef(ctx.db, memoryUrn));
+    // #1381: the destination is written, so it conceals as it resolves.
+    ({ id: destMemoryId } = await resolveMemoryRefForWrite(ctx, memoryUrn));
   } else {
-    ({ id: destMemoryId } = await resolveMemoryRef(ctx.db, targetMemoryRef as string));
+    ({ id: destMemoryId } = await resolveMemoryRefForWrite(ctx, targetMemoryRef as string));
     destLoc = source.loc;
   }
   try {
@@ -2941,7 +2984,7 @@ export const nodeMutations = {
       { sourceRef, targetUrn, targetMemoryRef }: { sourceRef: string; targetUrn?: string | null; targetMemoryRef?: string | null },
       ctx: Context,
     ) => {
-      const source = await resolveExistingNode(ctx, sourceRef);
+      const source = await resolveExistingNode(ctx, sourceRef, { forWrite: true });
       const { destMemoryId, destLoc } = await resolveRelocationTarget(
         ctx, source, targetUrn, targetMemoryRef,
       );
@@ -3652,7 +3695,8 @@ export const nodeMutations = {
       ctx: Context,
     ) => {
       // 007-entity-id-or-urn: memoryId may be ID, bare URN, or prefixed URN.
-      const { id: resolvedMemoryId } = await resolveMemoryRef(ctx.db, memoryId);
+      // #1381: an unreadable memory answers as resolveMemoryRef's miss.
+      const { id: resolvedMemoryId } = await resolveMemoryRefForWrite(ctx, memoryId);
       await requireMemoryWriteAccess(ctx, resolvedMemoryId);
 
       // #725 — this bulk path bypasses writeNodeCore, so enforce the memory's

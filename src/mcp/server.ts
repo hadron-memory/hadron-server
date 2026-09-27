@@ -3,6 +3,8 @@ import { createHmac, randomUUID } from 'crypto';
 import { assertLocWritable, LocProtectedError } from '../lib/protectedLoc.js';
 import {
   assertGovernedWrite,
+  assertRoleDeclaredForWrite,
+  RoleNotDeclaredError,
   governedKindsOf,
   roleIsOrDescendsFrom,
   type GovernedKind,
@@ -5159,6 +5161,19 @@ export function createMcpServerInstance(
           if (authoritative && !authoritative.deletedAt) throw LIVE_LOC_CONFLICT;
 
           const pre = await snapshotOverwrittenNode(tx);
+
+          // #1330 — H1 strict sub-roles, as writeNodeCore judges them (this
+          // handler is its parity implementation, so the gate is repeated here).
+          // Judged on `pre`, the tombstone as LOCKED by the snapshot, not on the
+          // unlocked `authoritative` read: a writer that takes no loc lock (git
+          // sync) could change the tombstone's role in between, and a stale
+          // prior role would make an undeclared one read as unchanged (#1400
+          // review). A refusal rolls the snapshot back with everything else.
+          await assertRoleDeclaredForWrite(tx, memoryId, {
+            role: role === undefined ? (pre?.role ?? null) : role,
+            priorRole: pre?.role ?? null,
+            runnableAfter: mergedGovernedState(pre, { role, isRunnable }).isRunnable,
+          });
           const written = await tx.node.upsert({
             ...upsertArgs,
             // Resurrect (#543) on the authoritative row, not the stale probe: a
@@ -5186,6 +5201,7 @@ export function createMcpServerInstance(
         if (e === LIVE_LOC_CONFLICT) {
           return textResult(`Node already exists at "${rawUrn}" — use hadron_update_node.`);
         }
+        if (e instanceof RoleNotDeclaredError) return textResult(`[role_not_declared] ${e.message}`);
         if (e instanceof InlineEdgeEndpointError) return textResult(e.message);
         throw e;
       }
@@ -5559,6 +5575,12 @@ export function createMcpServerInstance(
                 { extensions: { code: 'NODE_WRITE_CONFLICT', loc, memoryId: memory.id } },
               );
             }
+            // #1330 — H1 strict sub-roles on the locked row, as writeNodeCore.
+            await assertRoleDeclaredForWrite(tx, memory.id, {
+              role: role === undefined ? current.role : role,
+              priorRole: current.role,
+              runnableAfter: mergedGovernedState(current, { role, isRunnable }).isRunnable,
+            });
             // A guard-only call is a useful no-op check and must not manufacture
             // a history row or advance the live revision.
             if (Object.keys(data).length === 0 && resolvedEdges === null) return;
@@ -5596,6 +5618,7 @@ export function createMcpServerInstance(
           if (e instanceof LocProtectedError) return textResult(`[loc_protected] ${e.message}`);
           if (e instanceof NodeMovedDuringWriteError) return textResult(e.message);
           if (e instanceof InlineEdgeEndpointError) return textResult(e.message);
+          if (e instanceof RoleNotDeclaredError) return textResult(`[role_not_declared] ${e.message}`);
           if (e instanceof ScopeGraphQLError && e.extensions?.code === 'NODE_WRITE_CONFLICT') {
             return textResult(`[node_write_conflict] ${e.message}`);
           }
@@ -7820,22 +7843,41 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       // createTestableMcpServer bypasses zod — normalize defensively (a NaN
       // would reach Prisma's `take` as a raw driver error rather than a clamp).
       const take = Math.max(1, Math.min(typeof limit === 'number' && Number.isFinite(limit) ? limit : 10, 50));
-      const sessions = await db.session.findMany({
-        where: {
-          ...scope,
-          deletedAt: null,
-          // "Open" is `endedAt IS NULL` — the ONE active predicate the platform
-          // uses everywhere (#930: the reaper stamps endedAt AND autoExpiredAt
-          // together precisely so this stays a single test).
-          ...(includeEnded ? {} : { endedAt: null }),
+      // #1133 — the count runs under the IDENTICAL where as the rows (one
+      // object, used by both queries), so the truncation disclosure cannot
+      // leak a session count the caller may not read: whatever scopes the
+      // rows scopes the total, by construction rather than by re-statement.
+      const where = {
+        ...scope,
+        deletedAt: null,
+        // "Open" is `endedAt IS NULL` — the ONE active predicate the platform
+        // uses everywhere (#930: the reaper stamps endedAt AND autoExpiredAt
+        // together precisely so this stays a single test).
+        ...(includeEnded ? {} : { endedAt: null }),
+      };
+      // Both reads share ONE repeatable-read snapshot (Codex P2 + Copilot on
+      // the first head): as independent READ COMMITTED statements they could
+      // straddle a concurrent hadron_start_session — count sees 10, the insert
+      // lands, findMany then returns a DIFFERENT 10 that quietly drops the
+      // oldest while total === length reports "not truncated". That is the
+      // absence-as-reaped ambiguity this tool exists to kill, reopened in a
+      // race window; one snapshot closes it.
+      const [sessions, total] = await db.$transaction(
+        async (tx) => {
+          const rows = await tx.session.findMany({
+            where,
+            orderBy: { startedAt: 'desc' },
+            take,
+            select: {
+              id: true, startedAt: true, endedAt: true, type: true, plan: true,
+              appId: true, workerId: true,
+            },
+          });
+          const count = await tx.session.count({ where });
+          return [rows, count] as const;
         },
-        orderBy: { startedAt: 'desc' },
-        take,
-        select: {
-          id: true, startedAt: true, endedAt: true, type: true, plan: true,
-          appId: true, workerId: true,
-        },
-      });
+        { isolationLevel: 'RepeatableRead' },
+      );
       if (sessions.length === 0) {
         return textResult(
           includeEnded
@@ -7908,8 +7950,21 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         );
       });
 
+      // #1133 — absence from this list must never be readable as "the session
+      // is gone" (tasks:end-worker-session reads it as "reaped", and a reaped
+      // session writes no handoff). When the list truncated, say so, and give
+      // recovery guidance that is TRUE: `limit` retrieves everything only
+      // while the total fits under its 50 cap — beyond that, say older rows
+      // exist instead of promising a call that cannot return them.
+      const truncated = total > sessions.length;
+      const header = truncated
+        ? total <= 50
+          ? `${sessions.length} session(s) — TRUNCATED, showing the newest ${sessions.length} of ${total}; pass limit: ${total} to see them all:\n`
+          : `${sessions.length} session(s) — TRUNCATED, showing the newest ${sessions.length} of ${total}; limit caps at 50, so ${total - 50} older session(s) lie beyond any single call:\n`
+        : `${sessions.length} session(s):\n`;
+
       return textResult(
-        `${sessions.length} session(s):\n${lines.join('\n')}\n\n` +
+        `${header}${lines.join('\n')}\n\n` +
           // #1034: "session id" stays GENERAL here, because this list includes
           // unbound sessions whose own row says "working as: nobody" — calling
           // every id a worker session id would contradict the line above it and

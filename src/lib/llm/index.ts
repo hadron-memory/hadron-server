@@ -28,12 +28,22 @@ import { createOpenAI } from '@ai-sdk/openai';
 import { createAmazonBedrock } from '@ai-sdk/amazon-bedrock';
 import type { ResolvedAiConfig } from '../aiConfig.js';
 import { decryptToken } from '../tokenCrypto.js';
+import { defaultEndpoint, effectiveApiStyle, explicitEndpoint, usesProcessCredential } from '../aiEndpoint.js';
+import { guardedEndpointFetch } from './endpointFetch.js';
 
 export interface LlmRequest {
   system?: string;
   prompt: string;
   /** Hard output ceiling — callers pass their remaining run budget. */
   maxTokens?: number;
+  /**
+   * Abort the provider call after this many ms (#1385 review). A run has its
+   * own deadline around the whole flow; a single interactive call (the
+   * saved-config Test) has none, and an endpoint that accepts the connection
+   * but never answers must not hold the request forever. An abort surfaces as
+   * a transient LlmInvocationError.
+   */
+  timeoutMs?: number;
 }
 
 export interface LlmResult {
@@ -56,28 +66,58 @@ export class LlmInvocationError extends Error {
   }
 }
 
-const GLM_DEFAULT_BASE_URL = 'https://open.bigmodel.cn/api/paas/v4';
+/**
+ * Build the model a call would use, WITHOUT calling it: every local refusal
+ * `modelFor` makes (a malformed Bedrock key, a keyless config it won't run, an
+ * unknown provider) surfaces here as the same LlmInvocationError, with no
+ * network. The config test (#1385) runs it before charging its rate limit and
+ * quota, so a config that could never reach a provider costs nothing.
+ */
+export function assertModelBuildable(resolved: ResolvedAiConfig): void {
+  modelFor(resolved);
+}
 
 function modelFor(resolved: ResolvedAiConfig): LanguageModel {
   const { provider, model, apiKeyEncrypted } = resolved.config;
   const key = apiKeyEncrypted ? decryptToken(apiKeyEncrypted) : undefined;
-  const params = (resolved.config.params ?? {}) as { baseUrl?: string };
+  // #1373: an EXPLICIT endpoint is admin-chosen, so it goes through the
+  // connect-time egress guard. Provider defaults are constants and do not.
+  const endpoint = explicitEndpoint(resolved.config);
+  // With no stored key, every SDK falls back to the PROCESS's credentials
+  // (OPENAI_API_KEY, ANTHROPIC_API_KEY, the AWS chain). Sent to an
+  // admin-chosen host, that would hand the server's own credential to
+  // whoever runs it (#1389 review, Codex P1). An explicit endpoint therefore
+  // requires the config's own key, and so does a provider whose DEFAULT host
+  // is not the credential's issuer: glm's is Z.ai, and the OpenAI SDK would
+  // send it the server's OPENAI_API_KEY (#1385 review). And only the
+  // platform's own config may spend the platform credential at all (#1390).
+  if (!key && !usesProcessCredential(resolved.config, resolved.ownerType)) {
+    throw new LlmInvocationError(
+      endpoint
+        ? `Provider "${provider}" has an explicit endpoint but no stored key; the server's own credentials are never sent to a configured host.`
+        : resolved.ownerType !== 'HADRON_SERVER'
+          ? `This ${resolved.ownerType.toLowerCase()} AI config has no stored key; only the platform's own configs may use the server's credentials.`
+          : `Provider "${provider}" needs a stored key; the server's own credentials belong to other providers.`,
+      provider,
+      false,
+    );
+  }
+  const conn = endpoint ? { baseURL: endpoint, fetch: guardedEndpointFetch() } : {};
+  // D3: the wire protocol for an OpenAI-compatible provider. Calling the
+  // provider directly selects the Responses API in @ai-sdk/openai 4.x;
+  // `.chat()` selects Chat Completions (#1374).
+  const openAiCompatible = (client: ReturnType<typeof createOpenAI>) =>
+    effectiveApiStyle(resolved.config) === 'CHAT_COMPLETIONS' ? client.chat(model) : client(model);
   switch (provider) {
     case 'anthropic':
-      return createAnthropic({ apiKey: key })(model);
+      return createAnthropic({ apiKey: key, ...conn })(model);
     case 'openai':
-      // Calling the provider directly selects the Responses API (POST
-      // /responses) in @ai-sdk/openai 4.x. Kept for a custom baseUrl too: a
-      // custom URL alone does not say the host lacks /responses, so choosing
-      // the API per endpoint is a contract decision, not something to infer
-      // here (#1374).
-      return createOpenAI({ apiKey: key, ...(params.baseUrl ? { baseURL: params.baseUrl } : {}) })(model);
+      // Default RESPONSES; an OpenAI-compatible host that serves only Chat
+      // Completions sets apiStyle, never inferred from the URL (#1374).
+      return openAiCompatible(createOpenAI({ apiKey: key, ...conn }));
     case 'glm':
-      // OpenAI-compatible endpoint (headless-runner D1 note). `.chat()`
-      // explicitly: Zhipu and Z.ai serve only /chat/completions, and the
-      // provider's default model would POST /responses, failing every glm
-      // call (#1374).
-      return createOpenAI({ apiKey: key, baseURL: params.baseUrl ?? GLM_DEFAULT_BASE_URL }).chat(model);
+      // Default CHAT_COMPLETIONS: Zhipu and Z.ai serve only /chat/completions.
+      return openAiCompatible(createOpenAI({ apiKey: key, baseURL: defaultEndpoint('glm')!, ...conn }));
     case 'bedrock': {
       let triple: { accessKeyId?: string; secretAccessKey?: string; region?: string } = {};
       if (key) {
@@ -102,6 +142,7 @@ function modelFor(resolved: ResolvedAiConfig): LanguageModel {
         region: triple.region,
         accessKeyId: triple.accessKeyId,
         secretAccessKey: triple.secretAccessKey,
+        ...conn,
       })(model);
     }
     default:
@@ -480,6 +521,7 @@ export async function generateText(
       ...(req.system ? { system: req.system } : {}),
       prompt: req.prompt,
       ...(req.maxTokens != null ? { maxOutputTokens: req.maxTokens } : {}),
+      ...(req.timeoutMs != null ? { abortSignal: AbortSignal.timeout(req.timeoutMs), maxRetries: 0 } : {}),
     });
     return {
       text: out.text,

@@ -1991,6 +1991,14 @@ model AiServiceConfig {
   /// Provider-specific knobs (maxTokens, thinking, effort, baseUrl, ...).
   /// Validated per provider by zod in src/lib/aiConfig.ts.
   params          Json?
+  /// #1373: base URL requests for this config are sent to. Null = the
+  /// provider's default (src/lib/aiEndpoint.ts, the one suggestion list).
+  /// Validated at write (validateEndpoint) and guarded at connect time.
+  endpoint        String?
+  /// #1373 D3: wire protocol for an OpenAI-compatible provider —
+  /// 'CHAT_COMPLETIONS' | 'RESPONSES'. Null = the provider's default
+  /// (src/lib/aiEndpoint.ts). Refused for providers with one protocol.
+  apiStyle        String?   @map("api_style")
   /// Disabled configs are skipped by resolution (walk continues outward).
   enabled         Boolean   @default(true)
   createdAt       DateTime  @default(now()) @map("created_at")
