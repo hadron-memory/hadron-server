@@ -708,25 +708,31 @@ export const appMutations = {
               await ctx.db.$transaction(async (tx) => {
                 const cur = await lockAiServiceConfig(tx, existing.id);
                 if (!cur) throw new AiServiceConfigNotFoundError(existing.id);
+                // Omitted args keep what the row holds NOW, not what the read
+                // above saw (#1380 review), and the resulting config is judged
+                // again: provider, endpoint, key (#1389 review).
+                const lockedProvider = aiProvider ?? cur.provider;
+                const lockedModel = aiModel ?? cur.model;
                 try {
-                  const keptEndpoint = cur.provider === provider ? cur.endpoint : null;
-                  requireEndpointFor(provider, keptEndpoint);
-                  requireKeyFor({ provider, endpoint: keptEndpoint }, aiApiKey === undefined ? !!cur.apiKeyEncrypted : !!aiApiKey, 'APP');
+                  validateProviderAndParams(lockedProvider, null);
+                  const keptEndpoint = cur.provider === lockedProvider ? cur.endpoint : null;
+                  requireEndpointFor(lockedProvider, keptEndpoint);
+                  requireKeyFor({ provider: lockedProvider, endpoint: keptEndpoint }, aiApiKey === undefined ? !!cur.apiKeyEncrypted : !!aiApiKey, 'APP');
                 } catch (e) {
                   rethrowAiConfigTyped(e);
                 }
                 await tx.aiServiceConfig.update({
                   where: { id: cur.id },
                   data: {
-                    provider,
-                    model,
+                    provider: lockedProvider,
+                    model: lockedModel,
                     ...keyFields,
                     // #1380 review: a legacy surface can express neither a style nor
                     // an endpoint, and both were chosen for the OLD provider. Any
                     // provider change clears both, so the new provider starts
                     // from its own defaults and the new key never goes to the
                     // old host.
-                    ...(provider !== cur.provider ? { endpoint: null, apiStyle: null } : {}),
+                    ...(lockedProvider !== cur.provider ? { endpoint: null, apiStyle: null } : {}),
                     updatedBy: ctx.userId ?? null,
                   },
                 });
