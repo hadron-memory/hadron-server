@@ -763,12 +763,16 @@ export const teamWorkMutations = {
     if (reportedModel != null) {
       modelAttribution = reportedModel;
     } else if (llmModel != null && llmModel.trim() !== '') {
-      if (llmModel.trim().length > 120) {
+      // The bound is enforced on the EXACT persisted value (Chip QA on
+      // e5df5b2c): check and store the TRIMMED fallback, so a padded session
+      // model can neither exceed the bound nor store its padding.
+      const trimmedSessionModel = llmModel.trim();
+      if (trimmedSessionModel.length > 120) {
         throw badInput(
           `the session's llmModel exceeds 120 characters — pass an explicit model to attribute this milestone`,
         );
       }
-      modelAttribution = llmModel;
+      modelAttribution = trimmedSessionModel;
     }
 
     const root = (await locateWorklogRoot(ctx, appId)) ?? (await bootstrapWorklog(ctx, app));

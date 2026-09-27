@@ -171,6 +171,30 @@ describe('#1398 — model attribution on worklog milestones', () => {
     expect(item.model).toBe('glm-5.3');
   });
 
+  it('a PADDED session model stores trimmed — the persisted value obeys the bound exactly (Chip QA)', async () => {
+    // ' ' + 120 m's + ' ': trimmed length 120 (legal), raw 122 (would violate).
+    await db.session.update({
+      where: { id: session.id },
+      data: { llmModel: ` ${'m'.repeat(120)} ` },
+    });
+    const item = await record();
+    expect(item.model).toBe('m'.repeat(120));
+    const memoryId = await worklogMemory();
+    const row = await db.node.findFirstOrThrow({
+      where: { memoryId, objectType: WORKLOG_OBJECT_TYPE },
+      orderBy: { createdAt: 'desc' },
+    });
+    expect(((row.properties as Record<string, unknown>).model as string).length).toBeLessThanOrEqual(120);
+    // And one more padded char past the bound still refuses after trimming.
+    await db.session.update({
+      where: { id: session.id },
+      data: { llmModel: ` ${'m'.repeat(121)} ` },
+    });
+    await expect(record({ ref: 'o/r#3' })).rejects.toMatchObject({
+      extensions: { code: 'BAD_USER_INPUT' },
+    });
+  });
+
   it('a legacy record without the key reads back null, and the pre-model declaration converges', async () => {
     // First record bootstraps the canonical declaration (now WITH model).
     await record({ ref: 'o/r#1' });
