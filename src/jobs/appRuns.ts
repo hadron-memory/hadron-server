@@ -119,6 +119,7 @@ async function ensureQuotaRow(
   scopeId: string,
   action: QuotaAction,
   defaultLimit: number,
+  now: Date = new Date(),
 ): Promise<void> {
   // Native conflict handling is race-safe AND transaction-safe. Catching a
   // Prisma P2002 works in autocommit mode, but PostgreSQL marks an interactive
@@ -131,7 +132,7 @@ async function ensureQuotaRow(
        ${defaultLimit}::int, ${nextUtcMidnight()})
     ON CONFLICT (scope_kind, scope_id, action, "window") DO NOTHING`;
   await db.quotaCounter.updateMany({
-    where: { scopeKind, scopeId, action, window: QUOTA_WINDOW, resetAt: { lte: new Date() } },
+    where: { scopeKind, scopeId, action, window: QUOTA_WINDOW, resetAt: { lte: now } },
     data: { used: 0, resetAt: nextUtcMidnight() },
   });
 }
@@ -209,6 +210,78 @@ export async function consumeQuota(
       AND action = ${action} AND "window" = ${QUOTA_WINDOW}
       AND used + ${amount} <= "limit"`;
   return res === 1;
+}
+
+/**
+ * {@link consumeQuota} that also returns WHICH window the reservation landed
+ * in (its `reset_at`), or null when the stored limit has no headroom. The
+ * generation is what {@link releaseQuota} matches, so a reservation is only
+ * ever given back to the day it was taken from.
+ */
+export async function reserveQuota(
+  db: PrismaClient,
+  scopeKind: 'app' | 'org',
+  scopeId: string,
+  action: QuotaAction,
+  defaultLimit: number,
+  amount: number,
+  /** Test seam: the clock the rollover reads. */
+  clock: () => Date = () => new Date(),
+): Promise<{ resetAt: string } | null> {
+  // Rollover and reservation are ONE step, under the counter row's lock
+  // (#1385 review). Separately, midnight could fall between them: the
+  // reservation landed in the expired window and a concurrent rollover then
+  // erased it (so it never counted against the new day), or an expired
+  // window without headroom refused a probe the new day had room for. Every
+  // other counter writer UPDATEs this row, so it waits for this transaction,
+  // and ensureQuotaRow's rollover afterwards finds the window current.
+  await ensureQuotaRow(db, scopeKind, scopeId, action, defaultLimit, clock());
+  return db.$transaction(async (tx) => {
+    const locked = await tx.$queryRaw<Array<{ id: string }>>`
+      SELECT id FROM quota_counters
+      WHERE scope_kind = ${scopeKind} AND scope_id = ${scopeId}
+        AND action = ${action} AND "window" = ${QUOTA_WINDOW}
+      FOR UPDATE`;
+    if (!locked[0]) return null;
+    // Expiry judged through Prisma, exactly as ensureQuotaRow judges it, so
+    // both agree on time zones.
+    await tx.quotaCounter.updateMany({
+      where: { id: locked[0].id, resetAt: { lte: clock() } },
+      data: { used: 0, resetAt: nextUtcMidnight() },
+    });
+    // The generation as the DATABASE's own text: reset_at is a timestamp
+    // without time zone, and a JS Date parameter would be converted through
+    // the session's zone before comparing, so it could never match.
+    const rows = await tx.$queryRaw<Array<{ reset_at: string }>>`
+      UPDATE quota_counters SET used = used + ${amount}
+      WHERE id = ${locked[0].id} AND used + ${amount} <= "limit"
+      RETURNING reset_at::text AS reset_at`;
+    return rows[0] ? { resetAt: rows[0].reset_at } : null;
+  });
+}
+
+/**
+ * Settle a reservation to the real cost, in the window it came from and only
+ * there (#1385 review). `delta` is actual minus reserved: negative gives back
+ * the unused part, positive charges the excess. If the counter has rolled
+ * over since (a new day, `used` reset), the old day is gone, and applying
+ * either direction would bleed into the new day's usage, so nothing is
+ * applied. Floored at zero.
+ */
+export async function settleReservation(
+  db: PrismaClient,
+  scopeKind: 'app' | 'org',
+  scopeId: string,
+  action: QuotaAction,
+  delta: number,
+  reservation: { resetAt: string },
+): Promise<void> {
+  if (delta === 0) return;
+  await db.$executeRaw`
+    UPDATE quota_counters SET used = GREATEST(used + ${delta}, 0)
+    WHERE scope_kind = ${scopeKind} AND scope_id = ${scopeId}
+      AND action = ${action} AND "window" = ${QUOTA_WINDOW}
+      AND reset_at::text = ${reservation.resetAt}`;
 }
 
 /** Stored-limit headroom check WITHOUT consuming (the launch gate's token look-ahead). */
