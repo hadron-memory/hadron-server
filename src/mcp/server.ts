@@ -3587,6 +3587,7 @@ export function createMcpServerInstance(
         // invalid regex, etc. The MCP contract surfaces tool errors as text.
         return textResult(e instanceof Error ? e.message : 'Search failed.');
       }
+      const memoryUrnOf = memoizedMemoryUrnLookup();
 
       // ── Chunk (passage) rendering ──────────────────────────────────────────
       // findNodes passages carry parentNodeId + parentNodeUrn; re-fetch the
@@ -3604,7 +3605,7 @@ export function createMcpServerInstance(
         const lines: string[] = [];
         for (const p of passages) {
           const parent = parentById.get(p.parentNodeId);
-          const urn = parent ? await nodeUrn(parent.loc, parent.memoryId) : p.parentNodeUrn;
+          const urn = parent ? await nodeUrn(parent.loc, parent.memoryId, memoryUrnOf) : p.parentNodeUrn;
           const name = parent?.name ?? '';
           // Guard the score like renderHit does — a passage without a numeric
           // score renders without the trailing marker rather than crashing.
@@ -3676,8 +3677,6 @@ export function createMcpServerInstance(
       // Reduce, not Math.max(...scores): `limit` is caller-controlled, so a huge
       // page would spread too many args into Math.max and throw RangeError.
       const topScore = scores.length ? scores.reduce((m, s) => (s > m ? s : m), -Infinity) : null;
-      const memoryUrnOf = memoizedMemoryUrnLookup();
-
       const renderHit = async (hit: {
         node: {
           id: string;
@@ -4495,9 +4494,10 @@ export function createMcpServerInstance(
       // its own projection, so it records here.
       recordNodeRead(db, { id: node.id, loc: node.loc, memoryId: node.memoryId }, auth);
 
-      const { urn, fellBack: urnFellBack } = await nodeUrnResult(node.loc, node.memoryId);
+      const memoryUrnOf = memoizedMemoryUrnLookup();
+      const { urn, fellBack: urnFellBack } = await nodeUrnResult(node.loc, node.memoryId, memoryUrnOf);
       const outEdgeLines = await Promise.all(node.outgoingEdges.map(async (e) => {
-        const targetUrn = await nodeUrn(e.target.loc, (e.target as any).memoryId);
+        const targetUrn = await nodeUrn(e.target.loc, (e.target as any).memoryId, memoryUrnOf);
         // #322: surface the target's stable PK alongside the URN.
         return `  - ${targetUrn} (id: ${e.target.id}) (${e.target.name}) — ${e.name ?? e.loc}`;
       }));
@@ -6278,9 +6278,10 @@ export function createMcpServerInstance(
         );
 
         // Render a compact, URN-addressed summary.
+        const memoryUrnOf = memoizedMemoryUrnLookup();
         const lines = await Promise.all(
           result.results.map(async (r: { loc: string; memoryId: string; replacements: number; fields: Array<{ field: string; matches: number }> }) => {
-            const urn = await nodeUrn(r.loc, r.memoryId);
+            const urn = await nodeUrn(r.loc, r.memoryId, memoryUrnOf);
             const breakdown = r.fields.map((f) => `${f.field}×${f.matches}`).join(', ');
             return `  - ${urn} (${r.replacements}: ${breakdown})`;
           }),
@@ -9682,8 +9683,9 @@ function ageOf(at: Date, now: Date = new Date()): string {
       // findings typed.
       const report = await validateMemoryNodes(db, memory.id);
       const issues: string[] = [];
+      const memoryUrnOf = memoizedMemoryUrnLookup();
       for (const f of report.findings) {
-        issues.push(formatFindingLine(f, await nodeUrn(f.nodeLoc, memory.id)));
+        issues.push(formatFindingLine(f, await nodeUrn(f.nodeLoc, memory.id, memoryUrnOf)));
       }
       // A skipped check is stated rather than silently omitted — a clean bill
       // of health that quietly skipped a check is worse than no report.
