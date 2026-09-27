@@ -63,7 +63,7 @@ import {
   withoutRequestCaches,
 } from './resolvers.helpers.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
-import { resolveNodeRef } from '../../../lib/entityRef/nodeRef.js';
+import { resolveNodeRefForCaller } from './resolvers.nodeRefAccess.js';
 import { EntityNotFoundError, MemoryNotFoundError, NodeNotFoundError } from '../../../lib/entityRef/errors.js';
 import { assertValidRuleRole } from '../../../lib/governedRole.js';
 import { nodeUrnRoundTrips, safeNodeUrnV2 } from '../../../lib/urnEmit.js';
@@ -198,7 +198,7 @@ type RefKind = 'authorTask' | 'validationTask' | 'descriptionNode';
 async function resolveRuleRef(ctx: Context, kind: RefKind, ref: string): Promise<string> {
   let id: string;
   try {
-    ({ id } = await resolveNodeRef(ctx.db, ref));
+        ({ id } = await resolveNodeRefForCaller(ctx, ref));
   } catch (e) {
     if (e instanceof EntityNotFoundError) throw new NodeNotFoundError(ref);
     throw e;

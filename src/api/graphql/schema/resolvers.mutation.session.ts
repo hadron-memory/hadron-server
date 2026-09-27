@@ -50,7 +50,7 @@ import { isRoutingName, routingNameOf } from '../../../lib/runner/selectNextEdge
 import { compileTemplate } from '../../../lib/template.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
-import { resolveNodeRef } from '../../../lib/entityRef/nodeRef.js';
+import { resolveNodeRefForCaller } from './resolvers.nodeRefAccess.js';
 import { NodeNotFoundError, AgentNotFoundError, AppNotFoundError } from '../../../lib/entityRef/errors.js';
 import { triggerManualRun } from './resolvers.appRun.js';
 import { GraphQLError } from 'graphql';
@@ -2232,7 +2232,7 @@ export const sessionMutations = {
       // loc without a memory rejects as UrnNotQualifiedError.
       let resolvedNodeId: string;
       try {
-        ({ id: resolvedNodeId } = await resolveNodeRef(ctx.db, ref));
+        ({ id: resolvedNodeId } = await resolveNodeRefForCaller(ctx, ref));
       } catch (e) {
         if (e instanceof NodeNotFoundError || e instanceof UrnNotQualifiedError) {
           throw new GraphQLError(e.message, { extensions: { code: 'NOT_FOUND' } });
@@ -2254,4 +2254,3 @@ export const sessionMutations = {
       return dispatch(emitNodeUrnV2(resolved.memory.urn, resolved.loc));
     },
 };
-

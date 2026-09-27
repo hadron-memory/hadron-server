@@ -47,8 +47,8 @@ import { requireWorkerReadAccess } from './resolvers.worker.js';
 import { resolveNodeRevRef } from '../../../lib/entityRef/nodeRevRef.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { MemoryNotFoundError } from '../../../lib/asset/gate.js';
-import { resolveNodeRef } from '../../../lib/entityRef/nodeRef.js';
-import { NodeNotFoundError } from '../../../lib/entityRef/errors.js';
+import { resolveNodeRefForCaller } from './resolvers.nodeRefAccess.js';
+import { AmbiguousLegacyUrnError, NodeNotFoundError } from '../../../lib/entityRef/errors.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
 import { resolveUserRef } from '../../../lib/entityRef/userRef.js';
 import { isId } from '../../../lib/entityRef/shape.js';
@@ -145,7 +145,7 @@ export const nodeQueries = {
       // become an existence oracle.
       let parentId: string;
       try {
-        ({ id: parentId } = await resolveNodeRef(ctx.db, parentRef));
+        ({ id: parentId } = await resolveNodeRefForCaller(ctx, parentRef));
       } catch (e) {
         if (e instanceof NodeNotFoundError) return null;
         throw e;
@@ -187,7 +187,7 @@ export const nodeQueries = {
       } else {
         let currentId: string;
         try {
-          ({ id: currentId } = await resolveNodeRef(ctx.db, currentRef));
+          ({ id: currentId } = await resolveNodeRefForCaller(ctx, currentRef));
         } catch (e) {
           // Same posture as the parent: miss → null, malformed → throw.
           if (e instanceof NodeNotFoundError) return null;
@@ -238,7 +238,7 @@ export const nodeQueries = {
     ) => {
       let nodeId: string;
       try {
-        ({ id: nodeId } = await resolveNodeRef(ctx.db, nodeRef));
+        ({ id: nodeId } = await resolveNodeRefForCaller(ctx, nodeRef));
       } catch (e) {
         // Genuine miss → NOT_FOUND; a malformed ref propagates as itself.
         if (e instanceof NodeNotFoundError) {
@@ -421,7 +421,7 @@ export const nodeQueries = {
         case 'node': {
           let id: string;
           try {
-            ({ id } = await resolveNodeRef(ctx.db, baseUrn));
+            ({ id } = await resolveNodeRefForCaller(ctx, baseUrn));
           } catch {
             return null;
           }
@@ -692,7 +692,7 @@ export const nodeQueries = {
       const movedUrnRead = async () => {
         let id: string;
         try {
-          ({ id } = await resolveNodeRef(ctx.db, ref));
+          ({ id } = await resolveNodeRefForCaller(ctx, ref));
         } catch (e) {
           if (e instanceof NodeNotFoundError) return null;
           throw e;
@@ -1776,10 +1776,11 @@ export const nodeQueries = {
               });
             }
             try {
-              const { id } = await resolveNodeRef(ctx.db, ref);
+              const { id } = await resolveNodeRefForCaller(ctx, ref);
               return { ref, id: id as string | null };
             } catch (e) {
-              if (e instanceof NodeNotFoundError) return { ref, id: null };
+              if (e instanceof NodeNotFoundError || e instanceof AmbiguousLegacyUrnError)
+                return { ref, id: null };
               throw e;
             }
           }),
@@ -1978,7 +1979,7 @@ export const nodeQueries = {
       // memoryUsageSummary / resolveReadableMemoryId.
       let nodeId: string;
       try {
-        ({ id: nodeId } = await resolveNodeRef(ctx.db, nodeRef));
+        ({ id: nodeId } = await resolveNodeRefForCaller(ctx, nodeRef));
       } catch (e) {
         if (e instanceof NodeNotFoundError) return [];
         throw e;

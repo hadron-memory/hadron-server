@@ -6,7 +6,7 @@ import { generateId } from './id.js';
 import { resolveNodeRef } from './entityRef/nodeRef.js';
 import { moveNodeSubtree } from './nodeSubtreeMove.js';
 import { recordUrnRename } from './urnAlias.js';
-import { NodeNotFoundError } from './entityRef/errors.js';
+import { AmbiguousLegacyUrnError, NodeNotFoundError } from './entityRef/errors.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import { createTestableMcpServer } from '../mcp/server.js';
 import type { AuthContext } from '../middleware/auth.js';
@@ -79,6 +79,22 @@ describe('node move URN aliases', () => {
     const occupant = await createNode(source.id, 'old');
     expect(await resolveNodeRef(db, oldRoot)).toEqual({ id: occupant.id });
     expect((await resolvers.Query.node(null, { ref: oldRoot }, graphCtx()))?.id).toBe(occupant.id);
+  });
+
+  it('routes authorized update and delete refs through the moved address', async () => {
+    const node = await createNode(source.id, 'old');
+    const old = nodeUrn(source, 'old');
+    await resolvers.Mutation.moveNode(null, {
+      sourceRef: node.id, targetUrn: nodeUrn(source, 'new'),
+    }, graphCtx());
+    await resolvers.Mutation.updateNode(null, {
+      input: { id: old, content: 'updated through old address' },
+    }, graphCtx());
+    expect((await db.node.findUniqueOrThrow({ where: { id: node.id } })).content)
+      .toBe('updated through old address');
+    await resolvers.Mutation.deleteNode(null, { nodeRef: old }, graphCtx());
+    expect((await db.node.findUniqueOrThrow({ where: { id: node.id } })).deletedAt)
+      .not.toBeNull();
   });
 
   it('keeps the address published before a memory rename alive after a later node move', async () => {
@@ -236,6 +252,103 @@ describe('node move URN aliases', () => {
     expect(await resolvers.Query.node(null, { ref: old }, graphCtx(reader.id))).toBeNull();
     expect(await readerMcp.callToolText('hadron_get_node', { urn: old }))
       .toContain('Memory not found');
+  });
+
+  it('conceals ambiguous moved addresses from outsiders and isolates batch refs', async () => {
+    const old = nodeUrn(source, 'draft');
+    const first = await createNode(source.id, 'draft');
+    await resolvers.Mutation.moveNode(null, {
+      sourceRef: first.id, targetUrn: nodeUrn(target, 'archive:one'),
+    }, graphCtx());
+    const second = await createNode(source.id, 'draft');
+    await resolvers.Mutation.moveNode(null, {
+      sourceRef: second.id, targetUrn: nodeUrn(target, 'archive:two'),
+    }, graphCtx());
+    const safe = await createNode(source.id, 'safe');
+    const absent = nodeUrn(source, 'absent');
+
+    await expect(resolveNodeRef(db, old)).rejects.toMatchObject({
+      candidateNodeIds: expect.arrayContaining([first.id, second.id]),
+    });
+    await expect(resolveNodeRef(db, old)).rejects.toBeInstanceOf(AmbiguousLegacyUrnError);
+    await expect(resolvers.Query.node(null, { ref: old }, graphCtx())).rejects
+      .toBeInstanceOf(AmbiguousLegacyUrnError);
+
+    const outsider = graphCtx(reader.id);
+    expect(await resolvers.Query.node(null, { ref: old }, outsider)).toBeNull();
+    expect(await resolvers.Query.node(null, { ref: absent }, outsider)).toBeNull();
+    for (const ref of [old, absent]) {
+      await expect(resolvers.Mutation.updateNode(null, {
+        input: { id: ref, content: 'probe' },
+      }, outsider)).rejects.toMatchObject({ extensions: { code: 'NODE_NOT_FOUND' } });
+      await expect(resolvers.Mutation.deleteNode(null, { nodeRef: ref }, outsider))
+        .rejects.toMatchObject({ extensions: { code: 'NODE_NOT_FOUND' } });
+      await expect(resolvers.Mutation.moveNode(null, {
+        sourceRef: ref, targetUrn: nodeUrn(source, 'probe'),
+      }, outsider)).rejects.toMatchObject({ extensions: { code: 'NODE_NOT_FOUND' } });
+    }
+
+    const outsiderMcp = createTestableMcpServer(mcpAuth(reader.id));
+    const denied = await outsiderMcp.callToolText('hadron_get_node', { urn: old });
+    const missing = await outsiderMcp.callToolText('hadron_get_node', { urn: absent });
+    expect(denied.replace(old, '<ref>')).toBe(missing.replace(absent, '<ref>'));
+    for (const auth of [mcpAuth(), mcpAuth(reader.id)]) {
+      const batch = await createTestableMcpServer(auth).callToolText('hadron_get_nodes', {
+        refs: [old, nodeUrn(source, 'safe')],
+      });
+      expect(batch).toContain('body of safe');
+      expect(batch).toContain('Unavailable');
+      expect(batch).toContain(old);
+    }
+    const graphBatch = await resolvers.Query.nodeBatch(null, {
+      refs: [old, safe.id],
+    }, outsider);
+    expect(graphBatch.nodes).toEqual([expect.objectContaining({ id: safe.id })]);
+    expect(graphBatch.unavailable).toContain(old);
+  });
+
+  it('conceals ambiguity inherited from two historical memory holders', async () => {
+    const published = nodeUrn(target, 'same');
+    const first = await createNode(target.id, 'same');
+    const originalMemoryUrn = target.urn;
+    const renamedFirst = `${originalMemoryUrn}-one`;
+    await db.$transaction(async (tx) => {
+      await recordUrnRename(tx, {
+        entityType: 'MEMORY', entityId: target.id,
+        oldUrn: originalMemoryUrn, newUrn: renamedFirst,
+      });
+      await tx.memory.update({ where: { id: target.id }, data: { urn: renamedFirst } });
+    });
+    const secondMemory = await db.memory.create({ data: {
+      id: generateId(), organizationId: (await db.memory.findUniqueOrThrow({ where: { id: target.id } })).organizationId,
+      urn: originalMemoryUrn, name: 'second', class: 'knowledge', visibility: 'ORGANIZATION',
+    } });
+    const second = await createNode(secondMemory.id, 'same');
+    await db.$transaction(async (tx) => {
+      await recordUrnRename(tx, {
+        entityType: 'MEMORY', entityId: secondMemory.id,
+        oldUrn: originalMemoryUrn, newUrn: `${originalMemoryUrn}-two`,
+      });
+      await tx.memory.update({
+        where: { id: secondMemory.id }, data: { urn: `${originalMemoryUrn}-two` },
+      });
+    });
+
+    await expect(resolveNodeRef(db, published)).rejects.toMatchObject({
+      candidateNodeIds: expect.arrayContaining([first.id, second.id]),
+    });
+    await createNode(source.id, 'safe');
+    expect(await resolvers.Query.node(null, { ref: published }, graphCtx(reader.id))).toBeNull();
+    const mcp = createTestableMcpServer(mcpAuth(reader.id));
+    expect(await mcp.callToolText('hadron_get_node', { urn: published }))
+      .toContain('Memory not found');
+    const batch = await mcp.callToolText('hadron_get_nodes', {
+      refs: [published, nodeUrn(source, 'safe')],
+    });
+    expect(batch).toContain('Unavailable');
+    expect(batch).toContain('body of safe');
+    await expect(resolvers.Mutation.deleteNode(null, { nodeRef: published }, graphCtx(reader.id)))
+      .rejects.toMatchObject({ extensions: { code: 'NODE_NOT_FOUND' } });
   });
 
   it('coalesces projections when a batch reads many moved descendant addresses', async () => {

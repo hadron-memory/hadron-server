@@ -146,12 +146,13 @@ import {
   encryptNodeFieldsWithKey,
 } from '../lib/nodeCrypto.js';
 import { resolveSuppliedKey, MemoryUnlockError } from '../lib/memoryUnlock.js';
-import { resolveNodeRef } from '../lib/entityRef/nodeRef.js';
+import { resolveNodeRef, isConcealedNodeRefAmbiguity } from '../lib/entityRef/nodeRef.js';
 import { resolveChannelRefId } from '../lib/entityRef/channelRef.js';
 import { sortSiblings } from '../lib/siblingOrder.js';
 import { renderRunNodeBundle } from '../lib/runNodeRender.js';
 import {
   NodeNotFoundError,
+  AmbiguousLegacyUrnError,
   NodeAbstractTooLongError,
   InvalidContentScopeError,
 } from '../lib/entityRef/errors.js';
@@ -184,6 +185,23 @@ import { isAppParticipant, getAccessibleMemoryIds as gqlAccessibleMemoryIds } fr
 import { loadAppWorkerActivity } from '../api/graphql/schema/resolvers.worker.js';
 import { splitNodeUrnTolerant, nodeFragmentRefusal } from '../lib/splitNodeUrnTolerant.js';
 import { safeEqual } from '../lib/constantTime.js';
+
+/** Keep alias ambiguity concealed from callers who cannot read any claimant. */
+async function resolveNodeRefForAuth(
+  ref: string,
+  auth: AuthContext,
+  contextMemoryId?: string,
+): Promise<{ id: string }> {
+  try {
+    return await resolveNodeRef(db, ref, contextMemoryId);
+  } catch (error) {
+    if (await isConcealedNodeRefAmbiguity(db, error,
+      (memoryId) => canReadMemory(db, auth, memoryId))) {
+      throw new NodeNotFoundError(ref);
+    }
+    throw error;
+  }
+}
 
 /**
  * Annotate a node projection that was reached through a `#<fragment>` URN.
@@ -557,7 +575,7 @@ export async function resolveEdgeRefs(
   const resolved: ResolvedEdge[] = [];
   for (const edge of edges) {
     try {
-      const { id: targetNodeId } = await resolveNodeRef(db, edge.targetId, sourceMemoryId);
+      const { id: targetNodeId } = await resolveNodeRefForAuth(edge.targetId, auth, sourceMemoryId);
       // Fetch the target's loc so the edge loc can be derived at write time.
       const tgt = await db.node.findUnique({
         where: { id: targetNodeId },
@@ -700,7 +718,7 @@ export async function addEdge(args: {
 
   let targetNodeId: string;
   try {
-    ({ id: targetNodeId } = await resolveNodeRef(db, rawTarget, sourceNode.memoryId));
+    ({ id: targetNodeId } = await resolveNodeRefForAuth(rawTarget, auth, sourceNode.memoryId));
   } catch (e) {
     if (e instanceof NodeNotFoundError) {
       return { error: `Edge target not found: "${e.ref}"` };
@@ -3626,7 +3644,13 @@ export function createMcpServerInstance(
       // 0.0.14 → 0.0.15 bump). `#data` still decomposes normally and is
       // reported below rather than silently serving the parent.
       const { memoryUrn, loc, fragment, literalLoc } = splitNodeUrnTolerant(rawUrn);
-      const memory = await resolveMemoryByUrn(memoryUrn);
+      // A historical memory prefix may itself have several holders. For a
+      // NODE read, defer that ambiguity to resolveNodeRefForAuth, which checks
+      // the current node claimants before exposing any error.
+      const memory = await resolveMemoryByUrn(memoryUrn).catch((error) => {
+        if (error instanceof AmbiguousLegacyUrnError) return null;
+        throw error;
+      });
       const sourceReadable = !!memory && await canReadMemory(db, auth, memory.id);
       const missing = () => textResult(sourceReadable
         ? `Node "${rawUrn}" not found.`
@@ -3689,7 +3713,7 @@ export function createMcpServerInstance(
         let movedId: string | undefined;
         for (const aliasRef of aliasRefs) {
           try {
-            ({ id: movedId } = await resolveNodeRef(db, aliasRef));
+            ({ id: movedId } = await resolveNodeRefForAuth(aliasRef, auth));
             if (aliasRef === rawUrn && literalLoc) matchedLiteral = true;
             break;
           } catch (e) {
@@ -3948,7 +3972,10 @@ export function createMcpServerInstance(
           else byMemory.set(r.memoryUrn, [r]);
         }
         for (const [mu, group] of byMemory) {
-          const mem = await resolveMemoryByUrn(mu);
+          const mem = await resolveMemoryByUrn(mu).catch((error) => {
+            if (error instanceof AmbiguousLegacyUrnError) return null;
+            throw error;
+          });
           if (!mem || !(await canReadMemory(db, auth, mem.id))) {
             movedFallbacks.push(...group);
             continue;
@@ -3996,12 +4023,17 @@ export function createMcpServerInstance(
               : [r.raw];
             for (const aliasRef of aliasRefs) {
               try {
-                const { id } = await resolveNodeRef(db, aliasRef);
+                const { id } = await resolveNodeRefForAuth(aliasRef, auth);
                 movedIdByRef.set(r.raw, id);
                 if (aliasRef === r.raw && r.literalLoc) fragmentByRef.delete(r.raw);
                 break;
               } catch (e) {
                 if (e instanceof NodeNotFoundError) continue;
+                if (e instanceof AmbiguousLegacyUrnError) {
+                  // One bad historical address cannot suppress unrelated
+                  // readable results in an explicit batch (cor:api:040:03).
+                  break;
+                }
                 throw e;
               }
             }

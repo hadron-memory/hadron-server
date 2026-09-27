@@ -197,11 +197,12 @@ export async function findUrnAliasTargetIds(
  * `cor:urn:030:02`. Keeping it a callback is what makes it structurally
  * impossible for this module to answer a question that is not its to answer.
  *
- * Walks alias pages until it has TWO live rows (enough to distinguish "one
- * match" from "ambiguous") or the pages run out, so the liveness decision is
- * never truncated by a bound applied before it. `ALIAS_MAX_PAGES` is a runaway
- * guard on a corrupt map, not a semantic limit — reaching it means one URN has
- * had tens of thousands of historical holders.
+ * By default walks alias pages until it has TWO live rows (enough to
+ * distinguish "one match" from "ambiguous") or the pages run out. `all: true`
+ * walks every page: the node resolver needs every live claimant so a caller
+ * with access only to a later claimant cannot be falsely told no claimant is
+ * visible. `ALIAS_MAX_PAGES` guards a corrupt map with tens of thousands of
+ * historical holders; it is not an early liveness cutoff.
  *
  * Costs exactly one indexed query on the overwhelmingly common path (a URN that
  * is simply not found), because an empty first page returns immediately.
@@ -211,6 +212,7 @@ export async function findLiveUrnAliasTargets<T extends { id: string }>(
   entityType: UrnAliasEntityType,
   lookupUrn: string,
   findLive: (ids: string[]) => Promise<T[]>,
+  options?: { all?: boolean },
 ): Promise<T[]> {
   const live: T[] = [];
   const seen = new Set<string>();
@@ -226,11 +228,14 @@ export async function findLiveUrnAliasTargets<T extends { id: string }>(
         live.push(row);
       }
     }
-    // Two live rows already settle every question a caller asks: exactly one
-    // match, or ambiguous. Reading further pages could only add more of the
-    // latter.
-    if (live.length >= 2) break;
+    // The common resolver only needs two to decide ambiguity. Node lookups
+    // opt into all candidates so their caller-side access gate can inspect
+    // every claimant before deciding whether to conceal the ambiguity.
+    if (!options?.all && live.length >= 2) break;
     if (ids.length < ALIAS_PAGE_SIZE) break;
+    if (page === ALIAS_MAX_PAGES - 1) {
+      throw new Error(`URN alias walk exceeded ${ALIAS_MAX_PAGES} pages for ${entityType}`);
+    }
   }
   return live;
 }
