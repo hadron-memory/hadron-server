@@ -32,39 +32,80 @@ export function isGrantedAgentMemoryRole(role: string | null | undefined): boole
   return value === 'read' || value === 'read-write';
 }
 
+/** Resolve install licenses in bounded queries for a multi-Agent App fold. */
+export async function activeAgentInstallLicenseIds(
+  db: PrismaClient,
+  app: { organizationId: string | null; ownerUserId: string | null },
+  agents: Array<{ id: string; organizationId: string | null; ownerUserId: string | null }>,
+): Promise<Set<string>> {
+  const licensed = new Set<string>();
+  if (agents.length === 0) return licensed;
+  // Soft deletion leaves Apps, Agents, and AppAgent joins behind. A retained
+  // same-org join cannot license an install after its owning org is deleted.
+  const orgIds = [...new Set(
+    [app.organizationId, ...agents.map((agent) => agent.organizationId)]
+      .filter((id): id is string => id != null),
+  )];
+  const liveOrgRows = orgIds.length
+    ? await db.organization.findMany({
+        where: { id: { in: orgIds }, deletedAt: null }, select: { id: true },
+      })
+    : [];
+  const liveOrgs = new Set(liveOrgRows.map((row) => row.id));
+  if (app.organizationId !== null && !liveOrgs.has(app.organizationId)) return licensed;
+  const now = new Date();
+
+  if (app.organizationId == null) {
+    if (app.ownerUserId == null) return licensed;
+    // A personal App needs no subscription to its owner's own Agent. Every
+    // other Agent is licensed by the App owner's live AgentSubscription.
+    const foreignIds = agents
+      .filter((agent) => agent.ownerUserId !== app.ownerUserId)
+      .map((agent) => agent.id);
+    const subscriptions = foreignIds.length
+      ? await db.agentSubscription.findMany({
+          where: { userId: app.ownerUserId, agentId: { in: foreignIds } },
+        })
+      : [];
+    const activeSubscriptions = new Set(
+      subscriptions.filter((row) => isLifecycleActive(row, now)).map((row) => row.agentId),
+    );
+    for (const agent of agents) {
+      if (agent.organizationId !== null && !liveOrgs.has(agent.organizationId)) continue;
+      if (agent.ownerUserId === app.ownerUserId || activeSubscriptions.has(agent.id)) {
+        licensed.add(agent.id);
+      }
+    }
+    return licensed;
+  }
+  // Same-org installations are implicit; foreign Agents need an org grant.
+  const foreignIds = agents
+    .filter((agent) => agent.organizationId !== app.organizationId)
+    .map((agent) => agent.id);
+  const grants = foreignIds.length
+    ? await db.agentOrgGrant.findMany({
+        where: { orgId: app.organizationId, agentId: { in: foreignIds } },
+      })
+    : [];
+  const activeGrants = new Set(
+    grants.filter((row) => isLifecycleActive(row, now)).map((row) => row.agentId),
+  );
+  for (const agent of agents) {
+    if (agent.organizationId !== null && !liveOrgs.has(agent.organizationId)) continue;
+    if (agent.organizationId === app.organizationId || activeGrants.has(agent.id)) {
+      licensed.add(agent.id);
+    }
+  }
+  return licensed;
+}
+
 /** The same cross-org install license used by the App access fold. */
 export async function hasActiveAgentInstallLicense(
   db: PrismaClient,
   app: { organizationId: string | null; ownerUserId: string | null },
   agent: { id: string; organizationId: string | null; ownerUserId: string | null },
 ): Promise<boolean> {
-  // Soft deletion leaves Apps, Agents, and AppAgent joins behind. A retained
-  // same-org join cannot license an install after its owning org is deleted.
-  const orgIds = [...new Set(
-    [app.organizationId, agent.organizationId].filter((id): id is string => id != null),
-  )];
-  if (orgIds.length > 0) {
-    const liveOrgCount = await db.organization.count({
-      where: { id: { in: orgIds }, deletedAt: null },
-    });
-    if (liveOrgCount !== orgIds.length) return false;
-  }
-  if (app.organizationId == null) {
-    if (app.ownerUserId == null) return false;
-    // A personal App needs no subscription to its owner's own Agent. Every
-    // other Agent is licensed by the App owner's live AgentSubscription.
-    if (app.ownerUserId === agent.ownerUserId) return true;
-    const subscription = await db.agentSubscription.findUnique({
-      where: { userId_agentId: { userId: app.ownerUserId, agentId: agent.id } },
-    });
-    return subscription != null && isLifecycleActive(subscription);
-  }
-  // Same-org installations are implicit; foreign Agents need an org grant.
-  if (app.organizationId === agent.organizationId) return true;
-  const grant = await db.agentOrgGrant.findUnique({
-    where: { orgId_agentId: { orgId: app.organizationId, agentId: agent.id } },
-  });
-  return grant != null && isLifecycleActive(grant);
+  return (await activeAgentInstallLicenseIds(db, app, [agent])).has(agent.id);
 }
 
 /** A retained AppAgent pointer is authority only while its install is live. */

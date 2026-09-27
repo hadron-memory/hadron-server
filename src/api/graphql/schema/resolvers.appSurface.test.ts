@@ -617,6 +617,29 @@ describe('appNodes', () => {
     expect(await locs()).not.toContain('second.live.node');
   });
 
+  it('does not enumerate a soft-deleted Agent system memory', async () => {
+    const { app } = await createDbAppWithKey(db, 'app-nodes-deleted-system', orgId);
+    await db.appAgent.create({ data: { appId: app.id, agentId } });
+    const system = await db.memory.create({
+      data: {
+        id: generateId(), organizationId: orgId, urn: `${orgId}:deleted-agent-system`,
+        name: 'Agent system', class: 'system', acceptsUploads: false,
+      },
+    });
+    await db.agent.update({ where: { id: agentId }, data: { systemMemoryId: system.id } });
+    await db.node.create({
+      data: {
+        id: generateId(), memoryId: system.id, loc: 'system.deleted.node',
+        name: 'System node', isLink: false, tags: [],
+      },
+    });
+    const locs = async () => (await resolvers.Query.appNodes({}, { appRef: app.id }, adminCtx()))
+      .map((node: { loc: string }) => node.loc);
+    expect(await locs()).toContain('system.deleted.node');
+    await db.memory.update({ where: { id: system.id }, data: { deletedAt: new Date() } });
+    expect(await locs()).not.toContain('system.deleted.node');
+  });
+
   it('does not enumerate nodes from a deleted owning organization', async () => {
     const { app } = await createDbAppWithKey(db, 'app-nodes-deleted-org', orgId);
     await db.appAgent.create({ data: { appId: app.id, agentId } });

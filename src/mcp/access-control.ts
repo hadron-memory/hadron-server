@@ -29,7 +29,7 @@ import type { AgentSubscription, Memory, PrismaClient } from '../generated/prism
 import type { AuthContext } from '../middleware/auth.js';
 import { isActiveAgentSubscription } from '../lib/agentSubscription.js';
 import { participantAppIds } from '../lib/auth/appParticipation.js';
-import { hasActiveAgentInstallLicense, isAgentInstalled, isGrantedAgentMemoryRole } from '../lib/appAgent.js';
+import { activeAgentInstallLicenseIds, isAgentInstalled, isGrantedAgentMemoryRole } from '../lib/appAgent.js';
 import { resolveUserApps } from '../auth/user-app-resolution.js';
 import { getOrgReadableMemoryIds } from '../lib/auth/orgReadableMemory.js';
 
@@ -133,9 +133,24 @@ export async function getAppMemoryAccess(
   });
   if (!app || app.deletedAt || app.uninstalledAt || app.organization?.deletedAt) return new Map();
 
+  const agents = app.appAgents
+    .map((install) => install.agent)
+    .filter((agent): agent is NonNullable<typeof agent> => agent !== null && agent.deletedAt === null);
+  const licensedAgentIds = await activeAgentInstallLicenseIds(db, app, agents);
+  const systemIds = agents
+    .filter((agent) => licensedAgentIds.has(agent.id) && agent.systemMemoryId !== null)
+    .map((agent) => agent.systemMemoryId!);
+  const liveSystemRows = systemIds.length
+    ? await db.memory.findMany({
+        where: { id: { in: systemIds }, deletedAt: null }, select: { id: true },
+      })
+    : [];
+  const liveSystemIds = new Set(liveSystemRows.map((row) => row.id));
   const access = new Map<string, string>();
   for (const install of app.appAgents) {
-    const agentAccess = await getPrimaryAgentAccess(db, { ...app, appAgents: [install] });
+    const agentAccess = getPrimaryAgentAccess(
+      { ...app, appAgents: [install] }, licensedAgentIds, liveSystemIds,
+    );
     for (const [memoryId, level] of agentAccess) {
       if (level === 'READ_WRITE' || !access.has(memoryId)) access.set(memoryId, level);
     }
@@ -301,17 +316,18 @@ async function getAppTeamSpaceAccess(
  * installed Agent's system memory + memoryItems, behind the active install
  * license. Empty when the App's primary Agent doesn't resolve.
  */
-async function getPrimaryAgentAccess(
-  db: PrismaClient,
+function getPrimaryAgentAccess(
   app: AppAccessRow,
-): Promise<Map<string, string>> {
+  licensedAgentIds: ReadonlySet<string>,
+  liveSystemIds: ReadonlySet<string>,
+): Map<string, string> {
   const primary = app.appAgents[0]?.agent ?? null;
   if (!primary || primary.deletedAt) return new Map();
 
   // Org Apps require a live AgentOrgGrant for a foreign Agent; personal Apps
   // require their owner's live AgentSubscription for a foreign Agent. Both
   // license shapes share isLifecycleActive (008 R-2).
-  if (!(await hasActiveAgentInstallLicense(db, app, primary))) {
+  if (!licensedAgentIds.has(primary.id)) {
     return new Map();
   }
 
@@ -327,7 +343,9 @@ async function getPrimaryAgentAccess(
   const foreignUserOwned = (owner: string | null | undefined): boolean =>
     owner != null && owner !== appOwner;
 
-  const systemMemoryId = foreignUserOwned(primary.ownerUserId) ? null : primary.systemMemoryId;
+  const systemMemoryId = foreignUserOwned(primary.ownerUserId) ||
+    !primary.systemMemoryId || !liveSystemIds.has(primary.systemMemoryId)
+    ? null : primary.systemMemoryId;
   const memoryItems = primary.memoryItems
     .filter((item) => item.memory != null &&
       // Personal/private rows remain candidates for appNodes' per-memory
