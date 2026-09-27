@@ -396,6 +396,70 @@ describe('spec 032 — upsertNode maintains abstractOriginHash', () => {
     expect(await persistedHash('s3')).toBe(computeContentHash("B'"));
   });
 
+  it.each(['update', 'upsert'] as const)(
+    '%s re-affirmation hashes the authoritative body after an interleaved edit',
+    async (mode) => {
+      const loc = `s3-race-${mode}`;
+      const created = await upsertNode({ loc, name: loc, abstract: 'A', content: 'B' });
+      const findUnique = db.node.findUnique.bind(db.node);
+      let changedAfterProbe = false;
+      const probe = vi.spyOn(db.node, 'findUnique').mockImplementation((async (args: Parameters<typeof findUnique>[0]) => {
+        const result = await findUnique(args);
+        if (!changedAfterProbe && 'loc_memoryId' in args.where &&
+            args.where.loc_memoryId?.loc === loc) {
+          changedAfterProbe = true;
+          await db.node.update({ where: { id: created.id }, data: { content: "B'" } });
+        }
+        return result;
+      }) as never);
+      try {
+        await writeNodeCore({ memoryId: fx.memory.id, loc, name: loc, abstract: 'A' }, fx.ctx, mode);
+      } finally {
+        probe.mockRestore();
+      }
+      expect(changedAfterProbe).toBe(true);
+      const stored = await db.node.findUniqueOrThrow({ where: { id: created.id } });
+      expect(stored.content).toBe("B'");
+      expect(stored.abstractOriginHash).toBe(computeContentHash("B'"));
+      const history = await db.nodeRevision.findMany({
+        where: { nodeId: created.id }, orderBy: { revNo: 'asc' },
+      });
+      expect(history).toHaveLength(2); // raw-body drift, then the re-affirmation
+      expect(history[1]?.changes).toEqual(['abstractOriginHash']);
+    },
+  );
+
+  it('rolls back a guarded re-affirmation after an interleaved body edit', async () => {
+    const loc = 's3-race-guarded';
+    const created = await upsertNode({ loc, name: loc, abstract: 'A', content: 'B' });
+    const findUnique = db.node.findUnique.bind(db.node);
+    let changedAfterProbe = false;
+    const probe = vi.spyOn(db.node, 'findUnique').mockImplementation((async (args: Parameters<typeof findUnique>[0]) => {
+      const result = await findUnique(args);
+      if (!changedAfterProbe && 'loc_memoryId' in args.where &&
+          args.where.loc_memoryId?.loc === loc) {
+        changedAfterProbe = true;
+        await db.node.update({ where: { id: created.id }, data: { content: "B'" } });
+      }
+      return result;
+    }) as never);
+    try {
+      await expect(writeNodeCore(
+        { memoryId: fx.memory.id, loc, abstract: 'A' }, fx.ctx, 'update', { guardRevSeq: 1 },
+      )).rejects.toSatisfy(
+        (error: unknown) => error instanceof GraphQLError && error.extensions.code === 'NODE_WRITE_CONFLICT',
+      );
+    } finally {
+      probe.mockRestore();
+    }
+    expect(changedAfterProbe).toBe(true);
+    const stored = await db.node.findUniqueOrThrow({ where: { id: created.id } });
+    expect(stored.content).toBe("B'");
+    expect(stored.abstractOriginHash).toBe(computeContentHash('B'));
+    expect(stored.revSeq).toBe(1);
+    expect(await db.nodeRevision.count({ where: { nodeId: created.id } })).toBe(0);
+  });
+
   it('abstract cleared: hash cleared', async () => {
     await upsertNode({ loc: 's4', name: 's4', abstract: 'A', content: 'B' });
     await upsertNode({ loc: 's4', name: 's4', abstract: null });
