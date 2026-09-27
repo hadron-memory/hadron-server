@@ -6,6 +6,8 @@ import { generateId } from '../../lib/id.js';
 import { resolveNodeRef } from '../../lib/entityRef/nodeRef.js';
 import { recordUrnRename } from '../../lib/urnAlias.js';
 import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
+import { createTestableMcpServer } from '../../mcp/server.js';
+import type { AuthContext } from '../../middleware/auth.js';
 import { mergeMemoryGraph } from './mergeMemories.js';
 
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({
@@ -19,6 +21,9 @@ let sourceReaderId: string;
 
 const nodeUrn = (memory: { urn: string }, loc: string) => `hrn:node:${memory.urn}:${loc}`;
 const ctx = (userId = adminId): Context => ({ db, userId, roles: userId === adminId ? ['ADMIN'] : [] });
+const mcpAuth = (userId = adminId): AuthContext => ({
+  userId, roles: userId === adminId ? ['ADMIN'] : [], clientId: `user:${userId}`,
+});
 const makeNode = (memoryId: string, loc: string) => db.node.create({
   data: { id: generateId(), memoryId, loc, name: loc, content: `body of ${loc}` },
 });
@@ -186,6 +191,60 @@ describe('#1404 mergeMemories node aliases', () => {
     expect(await resolveNodeRef(db, old)).toEqual({ id: node.id });
     expect((await resolvers.Query.node(null, { ref: old }, ctx()))?.id).toBe(node.id);
     expect(await resolvers.Query.node(null, { ref: old }, ctx(sourceReaderId))).toBeNull();
+  });
+
+  it('retains an address published before source Memory rename and later merge deletion', async () => {
+    const node = await makeNode(source.id, 'older-prefix');
+    const published = nodeUrn(source, node.loc);
+    const renamedUrn = 'merge-alias-source.example:renamed-before-delete';
+    await db.$transaction(async (tx) => {
+      await recordUrnRename(tx, {
+        entityType: 'MEMORY', entityId: source.id,
+        oldUrn: source.urn, newUrn: renamedUrn,
+      });
+      await tx.memory.update({ where: { id: source.id }, data: { urn: renamedUrn } });
+    });
+    await merge(true);
+
+    expect(await resolveNodeRef(db, published)).toEqual({ id: node.id });
+    expect((await resolvers.Query.node(null, { ref: published }, ctx()))?.id).toBe(node.id);
+    expect(await resolvers.Query.node(null, { ref: published }, ctx(sourceReaderId))).toBeNull();
+    const mcp = createTestableMcpServer(mcpAuth());
+    expect(await mcp.callToolText('hadron_get_node', { urn: published }))
+      .toContain('body of older-prefix');
+    expect(await mcp.callToolText('hadron_get_nodes', { refs: [published] }))
+      .toContain('body of older-prefix');
+    const readerMcp = createTestableMcpServer(mcpAuth(sourceReaderId));
+    expect(await readerMcp.callToolText('hadron_get_node', { urn: published }))
+      .not.toContain('body of older-prefix');
+    expect(await readerMcp.callToolText('hadron_get_nodes', { refs: [published] }))
+      .not.toContain('body of older-prefix');
+
+    // The deleted source prefix translates an address; it never grants life
+    // or access to a target after that target is withdrawn.
+    await db.memory.update({ where: { id: target.id }, data: { deletedAt: new Date() } });
+    await expect(resolveNodeRef(db, published)).rejects.toMatchObject({
+      name: 'NodeNotFoundError',
+    });
+  });
+
+  it('does not resurrect a node still inside a deleted historical Memory', async () => {
+    const node = await makeNode(source.id, 'unmoved');
+    const published = nodeUrn(source, node.loc);
+    const renamedUrn = 'merge-alias-source.example:renamed-then-deleted';
+    await db.$transaction(async (tx) => {
+      await recordUrnRename(tx, {
+        entityType: 'MEMORY', entityId: source.id,
+        oldUrn: source.urn, newUrn: renamedUrn,
+      });
+      await tx.memory.update({ where: { id: source.id }, data: { urn: renamedUrn } });
+    });
+    await db.memory.update({ where: { id: source.id }, data: { deletedAt: new Date() } });
+
+    await expect(resolveNodeRef(db, published)).rejects.toMatchObject({
+      name: 'NodeNotFoundError',
+    });
+    expect(await resolvers.Query.node(null, { ref: published }, ctx())).toBeNull();
   });
 
   it('rolls an alias and relocation back together when their transaction aborts', async () => {
