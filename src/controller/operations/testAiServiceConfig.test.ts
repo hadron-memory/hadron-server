@@ -14,7 +14,7 @@ import { generateId } from '../../lib/id.js';
 import { encryptToken } from '../../lib/tokenCrypto.js';
 import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
 import { generateText } from '../../lib/llm/index.js';
-import { defaultQuotaLimit, recordQuotaUsage } from '../../jobs/appRuns.js';
+import { defaultQuotaLimit, recordQuotaUsage, reserveQuota } from '../../jobs/appRuns.js';
 import {
   testAiServiceConfig,
   AI_CONFIG_TEST_LIMIT,
@@ -471,6 +471,43 @@ describe('testAiServiceConfig (#1378)', () => {
     const cfg = await mkConfig({ hadronServerId: host.id });
     const r = await test(cfg.id, ctxFor(admin.id, { roles: ['ADMIN'], organizationId: org.id }));
     expect(r.ok).toBe(true);
+  });
+
+  it('a reservation that lands in a window which expired mid-call is undone and taken from the new day (#1385 review)', async () => {
+    const t0 = Date.now();
+    // The current window ends 1ms after t0, with 20 of yesterday's tokens used.
+    await db.quotaCounter.create({
+      data: { id: generateId(), scopeKind: 'org', scopeId: org.id, action: 'llm.tokens', window: 'day', used: 20, limit: 10_000, resetAt: new Date(t0 + 1) },
+    });
+    // Midnight passes between the rollover check (t0: still current) and the expiry check (t0 + 2).
+    let calls = 0;
+    const clock = () => new Date(calls++ === 0 ? t0 : t0 + 2);
+    const got = await reserveQuota(db, 'org', org.id, 'llm.tokens', 10_000, 64, clock);
+    expect(got).not.toBeNull();
+    const row = await db.quotaCounter.findFirstOrThrow({ where: { scopeId: org.id, action: 'llm.tokens' } });
+    // Taken from the NEW day: rolled to 0, then reserved.
+    expect(row.used).toBe(64);
+    expect(row.resetAt.getTime()).toBeGreaterThan(t0 + 1000);
+  });
+
+  it('secret parts of an operator base URL are redacted one by one, even when echoed alone (#1385 review)', async () => {
+    vi.stubEnv('OPENAI_API_KEY', 'sk-SERVER-AMBIENT-0123');
+    vi.stubEnv('OPENAI_BASE_URL', 'https://user:hunter2@llm.example.test/v1?token=s3cret');
+    vi.stubGlobal('fetch', async () =>
+      new Response(JSON.stringify({ error: { message: 'bad token s3cret for password hunter2', type: 'invalid_request_error' } }), {
+        status: 401,
+        headers: { 'content-type': 'application/json' },
+      }),
+    );
+    try {
+      const host = await db.hadronServer.create({ data: { id: generateId(), url: 'https://test.hadron.local' } });
+      const cfg = await mkConfig({ hadronServerId: host.id, provider: 'openai', endpoint: null, apiStyle: 'CHAT_COMPLETIONS', apiKeyEncrypted: null, apiKeyPreview: null });
+      const r = await test(cfg.id, ctxFor(admin.id, { roles: ['ADMIN'] }));
+      expect(r.ok).toBe(false);
+      expect(JSON.stringify(r)).not.toMatch(/hunter2|s3cret/);
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it('excess beyond the reservation is charged to the reservation\'s window only, never to a new day (#1385 review)', async () => {

@@ -200,7 +200,21 @@ function processSecrets(env: NodeJS.ProcessEnv): string[] {
   const urls = ['OPENAI_BASE_URL', 'ANTHROPIC_BASE_URL']
     .map((name) => env[name] ?? '')
     .filter((v) => /[@?#]/.test(v));
-  return [...keys, ...urls];
+  // …and each secret part on its own: a provider can echo just the
+  // password or a query value, which the whole-URL match would miss
+  // (#1385 review).
+  const parts: string[] = [];
+  for (const raw of urls) {
+    try {
+      const u = new URL(raw);
+      for (const v of [u.username, u.password, u.hash.slice(1), ...u.searchParams.values()]) {
+        if (v) parts.push(v, decodeURIComponent(v));
+      }
+    } catch {
+      // unparsable: the whole-string match above is all there is
+    }
+  }
+  return [...keys, ...urls, ...parts];
 }
 
 /**

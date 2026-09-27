@@ -119,6 +119,7 @@ async function ensureQuotaRow(
   scopeId: string,
   action: QuotaAction,
   defaultLimit: number,
+  now: Date = new Date(),
 ): Promise<void> {
   // Native conflict handling is race-safe AND transaction-safe. Catching a
   // Prisma P2002 works in autocommit mode, but PostgreSQL marks an interactive
@@ -131,7 +132,7 @@ async function ensureQuotaRow(
        ${defaultLimit}::int, ${nextUtcMidnight()})
     ON CONFLICT (scope_kind, scope_id, action, "window") DO NOTHING`;
   await db.quotaCounter.updateMany({
-    where: { scopeKind, scopeId, action, window: QUOTA_WINDOW, resetAt: { lte: new Date() } },
+    where: { scopeKind, scopeId, action, window: QUOTA_WINDOW, resetAt: { lte: now } },
     data: { used: 0, resetAt: nextUtcMidnight() },
   });
 }
@@ -224,18 +225,36 @@ export async function reserveQuota(
   action: QuotaAction,
   defaultLimit: number,
   amount: number,
+  /** Test seam: the clock both the rollover and the expiry check read. */
+  clock: () => Date = () => new Date(),
 ): Promise<{ resetAt: string } | null> {
-  await ensureQuotaRow(db, scopeKind, scopeId, action, defaultLimit);
-  // The generation as the DATABASE's own text: reset_at is a timestamp
-  // without time zone, and a JS Date parameter would be converted through
-  // the session's zone before comparing, so it could never match.
-  const rows = await db.$queryRaw<Array<{ reset_at: string }>>`
-    UPDATE quota_counters SET used = used + ${amount}
-    WHERE scope_kind = ${scopeKind} AND scope_id = ${scopeId}
-      AND action = ${action} AND "window" = ${QUOTA_WINDOW}
-      AND used + ${amount} <= "limit"
-    RETURNING reset_at::text AS reset_at`;
-  return rows[0] ? { resetAt: rows[0].reset_at } : null;
+  // Bounded retry: the window can expire between the rollover check and the
+  // reservation (midnight in between). A reservation that landed in an
+  // EXPIRED window is undone and retried after the rollover, never kept: a
+  // later rollover would erase it without it ever counting against the new
+  // day (#1385 review). Expiry is judged through Prisma, the same way
+  // ensureQuotaRow judges it, so both agree on time zones.
+  for (let attempt = 0; attempt < 3; attempt++) {
+    await ensureQuotaRow(db, scopeKind, scopeId, action, defaultLimit, clock());
+    // The generation as the DATABASE's own text: reset_at is a timestamp
+    // without time zone, and a JS Date parameter would be converted through
+    // the session's zone before comparing, so it could never match.
+    const rows = await db.$queryRaw<Array<{ reset_at: string }>>`
+      UPDATE quota_counters SET used = used + ${amount}
+      WHERE scope_kind = ${scopeKind} AND scope_id = ${scopeId}
+        AND action = ${action} AND "window" = ${QUOTA_WINDOW}
+        AND used + ${amount} <= "limit"
+      RETURNING reset_at::text AS reset_at`;
+    if (!rows[0]) return null;
+    const reservation = { resetAt: rows[0].reset_at };
+    const expired = await db.quotaCounter.findFirst({
+      where: { scopeKind, scopeId, action, window: QUOTA_WINDOW, resetAt: { lte: clock() } },
+      select: { id: true },
+    });
+    if (!expired) return reservation;
+    await settleReservation(db, scopeKind, scopeId, action, -amount, reservation);
+  }
+  return null;
 }
 
 /**
