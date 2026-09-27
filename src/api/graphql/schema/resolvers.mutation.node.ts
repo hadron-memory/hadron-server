@@ -11,6 +11,7 @@ import {
 import { lockMemoryForChannelChange } from '../../../lib/channels.js';
 import {
   assertGovernedWrite,
+  assertRoleDeclaredForWrite,
   mergedGovernedState,
   governedKindsOf,
   GOVERNED_KINDS,
@@ -97,6 +98,7 @@ import {
   toUsageNodeRefs,
 } from '../../../lib/usageRecorder.js';
 import { nextSiblingSeq } from '../../../lib/nodeSeq.js';
+import { authoredContentChanged, carryNodeAuthorship, clearNodeAuthorship, type NodeAuthorshipStamp } from '../../../lib/nodeAuthorship.js';
 import { mergePropertiesPatch } from '../../../lib/skilldoc/exportsMerge.js';
 import {
   ancestorLocs,
@@ -251,6 +253,15 @@ export async function writeNodeCore(
      * redesign unrelated write surfaces while #1220 remains separately scoped.
      */
     concealUnreadable?: { entity: 'memory' | 'node'; ref: string };
+    /** #1326 — an internal clone carries the source's already-stored stamp. */
+    copiedAuthorship?: NodeAuthorshipStamp;
+    /**
+     * #1330 — a node the SERVER writes on its own account, exempt from the
+     * strict-sub-role refusal (`assertRoleDeclaredForWrite`). Only server code
+     * can pass it, never a client, which is what makes the exemption
+     * trustworthy. No caller needs it yet: no platform writer sets a role.
+     */
+    platformWrite?: boolean;
   },
 ) {
       // Keep the historical `input` name so the body below stays a
@@ -700,6 +711,17 @@ export async function writeNodeCore(
         }
         nextAbstractOriginHash = computeContentHash(postUpdatePlaintextContent);
       }
+      // The hash is DERIVED above and never caller-supplied, so the raw input
+      // the diff reads cannot carry it. Without this, re-saving the same
+      // abstract to mark it accurate against the current content (spec 032's
+      // reset) diffs as a no-op and the refreshed hash is never written — on
+      // plaintext memories always, and on encrypted ones since the diff began
+      // comparing decrypted plaintext (Codex on #1397 `dbf7cdce`). The change
+      // is revisioned like MCP's; `authoredContentChanged` ignores this derived
+      // field, so a verified authorship stamp survives the reset.
+      if (nextAbstractOriginHash !== undefined) {
+        suppliedForDiff.abstractOriginHash = nextAbstractOriginHash;
+      }
 
       if (memEncInfo.isEncrypted) {
         const key = sessionKeyCache.getByMemoryId(memEncInfo.id);
@@ -1018,7 +1040,26 @@ export async function writeNodeCore(
               if (!current) return { conflict: false, node: null };
             }
 
-            const changes = diffNodeChanges(current, suppliedForDiff);
+            // #1330 — H1 strict sub-roles, judged on the locked row: a role the
+            // write assigns must be declared under a strict parent.
+            await assertRoleDeclaredForWrite(
+              tx,
+              input.memoryId,
+              {
+                role: input.role === undefined ? current.role : input.role,
+                priorRole: current.role,
+                runnableAfter: mergedGovernedState(current, { role: input.role, isRunnable: input.isRunnable }).isRunnable,
+              },
+              { platformWrite: opts?.platformWrite },
+            );
+
+            // The snapshot uses the at-rest row, but the caller supplied
+            // plaintext. Diff a decrypted COPY so an identical encrypted save
+            // neither manufactures a revision nor clears valid attribution.
+            const currentForDiff = memEncInfo.isEncrypted
+              ? decryptNodeFields({ ...current }, memEncInfo)
+              : current;
+            const changes = diffNodeChanges(currentForDiff, suppliedForDiff);
             const changesUnversionedField =
               input.ownerRepo !== undefined && input.ownerRepo !== current.ownerRepo;
             // ownerRepo deliberately remains outside restorable node history,
@@ -1072,6 +1113,9 @@ export async function writeNodeCore(
 
             const data = {
               ...updatePayload,
+              // The snapshot above keeps the old author. The new live content
+              // has no verified author until the attestation/human gates land.
+              ...(authoredContentChanged(changes) ? clearNodeAuthorship() : {}),
               revisionContentHash: revisionStateHashRefreshMarker(),
             } as Prisma.NodeUncheckedUpdateInput;
 
@@ -1131,6 +1175,7 @@ export async function writeNodeCore(
             where: { loc_memoryId: { loc: input.loc, memoryId: input.memoryId } },
             create: {
               ...nodeFieldsClean,
+              ...(opts?.copiedAuthorship ? carryNodeAuthorship(opts.copiedAuthorship) : {}),
               id,
               tags,
               createdBy,
@@ -1223,6 +1268,7 @@ export async function writeNodeCore(
             // tombstone's content is real content, which losing silently was
             // the #976 defect. `upsert` mode reaches here for a live row too,
             // deliberately: that mode is either-way by contract.
+            let authoritativeChanges: string[] = [];
             if (authoritative) {
               // Row lock + drift reconciled as its own revision BEFORE this
               // snapshot (@copilot, PR #1339): the address lock binds only
@@ -1241,13 +1287,30 @@ export async function writeNodeCore(
                   { extensions: { code: 'NODE_WRITE_CONFLICT', loc: input.loc, memoryId: input.memoryId } },
                 );
               }
+              const authoritativeForDiff = memEncInfo.isEncrypted
+                ? decryptNodeFields({ ...authoritative }, memEncInfo)
+                : authoritative;
+              authoritativeChanges = diffNodeChanges(authoritativeForDiff, suppliedForDiff);
               await createNodeRevision(tx, {
                 ...buildNodeRevisionSnapshot(authoritative, editorFromAuth(ctx), {
                   revLabel: input.reason,
-                  changes: diffNodeChanges(authoritative, suppliedForDiff),
+                  changes: authoritativeChanges,
                 }),
               });
             }
+
+            // #1330 — H1 strict sub-roles, against the AUTHORITATIVE row: a
+            // resurrection keeps the tombstone's role unless the write names one.
+            await assertRoleDeclaredForWrite(
+              tx,
+              input.memoryId,
+              {
+                role: input.role === undefined ? (authoritative?.role ?? null) : input.role,
+                priorRole: authoritative?.role ?? null,
+                runnableAfter: mergedGovernedState(authoritative, { role: input.role, isRunnable: input.isRunnable }).isRunnable,
+              },
+              { platformWrite: opts?.platformWrite },
+            );
 
             // #1183 — resurrect from the AUTHORITATIVE row, not the stale
             // probe. `updateExtras` above was built from `existing`, which may
@@ -1262,6 +1325,16 @@ export async function writeNodeCore(
               ...upsertArgs,
               update: {
                 ...upsertArgs.update,
+                // #1326 — this arm OVERWRITES an existing row. For a copy
+                // (`create` mode, which refuses a live occupant above) that row
+                // is a resurrected tombstone whose fields the copy omitted
+                // survive, so the copied claim describes the source, not the
+                // mixture. A copied stamp is carried only on the fresh insert
+                // (the create arm); here it clears (Codex on #1397 f650be49).
+                ...(opts?.copiedAuthorship
+                  ? clearNodeAuthorship()
+                  : authoritative && (mode === 'create' || authoredContentChanged(authoritativeChanges))
+                    ? clearNodeAuthorship() : {}),
                 revisionContentHash: revisionStateHashRefreshMarker(),
                 // create-ONLY, matching the `isResurrect` it corrects. Widening
                 // it to `upsert` would let an importer revive a soft-deleted
@@ -2278,6 +2351,7 @@ export const nodeMutations = {
           }
           data.revisionContentHash = revisionStateHashRefreshMarker();
 
+          Object.assign(data, clearNodeAuthorship());
           await tx.node.update({ where: { id: raw.id }, data });
         }
       });
@@ -3028,11 +3102,28 @@ export const nodeMutations = {
       { sourceRef, targetUrn, targetMemoryRef }: { sourceRef: string; targetUrn?: string | null; targetMemoryRef?: string | null },
       ctx: Context,
     ) => {
-      const source = await resolveExistingNode(ctx, sourceRef);
+      const selectedSource = await resolveExistingNode(ctx, sourceRef);
       // Cloning READS the source's content — require read access to the source
       // memory, or the URN-widened input becomes a cross-tenant exfiltration
       // path (review:entity-ref-args #3). Denial reads as not-found (no oracle).
-      if (!(await canReadMemory(ctx.db, ctx, source.memoryId))) {
+      if (!(await canReadMemory(ctx.db, ctx, selectedSource.memoryId))) {
+        throw new GraphQLError(`Node not found: "${sourceRef}"`, {
+          extensions: { code: 'NODE_NOT_FOUND', ref: sourceRef },
+        });
+      }
+      // A raw writer may have changed the source's content while leaving its
+      // old task/human stamp. Reconcile under the source row lock and copy the
+      // resulting state; the clone's own fingerprint would otherwise certify
+      // the stale stamp permanently. A concurrent move or delete is a miss in
+      // the memory this caller was authorized to read.
+      const source = await ctx.db.$transaction(async (tx) => {
+        if ((await ensureCurrentNodeRevisionInTransaction(tx, selectedSource.id, {
+          expectedMemoryId: selectedSource.memoryId,
+        })) == null) return null;
+        const current = await tx.node.findUnique({ where: { id: selectedSource.id } });
+        return current && !current.deletedAt && current.loc === selectedSource.loc ? current : null;
+      });
+      if (!source) {
         throw new GraphQLError(`Node not found: "${sourceRef}"`, {
           extensions: { code: 'NODE_NOT_FOUND', ref: sourceRef },
         });
@@ -3081,14 +3172,18 @@ export const nodeMutations = {
         loc: destLoc,
         name: srcPlain.name,
         nodeType: srcPlain.nodeType,
+        isLink: srcPlain.isLink,
         objectType: srcPlain.objectType ?? undefined, // #725 — carry the collection through a clone
         isRunnable: srcPlain.isRunnable,
+        alias: srcPlain.alias ?? undefined,
         description: srcPlain.description ?? undefined,
         abstract: srcPlain.abstract ?? undefined,
         content: srcPlain.content ?? undefined,
         data: (srcPlain.data as Record<string, unknown> | null) ?? undefined,
         tags: deserializeTags(srcPlain.tags),
         properties: (srcPlain.properties as Record<string, unknown> | null) ?? undefined,
+        llmModel: srcPlain.llmModel ?? undefined,
+        aiAgent: srcPlain.aiAgent ?? undefined,
         seq: srcPlain.seq ?? undefined,
         edges,
       };
@@ -3096,7 +3191,15 @@ export const nodeMutations = {
       // caller (a read of the SOURCE memory, which may differ from the
       // destination's) and writeNodeCore records the write of the new node.
       recordNodeRead(ctx.db, toUsageNodeRef(source), ctx);
-      return writeNodeCore(input, ctx, 'create');
+      // The generic clone currently does not copy role (the governed clone
+      // contract is handled separately in #1324). A stale abstract is also
+      // re-fingerprinted by writeNodeCore. Either change makes the copied
+      // authored state different, so it cannot inherit the source claim.
+      const copiedAuthorship = srcPlain.role == null && (
+        srcPlain.abstract == null ||
+        srcPlain.abstractOriginHash === computeContentHash(srcPlain.content)
+      ) ? carryNodeAuthorship(source) : clearNodeAuthorship();
+      return writeNodeCore(input, ctx, 'create', { copiedAuthorship });
     },
 
     // Fold a source node into a target node, returning the updated target.
@@ -3367,7 +3470,7 @@ export const nodeMutations = {
         );
 
         if (Object.keys(changed).length > 0) {
-          await tx.node.update({ where: { id: target.id }, data: writeData });
+          await tx.node.update({ where: { id: target.id }, data: { ...writeData, ...clearNodeAuthorship() } });
         }
 
         if (fields.has('EDGES')) {
@@ -3734,6 +3837,15 @@ export const nodeMutations = {
         // restoring its uncaptured fields would wipe the live values to
         // NULL rather than "restore" anything.
         const writeData: Record<string, unknown> = { ...restoreFields };
+        // #1326 — a legacy pre-#620 snapshot captured no authorship, so it has
+        // no stamp to restore. If the restore rewrites authored fields, keeping
+        // the live stamp would attribute that older state to the current
+        // author: clear it to unknown. An unchanged restore keeps its verified
+        // stamp — the same rule as the agent-snapshot restore (#1397).
+        if (!('authorshipKind' in restoreFields)
+          && authoredContentChanged(diffNodeChanges(current, restoreFields))) {
+          Object.assign(writeData, clearNodeAuthorship());
+        }
         if ('properties' in writeData) {
           writeData.properties = jsonOrDbNull(writeData.properties as never);
         }

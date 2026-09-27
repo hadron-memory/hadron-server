@@ -71,6 +71,7 @@ import {
   memoryAccessFilter,
   isMemoryReadableCached,
   loadMemoryUrn,
+  STORED_NODE_CONTENT,
 } from './resolvers.helpers.js';
 import { getAppMemoryAccess, canReadMemory, getMemoryAccess } from '../../../mcp/access-control.js';
 import { type AuthContext } from '../../../middleware/auth.js';
@@ -671,7 +672,8 @@ export const nodeQueries = {
             node.content, node.data as Record<string, unknown> | null, node.memoryId, ctx.db, access,
           );
           recordNodeRead(ctx.db, toUsageNodeRef(node), ctx);
-          return { ...node, content: compiled };
+          // Keep the stored template for parent-verifying field resolvers.
+          return { ...node, content: compiled, [STORED_NODE_CONTENT]: node.content };
         }
         recordNodeRead(ctx.db, toUsageNodeRef(node), ctx);
         return node;

@@ -101,6 +101,32 @@ async function provision(admin: Client) {
 /** The CHECK constraints `prisma db push` cannot express. Source of truth: prisma/post-push.sql. */
 async function applyTemplateConstraints(client: Client) {
 
+  // #1326 — nullable attribution is either unknown, a task at an exact
+  // revision, or an authenticated human. A CHECK with a bare OR of enum
+  // comparisons would admit SQL NULL, so use CASE with explicit non-null
+  // requirements. Synced with prisma/post-push.sql and the migration.
+  for (const [table, constraint] of [
+    ['nodes', 'chk_nodes_authorship_shape'],
+    ['node_revisions', 'chk_node_revisions_authorship_shape'],
+  ] as const) {
+    await client.query(`
+      ALTER TABLE "${table}" DROP CONSTRAINT IF EXISTS "${constraint}";
+      ALTER TABLE "${table}" ADD CONSTRAINT "${constraint}" CHECK (CASE
+        WHEN "authorship_kind" IS NULL THEN
+          "authored_by_task" IS NULL AND "authored_by_revision" IS NULL AND "authored_by_human" IS NULL AND "authored_at" IS NULL
+        WHEN "authorship_kind" = 'TASK' THEN
+          "authored_by_task" IS NOT NULL AND "authored_by_revision" IS NOT NULL AND "authored_by_revision" > 0 AND "authored_by_human" IS NULL AND "authored_at" IS NOT NULL
+        WHEN "authorship_kind" = 'HUMAN' THEN
+          "authored_by_task" IS NULL AND "authored_by_revision" IS NULL AND "authored_by_human" IS NOT NULL AND "authored_at" IS NOT NULL
+        ELSE false END);
+    `);
+  }
+  await client.query(`
+    ALTER TABLE "node_content_validation_reports" DROP CONSTRAINT IF EXISTS "chk_node_content_validation_revisions_positive";
+    ALTER TABLE "node_content_validation_reports" ADD CONSTRAINT "chk_node_content_validation_revisions_positive"
+      CHECK ("node_rev_seq" > 0 AND "validation_task_rev_seq" > 0);
+  `);
+
   // 005-agent-subscription, re-keyed by 034-memory-class-access: ownership is
   // class-based — personal/private ⇔ user_id IS NOT NULL (allows private+owner
   // and free-standing personal/private; decoupled from visibility).

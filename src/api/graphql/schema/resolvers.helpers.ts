@@ -3,6 +3,7 @@
 // by the GraphQL resolver map. No behavior change. The `Context` interface
 // lives here and is re-exported from resolvers.ts for existing importers.
 import type { NodeMergeField } from '../../../lib/nodeMerge.js';
+import type { SnapshotSourceNode } from '../../../lib/nodeRevisionSnapshot.js';
 import { sharedUrnAgentSlug } from '../../../lib/sharedMemoryLegacyKey.js';
 // Spec 049 Phase 5 — the install-created register row (D2) and its removal on uninstall.
 import { ensureInstallRegisterRows, removeRegisterRowsForUninstall } from '../../../lib/registerInstall.js';
@@ -17,6 +18,7 @@ import {
   DEFAULT_AI_CONFIG_NAME,
   type AiConfigOwnerType,
 } from '../../../lib/aiConfig.js';
+import { effectiveApiStyle, effectiveEndpoint } from '../../../lib/aiEndpoint.js';
 import {
   canWriteToMemory,
   filterReadableMemoryIds,
@@ -62,6 +64,16 @@ import {
   Prisma,
   type PrismaClient,
 } from '../../../generated/prisma/index.js';
+
+/**
+ * The STORED (uncompiled) content of a Node whose `content` a read resolver
+ * replaced with rendered Mustache output (`node(ref:)` / `nextNode` without
+ * `raw`). Field resolvers that verify the parent against the database —
+ * `Node.authorship`'s and `Node.revision`'s reconcile — must compare stored
+ * state, not presentation. A Symbol key is never serialized by GraphQL, so the
+ * wire shape is unchanged (#1326 review, Codex on #1397 `138e8185`).
+ */
+export const STORED_NODE_CONTENT: unique symbol = Symbol('storedNodeContent');
 
 export interface Context {
   db: PrismaClient;
@@ -112,6 +124,12 @@ export interface Context {
   // response's nodes/edges overwhelmingly share a memory, so the memory-urn
   // lookup is memoized per request (lazily created; see loadMemoryUrn).
   memoryUrnCache?: Map<string, Promise<string | null>>;
+  // Request-scoped per-parent reconciliation. Node.revision,
+  // Node.contentValidation and Node.authorship can all resolve on one GraphQL
+  // Node object; share its locked read without mixing distinct parent states.
+  nodeReconcileCache?: WeakMap<object, Promise<(SnapshotSourceNode & { revSeq: number }) | null>>;
+  // Request-scoped gated task URN lookup for repeated Node.authorship fields.
+  readableTaskRefCache?: Map<string, Promise<string | null>>;
   // Request-scoped memo for AppRun.urn composition (#696) — a run-list response
   // often shares one App across many runs, so the app-urn lookup is memoized per
   // request (lazily created; see loadAppUrn).
@@ -1121,6 +1139,9 @@ export interface AiServiceConfigRow {
   apiKeyEncrypted: string | null;
   apiKeyPreview: string | null;
   params: unknown;
+  /** #1373 — optional so a row read before the columns existed still maps. */
+  endpoint?: string | null;
+  apiStyle?: string | null;
   enabled: boolean;
   createdAt: Date | string;
   updatedAt?: Date | string | null;
@@ -1134,6 +1155,24 @@ export function aiConfigOwnerOf(c: AiServiceConfigRow): { ownerType: AiConfigOwn
 }
 
 /** Masked management view — never carries key material beyond the preview. */
+/**
+ * #1380 review (Codex P2): the MEMBER-visible picker (resolveAiServiceConfigs)
+ * — any App member, not just the owner's admins — must not learn an explicit
+ * endpoint, which under the self-hosted private-network opt-in can be an
+ * internal hostname or address. The endpoint is withheld, and
+ * effectiveEndpoint is shown only when it is the public provider default.
+ */
+export function toGqlAiServiceConfigForPicker(c: AiServiceConfigRow) {
+  const full = toGqlAiServiceConfig(c);
+  // A legacy row may still carry params.baseUrl (D2: no migration): it is no
+  // longer read, but it names a host all the same, so members don't see it.
+  const params =
+    full.params && typeof full.params === 'object' && !Array.isArray(full.params) && 'baseUrl' in full.params
+      ? Object.fromEntries(Object.entries(full.params as Record<string, unknown>).filter(([k]) => k !== 'baseUrl'))
+      : full.params;
+  return { ...full, params, endpoint: null, effectiveEndpoint: c.endpoint ? null : full.effectiveEndpoint };
+}
+
 export function toGqlAiServiceConfig(c: AiServiceConfigRow) {
   return {
     id: c.id,
@@ -1144,6 +1183,10 @@ export function toGqlAiServiceConfig(c: AiServiceConfigRow) {
     hasApiKey: !!c.apiKeyEncrypted,
     apiKeyPreview: c.apiKeyPreview,
     params: c.params ?? null,
+    endpoint: c.endpoint ?? null,
+    effectiveEndpoint: effectiveEndpoint(c),
+    apiStyle: c.apiStyle ?? null,
+    effectiveApiStyle: effectiveApiStyle(c),
     enabled: c.enabled,
     createdAt: toISO(c.createdAt)!,
     updatedAt: toISO(c.updatedAt ?? null),
@@ -2993,6 +3036,8 @@ export interface NodeInput {
   id?: string;
   memoryId: string;
   nodeType?: string;
+  /** Internal copy paths may preserve this legacy Node field. */
+  isLink?: boolean;
   /** #725 — collection discriminator (e.g. "competitor"). Omit preserves; null clears. */
   objectType?: string | null;
   isRunnable?: boolean | null;

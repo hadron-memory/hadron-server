@@ -3,6 +3,8 @@ import { createHmac, randomUUID } from 'crypto';
 import { assertLocWritable, LocProtectedError } from '../lib/protectedLoc.js';
 import {
   assertGovernedWrite,
+  assertRoleDeclaredForWrite,
+  RoleNotDeclaredError,
   governedKindsOf,
   roleIsOrDescendsFrom,
   type GovernedKind,
@@ -27,6 +29,7 @@ import {
   editorFromAuth,
   diffNodeChanges,
 } from '../lib/nodeRevisionSnapshot.js';
+import { authoredContentChanged, clearNodeAuthorship } from '../lib/nodeAuthorship.js';
 import {
   parseUrnInput,
   assertFullyQualifiedUrn,
@@ -47,6 +50,8 @@ import {
   type SafeUrnEmission,
 } from '../lib/urnEmit.js';
 import { portalUrlForUrn } from '../lib/portalUrl.js';
+import { userUrn } from '../lib/userHandle.js';
+import { nodeContentValidationState } from '../lib/nodeContentValidation.js';
 import { findLiveUrnAliasTargets, dedupeById } from '../lib/urnAlias.js';
 import { validateParentRel, InvalidParentRelError } from '../lib/parentRel.js';
 import type { NodeWhere } from '../lib/retrieval/nodeWhere.js';
@@ -226,7 +231,7 @@ import {
   teamAttentionPilotOperatorEnabled,
 } from '../lib/teamAttention.js';
 import { resolveOrgRef } from '../lib/entityRef/orgRef.js';
-import type { PrismaClient, SessionType, Prisma } from '../generated/prisma/index.js';
+import { Prisma, type PrismaClient, type SessionType, type NodeContentValidationOutcome } from '../generated/prisma/index.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -1182,6 +1187,11 @@ async function isMemoryHiddenFrom(
 type ReadProjectionNode = {
   id: string;
   revSeq: number;
+  authorshipKind: 'TASK' | 'HUMAN' | null;
+  authoredByTask: string | null;
+  authoredByRevision: number | null;
+  authoredByHuman: string | null;
+  authoredAt: Date | null;
   name: string;
   loc: string;
   memoryId: string;
@@ -1248,10 +1258,83 @@ function mcpDecryptOrMark(
   return 'locked';
 }
 
+type ReadValidationReport = {
+  nodeId: string;
+  nodeRevSeq: number;
+  validationTaskId: string;
+  validationTaskRevSeq: number;
+  outcome: NodeContentValidationOutcome;
+};
+
+/**
+ * One report lookup for an MCP batch, with each node's OWN current revision
+ * and memory. DISTINCT ON over all reports would pick a future revision for
+ * some nodes; the lateral index lookup keeps single-node selection semantics.
+ */
+async function batchValidationReports(nodes: readonly ReadProjectionNode[]): Promise<Map<string, ReadValidationReport>> {
+  if (nodes.length === 0) return new Map();
+  const values = Prisma.join(nodes.map((n) => Prisma.sql`(${n.id}::text, ${n.memoryId}::text, ${n.revSeq}::integer)`));
+  const rows = await db.$queryRaw<ReadValidationReport[]>(Prisma.sql`
+    WITH wanted(node_id, memory_id, rev_seq) AS (VALUES ${values})
+    SELECT w.node_id AS "nodeId", r.node_rev_seq AS "nodeRevSeq",
+           r.validation_task_id AS "validationTaskId",
+           r.validation_task_rev_seq AS "validationTaskRevSeq", r.outcome
+    FROM wanted w
+    JOIN LATERAL (
+      SELECT node_rev_seq, validation_task_id, validation_task_rev_seq, outcome
+      FROM node_content_validation_reports
+      WHERE node_id = w.node_id AND memory_id = w.memory_id AND node_rev_seq <= w.rev_seq
+      ORDER BY node_rev_seq DESC, reported_at DESC, id DESC
+      LIMIT 1
+    ) r ON TRUE
+  `);
+  return new Map(rows.map((row) => [row.nodeId, row]));
+}
+
+async function batchReadableTaskRefs(
+  nodes: readonly ReadProjectionNode[],
+  reports: ReadonlyMap<string, ReadValidationReport>,
+  auth: AuthContext,
+): Promise<Map<string, string | null>> {
+  const ids = [...new Set([
+    ...nodes.map((n) => n.authoredByTask),
+    ...[...reports.values()].map((r) => r.validationTaskId),
+  ].filter((id): id is string => !!id))];
+  if (ids.length === 0) return new Map();
+  const tasks = await db.node.findMany({
+    where: { id: { in: ids }, deletedAt: null },
+    select: { id: true, loc: true, memoryId: true },
+  });
+  // Resolve all referenced memories through the shared bulk gate. Calling
+  // canReadMemory once per task memory rebuilds the caller's access map for
+  // every distinct memory in a large batch.
+  const readable = await filterReadableMemoryIds(db, auth, tasks.map((task) => task.memoryId));
+  const refs = await Promise.all(tasks.map(async (task) => [
+    task.id,
+    readable.has(task.memoryId) ? await nodeUrn(task.loc, task.memoryId) : null,
+  ] as const));
+  return new Map(refs);
+}
+
+async function batchHumanNames(nodes: readonly ReadProjectionNode[]): Promise<Map<string, string>> {
+  const ids = [...new Set(nodes.map((n) => n.authoredByHuman).filter((id): id is string => !!id))];
+  if (ids.length === 0) return new Map();
+  const users = await db.user.findMany({ where: { id: { in: ids }, deletedAt: null }, select: { id: true, handle: true } });
+  return new Map(users.filter((user) => !!user.handle).map((user) => [user.id, user.handle!]));
+}
+
 async function renderNodeReadProjection(
   node: ReadProjectionNode,
   scope: 'content' | 'abstract' | 'all',
-  opts: { locked?: boolean } = {},
+  opts: {
+    locked?: boolean;
+    auth?: AuthContext;
+    batch?: {
+      reports: ReadonlyMap<string, ReadValidationReport>;
+      taskRefs: ReadonlyMap<string, string | null>;
+      humanNames: ReadonlyMap<string, string>;
+    };
+  } = {},
 ): Promise<string> {
   const revision = node.revSeq;
   const { urn, fellBack: urnFellBack } = await nodeUrnResult(node.loc, node.memoryId);
@@ -1304,6 +1387,44 @@ async function renderNodeReadProjection(
   // URL: a link that points somewhere other than the node is worse than none.
   const portalUrl = urnFellBack ? null : portalUrlForUrn(urn);
 
+  // #1326: a source node may be readable while its author/validator task
+  // lives in another tenant's memory. Resolve task addresses only after that
+  // memory's own content gate; never print the stored task id as a fallback.
+  const readableTask = async (id: string | null): Promise<string | null> => {
+    if (!id || !opts.auth) return null;
+    if (opts.batch) return opts.batch.taskRefs.get(id) ?? null;
+    const task = await db.node.findUnique({
+      where: { id }, select: { loc: true, memoryId: true, deletedAt: true },
+    });
+    if (!task || task.deletedAt || !(await canReadMemory(db, opts.auth, task.memoryId))) return null;
+    return nodeUrn(task.loc, task.memoryId);
+  };
+  let authorshipLine = '';
+  if (node.authorshipKind === 'TASK') {
+    const taskRef = await readableTask(node.authoredByTask);
+    authorshipLine = taskRef && node.authoredByRevision != null
+      ? `Authored by task: ${taskRef} @ revision ${node.authoredByRevision}`
+      : 'Authored by task: restricted';
+  } else if (node.authorshipKind === 'HUMAN' && node.authoredByHuman) {
+    const handle = opts.batch
+      ? opts.batch.humanNames.get(node.authoredByHuman)
+      : (await db.user.findFirst({
+          where: { id: node.authoredByHuman, deletedAt: null }, select: { handle: true },
+        }))?.handle;
+    authorshipLine = handle ? `Authored by human: ${userUrn(handle)}` : 'Authored by human';
+  }
+  const report = opts.batch
+    ? (opts.batch.reports.get(node.id) ?? null)
+    : await db.nodeContentValidationReport.findFirst({
+        where: { nodeId: node.id, memoryId: node.memoryId, nodeRevSeq: { lte: revision } },
+        orderBy: [{ nodeRevSeq: 'desc' }, { reportedAt: 'desc' }, { id: 'desc' }],
+      });
+  const validationState = nodeContentValidationState(revision, report);
+  const validatorRef = report ? await readableTask(report.validationTaskId) : null;
+  const validationLine = report
+    ? `Validation: ${validationState.toLowerCase()} (node revision ${report.nodeRevSeq}; validator ${validatorRef ? `${validatorRef} @ revision ${report.validationTaskRevSeq}` : 'restricted'})`
+    : 'Validation: unvalidated';
+
   // #186: surface nodeType so callers can tell `parent` from `info`.
   const meta = [
     `**${node.name}**`,
@@ -1314,6 +1435,8 @@ async function renderNodeReadProjection(
     `ID: ${node.id}`,
     `Revision: ${revision}`,
     portalUrl ? `URL: ${portalUrl}` : '',
+    authorshipLine,
+    validationLine,
     node.description ? `> ${node.description}` : '',
     `Type: ${node.nodeType}`,
     // #1201 (@codex P2, PR #1203). Without these a governed node reads as an
@@ -3075,6 +3198,7 @@ export function createMcpServerInstance(
             where: { loc_memoryId: { loc, memoryId } },
             select: { id: true, deletedAt: true },
           });
+          let sectionChanged = false;
           if (prior && !prior.deletedAt) {
             await tx.$queryRaw`SELECT "id" FROM "nodes" WHERE "id" = ${prior.id} FOR UPDATE`;
             // Reconcile only while the row is still in this memory.
@@ -3088,6 +3212,7 @@ export function createMcpServerInstance(
               );
             }
             const changes = diffNodeChanges(current, upsertArgs.update);
+            sectionChanged = authoredContentChanged(changes);
             if (changes.length > 0) {
               await createNodeRevision(tx, {
                 id: generateId(),
@@ -3097,7 +3222,7 @@ export function createMcpServerInstance(
           }
           const row = await tx.node.upsert({
             ...upsertArgs,
-            update: { ...upsertArgs.update, revisionContentHash: revisionStateHashRefreshMarker() },
+            update: { ...upsertArgs.update, ...(sectionChanged ? clearNodeAuthorship() : {}), revisionContentHash: revisionStateHashRefreshMarker() },
           });
           return row.id;
         });
@@ -3718,6 +3843,7 @@ export function createMcpServerInstance(
       // drift between the single-read and batch-read surfaces (cor:api:040:01).
       const projection = await renderNodeReadProjection(current, scope, {
         locked: lockState === 'locked',
+        auth,
       });
 
       // Record usage event (fire-and-forget), AFTER the projection is in hand:
@@ -4021,6 +4147,7 @@ export function createMcpServerInstance(
       const readEvents: UsageNodeRef[] = [];
       let bytes = 0;
       let truncated = false;
+      const visible: ReadProjectionNode[] = [];
       for (const selected of ordered) {
         const n = await loadCurrentReadProjection(selected.id, selected.memoryId);
         if (
@@ -4032,6 +4159,20 @@ export function createMcpServerInstance(
           unavailable.push(echoByNodeId.get(selected.id) ?? selected.id);
           continue;
         }
+        visible.push(n);
+      }
+      // #1326: the single-node renderer queries one latest report and up to
+      // two task refs per node. At the 200-node batch cap those lookups were
+      // serialized inside this loop. Prefetch only after reconciliation, so
+      // each report is judged against the revision the batch will actually
+      // render, and gate each distinct task memory before exposing its URN.
+      const reports = await batchValidationReports(visible);
+      const [taskRefs, humanNames] = await Promise.all([
+        batchReadableTaskRefs(visible, reports, auth),
+        batchHumanNames(visible),
+      ]);
+      const batchProvenance = { reports, taskRefs, humanNames };
+      for (const n of visible) {
         if (truncated) {
           omitted.push(await nodeUrn(n.loc, n.memoryId));
           continue;
@@ -4039,6 +4180,8 @@ export function createMcpServerInstance(
         const lockState = mcpDecryptOrMark(n); // spec 041 — same posture as hadron_get_node
         const projection = await renderNodeReadProjection(n, scope, {
           locked: lockState === 'locked',
+          auth,
+          batch: batchProvenance,
         });
         // Measured on the ANNOTATED block, which is what actually ships: sizing
         // the bare projection and pushing the annotated one lets a block cross
@@ -5018,6 +5161,19 @@ export function createMcpServerInstance(
           if (authoritative && !authoritative.deletedAt) throw LIVE_LOC_CONFLICT;
 
           const pre = await snapshotOverwrittenNode(tx);
+
+          // #1330 — H1 strict sub-roles, as writeNodeCore judges them (this
+          // handler is its parity implementation, so the gate is repeated here).
+          // Judged on `pre`, the tombstone as LOCKED by the snapshot, not on the
+          // unlocked `authoritative` read: a writer that takes no loc lock (git
+          // sync) could change the tombstone's role in between, and a stale
+          // prior role would make an undeclared one read as unchanged (#1400
+          // review). A refusal rolls the snapshot back with everything else.
+          await assertRoleDeclaredForWrite(tx, memoryId, {
+            role: role === undefined ? (pre?.role ?? null) : role,
+            priorRole: pre?.role ?? null,
+            runnableAfter: mergedGovernedState(pre, { role, isRunnable }).isRunnable,
+          });
           const written = await tx.node.upsert({
             ...upsertArgs,
             // Resurrect (#543) on the authoritative row, not the stale probe: a
@@ -5025,6 +5181,7 @@ export function createMcpServerInstance(
             // deleted while taking the new content.
             update: {
               ...upsertArgs.update,
+              ...(pre ? clearNodeAuthorship() : {}),
               ...(pre?.deletedAt ? { deletedAt: null, deletedBy: null } : {}),
             } as any,
           });
@@ -5044,6 +5201,7 @@ export function createMcpServerInstance(
         if (e === LIVE_LOC_CONFLICT) {
           return textResult(`Node already exists at "${rawUrn}" — use hadron_update_node.`);
         }
+        if (e instanceof RoleNotDeclaredError) return textResult(`[role_not_declared] ${e.message}`);
         if (e instanceof InlineEdgeEndpointError) return textResult(e.message);
         throw e;
       }
@@ -5347,6 +5505,9 @@ export function createMcpServerInstance(
       if (nodeData !== undefined) data.data = nodeData as any;
       if (llmModel !== undefined) data.llmModel = llmModel;
       if (aiAgent !== undefined) data.aiAgent = aiAgent;
+      // Keep the authored plaintext projection for the row-lock comparison.
+      // The write payload below may become fresh randomized ciphertext.
+      const plaintextUpdates = { ...data };
 
       // Spec 041 (PR-2): encrypted memory — encrypt the provided encrypted-
       // envelope fields with this session's key (gate + key resolved above,
@@ -5414,32 +5575,30 @@ export function createMcpServerInstance(
                 { extensions: { code: 'NODE_WRITE_CONFLICT', loc, memoryId: memory.id } },
               );
             }
+            // #1330 — H1 strict sub-roles on the locked row, as writeNodeCore.
+            await assertRoleDeclaredForWrite(tx, memory.id, {
+              role: role === undefined ? current.role : role,
+              priorRole: current.role,
+              runnableAfter: mergedGovernedState(current, { role, isRunnable }).isRunnable,
+            });
             // A guard-only call is a useful no-op check and must not manufacture
             // a history row or advance the live revision.
             if (Object.keys(data).length === 0 && resolvedEdges === null) return;
+            // Snapshot the ciphertext row, but compare the caller's plaintext
+            // with a decrypted copy. An identical encrypted save is a no-op.
+            const currentForDiff = updKey
+              ? decryptNodeFieldsWithKey({ ...current }, updKey)
+              : current;
+            const changedFields = diffNodeChanges(currentForDiff, plaintextUpdates);
+            if (changedFields.length === 0 && resolvedEdges === null) return;
             await createNodeRevision(tx, {
               id: generateId(),
               ...buildNodeRevisionSnapshot(current, editorFromAuth(auth), {
                 revLabel: reason,
-                changes: diffNodeChanges(current, {
-                  name,
-                  nodeType,
-                  objectType,
-                  isRunnable,
-                  role,
-                  description,
-                  abstract: normalizedAbstract,
-                  content: data.content,
-                  abstractOriginHash: nextAbstractOriginHash,
-                  seq,
-                  tags,
-                  properties,
-                  data: data.data,
-                  llmModel,
-                  aiAgent,
-                }),
+                changes: changedFields,
               }),
             });
+            if (authoredContentChanged(changedFields)) Object.assign(data, clearNodeAuthorship());
             data.revisionContentHash = revisionStateHashRefreshMarker();
             const updated = Object.keys(data).length > 0
               ? await tx.node.update({ where: { id: existing.id }, data })
@@ -5459,6 +5618,7 @@ export function createMcpServerInstance(
           if (e instanceof LocProtectedError) return textResult(`[loc_protected] ${e.message}`);
           if (e instanceof NodeMovedDuringWriteError) return textResult(e.message);
           if (e instanceof InlineEdgeEndpointError) return textResult(e.message);
+          if (e instanceof RoleNotDeclaredError) return textResult(`[role_not_declared] ${e.message}`);
           if (e instanceof ScopeGraphQLError && e.extensions?.code === 'NODE_WRITE_CONFLICT') {
             return textResult(`[node_write_conflict] ${e.message}`);
           }
@@ -6461,6 +6621,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
                   loc: toLoc,
                   name: newName,
                   memoryId: toMemory.id,
+                  ...clearNodeAuthorship(),
                   revisionContentHash: revisionStateHashRefreshMarker(),
                 },
               });
