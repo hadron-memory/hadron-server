@@ -3151,6 +3151,8 @@ export interface MergeMemoriesInput {
   target: string;
   /** Field strategy for source nodes that collide (same loc) in the target. Omitted/null = every mergeable field. */
   include?: NodeMergeField[] | null;
+  /** One assertion for changed collision folds into task-governed targets. */
+  authoredWith?: NodeInput['authoredWith'];
   /** Delete the (now-empty) source memory after a successful merge. */
   deleteSourceMem?: boolean | null;
 }

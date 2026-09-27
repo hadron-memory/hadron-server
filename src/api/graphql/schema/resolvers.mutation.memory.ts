@@ -379,6 +379,7 @@ export const memoryMutations = {
           fields,
           deleteSourceMem,
           editor,
+          authoredWith: input.authoredWith,
         });
       } catch (e) {
         // Surface the same typed error mergeNodes does, with the offending loc.

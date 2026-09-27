@@ -4914,6 +4914,8 @@ export const typeDefs = `#graphql
     target: String!
     "Field strategy for source nodes whose loc collides with an existing target node (folded via the mergeNodes rules). Omit (or null) = every mergeable field. Nodes with no target counterpart move over unchanged (loc preserved)."
     include: [NodeMergeField!]
+    "Required when a collision fold changes authored content on a target whose role rule names an author task. One claim must satisfy every changed target in this merge."
+    authoredWith: AuthoredWithInput
     "Delete the (now-empty) source memory after a successful merge."
     deleteSourceMem: Boolean = false
   }

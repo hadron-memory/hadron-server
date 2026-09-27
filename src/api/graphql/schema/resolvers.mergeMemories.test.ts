@@ -90,6 +90,52 @@ describe('mergeMemories — partition (collide vs relocate)', () => {
     });
   });
 
+  it('#1328 requires a current task assertion for a changed collision fold and preserves history', async () => {
+    // The bulk governed-kind gate refuses a runnable node in either merged
+    // memory, so the role rule references a readable task in a third memory.
+    const taskMem = await resolvers.Mutation.createMemory({}, { orgId: org.id, name: 'mm-tasks' }, ctx());
+    const task = await makeNode(taskMem.id, 'author-task', { isRunnable: true });
+    const config = await db.memoryConfig.create({ data: { id: generateId(), memoryId: tgtMem.id } });
+    await db.nodeRoleRule.create({
+      data: { id: generateId(), configId: config.id, role: 'guide', authorTaskId: task.id, authorTaskRequired: true },
+    });
+    const source = await makeNode(srcMem.id, 'guided', { content: 'source addition' });
+    const target = await makeNode(tgtMem.id, 'guided', {
+      role: 'guide', content: 'target body', authorshipKind: 'TASK',
+      authoredByTask: task.id, authoredByRevision: task.revSeq, authoredAt: new Date('2026-09-26T20:00:00Z'),
+    });
+    const input = { source: srcMem.id, target: tgtMem.id, include: ['CONTENT'] };
+
+    await expect(merge(input)).rejects.toMatchObject({ extensions: { code: 'AUTHOR_TASK_MISSING' } });
+    await expect(merge({ ...input, authoredWith: { task: task.id, revision: task.revSeq + 1 } }))
+      .rejects.toMatchObject({ extensions: { code: 'AUTHOR_TASK_STALE_REVISION' } });
+    expect(await db.node.findUniqueOrThrow({ where: { id: target.id } })).toMatchObject({
+      content: 'target body', authorshipKind: 'TASK', authoredByTask: task.id, revSeq: 1,
+    });
+    expect(await db.node.findUnique({ where: { id: source.id } })).not.toBeNull();
+
+    await merge({ ...input, authoredWith: { task: task.id, revision: task.revSeq } });
+    expect(await db.node.findUniqueOrThrow({ where: { id: target.id } })).toMatchObject({
+      content: 'target body\n\nsource addition', authorshipKind: 'TASK',
+      authoredByTask: task.id, authoredByRevision: task.revSeq,
+    });
+    expect(await db.nodeRevision.findFirstOrThrow({ where: { nodeId: target.id } })).toMatchObject({
+      content: 'target body', authorshipKind: 'TASK', authoredByTask: task.id,
+    });
+
+    // An edge-only fold authors no target content and carries its stamp even
+    // though the same role rule requires an assertion for a changed fold.
+    await makeNode(srcMem.id, 'edge-only', { content: 'unused source body' });
+    const carry = await makeNode(tgtMem.id, 'edge-only', {
+      role: 'guide', content: 'kept target body', authorshipKind: 'TASK',
+      authoredByTask: task.id, authoredByRevision: task.revSeq, authoredAt: new Date('2026-09-26T20:00:00Z'),
+    });
+    await merge({ source: srcMem.id, target: tgtMem.id, include: ['EDGES'] });
+    expect(await db.node.findUniqueOrThrow({ where: { id: carry.id } })).toMatchObject({
+      content: 'kept target body', authorshipKind: 'TASK', authoredByTask: task.id,
+    });
+  });
+
   it('folds colliding nodes and relocates the rest, emptying the source', async () => {
     await makeNode(srcMem.id, 'shared', { content: 'from source', tags: ['s'] });
     await makeNode(srcMem.id, 'srconly', { content: 'only in source' });
