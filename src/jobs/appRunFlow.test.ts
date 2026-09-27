@@ -458,6 +458,34 @@ describe('3-node flow through production deps (§10)', () => {
     ).rejects.toThrow(/encrypted/);
   });
 
+  it('run node-tool update requires a current author-task assertion for governed content', async () => {
+    const run = await mintFlow();
+    const r = (await db.appRun.findUniqueOrThrow({ where: { id: run.id } })) as AppRun;
+    const toolCtx = { log: vi.fn(), db, run: r, principal: runContext(db, r) };
+    const task = await db.node.create({
+      data: { id: generateId(), memoryId, loc: 'tasks:author', name: 'Author', isRunnable: true },
+    });
+    const config = await db.memoryConfig.create({ data: { id: generateId(), memoryId } });
+    await db.nodeRoleRule.create({
+      data: { id: generateId(), configId: config.id, role: 'guide', authorTaskId: task.id, authorTaskRequired: true },
+    });
+    const target = await db.node.create({
+      data: { id: generateId(), memoryId, loc: 'notes:governed', name: 'Guide', role: 'guide', content: 'original' },
+    });
+    const urn = `${ORG_URN}::flowmem::notes:governed`;
+
+    await expect(hadronUpdateNode.execute(toolCtx, { urn, content: 'replacement' }))
+      .rejects.toMatchObject({ extensions: { code: 'AUTHOR_TASK_MISSING' } });
+    await expect(hadronUpdateNode.execute(toolCtx, { urn, content: 'replacement', authoredWith: { task: task.id, revision: 2 } }))
+      .rejects.toMatchObject({ extensions: { code: 'AUTHOR_TASK_STALE_REVISION' } });
+    expect((await db.node.findUniqueOrThrow({ where: { id: target.id } })).content).toBe('original');
+    expect(await db.nodeRevision.count({ where: { nodeId: target.id } })).toBe(0);
+
+    await hadronUpdateNode.execute(toolCtx, { urn, content: 'replacement', authoredWith: { task: task.id, revision: 1 } });
+    expect(await db.node.findUniqueOrThrow({ where: { id: target.id } }))
+      .toMatchObject({ content: 'replacement', authoredByTask: task.id, authoredByRevision: 1 });
+  });
+
   it('a defer-branch flow can still route into another memory later (URN shape sanity)', async () => {
     // Guards composeNodeUrn round-tripping: the checkpointed target URN must
     // be walkable by the next hop's loadFlowNode.

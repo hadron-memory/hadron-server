@@ -41,11 +41,17 @@ const WRITE_ARG_PROPERTIES = {
   abstract: { type: 'string', description: 'Paragraph-length summary (max 2000 chars).' },
   properties: { type: 'object', description: 'Structured key-value properties.' },
   isRunnable: { type: 'boolean', description: 'Whether the node can be run as a task.' },
+  authoredWith: {
+    type: 'object',
+    description: 'Author-task assertion for a role that requires one; task is the task node ID and revision is its current revision.',
+    properties: { task: { type: 'string' }, revision: { type: 'integer' } },
+    required: ['task', 'revision'],
+  },
 } as const;
 
 const WRITE_FIELD_KEYS = [
   'name', 'content', 'nodeType', 'data', 'seq', 'tags',
-  'description', 'abstract', 'properties', 'isRunnable',
+  'description', 'abstract', 'properties', 'isRunnable', 'authoredWith',
 ] as const;
 
 function pickWriteFields(args: Record<string, unknown>): Record<string, unknown> {

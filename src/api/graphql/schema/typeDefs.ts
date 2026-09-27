@@ -4191,6 +4191,8 @@ export const typeDefs = `#graphql
     nodeType: String
     "Merged provenance metadata; the server sets properties.url on the url path when absent (properties.title is filled from the extracted title by the write seam)."
     properties: JSON
+    "Author-task assertion for writing a role-governed target. This attests the import itself; taskRef separately starts a task after import."
+    authoredWith: AuthoredWithInput
     "Task node to run against the imported node once stored (#528) — PK or fully-qualified URN. Presence triggers a MANUAL app run; the result envelope is FETCH_PENDING + jobId (poll appRun(ref:)). The imported node's URN is passed to the task as eventData.importedNodeUrn."
     taskRef: ID
     "Extra template args merged into the task run's eventData (only meaningful with taskRef)."
