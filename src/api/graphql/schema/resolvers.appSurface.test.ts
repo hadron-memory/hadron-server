@@ -444,6 +444,24 @@ describe('apps (the uniform member list, #473)', () => {
 // ---------------------------------------------------------------------------
 
 describe('memories — App-key orgId', () => {
+  it('does not list a memory linked only through a malformed stored role', async () => {
+    const { app } = await createDbAppWithKey(db, 'invalid-role-list', orgId);
+    await db.appAgent.create({ data: { appId: app.id, agentId } });
+    const invalid = await db.memory.create({
+      data: {
+        id: generateId(), name: 'invalid link', urn: `${orgId}:invalid-link`,
+        organizationId: orgId, class: 'knowledge', visibility: 'ORGANIZATION',
+      },
+    });
+    await db.agentMemoryItem.create({ data: { agentId, memoryId: invalid.id, role: 'bogus' } });
+    const page = await resolvers.Query.memories(
+      {}, { filter: { memoryClasses: ['knowledge'] } }, ctx({ appId: app.id }),
+    );
+    const ids = page.items.map((m: { id: string }) => m.id);
+    expect(ids).toContain(memoryId);
+    expect(ids).not.toContain(invalid.id);
+  });
+
   it('drops a cross-org Agent’s linked memories when its App grant is revoked', async () => {
     const foreignOrg = await db.organization.create({
       data: { id: generateId(), name: 'foreign-publisher', urn: `foreign-${generateId()}` },

@@ -29,7 +29,7 @@ import type { AgentSubscription, Memory, PrismaClient } from '../generated/prism
 import type { AuthContext } from '../middleware/auth.js';
 import { isActiveAgentSubscription } from '../lib/agentSubscription.js';
 import { participantAppIds } from '../lib/auth/appParticipation.js';
-import { hasActiveAgentInstallLicense, isAgentInstalled } from '../lib/appAgent.js';
+import { hasActiveAgentInstallLicense, isAgentInstalled, isGrantedAgentMemoryRole } from '../lib/appAgent.js';
 import { resolveUserApps } from '../auth/user-app-resolution.js';
 import { getOrgReadableMemoryIds } from '../lib/auth/orgReadableMemory.js';
 
@@ -64,7 +64,7 @@ export function foldAgentIntoAccessMap(agent: AgentLike): Map<string, string> {
     const agentRole = item.role ?? 'read';
     // The persisted column is a free string. A malformed legacy value is no
     // grant at all; mapping it to READ_ONLY would make invalid rows readable.
-    if (agentRole !== 'read' && agentRole !== 'read-write') continue;
+    if (!isGrantedAgentMemoryRole(agentRole)) continue;
     const effective = agentRole === 'read-write' ? 'READ_WRITE' : 'READ_ONLY';
     const existing = access.get(item.memoryId);
     if (!existing || effective === 'READ_WRITE') {

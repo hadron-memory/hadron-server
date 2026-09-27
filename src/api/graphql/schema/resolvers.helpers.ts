@@ -532,9 +532,9 @@ export async function concealUnreadableDenial(
  * additionally the sole write cap for a knowledge memory.
  *
  * Validated rather than free-form (#1349): the column is a plain `String`, so
- * an unrecognised value used to be stored silently and then read as "no grant"
- * by every consumer — inert, but indistinguishable from a real denial, which
- * is how a write bypass was first mis-measured as read-only.
+ * an unrecognised value used to be stored silently. Read surfaces now skip
+ * those legacy rows through isGrantedAgentMemoryRole rather than treating
+ * an unknown value as read-only.
  */
 export const AGENT_MEMORY_ROLES = ['read', 'read-write'] as const;
 export type AgentMemoryRole = (typeof AGENT_MEMORY_ROLES)[number];

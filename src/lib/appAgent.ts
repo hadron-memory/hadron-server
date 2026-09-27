@@ -26,6 +26,12 @@
 import type { PrismaClient, Prisma } from '../generated/prisma/index.js';
 import { isLifecycleActive } from '@hadron-memory/access-control';
 
+/** Legacy null uses the read default; unknown persisted strings grant nothing. */
+export function isGrantedAgentMemoryRole(role: string | null | undefined): boolean {
+  const value = role ?? 'read';
+  return value === 'read' || value === 'read-write';
+}
+
 /** The same cross-org install license used by the App access fold. */
 export async function hasActiveAgentInstallLicense(
   db: PrismaClient,

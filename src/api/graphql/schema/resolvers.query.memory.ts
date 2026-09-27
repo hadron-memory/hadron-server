@@ -25,7 +25,7 @@ import {
 import { getMemberOrgIds } from '../../../lib/auth/memberOrgIds.js';
 import { validateMemoryNodes } from '../../../lib/memoryValidation.js';
 import { emitNodeUrnV2 } from '../../../lib/urnEmit.js';
-import { isAgentInstalledAndLicensed } from '../../../lib/appAgent.js';
+import { isAgentInstalledAndLicensed, isGrantedAgentMemoryRole } from '../../../lib/appAgent.js';
 
 /** Compose a node URN, tolerating a memory urn the flat v2 shape can't express. */
 function safeCanonicalNodeUrn(memoryUrn: string, loc: string): string | null {
@@ -506,6 +506,7 @@ export const memoryQueries = {
         for (const aa of app.appAgents) {
           if (!(await isAgentInstalledAndLicensed(ctx.db, ctx.appId, aa.agent.id))) continue;
           for (const item of aa.agent.memoryItems) {
+            if (!isGrantedAgentMemoryRole(item.role)) continue;
             if (classSet ? !classSet.has(item.memory.class) : item.memory.class === 'system') continue;
             if (f.visibility && item.memory.visibility !== f.visibility) continue;
             // AgentMemoryItem is global to the Agent. An App-scoped memory
