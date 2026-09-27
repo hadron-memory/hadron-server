@@ -100,8 +100,8 @@ describe('createNode — schema enforcement (GraphQL)', () => {
   });
 });
 
-describe('replaceSubtree — schema enforcement (bulk path bypasses writeNodeCore)', () => {
-  it('rejects an imported node that violates the schema', async () => {
+describe('replaceSubtree — retired bulk path', () => {
+  it('refuses before interpreting even a schema-invalid payload', async () => {
     await expect(
       (resolvers.Mutation as any).replaceSubtree(
         null,
@@ -113,7 +113,8 @@ describe('replaceSubtree — schema enforcement (bulk path bypasses writeNodeCor
         },
         admin(),
       ),
-    ).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
+    ).rejects.toMatchObject({ extensions: { code: 'REPLACE_SUBTREE_RETIRED' } });
+    expect(await db.node.count({ where: { memoryId: memId, loc: 'imp' } })).toBe(0);
   });
 });
 

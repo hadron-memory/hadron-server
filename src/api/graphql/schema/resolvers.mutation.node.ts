@@ -5,7 +5,6 @@ import {
   assertLocWritable,
   protectedLocsIn,
   protectedLocCovers,
-  protectedDeletionFilter,
   type ProtectedLoc,
   type ProtectedSource,
 } from '../../../lib/protectedLoc.js';
@@ -44,9 +43,7 @@ import {
 import { enqueueNodeEmbedding } from '../../../services/embedding/enqueue.js';
 import { canReadMemory } from '../../../mcp/access-control.js';
 import { sessionKeyCache } from '../../../lib/sessionKeyCache.js';
-import { validateNodeAgainstSchema, NodeSchemaViolation } from '../../../lib/validateNodeAgainstSchema.js';
 import { enforceNodeSchemaOnWrite, normalizeObjectType } from '../../../lib/enforceNodeSchema.js';
-import type { MemorySchema } from '../../../lib/memorySchema.js';
 import {
   encryptNodeFieldsWithKey,
   decryptNodeFields,
@@ -60,7 +57,6 @@ import {
 } from '../../../lib/validateLoc.js';
 import { escapePrismaLikePattern } from '../../../lib/literalLocPrefix.js';
 import { deriveEdgeLoc } from '../../../lib/edgeLoc.js';
-import { countCrossMemoryEdgesForNodeDelete } from '../../../lib/crossMemoryEdgeDelete.js';
 import {
   liveEdgeEndpointSet,
   lockEdgeEndpointMemories,
@@ -110,7 +106,6 @@ import {
   lockAncestorsForCreate,
   acquireLockSet,
   lockLocForWrite,
-  lockAncestorsForCreateMany,
   lockNodeForDelete,
 } from '../../../lib/nodeSubtreeLock.js';
 import {
@@ -137,7 +132,6 @@ import {
   type CreateNodeInput,
   type UpdateNodeInput,
   type SearchReplaceInNodesInput,
-  type EdgeInput,
   type MergeNodesInput,
 } from './resolvers.helpers.js';
 import { type ToolDriveFile } from '../../../lib/emailClient.js';
@@ -3702,165 +3696,22 @@ export const nodeMutations = {
       return finalNode;
     },
 
-    // Merge one memory (source) into another (target), returning the updated
-    // target. Spec: cor:api:080. Source nodes whose loc collides with a target
-    // node are folded into the counterpart via the shared mergeNodeFields
-    // strategy (cor:api:070:01); the rest relocate with their loc unchanged.
-    // Edges follow. v1 rejects encrypted memories and system/app classes
-    // (mirrors cloneMemory's constraints).
+    // #454 — the old bulk path hard-deleted history and recreated rows outside
+    // the canonical encryption, embedding, revision, and role gates. Keep the
+    // public field for clients that still know it, but refuse every authorized
+    // invocation before a transaction or other write side effect.
     replaceSubtree: async (
       _: unknown,
-      {
-        ownerRepo,
-        memoryId,
-        nodes,
-        edges,
-      }: { ownerRepo: string; memoryId: string; nodes: NodeInput[]; edges: EdgeInput[] },
+      { memoryId }: { memoryId: string },
       ctx: Context,
     ) => {
-      // 007-entity-id-or-urn: memoryId may be ID, bare URN, or prefixed URN.
-      // #1381: an unreadable memory answers as resolveMemoryRef's miss.
-      const { id: resolvedMemoryId } = await resolveMemoryRefForWrite(ctx, memoryId);
-      await requireMemoryWriteAccess(ctx, resolvedMemoryId);
-
-      // #725 — this bulk path bypasses writeNodeCore, so enforce the memory's
-      // property schema on each imported node here too (a git-synced typed node
-      // must still satisfy its collection). Fetched once for the whole subtree.
-      const replaceMemSchema = (
-        await ctx.db.memory.findUnique({ where: { id: resolvedMemoryId }, select: { schema: true } })
-      )?.schema as unknown as MemorySchema | null;
-
-      // #1061 — collected inside the transaction because the PKs are minted
-      // there (`input.id ?? generateId()`); recorded only after it commits, so
-      // a rolled-back subtree records nothing.
-      const written: { id: string; loc: string; memoryId: string }[] = [];
-
-      await ctx.db.$transaction(async (tx: Prisma.TransactionClient) => {
-        // Same order as Channel creation: memory key before ancestor keys.
-        // Hold it through the ownerRepo cleanup so a tombstoned Channel cannot
-        // be resurrected after the protection snapshot but before deleteMany.
-        await lockMemoryForChannelChange(tx, resolvedMemoryId);
-        // #664/#752: this bulk create bypasses the locked writeNodeCore path, so
-        // a concurrent non-recursive delete of an ancestor could miss the rows
-        // inserted below. Lock the ancestor path of every incoming loc (deduped,
-        // root→leaf) BEFORE the deleteMany's row locks — the delete path takes
-        // its advisory lock before its row locks, so acquiring advisory-first
-        // here too avoids a lock-order inversion (advisory→row vs row→advisory)
-        // that could deadlock. READ COMMITTED (the tx default) is required so an
-        // ancestor-delete's count sees these rows post-commit.
-        await lockAncestorsForCreateMany(
-          tx,
-          resolvedMemoryId,
-          nodes.map((n) => n.loc).filter((l): l is string => typeof l === 'string' && l !== ''),
-        );
-
-        // #1180 — this deletes by ownerRepo, NOT by the locs it was handed, so
-        // the lock helper above (which only sees INCOMING locs) protects
-        // nothing on the way out: a payload containing no protected loc would
-        // still delete existing protected rows (@copilot, PR #1190). Route
-        // through the shared filter rather than rebuilding the predicate.
-        const replaceFilter = protectedDeletionFilter(
-          await protectedLocsIn(tx, resolvedMemoryId),
-        );
-        {
-          const replaceWhere: Prisma.NodeWhereInput = {
-            ownerRepo,
-            memoryId: resolvedMemoryId,
-            ...(replaceFilter.notClauses.length
-              ? { NOT: { OR: replaceFilter.notClauses as Prisma.NodeWhereInput[] } }
-              : {}),
-          };
-          const crossMemoryEdges = await countCrossMemoryEdgesForNodeDelete(
-            tx,
-            resolvedMemoryId,
-            replaceWhere,
-          );
-          if (crossMemoryEdges > 0) {
-            throw new GraphQLError(
-              `Subtree replacement refused: ${crossMemoryEdges} edge(s) bridge nodes selected for hard-delete to another memory. Remove or relocate those edges explicitly first.`,
-              { extensions: { code: 'CROSS_MEMORY_EDGES', count: crossMemoryEdges } },
-            );
-          }
-          await tx.node.deleteMany({
-            where: replaceWhere,
-          });
-        }
-
-        for (const input of nodes) {
-          // #725 — normalize an empty objectType to null, then enforce the schema.
-          if (typeof input.objectType === 'string' && input.objectType.trim() === '') {
-            input.objectType = null;
-          }
-          if (input.objectType != null) {
-            try {
-              validateNodeAgainstSchema(
-                replaceMemSchema,
-                input.objectType,
-                (input.properties ?? null) as Record<string, unknown> | null,
-              );
-            } catch (e) {
-              if (e instanceof NodeSchemaViolation) {
-                throw new GraphQLError(e.message, { extensions: { code: 'BAD_USER_INPUT' } });
-              }
-              throw e;
-            }
-          }
-          // Strip non-column NodeInput fields (edges/reason) that Prisma
-          // would reject, and pull out id/tags so they're set explicitly
-          // (spreading input.id would otherwise override the generated id).
-          const {
-            id: _id,
-            edges: _edges,
-            reason: _reason,
-            tags: _tags,
-            ...nodeFields
-          } = input;
-          const createdId = input.id ?? generateId();
-          await tx.node.create({
-            data: {
-              id: createdId,
-              ...nodeFields,
-              tags: serializeTags(input.tags ?? []) as string[],
-            } as Prisma.NodeUncheckedCreateInput,
-          });
-          if (typeof input.loc === 'string' && input.loc !== '') {
-            written.push({ id: createdId, loc: input.loc, memoryId: resolvedMemoryId });
-          }
-        }
-
-        for (const edge of edges) {
-          const source = await tx.node.findUnique({ where: { loc_memoryId: { loc: edge.sourceLoc, memoryId: resolvedMemoryId } } });
-          // loc is unique only within a memory — scope to resolvedMemoryId so a
-          // loc collision in another memory can't be resolved as the target.
-          const target = await tx.node.findUnique({ where: { loc_memoryId: { loc: edge.targetLoc, memoryId: resolvedMemoryId } } });
-          if (source && target) {
-            const edgeLoc = edge.loc ?? deriveEdgeLoc(source.loc, edge.name ?? null, target.loc);
-            await tx.edge.upsert({
-              where: { loc_memoryId: { loc: edgeLoc, memoryId: resolvedMemoryId } },
-              create: {
-                memoryId: resolvedMemoryId,
-                sourceId: source.id,
-                targetId: target.id,
-                loc: edgeLoc,
-                name: edge.name ?? null,
-                description: edge.description ?? null,
-                isRunnable: edge.isRunnable ?? null,
-              },
-              update: {},
-            });
-          }
-        }
-      });
-
-      // #1061 — one write per node the subtree replace actually created. This
-      // is the git-sync path, so a repo-backed memory's chart will be dominated
-      // by sync writes rather than by hand edits. That is the honest reading:
-      // the rows really were rewritten, and the alternative (silently exempting
-      // the biggest writer on the platform) is what made the old series
-      // untrustworthy in the first place.
-      recordNodeUsage(ctx.db, 'write', written, ctx);
-
-      return nodes.length;
+      // Preserve the ordinary write-access and concealed-memory boundary.
+      const { id } = await resolveMemoryRefForWrite(ctx, memoryId);
+      await requireMemoryWriteAccess(ctx, id);
+      throw new GraphQLError(
+        'replaceSubtree is unavailable because it cannot preserve node write invariants.',
+        { extensions: { code: 'REPLACE_SUBTREE_RETIRED' } },
+      );
     },
 
     restoreNodeRevision: async (
