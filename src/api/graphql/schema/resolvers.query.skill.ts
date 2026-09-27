@@ -125,6 +125,8 @@ export interface SkillSelectionResult {
  * read dropped. The one surface where under-reporting is destructive.
  */
 const SKILL_PLAN_MAX_NODES = 500;
+/** A selected plan fails loud if its collision census cannot finish within this bound. */
+const SKILL_PLAN_MAX_COLLISION_CENSUS_NODES = 50_000;
 
 /**
  * The DISCOVERY predicate: a node carrying any declaration key at all.
@@ -1114,8 +1116,19 @@ async function selectedFileCollisions(
   }));
   if (names.size === 0) return [];
 
-  const matching: SkillNode[] = [];
+  // Only the fact of a second claimant is needed. Keeping every matching row
+  // and calling lintCollisions would make one widely reused name quadratic in
+  // both report construction and message size.
+  const claimantCounts = new Map([...names].map((name) => [name, 0]));
+  const selectedIds = new Set(selected.map((node) => node._id));
+  for (const node of selected) {
+    const declaration = declaredSkill(node.properties, host);
+    if (declaration?.enable === true && names.has(declaration.name)) {
+      claimantCounts.set(declaration.name, Math.min(2, (claimantCounts.get(declaration.name) ?? 0) + 1));
+    }
+  }
   let cursor: string | undefined;
+  let scanned = 0;
   while (true) {
     const page = await ctx.db.node.findMany({
       where: {
@@ -1123,25 +1136,35 @@ async function selectedFileCollisions(
         OR: DISCOVERY_OR,
         AND: [access, { memory: { deletedAt: null } }],
       } as never,
-      select: { id: true, loc: true, properties: true, memory: { select: { urn: true } } },
+      select: { id: true, properties: true },
       orderBy: { id: 'asc' },
       take: 200,
       ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
     });
+    scanned += page.length;
+    if (scanned > SKILL_PLAN_MAX_COLLISION_CENSUS_NODES) {
+      throw new GraphQLError('selectedSkillFilePlan: the collision census is too large to complete safely.', {
+        extensions: { code: 'BAD_USER_INPUT' },
+      });
+    }
     for (const row of page) {
+      if (selectedIds.has(row.id)) continue;
       const declaration = declaredSkill(row.properties, host);
       if (declaration?.enable !== true || !names.has(declaration.name)) continue;
-      matching.push({
-        urn: safeNodeUrnV2(row.memory.urn, row.loc),
-        memoryUrn: row.memory.urn,
-        loc: row.loc,
-        properties: row.properties,
-        isRunnable: false,
-        content: '',
-      });
+      claimantCounts.set(declaration.name, Math.min(2, (claimantCounts.get(declaration.name) ?? 0) + 1));
     }
     if (page.length < 200) break;
     cursor = page[page.length - 1]!.id;
   }
-  return lintCollisions(matching, host);
+  return selected.flatMap((node) => {
+    const declaration = declaredSkill(node.properties, host);
+    if (declaration?.enable !== true || (claimantCounts.get(declaration.name) ?? 0) < 2) return [];
+    return [{
+      urn: node.urn,
+      memory: node.memoryUrn,
+      rule: 'skill-name-collision',
+      severity: 'error' as const,
+      message: `stores skill name "${declaration.name}", and another readable enabled declaration does too — one name, one skill directory; rename one or supersede the fork`,
+    }];
+  });
 }
