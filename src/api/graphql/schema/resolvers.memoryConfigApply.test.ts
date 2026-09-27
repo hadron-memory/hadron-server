@@ -177,7 +177,11 @@ describe('applyMemoryConfigTemplate (#1334 slice 1)', () => {
   it('references are re-validated for the caller: a soft-deleted task is NODE_NOT_FOUND, nothing written', async () => {
     const t = await tpl(as(orgAdmin), 'ORGANIZATION', org.id, { name: 'base', rules: [{ role: 'aaa' }, { role: 'spec', authorTaskRef: task.id }] });
     await db.node.update({ where: { id: task.id }, data: { deletedAt: new Date() } });
-    expect(code(await apply(as(orgAdmin), t.id, mem.id))).toBe('NODE_NOT_FOUND');
+    const r = await apply(as(orgAdmin), t.id, mem.id);
+    expect(code(r)).toBe('NODE_NOT_FOUND');
+    // The stored node id is never echoed: the refusal names the rule and field (#1399 review).
+    expect(JSON.stringify(r.errors)).not.toContain(task.id);
+    expect(r.errors![0].message).toContain('template rule "spec" authorTask');
     expect(await rulesOf(mem.id)).toEqual([]);
   });
 

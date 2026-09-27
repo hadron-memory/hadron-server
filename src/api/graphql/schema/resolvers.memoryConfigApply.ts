@@ -87,10 +87,15 @@ function refBroken(role: string, field: 'authorTask' | 'validationTask'): GraphQ
 function refsOf(rule: MemoryConfigTemplateRule): ResolvedRef[] {
   if (rule.authorTaskRequired && !rule.authorTaskId) throw refBroken(rule.role, 'authorTask');
   if (rule.validationTaskRequired && !rule.validationTaskId) throw refBroken(rule.role, 'validationTask');
+  // `ref` is what a refusal echoes (NODE_NOT_FOUND). A template reference
+  // is stored, not caller-supplied, and the rule's field resolvers withhold
+  // its id when it's UNREADABLE, so the refusal names the rule and field
+  // instead of the node id (#1399 review).
+  const label = (field: string) => `template rule "${rule.role}" ${field}`;
   const out: ResolvedRef[] = [];
-  if (rule.authorTaskId) out.push({ kind: 'authorTask', id: rule.authorTaskId, ref: rule.authorTaskId });
-  if (rule.validationTaskId) out.push({ kind: 'validationTask', id: rule.validationTaskId, ref: rule.validationTaskId });
-  if (rule.descriptionNodeId) out.push({ kind: 'descriptionNode', id: rule.descriptionNodeId, ref: rule.descriptionNodeId });
+  if (rule.authorTaskId) out.push({ kind: 'authorTask', id: rule.authorTaskId, ref: label('authorTask') });
+  if (rule.validationTaskId) out.push({ kind: 'validationTask', id: rule.validationTaskId, ref: label('validationTask') });
+  if (rule.descriptionNodeId) out.push({ kind: 'descriptionNode', id: rule.descriptionNodeId, ref: label('descriptionNode') });
   return out;
 }
 
