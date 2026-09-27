@@ -4,9 +4,9 @@ import { mergeOwnerNamespacedUrns } from '../../lib/mergeOwnerNamespacedUrns.js'
 
 /**
  * Tables whose audit actor columns carry User.id values in normal writes.
- * Organization.createdBy is deliberately excluded: it is also the durable
- * personal-workspace discriminator, and rewriting it could make one target
- * user appear to have two personal workspaces after an account merge.
+ * All four audit actor column names are covered, including Organization's
+ * creator: spec 048 retired auto-personal organizations, so that stamp is no
+ * longer a personal-workspace discriminator.
  *
  * Values such as `app:<id>` / `github:<login>` are untouched because every
  * update below matches the source User.id exactly.
@@ -62,9 +62,7 @@ export const AUDIT_USER_COLUMNS: Readonly<Record<string, readonly string[]>> = {
   memory_config_templates: ['created_by', 'updated_by', 'deleted_by'],
   channels: ['created_by', 'updated_by', 'deleted_by'],
   dashboard_widgets: ['created_by', 'updated_by'],
-  // Organization.createdBy identifies the hidden personal workspace and must
-  // remain on its original User; the other org audit stamps follow identity.
-  organizations: ['updated_by', 'deleted_by'],
+  organizations: ['created_by', 'updated_by', 'deleted_by'],
   register_entries: ['created_by', 'updated_by', 'deleted_by'],
   resend_senders: ['created_by', 'updated_by'],
   scopes: ['created_by', 'updated_by', 'deleted_by'],

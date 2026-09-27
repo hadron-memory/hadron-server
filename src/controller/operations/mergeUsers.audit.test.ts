@@ -5,10 +5,9 @@ import { mergeUsers, AUDIT_USER_COLUMNS } from './mergeUsers.js';
 
 type AuditColumn = { table_name: string; column_name: string };
 
-// Organization.createdBy doubles as the personal-workspace discriminator.
-// Rewriting it could give the survivor two apparent personal workspaces
-// (cor:api:010:02); every other audit actor column must be handled.
-const EXEMPT_AUDIT_COLUMNS = new Set(['organizations.created_by']);
+// Spec 048 retired auto-personal organizations, so even organizations.created_by
+// is an ordinary actor stamp. There are currently no intentional exemptions.
+const EXEMPT_AUDIT_COLUMNS = new Set<string>();
 
 function coveredPairs(registry: Readonly<Record<string, readonly string[]>>): Set<string> {
   return new Set(Object.entries(registry).flatMap(([table, columns]) => columns.map((column) => `${table}.${column}`)));
@@ -24,7 +23,7 @@ describe('mergeUsers audit actor registry', () => {
     await cleanDb(db);
   });
 
-  it('covers every migrated-schema audit column, except the personal-workspace discriminator', async () => {
+  it('covers every migrated-schema audit column with no stale exemptions', async () => {
     const columns = await db.$queryRaw<AuditColumn[]>`
       SELECT table_name, column_name FROM information_schema.columns
       WHERE table_schema = 'public'
@@ -182,7 +181,7 @@ describe('mergeUsers audit actor registry', () => {
     await mergeUsers(db, { sourceUserId: source.id, targetUserId: target.id, actorUserId: actor.id });
 
     expect(await db.organization.findUniqueOrThrow({ where: { id: org.id } })).toMatchObject({
-      createdBy: source.id, // Explicit spec exception; the row remains soft-deleted.
+      createdBy: target.id,
       updatedBy: target.id,
       deletedBy: target.id,
       deletedAt: expect.any(Date),
