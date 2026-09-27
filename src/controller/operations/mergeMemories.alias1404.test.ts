@@ -165,12 +165,6 @@ describe('#1404 mergeMemories node aliases', () => {
     const node = await makeNode(source.id, 'reused');
     const old = nodeUrn(source, node.loc);
     await merge();
-    // Seed the predecessor through #1402's existing helper to isolate the
-    // resolver contract from mergeMemories' missing alias-writing call.
-    await db.$transaction((tx) => recordUrnRename(tx, {
-      entityType: 'NODE', entityId: node.id,
-      oldUrn: `${source.urn}:${node.loc}`, newUrn: `${target.urn}:${node.loc}`,
-    }));
 
     expect((await resolvers.Query.node(null, { ref: old }, ctx()))?.id).toBe(node.id);
     expect(await resolvers.Query.node(null, { ref: old }, ctx(sourceReaderId))).toBeNull();
@@ -182,14 +176,10 @@ describe('#1404 mergeMemories node aliases', () => {
     expect((await resolvers.Query.node(null, { ref: old }, ctx()))?.id).toBe(occupant.id);
   });
 
-  it('resolves a seeded predecessor after the source memory is soft-deleted', async () => {
+  it('resolves the predecessor after the source memory is soft-deleted', async () => {
     const node = await makeNode(source.id, 'retained');
     const old = nodeUrn(source, node.loc);
     await merge(true);
-    await db.$transaction((tx) => recordUrnRename(tx, {
-      entityType: 'NODE', entityId: node.id,
-      oldUrn: `${source.urn}:${node.loc}`, newUrn: `${target.urn}:${node.loc}`,
-    }));
 
     expect((await db.memory.findUniqueOrThrow({ where: { id: source.id } })).deletedAt)
       .not.toBeNull();
