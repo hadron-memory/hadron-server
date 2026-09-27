@@ -717,6 +717,17 @@ export async function writeNodeCore(
         }
         nextAbstractOriginHash = computeContentHash(postUpdatePlaintextContent);
       }
+      // The hash is DERIVED above and never caller-supplied, so the raw input
+      // the diff reads cannot carry it. Without this, re-saving the same
+      // abstract to mark it accurate against the current content (spec 032's
+      // reset) diffs as a no-op and the refreshed hash is never written — on
+      // plaintext memories always, and on encrypted ones since the diff began
+      // comparing decrypted plaintext (Codex on #1397 `dbf7cdce`). The change
+      // is revisioned like MCP's; `authoredContentChanged` ignores this derived
+      // field, so a verified authorship stamp survives the reset.
+      if (nextAbstractOriginHash !== undefined) {
+        suppliedForDiff.abstractOriginHash = nextAbstractOriginHash;
+      }
 
       if (memEncInfo.isEncrypted) {
         const key = sessionKeyCache.getByMemoryId(memEncInfo.id);

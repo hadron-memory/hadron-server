@@ -7,6 +7,7 @@ import { typeResolvers } from './resolvers.types.js';
 import { resolvers, type Context } from './resolvers.js';
 import { typeDefs } from './typeDefs.js';
 import { writeNodeCore } from './resolvers.mutation.node.js';
+import { computeContentHash } from '../../../lib/contentHash.js';
 import { ensureCurrentNodeRevisionInTransaction, revisionStateHashRefreshMarker } from '../../../lib/nodeRevisionSnapshot.js';
 
 const at = new Date('2026-09-26T20:00:00Z');
@@ -73,6 +74,35 @@ describe('#1326 content provenance reads', () => {
       content: 'body', authorshipKind: 'TASK', authoredByTask: taskId,
       authoredByRevision: 4, authoredAt: at,
     });
+  });
+
+  it('persists a same-abstract accuracy reset on a plaintext node and keeps its stamp', async () => {
+    // Spec 032's reset: re-saving the SAME abstract re-fingerprints it against
+    // the current content. The hash is derived, so it must reach the diff, or
+    // the write reads as a no-op and the abstract stays stale forever.
+    const memory = await db.memory.findUniqueOrThrow({ where: { id: nodeMemoryId } });
+    await db.orgMember.update({
+      where: { organizationId_userId: { organizationId: memory.organizationId!, userId: readerId } },
+      data: { role: 'ADMIN' },
+    });
+    await db.node.update({
+      where: { id: nodeId },
+      data: {
+        abstract: 'A summary.', abstractOriginHash: computeContentHash('an older body'),
+        revisionContentHash: revisionStateHashRefreshMarker(),
+      },
+    });
+    const revisions = await db.nodeRevision.count({ where: { nodeId } });
+    await writeNodeCore(
+      { memoryId: nodeMemoryId, loc: 'authored', abstract: 'A summary.' },
+      { db, userId: readerId, roles: ['ADMIN'] } as Context,
+      'update',
+    );
+    expect(await db.node.findUniqueOrThrow({ where: { id: nodeId } })).toMatchObject({
+      abstractOriginHash: computeContentHash('body'),
+      authorshipKind: 'TASK', authoredByTask: taskId, authoredByRevision: 4, authoredAt: at,
+    });
+    expect(await db.nodeRevision.count({ where: { nodeId } })).toBe(revisions + 1);
   });
 
   it('keeps a task stamp and creates no revision for an identical save', async () => {
