@@ -229,6 +229,35 @@ describe('#945 — the memory leg must be tied to this App or this session\'s ag
     );
   });
 
+  it('does not turn an Agent link into an App-key grant on user-owned knowledge', async () => {
+    const owner = await db.user.create({ data: { id: generateId(), name: 'knowledge owner' } });
+    const owned = await db.memory.create({
+      data: {
+        id: generateId(), ownerUserId: owner.id,
+        urn: `u-${owner.id}:linked-knowledge`, name: 'owner-only knowledge',
+        class: 'knowledge', visibility: 'PUBLIC',
+      },
+    });
+    const shared = await db.memory.create({
+      data: {
+        id: generateId(), organizationId: org.id,
+        urn: `${org.urn}:linked-knowledge`, name: 'org knowledge', class: 'knowledge',
+      },
+    });
+    await db.agentMemoryItem.createMany({ data: [
+      { agentId: ownAgent.id, memoryId: owned.id, role: 'read' },
+      { agentId: ownAgent.id, memoryId: shared.id, role: 'read' },
+    ] });
+    for (const [memoryId, allowed] of [[owned.id, false], [shared.id, true]] as const) {
+      const session = await db.session.create({
+        data: { id: generateId(), appId: app.id, userId: user.id, agentId: ownAgent.id, memoryId },
+      });
+      const ids = await getAccessibleMemoryIds(appKeyCtx(app.id, session.id));
+      expect(ids).not.toBeNull();
+      expect(ids!.includes(memoryId)).toBe(allowed);
+    }
+  });
+
   it('does not import another App’s linked knowledge or agent-owned scratch memory', async () => {
     const otherApp = await db.app.create({
       data: { id: generateId(), organizationId: org.id, name: 'Other', urn: `${org.urn}:other` },

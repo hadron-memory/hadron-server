@@ -79,7 +79,7 @@ export async function sessionScopedMemoryIds(
       memory: {
         select: {
           id: true, appId: true, userMemoryOfAgentId: true,
-          class: true, userId: true, createdBy: true, deletedAt: true,
+          class: true, userId: true, ownerUserId: true, createdBy: true, deletedAt: true,
         },
       },
       agent: {
@@ -182,11 +182,15 @@ async function identityMemoryLicensed(
   mem: {
     class: string | null;
     userId: string | null;
+    ownerUserId: string | null;
     createdBy: string | null;
     userMemoryOfAgentId: string | null;
   },
 ): Promise<boolean> {
   const strictClass = mem.class === 'personal' || mem.class === 'private';
+  // Spec-047 knowledge/group memories are owner-only even though their class
+  // is shared. A pure App key has no user principal to satisfy that gate.
+  if (mem.ownerUserId !== null && !strictClass) return false;
   const legacyHolding = mem.userMemoryOfAgentId != null &&
     (mem.class === 'knowledge' || mem.class === 'group');
   if (!strictClass && !legacyHolding) return true;
