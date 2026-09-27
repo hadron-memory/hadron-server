@@ -6436,6 +6436,12 @@ export const typeDefs = `#graphql
     It is the mirror of teamChatMessages' sinceSeq: pass the OLDEST seq you
     hold, as you would pass the newest to page forward. Omit it for the tail.
 
+    There is no total -- the field returns the page and nothing else. A
+    page SHORTER than the limit is a truthful end-of-data under that cursor,
+    and only here: this resolver applies every filter inside the query and
+    never drops a row after the database take, so the take IS the page. Do
+    not carry the same-looking inference to reads that overfetch and
+    post-filter; there a short page can still mean rows were removed.
     Two boundaries worth knowing before you build on it:
       - A message with NO seq is older than every numbered one
         (cor:cht:050:02), so every cursor includes such messages. They are
