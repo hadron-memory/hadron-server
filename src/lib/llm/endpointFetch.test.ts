@@ -38,6 +38,38 @@ describe('connect-time resolution failures', () => {
     expect((err as LlmInvocationError).transient).toBe(true);
   });
 
+  it('a resolver that hangs is bounded by the caller deadline (#1385 review)', async () => {
+    lookupMock.mockImplementation(() => new Promise(() => {}));
+    const started = Date.now();
+    const err = await guardedEndpointFetch()('https://llm.example.test/v4/chat/completions', { signal: AbortSignal.timeout(50) }).catch((e) => e);
+    expect((err as Error).name).toBe('TimeoutError');
+    expect(Date.now() - started).toBeLessThan(2_000);
+  });
+
+  it('an already-aborted request never starts the DNS lookup (#1385 review)', async () => {
+    lookupMock.mockClear();
+    lookupMock.mockImplementation(async () => [{ address: '93.184.216.34', family: 4 }]);
+    const ctrl = new AbortController();
+    ctrl.abort(new Error('gave up'));
+    const err = await guardedEndpointFetch()('https://llm.example.test/v4/chat/completions', { signal: ctrl.signal }).catch((e) => e);
+    expect((err as Error).message).toBe('gave up');
+    expect(lookupMock).not.toHaveBeenCalled();
+  });
+
+  it('an abort that lands while the lookup is being started is not missed (#1385 review)', async () => {
+    const ctrl = new AbortController();
+    // The resolver call itself triggers the abort, synchronously, then hangs.
+    lookupMock.mockImplementation(() => {
+      ctrl.abort(new Error('aborted mid-start'));
+      return new Promise(() => {});
+    });
+    const outcome = await Promise.race([
+      guardedEndpointFetch()('https://llm.example.test/v4/chat/completions', { signal: ctrl.signal }).catch((e) => e),
+      new Promise((r) => setTimeout(() => r('HUNG'), 2_000)),
+    ]);
+    expect((outcome as Error).message).toBe('aborted mid-start');
+  });
+
   it('a host that does not exist (ENOTFOUND) is a permanent refusal', async () => {
     failLookupWith('ENOTFOUND');
     await expect(guardedEndpointFetch()('https://llm.example.test/v4/chat/completions')).rejects.toBeInstanceOf(AiEndpointForbiddenError);

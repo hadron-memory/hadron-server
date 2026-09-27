@@ -3027,7 +3027,7 @@ export const typeDefs = `#graphql
     ownerType: AiConfigOwnerType!
     "ID of the owning HadronServer / Organization / App / Agent."
     ownerId: ID!
-    "Provider identifier; v1 known: 'anthropic' | 'openai' | 'glm' | 'bedrock'."
+    "Provider identifier; known: 'anthropic' | 'openai' | 'glm' | 'bedrock' | 'openai-compatible' (any OpenAI-wire host; endpoint required)."
     provider: String!
     "Model identifier, passed verbatim to the provider."
     model: String!
@@ -3063,6 +3063,69 @@ export const typeDefs = `#graphql
     CHAT_COMPLETIONS
     "POST {endpoint}/responses — OpenAI's Responses API (the openai default)."
     RESPONSES
+  }
+
+  "#1378: where a tested value came from."
+  enum AiConfigTestValueSource {
+    SAVED
+    OVERRIDE
+  }
+
+  "#1378: which key a test used; NONE when there was none to use."
+  enum AiConfigTestKeySource {
+    SAVED
+    OVERRIDE
+    "A HADRON_SERVER config with no stored key: the server's own credential for that provider served the call, as it serves a run (#1385)."
+    PLATFORM
+    NONE
+  }
+
+  """
+  #1378: values to test INSTEAD of the saved ones — e.g. an edited form before
+  it is saved. Never stored. Each is validated exactly as a write would be.
+  """
+  input AiServiceConfigTestOverride {
+    provider: String
+    model: String
+    "Omitted = the saved endpoint; null or empty = the provider default."
+    endpoint: String
+    "Omitted = the saved style; null = the provider default."
+    apiStyle: AiApiStyle
+    "A key to test with instead of the stored one. Never stored, never echoed."
+    apiKey: String
+  }
+
+  "#1378: per field, whether the test used the saved value or the override."
+  type AiServiceConfigTestUsed {
+    provider: AiConfigTestValueSource!
+    model: AiConfigTestValueSource!
+    endpoint: AiConfigTestValueSource!
+    apiStyle: AiConfigTestValueSource!
+    key: AiConfigTestKeySource!
+  }
+
+  type AiServiceConfigTestError {
+    "NO_API_KEY | KEY_UNREADABLE (the stored key cannot be decrypted here; re-enter it) | CONFIG_INVALID (the config cannot be built at all, e.g. a malformed Bedrock key; no call made) | QUOTA_EXCEEDED (a platform-funded test with the org's daily token allowance used up; no call made) | LLM_CALL_FAILED (the provider call failed or timed out; see transient)"
+    code: String!
+    "Provider error text, scrubbed of the key and truncated."
+    message: String!
+    transient: Boolean!
+  }
+
+  "#1378: one test call, made through the same client and endpoint a run uses."
+  type AiServiceConfigTestResult {
+    ok: Boolean!
+    provider: String!
+    model: String!
+    "The endpoint the request actually went to: the explicit endpoint, else the host the SDK chose (OPENAI_BASE_URL / ANTHROPIC_BASE_URL when the server sets one, Bedrock's regional host), else the catalog default. Null when it can't be known (Bedrock with no region)."
+    endpoint: String
+    "The wire protocol the request actually used."
+    apiStyle: AiApiStyle
+    used: AiServiceConfigTestUsed!
+    latencyMs: Int!
+    "The model's reply, truncated."
+    reply: String
+    error: AiServiceConfigTestError
   }
 
   "#1373: one known endpoint for a provider, from the server's single suggestion list."
@@ -8308,9 +8371,17 @@ export const typeDefs = `#graphql
     """
     036-ai-service-config: create a named AI config on an owner entity.
 
-    apiKey semantics: omitted = stored without a key (unusable for
-    execution until one is set); non-empty = encrypted at rest with a
-    masked preview. Name must be 1-64 lower-case [a-z0-9_-], unique per
+    apiKey semantics: non-empty = encrypted at rest with a masked preview.
+    Omitted is accepted only where a run may use the server's own
+    credential: a HADRON_SERVER config for openai, anthropic or bedrock at
+    their default host (no endpoint). Every ORGANIZATION, APP and AGENT
+    config needs its own key: the platform credential is platform spend
+    (#1390). Any other provider (glm, openai-compatible), and any config
+    with an endpoint, needs one too, because the SDK would otherwise send
+    the server's credential to a host that didn't issue it (#1389). All of
+    these are refused with AiConfigValidationError. A host that checks no
+    key takes any placeholder.
+    Name must be 1-64 lower-case [a-z0-9_-], unique per
     owner. provider must be a known provider; params are validated per
     provider.
 
@@ -8336,7 +8407,9 @@ export const typeDefs = `#graphql
     036-ai-service-config: update a named AI config. All fields optional.
 
     apiKey semantics: omitted = keep the stored key; empty string =
-    clear it; non-empty = replace (encrypted, preview recomputed).
+    clear it; non-empty = replace (encrypted, preview recomputed). The
+    RESULTING config is held to createAiServiceConfig's key rule, so
+    clearing the key of a config that needs one is refused.
 
     Auth: admin rights on the owning entity (as aiServiceConfigs).
     """
@@ -8353,6 +8426,17 @@ export const typeDefs = `#graphql
       apiStyle: AiApiStyle
       enabled: Boolean
     ): AiServiceConfig!
+
+    """
+    #1378: test a SAVED config by id with one small real call, through the same
+    client, endpoint and egress guard a run uses; the stored key never leaves
+    the server. The override argument tests edited values without saving them. Auth: as
+    updateAiServiceConfig; refused under impersonation. Every test that
+    reaches the provider is metered (usage type ai-config-test); NO_API_KEY
+    and KEY_UNREADABLE make no call and record nothing. The call is bounded
+    by a 20s timeout. Rate-limited per caller and config (RATE_LIMITED).
+    """
+    testAiServiceConfig(id: ID!, override: AiServiceConfigTestOverride): AiServiceConfigTestResult!
 
     """
     036-ai-service-config: delete a named AI config (hard delete; the
@@ -8607,6 +8691,7 @@ export const typeDefs = `#graphql
       agentTools: [String!]
       aiProvider: String
       aiModel: String
+      "036 legacy shim over the App's 'default' AI config; held to createAiServiceConfig's key rule (#1389)."
       aiApiKey: String
       expiresAt: String
       surfaces: [String!]
@@ -8642,6 +8727,7 @@ export const typeDefs = `#graphql
       agentTools: [String!]
       aiProvider: String
       aiModel: String
+      "036 legacy shim over the App's 'default' AI config; held to createAiServiceConfig's key rule (#1389)."
       aiApiKey: String
       expiresAt: String
       surfaces: [String!]

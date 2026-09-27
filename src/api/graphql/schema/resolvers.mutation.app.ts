@@ -62,6 +62,7 @@ import { findOrCreateAppClassMemory } from './chat-scope.js';
 // Spec 049 Phase 4 — the App's default Channel, created with the App.
 import { ensureDefaultChannelForApp } from '../../../lib/channels.js';
 import { recordUrnRename } from '../../../lib/urnAlias.js';
+import { requireEndpointFor, requireKeyFor } from '../../../lib/aiEndpoint.js';
 
 /**
  * #974 / cor:agt:020:02: a soft-deleted App keeps reserving its workers'
@@ -265,6 +266,19 @@ export const appMutations = {
       if (orgRef !== undefined && orgRef !== null && orgRef.trim() === '') {
         throw new GraphQLError('orgRef must be a non-empty organization ID or URN — omit it entirely to create a personal App.', { extensions: { code: 'BAD_USER_INPUT' } });
       }
+      // The legacy AI arguments are validated BEFORE any write (#1389 review):
+      // refusing them after the App, its memory and its Channel exist would
+      // leave a half-made App behind and a URN a retry collides with.
+      if (aiProvider && aiModel) {
+        try {
+          validateProviderAndParams(aiProvider, null);
+          // The legacy args carry no endpoint (#1373): openai-compatible needs one.
+          requireEndpointFor(aiProvider, null);
+          requireKeyFor({ provider: aiProvider, endpoint: null }, !!aiApiKey, 'APP');
+        } catch (e) {
+          rethrowAiConfigTyped(e);
+        }
+      }
       let resolvedOrgId: string | null = null;
       let ownerUserId: string | null = null;
       let namespace: string;
@@ -431,11 +445,7 @@ export const appMutations = {
       // become the App's 'default' registry config (deploy-time override
       // that wins over the Agent's default in the resolution walk).
       if (aiProvider && aiModel) {
-        try {
-          validateProviderAndParams(aiProvider, null);
-        } catch (e) {
-          rethrowAiConfigTyped(e);
-        }
+        // Validated before the App was created (top of this resolver).
         await ctx.db.aiServiceConfig.create({
           data: {
             appId: createdApp.id,
@@ -680,20 +690,34 @@ export const appMutations = {
             } catch (e) {
               rethrowAiConfigTyped(e);
             }
+            // This legacy surface cannot set an endpoint, so an
+            // openai-compatible config through it must keep the one it has
+            // (same provider) — a provider change clears it below (#1373).
+            try {
+              const keptEndpoint = existing && existing.provider === provider ? existing.endpoint : null;
+              requireEndpointFor(provider, keptEndpoint);
+              requireKeyFor({ provider, endpoint: keptEndpoint }, aiApiKey === undefined ? !!existing?.apiKeyEncrypted : !!aiApiKey, 'APP');
+            } catch (e) {
+              rethrowAiConfigTyped(e);
+            }
             const keyFields = apiKeyWriteFields(aiApiKey);
             if (existing) {
-              // Decided on the LOCKED row (#1380 review): the clearing below
-              // compares against the provider as it is now, not as read above.
+              // Re-judged on the LOCKED row (#1380 / #1389 review): a concurrent edit
+              // after the read above must not let this write keep a provider
+              // whose endpoint or key was cleared in between.
               await ctx.db.$transaction(async (tx) => {
                 const cur = await lockAiServiceConfig(tx, existing.id);
                 if (!cur) throw new AiServiceConfigNotFoundError(existing.id);
                 // Omitted args keep what the row holds NOW, not what the read
-                // above saw (#1380 review), and the resulting provider is
-                // validated again.
+                // above saw (#1380 review), and the resulting config is judged
+                // again: provider, endpoint, key (#1389 review).
                 const lockedProvider = aiProvider ?? cur.provider;
                 const lockedModel = aiModel ?? cur.model;
                 try {
                   validateProviderAndParams(lockedProvider, null);
+                  const keptEndpoint = cur.provider === lockedProvider ? cur.endpoint : null;
+                  requireEndpointFor(lockedProvider, keptEndpoint);
+                  requireKeyFor({ provider: lockedProvider, endpoint: keptEndpoint }, aiApiKey === undefined ? !!cur.apiKeyEncrypted : !!aiApiKey, 'APP');
                 } catch (e) {
                   rethrowAiConfigTyped(e);
                 }

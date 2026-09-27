@@ -36,6 +36,14 @@ export interface LlmRequest {
   prompt: string;
   /** Hard output ceiling — callers pass their remaining run budget. */
   maxTokens?: number;
+  /**
+   * Abort the provider call after this many ms (#1385 review). A run has its
+   * own deadline around the whole flow; a single interactive call (the
+   * saved-config Test) has none, and an endpoint that accepts the connection
+   * but never answers must not hold the request forever. An abort surfaces as
+   * a transient LlmInvocationError.
+   */
+  timeoutMs?: number;
 }
 
 export interface LlmResult {
@@ -56,6 +64,17 @@ export class LlmInvocationError extends Error {
     super(message, options);
     this.name = 'LlmInvocationError';
   }
+}
+
+/**
+ * Build the model a call would use, WITHOUT calling it: every local refusal
+ * `modelFor` makes (a malformed Bedrock key, a keyless config it won't run, an
+ * unknown provider) surfaces here as the same LlmInvocationError, with no
+ * network. The config test (#1385) runs it before charging its rate limit and
+ * quota, so a config that could never reach a provider costs nothing.
+ */
+export function assertModelBuildable(resolved: ResolvedAiConfig): void {
+  modelFor(resolved);
 }
 
 function modelFor(resolved: ResolvedAiConfig): LanguageModel {
@@ -99,6 +118,14 @@ function modelFor(resolved: ResolvedAiConfig): LanguageModel {
     case 'glm':
       // Default CHAT_COMPLETIONS: Zhipu and Z.ai serve only /chat/completions.
       return openAiCompatible(createOpenAI({ apiKey: key, baseURL: defaultEndpoint('glm')!, ...conn }));
+    case 'openai-compatible':
+      // #1373: a caller-named host speaking an OpenAI wire protocol. Its
+      // endpoint is required at write time; a row that somehow lacks one must
+      // never fall through to OpenAI's own host with this key.
+      if (!endpoint) {
+        throw new LlmInvocationError(`Provider "${provider}" has no endpoint configured.`, provider, false);
+      }
+      return openAiCompatible(createOpenAI({ apiKey: key, ...conn }));
     case 'bedrock': {
       let triple: { accessKeyId?: string; secretAccessKey?: string; region?: string } = {};
       if (key) {
@@ -226,7 +253,7 @@ const EXTRACTION_NATIVE_TIMEOUT_MS = (() => {
 })();
 
 /** Providers whose native structured-output path is not trusted yet. */
-const JSON_PROMPT_ONLY_PROVIDERS = new Set(['bedrock', 'glm']);
+const JSON_PROMPT_ONLY_PROVIDERS = new Set(['bedrock', 'glm', 'openai-compatible']);
 
 export async function generateExtraction(
   resolved: ResolvedAiConfig,
@@ -411,7 +438,12 @@ export async function generateWithTools(
   opts: ToolLoopOpts,
 ): Promise<LlmToolLoopResult> {
   const { provider, model } = resolved.config;
-  if (!TOOL_LOOP_PROVIDERS.has(provider)) {
+  // An openai-compatible host is unverified by default; its config opts in
+  // with params.toolCalling once the operator knows the host does tools.
+  const optedIn =
+    provider === 'openai-compatible' &&
+    (resolved.config.params as { toolCalling?: unknown } | null | undefined)?.toolCalling === true;
+  if (!TOOL_LOOP_PROVIDERS.has(provider) && !optedIn) {
     // Loud, non-transient: silently running a tools-node WITHOUT its tools
     // would change semantics (D-TL-8).
     throw new NoToolSupportError(provider);
@@ -502,6 +534,7 @@ export async function generateText(
       ...(req.system ? { system: req.system } : {}),
       prompt: req.prompt,
       ...(req.maxTokens != null ? { maxOutputTokens: req.maxTokens } : {}),
+      ...(req.timeoutMs != null ? { abortSignal: AbortSignal.timeout(req.timeoutMs), maxRetries: 0 } : {}),
     });
     return {
       text: out.text,

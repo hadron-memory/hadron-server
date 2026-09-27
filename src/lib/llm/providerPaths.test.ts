@@ -12,7 +12,7 @@
 import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest';
 import { createServer, type IncomingMessage, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { generateText, LlmInvocationError } from './index.js';
+import { generateExtraction, generateText, generateWithTools, LlmInvocationError, NoToolSupportError } from './index.js';
 import { encryptToken } from '../tokenCrypto.js';
 
 interface Captured {
@@ -203,6 +203,50 @@ describe('#1373 — AiServiceConfig.endpoint and the connect-time egress guard',
     expect(String(err.message)).not.toContain('127.0.0.1');
     expect((err as LlmInvocationError).transient).toBe(false);
     expect(captured.map((c) => c.path)).toEqual(['/redirect/v4/chat/completions']);
+  });
+});
+
+describe('#1373 — the generic openai-compatible provider (Holger, 2026-09-26)', () => {
+  it('calls {endpoint}/chat/completions by default and parses the reply; apiStyle RESPONSES switches it', async () => {
+    const out = await generateText(resolved('openai-compatible', null, `${origin}/vllm/v1`), { prompt: 'hi' });
+    expect(out).toMatchObject({ text: 'ok', provider: 'openai-compatible' });
+    await generateText(resolved('openai-compatible', null, `${origin}/vllm/v1`, 'RESPONSES'), { prompt: 'hi' }).catch(() => undefined);
+    expect(captured.map((c) => c.path)).toEqual(['/vllm/v1/chat/completions', '/vllm/v1/responses']);
+  });
+
+  it('with no endpoint it refuses, and never falls through to OpenAI\'s own host with the key', async () => {
+    const urls = stubDefaultHost();
+    const err = await generateText(resolved('openai-compatible'), { prompt: 'hi' }).catch((e) => e);
+    expect(err).toBeInstanceOf(LlmInvocationError);
+    expect((err as LlmInvocationError).transient).toBe(false);
+    expect(urls).toEqual([]);
+  });
+
+  it('extraction takes the JSON-prompt path: no native json_schema request to an unknown host', async () => {
+    await generateExtraction(resolved('openai-compatible', null, `${origin}/vllm/v1`), { prompt: 'hi' }, [
+      { name: 'city', type: 'string' },
+    ] as never).catch(() => undefined);
+    expect(captured.length).toBeGreaterThan(0);
+    for (const c of captured) {
+      expect(c.path).toBe('/vllm/v1/chat/completions');
+      expect((c.body.response_format as { type?: string } | undefined)?.type).not.toBe('json_schema');
+    }
+  });
+
+  it('the tool loop is refused unless the config opts in with params.toolCalling', async () => {
+    const err = await generateWithTools(resolved('openai-compatible', null, `${origin}/vllm/v1`), { prompt: 'hi' }, [], {
+      toolCtx: {} as never,
+    }).catch((e) => e);
+    expect(err).toBeInstanceOf(NoToolSupportError);
+    expect(captured).toEqual([]);
+    const out = await generateWithTools(
+      resolved('openai-compatible', { toolCalling: true }, `${origin}/vllm/v1`),
+      { prompt: 'hi' },
+      [],
+      { toolCtx: {} as never },
+    );
+    expect(out.text).toBe('ok');
+    expect(captured.map((c) => c.path)).toEqual(['/vllm/v1/chat/completions']);
   });
 });
 

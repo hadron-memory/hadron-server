@@ -180,7 +180,7 @@ describe('updateApp updates absorbed Station fields', () => {
     expect(config.model).toBe('gpt-4');
   });
 
-  it('clears aiApiKey when passed an empty string', async () => {
+  it('refuses to clear aiApiKey: an App config always needs its own key (#1390)', async () => {
     // 036-ai-service-config: provider+model are required for a config row
     // to exist; key-only createApp args create no config (legacy quirk
     // dropped with the columns).
@@ -189,17 +189,15 @@ describe('updateApp updates absorbed Station fields', () => {
       { orgRef: orgId, agentRef: agentId, name: 'Has Key', aiProvider: 'anthropic', aiModel: 'claude-opus-4-6', aiApiKey: 'sk-initial' },
       adminCtx(),
     );
-    const cleared = await resolvers.Mutation.updateApp(
-      {},
-      { ref: created.id, aiApiKey: '' },
-      adminCtx(),
-    );
-    expect(cleared.id).toBe(created.id);
+    // Before #1390 this cleared the key, and the App's runs then spent the
+    // platform's credential; now the write is refused and the key is kept.
+    const err = await resolvers.Mutation.updateApp({}, { ref: created.id, aiApiKey: '' }, adminCtx()).catch((e: unknown) => e);
+    expect((err as { extensions?: { code?: string } }).extensions?.code).toBe('AiConfigValidationError');
     const config = await db.aiServiceConfig.findFirstOrThrow({
       where: { appId: created.id, name: 'default' },
     });
-    expect(config.apiKeyEncrypted).toBeNull();
-    expect(config.apiKeyPreview).toBeNull();
+    expect(config.apiKeyEncrypted).not.toBeNull();
+    expect(config.apiKeyPreview).not.toBeNull();
   });
 });
 
