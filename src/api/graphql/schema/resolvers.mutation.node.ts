@@ -1035,9 +1035,15 @@ export async function writeNodeCore(
               if (!current) return { conflict: false, node: null };
             }
 
+            // The snapshot uses the at-rest row, but the caller supplied
+            // plaintext. Diff a decrypted COPY so an identical encrypted save
+            // neither manufactures a revision nor clears valid attribution.
+            const currentForDiff = memEncInfo.isEncrypted
+              ? decryptNodeFields({ ...current }, memEncInfo)
+              : current;
+            const changes = diffNodeChanges(currentForDiff, suppliedForDiff);
             // #1330 — H1 strict sub-roles, judged on the locked row: a role the
             // write assigns must be declared under a strict parent.
-            const changes = diffNodeChanges(current, suppliedForDiff);
             const authoredChange = authoredContentChanged(changes);
             const verifiedAuthorship = await assertRoleDeclaredForWrite(
               tx,
@@ -1260,6 +1266,7 @@ export async function writeNodeCore(
             // tombstone's content is real content, which losing silently was
             // the #976 defect. `upsert` mode reaches here for a live row too,
             // deliberately: that mode is either-way by contract.
+            let authoritativeChanges: string[] = [];
             if (authoritative) {
               // Row lock + drift reconciled as its own revision BEFORE this
               // snapshot (@copilot, PR #1339): the address lock binds only
@@ -1278,10 +1285,14 @@ export async function writeNodeCore(
                   { extensions: { code: 'NODE_WRITE_CONFLICT', loc: input.loc, memoryId: input.memoryId } },
                 );
               }
+              const authoritativeForDiff = memEncInfo.isEncrypted
+                ? decryptNodeFields({ ...authoritative }, memEncInfo)
+                : authoritative;
+              authoritativeChanges = diffNodeChanges(authoritativeForDiff, suppliedForDiff);
               await createNodeRevision(tx, {
                 ...buildNodeRevisionSnapshot(authoritative, editorFromAuth(ctx), {
                   revLabel: input.reason,
-                  changes: diffNodeChanges(authoritative, suppliedForDiff),
+                  changes: authoritativeChanges,
                 }),
               });
             }
@@ -1289,7 +1300,7 @@ export async function writeNodeCore(
             // #1330 — H1 strict sub-roles, against the AUTHORITATIVE row: a
             // resurrection keeps the tombstone's role unless the write names one.
             const authoredChange = mode === 'create' || !authoritative
-              || authoredContentChanged(diffNodeChanges(authoritative, suppliedForDiff));
+              || authoredContentChanged(authoritativeChanges);
             const verifiedAuthorship = await assertRoleDeclaredForWrite(
               tx,
               input.memoryId,
@@ -1321,8 +1332,9 @@ export async function writeNodeCore(
                   ? carryNodeAuthorship(opts.copiedAuthorship)
                   : verifiedAuthorship
                     ? verifiedAuthorship
-                  : authoritative && (mode === 'create' || authoredContentChanged(diffNodeChanges(authoritative, suppliedForDiff)))
-                    ? clearNodeAuthorship() : {}),
+                    : authoritative && (mode === 'create' || authoredContentChanged(authoritativeChanges))
+                      ? clearNodeAuthorship()
+                      : {}),
                 revisionContentHash: revisionStateHashRefreshMarker(),
                 // create-ONLY, matching the `isResurrect` it corrects. Widening
                 // it to `upsert` would let an importer revive a soft-deleted

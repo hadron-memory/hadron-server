@@ -18,6 +18,9 @@ import type { AuthContext } from '../middleware/auth.js';
 import { generateId } from '../lib/id.js';
 import { isCiphertext } from '../lib/crypto.js';
 import { sessionKeyCache } from '../lib/sessionKeyCache.js';
+import { revisionStateHashRefreshMarker } from '../lib/nodeRevisionSnapshot.js';
+import { writeNodeCore } from '../api/graphql/schema/resolvers.mutation.node.js';
+import { computeContentHash } from '../lib/contentHash.js';
 
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -207,6 +210,106 @@ describe('locked vs unlocked writes', () => {
     const row = await db.node.findFirstOrThrow({ where: { memoryId, loc: 'secret-note' } });
     expect(isCiphertext(row.content)).toBe(true);
     expect(row.content).not.toContain('updated secret');
+  });
+
+  it('keeps a verified stamp and creates no history for identical encrypted GraphQL and MCP saves', async () => {
+    const server = mcp(ownerAuth());
+    await server.callToolText('hadron_unlock_memory', { memoryUrn, passphrase: PASS });
+    const context = { db, roles: ['ADMIN'], userId: owner.id } as Context;
+    await writeNodeCore(
+      { memoryId, loc: 'secret-note', data: { evidence: 'same' } },
+      context, 'update',
+    );
+    const initial = await db.node.findFirstOrThrow({ where: { memoryId, loc: 'secret-note' } });
+    await db.node.update({
+      where: { id: initial.id },
+      data: {
+        authorshipKind: 'TASK', authoredByTask: generateId(), authoredByRevision: 1,
+        authoredAt: new Date('2026-09-26T20:00:00Z'),
+        abstractOriginHash: computeContentHash('the plaintext secret'),
+        revisionContentHash: revisionStateHashRefreshMarker(),
+      },
+    });
+    const stamped = await db.node.findUniqueOrThrow({ where: { id: initial.id } });
+    const revisions = await db.nodeRevision.count({ where: { nodeId: initial.id } });
+
+    await writeNodeCore(
+      { memoryId, loc: 'secret-note', content: 'the plaintext secret', abstract: 'A secret summary.', data: { evidence: 'same' } },
+      context, 'update',
+    );
+    expect(await db.node.findUniqueOrThrow({ where: { id: initial.id } })).toMatchObject(stamped);
+    expect(await db.nodeRevision.count({ where: { nodeId: initial.id } })).toBe(revisions);
+
+    const result = await server.callToolText('hadron_update_node', {
+      urn: `mcp41-org::vault::secret-note`,
+      content: 'the plaintext secret', abstract: 'A secret summary.', data: { evidence: 'same' },
+    });
+    expect(result).toContain('Node updated');
+    expect(await db.node.findUniqueOrThrow({ where: { id: initial.id } })).toMatchObject(stamped);
+    expect(await db.nodeRevision.count({ where: { nodeId: initial.id } })).toBe(revisions);
+  });
+
+  it('keeps a verified stamp on an identical encrypted UPSERT of a live row (authoritative branch)', async () => {
+    // `upsert` reaches writeNodeCore's authoritative snapshot branch for a live
+    // row, which diffs separately from the `update` path above. Its revision is
+    // unconditional by contract; the stamp must still survive unchanged plaintext.
+    const server = mcp(ownerAuth());
+    await server.callToolText('hadron_unlock_memory', { memoryUrn, passphrase: PASS });
+    const context = { db, roles: ['ADMIN'], userId: owner.id } as Context;
+    const initial = await db.node.findFirstOrThrow({ where: { memoryId, loc: 'secret-note' } });
+    const taskId = generateId();
+    await db.node.update({
+      where: { id: initial.id },
+      data: {
+        authorshipKind: 'TASK', authoredByTask: taskId, authoredByRevision: 1,
+        authoredAt: new Date('2026-09-26T20:00:00Z'),
+        revisionContentHash: revisionStateHashRefreshMarker(),
+      },
+    });
+
+    await writeNodeCore(
+      { memoryId, loc: 'secret-note', name: initial.name, content: 'the plaintext secret' },
+      context, 'upsert',
+    );
+    expect(await db.node.findUniqueOrThrow({ where: { id: initial.id } })).toMatchObject({
+      authorshipKind: 'TASK', authoredByTask: taskId, authoredByRevision: 1,
+    });
+
+    // Control: a real plaintext change through the same branch still clears.
+    await writeNodeCore(
+      { memoryId, loc: 'secret-note', name: initial.name, content: 'a different plaintext secret' },
+      context, 'upsert',
+    );
+    expect(await db.node.findUniqueOrThrow({ where: { id: initial.id } })).toMatchObject({
+      authorshipKind: null, authoredByTask: null, authoredByRevision: null,
+    });
+  });
+
+  it('keeps authorship when an identical abstract only refreshes its derived hash', async () => {
+    const server = mcp(ownerAuth());
+    await server.callToolText('hadron_unlock_memory', { memoryUrn, passphrase: PASS });
+    const initial = await db.node.findFirstOrThrow({ where: { memoryId, loc: 'secret-note' } });
+    await db.node.update({
+      where: { id: initial.id },
+      data: {
+        authorshipKind: 'TASK', authoredByTask: generateId(), authoredByRevision: 1,
+        authoredAt: new Date('2026-09-26T20:00:00Z'),
+        revisionContentHash: revisionStateHashRefreshMarker(),
+      },
+    });
+    const before = await db.node.findUniqueOrThrow({ where: { id: initial.id } });
+    expect(before.abstractOriginHash).toBeNull();
+    const revisions = await db.nodeRevision.count({ where: { nodeId: initial.id } });
+
+    await server.callToolText('hadron_update_node', {
+      urn: `mcp41-org::vault::secret-note`, abstract: 'A secret summary.',
+    });
+    const after = await db.node.findUniqueOrThrow({ where: { id: initial.id } });
+    expect(after).toMatchObject({
+      authorshipKind: 'TASK', authoredByTask: before.authoredByTask,
+      abstractOriginHash: computeContentHash('the plaintext secret'),
+    });
+    expect(await db.nodeRevision.count({ where: { nodeId: initial.id } })).toBe(revisions + 1);
   });
 
   it('hadron_update_node while locked is REJECTED with NO side effects — not even a version row (PR-517 Codex P2)', async () => {

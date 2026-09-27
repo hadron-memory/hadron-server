@@ -5512,6 +5512,9 @@ export function createMcpServerInstance(
       if (nodeData !== undefined) data.data = nodeData as any;
       if (llmModel !== undefined) data.llmModel = llmModel;
       if (aiAgent !== undefined) data.aiAgent = aiAgent;
+      // Keep the authored plaintext projection for the row-lock comparison.
+      // The write payload below may become fresh randomized ciphertext.
+      const plaintextUpdates = { ...data };
 
       // Spec 041 (PR-2): encrypted memory — encrypt the provided encrypted-
       // envelope fields with this session's key (gate + key resolved above,
@@ -5579,8 +5582,13 @@ export function createMcpServerInstance(
                 { extensions: { code: 'NODE_WRITE_CONFLICT', loc, memoryId: memory.id } },
               );
             }
+            // Snapshot the ciphertext row, but compare the caller's plaintext
+            // with a decrypted copy. An identical encrypted save is a no-op.
+            const currentForDiff = updKey
+              ? decryptNodeFieldsWithKey({ ...current }, updKey)
+              : current;
+            const changedFields = diffNodeChanges(currentForDiff, plaintextUpdates);
             // #1330 — H1 strict sub-roles on the locked row, as writeNodeCore.
-            const changedFields = diffNodeChanges(current, data);
             const verifiedAuthorship = await assertRoleDeclaredForWrite(tx, memory.id, {
               role: role === undefined ? current.role : role,
               priorRole: current.role,
@@ -5591,27 +5599,12 @@ export function createMcpServerInstance(
             // A guard-only call is a useful no-op check and must not manufacture
             // a history row or advance the live revision.
             if (Object.keys(data).length === 0 && resolvedEdges === null) return;
+            if (changedFields.length === 0 && resolvedEdges === null) return;
             await createNodeRevision(tx, {
               id: generateId(),
               ...buildNodeRevisionSnapshot(current, editorFromAuth(auth), {
                 revLabel: reason,
-                changes: diffNodeChanges(current, {
-                  name,
-                  nodeType,
-                  objectType,
-                  isRunnable,
-                  role,
-                  description,
-                  abstract: normalizedAbstract,
-                  content: data.content,
-                  abstractOriginHash: nextAbstractOriginHash,
-                  seq,
-                  tags,
-                  properties,
-                  data: data.data,
-                  llmModel,
-                  aiAgent,
-                }),
+                changes: changedFields,
               }),
             });
             if (authoredContentChanged(changedFields)) Object.assign(data, verifiedAuthorship ?? clearNodeAuthorship());
