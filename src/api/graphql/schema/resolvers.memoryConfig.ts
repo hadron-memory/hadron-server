@@ -417,6 +417,9 @@ export const memoryConfigMutations = {
     try {
       const rule = await ctx.db.$transaction(async (tx) => {
         await lockRuleRefs(ctx, tx, resolved);
+        // #1400 review: the rulebook lock BEFORE the gate is re-asked, so no
+        // lock wait follows it (materializeConfig/touchConfig re-take it, re-entrant).
+        await lockMemoryConfigExclusive(tx, memory.id);
         await reassertManage(ctx, tx, memory.id, () => new MemoryNotFoundError(memoryRef));
         const configId = await materializeConfig(tx, memory.id, actor);
         const created = await tx.nodeRoleRule.create({
@@ -468,6 +471,9 @@ export const memoryConfigMutations = {
       await lockRuleRefs(ctx, tx, resolved);
       const current = await lockRule(tx, id);
       if (!current) throw new NodeRoleRuleNotFoundError(ref);
+      // #1400 review: the rulebook lock BEFORE the gate is re-asked, so no
+      // lock wait follows it (touchConfig re-takes it, re-entrant).
+      await lockMemoryConfigExclusive(tx, memoryId);
       await reassertManage(ctx, tx, memoryId, () => new NodeRoleRuleNotFoundError(ref));
       if (expectedRevision != null && current.revision !== expectedRevision) throw conflict(current.revision);
       assertValidateByHasTask({
@@ -494,6 +500,9 @@ export const memoryConfigMutations = {
     await ctx.db.$transaction(async (tx) => {
       const current = await lockRule(tx, id);
       if (!current) throw new NodeRoleRuleNotFoundError(ref);
+      // #1400 review: the rulebook lock BEFORE the gate is re-asked, so no
+      // lock wait follows it (touchConfig re-takes it, re-entrant).
+      await lockMemoryConfigExclusive(tx, memoryId);
       await reassertManage(ctx, tx, memoryId, () => new NodeRoleRuleNotFoundError(ref));
       if (expectedRevision != null && current.revision !== expectedRevision) throw conflict(current.revision);
       await tx.nodeRoleRule.delete({ where: { id } });
