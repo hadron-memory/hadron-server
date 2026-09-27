@@ -9315,7 +9315,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
 
   server.tool(
     'hadron_record_work',
-    'Record an externally visible work milestone (a PR opened, a branch pushed, an issue closed) into the team App\'s worklog (#947) — the append-only, authoritative PR-session join. Pass the session doing the work; ref accepts a github URL or short form (owner/repo#N, owner/repo@sha, owner/repo:branch, owner/repo) and is stored in ONE canonical spelling. A bare number is refused — include the repo. kind: pr also updates the session\'s displayed PR number. Correct a wrong record by recording a newer one (records are never edited).',
+    'Record an externally visible work milestone (a PR opened, a branch pushed, an issue closed) into the team App\'s worklog (#947) — the append-only, authoritative PR-session join. Pass the session doing the work; ref accepts a github URL or short form (owner/repo#N, owner/repo@sha, owner/repo:branch, owner/repo) and is stored in ONE canonical spelling. A bare number is refused — include the repo. kind: pr also updates the session\'s displayed PR number. Correct a wrong record by recording a newer one (records are never edited). Capability note (#1398): the optional `model` argument is honored when hadron_server_info advertises the `worklog-model` capability — an older build silently DROPS the argument and records the session\'s model instead, so test for the token before relying on an explicit model report.',
     {
       session: z.string().describe('The session id the work is attributed to (must be a session of the team App).'),
       tool: z.string().describe('The external tool the artifact lives in, e.g. "github".'),
@@ -9323,9 +9323,10 @@ function ageOf(at: Date, now: Date = new Date()): string {
       ref: z.string().describe('The artifact ref — a github URL or short form; stored canonically (e.g. owner/repo#371).'),
       action: z.string().describe('What happened: opened | merged | claimed | reviewed | closed | pushed | ... (free verb).'),
       detail: z.record(z.string(), z.unknown()).optional().describe('Optional display extras (title, URL) — stored, never filtered on.'),
+      model: z.string().optional().describe('Optional explicit report of the LLM model that produced the work (#1398) — use it for a model switch or a late record. Takes precedence over the session\'s model; omit to use the session\'s model. Not verified telemetry.'),
       app: z.string().optional().describe('The team App — an App URN or ID. Omit to use the session\'s active App.'),
     },
-    async ({ session, tool, kind, ref, action, detail, app }) => {
+    async ({ session, tool, kind, ref, action, detail, model, app }) => {
       // #1081 — the caller just drove this session, so it is alive. The
       // touch is explicit here rather than a side effect of whichever tool
       // happens to write the Session row (see heartbeatSession).
@@ -9349,7 +9350,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
       try {
         const item = await resolvers.Mutation.recordTeamWork(
           {},
-          { appRef, sessionRef: session, tool, kind, ref, action, detail: detail ?? null },
+          { appRef, sessionRef: session, tool, kind, ref, action, detail: detail ?? null, model: model ?? null },
           {
             db,
             clientId: auth.clientId ?? undefined,
@@ -9404,6 +9405,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
         }
         return textResult(
           `Recorded: ${item.kind} ${item.action} ${item.ref} — session ${item.sessionId} (${item.workerName}) at ${item.at.toISOString()}.` +
+            (item.model ? ` Model: ${item.model}.` : '') +
             endedNote,
         );
       } catch (e) {
@@ -9477,7 +9479,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
         if (page.total === 0) return textResult('No matching worklog records.');
         const lines = page.items.map(
           (i) =>
-            `${i.at.toISOString()} [${i.workerName}] ${i.kind} ${i.action} ${i.ref} (session ${i.sessionId})`,
+            `${i.at.toISOString()} [${i.workerName}] ${i.kind} ${i.action} ${i.ref} (session ${i.sessionId})${i.model ? ` [model: ${i.model}]` : ''}`,
         );
         return textResult(
           `${page.total} record(s) total, showing ${page.items.length}:\n\n${lines.join('\n')}`,
