@@ -3145,6 +3145,8 @@ export const typeDefs = `#graphql
     apiStyle: AiApiStyle
     "A key to test with instead of the stored one. Never stored, never echoed."
     apiKey: String
+    "Edited params to test instead of the saved ones (#1413): validated exactly as a save validates them, including the params.baseUrl refusal, against the effective provider — before anything outbound. Used for the call, never stored. Omitted = the saved params; null = the edit clears them (the provider defaults). On the wire the probe exercises the effective provider/model/endpoint/key and (hard-capped at 16, per #1378's original ceiling pending a cost ruling) maxTokens, like its one-word prompt; the platform's request contract does not yet forward the other knobs (temperature, reasoningEffort, …) on any path, so they are validated and reported, not transmitted."
+    params: JSON
   }
 
   "#1378: per field, whether the test used the saved value or the override."
@@ -3153,6 +3155,7 @@ export const typeDefs = `#graphql
     model: AiConfigTestValueSource!
     endpoint: AiConfigTestValueSource!
     apiStyle: AiConfigTestValueSource!
+    params: AiConfigTestValueSource!
     key: AiConfigTestKeySource!
   }
 

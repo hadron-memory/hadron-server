@@ -48,6 +48,7 @@ import {
   validateApiStyle,
   usesProcessCredential,
   validateEndpoint,
+  refuseLegacyBaseUrl,
   type AiApiStyle,
 } from '../../lib/aiEndpoint.js';
 import { assertModelBuildable, generateText, LlmInvocationError, type LlmRequest, type LlmResult } from '../../lib/llm/index.js';
@@ -68,6 +69,15 @@ export interface AiConfigTestOverride {
    * reads them (it clears the key), so an edit that removes the key tests as one.
    */
   apiKey?: string | null;
+  /**
+   * Edited params to test instead of the saved ones (#1413), validated
+   * exactly as a save validates them — including the legacy params.baseUrl
+   * refusal — against the EFFECTIVE provider, before anything outbound.
+   * Used for the call, never stored. Omitted = the saved params; null = the
+   * edit clears them (the provider defaults), as updateAiServiceConfig
+   * reads params.
+   */
+  params?: unknown;
 }
 
 type Source = 'SAVED' | 'OVERRIDE';
@@ -80,7 +90,7 @@ export interface AiConfigTestResult {
   model: string;
   endpoint: string | null;
   apiStyle: AiApiStyle | null;
-  used: { provider: Source; model: Source; endpoint: Source; apiStyle: Source; key: KeySource };
+  used: { provider: Source; model: Source; endpoint: Source; apiStyle: Source; params: Source; key: KeySource };
   latencyMs: number;
   reply: string | null;
   error: { code: string; message: string; transient: boolean } | null;
@@ -91,6 +101,17 @@ export const AI_CONFIG_TEST_REQUEST: LlmRequest = {
   prompt: 'Reply with the single word OK.',
   maxTokens: 16,
 };
+
+/**
+ * #1413: the probe's hard output cap, independent of the params under test —
+ * the effective maxTokens may not exceed it. Held at #1378's original 16
+ * pending an explicit cost ruling on raising it (QA #2596): the one argument
+ * for more is that thinking models spend reasoning tokens against
+ * max_tokens, so 16 can truncate a healthy config's single-word reply into
+ * a false failure. Like the probe's one-word prompt, the cap is the probe's
+ * own, not part of the config being tested.
+ */
+export const AI_CONFIG_TEST_PROBE_MAX_TOKENS = 16;
 
 // ── Rate limit ───────────────────────────────────────────────────────────
 // A test is a real provider call, so the button must not be a free relay.
@@ -339,9 +360,31 @@ export async function testAiServiceConfig(
   // validated exactly as a write would validate them.
   const provider = override.provider ?? row.provider;
   const model = override.model ?? row.model;
-  // The RESULTING pair, as a save would judge it: a test that passes must be
-  // an edit that can be saved (#1385 review, Codex).
-  validateProviderAndParams(provider, row.params ?? null);
+  // #1413: the effective params — saved, or the edit under test — validated
+  // ONCE, as a save judges the RESULTING pair (#1385 review, Codex): a
+  // corrected override must be able to test a repair of stale invalid saved
+  // params, exactly as updateAiServiceConfig would accept that edit. The
+  // override runs Save's own two checks (the legacy params.baseUrl refusal
+  // first, so it never reaches a provider) against the EFFECTIVE provider;
+  // the no-override path keeps judging the saved pair only — its own save
+  // time validated it, and legacy rows test as they run. Either way the
+  // params reach the CALL, never the stored row.
+  const params = override.params === undefined ? row.params : override.params;
+  if (override.params === undefined) {
+    validateProviderAndParams(provider, row.params ?? null);
+  } else {
+    refuseLegacyBaseUrl(override.params);
+    validateProviderAndParams(provider, override.params);
+  }
+  // #1413: the probe's output cap — the effective params' maxTokens (saved,
+  // or the edit under test) bounded by the probe's hard cap, defaulting to
+  // the probe's own 16. Used by both the call and the platform-funded
+  // reservation, so a test can never spend past what it reserved.
+  const paramsMaxTokens =
+    params && typeof params === 'object' && 'maxTokens' in params
+      ? (params as { maxTokens?: number }).maxTokens
+      : undefined;
+  const probeMaxTokens = Math.min(paramsMaxTokens ?? AI_CONFIG_TEST_REQUEST.maxTokens ?? 16, AI_CONFIG_TEST_PROBE_MAX_TOKENS);
   const endpoint =
     override.endpoint === undefined ? row.endpoint : override.endpoint ? validateEndpoint(override.endpoint) : null;
   const apiStyle = override.apiStyle === undefined ? row.apiStyle : override.apiStyle;
@@ -371,6 +414,9 @@ export async function testAiServiceConfig(
     model: override.model != null ? 'OVERRIDE' : 'SAVED',
     endpoint: override.endpoint === undefined ? 'SAVED' : 'OVERRIDE',
     apiStyle: override.apiStyle === undefined ? 'SAVED' : 'OVERRIDE',
+    // #1413: presence again — a null params override (the edit clears them)
+    // is still the override, and is what gets sent.
+    params: override.params === undefined ? 'SAVED' : 'OVERRIDE',
     key: keySource,
   };
   const base = {
@@ -430,6 +476,8 @@ export async function testAiServiceConfig(
       model,
       endpoint,
       apiStyle,
+      // #1413: the effective params — saved, or the edit under test.
+      params,
       // PLATFORM runs keyless even when the edit is what cleared the key.
       apiKeyEncrypted: overrideKey ? encryptToken(overrideKey) : keySource === 'SAVED' ? row.apiKeyEncrypted : null,
     },
@@ -458,10 +506,14 @@ export async function testAiServiceConfig(
 
   // A platform-funded probe RESERVES its tokens from the org's allowance
   // before the call, atomically (#1385 review): a check followed by a later
-  // record let concurrent tests all pass and overshoot. Settled after.
+  // record let concurrent tests all pass and overshoot. Settled after. The
+  // reservation covers prompt margin PLUS the probe's capped output (#1413,
+  // QA #2596: base + cap, so a realistic prompt and the full capped reply
+  // settle inside what was reserved).
   const quotaScope = keyOwnerType === 'HADRON_SERVER' && organizationId ? organizationId : null;
+  const reserveTokens = AI_CONFIG_TEST_TOKEN_RESERVE + probeMaxTokens;
   const reservation = quotaScope
-    ? await reserveQuota(ctx.db, 'org', quotaScope, 'llm.tokens', defaultQuotaLimit('org', 'llm.tokens'), AI_CONFIG_TEST_TOKEN_RESERVE)
+    ? await reserveQuota(ctx.db, 'org', quotaScope, 'llm.tokens', defaultQuotaLimit('org', 'llm.tokens'), reserveTokens)
     : null;
   if (quotaScope && !reservation) {
     return {
@@ -482,7 +534,7 @@ export async function testAiServiceConfig(
   // must not use up the caller's allowance either (#1385 review, Codex).
   const retryAfter = admitTest(`${ctx.userId}:${row.id}`, deps.now());
   if (retryAfter != null) {
-    if (quotaScope && reservation) await settleReservation(ctx.db, 'org', quotaScope, 'llm.tokens', -AI_CONFIG_TEST_TOKEN_RESERVE, reservation);
+    if (quotaScope && reservation) await settleReservation(ctx.db, 'org', quotaScope, 'llm.tokens', -reserveTokens, reservation);
     throw new GraphQLError(`Too many tests of this config; try again in ${retryAfter}s.`, {
       extensions: { code: 'RATE_LIMITED', retryAfterSeconds: retryAfter },
     });
@@ -492,7 +544,14 @@ export async function testAiServiceConfig(
   let out: LlmResult | null = null;
   let error: AiConfigTestResult['error'] = null;
   try {
-    out = await deps.generate(resolved, { ...AI_CONFIG_TEST_REQUEST, timeoutMs: deps.timeoutMs });
+    // #1413: the probe's capped maxTokens (computed above, shared with the
+    // reservation) — the wire carries min(edit, hard cap); validation
+    // exercised the edit's real value.
+    out = await deps.generate(resolved, {
+      ...AI_CONFIG_TEST_REQUEST,
+      maxTokens: probeMaxTokens,
+      timeoutMs: deps.timeoutMs,
+    });
   } catch (e) {
     error = {
       code: 'LLM_CALL_FAILED',
@@ -528,7 +587,7 @@ export async function testAiServiceConfig(
   if (quotaScope && reservation) {
     // Settled in the reservation's own window only: a rollover mid-probe
     // neither refunds into nor charges excess to the new day (#1385 review).
-    await settleReservation(ctx.db, 'org', quotaScope, 'llm.tokens', tokensIn + tokensOut - AI_CONFIG_TEST_TOKEN_RESERVE, reservation);
+    await settleReservation(ctx.db, 'org', quotaScope, 'llm.tokens', tokensIn + tokensOut - reserveTokens, reservation);
   }
 
   return {
