@@ -1,9 +1,9 @@
 import type { PrismaClient } from '../../generated/prisma/index.js';
 import { Prisma } from '../../generated/prisma/index.js';
 import { generateId } from '../../lib/id.js';
-import { jsonOrDbNull } from '../../lib/nodeRevisionSnapshot.js';
+import { ensureCurrentNodeRevisionInTransaction, jsonOrDbNull } from '../../lib/nodeRevisionSnapshot.js';
 import { carryGovernedSignals } from '../../lib/governedSignals.js';
-import { carryNodeAuthorship } from '../../lib/nodeAuthorship.js';
+import { carryNodeAuthorship, clearNodeAuthorship } from '../../lib/nodeAuthorship.js';
 import { computeContentHash } from '../../lib/contentHash.js';
 import {
   pendingEdgeStableTargetId,
@@ -188,9 +188,22 @@ export async function cloneMemoryGraph(
       });
 
       // ── Nodes ──────────────────────────────────────────────────────────
-      const nodes = await tx.node.findMany({
+      const selectedNodes = await tx.node.findMany({
         where: { memoryId: source.id, deletedAt: null },
       });
+      // A raw writer may have changed a stamped source without advancing its
+      // revision. Reconcile and refetch stamped rows before the destination
+      // insert can certify a stale claim against freshly copied content.
+      const refreshed = new Map<string, (typeof selectedNodes)[number]>();
+      for (const n of selectedNodes.filter((n) => n.authorshipKind).sort((a, b) => a.id.localeCompare(b.id))) {
+        const rev = await ensureCurrentNodeRevisionInTransaction(tx, n.id, { expectedMemoryId: source.id });
+        const current = rev == null ? null : await tx.node.findUnique({ where: { id: n.id } });
+        if (!current || current.deletedAt || current.memoryId !== source.id) {
+          throw new Error('cloneMemory: a source node changed during the copy; retry.');
+        }
+        refreshed.set(n.id, current);
+      }
+      const nodes = selectedNodes.map((n) => refreshed.get(n.id) ?? n);
 
       const idMap = new Map<string, string>();
       for (const n of nodes) idMap.set(n.id, generateId());
@@ -244,7 +257,9 @@ export async function cloneMemoryGraph(
           ...carryGovernedSignals(n),
           // #1326 — provenance describes the copied content's origin, not a
           // new execution of the authoring task by this clone operation.
-          ...carryNodeAuthorship(n),
+          ...(newContent === n.content && newAbstract === n.abstract
+            ? carryNodeAuthorship(n)
+            : clearNodeAuthorship()),
           llmModel: n.llmModel,
           aiAgent: n.aiAgent,
           tokens: n.tokens,

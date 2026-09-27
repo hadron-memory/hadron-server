@@ -49,6 +49,26 @@ beforeEach(async () => {
 });
 
 describe('extractParentNodeToMemory — copy (default)', () => {
+  it('reconciles a raw-edited stamped source before carrying attribution', async () => {
+    const { parent, oauth } = await seedSubtree();
+    await db.node.update({
+      where: { id: oauth.id },
+      data: {
+        authorshipKind: 'TASK', authoredByTask: generateId(), authoredByRevision: 1,
+        authoredAt: new Date('2026-09-26T20:00:00Z'),
+        revisionContentHash: 'refresh',
+      },
+    });
+    await db.node.update({ where: { id: oauth.id }, data: { content: 'raw edited oauth' } });
+    const mem = await M.extractParentNodeToMemory(
+      null, { parentRef: parent.id, targetUrn: 'ex-org::extracted' }, asAdmin(),
+    );
+    expect(await db.node.findFirstOrThrow({ where: { memoryId: mem.id, loc: 'extracted:oauth' } }))
+      .toMatchObject({ content: 'raw edited oauth', authorshipKind: null });
+    expect(await db.node.findUniqueOrThrow({ where: { id: oauth.id } }))
+      .toMatchObject({ authorshipKind: null, revSeq: 2 });
+  });
+
   it('extracts the subtree into a new memory, rebasing the parent to root', async () => {
     const { parent } = await seedSubtree();
     const mem = await M.extractParentNodeToMemory(

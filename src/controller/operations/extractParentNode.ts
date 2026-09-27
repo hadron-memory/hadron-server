@@ -2,7 +2,7 @@ import type { PrismaClient } from '../../generated/prisma/index.js';
 import { assertBatchMutable } from '../../lib/bulkMutationGate.js';
 import { Prisma } from '../../generated/prisma/index.js';
 import { generateId } from '../../lib/id.js';
-import { jsonOrDbNull } from '../../lib/nodeRevisionSnapshot.js';
+import { ensureCurrentNodeRevisionInTransaction, jsonOrDbNull } from '../../lib/nodeRevisionSnapshot.js';
 import { carryGovernedSignals } from '../../lib/governedSignals.js';
 import { carryNodeAuthorship } from '../../lib/nodeAuthorship.js';
 import { deriveEdgeLoc } from '../../lib/edgeLoc.js';
@@ -102,14 +102,14 @@ export async function extractParentNodeGraph(
       // ── Subtree ──────────────────────────────────────────────────────────
       // The node at parentLoc plus its descendants, on `:` path boundaries so
       // a sibling like `findings:auth-v2` isn't swept in with `findings:auth`.
-      const nodes = await tx.node.findMany({
+      const selectedNodes = await tx.node.findMany({
         where: {
           memoryId: args.sourceMemoryId,
           deletedAt: null,
           OR: [{ loc: args.parentLoc }, { loc: { startsWith: `${args.parentLoc}:` } }],
         },
       });
-      const parent = nodes.find((n) => n.loc === args.parentLoc);
+      const parent = selectedNodes.find((n) => n.loc === args.parentLoc);
       if (!parent) {
         throw new ParentNodeNotFoundError(args.parentLoc, args.sourceMemoryId);
       }
@@ -160,7 +160,7 @@ export async function extractParentNodeGraph(
       const freshSignals = await assertBatchMutable(
         tx,
         [args.sourceMemoryId],
-        nodes,
+        selectedNodes,
         args.move ? 'move' : 'copy',
         // #1210 — extract is an OWNING OPERATION and no longer refuses a
         // governed subtree. @Holger ruled this on 2026-09-19 (#1218), and the
@@ -192,6 +192,20 @@ export async function extractParentNodeGraph(
         // the door refuses the wrong TOOL and never the wrong PRINCIPAL.
         { governed: 'carry' },
       );
+      // The gate's signal snapshot does not validate authorship. A direct raw
+      // edit may leave a stale stamp on a selected source. Reconcile stamped
+      // sources in stable row-lock order, then copy their current content and
+      // attribution together.
+      const refreshed = new Map<string, (typeof selectedNodes)[number]>();
+      for (const n of selectedNodes.filter((n) => n.authorshipKind).sort((a, b) => a.id.localeCompare(b.id))) {
+        const rev = await ensureCurrentNodeRevisionInTransaction(tx, n.id, { expectedMemoryId: args.sourceMemoryId });
+        const current = rev == null ? null : await tx.node.findUnique({ where: { id: n.id } });
+        if (!current || current.deletedAt || current.memoryId !== args.sourceMemoryId || current.loc !== n.loc) {
+          throw new Error('extractParentNode: a source node changed during the copy; retry.');
+        }
+        refreshed.set(n.id, current);
+      }
+      const nodes = selectedNodes.map((n) => refreshed.get(n.id) ?? n);
 
       // Rebase a source loc onto the new root: parentLoc → rootLoc,
       // parentLoc:x → rootLoc:x. `slice(parentLoc.length)` yields '' for the
@@ -285,9 +299,8 @@ export async function extractParentNodeGraph(
         // soft-deleted, so the ungoverned copy is all that survives. Falling
         // back to `n` keeps the copy correct if a row vanished from the
         // re-read.
-        ...carryGovernedSignals(freshSignals?.get(n.loc) ?? n),
-        // Content and attribution both come from `n`; the fresh governed
-        // signal read above prevents a kind downgrade during the copy.
+        ...carryGovernedSignals(refreshed.has(n.id) ? n : freshSignals?.get(n.loc) ?? n),
+        // Content and attribution both come from the reconciled source.
         ...carryNodeAuthorship(n),
         llmModel: n.llmModel,
         aiAgent: n.aiAgent,
