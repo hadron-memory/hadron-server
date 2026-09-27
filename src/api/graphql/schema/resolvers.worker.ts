@@ -1740,26 +1740,27 @@ export async function loadAppWorkerActivity(
  */
 /**
  * #1090 — one composition of a worker's boot prompt, with the freshness facts
- * a holder needs to tell whether the text is current. `renderedAt` is the
- * instant this composition began; `roleAgentUpdatedAt` comes from the SAME
- * agent read that supplied the template, so the stamp describes the template
- * actually rendered — a parallel agent read could race an edit and label an
- * older prompt with a newer time (Andi, #2853). It is the Agent row's generic
- * `updatedAt` (nullable), NOT a proven persona-template edit time; no separate
- * prompt-override mtime exists, and none is invented here. Text is null when
- * there is no template and no override — in that case callers show no stamps.
+ * a holder needs to tell whether the text is current. `renderedAt` is stamped
+ * once the text exists (an up-front clock could predate a concurrent template
+ * edit the same query picked up — review P2); `roleAgentUpdatedAt` comes from
+ * the SAME agent read that supplied the template, so the stamp describes the
+ * template actually rendered — a parallel agent read could race an edit and
+ * label an older prompt with a newer time (Andi, #2853). It is the Agent
+ * row's generic `updatedAt` (nullable), NOT a proven persona-template edit
+ * time; no separate prompt-override mtime exists, and none is invented here.
+ * Text is null when there is no template and no override — in that case
+ * callers show no stamps.
  */
 export async function composeWorkerPrompt(
   ctx: Context,
   worker: { id: string; appId: string; agentId: string; name: string; role: string | null; promptOverride: string | null },
 ): Promise<{ text: string | null; renderedAt: Date; roleAgentUpdatedAt: Date | null }> {
-  const renderedAt = new Date();
   // Working-state path: the composed boot prompt embeds the agent's persona
   // template, which this loads WITHOUT the Agent read gate — so every caller
   // must sit behind the worker read gate itself (#983 review; see
   // maySeeWorkerInternals).
   if (!(await maySeeWorkerInternals(ctx, worker.appId))) {
-    return { text: null, renderedAt, roleAgentUpdatedAt: null };
+    return { text: null, renderedAt: new Date(), roleAgentUpdatedAt: null };
   }
   const agent = await ctx.db.agent.findUnique({
     where: { id: worker.agentId },
@@ -1775,7 +1776,12 @@ export async function composeWorkerPrompt(
   // and post, and re-renders live like the rest.
   const derived = renderDerivedBlocks(await resolveRegister(ctx.db, { attendee: { workerId: worker.id }, actor: ctx }));
   const text = !derived ? authored : authored ? `${authored}\n\n${derived}` : derived;
-  return { text, renderedAt, roleAgentUpdatedAt: agent?.updatedAt ?? null };
+  // #1090 review (Andi, P2): stamp the render time AFTER the text exists. A
+  // clock read taken up front could predate a concurrent template edit that
+  // the same query then picked up — an Agent stamp LATER than the claimed
+  // render time. Down here, renderedAt is a lower bound the printed text and
+  // its Agent stamp both satisfy.
+  return { text, renderedAt: new Date(), roleAgentUpdatedAt: agent?.updatedAt ?? null };
 }
 
 async function maySeeWorkerInternals(ctx: Context, appId: string): Promise<boolean> {
