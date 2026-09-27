@@ -1,10 +1,10 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { buildSchema, type GraphQLInputObjectType } from 'graphql';
 import { typeResolvers } from './resolvers.types.js';
-import type { Context } from './resolvers.js';
+import { resolvers, type Context } from './resolvers.js';
 import { typeDefs } from './typeDefs.js';
 import { writeNodeCore } from './resolvers.mutation.node.js';
 import { ensureCurrentNodeRevisionInTransaction, revisionStateHashRefreshMarker } from '../../../lib/nodeRevisionSnapshot.js';
@@ -143,6 +143,49 @@ describe('#1326 content provenance reads', () => {
     );
 
     expect(await typeResolvers.Node.authorship(staleParent, null, reader())).toBeNull();
+  });
+
+  it('reconciles a raw edited source before its stamp can be carried into a clone', async () => {
+    await db.$transaction((tx) => ensureCurrentNodeRevisionInTransaction(tx, nodeId, { expectedMemoryId: nodeMemoryId }));
+    await db.node.update({ where: { id: nodeId }, data: { data: { raw: 'edited' } } });
+    const memory = await db.memory.findUniqueOrThrow({ where: { id: nodeMemoryId } });
+    await db.orgMember.update({
+      where: { organizationId_userId: { organizationId: memory.organizationId!, userId: readerId } },
+      data: { role: 'ADMIN' },
+    });
+    const cloned = await resolvers.Mutation.cloneNode(
+      {}, { sourceRef: nodeId, targetUrn: 'hrn:node:provenance-own:mem:clone' },
+      { db, userId: readerId, roles: ['ADMIN'] } as Context,
+    );
+    expect(cloned).toMatchObject({ data: { raw: 'edited' }, authorshipKind: null, authoredByTask: null });
+    const liveClone = await db.node.findUniqueOrThrow({ where: { id: cloned.id } });
+    expect(liveClone).toMatchObject({ authorshipKind: null, authoredByTask: null });
+    await db.$transaction((tx) => ensureCurrentNodeRevisionInTransaction(tx, cloned.id, { expectedMemoryId: nodeMemoryId }));
+    expect(await db.nodeRevision.count({ where: { nodeId: cloned.id } })).toBe(0);
+  });
+
+  it('shares one locked reconcile among sibling GraphQL fields on the same parent', async () => {
+    const parent = await db.node.findUniqueOrThrow({ where: { id: nodeId } });
+    const context = reader();
+    const transactions = vi.spyOn(db, '$transaction');
+    try {
+      const [revision, validation, authorship] = await Promise.all([
+        typeResolvers.Node.revision(parent, null, context),
+        typeResolvers.Node.contentValidation(parent, null, context),
+        typeResolvers.Node.authorship(parent, null, context),
+      ]);
+      expect(revision).toBe(parent.revSeq);
+      expect(validation.state).toBe('UNVALIDATED');
+      expect(authorship?.kind).toBe('TASK');
+      expect(transactions).toHaveBeenCalledTimes(1);
+
+      // Another projection of the same id is a different selected state and
+      // must not borrow this parent's cached result.
+      await typeResolvers.Node.revision({ ...parent }, null, context);
+      expect(transactions).toHaveBeenCalledTimes(2);
+    } finally {
+      transactions.mockRestore();
+    }
   });
 
   it('offers no public GraphQL setter for system-owned attribution or validation', () => {
