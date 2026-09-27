@@ -150,25 +150,6 @@ function fail(message: string, code: string, extra: Record<string, unknown> = {}
   throw new GraphQLError(message, { extensions: { code, ...extra } });
 }
 
-function idSet(name: string): Set<string> {
-  return new Set(
-    (process.env[name] ?? '')
-      .split(',')
-      .map((v) => v.trim())
-      .filter(Boolean),
-  );
-}
-
-/** Exact, two-dimensional pilot gate. Unset means off. */
-export function teamAttentionPilotEnabled(userId: string | undefined, appId: string): boolean {
-  return teamAttentionPilotOperatorEnabled(userId) && idSet('TEAM_ATTENTION_PILOT_APP_IDS').has(appId);
-}
-
-/** Cheap first dimension for avoiding pilot-only lookups on ordinary reads. */
-export function teamAttentionPilotOperatorEnabled(userId: string | undefined): boolean {
-  return !!userId && idSet('TEAM_ATTENTION_PILOT_USER_IDS').has(userId);
-}
-
 function tokenSigningKey(): Buffer {
   const secret = process.env.TEAM_ATTENTION_TOKEN_SECRET || process.env.JWT_SECRET;
   if (!secret) fail('The team-attention token signer is not configured.', 'TEAM_ATTENTION_NOT_CONFIGURED');
@@ -233,24 +214,22 @@ async function resolvePilotApp(ctx: Context, appRef: string): Promise<AppRow> {
     where: { id, ...LIVE_APP_WHERE },
     select: { id: true, urn: true, organizationId: true, ownerUserId: true, defaultChannelId: true },
   });
-  // Existing-but-unreadable and absent Apps are indistinguishable. This is a
-  // public GraphQL door even while MCP discovery hides the pilot tools.
+  // Existing-but-unreadable and absent Apps are indistinguishable.
   if (!app || !(await isAppParticipant(ctx, app))) fail('App not found.', 'APP_NOT_FOUND');
-  if (!teamAttentionPilotEnabled(ctx.userId, app.id)) {
-    fail('Team attention is not enabled for this operator and App.', 'FEATURE_NOT_AVAILABLE');
-  }
+  // #1353: the two-dimensional pilot allowlist that used to refuse here is
+  // removed; every guard around it — ordinary non-impersonated user, live
+  // App/org, current participation, concealment parity — stays.
   return app;
 }
 
 /**
  * Whether `resolvePilotApp` would admit this caller and App — the SAME checks,
- * as a boolean, for the capability probe (#1362 review, Codex P2). Probing on
- * the env allowlists alone advertised `team-attention` for an App that had
- * since been uninstalled, deleted or left, and every tool then answered
- * APP_NOT_FOUND.
+ * as a boolean, for the capability probe (#1362 review, Codex P2): advertising
+ * on the allowlists alone would have claimed the capability for an App that had
+ * since been uninstalled, deleted or left.
  */
 export async function teamAttentionAvailable(ctx: Context, appId: string): Promise<boolean> {
-  if (!ctx.userId || ctx.impersonation || !teamAttentionPilotEnabled(ctx.userId, appId)) return false;
+  if (!ctx.userId || ctx.impersonation) return false;
   const app = await ctx.db.app.findFirst({
     where: { id: appId, ...LIVE_APP_WHERE },
     select: { id: true, organizationId: true, ownerUserId: true },
@@ -816,8 +795,7 @@ async function ownLiveSessionWorker(
   if (
     !session?.workerId ||
     !session.appId ||
-    session.worker?.appId !== session.appId ||
-    !teamAttentionPilotEnabled(ctx.userId, session.appId)
+    session.worker?.appId !== session.appId
   ) return null;
   // A historical Session.userId proves who started the Worker, not who may
   // still drive it. Recheck current App participation before a read mutates

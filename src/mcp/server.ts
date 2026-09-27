@@ -246,7 +246,6 @@ import {
   markOwnTeamChatRead,
   maybeAdvanceOwnChannelRead,
   teamAttentionAvailable,
-  teamAttentionPilotOperatorEnabled,
 } from '../lib/teamAttention.js';
 import { resolveOrgRef } from '../lib/entityRef/orgRef.js';
 import { Prisma, type PrismaClient, type SessionType, type NodeContentValidationOutcome } from '../generated/prisma/index.js';
@@ -8263,7 +8262,10 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     args: { sinceSeq?: number; beforeSeq?: number; mentions?: string; limit?: number; offset?: number; session?: string },
   ) => {
     try {
-      const pilotRead = !!args.session && teamAttentionPilotOperatorEnabled(auth.userId ?? undefined);
+      // #1353: capture applies to any user-principal session read — the pilot
+      // operator allowlist that used to bound it is gone. App-key callers
+      // (no userId) keep their resolver isolation and never capture.
+      const pilotRead = !!args.session && !!auth.userId;
       const channelId = pilotRead ? await resolveChannelRefId(db, channelRef) : null;
       const captured = channelId
         ? await db.channel.findFirst({
@@ -8792,7 +8794,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         // Capture the Channel the resolver will actually read (its oldest
         // team-space root, not necessarily App.defaultChannel), BEFORE the
         // read, with the context the resolver gets (#1362 review, Codex P2).
-        const pilotAppId = session && teamAttentionPilotOperatorEnabled(auth.userId ?? undefined)
+        const pilotAppId = session && auth.userId
           ? (await resolveAppRef(db, appRef)).id
           : null;
         const captured = pilotAppId ? await locateTeamChatChannel(resolverCtx, pilotAppId) : null;
@@ -8847,12 +8849,13 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
 
   // ── #1353 internal-pilot compact attention ───────────────────────────────────
 
-  // Discovery follows the pilot (#1362 review, Codex P2): a connection whose
-  // operator is not allowlisted never sees these tools in tools/list. The App
-  // half of the allowlist cannot be decided here — the active App can change
-  // on the connection — so it stays with the per-call capability probe and
-  // each tool's own resolvePilotApp refusal.
-  if (auth.userId && !auth.impersonation && teamAttentionPilotOperatorEnabled(auth.userId)) {
+  // #1353: discovery follows the user principal — the pilot operator
+  // allowlist that hid these tools from non-allowlisted connections is
+  // removed. What still bounds them is per-call: resolvePilotApp's live-App
+  // + participation checks (APP_NOT_FOUND parity) and each tool's own
+  // session/consent guards; the capability probe in server_info reports
+  // team-attention only for a caller who could actually use it.
+  if (auth.userId && !auth.impersonation) {
     server.tool(
       'hadron_team_attention',
       'INTERNAL PILOT (#1353): return compact unread counts for this operator\'s LIVE Workers and an opaque signed poll token; never reads message bodies and never changes ChannelReadState. Omit since for all unread. Adopt the returned token only after every listed nudge is accepted; after any partial failure retain the prior token so retry may duplicate but cannot lose a nudge. since:"now" is refused — use the explicit switchover preview/apply tool.',
