@@ -58,6 +58,38 @@ beforeEach(async () => {
 });
 
 describe('mergeMemories — partition (collide vs relocate)', () => {
+  it('carries a relocated stamp, clears a changed collision, and retains a no-op collision stamp', async () => {
+    const task = await makeNode(tgtMem.id, 'author-task', { nodeType: 'task' });
+    const authoredAt = new Date('2026-09-26T20:00:00Z');
+    const stamp = {
+      authorshipKind: 'TASK' as const,
+      authoredByTask: task.id,
+      authoredByRevision: 3,
+      authoredAt,
+    };
+    const relocated = await makeNode(srcMem.id, 'relocated', { content: 'source body', ...stamp });
+    await makeNode(srcMem.id, 'changed', { content: 'source addition' });
+    const changedTarget = await makeNode(tgtMem.id, 'changed', { content: 'target body', ...stamp });
+    await makeNode(srcMem.id, 'unchanged');
+    const unchangedTarget = await makeNode(tgtMem.id, 'unchanged', { content: 'keep body', ...stamp });
+
+    await merge({ source: srcMem.id, target: tgtMem.id, include: ['CONTENT'] });
+
+    expect(await db.node.findUniqueOrThrow({ where: { id: relocated.id } })).toMatchObject({
+      memoryId: tgtMem.id, content: 'source body', ...stamp,
+    });
+    expect(await db.node.findUniqueOrThrow({ where: { id: changedTarget.id } })).toMatchObject({
+      content: 'target body\n\nsource addition', authorshipKind: null,
+      authoredByTask: null, authoredByRevision: null, authoredByHuman: null, authoredAt: null,
+    });
+    expect(await db.nodeRevision.findFirstOrThrow({ where: { nodeId: changedTarget.id } })).toMatchObject({
+      content: 'target body', ...stamp,
+    });
+    expect(await db.node.findUniqueOrThrow({ where: { id: unchangedTarget.id } })).toMatchObject({
+      content: 'keep body', ...stamp,
+    });
+  });
+
   it('folds colliding nodes and relocates the rest, emptying the source', async () => {
     await makeNode(srcMem.id, 'shared', { content: 'from source', tags: ['s'] });
     await makeNode(srcMem.id, 'srconly', { content: 'only in source' });

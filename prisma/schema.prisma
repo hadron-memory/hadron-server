@@ -1067,6 +1067,20 @@ model Asset {
 /// Denormalized from `Memory.class` for chat-list query performance;
 /// MUST stay consistent with the holding memory's class per the
 /// invariant validator in `src/api/graphql/schema/chat-scope.ts`.
+/// #1326 — how the server attributed the current content. NULL on legacy or
+/// as-yet-unstamped writes; callers cannot choose this through NodeInput.
+enum NodeAuthorshipKind {
+  TASK
+  HUMAN
+}
+
+/// #1326 — a content-validation result is advisory, never a write gate.
+enum NodeContentValidationOutcome {
+  PASS
+  FAIL
+  ERROR
+}
+
 model Node {
   /// UUIDv7 from `node.yaml` when supplied by the importer (stable across
   /// moves); falls back to `cuid()` for inserts that omit `id`.
@@ -1184,6 +1198,16 @@ model Node {
   /// AI agent tool that created or last modified this node (e.g.
   /// "claude-code", "cursor", "hadron-portal").
   aiAgent            String?   @map("ai_agent")
+  /// #1326 — server-owned attribution for this content state. A task stamp
+  /// records the stable task Node.id and its revision when the content was
+  /// authored; a HUMAN stamp records the authenticated person, never a task.
+  /// NULL kind means unknown/legacy, not a claim of human authorship. No FK:
+  /// deleting or moving a task/user must not rewrite historical attribution.
+  authorshipKind     NodeAuthorshipKind? @map("authorship_kind")
+  authoredByTask     String?   @map("authored_by_task")
+  authoredByRevision Int?      @map("authored_by_revision")
+  authoredByHuman    String?   @map("authored_by_human")
+  authoredAt         DateTime? @map("authored_at")
   /// #696/#1323: the live node's current revision. Creation is revision 1.
   /// A revisioned edit snapshots the pre-edit state at this number, then
   /// atomically advances the live row to the next number.
@@ -1206,6 +1230,7 @@ model Node {
   pendingEdges  PendingEdge[]
   usageEvents   UsageEvent[]
   revisions     NodeRevision[]
+  contentValidationReports NodeContentValidationReport[]
   /// Spec 049 Phase 4: the Channel whose chat root this node is, if any.
   channel       Channel?        @relation("ChannelRoot")
   embeddings    NodeEmbedding[] // 033: 1 abstract row + N chunk rows; Cascade delete
@@ -2239,6 +2264,13 @@ model NodeRevision {
   role               String?
   llmModel           String?  @map("llm_model")
   aiAgent            String?  @map("ai_agent")
+  /// #1326 — pre-edit content attribution, distinct from editedBy (the actor
+  /// taking this snapshot for the next edit). NULL on legacy snapshots.
+  authorshipKind     NodeAuthorshipKind? @map("authorship_kind")
+  authoredByTask     String?   @map("authored_by_task")
+  authoredByRevision Int?      @map("authored_by_revision")
+  authoredByHuman    String?   @map("authored_by_human")
+  authoredAt         DateTime? @map("authored_at")
   /// #620: the User.id of the editor, when a user is known — nothing
   /// else goes here anymore. Historically this column was overloaded
   /// (`reason ?? clientId ?? userId`, so it held edit rationales, OAuth
@@ -2280,6 +2312,32 @@ model NodeRevision {
   @@unique([nodeId, revNo], map: "node_revisions_node_rev_no_uniq")
   @@index([nodeId, createdAt])
   @@map("node_revisions")
+}
+
+/// #1326 — append-only content-validation evidence. It names the exact Node
+/// revision and validation-task revision observed by its producer. Reports do
+/// not edit Node, mint an authorship stamp, or fire node-written events. A
+/// late report for revision N stays historical when live content reaches N+1.
+model NodeContentValidationReport {
+  id                        String @id @default(cuid())
+  nodeId                    String @map("node_id")
+  /// Snapshot of the holding memory, so a later cross-memory move cannot
+  /// disclose this report to a reader of only the new memory.
+  memoryId                  String @map("memory_id")
+  nodeRevSeq                Int    @map("node_rev_seq")
+  /// Stable Node.id values rather than FKs: task deletion preserves history.
+  validationTaskId          String @map("validation_task_id")
+  validationTaskRevSeq      Int    @map("validation_task_rev_seq")
+  outcome                   NodeContentValidationOutcome
+  reportedAt                DateTime @default(now()) @map("reported_at")
+  /// Optional producer-run identity for idempotent insertion by #1332.
+  runId                     String? @unique @map("run_id")
+
+  node Node @relation(fields: [nodeId], references: [id], onDelete: Cascade)
+
+  @@index([nodeId, nodeRevSeq, reportedAt], map: "node_validation_node_rev_reported_idx")
+  @@index([memoryId])
+  @@map("node_content_validation_reports")
 }
 
 /// Temporary record holding an encrypted API key for a newly

@@ -1,5 +1,6 @@
 import { createDecipheriv } from 'crypto';
 import { governedSignalsFromMirror } from '../../lib/governedSignals.js';
+import { authoredContentChanged, clearNodeAuthorship } from '../../lib/nodeAuthorship.js';
 import { NodeSchemaViolation, validateNodeAgainstSchema } from '../../lib/validateNodeAgainstSchema.js';
 import type { MemorySchema } from '../../lib/memorySchema.js';
 // Spec 049 S4 — a Channel's address is skipped and reported, never overwritten from git.
@@ -118,6 +119,7 @@ export async function updateNodeFromGitSync(
     where: { id: locked.id },
     data: {
       ...(update as Prisma.NodeUncheckedUpdateInput),
+      ...(authoredContentChanged(changes) ? clearNodeAuthorship() : {}),
       revisionContentHash: revisionStateHashRefreshMarker(),
     },
   });

@@ -1195,6 +1195,10 @@ export const typeDefs = `#graphql
     id: ID!
     "#1323 — current live revision. Creation is revision 1; each committed authoring change advances it. NodeRevision.revNo N is the retained snapshot of this node when revision N was current, before the edit that advanced it."
     revision: Int!
+    "#1326 — attribution of this content state. Null means legacy or unknown. Task identity is redacted unless its memory is independently readable."
+    authorship: NodeAuthorship
+    "#1326 — advisory validation for this exact revision. A report for an older revision is STALE."
+    contentValidation: NodeContentValidationStatus!
     memoryId: String!
     """
     The PLATFORM-kind axis (info / task / prompt / record / …). Load-bearing for
@@ -1493,6 +1497,29 @@ export const typeDefs = `#graphql
     urn: String
   }
 
+  enum NodeAuthorshipKind { TASK HUMAN }
+  type NodeAuthorship {
+    kind: NodeAuthorshipKind!
+    taskRef: String
+    taskRevision: Int
+    human: NodeRevisionEditor
+    authoredAt: DateTime!
+  }
+
+  enum NodeContentValidationOutcome { PASS FAIL ERROR }
+  enum NodeContentValidationState { UNVALIDATED STALE PASS FAIL ERROR }
+  type NodeContentValidationReport {
+    nodeRevision: Int!
+    validationTaskRef: String
+    validationTaskRevision: Int
+    outcome: NodeContentValidationOutcome!
+    reportedAt: DateTime!
+  }
+  type NodeContentValidationStatus {
+    state: NodeContentValidationState!
+    latestReport: NodeContentValidationReport
+  }
+
   """
   046-usage-metering: effective-dated provider rate row. Prices are
   micro-cents (1e-8 USD) per MILLION tokens, as base-10 integer strings.
@@ -1592,6 +1619,10 @@ export const typeDefs = `#graphql
 
   type NodeRevision {
     id: ID!
+    "#1326 — attribution of the content captured before the next edit."
+    authorship: NodeAuthorship
+    "#1326 — advisory validation at this historical revision."
+    contentValidation: NodeContentValidationStatus!
     "Computed end-anchored URN hrn:noderev:<root>:<mem>:<loc...>:<rev> (#696). Null for legacy rows without a revNo, and for multi-segment per-user memories the flat shape cannot express."
     urn: String
     "Per-node monotonic revision number (#696). Null on legacy rows predating the counter (backfilled by the migration)."

@@ -8,6 +8,7 @@ import {
   ensureCurrentNodeRevisionInTransaction,
   revisionStateHashRefreshMarker,
 } from '../../../lib/nodeRevisionSnapshot.js';
+import { authoredContentChanged, clearNodeAuthorship } from '../../../lib/nodeAuthorship.js';
 import { lockAncestorsForCreate, lockAncestorsForCreateMany } from '../../../lib/nodeSubtreeLock.js';
 import { mintMemoryUrnV2 } from '../../../lib/mintMemoryUrnV2.js';
 import { canReadMemory } from '../../../mcp/access-control.js';
@@ -1568,6 +1569,7 @@ export const sessionMutations = {
           );
           for (const n of restoreOrder) {
             const loc = n.loc as string;
+            let clearRestoredAuthorship = false;
             const nodeData = {
               name: n.name as string,
               nodeType: (n.nodeType as string) ?? 'system',
@@ -1593,6 +1595,11 @@ export const sessionMutations = {
                 throw new Error(`restoreRevision: "${loc}" moved during the restore; retry.`);
               }
               const changes = diffNodeChanges(current, nodeData);
+              // Agent snapshots predate #1326 and contain no attribution.
+              // Restoring their authored fields cannot inherit the current
+              // live row's task claim; the snapshot below keeps that claim in
+              // history, and the restored live state becomes unknown.
+              clearRestoredAuthorship = authoredContentChanged(changes);
               if (changes.length > 0) {
                 await createNodeRevision(
                   tx,
@@ -1606,7 +1613,11 @@ export const sessionMutations = {
             const upserted = await tx.node.upsert({
               where: { loc_memoryId: { loc, memoryId: sysMemId } },
               create: { id: generateId(), memoryId: sysMemId, loc, ...nodeData },
-              update: { ...nodeData, revisionContentHash: revisionStateHashRefreshMarker() },
+              update: {
+                ...nodeData,
+                ...(clearRestoredAuthorship ? clearNodeAuthorship() : {}),
+                revisionContentHash: revisionStateHashRefreshMarker(),
+              },
             });
             locToId.set(loc, upserted.id);
           }
@@ -2254,4 +2265,3 @@ export const sessionMutations = {
       return dispatch(emitNodeUrnV2(resolved.memory.urn, resolved.loc));
     },
 };
-
