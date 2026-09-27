@@ -37,7 +37,7 @@ import {
   canSeeUserPersonalFields,
   canSeeOrgMemberRole,
 } from '../../../lib/auth/userVisibility.js';
-import { type AgentVisibility } from '../../../generated/prisma/index.js';
+import { Prisma, type AgentVisibility, type NodeContentValidationOutcome } from '../../../generated/prisma/index.js';
 import {
   deserializeTags,
   deserializeJson,
@@ -414,12 +414,10 @@ async function resolveContentValidation(
   }))?.memoryId;
   if (!memoryId) return { state: 'UNVALIDATED', latestReport: null };
   // A report captured in another memory is not exposed by moving the node.
-  const report = await ctx.db.nodeContentValidationReport.findFirst({
-    where: { nodeId, memoryId, nodeRevSeq: { lte: nodeRevision } },
-    orderBy: [{ nodeRevSeq: 'desc' }, { reportedAt: 'desc' }, { id: 'desc' }],
-  });
+  // GraphQL resolves list siblings concurrently, so collect their report and
+  // task lookups into one request-scoped query per event-loop turn.
+  const { report, taskRef } = await loadValidationReport(ctx, nodeId, memoryId, nodeRevision);
   if (!report) return { state: 'UNVALIDATED', latestReport: null };
-  const taskRef = await readableTaskRef(ctx, report.validationTaskId);
   return {
     state: nodeContentValidationState(nodeRevision, report),
     latestReport: {
@@ -430,6 +428,97 @@ async function resolveContentValidation(
       reportedAt: report.reportedAt,
     },
   };
+}
+
+type ValidationReportRow = {
+  requestKey: string;
+  nodeRevSeq: number;
+  validationTaskId: string;
+  validationTaskRevSeq: number;
+  outcome: NodeContentValidationOutcome;
+  reportedAt: Date;
+};
+type ValidationLookup = { report: ValidationReportRow | null; taskRef: string | null };
+type PendingValidation = {
+  key: string;
+  nodeId: string;
+  memoryId: string;
+  revision: number;
+  resolve: (value: ValidationLookup) => void;
+  reject: (reason: unknown) => void;
+  promise: Promise<ValidationLookup>;
+};
+const validationBatches = new WeakMap<Context, { pending: Map<string, PendingValidation>; scheduled: boolean }>();
+
+/** Batch latest-report and readable-task projections across sibling Node fields. */
+function loadValidationReport(ctx: Context, nodeId: string, memoryId: string, revision: number): Promise<ValidationLookup> {
+  let batch = validationBatches.get(ctx);
+  if (!batch) {
+    batch = { pending: new Map(), scheduled: false };
+    validationBatches.set(ctx, batch);
+  }
+  const key = JSON.stringify([nodeId, memoryId, revision]);
+  const existing = batch.pending.get(key);
+  if (existing) return existing.promise;
+  let resolve!: PendingValidation['resolve'];
+  let reject!: PendingValidation['reject'];
+  const promise = new Promise<ValidationLookup>((res, rej) => { resolve = res; reject = rej; });
+  batch.pending.set(key, { key, nodeId, memoryId, revision, resolve, reject, promise });
+  if (!batch.scheduled) {
+    batch.scheduled = true;
+    setImmediate(() => { void flushValidationBatch(ctx, batch!); });
+  }
+  return promise;
+}
+
+async function flushValidationBatch(
+  ctx: Context,
+  batch: { pending: Map<string, PendingValidation>; scheduled: boolean },
+): Promise<void> {
+  const pending = [...batch.pending.values()];
+  batch.pending.clear();
+  batch.scheduled = false;
+  if (pending.length === 0) return;
+  try {
+    const values = Prisma.join(pending.map((item) => Prisma.sql`
+      (${item.key}::text, ${item.nodeId}::text, ${item.memoryId}::text, ${item.revision}::integer)
+    `));
+    const reports = await ctx.db.$queryRaw<ValidationReportRow[]>(Prisma.sql`
+      WITH wanted(request_key, node_id, memory_id, rev_seq) AS (VALUES ${values})
+      SELECT w.request_key AS "requestKey", r.node_rev_seq AS "nodeRevSeq",
+             r.validation_task_id AS "validationTaskId",
+             r.validation_task_rev_seq AS "validationTaskRevSeq", r.outcome,
+             r.reported_at AS "reportedAt"
+      FROM wanted w
+      JOIN LATERAL (
+        SELECT node_rev_seq, validation_task_id, validation_task_rev_seq, outcome, reported_at
+        FROM node_content_validation_reports
+        WHERE node_id = w.node_id AND memory_id = w.memory_id AND node_rev_seq <= w.rev_seq
+        ORDER BY node_rev_seq DESC, reported_at DESC, id DESC
+        LIMIT 1
+      ) r ON TRUE
+    `);
+    const byKey = new Map(reports.map((report) => [report.requestKey, report]));
+    const taskIds = [...new Set(reports.map((report) => report.validationTaskId))];
+    const tasks = taskIds.length === 0 ? [] : await ctx.db.node.findMany({
+      where: { id: { in: taskIds }, deletedAt: null },
+      select: { id: true, loc: true, memoryId: true },
+    });
+    // Use the GraphQL node-content gate, including active-session isolation.
+    // One access fold replaces a per-report task-memory check.
+    const accessible = tasks.length === 0 ? [] : await getAccessibleMemoryIds(ctx);
+    const readable = accessible === null ? null : new Set(accessible);
+    const taskRefs = new Map(await Promise.all(tasks.map(async (task) => [
+      task.id,
+      readable === null || readable.has(task.memoryId) ? await resolveNodeUrnField(task, ctx) : null,
+    ] as const)));
+    for (const item of pending) {
+      const report = byKey.get(item.key) ?? null;
+      item.resolve({ report, taskRef: report ? taskRefs.get(report.validationTaskId) ?? null : null });
+    }
+  } catch (error) {
+    for (const item of pending) item.reject(error);
+  }
 }
 
 export const typeResolvers = {
@@ -465,10 +554,21 @@ export const typeResolvers = {
       _: unknown,
       ctx: Context,
     ) => {
+      // Start the report lookup while sibling Node revisions reconcile. On a
+      // list this lets the request loader collect all selected parents in one
+      // turn. If raw drift advances this node's revision, re-query using the
+      // corrected cutoff before returning its validation state.
+      const selectedReport = resolveContentValidation(n, ctx).then(
+        (value) => ({ ok: true as const, value }),
+        (error: unknown) => ({ ok: false as const, error }),
+      );
       // Match Node.revision's lazy raw-writer reconcile, so a response cannot
       // display the advanced revision beside validation for the old number.
       const revSeq = await typeResolvers.Node.revision(n, _, ctx);
-      return resolveContentValidation({ ...n, revSeq }, ctx);
+      if (revSeq !== n.revSeq) return resolveContentValidation({ ...n, revSeq }, ctx);
+      const selected = await selectedReport;
+      if (!selected.ok) throw selected.error;
+      return selected.value;
     },
     revision: async (
       n: SnapshotSourceNode & {

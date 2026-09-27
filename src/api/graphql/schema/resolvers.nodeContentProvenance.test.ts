@@ -265,6 +265,39 @@ describe('#1326 content provenance reads', () => {
     expect(await db.nodeRevision.count({ where: { nodeId } })).toBe(1);
   });
 
+  it('batches sibling validation reports and task references on a GraphQL list read', async () => {
+    const second = await db.node.create({
+      data: { id: generateId(), memoryId: nodeMemoryId, loc: 'second', name: 'Second', revSeq: 2 },
+    });
+    for (const [id, rev] of [[nodeId, 1], [second.id, 2]] as const) {
+      await db.nodeContentValidationReport.create({
+        data: {
+          nodeId: id, memoryId: nodeMemoryId, nodeRevSeq: rev,
+          validationTaskId: taskId, validationTaskRevSeq: 4, outcome: 'PASS',
+        },
+      });
+    }
+    const parents = [
+      await db.node.findUniqueOrThrow({ where: { id: nodeId } }),
+      await db.node.findUniqueOrThrow({ where: { id: second.id } }),
+    ];
+    const rawQueries = vi.spyOn(db, '$queryRaw');
+    const taskLoads = vi.spyOn(db.node, 'findMany');
+    try {
+      const context = { db, userId: readerId, roles: ['ADMIN'] } as Context;
+      const states = await Promise.all(parents.map((parent) => typeResolvers.Node.contentValidation(parent, null, context)));
+      expect(states).toEqual([
+        expect.objectContaining({ state: 'PASS', latestReport: expect.objectContaining({ nodeRevision: 1, validationTaskRef: 'hrn:node:provenance-other:mem:author-task' }) }),
+        expect.objectContaining({ state: 'PASS', latestReport: expect.objectContaining({ nodeRevision: 2, validationTaskRef: 'hrn:node:provenance-other:mem:author-task' }) }),
+      ]);
+      expect(rawQueries.mock.calls.filter(([query]) => JSON.stringify(query).includes('node_content_validation_reports'))).toHaveLength(1);
+      expect(taskLoads.mock.calls.filter(([args]) => typeof args?.where?.id === 'object' && 'in' in args.where.id)).toHaveLength(1);
+    } finally {
+      rawQueries.mockRestore();
+      taskLoads.mockRestore();
+    }
+  });
+
   it('does not reveal a report from a different memory through the current node', async () => {
     await db.nodeContentValidationReport.create({
       data: {
