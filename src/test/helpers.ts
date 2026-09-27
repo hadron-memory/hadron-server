@@ -453,6 +453,7 @@ interface NodeMeta {
   objectType?: string | null;
   /** #1348: a governed signal, to pin that objectType handling leaves it alone. */
   role?: string;
+  authoredWith?: { task: string; revision: number };
 }
 
 /** Write a legacy node (`.node/node.yaml` + `topic.md`). */

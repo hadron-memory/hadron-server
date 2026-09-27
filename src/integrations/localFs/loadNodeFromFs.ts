@@ -81,8 +81,13 @@ interface NodeYaml {
   nodes?: Array<{ id: string; rel: string; loc?: string }>;
   alias?: string;
   author?: string;
+  /** #1328 — untrusted until the Git sync write gate verifies it. */
+  authoredWith?: unknown;
   contentHash?: string;
 }
+
+/** Mirror data may carry an unverified author-task assertion alongside Node fields. */
+export type LoadedNode = Partial<Node> & { authoredWith?: unknown };
 
 /**
  * Spec 032 FR-013 — reconcile the YAML's `abstractOriginHash` against
@@ -273,7 +278,7 @@ export const loadNodeFromFs = async (
   source: string,
   graphRoot: string,
   ownerRepo: string,
-): Promise<{ node: Partial<Node>; edges: Array<LoadedEdge> }> => {
+): Promise<{ node: LoadedNode; edges: Array<LoadedEdge> }> => {
   if (source.endsWith('.md')) {
     return loadFrontmatterNode(source, graphRoot, ownerRepo);
   }
@@ -287,7 +292,7 @@ async function loadFrontmatterNode(
   mdPath: string,
   graphRoot: string,
   ownerRepo: string,
-): Promise<{ node: Partial<Node>; edges: Array<LoadedEdge> }> {
+): Promise<{ node: LoadedNode; edges: Array<LoadedEdge> }> {
   const raw = readFileSync(mdPath, 'utf-8');
 
   const fmMatch = raw.match(/^---\n([\s\S]*?)\n---\n?([\s\S]*)$/);
@@ -331,6 +336,7 @@ async function loadFrontmatterNode(
       // #1218 — spread, NOT `?? null`: an absent key must stay absent so the
       // sync update preserves the stored value. See the NodeYaml doc above.
       ...governedSignalsFromMeta(meta),
+      ...('authoredWith' in meta ? { authoredWith: meta.authoredWith } : {}),
     },
     edges,
   };
@@ -343,7 +349,7 @@ async function loadLegacyNode(
   dirPath: string,
   graphRoot: string,
   ownerRepo: string,
-): Promise<{ node: Partial<Node>; edges: Array<LoadedEdge> }> {
+): Promise<{ node: LoadedNode; edges: Array<LoadedEdge> }> {
   const yamlPath = join(dirPath, '.node', 'node.yaml');
   const mdPath = join(dirPath, '.node', 'topic.md');
 
@@ -390,6 +396,7 @@ async function loadLegacyNode(
       // memory ungoverned — the same defect, reachable through the older of
       // the two formats. Same reader, same absent-means-preserve rule.
       ...governedSignalsFromMeta(meta),
+      ...('authoredWith' in meta ? { authoredWith: meta.authoredWith } : {}),
     },
     edges,
   };

@@ -393,6 +393,69 @@ describe('syncGraphFromGithub', () => {
     });
   });
 
+  it('requires current author-task frontmatter for a changed configured role', async () => {
+    const task = await db.node.create({
+      data: { id: generateId(), memoryId: dbGraphId, loc: 'author-task', name: 'Author task', isRunnable: true },
+    });
+    const config = await db.memoryConfig.create({ data: { id: generateId(), memoryId: dbGraphId } });
+    await db.nodeRoleRule.create({
+      data: { id: generateId(), configId: config.id, role: 'guide', authorTaskId: task.id, authorTaskRequired: true },
+    });
+    const row = await db.node.create({
+      data: { id: generateId(), memoryId: dbGraphId, loc: 'guided', name: 'Guided', role: 'guide', content: 'old body' },
+    });
+    const write = (claim?: { task: string; revision: number }) =>
+      db.$transaction((tx) => updateNodeFromGitSync(tx, row, { content: 'new body' }, undefined, dbGraphId, undefined, claim));
+    await expect(write()).rejects.toMatchObject({ extensions: { code: 'AUTHOR_TASK_MISSING' } });
+    await expect(write({ task: generateId(), revision: 1 })).rejects.toMatchObject({ extensions: { code: 'AUTHOR_TASK_WRONG_TASK' } });
+    await expect(write({ task: task.id, revision: 2 })).rejects.toMatchObject({ extensions: { code: 'AUTHOR_TASK_STALE_REVISION' } });
+    expect(await db.node.findUniqueOrThrow({ where: { id: row.id } })).toMatchObject({ content: 'old body', revSeq: 1 });
+    await write({ task: task.id, revision: 1 });
+    expect(await db.node.findUniqueOrThrow({ where: { id: row.id } })).toMatchObject({
+      content: 'new body', authorshipKind: 'TASK', authoredByTask: task.id, authoredByRevision: 1,
+    });
+  });
+
+  it('imports author-task assertions from legacy YAML and frontmatter without treating absent metadata as a new claim', async () => {
+    const task = await db.node.create({
+      data: { id: generateId(), memoryId: dbGraphId, loc: 'author-task', name: 'Author task', isRunnable: true },
+    });
+    const config = await db.memoryConfig.create({ data: { id: generateId(), memoryId: dbGraphId } });
+    await db.nodeRoleRule.create({
+      data: { id: generateId(), configId: config.id, role: 'guide', authorTaskId: task.id, authorTaskRequired: true },
+    });
+    const repo = join(mockSources, 'test-org', 'test/repo');
+    const legacy = join(repo, 'legacy');
+    writeNodeFiles(legacy, { name: 'Legacy', role: 'guide' }, 'legacy body');
+    expect((await syncGraphFromGithub(makeGraph())).error).toMatch(/requires authoredWith/);
+    expect(await db.node.count({ where: { memoryId: dbGraphId, loc: 'legacy' } })).toBe(0);
+
+    writeNodeFiles(legacy, { name: 'Legacy', role: 'guide', authoredWith: { task: task.id, revision: 1 } }, 'legacy body');
+    writeFrontmatterNode(join(repo, 'modern.md'), {
+      name: 'Modern', role: 'guide', authoredWith: { task: task.id, revision: 1 },
+    }, 'modern body');
+    expect((await syncGraphFromGithub(makeGraph())).error).toBeUndefined();
+    for (const loc of ['legacy', 'modern']) {
+      expect(await db.node.findFirstOrThrow({ where: { memoryId: dbGraphId, loc } })).toMatchObject({
+        role: 'guide', authorshipKind: 'TASK', authoredByTask: task.id, authoredByRevision: 1,
+      });
+    }
+    // A repo file predating the assertion field may be re-read unchanged;
+    // absence does not erase the existing verified stamp.
+    writeNodeFiles(legacy, { name: 'Legacy', role: 'guide' }, 'legacy body');
+    expect((await syncGraphFromGithub(makeGraph())).error).toBeUndefined();
+    expect(await db.node.findFirstOrThrow({ where: { memoryId: dbGraphId, loc: 'legacy' } }))
+      .toMatchObject({ authorshipKind: 'TASK', authoredByTask: task.id });
+
+    // A malformed claim reaches the transactional gate. Throwing in the
+    // loader would skip this file and let repo-wins cleanup delete its row.
+    writeFileSync(join(legacy, '.node', 'node.yaml'),
+      `id: ${generateId()}\nname: Legacy\nrole: guide\nauthoredWith:\n  task: ${task.id}\n  revision: bad\n`);
+    expect((await syncGraphFromGithub(makeGraph())).error).toMatch(/positive integer revision/);
+    expect(await db.node.findFirstOrThrow({ where: { memoryId: dbGraphId, loc: 'legacy' } }))
+      .toMatchObject({ authorshipKind: 'TASK', authoredByTask: task.id, content: 'legacy body' });
+  });
+
   it('re-sync replaces old nodes with the new set', async () => {
     const nodeA = join(mockSources, 'test-org', 'test/repo', 'nodeA');
     mkdirSync(nodeA, { recursive: true });

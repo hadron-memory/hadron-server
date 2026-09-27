@@ -18,6 +18,12 @@ import { loadGraphFromFs } from '../localFs/loadGraphFromFs.js';
 const base: FrontmatterNodeFields = { id: 'n1', name: 'A node', tags: [] };
 
 describe('buildNodeFrontmatter', () => {
+  it('exports a verified task stamp as authoredWith but never exports human attribution as a task claim', () => {
+    expect(buildNodeFrontmatter({ ...base, authorshipKind: 'TASK', authoredByTask: 'task-id', authoredByRevision: 3 }))
+      .toMatchObject({ authoredWith: { task: 'task-id', revision: 3 } });
+    expect(buildNodeFrontmatter({ ...base, authorshipKind: 'HUMAN', authoredByTask: null, authoredByRevision: null }))
+      .not.toHaveProperty('authoredWith');
+  });
   it('always emits name and id', () => {
     expect(buildNodeFrontmatter(base)).toEqual({ name: 'A node', id: 'n1' });
   });

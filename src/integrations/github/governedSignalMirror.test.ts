@@ -69,6 +69,7 @@ describe('export — the INCREMENTAL mirror path emits them too', () => {
         tags: [],
         role: 'review',
         isRunnable: true,
+        authorshipKind: null, authoredByTask: null, authoredByRevision: null,
         outgoingEdges: [],
       });
       const written = readFileSync(join(dir, 'topic.md'), 'utf-8');
@@ -84,7 +85,7 @@ describe('export — the INCREMENTAL mirror path emits them too', () => {
     try {
       writeNodeFile(dir, {
         id: 'n6', loc: 'plain', name: 'P', tags: [],
-        role: null, isRunnable: null, outgoingEdges: [],
+        role: null, isRunnable: null, authorshipKind: null, authoredByTask: null, authoredByRevision: null, outgoingEdges: [],
       });
       const written = readFileSync(join(dir, 'plain.md'), 'utf-8');
       expect(written).not.toMatch(/^role:/m);

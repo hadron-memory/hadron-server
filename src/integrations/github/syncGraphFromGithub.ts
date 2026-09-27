@@ -1,5 +1,6 @@
 import { createDecipheriv } from 'crypto';
 import { governedSignalsFromMirror } from '../../lib/governedSignals.js';
+import { assertRoleDeclaredForWrite, type AuthoredWithTask } from '../../lib/governedRole.js';
 import { authoredContentChanged, clearNodeAuthorship } from '../../lib/nodeAuthorship.js';
 import { NodeSchemaViolation, validateNodeAgainstSchema } from '../../lib/validateNodeAgainstSchema.js';
 import type { MemorySchema } from '../../lib/memorySchema.js';
@@ -56,6 +57,19 @@ export type MemoryWithOrg = Memory & { organization: Organization | null };
 class EdgeEndpointPreflightStale extends Error {}
 const MAX_EDGE_ENDPOINT_PREFLIGHT_RETRIES = 3;
 
+/** Validate YAML shape without treating a file's claim as trusted attribution. */
+function authoredWithFromMirror(value: unknown): AuthoredWithTask | null {
+  if (value == null) return null;
+  if (typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('Git sync authoredWith must contain a task ID and positive integer revision.');
+  }
+  const claim = value as Record<string, unknown>;
+  if (typeof claim.task !== 'string' || !claim.task || !Number.isSafeInteger(claim.revision) || (claim.revision as number) < 1) {
+    throw new Error('Git sync authoredWith must contain a task ID and positive integer revision.');
+  }
+  return { task: claim.task, revision: claim.revision as number };
+}
+
 /**
  * The row left the memory being synced between the preflight lookup and its
  * row lock (a concurrent cross-memory move). Applying the repo's update by id
@@ -82,6 +96,7 @@ export async function updateNodeFromGitSync(
    * has at write time, not before the lock).
    */
   extra?: (locked: Node) => Record<string, unknown>,
+  authoredWith?: AuthoredWithTask | null,
 ): Promise<void> {
   await tx.$queryRaw`SELECT "id" FROM "nodes" WHERE "id" = ${current.id} FOR UPDATE`;
   const owner = await tx.node.findUnique({ where: { id: current.id }, select: { memoryId: true } });
@@ -103,6 +118,14 @@ export async function updateNodeFromGitSync(
   const before = revisionBase ?? locked;
   if (extra) update = { ...update, ...extra(locked) };
   const changes = diffNodeChanges(before, update);
+  const authoredChange = authoredContentChanged(changes);
+  const verifiedAuthorship = await assertRoleDeclaredForWrite(tx, expectedMemoryId, {
+    role: (update.role === undefined ? locked.role : update.role) as string | null,
+    priorRole: before.role,
+    runnableAfter: (update.isRunnable === undefined ? locked.isRunnable : update.isRunnable) as boolean | null,
+    authoredChange,
+    authoredWith,
+  });
 
   if (changes.length > 0) {
     await createNodeRevision(
@@ -119,7 +142,7 @@ export async function updateNodeFromGitSync(
     where: { id: locked.id },
     data: {
       ...(update as Prisma.NodeUncheckedUpdateInput),
-      ...(authoredContentChanged(changes) ? clearNodeAuthorship() : {}),
+      ...(authoredChange ? verifiedAuthorship ?? clearNodeAuthorship() : {}),
       revisionContentHash: revisionStateHashRefreshMarker(),
     },
   });
@@ -441,6 +464,7 @@ export const syncGraphFromGithub = async (
           continue;
         }
         const name = node.name!;
+        const authoredWith = authoredWithFromMirror(node.authoredWith);
         const update = {
           loc,
           name,
@@ -575,9 +599,8 @@ export const syncGraphFromGithub = async (
             }
             console.log(`[syncGraphFromGithub] "${graphName}": node ${byId.id} moved "${byId.loc}" → "${loc}"`);
           }
-          await updateNodeFromGitSync(tx, byId, update, parkedRevisionBases.get(byId.id), graph.id, (locked) =>
-            objectTypeFor(locked.properties),
-          );
+          await updateNodeFromGitSync(tx, byId, update, parkedRevisionBases.get(byId.id), graph.id,
+            (locked) => objectTypeFor(locked.properties), authoredWith);
           parkedRevisionBases.delete(byId.id);
           rowId = byId.id;
         } else {
@@ -601,6 +624,7 @@ export const syncGraphFromGithub = async (
               parkedRevisionBases.get(existingAtLoc.id),
               graph.id,
               (locked) => objectTypeFor(locked.properties),
+              authoredWith,
             );
             parkedRevisionBases.delete(existingAtLoc.id);
             // The SURVIVING id: an update keeps the existing row's id, which
@@ -608,12 +632,20 @@ export const syncGraphFromGithub = async (
             // make the notIn deletion pass below delete the row we just wrote.
             rowId = existingAtLoc.id;
           } else {
+            const verifiedAuthorship = await assertRoleDeclaredForWrite(tx, graph.id, {
+              role: update.role ?? null,
+              priorRole: null,
+              runnableAfter: update.isRunnable ?? null,
+              authoredChange: true,
+              authoredWith,
+            });
             const row = await tx.node.create({
               data: {
                 id: createId,
                 memoryId: graph.id,
                 ...update,
                 ...objectTypeFor(null),
+                ...(verifiedAuthorship ?? clearNodeAuthorship()),
                 revisionContentHash: revisionStateHashRefreshMarker(),
               },
               select: { id: true },
