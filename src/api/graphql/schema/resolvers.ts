@@ -53,6 +53,7 @@ import { agentMutations } from './resolvers.mutation.agent.js';
 import { workerMutations, workerQueries, workerFieldResolvers } from './resolvers.worker.js';
 import { teamRoleMutations, teamRoleQueries } from './resolvers.teamRole.js';
 import { teamChatMutations, teamChatQueries } from './resolvers.teamChat.js';
+import { teamAttentionMutations, teamAttentionQueries } from './resolvers.teamAttention.js';
 import { teamWorkMutations, teamWorkQueries } from './resolvers.teamWork.js';
 import { memoryConfigMutations, memoryConfigQueries, memoryConfigFieldResolvers } from './resolvers.memoryConfig.js';
 import {
@@ -103,6 +104,7 @@ export const resolvers = {
     ...appQueries,
     ...chatQueries,
     ...teamChatQueries,
+    ...teamAttentionQueries,
     ...teamWorkQueries,
     ...memoryConfigQueries,
     ...memoryConfigTemplateQueries,
@@ -142,6 +144,7 @@ export const resolvers = {
     ...workerMutations,
     ...teamRoleMutations,
     ...teamChatMutations,
+    ...teamAttentionMutations,
     ...teamWorkMutations,
     ...memoryConfigMutations,
     ...memoryConfigTemplateMutations,

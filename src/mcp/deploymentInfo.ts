@@ -95,12 +95,15 @@
 // 0.19.0: #1265 — register + ChannelReadState-backed unattended team-chat
 // monitoring on hadron_team_chat_read (`monitor`, server-bound checkpoints,
 // deliberate acknowledgement). Token: `team-chat-monitor`.
-// 0.20.0 — `worklog-model` (#1398): the `model` argument on
+// 0.20.0: #1353 — internal-pilot compact team attention, explicit own-worker
+// mark-read, and preview/proof/confirm switchover. Its capability token is
+// caller/App-gated by hadron_server_info rather than added to the static list.
+// 0.21.0 — `worklog-model` (#1398): the `model` argument on
 // `hadron_record_work` and `TeamWorkItem.model`. MCP drops unknown arguments,
 // so a lagging build silently records the session fallback — a healthy-looking
 // receipt with the wrong attribution. Clients gate on the `worklog-model`
 // capability token rather than the version.
-export const HADRON_SERVER_VERSION = '0.20.0';
+export const HADRON_SERVER_VERSION = '0.21.0';
 
 /**
  * #1006 — the MCP surface's CAPABILITY tokens: what this build can actually do,

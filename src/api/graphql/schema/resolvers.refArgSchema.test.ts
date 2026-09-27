@@ -57,6 +57,7 @@ const EXPECTED_REF_ARGS: Record<string, string[]> = {
   deleteChannel: ['ref'],
   createChannelMessage: ['channelRef', 'sessionRef'],
   advanceChannelReadState: ['attendeeRef', 'appRef', 'channelRef'],
+  markOwnTeamChatRead: ['appRef', 'sessionRef', 'channelRef'],
 };
 
 /**

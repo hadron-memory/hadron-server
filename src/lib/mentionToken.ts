@@ -7,6 +7,9 @@
 // legally share one token — a mention then addresses both workers, which is
 // the accepted behavior of the one-format mention contract.
 
+/** Broadcast mentions route once to every registered destination. */
+export const BROADCAST_MENTION_TOKENS = ['all', 'team'] as const;
+
 /**
  * Canonical mention token of a display name — the slug both sides of the
  * mention contract use (Codex P2 on PR #941): worker names may legally

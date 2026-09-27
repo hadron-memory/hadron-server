@@ -176,6 +176,7 @@ import {
 } from '../api/graphql/schema/resolvers.mutation.session.js';
 import { HADRON_SERVER_VERSION, MCP_SURFACE_CAPABILITIES, getDeploymentInfo } from './deploymentInfo.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
+import { locateTeamChatChannel } from '../api/graphql/schema/resolvers.teamChat.js';
 // #1005: the SHARED App-participation predicate (#943) — reused here so
 // reconnect recovery admits exactly whom startSession admitted, rather than a
 // narrower member-row copy that would drift from it.
@@ -218,6 +219,12 @@ import { resolveSearchScope, canReadScope, resolveScopeByNameInApp, type SearchS
 // Spec 049 Phase 6 — the register block on hadron_whoami's bound rows.
 import { resolveRegister, renderDerivedBlocks } from '../lib/resolveRegister.js';
 import { attendeeMentionTokens } from '../lib/channelReadState.js';
+import {
+  markOwnTeamChatRead,
+  maybeAdvanceOwnChannelRead,
+  teamAttentionAvailable,
+  teamAttentionPilotOperatorEnabled,
+} from '../lib/teamAttention.js';
 import { resolveOrgRef } from '../lib/entityRef/orgRef.js';
 import type { PrismaClient, SessionType, Prisma } from '../generated/prisma/index.js';
 
@@ -2216,7 +2223,12 @@ export function createMcpServerInstance(
       const lines = [
         `server: ${dep.baseUrl}`,
         `version: ${dep.version}`,
-        `capabilities: ${MCP_SURFACE_CAPABILITIES.join(', ')}`,
+        `capabilities: ${[
+          ...MCP_SURFACE_CAPABILITIES,
+          // Probed exactly as the tools will admit the call: allowlists, a
+          // live App and current participation (#1362 review).
+          ...(auth.appId && (await teamAttentionAvailable(chatCtx(), auth.appId)) ? ['team-attention'] : []),
+        ].join(', ')}`,
       ];
       // Spec 049 Phase 1: the resolved active organization and which rung of
       // the ladder chose it — the one place a caller can ASK which tenancy the
@@ -7670,22 +7682,41 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       // createTestableMcpServer bypasses zod — normalize defensively (a NaN
       // would reach Prisma's `take` as a raw driver error rather than a clamp).
       const take = Math.max(1, Math.min(typeof limit === 'number' && Number.isFinite(limit) ? limit : 10, 50));
-      const sessions = await db.session.findMany({
-        where: {
-          ...scope,
-          deletedAt: null,
-          // "Open" is `endedAt IS NULL` — the ONE active predicate the platform
-          // uses everywhere (#930: the reaper stamps endedAt AND autoExpiredAt
-          // together precisely so this stays a single test).
-          ...(includeEnded ? {} : { endedAt: null }),
+      // #1133 — the count runs under the IDENTICAL where as the rows (one
+      // object, used by both queries), so the truncation disclosure cannot
+      // leak a session count the caller may not read: whatever scopes the
+      // rows scopes the total, by construction rather than by re-statement.
+      const where = {
+        ...scope,
+        deletedAt: null,
+        // "Open" is `endedAt IS NULL` — the ONE active predicate the platform
+        // uses everywhere (#930: the reaper stamps endedAt AND autoExpiredAt
+        // together precisely so this stays a single test).
+        ...(includeEnded ? {} : { endedAt: null }),
+      };
+      // Both reads share ONE repeatable-read snapshot (Codex P2 + Copilot on
+      // the first head): as independent READ COMMITTED statements they could
+      // straddle a concurrent hadron_start_session — count sees 10, the insert
+      // lands, findMany then returns a DIFFERENT 10 that quietly drops the
+      // oldest while total === length reports "not truncated". That is the
+      // absence-as-reaped ambiguity this tool exists to kill, reopened in a
+      // race window; one snapshot closes it.
+      const [sessions, total] = await db.$transaction(
+        async (tx) => {
+          const rows = await tx.session.findMany({
+            where,
+            orderBy: { startedAt: 'desc' },
+            take,
+            select: {
+              id: true, startedAt: true, endedAt: true, type: true, plan: true,
+              appId: true, workerId: true,
+            },
+          });
+          const count = await tx.session.count({ where });
+          return [rows, count] as const;
         },
-        orderBy: { startedAt: 'desc' },
-        take,
-        select: {
-          id: true, startedAt: true, endedAt: true, type: true, plan: true,
-          appId: true, workerId: true,
-        },
-      });
+        { isolationLevel: 'RepeatableRead' },
+      );
       if (sessions.length === 0) {
         return textResult(
           includeEnded
@@ -7758,8 +7789,21 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         );
       });
 
+      // #1133 — absence from this list must never be readable as "the session
+      // is gone" (tasks:end-worker-session reads it as "reaped", and a reaped
+      // session writes no handoff). When the list truncated, say so, and give
+      // recovery guidance that is TRUE: `limit` retrieves everything only
+      // while the total fits under its 50 cap — beyond that, say older rows
+      // exist instead of promising a call that cannot return them.
+      const truncated = total > sessions.length;
+      const header = truncated
+        ? total <= 50
+          ? `${sessions.length} session(s) — TRUNCATED, showing the newest ${sessions.length} of ${total}; pass limit: ${total} to see them all:\n`
+          : `${sessions.length} session(s) — TRUNCATED, showing the newest ${sessions.length} of ${total}; limit caps at 50, so ${total - 50} older session(s) lie beyond any single call:\n`
+        : `${sessions.length} session(s):\n`;
+
       return textResult(
-        `${sessions.length} session(s):\n${lines.join('\n')}\n\n` +
+        `${header}${lines.join('\n')}\n\n` +
           // #1034: "session id" stays GENERAL here, because this list includes
           // unbound sessions whose own row says "working as: nobody" — calling
           // every id a worker session id would contradict the line above it and
@@ -7898,14 +7942,48 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
   /** Read a Channel by id or address — the team-chat read's Channel-addressed twin. */
   const readChannel = async (
     channelRef: string,
-    args: { sinceSeq?: number; beforeSeq?: number; mentions?: string; limit?: number; offset?: number },
+    args: { sinceSeq?: number; beforeSeq?: number; mentions?: string; limit?: number; offset?: number; session?: string },
   ) => {
     try {
+      const pilotRead = !!args.session && teamAttentionPilotOperatorEnabled(auth.userId ?? undefined);
+      const channelId = pilotRead ? await resolveChannelRefId(db, channelRef) : null;
+      const captured = channelId
+        ? await db.channel.findFirst({
+            where: { id: channelId, deletedAt: null },
+            select: { id: true, lastSeq: true },
+          })
+        : null;
+      // An explicit Worker session owns cursor attribution for user callers.
+      // Keep a pure App key's header-bound session: the delegated resolver
+      // uses it to isolate reads to that session's memory.
+      const resolverCtx = args.session && auth.userId
+        ? { ...chatCtx(), sessionId: undefined }
+        : chatCtx();
       const page = await resolvers.Query.channelMessages(
         {},
         { channelRef, sinceSeq: args.sinceSeq ?? null, beforeSeq: args.beforeSeq ?? null, mentionsRef: args.mentions ?? null, limit: args.limit ?? null, offset: args.offset ?? null },
-        chatCtx(),
+        resolverCtx,
       );
+      if (captured && args.session) {
+        try {
+          await maybeAdvanceOwnChannelRead(chatCtx(), {
+            channelId: captured.id,
+            capturedHead: captured.lastSeq,
+            sessionRef: args.session,
+            sinceSeq: args.sinceSeq,
+            beforeSeq: args.beforeSeq,
+            mentionsRef: args.mentions,
+            limit: args.limit,
+            offset: args.offset,
+            page,
+          });
+        } catch (error) {
+          // The transcript is already authorized and loaded. Cursor ownership
+          // is best-effort bookkeeping: never discard a successful read and
+          // invite the caller to retry it because the follow-up write failed.
+          console.warn('[hadron_channel_read] pilot read-state advance failed:', error);
+        }
+      }
       if (page.total === 0) return textResult('The Channel has no matching messages.');
       const lines = page.items.map((m) => {
         const reply = m.replyToSeq != null ? ` (reply to #${m.replyToSeq})` : '';
@@ -8162,6 +8240,8 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       for (const message of page.items) {
         const routes = watchers.filter((watcher) => {
           if (message.seq <= watcher.seen) return false;
+          // A Worker never receives its own post, including a broadcast.
+          if (message.authorWorkerId === watcher.workerId) return false;
           if (!watcher.mentionOnly) return true;
           return message.mentions.some((mention) => watcher.mentionTokens.has(mention));
         });
@@ -8229,9 +8309,11 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       offset: z.number().int().optional().describe('Page offset.'),
       session: z.string().optional().describe('Your session id — passing it keeps that session alive (#1081).'),
     },
-    async ({ channel, sinceSeq, beforeSeq, mentions, limit, offset, session }) => {
+    async ({ channel, sinceSeq, beforeSeq, mentions, limit, offset, session: rawSession }) => {
+      // A blank session is no session, for every consumer below (#1362 review).
+      const session = typeof rawSession === 'string' ? rawSession.trim() || undefined : rawSession;
       await heartbeatSession(session);
-      return readChannel(channel, { sinceSeq, beforeSeq, mentions, limit, offset });
+      return readChannel(channel, { sinceSeq, beforeSeq, mentions, limit, offset, session });
     },
   );
 
@@ -8324,7 +8406,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
 
   server.tool(
     'hadron_team_chat_read',
-    'Read the team App\'s chat (#939), oldest first by seq. Ordinary reads take sinceSeq / beforeSeq / mentions. For unattended routing (#1265), pass monitor:true: the tool derives each of your LIVE Worker sessions\' cursor from ChannelReadState and its WATCH/BOTH + mentionOnly policy from the register, returns each message once with the Workers it concerns, and NEVER advances state merely by reading. After routing/action succeeds, call again with monitor:true and the returned acknowledge checkpoint. This makes a restart duplicate work rather than skip it. monitorFor narrows to one of your live Workers; monitoring never wakes sessions or observes another operator\'s sessions.',
+    'Read the team App\'s chat (#939), oldest first by seq. Ordinary reads take sinceSeq / beforeSeq / mentions. For unattended routing (#1265), pass monitor:true: the tool derives each of your LIVE Worker sessions\' cursor from ChannelReadState and its WATCH/BOTH + mentionOnly policy from the register, returns each message once with the Workers it concerns, and never routes a message back to its Worker author. It NEVER advances state merely by reading. After routing/action succeeds, call again with monitor:true and the returned acknowledge checkpoint. This makes a restart duplicate work rather than skip it. monitorFor narrows to one of your live Workers; monitoring never wakes sessions or observes another operator\'s sessions.',
     {
       sinceSeq: z.number().int().optional().describe('Only messages with seq strictly greater than this watermark.'),
       beforeSeq: z.number().int().optional().describe('Page BACKWARD (#1116): only messages with seq strictly LESS than this, returning the NEWEST such page — pass the oldest seq you have seen. Stable under concurrent posting where offset is not. Ignores offset.'),
@@ -8343,7 +8425,11 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         proof: z.string().describe('Opaque server proof from the returned checkpoint; binds Worker + Channel + sequence.'),
       })).max(TEAM_CHAT_MONITOR_MAX_TARGETS).optional().describe('With monitor:true, deliberately advance these server-issued checkpoints after routing/action succeeded.'),
     },
-    async ({ sinceSeq, beforeSeq, mentions, limit, offset, session, app, channel, monitor, monitorFor, acknowledge }) => {
+    async ({ sinceSeq, beforeSeq, mentions, limit, offset, session: rawSession, app, channel, monitor, monitorFor, acknowledge }) => {
+      // A blank session is no session, for every consumer below (#1362 review):
+      // otherwise the MCP layer drops the bound session as "explicit" while
+      // maybeAdvanceOwnChannelRead's trim falls back to it.
+      const session = typeof rawSession === 'string' ? rawSession.trim() || undefined : rawSession;
       if (!monitor && (monitorFor !== undefined || acknowledge !== undefined)) {
         return textResult('[bad_user_input] monitorFor and acknowledge require monitor:true.');
       }
@@ -8360,7 +8446,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       // contract: it needs no active App. Monitor mode still needs an App to
       // decide which of this operator's live Worker sessions participate.
       if (!monitor && channel !== undefined) {
-        return readChannel(channel, { sinceSeq, beforeSeq, mentions, limit, offset });
+        return readChannel(channel, { sinceSeq, beforeSeq, mentions, limit, offset, session });
       }
 
       let appRef = app;
@@ -8379,6 +8465,19 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       }
 
       try {
+        // Suppress the header-bound session only for user principals whose
+        // explicit Worker session owns cursor attribution. A pure App key
+        // needs its binding for the resolver's session-memory isolation.
+        const resolverCtx = session && auth.userId
+          ? { ...chatCtx(), sessionId: undefined }
+          : chatCtx();
+        // Capture the Channel the resolver will actually read (its oldest
+        // team-space root, not necessarily App.defaultChannel), BEFORE the
+        // read, with the context the resolver gets (#1362 review, Codex P2).
+        const pilotAppId = session && teamAttentionPilotOperatorEnabled(auth.userId ?? undefined)
+          ? (await resolveAppRef(db, appRef)).id
+          : null;
+        const captured = pilotAppId ? await locateTeamChatChannel(resolverCtx, pilotAppId) : null;
         const page = await resolvers.Query.teamChatMessages(
           {},
           {
@@ -8389,16 +8488,31 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
             limit: limit ?? null,
             offset: offset ?? null,
           },
-          {
-            db,
-            clientId: auth.clientId ?? undefined,
-            userId: auth.userId ?? undefined,
-            appId: auth.appId ?? undefined,
-            sessionId: auth.sessionId ?? undefined,
-            roles: auth.roles as Context['roles'],
-            organizationId: auth.organizationId ?? undefined,
-          },
+          resolverCtx,
         );
+        // Advance only if the resolver still serves the root captured above;
+        // a root that changed mid-read is skipped (a duplicate nudge, never a
+        // cursor moved on a Channel whose messages were not read).
+        const stillServed = captured && pilotAppId
+          ? (await locateTeamChatChannel(resolverCtx, pilotAppId))?.rootId === captured.rootId
+          : false;
+        if (captured && session && stillServed) {
+          try {
+            await maybeAdvanceOwnChannelRead(chatCtx(), {
+              channelId: captured.channelId,
+              capturedHead: captured.lastSeq,
+              sessionRef: session,
+              sinceSeq,
+              beforeSeq,
+              mentionsRef: mentions,
+              limit,
+              offset,
+              page,
+            });
+          } catch (error) {
+            console.warn('[hadron_team_chat_read] pilot read-state advance failed:', error);
+          }
+        }
         if (page.total === 0) return textResult('The team chat has no matching messages.');
         const lines = page.items.map((m) => {
           const reply = m.replyToSeq != null ? ` (reply to #${m.replyToSeq})` : '';
@@ -8412,6 +8526,104 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       }
     },
   );
+
+  // ── #1353 internal-pilot compact attention ───────────────────────────────────
+
+  // Discovery follows the pilot (#1362 review, Codex P2): a connection whose
+  // operator is not allowlisted never sees these tools in tools/list. The App
+  // half of the allowlist cannot be decided here — the active App can change
+  // on the connection — so it stays with the per-call capability probe and
+  // each tool's own resolvePilotApp refusal.
+  if (auth.userId && !auth.impersonation && teamAttentionPilotOperatorEnabled(auth.userId)) {
+    server.tool(
+      'hadron_team_attention',
+      'INTERNAL PILOT (#1353): return compact unread counts for this operator\'s LIVE Workers and an opaque signed poll token; never reads message bodies and never changes ChannelReadState. Omit since for all unread. Adopt the returned token only after every listed nudge is accepted; after any partial failure retain the prior token so retry may duplicate but cannot lose a nudge. since:"now" is refused — use the explicit switchover preview/apply tool.',
+      {
+        app: z.string().optional().describe('The pilot App — an App URN or ID. Omit to use the selected App.'),
+        since: z.string().optional().describe('Opaque token returned by the preceding successful poll. Do not pass "now".'),
+      },
+      async ({ app, since }) => {
+        let appRef = app;
+        if (!appRef) {
+          const scopeError = requireAppScope();
+          if (scopeError) return scopeError;
+          appRef = auth.appId;
+        }
+        if (!appRef) return textResult('No App context — pass app or select one with hadron_set_active_app.');
+        try {
+          const result = await resolvers.Query.teamAttention({}, { appRef, since: since ?? null }, chatCtx());
+          return textResult(JSON.stringify(result, null, 2));
+        } catch (error) {
+          return scopeErrorText(error);
+        }
+      },
+    );
+
+    server.tool(
+      'hadron_team_attention_switchover',
+      'INTERNAL PILOT (#1353): explicitly baseline every current live Worker through captured Channel heads. preview is read-only and returns exact counts plus a short-lived proof. apply requires that proof and atomically refuses if the operator, App, live-Worker scope, effective register or cursor changed. Messages arriving after preview remain unread. This is the only supported way to discard the pre-router backlog.',
+      {
+        app: z.string().optional().describe('The pilot App — an App URN or ID. Omit to use the selected App.'),
+        action: z.enum(['preview', 'apply']).describe('preview makes no writes; apply requires the exact preview proof.'),
+        proof: z.string().optional().describe('Required for action:"apply"; returned by preview.'),
+      },
+      async ({ app, action, proof }) => {
+        let appRef = app;
+        if (!appRef) {
+          const scopeError = requireAppScope();
+          if (scopeError) return scopeError;
+          appRef = auth.appId;
+        }
+        if (!appRef) return textResult('No App context — pass app or select one with hadron_set_active_app.');
+        if (action === 'apply' && !proof) return textResult('[bad_user_input] action:"apply" requires the proof returned by preview.');
+        if (action === 'preview' && proof !== undefined) return textResult('[bad_user_input] preview does not accept a proof.');
+        try {
+          const result = action === 'preview'
+            ? await resolvers.Query.teamAttentionSwitchoverPreview({}, { appRef }, chatCtx())
+            : await resolvers.Mutation.confirmTeamAttentionSwitchover({}, { appRef, proof: proof! }, chatCtx());
+          return textResult(JSON.stringify(result, null, 2));
+        } catch (error) {
+          return scopeErrorText(error);
+        }
+      },
+    );
+
+    server.tool(
+      'hadron_team_chat_mark_read',
+      'INTERNAL PILOT (#1353): explicitly advance the Worker bound to your live session on one registered Channel. Use after filtered reads, which intentionally never auto-advance. Monotonic; a lower seq is a no-op and a seq beyond the Channel head is refused.',
+      {
+        session: z.string().describe('Your live Worker session; selects the Worker whose own cursor advances.'),
+        app: z.string().optional().describe('The pilot App. Omit to recover it from session or the active selection.'),
+        channel: z.string().optional().describe('Channel id or address. Omit for the team Channel hadron_team_chat_read serves for the App.'),
+        seq: z.number().int().min(0).describe('Read through this exact sequence.'),
+      },
+      async ({ session, app, channel, seq }) => {
+        await heartbeatSession(session);
+        let appRef = app;
+        if (!appRef) {
+          await adoptAppFromSession(session);
+          const scopeError = requireAppScope();
+          if (scopeError) return scopeError;
+          appRef = auth.appId;
+        }
+        if (!appRef) return textResult('No App context — pass app or select one with hadron_set_active_app.');
+        try {
+          // An omitted channel means the one hadron_team_chat_read SERVES —
+          // its oldest team-space root, which need not be App.defaultChannel
+          // (#1362 review, Copilot). Resolved here, with the read's own
+          // locator, so the mark lands on the Channel that was read.
+          let channelRef: string | null | undefined = channel;
+          if (channelRef === undefined) {
+            channelRef = (await locateTeamChatChannel(chatCtx(), (await resolveAppRef(db, appRef)).id))?.channelId ?? '';
+          }
+          const result = await markOwnTeamChatRead(chatCtx(), { appRef, channelRef, sessionRef: session, seq });
+          return textResult(JSON.stringify(result, null, 2));
+        } catch (error) {
+          return scopeErrorText(error);
+        }
+      },
+    );
+  }
 
   // ── hadron_list_workers ───────────────────────────────────────────────────────
 
