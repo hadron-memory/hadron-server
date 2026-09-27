@@ -105,6 +105,36 @@ describe('#1326 content provenance reads', () => {
     expect(await db.nodeRevision.count({ where: { nodeId } })).toBe(revisions + 1);
   });
 
+  it('clears a live stamp when a LEGACY (pre-#620) revision restores different content, keeps it when unchanged', async () => {
+    // A legacy snapshot (nodeType NULL) captured no authorship. Restoring its
+    // older content must not leave the current task credited for it.
+    const memory = await db.memory.findUniqueOrThrow({ where: { id: nodeMemoryId } });
+    await db.orgMember.update({
+      where: { organizationId_userId: { organizationId: memory.organizationId!, userId: readerId } },
+      data: { role: 'ADMIN' },
+    });
+    const admin = { db, userId: readerId, roles: ['ADMIN'] } as Context;
+    const legacy = (content: string, revNo: number) => db.nodeRevision.create({
+      data: {
+        id: generateId(), nodeId, memoryId: nodeMemoryId, loc: 'authored', name: 'Authored',
+        tags: [], changes: [], revNo, content, nodeType: null,
+      },
+    });
+
+    const same = await legacy('body', -2);
+    await resolvers.Mutation.restoreNodeRevision({}, { revisionId: same.id }, admin);
+    expect(await db.node.findUniqueOrThrow({ where: { id: nodeId } })).toMatchObject({
+      content: 'body', authorshipKind: 'TASK', authoredByTask: taskId,
+    });
+
+    const older = await legacy('an older body', -1);
+    await resolvers.Mutation.restoreNodeRevision({}, { revisionId: older.id }, admin);
+    expect(await db.node.findUniqueOrThrow({ where: { id: nodeId } })).toMatchObject({
+      content: 'an older body', authorshipKind: null, authoredByTask: null,
+      authoredByRevision: null, authoredByHuman: null, authoredAt: null,
+    });
+  });
+
   it('keeps a task stamp and creates no revision for an identical save', async () => {
     const memory = await db.memory.findUniqueOrThrow({ where: { id: nodeMemoryId } });
     await db.orgMember.update({

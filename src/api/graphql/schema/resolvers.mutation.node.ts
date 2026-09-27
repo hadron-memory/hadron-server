@@ -3936,6 +3936,15 @@ export const nodeMutations = {
         // restoring its uncaptured fields would wipe the live values to
         // NULL rather than "restore" anything.
         const writeData: Record<string, unknown> = { ...restoreFields };
+        // #1326 — a legacy pre-#620 snapshot captured no authorship, so it has
+        // no stamp to restore. If the restore rewrites authored fields, keeping
+        // the live stamp would attribute that older state to the current
+        // author: clear it to unknown. An unchanged restore keeps its verified
+        // stamp — the same rule as the agent-snapshot restore (#1397).
+        if (!('authorshipKind' in restoreFields)
+          && authoredContentChanged(diffNodeChanges(current, restoreFields))) {
+          Object.assign(writeData, clearNodeAuthorship());
+        }
         if ('properties' in writeData) {
           writeData.properties = jsonOrDbNull(writeData.properties as never);
         }
