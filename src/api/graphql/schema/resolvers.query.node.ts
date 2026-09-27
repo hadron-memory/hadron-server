@@ -422,7 +422,8 @@ export const nodeQueries = {
           let id: string;
           try {
             ({ id } = await resolveNodeRefForCaller(ctx, baseUrn));
-          } catch {
+          } catch (error) {
+            if (error instanceof AmbiguousLegacyUrnError) throw error;
             return null;
           }
           const node = await ctx.db.node.findUnique({

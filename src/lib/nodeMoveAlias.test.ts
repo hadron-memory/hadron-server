@@ -117,6 +117,14 @@ describe('node move URN aliases', () => {
     expect(await resolveNodeRef(db, 'old', source.id)).toEqual({ id: root.id });
   });
 
+  it('returns null for a missing loc scoped to a readable memory', async () => {
+    const caller = graphCtx(reader.id);
+    for (const ref of ['missing', 'aa:bb:cc']) {
+      expect(await resolvers.Query.node(null, { ref, memoryRef: source.id }, caller))
+        .toBeNull();
+    }
+  });
+
   it('keeps the address published before a memory rename alive after a later node move', async () => {
     const root = await createNode(source.id, 'old');
     const publishedBeforeMemoryRename = nodeUrn(source, 'old');
@@ -294,9 +302,12 @@ describe('node move URN aliases', () => {
     await expect(resolveNodeRef(db, old)).rejects.toBeInstanceOf(AmbiguousLegacyUrnError);
     await expect(resolvers.Query.node(null, { ref: old }, graphCtx())).rejects
       .toBeInstanceOf(AmbiguousLegacyUrnError);
+    await expect(resolvers.Query.resolveUrn(null, { urn: old }, graphCtx())).rejects
+      .toBeInstanceOf(AmbiguousLegacyUrnError);
 
     const outsider = graphCtx(reader.id);
     expect(await resolvers.Query.node(null, { ref: old }, outsider)).toBeNull();
+    expect(await resolvers.Query.resolveUrn(null, { urn: old }, outsider)).toBeNull();
     expect(await resolvers.Query.node(null, { ref: absent }, outsider)).toBeNull();
     expect(await resolvers.Query.channel(null, { ref: old }, outsider)).toBeNull();
     for (const ref of [old, absent]) {
@@ -329,6 +340,32 @@ describe('node move URN aliases', () => {
     }, outsider);
     expect(graphBatch.nodes).toEqual([expect.objectContaining({ id: safe.id })]);
     expect(graphBatch.unavailable).toContain(old);
+  });
+
+  it('refuses a globally ambiguous alias with one readable claimant without identifying the hidden one', async () => {
+    const old = nodeUrn(source, 'shared-old');
+    const visible = await createNode(source.id, 'visible');
+    const hidden = await createNode(target.id, 'hidden');
+    await db.urnAlias.createMany({ data: [visible.id, hidden.id].map((entityId) => ({
+      urn: `${source.urn}:shared-old`, entityType: 'NODE' as const, entityId,
+      reason: 'RENAME' as const, replacedByUrn: `${source.urn}:visible`,
+    })) });
+
+    const caller = graphCtx(reader.id);
+    await expect(resolvers.Query.node(null, { ref: old }, caller))
+      .rejects.toBeInstanceOf(AmbiguousLegacyUrnError);
+    await expect(resolvers.Query.resolveUrn(null, { urn: old }, caller))
+      .rejects.toBeInstanceOf(AmbiguousLegacyUrnError);
+    await expect(resolvers.Mutation.deleteNode(null, { nodeRef: old }, caller))
+      .rejects.toBeInstanceOf(AmbiguousLegacyUrnError);
+
+    const outward = await createTestableMcpServer(mcpAuth(reader.id))
+      .callToolText('hadron_get_node', { urn: old })
+      .catch((error: unknown) => String(error));
+    expect(outward).toContain('AMBIGUOUS_LEGACY_URN');
+    expect(outward).not.toContain(hidden.id);
+    expect(outward).not.toContain(target.urn);
+    expect(outward).not.toContain('hidden');
   });
 
   it('conceals ambiguity inherited from two historical memory holders', async () => {

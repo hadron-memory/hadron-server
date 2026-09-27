@@ -6,8 +6,8 @@ import { resolveNodeRef, isConcealedNodeRefAmbiguity } from '../../../lib/entity
 /**
  * Apply the node-content gate before exposing an ambiguous historical URN.
  * A caller who can read no current claimant gets the same not-found as a
- * nonexistent ref; an authorized ambiguity remains loud until product policy
- * for one-visible-of-several claimants is settled (cor:urn:030:01/:02).
+ * nonexistent ref; if any claimant is readable, the globally ambiguous ref
+ * is refused without selecting a claimant by visibility (cor:urn:030:01/:02).
  */
 export async function resolveNodeRefForCaller(
   ctx: Context,
