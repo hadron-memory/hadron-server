@@ -80,4 +80,22 @@ describe('#1328 MCP author-task parity', () => {
     expect(await db.node.findUniqueOrThrow({ where: { id: target.id } }))
       .toMatchObject({ data: { before: true, after: true }, authoredByTask: taskId, authoredByRevision: 1 });
   });
+
+  it('the parent-node upsert checks a required task before rewriting an existing section', async () => {
+    const target = await db.node.create({
+      data: { id: generateId(), memoryId, loc: 'section', name: 'Section', role: 'guide', content: 'original' },
+    });
+    const srv = createTestableMcpServer(auth());
+    expect(await srv.callToolText('hadron_create_parent_node', { urn: urn('section'), description: 'replacement' }))
+      .toMatch(/^\[author_task_missing\]/);
+    expect(await db.node.findUniqueOrThrow({ where: { id: target.id } }))
+      .toMatchObject({ name: 'Section', content: 'original', authoredByTask: null });
+    expect(await db.nodeRevision.count({ where: { nodeId: target.id } })).toBe(0);
+
+    expect(await srv.callToolText('hadron_create_parent_node', {
+      urn: urn('section'), description: 'replacement', authoredWith: { task: taskId, revision: 1 },
+    })).toMatch(/Node saved/);
+    expect(await db.node.findUniqueOrThrow({ where: { id: target.id } }))
+      .toMatchObject({ content: 'replacement', authoredByTask: taskId, authoredByRevision: 1 });
+  });
 });

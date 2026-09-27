@@ -3094,8 +3094,10 @@ export function createMcpServerInstance(
       name: z.string().optional().describe('Display name (defaults to the last loc atom)'),
       description: z.string().optional().describe('What this section contains'),
       tags: tagsInputSchema.optional(),
+      authoredWith: z.object({ task: z.string(), revision: z.number().int().positive() }).optional()
+        .describe('For an existing section whose role requires an author task: its stable Node.id and current revision.'),
     },
-    async ({ urn: rawUrn, name: rawName, description, tags }) => {
+    async ({ urn: rawUrn, name: rawName, description, tags, authoredWith }) => {
       // Spec 022: qualification at the API boundary.
       try {
         assertFullyQualifiedUrn(rawUrn, 'node');
@@ -3200,6 +3202,7 @@ export function createMcpServerInstance(
             select: { id: true, deletedAt: true },
           });
           let sectionChanged = false;
+          let verifiedAuthorship: Awaited<ReturnType<typeof assertRoleDeclaredForWrite>> = null;
           if (prior && !prior.deletedAt) {
             await tx.$queryRaw`SELECT "id" FROM "nodes" WHERE "id" = ${prior.id} FOR UPDATE`;
             // Reconcile only while the row is still in this memory.
@@ -3214,6 +3217,13 @@ export function createMcpServerInstance(
             }
             const changes = diffNodeChanges(current, upsertArgs.update);
             sectionChanged = authoredContentChanged(changes);
+            verifiedAuthorship = await assertRoleDeclaredForWrite(tx, memoryId, {
+              role: current.role,
+              priorRole: current.role,
+              runnableAfter: current.isRunnable,
+              authoredChange: sectionChanged,
+              authoredWith,
+            });
             if (changes.length > 0) {
               await createNodeRevision(tx, {
                 id: generateId(),
@@ -3223,13 +3233,18 @@ export function createMcpServerInstance(
           }
           const row = await tx.node.upsert({
             ...upsertArgs,
-            update: { ...upsertArgs.update, ...(sectionChanged ? clearNodeAuthorship() : {}), revisionContentHash: revisionStateHashRefreshMarker() },
+            update: {
+              ...upsertArgs.update,
+              ...(sectionChanged ? verifiedAuthorship ?? clearNodeAuthorship() : {}),
+              revisionContentHash: revisionStateHashRefreshMarker(),
+            },
           });
           return row.id;
         });
       } catch (e) {
         if (e instanceof LocProtectedError) return textResult(`[loc_protected] ${e.message}`);
         if (e instanceof NodeMovedDuringWriteError) return textResult(e.message);
+        if (e instanceof AuthorTaskAttestationError) return textResult(`[${String(e.extensions.code).toLowerCase()}] ${e.message}`);
         throw e;
       }
 
