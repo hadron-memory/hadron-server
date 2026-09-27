@@ -139,6 +139,19 @@ describe('#945 — the agent leg rides on the INSTALL, not the binding', () => {
       ownAgent.systemMemoryId,
     );
   });
+
+  it('drops the whole session scope when its App is uninstalled', async () => {
+    await createDbAgentSubscription(db, user.id, ownAgent.id);
+    const mem = await provisionedMemory(ownAgent.id, app.id);
+    const session = await db.session.create({
+      data: { id: generateId(), appId: app.id, userId: user.id, agentId: ownAgent.id, memoryId: mem.id },
+    });
+    expect(new Set(await sessionScopedMemoryIds(db, app.id, session.id))).toEqual(
+      new Set([mem.id, ownAgent.systemMemoryId]),
+    );
+    await db.app.update({ where: { id: app.id }, data: { uninstalledAt: new Date() } });
+    expect(await sessionScopedMemoryIds(db, app.id, session.id)).toEqual([]);
+  });
 });
 
 describe('#945 — the memory leg must be tied to this App or this session\'s agent', () => {
@@ -197,6 +210,49 @@ describe('#945 review — lifecycle, not just structure', () => {
   /** Subscribe `user` to `agentId` so a personal session memory is licensed
    *  (what `startAgentSession` does via `ensureAgentSubscription`). */
   const subscribe = (agentId: string) => createDbAgentSubscription(db, user.id, agentId);
+
+  it('requires a personal App owner’s live AgentSubscription for a foreign Agent system memory', async () => {
+    const personalApp = await db.app.create({
+      data: { id: generateId(), name: 'Personal', urn: `@${user.id}:personal`, ownerUserId: user.id },
+    });
+    await db.appAgent.create({ data: { appId: personalApp.id, agentId: foreignAgent.id } });
+    await createDbAgentSubscription(db, user.id, foreignAgent.id);
+    const session = await db.session.create({
+      data: { id: generateId(), appId: personalApp.id, userId: user.id, agentId: foreignAgent.id },
+    });
+    expect(await sessionScopedMemoryIds(db, personalApp.id, session.id)).toContain(foreignAgent.systemMemoryId);
+    await db.agentSubscription.update({
+      where: { userId_agentId: { userId: user.id, agentId: foreignAgent.id } },
+      data: { revokedAt: new Date() },
+    });
+    expect(await sessionScopedMemoryIds(db, personalApp.id, session.id)).not.toContain(foreignAgent.systemMemoryId);
+  });
+
+  it('requires the creator and active subscription for a legacy knowledge holding', async () => {
+    const holding = await db.memory.create({
+      data: {
+        id: generateId(), organizationId: org.id, urn: `${org.urn}:legacy-holding`,
+        name: 'legacy holding', class: 'knowledge', visibility: 'PUBLIC',
+        userMemoryOfAgentId: ownAgent.id, createdBy: user.id,
+      },
+    });
+    const outsider = await db.user.create({ data: { id: generateId(), name: 'Outsider' } });
+    const outsiderSession = await db.session.create({
+      data: { id: generateId(), appId: app.id, userId: outsider.id, agentId: ownAgent.id, memoryId: holding.id },
+    });
+    expect(await sessionScopedMemoryIds(db, app.id, outsiderSession.id)).not.toContain(holding.id);
+
+    await subscribe(ownAgent.id);
+    const ownerSession = await db.session.create({
+      data: { id: generateId(), appId: app.id, userId: user.id, agentId: ownAgent.id, memoryId: holding.id },
+    });
+    expect(await sessionScopedMemoryIds(db, app.id, ownerSession.id)).toContain(holding.id);
+    await db.agentSubscription.update({
+      where: { userId_agentId: { userId: user.id, agentId: ownAgent.id } },
+      data: { revokedAt: new Date() },
+    });
+    expect(await sessionScopedMemoryIds(db, app.id, ownerSession.id)).not.toContain(holding.id);
+  });
 
   it('drops the system memory when a cross-org install\'s AgentOrgGrant is revoked (Codex P1)', async () => {
     // The foreign agent is installed cross-org under an ACTIVE grant, so its
