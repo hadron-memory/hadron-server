@@ -118,6 +118,14 @@ function modelFor(resolved: ResolvedAiConfig): LanguageModel {
     case 'glm':
       // Default CHAT_COMPLETIONS: Zhipu and Z.ai serve only /chat/completions.
       return openAiCompatible(createOpenAI({ apiKey: key, baseURL: defaultEndpoint('glm')!, ...conn }));
+    case 'openai-compatible':
+      // #1373: a caller-named host speaking an OpenAI wire protocol. Its
+      // endpoint is required at write time; a row that somehow lacks one must
+      // never fall through to OpenAI's own host with this key.
+      if (!endpoint) {
+        throw new LlmInvocationError(`Provider "${provider}" has no endpoint configured.`, provider, false);
+      }
+      return openAiCompatible(createOpenAI({ apiKey: key, ...conn }));
     case 'bedrock': {
       let triple: { accessKeyId?: string; secretAccessKey?: string; region?: string } = {};
       if (key) {
@@ -245,7 +253,7 @@ const EXTRACTION_NATIVE_TIMEOUT_MS = (() => {
 })();
 
 /** Providers whose native structured-output path is not trusted yet. */
-const JSON_PROMPT_ONLY_PROVIDERS = new Set(['bedrock', 'glm']);
+const JSON_PROMPT_ONLY_PROVIDERS = new Set(['bedrock', 'glm', 'openai-compatible']);
 
 export async function generateExtraction(
   resolved: ResolvedAiConfig,
@@ -430,7 +438,12 @@ export async function generateWithTools(
   opts: ToolLoopOpts,
 ): Promise<LlmToolLoopResult> {
   const { provider, model } = resolved.config;
-  if (!TOOL_LOOP_PROVIDERS.has(provider)) {
+  // An openai-compatible host is unverified by default; its config opts in
+  // with params.toolCalling once the operator knows the host does tools.
+  const optedIn =
+    provider === 'openai-compatible' &&
+    (resolved.config.params as { toolCalling?: unknown } | null | undefined)?.toolCalling === true;
+  if (!TOOL_LOOP_PROVIDERS.has(provider) && !optedIn) {
     // Loud, non-transient: silently running a tools-node WITHOUT its tools
     // would change semantics (D-TL-8).
     throw new NoToolSupportError(provider);

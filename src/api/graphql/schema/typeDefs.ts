@@ -2995,7 +2995,7 @@ export const typeDefs = `#graphql
     ownerType: AiConfigOwnerType!
     "ID of the owning HadronServer / Organization / App / Agent."
     ownerId: ID!
-    "Provider identifier; v1 known: 'anthropic' | 'openai' | 'glm' | 'bedrock'."
+    "Provider identifier; known: 'anthropic' | 'openai' | 'glm' | 'bedrock' | 'openai-compatible' (any OpenAI-wire host; endpoint required)."
     provider: String!
     "Model identifier, passed verbatim to the provider."
     model: String!
@@ -8339,9 +8339,17 @@ export const typeDefs = `#graphql
     """
     036-ai-service-config: create a named AI config on an owner entity.
 
-    apiKey semantics: omitted = stored without a key (unusable for
-    execution until one is set); non-empty = encrypted at rest with a
-    masked preview. Name must be 1-64 lower-case [a-z0-9_-], unique per
+    apiKey semantics: non-empty = encrypted at rest with a masked preview.
+    Omitted is accepted only where a run may use the server's own
+    credential: a HADRON_SERVER config for openai, anthropic or bedrock at
+    their default host (no endpoint). Every ORGANIZATION, APP and AGENT
+    config needs its own key: the platform credential is platform spend
+    (#1390). Any other provider (glm, openai-compatible), and any config
+    with an endpoint, needs one too, because the SDK would otherwise send
+    the server's credential to a host that didn't issue it (#1389). All of
+    these are refused with AiConfigValidationError. A host that checks no
+    key takes any placeholder.
+    Name must be 1-64 lower-case [a-z0-9_-], unique per
     owner. provider must be a known provider; params are validated per
     provider.
 
@@ -8367,7 +8375,9 @@ export const typeDefs = `#graphql
     036-ai-service-config: update a named AI config. All fields optional.
 
     apiKey semantics: omitted = keep the stored key; empty string =
-    clear it; non-empty = replace (encrypted, preview recomputed).
+    clear it; non-empty = replace (encrypted, preview recomputed). The
+    RESULTING config is held to createAiServiceConfig's key rule, so
+    clearing the key of a config that needs one is refused.
 
     Auth: admin rights on the owning entity (as aiServiceConfigs).
     """
@@ -8614,6 +8624,7 @@ export const typeDefs = `#graphql
       agentTools: [String!]
       aiProvider: String
       aiModel: String
+      "036 legacy shim over the App's 'default' AI config; held to createAiServiceConfig's key rule (#1389)."
       aiApiKey: String
       expiresAt: String
       surfaces: [String!]
@@ -8649,6 +8660,7 @@ export const typeDefs = `#graphql
       agentTools: [String!]
       aiProvider: String
       aiModel: String
+      "036 legacy shim over the App's 'default' AI config; held to createAiServiceConfig's key rule (#1389)."
       aiApiKey: String
       expiresAt: String
       surfaces: [String!]
