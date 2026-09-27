@@ -234,6 +234,27 @@ describe('hadron_server_info membership listing (#1372)', () => {
     );
   });
 
+  it('bounds the membership block: line count and name length', async () => {
+    // 11 more memberships → 13 total: 10 rendered lines + explicit omitted count.
+    for (let i = 0; i < 11; i++) {
+      const extra = await db.organization.create({
+        data: { id: generateId(), name: `z-extra-${i}`, urn: `z-extra-${i}-${generateId()}.com` },
+        select: { id: true },
+      });
+      await db.orgMember.create({
+        data: { id: generateId(), organizationId: extra.id, userId: user.id, role: 'CONTRIBUTOR' },
+      });
+    }
+    // …and one org whose display name is unboundedly long.
+    await db.organization.update({ where: { id: orgB.id }, data: { name: `B ${'x'.repeat(400)}` } });
+    const info = await server('si-6').callToolText('hadron_server_info');
+    expect((info.match(/^  - hrn:org:/gm) ?? []).length).toBe(10);
+    expect(info).toContain('… and 3 more not shown');
+    // The long name is capped at the render max, still one readable line.
+    expect(info).toContain(`(B ${'x'.repeat(97)}…)`);
+    expect(info).not.toContain('x'.repeat(150));
+  });
+
   it('reading server_info does not select or change anything', async () => {
     // Discovery on the unresolved state writes no selection row…
     await server('si-3').callToolText('hadron_server_info');

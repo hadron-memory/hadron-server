@@ -1513,12 +1513,18 @@ export function createMcpServerInstance(
 
   /**
    * Member orgs as `- <urn> (<name>)` lines, for surfaces that must say what IS
-   * available. #1412 review hardening: `Organization.name` accepts CR/LF, and
-   * these lines ride inside line-parsed diagnostic output (`server_info`, the
-   * ORG_REQUIRED/org_not_found refusals) — a tenant-editable name must never be
-   * able to forge an extra line (e.g. a second `server:` row), so control
-   * characters collapse to a space and one org stays one line.
+   * available. #1412 review hardening, two ways tenant-editable text can abuse
+   * a diagnostic an agent reads on every connection:
+   * - `Organization.name` accepts CR/LF, and these lines ride inside
+   *   line-parsed output (`server_info`, the ORG_REQUIRED/org_not_found
+   *   refusals) — control characters collapse to a space so one org can never
+   *   forge an extra line (e.g. a second `server:` row).
+   * - Memberships and names are unbounded, so the block is capped: at most
+   *   MEMBER_ORG_LINES lines (name-ascending, deterministic), each name at
+   *   ORG_NAME_RENDER_MAX chars, with an explicit omitted count.
    */
+  const MEMBER_ORG_LINES = 10;
+  const ORG_NAME_RENDER_MAX = 100;
   const renderMemberOrgs = async (orgIds: string[]): Promise<string> => {
     if (orgIds.length === 0) return '  (no organization memberships)';
     const orgs = await db.organization.findMany({
@@ -1526,8 +1532,17 @@ export function createMcpServerInstance(
       select: { urn: true, name: true },
       orderBy: { name: 'asc' },
     });
-    const oneLine = (name: string) => name.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, ' ');
-    return orgs.map((o) => `  - ${safeEmitEntityUrnV2('org', o.urn)} (${oneLine(o.name)})`).join('\n');
+    const oneLine = (name: string) => {
+      const flat = name.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, ' ');
+      return flat.length > ORG_NAME_RENDER_MAX ? `${flat.slice(0, ORG_NAME_RENDER_MAX - 1)}…` : flat;
+    };
+    const lines = orgs
+      .slice(0, MEMBER_ORG_LINES)
+      .map((o) => `  - ${safeEmitEntityUrnV2('org', o.urn)} (${oneLine(o.name)})`);
+    if (orgs.length > MEMBER_ORG_LINES) {
+      lines.push(`  … and ${orgs.length - MEMBER_ORG_LINES} more not shown`);
+    }
+    return lines.join('\n');
   };
 
   // Spec 026 — has the session called `hadron_list_apps` or `hadron_set_active_app`,
