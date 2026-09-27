@@ -1,5 +1,6 @@
 import { createDecipheriv } from 'crypto';
 import { governedSignalsFromMirror } from '../../lib/governedSignals.js';
+import { lockMemoryConfigShared, mergedGovernedState, strictParentRefusingRole } from '../../lib/governedRole.js';
 import { NodeSchemaViolation, validateNodeAgainstSchema } from '../../lib/validateNodeAgainstSchema.js';
 import type { MemorySchema } from '../../lib/memorySchema.js';
 // Spec 049 S4 — a Channel's address is skipped and reported, never overwritten from git.
@@ -66,6 +67,18 @@ export class GitSyncTargetMovedError extends Error {
     super(`Git sync target ${nodeId} left memory ${expectedMemoryId} while the sync ran; retry the sync.`);
     this.name = 'GitSyncTargetMovedError';
   }
+}
+
+/** #1330 — a synced file refused because its role is undeclared under a strict parent. */
+export interface SkippedUndeclaredRole {
+  loc: string;
+  role: string;
+  strictParent: string;
+  code: 'ROLE_NOT_DECLARED';
+}
+
+export function describeSkippedUndeclaredRole(s: SkippedUndeclaredRole): string {
+  return `${s.loc} (role "${s.role}", strict parent "${s.strictParent}")`;
 }
 
 /** Apply a Git-owned update without bypassing the live-revision contract. */
@@ -150,6 +163,13 @@ export const syncGraphFromGithub = async (
    * reason`). The node itself is still synced; its stored objectType is kept.
    */
   skippedObjectTypes?: string[];
+  /**
+   * #1330 — files NOT synced because the role they assign is undeclared under
+   * a strict parent rule (`ROLE_NOT_DECLARED`, the same judgement every other
+   * write path makes). The file is skipped whole and its existing row, if any,
+   * is kept as it was; every other file still syncs.
+   */
+  skippedUndeclaredRoles?: SkippedUndeclaredRole[];
 }> => {
   try {
     const graphName = graph.urn;
@@ -241,6 +261,7 @@ export const syncGraphFromGithub = async (
     const writtenNodes: { id: string; loc: string; memoryId: string }[] = [];
     const skippedProtected: string[] = [];
     const skippedObjectTypes: string[] = [];
+    const skippedUndeclaredRoles: SkippedUndeclaredRole[] = [];
 
     // #1226 / PR #1257 — collect every memory whose node may become an edge
     // endpoint in this transaction BEFORE taking any Channel-memory key. Git
@@ -368,6 +389,25 @@ export const syncGraphFromGithub = async (
           throw new EdgeEndpointPreflightStale(`Edge endpoint ${stale.id} moved after preflight`);
         }
       }
+      // #1330 — a file that assigns a role is judged against the memory's
+      // strict-sub-role rules under the rulebook lock (`lockMemoryConfigShared`),
+      // whose contract is that no transaction waits on a row while holding it:
+      // a rule write holds its referenced nodes FOR SHARE and then waits for
+      // that lock exclusively. A sync writes many rows, so it takes every row
+      // lock in this memory FIRST, in id order, and only then the rulebook lock.
+      // Rows it later updates, parks or deletes are already its own. Skipped
+      // when no file carries a role, which nothing then needs to judge.
+      const judgesRoles = fsGraph.nodes.some(
+        (n) => !isProtected(n.loc!) && governedSignalsFromMirror(n).role != null,
+      );
+      if (judgesRoles) {
+        await tx.$queryRaw`SELECT "id" FROM "nodes" WHERE "memory_id" = ${graph.id} ORDER BY "id" FOR UPDATE`;
+        await lockMemoryConfigShared(tx, graph.id);
+      }
+      // Locs of files refused for their role: nothing of theirs is written,
+      // including the edges they declare.
+      const refusedRoleLocs = new Set<string>();
+
       // #1224 — files whose path cannot be a loc, resolved to the rows they
       // name. @copilot on PR #1229: the cleanup pass keys on the SURVIVING
       // ROW id, and a file's frontmatter id is not that id — the loc-keyed
@@ -513,6 +553,26 @@ export const syncGraphFromGithub = async (
         //     already claimed by an earlier file this run → never steal it;
         //     fall through to the loc-keyed upsert with a fresh id
         //   - no id / unknown id → loc-keyed upsert as before
+        // #1330 — git sync is authoring, so a role the file ASSIGNS goes
+        // through the strict-sub-role rule like any other write (Holger,
+        // 2026-09-27). `prior` is the row the file would write, current under
+        // the locks above; a file with no role key assigns nothing. A refused
+        // file is skipped and reported, and its row survives the cleanup pass.
+        const refusesRole = async (prior: Node | null): Promise<boolean> => {
+          const signals = governedSignalsFromMirror(node);
+          if (signals.role == null) return false;
+          const strictParent = await strictParentRefusingRole(tx, graph.id, {
+            role: signals.role,
+            priorRole: prior?.role ?? null,
+            runnableAfter: mergedGovernedState(prior, signals).isRunnable,
+          });
+          if (strictParent === null) return false;
+          skippedUndeclaredRoles.push({ loc, role: signals.role, strictParent, code: 'ROLE_NOT_DECLARED' });
+          if (prior) protectedRowIds.add(prior.id);
+          refusedRoleLocs.add(loc);
+          return true;
+        };
+
         const fileId = node.id && !claimedFileIds.has(node.id) ? node.id : null;
         const byId = fileId
           ? await tx.node.findUnique({ where: { id: fileId } })
@@ -529,6 +589,7 @@ export const syncGraphFromGithub = async (
             protectedRowIds.add(byId.id);
             continue;
           }
+          if (await refusesRole(byId)) continue;
           if (byId.loc !== loc) {
             // Moving into a loc another row currently holds: repo-wins — the
             // occupant is stale at that loc (it either moves later this run
@@ -591,6 +652,7 @@ export const syncGraphFromGithub = async (
           const existingAtLoc = await tx.node.findUnique({
             where: { loc_memoryId: { loc, memoryId: graph.id } },
           });
+          if (await refusesRole(existingAtLoc)) continue;
           if (existingAtLoc) {
             await updateNodeFromGitSync(
               tx,
@@ -730,6 +792,7 @@ export const syncGraphFromGithub = async (
       }
 
       for (const edge of edges) {
+        if (refusedRoleLocs.has(edge.sourceLoc)) continue;
         // Resolve endpoints through the remaps: the source is always a file
         // in this repo (by loc); the target prefers this repo's claimant of
         // the referenced id, else stays raw (a cross-repo target).
@@ -832,7 +895,12 @@ export const syncGraphFromGithub = async (
         `Sync of "${graphName}": kept the stored objectType of ${skippedObjectTypes.length} node(s) whose file's value would violate the memory schema: ${skippedObjectTypes.join('; ')}`,
       );
     }
-    return { nodeCount: fsGraph.nodes.length, writtenNodes, skippedProtected, skippedObjectTypes };
+    if (skippedUndeclaredRoles.length > 0) {
+      console.warn(
+        `Sync of "${graphName}": skipped ${skippedUndeclaredRoles.length} file(s) whose role is not declared under a strict parent (ROLE_NOT_DECLARED): ${skippedUndeclaredRoles.map(describeSkippedUndeclaredRole).join('; ')}`,
+      );
+    }
+    return { nodeCount: fsGraph.nodes.length, writtenNodes, skippedProtected, skippedObjectTypes, skippedUndeclaredRoles };
   } catch (error) {
     // Update sync status to ERROR
     await db.memory.update({

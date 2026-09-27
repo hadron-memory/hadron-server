@@ -431,15 +431,38 @@ export class RoleNotDeclaredError extends GraphQLError {
 export async function assertRoleDeclaredForWrite(
   tx: Prisma.TransactionClient,
   memoryId: string,
-  write: { role: string | null | undefined; priorRole: string | null | undefined; runnableAfter: boolean | null | undefined },
+  write: RoleAssignment,
   opts: { platformWrite?: boolean } = {},
 ): Promise<void> {
+  const strictParent = await strictParentRefusingRole(tx, memoryId, write, opts);
+  if (strictParent !== null) throw new RoleNotDeclaredError(write.role!, strictParent);
+}
+
+export interface RoleAssignment {
+  role: string | null | undefined;
+  priorRole: string | null | undefined;
+  runnableAfter: boolean | null | undefined;
+}
+
+/**
+ * The same judgement as `assertRoleDeclaredForWrite`, answered rather than
+ * thrown: the strict parent that refuses the write, or null when it may
+ * proceed. For a caller that must skip a refused item and keep going, which
+ * git sync does per file (Holger, #1330). Same exemptions and the same config
+ * lock, so the two can never disagree.
+ */
+export async function strictParentRefusingRole(
+  tx: Prisma.TransactionClient,
+  memoryId: string,
+  write: RoleAssignment,
+  opts: { platformWrite?: boolean } = {},
+): Promise<string | null> {
   const role = write.role;
-  if (!role || role === (write.priorRole ?? null)) return;
-  if (write.runnableAfter === true || opts.platformWrite === true) return;
+  if (!role || role === (write.priorRole ?? null)) return null;
+  if (write.runnableAfter === true || opts.platformWrite === true) return null;
   await lockMemoryConfigShared(tx, memoryId);
   const resolution = await resolveMemoryNodeRoleRule(tx, memoryId, role);
-  if (resolution.kind === 'UNDECLARED_UNDER_STRICT') throw new RoleNotDeclaredError(role, resolution.ancestor.role);
+  return resolution.kind === 'UNDECLARED_UNDER_STRICT' ? resolution.ancestor.role : null;
 }
 
 export class RoleGovernedError extends GraphQLError {

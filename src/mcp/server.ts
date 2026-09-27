@@ -9430,7 +9430,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
       if (!memory.source) return textResult('Memory has no source repository configured.');
 
       // Import and call syncGraphFromGithub
-      const { syncGraphFromGithub } = await import('../integrations/github/syncGraphFromGithub.js');
+      const { syncGraphFromGithub, describeSkippedUndeclaredRole } = await import('../integrations/github/syncGraphFromGithub.js');
       const result = await syncGraphFromGithub(memory as Parameters<typeof syncGraphFromGithub>[0]);
 
       if (result.error) return textResult(`Sync failed: ${result.error}`);
@@ -9439,7 +9439,16 @@ function ageOf(at: Date, now: Date = new Date()): string {
       // webhook and startup batch-loop callers deliberately drop `writtenNodes`
       // on the floor, because an unattended sync is nobody's usage.
       recordNodeUsage(db, 'write', result.writtenNodes ?? [], auth);
-      return textResult(`Synced ${result.nodeCount ?? 0} nodes.`);
+      // #1330 — a file refused by a strict parent rule is skipped, not failed;
+      // say so, or the caller reads a clean sync.
+      const refused = result.skippedUndeclaredRoles ?? [];
+      return textResult(
+        `Synced ${result.nodeCount ?? 0} nodes.` +
+          (refused.length > 0
+            ? `\nSkipped ${refused.length} file(s), ROLE_NOT_DECLARED (the role is not declared under a strict parent; declare it or change the file):\n` +
+              refused.map((s) => `- ${describeSkippedUndeclaredRole(s)}`).join('\n')
+            : ''),
+      );
     },
   );
 
