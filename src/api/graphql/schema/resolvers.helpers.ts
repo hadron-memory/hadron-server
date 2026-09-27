@@ -117,6 +117,8 @@ export interface Context {
   // Node.contentValidation and Node.authorship can all resolve on one GraphQL
   // Node object; share its locked read without mixing distinct parent states.
   nodeReconcileCache?: WeakMap<object, Promise<(SnapshotSourceNode & { revSeq: number }) | null>>;
+  // Request-scoped gated task URN lookup for repeated Node.authorship fields.
+  readableTaskRefCache?: Map<string, Promise<string | null>>;
   // Request-scoped memo for AppRun.urn composition (#696) — a run-list response
   // often shares one App across many runs, so the app-urn lookup is memoized per
   // request (lazily created; see loadAppUrn).
@@ -2932,6 +2934,8 @@ export interface NodeInput {
   id?: string;
   memoryId: string;
   nodeType?: string;
+  /** Internal copy paths may preserve this legacy Node field. */
+  isLink?: boolean;
   /** #725 — collection discriminator (e.g. "competitor"). Omit preserves; null clears. */
   objectType?: string | null;
   isRunnable?: boolean | null;

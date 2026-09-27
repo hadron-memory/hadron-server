@@ -326,14 +326,53 @@ type AuthoredState = {
   authoredAt?: Date | null;
 };
 
+type PendingTaskRef = { id: string; resolve: (ref: string | null) => void; reject: (error: unknown) => void };
+const authorshipTaskBatches = new WeakMap<Context, { pending: Map<string, PendingTaskRef>; scheduled: boolean }>();
+
+async function flushAuthorshipTasks(ctx: Context, batch: { pending: Map<string, PendingTaskRef>; scheduled: boolean }) {
+  const pending = [...batch.pending.values()];
+  batch.pending.clear();
+  batch.scheduled = false;
+  if (pending.length === 0) return;
+  try {
+    const tasks = await ctx.db.node.findMany({
+      where: { id: { in: pending.map(({ id }) => id) }, deletedAt: null },
+      select: { id: true, loc: true, memoryId: true },
+    });
+    const accessible = await getAccessibleMemoryIds(ctx);
+    const readable = accessible === null ? null : new Set(accessible);
+    const refs = new Map(await Promise.all(tasks.map(async (task) => [
+      task.id,
+      readable === null || readable.has(task.memoryId) ? await resolveNodeUrnField(task, ctx) : null,
+    ] as const)));
+    for (const item of pending) item.resolve(refs.get(item.id) ?? null);
+  } catch (error) {
+    for (const item of pending) item.reject(error);
+  }
+}
+
 async function readableTaskRef(ctx: Context, taskId: string | null | undefined): Promise<string | null> {
   if (!taskId) return null;
-  const task = await ctx.db.node.findUnique({
-    where: { id: taskId },
-    select: { loc: true, memoryId: true, deletedAt: true },
-  });
-  if (!task || task.deletedAt || !(await isMemoryReadableCached(ctx, task.memoryId))) return null;
-  return resolveNodeUrnField(task, ctx);
+  // Sibling authorship fields can cite many tasks. Batch their gated
+  // projections and memoize each result (including concealed misses).
+  const cache = ctx.readableTaskRefCache ??= new Map<string, Promise<string | null>>();
+  let pending = cache.get(taskId);
+  if (!pending) {
+    let batch = authorshipTaskBatches.get(ctx);
+    if (!batch) {
+      batch = { pending: new Map(), scheduled: false };
+      authorshipTaskBatches.set(ctx, batch);
+    }
+    pending = new Promise<string | null>((resolve, reject) => {
+      batch!.pending.set(taskId, { id: taskId, resolve, reject });
+    });
+    cache.set(taskId, pending);
+    if (!batch.scheduled) {
+      batch.scheduled = true;
+      setImmediate(() => { void flushAuthorshipTasks(ctx, batch!); });
+    }
+  }
+  return pending;
 }
 
 async function resolveAuthorship(state: AuthoredState, ctx: Context) {
@@ -538,6 +577,16 @@ export const typeResolvers = {
   Node: {
     authorship: async (n: SnapshotSourceNode & { revSeq: number }, _: unknown, ctx: Context) => {
       if (!n.authorshipKind || !n.authoredAt) return null;
+      // Start the task lookup before per-node reconciliation so sibling list
+      // fields contribute their distinct author tasks to one request batch.
+      // A stale parent may lose its stamp; never return the prefetched claim
+      // without checking the reconciled row below.
+      const selectedTask = n.authorshipKind === 'TASK'
+        ? readableTaskRef(ctx, n.authoredByTask).then(
+          (value) => ({ ok: true as const, value }),
+          (error: unknown) => ({ ok: false as const, error }),
+        )
+        : null;
       // A raw writer can change authored content without refreshing its
       // fingerprint. Reconcile even when the client selects only authorship:
       // no other GraphQL field is guaranteed to run first. Compare the
@@ -547,7 +596,12 @@ export const typeResolvers = {
       // If the selected parent no longer matches a reconcilable live state,
       // its stamp cannot be verified here. An absent claim is safer than
       // attributing raw drift that a concurrent writer has since overwritten.
-      return current ? resolveAuthorship(current, ctx) : null;
+      if (!current) return null;
+      if (selectedTask && current.authorshipKind === 'TASK' && current.authoredByTask === n.authoredByTask) {
+        const selected = await selectedTask;
+        if (!selected.ok) throw selected.error;
+      }
+      return resolveAuthorship(current, ctx);
     },
     contentValidation: async (
       n: SnapshotSourceNode & { revSeq: number; revisionContentHash: string | null },

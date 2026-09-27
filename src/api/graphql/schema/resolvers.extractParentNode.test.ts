@@ -69,6 +69,20 @@ describe('extractParentNodeToMemory — copy (default)', () => {
       .toMatchObject({ authorshipKind: null, revSeq: 2 });
   });
 
+  it('carries the stamped node collection through an extract', async () => {
+    const { parent, oauth } = await seedSubtree();
+    const stamp = {
+      authorshipKind: 'TASK' as const, authoredByTask: generateId(), authoredByRevision: 1,
+      authoredAt: new Date('2026-09-26T20:00:00Z'),
+    };
+    await db.node.update({ where: { id: oauth.id }, data: { objectType: 'finding', ...stamp, revisionContentHash: 'refresh' } });
+    const mem = await M.extractParentNodeToMemory(
+      null, { parentRef: parent.id, targetUrn: 'ex-org::extracted' }, asAdmin(),
+    );
+    expect(await db.node.findFirstOrThrow({ where: { memoryId: mem.id, loc: 'extracted:oauth' } }))
+      .toMatchObject({ objectType: 'finding', ...stamp });
+  });
+
   it('extracts the subtree into a new memory, rebasing the parent to root', async () => {
     const { parent } = await seedSubtree();
     const mem = await M.extractParentNodeToMemory(

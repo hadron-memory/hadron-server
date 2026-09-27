@@ -229,6 +229,7 @@ export async function cloneMemoryGraph(
           id: idMap.get(n.id)!,
           memoryId,
           nodeType: n.nodeType,
+          objectType: n.objectType,
           name: n.name,
           alias: n.alias,
           loc: n.loc,
