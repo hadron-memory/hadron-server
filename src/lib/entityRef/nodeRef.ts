@@ -62,8 +62,8 @@ async function findMovedNodes(
   db: Pick<PrismaClient, 'node' | 'urnAlias'>,
   bareUrns: readonly string[],
   includeDeleted = false,
-): Promise<Array<{ id: string }>> {
-  const live = new Map<string, { id: string }>();
+): Promise<Array<{ id: string; memoryId: string }>> {
+  const live = new Map<string, { id: string; memoryId: string }>();
   for (const bareUrn of new Set(bareUrns)) {
     const rows = await findLiveUrnAliasTargets(db, 'NODE', bareUrn, (ids) =>
       db.node.findMany({
@@ -71,7 +71,7 @@ async function findMovedNodes(
           id: { in: ids },
           ...(includeDeleted ? {} : { deletedAt: null, memory: { deletedAt: null } }),
         },
-        select: { id: true },
+        select: { id: true, memoryId: true },
       }),
       { all: true },
     );
@@ -264,7 +264,7 @@ export async function resolveNodeRef(
     if (candidates.size > 1) {
       throw new AmbiguousLegacyUrnError(ref, [...candidates.keys()]);
     }
-    if (candidates.size === 1) return candidates.values().next().value!;
+    if (candidates.size === 1) return { id: candidates.values().next().value!.id };
     if (strictUrnNode) {
       // Explicit `urn:node:` with no live memory at the named prefix
       // — reject without falling back to short-loc.
@@ -294,15 +294,25 @@ export async function resolveNodeRef(
   if (node && (options?.includeDeleted || !node.deletedAt)) return { id: node.id };
   // Internal edge/write callers may pass a short loc pinned to a context
   // memory. Its live occupant still wins; on a miss, compose that memory's
-  // current URN and consult the same NODE aliases as a full reference.
+  // current and historical URNs and consult the same NODE aliases as a full
+  // reference. A short loc stays scoped to the current memory even if the
+  // aliased node has since moved to a different memory.
   const contextMemory = await db.memory.findUnique({
-    where: { id: contextMemoryId }, select: { urn: true, deletedAt: true },
+    where: { id: contextMemoryId }, select: { urn: true, legacyUrn: true, deletedAt: true },
   });
   if (!contextMemory || (!options?.includeDeleted && contextMemory.deletedAt)) {
     throw new NodeNotFoundError(ref);
   }
-  const moved = await findMovedNodes(db, [`${contextMemory.urn}:${normalized}`], options?.includeDeleted);
+  const oldPrefixes = await db.urnAlias.findMany({
+    where: { entityType: 'MEMORY', entityId: contextMemoryId },
+    select: { urn: true },
+  });
+  const moved = (await findMovedNodes(db, [
+    `${contextMemory.urn}:${normalized}`,
+    ...(contextMemory.legacyUrn ? [`${contextMemory.legacyUrn}:${normalized}`] : []),
+    ...oldPrefixes.map((a) => `${a.urn}:${normalized}`),
+  ], options?.includeDeleted)).filter((candidate) => candidate.memoryId === contextMemoryId);
   if (moved.length > 1) throw new AmbiguousLegacyUrnError(ref, moved.map((n) => n.id));
-  if (moved.length === 1) return moved[0]!;
+  if (moved.length === 1) return { id: moved[0]!.id };
   throw new NodeNotFoundError(ref);
 }

@@ -99,6 +99,24 @@ describe('node move URN aliases', () => {
       .not.toBeNull();
   });
 
+  it('keeps a short loc scoped to its memory after that memory is renamed', async () => {
+    const root = await createNode(source.id, 'old');
+    await resolvers.Mutation.moveNode(null, {
+      sourceRef: root.id, targetUrn: nodeUrn(source, 'new'),
+    }, graphCtx());
+    await db.$transaction(async (tx) => {
+      await recordUrnRename(tx, {
+        entityType: 'MEMORY', entityId: source.id,
+        oldUrn: source.urn, newUrn: 'alias-a.example:renamed',
+      });
+      await tx.memory.update({
+        where: { id: source.id }, data: { urn: 'alias-a.example:renamed' },
+      });
+    });
+
+    expect(await resolveNodeRef(db, 'old', source.id)).toEqual({ id: root.id });
+  });
+
   it('keeps the address published before a memory rename alive after a later node move', async () => {
     const root = await createNode(source.id, 'old');
     const publishedBeforeMemoryRename = nodeUrn(source, 'old');
@@ -216,6 +234,7 @@ describe('node move URN aliases', () => {
     expect((await aliasesFor(root.id)).map((a) => a.urn)).toEqual([`${source.urn}:old`]);
     expect((await aliasesFor(child.id)).map((a) => a.urn)).toEqual([`${source.urn}:old:child`]);
     expect(await resolveNodeRef(db, oldChild)).toEqual({ id: child.id });
+    await expect(resolveNodeRef(db, 'old:child', source.id)).rejects.toThrow(NodeNotFoundError);
     expect((await resolvers.Query.node(null, { ref: oldChild }, graphCtx()))?.id).toBe(child.id);
     expect(await mcp.callToolText('hadron_get_node', { urn: oldChild })).toContain('body of old:child');
     expect(await mcp.callToolText('hadron_get_nodes', { refs: [oldRoot, oldChild] }))
