@@ -170,3 +170,69 @@ describe('hadron_set_active_org', () => {
     expect(await db.mcpSessionState.count()).toBe(0);
   });
 });
+
+describe('hadron_server_info membership listing (#1372)', () => {
+  it('lists the caller\'s selectable organizations when the active org is unresolved', async () => {
+    const info = await server('si-1').callToolText('hadron_server_info');
+    expect(info).toContain('active organization: unresolved');
+    // URN + display name per line, exactly as the org_not_found refusal lists them.
+    expect(info).toContain(`- hrn:org:${orgA.urn} (ao-mcp-a)`);
+    expect(info).toContain(`- hrn:org:${orgB.urn} (ao-mcp-b)`);
+    // A nonmember organization is absent — the list is the authorized candidate set only.
+    expect(info).not.toContain(foreignOrg.urn);
+  });
+
+  it('a pure App-key caller gets its credential org, not a user-membership listing', async () => {
+    const srv = createTestableMcpServer({ appId: appInA.id, roles: [] } as AuthContext, {
+      sessionId: `ao-mcp-${generateId()}`,
+      clientKey: 'si-app-key',
+    });
+    const info = await srv.callToolText('hadron_server_info');
+    expect(info).toContain(`active organization: hrn:org:${orgA.urn} (via credential`);
+    expect(info).not.toContain('Your memberships:');
+  });
+
+  it('an impersonated caller gets no organization line at all', async () => {
+    const srv = createTestableMcpServer(
+      auth({
+        impersonation: {
+          sessionId: generateId(),
+          actorUserId: generateId(),
+          orgId: orgA.id,
+          expiresAt: new Date(Date.now() + 60 * 60_000),
+        },
+      }),
+      { sessionId: `ao-mcp-${generateId()}`, clientKey: 'si-imp', ...MULTI_APP },
+    );
+    const info = await srv.callToolText('hadron_server_info');
+    expect(info).not.toContain('active organization:');
+    expect(info).not.toContain('Your memberships:');
+  });
+
+  it('the zero-membership user-owned line stays clean (no empty listing)', async () => {
+    await db.orgMember.updateMany({ where: { userId: user.id }, data: { deletedAt: new Date() } });
+    const info = await server('si-2').callToolText('hadron_server_info');
+    expect(info).toContain('active organization: none — no memberships');
+    expect(info).not.toContain('Your memberships:');
+    expect(info).not.toContain('(no organization memberships)');
+  });
+
+  it('reading server_info does not select or change anything', async () => {
+    // Discovery on the unresolved state writes no selection row…
+    await server('si-3').callToolText('hadron_server_info');
+    expect(await db.mcpSessionState.count()).toBe(0);
+    // …and a read on top of an existing selection leaves it intact.
+    const key = 'si-4';
+    const srv = server(key);
+    await srv.callToolText('hadron_set_active_org', { org: orgA.urn });
+    await srv.callToolText('hadron_server_info');
+    const row = await db.mcpSessionState.findUniqueOrThrow({
+      where: { userId_clientKey: { userId: user.id, clientKey: key } },
+    });
+    expect(row.organizationId).toBe(orgA.id);
+    // A fresh instance still resolves the selection — the read was a read.
+    expect(await server(key, {}, orgA.id).callToolText('hadron_server_info')).toContain(
+      `active organization: hrn:org:${orgA.urn} (via selection)`,
+    );
+  });
+});

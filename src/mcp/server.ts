@@ -2244,8 +2244,14 @@ export function createMcpServerInstance(
         } else if (r.kind === 'user-owned') {
           lines.push('active organization: none — no memberships; the org view is your user-owned memories');
         } else {
+          // #1372: name the candidates, not just the count — until here, the
+          // only MCP enumeration of a caller's memberships was the
+          // org_not_found refusal of a DELIBERATELY wrong selection.
+          // renderMemberOrgs is the sanctioned renderer (the same authorized
+          // member set hadron_set_active_org refuses with), so this lists
+          // options without widening anything.
           lines.push(
-            `active organization: unresolved — ${r.memberOrgIds.length} memberships and none selected; the scope ladder will refuse org-scoped reads with org_required until hadron_set_active_org or the call names one`,
+            `active organization: unresolved — ${r.memberOrgIds.length} memberships and none selected; the scope ladder will refuse org-scoped reads with org_required until hadron_set_active_org or the call names one. Your memberships:\n${await renderMemberOrgs(r.memberOrgIds)}`,
           );
         }
       } else if (auth.appId && !auth.userId) {
