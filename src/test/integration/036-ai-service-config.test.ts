@@ -523,7 +523,7 @@ describe('AiServiceConfig CRUD (US2)', () => {
     // Org owner — org admin OK.
     const orgCfg = await resolvers.Mutation.createAiServiceConfig(
       {},
-      { ownerType: 'ORGANIZATION', ownerId: org.id, name: 'default', provider: 'openai', model: 'gpt-4o' },
+      { ownerType: 'ORGANIZATION', ownerId: org.id, name: 'default', provider: 'openai', model: 'gpt-4o', apiKey: 'sk-org' },
       ctxFor(admin.id),
     );
     expect(orgCfg.ownerType).toBe('ORGANIZATION');
@@ -565,13 +565,13 @@ describe('AiServiceConfig CRUD (US2)', () => {
   it('rejects duplicate names per owner with the typed error', async () => {
     await resolvers.Mutation.createAiServiceConfig(
       {},
-      { ownerType: 'AGENT', ownerId: agent.id, name: 'fast', provider: 'anthropic', model: 'm' },
+      { ownerType: 'AGENT', ownerId: agent.id, name: 'fast', provider: 'anthropic', model: 'm', apiKey: 'sk-a' },
       ctxFor(admin.id),
     );
     await expect(
       resolvers.Mutation.createAiServiceConfig(
         {},
-        { ownerType: 'AGENT', ownerId: agent.id, name: 'fast', provider: 'openai', model: 'x' },
+        { ownerType: 'AGENT', ownerId: agent.id, name: 'fast', provider: 'openai', model: 'x', apiKey: 'sk-b' },
         ctxFor(admin.id),
       ),
     ).rejects.toMatchObject({ extensions: { code: 'DuplicateAiServiceConfigNameError' } });
@@ -608,7 +608,7 @@ describe('AiServiceConfig CRUD (US2)', () => {
     ).rejects.toMatchObject({ extensions: { code: 'AiConfigValidationError' } });
   });
 
-  it('apiKey update semantics: empty string clears, value replaces', async () => {
+  it('apiKey update semantics: value replaces; empty string clears, only where a keyless config may run (#1390)', async () => {
     const created = await resolvers.Mutation.createAiServiceConfig(
       {},
       { ownerType: 'AGENT', ownerId: agent.id, name: 'fast', provider: 'anthropic', model: 'm', apiKey: 'sk-one' },
@@ -623,11 +623,18 @@ describe('AiServiceConfig CRUD (US2)', () => {
     const stored = await db.aiServiceConfig.findUniqueOrThrow({ where: { id: created.id } });
     expect(decryptToken(stored.apiKeyEncrypted!)).toBe('sk-two');
 
-    const cleared = await resolvers.Mutation.updateAiServiceConfig(
+    // A tenant (here AGENT) config always needs its own key: clearing is refused.
+    await expect(
+      resolvers.Mutation.updateAiServiceConfig({}, { id: created.id, apiKey: '' }, ctxFor(admin.id)),
+    ).rejects.toMatchObject({ extensions: { code: 'AiConfigValidationError' } });
+    expect((await db.aiServiceConfig.findUniqueOrThrow({ where: { id: created.id } })).apiKeyEncrypted).not.toBeNull();
+    // The platform's own anthropic config may run on the server credential, so it may clear.
+    const host = await resolvers.Mutation.createAiServiceConfig(
       {},
-      { id: created.id, apiKey: '' },
-      ctxFor(admin.id),
+      { ownerType: 'HADRON_SERVER', ownerId: server.id, name: 'hosted', provider: 'anthropic', model: 'm', apiKey: 'sk-host' },
+      platformAdminCtx(),
     );
+    const cleared = await resolvers.Mutation.updateAiServiceConfig({}, { id: host.id, apiKey: '' }, platformAdminCtx());
     expect(cleared.hasApiKey).toBe(false);
     expect(cleared.apiKeyPreview).toBeNull();
   });
@@ -925,6 +932,46 @@ describe('AiServiceConfig.endpoint (#1373)', () => {
     expect(edited).toMatchObject({ enabled: false, effectiveEndpoint: 'https://api.z.ai/api/paas/v4' });
   });
 
+  it('openai-compatible needs an endpoint on every write surface (#1373)', async () => {
+    const code = async (p: Promise<unknown>) => ((await p.catch((e) => e)) as GraphQLError)?.extensions?.code;
+    // Modern create: refused without, accepted with.
+    expect(await code(mk({ provider: 'openai-compatible', model: 'llama-3.3-70b', name: 'nope' }))).toBe('AiConfigValidationError');
+    const c = await mk({ provider: 'openai-compatible', model: 'llama-3.3-70b', name: 'compat', endpoint: 'https://api.together.xyz/v1', params: { toolCalling: true } });
+    expect(c).toMatchObject({ provider: 'openai-compatible', effectiveEndpoint: 'https://api.together.xyz/v1', effectiveApiStyle: 'CHAT_COMPLETIONS' });
+    // Clearing its endpoint would strand it.
+    expect(await code(resolvers.Mutation.updateAiServiceConfig({}, { id: c.id, endpoint: null }, ctxFor(admin.id)))).toBe('AiConfigValidationError');
+    // Switching another provider to it without one is refused too.
+    const other = await mk({ name: 'switch' });
+    expect(await code(resolvers.Mutation.updateAiServiceConfig({}, { id: other.id, provider: 'openai-compatible' }, ctxFor(admin.id)))).toBe('AiConfigValidationError');
+    // The legacy surfaces cannot set an endpoint, so they cannot create one.
+    expect(await code(resolvers.Mutation.updateAgentAIConfig({}, { agentId: agent.id, provider: 'openai-compatible', model: 'x', apiKey: 'k' }, ctxFor(admin.id)))).toBe('AiConfigValidationError');
+    expect(await code(resolvers.Mutation.updateApp({}, { ref: app.id, aiProvider: 'openai-compatible', aiModel: 'x', aiApiKey: 'k' } as never, ctxFor(admin.id)))).toBe('AiConfigValidationError');
+    expect(await db.aiServiceConfig.count({ where: { provider: 'openai-compatible', endpoint: null } })).toBe(0);
+    // A key is required too: with none stored, an SDK would reach for the
+    // server's own credential and send it to this host (#1389 review).
+    expect(await code(mk({ provider: 'openai-compatible', model: 'm', name: 'keyless', endpoint: 'https://api.together.xyz/v1', apiKey: undefined }))).toBe('AiConfigValidationError');
+    expect(await code(resolvers.Mutation.updateAiServiceConfig({}, { id: c.id, apiKey: '' }, ctxFor(admin.id)))).toBe('AiConfigValidationError');
+    // The same rule for every provider (usesProcessCredential): glm's default
+    // host is Z.ai, and any explicit endpoint is admin-chosen; only a default
+    // host that issued the server's credential may run keyless.
+    expect(await code(mk({ provider: 'glm', model: 'm', name: 'keyless-glm', apiKey: undefined }))).toBe('AiConfigValidationError');
+    expect(await code(mk({ provider: 'openai', model: 'm', name: 'keyless-ep', endpoint: 'https://llm.example.com/v1', apiKey: undefined }))).toBe('AiConfigValidationError');
+    // #1390: even at its own host, a keyless ORG config is refused; only the
+    // platform's own config may use the server credential.
+    expect(await code(mk({ provider: 'openai', model: 'm', name: 'keyless-openai', apiKey: undefined }))).toBe('AiConfigValidationError');
+    expect(
+      await code(
+        resolvers.Mutation.createAiServiceConfig(
+          {},
+          { ownerType: 'HADRON_SERVER', ownerId: server.id, name: 'keyless-host', provider: 'openai', model: 'm' },
+          platformAdminCtx(),
+        ),
+      ),
+    ).toBeUndefined();
+    // params.toolCalling is type-checked.
+    expect(await code(mk({ provider: 'openai-compatible', model: 'm', name: 'badtools', endpoint: 'https://api.together.xyz/v1', params: { toolCalling: 'yes' } }))).toBe('UnknownAiProviderError');
+  });
+
   it('aiProviderEndpoints serves the single suggestion list: one default per listed provider, none for bedrock or an unknown provider', async () => {
     const glm = await resolvers.Query.aiProviderEndpoints({}, { provider: 'glm' });
     expect(glm.map((e) => e.url)).toEqual([
@@ -936,6 +983,82 @@ describe('AiServiceConfig.endpoint (#1373)', () => {
     expect(glm.filter((e) => e.isDefault)).toHaveLength(1);
     expect(await resolvers.Query.aiProviderEndpoints({}, { provider: 'bedrock' })).toEqual([]);
     expect(await resolvers.Query.aiProviderEndpoints({}, { provider: 'toString' })).toEqual([]);
+  });
+});
+
+describe('write-time invariants hold against a concurrent edit (#1389 review)', () => {
+  const codeOf = (e: unknown) => (e as GraphQLError | null)?.extensions?.code;
+
+  /**
+   * Hold the config's row lock in another transaction while `write` passes its
+   * unlocked pre-check and blocks on the lock; then commit `change` and let the
+   * write re-judge the row as it is now.
+   */
+  async function race(id: string, change: Record<string, unknown>, write: () => Promise<unknown>) {
+    let locked!: () => void;
+    const holding = new Promise<void>((r) => (locked = r));
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const holder = db.$transaction(
+      async (tx) => {
+        await tx.$queryRaw`SELECT 1 FROM "ai_service_configs" WHERE "id" = ${id} FOR UPDATE`;
+        locked();
+        await gate;
+        await tx.aiServiceConfig.update({ where: { id }, data: change });
+      },
+      { timeout: 15_000 },
+    );
+    // A barrier, not a sleep (#1389 review): the write starts only once the
+    // row is held. Whether it then reaches the lock before or after the
+    // holder commits, it must judge the committed row: the pre-check read the
+    // old one, and the in-transaction check reads under the lock.
+    await holding;
+    const pending = write().then(() => null, (e: unknown) => e);
+    // The write has passed its unlocked pre-check and waits on the lock, so
+    // it is the in-transaction check that must refuse (#1389 review).
+    await waitForLockWaiters(db);
+    release();
+    await holder;
+    return pending;
+  }
+
+  it('updateAgentAIConfig: a provider switch that cleared the endpoint in between is refused, not restored without one', async () => {
+    const c = await resolvers.Mutation.createAiServiceConfig(
+      {},
+      { ownerType: 'AGENT', ownerId: agent.id, name: 'default', provider: 'openai-compatible', model: 'm', apiKey: 'k-1', endpoint: 'https://api.together.xyz/v1' },
+      ctxFor(admin.id),
+    );
+    const err = await race(c.id, { provider: 'openai', endpoint: null }, () =>
+      resolvers.Mutation.updateAgentAIConfig({}, { agentId: agent.id, provider: 'openai-compatible', model: 'm2', apiKey: 'k-2' }, ctxFor(admin.id)),
+    );
+    expect(codeOf(err)).toBe('AiConfigValidationError');
+    expect(await db.aiServiceConfig.findUniqueOrThrow({ where: { id: c.id } })).toMatchObject({ provider: 'openai', endpoint: null });
+  });
+
+  it('updateAiServiceConfig: a key cleared in between is judged on the locked row', async () => {
+    const c = await resolvers.Mutation.createAiServiceConfig(
+      {},
+      { ownerType: 'ORGANIZATION', ownerId: org.id, name: 'compat', provider: 'openai-compatible', model: 'm', apiKey: 'k-1', endpoint: 'https://api.together.xyz/v1' },
+      ctxFor(admin.id),
+    );
+    const err = await race(c.id, { apiKeyEncrypted: null, apiKeyPreview: null }, () =>
+      resolvers.Mutation.updateAiServiceConfig({}, { id: c.id, model: 'm2' }, ctxFor(admin.id)),
+    );
+    expect(codeOf(err)).toBe('AiConfigValidationError');
+    expect((await db.aiServiceConfig.findUniqueOrThrow({ where: { id: c.id } })).model).toBe('m');
+  });
+
+  it('updateApp (legacy aiProvider): the same re-judgement on the locked row', async () => {
+    const c = await resolvers.Mutation.createAiServiceConfig(
+      {},
+      { ownerType: 'APP', ownerId: app.id, name: 'default', provider: 'openai-compatible', model: 'm', apiKey: 'k-1', endpoint: 'https://api.together.xyz/v1' },
+      ctxFor(admin.id),
+    );
+    const err = await race(c.id, { provider: 'openai', endpoint: null }, () =>
+      resolvers.Mutation.updateApp({}, { ref: app.id, aiProvider: 'openai-compatible', aiModel: 'm2' } as never, ctxFor(admin.id)),
+    );
+    expect(codeOf(err)).toBe('AiConfigValidationError');
+    expect(await db.aiServiceConfig.findUniqueOrThrow({ where: { id: c.id } })).toMatchObject({ provider: 'openai', model: 'm' });
   });
 });
 

@@ -1,6 +1,6 @@
 // agentMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
 import { encryptToken } from '../../../lib/tokenCrypto.js';
-import { refuseLegacyBaseUrl, validateApiStyle, validateEndpoint } from '../../../lib/aiEndpoint.js';
+import { refuseLegacyBaseUrl, requireEndpointFor, requireKeyFor, validateApiStyle, validateEndpoint } from '../../../lib/aiEndpoint.js';
 import { testAiServiceConfig, type AiConfigTestOverride } from '../../../controller/operations/testAiServiceConfig.js';
 import { assertAgentPublicAllowed } from '../../../lib/agentPublicCongruence.js';
 import {
@@ -865,6 +865,14 @@ export const agentMutations = {
       const existing = await ctx.db.aiServiceConfig.findFirst({
         where: { agentId: resolvedAgentId, name: DEFAULT_AI_CONFIG_NAME },
       });
+      // This legacy surface cannot set an endpoint, so an openai-compatible
+      // config through it must keep the one it has (same provider) — a
+      // provider change clears the endpoint below (#1373).
+      try {
+        requireEndpointFor(provider, existing && existing.provider === provider ? existing.endpoint : null);
+      } catch (e) {
+        rethrowAiConfigTyped(e);
+      }
       const keyData: Record<string, string> = {};
       if (apiKey) {
         keyData.apiKeyEncrypted = encryptToken(apiKey);
@@ -875,12 +883,17 @@ export const agentMutations = {
         );
       }
       if (existing) {
-        // Decided on the LOCKED row (#1380 review): a concurrent modern update
-        // may have switched the provider (and its endpoint/style) since the
-        // read above, and the clearing below must compare against that.
+        // Re-judged on the LOCKED row (#1380 / #1389 review): a concurrent edit that
+        // cleared the endpoint or key after the read above must not let this
+        // write restore a provider that now lacks them.
         await ctx.db.$transaction(async (tx) => {
           const cur = await lockAiServiceConfig(tx, existing.id);
           if (!cur) throw new AiServiceConfigNotFoundError(existing.id);
+          try {
+            requireEndpointFor(provider, cur.provider === provider ? cur.endpoint : null);
+          } catch (e) {
+            rethrowAiConfigTyped(e);
+          }
           if (!apiKey && !cur.apiKeyEncrypted) {
             rethrowAiConfigTyped(new AiConfigValidationError('API key is required when no key is saved yet'));
           }
@@ -968,6 +981,8 @@ export const agentMutations = {
         validateProviderAndParams(args.provider, args.params ?? null);
         refuseLegacyBaseUrl(args.params);
         const endpoint = args.endpoint ? validateEndpoint(args.endpoint) : null;
+        requireEndpointFor(args.provider, endpoint);
+        requireKeyFor({ provider: args.provider, endpoint }, !!args.apiKey, args.ownerType);
         validateApiStyle(args.provider, args.apiStyle);
         // No upsert: a P2002 from the partial unique (owner, name) index is
         // the duplicate-name typed error, not a retry (upsert is not
@@ -1029,19 +1044,27 @@ export const agentMutations = {
         const endpoint =
           args.endpoint === undefined ? undefined : args.endpoint ? validateEndpoint(args.endpoint) : null;
         // The RESULTING config, judged against a base row: a provider change
-        // must not strand a style the new provider has no use for.
+        // must not strand a style, and the endpoint and key the result needs
+        // must be there.
         const judge = (base: typeof existing) => {
           const provider = args.provider ?? base.provider;
           const params = args.params === undefined ? base.params : args.params;
           validateProviderAndParams(provider, params ?? null);
           validateApiStyle(provider, args.apiStyle === undefined ? base.apiStyle : args.apiStyle);
+          const resultingEndpoint = endpoint === undefined ? base.endpoint : endpoint;
+          requireEndpointFor(provider, resultingEndpoint);
+          requireKeyFor(
+            { provider, endpoint: resultingEndpoint },
+            args.apiKey === undefined ? !!base.apiKeyEncrypted : !!args.apiKey,
+            owner.ownerType,
+          );
           return provider;
         };
         judge(existing);
-        // …and again on the LOCKED row, in the write's transaction (#1380
-        // review): two concurrent updates (one changing the provider, one the
-        // style) each passed on the old row and together wrote a pair neither
-        // judged.
+        // …and again on the LOCKED row, in the write's transaction (#1380 /
+        // #1389 review): a concurrent edit between the read above and this
+        // write can't leave a config the write-time rules refuse, including a
+        // provider/style pair neither of two racing updates judged.
         const config = await ctx.db.$transaction(async (tx) => {
           const cur = await lockAiServiceConfig(tx, existing.id);
           if (!cur) throw new AiServiceConfigNotFoundError(args.id);

@@ -1977,8 +1977,9 @@ model AiServiceConfig {
   organizationId  String?   @map("organization_id")
   appId           String?   @map("app_id")
   agentId         String?   @map("agent_id")
-  /// Provider identifier; v1 known: 'anthropic' | 'openai' | 'glm' |
-  /// 'bedrock'. Validated against the registry in src/lib/aiConfig.ts.
+  /// Provider identifier; known: 'anthropic' | 'openai' | 'glm' | 'bedrock' |
+  /// 'openai-compatible' (endpoint required). Validated against the registry
+  /// in src/lib/aiConfig.ts.
   provider        String
   /// Model identifier, passed verbatim to the provider.
   model           String

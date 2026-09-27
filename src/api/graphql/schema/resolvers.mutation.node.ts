@@ -3848,6 +3848,12 @@ export const nodeMutations = {
           undefined,
           { context: 'restore' },
         );
+        // #1330 — deliberately NO strict-sub-role check (`assertRoleDeclaredForWrite`):
+        // a restore copies history, it does not author a role. A revision whose
+        // role a since-tightened rulebook no longer declares still restores
+        // (Holger, 2026-09-27). Exempt from that rule only: the governed and
+        // schema gates around it still apply. Git sync, which IS authoring, is
+        // checked.
         await enforceNodeSchemaOnWrite(
           tx,
           current.memoryId,

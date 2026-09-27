@@ -20,10 +20,10 @@ import { encryptToken } from './tokenCrypto.js';
 
 /**
  * Lock an AI config's row for the rest of the transaction and read it as it
- * is NOW (#1380 review). Write-time invariants (the provider/style pair, a
- * provider change clearing a stale endpoint/style) are judged on this row, so
- * two concurrent updates can't each pass on the old row and together write a
- * pair neither judged.
+ * is NOW (#1380 / #1389 review). Write-time invariants (the provider/style
+ * pair, the endpoint and key a config needs, a provider change clearing a
+ * stale endpoint/style) are judged on this row, so a concurrent edit can't
+ * slip between the check and the write.
  */
 export async function lockAiServiceConfig(tx: Prisma.TransactionClient, id: string): Promise<AiServiceConfig | null> {
   await tx.$queryRaw`SELECT 1 FROM "ai_service_configs" WHERE "id" = ${id} FOR UPDATE`;
@@ -71,7 +71,7 @@ export class NoAiConfigAvailableError extends Error {
 
 // ── Provider registry + validation ──────────────────────────────────────
 
-export const KNOWN_AI_PROVIDERS = ['anthropic', 'openai', 'glm', 'bedrock'] as const;
+export const KNOWN_AI_PROVIDERS = ['anthropic', 'openai', 'glm', 'bedrock', 'openai-compatible'] as const;
 export type AiProvider = (typeof KNOWN_AI_PROVIDERS)[number];
 
 export const DEFAULT_AI_CONFIG_NAME = 'default';
@@ -118,6 +118,14 @@ const PROVIDER_PARAMS: Record<AiProvider, z.ZodType> = {
   // Bedrock credentials travel JSON-encoded in the apiKey field (portal
   // convention, finding llm-provider-config-surfaces); params stay generic.
   bedrock: baseParams,
+  // #1373 (Holger, 2026-09-26): any host speaking an OpenAI wire protocol —
+  // vLLM, Ollama, LM Studio, OpenRouter, Together, Groq, DeepSeek, … Its
+  // endpoint is REQUIRED (there is no default host). `toolCalling: true` opts
+  // the config into the run tool loop, which is otherwise refused: an unknown
+  // host is not assumed to support function calling.
+  'openai-compatible': baseParams.extend({
+    toolCalling: z.boolean().optional(),
+  }),
 };
 
 export function validateProviderAndParams(provider: string, params: unknown): void {

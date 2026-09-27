@@ -58,6 +58,8 @@ export const AI_PROVIDER_ENDPOINTS: Record<AiProvider, readonly AiProviderEndpoi
     },
   ],
   bedrock: [],
+  // No suggestions and no default: the host IS the configuration.
+  'openai-compatible': [],
 };
 
 /** The provider's default base URL, or null when the SDK derives it (bedrock). */
@@ -125,7 +127,41 @@ export type AiApiStyle = (typeof AI_API_STYLES)[number];
 const DEFAULT_API_STYLE: Partial<Record<string, AiApiStyle>> = {
   openai: 'RESPONSES',
   glm: 'CHAT_COMPLETIONS',
+  // What almost every compatible host serves; RESPONSES is one apiStyle away.
+  'openai-compatible': 'CHAT_COMPLETIONS',
 };
+
+/** Providers with no default host: a config of one is unusable without its endpoint. */
+const ENDPOINT_REQUIRED = new Set(['openai-compatible']);
+
+/**
+ * Refuse a resulting config with no key that no run could use: with no stored
+ * key an SDK reaches for the PROCESS's credentials, which only a default host
+ * that issued them may receive (`usesProcessCredential`; #1389 review, Codex
+ * P1). modelFor refuses the same configs at call time; this refuses them at
+ * the write, where the admin can still fix them. A keyless local server
+ * (Ollama) accepts any placeholder bearer.
+ */
+export function requireKeyFor(
+  config: { provider: string; endpoint?: string | null },
+  hasKey: boolean,
+  ownerType: AiConfigOwnerType,
+): void {
+  if (hasKey || usesProcessCredential(config, ownerType)) return;
+  throw new AiConfigValidationError(
+    explicitEndpoint(config)
+      ? `A '${config.provider}' config with an endpoint needs its own API key (any placeholder for a host that does not check one).`
+      : ownerType !== 'HADRON_SERVER'
+        ? `An AI config needs its own API key; only the platform's own configs may use the server's credentials.`
+        : `Provider '${config.provider}' needs an API key; the server's own credentials belong to other providers.`,
+  );
+}
+
+export function requireEndpointFor(provider: string, endpoint: string | null | undefined): void {
+  if (ENDPOINT_REQUIRED.has(provider) && !endpoint) {
+    throw new AiConfigValidationError(`Provider '${provider}' needs an endpoint: the base URL of the compatible host.`);
+  }
+}
 
 export function defaultApiStyle(provider: string): AiApiStyle | null {
   return DEFAULT_API_STYLE[provider] ?? null;

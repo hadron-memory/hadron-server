@@ -455,10 +455,7 @@ export class AuthorTaskAttestationError extends GraphQLError {
 export async function assertRoleDeclaredForWrite(
   tx: Prisma.TransactionClient,
   memoryId: string,
-  write: {
-    role: string | null | undefined;
-    priorRole: string | null | undefined;
-    runnableAfter: boolean | null | undefined;
+  write: RoleAssignment & {
     /** Only an authored content change (or a create) needs a new stamp. */
     authoredChange?: boolean;
     authoredWith?: AuthoredWithTask | null;
@@ -489,10 +486,11 @@ export async function assertRoleDeclaredForWrite(
   for (const candidateTaskId of candidateTaskIds) {
     await tx.$queryRaw`SELECT "id" FROM "nodes" WHERE "id" = ${candidateTaskId} FOR SHARE`;
   }
-  await lockMemoryConfigShared(tx, memoryId);
   if (judgeDeclaration) {
-    const resolution = await resolveMemoryNodeRoleRule(tx, memoryId, role);
-    if (resolution.kind === 'UNDECLARED_UNDER_STRICT') throw new RoleNotDeclaredError(role!, resolution.ancestor.role);
+    const strictParent = await strictParentRefusingRole(tx, memoryId, write, opts);
+    if (strictParent !== null) throw new RoleNotDeclaredError(role!, strictParent);
+  } else {
+    await lockMemoryConfigShared(tx, memoryId);
   }
   if (!judgeAuthorTask) return null;
   const required: NodeRoleRule[] = [];
@@ -530,6 +528,27 @@ export async function assertRoleDeclaredForWrite(
     authoredByHuman: null,
     authoredAt: new Date(),
   };
+}
+
+export interface RoleAssignment {
+  role: string | null | undefined;
+  priorRole: string | null | undefined;
+  runnableAfter: boolean | null | undefined;
+}
+
+/** The shared strict-sub-role judgement, answered for per-file sync skips. */
+export async function strictParentRefusingRole(
+  tx: Prisma.TransactionClient,
+  memoryId: string,
+  write: RoleAssignment,
+  opts: { platformWrite?: boolean } = {},
+): Promise<string | null> {
+  const role = write.role;
+  if (!role || role === (write.priorRole ?? null)) return null;
+  if (write.runnableAfter === true || opts.platformWrite === true) return null;
+  await lockMemoryConfigShared(tx, memoryId);
+  const resolution = await resolveMemoryNodeRoleRule(tx, memoryId, role);
+  return resolution.kind === 'UNDECLARED_UNDER_STRICT' ? resolution.ancestor.role : null;
 }
 
 export class RoleGovernedError extends GraphQLError {

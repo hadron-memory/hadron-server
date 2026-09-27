@@ -191,3 +191,19 @@ describe('#1330 — strictSubRoles at writeNodeCore', () => {
     ]);
   });
 });
+
+describe('#1330 — restore is exempt from strictSubRoles (Holger, 2026-09-27)', () => {
+  it('a revision whose role the tightened rulebook no longer declares still restores', async () => {
+    const node = await db.node.create({
+      data: { id: generateId(), memoryId, loc: 'r', name: 'R', content: 'now', nodeType: 'info', role: 'doc.current' },
+    });
+    const revision = await db.nodeRevision.create({
+      data: { id: generateId(), nodeId: node.id, memoryId, loc: 'r', name: 'R', content: 'then', nodeType: 'info', role: 'doc.historic' },
+    });
+    await rules({ role: 'doc', strictSubRoles: true }, { role: 'doc.current' });
+    // The same assignment through an ordinary write IS refused.
+    expect(await refusal(update('r', { role: 'doc.historic' }))).toMatchObject({ code: 'ROLE_NOT_DECLARED' });
+    await resolvers.Mutation.restoreNodeRevision({}, { revisionId: revision.id }, ctx());
+    expect(await db.node.findUniqueOrThrow({ where: { id: node.id } })).toMatchObject({ role: 'doc.historic', content: 'then' });
+  });
+});

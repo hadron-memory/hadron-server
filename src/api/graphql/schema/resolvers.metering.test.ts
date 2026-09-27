@@ -92,6 +92,12 @@ describe('setAiModelPrice', () => {
     expect(dup.errors?.[0]?.extensions?.code).toBe('BAD_USER_INPUT');
   });
 
+  it('refuses a price for openai-compatible, whose cost depends on the host serving it (#1389 review)', async () => {
+    const res = await gql(SET_PRICE, platformCtx(), { input: { ...priceInput, provider: 'openai-compatible' } });
+    expect(res.errors?.[0]?.extensions?.code).toBe('BAD_USER_INPUT');
+    expect(await db.aiModelPrice.count({ where: { provider: 'openai-compatible' } })).toBe(0);
+  });
+
   it('rejects a non-integer amount string', async () => {
     const res = await gql(SET_PRICE, platformCtx(), {
       input: { ...priceInput, inputMicroCentsPerMTok: '3.5e7' },
