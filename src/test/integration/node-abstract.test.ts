@@ -37,10 +37,12 @@
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { GraphQLError } from 'graphql';
+import { ApolloServer } from '@apollo/server';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../helpers.js';
 import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
 import { writeNodeCore } from '../../api/graphql/schema/resolvers.mutation.node.js';
+import { typeDefs } from '../../api/graphql/schema/typeDefs.js';
 import { generateId } from '../../lib/id.js';
 
 // The write core fires writeNodeToGit asynchronously; pin to a
@@ -55,6 +57,7 @@ interface Fixture {
 }
 
 let fx: Fixture;
+const gqlServer = new ApolloServer<Context>({ typeDefs, resolvers });
 
 const SHORT_ABSTRACT = 'A short summary paragraph.';
 const REVISED_ABSTRACT = 'A revised summary.';
@@ -365,7 +368,7 @@ describe('restoreNodeRevision — abstract round-trips through history', () => {
 
 // ─── Spec 032 — abstractOriginHash via GraphQL ──────────────────────────
 
-import { computeContentHash } from '../../lib/contentHash.js';
+import { computeContentHash, isAbstractUnverified } from '../../lib/contentHash.js';
 
 async function persistedHash(loc: string): Promise<string | null> {
   const node = await db.node.findFirst({
@@ -376,6 +379,36 @@ async function persistedHash(loc: string): Promise<string | null> {
 }
 
 describe('spec 032 — upsertNode maintains abstractOriginHash', () => {
+  it.each(['portal', 'cli'] as const)(
+    '%s-shaped GraphQL re-affirmation persists the hash and clears staleness',
+    async (caller) => {
+      const loc = `s3-wire-${caller}`;
+      const created = await upsertNode({ loc, name: loc, abstract: 'A', content: 'B' });
+      const update = async (fields: Record<string, unknown>) => {
+        const response = await gqlServer.executeOperation({
+          query: 'mutation($input: UpdateNodeInput!) { updateNode(input: $input) { id revision abstract abstractOriginHash content } }',
+          variables: { input: { id: created.id, ...fields } },
+        }, { contextValue: fx.ctx });
+        if (response.body.kind !== 'single') throw new Error('unexpected incremental response');
+        expect(response.body.singleResult.errors).toBeUndefined();
+        return response.body.singleResult.data?.updateNode;
+      };
+      await update({ content: "B'" });
+      expect(await persistedHash(loc)).toBe(computeContentHash('B'));
+
+      const result = await update(caller === 'portal'
+        ? { abstract: 'A' }
+        : { abstract: 'A', content: "B'" });
+      expect(result).toMatchObject({
+        id: created.id, revision: 3, abstract: 'A', content: "B'",
+        abstractOriginHash: computeContentHash("B'"),
+      });
+      const stored = await db.node.findUniqueOrThrow({ where: { id: created.id } });
+      expect(stored.abstractOriginHash).toBe(computeContentHash(stored.content));
+      expect(isAbstractUnverified(stored)).toBe(false);
+    },
+  );
+
   it('fresh abstract + content: hash = computeContentHash(content)', async () => {
     await upsertNode({ loc: 's1', name: 's1', abstract: 'A', content: 'B' });
     expect(await persistedHash('s1')).toBe(computeContentHash('B'));
