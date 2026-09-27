@@ -83,7 +83,7 @@ import {
   EdgeNotFoundError,
 } from '../../../lib/entityRef/errors.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
-import { resolveNodeRef } from '../../../lib/entityRef/nodeRef.js';
+import { resolveNodeRefForCaller } from './resolvers.nodeRefAccess.js';
 import { resolveEdgeRef } from '../../../lib/entityRef/edgeRef.js';
 import { GraphQLError } from 'graphql';
 import { convertHtmlToMarkdown, convertPdfToMarkdown } from '../../../lib/pdfClient.js';
@@ -571,7 +571,7 @@ export async function writeNodeCore(
             }
           }
           try {
-            const { id: targetNodeId } = await resolveNodeRef(ctx.db, e.targetId, input.memoryId);
+            const { id: targetNodeId } = await resolveNodeRefForCaller(ctx, e.targetId, input.memoryId);
             const tgt = await ctx.db.node.findUnique({
               where: { id: targetNodeId },
               select: { loc: true, memoryId: true },
@@ -1490,7 +1490,7 @@ export async function writeNodeCore(
 async function resolveExistingNode(ctx: Context, ref: string, opts?: { forWrite?: boolean }) {
   let id: string;
   try {
-    ({ id } = await resolveNodeRef(ctx.db, ref));
+    ({ id } = await resolveNodeRefForCaller(ctx, ref));
   } catch (e) {
     if (e instanceof NodeNotFoundError)
       throw new GraphQLError(`Node not found: "${ref}"`, {
@@ -1625,7 +1625,7 @@ async function updateNodeCore(
     // ID-or-URN dispatch (spec 007/022). A genuine miss → NODE_NOT_FOUND;
     // a relative-form URN propagates as UrnNotQualifiedError.
     try {
-      ({ id: targetNodeId } = await resolveNodeRef(ctx.db, id));
+      ({ id: targetNodeId } = await resolveNodeRefForCaller(ctx, id));
     } catch (e) {
       if (e instanceof NodeNotFoundError) {
         throw new GraphQLError(`Node not found: "${id}"`, {
@@ -1706,7 +1706,7 @@ export async function updateNodePropertiesWith(
   // updateNodeData / mergeNodes). A genuine miss → NODE_NOT_FOUND.
   let resolvedId: string;
   try {
-    ({ id: resolvedId } = await resolveNodeRef(ctx.db, nodeRef));
+    ({ id: resolvedId } = await resolveNodeRefForCaller(ctx, nodeRef));
   } catch (e) {
     if (e instanceof NodeNotFoundError) {
       throw new GraphQLError(`Node not found: "${nodeRef}"`, {
@@ -1908,7 +1908,7 @@ export const nodeMutations = {
       // relative URN propagates as UrnNotQualifiedError (spec 022).
       let resolvedId: string;
       try {
-        ({ id: resolvedId } = await resolveNodeRef(ctx.db, nodeRef));
+        ({ id: resolvedId } = await resolveNodeRefForCaller(ctx, nodeRef));
       } catch (e) {
         if (e instanceof NodeNotFoundError) {
           throw new GraphQLError(`Node not found: "${nodeRef}"`, {
@@ -2119,7 +2119,7 @@ export const nodeMutations = {
       if (hasNodeIds) {
         for (const ref of nodeIds!) {
           // Explicit refs must be IDs or fully-qualified URNs (no memory ctx).
-          const { id } = await resolveNodeRef(ctx.db, ref);
+          const { id } = await resolveNodeRefForCaller(ctx, ref);
           if (nodeById.has(id)) continue;
           const row = await ctx.db.node.findUnique({ where: { id } });
           if (!row || row.deletedAt) continue;
@@ -2471,7 +2471,7 @@ export const nodeMutations = {
       // the row directly regardless of deletedAt, so this preserves behavior.
       let resolvedId: string;
       try {
-        ({ id: resolvedId } = await resolveNodeRef(ctx.db, nodeRef, undefined, {
+        ({ id: resolvedId } = await resolveNodeRefForCaller(ctx, nodeRef, undefined, {
           includeDeleted: true,
         }));
       } catch (e) {
@@ -2732,7 +2732,7 @@ export const nodeMutations = {
       let resolvedSourceId: string;
       let resolvedTargetId: string;
       try {
-        ({ id: resolvedSourceId } = await resolveNodeRef(ctx.db, sourceRef));
+        ({ id: resolvedSourceId } = await resolveNodeRefForCaller(ctx, sourceRef));
       } catch (e) {
         if (e instanceof NodeNotFoundError)
           throw new GraphQLError(`Source node not found: "${sourceRef}"`, { extensions: { code: 'NODE_NOT_FOUND' } });
@@ -2751,7 +2751,7 @@ export const nodeMutations = {
       // Only now the target, and at least READ on it. Its denial is the same
       // NODE_NOT_FOUND as a genuine miss, so it is no cross-memory oracle.
       try {
-        ({ id: resolvedTargetId } = await resolveNodeRef(ctx.db, targetRef));
+        ({ id: resolvedTargetId } = await resolveNodeRefForCaller(ctx, targetRef));
       } catch (e) {
         if (e instanceof NodeNotFoundError)
           throw new GraphQLError(`Target node not found: "${targetRef}"`, { extensions: { code: 'NODE_NOT_FOUND' } });
@@ -3253,7 +3253,7 @@ export const nodeMutations = {
       let sourceId: string;
       let targetId: string;
       try {
-        ({ id: sourceId } = await resolveNodeRef(ctx.db, rawSource));
+        ({ id: sourceId } = await resolveNodeRefForCaller(ctx, rawSource));
       } catch (e) {
         if (e instanceof NodeNotFoundError)
           throw new GraphQLError(`Source node not found: "${rawSource}"`, {
@@ -3262,7 +3262,7 @@ export const nodeMutations = {
         throw e;
       }
       try {
-        ({ id: targetId } = await resolveNodeRef(ctx.db, rawTarget));
+        ({ id: targetId } = await resolveNodeRefForCaller(ctx, rawTarget));
       } catch (e) {
         if (e instanceof NodeNotFoundError)
           throw new GraphQLError(`Target node not found: "${rawTarget}"`, {
@@ -4117,7 +4117,7 @@ export const nodeMutations = {
         // owner may want to purge — clearing it is a cleanup op, so it stays
         // reachable on tombstones (parity with deleteNodeRevision's by-id path;
         // contrast the READ surfaces, which hide tombstoned history). PR #618.
-        ({ id: nodeId } = await resolveNodeRef(ctx.db, nodeRef, undefined, { includeDeleted: true }));
+        ({ id: nodeId } = await resolveNodeRefForCaller(ctx, nodeRef, undefined, { includeDeleted: true }));
       } catch (e) {
         if (e instanceof NodeNotFoundError) {
           throw new GraphQLError('Node not found', {
@@ -4155,7 +4155,7 @@ export const nodeMutations = {
     ) => {
       let nodeId: string;
       try {
-        ({ id: nodeId } = await resolveNodeRef(ctx.db, nodeRef));
+        ({ id: nodeId } = await resolveNodeRefForCaller(ctx, nodeRef));
       } catch (e) {
         if (e instanceof NodeNotFoundError) {
           throw new GraphQLError('Node not found', { extensions: { code: 'NODE_NOT_FOUND', nodeRef } });

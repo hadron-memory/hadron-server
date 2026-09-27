@@ -151,12 +151,13 @@ import {
   encryptNodeFieldsWithKey,
 } from '../lib/nodeCrypto.js';
 import { resolveSuppliedKey, MemoryUnlockError } from '../lib/memoryUnlock.js';
-import { resolveNodeRef } from '../lib/entityRef/nodeRef.js';
+import { resolveNodeRef, isConcealedNodeRefAmbiguity } from '../lib/entityRef/nodeRef.js';
 import { resolveChannelRefId } from '../lib/entityRef/channelRef.js';
 import { sortSiblings } from '../lib/siblingOrder.js';
 import { renderRunNodeBundle } from '../lib/runNodeRender.js';
 import {
   NodeNotFoundError,
+  AmbiguousLegacyUrnError,
   NodeAbstractTooLongError,
   InvalidContentScopeError,
 } from '../lib/entityRef/errors.js';
@@ -189,6 +190,23 @@ import { isAppParticipant, getAccessibleMemoryIds as gqlAccessibleMemoryIds } fr
 import { loadAppWorkerActivity } from '../api/graphql/schema/resolvers.worker.js';
 import { splitNodeUrnTolerant, nodeFragmentRefusal } from '../lib/splitNodeUrnTolerant.js';
 import { safeEqual } from '../lib/constantTime.js';
+
+/** Keep alias ambiguity concealed from callers who cannot read any claimant. */
+async function resolveNodeRefForAuth(
+  ref: string,
+  auth: AuthContext,
+  contextMemoryId?: string,
+): Promise<{ id: string }> {
+  try {
+    return await resolveNodeRef(db, ref, contextMemoryId);
+  } catch (error) {
+    if (await isConcealedNodeRefAmbiguity(db, error,
+      (memoryId) => canReadMemory(db, auth, memoryId))) {
+      throw new NodeNotFoundError(ref);
+    }
+    throw error;
+  }
+}
 
 /**
  * Annotate a node projection that was reached through a `#<fragment>` URN.
@@ -562,7 +580,7 @@ export async function resolveEdgeRefs(
   const resolved: ResolvedEdge[] = [];
   for (const edge of edges) {
     try {
-      const { id: targetNodeId } = await resolveNodeRef(db, edge.targetId, sourceMemoryId);
+      const { id: targetNodeId } = await resolveNodeRefForAuth(edge.targetId, auth, sourceMemoryId);
       // Fetch the target's loc so the edge loc can be derived at write time.
       const tgt = await db.node.findUnique({
         where: { id: targetNodeId },
@@ -705,7 +723,7 @@ export async function addEdge(args: {
 
   let targetNodeId: string;
   try {
-    ({ id: targetNodeId } = await resolveNodeRef(db, rawTarget, sourceNode.memoryId));
+    ({ id: targetNodeId } = await resolveNodeRefForAuth(rawTarget, auth, sourceNode.memoryId));
   } catch (e) {
     if (e instanceof NodeNotFoundError) {
       return { error: `Edge target not found: "${e.ref}"` };
@@ -3751,13 +3769,17 @@ export function createMcpServerInstance(
       // 0.0.14 → 0.0.15 bump). `#data` still decomposes normally and is
       // reported below rather than silently serving the parent.
       const { memoryUrn, loc, fragment, literalLoc } = splitNodeUrnTolerant(rawUrn);
-      const memory = await resolveMemoryByUrn(memoryUrn);
-      if (!memory) {
-        return textResult(`Memory not found: "${memoryUrn}".`);
-      }
-      if (!(await canReadMemory(db, auth, memory.id))) {
-        return textResult(`Memory not found: "${memoryUrn}".`);
-      }
+      // A historical memory prefix may itself have several holders. For a
+      // NODE read, defer that ambiguity to resolveNodeRefForAuth, which checks
+      // the current node claimants before exposing any error.
+      const memory = await resolveMemoryByUrn(memoryUrn).catch((error) => {
+        if (error instanceof AmbiguousLegacyUrnError) return null;
+        throw error;
+      });
+      const sourceReadable = !!memory && await canReadMemory(db, auth, memory.id);
+      const missing = () => textResult(sourceReadable
+        ? `Node "${rawUrn}" not found.`
+        : `Memory not found: "${memoryUrn}".`);
 
       // The projection's include, named so the two candidate lookups below
       // cannot drift apart.
@@ -3792,19 +3814,49 @@ export function createMcpServerInstance(
       // a tombstoned row returns "not found" instead of leaking its last
       // content.
       let matchedLiteral = false;
-      let node = await db.node.findFirst({
-        where: { loc: literalLoc ?? loc, memoryId: memory.id, deletedAt: null },
-        include: nodeReadInclude,
-      });
+      let node = sourceReadable && memory
+        ? await db.node.findFirst({
+            where: { loc: literalLoc ?? loc, memoryId: memory.id, deletedAt: null },
+            include: nodeReadInclude,
+          })
+        : null;
       if (node && literalLoc) matchedLiteral = true;
-      if (!node && literalLoc) {
+      if (!node && literalLoc && sourceReadable && memory) {
         node = await db.node.findFirst({
           where: { loc, memoryId: memory.id, deletedAt: null },
           include: nodeReadInclude,
         });
       }
       if (!node) {
-        return textResult(`Node "${rawUrn}" not found.`);
+        // #1391 — the old memory or loc can have vanished on a move. Resolve
+        // the full address (LIVE first, alias on miss) before gating the node
+        // at its CURRENT memory. Even when the old memory is unreadable, a live
+        // occupant there must beat a historical alias to another node.
+        const aliasRefs = literalLoc && fragment
+          ? [rawUrn, rawUrn.slice(0, rawUrn.lastIndexOf('#'))]
+          : [rawUrn];
+        let movedId: string | undefined;
+        for (const aliasRef of aliasRefs) {
+          try {
+            ({ id: movedId } = await resolveNodeRefForAuth(aliasRef, auth));
+            if (aliasRef === rawUrn && literalLoc) matchedLiteral = true;
+            break;
+          } catch (e) {
+            if (e instanceof NodeNotFoundError) continue;
+            throw e;
+          }
+        }
+        if (!movedId) return missing();
+        const target = await db.node.findFirst({
+          where: { id: movedId, deletedAt: null },
+          select: { memoryId: true },
+        });
+        if (!target || !(await canReadMemory(db, auth, target.memoryId))) return missing();
+        node = await db.node.findFirst({
+          where: { id: movedId, memoryId: target.memoryId, deletedAt: null },
+          include: nodeReadInclude,
+        });
+        if (!node) return missing();
       }
 
       // Spec 031 — contentScope-driven response shape. Default 'content'
@@ -3873,7 +3925,9 @@ export function createMcpServerInstance(
       //
       // A LOCKED node still records: the projection is what crossed the
       // boundary, and the caller did read this node's addressable state.
-      recordNodeRead(db, { id: current.id, loc, memoryId: current.memoryId }, auth);
+      // An alias read names the node at its CURRENT address; never pair the
+      // historical input loc with the target memory in the usage event.
+      recordNodeRead(db, { id: current.id, loc: current.loc, memoryId: current.memoryId }, auth);
 
       // #696: `#data` addresses the node's DATA, not the node — and before the
       // urn-lib-js 0.0.15 bump the fragment stayed glued to the loc, so such a
@@ -4033,6 +4087,7 @@ export function createMcpServerInstance(
         const projectionInclude = readProjectionInclude;
 
         const nodeByRef = new Map<string, ReadProjectionNode & { id: string }>();
+        const movedFallbacks: UrnRef[] = [];
 
         // URN refs: group by memory so each distinct memory is gated + fetched
         // once (not N findFirsts).
@@ -4043,9 +4098,12 @@ export function createMcpServerInstance(
           else byMemory.set(r.memoryUrn, [r]);
         }
         for (const [mu, group] of byMemory) {
-          const mem = await resolveMemoryByUrn(mu);
+          const mem = await resolveMemoryByUrn(mu).catch((error) => {
+            if (error instanceof AmbiguousLegacyUrnError) return null;
+            throw error;
+          });
           if (!mem || !(await canReadMemory(db, auth, mem.id))) {
-            for (const r of group) unavailable.push(r.raw);
+            movedFallbacks.push(...group);
             continue;
           }
           // Both candidates for a fragmented ref, in ONE query: the literal
@@ -4067,13 +4125,74 @@ export function createMcpServerInstance(
             const literal = r.literalLoc ? rowByLoc.get(r.literalLoc) : undefined;
             const row = literal ?? rowByLoc.get(r.loc);
             if (!row) {
-              unavailable.push(r.raw);
+              movedFallbacks.push(r);
               continue;
             }
             // A literal match resolved nothing away, so it carries no notice.
             if (literal) fragmentByRef.delete(r.raw);
             nodeByRef.set(r.raw, row as unknown as ReadProjectionNode & { id: string });
           }
+        }
+
+        // #1391: old addresses are a fallback only after the grouped live
+        // lookup missed. Bound resolver concurrency, then coalesce the target
+        // liveness probes, memory gates and projections for the WHOLE fallback
+        // set. Without this, 200 historical refs did their target gate and
+        // projection serially, turning a batch read back into N+1 round trips.
+        const movedIdByRef = new Map<string, string>();
+        let nextFallback = 0;
+        const resolveFallbackWorker = async () => {
+          while (nextFallback < movedFallbacks.length) {
+            const r = movedFallbacks[nextFallback++];
+            const aliasRefs = r.literalLoc && fragmentByRef.has(r.raw)
+              ? [r.raw, r.raw.slice(0, r.raw.lastIndexOf('#'))]
+              : [r.raw];
+            for (const aliasRef of aliasRefs) {
+              try {
+                const { id } = await resolveNodeRefForAuth(aliasRef, auth);
+                movedIdByRef.set(r.raw, id);
+                if (aliasRef === r.raw && r.literalLoc) fragmentByRef.delete(r.raw);
+                break;
+              } catch (e) {
+                if (e instanceof NodeNotFoundError) continue;
+                if (e instanceof AmbiguousLegacyUrnError) {
+                  // One bad historical address cannot suppress unrelated
+                  // readable results in an explicit batch (cor:api:040:03).
+                  break;
+                }
+                throw e;
+              }
+            }
+          }
+        };
+        await Promise.all(Array.from(
+          { length: Math.min(8, movedFallbacks.length) },
+          () => resolveFallbackWorker(),
+        ));
+        const movedIds = [...new Set(movedIdByRef.values())];
+        const movedProbes = movedIds.length
+          ? await db.node.findMany({
+              where: { id: { in: movedIds }, deletedAt: null, memory: { deletedAt: null } },
+              select: { id: true, memoryId: true },
+            })
+          : [];
+        const readableMemory = new Map<string, boolean>();
+        await Promise.all([...new Set(movedProbes.map((n) => n.memoryId))].map(async (memoryId) => {
+          readableMemory.set(memoryId, await canReadMemory(db, auth, memoryId));
+        }));
+        const allowedProbes = movedProbes.filter((n) => readableMemory.get(n.memoryId));
+        const movedRows = allowedProbes.length
+          ? await db.node.findMany({
+              where: { OR: allowedProbes.map((n) => ({ id: n.id, memoryId: n.memoryId })), deletedAt: null },
+              include: projectionInclude,
+            })
+          : [];
+        const movedRowById = new Map(movedRows.map((n) => [n.id, n]));
+        for (const r of movedFallbacks) {
+          const id = movedIdByRef.get(r.raw);
+          const row = id && movedRowById.get(id);
+          if (row) nodeByRef.set(r.raw, row as unknown as ReadProjectionNode & { id: string });
+          else unavailable.push(r.raw);
         }
 
         // PK refs: gate BEFORE fetching the projection, mirroring the URN path

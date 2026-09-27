@@ -50,8 +50,79 @@
 import type { PrismaClient } from '../../generated/prisma/index.js';
 import { isId as isIdFunc } from './shape.js';
 import { parseUrnInput, assertFullyQualifiedUrn } from '../urn.js';
-import { findMemoryByAliasedUrn } from '../urnAlias.js';
-import { NodeNotFoundError } from './errors.js';
+import { findLiveUrnAliasTargets } from '../urnAlias.js';
+import { AmbiguousLegacyUrnError, NodeNotFoundError } from './errors.js';
+
+/**
+ * Resolve a node's old composed address after the live memory/loc lookup
+ * missed. Alias rows carry no authority: re-query current node and memory
+ * liveness, then leave caller-specific content access to the caller's gate.
+ */
+async function findMovedNodes(
+  db: Pick<PrismaClient, 'node' | 'urnAlias'>,
+  bareUrns: readonly string[],
+  includeDeleted = false,
+): Promise<Array<{ id: string; memoryId: string }>> {
+  const live = new Map<string, { id: string; memoryId: string }>();
+  for (const bareUrn of new Set(bareUrns)) {
+    const rows = await findLiveUrnAliasTargets(db, 'NODE', bareUrn, (ids) =>
+      db.node.findMany({
+        where: {
+          id: { in: ids },
+          ...(includeDeleted ? {} : { deletedAt: null, memory: { deletedAt: null } }),
+        },
+        select: { id: true, memoryId: true },
+      }),
+      { all: true },
+    );
+    for (const row of rows) live.set(row.id, row);
+  }
+  return [...live.values()];
+}
+
+/** Find every live historical holder of one memory prefix before checking nodes. */
+async function findHistoricalMemories(
+  db: Pick<PrismaClient, 'memory' | 'urnAlias'>,
+  urns: readonly string[],
+  includeDeleted = false,
+): Promise<Array<{ id: string; urn: string }>> {
+  for (const urn of urns) {
+    const rows = await findLiveUrnAliasTargets(db, 'MEMORY', urn, (ids) =>
+      db.memory.findMany({
+        where: { id: { in: ids }, ...(includeDeleted ? {} : { deletedAt: null }) },
+        select: { id: true, urn: true },
+      }),
+      { all: true },
+    );
+    if (rows.length) return rows;
+  }
+  return [];
+}
+
+/**
+ * An ambiguous lookup is a visible refusal only if this caller can read at
+ * least one current claimant. The resolver itself has no principal or gate;
+ * every transport must apply its own node-content read predicate before
+ * exposing the ambiguity (cor:urn:030:02, cor:api:140:03).
+ */
+export async function isConcealedNodeRefAmbiguity(
+  db: Pick<PrismaClient, 'node'>,
+  error: unknown,
+  canReadMemoryId: (memoryId: string) => Promise<boolean>,
+): Promise<boolean> {
+  if (!(error instanceof AmbiguousLegacyUrnError) || !error.candidateNodeIds) return false;
+  const claimants = await db.node.findMany({
+    where: {
+      id: { in: [...error.candidateNodeIds] }, deletedAt: null,
+      memory: { deletedAt: null },
+    },
+    select: { memoryId: true },
+  });
+  for (const memoryId of new Set(claimants.map((n) => n.memoryId))) {
+    if (await canReadMemoryId(memoryId)) return false;
+  }
+  return true;
+}
 
 export async function resolveNodeRef(
   db: Pick<PrismaClient, 'node' | 'memory' | 'urnAlias'>,
@@ -146,48 +217,54 @@ export async function resolveNodeRef(
     const memoryUrnCandidates = isCanonical
       ? [parts.slice(0, -1).join('::'), parts.slice(0, -1).join(':')]
       : [`${parts[0]}:${parts[1]}`, `${parts[0]}::${parts[1]}`];
-    const memory =
-      // Liveness in the QUERY, not after it (PR #1080 review, Copilot P2).
-      // `??` only fires on a null, so an unfiltered primary lookup let a
-      // SOFT-DELETED holder of a re-used URN win the coalesce and suppress the
-      // alias arm entirely — the old URN then 404'd even though a live
-      // historical claimant existed and `resolveMemoryRef` would have found
-      // it. Filtering here makes "not live" mean "not found", which is what
-      // lets the alias arm run and matches the entity resolvers.
-      (await db.memory.findFirst({
-        where: {
-          urn: { in: memoryUrnCandidates },
-          ...(options?.includeDeleted ? {} : { deletedAt: null }),
-        },
-        select: { id: true, deletedAt: true },
-      })) ??
-      // #1079 — the memory may have been RENAMED since this node URN was
-      // published, and a node URN is the most-published identifier there is.
-      // This does NOT come for free from `resolveMemoryRef`'s alias fallback:
-      // this resolver never calls it, splitting the memory prefix out itself.
-      // A LIVE memory still wins, because this arm only runs on a miss above.
-      (await findMemoryByAliasedUrn(
-        db,
-        memoryUrnCandidates,
-        () => {
-          throw new NodeNotFoundError(ref);
-        },
-        { includeDeleted: options?.includeDeleted },
-      ));
+    // Liveness in the query, not after it (PR #1080 review): a soft-deleted
+    // holder of a re-used URN must not suppress the historical alias lookup.
+    const memory = await db.memory.findFirst({
+      where: {
+        urn: { in: memoryUrnCandidates },
+        ...(options?.includeDeleted ? {} : { deletedAt: null }),
+      },
+      select: { id: true, urn: true, deletedAt: true },
+    });
     if (memory) {
-      // The prefix names a memory row. Treat the body as
-      // `<memory-urn>:<loc>` and resolve strictly — soft-deleted
-      // memories produce a clean miss rather than a fall-through that
-      // could resolve to the wrong node in `contextMemoryId`.
-      if (!options?.includeDeleted && memory.deletedAt) throw new NodeNotFoundError(ref);
-      const loc = memLoc;
+      // A live node at the published address always wins. A live MEMORY row
+      // with no node at this loc does not: its URN may have been reused after
+      // the former memory was renamed, so the old node address can still be
+      // reached through that memory's alias.
       const node = await db.node.findUnique({
-        where: { loc_memoryId: { loc, memoryId: memory.id } },
+        where: { loc_memoryId: { loc: memLoc, memoryId: memory.id } },
         select: { id: true, deletedAt: true },
       });
-      if (!node || (!options?.includeDeleted && node.deletedAt)) throw new NodeNotFoundError(ref);
-      return { id: node.id };
+      if (node && (options?.includeDeleted || !node.deletedAt)) return { id: node.id };
     }
+    // #1079/#1391 — consult historical MEMORY holders even if another live
+    // memory now owns the prefix. A prior memory rename followed by a node
+    // move stored the NODE alias under that memory's CURRENT URN, while a
+    // newly re-used old memory may have no node at the requested loc. The
+    // old prefix itself conveys no authority; callers gate the resolved node.
+    const historicalMemories = await findHistoricalMemories(
+      db, memoryUrnCandidates, options?.includeDeleted,
+    );
+    const historicalIds = historicalMemories.map((m) => m.id).filter((id) => id !== memory?.id);
+    const historicalNodes = historicalIds.length
+      ? await db.node.findMany({
+          where: {
+            memoryId: { in: historicalIds }, loc: memLoc,
+            ...(options?.includeDeleted ? {} : { deletedAt: null }),
+          },
+          select: { id: true },
+        })
+      : [];
+    const moved = await findMovedNodes(db, [
+      normalized,
+      ...(memory ? [`${memory.urn}:${memLoc}`] : []),
+      ...historicalMemories.map((m) => `${m.urn}:${memLoc}`),
+    ], options?.includeDeleted);
+    const candidates = new Map([...historicalNodes, ...moved].map((n) => [n.id, n]));
+    if (candidates.size > 1) {
+      throw new AmbiguousLegacyUrnError(ref, [...candidates.keys()]);
+    }
+    if (candidates.size === 1) return { id: candidates.values().next().value!.id };
     if (strictUrnNode) {
       // Explicit `urn:node:` with no live memory at the named prefix
       // — reject without falling back to short-loc.
@@ -214,6 +291,28 @@ export async function resolveNodeRef(
     where: { loc_memoryId: { loc: normalized, memoryId: contextMemoryId } },
     select: { id: true, deletedAt: true },
   });
-  if (!node || (!options?.includeDeleted && node.deletedAt)) throw new NodeNotFoundError(ref);
-  return { id: node.id };
+  if (node && (options?.includeDeleted || !node.deletedAt)) return { id: node.id };
+  // Internal edge/write callers may pass a short loc pinned to a context
+  // memory. Its live occupant still wins; on a miss, compose that memory's
+  // current and historical URNs and consult the same NODE aliases as a full
+  // reference. A short loc stays scoped to the current memory even if the
+  // aliased node has since moved to a different memory.
+  const contextMemory = await db.memory.findUnique({
+    where: { id: contextMemoryId }, select: { urn: true, legacyUrn: true, deletedAt: true },
+  });
+  if (!contextMemory || (!options?.includeDeleted && contextMemory.deletedAt)) {
+    throw new NodeNotFoundError(ref);
+  }
+  const oldPrefixes = await db.urnAlias.findMany({
+    where: { entityType: 'MEMORY', entityId: contextMemoryId },
+    select: { urn: true },
+  });
+  const moved = (await findMovedNodes(db, [
+    `${contextMemory.urn}:${normalized}`,
+    ...(contextMemory.legacyUrn ? [`${contextMemory.legacyUrn}:${normalized}`] : []),
+    ...oldPrefixes.map((a) => `${a.urn}:${normalized}`),
+  ], options?.includeDeleted)).filter((candidate) => candidate.memoryId === contextMemoryId);
+  if (moved.length > 1) throw new AmbiguousLegacyUrnError(ref, moved.map((n) => n.id));
+  if (moved.length === 1) return { id: moved[0]!.id };
+  throw new NodeNotFoundError(ref);
 }

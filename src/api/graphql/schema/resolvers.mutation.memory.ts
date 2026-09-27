@@ -70,7 +70,7 @@ import {
 } from '../../../lib/entityRef/errors.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
-import { resolveNodeRef } from '../../../lib/entityRef/nodeRef.js';
+import { resolveNodeRefForCaller } from './resolvers.nodeRefAccess.js';
 import { resolveUserRefOrEmail } from '../../../lib/entityRef/userRef.js';
 import { canReadMemory } from '../../../mcp/access-control.js';
 import { MemoryNotFoundError } from '../../../lib/asset/gate.js';
@@ -1279,7 +1279,7 @@ export const memoryMutations = {
       // NODE_NOT_FOUND rather than a raw resolver throw.
       let parentId: string;
       try {
-        ({ id: parentId } = await resolveNodeRef(ctx.db, parentRef));
+        ({ id: parentId } = await resolveNodeRefForCaller(ctx, parentRef));
       } catch (e) {
         if (e instanceof NodeNotFoundError) {
           throw new GraphQLError(`Node not found: "${parentRef}"`, {
