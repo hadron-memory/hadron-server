@@ -167,24 +167,39 @@ export function verifyPageToken(
   // (typed stale restart) from a malformed payload (INVALID). A signed but
   // shape-broken token with no `o` is malformed, not old-order
   // (#3166 classification finding).
+  // FULL structural completeness — every array any v2 continuation carries
+  // (pre-C or current) must be present with consistent parallel lengths and
+  // in-bounds dictionary indices, BEFORE the ordering classification. A
+  // signed payload missing arrays or referencing absent registers is
+  // malformed, not an authentic old-order token (#3170/#3171).
+  const targetArrays = ['t_w', 't_c', 't_r', 't_mo', 't_seen', 't_head', 't_prior', 'u_unread', 'u_ment', 'u_first', 'u_last'] as const;
+  const channelArrays = ['c_inc', 'c_min', 'c_max', 'c_num'] as const;
   const arraysValid =
     Array.isArray(value.W) && Array.isArray(value.C) && Array.isArray(value.R) &&
-    Array.isArray(value.c_inc) &&
-    Array.isArray(value.t_w) && Array.isArray(value.t_c) &&
-    value.t_w.length === value.t_c.length;
-  // Dictionary indices must be in bounds — a signed token with out-of-range
-  // references is malformed regardless of ordering marker (#3166).
-  const indicesValid = arraysValid &&
-    (value.t_w as number[]).every((w, i) =>
-      Number.isInteger(w) && w >= 0 && w < (value.W as string[]).length &&
-      Number.isInteger((value.t_c as number[])[i]) && (value.t_c as number[])[i] >= 0 && (value.t_c as number[])[i] < (value.C as string[]).length);
+    channelArrays.every((key) => Array.isArray((value as Record<string, unknown>)[key])) &&
+    targetArrays.every((key) => Array.isArray((value as Record<string, unknown>)[key]));
+  const parallelValid = arraysValid && targetArrays.every((key) =>
+    ((value as Record<string, unknown>)[key] as unknown[]).length === (value.t_w as number[]).length);
+  const channelParallelValid = parallelValid &&
+    channelArrays.every((key) => ((value as Record<string, unknown>)[key] as unknown[]).length === (value.C as string[]).length);
+  const scalarValid = channelParallelValid &&
+    typeof value.c_done === 'string' && typeof value.e_emitted === 'string' &&
+    typeof value.dg === 'string' && typeof value.next === 'number';
+  const indicesValid = channelParallelValid && scalarValid &&
+    (value.t_w as number[]).every((w, i) => {
+      const tc = (value.t_c as number[])[i];
+      const tr = (value.t_r as number[])[i];
+      return Number.isInteger(w) && w >= 0 && w < (value.W as string[]).length &&
+        Number.isInteger(tc) && tc >= 0 && tc < (value.C as string[]).length &&
+        Number.isInteger(tr) && tr >= 0 && tr < (value.R as string[]).length;
+    });
   const shapeValid =
     value.v === 2 &&
     value.kind === 'team-attention-page' &&
     (value.op === 'poll' || value.op === 'preview') &&
     typeof value.appId === 'string' &&
     typeof value.userId === 'string' &&
-    arraysValid && indicesValid;
+    parallelValid && channelParallelValid && scalarValid && indicesValid;
   if (!shapeValid) {
     fail('Invalid team-attention page token.', 'INVALID_ATTENTION_PAGE');
   }

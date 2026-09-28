@@ -538,32 +538,42 @@ describe('family 13 — #3123 long-loc liveness', () => {
 });
 
 describe('family 14 — review #3153', () => {
-  it('a GENUINELY valid pre-C continuation gets STALE_PAGE; a signed but malformed no-o token gets INVALID (#3166)', async () => {
+  it('a genuinely-issued pre-C shape gets STALE_PAGE; every signed malformed variant gets INVALID (#3170/#3171)', async () => {
     const { signPageToken } = await import('./teamAttentionPage.js');
     await post('one');
     const secret = process.env.TEAM_ATTENTION_TOKEN_SECRET || process.env.JWT_SECRET || '';
-    // Genuine pre-C shape: valid dictionaries and indices, NO `o`, NO `c_front`
-    // (fields that did not exist before the C-ordering switch).
-    const oldOrder: Record<string, unknown> = {
-      v: 2, kind: 'team-attention-page', op: 'poll', appId: app.id, userId: user.id, ts: Date.now(),
-      W: [worker.id], C: [channel.id], R: ['reg-1'], t_w: [0], t_c: [0], t_r: [0], t_mo: [0],
-      t_seen: [0], t_head: [1], t_prior: [0], c_done: '', c_num: [''], c_inc: [1],
-      c_min: [0], c_max: [1], u_unread: [0], u_ment: [0], u_first: [0], u_last: [0],
-      e_emitted: '', q: [], next: 0, dg: 'x',
-    };
-    const signedOld = signPageToken(oldOrder as never, secret);
+    // Mint a REAL current continuation, then strip `o` and `c_front` — the
+    // exact transformation an actually-issued pre-C page underwent.
+    const current = await teamAttentionPage(userCtx(), app.id, {});
+    expect(current.scanComplete).toBe(true); // tiny scan final page — mint a paged one instead
+    await post('two');
+    await post('three');
+    const paged = await teamAttentionPage(userCtx(), app.id, { scanLimit: 1 });
+    expect(paged.scanComplete).toBe(false);
+    const realPayload = JSON.parse(Buffer.from(paged.nextPage!.split('.')[0], 'base64url').toString('utf-8'));
+    const preC: Record<string, unknown> = { ...realPayload };
+    delete preC.o;
+    delete preC.c_front;
+    const signedOld = signPageToken(preC as never, secret);
     if ('tooLarge' in signedOld) throw new Error('unexpected tooLarge');
     await expect(teamAttentionPage(userCtx(), app.id, { page: (signedOld as { token: string }).token })).rejects.toMatchObject({
       extensions: { code: 'TEAM_ATTENTION_STALE_PAGE' },
     });
-    // Signed but MALFORMED no-o token: broken dictionary indices (t_w references
-    // a nonexistent worker) — INVALID, not the old-order restart.
-    const malformed: Record<string, unknown> = { ...oldOrder, t_w: [99] };
-    const signedBad = signPageToken(malformed as never, secret);
-    if ('tooLarge' in signedBad) throw new Error('unexpected tooLarge');
-    await expect(teamAttentionPage(userCtx(), app.id, { page: (signedBad as { token: string }).token })).rejects.toMatchObject({
-      extensions: { code: 'INVALID_ATTENTION_PAGE' },
-    });
+    // Chip's three separately-signed malformed variants (#3171) — each must
+    // get INVALID, not the old-order restart.
+    const variants: Array<[string, Record<string, unknown>]> = [
+      ['t_r references absent register', { ...preC, R: [], t_r: [0] }],
+      ['missing c_num array', (() => { const v = { ...preC }; delete v.c_num; return v; })()],
+      ['missing t_r array', (() => { const v = { ...preC }; delete v.t_r; return v; })()],
+      ['broken t_w index', { ...preC, t_w: [99] }],
+    ];
+    for (const [label, variant] of variants) {
+      const signed = signPageToken(variant as never, secret);
+      if ('tooLarge' in signed) throw new Error(`unexpected tooLarge: ${label}`);
+      await expect(teamAttentionPage(userCtx(), app.id, { page: (signed as { token: string }).token })).rejects.toMatchObject({
+        extensions: { code: 'INVALID_ATTENTION_PAGE' },
+      });
+    }
   });
 
   it('a counted message followed by an own post keeps the COUNTED frontier on the counted row (#3153 finding 3)', async () => {
