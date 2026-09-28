@@ -229,6 +229,42 @@ describe('encryptMemory — locked conversion (#1346)', () => {
     expect(await db.nodeRevision.count({ where: { nodeId } })).toBe(0);
   });
 
+  it('does not mint a plaintext reconcile revision for a row deleted after enumeration', async () => {
+    const cleanDeleted = await db.node.create({
+      data: { id: generateId(), memoryId, loc: 'clean-delete', name: 'clean-delete', content: 'clean' },
+    });
+    const findMany = db.node.findMany.bind(db.node);
+    let injected = false;
+    const scan = vi.spyOn(db.node, 'findMany').mockImplementation((async (args: Parameters<typeof findMany>[0]) => {
+      const rows = await findMany(args);
+      if (!injected && args?.take === 200 && args.where?.memoryId === memoryId) {
+        injected = true;
+        const deletedAt = new Date();
+        // This combines an unrevisioned raw content edit with a soft delete.
+        // Reconciliation before the liveness check used to persist these
+        // canaries as a NEW plaintext NodeRevision after the memory flip.
+        await db.node.update({
+          where: { id: nodeId },
+          data: {
+            content: 'deleted canary', abstract: 'deleted abstract',
+            data: { secret: 'deleted data' }, deletedAt,
+          },
+        });
+        await db.node.update({ where: { id: cleanDeleted.id }, data: { deletedAt } });
+      }
+      return rows;
+    }) as never);
+    try {
+      await resolvers.Mutation.encryptMemory({}, { memoryId, dataKey }, ownerCtx());
+    } finally {
+      scan.mockRestore();
+    }
+    expect(injected).toBe(true);
+    expect((await db.memory.findUniqueOrThrow({ where: { id: memoryId } })).isEncrypted).toBe(true);
+    expect((await db.node.findUniqueOrThrow({ where: { id: nodeId } })).deletedAt).not.toBeNull();
+    expect(await db.nodeRevision.count({ where: { nodeId: { in: [nodeId, cleanDeleted.id] } } })).toBe(0);
+  });
+
   it('allows only one of two callers that both saw plaintext to claim the encryption key', async () => {
     const otherKey = Buffer.alloc(32, 8).toString('base64');
     const findMemory = db.memory.findUniqueOrThrow.bind(db.memory);

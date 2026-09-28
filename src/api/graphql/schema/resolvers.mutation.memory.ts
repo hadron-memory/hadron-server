@@ -2240,13 +2240,21 @@ export const memoryMutations = {
           cursor = nodes[nodes.length - 1].id;
           for (const node of nodes) {
             const didConvert = await ctx.db.$transaction(async (tx) => {
-              // The revision helper takes FOR UPDATE on this node, reconciles
-              // any raw drift as its own revision, and scopes that write to the
-              // memory the caller was authorized to convert. Each transaction
+              // Lock first, then reject a row deleted or moved since the ID
+              // page. Reconciliation must NOT run on a tombstone: a raw edit
+              // plus deletion can otherwise mint a new plaintext revision in
+              // an already-encrypted memory (#1346, Chip QA). Each transaction
               // holds only one node lock; id pagination gives a stable order.
-              const beforeLock = await tx.node.findUnique({
-                where: { id: node.id }, select: { revSeq: true },
+              const locked = await tx.$queryRaw<Array<{ id: string }>>`
+                SELECT id FROM nodes WHERE id = ${node.id} FOR UPDATE
+              `;
+              if (locked.length === 0) return false;
+              const lockedNode = await tx.node.findUnique({
+                where: { id: node.id },
               });
+              if (!lockedNode || lockedNode.memoryId !== resolvedMemoryId || lockedNode.deletedAt) return false;
+              // The helper reuses our row lock, scopes the reconcile to the
+              // authorized memory, and snapshots raw drift before conversion.
               const revision = await ensureCurrentNodeRevisionInTransaction(tx, node.id, {
                 expectedMemoryId: resolvedMemoryId,
               });
@@ -2259,7 +2267,7 @@ export const memoryMutations = {
               // once the memory flag is set, no new plaintext history may
               // become visible at rest. Ordinary pre-existing revisions are
               // outside this conversion's revision semantics.
-              if (beforeLock && revision > beforeLock.revSeq) {
+              if (revision > lockedNode.revSeq) {
                 const reconciled = await tx.nodeRevision.findFirst({
                   where: {
                     nodeId: node.id,
