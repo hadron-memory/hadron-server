@@ -628,7 +628,7 @@ function holdsContentReadIndependently(ctx: Context, memoryId: string): Promise<
 async function sameAppAttachAdmitted(
   ctx: Context,
   agent: { id: string; organizationId: string | null; ownerUserId: string | null },
-  memory: { appId: string | null; class: string; ownerUserId: string | null; userMemoryOfAgentId: string | null },
+  memory: { appId: string | null; class: string; organizationId: string | null; ownerUserId: string | null; userMemoryOfAgentId: string | null },
 ): Promise<boolean> {
   if (memory.appId == null) return false;
   if (memory.class !== 'knowledge' && memory.class !== 'group') return false;
@@ -644,6 +644,9 @@ async function sameAppAttachAdmitted(
     select: { id: true, organizationId: true, ownerUserId: true },
   });
   if (!app) return false;
+  // A stale appId on a transferred memory does not grant the destination
+  // tenant's content to the App's installed Agents.
+  if (app.organizationId !== memory.organizationId || app.ownerUserId !== memory.ownerUserId) return false;
   // deleteApp and App uninstall update the App row without removing the
   // AppAgent join. Lock and recheck lifecycle inside the attach transaction:
   // the earlier lookup identifies the row, not its authoritative live state.
@@ -694,11 +697,8 @@ async function sameAppAttachAdmitted(
     `;
     if (!license[0] || !isLifecycleActive(license[0])) return false;
   }
-  // Mutation #37 is an expected survivor under today's other gates: an
-  // administrator of a same-org Agent is also an administrator of this App;
-  // a foreign Agent owner fails the subsequent memory/Agent tenant check.
-  // Keep the explicit App-admin check as this branch's local contract if
-  // either surrounding gate changes.
+  // A licensed foreign Agent is permitted below for this App's read audience,
+  // so the caller must explicitly administer this App as well as the Agent.
   try {
     await requireOwnerOrOrgRole(ctx, app, 'ADMIN');
   } catch (error) {
@@ -723,8 +723,9 @@ async function sameAppAttachAdmitted(
  * Two conditions, both required:
  *
  * 1. **Tenancy.** The memory must belong to the agent's own tenant (same org,
- *    or the same owning user for a spec-047 user-owned agent), or be PUBLIC —
- *    and PUBLIC only for `read`, since a public audience is a READ audience.
+ *    or the same owning user for a spec-047 user-owned agent), be genuinely
+ *    PUBLIC, or be the knowledge of an App where the Agent is live-installed
+ *    and licensed. The latter two exceptions grant only `read`.
  *    Holger's ruling (2026-09-25) refuses a cross-tenant non-public attach even
  *    when the caller can read the memory, matching `attachMemoryToApp`'s
  *    `ORGANIZATION_MISMATCH` and the PUBLIC-only cross-org subscription rule.
@@ -811,6 +812,9 @@ export async function requireAgentMemoryGrant(
   const sameTenant =
     (agent.organizationId != null && agent.organizationId === memory.organizationId) ||
     (agent.ownerUserId != null && agent.ownerUserId === memory.ownerUserId);
+  // The live same-App READ branch is an App-local audience even for a licensed
+  // cross-tenant Agent. createMemoryInApp provisions that same link, so the
+  // generic attach path must be able to restore it for an authorized caller.
   // A PUBLIC *column* is not a public AUDIENCE (@codex, PR #1357). An
   // app-scoped row is App-internal even when marked PUBLIC (#653), and a
   // personal/private or spec-047 user-owned row is owner-only regardless — so
@@ -823,7 +827,7 @@ export async function requireAgentMemoryGrant(
     !isExcludedFromCoveredSet(memory) &&
     memory.ownerUserId == null;
   const publicRead = role === 'read' && genuinelyPublic;
-  if (!sameTenant && !publicRead) {
+  if (!sameTenant && !publicRead && !(role === 'read' && sameAppRead)) {
     throw new GraphQLError(
       genuinelyPublic
         ? 'A PUBLIC memory from another tenant can only be attached read-only — its audience is a read audience.'

@@ -26,6 +26,7 @@
  */
 import { GraphQLError } from 'graphql';
 import type { PrismaClient, Prisma } from '../generated/prisma/index.js';
+import { activeAgentInstallLicenseIds } from './appAgent.js';
 
 type Db = PrismaClient | Prisma.TransactionClient;
 
@@ -206,6 +207,11 @@ export async function assertMemoryVisibilityChangeAllowed(
  * A legacy writable link on a PUBLIC agent is also revoked, even when the
  * post-transfer memory and agent share a tenant. New links cannot take that
  * shape, but a transfer must restore the invariant for old rows.
+ * A read link to the memory's own App remains valid for an Agent with a live,
+ * licensed install there, even when that Agent belongs to another tenant.
+ * The App confines its audience; createMemoryInApp provisions exactly this
+ * link for cross-org installs. A moved memory whose tenant no longer matches
+ * its App receives no such exemption.
  *
  * Soft-delete, not hard: the row is an audit record of a grant that once
  * existed, and `addMemoryToAgent` resurrects it if the memory becomes PUBLIC
@@ -251,8 +257,28 @@ export async function revokeLinksForeignToTenant(
       deletedAt: null,
       ...(writableOnly ? { role: 'read-write' } : {}),
     },
-    select: { id: true, role: true, agent: { select: { organizationId: true, ownerUserId: true, visibility: true } } },
+    select: { id: true, role: true, agentId: true, agent: { select: { organizationId: true, ownerUserId: true, visibility: true } } },
   });
+  const appKnowledge = memory.appId != null && (memory.class === 'knowledge' || memory.class === 'group') &&
+    memory.userMemoryOfAgentId == null;
+  let appTenantMismatch = false;
+  let licensedAppReaders = new Set<string>();
+  if (appKnowledge && memory.appId != null) {
+    const app = await db.app.findUnique({
+      where: { id: memory.appId },
+      select: { organizationId: true, ownerUserId: true, deletedAt: true, uninstalledAt: true },
+    });
+    appTenantMismatch = !!app &&
+      (app.organizationId !== memory.organizationId || app.ownerUserId !== memory.ownerUserId);
+    if (app && !appTenantMismatch && app.deletedAt == null && app.uninstalledAt == null) {
+      const readerIds = links.filter((link) => link.role === 'read').map((link) => link.agentId);
+      const installs = readerIds.length === 0 ? [] : await db.appAgent.findMany({
+        where: { appId: memory.appId, agentId: { in: readerIds }, agent: { deletedAt: null } },
+        select: { agent: { select: { id: true, organizationId: true, ownerUserId: true } } },
+      });
+      licensedAppReaders = await activeAgentInstallLicenseIds(db, app, installs.map((row) => row.agent));
+    }
+  }
   const invalid = links.filter((l) => {
     const sameTenant =
       (l.agent.organizationId != null && l.agent.organizationId === memory.organizationId) ||
@@ -263,7 +289,8 @@ export async function revokeLinksForeignToTenant(
     const publicAgentWriter =
       l.role === 'read-write' && l.agent.visibility === 'PUBLIC' &&
       !isExcludedFromCoveredSet(memory);
-    return !sameTenant || publicAgentWriter;
+    return appTenantMismatch ||
+      (!sameTenant && !(l.role === 'read' && licensedAppReaders.has(l.agentId))) || publicAgentWriter;
   });
   if (invalid.length === 0) return 0;
   const result = await db.agentMemoryItem.updateMany({

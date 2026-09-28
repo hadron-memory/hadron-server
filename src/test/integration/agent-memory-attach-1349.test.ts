@@ -1778,20 +1778,19 @@ describe('#1357 round 8 — the same-App install check holds a lock (@copilot, P
     });
     await createDbAppAgent(db, app.id, agent.id);
     await db.agentOrgGrant.create({ data: { orgId: attackerOrgId, agentId: agent.id, activatedAt: new Date() } });
-    // Legacy mismatch: the scoped row names this App but retains its former
-    // org. That keeps the Agent/memory tenancy equal so the install license is
-    // the deciding gate; normal new writes align memory and App orgs.
+    // The memory belongs to the App's tenant, not the Agent's. The live
+    // cross-org license is therefore the deciding gate.
     const memory = await db.memory.create({
       data: {
-        id: generateId(), organizationId: victimOrgId, appId: app.id,
-        urn: `victim-${suffix}:licensed-app-know`, name: 'licensed-app-know',
+        id: generateId(), organizationId: attackerOrgId, appId: app.id,
+        urn: `attacker-${suffix}:licensed-app-know`, name: 'licensed-app-know',
         class: 'knowledge', visibility: 'ORGANIZATION',
       } as never,
     });
     const agentArg = { id: agent.id, organizationId: victimOrgId, ownerUserId: null, visibility: 'ORGANIZATION' };
     const memoryArg = {
       id: memory.id, class: 'knowledge', visibility: 'ORGANIZATION', userId: null,
-      ownerUserId: null, organizationId: victimOrgId, appId: app.id, userMemoryOfAgentId: null,
+      ownerUserId: null, organizationId: attackerOrgId, appId: app.id, userMemoryOfAgentId: null,
     };
     await db.$transaction(async (tx) => {
       expect(await requireAgentMemoryGrant(
@@ -1878,5 +1877,63 @@ describe('#1357 round 8 — the same-App install check holds a lock (@copilot, P
     }, { timeout: 15_000 });
     expect(uninstall).toMatch(/lock timeout|canceling statement/i);
     expect(await db.appAgent.count({ where: { appId: app.id, agentId: agent.id } })).toBe(1);
+  });
+});
+
+describe('#1357 Claude review — licensed cross-org App knowledge survives a visibility write', () => {
+  const CREATE = `mutation($app: ID!, $agent: ID!, $name: String!) {
+    createMemoryInApp(appRef: $app, agentRef: $agent, memoryClass: knowledge, name: $name) { id urn }
+  }`;
+  const TOUCH = `mutation($id: ID!) { updateMemory(id: $id, visibility: ORGANIZATION) { id } }`;
+
+  it('keeps the provisioned read link, revokes an unrelated foreign link, and permits an authorized restore', async () => {
+    const { app, rawKey: appKey } = await createDbAppWithKey(db, 'claude-cross-org', attackerOrgId);
+    const agent = await db.agent.create({
+      data: { id: generateId(), organizationId: victimOrgId, name: 'installed foreign', urn: `victim-${suffix}:installed-foreign` } as never,
+    });
+    await createDbAppAgent(db, app.id, agent.id);
+    await db.agentOrgGrant.create({ data: { orgId: attackerOrgId, agentId: agent.id, activatedAt: new Date() } });
+    const created = await gql(key.attacker!, CREATE, { app: app.id, agent: agent.id, name: 'Cross org runbook' });
+    expect(created.errors, JSON.stringify(created.errors)).toBeUndefined();
+    const memoryId = created.data!.createMemoryInApp.id as string;
+    const memoryUrn = created.data!.createMemoryInApp.urn as string;
+    const node = await db.node.findFirstOrThrow({ where: { memoryId } });
+    await db.node.update({ where: { id: node.id }, data: { content: 'CROSS ORG RUNBOOK' } });
+    expect((await gql(appKey, READ, { r: node.id })).data?.node?.content).toBe('CROSS ORG RUNBOOK');
+
+    const unrelated = await db.agent.create({
+      data: { id: generateId(), organizationId: victimOrgId, name: 'uninstalled foreign', urn: `victim-${suffix}:uninstalled-foreign` } as never,
+    });
+    await db.agentMemoryItem.create({ data: { id: generateId(), agentId: unrelated.id, memoryId, role: 'read' } });
+    const touch = await gql(key.attacker!, TOUCH, { id: memoryId });
+    expect(touch.errors, JSON.stringify(touch.errors)).toBeUndefined();
+    expect((await db.agentMemoryItem.findFirstOrThrow({ where: { agentId: agent.id, memoryId } })).deletedAt).toBeNull();
+    expect((await db.agentMemoryItem.findFirstOrThrow({ where: { agentId: unrelated.id, memoryId } })).deletedAt).not.toBeNull();
+    expect((await gql(appKey, READ, { r: node.id })).data?.node?.content).toBe('CROSS ORG RUNBOOK');
+
+    // Both grants belong to the caller: App admin and foreign Agent admin.
+    const both = await db.user.create({ data: { id: generateId(), handle: `both-${suffix}` } });
+    for (const organizationId of [attackerOrgId, victimOrgId]) {
+      await db.orgMember.create({ data: { organizationId, userId: both.id, role: 'ADMIN' } });
+    }
+    const bothKey = (await mintUserApiKey(db, {
+      userId: both.id, label: 'k', createdBy: both.id, issuedVia: 'test', oauthScopes: ['account'],
+    })).rawKey;
+    await db.agentMemoryItem.updateMany({ where: { agentId: agent.id, memoryId }, data: { deletedAt: new Date() } });
+    expect((await gql(appKey, READ, { r: node.id })).data?.node).toBeNull();
+    const restored = await gql(bothKey, ATTACH, { g: agent.id, m: memoryUrn, r: 'read' });
+    expect(restored.errors, JSON.stringify(restored.errors)).toBeUndefined();
+    expect((await gql(appKey, READ, { r: node.id })).data?.node?.content).toBe('CROSS ORG RUNBOOK');
+
+    // A transfer to the Agent's org makes the link same-tenant with the Agent,
+    // but the memory is no longer in its App's tenant. The old App must lose it.
+    const moved = await gql(bothKey,
+      `mutation($id: ID!, $org: ID!) { updateMemory(id: $id, organizationId: $org) { id } }`,
+      { id: memoryId, org: victimOrgId });
+    expect(moved.errors, JSON.stringify(moved.errors)).toBeUndefined();
+    expect((await db.agentMemoryItem.findFirstOrThrow({ where: { agentId: agent.id, memoryId } })).deletedAt).not.toBeNull();
+    expect((await gql(appKey, READ, { r: node.id })).data?.node).toBeNull();
+    const staleAttach = await gql(bothKey, ATTACH, { g: agent.id, m: memoryId, r: 'read' });
+    expect(code(staleAttach)).toBe('MEMORY_NOT_FOUND');
   });
 });

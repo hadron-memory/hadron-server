@@ -26,6 +26,8 @@
 import type { PrismaClient, Prisma } from '../generated/prisma/index.js';
 import { isLifecycleActive } from '@hadron-memory/access-control';
 
+type Db = PrismaClient | Prisma.TransactionClient;
+
 /** Legacy null uses the read default; unknown persisted strings grant nothing. */
 export function isGrantedAgentMemoryRole(role: string | null | undefined): boolean {
   const value = role ?? 'read';
@@ -34,7 +36,7 @@ export function isGrantedAgentMemoryRole(role: string | null | undefined): boole
 
 /** Resolve install licenses in bounded queries for a multi-Agent App fold. */
 export async function activeAgentInstallLicenseIds(
-  db: PrismaClient,
+  db: Db,
   app: { organizationId: string | null; ownerUserId: string | null },
   agents: Array<{ id: string; organizationId: string | null; ownerUserId: string | null }>,
 ): Promise<Set<string>> {
@@ -101,7 +103,7 @@ export async function activeAgentInstallLicenseIds(
 
 /** The same cross-org install license used by the App access fold. */
 export async function hasActiveAgentInstallLicense(
-  db: PrismaClient,
+  db: Db,
   app: { organizationId: string | null; ownerUserId: string | null },
   agent: { id: string; organizationId: string | null; ownerUserId: string | null },
 ): Promise<boolean> {
@@ -177,7 +179,7 @@ export async function activeAppInstallLicenseIdsForAgent(
 
 /** A retained AppAgent pointer is authority only while its install is live. */
 export async function isAgentInstalledAndLicensed(
-  db: PrismaClient,
+  db: Db,
   appId: string,
   agentId: string,
 ): Promise<boolean> {
