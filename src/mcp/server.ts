@@ -8901,8 +8901,8 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         app: z.string().optional().describe('The App — an App URN or ID. Omit to use the selected App.'),
         since: z.string().optional().describe('v1-shaped watermark token to start a scan from. Do not pass with page. Do not pass "now".'),
         page: z.string().optional().describe('Opaque continuation returned by the preceding page. Do not pass with since.'),
-        limit: z.number().optional().describe('Max Worker/Channel pairs to emit this call (default 50, cap 100).'),
-        scanLimit: z.number().optional().describe('Max encrypted rows to decrypt this call (default 50, cap 100).'),
+        limit: z.number().int().optional().describe('Max Worker/Channel pairs to emit this call (default 50, cap 100).'),
+        scanLimit: z.number().int().optional().describe('Max encrypted rows to decrypt or aggregate this call (default 50, cap 100).'),
       },
       async ({ app, since, page, limit, scanLimit }) => {
         let appRef = app;
@@ -8932,7 +8932,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         app: z.string().optional().describe('The App — an App URN or ID. Omit to use the selected App.'),
         action: z.enum(['preview', 'apply']).describe('preview makes no writes and pages; apply requires the exact final-page proof.'),
         page: z.string().optional().describe('preview continuation from the preceding preview page.'),
-        limit: z.number().optional().describe('Max Worker/Channel pairs to emit per preview call (default 50, cap 100).'),
+        limit: z.number().int().optional().describe('Max Worker/Channel pairs to emit per preview call (default 50, cap 100).'),
         proof: z.string().optional().describe('Required for action:"apply"; returned by the final preview page.'),
       },
       async ({ app, action, page, limit, proof }) => {

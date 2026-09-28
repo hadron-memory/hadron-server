@@ -490,3 +490,38 @@ describe('family 9 — consolidated review corrections (#3051/#3053/#3054)', () 
     if (!('tooLarge' in signed)) expect(signed.token.length).toBeLessThan(65_536);
   });
 });
+
+describe('family 10 — Codex #1428 findings', () => {
+  it('plaintext channels page under the scan budget instead of one aggregate (P1)', async () => {
+    // A plaintext memory + channel + register for the same worker.
+    const plainMemory = await db.memory.create({
+      data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:plain`, name: 'plain', class: 'knowledge', visibility: 'ORGANIZATION' },
+    });
+    const madePlain = await ensureChannelWithRoot(db, { memoryId: plainMemory.id, loc: 'chats:plain', name: 'plain-team', createdBy: user.id });
+    await db.registerEntry.create({
+      data: { id: generateId(), appId: app.id, channelId: madePlain.channel.id, attendeeWorkerId: worker.id, role: 'BOTH' },
+    });
+    for (let i = 0; i < 7; i++) {
+      await appendChatMessage(db, { id: madePlain.rootId, memoryId: plainMemory.id, loc: 'chats:plain' }, { id: plainMemory.id, isEncrypted: false },
+        async ({ tx, seq, msgNum }) => tx.node.create({
+          data: { id: generateId(), memoryId: plainMemory.id, loc: `chats:plain:messages:${msgNum}`, name: msgNum, nodeType: 'chat-message', seq, content: `plain ${i}`, data: { mentions: i === 6 ? ['dara'] : [] } },
+        }), { asChannel: true });
+    }
+    // Budget 2: the plaintext span must PAGE (no one-shot aggregate), and the
+    // encrypted channel also present must not be starved.
+    const p1 = await teamAttentionPage(userCtx(), app.id, { scanLimit: 2 });
+    expect(p1.scanComplete).toBe(false);
+    const drained = await drainPages({}, { scanLimit: 2 });
+    const plain = drained.items.filter((i) => i.channel === madePlain.channel.id && i.worker === worker.id);
+    expect(plain[0]).toMatchObject({ unread: 7, unreadMentions: 1 });
+  });
+
+  it('fractional pagination budgets are refused loudly at the door (P2)', async () => {
+    await expect(teamAttentionPage(userCtx(), app.id, { scanLimit: 1.5 })).rejects.toMatchObject({
+      extensions: { code: 'BAD_USER_INPUT' },
+    });
+    await expect(teamAttentionPage(userCtx(), app.id, { limit: 2.5 })).rejects.toMatchObject({
+      extensions: { code: 'BAD_USER_INPUT' },
+    });
+  });
+});

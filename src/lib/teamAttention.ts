@@ -404,7 +404,14 @@ function decryptRoutingEnvelope(candidate: EncryptedCandidateRow): Record<string
  * targets in memory. A page materializes at most PAGE_SIZE rows per active
  * Channel; it never duplicates an encrypted backlog per Worker.
  */
-async function unreadCounts(db: Context['db'], targets: Target[]): Promise<Map<string, CountRow>> {
+async function unreadCounts(
+  db: Context['db'],
+  targets: Target[],
+  /** Optional seq window [windowLow, windowHigh] intersecting every target's
+   * span — the paged engine aggregates plaintext channels in bounded windows
+   * so server work, not just row transfer, stays within the request budget. */
+  seqWindow?: { low: number; high: number },
+): Promise<Map<string, CountRow>> {
   if (targets.length === 0) return new Map();
   const memories = await db.memory.findMany({
     where: { id: { in: [...new Set(targets.map((target) => target.memoryId))] } },
@@ -419,7 +426,9 @@ async function unreadCounts(db: Context['db'], targets: Target[]): Promise<Map<s
     const values = plaintextTargets.map((target) => Prisma.sql`(
       ${target.workerId}, ${target.channelId}, ${target.memoryId},
       ${escapePrismaLikePattern(`${target.channelLoc}:messages:`)},
-      ${target.seen}, ${target.head}, ${target.mentionOnly}, ${JSON.stringify(target.mentionTokens)}::jsonb
+      ${seqWindow ? Math.max(target.seen, seqWindow.low) : target.seen},
+      ${seqWindow ? Math.min(target.head, seqWindow.high) : target.head},
+      ${target.mentionOnly}, ${JSON.stringify(target.mentionTokens)}::jsonb
     )`);
     const rows = await db.$queryRaw<PlaintextCountRow[]>(Prisma.sql`
       WITH targets(worker_id, channel_id, memory_id, loc_prefix, seen, head, mention_only, mention_tokens) AS (
@@ -609,8 +618,10 @@ async function pagedScanStep(
   db: Context['db'],
   targets: Target[],
   channelIndexOf: Map<string, number>,
-  /** Channel index → live {memoryId, locPrefix} rehydrated this pull. */
-  channelGeometry: Map<number, { memoryId: string; locPrefix: string }>,
+  /** Channel index → live geometry rehydrated this pull; plaintext channels
+   * aggregate in bounded seq windows (row-linear SQL work would otherwise
+   * escape the request budget — Codex P1 on #1428). */
+  channelGeometry: Map<number, { memoryId: string; locPrefix: string; encrypted: boolean }>,
   mentionTokensByTarget: string[][],
   state: PagedScanState,
   budget: number,
@@ -657,6 +668,41 @@ async function pagedScanStep(
     const activeChannels = state.cDone.filter((done) => !done).length;
     const share = Math.max(1, Math.floor((budget - spent) / Math.max(1, activeChannels)));
     const take = Math.min(budget - spent, share, ENCRYPTED_MESSAGE_PAGE_SIZE);
+
+    if (!geometry.encrypted) {
+      // Plaintext visit: one bounded seq window through the same aggregate.
+      // The window IS the work bound — the SQL scans at most `take` rows of
+      // the span; counts accumulate exactly across windows.
+      const list = targetsOfChannel.get(k) ?? [];
+      const windowLow = Math.max(state.cCursorSeq[k], state.cMin[k]);
+      const windowHigh = Math.min(windowLow + take, state.cMax[k]);
+      if (windowHigh <= windowLow) {
+        state.cDone[k] = true;
+        list.sort((a, b) => targets[a].workerId.localeCompare(targets[b].workerId));
+        state.pending.push(...list);
+        continue;
+      }
+      const windowed = list.map((ti) => targets[ti]);
+      const counts = await unreadCounts(db, windowed, { low: windowLow, high: windowHigh });
+      for (const ti of list) {
+        const count = counts.get(`${targets[ti].workerId}:${targets[ti].channelId}`);
+        if (count) {
+          state.aUnread[ti] += count.unread;
+          state.aMent[ti] += count.unread_mentions;
+          if (state.aFirst[ti] === 0 && count.first_unread_seq != null) state.aFirst[ti] = count.first_unread_seq;
+          if (count.last_relevant_seq != null && count.last_relevant_seq > state.aLast[ti]) state.aLast[ti] = count.last_relevant_seq;
+        }
+      }
+      spent += take; // charge the window as bounded work
+      state.cCursorSeq[k] = windowHigh;
+      state.cCursorId[k] = ''; // seq-window cursor; no row id for plaintext
+      if (windowHigh >= state.cMax[k]) {
+        state.cDone[k] = true;
+        list.sort((a, b) => targets[a].workerId.localeCompare(targets[b].workerId));
+        state.pending.push(...list);
+      }
+      continue;
+    }
     const rows = await db.$queryRaw<EncryptedCandidateRow[]>(Prisma.sql`
       SELECT n.seq::int AS seq, n.loc, n.data, n.id, n.memory_id
       FROM nodes n
@@ -839,6 +885,14 @@ async function runPagedAttention(
   if (op === 'preview' && args.since) {
     fail('The paged preview takes no since token.', 'BAD_USER_INPUT');
   }
+  // Integer budgets: GraphQL coerces Int and MCP validates via zod .int(),
+  // but direct resolver callers bypass both — a fractional budget must fail
+  // loudly rather than reach a SQL LIMIT (Codex P2 on #1428).
+  for (const [name, value] of [['limit', args.limit], ['scanLimit', args.scanLimit]] as const) {
+    if (value != null && !Number.isInteger(value)) {
+      fail(`${name} must be an integer.`, 'BAD_USER_INPUT');
+    }
+  }
   const limit = Math.max(1, Math.min(args.limit ?? PAGE_RESULT_PAIRS_DEFAULT, PAGE_RESULT_PAIRS_MAX));
   const scanLimit = Math.max(1, Math.min(args.scanLimit ?? PAGE_SCAN_ROW_BUDGET_DEFAULT, PAGE_SCAN_ROW_BUDGET_MAX));
 
@@ -919,7 +973,9 @@ async function runPagedAttention(
     // still exist undeleted — deletion of the scan frontier is the mutation
     // we CAN detect cheaply; interior edits are the documented residual.
     for (let k = 0; k < channelIds.length; k++) {
-      if (state.cDone[k] || state.cCursorSeq[k] < 0) continue;
+      // Plaintext windows key on seq alone (cursor id ''); only an encrypted
+      // channel's frontier has a row id to re-check.
+      if (state.cDone[k] || state.cCursorSeq[k] < 0 || state.cCursorId[k] === '') continue;
       const frontier = await ctx.db.node.findFirst({
         where: { id: state.cCursorId[k], deletedAt: null },
         select: { id: true },
@@ -982,42 +1038,26 @@ async function runPagedAttention(
     };
   }
 
-  // Plaintext channels complete in one aggregate visit per pull — one indexed
-  // query, no row decryption, no budget charge (the cost is not row-linear).
+  // Encryption split feeds the scan step: encrypted channels decrypt under
+  // the row budget; plaintext channels aggregate in bounded seq windows
+  // inside the same round-robin (one giant aggregate would be row-linear
+  // server work — Codex P1 on #1428).
   const memories = await ctx.db.memory.findMany({
     where: { id: { in: [...new Set(targets.map((t) => t.memoryId))] } },
     select: { id: true, isEncrypted: true },
   });
   const encryptedMemoryIds = new Set(memories.filter((m) => m.isEncrypted).map((m) => m.id));
-  const openPlaintextTargets = targets
-    .map((t, i) => ({ t, i }))
-    .filter(({ t, i }) => !encryptedMemoryIds.has(t.memoryId) && !state.cDone[channelIndexOf.get(t.channelId)!] && !state.emitted[i]);
-  if (openPlaintextTargets.length > 0) {
-    const counts = await unreadCounts(ctx.db, openPlaintextTargets.map(({ t }) => t));
-    for (const { t, i } of openPlaintextTargets) {
-      const count = counts.get(`${t.workerId}:${t.channelId}`);
-      if (count) {
-        state.aUnread[i] = count.unread;
-        state.aMent[i] = count.unread_mentions;
-        state.aFirst[i] = count.first_unread_seq ?? 0;
-        state.aLast[i] = count.last_relevant_seq ?? 0;
-      }
-    }
-    // Every plaintext channel represented here is now complete.
-    for (const k of new Set(openPlaintextTargets.map(({ t }) => channelIndexOf.get(t.channelId)!))) {
-      state.cDone[k] = true;
-      const list = targets.map((t, i) => ({ t, i })).filter(({ t }) => channelIndexOf.get(t.channelId) === k)
-        .sort((a, b) => a.t.workerId.localeCompare(b.t.workerId));
-      state.pending.push(...list.map(({ i }) => i));
-    }
-  }
 
   // Encrypted channels: one bounded round-robin step.
-  const channelGeometry = new Map<number, { memoryId: string; locPrefix: string }>();
+  const channelGeometry = new Map<number, { memoryId: string; locPrefix: string; encrypted: boolean }>();
   for (let k = 0; k < channelIds.length; k++) {
     const target = targets.find((t) => t.channelId === channelIds[k]);
-    if (target && encryptedMemoryIds.has(target.memoryId)) {
-      channelGeometry.set(k, { memoryId: target.memoryId, locPrefix: `${target.channelLoc}:messages:` });
+    if (target) {
+      channelGeometry.set(k, {
+        memoryId: target.memoryId,
+        locPrefix: `${target.channelLoc}:messages:`,
+        encrypted: encryptedMemoryIds.has(target.memoryId),
+      });
     }
   }
   await pagedScanStep(ctx.db, targets, channelIndexOf, channelGeometry, targets.map((t) => t.mentionTokens), state, scanLimit);
