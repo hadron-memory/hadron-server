@@ -683,6 +683,13 @@ async function pagedScanStep(
     // index key, so Postgres would walk non-qualifying rows unboundedly).
     // Post-freeze starvation is prevented by the POST-SPAN-done rule below.
     const prefix = geometry.locPrefix;
+    // The frozen upper loc (actual last in-span row's loc) is the true scan
+    // boundary — INCLUSIVE, since that row itself is in the frozen span.
+    // Empty (degenerate freeze) falls back to the unbounded prefix range.
+    // Channel-local prefix range in C order: [P+cursor, P-successor).
+    // The successor increments the final character (':' → ';'). Post-freeze
+    // rows within the prefix are fetched and charged (bounded by LIMIT);
+    // the seq residual rejects them from counting; the cursor advances past.
     const upperBound = prefix.slice(0, -1) + ';';
     const lowerBound = prefix + state.cCursorNum[k];
     const rows = await db.$queryRaw<EncryptedCandidateRow[]>(Prisma.sql`
@@ -700,14 +707,12 @@ async function pagedScanStep(
     `);
 
     const list = targetsOfChannel.get(k) ?? [];
-    let sawPostFreeze = false;
     for (const row of rows) {
       spent++; // charged whether or not the residual filters accept it
       // Residual filters AFTER the charged raw fetch; the cursor advances
       // past rejected rows too (they are paid once across the scan).
       if (row.node_type !== 'chat-message' || row.deleted_at != null
         || row.seq <= state.cMin[k] || row.seq > state.cMax[k]) {
-        if (row.seq > state.cMax[k]) sawPostFreeze = true;
         state.cCursorNum[k] = row.loc.slice(prefix.length);
         continue;
       }
@@ -737,13 +742,11 @@ async function pagedScanStep(
       if (anyCounted) state.cFrontNum[k] = state.cCursorNum[k];
     }
 
-    // Done when the loc range is exhausted (fewer than `take` raw rows) OR
-    // when every examined row in a FULL page is post-freeze (seq > cMax) —
-    // for well-formed channels seq order matches loc order, so once a full
-    // page contains only post-freeze rows the frozen span is provably past
-    // and remaining budget should go to other channels. The cursor still
-    // advances past the post-freeze rows (charged once).
-    if (rows.length < take || (sawPostFreeze && rows.every((r) => r.seq > state.cMax[k]))) {
+    // Done when the frozen loc range is exhausted (fewer than `take` raw
+    // rows). The frozen upper loc guarantees the range is finite and
+    // post-freeze traffic is never fetched — no seq inference, no padding-
+    // boundary hazard.
+    if (rows.length < take) {
       state.cDone[k] = true;
       list.sort((a, b) => targets[a].workerId.localeCompare(targets[b].workerId));
       state.pending.push(...list);

@@ -483,7 +483,7 @@ describe('family 9 — consolidated review corrections (#3051/#3053/#3054)', () 
       o: 'c' as const,
       c_num: Array.from({ length: 200 }, () => '2147483647'),
       c_front: Array.from({ length: 200 }, () => '2147483647'),
-      c_inc: Array.from({ length: 200 }, () => 2147483647),
+            c_inc: Array.from({ length: 200 }, () => 2147483647),
       c_min: Array.from({ length: 200 }, () => 0),
       c_max: Array.from({ length: 200 }, () => 2147483647),
       u_unread: Array.from({ length: 200 }, () => 2147483647),
@@ -565,6 +565,46 @@ describe('family 15 — frozen keyset boundary (#1428 Codex round N)', () => {
     // And the next poll from the adopted watermark reports the post-freeze work.
     const next = await drainPages({ since: adopted });
     expect(next.items.filter((i) => i.worker === worker.id)[0]).toMatchObject({ unread: 8 });
+  });
+});
+
+describe('family 16 — Codex padding-boundary round', () => {
+  it('a scan frozen at head 999 completes correctly despite a post-freeze msgNum-1000 row (#1428)', async () => {
+    // 999 messages: locs pad to 3 digits (…:001 through …:999). The channel
+    // head is 999. A post-freeze row at msgNum 1000 has loc …:1000 which
+    // sorts BEFORE …:101 in C order (padding inversion).
+    const memEnc = await getMemoryEncryptionInfo(db, channel.memoryId);
+    for (let seq = 1; seq <= 3; seq++) {
+      const locSuffix = String(seq).padStart(3, '0');
+      const enc = encryptNodeFields({ content: null, data: { mentions: seq === 3 ? ['dara'] : [] } }, memEnc);
+      await db.node.create({
+        data: { id: `pad999-${seq}`, memoryId: channel.memoryId, loc: `chats:team:messages:${locSuffix}`,
+          name: locSuffix, nodeType: 'chat-message', seq, content: 'x', data: (enc.data ?? null) as object },
+      });
+    }
+    await db.channel.update({ where: { id: channel.id }, data: { lastSeq: 3 } });
+    // Freeze at head 3, then a post-freeze row arrives with loc …:1000.
+    const p1 = await teamAttentionPage(userCtx(), app.id, { scanLimit: 2 });
+    expect(p1.scanComplete).toBe(false);
+    const enc1000 = encryptNodeFields({ content: null, data: { mentions: [] } }, memEnc);
+    await db.node.create({
+      data: { id: 'pad999-post', memoryId: channel.memoryId, loc: 'chats:team:messages:1000',
+        name: '1000', nodeType: 'chat-message', seq: 4, content: 'post', data: (enc1000.data ?? null) as object },
+    });
+    // Continue the original scan: it must complete over the frozen 3-message
+    // range despite the post-freeze row sitting inside the prefix range.
+    let page: string | null = p1.nextPage;
+    let adopted: string | null = null;
+    let items: ReturnType<typeof identityOf>[] = [];
+    for (let guard = 0; guard < 20 && page; guard++) {
+      const r = await teamAttentionPage(userCtx(), app.id, { page, scanLimit: 2 });
+      items.push(...r.items.map(identityOf));
+      if (r.scanComplete) { adopted = r.adoptableSince; break; }
+      page = r.nextPage;
+    }
+    expect(adopted).toBeTruthy();
+    const mine = items.filter((i) => i.worker === worker.id);
+    expect(mine[0]).toMatchObject({ unread: 3, unreadMentions: 1, firstUnreadSeq: 1 });
   });
 });
 
@@ -723,7 +763,7 @@ describe('family 11 — review #3105', () => {
       o: 'c' as const,
       c_num: Array.from({ length: 200 }, () => '2147483647'),
       c_front: Array.from({ length: 200 }, () => '2147483647'),
-      c_inc: Array.from({ length: 200 }, () => 2147483647),
+            c_inc: Array.from({ length: 200 }, () => 2147483647),
       c_min: Array.from({ length: 200 }, () => 0),
       c_max: Array.from({ length: 200 }, () => 2147483647),
       u_unread: Array.from({ length: 200 }, () => 2147483647),
