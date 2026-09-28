@@ -653,7 +653,7 @@ describe('family 17 — mixed-Channel isolation (#3216)', () => {
 });
 
 describe('family 14 — review #3153', () => {
-  it('an AUTHENTIC prior-era (loc-ordered) token gets STALE_PAGE; every signed malformed variant gets INVALID (#3170/#3171/#3281)', async () => {
+  it('each AUTHENTIC prior-era shape (70ed1328 / b6faa1b7 / 30a9f261) gets STALE_PAGE; mixed-era shapes get INVALID (#3299/#3301)', async () => {
     const { signPageToken } = await import('./teamAttentionPage.js');
     await post('one');
     await post('two');
@@ -662,45 +662,53 @@ describe('family 14 — review #3153', () => {
     const paged = await teamAttentionPage(userCtx(), app.id, { scanLimit: 1 });
     expect(paged.scanComplete).toBe(false);
     const realPayload = JSON.parse(Buffer.from(paged.nextPage!.split('.')[0], 'base64url').toString('utf-8')) as Record<string, unknown>;
-    // Reconstruct the payload the loc-ordered era (heads 2ab78595/30a9f261)
-    // actually minted — not a stripped current token (#3281: the prior tests
-    // mutated NEW tokens and never exercised the authentic prior format).
-    // That era carried o:'c', its cursor in c_num (loc suffix) and its bound
-    // in c_ful (frozen upper loc); c_seq/c_loc did not exist.
-    const locEra = (): Record<string, unknown> => {
-      const v: Record<string, unknown> = { ...realPayload, o: 'c' };
-      delete v.c_seq;
-      delete v.c_loc;
-      v.c_num = Array.from({ length: (realPayload.C as unknown[]).length }, () => '007');
+    const n = (realPayload.C as unknown[]).length;
+    const suffixes = Array.from({ length: n }, () => '007');
+    const drop = (v: Record<string, unknown>, ...keys: string[]) => {
+      for (const key of keys) delete v[key];
+      return v;
+    };
+    // The three shapes the codec's git history actually minted (field sets
+    // verified against those exact commits — NOT fabricated by stripping a
+    // current token beyond the marker (#3299's false-fixture finding)).
+    const preC = () => { // 70ed1328: NO marker, cursor in c_num ONLY
+      const v = drop({ ...realPayload }, 'o', 'c_seq', 'c_loc', 'c_front');
+      v.c_num = suffixes;
+      return v;
+    };
+    const earlyC = () => { // b6faa1b7: o:'c', c_num + c_front, NO c_ful
+      const v = drop({ ...realPayload, o: 'c' }, 'c_seq', 'c_loc');
+      v.c_num = suffixes;
+      return v;
+    };
+    const lateC = () => { // 30a9f261: o:'c', c_num + c_front + c_ful
+      const v = drop({ ...realPayload, o: 'c' }, 'c_seq', 'c_loc');
+      v.c_num = suffixes;
       v.c_ful = (realPayload.C as string[]).map(() => 'chats:team:messages:998-zzzz-author');
       return v;
     };
-    // The authentic prior-era token, and its marker-less variant (the
-    // pre-C shape) — both restart TYPED, never reinterpreted.
-    for (const [label, mutate] of [
-      ['authentic loc-era (o:c)', (v: Record<string, unknown>) => v],
-      ['marker-less pre-C shape', (v: Record<string, unknown>) => { delete v.o; return v; }],
-    ] as Array<[string, (v: Record<string, unknown>) => Record<string, unknown>]>) {
-      const signed = signPageToken(mutate(locEra()) as never, secret);
+    for (const [label, shape] of [
+      ['pre-C 70ed1328 (marker-less, c_num only)', preC()],
+      ['early-C b6faa1b7 (o:c, c_num+c_front)', earlyC()],
+      ['late-C 30a9f261 (o:c, c_num+c_front+c_ful)', lateC()],
+    ] as Array<[string, Record<string, unknown>]>) {
+      const signed = signPageToken(shape as never, secret);
       if ('tooLarge' in signed) throw new Error(`unexpected tooLarge: ${label}`);
       await expect(teamAttentionPage(userCtx(), app.id, { page: (signed as { token: string }).token })).rejects.toMatchObject({
         extensions: { code: 'TEAM_ATTENTION_STALE_PAGE' },
       });
     }
-    // Chip's separately-signed malformed variants (#3171) — each must get
-    // INVALID, not the prior-era restart.
+    // Mixed-era payloads — no minted token ever looked like these.
     const variants: Array<[string, Record<string, unknown>]> = [
-      ['t_r references absent register', { ...locEra(), R: [], t_r: [0] }],
-      ['missing prior-era c_num array', (() => { const v = locEra(); delete v.c_num; return v; })()],
-      ['missing t_r array', (() => { const v = locEra(); delete v.t_r; return v; })()],
-      ['broken t_w index', { ...locEra(), t_w: [99] }],
-      ['missing q queue array', (() => { const v = locEra(); delete v.q; return v; })()],
-      ['missing ts timestamp', (() => { const v = locEra(); delete v.ts; return v; })()],
-      // A MIXED-era token (current arrays, prior marker) is malformed, not
-      // prior-era: its c_num/c_ful are absent so the loc-era check fails.
-      ['current arrays with prior marker', (() => { const v = { ...realPayload, o: 'c' }; return v; })()],
-      // Current-era token missing its channel arrays → INVALID.
+      ['pre-C with c_ful smuggled in', { ...preC(), c_ful: ['x'] }],
+      ['pre-C with c_front smuggled in', { ...preC(), c_front: suffixes }],
+      ['pre-C missing c_num', (() => { const v = preC(); delete v.c_num; return v; })()],
+      ['early-C missing c_front', (() => { const v = earlyC(); delete v.c_front; return v; })()],
+      ['C-era with current c_seq/c_loc arrays', { ...earlyC(), c_seq: [1], c_loc: ['x'] }],
+      ['current arrays with prior marker', { ...realPayload, o: 'c' }],
       ['current token missing c_front', (() => { const v = { ...realPayload }; delete v.c_front; return v; })()],
+      ['broken t_w index', { ...lateC(), t_w: [99] }],
+      ['missing ts timestamp', (() => { const v = lateC(); delete v.ts; return v; })()],
     ];
     for (const [label, variant] of variants) {
       const signed = signPageToken(variant as never, secret);
@@ -709,6 +717,16 @@ describe('family 14 — review #3153', () => {
         extensions: { code: 'INVALID_ATTENTION_PAGE' },
       });
     }
+    // An UNKNOWN marker on an otherwise core-valid, non-current token is a
+    // well-signed continuation from some other build of this codec — typed
+    // restart, not INVALID (forward-compat for a rolled-back newer era).
+    const unknownMarker = drop({ ...realPayload, o: 'q' }, 'c_seq', 'c_loc');
+    unknownMarker.c_num = suffixes;
+    const signedUnknown = signPageToken(unknownMarker as never, secret);
+    if ('tooLarge' in signedUnknown) throw new Error('unexpected tooLarge: unknown marker');
+    await expect(teamAttentionPage(userCtx(), app.id, { page: (signedUnknown as { token: string }).token })).rejects.toMatchObject({
+      extensions: { code: 'TEAM_ATTENTION_STALE_PAGE' },
+    });
   });
 
   it('a counted message followed by an own post keeps the COUNTED frontier on the counted row (#3153 finding 3)', async () => {

@@ -486,19 +486,52 @@ async function pagedScanStep(
     // cursor's seq — a finite pre-#919 artifact, paid once per step).
     const cursorLoc = state.cCursorLoc[k] ? prefix + state.cCursorLoc[k] : '';
 
-    const rows = await db.$queryRaw<EncryptedCandidateRow[]>(Prisma.sql`
-      SELECT n.seq::int AS seq, n.loc, n.data, n.memory_id
-      FROM nodes n
-      WHERE n.message_channel_id = ${geometry.channelId}
-        AND n.node_type = 'chat-message'
-        AND n.deleted_at IS NULL
-        AND n.seq > ${state.cMin[k]}
-        AND n.seq <= ${state.cMax[k]}
-        AND (${state.cCursorSeq[k]} = -1 OR n.seq > ${state.cCursorSeq[k]}
-          OR (n.seq = ${state.cCursorSeq[k]} AND n.loc COLLATE "C" > ${cursorLoc} COLLATE "C"))
-      ORDER BY n.seq, n.loc COLLATE "C"
-      LIMIT ${take}
-    `);
+    // Continuation keyset as TWO single-range index descents (Chip #3305):
+    // a disjunctive `(seq > cs OR (seq = cs AND loc > cl))` cannot become a
+    // btree bound, so the planner kept the cursor as a FILTER over
+    // `seq > cMin` — a continuation after seq 9000 re-examined all 9,000
+    // already-scanned rows (measured: 231 buffer hits for LIMIT 2). Each
+    // UNION arm is one clean range on (message_channel_id, seq, loc C) —
+    // arm 1 the duplicate-seq remainder at the cursor's seq, arm 2 the rest
+    // of the frozen span — so the cursor participates as an Index Cond on
+    // every page, not just the first.
+    const rows = state.cCursorSeq[k] === -1
+      ? await db.$queryRaw<EncryptedCandidateRow[]>(Prisma.sql`
+        SELECT n.seq::int AS seq, n.loc, n.data, n.memory_id
+        FROM nodes n
+        WHERE n.message_channel_id = ${geometry.channelId}
+          AND n.node_type = 'chat-message'
+          AND n.deleted_at IS NULL
+          AND n.seq > ${state.cMin[k]}
+          AND n.seq <= ${state.cMax[k]}
+        ORDER BY n.seq, n.loc COLLATE "C"
+        LIMIT ${take}
+      `)
+      : await db.$queryRaw<EncryptedCandidateRow[]>(Prisma.sql`
+        SELECT merged.seq, merged.loc, merged.data, merged.memory_id FROM (
+          (SELECT n.seq::int AS seq, n.loc, n.data, n.memory_id
+           FROM nodes n
+           WHERE n.message_channel_id = ${geometry.channelId}
+             AND n.node_type = 'chat-message'
+             AND n.deleted_at IS NULL
+             AND n.seq = ${state.cCursorSeq[k]}
+             AND n.loc COLLATE "C" > ${cursorLoc} COLLATE "C"
+           ORDER BY n.seq, n.loc COLLATE "C"
+           LIMIT ${take})
+          UNION ALL
+          (SELECT n.seq::int AS seq, n.loc, n.data, n.memory_id
+           FROM nodes n
+           WHERE n.message_channel_id = ${geometry.channelId}
+             AND n.node_type = 'chat-message'
+             AND n.deleted_at IS NULL
+             AND n.seq > ${state.cCursorSeq[k]}
+             AND n.seq <= ${state.cMax[k]}
+           ORDER BY n.seq, n.loc COLLATE "C"
+           LIMIT ${take})
+        ) merged
+        ORDER BY merged.seq, merged.loc COLLATE "C"
+        LIMIT ${take}
+      `);
 
     const list = targetsOfChannel.get(k) ?? [];
     for (const row of rows) {

@@ -174,7 +174,6 @@ export function verifyPageToken(
   //    arrays, is malformed.
   const targetArrays = ['t_w', 't_c', 't_r', 't_mo', 't_seen', 't_head', 't_prior', 'u_unread', 'u_ment', 'u_first', 'u_last'] as const;
   const seqEraChannelArrays = ['c_inc', 'c_min', 'c_max', 'c_loc', 'c_front', 'c_seq'] as const;
-  const locEraChannelArrays = ['c_inc', 'c_min', 'c_max', 'c_num', 'c_ful', 'c_front'] as const;
   const coreArraysValid =
     Array.isArray(value.W) && Array.isArray(value.C) && Array.isArray(value.R) &&
     targetArrays.every((key) => Array.isArray((value as Record<string, unknown>)[key]));
@@ -205,9 +204,10 @@ export function verifyPageToken(
   if (!coreValid) {
     fail('Invalid team-attention page token.', 'INVALID_ATTENTION_PAGE');
   }
+  const field = (key: string) => (value as Record<string, unknown>)[key];
   const channelArraysOf = (keys: readonly string[]) =>
-    keys.every((key) => Array.isArray((value as Record<string, unknown>)[key])) &&
-    keys.every((key) => ((value as Record<string, unknown>)[key] as unknown[]).length === (value.C as string[]).length);
+    keys.every((key) => Array.isArray(field(key))) &&
+    keys.every((key) => (field(key) as unknown[]).length === (value.C as string[]).length);
   if (value.o === 's') {
     // Current era: the full seq-first channel state must be present.
     if (!channelArraysOf(seqEraChannelArrays)) {
@@ -215,12 +215,37 @@ export function verifyPageToken(
     }
     return value as PageContinuation;
   }
-  // Not this build's era. An AUTHENTIC prior-era continuation (loc-ordered
-  // 'c' marker or the marker-less pre-C shape, with that era's channel
-  // arrays intact) restarts typed; anything else is malformed.
-  if (channelArraysOf(locEraChannelArrays)) {
+  // Prior eras — the three shapes this branch's history actually minted
+  // (#3299/#3301; verified against 70ed1328, b6faa1b7, 30a9f261):
+  //   pre-C  (70ed1328): NO marker, cursor in c_num only.
+  //   early C (b6faa1b7): o:'c', c_num + c_front (c_ful not yet).
+  //   late C  (30a9f261): o:'c', c_num + c_front + c_ful.
+  // Each authentic form restarts TYPED. A payload mixing eras' arrays
+  // (current arrays under a prior marker, or c_ful on a marker-less token)
+  // is malformed: no minted token ever looked like that.
+  const commonPrior = ['c_inc', 'c_min', 'c_max', 'c_num'] as const;
+  const lacksCurrentArrays = !Array.isArray(field('c_seq')) && !Array.isArray(field('c_loc'));
+  const staleRestart = (): never =>
     fail('This scan continuation predates the current scan era; poll again without page to restart from your committed watermark.', 'TEAM_ATTENTION_STALE_PAGE');
+  if (value.o === undefined) {
+    if (channelArraysOf(commonPrior) && lacksCurrentArrays
+      && !Array.isArray(field('c_front')) && !Array.isArray(field('c_ful'))) {
+      staleRestart();
+    }
+    fail('Invalid team-attention page token.', 'INVALID_ATTENTION_PAGE');
   }
+  if (value.o === 'c') {
+    if (channelArraysOf([...commonPrior, 'c_front']) && lacksCurrentArrays) {
+      staleRestart(); // c_ful present (late C) or absent (early C) — both minted
+    }
+    fail('Invalid team-attention page token.', 'INVALID_ATTENTION_PAGE');
+  }
+  // A marker no era of this codec minted, on an otherwise core-valid signed
+  // token: a continuation from some other build of this codec (a newer
+  // deployment rolled back). Restart typed — INVALID would misdescribe a
+  // well-signed continuation, and the restart is lossless. Current arrays
+  // under a foreign marker stay malformed.
+  if (lacksCurrentArrays) staleRestart();
   fail('Invalid team-attention page token.', 'INVALID_ATTENTION_PAGE');
 }
 
