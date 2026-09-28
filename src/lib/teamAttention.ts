@@ -1064,26 +1064,50 @@ async function runPagedAttention(
       cMax: channelIds.map((id) => Math.max(...targets.filter((t) => t.channelId === id).map((t) => t.head))),
       cCursorNum: channelIds.map(() => ''),
       cFrontNum: channelIds.map(() => ''),
+      // HYBRID frozen upper bound (#3231): the COMPUTED loc handles the
+      // well-formed case (appendChatMessage: msgNum ≡ seq, padStart 3) with
+      // zero DB cost. A single bounded FORWARD query then widens it if any
+      // frozen row (seq ≤ head) has a loc BEYOND the computed bound — the
+      // legacy-shape fallback (duplicate-seq locs, nonnumeric suffixes,
+      // 999/1000 padding inversions). The widen query is ASC-forward from
+      // the computed bound, NOT the backward DESC walk that examined 9,900
+      // post-freeze rows — it examines at most the post-freeze rows between
+      // the computed bound and the first frozen row beyond it (or none when
+      // the computed bound is correct, the well-formed case).
       cFrozenUpperLoc: await Promise.all(channelIds.map(async (id) => {
-        const channelTargets = targets.filter((t) => t.channelId === id);
-        const maxHead = Math.max(...channelTargets.map((t) => t.head));
-        const sample = channelTargets[0];
-        // Max loc in C order among rows within the frozen span — NOT the
-        // highest seq (seq order diverges from loc order at padding
-        // boundaries like 999/1000, and duplicate seqs need the loc-max).
+        const sample = targets.find((t) => t.channelId === id);
+        if (!sample) return '';
+        const computed = `${sample.channelLoc}:messages:${String(sample.head).padStart(3, '0')}`;
         const fulPrefix = `${sample.channelLoc}:messages:`;
         const fulUpper = fulPrefix.slice(0, -1) + ';';
-        const rows = await ctx.db.$queryRaw<Array<{ loc: string }>>(Prisma.sql`
+        // Is there any frozen row (seq ≤ head) whose loc is BEYOND the
+        // computed bound? If so, take its loc as the wider bound.
+        const wider = await ctx.db.$queryRaw<Array<{ loc: string }>>(Prisma.sql`
           SELECT loc FROM nodes
           WHERE memory_id = ${sample.memoryId}
-            AND loc COLLATE "C" >= ${fulPrefix} COLLATE "C"
+            AND loc COLLATE "C" > ${computed} COLLATE "C"
             AND loc COLLATE "C" < ${fulUpper} COLLATE "C"
-            AND seq <= ${maxHead}
+            AND seq <= ${sample.head}
             AND deleted_at IS NULL
-          ORDER BY loc COLLATE "C" DESC
+          ORDER BY loc COLLATE "C" ASC
           LIMIT 1
         `);
-        return rows[0]?.loc ?? '';
+        // If a wider frozen row exists, use the LAST such row's loc (max-loc
+        // among frozen rows beyond the computed bound).
+        if (wider.length > 0) {
+          const maxWider = await ctx.db.$queryRaw<Array<{ loc: string }>>(Prisma.sql`
+            SELECT loc FROM nodes
+            WHERE memory_id = ${sample.memoryId}
+              AND loc COLLATE "C" > ${computed} COLLATE "C"
+              AND loc COLLATE "C" < ${fulUpper} COLLATE "C"
+              AND seq <= ${sample.head}
+              AND deleted_at IS NULL
+            ORDER BY loc COLLATE "C" DESC
+            LIMIT 1
+          `);
+          return maxWider[0]?.loc ?? computed;
+        }
+        return computed;
       })),
       cInc: channelIds.map((id) => liveIncarnations.get(id) ?? 0),
       cDone: channelIds.map(() => false),
