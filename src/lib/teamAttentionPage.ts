@@ -176,7 +176,7 @@ export function verifyPageToken(
   // signed payload missing arrays or referencing absent registers is
   // malformed, not an authentic old-order token (#3170/#3171).
   const targetArrays = ['t_w', 't_c', 't_r', 't_mo', 't_seen', 't_head', 't_prior', 'u_unread', 'u_ment', 'u_first', 'u_last'] as const;
-  const channelArrays = ['c_inc', 'c_min', 'c_max', 'c_num'] as const;
+  const channelArrays = ['c_inc', 'c_min', 'c_max', 'c_num', 'c_ful'] as const;
   const arraysValid =
     Array.isArray(value.W) && Array.isArray(value.C) && Array.isArray(value.R) &&
     channelArrays.every((key) => Array.isArray((value as Record<string, unknown>)[key])) &&

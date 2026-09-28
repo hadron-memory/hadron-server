@@ -704,6 +704,7 @@ async function pagedScanStep(
         SELECT n.seq, n.loc, n.data, n.id, n.memory_id, n.node_type, n.deleted_at
         FROM nodes n
         WHERE n.memory_id = ${geometry.memoryId}
+          AND n.loc COLLATE "C" >= ${prefix} COLLATE "C"
           AND n.loc COLLATE "C" > ${lowerBound} COLLATE "C"
           ${upperSql}
         ORDER BY n.loc COLLATE "C"
@@ -1070,9 +1071,13 @@ async function runPagedAttention(
         // Max loc in C order among rows within the frozen span — NOT the
         // highest seq (seq order diverges from loc order at padding
         // boundaries like 999/1000, and duplicate seqs need the loc-max).
+        const fulPrefix = `${sample.channelLoc}:messages:`;
+        const fulUpper = fulPrefix.slice(0, -1) + ';';
         const rows = await ctx.db.$queryRaw<Array<{ loc: string }>>(Prisma.sql`
           SELECT loc FROM nodes
           WHERE memory_id = ${sample.memoryId}
+            AND loc COLLATE "C" >= ${fulPrefix} COLLATE "C"
+            AND loc COLLATE "C" < ${fulUpper} COLLATE "C"
             AND seq <= ${maxHead}
             AND deleted_at IS NULL
           ORDER BY loc COLLATE "C" DESC

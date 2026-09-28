@@ -609,6 +609,48 @@ describe('family 16 — Codex padding-boundary round', () => {
   });
 });
 
+describe('family 17 — mixed-Channel isolation (#3216)', () => {
+  it('a foreign channel sharing the memory is never fetched or counted (#3216)', async () => {
+    // Foreign channel in the SAME encrypted memory.
+    const foreignMade = await ensureChannelWithRoot(db, {
+      memoryId: memory.id, loc: 'chats:zother', name: 'other-team', createdBy: user.id,
+    });
+    const encF = await getMemoryEncryptionInfo(db, memory.id);
+    await appendChatMessage(db, { id: foreignMade.rootId, memoryId: memory.id, loc: 'chats:zother' }, encF,
+      async ({ tx, seq, msgNum }) => tx.node.create({
+        data: { id: generateId(), memoryId: memory.id, loc: `chats:zother:messages:${msgNum}`,
+          name: msgNum, nodeType: 'chat-message', seq, content: 'foreign', data: { mentions: [] } },
+      }), { asChannel: true });
+    // Target channel: 1 message (the worker's register points here only).
+    await post('target', { mentions: ['dara'] });
+    const drained = await drainPages({});
+    const mine = drained.items.filter((i) => i.worker === worker.id && i.channel === channel.id);
+    expect(mine[0]).toMatchObject({ unread: 1, unreadMentions: 1 });
+    // The foreign channel's message is NEVER reported.
+    expect(drained.items.some((i) => i.channel === foreignMade.channel.id)).toBe(false);
+  });
+
+  it('c_ful missing or empty array is INVALID (#3220 codec)', async () => {
+    const { signPageToken } = await import('./teamAttentionPage.js');
+    await post('one');
+    await post('two');
+    const p1 = await teamAttentionPage(userCtx(), app.id, { scanLimit: 1 });
+    expect(p1.scanComplete).toBe(false);
+    const realPayload = JSON.parse(Buffer.from(p1.nextPage!.split('.')[0], 'base64url').toString('utf-8'));
+    const secret = process.env.TEAM_ATTENTION_TOKEN_SECRET || process.env.JWT_SECRET || '';
+    for (const [label, mod] of [
+      ['missing c_ful', (() => { const v = { ...realPayload }; delete v.c_ful; return v; })()],
+      ['c_ful empty array', { ...realPayload, c_ful: [] }],
+    ] as Array<[string, Record<string, unknown>]>) {
+      const signed = signPageToken(mod as never, secret);
+      if ('tooLarge' in signed) throw new Error(`unexpected tooLarge: ${label}`);
+      await expect(teamAttentionPage(userCtx(), app.id, { page: (signed as { token: string }).token })).rejects.toMatchObject({
+        extensions: { code: 'INVALID_ATTENTION_PAGE' },
+      });
+    }
+  });
+});
+
 describe('family 14 — review #3153', () => {
   it('a genuinely-issued pre-C shape gets STALE_PAGE; every signed malformed variant gets INVALID (#3170/#3171)', async () => {
     const { signPageToken } = await import('./teamAttentionPage.js');
