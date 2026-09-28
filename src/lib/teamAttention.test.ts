@@ -484,7 +484,7 @@ describe('explicit switchover', () => {
       async ({ tx, seq, msgNum }) => tx.node.create({
         data: {
           id: generateId(), memoryId: independentMemory.id, loc: `chats:independent:messages:${msgNum}`,
-          name: msgNum, nodeType: 'chat-message', seq, content: 'backlog',
+          name: msgNum, nodeType: 'chat-message', seq, messageChannelId: made.channel.id, content: 'backlog',
         },
       }),
       { asChannel: true },

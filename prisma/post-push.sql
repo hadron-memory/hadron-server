@@ -584,3 +584,9 @@ FOR EACH ROW EXECUTE FUNCTION hadron_initialize_node_revision_content_hash();
 -- #1430: C-collation index for paged-attention keyset pages. Prisma cannot
 -- model column collation in @@index, so this is recreated after every push.
 CREATE INDEX IF NOT EXISTS "nodes_memory_id_loc_c_idx" ON "nodes" ("memory_id", "loc" COLLATE "C");
+
+-- #1430: Channel-local seq-first partial index for paged-attention scans.
+-- Prisma cannot model collation in @@index, so this is recreated after push.
+CREATE INDEX IF NOT EXISTS "nodes_msg_channel_seq_loc_c_idx"
+  ON "nodes" ("message_channel_id", "seq", "loc" COLLATE "C")
+  WHERE "node_type" = 'chat-message' AND "deleted_at" IS NULL AND "seq" IS NOT NULL;

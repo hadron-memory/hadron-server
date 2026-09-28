@@ -446,7 +446,7 @@ describe('family 9 — consolidated review corrections (#3051/#3053/#3054)', () 
     const enc2 = await getMemoryEncryptionInfo(db, memory2.id);
     await appendChatMessage(db, { id: made2.rootId, memoryId: memory2.id, loc: 'chats:team2' }, enc2,
       async ({ tx, seq, msgNum }) => tx.node.create({
-        data: { id: generateId(), memoryId: memory2.id, loc: `chats:team2:messages:${msgNum}`, name: msgNum, nodeType: 'chat-message', seq, content: 'short channel', data: { mentions: [] } },
+        data: { id: generateId(), memoryId: memory2.id, loc: `chats:team2:messages:${msgNum}`, name: msgNum, nodeType: 'chat-message', seq, content: 'short channel', messageChannelId: made2.channel.id, data: { mentions: [] } },
       }), { asChannel: true });
     for (let i = 0; i < 9; i++) await post(`huge ${i}`);
     // Budget 4, quantum-fair: the huge channel may take at most half this
@@ -518,7 +518,7 @@ describe('family 13 — #3123 long-loc liveness', () => {
     for (let i = 0; i < 3; i++) {
       await appendChatMessage(db, { id: madeLong.rootId, memoryId: longMemory.id, loc: longLoc }, encL,
         async ({ tx, seq, msgNum }) => tx.node.create({
-          data: { id: generateId(), memoryId: longMemory.id, loc: `${longLoc}:messages:${msgNum}`, name: msgNum, nodeType: 'chat-message', seq, content: `long ${i}`, data: { mentions: [] } },
+          data: { id: generateId(), memoryId: longMemory.id, loc: `${longLoc}:messages:${msgNum}`, name: msgNum, nodeType: 'chat-message', seq, content: `long ${i}`, messageChannelId: madeLong.channel.id, data: { mentions: [] } },
         }), { asChannel: true });
     }
     // The original channel also present; the scan must page through both and
@@ -724,14 +724,14 @@ describe('family 13b — legacy suffix shapes', () => {
     await db.node.create({
       data: {
         id: 'legacy-suffix-row', memoryId: channel.memoryId, loc: 'chats:team:messages:legacy-alpha',
-        name: 'legacy', nodeType: 'chat-message', seq: 1, content: 'legacy',
+        name: 'legacy', nodeType: 'chat-message', seq: 1, content: 'legacy', messageChannelId: channel.id,
         data: (enc.data ?? null) as object,
       },
     });
     await db.node.create({
       data: {
         id: 'legacy-suffix-row-b', memoryId: channel.memoryId, loc: 'chats:team:messages:legacy-beta',
-        name: 'legacy-b', nodeType: 'chat-message', seq: 2, content: 'legacy-b',
+        name: 'legacy-b', nodeType: 'chat-message', seq: 2, content: 'legacy-b', messageChannelId: channel.id,
         data: (enc.data ?? null) as object,
       },
     });
@@ -778,7 +778,7 @@ describe('family 11 — review #3105', () => {
       await db.node.create({
         data: {
           id: `pad-${locSuffix}`, memoryId: channel.memoryId, loc: `chats:team:messages:${locSuffix}`,
-          name: locSuffix, nodeType: 'chat-message', seq, content: 'pad',
+          name: locSuffix, nodeType: 'chat-message', seq, content: 'pad', messageChannelId: channel.id,
           data: (enc.data ?? null) as object,
         },
       });
