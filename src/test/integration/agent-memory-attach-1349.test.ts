@@ -1936,4 +1936,32 @@ describe('#1357 Claude review — licensed cross-org App knowledge survives a vi
     const staleAttach = await gql(bothKey, ATTACH, { g: agent.id, m: memoryId, r: 'read' });
     expect(code(staleAttach)).toBe('MEMORY_NOT_FOUND');
   });
+
+  it('keeps a user-owned App link only while its foreign Agent subscription is live', async () => {
+    const app = await db.app.create({
+      data: { id: generateId(), ownerUserId: attackerUserId, name: 'personal knowledge App', urn: `attacker-${suffix}:personal-knowledge-app` } as never,
+    });
+    const agent = await db.agent.create({
+      data: { id: generateId(), ownerUserId: reader2UserId, name: 'subscribed Agent', urn: `reader2-${suffix}:subscribed-agent` } as never,
+    });
+    await createDbAppAgent(db, app.id, agent.id);
+    await db.agentSubscription.create({ data: { userId: attackerUserId, agentId: agent.id, activatedAt: new Date() } });
+    const memory = await db.memory.create({
+      data: {
+        id: generateId(), ownerUserId: attackerUserId, appId: app.id,
+        urn: `attacker-${suffix}:personal-app-knowledge`, name: 'personal-app-knowledge',
+        class: 'knowledge', visibility: 'ORGANIZATION',
+      } as never,
+    });
+    await db.agentMemoryItem.create({ data: { id: generateId(), memoryId: memory.id, agentId: agent.id, role: 'read' } });
+
+    expect((await gql(key.attacker!, TOUCH, { id: memory.id })).errors).toBeUndefined();
+    expect((await db.agentMemoryItem.findFirstOrThrow({ where: { memoryId: memory.id, agentId: agent.id } })).deletedAt).toBeNull();
+    await db.agentSubscription.update({
+      where: { userId_agentId: { userId: attackerUserId, agentId: agent.id } },
+      data: { revokedAt: new Date() },
+    });
+    expect((await gql(key.attacker!, TOUCH, { id: memory.id })).errors).toBeUndefined();
+    expect((await db.agentMemoryItem.findFirstOrThrow({ where: { memoryId: memory.id, agentId: agent.id } })).deletedAt).not.toBeNull();
+  });
 });
