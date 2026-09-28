@@ -7,6 +7,9 @@
  * an agent's public surface:
  *   - per-user personal/private (`class IN ('personal','private')`) — owner-only
  *     by class, never PUBLIC;
+ *   - user-owned (`ownerUserId != null`) — strict-owner, never publicly readable;
+ *   - legacy per-user holdings (`userMemoryOfAgentId != null`) — scoped to
+ *     their creator even if visibility is PUBLIC;
  *   - app-scoped (`appId != null`) — App-internal even at `visibility=PUBLIC`
  *     (#653: `effectiveAccess` blocks public read via `!isAppScopedShared`), so
  *     it is never publicly readable regardless of its visibility value.
@@ -23,15 +26,34 @@
  */
 import { GraphQLError } from 'graphql';
 import type { PrismaClient, Prisma } from '../generated/prisma/index.js';
+import { activeAgentInstallLicenseIds } from './appAgent.js';
 
 type Db = PrismaClient | Prisma.TransactionClient;
 
 const badInput = (message: string) =>
   new GraphQLError(message, { extensions: { code: 'BAD_USER_INPUT' } });
 
-/** True when a memory is excluded from the covered set (never publicly readable). */
-function isExcludedFromCoveredSet(memory: { class: string; appId: string | null }): boolean {
-  return memory.class === 'personal' || memory.class === 'private' || memory.appId != null;
+/**
+ * True when a memory is excluded from the covered set (never publicly readable).
+ *
+ * Exported since #1349: the agent-attachment gate needs the SAME notion of
+ * "genuinely public audience". A `visibility = 'PUBLIC'` column alone does not
+ * mean it — app-scoped rows are App-internal (#653), and strict-owner
+ * classes or user-owned rows remain owner-only whatever the column says.
+ */
+export function isExcludedFromCoveredSet(memory: {
+  class: string;
+  appId: string | null;
+  ownerUserId: string | null;
+  userMemoryOfAgentId: string | null;
+}): boolean {
+  return (
+    memory.class === 'personal' ||
+    memory.class === 'private' ||
+    memory.appId != null ||
+    memory.ownerUserId != null ||
+    memory.userMemoryOfAgentId != null
+  );
 }
 
 /**
@@ -47,8 +69,10 @@ export async function nonPublicLinkedMemories(
       deletedAt: null,
       class: { notIn: ['personal', 'private'] }, // per-user owner-only: excluded
       appId: null, // app-scoped: App-internal even if PUBLIC (#653) — excluded
+      ownerUserId: null, // spec-047 user-owned: strict-owner even if PUBLIC
+      userMemoryOfAgentId: null, // legacy per-user holding: creator-only
       visibility: { not: 'PUBLIC' },
-      agentItems: { some: { agentId, deletedAt: null } },
+      agentItems: { some: { agentId, deletedAt: null, role: { in: ['read', 'read-write'] } } },
     },
     select: { id: true, name: true },
   });
@@ -59,6 +83,46 @@ export async function nonPublicLinkedMemories(
  * PUBLIC. Call before persisting `visibility = PUBLIC`.
  */
 export async function assertAgentPublicAllowed(db: Db, agentId: string): Promise<void> {
+  // #1349 (@codex, PR #1357) — the WRITE half of congruence. A PUBLIC agent's
+  // audience is every org that installs it, and PUBLIC is a READ audience, so a
+  // `read-write` item would hand each installer the write cap on the
+  // publisher's own memory. Checked here as well as at attach time, because
+  // either side can move: an agent with read-write knowledge must not become
+  // PUBLIC, just as a PUBLIC agent must not be given read-write knowledge.
+  const writable = await db.agentMemoryItem.findMany({
+    // Same predicate shape as nonPublicLinkedMemories, deliberately (@codex,
+    // PR #1357):
+    //  - `memory.deletedAt: null` — an item pointing at a soft-deleted memory
+    //    grants no capability, so counting it would refuse publication forever
+    //    over a link that cannot confer anything;
+    //  - the COVERED-SET exclusions — a personal/private or app-scoped item is
+    //    outside a PUBLIC agent's public surface by #653/`cor:acl:080:03`, so a
+    //    legitimate read-write app-scoped link must not block publication while
+    //    the sibling congruence checks are happily allowing it. Two guards
+    //    disagreeing about which links count is the drift, not the safety.
+    where: {
+      agentId,
+      deletedAt: null,
+      role: 'read-write',
+      memory: {
+        deletedAt: null,
+        class: { notIn: ['personal', 'private'] },
+        appId: null,
+        ownerUserId: null,
+        userMemoryOfAgentId: null,
+      },
+    },
+    select: { memory: { select: { name: true } } },
+  });
+  if (writable.length > 0) {
+    const names = writable.map((w: { memory: { name: string } }) => w.memory.name).join(', ');
+    throw badInput(
+      `Cannot make this agent PUBLIC: it holds read-write knowledge (${names}). ` +
+        `A PUBLIC agent may hold read-only knowledge only — every organization that ` +
+        `installs it would receive that write access. Downgrade the link to read, or ` +
+        `unlink it first (cor:acl:080:03).`,
+    );
+  }
   const bad = await nonPublicLinkedMemories(db, agentId);
   if (bad.length === 0) return;
   const names = bad.map((m) => m.name).join(', ');
@@ -77,16 +141,33 @@ export async function assertAgentPublicAllowed(db: Db, agentId: string): Promise
  */
 export async function assertMemoryVisibilityChangeAllowed(
   db: Db,
-  memory: { id: string; class: string; appId: string | null },
+  memory: {
+    id: string;
+    class: string;
+    appId: string | null;
+    organizationId: string | null;
+    ownerUserId: string | null;
+    userMemoryOfAgentId: string | null;
+  },
   nextVisibility: string | null | undefined,
 ): Promise<void> {
   if (isExcludedFromCoveredSet(memory)) return; // not part of any public surface
   if (nextVisibility === 'PUBLIC') return; // still public — congruence preserved
+  // Only a PUBLIC agent in the memory's OWN tenant blocks the narrowing
+  // (@copilot, PR #1357). A FOREIGN one holds a link that only PUBLIC ever
+  // justified, which `revokeLinksForeignToTenant` removes in this same
+  // transaction — counting it here would refuse before that sweep runs,
+  // handing another tenant a veto over the owner's own visibility setting.
+  const sameTenant: Prisma.AgentWhereInput[] = [];
+  if (memory.organizationId != null) sameTenant.push({ organizationId: memory.organizationId });
+  if (memory.ownerUserId != null) sameTenant.push({ ownerUserId: memory.ownerUserId });
+  if (sameTenant.length === 0) return;
   const publicAgent = await db.agent.findFirst({
     where: {
       deletedAt: null,
       visibility: 'PUBLIC',
-      memoryItems: { some: { memoryId: memory.id, deletedAt: null } },
+      OR: sameTenant,
+      memoryItems: { some: { memoryId: memory.id, deletedAt: null, role: { in: ['read', 'read-write'] } } },
     },
     select: { name: true },
   });
@@ -100,16 +181,136 @@ export async function assertMemoryVisibilityChangeAllowed(
 }
 
 /**
+ * Revoke the agent links that are FOREIGN to a memory's CURRENT tenant, when
+ * the memory is no longer PUBLIC (#1349, @codex on PR #1357).
+ *
+ * Two things make a live link foreign: the memory leaving PUBLIC (the
+ * cross-tenant read exception that justified it is gone), and the memory moving
+ * to a DIFFERENT tenant (links to the source tenant are now outsiders'). Both
+ * are evaluated from the post-write row, so either trigger is handled by the
+ * same predicate.
+ *
+ * `requireAgentMemoryGrant` lets another tenant attach a PUBLIC memory
+ * read-only, because a public audience is exactly what PUBLIC means. That
+ * permission is evaluated once, at attach time — so when the owner later makes
+ * the memory ORGANIZATION-visible, every access fold keeps trusting the stored
+ * row and the foreign App keeps reading nodes that are no longer public.
+ * Measured before this sweep: a foreign App key read the content unchanged
+ * after the owner narrowed it.
+ *
+ * The owner's change WINS rather than being blocked: refusing the narrowing
+ * would hand a foreign tenant a veto over the publisher's own visibility
+ * setting. (That is why this is not simply another clause in
+ * `assertMemoryVisibilityChangeAllowed`, whose PUBLIC-agent rule is a genuine
+ * refusal.) Ordinary same-tenant links survive; they never depended on PUBLIC.
+ *
+ * A legacy writable link on a PUBLIC agent is also revoked, even when the
+ * post-transfer memory and agent share a tenant. New links cannot take that
+ * shape, but a transfer must restore the invariant for old rows.
+ * A read link to the memory's own App remains valid for an Agent with a live,
+ * licensed install there, even when that Agent belongs to another tenant.
+ * The App confines its audience; createMemoryInApp provisions exactly this
+ * link for cross-org installs. A moved memory whose tenant no longer matches
+ * its App receives no such exemption.
+ *
+ * Soft-delete, not hard: the row is an audit record of a grant that once
+ * existed, and `addMemoryToAgent` resurrects it if the memory becomes PUBLIC
+ * again and someone re-attaches deliberately.
+ */
+export async function revokeLinksForeignToTenant(
+  db: Db,
+  memory: {
+    id: string;
+    organizationId: string | null;
+    ownerUserId: string | null;
+    visibility: string | null;
+    class: string;
+    appId: string | null;
+    userMemoryOfAgentId: string | null;
+  },
+  actor: string | null,
+): Promise<number> {
+  // Takes the memory's state AFTER the write (@codex, PR #1357). Classifying
+  // "foreign" against the pre-update row read tenancy from the OLD
+  // organization, so a memory TRANSFERRED to another tenant kept its source
+  // tenant's links alive — they looked same-tenant against the org it had just
+  // left. This is also why the caller must fire on an org change, not only on
+  // a visibility change: a transfer makes existing links foreign without
+  // touching visibility at all.
+  // PUBLIC justifies a cross-tenant READ link and nothing more — that is
+  // exactly the exception `requireAgentMemoryGrant` grants. So a still-PUBLIC
+  // memory keeps its foreign READ links, but a foreign WRITABLE one is never
+  // justified by PUBLIC and must go (@codex P1, PR #1357): a PUBLIC memory
+  // carrying a same-tenant read-write item and then TRANSFERRED to another
+  // organization left that item live and writable from what is now a foreign
+  // tenant, because this early return skipped the sweep entirely.
+  //
+  // "PUBLIC" here means a genuine public AUDIENCE — the same predicate the
+  // attach gate uses — not the raw column (@copilot, PR #1357). An App-scoped
+  // or user-owned row marked PUBLIC has no cross-tenant audience, so none of
+  // its foreign links (read ones included) was ever justified.
+  const writableOnly =
+    memory.visibility === 'PUBLIC' && !isExcludedFromCoveredSet(memory) && memory.ownerUserId == null;
+  const links = await db.agentMemoryItem.findMany({
+    where: {
+      memoryId: memory.id,
+      deletedAt: null,
+      ...(writableOnly ? { role: 'read-write' } : {}),
+    },
+    select: { id: true, role: true, agentId: true, agent: { select: { organizationId: true, ownerUserId: true, visibility: true } } },
+  });
+  const appKnowledge = memory.appId != null && (memory.class === 'knowledge' || memory.class === 'group') &&
+    memory.userMemoryOfAgentId == null;
+  let appTenantMismatch = false;
+  let licensedAppReaders = new Set<string>();
+  if (appKnowledge && memory.appId != null) {
+    const app = await db.app.findUnique({
+      where: { id: memory.appId },
+      select: { organizationId: true, ownerUserId: true, deletedAt: true, uninstalledAt: true },
+    });
+    appTenantMismatch = !!app &&
+      (app.organizationId !== memory.organizationId || app.ownerUserId !== memory.ownerUserId);
+    if (app && !appTenantMismatch && app.deletedAt == null && app.uninstalledAt == null) {
+      const readerIds = links.filter((link) => link.role === 'read').map((link) => link.agentId);
+      const installs = readerIds.length === 0 ? [] : await db.appAgent.findMany({
+        where: { appId: memory.appId, agentId: { in: readerIds }, agent: { deletedAt: null } },
+        select: { agent: { select: { id: true, organizationId: true, ownerUserId: true } } },
+      });
+      licensedAppReaders = await activeAgentInstallLicenseIds(db, app, installs.map((row) => row.agent));
+    }
+  }
+  const invalid = links.filter((l) => {
+    const sameTenant =
+      (l.agent.organizationId != null && l.agent.organizationId === memory.organizationId) ||
+      (l.agent.ownerUserId != null && l.agent.ownerUserId === memory.ownerUserId);
+    // A destination-tenant PUBLIC agent can carry a legacy writable link
+    // created before the attach gate. A PUBLIC memory transfer must not retain
+    // that link merely because the transfer makes the agent same-tenant.
+    const publicAgentWriter =
+      l.role === 'read-write' && l.agent.visibility === 'PUBLIC' &&
+      !isExcludedFromCoveredSet(memory);
+    return appTenantMismatch ||
+      (!sameTenant && !(l.role === 'read' && licensedAppReaders.has(l.agentId))) || publicAgentWriter;
+  });
+  if (invalid.length === 0) return 0;
+  const result = await db.agentMemoryItem.updateMany({
+    where: { id: { in: invalid.map((f) => f.id) }, deletedAt: null },
+    data: { deletedAt: new Date(), deletedBy: actor },
+  });
+  return result.count;
+}
+
+/**
  * Guard for linking a memory to an agent: reject if the target agent is PUBLIC
  * and the memory is a COVERED, non-PUBLIC memory. Excluded memories (per-user,
  * app-scoped) may always be linked. `memory` is the row being linked.
  */
 export async function assertLinkAllowedForPublicAgent(
   agentVisibility: string | null,
-  memory: { class: string; appId: string | null; visibility: string | null },
+  memory: { class: string; appId: string | null; ownerUserId: string | null; userMemoryOfAgentId: string | null; visibility: string | null },
 ): Promise<void> {
   if (agentVisibility !== 'PUBLIC') return;
-  if (isExcludedFromCoveredSet(memory)) return; // per-user / app-scoped: allowed
+  if (isExcludedFromCoveredSet(memory)) return; // strict-owner / app-scoped: allowed
   if (memory.visibility === 'PUBLIC') return;
   throw badInput(
     `Cannot link a non-public memory to a PUBLIC agent — a PUBLIC agent may ` +

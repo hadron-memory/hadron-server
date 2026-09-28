@@ -4,6 +4,7 @@ import { isLifecycleActive } from '@hadron-memory/access-control';
 import {
   getPrimaryAgent,
   getPrimaryAgentId,
+  isGrantedAgentMemoryRole,
 } from '../../../lib/appAgent.js';
 import {
   emitNodeUrnV2,
@@ -1752,8 +1753,9 @@ export const typeResolvers = {
     // readable app-scoped memories from `organization`/`app -> agents ->
     // memoryItems` (PR #846 review: Codex P1 / Copilot).
     //
-    // A PUBLIC non-app-scoped memory short-circuits, so the marketplace listing
-    // costs no extra query.
+    // Only an org-owned PUBLIC non-App memory short-circuits. A spec-047
+    // user-owned memory remains strict-owner even with visibility PUBLIC; the
+    // owner axis must reach canReadMemoryRecord (#1357 review).
     memoryItems: async (
       a: { id: string; memoryItems?: unknown },
       _: unknown,
@@ -1775,8 +1777,9 @@ export const typeResolvers = {
         ownerUserId: string | null;
         organizationId: string | null;
         userMemoryOfAgentId: string | null;
+        createdBy: string | null;
       };
-      type Item = { memoryId: string; memory?: Mem | null };
+      type Item = { memoryId: string; role: string | null; memory?: Mem | null };
       const eager = a.memoryItems as Item[] | undefined;
       // Fall back to a query when the field wasn't eager-loaded AT ALL, and
       // also when it was loaded WITHOUT its `memory` relation — otherwise every
@@ -1791,11 +1794,22 @@ export const typeResolvers = {
         : eager;
       const kept: Item[] = [];
       for (const item of items) {
+        // A malformed persisted role grants no audience, even when the linked
+        // Memory itself is PUBLIC. The public fast path must honor the same
+        // link semantics as the App access fold.
+        if (!isGrantedAgentMemoryRole(item.role)) continue;
         const mem = item.memory;
         if (!mem) continue;
-        // Readable by anyone (#362 PUBLIC carve-out); #653 keeps app-scoped
-        // rows out of the public set even when their visibility says PUBLIC.
-        if (mem.visibility === 'PUBLIC' && mem.appId == null) {
+        // Legacy per-user holding rows can carry PUBLIC visibility while
+        // ownerUserId is null. Their audience is the creating user alone.
+        if (mem.userMemoryOfAgentId != null) {
+          if (!ctx.impersonation && ctx.userId != null && ctx.userId === mem.createdBy) kept.push(item);
+          continue;
+        }
+        // Readable by anyone only for the genuine public audience. #653 keeps
+        // App-scoped rows internal; spec-047 keeps user-owned rows strict-owner
+        // even if their visibility column says PUBLIC.
+        if (mem.visibility === 'PUBLIC' && mem.appId == null && mem.ownerUserId == null && mem.userMemoryOfAgentId == null) {
           kept.push(item);
           continue;
         }

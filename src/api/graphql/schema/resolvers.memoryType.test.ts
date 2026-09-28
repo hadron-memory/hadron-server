@@ -486,6 +486,13 @@ describe('AGENT_SYSTEM memory guards', () => {
           roles: ['READER'],
         },
       });
+      // #1349: the class message is only REACHABLE by a principal who can both
+      // read the memory and administer the agent — otherwise an earlier gate
+      // answers first. The owner as org ADMIN is that principal, and is the
+      // realistic one: someone attaching their OWN personal memory.
+      await db.orgMember.create({
+        data: { organizationId: orgA.id, userId: owner.id, role: 'ADMIN' },
+      });
       const secret = await db.memory.create({
         data: {
           id: generateId(),
@@ -501,11 +508,36 @@ describe('AGENT_SYSTEM memory guards', () => {
       // READ this memory (`cor:acl:010:02`: the ADMIN bypass stops at
       // personal/private), so the attach was a grant they had no standing to
       // make.
+      //
+      // #1349 SPLIT THIS BY PRINCIPAL. The class-specific message below is
+      // addressed to someone who knows this memory exists; saying it to a
+      // NON-READER discloses both its existence and its class, which is the
+      // #1316 oracle (memory URNs are guessable). So the org ADMIN — who
+      // cannot read it — now gets the same answer a missing memory gives,
+      // while the OWNER, the actor the remedy actually names, still gets every
+      // word of it. Nothing about the message's wording is relaxed; it just no
+      // longer goes to a principal with no standing to hear it.
+      const concealed = await resolvers.Mutation
+        .addMemoryToAgent({}, { agentRef: agent.id, memoryRef: secret.id, role: 'read' }, adminCtx())
+        .catch((e: Error) => e);
+      const missingRef = generateId();
+      const missing = await resolvers.Mutation
+        .addMemoryToAgent({}, { agentRef: agent.id, memoryRef: missingRef, role: 'read' }, adminCtx())
+        .catch((e: Error) => e);
+      // Paired: identical once each caller's OWN ref is substituted. Echoing
+      // back the ref the caller supplied discloses nothing they did not send.
+      expect((concealed as { name?: string }).name).toBe('MemoryNotFoundError');
+      expect((concealed as Error).message.split(secret.id).join('<REF>')).toBe(
+        (missing as Error).message.split(missingRef).join('<REF>'),
+      );
+      expect((concealed as Error).message).not.toMatch(new RegExp(`${klass}-class`, 'i'));
+
+      const ownerCtx = () => ({ db, userId: owner.id, roles: [] }) as unknown as Context;
       await expect(
         resolvers.Mutation.addMemoryToAgent(
           {},
           { agentRef: agent.id, memoryRef: secret.id, role: 'read' },
-          adminCtx(),
+          ownerCtx(),
         ),
       ).rejects.toThrow(new RegExp(`${klass}-class memory`, 'i'));
 
@@ -515,7 +547,7 @@ describe('AGENT_SYSTEM memory guards', () => {
       // `personal` as owner-only when a MemoryShare grantee reads it — the
       // subject of #1104, merged the day before.
       const err = await resolvers.Mutation
-        .addMemoryToAgent({}, { agentRef: agent.id, memoryRef: secret.id, role: 'read' }, adminCtx())
+        .addMemoryToAgent({}, { agentRef: agent.id, memoryRef: secret.id, role: 'read' }, ownerCtx())
         .catch((e: Error) => e);
       const message = (err as Error).message;
       if (klass === 'private') {
