@@ -537,6 +537,37 @@ describe('family 13 — #3123 long-loc liveness', () => {
   });
 });
 
+describe('family 15 — frozen keyset boundary (#1428 Codex round N)', () => {
+  it('a busy channel producing rows after the freeze does not starve completion', async () => {
+    for (let i = 0; i < 5; i++) await post(`freeze-range ${i}`);
+    // Page 1 of a multi-page scan — the freeze captures head 5.
+    const p1 = await teamAttentionPage(userCtx(), app.id, { scanLimit: 2 });
+    expect(p1.scanComplete).toBe(false);
+    // Post-freeze traffic: rows beyond the frozen head keep arriving…
+    await post('post-freeze 1');
+    await post('post-freeze 2');
+    await post('post-freeze 3');
+    // …but the ORIGINAL scan (continuing p1's page token) completes over its
+    // frozen range without fetching them — the busy channel cannot starve
+    // completion by keeping every page full of seq > cMax rows.
+    let page: string | null = p1.nextPage;
+    let adopted: string | null = null;
+    let items: ReturnType<typeof identityOf>[] = [];
+    for (let guard = 0; guard < 30 && page; guard++) {
+      const r = await teamAttentionPage(userCtx(), app.id, { page, scanLimit: 2 });
+      items.push(...r.items.map(identityOf));
+      if (r.scanComplete) { adopted = r.adoptableSince; break; }
+      page = r.nextPage;
+    }
+    expect(adopted).toBeTruthy();
+    const mine = items.filter((i) => i.worker === worker.id);
+    expect(mine[0]).toMatchObject({ unread: 5 });
+    // And the next poll from the adopted watermark reports the post-freeze work.
+    const next = await drainPages({ since: adopted });
+    expect(next.items.filter((i) => i.worker === worker.id)[0]).toMatchObject({ unread: 8 });
+  });
+});
+
 describe('family 14 — review #3153', () => {
   it('a genuinely-issued pre-C shape gets STALE_PAGE; every signed malformed variant gets INVALID (#3170/#3171)', async () => {
     const { signPageToken } = await import('./teamAttentionPage.js');

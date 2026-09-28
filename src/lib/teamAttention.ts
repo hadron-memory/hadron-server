@@ -678,6 +678,10 @@ async function pagedScanStep(
     // budget (residual-rejected included); the cursor persists from the LAST
     // CHARGED RAW row so rejects are paid once. Decryption is gated on
     // eligibility; the data column transfers for every raw-budgeted row.
+    // The frozen seq span bounds the FETCH itself: post-freeze traffic is
+    // never fetched and cannot starve completion (Codex P1 — a busy Channel
+    // producing rows faster than pages drain would otherwise keep every
+    // page full of seq > cMax rows).
     const prefix = geometry.locPrefix;
     const upperBound = prefix.slice(0, -1) + ';';
     const lowerBound = prefix + state.cCursorNum[k];
@@ -689,6 +693,8 @@ async function pagedScanStep(
         WHERE n.memory_id = ${geometry.memoryId}
           AND n.loc COLLATE "C" > ${lowerBound} COLLATE "C"
           AND n.loc COLLATE "C" < ${upperBound} COLLATE "C"
+          AND n.seq > ${state.cMin[k]}
+          AND n.seq <= ${state.cMax[k]}
         ORDER BY n.loc COLLATE "C"
         LIMIT ${take}
       ) raw
