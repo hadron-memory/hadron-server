@@ -213,6 +213,11 @@ describe('#990 — workerRef by name, and the briefing always comes back', () =>
       workerRef: 'Iris',
     });
     expect(out).toContain('Boot briefing');
+    // #1090: the bind receipt stamps the rendering it just made — composition
+    // time plus the role Agent's generic updatedAt from the same read.
+    expect(out).toMatch(/rendered at: \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/);
+    expect(out).toMatch(/role Agent updated at: \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/);
+    expect(out).toContain('no per-override mtime is tracked');
     // Rendered live from the template, with {{name}}/{{role}} bound — this is
     // what removes the need for published briefing NODES (hadron-cli#443).
     expect(out).toContain('You are Iris, a backend-engineer. Ship carefully.');
@@ -265,7 +270,10 @@ describe('#996 review — a briefing failure must not swallow the session', () =
     // its retry would hit WORKER_TAKEN for the very session it was told had
     // failed — unable to continue or to end it.
     const spy = vi
-      .spyOn(resolvers.Worker as any, 'prompt')
+      // #1090 moved the bind's briefing composition onto composeWorkerPrompt
+      // (one agent read for text + stamps), so the #996 injection point moved
+      // with it — the catch contract itself is unchanged.
+      .spyOn(await import('../api/graphql/schema/resolvers.worker.js'), 'composeWorkerPrompt')
       .mockRejectedValueOnce(new Error('transient prompt failure'));
     try {
       const srv = createTestableMcpServer(hybridAuth());
