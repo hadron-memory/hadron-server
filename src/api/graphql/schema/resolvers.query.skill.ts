@@ -481,10 +481,19 @@ async function planSkills(input: SkillPlanInput, ctx: Context, selectedRefs?: st
         extensions: { code: 'BAD_USER_INPUT' },
       });
     }
-    if (input.scopeRef != null && input.intent !== 'EXPORT') {
-      throw new GraphQLError('skillPlan: scopeRef is valid only with EXPORT intent.', {
-        extensions: { code: 'BAD_USER_INPUT' },
-      });
+    let requestedScopeRef: string | null = null;
+    if (Object.prototype.hasOwnProperty.call(input, 'scopeRef')) {
+      if (input.intent !== 'EXPORT') {
+        throw new GraphQLError('skillPlan: scopeRef is valid only with EXPORT intent.', {
+          extensions: { code: 'BAD_USER_INPUT' },
+        });
+      }
+      // A supplied null is a failed narrowing request, not omission. Treating
+      // it as unscoped would hand an EXPORT every readable task (Chip, #1427).
+      if (typeof input.scopeRef !== 'string' || input.scopeRef.trim() === '') {
+        throw new GraphQLError('skillPlan: scope unavailable.', { extensions: { code: 'BAD_USER_INPUT' } });
+      }
+      requestedScopeRef = input.scopeRef;
     }
     if (selectedRefs !== undefined) {
       if (selectedRefs.length === 0 || selectedRefs.length > SKILL_PLAN_MAX_NODES) {
@@ -571,14 +580,14 @@ async function planSkills(input: SkillPlanInput, ctx: Context, selectedRefs?: st
       droppedCount: number;
       fingerprint: string;
     } | null = null;
-    if (input.scopeRef != null) {
+    if (requestedScopeRef !== null) {
       // Scope identity crosses the wire; membership is always re-resolved
       // through the shared Scope gate and canonical materialized access set.
       // The same ordered set and fingerprint applies to every host, which the
       // client compares before writing a multi-host artifact.
       let scopeId: string;
       try {
-        ({ id: scopeId } = await resolveScopeRef(ctx.db, input.scopeRef));
+        ({ id: scopeId } = await resolveScopeRef(ctx.db, requestedScopeRef));
       } catch {
         throw new GraphQLError('skillPlan: scope unavailable.', { extensions: { code: 'BAD_USER_INPUT' } });
       }

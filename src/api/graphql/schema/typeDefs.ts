@@ -1020,7 +1020,7 @@ export const typeDefs = `#graphql
     intent: SkillPlanIntent!
     """Memory refs for LINT/STATUS only. EXPORT refuses this field, even an empty list."""
     memories: [String!]
-    """Persisted Scope ID for a narrowed EXPORT. Membership is resolved afresh for each call."""
+    """Persisted Scope ID for a narrowed EXPORT. Omit for unscoped export; explicit null refuses. Membership is resolved afresh for each call."""
     scopeRef: ID
     """
     Target host, named by its D12 declaration key verbatim: claudeSkill (the default) or codexSkill. One host per call; the plan reads that host's declaration and applies its limits, and the retired top-level skill/claudeSkill keys alias to claudeSkill only. An unknown host is refused with BAD_USER_INPUT naming the supported hosts, never judged as another host and never answered with an empty plan.

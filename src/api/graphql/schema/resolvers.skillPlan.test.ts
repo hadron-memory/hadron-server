@@ -157,6 +157,14 @@ describe('server-owned Scope selection for plugin EXPORT', () => {
     const scope = await mkScope('one-memory', [mem.id]);
     const files = [{ dirName: 'outside-skill', nodeId: outside.id, sourceUrn: 'old', headerHash: 'x', fileHash: 'x' }];
 
+    // Omission means unscoped, while an explicitly supplied null must refuse
+    // rather than silently widening from A to readable A+B (Chip, #1427).
+    expect((await plan({ intent: 'EXPORT' })).entries.map((e: { nodeId: string }) => e.nodeId).sort())
+      .toEqual([inside.id, outside.id].sort());
+    await expect(plan({ intent: 'EXPORT', scopeRef: null })).rejects.toMatchObject({
+      extensions: { code: 'BAD_USER_INPUT' },
+    });
+
     const claude = await plan({ intent: 'EXPORT', host: 'claudeSkill', scopeRef: scope.id, files });
     const codex = await plan({ intent: 'EXPORT', host: 'codexSkill', scopeRef: scope.id, files });
     expect(claude.entries.map((e: { nodeId: string }) => e.nodeId)).toEqual([inside.id]);
@@ -181,6 +189,31 @@ describe('server-owned Scope selection for plugin EXPORT', () => {
     const changed = await plan({ intent: 'EXPORT', host: 'claudeSkill', scopeRef: scope.id });
     expect(changed.entries.map((e: { nodeId: string }) => e.nodeId)).toEqual([outside.id]);
     expect(changed.scopeSelection.fingerprint).not.toBe(claude.scopeSelection.fingerprint);
+  });
+
+  it('keeps existing file-facts and force protections for a scoped entry', async () => {
+    const node = await mkNode('tasks:edited-in-scope', { properties: declaration() });
+    const scope = await mkScope('file-protection', [mem.id]);
+    const initial = await plan({ intent: 'EXPORT' });
+    const entry = initial.entries[0];
+    const file = {
+      dirName: 'my-skill', nodeId: node.id, sourceUrn: entry.urn,
+      headerHash: /hash=([0-9a-f]{16})/.exec(entry.renderedBody)![1]!,
+      fileHash: 'f'.repeat(16),
+    };
+
+    const unscoped = await plan({ intent: 'EXPORT', files: [file] });
+    const scoped = await plan({ intent: 'EXPORT', scopeRef: scope.id, files: [file] });
+    expect(scoped.entries[0].exportPlan).toEqual(unscoped.entries[0].exportPlan);
+    expect(scoped.entries[0].exportPlan).toMatchObject({ action: 'REFUSE', reasons: [{ code: 'locally-edited' }] });
+    expect(scoped.entries[0].renderedBody).toBeNull();
+
+    const unscopedForced = await plan({ intent: 'EXPORT', force: true, files: [file] });
+    const scopedForced = await plan({ intent: 'EXPORT', scopeRef: scope.id, force: true, files: [file] });
+    expect(scopedForced.entries[0].exportPlan).toEqual(unscopedForced.entries[0].exportPlan);
+    expect(scopedForced.entries[0].exportPlan).toMatchObject({ action: 'WRITE', reasons: [{ code: 'locally-edited-override' }] });
+    expect(scopedForced.orphans).toEqual([]);
+    expect(scopedForced.orphanAssessmentSkipped).toBe(true);
   });
 
   it('refuses arbitrary EXPORT memories, including an empty list, while keeping LINT/STATUS filters', async () => {
