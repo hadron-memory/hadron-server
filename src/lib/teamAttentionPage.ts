@@ -162,25 +162,39 @@ export function verifyPageToken(
   } catch {
     fail('Invalid team-attention page token.', 'INVALID_ATTENTION_PAGE');
   }
-  // A CORRECTLY SIGNED pre-C-ordering continuation (no `o` marker) is not a
-  // malformed token — it is a stale ordering the cursor must never be
-  // reinterpreted under. Answer the typed stale-page restart so the router
+  // Shared v2 shape validation — a token must pass this BEFORE the
+  // ordering classification distinguishes an authentic pre-C continuation
+  // (typed stale restart) from a malformed payload (INVALID). A signed but
+  // shape-broken token with no `o` is malformed, not old-order
+  // (#3166 classification finding).
+  const arraysValid =
+    Array.isArray(value.W) && Array.isArray(value.C) && Array.isArray(value.R) &&
+    Array.isArray(value.c_inc) &&
+    Array.isArray(value.t_w) && Array.isArray(value.t_c) &&
+    value.t_w.length === value.t_c.length;
+  // Dictionary indices must be in bounds — a signed token with out-of-range
+  // references is malformed regardless of ordering marker (#3166).
+  const indicesValid = arraysValid &&
+    (value.t_w as number[]).every((w, i) =>
+      Number.isInteger(w) && w >= 0 && w < (value.W as string[]).length &&
+      Number.isInteger((value.t_c as number[])[i]) && (value.t_c as number[])[i] >= 0 && (value.t_c as number[])[i] < (value.C as string[]).length);
+  const shapeValid =
+    value.v === 2 &&
+    value.kind === 'team-attention-page' &&
+    (value.op === 'poll' || value.op === 'preview') &&
+    typeof value.appId === 'string' &&
+    typeof value.userId === 'string' &&
+    arraysValid && indicesValid;
+  if (!shapeValid) {
+    fail('Invalid team-attention page token.', 'INVALID_ATTENTION_PAGE');
+  }
+  // A CORRECTLY SIGNED, shape-valid pre-C-ordering continuation (no `o`
+  // marker) is not malformed — it is a stale ordering the cursor must never
+  // be reinterpreted under. Answer the typed stale-page restart so the router
   // discards only `page` and retries from its unchanged committed `since`
   // (#3153 finding 2; Anne #3139 / Liam #3144).
-  if (value.v === 2 && value.kind === 'team-attention-page' && value.o !== 'c') {
+  if (value.o !== 'c') {
     fail('This scan continuation predates the current keyset ordering; poll again without page to restart from your committed watermark.', 'TEAM_ATTENTION_STALE_PAGE');
-  }
-  if (
-    value.v !== 2 ||
-    value.kind !== 'team-attention-page' ||
-    (value.op !== 'poll' && value.op !== 'preview') ||
-    typeof value.appId !== 'string' ||
-    typeof value.userId !== 'string' ||
-    !Array.isArray(value.W) || !Array.isArray(value.C) || !Array.isArray(value.R) ||
-    !Array.isArray(value.c_inc) ||
-    !Array.isArray(value.t_w) || !Array.isArray(value.t_c)
-  ) {
-    fail('Invalid team-attention page token.', 'INVALID_ATTENTION_PAGE');
   }
   return value as PageContinuation;
 }

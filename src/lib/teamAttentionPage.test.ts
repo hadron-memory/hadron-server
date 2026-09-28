@@ -538,36 +538,49 @@ describe('family 13 — #3123 long-loc liveness', () => {
 });
 
 describe('family 14 — review #3153', () => {
-  it('an authentic pre-C-ordering continuation answers the typed stale restart, not INVALID (#3153 finding 2)', async () => {
+  it('a GENUINELY valid pre-C continuation gets STALE_PAGE; a signed but malformed no-o token gets INVALID (#3166)', async () => {
     const { signPageToken } = await import('./teamAttentionPage.js');
     await post('one');
-    // Mint a correctly-signed token WITHOUT the `o` marker — the shape every
-    // continuation had before the C-ordering switch.
+    const secret = process.env.TEAM_ATTENTION_TOKEN_SECRET || process.env.JWT_SECRET || '';
+    // Genuine pre-C shape: valid dictionaries and indices, NO `o`, NO `c_front`
+    // (fields that did not exist before the C-ordering switch).
     const oldOrder: Record<string, unknown> = {
       v: 2, kind: 'team-attention-page', op: 'poll', appId: app.id, userId: user.id, ts: Date.now(),
-      W: [worker.id], C: [channel.id], R: [], t_w: [0], t_c: [0], t_r: [0], t_mo: [0],
-      t_seen: [0], t_head: [1], t_prior: [0], c_done: '', c_num: [''], c_front: [''], c_inc: [1],
+      W: [worker.id], C: [channel.id], R: ['reg-1'], t_w: [0], t_c: [0], t_r: [0], t_mo: [0],
+      t_seen: [0], t_head: [1], t_prior: [0], c_done: '', c_num: [''], c_inc: [1],
       c_min: [0], c_max: [1], u_unread: [0], u_ment: [0], u_first: [0], u_last: [0],
       e_emitted: '', q: [], next: 0, dg: 'x',
     };
-    delete oldOrder.o;
-    const signed = signPageToken(oldOrder as never, process.env.TEAM_ATTENTION_TOKEN_SECRET || process.env.JWT_SECRET || '');
-    if ('tooLarge' in signed) throw new Error('unexpected tooLarge');
-    await expect(teamAttentionPage(userCtx(), app.id, { page: (signed as { token: string }).token })).rejects.toMatchObject({
+    const signedOld = signPageToken(oldOrder as never, secret);
+    if ('tooLarge' in signedOld) throw new Error('unexpected tooLarge');
+    await expect(teamAttentionPage(userCtx(), app.id, { page: (signedOld as { token: string }).token })).rejects.toMatchObject({
       extensions: { code: 'TEAM_ATTENTION_STALE_PAGE' },
+    });
+    // Signed but MALFORMED no-o token: broken dictionary indices (t_w references
+    // a nonexistent worker) — INVALID, not the old-order restart.
+    const malformed: Record<string, unknown> = { ...oldOrder, t_w: [99] };
+    const signedBad = signPageToken(malformed as never, secret);
+    if ('tooLarge' in signedBad) throw new Error('unexpected tooLarge');
+    await expect(teamAttentionPage(userCtx(), app.id, { page: (signedBad as { token: string }).token })).rejects.toMatchObject({
+      extensions: { code: 'INVALID_ATTENTION_PAGE' },
     });
   });
 
   it('a counted message followed by an own post keeps the COUNTED frontier on the counted row (#3153 finding 3)', async () => {
     await post('counted', { mentions: ['dara'] });
     await post('own after counted', { authorWorkerId: worker.id });
-    const first = await teamAttentionPage(userCtx(), app.id, { scanLimit: 1 });
+    await post('not yet visited');
+    // scanLimit 2: the first TWO rows are visited (counted + own); the third
+    // remains, so the channel stays ACTIVE after the pull. c_num advances to
+    // the own (last charged raw) row; c_front stays on the counted row — the
+    // one the deletion check protects. THEN delete the counted row → typed
+    // restart while the channel is still active.
+    const first = await teamAttentionPage(userCtx(), app.id, { scanLimit: 2 });
     expect(first.scanComplete).toBe(false);
-    // The own post is channel-eligible but no target counts it; the frontier
-    // stays on the first (counted) row. Delete THAT row → typed stale restart.
     const decoded = JSON.parse(Buffer.from(first.nextPage!.split('.')[0], 'base64url').toString('utf-8'));
-    const frontierLoc = `chats:team:messages:${decoded.c_front[0]}`;
-    await db.node.updateMany({ where: { memoryId: memory.id, loc: frontierLoc }, data: { deletedAt: new Date() } });
+    expect(decoded.c_num[0]).toBe('002'); // raw cursor on the own post (loc suffix is padded)
+    expect(decoded.c_front[0]).toBe('001'); // counted frontier on the counted row
+    await db.node.updateMany({ where: { memoryId: memory.id, loc: 'chats:team:messages:001' }, data: { deletedAt: new Date() } });
     await expect(teamAttentionPage(userCtx(), app.id, { page: first.nextPage })).rejects.toMatchObject({
       extensions: { code: 'TEAM_ATTENTION_STALE_PAGE' },
     });
