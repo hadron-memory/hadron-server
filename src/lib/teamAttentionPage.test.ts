@@ -239,6 +239,50 @@ describe('family 3 — loss safety', () => {
 });
 
 describe('family 4 — drift and key loss', () => {
+  it('a message arriving mid-scan is NOT skipped by adoption (#3046 finding 1)', async () => {
+    for (let i = 0; i < 5; i++) await post(`m${i}`);
+    const first = await teamAttentionPage(userCtx(), app.id, { scanLimit: 2 });
+    expect(first.scanComplete).toBe(false);
+    // Message #6 lands while the scan is mid-flight.
+    await post('arrived mid-scan');
+    let page = first.nextPage;
+    let adopted: string | null = null;
+    for (let guard = 0; guard < 50 && page; guard++) {
+      const r = await teamAttentionPage(userCtx(), app.id, { page });
+      if (r.scanComplete) { adopted = r.adoptableSince; break; }
+      page = r.nextPage;
+    }
+    expect(adopted).toBeTruthy();
+    // The adoptable watermark carries the FROZEN head (5), not the live 6…
+    const decoded = JSON.parse(Buffer.from(adopted!.split('.')[0], 'base64url').toString('utf-8'));
+    expect(decoded.workers[0].channels[0].head).toBe(5);
+    // …so the next poll from it must notify the mid-scan arrival.
+    const next = await drainPages({ since: adopted });
+    // v1 semantics: full unread from the read cursor; the skip-prevention
+    // proof is the target being REPORTED at all (relevance 6 > watermark 5).
+    expect(next.items.filter((i) => i.worker === worker.id)[0]).toMatchObject({ unread: 6, lastRelevantSeq: 6 });
+  });
+
+  it('a target appearing between pages stales the continuation (#3046 finding 2)', async () => {
+    for (let i = 0; i < 5; i++) await post(`m${i}`);
+    const first = await teamAttentionPage(userCtx(), app.id, { scanLimit: 2 });
+    expect(first.scanComplete).toBe(false);
+    // A second live Worker registers mid-scan: the live target set grows.
+    const second = await db.worker.create({ data: { id: generateId(), appId: app.id, agentId: agent.id, name: 'Mira', slug: 'mira' } });
+    await db.registerEntry.create({
+      data: { id: generateId(), appId: app.id, channelId: channel.id, attendeeWorkerId: second.id, role: 'BOTH' },
+    });
+    await db.session.create({
+      data: { id: generateId(), appId: app.id, userId: user.id, workerId: second.id, agentId: agent.id, type: 'DEVELOPER', startedAt: new Date() },
+    });
+    await expect(teamAttentionPage(userCtx(), app.id, { page: first.nextPage })).rejects.toMatchObject({
+      extensions: { code: 'TEAM_ATTENTION_STALE_PAGE' },
+    });
+    // The restart picks the new target up fresh.
+    const restarted = await drainPages({});
+    expect(restarted.items.some((i) => i.worker === second.id)).toBe(true);
+  });
+
   it('refuses a page token whose channel frontier row was deleted (typed stale restart)', async () => {
     for (let i = 0; i < 5; i++) await post(`m${i}`);
     const first = await teamAttentionPage(userCtx(), app.id, { scanLimit: 2 });

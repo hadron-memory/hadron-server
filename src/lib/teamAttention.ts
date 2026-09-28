@@ -824,12 +824,12 @@ async function runPagedAttention(
   const limit = Math.max(1, Math.min(args.limit ?? PAGE_RESULT_PAIRS_DEFAULT, PAGE_RESULT_PAIRS_MAX));
   const scanLimit = Math.max(1, Math.min(args.scanLimit ?? PAGE_SCAN_ROW_BUDGET_DEFAULT, PAGE_SCAN_ROW_BUDGET_MAX));
 
-  const targets = await attentionTargets(ctx, app);
+  let targets = await attentionTargets(ctx, app);
   const secret = attentionTokenSecret();
 
   // The frozen channel dictionary is sorted-id: deterministic round-robin.
-  const channelIds = [...new Set(targets.map((t) => t.channelId))].sort();
-  const channelIndexOf = new Map(channelIds.map((id, k) => [id, k]));
+  let channelIds = [...new Set(targets.map((t) => t.channelId))].sort();
+  let channelIndexOf = new Map(channelIds.map((id, k) => [id, k]));
 
   let state: PagedScanState;
   let priorHeads: Map<string, number> | null = null;
@@ -851,24 +851,44 @@ async function runPagedAttention(
     state = continuationToState(decoded);
     frozenSeen = decoded.t_seen;
     frozenHead = decoded.t_head;
-    // Rehydrate the frozen scope against the LIVE scope: every frozen target
-    // must still resolve to a live target of the same identity (worker,
-    // channel, register, mentionOnly) whose head has not moved BACKWARD.
-    // A forward READ-cursor move does NOT stale the scan — the frozen span
-    // stays exact for its captured range and may merely produce a redundant
-    // nudge (contract: duplicate, never lose).
+    // Rehydrate by REBUILDING the working target list FROM THE FROZEN
+    // ARRAYS (#3046 finding 2): the frozen set and order drive scan,
+    // emission, snapshot and continuation for the rest of this request;
+    // live rows only prove liveness/participation and supply display
+    // metadata plus the register behind the (worker, channel, mentionOnly)
+    // identity. EXACT set-and-order equality is required — a count
+    // difference or any unmatched entry answers a typed stale restart, so a
+    // target that appeared between pages can never slip into the final
+    // snapshot unscanned. A forward READ-cursor move does NOT stale the
+    // scan (the frozen span stays exact for its captured range; redundant
+    // nudges allowed, loss impossible); a head moving backward does.
+    if (decoded.t_w.length !== targets.length) {
+      fail('The scan scope drifted (target set changed size); poll again without page.', 'TEAM_ATTENTION_STALE_PAGE');
+    }
+    const liveAtFreeze = targets;
+    const claimed = new Set<Target>();
+    const rebuilt: Target[] = [];
     for (let i = 0; i < decoded.t_w.length; i++) {
       const workerId = decoded.W[decoded.t_w[i]];
       const channelId = decoded.C[decoded.t_c[i]];
-      const match = targets.find(
+      const match = liveAtFreeze.find(
         (t) => t.workerId === workerId
           && t.channelId === channelId
           && decoded.t_mo[i] === (t.mentionOnly ? 1 : 0)
+          && !claimed.has(t)
           && decoded.t_head[i] <= t.head,
       );
       if (!match) {
         fail('The scan scope drifted (register, participation or head changed); poll again without page.', 'TEAM_ATTENTION_STALE_PAGE');
       }
+      claimed.add(match);
+      rebuilt.push({ ...match, seen: decoded.t_seen[i], head: decoded.t_head[i] });
+    }
+    targets = rebuilt;
+    channelIds = [...new Set(targets.map((t) => t.channelId))].sort();
+    channelIndexOf = new Map(channelIds.map((id, k) => [id, k]));
+    if (channelIds.length !== decoded.C.length || channelIds.some((id, k) => id !== decoded.C[k])) {
+      fail('The scan scope drifted (channel dictionary changed); poll again without page.', 'TEAM_ATTENTION_STALE_PAGE');
     }
     // Boundary check: the frontier row of every still-active channel must
     // still exist undeleted — deletion of the scan frontier is the mutation
