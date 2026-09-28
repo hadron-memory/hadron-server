@@ -229,9 +229,15 @@ describe('encryptMemory — locked conversion (#1346)', () => {
     expect(await db.nodeRevision.count({ where: { nodeId } })).toBe(0);
   });
 
-  it('does not mint a plaintext reconcile revision for a row deleted after enumeration', async () => {
+  it('encrypts tombstones without leaking a raw-edit reconcile revision', async () => {
     const cleanDeleted = await db.node.create({
       data: { id: generateId(), memoryId, loc: 'clean-delete', name: 'clean-delete', content: 'clean' },
+    });
+    const alreadyDeleted = await db.node.create({
+      data: {
+        id: generateId(), memoryId, loc: 'prior-delete', name: 'prior-delete',
+        content: 'prior tombstone', deletedAt: new Date(),
+      },
     });
     const findMany = db.node.findMany.bind(db.node);
     let injected = false;
@@ -241,8 +247,8 @@ describe('encryptMemory — locked conversion (#1346)', () => {
         injected = true;
         const deletedAt = new Date();
         // This combines an unrevisioned raw content edit with a soft delete.
-        // Reconciliation before the liveness check used to persist these
-        // canaries as a NEW plaintext NodeRevision after the memory flip.
+        // The conversion must encrypt both this row and any NEW reconcile
+        // snapshot, even though a soft delete arrived after enumeration.
         await db.node.update({
           where: { id: nodeId },
           data: {
@@ -261,8 +267,20 @@ describe('encryptMemory — locked conversion (#1346)', () => {
     }
     expect(injected).toBe(true);
     expect((await db.memory.findUniqueOrThrow({ where: { id: memoryId } })).isEncrypted).toBe(true);
-    expect((await db.node.findUniqueOrThrow({ where: { id: nodeId } })).deletedAt).not.toBeNull();
-    expect(await db.nodeRevision.count({ where: { nodeId: { in: [nodeId, cleanDeleted.id] } } })).toBe(0);
+    for (const [id, expected] of [
+      [nodeId, 'deleted canary'], [cleanDeleted.id, 'clean'], [alreadyDeleted.id, 'prior tombstone'],
+    ]) {
+      const row = await db.node.findUniqueOrThrow({ where: { id } });
+      expect(row.deletedAt).not.toBeNull();
+      expect(isCiphertext(row.content)).toBe(true);
+      expect(decryptNodeFieldsWithKey(row, parseDataKey(dataKey)).content).toBe(expected);
+    }
+    const revisions = await db.nodeRevision.findMany({ where: { nodeId } });
+    expect(revisions).toHaveLength(1);
+    expect(revisions[0]!.editedByInfo).toBe('system:revision-reconcile');
+    expect(isCiphertext(revisions[0]!.content)).toBe(true);
+    expect(decryptNodeFieldsWithKey(revisions[0]!, parseDataKey(dataKey)).content).toBe('deleted canary');
+    expect(await db.nodeRevision.count({ where: { nodeId: { in: [cleanDeleted.id, alreadyDeleted.id] } } })).toBe(0);
   });
 
   it('allows only one of two callers that both saw plaintext to claim the encryption key', async () => {

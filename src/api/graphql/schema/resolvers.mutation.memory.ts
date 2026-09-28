@@ -2227,7 +2227,9 @@ export const memoryMutations = {
         let cursor: string | undefined;
         for (;;) {
           const nodes = await ctx.db.node.findMany({
-            where: { memoryId: resolvedMemoryId, deletedAt: null },
+            // Tombstones retain content and may later be restored. They are
+            // part of the at-rest conversion too (#1435 review P2).
+            where: { memoryId: resolvedMemoryId },
             // This is only an id page. Fields must be read AFTER the row lock:
             // a concurrent edit between enumeration and conversion otherwise
             // gets overwritten with ciphertext of the older value (#1346).
@@ -2240,11 +2242,12 @@ export const memoryMutations = {
           cursor = nodes[nodes.length - 1].id;
           for (const node of nodes) {
             const didConvert = await ctx.db.$transaction(async (tx) => {
-              // Lock first, then reject a row deleted or moved since the ID
-              // page. Reconciliation must NOT run on a tombstone: a raw edit
-              // plus deletion can otherwise mint a new plaintext revision in
-              // an already-encrypted memory (#1346, Chip QA). Each transaction
-              // holds only one node lock; id pagination gives a stable order.
+              // Lock first, then re-read. A moved row is outside this memory;
+              // a deleted row still belongs here and retains restorable
+              // content, so it must be reconciled and encrypted too. The
+              // reconciliation snapshot is encrypted below before commit.
+              // Each transaction holds only one node lock; id paging orders
+              // the conversions deterministically.
               const locked = await tx.$queryRaw<Array<{ id: string }>>`
                 SELECT id FROM nodes WHERE id = ${node.id} FOR UPDATE
               `;
@@ -2252,7 +2255,7 @@ export const memoryMutations = {
               const lockedNode = await tx.node.findUnique({
                 where: { id: node.id },
               });
-              if (!lockedNode || lockedNode.memoryId !== resolvedMemoryId || lockedNode.deletedAt) return false;
+              if (!lockedNode || lockedNode.memoryId !== resolvedMemoryId) return false;
               // The helper reuses our row lock, scopes the reconcile to the
               // authorized memory, and snapshots raw drift before conversion.
               const revision = await ensureCurrentNodeRevisionInTransaction(tx, node.id, {
@@ -2260,7 +2263,7 @@ export const memoryMutations = {
               });
               if (revision == null) return false;
               const current = await tx.node.findUnique({ where: { id: node.id } });
-              if (!current || current.memoryId !== resolvedMemoryId || current.deletedAt) return false;
+              if (!current || current.memoryId !== resolvedMemoryId) return false;
 
               // Reconciliation can snapshot the raw plaintext change. Encrypt
               // that newly minted snapshot before this transaction commits:
