@@ -216,6 +216,31 @@ describe('server-owned Scope selection for plugin EXPORT', () => {
     expect(scopedForced.orphanAssessmentSkipped).toBe(true);
   });
 
+  it('refuses duplicate installed files for an in-scope task without surfacing out-of-scope orphans', async () => {
+    const outsideMemory = await resolvers.Mutation.createMemory({}, { orgId: org.id, name: `dup-outside-${generateId()}` }, ctx());
+    const inside = await mkNode('tasks:inside-duplicate', { properties: declaration() });
+    const outside = await db.node.create({ data: {
+      id: generateId(), memoryId: outsideMemory.id, loc: 'tasks:outside-duplicate', name: 'outside',
+      isRunnable: true, content: '# Outside', properties: declaration({ name: 'outside-skill' }),
+    } });
+    const scope = await mkScope('duplicate-protection', [mem.id]);
+    const urn = (await plan({ intent: 'LINT', memories: [mem.id] })).entries[0].urn as string;
+    const files = [
+      { dirName: 'my-skill', nodeId: inside.id, sourceUrn: urn, headerHash: 'a'.repeat(16), fileHash: 'a'.repeat(16) },
+      { dirName: 'old-copy', nodeId: inside.id, sourceUrn: urn, headerHash: 'a'.repeat(16), fileHash: 'a'.repeat(16) },
+      { dirName: 'outside-skill', nodeId: outside.id, sourceUrn: 'old', headerHash: 'a'.repeat(16), fileHash: 'a'.repeat(16) },
+    ];
+
+    const got = await plan({ intent: 'EXPORT', scopeRef: scope.id, files, force: true });
+    expect(got.entries.map((e: { nodeId: string }) => e.nodeId)).toEqual([inside.id]);
+    expect(got.entries[0]).toMatchObject({
+      renderedBody: null,
+      exportPlan: { action: 'REFUSE', preservesExistingFile: true, reasons: [{ code: 'multiple-installed-files' }] },
+    });
+    expect(got.orphans).toEqual([]);
+    expect(got.orphanAssessmentSkipped).toBe(true);
+  });
+
   it('refuses arbitrary EXPORT memories, including an empty list, while keeping LINT/STATUS filters', async () => {
     await mkNode('tasks:inside', { properties: declaration() });
     for (const memories of [[], [mem.id]]) {

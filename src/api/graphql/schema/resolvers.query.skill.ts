@@ -973,13 +973,13 @@ async function planSkills(input: SkillPlanInput, ctx: Context, selectedRefs?: st
       // it. That is the duplicate-directory outcome §4a exists to prevent,
       // arriving through a different door.
       //
-      // One node keeps ONE directory: the first by name wins, and every other
-      // claimant is reported as an orphan — a file this plan will not
-      // maintain, which is what an orphan IS operationally and what `--prune`
-      // acts on. The class table does not name this case; reported to @Eli
-      // rather than invented as a tenth class.
+      // One node keeps ONE directory: the first by name wins. An unscoped
+      // plan reports every other claimant as an orphan; narrowed plans skip
+      // orphan assessment, so they must REFUSE the in-scope node instead of
+      // silently hiding its duplicate. The class table does not name this
+      // case; reported to @Eli rather than invented as a tenth class.
       if (fileFor.has(paired.id)) {
-        if (selectedRefs !== undefined) duplicateSelectedFiles.add(paired.id);
+        if (selectedRefs !== undefined || scopeSelection !== null) duplicateSelectedFiles.add(paired.id);
         continue;
       }
       fileFor.set(paired.id, facts);
