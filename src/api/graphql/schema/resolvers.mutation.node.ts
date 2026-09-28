@@ -127,6 +127,7 @@ import {
   nodeNotFoundError,
   resolveMemoryRefForWrite,
   isMemoryHiddenForWrite,
+  withoutRequestCaches,
   type NodeInput,
   type NodeEdgeInput,
   type CreateNodeInput,
@@ -205,6 +206,12 @@ export async function writeNodeCore(
   // mechanism stays: it is the generic guarded-write primitive, and the next
   // caller-level precondition will need exactly it.)
   opts?: {
+    /** Reuse a caller's lock transaction; effects wait for its commit. */
+    transaction?: {
+      tx: Prisma.TransactionClient;
+      pooledDb: Context['db'];
+      afterCommit: (effect: () => void) => void;
+    };
     targetNodeId?: string;
     guardRevSeq?: number;
     /**
@@ -804,6 +811,8 @@ export async function writeNodeCore(
         outgoingEdges: { include: { target: true } },
         incomingEdges: { include: { source: true } },
       };
+      const inWriteTransaction = <T>(work: (tx: Prisma.TransactionClient) => Promise<T>): Promise<T> =>
+        opts?.transaction ? work(opts.transaction.tx) : ctx.db.$transaction(work);
 
       // Inline edge replacement is part of the node mutation, not a follow-up
       // write. Acquire the complete endpoint-memory set BEFORE any loc lock or
@@ -1027,7 +1036,7 @@ export async function writeNodeCore(
             new GraphQLError(`Node at loc "${input.loc}" changed since it was read — re-read and retry.`, {
               extensions: { code: 'NODE_WRITE_CONFLICT', loc: input.loc, memoryId: input.memoryId },
             });
-          const result = await ctx.db.$transaction(async (tx) => {
+          const result = await inWriteTransaction(async (tx) => {
             await lockInlineEdgeMemories(tx);
             await lockLocForWrite(tx, input.memoryId, input.loc, {
               owns: opts?.owns,
@@ -1206,7 +1215,7 @@ export async function writeNodeCore(
           // the helper: it is also the spec 049 S4 protected-loc gate, run
           // under the transaction — a root-level Channel address was
           // otherwise overwritable here (Copilot on PR #1165, round 2).
-          node = await ctx.db.$transaction(async (tx) => {
+          node = await inWriteTransaction(async (tx) => {
             await lockInlineEdgeMemories(tx);
             await lockAncestorsForCreate(tx, input.memoryId, input.loc, {
               owns: opts?.owns,
@@ -1419,58 +1428,61 @@ export async function writeNodeCore(
 
       // Event pivot: the write core announces the fact; subscribers (git
       // mirror, embedding wake, whatever comes next) act on it. Encrypted
-      // memories keep the direct in-closure git write below — the subscriber
-      // can't decrypt without this request's session key, and finalNode here
-      // is already plaintext.
-      void publishNodeWritten({
-        nodeId: finalNode.id,
-        memoryId: input.memoryId,
-        ownerRepo: input.ownerRepo ?? '',
-        clientId: ctx.clientId,
-      });
-      if (memEncInfo.isEncrypted) {
-        writeNodeToGit({
-          id: finalNode.id,
-          loc: finalNode.loc,
-          name: finalNode.name,
-          nodeType: finalNode.nodeType,
-          alias: finalNode.alias,
-          description: finalNode.description,
-          abstract: finalNode.abstract,
-          abstractOriginHash: finalNode.abstractOriginHash,
-          contentHash: finalNode.contentHash,
-          content: finalNode.content,
-          tags: deserializeTags(finalNode.tags) as string[],
-          seq: finalNode.seq,
-          data: finalNode.data,
-          properties: finalNode.properties,
-          // #1218 — the mirror carries the governed signals.
-          role: finalNode.role ?? null,
-          isRunnable: finalNode.isRunnable ?? null,
-          outgoingEdges: finalNode.outgoingEdges ?? [],
-        }, input.ownerRepo ?? '', ctx.clientId, input.memoryId).catch((err) => {
-          console.error('[writeNodeCore] git write error:', err);
+      // memories keep the direct git write below — the subscriber can't
+      // decrypt without this request's session key, and finalNode is plaintext.
+      // When the caller owns the transaction, delay every effect until its
+      // commit succeeds. The callback uses the pooled client, never the tx.
+      const afterCommit = () => {
+        void publishNodeWritten({
+          nodeId: finalNode.id,
+          memoryId: input.memoryId,
+          ownerRepo: input.ownerRepo ?? '',
+          clientId: ctx.clientId,
         });
-      }
+        if (memEncInfo.isEncrypted) {
+          writeNodeToGit({
+            id: finalNode.id,
+            loc: finalNode.loc,
+            name: finalNode.name,
+            nodeType: finalNode.nodeType,
+            alias: finalNode.alias,
+            description: finalNode.description,
+            abstract: finalNode.abstract,
+            abstractOriginHash: finalNode.abstractOriginHash,
+            contentHash: finalNode.contentHash,
+            content: finalNode.content,
+            tags: deserializeTags(finalNode.tags) as string[],
+            seq: finalNode.seq,
+            data: finalNode.data,
+            properties: finalNode.properties,
+            // #1218 — the mirror carries the governed signals.
+            role: finalNode.role ?? null,
+            isRunnable: finalNode.isRunnable ?? null,
+            outgoingEdges: finalNode.outgoingEdges ?? [],
+          }, input.ownerRepo ?? '', ctx.clientId, input.memoryId).catch((err) => {
+            console.error('[writeNodeCore] git write error:', err);
+          });
+        }
 
-      // 033 — (re-)embed on write. finalNode is decrypted (plaintext) here, so
-      // the prompt-drain embeds correctly even on encrypted memories (FR-027).
-      void enqueueNodeEmbedding(ctx.db, {
-        nodeId: finalNode.id,
-        memoryId: input.memoryId,
-        plaintext: { content: finalNode.content, abstract: finalNode.abstract },
-      });
+        // 033 — (re-)embed on write. finalNode is decrypted (plaintext) here,
+        // so the prompt-drain embeds correctly on encrypted memories (FR-027).
+        const pooledDb = opts?.transaction?.pooledDb ?? ctx.db;
+        void enqueueNodeEmbedding(pooledDb, {
+          nodeId: finalNode.id,
+          memoryId: input.memoryId,
+          plaintext: { content: finalNode.content, abstract: finalNode.abstract },
+        });
 
-      // #1061 — the one place a `write` event is recorded for every caller that
-      // reaches the shared write core: GraphQL createNode/updateNode, the
-      // portal and CLI behind them, importNode, the run-tools, asset reference
-      // nodes and the session handoff. Placed after the write has landed, so a
-      // refused or conflicted write records nothing.
-      recordNodeWrite(
-        ctx.db,
-        { id: finalNode.id, loc: finalNode.loc, memoryId: input.memoryId },
-        ctx,
-      );
+        // #1061 — the one place a `write` event is recorded for every caller
+        // that reaches the shared write core. A refused write records nothing.
+        recordNodeWrite(
+          pooledDb,
+          { id: finalNode.id, loc: finalNode.loc, memoryId: input.memoryId },
+          ctx,
+        );
+      };
+      if (opts?.transaction) opts.transaction.afterCommit(afterCommit);
+      else afterCommit();
 
       return finalNode;
 }
@@ -1751,12 +1763,13 @@ export async function updateNodePropertiesWith(
   // advisory lock: any other updateNodeProperties on this node blocks until
   // this one's write commits, then reads the fresh base.
   //
-  // The lock is held by this short tx; writeNodeCore runs on the POOLED
-  // connection (not this tx) on purpose — it fires a `void enqueueNodeEmbedding
-  // (ctx.db)` that would break against a closing tx client — so the tx only
-  // does the lock + the fresh read + delegate, and the lock releases when the
-  // closure (incl. the awaited writeNodeCore) returns.
-  return ctx.db.$transaction(async (lockTx) => {
+  // The merge and core write use the SAME transaction connection. Otherwise
+  // each concurrent merge holds one connection for its lock while waiting for
+  // a second connection to write, exhausting a small pool (#1279). The core's
+  // event, embedding, git and usage effects run only after this commit, on the
+  // pooled client rather than a closed transaction client.
+  const effects: Array<() => void> = [];
+  const written = await ctx.db.$transaction(async (lockTx) => {
     await lockTx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${meta.id}))`;
 
     // Fresh read UNDER the lock — the merge base can't be stale. `properties`
@@ -1795,11 +1808,18 @@ export async function updateNodePropertiesWith(
         ...(fresh.ownerRepo != null ? { ownerRepo: fresh.ownerRepo } : {}),
         ...(reason != null ? { reason } : {}),
       },
-      ctx,
+      withoutRequestCaches(ctx, lockTx),
       'update',
-      { targetNodeId: meta.id, governedMerge: 'properties', governedContext: opts.governedContext },
+      {
+        targetNodeId: meta.id,
+        governedMerge: 'properties',
+        governedContext: opts.governedContext,
+        transaction: { tx: lockTx, pooledDb: ctx.db, afterCommit: (effect) => effects.push(effect) },
+      },
     );
   });
+  for (const effect of effects) effect();
+  return written;
 }
 
 /** Shallow, patch-wins merge; a node with no object properties takes the patch as-is. */

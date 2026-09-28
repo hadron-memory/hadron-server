@@ -8,6 +8,7 @@
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
+import { PrismaClient } from '../../../generated/prisma/index.js';
 import { cleanDb, createDbOrgAndGraph } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
@@ -24,7 +25,7 @@ let orgId: string;
 let memId: string;
 const admin = (): Context => ({ db, roles: ['ADMIN'], userId: adminId } as Context);
 const createObject = (input: Record<string, unknown>) => M().createObject(null, input, admin());
-const updateObject = (input: Record<string, unknown>) => M().updateObject(null, input, admin());
+const updateObject = (input: Record<string, unknown>, c: Context = admin()) => M().updateObject(null, input, c);
 const deleteObject = (input: Record<string, unknown>) => M().deleteObject(null, input, admin());
 const getObject = (ref: string) => Q().object(null, { ref }, admin());
 const findObjects = (input: Record<string, unknown>) => Q().findObjects(null, input, admin());
@@ -110,6 +111,24 @@ describe('getObject / updateObject / deleteObject', () => {
     const obj = await createObject({ memoryRef: memId, type: 'competitor', fields: { name: 'Letta', stage: 'seed' } });
     const updated = await updateObject({ ref: obj.id, fields: { stage: 'series-a', fundingUsd: 10 } });
     expect(updated).toMatchObject({ id: obj.id, type: 'competitor', name: 'Letta', stage: 'series-a', fundingUsd: 10 });
+  });
+
+  it('updates distinct objects concurrently with a two-connection pool (#1279)', async () => {
+    const objects = [];
+    for (const name of ['Alpha', 'Beta', 'Gamma']) {
+      objects.push(await createObject({ memoryRef: memId, type: 'competitor', fields: { name } }));
+    }
+    const url = new URL(process.env.DATABASE_URL!);
+    url.searchParams.set('connection_limit', '2');
+    const limitedDb = new PrismaClient({ datasourceUrl: url.toString() });
+    try {
+      const updated = await Promise.all(objects.map((object, stage) =>
+        updateObject({ ref: object.id, fields: { stage } }, { ...admin(), db: limitedDb }),
+      ));
+      expect(updated.map((object: any) => object.stage)).toEqual([0, 1, 2]);
+    } finally {
+      await limitedDb.$disconnect();
+    }
   });
 
   it('an object field named `exports` keeps the shallow merge (#1278 review: the #1227 merge-patch is node-only)', async () => {
