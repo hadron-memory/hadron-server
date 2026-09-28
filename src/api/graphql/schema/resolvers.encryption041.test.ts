@@ -12,8 +12,8 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { resolvers, type Context } from './resolvers.js';
 import { generateId } from '../../../lib/id.js';
-import { isCiphertext } from '../../../lib/crypto.js';
-import { decryptNodeFields } from '../../../lib/nodeCrypto.js';
+import { isCiphertext, parseDataKey } from '../../../lib/crypto.js';
+import { decryptNodeFields, decryptNodeFieldsWithKey } from '../../../lib/nodeCrypto.js';
 import { sessionKeyCache } from '../../../lib/sessionKeyCache.js';
 import { stageRequestMemoryKeys } from '../../../lib/memoryUnlock.js';
 import { requestKeyStorage } from '../../../lib/requestKeys.js';
@@ -150,5 +150,82 @@ describe('encryptMemory — passphrase path (spec 041)', () => {
     });
     // Outside the request scope the memory is locked again.
     expect(sessionKeyCache.getByMemoryId(memoryId)).toBeNull();
+  });
+});
+
+describe('encryptMemory — locked conversion (#1346)', () => {
+  const dataKey = Buffer.alloc(32, 7).toString('base64');
+
+  it('preserves a raw edit made after the id scan and reconciles its drift before encrypting', async () => {
+    const findMany = db.node.findMany.bind(db.node);
+    let injected = false;
+    const scan = vi.spyOn(db.node, 'findMany').mockImplementation((async (args: Parameters<typeof findMany>[0]) => {
+      const rows = await findMany(args);
+      if (!injected && args?.take === 200 && args.where?.memoryId === memoryId) {
+        injected = true;
+        // A real committed database write between enumeration and the locked
+        // transform. The previous implementation encrypted the older values
+        // from `rows` and erased this edit without a visible drift marker.
+        await db.node.update({
+          where: { id: nodeId },
+          data: { content: 'late content', abstract: 'late abstract', data: { mood: 'late' } },
+        });
+      }
+      return rows;
+    }) as never);
+    try {
+      await resolvers.Mutation.encryptMemory({}, { memoryId, dataKey }, ownerCtx());
+    } finally {
+      scan.mockRestore();
+    }
+    expect(injected).toBe(true);
+    const live = await db.node.findUniqueOrThrow({ where: { id: nodeId } });
+    const plain = decryptNodeFieldsWithKey(live, parseDataKey(dataKey));
+    expect(plain.content).toBe('late content');
+    expect(plain.abstract).toBe('late abstract');
+    expect(plain.data).toEqual({ mood: 'late' });
+    expect(live.revSeq).toBe(2);
+    const revisions = await db.nodeRevision.findMany({ where: { nodeId } });
+    expect(revisions).toHaveLength(1);
+    expect(revisions[0]!.editedByInfo).toBe('system:revision-reconcile');
+    expect(isCiphertext(revisions[0]!.content)).toBe(true);
+    expect(decryptNodeFieldsWithKey(revisions[0]!, parseDataKey(dataKey)).content).toBe('late content');
+  });
+
+  it('keeps a clean conversion at revision 1 without a fabricated reconcile', async () => {
+    await resolvers.Mutation.encryptMemory({}, { memoryId, dataKey }, ownerCtx());
+    const live = await db.node.findUniqueOrThrow({ where: { id: nodeId } });
+    expect(decryptNodeFieldsWithKey(live, parseDataKey(dataKey)).content).toBe('my secret plaintext');
+    expect(live.revSeq).toBe(1);
+    expect(await db.nodeRevision.count({ where: { nodeId } })).toBe(0);
+  });
+
+  it('does not encrypt or reconcile a row moved to another memory after enumeration', async () => {
+    const destination = await db.memory.create({
+      data: {
+        id: generateId(), organizationId: org.id, urn: 'enc41-org:other-diary',
+        name: 'other diary', class: 'private', userId: owner.id,
+      },
+    });
+    const findMany = db.node.findMany.bind(db.node);
+    let moved = false;
+    const scan = vi.spyOn(db.node, 'findMany').mockImplementation((async (args: Parameters<typeof findMany>[0]) => {
+      const rows = await findMany(args);
+      if (!moved && args?.take === 200 && args.where?.memoryId === memoryId) {
+        moved = true;
+        await db.node.update({ where: { id: nodeId }, data: { memoryId: destination.id } });
+      }
+      return rows;
+    }) as never);
+    try {
+      await resolvers.Mutation.encryptMemory({}, { memoryId, dataKey }, ownerCtx());
+    } finally {
+      scan.mockRestore();
+    }
+    expect(moved).toBe(true);
+    const node = await db.node.findUniqueOrThrow({ where: { id: nodeId } });
+    expect(node.memoryId).toBe(destination.id);
+    expect(node.content).toBe('my secret plaintext');
+    expect(await db.nodeRevision.count({ where: { nodeId } })).toBe(0);
   });
 });
