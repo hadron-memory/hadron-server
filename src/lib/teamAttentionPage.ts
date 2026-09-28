@@ -51,10 +51,12 @@ function fail(message: string, code: string): never {
 export interface PageContinuation {
   v: 2;
   kind: 'team-attention-page';
-  /** Keyset ordering marker: 'c' = C-collation byte order. Continuations
-   * minted before the C-order switch (or with any other marker) are refused
-   * with a typed restart — their cursor is never reinterpreted (#1430). */
-  o: 'c';
+  /** Scan-era marker: 's' = seq-first Channel-local order (the structural
+   * #3248 design). The prior era minted 'c' (C-collation loc order, cursor
+   * in c_num/c_ful); an authentic signed token of that era — or any marker
+   * this build did not mint — is refused with a TYPED restart, never
+   * reinterpreted: its cursor fields mean something else (#3281). */
+  o: 's';
   op: 'poll' | 'preview';
   appId: string;
   userId: string;
@@ -83,16 +85,6 @@ export interface PageContinuation {
   /** Per-channel scan state, parallel arrays by channel index. `c_done` is a
    * hex bitset (channel index → bit), sized to the channel dictionary. */
   c_done: string;
-  /** Keyset cursor: the last consumed row's loc SUFFIX — the part after the
-   * channel's `{loc}:messages:` prefix, which rehydration reconstructs from
-   * live geometry. Storing the suffix (typically 1-7 chars) instead of the
-   * full loc keeps the 200-target continuation within the transport ceiling
-   * when channels carry long addresses (#3123 liveness blocker). '' = not
-   * started. The reconstructed full loc drives the `loc > cursor` keyset.
-   * EXAMINED WORK IS NOT HARD-BOUNDED (#1430): a collated text index can
-   * pass foreign/residual rows before LIMIT; only returned rows are
-   * budget-bounded. Suffix length is observational, not a guaranteed
-   * transport bound — legacy nonnumeric suffixes store verbatim. */
   /** Seq-first keyset cursor per channel: the last consumed row's seq. */
   c_seq: number[];
   /** Seq-first keyset cursor per channel: the last consumed row's loc suffix
@@ -165,34 +157,37 @@ export function verifyPageToken(
   } catch {
     fail('Invalid team-attention page token.', 'INVALID_ATTENTION_PAGE');
   }
-  // Shared v2 shape validation — a token must pass this BEFORE the
-  // ordering classification distinguishes an authentic pre-C continuation
-  // (typed stale restart) from a malformed payload (INVALID). A signed but
-  // shape-broken token with no `o` is malformed, not old-order
-  // (#3166 classification finding).
-  // FULL structural completeness — every array any v2 continuation carries
-  // (pre-C or current) must be present with consistent parallel lengths and
-  // in-bounds dictionary indices, BEFORE the ordering classification. A
-  // signed payload missing arrays or referencing absent registers is
-  // malformed, not an authentic old-order token (#3170/#3171).
+  // Structural validation in two tiers (#3166/#3170/#3171 classification,
+  // carried to the seq-first era per #3281):
+  //
+  // 1. The era-INDEPENDENT v2 core — dictionaries, target arrays, queue,
+  //    scalars — every era's minted token carries these with consistent
+  //    parallel lengths and in-bounds indices. A signed payload that fails
+  //    the core is malformed: INVALID, not an old era.
+  // 2. The era-specific channel arrays. The current era ('s') carries
+  //    c_seq/c_loc/c_front; the prior loc-ordered era ('c' or no marker)
+  //    carried c_num/c_ful/c_front instead. Only a token whose OWN era's
+  //    arrays are all present is classified as an authentic prior-era
+  //    continuation — answered with the TYPED stale-page restart so the
+  //    router discards only `page` and retries from its unchanged committed
+  //    `since`. A marker this build never minted, or a mixture of eras'
+  //    arrays, is malformed.
   const targetArrays = ['t_w', 't_c', 't_r', 't_mo', 't_seen', 't_head', 't_prior', 'u_unread', 'u_ment', 'u_first', 'u_last'] as const;
-  const channelArrays = ['c_inc', 'c_min', 'c_max', 'c_loc', 'c_front', 'c_seq'] as const;
-  const arraysValid =
+  const seqEraChannelArrays = ['c_inc', 'c_min', 'c_max', 'c_loc', 'c_front', 'c_seq'] as const;
+  const locEraChannelArrays = ['c_inc', 'c_min', 'c_max', 'c_num', 'c_ful', 'c_front'] as const;
+  const coreArraysValid =
     Array.isArray(value.W) && Array.isArray(value.C) && Array.isArray(value.R) &&
-    channelArrays.every((key) => Array.isArray((value as Record<string, unknown>)[key])) &&
     targetArrays.every((key) => Array.isArray((value as Record<string, unknown>)[key]));
-  const parallelValid = arraysValid && targetArrays.every((key) =>
+  const parallelValid = coreArraysValid && targetArrays.every((key) =>
     ((value as Record<string, unknown>)[key] as unknown[]).length === (value.t_w as number[]).length);
-  const channelParallelValid = parallelValid &&
-    channelArrays.every((key) => ((value as Record<string, unknown>)[key] as unknown[]).length === (value.C as string[]).length);
-  const queueValid = channelParallelValid &&
+  const queueValid = parallelValid &&
     Array.isArray(value.q) && (value.q as number[]).every((ti) =>
       Number.isInteger(ti) && ti >= 0 && ti < (value.t_w as number[]).length);
-  const scalarValid = queueValid && channelParallelValid &&
+  const scalarValid = queueValid &&
     typeof value.c_done === 'string' && typeof value.e_emitted === 'string' &&
     typeof value.dg === 'string' && typeof value.next === 'number' &&
     typeof value.ts === 'number';
-  const indicesValid = channelParallelValid && scalarValid &&
+  const indicesValid = scalarValid &&
     (value.t_w as number[]).every((w, i) => {
       const tc = (value.t_c as number[])[i];
       const tr = (value.t_r as number[])[i];
@@ -200,29 +195,33 @@ export function verifyPageToken(
         Number.isInteger(tc) && tc >= 0 && tc < (value.C as string[]).length &&
         Number.isInteger(tr) && tr >= 0 && tr < (value.R as string[]).length;
     });
-  const shapeValid =
+  const coreValid =
     value.v === 2 &&
     value.kind === 'team-attention-page' &&
     (value.op === 'poll' || value.op === 'preview') &&
     typeof value.appId === 'string' &&
     typeof value.userId === 'string' &&
-    parallelValid && channelParallelValid && scalarValid && indicesValid;
-  if (!shapeValid) {
+    parallelValid && scalarValid && indicesValid;
+  if (!coreValid) {
     fail('Invalid team-attention page token.', 'INVALID_ATTENTION_PAGE');
   }
-  // A CORRECTLY SIGNED, shape-valid pre-C-ordering continuation (no `o`
-  // marker) is not malformed — it is a stale ordering the cursor must never
-  // be reinterpreted under. Answer the typed stale-page restart so the router
-  // discards only `page` and retries from its unchanged committed `since`
-  // (#3153 finding 2; Anne #3139 / Liam #3144).
-  if (value.o !== 'c') {
-    fail('This scan continuation predates the current keyset ordering; poll again without page to restart from your committed watermark.', 'TEAM_ATTENTION_STALE_PAGE');
+  const channelArraysOf = (keys: readonly string[]) =>
+    keys.every((key) => Array.isArray((value as Record<string, unknown>)[key])) &&
+    keys.every((key) => ((value as Record<string, unknown>)[key] as unknown[]).length === (value.C as string[]).length);
+  if (value.o === 's') {
+    // Current era: the full seq-first channel state must be present.
+    if (!channelArraysOf(seqEraChannelArrays)) {
+      fail('Invalid team-attention page token.', 'INVALID_ATTENTION_PAGE');
+    }
+    return value as PageContinuation;
   }
-  // Current-era (C-ordering) tokens additionally carry the counted frontier.
-  if (!Array.isArray(value.c_front) || (value.c_front as string[]).length !== (value.C as string[]).length) {
-    fail('Invalid team-attention page token.', 'INVALID_ATTENTION_PAGE');
+  // Not this build's era. An AUTHENTIC prior-era continuation (loc-ordered
+  // 'c' marker or the marker-less pre-C shape, with that era's channel
+  // arrays intact) restarts typed; anything else is malformed.
+  if (channelArraysOf(locEraChannelArrays)) {
+    fail('This scan continuation predates the current scan era; poll again without page to restart from your committed watermark.', 'TEAM_ATTENTION_STALE_PAGE');
   }
-  return value as PageContinuation;
+  fail('Invalid team-attention page token.', 'INVALID_ATTENTION_PAGE');
 }
 
 /** The scope digest binds the dictionaries so a pull can detect a token cut

@@ -481,7 +481,7 @@ describe('family 9 — consolidated review corrections (#3051/#3053/#3054)', () 
       t_head: Array.from({ length: 200 }, () => 2147483647),
       t_prior: Array.from({ length: 200 }, () => 2147483647),
       c_done: '0'.repeat(50),
-      o: 'c' as const,
+      o: 's' as const,
       c_seq: Array.from({ length: 200 }, () => 2147483647),
       c_loc: Array.from({ length: 200 }, () => '007'),
       c_front: Array.from({ length: 200 }, () => '2147483647'),
@@ -653,36 +653,53 @@ describe('family 17 — mixed-Channel isolation (#3216)', () => {
 });
 
 describe('family 14 — review #3153', () => {
-  it('a genuinely-issued current-minus-o shape gets STALE_PAGE; every signed malformed variant gets INVALID (#3170/#3171)', async () => {
+  it('an AUTHENTIC prior-era (loc-ordered) token gets STALE_PAGE; every signed malformed variant gets INVALID (#3170/#3171/#3281)', async () => {
     const { signPageToken } = await import('./teamAttentionPage.js');
     await post('one');
-    const secret = process.env.TEAM_ATTENTION_TOKEN_SECRET || process.env.JWT_SECRET || '';
-    // Mint a REAL current continuation, then strip `o` and `c_front` — the
-    // exact transformation an actually-issued pre-C page underwent.
-    const current = await teamAttentionPage(userCtx(), app.id, {});
-    expect(current.scanComplete).toBe(true); // tiny scan final page — mint a paged one instead
     await post('two');
     await post('three');
+    const secret = process.env.TEAM_ATTENTION_TOKEN_SECRET || process.env.JWT_SECRET || '';
     const paged = await teamAttentionPage(userCtx(), app.id, { scanLimit: 1 });
     expect(paged.scanComplete).toBe(false);
-    const realPayload = JSON.parse(Buffer.from(paged.nextPage!.split('.')[0], 'base64url').toString('utf-8'));
-    const preC: Record<string, unknown> = { ...realPayload };
-    delete preC.o; // strip only the ordering marker
-    const signedOld = signPageToken(preC as never, secret);
-    if ('tooLarge' in signedOld) throw new Error('unexpected tooLarge');
-    await expect(teamAttentionPage(userCtx(), app.id, { page: (signedOld as { token: string }).token })).rejects.toMatchObject({
-      extensions: { code: 'TEAM_ATTENTION_STALE_PAGE' },
-    });
-    // Chip's three separately-signed malformed variants (#3171) — each must
-    // get INVALID, not the old-order restart.
+    const realPayload = JSON.parse(Buffer.from(paged.nextPage!.split('.')[0], 'base64url').toString('utf-8')) as Record<string, unknown>;
+    // Reconstruct the payload the loc-ordered era (heads 2ab78595/30a9f261)
+    // actually minted — not a stripped current token (#3281: the prior tests
+    // mutated NEW tokens and never exercised the authentic prior format).
+    // That era carried o:'c', its cursor in c_num (loc suffix) and its bound
+    // in c_ful (frozen upper loc); c_seq/c_loc did not exist.
+    const locEra = (): Record<string, unknown> => {
+      const v: Record<string, unknown> = { ...realPayload, o: 'c' };
+      delete v.c_seq;
+      delete v.c_loc;
+      v.c_num = Array.from({ length: (realPayload.C as unknown[]).length }, () => '007');
+      v.c_ful = (realPayload.C as string[]).map(() => 'chats:team:messages:998-zzzz-author');
+      return v;
+    };
+    // The authentic prior-era token, and its marker-less variant (the
+    // pre-C shape) — both restart TYPED, never reinterpreted.
+    for (const [label, mutate] of [
+      ['authentic loc-era (o:c)', (v: Record<string, unknown>) => v],
+      ['marker-less pre-C shape', (v: Record<string, unknown>) => { delete v.o; return v; }],
+    ] as Array<[string, (v: Record<string, unknown>) => Record<string, unknown>]>) {
+      const signed = signPageToken(mutate(locEra()) as never, secret);
+      if ('tooLarge' in signed) throw new Error(`unexpected tooLarge: ${label}`);
+      await expect(teamAttentionPage(userCtx(), app.id, { page: (signed as { token: string }).token })).rejects.toMatchObject({
+        extensions: { code: 'TEAM_ATTENTION_STALE_PAGE' },
+      });
+    }
+    // Chip's separately-signed malformed variants (#3171) — each must get
+    // INVALID, not the prior-era restart.
     const variants: Array<[string, Record<string, unknown>]> = [
-      ['t_r references absent register', { ...preC, R: [], t_r: [0] }],
-      ['missing c_loc array', (() => { const v = { ...preC }; delete v.c_loc; return v; })()],
-      ['missing t_r array', (() => { const v = { ...preC }; delete v.t_r; return v; })()],
-      ['broken t_w index', { ...preC, t_w: [99] }],
-      ['missing q queue array', (() => { const v = { ...preC }; delete v.q; return v; })()],
-      ['missing ts timestamp', (() => { const v = { ...preC }; delete v.ts; return v; })()],
-      // Current-era token missing c_front (has o:'c') → INVALID
+      ['t_r references absent register', { ...locEra(), R: [], t_r: [0] }],
+      ['missing prior-era c_num array', (() => { const v = locEra(); delete v.c_num; return v; })()],
+      ['missing t_r array', (() => { const v = locEra(); delete v.t_r; return v; })()],
+      ['broken t_w index', { ...locEra(), t_w: [99] }],
+      ['missing q queue array', (() => { const v = locEra(); delete v.q; return v; })()],
+      ['missing ts timestamp', (() => { const v = locEra(); delete v.ts; return v; })()],
+      // A MIXED-era token (current arrays, prior marker) is malformed, not
+      // prior-era: its c_num/c_ful are absent so the loc-era check fails.
+      ['current arrays with prior marker', (() => { const v = { ...realPayload, o: 'c' }; return v; })()],
+      // Current-era token missing its channel arrays → INVALID.
       ['current token missing c_front', (() => { const v = { ...realPayload }; delete v.c_front; return v; })()],
     ];
     for (const [label, variant] of variants) {
@@ -803,7 +820,7 @@ describe('family 11 — review #3105', () => {
       t_head: Array.from({ length: 200 }, () => 2147483647),
       t_prior: Array.from({ length: 200 }, () => 2147483647),
       c_done: '0'.repeat(50),
-      o: 'c' as const,
+      o: 's' as const,
       c_seq: Array.from({ length: 200 }, () => 2147483647),
       c_loc: Array.from({ length: 200 }, () => '007'),
       c_front: Array.from({ length: 200 }, () => '2147483647'),
@@ -856,5 +873,70 @@ describe('family 10 — Codex #1428 findings', () => {
     await expect(teamAttentionPage(userCtx(), app.id, { limit: 2.5 })).rejects.toMatchObject({
       extensions: { code: 'BAD_USER_INPUT' },
     });
+  });
+});
+
+describe('family 18 — structural review corrections (#3280/#3283/#3257)', () => {
+  it('a message posted through the REAL mutation is stamped and counted end to end (#3280)', async () => {
+    const { teamChatMutations } = await import('../api/graphql/schema/resolvers.teamChat.js');
+    // No fixture-created message: the production append path itself must
+    // stamp Channel membership in the same transaction (the regression the
+    // manually-stamping post() helper masked).
+    const sent = await teamChatMutations.createTeamChatMessage(null, { appRef: app.id, body: 'e2e hello' }, userCtx());
+    expect(sent.seq).toBe(1);
+    const row = await db.node.findUnique({ where: { id: sent.nodeId }, select: { messageChannelId: true } });
+    expect(row?.messageChannelId).toBe(channel.id);
+    const drained = await drainPages({}, {});
+    const mine = drained.items.filter((i) => i.worker === worker.id);
+    expect(mine).toHaveLength(1);
+    expect(mine[0]).toMatchObject({ unread: 1, firstUnreadSeq: 1, lastSeq: 1 });
+  });
+
+  it('refuses a fresh scan TYPED while an unstamped live chat-message sits under the Channel (#3257)', async () => {
+    await post('one');
+    await post('two');
+    // An old-binary append after the backfill migration: live chat-message
+    // under the messages prefix with NO membership stamp.
+    const unstampedId = generateId();
+    await db.node.create({
+      data: {
+        id: unstampedId, memoryId: channel.memoryId, loc: `${channel.loc}:messages:3-oldwriter`,
+        name: '3-oldwriter', nodeType: 'chat-message', seq: 3, content: 'unstamped',
+      },
+    });
+    await db.channel.update({ where: { id: channel.id }, data: { lastSeq: 3 } });
+    await expect(teamAttentionPage(userCtx(), app.id, {})).rejects.toMatchObject({
+      extensions: { code: 'TEAM_ATTENTION_MEMBERSHIP_INCOMPLETE', channel: channel.id },
+    });
+    // The preview door refuses identically — a proof must never issue over
+    // incomplete membership.
+    await expect(teamAttentionPreviewPage(userCtx(), app.id, {})).rejects.toMatchObject({
+      extensions: { code: 'TEAM_ATTENTION_MEMBERSHIP_INCOMPLETE' },
+    });
+    // Operator remedy: re-run adoption, then the scan proceeds AND counts
+    // the adopted row — full visibility is restored, never silently partial.
+    await db.node.update({ where: { id: unstampedId }, data: { messageChannelId: channel.id } });
+    const drained = await drainPages({}, {});
+    const mine = drained.items.filter((i) => i.worker === worker.id);
+    expect(mine[0]).toMatchObject({ unread: 3, lastSeq: 3 });
+  });
+
+  it('does not re-gate on resume: a post-freeze unstamped row cannot stall an in-flight scan', async () => {
+    for (let i = 0; i < 4; i++) await post(`m${i}`);
+    const p1 = await teamAttentionPage(userCtx(), app.id, { scanLimit: 2 });
+    expect(p1.scanComplete).toBe(false);
+    await db.node.create({
+      data: {
+        id: generateId(), memoryId: channel.memoryId, loc: `${channel.loc}:messages:9-oldwriter`,
+        name: '9-oldwriter', nodeType: 'chat-message', seq: 9, content: 'unstamped post-freeze',
+      },
+    });
+    // Post-freeze rows allocate seq above the frozen head, so the resumed
+    // scan completes over its frozen span without the gate firing; the NEXT
+    // fresh scan's gate is what refuses until adoption runs.
+    const done = await teamAttentionPage(userCtx(), app.id, { page: p1.nextPage });
+    expect(done.scanComplete).toBe(true);
+    const mine = done.items.filter((i) => i.worker === worker.id);
+    expect(mine[0]).toMatchObject({ unread: 4, lastSeq: 4 });
   });
 });

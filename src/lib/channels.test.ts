@@ -536,6 +536,23 @@ describe('protection (S4)', () => {
     expect((await db.node.findUniqueOrThrow({ where: { id: unrelated.id } })).deletedAt).toBeNull();
   }, 20_000);
 
+  it('adoption treats the Channel loc prefix literally — an underscore loc never claims foreign rows (#3279)', async () => {
+    // Pre-Channel rows: one genuinely under chats_team, one under a foreign
+    // chatsXteam address that an unescaped LIKE ('_' matches any char) would
+    // wrongly claim for chats_team's adoption stamp.
+    const mine = await db.node.create({
+      data: { id: generateId(), memoryId: appMem.id, loc: 'chats_team:messages:0001', name: 'mine', nodeType: 'chat-message', seq: 1 },
+    });
+    const foreign = await db.node.create({
+      data: { id: generateId(), memoryId: appMem.id, loc: 'chatsXteam:messages:0001', name: 'foreign', nodeType: 'chat-message', seq: 1 },
+    });
+    const { channel } = await ensureChannelWithRoot(db, {
+      memoryId: appMem.id, loc: 'chats_team', name: 'underscored', createdBy: admin.id,
+    });
+    expect((await db.node.findUniqueOrThrow({ where: { id: mine.id } })).messageChannelId).toBe(channel.id);
+    expect((await db.node.findUniqueOrThrow({ where: { id: foreign.id } })).messageChannelId).toBeNull();
+  });
+
   it('rolls reuse back with typed SESSION_EXPIRED if the encryption key expires while waiting (#1226)', async () => {
     const privateMem = await db.memory.create({
       data: {

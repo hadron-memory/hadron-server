@@ -345,42 +345,15 @@ async function attentionTargets(ctx: Context, app: AppRow): Promise<Target[]> {
   return targets;
 }
 
-type CountRow = {
-  worker_id: string;
-  channel_id: string;
-  unread: number;
-  unread_mentions: number;
-  first_unread_seq: number | null;
-  last_relevant_seq: number | null;
-};
-
-type PlaintextCountRow = CountRow;
-
+/** One row fetched by the paged scan's inner SELECT — already filtered to
+ * live chat-messages of the one Channel (the partial-index predicate), so the
+ * row budget counts exactly the rows examined. */
 type EncryptedCandidateRow = {
-  channel_id: string;
   memory_id: string;
   seq: number;
   loc: string;
   data: unknown;
-  id?: string;
-  node_type?: string;
-  deleted_at?: Date | null;
 };
-
-type EncryptedChannelScan = {
-  channelId: string;
-  memoryId: string;
-  locPrefix: string;
-  minSeen: number;
-  maxHead: number;
-  afterSeq: number;
-  afterLoc: string;
-  targets: Target[];
-};
-
-function countKey(workerId: string, channelId: string): string {
-  return `${workerId}:${channelId}`;
-}
 
 function decryptRoutingEnvelope(candidate: EncryptedCandidateRow): Record<string, unknown> {
   try {
@@ -399,199 +372,22 @@ function decryptRoutingEnvelope(candidate: EncryptedCandidateRow): Record<string
   }
 }
 
-/**
- * Batch every plaintext predicate in one aggregate query. Encrypted routing
- * envelopes cannot be filtered in SQL, so scan each Channel once in bounded
- * keyset pages and fan each decrypted envelope out to that Channel's Worker
- * targets in memory. A page materializes at most PAGE_SIZE rows per active
- * Channel; it never duplicates an encrypted backlog per Worker.
- */
-async function unreadCounts(db: Context['db'], targets: Target[]): Promise<Map<string, CountRow>> {
-  if (targets.length === 0) return new Map();
-  const memories = await db.memory.findMany({
-    where: { id: { in: [...new Set(targets.map((target) => target.memoryId))] } },
-    select: { id: true, isEncrypted: true },
-  });
-  const encryptedMemoryIds = new Set(memories.filter((memory) => memory.isEncrypted).map((memory) => memory.id));
-  const plaintextTargets = targets.filter((target) => !encryptedMemoryIds.has(target.memoryId));
-  const encryptedTargets = targets.filter((target) => encryptedMemoryIds.has(target.memoryId));
-  const out = new Map<string, CountRow>();
-
-  if (plaintextTargets.length > 0) {
-    const values = plaintextTargets.map((target) => Prisma.sql`(
-      ${target.workerId}, ${target.channelId}, ${target.memoryId},
-      ${escapePrismaLikePattern(`${target.channelLoc}:messages:`)},
-      ${target.seen}, ${target.head},
-      ${target.mentionOnly}, ${JSON.stringify(target.mentionTokens)}::jsonb
-    )`);
-    const rows = await db.$queryRaw<PlaintextCountRow[]>(Prisma.sql`
-      WITH targets(worker_id, channel_id, memory_id, loc_prefix, seen, head, mention_only, mention_tokens) AS (
-        VALUES ${Prisma.join(values)}
-      )
-      SELECT
-        t.worker_id,
-        t.channel_id,
-        COUNT(n.id) FILTER (
-          WHERE (n.data->>'authorWorkerId') IS DISTINCT FROM t.worker_id
-        )::int AS unread,
-        COUNT(n.id) FILTER (
-          WHERE (n.data->>'authorWorkerId') IS DISTINCT FROM t.worker_id
-            AND EXISTS (
-            SELECT 1
-            FROM jsonb_array_elements_text(t.mention_tokens) AS wanted(token)
-            WHERE COALESCE(n.data->'mentions', '[]'::jsonb) ? wanted.token
-          )
-        )::int AS unread_mentions,
-        MIN(n.seq) FILTER (
-          WHERE (n.data->>'authorWorkerId') IS DISTINCT FROM t.worker_id
-        )::int AS first_unread_seq,
-        MAX(n.seq) FILTER (
-          WHERE (n.data->>'authorWorkerId') IS DISTINCT FROM t.worker_id
-            AND (
-              NOT t.mention_only OR EXISTS (
-                SELECT 1
-                FROM jsonb_array_elements_text(t.mention_tokens) AS wanted(token)
-                WHERE COALESCE(n.data->'mentions', '[]'::jsonb) ? wanted.token
-              )
-            )
-        )::int AS last_relevant_seq
-      FROM targets t
-      LEFT JOIN nodes n
-        ON n.memory_id = t.memory_id
-        AND n.loc LIKE (t.loc_prefix || '%') ESCAPE '\\'
-        AND n.node_type = 'chat-message'
-        AND n.deleted_at IS NULL
-        AND n.seq > t.seen
-        AND n.seq <= t.head
-      GROUP BY t.worker_id, t.channel_id
-    `);
-    for (const row of rows) out.set(countKey(row.worker_id, row.channel_id), row);
-  }
-
-  const scansByChannel = new Map<string, EncryptedChannelScan>();
-  for (const target of encryptedTargets) {
-    let scan = scansByChannel.get(target.channelId);
-    if (!scan) {
-      scan = {
-        channelId: target.channelId,
-        memoryId: target.memoryId,
-        locPrefix: escapePrismaLikePattern(`${target.channelLoc}:messages:`),
-        minSeen: target.seen,
-        maxHead: target.head,
-        afterSeq: -1,
-        afterLoc: '',
-        targets: [],
-      };
-      scansByChannel.set(target.channelId, scan);
-    } else {
-      scan.minSeen = Math.min(scan.minSeen, target.seen);
-      scan.maxHead = Math.max(scan.maxHead, target.head);
-    }
-    scan.targets.push(target);
-    out.set(countKey(target.workerId, target.channelId), {
-      worker_id: target.workerId,
-      channel_id: target.channelId,
-      unread: 0,
-      unread_mentions: 0,
-      first_unread_seq: null,
-      last_relevant_seq: null,
-    });
-  }
-
-  let activeScans = [...scansByChannel.values()];
-  while (activeScans.length > 0) {
-    const values = activeScans.map((scan) => Prisma.sql`(
-      ${scan.channelId}, ${scan.memoryId}, ${scan.locPrefix},
-      ${scan.minSeen}, ${scan.maxHead}, ${scan.afterSeq}, ${scan.afterLoc}
-    )`);
-    const candidates = await db.$queryRaw<EncryptedCandidateRow[]>(Prisma.sql`
-      WITH channels(channel_id, memory_id, loc_prefix, min_seen, max_head, after_seq, after_loc) AS (
-        VALUES ${Prisma.join(values)}
-      )
-      SELECT
-        channels.channel_id,
-        channels.memory_id,
-        page.seq::int,
-        page.loc,
-        page.data
-      FROM channels
-      CROSS JOIN LATERAL (
-        SELECT n.seq, n.loc, n.data
-        FROM nodes n
-        WHERE n.memory_id = channels.memory_id
-          AND n.loc LIKE (channels.loc_prefix || '%') ESCAPE '\\'
-          AND n.node_type = 'chat-message'
-          AND n.deleted_at IS NULL
-          AND n.seq > channels.min_seen
-          AND n.seq <= channels.max_head
-          AND (n.seq, n.loc) > (channels.after_seq, channels.after_loc)
-        ORDER BY n.seq, n.loc
-        LIMIT ${ENCRYPTED_MESSAGE_PAGE_SIZE}
-      ) page
-      ORDER BY channels.channel_id, page.seq, page.loc
-    `);
-    const pageByChannel = new Map<string, EncryptedCandidateRow[]>();
-    for (const candidate of candidates) {
-      const rows = pageByChannel.get(candidate.channel_id) ?? [];
-      rows.push(candidate);
-      pageByChannel.set(candidate.channel_id, rows);
-    }
-
-    const stillActive: EncryptedChannelScan[] = [];
-    for (const scan of activeScans) {
-      const page = pageByChannel.get(scan.channelId) ?? [];
-      for (const candidate of page) {
-        const envelope = decryptRoutingEnvelope(candidate);
-        const mentions = Array.isArray(envelope.mentions)
-          ? envelope.mentions.filter((value): value is string => typeof value === 'string')
-          : [];
-        for (const target of scan.targets) {
-          if (candidate.seq <= target.seen || candidate.seq > target.head || envelope.authorWorkerId === target.workerId) continue;
-          const count = out.get(countKey(target.workerId, target.channelId))!;
-          count.unread += 1;
-          count.first_unread_seq = count.first_unread_seq == null
-            ? candidate.seq
-            : Math.min(count.first_unread_seq, candidate.seq);
-          const mentioned = target.mentionTokens.some((token) => mentions.includes(token));
-          if (mentioned) count.unread_mentions += 1;
-          if (!target.mentionOnly || mentioned) {
-            count.last_relevant_seq = count.last_relevant_seq == null
-              ? candidate.seq
-              : Math.max(count.last_relevant_seq, candidate.seq);
-          }
-        }
-      }
-      if (page.length === ENCRYPTED_MESSAGE_PAGE_SIZE) {
-        const last = page[page.length - 1];
-        scan.afterSeq = last.seq;
-        scan.afterLoc = last.loc;
-        stillActive.push(scan);
-      }
-    }
-    activeScans = stillActive;
-  }
-  return out;
-}
-
 // ── #1384/#1421 paged (v2) scan engine ───────────────────────────────────────
 //
-// The v1 loop above pages an encrypted Channel to EXHAUSTION inside one
-// request. The v2 engine below performs a bounded amount of work per call and
-// hands the private progress back in a signed continuation (codec in
-// teamAttentionPage.ts). In-memory state mirrors the continuation payload;
-// entry/exit points serialize it. Channels are indexed in sorted-id order so
-// the round-robin schedule is deterministic across pulls.
+// The retired v1 poll decrypted an encrypted Channel's whole unread backlog
+// inside one request (its doors now answer UPGRADE_REQUIRED; the exhaustive
+// unreadCounts loop is deleted). The v2 engine below performs a bounded
+// amount of work per call and hands the private progress back in a signed
+// continuation (codec in teamAttentionPage.ts). In-memory state mirrors the
+// continuation payload; entry/exit points serialize it. Channels are indexed
+// in sorted-id order so the round-robin schedule is deterministic across
+// pulls.
 
 /** Mutable scan state, isomorphic to the signed continuation payload. */
 export interface PagedScanState {
   /** Channel index → frozen span [cMin, cMax] over its targets. */
   cMin: number[];
   cMax: number[];
-  /** Channel index → keyset cursor suffix ('' = not started). The
-   * reconstructed full loc drives the `loc > cursor` keyset. EXAMINED WORK
-   * IS NOT HARD-BOUNDED (#1430): under a collated text index the walk can
-   * pass foreign-channel and residual-rejected rows before LIMIT; only
-   * returned/decrypted rows are bounded by the request budget. */
   /** Seq-first keyset cursor per channel: (seq, locSuffix). seq -1 = not
    * started. The scan walks (message_channel_id, seq, loc) on the partial
    * C-collation index — the seq range IS the frozen bound (post-freeze
@@ -664,7 +460,6 @@ async function pagedScanStep(
       state.cDone[k] = true;
       continue;
     }
-    void geometry; // memoryId/locPrefix retained for decrypt + cursor slicing
     // Fairness quantum (#3051 finding 7): no single channel may consume the
     // whole request budget — each active channel gets at most an equal share
     // of the remaining budget per visit, so 200 backlogged channels each get
@@ -674,54 +469,40 @@ async function pagedScanStep(
     const activeChannels = state.cDone.filter((done) => !done).length;
     const share = Math.max(1, Math.floor((budget - spent) / Math.max(1, activeChannels)));
     const take = Math.min(budget - spent, share, ENCRYPTED_MESSAGE_PAGE_SIZE);
-    // #1430 C-collation keyset: P = the channel's message prefix; U = P's
-    // byte-successor (final ':' → ';'). The range [P+cursor, U) is exact and
-    // Channel-local in byte order — independent of the DB's locale collation
-    // (en_US orders ':' and ';' by locale, verified) — served by the
-    // nodes_memory_id_loc_c_idx btree. EVERY returned raw row charges the
-    // budget (residual-rejected included); the cursor persists from the LAST
-    // CHARGED RAW row so rejects are paid once. Decryption is gated on
-    // eligibility; the data column transfers for every raw-budgeted row.
-    // The seq span stays a RESIDUAL filter (keeping it in the indexed CTE
-    // breaks the examined-row bound — the seq column is not in the C-collation
-    // index key, so Postgres would walk non-qualifying rows unboundedly).
-    // Post-freeze starvation is prevented by the POST-SPAN-done rule below.
     const prefix = geometry.locPrefix;
     // #1430 seq-first scan on the partial (message_channel_id, seq, loc C)
-    // index. The frozen seq range IS the bound: post-freeze rows (seq > cMax)
-    // cannot enter the index range, so sustained traffic cannot prevent
-    // completion. The (seq, loc) keyset handles duplicate seqs; loc order
-    // inversions (999/1000) are irrelevant because seq leads. No freeze
-    // lookup, no c_ful — the access path itself is the frozen bound.
+    // index. The inner SELECT carries the index predicate VERBATIM
+    // (node_type / deleted_at; `seq > cMin` proves seq IS NOT NULL), so the
+    // planner can use nodes_msg_channel_seq_loc_c_idx as the access path —
+    // without predicate proof it must scan/sort the wider nodes table despite
+    // the LIMIT (Andi #3277; Chip's #3282 EXPLAIN measured 20k rows examined
+    // for LIMIT 2 when the predicate was applied only in JS). The frozen seq
+    // range IS the bound: post-freeze rows (seq > cMax) cannot enter the
+    // index range, so sustained traffic cannot prevent completion. The
+    // (seq, loc) keyset handles duplicate seqs; loc order inversions
+    // (999/1000) are irrelevant because seq leads. Every RETURNED row has
+    // passed every predicate, so examined work per page is ≤ take (the only
+    // extra rows the index walk can touch are same-seq duplicates at the
+    // cursor's seq — a finite pre-#919 artifact, paid once per step).
     const cursorLoc = state.cCursorLoc[k] ? prefix + state.cCursorLoc[k] : '';
 
     const rows = await db.$queryRaw<EncryptedCandidateRow[]>(Prisma.sql`
-      SELECT seq::int AS seq, loc, data, id, memory_id, node_type, deleted_at
-      FROM (
-        SELECT n.seq, n.loc, n.data, n.id, n.memory_id, n.node_type, n.deleted_at
-        FROM nodes n
-        WHERE n.message_channel_id = ${geometry.channelId}
-          AND n.seq > ${state.cMin[k]}
-          AND n.seq <= ${state.cMax[k]}
-          AND (${state.cCursorSeq[k]} = -1 OR n.seq > ${state.cCursorSeq[k]}
-            OR (n.seq = ${state.cCursorSeq[k]} AND n.loc COLLATE "C" > ${cursorLoc} COLLATE "C"))
-        ORDER BY n.seq, n.loc COLLATE "C"
-        LIMIT ${take}
-      ) raw
-      ORDER BY raw.seq, raw.loc COLLATE "C"
+      SELECT n.seq::int AS seq, n.loc, n.data, n.memory_id
+      FROM nodes n
+      WHERE n.message_channel_id = ${geometry.channelId}
+        AND n.node_type = 'chat-message'
+        AND n.deleted_at IS NULL
+        AND n.seq > ${state.cMin[k]}
+        AND n.seq <= ${state.cMax[k]}
+        AND (${state.cCursorSeq[k]} = -1 OR n.seq > ${state.cCursorSeq[k]}
+          OR (n.seq = ${state.cCursorSeq[k]} AND n.loc COLLATE "C" > ${cursorLoc} COLLATE "C"))
+      ORDER BY n.seq, n.loc COLLATE "C"
+      LIMIT ${take}
     `);
 
     const list = targetsOfChannel.get(k) ?? [];
     for (const row of rows) {
-      spent++; // charged whether or not the residual filters accept it
-      // Residual filters AFTER the charged raw fetch; the cursor advances
-      // past rejected rows too (they are paid once across the scan).
-      if (row.node_type !== 'chat-message' || row.deleted_at != null
-        || row.seq <= state.cMin[k] || row.seq > state.cMax[k]) {
-        state.cCursorSeq[k] = row.seq;
-        state.cCursorLoc[k] = row.loc.slice(prefix.length);
-        continue;
-      }
+      spent++; // every returned row passed all predicates — charge it
       const envelope = geometry.encrypted
         ? decryptRoutingEnvelope(row)
         : ((row.data && typeof row.data === 'object') ? row.data as Record<string, unknown> : {});
@@ -749,10 +530,9 @@ async function pagedScanStep(
       if (anyCounted) state.cFrontNum[k] = state.cCursorLoc[k];
     }
 
-    // Done when the frozen loc range is exhausted (fewer than `take` raw
-    // rows). The frozen upper loc guarantees the range is finite and
-    // post-freeze traffic is never fetched — no seq inference, no padding-
-    // boundary hazard.
+    // Done when the frozen seq range is exhausted (fewer than `take`
+    // qualifying rows). Post-freeze traffic never enters the index range —
+    // no seq inference, no padding-boundary hazard.
     if (rows.length < take) {
       state.cDone[k] = true;
       list.sort((a, b) => targets[a].workerId.localeCompare(targets[b].workerId));
@@ -818,7 +598,10 @@ function stateToContinuation(
   const payload: PageContinuation = {
     v: 2,
     kind: 'team-attention-page',
-    o: 'c',
+    // Era marker 's' = seq-first Channel-local scan. The loc-ordered era
+    // minted 'c'; verifyPageToken restarts those typed rather than
+    // reinterpreting their cursor (Andi #3281).
+    o: 's',
     op,
     appId,
     userId,
@@ -924,6 +707,9 @@ async function runPagedAttention(
   let channelIndexOf = new Map(channelIds.map((id, k) => [id, k]));
 
   let state: PagedScanState;
+  /** True when this request STARTED the scan (no continuation) — the only
+   * point where the membership completeness gate (#3257) runs. */
+  let freshScan = false;
   /** Frozen Channel incarnations — captured at freeze, compared on every
    * resume INCLUDING unstarted and done channels (#3111 lifecycle gate). */
   let channelIncarnations: number[] = [];
@@ -1059,6 +845,7 @@ async function runPagedAttention(
       const key = `${target.workerId}:${target.channelId}:${target.registerId}:${target.mentionOnly}`;
       return priorHeads?.get(key) ?? 0;
     });
+    freshScan = true;
     state = {
       cMin: channelIds.map((id) => Math.min(...targets.filter((t) => t.channelId === id).map((t) => t.seen))),
       cMax: channelIds.map((id) => Math.max(...targets.filter((t) => t.channelId === id).map((t) => t.head))),
@@ -1100,6 +887,41 @@ async function runPagedAttention(
       });
     }
   }
+  // #3257 rollout completeness gate — freeze only. The paged reader trusts
+  // Node.messageChannelId for membership; an unstamped live chat-message
+  // under a Channel's messages prefix (an old binary still appending after
+  // the backfill migration, or an off-road generic-surface create) would be
+  // INVISIBLE to the scan, so a fresh scan refuses until adoption completes
+  // instead of silently missing messages. Runs once per Channel per scan
+  // start, never on resume: post-freeze appends allocate seq above every
+  // row the freeze saw, so they sit outside the frozen span and the next
+  // scan's gate re-checks them. seq IS NOT NULL is included explicitly so
+  // the planner can prove the partial-index predicate and serve this from
+  // nodes_msg_channel_seq_loc_c_idx (the NULL membership partition is empty
+  // once adoption has run — the check is O(log n) in steady state).
+  if (freshScan) {
+    for (let k = 0; k < channelIds.length; k++) {
+      const geometry = channelGeometry.get(k)!;
+      const unstamped = await ctx.db.$queryRaw<Array<{ loc: string }>>(Prisma.sql`
+        SELECT n.loc FROM nodes n
+        WHERE n.memory_id = ${geometry.memoryId}
+          AND n.node_type = 'chat-message'
+          AND n.deleted_at IS NULL
+          AND n.seq IS NOT NULL
+          AND n.message_channel_id IS NULL
+          AND starts_with(n.loc, ${geometry.locPrefix})
+        LIMIT 1
+      `);
+      if (unstamped.length > 0) {
+        fail(
+          `Channel ${geometry.locPrefix.slice(0, -':messages:'.length)} has live chat-message rows without Channel membership (for example ${unstamped[0].loc}); an older writer or an off-road create left them unstamped. Re-run Channel adoption, then poll again — your committed watermark is untouched.`,
+          'TEAM_ATTENTION_MEMBERSHIP_INCOMPLETE',
+          { channel: channelIds[k], exampleLoc: unstamped[0].loc },
+        );
+      }
+    }
+  }
+
   await pagedScanStep(ctx.db, targets, channelIndexOf, channelGeometry, targets.map((t) => t.mentionTokens), state, scanLimit);
 
   // Emission: deliver completed targets in completion-visit order. The poll
