@@ -7,6 +7,8 @@ import { mintMemoryUrnV2 } from '../../../lib/mintMemoryUrnV2.js';
 import { generateUniqueHandle, ensureUserHandle } from '../../../lib/userHandle.js';
 import { ensureUserPrincipal } from '../../../lib/principal/mintPrincipal.js';
 import {
+  ensureCurrentNodeRevisionInTransaction,
+  RECONCILE_EDITOR_INFO,
   revisionStateHashRefreshMarker,
   editorFromAuth,
 } from '../../../lib/nodeRevisionSnapshot.js';
@@ -2204,8 +2206,12 @@ export const memoryMutations = {
       // converge on zero plaintext rows: a row written plaintext between
       // our scan and the flip is caught by the next pass. Idempotent by the
       // enc:v1 prefix (isCiphertext), so re-running a pass is safe.
-      await ctx.db.memory.update({
-        where: { id: resolvedMemoryId },
+      // Two callers may both have read the plaintext flag above. Claim the
+      // flip atomically so only one key can become the verifier/conversion key;
+      // otherwise a losing caller could replace the verifier while the winner
+      // encrypts rows under its own key (#1346).
+      const flip = await ctx.db.memory.updateMany({
+        where: { id: resolvedMemoryId, isEncrypted: false },
         data: {
           isEncrypted: true,
           keyVerifier: makeKeyVerifier(key),
@@ -2213,6 +2219,7 @@ export const memoryMutations = {
           updatedBy: ctx.appId ?? ctx.userId ?? null,
         },
       });
+      if (flip.count !== 1) throw new Error('Memory is already encrypted');
       const BATCH = 200; // bound memory per pass (PR-514 review, Gemini)
       for (let pass = 0; pass < 5; pass++) {
         let converted = 0;
@@ -2220,10 +2227,13 @@ export const memoryMutations = {
         let cursor: string | undefined;
         for (;;) {
           const nodes = await ctx.db.node.findMany({
-            where: { memoryId: resolvedMemoryId, deletedAt: null },
-            // abstract encrypts alongside content since spec 031 — the old
-            // select missed it, leaving abstracts plaintext (spec-041 fix).
-            select: { id: true, content: true, abstract: true, data: true },
+            // Tombstones retain content and may later be restored. They are
+            // part of the at-rest conversion too (#1435 review P2).
+            where: { memoryId: resolvedMemoryId },
+            // This is only an id page. Fields must be read AFTER the row lock:
+            // a concurrent edit between enumeration and conversion otherwise
+            // gets overwritten with ciphertext of the older value (#1346).
+            select: { id: true },
             orderBy: { id: 'asc' },
             take: BATCH,
             ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
@@ -2231,26 +2241,79 @@ export const memoryMutations = {
           if (nodes.length === 0) break;
           cursor = nodes[nodes.length - 1].id;
           for (const node of nodes) {
-            const plaintextContent = node.content != null && !isCiphertext(node.content);
-            const plaintextAbstract = node.abstract != null && !isCiphertext(node.abstract);
-            const plaintextData =
-              node.data != null &&
-              !(typeof node.data === 'object' && (node.data as { __enc?: string }).__enc);
-            if (!plaintextContent && !plaintextAbstract && !plaintextData) continue;
-            const encrypted = encryptNodeFieldsWithKey(
-              { content: node.content, abstract: node.abstract, data: node.data },
-              key,
-            );
-            await ctx.db.node.update({
-              where: { id: node.id },
-              data: {
-                content: encrypted.content ?? null,
-                revisionContentHash: revisionStateHashRefreshMarker(),
-                abstract: encrypted.abstract ?? null,
-                data: (encrypted.data ?? null) as InputJsonValue,
-              },
+            const didConvert = await ctx.db.$transaction(async (tx) => {
+              // Lock first, then re-read. A moved row is outside this memory;
+              // a deleted row still belongs here and retains restorable
+              // content, so it must be reconciled and encrypted too. The
+              // reconciliation snapshot is encrypted below before commit.
+              // Each transaction holds only one node lock; id paging orders
+              // the conversions deterministically.
+              const locked = await tx.$queryRaw<Array<{ id: string }>>`
+                SELECT id FROM nodes WHERE id = ${node.id} FOR UPDATE
+              `;
+              if (locked.length === 0) return false;
+              const lockedNode = await tx.node.findUnique({
+                where: { id: node.id },
+              });
+              if (!lockedNode || lockedNode.memoryId !== resolvedMemoryId) return false;
+              // The helper reuses our row lock, scopes the reconcile to the
+              // authorized memory, and snapshots raw drift before conversion.
+              const revision = await ensureCurrentNodeRevisionInTransaction(tx, node.id, {
+                expectedMemoryId: resolvedMemoryId,
+              });
+              if (revision == null) return false;
+              const current = await tx.node.findUnique({ where: { id: node.id } });
+              if (!current || current.memoryId !== resolvedMemoryId) return false;
+
+              // Reconciliation can snapshot the raw plaintext change. Encrypt
+              // that newly minted snapshot before this transaction commits:
+              // once the memory flag is set, no new plaintext history may
+              // become visible at rest. Ordinary pre-existing revisions are
+              // outside this conversion's revision semantics.
+              if (revision > lockedNode.revSeq) {
+                const reconciled = await tx.nodeRevision.findFirst({
+                  where: {
+                    nodeId: node.id,
+                    revNo: revision - 1,
+                    editedByInfo: RECONCILE_EDITOR_INFO,
+                    memoryId: resolvedMemoryId,
+                  },
+                });
+                if (reconciled) {
+                  const encryptedRevision = encryptNodeFieldsWithKey(
+                    { content: reconciled.content, abstract: reconciled.abstract, data: reconciled.data }, key,
+                  );
+                  await tx.nodeRevision.update({
+                    where: { id: reconciled.id },
+                    data: {
+                      content: encryptedRevision.content ?? null,
+                      abstract: encryptedRevision.abstract ?? null,
+                      data: (encryptedRevision.data ?? null) as InputJsonValue,
+                    },
+                  });
+                }
+              }
+
+              const plaintextContent = current.content != null && !isCiphertext(current.content);
+              const plaintextAbstract = current.abstract != null && !isCiphertext(current.abstract);
+              const plaintextData = current.data != null &&
+                !(typeof current.data === 'object' && (current.data as { __enc?: string }).__enc);
+              if (!plaintextContent && !plaintextAbstract && !plaintextData) return false;
+              const encrypted = encryptNodeFieldsWithKey(
+                { content: current.content, abstract: current.abstract, data: current.data }, key,
+              );
+              await tx.node.update({
+                where: { id: current.id },
+                data: {
+                  content: encrypted.content ?? null,
+                  revisionContentHash: revisionStateHashRefreshMarker(),
+                  abstract: encrypted.abstract ?? null,
+                  data: (encrypted.data ?? null) as InputJsonValue,
+                },
+              });
+              return true;
             });
-            converted += 1;
+            if (didConvert) converted += 1;
           }
           if (nodes.length < BATCH) break;
         }
