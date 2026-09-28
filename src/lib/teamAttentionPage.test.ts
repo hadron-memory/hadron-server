@@ -581,7 +581,7 @@ describe('family 16 — Codex padding-boundary round', () => {
       const enc = encryptNodeFields({ content: null, data: { mentions: seq === 3 ? ['dara'] : [] } }, memEnc);
       await db.node.create({
         data: { id: `pad999-${seq}`, memoryId: channel.memoryId, loc: `chats:team:messages:${locSuffix}`,
-          name: locSuffix, nodeType: 'chat-message', seq, content: 'x', data: (enc.data ?? null) as object },
+          name: locSuffix, nodeType: 'chat-message', seq, messageChannelId: channel.id, content: 'x', data: (enc.data ?? null) as object },
       });
     }
     await db.channel.update({ where: { id: channel.id }, data: { lastSeq: 3 } });
@@ -653,7 +653,7 @@ describe('family 17 — mixed-Channel isolation (#3216)', () => {
 });
 
 describe('family 14 — review #3153', () => {
-  it('a genuinely-issued pre-C shape gets STALE_PAGE; every signed malformed variant gets INVALID (#3170/#3171)', async () => {
+  it('a genuinely-issued current-minus-o shape gets STALE_PAGE; every signed malformed variant gets INVALID (#3170/#3171)', async () => {
     const { signPageToken } = await import('./teamAttentionPage.js');
     await post('one');
     const secret = process.env.TEAM_ATTENTION_TOKEN_SECRET || process.env.JWT_SECRET || '';
@@ -667,8 +667,7 @@ describe('family 14 — review #3153', () => {
     expect(paged.scanComplete).toBe(false);
     const realPayload = JSON.parse(Buffer.from(paged.nextPage!.split('.')[0], 'base64url').toString('utf-8'));
     const preC: Record<string, unknown> = { ...realPayload };
-    delete preC.o;
-    delete preC.c_front;
+    delete preC.o; // strip only the ordering marker
     const signedOld = signPageToken(preC as never, secret);
     if ('tooLarge' in signedOld) throw new Error('unexpected tooLarge');
     await expect(teamAttentionPage(userCtx(), app.id, { page: (signedOld as { token: string }).token })).rejects.toMatchObject({
@@ -678,7 +677,7 @@ describe('family 14 — review #3153', () => {
     // get INVALID, not the old-order restart.
     const variants: Array<[string, Record<string, unknown>]> = [
       ['t_r references absent register', { ...preC, R: [], t_r: [0] }],
-      ['missing c_num array', (() => { const v = { ...preC }; delete v.c_num; return v; })()],
+      ['missing c_loc array', (() => { const v = { ...preC }; delete v.c_loc; return v; })()],
       ['missing t_r array', (() => { const v = { ...preC }; delete v.t_r; return v; })()],
       ['broken t_w index', { ...preC, t_w: [99] }],
       ['missing q queue array', (() => { const v = { ...preC }; delete v.q; return v; })()],
@@ -707,7 +706,7 @@ describe('family 14 — review #3153', () => {
     const first = await teamAttentionPage(userCtx(), app.id, { scanLimit: 2 });
     expect(first.scanComplete).toBe(false);
     const decoded = JSON.parse(Buffer.from(first.nextPage!.split('.')[0], 'base64url').toString('utf-8'));
-    expect(decoded.c_num[0]).toBe('002'); // raw cursor on the own post (loc suffix is padded)
+    expect(decoded.c_seq[0]).toBe(2); // raw seq cursor on the own post
     expect(decoded.c_front[0]).toBe('001'); // counted frontier on the counted row
     await db.node.updateMany({ where: { memoryId: memory.id, loc: 'chats:team:messages:001' }, data: { deletedAt: new Date() } });
     await expect(teamAttentionPage(userCtx(), app.id, { page: first.nextPage })).rejects.toMatchObject({
@@ -838,7 +837,7 @@ describe('family 10 — Codex #1428 findings', () => {
     for (let i = 0; i < 7; i++) {
       await appendChatMessage(db, { id: madePlain.rootId, memoryId: plainMemory.id, loc: 'chats:plain' }, { id: plainMemory.id, isEncrypted: false },
         async ({ tx, seq, msgNum }) => tx.node.create({
-          data: { id: generateId(), memoryId: plainMemory.id, loc: `chats:plain:messages:${msgNum}`, name: msgNum, nodeType: 'chat-message', seq, content: `plain ${i}`, data: { mentions: i === 6 ? ['dara'] : [] } },
+          data: { id: generateId(), memoryId: plainMemory.id, loc: `chats:plain:messages:${msgNum}`, name: msgNum, nodeType: 'chat-message', seq, messageChannelId: madePlain.channel.id, content: `plain ${i}`, data: { mentions: i === 6 ? ['dara'] : [] } },
         }), { asChannel: true });
     }
     // Budget 2: the plaintext span must PAGE (no one-shot aggregate), and the
