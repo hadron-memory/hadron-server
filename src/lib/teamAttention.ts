@@ -694,6 +694,7 @@ async function pagedScanStep(
     // inversions (999/1000) are irrelevant because seq leads. No freeze
     // lookup, no c_ful — the access path itself is the frozen bound.
     const cursorLoc = state.cCursorLoc[k] ? prefix + state.cCursorLoc[k] : '';
+
     const rows = await db.$queryRaw<EncryptedCandidateRow[]>(Prisma.sql`
       SELECT seq::int AS seq, loc, data, id, memory_id, node_type, deleted_at
       FROM (
@@ -702,7 +703,8 @@ async function pagedScanStep(
         WHERE n.message_channel_id = ${geometry.channelId}
           AND n.seq > ${state.cMin[k]}
           AND n.seq <= ${state.cMax[k]}
-          AND (${state.cCursorSeq[k]} = -1 OR (n.seq, n.loc COLLATE "C") > (${state.cCursorSeq[k]}, ${cursorLoc} COLLATE "C"))
+          AND (${state.cCursorSeq[k]} = -1 OR n.seq > ${state.cCursorSeq[k]}
+            OR (n.seq = ${state.cCursorSeq[k]} AND n.loc COLLATE "C" > ${cursorLoc} COLLATE "C"))
         ORDER BY n.seq, n.loc COLLATE "C"
         LIMIT ${take}
       ) raw
@@ -739,6 +741,7 @@ async function pagedScanStep(
           state.aLast[ti] = Math.max(state.aLast[ti], row.seq);
         }
       }
+      state.cCursorSeq[k] = row.seq;
       state.cCursorLoc[k] = row.loc.slice(prefix.length);
       // The COUNTED frontier only advances when ≥1 target actually counted
       // this row — an own post after a counted message must not weaken the

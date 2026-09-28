@@ -50,6 +50,7 @@ async function post(body: string, options: { authorWorkerId?: string; mentions?:
         name: msgNum,
         nodeType: 'chat-message',
         seq,
+        messageChannelId: channel.id,
         content: body,
         data: {
           mentions: options.mentions ?? [],
@@ -639,8 +640,8 @@ describe('family 17 — mixed-Channel isolation (#3216)', () => {
     const realPayload = JSON.parse(Buffer.from(p1.nextPage!.split('.')[0], 'base64url').toString('utf-8'));
     const secret = process.env.TEAM_ATTENTION_TOKEN_SECRET || process.env.JWT_SECRET || '';
     for (const [label, mod] of [
-      ['missing c_ful', (() => { const v = { ...realPayload }; delete v.c_ful; return v; })()],
-      ['c_ful empty array', { ...realPayload, c_ful: [] }],
+      ['missing c_seq', (() => { const v = { ...realPayload }; delete v.c_seq; return v; })()],
+      ['missing c_loc', (() => { const v = { ...realPayload }; delete v.c_loc; return v; })()],
     ] as Array<[string, Record<string, unknown>]>) {
       const signed = signPageToken(mod as never, secret);
       if ('tooLarge' in signed) throw new Error(`unexpected tooLarge: ${label}`);

@@ -104,6 +104,7 @@ async function post(body: string, options: { authorWorkerId?: string; mentions?:
         name: msgNum,
         nodeType: 'chat-message',
         seq,
+        messageChannelId: channel.id,
         content: body,
         data: {
           mentions: options.mentions ?? [],
