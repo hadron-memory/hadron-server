@@ -84,6 +84,12 @@ export interface PageContinuation {
    * started. (A seq-ordered cursor interleaves foreign channels of the same
    * memory and cannot bound the walk — Codex round 4 on #1428.) */
   c_loc: string[];
+  /** Channel.incarnation at freeze, per channel index — compared on EVERY
+   * resume (unstarted and done channels included). A same-address
+   * deleteChannel + ensureChannelWithRoot reuses the Channel/register IDs and
+   * only increments incarnation, so identity alone cannot detect the
+   * lifecycle change (#3111). */
+  c_inc: number[];
   c_min: number[]; // frozen span min(seen) across its targets
   c_max: number[]; // frozen span max(head)
   /** Per-target private partial accumulators (0 / null = untouched). */
@@ -148,6 +154,7 @@ export function verifyPageToken(
     typeof value.appId !== 'string' ||
     typeof value.userId !== 'string' ||
     !Array.isArray(value.W) || !Array.isArray(value.C) || !Array.isArray(value.R) ||
+    !Array.isArray(value.c_inc) ||
     !Array.isArray(value.t_w) || !Array.isArray(value.t_c)
   ) {
     fail('Invalid team-attention page token.', 'INVALID_ATTENTION_PAGE');

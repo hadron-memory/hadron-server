@@ -473,6 +473,7 @@ describe('family 9 — consolidated review corrections (#3051/#3053/#3054)', () 
       t_prior: Array.from({ length: 200 }, () => 2147483647),
       c_done: '0'.repeat(50),
       c_loc: Array.from({ length: 200 }, () => 'x'.repeat(40)),
+      c_inc: Array.from({ length: 200 }, () => 2147483647),
       c_min: Array.from({ length: 200 }, () => 0),
       c_max: Array.from({ length: 200 }, () => 2147483647),
       u_unread: Array.from({ length: 200 }, () => 2147483647),
@@ -487,6 +488,34 @@ describe('family 9 — consolidated review corrections (#3051/#3053/#3054)', () 
     const signed = signPageToken(payload, 'size-fixture-secret');
     expect('tooLarge' in signed).toBe(false);
     if (!('tooLarge' in signed)) expect(signed.token.length).toBeLessThan(65_536);
+  });
+});
+
+describe('family 12 — review #3111 lifecycle', () => {
+  it('a same-address channel recreation stales the continuation despite preserved IDs (#3111)', async () => {
+    for (let i = 0; i < 5; i++) await post(`m${i}`);
+    const first = await teamAttentionPage(userCtx(), app.id, { scanLimit: 2 });
+    expect(first.scanComplete).toBe(false);
+    // The SUPPORTED same-address lifecycle: delete, then ensure at the same
+    // address — Channel/register IDs survive, incarnation increments, and a
+    // fresh message keeps the live head >= the frozen head. The deletion
+    // mirrors the GraphQL deleteChannel tombstone (soft-delete the root,
+    // soft-delete the messages, reset the channel) without its auth surface.
+    await db.node.update({ where: { id: channel.chatRootNodeId }, data: { deletedAt: new Date() } });
+    await db.node.updateMany({ where: { memoryId: channel.memoryId, loc: { startsWith: 'chats:team:messages:' } }, data: { deletedAt: new Date() } });
+    await db.channel.update({ where: { id: channel.id }, data: { deletedAt: new Date() } });
+    const remade = await ensureChannelWithRoot(db, {
+      memoryId: channel.memoryId, loc: channel.loc, name: 'team', createdBy: user.id, asDefaultOfAppId: app.id,
+    });
+    expect(remade.channel.id).toBe(channel.id); // IDs preserved — the whole point
+    const enc = await getMemoryEncryptionInfo(db, channel.memoryId);
+    await appendChatMessage(db, { id: remade.rootId, memoryId: channel.memoryId, loc: channel.loc }, enc,
+      async ({ tx, seq, msgNum }) => tx.node.create({
+        data: { id: generateId(), memoryId: channel.memoryId, loc: `${channel.loc}:messages:${msgNum}`, name: msgNum, nodeType: 'chat-message', seq, content: 'new incarnation', data: { mentions: [] } },
+      }), { asChannel: true });
+    await expect(teamAttentionPage(userCtx(), app.id, { page: first.nextPage })).rejects.toMatchObject({
+      extensions: { code: 'TEAM_ATTENTION_STALE_PAGE' },
+    });
   });
 });
 
@@ -524,6 +553,7 @@ describe('family 11 — review #3105', () => {
       t_prior: Array.from({ length: 200 }, () => 2147483647),
       c_done: '0'.repeat(50),
       c_loc: Array.from({ length: 200 }, () => 'x'.repeat(40)),
+      c_inc: Array.from({ length: 200 }, () => 2147483647),
       c_min: Array.from({ length: 200 }, () => 0),
       c_max: Array.from({ length: 200 }, () => 2147483647),
       u_unread: Array.from({ length: 200 }, () => 2147483647),

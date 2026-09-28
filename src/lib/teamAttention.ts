@@ -590,6 +590,8 @@ export interface PagedScanState {
    * existing (memoryId, loc) index — every row in the range belongs to this
    * channel. */
   cCursorLoc: string[];
+  /** Channel index → frozen incarnation, compared on every resume (#3111). */
+  cInc: number[];
   cDone: boolean[];
   /** Target index → private partial accumulators (never surfaced as exact
    * until the target's channel is done and the item is emitted). */
@@ -662,6 +664,16 @@ async function pagedScanStep(
     const activeChannels = state.cDone.filter((done) => !done).length;
     const share = Math.max(1, Math.floor((budget - spent) / Math.max(1, activeChannels)));
     const take = Math.min(budget - spent, share, ENCRYPTED_MESSAGE_PAGE_SIZE);
+    // Prefix match via LIKE: a character-successor upper bound is NOT valid
+    // under a non-C database collation (en_US.UTF-8 orders ':' and ';' by
+    // locale rules, not bytes — verified against the live test DB), so the
+    // btree range cannot express the prefix independent of collation. The
+    // honest examined-work statement (#3111): LIMIT bounds returned and
+    // decrypted rows; rows the index walk passes that fail the LIKE filter
+    // (foreign channels of the same memory past the cursor) are NOT
+    // hard-bounded under a collated text index. A durable fix is a
+    // text_pattern_ops expression index — deliberately a follow-up, not
+    // smuggled into this PR.
     const rows = await db.$queryRaw<EncryptedCandidateRow[]>(Prisma.sql`
       SELECT n.seq::int AS seq, n.loc, n.data, n.id, n.memory_id
       FROM nodes n
@@ -767,6 +779,7 @@ function stateToContinuation(
   channelIds: string[],
   state: PagedScanState,
   priorFloors: number[],
+  channelIncarnations: number[],
 ): PageContinuation {
   const workerIds = [...new Set(targets.map((t) => t.workerId))].sort();
   const workerIndex = new Map(workerIds.map((id, i) => [id, i]));
@@ -791,6 +804,7 @@ function stateToContinuation(
     t_prior: priorFloors,
     c_done: channelIds.reduce((m, _id, k) => (state.cDone[k] ? maskSet(m, k) : m), maskEmpty()),
     c_loc: state.cCursorLoc,
+    c_inc: channelIncarnations,
     c_min: state.cMin,
     c_max: state.cMax,
     u_unread: state.aUnread,
@@ -812,6 +826,7 @@ function continuationToState(page: PageContinuation): PagedScanState {
     cMin: page.c_min,
     cMax: page.c_max,
     cCursorLoc: page.c_loc,
+    cInc: page.c_inc,
     cDone: Array.from({ length: channelCount }, (_v, k) => maskGet(page.c_done, k)),
     aUnread: page.u_unread,
     aMent: page.u_ment,
@@ -862,12 +877,21 @@ async function runPagedAttention(
 
   let targets = await attentionTargets(ctx, app);
   const secret = attentionTokenSecret();
+  const liveIncarnations = new Map(
+    (await ctx.db.channel.findMany({
+      where: { id: { in: [...new Set(targets.map((t) => t.channelId))] } },
+      select: { id: true, incarnation: true },
+    })).map((c) => [c.id, c.incarnation]),
+  );
 
   // The frozen channel dictionary is sorted-id: deterministic round-robin.
   let channelIds = [...new Set(targets.map((t) => t.channelId))].sort();
   let channelIndexOf = new Map(channelIds.map((id, k) => [id, k]));
 
   let state: PagedScanState;
+  /** Frozen Channel incarnations — captured at freeze, compared on every
+   * resume INCLUDING unstarted and done channels (#3111 lifecycle gate). */
+  let channelIncarnations: number[] = [];
   let priorHeads: Map<string, number> | null = null;
   // Per-target relevance floor (the ORIGINAL since head this scan started
   // from, 0 when none) — frozen into the continuation so a resumed page
@@ -892,6 +916,17 @@ async function runPagedAttention(
     frozenSeen = decoded.t_seen;
     frozenHead = decoded.t_head;
     priorFloors = decoded.t_prior;
+    channelIncarnations = decoded.c_inc;
+    // Lifecycle gate FIRST, covering every frozen channel — unstarted and
+    // done included. A same-address recreate preserves Channel/register IDs
+    // and only increments incarnation (#3111; Chip reproduced old-token
+    // acceptance through the supported deleteChannel + ensureChannelWithRoot
+    // path), so identity and head comparisons alone cannot see it.
+    for (let k = 0; k < decoded.C.length; k++) {
+      if (liveIncarnations.get(decoded.C[k]) !== decoded.c_inc[k]) {
+        fail('A Channel was recreated since this scan started; poll again without page.', 'TEAM_ATTENTION_STALE_PAGE');
+      }
+    }
     // Rehydrate by REBUILDING the working target list FROM THE FROZEN
     // ARRAYS (#3046 finding 2): the frozen set and order drive scan,
     // emission, snapshot and continuation for the rest of this request;
@@ -981,6 +1016,7 @@ async function runPagedAttention(
     }
     frozenSeen = targets.map((t) => t.seen);
     frozenHead = targets.map((t) => t.head);
+    channelIncarnations = channelIds.map((id) => liveIncarnations.get(id) ?? 0);
     priorFloors = targets.map((target) => {
       const key = `${target.workerId}:${target.channelId}:${target.registerId}:${target.mentionOnly}`;
       return priorHeads?.get(key) ?? 0;
@@ -989,6 +1025,7 @@ async function runPagedAttention(
       cMin: channelIds.map((id) => Math.min(...targets.filter((t) => t.channelId === id).map((t) => t.seen))),
       cMax: channelIds.map((id) => Math.max(...targets.filter((t) => t.channelId === id).map((t) => t.head))),
       cCursorLoc: channelIds.map(() => ''),
+      cInc: channelIds.map((id) => liveIncarnations.get(id) ?? 0),
       cDone: channelIds.map(() => false),
       aUnread: targets.map(() => 0),
       aMent: targets.map(() => 0),
@@ -1087,7 +1124,7 @@ async function runPagedAttention(
       state.aUnread[i] = 0; state.aMent[i] = 0; state.aFirst[i] = 0; state.aLast[i] = 0;
     }
   }
-  const payload = stateToContinuation(op, app.id, ctx.userId!, targets, channelIds, state, priorFloors);
+  const payload = stateToContinuation(op, app.id, ctx.userId!, targets, channelIds, state, priorFloors, channelIncarnations);
   payload.t_seen = frozenSeen;
   payload.t_head = frozenHead;
   const signed = signPageToken(payload, secret);
