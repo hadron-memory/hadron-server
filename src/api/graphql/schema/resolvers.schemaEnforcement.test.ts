@@ -35,6 +35,18 @@ let freeMemId: string; // no schema
 const admin = (): Context => ({ db, roles: ['ADMIN'], userId: adminId } as Context);
 const adminAuth = (): AuthContext => ({ userId: adminId, roles: ['ADMIN'], clientId: `user:${adminId}` });
 const createNode = (input: Record<string, unknown>) => (resolvers.Mutation as any).createNode(null, { input }, admin());
+const typedTaskSchema = {
+  objectTypes: {
+    task: {
+      strict: true,
+      fields: {
+        title: { type: 'text', required: true },
+        exports: { type: 'text', required: true },
+      },
+    },
+  },
+};
+const skillExports = { claudeSkill: { name: 'typed-task', description: 'Use when testing typed tasks.', enable: true } };
 
 beforeEach(async () => {
   await cleanDb(db);
@@ -100,6 +112,33 @@ describe('createNode — schema enforcement (GraphQL)', () => {
   });
 });
 
+describe('platform-owned exports on typed nodes (#1286)', () => {
+  it('allows task-door create/update under a strict collection that declares required text exports', async () => {
+    await (resolvers.Mutation as any).updateMemory(null, { id: memId, schema: typedTaskSchema }, admin());
+    const mutation = resolvers.Mutation as any;
+    const node = await mutation.createTaskNode(null, {
+      input: { memoryId: memId, loc: 'tasks:typed', name: 'Typed', isRunnable: true, objectType: 'task', properties: { title: 'T' } },
+    }, admin());
+    expect(node.properties).toEqual({ title: 'T' }); // collection-required exports has no authority
+
+    await mutation.updateTaskNode(null, {
+      input: { id: node.id, properties: { title: 'T', exports: skillExports } },
+    }, admin());
+    expect((await db.node.findUniqueOrThrow({ where: { id: node.id } })).properties).toEqual({ title: 'T', exports: skillExports });
+
+    await mutation.updateTaskNode(null, {
+      input: { id: node.id, properties: { title: 'T', exports: { claudeSkill: [] } } },
+    }, admin());
+    const plan = await (resolvers.Query as any).skillPlan(null, { input: { intent: 'LINT' } }, admin());
+    const entry = plan.entries.find((item: { urn: string }) => item.urn.endsWith('tasks:typed'));
+    expect(entry.findings).toEqual(expect.arrayContaining([expect.objectContaining({ rule: 'skill-declaration-malformed', severity: 'error' })]));
+
+    await expect(mutation.updateTaskNode(null, {
+      input: { id: node.id, properties: { title: 'T', exports: skillExports, unrelated: true } },
+    }, admin())).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
+  });
+});
+
 describe('replaceSubtree — retired bulk path', () => {
   it('refuses before interpreting even a schema-invalid payload', async () => {
     await expect(
@@ -129,5 +168,19 @@ describe('hadron_create_node — schema enforcement (MCP)', () => {
   it('surfaces a schema violation as tool-error text', async () => {
     const text = await call({ urn: emitNodeUrnV2(memUrn, 'c.bad'), name: 'B', objectType: 'competitor', properties: { stage: 'seed' } });
     expect(text).toContain('Schema violation');
+  });
+
+  it('accepts exports on strict typed create/update while still rejecting unrelated fields', async () => {
+    await (resolvers.Mutation as any).updateMemory(null, { id: memId, schema: {
+      objectTypes: { competitor: { strict: true, fields: { name: { type: 'text', required: true } } } },
+    } }, admin());
+    const urn = emitNodeUrnV2(memUrn, 'c.exports');
+    expect(await call({ urn, name: 'C', objectType: 'competitor', properties: { name: 'C', exports: skillExports } }))
+      .not.toContain('Schema violation');
+    const server = createTestableMcpServer(adminAuth());
+    expect(await server.callToolText('hadron_update_node', { urn, properties: { name: 'C', exports: { claudeSkill: [] } } }))
+      .not.toContain('Schema violation');
+    expect(await server.callToolText('hadron_update_node', { urn, properties: { name: 'C', exports: skillExports, extra: 1 } }))
+      .toContain('Schema violation');
   });
 });
