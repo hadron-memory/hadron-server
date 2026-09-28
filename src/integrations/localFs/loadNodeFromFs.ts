@@ -288,12 +288,20 @@ async function loadFrontmatterNode(
   graphRoot: string,
   ownerRepo: string,
 ): Promise<{ node: Partial<Node>; edges: Array<LoadedEdge> }> {
-  const raw = readFileSync(mdPath, 'utf-8');
+  // Normalize CRLF to LF before splitting (#280). The LF-only split used to
+  // reject a CRLF file (a Windows author, or git core.autocrlf on the clone
+  // host), which drops the node from the loaded graph. Normalizing the whole
+  // file, body included, rather than only tolerating CRLF in the delimiters is
+  // what the CLI's ParseMarkdown does (hadron-cli internal/nodedoc), so one
+  // file imports as the same node through either surface (cor:int:020:01). It
+  // also means a checkout that flips a file's line endings does not rewrite the
+  // stored content on the next sync.
+  const raw = readFileSync(mdPath, 'utf-8').replace(/\r\n/g, '\n');
 
   const fmMatch = raw.match(/^---\n([\s\S]*?)\n---\n?([\s\S]*)$/);
   if (!fmMatch) throw new Error(`No frontmatter found in ${mdPath}`);
 
-  const meta = parse(fmMatch[1]) as NodeYaml & { nodes?: EdgeEntry[] };
+  const meta = parseYamlMapping(fmMatch[1], `frontmatter in ${mdPath}`);
   const content = fmMatch[2]?.trim() || null;
   const loc = deriveValidatedLoc(mdPath, graphRoot, true, meta.id);
 
@@ -347,7 +355,7 @@ async function loadLegacyNode(
   const yamlPath = join(dirPath, '.node', 'node.yaml');
   const mdPath = join(dirPath, '.node', 'topic.md');
 
-  const meta = parse(readFileSync(yamlPath, 'utf-8')) as NodeYaml & { nodes?: EdgeEntry[] };
+  const meta = parseYamlMapping(readFileSync(yamlPath, 'utf-8'), `node.yaml in ${yamlPath}`);
   const content = existsSync(mdPath) ? readFileSync(mdPath, 'utf-8') : null;
   // The LEGACY layout derives its loc the same way and needs the same guard —
   // handling only the frontmatter loader would leave the older of the two
@@ -393,6 +401,39 @@ async function loadLegacyNode(
     },
     edges,
   };
+}
+
+/**
+ * Parse a node's metadata YAML and require its root to be a mapping (#280).
+ *
+ * `parse()` returns `null` for empty input (or a comment), a scalar for a bare
+ * value, and an array for a sequence. Every caller indexes the result as a
+ * mapping, so any of those used to surface as a bare TypeError, or as a node
+ * with no id and no name. Syntax errors are rethrown with the same prefix, so
+ * every failure names the file it came from.
+ *
+ * @param what Names the input in the error, e.g. `frontmatter in /path/a.md`.
+ * @throws {Error} `Malformed <what>: …` when the YAML is invalid or its root
+ *   is not a mapping.
+ */
+function parseYamlMapping(text: string, what: string): NodeYaml & { nodes?: EdgeEntry[] } {
+  let parsed: unknown;
+  try {
+    parsed = parse(text);
+  } catch (err) {
+    throw new Error(`Malformed ${what}: ${(err as Error).message}`);
+  }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error(`Malformed ${what}: expected a YAML mapping, got ${describeYamlRoot(parsed)}`);
+  }
+  return parsed as NodeYaml & { nodes?: EdgeEntry[] };
+}
+
+/** Human-readable kind of a non-mapping YAML root, for `parseYamlMapping`'s error. */
+function describeYamlRoot(value: unknown): string {
+  if (value == null) return 'empty';
+  if (Array.isArray(value)) return 'an array';
+  return `a ${typeof value}`;
 }
 
 /**

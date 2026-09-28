@@ -456,3 +456,161 @@ describe('loadNodeFromFs — abstractOriginHash validate-and-warn (spec 032)', (
     expect(warnSpy).not.toHaveBeenCalled();
   });
 });
+
+// #280 — the importer read frontmatter with an LF-only regex, so a CRLF file
+// (a Windows author, or `core.autocrlf=true` on the clone host) threw "No
+// frontmatter found" and was silently dropped from the loaded graph. And
+// `parse()` returns null / a scalar / an array for empty or malformed YAML,
+// which both loaders then indexed as a mapping. These fixtures are written
+// byte-for-byte rather than through `writeFrontmatterNode`, which only emits LF.
+describe('loadNodeFromFs — line endings and YAML root shape (#280)', () => {
+  const lfFile = [
+    '---',
+    'id: node-280',
+    'name: Line endings',
+    'description: One-line headline',
+    'tags:',
+    '  - a',
+    '  - b',
+    'role: skill',
+    'nodes:',
+    '  - id: target-1',
+    '    rel: Related',
+    '---',
+    '',
+    '# Heading',
+    '',
+    'Body with a {{placeholder}} and --- inside a line.',
+    '',
+  ].join('\n');
+
+  it.each([
+    ['LF', '\n'],
+    ['CRLF', '\r\n'],
+  ])('loads a %s frontmatter file with identical metadata and edges', async (_label, eol) => {
+    const mdPath = join(graphRoot, 'server', 'line-endings.md');
+    mkdirSync(join(graphRoot, 'server'), { recursive: true });
+    writeFileSync(mdPath, lfFile.replace(/\n/g, eol), 'utf-8');
+
+    const { node, edges } = await loadNodeFromFs(mdPath, graphRoot, 'test/repo');
+    expect(node.id).toBe('node-280');
+    expect(node.loc).toBe('server:line-endings');
+    expect(node.name).toBe('Line endings');
+    expect(node.description).toBe('One-line headline');
+    expect(node.tags).toEqual(['a', 'b']);
+    expect(node).toMatchObject({ role: 'skill' });
+    expect(node.ownerRepo).toBe('test/repo');
+    expect(edges).toEqual([{ targetId: 'target-1', name: 'Related' }]);
+    // Same stored body either way: CRLF is normalized to LF, as the CLI's
+    // import does, so a checkout that flips line endings does not rewrite the
+    // node. The placeholder and the mid-line `---` are untouched.
+    expect(node.content).toBe('# Heading\n\nBody with a {{placeholder}} and --- inside a line.');
+  });
+
+  it('loads a CRLF file whose closing delimiter is the last line (no body)', async () => {
+    const mdPath = join(graphRoot, 'bare.md');
+    writeFileSync(mdPath, '---\r\nid: bare\r\nname: Bare\r\n---', 'utf-8');
+
+    const { node } = await loadNodeFromFs(mdPath, graphRoot, 'test/repo');
+    expect(node.id).toBe('bare');
+    expect(node.content).toBeNull();
+  });
+
+  it('gives a CRLF file sidecar edges precedence, same as LF', async () => {
+    const mdPath = join(graphRoot, 'architecture.md');
+    writeFileSync(
+      mdPath,
+      '---\r\nid: arch\r\nname: Architecture\r\nnodes:\r\n  - id: from-frontmatter\r\n    rel: Ignored\r\n---\r\n\r\nBody\r\n',
+      'utf-8',
+    );
+    mkdirSync(join(graphRoot, '.architecture'), { recursive: true });
+    writeFileSync(
+      join(graphRoot, '.architecture', 'edges.yaml'),
+      '- target: from-sidecar\r\n  rel: Wins\r\n',
+      'utf-8',
+    );
+
+    const { edges } = await loadNodeFromFs(mdPath, graphRoot, 'test/repo');
+    expect(edges).toEqual([{ targetId: 'from-sidecar', name: 'Wins' }]);
+  });
+
+  it('still refuses a file with no frontmatter at all', async () => {
+    const mdPath = join(graphRoot, 'plain.md');
+    writeFileSync(mdPath, '# Just markdown\r\n', 'utf-8');
+
+    await expect(loadNodeFromFs(mdPath, graphRoot, 'test/repo')).rejects.toThrow(
+      `No frontmatter found in ${mdPath}`,
+    );
+  });
+
+  // Each of these used to reach `meta.id` on a non-mapping and die with a bare
+  // TypeError (null) or load a node with no id and no name (scalar / array).
+  it.each([
+    ['empty', '', 'empty'],
+    ['a comment only', '# nothing here', 'empty'],
+    ['a scalar', 'just a string', 'a string'],
+    ['a number', '42', 'a number'],
+    ['an array', '- id: x\n- name: y', 'an array'],
+  ])('refuses frontmatter that is %s, naming the file', async (_label, yamlBody, got) => {
+    const mdPath = join(graphRoot, 'bad.md');
+    // A blank line between the delimiters: the regex needs a newline before
+    // the closing `---`, so `---\n---` is "no frontmatter" rather than empty.
+    writeFileSync(mdPath, `---\n${yamlBody}\n---\n\nBody\n`, 'utf-8');
+
+    await expect(loadNodeFromFs(mdPath, graphRoot, 'test/repo')).rejects.toThrow(
+      `Malformed frontmatter in ${mdPath}: expected a YAML mapping, got ${got}`,
+    );
+  });
+
+  it('refuses frontmatter that is not valid YAML, naming the file', async () => {
+    const mdPath = join(graphRoot, 'broken.md');
+    writeFileSync(mdPath, '---\r\nid: [unclosed\r\n---\r\n', 'utf-8');
+
+    await expect(loadNodeFromFs(mdPath, graphRoot, 'test/repo')).rejects.toThrow(
+      `Malformed frontmatter in ${mdPath}:`,
+    );
+  });
+
+  // The legacy layout never used the LF-only split, so CRLF already loaded.
+  // Its topic.md body is deliberately left as it was (CRLF kept): normalizing
+  // it here would rewrite the stored content of legacy nodes that load fine
+  // today, which is a change #280 does not ask for.
+  it('loads a legacy node.yaml written with CRLF, body unchanged', async () => {
+    const nodeDir = join(graphRoot, 'org', 'legacy');
+    mkdirSync(join(nodeDir, '.node'), { recursive: true });
+    writeFileSync(join(nodeDir, '.node', 'node.yaml'), 'id: legacy-1\r\nname: Legacy\r\n', 'utf-8');
+    writeFileSync(join(nodeDir, '.node', 'topic.md'), 'Body\r\nline two\r\n', 'utf-8');
+
+    const { node } = await loadNodeFromFs(nodeDir, graphRoot, 'test/repo');
+    expect(node.id).toBe('legacy-1');
+    expect(node.name).toBe('Legacy');
+    expect(node.loc).toBe('org:legacy');
+    expect(node.content).toBe('Body\r\nline two');
+  });
+
+  it.each([
+    ['empty', '', 'empty'],
+    ['a scalar', 'just a string', 'a string'],
+    ['an array', '- id: x', 'an array'],
+  ])('refuses a legacy node.yaml that is %s, naming the file', async (_label, yamlBody, got) => {
+    const nodeDir = join(graphRoot, 'org', 'legacy');
+    const yamlPath = join(nodeDir, '.node', 'node.yaml');
+    mkdirSync(join(nodeDir, '.node'), { recursive: true });
+    writeFileSync(yamlPath, yamlBody, 'utf-8');
+
+    await expect(loadNodeFromFs(nodeDir, graphRoot, 'test/repo')).rejects.toThrow(
+      `Malformed node.yaml in ${yamlPath}: expected a YAML mapping, got ${got}`,
+    );
+  });
+
+  it('refuses a legacy node.yaml that is not valid YAML, naming the file', async () => {
+    const nodeDir = join(graphRoot, 'org', 'legacy');
+    const yamlPath = join(nodeDir, '.node', 'node.yaml');
+    mkdirSync(join(nodeDir, '.node'), { recursive: true });
+    writeFileSync(yamlPath, 'id: [unclosed\n', 'utf-8');
+
+    await expect(loadNodeFromFs(nodeDir, graphRoot, 'test/repo')).rejects.toThrow(
+      `Malformed node.yaml in ${yamlPath}:`,
+    );
+  });
+});
