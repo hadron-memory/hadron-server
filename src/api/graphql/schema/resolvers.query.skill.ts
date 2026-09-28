@@ -39,18 +39,21 @@
  * protect.
  */
 import { GraphQLError } from 'graphql';
+import { createHash } from 'node:crypto';
 import { BATCH_READ_MAX_BYTES } from '../../../lib/batchRead.js';
 import { Prisma } from '../../../generated/prisma/index.js';
 import type { Context } from './resolvers.helpers.js';
 import { getAccessibleMemoryIds, memoryAccessFilter } from './resolvers.helpers.js';
 import { decryptNodesBatch } from '../../../lib/nodeCrypto.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
+import { resolveScopeRef } from '../../../lib/entityRef/scopeRef.js';
 import { resolveNodeRef } from '../../../lib/entityRef/nodeRef.js';
 import { NodeNotFoundError } from '../../../lib/entityRef/errors.js';
 import { isId } from '../../../lib/entityRef/shape.js';
 import { assertFullyQualifiedUrn, splitNodeUrn } from '../../../lib/urn.js';
 import { safeNodeUrnV2 } from '../../../lib/urnEmit.js';
 import { isCiphertext } from '../../../lib/crypto.js';
+import { canReadScope, explainScope } from '../../../lib/scopes.js';
 import { recordNodeUsage, toUsageNodeRefs } from '../../../lib/usageRecorder.js';
 import { ensureCurrentNodeRevisionInTransaction } from '../../../lib/nodeRevisionSnapshot.js';
 import {
@@ -97,6 +100,7 @@ export interface SkillFileFactsInput {
 export interface SkillPlanInput {
   intent: SkillPlanIntent;
   memories?: string[] | null;
+  scopeRef?: string | null;
   host?: string | null;
   files?: SkillFileFactsInput[] | null;
   force?: boolean | null;
@@ -469,6 +473,19 @@ function buildExportPlan(args: {
 
 /** The existing plugin/unscoped plan and the selected individual-file plan share judgment. */
 async function planSkills(input: SkillPlanInput, ctx: Context, selectedRefs?: string[]) {
+    // Plugin EXPORT is narrowed by a persisted Scope, never by a caller's
+    // hand-picked memory IDs (cor:agt:030:03). An explicit [] is still an
+    // attempted memory selector and must not silently become an unscoped plan.
+    if (input.intent === 'EXPORT' && Object.prototype.hasOwnProperty.call(input, 'memories')) {
+      throw new GraphQLError('skillPlan: EXPORT cannot select memories; use scopeRef.', {
+        extensions: { code: 'BAD_USER_INPUT' },
+      });
+    }
+    if (input.scopeRef != null && input.intent !== 'EXPORT') {
+      throw new GraphQLError('skillPlan: scopeRef is valid only with EXPORT intent.', {
+        extensions: { code: 'BAD_USER_INPUT' },
+      });
+    }
     if (selectedRefs !== undefined) {
       if (selectedRefs.length === 0 || selectedRefs.length > SKILL_PLAN_MAX_NODES) {
         throw new GraphQLError(`selectedSkillFilePlan: nodes must contain 1–${SKILL_PLAN_MAX_NODES} refs.`, {
@@ -547,6 +564,43 @@ async function planSkills(input: SkillPlanInput, ctx: Context, selectedRefs?: st
       }
     }
     let memoryIds: string[] | null = null;
+    let scopeSelection: {
+      id: string;
+      name: string;
+      readableMemoryCount: number;
+      droppedCount: number;
+      fingerprint: string;
+    } | null = null;
+    if (input.scopeRef != null) {
+      // Scope identity crosses the wire; membership is always re-resolved
+      // through the shared Scope gate and canonical materialized access set.
+      // The same ordered set and fingerprint applies to every host, which the
+      // client compares before writing a multi-host artifact.
+      let scopeId: string;
+      try {
+        ({ id: scopeId } = await resolveScopeRef(ctx.db, input.scopeRef));
+      } catch {
+        throw new GraphQLError('skillPlan: scope unavailable.', { extensions: { code: 'BAD_USER_INPUT' } });
+      }
+      const scope = await ctx.db.scope.findFirst({ where: { id: scopeId, deletedAt: null } });
+      if (!scope || !(await canReadScope(ctx, scope))) {
+        throw new GraphQLError('skillPlan: scope unavailable.', { extensions: { code: 'BAD_USER_INPUT' } });
+      }
+      const explained = await explainScope(ctx, scope.id);
+      if (explained.memoryIds.length === 0) {
+        throw new GraphQLError('skillPlan: scope has no readable memories.', { extensions: { code: 'BAD_USER_INPUT' } });
+      }
+      memoryIds = explained.memoryIds;
+      scopeSelection = {
+        id: scope.id,
+        name: scope.name,
+        readableMemoryCount: memoryIds.length,
+        droppedCount: explained.droppedCount,
+        fingerprint: createHash('sha256')
+          .update(JSON.stringify([scope.id, scope.name, memoryIds, explained.droppedCount]))
+          .digest('hex'),
+      };
+    }
     if (input.memories && input.memories.length > 0) {
       const accessible = await getAccessibleMemoryIds(ctx);
       memoryIds = [];
@@ -609,6 +663,7 @@ async function planSkills(input: SkillPlanInput, ctx: Context, selectedRefs?: st
         revSeq: true,
     } as const;
     const { content: _content, ...declaredMetadataSelect } = declaredSelect;
+    const narrowHint = input.intent === 'EXPORT' ? 'Choose a smaller scope' : 'Narrow `memories`';
     const candidateOrder = [{ memoryId: 'asc' }, { loc: 'asc' }] as const;
     const candidates = selectedRefs === undefined
       ? await ctx.db.node.findMany({
@@ -652,7 +707,7 @@ async function planSkills(input: SkillPlanInput, ctx: Context, selectedRefs?: st
         }, { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead });
     if (candidates.length > SKILL_PLAN_MAX_NODES) {
       throw new GraphQLError(
-        `skillPlan: more than ${SKILL_PLAN_MAX_NODES} nodes are in scope. Narrow \`memories\`; this surface does not silently truncate.`,
+        `skillPlan: more than ${SKILL_PLAN_MAX_NODES} nodes are in scope. ${narrowHint}; this surface does not silently truncate.`,
         { extensions: { code: 'BAD_USER_INPUT' } },
       );
     }
@@ -769,7 +824,7 @@ async function planSkills(input: SkillPlanInput, ctx: Context, selectedRefs?: st
     );
     if (loadedBytes > SKILL_PLAN_MAX_BODY_BYTES) {
       throw new GraphQLError(
-        `skillPlan: the nodes in scope carry ${loadedBytes} bytes of content, over the ${SKILL_PLAN_MAX_BODY_BYTES}-byte ceiling. Narrow \`memories\`, or work in batches; this surface does not silently truncate.`,
+        `skillPlan: the nodes in scope carry ${loadedBytes} bytes of content, over the ${SKILL_PLAN_MAX_BODY_BYTES}-byte ceiling. ${narrowHint}, or work in batches; this surface does not silently truncate.`,
         { extensions: { code: 'BAD_USER_INPUT' } },
       );
     }
@@ -1132,7 +1187,8 @@ async function planSkills(input: SkillPlanInput, ctx: Context, selectedRefs?: st
     // (@codex P1, PR #1318). Matched by filesystem equivalence, not `toLowerCase`
     // (`isHostReservedName`; @copilot, PR #1318): an alias of the name is the same directory.
     const hostRow = requireSkillHost(host);
-    const orphans = (selectedRefs === undefined ? files : [])
+    const orphanAssessmentSkipped = selectedRefs !== undefined || scopeSelection !== null;
+    const orphans = (orphanAssessmentSkipped ? [] : files)
       .filter((f) => !selectedDirs.has(f.dirName))
       .filter((f) => !isHostReservedName(hostRow, f.dirName))
       .map((f) => ({
@@ -1161,7 +1217,8 @@ async function planSkills(input: SkillPlanInput, ctx: Context, selectedRefs?: st
         : declaredRows.filter((row) => hasDeclarationKey(row.properties)).length,
       judged: skillNodes.length,
       unrecognized,
-      orphanAssessmentSkipped: selectedRefs !== undefined,
+      orphanAssessmentSkipped,
+      scopeSelection,
       selectionResults,
     };
 }
