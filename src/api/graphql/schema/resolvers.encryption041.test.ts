@@ -228,4 +228,36 @@ describe('encryptMemory — locked conversion (#1346)', () => {
     expect(node.content).toBe('my secret plaintext');
     expect(await db.nodeRevision.count({ where: { nodeId } })).toBe(0);
   });
+
+  it('allows only one of two callers that both saw plaintext to claim the encryption key', async () => {
+    const otherKey = Buffer.alloc(32, 8).toString('base64');
+    const findMemory = db.memory.findUniqueOrThrow.bind(db.memory);
+    let releaseReads!: () => void;
+    const bothRead = new Promise<void>((resolve) => { releaseReads = resolve; });
+    let plaintextReads = 0;
+    const read = vi.spyOn(db.memory, 'findUniqueOrThrow').mockImplementation((async (args: Parameters<typeof findMemory>[0]) => {
+      const memory = await findMemory(args);
+      if (memory.id === memoryId && !memory.isEncrypted && plaintextReads < 2) {
+        plaintextReads++;
+        if (plaintextReads === 2) releaseReads();
+        await bothRead;
+      }
+      return memory;
+    }) as never);
+    let results: PromiseSettledResult<unknown>[];
+    try {
+      results = await Promise.allSettled([
+        resolvers.Mutation.encryptMemory({}, { memoryId, dataKey }, ownerCtx()),
+        resolvers.Mutation.encryptMemory({}, { memoryId, dataKey: otherKey }, ownerCtx()),
+      ]);
+    } finally {
+      read.mockRestore();
+    }
+    expect(plaintextReads).toBe(2);
+    expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
+    expect(results.filter((r) => r.status === 'rejected')).toHaveLength(1);
+    const winnerKey = results[0].status === 'fulfilled' ? dataKey : otherKey;
+    const node = await db.node.findUniqueOrThrow({ where: { id: nodeId } });
+    expect(decryptNodeFieldsWithKey(node, parseDataKey(winnerKey)).content).toBe('my secret plaintext');
+  });
 });

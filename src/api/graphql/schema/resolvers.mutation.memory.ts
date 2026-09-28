@@ -2206,8 +2206,12 @@ export const memoryMutations = {
       // converge on zero plaintext rows: a row written plaintext between
       // our scan and the flip is caught by the next pass. Idempotent by the
       // enc:v1 prefix (isCiphertext), so re-running a pass is safe.
-      await ctx.db.memory.update({
-        where: { id: resolvedMemoryId },
+      // Two callers may both have read the plaintext flag above. Claim the
+      // flip atomically so only one key can become the verifier/conversion key;
+      // otherwise a losing caller could replace the verifier while the winner
+      // encrypts rows under its own key (#1346).
+      const flip = await ctx.db.memory.updateMany({
+        where: { id: resolvedMemoryId, isEncrypted: false },
         data: {
           isEncrypted: true,
           keyVerifier: makeKeyVerifier(key),
@@ -2215,6 +2219,7 @@ export const memoryMutations = {
           updatedBy: ctx.appId ?? ctx.userId ?? null,
         },
       });
+      if (flip.count !== 1) throw new Error('Memory is already encrypted');
       const BATCH = 200; // bound memory per pass (PR-514 review, Gemini)
       for (let pass = 0; pass < 5; pass++) {
         let converted = 0;
