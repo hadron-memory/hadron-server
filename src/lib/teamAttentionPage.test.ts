@@ -597,6 +597,10 @@ describe('family 14 — review #3153', () => {
       ['missing c_num array', (() => { const v = { ...preC }; delete v.c_num; return v; })()],
       ['missing t_r array', (() => { const v = { ...preC }; delete v.t_r; return v; })()],
       ['broken t_w index', { ...preC, t_w: [99] }],
+      ['missing q queue array', (() => { const v = { ...preC }; delete v.q; return v; })()],
+      ['missing ts timestamp', (() => { const v = { ...preC }; delete v.ts; return v; })()],
+      // Current-era token missing c_front (has o:'c') → INVALID
+      ['current token missing c_front', (() => { const v = { ...realPayload }; delete v.c_front; return v; })()],
     ];
     for (const [label, variant] of variants) {
       const signed = signPageToken(variant as never, secret);

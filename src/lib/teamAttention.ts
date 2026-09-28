@@ -678,10 +678,10 @@ async function pagedScanStep(
     // budget (residual-rejected included); the cursor persists from the LAST
     // CHARGED RAW row so rejects are paid once. Decryption is gated on
     // eligibility; the data column transfers for every raw-budgeted row.
-    // The frozen seq span bounds the FETCH itself: post-freeze traffic is
-    // never fetched and cannot starve completion (Codex P1 — a busy Channel
-    // producing rows faster than pages drain would otherwise keep every
-    // page full of seq > cMax rows).
+    // The seq span stays a RESIDUAL filter (keeping it in the indexed CTE
+    // breaks the examined-row bound — the seq column is not in the C-collation
+    // index key, so Postgres would walk non-qualifying rows unboundedly).
+    // Post-freeze starvation is prevented by the POST-SPAN-done rule below.
     const prefix = geometry.locPrefix;
     const upperBound = prefix.slice(0, -1) + ';';
     const lowerBound = prefix + state.cCursorNum[k];
@@ -693,8 +693,6 @@ async function pagedScanStep(
         WHERE n.memory_id = ${geometry.memoryId}
           AND n.loc COLLATE "C" > ${lowerBound} COLLATE "C"
           AND n.loc COLLATE "C" < ${upperBound} COLLATE "C"
-          AND n.seq > ${state.cMin[k]}
-          AND n.seq <= ${state.cMax[k]}
         ORDER BY n.loc COLLATE "C"
         LIMIT ${take}
       ) raw
@@ -702,12 +700,14 @@ async function pagedScanStep(
     `);
 
     const list = targetsOfChannel.get(k) ?? [];
+    let sawPostFreeze = false;
     for (const row of rows) {
       spent++; // charged whether or not the residual filters accept it
       // Residual filters AFTER the charged raw fetch; the cursor advances
       // past rejected rows too (they are paid once across the scan).
       if (row.node_type !== 'chat-message' || row.deleted_at != null
         || row.seq <= state.cMin[k] || row.seq > state.cMax[k]) {
+        if (row.seq > state.cMax[k]) sawPostFreeze = true;
         state.cCursorNum[k] = row.loc.slice(prefix.length);
         continue;
       }
@@ -737,10 +737,13 @@ async function pagedScanStep(
       if (anyCounted) state.cFrontNum[k] = state.cCursorNum[k];
     }
 
-    // Done when fewer than `take` raw rows return — the Channel-local range
-    // is exhausted. A full page leaves the channel active with the cursor on
-    // the last charged raw row; completion is idempotent on re-visit.
-    if (rows.length < take) {
+    // Done when the loc range is exhausted (fewer than `take` raw rows) OR
+    // when every examined row in a FULL page is post-freeze (seq > cMax) —
+    // for well-formed channels seq order matches loc order, so once a full
+    // page contains only post-freeze rows the frozen span is provably past
+    // and remaining budget should go to other channels. The cursor still
+    // advances past the post-freeze rows (charged once).
+    if (rows.length < take || (sawPostFreeze && rows.every((r) => r.seq > state.cMax[k]))) {
       state.cDone[k] = true;
       list.sort((a, b) => targets[a].workerId.localeCompare(targets[b].workerId));
       state.pending.push(...list);

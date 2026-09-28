@@ -182,9 +182,13 @@ export function verifyPageToken(
     ((value as Record<string, unknown>)[key] as unknown[]).length === (value.t_w as number[]).length);
   const channelParallelValid = parallelValid &&
     channelArrays.every((key) => ((value as Record<string, unknown>)[key] as unknown[]).length === (value.C as string[]).length);
-  const scalarValid = channelParallelValid &&
+  const queueValid = channelParallelValid &&
+    Array.isArray(value.q) && (value.q as number[]).every((ti) =>
+      Number.isInteger(ti) && ti >= 0 && ti < (value.t_w as number[]).length);
+  const scalarValid = queueValid && channelParallelValid &&
     typeof value.c_done === 'string' && typeof value.e_emitted === 'string' &&
-    typeof value.dg === 'string' && typeof value.next === 'number';
+    typeof value.dg === 'string' && typeof value.next === 'number' &&
+    typeof value.ts === 'number';
   const indicesValid = channelParallelValid && scalarValid &&
     (value.t_w as number[]).every((w, i) => {
       const tc = (value.t_c as number[])[i];
@@ -210,6 +214,10 @@ export function verifyPageToken(
   // (#3153 finding 2; Anne #3139 / Liam #3144).
   if (value.o !== 'c') {
     fail('This scan continuation predates the current keyset ordering; poll again without page to restart from your committed watermark.', 'TEAM_ATTENTION_STALE_PAGE');
+  }
+  // Current-era (C-ordering) tokens additionally carry the counted frontier.
+  if (!Array.isArray(value.c_front) || (value.c_front as string[]).length !== (value.C as string[]).length) {
+    fail('Invalid team-attention page token.', 'INVALID_ATTENTION_PAGE');
   }
   return value as PageContinuation;
 }
