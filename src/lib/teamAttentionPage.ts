@@ -79,8 +79,11 @@ export interface PageContinuation {
   /** Per-channel scan state, parallel arrays by channel index. `c_done` is a
    * hex bitset (channel index → bit), sized to the channel dictionary. */
   c_done: string;
-  c_seq: number[]; // keyset cursor seq (-1 = not started)
-  c_id: string[]; // keyset cursor node id ('' = not started)
+  /** Keyset cursor: the last consumed row's loc — unique per memory, so it is
+   * a total order the existing (memoryId, loc) index serves; '' = not
+   * started. (A seq-ordered cursor interleaves foreign channels of the same
+   * memory and cannot bound the walk — Codex round 4 on #1428.) */
+  c_loc: string[];
   c_min: number[]; // frozen span min(seen) across its targets
   c_max: number[]; // frozen span max(head)
   /** Per-target private partial accumulators (0 / null = untouched). */

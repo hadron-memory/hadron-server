@@ -585,9 +585,11 @@ export interface PagedScanState {
   /** Channel index → frozen span [cMin, cMax] over its targets. */
   cMin: number[];
   cMax: number[];
-  /** Channel index → keyset cursor; seq -1 means "not started". */
-  cCursorSeq: number[];
-  cCursorId: string[];
+  /** Channel index → keyset cursor loc ('' = not started). loc is unique per
+   * memory, so (memoryId, loc > cursor) is a bounded prefix-range walk on the
+   * existing (memoryId, loc) index — every row in the range belongs to this
+   * channel. */
+  cCursorLoc: string[];
   cDone: boolean[];
   /** Target index → private partial accumulators (never surfaced as exact
    * until the target's channel is done and the item is emitted). */
@@ -669,8 +671,8 @@ async function pagedScanStep(
         AND n.deleted_at IS NULL
         AND n.seq > ${state.cMin[k]}
         AND n.seq <= ${state.cMax[k]}
-        AND (n.seq, n.id) > (${state.cCursorSeq[k]}, ${state.cCursorId[k]})
-      ORDER BY n.seq, n.id
+        AND n.loc > ${state.cCursorLoc[k]}
+      ORDER BY n.loc
       LIMIT ${take + 1}
     `);
 
@@ -699,15 +701,12 @@ async function pagedScanStep(
           state.aLast[ti] = Math.max(state.aLast[ti], row.seq);
         }
       }
-      state.cCursorSeq[k] = row.seq;
-      state.cCursorId[k] = row.id ?? row.loc;
+      state.cCursorLoc[k] = row.loc;
     }
 
-    // Done ONLY when the frontier probe says no next row exists. A seq >=
-    // cMax shortcut marked the channel done while same-seq rows with larger
-    // ids remained — the legacy duplicate-seq shape v1 explicitly supports
-    // (#3051 finding 4); the LIMIT+1 probe alone distinguishes "page full"
-    // from "span ended" without extra queries.
+    // Done ONLY when the frontier probe says no next row exists; the LIMIT+1
+    // probe alone distinguishes "page full" from "span ended" (and never
+    // truncates duplicate-seq rows, which the loc order interleaves safely).
     if (rows.length <= take) {
       state.cDone[k] = true;
       // Completion-visit order, worker-id order within the channel.
@@ -788,8 +787,7 @@ function stateToContinuation(
     t_head: targets.map((t) => t.head),
     t_prior: priorFloors,
     c_done: channelIds.reduce((m, _id, k) => (state.cDone[k] ? maskSet(m, k) : m), maskEmpty()),
-    c_seq: state.cCursorSeq,
-    c_id: state.cCursorId,
+    c_loc: state.cCursorLoc,
     c_min: state.cMin,
     c_max: state.cMax,
     u_unread: state.aUnread,
@@ -810,8 +808,7 @@ function continuationToState(page: PageContinuation): PagedScanState {
   const state: PagedScanState = {
     cMin: page.c_min,
     cMax: page.c_max,
-    cCursorSeq: page.c_seq,
-    cCursorId: page.c_id,
+    cCursorLoc: page.c_loc,
     cDone: Array.from({ length: channelCount }, (_v, k) => maskGet(page.c_done, k)),
     aUnread: page.u_unread,
     aMent: page.u_ment,
@@ -937,9 +934,10 @@ async function runPagedAttention(
     // still exist undeleted — deletion of the scan frontier is the mutation
     // we CAN detect cheaply; interior edits are the documented residual.
     for (let k = 0; k < channelIds.length; k++) {
-      if (state.cDone[k] || state.cCursorSeq[k] < 0) continue;
+      if (state.cDone[k] || state.cCursorLoc[k] === '') continue;
+      const target = targets.find((t) => t.channelId === channelIds[k]);
       const frontier = await ctx.db.node.findFirst({
-        where: { id: state.cCursorId[k], deletedAt: null },
+        where: { memoryId: target?.memoryId, loc: state.cCursorLoc[k], deletedAt: null },
         select: { id: true },
       });
       if (!frontier) {
@@ -987,8 +985,7 @@ async function runPagedAttention(
     state = {
       cMin: channelIds.map((id) => Math.min(...targets.filter((t) => t.channelId === id).map((t) => t.seen))),
       cMax: channelIds.map((id) => Math.max(...targets.filter((t) => t.channelId === id).map((t) => t.head))),
-      cCursorSeq: channelIds.map(() => -1),
-      cCursorId: channelIds.map(() => ''),
+      cCursorLoc: channelIds.map(() => ''),
       cDone: channelIds.map(() => false),
       aUnread: targets.map(() => 0),
       aMent: targets.map(() => 0),

@@ -289,8 +289,8 @@ describe('family 4 — drift and key loss', () => {
     expect(first.scanComplete).toBe(false);
     // Delete the frontier row the continuation points at.
     const decoded = JSON.parse(Buffer.from(first.nextPage!.split('.')[0], 'base64url').toString('utf-8'));
-    const frontierId = decoded.c_id[0];
-    await db.node.update({ where: { id: frontierId }, data: { deletedAt: new Date() } });
+    const frontierLoc = decoded.c_loc[0];
+    await db.node.updateMany({ where: { memoryId: memory.id, loc: frontierLoc }, data: { deletedAt: new Date() } });
     await expect(teamAttentionPage(userCtx(), app.id, { page: first.nextPage })).rejects.toMatchObject({
       extensions: { code: 'TEAM_ATTENTION_STALE_PAGE' },
     });
@@ -472,8 +472,7 @@ describe('family 9 — consolidated review corrections (#3051/#3053/#3054)', () 
       t_head: Array.from({ length: 200 }, () => 2147483647),
       t_prior: Array.from({ length: 200 }, () => 2147483647),
       c_done: '0'.repeat(50),
-      c_seq: Array.from({ length: 200 }, () => 2147483647),
-      c_id: C.slice(),
+      c_loc: Array.from({ length: 200 }, () => 'x'.repeat(40)),
       c_min: Array.from({ length: 200 }, () => 0),
       c_max: Array.from({ length: 200 }, () => 2147483647),
       u_unread: Array.from({ length: 200 }, () => 2147483647),
