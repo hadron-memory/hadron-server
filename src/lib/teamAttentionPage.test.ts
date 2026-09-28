@@ -289,7 +289,7 @@ describe('family 4 — drift and key loss', () => {
     expect(first.scanComplete).toBe(false);
     // Delete the frontier row the continuation points at.
     const decoded = JSON.parse(Buffer.from(first.nextPage!.split('.')[0], 'base64url').toString('utf-8'));
-    const frontierLoc = `chats:team:messages:${decoded.c_num[0]}`;
+    const frontierLoc = `chats:team:messages:${decoded.c_front[0]}`;
     await db.node.updateMany({ where: { memoryId: memory.id, loc: frontierLoc }, data: { deletedAt: new Date() } });
     await expect(teamAttentionPage(userCtx(), app.id, { page: first.nextPage })).rejects.toMatchObject({
       extensions: { code: 'TEAM_ATTENTION_STALE_PAGE' },
@@ -312,8 +312,10 @@ describe('family 4 — drift and key loss', () => {
 describe('family 5 — token integrity', () => {
   it('rejects tampered, cross-operator and wrong-kind page tokens', async () => {
     await post('one');
-    const first = await teamAttentionPage(userCtx(), app.id, { scanLimit: 1 });
-    expect(first.scanComplete).toBe(true); // tiny scan completes; forge continuations instead
+    // Completion rule post-#1430: an exactly-full page leaves the channel
+    // active; the zero-row seek on the next pull proves completion.
+    const first = await drainPages({}, { scanLimit: 1 });
+    expect(first.adoptableSince).toBeTruthy();
     const forged = `${Buffer.from(JSON.stringify({ v: 2, kind: 'team-attention-page', op: 'poll', appId: app.id, userId: user.id, W: [], C: [], t_w: [], t_c: [], dg: 'x' })).toString('base64url')}.deadbeef`;
     await expect(teamAttentionPage(userCtx(), app.id, { page: forged })).rejects.toMatchObject({ extensions: { code: 'INVALID_ATTENTION_PAGE' } });
     await expect(teamAttentionPage(userCtx(), app.id, { page: 'not-a-token' })).rejects.toMatchObject({ extensions: { code: 'INVALID_ATTENTION_PAGE' } });
@@ -447,12 +449,18 @@ describe('family 9 — consolidated review corrections (#3051/#3053/#3054)', () 
         data: { id: generateId(), memoryId: memory2.id, loc: `chats:team2:messages:${msgNum}`, name: msgNum, nodeType: 'chat-message', seq, content: 'short channel', data: { mentions: [] } },
       }), { asChannel: true });
     for (let i = 0; i < 9; i++) await post(`huge ${i}`);
-    // Budget 4: the huge channel may take at most half this request's rows;
-    // the short channel completes and its item ships on page 1.
+    // Budget 4, quantum-fair: the huge channel may take at most half this
+    // request's rows per visit. The short channel's item ships no later than
+    // the SECOND pull (the exactly-full page rule #1430 leaves it active
+    // until a zero-row seek proves completion on the next visit).
     const p1 = await teamAttentionPage(userCtx(), app.id, { scanLimit: 4 });
-    const shortItem = p1.items.find((i) => i.channel === made2.channel.id);
+    const p2 = await teamAttentionPage(userCtx(), app.id, { page: p1.nextPage });
+    const shortItem = [...p1.items, ...p2.items].find((i) => i.channel === made2.channel.id);
     expect(shortItem).toMatchObject({ unread: 1 });
-    expect(p1.scanComplete).toBe(false);
+    // The huge channel (9 messages) is still delivering at this point: the
+    // short item shipped before the huge one completed.
+    const hugeItems = [...p1.items, ...p2.items].filter((i) => i.channel === channel.id);
+    expect(hugeItems.length).toBeLessThanOrEqual(1);
   });
 
   it('the 200-target continuation fits the transport ceiling at compact IDs (size fixture)', async () => {
@@ -472,7 +480,9 @@ describe('family 9 — consolidated review corrections (#3051/#3053/#3054)', () 
       t_head: Array.from({ length: 200 }, () => 2147483647),
       t_prior: Array.from({ length: 200 }, () => 2147483647),
       c_done: '0'.repeat(50),
+      o: 'c' as const,
       c_num: Array.from({ length: 200 }, () => '2147483647'),
+      c_front: Array.from({ length: 200 }, () => '2147483647'),
       c_inc: Array.from({ length: 200 }, () => 2147483647),
       c_min: Array.from({ length: 200 }, () => 0),
       c_max: Array.from({ length: 200 }, () => 2147483647),
@@ -615,7 +625,9 @@ describe('family 11 — review #3105', () => {
       t_head: Array.from({ length: 200 }, () => 2147483647),
       t_prior: Array.from({ length: 200 }, () => 2147483647),
       c_done: '0'.repeat(50),
+      o: 'c' as const,
       c_num: Array.from({ length: 200 }, () => '2147483647'),
+      c_front: Array.from({ length: 200 }, () => '2147483647'),
       c_inc: Array.from({ length: 200 }, () => 2147483647),
       c_min: Array.from({ length: 200 }, () => 0),
       c_max: Array.from({ length: 200 }, () => 2147483647),

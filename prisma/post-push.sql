@@ -580,3 +580,7 @@ DROP TRIGGER IF EXISTS nodes_initialize_revision_content_hash ON "nodes";
 CREATE TRIGGER nodes_initialize_revision_content_hash
 BEFORE INSERT OR UPDATE ON "nodes"
 FOR EACH ROW EXECUTE FUNCTION hadron_initialize_node_revision_content_hash();
+
+-- #1430: C-collation index for paged-attention keyset pages. Prisma cannot
+-- model column collation in @@index, so this is recreated after every push.
+CREATE INDEX IF NOT EXISTS "nodes_memory_id_loc_c_idx" ON "nodes" ("memory_id", "loc" COLLATE "C");

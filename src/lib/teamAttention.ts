@@ -363,6 +363,8 @@ type EncryptedCandidateRow = {
   loc: string;
   data: unknown;
   id?: string;
+  node_type?: string;
+  deleted_at?: Date | null;
 };
 
 type EncryptedChannelScan = {
@@ -591,6 +593,9 @@ export interface PagedScanState {
    * pass foreign-channel and residual-rejected rows before LIMIT; only
    * returned/decrypted rows are bounded by the request budget. */
   cCursorNum: string[];
+  /** Last COUNTED-message suffix ('' until one counted) — the stale-frontier
+   * check row, independent of the raw cursor (#1430 decoupling). */
+  cFrontNum: string[];
   /** Channel index → frozen incarnation, compared on every resume (#3111). */
   cInc: number[];
   cDone: boolean[];
@@ -665,38 +670,40 @@ async function pagedScanStep(
     const activeChannels = state.cDone.filter((done) => !done).length;
     const share = Math.max(1, Math.floor((budget - spent) / Math.max(1, activeChannels)));
     const take = Math.min(budget - spent, share, ENCRYPTED_MESSAGE_PAGE_SIZE);
-    // Prefix match via LIKE: a character-successor upper bound is NOT valid
-    // under a non-C database collation (en_US.UTF-8 orders ':' and ';' by
-    // locale rules, not bytes — verified against the live test DB), so the
-    // btree range cannot express the prefix independent of collation. The
-    // honest examined-work statement (#3111): LIMIT bounds returned and
-    // decrypted rows; rows the index walk passes that fail the LIKE filter
-    // (foreign channels of the same memory past the cursor) are NOT
-    // hard-bounded under a collated text index. A durable fix is a
-    // text_pattern_ops expression index — deliberately a follow-up, not
-    // smuggled into this PR.
+    // #1430 C-collation keyset: P = the channel's message prefix; U = P's
+    // byte-successor (final ':' → ';'). The range [P+cursor, U) is exact and
+    // Channel-local in byte order — independent of the DB's locale collation
+    // (en_US orders ':' and ';' by locale, verified) — served by the
+    // nodes_memory_id_loc_c_idx btree. EVERY returned raw row charges the
+    // budget (residual-rejected included); the cursor persists from the LAST
+    // CHARGED RAW row so rejects are paid once; payload/decrypt happens only
+    // for eligible rows.
+    const prefix = geometry.locPrefix;
+    const upperBound = prefix.slice(0, -1) + ';';
+    const lowerBound = prefix + state.cCursorNum[k];
     const rows = await db.$queryRaw<EncryptedCandidateRow[]>(Prisma.sql`
-      SELECT n.seq::int AS seq, n.loc, n.data, n.id, n.memory_id
-      FROM nodes n
-      WHERE n.memory_id = ${geometry.memoryId}
-        AND n.loc LIKE ${escapePrismaLikePattern(geometry.locPrefix) + '%'} ESCAPE '\\'
-        AND n.node_type = 'chat-message'
-        AND n.deleted_at IS NULL
-        AND n.seq > ${state.cMin[k]}
-        AND n.seq <= ${state.cMax[k]}
-        AND n.loc > ${geometry.locPrefix + state.cCursorNum[k]}
-      ORDER BY n.loc
-      LIMIT ${take + 1}
+      SELECT seq::int AS seq, loc, data, id, memory_id, node_type, deleted_at
+      FROM (
+        SELECT n.seq, n.loc, n.data, n.id, n.memory_id, n.node_type, n.deleted_at
+        FROM nodes n
+        WHERE n.memory_id = ${geometry.memoryId}
+          AND n.loc COLLATE "C" > ${lowerBound} COLLATE "C"
+          AND n.loc COLLATE "C" < ${upperBound} COLLATE "C"
+        ORDER BY n.loc COLLATE "C"
+        LIMIT ${take}
+      ) raw
     `);
 
     const list = targetsOfChannel.get(k) ?? [];
-    for (const row of rows.slice(0, take)) {
-      spent++;
-      // One row-limited (seq, id) keyset page serves BOTH classes: Node has
-      // no seq index, so a seq-windowed aggregate would still examine the
-      // whole channel prefix (Codex P1 round 2 on #1428) and duplicate-seq
-      // rows could overflow a window. Plaintext data is already readable —
-      // only encrypted rows pay decryption.
+    for (const row of rows) {
+      spent++; // charged whether or not the residual filters accept it
+      // Residual filters AFTER the charged raw fetch; the cursor advances
+      // past rejected rows too (they are paid once across the scan).
+      if (row.node_type !== 'chat-message' || row.deleted_at != null
+        || row.seq <= state.cMin[k] || row.seq > state.cMax[k]) {
+        state.cCursorNum[k] = row.loc.slice(prefix.length);
+        continue;
+      }
       const envelope = geometry.encrypted
         ? decryptRoutingEnvelope(row)
         : ((row.data && typeof row.data === 'object') ? row.data as Record<string, unknown> : {});
@@ -707,9 +714,6 @@ async function pagedScanStep(
         const target = targets[ti];
         if (row.seq <= target.seen || row.seq > target.head || envelope.authorWorkerId === target.workerId) continue;
         state.aUnread[ti]++;
-        // firstUnreadSeq is the MINIMUM seq, not the first-encountered: loc
-        // order diverges from seq order at padding boundaries (…:999 sorts
-        // after …:1000) and legacy loc shapes can differ too (review #3105).
         state.aFirst[ti] = state.aFirst[ti] === 0 ? row.seq : Math.min(state.aFirst[ti], row.seq);
         const mentioned = mentionTokensByTarget[ti].some((token) => mentions.includes(token));
         if (mentioned) state.aMent[ti]++;
@@ -717,15 +721,15 @@ async function pagedScanStep(
           state.aLast[ti] = Math.max(state.aLast[ti], row.seq);
         }
       }
-      state.cCursorNum[k] = row.loc.slice(geometry.locPrefix.length);
+      state.cCursorNum[k] = row.loc.slice(prefix.length);
+      state.cFrontNum[k] = state.cCursorNum[k];
     }
 
-    // Done ONLY when the frontier probe says no next row exists; the LIMIT+1
-    // probe alone distinguishes "page full" from "span ended" (and never
-    // truncates duplicate-seq rows, which the loc order interleaves safely).
-    if (rows.length <= take) {
+    // Done when fewer than `take` raw rows return — the Channel-local range
+    // is exhausted. A full page leaves the channel active with the cursor on
+    // the last charged raw row; completion is idempotent on re-visit.
+    if (rows.length < take) {
       state.cDone[k] = true;
-      // Completion-visit order, worker-id order within the channel.
       list.sort((a, b) => targets[a].workerId.localeCompare(targets[b].workerId));
       state.pending.push(...list);
     }
@@ -789,6 +793,7 @@ function stateToContinuation(
   const payload: PageContinuation = {
     v: 2,
     kind: 'team-attention-page',
+    o: 'c',
     op,
     appId,
     userId,
@@ -805,6 +810,7 @@ function stateToContinuation(
     t_prior: priorFloors,
     c_done: channelIds.reduce((m, _id, k) => (state.cDone[k] ? maskSet(m, k) : m), maskEmpty()),
     c_num: state.cCursorNum,
+    c_front: state.cFrontNum,
     c_inc: channelIncarnations,
     c_min: state.cMin,
     c_max: state.cMax,
@@ -827,6 +833,7 @@ function continuationToState(page: PageContinuation): PagedScanState {
     cMin: page.c_min,
     cMax: page.c_max,
     cCursorNum: page.c_num,
+    cFrontNum: page.c_front,
     cInc: page.c_inc,
     cDone: Array.from({ length: channelCount }, (_v, k) => maskGet(page.c_done, k)),
     aUnread: page.u_unread,
@@ -973,9 +980,11 @@ async function runPagedAttention(
     // still exist undeleted — deletion of the scan frontier is the mutation
     // we CAN detect cheaply; interior edits are the documented residual.
     for (let k = 0; k < channelIds.length; k++) {
-      if (state.cDone[k] || state.cCursorNum[k] === '') continue;
+      // Stale-frontier check uses the COUNTED frontier — the raw cursor may
+      // legitimately sit on a residual-rejected row (#1430 decoupling).
+      if (state.cDone[k] || state.cFrontNum[k] === '') continue;
       const target = targets.find((t) => t.channelId === channelIds[k]);
-      const frontierLoc = `${target?.channelLoc ?? ''}:messages:${state.cCursorNum[k]}`;
+      const frontierLoc = `${target?.channelLoc ?? ''}:messages:${state.cFrontNum[k]}`;
       const frontier = await ctx.db.node.findFirst({
         where: { memoryId: target?.memoryId, loc: frontierLoc, deletedAt: null },
         select: { id: true },
@@ -1027,6 +1036,7 @@ async function runPagedAttention(
       cMin: channelIds.map((id) => Math.min(...targets.filter((t) => t.channelId === id).map((t) => t.seen))),
       cMax: channelIds.map((id) => Math.max(...targets.filter((t) => t.channelId === id).map((t) => t.head))),
       cCursorNum: channelIds.map(() => ''),
+      cFrontNum: channelIds.map(() => ''),
       cInc: channelIds.map((id) => liveIncarnations.get(id) ?? 0),
       cDone: channelIds.map(() => false),
       aUnread: targets.map(() => 0),

@@ -51,6 +51,10 @@ function fail(message: string, code: string): never {
 export interface PageContinuation {
   v: 2;
   kind: 'team-attention-page';
+  /** Keyset ordering marker: 'c' = C-collation byte order. Continuations
+   * minted before the C-order switch (or with any other marker) are refused
+   * with a typed restart — their cursor is never reinterpreted (#1430). */
+  o: 'c';
   op: 'poll' | 'preview';
   appId: string;
   userId: string;
@@ -90,6 +94,11 @@ export interface PageContinuation {
    * budget-bounded. Suffix length is observational, not a guaranteed
    * transport bound — legacy nonnumeric suffixes store verbatim. */
   c_num: string[];
+  /** Last COUNTED-message suffix per channel (empty until one was counted) —
+   * the stale-frontier check row. Independent of c_num: the raw cursor may
+   * sit on a residual-rejected row, which would make an undeleted-message
+   * check false (#1430 decoupling). */
+  c_front: string[];
   /** Channel.incarnation at freeze, per channel index — compared on EVERY
    * resume (unstarted and done channels included). A same-address
    * deleteChannel + ensureChannelWithRoot reuses the Channel/register IDs and
@@ -160,6 +169,7 @@ export function verifyPageToken(
     typeof value.appId !== 'string' ||
     typeof value.userId !== 'string' ||
     !Array.isArray(value.W) || !Array.isArray(value.C) || !Array.isArray(value.R) ||
+    value.o !== 'c' ||
     !Array.isArray(value.c_inc) ||
     !Array.isArray(value.t_w) || !Array.isArray(value.t_c)
   ) {
