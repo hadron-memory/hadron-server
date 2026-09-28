@@ -28,6 +28,12 @@ import { escapePrismaLikePattern } from './literalLocPrefix.js';
 import { safeEqual } from './constantTime.js';
 import { decryptNodeFields } from './nodeCrypto.js';
 import {
+  maskEmpty, maskGet, maskSet, scopeDigest, signPageToken, verifyPageToken,
+  MAX_PAGE_TOKEN_CHARS, PAGE_RESULT_PAIRS_DEFAULT, PAGE_RESULT_PAIRS_MAX,
+  PAGE_SCAN_ROW_BUDGET_DEFAULT, PAGE_SCAN_ROW_BUDGET_MAX,
+  type PageContinuation,
+} from './teamAttentionPage.js';
+import {
   isSessionLive,
   loadLastEventBySession,
   OPEN_SESSION_SCAN_CAP,
@@ -176,6 +182,14 @@ function tokenSigningKey(): Buffer {
   // this protocol must not share the JWT signing domain. The derived key also
   // gives future team-attention formats an explicit version boundary.
   return createHmac('sha256', secret).update('hadron/team-attention/v1').digest();
+}
+
+/** The raw secret behind `tokenSigningKey`, for the v2 paged-attention codec
+ * (its own HMAC domain derivation lives in teamAttentionPage.ts). */
+export function attentionTokenSecret(): string {
+  const secret = process.env.TEAM_ATTENTION_TOKEN_SECRET || process.env.JWT_SECRET;
+  if (!secret) fail('The team-attention token signer is not configured.', 'TEAM_ATTENTION_NOT_CONFIGURED');
+  return secret;
 }
 
 function sign(payload: SignedPayload): string {
@@ -348,6 +362,7 @@ type EncryptedCandidateRow = {
   seq: number;
   loc: string;
   data: unknown;
+  id?: string;
 };
 
 type EncryptedChannelScan = {
@@ -555,6 +570,500 @@ async function unreadCounts(db: Context['db'], targets: Target[]): Promise<Map<s
   return out;
 }
 
+// ── #1384/#1421 paged (v2) scan engine ───────────────────────────────────────
+//
+// The v1 loop above pages an encrypted Channel to EXHAUSTION inside one
+// request. The v2 engine below performs a bounded amount of work per call and
+// hands the private progress back in a signed continuation (codec in
+// teamAttentionPage.ts). In-memory state mirrors the continuation payload;
+// entry/exit points serialize it. Channels are indexed in sorted-id order so
+// the round-robin schedule is deterministic across pulls.
+
+/** Mutable scan state, isomorphic to the signed continuation payload. */
+export interface PagedScanState {
+  /** Channel index → frozen span [cMin, cMax] over its targets. */
+  cMin: number[];
+  cMax: number[];
+  /** Channel index → keyset cursor; seq -1 means "not started". */
+  cCursorSeq: number[];
+  cCursorId: string[];
+  cDone: boolean[];
+  /** Target index → private partial accumulators (never surfaced as exact
+   * until the target's channel is done and the item is emitted). */
+  aUnread: number[];
+  aMent: number[];
+  aFirst: number[]; // 0 = none seen yet
+  aLast: number[]; // 0 = none
+  /** Target indices awaiting delivery, in completion-visit order. */
+  pending: number[];
+  emitted: boolean[];
+  /** Round-robin scheduler position (channel index). */
+  next: number;
+}
+
+/** One bounded work step. `budget` is the GLOBAL decrypted-row allowance for
+ * this request; plaintext channels complete in one aggregate visit without
+ * charging the budget (their cost is one indexed query, not row decryption).
+ * Returns the number of decrypted rows consumed. */
+async function pagedScanStep(
+  db: Context['db'],
+  targets: Target[],
+  channelIndexOf: Map<string, number>,
+  /** Channel index → live {memoryId, locPrefix} rehydrated this pull. */
+  channelGeometry: Map<number, { memoryId: string; locPrefix: string }>,
+  mentionTokensByTarget: string[][],
+  state: PagedScanState,
+  budget: number,
+): Promise<number> {
+  const channelCount = state.cDone.length;
+  const targetsOfChannel = new Map<number, number[]>();
+  targets.forEach((_t, i) => {
+    const c = channelIndexOf.get(targets[i].channelId)!;
+    const list = targetsOfChannel.get(c) ?? [];
+    list.push(i);
+    targetsOfChannel.set(c, list);
+  });
+
+  let spent = 0;
+  let visits = 0;
+  while (spent < budget && visits < channelCount) {
+    visits++;
+    // Advance to the next not-done channel, round-robin; stop when a full
+    // lap finds only done channels.
+    let k = -1;
+    for (let step = 0; step < channelCount; step++) {
+      const candidate = (state.next + step) % channelCount;
+      if (!state.cDone[candidate]) { k = candidate; break; }
+    }
+    if (k === -1) break;
+    state.next = (k + 1) % channelCount;
+
+    const geometry = channelGeometry.get(k);
+    if (!geometry) {
+      // Channel vanished from the live scope between pulls — treat as drift;
+      // the caller's boundary/digest checks own the typed refusal, so here we
+      // simply stop consuming budget on it.
+      state.cDone[k] = true;
+      continue;
+    }
+    const take = Math.min(budget - spent, ENCRYPTED_MESSAGE_PAGE_SIZE);
+    const rows = await db.$queryRaw<EncryptedCandidateRow[]>(Prisma.sql`
+      SELECT n.seq::int AS seq, n.loc, n.data, n.id, n.memory_id
+      FROM nodes n
+      WHERE n.memory_id = ${geometry.memoryId}
+        AND n.loc LIKE ${geometry.locPrefix + '%'} ESCAPE '\\'
+        AND n.node_type = 'chat-message'
+        AND n.deleted_at IS NULL
+        AND n.seq > ${state.cMin[k]}
+        AND n.seq <= ${state.cMax[k]}
+        AND (n.seq, n.id) > (${state.cCursorSeq[k]}, ${state.cCursorId[k]})
+      ORDER BY n.seq, n.id
+      LIMIT ${take + 1}
+    `);
+
+    const list = targetsOfChannel.get(k) ?? [];
+    for (const row of rows.slice(0, take)) {
+      spent++;
+      const envelope = decryptRoutingEnvelope(row);
+      const mentions = Array.isArray(envelope.mentions)
+        ? envelope.mentions.filter((v): v is string => typeof v === 'string')
+        : [];
+      for (const ti of list) {
+        const target = targets[ti];
+        if (row.seq <= target.seen || row.seq > target.head || envelope.authorWorkerId === target.workerId) continue;
+        state.aUnread[ti]++;
+        if (state.aFirst[ti] === 0) state.aFirst[ti] = row.seq;
+        const mentioned = mentionTokensByTarget[ti].some((token) => mentions.includes(token));
+        if (mentioned) state.aMent[ti]++;
+        if (!target.mentionOnly || mentioned) {
+          state.aLast[ti] = Math.max(state.aLast[ti], row.seq);
+        }
+      }
+      state.cCursorSeq[k] = row.seq;
+      state.cCursorId[k] = row.id ?? row.loc;
+    }
+
+    // Done when the frozen span is exhausted: fewer rows than the ask, or the
+    // cursor reached/passed the frozen max. The LIMIT+1 probe distinguishes
+    // "page full" (more to scan) from "span ended" without extra queries.
+    if (rows.length <= take || state.cCursorSeq[k] >= state.cMax[k]) {
+      state.cDone[k] = true;
+      // Completion-visit order, worker-id order within the channel.
+      list.sort((a, b) => targets[a].workerId.localeCompare(targets[b].workerId));
+      state.pending.push(...list);
+    }
+  }
+  return spent;
+}
+
+// ── #1384/#1421 paged (v2) public surface ────────────────────────────────────
+
+export interface TeamAttentionPageItem {
+  worker: string;
+  workerName: string;
+  workerUrn: string | null;
+  channel: string;
+  channelName: string;
+  unread: number;
+  unreadMentions: number;
+  firstUnreadSeq: number | null;
+  lastRelevantSeq: number | null;
+  lastSeq: number; // the frozen Channel head this page's counts are exact for
+}
+
+export interface TeamAttentionPageResult {
+  items: TeamAttentionPageItem[];
+  scanComplete: boolean;
+  /** Present while any Channel is unfinished or queued items remain
+   * undelivered. Absent (null) on the final page. */
+  nextPage: string | null;
+  /** Present ONLY on the final page: a v1-shaped `since` head snapshot the
+   * router adopts under the unchanged no-loss rule (every listed nudge
+   * accepted first). Routers migrate without discarding a watermark. */
+  adoptableSince: string | null;
+}
+
+export interface TeamAttentionPreviewPageResult {
+  items: TeamAttentionPageItem[];
+  scanComplete: boolean;
+  nextPage: string | null;
+  /** Present ONLY on the final page: the existing short-lived switchover
+   * proof, bound to the complete frozen target scope and from/through heads.
+   * An incomplete preview NEVER carries a proof, so a capped/partial preview
+   * can never become a silent backlog-discard path. */
+  proof: string | null;
+  expiresAt: Date | null;
+}
+
+function stateToContinuation(
+  op: 'poll' | 'preview',
+  appId: string,
+  userId: string,
+  targets: Target[],
+  channelIds: string[],
+  state: PagedScanState,
+): PageContinuation {
+  const workerIds = [...new Set(targets.map((t) => t.workerId))].sort();
+  const workerIndex = new Map(workerIds.map((id, i) => [id, i]));
+  const payload: PageContinuation = {
+    v: 2,
+    kind: 'team-attention-page',
+    op,
+    appId,
+    userId,
+    ts: Date.now(),
+    W: workerIds,
+    C: channelIds,
+    t_w: targets.map((t) => workerIndex.get(t.workerId)!),
+    t_c: targets.map((t) => channelIds.indexOf(t.channelId)),
+    t_mo: targets.map((t) => (t.mentionOnly ? 1 : 0)),
+    t_seen: targets.map((t) => t.seen),
+    t_head: targets.map((t) => t.head),
+    c_done: channelIds.reduce((m, _id, k) => (state.cDone[k] ? maskSet(m, k) : m), maskEmpty()),
+    c_seq: state.cCursorSeq,
+    c_id: state.cCursorId,
+    c_min: state.cMin,
+    c_max: state.cMax,
+    u_unread: state.aUnread,
+    u_ment: state.aMent,
+    u_first: state.aFirst,
+    u_last: state.aLast,
+    e_emitted: targets.reduce((m, _t, i) => (state.emitted[i] ? maskSet(m, i) : m), maskEmpty()),
+    q: state.pending,
+    next: state.next,
+    dg: '',
+  };
+  payload.dg = scopeDigest(payload, attentionTokenSecret());
+  return payload;
+}
+
+function continuationToState(page: PageContinuation): PagedScanState {
+  const channelCount = page.C.length;
+  const state: PagedScanState = {
+    cMin: page.c_min,
+    cMax: page.c_max,
+    cCursorSeq: page.c_seq,
+    cCursorId: page.c_id,
+    cDone: Array.from({ length: channelCount }, (_v, k) => maskGet(page.c_done, k)),
+    aUnread: page.u_unread,
+    aMent: page.u_ment,
+    aFirst: page.u_first,
+    aLast: page.u_last,
+    pending: page.q,
+    emitted: page.t_w.map((_v, i) => maskGet(page.e_emitted, i)),
+    next: page.next,
+  };
+  return state;
+}
+
+/**
+ * The paged attention poll (#1384 v2). Each call performs bounded work — at
+ * most `scanLimit` decrypted rows and `limit` emitted Worker/Channel pairs —
+ * and returns either a continuation or, when every frozen Channel is scanned
+ * AND every queued item delivered, the final page with the adoptable v1-shaped
+ * `since` snapshot. `since` (a v1 token) is accepted on the FIRST page only,
+ * carrying the router's committed watermark forward; `page` continues a scan.
+ * Never advances ChannelReadState; drift answers a typed stale-page refusal.
+ */
+async function runPagedAttention(
+  ctx: Context,
+  appRef: string,
+  args: { since?: string | null; page?: string | null; limit?: number | null; scanLimit?: number | null },
+  op: 'poll' | 'preview',
+): Promise<{ items: TeamAttentionPageItem[]; scanComplete: boolean; nextPage: string | null; adoptableSince: string | null; proof: string | null; proofExpiresAt: Date | null; frozenSeen: number[]; frozenHead: number[] }> {
+  const app = await resolvePilotApp(ctx, appRef);
+  if (args.since === 'now') {
+    fail('since:"now" is intentionally unavailable: preview and explicitly confirm a switchover instead.', 'SWITCHOVER_CONFIRMATION_REQUIRED');
+  }
+  if (args.since && args.page) {
+    fail('Pass either since (start a scan) or page (continue one), not both.', 'BAD_USER_INPUT');
+  }
+  if (op === 'preview' && args.since) {
+    fail('The paged preview takes no since token.', 'BAD_USER_INPUT');
+  }
+  const limit = Math.max(1, Math.min(args.limit ?? PAGE_RESULT_PAIRS_DEFAULT, PAGE_RESULT_PAIRS_MAX));
+  const scanLimit = Math.max(1, Math.min(args.scanLimit ?? PAGE_SCAN_ROW_BUDGET_DEFAULT, PAGE_SCAN_ROW_BUDGET_MAX));
+
+  const targets = await attentionTargets(ctx, app);
+  const secret = attentionTokenSecret();
+
+  // The frozen channel dictionary is sorted-id: deterministic round-robin.
+  const channelIds = [...new Set(targets.map((t) => t.channelId))].sort();
+  const channelIndexOf = new Map(channelIds.map((id, k) => [id, k]));
+
+  let state: PagedScanState;
+  let priorHeads: Map<string, number> | null = null;
+  // Frozen per-target spans — the FROZEN head (not the live one) is what the
+  // final preview proof and the emitted lastSeq describe; live heads may sit
+  // above them by the time the last page is pulled.
+  let frozenSeen: number[];
+  let frozenHead: number[];
+
+  if (args.page) {
+    const decoded = verifyPageToken(args.page, secret);
+    if (decoded.op !== op) fail('That page token belongs to the other attention operation.', 'INVALID_ATTENTION_PAGE');
+    if (decoded.appId !== app.id || decoded.userId !== ctx.userId) {
+      fail('That page token belongs to another operator or App.', 'INVALID_ATTENTION_PAGE');
+    }
+    if (decoded.dg !== scopeDigest(decoded, secret)) {
+      fail('The page token scope does not match; poll again without page.', 'TEAM_ATTENTION_STALE_PAGE');
+    }
+    state = continuationToState(decoded);
+    frozenSeen = decoded.t_seen;
+    frozenHead = decoded.t_head;
+    // Rehydrate the frozen scope against the LIVE scope: every frozen target
+    // must still resolve to a live target of the same identity (worker,
+    // channel, register, mentionOnly) whose head has not moved BACKWARD.
+    // A forward READ-cursor move does NOT stale the scan — the frozen span
+    // stays exact for its captured range and may merely produce a redundant
+    // nudge (contract: duplicate, never lose).
+    for (let i = 0; i < decoded.t_w.length; i++) {
+      const workerId = decoded.W[decoded.t_w[i]];
+      const channelId = decoded.C[decoded.t_c[i]];
+      const match = targets.find(
+        (t) => t.workerId === workerId
+          && t.channelId === channelId
+          && decoded.t_mo[i] === (t.mentionOnly ? 1 : 0)
+          && decoded.t_head[i] <= t.head,
+      );
+      if (!match) {
+        fail('The scan scope drifted (register, participation or head changed); poll again without page.', 'TEAM_ATTENTION_STALE_PAGE');
+      }
+    }
+    // Boundary check: the frontier row of every still-active channel must
+    // still exist undeleted — deletion of the scan frontier is the mutation
+    // we CAN detect cheaply; interior edits are the documented residual.
+    for (let k = 0; k < channelIds.length; k++) {
+      if (state.cDone[k] || state.cCursorSeq[k] < 0) continue;
+      const frontier = await ctx.db.node.findFirst({
+        where: { id: state.cCursorId[k], deletedAt: null },
+        select: { id: true },
+      });
+      if (!frontier) {
+        fail('A Channel\'s scanned history changed (frontier row removed); poll again without page.', 'TEAM_ATTENTION_STALE_PAGE');
+      }
+    }
+  } else {
+    let prior: AttentionSnapshot | null = null;
+    if (args.since) {
+      const decoded = verify(args.since);
+      if (decoded.kind !== 'team-attention') fail('That token is not an attention poll token.', 'INVALID_ATTENTION_TOKEN');
+      if (decoded.appId !== app.id || decoded.userId !== ctx.userId) {
+        fail('That attention token belongs to another operator or App.', 'INVALID_ATTENTION_TOKEN');
+      }
+      prior = decoded;
+    }
+    priorHeads = previousHeads(prior);
+    for (const target of targets) {
+      const key = `${target.workerId}:${target.channelId}:${target.registerId}:${target.mentionOnly}`;
+      const priorHead = priorHeads.get(key);
+      if (priorHead != null && priorHead > target.head) {
+        fail('A Channel watermark moved behind the supplied token; poll again without since.', 'ATTENTION_TOKEN_STALE');
+      }
+    }
+    // The idle short-circuit survives from v1 (poll only — a preview always
+    // accounts for the full backlog): when every current target was in the
+    // prior scope and no head moved, nothing relevant can be newer than the
+    // token — no message-table touch, final page immediately.
+    if (
+      op === 'poll' &&
+      prior &&
+      targets.every((target) => {
+        const key = `${target.workerId}:${target.channelId}:${target.registerId}:${target.mentionOnly}`;
+        return priorHeads!.get(key) === target.head;
+      })
+    ) {
+      return { items: [], scanComplete: true, nextPage: null, adoptableSince: sign(snapshot(app.id, ctx.userId!, targets)), proof: null, proofExpiresAt: null, frozenSeen: targets.map((t) => t.seen), frozenHead: targets.map((t) => t.head) };
+    }
+    frozenSeen = targets.map((t) => t.seen);
+    frozenHead = targets.map((t) => t.head);
+    state = {
+      cMin: channelIds.map((id) => Math.min(...targets.filter((t) => t.channelId === id).map((t) => t.seen))),
+      cMax: channelIds.map((id) => Math.max(...targets.filter((t) => t.channelId === id).map((t) => t.head))),
+      cCursorSeq: channelIds.map(() => -1),
+      cCursorId: channelIds.map(() => ''),
+      cDone: channelIds.map(() => false),
+      aUnread: targets.map(() => 0),
+      aMent: targets.map(() => 0),
+      aFirst: targets.map(() => 0),
+      aLast: targets.map(() => 0),
+      pending: [],
+      emitted: targets.map(() => false),
+      next: 0,
+    };
+  }
+
+  // Plaintext channels complete in one aggregate visit per pull — one indexed
+  // query, no row decryption, no budget charge (the cost is not row-linear).
+  const memories = await ctx.db.memory.findMany({
+    where: { id: { in: [...new Set(targets.map((t) => t.memoryId))] } },
+    select: { id: true, isEncrypted: true },
+  });
+  const encryptedMemoryIds = new Set(memories.filter((m) => m.isEncrypted).map((m) => m.id));
+  const openPlaintextTargets = targets
+    .map((t, i) => ({ t, i }))
+    .filter(({ t, i }) => !encryptedMemoryIds.has(t.memoryId) && !state.cDone[channelIndexOf.get(t.channelId)!] && !state.emitted[i]);
+  if (openPlaintextTargets.length > 0) {
+    const counts = await unreadCounts(ctx.db, openPlaintextTargets.map(({ t }) => t));
+    for (const { t, i } of openPlaintextTargets) {
+      const count = counts.get(`${t.workerId}:${t.channelId}`);
+      if (count) {
+        state.aUnread[i] = count.unread;
+        state.aMent[i] = count.unread_mentions;
+        state.aFirst[i] = count.first_unread_seq ?? 0;
+        state.aLast[i] = count.last_relevant_seq ?? 0;
+      }
+    }
+    // Every plaintext channel represented here is now complete.
+    for (const k of new Set(openPlaintextTargets.map(({ t }) => channelIndexOf.get(t.channelId)!))) {
+      state.cDone[k] = true;
+      const list = targets.map((t, i) => ({ t, i })).filter(({ t }) => channelIndexOf.get(t.channelId) === k)
+        .sort((a, b) => a.t.workerId.localeCompare(b.t.workerId));
+      state.pending.push(...list.map(({ i }) => i));
+    }
+  }
+
+  // Encrypted channels: one bounded round-robin step.
+  const channelGeometry = new Map<number, { memoryId: string; locPrefix: string }>();
+  for (let k = 0; k < channelIds.length; k++) {
+    const target = targets.find((t) => t.channelId === channelIds[k]);
+    if (target && encryptedMemoryIds.has(target.memoryId)) {
+      channelGeometry.set(k, { memoryId: target.memoryId, locPrefix: `${target.channelLoc}:messages:` });
+    }
+  }
+  await pagedScanStep(ctx.db, targets, channelIndexOf, channelGeometry, targets.map((t) => t.mentionTokens), state, scanLimit);
+
+  // Emission: deliver completed targets in completion-visit order. The poll
+  // applies v1's relevance rule (lastRelevant > priorHead; priorHead 0 when
+  // this scan started without a since token); the preview accounts for the
+  // full backlog and emits every completed target.
+  const items: TeamAttentionPageItem[] = [];
+  while (items.length < limit && state.pending.length > 0) {
+    const i = state.pending[0];
+    state.pending = state.pending.slice(1);
+    state.emitted[i] = true;
+    const target = targets[i];
+    const key = `${target.workerId}:${target.channelId}:${target.registerId}:${target.mentionOnly}`;
+    const priorHead = priorHeads?.get(key) ?? 0;
+    if (op === 'poll' && state.aLast[i] <= priorHead) continue; // nothing relevant since the watermark
+    items.push({
+      worker: target.workerId,
+      workerName: target.workerName,
+      workerUrn: target.workerUrn,
+      channel: target.channelId,
+      channelName: target.channelName,
+      unread: state.aUnread[i],
+      unreadMentions: state.aMent[i],
+      firstUnreadSeq: state.aFirst[i] || null,
+      lastRelevantSeq: state.aLast[i] || null,
+      lastSeq: frozenHead[i],
+    });
+  }
+
+  const scanComplete = state.cDone.every(Boolean) && state.pending.length === 0;
+  if (scanComplete) {
+    if (op === 'preview') {
+      // The proof starts its short life only now — the final page of a FULL
+      // preview — and binds the frozen from/through heads; messages arriving
+      // after the freeze remain unread.
+      const issuedAt = Date.now();
+      const expiresAt = issuedAt + SWITCHOVER_PROOF_TTL_MS;
+      const proof: SwitchoverProof = {
+        v: 1,
+        kind: 'team-attention-switchover',
+        appId: app.id,
+        userId: ctx.userId!,
+        issuedAt,
+        expiresAt,
+        targets: targets.map((t, i) => ({
+          workerId: t.workerId,
+          channelId: t.channelId,
+          registerId: t.registerId,
+          mentionOnly: t.mentionOnly,
+          from: frozenSeen[i],
+          through: frozenHead[i],
+        })),
+      };
+      return { items, scanComplete: true, nextPage: null, adoptableSince: null, proof: sign(proof), proofExpiresAt: new Date(expiresAt), frozenSeen, frozenHead };
+    }
+    return { items, scanComplete: true, nextPage: null, adoptableSince: sign(snapshot(app.id, ctx.userId!, targets)), proof: null, proofExpiresAt: null, frozenSeen, frozenHead };
+  }
+  const payload = stateToContinuation(op, app.id, ctx.userId!, targets, channelIds, state);
+  payload.t_seen = frozenSeen;
+  payload.t_head = frozenHead;
+  const signed = signPageToken(payload, secret);
+  if ('tooLarge' in signed) {
+    fail(
+      `The scan continuation would not fit the ${MAX_PAGE_TOKEN_CHARS}-character transport ceiling (${signed.actualChars} needed); poll again without page to restart from your committed watermark.`,
+      'TEAM_ATTENTION_PAGE_TOO_LARGE',
+    );
+  }
+  return { items, scanComplete: false, nextPage: signed.token, adoptableSince: null, proof: null, proofExpiresAt: null, frozenSeen, frozenHead };
+}
+
+/** The paged attention poll (#1384 v2). See `runPagedAttention`. */
+export async function teamAttentionPage(
+  ctx: Context,
+  appRef: string,
+  args: { since?: string | null; page?: string | null; limit?: number | null; scanLimit?: number | null },
+): Promise<TeamAttentionPageResult> {
+  const run = await runPagedAttention(ctx, appRef, args, 'poll');
+  return { items: run.items, scanComplete: run.scanComplete, nextPage: run.nextPage, adoptableSince: run.adoptableSince };
+}
+
+/** The paged switchover preview (#1384 v2): same bounded scan and paged
+ * result contract; the short-lived apply proof exists ONLY on the final page
+ * of a fully completed preview. `confirmTeamAttentionSwitchover` (apply) is
+ * unchanged. */
+export async function teamAttentionPreviewPage(
+  ctx: Context,
+  appRef: string,
+  args: { page?: string | null; limit?: number | null; scanLimit?: number | null },
+): Promise<TeamAttentionPreviewPageResult> {
+  const run = await runPagedAttention(ctx, appRef, args, 'preview');
+  return { items: run.items, scanComplete: run.scanComplete, nextPage: run.nextPage, proof: run.proof, expiresAt: run.proofExpiresAt };
+}
+
 function snapshot(appId: string, userId: string, targets: Target[]): AttentionSnapshot {
   const workers = new Map<string, AttentionSnapshot['workers'][number]>();
   for (const t of targets) {
@@ -595,119 +1104,30 @@ function previousHeads(value: AttentionSnapshot | null): Map<string, number> {
 }
 
 export async function getTeamAttention(ctx: Context, appRef: string, since?: string | null): Promise<TeamAttentionResult> {
-  const app = await resolvePilotApp(ctx, appRef);
-  if (since === 'now') {
-    fail('since:"now" is intentionally unavailable: preview and explicitly confirm a switchover instead.', 'SWITCHOVER_CONFIRMATION_REQUIRED');
-  }
-  let prior: AttentionSnapshot | null = null;
-  if (since) {
-    const decoded = verify(since);
-    if (decoded.kind !== 'team-attention') fail('That token is not an attention poll token.', 'INVALID_ATTENTION_TOKEN');
-    if (decoded.appId !== app.id || decoded.userId !== ctx.userId) {
-      fail('That attention token belongs to another operator or App.', 'INVALID_ATTENTION_TOKEN');
-    }
-    if (!Array.isArray(decoded.workers)) fail('Invalid team-attention token.', 'INVALID_ATTENTION_TOKEN');
-    prior = decoded;
-  }
-
-  const targets = await attentionTargets(ctx, app);
-  const heads = previousHeads(prior);
-  for (const target of targets) {
-    const key = `${target.workerId}:${target.channelId}:${target.registerId}:${target.mentionOnly}`;
-    const priorHead = heads.get(key);
-    if (priorHead != null && priorHead > target.head) {
-      fail('A Channel watermark moved behind the supplied token; poll again without since.', 'ATTENTION_TOKEN_STALE');
-    }
-  }
-  const nextSnapshot = snapshot(app.id, ctx.userId!, targets);
-  // The ordinary one-minute idle poll stops at register/read-state metadata:
-  // when every current target was in the prior scope and no Channel head
-  // moved, no relevant message can possibly be newer than the token. Avoid
-  // touching the message table at all. A new Worker/register deliberately
-  // misses this shortcut so its existing unread backlog is considered.
-  if (
-    prior &&
-    targets.every((target) => {
-      const key = `${target.workerId}:${target.channelId}:${target.registerId}:${target.mentionOnly}`;
-      return heads.get(key) === target.head;
-    })
-  ) {
-    return { token: sign(nextSnapshot), workers: [] };
-  }
-
-  const counts = await unreadCounts(ctx.db, targets);
-  const workerRows = new Map<string, TeamAttentionWorker>();
-  for (const target of targets) {
-    const key = `${target.workerId}:${target.channelId}:${target.registerId}:${target.mentionOnly}`;
-    const priorHead = heads.get(key) ?? 0;
-    const count = counts.get(`${target.workerId}:${target.channelId}`);
-    if (!count || count.last_relevant_seq == null || count.last_relevant_seq <= priorHead) continue;
-    let worker = workerRows.get(target.workerId);
-    if (!worker) {
-      worker = {
-        worker: target.workerId,
-        name: target.workerName,
-        urn: target.workerUrn,
-        live: true,
-        channels: [],
-      };
-      workerRows.set(target.workerId, worker);
-    }
-    worker.channels.push({
-      channel: target.channelId,
-      name: target.channelName,
-      unread: count.unread,
-      unreadMentions: count.unread_mentions,
-      firstUnreadSeq: count.first_unread_seq,
-      lastSeq: target.head,
-    });
-  }
-  return { token: sign(nextSnapshot), workers: [...workerRows.values()] };
+  // #1384 v2 retirement: the v1 poll decrypts an encrypted Channel's whole
+  // unread backlog inside one request. It is refused everywhere so no
+  // deployment can expose unbounded work; routers migrate by passing their
+  // existing since token to teamAttentionPage (the watermark carries over).
+  void ctx; void appRef; void since;
+  fail(
+    'Team attention v1 is retired: use the paged teamAttentionPage operation (your existing since token is accepted there).',
+    'UPGRADE_REQUIRED',
+  );
 }
 
 export async function previewTeamAttentionSwitchover(
   ctx: Context,
   appRef: string,
 ): Promise<TeamAttentionSwitchoverPreview> {
-  const app = await resolvePilotApp(ctx, appRef);
-  const targets = await attentionTargets(ctx, app);
-  const counts = await unreadCounts(ctx.db, targets);
-  const issuedAt = Date.now();
-  const expiresAt = issuedAt + SWITCHOVER_PROOF_TTL_MS;
-  const proof: SwitchoverProof = {
-    v: 1,
-    kind: 'team-attention-switchover',
-    appId: app.id,
-    userId: ctx.userId!,
-    issuedAt,
-    expiresAt,
-    targets: targets.map((t) => ({
-      workerId: t.workerId,
-      channelId: t.channelId,
-      registerId: t.registerId,
-      mentionOnly: t.mentionOnly,
-      from: t.seen,
-      through: t.head,
-    })),
-  };
-  const workers = new Map<string, TeamAttentionSwitchoverWorker>();
-  for (const target of targets) {
-    let worker = workers.get(target.workerId);
-    if (!worker) {
-      worker = { worker: target.workerId, name: target.workerName, urn: target.workerUrn, channels: [] };
-      workers.set(target.workerId, worker);
-    }
-    const count = counts.get(`${target.workerId}:${target.channelId}`);
-    worker.channels.push({
-      channel: target.channelId,
-      name: target.channelName,
-      fromSeq: target.seen,
-      throughSeq: target.head,
-      unread: count?.unread ?? 0,
-      unreadMentions: count?.unread_mentions ?? 0,
-    });
-  }
-  return { proof: sign(proof), expiresAt: new Date(expiresAt), workers: [...workers.values()] };
+  // #1384 v2 retirement: the unbounded v1 preview shares the v1 poll's scan.
+  // The paged teamAttentionPreviewPage replaces it; apply
+  // (confirmTeamAttentionSwitchover) is unchanged and honors existing
+  // unexpired proofs to expiry.
+  void ctx; void appRef;
+  fail(
+    'Switchover preview v1 is retired: use the paged teamAttentionPreviewPage operation; the proof it issues on its final page feeds the unchanged apply.',
+    'UPGRADE_REQUIRED',
+  );
 }
 
 function targetIdentity(t: Pick<Target, 'workerId' | 'channelId' | 'registerId' | 'mentionOnly' | 'seen'>): string {

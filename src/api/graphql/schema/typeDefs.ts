@@ -740,6 +740,52 @@ export const typeDefs = `#graphql
     workers: [TeamAttentionSwitchoverWorker!]!
   }
 
+  """
+  #1384 paged (v2): one bounded slice of an attention scan. Counts are exact
+  for the captured (seen, head] range of the issuing scan only, and items are
+  emitted solely from Channels that scan has exhausted.
+  """
+  type TeamAttentionPageItem {
+    worker: ID!
+    workerName: String!
+    workerUrn: String
+    channel: ID!
+    channelName: String!
+    unread: Int!
+    unreadMentions: Int!
+    firstUnreadSeq: Int
+    lastRelevantSeq: Int
+    "The frozen Channel head this item's counts are exact for."
+    lastSeq: Int!
+  }
+
+  type TeamAttentionPage {
+    items: [TeamAttentionPageItem!]!
+    "False while any Channel is unfinished or queued items remain undelivered."
+    scanComplete: Boolean!
+    "Continuation for the next pull; null on the final page."
+    nextPage: String
+    """
+    FINAL PAGE ONLY: a since-watermark token (same shape v1 issued) to adopt
+    after every listed nudge was accepted. Never present while scanComplete
+    is false.
+    """
+    adoptableSince: String
+  }
+
+  type TeamAttentionPreviewPage {
+    items: [TeamAttentionPageItem!]!
+    scanComplete: Boolean!
+    nextPage: String
+    """
+    FINAL PAGE ONLY: the short-lived switchover proof (frozen heads). An
+    incomplete preview never carries one, so a partial preview can never
+    silently discard an unscanned backlog.
+    """
+    proof: String
+    expiresAt: DateTime
+  }
+
   type TeamAttentionSwitchoverResult {
     applied: Boolean!
     workersAdvanced: Int!
@@ -6557,6 +6603,36 @@ export const typeDefs = `#graphql
     duplicate a nudge but cannot silently lose one.
     """
     teamAttention(appRef: ID!, since: String): TeamAttentionResult!
+
+    """
+    #1384 paged (v2) attention poll — the bounded successor to teamAttention
+    (v1 answers UPGRADE_REQUIRED). Each call decrypts at most scanLimit rows
+    and emits at most limit Worker/Channel pairs; continue with page while
+    nextPage is present. The final page alone carries adoptableSince — adopt
+    it only after EVERY listed nudge was accepted; on any partial failure
+    retain the prior watermark and restart the scan (duplicates, never loss).
+    An existing v1 since token starts a scan, carrying the watermark forward.
+    Never changes read state.
+    """
+    teamAttentionPage(
+      appRef: ID!
+      since: String
+      page: String
+      limit: Int
+      scanLimit: Int
+    ): TeamAttentionPage!
+
+    """
+    #1384 paged switchover preview — same bounded scan as teamAttentionPage,
+    full-backlog accounting. The apply proof exists ONLY on the final page of
+    a completed preview; confirmTeamAttentionSwitchover (apply) is unchanged.
+    """
+    teamAttentionPreviewPage(
+      appRef: ID!
+      page: String
+      limit: Int
+      scanLimit: Int
+    ): TeamAttentionPreviewPage!
 
     """
     Preview the explicit baseline switchover for the operator's current live
