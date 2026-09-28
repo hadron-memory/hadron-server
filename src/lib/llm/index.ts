@@ -647,10 +647,10 @@ export async function generateChatRespond(
     };
   } catch (err) {
     if (err instanceof LlmInvocationError) throw err;
-    // The public chat operation must never relay raw provider error bodies;
-    // they can contain request details or credentials on custom endpoints.
+    // Provider errors may echo request headers. Keep the raw error out of
+    // BOTH message and cause: callers and loggers inspect error.cause too.
     throw new LlmInvocationError(
-      `Chat LLM call failed (${provider}/${model}).`, provider, isTransient(err), { cause: err },
+      `Chat LLM call failed (${provider}/${model}).`, provider, isTransient(err),
     );
   }
 }

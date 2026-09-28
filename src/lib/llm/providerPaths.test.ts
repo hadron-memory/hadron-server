@@ -80,6 +80,13 @@ beforeAll(async () => {
       res.end(body.slice(20));
       return;
     }
+    if (path.startsWith('/chat-error/')) {
+      // A hostile endpoint may echo the Authorization header in its error.
+      // The wrapper must not expose it through message OR cause.
+      res.statusCode = 400;
+      res.end(JSON.stringify({ error: { message: `echo ${req.headers.authorization}`, type: 'invalid_request_error' } }));
+      return;
+    }
     if (path.endsWith('/chat/completions')) {
       res.end(JSON.stringify(path.startsWith('/chat-respond/') ? RESPOND_COMPLETION : CHAT_COMPLETION));
       return;
@@ -240,6 +247,18 @@ describe('#1418 — server-owned chat provider invocation', () => {
     await expect(generateChatRespond(resolved('glm', null, `${origin}/v4`), {
       messages: [{ role: 'user', content: 'Hello' }], respondTool,
     })).rejects.toThrow('Chat model did not return exactly one respond call.');
+  });
+
+  it('does not expose a provider-echoed bearer key through the error cause', async () => {
+    const err = await generateChatRespond(resolved('glm', null, `${origin}/chat-error/v4`), {
+      messages: [{ role: 'user', content: 'Hello' }], respondTool,
+    }).catch((e: unknown) => e);
+    expect(captured).toHaveLength(1);
+    expect(captured[0].auth).toBe('Bearer test-key');
+    expect(err).toBeInstanceOf(LlmInvocationError);
+    expect((err as Error).message).toBe('Chat LLM call failed (glm/GLM-5.3).');
+    expect((err as Error & { cause?: unknown }).cause).toBeUndefined();
+    expect(`${String(err)} ${String((err as Error & { cause?: unknown }).cause)} ${(err as Error).stack}`).not.toContain('test-key');
   });
 });
 
