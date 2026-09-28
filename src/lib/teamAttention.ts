@@ -404,14 +404,7 @@ function decryptRoutingEnvelope(candidate: EncryptedCandidateRow): Record<string
  * targets in memory. A page materializes at most PAGE_SIZE rows per active
  * Channel; it never duplicates an encrypted backlog per Worker.
  */
-async function unreadCounts(
-  db: Context['db'],
-  targets: Target[],
-  /** Optional seq window [windowLow, windowHigh] intersecting every target's
-   * span — the paged engine aggregates plaintext channels in bounded windows
-   * so server work, not just row transfer, stays within the request budget. */
-  seqWindow?: { low: number; high: number },
-): Promise<Map<string, CountRow>> {
+async function unreadCounts(db: Context['db'], targets: Target[]): Promise<Map<string, CountRow>> {
   if (targets.length === 0) return new Map();
   const memories = await db.memory.findMany({
     where: { id: { in: [...new Set(targets.map((target) => target.memoryId))] } },
@@ -426,8 +419,7 @@ async function unreadCounts(
     const values = plaintextTargets.map((target) => Prisma.sql`(
       ${target.workerId}, ${target.channelId}, ${target.memoryId},
       ${escapePrismaLikePattern(`${target.channelLoc}:messages:`)},
-      ${seqWindow ? Math.max(target.seen, seqWindow.low) : target.seen},
-      ${seqWindow ? Math.min(target.head, seqWindow.high) : target.head},
+      ${target.seen}, ${target.head},
       ${target.mentionOnly}, ${JSON.stringify(target.mentionTokens)}::jsonb
     )`);
     const rows = await db.$queryRaw<PlaintextCountRow[]>(Prisma.sql`
@@ -668,41 +660,6 @@ async function pagedScanStep(
     const activeChannels = state.cDone.filter((done) => !done).length;
     const share = Math.max(1, Math.floor((budget - spent) / Math.max(1, activeChannels)));
     const take = Math.min(budget - spent, share, ENCRYPTED_MESSAGE_PAGE_SIZE);
-
-    if (!geometry.encrypted) {
-      // Plaintext visit: one bounded seq window through the same aggregate.
-      // The window IS the work bound — the SQL scans at most `take` rows of
-      // the span; counts accumulate exactly across windows.
-      const list = targetsOfChannel.get(k) ?? [];
-      const windowLow = Math.max(state.cCursorSeq[k], state.cMin[k]);
-      const windowHigh = Math.min(windowLow + take, state.cMax[k]);
-      if (windowHigh <= windowLow) {
-        state.cDone[k] = true;
-        list.sort((a, b) => targets[a].workerId.localeCompare(targets[b].workerId));
-        state.pending.push(...list);
-        continue;
-      }
-      const windowed = list.map((ti) => targets[ti]);
-      const counts = await unreadCounts(db, windowed, { low: windowLow, high: windowHigh });
-      for (const ti of list) {
-        const count = counts.get(`${targets[ti].workerId}:${targets[ti].channelId}`);
-        if (count) {
-          state.aUnread[ti] += count.unread;
-          state.aMent[ti] += count.unread_mentions;
-          if (state.aFirst[ti] === 0 && count.first_unread_seq != null) state.aFirst[ti] = count.first_unread_seq;
-          if (count.last_relevant_seq != null && count.last_relevant_seq > state.aLast[ti]) state.aLast[ti] = count.last_relevant_seq;
-        }
-      }
-      spent += take; // charge the window as bounded work
-      state.cCursorSeq[k] = windowHigh;
-      state.cCursorId[k] = ''; // seq-window cursor; no row id for plaintext
-      if (windowHigh >= state.cMax[k]) {
-        state.cDone[k] = true;
-        list.sort((a, b) => targets[a].workerId.localeCompare(targets[b].workerId));
-        state.pending.push(...list);
-      }
-      continue;
-    }
     const rows = await db.$queryRaw<EncryptedCandidateRow[]>(Prisma.sql`
       SELECT n.seq::int AS seq, n.loc, n.data, n.id, n.memory_id
       FROM nodes n
@@ -720,7 +677,14 @@ async function pagedScanStep(
     const list = targetsOfChannel.get(k) ?? [];
     for (const row of rows.slice(0, take)) {
       spent++;
-      const envelope = decryptRoutingEnvelope(row);
+      // One row-limited (seq, id) keyset page serves BOTH classes: Node has
+      // no seq index, so a seq-windowed aggregate would still examine the
+      // whole channel prefix (Codex P1 round 2 on #1428) and duplicate-seq
+      // rows could overflow a window. Plaintext data is already readable —
+      // only encrypted rows pay decryption.
+      const envelope = geometry.encrypted
+        ? decryptRoutingEnvelope(row)
+        : ((row.data && typeof row.data === 'object') ? row.data as Record<string, unknown> : {});
       const mentions = Array.isArray(envelope.mentions)
         ? envelope.mentions.filter((v): v is string => typeof v === 'string')
         : [];
@@ -973,9 +937,7 @@ async function runPagedAttention(
     // still exist undeleted — deletion of the scan frontier is the mutation
     // we CAN detect cheaply; interior edits are the documented residual.
     for (let k = 0; k < channelIds.length; k++) {
-      // Plaintext windows key on seq alone (cursor id ''); only an encrypted
-      // channel's frontier has a row id to re-check.
-      if (state.cDone[k] || state.cCursorSeq[k] < 0 || state.cCursorId[k] === '') continue;
+      if (state.cDone[k] || state.cCursorSeq[k] < 0) continue;
       const frontier = await ctx.db.node.findFirst({
         where: { id: state.cCursorId[k], deletedAt: null },
         select: { id: true },
