@@ -56,6 +56,7 @@ import {
 import { isSessionLive, loadLastEventBySession } from '../../../lib/sessionActivity.js';
 import { findOrCreateAppClassMemory } from './chat-scope.js';
 import { mentionTokenOf } from '../../../lib/mentionToken.js';
+import { extractMentions } from '../../../lib/teamChatMentions.js';
 import { TEAM_CHAT_LOC, TEAM_CHAT_MESSAGES_LOC } from '../../../lib/teamChatLoc.js';
 import { isTeamSpaceRow, teamSpaceAudienceFilter, teamSpaceOwnerFilter } from '../../../lib/auth/teamSpace.js';
 // Spec 049 Phase 4 — the Channel row the team chat became.
@@ -86,24 +87,8 @@ const forbidden = (): GraphQLError =>
     extensions: { code: 'FORBIDDEN' },
   });
 
-/**
- * Extract mention tokens from a message body — the ONE mention format for
- * writer and reader (#939): `@` followed by a mention token
- * (`[A-Za-z0-9][A-Za-z0-9._-]*`, trailing punctuation dropped so "@iris."
- * mentions iris). The `@` must sit at a token boundary, so an email address
- * (`x@example.com`) is NOT a mention (Copilot review on PR #941). Tokens are
- * stored LOWERCASED and without the `@`; matching is case-insensitive on both
- * sides. hadron-client's client-side MENTION_RE retires with the dialect
- * change (see hadron-client#20).
- */
-export function extractMentions(body: string): string[] {
-  const seen = new Set<string>();
-  for (const match of body.matchAll(/(?<=^|[^A-Za-z0-9._-])@([A-Za-z0-9][A-Za-z0-9._-]*)/g)) {
-    const token = match[1].replace(/[^A-Za-z0-9]+$/, '').toLowerCase();
-    if (token) seen.add(token);
-  }
-  return [...seen];
-}
+// Keep the public resolver export for existing callers and tests.
+export { extractMentions };
 
 // The mention token moved to src/lib/mentionToken.ts (PR #978 review): worker
 // casting has to refuse a name whose token is taken, and that resolver must not
