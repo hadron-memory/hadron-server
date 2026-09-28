@@ -490,6 +490,56 @@ describe('family 9 — consolidated review corrections (#3051/#3053/#3054)', () 
   });
 });
 
+describe('family 11 — review #3105', () => {
+  it('firstUnreadSeq is the minimum seq when loc order diverges from seq order (999/1000)', async () => {
+    const memEnc = await getMemoryEncryptionInfo(db, channel.memoryId);
+    for (const [locSuffix, seq] of [['1000', 1000], ['999', 999]] as const) {
+      const enc = encryptNodeFields({ content: null, data: { mentions: [] } }, memEnc);
+      await db.node.create({
+        data: {
+          id: `pad-${locSuffix}`, memoryId: channel.memoryId, loc: `chats:team:messages:${locSuffix}`,
+          name: locSuffix, nodeType: 'chat-message', seq, content: 'pad',
+          data: (enc.data ?? null) as object,
+        },
+      });
+    }
+    await db.channel.update({ where: { id: channel.id }, data: { lastSeq: 1000 } });
+    const drained = await drainPages({});
+    expect(drained.items.filter((i) => i.worker === worker.id)[0]).toMatchObject({ unread: 2, firstUnreadSeq: 999 });
+  });
+
+  it('the 36-char-ID variant of the size fixture also fits (contract boundary)', async () => {
+    const { signPageToken } = await import('./teamAttentionPage.js');
+    const id = () => Array.from({ length: 36 }, () => '0123456789abcdef'[Math.floor(Math.random() * 16)]).join('');
+    const payload = {
+      v: 2 as const, kind: 'team-attention-page' as const, op: 'poll' as const,
+      appId: id(), userId: id(), ts: Date.now(),
+      W: Array.from({ length: 20 }, id), C: Array.from({ length: 200 }, id), R: Array.from({ length: 200 }, id),
+      t_w: Array.from({ length: 200 }, (_v, i) => i % 20),
+      t_c: Array.from({ length: 200 }, (_v, i) => i),
+      t_r: Array.from({ length: 200 }, (_v, i) => i),
+      t_mo: Array.from({ length: 200 }, () => 1),
+      t_seen: Array.from({ length: 200 }, () => 2147483647),
+      t_head: Array.from({ length: 200 }, () => 2147483647),
+      t_prior: Array.from({ length: 200 }, () => 2147483647),
+      c_done: '0'.repeat(50),
+      c_loc: Array.from({ length: 200 }, () => 'x'.repeat(40)),
+      c_min: Array.from({ length: 200 }, () => 0),
+      c_max: Array.from({ length: 200 }, () => 2147483647),
+      u_unread: Array.from({ length: 200 }, () => 2147483647),
+      u_ment: Array.from({ length: 200 }, () => 2147483647),
+      u_first: Array.from({ length: 200 }, () => 2147483647),
+      u_last: Array.from({ length: 200 }, () => 2147483647),
+      e_emitted: '0'.repeat(50),
+      q: Array.from({ length: 200 }, (_v, i) => i),
+      next: 0, dg: 'x'.repeat(32),
+    };
+    const signed = signPageToken(payload, 'size-fixture-secret');
+    expect('tooLarge' in signed).toBe(false);
+    if (!('tooLarge' in signed)) expect(signed.token.length).toBeLessThan(65_536);
+  });
+});
+
 describe('family 10 — Codex #1428 findings', () => {
   it('plaintext channels page under the scan budget instead of one aggregate (P1)', async () => {
     // A plaintext memory + channel + register for the same worker.

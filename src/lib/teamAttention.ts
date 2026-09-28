@@ -694,7 +694,10 @@ async function pagedScanStep(
         const target = targets[ti];
         if (row.seq <= target.seen || row.seq > target.head || envelope.authorWorkerId === target.workerId) continue;
         state.aUnread[ti]++;
-        if (state.aFirst[ti] === 0) state.aFirst[ti] = row.seq;
+        // firstUnreadSeq is the MINIMUM seq, not the first-encountered: loc
+        // order diverges from seq order at padding boundaries (…:999 sorts
+        // after …:1000) and legacy loc shapes can differ too (review #3105).
+        state.aFirst[ti] = state.aFirst[ti] === 0 ? row.seq : Math.min(state.aFirst[ti], row.seq);
         const mentioned = mentionTokensByTarget[ti].some((token) => mentions.includes(token));
         if (mentioned) state.aMent[ti]++;
         if (!target.mentionOnly || mentioned) {
