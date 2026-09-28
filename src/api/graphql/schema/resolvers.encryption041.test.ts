@@ -156,6 +156,159 @@ describe('encryptMemory — passphrase path (spec 041)', () => {
 describe('encryptMemory — locked conversion (#1346)', () => {
   const dataKey = Buffer.alloc(32, 7).toString('base64');
 
+  it('converts pre-existing revision history without changing another memory\'s snapshots', async () => {
+    const other = await db.memory.create({
+      data: {
+        id: generateId(), organizationId: org.id, urn: 'enc41-org:other-history',
+        name: 'other history', class: 'private', userId: stranger.id,
+      },
+    });
+    const historical = await Promise.all([
+      db.nodeRevision.create({
+        data: {
+          id: generateId(), nodeId, memoryId, loc: 'entry-1', name: 'Entry 1',
+          content: 'prior content', abstract: 'prior abstract', data: { secret: 'prior' },
+        },
+      }),
+      db.nodeRevision.create({
+        data: {
+          id: generateId(), nodeId, memoryId: null, loc: 'entry-1', name: 'Entry 1',
+          content: 'legacy content', abstract: 'legacy abstract', data: { secret: 'legacy' },
+        },
+      }),
+      db.nodeRevision.create({
+        data: {
+          id: generateId(), nodeId, memoryId: other.id, loc: 'entry-1', name: 'Entry 1',
+          content: 'foreign content', abstract: 'foreign abstract', data: { secret: 'foreign' },
+        },
+      }),
+    ]);
+
+    await resolvers.Mutation.encryptMemory({}, { memoryId, dataKey }, ownerCtx());
+
+    for (const [revision, content, abstract, data] of [
+      [historical[0]!, 'prior content', 'prior abstract', { secret: 'prior' }],
+      [historical[1]!, 'legacy content', 'legacy abstract', { secret: 'legacy' }],
+    ] as const) {
+      const stored = await db.nodeRevision.findUniqueOrThrow({ where: { id: revision.id } });
+      expect(isCiphertext(stored.content)).toBe(true);
+      expect(isCiphertext(stored.abstract)).toBe(true);
+      expect((stored.data as { __enc?: string })?.__enc).toBeTruthy();
+      const decrypted = decryptNodeFieldsWithKey(stored, parseDataKey(dataKey));
+      expect([decrypted.content, decrypted.abstract, decrypted.data]).toEqual([content, abstract, data]);
+    }
+    const foreign = await db.nodeRevision.findUniqueOrThrow({ where: { id: historical[2]!.id } });
+    expect([foreign.content, foreign.abstract, foreign.data]).toEqual([
+      'foreign content', 'foreign abstract', { secret: 'foreign' },
+    ]);
+    const readable = await resolvers.Query.nodeRevisions({}, { nodeRef: nodeId }, ownerCtx());
+    expect(readable.map((revision) => revision.id).sort()).toEqual(
+      historical.slice(0, 2).map((revision) => revision.id).sort(),
+    );
+    await resolvers.Mutation.restoreNodeRevision(
+      {}, { revisionId: historical[0]!.id }, ownerCtx(),
+    );
+    const restored = await db.node.findUniqueOrThrow({ where: { id: nodeId } });
+    expect(isCiphertext(restored.content)).toBe(true);
+    expect(decryptNodeFieldsWithKey(restored, parseDataKey(dataKey)).content).toBe('prior content');
+  });
+
+  it('pages more than 200 old snapshots and encrypts tombstone history', async () => {
+    const deleted = await db.node.create({
+      data: {
+        id: generateId(), memoryId, loc: 'deleted-history', name: 'deleted history',
+        content: 'deleted live', deletedAt: new Date(),
+      },
+    });
+    const history = Array.from({ length: 205 }, (_, index) => ({
+      id: generateId(), nodeId: index === 204 ? deleted.id : nodeId,
+      memoryId, loc: index === 204 ? 'deleted-history' : 'entry-1',
+      name: 'history', content: `historical ${index}`,
+    }));
+    await db.nodeRevision.createMany({ data: history });
+
+    await resolvers.Mutation.encryptMemory({}, { memoryId, dataKey }, ownerCtx());
+
+    const rows = await db.nodeRevision.findMany({ where: { id: { in: history.map((r) => r.id) } } });
+    expect(rows).toHaveLength(205);
+    expect(rows.every((revision) => isCiphertext(revision.content))).toBe(true);
+    const tombstoneHistory = rows.find((revision) => revision.nodeId === deleted.id)!;
+    expect(decryptNodeFieldsWithKey(tombstoneHistory, parseDataKey(dataKey)).content).toBe('historical 204');
+  });
+
+  it('continues past a pruned page-boundary snapshot', async () => {
+    const history = Array.from({ length: 201 }, (_, index) => ({
+      id: generateId(), nodeId, memoryId, loc: 'entry-1', name: 'history',
+      content: `snapshot ${index}`,
+    }));
+    await db.nodeRevision.createMany({ data: history });
+    const findMany = db.nodeRevision.findMany.bind(db.nodeRevision);
+    let pruned = false;
+    let pages = 0;
+    const scan = vi.spyOn(db.nodeRevision, 'findMany').mockImplementation((async (args: Parameters<typeof findMany>[0]) => {
+      const rows = await findMany(args);
+      if (args?.take === 200) {
+        pages++;
+        if (!pruned && rows.length === 200) {
+          pruned = true;
+          await db.nodeRevision.delete({ where: { id: rows[199]!.id } });
+        }
+      }
+      return rows;
+    }) as never);
+    try {
+      await resolvers.Mutation.encryptMemory({}, { memoryId, dataKey }, ownerCtx());
+    } finally {
+      scan.mockRestore();
+    }
+    expect(pruned).toBe(true);
+    expect(pages).toBeGreaterThanOrEqual(2);
+    const remaining = await db.nodeRevision.findMany({ where: { nodeId } });
+    expect(remaining).toHaveLength(200);
+    expect(remaining.every((revision) => isCiphertext(revision.content))).toBe(true);
+  });
+
+  it('rechecks legacy ownership when a node moves after the revision page read', async () => {
+    const destination = await db.memory.create({
+      data: {
+        id: generateId(), organizationId: org.id, urn: 'enc41-org:moved-history',
+        name: 'moved history', class: 'private', userId: owner.id,
+      },
+    });
+    const legacy = await db.nodeRevision.create({
+      data: {
+        id: generateId(), nodeId, memoryId: null, loc: 'entry-1', name: 'legacy',
+        content: 'destination history',
+      },
+    });
+    const source = await db.nodeRevision.create({
+      data: {
+        id: generateId(), nodeId, memoryId, loc: 'entry-1', name: 'source',
+        content: 'source history',
+      },
+    });
+    const findMany = db.nodeRevision.findMany.bind(db.nodeRevision);
+    let moved = false;
+    const scan = vi.spyOn(db.nodeRevision, 'findMany').mockImplementation((async (args: Parameters<typeof findMany>[0]) => {
+      const rows = await findMany(args);
+      if (!moved && args?.take === 200) {
+        moved = true;
+        await db.node.update({ where: { id: nodeId }, data: { memoryId: destination.id } });
+      }
+      return rows;
+    }) as never);
+    try {
+      await resolvers.Mutation.encryptMemory({}, { memoryId, dataKey }, ownerCtx());
+    } finally {
+      scan.mockRestore();
+    }
+    expect(moved).toBe(true);
+    expect((await db.nodeRevision.findUniqueOrThrow({ where: { id: legacy.id } })).content)
+      .toBe('destination history');
+    expect(isCiphertext((await db.nodeRevision.findUniqueOrThrow({ where: { id: source.id } })).content))
+      .toBe(true);
+  });
+
   it('preserves a raw edit made after the id scan and reconciles its drift before encrypting', async () => {
     const findMany = db.node.findMany.bind(db.node);
     let injected = false;

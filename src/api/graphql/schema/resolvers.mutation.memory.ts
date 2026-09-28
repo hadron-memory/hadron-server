@@ -2324,6 +2324,73 @@ export const memoryMutations = {
           );
         }
       }
+
+      // Historical snapshots belong to the memory where they were captured,
+      // even when their Node has since moved. Legacy NULL-memory snapshots
+      // follow the read gate's current-Node-memory fallback (#602). Page IDs
+      // only, then lock the parent and re-check that fallback before writing:
+      // a move between the page read and conversion must not encrypt history
+      // under the wrong memory key. Sanctioned writes after the flip create
+      // ciphertext snapshots; this pass converts the pre-flip history (#1434).
+      // Encryption stays in the application because the caller's key must
+      // never be passed to PostgreSQL for a bulk UPDATE. Use an id comparison
+      // for paging: a history prune can delete the last row of a page, so a
+      // Prisma cursor on that row would lose the remaining pages.
+      let revisionCursor: string | undefined;
+      for (;;) {
+        const revisions = await ctx.db.nodeRevision.findMany({
+          where: {
+            ...(revisionCursor ? { id: { gt: revisionCursor } } : {}),
+            OR: [
+              { memoryId: resolvedMemoryId },
+              { memoryId: null, node: { memoryId: resolvedMemoryId } },
+            ],
+          },
+          select: { id: true, nodeId: true },
+          orderBy: { id: 'asc' },
+          take: BATCH,
+        });
+        if (revisions.length === 0) break;
+        revisionCursor = revisions[revisions.length - 1].id;
+        for (const candidate of revisions) {
+          await ctx.db.$transaction(async (tx) => {
+            await tx.$queryRaw`SELECT id FROM nodes WHERE id = ${candidate.nodeId} FOR UPDATE`;
+            // A concurrent history prune may delete a page candidate. Lock
+            // the snapshot before reading it so a later delete cannot turn
+            // the selective update into a failed, half-finished conversion.
+            const lockedRevision = await tx.$queryRaw<Array<{ id: string }>>`
+              SELECT id FROM node_revisions WHERE id = ${candidate.id} FOR UPDATE
+            `;
+            if (lockedRevision.length === 0) return;
+            const revision = await tx.nodeRevision.findUnique({ where: { id: candidate.id } });
+            if (!revision) return;
+            if (revision.memoryId !== resolvedMemoryId) {
+              if (revision.memoryId !== null) return;
+              const node = await tx.node.findUnique({
+                where: { id: candidate.nodeId }, select: { memoryId: true },
+              });
+              if (node?.memoryId !== resolvedMemoryId) return;
+            }
+            const plaintextContent = revision.content != null && !isCiphertext(revision.content);
+            const plaintextAbstract = revision.abstract != null && !isCiphertext(revision.abstract);
+            const plaintextData = revision.data != null &&
+              !(typeof revision.data === 'object' && (revision.data as { __enc?: string }).__enc);
+            if (!plaintextContent && !plaintextAbstract && !plaintextData) return;
+            const encrypted = encryptNodeFieldsWithKey(
+              { content: revision.content, abstract: revision.abstract, data: revision.data }, key,
+            );
+            await tx.nodeRevision.update({
+              where: { id: revision.id },
+              data: {
+                content: encrypted.content ?? null,
+                abstract: encrypted.abstract ?? null,
+                data: (encrypted.data ?? null) as InputJsonValue,
+              },
+            });
+          });
+        }
+        if (revisions.length < BATCH) break;
+      }
       return ctx.db.memory.findUniqueOrThrow({ where: { id: resolvedMemoryId } });
     },
 
