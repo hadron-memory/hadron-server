@@ -922,15 +922,30 @@ function workerPortalUrl(urn: string | null | undefined): string | null {
   return urn ? portalUrlForUrn(urn) : null;
 }
 
-/** Build a full urn:node: URN from a loc and memoryId. Caches memory URNs. */
-const memoryUrnCache = new Map<string, string>();
-async function nodeUrn(loc: string, memoryId: string): Promise<string> {
-  let memUrn = memoryUrnCache.get(memoryId);
-  if (!memUrn) {
-    const mem = await db.memory.findUnique({ where: { id: memoryId }, select: { urn: true } });
-    memUrn = mem?.urn ?? memoryId;
-    memoryUrnCache.set(memoryId, memUrn);
-  }
+/** Read the current stored Memory URN; a rename may come through GraphQL or another process. */
+async function loadMemoryUrn(memoryId: string): Promise<string> {
+  const mem = await db.memory.findUnique({ where: { id: memoryId }, select: { urn: true } });
+  return mem?.urn ?? memoryId;
+}
+
+/** Share one Memory lookup only among projections within the same render. */
+function memoizedMemoryUrnLookup(): (memoryId: string) => Promise<string> {
+  const pending = new Map<string, Promise<string>>();
+  return (memoryId) => {
+    let lookup = pending.get(memoryId);
+    if (!lookup) {
+      lookup = loadMemoryUrn(memoryId);
+      pending.set(memoryId, lookup);
+    }
+    return lookup;
+  };
+}
+
+/** Build a full urn:node: URN from a loc and the current Memory URN. */
+async function nodeUrn(
+  loc: string, memoryId: string, memoryUrnOf = loadMemoryUrn,
+): Promise<string> {
+  const memUrn = await memoryUrnOf(memoryId);
   // Grammar-v2 node URN (#697 emission flip). Shared with the global-search
   // node adapter via urnEmit (src/lib/urnEmit.ts) so the two surfaces can't
   // drift on node-URN shape. The SAFE variant is load-bearing here: this is
@@ -947,24 +962,16 @@ async function nodeUrn(loc: string, memoryId: string): Promise<string> {
  * emitted href could point somewhere other than the node being displayed.
  * Edge-neighbour URNs are display-only and use the plain string form.
  */
-async function nodeUrnResult(loc: string, memoryId: string): Promise<SafeUrnEmission> {
-  let memUrn = memoryUrnCache.get(memoryId);
-  if (!memUrn) {
-    const mem = await db.memory.findUnique({ where: { id: memoryId }, select: { urn: true } });
-    memUrn = mem?.urn ?? memoryId;
-    memoryUrnCache.set(memoryId, memUrn);
-  }
+async function nodeUrnResult(
+  loc: string, memoryId: string, memoryUrnOf = loadMemoryUrn,
+): Promise<SafeUrnEmission> {
+  const memUrn = await memoryUrnOf(memoryId);
   return safeNodeUrnV2Result(memUrn, loc);
 }
 
 /** Build a full hrn:edge: URN from an edge loc and its memoryId (spec 037). */
 async function edgeUrn(loc: string, memoryId: string): Promise<string> {
-  let memUrn = memoryUrnCache.get(memoryId);
-  if (!memUrn) {
-    const mem = await db.memory.findUnique({ where: { id: memoryId }, select: { urn: true } });
-    memUrn = mem?.urn ?? memoryId;
-    memoryUrnCache.set(memoryId, memUrn);
-  }
+  const memUrn = await loadMemoryUrn(memoryId);
   return safeEdgeUrnV2(memUrn, loc);
 }
 
@@ -1313,6 +1320,7 @@ async function batchReadableTaskRefs(
   nodes: readonly ReadProjectionNode[],
   reports: ReadonlyMap<string, ReadValidationReport>,
   auth: AuthContext,
+  memoryUrnOf: (memoryId: string) => Promise<string>,
 ): Promise<Map<string, string | null>> {
   const ids = [...new Set([
     ...nodes.map((n) => n.authoredByTask),
@@ -1329,7 +1337,7 @@ async function batchReadableTaskRefs(
   const readable = await filterReadableMemoryIds(db, auth, tasks.map((task) => task.memoryId));
   const refs = await Promise.all(tasks.map(async (task) => [
     task.id,
-    readable.has(task.memoryId) ? await nodeUrn(task.loc, task.memoryId) : null,
+    readable.has(task.memoryId) ? await nodeUrn(task.loc, task.memoryId, memoryUrnOf) : null,
   ] as const));
   return new Map(refs);
 }
@@ -1352,13 +1360,15 @@ async function renderNodeReadProjection(
       taskRefs: ReadonlyMap<string, string | null>;
       humanNames: ReadonlyMap<string, string>;
     };
+    memoryUrnOf?: (memoryId: string) => Promise<string>;
   } = {},
 ): Promise<string> {
   const revision = node.revSeq;
-  const { urn, fellBack: urnFellBack } = await nodeUrnResult(node.loc, node.memoryId);
+  const memoryUrnOf = opts.memoryUrnOf ?? memoizedMemoryUrnLookup();
+  const { urn, fellBack: urnFellBack } = await nodeUrnResult(node.loc, node.memoryId, memoryUrnOf);
   const outgoingLines = await Promise.all(
     node.outgoingEdges.map(async (e) => {
-      const targetUrn = await nodeUrn(e.target.loc, e.target.memoryId);
+      const targetUrn = await nodeUrn(e.target.loc, e.target.memoryId, memoryUrnOf);
       // #322: surface the target's stable PK alongside the URN so callers can
       // reference it by id (immutable across move/rename) instead of the URN.
       return `  - ${targetUrn} (id: ${e.target.id}) (${e.target.name}) — ${e.name ?? e.loc}`;
@@ -1366,7 +1376,7 @@ async function renderNodeReadProjection(
   );
   const incomingLines = await Promise.all(
     node.incomingEdges.map(async (e) => {
-      const sourceUrn = await nodeUrn(e.source.loc, e.source.memoryId);
+      const sourceUrn = await nodeUrn(e.source.loc, e.source.memoryId, memoryUrnOf);
       return `  - ${sourceUrn} (id: ${e.source.id}) (${e.source.name}) — ${e.name ?? e.loc}`;
     }),
   );
@@ -1415,7 +1425,7 @@ async function renderNodeReadProjection(
       where: { id }, select: { loc: true, memoryId: true, deletedAt: true },
     });
     if (!task || task.deletedAt || !(await canReadMemory(db, opts.auth, task.memoryId))) return null;
-    return nodeUrn(task.loc, task.memoryId);
+    return nodeUrn(task.loc, task.memoryId, memoryUrnOf);
   };
   let authorshipLine = '';
   if (node.authorshipKind === 'TASK') {
@@ -3577,6 +3587,7 @@ export function createMcpServerInstance(
         // invalid regex, etc. The MCP contract surfaces tool errors as text.
         return textResult(e instanceof Error ? e.message : 'Search failed.');
       }
+      const memoryUrnOf = memoizedMemoryUrnLookup();
 
       // ── Chunk (passage) rendering ──────────────────────────────────────────
       // findNodes passages carry parentNodeId + parentNodeUrn; re-fetch the
@@ -3594,7 +3605,7 @@ export function createMcpServerInstance(
         const lines: string[] = [];
         for (const p of passages) {
           const parent = parentById.get(p.parentNodeId);
-          const urn = parent ? await nodeUrn(parent.loc, parent.memoryId) : p.parentNodeUrn;
+          const urn = parent ? await nodeUrn(parent.loc, parent.memoryId, memoryUrnOf) : p.parentNodeUrn;
           const name = parent?.name ?? '';
           // Guard the score like renderHit does — a passage without a numeric
           // score renders without the trailing marker rather than crashing.
@@ -3666,7 +3677,6 @@ export function createMcpServerInstance(
       // Reduce, not Math.max(...scores): `limit` is caller-controlled, so a huge
       // page would spread too many args into Math.max and throw RangeError.
       const topScore = scores.length ? scores.reduce((m, s) => (s > m ? s : m), -Infinity) : null;
-
       const renderHit = async (hit: {
         node: {
           id: string;
@@ -3687,7 +3697,7 @@ export function createMcpServerInstance(
         score: number | null;
       }): Promise<string> => {
         const n = hit.node;
-        const { urn, fellBack: urnFellBack } = await nodeUrnResult(n.loc, n.memoryId);
+        const { urn, fellBack: urnFellBack } = await nodeUrnResult(n.loc, n.memoryId, memoryUrnOf);
         const score = hit.score;
         // #497: show the score relative to the top hit (mode-independent signal).
         const relStr =
@@ -3735,7 +3745,7 @@ export function createMcpServerInstance(
           if (edges.length) {
             const edgeStrs = await Promise.all(
               edges.map(async (e) => {
-                const targetUrn = await nodeUrn(e.target!.loc, e.target!.memoryId);
+                const targetUrn = await nodeUrn(e.target!.loc, e.target!.memoryId, memoryUrnOf);
                 return `→ ${targetUrn} (${e.name ?? e.loc})`;
               }),
             );
@@ -4324,14 +4334,15 @@ export function createMcpServerInstance(
       // each report is judged against the revision the batch will actually
       // render, and gate each distinct task memory before exposing its URN.
       const reports = await batchValidationReports(visible);
+      const memoryUrnOf = memoizedMemoryUrnLookup();
       const [taskRefs, humanNames] = await Promise.all([
-        batchReadableTaskRefs(visible, reports, auth),
+        batchReadableTaskRefs(visible, reports, auth, memoryUrnOf),
         batchHumanNames(visible),
       ]);
       const batchProvenance = { reports, taskRefs, humanNames };
       for (const n of visible) {
         if (truncated) {
-          omitted.push(await nodeUrn(n.loc, n.memoryId));
+          omitted.push(await nodeUrn(n.loc, n.memoryId, memoryUrnOf));
           continue;
         }
         const lockState = mcpDecryptOrMark(n); // spec 041 — same posture as hadron_get_node
@@ -4339,6 +4350,7 @@ export function createMcpServerInstance(
           locked: lockState === 'locked',
           auth,
           batch: batchProvenance,
+          memoryUrnOf,
         });
         // Measured on the ANNOTATED block, which is what actually ships: sizing
         // the bare projection and pushing the annotated one lets a block cross
@@ -4348,7 +4360,7 @@ export function createMcpServerInstance(
         const size = Buffer.byteLength(block, 'utf8');
         if (blocks.length > 0 && bytes + size > BATCH_READ_MAX_BYTES) {
           truncated = true;
-          omitted.push(await nodeUrn(n.loc, n.memoryId));
+          omitted.push(await nodeUrn(n.loc, n.memoryId, memoryUrnOf));
           continue;
         }
         blocks.push(block);
@@ -4482,9 +4494,10 @@ export function createMcpServerInstance(
       // its own projection, so it records here.
       recordNodeRead(db, { id: node.id, loc: node.loc, memoryId: node.memoryId }, auth);
 
-      const { urn, fellBack: urnFellBack } = await nodeUrnResult(node.loc, node.memoryId);
+      const memoryUrnOf = memoizedMemoryUrnLookup();
+      const { urn, fellBack: urnFellBack } = await nodeUrnResult(node.loc, node.memoryId, memoryUrnOf);
       const outEdgeLines = await Promise.all(node.outgoingEdges.map(async (e) => {
-        const targetUrn = await nodeUrn(e.target.loc, (e.target as any).memoryId);
+        const targetUrn = await nodeUrn(e.target.loc, (e.target as any).memoryId, memoryUrnOf);
         // #322: surface the target's stable PK alongside the URN.
         return `  - ${targetUrn} (id: ${e.target.id}) (${e.target.name}) — ${e.name ?? e.loc}`;
       }));
@@ -4745,6 +4758,7 @@ export function createMcpServerInstance(
         return compareLocs(a.loc, b.loc);
       });
 
+      const memoryUrnOf = memoizedMemoryUrnLookup();
       const lines = await Promise.all(sortedRows.map(async (row) => {
         const indent = '  '.repeat(row.depth - 1);
         // Direct-child count uses the full node set (not just visible
@@ -4758,7 +4772,7 @@ export function createMcpServerInstance(
           c.loc.split(':').length === rowSegCount + 1,
         ).length;
         const childInfo = childCount > 0 ? ` (${childCount} children)` : '';
-        const nUrn = await nodeUrn(row.loc, row.memoryId);
+        const nUrn = await nodeUrn(row.loc, row.memoryId, memoryUrnOf);
         if (row.node) {
           return `${indent}├── ${nUrn} — ${row.node.name}${childInfo}`;
         }
@@ -6264,9 +6278,10 @@ export function createMcpServerInstance(
         );
 
         // Render a compact, URN-addressed summary.
+        const memoryUrnOf = memoizedMemoryUrnLookup();
         const lines = await Promise.all(
           result.results.map(async (r: { loc: string; memoryId: string; replacements: number; fields: Array<{ field: string; matches: number }> }) => {
-            const urn = await nodeUrn(r.loc, r.memoryId);
+            const urn = await nodeUrn(r.loc, r.memoryId, memoryUrnOf);
             const breakdown = r.fields.map((f) => `${f.field}×${f.matches}`).join(', ');
             return `  - ${urn} (${r.replacements}: ${breakdown})`;
           }),
@@ -7063,16 +7078,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       return pending;
     };
     const rendered = await renderRunNodeBundle(node, args, {
-      memoryUrnOf: async (memoryId) => {
-        // Reuse the tool surface's own memoized memory-urn lookup.
-        let memUrn = memoryUrnCache.get(memoryId);
-        if (!memUrn) {
-          const mem = await db.memory.findUnique({ where: { id: memoryId }, select: { urn: true } });
-          memUrn = mem?.urn ?? memoryId;
-          memoryUrnCache.set(memoryId, memUrn);
-        }
-        return memUrn;
-      },
+      memoryUrnOf: memoizedMemoryUrnLookup(),
       // The run node's OWN memory was gated by loadNodeForRun; this gates each
       // dependency separately, because an edge can cross memories (#781).
       includeTarget: (target) => canRead(target.memoryId),
@@ -9677,8 +9683,9 @@ function ageOf(at: Date, now: Date = new Date()): string {
       // findings typed.
       const report = await validateMemoryNodes(db, memory.id);
       const issues: string[] = [];
+      const memoryUrnOf = memoizedMemoryUrnLookup();
       for (const f of report.findings) {
-        issues.push(formatFindingLine(f, await nodeUrn(f.nodeLoc, memory.id)));
+        issues.push(formatFindingLine(f, await nodeUrn(f.nodeLoc, memory.id, memoryUrnOf)));
       }
       // A skipped check is stated rather than silently omitted — a clean bill
       // of health that quietly skipped a check is worse than no report.
