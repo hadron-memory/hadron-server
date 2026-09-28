@@ -289,7 +289,7 @@ describe('family 4 — drift and key loss', () => {
     expect(first.scanComplete).toBe(false);
     // Delete the frontier row the continuation points at.
     const decoded = JSON.parse(Buffer.from(first.nextPage!.split('.')[0], 'base64url').toString('utf-8'));
-    const frontierLoc = decoded.c_loc[0];
+    const frontierLoc = `chats:team:messages:${decoded.c_num[0]}`;
     await db.node.updateMany({ where: { memoryId: memory.id, loc: frontierLoc }, data: { deletedAt: new Date() } });
     await expect(teamAttentionPage(userCtx(), app.id, { page: first.nextPage })).rejects.toMatchObject({
       extensions: { code: 'TEAM_ATTENTION_STALE_PAGE' },
@@ -472,7 +472,7 @@ describe('family 9 — consolidated review corrections (#3051/#3053/#3054)', () 
       t_head: Array.from({ length: 200 }, () => 2147483647),
       t_prior: Array.from({ length: 200 }, () => 2147483647),
       c_done: '0'.repeat(50),
-      c_loc: Array.from({ length: 200 }, () => 'x'.repeat(40)),
+      c_num: Array.from({ length: 200 }, () => '2147483647'),
       c_inc: Array.from({ length: 200 }, () => 2147483647),
       c_min: Array.from({ length: 200 }, () => 0),
       c_max: Array.from({ length: 200 }, () => 2147483647),
@@ -488,6 +488,42 @@ describe('family 9 — consolidated review corrections (#3051/#3053/#3054)', () 
     const signed = signPageToken(payload, 'size-fixture-secret');
     expect('tooLarge' in signed).toBe(false);
     if (!('tooLarge' in signed)) expect(signed.token.length).toBeLessThan(65_536);
+  });
+});
+
+describe('family 13 — #3123 long-loc liveness', () => {
+  it('a 200-target scan with 60-char loc atoms completes within the token ceiling', async () => {
+    // Channel with a long address: two 60-char atoms.
+    const longLoc = 'chats:' + 'x'.repeat(60) + ':' + 'y'.repeat(60);
+    const longMemory = await db.memory.create({
+      data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:long`, name: 'long', class: 'knowledge', visibility: 'ORGANIZATION', isEncrypted: true },
+    });
+    sessionKeyCache.set('paged-long', longMemory.id, generateDataKey());
+    const madeLong = await ensureChannelWithRoot(db, { memoryId: longMemory.id, loc: longLoc, name: 'long-team', createdBy: user.id });
+    await db.registerEntry.create({
+      data: { id: generateId(), appId: app.id, channelId: madeLong.channel.id, attendeeWorkerId: worker.id, role: 'BOTH' },
+    });
+    const encL = await getMemoryEncryptionInfo(db, longMemory.id);
+    for (let i = 0; i < 3; i++) {
+      await appendChatMessage(db, { id: madeLong.rootId, memoryId: longMemory.id, loc: longLoc }, encL,
+        async ({ tx, seq, msgNum }) => tx.node.create({
+          data: { id: generateId(), memoryId: longMemory.id, loc: `${longLoc}:messages:${msgNum}`, name: msgNum, nodeType: 'chat-message', seq, content: `long ${i}`, data: { mentions: [] } },
+        }), { asChannel: true });
+    }
+    // The original channel also present; the scan must page through both and
+    // produce continuations whose SUFFIX cursors keep the token small.
+    for (let i = 0; i < 3; i++) await post(`orig ${i}`);
+    let page: string | null = null;
+    let pages = 0;
+    let completed = false;
+    do {
+      const r = await teamAttentionPage(userCtx(), app.id, { page, scanLimit: 2 });
+      pages++;
+      if (r.scanComplete) { completed = true; break; }
+      page = r.nextPage;
+      if (page && page.length > 65_536) throw new Error(`continuation exceeded ceiling: ${page.length}`);
+    } while (page && pages < 30);
+    expect(completed).toBe(true);
   });
 });
 
@@ -552,7 +588,7 @@ describe('family 11 — review #3105', () => {
       t_head: Array.from({ length: 200 }, () => 2147483647),
       t_prior: Array.from({ length: 200 }, () => 2147483647),
       c_done: '0'.repeat(50),
-      c_loc: Array.from({ length: 200 }, () => 'x'.repeat(40)),
+      c_num: Array.from({ length: 200 }, () => '2147483647'),
       c_inc: Array.from({ length: 200 }, () => 2147483647),
       c_min: Array.from({ length: 200 }, () => 0),
       c_max: Array.from({ length: 200 }, () => 2147483647),

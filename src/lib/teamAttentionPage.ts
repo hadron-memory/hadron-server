@@ -79,11 +79,15 @@ export interface PageContinuation {
   /** Per-channel scan state, parallel arrays by channel index. `c_done` is a
    * hex bitset (channel index → bit), sized to the channel dictionary. */
   c_done: string;
-  /** Keyset cursor: the last consumed row's loc — unique per memory, so it is
-   * a total order the existing (memoryId, loc) index serves; '' = not
-   * started. (A seq-ordered cursor interleaves foreign channels of the same
-   * memory and cannot bound the walk — Codex round 4 on #1428.) */
-  c_loc: string[];
+  /** Keyset cursor: the last consumed row's loc SUFFIX — the part after the
+   * channel's `{loc}:messages:` prefix, which rehydration reconstructs from
+   * live geometry. Storing the suffix (typically 1-7 chars) instead of the
+   * full loc keeps the 200-target continuation within the transport ceiling
+   * when channels carry long addresses (#3123 liveness blocker). '' = not
+   * started. The reconstructed full loc drives the `loc > cursor` keyset —
+   * loc order is unique per memory, so the walk stays bounded by the
+   * existing (memoryId, loc) index. */
+  c_num: string[];
   /** Channel.incarnation at freeze, per channel index — compared on EVERY
    * resume (unstarted and done channels included). A same-address
    * deleteChannel + ensureChannelWithRoot reuses the Channel/register IDs and

@@ -589,7 +589,7 @@ export interface PagedScanState {
    * memory, so (memoryId, loc > cursor) is a bounded prefix-range walk on the
    * existing (memoryId, loc) index — every row in the range belongs to this
    * channel. */
-  cCursorLoc: string[];
+  cCursorNum: string[];
   /** Channel index → frozen incarnation, compared on every resume (#3111). */
   cInc: number[];
   cDone: boolean[];
@@ -683,7 +683,7 @@ async function pagedScanStep(
         AND n.deleted_at IS NULL
         AND n.seq > ${state.cMin[k]}
         AND n.seq <= ${state.cMax[k]}
-        AND n.loc > ${state.cCursorLoc[k]}
+        AND n.loc > ${geometry.locPrefix + state.cCursorNum[k]}
       ORDER BY n.loc
       LIMIT ${take + 1}
     `);
@@ -716,7 +716,7 @@ async function pagedScanStep(
           state.aLast[ti] = Math.max(state.aLast[ti], row.seq);
         }
       }
-      state.cCursorLoc[k] = row.loc;
+      state.cCursorNum[k] = row.loc.slice(geometry.locPrefix.length);
     }
 
     // Done ONLY when the frontier probe says no next row exists; the LIMIT+1
@@ -803,7 +803,7 @@ function stateToContinuation(
     t_head: targets.map((t) => t.head),
     t_prior: priorFloors,
     c_done: channelIds.reduce((m, _id, k) => (state.cDone[k] ? maskSet(m, k) : m), maskEmpty()),
-    c_loc: state.cCursorLoc,
+    c_num: state.cCursorNum,
     c_inc: channelIncarnations,
     c_min: state.cMin,
     c_max: state.cMax,
@@ -825,7 +825,7 @@ function continuationToState(page: PageContinuation): PagedScanState {
   const state: PagedScanState = {
     cMin: page.c_min,
     cMax: page.c_max,
-    cCursorLoc: page.c_loc,
+    cCursorNum: page.c_num,
     cInc: page.c_inc,
     cDone: Array.from({ length: channelCount }, (_v, k) => maskGet(page.c_done, k)),
     aUnread: page.u_unread,
@@ -972,10 +972,11 @@ async function runPagedAttention(
     // still exist undeleted — deletion of the scan frontier is the mutation
     // we CAN detect cheaply; interior edits are the documented residual.
     for (let k = 0; k < channelIds.length; k++) {
-      if (state.cDone[k] || state.cCursorLoc[k] === '') continue;
+      if (state.cDone[k] || state.cCursorNum[k] === '') continue;
       const target = targets.find((t) => t.channelId === channelIds[k]);
+      const frontierLoc = `${target?.channelLoc ?? ''}:messages:${state.cCursorNum[k]}`;
       const frontier = await ctx.db.node.findFirst({
-        where: { memoryId: target?.memoryId, loc: state.cCursorLoc[k], deletedAt: null },
+        where: { memoryId: target?.memoryId, loc: frontierLoc, deletedAt: null },
         select: { id: true },
       });
       if (!frontier) {
@@ -1024,7 +1025,7 @@ async function runPagedAttention(
     state = {
       cMin: channelIds.map((id) => Math.min(...targets.filter((t) => t.channelId === id).map((t) => t.seen))),
       cMax: channelIds.map((id) => Math.max(...targets.filter((t) => t.channelId === id).map((t) => t.head))),
-      cCursorLoc: channelIds.map(() => ''),
+      cCursorNum: channelIds.map(() => ''),
       cInc: channelIds.map((id) => liveIncarnations.get(id) ?? 0),
       cDone: channelIds.map(() => false),
       aUnread: targets.map(() => 0),
