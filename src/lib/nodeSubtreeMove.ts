@@ -57,8 +57,11 @@ import { deriveEdgeLoc } from './edgeLoc.js';
 import { lockAncestorsForCreate, lockNodeForDelete } from './nodeSubtreeLock.js';
 import type { Prisma } from '../generated/prisma/index.js';
 import { normalizeObjectType } from './enforceNodeSchema.js';
+import { recordUrnRename } from './urnAlias.js';
+import { safeNodeUrnV2 } from './urnEmit.js';
 import { validateNodeAgainstSchema, NodeSchemaViolation } from './validateNodeAgainstSchema.js';
 import type { MemorySchema } from './memorySchema.js';
+import { clearNodeAuthorship } from './nodeAuthorship.js';
 import {
   buildNodeRevisionSnapshot,
   createNodeRevision,
@@ -381,6 +384,40 @@ export async function moveNodeSubtree(
     }
   }
 
+  // cor:urn:030:01 — each moved row leaves a published address behind, even
+  // when its parent memory's stored URN never changes. Record every predecessor
+  // in this SAME transaction as the two-phase rebase. The shared alias helper
+  // normalizes and deduplicates repeat moves; the node-ref resolver applies
+  // live-address precedence and current-target liveness on lookup.
+  // Memory rename takes FOR UPDATE before it reads/replaces `urn`.
+  // Lock then read here too: a rename cannot publish a new source prefix
+  // between our alias-key read and the move's commit. Lock both memories in
+  // ID order so opposing cross-memory moves take these rows consistently.
+  // NO KEY UPDATE still conflicts with rename's FOR UPDATE, while allowing
+  // other connections' FK KEY SHARE checks on this memory during the move
+  // (findings:memory-row-for-update-deadlocks-node-inserts).
+  const memoryUrns = new Map<string, string>();
+  for (const id of [...new Set([srcMemoryId, destMemoryId])].sort()) {
+    const [row] = await tx.$queryRaw<{ urn: string }[]>`
+      SELECT urn FROM memories WHERE id = ${id} FOR NO KEY UPDATE
+    `;
+    if (!row) throw new Error(`Move memory ${id} disappeared while locking; retry.`);
+    memoryUrns.set(id, row.urn);
+  }
+  const sourceMemoryUrn = memoryUrns.get(srcMemoryId)!;
+  const targetMemoryUrn = memoryUrns.get(destMemoryId)!;
+  const aliasKey = (memoryUrn: string, loc: string) =>
+    safeNodeUrnV2(memoryUrn, loc).slice('hrn:node:'.length);
+  for (const n of subtree) {
+    await recordUrnRename(tx, {
+      entityType: 'NODE',
+      entityId: n.id,
+      oldUrn: aliasKey(sourceMemoryUrn, n.loc),
+      newUrn: aliasKey(targetMemoryUrn, newLocById.get(n.id)!),
+      createdBy: editor.userId ?? editor.info ?? null,
+    });
+  }
+
   // Move every node in two phases so per-row updates never trip the
   // (loc, memoryId) unique mid-transaction — a same-memory rebase can overlap
   // the source subtree (moving `a:b` → `a` sends grandchild `a:b:b` onto the
@@ -411,7 +448,11 @@ export async function moveNodeSubtree(
     );
     await tx.node.update({
       where: { id: n.id },
-      data: { ...changed, revisionContentHash: revisionStateHashRefreshMarker() },
+      data: {
+        ...changed,
+        ...(rename && n.name !== leaf ? clearNodeAuthorship() : {}),
+        revisionContentHash: revisionStateHashRefreshMarker(),
+      },
     });
   }
 

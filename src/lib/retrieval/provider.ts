@@ -37,6 +37,8 @@ export interface NodeSqlFilter {
   /** #725 — collection discriminator facet (which domain object; e.g. "competitor"). */
   objectType?: string | null;
   isRunnable?: boolean | null;
+  /** #1322 — exact role or a dotted descendant on a segment boundary. */
+  role?: string | null;
   tags?: string[] | null;
   locPrefix?: string | null;
   createdBy?: string | null;
@@ -116,6 +118,14 @@ export interface VectorSearchOpts {
   queryEmbedding: number[];
   memoryIds: string[];
   limit: number;
+  /**
+   * #1345 — called once per search with whether the provider's RAW candidate
+   * window was exhausted (the index has nothing deeper). A caller that widens a
+   * filtered window stops on this, not on a short result, which dedup can
+   * produce without exhaustion. A provider that never calls it is treated as
+   * not exhausted.
+   */
+  onWindow?: (w: { exhausted: boolean }) => void;
 }
 
 export interface NodeRetrievalProvider {

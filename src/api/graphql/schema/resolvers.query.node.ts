@@ -30,6 +30,7 @@ import type { LexicalField, BrowseSort, NodeSqlFilter } from '../../../lib/retri
 import { expandWithNeighbors } from '../../../lib/search.js';
 import { decryptNodesBatch } from '../../../lib/nodeCrypto.js';
 import { sortSiblings } from '../../../lib/siblingOrder.js';
+import { escapePrismaLikePattern } from '../../../lib/literalLocPrefix.js';
 import {
   parseUrnInput,
   validateUrnType,
@@ -45,8 +46,9 @@ import { resolveWorkerRef } from '../../../lib/entityRef/workerRef.js';
 import { requireWorkerReadAccess } from './resolvers.worker.js';
 import { resolveNodeRevRef } from '../../../lib/entityRef/nodeRevRef.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
-import { resolveNodeRef } from '../../../lib/entityRef/nodeRef.js';
-import { NodeNotFoundError } from '../../../lib/entityRef/errors.js';
+import { MemoryNotFoundError } from '../../../lib/asset/gate.js';
+import { resolveNodeRefForCaller } from './resolvers.nodeRefAccess.js';
+import { AmbiguousLegacyUrnError, NodeNotFoundError } from '../../../lib/entityRef/errors.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
 import { resolveUserRef } from '../../../lib/entityRef/userRef.js';
 import { isId } from '../../../lib/entityRef/shape.js';
@@ -69,8 +71,9 @@ import {
   memoryAccessFilter,
   isMemoryReadableCached,
   loadMemoryUrn,
+  STORED_NODE_CONTENT,
 } from './resolvers.helpers.js';
-import { getAppMemoryAccess, canReadMemory, getMemoryAccess } from '../../../mcp/access-control.js';
+import { getAppMemoryAccess, filterReadableMemoryIds } from '../../../mcp/access-control.js';
 import { type AuthContext } from '../../../middleware/auth.js';
 import { getMemberOrgIds } from '../../../lib/auth/memberOrgIds.js';
 import {
@@ -93,6 +96,7 @@ export interface FindNodesArgs {
     objectType?: string | null;
     tags?: string[] | null;
     isRunnable?: boolean | null;
+    role?: string | null;
     locPrefix?: string | null;
     createdBy?: string | null;
     updatedAfter?: string | null;
@@ -142,7 +146,7 @@ export const nodeQueries = {
       // become an existence oracle.
       let parentId: string;
       try {
-        ({ id: parentId } = await resolveNodeRef(ctx.db, parentRef));
+        ({ id: parentId } = await resolveNodeRefForCaller(ctx, parentRef));
       } catch (e) {
         if (e instanceof NodeNotFoundError) return null;
         throw e;
@@ -184,7 +188,7 @@ export const nodeQueries = {
       } else {
         let currentId: string;
         try {
-          ({ id: currentId } = await resolveNodeRef(ctx.db, currentRef));
+          ({ id: currentId } = await resolveNodeRefForCaller(ctx, currentRef));
         } catch (e) {
           // Same posture as the parent: miss → null, malformed → throw.
           if (e instanceof NodeNotFoundError) return null;
@@ -235,7 +239,7 @@ export const nodeQueries = {
     ) => {
       let nodeId: string;
       try {
-        ({ id: nodeId } = await resolveNodeRef(ctx.db, nodeRef));
+        ({ id: nodeId } = await resolveNodeRefForCaller(ctx, nodeRef));
       } catch (e) {
         // Genuine miss → NOT_FOUND; a malformed ref propagates as itself.
         if (e instanceof NodeNotFoundError) {
@@ -418,8 +422,9 @@ export const nodeQueries = {
         case 'node': {
           let id: string;
           try {
-            ({ id } = await resolveNodeRef(ctx.db, baseUrn));
-          } catch {
+            ({ id } = await resolveNodeRefForCaller(ctx, baseUrn));
+          } catch (error) {
+            if (error instanceof AmbiguousLegacyUrnError) throw error;
             return null;
           }
           const node = await ctx.db.node.findUnique({
@@ -668,7 +673,8 @@ export const nodeQueries = {
             node.content, node.data as Record<string, unknown> | null, node.memoryId, ctx.db, access,
           );
           recordNodeRead(ctx.db, toUsageNodeRef(node), ctx);
-          return { ...node, content: compiled };
+          // Keep the stored template for parent-verifying field resolvers.
+          return { ...node, content: compiled, [STORED_NODE_CONTENT]: node.content };
         }
         recordNodeRead(ctx.db, toUsageNodeRef(node), ctx);
         return node;
@@ -686,30 +692,40 @@ export const nodeQueries = {
       const typeErr = validateUrnType(parsed, 'node');
       if (typeErr) throw new Error(typeErr);
       const value = parsed.value;
+      const movedUrnRead = async () => {
+        let id: string;
+        try {
+          ({ id } = await resolveNodeRefForCaller(ctx, ref));
+        } catch (e) {
+          if (e instanceof NodeNotFoundError) return null;
+          throw e;
+        }
+        const selected = await ctx.db.node.findUnique({ where: { id }, include });
+        return selected && !selected.deletedAt && allowed(selected.memoryId)
+          ? finish(selected)
+          : null;
+      };
 
       // Form 2: explicit `hrn:node:` URN — strict resolution, no loc
       // fallback (resolveNodeRef enforces the fully-qualified shape; a
       // malformed input propagates as UrnNotQualifiedError rather than
       // masking as not-found).
       if (parsed.type === 'node') {
-        let id: string;
-        try {
-          ({ id } = await resolveNodeRef(ctx.db, ref));
-        } catch (e) {
-          if (e instanceof NodeNotFoundError) return null;
-          throw e;
-        }
-        const node = await ctx.db.node.findUnique({ where: { id }, include });
-        if (!node || node.deletedAt || !allowed(node.memoryId)) return null;
-        return finish(node);
+        return movedUrnRead();
       }
 
       // Form 3a: bare loc pinned by `memory:` (ID or URN per
       // 007-entity-id-or-urn). #335: scoping pins the lookup; the access
       // filter is still intersected so `memory` can never widen visibility.
       if (memoryRef != null && memoryRef !== '') {
+        // #1316: a missing `memory:` throws MEMORY_NOT_FOUND, so an unreadable
+        // one must too — the bare null it used to return disclosed that the
+        // memory exists. (The loc inside a READABLE memory still answers null
+        // when absent: that caller may already see the memory.) `allowed` is
+        // the node-content gate this resolver already computed, so the
+        // concealment costs no second authorization round (@copilot, #1350).
         const { id: scopedMemoryId } = await resolveMemoryRef(ctx.db, memoryRef);
-        if (!allowed(scopedMemoryId)) return null;
+        if (!allowed(scopedMemoryId)) throw new MemoryNotFoundError(memoryRef);
         const node = await ctx.db.node.findFirst({
           where: { loc: value, memoryId: scopedMemoryId, deletedAt: null },
           include,
@@ -736,13 +752,20 @@ export const nodeQueries = {
           select: { id: true },
         });
         if (memory) {
-          if (!allowed(memory.id)) return null;
-          const node = await ctx.db.node.findFirst({
-            where: { loc: urnLoc, memoryId: memory.id, deletedAt: null },
-            include,
-          });
-          return node ? finish(node) : null;
+          if (allowed(memory.id)) {
+            const node = await ctx.db.node.findFirst({
+              where: { loc: urnLoc, memoryId: memory.id, deletedAt: null },
+              include,
+            });
+            if (node) return finish(node);
+          }
+          // The memory may be unreadable now while its former node moved to
+          // one the caller CAN read. resolveNodeRef still checks the live old
+          // address first, so a new occupant cannot be shadowed by an alias.
+          return movedUrnRead();
         }
+        const moved = await movedUrnRead();
+        if (moved) return moved;
       }
 
       // Form 3c: bare loc across EVERY readable memory. #391: exclude
@@ -832,6 +855,7 @@ export const nodeQueries = {
           loc: node.loc,
           name: node.name,
           nodeType: node.nodeType,
+          objectType: node.objectType,
           alias: node.alias,
           description: node.description,
           abstract: node.abstract,
@@ -839,6 +863,8 @@ export const nodeQueries = {
           content: node.content,
           tags: deserializeTags(node.tags) as string[],
           seq: node.seq,
+          role: node.role,
+          isRunnable: node.isRunnable,
           data: node.data,
           properties: node.properties,
           edges: node.outgoingEdges as unknown as EdgeForGit[],
@@ -1026,6 +1052,14 @@ export const nodeQueries = {
         ...(f.nodeType ? { nodeType: f.nodeType } : { nodeType: { not: 'system' } }),
         ...(f.objectType ? { objectType: f.objectType } : {}),
         ...(f.isRunnable != null ? { isRunnable: f.isRunnable } : {}),
+        ...(f.role != null
+          ? {
+              OR: [
+                { role: f.role },
+                { role: { startsWith: escapePrismaLikePattern(`${f.role}.`) } },
+              ],
+            }
+          : {}),
         ...(f.tags?.length ? tagsFilter(f.tags) : {}),
         ...(f.locPrefix ? { loc: { startsWith: f.locPrefix } } : {}),
         ...(f.createdBy ? { createdBy: f.createdBy } : {}),
@@ -1051,6 +1085,7 @@ export const nodeQueries = {
         nodeType: f.nodeType ?? null,
         objectType: f.objectType ?? null,
         isRunnable: f.isRunnable ?? null,
+        role: f.role ?? null,
         tags: f.tags ?? null,
         locPrefix: f.locPrefix ?? null,
         createdBy: f.createdBy ?? null,
@@ -1089,8 +1124,11 @@ export const nodeQueries = {
           // re-scoping here means a concurrent cross-memory move (cf. #409) can
           // never surface an out-of-scope node — cross-tenant reads are the
           // first-class invariant, not a cosmetic one.
+          // #1345 review (@copilot): the structured filters too, not only scope,
+          // so a node that stopped matching (e.g. its role changed) between the
+          // SQL filter and this read is not returned against the filter.
           const rows = await ctx.db.node.findMany({
-            where: { id: { in: ids }, memoryId: { in: scopeIds } },
+            where: { id: { in: ids }, memoryId: { in: scopeIds }, ...structuredWhere },
             include: nodeInclude,
           });
           await decryptNodesBatch(ctx.db, rows);
@@ -1130,11 +1168,61 @@ export const nodeQueries = {
       // A selective structured filter can drop many ranked candidates, so over-fetch
       // from the retrieval layer to keep the page full after post-filtering + offset.
       const hasStructuredFilters = !!(
-        f.nodeType || f.objectType || f.isRunnable != null || f.tags?.length || f.locPrefix ||
+        f.nodeType || f.objectType || f.isRunnable != null || f.role != null || f.tags?.length || f.locPrefix ||
         f.createdBy || f.updatedAfter || f.updatedBefore || f.includeDeleted || f.where
       );
       const page = off + finalLimit;
-      const fetchN = hasStructuredFilters ? Math.min(page * 5, 2000) : page;
+      const VECTOR_FETCH_CAP = 2000;
+      const fetchN = hasStructuredFilters ? Math.min(page * 5, VECTOR_FETCH_CAP) : page;
+
+      /**
+       * The ids among `ids` that pass every structured filter and `where`, in
+       * the caller's scope — the same predicate `buildResult` and the chunk
+       * branch apply on hydration.
+       */
+      const eligibleIds = async (ids: string[]): Promise<Set<string>> => {
+        let candidates = ids;
+        if (f.where != null) {
+          candidates = await provider.filterWhere({
+            db: ctx.db, ids, memoryIds: scopeIds, where: f.where, includeDeleted: !!f.includeDeleted,
+          });
+        }
+        const rows = await ctx.db.node.findMany({
+          where: { id: { in: candidates }, memoryId: { in: scopeIds }, ...structuredWhere },
+          select: { id: true },
+        });
+        return new Set(rows.map((r) => r.id));
+      };
+
+      /**
+       * #1345 review (@codex P2): a vector candidate window is selected WITHOUT
+       * the structured filters (the ANN scan is index-driven), so a fixed
+       * over-fetch could leave the page empty when the matches rank past it —
+       * `limit: 1` returned nothing when the five nearest nodes had other roles.
+       * With filters present, widen the window (x4, to the same cap) until the
+       * filtered, floored hits fill the page, or the provider reports its raw
+       * candidate window exhausted.
+       * Past the cap a page can still be short; it is never wrong.
+       */
+      const widenVectorWindow = async <T extends { nodeId: string; score: number }>(
+        search: (limit: number, onWindow: (w: { exhausted: boolean }) => void) => Promise<T[]>,
+      ): Promise<T[]> => {
+        let limit = fetchN;
+        for (;;) {
+          // Exhaustion comes from the PROVIDER's raw window, never from the
+          // result size: node search dedupes chunk vectors to nodes, so a short
+          // or unchanged hit count can be duplicates with more of the index
+          // unread (@codex + @copilot, #1345 rounds 3-4). Unreported ⇒ not
+          // exhausted, so an unknown provider widens to the cap.
+          let exhausted = false;
+          const hits = await search(limit, (w) => { exhausted = w.exhausted; });
+          if (!hasStructuredFilters || limit >= VECTOR_FETCH_CAP || exhausted) return hits;
+          const floored = scoreFloor == null ? hits : hits.filter((h) => h.score >= scoreFloor);
+          const ok = await eligibleIds([...new Set(floored.map((h) => h.nodeId))]);
+          if (floored.filter((h) => ok.has(h.nodeId)).length >= page) return hits;
+          limit = Math.min(limit * 4, VECTOR_FETCH_CAP);
+        }
+      };
 
       // Hydrate a ranked (nodeId, score) list into hits: enforce the structured
       // filters via a Prisma re-fetch, order (by rank, or by an explicit sort),
@@ -1166,8 +1254,11 @@ export const nodeQueries = {
           );
           candidateIds = candidateIds.filter((id) => allowed.has(id));
         }
+        // #1345 review (@copilot): re-assert the memory scope at hydration. The
+        // candidates were scoped when RANKED, in a separate query; a node moved
+        // to another memory in between must not come back from outside scope.
         const rows = await ctx.db.node.findMany({
-          where: { id: { in: candidateIds }, ...structuredWhere },
+          where: { id: { in: candidateIds }, memoryId: { in: scopeIds }, ...structuredWhere },
           include: nodeInclude,
         });
         await decryptNodesBatch(ctx.db, rows);
@@ -1199,8 +1290,12 @@ export const nodeQueries = {
             ctx.db, pageRows.map((n) => n.id), expandDepth, { memoryIds: scopeIds },
           )).filter((id) => !shown.has(id));
           if (neighbourIds.length > 0) {
+            // Neighbours are deliberately UNFILTERED (appended context), but
+            // never out of scope: re-assert it here, like every other hydration
+            // in findNodes (#1345 review) — expandWithNeighbors scoped them in a
+            // separate query.
             const nRows = await ctx.db.node.findMany({
-              where: { id: { in: neighbourIds }, deletedAt: null },
+              where: { id: { in: neighbourIds }, memoryId: { in: scopeIds }, deletedAt: null },
               include: nodeInclude,
             });
             await decryptNodesBatch(ctx.db, nRows);
@@ -1233,8 +1328,12 @@ export const nodeQueries = {
         // from deeper ranks — a floor returns fewer, never weaker, results).
         ranked = applyFloor(ranked);
         const scoreById = new Map(ranked.map((r) => [r.nodeId, r.score]));
+        // #1345 review (@copilot): the lexical/regex SQL applied scope and the
+        // structured filters when RANKING; re-assert them at hydration, as
+        // buildResult does, so a node whose role (or memory, or deletion) changed
+        // in between is not returned against the filter it no longer meets.
         const rows = await ctx.db.node.findMany({
-          where: { id: { in: ranked.map((r) => r.nodeId) } },
+          where: { id: { in: ranked.map((r) => r.nodeId) }, memoryId: { in: scopeIds }, ...structuredWhere },
           include: nodeInclude,
         });
         await decryptNodesBatch(ctx.db, rows);
@@ -1255,7 +1354,7 @@ export const nodeQueries = {
             ctx.db, pageRows.map((n) => n.id), expandDepth, { memoryIds: scopeIds },
           )).filter((id) => !shown.has(id));
           if (neighbourIds.length > 0) {
-            const nRows = await ctx.db.node.findMany({ where: { id: { in: neighbourIds }, deletedAt: null }, include: nodeInclude });
+            const nRows = await ctx.db.node.findMany({ where: { id: { in: neighbourIds }, memoryId: { in: scopeIds }, deletedAt: null }, include: nodeInclude });
             await decryptNodesBatch(ctx.db, nRows);
             const nById = new Map(nRows.map((n) => [n.id, n]));
             for (const id of neighbourIds) { const n = nById.get(id); if (n) hits.push({ node: n, score: null, vector: null }); }
@@ -1412,11 +1511,16 @@ export const nodeQueries = {
         return { hits: [], passages: [], total: 0, reason: 'embedding_unavailable', degraded: null };
       }
 
-      // Chunk granularity (vector only) → passages, mirroring nodeSearch. The
-      // coarse structured node filters (nodeType/tags/…) are not applied to
-      // passage results in v1 (chunk-level, not node-level) — but a `where`
-      // predicate IS honored (#719): a passage from a parent that fails the
-      // predicate must not surface, so we drop it below.
+      // Chunk granularity (vector only) → passages, mirroring nodeSearch.
+      // #1345 review (@codex P2): every structured node filter applies to the
+      // passage's PARENT exactly as it does to a node hit — the same
+      // `structuredWhere` (nodeType, objectType, isRunnable, role, tags,
+      // locPrefix, createdBy, updated*, includeDeleted) plus the #719 `where`
+      // predicate. v1 applied only `where`, so `role` / `isRunnable` — which the
+      // MCP tool promises "in every mode" — silently returned passages from any
+      // parent. And the filters run BEFORE paging, with the same over-fetch the
+      // node path uses: a filtered-out passage must neither appear in nor
+      // consume the requested page.
       if (granularity === 'chunk') {
         if (effectiveMode !== 'vector') {
           throw badInput(`findNodes granularity:chunk is only supported in mode:vector (got mode:${effectiveMode}).`);
@@ -1425,41 +1529,49 @@ export const nodeQueries = {
         // #497 — apply the minScore floor to the scored passages too (PR-569
         // review, Codex): filter before paging so a floor drops sub-threshold
         // chunks rather than silently returning them.
-        const rawChunks = await provider.vectorSearchChunks({ db: ctx.db, queryEmbedding: qvec, memoryIds: indexedIds, limit: off + finalLimit });
-        const chunkHits = (scoreFloor == null ? rawChunks : rawChunks.filter((c) => c.score >= scoreFloor))
-          .slice(off, off + finalLimit);
+        const rawChunks = await widenVectorWindow((limit, onWindow) =>
+          provider.vectorSearchChunks({ db: ctx.db, queryEmbedding: qvec, memoryIds: indexedIds, limit, onWindow }),
+        );
+        const scoredChunks = scoreFloor == null ? rawChunks : rawChunks.filter((c) => c.score >= scoreFloor);
+        const candidateParentIds = [...new Set(scoredChunks.map((c) => c.nodeId))];
         // #719 — honor `where` on chunk passages: keep only passages whose PARENT
         // node satisfies the predicate (also re-asserts the memory scope).
-        let allowedParents: Set<string> | null = null;
+        let whereAllowed: Set<string> | null = null;
         if (f.where != null) {
-          allowedParents = new Set(
+          whereAllowed = new Set(
             await provider.filterWhere({
-              db: ctx.db, ids: [...new Set(chunkHits.map((c) => c.nodeId))],
+              db: ctx.db, ids: candidateParentIds,
               memoryIds: scopeIds, where: f.where, includeDeleted: !!f.includeDeleted,
             }),
           );
         }
         const parents = await ctx.db.node.findMany({
-          where: { id: { in: [...new Set(chunkHits.map((c) => c.nodeId))] }, deletedAt: null },
+          where: {
+            id: { in: whereAllowed ? candidateParentIds.filter((id) => whereAllowed!.has(id)) : candidateParentIds },
+            // @copilot: re-assert scope at hydration, as buildResult does.
+            memoryId: { in: scopeIds },
+            ...structuredWhere,
+          },
           include: { memory: { select: { urn: true } } },
         });
+        const eligible = new Set(parents.map((p) => p.id));
+        const chunkHits = scoredChunks.filter((c) => eligible.has(c.nodeId)).slice(off, off + finalLimit);
+        const pageParentIds = new Set(chunkHits.map((c) => c.nodeId));
         const parentById = new Map(parents.map((p) => [p.id, p]));
         // #1061 — chunk granularity returns passages rather than whole nodes,
         // but the passage text IS node content, so each DISTINCT parent counts
         // once (not once per passage: three chunks of one node is one node's
         // content read, and per-chunk counting would make a node's read count
         // depend on how finely it happens to be chunked). Scoped to the parents
-        // that survive `allowedParents`, so a filtered-out node records nothing.
+        // on the returned PAGE, so a filtered-out or off-page node records nothing.
         recordNodeUsage(
           ctx.db,
           'read',
-          toUsageNodeRefs(
-            parents.filter((p) => allowedParents == null || allowedParents.has(p.id)),
-          ),
+          toUsageNodeRefs(parents.filter((p) => pageParentIds.has(p.id))),
           ctx,
         );
         const passages = chunkHits
-          .filter((c) => parentById.has(c.nodeId) && (allowedParents == null || allowedParents.has(c.nodeId)))
+          .filter((c) => parentById.has(c.nodeId))
           .map((c) => {
             const p = parentById.get(c.nodeId)! as { loc: string; memory: { urn: string } };
             // #697 Stage 2: emit the flat v2 node URN (matches Node.urn); fall
@@ -1485,7 +1597,9 @@ export const nodeQueries = {
         return { hits: [], passages, total: null, reason: null, degraded: null };
       }
 
-      const vecHits = await provider.vectorSearch({ db: ctx.db, queryEmbedding: qvec, memoryIds: indexedIds, limit: fetchN });
+      const vecHits = await widenVectorWindow((limit, onWindow) =>
+        provider.vectorSearch({ db: ctx.db, queryEmbedding: qvec, memoryIds: indexedIds, limit, onWindow }),
+      );
 
       if (effectiveMode === 'vector') {
         const simById = new Map(vecHits.map((h) => [h.nodeId, h.score]));
@@ -1502,7 +1616,9 @@ export const nodeQueries = {
       const fused = reciprocalRankFusionScored(
         [kwRanked.map((r) => r.nodeId), vecHits.map((h) => h.nodeId)],
         (id) => id,
-      ).slice(0, fetchN);
+        // Keep at least the (possibly widened) vector window: truncating to the
+        // original fetchN would drop the matches widening went out to find.
+      ).slice(0, Math.max(fetchN, vecHits.length));
       const simById = new Map(vecHits.map((h) => [h.nodeId, h.score]));
       return await buildResult(
         fused.map((r) => ({ nodeId: r.item, score: r.score })),
@@ -1663,10 +1779,11 @@ export const nodeQueries = {
               });
             }
             try {
-              const { id } = await resolveNodeRef(ctx.db, ref);
+              const { id } = await resolveNodeRefForCaller(ctx, ref);
               return { ref, id: id as string | null };
             } catch (e) {
-              if (e instanceof NodeNotFoundError) return { ref, id: null };
+              if (e instanceof NodeNotFoundError || e instanceof AmbiguousLegacyUrnError)
+                return { ref, id: null };
               throw e;
             }
           }),
@@ -1695,11 +1812,13 @@ export const nodeQueries = {
           else unavailable.push(ref);
         }
       } else {
+        // #1316: an unreadable memory answers MEMORY_NOT_FOUND exactly like a
+        // missing one; the FORBIDDEN it used to throw disclosed existence.
+        // Gated on `access`, the node-content filter computed above, rather
+        // than a second authorization round (@copilot, #1350).
         const { id: memId } = await resolveMemoryRef(ctx.db, memory!);
-        const accessible = await getAccessibleMemoryIds(ctx);
-        if (accessible !== null && !accessible.includes(memId)) {
-          throw new GraphQLError('Memory not accessible.', { extensions: { code: 'FORBIDDEN' } });
-        }
+        const accessibleIds = access.memoryId as { in: string[] } | undefined;
+        if (accessibleIds && !accessibleIds.in.includes(memId)) throw new MemoryNotFoundError(memory!);
         // Count cap: take MAX+1 to detect overflow, then fail loud rather than
         // silently returning a truncated subtree.
         const rows = await ctx.db.node.findMany({
@@ -1863,7 +1982,7 @@ export const nodeQueries = {
       // memoryUsageSummary / resolveReadableMemoryId.
       let nodeId: string;
       try {
-        ({ id: nodeId } = await resolveNodeRef(ctx.db, nodeRef));
+        ({ id: nodeId } = await resolveNodeRefForCaller(ctx, nodeRef));
       } catch (e) {
         if (e instanceof NodeNotFoundError) return [];
         throw e;
@@ -1939,6 +2058,7 @@ export const nodeQueries = {
           objectType?: string | null;
           tags?: string[] | null;
           isRunnable?: boolean | null;
+          role?: string | null;
           locPrefix?: string | null;
           createdBy?: string | null;
           updatedAfter?: string | null;
@@ -1951,7 +2071,11 @@ export const nodeQueries = {
     ) => {
       // 007-entity-id-or-urn: appRef may be ID, bare URN, or prefixed URN.
       const { id: resolvedAppId } = await resolveAppRef(ctx.db, appRef);
-      const app = await ctx.db.app.findUniqueOrThrow({ where: { id: resolvedAppId } });
+      const app = await ctx.db.app.findUniqueOrThrow({
+        where: { id: resolvedAppId },
+        include: { organization: { select: { deletedAt: true } } },
+      });
+      if (app.organization?.deletedAt) return [];
       // Auth: an App PARTICIPANT, or org membership at READER+ on the App's
       // org; platform ADMIN/OWNER bypasses.
       //
@@ -1971,9 +2095,8 @@ export const nodeQueries = {
       // Admitting them grants nothing the platform does not already grant them;
       // it stops two surfaces disagreeing about one question.
       //
-      // Deliberately additive: the org-READER arm is unchanged, so a reader who
-      // is not a participant keeps exactly today's results — including NOT the
-      // team space, which stays behind its own `isAppParticipant` check below.
+      // Org READER remains an admission arm, without the team space. The
+      // installed-Agent enumeration below applies current link liveness.
       const isPlatformAdmin = ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER');
       // Resolved ONCE: the gate here and the team-space scope below ask the
       // same question, and two calls would be two identical queries per read.
@@ -1998,11 +2121,8 @@ export const nodeQueries = {
       // uninstall, and `resolveUserApps` excludes exactly those memberships
       // from every active-App access map (PR #1093 review, Codex P1).
       //
-      // But it must NOT also change what an ORG caller sees on a retired App —
-      // folding the lifecycle into `participant` itself took the team space
-      // away from them, which is existing behaviour and not this PR's to
-      // change. My own test caught that; the comment claiming the scope was
-      // untouched was written before the assertion that checked it.
+      // An org-authorized caller can still see the retired App's team space;
+      // installed-Agent memories follow the live App access fold below.
       const admitAsParticipant = participant && !app.uninstalledAt;
       // Org authorization is tracked, not just enforced, because it decides the
       // SCOPE below as well as admission (PR #1093 review, Codex P1).
@@ -2019,30 +2139,19 @@ export const nodeQueries = {
         // neither — so the error a stranger sees is the one they saw before.
         await requireOwnerOrOrgRole(ctx, app, 'READER');
       }
-      // 023-app-shape Phase 2b: App↔Agent is N:M via AppAgent. Gather
-      // memoryItems for every installed Agent. Apps with no installed
-      // Agents have no accessible nodes.
-      const appWithAgents = await ctx.db.app.findUnique({
-        where: { id: resolvedAppId },
-        select: {
-          appAgents: {
-            select: { agent: { select: { systemMemoryId: true, memoryItems: true } } },
-          },
-        },
+      // Keep appNodes' historical multi-Agent scope while using the same live
+      // item, stored-role, App-scope and install-license fold as MCP reads.
+      // The raw AppAgent walk retained revoked links after a PUBLIC memory was
+      // narrowed, because only the join row was soft-deleted.
+      const installedAccess = await getAppMemoryAccess(ctx.db, resolvedAppId, {
+        allAgents: orgAuthorized, includeTeamSpace: false, callerUserId: ctx.userId ?? null,
       });
-      const agentMemoryIds = [
-        ...new Set(
-          (appWithAgents?.appAgents ?? []).flatMap((aa) => [
-            // #524 — the installed agent's system memory is universally
-            // read-only from an App context (schema Agent.systemMemoryId;
-            // folded as READ_ONLY by mcp/access-control.ts). Task nodes are
-            // commonly authored there, so appNodes must include it — matching
-            // the MCP access-map fold (systemMemoryId + memoryItems).
-            ...(aa.agent.systemMemoryId ? [aa.agent.systemMemoryId] : []),
-            ...aa.agent.memoryItems.map((m) => m.memoryId),
-          ]),
-        ),
-      ];
+      const scopedAuth = {
+        userId: ctx.userId, appId: resolvedAppId, roles: ctx.roles,
+      } as AuthContext;
+      const agentMemoryIds = [...await filterReadableMemoryIds(
+        ctx.db as never, scopedAuth, installedAccess.keys(), { access: installedAccess },
+      )];
 
       // #1031 — the App's own TEAM SPACE, which is structurally unreachable
       // through the installed-agent walk above: it is an app-class memory keyed
@@ -2067,115 +2176,14 @@ export const nodeQueries = {
         ? await resolveAppTeamSpaceMemoryIds(ctx.db, resolvedAppId)
         : [];
 
-      // SCOPE, and this is the half the participant arm turns on (PR #1093
-      // review, Codex P1). My justification for admitting a participant was
-      // that MCP already grants them this material — and the agent walk above
-      // is BROADER than what MCP grants: `getAppMemoryAccess` reads only the
-      // PRIMARY live agent, filters soft-deleted memory items and memories, and
-      // requires an active AgentOrgGrant for a cross-org install. The walk
-      // above does none of those. So admitting a participant to it would hand
-      // them secondary agents, deleted items, and installs whose cross-org
-      // grant has LAPSED — none of which they can reach anywhere else, which
-      // makes it a widening after all, of exactly the kind #1070 warned that
-      // this resolver's scope invites.
-      //
-      // A participant who is not also org-authorized therefore gets the
-      // platform's own answer for their principal — the same fold MCP uses —
-      // rather than this resolver's historically wider walk.
-      //
-      // #1093 added "An org member's scope is untouched" here, which was true
-      // then and is NOT any more (PR #1132 review, @copilot): #1097 applies the
-      // per-App filter below to EVERY principal, so an org member's scope is
-      // narrowed too — deliberately, and that is the whole point of this
-      // change. Left as a correction rather than a deletion so the next reader
-      // can see the org path used to return the unscoped raw walk.
-      const candidateMemoryIds = orgAuthorized
-        ? [...new Set([...agentMemoryIds, ...teamSpaceIds])]
-        : await (async () => {
-            // DELEGATED, after four review rounds of hand-copying this
-            // predicate one clause at a time (PR #1093 — owner, then per-App,
-            // then the subscription gate, then the legacy agent-scoped shape).
-            // Each round I copied what I had read and shipped the rest as an
-            // assertion. That is the repo's FIRST authorization invariant
-            // arriving as a bill:
-            //
-            //   "Reuse the shared access gate; a bespoke per-resolver gate
-            //    drifts."
-            //
-            // — which I quoted at other people twice this week while
-            // reimplementing one. `canReadMemory` is the gate MCP's point read
-            // uses, and the App it is asked about is the App being queried, so
-            // the auth it wants is this caller in THIS App's scope. There is
-            // now no rule here to be a partial copy of.
-            const folded = [
-              ...(
-                await getAppMemoryAccess(ctx.db, resolvedAppId, {
-                  callerUserId: ctx.userId ?? null,
-                })
-              ).keys(),
-            ];
-            const scopedAuth = {
-              userId: ctx.userId,
-              appId: resolvedAppId,
-              roles: ctx.roles,
-            } as AuthContext;
-            // The access map ONCE for the whole page, not once per memory:
-            // `canReadMemory` ends in `getMemoryAccess`, which rebuilds the
-            // App's agent fold on every call (PR #1093 review, Codex P2 — the
-            // same N+1 this resolver's roster sibling was cured of twice).
-            const sharedAccess = await getMemoryAccess(ctx.db as never, scopedAuth);
-            const allowed = await Promise.all(
-              folded.map(async (id) =>
-                (await canReadMemory(ctx.db as never, scopedAuth, id, { access: sharedAccess }))
-                  ? id
-                  : null,
-              ),
-            );
-            const readable = allowed.filter((id): id is string => id !== null);
+      // Org readers retain the resolver's multi-Agent scope. Participants
+      // outside that group receive the primary Agent fold used by MCP reads.
+      const candidateMemoryIds = [...new Set([...agentMemoryIds, ...teamSpaceIds])];
 
-            return readable;
-          })();
-
-      // THIS App's memories only — for EVERY principal (#1097; the participant
-      // half was #1093 review, Codex P1).
-      //
-      // One Agent installed in two Apps carries BOTH Apps' app-scoped memories
-      // in its global `memoryItems`, so the fold for B contains A's.
-      //
-      // WHICH PATH ACTUALLY LEAKED, corrected (PR #1132 review, @copilot; the
-      // claim below is what #1093 wrote here and I repeated):
-      //
-      // #1093's comment said `canReadMemory` enforces `appId` for
-      // personal/private rows only and so admits an app-class memory of A. That
-      // was true when written and is now FALSE — #1102 moved the rule into
-      // `admissibleFoldRows`, the shared predicate behind `getMemoryAccess`,
-      // whose own docstring calls itself "the enumeration half of #1097". A
-      // participant is therefore already refused A's app-class memory before
-      // this filter is consulted.
-      //
-      // The leak was specific to the ORG branch, which bypasses that predicate
-      // entirely and reads the raw installed-agent walk: nothing enforced
-      // `appId`, and an org READER of B read A's internals. This is the other
-      // half of the same issue.
-      //
-      // Applied ONCE, to both branches, rather than added to the second one.
-      // #1093 shipped this rule inside the participant arm and left the org arm
-      // out, which is how #1092 (the predicates disagreeing about the same
-      // question) and this issue both exist. A second copy would have been the
-      // third answer to one question — and this resolver's own comment, four
-      // lines up, quotes the invariant it would be breaking.
-      //
-      // It is a SCOPE rule about what `appNodes(B)` MEANS, not an access gate:
-      // the resolver's contract is already "the App's installed-agent memories
-      // are the authoritative scope", and the fold does not honour it. Nothing
-      // here decides who may read a memory — that is `canReadMemory`'s job on
-      // the participant path and the org role gate's above.
-      //
-      // `appId IS NULL` keeps what genuinely belongs to the Agent rather than to
-      // a sibling App: its `system` memory (where `app_id` is FORBIDDEN by
-      // `chk_memory_class_app_id`) and any free-standing knowledge it carries.
-      // #1097 weighed dropping those too; this keeps cross-App agent knowledge
-      // working and drops only another App's internals.
+      // Keep this App's memories only. An Agent installed in two Apps can link
+      // memories scoped to each; the shared fold already applies this rule,
+      // and the final filter also covers the separately added team space.
+      // App-agnostic system and knowledge memories remain in scope.
       // Short-circuit before the query, not after it (PR #1132 review,
       // @copilot): an App with no installed Agents reaches here with an empty
       // candidate set, and `findMany({ id: { in: [] } })` is a round-trip whose
@@ -2225,6 +2233,14 @@ export const nodeQueries = {
           ...(f.nodeType ? { nodeType: f.nodeType } : {}),
           ...(f.objectType ? { objectType: f.objectType } : {}),
           ...(f.isRunnable != null ? { isRunnable: f.isRunnable } : {}),
+          ...(f.role != null
+            ? {
+                OR: [
+                  { role: f.role },
+                  { role: { startsWith: escapePrismaLikePattern(`${f.role}.`) } },
+                ],
+              }
+            : {}),
           ...(f.tags?.length ? tagsFilter(f.tags) : {}),
           ...(f.locPrefix ? { loc: { startsWith: f.locPrefix } } : {}),
           ...(f.createdBy ? { createdBy: f.createdBy } : {}),

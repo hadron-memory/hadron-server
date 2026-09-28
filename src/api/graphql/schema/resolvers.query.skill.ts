@@ -39,14 +39,21 @@
  * protect.
  */
 import { GraphQLError } from 'graphql';
+import { createHash } from 'node:crypto';
 import { BATCH_READ_MAX_BYTES } from '../../../lib/batchRead.js';
 import { Prisma } from '../../../generated/prisma/index.js';
 import type { Context } from './resolvers.helpers.js';
 import { getAccessibleMemoryIds, memoryAccessFilter } from './resolvers.helpers.js';
 import { decryptNodesBatch } from '../../../lib/nodeCrypto.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
+import { resolveScopeRef } from '../../../lib/entityRef/scopeRef.js';
+import { resolveNodeRef } from '../../../lib/entityRef/nodeRef.js';
+import { NodeNotFoundError } from '../../../lib/entityRef/errors.js';
+import { isId } from '../../../lib/entityRef/shape.js';
+import { assertFullyQualifiedUrn, splitNodeUrn } from '../../../lib/urn.js';
 import { safeNodeUrnV2 } from '../../../lib/urnEmit.js';
 import { isCiphertext } from '../../../lib/crypto.js';
+import { canReadScope, explainScope } from '../../../lib/scopes.js';
 import { recordNodeUsage, toUsageNodeRefs } from '../../../lib/usageRecorder.js';
 import { ensureCurrentNodeRevisionInTransaction } from '../../../lib/nodeRevisionSnapshot.js';
 import {
@@ -93,9 +100,24 @@ export interface SkillFileFactsInput {
 export interface SkillPlanInput {
   intent: SkillPlanIntent;
   memories?: string[] | null;
+  scopeRef?: string | null;
   host?: string | null;
   files?: SkillFileFactsInput[] | null;
   force?: boolean | null;
+}
+
+export interface SelectedSkillFilePlanInput {
+  nodes: string[];
+  host?: string | null;
+  files?: SkillFileFactsInput[] | null;
+  force?: boolean | null;
+}
+
+export interface SkillSelectionResult {
+  ref: string;
+  nodeId: string | null;
+  action: 'FAIL' | 'SKIP';
+  reason: SkillExportReason;
 }
 
 /**
@@ -107,6 +129,15 @@ export interface SkillPlanInput {
  * read dropped. The one surface where under-reporting is destructive.
  */
 const SKILL_PLAN_MAX_NODES = 500;
+/** A selected plan fails loud if its collision census cannot finish within this bound. */
+const SKILL_PLAN_MAX_COLLISION_CENSUS_NODES = 50_000;
+// The census reads arbitrary JSON, so a row count alone cannot bound its
+// transfer or deserialization cost. Check JSON byte size in PostgreSQL before
+// fetching each page's properties.
+const SKILL_PLAN_MAX_COLLISION_CENSUS_BYTES = 32 * 1024 * 1024;
+// Selected metadata has the same arbitrary-JSON risk even when no declaration
+// exists for the requested host and the collision census never runs.
+const SKILL_PLAN_MAX_SELECTED_PROPERTIES_BYTES = SKILL_PLAN_MAX_COLLISION_CENSUS_BYTES;
 
 /**
  * The DISCOVERY predicate: a node carrying any declaration key at all.
@@ -440,19 +471,49 @@ function buildExportPlan(args: {
   };
 }
 
-export const skillQueries = {
-  /**
-   * Judge a corpus of declared nodes against the files a client found.
-   *
-   * `memories` scopes the scan; omitted means every memory the caller can
-   * read. `files` is what the client saw on disk — empty for `lint`, which
-   * touches no disk at all.
-   */
-  skillPlan: async (
-    _: unknown,
-    { input }: { input: SkillPlanInput },
-    ctx: Context,
-  ) => {
+/** The existing plugin/unscoped plan and the selected individual-file plan share judgment. */
+async function planSkills(input: SkillPlanInput, ctx: Context, selectedRefs?: string[]) {
+    // Plugin EXPORT is narrowed by a persisted Scope, never by a caller's
+    // hand-picked memory IDs (cor:agt:030:03). An explicit [] is still an
+    // attempted memory selector and must not silently become an unscoped plan.
+    if (input.intent === 'EXPORT' && Object.prototype.hasOwnProperty.call(input, 'memories')) {
+      throw new GraphQLError('skillPlan: EXPORT cannot select memories; use scopeRef.', {
+        extensions: { code: 'BAD_USER_INPUT' },
+      });
+    }
+    let requestedScopeRef: string | null = null;
+    if (Object.prototype.hasOwnProperty.call(input, 'scopeRef')) {
+      if (input.intent !== 'EXPORT') {
+        throw new GraphQLError('skillPlan: scopeRef is valid only with EXPORT intent.', {
+          extensions: { code: 'BAD_USER_INPUT' },
+        });
+      }
+      // A supplied null is a failed narrowing request, not omission. Treating
+      // it as unscoped would hand an EXPORT every readable task (Chip, #1427).
+      if (typeof input.scopeRef !== 'string' || input.scopeRef.trim() === '') {
+        throw new GraphQLError('skillPlan: scope unavailable.', { extensions: { code: 'BAD_USER_INPUT' } });
+      }
+      requestedScopeRef = input.scopeRef;
+    }
+    if (selectedRefs !== undefined) {
+      if (selectedRefs.length === 0 || selectedRefs.length > SKILL_PLAN_MAX_NODES) {
+        throw new GraphQLError(`selectedSkillFilePlan: nodes must contain 1–${SKILL_PLAN_MAX_NODES} refs.`, {
+          extensions: { code: 'BAD_USER_INPUT' },
+        });
+      }
+      for (const ref of selectedRefs) {
+        try {
+          if (!isId(ref)) {
+            assertFullyQualifiedUrn(ref, 'node');
+            if (splitNodeUrn(ref).fragment) throw new Error('Node fragments do not name a skill source.');
+          }
+        } catch {
+          throw new GraphQLError('selectedSkillFilePlan: each node must be an ID or fully qualified node URN.', {
+            extensions: { code: 'BAD_USER_INPUT' },
+          });
+        }
+      }
+    }
     if (input.force === true && input.intent !== 'EXPORT') {
       throw new GraphQLError('skillPlan: force is valid only with EXPORT intent.', {
         extensions: { code: 'BAD_USER_INPUT' },
@@ -478,7 +539,77 @@ export const skillQueries = {
 
     // ── Scope, through the shared gate ───────────────────────────────────
     const access = await memoryAccessFilter(ctx);
+    const selectionResults: SkillSelectionResult[] = [];
+    const selectedIdToRef = new Map<string, string>();
+    if (selectedRefs !== undefined) {
+      const unavailable = new Set<string>();
+      for (const ref of selectedRefs) {
+        let id: string;
+        try {
+          ({ id } = await resolveNodeRef(ctx.db, ref));
+        } catch (error) {
+          if (!(error instanceof NodeNotFoundError)) throw error;
+          unavailable.add(ref);
+          continue;
+        }
+        // The resolver above is identity lookup, not an access gate. Apply the
+        // same shared predicate as the declared scan, and conceal missing and
+        // unreadable refs with one outward result (cor:api:140:03).
+        const readable = await ctx.db.node.findFirst({
+          where: { id, deletedAt: null, memory: { deletedAt: null }, AND: [access] } as never,
+          select: { id: true },
+        });
+        if (!readable) {
+          unavailable.add(ref);
+          continue;
+        }
+        if (!selectedIdToRef.has(id)) selectedIdToRef.set(id, ref);
+      }
+      for (const ref of unavailable) {
+        selectionResults.push({
+          ref, nodeId: null, action: 'FAIL',
+          reason: { code: 'node-unavailable', message: 'The named task is unavailable.' },
+        });
+      }
+    }
     let memoryIds: string[] | null = null;
+    let scopeSelection: {
+      id: string;
+      name: string;
+      readableMemoryCount: number;
+      droppedCount: number;
+      fingerprint: string;
+    } | null = null;
+    if (requestedScopeRef !== null) {
+      // Scope identity crosses the wire; membership is always re-resolved
+      // through the shared Scope gate and canonical materialized access set.
+      // The same ordered set and fingerprint applies to every host, which the
+      // client compares before writing a multi-host artifact.
+      let scopeId: string;
+      try {
+        ({ id: scopeId } = await resolveScopeRef(ctx.db, requestedScopeRef));
+      } catch {
+        throw new GraphQLError('skillPlan: scope unavailable.', { extensions: { code: 'BAD_USER_INPUT' } });
+      }
+      const scope = await ctx.db.scope.findFirst({ where: { id: scopeId, deletedAt: null } });
+      if (!scope || !(await canReadScope(ctx, scope))) {
+        throw new GraphQLError('skillPlan: scope unavailable.', { extensions: { code: 'BAD_USER_INPUT' } });
+      }
+      const explained = await explainScope(ctx, scope.id);
+      if (explained.memoryIds.length === 0) {
+        throw new GraphQLError('skillPlan: scope has no readable memories.', { extensions: { code: 'BAD_USER_INPUT' } });
+      }
+      memoryIds = explained.memoryIds;
+      scopeSelection = {
+        id: scope.id,
+        name: scope.name,
+        readableMemoryCount: memoryIds.length,
+        droppedCount: explained.droppedCount,
+        fingerprint: createHash('sha256')
+          .update(JSON.stringify([scope.id, scope.name, memoryIds, explained.droppedCount]))
+          .digest('hex'),
+      };
+    }
     if (input.memories && input.memories.length > 0) {
       const accessible = await getAccessibleMemoryIds(ctx);
       memoryIds = [];
@@ -513,7 +644,7 @@ export const skillQueries = {
     // Declared is the opt-in (§4.1: "declared, not merely runnable").
     const declaredWhere = {
         deletedAt: null,
-        OR: DISCOVERY_OR,
+        ...(selectedRefs === undefined ? { OR: DISCOVERY_OR } : {}),
         // INTERSECTED, not spread (@copilot, PR #1240). `memoryAccessFilter`
         // returns `{ memoryId: { in: … } }`, so spreading it beside the
         // requested scope made the LAST key win and silently dropped the
@@ -521,7 +652,11 @@ export const skillQueries = {
         // Not a leak — the caller could read them anyway — but a plan wider
         // than the one asked for, which a client running `--prune` against a
         // single memory would act on for files it never meant to touch.
-        AND: [access, ...(memoryIds ? [{ memoryId: { in: memoryIds } }] : [])],
+        AND: [
+          access,
+          ...(memoryIds ? [{ memoryId: { in: memoryIds } }] : []),
+          ...(selectedRefs !== undefined ? [{ id: { in: [...selectedIdToRef.keys()] } }, { memory: { deletedAt: null } }] : []),
+        ],
     } as never;
     const declaredSelect = {
         id: true,
@@ -536,24 +671,100 @@ export const skillQueries = {
         memory: { select: { urn: true } },
         revSeq: true,
     } as const;
-    const candidates = await ctx.db.node.findMany({
-      where: declaredWhere,
-      select: declaredSelect,
-      take: SKILL_PLAN_MAX_NODES + 1,
-      orderBy: [{ memoryId: 'asc' }, { loc: 'asc' }],
-    });
-    let declaredRows = candidates;
-    if (candidates.length <= SKILL_PLAN_MAX_NODES) {
+    const { content: _content, ...declaredMetadataSelect } = declaredSelect;
+    const narrowHint = input.intent === 'EXPORT' ? 'Choose a smaller scope' : 'Narrow `memories`';
+    const candidateOrder = [{ memoryId: 'asc' }, { loc: 'asc' }] as const;
+    const candidates = selectedRefs === undefined
+      ? await ctx.db.node.findMany({
+          where: declaredWhere,
+          select: declaredMetadataSelect,
+          take: SKILL_PLAN_MAX_NODES + 1,
+          orderBy: [...candidateOrder],
+        })
+      : await ctx.db.$transaction(async (tx) => {
+          // A metadata-only Prisma select still transfers the entire JSON
+          // value. Read gated IDs first, check bytes in PostgreSQL, then read
+          // properties from the same snapshot so no row can grow past the cap
+          // between the check and deserialization.
+          const ids = await tx.node.findMany({
+            where: declaredWhere,
+            select: { id: true },
+            take: SKILL_PLAN_MAX_NODES + 1,
+            orderBy: [...candidateOrder],
+          });
+          if (ids.length === 0) return [];
+          if (ids.length > SKILL_PLAN_MAX_NODES) {
+            throw new GraphQLError(`selectedSkillFilePlan: more than ${SKILL_PLAN_MAX_NODES} nodes are in scope.`, {
+              extensions: { code: 'BAD_USER_INPUT' },
+            });
+          }
+          const candidateIds = ids.map((row) => row.id);
+          const sizes = await tx.$queryRaw<{ bytes: bigint }[]>`
+            SELECT COALESCE(SUM(octet_length(properties::text)), 0)::bigint AS bytes
+            FROM nodes WHERE id IN (${Prisma.join(candidateIds)})
+          `;
+          if ((sizes[0]?.bytes ?? 0n) > BigInt(SKILL_PLAN_MAX_SELECTED_PROPERTIES_BYTES)) {
+            throw new GraphQLError('selectedSkillFilePlan: selected task properties exceed the safe byte ceiling.', {
+              extensions: { code: 'BAD_USER_INPUT' },
+            });
+          }
+          return tx.node.findMany({
+            where: { AND: [declaredWhere, { id: { in: candidateIds } }] } as never,
+            select: declaredMetadataSelect,
+            orderBy: [...candidateOrder],
+          });
+        }, { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead });
+    if (candidates.length > SKILL_PLAN_MAX_NODES) {
+      throw new GraphQLError(
+        `skillPlan: more than ${SKILL_PLAN_MAX_NODES} nodes are in scope. ${narrowHint}; this surface does not silently truncate.`,
+        { extensions: { code: 'BAD_USER_INPUT' } },
+      );
+    }
+    let declaredRows: Prisma.NodeGetPayload<{ select: typeof declaredSelect }>[] = [];
+    if (candidates.length > 0) {
       // One short transaction per node: retaining every FOR UPDATE lock until
       // the whole plan commits can deadlock a Git sync that visits the same
       // rows in filesystem order. Fetch the final projection BEFORE releasing
       // that node's lock: a bypass writer landing after reconciliation must not
       // pair newer fields with the older revSeq in one exported artifact.
-      const liveRows: typeof candidates = [];
+      const liveRows: typeof declaredRows = [];
+      let liveMetadataBytes = 0n;
       const candidateMemory = new Map(candidates.map((r) => [r.id, r.memoryId]));
       for (const id of candidates.map((r) => r.id).sort()) {
         const live = await ctx.db.$transaction(
           async (tx) => {
+            if (selectedRefs !== undefined) {
+              // A named task may have no declaration for this host. Recheck
+              // access, then bound the live JSON before deserializing it. A
+              // writer can enlarge properties after the candidate snapshot;
+              // REPEATABLE READ holds this check and fetch to one snapshot.
+              const authorized = await tx.node.findFirst({
+                where: { AND: [declaredWhere, { id }] } as never,
+                select: { id: true },
+              });
+              if (authorized === null) return null;
+              const sizes = await tx.$queryRaw<{ bytes: bigint }[]>`
+                SELECT COALESCE(octet_length(properties::text), 0)::bigint AS bytes
+                FROM nodes WHERE id = ${id}
+              `;
+              const nextBytes = liveMetadataBytes + (sizes[0]?.bytes ?? 0n);
+              if (nextBytes > BigInt(SKILL_PLAN_MAX_SELECTED_PROPERTIES_BYTES)) {
+                throw new GraphQLError('selectedSkillFilePlan: selected task properties exceed the safe byte ceiling.', {
+                  extensions: { code: 'BAD_USER_INPUT' },
+                });
+              }
+              liveMetadataBytes = nextBytes;
+              // The SKIP needs metadata only, even for a very large body.
+              const metadata = await tx.node.findFirst({
+                where: { AND: [declaredWhere, { id }] } as never,
+                select: declaredMetadataSelect,
+              });
+              if (metadata === null) return null;
+              const { declaration, malformed } = classifyDeclaration(metadata.properties, host);
+              if (declaration === null && malformed.length === 0) {
+                return { ...metadata, content: null };
+              }
+            }
             // Never reconcile a row that left the memory it was discovered in
             // (@codex P1, PR #1339) — the refetch below would drop it anyway,
             // but only after a revision had been written into another tenant.
@@ -567,7 +778,11 @@ export const skillQueries = {
               select: declaredSelect,
             });
           },
-          { timeout: 60_000, maxWait: 15_000 },
+          {
+            timeout: 60_000,
+            maxWait: 15_000,
+            ...(selectedRefs !== undefined ? { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead } : {}),
+          },
         );
         if (live != null) liveRows.push(live);
       }
@@ -575,26 +790,50 @@ export const skillQueries = {
         (a, b) => a.memoryId.localeCompare(b.memoryId) || a.loc.localeCompare(b.loc),
       );
     }
-    if (declaredRows.length > SKILL_PLAN_MAX_NODES) {
-      throw new GraphQLError(
-        `skillPlan: more than ${SKILL_PLAN_MAX_NODES} nodes are in scope. Narrow \`memories\`; this surface does not silently truncate.`,
-        { extensions: { code: 'BAD_USER_INPUT' } },
-      );
+    if (selectedRefs !== undefined) {
+      const liveIds = new Set(declaredRows.map((r) => r.id));
+      for (const [id, ref] of selectedIdToRef) {
+        if (!liveIds.has(id)) {
+          selectionResults.push({
+            ref, nodeId: null, action: 'FAIL',
+            reason: { code: 'node-unavailable', message: 'The named task is unavailable.' },
+          });
+        }
+      }
+      for (const row of declaredRows) {
+        const { declaration, malformed } = classifyDeclaration(row.properties, host);
+        if (declaration === null && malformed.length === 0) {
+          selectionResults.push({
+            ref: selectedIdToRef.get(row.id)!, nodeId: row.id, action: 'SKIP',
+            reason: { code: 'host-not-declared', message: 'This task has no declaration for this host; its installed files are unchanged.' },
+          });
+        }
+      }
     }
-    await decryptNodesBatch(ctx.db, declaredRows);
+    // A selected node with no declaration for this host is a reported no-op.
+    // Keep it in the scanned population and metadata reports, but its body is
+    // outside this export. In particular, it must not consume the decryption
+    // work or content-byte budget for the selected host.
+    const actionableRows = selectedRefs === undefined
+      ? declaredRows
+      : declaredRows.filter((row) => {
+          const { declaration, malformed } = classifyDeclaration(row.properties, host);
+          return declaration !== null || malformed.length > 0;
+        });
+    await decryptNodesBatch(ctx.db, actionableRows);
 
     // The byte ceiling belongs HERE, not on the response (@copilot, PR #1240).
     // Capping only the rendered bodies left LINT and STATUS with no byte limit
     // at all — they return no body, and 500 arbitrarily large nodes are still
     // decrypted, hashed and linted first. The cost is paid at load, so the
     // refusal belongs at load, and it applies to every intent.
-    const loadedBytes = declaredRows.reduce(
+    const loadedBytes = actionableRows.reduce(
       (n, r) => n + (r.content ? Buffer.byteLength(r.content, 'utf8') : 0),
       0,
     );
     if (loadedBytes > SKILL_PLAN_MAX_BODY_BYTES) {
       throw new GraphQLError(
-        `skillPlan: the nodes in scope carry ${loadedBytes} bytes of content, over the ${SKILL_PLAN_MAX_BODY_BYTES}-byte ceiling. Narrow \`memories\`, or work in batches; this surface does not silently truncate.`,
+        `skillPlan: the nodes in scope carry ${loadedBytes} bytes of content, over the ${SKILL_PLAN_MAX_BODY_BYTES}-byte ceiling. ${narrowHint}, or work in batches; this surface does not silently truncate.`,
         { extensions: { code: 'BAD_USER_INPUT' } },
       );
     }
@@ -615,10 +854,10 @@ export const skillQueries = {
     // outranks every other class, which is exactly right here: nothing below
     // it is knowable.
     const lockedIds = new Set(
-      declaredRows.filter((r) => isCiphertext(r.content)).map((r) => r.id),
+      actionableRows.filter((r) => isCiphertext(r.content)).map((r) => r.id),
     );
 
-    const skillNodes = declaredRows
+    const skillNodes = actionableRows
       .map((r) => ({
         // NEVER hand-built. `${memory.urn}:${loc}` looks right and is wrong for
         // a memory stored in a compound or legacy spelling — and this URN is
@@ -659,7 +898,9 @@ export const skillQueries = {
     }
     // Per host: one name on a node's Claude and Codex declarations is by
     // design, and two nodes sharing a Codex name collide only for Codex.
-    const collisions = lintCollisions(skillNodes, host);
+    const collisions = selectedRefs === undefined
+      ? lintCollisions(skillNodes, host)
+      : await selectedFileCollisions(ctx, access, skillNodes, host);
     // A collision finding names its node by URN AND memory (lint sets
     // `memory: node.memoryUrn`). The URN alone can name two nodes; within one
     // memory it cannot, so the pair is exact. Attaching by URN alone handed a
@@ -705,6 +946,7 @@ export const skillQueries = {
     });
 
     const fileFor = new Map<string, FileFacts>();
+    const duplicateSelectedFiles = new Set<string>();
     /** Directory names that paired with a node AND were selected for it. */
     const selectedDirs = new Set<string>();
     // Sorted so the selection is a property of the DATA rather than of the
@@ -731,12 +973,15 @@ export const skillQueries = {
       // it. That is the duplicate-directory outcome §4a exists to prevent,
       // arriving through a different door.
       //
-      // One node keeps ONE directory: the first by name wins, and every other
-      // claimant is reported as an orphan — a file this plan will not
-      // maintain, which is what an orphan IS operationally and what `--prune`
-      // acts on. The class table does not name this case; reported to @Eli
-      // rather than invented as a tenth class.
-      if (fileFor.has(paired.id)) continue;
+      // One node keeps ONE directory: the first by name wins. An unscoped
+      // plan reports every other claimant as an orphan; narrowed plans skip
+      // orphan assessment, so they must REFUSE the in-scope node instead of
+      // silently hiding its duplicate. The class table does not name this
+      // case; reported to @Eli rather than invented as a tenth class.
+      if (fileFor.has(paired.id)) {
+        if (selectedRefs !== undefined || scopeSelection !== null) duplicateSelectedFiles.add(paired.id);
+        continue;
+      }
       fileFor.set(paired.id, facts);
       selectedDirs.add(f.dirName);
     }
@@ -801,6 +1046,7 @@ export const skillQueries = {
         ((WRITES_A_FILE.has(verdict.class) && !protectsLocalEdit && !missingProvenanceId) ||
           ((forceLocalEdit || forceMissingProvenance) && forcedAction !== 'REMOVE')) &&
         !hasError &&
+        !duplicateSelectedFiles.has(nf.id) &&
         !ambiguousFilesystemAlias &&
         !targetOccupied;
 
@@ -828,7 +1074,16 @@ export const skillQueries = {
 
       const exportPlan =
         input.intent === 'EXPORT'
-          ? buildExportPlan({
+          ? duplicateSelectedFiles.has(nf.id)
+            ? {
+                action: 'REFUSE' as const,
+                preservesExistingFile: true,
+                reasons: [{
+                  code: 'multiple-installed-files',
+                  message: 'More than one installed directory names this task. Resolve the duplicates before exporting; this plan changes neither file.',
+                }],
+              }
+            : buildExportPlan({
               driftClass: verdict.class ?? null,
               parseFailure: verdict.parseFailure === true,
               hasFile: selectedFile !== null,
@@ -941,7 +1196,8 @@ export const skillQueries = {
     // (@codex P1, PR #1318). Matched by filesystem equivalence, not `toLowerCase`
     // (`isHostReservedName`; @copilot, PR #1318): an alias of the name is the same directory.
     const hostRow = requireSkillHost(host);
-    const orphans = files
+    const orphanAssessmentSkipped = selectedRefs !== undefined || scopeSelection !== null;
+    const orphans = (orphanAssessmentSkipped ? [] : files)
       .filter((f) => !selectedDirs.has(f.dirName))
       .filter((f) => !isHostReservedName(hostRow, f.dirName))
       .map((f) => ({
@@ -965,14 +1221,129 @@ export const skillQueries = {
       // overstated the population this plan judged. Reporting only `judged`
       // would hide that the read saw more. Both, and the gap between them is
       // a fact about the corpus rather than a discrepancy in the report.
-      scanned: declaredRows.length,
+      scanned: selectedRefs === undefined
+        ? declaredRows.length
+        : declaredRows.filter((row) => hasDeclarationKey(row.properties)).length,
       judged: skillNodes.length,
       unrecognized,
+      orphanAssessmentSkipped,
+      scopeSelection,
+      selectionResults,
     };
-  },
+}
+
+export const skillQueries = {
+  /** Existing unscoped and memory-scoped plan; plugin callers stay on this operation. */
+  skillPlan: (_: unknown, { input }: { input: SkillPlanInput }, ctx: Context) => planSkills(input, ctx),
+  /** Individual installed skill files only; plugin bundles have no node selector. */
+  selectedSkillFilePlan: (
+    _: unknown,
+    { input }: { input: SelectedSkillFilePlanInput },
+    ctx: Context,
+  ) => planSkills({ intent: 'EXPORT', host: input.host, files: input.files, force: input.force }, ctx, input.nodes),
 };
 
 /** The node body for a urn, read from the already-loaded set. */
 function findContent(nodes: SkillNode[], id: string): string {
   return nodes.find((n) => (n as SkillNode & { _id: string })._id === id)?.content ?? '';
+}
+
+function hasDeclarationKey(properties: unknown): boolean {
+  return typeof properties === 'object' && properties !== null && !Array.isArray(properties) &&
+    DECLARATION_KEYS.some((key) => Object.prototype.hasOwnProperty.call(properties, key));
+}
+
+/**
+ * A selected export still competes for names with EVERY readable enabled
+ * declaration for its host. This scan is metadata-only and paged to the end;
+ * the 500-node/body cap applies to selected content, never to collision proof.
+ * A failed page rejects the whole query, so an incomplete census cannot yield
+ * an executable WRITE or MOVE.
+ */
+async function selectedFileCollisions(
+  ctx: Context,
+  access: Awaited<ReturnType<typeof memoryAccessFilter>>,
+  selected: (SkillNode & { _id: string })[],
+  host: string,
+): Promise<Finding[]> {
+  const names = new Set(selected.flatMap((node) => {
+    const declaration = declaredSkill(node.properties, host);
+    return declaration?.enable === true && storedName(declaration) !== '' ? [declaration.name] : [];
+  }));
+  if (names.size === 0) return [];
+
+  // Only the fact of a second claimant is needed. Keeping every matching row
+  // and calling lintCollisions would make one widely reused name quadratic in
+  // both report construction and message size.
+  const claimantCounts = new Map([...names].map((name) => [name, 0]));
+  const selectedIds = new Set(selected.map((node) => node._id));
+  for (const node of selected) {
+    const declaration = declaredSkill(node.properties, host);
+    if (declaration?.enable === true && names.has(declaration.name)) {
+      claimantCounts.set(declaration.name, Math.min(2, (claimantCounts.get(declaration.name) ?? 0) + 1));
+    }
+  }
+  let cursor: string | undefined;
+  let scanned = 0;
+  let loadedBytes = 0n;
+  while (true) {
+    // Keep ID discovery, the DB-side byte check and the JSON fetch in one
+    // snapshot. Otherwise a row growing between the check and fetch could
+    // transfer an unbounded body, or a moved row could bypass the access gate.
+    const { pageIds, page } = await ctx.db.$transaction(async (tx) => {
+      const ids = await tx.node.findMany({
+        where: {
+          deletedAt: null,
+          OR: DISCOVERY_OR,
+          AND: [access, { memory: { deletedAt: null } }],
+        } as never,
+        select: { id: true },
+        orderBy: { id: 'asc' },
+        take: 200,
+        ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
+      });
+      if (scanned + ids.length > SKILL_PLAN_MAX_COLLISION_CENSUS_NODES) {
+        throw new GraphQLError('selectedSkillFilePlan: the collision census is too large to complete safely.', {
+          extensions: { code: 'BAD_USER_INPUT' },
+        });
+      }
+      const pageIds = ids.map((row) => row.id);
+      if (pageIds.length === 0) return { pageIds, page: [] as { id: string; properties: Prisma.JsonValue | null }[] };
+      const sizes = await tx.$queryRaw<{ bytes: bigint }[]>`
+        SELECT COALESCE(SUM(octet_length(properties::text)), 0)::bigint AS bytes
+        FROM nodes WHERE id IN (${Prisma.join(pageIds)})
+      `;
+      loadedBytes += sizes[0]?.bytes ?? 0n;
+      if (loadedBytes > BigInt(SKILL_PLAN_MAX_COLLISION_CENSUS_BYTES)) {
+        throw new GraphQLError('selectedSkillFilePlan: the collision census properties exceed the safe byte ceiling.', {
+          extensions: { code: 'BAD_USER_INPUT' },
+        });
+      }
+      const page = await tx.node.findMany({
+        where: { id: { in: pageIds }, deletedAt: null, AND: [access, { memory: { deletedAt: null } }] } as never,
+        select: { id: true, properties: true },
+      });
+      return { pageIds, page };
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead });
+    scanned += pageIds.length;
+    for (const row of page) {
+      if (selectedIds.has(row.id)) continue;
+      const declaration = declaredSkill(row.properties, host);
+      if (declaration?.enable !== true || !names.has(declaration.name)) continue;
+      claimantCounts.set(declaration.name, Math.min(2, (claimantCounts.get(declaration.name) ?? 0) + 1));
+    }
+    if (pageIds.length < 200) break;
+    cursor = pageIds[pageIds.length - 1]!;
+  }
+  return selected.flatMap((node) => {
+    const declaration = declaredSkill(node.properties, host);
+    if (declaration?.enable !== true || (claimantCounts.get(declaration.name) ?? 0) < 2) return [];
+    return [{
+      urn: node.urn,
+      memory: node.memoryUrn,
+      rule: 'skill-name-collision',
+      severity: 'error' as const,
+      message: `stores skill name "${declaration.name}", and another readable enabled declaration does too — one name, one skill directory; rename one or supersede the fork`,
+    }];
+  });
 }

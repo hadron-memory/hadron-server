@@ -3,7 +3,10 @@ import { createHmac, randomUUID } from 'crypto';
 import { assertLocWritable, LocProtectedError } from '../lib/protectedLoc.js';
 import {
   assertGovernedWrite,
-  GOVERNED_ROLES,
+  assertRoleDeclaredForWrite,
+  RoleNotDeclaredError,
+  governedKindsOf,
+  roleIsOrDescendsFrom,
   type GovernedKind,
   mergedGovernedState,
   RoleGovernedError,
@@ -26,6 +29,7 @@ import {
   editorFromAuth,
   diffNodeChanges,
 } from '../lib/nodeRevisionSnapshot.js';
+import { authoredContentChanged, clearNodeAuthorship } from '../lib/nodeAuthorship.js';
 import {
   parseUrnInput,
   assertFullyQualifiedUrn,
@@ -46,6 +50,8 @@ import {
   type SafeUrnEmission,
 } from '../lib/urnEmit.js';
 import { portalUrlForUrn } from '../lib/portalUrl.js';
+import { userUrn } from '../lib/userHandle.js';
+import { nodeContentValidationState } from '../lib/nodeContentValidation.js';
 import { findLiveUrnAliasTargets, dedupeById } from '../lib/urnAlias.js';
 import { validateParentRel, InvalidParentRelError } from '../lib/parentRel.js';
 import type { NodeWhere } from '../lib/retrieval/nodeWhere.js';
@@ -145,12 +151,13 @@ import {
   encryptNodeFieldsWithKey,
 } from '../lib/nodeCrypto.js';
 import { resolveSuppliedKey, MemoryUnlockError } from '../lib/memoryUnlock.js';
-import { resolveNodeRef } from '../lib/entityRef/nodeRef.js';
+import { resolveNodeRef, isConcealedNodeRefAmbiguity } from '../lib/entityRef/nodeRef.js';
 import { resolveChannelRefId } from '../lib/entityRef/channelRef.js';
 import { sortSiblings } from '../lib/siblingOrder.js';
 import { renderRunNodeBundle } from '../lib/runNodeRender.js';
 import {
   NodeNotFoundError,
+  AmbiguousLegacyUrnError,
   NodeAbstractTooLongError,
   InvalidContentScopeError,
 } from '../lib/entityRef/errors.js';
@@ -175,13 +182,31 @@ import {
 } from '../api/graphql/schema/resolvers.mutation.session.js';
 import { HADRON_SERVER_VERSION, MCP_SURFACE_CAPABILITIES, getDeploymentInfo } from './deploymentInfo.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
+import { locateTeamChatChannel } from '../api/graphql/schema/resolvers.teamChat.js';
 // #1005: the SHARED App-participation predicate (#943) — reused here so
 // reconnect recovery admits exactly whom startSession admitted, rather than a
 // narrower member-row copy that would drift from it.
 import { isAppParticipant, getAccessibleMemoryIds as gqlAccessibleMemoryIds } from '../api/graphql/schema/resolvers.helpers.js';
-import { loadAppWorkerActivity } from '../api/graphql/schema/resolvers.worker.js';
+import { composeWorkerPrompt, loadAppWorkerActivity } from '../api/graphql/schema/resolvers.worker.js';
 import { splitNodeUrnTolerant, nodeFragmentRefusal } from '../lib/splitNodeUrnTolerant.js';
 import { safeEqual } from '../lib/constantTime.js';
+
+/** Keep alias ambiguity concealed from callers who cannot read any claimant. */
+async function resolveNodeRefForAuth(
+  ref: string,
+  auth: AuthContext,
+  contextMemoryId?: string,
+): Promise<{ id: string }> {
+  try {
+    return await resolveNodeRef(db, ref, contextMemoryId);
+  } catch (error) {
+    if (await isConcealedNodeRefAmbiguity(db, error,
+      (memoryId) => canReadMemory(db, auth, memoryId))) {
+      throw new NodeNotFoundError(ref);
+    }
+    throw error;
+  }
+}
 
 /**
  * Annotate a node projection that was reached through a `#<fragment>` URN.
@@ -217,8 +242,14 @@ import { resolveSearchScope, canReadScope, resolveScopeByNameInApp, type SearchS
 // Spec 049 Phase 6 — the register block on hadron_whoami's bound rows.
 import { resolveRegister, renderDerivedBlocks } from '../lib/resolveRegister.js';
 import { attendeeMentionTokens } from '../lib/channelReadState.js';
+import {
+  markOwnTeamChatRead,
+  maybeAdvanceOwnChannelRead,
+  teamAttentionAvailable,
+  teamAttentionPilotOperatorEnabled,
+} from '../lib/teamAttention.js';
 import { resolveOrgRef } from '../lib/entityRef/orgRef.js';
-import type { PrismaClient, SessionType, Prisma } from '../generated/prisma/index.js';
+import { Prisma, type PrismaClient, type SessionType, type NodeContentValidationOutcome } from '../generated/prisma/index.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -348,16 +379,30 @@ export function mcpDoorCanReplay(
   if (kind !== 'task' && kind !== 'review') return true;
   for (const [key, value] of Object.entries(fields)) {
     if (value === undefined) continue;
+    // #937 — a revision precondition replays through governed UPDATE doors,
+    // but is intentionally absent from every CREATE door.
+    if (key === 'expectedRevision') {
+      if (op !== 'update') return false;
+      continue;
+    }
     if (key === 'isRunnable') {
       if (kind !== 'task' || (op === 'create' && value !== true)) return false;
       continue;
     }
     if (key === 'role') {
-      if (kind !== 'review' || (op === 'create' && value !== 'review')) return false;
-      // The review door refuses ANOTHER governed value ("spec" has its own
-      // door), so only null, 'review' or an ordinary role replays (@copilot,
-      // PR #1305).
-      if (typeof value === 'string' && value !== 'review' && GOVERNED_ROLES.includes(value)) return false;
+      // #1345 review (@codex): the review CREATE door now sets any role in the
+      // review family it is asked for (`review` or a dotted `review.*`), so a
+      // generic create of `review.security` replays there.
+      if (kind !== 'review' || (op === 'create' && !(typeof value === 'string' && roleIsOrDescendsFrom(value, 'review')))) {
+        return false;
+      }
+      // The review door refuses ANOTHER governed family ("spec" and every
+      // `spec.*` sub-role have their own door), while `review.*` remains owned
+      // by this door (#1322). Null and ordinary open roles also replay.
+      if (
+        typeof value === 'string' &&
+        governedKindsOf({ role: value }).some((entry) => entry.kind !== 'review')
+      ) return false;
       continue;
     }
     if (!GOVERNED_MCP_DOOR_FIELDS.includes(key)) return false;
@@ -535,7 +580,7 @@ export async function resolveEdgeRefs(
   const resolved: ResolvedEdge[] = [];
   for (const edge of edges) {
     try {
-      const { id: targetNodeId } = await resolveNodeRef(db, edge.targetId, sourceMemoryId);
+      const { id: targetNodeId } = await resolveNodeRefForAuth(edge.targetId, auth, sourceMemoryId);
       // Fetch the target's loc so the edge loc can be derived at write time.
       const tgt = await db.node.findUnique({
         where: { id: targetNodeId },
@@ -637,7 +682,8 @@ export async function addEdge(args: {
       where: { id: rawSource },
       select: { id: true, loc: true, memoryId: true, deletedAt: true },
     });
-    if (!found || found.deletedAt) {
+    // #1316: a node in a memory hidden from this caller answers as a missing one.
+    if (!found || found.deletedAt || (await isMemoryHiddenFrom(auth, found.memoryId, 'write'))) {
       return { error: `Source node not found: "${rawSource}".` };
     }
     sourceNode = { id: found.id, loc: found.loc, memoryId: found.memoryId };
@@ -654,7 +700,10 @@ export async function addEdge(args: {
     // it to the parent and bake that into a derived edge loc.
     const sourceFragRefusal = nodeFragmentRefusal(rawSource, sourceFrag);
     if (sourceFragRefusal) return { error: `Source: ${sourceFragRefusal}` };
-    const sourceMem = await resolveMemoryByUrn(sourceMemoryUrn);
+    // #1316: hidden from this caller ⇒ the missing branch, BEFORE the node
+    // lookup — otherwise a missing loc answers "Source node not found" and so
+    // confirms the memory exists.
+    const sourceMem = await resolveVisibleMemoryByUrn(auth, sourceMemoryUrn, 'write');
     if (!sourceMem) {
       return { error: `Source memory not found: "${sourceMemoryUrn}".` };
     }
@@ -674,7 +723,7 @@ export async function addEdge(args: {
 
   let targetNodeId: string;
   try {
-    ({ id: targetNodeId } = await resolveNodeRef(db, rawTarget, sourceNode.memoryId));
+    ({ id: targetNodeId } = await resolveNodeRefForAuth(rawTarget, auth, sourceNode.memoryId));
   } catch (e) {
     if (e instanceof NodeNotFoundError) {
       return { error: `Edge target not found: "${e.ref}"` };
@@ -873,15 +922,30 @@ function workerPortalUrl(urn: string | null | undefined): string | null {
   return urn ? portalUrlForUrn(urn) : null;
 }
 
-/** Build a full urn:node: URN from a loc and memoryId. Caches memory URNs. */
-const memoryUrnCache = new Map<string, string>();
-async function nodeUrn(loc: string, memoryId: string): Promise<string> {
-  let memUrn = memoryUrnCache.get(memoryId);
-  if (!memUrn) {
-    const mem = await db.memory.findUnique({ where: { id: memoryId }, select: { urn: true } });
-    memUrn = mem?.urn ?? memoryId;
-    memoryUrnCache.set(memoryId, memUrn);
-  }
+/** Read the current stored Memory URN; a rename may come through GraphQL or another process. */
+async function loadMemoryUrn(memoryId: string): Promise<string> {
+  const mem = await db.memory.findUnique({ where: { id: memoryId }, select: { urn: true } });
+  return mem?.urn ?? memoryId;
+}
+
+/** Share one Memory lookup only among projections within the same render. */
+function memoizedMemoryUrnLookup(): (memoryId: string) => Promise<string> {
+  const pending = new Map<string, Promise<string>>();
+  return (memoryId) => {
+    let lookup = pending.get(memoryId);
+    if (!lookup) {
+      lookup = loadMemoryUrn(memoryId);
+      pending.set(memoryId, lookup);
+    }
+    return lookup;
+  };
+}
+
+/** Build a full urn:node: URN from a loc and the current Memory URN. */
+async function nodeUrn(
+  loc: string, memoryId: string, memoryUrnOf = loadMemoryUrn,
+): Promise<string> {
+  const memUrn = await memoryUrnOf(memoryId);
   // Grammar-v2 node URN (#697 emission flip). Shared with the global-search
   // node adapter via urnEmit (src/lib/urnEmit.ts) so the two surfaces can't
   // drift on node-URN shape. The SAFE variant is load-bearing here: this is
@@ -898,24 +962,16 @@ async function nodeUrn(loc: string, memoryId: string): Promise<string> {
  * emitted href could point somewhere other than the node being displayed.
  * Edge-neighbour URNs are display-only and use the plain string form.
  */
-async function nodeUrnResult(loc: string, memoryId: string): Promise<SafeUrnEmission> {
-  let memUrn = memoryUrnCache.get(memoryId);
-  if (!memUrn) {
-    const mem = await db.memory.findUnique({ where: { id: memoryId }, select: { urn: true } });
-    memUrn = mem?.urn ?? memoryId;
-    memoryUrnCache.set(memoryId, memUrn);
-  }
+async function nodeUrnResult(
+  loc: string, memoryId: string, memoryUrnOf = loadMemoryUrn,
+): Promise<SafeUrnEmission> {
+  const memUrn = await memoryUrnOf(memoryId);
   return safeNodeUrnV2Result(memUrn, loc);
 }
 
 /** Build a full hrn:edge: URN from an edge loc and its memoryId (spec 037). */
 async function edgeUrn(loc: string, memoryId: string): Promise<string> {
-  let memUrn = memoryUrnCache.get(memoryId);
-  if (!memUrn) {
-    const mem = await db.memory.findUnique({ where: { id: memoryId }, select: { urn: true } });
-    memUrn = mem?.urn ?? memoryId;
-    memoryUrnCache.set(memoryId, memUrn);
-  }
+  const memUrn = await loadMemoryUrn(memoryId);
   return safeEdgeUrnV2(memUrn, loc);
 }
 
@@ -1093,6 +1149,54 @@ async function resolveMemoryByUrn(
   return aliased ? (candidates.find((m) => m.id === aliased.id) ?? null) : null;
 }
 
+/**
+ * Resolve a memory URN exactly as a tool's MISSING branch sees it (#1316):
+ * null when no such memory exists, and ALSO null when it exists but is hidden
+ * from this caller — so the tool's own `if (!memory) return <missing text>`
+ * answers both, byte for byte, from the same line.
+ *
+ * Folding the check into resolution, rather than refusing later, is the
+ * point. Each tool used to resolve first (only a missing memory refused
+ * there) and deny afterwards with its own text, so "exists but not yours"
+ * differed from "no such memory" — and memory URNs are guessable. A refusal
+ * placed any later than the missing branch leaks through whatever runs in
+ * between: loc validation, a node lookup, the other end of a move.
+ *
+ * Hidden means:
+ *   - `'read'`  — the caller cannot read the memory (`canReadMemory`).
+ *   - `'write'` — the caller can neither write NOR read it. A caller who may
+ *     read it already knows it exists and keeps the tool's actionable write
+ *     denial; a caller who may write is never narrowed, even without read.
+ */
+async function resolveVisibleMemoryByUrn(
+  auth: AuthContext,
+  rawUrn: string,
+  need: 'read' | 'write',
+): Promise<{ id: string; urn: string } | null> {
+  const memory = await resolveMemoryByUrn(rawUrn);
+  if (!memory) return null;
+  return (await isMemoryHiddenFrom(auth, memory.id, need)) ? null : memory;
+}
+
+/**
+ * The predicate behind {@link resolveVisibleMemoryByUrn}, for a tool whose
+ * missing branch answers after a lookup by some other key (a node PK): true
+ * when this memory must be treated as absent for this caller (#1316).
+ */
+async function isMemoryHiddenFrom(
+  auth: AuthContext,
+  memoryId: string,
+  need: 'read' | 'write',
+): Promise<boolean> {
+  // A no-op TODAY, and deliberately kept: every branch of the MCP gates has
+  // write ⇒ read, so a writer is also a reader and the read check alone would
+  // admit them. This makes "never narrow a writer" hold by construction instead
+  // of by that implication, which lives in another file and nothing pins. A
+  // mutant deleting this line therefore survives — that is expected, not a gap.
+  if (need === 'write' && (await canWriteToMemory(db, auth, memoryId))) return false;
+  return !(await canReadMemory(db, auth, memoryId));
+}
+
 // Access control lives in ./access-control.ts.
 
 /**
@@ -1108,6 +1212,11 @@ async function resolveMemoryByUrn(
 type ReadProjectionNode = {
   id: string;
   revSeq: number;
+  authorshipKind: 'TASK' | 'HUMAN' | null;
+  authoredByTask: string | null;
+  authoredByRevision: number | null;
+  authoredByHuman: string | null;
+  authoredAt: Date | null;
   name: string;
   loc: string;
   memoryId: string;
@@ -1174,16 +1283,92 @@ function mcpDecryptOrMark(
   return 'locked';
 }
 
+type ReadValidationReport = {
+  nodeId: string;
+  nodeRevSeq: number;
+  validationTaskId: string;
+  validationTaskRevSeq: number;
+  outcome: NodeContentValidationOutcome;
+};
+
+/**
+ * One report lookup for an MCP batch, with each node's OWN current revision
+ * and memory. DISTINCT ON over all reports would pick a future revision for
+ * some nodes; the lateral index lookup keeps single-node selection semantics.
+ */
+async function batchValidationReports(nodes: readonly ReadProjectionNode[]): Promise<Map<string, ReadValidationReport>> {
+  if (nodes.length === 0) return new Map();
+  const values = Prisma.join(nodes.map((n) => Prisma.sql`(${n.id}::text, ${n.memoryId}::text, ${n.revSeq}::integer)`));
+  const rows = await db.$queryRaw<ReadValidationReport[]>(Prisma.sql`
+    WITH wanted(node_id, memory_id, rev_seq) AS (VALUES ${values})
+    SELECT w.node_id AS "nodeId", r.node_rev_seq AS "nodeRevSeq",
+           r.validation_task_id AS "validationTaskId",
+           r.validation_task_rev_seq AS "validationTaskRevSeq", r.outcome
+    FROM wanted w
+    JOIN LATERAL (
+      SELECT node_rev_seq, validation_task_id, validation_task_rev_seq, outcome
+      FROM node_content_validation_reports
+      WHERE node_id = w.node_id AND memory_id = w.memory_id AND node_rev_seq <= w.rev_seq
+      ORDER BY node_rev_seq DESC, reported_at DESC, id DESC
+      LIMIT 1
+    ) r ON TRUE
+  `);
+  return new Map(rows.map((row) => [row.nodeId, row]));
+}
+
+async function batchReadableTaskRefs(
+  nodes: readonly ReadProjectionNode[],
+  reports: ReadonlyMap<string, ReadValidationReport>,
+  auth: AuthContext,
+  memoryUrnOf: (memoryId: string) => Promise<string>,
+): Promise<Map<string, string | null>> {
+  const ids = [...new Set([
+    ...nodes.map((n) => n.authoredByTask),
+    ...[...reports.values()].map((r) => r.validationTaskId),
+  ].filter((id): id is string => !!id))];
+  if (ids.length === 0) return new Map();
+  const tasks = await db.node.findMany({
+    where: { id: { in: ids }, deletedAt: null },
+    select: { id: true, loc: true, memoryId: true },
+  });
+  // Resolve all referenced memories through the shared bulk gate. Calling
+  // canReadMemory once per task memory rebuilds the caller's access map for
+  // every distinct memory in a large batch.
+  const readable = await filterReadableMemoryIds(db, auth, tasks.map((task) => task.memoryId));
+  const refs = await Promise.all(tasks.map(async (task) => [
+    task.id,
+    readable.has(task.memoryId) ? await nodeUrn(task.loc, task.memoryId, memoryUrnOf) : null,
+  ] as const));
+  return new Map(refs);
+}
+
+async function batchHumanNames(nodes: readonly ReadProjectionNode[]): Promise<Map<string, string>> {
+  const ids = [...new Set(nodes.map((n) => n.authoredByHuman).filter((id): id is string => !!id))];
+  if (ids.length === 0) return new Map();
+  const users = await db.user.findMany({ where: { id: { in: ids }, deletedAt: null }, select: { id: true, handle: true } });
+  return new Map(users.filter((user) => !!user.handle).map((user) => [user.id, user.handle!]));
+}
+
 async function renderNodeReadProjection(
   node: ReadProjectionNode,
   scope: 'content' | 'abstract' | 'all',
-  opts: { locked?: boolean } = {},
+  opts: {
+    locked?: boolean;
+    auth?: AuthContext;
+    batch?: {
+      reports: ReadonlyMap<string, ReadValidationReport>;
+      taskRefs: ReadonlyMap<string, string | null>;
+      humanNames: ReadonlyMap<string, string>;
+    };
+    memoryUrnOf?: (memoryId: string) => Promise<string>;
+  } = {},
 ): Promise<string> {
   const revision = node.revSeq;
-  const { urn, fellBack: urnFellBack } = await nodeUrnResult(node.loc, node.memoryId);
+  const memoryUrnOf = opts.memoryUrnOf ?? memoizedMemoryUrnLookup();
+  const { urn, fellBack: urnFellBack } = await nodeUrnResult(node.loc, node.memoryId, memoryUrnOf);
   const outgoingLines = await Promise.all(
     node.outgoingEdges.map(async (e) => {
-      const targetUrn = await nodeUrn(e.target.loc, e.target.memoryId);
+      const targetUrn = await nodeUrn(e.target.loc, e.target.memoryId, memoryUrnOf);
       // #322: surface the target's stable PK alongside the URN so callers can
       // reference it by id (immutable across move/rename) instead of the URN.
       return `  - ${targetUrn} (id: ${e.target.id}) (${e.target.name}) — ${e.name ?? e.loc}`;
@@ -1191,7 +1376,7 @@ async function renderNodeReadProjection(
   );
   const incomingLines = await Promise.all(
     node.incomingEdges.map(async (e) => {
-      const sourceUrn = await nodeUrn(e.source.loc, e.source.memoryId);
+      const sourceUrn = await nodeUrn(e.source.loc, e.source.memoryId, memoryUrnOf);
       return `  - ${sourceUrn} (id: ${e.source.id}) (${e.source.name}) — ${e.name ?? e.loc}`;
     }),
   );
@@ -1230,6 +1415,44 @@ async function renderNodeReadProjection(
   // URL: a link that points somewhere other than the node is worse than none.
   const portalUrl = urnFellBack ? null : portalUrlForUrn(urn);
 
+  // #1326: a source node may be readable while its author/validator task
+  // lives in another tenant's memory. Resolve task addresses only after that
+  // memory's own content gate; never print the stored task id as a fallback.
+  const readableTask = async (id: string | null): Promise<string | null> => {
+    if (!id || !opts.auth) return null;
+    if (opts.batch) return opts.batch.taskRefs.get(id) ?? null;
+    const task = await db.node.findUnique({
+      where: { id }, select: { loc: true, memoryId: true, deletedAt: true },
+    });
+    if (!task || task.deletedAt || !(await canReadMemory(db, opts.auth, task.memoryId))) return null;
+    return nodeUrn(task.loc, task.memoryId, memoryUrnOf);
+  };
+  let authorshipLine = '';
+  if (node.authorshipKind === 'TASK') {
+    const taskRef = await readableTask(node.authoredByTask);
+    authorshipLine = taskRef && node.authoredByRevision != null
+      ? `Authored by task: ${taskRef} @ revision ${node.authoredByRevision}`
+      : 'Authored by task: restricted';
+  } else if (node.authorshipKind === 'HUMAN' && node.authoredByHuman) {
+    const handle = opts.batch
+      ? opts.batch.humanNames.get(node.authoredByHuman)
+      : (await db.user.findFirst({
+          where: { id: node.authoredByHuman, deletedAt: null }, select: { handle: true },
+        }))?.handle;
+    authorshipLine = handle ? `Authored by human: ${userUrn(handle)}` : 'Authored by human';
+  }
+  const report = opts.batch
+    ? (opts.batch.reports.get(node.id) ?? null)
+    : await db.nodeContentValidationReport.findFirst({
+        where: { nodeId: node.id, memoryId: node.memoryId, nodeRevSeq: { lte: revision } },
+        orderBy: [{ nodeRevSeq: 'desc' }, { reportedAt: 'desc' }, { id: 'desc' }],
+      });
+  const validationState = nodeContentValidationState(revision, report);
+  const validatorRef = report ? await readableTask(report.validationTaskId) : null;
+  const validationLine = report
+    ? `Validation: ${validationState.toLowerCase()} (node revision ${report.nodeRevSeq}; validator ${validatorRef ? `${validatorRef} @ revision ${report.validationTaskRevSeq}` : 'restricted'})`
+    : 'Validation: unvalidated';
+
   // #186: surface nodeType so callers can tell `parent` from `info`.
   const meta = [
     `**${node.name}**`,
@@ -1240,6 +1463,8 @@ async function renderNodeReadProjection(
     `ID: ${node.id}`,
     `Revision: ${revision}`,
     portalUrl ? `URL: ${portalUrl}` : '',
+    authorshipLine,
+    validationLine,
     node.description ? `> ${node.description}` : '',
     `Type: ${node.nodeType}`,
     // #1201 (@codex P2, PR #1203). Without these a governed node reads as an
@@ -1311,6 +1536,7 @@ export function createMcpServerInstance(
    * keeps the pre-#1012 in-memory-only behaviour, so opting out costs nothing.
    */
   const clientKey = opts.clientKey ?? null;
+
   /**
    * #1009 — this MCP session replaced one the client had already been using
    * (it presented a session id this server did not know and re-initialized).
@@ -1434,15 +1660,43 @@ export function createMcpServerInstance(
       restrictToOrgId: auth.impersonation?.orgId,
     });
 
-  /** Member orgs as `- <urn> (<name>)` lines, for refusals that must say what IS available. */
+  /**
+   * Member orgs as `- <urn> (<name>)` lines, for surfaces that must say what IS
+   * available. #1412 review hardening, two ways tenant-editable text can abuse
+   * a diagnostic an agent reads on every connection:
+   * - `Organization.name` accepts CR/LF, and these lines ride inside
+   *   line-parsed output (`server_info`, the ORG_REQUIRED/org_not_found
+   *   refusals) — control characters collapse to a space so one org can never
+   *   forge an extra line (e.g. a second `server:` row).
+   * - Memberships and names are unbounded, so the block AND its query are
+   *   capped: findMany takes MEMBER_ORG_LINES rows (name-ascending,
+   *   deterministic) with a sibling count() for the exact omitted figure,
+   *   each name at ORG_NAME_RENDER_MAX chars — a connection-time diagnostic
+   *   must not scale its database transfer with the membership count.
+   */
+  const MEMBER_ORG_LINES = 10;
+  const ORG_NAME_RENDER_MAX = 100;
   const renderMemberOrgs = async (orgIds: string[]): Promise<string> => {
     if (orgIds.length === 0) return '  (no organization memberships)';
-    const orgs = await db.organization.findMany({
-      where: { id: { in: orgIds }, deletedAt: null },
-      select: { urn: true, name: true },
-      orderBy: { name: 'asc' },
-    });
-    return orgs.map((o) => `  - ${safeEmitEntityUrnV2('org', o.urn)} (${o.name})`).join('\n');
+    const where = { id: { in: orgIds }, deletedAt: null };
+    const [orgs, total] = await Promise.all([
+      db.organization.findMany({
+        where,
+        select: { urn: true, name: true },
+        orderBy: { name: 'asc' },
+        take: MEMBER_ORG_LINES,
+      }),
+      db.organization.count({ where }),
+    ]);
+    const oneLine = (name: string) => {
+      const flat = name.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, ' ');
+      return flat.length > ORG_NAME_RENDER_MAX ? `${flat.slice(0, ORG_NAME_RENDER_MAX - 1)}…` : flat;
+    };
+    const lines = orgs.map((o) => `  - ${safeEmitEntityUrnV2('org', o.urn)} (${oneLine(o.name)})`);
+    if (total > orgs.length) {
+      lines.push(`  … and ${total - orgs.length} more not shown`);
+    }
+    return lines.join('\n');
   };
 
   // Spec 026 — has the session called `hadron_list_apps` or `hadron_set_active_app`,
@@ -2084,12 +2338,10 @@ export function createMcpServerInstance(
       // Resolve via the shared helper — soft-delete filtering, trimming, and
       // bare-URN normalization all live in one place so every read-side
       // scoping point behaves consistently.
-      const mem = await resolveMemoryByUrn(memoryUrn);
+      // #1316: an unreadable memory takes the missing branch, not "Access denied".
+      const mem = await resolveVisibleMemoryByUrn(auth, memoryUrn, 'read');
       if (!mem) {
         return textResult(`Memory not found: '${memoryUrn}'. Use hadron_list_memories to see what's available.`);
-      }
-      if (!(await canReadMemory(db, auth, mem.id))) {
-        return textResult(`Access denied: '${memoryUrn}'.`);
       }
 
       // Store the bare URN from the DB row (the canonical form for downstream
@@ -2123,7 +2375,11 @@ export function createMcpServerInstance(
   // without needing to issue any other tool calls. Doesn't require an
   // active App, doesn't require an active memory, doesn't even require
   // read access on any memory — it returns server identity only, never
-  // any per-tenant data.
+  // any per-tenant data. The one #1372 exception: an authenticated
+  // caller with memberships and no resolved active org also gets their
+  // OWN selectable organizations (urn + display name, the same
+  // authorized candidate set hadron_set_active_org refuses with), so
+  // discovery doesn't require a deliberately wrong selection.
   //
   // Auth layering — the tool itself does NOT add gating because the MCP
   // transport already requires a valid AuthContext (App Key, User API Key,
@@ -2143,14 +2399,19 @@ export function createMcpServerInstance(
 
   server.tool(
     'hadron_server_info',
-    'Returns the identity of the hadron-server this MCP session is bound to: deployment URL, server version, the CAPABILITY tokens this build supports, and whether this connection was re-established. Useful when a caller has two MCP namespaces wired up and needs to know which one a tool call landed on (#190), and to check a feature is actually present BEFORE relying on it — a deployment behind the docs silently ignores arguments it does not know (#1006). Test for a capability token, not a version number; if the capabilities line is missing entirely the server predates this field and should not be trusted to bind workers. No arguments. Returns plain key:value pairs. Does NOT require an active App or any memory access.',
+    'Returns the identity of the hadron-server this MCP session is bound to: deployment URL, server version, the CAPABILITY tokens this build supports, and whether this connection was re-established. Useful when a caller has two MCP namespaces wired up and needs to know which one a tool call landed on (#190), and to check a feature is actually present BEFORE relying on it — a deployment behind the docs silently ignores arguments it does not know (#1006). Test for a capability token, not a version number; if the capabilities line is missing entirely the server predates this field and should not be trusted to bind workers. No arguments. Returns plain key:value lines — plus, for an authenticated caller whose active organization is unresolved (several memberships, none selected), a `Your memberships:` block listing the selectable organizations as `- <org URN> (<display name>)` per line: the happy-path discovery surface feeding hadron_set_active_org (#1372). Does NOT require an active App or any memory access.',
     {},
     async () => {
       const dep = getDeploymentInfo();
       const lines = [
         `server: ${dep.baseUrl}`,
         `version: ${dep.version}`,
-        `capabilities: ${MCP_SURFACE_CAPABILITIES.join(', ')}`,
+        `capabilities: ${[
+          ...MCP_SURFACE_CAPABILITIES,
+          // Probed exactly as the tools will admit the call: allowlists, a
+          // live App and current participation (#1362 review).
+          ...(auth.appId && (await teamAttentionAvailable(chatCtx(), auth.appId)) ? ['team-attention'] : []),
+        ].join(', ')}`,
       ];
       // Spec 049 Phase 1: the resolved active organization and which rung of
       // the ladder chose it — the one place a caller can ASK which tenancy the
@@ -2164,8 +2425,14 @@ export function createMcpServerInstance(
         } else if (r.kind === 'user-owned') {
           lines.push('active organization: none — no memberships; the org view is your user-owned memories');
         } else {
+          // #1372: name the candidates, not just the count — until here, the
+          // only MCP enumeration of a caller's memberships was the
+          // org_not_found refusal of a DELIBERATELY wrong selection.
+          // renderMemberOrgs is the sanctioned renderer (the same authorized
+          // member set hadron_set_active_org refuses with), so this lists
+          // options without widening anything.
           lines.push(
-            `active organization: unresolved — ${r.memberOrgIds.length} memberships and none selected; the scope ladder will refuse org-scoped reads with org_required until hadron_set_active_org or the call names one`,
+            `active organization: unresolved — ${r.memberOrgIds.length} memberships and none selected; the scope ladder will refuse org-scoped reads with org_required until hadron_set_active_org or the call names one. Your memberships:\n${await renderMemberOrgs(r.memberOrgIds)}`,
           );
         }
       } else if (auth.appId && !auth.userId) {
@@ -2337,7 +2604,7 @@ export function createMcpServerInstance(
 
   server.tool(
     'hadron_set_active_org',
-    'Set — or with clear:true, drop — the active ORGANIZATION for this client (spec 049 / D-2026-09-13-003): the tenancy an org-scoped read runs against (the cor:api:100 org view), persisted per client instance like hadron_set_active_app. You need it only when you belong to SEVERAL organizations and neither the call nor an org-owned active App names one; the resolution ladder is: an org named in the call › the active App\'s organization when that App is org-owned (a personal App has none) › this selection › your single membership › no membership at all ⇒ your own user-owned memories. With two or more memberships and none of those, org-scoped reads refuse with ORG_REQUIRED and list your memberships. Selecting an organization is not a search scope and attaches nothing: the org picks the tenancy, a scope (spec 049 Phase 3) picks the view. AppKey callers carry their org in the credential and cannot use this. hadron_server_info reports the currently resolved organization and which rung chose it.',
+    'Set — or with clear:true, drop — the active ORGANIZATION for this client (spec 049 / D-2026-09-13-003): the tenancy an org-scoped read runs against (the cor:api:100 org view), persisted per client instance like hadron_set_active_app. You need it only when you belong to SEVERAL organizations and neither the call nor an org-owned active App names one; the resolution ladder is: an org named in the call › the active App\'s organization when that App is org-owned (a personal App has none) › this selection › your single membership › no membership at all ⇒ your own user-owned memories. With two or more memberships and none of those, org-scoped reads refuse with ORG_REQUIRED and list your memberships. Selecting an organization is not a search scope and attaches nothing: the org picks the tenancy, a scope (spec 049 Phase 3) picks the view. AppKey callers carry their org in the credential and cannot use this. hadron_server_info reports the currently resolved organization and which rung chose it — and, while yours is unresolved, lists your selectable organizations (#1372).',
     {
       org: z
         .string()
@@ -2905,7 +3172,8 @@ export function createMcpServerInstance(
       const { memoryUrn, loc, fragment } = splitNodeUrn(rawUrn);
       const fragRefusal = nodeFragmentRefusal(rawUrn, fragment);
       if (fragRefusal) return textResult(fragRefusal);
-      const memory = await resolveMemoryByUrn(memoryUrn);
+      // #1316: hidden from this caller ⇒ the missing branch; a reader keeps the denial.
+      const memory = await resolveVisibleMemoryByUrn(auth, memoryUrn, 'write');
       if (!memory) {
         return textResult(`Memory not found: "${memoryUrn}".`);
       }
@@ -2996,6 +3264,7 @@ export function createMcpServerInstance(
             where: { loc_memoryId: { loc, memoryId } },
             select: { id: true, deletedAt: true },
           });
+          let sectionChanged = false;
           if (prior && !prior.deletedAt) {
             await tx.$queryRaw`SELECT "id" FROM "nodes" WHERE "id" = ${prior.id} FOR UPDATE`;
             // Reconcile only while the row is still in this memory.
@@ -3009,6 +3278,7 @@ export function createMcpServerInstance(
               );
             }
             const changes = diffNodeChanges(current, upsertArgs.update);
+            sectionChanged = authoredContentChanged(changes);
             if (changes.length > 0) {
               await createNodeRevision(tx, {
                 id: generateId(),
@@ -3018,7 +3288,7 @@ export function createMcpServerInstance(
           }
           const row = await tx.node.upsert({
             ...upsertArgs,
-            update: { ...upsertArgs.update, revisionContentHash: revisionStateHashRefreshMarker() },
+            update: { ...upsertArgs.update, ...(sectionChanged ? clearNodeAuthorship() : {}), revisionContentHash: revisionStateHashRefreshMarker() },
           });
           return row.id;
         });
@@ -3050,6 +3320,7 @@ export function createMcpServerInstance(
       memoryUrns: z.array(z.string()).min(1).optional().describe('Scope search to this SET of memories (each a fully-qualified memory URN, hrn:mem:<root>:<slug>) — a targeted multi-memory search. Must be non-empty (for "everything", use allMemories). Mutually exclusive with memoryUrn and allMemories.'),
       allMemories: z.boolean().optional().describe('Search across ALL memories you can read — the org-wide "does anyone know about X?" probe (stemmed + relevance-ranked in keyword mode). The explicit, self-documenting form of omitting a memory scope. Mutually exclusive with memoryUrn / memoryUrns.'),
       isRunnable: z.boolean().optional().describe('Filter by runnable status (applies in every mode). true = only task nodes (Node.isRunnable=true) — the canonical "tasks I can run" predicate hadron_run_task gates on. false = only nodes explicitly marked non-runnable (most nodes leave it NULL, so false does NOT include them). Omit to ignore runnable status. Spec cor:api:060.'),
+      role: z.string().optional().describe('Filter by Node.role family in every mode. Segment-boundary prefix semantics: "spec" matches "spec" and dotted descendants such as "spec.rule", but never "special" or "specification" (#1322). Node.role remains an open string; this is a query filter, not role validation.'),
       objectType: z.string().optional().describe('#725 — collection facet: only nodes whose objectType equals this (the domain-object discriminator, e.g. "competitor" / "insight"). Orthogonal to nodeType. Composes with query/mode + where.'),
       scope: z.string().optional().describe('Spec 049: search under a named scope — a scope id, a scope NAME (resolved in the active App\'s context), "app" (the active App\'s attached memories), or "global" (your active organization\'s view). Omitted with no memory selector: the ladder applies (active scope › active App › active organization), and the result says which. An explicit memoryUrn / memoryUrns / allMemories outranks the ambient scope but still intersects with one named here.'),
       brief: z.boolean().optional().describe('Return index info only: name, description, edges'),
@@ -3059,7 +3330,7 @@ export function createMcpServerInstance(
       granularity: z.enum(['node', 'chunk']).optional().describe('node (default): one entry per matching node, ranked by best-chunk similarity for content-chunk indexes. chunk: return matching passages (span text + character offsets + chunk index + parent node URN), useful for RAG context-stuffing. **chunk requires mode:vector** — hybrid + chunk is out of v1 (the design call for how RRF fuses with passage-level results was deferred). Spec 033 US2 FR-022.'),
       where: z.record(z.string(), z.unknown()).optional().describe('Structured predicate over a node\'s `properties`/`data` JSONB (#719) — filters, then the chosen mode ranks the survivors (composes with keyword/vector/hybrid/regex and survey/browse). A node is EITHER a branch (exactly one of `and`/`or`/`not`) OR a leaf: a `path` (array of JSON keys, e.g. ["sourceKind"]) plus exactly ONE operator — eq | ne | in | lt | lte | gt | gte | between | exists | contains. `field`: "properties" (default) | "data". `as`: "text" (default) | "number" | "datetime" | "boolean" — number/datetime route through DB guards so unparseable values drop the row (never an error); `contains` is jsonb @> containment. Bounded: depth ≤ 4, ≤ 32 leaves, path ≤ 8. Example: {"and":[{"path":["sourceKind"],"eq":"substack"},{"path":["extractedAt"],"as":"datetime","gte":"2026-07-04T00:00:00Z"}]}'),
     },
-    async ({ query, mode, parentRel, memoryUrn, memoryUrns, allMemories, isRunnable, objectType, brief, limit, minScore, expand, granularity, where, scope }) => {
+    async ({ query, mode, parentRel, memoryUrn, memoryUrns, allMemories, isRunnable, role, objectType, brief, limit, minScore, expand, granularity, where, scope }) => {
       try {
         validateParentRel(parentRel);
       } catch (e) {
@@ -3292,6 +3563,7 @@ export function createMcpServerInstance(
             filter: {
               memoryIds: filterMemoryIds,
               isRunnable: isRunnable ?? undefined,
+              role: role ?? undefined,
               objectType: objectType ?? undefined,
               locPrefix: filterLocPrefix,
               // #719 — structured JSONB predicate; findNodes validates it and
@@ -3315,6 +3587,7 @@ export function createMcpServerInstance(
         // invalid regex, etc. The MCP contract surfaces tool errors as text.
         return textResult(e instanceof Error ? e.message : 'Search failed.');
       }
+      const memoryUrnOf = memoizedMemoryUrnLookup();
 
       // ── Chunk (passage) rendering ──────────────────────────────────────────
       // findNodes passages carry parentNodeId + parentNodeUrn; re-fetch the
@@ -3332,7 +3605,7 @@ export function createMcpServerInstance(
         const lines: string[] = [];
         for (const p of passages) {
           const parent = parentById.get(p.parentNodeId);
-          const urn = parent ? await nodeUrn(parent.loc, parent.memoryId) : p.parentNodeUrn;
+          const urn = parent ? await nodeUrn(parent.loc, parent.memoryId, memoryUrnOf) : p.parentNodeUrn;
           const name = parent?.name ?? '';
           // Guard the score like renderHit does — a passage without a numeric
           // score renders without the trailing marker rather than crashing.
@@ -3404,7 +3677,6 @@ export function createMcpServerInstance(
       // Reduce, not Math.max(...scores): `limit` is caller-controlled, so a huge
       // page would spread too many args into Math.max and throw RangeError.
       const topScore = scores.length ? scores.reduce((m, s) => (s > m ? s : m), -Infinity) : null;
-
       const renderHit = async (hit: {
         node: {
           id: string;
@@ -3425,7 +3697,7 @@ export function createMcpServerInstance(
         score: number | null;
       }): Promise<string> => {
         const n = hit.node;
-        const { urn, fellBack: urnFellBack } = await nodeUrnResult(n.loc, n.memoryId);
+        const { urn, fellBack: urnFellBack } = await nodeUrnResult(n.loc, n.memoryId, memoryUrnOf);
         const score = hit.score;
         // #497: show the score relative to the top hit (mode-independent signal).
         const relStr =
@@ -3473,7 +3745,7 @@ export function createMcpServerInstance(
           if (edges.length) {
             const edgeStrs = await Promise.all(
               edges.map(async (e) => {
-                const targetUrn = await nodeUrn(e.target!.loc, e.target!.memoryId);
+                const targetUrn = await nodeUrn(e.target!.loc, e.target!.memoryId, memoryUrnOf);
                 return `→ ${targetUrn} (${e.name ?? e.loc})`;
               }),
             );
@@ -3545,13 +3817,17 @@ export function createMcpServerInstance(
       // 0.0.14 → 0.0.15 bump). `#data` still decomposes normally and is
       // reported below rather than silently serving the parent.
       const { memoryUrn, loc, fragment, literalLoc } = splitNodeUrnTolerant(rawUrn);
-      const memory = await resolveMemoryByUrn(memoryUrn);
-      if (!memory) {
-        return textResult(`Memory not found: "${memoryUrn}".`);
-      }
-      if (!(await canReadMemory(db, auth, memory.id))) {
-        return textResult(`Memory not found: "${memoryUrn}".`);
-      }
+      // A historical memory prefix may itself have several holders. For a
+      // NODE read, defer that ambiguity to resolveNodeRefForAuth, which checks
+      // the current node claimants before exposing any error.
+      const memory = await resolveMemoryByUrn(memoryUrn).catch((error) => {
+        if (error instanceof AmbiguousLegacyUrnError) return null;
+        throw error;
+      });
+      const sourceReadable = !!memory && await canReadMemory(db, auth, memory.id);
+      const missing = () => textResult(sourceReadable
+        ? `Node "${rawUrn}" not found.`
+        : `Memory not found: "${memoryUrn}".`);
 
       // The projection's include, named so the two candidate lookups below
       // cannot drift apart.
@@ -3586,19 +3862,49 @@ export function createMcpServerInstance(
       // a tombstoned row returns "not found" instead of leaking its last
       // content.
       let matchedLiteral = false;
-      let node = await db.node.findFirst({
-        where: { loc: literalLoc ?? loc, memoryId: memory.id, deletedAt: null },
-        include: nodeReadInclude,
-      });
+      let node = sourceReadable && memory
+        ? await db.node.findFirst({
+            where: { loc: literalLoc ?? loc, memoryId: memory.id, deletedAt: null },
+            include: nodeReadInclude,
+          })
+        : null;
       if (node && literalLoc) matchedLiteral = true;
-      if (!node && literalLoc) {
+      if (!node && literalLoc && sourceReadable && memory) {
         node = await db.node.findFirst({
           where: { loc, memoryId: memory.id, deletedAt: null },
           include: nodeReadInclude,
         });
       }
       if (!node) {
-        return textResult(`Node "${rawUrn}" not found.`);
+        // #1391 — the old memory or loc can have vanished on a move. Resolve
+        // the full address (LIVE first, alias on miss) before gating the node
+        // at its CURRENT memory. Even when the old memory is unreadable, a live
+        // occupant there must beat a historical alias to another node.
+        const aliasRefs = literalLoc && fragment
+          ? [rawUrn, rawUrn.slice(0, rawUrn.lastIndexOf('#'))]
+          : [rawUrn];
+        let movedId: string | undefined;
+        for (const aliasRef of aliasRefs) {
+          try {
+            ({ id: movedId } = await resolveNodeRefForAuth(aliasRef, auth));
+            if (aliasRef === rawUrn && literalLoc) matchedLiteral = true;
+            break;
+          } catch (e) {
+            if (e instanceof NodeNotFoundError) continue;
+            throw e;
+          }
+        }
+        if (!movedId) return missing();
+        const target = await db.node.findFirst({
+          where: { id: movedId, deletedAt: null },
+          select: { memoryId: true },
+        });
+        if (!target || !(await canReadMemory(db, auth, target.memoryId))) return missing();
+        node = await db.node.findFirst({
+          where: { id: movedId, memoryId: target.memoryId, deletedAt: null },
+          include: nodeReadInclude,
+        });
+        if (!node) return missing();
       }
 
       // Spec 031 — contentScope-driven response shape. Default 'content'
@@ -3637,6 +3943,7 @@ export function createMcpServerInstance(
       // drift between the single-read and batch-read surfaces (cor:api:040:01).
       const projection = await renderNodeReadProjection(current, scope, {
         locked: lockState === 'locked',
+        auth,
       });
 
       // Record usage event (fire-and-forget), AFTER the projection is in hand:
@@ -3666,7 +3973,9 @@ export function createMcpServerInstance(
       //
       // A LOCKED node still records: the projection is what crossed the
       // boundary, and the caller did read this node's addressable state.
-      recordNodeRead(db, { id: current.id, loc, memoryId: current.memoryId }, auth);
+      // An alias read names the node at its CURRENT address; never pair the
+      // historical input loc with the target memory in the usage event.
+      recordNodeRead(db, { id: current.id, loc: current.loc, memoryId: current.memoryId }, auth);
 
       // #696: `#data` addresses the node's DATA, not the node — and before the
       // urn-lib-js 0.0.15 bump the fragment stayed glued to the loc, so such a
@@ -3826,6 +4135,7 @@ export function createMcpServerInstance(
         const projectionInclude = readProjectionInclude;
 
         const nodeByRef = new Map<string, ReadProjectionNode & { id: string }>();
+        const movedFallbacks: UrnRef[] = [];
 
         // URN refs: group by memory so each distinct memory is gated + fetched
         // once (not N findFirsts).
@@ -3836,9 +4146,12 @@ export function createMcpServerInstance(
           else byMemory.set(r.memoryUrn, [r]);
         }
         for (const [mu, group] of byMemory) {
-          const mem = await resolveMemoryByUrn(mu);
+          const mem = await resolveMemoryByUrn(mu).catch((error) => {
+            if (error instanceof AmbiguousLegacyUrnError) return null;
+            throw error;
+          });
           if (!mem || !(await canReadMemory(db, auth, mem.id))) {
-            for (const r of group) unavailable.push(r.raw);
+            movedFallbacks.push(...group);
             continue;
           }
           // Both candidates for a fragmented ref, in ONE query: the literal
@@ -3860,13 +4173,74 @@ export function createMcpServerInstance(
             const literal = r.literalLoc ? rowByLoc.get(r.literalLoc) : undefined;
             const row = literal ?? rowByLoc.get(r.loc);
             if (!row) {
-              unavailable.push(r.raw);
+              movedFallbacks.push(r);
               continue;
             }
             // A literal match resolved nothing away, so it carries no notice.
             if (literal) fragmentByRef.delete(r.raw);
             nodeByRef.set(r.raw, row as unknown as ReadProjectionNode & { id: string });
           }
+        }
+
+        // #1391: old addresses are a fallback only after the grouped live
+        // lookup missed. Bound resolver concurrency, then coalesce the target
+        // liveness probes, memory gates and projections for the WHOLE fallback
+        // set. Without this, 200 historical refs did their target gate and
+        // projection serially, turning a batch read back into N+1 round trips.
+        const movedIdByRef = new Map<string, string>();
+        let nextFallback = 0;
+        const resolveFallbackWorker = async () => {
+          while (nextFallback < movedFallbacks.length) {
+            const r = movedFallbacks[nextFallback++];
+            const aliasRefs = r.literalLoc && fragmentByRef.has(r.raw)
+              ? [r.raw, r.raw.slice(0, r.raw.lastIndexOf('#'))]
+              : [r.raw];
+            for (const aliasRef of aliasRefs) {
+              try {
+                const { id } = await resolveNodeRefForAuth(aliasRef, auth);
+                movedIdByRef.set(r.raw, id);
+                if (aliasRef === r.raw && r.literalLoc) fragmentByRef.delete(r.raw);
+                break;
+              } catch (e) {
+                if (e instanceof NodeNotFoundError) continue;
+                if (e instanceof AmbiguousLegacyUrnError) {
+                  // One bad historical address cannot suppress unrelated
+                  // readable results in an explicit batch (cor:api:040:03).
+                  break;
+                }
+                throw e;
+              }
+            }
+          }
+        };
+        await Promise.all(Array.from(
+          { length: Math.min(8, movedFallbacks.length) },
+          () => resolveFallbackWorker(),
+        ));
+        const movedIds = [...new Set(movedIdByRef.values())];
+        const movedProbes = movedIds.length
+          ? await db.node.findMany({
+              where: { id: { in: movedIds }, deletedAt: null, memory: { deletedAt: null } },
+              select: { id: true, memoryId: true },
+            })
+          : [];
+        const readableMemory = new Map<string, boolean>();
+        await Promise.all([...new Set(movedProbes.map((n) => n.memoryId))].map(async (memoryId) => {
+          readableMemory.set(memoryId, await canReadMemory(db, auth, memoryId));
+        }));
+        const allowedProbes = movedProbes.filter((n) => readableMemory.get(n.memoryId));
+        const movedRows = allowedProbes.length
+          ? await db.node.findMany({
+              where: { OR: allowedProbes.map((n) => ({ id: n.id, memoryId: n.memoryId })), deletedAt: null },
+              include: projectionInclude,
+            })
+          : [];
+        const movedRowById = new Map(movedRows.map((n) => [n.id, n]));
+        for (const r of movedFallbacks) {
+          const id = movedIdByRef.get(r.raw);
+          const row = id && movedRowById.get(id);
+          if (row) nodeByRef.set(r.raw, row as unknown as ReadProjectionNode & { id: string });
+          else unavailable.push(r.raw);
         }
 
         // PK refs: gate BEFORE fetching the projection, mirroring the URN path
@@ -3940,6 +4314,7 @@ export function createMcpServerInstance(
       const readEvents: UsageNodeRef[] = [];
       let bytes = 0;
       let truncated = false;
+      const visible: ReadProjectionNode[] = [];
       for (const selected of ordered) {
         const n = await loadCurrentReadProjection(selected.id, selected.memoryId);
         if (
@@ -3951,13 +4326,31 @@ export function createMcpServerInstance(
           unavailable.push(echoByNodeId.get(selected.id) ?? selected.id);
           continue;
         }
+        visible.push(n);
+      }
+      // #1326: the single-node renderer queries one latest report and up to
+      // two task refs per node. At the 200-node batch cap those lookups were
+      // serialized inside this loop. Prefetch only after reconciliation, so
+      // each report is judged against the revision the batch will actually
+      // render, and gate each distinct task memory before exposing its URN.
+      const reports = await batchValidationReports(visible);
+      const memoryUrnOf = memoizedMemoryUrnLookup();
+      const [taskRefs, humanNames] = await Promise.all([
+        batchReadableTaskRefs(visible, reports, auth, memoryUrnOf),
+        batchHumanNames(visible),
+      ]);
+      const batchProvenance = { reports, taskRefs, humanNames };
+      for (const n of visible) {
         if (truncated) {
-          omitted.push(await nodeUrn(n.loc, n.memoryId));
+          omitted.push(await nodeUrn(n.loc, n.memoryId, memoryUrnOf));
           continue;
         }
         const lockState = mcpDecryptOrMark(n); // spec 041 — same posture as hadron_get_node
         const projection = await renderNodeReadProjection(n, scope, {
           locked: lockState === 'locked',
+          auth,
+          batch: batchProvenance,
+          memoryUrnOf,
         });
         // Measured on the ANNOTATED block, which is what actually ships: sizing
         // the bare projection and pushing the annotated one lets a block cross
@@ -3967,7 +4360,7 @@ export function createMcpServerInstance(
         const size = Buffer.byteLength(block, 'utf8');
         if (blocks.length > 0 && bytes + size > BATCH_READ_MAX_BYTES) {
           truncated = true;
-          omitted.push(await nodeUrn(n.loc, n.memoryId));
+          omitted.push(await nodeUrn(n.loc, n.memoryId, memoryUrnOf));
           continue;
         }
         blocks.push(block);
@@ -4101,9 +4494,10 @@ export function createMcpServerInstance(
       // its own projection, so it records here.
       recordNodeRead(db, { id: node.id, loc: node.loc, memoryId: node.memoryId }, auth);
 
-      const { urn, fellBack: urnFellBack } = await nodeUrnResult(node.loc, node.memoryId);
+      const memoryUrnOf = memoizedMemoryUrnLookup();
+      const { urn, fellBack: urnFellBack } = await nodeUrnResult(node.loc, node.memoryId, memoryUrnOf);
       const outEdgeLines = await Promise.all(node.outgoingEdges.map(async (e) => {
-        const targetUrn = await nodeUrn(e.target.loc, (e.target as any).memoryId);
+        const targetUrn = await nodeUrn(e.target.loc, (e.target as any).memoryId, memoryUrnOf);
         // #322: surface the target's stable PK alongside the URN.
         return `  - ${targetUrn} (id: ${e.target.id}) (${e.target.name}) — ${e.name ?? e.loc}`;
       }));
@@ -4364,6 +4758,7 @@ export function createMcpServerInstance(
         return compareLocs(a.loc, b.loc);
       });
 
+      const memoryUrnOf = memoizedMemoryUrnLookup();
       const lines = await Promise.all(sortedRows.map(async (row) => {
         const indent = '  '.repeat(row.depth - 1);
         // Direct-child count uses the full node set (not just visible
@@ -4377,7 +4772,7 @@ export function createMcpServerInstance(
           c.loc.split(':').length === rowSegCount + 1,
         ).length;
         const childInfo = childCount > 0 ? ` (${childCount} children)` : '';
-        const nUrn = await nodeUrn(row.loc, row.memoryId);
+        const nUrn = await nodeUrn(row.loc, row.memoryId, memoryUrnOf);
         if (row.node) {
           return `${indent}├── ${nUrn} — ${row.node.name}${childInfo}`;
         }
@@ -4497,7 +4892,7 @@ export function createMcpServerInstance(
       nodeType: z.string().optional().describe('Node classification (free-form; canonical values: abstract, chat, data, info (default), prompt, record, reference, system). Running is gated by isRunnable, independent of nodeType.'),
       objectType: z.string().optional().describe('#725 — collection this node belongs to (the domain-object discriminator, e.g. "competitor" / "insight"), orthogonal to nodeType. On a memory with a property schema, it MUST name a declared collection and the node\'s properties are validated against it; free-form on an unschema\'d memory. Omit for an ordinary node.'),
       isRunnable: z.boolean().optional().describe('#1201 — REFUSED on this tool if true: a write producing a runnable node must go through hadron_create_task, because authoring something the platform will EXECUTE is not the same act as writing prose. Accepted only as false/omitted (the default). Independent of nodeType — a runnable node may carry any nodeType.'),
-      role: z.string().optional().describe('#1201 — what this node is FOR (open string). NOT nodeType (the platform-kind axis) and NOT objectType (the collection discriminator); role has no retrieval impact. Most values are inert, but the GOVERNED ones — "review", "spec" — are refused on this tool. Use hadron_create_review for a review; a spec is authored with the `hadron spec` CLI, its only authoring surface. The same applies to isRunnable — this tool cannot create a runnable node; use hadron_create_task.'),
+      role: z.string().optional().describe('#1201/#1322 — what this node is FOR (open string). NOT nodeType (the platform-kind axis) and NOT objectType (the collection discriminator); role does not affect default ranking, though hadron_find_nodes can filter by its dotted family. Most values are inert, but the GOVERNED families — "review" / "review.*" and "spec" / "spec.*" — are refused on this tool. Use hadron_create_review for a review; a spec is authored with the `hadron spec` CLI, its only authoring surface. The same applies to isRunnable — this tool cannot create a runnable node; use hadron_create_task.'),
       description: z.string().optional().describe('Short description'),
       abstract: z.string().optional().describe('Paragraph-length summary (max 2000 chars). Opt-in on hadron_get_node via the contentScope parameter. (hadron_find_nodes preview surfacing of abstract ships in spec 031 US2 — not yet live.) Empty + whitespace-only values normalize to null. Spec 031.'),
       content: z.string().optional().describe('Markdown content'),
@@ -4530,7 +4925,8 @@ export function createMcpServerInstance(
       const { memoryUrn, loc, fragment } = splitNodeUrn(rawUrn);
       const fragRefusal = nodeFragmentRefusal(rawUrn, fragment);
       if (fragRefusal) return textResult(fragRefusal);
-      const memory = await resolveMemoryByUrn(memoryUrn);
+      // #1316: hidden from this caller ⇒ the missing branch; a reader keeps the denial.
+      const memory = await resolveVisibleMemoryByUrn(auth, memoryUrn, 'write');
       if (!memory) {
         return textResult(`Memory not found: "${memoryUrn}".`);
       }
@@ -4936,6 +5332,19 @@ export function createMcpServerInstance(
           if (authoritative && !authoritative.deletedAt) throw LIVE_LOC_CONFLICT;
 
           const pre = await snapshotOverwrittenNode(tx);
+
+          // #1330 — H1 strict sub-roles, as writeNodeCore judges them (this
+          // handler is its parity implementation, so the gate is repeated here).
+          // Judged on `pre`, the tombstone as LOCKED by the snapshot, not on the
+          // unlocked `authoritative` read: a writer that takes no loc lock (git
+          // sync) could change the tombstone's role in between, and a stale
+          // prior role would make an undeclared one read as unchanged (#1400
+          // review). A refusal rolls the snapshot back with everything else.
+          await assertRoleDeclaredForWrite(tx, memoryId, {
+            role: role === undefined ? (pre?.role ?? null) : role,
+            priorRole: pre?.role ?? null,
+            runnableAfter: mergedGovernedState(pre, { role, isRunnable }).isRunnable,
+          });
           const written = await tx.node.upsert({
             ...upsertArgs,
             // Resurrect (#543) on the authoritative row, not the stale probe: a
@@ -4943,6 +5352,7 @@ export function createMcpServerInstance(
             // deleted while taking the new content.
             update: {
               ...upsertArgs.update,
+              ...(pre ? clearNodeAuthorship() : {}),
               ...(pre?.deletedAt ? { deletedAt: null, deletedBy: null } : {}),
             } as any,
           });
@@ -4962,6 +5372,7 @@ export function createMcpServerInstance(
         if (e === LIVE_LOC_CONFLICT) {
           return textResult(`Node already exists at "${rawUrn}" — use hadron_update_node.`);
         }
+        if (e instanceof RoleNotDeclaredError) return textResult(`[role_not_declared] ${e.message}`);
         if (e instanceof InlineEdgeEndpointError) return textResult(e.message);
         throw e;
       }
@@ -5013,14 +5424,15 @@ export function createMcpServerInstance(
 
   server.tool(
     'hadron_update_node',
-    'Partially update an existing node. Only the fields you provide are changed — everything else is preserved. The URN MUST be fully qualified (hrn:node:<root>:<memory>:<loc>).',
+    'Partially update an existing node. Only the fields you provide are changed — everything else is preserved. The URN MUST be fully qualified (hrn:node:<root>:<memory>:<loc>). Pass expectedRevision from hadron_get_node to refuse atomically if the node changed since you read it.',
     {
       urn: z.string().describe('Fully-qualified node URN, e.g. "hrn:node:acme.com:mmdata:review:sort-imports"'),
+      expectedRevision: z.number().int().positive().max(2_147_483_647).optional().describe('Optional positive Revision value from hadron_get_node. A mismatch refuses with [node_write_conflict]; omit for backward-compatible last-write-wins behavior.'),
       name: z.string().optional().describe('New node name'),
       nodeType: z.string().optional().describe('Node classification (free-form; canonical values: abstract, chat, data, info (default), prompt, record, reference, system). Changing nodeType does NOT change isRunnable or properties (e.g. claudeSkill) — a retyped runnable node stays runnable until you clear isRunnable yourself. Running is gated by isRunnable, not nodeType.'),
       objectType: z.string().optional().describe('#725 — collection this node belongs to (e.g. "competitor" / "insight"), orthogonal to nodeType. On a schema-governed memory it must name a declared collection and the resulting properties are validated against it. Omit to preserve.'),
       isRunnable: z.boolean().optional().describe('#1201 — REFUSED on this tool: making a node runnable, and RETIRING a runnable one, both go through hadron_update_task. Editing a node that is already runnable is refused here too, whatever this field says, because the result is still a runnable node. Omit to preserve. Independent of nodeType — retyping the node never changes this flag.'),
-      role: z.string().nullable().optional().describe('#1201 — what this node is FOR (open string). NOT nodeType and NOT objectType. Omit to preserve; null to clear. GOVERNED values ("review", "spec") are refused here — use hadron_update_review, or the `hadron spec` CLI for a spec — and so is EDITING a node that already carries one — the gate reads the resulting state, not the change — because a governed node must not be rewritable through the generic surface.'),
+      role: z.string().nullable().optional().describe('#1201/#1322 — what this node is FOR (open string). NOT nodeType and NOT objectType. Omit to preserve; null to clear. GOVERNED families ("review" / "review.*", "spec" / "spec.*") are refused here — use hadron_update_review, or the `hadron spec` CLI for a spec — and so is EDITING a node that already carries one — the gate reads the resulting state, not the change — because a governed node must not be rewritable through the generic surface.'),
       description: z.string().optional().describe('New short description'),
       abstract: z.string().nullable().optional().describe('New paragraph-length summary (max 2000 chars). Pass `null` to clear; omit to preserve. Empty + whitespace-only normalize to null. Surfaced on hadron_get_node via contentScope; hadron_find_nodes preview surfacing ships in spec 031 US2. STALENESS: the abstract is fingerprinted against the content AS OF THIS CALL, so passing `abstract` and `content` TOGETHER keeps them in sync and needs no ordering. If you instead change `content` in a LATER call, this abstract is marked `abstract-stale` on read until you re-save it (re-sending the identical text is enough) or assert `abstractStillAccurate`. It also arms for an abstract that was NEVER fingerprinted — one saved against an empty node, where a body arrived later (#1128). Read the ABSENCE of the marker narrowly: it means "checked against this exact content" ONLY on a read that could have shown it — `contentScope` of `abstract` or `all`, on a memory that is unencrypted or unlocked. Under the default `content` scope, or on a locked memory, no marker is emitted either way and its absence says nothing at all. Spec 031/032.'),
       content: z.string().nullable().optional().describe('New markdown content. Pass `null` to clear; omit to preserve. Spec 032 widened the schema from string-only to allow null per the consistent partial-update convention; clearing content interacts with abstractOriginHash maintenance (FR-006/FR-007). Changing content WITHOUT also passing `abstract` arms the `abstract-stale` marker on this node — that is intended (the abstract was written against the old content and may no longer describe it). Pass both together, or assert `abstractStillAccurate` if you have re-read the abstract and it survives the edit.'),
@@ -5040,7 +5452,7 @@ export function createMcpServerInstance(
       })).optional().describe('REPLACES the node\'s ENTIRE outgoing edge set — it does NOT merge. Any existing edge you do not re-supply here is DELETED, silently and without a diff. Unlike every other argument on this tool (omit `content` and content is preserved, omit `tags` and tags are preserved), omitting an edge does not preserve it. To change ONE edge, use hadron_update_edge instead; to add one without touching the others, use hadron_create_edge. If you must use this argument, read the node first and re-supply every edge you want to keep.'),
       reason: z.string().optional().describe('Why this change was made (stored in revision history)'),
     },
-    async ({ urn: rawUrn, name, nodeType, objectType, isRunnable, role, description, abstract, content, abstractStillAccurate, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges, reason }) => {
+    async ({ urn: rawUrn, expectedRevision, name, nodeType, objectType, isRunnable, role, description, abstract, content, abstractStillAccurate, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges, reason }) => {
       // Spec 022: qualification at the API boundary.
       try {
         assertFullyQualifiedUrn(rawUrn, 'node');
@@ -5052,7 +5464,8 @@ export function createMcpServerInstance(
       const { memoryUrn, loc, fragment } = splitNodeUrn(rawUrn);
       const fragRefusal = nodeFragmentRefusal(rawUrn, fragment);
       if (fragRefusal) return textResult(fragRefusal);
-      const memory = await resolveMemoryByUrn(memoryUrn);
+      // #1316: hidden from this caller ⇒ the missing branch; a reader keeps the denial.
+      const memory = await resolveVisibleMemoryByUrn(auth, memoryUrn, 'write');
       if (!memory) {
         return textResult(`Memory not found: "${memoryUrn}".`);
       }
@@ -5096,7 +5509,7 @@ export function createMcpServerInstance(
                 context: 'node-write',
                 surface: 'mcp',
                 canReplay: (kind) =>
-                  mcpDoorCanReplay({ name, nodeType, objectType, isRunnable, role, description, abstract, content, abstractStillAccurate, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges, reason }, kind, 'update'),
+                  mcpDoorCanReplay({ name, nodeType, objectType, isRunnable, role, description, abstract, content, abstractStillAccurate, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges, reason, expectedRevision }, kind, 'update'),
               }
             : {},
         );
@@ -5263,6 +5676,9 @@ export function createMcpServerInstance(
       if (nodeData !== undefined) data.data = nodeData as any;
       if (llmModel !== undefined) data.llmModel = llmModel;
       if (aiAgent !== undefined) data.aiAgent = aiAgent;
+      // Keep the authored plaintext projection for the row-lock comparison.
+      // The write payload below may become fresh randomized ciphertext.
+      const plaintextUpdates = { ...data };
 
       // Spec 041 (PR-2): encrypted memory — encrypt the provided encrypted-
       // envelope fields with this session's key (gate + key resolved above,
@@ -5281,7 +5697,7 @@ export function createMcpServerInstance(
         if (data.data !== undefined) data.data = (enc.data ?? null) as never;
       }
 
-      if (Object.keys(data).length > 0 || resolvedEdges !== null) {
+      if (Object.keys(data).length > 0 || resolvedEdges !== null || expectedRevision !== undefined) {
         // Spec 049 S4: the write holds the address lock and the gate runs
         // under it — the check above is the fast refusal, this the
         // authoritative one (Copilot on PR #1165).
@@ -5318,29 +5734,42 @@ export function createMcpServerInstance(
                 `[write_conflict] ${rawUrn} moved, was deleted or changed memory while this update waited — re-read it and retry.`,
               );
             }
+            // #937 — bind a client-side read/modify/write to the Revision it
+            // actually read. The row lock + #1339 reconciliation above make
+            // this the same atomic revSeq guard used by writeNodeCore. Do not
+            // include the current value in the refusal: write authority is not
+            // necessarily read authority, and a conflict must not become a
+            // revision oracle.
+            if (expectedRevision !== undefined && current.revSeq !== expectedRevision) {
+              throw new ScopeGraphQLError(
+                `Node at loc "${loc}" changed since it was read — re-read and retry.`,
+                { extensions: { code: 'NODE_WRITE_CONFLICT', loc, memoryId: memory.id } },
+              );
+            }
+            // #1330 — H1 strict sub-roles on the locked row, as writeNodeCore.
+            await assertRoleDeclaredForWrite(tx, memory.id, {
+              role: role === undefined ? current.role : role,
+              priorRole: current.role,
+              runnableAfter: mergedGovernedState(current, { role, isRunnable }).isRunnable,
+            });
+            // A guard-only call is a useful no-op check and must not manufacture
+            // a history row or advance the live revision.
+            if (Object.keys(data).length === 0 && resolvedEdges === null) return;
+            // Snapshot the ciphertext row, but compare the caller's plaintext
+            // with a decrypted copy. An identical encrypted save is a no-op.
+            const currentForDiff = updKey
+              ? decryptNodeFieldsWithKey({ ...current }, updKey)
+              : current;
+            const changedFields = diffNodeChanges(currentForDiff, plaintextUpdates);
+            if (changedFields.length === 0 && resolvedEdges === null) return;
             await createNodeRevision(tx, {
               id: generateId(),
               ...buildNodeRevisionSnapshot(current, editorFromAuth(auth), {
                 revLabel: reason,
-                changes: diffNodeChanges(current, {
-                  name,
-                  nodeType,
-                  objectType,
-                  isRunnable,
-                  role,
-                  description,
-                  abstract: normalizedAbstract,
-                  content: data.content,
-                  abstractOriginHash: nextAbstractOriginHash,
-                  seq,
-                  tags,
-                  properties,
-                  data: data.data,
-                  llmModel,
-                  aiAgent,
-                }),
+                changes: changedFields,
               }),
             });
+            if (authoredContentChanged(changedFields)) Object.assign(data, clearNodeAuthorship());
             data.revisionContentHash = revisionStateHashRefreshMarker();
             const updated = Object.keys(data).length > 0
               ? await tx.node.update({ where: { id: existing.id }, data })
@@ -5360,6 +5789,10 @@ export function createMcpServerInstance(
           if (e instanceof LocProtectedError) return textResult(`[loc_protected] ${e.message}`);
           if (e instanceof NodeMovedDuringWriteError) return textResult(e.message);
           if (e instanceof InlineEdgeEndpointError) return textResult(e.message);
+          if (e instanceof RoleNotDeclaredError) return textResult(`[role_not_declared] ${e.message}`);
+          if (e instanceof ScopeGraphQLError && e.extensions?.code === 'NODE_WRITE_CONFLICT') {
+            return textResult(`[node_write_conflict] ${e.message}`);
+          }
           throw e;
         }
       }
@@ -5479,7 +5912,10 @@ export function createMcpServerInstance(
     }
     const fragRefusal = nodeFragmentRefusal(rawUrn, fragment);
     if (fragRefusal) return textResult(fragRefusal);
-    const memory = await resolveMemoryByUrn(memoryUrn);
+    // #1316: hidden from this caller ⇒ the missing branch. Before this the door's
+    // own concealment answered instead, echoing the RESOLVED id it was handed —
+    // the victim memory's internal id, to a caller who cannot read it.
+    const memory = await resolveVisibleMemoryByUrn(auth, memoryUrn, 'write');
     if (!memory) return textResult(`Memory not found: "${memoryUrn}".`);
     try {
       validateLoc(loc);
@@ -5505,12 +5941,26 @@ export function createMcpServerInstance(
     // that is legitimate — it just belongs to the task's own door rather than
     // to the generic surface, which is exactly what the before-union-after gate
     // now requires. Omitted still preserves, so an ordinary edit is unaffected.
-    const signal =
-      mode === 'create'
-        ? entry.signal.field === 'isRunnable'
-          ? { isRunnable: true }
-          : { role: entry.signal.value }
-        : {};
+    //
+    // #1345 review (@codex): a role-governed kind is a FAMILY since #1322, so
+    // the review create door sets the family member the caller names
+    // (`review.security`) — defaulting to the base `review` — and refuses one
+    // outside the family. Without this, `review.*` was governed away from the
+    // generic tool with no MCP route left to author it.
+    let signal: Record<string, unknown> = {};
+    if (mode === 'create') {
+      if (entry.signal.field === 'isRunnable') {
+        signal = { isRunnable: true };
+      } else {
+        const asked = fields.role;
+        if (asked != null && !(typeof asked === 'string' && roleIsOrDescendsFrom(asked, entry.signal.value))) {
+          return textResult(
+            `hadron_create_${kind}: "role" must be "${entry.signal.value}" or a dotted "${entry.signal.value}.<sub-role>" (got ${JSON.stringify(asked)}).`,
+          );
+        }
+        signal = { role: typeof asked === 'string' ? asked : entry.signal.value };
+      }
+    }
 
     try {
       const node = await (
@@ -5548,6 +5998,7 @@ export function createMcpServerInstance(
   // no argument.
   const taskUpdateArgs = {
     ...governedDoorArgs,
+    expectedRevision: z.number().int().positive().max(2_147_483_647).optional().describe('Optional positive Revision value from hadron_get_node. A mismatch refuses atomically with [node_write_conflict].'),
     isRunnable: z
       .boolean()
       .optional()
@@ -5556,11 +6007,21 @@ export function createMcpServerInstance(
 
   const reviewUpdateArgs = {
     ...governedDoorArgs,
+    expectedRevision: z.number().int().positive().max(2_147_483_647).optional().describe('Optional positive Revision value from hadron_get_node. A mismatch refuses atomically with [node_write_conflict].'),
     role: z
       .string()
       .nullable()
       .optional()
-      .describe('Set null to RETIRE this node from the review kind. Omit to preserve. This door is the only way to change it. Setting it to another GOVERNED value ("spec") is refused — that kind has its own door.'),
+      .describe('Set null to RETIRE this node from the review kind. Omit to preserve. This door is the only way to change it, including moving it between "review" and a dotted "review.<sub-role>" (#1322). Setting it to another GOVERNED family ("spec" / "spec.*") is refused — that kind has its own door.'),
+  };
+
+  // #1345 review (@codex): the review family is authored here, sub-roles included.
+  const reviewCreateArgs = {
+    ...governedDoorArgs,
+    role: z
+      .string()
+      .optional()
+      .describe('Which member of the review family to create: "review" (the default) or a dotted sub-role such as "review.security" (#1322). Anything outside the review family is refused.'),
   };
 
   server.tool(
@@ -5572,8 +6033,8 @@ export function createMcpServerInstance(
 
   server.tool(
     'hadron_create_review',
-    'Create a REVIEW node — a check on work performed. Reviews are not coding-specific: any work can be reviewed, and a review may be a SAFETY check, which is why removing or rewriting one is treated as an attack and why `hadron_create_node` refuses to author one. The review role is set by this tool, so you do not pass it. Reach for this when recording what must be verified about a piece of work, not when writing up the work itself.',
-    governedDoorArgs,
+    'Create a REVIEW node — a check on work performed. Reviews are not coding-specific: any work can be reviewed, and a review may be a SAFETY check, which is why removing or rewriting one is treated as an attack and why `hadron_create_node` refuses to author one. The review role is set by this tool: "review" by default, or pass a dotted review sub-role such as "review.security". Reach for this when recording what must be verified about a piece of work, not when writing up the work itself.',
+    reviewCreateArgs,
     async (args) => callGovernedDoor('review', 'create', args),
   );
 
@@ -5768,7 +6229,7 @@ export function createMcpServerInstance(
 
   server.tool(
     'hadron_replace_text',
-    "Search-and-replace a piece of text across MANY nodes in one call. Selection is the union of explicit node URNs and whole memories (memoryUrns), optionally narrowed to a subtree by 'prefix' (a parent loc — matches that node plus its descendants on ':' path boundaries, so 'auth' matches 'auth' and 'auth:tokens' but not 'authoring'; requires memoryUrns). Searches the chosen text fields (content, name, alias, description, abstract, tags); JSON fields are not touched. Literal substring match by default; set regex:true to treat oldText as a regular expression and newText as a replacement pattern (supports $1/$& backrefs). ALWAYS run with dryRun:true first to preview match counts before writing — this tool can rewrite a lot of nodes at once. Governed nodes and Channel addresses are protected and reported as skipped rather than searched. Honors write permissions, revision history (each change is undoable), and re-embeds changed nodes.",
+    "Search-and-replace a piece of text across MANY nodes in one call. Selection is the union of explicit node URNs and whole memories (memoryUrns), optionally narrowed to a subtree by 'prefix' (a parent loc — matches that node plus its descendants on ':' path boundaries, so 'auth' matches 'auth' and 'auth:tokens' but not 'authoring'; requires memoryUrns). Searches the chosen text fields (content, name, alias, description, abstract, tags); JSON fields are not touched. Literal substring match by default; set regex:true to treat oldText as a regular expression and newText as a replacement pattern (supports $1/$& backrefs). ALWAYS run with dryRun:true first to preview match counts before writing — this tool can rewrite a lot of nodes at once. Governed nodes and Channel addresses are protected and reported as skipped rather than searched. Multi-node runs are all-or-nothing: a node whose edited field would violate a field cap (e.g. the 2000-character abstract cap, whose refusal reports the edit's delta and remaining headroom) refuses the WHOLE batch before any write — nothing is partially applied; fix the edit and re-run. Honors write permissions, revision history (each change is undoable), and re-embeds changed nodes.",
     {
       oldText: z.string().describe('Text to find (literal substring), or a regular-expression source when regex:true. Must be non-empty.'),
       newText: z.string().describe('Replacement text. May be empty to delete the matched text. In regex mode, $1/$<name>/$& are honored.'),
@@ -5817,9 +6278,10 @@ export function createMcpServerInstance(
         );
 
         // Render a compact, URN-addressed summary.
+        const memoryUrnOf = memoizedMemoryUrnLookup();
         const lines = await Promise.all(
           result.results.map(async (r: { loc: string; memoryId: string; replacements: number; fields: Array<{ field: string; matches: number }> }) => {
-            const urn = await nodeUrn(r.loc, r.memoryId);
+            const urn = await nodeUrn(r.loc, r.memoryId, memoryUrnOf);
             const breakdown = r.fields.map((f) => `${f.field}×${f.matches}`).join(', ');
             return `  - ${urn} (${r.replacements}: ${breakdown})`;
           }),
@@ -6211,11 +6673,14 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         nodeFragmentRefusal(rawFrom, fromFrag) ?? nodeFragmentRefusal(rawTo, toFrag);
       if (moveRefusal) return textResult(moveRefusal);
 
-      const fromMemory = await resolveMemoryByUrn(fromMemoryUrn);
+      // #1316: BOTH ends conceal at the point their missing branch answers —
+      // a later refusal would leak through the loc validation and the source
+      // node lookup that run in between.
+      const fromMemory = await resolveVisibleMemoryByUrn(auth, fromMemoryUrn, 'write');
       if (!fromMemory) {
         return textResult(`Source memory not found: "${fromMemoryUrn}".`);
       }
-      const toMemory = await resolveMemoryByUrn(toMemoryUrn);
+      const toMemory = await resolveVisibleMemoryByUrn(auth, toMemoryUrn, 'write');
       if (!toMemory) {
         return textResult(`Target memory not found: "${toMemoryUrn}".`);
       }
@@ -6336,6 +6801,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
                   loc: toLoc,
                   name: newName,
                   memoryId: toMemory.id,
+                  ...clearNodeAuthorship(),
                   revisionContentHash: revisionStateHashRefreshMarker(),
                 },
               });
@@ -6620,16 +7086,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       return pending;
     };
     const rendered = await renderRunNodeBundle(node, args, {
-      memoryUrnOf: async (memoryId) => {
-        // Reuse the tool surface's own memoized memory-urn lookup.
-        let memUrn = memoryUrnCache.get(memoryId);
-        if (!memUrn) {
-          const mem = await db.memory.findUnique({ where: { id: memoryId }, select: { urn: true } });
-          memUrn = mem?.urn ?? memoryId;
-          memoryUrnCache.set(memoryId, memUrn);
-        }
-        return memUrn;
-      },
+      memoryUrnOf: memoizedMemoryUrnLookup(),
       // The run node's OWN memory was gated by loadNodeForRun; this gates each
       // dependency separately, because an edge can cross memories (#781).
       includeTarget: (target) => canRead(target.memoryId),
@@ -7301,7 +7758,13 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         if (session.workerId) {
           try {
             const worker = await db.worker.findUnique({ where: { id: session.workerId } });
-            const prompt = worker ? await resolvers.Worker.prompt(worker, {}, mcpCtx) : null;
+            // #1090: the composition itself carries the freshness facts, so
+            // the stamps describe the text printed below (one agent read — no
+            // parallel lookup that could race a template edit).
+            const briefing = worker
+              ? await composeWorkerPrompt(mcpCtx, worker)
+              : { text: null as string | null, renderedAt: null as Date | null, roleAgentUpdatedAt: null as Date | null };
+            const prompt = briefing.text;
             // #1029: the previous stint's handoff, delivered with the briefing
             // rather than left to be discovered. A fresh session does not know
             // there is anything to look for, so a design that requires it to go
@@ -7330,7 +7793,10 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
               // A worker whose agent carries no template and who has no override
               // has no briefing — say so, rather than emitting a bare heading.
               (prompt
-                ? `\n\nBoot briefing — adopt this for the rest of the session:\n\n${prompt}`
+                ? `\n\nBoot briefing — adopt this for the rest of the session:` +
+                  `\nrendered at: ${briefing.renderedAt!.toISOString()}` +
+                  `\nrole Agent updated at: ${briefing.roleAgentUpdatedAt ? briefing.roleAgentUpdatedAt.toISOString() : 'not recorded'} (generic Agent row update — no per-override mtime is tracked)` +
+                  `\n\n${prompt}`
                 : '\n\n(No boot briefing: the role agent carries no personaPrompt template and this worker has no promptOverride.)') +
               renderWorkerContinuity(continuity as RenderableContinuity | null);
           } catch {
@@ -7557,22 +8023,41 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       // createTestableMcpServer bypasses zod — normalize defensively (a NaN
       // would reach Prisma's `take` as a raw driver error rather than a clamp).
       const take = Math.max(1, Math.min(typeof limit === 'number' && Number.isFinite(limit) ? limit : 10, 50));
-      const sessions = await db.session.findMany({
-        where: {
-          ...scope,
-          deletedAt: null,
-          // "Open" is `endedAt IS NULL` — the ONE active predicate the platform
-          // uses everywhere (#930: the reaper stamps endedAt AND autoExpiredAt
-          // together precisely so this stays a single test).
-          ...(includeEnded ? {} : { endedAt: null }),
+      // #1133 — the count runs under the IDENTICAL where as the rows (one
+      // object, used by both queries), so the truncation disclosure cannot
+      // leak a session count the caller may not read: whatever scopes the
+      // rows scopes the total, by construction rather than by re-statement.
+      const where = {
+        ...scope,
+        deletedAt: null,
+        // "Open" is `endedAt IS NULL` — the ONE active predicate the platform
+        // uses everywhere (#930: the reaper stamps endedAt AND autoExpiredAt
+        // together precisely so this stays a single test).
+        ...(includeEnded ? {} : { endedAt: null }),
+      };
+      // Both reads share ONE repeatable-read snapshot (Codex P2 + Copilot on
+      // the first head): as independent READ COMMITTED statements they could
+      // straddle a concurrent hadron_start_session — count sees 10, the insert
+      // lands, findMany then returns a DIFFERENT 10 that quietly drops the
+      // oldest while total === length reports "not truncated". That is the
+      // absence-as-reaped ambiguity this tool exists to kill, reopened in a
+      // race window; one snapshot closes it.
+      const [sessions, total] = await db.$transaction(
+        async (tx) => {
+          const rows = await tx.session.findMany({
+            where,
+            orderBy: { startedAt: 'desc' },
+            take,
+            select: {
+              id: true, startedAt: true, endedAt: true, type: true, plan: true,
+              appId: true, workerId: true,
+            },
+          });
+          const count = await tx.session.count({ where });
+          return [rows, count] as const;
         },
-        orderBy: { startedAt: 'desc' },
-        take,
-        select: {
-          id: true, startedAt: true, endedAt: true, type: true, plan: true,
-          appId: true, workerId: true,
-        },
-      });
+        { isolationLevel: 'RepeatableRead' },
+      );
       if (sessions.length === 0) {
         return textResult(
           includeEnded
@@ -7645,8 +8130,21 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         );
       });
 
+      // #1133 — absence from this list must never be readable as "the session
+      // is gone" (tasks:end-worker-session reads it as "reaped", and a reaped
+      // session writes no handoff). When the list truncated, say so, and give
+      // recovery guidance that is TRUE: `limit` retrieves everything only
+      // while the total fits under its 50 cap — beyond that, say older rows
+      // exist instead of promising a call that cannot return them.
+      const truncated = total > sessions.length;
+      const header = truncated
+        ? total <= 50
+          ? `${sessions.length} session(s) — TRUNCATED, showing the newest ${sessions.length} of ${total}; pass limit: ${total} to see them all:\n`
+          : `${sessions.length} session(s) — TRUNCATED, showing the newest ${sessions.length} of ${total}; limit caps at 50, so ${total - 50} older session(s) lie beyond any single call:\n`
+        : `${sessions.length} session(s):\n`;
+
       return textResult(
-        `${sessions.length} session(s):\n${lines.join('\n')}\n\n` +
+        `${header}${lines.join('\n')}\n\n` +
           // #1034: "session id" stays GENERAL here, because this list includes
           // unbound sessions whose own row says "working as: nobody" — calling
           // every id a worker session id would contradict the line above it and
@@ -7785,14 +8283,48 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
   /** Read a Channel by id or address — the team-chat read's Channel-addressed twin. */
   const readChannel = async (
     channelRef: string,
-    args: { sinceSeq?: number; beforeSeq?: number; mentions?: string; limit?: number; offset?: number },
+    args: { sinceSeq?: number; beforeSeq?: number; mentions?: string; limit?: number; offset?: number; session?: string },
   ) => {
     try {
+      const pilotRead = !!args.session && teamAttentionPilotOperatorEnabled(auth.userId ?? undefined);
+      const channelId = pilotRead ? await resolveChannelRefId(db, channelRef) : null;
+      const captured = channelId
+        ? await db.channel.findFirst({
+            where: { id: channelId, deletedAt: null },
+            select: { id: true, lastSeq: true },
+          })
+        : null;
+      // An explicit Worker session owns cursor attribution for user callers.
+      // Keep a pure App key's header-bound session: the delegated resolver
+      // uses it to isolate reads to that session's memory.
+      const resolverCtx = args.session && auth.userId
+        ? { ...chatCtx(), sessionId: undefined }
+        : chatCtx();
       const page = await resolvers.Query.channelMessages(
         {},
         { channelRef, sinceSeq: args.sinceSeq ?? null, beforeSeq: args.beforeSeq ?? null, mentionsRef: args.mentions ?? null, limit: args.limit ?? null, offset: args.offset ?? null },
-        chatCtx(),
+        resolverCtx,
       );
+      if (captured && args.session) {
+        try {
+          await maybeAdvanceOwnChannelRead(chatCtx(), {
+            channelId: captured.id,
+            capturedHead: captured.lastSeq,
+            sessionRef: args.session,
+            sinceSeq: args.sinceSeq,
+            beforeSeq: args.beforeSeq,
+            mentionsRef: args.mentions,
+            limit: args.limit,
+            offset: args.offset,
+            page,
+          });
+        } catch (error) {
+          // The transcript is already authorized and loaded. Cursor ownership
+          // is best-effort bookkeeping: never discard a successful read and
+          // invite the caller to retry it because the follow-up write failed.
+          console.warn('[hadron_channel_read] pilot read-state advance failed:', error);
+        }
+      }
       if (page.total === 0) return textResult('The Channel has no matching messages.');
       const lines = page.items.map((m) => {
         const reply = m.replyToSeq != null ? ` (reply to #${m.replyToSeq})` : '';
@@ -8049,6 +8581,8 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       for (const message of page.items) {
         const routes = watchers.filter((watcher) => {
           if (message.seq <= watcher.seen) return false;
+          // A Worker never receives its own post, including a broadcast.
+          if (message.authorWorkerId === watcher.workerId) return false;
           if (!watcher.mentionOnly) return true;
           return message.mentions.some((mention) => watcher.mentionTokens.has(mention));
         });
@@ -8116,9 +8650,11 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       offset: z.number().int().optional().describe('Page offset.'),
       session: z.string().optional().describe('Your session id — passing it keeps that session alive (#1081).'),
     },
-    async ({ channel, sinceSeq, beforeSeq, mentions, limit, offset, session }) => {
+    async ({ channel, sinceSeq, beforeSeq, mentions, limit, offset, session: rawSession }) => {
+      // A blank session is no session, for every consumer below (#1362 review).
+      const session = typeof rawSession === 'string' ? rawSession.trim() || undefined : rawSession;
       await heartbeatSession(session);
-      return readChannel(channel, { sinceSeq, beforeSeq, mentions, limit, offset });
+      return readChannel(channel, { sinceSeq, beforeSeq, mentions, limit, offset, session });
     },
   );
 
@@ -8211,7 +8747,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
 
   server.tool(
     'hadron_team_chat_read',
-    'Read the team App\'s chat (#939), oldest first by seq. Ordinary reads take sinceSeq / beforeSeq / mentions. For unattended routing (#1265), pass monitor:true: the tool derives each of your LIVE Worker sessions\' cursor from ChannelReadState and its WATCH/BOTH + mentionOnly policy from the register, returns each message once with the Workers it concerns, and NEVER advances state merely by reading. After routing/action succeeds, call again with monitor:true and the returned acknowledge checkpoint. This makes a restart duplicate work rather than skip it. monitorFor narrows to one of your live Workers; monitoring never wakes sessions or observes another operator\'s sessions.',
+    'Read the team App\'s chat (#939), oldest first by seq. Ordinary reads take sinceSeq / beforeSeq / mentions. For unattended routing (#1265), pass monitor:true: the tool derives each of your LIVE Worker sessions\' cursor from ChannelReadState and its WATCH/BOTH + mentionOnly policy from the register, returns each message once with the Workers it concerns, and never routes a message back to its Worker author. It NEVER advances state merely by reading. After routing/action succeeds, call again with monitor:true and the returned acknowledge checkpoint. This makes a restart duplicate work rather than skip it. monitorFor narrows to one of your live Workers; monitoring never wakes sessions or observes another operator\'s sessions.',
     {
       sinceSeq: z.number().int().optional().describe('Only messages with seq strictly greater than this watermark.'),
       beforeSeq: z.number().int().optional().describe('Page BACKWARD (#1116): only messages with seq strictly LESS than this, returning the NEWEST such page — pass the oldest seq you have seen. Stable under concurrent posting where offset is not. Ignores offset.'),
@@ -8230,7 +8766,11 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         proof: z.string().describe('Opaque server proof from the returned checkpoint; binds Worker + Channel + sequence.'),
       })).max(TEAM_CHAT_MONITOR_MAX_TARGETS).optional().describe('With monitor:true, deliberately advance these server-issued checkpoints after routing/action succeeded.'),
     },
-    async ({ sinceSeq, beforeSeq, mentions, limit, offset, session, app, channel, monitor, monitorFor, acknowledge }) => {
+    async ({ sinceSeq, beforeSeq, mentions, limit, offset, session: rawSession, app, channel, monitor, monitorFor, acknowledge }) => {
+      // A blank session is no session, for every consumer below (#1362 review):
+      // otherwise the MCP layer drops the bound session as "explicit" while
+      // maybeAdvanceOwnChannelRead's trim falls back to it.
+      const session = typeof rawSession === 'string' ? rawSession.trim() || undefined : rawSession;
       if (!monitor && (monitorFor !== undefined || acknowledge !== undefined)) {
         return textResult('[bad_user_input] monitorFor and acknowledge require monitor:true.');
       }
@@ -8247,7 +8787,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       // contract: it needs no active App. Monitor mode still needs an App to
       // decide which of this operator's live Worker sessions participate.
       if (!monitor && channel !== undefined) {
-        return readChannel(channel, { sinceSeq, beforeSeq, mentions, limit, offset });
+        return readChannel(channel, { sinceSeq, beforeSeq, mentions, limit, offset, session });
       }
 
       let appRef = app;
@@ -8266,6 +8806,19 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       }
 
       try {
+        // Suppress the header-bound session only for user principals whose
+        // explicit Worker session owns cursor attribution. A pure App key
+        // needs its binding for the resolver's session-memory isolation.
+        const resolverCtx = session && auth.userId
+          ? { ...chatCtx(), sessionId: undefined }
+          : chatCtx();
+        // Capture the Channel the resolver will actually read (its oldest
+        // team-space root, not necessarily App.defaultChannel), BEFORE the
+        // read, with the context the resolver gets (#1362 review, Codex P2).
+        const pilotAppId = session && teamAttentionPilotOperatorEnabled(auth.userId ?? undefined)
+          ? (await resolveAppRef(db, appRef)).id
+          : null;
+        const captured = pilotAppId ? await locateTeamChatChannel(resolverCtx, pilotAppId) : null;
         const page = await resolvers.Query.teamChatMessages(
           {},
           {
@@ -8276,16 +8829,31 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
             limit: limit ?? null,
             offset: offset ?? null,
           },
-          {
-            db,
-            clientId: auth.clientId ?? undefined,
-            userId: auth.userId ?? undefined,
-            appId: auth.appId ?? undefined,
-            sessionId: auth.sessionId ?? undefined,
-            roles: auth.roles as Context['roles'],
-            organizationId: auth.organizationId ?? undefined,
-          },
+          resolverCtx,
         );
+        // Advance only if the resolver still serves the root captured above;
+        // a root that changed mid-read is skipped (a duplicate nudge, never a
+        // cursor moved on a Channel whose messages were not read).
+        const stillServed = captured && pilotAppId
+          ? (await locateTeamChatChannel(resolverCtx, pilotAppId))?.rootId === captured.rootId
+          : false;
+        if (captured && session && stillServed) {
+          try {
+            await maybeAdvanceOwnChannelRead(chatCtx(), {
+              channelId: captured.channelId,
+              capturedHead: captured.lastSeq,
+              sessionRef: session,
+              sinceSeq,
+              beforeSeq,
+              mentionsRef: mentions,
+              limit,
+              offset,
+              page,
+            });
+          } catch (error) {
+            console.warn('[hadron_team_chat_read] pilot read-state advance failed:', error);
+          }
+        }
         if (page.total === 0) return textResult('The team chat has no matching messages.');
         const lines = page.items.map((m) => {
           const reply = m.replyToSeq != null ? ` (reply to #${m.replyToSeq})` : '';
@@ -8299,6 +8867,104 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       }
     },
   );
+
+  // ── #1353 internal-pilot compact attention ───────────────────────────────────
+
+  // Discovery follows the pilot (#1362 review, Codex P2): a connection whose
+  // operator is not allowlisted never sees these tools in tools/list. The App
+  // half of the allowlist cannot be decided here — the active App can change
+  // on the connection — so it stays with the per-call capability probe and
+  // each tool's own resolvePilotApp refusal.
+  if (auth.userId && !auth.impersonation && teamAttentionPilotOperatorEnabled(auth.userId)) {
+    server.tool(
+      'hadron_team_attention',
+      'INTERNAL PILOT (#1353): return compact unread counts for this operator\'s LIVE Workers and an opaque signed poll token; never reads message bodies and never changes ChannelReadState. Omit since for all unread. Adopt the returned token only after every listed nudge is accepted; after any partial failure retain the prior token so retry may duplicate but cannot lose a nudge. since:"now" is refused — use the explicit switchover preview/apply tool.',
+      {
+        app: z.string().optional().describe('The pilot App — an App URN or ID. Omit to use the selected App.'),
+        since: z.string().optional().describe('Opaque token returned by the preceding successful poll. Do not pass "now".'),
+      },
+      async ({ app, since }) => {
+        let appRef = app;
+        if (!appRef) {
+          const scopeError = requireAppScope();
+          if (scopeError) return scopeError;
+          appRef = auth.appId;
+        }
+        if (!appRef) return textResult('No App context — pass app or select one with hadron_set_active_app.');
+        try {
+          const result = await resolvers.Query.teamAttention({}, { appRef, since: since ?? null }, chatCtx());
+          return textResult(JSON.stringify(result, null, 2));
+        } catch (error) {
+          return scopeErrorText(error);
+        }
+      },
+    );
+
+    server.tool(
+      'hadron_team_attention_switchover',
+      'INTERNAL PILOT (#1353): explicitly baseline every current live Worker through captured Channel heads. preview is read-only and returns exact counts plus a short-lived proof. apply requires that proof and atomically refuses if the operator, App, live-Worker scope, effective register or cursor changed. Messages arriving after preview remain unread. This is the only supported way to discard the pre-router backlog.',
+      {
+        app: z.string().optional().describe('The pilot App — an App URN or ID. Omit to use the selected App.'),
+        action: z.enum(['preview', 'apply']).describe('preview makes no writes; apply requires the exact preview proof.'),
+        proof: z.string().optional().describe('Required for action:"apply"; returned by preview.'),
+      },
+      async ({ app, action, proof }) => {
+        let appRef = app;
+        if (!appRef) {
+          const scopeError = requireAppScope();
+          if (scopeError) return scopeError;
+          appRef = auth.appId;
+        }
+        if (!appRef) return textResult('No App context — pass app or select one with hadron_set_active_app.');
+        if (action === 'apply' && !proof) return textResult('[bad_user_input] action:"apply" requires the proof returned by preview.');
+        if (action === 'preview' && proof !== undefined) return textResult('[bad_user_input] preview does not accept a proof.');
+        try {
+          const result = action === 'preview'
+            ? await resolvers.Query.teamAttentionSwitchoverPreview({}, { appRef }, chatCtx())
+            : await resolvers.Mutation.confirmTeamAttentionSwitchover({}, { appRef, proof: proof! }, chatCtx());
+          return textResult(JSON.stringify(result, null, 2));
+        } catch (error) {
+          return scopeErrorText(error);
+        }
+      },
+    );
+
+    server.tool(
+      'hadron_team_chat_mark_read',
+      'INTERNAL PILOT (#1353): explicitly advance the Worker bound to your live session on one registered Channel. Use after filtered reads, which intentionally never auto-advance. Monotonic; a lower seq is a no-op and a seq beyond the Channel head is refused.',
+      {
+        session: z.string().describe('Your live Worker session; selects the Worker whose own cursor advances.'),
+        app: z.string().optional().describe('The pilot App. Omit to recover it from session or the active selection.'),
+        channel: z.string().optional().describe('Channel id or address. Omit for the team Channel hadron_team_chat_read serves for the App.'),
+        seq: z.number().int().min(0).describe('Read through this exact sequence.'),
+      },
+      async ({ session, app, channel, seq }) => {
+        await heartbeatSession(session);
+        let appRef = app;
+        if (!appRef) {
+          await adoptAppFromSession(session);
+          const scopeError = requireAppScope();
+          if (scopeError) return scopeError;
+          appRef = auth.appId;
+        }
+        if (!appRef) return textResult('No App context — pass app or select one with hadron_set_active_app.');
+        try {
+          // An omitted channel means the one hadron_team_chat_read SERVES —
+          // its oldest team-space root, which need not be App.defaultChannel
+          // (#1362 review, Copilot). Resolved here, with the read's own
+          // locator, so the mark lands on the Channel that was read.
+          let channelRef: string | null | undefined = channel;
+          if (channelRef === undefined) {
+            channelRef = (await locateTeamChatChannel(chatCtx(), (await resolveAppRef(db, appRef)).id))?.channelId ?? '';
+          }
+          const result = await markOwnTeamChatRead(chatCtx(), { appRef, channelRef, sessionRef: session, seq });
+          return textResult(JSON.stringify(result, null, 2));
+        } catch (error) {
+          return scopeErrorText(error);
+        }
+      },
+    );
+  }
 
   // ── hadron_list_workers ───────────────────────────────────────────────────────
 
@@ -8597,8 +9263,10 @@ function ageOf(at: Date, now: Date = new Date()): string {
         // through it cannot widen access. Rendering live is the whole point:
         // a copied briefing goes stale silently the moment a role agent's
         // template changes, which is why the contract forbids caching it.
-        const [prompt, workerUrn, agent, override, continuity] = await Promise.all([
-          resolvers.Worker.prompt(worker, {}, ctx),
+        // #1090: one composition supplies the text AND its freshness facts —
+        // the stamps below describe exactly this rendering.
+        const [briefing, workerUrn, agent, override, continuity] = await Promise.all([
+          composeWorkerPrompt(ctx, worker),
           resolvers.Worker.urn(worker, {}, ctx),
           resolvers.Worker.agent(worker, {}, ctx),
           // The RAW override, separate from the composed briefing (PR #1019
@@ -8615,6 +9283,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
           // reader to know one exists.
           resolvers.Worker.continuity(worker, {}, ctx),
         ]);
+        const prompt = briefing.text;
         const agentName = (agent as { name?: string } | null)?.name ?? null;
         const readUrl = workerPortalUrl(workerUrn as string | null);
 
@@ -8719,7 +9388,10 @@ function ageOf(at: Date, now: Date = new Date()): string {
               ? `\nPrompt override (the editable part — pass THIS text, amended, to hadron_update_worker; the briefing below is it composed with the shared template):\n\n${override}\n`
               : '') +
             (prompt
-              ? `\nBoot briefing — adopt this for the rest of the session:\n\n${prompt}`
+              ? `\nBoot briefing — adopt this for the rest of the session:` +
+                `\nrendered at: ${briefing.renderedAt.toISOString()}` +
+                `\nrole Agent updated at: ${briefing.roleAgentUpdatedAt ? briefing.roleAgentUpdatedAt.toISOString() : 'not recorded'} (generic Agent row update — no per-override mtime is tracked)` +
+                `\n\n${prompt}`
               : '\n(No boot briefing: the role agent carries no personaPrompt template and this worker has no promptOverride.)') +
             renderWorkerContinuity(continuity as RenderableContinuity | null),
         );
@@ -8829,7 +9501,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
 
   server.tool(
     'hadron_record_work',
-    'Record an externally visible work milestone (a PR opened, a branch pushed, an issue closed) into the team App\'s worklog (#947) — the append-only, authoritative PR-session join. Pass the session doing the work; ref accepts a github URL or short form (owner/repo#N, owner/repo@sha, owner/repo:branch, owner/repo) and is stored in ONE canonical spelling. A bare number is refused — include the repo. kind: pr also updates the session\'s displayed PR number. Correct a wrong record by recording a newer one (records are never edited).',
+    'Record an externally visible work milestone (a PR opened, a branch pushed, an issue closed) into the team App\'s worklog (#947) — the append-only, authoritative PR-session join. Pass the session doing the work; ref accepts a github URL or short form (owner/repo#N, owner/repo@sha, owner/repo:branch, owner/repo) and is stored in ONE canonical spelling. A bare number is refused — include the repo. kind: pr also updates the session\'s displayed PR number. Correct a wrong record by recording a newer one (records are never edited). Capability note (#1398): the optional `model` argument is honored when hadron_server_info advertises the `worklog-model` capability — an older build silently DROPS the argument and records the session\'s model instead, so test for the token before relying on an explicit model report.',
     {
       session: z.string().describe('The session id the work is attributed to (must be a session of the team App).'),
       tool: z.string().describe('The external tool the artifact lives in, e.g. "github".'),
@@ -8837,9 +9509,10 @@ function ageOf(at: Date, now: Date = new Date()): string {
       ref: z.string().describe('The artifact ref — a github URL or short form; stored canonically (e.g. owner/repo#371).'),
       action: z.string().describe('What happened: opened | merged | claimed | reviewed | closed | pushed | ... (free verb).'),
       detail: z.record(z.string(), z.unknown()).optional().describe('Optional display extras (title, URL) — stored, never filtered on.'),
+      model: z.string().optional().describe('Optional explicit report of the LLM model that produced the work (#1398) — use it for a model switch or a late record. Takes precedence over the session\'s model; omit to use the session\'s model. Not verified telemetry.'),
       app: z.string().optional().describe('The team App — an App URN or ID. Omit to use the session\'s active App.'),
     },
-    async ({ session, tool, kind, ref, action, detail, app }) => {
+    async ({ session, tool, kind, ref, action, detail, model, app }) => {
       // #1081 — the caller just drove this session, so it is alive. The
       // touch is explicit here rather than a side effect of whichever tool
       // happens to write the Session row (see heartbeatSession).
@@ -8863,7 +9536,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
       try {
         const item = await resolvers.Mutation.recordTeamWork(
           {},
-          { appRef, sessionRef: session, tool, kind, ref, action, detail: detail ?? null },
+          { appRef, sessionRef: session, tool, kind, ref, action, detail: detail ?? null, model: model ?? null },
           {
             db,
             clientId: auth.clientId ?? undefined,
@@ -8918,6 +9591,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
         }
         return textResult(
           `Recorded: ${item.kind} ${item.action} ${item.ref} — session ${item.sessionId} (${item.workerName}) at ${item.at.toISOString()}.` +
+            (item.model ? ` Model: ${item.model}.` : '') +
             endedNote,
         );
       } catch (e) {
@@ -8991,7 +9665,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
         if (page.total === 0) return textResult('No matching worklog records.');
         const lines = page.items.map(
           (i) =>
-            `${i.at.toISOString()} [${i.workerName}] ${i.kind} ${i.action} ${i.ref} (session ${i.sessionId})`,
+            `${i.at.toISOString()} [${i.workerName}] ${i.kind} ${i.action} ${i.ref} (session ${i.sessionId})${i.model ? ` [model: ${i.model}]` : ''}`,
         );
         return textResult(
           `${page.total} record(s) total, showing ${page.items.length}:\n\n${lines.join('\n')}`,
@@ -9019,12 +9693,10 @@ function ageOf(at: Date, now: Date = new Date()): string {
         throw e;
       }
 
-      const memory = await resolveMemoryByUrn(memoryUrn);
+      // #1316: an unreadable memory takes the missing branch.
+      const memory = await resolveVisibleMemoryByUrn(auth, memoryUrn, 'read');
       if (!memory) {
         return textResult(`Memory not found: "${memoryUrn}".`);
-      }
-      if (!(await canReadMemory(db, auth, memory.id))) {
-        return textResult('Access denied for this memory.');
       }
 
       // #819 — the checks themselves now live in src/lib/memoryValidation.ts,
@@ -9034,8 +9706,9 @@ function ageOf(at: Date, now: Date = new Date()): string {
       // findings typed.
       const report = await validateMemoryNodes(db, memory.id);
       const issues: string[] = [];
+      const memoryUrnOf = memoizedMemoryUrnLookup();
       for (const f of report.findings) {
-        issues.push(formatFindingLine(f, await nodeUrn(f.nodeLoc, memory.id)));
+        issues.push(formatFindingLine(f, await nodeUrn(f.nodeLoc, memory.id, memoryUrnOf)));
       }
       // A skipped check is stated rather than silently omitted — a clean bill
       // of health that quietly skipped a check is worse than no report.
@@ -9069,7 +9742,8 @@ function ageOf(at: Date, now: Date = new Date()): string {
         throw e;
       }
 
-      const memoryRef = await resolveMemoryByUrn(memoryUrn);
+      // #1316: hidden from this caller ⇒ the missing branch; a reader keeps the denial.
+      const memoryRef = await resolveVisibleMemoryByUrn(auth, memoryUrn, 'write');
       if (!memoryRef) return textResult(`Memory not found: "${memoryUrn}".`);
       if (!(await canWriteToMemory(db, auth, memoryRef.id))) {
         return textResult('Access denied.');

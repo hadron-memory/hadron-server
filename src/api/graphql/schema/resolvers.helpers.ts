@@ -3,6 +3,7 @@
 // by the GraphQL resolver map. No behavior change. The `Context` interface
 // lives here and is re-exported from resolvers.ts for existing importers.
 import type { NodeMergeField } from '../../../lib/nodeMerge.js';
+import type { SnapshotSourceNode } from '../../../lib/nodeRevisionSnapshot.js';
 import { sharedUrnAgentSlug } from '../../../lib/sharedMemoryLegacyKey.js';
 // Spec 049 Phase 5 — the install-created register row (D2) and its removal on uninstall.
 import { ensureInstallRegisterRows, removeRegisterRowsForUninstall } from '../../../lib/registerInstall.js';
@@ -17,6 +18,7 @@ import {
   DEFAULT_AI_CONFIG_NAME,
   type AiConfigOwnerType,
 } from '../../../lib/aiConfig.js';
+import { effectiveApiStyle, effectiveEndpoint } from '../../../lib/aiEndpoint.js';
 import {
   canWriteToMemory,
   filterReadableMemoryIds,
@@ -56,12 +58,24 @@ import {
   AgentNotFoundError,
 } from '../../../lib/entityRef/errors.js';
 import { MemoryNotFoundError } from '../../../lib/asset/gate.js';
+import { assertLinkAllowedForPublicAgent, isExcludedFromCoveredSet } from '../../../lib/agentPublicCongruence.js';
 import type { ImpersonationContext } from '../../../lib/auth/impersonation.js';
 import { GraphQLError } from 'graphql';
+import { isLifecycleActive, type LifecycleLike } from '@hadron-memory/access-control';
 import {
   Prisma,
   type PrismaClient,
 } from '../../../generated/prisma/index.js';
+
+/**
+ * The STORED (uncompiled) content of a Node whose `content` a read resolver
+ * replaced with rendered Mustache output (`node(ref:)` / `nextNode` without
+ * `raw`). Field resolvers that verify the parent against the database —
+ * `Node.authorship`'s and `Node.revision`'s reconcile — must compare stored
+ * state, not presentation. A Symbol key is never serialized by GraphQL, so the
+ * wire shape is unchanged (#1326 review, Codex on #1397 `138e8185`).
+ */
+export const STORED_NODE_CONTENT: unique symbol = Symbol('storedNodeContent');
 
 export interface Context {
   db: PrismaClient;
@@ -112,6 +126,12 @@ export interface Context {
   // response's nodes/edges overwhelmingly share a memory, so the memory-urn
   // lookup is memoized per request (lazily created; see loadMemoryUrn).
   memoryUrnCache?: Map<string, Promise<string | null>>;
+  // Request-scoped per-parent reconciliation. Node.revision,
+  // Node.contentValidation and Node.authorship can all resolve on one GraphQL
+  // Node object; share its locked read without mixing distinct parent states.
+  nodeReconcileCache?: WeakMap<object, Promise<(SnapshotSourceNode & { revSeq: number }) | null>>;
+  // Request-scoped gated task URN lookup for repeated Node.authorship fields.
+  readableTaskRefCache?: Map<string, Promise<string | null>>;
   // Request-scoped memo for AppRun.urn composition (#696) — a run-list response
   // often shares one App across many runs, so the app-urn lookup is memoized per
   // request (lazily created; see loadAppUrn).
@@ -180,7 +200,7 @@ export async function resolveRefArg(
       extensions: { code: 'BAD_USER_INPUT' },
     });
   }
-  const chosen = ref || id;
+  const chosen = chosenRefArg(args);
   if (!chosen) {
     throw new GraphQLError(
       `A ${args.label} is required: pass ${args.label}Ref (or the deprecated ${args.label}Id).`,
@@ -191,11 +211,7 @@ export async function resolveRefArg(
     const { id: resolvedId } = await resolve(db, chosen);
     return resolvedId;
   } catch (e) {
-    if (isEntityNotFound(e)) {
-      throw new GraphQLError(`No match for ${args.label}Ref "${chosen}".`, {
-        extensions: { code: 'NOT_FOUND' },
-      });
-    }
+    if (isEntityNotFound(e)) throw refArgNotFoundError(args.label, chosen);
     if (e instanceof AmbiguousUserRefError) {
       throw new GraphQLError(
         `${args.label}Ref "${chosen}" matches more than one account (differing only by email case). Use the exact-case email, the handle, or the id.`,
@@ -204,6 +220,20 @@ export async function resolveRefArg(
     }
     throw e;
   }
+}
+
+/** The ref `resolveRefArg` resolves: the trimmed `<label>Ref`, else the deprecated `<label>Id`. */
+export function chosenRefArg(args: { ref?: string | null; id?: string | null }): string | undefined {
+  return args.ref?.trim() || args.id?.trim();
+}
+
+/**
+ * `resolveRefArg`'s answer for a ref that resolves to nothing. Exported so a
+ * surface that CONCEALS an unreadable target (#1381, `cor:api:140:03`) throws
+ * the identical error rather than a copy that could drift.
+ */
+export function refArgNotFoundError(label: string, chosen: string): GraphQLError {
+  return new GraphQLError(`No match for ${label}Ref "${chosen}".`, { extensions: { code: 'NOT_FOUND' } });
 }
 
 /** #764 — per-entity `resolveRefArg` wrappers (label = the ref arg's name). */
@@ -346,6 +376,47 @@ export function isMemoryReadableCached(ctx: Context, memoryId: string): Promise<
 }
 
 /**
+ * A copy of the context with EVERY request memo removed (each `*Cache` key), so
+ * a gate asked on it reflects the database as it is now rather than replaying
+ * an answer memoized earlier in the request. Stripping by suffix keeps a memo
+ * added later from quietly re-staling the callers (#1360 review, round 4).
+ *
+ * Pass `db` — the interactive transaction's client — when the gate runs INSIDE
+ * a transaction. Asked on `ctx.db` it needs a second pool connection while the
+ * transaction holds one, so N concurrent writers queued on one row lock can
+ * hold every connection and starve the lock holder until the transaction
+ * timeout (#1360 review: 8 concurrent rule updates did exactly that).
+ */
+export function withoutRequestCaches(ctx: Context, db?: Prisma.TransactionClient): Context {
+  const fresh = Object.fromEntries(Object.entries(ctx).filter(([k]) => !k.endsWith('Cache'))) as Context;
+  return db ? { ...fresh, db: db as PrismaClient } : fresh;
+}
+
+/**
+ * {@link isMemoryReadableCached}, but ALWAYS re-asked, and the fresh answer
+ * replaces the request's memoized one. For a check that must reflect the state
+ * at a later point in the same request — a re-check inside a write's
+ * transaction — where the memoized answer from the pre-check would make it a
+ * no-op, and where later reads in the request must not reuse the stale
+ * decision either (#1360 review).
+ *
+ * The gate runs on a copy of the context with EVERY request memo removed (each
+ * `*Cache` key), not just `memoryReadCache`: `getAccessibleMemoryIds` consults
+ * nested ones too (`appDerivedMemoryIdCache` for App-derived access, App rows),
+ * and bypassing only the outer one re-used the inner answer (#1360 review,
+ * round 4). Stripping by suffix keeps a memo added later from quietly
+ * re-staling this path. Inside a transaction, pass its client as `tx` (see
+ * {@link withoutRequestCaches}).
+ */
+export function isMemoryReadableFresh(ctx: Context, memoryId: string, tx?: Prisma.TransactionClient): Promise<boolean> {
+  const uncached = withoutRequestCaches(ctx, tx);
+  const cache = (ctx.memoryReadCache ??= new Map<string, Promise<boolean>>());
+  const pending = getAccessibleMemoryIds(uncached, memoryId).then((ids) => ids === null || ids.includes(memoryId));
+  cache.set(memoryId, pending);
+  return pending;
+}
+
+/**
  * Resolve a memory ref (ID or URN) to its id IFF the caller may read it; returns
  * null when the ref does not resolve OR the caller lacks read access — so a
  * ref-scoped surface answers with an empty page and discloses neither the
@@ -386,6 +457,563 @@ export async function resolveReadableMemoryId(
   const accessible = await getAccessibleMemoryIds(ctx, resolvedId);
   if (accessible !== null && !accessible.includes(resolvedId)) return null;
   return resolvedId;
+}
+
+/**
+ * Resolve a memory ref for a surface that reads the memory's NODE data, and
+ * answer an unreadable memory exactly as `resolveMemoryRef` answers a missing
+ * one: `MemoryNotFoundError(ref)`, carrying the caller's own ref (#1316).
+ *
+ * The throwing twin of {@link resolveReadableMemoryId}, for surfaces whose
+ * missing-memory contract is the typed `MEMORY_NOT_FOUND` error rather than an
+ * empty page. Before this, each such surface resolved first (only a MISSING
+ * memory throws there) and then applied its own gate with its own denial —
+ * `[]`, `NOT_FOUND`, `null`, `FORBIDDEN` — so "exists but unreadable" differed
+ * from "no such memory". Memory URNs are guessable, which made each one a
+ * cross-tenant name oracle.
+ *
+ * The gate is the node-content gate (`isMemoryReadableCached`, i.e.
+ * `getAccessibleMemoryIds`) — the one these surfaces already used, so this
+ * moves only the response, not the access decision. It is deliberately NOT the
+ * record gate: an org member may open an app/system memory RECORD whose nodes
+ * that gate excludes, and these surfaces return node data.
+ *
+ * Malformed refs and DB faults propagate from `resolveMemoryRef` unchanged.
+ */
+export async function resolveNodeReadableMemoryRef(
+  ctx: Context,
+  ref: string,
+): Promise<{ id: string }> {
+  const { id } = await resolveMemoryRef(ctx.db, ref);
+  if (!(await isMemoryReadableCached(ctx, id))) throw new MemoryNotFoundError(ref);
+  return { id };
+}
+
+/**
+ * True for an ORDINARY authorization denial — the only error an existence
+ * classification may replace. The platform's gates deny in three spellings:
+ * a `FORBIDDEN`-coded GraphQLError, a plain `Error('Forbidden')` /
+ * `Error('Forbidden: …')` (requireOrgRole, requireOrgAction,
+ * requireOwnerOrOrgRole), and `Error('Unauthenticated')`. Anything else — a DB
+ * fault, a typed domain refusal, a malformed ref — is not a denial and must
+ * propagate as itself (#1316: no blanket catch-all).
+ */
+export function isAuthorizationDenial(error: unknown): boolean {
+  if (error instanceof GraphQLError) return error.extensions.code === 'FORBIDDEN';
+  if (!(error instanceof Error)) return false;
+  return (
+    error.message === 'Forbidden' ||
+    error.message.startsWith('Forbidden:') ||
+    error.message === 'Unauthenticated'
+  );
+}
+
+/**
+ * Run a memory-targeted mutation's EXISTING authorization, and when it denies
+ * a caller who cannot even open the memory's record, answer as the missing
+ * branch does: `MemoryNotFoundError(ref)` (#1316).
+ *
+ * A caller who CAN open the record (via `Query.memory`) already knows the
+ * memory exists, so their denial stays exactly what the surface threw —
+ * readable-but-not-permitted remains FORBIDDEN, which is the actionable
+ * answer. Only an ordinary denial ({@link isAuthorizationDenial}) is
+ * classified; every other error, and every success, passes through untouched,
+ * so no permitted caller is ever narrowed. The record read here selects every
+ * field `canReadMemoryRecord` requires (omitting one can fail it open —
+ * #1104).
+ *
+ * `authorize` must perform authorization ONLY — no writes — since it runs
+ * before classification and its side effects would not be concealed.
+ */
+export async function concealUnreadableDenial(
+  ctx: Context,
+  memoryId: string,
+  ref: string,
+  authorize: () => Promise<void>,
+  // #1381 — the surface's own missing-memory error, for the surfaces whose
+  // miss is not `MemoryNotFoundError` (the `<label>Ref` arguments answer
+  // `refArgNotFoundError`). Only an identical answer conceals anything.
+  missing: () => Error = () => new MemoryNotFoundError(ref),
+): Promise<void> {
+  try {
+    await authorize();
+  } catch (error) {
+    if (!isAuthorizationDenial(error)) throw error;
+    if (await canOpenMemoryRecordById(ctx, memoryId)) throw error;
+    throw missing();
+  }
+}
+
+/**
+ * The capability an `AgentMemoryItem` row confers (`cor:dmo:050:09`). `read`
+ * admits the memory's node CONTENT to the agent's audience; `read-write` is
+ * additionally the sole write cap for a knowledge memory.
+ *
+ * Validated rather than free-form (#1349): the column is a plain `String`, so
+ * an unrecognised value used to be stored silently. Read surfaces now skip
+ * those legacy rows through isGrantedAgentMemoryRole rather than treating
+ * an unknown value as read-only.
+ */
+export const AGENT_MEMORY_ROLES = ['read', 'read-write'] as const;
+export type AgentMemoryRole = (typeof AGENT_MEMORY_ROLES)[number];
+
+/** Parse an `AgentMemoryItem.role` argument, defaulting to the narrower cap. */
+export function parseAgentMemoryRole(role?: string | null): AgentMemoryRole {
+  const value = role ?? 'read';
+  if (!(AGENT_MEMORY_ROLES as readonly string[]).includes(value)) {
+    throw new GraphQLError(
+      `Unknown role "${value}" — expected one of: ${AGENT_MEMORY_ROLES.join(', ')}.`,
+      { extensions: { code: 'BAD_USER_INPUT', role: value } },
+    );
+  }
+  return value as AgentMemoryRole;
+}
+
+/**
+ * The caller's OWN user principal, with every App-derived reach stripped
+ * (#1349).
+ *
+ * An attach is a grant TO an App audience, so the capability it hands over has
+ * to be one the human calling holds themselves. Evaluated on the request
+ * context as-is, an App-keyed or session-bound caller would have
+ * `getAccessibleMemoryIds` union in whatever THAT App already reaches — which
+ * is exactly how one App's grant would launder into another App's audience.
+ * Dropping `appId`/`sessionId` (and the caches primed under the wider
+ * principal) asks the narrower question the grant needs: what may this *user*
+ * reach?
+ */
+function userPrincipalOnly(ctx: Context): Context {
+  return {
+    db: ctx.db,
+    userId: ctx.userId,
+    clientId: ctx.clientId,
+    roles: ctx.roles,
+    organizationId: ctx.organizationId,
+    apiKeyId: ctx.apiKeyId,
+    oauthScopes: ctx.oauthScopes,
+    impersonation: ctx.impersonation,
+  };
+}
+
+/**
+ * Does this caller hold CONTENT-READ on the memory **in their own right** —
+ * excluding anything they can only reach through an App (#1349)?
+ *
+ * Dropping `ctx.appId` is NOT enough, and the first version of this gate was
+ * wrong to claim it was (@codex, PR #1357). `getAccessibleMemoryIds`' user
+ * branch folds in `appDerivedMemoryIds`, which for a user principal enumerates
+ * EVERY App that user can reach — so a memory readable only through App B still
+ * passed, and attaching it to an agent in App A laundered B's grant into A's
+ * audience, which is precisely what this gate exists to stop. Stripping the
+ * active App made the reach broader, not narrower.
+ */
+function holdsContentReadIndependently(ctx: Context, memoryId: string): Promise<boolean> {
+  const self = userPrincipalOnly(ctx);
+  return getAccessibleMemoryIds(self, memoryId, { excludeAppDerived: true }).then(
+    (ids) => ids === null || ids.includes(memoryId),
+  );
+}
+
+/**
+ * The same-App attach (#1357; Holger's ruling, 2026-09-26): an appropriately
+ * authorized caller may attach an App's own memory, READ-ONLY, to another
+ * agent installed in that same App.
+ *
+ * Why it needs its own branch: the capability check excludes App-derived reach
+ * on purpose — counting it let a memory reachable only through App B be
+ * laundered into App A. That also made an App-scoped memory (#653: App-internal,
+ * excluded from every org-wide gate) unattachable by anyone, including the
+ * App's own admins, so provisioning a SECOND agent in the App could not give it
+ * the App's knowledge. This admits exactly that and nothing wider:
+ *
+ *  - **the memory's OWN App** — `memory.appId`, never whichever App the caller
+ *    happens to reach it through. That is the "no cross-App shortcut";
+ *  - **the target agent is installed in that App**, which is live (not deleted,
+ *    not uninstalled, its org not soft-deleted);
+ *  - **the caller is authorized for that App** by the gate `createMemoryInApp`
+ *    uses to provision App knowledge (`requireOwnerOrOrgRole(app, 'ADMIN')`), so
+ *    "appropriately authorized" means what it already means;
+ *  - **knowledge / group only**, and never a user-owned row — never a
+ *    strict-owner shape;
+ *  - **`read` only**, mirroring provisioning, which links App knowledge `read`
+ *    and leaves writes with the org admin. This also holds for a platform
+ *    admin, whose independent read capability must not bypass App scope.
+ *
+ * The row this admits confers no ambient authority of its own: the access fold
+ * (`admissibleFoldRows`) confines an App-scoped row to its own App, so the new
+ * agent reaches the memory only inside the App that owns it (#1376).
+ */
+async function sameAppAttachAdmitted(
+  ctx: Context,
+  agent: { id: string; organizationId: string | null; ownerUserId: string | null },
+  memory: { appId: string | null; class: string; organizationId: string | null; ownerUserId: string | null; userMemoryOfAgentId: string | null },
+): Promise<boolean> {
+  if (memory.appId == null) return false;
+  if (memory.class !== 'knowledge' && memory.class !== 'group') return false;
+  // Legacy knowledge/group holdings with this pointer are creator-scoped,
+  // even when the App owns their namespace and ownerUserId is null.
+  if (memory.userMemoryOfAgentId != null) return false;
+  // A spec-047 USER-owned row is strictly owner-only (@copilot, PR #1357). Its
+  // owner already holds content read in their own right and never needs this
+  // branch; anyone else must not get it through an App admin role.
+  if (memory.ownerUserId != null) return false;
+  const app = await ctx.db.app.findUnique({
+    where: { id: memory.appId },
+    select: { id: true, organizationId: true, ownerUserId: true },
+  });
+  if (!app) return false;
+  // A stale appId on a transferred memory does not grant the destination
+  // tenant's content to the App's installed Agents.
+  if (app.organizationId !== memory.organizationId || app.ownerUserId !== memory.ownerUserId) return false;
+  // deleteApp and App uninstall update the App row without removing the
+  // AppAgent join. Lock and recheck lifecycle inside the attach transaction:
+  // the earlier lookup identifies the row, not its authoritative live state.
+  const liveApp = await ctx.db.$queryRaw<{ id: string }[]>`
+    SELECT id FROM apps WHERE id = ${app.id} AND deleted_at IS NULL AND uninstalled_at IS NULL FOR SHARE
+  `;
+  if (liveApp.length === 0) return false;
+  if (app.organizationId != null) {
+    const liveOrg = await ctx.db.$queryRaw<{ id: string }[]>`
+      SELECT id FROM organizations WHERE id = ${app.organizationId} AND deleted_at IS NULL FOR SHARE
+    `;
+    if (liveOrg.length === 0) return false;
+  }
+  // A foreign Agent's owning org can be deleted while its AppAgent and grant
+  // survive. Hold that lifecycle row through the attach decision too.
+  if (agent.organizationId != null && agent.organizationId !== app.organizationId) {
+    const liveAgentOrg = await ctx.db.$queryRaw<{ id: string }[]>`
+      SELECT id FROM organizations WHERE id = ${agent.organizationId} AND deleted_at IS NULL FOR SHARE
+    `;
+    if (liveAgentOrg.length === 0) return false;
+  }
+  // FOR KEY SHARE, not a plain read (@copilot, PR #1357): uninstalling DELETES
+  // this join row without locking the agent or the memory, so a snapshot could
+  // pass here and the uninstall commit before the grant — leaving a latent row
+  // that re-activates if the agent is reinstalled. The lock makes that delete
+  // wait for this transaction instead. No deadlock: uninstall takes no memory
+  // or agent lock.
+  const installed = await ctx.db.$queryRaw<{ app_id: string }[]>`
+    SELECT app_id FROM app_agents WHERE app_id = ${app.id} AND agent_id = ${agent.id} FOR KEY SHARE
+  `;
+  if (installed.length === 0) return false;
+  // The join can outlive a revoked/expired install license. Lock that row and
+  // evaluate the same lifecycle predicate as the App access fold, so a revoke
+  // cannot commit between this decision and the attached grant.
+  if (app.organizationId == null) {
+    if (app.ownerUserId == null) return false;
+    if (app.ownerUserId !== agent.ownerUserId) {
+      const license = await ctx.db.$queryRaw<LifecycleLike[]>`
+        SELECT activated_at AS "activatedAt", revoked_at AS "revokedAt", expires_at AS "expiresAt"
+        FROM agent_subscriptions WHERE user_id = ${app.ownerUserId} AND agent_id = ${agent.id} FOR SHARE
+      `;
+      if (!license[0] || !isLifecycleActive(license[0])) return false;
+    }
+  } else if (app.organizationId !== agent.organizationId) {
+    const license = await ctx.db.$queryRaw<LifecycleLike[]>`
+      SELECT activated_at AS "activatedAt", revoked_at AS "revokedAt", expires_at AS "expiresAt"
+      FROM agent_org_grants WHERE org_id = ${app.organizationId} AND agent_id = ${agent.id} FOR SHARE
+    `;
+    if (!license[0] || !isLifecycleActive(license[0])) return false;
+  }
+  // A licensed foreign Agent is permitted below for this App's read audience,
+  // so the caller must explicitly administer this App as well as the Agent.
+  try {
+    await requireOwnerOrOrgRole(ctx, app, 'ADMIN');
+  } catch (error) {
+    if (!isAuthorizationDenial(error)) throw error;
+    return false;
+  }
+  return true;
+}
+
+/**
+ * Gate an agent-memory ATTACHMENT on the capability it grants (#1349).
+ *
+ * `addMemoryToAgent` / `updateAgentMemoryRole` authorize the AGENT (its owner
+ * or an org ADMIN). That is necessary and not sufficient: the row they write is
+ * the sole knowledge-memory write cap (`cor:dmo:050:09`) and folds into every
+ * App access map, so administering an agent used to be enough to hand that
+ * agent's audience read — and with `read-write`, WRITE — over a memory the
+ * caller could not touch themselves. `findings:installing-an-agent-is-a-read-grant`
+ * states the rule this restores: **an attach operation's gate is a read gate on
+ * the attached entity.**
+ *
+ * Two conditions, both required:
+ *
+ * 1. **Tenancy.** The memory must belong to the agent's own tenant (same org,
+ *    or the same owning user for a spec-047 user-owned agent), be genuinely
+ *    PUBLIC, or be the knowledge of an App where the Agent is live-installed
+ *    and licensed. The latter two exceptions grant only `read`.
+ *    Holger's ruling (2026-09-25) refuses a cross-tenant non-public attach even
+ *    when the caller can read the memory, matching `attachMemoryToApp`'s
+ *    `ORGANIZATION_MISMATCH` and the PUBLIC-only cross-org subscription rule.
+ * 2. **Capability.** The caller must hold, on their own user principal, the
+ *    capability being granted: the node-CONTENT read gate for `read`, and the
+ *    memory write gate for `read-write`. The content gate (not the record gate)
+ *    is the right one because an attach grants node content: an org member may
+ *    open an app-scoped memory's RECORD while `getAccessibleMemoryIds`
+ *    deliberately excludes its nodes (#653), and that gap is a same-tenant
+ *    amplification a tenancy check alone cannot see.
+ *
+ * A caller who cannot read the memory at all is answered as if it did not exist
+ * (#1316) — the refusal itself must not disclose that a guessable URN names a
+ * real memory. A caller who CAN read it but may not grant what they asked for
+ * gets an actionable `FORBIDDEN`, since existence is not a secret from them.
+ */
+export async function requireAgentMemoryGrant(
+  ctx: Context,
+  agent: { id: string; organizationId: string | null; ownerUserId: string | null; visibility: string | null },
+  memory: {
+    id: string;
+    class: string;
+    visibility: string | null;
+    userId: string | null;
+    ownerUserId: string | null;
+    organizationId: string | null;
+    appId: string | null;
+    userMemoryOfAgentId: string | null;
+  },
+  // The RAW role argument (@copilot, PR #1357): it is parsed only AFTER the
+  // concealment decision below, so a real-but-unreadable memory cannot be told
+  // from a missing one by sending an invalid role (BAD_USER_INPUT vs
+  // MEMORY_NOT_FOUND). Returns the parsed role for the caller to store.
+  rawRole: string | null | undefined,
+  ref: string,
+): Promise<AgentMemoryRole> {
+  // The role the caller asked for, defaulted as parseAgentMemoryRole does; it
+  // only selects the same-App branch here and is validated after concealment.
+  const asked = rawRole ?? 'read';
+  // Also a KNOWN mutation survivor (harness #8), for #7's reason: `self` feeds
+  // only the write check below, which no reachable caller depends on today.
+  const self = userPrincipalOnly(ctx);
+  const independentlyReadable = await holdsContentReadIndependently(ctx, memory.id);
+  // The ONE route by which App reach may admit an attach (#1357).
+  const sameAppRead = asked === 'read' && (await sameAppAttachAdmitted(ctx, agent, memory));
+  const canRead = independentlyReadable || sameAppRead;
+  // Existence-hiding first: every refusal below this line is addressed to
+  // someone who already knows the memory exists.
+  if (!canRead) throw new MemoryNotFoundError(ref);
+  // Both attachment mutations use this gate, including re-role on a legacy
+  // AgentMemoryItem. Check class AFTER concealment: an unreadable memory must
+  // still answer like a miss, without revealing its class (#1349, #1101).
+  if (memory.class === 'system') {
+    throw new Error('Agent system memories can only be attached via systemMemoryId, not as a memory item');
+  }
+  // #1101: these classes have no App audience to grant. A personal share is
+  // per-user, and a private memory is not shareable.
+  if (memory.class === 'personal' || memory.class === 'private') {
+    throw new GraphQLError(
+      memory.class === 'private'
+        ? 'A private-class memory cannot be attached to an agent — an attach grants the agent’s whole audience, and this class has no audience to grant. Private memories are never shareable either, not even by their owner. If this content needs to reach an agent, it has to live in a memory whose class has readers.'
+        : 'A personal-class memory cannot be attached to an agent — an attach grants the agent’s whole audience, and this class has no audience to grant. Giving another person access is the owner’s to do, not an administrator’s: createMemoryShare is the mechanism and only the owner may call it, so if you are not the owner, ask them.',
+      { extensions: { code: 'UNSUPPORTED_MEMORY_CLASS', memoryId: memory.id, memoryClass: memory.class } },
+    );
+  }
+  // An APP-class memory is App-internal and never an agent's to hold, for any
+  // caller (@copilot, PR #1357): its fold would break session isolation.
+  if (memory.class === 'app') {
+    throw new GraphQLError('An App-class memory belongs to its App and cannot be attached to an agent.', {
+      extensions: { code: 'UNSUPPORTED_MEMORY_CLASS', memoryClass: memory.class },
+    });
+  }
+  const role = parseAgentMemoryRole(rawRole);
+  // Platform ADMIN can independently read App-scoped knowledge through its
+  // global branch, but the row is still App-internal. Its grant must satisfy
+  // the same live-install, App-admin and read-only rule as every other caller.
+  if (memory.appId != null && memory.ownerUserId == null &&
+      (memory.class === 'knowledge' || memory.class === 'group') && !sameAppRead) {
+    throw new GraphQLError('App-scoped knowledge can only be attached read-only to an agent installed in its App.', {
+      extensions: { code: 'FORBIDDEN', reason: 'APP_SCOPED_ATTACH' },
+    });
+  }
+
+  const sameTenant =
+    (agent.organizationId != null && agent.organizationId === memory.organizationId) ||
+    (agent.ownerUserId != null && agent.ownerUserId === memory.ownerUserId);
+  // The live same-App READ branch is an App-local audience even for a licensed
+  // cross-tenant Agent. createMemoryInApp provisions that same link, so the
+  // generic attach path must be able to restore it for an authorized caller.
+  // A PUBLIC *column* is not a public AUDIENCE (@codex, PR #1357). An
+  // app-scoped row is App-internal even when marked PUBLIC (#653), and a
+  // personal/private or spec-047 user-owned row is owner-only regardless — so
+  // the cross-tenant exception uses the SAME covered-set predicate
+  // `cor:acl:080:03` uses, not the raw column. Otherwise a platform admin, or
+  // the strict owner, could attach one to an agent in another organization and
+  // expose it through that agent's App map.
+  const genuinelyPublic =
+    memory.visibility === 'PUBLIC' &&
+    !isExcludedFromCoveredSet(memory) &&
+    memory.ownerUserId == null;
+  const publicRead = role === 'read' && genuinelyPublic;
+  if (!sameTenant && !publicRead && !(role === 'read' && sameAppRead)) {
+    throw new GraphQLError(
+      genuinelyPublic
+        ? 'A PUBLIC memory from another tenant can only be attached read-only — its audience is a read audience.'
+        : "This memory belongs to another tenant; attach it to an agent in its own tenant, or share it with the agent's tenant first.",
+      { extensions: { code: 'FORBIDDEN', reason: 'CROSS_TENANT_ATTACH' } },
+    );
+  }
+
+  if (role === 'read-write') {
+    // A PUBLIC agent's audience is EVERY org that installs it (@codex, PR
+    // #1357). `cor:acl:080:03` already keeps such an agent's knowledge public;
+    // the missing half is that PUBLIC is a READ audience, so a read-write item
+    // on a public agent hands every installer the write cap. Measured before
+    // this guard: a foreign App key, holding only an AgentOrgGrant on the
+    // published agent, overwrote the publisher's node. Same-tenant ownership
+    // does not make that safe — the audience, not the tenancy, is what widens.
+    // The App-scoped grant rule above admits read only, including for platform
+    // admins. Legacy writable App-scoped links remain outside the PUBLIC
+    // covered set, but this mutation cannot create or escalate one.
+    // Only for a COVERED memory, exactly as publication judges it (@codex,
+    // PR #1357): an App-scoped or strict-owner memory is not part of any
+    // public surface — the fold confines it to its own App — so
+    // assertAgentPublicAllowed ignores such links. Without the same exemption
+    // here, attach-then-publish succeeded (reachable by a platform admin, who
+    // can read and write an App-scoped memory) while publish-then-attach was
+    // refused: one invariant, two answers depending on order.
+    if (agent.visibility === 'PUBLIC' && !isExcludedFromCoveredSet(memory)) {
+      throw new GraphQLError(
+        'A PUBLIC agent may hold read-only knowledge only — publishing it would grant write access to every organization that installs it.',
+        { extensions: { code: 'FORBIDDEN', reason: 'PUBLIC_AGENT_READ_WRITE' } },
+      );
+    }
+    // Defense in depth, and a KNOWN mutation survivor (harness #7): no caller
+    // constructible today reaches this check without already holding write.
+    // Same tenant, everyone past the agent gate (an org ADMIN, or a user-owned
+    // agent's owner) can write what they can read — and App-scoped knowledge,
+    // which no user writes, is refused by the read gate above (the same-App
+    // branch admits `read` only). Cross tenant, the tenancy rule and the
+    // PUBLIC-is-read-only rule refuse first. It stays because those facts live
+    // in other files, and this is the check that states the actual invariant.
+    try {
+      await requireMemoryWriteAccess(self, memory.id);
+    } catch (error) {
+      if (!isAuthorizationDenial(error)) throw error;
+      throw new GraphQLError(
+        'Attaching a memory read-write grants the agent write access you do not hold on it yourself.',
+        { extensions: { code: 'FORBIDDEN', reason: 'INSUFFICIENT_MEMORY_CAPABILITY' } },
+      );
+    }
+  }
+  // cor:acl:080:03 — both fresh attach and legacy-row re-role can leave an
+  // active item on a PUBLIC agent. Judge the locked agent and memory together
+  // here so neither door can retain non-PUBLIC covered knowledge (#1357).
+  await assertLinkAllowedForPublicAgent(agent.visibility, memory);
+  return role;
+}
+
+/**
+ * The record gate by id: may this caller open the memory's record? A
+ * soft-deleted or absent memory is never openable. Reads EVERY field
+ * `canReadMemoryRecord` requires — omitting one can fail it open (#1104).
+ */
+export async function canOpenMemoryRecordById(ctx: Context, memoryId: string): Promise<boolean> {
+  const record = await ctx.db.memory.findUnique({
+    where: { id: memoryId },
+    select: {
+      id: true,
+      class: true,
+      userId: true,
+      ownerUserId: true,
+      organizationId: true,
+      appId: true,
+      userMemoryOfAgentId: true,
+      deletedAt: true,
+    },
+  });
+  return !!record && !record.deletedAt && (await canReadMemoryRecord(ctx, record));
+}
+
+/**
+ * Resolve a memory ref that a mutation will WRITE, concealing it at the moment
+ * it resolves (#1381): a memory this caller can neither write nor open answers
+ * `MemoryNotFoundError(ref)`, exactly as `resolveMemoryRef` answers a miss.
+ *
+ * For surfaces that resolve SEVERAL refs before authorizing any of them
+ * (`moveNode`, `mergeMemories`, …). Wrapping only the later write gate is not
+ * enough there: a missing ref refuses at resolution, so the ORDER in which the
+ * refs refuse becomes the oracle — an unreadable source paired with a missing
+ * destination answered differently from a missing source.
+ *
+ * A caller who may open the record gets the memory back and meets the
+ * surface's own write denial later, in the same order as before; a writer is
+ * never narrowed. Malformed refs and faults propagate.
+ */
+export async function resolveMemoryRefForWrite(ctx: Context, ref: string): Promise<{ id: string }> {
+  const { id } = await resolveMemoryRef(ctx.db, ref);
+  if (await isMemoryHiddenForWrite(ctx, id, 'record')) throw new MemoryNotFoundError(ref);
+  return { id };
+}
+
+/**
+ * True when this caller can neither write the memory nor read it — the only
+ * case an existence-concealing surface may answer as "missing" (#1381).
+ * `gate` picks the read half: `'record'` for a memory-addressed surface,
+ * `'node'` (the node-content gate `Query.node` uses) for a node-addressed one.
+ * Only an ordinary denial counts as "cannot write"; any other error propagates.
+ */
+export async function isMemoryHiddenForWrite(
+  ctx: Context,
+  memoryId: string,
+  gate: 'record' | 'node',
+): Promise<boolean> {
+  try {
+    await requireMemoryWriteAccess(ctx, memoryId);
+    return false;
+  } catch (error) {
+    if (!isAuthorizationDenial(error)) throw error;
+  }
+  return gate === 'node'
+    ? !(await isMemoryReadableCached(ctx, memoryId))
+    : !(await canOpenMemoryRecordById(ctx, memoryId));
+}
+
+/**
+ * The NODE-addressed twin of {@link concealUnreadableDenial} (#1316): run a
+ * node-targeted mutation's existing authorization, and when it denies a caller
+ * who cannot read the node's memory, throw `missing()` — the surface's own
+ * missing-node error, since each spells that miss its own way (a
+ * `NODE_NOT_FOUND` GraphQLError, a bare `NodeNotFoundError`, …) and only an
+ * identical answer conceals anything.
+ *
+ * These surfaces resolve the node BEFORE authorizing, so without this a caller
+ * who cannot read the memory learned three things by probing: the memory
+ * exists, the node exists, and (by a missing loc answering differently) that
+ * the loc is free.
+ *
+ * The classifier is the node-content gate (`isMemoryReadableCached`), NOT the
+ * record gate: a caller who may open an app/system memory's RECORD but not its
+ * nodes must not learn which nodes exist in it — the same line `Query.node`
+ * draws. Ordinary denials only ({@link isAuthorizationDenial}); every other
+ * error and every success passes through, so no permitted caller is narrowed.
+ *
+ * `authorize` must perform authorization ONLY — no writes.
+ */
+export async function concealUnreadableNodeDenial(
+  ctx: Context,
+  memoryId: string,
+  missing: () => Error,
+  authorize: () => Promise<void>,
+): Promise<void> {
+  try {
+    await authorize();
+  } catch (error) {
+    if (!isAuthorizationDenial(error)) throw error;
+    if (await isMemoryReadableCached(ctx, memoryId)) throw error;
+    throw missing();
+  }
+}
+
+/**
+ * The typed `NODE_NOT_FOUND` answer the node-addressed mutations give for a
+ * ref that resolves to nothing — shared so a concealed denial is byte-identical
+ * to it (#1316).
+ */
+export function nodeNotFoundError(ref: string): GraphQLError {
+  return new GraphQLError(`Node not found: "${ref}"`, {
+    extensions: { code: 'NODE_NOT_FOUND', ref },
+  });
 }
 
 /**
@@ -731,6 +1359,12 @@ export async function isAppParticipant(
   // The owner arm above denies outright for the SAME rule, not a different one:
   // a user-owned App has no org, so it can never satisfy this bound.
   if (ctx.impersonation && app.organizationId !== ctx.impersonation.orgId) return false;
+  if (app.organizationId !== null) {
+    const liveOrg = await ctx.db.organization.findFirst({
+      where: { id: app.organizationId, deletedAt: null }, select: { id: true },
+    });
+    if (!liveOrg) return false;
+  }
   const member = await ctx.db.appMember.findUnique({
     where: { appId_userId: { appId: app.id, userId: ctx.userId } },
     select: { userId: true },
@@ -872,6 +1506,9 @@ export interface AiServiceConfigRow {
   apiKeyEncrypted: string | null;
   apiKeyPreview: string | null;
   params: unknown;
+  /** #1373 — optional so a row read before the columns existed still maps. */
+  endpoint?: string | null;
+  apiStyle?: string | null;
   enabled: boolean;
   createdAt: Date | string;
   updatedAt?: Date | string | null;
@@ -885,6 +1522,24 @@ export function aiConfigOwnerOf(c: AiServiceConfigRow): { ownerType: AiConfigOwn
 }
 
 /** Masked management view — never carries key material beyond the preview. */
+/**
+ * #1380 review (Codex P2): the MEMBER-visible picker (resolveAiServiceConfigs)
+ * — any App member, not just the owner's admins — must not learn an explicit
+ * endpoint, which under the self-hosted private-network opt-in can be an
+ * internal hostname or address. The endpoint is withheld, and
+ * effectiveEndpoint is shown only when it is the public provider default.
+ */
+export function toGqlAiServiceConfigForPicker(c: AiServiceConfigRow) {
+  const full = toGqlAiServiceConfig(c);
+  // A legacy row may still carry params.baseUrl (D2: no migration): it is no
+  // longer read, but it names a host all the same, so members don't see it.
+  const params =
+    full.params && typeof full.params === 'object' && !Array.isArray(full.params) && 'baseUrl' in full.params
+      ? Object.fromEntries(Object.entries(full.params as Record<string, unknown>).filter(([k]) => k !== 'baseUrl'))
+      : full.params;
+  return { ...full, params, endpoint: null, effectiveEndpoint: c.endpoint ? null : full.effectiveEndpoint };
+}
+
 export function toGqlAiServiceConfig(c: AiServiceConfigRow) {
   return {
     id: c.id,
@@ -895,6 +1550,10 @@ export function toGqlAiServiceConfig(c: AiServiceConfigRow) {
     hasApiKey: !!c.apiKeyEncrypted,
     apiKeyPreview: c.apiKeyPreview,
     params: c.params ?? null,
+    endpoint: c.endpoint ?? null,
+    effectiveEndpoint: effectiveEndpoint(c),
+    apiStyle: c.apiStyle ?? null,
+    effectiveApiStyle: effectiveApiStyle(c),
     enabled: c.enabled,
     createdAt: toISO(c.createdAt)!,
     updatedAt: toISO(c.updatedAt ?? null),
@@ -1195,6 +1854,13 @@ export async function getAccessibleMemoryIds(
   // memory). The canonical predicates are unchanged, just narrowed, so a
   // scoped check stays in lockstep with the full-set node gate by construction.
   onlyMemoryId?: string,
+  // #1349 — `excludeAppDerived` drops the App-participation fold from the USER
+  // branch, leaving only the paths a user holds in their own right: ownership,
+  // org membership, a share, a subscription, PUBLIC. Exactly one caller wants
+  // this — the agent-attachment gate, which must not let a grant held through
+  // one App be re-granted to another App's audience. Everywhere else the fold
+  // is correct and the default keeps it.
+  options?: { excludeAppDerived?: boolean },
 ): Promise<string[] | null> {
   const scope = onlyMemoryId ? { id: onlyMemoryId } : {};
   // App Key with an active session — hard-isolate to the session's memory
@@ -1282,6 +1948,10 @@ export async function getAccessibleMemoryIds(
     // is now proven constructible. #1101 is the real fix — the ATTACH gate
     // should refuse a strict-owner class; this is the read gate that must not
     // depend on it having done so.
+    // A principal whose ONLY reach is App-derived holds nothing in its own
+    // right, so an attachment gate asking "what does this caller hold?" gets
+    // the empty set rather than that App's fold (#1349).
+    if (options?.excludeAppDerived) return [];
     return appDerivedMemoryIds(ctx, onlyMemoryId);
   }
 
@@ -1386,7 +2056,7 @@ export async function getAccessibleMemoryIds(
     // common point-read (an org member reading their own org memory) at exactly
     // its previous query cost. The fold is several queries per App and this gate
     // runs on nearly every read surface, so the shortcut is worth stating.
-    if (!(onlyMemoryId && accessibleIds.has(onlyMemoryId))) {
+    if (!options?.excludeAppDerived && !(onlyMemoryId && accessibleIds.has(onlyMemoryId))) {
       for (const id of await appDerivedMemoryIds(ctx, onlyMemoryId)) accessibleIds.add(id);
     }
     return [...accessibleIds];
@@ -2737,14 +3407,15 @@ export interface NodeEdgeInput {
 }
 
 /**
- * Bulk-import node shape — used only by replaceSubtree (git-sync) since the
- * spec-039 Phase 0 split retired upsertNode. Single-node writes use
- * CreateNodeInput / UpdateNodeInput below.
+ * Legacy bulk-import node shape retained by the refused replaceSubtree field.
+ * Single-node writes use CreateNodeInput / UpdateNodeInput below.
  */
 export interface NodeInput {
   id?: string;
   memoryId: string;
   nodeType?: string;
+  /** Internal copy paths may preserve this legacy Node field. */
+  isLink?: boolean;
   /** #725 — collection discriminator (e.g. "competitor"). Omit preserves; null clears. */
   objectType?: string | null;
   isRunnable?: boolean | null;
@@ -2798,6 +3469,8 @@ export interface UpdateNodeInput
   id?: string;
   memoryId?: string;
   loc?: string;
+  /** Optional positive Node.revision compare-and-swap precondition (#937). */
+  expectedRevision?: number | null;
   name?: string;
 }
 

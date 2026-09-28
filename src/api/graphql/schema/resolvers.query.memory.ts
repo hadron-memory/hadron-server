@@ -15,17 +15,17 @@ import {
   type Context,
   requireRole,
   clampListTake,
-  getAccessibleMemoryIds,
   granteeShareAccess,
   canReadMemoryRecord,
-  isMemoryReadableCached,
   resolveOrgScope,
   resolveReadableMemoryId,
+  resolveNodeReadableMemoryRef,
   MEMORY_INCLUDE,
 } from './resolvers.helpers.js';
 import { getMemberOrgIds } from '../../../lib/auth/memberOrgIds.js';
 import { validateMemoryNodes } from '../../../lib/memoryValidation.js';
 import { emitNodeUrnV2 } from '../../../lib/urnEmit.js';
+import { activeAgentInstallLicenseIds, isGrantedAgentMemoryRole } from '../../../lib/appAgent.js';
 
 /** Compose a node URN, tolerating a memory urn the flat v2 shape can't express. */
 function safeCanonicalNodeUrn(memoryUrn: string, loc: string): string | null {
@@ -167,11 +167,6 @@ export const memoryQueries = {
       { memoryRef, limit }: { memoryRef: string; limit?: number | null },
       ctx: Context,
     ) => {
-      const { id: memoryId } = await resolveMemoryRef(ctx.db, memoryRef);
-      const memory = await ctx.db.memory.findFirst({
-        where: { id: memoryId, deletedAt: null },
-        select: { id: true, urn: true },
-      });
       // #859 review (Codex P1): the NODE-CONTENT gate, not the record-level
       // one. This query returns node ids, locs, counts and operational error
       // details — node-level data. `canReadMemoryRecord` keeps an org-member
@@ -180,12 +175,17 @@ export const memoryQueries = {
       // gating on it would let an ordinary org member enumerate App-internal
       // nodes. (This is the SAME record-vs-node-content distinction as #846,
       // and the opposite answer: there the payload was Memory scalars, here it
-      // is node data.) Denied ≡ not-found — no existence oracle.
-      if (!memory || !(await isMemoryReadableCached(ctx, memory.id))) {
-        throw new GraphQLError(`Memory not found: "${memoryRef}"`, {
-          extensions: { code: 'NOT_FOUND' },
-        });
-      }
+      // is node data.) Denied ≡ not-found — and since #1316 the SAME
+      // not-found: the old `NOT_FOUND` here differed from the missing
+      // branch's `MEMORY_NOT_FOUND`, which kept the oracle open.
+      const { id: memoryId } = await resolveNodeReadableMemoryRef(ctx, memoryRef);
+      const memory = await ctx.db.memory.findFirst({
+        where: { id: memoryId, deletedAt: null },
+        select: { id: true, urn: true },
+      });
+      // resolveMemoryRef already excludes deleted rows; this only guards the
+      // read-then-read race, answering it as the missing branch does.
+      if (!memory) throw new MemoryNotFoundError(memoryRef);
 
       const cap = Math.min(Math.max(limit ?? 200, 0), 1000);
       // The cap is pushed DOWN so findings past it are counted but never
@@ -215,17 +215,13 @@ export const memoryQueries = {
     memoryUsageSummary: async (_: unknown, { memoryRef }: { memoryRef: string }, ctx: Context) => {
       requireRole(ctx, 'READER');
       // 007-entity-id-or-urn: memoryRef may be ID, bare URN, or prefixed URN.
-      const { id: resolvedMemoryId } = await resolveMemoryRef(ctx.db, memoryRef);
-
-      // Access control (#250, extended from usageEvents): deny a memory the
-      // caller can't read with [] (no existence leak), mirroring usageEvents
-      // and nodeById. getAccessibleMemoryIds encodes principals + the memory-
-      // class rules (spec 034). Previously this resolver had no gate at all —
-      // any authenticated caller could read any tenant's per-node usage counts.
-      const accessibleMemoryIds = await getAccessibleMemoryIds(ctx);
-      if (accessibleMemoryIds !== null && !accessibleMemoryIds.includes(resolvedMemoryId)) {
-        return [];
-      }
+      // Access control (#250, extended from usageEvents): the node-content
+      // gate (getAccessibleMemoryIds — principals + the spec-034 class rules).
+      // Previously this resolver had no gate at all — any authenticated caller
+      // could read any tenant's per-node usage counts. #1316: a denied memory
+      // used to answer `[]` while a missing one threw MEMORY_NOT_FOUND, so the
+      // `[]` itself disclosed existence; both now throw the same error.
+      const { id: resolvedMemoryId } = await resolveNodeReadableMemoryRef(ctx, memoryRef);
 
       // #796: scope on the `memoryId` COLUMN. This was #253's UsageEvent→Node
       // relation join, which kept the FK precision the older `nodeLoc: { in: locs }`
@@ -484,18 +480,23 @@ export const memoryQueries = {
           select: {
             organizationId: true,
             ownerUserId: true,
+            deletedAt: true,
+            uninstalledAt: true,
             appAgents: {
               select: {
                 agent: {
                   include: {
-                    memoryItems: { include: { memory: { include: MEMORY_INCLUDE } } },
+                    memoryItems: {
+                      where: { deletedAt: null, memory: { deletedAt: null } },
+                      include: { memory: { include: MEMORY_INCLUDE } },
+                    },
                   },
                 },
               },
             },
           },
         });
-        if (!app || app.appAgents.length === 0) return empty;
+        if (!app || app.deletedAt || app.uninstalledAt || app.appAgents.length === 0) return empty;
         // #758 — the twin of the #676 blocker-2 fix, which landed only in the
         // MCP `getAppMemoryAccess`. spec 047: a USER-owned memory is strictly
         // owner-only, so one owned by someone other than this App's owner must
@@ -503,12 +504,30 @@ export const memoryQueries = {
         // (ownerUserId NULL) are unaffected.
         const foreignUserOwned = (owner: string | null | undefined): boolean =>
           owner != null && owner !== app.ownerUserId;
+        const licensedAgentIds = await activeAgentInstallLicenseIds(
+          ctx.db, app,
+          app.appAgents.map((row) => row.agent).filter((agent) => agent.deletedAt === null),
+        );
         const memoryMap = new Map<string, any>();
         for (const aa of app.appAgents) {
+          if (!licensedAgentIds.has(aa.agent.id)) continue;
           for (const item of aa.agent.memoryItems) {
+            if (!isGrantedAgentMemoryRole(item.role)) continue;
             if (classSet ? !classSet.has(item.memory.class) : item.memory.class === 'system') continue;
             if (f.visibility && item.memory.visibility !== f.visibility) continue;
+            // AgentMemoryItem is global to the Agent. An App-scoped memory
+            // contributes only to its own App, even when the same Agent is
+            // installed elsewhere (#1357 review).
+            if (item.memory.appId != null && item.memory.appId !== ctx.appId) continue;
+            if (item.memory.userMemoryOfAgentId != null) continue;
             if (foreignUserOwned(item.memory.ownerUserId)) continue;
+            // A pure App key has no user principal for strict-owner records.
+            // If this is a user-bound App context, use the record gate for the
+            // rare personal/private or spec-047 owner-owned row.
+            if (item.memory.ownerUserId != null ||
+                item.memory.class === 'personal' || item.memory.class === 'private') {
+              if (!ctx.userId || !(await canReadMemoryRecord(ctx, item.memory))) continue;
+            }
             memoryMap.set(item.memory.id, item.memory);
           }
         }

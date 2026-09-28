@@ -23,6 +23,7 @@ import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import { createTestableMcpServer } from './server.js';
 import type { AuthContext } from '../middleware/auth.js';
 import { generateId } from '../lib/id.js';
+import { revisionStateHashRefreshMarker } from '../lib/nodeRevisionSnapshot.js';
 
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -146,6 +147,37 @@ describe('hadron_create_node — resurrects a soft-deleted node (#543)', () => {
 });
 
 describe('hadron_update_node — soft-deleted node is not-found (#543)', () => {
+  it('does not carry an old task stamp onto newly edited live content', async () => {
+    const task = await db.node.create({
+      data: { id: generateId(), memoryId: fx.memory.id, loc: 'author-task', name: 'Author task', nodeType: 'task' },
+    });
+    const authoredAt = new Date('2026-09-26T20:00:00Z');
+    await db.node.update({
+      where: { id: fx.ghost.id },
+      data: {
+        deletedAt: null, deletedBy: null, authorshipKind: 'TASK',
+        authoredByTask: task.id, authoredByRevision: 1, authoredAt,
+        revisionContentHash: revisionStateHashRefreshMarker(),
+      },
+    });
+    const srv = createTestableMcpServer(adminAuth());
+    const text = await srv.callToolText('hadron_update_node', {
+      urn: `urn:node:${fx.memory.urn}:${fx.ghost.loc}`, content: 'edited body',
+    });
+    expect(text).toMatch(/updated|saved/i);
+    expect(await db.node.findUniqueOrThrow({ where: { id: fx.ghost.id } })).toMatchObject({
+      content: 'edited body', authorshipKind: null, authoredByTask: null,
+      authoredByRevision: null, authoredAt: null,
+    });
+    expect(await db.nodeRevision.findFirstOrThrow({
+      where: { nodeId: fx.ghost.id, content: 'stale content' },
+      orderBy: { revNo: 'desc' },
+    })).toMatchObject({
+      authorshipKind: 'TASK', authoredByTask: task.id,
+      authoredByRevision: 1, authoredAt,
+    });
+  });
+
   it('returns "not found" and leaves the row tombstoned', async () => {
     const srv = createTestableMcpServer(adminAuth());
     const text = await srv.callToolText('hadron_update_node', {
@@ -176,8 +208,10 @@ describe('hadron_update_node — soft-deleted node is not-found (#543)', () => {
       name: 'nope',
     });
 
-    expect(existingLoc).toMatch(/access denied/i);
-    expect(existingLoc).not.toMatch(/not found/i);
+    // #1316: the viewer cannot read the memory, so both answer as a missing
+    // MEMORY does — "access denied" would confirm the memory exists. Neither
+    // names the node, so the node-existence guarantee below is unchanged.
+    expect(existingLoc).toBe(`Memory not found: "${fx.memory.urn}".`);
     // Identical response for both — no existence signal.
     expect(missingLoc).toBe(existingLoc);
   });

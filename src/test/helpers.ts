@@ -449,6 +449,10 @@ interface NodeMeta {
   alias?: string;
   tags?: string[];
   nodes?: Array<{ id: string; rel: string }>;
+  /** #1348: the collection discriminator; null/blank to exercise the no-opinion forms. */
+  objectType?: string | null;
+  /** #1348: a governed signal, to pin that objectType handling leaves it alone. */
+  role?: string;
 }
 
 /** Write a legacy node (`.node/node.yaml` + `topic.md`). */

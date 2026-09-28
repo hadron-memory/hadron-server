@@ -22,7 +22,9 @@
  * platform are **composed on read** from one of them — a node URN carries its
  * memory's slug, a worker URN its App's slug, an apprun URN likewise. Renaming
  * one memory therefore orphans every published *node* URN beneath it, which is
- * the platform's most-cited identifier.
+ * the platform's most-cited identifier. A node MOVE is the exception: it changes
+ * the node's loc or memory without renaming its old memory, so it records a
+ * NODE alias for the composed address it left (#1391).
  *
  * A derived URN heals **when** it resolves THROUGH its parent's ref resolver:
  * `hrn:worker:<root>:<app-slug>:<slug>` is resolved by looking up
@@ -60,11 +62,10 @@ import type { Prisma, PrismaClient } from '../generated/prisma/index.js';
 import { normalizeUrnForLookup } from './urn.js';
 
 /**
- * The entities whose URN is a stored, renameable column. Deliberately closed:
- * everything else composes its URN on read from one of these, so adding a member
- * means a new column somewhere, not a new derived shape.
+ * The four stored-URN entities, plus NODE for moves of a composed address.
+ * Other derived URNs inherit parent aliases through their resolver.
  */
-export type UrnAliasEntityType = 'ORGANIZATION' | 'MEMORY' | 'AGENT' | 'APP';
+export type UrnAliasEntityType = 'ORGANIZATION' | 'MEMORY' | 'AGENT' | 'APP' | 'NODE';
 
 /** Why an alias row exists. See the Prisma enum for the authoritative list. */
 export type UrnAliasReason = 'RENAME' | 'ORG_RENAME_CASCADE' | 'V1_MIGRATION';
@@ -196,11 +197,12 @@ export async function findUrnAliasTargetIds(
  * `cor:urn:030:02`. Keeping it a callback is what makes it structurally
  * impossible for this module to answer a question that is not its to answer.
  *
- * Walks alias pages until it has TWO live rows (enough to distinguish "one
- * match" from "ambiguous") or the pages run out, so the liveness decision is
- * never truncated by a bound applied before it. `ALIAS_MAX_PAGES` is a runaway
- * guard on a corrupt map, not a semantic limit — reaching it means one URN has
- * had tens of thousands of historical holders.
+ * By default walks alias pages until it has TWO live rows (enough to
+ * distinguish "one match" from "ambiguous") or the pages run out. `all: true`
+ * walks every page: the node resolver needs every live claimant so a caller
+ * with access only to a later claimant cannot be falsely told no claimant is
+ * visible. `ALIAS_MAX_PAGES` guards a corrupt map with tens of thousands of
+ * historical holders; it is not an early liveness cutoff.
  *
  * Costs exactly one indexed query on the overwhelmingly common path (a URN that
  * is simply not found), because an empty first page returns immediately.
@@ -210,6 +212,7 @@ export async function findLiveUrnAliasTargets<T extends { id: string }>(
   entityType: UrnAliasEntityType,
   lookupUrn: string,
   findLive: (ids: string[]) => Promise<T[]>,
+  options?: { all?: boolean },
 ): Promise<T[]> {
   const live: T[] = [];
   const seen = new Set<string>();
@@ -225,11 +228,19 @@ export async function findLiveUrnAliasTargets<T extends { id: string }>(
         live.push(row);
       }
     }
-    // Two live rows already settle every question a caller asks: exactly one
-    // match, or ambiguous. Reading further pages could only add more of the
-    // latter.
-    if (live.length >= 2) break;
+    // The common resolver only needs two to decide ambiguity. Node lookups
+    // opt into all candidates so their caller-side access gate can inspect
+    // every claimant before deciding whether to conceal the ambiguity.
+    if (!options?.all && live.length >= 2) break;
     if (ids.length < ALIAS_PAGE_SIZE) break;
+    if (page === ALIAS_MAX_PAGES - 1) {
+      const beyond = await findUrnAliasTargetIds(db, entityType, lookupUrn, {
+        skip: ALIAS_MAX_PAGES * ALIAS_PAGE_SIZE, take: 1,
+      });
+      if (beyond.length) {
+        throw new Error(`URN alias walk exceeded ${ALIAS_MAX_PAGES} pages for ${entityType}`);
+      }
+    }
   }
   return live;
 }
@@ -276,7 +287,7 @@ export async function findMemoryByAliasedUrn(
   candidateUrns: ReadonlyArray<string>,
   onAmbiguous: (candidate: string, rows: ReadonlyArray<{ id: string }>) => never,
   options?: { includeDeleted?: boolean },
-): Promise<{ id: string; deletedAt: Date | null } | null> {
+): Promise<{ id: string; urn: string; deletedAt: Date | null } | null> {
   for (const candidate of candidateUrns) {
     // Routed through the shared paged walk rather than fetching ids directly
     // (PR #1080 re-review, Codex P2): liveness is applied per page and the walk
@@ -290,7 +301,7 @@ export async function findMemoryByAliasedUrn(
     const rows = await findLiveUrnAliasTargets(db, 'MEMORY', candidate, (ids) =>
       db.memory.findMany({
         where: { id: { in: ids }, ...(options?.includeDeleted ? {} : { deletedAt: null }) },
-        select: { id: true, deletedAt: true },
+        select: { id: true, urn: true, deletedAt: true },
       }),
     );
     if (rows.length === 0) continue;
@@ -301,4 +312,3 @@ export async function findMemoryByAliasedUrn(
   }
   return null;
 }
-

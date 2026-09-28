@@ -4,6 +4,7 @@ import { isLifecycleActive } from '@hadron-memory/access-control';
 import {
   getPrimaryAgent,
   getPrimaryAgentId,
+  isGrantedAgentMemoryRole,
 } from '../../../lib/appAgent.js';
 import {
   emitNodeUrnV2,
@@ -13,6 +14,7 @@ import {
   bestEffortFlatNodeUrn,
 } from '../../../lib/urnEmit.js';
 import { portalUrlForUrn } from '../../../lib/portalUrl.js';
+import { nodeContentValidationState } from '../../../lib/nodeContentValidation.js';
 // Spec 049 Phase 3b — AppRun.scope: the mint snapshot as the caller may read it.
 import { parseRunScopeSnapshot, resolveRunScope, scopeInfoOf } from '../../../lib/scopes.js';
 import { parseRunRegisterSnapshot, resolveRegister, snapshotRowsAsEntries, toGqlRegisterRows } from '../../../lib/resolveRegister.js';
@@ -24,6 +26,7 @@ import {
   revisionStateMatches,
   type SnapshotSourceNode,
 } from '../../../lib/nodeRevisionSnapshot.js';
+import { clearNodeAuthorship } from '../../../lib/nodeAuthorship.js';
 import { decryptNodeFieldsWithKey } from '../../../lib/nodeCrypto.js';
 import { sessionKeyCache } from '../../../lib/sessionKeyCache.js';
 import { composeAppRunUrn } from '../../../lib/entityRef/appRunRef.js';
@@ -35,7 +38,7 @@ import {
   canSeeUserPersonalFields,
   canSeeOrgMemberRole,
 } from '../../../lib/auth/userVisibility.js';
-import { type AgentVisibility } from '../../../generated/prisma/index.js';
+import { Prisma, type AgentVisibility, type NodeContentValidationOutcome } from '../../../generated/prisma/index.js';
 import {
   deserializeTags,
   deserializeJson,
@@ -61,6 +64,7 @@ import {
   assetUrn,
   resolveAppTeamSpaceMemoryIds,
   getAccessibleMemoryIds,
+  STORED_NODE_CONTENT,
 } from './resolvers.helpers.js';
 import { getMemberOrgIds } from '../../../lib/auth/memberOrgIds.js';
 import { publicReadableMemoryWhere } from '../../../lib/orgDiscoverability.js';
@@ -316,6 +320,253 @@ function resolveRevisionEditor(
   })();
 }
 
+type AuthoredState = {
+  authorshipKind?: 'TASK' | 'HUMAN' | null;
+  authoredByTask?: string | null;
+  authoredByRevision?: number | null;
+  authoredByHuman?: string | null;
+  authoredAt?: Date | null;
+};
+
+type PendingTaskRef = { id: string; resolve: (ref: string | null) => void; reject: (error: unknown) => void };
+const authorshipTaskBatches = new WeakMap<Context, { pending: Map<string, PendingTaskRef>; scheduled: boolean }>();
+
+async function flushAuthorshipTasks(ctx: Context, batch: { pending: Map<string, PendingTaskRef>; scheduled: boolean }) {
+  const pending = [...batch.pending.values()];
+  batch.pending.clear();
+  batch.scheduled = false;
+  if (pending.length === 0) return;
+  try {
+    const tasks = await ctx.db.node.findMany({
+      where: { id: { in: pending.map(({ id }) => id) }, deletedAt: null },
+      select: { id: true, loc: true, memoryId: true },
+    });
+    const accessible = await getAccessibleMemoryIds(ctx);
+    const readable = accessible === null ? null : new Set(accessible);
+    const refs = new Map(await Promise.all(tasks.map(async (task) => [
+      task.id,
+      readable === null || readable.has(task.memoryId) ? await resolveNodeUrnField(task, ctx) : null,
+    ] as const)));
+    for (const item of pending) item.resolve(refs.get(item.id) ?? null);
+  } catch (error) {
+    for (const item of pending) item.reject(error);
+  }
+}
+
+async function readableTaskRef(ctx: Context, taskId: string | null | undefined): Promise<string | null> {
+  if (!taskId) return null;
+  // Sibling authorship fields can cite many tasks. Batch their gated
+  // projections and memoize each result (including concealed misses).
+  const cache = ctx.readableTaskRefCache ??= new Map<string, Promise<string | null>>();
+  let pending = cache.get(taskId);
+  if (!pending) {
+    let batch = authorshipTaskBatches.get(ctx);
+    if (!batch) {
+      batch = { pending: new Map(), scheduled: false };
+      authorshipTaskBatches.set(ctx, batch);
+    }
+    pending = new Promise<string | null>((resolve, reject) => {
+      batch!.pending.set(taskId, { id: taskId, resolve, reject });
+    });
+    cache.set(taskId, pending);
+    if (!batch.scheduled) {
+      batch.scheduled = true;
+      setImmediate(() => { void flushAuthorshipTasks(ctx, batch!); });
+    }
+  }
+  return pending;
+}
+
+async function resolveAuthorship(state: AuthoredState, ctx: Context) {
+  if (!state.authorshipKind || !state.authoredAt) return null;
+  const taskRef = state.authorshipKind === 'TASK'
+    ? await readableTaskRef(ctx, state.authoredByTask)
+    : null;
+  return {
+    kind: state.authorshipKind,
+    taskRef,
+    // Task identity and revision are a single claim; never reveal only half.
+    taskRevision: taskRef ? state.authoredByRevision : null,
+    human: state.authorshipKind === 'HUMAN'
+      ? await resolveRevisionEditor(ctx, [state.authoredByHuman])
+      : null,
+    authoredAt: state.authoredAt,
+  };
+}
+
+/**
+ * Reconcile a raw writer's drift for a Node parent without mixing a later
+ * writer's state into the GraphQL object already selected by the caller.
+ */
+async function reconciledNodeForParent(
+  n: SnapshotSourceNode & { revSeq: number },
+  ctx: Context,
+): Promise<(SnapshotSourceNode & { revSeq: number }) | null> {
+  // Sibling GraphQL fields resolve independently, often concurrently. Cache
+  // by the selected parent OBJECT, not node id: two mutation fields in one
+  // request may return different states of the same node.
+  const cache = ctx.nodeReconcileCache ??= new WeakMap();
+  const existing = cache.get(n);
+  if (existing) return existing;
+  const pending = ctx.db.$transaction(async (tx) => {
+    // A newer number is safe only when every intervening revision came from
+    // another reader's reconcile. An authored or edge write may have changed
+    // the parent's state even when its tracked fields happen to look equal.
+    await tx.$queryRaw`SELECT "id" FROM "nodes" WHERE "id" = ${n.id} FOR UPDATE`;
+    const pre = await tx.node.findUnique({ where: { id: n.id }, select: { memoryId: true, revSeq: true } });
+    if (!pre || pre.memoryId !== n.memoryId || pre.revSeq < n.revSeq) return null;
+    if (pre.revSeq > n.revSeq) {
+      const reconciles = await tx.nodeRevision.count({
+        where: { nodeId: n.id, revNo: { gte: n.revSeq, lt: pre.revSeq }, editedByInfo: RECONCILE_EDITOR_INFO },
+      });
+      if (reconciles !== pre.revSeq - n.revSeq) return null;
+    }
+    if ((await ensureCurrentNodeRevisionInTransaction(tx, n.id, { expectedMemoryId: n.memoryId })) == null) return null;
+    const current = await tx.node.findUnique({ where: { id: n.id } });
+    if (!current) return null;
+    const key = sessionKeyCache.getByMemoryId(current.memoryId);
+    if (key) decryptNodeFieldsWithKey(current, key);
+    // Verify against what was STORED: a templated read hands field resolvers
+    // rendered `content`, which would never match the row.
+    const stored = STORED_NODE_CONTENT in n
+      ? { ...n, content: (n as { [STORED_NODE_CONTENT]?: string | null })[STORED_NODE_CONTENT] ?? null }
+      : n;
+    return revisionStateMatchesWithoutAuthorship(stored, current) ? current : null;
+  });
+  cache.set(n, pending);
+  return pending;
+}
+
+/** The read resolver corrects a stale stamp without changing authored content. */
+function revisionStateMatchesWithoutAuthorship(parent: SnapshotSourceNode, current: SnapshotSourceNode): boolean {
+  return revisionStateMatches(
+    { ...parent, ...clearNodeAuthorship() },
+    { ...current, ...clearNodeAuthorship() },
+  );
+}
+
+async function resolveContentValidation(
+  state: { id?: string; nodeId?: string; memoryId?: string | null; revSeq?: number; revNo?: number | null },
+  ctx: Context,
+) {
+  const nodeRevision = state.revSeq ?? state.revNo;
+  if (nodeRevision == null) return { state: 'UNVALIDATED', latestReport: null };
+  const nodeId = state.nodeId ?? state.id;
+  if (!nodeId) return { state: 'UNVALIDATED', latestReport: null };
+  // Legacy snapshots lacked memoryId. Their parent query already gated the
+  // current memory; use that only for this legacy case.
+  const memoryId = state.memoryId ?? (await ctx.db.node.findUnique({
+    where: { id: nodeId }, select: { memoryId: true },
+  }))?.memoryId;
+  if (!memoryId) return { state: 'UNVALIDATED', latestReport: null };
+  // A report captured in another memory is not exposed by moving the node.
+  // GraphQL resolves list siblings concurrently, so collect their report and
+  // task lookups into one request-scoped query per event-loop turn.
+  const { report, taskRef } = await loadValidationReport(ctx, nodeId, memoryId, nodeRevision);
+  if (!report) return { state: 'UNVALIDATED', latestReport: null };
+  return {
+    state: nodeContentValidationState(nodeRevision, report),
+    latestReport: {
+      nodeRevision: report.nodeRevSeq,
+      validationTaskRef: taskRef,
+      validationTaskRevision: taskRef ? report.validationTaskRevSeq : null,
+      outcome: report.outcome,
+      reportedAt: report.reportedAt,
+    },
+  };
+}
+
+type ValidationReportRow = {
+  requestKey: string;
+  nodeRevSeq: number;
+  validationTaskId: string;
+  validationTaskRevSeq: number;
+  outcome: NodeContentValidationOutcome;
+  reportedAt: Date;
+};
+type ValidationLookup = { report: ValidationReportRow | null; taskRef: string | null };
+type PendingValidation = {
+  key: string;
+  nodeId: string;
+  memoryId: string;
+  revision: number;
+  resolve: (value: ValidationLookup) => void;
+  reject: (reason: unknown) => void;
+  promise: Promise<ValidationLookup>;
+};
+const validationBatches = new WeakMap<Context, { pending: Map<string, PendingValidation>; scheduled: boolean }>();
+
+/** Batch latest-report and readable-task projections across sibling Node fields. */
+function loadValidationReport(ctx: Context, nodeId: string, memoryId: string, revision: number): Promise<ValidationLookup> {
+  let batch = validationBatches.get(ctx);
+  if (!batch) {
+    batch = { pending: new Map(), scheduled: false };
+    validationBatches.set(ctx, batch);
+  }
+  const key = JSON.stringify([nodeId, memoryId, revision]);
+  const existing = batch.pending.get(key);
+  if (existing) return existing.promise;
+  let resolve!: PendingValidation['resolve'];
+  let reject!: PendingValidation['reject'];
+  const promise = new Promise<ValidationLookup>((res, rej) => { resolve = res; reject = rej; });
+  batch.pending.set(key, { key, nodeId, memoryId, revision, resolve, reject, promise });
+  if (!batch.scheduled) {
+    batch.scheduled = true;
+    setImmediate(() => { void flushValidationBatch(ctx, batch!); });
+  }
+  return promise;
+}
+
+async function flushValidationBatch(
+  ctx: Context,
+  batch: { pending: Map<string, PendingValidation>; scheduled: boolean },
+): Promise<void> {
+  const pending = [...batch.pending.values()];
+  batch.pending.clear();
+  batch.scheduled = false;
+  if (pending.length === 0) return;
+  try {
+    const values = Prisma.join(pending.map((item) => Prisma.sql`
+      (${item.key}::text, ${item.nodeId}::text, ${item.memoryId}::text, ${item.revision}::integer)
+    `));
+    const reports = await ctx.db.$queryRaw<ValidationReportRow[]>(Prisma.sql`
+      WITH wanted(request_key, node_id, memory_id, rev_seq) AS (VALUES ${values})
+      SELECT w.request_key AS "requestKey", r.node_rev_seq AS "nodeRevSeq",
+             r.validation_task_id AS "validationTaskId",
+             r.validation_task_rev_seq AS "validationTaskRevSeq", r.outcome,
+             r.reported_at AS "reportedAt"
+      FROM wanted w
+      JOIN LATERAL (
+        SELECT node_rev_seq, validation_task_id, validation_task_rev_seq, outcome, reported_at
+        FROM node_content_validation_reports
+        WHERE node_id = w.node_id AND memory_id = w.memory_id AND node_rev_seq <= w.rev_seq
+        ORDER BY node_rev_seq DESC, reported_at DESC, id DESC
+        LIMIT 1
+      ) r ON TRUE
+    `);
+    const byKey = new Map(reports.map((report) => [report.requestKey, report]));
+    const taskIds = [...new Set(reports.map((report) => report.validationTaskId))];
+    const tasks = taskIds.length === 0 ? [] : await ctx.db.node.findMany({
+      where: { id: { in: taskIds }, deletedAt: null },
+      select: { id: true, loc: true, memoryId: true },
+    });
+    // Use the GraphQL node-content gate, including active-session isolation.
+    // One access fold replaces a per-report task-memory check.
+    const accessible = tasks.length === 0 ? [] : await getAccessibleMemoryIds(ctx);
+    const readable = accessible === null ? null : new Set(accessible);
+    const taskRefs = new Map(await Promise.all(tasks.map(async (task) => [
+      task.id,
+      readable === null || readable.has(task.memoryId) ? await resolveNodeUrnField(task, ctx) : null,
+    ] as const)));
+    for (const item of pending) {
+      const report = byKey.get(item.key) ?? null;
+      item.resolve({ report, taskRef: report ? taskRefs.get(report.validationTaskId) ?? null : null });
+    }
+  } catch (error) {
+    for (const item of pending) item.reject(error);
+  }
+}
+
 export const typeResolvers = {
   McpServer: {
     // headersEncrypted is not in the GraphQL type at all; readers get only
@@ -331,6 +582,55 @@ export const typeResolvers = {
     from: (s: { fromAddress: string }) => s.fromAddress,
   },
   Node: {
+    authorship: async (n: SnapshotSourceNode & { revSeq: number }, _: unknown, ctx: Context) => {
+      if (!n.authorshipKind || !n.authoredAt) return null;
+      // Start the task lookup before per-node reconciliation so sibling list
+      // fields contribute their distinct author tasks to one request batch.
+      // A stale parent may lose its stamp; never return the prefetched claim
+      // without checking the reconciled row below.
+      const selectedTask = n.authorshipKind === 'TASK'
+        ? readableTaskRef(ctx, n.authoredByTask).then(
+          (value) => ({ ok: true as const, value }),
+          (error: unknown) => ({ ok: false as const, error }),
+        )
+        : null;
+      // A raw writer can change authored content without refreshing its
+      // fingerprint. Reconcile even when the client selects only authorship:
+      // no other GraphQL field is guaranteed to run first. Compare the
+      // parent's content after ignoring its stale stamp; a concurrent
+      // supported edit must not lend its new authorship to this old parent.
+      const current = await reconciledNodeForParent(n, ctx);
+      // If the selected parent no longer matches a reconcilable live state,
+      // its stamp cannot be verified here. An absent claim is safer than
+      // attributing raw drift that a concurrent writer has since overwritten.
+      if (!current) return null;
+      if (selectedTask && current.authorshipKind === 'TASK' && current.authoredByTask === n.authoredByTask) {
+        const selected = await selectedTask;
+        if (!selected.ok) throw selected.error;
+      }
+      return resolveAuthorship(current, ctx);
+    },
+    contentValidation: async (
+      n: SnapshotSourceNode & { revSeq: number; revisionContentHash: string | null },
+      _: unknown,
+      ctx: Context,
+    ) => {
+      // Start the report lookup while sibling Node revisions reconcile. On a
+      // list this lets the request loader collect all selected parents in one
+      // turn. If raw drift advances this node's revision, re-query using the
+      // corrected cutoff before returning its validation state.
+      const selectedReport = resolveContentValidation(n, ctx).then(
+        (value) => ({ ok: true as const, value }),
+        (error: unknown) => ({ ok: false as const, error }),
+      );
+      // Match Node.revision's lazy raw-writer reconcile, so a response cannot
+      // display the advanced revision beside validation for the old number.
+      const revSeq = await typeResolvers.Node.revision(n, _, ctx);
+      if (revSeq !== n.revSeq) return resolveContentValidation({ ...n, revSeq }, ctx);
+      const selected = await selectedReport;
+      if (!selected.ok) throw selected.error;
+      return selected.value;
+    },
     revision: async (
       n: SnapshotSourceNode & {
         revSeq: number;
@@ -342,40 +642,11 @@ export const typeResolvers = {
       // Raw writers are detected lazily. The canonical fingerprint is computed
       // by PostgreSQL because the revision state includes JSON/array fields
       // whose text encoding is not portable across runtimes. Reconcile + refetch under one lock,
-      // then use the new number ONLY when the complete revisioned state still
-      // matches the parent object. If a concurrent supported write changed the
-      // row, the parent's own number remains the only self-consistent answer.
-      return ctx.db.$transaction(async (tx) => {
-        // A NEWER number is only ever returned for this call's own reconcile
-        // of drift the parent already reflects. If any revisioned write landed
-        // since the parent was read — an edge-only update advances revSeq
-        // without touching a tracked field — the parent's edges/fields may be
-        // stale, and its own number is the only self-consistent answer
-        // (@codex P1, PR #1339).
-        await tx.$queryRaw`SELECT "id" FROM "nodes" WHERE "id" = ${n.id} FOR UPDATE`;
-        const pre = await tx.node.findUnique({ where: { id: n.id }, select: { memoryId: true, revSeq: true } });
-        if (!pre || pre.memoryId !== n.memoryId || pre.revSeq < n.revSeq) return n.revSeq;
-        if (pre.revSeq > n.revSeq) {
-          // Advances since the parent was read are harmless ONLY if every one
-          // is a server reconcile (another reader's — reconciles never touch
-          // edges): the parent is then still current, and must get the SAME
-          // number that reader got (@codex P1, PR #1339). Any authoring or
-          // edge write in between, or pruned history we cannot see, keeps the
-          // parent's own number.
-          const reconciles = await tx.nodeRevision.count({
-            where: { nodeId: n.id, revNo: { gte: n.revSeq, lt: pre.revSeq }, editedByInfo: RECONCILE_EDITOR_INFO },
-          });
-          if (reconciles !== pre.revSeq - n.revSeq) return n.revSeq;
-        }
-        // Only while the row is still in the memory the parent was read from
-        // (@codex P1, PR #1339): never reconcile into another tenant.
-        if ((await ensureCurrentNodeRevisionInTransaction(tx, n.id, { expectedMemoryId: n.memoryId })) == null) return n.revSeq;
-        const current = await tx.node.findUnique({ where: { id: n.id } });
-        if (!current) return n.revSeq;
-        const key = sessionKeyCache.getByMemoryId(current.memoryId);
-        if (key) decryptNodeFieldsWithKey(current, key);
-        return revisionStateMatches(n, current) ? current.revSeq : n.revSeq;
-      });
+      // then use the new number only when the selected content still matches.
+      // The reconcile itself may clear a stale authorship stamp; the field
+      // resolver presents that corrected stamp, so its change is allowed here.
+      const current = await reconciledNodeForParent(n, ctx);
+      return current?.revSeq ?? n.revSeq;
     },
     tags: (node: { tags: string | string[] }) => deserializeTags(node.tags),
     // The referenced asset for a `reference` node carrying data.asset
@@ -496,6 +767,12 @@ export const typeResolvers = {
     },
   },
   NodeRevision: {
+    authorship: (nv: AuthoredState, _: unknown, ctx: Context) => resolveAuthorship(nv, ctx),
+    contentValidation: (
+      nv: { nodeId: string; memoryId: string | null; revNo: number | null },
+      _: unknown,
+      ctx: Context,
+    ) => resolveContentValidation(nv, ctx),
     // #696 — the computed end-anchored noderev URN. Null for legacy rows with
     // no revNo, and for the rare multi-segment per-user memory the flat shape
     // can't express (the compose helper throws → served as null, never crashes).
@@ -1476,8 +1753,9 @@ export const typeResolvers = {
     // readable app-scoped memories from `organization`/`app -> agents ->
     // memoryItems` (PR #846 review: Codex P1 / Copilot).
     //
-    // A PUBLIC non-app-scoped memory short-circuits, so the marketplace listing
-    // costs no extra query.
+    // Only an org-owned PUBLIC non-App memory short-circuits. A spec-047
+    // user-owned memory remains strict-owner even with visibility PUBLIC; the
+    // owner axis must reach canReadMemoryRecord (#1357 review).
     memoryItems: async (
       a: { id: string; memoryItems?: unknown },
       _: unknown,
@@ -1499,8 +1777,9 @@ export const typeResolvers = {
         ownerUserId: string | null;
         organizationId: string | null;
         userMemoryOfAgentId: string | null;
+        createdBy: string | null;
       };
-      type Item = { memoryId: string; memory?: Mem | null };
+      type Item = { memoryId: string; role: string | null; memory?: Mem | null };
       const eager = a.memoryItems as Item[] | undefined;
       // Fall back to a query when the field wasn't eager-loaded AT ALL, and
       // also when it was loaded WITHOUT its `memory` relation — otherwise every
@@ -1515,11 +1794,22 @@ export const typeResolvers = {
         : eager;
       const kept: Item[] = [];
       for (const item of items) {
+        // A malformed persisted role grants no audience, even when the linked
+        // Memory itself is PUBLIC. The public fast path must honor the same
+        // link semantics as the App access fold.
+        if (!isGrantedAgentMemoryRole(item.role)) continue;
         const mem = item.memory;
         if (!mem) continue;
-        // Readable by anyone (#362 PUBLIC carve-out); #653 keeps app-scoped
-        // rows out of the public set even when their visibility says PUBLIC.
-        if (mem.visibility === 'PUBLIC' && mem.appId == null) {
+        // Legacy per-user holding rows can carry PUBLIC visibility while
+        // ownerUserId is null. Their audience is the creating user alone.
+        if (mem.userMemoryOfAgentId != null) {
+          if (!ctx.impersonation && ctx.userId != null && ctx.userId === mem.createdBy) kept.push(item);
+          continue;
+        }
+        // Readable by anyone only for the genuine public audience. #653 keeps
+        // App-scoped rows internal; spec-047 keeps user-owned rows strict-owner
+        // even if their visibility column says PUBLIC.
+        if (mem.visibility === 'PUBLIC' && mem.appId == null && mem.ownerUserId == null && mem.userMemoryOfAgentId == null) {
           kept.push(item);
           continue;
         }

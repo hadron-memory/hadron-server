@@ -48,6 +48,8 @@ export interface ExportNode {
   loc: string;
   name: string;
   nodeType?: string | null;
+  /** #1340: the collection discriminator (#725). */
+  objectType?: string | null;
   alias?: string | null;
   description?: string | null;
   abstract?: string | null;
@@ -55,6 +57,10 @@ export interface ExportNode {
   content?: string | null;
   tags: string[];
   seq?: number | null;
+  /** #1340: the governed-kind signals. Null is "no opinion", distinct from an
+   *  explicit `isRunnable: false`, exactly as the git mirror carries them. */
+  role?: string | null;
+  isRunnable?: boolean | null;
   data?: unknown;
   properties?: unknown;
   edges: EdgeForGit[];
@@ -65,23 +71,27 @@ export interface ExportNode {
 // map one-to-one.
 const FRONTMATTER_KEY_SECTION: Record<string, NodeExportSection> = {
   name: 'METADATA', id: 'METADATA', loc: 'METADATA', memory: 'METADATA',
-  alias: 'METADATA', type: 'METADATA', description: 'METADATA',
+  alias: 'METADATA', type: 'METADATA', objectType: 'METADATA', description: 'METADATA',
   contentHash: 'METADATA', tags: 'METADATA', seq: 'METADATA',
+  role: 'METADATA', runnable: 'METADATA',
   abstract: 'ABSTRACT', abstractOriginHash: 'ABSTRACT',
   data: 'DATA', properties: 'PROPERTIES', nodes: 'EDGES',
 };
 const JSON_KEY_SECTION: Record<string, NodeExportSection> = {
   id: 'METADATA', memory: 'METADATA', loc: 'METADATA', name: 'METADATA',
-  type: 'METADATA', alias: 'METADATA', description: 'METADATA',
+  type: 'METADATA', objectType: 'METADATA', alias: 'METADATA', description: 'METADATA',
   contentHash: 'METADATA', tags: 'METADATA', seq: 'METADATA',
+  role: 'METADATA', isRunnable: 'METADATA',
   abstract: 'ABSTRACT', abstractOriginHash: 'ABSTRACT',
   data: 'DATA', properties: 'PROPERTIES', content: 'CONTENT', edges: 'EDGES',
 };
 
 /**
  * The canonical standalone YAML-frontmatter object, in the CLI's field order:
- * name, id, loc, memory, alias, type, description, abstract, abstractOriginHash,
- * contentHash, tags, seq, data, properties, nodes. `loc`/`memory` are the two
+ * name, id, loc, memory, alias, type, objectType, description, abstract,
+ * abstractOriginHash, contentHash, tags, seq, role, runnable, data, properties,
+ * nodes. `objectType`/`role`/`runnable` are emitted only when set (#1340 —
+ * `runnable: false` is set, and kept). `loc`/`memory` are the two
  * self-describing keys a standalone file carries (injected right after `id`),
  * and `contentHash` is recomputed from the content (`hadron node export`'s rule).
  */
@@ -91,6 +101,7 @@ function canonicalFrontmatter(n: ExportNode): Record<string, unknown> {
       id: n.id,
       name: n.name,
       nodeType: n.nodeType,
+      objectType: n.objectType,
       alias: n.alias,
       description: n.description,
       abstract: n.abstract,
@@ -98,6 +109,8 @@ function canonicalFrontmatter(n: ExportNode): Record<string, unknown> {
       contentHash: computeContentHash(n.content),
       tags: n.tags,
       seq: n.seq,
+      role: n.role,
+      isRunnable: n.isRunnable,
       data: n.data,
       properties: n.properties,
     },
@@ -152,7 +165,9 @@ function jsonEdge(e: EdgeForGit): Record<string, unknown> {
 
 /** The canonical JSON Document object, in the CLI's struct order. All fields
  *  present (empty string / null for absent), `contentHash` recomputed, `type`
- *  blank for the default `info`. */
+ *  blank for the default `info`. #1340: `objectType` is `""` when unset (a
+ *  string field, like `alias`); `role`/`isRunnable` are pointer fields in the
+ *  CLI's Document, so unset is `null`, and an explicit `false` stays `false`. */
 function canonicalJsonDocument(n: ExportNode): Record<string, unknown> {
   const type = n.nodeType && n.nodeType !== 'info' ? n.nodeType : '';
   return {
@@ -161,6 +176,7 @@ function canonicalJsonDocument(n: ExportNode): Record<string, unknown> {
     loc: n.loc,
     name: n.name,
     type,
+    objectType: n.objectType ?? '',
     alias: n.alias ?? '',
     description: n.description ?? '',
     abstract: n.abstract ?? '',
@@ -168,6 +184,8 @@ function canonicalJsonDocument(n: ExportNode): Record<string, unknown> {
     contentHash: computeContentHash(n.content) ?? '',
     tags: n.tags ?? [],
     seq: n.seq ?? null,
+    role: n.role ?? null,
+    isRunnable: n.isRunnable ?? null,
     data: n.data ?? null,
     properties: n.properties ?? null,
     content: n.content ?? '',

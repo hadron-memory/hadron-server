@@ -2,6 +2,7 @@ import type { PrismaClient } from '../../generated/prisma/index.js';
 import { assertBatchMutable, assertMemoryBulkMutable, assertNoProtectedReach } from '../../lib/bulkMutationGate.js';
 import { lockMemoryForChannelChange } from '../../lib/channels.js';
 import { computeContentHash } from '../../lib/contentHash.js';
+import { clearNodeAuthorship } from '../../lib/nodeAuthorship.js';
 import {
   ensureCurrentNodeRevisionInTransaction,
   buildNodeRevisionSnapshot,
@@ -19,6 +20,8 @@ import { validateNodeAgainstSchema, NodeSchemaViolation } from '../../lib/valida
 import { normalizeObjectType } from '../../lib/enforceNodeSchema.js';
 import type { MemorySchema } from '../../lib/memorySchema.js';
 import { acquireLockSet } from '../../lib/nodeSubtreeLock.js';
+import { recordUrnRename } from '../../lib/urnAlias.js';
+import { safeNodeUrnV2 } from '../../lib/urnEmit.js';
 
 /**
  * Batched, resumable execution of a memory→memory merge (spec cor:api:080).
@@ -302,11 +305,39 @@ export async function mergeMemoryGraph(
           if (rows.length !== relocationIds.length) {
             throw new Error('a merge source node was deleted during the merge; retry the merge');
           }
+          // A Memory rename takes FOR UPDATE. Lock and read both URNs only
+          // after the node/loc locks, in stable ID order, so each predecessor
+          // key names the source memory as of this relocation transaction.
+          // NO KEY UPDATE still serializes with the rename without blocking
+          // unrelated child-row FK KEY SHARE checks.
+          const memoryUrns = new Map<string, string>();
+          for (const id of [sourceMemoryId, targetMemoryId].sort()) {
+            const [memory] = await tx.$queryRaw<{ urn: string }[]>`
+              SELECT urn FROM memories WHERE id = ${id} FOR NO KEY UPDATE
+            `;
+            if (!memory) throw new Error(`merge memory ${id} disappeared while locking; retry the merge`);
+            memoryUrns.set(id, memory.urn);
+          }
+          const sourceUrn = memoryUrns.get(sourceMemoryId)!;
+          const targetUrn = memoryUrns.get(targetMemoryId)!;
           for (const row of rows) {
             await createNodeRevision(
               tx,
               buildNodeRevisionSnapshot(row, editor, { changes: ['memoryId'] }),
             );
+            // cor:urn:030:01 — this stable node ID changes its composed URN.
+            // Record the old address beside the write in this bounded tx;
+            // folded/deleted identities never reach this relocation loop.
+            // The mirror root has loc='' and no round-trippable v2 node URN.
+            if (row.loc) {
+              await recordUrnRename(tx, {
+                entityType: 'NODE',
+                entityId: row.id,
+                oldUrn: safeNodeUrnV2(sourceUrn, row.loc).slice('hrn:node:'.length),
+                newUrn: safeNodeUrnV2(targetUrn, row.loc).slice('hrn:node:'.length),
+                createdBy: actorId,
+              });
+            }
             await tx.node.update({
               where: { id: row.id },
               data: {
@@ -430,7 +461,15 @@ export async function mergeMemoryGraph(
         if (Object.keys(merged.changed).length > 0) {
           // #725/#737 — the folded target must still satisfy its collection.
           assertConformsAgainst(batchSchema, tgt.objectType, 'properties' in merged.changed ? merged.changed.properties : tgt.properties);
-          const writeData: Record<string, unknown> = { ...merged.changed, updatedBy: actorId };
+          // A collision fold authors a new target content state. Keep the
+          // target's old stamp in its pre-fold NodeRevision above; the live
+          // combination has no single verified author. Unchanged folds never
+          // enter this branch, and relocations preserve their source stamp.
+          const writeData: Record<string, unknown> = {
+            ...merged.changed,
+            ...clearNodeAuthorship(),
+            updatedBy: actorId,
+          };
           if (merged.abstractChanged) {
             writeData.abstractOriginHash = computeContentHash(
               merged.contentChanged ? (merged.changed.content as string | null) : tgt.content,

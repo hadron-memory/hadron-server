@@ -95,7 +95,15 @@
 // 0.19.0: #1265 — register + ChannelReadState-backed unattended team-chat
 // monitoring on hadron_team_chat_read (`monitor`, server-bound checkpoints,
 // deliberate acknowledgement). Token: `team-chat-monitor`.
-export const HADRON_SERVER_VERSION = '0.19.0';
+// 0.20.0: #1353 — internal-pilot compact team attention, explicit own-worker
+// mark-read, and preview/proof/confirm switchover. Its capability token is
+// caller/App-gated by hadron_server_info rather than added to the static list.
+// 0.21.0 — `worklog-model` (#1398): the `model` argument on
+// `hadron_record_work` and `TeamWorkItem.model`. MCP drops unknown arguments,
+// so a lagging build silently records the session fallback — a healthy-looking
+// receipt with the wrong attribution. Clients gate on the `worklog-model`
+// capability token rather than the version.
+export const HADRON_SERVER_VERSION = '0.21.0';
 
 /**
  * #1006 — the MCP surface's CAPABILITY tokens: what this build can actually do,
@@ -169,6 +177,16 @@ export const MCP_SURFACE_CAPABILITIES = [
   'channels',
   /** #1265 — register-routed team-chat monitor with durable read state. */
   'team-chat-monitor',
+  /**
+   * #1398 — per-milestone model attribution on the worklog: the `model`
+   * argument on `hadron_record_work` and `TeamWorkItem.model` on reads. Worth
+   * a token rather than a version comparison alone, because MCP drops unknown
+   * arguments: a client that sends `model` to a build lacking it gets a
+   * healthy receipt whose record silently carries the session fallback — a
+   * wrong answer, not a failure (the `transcript-backward-cursor` shape). On
+   * such a build, record without `model` and read `model` as null.
+   */
+  'worklog-model',
 ] as const;
 
 /**

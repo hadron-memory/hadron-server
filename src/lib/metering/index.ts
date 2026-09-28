@@ -28,6 +28,16 @@ const MTOK = 1_000_000n;
 
 // ── Env gates (read at call time so tests can flip them) ────────────────
 
+/**
+ * #1389 review: providers whose price depends on WHICH host serves them. An
+ * `openai-compatible` config names its own endpoint (Together, OpenRouter, a
+ * local server), and the same model id costs differently on each, while
+ * `AiModelPrice` is keyed by provider/model/tier only. Until pricing can name
+ * the host, such spend is recorded UNPRICED (cost NULL), so it is never debited
+ * at another host's rate.
+ */
+export const HOST_PRICED_PROVIDERS: ReadonlySet<string> = new Set(['openai-compatible']);
+
 /** FR-006: automatic usage debits are OFF unless explicitly enabled. */
 function debitEnabled(): boolean {
   const raw = process.env.BILLING_DEBIT_ENABLED?.trim().toLowerCase();
@@ -190,9 +200,9 @@ export async function recordLlmUsage(
   params: LlmUsageParams,
 ): Promise<UsageEvent | null> {
   try {
-    const price = await getAiModelPrice(db, params.provider, params.model, {
-      tier: params.tier,
-    });
+    const price = HOST_PRICED_PROVIDERS.has(params.provider)
+      ? null
+      : await getAiModelPrice(db, params.provider, params.model, { tier: params.tier });
     const cost = price
       ? computeCostMicroCents(price, params.tokensIn, params.tokensOut)
       : null;

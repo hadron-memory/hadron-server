@@ -6,6 +6,7 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { resolvers, type Context } from './resolvers.js';
 import { generateId } from '../../../lib/id.js';
+import { revisionStateHashRefreshMarker } from '../../../lib/nodeRevisionSnapshot.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -167,6 +168,38 @@ describe('publishRevision', () => {
 });
 
 describe('restoreRevision', () => {
+  it('does not attach a current task stamp to content restored from a legacy agent snapshot', async () => {
+    const target = await db.node.findFirstOrThrow({
+      where: { memoryId: systemMemory.id, loc: 'prompts:hello:greet' },
+    });
+    await resolvers.Mutation.createRevision({}, { agentId: agent.id, description: 'before task stamp' }, adminCtx());
+    const task = await db.node.create({
+      data: { id: generateId(), memoryId: systemMemory.id, loc: 'prompts:author-task', name: 'Author task', nodeType: 'task' },
+    });
+    const authoredAt = new Date('2026-09-26T20:00:00Z');
+    await db.node.update({
+      where: { id: target.id },
+      data: {
+        content: 'newer task-authored content', authorshipKind: 'TASK',
+        authoredByTask: task.id, authoredByRevision: 1, authoredAt,
+        revisionContentHash: revisionStateHashRefreshMarker(),
+      },
+    });
+
+    await resolvers.Mutation.restoreRevision({}, { agentId: agent.id, revisionLoc: 'revisions:rev-1' }, adminCtx());
+
+    expect(await db.node.findUniqueOrThrow({ where: { id: target.id } })).toMatchObject({
+      content: 'Hello world!', authorshipKind: null, authoredByTask: null,
+      authoredByRevision: null, authoredAt: null,
+    });
+    expect(await db.nodeRevision.findFirstOrThrow({
+      where: { nodeId: target.id, content: 'newer task-authored content' },
+      orderBy: { revNo: 'desc' },
+    })).toMatchObject({
+      authorshipKind: 'TASK', authoredByTask: task.id, authoredByRevision: 1, authoredAt,
+    });
+  });
+
   it('restoring over existing nodes is a revisioned write — drift reconciled first (#1339 review)', async () => {
     // @copilot: the restore upsert rewrote existing system nodes with no
     // NodeRevision and no fingerprint refresh, so the next exposed read

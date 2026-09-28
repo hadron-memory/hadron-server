@@ -355,9 +355,12 @@ describe('cloneMemory', () => {
     });
 
     // A platform admin who is not the owner is rejected (matches deleteMemory).
+    // #1316: they cannot even open another user's personal record (strict
+    // owner, #676), so the refusal is the missing-memory answer, not a
+    // Forbidden that would confirm the memory exists.
     await expect(
       resolvers.Mutation.cloneMemory({}, { ref: personal.id, targetUrn: 'org-a::notes-2' }, adminCtx()),
-    ).rejects.toThrow(/only the owner/);
+    ).rejects.toThrow(`MEMORY_NOT_FOUND: ${personal.id}`);
 
     const clone = await resolvers.Mutation.cloneMemory(
       {},

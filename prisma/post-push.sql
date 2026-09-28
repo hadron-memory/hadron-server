@@ -242,8 +242,10 @@ CREATE UNIQUE INDEX IF NOT EXISTS scopes_app_name_uniq
   ON scopes (app_id, name) WHERE app_id IS NOT NULL AND deleted_at IS NULL;
 
 -- ─── #1325 — MemoryConfig templates: exactly one owner + per-owner live-name
--- uniqueness; rule task-reference markers (fail closed on a hard-deleted task).
--- Synced with the 20260925030000_memory_config migration and src/test/globalSetup.ts.
+-- uniqueness; rule task-reference markers (fail closed on a hard-deleted task);
+-- and #1322 dotted rule-key grammar. Synced with the
+-- 20260925030000_memory_config + 20260925100000_dotted_role_rules migrations
+-- and src/test/globalSetup.ts.
 ALTER TABLE memory_config_templates
   DROP CONSTRAINT IF EXISTS chk_memory_config_template_owner;
 ALTER TABLE memory_config_templates
@@ -263,12 +265,44 @@ ALTER TABLE node_role_rules
   ADD CONSTRAINT chk_node_role_rule_task_markers
   CHECK ((author_task_id IS NULL OR author_task_required)
      AND (validation_task_id IS NULL OR validation_task_required));
+-- #1345 review (@copilot): name any existing rule key the new CHECKs would
+-- refuse, and say what to do, instead of failing on an opaque constraint
+-- violation. (The tables arrived in 20260925030000 and have no write path
+-- before #1325(b), so none is expected; this makes the unexpected actionable.)
+DO $$
+DECLARE
+  bad text;
+BEGIN
+  SELECT string_agg(format('%s:%s (%L)', src, id, role), ', ') INTO bad FROM (
+    SELECT 'node_role_rules' AS src, id, role FROM node_role_rules
+     WHERE NOT (char_length(role) BETWEEN 1 AND 64 AND role ~ '^[a-z0-9][a-z0-9-]*(\.[a-z0-9][a-z0-9-]*)*$')
+    UNION ALL
+    SELECT 'memory_config_template_rules', id, role FROM memory_config_template_rules
+     WHERE NOT (char_length(role) BETWEEN 1 AND 64 AND role ~ '^[a-z0-9][a-z0-9-]*(\.[a-z0-9][a-z0-9-]*)*$')
+    LIMIT 20
+  ) t;
+  IF bad IS NOT NULL THEN
+    RAISE EXCEPTION '#1322: rule keys the dotted grammar refuses (lower-case letter/digit/dash segments joined by dots, 1-64 characters). Rename or delete these rules, then re-run: %', bad;
+  END IF;
+END $$;
+ALTER TABLE node_role_rules
+  DROP CONSTRAINT IF EXISTS chk_node_role_rule_role_format;
+ALTER TABLE node_role_rules
+  ADD CONSTRAINT chk_node_role_rule_role_format
+  CHECK (char_length(role) BETWEEN 1 AND 64
+     AND role ~ '^[a-z0-9][a-z0-9-]*(\.[a-z0-9][a-z0-9-]*)*$');
 ALTER TABLE memory_config_template_rules
   DROP CONSTRAINT IF EXISTS chk_memory_config_template_rule_task_markers;
 ALTER TABLE memory_config_template_rules
   ADD CONSTRAINT chk_memory_config_template_rule_task_markers
   CHECK ((author_task_id IS NULL OR author_task_required)
      AND (validation_task_id IS NULL OR validation_task_required));
+ALTER TABLE memory_config_template_rules
+  DROP CONSTRAINT IF EXISTS chk_memory_config_template_rule_role_format;
+ALTER TABLE memory_config_template_rules
+  ADD CONSTRAINT chk_memory_config_template_rule_role_format
+  CHECK (char_length(role) BETWEEN 1 AND 64
+     AND role ~ '^[a-z0-9][a-z0-9-]*(\.[a-z0-9][a-z0-9-]*)*$');
 
 -- #974 Worker model (cor:dmo:050:11, cor:agt:020:02 v0.0.3): a worker's name
 -- is unique per App, case-insensitively — a functional unique, so it lives
@@ -467,7 +501,40 @@ CREATE UNIQUE INDEX IF NOT EXISTS channel_read_states_agent_app_channel_uniq
 
 -- #1323 — every newly inserted Node gets a complete at-rest state baseline, including
 -- raw/createMany writers Prisma cannot route through an application helper.
--- Keep in lockstep with 20260925010000_trustworthy_node_revisions.
+-- Keep in lockstep with 20260925010000_trustworthy_node_revisions and
+-- 20260926220000_node_content_provenance.
+ALTER TABLE "nodes" DROP CONSTRAINT IF EXISTS "chk_nodes_authorship_shape";
+ALTER TABLE "nodes" ADD CONSTRAINT "chk_nodes_authorship_shape" CHECK (CASE
+  WHEN "authorship_kind" IS NULL THEN
+    "authored_by_task" IS NULL AND "authored_by_revision" IS NULL AND "authored_by_human" IS NULL AND "authored_at" IS NULL
+  WHEN "authorship_kind" = 'TASK' THEN
+    "authored_by_task" IS NOT NULL AND "authored_by_revision" IS NOT NULL AND "authored_by_revision" > 0 AND "authored_by_human" IS NULL AND "authored_at" IS NOT NULL
+  WHEN "authorship_kind" = 'HUMAN' THEN
+    "authored_by_task" IS NULL AND "authored_by_revision" IS NULL AND "authored_by_human" IS NOT NULL AND "authored_at" IS NOT NULL
+  ELSE false END);
+ALTER TABLE "node_revisions" DROP CONSTRAINT IF EXISTS "chk_node_revisions_authorship_shape";
+ALTER TABLE "node_revisions" ADD CONSTRAINT "chk_node_revisions_authorship_shape" CHECK (CASE
+  WHEN "authorship_kind" IS NULL THEN
+    "authored_by_task" IS NULL AND "authored_by_revision" IS NULL AND "authored_by_human" IS NULL AND "authored_at" IS NULL
+  WHEN "authorship_kind" = 'TASK' THEN
+    "authored_by_task" IS NOT NULL AND "authored_by_revision" IS NOT NULL AND "authored_by_revision" > 0 AND "authored_by_human" IS NULL AND "authored_at" IS NOT NULL
+  WHEN "authorship_kind" = 'HUMAN' THEN
+    "authored_by_task" IS NULL AND "authored_by_revision" IS NULL AND "authored_by_human" IS NOT NULL AND "authored_at" IS NOT NULL
+  ELSE false END);
+ALTER TABLE "node_content_validation_reports" DROP CONSTRAINT IF EXISTS "chk_node_content_validation_revisions_positive";
+ALTER TABLE "node_content_validation_reports" ADD CONSTRAINT "chk_node_content_validation_revisions_positive"
+  CHECK ("node_rev_seq" > 0 AND "validation_task_rev_seq" > 0);
+
+-- Preserve a pre-existing drift mismatch when widening the fingerprint. On a
+-- fresh DB the old function is absent, so there is no old hash to translate.
+CREATE TEMP TABLE node_revision_hash_before_1326 (id TEXT, stored_hash TEXT, old_actual_hash TEXT);
+DO $$ BEGIN
+  IF to_regprocedure('hadron_node_revision_state_hash(nodes)') IS NOT NULL THEN
+    EXECUTE 'INSERT INTO node_revision_hash_before_1326
+      SELECT n.id, n.revision_content_hash, hadron_node_revision_state_hash(n) FROM nodes n';
+  END IF;
+END $$;
+
 -- `prisma db push` adds the nullable column without running the migration, so
 -- upgrade every row still carrying that one-time marker to the new LIVE-state
 -- counter semantics before clearing it. Re-running post-push is then a no-op.
@@ -481,9 +548,17 @@ IMMUTABLE AS $$
     node_row."content", to_jsonb(node_row."tags"), node_row."node_type",
     node_row."object_type", node_row."is_link", node_row."properties",
     node_row."data", node_row."seq", node_row."is_runnable", node_row."role",
-    node_row."llm_model", node_row."ai_agent"
+    node_row."llm_model", node_row."ai_agent", node_row."authorship_kind",
+    node_row."authored_by_task", node_row."authored_by_revision",
+    node_row."authored_by_human", node_row."authored_at"
   )::text)
 $$;
+
+UPDATE "nodes" n SET "revision_content_hash" = hadron_node_revision_state_hash(n)
+FROM node_revision_hash_before_1326 old
+WHERE n.id = old.id AND old.stored_hash IS NOT NULL
+  AND old.stored_hash = old.old_actual_hash;
+DROP TABLE node_revision_hash_before_1326;
 
 UPDATE "nodes"
 SET "rev_seq" = "rev_seq" + 1,

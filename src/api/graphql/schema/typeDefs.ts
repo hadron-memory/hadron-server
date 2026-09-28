@@ -196,6 +196,8 @@ export const typeDefs = `#graphql
     objectType: String
     tags: [String!]
     isRunnable: Boolean
+    "#1322 — role-family filter. 'spec' matches 'spec' and 'spec.*' on a dot boundary, never 'special' / 'specification'."
+    role: String
     locPrefix: String
     createdBy: String
     updatedAfter: String
@@ -690,6 +692,67 @@ export const typeDefs = `#graphql
     updatedAt: DateTime!
   }
 
+  "#1353 — compact unread metadata for one Worker/Channel pair. No message body is returned."
+  type TeamAttentionChannel {
+    channel: ID!
+    name: String!
+    unread: Int!
+    unreadMentions: Int!
+    firstUnreadSeq: Int
+    lastSeq: Int!
+  }
+
+  "#1353 — one live Worker that has relevant unread attention after the supplied token."
+  type TeamAttentionWorker {
+    worker: ID!
+    name: String!
+    urn: String
+    live: Boolean!
+    channels: [TeamAttentionChannel!]!
+  }
+
+  type TeamAttentionResult {
+    "Opaque signed snapshot. Adopt it only after every listed nudge is accepted."
+    token: String!
+    workers: [TeamAttentionWorker!]!
+  }
+
+  type TeamAttentionSwitchoverChannel {
+    channel: ID!
+    name: String!
+    fromSeq: Int!
+    throughSeq: Int!
+    unread: Int!
+    unreadMentions: Int!
+  }
+
+  type TeamAttentionSwitchoverWorker {
+    worker: ID!
+    name: String!
+    urn: String
+    channels: [TeamAttentionSwitchoverChannel!]!
+  }
+
+  type TeamAttentionSwitchoverPreview {
+    "Short-lived proof binding the exact operator, App, Workers, registers, cursors and heads shown here."
+    proof: String!
+    expiresAt: DateTime!
+    workers: [TeamAttentionSwitchoverWorker!]!
+  }
+
+  type TeamAttentionSwitchoverResult {
+    applied: Boolean!
+    workersAdvanced: Int!
+    channelsAdvanced: Int!
+  }
+
+  "#1353 — the exact Worker/Channel cursor advanced by markOwnTeamChatRead."
+  type OwnTeamChatReadState {
+    workerId: ID!
+    channelId: ID!
+    lastSeenSeq: Int!
+  }
+
   "Spec 049 Phase 5 — what an Agent's install-created register row is made with (plan §3.5)."
   type RegisterDefaults {
     mentionOnly: Boolean!
@@ -955,8 +1018,10 @@ export const typeDefs = `#graphql
 
   input SkillPlanInput {
     intent: SkillPlanIntent!
-    """Memory refs to scan. Omitted means every memory the caller can read."""
+    """Memory refs for LINT/STATUS only. EXPORT refuses this field, even an empty list."""
     memories: [String!]
+    """Persisted Scope ID for a narrowed EXPORT. Omit for unscoped export; explicit null refuses. Membership is resolved afresh for each call."""
+    scopeRef: ID
     """
     Target host, named by its D12 declaration key verbatim: claudeSkill (the default) or codexSkill. One host per call; the plan reads that host's declaration and applies its limits, and the retired top-level skill/claudeSkill keys alias to claudeSkill only. An unknown host is refused with BAD_USER_INPUT naming the supported hosts, never judged as another host and never answered with an empty plan.
     """
@@ -964,6 +1029,15 @@ export const typeDefs = `#graphql
     """What the client found on disk. Empty for lint, which touches no disk."""
     files: [SkillFileFactsInput!]
     """With EXPORT only, explicitly override local-edit or missing-provenance-ID protection for this invocation."""
+    force: Boolean
+  }
+
+  """Plan installed individual skill files for explicit task refs; plugin exports use skillPlan."""
+  input SelectedSkillFilePlanInput {
+    """Nonempty node IDs or fully qualified node URNs. Relative locs are refused."""
+    nodes: [String!]!
+    host: String
+    files: [SkillFileFactsInput!]
     force: Boolean
   }
 
@@ -1044,9 +1118,33 @@ export const typeDefs = `#graphql
     nodeId: String
   }
 
+  """A named task that cannot produce a host entry. An unavailable ref reveals no node metadata."""
+  type SkillSelectionResult {
+    ref: String!
+    nodeId: String
+    action: SkillExportAction!
+    reason: SkillExportReason!
+  }
+
+  """The live, access-intersected Scope selection used by this EXPORT plan."""
+  type SkillPlanScopeSelection {
+    id: ID!
+    name: String!
+    readableMemoryCount: Int!
+    droppedCount: Int!
+    """Stable digest for comparing separate host plans from one export."""
+    fingerprint: String!
+  }
+
   type SkillPlan {
     entries: [SkillPlanEntry!]!
     orphans: [SkillOrphan!]!
+    """True for scoped or selected exports: out-of-selection files are not classified as orphans."""
+    orphanAssessmentSkipped: Boolean!
+    """Non-null only when EXPORT selected a persisted Scope."""
+    scopeSelection: SkillPlanScopeSelection
+    """Opaque unavailable refs and selected nodes with no declaration for this host."""
+    selectionResults: [SkillSelectionResult!]!
     """
     How many nodes carrying ANY declaration key were in scope. A plan over an
     empty corpus and a plan the caller cannot see are otherwise the same empty
@@ -1132,6 +1230,10 @@ export const typeDefs = `#graphql
     id: ID!
     "#1323 — current live revision. Creation is revision 1; each committed authoring change advances it. NodeRevision.revNo N is the retained snapshot of this node when revision N was current, before the edit that advanced it."
     revision: Int!
+    "#1326 — attribution of this content state. Null means legacy or unknown. Task identity is redacted unless its memory is independently readable."
+    authorship: NodeAuthorship
+    "#1326 — advisory validation for this exact revision. A report for an older revision is STALE."
+    contentValidation: NodeContentValidationStatus!
     memoryId: String!
     """
     The PLATFORM-kind axis (info / task / prompt / record / …). Load-bearing for
@@ -1149,7 +1251,8 @@ export const typeDefs = `#graphql
     property schema when it has one. NULL for an ordinary node.
 
     NOT 'nodeType' (the platform-kind axis, which drives retrieval) and NOT
-    'role' (what the node is for, which has no retrieval impact).
+    'role' (what the node is for; role can be filtered explicitly but does not
+    change default ranking or rendering).
     """
     objectType: String
     loc: String!
@@ -1233,13 +1336,14 @@ export const typeDefs = `#graphql
 
     NOT 'nodeType' (the platform-kind axis, load-bearing for retrieval) and NOT
     'objectType' (the collection discriminator, schema-validated). This field
-    has NO retrieval impact.
+    does not change default retrieval or ranking; NodeFilter.role explicitly
+    selects its exact dotted family (#1322).
 
-    A GOVERNED value routes the write to that kind's own authoring door, and the
-    generic node surface is refused: 'review' and 'spec' today, alongside the
-    task kind, which is gated on 'isRunnable' rather than on any label because a
-    label can be omitted and a capability cannot. 'role: \"weather-widget\"'
-    does nothing at all.
+    A GOVERNED family routes the write to that kind's own authoring door, and
+    the generic node surface is refused: 'review' / 'review.*' and 'spec' /
+    'spec.*' today, alongside the task kind, which is gated on 'isRunnable'
+    rather than on any label because a label can be omitted and a capability
+    cannot. Other values are inert unless a caller explicitly filters for them.
     """
     role: String
     llmModel: String
@@ -1428,6 +1532,29 @@ export const typeDefs = `#graphql
     urn: String
   }
 
+  enum NodeAuthorshipKind { TASK HUMAN }
+  type NodeAuthorship {
+    kind: NodeAuthorshipKind!
+    taskRef: String
+    taskRevision: Int
+    human: NodeRevisionEditor
+    authoredAt: DateTime!
+  }
+
+  enum NodeContentValidationOutcome { PASS FAIL ERROR }
+  enum NodeContentValidationState { UNVALIDATED STALE PASS FAIL ERROR }
+  type NodeContentValidationReport {
+    nodeRevision: Int!
+    validationTaskRef: String
+    validationTaskRevision: Int
+    outcome: NodeContentValidationOutcome!
+    reportedAt: DateTime!
+  }
+  type NodeContentValidationStatus {
+    state: NodeContentValidationState!
+    latestReport: NodeContentValidationReport
+  }
+
   """
   046-usage-metering: effective-dated provider rate row. Prices are
   micro-cents (1e-8 USD) per MILLION tokens, as base-10 integer strings.
@@ -1527,6 +1654,10 @@ export const typeDefs = `#graphql
 
   type NodeRevision {
     id: ID!
+    "#1326 — attribution of the content captured before the next edit."
+    authorship: NodeAuthorship
+    "#1326 — advisory validation at this historical revision."
+    contentValidation: NodeContentValidationStatus!
     "Computed end-anchored URN hrn:noderev:<root>:<mem>:<loc...>:<rev> (#696). Null for legacy rows without a revNo, and for multi-segment per-user memories the flat shape cannot express."
     urn: String
     "Per-node monotonic revision number (#696). Null on legacy rows predating the counter (backfilled by the migration)."
@@ -2573,6 +2704,277 @@ export const typeDefs = `#graphql
     (any role) and to ADMIN/OWNER of the memory's owning org.
     """
     members: [MemoryMember!]!
+    """
+    #1325 — this memory's config: its node-role rules. Null for anyone who does
+    not MANAGE the memory (the strict owner of a personal/private memory; else
+    its user owner or an org ADMIN/OWNER), however the Memory was reached. A
+    memory with no rules yet reads as the empty config (id null, no rules).
+    """
+    config: MemoryConfig
+  }
+
+  """
+  #1325 — a memory's config: exactly one per memory, holding its node-role
+  rules (one per role or declared sub-role). Read and changed only by the
+  memory's managers. Materialized by the first rule write; before that it reads
+  as empty, with a null id.
+  """
+  type MemoryConfig {
+    "Null until the first rule is written."
+    id: ID
+    memoryId: ID!
+    "Role-ascending."
+    rules: [NodeRoleRule!]!
+    createdAt: DateTime
+    createdBy: ID
+    updatedAt: DateTime
+    updatedBy: ID
+  }
+
+  enum NodeRoleWriters {
+    ALL
+    OWNER
+    ADMIN
+  }
+
+  enum ContentValidator {
+    AGENT
+    PLATFORM
+  }
+
+  """
+  #1325 — the state of one rule reference, next to its URN and id. NONE: not
+  configured. OK: the node is live and you can read it; its id is given, and
+  its URN too unless the node's memory has a legacy URN that cannot address it
+  (#697), when the URN is null and the id is the ref to use. BROKEN: configured,
+  but the node was deleted, so operations relying on the rule are refused until
+  a manager repoints it (fail-closed). UNREADABLE: the node exists but you may
+  not read it, so its URN and id are withheld.
+  """
+  enum NodeRoleRuleRefState {
+    NONE
+    OK
+    BROKEN
+    UNREADABLE
+  }
+
+  """
+  #1325 — one node-role rule. Task and description references are stored by
+  node id (they survive moves) and returned as a URN and an id, each with its
+  state. Both are given only when the state is OK; see NodeRoleRuleRefState.
+  """
+  type NodeRoleRule {
+    "The rule's id — its ref for updateNodeRoleRule / deleteNodeRoleRule (a rule has no URN)."
+    id: ID!
+    "The dotted role or sub-role this rule governs, unique within the config."
+    role: String!
+    authorTask: String
+    authorTaskId: ID
+    authorTaskState: NodeRoleRuleRefState!
+    validationTask: String
+    validationTaskId: ID
+    validationTaskState: NodeRoleRuleRefState!
+    "Documentation, not procedure: a deleted description node reads as NONE, never BROKEN."
+    descriptionNode: String
+    descriptionNodeId: ID
+    descriptionNodeState: NodeRoleRuleRefState!
+    "On a parent role: refuse its undeclared sub-roles instead of falling back to it."
+    strictSubRoles: Boolean!
+    writers: NodeRoleWriters!
+    validateBy: ContentValidator
+    enabled: Boolean!
+    "Set by applying a required template (#1334). A locked rule refuses every ordinary edit and delete (RULE_LOCKED); unlockNodeRoleRule is the deliberate step."
+    locked: Boolean!
+    "The template this rule was copied from, if any (provenance only; no live link)."
+    sourceTemplateId: ID
+    sourceTemplate: NodeRoleRuleSourceTemplate
+    "Optimistic-concurrency token: pass it as expectedRevision to update or delete."
+    revision: Int!
+    createdAt: DateTime!
+    createdBy: ID
+    updatedAt: DateTime
+    updatedBy: ID
+  }
+
+  type NodeRoleRuleSourceTemplate {
+    id: ID!
+    name: String!
+    "The template has been deleted; the rule keeps its copy."
+    deleted: Boolean!
+  }
+
+  "#1325 — a non-fatal finding about a saved rule. Never changes the mutation's success."
+  type MemoryConfigWarning {
+    code: String!
+    role: String!
+    field: String
+    taskUrn: String
+    taskState: NodeRoleRuleRefState
+  }
+
+  "#1325 part (c) — which entity owns a MemoryConfigTemplate. Exactly one per template."
+  enum MemoryConfigTemplateOwnerType {
+    HADRON_SERVER
+    ORGANIZATION
+    USER
+    APP
+  }
+
+  """
+  #1325 part (c) — a reusable rulebook with exactly one owner, COPIED into a
+  memory's config when applied (never live-linked). Read and managed only by
+  its owner's managers: a platform admin (server), an org ADMIN/OWNER
+  (organization), the user themselves (user), the App's owner or org
+  ADMIN/OWNER (App). For anyone else it does not exist.
+  """
+  type MemoryConfigTemplate {
+    id: ID!
+    "Unique per owner among live templates; 1-64 lower-case letters, digits, '-' or '_'."
+    name: String!
+    description: String
+    "Applied as locked rules (#1334)."
+    required: Boolean!
+    ownerType: MemoryConfigTemplateOwnerType!
+    "ID of the owning organization, user or App; null for the server."
+    ownerId: ID
+    "Role-ascending."
+    rules: [MemoryConfigTemplateRule!]!
+    "Optimistic-concurrency token for the template AND its rules."
+    revision: Int!
+    createdAt: DateTime!
+    createdBy: ID
+    updatedAt: DateTime
+    updatedBy: ID
+  }
+
+  "#1325 part (c) — one rule of a template: a node-role rule without the config-only fields."
+  type MemoryConfigTemplateRule {
+    role: String!
+    authorTask: String
+    authorTaskId: ID
+    authorTaskState: NodeRoleRuleRefState!
+    validationTask: String
+    validationTaskId: ID
+    validationTaskState: NodeRoleRuleRefState!
+    "Documentation, not procedure: a deleted description node reads as NONE, never BROKEN."
+    descriptionNode: String
+    descriptionNodeId: ID
+    descriptionNodeState: NodeRoleRuleRefState!
+    strictSubRoles: Boolean!
+    writers: NodeRoleWriters!
+    validateBy: ContentValidator
+    enabled: Boolean!
+  }
+
+  type MemoryConfigTemplatesPage {
+    items: [MemoryConfigTemplate!]!
+    total: Int!
+  }
+
+  "Filter for memoryConfigTemplates(). Narrows the templates you manage; it never widens them."
+  input MemoryConfigTemplateFilter {
+    ownerType: MemoryConfigTemplateOwnerType
+    "ID or URN of the owner (with ownerType). An owner you do not manage matches nothing."
+    ownerRef: ID
+  }
+
+  "#1325 part (c) — a new template. \`rules\` are validated as a whole before anything is written."
+  input CreateMemoryConfigTemplateInput {
+    name: String!
+    description: String
+    required: Boolean
+    "Each role at most once (NODE_ROLE_RULE_EXISTS)."
+    rules: [CreateNodeRoleRuleInput!]
+  }
+
+  """
+  #1325 part (c) — change a template. An omitted field is unchanged;
+  description null clears it. \`rules\`, when given, REPLACES the template's
+  rules in one transaction.
+  """
+  input UpdateMemoryConfigTemplateInput {
+    name: String
+    description: String
+    required: Boolean
+    rules: [CreateNodeRoleRuleInput!]
+  }
+
+  type MemoryConfigTemplatePayload {
+    template: MemoryConfigTemplate!
+    "Empty until #1327 adds its visibility warnings."
+    warnings: [MemoryConfigWarning!]!
+  }
+
+  "#1334 — what applying a template did (or, on a dry run, would do) for one role."
+  enum MemoryConfigApplyOutcome {
+    "The memory had no rule for the role; the template's was copied in (locked if the template is required)."
+    APPLIED
+    "The memory already had a rule for the role, and a non-required template never overrides one."
+    SKIPPED_CONFLICT
+    "The memory's rule for the role was overwritten by a required template's, and is now locked."
+    REPLACED
+    "A required template met a LOCKED rule that you have no authority to move; the rule stands."
+    SKIPPED_LOCKED
+  }
+
+  type MemoryConfigApplyEntry {
+    role: String!
+    outcome: MemoryConfigApplyOutcome!
+    "The rule in force for this role afterwards. On a dry run, the existing rule, or null for a would-be APPLIED."
+    rule: NodeRoleRule
+  }
+
+  type MemoryConfigApplyResult {
+    memoryId: ID!
+    template: NodeRoleRuleSourceTemplate!
+    "The template revision that was applied; pass it back as expectedTemplateRevision to apply exactly what a dry run showed."
+    templateRevision: Int!
+    required: Boolean!
+    dryRun: Boolean!
+    "One per template rule, role-ascending."
+    entries: [MemoryConfigApplyEntry!]!
+    "Empty until #1327 adds its visibility warnings."
+    warnings: [MemoryConfigWarning!]!
+  }
+
+  type NodeRoleRulePayload {
+    rule: NodeRoleRule!
+    "Empty until #1327 adds its visibility warnings."
+    warnings: [MemoryConfigWarning!]!
+  }
+
+  """
+  #1325 — a new rule, in a memory's config or in a template's rule list.
+  Task and description references are node IDs or URNs you
+  can read; a node you cannot read is refused exactly like a missing one
+  (NODE_NOT_FOUND), and a task reference must be a runnable task (NOT_A_TASK).
+  """
+  input CreateNodeRoleRuleInput {
+    "Lower-case letter/digit/dash segments joined by dots, 1-64 characters (INVALID_NODE_ROLE)."
+    role: String!
+    authorTaskRef: ID
+    validationTaskRef: ID
+    descriptionNodeRef: ID
+    strictSubRoles: Boolean
+    writers: NodeRoleWriters
+    "Needs a validation task."
+    validateBy: ContentValidator
+    enabled: Boolean
+  }
+
+  """
+  #1325 — change a rule. An omitted field is unchanged. A reference given as
+  null or an empty string CLEARS it; validateBy null clears it. The role itself
+  is the rule's identity and cannot be changed: delete and re-create instead.
+  """
+  input UpdateNodeRoleRuleInput {
+    authorTaskRef: ID
+    validationTaskRef: ID
+    descriptionNodeRef: ID
+    strictSubRoles: Boolean
+    writers: NodeRoleWriters
+    validateBy: ContentValidator
+    enabled: Boolean
   }
 
   """
@@ -2691,7 +3093,7 @@ export const typeDefs = `#graphql
     ownerType: AiConfigOwnerType!
     "ID of the owning HadronServer / Organization / App / Agent."
     ownerId: ID!
-    "Provider identifier; v1 known: 'anthropic' | 'openai' | 'glm' | 'bedrock'."
+    "Provider identifier; known: 'anthropic' | 'openai' | 'glm' | 'bedrock' | 'openai-compatible' (any OpenAI-wire host; endpoint required)."
     provider: String!
     "Model identifier, passed verbatim to the provider."
     model: String!
@@ -2700,10 +3102,109 @@ export const typeDefs = `#graphql
     apiKeyPreview: String
     "Provider-specific knobs (maxTokens, thinking, effort, baseUrl, ...)."
     params: JSON
+    """
+    #1373: the base URL this config's requests are sent to, as stored. Null =
+    the provider's default (see effectiveEndpoint and aiProviderEndpoints).
+    """
+    endpoint: String
+    """
+    #1373: where a request for this config actually goes: endpoint, else the
+    provider default. Null only for bedrock, whose endpoint is derived from
+    its region.
+    """
+    effectiveEndpoint: String
+    "#1373: the wire protocol as stored; null = the provider default. OpenAI-compatible providers only."
+    apiStyle: AiApiStyle
+    "#1373: the wire protocol a request actually uses (apiStyle, else the provider default); null for single-protocol providers."
+    effectiveApiStyle: AiApiStyle
     "Disabled configs are skipped by resolution (the walk continues outward)."
     enabled: Boolean!
     createdAt: DateTime!
     updatedAt: DateTime
+  }
+
+  "#1373: the wire protocol of an OpenAI-compatible provider."
+  enum AiApiStyle {
+    "POST {endpoint}/chat/completions — what most OpenAI-compatible hosts serve (the glm default)."
+    CHAT_COMPLETIONS
+    "POST {endpoint}/responses — OpenAI's Responses API (the openai default)."
+    RESPONSES
+  }
+
+  "#1378: where a tested value came from."
+  enum AiConfigTestValueSource {
+    SAVED
+    OVERRIDE
+  }
+
+  "#1378: which key a test used; NONE when there was none to use."
+  enum AiConfigTestKeySource {
+    SAVED
+    OVERRIDE
+    "A HADRON_SERVER config with no stored key: the server's own credential for that provider served the call, as it serves a run (#1385)."
+    PLATFORM
+    NONE
+  }
+
+  """
+  #1378: values to test INSTEAD of the saved ones — e.g. an edited form before
+  it is saved. Never stored. Each is validated exactly as a write would be.
+  """
+  input AiServiceConfigTestOverride {
+    provider: String
+    model: String
+    "Omitted = the saved endpoint; null or empty = the provider default."
+    endpoint: String
+    "Omitted = the saved style; null = the provider default."
+    apiStyle: AiApiStyle
+    "A key to test with instead of the stored one. Never stored, never echoed."
+    apiKey: String
+    "Edited params to test instead of the saved ones (#1413): validated exactly as a save validates them, including the params.baseUrl refusal, against the effective provider — before anything outbound. Used for the call, never stored. Omitted = the saved params; null = the edit clears them (the provider defaults). On the wire the probe exercises the effective provider/model/endpoint/key and (hard-capped at 16, per #1378's original ceiling pending a cost ruling) maxTokens, like its one-word prompt; the platform's request contract does not yet forward the other knobs (temperature, reasoningEffort, …) on any path, so they are validated and reported, not transmitted."
+    params: JSON
+  }
+
+  "#1378: per field, whether the test used the saved value or the override."
+  type AiServiceConfigTestUsed {
+    provider: AiConfigTestValueSource!
+    model: AiConfigTestValueSource!
+    endpoint: AiConfigTestValueSource!
+    apiStyle: AiConfigTestValueSource!
+    params: AiConfigTestValueSource!
+    key: AiConfigTestKeySource!
+  }
+
+  type AiServiceConfigTestError {
+    "NO_API_KEY | KEY_UNREADABLE (the stored key cannot be decrypted here; re-enter it) | CONFIG_INVALID (the config cannot be built at all, e.g. a malformed Bedrock key; no call made) | QUOTA_EXCEEDED (a platform-funded test with the org's daily token allowance used up; no call made) | LLM_CALL_FAILED (the provider call failed or timed out; see transient)"
+    code: String!
+    "Provider error text, scrubbed of the key and truncated."
+    message: String!
+    transient: Boolean!
+  }
+
+  "#1378: one test call, made through the same client and endpoint a run uses."
+  type AiServiceConfigTestResult {
+    ok: Boolean!
+    provider: String!
+    model: String!
+    "The endpoint the request actually went to: the explicit endpoint, else the host the SDK chose (OPENAI_BASE_URL / ANTHROPIC_BASE_URL when the server sets one, Bedrock's regional host), else the catalog default. Null when it can't be known (Bedrock with no region)."
+    endpoint: String
+    "The wire protocol the request actually used."
+    apiStyle: AiApiStyle
+    used: AiServiceConfigTestUsed!
+    latencyMs: Int!
+    "The model's reply, truncated."
+    reply: String
+    error: AiServiceConfigTestError
+  }
+
+  "#1373: one known endpoint for a provider, from the server's single suggestion list."
+  type AiProviderEndpoint {
+    url: String!
+    label: String!
+    "The endpoint a config with no endpoint uses."
+    isDefault: Boolean!
+    "What the URL does not say: billing, terms."
+    note: String
   }
 
   """
@@ -2725,6 +3226,10 @@ export const typeDefs = `#graphql
     """
     apiKey: String!
     params: JSON
+    "#1373: where requests for this config go (see AiServiceConfig.effectiveEndpoint)."
+    effectiveEndpoint: String
+    "#1373: the wire protocol requests use (see AiServiceConfig.effectiveApiStyle)."
+    effectiveApiStyle: AiApiStyle
   }
 
   """
@@ -2808,6 +3313,11 @@ export const typeDefs = `#graphql
 
   type TeamChatMessagesPage {
     items: [TeamChatMessage!]!
+    """
+    Number of canonical messages matching this read's sinceSeq/beforeSeq cursor
+    range and mentionsRef filter, before limit/offset. It is not the total
+    number of messages in the chat or Channel when a cursor/filter is present.
+    """
     total: Int!
   }
 
@@ -2840,6 +3350,8 @@ export const typeDefs = `#graphql
     at: DateTime!
     "Optional display extras (title, URL) — never filtered on."
     detail: JSON
+    "The LLM model that produced the work, snapshotted at record time (#1398): an explicit report wins over the recording session's model; null on records that predate the field or were made with none — never backfilled, so null always means unknown-at-record-time."
+    model: String
   }
 
   type TeamWorkItemsPage {
@@ -2859,6 +3371,14 @@ export const typeDefs = `#graphql
   type Worker {
     id: ID!
     appId: ID!
+    """
+    The App's canonical URN (the same value App.urn returns, e.g.
+    hrn:app:acme.com:team), as a scalar identity suitable for cross-App
+    worker lists. Null when the caller cannot inspect this App's workers. This
+    intentionally does not return the App object, whose nested keys and
+    members have a narrower read audience.
+    """
+    appUrn: String
     agentId: ID!
     "The worker's name ('Iris') — the identity every surface renders."
     name: String!
@@ -3654,8 +4174,9 @@ export const typeDefs = `#graphql
   }
 
   """
-  Bulk-import node shape, used only by replaceSubtree (git-sync). Single-node
-  writes use CreateNodeInput / UpdateNodeInput (spec 039 Phase 0 D1).
+  Legacy bulk-import node shape retained for replaceSubtree compatibility.
+  replaceSubtree now refuses without writing; single-node writes use
+  CreateNodeInput / UpdateNodeInput (spec 039 Phase 0 D1).
   """
   input NodeInput {
     "Forced PK (importer-supplied UUIDv7 from node.yaml, stable across moves). Omit to mint."
@@ -3762,6 +4283,15 @@ export const typeDefs = `#graphql
     memoryId: String
     "Selector, with 'memoryId': the target's current loc. Not writable here — moveNode relocates."
     loc: String
+    """
+    Optional optimistic-concurrency precondition (#937). When supplied, the
+    update is applied only while the node's current live revision still equals
+    this positive integer. A mismatch refuses atomically with
+    NODE_WRITE_CONFLICT; omitting it or passing null preserves last-write-wins
+    compatibility.
+    Read the baseline from Node.revision.
+    """
+    expectedRevision: Int
     "Omit to preserve (D4)."
     name: String
     nodeType: String
@@ -5287,6 +5817,8 @@ export const typeDefs = `#graphql
     body, so a client cannot write a file the server judged broken.
     """
     skillPlan(input: SkillPlanInput!): SkillPlan!
+    """Selected individual skill files only. Plugin bundles cannot use node selectors."""
+    selectedSkillFilePlan(input: SelectedSkillFilePlanInput!): SkillPlan!
 
     """
     DEPRECATED: use usageEvents(loc: <loc>). Carried for source-compat;
@@ -5862,7 +6394,7 @@ export const typeDefs = `#graphql
     The App's memory scope is authoritative, so the filter's memory-scope
     fields (memoryIds / memoryClasses) are rejected with BAD_USER_INPUT rather
     than silently ignored — use findNodes for cross-memory scoping. Only
-    node-level predicates (nodeType, tags, isRunnable, locPrefix, createdBy,
+    node-level predicates (nodeType, tags, isRunnable, role, locPrefix, createdBy,
     updatedAfter/Before, includeDeleted) apply. Unlike findNodes, system-memory
     nodes are NOT excluded by default.
     """
@@ -5965,6 +6497,21 @@ export const typeDefs = `#graphql
     scope(ref: ID!): Scope
 
     """
+    #1325 — a memory's config, for the memory's managers only. For anyone else,
+    and for a missing memory, the same MEMORY_NOT_FOUND.
+    """
+    memoryConfig(memoryRef: ID!): MemoryConfig!
+
+    "#1325 part (c) — one template you manage, by id; null for anything else, including a missing or deleted one."
+    memoryConfigTemplate(ref: ID!): MemoryConfigTemplate
+
+    """
+    #1325 part (c) — the templates you manage, name-ascending. Default page 50,
+    at most 200; limit 0 returns the count only.
+    """
+    memoryConfigTemplates(filter: MemoryConfigTemplateFilter, limit: Int, offset: Int): MemoryConfigTemplatesPage!
+
+    """
     Spec 049 Phase 2 — paginated list of the scopes you may read, optionally
     narrowed by owner, by an App's resolution context, by name, and by the
     cor:api:100:01 orgId (member-gated, no admin bypass; non-member ⇒ empty
@@ -6031,6 +6578,25 @@ export const typeDefs = `#graphql
     channelReadState(attendeeRef: ID!, appRef: ID, channelRef: ID!): ChannelReadState
 
     """
+    #1353 internal pilot: compact attention for this operator's LIVE Workers.
+    The signed token is a pure poll watermark and never changes read state.
+    Omit since for all current unread. since:"now" is refused: discarding a
+    backlog requires the separate preview + confirmed switchover.
+
+    A router must adopt the returned token only after EVERY listed nudge was
+    accepted. On any partial failure retain the prior token; retries can
+    duplicate a nudge but cannot silently lose one.
+    """
+    teamAttention(appRef: ID!, since: String): TeamAttentionResult!
+
+    """
+    Preview the explicit baseline switchover for the operator's current live
+    Workers. Read-only: inspect the exact cursors, heads and unread counts,
+    then pass proof to confirmTeamAttentionSwitchover within ten minutes.
+    """
+    teamAttentionSwitchoverPreview(appRef: ID!): TeamAttentionSwitchoverPreview!
+
+    """
     036-ai-service-config: resolve a config name for an execution context
     and return the DECRYPTED credentials (privileged; successor to
     agentAIConfig/appAIConfig).
@@ -6049,6 +6615,15 @@ export const typeDefs = `#graphql
     appRef/agentRef accept the entity's ID or URN.
     """
     resolveAIConfig(name: String, appRef: ID, agentRef: ID): ResolvedAiConfig!
+
+    """
+    #1373: the known endpoints for a provider — the server's single suggestion
+    list, so the portal and the CLI render the same choices and neither
+    hardcodes a URL. Empty for an unknown provider and for bedrock (its
+    endpoint comes from the region). Public reference data (vendor URLs), so
+    it needs no auth.
+    """
+    aiProviderEndpoints(provider: String!): [AiProviderEndpoint!]!
 
     """
     036-ai-service-config: the MASKED set of configs RESOLVABLE in an
@@ -6098,6 +6673,12 @@ export const typeDefs = `#graphql
     It is the mirror of teamChatMessages' sinceSeq: pass the OLDEST seq you
     hold, as you would pass the newest to page forward. Omit it for the tail.
 
+    There is no total -- the field returns the page and nothing else. A
+    page SHORTER than the limit is a truthful end-of-data under that cursor,
+    and only here: this resolver applies every filter inside the query and
+    never drops a row after the database take, so the take IS the page. Do
+    not carry the same-looking inference to reads that overfetch and
+    post-filter; there a short page can still mean rows were removed.
     Two boundaries worth knowing before you build on it:
       - A message with NO seq is older than every numbered one
         (cor:cht:050:02), so every cursor includes such messages. They are
@@ -6118,6 +6699,8 @@ export const typeDefs = `#graphql
     messages with seq STRICTLY LESS than it are considered, and the NEWEST
     limit of those come back -- the page immediately before the cursor, still
     ascending. The two compose, so passing both reads a bounded slice.
+    TeamChatMessagesPage.total counts that cursor range and the mentionsRef
+    filter before paging, not the whole team-chat history.
     offset is IGNORED when beforeSeq is given: a cursor exists precisely
     because a position is unstable while workers keep posting, and honouring
     both would put that race back. mentionsRef filters to messages whose stored envelope mentions the
@@ -6151,6 +6734,8 @@ export const typeDefs = `#graphql
     appRef → App.defaultChannel convenience over this. Authorization is the
     host App's team-chat read gate; a Channel you may not read — or one that
     does not exist — is CHANNEL_NOT_FOUND, identically.
+    TeamChatMessagesPage.total has the same cursor- and mention-filtered
+    meaning as for teamChatMessages, before paging.
     """
     channelMessages(
       channelRef: ID!
@@ -6230,6 +6815,19 @@ export const typeDefs = `#graphql
     ID or URN.
     """
     workers(appRef: ID!, includeRetired: Boolean, limit: Int, offset: Int): WorkersPage!
+
+    """
+    Workers CURRENTLY held by userRef across Apps the caller may inspect
+    (#1344), oldest casting first. userRef accepts a user id, handle, URN, or
+    email. Missing users, no holds, and holds confined to unreadable Apps all
+    return the same empty page; total and pagination are computed only after
+    the App authorization filter.
+
+    Retired castings are hidden unless includeRetired. hasLiveSession on each
+    item uses the existing derived idle-window predicate — it means the worker
+    is being driven now, not merely that an unended Session row exists.
+    """
+    heldWorkers(userRef: String!, includeRetired: Boolean, limit: Int, offset: Int): WorkersPage!
 
     """
     An App's role definitions (#960): every roles:<role> node in the Team
@@ -6555,7 +7153,7 @@ export const typeDefs = `#graphql
 
     """
     #1201 — the CREATE door for the spec kind. A write that would produce a
-    node with role: 'spec' must come through here; the generic createNode
+    node with role: 'spec' or a dotted 'spec.*' sub-role must come through here; the generic createNode
     refuses it.
 
     PURE ROUTING: it validates nothing and knows nothing beyond which kind it is
@@ -6589,7 +7187,7 @@ export const typeDefs = `#graphql
 
     """
     #1201 — the CREATE door for the review kind. A write that would produce a
-    node with role: 'review' must come through here; the generic createNode
+    node with role: 'review' or a dotted 'review.*' sub-role must come through here; the generic createNode
     refuses it.
 
     PURE ROUTING: it validates nothing and knows nothing beyond which kind it is
@@ -6862,9 +7460,12 @@ export const typeDefs = `#graphql
     mergeMemories(input: MergeMemoriesInput!): Memory!
 
     """
-    Replace all nodes owned by a repo within a memory (collection tool)
+    Retired. Calls return REPLACE_SUBTREE_RETIRED without changing nodes or
+    edges. The field remains temporarily so existing clients get a clear
+    refusal rather than an unknown-field error.
     """
     replaceSubtree(ownerRepo: String!, memoryId: String!, nodes: [NodeInput!]!, edges: [EdgeInput!]!): Int!
+      @deprecated(reason: "Retired (#454): every authorized call refuses with REPLACE_SUBTREE_RETIRED and writes nothing. Use the canonical node write mutations.")
 
     # Edge CRUD — a GROUP note covering create/update/delete, which is why it
     # is allow-listed rather than published on createEdge alone (#1232).
@@ -7873,9 +8474,17 @@ export const typeDefs = `#graphql
     """
     036-ai-service-config: create a named AI config on an owner entity.
 
-    apiKey semantics: omitted = stored without a key (unusable for
-    execution until one is set); non-empty = encrypted at rest with a
-    masked preview. Name must be 1-64 lower-case [a-z0-9_-], unique per
+    apiKey semantics: non-empty = encrypted at rest with a masked preview.
+    Omitted is accepted only where a run may use the server's own
+    credential: a HADRON_SERVER config for openai, anthropic or bedrock at
+    their default host (no endpoint). Every ORGANIZATION, APP and AGENT
+    config needs its own key: the platform credential is platform spend
+    (#1390). Any other provider (glm, openai-compatible), and any config
+    with an endpoint, needs one too, because the SDK would otherwise send
+    the server's credential to a host that didn't issue it (#1389). All of
+    these are refused with AiConfigValidationError. A host that checks no
+    key takes any placeholder.
+    Name must be 1-64 lower-case [a-z0-9_-], unique per
     owner. provider must be a known provider; params are validated per
     provider.
 
@@ -7890,6 +8499,10 @@ export const typeDefs = `#graphql
       model: String!
       apiKey: String
       params: JSON
+      "#1373: base URL; https only, no query/fragment/credentials. Omit for the provider default."
+      endpoint: String
+      "#1373: OpenAI-compatible providers only; omit for the provider default."
+      apiStyle: AiApiStyle
       enabled: Boolean
     ): AiServiceConfig!
 
@@ -7897,7 +8510,9 @@ export const typeDefs = `#graphql
     036-ai-service-config: update a named AI config. All fields optional.
 
     apiKey semantics: omitted = keep the stored key; empty string =
-    clear it; non-empty = replace (encrypted, preview recomputed).
+    clear it; non-empty = replace (encrypted, preview recomputed). The
+    RESULTING config is held to createAiServiceConfig's key rule, so
+    clearing the key of a config that needs one is refused.
 
     Auth: admin rights on the owning entity (as aiServiceConfigs).
     """
@@ -7908,8 +8523,23 @@ export const typeDefs = `#graphql
       model: String
       apiKey: String
       params: JSON
+      "#1373: omitted = unchanged; null or empty string = clear (provider default)."
+      endpoint: String
+      "#1373: omitted = unchanged; null = clear (provider default)."
+      apiStyle: AiApiStyle
       enabled: Boolean
     ): AiServiceConfig!
+
+    """
+    #1378: test a SAVED config by id with one small real call, through the same
+    client, endpoint and egress guard a run uses; the stored key never leaves
+    the server. The override argument tests edited values without saving them. Auth: as
+    updateAiServiceConfig; refused under impersonation. Every test that
+    reaches the provider is metered (usage type ai-config-test); NO_API_KEY
+    and KEY_UNREADABLE make no call and record nothing. The call is bounded
+    by a 20s timeout. Rate-limited per caller and config (RATE_LIMITED).
+    """
+    testAiServiceConfig(id: ID!, override: AiServiceConfigTestOverride): AiServiceConfigTestResult!
 
     """
     036-ai-service-config: delete a named AI config (hard delete; the
@@ -7926,6 +8556,83 @@ export const typeDefs = `#graphql
     among live scopes (SCOPE_NAME_TAKEN), never \`global\` / \`app\`.
     """
     createScope(input: CreateScopeInput!): Scope!
+
+    """
+    #1325 — add a rule to a memory's config (creating the config on first use).
+    Managers only; anyone else gets MEMORY_NOT_FOUND. A role that already has a
+    rule is refused NODE_ROLE_RULE_EXISTS.
+    """
+    createNodeRoleRule(memoryRef: ID!, input: CreateNodeRoleRuleInput!): NodeRoleRulePayload!
+
+    """
+    #1325 — change a rule by its id. With expectedRevision, a rule changed since
+    you read it is refused CONFLICT (extensions.currentRevision) and nothing is
+    written; omitted, the last writer wins. A rule you may not manage reads as
+    NOT_FOUND. A LOCKED rule (#1334) is refused with RULE_LOCKED (extensions
+    ruleId, role, sourceTemplateId) for EVERY caller: unlock it first
+    (unlockNodeRoleRule) or re-apply its required template.
+    """
+    updateNodeRoleRule(ref: ID!, input: UpdateNodeRoleRuleInput!, expectedRevision: Int): NodeRoleRulePayload!
+
+    "#1325 — delete a rule by its id; expectedRevision as for updateNodeRoleRule. A LOCKED rule (#1334) is refused with RULE_LOCKED for every caller: unlock it first (unlockNodeRoleRule)."
+    deleteNodeRoleRule(ref: ID!, expectedRevision: Int): Boolean!
+
+    """
+    #1334 — the deliberate step before a rule a required template LOCKED can be
+    edited or deleted (Holger, 2026-09-27: nobody changes a locked rule through
+    an ordinary edit). Needs lock authority: an org ADMIN/OWNER of the memory's
+    org; on a personal/private or org-less memory, its manager. Anyone else who
+    manages the memory gets RULE_LOCKED. Visible: bumps revision and stamps
+    updatedBy. Unlocking an unlocked rule changes nothing. expectedRevision as
+    for updateNodeRoleRule.
+    """
+    unlockNodeRoleRule(ref: ID!, expectedRevision: Int): NodeRoleRulePayload!
+
+    """
+    #1334 — copy a template's rules into ONE memory's config. A one-off copy:
+    later template edits never reach this memory, and re-applying is explicit.
+
+    Needs MANAGE on the memory (else MemoryNotFound) and on the template,
+    which exists for you only if you manage its owner (else
+    MEMORY_CONFIG_TEMPLATE_NOT_FOUND). The rules are validated as a whole,
+    under a share lock, as createNodeRoleRule validates a new rule's
+    references (NODE_NOT_FOUND for one you cannot read, NOT_A_TASK), and a
+    template rule whose task was deleted refuses the whole apply
+    (NODE_ROLE_RULE_REF_BROKEN). All-or-nothing per memory.
+
+    When the memory already has a rule for a role, a non-required template
+    skips it and a required template replaces it. A LOCKED rule is only
+    replaced by a caller with lock authority (see unlockNodeRoleRule);
+    otherwise SKIPPED_LOCKED. Rules written by a required template are locked.
+
+    expectedTemplateRevision: CONFLICT (with currentRevision) if the template
+    changed since you read it. dryRun: the same report with nothing written.
+    """
+    applyMemoryConfigTemplate(templateRef: ID!, memoryRef: ID!, expectedTemplateRevision: Int, dryRun: Boolean): MemoryConfigApplyResult!
+
+    """
+    #1325 part (c) — create a template. ownerRef names the organization, user
+    or App; omit it for HADRON_SERVER (platform admins only; refused
+    HADRON_SERVER_NOT_CONFIGURED when this server has no row) and for USER
+    (yourself — you own templates for no one else). A second live template of
+    the same name under the same owner is MEMORY_CONFIG_TEMPLATE_EXISTS.
+    """
+    createMemoryConfigTemplate(
+      ownerType: MemoryConfigTemplateOwnerType!
+      ownerRef: ID
+      input: CreateMemoryConfigTemplateInput!
+    ): MemoryConfigTemplatePayload!
+
+    """
+    #1325 part (c) — change a template by its id. With expectedRevision, a
+    template changed since you read it is refused CONFLICT
+    (extensions.currentRevision) and nothing is written. A template you may not
+    manage reads as MEMORY_CONFIG_TEMPLATE_NOT_FOUND.
+    """
+    updateMemoryConfigTemplate(ref: ID!, input: UpdateMemoryConfigTemplateInput!, expectedRevision: Int): MemoryConfigTemplatePayload!
+
+    "#1325 part (c) — soft-delete a template. Configs it was applied to keep their copies."
+    deleteMemoryConfigTemplate(ref: ID!, expectedRevision: Int): Boolean!
 
     "Spec 049 Phase 2 — update a scope you may write (auth as createScope). memoryRefs replaces the ordered list."
     updateScope(ref: ID!, input: UpdateScopeInput!): Scope!
@@ -7976,6 +8683,23 @@ export const typeDefs = `#graphql
     channelRef: the Channel's id or its address (\`Channel.chatRootUrn\`, #1171).
     """
     advanceChannelReadState(attendeeRef: ID!, appRef: ID, channelRef: ID!, seq: Int!): ChannelReadState!
+
+    """
+    #1353 internal pilot: explicitly advance the cursor owned by one exact,
+    caller-owned live Worker session on one readable registered Channel.
+    Shares the MCP mark-read gate; unlike advanceChannelReadState this door is
+    operator+App pilot-gated and session-pinned. Monotonic; a seq beyond the
+    captured Channel watermark is refused.
+    """
+    markOwnTeamChatRead(appRef: ID!, sessionRef: ID!, channelRef: ID!, seq: Int!): OwnTeamChatReadState!
+
+    """
+    Explicitly confirm a previously previewed #1353 switchover. The proof is
+    actor/App/scope-bound; any live-Worker, register or cursor drift rejects
+    the whole transaction. It advances only through the heads captured by the
+    preview, so messages arriving afterward remain unread.
+    """
+    confirmTeamAttentionSwitchover(appRef: ID!, proof: String!): TeamAttentionSwitchoverResult!
 
     # Chatbot revisions (org ADMIN)
     """
@@ -8070,6 +8794,7 @@ export const typeDefs = `#graphql
       agentTools: [String!]
       aiProvider: String
       aiModel: String
+      "036 legacy shim over the App's 'default' AI config; held to createAiServiceConfig's key rule (#1389)."
       aiApiKey: String
       expiresAt: String
       surfaces: [String!]
@@ -8105,6 +8830,7 @@ export const typeDefs = `#graphql
       agentTools: [String!]
       aiProvider: String
       aiModel: String
+      "036 legacy shim over the App's 'default' AI config; held to createAiServiceConfig's key rule (#1389)."
       aiApiKey: String
       expiresAt: String
       surfaces: [String!]
@@ -8502,6 +9228,8 @@ export const typeDefs = `#graphql
       ref: String!
       action: String!
       detail: JSON
+      "Optional explicit model report (#1398). Takes precedence over the session's model; a model switch or a late record should pass the model that actually did the work. Empty string is refused — pass nothing to fall back to the session's model."
+      model: String
     ): TeamWorkItem!
 
     """

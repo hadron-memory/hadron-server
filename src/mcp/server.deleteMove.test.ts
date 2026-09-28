@@ -30,6 +30,7 @@ import { createTestableMcpServer } from './server.js';
 import type { AuthContext } from '../middleware/auth.js';
 import { generateId } from '../lib/id.js';
 import { deriveEdgeLoc } from '../lib/edgeLoc.js';
+import { revisionStateHashRefreshMarker } from '../lib/nodeRevisionSnapshot.js';
 
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -471,6 +472,11 @@ describe('hadron_move_node — return record (#185 F1)', () => {
 
 describe('hadron_move_node — name preservation (#1017)', () => {
   it('preserves the human-authored name by default', async () => {
+    const authoredAt = new Date('2026-09-26T12:00:00Z');
+    await db.node.update({ where: { id: fx.nodes.moveSource.id }, data: {
+      authorshipKind: 'TASK', authoredByTask: fx.nodes.leaf.id,
+      authoredByRevision: 3, authoredAt, revisionContentHash: revisionStateHashRefreshMarker(),
+    } });
     const srv = createTestableMcpServer(adminAuth());
     const text = await srv.callToolText('hadron_move_node', {
       urn: `urn:node:${fx.memory.urn}:${fx.nodes.moveSource.loc}`,
@@ -481,9 +487,15 @@ describe('hadron_move_node — name preservation (#1017)', () => {
     const moved = await db.node.findUniqueOrThrow({ where: { id: fx.nodes.moveSource.id } });
     expect(moved.loc).toBe('relocated');
     expect(moved.name).toBe('Relocate source');
+    expect(moved).toMatchObject({ authorshipKind: 'TASK', authoredByTask: fx.nodes.leaf.id, authoredByRevision: 3, authoredAt });
   });
 
   it('renames to the target loc leaf when renameToLeaf is true', async () => {
+    const authoredAt = new Date('2026-09-26T12:00:00Z');
+    await db.node.update({ where: { id: fx.nodes.moveSource.id }, data: {
+      authorshipKind: 'TASK', authoredByTask: fx.nodes.leaf.id,
+      authoredByRevision: 3, authoredAt, revisionContentHash: revisionStateHashRefreshMarker(),
+    } });
     const srv = createTestableMcpServer(adminAuth());
     await srv.callToolText('hadron_move_node', {
       urn: `urn:node:${fx.memory.urn}:${fx.nodes.moveSource.loc}`,
@@ -494,6 +506,9 @@ describe('hadron_move_node — name preservation (#1017)', () => {
     const moved = await db.node.findUniqueOrThrow({ where: { id: fx.nodes.moveSource.id } });
     expect(moved.loc).toBe('section:renamed-leaf');
     expect(moved.name).toBe('renamed-leaf');
+    expect(moved).toMatchObject({ authorshipKind: null, authoredByTask: null, authoredByRevision: null, authoredAt: null });
+    const old = await db.nodeRevision.findFirstOrThrow({ where: { nodeId: moved.id }, orderBy: { revNo: 'desc' } });
+    expect(old).toMatchObject({ name: 'Relocate source', authorshipKind: 'TASK', authoredByTask: fx.nodes.leaf.id, authoredByRevision: 3, authoredAt });
   });
 
   it('agrees with the GraphQL moveNode resolver on what happens to name', async () => {
@@ -547,6 +562,11 @@ describe('hadron_move_node — name preservation (#1017)', () => {
   });
 
   it('a same-slot move with renameToLeaf still normalizes the name to the leaf', async () => {
+    const authoredAt = new Date('2026-09-26T12:00:00Z');
+    await db.node.update({ where: { id: fx.nodes.moveSource.id }, data: {
+      authorshipKind: 'TASK', authoredByTask: fx.nodes.leaf.id,
+      authoredByRevision: 3, authoredAt, revisionContentHash: revisionStateHashRefreshMarker(),
+    } });
     const srv = createTestableMcpServer(adminAuth());
     const sameUrn = `urn:node:${fx.memory.urn}:${fx.nodes.moveSource.loc}`;
     await srv.callToolText('hadron_move_node', {
@@ -557,6 +577,9 @@ describe('hadron_move_node — name preservation (#1017)', () => {
 
     const moved = await db.node.findUniqueOrThrow({ where: { id: fx.nodes.moveSource.id } });
     expect(moved.name).toBe('src');
+    expect(moved).toMatchObject({ authorshipKind: null, authoredByTask: null, authoredByRevision: null, authoredAt: null });
+    expect(await db.nodeRevision.findFirstOrThrow({ where: { nodeId: moved.id } }))
+      .toMatchObject({ authorshipKind: 'TASK', authoredByTask: fx.nodes.leaf.id, authoredByRevision: 3, authoredAt });
     expect(await db.nodeRevision.count({ where: { nodeId: fx.nodes.moveSource.id } })).toBe(1);
   });
 
@@ -806,14 +829,18 @@ describe('hadron_move_node — cross-memory move + permission denial', () => {
     ).toBeNull();
   });
 
-  it('refuses with "write access denied for source memory" when the caller lacks source write', async () => {
+  it('refuses a caller who cannot read the source memory as if it did not exist (#1316)', async () => {
+    // The viewer has no membership, so it cannot READ the source memory either.
+    // "Write access denied for source memory" would confirm the memory exists;
+    // the missing-memory answer does not. (A caller who CAN read it still gets
+    // the write denial — pinned in mcp-existence-oracle-1316.test.ts.)
     const srv = createTestableMcpServer(viewerAuth());
     const text = await srv.callToolText('hadron_move_node', {
       urn: `urn:node:${fx.memory.urn}:${fx.nodes.moveSource.loc}`,
       targetUrn: `urn:node:${fx.memory.urn}:somewhere-else`,
     });
 
-    expect(text).toMatch(/Write access denied for source memory/);
+    expect(text).toBe(`Source memory not found: "${fx.memory.urn}".`);
     // No row got moved.
     const sourceRow = await db.node.findUnique({
       where: { id: fx.nodes.moveSource.id },

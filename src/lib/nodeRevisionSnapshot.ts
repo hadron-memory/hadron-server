@@ -17,9 +17,10 @@
  * captured as `revLabel` — it previously squatted in `editedBy`.
  */
 
-import { Prisma } from '../generated/prisma/index.js';
+import { Prisma, type NodeAuthorshipKind } from '../generated/prisma/index.js';
 import type { PrismaClient } from '../generated/prisma/index.js';
 import { generateId } from './id.js';
+import { clearNodeAuthorship } from './nodeAuthorship.js';
 
 /**
  * The curated subset of Node fields every snapshot captures. On encrypted
@@ -48,6 +49,11 @@ export interface SnapshotSourceNode {
   role: string | null;
   llmModel: string | null;
   aiAgent: string | null;
+  authorshipKind: NodeAuthorshipKind | null;
+  authoredByTask: string | null;
+  authoredByRevision: number | null;
+  authoredByHuman: string | null;
+  authoredAt: Date | null;
 }
 
 /** Editor identity split per #620 — see module doc. */
@@ -125,6 +131,11 @@ export function buildNodeRevisionSnapshot(
     role: node.role,
     llmModel: node.llmModel,
     aiAgent: node.aiAgent,
+    authorshipKind: node.authorshipKind,
+    authoredByTask: node.authoredByTask,
+    authoredByRevision: node.authoredByRevision,
+    authoredByHuman: node.authoredByHuman,
+    authoredAt: node.authoredAt,
     editedBy: editor.userId ?? null,
     editedByInfo: editor.userId ? null : editor.info ?? null,
     revLabel: opts?.revLabel != null ? opts.revLabel.slice(0, REV_LABEL_MAX_LEN) : null,
@@ -219,7 +230,12 @@ export async function ensureCurrentNodeRevisionInTransaction(
   await createNodeRevision(
     tx,
     buildNodeRevisionSnapshot(
-      node,
+      // The old authored content is already gone: an out-of-band writer
+      // changed the live row without a predecessor snapshot. The reconciled
+      // state cannot truthfully inherit its old task/human stamp, either in
+      // this new revision or on the live row. Known structural writers keep
+      // their stamp by refreshing the fingerprint in their own transaction.
+      { ...node, ...clearNodeAuthorship() },
       { userId: null, info: RECONCILE_EDITOR_INFO },
       {
         revLabel: 'Reconciled state changed outside a revisioned writer (#1323)',
@@ -229,7 +245,9 @@ export async function ensureCurrentNodeRevisionInTransaction(
   );
   await tx.node.update({
     where: { id: node.id },
-    data: { revisionContentHash: actual },
+    // The fingerprint computed above included the stale stamp. Recompute it
+    // from the cleared live state, or the next read sees a second false drift.
+    data: { ...clearNodeAuthorship(), revisionContentHash: revisionStateHashRefreshMarker() },
   });
   return node.revSeq + 1;
 }
@@ -352,6 +370,11 @@ export const TRACKED_NODE_FIELDS = [
   'role',
   'llmModel',
   'aiAgent',
+  'authorshipKind',
+  'authoredByTask',
+  'authoredByRevision',
+  'authoredByHuman',
+  'authoredAt',
 ] as const satisfies readonly (keyof SnapshotSourceNode)[];
 
 /**
@@ -440,6 +463,11 @@ export function restorableNodeFields(revision: {
   role: string | null;
   llmModel: string | null;
   aiAgent: string | null;
+  authorshipKind: NodeAuthorshipKind | null;
+  authoredByTask: string | null;
+  authoredByRevision: number | null;
+  authoredByHuman: string | null;
+  authoredAt: Date | null;
 }): Record<string, unknown> {
   const base: Record<string, unknown> = {
     name: revision.name,
@@ -468,5 +496,10 @@ export function restorableNodeFields(revision: {
     role: revision.role,
     llmModel: revision.llmModel,
     aiAgent: revision.aiAgent,
+    authorshipKind: revision.authorshipKind,
+    authoredByTask: revision.authoredByTask,
+    authoredByRevision: revision.authoredByRevision,
+    authoredByHuman: revision.authoredByHuman,
+    authoredAt: revision.authoredAt,
   };
 }

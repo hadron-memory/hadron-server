@@ -101,6 +101,32 @@ async function provision(admin: Client) {
 /** The CHECK constraints `prisma db push` cannot express. Source of truth: prisma/post-push.sql. */
 async function applyTemplateConstraints(client: Client) {
 
+  // #1326 — nullable attribution is either unknown, a task at an exact
+  // revision, or an authenticated human. A CHECK with a bare OR of enum
+  // comparisons would admit SQL NULL, so use CASE with explicit non-null
+  // requirements. Synced with prisma/post-push.sql and the migration.
+  for (const [table, constraint] of [
+    ['nodes', 'chk_nodes_authorship_shape'],
+    ['node_revisions', 'chk_node_revisions_authorship_shape'],
+  ] as const) {
+    await client.query(`
+      ALTER TABLE "${table}" DROP CONSTRAINT IF EXISTS "${constraint}";
+      ALTER TABLE "${table}" ADD CONSTRAINT "${constraint}" CHECK (CASE
+        WHEN "authorship_kind" IS NULL THEN
+          "authored_by_task" IS NULL AND "authored_by_revision" IS NULL AND "authored_by_human" IS NULL AND "authored_at" IS NULL
+        WHEN "authorship_kind" = 'TASK' THEN
+          "authored_by_task" IS NOT NULL AND "authored_by_revision" IS NOT NULL AND "authored_by_revision" > 0 AND "authored_by_human" IS NULL AND "authored_at" IS NOT NULL
+        WHEN "authorship_kind" = 'HUMAN' THEN
+          "authored_by_task" IS NULL AND "authored_by_revision" IS NULL AND "authored_by_human" IS NOT NULL AND "authored_at" IS NOT NULL
+        ELSE false END);
+    `);
+  }
+  await client.query(`
+    ALTER TABLE "node_content_validation_reports" DROP CONSTRAINT IF EXISTS "chk_node_content_validation_revisions_positive";
+    ALTER TABLE "node_content_validation_reports" ADD CONSTRAINT "chk_node_content_validation_revisions_positive"
+      CHECK ("node_rev_seq" > 0 AND "validation_task_rev_seq" > 0);
+  `);
+
   // 005-agent-subscription, re-keyed by 034-memory-class-access: ownership is
   // class-based — personal/private ⇔ user_id IS NOT NULL (allows private+owner
   // and free-standing personal/private; decoupled from visibility).
@@ -240,8 +266,9 @@ async function applyTemplateConstraints(client: Client) {
   `);
 
   // #1325 — MemoryConfig templates: exactly one owner + per-owner live-name
-  // uniqueness; rule task-reference markers. Synced with prisma/post-push.sql
-  // + the 20260925030000_memory_config migration.
+  // uniqueness; rule task-reference markers; and #1322 dotted rule-key
+  // grammar. Synced with prisma/post-push.sql + the 20260925030000_memory_config
+  // and 20260925100000_dotted_role_rules migrations.
   await client.query(`
     ALTER TABLE memory_config_templates
       DROP CONSTRAINT IF EXISTS chk_memory_config_template_owner;
@@ -262,12 +289,40 @@ async function applyTemplateConstraints(client: Client) {
       ADD CONSTRAINT chk_node_role_rule_task_markers
       CHECK ((author_task_id IS NULL OR author_task_required)
          AND (validation_task_id IS NULL OR validation_task_required));
+    DO $$
+    DECLARE
+      bad text;
+    BEGIN
+      SELECT string_agg(format('%s:%s (%L)', src, id, role), ', ') INTO bad FROM (
+        SELECT 'node_role_rules' AS src, id, role FROM node_role_rules
+         WHERE NOT (char_length(role) BETWEEN 1 AND 64 AND role ~ '^[a-z0-9][a-z0-9-]*(\\.[a-z0-9][a-z0-9-]*)*$')
+        UNION ALL
+        SELECT 'memory_config_template_rules', id, role FROM memory_config_template_rules
+         WHERE NOT (char_length(role) BETWEEN 1 AND 64 AND role ~ '^[a-z0-9][a-z0-9-]*(\\.[a-z0-9][a-z0-9-]*)*$')
+        LIMIT 20
+      ) t;
+      IF bad IS NOT NULL THEN
+        RAISE EXCEPTION '#1322: rule keys the dotted grammar refuses (lower-case letter/digit/dash segments joined by dots, 1-64 characters). Rename or delete these rules, then re-run: %', bad;
+      END IF;
+    END $$;
+    ALTER TABLE node_role_rules
+      DROP CONSTRAINT IF EXISTS chk_node_role_rule_role_format;
+    ALTER TABLE node_role_rules
+      ADD CONSTRAINT chk_node_role_rule_role_format
+      CHECK (char_length(role) BETWEEN 1 AND 64
+         AND role ~ '^[a-z0-9][a-z0-9-]*(\\.[a-z0-9][a-z0-9-]*)*$');
     ALTER TABLE memory_config_template_rules
       DROP CONSTRAINT IF EXISTS chk_memory_config_template_rule_task_markers;
     ALTER TABLE memory_config_template_rules
       ADD CONSTRAINT chk_memory_config_template_rule_task_markers
       CHECK ((author_task_id IS NULL OR author_task_required)
          AND (validation_task_id IS NULL OR validation_task_required));
+    ALTER TABLE memory_config_template_rules
+      DROP CONSTRAINT IF EXISTS chk_memory_config_template_rule_role_format;
+    ALTER TABLE memory_config_template_rules
+      ADD CONSTRAINT chk_memory_config_template_rule_role_format
+      CHECK (char_length(role) BETWEEN 1 AND 64
+         AND role ~ '^[a-z0-9][a-z0-9-]*(\\.[a-z0-9][a-z0-9-]*)*$');
   `);
 
   // Spec 049 Phase 5 — the register: exactly one owner, at most one

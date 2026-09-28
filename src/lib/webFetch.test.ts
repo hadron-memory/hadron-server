@@ -38,9 +38,24 @@ describe('isForbiddenAddress', () => {
     }
   });
 
-  it('blocks loopback/unspecified/ULA/link-local/multicast IPv6', () => {
-    for (const ip of ['::1', '::', 'fc00::1', 'fd12:3456::1', 'fe80::1', 'ff02::1']) {
+  it('blocks loopback/unspecified/ULA/link-local/site-local/multicast IPv6', () => {
+    for (const ip of ['::1', '::', 'fc00::1', 'fd12:3456::1', 'fe80::1', 'febf::1', 'fec0::1', 'feff::1', 'ff02::1']) {
       expect(isForbiddenAddress(ip), ip).toBe(true);
+    }
+  });
+
+  it('blocks the rest of the IANA special-purpose ranges, compared numerically (#1380 review)', () => {
+    for (const ip of [
+      '192.0.0.8', '192.0.2.1', '192.88.99.1', '198.18.0.1', '198.19.255.254', '198.51.100.7', '203.0.113.9',
+      '64:ff9b:1::1', '100::1', '2001::1', '2001:1ff::1', '2001:db8::1', '2001:0db8:0000::1', '2002:c000:0204::1',
+      '3fff::1', '5f00::1', '4000::1', 'fc::1', '1::1', 'e000::1', '64:ff9b::a00:1', '64:ff9b::127.0.0.1', '::ffff:0:a00:1', '::ffff:0:10.0.0.1', '::ffff:0:a9fe:a9fe', 'not-an-ip:zz::1',
+    ]) {
+      expect(isForbiddenAddress(ip), ip).toBe(true);
+    }
+    // Neighbours stay public, and NAT64 to a PUBLIC IPv4 is how an IPv6-only
+    // host reaches one.
+    for (const ip of ['192.0.1.1', '192.0.3.1', '198.17.255.255', '198.20.0.1', '203.0.114.1', '2001:200::1', '2001:4860:4860::8888', '64:ff9b::808:808', '64:ff9b::8.8.8.8', '::ffff:0:808:808']) {
+      expect(isForbiddenAddress(ip), ip).toBe(false);
     }
   });
 

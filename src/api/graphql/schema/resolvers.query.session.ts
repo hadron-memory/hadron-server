@@ -4,7 +4,8 @@ import {
   hasSchemePrefix,
 } from '../../../lib/urn.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
-import { resolveNodeRef } from '../../../lib/entityRef/nodeRef.js';
+import { MemoryNotFoundError } from '../../../lib/entityRef/errors.js';
+import { resolveNodeRefForCaller } from './resolvers.nodeRefAccess.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
 import { isId } from '../../../lib/entityRef/shape.js';
 import { GraphQLError } from 'graphql';
@@ -198,7 +199,7 @@ export const sessionQueries = {
         if (isNodeRef) {
           // 007/022-entity-id-or-urn: PK or fully-qualified node URN. No
           // contextMemoryId at the API boundary (spec 022).
-          const { id: resolvedNodeId } = await resolveNodeRef(ctx.db, nodeId);
+          const { id: resolvedNodeId } = await resolveNodeRefForCaller(ctx, nodeId);
           nodeIdFilter = resolvedNodeId;
         } else {
           nodeLocExact = nodeId;
@@ -231,11 +232,12 @@ export const sessionQueries = {
       if (memoryId) {
         // 007-entity-id-or-urn: memoryId may be ID, bare URN, or prefixed URN.
         const { id: resolvedMemoryId } = await resolveMemoryRef(ctx.db, memoryId);
-        // #250: deny a memory the caller can't read. Return [] (not a thrown
-        // Forbidden) to avoid leaking existence — mirrors nodeById returning
-        // null for an out-of-scope target.
+        // #250 denied an unreadable memory with [] to avoid leaking existence,
+        // but a MISSING memory throws above, so [] itself meant "exists, not
+        // yours". #1381 (`cor:api:140:03`): answer exactly as resolveMemoryRef's
+        // miss instead.
         if (accessibleMemoryIds !== null && !accessibleMemoryIds.includes(resolvedMemoryId)) {
-          return [];
+          throw new MemoryNotFoundError(memoryId);
         }
         memoryScopeId = resolvedMemoryId;
       }
@@ -511,4 +513,3 @@ export const sessionQueries = {
       };
     },
 };
-
