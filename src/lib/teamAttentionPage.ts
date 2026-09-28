@@ -99,6 +99,9 @@ export interface PageContinuation {
    * sit on a residual-rejected row, which would make an undeleted-message
    * check false (#1430 decoupling). */
   c_front: string[];
+  /** The actual LOC of the last row within the frozen seq span, per channel —
+   * the scan's fixed inclusive upper bound (#1428 liveness). */
+  c_ful: string[];
   /** Channel.incarnation at freeze, per channel index — compared on EVERY
    * resume (unstarted and done channels included). A same-address
    * deleteChannel + ensureChannelWithRoot reuses the Channel/register IDs and

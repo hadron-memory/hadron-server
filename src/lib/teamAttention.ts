@@ -596,6 +596,9 @@ export interface PagedScanState {
   /** Last COUNTED-message suffix ('' until one counted) — the stale-frontier
    * check row, independent of the raw cursor (#1430 decoupling). */
   cFrontNum: string[];
+  /** The actual LOC of the last row within the frozen seq span — a FIXED
+   * upper bound that does not grow under writes (#1428 liveness). */
+  cFrozenUpperLoc: string[];
   /** Channel index → frozen incarnation, compared on every resume (#3111). */
   cInc: number[];
   cDone: boolean[];
@@ -683,14 +686,17 @@ async function pagedScanStep(
     // index key, so Postgres would walk non-qualifying rows unboundedly).
     // Post-freeze starvation is prevented by the POST-SPAN-done rule below.
     const prefix = geometry.locPrefix;
-    // The frozen upper loc (actual last in-span row's loc) is the true scan
-    // boundary — INCLUSIVE, since that row itself is in the frozen span.
-    // Empty (degenerate freeze) falls back to the unbounded prefix range.
-    // Channel-local prefix range in C order: [P+cursor, P-successor).
-    // The successor increments the final character (':' → ';'). Post-freeze
-    // rows within the prefix are fetched and charged (bounded by LIMIT);
-    // the seq residual rejects them from counting; the cursor advances past.
-    const upperBound = prefix.slice(0, -1) + ';';
+    // The frozen upper loc (the actual last in-span row's loc at freeze) is
+    // a FIXED scan boundary — unlike the prefix successor, it does not grow
+    // under writes, so sustained traffic cannot prevent completion (the
+    // liveness failure Chip reproduced at 032a5ade). INCLUSIVE: that row is
+    // in the span. Post-freeze rows sorting within [P, frozenUpper] are
+    // fetched, seq-rejected, charged, cursor-advanced past. Empty (no frozen
+    // rows) falls back to the prefix successor (nothing to scan anyway).
+    const frozenUpper = state.cFrozenUpperLoc[k];
+    const upperSql = frozenUpper
+      ? Prisma.sql`AND n.loc COLLATE "C" <= ${frozenUpper} COLLATE "C"`
+      : Prisma.sql`AND n.loc COLLATE "C" < ${prefix.slice(0, -1) + ';'} COLLATE "C"`;
     const lowerBound = prefix + state.cCursorNum[k];
     const rows = await db.$queryRaw<EncryptedCandidateRow[]>(Prisma.sql`
       SELECT seq::int AS seq, loc, data, id, memory_id, node_type, deleted_at
@@ -699,7 +705,7 @@ async function pagedScanStep(
         FROM nodes n
         WHERE n.memory_id = ${geometry.memoryId}
           AND n.loc COLLATE "C" > ${lowerBound} COLLATE "C"
-          AND n.loc COLLATE "C" < ${upperBound} COLLATE "C"
+          ${upperSql}
         ORDER BY n.loc COLLATE "C"
         LIMIT ${take}
       ) raw
@@ -829,6 +835,7 @@ function stateToContinuation(
     c_done: channelIds.reduce((m, _id, k) => (state.cDone[k] ? maskSet(m, k) : m), maskEmpty()),
     c_num: state.cCursorNum,
     c_front: state.cFrontNum,
+    c_ful: state.cFrozenUpperLoc,
     c_inc: channelIncarnations,
     c_min: state.cMin,
     c_max: state.cMax,
@@ -852,6 +859,7 @@ function continuationToState(page: PageContinuation): PagedScanState {
     cMax: page.c_max,
     cCursorNum: page.c_num,
     cFrontNum: page.c_front,
+    cFrozenUpperLoc: page.c_ful ?? [],
     cInc: page.c_inc,
     cDone: Array.from({ length: channelCount }, (_v, k) => maskGet(page.c_done, k)),
     aUnread: page.u_unread,
@@ -1055,6 +1063,23 @@ async function runPagedAttention(
       cMax: channelIds.map((id) => Math.max(...targets.filter((t) => t.channelId === id).map((t) => t.head))),
       cCursorNum: channelIds.map(() => ''),
       cFrontNum: channelIds.map(() => ''),
+      cFrozenUpperLoc: await Promise.all(channelIds.map(async (id) => {
+        const channelTargets = targets.filter((t) => t.channelId === id);
+        const maxHead = Math.max(...channelTargets.map((t) => t.head));
+        const sample = channelTargets[0];
+        // Max loc in C order among rows within the frozen span — NOT the
+        // highest seq (seq order diverges from loc order at padding
+        // boundaries like 999/1000, and duplicate seqs need the loc-max).
+        const rows = await ctx.db.$queryRaw<Array<{ loc: string }>>(Prisma.sql`
+          SELECT loc FROM nodes
+          WHERE memory_id = ${sample.memoryId}
+            AND seq <= ${maxHead}
+            AND deleted_at IS NULL
+          ORDER BY loc COLLATE "C" DESC
+          LIMIT 1
+        `);
+        return rows[0]?.loc ?? '';
+      })),
       cInc: channelIds.map((id) => liveIncarnations.get(id) ?? 0),
       cDone: channelIds.map(() => false),
       aUnread: targets.map(() => 0),
