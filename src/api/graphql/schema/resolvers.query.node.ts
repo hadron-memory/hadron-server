@@ -29,6 +29,7 @@ import {
 import type { LexicalField, BrowseSort, NodeSqlFilter } from '../../../lib/retrieval/provider.js';
 import { expandWithNeighbors } from '../../../lib/search.js';
 import { decryptNodesBatch } from '../../../lib/nodeCrypto.js';
+import { decryptReadableRevisions } from '../../../lib/nodeRevisionRead.js';
 import { sortSiblings } from '../../../lib/siblingOrder.js';
 import { escapePrismaLikePattern } from '../../../lib/literalLocPrefix.js';
 import {
@@ -2017,7 +2018,9 @@ export const nodeQueries = {
       // memory, already authorized above. (Filter after take: a >limit-revision
       // node spanning inaccessible memories may under-return near the limit —
       // safe, never over-returns.)
-      return revisions.filter((v) => canRead(v.memoryId ?? node.memoryId));
+      return decryptReadableRevisions(
+        ctx.db, revisions.filter((v) => canRead(v.memoryId ?? node.memoryId)), node.memoryId,
+      );
     },
 
     // #617 (Display) — a single snapshot by id, so the portal doesn't filter
@@ -2042,7 +2045,7 @@ export const nodeQueries = {
       const canRead = (memId: string) => accessible === null || accessible.includes(memId);
       if (!canRead(node.memoryId)) return null;
       if (!canRead(revision.memoryId ?? node.memoryId)) return null;
-      return revision;
+      return (await decryptReadableRevisions(ctx.db, [revision], node.memoryId))[0]!;
     },
 
     appNodes: async (

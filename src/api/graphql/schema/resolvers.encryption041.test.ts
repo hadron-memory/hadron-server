@@ -205,9 +205,23 @@ describe('encryptMemory — locked conversion (#1346)', () => {
     expect(readable.map((revision) => revision.id).sort()).toEqual(
       historical.slice(0, 2).map((revision) => revision.id).sort(),
     );
-    await resolvers.Mutation.restoreNodeRevision(
-      {}, { revisionId: historical[0]!.id }, ownerCtx(),
-    );
+    expect(readable.every((revision) => isCiphertext(revision.content))).toBe(true);
+    await requestKeyStorage.run(new Map([[memoryId, parseDataKey(dataKey)]]), async () => {
+      const unlocked = await resolvers.Query.nodeRevisions({}, { nodeRef: nodeId }, ownerCtx());
+      expect(unlocked.find((revision) => revision.id === historical[0]!.id)).toMatchObject({
+        content: 'prior content', abstract: 'prior abstract', data: { secret: 'prior' },
+      });
+      expect(await resolvers.Query.nodeRevision({}, { revisionId: historical[0]!.id }, ownerCtx()))
+        .toMatchObject({ content: 'prior content', abstract: 'prior abstract' });
+      expect(await resolvers.Mutation.updateNodeRevision(
+        {}, { revisionId: historical[0]!.id, revLabel: 'readable' }, ownerCtx(),
+      )).toMatchObject({ content: 'prior content', abstract: 'prior abstract' });
+    });
+    await requestKeyStorage.run(new Map([[memoryId, parseDataKey(dataKey)]]), async () => {
+      await resolvers.Mutation.restoreNodeRevision(
+        {}, { revisionId: historical[0]!.id }, ownerCtx(),
+      );
+    });
     const restored = await db.node.findUniqueOrThrow({ where: { id: nodeId } });
     expect(isCiphertext(restored.content)).toBe(true);
     expect(decryptNodeFieldsWithKey(restored, parseDataKey(dataKey)).content).toBe('prior content');
@@ -307,6 +321,102 @@ describe('encryptMemory — locked conversion (#1346)', () => {
       .toBe('destination history');
     expect(isCiphertext((await db.nodeRevision.findUniqueOrThrow({ where: { id: source.id } })).content))
       .toBe(true);
+  });
+
+  it('restores a source-encrypted snapshot into a plaintext destination as plaintext', async () => {
+    const destination = await db.memory.create({
+      data: {
+        id: generateId(), organizationId: org.id, urn: 'enc41-org:restore-destination',
+        name: 'restore destination', class: 'private', userId: owner.id,
+      },
+    });
+    const prior = await db.nodeRevision.create({
+      data: {
+        id: generateId(), nodeId, memoryId, loc: 'entry-1', name: 'Entry 1',
+        content: 'source historical secret', abstract: 'source historical abstract',
+        data: { secret: 'source history' }, nodeType: 'info',
+      },
+    });
+    await db.node.update({ where: { id: nodeId }, data: { memoryId: destination.id } });
+    await resolvers.Mutation.encryptMemory({}, { memoryId, dataKey }, ownerCtx());
+    const encryptedHistory = await db.nodeRevision.findUniqueOrThrow({ where: { id: prior.id } });
+    expect(isCiphertext(encryptedHistory.content)).toBe(true);
+
+    await requestKeyStorage.run(new Map([[memoryId, parseDataKey(dataKey)]]), async () => {
+      expect(await resolvers.Query.nodeRevision({}, { revisionId: prior.id }, ownerCtx()))
+        .toMatchObject({ content: 'source historical secret' });
+      await resolvers.Mutation.restoreNodeRevision({}, { revisionId: prior.id }, ownerCtx());
+    });
+    const restored = await db.node.findUniqueOrThrow({ where: { id: nodeId } });
+    expect([restored.content, restored.abstract, restored.data]).toEqual([
+      'source historical secret', 'source historical abstract', { secret: 'source history' },
+    ]);
+  });
+
+  it('restores a source-encrypted snapshot under the encrypted destination key', async () => {
+    const destinationKey = Buffer.alloc(32, 9).toString('base64');
+    const destination = await db.memory.create({
+      data: {
+        id: generateId(), organizationId: org.id, urn: 'enc41-org:encrypted-restore-destination',
+        name: 'encrypted restore destination', class: 'private', userId: owner.id,
+      },
+    });
+    const prior = await db.nodeRevision.create({
+      data: {
+        id: generateId(), nodeId, memoryId, loc: 'entry-1', name: 'Entry 1',
+        content: 'source snapshot secret', abstract: 'source snapshot abstract',
+        data: { secret: 'source snapshot data' }, nodeType: 'info',
+      },
+    });
+    await db.node.update({ where: { id: nodeId }, data: { memoryId: destination.id } });
+    await resolvers.Mutation.encryptMemory({}, { memoryId, dataKey }, ownerCtx());
+    await resolvers.Mutation.encryptMemory({}, { memoryId: destination.id, dataKey: destinationKey }, ownerCtx());
+
+    await expect(resolvers.Mutation.restoreNodeRevision(
+      {}, { revisionId: prior.id }, ownerCtx(),
+    )).rejects.toMatchObject({ extensions: { code: 'SESSION_EXPIRED', memoryId } });
+    await requestKeyStorage.run(new Map([[memoryId, parseDataKey(dataKey)]]), async () => {
+      await expect(resolvers.Mutation.restoreNodeRevision(
+        {}, { revisionId: prior.id }, ownerCtx(),
+      )).rejects.toMatchObject({ extensions: { code: 'SESSION_EXPIRED', memoryId: destination.id } });
+    });
+    await requestKeyStorage.run(new Map([
+      [memoryId, parseDataKey(dataKey)],
+      [destination.id, parseDataKey(destinationKey)],
+    ]), async () => {
+      await resolvers.Mutation.restoreNodeRevision({}, { revisionId: prior.id }, ownerCtx());
+    });
+    const restored = await db.node.findUniqueOrThrow({ where: { id: nodeId } });
+    expect(isCiphertext(restored.content)).toBe(true);
+    expect(isCiphertext(restored.abstract)).toBe(true);
+    expect((restored.data as { __enc?: string })?.__enc).toBeTruthy();
+    expect(decryptNodeFieldsWithKey(restored, parseDataKey(destinationKey))).toMatchObject({
+      content: 'source snapshot secret', abstract: 'source snapshot abstract',
+      data: { secret: 'source snapshot data' },
+    });
+  });
+
+  it('does not restore a prior-memory snapshot for a caller who cannot read that memory', async () => {
+    const destination = await db.memory.create({
+      data: {
+        id: generateId(), organizationId: org.id, urn: 'enc41-org:foreign-restore',
+        name: 'foreign restore', class: 'private', userId: stranger.id,
+      },
+    });
+    const prior = await db.nodeRevision.create({
+      data: {
+        id: generateId(), nodeId, memoryId, loc: 'entry-1', name: 'Entry 1',
+        content: 'prior owner secret',
+      },
+    });
+    await db.node.update({ where: { id: nodeId }, data: { memoryId: destination.id } });
+
+    await expect(resolvers.Mutation.restoreNodeRevision(
+      {}, { revisionId: prior.id },
+      { db, roles: ['READER'], userId: stranger.id } as Context,
+    )).rejects.toMatchObject({ extensions: { code: 'NOT_FOUND' } });
+    expect((await db.node.findUniqueOrThrow({ where: { id: nodeId } })).content)
+      .toBe('my secret plaintext');
   });
 
   it('preserves a raw edit made after the id scan and reconciles its drift before encrypting', async () => {
