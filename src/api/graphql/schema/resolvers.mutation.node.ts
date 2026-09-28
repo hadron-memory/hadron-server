@@ -3894,16 +3894,22 @@ export const nodeMutations = {
         });
         if (selectedSource.isEncrypted) requireKey(selectedSourceId);
         if (selectedDestination.isEncrypted) requireKey(current.memoryId);
-        const restoreFields = restorableNodeFields(selected);
+        const logicalRestoreFields = restorableNodeFields(selected);
         const plaintextFields = {
-          content: restoreFields.content as string | null,
-          abstract: restoreFields.abstract as string | null,
-          ...('data' in restoreFields ? { data: restoreFields.data } : {}),
+          content: logicalRestoreFields.content as string | null,
+          abstract: logicalRestoreFields.abstract as string | null,
+          ...('data' in logicalRestoreFields ? { data: logicalRestoreFields.data } : {}),
         };
         if (selectedSource.isEncrypted) {
           decryptNodeFieldsWithKey(plaintextFields, requireKey(selectedSourceId));
         }
-        Object.assign(restoreFields, plaintextFields);
+        Object.assign(logicalRestoreFields, plaintextFields);
+        const logicalCurrent = { ...current };
+        if (selectedDestination.isEncrypted) {
+          decryptNodeFieldsWithKey(logicalCurrent, requireKey(current.memoryId));
+        }
+        const changes = diffNodeChanges(logicalCurrent, logicalRestoreFields);
+        const restoreFields = { ...logicalRestoreFields };
         if (selectedDestination.isEncrypted) {
           Object.assign(restoreFields, encryptNodeFieldsWithKey(plaintextFields, requireKey(current.memoryId)));
         }
@@ -3955,7 +3961,7 @@ export const nodeMutations = {
           await createNodeRevision(tx, {
             id: generateId(),
             ...buildNodeRevisionSnapshot(current, editorFromAuth(ctx), {
-              changes: diffNodeChanges(current, restoreFields),
+              changes,
             }),
           });
         }
@@ -3978,7 +3984,7 @@ export const nodeMutations = {
         // author: clear it to unknown. An unchanged restore keeps its verified
         // stamp — the same rule as the agent-snapshot restore (#1397).
         if (!('authorshipKind' in restoreFields)
-          && authoredContentChanged(diffNodeChanges(current, restoreFields))) {
+          && authoredContentChanged(changes)) {
           Object.assign(writeData, clearNodeAuthorship());
         }
         if ('properties' in writeData) {

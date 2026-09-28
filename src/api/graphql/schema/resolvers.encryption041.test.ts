@@ -396,6 +396,26 @@ describe('encryptMemory — locked conversion (#1346)', () => {
     });
   });
 
+  it('does not record a content change when restore only rotates ciphertext', async () => {
+    const prior = await db.nodeRevision.create({
+      data: {
+        id: generateId(), nodeId, memoryId, loc: 'entry-1', name: 'Entry 1',
+        content: 'my secret plaintext', abstract: 'A secret abstract.',
+        data: { mood: 'good' }, nodeType: 'info',
+      },
+    });
+    await resolvers.Mutation.encryptMemory({}, { memoryId, dataKey }, ownerCtx());
+    await requestKeyStorage.run(new Map([[memoryId, parseDataKey(dataKey)]]), async () => {
+      await resolvers.Mutation.restoreNodeRevision({}, { revisionId: prior.id }, ownerCtx());
+    });
+    const beforeRestore = await db.nodeRevision.findFirstOrThrow({
+      where: { nodeId, id: { not: prior.id } }, orderBy: { createdAt: 'desc' },
+    });
+    expect(beforeRestore.changes).not.toContain('content');
+    expect(beforeRestore.changes).not.toContain('abstract');
+    expect(beforeRestore.changes).not.toContain('data');
+  });
+
   it('does not restore a prior-memory snapshot for a caller who cannot read that memory', async () => {
     const destination = await db.memory.create({
       data: {
