@@ -492,7 +492,7 @@ describe('family 9 — consolidated review corrections (#3051/#3053/#3054)', () 
 });
 
 describe('family 13 — #3123 long-loc liveness', () => {
-  it('a 200-target scan with 60-char loc atoms completes within the token ceiling', async () => {
+  it('a long-loc (147-char) channel completes within the token ceiling alongside a normal channel', async () => {
     // Channel with a long address: two 60-char atoms.
     const longLoc = 'chats:' + 'x'.repeat(60) + ':' + 'y'.repeat(60);
     const longMemory = await db.memory.create({
@@ -524,6 +524,33 @@ describe('family 13 — #3123 long-loc liveness', () => {
       if (page && page.length > 65_536) throw new Error(`continuation exceeded ceiling: ${page.length}`);
     } while (page && pages < 30);
     expect(completed).toBe(true);
+  });
+});
+
+describe('family 13b — legacy suffix shapes', () => {
+  it('a nonnumeric message suffix pages correctly and stores verbatim', async () => {
+    // Legacy shape: a message loc whose suffix after the channel prefix is
+    // not a plain counter (pre-padding or importer-created row).
+    const memEnc = await getMemoryEncryptionInfo(db, channel.memoryId);
+    const enc = encryptNodeFields({ content: null, data: { mentions: ['dara'] } }, memEnc);
+    await db.node.create({
+      data: {
+        id: 'legacy-suffix-row', memoryId: channel.memoryId, loc: 'chats:team:messages:legacy-alpha',
+        name: 'legacy', nodeType: 'chat-message', seq: 1, content: 'legacy',
+        data: (enc.data ?? null) as object,
+      },
+    });
+    await db.node.create({
+      data: {
+        id: 'legacy-suffix-row-b', memoryId: channel.memoryId, loc: 'chats:team:messages:legacy-beta',
+        name: 'legacy-b', nodeType: 'chat-message', seq: 2, content: 'legacy-b',
+        data: (enc.data ?? null) as object,
+      },
+    });
+    await db.channel.update({ where: { id: channel.id }, data: { lastSeq: 2 } });
+    const drained = await drainPages({}, { scanLimit: 1 });
+    const mine = drained.items.filter((i) => i.worker === worker.id);
+    expect(mine[0]).toMatchObject({ unread: 2, unreadMentions: 2, firstUnreadSeq: 1 });
   });
 });
 

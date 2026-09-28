@@ -84,9 +84,11 @@ export interface PageContinuation {
    * live geometry. Storing the suffix (typically 1-7 chars) instead of the
    * full loc keeps the 200-target continuation within the transport ceiling
    * when channels carry long addresses (#3123 liveness blocker). '' = not
-   * started. The reconstructed full loc drives the `loc > cursor` keyset —
-   * loc order is unique per memory, so the walk stays bounded by the
-   * existing (memoryId, loc) index. */
+   * started. The reconstructed full loc drives the `loc > cursor` keyset.
+   * EXAMINED WORK IS NOT HARD-BOUNDED (#1430): a collated text index can
+   * pass foreign/residual rows before LIMIT; only returned rows are
+   * budget-bounded. Suffix length is observational, not a guaranteed
+   * transport bound — legacy nonnumeric suffixes store verbatim. */
   c_num: string[];
   /** Channel.incarnation at freeze, per channel index — compared on EVERY
    * resume (unstarted and done channels included). A same-address

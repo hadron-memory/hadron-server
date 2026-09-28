@@ -585,10 +585,11 @@ export interface PagedScanState {
   /** Channel index → frozen span [cMin, cMax] over its targets. */
   cMin: number[];
   cMax: number[];
-  /** Channel index → keyset cursor loc ('' = not started). loc is unique per
-   * memory, so (memoryId, loc > cursor) is a bounded prefix-range walk on the
-   * existing (memoryId, loc) index — every row in the range belongs to this
-   * channel. */
+  /** Channel index → keyset cursor suffix ('' = not started). The
+   * reconstructed full loc drives the `loc > cursor` keyset. EXAMINED WORK
+   * IS NOT HARD-BOUNDED (#1430): under a collated text index the walk can
+   * pass foreign-channel and residual-rejected rows before LIMIT; only
+   * returned/decrypted rows are bounded by the request budget. */
   cCursorNum: string[];
   /** Channel index → frozen incarnation, compared on every resume (#3111). */
   cInc: number[];
