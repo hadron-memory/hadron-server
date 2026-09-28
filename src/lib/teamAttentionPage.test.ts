@@ -537,6 +537,43 @@ describe('family 13 — #3123 long-loc liveness', () => {
   });
 });
 
+describe('family 14 — review #3153', () => {
+  it('an authentic pre-C-ordering continuation answers the typed stale restart, not INVALID (#3153 finding 2)', async () => {
+    const { signPageToken } = await import('./teamAttentionPage.js');
+    await post('one');
+    // Mint a correctly-signed token WITHOUT the `o` marker — the shape every
+    // continuation had before the C-ordering switch.
+    const oldOrder: Record<string, unknown> = {
+      v: 2, kind: 'team-attention-page', op: 'poll', appId: app.id, userId: user.id, ts: Date.now(),
+      W: [worker.id], C: [channel.id], R: [], t_w: [0], t_c: [0], t_r: [0], t_mo: [0],
+      t_seen: [0], t_head: [1], t_prior: [0], c_done: '', c_num: [''], c_front: [''], c_inc: [1],
+      c_min: [0], c_max: [1], u_unread: [0], u_ment: [0], u_first: [0], u_last: [0],
+      e_emitted: '', q: [], next: 0, dg: 'x',
+    };
+    delete oldOrder.o;
+    const signed = signPageToken(oldOrder as never, process.env.TEAM_ATTENTION_TOKEN_SECRET || process.env.JWT_SECRET || '');
+    if ('tooLarge' in signed) throw new Error('unexpected tooLarge');
+    await expect(teamAttentionPage(userCtx(), app.id, { page: (signed as { token: string }).token })).rejects.toMatchObject({
+      extensions: { code: 'TEAM_ATTENTION_STALE_PAGE' },
+    });
+  });
+
+  it('a counted message followed by an own post keeps the COUNTED frontier on the counted row (#3153 finding 3)', async () => {
+    await post('counted', { mentions: ['dara'] });
+    await post('own after counted', { authorWorkerId: worker.id });
+    const first = await teamAttentionPage(userCtx(), app.id, { scanLimit: 1 });
+    expect(first.scanComplete).toBe(false);
+    // The own post is channel-eligible but no target counts it; the frontier
+    // stays on the first (counted) row. Delete THAT row → typed stale restart.
+    const decoded = JSON.parse(Buffer.from(first.nextPage!.split('.')[0], 'base64url').toString('utf-8'));
+    const frontierLoc = `chats:team:messages:${decoded.c_front[0]}`;
+    await db.node.updateMany({ where: { memoryId: memory.id, loc: frontierLoc }, data: { deletedAt: new Date() } });
+    await expect(teamAttentionPage(userCtx(), app.id, { page: first.nextPage })).rejects.toMatchObject({
+      extensions: { code: 'TEAM_ATTENTION_STALE_PAGE' },
+    });
+  });
+});
+
 describe('family 13b — legacy suffix shapes', () => {
   it('a nonnumeric message suffix pages correctly and stores verbatim', async () => {
     // Legacy shape: a message loc whose suffix after the channel prefix is

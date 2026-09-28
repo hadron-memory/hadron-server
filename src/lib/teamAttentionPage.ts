@@ -162,6 +162,14 @@ export function verifyPageToken(
   } catch {
     fail('Invalid team-attention page token.', 'INVALID_ATTENTION_PAGE');
   }
+  // A CORRECTLY SIGNED pre-C-ordering continuation (no `o` marker) is not a
+  // malformed token — it is a stale ordering the cursor must never be
+  // reinterpreted under. Answer the typed stale-page restart so the router
+  // discards only `page` and retries from its unchanged committed `since`
+  // (#3153 finding 2; Anne #3139 / Liam #3144).
+  if (value.v === 2 && value.kind === 'team-attention-page' && value.o !== 'c') {
+    fail('This scan continuation predates the current keyset ordering; poll again without page to restart from your committed watermark.', 'TEAM_ATTENTION_STALE_PAGE');
+  }
   if (
     value.v !== 2 ||
     value.kind !== 'team-attention-page' ||
@@ -169,7 +177,6 @@ export function verifyPageToken(
     typeof value.appId !== 'string' ||
     typeof value.userId !== 'string' ||
     !Array.isArray(value.W) || !Array.isArray(value.C) || !Array.isArray(value.R) ||
-    value.o !== 'c' ||
     !Array.isArray(value.c_inc) ||
     !Array.isArray(value.t_w) || !Array.isArray(value.t_c)
   ) {

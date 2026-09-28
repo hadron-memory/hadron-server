@@ -676,8 +676,8 @@ async function pagedScanStep(
     // (en_US orders ':' and ';' by locale, verified) — served by the
     // nodes_memory_id_loc_c_idx btree. EVERY returned raw row charges the
     // budget (residual-rejected included); the cursor persists from the LAST
-    // CHARGED RAW row so rejects are paid once; payload/decrypt happens only
-    // for eligible rows.
+    // CHARGED RAW row so rejects are paid once. Decryption is gated on
+    // eligibility; the data column transfers for every raw-budgeted row.
     const prefix = geometry.locPrefix;
     const upperBound = prefix.slice(0, -1) + ';';
     const lowerBound = prefix + state.cCursorNum[k];
@@ -692,6 +692,7 @@ async function pagedScanStep(
         ORDER BY n.loc COLLATE "C"
         LIMIT ${take}
       ) raw
+      ORDER BY raw.loc COLLATE "C"
     `);
 
     const list = targetsOfChannel.get(k) ?? [];
@@ -710,9 +711,11 @@ async function pagedScanStep(
       const mentions = Array.isArray(envelope.mentions)
         ? envelope.mentions.filter((v): v is string => typeof v === 'string')
         : [];
+      let anyCounted = false;
       for (const ti of list) {
         const target = targets[ti];
         if (row.seq <= target.seen || row.seq > target.head || envelope.authorWorkerId === target.workerId) continue;
+        anyCounted = true;
         state.aUnread[ti]++;
         state.aFirst[ti] = state.aFirst[ti] === 0 ? row.seq : Math.min(state.aFirst[ti], row.seq);
         const mentioned = mentionTokensByTarget[ti].some((token) => mentions.includes(token));
@@ -722,7 +725,10 @@ async function pagedScanStep(
         }
       }
       state.cCursorNum[k] = row.loc.slice(prefix.length);
-      state.cFrontNum[k] = state.cCursorNum[k];
+      // The COUNTED frontier only advances when ≥1 target actually counted
+      // this row — an own post after a counted message must not weaken the
+      // deletion check (#3153 finding 3).
+      if (anyCounted) state.cFrontNum[k] = state.cCursorNum[k];
     }
 
     // Done when fewer than `take` raw rows return — the Channel-local range

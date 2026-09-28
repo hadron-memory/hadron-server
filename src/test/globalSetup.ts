@@ -447,6 +447,9 @@ async function applyTemplateConstraints(client: Client) {
     ) STORED;
 
     CREATE INDEX IF NOT EXISTS nodes_tsv_gin ON nodes USING gin (tsv);
+    -- #1430: C-collation index for paged-attention keyset pages (mirrors the
+    -- migration and post-push.sql — all three DDL-sync sites per the review rule).
+    CREATE INDEX IF NOT EXISTS nodes_memory_id_loc_c_idx ON nodes ("memory_id", "loc" COLLATE "C");
   `);
 
 }
