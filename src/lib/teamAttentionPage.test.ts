@@ -13,7 +13,7 @@ import { cleanDb } from '../test/helpers.js';
 import { generateId } from './id.js';
 import { ensureChannelWithRoot } from './channels.js';
 import { appendChatMessage } from './chatRoot.js';
-import { getMemoryEncryptionInfo } from './nodeCrypto.js';
+import { encryptNodeFields, getMemoryEncryptionInfo } from './nodeCrypto.js';
 import { generateDataKey } from './crypto.js';
 import { sessionKeyCache } from './sessionKeyCache.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
@@ -372,5 +372,121 @@ describe('family 8 — GraphQL parity', () => {
     expect(viaGraphQL.items.filter((i: { worker: string }) => i.worker === worker.id)[0]).toMatchObject({ unread: 1 });
     const previewViaGraphQL = await resolvers.Query.teamAttentionPreviewPage({}, { appRef: app.id, page: null, limit: null, scanLimit: null }, userCtx());
     expect(previewViaGraphQL.proof).toBeTruthy();
+  });
+});
+
+describe('family 9 — consolidated review corrections (#3051/#3053/#3054)', () => {
+  it('maskSet sets bits that open a new nibble (indices 0/4/8)', async () => {
+    const { maskSet, maskGet, maskEmpty } = await import('./teamAttentionPage.js');
+    let m = maskEmpty();
+    for (const i of [0, 4, 8, 12]) m = maskSet(m, i);
+    for (const i of [0, 4, 8, 12]) expect(maskGet(m, i)).toBe(true);
+    for (const i of [1, 5, 9]) expect(maskGet(m, i)).toBe(false);
+  });
+
+  it('duplicate seq at the frozen max is fully scanned (finding 4)', async () => {
+    // Two message rows sharing seq=1 (the legacy duplicate-seq shape): the
+    // relevant mention rides the row with the LARGER id. Envelopes encrypt
+    // exactly as appendChatMessage would in this encrypted memory.
+    const memEnc = await getMemoryEncryptionInfo(db, channel.memoryId);
+    for (const [id, mentions] of [['aaa-dup', []], ['zzz-dup', ['dara']]] as const) {
+      const enc = encryptNodeFields({ content: null, data: { mentions } }, memEnc);
+      await db.node.create({
+        data: {
+          id, memoryId: channel.memoryId, loc: `chats:team:messages:${id}`,
+          name: id, nodeType: 'chat-message', seq: 1, content: 'dup',
+          data: (enc.data ?? null) as object,
+        },
+      });
+    }
+    // Raw inserts bypass appendChatMessage's watermark maintenance.
+    await db.channel.update({ where: { id: channel.id }, data: { lastSeq: 1 } });
+    const drained = await drainPages({}, { scanLimit: 1 });
+    expect(drained.items.filter((i) => i.worker === worker.id)[0]).toMatchObject({ unread: 2, unreadMentions: 1 });
+  });
+
+  it('carries the original relevance floor across pages (finding 6 / QA repro 2)', async () => {
+    await post('one');
+    await post('two');
+    const first = await drainPages({});
+    // A post-watermark self-authored message moves the head but is excluded
+    // by the author filter — nothing NEW is relevant for this worker.
+    await post('own, excluded', { authorWorkerId: worker.id });
+    const second = await drainPages({ since: first.adoptableSince }, { scanLimit: 1 });
+    expect(second.items.filter((i) => i.worker === worker.id)).toHaveLength(0);
+  });
+
+  it('a replaced register with the same worker+channel+mentionOnly stales (finding 2 / QA repro 5)', async () => {
+    for (let i = 0; i < 4; i++) await post(`m${i}`);
+    const first = await teamAttentionPage(userCtx(), app.id, { scanLimit: 2 });
+    expect(first.scanComplete).toBe(false);
+    await db.registerEntry.deleteMany({ where: { attendeeWorkerId: worker.id, channelId: channel.id } });
+    await db.registerEntry.create({
+      data: { id: generateId(), appId: app.id, channelId: channel.id, attendeeWorkerId: worker.id, role: 'BOTH' },
+    });
+    await expect(teamAttentionPage(userCtx(), app.id, { page: first.nextPage })).rejects.toMatchObject({
+      extensions: { code: 'TEAM_ATTENTION_STALE_PAGE' },
+    });
+  });
+
+  it('round-robin quantum lets a short channel finish beside a huge one (finding 7)', async () => {
+    // Second encrypted channel with its own register for the same worker.
+    const memory2 = await db.memory.create({
+      // No sharedMemoryOfAgentId: one shared app-class memory per App per agent —
+      // a second REGISTER channel lives fine in a plain org knowledge memory.
+      data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:second`, name: 'second', class: 'knowledge', visibility: 'ORGANIZATION', isEncrypted: true },
+    });
+    sessionKeyCache.set('paged-attention-2', memory2.id, generateDataKey());
+    const made2 = await ensureChannelWithRoot(db, { memoryId: memory2.id, loc: 'chats:team2', name: 'team2', createdBy: user.id });
+    await db.registerEntry.create({
+      data: { id: generateId(), appId: app.id, channelId: made2.channel.id, attendeeWorkerId: worker.id, role: 'BOTH' },
+    });
+    const enc2 = await getMemoryEncryptionInfo(db, memory2.id);
+    await appendChatMessage(db, { id: made2.rootId, memoryId: memory2.id, loc: 'chats:team2' }, enc2,
+      async ({ tx, seq, msgNum }) => tx.node.create({
+        data: { id: generateId(), memoryId: memory2.id, loc: `chats:team2:messages:${msgNum}`, name: msgNum, nodeType: 'chat-message', seq, content: 'short channel', data: { mentions: [] } },
+      }), { asChannel: true });
+    for (let i = 0; i < 9; i++) await post(`huge ${i}`);
+    // Budget 4: the huge channel may take at most half this request's rows;
+    // the short channel completes and its item ships on page 1.
+    const p1 = await teamAttentionPage(userCtx(), app.id, { scanLimit: 4 });
+    const shortItem = p1.items.find((i) => i.channel === made2.channel.id);
+    expect(shortItem).toMatchObject({ unread: 1 });
+    expect(p1.scanComplete).toBe(false);
+  });
+
+  it('the 200-target continuation fits the transport ceiling at compact IDs (size fixture)', async () => {
+    const { signPageToken } = await import('./teamAttentionPage.js');
+    const id = () => Array.from({ length: 32 }, () => '0123456789abcdef'[Math.floor(Math.random() * 16)]).join('');
+    const W = Array.from({ length: 20 }, id);
+    const C = Array.from({ length: 200 }, id);
+    const R = Array.from({ length: 200 }, id);
+    const payload = {
+      v: 2 as const, kind: 'team-attention-page' as const, op: 'poll' as const,
+      appId: id(), userId: id(), ts: Date.now(), W, C, R,
+      t_w: Array.from({ length: 200 }, (_v, i) => i % 20),
+      t_c: Array.from({ length: 200 }, (_v, i) => i),
+      t_r: Array.from({ length: 200 }, (_v, i) => i),
+      t_mo: Array.from({ length: 200 }, () => 1),
+      t_seen: Array.from({ length: 200 }, () => 2147483647),
+      t_head: Array.from({ length: 200 }, () => 2147483647),
+      t_prior: Array.from({ length: 200 }, () => 2147483647),
+      c_done: '0'.repeat(50),
+      c_seq: Array.from({ length: 200 }, () => 2147483647),
+      c_id: C.slice(),
+      c_min: Array.from({ length: 200 }, () => 0),
+      c_max: Array.from({ length: 200 }, () => 2147483647),
+      u_unread: Array.from({ length: 200 }, () => 2147483647),
+      u_ment: Array.from({ length: 200 }, () => 2147483647),
+      u_first: Array.from({ length: 200 }, () => 2147483647),
+      u_last: Array.from({ length: 200 }, () => 2147483647),
+      e_emitted: '0'.repeat(50),
+      q: Array.from({ length: 200 }, (_v, i) => i),
+      next: 0,
+      dg: 'x'.repeat(32),
+    };
+    const signed = signPageToken(payload, 'size-fixture-secret');
+    expect('tooLarge' in signed).toBe(false);
+    if (!('tooLarge' in signed)) expect(signed.token.length).toBeLessThan(65_536);
   });
 });

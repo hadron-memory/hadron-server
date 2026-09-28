@@ -60,12 +60,22 @@ export interface PageContinuation {
   W: string[];
   /** Channel ID dictionary (index → id). */
   C: string[];
+  /** Register ID dictionary (index → id) — register identity travels in the
+   * token so a deleted/recreated register with the same worker+channel+
+   * mentionOnly shape cannot masquerade as the frozen target (#3054 repro 5). */
+  R: string[];
   /** Frozen targets, parallel arrays by target index. */
   t_w: number[]; // worker index
   t_c: number[]; // channel index
+  t_r: number[]; // register index — identity, matched exactly on resume
   t_mo: number[]; // mentionOnly 0/1
   t_seen: number[]; // frozen seen (read cursor at freeze)
   t_head: number[]; // frozen channel head at freeze
+  /** Relevance floor per target: the prior `since` head this scan started
+   * from (0 when none) — carried so a resumed page keeps emitting against
+   * the ORIGINAL watermark instead of re-nudging pre-watermark backlog
+   * (#3051 finding 6 / Chip repro 2). */
+  t_prior: number[];
   /** Per-channel scan state, parallel arrays by channel index. `c_done` is a
    * hex bitset (channel index → bit), sized to the channel dictionary. */
   c_done: string;
@@ -134,7 +144,7 @@ export function verifyPageToken(
     (value.op !== 'poll' && value.op !== 'preview') ||
     typeof value.appId !== 'string' ||
     typeof value.userId !== 'string' ||
-    !Array.isArray(value.W) || !Array.isArray(value.C) ||
+    !Array.isArray(value.W) || !Array.isArray(value.C) || !Array.isArray(value.R) ||
     !Array.isArray(value.t_w) || !Array.isArray(value.t_c)
   ) {
     fail('Invalid team-attention page token.', 'INVALID_ATTENTION_PAGE');
@@ -162,12 +172,13 @@ export function maskGet(mask: string, i: number): boolean {
   return ((char - 48) & (1 << (i % 4))) !== 0;
 }
 export function maskSet(mask: string, i: number): string {
-  const pos = mask.length - 1 - Math.floor(i / 4);
+  // Pad FIRST, then set the bit at the post-padding index — computing the
+  // index before padding returned the string without setting the bit
+  // whenever the target bit opened a new nibble (review #3051 finding 3:
+  // maskSet('', 0) yielded '0', losing indices 0, 4, 8, …).
   const need = Math.floor(i / 4) + 1;
-  let m = mask.padStart(need, '0');
-  if (pos < 0) return m; // unreachable with padStart above
-  const chars = m.split('');
-  const idx = m.length - 1 - Math.floor(i / 4);
+  const chars = mask.padStart(need, '0').split('');
+  const idx = chars.length - 1 - Math.floor(i / 4);
   chars[idx] = String.fromCharCode(((chars[idx].charCodeAt(0) - 48) | (1 << (i % 4))) + 48);
   return chars.join('');
 }

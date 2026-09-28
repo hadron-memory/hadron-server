@@ -626,7 +626,9 @@ async function pagedScanStep(
 
   let spent = 0;
   let visits = 0;
-  while (spent < budget && visits < channelCount) {
+  // Guard against a pathological loop when channels keep drifting away: a
+  // full lap that only retires vanished channels still counts as visits.
+  while (spent < budget && visits < channelCount * 2) {
     visits++;
     // Advance to the next not-done channel, round-robin; stop when a full
     // lap finds only done channels.
@@ -646,12 +648,20 @@ async function pagedScanStep(
       state.cDone[k] = true;
       continue;
     }
-    const take = Math.min(budget - spent, ENCRYPTED_MESSAGE_PAGE_SIZE);
+    // Fairness quantum (#3051 finding 7): no single channel may consume the
+    // whole request budget — each active channel gets at most an equal share
+    // of the remaining budget per visit, so 200 backlogged channels each get
+    // a visit within ceil(active / floor(budget / active)) rounds (≤4 pulls
+    // at the contract's 50/200 numbers), instead of the first channel eating
+    // all 50 rows and the last waiting 200 pulls.
+    const activeChannels = state.cDone.filter((done) => !done).length;
+    const share = Math.max(1, Math.floor((budget - spent) / Math.max(1, activeChannels)));
+    const take = Math.min(budget - spent, share, ENCRYPTED_MESSAGE_PAGE_SIZE);
     const rows = await db.$queryRaw<EncryptedCandidateRow[]>(Prisma.sql`
       SELECT n.seq::int AS seq, n.loc, n.data, n.id, n.memory_id
       FROM nodes n
       WHERE n.memory_id = ${geometry.memoryId}
-        AND n.loc LIKE ${geometry.locPrefix + '%'} ESCAPE '\\'
+        AND n.loc LIKE ${escapePrismaLikePattern(geometry.locPrefix) + '%'} ESCAPE '\\'
         AND n.node_type = 'chat-message'
         AND n.deleted_at IS NULL
         AND n.seq > ${state.cMin[k]}
@@ -683,10 +693,12 @@ async function pagedScanStep(
       state.cCursorId[k] = row.id ?? row.loc;
     }
 
-    // Done when the frozen span is exhausted: fewer rows than the ask, or the
-    // cursor reached/passed the frozen max. The LIMIT+1 probe distinguishes
-    // "page full" (more to scan) from "span ended" without extra queries.
-    if (rows.length <= take || state.cCursorSeq[k] >= state.cMax[k]) {
+    // Done ONLY when the frontier probe says no next row exists. A seq >=
+    // cMax shortcut marked the channel done while same-seq rows with larger
+    // ids remained — the legacy duplicate-seq shape v1 explicitly supports
+    // (#3051 finding 4); the LIMIT+1 probe alone distinguishes "page full"
+    // from "span ended" without extra queries.
+    if (rows.length <= take) {
       state.cDone[k] = true;
       // Completion-visit order, worker-id order within the channel.
       list.sort((a, b) => targets[a].workerId.localeCompare(targets[b].workerId));
@@ -742,9 +754,12 @@ function stateToContinuation(
   targets: Target[],
   channelIds: string[],
   state: PagedScanState,
+  priorFloors: number[],
 ): PageContinuation {
   const workerIds = [...new Set(targets.map((t) => t.workerId))].sort();
   const workerIndex = new Map(workerIds.map((id, i) => [id, i]));
+  const registerIds = [...new Set(targets.map((t) => t.registerId))].sort();
+  const registerIndex = new Map(registerIds.map((id, i) => [id, i]));
   const payload: PageContinuation = {
     v: 2,
     kind: 'team-attention-page',
@@ -754,11 +769,14 @@ function stateToContinuation(
     ts: Date.now(),
     W: workerIds,
     C: channelIds,
+    R: registerIds,
     t_w: targets.map((t) => workerIndex.get(t.workerId)!),
     t_c: targets.map((t) => channelIds.indexOf(t.channelId)),
+    t_r: targets.map((t) => registerIndex.get(t.registerId)!),
     t_mo: targets.map((t) => (t.mentionOnly ? 1 : 0)),
     t_seen: targets.map((t) => t.seen),
     t_head: targets.map((t) => t.head),
+    t_prior: priorFloors,
     c_done: channelIds.reduce((m, _id, k) => (state.cDone[k] ? maskSet(m, k) : m), maskEmpty()),
     c_seq: state.cCursorSeq,
     c_id: state.cCursorId,
@@ -833,6 +851,10 @@ async function runPagedAttention(
 
   let state: PagedScanState;
   let priorHeads: Map<string, number> | null = null;
+  // Per-target relevance floor (the ORIGINAL since head this scan started
+  // from, 0 when none) — frozen into the continuation so a resumed page
+  // keeps emitting against the original watermark (#3051 finding 6).
+  let priorFloors: number[] = [];
   // Frozen per-target spans — the FROZEN head (not the live one) is what the
   // final preview proof and the emitted lastSeq describe; live heads may sit
   // above them by the time the last page is pulled.
@@ -851,6 +873,7 @@ async function runPagedAttention(
     state = continuationToState(decoded);
     frozenSeen = decoded.t_seen;
     frozenHead = decoded.t_head;
+    priorFloors = decoded.t_prior;
     // Rehydrate by REBUILDING the working target list FROM THE FROZEN
     // ARRAYS (#3046 finding 2): the frozen set and order drive scan,
     // emission, snapshot and continuation for the rest of this request;
@@ -871,9 +894,11 @@ async function runPagedAttention(
     for (let i = 0; i < decoded.t_w.length; i++) {
       const workerId = decoded.W[decoded.t_w[i]];
       const channelId = decoded.C[decoded.t_c[i]];
+      const registerId = decoded.R[decoded.t_r[i]];
       const match = liveAtFreeze.find(
         (t) => t.workerId === workerId
           && t.channelId === channelId
+          && t.registerId === registerId
           && decoded.t_mo[i] === (t.mentionOnly ? 1 : 0)
           && !claimed.has(t)
           && decoded.t_head[i] <= t.head,
@@ -937,6 +962,10 @@ async function runPagedAttention(
     }
     frozenSeen = targets.map((t) => t.seen);
     frozenHead = targets.map((t) => t.head);
+    priorFloors = targets.map((target) => {
+      const key = `${target.workerId}:${target.channelId}:${target.registerId}:${target.mentionOnly}`;
+      return priorHeads?.get(key) ?? 0;
+    });
     state = {
       cMin: channelIds.map((id) => Math.min(...targets.filter((t) => t.channelId === id).map((t) => t.seen))),
       cMax: channelIds.map((id) => Math.max(...targets.filter((t) => t.channelId === id).map((t) => t.head))),
@@ -1003,8 +1032,7 @@ async function runPagedAttention(
     state.pending = state.pending.slice(1);
     state.emitted[i] = true;
     const target = targets[i];
-    const key = `${target.workerId}:${target.channelId}:${target.registerId}:${target.mentionOnly}`;
-    const priorHead = priorHeads?.get(key) ?? 0;
+    const priorHead = priorFloors[i] ?? 0;
     if (op === 'poll' && state.aLast[i] <= priorHead) continue; // nothing relevant since the watermark
     items.push({
       worker: target.workerId,
@@ -1048,7 +1076,16 @@ async function runPagedAttention(
     }
     return { items, scanComplete: true, nextPage: null, adoptableSince: sign(snapshot(app.id, ctx.userId!, targets)), proof: null, proofExpiresAt: null, frozenSeen, frozenHead };
   }
-  const payload = stateToContinuation(op, app.id, ctx.userId!, targets, channelIds, state);
+  // #3053 compaction: delivered targets' accumulators are final and already
+  // emitted — zero them in the continuation so token size decreases
+  // monotonically as results deliver (the emitted mask prevents re-emission
+  // and their channels are done, so nothing reads these values again).
+  for (let i = 0; i < state.emitted.length; i++) {
+    if (state.emitted[i]) {
+      state.aUnread[i] = 0; state.aMent[i] = 0; state.aFirst[i] = 0; state.aLast[i] = 0;
+    }
+  }
+  const payload = stateToContinuation(op, app.id, ctx.userId!, targets, channelIds, state, priorFloors);
   payload.t_seen = frozenSeen;
   payload.t_head = frozenHead;
   const signed = signPageToken(payload, secret);
