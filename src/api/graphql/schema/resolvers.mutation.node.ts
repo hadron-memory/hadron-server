@@ -2145,6 +2145,19 @@ export const nodeMutations = {
         }
       }
 
+      // Spec 049 S4: a node under a Channel's address is SKIPPED, never
+      // rewritten — the bulk surface reports rather than failing the batch.
+      // One Channel-table read per memory, not per node (Copilot on PR #1165).
+      const protectedByMemory = new Map<string, ProtectedLoc[]>();
+      const isProtectedLoc = async (memoryId: string, loc: string) => {
+        let locs = protectedByMemory.get(memoryId);
+        if (!locs) {
+          locs = await protectedLocsIn(ctx.db, memoryId);
+          protectedByMemory.set(memoryId, locs);
+        }
+        return locs.some((p) => protectedLocCovers(p, loc));
+      };
+
       // #1201 — GOVERNED nodes are excluded from a bulk search-replace
       // (@codex P1, PR #1203). This path writes with `tx.node.update` and never
       // reached the gate, so `hadron_replace_text` could rewrite a review node
@@ -2155,11 +2168,26 @@ export const nodeMutations = {
       // SKIPPED, not refused, matching how `partitionProtected` treats a
       // Channel address on the bulk paths: failing a whole batch on one
       // governed row makes the tool unusable on any memory that contains one,
-      // and a skip writes nothing, which is the safe direction. They simply do
-      // not appear in `nodesScanned`.
-      const rawNodes = [...nodeById.values()].filter(
-        (r) => governedKindsOf({ role: r.role, isRunnable: r.isRunnable }).length === 0,
-      );
+      // and a skip writes nothing, which is the safe direction.
+      //
+      // #1294 reporting: classify every UNIQUE, AUTHORIZED selected row once,
+      // before scanning text. Precedence is deterministic: governance first,
+      // then Channel address protection. A node carrying multiple governed
+      // signals still contributes one governed skip. Aggregate counts avoid
+      // disclosing node metadata beyond what this mutation already returns.
+      const skipCounts = { governed: 0, protectedAddress: 0 };
+      const scannedNodes: NodeRow[] = [];
+      for (const row of nodeById.values()) {
+        if (governedKindsOf({ role: row.role, isRunnable: row.isRunnable }).length > 0) {
+          skipCounts.governed += 1;
+          continue;
+        }
+        if (await isProtectedLoc(row.memoryId, row.loc)) {
+          skipCounts.protectedAddress += 1;
+          continue;
+        }
+        scannedNodes.push(row);
+      }
 
       // ── Compute pass: replace on PLAINTEXT, validate, plan writes ──
       // All validation (empty name, abstract cap, SESSION_EXPIRED) happens here
@@ -2187,21 +2215,7 @@ export const nodeMutations = {
       }
       const plans: Plan[] = [];
 
-      // Spec 049 S4: a node under a Channel's address is SKIPPED, never
-      // rewritten — the bulk surface reports rather than failing the batch.
-      // One Channel-table read per memory, not per node (Copilot on PR #1165).
-      const protectedByMemory = new Map<string, ProtectedLoc[]>();
-      const isProtectedLoc = async (memoryId: string, loc: string) => {
-        let locs = protectedByMemory.get(memoryId);
-        if (!locs) {
-          locs = await protectedLocsIn(ctx.db, memoryId);
-          protectedByMemory.set(memoryId, locs);
-        }
-        return locs.some((p) => protectedLocCovers(p, loc));
-      };
-
-      for (const raw of rawNodes) {
-        if (await isProtectedLoc(raw.memoryId, raw.loc)) continue;
+      for (const raw of scannedNodes) {
         const memEnc = await getMemEnc(raw.memoryId);
         if (memEnc.isEncrypted && !sessionKeyCache.getByMemoryId(memEnc.id)) {
           throw new GraphQLError(
@@ -2312,7 +2326,10 @@ export const nodeMutations = {
       }
 
       const buildResult = () => ({
-        nodesScanned: rawNodes.length,
+        nodesSelected: nodeById.size,
+        nodesScanned: scannedNodes.length,
+        nodesSkipped: skipCounts.governed + skipCounts.protectedAddress,
+        skipCounts,
         nodesChanged: plans.length,
         totalReplacements: plans.reduce((a, p) => a + p.total, 0),
         dryRun,
