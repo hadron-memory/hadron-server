@@ -397,7 +397,7 @@ describe('family 9 — consolidated review corrections (#3051/#3053/#3054)', () 
       await db.node.create({
         data: {
           id, memoryId: channel.memoryId, loc: `chats:team:messages:${id}`,
-          name: id, nodeType: 'chat-message', seq: 1, content: 'dup',
+          name: id, nodeType: 'chat-message', seq: 1, content: 'dup', messageChannelId: channel.id,
           data: (enc.data ?? null) as object,
         },
       });
@@ -591,7 +591,7 @@ describe('family 16 — Codex padding-boundary round', () => {
     const enc1000 = encryptNodeFields({ content: null, data: { mentions: [] } }, memEnc);
     await db.node.create({
       data: { id: 'pad999-post', memoryId: channel.memoryId, loc: 'chats:team:messages:1000',
-        name: '1000', nodeType: 'chat-message', seq: 4, content: 'post', data: (enc1000.data ?? null) as object },
+        name: '1000', nodeType: 'chat-message', seq: 4, messageChannelId: channel.id, content: 'post', data: (enc1000.data ?? null) as object },
     });
     // Continue the original scan: it must complete over the frozen 3-message
     // range despite the post-freeze row sitting inside the prefix range.
@@ -631,7 +631,7 @@ describe('family 17 — mixed-Channel isolation (#3216)', () => {
     expect(drained.items.some((i) => i.channel === foreignMade.channel.id)).toBe(false);
   });
 
-  it('c_ful missing or empty array is INVALID (#3220 codec)', async () => {
+  it('c_seq/c_loc missing is INVALID (#3220 codec)', async () => {
     const { signPageToken } = await import('./teamAttentionPage.js');
     await post('one');
     await post('two');
