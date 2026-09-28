@@ -1243,6 +1243,11 @@ model Node {
   // Postgres seek to the memory's rows AND return them loc-ordered without a
   // separate sort or a full loc-index scan across other memories.
   @@index([memoryId, loc])
+  /// #1384 paged attention: the keyset order for channel-message scans.
+  /// With memoryId equality this index yields rows in (seq, id) order, so a
+  /// (seq, id) > cursor keyset page reads ~take rows instead of sorting the
+  /// whole Channel backlog per page (Codex review on #1428).
+  @@index([memoryId, seq, id])
   // #725 — "list all nodes of collection X in this memory" (the objectType
   // facet). objectType is NULL for most nodes; the composite seeks a memory's
   // typed rows directly.
