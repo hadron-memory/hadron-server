@@ -3299,6 +3299,11 @@ export const typeDefs = `#graphql
 
   type TeamChatMessagesPage {
     items: [TeamChatMessage!]!
+    """
+    Number of canonical messages matching this read's sinceSeq/beforeSeq cursor
+    range and mentionsRef filter, before limit/offset. It is not the total
+    number of messages in the chat or Channel when a cursor/filter is present.
+    """
     total: Int!
   }
 
@@ -6663,6 +6668,8 @@ export const typeDefs = `#graphql
     messages with seq STRICTLY LESS than it are considered, and the NEWEST
     limit of those come back -- the page immediately before the cursor, still
     ascending. The two compose, so passing both reads a bounded slice.
+    TeamChatMessagesPage.total counts that cursor range and the mentionsRef
+    filter before paging, not the whole team-chat history.
     offset is IGNORED when beforeSeq is given: a cursor exists precisely
     because a position is unstable while workers keep posting, and honouring
     both would put that race back. mentionsRef filters to messages whose stored envelope mentions the
@@ -6696,6 +6703,8 @@ export const typeDefs = `#graphql
     appRef → App.defaultChannel convenience over this. Authorization is the
     host App's team-chat read gate; a Channel you may not read — or one that
     does not exist — is CHANNEL_NOT_FOUND, identically.
+    TeamChatMessagesPage.total has the same cursor- and mention-filtered
+    meaning as for teamChatMessages, before paging.
     """
     channelMessages(
       channelRef: ID!
