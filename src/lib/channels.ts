@@ -156,6 +156,21 @@ export async function ensureChannelRow(
       if ((e as { code?: string }).code !== 'P2002') throw e;
       row = await db.channel.findUniqueOrThrow({ where: { chatRootNodeId: args.rootId } });
     }
+    // #1430: stamp membership for any live chat-message children this Channel
+    // adopted (pre-Channel rows under the messages prefix — the one-time
+    // migration cannot cover Channels created after it). Centralized here so
+    // both ensureChannelWithRoot and jobs/backfillChannels are covered.
+    const prefix = `${args.loc}:messages:`;
+    await db.node.updateMany({
+      where: {
+        memoryId: args.memoryId,
+        loc: { startsWith: prefix },
+        nodeType: 'chat-message',
+        deletedAt: null,
+        messageChannelId: null,
+      },
+      data: { messageChannelId: row.id },
+    });
   } else if (row.deletedAt || args.resetForReuse) {
     // The root was restored. Its allocator counter stays on the root so the
     // next message never reuses an old seq, but the Channel watermark describes

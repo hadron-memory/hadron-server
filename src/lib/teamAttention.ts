@@ -592,13 +592,16 @@ export interface PagedScanState {
    * IS NOT HARD-BOUNDED (#1430): under a collated text index the walk can
    * pass foreign-channel and residual-rejected rows before LIMIT; only
    * returned/decrypted rows are bounded by the request budget. */
-  cCursorNum: string[];
+  /** Seq-first keyset cursor per channel: (seq, locSuffix). seq -1 = not
+   * started. The scan walks (message_channel_id, seq, loc) on the partial
+   * C-collation index — the seq range IS the frozen bound (post-freeze
+   * rows have seq > cMax and cannot enter the range; no separate
+   * frozen-upper-loc lookup needed). */
+  cCursorSeq: number[];
+  cCursorLoc: string[];
   /** Last COUNTED-message suffix ('' until one counted) — the stale-frontier
    * check row, independent of the raw cursor (#1430 decoupling). */
   cFrontNum: string[];
-  /** The actual LOC of the last row within the frozen seq span — a FIXED
-   * upper bound that does not grow under writes (#1428 liveness). */
-  cFrozenUpperLoc: string[];
   /** Channel index → frozen incarnation, compared on every resume (#3111). */
   cInc: number[];
   cDone: boolean[];
@@ -626,7 +629,7 @@ async function pagedScanStep(
   /** Channel index → live geometry rehydrated this pull; plaintext channels
    * aggregate in bounded seq windows (row-linear SQL work would otherwise
    * escape the request budget — Codex P1 on #1428). */
-  channelGeometry: Map<number, { memoryId: string; locPrefix: string; encrypted: boolean }>,
+  channelGeometry: Map<number, { memoryId: string; locPrefix: string; encrypted: boolean; channelId: string }>,
   mentionTokensByTarget: string[][],
   state: PagedScanState,
   budget: number,
@@ -658,12 +661,10 @@ async function pagedScanStep(
 
     const geometry = channelGeometry.get(k);
     if (!geometry) {
-      // Channel vanished from the live scope between pulls — treat as drift;
-      // the caller's boundary/digest checks own the typed refusal, so here we
-      // simply stop consuming budget on it.
       state.cDone[k] = true;
       continue;
     }
+    void geometry; // memoryId/locPrefix retained for decrypt + cursor slicing
     // Fairness quantum (#3051 finding 7): no single channel may consume the
     // whole request budget — each active channel gets at most an equal share
     // of the remaining budget per visit, so 200 backlogged channels each get
@@ -686,31 +687,26 @@ async function pagedScanStep(
     // index key, so Postgres would walk non-qualifying rows unboundedly).
     // Post-freeze starvation is prevented by the POST-SPAN-done rule below.
     const prefix = geometry.locPrefix;
-    // The frozen upper loc (the actual last in-span row's loc at freeze) is
-    // a FIXED scan boundary — unlike the prefix successor, it does not grow
-    // under writes, so sustained traffic cannot prevent completion (the
-    // liveness failure Chip reproduced at 032a5ade). INCLUSIVE: that row is
-    // in the span. Post-freeze rows sorting within [P, frozenUpper] are
-    // fetched, seq-rejected, charged, cursor-advanced past. Empty (no frozen
-    // rows) falls back to the prefix successor (nothing to scan anyway).
-    const frozenUpper = state.cFrozenUpperLoc[k];
-    const upperSql = frozenUpper
-      ? Prisma.sql`AND n.loc COLLATE "C" <= ${frozenUpper} COLLATE "C"`
-      : Prisma.sql`AND n.loc COLLATE "C" < ${prefix.slice(0, -1) + ';'} COLLATE "C"`;
-    const lowerBound = prefix + state.cCursorNum[k];
+    // #1430 seq-first scan on the partial (message_channel_id, seq, loc C)
+    // index. The frozen seq range IS the bound: post-freeze rows (seq > cMax)
+    // cannot enter the index range, so sustained traffic cannot prevent
+    // completion. The (seq, loc) keyset handles duplicate seqs; loc order
+    // inversions (999/1000) are irrelevant because seq leads. No freeze
+    // lookup, no c_ful — the access path itself is the frozen bound.
+    const cursorLoc = state.cCursorLoc[k] ? prefix + state.cCursorLoc[k] : '';
     const rows = await db.$queryRaw<EncryptedCandidateRow[]>(Prisma.sql`
       SELECT seq::int AS seq, loc, data, id, memory_id, node_type, deleted_at
       FROM (
         SELECT n.seq, n.loc, n.data, n.id, n.memory_id, n.node_type, n.deleted_at
         FROM nodes n
-        WHERE n.memory_id = ${geometry.memoryId}
-          AND n.loc COLLATE "C" >= ${prefix} COLLATE "C"
-          AND n.loc COLLATE "C" > ${lowerBound} COLLATE "C"
-          ${upperSql}
-        ORDER BY n.loc COLLATE "C"
+        WHERE n.message_channel_id = ${geometry.channelId}
+          AND n.seq > ${state.cMin[k]}
+          AND n.seq <= ${state.cMax[k]}
+          AND (${state.cCursorSeq[k]} = -1 OR (n.seq, n.loc COLLATE "C") > (${state.cCursorSeq[k]}, ${cursorLoc} COLLATE "C"))
+        ORDER BY n.seq, n.loc COLLATE "C"
         LIMIT ${take}
       ) raw
-      ORDER BY raw.loc COLLATE "C"
+      ORDER BY raw.seq, raw.loc COLLATE "C"
     `);
 
     const list = targetsOfChannel.get(k) ?? [];
@@ -720,7 +716,8 @@ async function pagedScanStep(
       // past rejected rows too (they are paid once across the scan).
       if (row.node_type !== 'chat-message' || row.deleted_at != null
         || row.seq <= state.cMin[k] || row.seq > state.cMax[k]) {
-        state.cCursorNum[k] = row.loc.slice(prefix.length);
+        state.cCursorSeq[k] = row.seq;
+        state.cCursorLoc[k] = row.loc.slice(prefix.length);
         continue;
       }
       const envelope = geometry.encrypted
@@ -742,11 +739,11 @@ async function pagedScanStep(
           state.aLast[ti] = Math.max(state.aLast[ti], row.seq);
         }
       }
-      state.cCursorNum[k] = row.loc.slice(prefix.length);
+      state.cCursorLoc[k] = row.loc.slice(prefix.length);
       // The COUNTED frontier only advances when ≥1 target actually counted
       // this row — an own post after a counted message must not weaken the
       // deletion check (#3153 finding 3).
-      if (anyCounted) state.cFrontNum[k] = state.cCursorNum[k];
+      if (anyCounted) state.cFrontNum[k] = state.cCursorLoc[k];
     }
 
     // Done when the frozen loc range is exhausted (fewer than `take` raw
@@ -834,9 +831,9 @@ function stateToContinuation(
     t_head: targets.map((t) => t.head),
     t_prior: priorFloors,
     c_done: channelIds.reduce((m, _id, k) => (state.cDone[k] ? maskSet(m, k) : m), maskEmpty()),
-    c_num: state.cCursorNum,
+    c_seq: state.cCursorSeq,
+    c_loc: state.cCursorLoc,
     c_front: state.cFrontNum,
-    c_ful: state.cFrozenUpperLoc,
     c_inc: channelIncarnations,
     c_min: state.cMin,
     c_max: state.cMax,
@@ -858,9 +855,9 @@ function continuationToState(page: PageContinuation): PagedScanState {
   const state: PagedScanState = {
     cMin: page.c_min,
     cMax: page.c_max,
-    cCursorNum: page.c_num,
+    cCursorSeq: page.c_seq,
+    cCursorLoc: page.c_loc,
     cFrontNum: page.c_front,
-    cFrozenUpperLoc: page.c_ful ?? [],
     cInc: page.c_inc,
     cDone: Array.from({ length: channelCount }, (_v, k) => maskGet(page.c_done, k)),
     aUnread: page.u_unread,
@@ -1062,53 +1059,9 @@ async function runPagedAttention(
     state = {
       cMin: channelIds.map((id) => Math.min(...targets.filter((t) => t.channelId === id).map((t) => t.seen))),
       cMax: channelIds.map((id) => Math.max(...targets.filter((t) => t.channelId === id).map((t) => t.head))),
-      cCursorNum: channelIds.map(() => ''),
+      cCursorSeq: channelIds.map(() => -1),
+      cCursorLoc: channelIds.map(() => ''),
       cFrontNum: channelIds.map(() => ''),
-      // HYBRID frozen upper bound (#3231): the COMPUTED loc handles the
-      // well-formed case (appendChatMessage: msgNum ≡ seq, padStart 3) with
-      // zero DB cost. A single bounded FORWARD query then widens it if any
-      // frozen row (seq ≤ head) has a loc BEYOND the computed bound — the
-      // legacy-shape fallback (duplicate-seq locs, nonnumeric suffixes,
-      // 999/1000 padding inversions). The widen query is ASC-forward from
-      // the computed bound, NOT the backward DESC walk that examined 9,900
-      // post-freeze rows — it examines at most the post-freeze rows between
-      // the computed bound and the first frozen row beyond it (or none when
-      // the computed bound is correct, the well-formed case).
-      cFrozenUpperLoc: await Promise.all(channelIds.map(async (id) => {
-        const sample = targets.find((t) => t.channelId === id);
-        if (!sample) return '';
-        const computed = `${sample.channelLoc}:messages:${String(sample.head).padStart(3, '0')}`;
-        const fulPrefix = `${sample.channelLoc}:messages:`;
-        const fulUpper = fulPrefix.slice(0, -1) + ';';
-        // Is there any frozen row (seq ≤ head) whose loc is BEYOND the
-        // computed bound? If so, take its loc as the wider bound.
-        const wider = await ctx.db.$queryRaw<Array<{ loc: string }>>(Prisma.sql`
-          SELECT loc FROM nodes
-          WHERE memory_id = ${sample.memoryId}
-            AND loc COLLATE "C" > ${computed} COLLATE "C"
-            AND loc COLLATE "C" < ${fulUpper} COLLATE "C"
-            AND seq <= ${sample.head}
-            AND deleted_at IS NULL
-          ORDER BY loc COLLATE "C" ASC
-          LIMIT 1
-        `);
-        // If a wider frozen row exists, use the LAST such row's loc (max-loc
-        // among frozen rows beyond the computed bound).
-        if (wider.length > 0) {
-          const maxWider = await ctx.db.$queryRaw<Array<{ loc: string }>>(Prisma.sql`
-            SELECT loc FROM nodes
-            WHERE memory_id = ${sample.memoryId}
-              AND loc COLLATE "C" > ${computed} COLLATE "C"
-              AND loc COLLATE "C" < ${fulUpper} COLLATE "C"
-              AND seq <= ${sample.head}
-              AND deleted_at IS NULL
-            ORDER BY loc COLLATE "C" DESC
-            LIMIT 1
-          `);
-          return maxWider[0]?.loc ?? computed;
-        }
-        return computed;
-      })),
       cInc: channelIds.map((id) => liveIncarnations.get(id) ?? 0),
       cDone: channelIds.map(() => false),
       aUnread: targets.map(() => 0),
@@ -1132,7 +1085,7 @@ async function runPagedAttention(
   const encryptedMemoryIds = new Set(memories.filter((m) => m.isEncrypted).map((m) => m.id));
 
   // Encrypted channels: one bounded round-robin step.
-  const channelGeometry = new Map<number, { memoryId: string; locPrefix: string; encrypted: boolean }>();
+  const channelGeometry = new Map<number, { memoryId: string; locPrefix: string; encrypted: boolean; channelId: string }>();
   for (let k = 0; k < channelIds.length; k++) {
     const target = targets.find((t) => t.channelId === channelIds[k]);
     if (target) {
@@ -1140,6 +1093,7 @@ async function runPagedAttention(
         memoryId: target.memoryId,
         locPrefix: `${target.channelLoc}:messages:`,
         encrypted: encryptedMemoryIds.has(target.memoryId),
+        channelId: channelIds[k],
       });
     }
   }

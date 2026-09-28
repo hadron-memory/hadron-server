@@ -93,15 +93,15 @@ export interface PageContinuation {
    * pass foreign/residual rows before LIMIT; only returned rows are
    * budget-bounded. Suffix length is observational, not a guaranteed
    * transport bound — legacy nonnumeric suffixes store verbatim. */
-  c_num: string[];
+  /** Seq-first keyset cursor per channel: the last consumed row's seq. */
+  c_seq: number[];
+  /** Seq-first keyset cursor per channel: the last consumed row's loc suffix
+   * (the tiebreak in the (seq, loc) keyset for duplicate-seq rows). */
+  c_loc: string[];
   /** Last COUNTED-message suffix per channel (empty until one was counted) —
-   * the stale-frontier check row. Independent of c_num: the raw cursor may
-   * sit on a residual-rejected row, which would make an undeleted-message
-   * check false (#1430 decoupling). */
+   * the stale-frontier check row. Independent of the raw cursor: the raw
+   * cursor may sit on a residual-rejected row (#1430 decoupling). */
   c_front: string[];
-  /** The actual LOC of the last row within the frozen seq span, per channel —
-   * the scan's fixed inclusive upper bound (#1428 liveness). */
-  c_ful: string[];
   /** Channel.incarnation at freeze, per channel index — compared on EVERY
    * resume (unstarted and done channels included). A same-address
    * deleteChannel + ensureChannelWithRoot reuses the Channel/register IDs and
@@ -176,7 +176,7 @@ export function verifyPageToken(
   // signed payload missing arrays or referencing absent registers is
   // malformed, not an authentic old-order token (#3170/#3171).
   const targetArrays = ['t_w', 't_c', 't_r', 't_mo', 't_seen', 't_head', 't_prior', 'u_unread', 'u_ment', 'u_first', 'u_last'] as const;
-  const channelArrays = ['c_inc', 'c_min', 'c_max', 'c_num', 'c_ful'] as const;
+  const channelArrays = ['c_inc', 'c_min', 'c_max', 'c_loc', 'c_front'] as const;
   const arraysValid =
     Array.isArray(value.W) && Array.isArray(value.C) && Array.isArray(value.R) &&
     channelArrays.every((key) => Array.isArray((value as Record<string, unknown>)[key])) &&
