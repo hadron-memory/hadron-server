@@ -3458,10 +3458,12 @@ export interface NodeInput {
   loc: string;
   name: string;
   alias?: string;
-  description?: string;
+  /** Nullable on the wire (CreateNodeInput/UpdateNodeInput `description: String`); `null` clears. */
+  description?: string | null;
   /** Paragraph-length summary. Spec 031. Optional; `null` clears, omitted preserves. */
   abstract?: string | null;
-  content?: string;
+  /** Nullable on the wire (`content: String`); `null` clears. */
+  content?: string | null;
   /**
    * MIME type of `content` (#476, spec cor:cnv:010:01). 'text/markdown'
    * (default) stores as-is; 'text/html' converts to Markdown via

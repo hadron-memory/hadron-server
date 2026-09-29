@@ -39,7 +39,14 @@ export const specCorpusMutations = {
     const effects: Array<() => void> = [];
     const reserved = await ctx.db.$transaction(async (tx) => {
       const node = await writeNodeCore(
-        { memoryId, loc, name: name?.trim() || loc, role: 'spec', nodeType: 'info' },
+        {
+          memoryId, loc, name: name?.trim() || loc, role: 'spec', nodeType: 'info',
+          // (@codex P2, PR #1452) Explicit nulls, not omissions: a create over a
+          // soft-deleted node at this loc revives that row and keeps every field
+          // the input omits, so a deleted spec's text would reappear inside a
+          // "placeholder" that claims to have none.
+          content: null, abstract: null, description: null,
+        },
         withoutRequestCaches(ctx, tx),
         'create',
         {

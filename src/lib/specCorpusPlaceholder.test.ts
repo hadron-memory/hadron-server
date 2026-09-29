@@ -227,3 +227,18 @@ describe('every content write fills a placeholder (@codex P2 on #1452)', () => {
     expect(await row(draft.id, 'pas:130:01')).toMatchObject({ isPlaceholder: false, content: 'Already written.' });
   });
 });
+
+describe('reserving over a deleted spec (@codex P2 on #1452)', () => {
+  it('does not revive the deleted spec\'s text inside the placeholder', async () => {
+    const old = await resolvers.Mutation.createSpecNode(null, {
+      input: { memoryId: draft.id, loc: 'pas:140:01', name: 'Old', role: 'spec', nodeType: 'info',
+        content: 'Deleted spec text.', abstract: 'Deleted abstract.', description: 'Deleted headline.' },
+    } as never, as(admin.id));
+    await resolvers.Mutation.deleteNode(null, { nodeRef: old.id }, as(admin.id));
+
+    await reserve(draft.id, 'pas:140:01');
+    expect(await row(draft.id, 'pas:140:01')).toMatchObject({
+      isPlaceholder: true, content: null, abstract: null, description: null,
+    });
+  });
+});
