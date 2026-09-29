@@ -4,7 +4,7 @@
 // https://github.com/hadron-memory/hadron-server/issues/1447#issuecomment-5895948862 §4.
 import { GraphQLError } from 'graphql';
 import type { Context } from './resolvers.js';
-import { nodeMutations, writeNodeCore } from './resolvers.mutation.node.js';
+import { nodeMoveOps, writeNodeCore } from './resolvers.mutation.node.js';
 import { concealUnreadableDenial, isMemoryReadableCached, requireMemoryWriteAccess, withoutRequestCaches } from './resolvers.helpers.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { acquireLockSet, ancestorLocs } from '../../../lib/nodeSubtreeLock.js';
@@ -534,22 +534,15 @@ export const specCorpusRenumberMutations = {
       // request moved since the scan refuses instead of being moved from
       // wherever it now is. In a draft the old address leaves no alias, so a
       // second concurrent renumber of the same spec fails cleanly too.
-      const unrelatedUnderTo = new Set(
-        nodes
-          .filter((n) => (n.loc === toLoc || n.loc.startsWith(`${toLoc}:`)) && !movingNodes.some((m) => m.id === n.id))
-          .map((n) => n.id),
-      );
-      await nodeMutations.moveNode(
-        null,
-        { sourceRef: `hrn:node:${corpus.urn}:${fromLoc}`, targetUrn: `hrn:node:${corpus.urn}:${toLoc}` },
-        ctx,
-      );
+      const { relocated } = await nodeMoveOps.moveWithResult(ctx, {
+        sourceRef: `hrn:node:${corpus.urn}:${fromLoc}`,
+        targetUrn: `hrn:node:${corpus.urn}:${toLoc}`,
+      });
       nodes = await loadCorpusNodes(ctx.db, corpus.id);
-      // Report what actually moved (the mover re-reads the subtree under lock,
-      // so it can differ from the plan), mapped back through the same prefix.
-      moved = nodes
-        .filter((n) => (n.loc === toLoc || n.loc.startsWith(`${toLoc}:`)) && !unrelatedUnderTo.has(n.id))
-        .map((n) => ({ fromLoc: `${fromLoc}${n.loc.slice(toLoc.length)}`, toLoc: n.loc }))
+      // (@codex P2, #1453) Report exactly what the atomic mover relocated,
+      // with the loc each node left, not a reconstruction from a later read.
+      moved = relocated
+        .map((r) => ({ fromLoc: r.previousLoc, toLoc: r.loc }))
         .sort((a, b) => a.fromLoc.localeCompare(b.fromLoc));
     }
 

@@ -6,7 +6,7 @@ import { cleanDb } from '../test/helpers.js';
 import { generateId } from './id.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import { specCorpusRenumberMutations } from '../api/graphql/schema/resolvers.specCorpus.js';
-import { nodeMutations } from '../api/graphql/schema/resolvers.mutation.node.js';
+import { nodeMoveOps } from '../api/graphql/schema/resolvers.mutation.node.js';
 
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -229,12 +229,12 @@ describe('former URNs use live-address precedence (@codex P2 on #1453)', () => {
 describe('renumber moves by address, atomically (@codex P2 on #1453)', () => {
   it('refuses, and rewrites nothing, when the spec was moved after the scan', async () => {
     const before = await content('pas:020');
-    const spy = vi.spyOn(nodeMutations, 'moveNode').mockImplementationOnce(async (...args) => {
+    const spy = vi.spyOn(nodeMoveOps, 'moveWithResult').mockImplementationOnce(async (...args) => {
       // A concurrent request moves the spec away between the scan and the move.
       await db.node.update({ where: { id: feature.id }, data: { loc: 'pas:777' } });
       await db.node.update({ where: { id: rule.id }, data: { loc: 'pas:777:01' } });
       spy.mockRestore();
-      return nodeMutations.moveNode(...args);
+      return nodeMoveOps.moveWithResult(...args);
     });
     expect(await codeOf(specCorpusRenumberMutations.renumberSpec(null, { memoryRef: draft.id, fromLoc: 'pas:010', toLoc: 'pas:040' }, as())))
       .not.toBe('NO_ERROR');
@@ -261,9 +261,9 @@ describe('renumber reports what it actually wrote (@codex P2 on #1453)', () => {
         return Reflect.get(target, prop, receiver);
       },
     });
-    const spy = vi.spyOn(nodeMutations, 'moveNode').mockImplementationOnce(async (...args) => {
+    const spy = vi.spyOn(nodeMoveOps, 'moveWithResult').mockImplementationOnce(async (...args) => {
       spy.mockRestore();
-      const out = await nodeMutations.moveNode(...args);
+      const out = await nodeMoveOps.moveWithResult(...args);
       armed = true;
       return out;
     });
@@ -347,9 +347,9 @@ describe('renumber reports where each rewrite landed (@codex P2 on #1453)', () =
         return Reflect.get(target, prop, receiver);
       },
     });
-    const spy = vi.spyOn(nodeMutations, 'moveNode').mockImplementationOnce(async (...args) => {
+    const spy = vi.spyOn(nodeMoveOps, 'moveWithResult').mockImplementationOnce(async (...args) => {
       spy.mockRestore();
-      const out = await nodeMutations.moveNode(...args);
+      const out = await nodeMoveOps.moveWithResult(...args);
       armed = true;
       return out;
     });
@@ -383,5 +383,19 @@ describe('historical holders of the CURRENT corpus URN (@codex P2 on #1453)', ()
     expect(unresolved.map((r) => r.targetLoc)).not.toContain('pas:500');
     const toFeature = await resolvers.Query.specBacklinks(null, { memoryRef: draft.id, loc: 'pas:010' }, as());
     expect(toFeature.some((r) => r.kind === 'URN' && r.sourceLoc === 'pas:020')).toBe(true);
+  });
+});
+
+describe('renumber reports exactly what the mover moved (@codex P2 on #1453)', () => {
+  it('does not report a node created under toLoc right after the move', async () => {
+    const spy = vi.spyOn(nodeMoveOps, 'moveWithResult').mockImplementationOnce(async (...args) => {
+      spy.mockRestore();
+      const out = await nodeMoveOps.moveWithResult(...args);
+      // A concurrent request creates an unrelated node under the new number.
+      await spec('pas:040:99', 'Unrelated newcomer', 'x');
+      return out;
+    });
+    const res = await specCorpusRenumberMutations.renumberSpec(null, { memoryRef: draft.id, fromLoc: 'pas:010', toLoc: 'pas:040' }, as());
+    expect(res.moved).toEqual([{ fromLoc: 'pas:010', toLoc: 'pas:040' }, { fromLoc: 'pas:010:01', toLoc: 'pas:040:01' }]);
   });
 });
