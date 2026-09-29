@@ -60,6 +60,7 @@ import { normalizeObjectType } from '../lib/enforceNodeSchema.js';
 import type { MemorySchema } from '../lib/memorySchema.js';
 import { validateLoc, InvalidLocError } from '../lib/validateLoc.js';
 import { deriveEdgeLoc } from '../lib/edgeLoc.js';
+import { archiveTombstone } from '../lib/tombstoneArchive.js';
 import { promotePendingEdgeForTarget } from '../lib/pendingEdgePromotion.js';
 import {
   liveEdgeEndpointSet,
@@ -6921,16 +6922,16 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
               return { refused: 'urn-exists', targetUrn };
             }
             if (existingTarget) {
-              const archivedLoc = `${toLoc}__deleted-${existingTarget.id}`;
-              await tx.node.update({
-                where: { id: existingTarget.id },
-                data: {
-                  loc: archivedLoc,
-                  ...(existingTarget.deletedAt
-                    ? {}
-                    : { deletedAt: new Date(), deletedBy: auth.userId ?? auth.clientId ?? null }),
-                },
-              });
+              if (!existingTarget.deletedAt) {
+                await tx.node.update({
+                  where: { id: existingTarget.id },
+                  data: { deletedAt: new Date(), deletedBy: auth.userId ?? auth.clientId ?? null },
+                });
+              }
+              // #1466: the old node's edges keep locs derived from this address.
+              // Rekey them with the tombstone inside the same move transaction,
+              // before the mover takes the address and can create its own edges.
+              await archiveTombstone(tx, existingTarget);
             }
 
             // #768/#781: rebase the whole loc-subtree via the shared helper (the
