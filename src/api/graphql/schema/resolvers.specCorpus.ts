@@ -526,6 +526,12 @@ export const specCorpusRenumberMutations = {
       });
     }
 
+    // (@codex P2, #1453) Decide which references are ours BEFORE the move.
+    // When a prior holder of our URN also has a node at fromLoc, our own live
+    // node there is what makes those references ours; once it has moved, the
+    // prior holder's node would claim them and they would be left unrewritten.
+    const accept = await referenceAcceptor(ctx.db, corpus, scanReferences(nodes, corpus.pattern));
+
     if (!dryRun) {
       // Fail before any write, rather than after the move.
       await requireMemoryWriteAccess(ctx, corpus.id);
@@ -546,7 +552,6 @@ export const specCorpusRenumberMutations = {
         .sort((a, b) => a.fromLoc.localeCompare(b.fromLoc));
     }
 
-    const accept = await referenceAcceptor(ctx.db, corpus, scanReferences(nodes, corpus.pattern));
     const rewrites: RewriteOut[] = [];
     for (const n of nodes) {
       const plan = planRewrite(n, corpus.pattern, fromLoc, toLoc, accept);

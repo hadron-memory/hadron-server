@@ -386,6 +386,21 @@ describe('historical holders of the CURRENT corpus URN (@codex P2 on #1453)', ()
   });
 });
 
+describe('renumber decides reference ownership before the move (@codex P2 on #1453)', () => {
+  it('rewrites our citations even when a prior holder of our URN also has the old loc', async () => {
+    const prior = await resolvers.Mutation.createMemory(null, { orgId: org.id, name: 'shared' }, as());
+    const shared = prior.urn;
+    await db.node.create({ data: { id: generateId(), memoryId: prior.id, loc: 'pas:010', name: 'Theirs too' } });
+    await resolvers.Mutation.updateMemory(null, { id: prior.id, urn: 'renamed-away' } as never, as());
+    await resolvers.Mutation.updateMemory(null, { id: draft.id, urn: 'shared' } as never, as());
+    await db.node.update({ where: { id: other.id }, data: { content: `Ours: hrn:node:${shared}:pas:010.` } });
+
+    const res = await specCorpusRenumberMutations.renumberSpec(null, { memoryRef: draft.id, fromLoc: 'pas:010', toLoc: 'pas:040' }, as());
+    expect(res.rewrites).toEqual(expect.arrayContaining([expect.objectContaining({ nodeId: other.id, status: 'REWRITTEN', count: 1 })]));
+    expect((await db.node.findUniqueOrThrow({ where: { id: other.id } })).content).toBe(`Ours: hrn:node:${shared}:pas:040.`);
+  });
+});
+
 describe('renumber reports exactly what the mover moved (@codex P2 on #1453)', () => {
   it('does not report a node created under toLoc right after the move', async () => {
     const spy = vi.spyOn(nodeMoveOps, 'moveWithResult').mockImplementationOnce(async (...args) => {
