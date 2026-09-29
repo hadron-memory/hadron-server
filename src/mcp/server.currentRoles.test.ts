@@ -177,6 +177,47 @@ describe('#1251 — existing MCP sessions refresh platform roles', () => {
     expect(text).not.toContain('hrn:node:');
   });
 
+  it('uses roles from bearer resolution when demotion lands after the first role read', async () => {
+    const { suffix, token, user } = await createUserAndToken();
+    const org = await db.organization.create({
+      data: { id: generateId(), name: 'foreign org', urn: `foreign-race-${suffix}.com` },
+    });
+    const memory = await db.memory.create({
+      data: {
+        id: generateId(),
+        organizationId: org.id,
+        urn: `${org.urn}:role-refresh-secret`,
+        name: 'RoleRefreshSecret',
+        class: 'knowledge',
+      },
+    });
+    await db.node.create({
+      data: {
+        id: generateId(),
+        memoryId: memory.id,
+        loc: 'role-refresh-secret',
+        name: 'RoleRefreshSecret',
+        content: 'Only a current platform administrator may find this globally.',
+      },
+    });
+    const sessionId = await initializeSession(token);
+    const originalFindFirst = db.user.findFirst.bind(db.user);
+    const findFirst = vi.spyOn(db.user, 'findFirst').mockImplementationOnce((async (
+      ...args: Parameters<typeof db.user.findFirst>
+    ) => {
+      const initialRoles = await originalFindFirst(...args);
+      await db.user.update({ where: { id: user.id }, data: { roles: ['READER'] } });
+      return initialRoles;
+    }) as never);
+
+    const response = await mcpFetch(token, searchBody, sessionId);
+    expect(response.status).toBe(200);
+    const body = await response.text();
+    expect(body).toContain('No nodes found');
+    expect(body).not.toContain('hrn:node:');
+    expect(findFirst).toHaveBeenCalledTimes(2);
+  });
+
   it('invalidates an existing transport when the authenticated user is deleted', async () => {
     const { token, user } = await createUserAndToken();
     const sessionId = await initializeSession(token);

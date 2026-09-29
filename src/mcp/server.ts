@@ -9886,21 +9886,21 @@ async function authenticateBoundMcpSession(
   res: Response,
   sessionId: string,
   active: ActiveMcpTransport,
-): Promise<boolean> {
+): Promise<AuthContext | null> {
   let presented: AuthContext;
   try {
     presented = await resolveAuthContext(req, db);
   } catch {
     res.status(503).json({ error: 'Authentication temporarily unavailable' });
-    return false;
+    return null;
   }
   if (transports.get(sessionId) !== active) {
     respondMcpSessionNotFound(res);
-    return false;
+    return null;
   }
   if (presented.impersonation || (!presented.userId && !presented.appId && !presented.clientId)) {
     respondMcpAuthenticationRequired(req, res);
-    return false;
+    return null;
   }
   const surfaceRefusal = oauthSurfaceRefusal(presented, 'mcp');
   if (surfaceRefusal) {
@@ -9910,14 +9910,14 @@ async function authenticateBoundMcpSession(
       code: 'FORBIDDEN',
       ...surfaceRefusal,
     });
-    return false;
+    return null;
   }
   if (!sameMcpPrincipal(active.auth, presented)) {
     // A foreign principal's session ID is indistinguishable from a missing one.
     respondMcpSessionNotFound(res);
-    return false;
+    return null;
   }
-  return true;
+  return presented;
 }
 
 /**
@@ -10010,8 +10010,11 @@ export async function handleMcpRequest(req: Request, res: Response): Promise<voi
 
       // Credential validation shares this lock with role refresh and dispatch:
       // a queued request may never borrow the prior request's bearer.
-      if (!(await authenticateBoundMcpSession(req, res, sessionId, active))) return;
-      active.auth.roles = roles;
+      const presented = await authenticateBoundMcpSession(req, res, sessionId, active);
+      if (!presented) return;
+      // Credential resolution re-reads the live user after the liveness check
+      // above. A demotion between those reads must win before tool dispatch.
+      active.auth.roles = presented.roles ?? [];
       await active.transport.handleRequest(req, res, req.body);
     } finally {
       releaseRequest();
