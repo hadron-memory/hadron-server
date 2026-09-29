@@ -58,6 +58,7 @@ import { lockAncestorsForCreate, lockNodeForDelete } from './nodeSubtreeLock.js'
 import type { Prisma } from '../generated/prisma/index.js';
 import { normalizeObjectType } from './enforceNodeSchema.js';
 import { recordUrnRename } from './urnAlias.js';
+import { isDraftCorpus } from './specCorpus.js';
 import { safeNodeUrnV2 } from './urnEmit.js';
 import { validateNodeAgainstSchema, NodeSchemaViolation } from './validateNodeAgainstSchema.js';
 import type { MemorySchema } from './memorySchema.js';
@@ -256,12 +257,16 @@ export async function moveNodeSubtree(
   // needed by the later URN read now: upgrading two disjoint moves' FOR SHARE
   // locks to FOR NO KEY UPDATE would deadlock. Opposing moves use one ID order.
   const memoryUrns = new Map<string, string>();
+  // #1448: whether each memory is a draft spec corpus, read under the same
+  // lock, so a concurrent mint (which takes this row too) cannot interleave.
+  const draftCorpus = new Map<string, boolean>();
   for (const memoryId of [...new Set([srcMemoryId, destMemoryId])].sort()) {
-    const [memory] = await tx.$queryRaw<Array<{ urn: string }>>`
-      SELECT urn FROM memories WHERE id = ${memoryId} FOR NO KEY UPDATE
+    const [memory] = await tx.$queryRaw<Array<{ urn: string; corpus_draft: boolean }>>`
+      SELECT urn, corpus_draft FROM memories WHERE id = ${memoryId} FOR NO KEY UPDATE
     `;
     if (!memory) throw new Error(`Move memory ${memoryId} disappeared while locking; retry.`);
     memoryUrns.set(memoryId, memory.urn);
+    draftCorpus.set(memoryId, memory.corpus_draft);
   }
 
   for (const id of reconcileIds) {
@@ -412,11 +417,19 @@ export async function moveNodeSubtree(
   // live-address precedence and current-target liveness on lookup.
   // The earlier NO KEY UPDATE locks pin both URNs against Memory rename and
   // remain compatible with child-row FK KEY SHARE checks.
+  //
+  // #1448: except out of a DRAFT spec corpus. A draft number was never
+  // published, so nothing outside can cite it; recording it would make two
+  // specs moved through the same number resolve as ambiguous, and keep
+  // draft-era numbers resolving after the corpus is minted. Keyed on the
+  // SOURCE memory: a move from a minted memory into a draft one leaves a
+  // public address behind and still records it.
   const sourceMemoryUrn = memoryUrns.get(srcMemoryId)!;
   const targetMemoryUrn = memoryUrns.get(destMemoryId)!;
   const aliasKey = (memoryUrn: string, loc: string) =>
     safeNodeUrnV2(memoryUrn, loc).slice('hrn:node:'.length);
-  for (const n of subtree) {
+  const recordAliases = !isDraftCorpus({ corpusDraft: draftCorpus.get(srcMemoryId)! });
+  for (const n of recordAliases ? subtree : []) {
     await recordUrnRename(tx, {
       entityType: 'NODE',
       entityId: n.id,
