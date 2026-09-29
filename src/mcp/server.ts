@@ -2410,7 +2410,9 @@ export function createMcpServerInstance(
           ...MCP_SURFACE_CAPABILITIES,
           // Probed exactly as the tools will admit the call: allowlists, a
           // live App and current participation (#1362 review).
-          ...(auth.appId && (await teamAttentionAvailable(chatCtx(), auth.appId)) ? ['team-attention'] : []),
+          ...(auth.appId && (await teamAttentionAvailable(chatCtx(), auth.appId))
+            ? ['team-attention', 'team-attention-paged']
+            : []),
         ].join(', ')}`,
       ];
       // Spec 049 Phase 1: the resolved active organization and which rung of
@@ -8878,7 +8880,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
   if (auth.userId && !auth.impersonation && teamAttentionPilotOperatorEnabled(auth.userId)) {
     server.tool(
       'hadron_team_attention',
-      'INTERNAL PILOT (#1353): return compact unread counts for this operator\'s LIVE Workers and an opaque signed poll token; never reads message bodies and never changes ChannelReadState. Omit since for all unread. Adopt the returned token only after every listed nudge is accepted; after any partial failure retain the prior token so retry may duplicate but cannot lose a nudge. since:"now" is refused — use the explicit switchover preview/apply tool.',
+      'RETIRED (#1384): the v1 one-shot poll scanned an encrypted Channel\'s whole unread backlog inside one request and now answers UPGRADE_REQUIRED. Use hadron_team_attention_page — the bounded paged successor; your existing since token is accepted there and carries your watermark forward.',
       {
         app: z.string().optional().describe('The pilot App — an App URN or ID. Omit to use the selected App.'),
         since: z.string().optional().describe('Opaque token returned by the preceding successful poll. Do not pass "now".'),
@@ -8901,14 +8903,16 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     );
 
     server.tool(
-      'hadron_team_attention_switchover',
-      'INTERNAL PILOT (#1353): explicitly baseline every current live Worker through captured Channel heads. preview is read-only and returns exact counts plus a short-lived proof. apply requires that proof and atomically refuses if the operator, App, live-Worker scope, effective register or cursor changed. Messages arriving after preview remain unread. This is the only supported way to discard the pre-router backlog.',
+      'hadron_team_attention_page',
+      'PAGED ATTENTION (#1384 v2): one bounded slice of the compact unread scan for this operator\'s LIVE Workers — at most scanLimit decrypted rows and limit emitted Worker/Channel pairs per call. Continue with the returned nextPage while scanComplete is false. Items carry no message bodies; counts are exact for the captured range of the issuing scan. The FINAL page alone returns adoptableSince — adopt it only after every listed nudge was accepted; on any partial failure retain your prior watermark and restart the scan (duplicates, never loss). An existing v1 since token starts a scan and carries the watermark forward. Never changes ChannelReadState.',
       {
-        app: z.string().optional().describe('The pilot App — an App URN or ID. Omit to use the selected App.'),
-        action: z.enum(['preview', 'apply']).describe('preview makes no writes; apply requires the exact preview proof.'),
-        proof: z.string().optional().describe('Required for action:"apply"; returned by preview.'),
+        app: z.string().optional().describe('The App — an App URN or ID. Omit to use the selected App.'),
+        since: z.string().optional().describe('v1-shaped watermark token to start a scan from. Do not pass with page. Do not pass "now".'),
+        page: z.string().optional().describe('Opaque continuation returned by the preceding page. Do not pass with since.'),
+        limit: z.number().int().optional().describe('Max Worker/Channel pairs to emit this call (default 50, cap 100).'),
+        scanLimit: z.number().int().optional().describe('Max encrypted rows to decrypt or aggregate this call (default 50, cap 100).'),
       },
-      async ({ app, action, proof }) => {
+      async ({ app, since, page, limit, scanLimit }) => {
         let appRef = app;
         if (!appRef) {
           const scopeError = requireAppScope();
@@ -8916,11 +8920,43 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           appRef = auth.appId;
         }
         if (!appRef) return textResult('No App context — pass app or select one with hadron_set_active_app.');
-        if (action === 'apply' && !proof) return textResult('[bad_user_input] action:"apply" requires the proof returned by preview.');
+        try {
+          const result = await resolvers.Query.teamAttentionPage(
+            {},
+            { appRef, since: since ?? null, page: page ?? null, limit: limit ?? null, scanLimit: scanLimit ?? null },
+            chatCtx(),
+          );
+          return textResult(JSON.stringify(result, null, 2));
+        } catch (error) {
+          return scopeErrorText(error);
+        }
+      },
+    );
+
+    server.tool(
+      'hadron_team_attention_switchover',
+      'PAGED (#1384 v2): explicitly baseline every current live Worker through captured Channel heads. preview is read-only, pages like the poll tool (continue with its returned nextPage), and yields the short-lived proof ONLY on its final completed page. apply requires that proof and atomically refuses if the operator, App, live-Worker scope, effective register or cursor changed. Messages arriving after the preview freeze remain unread. This is the only supported way to discard the pre-router backlog.',
+      {
+        app: z.string().optional().describe('The App — an App URN or ID. Omit to use the selected App.'),
+        action: z.enum(['preview', 'apply']).describe('preview makes no writes and pages; apply requires the exact final-page proof.'),
+        page: z.string().optional().describe('preview continuation from the preceding preview page.'),
+        limit: z.number().int().optional().describe('Max Worker/Channel pairs to emit per preview call (default 50, cap 100).'),
+        proof: z.string().optional().describe('Required for action:"apply"; returned by the final preview page.'),
+      },
+      async ({ app, action, page, limit, proof }) => {
+        let appRef = app;
+        if (!appRef) {
+          const scopeError = requireAppScope();
+          if (scopeError) return scopeError;
+          appRef = auth.appId;
+        }
+        if (!appRef) return textResult('No App context — pass app or select one with hadron_set_active_app.');
+        if (action === 'apply' && !proof) return textResult('[bad_user_input] action:"apply" requires the proof returned by the final preview page.');
         if (action === 'preview' && proof !== undefined) return textResult('[bad_user_input] preview does not accept a proof.');
+        if (action === 'apply' && page !== undefined) return textResult('[bad_user_input] apply does not accept a page continuation.');
         try {
           const result = action === 'preview'
-            ? await resolvers.Query.teamAttentionSwitchoverPreview({}, { appRef }, chatCtx())
+            ? await resolvers.Query.teamAttentionPreviewPage({}, { appRef, page: page ?? null, limit: limit ?? null, scanLimit: null }, chatCtx())
             : await resolvers.Mutation.confirmTeamAttentionSwitchover({}, { appRef, proof: proof! }, chatCtx());
           return textResult(JSON.stringify(result, null, 2));
         } catch (error) {

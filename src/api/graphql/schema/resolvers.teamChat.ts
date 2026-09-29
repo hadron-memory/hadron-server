@@ -955,6 +955,12 @@ async function postToChannelRoot(
         content: msgFields.content ?? null,
         data: (msgFields.data ?? null) as InputJsonValue,
         seq,
+        // #1430: Channel membership in the SAME append transaction — the
+        // paged attention reader resolves this Channel's rows through
+        // Node.messageChannelId, so an unstamped append would be invisible
+        // to it forever (Andi #3280: fixtures stamping this field masked
+        // the production path).
+        messageChannelId: incarnation.id,
         // #914: the SENDER's user id — for worker posts, the human driver.
         createdBy,
       },

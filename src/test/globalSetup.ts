@@ -447,6 +447,13 @@ async function applyTemplateConstraints(client: Client) {
     ) STORED;
 
     CREATE INDEX IF NOT EXISTS nodes_tsv_gin ON nodes USING gin (tsv);
+    -- #1430: C-collation index for paged-attention keyset pages (mirrors the
+    -- migration and post-push.sql — all three DDL-sync sites per the review rule).
+    CREATE INDEX IF NOT EXISTS nodes_memory_id_loc_c_idx ON nodes ("memory_id", "loc" COLLATE "C");
+    -- #1430: Channel-local seq-first partial index (see migration).
+    CREATE INDEX IF NOT EXISTS nodes_msg_channel_seq_loc_c_idx
+      ON "nodes" ("message_channel_id", "seq", "loc" COLLATE "C")
+      WHERE "node_type" = 'chat-message' AND "deleted_at" IS NULL AND "seq" IS NOT NULL;
   `);
 
 }

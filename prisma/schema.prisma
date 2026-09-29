@@ -1166,6 +1166,10 @@ model Node {
   /// Sort order among sibling nodes (lower values come first); used
   /// by `hadron_get_next_node` and portal drag-and-drop reordering.
   seq                Int?
+  /// #1430 paged attention: the owning Channel for chat-message transcript
+  /// rows — stamped in the append transaction, providing a Channel-local
+  /// seq-first access path (see the partial index below).
+  messageChannelId   String?          @map("message_channel_id")
   /// GitHub repo slug (e.g. "micromentor/mmdata").
   ownerRepo          String?   @map("owner_repo")
   /// If true, this node can be executed as a task.

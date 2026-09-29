@@ -6,6 +6,8 @@ import {
   getTeamAttention,
   markOwnTeamChatRead,
   previewTeamAttentionSwitchover,
+  teamAttentionPage as teamAttentionPageLib,
+  teamAttentionPreviewPage as teamAttentionPreviewPageLib,
 } from '../../../lib/teamAttention.js';
 
 export const teamAttentionQueries = {
@@ -14,6 +16,18 @@ export const teamAttentionQueries = {
     { appRef, since }: { appRef: string; since?: string | null },
     ctx: Context,
   ) => getTeamAttention(ctx, appRef, since),
+
+  teamAttentionPage: async (
+    _: unknown,
+    { appRef, since, page, limit, scanLimit }: { appRef: string; since?: string | null; page?: string | null; limit?: number | null; scanLimit?: number | null },
+    ctx: Context,
+  ) => teamAttentionPageLib(ctx, appRef, { since, page, limit, scanLimit }),
+
+  teamAttentionPreviewPage: async (
+    _: unknown,
+    { appRef, page, limit, scanLimit }: { appRef: string; page?: string | null; limit?: number | null; scanLimit?: number | null },
+    ctx: Context,
+  ) => teamAttentionPreviewPageLib(ctx, appRef, { page, limit, scanLimit }),
 
   teamAttentionSwitchoverPreview: async (
     _: unknown,

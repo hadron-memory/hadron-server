@@ -40,6 +40,7 @@ import { GraphQLError } from 'graphql';
 import type { Prisma, PrismaClient } from '../generated/prisma/index.js';
 import type { InputJsonValue } from '../generated/prisma/runtime/library.js';
 import { generateId } from './id.js';
+import { escapePrismaLikePattern } from './literalLocPrefix.js';
 import { ancestorLocs, lockAncestorsForCreateMany } from './nodeSubtreeLock.js';
 import { getMemoryEncryptionInfo, decryptNodeFields, encryptNodeFields, type MemoryEncryptionInfo } from './nodeCrypto.js';
 import { locsOverlap } from './protectedLoc.js';
@@ -156,6 +157,24 @@ export async function ensureChannelRow(
       if ((e as { code?: string }).code !== 'P2002') throw e;
       row = await db.channel.findUniqueOrThrow({ where: { chatRootNodeId: args.rootId } });
     }
+    // #1430: stamp membership for any live chat-message children this Channel
+    // adopted (pre-Channel rows under the messages prefix — the one-time
+    // migration cannot cover Channels created after it). Centralized here so
+    // both ensureChannelWithRoot and jobs/backfillChannels are covered.
+    // The prefix is ESCAPED (Andi #3279): Prisma's startsWith compiles to
+    // LIKE '…%', where an unescaped `_`/`%` in the Channel loc matches foreign
+    // rows (`chats_team` would claim `chatsXteam:messages:*`).
+    const prefix = `${args.loc}:messages:`;
+    await db.node.updateMany({
+      where: {
+        memoryId: args.memoryId,
+        loc: { startsWith: escapePrismaLikePattern(prefix) },
+        nodeType: 'chat-message',
+        deletedAt: null,
+        messageChannelId: null,
+      },
+      data: { messageChannelId: row.id },
+    });
   } else if (row.deletedAt || args.resetForReuse) {
     // The root was restored. Its allocator counter stays on the root so the
     // next message never reuses an old seq, but the Channel watermark describes
