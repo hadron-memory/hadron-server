@@ -117,6 +117,16 @@ describe('hadron_unlock_memory', () => {
     expect(ok).toContain('unlocked');
     expect(sessionKeyCache.getByMemoryId(memoryId)).not.toBeNull();
   });
+
+  it('refuses a verifier-less encrypted memory without caching its old key', async () => {
+    await db.memory.update({ where: { id: memoryId }, data: { keyVerifier: null } });
+    const out = await mcp(ownerAuth()).callToolText('hadron_unlock_memory', {
+      memoryUrn,
+      passphrase: PASS,
+    });
+    expect(out).toContain('no stored key verifier');
+    expect(sessionKeyCache.getByMemoryId(memoryId)).toBeNull();
+  });
 });
 
 describe('locked vs unlocked reads (hadron_get_node)', () => {

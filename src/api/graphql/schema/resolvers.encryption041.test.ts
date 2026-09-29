@@ -253,7 +253,7 @@ describe('encryptMemory — locked conversion (#1346)', () => {
       .every((revision) => revision.content == null || isCiphertext(revision.content))).toBe(true);
   });
 
-  it('derives the stored passphrase key and proves verifier-less legacy completion', async () => {
+  it('derives the stored passphrase key but refuses verifier-less legacy completion', async () => {
     const passphrase = 'existing encryption passphrase';
     await resolvers.Mutation.encryptMemory({}, { memoryId, passphrase }, ownerCtx());
     const prior = await db.nodeRevision.create({
@@ -278,9 +278,10 @@ describe('encryptMemory — locked conversion (#1346)', () => {
     )).rejects.toMatchObject({ extensions: { code: 'BAD_UNLOCK_INPUT', memoryId } });
     await expect(resolvers.Mutation.encryptMemory(
       {}, { memoryId, passphrase }, ownerCtx(),
-    )).resolves.toMatchObject({ isEncrypted: true, keyVerifier: expect.stringMatching(/^enc:v1:/) });
+    )).rejects.toMatchObject({ extensions: { code: 'BAD_UNLOCK_INPUT', memoryId } });
     expect((await db.nodeRevision.findUniqueOrThrow({ where: { id: noVerifier.id } })).content)
-      .toMatch(/^enc:v1:/);
+      .toBe('unverifiable secret');
+    expect((await db.memory.findUniqueOrThrow({ where: { id: memoryId } })).keyVerifier).toBeNull();
   });
 
   it('converts pre-existing revision history without changing another memory\'s snapshots', async () => {
