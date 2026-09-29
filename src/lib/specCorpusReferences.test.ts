@@ -329,3 +329,34 @@ describe('renumber cost does not grow with the number of citing nodes (@codex P2
     expect(pageReads).toBeLessThan(9);
   });
 });
+
+describe('renumber reports where each rewrite landed (@codex P2 on #1453)', () => {
+  it('reports the reloaded loc when a citing node moved between the plan and its rewrite', async () => {
+    let armed = false;
+    let fired = false;
+    const racingDb = new Proxy(db, {
+      get(target, prop, receiver) {
+        if (prop === '$transaction' && armed && !fired) {
+          return async (...args: unknown[]) => {
+            fired = true;
+            // A concurrent request moves the citing node within the corpus.
+            await db.node.update({ where: { id: other.id }, data: { loc: 'pas:021' } });
+            return (target.$transaction as (...a: unknown[]) => unknown)(...args);
+          };
+        }
+        return Reflect.get(target, prop, receiver);
+      },
+    });
+    const spy = vi.spyOn(nodeMutations, 'moveNode').mockImplementationOnce(async (...args) => {
+      spy.mockRestore();
+      const out = await nodeMutations.moveNode(...args);
+      armed = true;
+      return out;
+    });
+    const res = await specCorpusRenumberMutations.renumberSpec(
+      null, { memoryRef: draft.id, fromLoc: 'pas:010', toLoc: 'pas:040' }, { ...as(), db: racingDb },
+    );
+    expect(fired).toBe(true);
+    expect(res.rewrites.find((r) => r.nodeId === other.id)).toMatchObject({ loc: 'pas:021', status: 'REWRITTEN' });
+  });
+});

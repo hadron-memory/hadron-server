@@ -547,6 +547,8 @@ export const specCorpusRenumberMutations = {
           if (done) {
             row.fields = done.fields;
             row.count = done.count;
+            // (@codex P2, #1453) where it was written, if it moved meanwhile
+            row.loc = done.loc;
           } else {
             row.status = 'UNCHANGED';
             row.fields = [];
@@ -585,7 +587,7 @@ async function rewriteWithRetry(
   fromLoc: string,
   toLoc: string,
   accept: (ref: { memoryUrn: string; targetLoc: string }) => boolean,
-): Promise<{ fields: string[]; count: number } | null> {
+): Promise<{ fields: string[]; count: number; loc: string } | null> {
   let node: ScannedNode | undefined = initial;
   for (let attempt = 1; ; attempt++) {
     // The plan is computed from the row as stored, which may carry raw drift
@@ -608,7 +610,7 @@ async function rewriteWithRetry(
         'update',
         { targetNodeId: node.id, guardRevSeq: node.revSeq, ownsKind: 'spec', governedContext: 'node-write' },
       );
-      return { fields: Object.keys(plan.patch), count: plan.count };
+      return { fields: Object.keys(plan.patch), count: plan.count, loc: node.loc };
     } catch (e) {
       const conflict = e instanceof GraphQLError && e.extensions?.code === 'NODE_WRITE_CONFLICT';
       if (!conflict || attempt >= REWRITE_ATTEMPTS) throw e;
