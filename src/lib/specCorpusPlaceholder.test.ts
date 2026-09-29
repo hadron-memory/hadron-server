@@ -256,3 +256,21 @@ describe('git sync fills a placeholder too (@codex P2 on #1452)', () => {
     expect(await row(draft.id, 'pas:150:01')).toMatchObject({ isPlaceholder: false, content: 'Written in the mirror.' });
   });
 });
+
+describe('reserving over a deleted spec with edges (@codex P2 on #1452)', () => {
+  it('does not revive the deleted spec\'s outgoing edges', async () => {
+    const target = await resolvers.Mutation.createSpecNode(null, {
+      input: { memoryId: draft.id, loc: 'pas:160', name: 'Target', role: 'spec', nodeType: 'info', content: 'Body.' },
+    } as never, as(admin.id));
+    const old = await resolvers.Mutation.createSpecNode(null, {
+      input: { memoryId: draft.id, loc: 'pas:160:01', name: 'Old', role: 'spec', nodeType: 'info', content: 'Old.',
+        edges: [{ targetId: target.id, name: 'depends-on' }] },
+    } as never, as(admin.id));
+    expect(await db.edge.count({ where: { sourceId: old.id, deletedAt: null } })).toBe(1);
+    await resolvers.Mutation.deleteNode(null, { nodeRef: old.id }, as(admin.id));
+
+    const reserved = await reserve(draft.id, 'pas:160:01');
+    expect(reserved.id).toBe(old.id); // the tombstone was revived
+    expect(await db.edge.count({ where: { sourceId: reserved.id, deletedAt: null } })).toBe(0);
+  });
+});

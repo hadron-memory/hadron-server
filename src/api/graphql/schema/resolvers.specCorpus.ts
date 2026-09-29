@@ -46,6 +46,11 @@ export const specCorpusMutations = {
           // the input omits, so a deleted spec's text would reappear inside a
           // "placeholder" that claims to have none.
           content: null, abstract: null, description: null,
+          // (@codex P2, PR #1452) deleteNode leaves a tombstone's outgoing
+          // edges attached, and a revival keeps them unless told otherwise:
+          // an explicit empty set replaces them, so the placeholder starts
+          // with no relationships.
+          edges: [],
         },
         withoutRequestCaches(ctx, tx),
         'create',
