@@ -163,6 +163,10 @@ export async function endSessionFirstWins(
     where: { id },
     select: { endedAt: true, autoExpiredAt: true },
   });
+  // GraphQL and MCP close through this writer. Release this session's key
+  // holdings only after its durable end is confirmed; other sessions holding
+  // the same memory keep their independent references.
+  if (after?.endedAt) sessionKeyCache.evict(id);
   return {
     endedByThisCall: claimed.count > 0,
     endedAt: after?.endedAt ?? null,

@@ -15,6 +15,8 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
+import { generateDataKey } from '../../../lib/crypto.js';
+import { sessionKeyCache } from '../../../lib/sessionKeyCache.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -36,6 +38,7 @@ let app: { id: string };
 
 beforeEach(async () => {
   await cleanDb(db);
+  sessionKeyCache.clear();
   const suffix = `${Date.now()}-${Math.floor(Math.random() * 100_000)}`;
   creator = await db.user.create({
     data: { id: generateId(), githubId: 93101, githubUsername: `sess-creator-${suffix}`, roles: ['READER'] },
@@ -144,6 +147,38 @@ describe('updateSession (#931)', () => {
 });
 
 describe('endSession gate (#931 — previously ungated)', () => {
+  it('releases every key held by the ended session', async () => {
+    const s = await startAs(creator.id);
+    const memoryA = generateId();
+    const memoryB = generateId();
+    sessionKeyCache.set(s.id, memoryA, generateDataKey());
+    sessionKeyCache.set(s.id, memoryB, generateDataKey());
+
+    await M.endSession({}, { id: s.id }, ctx({ userId: creator.id }));
+
+    expect(sessionKeyCache.refCount(memoryA)).toBe(0);
+    expect(sessionKeyCache.refCount(memoryB)).toBe(0);
+    expect(sessionKeyCache.getByMemoryId(memoryA)).toBeNull();
+    expect(sessionKeyCache.getByMemoryId(memoryB)).toBeNull();
+  });
+
+  it('releases only the ending session when another holder remains', async () => {
+    const ending = await startAs(creator.id);
+    const active = await startAs(creator.id);
+    const memoryId = generateId();
+    const key = generateDataKey();
+    sessionKeyCache.set(ending.id, memoryId, key);
+    sessionKeyCache.set(active.id, memoryId, key);
+
+    await M.endSession({}, { id: ending.id }, ctx({ userId: creator.id }));
+    expect(sessionKeyCache.refCount(memoryId)).toBe(1);
+    expect(sessionKeyCache.getByMemoryId(memoryId)).toBe(key);
+
+    await M.endSession({}, { id: active.id }, ctx({ userId: creator.id }));
+    expect(sessionKeyCache.refCount(memoryId)).toBe(0);
+    expect(sessionKeyCache.getByMemoryId(memoryId)).toBeNull();
+  });
+
   it('lets the attributed user end their session, refuses a stranger', async () => {
     const s = await startAs(creator.id);
     await expect(
