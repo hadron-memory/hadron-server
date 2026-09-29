@@ -188,7 +188,8 @@ export interface OpenQuestion {
 }
 
 const HEADING = /^ {0,3}(#{1,6})(?:[ \t]+(.*?))?[ \t#]*$/;
-const TOP_BULLET = /^ {0,3}(?:[-+*]|\d{1,9}[.)])[ \t]+(.*)$/;
+/** A list item's marker and its text, on a line with its indentation removed. */
+const LIST_ITEM = /^(?:[-+*]|\d{1,9}[.)])[ \t]+(.*)$/;
 const THEMATIC_BREAK = /^ {0,3}(?:(?:-[ \t]*){3,}|(?:\*[ \t]*){3,}|(?:_[ \t]*){3,})$/;
 
 /**
@@ -196,8 +197,11 @@ const THEMATIC_BREAK = /^ {0,3}(?:(?:-[ \t]*){3,}|(?:\*[ \t]*){3,}|(?:_[ \t]*){3
  * whose text contains "Open Questions" (case-insensitive) starts a section,
  * which runs to the next heading at the same or a higher level (or a thematic
  * break). Each top-level bullet in it is one question; indented lines continue
- * it. The decider is a trailing "<Name> decides." on the bullet; without one it
- * is unassigned. Fenced code is ignored. The question text is the bullet's
+ * it. A NESTED list item (indented deeper than the section's first bullet) is
+ * supporting detail: it and everything after it in that item are left out, so
+ * the item's own text keeps its trailing decider (@codex P2, PR #1462). The
+ * decider is a trailing "<Name> decides." on the bullet; without one it is
+ * unassigned. Fenced code is ignored. The question text is the bullet's
  * leading bold phrase when it has one, otherwise its first 200 characters.
  */
 export function parseOpenQuestions(content: string | null | undefined): OpenQuestion[] {
@@ -205,7 +209,9 @@ export function parseOpenQuestions(content: string | null | undefined): OpenQues
   const lines = withoutFencedCode(content).split('\n');
   const out: OpenQuestion[] = [];
   let sectionLevel = 0; // 0 = not in an Open Questions section
+  let outerIndent = -1; // the section's first bullet's indent; -1 = none yet
   let current: string[] | null = null;
+  let inNested = false; // the current item has reached a nested list
   const flush = () => {
     if (!current) return;
     const text = current.join(' ').replace(/\s+/g, ' ').trim();
@@ -223,14 +229,23 @@ export function parseOpenQuestions(content: string | null | undefined): OpenQues
     if (h) {
       const level = h[1].length;
       if (sectionLevel > 0 && level <= sectionLevel) { flush(); sectionLevel = 0; }
-      if (/open questions/i.test(h[2] ?? '')) { flush(); sectionLevel = level; }
+      if (/open questions/i.test(h[2] ?? '')) { flush(); sectionLevel = level; outerIndent = -1; }
       continue;
     }
     if (sectionLevel === 0) continue;
     if (THEMATIC_BREAK.test(line)) { flush(); sectionLevel = 0; continue; }
-    const bullet = TOP_BULLET.exec(line);
-    if (bullet) { flush(); current = [bullet[1]]; continue; }
-    if (current && line.trim() !== '' && /^[ \t]/.test(line)) current.push(line.trim());
+    const [indent, trimmed] = splitIndent(line);
+    const item = LIST_ITEM.exec(trimmed);
+    if (item && (outerIndent < 0 || indent <= outerIndent) && indent <= 3) {
+      flush();
+      if (outerIndent < 0) outerIndent = indent;
+      current = [item[1]];
+      inNested = false;
+      continue;
+    }
+    if (!current) continue;
+    if (item) { inNested = true; continue; }
+    if (!inNested && trimmed !== '' && indent > 0) current.push(trimmed);
   }
   flush();
   return out;

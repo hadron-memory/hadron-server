@@ -75,6 +75,24 @@ describe('parseOpenQuestions (ruling (b))', () => {
     ]);
   });
 
+  it('keeps nested list items as detail of their question, decider intact (@codex P2 on #1462)', () => {
+    const body = [
+      '## Open Questions',
+      '- **Retention window?** Ada decides.',
+      '  - supporting detail',
+      '    - deeper detail',
+      '- **Export format?**',
+      '    1. CSV',
+      '    2. JSON',
+      '- Third. Bo decides.',
+    ].join('\n');
+    expect(parseOpenQuestions(body)).toEqual([
+      { question: 'Retention window?', decider: 'Ada' },
+      { question: 'Export format?', decider: null },
+      { question: 'Third. Bo decides.', decider: 'Bo' },
+    ]);
+  });
+
   it('ignores fenced code and bodies without the section', () => {
     expect(parseOpenQuestions('```\n## Open Questions\n- x. Ada decides.\n```')).toEqual([]);
     expect(parseOpenQuestions('Just prose.')).toEqual([]);
