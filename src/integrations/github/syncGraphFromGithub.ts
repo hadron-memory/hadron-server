@@ -1,5 +1,6 @@
 import { createDecipheriv } from 'crypto';
-import { placeholderFillPatch } from '../../lib/specCorpus.js';
+import { GraphQLError } from 'graphql';
+import { assertPlaceholderKeepsSpecRole, placeholderFillPatch } from '../../lib/specCorpus.js';
 import { governedSignalsFromMirror } from '../../lib/governedSignals.js';
 import { authoredContentChanged, clearNodeAuthorship } from '../../lib/nodeAuthorship.js';
 import { NodeSchemaViolation, validateNodeAgainstSchema } from '../../lib/validateNodeAgainstSchema.js';
@@ -132,6 +133,21 @@ export async function updateNodeFromGitSync(
     );
   }
 
+  // #1450 (@codex P2, PR #1452): a placeholder stays a spec until it is
+  // written. Sync's rule for a file that would break an invariant applies (one
+  // bad file must not block the memory, and no nonconforming record is
+  // written): the stored role is KEPT, the rest of the file still applies, and
+  // the file is reported.
+  if ('role' in update) {
+    try {
+      assertPlaceholderKeepsSpecRole(locked, { role: update.role as string | null, content: update.content });
+    } catch (e) {
+      if (!(e instanceof GraphQLError) || e.extensions?.code !== 'SPEC_PLACEHOLDER_ROLE_LOCKED') throw e;
+      console.warn(`[syncGraphFromGithub] kept role 'spec' on unwritten placeholder ${locked.loc}: ${e.message}`);
+      const { role: _kept, ...rest } = update;
+      update = rest;
+    }
+  }
   await tx.node.update({
     where: { id: locked.id },
     data: {

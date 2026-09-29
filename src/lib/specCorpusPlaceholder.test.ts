@@ -274,3 +274,19 @@ describe('reserving over a deleted spec with edges (@codex P2 on #1452)', () => 
     expect(await db.edge.count({ where: { sourceId: reserved.id, deletedAt: null } })).toBe(0);
   });
 });
+
+describe('git sync keeps an unwritten placeholder a spec (@codex P2 on #1452)', () => {
+  it('keeps role spec (and applies the rest of the file) when the file drops the role without writing the spec', async () => {
+    const reserved = await reserve(draft.id, 'pas:170:01');
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const current = await db.node.findUniqueOrThrow({ where: { id: reserved.id } });
+    await db.$transaction((tx) => updateNodeFromGitSync(tx, current, { role: null, name: 'Renamed in git' }, undefined, draft.id));
+    expect(await row(draft.id, 'pas:170:01')).toMatchObject({ role: 'spec', isPlaceholder: true, name: 'Renamed in git' });
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('pas:170:01'));
+    warn.mockRestore();
+
+    const again = await db.node.findUniqueOrThrow({ where: { id: reserved.id } });
+    await db.$transaction((tx) => updateNodeFromGitSync(tx, again, { role: null, content: 'Written in the mirror.' }, undefined, draft.id));
+    expect(await row(draft.id, 'pas:170:01')).toMatchObject({ role: null, isPlaceholder: false });
+  });
+});
