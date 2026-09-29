@@ -180,9 +180,9 @@ export async function searchReplaceInSpecNodes(
   const snapshot = async (tx: DbTx, applying: boolean): Promise<Snapshot> => {
     const memory = await tx.memory.findUnique({
       where: { id: memoryId },
-      select: { id: true, corpusDraft: true, isEncrypted: true },
+      select: { id: true, deletedAt: true, corpusDraft: true, isEncrypted: true },
     });
-    if (!memory || !isDraftCorpus(memory)) {
+    if (!memory || memory.deletedAt || !isDraftCorpus(memory)) {
       throw applying ? stale() : error('Spec bulk replacement requires a draft corpus.', 'SEARCH_REPLACE_NOT_DRAFT');
     }
 
@@ -344,11 +344,12 @@ export async function searchReplaceInSpecNodes(
   }
 
   const applied = await ctx.db.$transaction(async (tx) => {
-    // Channel creation takes this memory key. Minting updates the Memory row.
-    // Tuple locks then serialize against kind doors and ordinary node edits.
+    // Channel creation takes this memory key. Lock every selected Node before
+    // the Memory row: ordinary node writers take Node then Memory FOR SHARE.
+    // Minting and memory deletion update the Memory row after these locks.
     await lockMemoryForChannelChange(tx, memoryId);
-    await tx.$queryRaw`SELECT id FROM memories WHERE id = ${memoryId} FOR UPDATE`;
     await tx.$queryRaw`SELECT id FROM nodes WHERE id = ANY(${selectedIds}::text[]) ORDER BY id FOR UPDATE`;
+    await tx.$queryRaw`SELECT id FROM memories WHERE id = ${memoryId} FOR NO KEY UPDATE`;
 
     // Repeat authorization under the row/memory locks. Snapshot then refuses
     // any row that moved out of this memory before it reads plaintext.

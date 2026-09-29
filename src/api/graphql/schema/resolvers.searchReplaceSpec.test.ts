@@ -129,6 +129,76 @@ describe('searchReplaceInSpecNodes', () => {
     expect(await db.nodeRevision.count({ where: { nodeId: spec.id } })).toBe(0);
   });
 
+  it('refuses a corpus deleted after apply resolved its reference', async () => {
+    const spec = await node('pas:010:03');
+    const preview = await call(request([spec.id]));
+    const findNode = db.node.findUnique.bind(db.node);
+    let reached!: () => void;
+    let release!: () => void;
+    const atSelection = new Promise<void>((resolve) => { reached = resolve; });
+    const resume = new Promise<void>((resolve) => { release = resolve; });
+    let held = false;
+    const lookup = vi.spyOn(db.node, 'findUnique').mockImplementation((async (args: Parameters<typeof findNode>[0]) => {
+      const row = await findNode(args);
+      if (!held && Object.keys(args.select ?? {}).sort().join(',') === 'deletedAt,memoryId') {
+        held = true;
+        reached();
+        await resume;
+      }
+      return row;
+    }) as unknown as typeof db.node.findUnique);
+    try {
+      const applying = call(request([spec.id], { dryRun: false, expectedPlan: preview.plan }));
+      await atSelection;
+      await resolvers.Mutation.deleteMemory(null, { id: draft.id }, ctx());
+      release();
+      await expect(applying).rejects.toMatchObject({ extensions: { code: 'SEARCH_REPLACE_PLAN_STALE' } });
+    } finally {
+      release();
+      lookup.mockRestore();
+    }
+    expect((await db.node.findUniqueOrThrow({ where: { id: spec.id } })).content).toBe('cat cat scatter');
+    expect(await db.nodeRevision.count({ where: { nodeId: spec.id } })).toBe(0);
+  });
+
+  it('waits for selected node rows before locking the corpus memory row', async () => {
+    const spec = await node('pas:010:04');
+    const preview = await call(request([spec.id]));
+    let signalHeld!: () => void;
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { signalHeld = resolve; });
+    const mayRelease = new Promise<void>((resolve) => { release = resolve; });
+    const holder = db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM nodes WHERE id = ${spec.id} FOR UPDATE`;
+      signalHeld();
+      await mayRelease;
+    }, { timeout: 20_000 });
+    await held;
+    const applying = call(request([spec.id], { dryRun: false, expectedPlan: preview.plan }));
+    try {
+      await vi.waitFor(async () => {
+        const waiting = await db.$queryRaw<Array<{ pid: number }>>`
+          SELECT pid FROM pg_stat_activity
+          WHERE datname = current_database() AND wait_event_type = 'Lock'
+            AND query LIKE '%nodes%' AND pid <> pg_backend_pid()
+        `;
+        expect(waiting.length).toBeGreaterThan(0);
+      }, { timeout: 5_000, interval: 25 });
+      await db.$transaction(async (tx) => {
+        await tx.$executeRaw`SET LOCAL lock_timeout = '500ms'`;
+        const rows = await tx.$queryRaw<Array<{ id: string }>>`
+          SELECT id FROM memories WHERE id = ${draft.id} FOR SHARE
+        `;
+        expect(rows).toHaveLength(1);
+      });
+    } finally {
+      release();
+      await holder;
+    }
+    await applying;
+    expect((await db.node.findUniqueOrThrow({ where: { id: spec.id } })).content).toBe('dog dog scatter');
+  }, 20_000);
+
   it('rejects minted and mixed corpora while the generic door still skips specs', async () => {
     const spec = await node('pas:010:01');
     const minted = await memory('minted', false);
