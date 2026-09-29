@@ -457,6 +457,10 @@ describe('teamChatMessages — mentions round trip', () => {
       body: ['# Example', `    ${token}`].join('\n'),
     });
     expect(headingCode.mentions).toEqual([]);
+    const codeWithQuotePrefix = await post(ctx(admin.id), {
+      body: ['```sh', `> ${token}`, token, '```'].join('\n'),
+    });
+    expect(codeWithQuotePrefix.mentions).toEqual([]);
     expect(await read(ctx(appMember.id), { mentionsRef: s.workerId })).toEqual({ items: [], total: 0 });
 
     const addressed = await post(ctx(admin.id), { body: `\`${token}\` is an example. ${token}, please review.` });

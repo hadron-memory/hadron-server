@@ -10,7 +10,36 @@ function markdownCodeMask(body: string): Uint8Array {
   for (let start = 0; start < body.length;) {
     const newline = body.indexOf('\n', start);
     const end = newline < 0 ? body.length : newline + 1;
-    let line = body.slice(start, newline < 0 ? end : newline).replace(/\r$/, '');
+    const rawLine = body.slice(start, newline < 0 ? end : newline).replace(/\r$/, '');
+    let line = rawLine;
+
+    if (fence) {
+      // Only the quote markers that CONTAIN the fence are structural. A
+      // further '>' is literal code (for example, a pasted shell prompt).
+      let inContainer = true;
+      for (let depth = 0; depth < fence.quoteDepth; depth++) {
+        const quote = /^ {0,3}>[ \t]?/.exec(line);
+        if (!quote) { inContainer = false; break; }
+        line = line.slice(quote[0].length);
+      }
+      if (inContainer && fence.listIndent !== null && line.trim() !== '') {
+        const spaces = /^( *)/.exec(line)![1].length;
+        if (spaces >= fence.listIndent) line = line.slice(fence.listIndent);
+        else inContainer = false;
+      }
+      if (inContainer) {
+        mark(start, end);
+        const closer = /^ {0,3}(`+|~+)[ \t]*$/.exec(line);
+        if (closer && closer[1][0] === fence.marker && closer[1].length >= fence.length) fence = null;
+        start = end;
+        continue;
+      }
+      // A required quote or list marker disappeared: parse the raw line as a
+      // new block, since a fenced block has no lazy container continuation.
+      fence = null;
+      line = rawLine;
+    }
+
     let currentQuoteDepth = 0;
     for (;;) {
       const quote = /^ {0,3}>[ \t]?/.exec(line);
@@ -35,14 +64,7 @@ function markdownCodeMask(body: string): Uint8Array {
       }
     }
 
-    // A fence belongs to the container where it opened. Leaving that quote
-    // or list ends it even when no closing delimiter was written.
-    if (fence && (fence.quoteDepth !== quoteDepth || fence.listIndent !== listIndent)) fence = null;
-    if (fence) {
-      mark(start, end);
-      const closer = /^ {0,3}(`+|~+)[ \t]*$/.exec(line);
-      if (closer && closer[1][0] === fence.marker && closer[1].length >= fence.length) fence = null;
-    } else if (line.trim() === '') {
+    if (line.trim() === '') {
       paragraphActive = false;
     } else {
       const listMarker = /^ {0,3}(?:[-+*]|\d{1,9}[.)])(?:[ \t]+|$)/.exec(line);
