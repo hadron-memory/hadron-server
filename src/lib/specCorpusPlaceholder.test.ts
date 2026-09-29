@@ -277,6 +277,49 @@ describe('reserving over a deleted spec with edges (@codex P2 on #1452)', () => 
     expect(await db.node.findUniqueOrThrow({ where: { id: old.id } }))
       .toMatchObject({ loc: `pas:160:01__deleted-${old.id}`, deletedAt: expect.any(Date) });
   });
+
+  it('frees the tombstone\'s edge addresses, so filling the placeholder with the same relationship writes it', async () => {
+    const target = await resolvers.Mutation.createSpecNode(null, {
+      input: { memoryId: draft.id, loc: 'pas:161', name: 'Target', role: 'spec', nodeType: 'info', content: 'Body.' },
+    } as never, as(admin.id));
+    const old = await resolvers.Mutation.createSpecNode(null, {
+      input: { memoryId: draft.id, loc: 'pas:161:01', name: 'Old', role: 'spec', nodeType: 'info', content: 'Old.',
+        edges: [{ targetId: target.id, name: 'depends-on' }] },
+    } as never, as(admin.id));
+    await resolvers.Mutation.deleteNode(null, { nodeRef: old.id }, as(admin.id));
+
+    const reserved = await reserve(draft.id, 'pas:161:01');
+    await updateSpec(draft.id, 'pas:161:01', {
+      content: 'Written.', edges: [{ targetId: target.id, name: 'depends-on' }],
+    });
+
+    // createMany({ skipDuplicates }) would have dropped this edge silently.
+    expect(await db.edge.findMany({ where: { sourceId: reserved.id }, select: { loc: true, targetId: true } }))
+      .toEqual([{ loc: 'pas:161:01:depends-on:pas:161', targetId: target.id }]);
+    // The tombstone keeps its edge, at the address derived from its archived loc.
+    expect(await db.edge.findMany({ where: { sourceId: old.id }, select: { loc: true } }))
+      .toEqual([{ loc: `pas:161:01__deleted-${old.id}:depends-on:pas:161` }]);
+  });
+
+  it('frees incoming edge addresses in the same memory, so a live source can link to the placeholder', async () => {
+    const source = await resolvers.Mutation.createSpecNode(null, {
+      input: { memoryId: draft.id, loc: 'pas:162', name: 'Source', role: 'spec', nodeType: 'info', content: 'Body.' },
+    } as never, as(admin.id));
+    const old = await resolvers.Mutation.createSpecNode(null, {
+      input: { memoryId: draft.id, loc: 'pas:162:01', name: 'Old', role: 'spec', nodeType: 'info', content: 'Old.' },
+    } as never, as(admin.id));
+    await resolvers.Mutation.createEdge(null, { sourceRef: source.id, targetRef: old.id, name: 'cites' }, as(admin.id));
+    await resolvers.Mutation.deleteNode(null, { nodeRef: old.id }, as(admin.id));
+
+    const reserved = await reserve(draft.id, 'pas:162:01');
+    const linked = await resolvers.Mutation.createEdge(
+      null, { sourceRef: source.id, targetRef: reserved.id, name: 'cites' }, as(admin.id),
+    );
+
+    expect(linked).toMatchObject({ loc: 'pas:162:cites:pas:162:01', targetId: reserved.id });
+    expect(await db.edge.findMany({ where: { targetId: old.id }, select: { loc: true } }))
+      .toEqual([{ loc: `pas:162:cites:pas:162:01__deleted-${old.id}` }]);
+  });
 });
 
 describe('git sync keeps an unwritten placeholder a spec (@codex P2 on #1452)', () => {

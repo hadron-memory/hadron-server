@@ -8,6 +8,7 @@ import { writeNodeCore } from './resolvers.mutation.node.js';
 import { withoutRequestCaches } from './resolvers.helpers.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { acquireLockSet, ancestorLocs } from '../../../lib/nodeSubtreeLock.js';
+import { archiveTombstone } from '../../../lib/tombstoneArchive.js';
 
 export const specCorpusMutations = {
   /**
@@ -61,28 +62,19 @@ export const specCorpusMutations = {
         where: { memoryId, loc, deletedAt: { not: null } },
         select: { id: true },
       });
-      if (tombstone) {
-        await tx.node.update({ where: { id: tombstone.id }, data: { loc: `${loc}__deleted-${tombstone.id}` } });
-      }
+      // (@codex P2, PR #1452) The tombstone's edges go with it: their derived
+      // locs would otherwise collide with the placeholder's once it is filled.
+      if (tombstone) await archiveTombstone(tx, { id: tombstone.id, loc, memoryId });
       const node = await writeNodeCore(
         {
           memoryId, loc, name: name?.trim() || loc, role: 'spec', nodeType: 'info',
-          // (@codex P2, PR #1452) Explicit nulls, not omissions: a create over a
-          // soft-deleted node at this loc revives that row and keeps every field
-          // the input omits, so a deleted spec's text would reappear inside a
-          // "placeholder" that claims to have none.
-          // Every authored field a node input can carry is RESET, not
-          // omitted (@codex P2s, PR #1452): a create over a soft-deleted node
-          // revives that row and keeps whatever the input omits, so a deleted
-          // spec's text, payload and provenance would reappear inside a
-          // "placeholder" that claims to have none. The test that pins this
-          // compares a revived reservation to a fresh one column by column, so
-          // a new node column that leaks fails it.
+          // Every authored field is stated, not omitted, so the placeholder is
+          // empty by construction rather than by relying on a fresh row. The
+          // test that pins this compares a reservation over a tombstone to a
+          // fresh one column by column.
           content: null, abstract: null, description: null, contentType: null,
           alias: null, tags: [], data: null, properties: null,
           llmModel: null, aiAgent: null, isLink: false, objectType: null,
-          // deleteNode leaves a tombstone's outgoing edges attached; an
-          // explicit empty set replaces them.
           edges: [],
         },
         withoutRequestCaches(ctx, tx),
