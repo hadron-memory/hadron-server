@@ -1,6 +1,8 @@
 -- D-2026-09-14-001, #1241 pass one: keep the authored text byte-for-byte.
 -- Persona text historically headed the Worker briefing; when both fields
 -- exist, retain that order with the same paragraph separator used elsewhere.
+-- The UPDATE is duplicated in prisma/pre-push.sql for migrationless dev/test
+-- databases. Change one, change the other.
 UPDATE "agents"
 SET "system_prompt" = CASE
   WHEN "persona_prompt" IS NULL THEN "system_prompt"
