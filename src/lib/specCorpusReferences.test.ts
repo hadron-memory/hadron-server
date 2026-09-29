@@ -6,6 +6,7 @@ import { cleanDb } from '../test/helpers.js';
 import { generateId } from './id.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import { specCorpusRenumberMutations } from '../api/graphql/schema/resolvers.specCorpus.js';
+import { nodeMutations } from '../api/graphql/schema/resolvers.mutation.node.js';
 
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -192,5 +193,52 @@ describe('deleted edges are not references (@codex P2 on #1453)', () => {
     } });
     const unresolved = await resolvers.Query.specUnresolvedReferences(null, { memoryRef: draft.id }, as());
     expect(unresolved.filter((r) => r.kind === 'EDGE')).toEqual([]);
+  });
+});
+
+describe('former URNs use live-address precedence (@codex P2 on #1453)', () => {
+  it('leaves a reference through a reused former URN to the memory that now holds it, and still counts one it cannot resolve there', async () => {
+    const oldUrn = draft.urn;
+    await resolvers.Mutation.updateMemory(null, { id: draft.id, urn: 'specs-draft-renamed' } as never, as());
+    const newUrn = (await db.memory.findUniqueOrThrow({ where: { id: draft.id } })).urn;
+    // Another memory now holds the old URN, with its own live pas:010.
+    const squatter = await resolvers.Mutation.createMemory(null, { orgId: org.id, name: 'specs-draft' }, as());
+    expect(squatter.urn).toBe(oldUrn);
+    await db.node.create({ data: { id: generateId(), memoryId: squatter.id, loc: 'pas:010', name: 'Theirs' } });
+
+    await db.node.update({ where: { id: other.id }, data: {
+      content: `Theirs: hrn:node:${oldUrn}:pas:010. Ours via the old name: hrn:node:${oldUrn}:pas:010:01.`,
+    } });
+
+    const toFeature = await resolvers.Query.specBacklinks(null, { memoryRef: draft.id, loc: 'pas:010' }, as());
+    expect(toFeature.filter((r) => r.kind === 'URN' && r.sourceLoc === 'pas:020')).toEqual([]);
+    const toRule = await resolvers.Query.specBacklinks(null, { memoryRef: draft.id, loc: 'pas:010:01' }, as());
+    expect(toRule.map((r) => r.sourceLoc).sort()).toEqual(['pas:010', 'pas:020']);
+
+    const res = await specCorpusRenumberMutations.renumberSpec(null, { memoryRef: draft.id, fromLoc: 'pas:010', toLoc: 'pas:040' }, as());
+    // pas:020 was edited with a raw write above (unrevisioned drift); the
+    // rewrite must still land rather than conflict on every retry.
+    expect(res.rewrites.find((r) => r.loc === 'pas:020')).toMatchObject({ status: 'REWRITTEN', count: 1 });
+    const after = await content('pas:020');
+    expect(after).toContain(`hrn:node:${oldUrn}:pas:010.`);      // the squatter's node: untouched
+    expect(after).toContain(`hrn:node:${oldUrn}:pas:040:01`);    // ours: rewritten, spelling kept
+    expect(newUrn).not.toBe(oldUrn);
+  });
+});
+
+describe('renumber moves by address, atomically (@codex P2 on #1453)', () => {
+  it('refuses, and rewrites nothing, when the spec was moved after the scan', async () => {
+    const before = await content('pas:020');
+    const spy = vi.spyOn(nodeMutations, 'moveNode').mockImplementationOnce(async (...args) => {
+      // A concurrent request moves the spec away between the scan and the move.
+      await db.node.update({ where: { id: feature.id }, data: { loc: 'pas:777' } });
+      await db.node.update({ where: { id: rule.id }, data: { loc: 'pas:777:01' } });
+      spy.mockRestore();
+      return nodeMutations.moveNode(...args);
+    });
+    expect(await codeOf(specCorpusRenumberMutations.renumberSpec(null, { memoryRef: draft.id, fromLoc: 'pas:010', toLoc: 'pas:040' }, as())))
+      .not.toBe('NO_ERROR');
+    expect((await db.node.findUniqueOrThrow({ where: { id: feature.id } })).loc).toBe('pas:777');
+    expect(await content('pas:020')).toBe(before);
   });
 });

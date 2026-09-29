@@ -11,6 +11,7 @@ import { acquireLockSet, ancestorLocs } from '../../../lib/nodeSubtreeLock.js';
 import { archiveTombstone } from '../../../lib/tombstoneArchive.js';
 import { lockEdgeEndpointMemories } from '../../../lib/edgeEndpointLock.js';
 import { MemoryNotFoundError } from '../../../lib/asset/gate.js';
+import { ensureCurrentNodeRevisionInTransaction } from '../../../lib/nodeRevisionSnapshot.js';
 import { isDraftCorpus } from '../../../lib/specCorpus.js';
 import { InvalidLocError, validateLoc } from '../../../lib/validateLoc.js';
 import {
@@ -149,6 +150,13 @@ interface ScannableCorpus {
   id: string;
   urn: string;
   pattern: RegExp;
+  /**
+   * Former URNs of this corpus that another LIVE memory now holds, mapped to
+   * that memory's id. A reference written with one of them points at that
+   * memory whenever it has a live node at the cited loc (live-address
+   * precedence, as resolveNodeRef applies it), and only otherwise at us.
+   */
+  shadowed: Map<string, string>;
 }
 
 /**
@@ -184,7 +192,43 @@ async function loadScannableCorpus(ctx: Context, memoryRef: string): Promise<Sca
     select: { urn: true },
   });
   const urns = [memory.urn, ...aliases.map((a) => a.urn)].map((u) => u.replace(/^(?:hrn|urn):mem(?:ory)?:/i, ''));
-  return { id, urn: memory.urn, pattern: corpusReferencePattern(urns) };
+  const former = urns.filter((u) => u !== memory.urn);
+  const holders = former.length
+    ? await ctx.db.memory.findMany({ where: { urn: { in: former }, deletedAt: null, id: { not: id } }, select: { id: true, urn: true } })
+    : [];
+  return {
+    id,
+    urn: memory.urn,
+    pattern: corpusReferencePattern(urns),
+    shadowed: new Map(holders.map((h) => [h.urn, h.id])),
+  };
+}
+
+/**
+ * (@codex P2, #1453) Decide which scanned references really point into the
+ * corpus: one written with a former URN that another live memory now holds
+ * belongs to that memory when it has a live node at the cited loc. One query
+ * for the whole scan; the returned predicate is synchronous.
+ */
+async function referenceAcceptor(
+  db: Context['db'],
+  corpus: ScannableCorpus,
+  refs: ReadonlyArray<{ memoryUrn: string; targetLoc: string }>,
+): Promise<(ref: { memoryUrn: string; targetLoc: string }) => boolean> {
+  const candidates = refs.filter((r) => corpus.shadowed.has(r.memoryUrn));
+  if (candidates.length === 0) return () => true;
+  const live = await db.node.findMany({
+    where: {
+      deletedAt: null,
+      OR: candidates.map((r) => ({ memoryId: corpus.shadowed.get(r.memoryUrn)!, loc: r.targetLoc })),
+    },
+    select: { memoryId: true, loc: true },
+  });
+  const taken = new Set(live.map((n) => `${n.memoryId}\u0000${n.loc}`));
+  return (ref) => {
+    const holder = corpus.shadowed.get(ref.memoryUrn);
+    return !holder || !taken.has(`${holder}\u0000${ref.targetLoc}`);
+  };
 }
 
 /** One text-field reference found in the corpus. */
@@ -194,6 +238,7 @@ interface ScannedReference {
   field: ScannedField;
   targetLoc: string;
   urn: string;
+  memoryUrn: string;
 }
 
 interface ScannedNode {
@@ -237,7 +282,7 @@ function scanReferences(nodes: ScannedNode[], pattern: RegExp): ScannedReference
   for (const n of nodes) {
     for (const field of SCANNED_FIELDS) {
       for (const ref of findCorpusReferences(n.fields[field], pattern)) {
-        out.push({ sourceNodeId: n.id, sourceLoc: n.loc, field, targetLoc: ref.targetLoc, urn: ref.urn });
+        out.push({ sourceNodeId: n.id, sourceLoc: n.loc, field, targetLoc: ref.targetLoc, urn: ref.urn, memoryUrn: ref.memoryUrn });
       }
     }
   }
@@ -281,7 +326,9 @@ export const specCorpusQueries = {
   specBacklinks: async (_: unknown, { memoryRef, loc }: { memoryRef: string; loc: string }, ctx: Context): Promise<SpecReferenceOut[]> => {
     const corpus = await loadScannableCorpus(ctx, memoryRef);
     const nodes = await loadCorpusNodes(ctx.db, corpus.id);
-    const text = scanReferences(nodes, corpus.pattern).filter((r) => r.targetLoc === loc).map(fromScan);
+    const scanned = scanReferences(nodes, corpus.pattern);
+    const accept = await referenceAcceptor(ctx.db, corpus, scanned);
+    const text = scanned.filter((r) => r.targetLoc === loc && accept(r)).map(fromScan);
     const target = nodes.find((n) => n.loc === loc);
     const edges = target ? await corpusEdgesTo(ctx.db, corpus.id, [target.id]) : [];
     return [
@@ -303,7 +350,10 @@ export const specCorpusQueries = {
     const nodes = await loadCorpusNodes(ctx.db, corpus.id);
     const byLoc = new Map(nodes.map((n) => [n.loc, n]));
     const out: SpecReferenceOut[] = [];
-    for (const r of scanReferences(nodes, corpus.pattern)) {
+    const scanned = scanReferences(nodes, corpus.pattern);
+    const accept = await referenceAcceptor(ctx.db, corpus, scanned);
+    for (const r of scanned) {
+      if (!accept(r)) continue;
       const target = byLoc.get(r.targetLoc);
       if (!target) out.push({ ...fromScan(r), reason: 'MISSING' });
       else if (target.isPlaceholder) out.push({ ...fromScan(r), reason: 'PLACEHOLDER' });
@@ -340,13 +390,19 @@ type SpecRenumberResultOut = {
 };
 
 /** Plan the reference rewrite of one node for a renumber; null when it cites nothing that moves. */
-function planRewrite(n: ScannedNode, pattern: RegExp, fromLoc: string, toLoc: string) {
+function planRewrite(
+  n: ScannedNode,
+  pattern: RegExp,
+  fromLoc: string,
+  toLoc: string,
+  accept: (ref: { memoryUrn: string; targetLoc: string }) => boolean,
+) {
   const patch: Partial<Record<ScannedField, string>> = {};
   let count = 0;
   for (const field of SCANNED_FIELDS) {
     const before = n.fields[field];
     if (!before) continue;
-    const r = rewriteCorpusReferences(before, pattern, fromLoc, toLoc);
+    const r = rewriteCorpusReferences(before, pattern, fromLoc, toLoc, accept);
     if (r.count > 0) {
       patch[field] = r.text;
       count += r.count;
@@ -394,7 +450,7 @@ export const specCorpusRenumberMutations = {
       });
     }
     const movingNodes = nodes.filter((n) => renumberedLoc(n.loc, fromLoc, toLoc) !== null);
-    const moved = movingNodes
+    let moved = movingNodes
       .map((n) => ({ fromLoc: n.loc, toLoc: renumberedLoc(n.loc, fromLoc, toLoc)! }))
       .sort((a, b) => a.fromLoc.localeCompare(b.fromLoc));
     // (@codex P2, #1453) Exactly the shared mover's collision rule: a node
@@ -419,17 +475,34 @@ export const specCorpusRenumberMutations = {
     if (!dryRun) {
       // Fail before any write, rather than after the move.
       await requireMemoryWriteAccess(ctx, corpus.id);
+      // (@codex P2, #1453) Move BY ADDRESS, not by stable id: the shared mover
+      // revalidates this source under its row lock, so a spec that another
+      // request moved since the scan refuses instead of being moved from
+      // wherever it now is. In a draft the old address leaves no alias, so a
+      // second concurrent renumber of the same spec fails cleanly too.
+      const unrelatedUnderTo = new Set(
+        nodes
+          .filter((n) => (n.loc === toLoc || n.loc.startsWith(`${toLoc}:`)) && !movingNodes.some((m) => m.id === n.id))
+          .map((n) => n.id),
+      );
       await nodeMutations.moveNode(
         null,
-        { sourceRef: source.id, targetUrn: `hrn:node:${corpus.urn}:${toLoc}` },
+        { sourceRef: `hrn:node:${corpus.urn}:${fromLoc}`, targetUrn: `hrn:node:${corpus.urn}:${toLoc}` },
         ctx,
       );
       nodes = await loadCorpusNodes(ctx.db, corpus.id);
+      // Report what actually moved (the mover re-reads the subtree under lock,
+      // so it can differ from the plan), mapped back through the same prefix.
+      moved = nodes
+        .filter((n) => (n.loc === toLoc || n.loc.startsWith(`${toLoc}:`)) && !unrelatedUnderTo.has(n.id))
+        .map((n) => ({ fromLoc: `${fromLoc}${n.loc.slice(toLoc.length)}`, toLoc: n.loc }))
+        .sort((a, b) => a.fromLoc.localeCompare(b.fromLoc));
     }
 
+    const accept = await referenceAcceptor(ctx.db, corpus, scanReferences(nodes, corpus.pattern));
     const rewrites: RewriteOut[] = [];
     for (const n of nodes) {
-      const plan = planRewrite(n, corpus.pattern, fromLoc, toLoc);
+      const plan = planRewrite(n, corpus.pattern, fromLoc, toLoc, accept);
       if (!plan) continue;
       const row: RewriteOut = {
         nodeId: n.id, loc: n.loc, fields: Object.keys(plan.patch), count: plan.count,
@@ -437,7 +510,7 @@ export const specCorpusRenumberMutations = {
       };
       if (!dryRun) {
         try {
-          await rewriteWithRetry(ctx, corpus, n, fromLoc, toLoc);
+          await rewriteWithRetry(ctx, corpus, n, fromLoc, toLoc, accept);
         } catch (e) {
           row.status = 'FAILED';
           row.error = e instanceof Error ? e.message : String(e);
@@ -470,10 +543,22 @@ async function rewriteWithRetry(
   initial: ScannedNode,
   fromLoc: string,
   toLoc: string,
+  accept: (ref: { memoryUrn: string; targetLoc: string }) => boolean,
 ): Promise<void> {
   let node: ScannedNode | undefined = initial;
   for (let attempt = 1; ; attempt++) {
-    const plan = planRewrite(node, corpus.pattern, fromLoc, toLoc);
+    // The plan is computed from the row as stored, which may carry raw drift
+    // (a write that bypassed revisions). writeNodeCore reconciles that drift
+    // into its own revision BEFORE the compare-and-swap, which moves revSeq off
+    // the value read here, and a refused write rolls the reconcile back too, so
+    // every retry would conflict again. Commit the reconcile on its own first,
+    // then read the settled revSeq and plan from that.
+    await ctx.db.$transaction((tx) =>
+      ensureCurrentNodeRevisionInTransaction(tx, node!.id, { expectedMemoryId: corpus.id }),
+    );
+    node = (await loadCorpusNodes(ctx.db, corpus.id)).find((n) => n.id === initial.id);
+    if (!node) return; // deleted meanwhile: nothing left to rewrite
+    const plan = planRewrite(node, corpus.pattern, fromLoc, toLoc, accept);
     if (!plan) return; // a concurrent edit already removed the references
     try {
       await writeNodeCore(
@@ -486,8 +571,6 @@ async function rewriteWithRetry(
     } catch (e) {
       const conflict = e instanceof GraphQLError && e.extensions?.code === 'NODE_WRITE_CONFLICT';
       if (!conflict || attempt >= REWRITE_ATTEMPTS) throw e;
-      node = (await loadCorpusNodes(ctx.db, corpus.id)).find((n) => n.id === initial.id);
-      if (!node) return; // deleted meanwhile: nothing left to rewrite
     }
   }
 }

@@ -38,6 +38,13 @@ export interface TextReferenceMatch {
   targetLoc: string;
   /** Offset of `targetLoc` within the text (the only part a renumber rewrites). */
   locStart: number;
+  /**
+   * The memory URN the reference was written with, normalized to `<org>:<name>`
+   * (the corpus's current URN or one of its former ones). A former URN that
+   * another live memory now holds is resolved with live-address precedence by
+   * the caller, exactly as `resolveNodeRef` does.
+   */
+  memoryUrn: string;
 }
 
 /**
@@ -58,7 +65,7 @@ export function corpusReferencePattern(memoryUrns: readonly string[]): RegExp {
     // Longest first, so a memory whose name extends another's is tried first.
     .sort((a, b) => b.length - a.length);
   return new RegExp(
-    `(?<![A-Za-z0-9._:-])((?:[Hh][Rr][Nn]|[Uu][Rr][Nn]):[Nn][Oo][Dd][Ee]:)?(?:${memories.join('|')})${SEP}(${LOC})(?![A-Za-z0-9_-])`,
+    `(?<![A-Za-z0-9._:-])((?:[Hh][Rr][Nn]|[Uu][Rr][Nn]):[Nn][Oo][Dd][Ee]:)?(${memories.join('|')})${SEP}(${LOC})(?![A-Za-z0-9_-])`,
     'g',
   );
 }
@@ -69,13 +76,14 @@ export function findCorpusReferences(text: string | null | undefined, pattern: R
   const out: TextReferenceMatch[] = [];
   for (const m of text.matchAll(new RegExp(pattern.source, pattern.flags))) {
     const urn = m[0];
-    const targetLoc = m[2];
+    const targetLoc = m[3];
     out.push({
       start: m.index!,
       end: m.index! + urn.length,
       urn,
       targetLoc,
       locStart: m.index! + urn.length - targetLoc.length,
+      memoryUrn: m[2].replace('::', ':'),
     });
   }
   return out;
@@ -100,11 +108,14 @@ export function rewriteCorpusReferences(
   pattern: RegExp,
   fromLoc: string,
   toLoc: string,
+  /** Whether a match really points into the corpus (see TextReferenceMatch.memoryUrn). Default: all do. */
+  accept: (ref: TextReferenceMatch) => boolean = () => true,
 ): { text: string; count: number } {
   let count = 0;
   let out = '';
   let last = 0;
   for (const ref of findCorpusReferences(text, pattern)) {
+    if (!accept(ref)) continue;
     const next = renumberedLoc(ref.targetLoc, fromLoc, toLoc);
     if (next === null) continue;
     out += text.slice(last, ref.locStart) + next;
