@@ -763,6 +763,14 @@ export const specCorpusMintMutations = {
     return ctx.db.$transaction(async (tx) => {
       await tx.$queryRaw`SELECT id FROM memories WHERE id = ${id} FOR NO KEY UPDATE`;
       const txCtx = withoutRequestCaches(ctx, tx);
+      // (@codex P2, PR #1462) Re-authorize under the lock: an org transfer
+      // (updateMemory takes this row FOR UPDATE) may have committed between the
+      // check above and this lock, and minting is irreversible, so the gate
+      // must judge the owner the row has NOW.
+      const lockedOwner = await tx.memory.findUniqueOrThrow({
+        where: { id }, select: { organizationId: true, ownerUserId: true },
+      });
+      await concealUnreadableDenial(txCtx, id, memoryRef, () => requireOwnerOrOrgRole(txCtx, lockedOwner, 'ADMIN'));
       // Re-reads the draft flag and encryption under the lock just taken.
       const corpus = await loadScannableCorpus(txCtx, id);
       const nodes = await tx.node.findMany({

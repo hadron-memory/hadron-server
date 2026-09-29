@@ -190,3 +190,40 @@ describe('mintSpecCorpus serializes with in-flight node writes (#1448)', () => {
     expect(await stateOf()).toBe('DRAFT');
   });
 });
+
+describe('mintSpecCorpus re-authorizes under the lock (@codex P2 on #1462)', () => {
+  it('refuses when the corpus moved to an org the caller cannot manage after the pre-check', async () => {
+    const otherOrg = await db.organization.create({ data: { id: generateId(), name: 'Other Org', urn: 'other-mint.example' } });
+    // Only a READER there: can still read the corpus, so the read gate alone
+    // would not stop the mint; the re-run MANAGE gate must.
+    await db.orgMember.create({ data: { organizationId: otherOrg.id, userId: admin.id, role: 'READER' } });
+    let fired = false;
+    // The org transfer commits between the pre-check and the mint's row lock.
+    const racingDb = new Proxy(db, {
+      get(target, prop, receiver) {
+        if (prop === '$transaction' && !fired) {
+          return async (...args: unknown[]) => {
+            fired = true;
+            await db.memory.update({ where: { id: draft.id }, data: { organizationId: otherOrg.id } });
+            return (target.$transaction as (...a: unknown[]) => unknown)(...args);
+          };
+        }
+        return Reflect.get(target, prop, receiver);
+      },
+    });
+    const code = await codeOf(specCorpusMintMutations.mintSpecCorpus(null, { memoryRef: draft.id }, { ...as(), db: racingDb }));
+    expect(fired).toBe(true);
+    expect(code).not.toBe('NO_ERROR');
+    expect((await db.memory.findUniqueOrThrow({ where: { id: draft.id } })).corpusDraft).toBe(true);
+  });
+});
+
+describe('Memory.corpusMintedAt reads through a narrowed parent (@codex P2 on #1462)', () => {
+  it('reloads the column when the parent was projected without it', async () => {
+    await mint();
+    const at = (await db.memory.findUniqueOrThrow({ where: { id: draft.id } })).corpusMintedAt;
+    expect(at).toBeInstanceOf(Date);
+    expect(await resolvers.Memory.corpusMintedAt({ id: draft.id }, {}, as())).toEqual(at);
+    expect(await resolvers.Memory.corpusMintedAt({ id: draft.id, corpusMintedAt: null }, {}, as())).toBeNull();
+  });
+});

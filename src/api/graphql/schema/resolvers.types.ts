@@ -978,6 +978,13 @@ export const typeResolvers = {
     // #1448 — DRAFT | MINTED, projected from the stored flag in one place. A
     // parent built from a narrowed select may not carry the column; reading it
     // back is correct, while defaulting would report a draft corpus as MINTED.
+    // #1448 (@codex P2, PR #1462) — same read-back as corpusState: a parent
+    // projected without the column must not report a minted corpus as never
+    // minted. `undefined` means "not selected"; null is a real value.
+    corpusMintedAt: async (m: { id: string; corpusMintedAt?: Date | null }, _: unknown, ctx: Context) =>
+      m.corpusMintedAt !== undefined
+        ? m.corpusMintedAt
+        : (await ctx.db.memory.findUniqueOrThrow({ where: { id: m.id }, select: { corpusMintedAt: true } })).corpusMintedAt,
     corpusState: async (m: { id: string; corpusDraft?: boolean }, _: unknown, ctx: Context) =>
       corpusStateOf(
         typeof m.corpusDraft === 'boolean'
