@@ -1665,7 +1665,8 @@ model Agent {
   /// Display name of this agent.
   name                 String
   description          String?
-  /// System prompt sent to the LLM at session start.
+  /// Agent prompt template. {{name}}/{{role}} bind to the Worker's identity
+  /// for a worker briefing, or to this Agent's name/role for a chat.
   systemPrompt         String?         @map("system_prompt")
   /// Memory containing conversation designs (stages, prompts,
   /// partials). Universally read-only from any App context post-008
@@ -1737,11 +1738,6 @@ model Agent {
   /// A dedicated column so roster/casting queries can filter without
   /// parsing the prompt.
   personaRole          String?         @map("persona_role")
-  /// The persona identity TEMPLATE ("You are {{name}}, a senior backend
-  /// engineer ..."). `{{name}}` is bound at casting time with the Worker's
-  /// name (cor:agt:020:01); by CONVENTION clients compose the bound result
-  /// into the head of systemPrompt — the server does no injection.
-  personaPrompt        String?         @map("persona_prompt")
   createdAt            DateTime        @default(now()) @map("created_at")
   createdBy            String?         @map("created_by")
   updatedAt            DateTime?       @updatedAt @map("updated_at")
@@ -3281,7 +3277,7 @@ model AppAgent {
 
 /// #974 — a **Worker**: the named casting of an installed Agent into an App
 /// (cor:dmo:050:11, cor:agt:020:01). The Agent carries the reusable persona
-/// dressing (`personaRole` + the `personaPrompt` template); the Worker is the
+/// dressing (`personaRole` + the `systemPrompt` template); the Worker is the
 /// local named identity ("Iris") that does attributable work. Casting is
 /// opt-in (an installed agent with no Worker row is just an agent) and
 /// requires the agent installed in the App at cast time; multiple Workers may

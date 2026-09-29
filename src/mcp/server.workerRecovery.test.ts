@@ -60,7 +60,7 @@ beforeEach(async () => {
     data: {
       id: generateId(), organizationId: org.id, urn: `${org.urn}:backend`,
       name: 'Backend', visibility: 'ORGANIZATION',
-      personaRole: 'backend-engineer', personaPrompt: PERSONA_TEMPLATE,
+      personaRole: 'backend-engineer', systemPrompt: PERSONA_TEMPLATE,
     },
   });
   app = await db.app.create({
@@ -126,7 +126,7 @@ describe('#1015 — hadron_get_worker re-fetches the boot briefing', () => {
       data: {
         id: generateId(), organizationId: org.id, urn: `${org.urn}:null-stamp`,
         name: 'Null stamp', visibility: 'ORGANIZATION',
-        personaRole: 'archivist', personaPrompt: 'You are {{name}}, the {{role}}.',
+        personaRole: 'archivist', systemPrompt: 'You are {{name}}, the {{role}}.',
         updatedAt: null,
       },
     });
@@ -205,7 +205,7 @@ describe('#1015 — hadron_get_worker re-fetches the boot briefing', () => {
 
     await db.agent.update({
       where: { id: agent.id },
-      data: { personaPrompt: 'You are {{name}}. The team ships on Fridays.' },
+      data: { systemPrompt: 'You are {{name}}. The team ships on Fridays.' },
     });
 
     const after = await srv.callToolText('hadron_get_worker', { workerRef: 'Iris' });
@@ -405,7 +405,7 @@ describe('#1015 — hadron_get_worker re-fetches the boot briefing', () => {
   });
 
   it('says so plainly when there is no briefing to give', async () => {
-    await db.agent.update({ where: { id: agent.id }, data: { personaPrompt: null } });
+    await db.agent.update({ where: { id: agent.id }, data: { systemPrompt: null } });
     await worker('Bare', 'bare');
     const out = await createTestableMcpServer(hybridAuth()).callToolText('hadron_get_worker', {
       workerRef: 'Bare',
@@ -614,7 +614,7 @@ describe('#1010 — a casting\'s individuality is amendable', () => {
   });
 
   it('does not touch a sibling casting of the same role agent', async () => {
-    // The whole reason the role agent's shared personaPrompt cannot hold this.
+    // The whole reason the role agent's shared systemPrompt cannot hold this.
     await worker('Iris', 'iris');
     const fred = await worker('Fred', 'fred');
     await createTestableMcpServer(hybridAuth()).callToolText('hadron_update_worker', {

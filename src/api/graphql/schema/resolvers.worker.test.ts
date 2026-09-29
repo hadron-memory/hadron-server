@@ -2,7 +2,7 @@
  * #974 (re-cut) — the Worker model (spec cor:dmo:050:11, cor:agt:020:01/:02).
  *
  * A persona is universal DRESSING on an Agent (`personaRole` + the
- * `personaPrompt` template with {{name}}/{{role}} placeholders); the Worker is
+ * `systemPrompt` template with {{name}}/{{role}} placeholders); the Worker is
  * the named casting of an installed agent into an App — the local identity
  * ("Iris") that does attributable work. `castWorker` mints nothing: it casts
  * an EXISTING installed agent under a name, allocating the name against the
@@ -140,14 +140,14 @@ beforeEach(async () => {
   await createRoleNode(teamAgent.systemMemoryId, 'backend-engineer');
 
   // The role-agent — the persona dressing lives HERE (#974): personaRole is
-  // the role-resolution key, personaPrompt the {{name}}/{{role}} template.
+  // the role-resolution key, systemPrompt the {{name}}/{{role}} template.
   const role = await M.createAgent(
     {},
     {
       orgId: org.id,
       name: 'Backend Engineer',
       personaRole: 'backend-engineer',
-      personaPrompt: TEMPLATE,
+      systemPrompt: TEMPLATE,
     },
     ctx(admin.id),
   );
@@ -650,7 +650,7 @@ describe('castWorker — user-owned App (spec 047)', () => {
     });
     const agent = await M.createAgent(
       {},
-      { name: 'My Engineer', personaRole: 'backend-engineer', personaPrompt: TEMPLATE },
+      { name: 'My Engineer', personaRole: 'backend-engineer', systemPrompt: TEMPLATE },
       ctx(owner.id),
     );
     personalAgent = { id: agent.id };
@@ -1254,7 +1254,7 @@ describe('Worker field resolvers', () => {
   });
 
   it('override-only when the agent carries no template', async () => {
-    // The team agent has no personaPrompt dressing.
+    // The team agent has no systemPrompt dressing.
     const worker = await cast({
       agentRef: teamAgent.id,
       role: 'coordinator',

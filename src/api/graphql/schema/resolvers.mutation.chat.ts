@@ -18,6 +18,7 @@ import {
   agentSlugFromUrn,
 } from '../../../lib/urn.js';
 import { compileTemplate } from '../../../lib/template.js';
+import { applyPersonaTemplate } from '../../../lib/personaDescription.js';
 import {
   evaluateEdgeCondition,
   userMessageFor,
@@ -538,9 +539,10 @@ export const chatMutations = {
       // messages parent), so it is two writes.
       recordNodeUsage(ctx.db, 'write', startedNodes, ctx);
 
-      // Prepend the agent's system prompt to the compiled stage prompt
+      // Bind the Agent's own identity on the chat path. Worker briefings bind
+      // the same template to the Worker's name and role instead.
       if (agent.systemPrompt) {
-        systemMessage = agent.systemPrompt + '\n\n' + systemMessage;
+        systemMessage = applyPersonaTemplate(agent.systemPrompt, agent.name, agent.personaRole ?? '') + '\n\n' + systemMessage;
       }
 
       return { chatId: chatLoc, systemMessage, tools, conversationName: convName, stageName: firstStage };
@@ -876,9 +878,9 @@ export const chatMutations = {
           systemMessage = promptContent;
         }
 
-        // Prepend agent system prompt
+        // Rebind on each chat turn so edits to the Agent's prompt take effect.
         if (agent?.systemPrompt) {
-          systemMessage = agent.systemPrompt + '\n\n' + systemMessage;
+          systemMessage = applyPersonaTemplate(agent.systemPrompt, agent.name, agent.personaRole ?? '') + '\n\n' + systemMessage;
         }
 
         // Build tools from hierarchical extraction spec

@@ -67,7 +67,7 @@ import {
 import { recordUrnRename } from '../../../lib/urnAlias.js';
 
 /**
- * #928/#929 review: persona dressing fields are trimmed, and a blank-after-trim
+ * #928/#929 review: persona role is trimmed, and a blank-after-trim
  * value is NULL (absent on create, clear on update). undefined passes through
  * (omitted arg = no change on update).
  */
@@ -108,7 +108,6 @@ export interface CreateAgentCoreInput {
   type?: 'ASSISTANT' | 'CHATBOT';
   surfaces?: string[];
   personaRole?: string | null;
-  personaPrompt?: string | null;
 }
 
 /**
@@ -116,8 +115,8 @@ export interface CreateAgentCoreInput {
  * visibility defaults, and the one transaction that provisions the system
  * memory alongside the Agent row. (Extracted for #935; the Worker re-cut of
  * #974 removed its persona-minting caller, so createAgent is its one caller
- * again.) Persona dressing fields (`personaRole`/`personaPrompt` —
- * cor:agt:020:01) are normalized here (blank-after-trim ⇒ NULL); the named
+ * again.) The persona role (cor:agt:020:01) is normalized here
+ * (blank-after-trim ⇒ NULL); the named
  * identity lives on the Worker entity, never here.
  */
 export async function createAgentCore(ctx: Context, input: CreateAgentCoreInput) {
@@ -136,7 +135,6 @@ export async function createAgentCore(ctx: Context, input: CreateAgentCoreInput)
   // #929 review: normalize persona dressing inputs before anything touches
   // them.
   const personaRoleNorm = normalizePersonaField(input.personaRole);
-  const personaPromptNorm = normalizePersonaField(input.personaPrompt);
   // #574: slugify the display name — a raw name would persist a
   // case-sensitive / space-bearing URN (and the system memory URN derives
   // from this one, so it inherits the clean slug).
@@ -268,7 +266,7 @@ export async function createAgentCore(ctx: Context, input: CreateAgentCoreInput)
         type: inferredType,
         surfaces: surfaces ?? defaultSurfaces,
         // #928 persona dressing — pure metadata (see schema.prisma).
-        personaRole: personaRoleNorm, personaPrompt: personaPromptNorm,
+        personaRole: personaRoleNorm,
         createdBy: ctx.userId ?? ctx.clientId ?? null,
       },
       include: AGENT_INCLUDE,
@@ -361,7 +359,7 @@ export async function syncSystemMemoryName(
 export const agentMutations = {
     createAgent: async (
       _: unknown,
-      { orgId, name, description, systemPrompt, systemMemoryId, visibility, type, surfaces, personaRole, personaPrompt }: { orgId?: string | null; name: string; description?: string; systemPrompt?: string; systemMemoryId?: string; visibility?: string; type?: 'ASSISTANT' | 'CHATBOT'; surfaces?: string[]; personaRole?: string; personaPrompt?: string },
+      { orgId, name, description, systemPrompt, systemMemoryId, visibility, type, surfaces, personaRole }: { orgId?: string | null; name: string; description?: string; systemPrompt?: string; systemMemoryId?: string; visibility?: string; type?: 'ASSISTANT' | 'CHATBOT'; surfaces?: string[]; personaRole?: string },
       ctx: Context,
     ) => {
       // spec 047: an agent is owned by EXACTLY ONE of an org or a user. `orgId`
@@ -419,18 +417,16 @@ export const agentMutations = {
         type,
         surfaces,
         personaRole,
-        personaPrompt,
       });
     },
 
     updateAgent: async (
       _: unknown,
-      { ref, name, urn, description, systemPrompt, systemMemoryId, visibility, listedOnMarketplace, type, surfaces, personaRole, personaPrompt, registerDefaults }: { ref: string; name?: string; urn?: string; description?: string; systemPrompt?: string; systemMemoryId?: string; visibility?: string; listedOnMarketplace?: boolean; type?: 'ASSISTANT' | 'CHATBOT'; surfaces?: string[]; personaRole?: string | null; personaPrompt?: string | null; registerDefaults?: { mentionOnly?: boolean | null } | null },
+      { ref, name, urn, description, systemPrompt, systemMemoryId, visibility, listedOnMarketplace, type, surfaces, personaRole, registerDefaults }: { ref: string; name?: string; urn?: string; description?: string; systemPrompt?: string; systemMemoryId?: string; visibility?: string; listedOnMarketplace?: boolean; type?: 'ASSISTANT' | 'CHATBOT'; surfaces?: string[]; personaRole?: string | null; registerDefaults?: { mentionOnly?: boolean | null } | null },
       ctx: Context,
     ) => {
       // #929 review: normalize persona dressing (blank-after-trim clears).
       const personaRoleNorm = normalizePersonaField(personaRole);
-      const personaPromptNorm = normalizePersonaField(personaPrompt);
       // #789 / cor:api:140 — was a PK-only findUniqueOrThrow, so a caller
       // holding a URN or handle had to pre-resolve it. resolveAgentRef is a
       // pure lookup and does NOT authorize (#554): the resource-scoped
@@ -740,7 +736,6 @@ export const agentMutations = {
           // #928 persona dressing — pure metadata. An explicit null (or a
           // blank-after-trim string) clears the field; omitted preserves.
           ...(personaRoleNorm !== undefined ? { personaRole: personaRoleNorm } : {}),
-          ...(personaPromptNorm !== undefined ? { personaPrompt: personaPromptNorm } : {}),
           // Spec 049 Phase 5: the install-row defaults — a scalar declaration,
           // stored as given; null clears to the platform defaults.
           ...(registerDefaults !== undefined

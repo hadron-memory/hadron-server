@@ -3,7 +3,7 @@
  * hadron-concept 2026-08-14-agent-persona-scoping).
  *
  * An Agent carries only the reusable persona dressing — `personaRole` (the
- * cast-list role its template answers) and `personaPrompt` (the identity
+ * cast-list role its template answers) and `systemPrompt` (the identity
  * TEMPLATE with `{{name}}`/`{{role}}` placeholders). The NAMED identity
  * ("Iris") is a Worker row (cor:dmo:050:11), so `createAgent`/`updateAgent`
  * accept no `personaName` at all; name permanence lives on Worker rows,
@@ -78,33 +78,33 @@ beforeEach(async () => {
   });
 });
 
-describe('createAgent — persona dressing (#928, re-cut by #974)', () => {
-  it('persists personaRole/personaPrompt — pure dressing, no named identity on agents', async () => {
+describe('createAgent — prompt template and persona role (#1241)', () => {
+  it('persists personaRole/systemPrompt without a named identity on agents', async () => {
     const agent = await M.createAgent(
       {},
       {
         orgId: orgA.id,
         name: 'Backend Worker',
         personaRole: 'backend-engineer',
-        personaPrompt: 'You are {{name}}, a senior {{role}}.',
+        systemPrompt: 'You are {{name}}, a senior {{role}}.',
       },
       ctx(adminA.id),
     );
     expect(agent.personaRole).toBe('backend-engineer');
-    expect(agent.personaPrompt).toBe('You are {{name}}, a senior {{role}}.');
+    expect(agent.systemPrompt).toBe('You are {{name}}, a senior {{role}}.');
     // #974: the named identity lives on Worker rows — the Agent row carries
     // no personaName column at all.
     expect(agent.personaName).toBeUndefined();
   });
 
-  it('trims dressing fields; blank-after-trim is stored as NULL (#929 review)', async () => {
+  it('trims personaRole while preserving systemPrompt text', async () => {
     const blank = await M.createAgent(
       {},
-      { orgId: orgA.id, name: 'Blank One', personaRole: ' ', personaPrompt: '' },
+      { orgId: orgA.id, name: 'Blank One', personaRole: ' ', systemPrompt: '' },
       ctx(adminA.id),
     );
     expect(blank.personaRole).toBeNull();
-    expect(blank.personaPrompt).toBeNull();
+    expect(blank.systemPrompt).toBe('');
     const trimmed = await M.createAgent(
       {},
       { orgId: orgA.id, name: 'Trimmed One', personaRole: '  backend-engineer  ' },
@@ -114,35 +114,35 @@ describe('createAgent — persona dressing (#928, re-cut by #974)', () => {
   });
 });
 
-describe('updateAgent — persona dressing (#928, re-cut by #974)', () => {
-  it('sets, preserves-when-omitted, and clears on explicit null / blank', async () => {
+describe('updateAgent — prompt template and persona role (#1241)', () => {
+  it('updates the prompt while normalizing personaRole', async () => {
     const agent = await M.createAgent({}, { orgId: orgA.id, name: 'Worker B' }, ctx(adminA.id));
 
     const set = await M.updateAgent(
       {},
-      { ref: agent.id, personaRole: ' backend-engineer ', personaPrompt: 'You are {{name}}.' },
+      { ref: agent.id, personaRole: ' backend-engineer ', systemPrompt: 'You are {{name}}.' },
       ctx(adminA.id),
     );
     expect(set.personaRole).toBe('backend-engineer');
-    expect(set.personaPrompt).toBe('You are {{name}}.');
+    expect(set.systemPrompt).toBe('You are {{name}}.');
 
     // Omitted preserves.
     const kept = await M.updateAgent(
       {},
-      { ref: agent.id, personaPrompt: 'You are {{name}}, a {{role}}.' },
+      { ref: agent.id, systemPrompt: 'You are {{name}}, a {{role}}.' },
       ctx(adminA.id),
     );
     expect(kept.personaRole).toBe('backend-engineer');
-    expect(kept.personaPrompt).toBe('You are {{name}}, a {{role}}.');
+    expect(kept.systemPrompt).toBe('You are {{name}}, a {{role}}.');
 
-    // Explicit null clears; blank-after-trim clears too (#929 review).
+    // Explicit null clears the role; omitted prompt keeps its text.
     const cleared = await M.updateAgent(
       {},
-      { ref: agent.id, personaRole: null, personaPrompt: '   ' },
+      { ref: agent.id, personaRole: null },
       ctx(adminA.id),
     );
     expect(cleared.personaRole).toBeNull();
-    expect(cleared.personaPrompt).toBeNull();
+    expect(cleared.systemPrompt).toBe('You are {{name}}, a {{role}}.');
   });
 });
 
