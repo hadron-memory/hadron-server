@@ -2341,20 +2341,26 @@ export async function requireMemoryWriteAccess(ctx: Context, memoryId: string): 
     if (member && (ROLE_ORDER[member.role] ?? -1) >= ROLE_ORDER['CONTRIBUTOR']) return;
   }
 
-  // Cross-org subscription with CONTRIBUTOR role?
-  const userOrgs = await ctx.db.orgMember.findMany({
-    where: {
-      userId: ctx.userId,
-      deletedAt: null,
-      role: { in: ['CONTRIBUTOR', 'ADMIN', 'OWNER'] as any },
-    },
-    select: { organizationId: true },
-  });
-  for (const uo of userOrgs) {
-    const memorySub = await ctx.db.memorySubscription.findUnique({
-      where: { memoryId_organizationId: { memoryId, organizationId: uo.organizationId } },
+  // Cross-org subscription with CONTRIBUTOR role — for every class EXCEPT
+  // group (#3781): createMemorySubscription only admits PUBLIC memories and
+  // group visibility is CHECK-forced to GROUP, so a group-subscription row
+  // is API-invalid legacy state. For group, the MemoryMember writer/owner
+  // check above is the exclusive write grant (cor:acl:010:01).
+  if (memory.class !== 'group') {
+    const userOrgs = await ctx.db.orgMember.findMany({
+      where: {
+        userId: ctx.userId,
+        deletedAt: null,
+        role: { in: ['CONTRIBUTOR', 'ADMIN', 'OWNER'] as any },
+      },
+      select: { organizationId: true },
     });
-    if (memorySub && (ROLE_ORDER[memorySub.role] ?? -1) >= ROLE_ORDER['CONTRIBUTOR']) return;
+    for (const uo of userOrgs) {
+      const memorySub = await ctx.db.memorySubscription.findUnique({
+        where: { memoryId_organizationId: { memoryId, organizationId: uo.organizationId } },
+      });
+      if (memorySub && (ROLE_ORDER[memorySub.role] ?? -1) >= ROLE_ORDER['CONTRIBUTOR']) return;
+    }
   }
 
   throw memoryWriteForbidden();

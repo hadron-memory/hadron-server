@@ -577,7 +577,10 @@ export const memoryQueries = {
             // user-owned rows excluded (#758). MemoryMember rows hard-delete
             // (FR-038), so `some` is liveness.
             { class: 'group' as any, appId: null, userMemoryOfAgentId: null, ownerUserId: null, ...(groupOrgBound ? { organizationId: groupOrgBound } : {}), memberships: { some: { userId: ctx.userId } } },
-            { class: { notIn: ['personal', 'private'] as any }, subscriptions: { some: { organizationId: { in: orgIds } } } },
+            // GROUP excluded (#3781): a group-subscription row is API-invalid
+            // state (createMemorySubscription admits PUBLIC only; group
+            // visibility is CHECK-forced to GROUP) — never a listing grant.
+            { class: { notIn: ['personal', 'private', 'group'] as any }, subscriptions: { some: { organizationId: { in: orgIds } } } },
             // Admin impersonation: the identity-scoped clauses are dropped —
             // the shared-org session never lists the target's personal/private
             // or user-owned memories (matches getAccessibleMemoryIds).

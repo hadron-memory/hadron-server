@@ -43,6 +43,7 @@ let memoryMemberNoOrgRole: { id: string };
 let memoryMemberWriter: { id: string };
 let memoryMemberOwner: { id: string };
 let subscriberContributor: { id: string };
+let publicKnowledgeMem: { id: string };
 let crossOrgMember: { id: string };
 
 beforeEach(async () => {
@@ -128,6 +129,16 @@ beforeEach(async () => {
   });
   await db.memorySubscription.create({
     data: { memoryId: groupMem.id, organizationId: orgB.id, role: 'CONTRIBUTOR' },
+  });
+  // The LEGITIMATE subscription surface: a PUBLIC knowledge memory org B
+  // subscribes to. Group-subscription rows above are API-invalid state
+  // (createMemorySubscription refuses non-PUBLIC; group visibility is
+  // CHECK-forced to GROUP) — knowledge stays the subscription arm's class.
+  publicKnowledgeMem = await db.memory.create({
+    data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:pk`, name: 'pk', class: 'knowledge', visibility: 'PUBLIC' },
+  });
+  await db.memorySubscription.create({
+    data: { memoryId: publicKnowledgeMem.id, organizationId: orgB.id, role: 'CONTRIBUTOR' },
   });
 });
 
@@ -258,8 +269,29 @@ describe('#1208 group read gates vs MemoryMember (cor:acl:010:01)', () => {
     await expect(requireMemoryWriteAccess(gqlCtx(memoryMemberOwner.id), groupMem.id)).resolves.toBeUndefined(); // RED before the write fix
   });
 
-  it('a cross-org subscription CONTRIBUTOR still writes — the subscription grant surface is unchanged (#3677)', async () => {
-    await expect(requireMemoryWriteAccess(gqlCtx(subscriberContributor.id), groupMem.id)).resolves.toBeUndefined(); // parity pin, green on both sides
+  it('a cross-org subscription CONTRIBUTOR gets NOTHING on a group memory — the row is API-invalid state (#3781)', async () => {
+    // createMemorySubscription only admits PUBLIC memories and group
+    // visibility is CHECK-forced to GROUP, so a group-subscription row can
+    // only exist as legacy/manual DB state. The gates must not honor it as
+    // a grant (Baloo #3781, Ada #3782): read, list, and write all deny.
+    expect(await getOrgReadableMemoryIds(db, subscriberContributor.id)).not.toContain(groupMem.id); // RED before the subscription-arm fix
+    const Q = resolvers.Query as any;
+    const list = await Q.memories({}, {}, gqlCtx(subscriberContributor.id));
+    expect(list.items.map((m: { id: string }) => m.id)).not.toContain(groupMem.id); // RED before the subscription-arm fix
+    await expect(requireMemoryWriteAccess(gqlCtx(subscriberContributor.id), groupMem.id)).rejects.toMatchObject({
+      extensions: { code: 'FORBIDDEN' },
+    }); // RED before the subscription-arm fix — the shipped parity pin asserted the opposite
+  });
+
+  it('the subscription arm still serves its LEGITIMATE class: PUBLIC knowledge stays reachable (#3781)', async () => {
+    // subscriberContributor's org B holds a real subscription to a PUBLIC
+    // knowledge memory — the arm's only lawful shape. Narrowing group out
+    // must not narrow knowledge with it.
+    expect(await getOrgReadableMemoryIds(db, subscriberContributor.id)).toContain(publicKnowledgeMem.id);
+    const Q = resolvers.Query as any;
+    const list = await Q.memories({}, {}, gqlCtx(subscriberContributor.id));
+    expect(list.items.map((m: { id: string }) => m.id)).toContain(publicKnowledgeMem.id);
+    await expect(requireMemoryWriteAccess(gqlCtx(subscriberContributor.id), publicKnowledgeMem.id)).resolves.toBeUndefined();
   });
 
   it('effectiveAccess mirrors the enforced gates: no ORG_ROLE for group, MEMORY_MEMBER is the source (#3677)', async () => {

@@ -79,11 +79,16 @@ export async function getOrgReadableMemoryIds(
               // this, a knowledge memory provisioned for App A would leak to
               // every org member (codex review on #660).
               { organizationId: { in: orgIds }, class: 'knowledge' as any, appId: null, userMemoryOfAgentId: null },
-              // Cross-org subscriptions never reach owner-only personal/private.
-              // `deletedAt: null` on the subscription so a REVOKED (soft-deleted)
-              // subscription stops granting read. `appId: null` — app-scoped
-              // memories are App-internal, never cross-org-subscription-readable.
-              { class: { notIn: ['personal', 'private'] as any }, appId: null, userMemoryOfAgentId: null, subscriptions: { some: { organizationId: { in: orgIds }, deletedAt: null } } },
+              // Cross-org subscriptions never reach owner-only personal/private,
+              // and never GROUP (#3781): createMemorySubscription only admits
+              // PUBLIC memories while group visibility is CHECK-forced to
+              // GROUP, so a group-subscription row is API-invalid legacy state,
+              // not a grant cor:acl:010:01's exclusive MemoryMember audience
+              // should honor. `deletedAt: null` on the subscription so a
+              // REVOKED (soft-deleted) subscription stops granting read.
+              // `appId: null` — app-scoped memories are App-internal, never
+              // cross-org-subscription-readable.
+              { class: { notIn: ['personal', 'private', 'group'] as any }, appId: null, userMemoryOfAgentId: null, subscriptions: { some: { organizationId: { in: orgIds }, deletedAt: null } } },
             ]
           : []),
         // #1208 / cor:acl:010:01 — group memories are readable ONLY through
