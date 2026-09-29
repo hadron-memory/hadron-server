@@ -82,6 +82,15 @@ export function findCorpusReferences(text: string | null | undefined, pattern: R
   for (const m of text.matchAll(new RegExp(pattern.source, pattern.flags))) {
     const urn = m[0];
     const targetLoc = m[3];
+    // (@codex P2, #1453) One separator style throughout: all legacy `:` or all
+    // canonical `::`. resolveNodeRef rejects a mix (`org::memory:loc`,
+    // `org:memory::loc`), so it is not a reference. The org has no `:`, so the
+    // character after the org's first `:` tells the org/memory separator.
+    const memory = m[2];
+    const orgEnd = memory.indexOf(':');
+    const memorySep = memory[orgEnd + 1] === ':' ? '::' : ':';
+    const locSep = urn.slice((m[1] ?? '').length + memory.length, urn.length - targetLoc.length);
+    if (memorySep !== locSep) continue;
     out.push({
       start: m.index!,
       end: m.index! + urn.length,

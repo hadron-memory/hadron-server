@@ -40,6 +40,14 @@ describe('findCorpusReferences', () => {
       .toEqual({ text: 'hrn:node:micromentor.org::specs-draft::pas:010::child', count: 0 });
   });
 
+  it('rejects mixed separator styles, which the resolver rejects too (@codex P2 on #1453)', () => {
+    expect(locs('hrn:node:micromentor.org::specs-draft:pas:010')).toEqual([]);
+    expect(locs('hrn:node:micromentor.org:specs-draft::pas:010')).toEqual([]);
+    expect(locs('micromentor.org::specs-draft:pas:010 then micromentor.org::specs-draft::pas:020')).toEqual(['pas:020']);
+    expect(rewriteCorpusReferences('hrn:node:micromentor.org::specs-draft:pas:010', P, 'pas:010', 'pas:040'))
+      .toEqual({ text: 'hrn:node:micromentor.org::specs-draft:pas:010', count: 0 });
+  });
+
   it('does not swallow sentence punctuation, but keeps dots inside an atom', () => {
     expect(locs('Cite micromentor.org:specs-draft:pas:010:01.')).toEqual(['pas:010:01']);
     expect(locs('Cite micromentor.org:specs-draft:v1.2:intro, then')).toEqual(['v1.2:intro']);
