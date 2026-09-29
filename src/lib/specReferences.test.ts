@@ -32,6 +32,14 @@ describe('findCorpusReferences', () => {
     expect(locs('hrn:mem:micromentor.org:specs-draft and nothing else')).toEqual([]);
   });
 
+  it('does not match inside a canonical URN whose final :: leaf is a deeper loc (@codex P2 on #1453)', () => {
+    // resolveNodeRef: memory `micromentor.org::specs-draft::pas:010`, loc `child`.
+    expect(locs('hrn:node:micromentor.org::specs-draft::pas:010::child')).toEqual([]);
+    expect(locs('micromentor.org:specs-draft:pas:010::child and micromentor.org::specs-draft::pas:020.')).toEqual(['pas:020']);
+    expect(rewriteCorpusReferences('hrn:node:micromentor.org::specs-draft::pas:010::child', P, 'pas:010', 'pas:040'))
+      .toEqual({ text: 'hrn:node:micromentor.org::specs-draft::pas:010::child', count: 0 });
+  });
+
   it('does not swallow sentence punctuation, but keeps dots inside an atom', () => {
     expect(locs('Cite micromentor.org:specs-draft:pas:010:01.')).toEqual(['pas:010:01']);
     expect(locs('Cite micromentor.org:specs-draft:v1.2:intro, then')).toEqual(['v1.2:intro']);

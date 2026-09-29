@@ -65,7 +65,12 @@ export function corpusReferencePattern(memoryUrns: readonly string[]): RegExp {
     // Longest first, so a memory whose name extends another's is tried first.
     .sort((a, b) => b.length - a.length);
   return new RegExp(
-    `(?<![A-Za-z0-9._:-])((?:[Hh][Rr][Nn]|[Uu][Rr][Nn]):[Nn][Oo][Dd][Ee]:)?(${memories.join('|')})${SEP}(${LOC})(?![A-Za-z0-9_-])`,
+    // (@codex P2, #1453) Nor followed by a `:` that continues the address: in
+    // the canonical grammar the loc is the FINAL `::` leaf (resolveNodeRef), so
+    // `<corpus>::pas:010::x` names loc `x` in a deeper memory, not `pas:010`
+    // here. Rejecting only `::` is not enough, since the loc would backtrack to
+    // `pas`; a real loc already consumes every `:<atom>` greedily.
+    `(?<![A-Za-z0-9._:-])((?:[Hh][Rr][Nn]|[Uu][Rr][Nn]):[Nn][Oo][Dd][Ee]:)?(${memories.join('|')})${SEP}(${LOC})(?![A-Za-z0-9_-]|:[A-Za-z0-9:])`,
     'g',
   );
 }
