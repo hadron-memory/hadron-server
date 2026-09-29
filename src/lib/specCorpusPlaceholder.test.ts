@@ -322,3 +322,19 @@ describe('a placeholder over a tombstone is indistinguishable from a fresh one (
     expect(differing.map((k) => `${k}: ${JSON.stringify((b as Record<string, unknown>)[k])}`)).toEqual([]);
   });
 });
+
+describe('a kept placeholder role is not a sync change (@codex P2 on #1452)', () => {
+  it('records no revision for a role-only mismatch, sync after sync', async () => {
+    const reserved = await reserve(draft.id, 'pas:190:01');
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const revisions = () => db.nodeRevision.count({ where: { nodeId: reserved.id } });
+    const before = await revisions();
+    for (let i = 0; i < 2; i++) {
+      const current = await db.node.findUniqueOrThrow({ where: { id: reserved.id } });
+      await db.$transaction((tx) => updateNodeFromGitSync(tx, current, { role: null }, undefined, draft.id));
+    }
+    warn.mockRestore();
+    expect(await revisions()).toBe(before);
+    expect(await row(draft.id, 'pas:190:01')).toMatchObject({ role: 'spec', isPlaceholder: true });
+  });
+});
