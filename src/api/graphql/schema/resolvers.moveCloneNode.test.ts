@@ -59,6 +59,44 @@ beforeEach(async () => {
 });
 
 describe('moveNode (#564)', () => {
+  it('holds the source encryption state before a same-memory move can snapshot history', async () => {
+    const alpha = await createDbNode(db, { loc: 'alpha', memoryId: memA.id, content: 'plain source' });
+    let reached!: () => void;
+    let release!: () => void;
+    const atSubtreeRead = new Promise<void>((resolve) => { reached = resolve; });
+    const resume = new Promise<void>((resolve) => { release = resolve; });
+    let moved: Promise<unknown> | undefined;
+    let flip: Promise<unknown> | undefined;
+    try {
+      moved = db.$transaction(async (tx) => {
+        const findNodes = tx.node.findMany.bind(tx.node);
+        let held = false;
+        vi.spyOn(tx.node, 'findMany').mockImplementation((async (args: Parameters<typeof findNodes>[0]) => {
+          const rows = await findNodes(args);
+          if (!held && args?.where?.memoryId === memA.id) {
+            held = true;
+            reached();
+            await resume;
+          }
+          return rows;
+        }) as unknown as typeof tx.node.findMany);
+        await moveNodeSubtree(tx, {
+          source: alpha, destLoc: 'alpha-renamed', editor: { userId: user.id },
+        });
+      }, { timeout: 15_000 });
+      await atSubtreeRead;
+      let flipped = false;
+      flip = db.memory.update({ where: { id: memA.id }, data: { isEncrypted: true } })
+        .then(() => { flipped = true; });
+      await new Promise((resolve) => setTimeout(resolve, 75));
+      expect(flipped).toBe(false);
+    } finally {
+      release?.();
+      await Promise.allSettled([moved, flip]);
+    }
+    expect((await db.node.findUniqueOrThrow({ where: { id: alpha.id } })).loc).toBe('alpha-renamed');
+  });
+
   it('holds the destination encryption state until a cross-memory relocation commits', async () => {
     const alpha = await createDbNode(db, { loc: 'alpha', memoryId: memA.id, content: 'plain source' });
     const dest = await db.memory.create({

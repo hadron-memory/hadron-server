@@ -229,6 +229,14 @@ export async function moveNodeSubtree(
   // the destination ancestor lock.
   await lockSourceForMove(tx, source);
 
+  // Reconciliation below can mint a NodeRevision. Fence the source flip before
+  // that first history write, including same-memory moves; a cross-memory move
+  // also holds the destination flag through the relocation. Opposing moves use
+  // one ID order for the shared locks.
+  for (const memoryId of [...new Set([srcMemoryId, destMemoryId])].sort()) {
+    await tx.$queryRaw`SELECT "id" FROM "memories" WHERE "id" = ${memoryId} FOR SHARE`;
+  }
+
   // The subtree: the source node's descendants, on ':' path boundaries (so
   // `findings:auth` doesn't sweep in `findings:auth-v2`).
   const firstDescendants = await tx.node.findMany({
@@ -287,12 +295,6 @@ export async function moveNodeSubtree(
   // vectorIndexEnabled for the embedding step below.
   let destVectorIndexEnabled = false;
   if (crossMemory) {
-    // A destination encryption flip must not pass this move after we decide
-    // plaintext nodes can cross the boundary. Hold both memory rows through
-    // relocation; sorted order keeps opposing moves from lock-inverting.
-    for (const memoryId of [srcMemoryId, destMemoryId].sort()) {
-      await tx.$queryRaw`SELECT "id" FROM "memories" WHERE "id" = ${memoryId} FOR SHARE`;
-    }
     const [srcMem, destMem] = await Promise.all([
       tx.memory.findUnique({ where: { id: srcMemoryId }, select: { isEncrypted: true, source: true } }),
       tx.memory.findUnique({
