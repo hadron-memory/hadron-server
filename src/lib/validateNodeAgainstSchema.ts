@@ -17,12 +17,17 @@
  *        matching the #719 where-cast semantics, so a value that validates here
  *        is also queryable (e.g. "0.9" satisfies a `number` field).
  *      • a `strict` collection additionally rejects any undeclared property key.
+ *      • `properties.exports` is platform-owned (#1286), so collection field
+ *        required/type checks and strict unknown-key checks do not govern it.
+ *        Skill declaration shape and exportability are judged by skill lint.
  *
  * A violation throws NodeSchemaViolation, which the write surfaces map to
  * BAD_USER_INPUT. Pre-existing non-conforming nodes are audited on demand by the
  * conformance check (PR C2), never rejected retroactively.
  */
 import type { MemorySchema, MemorySchemaField } from './memorySchema.js';
+
+const PLATFORM_EXPORTS_KEY = 'exports';
 
 export class NodeSchemaViolation extends Error {
   constructor(message: string) {
@@ -83,6 +88,7 @@ export function validateNodeAgainstSchema(
   }
   const props: Record<string, unknown> = properties ?? {};
   for (const [name, field] of Object.entries(def.fields)) {
+    if (name === PLATFORM_EXPORTS_KEY) continue;
     const present = Object.prototype.hasOwnProperty.call(props, name) && props[name] != null;
     if (!present) {
       if (field.required) {
@@ -98,6 +104,7 @@ export function validateNodeAgainstSchema(
 
   if (def.strict) {
     for (const key of Object.keys(props)) {
+      if (key === PLATFORM_EXPORTS_KEY) continue;
       // own-property check — `in` would let inherited keys (toString, …) slip past.
       if (!Object.prototype.hasOwnProperty.call(def.fields, key)) {
         throw new NodeSchemaViolation(`objectType "${objectType}" is strict — unknown property "${key}"`);

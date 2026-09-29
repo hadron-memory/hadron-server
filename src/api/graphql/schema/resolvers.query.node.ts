@@ -73,7 +73,7 @@ import {
   loadMemoryUrn,
   STORED_NODE_CONTENT,
 } from './resolvers.helpers.js';
-import { getAppMemoryAccess, canReadMemory, getMemoryAccess } from '../../../mcp/access-control.js';
+import { getAppMemoryAccess, filterReadableMemoryIds } from '../../../mcp/access-control.js';
 import { type AuthContext } from '../../../middleware/auth.js';
 import { getMemberOrgIds } from '../../../lib/auth/memberOrgIds.js';
 import {
@@ -2071,7 +2071,11 @@ export const nodeQueries = {
     ) => {
       // 007-entity-id-or-urn: appRef may be ID, bare URN, or prefixed URN.
       const { id: resolvedAppId } = await resolveAppRef(ctx.db, appRef);
-      const app = await ctx.db.app.findUniqueOrThrow({ where: { id: resolvedAppId } });
+      const app = await ctx.db.app.findUniqueOrThrow({
+        where: { id: resolvedAppId },
+        include: { organization: { select: { deletedAt: true } } },
+      });
+      if (app.organization?.deletedAt) return [];
       // Auth: an App PARTICIPANT, or org membership at READER+ on the App's
       // org; platform ADMIN/OWNER bypasses.
       //
@@ -2091,9 +2095,8 @@ export const nodeQueries = {
       // Admitting them grants nothing the platform does not already grant them;
       // it stops two surfaces disagreeing about one question.
       //
-      // Deliberately additive: the org-READER arm is unchanged, so a reader who
-      // is not a participant keeps exactly today's results — including NOT the
-      // team space, which stays behind its own `isAppParticipant` check below.
+      // Org READER remains an admission arm, without the team space. The
+      // installed-Agent enumeration below applies current link liveness.
       const isPlatformAdmin = ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER');
       // Resolved ONCE: the gate here and the team-space scope below ask the
       // same question, and two calls would be two identical queries per read.
@@ -2118,11 +2121,8 @@ export const nodeQueries = {
       // uninstall, and `resolveUserApps` excludes exactly those memberships
       // from every active-App access map (PR #1093 review, Codex P1).
       //
-      // But it must NOT also change what an ORG caller sees on a retired App —
-      // folding the lifecycle into `participant` itself took the team space
-      // away from them, which is existing behaviour and not this PR's to
-      // change. My own test caught that; the comment claiming the scope was
-      // untouched was written before the assertion that checked it.
+      // An org-authorized caller can still see the retired App's team space;
+      // installed-Agent memories follow the live App access fold below.
       const admitAsParticipant = participant && !app.uninstalledAt;
       // Org authorization is tracked, not just enforced, because it decides the
       // SCOPE below as well as admission (PR #1093 review, Codex P1).
@@ -2139,30 +2139,19 @@ export const nodeQueries = {
         // neither — so the error a stranger sees is the one they saw before.
         await requireOwnerOrOrgRole(ctx, app, 'READER');
       }
-      // 023-app-shape Phase 2b: App↔Agent is N:M via AppAgent. Gather
-      // memoryItems for every installed Agent. Apps with no installed
-      // Agents have no accessible nodes.
-      const appWithAgents = await ctx.db.app.findUnique({
-        where: { id: resolvedAppId },
-        select: {
-          appAgents: {
-            select: { agent: { select: { systemMemoryId: true, memoryItems: true } } },
-          },
-        },
+      // Keep appNodes' historical multi-Agent scope while using the same live
+      // item, stored-role, App-scope and install-license fold as MCP reads.
+      // The raw AppAgent walk retained revoked links after a PUBLIC memory was
+      // narrowed, because only the join row was soft-deleted.
+      const installedAccess = await getAppMemoryAccess(ctx.db, resolvedAppId, {
+        allAgents: orgAuthorized, includeTeamSpace: false, callerUserId: ctx.userId ?? null,
       });
-      const agentMemoryIds = [
-        ...new Set(
-          (appWithAgents?.appAgents ?? []).flatMap((aa) => [
-            // #524 — the installed agent's system memory is universally
-            // read-only from an App context (schema Agent.systemMemoryId;
-            // folded as READ_ONLY by mcp/access-control.ts). Task nodes are
-            // commonly authored there, so appNodes must include it — matching
-            // the MCP access-map fold (systemMemoryId + memoryItems).
-            ...(aa.agent.systemMemoryId ? [aa.agent.systemMemoryId] : []),
-            ...aa.agent.memoryItems.map((m) => m.memoryId),
-          ]),
-        ),
-      ];
+      const scopedAuth = {
+        userId: ctx.userId, appId: resolvedAppId, roles: ctx.roles,
+      } as AuthContext;
+      const agentMemoryIds = [...await filterReadableMemoryIds(
+        ctx.db as never, scopedAuth, installedAccess.keys(), { access: installedAccess },
+      )];
 
       // #1031 — the App's own TEAM SPACE, which is structurally unreachable
       // through the installed-agent walk above: it is an app-class memory keyed
@@ -2187,115 +2176,14 @@ export const nodeQueries = {
         ? await resolveAppTeamSpaceMemoryIds(ctx.db, resolvedAppId)
         : [];
 
-      // SCOPE, and this is the half the participant arm turns on (PR #1093
-      // review, Codex P1). My justification for admitting a participant was
-      // that MCP already grants them this material — and the agent walk above
-      // is BROADER than what MCP grants: `getAppMemoryAccess` reads only the
-      // PRIMARY live agent, filters soft-deleted memory items and memories, and
-      // requires an active AgentOrgGrant for a cross-org install. The walk
-      // above does none of those. So admitting a participant to it would hand
-      // them secondary agents, deleted items, and installs whose cross-org
-      // grant has LAPSED — none of which they can reach anywhere else, which
-      // makes it a widening after all, of exactly the kind #1070 warned that
-      // this resolver's scope invites.
-      //
-      // A participant who is not also org-authorized therefore gets the
-      // platform's own answer for their principal — the same fold MCP uses —
-      // rather than this resolver's historically wider walk.
-      //
-      // #1093 added "An org member's scope is untouched" here, which was true
-      // then and is NOT any more (PR #1132 review, @copilot): #1097 applies the
-      // per-App filter below to EVERY principal, so an org member's scope is
-      // narrowed too — deliberately, and that is the whole point of this
-      // change. Left as a correction rather than a deletion so the next reader
-      // can see the org path used to return the unscoped raw walk.
-      const candidateMemoryIds = orgAuthorized
-        ? [...new Set([...agentMemoryIds, ...teamSpaceIds])]
-        : await (async () => {
-            // DELEGATED, after four review rounds of hand-copying this
-            // predicate one clause at a time (PR #1093 — owner, then per-App,
-            // then the subscription gate, then the legacy agent-scoped shape).
-            // Each round I copied what I had read and shipped the rest as an
-            // assertion. That is the repo's FIRST authorization invariant
-            // arriving as a bill:
-            //
-            //   "Reuse the shared access gate; a bespoke per-resolver gate
-            //    drifts."
-            //
-            // — which I quoted at other people twice this week while
-            // reimplementing one. `canReadMemory` is the gate MCP's point read
-            // uses, and the App it is asked about is the App being queried, so
-            // the auth it wants is this caller in THIS App's scope. There is
-            // now no rule here to be a partial copy of.
-            const folded = [
-              ...(
-                await getAppMemoryAccess(ctx.db, resolvedAppId, {
-                  callerUserId: ctx.userId ?? null,
-                })
-              ).keys(),
-            ];
-            const scopedAuth = {
-              userId: ctx.userId,
-              appId: resolvedAppId,
-              roles: ctx.roles,
-            } as AuthContext;
-            // The access map ONCE for the whole page, not once per memory:
-            // `canReadMemory` ends in `getMemoryAccess`, which rebuilds the
-            // App's agent fold on every call (PR #1093 review, Codex P2 — the
-            // same N+1 this resolver's roster sibling was cured of twice).
-            const sharedAccess = await getMemoryAccess(ctx.db as never, scopedAuth);
-            const allowed = await Promise.all(
-              folded.map(async (id) =>
-                (await canReadMemory(ctx.db as never, scopedAuth, id, { access: sharedAccess }))
-                  ? id
-                  : null,
-              ),
-            );
-            const readable = allowed.filter((id): id is string => id !== null);
+      // Org readers retain the resolver's multi-Agent scope. Participants
+      // outside that group receive the primary Agent fold used by MCP reads.
+      const candidateMemoryIds = [...new Set([...agentMemoryIds, ...teamSpaceIds])];
 
-            return readable;
-          })();
-
-      // THIS App's memories only — for EVERY principal (#1097; the participant
-      // half was #1093 review, Codex P1).
-      //
-      // One Agent installed in two Apps carries BOTH Apps' app-scoped memories
-      // in its global `memoryItems`, so the fold for B contains A's.
-      //
-      // WHICH PATH ACTUALLY LEAKED, corrected (PR #1132 review, @copilot; the
-      // claim below is what #1093 wrote here and I repeated):
-      //
-      // #1093's comment said `canReadMemory` enforces `appId` for
-      // personal/private rows only and so admits an app-class memory of A. That
-      // was true when written and is now FALSE — #1102 moved the rule into
-      // `admissibleFoldRows`, the shared predicate behind `getMemoryAccess`,
-      // whose own docstring calls itself "the enumeration half of #1097". A
-      // participant is therefore already refused A's app-class memory before
-      // this filter is consulted.
-      //
-      // The leak was specific to the ORG branch, which bypasses that predicate
-      // entirely and reads the raw installed-agent walk: nothing enforced
-      // `appId`, and an org READER of B read A's internals. This is the other
-      // half of the same issue.
-      //
-      // Applied ONCE, to both branches, rather than added to the second one.
-      // #1093 shipped this rule inside the participant arm and left the org arm
-      // out, which is how #1092 (the predicates disagreeing about the same
-      // question) and this issue both exist. A second copy would have been the
-      // third answer to one question — and this resolver's own comment, four
-      // lines up, quotes the invariant it would be breaking.
-      //
-      // It is a SCOPE rule about what `appNodes(B)` MEANS, not an access gate:
-      // the resolver's contract is already "the App's installed-agent memories
-      // are the authoritative scope", and the fold does not honour it. Nothing
-      // here decides who may read a memory — that is `canReadMemory`'s job on
-      // the participant path and the org role gate's above.
-      //
-      // `appId IS NULL` keeps what genuinely belongs to the Agent rather than to
-      // a sibling App: its `system` memory (where `app_id` is FORBIDDEN by
-      // `chk_memory_class_app_id`) and any free-standing knowledge it carries.
-      // #1097 weighed dropping those too; this keeps cross-App agent knowledge
-      // working and drops only another App's internals.
+      // Keep this App's memories only. An Agent installed in two Apps can link
+      // memories scoped to each; the shared fold already applies this rule,
+      // and the final filter also covers the separately added team space.
+      // App-agnostic system and knowledge memories remain in scope.
       // Short-circuit before the query, not after it (PR #1132 review,
       // @copilot): an App with no installed Agents reaches here with an empty
       // candidate set, and `findMany({ id: { in: [] } })` is a round-trip whose

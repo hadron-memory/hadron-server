@@ -442,6 +442,115 @@ describe('apps (the uniform member list, #473)', () => {
 // ---------------------------------------------------------------------------
 
 describe('memories — App-key orgId', () => {
+  it('does not list strict-owner metadata through a pure App key', async () => {
+    const app = await db.app.create({
+      data: { id: generateId(), name: 'owner-app', urn: `u-${user.id}:owner-app`, ownerUserId: user.id },
+    });
+    const agent = await db.agent.create({
+      data: { id: generateId(), name: 'owner-agent', urn: `u-${user.id}:owner-agent`, ownerUserId: user.id },
+    });
+    await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
+    const owned = await db.memory.create({
+      data: {
+        id: generateId(), name: 'owner-only knowledge', urn: `u-${user.id}:owner-only-knowledge`,
+        ownerUserId: user.id, class: 'knowledge', visibility: 'PUBLIC',
+      },
+    });
+    const personal = await db.memory.create({
+      data: {
+        id: generateId(), name: 'personal', urn: `${orgId}:personal-appkey-leak`,
+        organizationId: orgId, userId: user.id, class: 'personal',
+      },
+    });
+    await db.agentMemoryItem.createMany({ data: [
+      { agentId: agent.id, memoryId: owned.id, role: 'read' },
+      { agentId: agent.id, memoryId: personal.id, role: 'read' },
+    ] });
+    const appContext = ctx({ appId: app.id });
+    expect(await canReadMemoryRecord(appContext, owned)).toBe(false);
+    expect(await canReadMemoryRecord(appContext, personal)).toBe(false);
+    const page = await resolvers.Query.memories({}, {}, appContext);
+    expect(page.items.map((m: { id: string }) => m.id)).not.toContain(owned.id);
+    expect(page.items.map((m: { id: string }) => m.id)).not.toContain(personal.id);
+    const ownerPage = await resolvers.Query.memories({}, {}, ctx({ appId: app.id, userId: user.id }));
+    expect(ownerPage.items.map((m: { id: string }) => m.id)).toEqual(
+      expect.arrayContaining([owned.id, personal.id]),
+    );
+  });
+
+  it('does not list a memory linked only through a malformed stored role', async () => {
+    const { app } = await createDbAppWithKey(db, 'invalid-role-list', orgId);
+    await db.appAgent.create({ data: { appId: app.id, agentId } });
+    const invalid = await db.memory.create({
+      data: {
+        id: generateId(), name: 'invalid link', urn: `${orgId}:invalid-link`,
+        organizationId: orgId, class: 'knowledge', visibility: 'ORGANIZATION',
+      },
+    });
+    await db.agentMemoryItem.create({ data: { agentId, memoryId: invalid.id, role: 'bogus' } });
+    const page = await resolvers.Query.memories(
+      {}, { filter: { memoryClasses: ['knowledge'] } }, ctx({ appId: app.id }),
+    );
+    const ids = page.items.map((m: { id: string }) => m.id);
+    expect(ids).toContain(memoryId);
+    expect(ids).not.toContain(invalid.id);
+  });
+
+  it('drops a cross-org Agent’s linked memories when its App grant is revoked', async () => {
+    const foreignOrg = await db.organization.create({
+      data: { id: generateId(), name: 'foreign-publisher', urn: `foreign-${generateId()}` },
+    });
+    const linked = await db.memory.create({
+      data: {
+        id: generateId(), name: 'foreign note', urn: `${foreignOrg.urn}:note`,
+        organizationId: foreignOrg.id, class: 'knowledge', visibility: 'PUBLIC',
+      },
+    });
+    const foreignAgent = await db.agent.create({
+      data: {
+        id: generateId(), name: 'foreign agent', urn: `${foreignOrg.urn}:agent`,
+        organizationId: foreignOrg.id, visibility: 'PUBLIC',
+        memoryItems: { create: { memoryId: linked.id, role: 'read' } },
+      },
+    });
+    const { app } = await createDbAppWithKey(db, 'grant-list-app', orgId);
+    await db.appAgent.create({ data: { appId: app.id, agentId: foreignAgent.id } });
+    await db.agentOrgGrant.create({
+      data: { orgId, agentId: foreignAgent.id, activatedAt: new Date() },
+    });
+    const list = () => resolvers.Query.memories(
+      {}, { filter: { memoryClasses: ['knowledge'] } }, ctx({ appId: app.id }),
+    );
+    expect((await list()).items.map((m: { id: string }) => m.id)).toContain(linked.id);
+    await db.agentOrgGrant.update({
+      where: { orgId_agentId: { orgId, agentId: foreignAgent.id } },
+      data: { revokedAt: new Date() },
+    });
+    expect((await list()).items.map((m: { id: string }) => m.id)).not.toContain(linked.id);
+  });
+
+  it('lists an App-scoped memory only through its own App when the Agent is shared', async () => {
+    const { app: appA } = await createDbAppWithKey(db, 'memory-list-a', orgId);
+    const { app: appB } = await createDbAppWithKey(db, 'memory-list-b', orgId);
+    await db.appAgent.createMany({ data: [
+      { appId: appA.id, agentId }, { appId: appB.id, agentId },
+    ] });
+    const internal = await db.memory.create({
+      data: {
+        id: generateId(), organizationId: orgId, appId: appA.id,
+        urn: `${orgId}:memory-list-internal`, name: 'A internal',
+        class: 'knowledge', visibility: 'ORGANIZATION',
+      },
+    });
+    await db.agentMemoryItem.create({ data: { agentId, memoryId: internal.id, role: 'read' } });
+
+    const a = await resolvers.Query.memories({}, {}, ctx({ appId: appA.id }));
+    const b = await resolvers.Query.memories({}, {}, ctx({ appId: appB.id }));
+    expect(a.items.map((m: { id: string }) => m.id)).toContain(internal.id);
+    expect(b.items.map((m: { id: string }) => m.id)).not.toContain(internal.id);
+    expect(b.items.map((m: { id: string }) => m.id)).toContain(memoryId);
+  });
+
   it('scopes to the App own org: match → its memories, any other org → empty page', async () => {
     const { app } = await createDbAppWithKey(db, 'mm-appkey', orgId);
     await db.appAgent.create({ data: { appId: app.id, agentId } });
@@ -475,6 +584,66 @@ describe('appNodes', () => {
     const nodes = await resolvers.Query.appNodes({}, { appRef: app.id }, adminCtx());
     expect(nodes.length).toBe(1);
     expect(nodes[0].loc).toBe('org.test.node');
+  });
+
+  it('uses live links and valid roles across every installed Agent', async () => {
+    const { app } = await createDbAppWithKey(db, 'app-nodes-live-links', orgId);
+    await db.appAgent.create({ data: { appId: app.id, agentId } });
+    await db.appAgent.create({ data: { appId: app.id, agentId: secondAgentId } });
+    const secondMemory = await db.memory.create({
+      data: {
+        id: generateId(), organizationId: orgId, urn: `${orgId}:second-app-memory`,
+        name: 'Second Agent memory', class: 'knowledge', visibility: 'ORGANIZATION',
+      },
+    });
+    const link = await db.agentMemoryItem.create({
+      data: { id: generateId(), agentId: secondAgentId, memoryId: secondMemory.id, role: 'read' },
+    });
+    await db.node.create({
+      data: {
+        id: generateId(), memoryId: secondMemory.id, loc: 'second.live.node',
+        name: 'Second Agent node', isLink: false, tags: [],
+      },
+    });
+    const locs = async () => (await resolvers.Query.appNodes({}, { appRef: app.id }, adminCtx()))
+      .map((node: { loc: string }) => node.loc);
+
+    expect(await locs()).toEqual(expect.arrayContaining(['org.test.node', 'second.live.node']));
+    await db.agentMemoryItem.update({ where: { id: link.id }, data: { deletedAt: new Date() } });
+    expect(await locs()).not.toContain('second.live.node');
+    await db.agentMemoryItem.update({ where: { id: link.id }, data: { deletedAt: null, role: 'bogus' } });
+    expect(await locs()).not.toContain('second.live.node');
+  });
+
+  it('does not enumerate a soft-deleted Agent system memory', async () => {
+    const { app } = await createDbAppWithKey(db, 'app-nodes-deleted-system', orgId);
+    await db.appAgent.create({ data: { appId: app.id, agentId } });
+    const system = await db.memory.create({
+      data: {
+        id: generateId(), organizationId: orgId, urn: `${orgId}:deleted-agent-system`,
+        name: 'Agent system', class: 'system', acceptsUploads: false,
+      },
+    });
+    await db.agent.update({ where: { id: agentId }, data: { systemMemoryId: system.id } });
+    await db.node.create({
+      data: {
+        id: generateId(), memoryId: system.id, loc: 'system.deleted.node',
+        name: 'System node', isLink: false, tags: [],
+      },
+    });
+    const locs = async () => (await resolvers.Query.appNodes({}, { appRef: app.id }, adminCtx()))
+      .map((node: { loc: string }) => node.loc);
+    expect(await locs()).toContain('system.deleted.node');
+    await db.memory.update({ where: { id: system.id }, data: { deletedAt: new Date() } });
+    expect(await locs()).not.toContain('system.deleted.node');
+  });
+
+  it('does not enumerate nodes from a deleted owning organization', async () => {
+    const { app } = await createDbAppWithKey(db, 'app-nodes-deleted-org', orgId);
+    await db.appAgent.create({ data: { appId: app.id, agentId } });
+    expect((await resolvers.Query.appNodes({}, { appRef: app.id }, adminCtx())).length).toBe(1);
+    await db.organization.update({ where: { id: orgId }, data: { deletedAt: new Date() } });
+    expect(await resolvers.Query.appNodes({}, { appRef: app.id }, adminCtx())).toEqual([]);
   });
 
   // ── #1031: the App's own TEAM SPACE ──────────────────────────────────────
@@ -595,7 +764,7 @@ describe('appNodes', () => {
       },
     });
     await db.agentMemoryItem.create({
-      data: { id: generateId(), agentId: secondAgent.id, memoryId: secondMemory.id, role: 'READ_WRITE' },
+      data: { id: generateId(), agentId: secondAgent.id, memoryId: secondMemory.id, role: 'read-write' },
     });
     await db.node.create({
       data: {
@@ -655,7 +824,7 @@ describe('appNodes', () => {
       },
     });
     await db.agentMemoryItem.create({
-      data: { id: generateId(), agentId, memoryId: personal.id, role: 'READ_WRITE' },
+      data: { id: generateId(), agentId, memoryId: personal.id, role: 'read-write' },
     });
     await db.node.create({
       data: {
@@ -726,7 +895,7 @@ describe('appNodes', () => {
       },
     });
     await db.agentMemoryItem.create({
-      data: { id: generateId(), agentId, memoryId: personalInA.id, role: 'READ_WRITE' },
+      data: { id: generateId(), agentId, memoryId: personalInA.id, role: 'read-write' },
     });
     await db.node.create({
       data: {
@@ -786,7 +955,7 @@ describe('appNodes', () => {
       },
     });
     await db.agentMemoryItem.create({
-      data: { id: generateId(), agentId, memoryId: knowledgeInA.id, role: 'READ_WRITE' },
+      data: { id: generateId(), agentId, memoryId: knowledgeInA.id, role: 'read-write' },
     });
     await db.node.create({
       data: {
@@ -853,7 +1022,7 @@ describe('appNodes', () => {
       },
     });
     await db.agentMemoryItem.create({
-      data: { id: generateId(), agentId, memoryId: knowledgeInA.id, role: 'READ_WRITE' },
+      data: { id: generateId(), agentId, memoryId: knowledgeInA.id, role: 'read-write' },
     });
     await db.node.create({
       data: {
@@ -906,7 +1075,7 @@ describe('appNodes', () => {
       },
     });
     await db.agentMemoryItem.create({
-      data: { id: generateId(), agentId, memoryId: personal.id, role: 'READ_WRITE' },
+      data: { id: generateId(), agentId, memoryId: personal.id, role: 'read-write' },
     });
     await db.node.create({
       data: {
@@ -990,7 +1159,7 @@ describe('appNodes', () => {
       },
     });
     await db.agentMemoryItem.create({
-      data: { id: generateId(), agentId, memoryId: knowledgeInA.id, role: 'READ_WRITE' },
+      data: { id: generateId(), agentId, memoryId: knowledgeInA.id, role: 'read-write' },
     });
     await db.node.create({
       data: {

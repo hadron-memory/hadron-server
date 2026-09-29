@@ -61,6 +61,14 @@ const selectedPlan = (input: Record<string, unknown>, c: Ctx = ctx()) =>
     {}, { input }, c,
   );
 
+const mkScope = async (name: string, memoryIds: string[]) => {
+  const scope = await db.scope.create({ data: { id: generateId(), name, organizationId: org.id } });
+  await db.scopeMemory.createMany({
+    data: memoryIds.map((memoryId, position) => ({ scopeId: scope.id, memoryId, position })),
+  });
+  return scope;
+};
+
 beforeEach(async () => {
   await cleanDb(db);
   const t = `${Date.now()}-${Math.floor(Math.random() * 100_000)}`;
@@ -134,6 +142,143 @@ describe('the access gate', () => {
     // the same wrong answer as a short read.
     await expect(plan({ intent: 'LINT', memories: [mem.id] }, strangerCtx())).rejects.toMatchObject({
       extensions: { code: 'FORBIDDEN' },
+    });
+  });
+});
+
+describe('server-owned Scope selection for plugin EXPORT', () => {
+  it('narrows by a live Scope, skips orphan assessment, and gives both hosts the same fingerprint', async () => {
+    const other = await resolvers.Mutation.createMemory({}, { orgId: org.id, name: `scope-other-${generateId()}` }, ctx());
+    const inside = await mkNode('tasks:inside', { properties: declaration({ name: 'inside-skill' }) });
+    const outside = await db.node.create({ data: {
+      id: generateId(), memoryId: other.id, loc: 'tasks:outside', name: 'outside',
+      isRunnable: true, content: '# Outside', properties: declaration({ name: 'outside-skill' }),
+    } });
+    const scope = await mkScope('one-memory', [mem.id]);
+    const files = [{ dirName: 'outside-skill', nodeId: outside.id, sourceUrn: 'old', headerHash: 'x', fileHash: 'x' }];
+
+    // Omission means unscoped, while an explicitly supplied null must refuse
+    // rather than silently widening from A to readable A+B (Chip, #1427).
+    expect((await plan({ intent: 'EXPORT' })).entries.map((e: { nodeId: string }) => e.nodeId).sort())
+      .toEqual([inside.id, outside.id].sort());
+    await expect(plan({ intent: 'EXPORT', scopeRef: null })).rejects.toMatchObject({
+      extensions: { code: 'BAD_USER_INPUT' },
+    });
+
+    const claude = await plan({ intent: 'EXPORT', host: 'claudeSkill', scopeRef: scope.id, files });
+    const codex = await plan({ intent: 'EXPORT', host: 'codexSkill', scopeRef: scope.id, files });
+    expect(claude.entries.map((e: { nodeId: string }) => e.nodeId)).toEqual([inside.id]);
+    expect(claude.scopeSelection).toMatchObject({
+      id: scope.id, name: scope.name, readableMemoryCount: 1, droppedCount: 0,
+    });
+    expect(claude.scopeSelection.fingerprint).toMatch(/^[a-f0-9]{64}$/);
+    expect(codex.scopeSelection.fingerprint).toBe(claude.scopeSelection.fingerprint);
+    expect(claude.orphans).toEqual([]);
+    expect(claude.orphanAssessmentSkipped).toBe(true);
+    expect(codex.orphanAssessmentSkipped).toBe(true);
+    const occupied = await plan({ intent: 'EXPORT', scopeRef: scope.id, files: [
+      { dirName: 'inside-skill', nodeId: outside.id, sourceUrn: 'old', headerHash: 'x', fileHash: 'x' },
+    ] });
+    expect(occupied.entries[0].exportPlan.action).toBe('REFUSE');
+    expect(occupied.orphans).toEqual([]);
+
+    // The ID stays constant while membership changes. Every plan resolves it
+    // afresh, and separate host calls expose the change to the CLI.
+    await db.scopeMemory.deleteMany({ where: { scopeId: scope.id } });
+    await db.scopeMemory.create({ data: { scopeId: scope.id, memoryId: other.id, position: 0 } });
+    const changed = await plan({ intent: 'EXPORT', host: 'claudeSkill', scopeRef: scope.id });
+    expect(changed.entries.map((e: { nodeId: string }) => e.nodeId)).toEqual([outside.id]);
+    expect(changed.scopeSelection.fingerprint).not.toBe(claude.scopeSelection.fingerprint);
+  });
+
+  it('keeps existing file-facts and force protections for a scoped entry', async () => {
+    const node = await mkNode('tasks:edited-in-scope', { properties: declaration() });
+    const scope = await mkScope('file-protection', [mem.id]);
+    const initial = await plan({ intent: 'EXPORT' });
+    const entry = initial.entries[0];
+    const file = {
+      dirName: 'my-skill', nodeId: node.id, sourceUrn: entry.urn,
+      headerHash: /hash=([0-9a-f]{16})/.exec(entry.renderedBody)![1]!,
+      fileHash: 'f'.repeat(16),
+    };
+
+    const unscoped = await plan({ intent: 'EXPORT', files: [file] });
+    const scoped = await plan({ intent: 'EXPORT', scopeRef: scope.id, files: [file] });
+    expect(scoped.entries[0].exportPlan).toEqual(unscoped.entries[0].exportPlan);
+    expect(scoped.entries[0].exportPlan).toMatchObject({ action: 'REFUSE', reasons: [{ code: 'locally-edited' }] });
+    expect(scoped.entries[0].renderedBody).toBeNull();
+
+    const unscopedForced = await plan({ intent: 'EXPORT', force: true, files: [file] });
+    const scopedForced = await plan({ intent: 'EXPORT', scopeRef: scope.id, force: true, files: [file] });
+    expect(scopedForced.entries[0].exportPlan).toEqual(unscopedForced.entries[0].exportPlan);
+    expect(scopedForced.entries[0].exportPlan).toMatchObject({ action: 'WRITE', reasons: [{ code: 'locally-edited-override' }] });
+    expect(scopedForced.orphans).toEqual([]);
+    expect(scopedForced.orphanAssessmentSkipped).toBe(true);
+  });
+
+  it('refuses duplicate installed files for an in-scope task without surfacing out-of-scope orphans', async () => {
+    const outsideMemory = await resolvers.Mutation.createMemory({}, { orgId: org.id, name: `dup-outside-${generateId()}` }, ctx());
+    const inside = await mkNode('tasks:inside-duplicate', { properties: declaration() });
+    const outside = await db.node.create({ data: {
+      id: generateId(), memoryId: outsideMemory.id, loc: 'tasks:outside-duplicate', name: 'outside',
+      isRunnable: true, content: '# Outside', properties: declaration({ name: 'outside-skill' }),
+    } });
+    const scope = await mkScope('duplicate-protection', [mem.id]);
+    const urn = (await plan({ intent: 'LINT', memories: [mem.id] })).entries[0].urn as string;
+    const files = [
+      { dirName: 'my-skill', nodeId: inside.id, sourceUrn: urn, headerHash: 'a'.repeat(16), fileHash: 'a'.repeat(16) },
+      { dirName: 'old-copy', nodeId: inside.id, sourceUrn: urn, headerHash: 'a'.repeat(16), fileHash: 'a'.repeat(16) },
+      { dirName: 'outside-skill', nodeId: outside.id, sourceUrn: 'old', headerHash: 'a'.repeat(16), fileHash: 'a'.repeat(16) },
+    ];
+
+    const got = await plan({ intent: 'EXPORT', scopeRef: scope.id, files, force: true });
+    expect(got.entries.map((e: { nodeId: string }) => e.nodeId)).toEqual([inside.id]);
+    expect(got.entries[0]).toMatchObject({
+      renderedBody: null,
+      exportPlan: { action: 'REFUSE', preservesExistingFile: true, reasons: [{ code: 'multiple-installed-files' }] },
+    });
+    expect(got.orphans).toEqual([]);
+    expect(got.orphanAssessmentSkipped).toBe(true);
+  });
+
+  it('refuses arbitrary EXPORT memories, including an empty list, while keeping LINT/STATUS filters', async () => {
+    await mkNode('tasks:inside', { properties: declaration() });
+    for (const memories of [[], [mem.id]]) {
+      await expect(plan({ intent: 'EXPORT', memories })).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
+    }
+    const scope = await mkScope('lint-not-export', [mem.id]);
+    await expect(plan({ intent: 'LINT', scopeRef: scope.id })).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
+    expect((await plan({ intent: 'LINT', memories: [mem.id] })).entries).toHaveLength(1);
+    expect((await plan({ intent: 'STATUS', memories: [mem.id] })).entries).toHaveLength(1);
+  });
+
+  it('refuses blank, missing, deleted, unreadable, and zero-readable scopes without widening', async () => {
+    await mkNode('tasks:inside', { properties: declaration() });
+    const scope = await mkScope('disappearing', [mem.id]);
+    for (const scopeRef of ['', generateId()]) {
+      await expect(plan({ intent: 'EXPORT', scopeRef })).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
+    }
+    await expect(plan({ intent: 'EXPORT', scopeRef: scope.id }, strangerCtx())).rejects.toMatchObject({
+      extensions: { code: 'BAD_USER_INPUT' },
+    });
+    await db.scope.update({ where: { id: scope.id }, data: { deletedAt: new Date() } });
+    await expect(plan({ intent: 'EXPORT', scopeRef: scope.id })).rejects.toMatchObject({
+      extensions: { code: 'BAD_USER_INPUT' },
+    });
+
+    // Even platform admins cannot see another user's owner-only personal
+    // memory. The shared access intersection drops it and reports the count.
+    const privateMemory = await db.memory.create({ data: {
+      id: generateId(), organizationId: org.id, urn: `${org.urn}:foreign-private-${generateId()}`,
+      name: 'foreign private', class: 'private', userId: outsider.id,
+    } });
+    const mixed = await mkScope('mixed', [mem.id, privateMemory.id]);
+    const narrowed = await plan({ intent: 'EXPORT', scopeRef: mixed.id });
+    expect(narrowed.scopeSelection).toMatchObject({ readableMemoryCount: 1, droppedCount: 1 });
+    expect(narrowed.entries).toHaveLength(1);
+    const empty = await mkScope('empty-for-admin', [privateMemory.id]);
+    await expect(plan({ intent: 'EXPORT', scopeRef: empty.id })).rejects.toMatchObject({
+      extensions: { code: 'BAD_USER_INPUT' },
     });
   });
 });
@@ -1899,8 +2044,10 @@ describe('#1406 selected individual skill files', () => {
     const oldInput = schema.getType('SkillPlanInput') as GraphQLInputObjectType;
     const selectedInput = schema.getType('SelectedSkillFilePlanInput') as GraphQLInputObjectType;
     expect(oldInput.getFields().nodes).toBeUndefined();
+    expect(oldInput.getFields().scopeRef).toBeDefined();
     expect(selectedInput.getFields().nodes).toBeDefined();
     expect(selectedInput.getFields().memories).toBeUndefined();
+    expect(selectedInput.getFields().scopeRef).toBeUndefined();
   });
 
   it('selects IDs and full URNs across memories once, without classifying other installed skills as orphans', async () => {

@@ -1064,8 +1064,10 @@ export const typeDefs = `#graphql
 
   input SkillPlanInput {
     intent: SkillPlanIntent!
-    """Memory refs to scan. Omitted means every memory the caller can read."""
+    """Memory refs for LINT/STATUS only. EXPORT refuses this field, even an empty list."""
     memories: [String!]
+    """Persisted Scope ID for a narrowed EXPORT. Omit for unscoped export; explicit null refuses. Membership is resolved afresh for each call."""
+    scopeRef: ID
     """
     Target host, named by its D12 declaration key verbatim: claudeSkill (the default) or codexSkill. One host per call; the plan reads that host's declaration and applies its limits, and the retired top-level skill/claudeSkill keys alias to claudeSkill only. An unknown host is refused with BAD_USER_INPUT naming the supported hosts, never judged as another host and never answered with an empty plan.
     """
@@ -1170,11 +1172,23 @@ export const typeDefs = `#graphql
     reason: SkillExportReason!
   }
 
+  """The live, access-intersected Scope selection used by this EXPORT plan."""
+  type SkillPlanScopeSelection {
+    id: ID!
+    name: String!
+    readableMemoryCount: Int!
+    droppedCount: Int!
+    """Stable digest for comparing separate host plans from one export."""
+    fingerprint: String!
+  }
+
   type SkillPlan {
     entries: [SkillPlanEntry!]!
     orphans: [SkillOrphan!]!
-    """True for explicit individual-file selection: unselected files are not classified as orphans."""
+    """True for scoped or selected exports: out-of-selection files are not classified as orphans."""
     orphanAssessmentSkipped: Boolean!
+    """Non-null only when EXPORT selected a persisted Scope."""
+    scopeSelection: SkillPlanScopeSelection
     """Opaque unavailable refs and selected nodes with no declaration for this host."""
     selectionResults: [SkillSelectionResult!]!
     """
@@ -4947,9 +4961,26 @@ export const typeDefs = `#graphql
     fields: [SearchReplaceFieldResult!]!
   }
 
+  "Mutually exclusive reasons selected nodes were protected from bulk replacement."
+  type SearchReplaceSkipCounts {
+    "Governed nodes of any kind. This is not a spec-only count."
+    governed: Int!
+    "Nodes at or below a Channel address."
+    protectedAddress: Int!
+  }
+
   type SearchReplaceResult {
-    "Nodes the selection resolved to (after auth + prefix filtering)."
+    "Unique authorized nodes selected before bulk-write protections are applied."
+    nodesSelected: Int!
+    "Selected nodes whose requested text fields were actually inspected."
     nodesScanned: Int!
+    "Selected nodes protected from inspection and replacement."
+    nodesSkipped: Int!
+    """
+    Mutually exclusive skip reasons. Governance takes precedence over Channel
+    address protection, so a node carrying both signals counts once as governed.
+    """
+    skipCounts: SearchReplaceSkipCounts!
     "Nodes with at least one replacement."
     nodesChanged: Int!
     totalReplacements: Int!

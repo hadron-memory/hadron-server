@@ -122,6 +122,19 @@ describe('getAppMemoryAccess (App-key principal)', () => {
     expect(access.get(localKnId)).toBe('READ_WRITE');
   });
 
+  it('treats a malformed legacy memoryItem role as no grant', async () => {
+    const { app } = await createDbAppWithKey(db, 'app-invalid-role', orgId);
+    await createDbAppAgent(db, app.id, agentId);
+    const invalid = await db.memory.create({
+      data: { id: generateId(), name: 'invalid role', urn: `${orgId}:invalid-role`, organizationId: orgId, class: 'knowledge' },
+    });
+    await db.agentMemoryItem.create({ data: { agentId, memoryId: invalid.id, role: 'bogus' } });
+    const auth: AuthContext = { appId: app.id, organizationId: orgId };
+    expect((await getAppMemoryAccess(db, app.id)).get(knowledgeMemoryId)).toBe('READ_ONLY');
+    expect((await getAppMemoryAccess(db, app.id)).has(invalid.id)).toBe(false);
+    expect(await canReadMemory(db, auth, invalid.id)).toBe(false);
+  });
+
   it('returns an empty map when the App is orphan (agent_id IS NULL)', async () => {
     const { app } = await createDbAppWithKey(db, 'app-orphan', orgId);
 
@@ -138,6 +151,79 @@ describe('getAppMemoryAccess (App-key principal)', () => {
     const access = await getAppMemoryAccess(db, app.id);
 
     expect(access.size).toBe(0);
+  });
+
+  it('drops Agent reach when a retained AppAgent belongs to an uninstalled App', async () => {
+    const { app } = await createDbAppWithKey(db, 'app-uninstalled', orgId);
+    await createDbAppAgent(db, app.id, agentId);
+    expect((await getAppMemoryAccess(db, app.id)).has(knowledgeMemoryId)).toBe(true);
+    await db.app.update({ where: { id: app.id }, data: { uninstalledAt: new Date() } });
+    expect((await getAppMemoryAccess(db, app.id)).size).toBe(0);
+    expect(await canReadMemory(db, { appId: app.id, organizationId: orgId }, knowledgeMemoryId)).toBe(false);
+  });
+
+  it('drops a same-org install when its organization is soft-deleted', async () => {
+    const { app } = await createDbAppWithKey(db, 'app-deleted-org', orgId);
+    await createDbAppAgent(db, app.id, agentId);
+    expect((await getAppMemoryAccess(db, app.id)).has(knowledgeMemoryId)).toBe(true);
+    await db.organization.update({ where: { id: orgId }, data: { deletedAt: new Date() } });
+    expect((await getAppMemoryAccess(db, app.id)).size).toBe(0);
+    expect(await canReadMemory(db, { appId: app.id, organizationId: orgId }, knowledgeMemoryId)).toBe(false);
+  });
+
+  it('drops a licensed cross-org install when the Agent’s organization is soft-deleted', async () => {
+    const appOrg = await db.organization.create({
+      data: { id: generateId(), name: 'Foreign App', urn: `foreign-app-${generateId()}` },
+    });
+    const { app } = await createDbAppWithKey(db, 'app-deleted-agent-org', appOrg.id);
+    await createDbAppAgent(db, app.id, agentId);
+    await db.agentOrgGrant.create({
+      data: { orgId: appOrg.id, agentId, activatedAt: new Date() },
+    });
+    expect((await getAppMemoryAccess(db, app.id)).has(knowledgeMemoryId)).toBe(true);
+    await db.organization.update({ where: { id: orgId }, data: { deletedAt: new Date() } });
+    expect((await getAppMemoryAccess(db, app.id)).size).toBe(0);
+  });
+
+  it('does not fold a legacy per-user holding into a foreign App key through a PUBLIC Agent', async () => {
+    const creator = await db.user.create({ data: { id: generateId(), name: 'Holding creator' } });
+    const holding = await db.memory.create({
+      data: {
+        id: generateId(), name: 'Legacy holding', urn: `${orgId}:legacy-holding`,
+        organizationId: orgId, class: 'knowledge', visibility: 'PUBLIC',
+        userMemoryOfAgentId: agentId, createdBy: creator.id,
+      },
+    });
+    await db.agent.update({ where: { id: agentId }, data: { visibility: 'PUBLIC' } });
+    await db.agentMemoryItem.create({ data: { agentId, memoryId: holding.id, role: 'read' } });
+    const foreignOrg = await db.organization.create({
+      data: { id: generateId(), name: 'Foreign', urn: `foreign-${generateId()}` },
+    });
+    const { app } = await createDbAppWithKey(db, 'foreign-holding-app', foreignOrg.id);
+    await createDbAppAgent(db, app.id, agentId);
+    await db.agentOrgGrant.create({
+      data: { orgId: foreignOrg.id, agentId, activatedAt: new Date() },
+    });
+    expect((await getAppMemoryAccess(db, app.id)).has(knowledgeMemoryId)).toBe(true);
+    expect((await getAppMemoryAccess(db, app.id)).has(holding.id)).toBe(false);
+    expect(await canReadMemory(db, { appId: app.id, organizationId: foreignOrg.id }, holding.id)).toBe(false);
+  });
+
+  it('does not fold another App’s scoped knowledge through a globally linked Agent', async () => {
+    const { app: appA } = await createDbAppWithKey(db, 'scoped-a', orgId);
+    const { app: appB } = await createDbAppWithKey(db, 'scoped-b', orgId);
+    await createDbAppAgent(db, appA.id, agentId);
+    await createDbAppAgent(db, appB.id, agentId);
+    const scoped = await db.memory.create({
+      data: {
+        id: generateId(), name: 'A only', urn: `${orgId}:scoped-a-only`,
+        organizationId: orgId, appId: appA.id, class: 'knowledge', visibility: 'ORGANIZATION',
+      },
+    });
+    await db.agentMemoryItem.create({ data: { agentId, memoryId: scoped.id, role: 'read' } });
+    expect((await getAppMemoryAccess(db, appA.id)).has(scoped.id)).toBe(true);
+    expect((await getAppMemoryAccess(db, appB.id)).has(scoped.id)).toBe(false);
+    expect(await canReadMemory(db, { appId: appB.id, organizationId: orgId }, scoped.id)).toBe(false);
   });
 });
 

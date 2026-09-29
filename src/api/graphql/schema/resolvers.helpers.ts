@@ -58,8 +58,10 @@ import {
   AgentNotFoundError,
 } from '../../../lib/entityRef/errors.js';
 import { MemoryNotFoundError } from '../../../lib/asset/gate.js';
+import { assertLinkAllowedForPublicAgent, isExcludedFromCoveredSet } from '../../../lib/agentPublicCongruence.js';
 import type { ImpersonationContext } from '../../../lib/auth/impersonation.js';
 import { GraphQLError } from 'graphql';
+import { isLifecycleActive, type LifecycleLike } from '@hadron-memory/access-control';
 import {
   Prisma,
   type PrismaClient,
@@ -543,6 +545,365 @@ export async function concealUnreadableDenial(
 }
 
 /**
+ * The capability an `AgentMemoryItem` row confers (`cor:dmo:050:09`). `read`
+ * admits the memory's node CONTENT to the agent's audience; `read-write` is
+ * additionally the sole write cap for a knowledge memory.
+ *
+ * Validated rather than free-form (#1349): the column is a plain `String`, so
+ * an unrecognised value used to be stored silently. Read surfaces now skip
+ * those legacy rows through isGrantedAgentMemoryRole rather than treating
+ * an unknown value as read-only.
+ */
+export const AGENT_MEMORY_ROLES = ['read', 'read-write'] as const;
+export type AgentMemoryRole = (typeof AGENT_MEMORY_ROLES)[number];
+
+/** Parse an `AgentMemoryItem.role` argument, defaulting to the narrower cap. */
+export function parseAgentMemoryRole(role?: string | null): AgentMemoryRole {
+  const value = role ?? 'read';
+  if (!(AGENT_MEMORY_ROLES as readonly string[]).includes(value)) {
+    throw new GraphQLError(
+      `Unknown role "${value}" — expected one of: ${AGENT_MEMORY_ROLES.join(', ')}.`,
+      { extensions: { code: 'BAD_USER_INPUT', role: value } },
+    );
+  }
+  return value as AgentMemoryRole;
+}
+
+/**
+ * The caller's OWN user principal, with every App-derived reach stripped
+ * (#1349).
+ *
+ * An attach is a grant TO an App audience, so the capability it hands over has
+ * to be one the human calling holds themselves. Evaluated on the request
+ * context as-is, an App-keyed or session-bound caller would have
+ * `getAccessibleMemoryIds` union in whatever THAT App already reaches — which
+ * is exactly how one App's grant would launder into another App's audience.
+ * Dropping `appId`/`sessionId` (and the caches primed under the wider
+ * principal) asks the narrower question the grant needs: what may this *user*
+ * reach?
+ */
+function userPrincipalOnly(ctx: Context): Context {
+  return {
+    db: ctx.db,
+    userId: ctx.userId,
+    clientId: ctx.clientId,
+    roles: ctx.roles,
+    organizationId: ctx.organizationId,
+    apiKeyId: ctx.apiKeyId,
+    oauthScopes: ctx.oauthScopes,
+    impersonation: ctx.impersonation,
+  };
+}
+
+/**
+ * Does this caller hold CONTENT-READ on the memory **in their own right** —
+ * excluding anything they can only reach through an App (#1349)?
+ *
+ * Dropping `ctx.appId` is NOT enough, and the first version of this gate was
+ * wrong to claim it was (@codex, PR #1357). `getAccessibleMemoryIds`' user
+ * branch folds in `appDerivedMemoryIds`, which for a user principal enumerates
+ * EVERY App that user can reach — so a memory readable only through App B still
+ * passed, and attaching it to an agent in App A laundered B's grant into A's
+ * audience, which is precisely what this gate exists to stop. Stripping the
+ * active App made the reach broader, not narrower.
+ */
+function holdsContentReadIndependently(ctx: Context, memoryId: string): Promise<boolean> {
+  const self = userPrincipalOnly(ctx);
+  return getAccessibleMemoryIds(self, memoryId, { excludeAppDerived: true }).then(
+    (ids) => ids === null || ids.includes(memoryId),
+  );
+}
+
+/**
+ * The same-App attach (#1357; Holger's ruling, 2026-09-26): an appropriately
+ * authorized caller may attach an App's own memory, READ-ONLY, to another
+ * agent installed in that same App.
+ *
+ * Why it needs its own branch: the capability check excludes App-derived reach
+ * on purpose — counting it let a memory reachable only through App B be
+ * laundered into App A. That also made an App-scoped memory (#653: App-internal,
+ * excluded from every org-wide gate) unattachable by anyone, including the
+ * App's own admins, so provisioning a SECOND agent in the App could not give it
+ * the App's knowledge. This admits exactly that and nothing wider:
+ *
+ *  - **the memory's OWN App** — `memory.appId`, never whichever App the caller
+ *    happens to reach it through. That is the "no cross-App shortcut";
+ *  - **the target agent is installed in that App**, which is live (not deleted,
+ *    not uninstalled, its org not soft-deleted);
+ *  - **the caller is authorized for that App** by the gate `createMemoryInApp`
+ *    uses to provision App knowledge (`requireOwnerOrOrgRole(app, 'ADMIN')`), so
+ *    "appropriately authorized" means what it already means;
+ *  - **knowledge / group only**, and never a user-owned row — never a
+ *    strict-owner shape;
+ *  - **`read` only**, mirroring provisioning, which links App knowledge `read`
+ *    and leaves writes with the org admin. This also holds for a platform
+ *    admin, whose independent read capability must not bypass App scope.
+ *
+ * The row this admits confers no ambient authority of its own: the access fold
+ * (`admissibleFoldRows`) confines an App-scoped row to its own App, so the new
+ * agent reaches the memory only inside the App that owns it (#1376).
+ */
+async function sameAppAttachAdmitted(
+  ctx: Context,
+  agent: { id: string; organizationId: string | null; ownerUserId: string | null },
+  memory: { appId: string | null; class: string; organizationId: string | null; ownerUserId: string | null; userMemoryOfAgentId: string | null },
+): Promise<boolean> {
+  if (memory.appId == null) return false;
+  if (memory.class !== 'knowledge' && memory.class !== 'group') return false;
+  // Legacy knowledge/group holdings with this pointer are creator-scoped,
+  // even when the App owns their namespace and ownerUserId is null.
+  if (memory.userMemoryOfAgentId != null) return false;
+  // A spec-047 USER-owned row is strictly owner-only (@copilot, PR #1357). Its
+  // owner already holds content read in their own right and never needs this
+  // branch; anyone else must not get it through an App admin role.
+  if (memory.ownerUserId != null) return false;
+  const app = await ctx.db.app.findUnique({
+    where: { id: memory.appId },
+    select: { id: true, organizationId: true, ownerUserId: true },
+  });
+  if (!app) return false;
+  // A stale appId on a transferred memory does not grant the destination
+  // tenant's content to the App's installed Agents.
+  if (app.organizationId !== memory.organizationId || app.ownerUserId !== memory.ownerUserId) return false;
+  // deleteApp and App uninstall update the App row without removing the
+  // AppAgent join. Lock and recheck lifecycle inside the attach transaction:
+  // the earlier lookup identifies the row, not its authoritative live state.
+  const liveApp = await ctx.db.$queryRaw<{ id: string }[]>`
+    SELECT id FROM apps WHERE id = ${app.id} AND deleted_at IS NULL AND uninstalled_at IS NULL FOR SHARE
+  `;
+  if (liveApp.length === 0) return false;
+  if (app.organizationId != null) {
+    const liveOrg = await ctx.db.$queryRaw<{ id: string }[]>`
+      SELECT id FROM organizations WHERE id = ${app.organizationId} AND deleted_at IS NULL FOR SHARE
+    `;
+    if (liveOrg.length === 0) return false;
+  }
+  // A foreign Agent's owning org can be deleted while its AppAgent and grant
+  // survive. Hold that lifecycle row through the attach decision too.
+  if (agent.organizationId != null && agent.organizationId !== app.organizationId) {
+    const liveAgentOrg = await ctx.db.$queryRaw<{ id: string }[]>`
+      SELECT id FROM organizations WHERE id = ${agent.organizationId} AND deleted_at IS NULL FOR SHARE
+    `;
+    if (liveAgentOrg.length === 0) return false;
+  }
+  // FOR KEY SHARE, not a plain read (@copilot, PR #1357): uninstalling DELETES
+  // this join row without locking the agent or the memory, so a snapshot could
+  // pass here and the uninstall commit before the grant — leaving a latent row
+  // that re-activates if the agent is reinstalled. The lock makes that delete
+  // wait for this transaction instead. No deadlock: uninstall takes no memory
+  // or agent lock.
+  const installed = await ctx.db.$queryRaw<{ app_id: string }[]>`
+    SELECT app_id FROM app_agents WHERE app_id = ${app.id} AND agent_id = ${agent.id} FOR KEY SHARE
+  `;
+  if (installed.length === 0) return false;
+  // The join can outlive a revoked/expired install license. Lock that row and
+  // evaluate the same lifecycle predicate as the App access fold, so a revoke
+  // cannot commit between this decision and the attached grant.
+  if (app.organizationId == null) {
+    if (app.ownerUserId == null) return false;
+    if (app.ownerUserId !== agent.ownerUserId) {
+      const license = await ctx.db.$queryRaw<LifecycleLike[]>`
+        SELECT activated_at AS "activatedAt", revoked_at AS "revokedAt", expires_at AS "expiresAt"
+        FROM agent_subscriptions WHERE user_id = ${app.ownerUserId} AND agent_id = ${agent.id} FOR SHARE
+      `;
+      if (!license[0] || !isLifecycleActive(license[0])) return false;
+    }
+  } else if (app.organizationId !== agent.organizationId) {
+    const license = await ctx.db.$queryRaw<LifecycleLike[]>`
+      SELECT activated_at AS "activatedAt", revoked_at AS "revokedAt", expires_at AS "expiresAt"
+      FROM agent_org_grants WHERE org_id = ${app.organizationId} AND agent_id = ${agent.id} FOR SHARE
+    `;
+    if (!license[0] || !isLifecycleActive(license[0])) return false;
+  }
+  // A licensed foreign Agent is permitted below for this App's read audience,
+  // so the caller must explicitly administer this App as well as the Agent.
+  try {
+    await requireOwnerOrOrgRole(ctx, app, 'ADMIN');
+  } catch (error) {
+    if (!isAuthorizationDenial(error)) throw error;
+    return false;
+  }
+  return true;
+}
+
+/**
+ * Gate an agent-memory ATTACHMENT on the capability it grants (#1349).
+ *
+ * `addMemoryToAgent` / `updateAgentMemoryRole` authorize the AGENT (its owner
+ * or an org ADMIN). That is necessary and not sufficient: the row they write is
+ * the sole knowledge-memory write cap (`cor:dmo:050:09`) and folds into every
+ * App access map, so administering an agent used to be enough to hand that
+ * agent's audience read — and with `read-write`, WRITE — over a memory the
+ * caller could not touch themselves. `findings:installing-an-agent-is-a-read-grant`
+ * states the rule this restores: **an attach operation's gate is a read gate on
+ * the attached entity.**
+ *
+ * Two conditions, both required:
+ *
+ * 1. **Tenancy.** The memory must belong to the agent's own tenant (same org,
+ *    or the same owning user for a spec-047 user-owned agent), be genuinely
+ *    PUBLIC, or be the knowledge of an App where the Agent is live-installed
+ *    and licensed. The latter two exceptions grant only `read`.
+ *    Holger's ruling (2026-09-25) refuses a cross-tenant non-public attach even
+ *    when the caller can read the memory, matching `attachMemoryToApp`'s
+ *    `ORGANIZATION_MISMATCH` and the PUBLIC-only cross-org subscription rule.
+ * 2. **Capability.** The caller must hold, on their own user principal, the
+ *    capability being granted: the node-CONTENT read gate for `read`, and the
+ *    memory write gate for `read-write`. The content gate (not the record gate)
+ *    is the right one because an attach grants node content: an org member may
+ *    open an app-scoped memory's RECORD while `getAccessibleMemoryIds`
+ *    deliberately excludes its nodes (#653), and that gap is a same-tenant
+ *    amplification a tenancy check alone cannot see.
+ *
+ * A caller who cannot read the memory at all is answered as if it did not exist
+ * (#1316) — the refusal itself must not disclose that a guessable URN names a
+ * real memory. A caller who CAN read it but may not grant what they asked for
+ * gets an actionable `FORBIDDEN`, since existence is not a secret from them.
+ */
+export async function requireAgentMemoryGrant(
+  ctx: Context,
+  agent: { id: string; organizationId: string | null; ownerUserId: string | null; visibility: string | null },
+  memory: {
+    id: string;
+    class: string;
+    visibility: string | null;
+    userId: string | null;
+    ownerUserId: string | null;
+    organizationId: string | null;
+    appId: string | null;
+    userMemoryOfAgentId: string | null;
+  },
+  // The RAW role argument (@copilot, PR #1357): it is parsed only AFTER the
+  // concealment decision below, so a real-but-unreadable memory cannot be told
+  // from a missing one by sending an invalid role (BAD_USER_INPUT vs
+  // MEMORY_NOT_FOUND). Returns the parsed role for the caller to store.
+  rawRole: string | null | undefined,
+  ref: string,
+): Promise<AgentMemoryRole> {
+  // The role the caller asked for, defaulted as parseAgentMemoryRole does; it
+  // only selects the same-App branch here and is validated after concealment.
+  const asked = rawRole ?? 'read';
+  // Also a KNOWN mutation survivor (harness #8), for #7's reason: `self` feeds
+  // only the write check below, which no reachable caller depends on today.
+  const self = userPrincipalOnly(ctx);
+  const independentlyReadable = await holdsContentReadIndependently(ctx, memory.id);
+  // The ONE route by which App reach may admit an attach (#1357).
+  const sameAppRead = asked === 'read' && (await sameAppAttachAdmitted(ctx, agent, memory));
+  const canRead = independentlyReadable || sameAppRead;
+  // Existence-hiding first: every refusal below this line is addressed to
+  // someone who already knows the memory exists.
+  if (!canRead) throw new MemoryNotFoundError(ref);
+  // Both attachment mutations use this gate, including re-role on a legacy
+  // AgentMemoryItem. Check class AFTER concealment: an unreadable memory must
+  // still answer like a miss, without revealing its class (#1349, #1101).
+  if (memory.class === 'system') {
+    throw new Error('Agent system memories can only be attached via systemMemoryId, not as a memory item');
+  }
+  // #1101: these classes have no App audience to grant. A personal share is
+  // per-user, and a private memory is not shareable.
+  if (memory.class === 'personal' || memory.class === 'private') {
+    throw new GraphQLError(
+      memory.class === 'private'
+        ? 'A private-class memory cannot be attached to an agent — an attach grants the agent’s whole audience, and this class has no audience to grant. Private memories are never shareable either, not even by their owner. If this content needs to reach an agent, it has to live in a memory whose class has readers.'
+        : 'A personal-class memory cannot be attached to an agent — an attach grants the agent’s whole audience, and this class has no audience to grant. Giving another person access is the owner’s to do, not an administrator’s: createMemoryShare is the mechanism and only the owner may call it, so if you are not the owner, ask them.',
+      { extensions: { code: 'UNSUPPORTED_MEMORY_CLASS', memoryId: memory.id, memoryClass: memory.class } },
+    );
+  }
+  // An APP-class memory is App-internal and never an agent's to hold, for any
+  // caller (@copilot, PR #1357): its fold would break session isolation.
+  if (memory.class === 'app') {
+    throw new GraphQLError('An App-class memory belongs to its App and cannot be attached to an agent.', {
+      extensions: { code: 'UNSUPPORTED_MEMORY_CLASS', memoryClass: memory.class },
+    });
+  }
+  const role = parseAgentMemoryRole(rawRole);
+  // Platform ADMIN can independently read App-scoped knowledge through its
+  // global branch, but the row is still App-internal. Its grant must satisfy
+  // the same live-install, App-admin and read-only rule as every other caller.
+  if (memory.appId != null && memory.ownerUserId == null &&
+      (memory.class === 'knowledge' || memory.class === 'group') && !sameAppRead) {
+    throw new GraphQLError('App-scoped knowledge can only be attached read-only to an agent installed in its App.', {
+      extensions: { code: 'FORBIDDEN', reason: 'APP_SCOPED_ATTACH' },
+    });
+  }
+
+  const sameTenant =
+    (agent.organizationId != null && agent.organizationId === memory.organizationId) ||
+    (agent.ownerUserId != null && agent.ownerUserId === memory.ownerUserId);
+  // The live same-App READ branch is an App-local audience even for a licensed
+  // cross-tenant Agent. createMemoryInApp provisions that same link, so the
+  // generic attach path must be able to restore it for an authorized caller.
+  // A PUBLIC *column* is not a public AUDIENCE (@codex, PR #1357). An
+  // app-scoped row is App-internal even when marked PUBLIC (#653), and a
+  // personal/private or spec-047 user-owned row is owner-only regardless — so
+  // the cross-tenant exception uses the SAME covered-set predicate
+  // `cor:acl:080:03` uses, not the raw column. Otherwise a platform admin, or
+  // the strict owner, could attach one to an agent in another organization and
+  // expose it through that agent's App map.
+  const genuinelyPublic =
+    memory.visibility === 'PUBLIC' &&
+    !isExcludedFromCoveredSet(memory) &&
+    memory.ownerUserId == null;
+  const publicRead = role === 'read' && genuinelyPublic;
+  if (!sameTenant && !publicRead && !(role === 'read' && sameAppRead)) {
+    throw new GraphQLError(
+      genuinelyPublic
+        ? 'A PUBLIC memory from another tenant can only be attached read-only — its audience is a read audience.'
+        : "This memory belongs to another tenant; attach it to an agent in its own tenant, or share it with the agent's tenant first.",
+      { extensions: { code: 'FORBIDDEN', reason: 'CROSS_TENANT_ATTACH' } },
+    );
+  }
+
+  if (role === 'read-write') {
+    // A PUBLIC agent's audience is EVERY org that installs it (@codex, PR
+    // #1357). `cor:acl:080:03` already keeps such an agent's knowledge public;
+    // the missing half is that PUBLIC is a READ audience, so a read-write item
+    // on a public agent hands every installer the write cap. Measured before
+    // this guard: a foreign App key, holding only an AgentOrgGrant on the
+    // published agent, overwrote the publisher's node. Same-tenant ownership
+    // does not make that safe — the audience, not the tenancy, is what widens.
+    // The App-scoped grant rule above admits read only, including for platform
+    // admins. Legacy writable App-scoped links remain outside the PUBLIC
+    // covered set, but this mutation cannot create or escalate one.
+    // Only for a COVERED memory, exactly as publication judges it (@codex,
+    // PR #1357): an App-scoped or strict-owner memory is not part of any
+    // public surface — the fold confines it to its own App — so
+    // assertAgentPublicAllowed ignores such links. Without the same exemption
+    // here, attach-then-publish succeeded (reachable by a platform admin, who
+    // can read and write an App-scoped memory) while publish-then-attach was
+    // refused: one invariant, two answers depending on order.
+    if (agent.visibility === 'PUBLIC' && !isExcludedFromCoveredSet(memory)) {
+      throw new GraphQLError(
+        'A PUBLIC agent may hold read-only knowledge only — publishing it would grant write access to every organization that installs it.',
+        { extensions: { code: 'FORBIDDEN', reason: 'PUBLIC_AGENT_READ_WRITE' } },
+      );
+    }
+    // Defense in depth, and a KNOWN mutation survivor (harness #7): no caller
+    // constructible today reaches this check without already holding write.
+    // Same tenant, everyone past the agent gate (an org ADMIN, or a user-owned
+    // agent's owner) can write what they can read — and App-scoped knowledge,
+    // which no user writes, is refused by the read gate above (the same-App
+    // branch admits `read` only). Cross tenant, the tenancy rule and the
+    // PUBLIC-is-read-only rule refuse first. It stays because those facts live
+    // in other files, and this is the check that states the actual invariant.
+    try {
+      await requireMemoryWriteAccess(self, memory.id);
+    } catch (error) {
+      if (!isAuthorizationDenial(error)) throw error;
+      throw new GraphQLError(
+        'Attaching a memory read-write grants the agent write access you do not hold on it yourself.',
+        { extensions: { code: 'FORBIDDEN', reason: 'INSUFFICIENT_MEMORY_CAPABILITY' } },
+      );
+    }
+  }
+  // cor:acl:080:03 — both fresh attach and legacy-row re-role can leave an
+  // active item on a PUBLIC agent. Judge the locked agent and memory together
+  // here so neither door can retain non-PUBLIC covered knowledge (#1357).
+  await assertLinkAllowedForPublicAgent(agent.visibility, memory);
+  return role;
+}
+
+/**
  * The record gate by id: may this caller open the memory's record? A
  * soft-deleted or absent memory is never openable. Reads EVERY field
  * `canReadMemoryRecord` requires — omitting one can fail it open (#1104).
@@ -998,6 +1359,12 @@ export async function isAppParticipant(
   // The owner arm above denies outright for the SAME rule, not a different one:
   // a user-owned App has no org, so it can never satisfy this bound.
   if (ctx.impersonation && app.organizationId !== ctx.impersonation.orgId) return false;
+  if (app.organizationId !== null) {
+    const liveOrg = await ctx.db.organization.findFirst({
+      where: { id: app.organizationId, deletedAt: null }, select: { id: true },
+    });
+    if (!liveOrg) return false;
+  }
   const member = await ctx.db.appMember.findUnique({
     where: { appId_userId: { appId: app.id, userId: ctx.userId } },
     select: { userId: true },
@@ -1487,6 +1854,13 @@ export async function getAccessibleMemoryIds(
   // memory). The canonical predicates are unchanged, just narrowed, so a
   // scoped check stays in lockstep with the full-set node gate by construction.
   onlyMemoryId?: string,
+  // #1349 — `excludeAppDerived` drops the App-participation fold from the USER
+  // branch, leaving only the paths a user holds in their own right: ownership,
+  // org membership, a share, a subscription, PUBLIC. Exactly one caller wants
+  // this — the agent-attachment gate, which must not let a grant held through
+  // one App be re-granted to another App's audience. Everywhere else the fold
+  // is correct and the default keeps it.
+  options?: { excludeAppDerived?: boolean },
 ): Promise<string[] | null> {
   const scope = onlyMemoryId ? { id: onlyMemoryId } : {};
   // App Key with an active session — hard-isolate to the session's memory
@@ -1574,6 +1948,10 @@ export async function getAccessibleMemoryIds(
     // is now proven constructible. #1101 is the real fix — the ATTACH gate
     // should refuse a strict-owner class; this is the read gate that must not
     // depend on it having done so.
+    // A principal whose ONLY reach is App-derived holds nothing in its own
+    // right, so an attachment gate asking "what does this caller hold?" gets
+    // the empty set rather than that App's fold (#1349).
+    if (options?.excludeAppDerived) return [];
     return appDerivedMemoryIds(ctx, onlyMemoryId);
   }
 
@@ -1678,7 +2056,7 @@ export async function getAccessibleMemoryIds(
     // common point-read (an org member reading their own org memory) at exactly
     // its previous query cost. The fold is several queries per App and this gate
     // runs on nearly every read surface, so the shortcut is worth stating.
-    if (!(onlyMemoryId && accessibleIds.has(onlyMemoryId))) {
+    if (!options?.excludeAppDerived && !(onlyMemoryId && accessibleIds.has(onlyMemoryId))) {
       for (const id of await appDerivedMemoryIds(ctx, onlyMemoryId)) accessibleIds.add(id);
     }
     return [...accessibleIds];

@@ -21,6 +21,7 @@
 import { GraphQLError } from 'graphql';
 import { Prisma, type PrismaClient } from '../../../generated/prisma/index.js';
 import { mintMemoryUrnV2 } from '../../../lib/mintMemoryUrnV2.js';
+import { isGrantedAgentMemoryRole } from '../../../lib/appAgent.js';
 import { agentSlugFromUrn, normalizeUrnForLookup } from '../../../lib/urn.js';
 import {
   agentSlugCandidates,
@@ -53,6 +54,35 @@ export interface ChatScopeAttachments {
    * (the chat is stored there).
    */
   appClassMemoryId: string | null;
+}
+
+/**
+ * AgentMemoryItem is global to the Agent, while a shared chat belongs to one
+ * App. Only this App's knowledge (plus App-agnostic knowledge) can ground its
+ * prompts. Strict-owner knowledge is available only to its owner.
+ */
+export async function sharedChatKnowledgeMemoryIds(
+  db: PrismaClient,
+  agentId: string,
+  appId: string,
+  callerUserId: string,
+): Promise<string[]> {
+  const items = await db.agentMemoryItem.findMany({
+    where: {
+      agentId, deletedAt: null,
+      // A legacy user holding can be class='knowledge' with ownerUserId NULL.
+      // userMemoryOfAgentId still makes it per-user, never shared-chat context.
+      memory: { class: 'knowledge', deletedAt: null, userMemoryOfAgentId: null },
+    },
+    select: { memoryId: true, role: true, memory: { select: { appId: true, ownerUserId: true } } },
+  });
+  return items
+    .filter(({ role, memory }) =>
+      isGrantedAgentMemoryRole(role) &&
+      (memory.appId == null || memory.appId === appId) &&
+      (memory.ownerUserId == null || memory.ownerUserId === callerUserId),
+    )
+    .map(({ memoryId }) => memoryId);
 }
 
 /**

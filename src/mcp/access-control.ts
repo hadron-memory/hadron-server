@@ -29,8 +29,7 @@ import type { AgentSubscription, Memory, PrismaClient } from '../generated/prism
 import type { AuthContext } from '../middleware/auth.js';
 import { isActiveAgentSubscription } from '../lib/agentSubscription.js';
 import { participantAppIds } from '../lib/auth/appParticipation.js';
-import { isLifecycleActive } from '@hadron-memory/access-control';
-import { isAgentInstalled } from '../lib/appAgent.js';
+import { activeAgentInstallLicenseIds, isAgentInstalled, isGrantedAgentMemoryRole } from '../lib/appAgent.js';
 import { resolveUserApps } from '../auth/user-app-resolution.js';
 import { getOrgReadableMemoryIds } from '../lib/auth/orgReadableMemory.js';
 
@@ -63,6 +62,9 @@ export function foldAgentIntoAccessMap(agent: AgentLike): Map<string, string> {
 
   for (const item of agent.memoryItems) {
     const agentRole = item.role ?? 'read';
+    // The persisted column is a free string. A malformed legacy value is no
+    // grant at all; mapping it to READ_ONLY would make invalid rows readable.
+    if (!isGrantedAgentMemoryRole(agentRole)) continue;
     const effective = agentRole === 'read-write' ? 'READ_WRITE' : 'READ_ONLY';
     const existing = access.get(item.memoryId);
     if (!existing || effective === 'READ_WRITE') {
@@ -88,24 +90,25 @@ export function foldAgentIntoAccessMap(agent: AgentLike): Map<string, string> {
  * installed Agent to evaluate — is the US1 work; this legacy path keeps
  * single-Agent semantics until then.
  *
- * Cross-org gate: if the App's org and the Agent's org differ, an active
- * AgentOrgGrant(App.organization_id, primary-agent.id) is required.
- * Same-org installations auto-pass.
+ * The Agent path requires a live App, Agent, and install license.
  */
 export async function getAppMemoryAccess(
   db: PrismaClient,
   appId: string,
-  opts: { includeTeamSpace?: boolean; callerUserId?: string | null } = {},
+  opts: { includeTeamSpace?: boolean; callerUserId?: string | null; allAgents?: boolean } = {},
 ): Promise<Map<string, string>> {
   const app = await db.app.findUnique({
     where: { id: appId },
     select: {
       id: true,
       organizationId: true,
+      organization: { select: { deletedAt: true } },
       ownerUserId: true,
+      deletedAt: true,
+      uninstalledAt: true,
       appAgents: {
         orderBy: { createdAt: 'asc' },
-        take: 1,
+        ...(opts.allAgents ? {} : { take: 1 }),
         select: {
           agent: {
             select: {
@@ -116,7 +119,11 @@ export async function getAppMemoryAccess(
               deletedAt: true,
               memoryItems: {
                 where: { deletedAt: null, memory: { deletedAt: null } },
-                select: { memoryId: true, role: true, memory: { select: { ownerUserId: true } } },
+                select: {
+                  memoryId: true,
+                  role: true,
+                  memory: { select: { class: true, ownerUserId: true, appId: true, userMemoryOfAgentId: true } },
+                },
               },
             },
           },
@@ -124,9 +131,30 @@ export async function getAppMemoryAccess(
       },
     },
   });
-  if (!app) return new Map();
+  if (!app || app.deletedAt || app.uninstalledAt || app.organization?.deletedAt) return new Map();
 
-  const access = await getPrimaryAgentAccess(db, app);
+  const agents = app.appAgents
+    .map((install) => install.agent)
+    .filter((agent): agent is NonNullable<typeof agent> => agent !== null && agent.deletedAt === null);
+  const licensedAgentIds = await activeAgentInstallLicenseIds(db, app, agents);
+  const systemIds = agents
+    .filter((agent) => licensedAgentIds.has(agent.id) && agent.systemMemoryId !== null)
+    .map((agent) => agent.systemMemoryId!);
+  const liveSystemRows = systemIds.length
+    ? await db.memory.findMany({
+        where: { id: { in: systemIds }, deletedAt: null }, select: { id: true },
+      })
+    : [];
+  const liveSystemIds = new Set(liveSystemRows.map((row) => row.id));
+  const access = new Map<string, string>();
+  for (const install of app.appAgents) {
+    const agentAccess = getPrimaryAgentAccess(
+      { ...app, appAgents: [install] }, licensedAgentIds, liveSystemIds,
+    );
+    for (const [memoryId, level] of agentAccess) {
+      if (level === 'READ_WRITE' || !access.has(memoryId)) access.set(memoryId, level);
+    }
+  }
 
   // ── #1003: the App's OWN team space ─────────────────────────────────────
   // Folded in AFTER, and independently of, the agent walk above — the team
@@ -156,6 +184,8 @@ type AppAccessRow = {
   id: string;
   organizationId: string | null;
   ownerUserId: string | null;
+  deletedAt: Date | null;
+  uninstalledAt: Date | null;
   appAgents: Array<{
     agent: {
       id: string;
@@ -166,7 +196,7 @@ type AppAccessRow = {
       memoryItems: Array<{
         memoryId: string;
         role: string | null;
-        memory: { ownerUserId: string | null } | null;
+        memory: { class: string; ownerUserId: string | null; appId: string | null; userMemoryOfAgentId: string | null } | null;
       }>;
     } | null;
   }>;
@@ -283,28 +313,22 @@ async function getAppTeamSpaceAccess(
 
 /**
  * The agent-derived half of {@link getAppMemoryAccess} — the App's primary
- * installed Agent's system memory + memoryItems, behind the cross-org
- * AgentOrgGrant gate. Empty when the App's primary Agent doesn't resolve.
+ * installed Agent's system memory + memoryItems, behind the active install
+ * license. Empty when the App's primary Agent doesn't resolve.
  */
-async function getPrimaryAgentAccess(
-  db: PrismaClient,
+function getPrimaryAgentAccess(
   app: AppAccessRow,
-): Promise<Map<string, string>> {
+  licensedAgentIds: ReadonlySet<string>,
+  liveSystemIds: ReadonlySet<string>,
+): Map<string, string> {
   const primary = app.appAgents[0]?.agent ?? null;
   if (!primary || primary.deletedAt) return new Map();
 
-  // Cross-org gate: require active AgentOrgGrant when App and Agent live in
-  // different orgs. Same-org installs auto-pass — the Agent owner has implicit
-  // license to deploy it. The active-status predicate is shared across
-  // AgentSubscription + AgentOrgGrant via isLifecycleActive (008 R-2).
-  // spec 047: the cross-org AgentOrgGrant gate is org-scoped. A user-owned App
-  // has no org — its install license rides the owner's AgentSubscription
-  // (Phase 2c-2), so the org-grant gate doesn't apply.
-  if (app.organizationId !== null && app.organizationId !== primary.organizationId) {
-    const grant = await db.agentOrgGrant.findUnique({
-      where: { orgId_agentId: { orgId: app.organizationId, agentId: primary.id } },
-    });
-    if (!grant || !isLifecycleActive(grant)) return new Map();
+  // Org Apps require a live AgentOrgGrant for a foreign Agent; personal Apps
+  // require their owner's live AgentSubscription for a foreign Agent. Both
+  // license shapes share isLifecycleActive (008 R-2).
+  if (!licensedAgentIds.has(primary.id)) {
+    return new Map();
   }
 
   // spec 047 (blocker 2, #676 review): a USER-owned memory folds into an App's
@@ -319,9 +343,17 @@ async function getPrimaryAgentAccess(
   const foreignUserOwned = (owner: string | null | undefined): boolean =>
     owner != null && owner !== appOwner;
 
-  const systemMemoryId = foreignUserOwned(primary.ownerUserId) ? null : primary.systemMemoryId;
+  const systemMemoryId = foreignUserOwned(primary.ownerUserId) ||
+    !primary.systemMemoryId || !liveSystemIds.has(primary.systemMemoryId)
+    ? null : primary.systemMemoryId;
   const memoryItems = primary.memoryItems
-    .filter((item) => !foreignUserOwned((item as { memory?: { ownerUserId: string | null } }).memory?.ownerUserId))
+    .filter((item) => item.memory != null &&
+      // Personal/private rows remain candidates for appNodes' per-memory
+      // owner + subscription gate; legacy knowledge/app holdings never do.
+      (item.memory.userMemoryOfAgentId == null ||
+        item.memory.class === 'personal' || item.memory.class === 'private') &&
+      (item.memory.appId == null || item.memory.appId === app.id) &&
+      !foreignUserOwned(item.memory.ownerUserId))
     .map((item) => ({
       memoryId: item.memoryId,
       role: (item as { role?: string | null }).role ?? 'read',
@@ -538,7 +570,11 @@ async function participantTeamSpaceFolds(
  * principal (no `userId`) never matches an owner, and is denied by the point
  * gates for exactly that reason, so it is denied here too.
  *
- * **3. Strict-owner classes.** `personal`/`private` never enter an App-derived
+ * **3. Legacy per-user holdings.** A `userMemoryOfAgentId` pointer confines
+ * a row to its creating user even when its class is knowledge and its
+ * visibility column is PUBLIC. An App-derived fold never grants that user.
+ *
+ * **4. Strict-owner classes.** `personal`/`private` never enter an App-derived
  * map. Their identity, selected-App and subscription checks live in the
  * canonical per-memory gate; discovery callers consume this map directly and
  * cannot safely reproduce those checks. `hadron_list_memories` folds the
@@ -555,9 +591,10 @@ async function admissibleFoldRows(
 
   const rows = await db.memory.findMany({
     where: { id: { in: ids } },
-    select: { id: true, class: true, appId: true, ownerUserId: true },
+    select: { id: true, class: true, appId: true, ownerUserId: true, userMemoryOfAgentId: true },
   });
   for (const row of rows) {
+    if (row.userMemoryOfAgentId != null) continue;
     // Rule 3 — a fold is never authority for a strict-owner class.
     if (row.class === 'personal' || row.class === 'private') continue;
     // Rule 2 — strict ownership admits the owner alone, nobody else, and no
@@ -870,11 +907,13 @@ export async function canReadMemory(
  * personal/private side lookups (legacy AppAgent installs and subscriptions).
  * The final decision stays in `canReadMemoryRow`, so discovery surfaces cannot
  * replace the real gate with an ownership-only predicate.
+ * Callers with a narrower or multi-Agent App fold may pass it as `opts.access`.
  */
 export async function filterReadableMemoryIds(
   db: PrismaClient,
   auth: AuthContext,
   memoryIds: Iterable<string>,
+  opts: { access?: Map<string, string> } = {},
 ): Promise<Set<string>> {
   const ids = [...new Set(memoryIds)];
   if (ids.length === 0) return new Set();
@@ -892,7 +931,7 @@ export async function filterReadableMemoryIds(
   });
 
   const isPlatformAdmin = auth.roles?.includes('ADMIN') || auth.roles?.includes('OWNER');
-  const access = isPlatformAdmin ? undefined : await getMemoryAccess(db, auth);
+  const access = opts.access ?? (isPlatformAdmin ? undefined : await getMemoryAccess(db, auth));
   let installedAgentIds: Set<string> | undefined;
   let subscriptionsByAgentId: Map<string, SubscriptionReadRow> | undefined;
 
