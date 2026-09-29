@@ -24,6 +24,7 @@ import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { acquireLockSet, ancestorLocs } from '../../../lib/nodeSubtreeLock.js';
 import { archiveTombstone } from '../../../lib/tombstoneArchive.js';
 import { lockEdgeEndpointMemories } from '../../../lib/edgeEndpointLock.js';
+import { pendingEdgeStableTargetId } from '../../../lib/pendingEdgePromotion.js';
 import { MemoryNotFoundError } from '../../../lib/asset/gate.js';
 import { ensureCurrentNodeRevisionInTransaction } from '../../../lib/nodeRevisionSnapshot.js';
 import { isDraftCorpus } from '../../../lib/specCorpus.js';
@@ -464,29 +465,35 @@ async function unresolvedReferencesIn(
         targetLoc: e.target.loc, text: e.name, reason: 'PLACEHOLDER',
       });
     }
-    // (@codex P2, PR #1462) A PendingEdge is an edge whose target is not a
-    // node yet (a Git import ahead of its target), and promotion can
-    // materialize it later: an unresolved reference like any other. One whose
-    // target is already a live, written node is only awaiting promotion.
+    // (@codex P2s, PR #1462) A PendingEdge is an edge not materialized yet,
+    // and promotion can materialize it later: an unresolved reference like any
+    // other. Its targetId has two DISJOINT encodings (pendingEdgePromotion.ts),
+    // and the kind is never inferred from the value or from an id join:
+    // - a stable `@node-id:<id>` key is promotion retry work for a known node,
+    //   so it is unresolved only while that node is missing, deleted or a
+    //   placeholder;
+    // - anything else is a reference no node has resolved yet (a loc, a Git
+    //   file id, a URN), reported as recorded.
     const pending = await db.pendingEdge.findMany({
       where: { deletedAt: null, source: { memoryId: corpus.id, deletedAt: null } },
       select: { name: true, targetId: true, source: { select: { id: true, loc: true } } },
       orderBy: { id: 'asc' },
     });
-    if (pending.length > 0) {
-      const targets = new Map((await db.node.findMany({
-        where: { id: { in: [...new Set(pending.map((p) => p.targetId))] } },
-        select: { id: true, loc: true, deletedAt: true, isPlaceholder: true },
-      })).map((t) => [t.id, t]));
-      for (const p of pending) {
-        const target = targets.get(p.targetId);
-        if (target && !target.deletedAt && !target.isPlaceholder) continue;
-        out.push({
-          kind: 'EDGE', sourceNodeId: p.source.id, sourceLoc: p.source.loc, field: 'pendingEdge',
-          targetLoc: target?.loc ?? p.targetId, text: p.name,
-          reason: target && !target.deletedAt ? 'PLACEHOLDER' : 'MISSING',
-        });
-      }
+    const stableIds = [...new Set(pending.map((p) => pendingEdgeStableTargetId(p.targetId)).filter((id): id is string => id !== null))];
+    const stableTargets = new Map(stableIds.length === 0 ? [] : (await db.node.findMany({
+      where: { id: { in: stableIds } },
+      select: { id: true, loc: true, deletedAt: true, isPlaceholder: true },
+    })).map((t) => [t.id, t]));
+    for (const p of pending) {
+      const stableId = pendingEdgeStableTargetId(p.targetId);
+      const target = stableId === null ? undefined : stableTargets.get(stableId);
+      const live = target && !target.deletedAt ? target : undefined;
+      if (live && !live.isPlaceholder) continue;
+      out.push({
+        kind: 'EDGE', sourceNodeId: p.source.id, sourceLoc: p.source.loc, field: 'pendingEdge',
+        targetLoc: target?.loc ?? p.targetId, text: p.name,
+        reason: live ? 'PLACEHOLDER' : 'MISSING',
+      });
     }
     return out;
 }

@@ -7,6 +7,7 @@ import { generateId } from './id.js';
 import { computeContentHash } from './contentHash.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import { specCorpusMintMutations } from '../api/graphql/schema/resolvers.specCorpus.js';
+import { pendingEdgeStableTargetKey } from './pendingEdgePromotion.js';
 
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -111,32 +112,43 @@ describe('mintSpecCorpus: blockers (#1448)', () => {
   });
 });
 
-describe('mintSpecCorpus: pending edges are references too (@codex P2 on #1462)', () => {
+describe('mintSpecCorpus: pending edges are references too (@codex P2s on #1462)', () => {
   const pendingFrom = async (loc: string, targetId: string, name = 'depends-on') => {
     const source = await db.node.findFirstOrThrow({ where: { memoryId: draft.id, loc } });
     await db.pendingEdge.create({ data: { id: generateId(), sourceId: source.id, targetId, name } });
   };
 
-  it('blocks on a pending edge whose target is not a node yet, and a real run refuses', async () => {
-    const missing = generateId();
-    await pendingFrom('pas:010:01', missing);
-    const blockers = (await mint(true)).blockers;
-    expect(blockers).toEqual([
-      expect.objectContaining({ kind: 'UNRESOLVED_REFERENCE', loc: 'pas:010:01', rule: 'MISSING', targetLoc: missing }),
+  it('blocks on an unresolved pending edge, and a real run refuses', async () => {
+    await pendingFrom('pas:010:01', 'pas:099');
+    expect((await mint(true)).blockers).toEqual([
+      expect.objectContaining({ kind: 'UNRESOLVED_REFERENCE', loc: 'pas:010:01', rule: 'MISSING', targetLoc: 'pas:099' }),
     ]);
     expect(await codeOf(mint())).toBe('SPEC_CORPUS_MINT_BLOCKED');
     expect(await stateOf()).toBe('DRAFT');
   });
 
-  it('reports one to a placeholder as PLACEHOLDER, and ignores one whose target is a written spec', async () => {
+  it('never reads an unresolved target as a node id, even when it equals one', async () => {
+    const written = await db.node.findFirstOrThrow({ where: { memoryId: draft.id, loc: 'pas:010' } });
+    await pendingFrom('pas:010:01', written.id);
+    expect((await mint(true)).blockers).toEqual([
+      expect.objectContaining({ kind: 'UNRESOLVED_REFERENCE', rule: 'MISSING', targetLoc: written.id }),
+    ]);
+  });
+
+  it('decodes a stable key: skipped for a written spec, PLACEHOLDER for a placeholder, MISSING once deleted', async () => {
     const reserved = await resolvers.Mutation.reserveSpecCitation(null, { memoryRef: draft.id, loc: 'pas:020' }, as());
     const written = await db.node.findFirstOrThrow({ where: { memoryId: draft.id, loc: 'pas:010' } });
-    await pendingFrom('pas:010:01', reserved.id);
-    await pendingFrom('pas:010:01', written.id, 'refines');
+    const gone = await spec('pas:030', 'Soon deleted.');
+    await db.node.update({ where: { id: gone.id }, data: { deletedAt: new Date() } });
+    await pendingFrom('pas:010:01', pendingEdgeStableTargetKey(reserved.id));
+    await pendingFrom('pas:010:01', pendingEdgeStableTargetKey(written.id), 'refines');
+    await pendingFrom('pas:010:01', pendingEdgeStableTargetKey(gone.id), 'replaces');
     const unresolved = await resolvers.Query.specUnresolvedReferences(null, { memoryRef: draft.id }, as());
-    expect(unresolved).toEqual([expect.objectContaining({
-      kind: 'EDGE', field: 'pendingEdge', sourceLoc: 'pas:010:01', targetLoc: 'pas:020', reason: 'PLACEHOLDER',
-    })]);
+    expect(unresolved.map((r) => [r.field, r.text, r.targetLoc, r.reason])).toEqual(expect.arrayContaining([
+      ['pendingEdge', 'depends-on', 'pas:020', 'PLACEHOLDER'],
+      ['pendingEdge', 'replaces', 'pas:030', 'MISSING'],
+    ]));
+    expect(unresolved.filter((r) => r.field === 'pendingEdge')).toHaveLength(2);
   });
 });
 

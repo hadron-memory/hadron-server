@@ -5702,7 +5702,7 @@ export const typeDefs = `#graphql
     sourceLoc: String!
     "The scanned field; edge for a real edge; pendingEdge for an edge whose target is not a node yet."
     field: String!
-    "The cited loc; for a pendingEdge whose target has no node row at all, the intended target node's id."
+    "The cited loc; for a pendingEdge not yet resolved to a node, its target as recorded (a loc, file id or URN)."
     targetLoc: String!
     text: String
     "Set only by specUnresolvedReferences."
