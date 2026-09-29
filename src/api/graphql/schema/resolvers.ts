@@ -57,7 +57,7 @@ import { teamAttentionMutations, teamAttentionQueries } from './resolvers.teamAt
 import { teamWorkMutations, teamWorkQueries } from './resolvers.teamWork.js';
 import { memoryConfigMutations, memoryConfigQueries, memoryConfigFieldResolvers } from './resolvers.memoryConfig.js';
 import { memoryConfigApplyMutations } from './resolvers.memoryConfigApply.js';
-import { specCorpusMutations } from './resolvers.specCorpus.js';
+import { specCorpusMutations, specCorpusQueries, specCorpusRenumberMutations } from './resolvers.specCorpus.js';
 import {
   memoryConfigTemplateFieldResolvers,
   memoryConfigTemplateMutations,
@@ -96,6 +96,7 @@ export const resolvers = {
   MemoryConfigTemplateRule: memoryConfigTemplateFieldResolvers.MemoryConfigTemplateRule,
   Query: {
     ...nodeQueries,
+    ...specCorpusQueries,
     ...skillQueries,
     ...objectQueries,
     ...edgeQueries,
@@ -152,6 +153,7 @@ export const resolvers = {
     ...memoryConfigTemplateMutations,
     ...memoryConfigApplyMutations,
     ...specCorpusMutations,
+    ...specCorpusRenumberMutations,
     ...scopeMutations,
     ...channelMutations,
     ...registerMutations,

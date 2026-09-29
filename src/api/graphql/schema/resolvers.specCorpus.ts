@@ -4,12 +4,24 @@
 // https://github.com/hadron-memory/hadron-server/issues/1447#issuecomment-5895948862 §4.
 import { GraphQLError } from 'graphql';
 import type { Context } from './resolvers.js';
-import { writeNodeCore } from './resolvers.mutation.node.js';
-import { concealUnreadableDenial, requireMemoryWriteAccess, withoutRequestCaches } from './resolvers.helpers.js';
+import { nodeMutations, writeNodeCore } from './resolvers.mutation.node.js';
+import { concealUnreadableDenial, isMemoryReadableCached, requireMemoryWriteAccess, withoutRequestCaches } from './resolvers.helpers.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { acquireLockSet, ancestorLocs } from '../../../lib/nodeSubtreeLock.js';
 import { archiveTombstone } from '../../../lib/tombstoneArchive.js';
 import { lockEdgeEndpointMemories } from '../../../lib/edgeEndpointLock.js';
+import { MemoryNotFoundError } from '../../../lib/asset/gate.js';
+import { isDraftCorpus } from '../../../lib/specCorpus.js';
+import { InvalidLocError, validateLoc } from '../../../lib/validateLoc.js';
+import {
+  SCANNED_FIELDS,
+  corpusReferencePattern,
+  findCorpusReferences,
+  findTextCitations,
+  renumberedLoc,
+  rewriteCorpusReferences,
+  type ScannedField,
+} from '../../../lib/specReferences.js';
 
 export const specCorpusMutations = {
   /**
@@ -129,3 +141,351 @@ export const specCorpusMutations = {
     return reserved;
   },
 };
+
+// ─── #1449 — reference scan: backlinks, unresolved references, renumber ────
+
+/** The corpus a scan runs over: readable, draft, plaintext. */
+interface ScannableCorpus {
+  id: string;
+  urn: string;
+  pattern: RegExp;
+}
+
+/**
+ * Resolve a corpus for a reference scan. Order matters for disclosure: an
+ * unreadable memory answers exactly like a missing one (the shared node-content
+ * read gate), and only then is its draft state or encryption revealed.
+ *
+ * Draft only (contract §3). Encrypted corpora are refused: their text is
+ * ciphertext at rest, and scanning it needs a decryption path this slice does
+ * not add.
+ */
+async function loadScannableCorpus(ctx: Context, memoryRef: string): Promise<ScannableCorpus> {
+  const { id } = await resolveMemoryRef(ctx.db, memoryRef);
+  if (!(await isMemoryReadableCached(ctx, id))) throw new MemoryNotFoundError(memoryRef);
+  const memory = await ctx.db.memory.findUniqueOrThrow({
+    where: { id },
+    select: { urn: true, corpusDraft: true, isEncrypted: true },
+  });
+  if (!isDraftCorpus(memory)) {
+    throw new GraphQLError(
+      'References are scanned only in a draft spec corpus: a minted corpus keeps its citations permanent.',
+      { extensions: { code: 'SPEC_CORPUS_NOT_DRAFT', memoryId: id } },
+    );
+  }
+  if (memory.isEncrypted) {
+    throw new GraphQLError('Reference scans do not support encrypted memories yet.', {
+      extensions: { code: 'SPEC_CORPUS_ENCRYPTED_UNSUPPORTED', memoryId: id },
+    });
+  }
+  // A URN the corpus was published under before a rename still names it.
+  const aliases = await ctx.db.urnAlias.findMany({
+    where: { entityType: 'MEMORY', entityId: id },
+    select: { urn: true },
+  });
+  const urns = [memory.urn, ...aliases.map((a) => a.urn)].map((u) => u.replace(/^(?:hrn|urn):mem(?:ory)?:/i, ''));
+  return { id, urn: memory.urn, pattern: corpusReferencePattern(urns) };
+}
+
+/** One text-field reference found in the corpus. */
+interface ScannedReference {
+  sourceNodeId: string;
+  sourceLoc: string;
+  field: ScannedField;
+  targetLoc: string;
+  urn: string;
+}
+
+interface ScannedNode {
+  id: string;
+  loc: string;
+  isPlaceholder: boolean;
+  revSeq: number;
+  role: string | null;
+  fields: Record<ScannedField, string | null>;
+}
+
+const SCAN_PAGE = 500;
+
+/** Read every live node of the corpus, a page at a time, in id order. */
+async function loadCorpusNodes(db: Context['db'], memoryId: string): Promise<ScannedNode[]> {
+  const nodes: ScannedNode[] = [];
+  let cursor: string | undefined;
+  for (;;) {
+    const page = await db.node.findMany({
+      where: { memoryId, deletedAt: null, ...(cursor ? { id: { gt: cursor } } : {}) },
+      orderBy: { id: 'asc' },
+      take: SCAN_PAGE,
+      select: {
+        id: true, loc: true, isPlaceholder: true, revSeq: true, role: true,
+        name: true, description: true, abstract: true, content: true,
+      },
+    });
+    for (const n of page) {
+      nodes.push({
+        id: n.id, loc: n.loc, isPlaceholder: n.isPlaceholder, revSeq: n.revSeq, role: n.role,
+        fields: { name: n.name, description: n.description, abstract: n.abstract, content: n.content },
+      });
+    }
+    if (page.length < SCAN_PAGE) return nodes;
+    cursor = page[page.length - 1].id;
+  }
+}
+
+function scanReferences(nodes: ScannedNode[], pattern: RegExp): ScannedReference[] {
+  const out: ScannedReference[] = [];
+  for (const n of nodes) {
+    for (const field of SCANNED_FIELDS) {
+      for (const ref of findCorpusReferences(n.fields[field], pattern)) {
+        out.push({ sourceNodeId: n.id, sourceLoc: n.loc, field, targetLoc: ref.targetLoc, urn: ref.urn });
+      }
+    }
+  }
+  return out;
+}
+
+/** GraphQL projection of a reference. `kind` separates text URNs from real edges. */
+type SpecReferenceOut = {
+  kind: 'URN' | 'EDGE';
+  sourceNodeId: string;
+  sourceLoc: string;
+  field: string;
+  targetLoc: string;
+  text: string | null;
+  reason?: 'MISSING' | 'PLACEHOLDER';
+};
+
+const fromScan = (r: ScannedReference): SpecReferenceOut => ({
+  kind: 'URN', sourceNodeId: r.sourceNodeId, sourceLoc: r.sourceLoc, field: r.field, targetLoc: r.targetLoc, text: r.urn,
+});
+
+/** Real edges whose source is a live node of this corpus, pointing at `targetIds`. */
+async function corpusEdgesTo(db: Context['db'], memoryId: string, targetIds: string[]) {
+  if (targetIds.length === 0) return [];
+  return db.edge.findMany({
+    where: { targetId: { in: targetIds }, source: { memoryId, deletedAt: null } },
+    select: { name: true, source: { select: { id: true, loc: true } }, target: { select: { loc: true } } },
+    orderBy: { id: 'asc' },
+  });
+}
+
+export const specCorpusQueries = {
+  /**
+   * #1449 — what refers to the spec at `loc` in a draft corpus: every node URN
+   * pointing at it in the corpus's text (name, description, abstract, content;
+   * inside URLs too), plus real edges from corpus nodes. Exact citation, not
+   * its descendants. The spec need not exist: a reference to a missing spec is
+   * still a backlink.
+   */
+  specBacklinks: async (_: unknown, { memoryRef, loc }: { memoryRef: string; loc: string }, ctx: Context): Promise<SpecReferenceOut[]> => {
+    const corpus = await loadScannableCorpus(ctx, memoryRef);
+    const nodes = await loadCorpusNodes(ctx.db, corpus.id);
+    const text = scanReferences(nodes, corpus.pattern).filter((r) => r.targetLoc === loc).map(fromScan);
+    const target = nodes.find((n) => n.loc === loc);
+    const edges = target ? await corpusEdgesTo(ctx.db, corpus.id, [target.id]) : [];
+    return [
+      ...text,
+      ...edges.map((e): SpecReferenceOut => ({
+        kind: 'EDGE', sourceNodeId: e.source.id, sourceLoc: e.source.loc, field: 'edge', targetLoc: e.target.loc, text: e.name,
+      })),
+    ];
+  },
+
+  /**
+   * #1449 — references in a draft corpus that do not reach a written spec: a
+   * URN citing a loc with no live node (MISSING), or citing a placeholder, and
+   * real edges pointing at a placeholder (PLACEHOLDER). This is the mint
+   * report's "unresolved" block.
+   */
+  specUnresolvedReferences: async (_: unknown, { memoryRef }: { memoryRef: string }, ctx: Context): Promise<SpecReferenceOut[]> => {
+    const corpus = await loadScannableCorpus(ctx, memoryRef);
+    const nodes = await loadCorpusNodes(ctx.db, corpus.id);
+    const byLoc = new Map(nodes.map((n) => [n.loc, n]));
+    const out: SpecReferenceOut[] = [];
+    for (const r of scanReferences(nodes, corpus.pattern)) {
+      const target = byLoc.get(r.targetLoc);
+      if (!target) out.push({ ...fromScan(r), reason: 'MISSING' });
+      else if (target.isPlaceholder) out.push({ ...fromScan(r), reason: 'PLACEHOLDER' });
+    }
+    const placeholders = nodes.filter((n) => n.isPlaceholder).map((n) => n.id);
+    for (const e of await corpusEdgesTo(ctx.db, corpus.id, placeholders)) {
+      out.push({
+        kind: 'EDGE', sourceNodeId: e.source.id, sourceLoc: e.source.loc, field: 'edge',
+        targetLoc: e.target.loc, text: e.name, reason: 'PLACEHOLDER',
+      });
+    }
+    return out;
+  },
+};
+
+/** How many times a reference rewrite re-reads and retries after a concurrent edit. */
+const REWRITE_ATTEMPTS = 3;
+
+type RewriteOut = {
+  nodeId: string;
+  loc: string;
+  fields: string[];
+  count: number;
+  status: 'PLANNED' | 'REWRITTEN' | 'FAILED';
+  error: string | null;
+};
+
+/** The renumberSpec result (the GraphQL SpecRenumberResult), typed explicitly. */
+type SpecRenumberResultOut = {
+  dryRun: boolean;
+  moved: Array<{ fromLoc: string; toLoc: string }>;
+  rewrites: RewriteOut[];
+  textCitations: Array<{ sourceNodeId: string; sourceLoc: string; field: ScannedField; citation: string; excerpt: string }>;
+};
+
+/** Plan the reference rewrite of one node for a renumber; null when it cites nothing that moves. */
+function planRewrite(n: ScannedNode, pattern: RegExp, fromLoc: string, toLoc: string) {
+  const patch: Partial<Record<ScannedField, string>> = {};
+  let count = 0;
+  for (const field of SCANNED_FIELDS) {
+    const before = n.fields[field];
+    if (!before) continue;
+    const r = rewriteCorpusReferences(before, pattern, fromLoc, toLoc);
+    if (r.count > 0) {
+      patch[field] = r.text;
+      count += r.count;
+    }
+  }
+  return count === 0 ? null : { patch, count };
+}
+
+export const specCorpusRenumberMutations = {
+  /**
+   * #1449 — renumber a spec in a DRAFT corpus: move it and its subtree from
+   * `fromLoc` to `toLoc` (no URN alias, since it is a draft), then rewrite
+   * every node URN in the corpus that cites the moved specs, each as a normal
+   * edit with revision history. Only the loc inside each URN changes; its
+   * spelling and any URL around it are kept.
+   *
+   * A citation written only as TEXT (a link label, a name, prose) cannot be
+   * told from other characters, so it is REPORTED with its location and left
+   * alone (contract §3).
+   *
+   * `dryRun` returns the same plan without writing anything. A real run is
+   * not one transaction: the move is atomic, then each reference rewrite is
+   * its own compare-and-swap edit, re-read and retried on a concurrent write.
+   * A rewrite that still fails is reported FAILED with its reason rather than
+   * rolling back the move, since a partial rewrite is visible in
+   * specUnresolvedReferences and fixable by hand.
+   */
+  renumberSpec: async (
+    _: unknown,
+    { memoryRef, fromLoc, toLoc, dryRun }: { memoryRef: string; fromLoc: string; toLoc: string; dryRun?: boolean | null },
+    ctx: Context,
+  ): Promise<SpecRenumberResultOut> => {
+    const corpus = await loadScannableCorpus(ctx, memoryRef);
+    for (const loc of [fromLoc, toLoc]) validateLocOrThrow(loc);
+    if (fromLoc === toLoc || toLoc.startsWith(`${fromLoc}:`)) {
+      throw new GraphQLError(`Cannot renumber "${fromLoc}" to "${toLoc}": the target is the spec itself or inside its subtree.`, {
+        extensions: { code: 'BAD_USER_INPUT' },
+      });
+    }
+    let nodes = await loadCorpusNodes(ctx.db, corpus.id);
+    const source = nodes.find((n) => n.loc === fromLoc);
+    if (!source) {
+      throw new GraphQLError(`No spec at "${fromLoc}" in this corpus.`, {
+        extensions: { code: 'NODE_NOT_FOUND', loc: fromLoc, memoryId: corpus.id },
+      });
+    }
+    const occupied = nodes.find((n) => n.loc === toLoc || n.loc.startsWith(`${toLoc}:`));
+    if (occupied) {
+      throw new GraphQLError(`Cannot renumber to "${toLoc}": "${occupied.loc}" already exists there.`, {
+        extensions: { code: 'NodeLocConflictError', loc: occupied.loc, memoryId: corpus.id },
+      });
+    }
+    const moved = nodes
+      .filter((n) => renumberedLoc(n.loc, fromLoc, toLoc) !== null)
+      .map((n) => ({ fromLoc: n.loc, toLoc: renumberedLoc(n.loc, fromLoc, toLoc)! }))
+      .sort((a, b) => a.fromLoc.localeCompare(b.fromLoc));
+
+    if (!dryRun) {
+      // Fail before any write, rather than after the move.
+      await requireMemoryWriteAccess(ctx, corpus.id);
+      await nodeMutations.moveNode(
+        null,
+        { sourceRef: source.id, targetUrn: `hrn:node:${corpus.urn}:${toLoc}` },
+        ctx,
+      );
+      nodes = await loadCorpusNodes(ctx.db, corpus.id);
+    }
+
+    const rewrites: RewriteOut[] = [];
+    for (const n of nodes) {
+      const plan = planRewrite(n, corpus.pattern, fromLoc, toLoc);
+      if (!plan) continue;
+      const row: RewriteOut = {
+        nodeId: n.id, loc: n.loc, fields: Object.keys(plan.patch), count: plan.count,
+        status: dryRun ? 'PLANNED' : 'REWRITTEN', error: null,
+      };
+      if (!dryRun) {
+        try {
+          await rewriteWithRetry(ctx, corpus, n, fromLoc, toLoc);
+        } catch (e) {
+          row.status = 'FAILED';
+          row.error = e instanceof Error ? e.message : String(e);
+        }
+      }
+      rewrites.push(row);
+    }
+
+    // Bare-text copies of the moved citations, located in the corpus as it now stands.
+    const textCitations = nodes.flatMap((n) =>
+      SCANNED_FIELDS.flatMap((field) =>
+        findTextCitations(n.fields[field], corpus.pattern, fromLoc).map((c) => ({
+          sourceNodeId: n.id, sourceLoc: n.loc, field, citation: c.citation, excerpt: c.excerpt,
+        })),
+      ),
+    );
+
+    return { dryRun: !!dryRun, moved, rewrites, textCitations };
+  },
+};
+
+/**
+ * Rewrite one node's references as a guarded edit through the spec door's
+ * update path (so a spec, which the generic writer refuses, can be edited), and
+ * re-read and retry when a concurrent edit moved its revision on.
+ */
+async function rewriteWithRetry(
+  ctx: Context,
+  corpus: ScannableCorpus,
+  initial: ScannedNode,
+  fromLoc: string,
+  toLoc: string,
+): Promise<void> {
+  let node: ScannedNode | undefined = initial;
+  for (let attempt = 1; ; attempt++) {
+    const plan = planRewrite(node, corpus.pattern, fromLoc, toLoc);
+    if (!plan) return; // a concurrent edit already removed the references
+    try {
+      await writeNodeCore(
+        { memoryId: corpus.id, loc: node.loc, ...plan.patch, reason: `renumber ${fromLoc} → ${toLoc}` },
+        ctx,
+        'update',
+        { targetNodeId: node.id, guardRevSeq: node.revSeq, ownsKind: 'spec', governedContext: 'node-write' },
+      );
+      return;
+    } catch (e) {
+      const conflict = e instanceof GraphQLError && e.extensions?.code === 'NODE_WRITE_CONFLICT';
+      if (!conflict || attempt >= REWRITE_ATTEMPTS) throw e;
+      node = (await loadCorpusNodes(ctx.db, corpus.id)).find((n) => n.id === initial.id);
+      if (!node) return; // deleted meanwhile: nothing left to rewrite
+    }
+  }
+}
+
+function validateLocOrThrow(loc: string): void {
+  try {
+    validateLoc(loc);
+  } catch (err) {
+    if (err instanceof InvalidLocError) {
+      throw new GraphQLError(err.message, { extensions: { code: err.name, loc: err.loc, segment: err.segment } });
+    }
+    throw err;
+  }
+}

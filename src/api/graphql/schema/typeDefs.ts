@@ -5673,6 +5673,87 @@ export const typeDefs = `#graphql
     config: JSON
   }
 
+  """#1449 — how a spec corpus reference was found."""
+  enum SpecReferenceKind {
+    "A node URN in the corpus text (name, description, abstract or content), including inside a URL."
+    URN
+    "A real edge from a corpus node."
+    EDGE
+  }
+
+  """#1449 — why a reference does not reach a written spec."""
+  enum SpecReferenceProblem {
+    "No live node at the cited loc."
+    MISSING
+    "The cited node is a placeholder: a reserved citation with no spec written yet."
+    PLACEHOLDER
+  }
+
+  """
+  #1449 — one reference to a spec in a draft corpus. For kind URN, field is
+  the text field it was found in and text the URN as written; for kind EDGE,
+  field is 'edge' and text the edge's relationship name.
+  """
+  type SpecReference {
+    kind: SpecReferenceKind!
+    sourceNodeId: ID!
+    sourceLoc: String!
+    field: String!
+    targetLoc: String!
+    text: String
+    "Set only by specUnresolvedReferences."
+    reason: SpecReferenceProblem
+  }
+
+  """#1449 — one spec a renumber moves (the spec or a descendant)."""
+  type SpecRenumberMove {
+    fromLoc: String!
+    toLoc: String!
+  }
+
+  """#1449 — state of one node's reference rewrite in a renumber."""
+  enum SpecRewriteStatus {
+    "Dry run: this rewrite would be made."
+    PLANNED
+    REWRITTEN
+    "The rewrite was refused or kept conflicting; error says why. The move itself stands."
+    FAILED
+  }
+
+  """#1449 — one node whose URN references a renumber rewrites."""
+  type SpecRenumberRewrite {
+    nodeId: ID!
+    loc: String!
+    "The text fields rewritten."
+    fields: [String!]!
+    "How many URN references were rewritten."
+    count: Int!
+    status: SpecRewriteStatus!
+    error: String
+  }
+
+  """
+  #1449 — a moved citation that appears as bare TEXT (a link label, a node
+  name, prose). Reported, never rewritten: it cannot be told apart from other
+  characters in prose.
+  """
+  type SpecTextCitation {
+    sourceNodeId: ID!
+    sourceLoc: String!
+    field: String!
+    citation: String!
+    "A short window of text around the citation."
+    excerpt: String!
+  }
+
+  """#1449 — the result (or, with dryRun, the plan) of renumberSpec."""
+  type SpecRenumberResult {
+    dryRun: Boolean!
+    moved: [SpecRenumberMove!]!
+    rewrites: [SpecRenumberRewrite!]!
+    textCitations: [SpecTextCitation!]!
+  }
+
   type Query {
     """
     Resolve a fully-qualified, \`hrn:<type>:\`-prefixed Hadron URN (legacy \`urn:\` scheme also accepted) to the ids
@@ -7140,6 +7221,21 @@ export const typeDefs = `#graphql
     """
     validateMemory(memoryRef: ID!, limit: Int): MemoryValidationResult!
 
+    """
+    #1449 — what refers to the spec at loc in a DRAFT spec corpus: node URNs
+    in the corpus text (inside URLs too) plus real edges from corpus nodes.
+    Exact citation, not descendants. Refuses SPEC_CORPUS_NOT_DRAFT for a
+    minted memory. memoryRef accepts the memory's ID or URN.
+    """
+    specBacklinks(memoryRef: ID!, loc: String!): [SpecReference!]!
+
+    """
+    #1449 — references in a DRAFT spec corpus that do not reach a written
+    spec: URNs citing a missing loc or a placeholder, and edges to a
+    placeholder. Minting refuses while any remain.
+    """
+    specUnresolvedReferences(memoryRef: ID!): [SpecReference!]!
+
     "One run (cor:agt:010:02). ref is an AppRun ID or an hrn:apprun:<root>:<app>:<run-id> URN (#696)."
     appRun(ref: ID!): AppRun
     "The latest run of an App resolved to a concrete run (#696) — 'current/latest/previous' are queries, never magic run-ids in URN space (cor:urn:010:02). previous: true returns the run before the latest."
@@ -7314,6 +7410,16 @@ export const typeDefs = `#graphql
     memoryRef accepts the memory's ID or URN.
     """
     reserveSpecCitation(memoryRef: ID!, loc: String!, name: String): Node!
+    """
+    #1449 — renumber a spec in a DRAFT spec corpus: move it and its subtree
+    from fromLoc to toLoc (no URN alias in a draft), then rewrite every node
+    URN in the corpus that cites the moved specs, each as a normal edit. Bare
+    text citations (labels, names) are reported in textCitations, not
+    rewritten. dryRun returns the plan and writes nothing. The move is atomic;
+    each rewrite is a separate guarded edit, and one that fails is reported
+    FAILED without undoing the move.
+    """
+    renumberSpec(memoryRef: ID!, fromLoc: String!, toLoc: String!, dryRun: Boolean): SpecRenumberResult!
 
     """
     #1201 — the UPDATE door for the spec kind, and the counterpart of
