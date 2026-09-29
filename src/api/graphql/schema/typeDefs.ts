@@ -5716,6 +5716,8 @@ export const typeDefs = `#graphql
     "Dry run: this rewrite would be made."
     PLANNED
     REWRITTEN
+    "A concurrent edit removed the references (or the node) before the rewrite, so nothing was written."
+    UNCHANGED
     "The rewrite was refused or kept conflicting; error says why. The move itself stands."
     FAILED
   }

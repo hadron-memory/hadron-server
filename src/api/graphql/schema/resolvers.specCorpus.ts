@@ -377,7 +377,7 @@ type RewriteOut = {
   loc: string;
   fields: string[];
   count: number;
-  status: 'PLANNED' | 'REWRITTEN' | 'FAILED';
+  status: 'PLANNED' | 'REWRITTEN' | 'UNCHANGED' | 'FAILED';
   error: string | null;
 };
 
@@ -510,7 +510,17 @@ export const specCorpusRenumberMutations = {
       };
       if (!dryRun) {
         try {
-          await rewriteWithRetry(ctx, corpus, n, fromLoc, toLoc, accept);
+          // (@codex P2, #1453) Report what was actually written: a concurrent
+          // edit can change or remove the references between plan and write.
+          const done = await rewriteWithRetry(ctx, corpus, n, fromLoc, toLoc, accept);
+          if (done) {
+            row.fields = done.fields;
+            row.count = done.count;
+          } else {
+            row.status = 'UNCHANGED';
+            row.fields = [];
+            row.count = 0;
+          }
         } catch (e) {
           row.status = 'FAILED';
           row.error = e instanceof Error ? e.message : String(e);
@@ -544,7 +554,7 @@ async function rewriteWithRetry(
   fromLoc: string,
   toLoc: string,
   accept: (ref: { memoryUrn: string; targetLoc: string }) => boolean,
-): Promise<void> {
+): Promise<{ fields: string[]; count: number } | null> {
   let node: ScannedNode | undefined = initial;
   for (let attempt = 1; ; attempt++) {
     // The plan is computed from the row as stored, which may carry raw drift
@@ -557,9 +567,9 @@ async function rewriteWithRetry(
       ensureCurrentNodeRevisionInTransaction(tx, node!.id, { expectedMemoryId: corpus.id }),
     );
     node = (await loadCorpusNodes(ctx.db, corpus.id)).find((n) => n.id === initial.id);
-    if (!node) return; // deleted meanwhile: nothing left to rewrite
+    if (!node) return null; // deleted meanwhile: nothing left to rewrite
     const plan = planRewrite(node, corpus.pattern, fromLoc, toLoc, accept);
-    if (!plan) return; // a concurrent edit already removed the references
+    if (!plan) return null; // a concurrent edit already removed the references
     try {
       await writeNodeCore(
         { memoryId: corpus.id, loc: node.loc, ...plan.patch, reason: `renumber ${fromLoc} → ${toLoc}` },
@@ -567,7 +577,7 @@ async function rewriteWithRetry(
         'update',
         { targetNodeId: node.id, guardRevSeq: node.revSeq, ownsKind: 'spec', governedContext: 'node-write' },
       );
-      return;
+      return { fields: Object.keys(plan.patch), count: plan.count };
     } catch (e) {
       const conflict = e instanceof GraphQLError && e.extensions?.code === 'NODE_WRITE_CONFLICT';
       if (!conflict || attempt >= REWRITE_ATTEMPTS) throw e;

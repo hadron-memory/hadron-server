@@ -242,3 +242,37 @@ describe('renumber moves by address, atomically (@codex P2 on #1453)', () => {
     expect(await content('pas:020')).toBe(before);
   });
 });
+
+describe('renumber reports what it actually wrote (@codex P2 on #1453)', () => {
+  it('marks a node UNCHANGED when a concurrent edit removed its references before the rewrite', async () => {
+    let armed = false;
+    let fired = false;
+    // After the move completes, the next transaction (the first rewrite's
+    // reconcile) first sees a concurrent edit strip pas:020's references.
+    const racingDb = new Proxy(db, {
+      get(target, prop, receiver) {
+        if (prop === '$transaction' && armed && !fired) {
+          return async (...args: unknown[]) => {
+            fired = true;
+            await db.node.update({ where: { id: other.id }, data: { content: 'No references any more.' } });
+            return (target.$transaction as (...a: unknown[]) => unknown)(...args);
+          };
+        }
+        return Reflect.get(target, prop, receiver);
+      },
+    });
+    const spy = vi.spyOn(nodeMutations, 'moveNode').mockImplementationOnce(async (...args) => {
+      spy.mockRestore();
+      const out = await nodeMutations.moveNode(...args);
+      armed = true;
+      return out;
+    });
+    const res = await specCorpusRenumberMutations.renumberSpec(
+      null, { memoryRef: draft.id, fromLoc: 'pas:010', toLoc: 'pas:040' }, { ...as(), db: racingDb },
+    );
+    expect(fired).toBe(true);
+    expect(res.rewrites.find((r) => r.loc === 'pas:020')).toMatchObject({ status: 'UNCHANGED', count: 0, fields: [] });
+    expect(res.rewrites.find((r) => r.loc === 'pas:040')).toMatchObject({ status: 'REWRITTEN', count: 1 });
+    expect(await content('pas:020')).toBe('No references any more.');
+  });
+});
