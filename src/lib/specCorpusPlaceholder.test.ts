@@ -205,3 +205,25 @@ describe('a placeholder stays a spec until written; cloneNode never copies one (
     expect(await db.node.count({ where: { memoryId: minted.id, loc: 'pas:110:01' } })).toBe(0);
   });
 });
+
+describe('every content write fills a placeholder (@codex P2 on #1452)', () => {
+  it('mergeNodes: merging real content into a placeholder makes it a spec', async () => {
+    const reserved = await reserve(draft.id, 'pas:120:01');
+    const donor = await db.node.create({ data: { id: generateId(), memoryId: draft.id, loc: 'scratch:donor', name: 'Donor', content: 'The written rule.' } });
+    const result = await codeOf(resolvers.Mutation.mergeNodes({}, {
+      input: { source: donor.id, target: reserved.id, include: ['CONTENT'] },
+    } as never, as(admin.id)));
+    // mergeNodes admits a governed spec target, so this is a real write path.
+    expect(result).toBe('NO_ERROR');
+    expect(await db.node.findUniqueOrThrow({ where: { id: reserved.id } }))
+      .toMatchObject({ content: 'The written rule.', isPlaceholder: false });
+  });
+
+  it('re-saving real content that is already there clears a stuck placeholder', async () => {
+    const reserved = await reserve(draft.id, 'pas:130:01');
+    // A write outside the fill hook left real content on a still-marked placeholder.
+    await db.node.update({ where: { id: reserved.id }, data: { content: 'Already written.' } });
+    await updateSpec(draft.id, 'pas:130:01', { content: 'Already written.' });
+    expect(await row(draft.id, 'pas:130:01')).toMatchObject({ isPlaceholder: false, content: 'Already written.' });
+  });
+});

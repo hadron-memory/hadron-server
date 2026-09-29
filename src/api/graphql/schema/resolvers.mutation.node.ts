@@ -1142,6 +1142,14 @@ export async function writeNodeCore(
               if (opts?.guardRevSeq !== undefined && current.revSeq !== opts.guardRevSeq) {
                 throw writeConflict();
               }
+              // #1450 (@codex P2, PR #1452): a placeholder that already holds
+              // real content (a merge or raw write put it there) is cleared by
+              // re-saving that content, even though nothing else changes. Not
+              // a revisioned field, so no revision.
+              const fill = placeholderFillPatch(current, input.content);
+              if (Object.keys(fill).length > 0) {
+                await tx.node.update({ where: { id: current.id }, data: fill });
+              }
               const unchanged = await tx.node.findUniqueOrThrow({
                 where: { id: current.id },
                 include,
@@ -3649,7 +3657,16 @@ export const nodeMutations = {
         );
 
         if (Object.keys(changed).length > 0) {
-          await tx.node.update({ where: { id: target.id }, data: { ...writeData, ...clearNodeAuthorship() } });
+          await tx.node.update({
+            where: { id: target.id },
+            data: {
+              ...writeData,
+              ...clearNodeAuthorship(),
+              // #1450 (@codex P2, PR #1452): merging real content into a
+              // reserved citation writes the spec, same as updateSpecNode.
+              ...placeholderFillPatch(lockedTarget, 'content' in changed ? changed.content : undefined),
+            },
+          });
         }
 
         if (fields.has('EDGES')) {
