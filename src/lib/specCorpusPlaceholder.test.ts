@@ -311,6 +311,8 @@ describe('a placeholder over a tombstone is indistinguishable from a fresh one (
         llmModel: 'old-model', aiAgent: 'old-agent',
       },
     } as never, as(admin.id));
+    // Git-sync provenance is not an input field, so seed it directly.
+    await db.node.update({ where: { id: old.id }, data: { contentHash: 'deadbeef', ownerRepo: 'acme/specs' } });
     await resolvers.Mutation.deleteNode(null, { nodeRef: old.id }, as(admin.id));
     const revived = await reserve(draft.id, 'pas:180:02');
     expect(revived.id).toBe(old.id);

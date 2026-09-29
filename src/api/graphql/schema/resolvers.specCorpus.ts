@@ -77,7 +77,15 @@ export const specCorpusMutations = {
           { extensions: { code: 'SPEC_CORPUS_NOT_DRAFT', memoryId } },
         );
       }
-      await tx.node.update({ where: { id: node.id }, data: { isPlaceholder: true }, select: { id: true } });
+      // Git provenance is not a node-input field, so it is reset here, in the
+      // same write that marks the placeholder (@codex P2, PR #1452): a revived
+      // git-synced tombstone would otherwise keep the deleted body's hash and
+      // stay owned by the old repo, where sync's cleanup could delete it.
+      await tx.node.update({
+        where: { id: node.id },
+        data: { isPlaceholder: true, contentHash: null, ownerRepo: null },
+        select: { id: true },
+      });
       // The node as the create door built it (relations included), now marked.
       return { ...node, isPlaceholder: true };
     });
