@@ -9,6 +9,7 @@ import { withoutRequestCaches } from './resolvers.helpers.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { acquireLockSet, ancestorLocs } from '../../../lib/nodeSubtreeLock.js';
 import { archiveTombstone } from '../../../lib/tombstoneArchive.js';
+import { lockEdgeEndpointMemories } from '../../../lib/edgeEndpointLock.js';
 
 export const specCorpusMutations = {
   /**
@@ -54,6 +55,11 @@ export const specCorpusMutations = {
       // these advisory locks and waits on that row: a deadlock instead of a
       // typed loc conflict. writeNodeCore's own acquisition below is then a
       // re-entrant no-op.
+      // (Chip's QA, PR #1452) The edge-endpoint memory key first, as every edge
+      // writer takes it before its address locks: an in-flight edge naming the
+      // tombstone then commits before the archive lists edges, and a later one
+      // revalidates the endpoint under this key and finds it gone.
+      await lockEdgeEndpointMemories(tx, [memoryId]);
       await acquireLockSet(tx, [
         ...ancestorLocs(loc).map((ancestor) => ({ memoryId, loc: ancestor })),
         { memoryId, loc },

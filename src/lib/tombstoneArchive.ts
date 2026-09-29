@@ -31,8 +31,10 @@ export function archivedTombstoneLoc(loc: string, id: string): string {
  * Incoming edges from OTHER memories are left alone too. Their loc lives in the
  * source memory, which the caller has not been authorized to write.
  *
- * The caller must hold the address locks for `loc` and must have verified the
- * row is a tombstone. Returns the archived loc.
+ * The caller must hold the edge-endpoint memory key for the tombstone's memory
+ * (`lockEdgeEndpointMemories`, taken before any address lock, the order every
+ * edge writer uses) and the address locks for `loc`, and must have verified
+ * the row is a tombstone. Returns the archived loc.
  */
 export async function archiveTombstone(
   tx: Prisma.TransactionClient,
@@ -40,6 +42,12 @@ export async function archiveTombstone(
 ): Promise<string> {
   const { id, loc, memoryId } = tombstone;
   const archived = archivedTombstoneLoc(loc, id);
+  // Re-stamp FIRST, then list the edges (Chip's QA, PR #1452). `loc` is in the
+  // (loc, memory_id) unique index, so this update takes the row FOR UPDATE and
+  // waits out any in-flight edge insert still holding its FK KEY SHARE on the
+  // node; the listing below, a fresh READ COMMITTED statement, then sees that
+  // edge. Listing first would miss it, and it would commit at the old address.
+  await tx.node.update({ where: { id }, data: { loc: archived }, select: { id: true } });
   const edges = await tx.edge.findMany({
     where: { memoryId, OR: [{ sourceId: id }, { targetId: id }] },
     select: {
@@ -48,7 +56,6 @@ export async function archiveTombstone(
       target: { select: { loc: true } },
     },
   });
-  await tx.node.update({ where: { id }, data: { loc: archived }, select: { id: true } });
   for (const edge of edges) {
     const renamed = rekeyedEdgeLoc(edge, id, loc, archived);
     if (renamed !== null) {

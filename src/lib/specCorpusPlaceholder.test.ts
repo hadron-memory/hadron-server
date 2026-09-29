@@ -8,6 +8,7 @@ import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import { mergeMemoryGraph } from '../controller/operations/mergeMemories.js';
 import { updateNodeFromGitSync } from '../integrations/github/syncGraphFromGithub.js';
 import { acquireLockSet, ancestorLocs } from './nodeSubtreeLock.js';
+import { lockEdgeEndpointMemories } from './edgeEndpointLock.js';
 
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -319,6 +320,88 @@ describe('reserving over a deleted spec with edges (@codex P2 on #1452)', () => 
     expect(linked).toMatchObject({ loc: 'pas:162:cites:pas:162:01', targetId: reserved.id });
     expect(await db.edge.findMany({ where: { targetId: old.id }, select: { loc: true } }))
       .toEqual([{ loc: `pas:162:cites:pas:162:01__deleted-${old.id}` }]);
+  });
+});
+
+describe('reserve archives an edge that was in flight when the spec was deleted (Chip QA on #1452)', () => {
+  it('takes the edge-endpoint memory key first, so it waits for an edge writer holding it', async () => {
+    let release!: () => void;
+    let held!: () => void;
+    const keyHeld = new Promise<void>((r) => { held = r; });
+    const hold = new Promise<void>((r) => { release = r; });
+    // What every edge writer holds from endpoint validation to commit.
+    const edgeWriter = db.$transaction(async (tx) => {
+      await lockEdgeEndpointMemories(tx, [draft.id]);
+      held();
+      await hold;
+    }, { timeout: 20_000 });
+    await keyHeld;
+
+    const reserving = reserve(draft.id, 'pas:164');
+    try {
+      await vi.waitFor(async () => {
+        const waiting = await db.$queryRaw<Array<{ pid: number }>>`
+          SELECT pid FROM pg_stat_activity
+          WHERE datname = current_database() AND wait_event_type = 'Lock' AND wait_event = 'advisory'
+        `;
+        expect(waiting.length).toBeGreaterThan(0);
+      }, { timeout: 5_000, interval: 25 });
+      // It waits holding no address lock: another writer can still lock the loc.
+      await db.$transaction((tx) => acquireLockSet(tx, [{ memoryId: draft.id, loc: 'pas:164' }]), { timeout: 5_000 });
+    } finally {
+      release();
+    }
+    await edgeWriter;
+    expect(await reserving).toMatchObject({ loc: 'pas:164', isPlaceholder: true });
+  });
+
+
+  it('waits for the edge insert holding the tombstone, then re-keys that edge too', async () => {
+    const source = await resolvers.Mutation.createSpecNode(null, {
+      input: { memoryId: draft.id, loc: 'pas:163', name: 'Source', role: 'spec', nodeType: 'info', content: 'Body.' },
+    } as never, as(admin.id));
+    const target = await resolvers.Mutation.createSpecNode(null, {
+      input: { memoryId: draft.id, loc: 'pas:163:01', name: 'Target', role: 'spec', nodeType: 'info', content: 'Old.' },
+    } as never, as(admin.id));
+
+    // 1. An edge insert begins while the target is live, and stays open (its FK
+    //    holds KEY SHARE on the target row).
+    let release!: () => void;
+    let inserted!: () => void;
+    const edgeOpen = new Promise<void>((r) => { inserted = r; });
+    const hold = new Promise<void>((r) => { release = r; });
+    const edgeWriter = db.$transaction(async (tx) => {
+      await tx.edge.create({ data: {
+        memoryId: draft.id, sourceId: source.id, targetId: target.id, loc: 'pas:163:cites:pas:163:01', name: 'cites',
+      } });
+      inserted();
+      await hold;
+    }, { timeout: 20_000 });
+    await edgeOpen;
+
+    // 2. The target is soft-deleted (a non-key column: it does not wait).
+    await resolvers.Mutation.deleteNode(null, { nodeRef: target.id }, as(admin.id));
+
+    // 3. Reserve at the freed citation, and let it reach the archive.
+    const reserving = reserve(draft.id, 'pas:163:01');
+    try {
+      await vi.waitFor(async () => {
+        const waiting = await db.$queryRaw<Array<{ pid: number }>>`
+          SELECT pid FROM pg_stat_activity
+          WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE '%UPDATE "public"."nodes"%'
+        `;
+        expect(waiting.length).toBeGreaterThan(0);
+      }, { timeout: 5_000, interval: 25 });
+    } finally {
+      // 4. The edge commits.
+      release();
+    }
+    await edgeWriter;
+    const reserved = await reserving;
+
+    expect(reserved.id).not.toBe(target.id);
+    expect(await db.edge.findMany({ where: { targetId: target.id }, select: { loc: true } }))
+      .toEqual([{ loc: `pas:163:cites:pas:163:01__deleted-${target.id}` }]);
   });
 });
 
