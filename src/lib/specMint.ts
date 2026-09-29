@@ -41,9 +41,8 @@ const TWO_DIGIT = /^[0-9]{2}$/;
 /**
  * Whether a loc is citation-shaped: `[<product>:]<module>[:<feature>[:<rule>[:<flow>]]]`
  * with 3-letter product/module, 3-digit feature and 2-digit rule/flow. This is
- * the CLI's ParseCitation, and exactly the set its `spec lint --all` scans.
- * A memory's root node (loc = the memory's name) and other non-citation nodes
- * are outside the corpus lint, as they are in the CLI.
+ * the CLI's ParseCitation. The mint lint reads these plus every spec-marked
+ * node ({@link mintLintSelects}), as the CLI's `spec lint --all` does.
  */
 export function isCitationLoc(loc: string): boolean {
   const parts = loc.trim().split(':');
@@ -174,8 +173,19 @@ export function lintNodeForMint(n: MintLintNode): MintLintFinding[] {
  * (loc, memoryId) index makes a duplicate impossible in the database; the rule
  * is kept so the server and CLI rule sets stay the same.
  */
+/**
+ * What a mint lint reads: exactly the CLI's `lintSelects` (hadron-cli #708),
+ * so the two cannot disagree on scope. Every spec-marked node at ANY loc, plus
+ * every citation-shaped node, marked or not, so a spec that lost its tag is
+ * still caught. A memory root at a citation-shaped name (`pas`) occupies that
+ * citation and is linted like any node there.
+ */
+export function mintLintSelects(n: { loc: string; tags: readonly string[]; role: string | null }): boolean {
+  return hasSpecMarker(n) || isCitationLoc(n.loc);
+}
+
 export function lintCorpusForMint(nodes: readonly MintLintNode[]): MintLintFinding[] {
-  const cited = nodes.filter((n) => isCitationLoc(n.loc));
+  const cited = nodes.filter(mintLintSelects);
   const out = cited.flatMap(lintNodeForMint);
   const count = new Map<string, number>();
   for (const n of cited) count.set(n.loc, (count.get(n.loc) ?? 0) + 1);

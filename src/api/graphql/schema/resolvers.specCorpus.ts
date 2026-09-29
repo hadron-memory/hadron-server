@@ -16,9 +16,8 @@ import {
 import { isAbstractUnverified } from '../../../lib/contentHash.js';
 import {
   STALE_ABSTRACT_BLOCKS_MINT,
-  hasSpecMarker,
-  isCitationLoc,
   lintCorpusForMint,
+  mintLintSelects,
   parseOpenQuestions,
 } from '../../../lib/specMint.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
@@ -182,13 +181,6 @@ interface ScannableCorpus {
    * falls through to one of these if IT has that loc, so it is not ours.
    */
   currentUrnHistorical: string[];
-  /**
-   * (@codex P2, PR #1462) Where the memory's root node can sit: createMemory
-   * puts it at the memory's name, and a rename moves neither, so every name
-   * and URN slug the memory has held. A GUARD only: which node is the root is
-   * decided by identity (the mint's first-row check), never by loc alone.
-   */
-  rootLocs: ReadonlySet<string>;
 }
 
 /**
@@ -205,7 +197,7 @@ async function loadScannableCorpus(ctx: Context, memoryRef: string): Promise<Sca
   if (!(await isMemoryReadableCached(ctx, id))) throw new MemoryNotFoundError(memoryRef);
   const memory = await ctx.db.memory.findUniqueOrThrow({
     where: { id },
-    select: { urn: true, name: true, corpusDraft: true, isEncrypted: true },
+    select: { urn: true, corpusDraft: true, isEncrypted: true },
   });
   if (!isDraftCorpus(memory)) {
     throw new GraphQLError(
@@ -270,11 +262,9 @@ async function loadScannableCorpus(ctx: Context, memoryRef: string): Promise<Sca
     if (visible.length) shadowed.set(urn, visible);
     else shadowed.delete(urn);
   }
-  const rootLocs = new Set([memory.name, ...urns.map((u) => u.slice(u.indexOf(':') + 1).replace(/^:/, ''))]);
   return {
     id, urn: memory.urn, pattern: corpusReferencePattern(urns), shadowed,
     currentUrnHistorical: await readable(currentUrnHistorical),
-    rootLocs,
   };
 }
 
@@ -445,7 +435,7 @@ export const specCorpusQueries = {
    */
   specUnresolvedReferences: async (_: unknown, { memoryRef }: { memoryRef: string }, ctx: Context): Promise<SpecReferenceOut[]> => {
     const corpus = await loadScannableCorpus(ctx, memoryRef);
-    return unresolvedReferencesIn(ctx.db, corpus, await loadCorpusNodes(ctx.db, corpus.id));
+    return unresolvedReferencesIn(ctx, corpus, await loadCorpusNodes(ctx.db, corpus.id));
   },
 };
 
@@ -454,10 +444,11 @@ export const specCorpusQueries = {
  * PLACEHOLDER), shared by specUnresolvedReferences and the mint report.
  */
 async function unresolvedReferencesIn(
-  db: Pick<Context['db'], 'node' | 'edge' | 'pendingEdge'>,
+  ctx: Context,
   corpus: ScannableCorpus,
   nodes: ScannedNode[],
 ): Promise<SpecReferenceOut[]> {
+    const { db } = ctx;
     const byLoc = new Map(nodes.map((n) => [n.loc, n]));
     const out: SpecReferenceOut[] = [];
     const scanned = scanReferences(nodes, corpus.pattern);
@@ -473,6 +464,33 @@ async function unresolvedReferencesIn(
       out.push({
         kind: 'EDGE', sourceNodeId: e.source.id, sourceLoc: e.source.loc, field: 'edge',
         targetLoc: e.target.loc, text: e.name, reason: 'PLACEHOLDER',
+      });
+    }
+    // (@codex P2, PR #1462) An edge may cross into another readable memory
+    // (createEdge admits readable targets), so a placeholder there is an
+    // unwritten spec this corpus points at. Only a memory the CALLER can read
+    // is consulted: classifying by an unreadable one's rows would make this
+    // report an oracle for it (findings:classifying-by-another-memorys-rows-
+    // is-an-existence-oracle). Its target is named by node URN, since a loc
+    // alone does not say which memory it is in.
+    const foreign = await db.edge.findMany({
+      where: {
+        deletedAt: null,
+        source: { memoryId: corpus.id, deletedAt: null },
+        target: { memoryId: { not: corpus.id }, deletedAt: null, isPlaceholder: true },
+      },
+      select: {
+        name: true, source: { select: { id: true, loc: true } },
+        target: { select: { loc: true, memoryId: true, memory: { select: { urn: true } } } },
+      },
+      orderBy: { id: 'asc' },
+    });
+    for (const e of foreign) {
+      if (!(await isMemoryReadableCached(ctx, e.target.memoryId))) continue;
+      out.push({
+        kind: 'EDGE', sourceNodeId: e.source.id, sourceLoc: e.source.loc, field: 'edge',
+        targetLoc: `hrn:node:${e.target.memory.urn.replace(/^(?:hrn|urn):mem(?:ory)?:/i, '')}:${e.target.loc}`,
+        text: e.name, reason: 'PLACEHOLDER',
       });
     }
     // (@codex P2, PR #1462) deleteNode soft-deletes a spec but leaves the
@@ -899,20 +917,13 @@ export const specCorpusMintMutations = {
           name: true, description: true, abstract: true, content: true, abstractOriginHash: true,
         },
       });
-      // Citation-shaped nodes, less the memory's ROOT (@codex P2, PR #1462):
-      // infrastructure, even at a citation-shaped name like `pas`. The root is
-      // identified by IDENTITY, not by loc (Chip's QA / Bob, PR #1462: after a
-      // rename, a different node can sit at a former name): it is the memory's
-      // first row, which createMemory writes before the memory's id is even
-      // returned, tombstones included so a replacement never inherits the
-      // exemption. The loc guard only narrows it further, so a hard-deleted
-      // root can never hand the exemption to a real spec. A root someone made
-      // a spec carries the marker and is linted like any spec.
-      const firstRow = await tx.node.findFirst({
-        where: { memoryId: id }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }], select: { id: true },
-      });
-      const isRoot = (n: { id: string; loc: string }) => n.id === firstRow?.id && corpus.rootLocs.has(n.loc);
-      const cited = nodes.filter((n) => isCitationLoc(n.loc) && !(isRoot(n) && !hasSpecMarker(n)));
+      // The lint scope is exactly the CLI's (`lintSelects`, hadron-cli #708;
+      // ruling (a) in team chat #4086): every spec-marked node at ANY loc, plus
+      // every citation-shaped node, marked or not, so a spec that lost its tag
+      // is still caught. A memory root at a citation-shaped name (`pas`)
+      // occupies that citation and is linted like any node there, as the CLI
+      // lints it; one at an ordinary name (`specs-draft`) is outside.
+      const cited = nodes.filter(mintLintSelects);
 
       const blockers: MintFinding[] = [];
       for (const n of nodes) {
@@ -924,7 +935,7 @@ export const specCorpusMintMutations = {
         id: n.id, loc: n.loc, isPlaceholder: n.isPlaceholder, revSeq: n.revSeq, role: n.role,
         fields: { name: n.name, description: n.description, abstract: n.abstract, content: n.content },
       }));
-      for (const r of await unresolvedReferencesIn(tx, corpus, scanned)) {
+      for (const r of await unresolvedReferencesIn(txCtx, corpus, scanned)) {
         blockers.push({
           kind: 'UNRESOLVED_REFERENCE', loc: r.sourceLoc, rule: r.reason ?? null, targetLoc: r.targetLoc,
           message: r.reason === 'PLACEHOLDER'

@@ -79,43 +79,21 @@ describe('mintSpecCorpus: a clean corpus (#1448)', () => {
   });
 });
 
-describe('mintSpecCorpus: a citation-shaped memory root is not a spec (@codex P2 on #1462)', () => {
-  it('mints a clean corpus named `pas`, whose root sits at a citation-shaped loc', async () => {
+describe('mintSpecCorpus lints exactly the CLI --all scope (ruling (a); @codex P2s on #1462)', () => {
+  it('lints a memory root that sits at a citation-shaped name, as the CLI does', async () => {
     const pas = await resolvers.Mutation.createMemory(null, { orgId: org.id, name: 'pas', draftCorpus: true }, as());
-    const root = await db.node.findFirstOrThrow({ where: { memoryId: pas.id, loc: 'pas' } });
-    expect(root.tags).not.toContain('spec');
+    expect((await mint(true, admin.id, pas.id)).blockers.map((b) => [b.loc, b.rule])).toEqual([['pas', 'tag-spec']]);
+    // Marked as the module's spec, it passes like any spec.
+    await db.node.updateMany({ where: { memoryId: pas.id, loc: 'pas' }, data: { tags: ['spec'] } });
+    expect((await mint(true, admin.id, pas.id)).blockers).toEqual([]);
+  });
+
+  it('lints a spec-marked node at a non-citation loc, and leaves an ordinary unmarked node alone', async () => {
     await db.node.create({ data: {
-      id: generateId(), memoryId: pas.id, loc: 'pas:010', name: 'pas:010', content: 'Body.', role: 'spec', nodeType: 'info', tags: ['spec'],
+      id: generateId(), memoryId: draft.id, loc: 'guides:intro', name: 'Intro', content: 'Body.', role: 'spec', nodeType: 'data',
     } });
-    expect((await mint(true, admin.id, pas.id)).blockers).toEqual([]);
-    // Still found at its creation-time loc after the memory is renamed.
-    await resolvers.Mutation.updateMemory(null, { id: pas.id, name: 'renamed' } as never, as());
-    expect((await mint(true, admin.id, pas.id)).blockers).toEqual([]);
-  });
-
-  it('lints a different node that sits at a former or current name loc (Chip QA / Bob on #1462)', async () => {
-    const memory = await resolvers.Mutation.createMemory(null, { orgId: org.id, name: 'not-a-citation', draftCorpus: true }, as());
-    await resolvers.Mutation.updateMemory(null, { id: memory.id, name: 'pas' } as never, as());
-    await db.node.create({ data: { id: generateId(), memoryId: memory.id, loc: 'pas', name: 'Data', nodeType: 'data' } });
-    expect((await mint(true, admin.id, memory.id)).blockers.map((b) => [b.kind, b.loc, b.rule])).toEqual([
-      ['LINT', 'pas', 'nodetype-info'],
-      ['LINT', 'pas', 'tag-spec'],
-    ]);
-  });
-
-  it('never hands the exemption to a real node when the root was hard-deleted', async () => {
-    const memory = await resolvers.Mutation.createMemory(null, { orgId: org.id, name: 'spec-corpus', draftCorpus: true }, as());
-    await db.node.deleteMany({ where: { memoryId: memory.id } });
-    await db.node.create({ data: { id: generateId(), memoryId: memory.id, loc: 'pas:010', name: 'Unmarked', nodeType: 'info' } });
-    expect((await mint(true, admin.id, memory.id)).blockers.map((b) => [b.loc, b.rule])).toEqual([['pas:010', 'tag-spec']]);
-  });
-
-  it('still lints a root that someone made a spec', async () => {
-    const pas = await resolvers.Mutation.createMemory(null, { orgId: org.id, name: 'pas', draftCorpus: true }, as());
-    await db.node.updateMany({ where: { memoryId: pas.id, loc: 'pas' }, data: { role: 'spec', nodeType: 'data' } });
-    expect((await mint(true, admin.id, pas.id)).blockers).toEqual([
-      expect.objectContaining({ kind: 'LINT', loc: 'pas', rule: 'nodetype-info' }),
-    ]);
+    await db.node.create({ data: { id: generateId(), memoryId: draft.id, loc: 'guides:notes', name: 'Notes', nodeType: 'data' } });
+    expect((await mint(true)).blockers.map((b) => [b.loc, b.rule])).toEqual([['guides:intro', 'nodetype-info']]);
   });
 });
 
@@ -168,6 +146,35 @@ describe('mintSpecCorpus: an edge to a deleted spec is unresolved (@codex P2 on 
     expect(await codeOf(mint())).toBe('SPEC_CORPUS_MINT_BLOCKED');
 
     await db.edge.delete({ where: { id: edge.id } });
+    expect((await mint(true)).blockers).toEqual([]);
+  });
+});
+
+describe('mintSpecCorpus: an edge into another memory can point at a placeholder (@codex P2 on #1462)', () => {
+  const edgeFrom010To = async (targetId: string) => {
+    const source = await db.node.findFirstOrThrow({ where: { memoryId: draft.id, loc: 'pas:010' } });
+    await db.edge.create({ data: { memoryId: draft.id, sourceId: source.id, targetId, loc: `pas:010:uses:${targetId}`, name: 'uses' } });
+  };
+
+  it('blocks on a placeholder in another draft the caller can read, named by its node URN', async () => {
+    const other = await resolvers.Mutation.createMemory(null, { orgId: org.id, name: 'other-draft', draftCorpus: true }, as());
+    const reserved = await resolvers.Mutation.reserveSpecCitation(null, { memoryRef: other.id, loc: 'pas:900' }, as());
+    await edgeFrom010To(reserved.id);
+    expect((await mint(true)).blockers).toEqual([expect.objectContaining({
+      kind: 'UNRESOLVED_REFERENCE', loc: 'pas:010', rule: 'PLACEHOLDER', targetLoc: `hrn:node:${other.urn}:pas:900`,
+    })]);
+  });
+
+  it('conceals one in a memory the caller cannot read', async () => {
+    await db.orgMember.create({ data: { organizationId: org.id, userId: outsider.id, role: 'READER' } });
+    const hidden = await db.memory.create({ data: {
+      id: generateId(), urn: `${org.urn}:outsiders-draft`, name: 'outsiders-draft', class: 'private',
+      organizationId: org.id, userId: outsider.id, corpusDraft: true,
+    } });
+    const placeholder = await db.node.create({ data: {
+      id: generateId(), memoryId: hidden.id, loc: 'pas:900', name: 'pas:900', role: 'spec', nodeType: 'info', isPlaceholder: true,
+    } });
+    await edgeFrom010To(placeholder.id);
     expect((await mint(true)).blockers).toEqual([]);
   });
 });
