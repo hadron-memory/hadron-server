@@ -110,6 +110,34 @@ describe('#1339/#1454 — drift is reconciled before the guard and the edit', ()
     const updated = await writeNodeCore({ memoryId, loc: node.loc, content: 'y' }, ctx(), 'update', { guardRevSeq: 1 });
     expect(updated.revSeq).toBe(2);
   });
+
+  // @codex P2, PR #1458: a token that happens to equal the revision the
+  // reconcile is about to mint cannot name drift nobody has read yet.
+  it('a guard equal to the post-reconcile revision is still refused, and only the drift commits', async () => {
+    const node = await driftedNode('drift:aba');
+    await expect(
+      writeNodeCore({ memoryId, loc: node.loc, content: 'guessed overwrite' }, ctx(), 'update', { guardRevSeq: 2 }),
+    ).rejects.toSatisfy((e: unknown) => e instanceof GraphQLError && e.extensions.code === 'NODE_WRITE_CONFLICT');
+    const after = await db.node.findUniqueOrThrow({ where: { id: node.id } });
+    expect(after).toMatchObject({ content: 'changed by a raw writer', revSeq: 2 });
+    const history = await db.nodeRevision.findMany({ where: { nodeId: node.id } });
+    expect(history).toHaveLength(1);
+    expect(history[0]!.revLabel).toMatch(/Reconciled state changed outside a revisioned writer/);
+
+    // The same token is now a legitimate read of the reconciled state.
+    const updated = await writeNodeCore(
+      { memoryId, loc: node.loc, content: 'edit after reconcile' }, ctx(), 'update', { guardRevSeq: 2 },
+    );
+    expect(updated).toMatchObject({ content: 'edit after reconcile', revSeq: 3 });
+  });
+
+  it('a legacy null fingerprint is backfilled without refusing a current guard', async () => {
+    const node = await db.node.create({ data: { id: generateId(), memoryId, loc: 'drift:legacy', name: 'l', content: 'x' } });
+    await db.node.update({ where: { id: node.id }, data: { revisionContentHash: null } });
+    const updated = await writeNodeCore({ memoryId, loc: node.loc, content: 'y' }, ctx(), 'update', { guardRevSeq: 1 });
+    expect(updated).toMatchObject({ content: 'y', revSeq: 2 });
+    expect(await db.nodeRevision.count({ where: { nodeId: node.id } })).toBe(1);
+  });
 });
 
 // Round 3 (@codex P1 / @copilot, PR #1339): the SAME rule on every other

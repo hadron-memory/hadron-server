@@ -1074,13 +1074,20 @@ export async function writeNodeCore(
             // hid the drift transition once the fingerprint was refreshed
             // (@codex P1, PR #1339). The row lock is already held.
             if (current.revisionContentHash !== await computeRevisionStateHash(tx, current.id)) {
+              const preReconcileRevSeq = current.revSeq;
               await ensureCurrentNodeRevisionInTransaction(tx, current.id, { expectedMemoryId: input.memoryId });
               current = await assertTargetStillWritable(tx);
               if (!current) return { conflict: false, node: null };
+              // A guarded write that itself reconciled drift is refused even when
+              // its token equals the NEW revision: every exposed read reconciles,
+              // so no token can name drift first seen here, and a token matching
+              // the freshly minted number is a guess or a stale ABA collision
+              // (@codex P2, PR #1458). A legacy null-fingerprint backfill mints no
+              // revision and falls through to the ordinary guard below.
               // Return rather than throw: the transaction commits only the
               // reconciled drift. The caller's edit and inline edges have not
               // run, and the conflict is surfaced after commit below.
-              if (opts?.guardRevSeq !== undefined && current.revSeq !== opts.guardRevSeq) {
+              if (opts?.guardRevSeq !== undefined && current.revSeq !== preReconcileRevSeq) {
                 return { conflict: true, node: null };
               }
             }
