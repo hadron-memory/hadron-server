@@ -1342,7 +1342,12 @@ export const sessionMutations = {
         const keyProof = await ctx.db.memory.findUniqueOrThrow({
           where: { id: memoryId }, select: { keyVerifier: true },
         });
-        if (keyProof.keyVerifier && !verifyDataKey(keyProof.keyVerifier, parsedKey)) {
+        if (!keyProof.keyVerifier) {
+          throw new GraphQLError('Encrypted memory has no stored key verifier for safe session unlock.', {
+            extensions: { code: 'BAD_UNLOCK_INPUT', memoryId },
+          });
+        }
+        if (!verifyDataKey(keyProof.keyVerifier, parsedKey)) {
           throw new Error('Wrong dataKey for encrypted memory');
         }
       }

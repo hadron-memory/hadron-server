@@ -2204,6 +2204,11 @@ export const memoryMutations = {
           { extensions: { code: 'BAD_USER_INPUT' } },
         );
       }
+      if (memory.isEncrypted && !memory.keyVerifier) {
+        throw new GraphQLError('Encrypted memory has no stored key verifier for safe completion.', {
+          extensions: { code: 'BAD_UNLOCK_INPUT', memoryId: resolvedMemoryId },
+        });
+      }
       let key;
       let kdfFields: { kdfSalt?: string; kdfParams?: InputJsonValue } = {};
       if (memory.isEncrypted) {
@@ -2237,11 +2242,6 @@ export const memoryMutations = {
       } else {
         throw new GraphQLError('Provide exactly one of dataKey or passphrase.', {
           extensions: { code: 'BAD_USER_INPUT' },
-        });
-      }
-      if (memory.isEncrypted && !memory.keyVerifier) {
-        throw new GraphQLError('Encrypted memory has no stored key verifier for safe completion.', {
-          extensions: { code: 'BAD_UNLOCK_INPUT', memoryId: resolvedMemoryId },
         });
       }
       // FLIP FIRST, then converge (PR-514 review, Copilot — conversion

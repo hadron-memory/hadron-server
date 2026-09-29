@@ -175,6 +175,27 @@ describe('startAgentSession with encryption', () => {
     )).rejects.toThrow(/Wrong dataKey/);
   });
 
+  it('refuses new sessions for a verifier-less encrypted memory before caching either key', async () => {
+    const originalKey = generateDataKey().raw.toString('base64');
+    const wrongKey = generateDataKey().raw.toString('base64');
+    const first = await resolvers.Mutation.startAgentSession(
+      {}, { agentId: agent.id, externalUserId: 'legacy-session', dataKey: originalKey },
+      appCtx(secretApp.id),
+    );
+    await db.memory.update({ where: { id: first.memoryId! }, data: { keyVerifier: null } });
+    await resolvers.Mutation.endAgentSession({}, { sessionId: first.id }, appCtx(secretApp.id));
+    const sessionCount = await db.session.count({ where: { memoryId: first.memoryId! } });
+
+    for (const dataKey of [originalKey, wrongKey]) {
+      await expect(resolvers.Mutation.startAgentSession(
+        {}, { agentId: agent.id, externalUserId: 'legacy-session', dataKey },
+        appCtx(secretApp.id),
+      )).rejects.toMatchObject({ extensions: { code: 'BAD_UNLOCK_INPUT', memoryId: first.memoryId } });
+      expect(sessionKeyCache.getByMemoryId(first.memoryId!)).toBeNull();
+    }
+    expect(await db.session.count({ where: { memoryId: first.memoryId! } })).toBe(sessionCount);
+  });
+
   it('accepts the same key on concurrent sessions (ref count increments)', async () => {
     const key = generateDataKey().raw.toString('base64');
     const s1 = await resolvers.Mutation.startAgentSession(
@@ -579,7 +600,7 @@ describe('encryptMemory', () => {
     )).rejects.toMatchObject({ extensions: { code: 'BAD_UNLOCK_INPUT' } });
   });
 
-  it('refuses a later wrong-key witness without rewriting legacy nodes or history (#1441)', async () => {
+  it('refuses a mixed-key legacy witness without rewriting nodes or history (#1441)', async () => {
     const originalKey = generateDataKey().raw.toString('base64');
     const wrongKey = generateDataKey().raw.toString('base64');
     const first = await resolvers.Mutation.startAgentSession(
@@ -594,17 +615,16 @@ describe('encryptMemory', () => {
     await resolvers.Mutation.endAgentSession({}, { sessionId: first.id }, appCtx(secretApp.id));
     expect(sessionKeyCache.getByMemoryId(first.memoryId!)).toBeNull();
 
-    // The legacy session gate accepts another syntactically valid key once
-    // the original session's process-local key is gone.
-    const later = await resolvers.Mutation.startAgentSession(
-      {}, { agentId: agent.id, externalUserId: 'mixed-legacy', dataKey: wrongKey },
-      appCtx(secretApp.id),
+    // Model a witness written by an older server before the session gate.
+    const wrongEnvelope = encryptNodeFieldsWithKey(
+      { content: 'wrong-key witness' }, parseDataKey(wrongKey),
     );
-    const witness = await resolvers.Mutation.createNode(
-      {}, { input: { memoryId: later.memoryId!, loc: 'later', name: 'later', content: 'wrong-key witness' } },
-      appCtx(secretApp.id, { sessionId: later.id, roles: ['ADMIN'] }),
-    );
-    await resolvers.Mutation.endAgentSession({}, { sessionId: later.id }, appCtx(secretApp.id));
+    const witness = await db.node.create({
+      data: {
+        id: generateId(), memoryId: first.memoryId!, loc: 'later', name: 'later',
+        content: wrongEnvelope.content,
+      },
+    });
 
     const beforeOriginal = await db.node.findUniqueOrThrow({ where: { id: original.id } });
     const beforeWitness = await db.node.findUniqueOrThrow({ where: { id: witness.id } });
