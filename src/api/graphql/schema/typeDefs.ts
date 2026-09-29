@@ -6624,14 +6624,10 @@ export const typeDefs = `#graphql
     channelReadState(attendeeRef: ID!, appRef: ID, channelRef: ID!): ChannelReadState
 
     """
-    #1353 internal pilot: compact attention for this operator's LIVE Workers.
-    The signed token is a pure poll watermark and never changes read state.
-    Omit since for all current unread. since:"now" is refused: discarding a
-    backlog requires the separate preview + confirmed switchover.
-
-    A router must adopt the returned token only after EVERY listed nudge was
-    accepted. On any partial failure retain the prior token; retries can
-    duplicate a nudge but cannot silently lose one.
+    #1353 v1 attention query, retired by #1384. This field always returns
+    UPGRADE_REQUIRED; use teamAttentionPage for bounded polling. Pass an
+    existing v1 since token to teamAttentionPage to carry its watermark
+    forward. Neither operation changes read state.
     """
     teamAttention(appRef: ID!, since: String): TeamAttentionResult!
 
