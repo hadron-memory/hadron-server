@@ -5,7 +5,20 @@
 import { GraphQLError } from 'graphql';
 import type { Context } from './resolvers.js';
 import { nodeMoveOps, writeNodeCore } from './resolvers.mutation.node.js';
-import { concealUnreadableDenial, isMemoryReadableCached, requireMemoryWriteAccess, withoutRequestCaches } from './resolvers.helpers.js';
+import {
+  concealUnreadableDenial,
+  isMemoryReadableCached,
+  requireMemoryWriteAccess,
+  requireOwnerOrOrgRole,
+  withoutRequestCaches,
+} from './resolvers.helpers.js';
+import { isAbstractUnverified } from '../../../lib/contentHash.js';
+import {
+  STALE_ABSTRACT_BLOCKS_MINT,
+  isCitationLoc,
+  lintCorpusForMint,
+  parseOpenQuestions,
+} from '../../../lib/specMint.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { acquireLockSet, ancestorLocs } from '../../../lib/nodeSubtreeLock.js';
 import { archiveTombstone } from '../../../lib/tombstoneArchive.js';
@@ -260,7 +273,7 @@ async function loadScannableCorpus(ctx: Context, memoryRef: string): Promise<Sca
  * for the whole scan; the returned predicate is synchronous.
  */
 async function referenceAcceptor(
-  db: Context['db'],
+  db: Pick<Context['db'], 'node'>,
   corpus: ScannableCorpus,
   refs: ReadonlyArray<{ memoryUrn: string; targetLoc: string }>,
 ): Promise<(ref: { memoryUrn: string; targetLoc: string }) => boolean> {
@@ -328,13 +341,13 @@ function toScannedNode(n: {
  * is still a live node of this corpus. Re-reading the whole corpus per rewrite
  * made a renumber quadratic in a well-linked corpus.
  */
-async function loadCorpusNode(db: Context['db'], memoryId: string, id: string): Promise<ScannedNode | undefined> {
+async function loadCorpusNode(db: Pick<Context['db'], 'node'>, memoryId: string, id: string): Promise<ScannedNode | undefined> {
   const n = await db.node.findFirst({ where: { id, memoryId, deletedAt: null }, select: SCANNED_SELECT });
   return n ? toScannedNode(n) : undefined;
 }
 
 /** Read every live node of the corpus, a page at a time, in id order. */
-async function loadCorpusNodes(db: Context['db'], memoryId: string): Promise<ScannedNode[]> {
+async function loadCorpusNodes(db: Pick<Context['db'], 'node'>, memoryId: string): Promise<ScannedNode[]> {
   const nodes: ScannedNode[] = [];
   let cursor: string | undefined;
   for (;;) {
@@ -378,7 +391,7 @@ const fromScan = (r: ScannedReference): SpecReferenceOut => ({
 });
 
 /** Live real edges whose source is a live node of this corpus, pointing at `targetIds`. */
-async function corpusEdgesTo(db: Context['db'], memoryId: string, targetIds: string[]) {
+async function corpusEdgesTo(db: Pick<Context['db'], 'edge'>, memoryId: string, targetIds: string[]) {
   if (targetIds.length === 0) return [];
   return db.edge.findMany({
     // (@codex P2, #1453) Edges are soft-deleted: a deleted edge is not a reference.
@@ -420,11 +433,23 @@ export const specCorpusQueries = {
    */
   specUnresolvedReferences: async (_: unknown, { memoryRef }: { memoryRef: string }, ctx: Context): Promise<SpecReferenceOut[]> => {
     const corpus = await loadScannableCorpus(ctx, memoryRef);
-    const nodes = await loadCorpusNodes(ctx.db, corpus.id);
+    return unresolvedReferencesIn(ctx.db, corpus, await loadCorpusNodes(ctx.db, corpus.id));
+  },
+};
+
+/**
+ * The references in a corpus that do not reach a written spec (MISSING or
+ * PLACEHOLDER), shared by specUnresolvedReferences and the mint report.
+ */
+async function unresolvedReferencesIn(
+  db: Pick<Context['db'], 'node' | 'edge'>,
+  corpus: ScannableCorpus,
+  nodes: ScannedNode[],
+): Promise<SpecReferenceOut[]> {
     const byLoc = new Map(nodes.map((n) => [n.loc, n]));
     const out: SpecReferenceOut[] = [];
     const scanned = scanReferences(nodes, corpus.pattern);
-    const accept = await referenceAcceptor(ctx.db, corpus, scanned);
+    const accept = await referenceAcceptor(db, corpus, scanned);
     for (const r of scanned) {
       if (!accept(r)) continue;
       const target = byLoc.get(r.targetLoc);
@@ -432,15 +457,14 @@ export const specCorpusQueries = {
       else if (target.isPlaceholder) out.push({ ...fromScan(r), reason: 'PLACEHOLDER' });
     }
     const placeholders = nodes.filter((n) => n.isPlaceholder).map((n) => n.id);
-    for (const e of await corpusEdgesTo(ctx.db, corpus.id, placeholders)) {
+    for (const e of await corpusEdgesTo(db, corpus.id, placeholders)) {
       out.push({
         kind: 'EDGE', sourceNodeId: e.source.id, sourceLoc: e.source.loc, field: 'edge',
         targetLoc: e.target.loc, text: e.name, reason: 'PLACEHOLDER',
       });
     }
     return out;
-  },
-};
+}
 
 /** How many times a reference rewrite re-reads and retries after a concurrent edit. */
 const REWRITE_ATTEMPTS = 3;
@@ -677,3 +701,142 @@ function validateLocOrThrow(loc: string): void {
     throw err;
   }
 }
+
+// ─── #1448 — minting: draft → minted, once, one-way ─────────────────────────
+
+/** Why the mint report lists an item. */
+type MintFindingKind = 'PLACEHOLDER' | 'UNRESOLVED_REFERENCE' | 'LINT' | 'STALE_ABSTRACT';
+
+type MintFinding = {
+  kind: MintFindingKind;
+  loc: string;
+  rule: string | null;
+  message: string;
+  targetLoc: string | null;
+};
+
+type MintReport = {
+  memoryId: string;
+  dryRun: boolean;
+  minted: boolean;
+  blockers: MintFinding[];
+  staleAbstracts: MintFinding[];
+  staleAbstractsBlock: boolean;
+  openQuestions: Array<{ decider: string | null; questions: Array<{ loc: string; question: string }> }>;
+};
+
+/** How many blockers a refusal carries in its error extensions (the dry run has them all). */
+const MINT_REFUSAL_BLOCKER_CAP = 50;
+
+export const specCorpusMintMutations = {
+  /**
+   * #1448 — mint a DRAFT spec corpus: one step for the whole corpus, one-way
+   * (contract §5). After minting, today's rules apply unchanged: citations are
+   * permanent, moves record URN aliases again, and no placeholder can be
+   * reserved. `dryRun` returns the same report without minting.
+   *
+   * Blocks (and a real run refuses `SPEC_CORPUS_MINT_BLOCKED` while any hold):
+   * a placeholder remains; a reference points to a missing spec or a
+   * placeholder; a structural lint error (the four server-owned rules, over
+   * the citation-shaped nodes); and a stale abstract once
+   * STALE_ABSTRACT_BLOCKS_MINT is switched on (#1408). Reported only: stale
+   * abstracts while that switch is off, and open questions grouped by who
+   * decides.
+   *
+   * By anyone who can manage the corpus: its owner, or an ADMIN of its org
+   * (the updateMemory gate); an unreadable memory answers as not found.
+   * The whole check and the flip run under a FOR NO KEY UPDATE lock on the
+   * memory row, which conflicts with the FOR SHARE lock every node write holds
+   * on it, so no write lands between the report and the mint.
+   */
+  mintSpecCorpus: async (
+    _: unknown,
+    { memoryRef, dryRun }: { memoryRef: string; dryRun?: boolean | null },
+    ctx: Context,
+  ): Promise<MintReport> => {
+    const { id } = await resolveMemoryRef(ctx.db, memoryRef);
+    const owner = await ctx.db.memory.findUniqueOrThrow({
+      where: { id }, select: { organizationId: true, ownerUserId: true },
+    });
+    await concealUnreadableDenial(ctx, id, memoryRef, () => requireOwnerOrOrgRole(ctx, owner, 'ADMIN'));
+
+    return ctx.db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM memories WHERE id = ${id} FOR NO KEY UPDATE`;
+      const txCtx = withoutRequestCaches(ctx, tx);
+      // Re-reads the draft flag and encryption under the lock just taken.
+      const corpus = await loadScannableCorpus(txCtx, id);
+      const nodes = await tx.node.findMany({
+        where: { memoryId: id, deletedAt: null },
+        orderBy: { loc: 'asc' },
+        select: {
+          id: true, loc: true, nodeType: true, tags: true, role: true, isPlaceholder: true, revSeq: true,
+          name: true, description: true, abstract: true, content: true, abstractOriginHash: true,
+        },
+      });
+      const cited = nodes.filter((n) => isCitationLoc(n.loc));
+
+      const blockers: MintFinding[] = [];
+      for (const n of nodes) {
+        if (n.isPlaceholder) {
+          blockers.push({ kind: 'PLACEHOLDER', loc: n.loc, rule: null, message: 'reserved citation with no spec written', targetLoc: null });
+        }
+      }
+      const scanned: ScannedNode[] = nodes.map((n) => ({
+        id: n.id, loc: n.loc, isPlaceholder: n.isPlaceholder, revSeq: n.revSeq, role: n.role,
+        fields: { name: n.name, description: n.description, abstract: n.abstract, content: n.content },
+      }));
+      for (const r of await unresolvedReferencesIn(tx, corpus, scanned)) {
+        blockers.push({
+          kind: 'UNRESOLVED_REFERENCE', loc: r.sourceLoc, rule: r.reason ?? null, targetLoc: r.targetLoc,
+          message: r.reason === 'PLACEHOLDER'
+            ? `${r.kind === 'EDGE' ? 'edge' : r.field} points at placeholder ${r.targetLoc}`
+            : `${r.field} cites ${r.targetLoc}, which does not exist`,
+        });
+      }
+      for (const f of lintCorpusForMint(cited)) {
+        blockers.push({ kind: 'LINT', loc: f.loc, rule: f.rule, message: f.message, targetLoc: null });
+      }
+      const staleAbstracts: MintFinding[] = cited
+        .filter((n) => isAbstractUnverified(n))
+        .map((n) => ({
+          kind: 'STALE_ABSTRACT' as const, loc: n.loc, rule: null, targetLoc: null,
+          message: 'the abstract was written for an earlier body; re-affirm or rewrite it',
+        }));
+      if (STALE_ABSTRACT_BLOCKS_MINT) blockers.push(...staleAbstracts);
+
+      const byDecider = new Map<string | null, Array<{ loc: string; question: string }>>();
+      for (const n of cited) {
+        for (const q of parseOpenQuestions(n.content)) {
+          byDecider.set(q.decider, [...(byDecider.get(q.decider) ?? []), { loc: n.loc, question: q.question }]);
+        }
+      }
+      const openQuestions = [...byDecider.entries()]
+        .sort(([a], [b]) => (a === null ? 1 : b === null ? -1 : a.localeCompare(b)))
+        .map(([decider, questions]) => ({ decider, questions }));
+
+      const report: MintReport = {
+        memoryId: id, dryRun: !!dryRun, minted: false, blockers,
+        staleAbstracts, staleAbstractsBlock: STALE_ABSTRACT_BLOCKS_MINT, openQuestions,
+      };
+      if (dryRun) return report;
+      if (blockers.length > 0) {
+        throw new GraphQLError(
+          `Minting refused: ${blockers.length} blocking item(s) remain. Run mintSpecCorpus with dryRun: true for the full report.`,
+          {
+            extensions: {
+              code: 'SPEC_CORPUS_MINT_BLOCKED',
+              memoryId: id,
+              blockerCount: blockers.length,
+              blockers: blockers.slice(0, MINT_REFUSAL_BLOCKER_CAP),
+            },
+          },
+        );
+      }
+      await tx.memory.update({
+        where: { id },
+        data: { corpusDraft: false, corpusMintedAt: new Date(), corpusMintedBy: ctx.userId ?? ctx.clientId ?? null },
+      });
+      return { ...report, minted: true };
+    }, { timeout: 120_000 });
+  },
+};

@@ -2712,6 +2712,8 @@ export const typeDefs = `#graphql
     created without asking for draft is MINTED.
     """
     corpusState: CorpusState!
+    "#1448 — when this corpus was minted (draft → minted). Null if it was never a draft."
+    corpusMintedAt: DateTime
     """
     Spec 033 FR-026 — timestamp at which the memory owner accepted the
     encrypted-memory vector-inversion disclosure. Set when the caller
@@ -5756,6 +5758,56 @@ export const typeDefs = `#graphql
     textCitations: [SpecTextCitation!]!
   }
 
+  """#1448 — why the mint report lists an item."""
+  enum SpecMintFindingKind {
+    "A reserved citation with no spec written yet."
+    PLACEHOLDER
+    "A reference to a spec that does not exist, or to a placeholder (rule: MISSING | PLACEHOLDER)."
+    UNRESOLVED_REFERENCE
+    "A structural lint error (rule: nodetype-info | tag-spec | serialization-leak | duplicate-loc)."
+    LINT
+    "An abstract written for an earlier body."
+    STALE_ABSTRACT
+  }
+
+  """#1448 — one item in a mint report. loc is where it was found; targetLoc the cited spec, for a reference."""
+  type SpecMintFinding {
+    kind: SpecMintFindingKind!
+    loc: String!
+    rule: String
+    message: String!
+    targetLoc: String
+  }
+
+  """#1448 — one open question in the corpus (report-only, never blocks minting)."""
+  type SpecOpenQuestion {
+    loc: String!
+    question: String!
+  }
+
+  """#1448 — open questions grouped by who decides; decider null means unassigned."""
+  type SpecOpenQuestionGroup {
+    decider: String
+    questions: [SpecOpenQuestion!]!
+  }
+
+  """
+  #1448 — the mint report. blockers must all be gone for a mint to succeed.
+  staleAbstracts are listed separately; they block only when
+  staleAbstractsBlock is true (once abstract re-affirmation is saved and
+  deployed, server#1408). openQuestions never block.
+  """
+  type SpecCorpusMintReport {
+    memoryId: ID!
+    dryRun: Boolean!
+    "True when this call minted the corpus."
+    minted: Boolean!
+    blockers: [SpecMintFinding!]!
+    staleAbstracts: [SpecMintFinding!]!
+    staleAbstractsBlock: Boolean!
+    openQuestions: [SpecOpenQuestionGroup!]!
+  }
+
   type Query {
     """
     Resolve a fully-qualified, \`hrn:<type>:\`-prefixed Hadron URN (legacy \`urn:\` scheme also accepted) to the ids
@@ -7422,6 +7474,17 @@ export const typeDefs = `#graphql
     FAILED without undoing the move.
     """
     renumberSpec(memoryRef: ID!, fromLoc: String!, toLoc: String!, dryRun: Boolean): SpecRenumberResult!
+    """
+    #1448 — mint a DRAFT spec corpus: once, one-way, for the whole corpus.
+    After minting, citations are permanent (moves record URN aliases again) and
+    no placeholder can be reserved. Refuses SPEC_CORPUS_MINT_BLOCKED while any
+    blocker remains: a placeholder, an unresolved reference, a structural lint
+    error over the citation-shaped nodes (nodetype-info, tag-spec,
+    serialization-leak, duplicate-loc), or a stale abstract once
+    staleAbstractsBlock is true. dryRun returns the full report without
+    minting. Owner or org ADMIN only. memoryRef accepts the ID or URN.
+    """
+    mintSpecCorpus(memoryRef: ID!, dryRun: Boolean): SpecCorpusMintReport!
 
     """
     #1201 — the UPDATE door for the spec kind, and the counterpart of
