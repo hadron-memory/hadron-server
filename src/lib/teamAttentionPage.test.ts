@@ -706,6 +706,10 @@ describe('family 14 — review #3153', () => {
       ['early-C missing c_front', (() => { const v = earlyC(); delete v.c_front; return v; })()],
       ['C-era with current c_seq/c_loc arrays', { ...earlyC(), c_seq: [1], c_loc: ['x'] }],
       ['current arrays with prior marker', { ...realPayload, o: 'c' }],
+      // Chip #3341 classification gaps — now guarded.
+      ['current token with prior c_num smuggled in', { ...realPayload, c_num: ['007'] }],
+      ['C-era with scalar c_ful', { ...lateC(), c_ful: 'not-an-array' }],
+      ['C-era with wrong-length c_ful', { ...lateC(), c_ful: ['a', 'b'] }],
       ['current token missing c_front', (() => { const v = { ...realPayload }; delete v.c_front; return v; })()],
       ['broken t_w index', { ...lateC(), t_w: [99] }],
       ['missing ts timestamp', (() => { const v = lateC(); delete v.ts; return v; })()],

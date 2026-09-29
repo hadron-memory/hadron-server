@@ -209,8 +209,13 @@ export function verifyPageToken(
     keys.every((key) => Array.isArray(field(key))) &&
     keys.every((key) => (field(key) as unknown[]).length === (value.C as string[]).length);
   if (value.o === 's') {
-    // Current era: the full seq-first channel state must be present.
-    if (!channelArraysOf(seqEraChannelArrays)) {
+    // Current era: the full seq-first channel state must be present, and NO
+    // prior-era arrays may ride along — no minted token carried both, so a
+    // `c_num`/`c_ful` under the current marker is mixed-era, not current
+    // (Chip #3341: an 's' token with valid c_seq/c_loc plus prior c_num was
+    // accepted here).
+    if (!channelArraysOf(seqEraChannelArrays)
+      || Array.isArray(field('c_num')) || Array.isArray(field('c_ful'))) {
       fail('Invalid team-attention page token.', 'INVALID_ATTENTION_PAGE');
     }
     return value as PageContinuation;
@@ -235,8 +240,15 @@ export function verifyPageToken(
     fail('Invalid team-attention page token.', 'INVALID_ATTENTION_PAGE');
   }
   if (value.o === 'c') {
-    if (channelArraysOf([...commonPrior, 'c_front']) && lacksCurrentArrays) {
-      staleRestart(); // c_ful present (late C) or absent (early C) — both minted
+    // c_ful is era-shape evidence: absent = early C (b6faa1b7), a
+    // channel-parallel array = late C (30a9f261). Anything else — a scalar,
+    // a wrong-length array — is a shape no era minted and is malformed
+    // rather than prior-era (Chip #3341).
+    const ful = field('c_ful');
+    const fulWellFormed = ful === undefined
+      || (Array.isArray(ful) && ful.length === (value.C as string[]).length);
+    if (channelArraysOf([...commonPrior, 'c_front']) && lacksCurrentArrays && fulWellFormed) {
+      staleRestart();
     }
     fail('Invalid team-attention page token.', 'INVALID_ATTENTION_PAGE');
   }
