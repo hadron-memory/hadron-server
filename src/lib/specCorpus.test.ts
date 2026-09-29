@@ -147,6 +147,22 @@ describe('draft corpus merges record no URN alias either (#1448, @codex P1 on #1
     expect(await aliasesFor(node.id)).toEqual([]);
   });
 
+  // @codex P1 on #1451: the merge guards refuse governed rows, so a SPEC in a
+  // draft corpus never reaches the relocation above. The #1447 contract relaxes
+  // move, renumber and delete for draft specs, not merges, so that refusal is
+  // kept. Pinned here so the alias-skip's reach is explicit, not masked.
+  it('still refuses to merge a draft corpus that contains a spec (merges are not a draft relaxation)', async () => {
+    const draft = await createMemory('specs-draft', true);
+    const minted = await createMemory('specs');
+    const specNode = await db.node.create({
+      data: { id: generateId(), memoryId: draft.id, loc: 'pas:060:01', name: 'A spec', content: 'Body.', role: 'spec' },
+    });
+
+    await expect(merge(draft.id, minted.id)).rejects.toThrow();
+    expect((await db.node.findUniqueOrThrow({ where: { id: specNode.id } })).memoryId).toBe(draft.id);
+    expect(await aliasesFor(specNode.id)).toEqual([]);
+  });
+
   it('still records aliases when a minted memory merges into a draft one', async () => {
     const draft = await createMemory('specs-draft', true);
     const minted = await createMemory('specs');
