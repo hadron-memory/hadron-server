@@ -173,6 +173,46 @@ async function waitForLockWaiters(
 }
 
 describe('syncGraphFromGithub', () => {
+  it('refuses an encrypted memory before Git I/O or a Node write', async () => {
+    await db.memory.update({ where: { id: dbGraphId }, data: { isEncrypted: true } });
+    const result = await syncGraphFromGithub(makeGraph());
+    expect(result.error).toContain('cannot write an encrypted memory');
+    expect(await gitCalls()).toHaveLength(0);
+    expect(await db.node.count({ where: { memoryId: dbGraphId } })).toBe(0);
+  });
+
+  it('refuses a Git sync whose plaintext preflight predates the encryption flip', async () => {
+    const filePath = join(mockSources, 'test-org', 'test/repo', 'late-entry');
+    mkdirSync(filePath, { recursive: true });
+    writeNodeFiles(filePath, { name: 'Late entry' }, 'late Git plaintext');
+    const findMemory = db.memory.findUnique.bind(db.memory);
+    let reached!: () => void;
+    let release!: () => void;
+    const atOldFlag = new Promise<void>((resolve) => { reached = resolve; });
+    const resume = new Promise<void>((resolve) => { release = resolve; });
+    let held = false;
+    const lookup = vi.spyOn(db.memory, 'findUnique').mockImplementation((async (args: Parameters<typeof findMemory>[0]) => {
+      const row = await findMemory(args);
+      if (!held && args?.where?.id === dbGraphId && args.select?.isEncrypted === true) {
+        held = true;
+        reached();
+        await resume;
+      }
+      return row;
+    }) as unknown as typeof db.memory.findUnique);
+    try {
+      const syncing = syncGraphFromGithub(makeGraph());
+      await atOldFlag;
+      await db.memory.update({ where: { id: dbGraphId }, data: { isEncrypted: true } });
+      release();
+      expect((await syncing).error).toContain('cannot write an encrypted memory');
+    } finally {
+      release();
+      lookup.mockRestore();
+    }
+    expect(await db.node.count({ where: { memoryId: dbGraphId } })).toBe(0);
+  });
+
   it('calls git clone when .git directory does not exist', async () => {
     const result = await syncGraphFromGithub(makeGraph());
 

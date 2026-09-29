@@ -55,7 +55,7 @@ import {
   type Role,
   type MemoryVisibility,
 } from '../../../generated/prisma/index.js';
-import { parseDataKey, isCiphertext } from '../../../lib/crypto.js';
+import { parseDataKey } from '../../../lib/crypto.js';
 import {
   generateKdfSalt,
   deriveDataKeyFromPassphrase,
@@ -64,7 +64,11 @@ import {
   MemoryUnlockError,
   DEFAULT_KDF_PARAMS,
 } from '../../../lib/memoryUnlock.js';
-import { encryptNodeFieldsWithKey } from '../../../lib/nodeCrypto.js';
+import {
+  encryptNodeFieldsWithKey,
+  isAuthenticatedStringEnvelope,
+  isAuthenticatedDataEnvelope,
+} from '../../../lib/nodeCrypto.js';
 import {
   NodeAbstractTooLongError,
   NodeNotFoundError,
@@ -2223,7 +2227,7 @@ export const memoryMutations = {
       // plaintext can no longer be ADDED. The encryption passes below then
       // converge on zero plaintext rows: a row written plaintext between
       // our scan and the flip is caught by the next pass. Idempotent by the
-      // enc:v1 prefix (isCiphertext), so re-running a pass is safe.
+      // Authenticated envelopes stay unchanged, so re-running a pass is safe.
       // Two callers may both have read the plaintext flag above. Claim the
       // flip atomically so only one key can become the verifier/conversion key;
       // otherwise a losing caller could replace the verifier while the winner
@@ -2314,10 +2318,9 @@ export const memoryMutations = {
                 }
               }
 
-              const plaintextContent = current.content != null && !isCiphertext(current.content);
-              const plaintextAbstract = current.abstract != null && !isCiphertext(current.abstract);
-              const plaintextData = current.data != null &&
-                !(typeof current.data === 'object' && (current.data as { __enc?: string }).__enc);
+              const plaintextContent = current.content != null && !isAuthenticatedStringEnvelope(current.content, key);
+              const plaintextAbstract = current.abstract != null && !isAuthenticatedStringEnvelope(current.abstract, key);
+              const plaintextData = current.data != null && !isAuthenticatedDataEnvelope(current.data, key);
               if (!plaintextContent && !plaintextAbstract && !plaintextData) return false;
               const encrypted = encryptNodeFieldsWithKey(
                 { content: current.content, abstract: current.abstract, data: current.data }, key,
@@ -2394,10 +2397,9 @@ export const memoryMutations = {
                 });
                 if (node?.memoryId !== resolvedMemoryId) return false;
               }
-              const plaintextContent = revision.content != null && !isCiphertext(revision.content);
-              const plaintextAbstract = revision.abstract != null && !isCiphertext(revision.abstract);
-              const plaintextData = revision.data != null &&
-                !(typeof revision.data === 'object' && (revision.data as { __enc?: string }).__enc);
+              const plaintextContent = revision.content != null && !isAuthenticatedStringEnvelope(revision.content, key);
+              const plaintextAbstract = revision.abstract != null && !isAuthenticatedStringEnvelope(revision.abstract, key);
+              const plaintextData = revision.data != null && !isAuthenticatedDataEnvelope(revision.data, key);
               if (!plaintextContent && !plaintextAbstract && !plaintextData) return false;
               const encrypted = encryptNodeFieldsWithKey(
                 { content: revision.content, abstract: revision.abstract, data: revision.data }, key,

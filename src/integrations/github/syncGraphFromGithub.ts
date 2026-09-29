@@ -69,6 +69,21 @@ export class GitSyncTargetMovedError extends Error {
   }
 }
 
+export class GitSyncEncryptedMemoryError extends Error {
+  constructor() {
+    super('Git sync cannot write an encrypted memory without its data key.');
+    this.name = 'GitSyncEncryptedMemoryError';
+  }
+}
+
+async function assertGitSyncMemoryPlaintext(tx: Prisma.TransactionClient, memoryId: string): Promise<void> {
+  await tx.$queryRaw`SELECT "id" FROM "memories" WHERE "id" = ${memoryId} FOR SHARE`;
+  const memory = await tx.memory.findUniqueOrThrow({
+    where: { id: memoryId }, select: { isEncrypted: true },
+  });
+  if (memory.isEncrypted) throw new GitSyncEncryptedMemoryError();
+}
+
 /** Apply a Git-owned update without bypassing the live-revision contract. */
 export async function updateNodeFromGitSync(
   tx: Prisma.TransactionClient,
@@ -88,6 +103,7 @@ export async function updateNodeFromGitSync(
   if (!owner || owner.memoryId !== expectedMemoryId) {
     throw new GitSyncTargetMovedError(current.id, expectedMemoryId);
   }
+  await assertGitSyncMemoryPlaintext(tx, expectedMemoryId);
   // Unrevisioned drift gets its OWN revision before the Git edit's, never
   // folded into it (@codex P1 / @copilot, PR #1339) — the same order as the
   // GraphQL and MCP update paths. A swap base is exempt: its row was
@@ -192,6 +208,13 @@ export const syncGraphFromGithub = async (
     // showed a memory that simply never synced. Caught by the test below, not
     // by reading this.
     validateMemorySource(graph.source);
+
+    // Avoid clone/pull work for an encrypted memory. The transaction below
+    // repeats this check under a row lock because this preflight can go stale.
+    const encryptionState = await db.memory.findUnique({
+      where: { id: graph.id }, select: { isEncrypted: true },
+    });
+    if (encryptionState?.isEncrypted) throw new GitSyncEncryptedMemoryError();
 
     // Update sync status to SYNCING
     await db.memory.update({
@@ -310,6 +333,7 @@ export const syncGraphFromGithub = async (
       for (const memoryId of edgeEndpointMemoryIds) {
         await lockMemoryForChannelChange(tx, memoryId);
       }
+      await assertGitSyncMemoryPlaintext(tx, graph.id);
       // #664/#752: a git-sync bulk-upserts/moves rows into an EXISTING memory,
       // bypassing the locked create surfaces. Lock the ancestor path of every
       // synced loc (deduped, root→leaf) up front so a concurrent non-recursive

@@ -329,7 +329,7 @@ describe('encryptMemory — locked conversion (#1346)', () => {
     expect(readable.map((revision) => revision.id).sort()).toEqual(
       historical.slice(0, 2).map((revision) => revision.id).sort(),
     );
-    expect(readable.every((revision) => isCiphertext(revision.content))).toBe(true);
+    expect(readable.every((revision) => revision.content === null && revision.abstract === null && revision.data === null)).toBe(true);
     await requestKeyStorage.run(new Map([[memoryId, parseDataKey(dataKey)]]), async () => {
       const unlocked = await resolvers.Query.nodeRevisions({}, { nodeRef: nodeId }, ownerCtx());
       expect(unlocked.find((revision) => revision.id === historical[0]!.id)).toMatchObject({
@@ -349,6 +349,30 @@ describe('encryptMemory — locked conversion (#1346)', () => {
     const restored = await db.node.findUniqueOrThrow({ where: { id: nodeId } });
     expect(isCiphertext(restored.content)).toBe(true);
     expect(decryptNodeFieldsWithKey(restored, parseDataKey(dataKey)).content).toBe('prior content');
+  });
+
+  it('encrypts marker-shaped old plaintext and conceals it from locked revision reads', async () => {
+    const content = 'enc:v1:ordinary text, not an envelope';
+    const abstract = 'enc:v1:ordinary abstract';
+    const data = { __enc: 'ordinary data', detail: 'still plaintext' };
+    await db.node.update({ where: { id: nodeId }, data: { content, abstract, data } });
+    const prior = await db.nodeRevision.create({
+      data: { id: generateId(), nodeId, memoryId, loc: 'entry-1', name: 'Entry 1', content, abstract, data },
+    });
+    const dataKey = Buffer.alloc(32, 37).toString('base64');
+    await resolvers.Mutation.encryptMemory({}, { memoryId, dataKey }, ownerCtx());
+
+    const live = await db.node.findUniqueOrThrow({ where: { id: nodeId } });
+    const stored = await db.nodeRevision.findUniqueOrThrow({ where: { id: prior.id } });
+    const key = parseDataKey(dataKey);
+    expect(decryptNodeFieldsWithKey({ ...live }, key)).toMatchObject({ content, abstract, data });
+    expect(decryptNodeFieldsWithKey({ ...stored }, key)).toMatchObject({ content, abstract, data });
+    const locked = await resolvers.Query.nodeRevision({}, { revisionId: prior.id }, ownerCtx());
+    expect(locked).toMatchObject({ content: null, abstract: null, data: null });
+    await requestKeyStorage.run(new Map([[memoryId, key]]), async () => {
+      const unlocked = await resolvers.Query.nodeRevision({}, { revisionId: prior.id }, ownerCtx());
+      expect(unlocked).toMatchObject({ content, abstract, data });
+    });
   });
 
   it('pages more than 200 old snapshots and encrypts tombstone history', async () => {

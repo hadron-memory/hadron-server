@@ -63,6 +63,29 @@ export function encryptNodeFieldsWithKey<T extends Partial<EncryptedNodeFields>>
   return applyEncryption(payload, key);
 }
 
+/** A marker is only an envelope when its GCM tag authenticates under this memory key. */
+export function isAuthenticatedStringEnvelope(value: string | null | undefined, key: EncryptionKey): boolean {
+  if (!isCiphertext(value)) return false;
+  try {
+    decryptString(stripCiphertextPrefix(value), key);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function isAuthenticatedDataEnvelope(value: unknown, key: EncryptionKey): boolean {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const entries = Object.entries(value);
+  if (entries.length !== 1 || entries[0]?.[0] !== '__enc' || typeof entries[0][1] !== 'string') return false;
+  try {
+    decryptJson(entries[0][1], key);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function applyEncryption<T extends Partial<EncryptedNodeFields>>(
   payload: T,
   key: EncryptionKey,
@@ -70,12 +93,12 @@ function applyEncryption<T extends Partial<EncryptedNodeFields>>(
   const out: T = { ...payload };
   // Spec 031 — abstract is encrypted under the same envelope as content.
   if (payload.abstract !== undefined && payload.abstract !== null) {
-    if (!isCiphertext(payload.abstract)) {
+    if (!isAuthenticatedStringEnvelope(payload.abstract, key)) {
       out.abstract = markCiphertext(encryptString(payload.abstract, key));
     }
   }
   if (payload.content !== undefined && payload.content !== null) {
-    if (!isCiphertext(payload.content)) {
+    if (!isAuthenticatedStringEnvelope(payload.content, key)) {
       out.content = markCiphertext(encryptString(payload.content, key));
     }
   }
@@ -83,7 +106,7 @@ function applyEncryption<T extends Partial<EncryptedNodeFields>>(
     // JSON data is serialized then encrypted. We wrap the ciphertext in a
     // small JSON object so Prisma's Json type still accepts it.
     const existing = payload.data as Record<string, unknown>;
-    if (!existing || typeof existing !== 'object' || !existing.__enc) {
+    if (!isAuthenticatedDataEnvelope(existing, key)) {
       const ct = encryptJson(payload.data, key);
       out.data = ct ? ({ __enc: ct } as unknown as T['data']) : payload.data;
     }
@@ -123,15 +146,15 @@ function applyDecryption<T extends Partial<EncryptedNodeFields>>(
   key: EncryptionKey,
 ): T {
   // Spec 031 — abstract decrypts under the same envelope as content.
-  if (node.abstract != null && isCiphertext(node.abstract)) {
+  if (node.abstract != null && isAuthenticatedStringEnvelope(node.abstract, key)) {
     node.abstract = decryptString(stripCiphertextPrefix(node.abstract), key);
   }
-  if (node.content != null && isCiphertext(node.content)) {
+  if (node.content != null && isAuthenticatedStringEnvelope(node.content, key)) {
     node.content = decryptString(stripCiphertextPrefix(node.content), key);
   }
   if (node.data != null && typeof node.data === 'object') {
     const wrapped = node.data as { __enc?: string };
-    if (wrapped.__enc && typeof wrapped.__enc === 'string') {
+    if (isAuthenticatedDataEnvelope(wrapped, key)) {
       node.data = decryptJson(wrapped.__enc, key);
     }
   }
