@@ -287,6 +287,12 @@ export async function moveNodeSubtree(
   // vectorIndexEnabled for the embedding step below.
   let destVectorIndexEnabled = false;
   if (crossMemory) {
+    // A destination encryption flip must not pass this move after we decide
+    // plaintext nodes can cross the boundary. Hold both memory rows through
+    // relocation; sorted order keeps opposing moves from lock-inverting.
+    for (const memoryId of [srcMemoryId, destMemoryId].sort()) {
+      await tx.$queryRaw`SELECT "id" FROM "memories" WHERE "id" = ${memoryId} FOR SHARE`;
+    }
     const [srcMem, destMem] = await Promise.all([
       tx.memory.findUnique({ where: { id: srcMemoryId }, select: { isEncrypted: true, source: true } }),
       tx.memory.findUnique({

@@ -214,6 +214,18 @@ describe('locked vs unlocked writes', () => {
     })).toContain('Node saved');
     const section = await db.node.findFirstOrThrow({ where: { memoryId, loc: 'section' } });
     expect(isCiphertext(section.content)).toBe(true);
+    const versions = await db.nodeRevision.count({ where: { nodeId: section.id } });
+    expect(await server.callToolText('hadron_create_parent_node', {
+      urn, name: 'Section', description: 'section secret',
+    })).toContain('Node saved');
+    expect(await db.node.findUniqueOrThrow({ where: { id: section.id } })).toMatchObject(section);
+    expect(await db.nodeRevision.count({ where: { nodeId: section.id } })).toBe(versions);
+
+    await server.callToolText('hadron_create_parent_node', {
+      urn, name: 'Section', description: 'a changed section secret',
+    });
+    expect(await db.nodeRevision.count({ where: { nodeId: section.id } })).toBe(versions + 1);
+    expect(isCiphertext((await db.node.findUniqueOrThrow({ where: { id: section.id } })).content)).toBe(true);
   });
 
   it.each(['hadron_update_node', 'hadron_create_node'])(

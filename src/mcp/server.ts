@@ -3307,14 +3307,20 @@ export function createMcpServerInstance(
                 `[write_conflict] the section at "${loc}" moved while this write waited — re-read and retry.`,
               );
             }
-            const changes = diffNodeChanges(current, upsertArgs.update);
+            // Compare logical plaintext. Fresh AES-GCM ciphertext differs on
+            // every save even when the section body is unchanged.
+            const currentForDiff = parentKey
+              ? decryptNodeFieldsWithKey({ ...current }, parentKey)
+              : current;
+            const changes = diffNodeChanges(currentForDiff, {
+              ...upsertArgs.update, content,
+            });
+            if (changes.length === 0) return current.id;
             sectionChanged = authoredContentChanged(changes);
-            if (changes.length > 0) {
-              await createNodeRevision(tx, {
-                id: generateId(),
-                ...buildNodeRevisionSnapshot(current, editorFromAuth(auth), { changes }),
-              });
-            }
+            await createNodeRevision(tx, {
+              id: generateId(),
+              ...buildNodeRevisionSnapshot(current, editorFromAuth(auth), { changes }),
+            });
           }
           if (!prior || prior.deletedAt) {
             await assertMemoryEncryptionStateForWrite(tx, memoryId, parentMemoryState.isEncrypted);

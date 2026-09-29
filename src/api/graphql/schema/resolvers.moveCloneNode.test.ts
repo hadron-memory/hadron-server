@@ -16,6 +16,7 @@ import { cleanDb, createDbOrgAndGraph, createDbNode } from '../../../test/helper
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
 import { mirrorNodeMoveToGit } from '../../../integrations/github/mirrorNodeMove.js';
+import { moveNodeSubtree } from '../../../lib/nodeSubtreeMove.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -58,6 +59,51 @@ beforeEach(async () => {
 });
 
 describe('moveNode (#564)', () => {
+  it('holds the destination encryption state until a cross-memory relocation commits', async () => {
+    const alpha = await createDbNode(db, { loc: 'alpha', memoryId: memA.id, content: 'plain source' });
+    const dest = await db.memory.create({
+      data: {
+        id: generateId(), organizationId: org.id, urn: 'mc-org:private-dest',
+        name: 'private-dest', class: 'private', userId: user.id,
+      },
+    });
+    let reached!: () => void;
+    let release!: () => void;
+    const atCheck = new Promise<void>((resolve) => { reached = resolve; });
+    const resume = new Promise<void>((resolve) => { release = resolve; });
+    let moved: Promise<unknown> | undefined;
+    let flip: Promise<unknown> | undefined;
+    try {
+      moved = db.$transaction(async (tx) => {
+        const findMemory = tx.memory.findUnique.bind(tx.memory);
+        let held = false;
+        vi.spyOn(tx.memory, 'findUnique').mockImplementation((async (args: Parameters<typeof findMemory>[0]) => {
+          const row = await findMemory(args);
+          if (!held && args?.where?.id === dest.id && args.select?.isEncrypted === true) {
+            held = true;
+            reached();
+            await resume;
+          }
+          return row;
+        }) as unknown as typeof tx.memory.findUnique);
+        await moveNodeSubtree(tx, {
+          source: alpha, destLoc: 'alpha', destMemoryId: dest.id, editor: { userId: user.id },
+        });
+      }, { timeout: 15_000 });
+      await atCheck;
+      let flipped = false;
+      flip = db.memory.update({ where: { id: dest.id }, data: { isEncrypted: true } })
+        .then(() => { flipped = true; });
+      await new Promise((resolve) => setTimeout(resolve, 75));
+      expect(flipped).toBe(false);
+    } finally {
+      release?.();
+      await Promise.allSettled([moved, flip]);
+    }
+    expect((await db.node.findUniqueOrThrow({ where: { id: alpha.id } })).memoryId).toBe(dest.id);
+    expect((await db.memory.findUniqueOrThrow({ where: { id: dest.id } })).isEncrypted).toBe(true);
+  });
+
   it('moves within the same memory to a new loc, keeping id + edges', async () => {
     const alpha = await createDbNode(db, { loc: 'alpha', memoryId: memA.id, content: 'A' });
     const beta = await createDbNode(db, { loc: 'beta', memoryId: memA.id });
