@@ -38,6 +38,20 @@ export const specCorpusMutations = {
     const { id: memoryId } = await resolveMemoryRef(ctx.db, memoryRef);
     const effects: Array<() => void> = [];
     const reserved = await ctx.db.$transaction(async (tx) => {
+      // (@codex P1/P2s, PR #1452) Never REVIVE a deleted node as a placeholder.
+      // A revival keeps everything attached to the row (text, payload, edges,
+      // vectors, provenance, revision history), and each of those surfaced a
+      // leak in turn. Archive the tombstone at `<loc>__deleted-<id>` instead,
+      // the convention a move that overwrites a live target already uses, so
+      // the placeholder is a FRESH node and the deleted spec keeps its own
+      // identity and history on its still-deleted row.
+      const tombstone = await tx.node.findFirst({
+        where: { memoryId, loc, deletedAt: { not: null } },
+        select: { id: true },
+      });
+      if (tombstone) {
+        await tx.node.update({ where: { id: tombstone.id }, data: { loc: `${loc}__deleted-${tombstone.id}` } });
+      }
       const node = await writeNodeCore(
         {
           memoryId, loc, name: name?.trim() || loc, role: 'spec', nodeType: 'info',

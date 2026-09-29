@@ -270,8 +270,11 @@ describe('reserving over a deleted spec with edges (@codex P2 on #1452)', () => 
     await resolvers.Mutation.deleteNode(null, { nodeRef: old.id }, as(admin.id));
 
     const reserved = await reserve(draft.id, 'pas:160:01');
-    expect(reserved.id).toBe(old.id); // the tombstone was revived
+    // A FRESH node: the tombstone is archived, not revived.
+    expect(reserved.id).not.toBe(old.id);
     expect(await db.edge.count({ where: { sourceId: reserved.id, deletedAt: null } })).toBe(0);
+    expect(await db.node.findUniqueOrThrow({ where: { id: old.id } }))
+      .toMatchObject({ loc: `pas:160:01__deleted-${old.id}`, deletedAt: expect.any(Date) });
   });
 });
 
@@ -315,7 +318,7 @@ describe('a placeholder over a tombstone is indistinguishable from a fresh one (
     await db.node.update({ where: { id: old.id }, data: { contentHash: 'deadbeef', ownerRepo: 'acme/specs' } });
     await resolvers.Mutation.deleteNode(null, { nodeRef: old.id }, as(admin.id));
     const revived = await reserve(draft.id, 'pas:180:02');
-    expect(revived.id).toBe(old.id);
+    expect(revived.id).not.toBe(old.id); // fresh identity, the tombstone is archived
     // The mutation's own result reports the reset provenance, not the tombstone's.
     expect(revived).toMatchObject({ ownerRepo: null, contentHash: null, isPlaceholder: true });
 
@@ -356,7 +359,28 @@ describe('a revived placeholder has no vectors (@codex P1 on #1452)', () => {
     await resolvers.Mutation.deleteNode(null, { nodeRef: old.id }, as(admin.id));
 
     const revived = await reserve(draft.id, 'pas:200:01');
-    expect(revived.id).toBe(old.id);
+    expect(revived.id).not.toBe(old.id);
     expect(await db.nodeEmbedding.count({ where: { nodeId: revived.id } })).toBe(0);
+    // The deleted spec keeps its own vectors on its own still-deleted row.
+    expect(await db.nodeEmbedding.count({ where: { nodeId: old.id } })).toBe(2);
+  });
+});
+
+describe('a placeholder over a deleted spec is a fresh node (@codex P2 on #1452)', () => {
+  it('has no revision history, and the deleted spec keeps its own, still deleted', async () => {
+    const old = await resolvers.Mutation.createSpecNode(null, {
+      input: { memoryId: draft.id, loc: 'pas:210:01', name: 'Old', role: 'spec', nodeType: 'info', content: 'v1' },
+    } as never, as(admin.id));
+    await updateSpec(draft.id, 'pas:210:01', { content: 'v2 secret' });
+    const oldHistory = await db.nodeRevision.count({ where: { nodeId: old.id } });
+    expect(oldHistory).toBeGreaterThan(0);
+    await resolvers.Mutation.deleteNode(null, { nodeRef: old.id }, as(admin.id));
+
+    const reserved = await reserve(draft.id, 'pas:210:01');
+    expect(reserved.id).not.toBe(old.id);
+    expect(await db.nodeRevision.count({ where: { nodeId: reserved.id } })).toBe(0);
+    expect(await db.nodeRevision.count({ where: { nodeId: old.id } })).toBe(oldHistory);
+    expect(await db.node.findUniqueOrThrow({ where: { id: old.id } }))
+      .toMatchObject({ loc: `pas:210:01__deleted-${old.id}`, deletedAt: expect.any(Date) });
   });
 });
