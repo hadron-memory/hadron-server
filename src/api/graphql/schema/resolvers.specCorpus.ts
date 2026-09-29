@@ -231,7 +231,26 @@ async function loadScannableCorpus(ctx: Context, memoryRef: string): Promise<Sca
         select: { id: true },
       })).map((m) => m.id)
     : [];
-  return { id, urn: memory.urn, pattern: corpusReferencePattern(urns), shadowed, currentUrnHistorical };
+  // (@codex P1, #1453) Only claimants the CALLER can read may decide which
+  // references are ours. Deciding it from an unreadable memory's nodes would
+  // make backlinks and the unresolved report an existence oracle for that
+  // tenant (plant a reference, see whether it is claimed). The shared resolver
+  // conceals such claimants the same way (isConcealedNodeRefAmbiguity): what
+  // the caller cannot read, it cannot resolve to either.
+  const readable = async (ids: readonly string[]) => {
+    const out: string[] = [];
+    for (const m of ids) if (await isMemoryReadableCached(ctx, m)) out.push(m);
+    return out;
+  };
+  for (const [urn, ids] of shadowed) {
+    const visible = await readable(ids);
+    if (visible.length) shadowed.set(urn, visible);
+    else shadowed.delete(urn);
+  }
+  return {
+    id, urn: memory.urn, pattern: corpusReferencePattern(urns), shadowed,
+    currentUrnHistorical: await readable(currentUrnHistorical),
+  };
 }
 
 /**

@@ -386,6 +386,45 @@ describe('historical holders of the CURRENT corpus URN (@codex P2 on #1453)', ()
   });
 });
 
+describe('an alias claimant the caller cannot read decides nothing (@codex P1 on #1453)', () => {
+  /** A prior holder of the corpus's CURRENT urn, owned by someone else: org-anchored and private to `outsider`. */
+  const unreadablePriorHolder = async () => {
+    await db.orgMember.create({ data: { organizationId: org.id, userId: outsider.id, role: 'READER' } });
+    const prior = await db.memory.create({ data: {
+      id: generateId(), urn: `${org.urn}:outsiders-private`, name: 'outsiders-private', class: 'private',
+      organizationId: org.id, userId: outsider.id,
+    } });
+    await db.urnAlias.create({ data: { urn: draft.urn, entityType: 'MEMORY', entityId: prior.id, reason: 'RENAME' } });
+    return prior;
+  };
+  const cites500 = () => db.node.update({ where: { id: other.id }, data: { content: `Probe: hrn:node:${draft.urn}:pas:500.` } });
+  const unresolvedLocs = async () =>
+    (await resolvers.Query.specUnresolvedReferences(null, { memoryRef: draft.id }, as())).map((r) => r.targetLoc);
+
+  it('reports the same thing whether or not the unreadable holder has the cited loc', async () => {
+    const prior = await unreadablePriorHolder();
+    await cites500();
+    const without = await unresolvedLocs();
+    await db.node.create({ data: { id: generateId(), memoryId: prior.id, loc: 'pas:500', name: 'Hidden' } });
+    const withNode = await unresolvedLocs();
+
+    expect(withNode).toEqual(without);
+    expect(withNode).toContain('pas:500');
+    const backlinks = await resolvers.Query.specBacklinks(null, { memoryRef: draft.id, loc: 'pas:500' }, as());
+    expect(backlinks.map((r) => r.sourceLoc)).toEqual(['pas:020']);
+  });
+
+  it('CONTROL: a claimant the caller CAN read still takes the reference', async () => {
+    const prior = await unreadablePriorHolder();
+    await cites500();
+    await db.node.create({ data: { id: generateId(), memoryId: prior.id, loc: 'pas:500', name: 'Theirs' } });
+    const readableCtx: Context = { db, userId: outsider.id, roles: [] };
+    await db.orgMember.updateMany({ where: { organizationId: org.id, userId: outsider.id }, data: { role: 'ADMIN' } });
+    const unresolved = await resolvers.Query.specUnresolvedReferences(null, { memoryRef: draft.id }, readableCtx);
+    expect(unresolved.map((r) => r.targetLoc)).not.toContain('pas:500');
+  });
+});
+
 describe('renumber decides reference ownership before the move (@codex P2 on #1453)', () => {
   it('rewrites our citations even when a prior holder of our URN also has the old loc', async () => {
     const prior = await resolvers.Mutation.createMemory(null, { orgId: org.id, name: 'shared' }, as());
