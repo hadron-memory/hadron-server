@@ -340,3 +340,21 @@ describe('a kept placeholder role is not a sync change (@codex P2 on #1452)', ()
     expect(await row(draft.id, 'pas:190:01')).toMatchObject({ role: 'spec', isPlaceholder: true });
   });
 });
+
+describe('a revived placeholder has no vectors (@codex P1 on #1452)', () => {
+  it('deletes the deleted spec\'s embeddings so its text cannot surface through vector search', async () => {
+    const old = await resolvers.Mutation.createSpecNode(null, {
+      input: { memoryId: draft.id, loc: 'pas:200:01', name: 'Old', role: 'spec', nodeType: 'info', content: 'Secret deleted text.' },
+    } as never, as(admin.id));
+    await db.nodeEmbedding.create({ data: { nodeId: old.id, memoryId: draft.id, kind: 'abstract', provider: 'local', model: 'test', dim: 768 } });
+    await db.nodeEmbedding.create({ data: {
+      nodeId: old.id, memoryId: draft.id, kind: 'chunk', provider: 'local', model: 'test', dim: 768,
+      chunkIndex: 0, chunkText: 'Secret deleted text.',
+    } as never });
+    await resolvers.Mutation.deleteNode(null, { nodeRef: old.id }, as(admin.id));
+
+    const revived = await reserve(draft.id, 'pas:200:01');
+    expect(revived.id).toBe(old.id);
+    expect(await db.nodeEmbedding.count({ where: { nodeId: revived.id } })).toBe(0);
+  });
+});

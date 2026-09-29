@@ -86,6 +86,11 @@ export const specCorpusMutations = {
         data: { isPlaceholder: true, contentHash: null, ownerRepo: null },
         select: { id: true },
       });
+      // (@codex P1, PR #1452) Soft deletion keeps a node's vectors, and vector
+      // search only checks the node's own deleted_at. A revived tombstone would
+      // therefore let the placeholder rank for, and chunk search return, the
+      // deleted spec's text. A placeholder has no content, so it has no vectors.
+      await tx.nodeEmbedding.deleteMany({ where: { nodeId: node.id } });
       // The node as the create door built it (relations included), now marked.
       return { ...node, isPlaceholder: true };
     });
