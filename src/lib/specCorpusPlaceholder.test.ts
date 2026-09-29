@@ -6,6 +6,7 @@ import { cleanDb } from '../test/helpers.js';
 import { generateId } from './id.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import { mergeMemoryGraph } from '../controller/operations/mergeMemories.js';
+import { updateNodeFromGitSync } from '../integrations/github/syncGraphFromGithub.js';
 
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -240,5 +241,18 @@ describe('reserving over a deleted spec (@codex P2 on #1452)', () => {
     expect(await row(draft.id, 'pas:140:01')).toMatchObject({
       isPlaceholder: true, content: null, abstract: null, description: null,
     });
+  });
+});
+
+describe('git sync fills a placeholder too (@codex P2 on #1452)', () => {
+  it('clears the flag when a synced file writes real content, and keeps it for a content-less update', async () => {
+    const reserved = await reserve(draft.id, 'pas:150:01');
+    const current = await db.node.findUniqueOrThrow({ where: { id: reserved.id } });
+    await db.$transaction((tx) => updateNodeFromGitSync(tx, current, { name: 'Renamed in git' }, undefined, draft.id));
+    expect(await row(draft.id, 'pas:150:01')).toMatchObject({ isPlaceholder: true, name: 'Renamed in git' });
+
+    const again = await db.node.findUniqueOrThrow({ where: { id: reserved.id } });
+    await db.$transaction((tx) => updateNodeFromGitSync(tx, again, { content: 'Written in the mirror.' }, undefined, draft.id));
+    expect(await row(draft.id, 'pas:150:01')).toMatchObject({ isPlaceholder: false, content: 'Written in the mirror.' });
   });
 });

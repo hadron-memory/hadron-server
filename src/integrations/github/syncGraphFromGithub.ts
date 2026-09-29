@@ -1,4 +1,5 @@
 import { createDecipheriv } from 'crypto';
+import { placeholderFillPatch } from '../../lib/specCorpus.js';
 import { governedSignalsFromMirror } from '../../lib/governedSignals.js';
 import { authoredContentChanged, clearNodeAuthorship } from '../../lib/nodeAuthorship.js';
 import { NodeSchemaViolation, validateNodeAgainstSchema } from '../../lib/validateNodeAgainstSchema.js';
@@ -136,6 +137,9 @@ export async function updateNodeFromGitSync(
     data: {
       ...(update as Prisma.NodeUncheckedUpdateInput),
       ...(authoredContentChanged(changes) ? clearNodeAuthorship() : {}),
+      // #1450 (@codex P2, PR #1452): filling a reserved citation by editing its
+      // mirrored file writes the spec, same as updateSpecNode.
+      ...placeholderFillPatch(locked, update.content),
       revisionContentHash: revisionStateHashRefreshMarker(),
     },
   });
