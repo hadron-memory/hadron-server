@@ -204,6 +204,8 @@ describe('an extraction that moves specs out serializes with minting (@codex P2 
       held();
       await hold;
       seenByMint = await tx.node.count({ where: { memoryId: draft.id, deletedAt: null, loc: { startsWith: 'pas:010' } } });
+      // …and flips the corpus, as a real mint does before it commits.
+      await tx.$executeRaw`UPDATE memories SET corpus_draft = false WHERE id = ${draft.id}`;
     }, { timeout: 20_000 });
     await lockHeld;
 
@@ -226,6 +228,9 @@ describe('an extraction that moves specs out serializes with minting (@codex P2 
     await minter;
     // The mint's snapshot still had both specs: the extraction had not landed.
     expect(seenByMint).toBe(2);
+    // Ordered after the mint, the extraction is an ordinary edit of a MINTED
+    // corpus. Extract has no draft-only behavior, and today's rules (which
+    // apply unchanged after minting, #1447 §5) do not refuse removing a spec.
     expect(await extracting).toBe('NO_ERROR');
     expect(await db.node.count({ where: { memoryId: draft.id, deletedAt: null, loc: { startsWith: 'pas:010' } } })).toBe(0);
   });
