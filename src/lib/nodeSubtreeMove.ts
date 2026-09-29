@@ -243,6 +243,27 @@ export async function moveNodeSubtree(
   // the rows as they are under their locks, and a source that moved or a
   // descendant set that changed in the meantime refuses as a retryable move.
   const reconcileIds = [source.id, ...firstDescendants.map((d) => d.id)].sort();
+  // Take the complete Node set before the Memory fence. A merge fold holds
+  // Node locks before its Memory FOR SHARE fence; taking Memory first here
+  // deadlocks when each operation waits on the other's row.
+  for (const id of reconcileIds) {
+    await tx.$queryRaw`SELECT id FROM nodes WHERE id = ${id} FOR UPDATE`;
+  }
+
+  // Reconciliation below can mint a NodeRevision. Fence the source flip before
+  // that first history write, including same-memory moves; a cross-memory move
+  // also holds the destination flag through the relocation. Take the lock mode
+  // needed by the later URN read now: upgrading two disjoint moves' FOR SHARE
+  // locks to FOR NO KEY UPDATE would deadlock. Opposing moves use one ID order.
+  const memoryUrns = new Map<string, string>();
+  for (const memoryId of [...new Set([srcMemoryId, destMemoryId])].sort()) {
+    const [memory] = await tx.$queryRaw<Array<{ urn: string }>>`
+      SELECT urn FROM memories WHERE id = ${memoryId} FOR NO KEY UPDATE
+    `;
+    if (!memory) throw new Error(`Move memory ${memoryId} disappeared while locking; retry.`);
+    memoryUrns.set(memoryId, memory.urn);
+  }
+
   for (const id of reconcileIds) {
     await ensureCurrentNodeRevisionInTransaction(tx, id, { expectedMemoryId: srcMemoryId });
   }
@@ -389,21 +410,8 @@ export async function moveNodeSubtree(
   // in this SAME transaction as the two-phase rebase. The shared alias helper
   // normalizes and deduplicates repeat moves; the node-ref resolver applies
   // live-address precedence and current-target liveness on lookup.
-  // Memory rename takes FOR UPDATE before it reads/replaces `urn`.
-  // Lock then read here too: a rename cannot publish a new source prefix
-  // between our alias-key read and the move's commit. Lock both memories in
-  // ID order so opposing cross-memory moves take these rows consistently.
-  // NO KEY UPDATE still conflicts with rename's FOR UPDATE, while allowing
-  // other connections' FK KEY SHARE checks on this memory during the move
-  // (findings:memory-row-for-update-deadlocks-node-inserts).
-  const memoryUrns = new Map<string, string>();
-  for (const id of [...new Set([srcMemoryId, destMemoryId])].sort()) {
-    const [row] = await tx.$queryRaw<{ urn: string }[]>`
-      SELECT urn FROM memories WHERE id = ${id} FOR NO KEY UPDATE
-    `;
-    if (!row) throw new Error(`Move memory ${id} disappeared while locking; retry.`);
-    memoryUrns.set(id, row.urn);
-  }
+  // The earlier NO KEY UPDATE locks pin both URNs against Memory rename and
+  // remain compatible with child-row FK KEY SHARE checks.
   const sourceMemoryUrn = memoryUrns.get(srcMemoryId)!;
   const targetMemoryUrn = memoryUrns.get(destMemoryId)!;
   const aliasKey = (memoryUrn: string, loc: string) =>

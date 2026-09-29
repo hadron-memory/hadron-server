@@ -513,17 +513,12 @@ function nameTaken(name: string, appId: string): GraphQLError {
 }
 
 /**
- * App-scoped critical section for REGISTER semantics (#984 review, Codex P1):
- * `SELECT … FOR UPDATE` on the Team Agent's system-memory row serializes every
- * register-consuming operation — role-definition writes (create/updateTeamRole,
- * whose check-then-write invariant runs would otherwise interleave: two
- * concurrent creates can each observe a name absent and both persist it) and
- * register-mode casting (which reads the register and mints against it). The
- * transaction is a LOCK BRACKET only: the work inside may run its own queries
- * and transactions on other pool connections (`writeNodeCore` does), which is
- * safe because the bracket commits — releasing the lock — only after `fn`
- * resolves. The `ensureWorklogSchema` FOR-UPDATE pattern, held across the
- * whole read-check-write window.
+ * App-scoped critical section for role-definition writes. The transaction is
+ * a LOCK BRACKET: `fn` runs on other pool connections, so its node writes must
+ * not wait on a row lock held here. A memory-row NO KEY UPDATE bracket worked
+ * while the nested writes only needed FK KEY SHARE, but the encryption-flip
+ * fence now takes FOR SHARE on that row. Use a dedicated advisory key to
+ * serialize role writes without blocking their own Memory fence.
  *
  * #1050 — renamed from `withRegisterLock`. It no longer guards a name
  * register (there is none); what it still guards is a role DEFINITION write:
@@ -538,14 +533,7 @@ export async function withRoleWriteLock<T>(
 ): Promise<T> {
   return ctx.db.$transaction(
     async (tx) => {
-      // FOR NO KEY UPDATE, deliberately NOT FOR UPDATE: the bracketed work
-      // INSERTS child rows referencing this memory (nodes via writeNodeCore),
-      // and an FK check takes FOR KEY SHARE on the referenced row from a
-      // DIFFERENT connection — which FOR UPDATE blocks, deadlocking the
-      // bracket against its own work until timeout. NO KEY UPDATE conflicts
-      // with other NO KEY UPDATE / UPDATE lockers (the mutual exclusion we
-      // want) while admitting KEY SHARE (the FK checks we cause).
-      await tx.$queryRaw`SELECT id FROM memories WHERE id = ${systemMemoryId} FOR NO KEY UPDATE`;
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${'role-write:' + systemMemoryId}))`;
       return fn();
     },
     // Generous: the bracket spans a full node write including the git mirror.

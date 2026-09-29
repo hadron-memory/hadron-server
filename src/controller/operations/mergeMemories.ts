@@ -1,4 +1,4 @@
-import type { PrismaClient } from '../../generated/prisma/index.js';
+import type { Prisma, PrismaClient } from '../../generated/prisma/index.js';
 import { assertBatchMutable, assertMemoryBulkMutable, assertNoProtectedReach } from '../../lib/bulkMutationGate.js';
 import { lockMemoryForChannelChange } from '../../lib/channels.js';
 import { computeContentHash } from '../../lib/contentHash.js';
@@ -73,9 +73,9 @@ import { safeNodeUrnV2 } from '../../lib/urnEmit.js';
  * idempotent under retry.
  *
  * Caller (the `mergeMemories` resolver) owns: ref resolution, class/encryption
- * gating, per-memory write authorization (including third memories whose
+ * preflight gating, per-memory write authorization (including third memories whose
  * edges re-point), and the post-merge embedding backfill. Encrypted memories
- * are rejected upstream, so every row read here is plaintext.
+ * are rejected upstream and rechecked under row locks in every writing batch.
  */
 
 /** Nodes folded / edges drained per inner transaction. Bounds tx size + lock duration. */
@@ -129,6 +129,32 @@ export async function mergeMemoryGraph(
   const batchSize = Math.max(1, Math.floor(args.batchSize ?? MERGE_BATCH_SIZE));
   const classifyPage = Math.max(1, Math.floor(args.classifyPageSize ?? CLASSIFY_PAGE));
   const withEdges = fields.has('EDGES');
+
+  /** Hold both flags through a batch so encryptMemory cannot flip mid-write. */
+  const lockMergeMemoryRows = async (
+    tx: Prisma.TransactionClient,
+    lockMode: 'share' | 'update' = 'share',
+    requirePlaintext = true,
+  ): Promise<Map<string, string>> => {
+    const urns = new Map<string, string>();
+    for (const id of [sourceMemoryId, targetMemoryId].sort()) {
+      const [memory] = lockMode === 'update'
+        ? await tx.$queryRaw<Array<{ urn: string; is_encrypted: boolean }>>`
+            SELECT urn, is_encrypted FROM memories WHERE id = ${id} FOR NO KEY UPDATE
+          `
+        : await tx.$queryRaw<Array<{ urn: string; is_encrypted: boolean }>>`
+            SELECT urn, is_encrypted FROM memories WHERE id = ${id} FOR SHARE
+          `;
+      if (!memory) throw new Error(`merge memory ${id} disappeared while locking; retry the merge`);
+      if (requirePlaintext && memory.is_encrypted) {
+        throw new GraphQLError('mergeMemories does not support encrypted memories yet.', {
+          extensions: { code: 'ENCRYPTED_MEMORY_MERGE_UNSUPPORTED', memoryId: id },
+        });
+      }
+      urns.set(id, memory.urn);
+    }
+    return urns;
+  };
 
   // #725/#737 — nodes landing in a schema-governed target (relocated OR folded)
   // must satisfy the target schema. A merge is a LONG batched op; the target's
@@ -265,6 +291,13 @@ export async function mergeMemoryGraph(
               ];
             }),
           );
+          // Lock node rows before Memory rows, matching moveNodeSubtree's
+          // order. The resolver's one-time flag check can go stale between
+          // batches, so pin both flags before reconciliation mints history.
+          for (const id of [...ids].sort()) {
+            await tx.$queryRaw`SELECT id FROM nodes WHERE id = ${id} FOR UPDATE`;
+          }
+          const memoryUrns = await lockMergeMemoryRows(tx);
           rows = await tx.node.findMany({
             where: { id: { in: ids }, memoryId: sourceMemoryId, deletedAt: null },
           });
@@ -305,19 +338,7 @@ export async function mergeMemoryGraph(
           if (rows.length !== relocationIds.length) {
             throw new Error('a merge source node was deleted during the merge; retry the merge');
           }
-          // A Memory rename takes FOR UPDATE. Lock and read both URNs only
-          // after the node/loc locks, in stable ID order, so each predecessor
-          // key names the source memory as of this relocation transaction.
-          // NO KEY UPDATE still serializes with the rename without blocking
-          // unrelated child-row FK KEY SHARE checks.
-          const memoryUrns = new Map<string, string>();
-          for (const id of [sourceMemoryId, targetMemoryId].sort()) {
-            const [memory] = await tx.$queryRaw<{ urn: string }[]>`
-              SELECT urn FROM memories WHERE id = ${id} FOR NO KEY UPDATE
-            `;
-            if (!memory) throw new Error(`merge memory ${id} disappeared while locking; retry the merge`);
-            memoryUrns.set(id, memory.urn);
-          }
+          // The held Memory rows also pin both URNs against a concurrent rename.
           const sourceUrn = memoryUrns.get(sourceMemoryId)!;
           const targetUrn = memoryUrns.get(targetMemoryId)!;
           for (const row of rows) {
@@ -372,6 +393,14 @@ export async function mergeMemoryGraph(
       let moved = 0;
       let dropped = 0;
 
+      // The authoritative gate below reacquires these keys after refreshing
+      // the fold rows. Take the complete Channel-memory set first: holding the
+      // Node/Memory rows while waiting for a Channel key would invert against
+      // final source disposition, which takes that key before its Memory rows.
+      for (const id of [...new Set([sourceMemoryId, targetMemoryId])].sort()) {
+        await lockMemoryForChannelChange(tx, id);
+      }
+
       // Read the target schema INSIDE the tx so the fold validates against the
       // schema current at fold time (a tightening committed between batches is
       // honored), consistent with this batch's other reads/writes.
@@ -410,6 +439,12 @@ export async function mergeMemoryGraph(
         ...srcRows.map((row) => [row.id, sourceMemoryId] as const),
         ...tgtRows.map((row) => [row.id, targetMemoryId] as const),
       ]);
+      // Lock all node rows first, as on other move paths; then recheck both
+      // flags before the first drift reconciliation snapshot.
+      for (const id of foldIds) {
+        await tx.$queryRaw`SELECT id FROM nodes WHERE id = ${id} FOR UPDATE`;
+      }
+      await lockMergeMemoryRows(tx);
       for (const id of foldIds) {
         const reconciled = await ensureCurrentNodeRevisionInTransaction(tx, id, { expectedMemoryId: foldMemory.get(id)! });
         if (reconciled == null) throw new Error(`merge node ${id} moved or vanished during the fold; retry the merge`);
@@ -614,6 +649,7 @@ export async function mergeMemoryGraph(
     const drop = edges.filter((e) => taken.has(e.loc)).map((e) => e.id);
     const move = edges.filter((e) => !taken.has(e.loc)).map((e) => e.id);
     await db.$transaction(async (tx) => {
+      await lockMergeMemoryRows(tx);
       if (drop.length > 0) await tx.edge.deleteMany({ where: { id: { in: drop } } });
       if (move.length > 0) {
         await tx.edge.updateMany({ where: { id: { in: move } }, data: { memoryId: targetMemoryId } });
@@ -637,6 +673,13 @@ export async function mergeMemoryGraph(
       // the memory puts EVERY address in it out of reach, so any Channel at all
       // refuses.
       await lockMemoryForChannelChange(tx, sourceMemoryId);
+      // The later memory.update needs NO KEY UPDATE. Take it on BOTH rows in
+      // stable ID order now; opposing merges must not each upgrade a shared
+      // lock on a different source row after holding SHARE on both.
+      // All content and edge writes have committed. Disposition only marks
+      // the source deleted, so a target encryption flip after those batches
+      // must not strand the requested cleanup.
+      await lockMergeMemoryRows(tx, 'update', false);
       await assertNoProtectedReach(tx, sourceMemoryId, 'all', 'delete');
       await tx.memory.update({ where: { id: sourceMemoryId }, data: { deletedAt: new Date() } });
     });

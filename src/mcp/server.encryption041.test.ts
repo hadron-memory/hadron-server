@@ -199,6 +199,129 @@ describe('locked vs unlocked writes', () => {
     expect(read).toContain('fresh secret');
   });
 
+  it('hadron_create_parent_node requires an unlock and stores section content as ciphertext', async () => {
+    const server = mcp(ownerAuth());
+    const urn = `mcp41-org::vault::section`;
+    const locked = await server.callToolText('hadron_create_parent_node', {
+      urn, name: 'Section', description: 'section secret',
+    });
+    expect(locked).toContain('encrypted and locked');
+    expect(await db.node.findFirst({ where: { memoryId, loc: 'section' } })).toBeNull();
+
+    await server.callToolText('hadron_unlock_memory', { memoryUrn, passphrase: PASS });
+    expect(await server.callToolText('hadron_create_parent_node', {
+      urn, name: 'Section', description: 'section secret',
+    })).toContain('Node saved');
+    const section = await db.node.findFirstOrThrow({ where: { memoryId, loc: 'section' } });
+    expect(isCiphertext(section.content)).toBe(true);
+    const versions = await db.nodeRevision.count({ where: { nodeId: section.id } });
+    expect(await server.callToolText('hadron_create_parent_node', {
+      urn, name: 'Section', description: 'section secret',
+    })).toContain('Node saved');
+    expect(await db.node.findUniqueOrThrow({ where: { id: section.id } })).toMatchObject(section);
+    expect(await db.nodeRevision.count({ where: { nodeId: section.id } })).toBe(versions);
+
+    await server.callToolText('hadron_create_parent_node', {
+      urn, name: 'Section', description: 'a changed section secret',
+    });
+    expect(await db.nodeRevision.count({ where: { nodeId: section.id } })).toBe(versions + 1);
+    expect(isCiphertext((await db.node.findUniqueOrThrow({ where: { id: section.id } })).content)).toBe(true);
+  });
+
+  it.each(['hadron_update_node', 'hadron_create_node'])(
+    '%s refuses a plaintext payload prepared before encryption flipped', async (tool) => {
+      const plainMemory = await db.memory.create({
+        data: {
+          id: generateId(), organizationId: org.id, name: 'plain', urn: 'mcp41-org:plain',
+          class: 'private', userId: owner.id,
+        },
+      });
+      const plainNode = await db.node.create({
+        data: {
+          id: generateId(), memoryId: plainMemory.id, loc: 'entry', name: 'Entry',
+          content: 'original plain', tags: [],
+        },
+      });
+      const findMemory = db.memory.findUnique.bind(db.memory);
+      let reached!: () => void;
+      let release!: () => void;
+      const atOldFlag = new Promise<void>((resolve) => { reached = resolve; });
+      const resume = new Promise<void>((resolve) => { release = resolve; });
+      let held = false;
+      const lookup = vi.spyOn(db.memory, 'findUnique').mockImplementation((async (args: Parameters<typeof findMemory>[0]) => {
+        const row = await findMemory(args);
+        if (!held && args?.where?.id === plainMemory.id && args.select?.isEncrypted === true) {
+          held = true;
+          reached();
+          await resume;
+        }
+        return row;
+      }) as unknown as typeof db.memory.findUnique);
+      try {
+        const writer = mcp(ownerAuth()).callToolText(tool, {
+          urn: `mcp41-org::plain::${tool === 'hadron_update_node' ? 'entry' : 'new-entry'}`,
+          ...(tool === 'hadron_create_node' ? { name: 'New entry' } : {}),
+          content: 'late plaintext write',
+        });
+        await atOldFlag;
+        await resolvers.Mutation.encryptMemory(
+          {}, { memoryId: plainMemory.id, passphrase: PASS },
+          { db, roles: ['ADMIN'], userId: owner.id } as Context,
+        );
+        release();
+        expect(await writer).toContain('[node_write_conflict]');
+      } finally {
+        release();
+        lookup.mockRestore();
+      }
+      const live = await db.node.findUniqueOrThrow({ where: { id: plainNode.id } });
+      expect(isCiphertext(live.content)).toBe(true);
+      expect(await db.node.findFirst({ where: { memoryId: plainMemory.id, loc: 'new-entry' } })).toBeNull();
+      expect((await db.nodeRevision.findMany({ where: { nodeId: plainNode.id } }))
+        .every((revision) => revision.content == null || isCiphertext(revision.content))).toBe(true);
+    },
+  );
+
+  it('hadron_create_parent_node refuses a section prepared before encryption flipped', async () => {
+    const plainMemory = await db.memory.create({
+      data: {
+        id: generateId(), organizationId: org.id, name: 'plain-section',
+        urn: 'mcp41-org:plain-section', class: 'private', userId: owner.id,
+      },
+    });
+    const findMemory = db.memory.findUniqueOrThrow.bind(db.memory);
+    let reached!: () => void;
+    let release!: () => void;
+    const atOldFlag = new Promise<void>((resolve) => { reached = resolve; });
+    const resume = new Promise<void>((resolve) => { release = resolve; });
+    let held = false;
+    const lookup = vi.spyOn(db.memory, 'findUniqueOrThrow').mockImplementation((async (args: Parameters<typeof findMemory>[0]) => {
+      const row = await findMemory(args);
+      if (!held && args?.where?.id === plainMemory.id && args.select?.isEncrypted === true) {
+        held = true;
+        reached();
+        await resume;
+      }
+      return row;
+    }) as unknown as typeof db.memory.findUniqueOrThrow);
+    try {
+      const writer = mcp(ownerAuth()).callToolText('hadron_create_parent_node', {
+        urn: 'mcp41-org::plain-section::section', name: 'Section', description: 'late plaintext',
+      });
+      await atOldFlag;
+      await resolvers.Mutation.encryptMemory(
+        {}, { memoryId: plainMemory.id, passphrase: PASS },
+        { db, roles: ['ADMIN'], userId: owner.id } as Context,
+      );
+      release();
+      expect(await writer).toContain('[node_write_conflict]');
+    } finally {
+      release();
+      lookup.mockRestore();
+    }
+    expect(await db.node.findFirst({ where: { memoryId: plainMemory.id, loc: 'section' } })).toBeNull();
+  });
+
   it('hadron_update_node while unlocked re-encrypts the provided fields', async () => {
     const server = mcp(ownerAuth());
     await server.callToolText('hadron_unlock_memory', { memoryUrn, passphrase: PASS });

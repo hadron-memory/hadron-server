@@ -69,6 +69,21 @@ export class GitSyncTargetMovedError extends Error {
   }
 }
 
+export class GitSyncEncryptedMemoryError extends Error {
+  constructor() {
+    super('Git sync cannot write an encrypted memory without its data key.');
+    this.name = 'GitSyncEncryptedMemoryError';
+  }
+}
+
+async function assertGitSyncMemoryPlaintext(tx: Prisma.TransactionClient, memoryId: string): Promise<void> {
+  await tx.$queryRaw`SELECT "id" FROM "memories" WHERE "id" = ${memoryId} FOR SHARE`;
+  const memory = await tx.memory.findUniqueOrThrow({
+    where: { id: memoryId }, select: { isEncrypted: true },
+  });
+  if (memory.isEncrypted) throw new GitSyncEncryptedMemoryError();
+}
+
 /** Apply a Git-owned update without bypassing the live-revision contract. */
 export async function updateNodeFromGitSync(
   tx: Prisma.TransactionClient,
@@ -88,6 +103,7 @@ export async function updateNodeFromGitSync(
   if (!owner || owner.memoryId !== expectedMemoryId) {
     throw new GitSyncTargetMovedError(current.id, expectedMemoryId);
   }
+  await assertGitSyncMemoryPlaintext(tx, expectedMemoryId);
   // Unrevisioned drift gets its OWN revision before the Git edit's, never
   // folded into it (@codex P1 / @copilot, PR #1339) — the same order as the
   // GraphQL and MCP update paths. A swap base is exempt: its row was
@@ -192,6 +208,13 @@ export const syncGraphFromGithub = async (
     // showed a memory that simply never synced. Caught by the test below, not
     // by reading this.
     validateMemorySource(graph.source);
+
+    // Avoid clone/pull work for an encrypted memory. The transaction below
+    // repeats this check under a row lock because this preflight can go stale.
+    const encryptionState = await db.memory.findUnique({
+      where: { id: graph.id }, select: { isEncrypted: true },
+    });
+    if (encryptionState?.isEncrypted) throw new GitSyncEncryptedMemoryError();
 
     // Update sync status to SYNCING
     await db.memory.update({
@@ -352,6 +375,11 @@ export const syncGraphFromGithub = async (
         graph.id,
         writableLocs,
       );
+      // Moves take their source path before their Memory row lock. Take the
+      // Git path set first too, then fence the encryption flag before any
+      // NodeRevision or Node write. Holding FOR SHARE while waiting for a
+      // move's path would deadlock against its FOR NO KEY UPDATE Memory lock.
+      await assertGitSyncMemoryPlaintext(tx, graph.id);
 
       // A move that won before these locks were granted invalidates preflight.
       // Retry the whole collection phase so the endpoint's current memory and

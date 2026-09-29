@@ -55,14 +55,20 @@ import {
   type Role,
   type MemoryVisibility,
 } from '../../../generated/prisma/index.js';
-import { parseDataKey, isCiphertext } from '../../../lib/crypto.js';
+import { parseDataKey, type EncryptionKey } from '../../../lib/crypto.js';
 import {
   generateKdfSalt,
   deriveDataKeyFromPassphrase,
   makeKeyVerifier,
+  resolveSuppliedKey,
+  MemoryUnlockError,
   DEFAULT_KDF_PARAMS,
 } from '../../../lib/memoryUnlock.js';
-import { encryptNodeFieldsWithKey } from '../../../lib/nodeCrypto.js';
+import {
+  encryptNodeFieldsWithKey,
+  isAuthenticatedStringEnvelope,
+  isAuthenticatedDataEnvelope,
+} from '../../../lib/nodeCrypto.js';
 import {
   NodeAbstractTooLongError,
   NodeNotFoundError,
@@ -336,6 +342,47 @@ async function requireMemorySubscription(
   throw new GraphQLError('No subscription from that organization to this memory.', {
     extensions: { code: 'NOT_FOUND' },
   });
+}
+
+// Older SECRET memories and anonymous promotions were born encrypted without
+// a verifier. A completion key can be bound to such a row only if an existing
+// payload authenticates under it. Page IDs/fields so this proof does not load
+// an unbounded graph into memory. A genuinely empty legacy memory has no key
+// proof and must keep failing closed.
+async function legacyMemoryHasKeyProof(
+  ctx: Context,
+  memoryId: string,
+  key: EncryptionKey,
+): Promise<boolean> {
+  const authenticates = (row: { content: string | null; abstract: string | null; data: unknown }) =>
+    isAuthenticatedStringEnvelope(row.content, key) ||
+    isAuthenticatedStringEnvelope(row.abstract, key) ||
+    isAuthenticatedDataEnvelope(row.data, key);
+  let cursor: string | undefined;
+  for (;;) {
+    const rows = await ctx.db.node.findMany({
+      where: { memoryId, ...(cursor ? { id: { gt: cursor } } : {}) },
+      select: { id: true, content: true, abstract: true, data: true },
+      orderBy: { id: 'asc' }, take: 200,
+    });
+    if (rows.some(authenticates)) return true;
+    if (rows.length < 200) break;
+    cursor = rows[rows.length - 1].id;
+  }
+  cursor = undefined;
+  for (;;) {
+    const rows: Array<{ id: string; content: string | null; abstract: string | null; data: unknown }> = await ctx.db.nodeRevision.findMany({
+      where: {
+        ...(cursor ? { id: { gt: cursor } } : {}),
+        OR: [{ memoryId }, { memoryId: null, node: { memoryId } }],
+      },
+      select: { id: true, content: true, abstract: true, data: true },
+      orderBy: { id: 'asc' }, take: 200,
+    });
+    if (rows.some(authenticates)) return true;
+    if (rows.length < 200) return false;
+    cursor = rows[rows.length - 1].id;
+  }
 }
 
 export const memoryMutations = {
@@ -2073,13 +2120,24 @@ export const memoryMutations = {
             newUrn,
             createdBy: user.id,
           });
-          await tx.memory.update({
-            where: { id: resolvedMemoryId },
+          // A second promotion may have read the same anonymous row and
+          // supplied a different key. Claim the flag and verifier together;
+          // if another writer won after our pre-transaction scan, roll back
+          // every stale Node rewrite and alias in this transaction.
+          const claimed = await tx.memory.updateMany({
+            where: {
+              id: resolvedMemoryId,
+              isEncrypted: false,
+              keyVerifier: null,
+              urn: memory.urn,
+              userId: null,
+            },
             data: {
               urn: newUrn,
               createdBy: user.id,
               anonymousExpiresAt: null,
               isEncrypted: true,
+              keyVerifier: makeKeyVerifier(key),
               // 041 (#516): encrypted ⇒ class='private'; set the owner so the
               // bidirectional chk_personal_visibility_user (private ⇔ userId)
               // holds. userMemoryOfAgentId + appId are already set on the anon
@@ -2089,7 +2147,18 @@ export const memoryMutations = {
               updatedBy: ctx.appId,
             },
           });
+          if (claimed.count !== 1) {
+            throw new GraphQLError('Anonymous memory changed during promotion; retry.', {
+              extensions: { code: 'MEMORY_WRITE_CONFLICT', memoryId: resolvedMemoryId },
+            });
+          }
         });
+        // Promotion's live-node rewrite does not cover tombstones or prior
+        // snapshots. Reuse the bounded completion pass under the verifier we
+        // just installed; an interrupted pass can be retried by the caller.
+        await memoryMutations.encryptMemory(
+          {}, { memoryId: resolvedMemoryId, dataKey }, ctx,
+        );
         return ctx.db.memory.findUniqueOrThrow({ where: { id: resolvedMemoryId } });
       }
 
@@ -2161,13 +2230,15 @@ export const memoryMutations = {
           { extensions: { code: 'BAD_USER_INPUT', memoryClass: memory.class } },
         );
       }
-      if (memory.isEncrypted) {
-        throw new Error('Memory is already encrypted');
-      }
+      // #1434: an encryption interrupted after the flip, or completed before
+      // historical revisions were included, may leave plaintext rows behind.
+      // A rerun is a completion under the EXISTING key, never a key rotation.
+      // Verifier-less legacy rows need a ciphertext proof before claiming a
+      // verifier. Otherwise a wrong key could double-encrypt old history.
       // Vector indexing on an encrypted memory requires the FR-026 ack;
       // converting an INDEXED memory would violate chk_memory_vector_
       // encrypted_ack — surface it as a typed error, not a DB error.
-      if (memory.vectorIndexEnabled && !memory.vectorIndexEncryptedAckAt) {
+      if (!memory.isEncrypted && memory.vectorIndexEnabled && !memory.vectorIndexEncryptedAckAt) {
         throw new GraphQLError(
           'Disable the vector index (or acknowledge the inversion disclosure) before encrypting.',
           { extensions: { code: 'BAD_USER_INPUT' } },
@@ -2175,7 +2246,16 @@ export const memoryMutations = {
       }
       let key;
       let kdfFields: { kdfSalt?: string; kdfParams?: InputJsonValue } = {};
-      if (passphrase) {
+      if (memory.isEncrypted) {
+        try {
+          key = await resolveSuppliedKey(memory, { dataKey, passphrase });
+        } catch (e) {
+          if (e instanceof MemoryUnlockError) {
+            throw new GraphQLError(e.message, { extensions: { code: e.code, memoryId: resolvedMemoryId } });
+          }
+          throw e;
+        }
+      } else if (passphrase) {
         if (dataKey) {
           throw new GraphQLError('Provide exactly one of dataKey or passphrase.', {
             extensions: { code: 'BAD_USER_INPUT' },
@@ -2199,27 +2279,45 @@ export const memoryMutations = {
           extensions: { code: 'BAD_USER_INPUT' },
         });
       }
+      if (memory.isEncrypted && !memory.keyVerifier) {
+        if (!(await legacyMemoryHasKeyProof(ctx, resolvedMemoryId, key))) {
+          throw new GraphQLError('Encrypted memory has no key proof for safe completion.', {
+            extensions: { code: 'BAD_UNLOCK_INPUT', memoryId: resolvedMemoryId },
+          });
+        }
+        const claimed = await ctx.db.memory.updateMany({
+          where: { id: resolvedMemoryId, isEncrypted: true, keyVerifier: null },
+          data: { keyVerifier: makeKeyVerifier(key) },
+        });
+        if (claimed.count !== 1) {
+          throw new GraphQLError('Encryption key was claimed concurrently; retry completion.', {
+            extensions: { code: 'ENCRYPTION_INCOMPLETE', memoryId: resolvedMemoryId },
+          });
+        }
+      }
       // FLIP FIRST, then converge (PR-514 review, Copilot — conversion
       // race): once isEncrypted commits, every concurrent write path either
       // encrypts (key present) or fails closed (SESSION_EXPIRED) — so
       // plaintext can no longer be ADDED. The encryption passes below then
       // converge on zero plaintext rows: a row written plaintext between
       // our scan and the flip is caught by the next pass. Idempotent by the
-      // enc:v1 prefix (isCiphertext), so re-running a pass is safe.
+      // Authenticated envelopes stay unchanged, so re-running a pass is safe.
       // Two callers may both have read the plaintext flag above. Claim the
       // flip atomically so only one key can become the verifier/conversion key;
       // otherwise a losing caller could replace the verifier while the winner
       // encrypts rows under its own key (#1346).
-      const flip = await ctx.db.memory.updateMany({
-        where: { id: resolvedMemoryId, isEncrypted: false },
-        data: {
-          isEncrypted: true,
-          keyVerifier: makeKeyVerifier(key),
-          ...kdfFields,
-          updatedBy: ctx.appId ?? ctx.userId ?? null,
-        },
-      });
-      if (flip.count !== 1) throw new Error('Memory is already encrypted');
+      if (!memory.isEncrypted) {
+        const flip = await ctx.db.memory.updateMany({
+          where: { id: resolvedMemoryId, isEncrypted: false },
+          data: {
+            isEncrypted: true,
+            keyVerifier: makeKeyVerifier(key),
+            ...kdfFields,
+            updatedBy: ctx.appId ?? ctx.userId ?? null,
+          },
+        });
+        if (flip.count !== 1) throw new Error('Memory is already encrypted');
+      }
       const BATCH = 200; // bound memory per pass (PR-514 review, Gemini)
       for (let pass = 0; pass < 5; pass++) {
         let converted = 0;
@@ -2294,10 +2392,9 @@ export const memoryMutations = {
                 }
               }
 
-              const plaintextContent = current.content != null && !isCiphertext(current.content);
-              const plaintextAbstract = current.abstract != null && !isCiphertext(current.abstract);
-              const plaintextData = current.data != null &&
-                !(typeof current.data === 'object' && (current.data as { __enc?: string }).__enc);
+              const plaintextContent = current.content != null && !isAuthenticatedStringEnvelope(current.content, key);
+              const plaintextAbstract = current.abstract != null && !isAuthenticatedStringEnvelope(current.abstract, key);
+              const plaintextData = current.data != null && !isAuthenticatedDataEnvelope(current.data, key);
               if (!plaintextContent && !plaintextAbstract && !plaintextData) return false;
               const encrypted = encryptNodeFieldsWithKey(
                 { content: current.content, abstract: current.abstract, data: current.data }, key,
@@ -2323,6 +2420,90 @@ export const memoryMutations = {
             `[encryptMemory] memory ${resolvedMemoryId} did not converge after 5 passes — investigate`,
           );
         }
+      }
+
+      // Historical snapshots belong to the memory where they were captured,
+      // even when their Node has since moved. Legacy NULL-memory snapshots
+      // follow the read gate's current-Node-memory fallback (#602). Page IDs
+      // only, then lock the parent and re-check that fallback before writing:
+      // a move between the page read and conversion must not encrypt history
+      // under the wrong memory key. Sanctioned writes after the flip create
+      // ciphertext snapshots; this pass converts the pre-flip history (#1434).
+      // Encryption stays in the application because the caller's key must
+      // never be passed to PostgreSQL for a bulk UPDATE. Use an id comparison
+      // for paging: a history prune can delete the last row of a page, so a
+      // Prisma cursor on that row would lose the remaining pages.
+      let revisionConverged = false;
+      for (let revisionPass = 0; revisionPass < 5; revisionPass++) {
+        let convertedRevisions = 0;
+        let revisionCursor: string | undefined;
+        for (;;) {
+          const revisions = await ctx.db.nodeRevision.findMany({
+            where: {
+              ...(revisionCursor ? { id: { gt: revisionCursor } } : {}),
+              OR: [
+                { memoryId: resolvedMemoryId },
+                { memoryId: null, node: { memoryId: resolvedMemoryId } },
+              ],
+            },
+            select: { id: true, nodeId: true },
+            orderBy: { id: 'asc' },
+            take: BATCH,
+          });
+          if (revisions.length === 0) break;
+          revisionCursor = revisions[revisions.length - 1].id;
+          for (const candidate of revisions) {
+            const didConvert = await ctx.db.$transaction(async (tx) => {
+              await tx.$queryRaw`SELECT id FROM nodes WHERE id = ${candidate.nodeId} FOR UPDATE`;
+              // A concurrent history prune may delete a page candidate. Lock
+              // the snapshot before reading it so a later delete cannot turn
+              // the selective update into a failed, half-finished conversion.
+              const lockedRevision = await tx.$queryRaw<Array<{ id: string }>>`
+                SELECT id FROM node_revisions WHERE id = ${candidate.id} FOR UPDATE
+              `;
+              if (lockedRevision.length === 0) return false;
+              const revision = await tx.nodeRevision.findUnique({ where: { id: candidate.id } });
+              if (!revision) return false;
+              if (revision.memoryId !== resolvedMemoryId) {
+                if (revision.memoryId !== null) return false;
+                const node = await tx.node.findUnique({
+                  where: { id: candidate.nodeId }, select: { memoryId: true },
+                });
+                if (node?.memoryId !== resolvedMemoryId) return false;
+              }
+              const plaintextContent = revision.content != null && !isAuthenticatedStringEnvelope(revision.content, key);
+              const plaintextAbstract = revision.abstract != null && !isAuthenticatedStringEnvelope(revision.abstract, key);
+              const plaintextData = revision.data != null && !isAuthenticatedDataEnvelope(revision.data, key);
+              if (!plaintextContent && !plaintextAbstract && !plaintextData) return false;
+              const encrypted = encryptNodeFieldsWithKey(
+                { content: revision.content, abstract: revision.abstract, data: revision.data }, key,
+              );
+              await tx.nodeRevision.update({
+                where: { id: revision.id },
+                data: {
+                  content: encrypted.content ?? null,
+                  abstract: encrypted.abstract ?? null,
+                  data: (encrypted.data ?? null) as InputJsonValue,
+                },
+              });
+              return true;
+            });
+            if (didConvert) convertedRevisions += 1;
+          }
+          if (revisions.length < BATCH) break;
+        }
+        // Always make a second pass: an old pre-flip writer can commit after
+        // the first scan reached its last page. Later passes stop only after
+        // observing no plaintext conversion across a complete traversal.
+        if (convertedRevisions === 0 && revisionPass > 0) {
+          revisionConverged = true;
+          break;
+        }
+      }
+      if (!revisionConverged) {
+        throw new GraphQLError('Encrypted revision history did not converge; retry completion.', {
+          extensions: { code: 'ENCRYPTION_INCOMPLETE', memoryId: resolvedMemoryId },
+        });
       }
       return ctx.db.memory.findUniqueOrThrow({ where: { id: resolvedMemoryId } });
     },
