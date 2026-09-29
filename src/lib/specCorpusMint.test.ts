@@ -191,6 +191,46 @@ describe('mintSpecCorpus serializes with in-flight node writes (#1448)', () => {
   });
 });
 
+describe('an extraction that moves specs out serializes with minting (@codex P2 on #1462)', () => {
+  it('waits while a mint holds the corpus, so it cannot delete specs between the mint\'s read and its flip', async () => {
+    let release!: () => void;
+    let held!: () => void;
+    const lockHeld = new Promise<void>((r) => { held = r; });
+    const hold = new Promise<void>((r) => { release = r; });
+    let seenByMint = -1;
+    // What mintSpecCorpus holds from its report to its flip.
+    const minter = db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM memories WHERE id = ${draft.id} FOR NO KEY UPDATE`;
+      held();
+      await hold;
+      seenByMint = await tx.node.count({ where: { memoryId: draft.id, deletedAt: null, loc: { startsWith: 'pas:010' } } });
+    }, { timeout: 20_000 });
+    await lockHeld;
+
+    const parent = await db.node.findFirstOrThrow({ where: { memoryId: draft.id, loc: 'pas:010' } });
+    const extracting = codeOf(resolvers.Mutation.extractParentNodeToMemory(
+      {}, { parentRef: parent.id, targetUrn: `${org.urn}::extracted-specs`, move: true } as never, as(),
+    ));
+    try {
+      await vi.waitFor(async () => {
+        const waiting = await db.$queryRaw<Array<{ pid: number }>>`
+          SELECT pid FROM pg_stat_activity
+          WHERE datname = current_database() AND wait_event_type = 'Lock'
+            AND query LIKE '%FROM memories WHERE id%' AND query LIKE '%FOR SHARE%'
+        `;
+        expect(waiting.length).toBeGreaterThan(0);
+      }, { timeout: 5_000, interval: 25 });
+    } finally {
+      release();
+    }
+    await minter;
+    // The mint's snapshot still had both specs: the extraction had not landed.
+    expect(seenByMint).toBe(2);
+    expect(await extracting).toBe('NO_ERROR');
+    expect(await db.node.count({ where: { memoryId: draft.id, deletedAt: null, loc: { startsWith: 'pas:010' } } })).toBe(0);
+  });
+});
+
 describe('mintSpecCorpus re-authorizes under the lock (@codex P2 on #1462)', () => {
   it('refuses when the corpus moved to an org the caller cannot manage after the pre-check', async () => {
     const otherOrg = await db.organization.create({ data: { id: generateId(), name: 'Other Org', urn: 'other-mint.example' } });
