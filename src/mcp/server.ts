@@ -246,7 +246,6 @@ import {
   markOwnTeamChatRead,
   maybeAdvanceOwnChannelRead,
   teamAttentionAvailable,
-  teamAttentionPilotOperatorEnabled,
 } from '../lib/teamAttention.js';
 import { resolveOrgRef } from '../lib/entityRef/orgRef.js';
 import { Prisma, type PrismaClient, type SessionType, type NodeContentValidationOutcome } from '../generated/prisma/index.js';
@@ -8339,7 +8338,10 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     args: { sinceSeq?: number; beforeSeq?: number; mentions?: string; limit?: number; offset?: number; session?: string },
   ) => {
     try {
-      const pilotRead = !!args.session && teamAttentionPilotOperatorEnabled(auth.userId ?? undefined);
+      // #1353: capture applies to any user-principal session read — the pilot
+      // operator allowlist that used to bound it is gone. App-key callers
+      // (no userId) keep their resolver isolation and never capture.
+      const pilotRead = !!args.session && !!auth.userId;
       const channelId = pilotRead ? await resolveChannelRefId(db, channelRef) : null;
       const captured = channelId
         ? await db.channel.findFirst({
@@ -8868,7 +8870,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         // Capture the Channel the resolver will actually read (its oldest
         // team-space root, not necessarily App.defaultChannel), BEFORE the
         // read, with the context the resolver gets (#1362 review, Codex P2).
-        const pilotAppId = session && teamAttentionPilotOperatorEnabled(auth.userId ?? undefined)
+        const pilotAppId = session && auth.userId
           ? (await resolveAppRef(db, appRef)).id
           : null;
         const captured = pilotAppId ? await locateTeamChatChannel(resolverCtx, pilotAppId) : null;
@@ -8923,17 +8925,18 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
 
   // ── #1353 internal-pilot compact attention ───────────────────────────────────
 
-  // Discovery follows the pilot (#1362 review, Codex P2): a connection whose
-  // operator is not allowlisted never sees these tools in tools/list. The App
-  // half of the allowlist cannot be decided here — the active App can change
-  // on the connection — so it stays with the per-call capability probe and
-  // each tool's own resolvePilotApp refusal.
-  if (auth.userId && !auth.impersonation && teamAttentionPilotOperatorEnabled(auth.userId)) {
+  // #1353: discovery follows the user principal — the pilot operator
+  // allowlist that hid these tools from non-allowlisted connections is
+  // removed. What still bounds them is per-call: resolvePilotApp's live-App
+  // + participation checks (APP_NOT_FOUND parity) and each tool's own
+  // session/consent guards; the capability probe in server_info reports
+  // team-attention only for a caller who could actually use it.
+  if (auth.userId && !auth.impersonation) {
     server.tool(
       'hadron_team_attention',
       'RETIRED (#1384): the v1 one-shot poll scanned an encrypted Channel\'s whole unread backlog inside one request and now answers UPGRADE_REQUIRED. Use hadron_team_attention_page — the bounded paged successor; your existing since token is accepted there and carries your watermark forward.',
       {
-        app: z.string().optional().describe('The pilot App — an App URN or ID. Omit to use the selected App.'),
+        app: z.string().optional().describe('The App — an App URN or ID. Omit to use the selected App.'),
         since: z.string().optional().describe('Opaque token returned by the preceding successful poll. Do not pass "now".'),
       },
       async ({ app, since }) => {
@@ -9018,10 +9021,10 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
 
     server.tool(
       'hadron_team_chat_mark_read',
-      'INTERNAL PILOT (#1353): explicitly advance the Worker bound to your live session on one registered Channel. Use after filtered reads, which intentionally never auto-advance. Monotonic; a lower seq is a no-op and a seq beyond the Channel head is refused.',
+      'Explicitly advance the Worker bound to your live session on one registered Channel. Use after filtered reads, which intentionally never auto-advance. Monotonic; a lower seq is a no-op and a seq beyond the Channel head is refused.',
       {
         session: z.string().describe('Your live Worker session; selects the Worker whose own cursor advances.'),
-        app: z.string().optional().describe('The pilot App. Omit to recover it from session or the active selection.'),
+        app: z.string().optional().describe('The App. Omit to recover it from session or the active selection.'),
         channel: z.string().optional().describe('Channel id or address. Omit for the team Channel hadron_team_chat_read serves for the App.'),
         seq: z.number().int().min(0).describe('Read through this exact sequence.'),
       },
