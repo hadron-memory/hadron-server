@@ -2316,12 +2316,30 @@ export async function requireMemoryWriteAccess(ctx: Context, memoryId: string): 
     throw memoryWriteForbidden();
   }
 
-  // Direct org member with CONTRIBUTOR+? findFirst + deletedAt so a REVOKED
-  // membership no longer grants write access (same rule as requireOrgRole).
-  const member = await ctx.db.orgMember.findFirst({
-    where: { organizationId: memory.organizationId, userId: ctx.userId, deletedAt: null },
-  });
-  if (member && (ROLE_ORDER[member.role] ?? -1) >= ROLE_ORDER['CONTRIBUTOR']) return;
+  // #1208 / cor:acl:010:01 — GROUP write is MemoryMember writer/owner ONLY.
+  // The plain org-CONTRIBUTOR path below must not fire for group: an org
+  // contributor the narrowed read gates no longer admit could otherwise
+  // still WRITE the memory (write wider than read — the incoherent state
+  // Baloo's #3677 review caught). Falls through to the cross-org
+  // subscription grant below, which stays: it is the subscription grant
+  // surface, symmetric with the read gates' subscription clause. MemoryMember
+  // rows hard-delete (FR-038), so existence is liveness.
+  if (memory.class === 'group') {
+    const groupWrite =
+      ctx.userId &&
+      (await ctx.db.memoryMember.findUnique({
+        where: { memoryId_userId: { memoryId, userId: ctx.userId } },
+        select: { role: true },
+      }));
+    if (groupWrite && (groupWrite.role === 'writer' || groupWrite.role === 'owner')) return;
+  } else {
+    // Direct org member with CONTRIBUTOR+? findFirst + deletedAt so a REVOKED
+    // membership no longer grants write access (same rule as requireOrgRole).
+    const member = await ctx.db.orgMember.findFirst({
+      where: { organizationId: memory.organizationId, userId: ctx.userId, deletedAt: null },
+    });
+    if (member && (ROLE_ORDER[member.role] ?? -1) >= ROLE_ORDER['CONTRIBUTOR']) return;
+  }
 
   // Cross-org subscription with CONTRIBUTOR role?
   const userOrgs = await ctx.db.orgMember.findMany({

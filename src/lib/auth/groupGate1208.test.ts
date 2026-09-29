@@ -27,6 +27,8 @@ import {
   type Context,
 } from '../../api/graphql/schema/resolvers.helpers.js';
 import { resolvers } from '../../api/graphql/schema/resolvers.js';
+import { requireMemoryWriteAccess } from '../../api/graphql/schema/resolvers.helpers.js';
+import { computeEffectiveAccess } from './effectiveAccess.js';
 
 let org: { id: string; urn: string };
 let orgB: { id: string; urn: string };
@@ -36,7 +38,11 @@ let knowledgeMem: { id: string };
 let appScopedGroupMem: { id: string };
 let orgMemberNoGroup: { id: string };
 let orgAdminNoGroup: { id: string };
+let orgContributorNoGroup: { id: string };
 let memoryMemberNoOrgRole: { id: string };
+let memoryMemberWriter: { id: string };
+let memoryMemberOwner: { id: string };
+let subscriberContributor: { id: string };
 let crossOrgMember: { id: string };
 
 beforeEach(async () => {
@@ -91,6 +97,37 @@ beforeEach(async () => {
   });
   await db.memoryMember.create({
     data: { memoryId: orgBGroupMem.id, userId: crossOrgMember.id, role: 'reader' },
+  });
+  // #3677 write-boundary shapes: an org CONTRIBUTOR with no MemoryMember row
+  // (must NOT write), MemoryMember writer/owner rows (must write), and a
+  // cross-org subscription CONTRIBUTOR (the subscription grant surface,
+  // which stays).
+  orgContributorNoGroup = await db.user.create({
+    data: { id: generateId(), githubId: 12085, githubUsername: `g1208-c-${suffix}`, roles: ['READER'] },
+  });
+  await db.orgMember.create({
+    data: { organizationId: org.id, userId: orgContributorNoGroup.id, role: 'CONTRIBUTOR' },
+  });
+  memoryMemberWriter = await db.user.create({
+    data: { id: generateId(), githubId: 12086, githubUsername: `g1208-w-${suffix}`, roles: ['READER'] },
+  });
+  await db.memoryMember.create({
+    data: { memoryId: groupMem.id, userId: memoryMemberWriter.id, role: 'writer' },
+  });
+  memoryMemberOwner = await db.user.create({
+    data: { id: generateId(), githubId: 12087, githubUsername: `g1208-o-${suffix}`, roles: ['READER'] },
+  });
+  await db.memoryMember.create({
+    data: { memoryId: groupMem.id, userId: memoryMemberOwner.id, role: 'owner' },
+  });
+  subscriberContributor = await db.user.create({
+    data: { id: generateId(), githubId: 12088, githubUsername: `g1208-s-${suffix}`, roles: ['READER'] },
+  });
+  await db.orgMember.create({
+    data: { organizationId: orgB.id, userId: subscriberContributor.id, role: 'CONTRIBUTOR' },
+  });
+  await db.memorySubscription.create({
+    data: { memoryId: groupMem.id, organizationId: orgB.id, role: 'CONTRIBUTOR' },
   });
 });
 
@@ -202,5 +239,47 @@ describe('#1208 group read gates vs MemoryMember (cor:acl:010:01)', () => {
     // Unscoped, the same caller's cross-org MemoryMember reach is retained.
     const unscoped = await Q.memories({}, {}, gqlCtx(crossOrgMember.id));
     expect(unscoped.items.map((m: { id: string }) => m.id)).toContain(orgBGroupMem.id);
+  });
+
+  it('an org CONTRIBUTOR without MemoryMember cannot WRITE a group memory (#3677)', async () => {
+    await expect(requireMemoryWriteAccess(gqlCtx(orgContributorNoGroup.id), groupMem.id)).rejects.toMatchObject({
+      extensions: { code: 'FORBIDDEN' },
+    }); // RED before the write fix — org CONTRIBUTOR+ used to write any org memory
+  });
+
+  it('a MemoryMember WRITER with no org role can write; a READER cannot (#3677)', async () => {
+    await expect(requireMemoryWriteAccess(gqlCtx(memoryMemberWriter.id), groupMem.id)).resolves.toBeUndefined(); // RED before the write fix
+    await expect(requireMemoryWriteAccess(gqlCtx(memoryMemberNoOrgRole.id), groupMem.id)).rejects.toMatchObject({
+      extensions: { code: 'FORBIDDEN' },
+    }); // pins writer-or-owner: a reader row grants read, never write
+  });
+
+  it('a MemoryMember OWNER can write a group memory (#3677)', async () => {
+    await expect(requireMemoryWriteAccess(gqlCtx(memoryMemberOwner.id), groupMem.id)).resolves.toBeUndefined(); // RED before the write fix
+  });
+
+  it('a cross-org subscription CONTRIBUTOR still writes — the subscription grant surface is unchanged (#3677)', async () => {
+    await expect(requireMemoryWriteAccess(gqlCtx(subscriberContributor.id), groupMem.id)).resolves.toBeUndefined(); // parity pin, green on both sides
+  });
+
+  it('effectiveAccess mirrors the enforced gates: no ORG_ROLE for group, MEMORY_MEMBER is the source (#3677)', async () => {
+    const row = (await db.memory.findUnique({ where: { id: groupMem.id } }))!;
+    // An org ADMIN with no MemoryMember row: the audit must not report the
+    // old ORG_ROLE FULL — the enforced gates admit nothing.
+    const admin = await computeEffectiveAccess(
+      db,
+      { id: orgAdminNoGroup.id, roles: ['READER'] },
+      { kind: 'memory', memory: row as any },
+    );
+    expect(admin.canRead).toBe(false); // RED before the audit fix
+    expect(admin.canWrite).toBe(false); // RED before the audit fix
+    // A MemoryMember reader: exactly the reader caps, no more.
+    const reader = await computeEffectiveAccess(
+      db,
+      { id: memoryMemberNoOrgRole.id, roles: [] },
+      { kind: 'memory', memory: row as any },
+    );
+    expect(reader.canRead).toBe(true);
+    expect(reader.canWrite).toBe(false);
   });
 });
