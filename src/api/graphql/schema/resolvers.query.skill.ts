@@ -1105,6 +1105,19 @@ async function planSkills(input: SkillPlanInput, ctx: Context, selectedRefs?: st
             })
           : null;
 
+      // The out-of-export report describes the source's export eligibility,
+      // independently of the filesystem action. In particular, an installed
+      // file can still be current or locally edited while its enabled source
+      // is blocked by lint. Only an attempted render can expose a render
+      // failure; a protected file never gets rendered speculatively.
+      const outOfExportReason =
+        input.intent === 'EXPORT' && nf.declaration?.enable === true && verdict.class !== 'unavailable'
+          ? findings
+              .filter((finding) => finding.severity === 'error' && finding.rule !== 'skill-name-collision')
+              .map((finding) => finding.message)
+              .join('; ') || renderFailure
+          : null;
+
       return {
         urn: nf.urn,
         nodeId: nf.id,
@@ -1125,6 +1138,7 @@ async function planSkills(input: SkillPlanInput, ctx: Context, selectedRefs?: st
         findings,
         renderedBody,
         exportPlan,
+        outOfExportReason,
       };
     });
 

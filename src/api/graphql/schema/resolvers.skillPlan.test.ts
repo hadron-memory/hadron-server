@@ -8,13 +8,14 @@
  * lint is never handed a body.
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { buildSchema, type GraphQLInputObjectType } from 'graphql';
+import { buildSchema, type GraphQLInputObjectType, type GraphQLObjectType } from 'graphql';
 import { typeDefs } from './typeDefs.js';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { splitNodeUrn } from '../../../lib/urn.js';
 import { revisionStateHashRefreshMarker } from '../../../lib/nodeRevisionSnapshot.js';
+import { hash } from '../../../lib/skilldoc/hash.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -321,6 +322,7 @@ describe('classes and bodies', () => {
       preservesExistingFile: true,
       reasons: [{ code: 'skill-name-invalid' }],
     });
+    expect(got.entries[0].outOfExportReason).toContain('Not_Kebab');
   });
 
   it('reports an over-limit description as out of export and preserves an installed file', async () => {
@@ -349,7 +351,51 @@ describe('classes and bodies', () => {
     });
     expect(got.entries[0].exportPlan.reasons[0].message).toContain('1083 characters');
     expect(got.entries[0].exportPlan.reasons[0].message).toContain('1024');
+    expect(got.entries[0].outOfExportReason).toBe(got.entries[0].exportPlan.reasons[0].message);
     expect(got.orphans).toEqual([]);
+  });
+
+  it('reports an enabled over-limit source even when its installed file is current', async () => {
+    const description = 'x'.repeat(1083);
+    const node = await mkNode('tasks:current-too-long', { properties: declaration({ description }) });
+    const urn = (await plan({ intent: 'LINT' })).entries[0].urn as string;
+    const fingerprint = hash(node.id, urn, 'my-skill', description, node.content!);
+
+    const got = await plan({ intent: 'EXPORT', files: [{
+      dirName: 'my-skill', sourceUrn: urn, nodeId: node.id, headerHash: fingerprint, fileHash: fingerprint,
+    }] });
+    expect(got.entries[0]).toMatchObject({
+      class: 'current', renderedBody: null,
+      exportPlan: { action: 'SKIP', preservesExistingFile: true },
+    });
+    expect(got.entries[0].outOfExportReason).toContain('1083 characters');
+    expect(got.orphans).toEqual([]);
+  });
+
+  it('reports an invalid enabled source alongside local-edit and no-ID protections', async () => {
+    const node = await mkNode('tasks:overlap-too-long', { properties: declaration({ description: 'x'.repeat(1083) }) });
+    const urn = (await plan({ intent: 'LINT' })).entries[0].urn as string;
+    const edited = await plan({ intent: 'EXPORT', files: [{
+      dirName: 'my-skill', sourceUrn: urn, nodeId: node.id,
+      headerHash: 'a'.repeat(16), fileHash: 'f'.repeat(16),
+    }] });
+    expect(edited.entries[0].exportPlan).toMatchObject({ action: 'REFUSE', preservesExistingFile: true });
+    expect(edited.entries[0].outOfExportReason).toContain('1083 characters');
+
+    const noId = await plan({ intent: 'EXPORT', files: [{ dirName: 'my-skill', sourceUrn: urn }] });
+    expect(noId.entries[0].exportPlan).toMatchObject({ action: 'SKIP', preservesExistingFile: true });
+    expect(noId.entries[0].outOfExportReason).toContain('1083 characters');
+    expect(noId.orphans).toEqual([]);
+  });
+
+  it('joins multiple blocking findings into one display-ready reason', async () => {
+    await mkNode('tasks:multiple-errors', {
+      properties: declaration({ name: 'Not_Kebab', description: 'x'.repeat(1083) }),
+    });
+    const got = await plan({ intent: 'EXPORT', files: [] });
+    expect(got.entries[0].outOfExportReason).toContain('Not_Kebab');
+    expect(got.entries[0].outOfExportReason).toContain('1083 characters');
+    expect(got.entries[0].exportPlan).toMatchObject({ action: 'SKIP', preservesExistingFile: true });
   });
 
   it('reports an unsafe render as a failure with the renderer reason', async () => {
@@ -365,6 +411,7 @@ describe('classes and bodies', () => {
       reasons: [{ code: 'render-failed' }],
     });
     expect(got.entries[0].exportPlan.reasons[0].message).toContain('provenance comment');
+    expect(got.entries[0].outOfExportReason).toBe(got.entries[0].exportPlan.reasons[0].message);
   });
 
   it('refuses a locally edited file and names the remedies', async () => {
@@ -392,6 +439,7 @@ describe('classes and bodies', () => {
       reasons: [{ code: 'locally-edited' }],
     });
     expect(got.entries[0].exportPlan.reasons[0].message).toContain('one-invocation override');
+    expect(got.entries[0].outOfExportReason).toBeNull();
 
     const forced = await plan({
       intent: 'EXPORT',
@@ -728,6 +776,7 @@ describe('classes and bodies', () => {
       preservesExistingFile: true,
       reasons: [{ code: 'parse-failed' }],
     });
+    expect(exported.entries[0].outOfExportReason).toBeNull();
   });
 
   it('pairs a file by its source URN and reports it current when everything agrees', async () => {
@@ -754,6 +803,7 @@ describe('classes and bodies', () => {
       preservesExistingFile: true,
       reasons: [{ code: 'current' }],
     });
+    expect(got.entries[0].outOfExportReason).toBeNull();
     expect(got.orphans).toHaveLength(0);
   });
 
@@ -987,6 +1037,8 @@ describe('classes and bodies', () => {
       preservesExistingFile: true,
       reasons: [{ code: 'disabled' }],
     });
+    expect(withFile.entries[0].outOfExportReason).toBeNull();
+    expect(withoutFile.entries[0].outOfExportReason).toBeNull();
   });
 
   it('removes the paired disabled file even when an orphan occupies the renamed target', async () => {
@@ -1051,6 +1103,7 @@ describe('classes and bodies', () => {
       preservesExistingFile: true,
       reasons: [{ code: 'skill-description-too-long' }],
     });
+    expect(got.entries[0].outOfExportReason).toBeNull();
   });
 
   it('preserves a disabled installed file when any blocking lint finding remains', async () => {
@@ -1281,6 +1334,12 @@ describe('review round 2 — @copilot', () => {
 });
 
 describe('the surface itself', () => {
+  it('exposes the server-owned out-of-export reason on each plan entry', () => {
+    const schema = buildSchema(typeDefs);
+    const entry = schema.getType('SkillPlanEntry') as GraphQLObjectType;
+    expect(String(entry.getFields().outOfExportReason.type)).toBe('String');
+  });
+
   it('is a QUERY, not a mutation — status and lint cannot write by construction', () => {
     // The guarantee §3 asks for. A mutation that promises not to write is a
     // promise; this is the structural version, and it is worth an assertion
@@ -1474,6 +1533,7 @@ describe('hosts (#1254)', () => {
     expect(codex.entries).toHaveLength(2);
     for (const e of codex.entries) {
       expect(e).toMatchObject({ class: 'collision', renderedBody: null, exportPlan: { action: 'REFUSE' } });
+      expect(e.outOfExportReason).toBeNull();
     }
     for (const e of claude.entries) {
       expect(e).toMatchObject({ class: 'never-exported', exportPlan: { action: 'WRITE' } });
@@ -1722,6 +1782,7 @@ describe('#1309 — a no-id legacy file pairs by its source URN in every accepte
       renderedBody: null,
       exportPlan: { action: 'SKIP', preservesExistingFile: true, reasons: [{ code: 'missing-node-id' }] },
     });
+    expect(got.entries[0].outOfExportReason).toBeNull();
 
     const forced = await plan({ intent: 'EXPORT', force: true, files: [file] });
     expect(forced.orphans).toEqual([]);
