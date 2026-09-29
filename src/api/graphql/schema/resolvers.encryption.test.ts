@@ -538,7 +538,7 @@ describe('encryptMemory', () => {
     expect(rows[1].data).toMatchObject({ __enc: expect.any(String) });
   });
 
-  it('refuses to encrypt an already-encrypted memory', async () => {
+  it('refuses completion for an already-encrypted memory without a verifier', async () => {
     const key = generateDataKey().raw.toString('base64');
     const session = await resolvers.Mutation.startAgentSession(
       {},
@@ -551,7 +551,7 @@ describe('encryptMemory', () => {
         { memoryId: session.memoryId!, dataKey: key },
         appCtx(secretApp.id),
       ),
-    ).rejects.toThrow(/already encrypted/);
+    ).rejects.toMatchObject({ extensions: { code: 'BAD_UNLOCK_INPUT', memoryId: session.memoryId } });
   });
 
   // 007-entity-id-or-urn: encryptMemory accepts memoryId as ID or URN.

@@ -60,6 +60,8 @@ import {
   generateKdfSalt,
   deriveDataKeyFromPassphrase,
   makeKeyVerifier,
+  resolveSuppliedKey,
+  MemoryUnlockError,
   DEFAULT_KDF_PARAMS,
 } from '../../../lib/memoryUnlock.js';
 import { encryptNodeFieldsWithKey } from '../../../lib/nodeCrypto.js';
@@ -2161,13 +2163,20 @@ export const memoryMutations = {
           { extensions: { code: 'BAD_USER_INPUT', memoryClass: memory.class } },
         );
       }
-      if (memory.isEncrypted) {
-        throw new Error('Memory is already encrypted');
+      // #1434: an encryption interrupted after the flip, or completed before
+      // historical revisions were included, may leave plaintext rows behind.
+      // A rerun is a completion under the EXISTING key, never a key rotation.
+      // Legacy rows without a verifier cannot prove the supplied key belongs
+      // to existing ciphertext, so automatic completion must fail closed.
+      if (memory.isEncrypted && !memory.keyVerifier) {
+        throw new GraphQLError('Encrypted memory has no key verifier for safe completion.', {
+          extensions: { code: 'BAD_UNLOCK_INPUT', memoryId: resolvedMemoryId },
+        });
       }
       // Vector indexing on an encrypted memory requires the FR-026 ack;
       // converting an INDEXED memory would violate chk_memory_vector_
       // encrypted_ack — surface it as a typed error, not a DB error.
-      if (memory.vectorIndexEnabled && !memory.vectorIndexEncryptedAckAt) {
+      if (!memory.isEncrypted && memory.vectorIndexEnabled && !memory.vectorIndexEncryptedAckAt) {
         throw new GraphQLError(
           'Disable the vector index (or acknowledge the inversion disclosure) before encrypting.',
           { extensions: { code: 'BAD_USER_INPUT' } },
@@ -2175,7 +2184,16 @@ export const memoryMutations = {
       }
       let key;
       let kdfFields: { kdfSalt?: string; kdfParams?: InputJsonValue } = {};
-      if (passphrase) {
+      if (memory.isEncrypted) {
+        try {
+          key = await resolveSuppliedKey(memory, { dataKey, passphrase });
+        } catch (e) {
+          if (e instanceof MemoryUnlockError) {
+            throw new GraphQLError(e.message, { extensions: { code: e.code, memoryId: resolvedMemoryId } });
+          }
+          throw e;
+        }
+      } else if (passphrase) {
         if (dataKey) {
           throw new GraphQLError('Provide exactly one of dataKey or passphrase.', {
             extensions: { code: 'BAD_USER_INPUT' },
@@ -2210,16 +2228,18 @@ export const memoryMutations = {
       // flip atomically so only one key can become the verifier/conversion key;
       // otherwise a losing caller could replace the verifier while the winner
       // encrypts rows under its own key (#1346).
-      const flip = await ctx.db.memory.updateMany({
-        where: { id: resolvedMemoryId, isEncrypted: false },
-        data: {
-          isEncrypted: true,
-          keyVerifier: makeKeyVerifier(key),
-          ...kdfFields,
-          updatedBy: ctx.appId ?? ctx.userId ?? null,
-        },
-      });
-      if (flip.count !== 1) throw new Error('Memory is already encrypted');
+      if (!memory.isEncrypted) {
+        const flip = await ctx.db.memory.updateMany({
+          where: { id: resolvedMemoryId, isEncrypted: false },
+          data: {
+            isEncrypted: true,
+            keyVerifier: makeKeyVerifier(key),
+            ...kdfFields,
+            updatedBy: ctx.appId ?? ctx.userId ?? null,
+          },
+        });
+        if (flip.count !== 1) throw new Error('Memory is already encrypted');
+      }
       const BATCH = 200; // bound memory per pass (PR-514 review, Gemini)
       for (let pass = 0; pass < 5; pass++) {
         let converted = 0;

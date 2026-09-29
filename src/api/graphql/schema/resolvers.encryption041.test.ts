@@ -156,6 +156,68 @@ describe('encryptMemory — passphrase path (spec 041)', () => {
 describe('encryptMemory — locked conversion (#1346)', () => {
   const dataKey = Buffer.alloc(32, 7).toString('base64');
 
+  it('converts old plaintext history in a memory encrypted before this fix', async () => {
+    await resolvers.Mutation.encryptMemory({}, { memoryId, dataKey }, ownerCtx());
+    const before = await db.memory.findUniqueOrThrow({ where: { id: memoryId } });
+    const old = await db.nodeRevision.create({
+      data: {
+        id: generateId(), nodeId, memoryId, loc: 'entry-1', name: 'Entry 1',
+        content: 'old stored secret', abstract: 'old stored abstract',
+        data: { secret: 'old stored data' }, nodeType: 'info',
+      },
+    });
+    const wrongKey = Buffer.alloc(32, 8).toString('base64');
+    await expect(resolvers.Mutation.encryptMemory(
+      {}, { memoryId, dataKey: wrongKey }, ownerCtx(),
+    )).rejects.toMatchObject({ extensions: { code: 'WRONG_KEY', memoryId } });
+    expect((await db.nodeRevision.findUniqueOrThrow({ where: { id: old.id } })).content)
+      .toBe('old stored secret');
+
+    await resolvers.Mutation.encryptMemory({}, { memoryId, dataKey }, ownerCtx());
+    const stored = await db.nodeRevision.findUniqueOrThrow({ where: { id: old.id } });
+    expect(isCiphertext(stored.content)).toBe(true);
+    expect(isCiphertext(stored.abstract)).toBe(true);
+    expect((stored.data as { __enc?: string })?.__enc).toBeTruthy();
+    expect(decryptNodeFieldsWithKey({ ...stored }, parseDataKey(dataKey))).toMatchObject({
+      content: 'old stored secret', abstract: 'old stored abstract',
+      data: { secret: 'old stored data' },
+    });
+    await resolvers.Mutation.encryptMemory({}, { memoryId, dataKey }, ownerCtx());
+    const repeated = await db.nodeRevision.findUniqueOrThrow({ where: { id: old.id } });
+    expect([repeated.content, repeated.abstract, repeated.data])
+      .toEqual([stored.content, stored.abstract, stored.data]);
+    const after = await db.memory.findUniqueOrThrow({ where: { id: memoryId } });
+    expect([after.isEncrypted, after.keyVerifier, after.kdfSalt, after.kdfParams])
+      .toEqual([before.isEncrypted, before.keyVerifier, before.kdfSalt, before.kdfParams]);
+  });
+
+  it('derives the stored passphrase key and refuses verifier-less completion', async () => {
+    const passphrase = 'existing encryption passphrase';
+    await resolvers.Mutation.encryptMemory({}, { memoryId, passphrase }, ownerCtx());
+    const prior = await db.nodeRevision.create({
+      data: {
+        id: generateId(), nodeId, memoryId, loc: 'entry-1', name: 'Entry 1',
+        content: 'old passphrase secret',
+      },
+    });
+    await resolvers.Mutation.encryptMemory({}, { memoryId, passphrase }, ownerCtx());
+    expect(isCiphertext((await db.nodeRevision.findUniqueOrThrow({ where: { id: prior.id } })).content))
+      .toBe(true);
+
+    const noVerifier = await db.nodeRevision.create({
+      data: {
+        id: generateId(), nodeId, memoryId, loc: 'entry-1', name: 'Entry 1',
+        content: 'unverifiable secret',
+      },
+    });
+    await db.memory.update({ where: { id: memoryId }, data: { keyVerifier: null } });
+    await expect(resolvers.Mutation.encryptMemory(
+      {}, { memoryId, passphrase }, ownerCtx(),
+    )).rejects.toMatchObject({ extensions: { code: 'BAD_UNLOCK_INPUT', memoryId } });
+    expect((await db.nodeRevision.findUniqueOrThrow({ where: { id: noVerifier.id } })).content)
+      .toBe('unverifiable secret');
+  });
+
   it('converts pre-existing revision history without changing another memory\'s snapshots', async () => {
     const other = await db.memory.create({
       data: {
