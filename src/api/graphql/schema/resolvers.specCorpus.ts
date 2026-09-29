@@ -7,6 +7,7 @@ import type { Context } from './resolvers.js';
 import { writeNodeCore } from './resolvers.mutation.node.js';
 import { withoutRequestCaches } from './resolvers.helpers.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
+import { acquireLockSet, ancestorLocs } from '../../../lib/nodeSubtreeLock.js';
 
 export const specCorpusMutations = {
   /**
@@ -45,6 +46,17 @@ export const specCorpusMutations = {
       // the convention a move that overwrites a live target already uses, so
       // the placeholder is a FRESH node and the deleted spec keeps its own
       // identity and history on its still-deleted row.
+      // (@codex P2, PR #1452) Take the address locks FIRST, in the global
+      // order every create/move/overwrite at this loc uses (ancestors, then the
+      // loc itself), before touching the tombstone's row. Row-locking the
+      // tombstone first would invert against a concurrent writer that holds
+      // these advisory locks and waits on that row: a deadlock instead of a
+      // typed loc conflict. writeNodeCore's own acquisition below is then a
+      // re-entrant no-op.
+      await acquireLockSet(tx, [
+        ...ancestorLocs(loc).map((ancestor) => ({ memoryId, loc: ancestor })),
+        { memoryId, loc },
+      ]);
       const tombstone = await tx.node.findFirst({
         where: { memoryId, loc, deletedAt: { not: null } },
         select: { id: true },

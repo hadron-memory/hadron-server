@@ -7,6 +7,7 @@ import { generateId } from './id.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import { mergeMemoryGraph } from '../controller/operations/mergeMemories.js';
 import { updateNodeFromGitSync } from '../integrations/github/syncGraphFromGithub.js';
+import { acquireLockSet, ancestorLocs } from './nodeSubtreeLock.js';
 
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -382,5 +383,47 @@ describe('a placeholder over a deleted spec is a fresh node (@codex P2 on #1452)
     expect(await db.nodeRevision.count({ where: { nodeId: old.id } })).toBe(oldHistory);
     expect(await db.node.findUniqueOrThrow({ where: { id: old.id } }))
       .toMatchObject({ loc: `pas:210:01__deleted-${old.id}`, deletedAt: expect.any(Date) });
+  });
+});
+
+describe('reserve takes the address locks before the tombstone row (@codex P2 on #1452)', () => {
+  it('waits on the loc\'s advisory lock without holding the tombstone row meanwhile', async () => {
+    const old = await resolvers.Mutation.createSpecNode(null, {
+      input: { memoryId: draft.id, loc: 'pas:220:01', name: 'Old', role: 'spec', nodeType: 'info', content: 'x' },
+    } as never, as(admin.id));
+    await resolvers.Mutation.deleteNode(null, { nodeRef: old.id }, as(admin.id));
+
+    let release!: () => void;
+    let held!: () => void;
+    const lockHeld = new Promise<void>((r) => { held = r; });
+    const hold = new Promise<void>((r) => { release = r; });
+    // A competing writer at the same address, holding its advisory locks.
+    const competitor = db.$transaction(async (tx) => {
+      await acquireLockSet(tx, [...ancestorLocs('pas:220:01').map((l) => ({ memoryId: draft.id, loc: l })), { memoryId: draft.id, loc: 'pas:220:01' }]);
+      held();
+      await hold;
+    }, { timeout: 20_000 });
+    await lockHeld;
+
+    const reserving = reserve(draft.id, 'pas:220:01');
+    try {
+      await vi.waitFor(async () => {
+        const [{ count }] = await db.$queryRaw<Array<{ count: bigint }>>`
+          SELECT count(*)::bigint AS count FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid
+          WHERE l.locktype = 'advisory' AND NOT l.granted AND a.datname = current_database()
+        `;
+        expect(Number(count)).toBeGreaterThan(0);
+      }, { timeout: 5_000, interval: 25 });
+      // While reserve waits on the address, the tombstone row is NOT locked by it.
+      const probe = await db.$transaction(async (tx) =>
+        tx.$queryRaw<Array<{ id: string }>>`SELECT id FROM nodes WHERE id = ${old.id} FOR UPDATE NOWAIT`);
+      expect(probe).toHaveLength(1);
+    } finally {
+      release();
+    }
+    await competitor;
+    const placeholder = await reserving;
+    expect(placeholder).toMatchObject({ loc: 'pas:220:01', isPlaceholder: true });
+    expect(placeholder.id).not.toBe(old.id);
   });
 });
