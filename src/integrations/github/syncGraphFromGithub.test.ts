@@ -213,6 +213,38 @@ describe('syncGraphFromGithub', () => {
     expect(await db.node.count({ where: { memoryId: dbGraphId } })).toBe(0);
   });
 
+  it('takes the source path before the Memory fence when a move and Git sync overlap', async () => {
+    const source = await db.node.create({
+      data: { id: generateId(), memoryId: dbGraphId, loc: 'source', name: 'source' },
+    });
+    const childDir = join(mockSources, 'test-org', 'test/repo', 'source', 'child');
+    mkdirSync(childDir, { recursive: true });
+    writeNodeFiles(childDir, { name: 'child' }, 'from Git');
+
+    let signalPathHeld!: () => void;
+    let releaseMove!: () => void;
+    const pathHeld = new Promise<void>((resolve) => { signalPathHeld = resolve; });
+    const mayMove = new Promise<void>((resolve) => { releaseMove = resolve; });
+    const moving = db.$transaction(async (tx) => {
+      await acquireLockSet(tx, [{ memoryId: dbGraphId, loc: 'source' }]);
+      signalPathHeld();
+      await mayMove;
+      return moveNodeSubtree(tx, {
+        source, destLoc: 'moved', editor: { info: 'git-sync-lock-order-test' },
+      });
+    }, { timeout: 20_000 });
+    await pathHeld;
+
+    const syncing = syncGraphFromGithub(makeGraph());
+    try {
+      await waitForLockWaiters('advisory', 1);
+    } finally {
+      releaseMove();
+    }
+    await moving;
+    expect((await syncing).error).toBeUndefined();
+  }, 20_000);
+
   it('calls git clone when .git directory does not exist', async () => {
     const result = await syncGraphFromGithub(makeGraph());
 

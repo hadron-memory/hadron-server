@@ -333,7 +333,6 @@ export const syncGraphFromGithub = async (
       for (const memoryId of edgeEndpointMemoryIds) {
         await lockMemoryForChannelChange(tx, memoryId);
       }
-      await assertGitSyncMemoryPlaintext(tx, graph.id);
       // #664/#752: a git-sync bulk-upserts/moves rows into an EXISTING memory,
       // bypassing the locked create surfaces. Lock the ancestor path of every
       // synced loc (deduped, root→leaf) up front so a concurrent non-recursive
@@ -376,6 +375,11 @@ export const syncGraphFromGithub = async (
         graph.id,
         writableLocs,
       );
+      // Moves take their source path before their Memory row lock. Take the
+      // Git path set first too, then fence the encryption flag before any
+      // NodeRevision or Node write. Holding FOR SHARE while waiting for a
+      // move's path would deadlock against its FOR NO KEY UPDATE Memory lock.
+      await assertGitSyncMemoryPlaintext(tx, graph.id);
 
       // A move that won before these locks were granted invalidates preflight.
       // Retry the whole collection phase so the endpoint's current memory and
