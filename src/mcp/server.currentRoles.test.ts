@@ -357,7 +357,9 @@ describe('#1251 — existing MCP sessions refresh platform roles', () => {
     expect(callsWhileFirstBlocked).toBe(1);
     expect(firstResponse.status).toBe(200);
     expect(secondResponse.status).toBe(200);
-    expect(findFirst).toHaveBeenCalledTimes(2);
+    // Each POST now looks up the user once for live roles and once for its
+    // presented bearer. The critical-section assertion above remains the gate.
+    expect(findFirst).toHaveBeenCalledTimes(4);
   });
 
   it('does not let a long-lived SSE GET block role refresh and POST dispatch', async () => {
