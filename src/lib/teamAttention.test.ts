@@ -169,13 +169,9 @@ beforeEach(async () => {
   await db.session.create({
     data: { id: sessionId, appId: app.id, userId: user.id, workerId: worker.id, agentId: agent.id, type: 'DEVELOPER', startedAt: new Date() },
   });
-  process.env.TEAM_ATTENTION_PILOT_USER_IDS = user.id;
-  process.env.TEAM_ATTENTION_PILOT_APP_IDS = app.id;
 });
 
 afterEach(() => {
-  delete process.env.TEAM_ATTENTION_PILOT_USER_IDS;
-  delete process.env.TEAM_ATTENTION_PILOT_APP_IDS;
   delete process.env.TEAM_ATTENTION_TOKEN_SECRET;
   sessionKeyCache.clear();
 });
@@ -236,7 +232,10 @@ describe('worker-owned ordinary reads', () => {
     expect(await db.channelReadState.findFirst({ where: { workerId: worker.id, channelId: channel.id } })).toMatchObject({ lastSeenSeq: 1 });
 
     await db.channelReadState.deleteMany();
-    delete process.env.TEAM_ATTENTION_PILOT_USER_IDS;
+    // #1353: the pilot allowlist is gone — the boundary is the caller's OWN
+    // live Worker session. A session id that no longer exists captures
+    // nothing (the lost-participation shape).
+    await db.session.delete({ where: { id: sessionId } });
     await Q.channelMessages({}, { channelRef: channel.id, sinceSeq: 0, beforeSeq: null, mentionsRef: null, limit: 50, offset: 0 }, ctx);
     expect(await db.channelReadState.findFirst({ where: { workerId: worker.id, channelId: channel.id } })).toBeNull();
   });
@@ -305,7 +304,6 @@ describe('signed attention poll', () => {
     const outsider = await db.user.create({
       data: { id: generateId(), githubId: 1353003, githubUsername: `outsider-${Date.now()}` },
     });
-    process.env.TEAM_ATTENTION_PILOT_USER_IDS = outsider.id;
     const outsiderCtx = { db, userId: outsider.id, roles: ['READER'] } as Context;
 
     const existing = pollPaged(outsiderCtx, app.id).catch((error) => error);
@@ -433,8 +431,6 @@ describe('signed attention poll', () => {
 
   it('binds tokens to the exact operator and App, and refuses the backlog-skipping shortcut', async () => {
     const result = await pollPaged(userCtx(), app.id);
-    process.env.TEAM_ATTENTION_PILOT_USER_IDS = `${user.id},${otherUser.id}`;
-    process.env.TEAM_ATTENTION_PILOT_APP_IDS = `${app.id},${otherApp.id}`;
     await expect(pollPaged({ db, userId: otherUser.id, roles: ['READER'] } as Context, app.id, result.token)).rejects.toMatchObject({ extensions: { code: 'INVALID_ATTENTION_TOKEN' } });
     await expect(pollPaged(userCtx(), otherApp.id, result.token)).rejects.toMatchObject({ extensions: { code: 'INVALID_ATTENTION_TOKEN' } });
     await expect(pollPaged(userCtx(), app.id, 'now')).rejects.toMatchObject({ extensions: { code: 'SWITCHOVER_CONFIRMATION_REQUIRED' } });
@@ -454,9 +450,7 @@ describe('explicit switchover', () => {
     const remaining = await pollPaged(userCtx(), app.id);
     expect(remaining.workers[0].channels[0]).toMatchObject({ unread: 1, firstUnreadSeq: 2, lastSeq: 2 });
 
-    process.env.TEAM_ATTENTION_PILOT_USER_IDS = `${user.id},${otherUser.id}`;
     await expect(confirmTeamAttentionSwitchover({ db, userId: otherUser.id, roles: ['READER'] } as Context, app.id, preview.proof!)).rejects.toMatchObject({ extensions: { code: 'INVALID_SWITCHOVER_PROOF' } });
-    process.env.TEAM_ATTENTION_PILOT_APP_IDS = `${app.id},${otherApp.id}`;
     await expect(confirmTeamAttentionSwitchover(userCtx(), otherApp.id, preview.proof!)).rejects.toMatchObject({ extensions: { code: 'INVALID_SWITCHOVER_PROOF' } });
   });
 
@@ -648,7 +642,7 @@ describe('MCP parity and discovery gate', () => {
     expect(await probe()).not.toContain('team-attention');
   });
 
-  it('advertises the capability only inside the operator+App pilot and delegates the paged query', async () => {
+  it('lists paged tools for user principals while capability stays participation-gated', async () => {
     const enabled = createTestableMcpServer(auth());
     expect(await enabled.callToolText('hadron_server_info', {})).toContain('team-attention');
     expect(await enabled.callToolText('hadron_server_info', {})).toContain('team-attention-paged');
@@ -660,14 +654,20 @@ describe('MCP parity and discovery gate', () => {
     expect(out).toContain('"unread": 1');
     expect(out).not.toContain('compact, no body in the result');
 
-    delete process.env.TEAM_ATTENTION_PILOT_USER_IDS;
-    const disabled = createTestableMcpServer(auth());
-    expect(await disabled.callToolText('hadron_server_info', {})).not.toContain('team-attention');
-    // A non-pilot operator's connection does not even list the pilot tools
-    // (#1362 review): discovery follows the operator allowlist.
-    const pilotTools = ['hadron_team_attention', 'hadron_team_attention_page', 'hadron_team_attention_switchover', 'hadron_team_chat_mark_read'];
-    expect(enabled.toolNames()).toEqual(expect.arrayContaining(pilotTools));
-    for (const name of pilotTools) expect(disabled.toolNames()).not.toContain(name);
+    // #1353: the operator allowlist no longer hides discovery — an
+    // ordinary non-participant still LISTS the tools (registration follows
+    // the user principal) but gets no capability advertisement (the probe
+    // requires live-App participation) and a concealed per-call refusal.
+    const outsider = await db.user.create({
+      data: { id: generateId(), githubId: 1353004, githubUsername: `unlisted-${Date.now()}` },
+    });
+    const outsiderServer = createTestableMcpServer({ ...auth(), userId: outsider.id });
+    const attentionTools = ['hadron_team_attention', 'hadron_team_attention_page', 'hadron_team_attention_switchover', 'hadron_team_chat_mark_read'];
+    expect(enabled.toolNames()).toEqual(expect.arrayContaining(attentionTools));
+    for (const name of attentionTools) expect(outsiderServer.toolNames()).toContain(name);
+    expect(await outsiderServer.callToolText('hadron_server_info', {})).not.toContain('team-attention');
+    const refused = await outsiderServer.callTool('hadron_team_attention_page', { app: app.id });
+    expect((refused.content[0]?.text ?? '')).toContain('[app_not_found] App not found.');
   });
 
   it('ordinary MCP reads own the cursor and the explicit mark-read door covers filtered reads', async () => {
@@ -723,12 +723,13 @@ describe('MCP parity and discovery gate', () => {
       userCtx(),
     )).rejects.toMatchObject({ extensions: { code: 'SEQ_BEYOND_WATERMARK', lastSeq: 2 } });
 
-    delete process.env.TEAM_ATTENTION_PILOT_USER_IDS;
+    // #1353: no allowlist — the boundary is own-session. Another user's
+    // context cannot mark this session's cursor (SESSION_NOT_LIVE).
     await expect(M.markOwnTeamChatRead(
       {},
       { appRef: app.id, sessionRef: sessionId, channelRef: channel.id, seq: 2 },
-      userCtx(),
-    )).rejects.toMatchObject({ extensions: { code: 'FEATURE_NOT_AVAILABLE' } });
+      { db, userId: otherUser.id, roles: ['READER'] } as Context,
+    )).rejects.toMatchObject({ extensions: { code: 'SESSION_NOT_LIVE' } });
   });
 
   it('an explicit MCP session advances only that Worker, not the different header-bound session', async () => {
