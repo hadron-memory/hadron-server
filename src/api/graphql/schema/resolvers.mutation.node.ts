@@ -138,6 +138,7 @@ import {
   type MergeNodesInput,
 } from './resolvers.helpers.js';
 import { type ToolDriveFile } from '../../../lib/emailClient.js';
+import { searchReplaceInSpecNodes } from './resolvers.searchReplaceSpec.js';
 
 // ── Shared node-write core (spec 039 Phase 0 D1) ────────────────────────────
 //
@@ -2549,6 +2550,8 @@ export const nodeMutations = {
 
       return buildResult();
     },
+
+    searchReplaceInSpecNodes,
 
     deleteNode: async (
       _: unknown,
