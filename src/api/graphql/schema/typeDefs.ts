@@ -5700,7 +5700,9 @@ export const typeDefs = `#graphql
     kind: SpecReferenceKind!
     sourceNodeId: ID!
     sourceLoc: String!
+    "The scanned field; edge for a real edge; pendingEdge for an edge whose target is not a node yet."
     field: String!
+    "The cited loc; for a pendingEdge whose target has no node row at all, the intended target node's id."
     targetLoc: String!
     text: String
     "Set only by specUnresolvedReferences."
@@ -7285,8 +7287,9 @@ export const typeDefs = `#graphql
 
     """
     #1449 — references in a DRAFT spec corpus that do not reach a written
-    spec: URNs citing a missing loc or a placeholder, and edges to a
-    placeholder. Minting refuses while any remain.
+    spec: URNs citing a missing loc or a placeholder, edges to a
+    placeholder, and pending edges (field pendingEdge) whose target is not
+    a written node yet. Minting refuses while any remain.
     """
     specUnresolvedReferences(memoryRef: ID!): [SpecReference!]!
 

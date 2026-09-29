@@ -111,6 +111,35 @@ describe('mintSpecCorpus: blockers (#1448)', () => {
   });
 });
 
+describe('mintSpecCorpus: pending edges are references too (@codex P2 on #1462)', () => {
+  const pendingFrom = async (loc: string, targetId: string, name = 'depends-on') => {
+    const source = await db.node.findFirstOrThrow({ where: { memoryId: draft.id, loc } });
+    await db.pendingEdge.create({ data: { id: generateId(), sourceId: source.id, targetId, name } });
+  };
+
+  it('blocks on a pending edge whose target is not a node yet, and a real run refuses', async () => {
+    const missing = generateId();
+    await pendingFrom('pas:010:01', missing);
+    const blockers = (await mint(true)).blockers;
+    expect(blockers).toEqual([
+      expect.objectContaining({ kind: 'UNRESOLVED_REFERENCE', loc: 'pas:010:01', rule: 'MISSING', targetLoc: missing }),
+    ]);
+    expect(await codeOf(mint())).toBe('SPEC_CORPUS_MINT_BLOCKED');
+    expect(await stateOf()).toBe('DRAFT');
+  });
+
+  it('reports one to a placeholder as PLACEHOLDER, and ignores one whose target is a written spec', async () => {
+    const reserved = await resolvers.Mutation.reserveSpecCitation(null, { memoryRef: draft.id, loc: 'pas:020' }, as());
+    const written = await db.node.findFirstOrThrow({ where: { memoryId: draft.id, loc: 'pas:010' } });
+    await pendingFrom('pas:010:01', reserved.id);
+    await pendingFrom('pas:010:01', written.id, 'refines');
+    const unresolved = await resolvers.Query.specUnresolvedReferences(null, { memoryRef: draft.id }, as());
+    expect(unresolved).toEqual([expect.objectContaining({
+      kind: 'EDGE', field: 'pendingEdge', sourceLoc: 'pas:010:01', targetLoc: 'pas:020', reason: 'PLACEHOLDER',
+    })]);
+  });
+});
+
 describe('mintSpecCorpus: report-only items (#1448)', () => {
   it('lists stale abstracts without blocking while #1408 is pending, and groups open questions by decider', async () => {
     await spec('pas:090', 'New body.', { abstract: 'Summary of an older body.', abstractOriginHash: computeContentHash('Old body.') });

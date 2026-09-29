@@ -443,7 +443,7 @@ export const specCorpusQueries = {
  * PLACEHOLDER), shared by specUnresolvedReferences and the mint report.
  */
 async function unresolvedReferencesIn(
-  db: Pick<Context['db'], 'node' | 'edge'>,
+  db: Pick<Context['db'], 'node' | 'edge' | 'pendingEdge'>,
   corpus: ScannableCorpus,
   nodes: ScannedNode[],
 ): Promise<SpecReferenceOut[]> {
@@ -463,6 +463,30 @@ async function unresolvedReferencesIn(
         kind: 'EDGE', sourceNodeId: e.source.id, sourceLoc: e.source.loc, field: 'edge',
         targetLoc: e.target.loc, text: e.name, reason: 'PLACEHOLDER',
       });
+    }
+    // (@codex P2, PR #1462) A PendingEdge is an edge whose target is not a
+    // node yet (a Git import ahead of its target), and promotion can
+    // materialize it later: an unresolved reference like any other. One whose
+    // target is already a live, written node is only awaiting promotion.
+    const pending = await db.pendingEdge.findMany({
+      where: { deletedAt: null, source: { memoryId: corpus.id, deletedAt: null } },
+      select: { name: true, targetId: true, source: { select: { id: true, loc: true } } },
+      orderBy: { id: 'asc' },
+    });
+    if (pending.length > 0) {
+      const targets = new Map((await db.node.findMany({
+        where: { id: { in: [...new Set(pending.map((p) => p.targetId))] } },
+        select: { id: true, loc: true, deletedAt: true, isPlaceholder: true },
+      })).map((t) => [t.id, t]));
+      for (const p of pending) {
+        const target = targets.get(p.targetId);
+        if (target && !target.deletedAt && !target.isPlaceholder) continue;
+        out.push({
+          kind: 'EDGE', sourceNodeId: p.source.id, sourceLoc: p.source.loc, field: 'pendingEdge',
+          targetLoc: target?.loc ?? p.targetId, text: p.name,
+          reason: target && !target.deletedAt ? 'PLACEHOLDER' : 'MISSING',
+        });
+      }
     }
     return out;
 }
@@ -837,7 +861,7 @@ export const specCorpusMintMutations = {
           kind: 'UNRESOLVED_REFERENCE', loc: r.sourceLoc, rule: r.reason ?? null, targetLoc: r.targetLoc,
           message: r.reason === 'PLACEHOLDER'
             ? `${r.kind === 'EDGE' ? 'edge' : r.field} points at placeholder ${r.targetLoc}`
-            : `${r.field} cites ${r.targetLoc}, which does not exist`,
+            : `${r.kind === 'EDGE' ? 'edge' : r.field} cites ${r.targetLoc}, which does not exist`,
         });
       }
       for (const f of lintCorpusForMint(cited)) {
