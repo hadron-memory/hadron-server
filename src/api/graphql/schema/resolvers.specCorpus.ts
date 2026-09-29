@@ -16,6 +16,7 @@ import {
 import { isAbstractUnverified } from '../../../lib/contentHash.js';
 import {
   STALE_ABSTRACT_BLOCKS_MINT,
+  hasSpecMarker,
   isCitationLoc,
   lintCorpusForMint,
   parseOpenQuestions,
@@ -181,6 +182,13 @@ interface ScannableCorpus {
    * falls through to one of these if IT has that loc, so it is not ours.
    */
   currentUrnHistorical: string[];
+  /**
+   * (@codex P2, PR #1462) Where the memory's root node can sit: createMemory
+   * puts it at the memory's name, and a rename moves neither, so every name
+   * and URN slug the memory has held. A root is infrastructure, not a spec,
+   * even when that name happens to be citation-shaped (`pas`).
+   */
+  rootLocs: ReadonlySet<string>;
 }
 
 /**
@@ -197,7 +205,7 @@ async function loadScannableCorpus(ctx: Context, memoryRef: string): Promise<Sca
   if (!(await isMemoryReadableCached(ctx, id))) throw new MemoryNotFoundError(memoryRef);
   const memory = await ctx.db.memory.findUniqueOrThrow({
     where: { id },
-    select: { urn: true, corpusDraft: true, isEncrypted: true },
+    select: { urn: true, name: true, corpusDraft: true, isEncrypted: true },
   });
   if (!isDraftCorpus(memory)) {
     throw new GraphQLError(
@@ -262,9 +270,11 @@ async function loadScannableCorpus(ctx: Context, memoryRef: string): Promise<Sca
     if (visible.length) shadowed.set(urn, visible);
     else shadowed.delete(urn);
   }
+  const rootLocs = new Set([memory.name, ...urns.map((u) => u.slice(u.indexOf(':') + 1).replace(/^:/, ''))]);
   return {
     id, urn: memory.urn, pattern: corpusReferencePattern(urns), shadowed,
     currentUrnHistorical: await readable(currentUrnHistorical),
+    rootLocs,
   };
 }
 
@@ -889,7 +899,10 @@ export const specCorpusMintMutations = {
           name: true, description: true, abstract: true, content: true, abstractOriginHash: true,
         },
       });
-      const cited = nodes.filter((n) => isCitationLoc(n.loc));
+      // Citation-shaped nodes, less the memory's root: an unmarked node at a
+      // root loc is infrastructure (@codex P2, PR #1462). A root someone made
+      // a spec carries the marker and is linted like any spec.
+      const cited = nodes.filter((n) => isCitationLoc(n.loc) && !(corpus.rootLocs.has(n.loc) && !hasSpecMarker(n)));
 
       const blockers: MintFinding[] = [];
       for (const n of nodes) {

@@ -79,6 +79,29 @@ describe('mintSpecCorpus: a clean corpus (#1448)', () => {
   });
 });
 
+describe('mintSpecCorpus: a citation-shaped memory root is not a spec (@codex P2 on #1462)', () => {
+  it('mints a clean corpus named `pas`, whose root sits at a citation-shaped loc', async () => {
+    const pas = await resolvers.Mutation.createMemory(null, { orgId: org.id, name: 'pas', draftCorpus: true }, as());
+    const root = await db.node.findFirstOrThrow({ where: { memoryId: pas.id, loc: 'pas' } });
+    expect(root.tags).not.toContain('spec');
+    await db.node.create({ data: {
+      id: generateId(), memoryId: pas.id, loc: 'pas:010', name: 'pas:010', content: 'Body.', role: 'spec', nodeType: 'info', tags: ['spec'],
+    } });
+    expect((await mint(true, admin.id, pas.id)).blockers).toEqual([]);
+    // Still found at its creation-time loc after the memory is renamed.
+    await resolvers.Mutation.updateMemory(null, { id: pas.id, name: 'renamed' } as never, as());
+    expect((await mint(true, admin.id, pas.id)).blockers).toEqual([]);
+  });
+
+  it('still lints a root that someone made a spec', async () => {
+    const pas = await resolvers.Mutation.createMemory(null, { orgId: org.id, name: 'pas', draftCorpus: true }, as());
+    await db.node.updateMany({ where: { memoryId: pas.id, loc: 'pas' }, data: { role: 'spec', nodeType: 'data' } });
+    expect((await mint(true, admin.id, pas.id)).blockers).toEqual([
+      expect.objectContaining({ kind: 'LINT', loc: 'pas', rule: 'nodetype-info' }),
+    ]);
+  });
+});
+
 describe('mintSpecCorpus: blockers (#1448)', () => {
   it('lists every blocker, and a real run refuses and leaves the corpus a draft', async () => {
     await resolvers.Mutation.reserveSpecCitation(null, { memoryRef: draft.id, loc: 'pas:030' }, as());

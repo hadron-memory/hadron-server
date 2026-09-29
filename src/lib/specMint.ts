@@ -61,6 +61,11 @@ function roleInSpecFamily(role: string | null): boolean {
   return role === 'spec' || (role?.startsWith('spec.') ?? false);
 }
 
+/** The spec marker of ruling (a): a `spec` tag, or a role in the spec family. */
+export function hasSpecMarker(n: { tags: readonly string[]; role: string | null }): boolean {
+  return n.tags.includes('spec') || roleInSpecFamily(n.role);
+}
+
 /**
  * Writing-tool field delimiters, never spec content (CLI #545). Their presence
  * means one field absorbed another, and the absorbed one may be the only copy.
@@ -146,7 +151,7 @@ export function lintNodeForMint(n: MintLintNode): MintLintFinding[] {
   if (n.nodeType !== 'info') {
     out.push({ loc: n.loc, rule: 'nodetype-info', message: `nodeType must be "info", got ${JSON.stringify(n.nodeType ?? '')}` });
   }
-  if (!n.tags.includes('spec') && !roleInSpecFamily(n.role)) {
+  if (!hasSpecMarker(n)) {
     out.push({ loc: n.loc, rule: 'tag-spec', message: 'missing "spec" tag or spec-family role' });
   }
   for (const [name, text] of [['abstract', n.abstract], ['body', n.content]] as const) {
