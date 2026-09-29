@@ -6,7 +6,7 @@
  * drain, and a signup-enumeration oracle.
  *
  * The nearby claim that it did not need one was wrong, and checking it is what
- * made this worth fixing rather than closing. `buildAuthorizeEmailRateLimit`'s
+ * made this worth fixing rather than closing. The former OAuth email limiter's
  * docstring said the path was "portal-gated by the mandatory #505
  * `client_state` nonce". The nonce IS mandatory — and it is caller-supplied,
  * hashed, and written onto the token row, with nothing validating it against a
