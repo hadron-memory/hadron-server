@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { extractMentions } from './teamChatMentions.js';
 
-describe('extractMentions — Markdown code candidate (#1423)', () => {
+describe('extractMentions — Markdown code (#1423)', () => {
   it.each([
     ['single-backtick code span', 'field stays `@deprecated` in SDL, cc @ada', ['ada']],
     ['longer delimiter with an inner backtick', 'use ``@Injectable(`x`)`` decorator, @ella', ['ella']],

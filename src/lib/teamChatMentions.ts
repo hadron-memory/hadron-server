@@ -59,7 +59,7 @@ function markdownCodeMask(body: string): Uint8Array {
 
 /**
  * Extract write-time mention tokens (cor:agt:020:04), excluding Markdown code
- * per the local #1423 policy candidate. Email boundaries and token spelling
+ * per Holger's #1423 ruling. Email boundaries and token spelling
  * retain the existing #939 behavior.
  */
 export function extractMentions(body: string): string[] {
