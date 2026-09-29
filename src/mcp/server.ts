@@ -6847,10 +6847,15 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           // Enumerating the multi-key callers from the GraphQL resolvers alone
           // is how this was missed; the writers are enumerated by STATE (who
           // takes two keys), never by the call sites one happens to know.
+          // #1466: an edge writer holds this memory key across endpoint
+          // validation and insertion. Take it before any loc lock so an edge
+          // cannot land after archiveTombstone enumerates the target's edges.
+          await lockEdgeEndpointMemories(tx, [toMemory.id]);
           await acquireLockSet(tx, [
             ...ancestorLocs(toLoc).map((loc) => ({ memoryId: toMemory.id, loc })),
             ...ancestorLocs(fromLoc).map((loc) => ({ memoryId: fromMemory.id, loc })),
             { memoryId: fromMemory.id, loc: fromLoc },
+            { memoryId: toMemory.id, loc: toLoc },
           ]);
           await lockAncestorsForCreate(tx, toMemory.id, toLoc);
 

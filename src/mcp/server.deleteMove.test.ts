@@ -30,6 +30,7 @@ import { createTestableMcpServer } from './server.js';
 import type { AuthContext } from '../middleware/auth.js';
 import { generateId } from '../lib/id.js';
 import { deriveEdgeLoc } from '../lib/edgeLoc.js';
+import { lockLiveEdgeEndpoints } from '../lib/edgeEndpointLock.js';
 import { revisionStateHashRefreshMarker } from '../lib/nodeRevisionSnapshot.js';
 
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({
@@ -736,6 +737,75 @@ describe('hadron_move_node — collision policy (#185 F2)', () => {
     expect((await db.edge.findUniqueOrThrow({ where: { id: oldEdge.id } })).sourceId)
       .toBe(moveTombstone.id);
   });
+
+  it('waits for an in-flight target edge before archiving its derived loc (#1466)', async () => {
+    const { moveTarget, moveSource, edgeTarget } = fx.nodes;
+    const oldLoc = deriveEdgeLoc(moveTarget.loc, 'cites', edgeTarget.loc);
+    const oldEdgeId = generateId();
+    let releaseEdge!: () => void;
+    const edgeHeld = new Promise<void>((resolve) => { releaseEdge = resolve; });
+    let signalInserted!: () => void;
+    const inserted = new Promise<void>((resolve) => { signalInserted = resolve; });
+    const edgeWrite = db.$transaction(async (tx) => {
+      const live = await lockLiveEdgeEndpoints(
+        tx,
+        { id: moveTarget.id, loc: moveTarget.loc, memoryId: fx.memory.id },
+        { id: edgeTarget.id, loc: edgeTarget.loc, memoryId: fx.memory.id },
+      );
+      expect(live.source?.id).toBe(moveTarget.id);
+      expect(live.target?.id).toBe(edgeTarget.id);
+      await tx.edge.create({
+        data: {
+          id: oldEdgeId, memoryId: fx.memory.id, sourceId: moveTarget.id,
+          targetId: edgeTarget.id, loc: oldLoc, name: 'cites',
+        },
+      });
+      signalInserted();
+      await edgeHeld;
+    }, { timeout: 20_000 });
+    await Promise.race([inserted, edgeWrite]);
+
+    const srv = createTestableMcpServer(adminAuth());
+    const move = srv.callToolText('hadron_move_node', {
+      urn: `urn:node:${fx.memory.urn}:${moveSource.loc}`,
+      targetUrn: `urn:node:${fx.memory.urn}:${moveTarget.loc}`,
+      overwrite: true,
+    });
+    let waitError: unknown;
+    try {
+      const deadline = Date.now() + 5_000;
+      for (;;) {
+        const [{ waiting }] = await db.$queryRaw<Array<{ waiting: bigint }>>`
+          SELECT count(*)::bigint AS waiting FROM pg_stat_activity
+          WHERE datname = current_database() AND pid <> pg_backend_pid()
+            AND wait_event_type = 'Lock'
+        `;
+        if (waiting > 0n) break;
+        if (Date.now() > deadline) throw new Error('move did not wait for the in-flight edge');
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+    } catch (error) {
+      waitError = error;
+    } finally {
+      releaseEdge();
+    }
+    await edgeWrite;
+    const moved = await move;
+    if (waitError) throw waitError;
+    expect(moved).toMatch(/Moved/);
+
+    const archived = await db.node.findUniqueOrThrow({ where: { id: moveTarget.id } });
+    expect((await db.edge.findUniqueOrThrow({ where: { id: oldEdgeId } })).loc)
+      .toBe(deriveEdgeLoc(archived.loc, 'cites', edgeTarget.loc));
+    expect(await srv.callToolText('hadron_create_edge', {
+      sourceUrn: moveSource.id, targetUrn: edgeTarget.id, name: 'cites',
+    })).toMatch(/Edge saved/);
+    const newEdge = await db.edge.findUniqueOrThrow({
+      where: { loc_memoryId: { loc: oldLoc, memoryId: fx.memory.id } },
+    });
+    expect(newEdge.id).not.toBe(oldEdgeId);
+    expect(newEdge.sourceId).toBe(moveSource.id);
+  }, 20_000);
 
   it('re-stamp uses the full id so two eviction collisions in the same ms-window don\'t crash', async () => {
     // PR-189 review caught that the old `id.slice(0, 8)` was timestamp-
