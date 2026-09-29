@@ -29,12 +29,15 @@ import {
 import { resolvers } from '../../api/graphql/schema/resolvers.js';
 
 let org: { id: string; urn: string };
+let orgB: { id: string; urn: string };
 let groupMem: { id: string; urn: string };
+let orgBGroupMem: { id: string; urn: string };
 let knowledgeMem: { id: string };
 let appScopedGroupMem: { id: string };
 let orgMemberNoGroup: { id: string };
 let orgAdminNoGroup: { id: string };
 let memoryMemberNoOrgRole: { id: string };
+let crossOrgMember: { id: string };
 
 beforeEach(async () => {
   await cleanDb(db);
@@ -72,6 +75,23 @@ beforeEach(async () => {
   await db.memoryMember.create({
     data: { memoryId: groupMem.id, userId: memoryMemberNoOrgRole.id, role: 'reader' },
   });
+  // #3595 shapes: a SECOND org with its own group, and a caller who is an
+  // org-A member holding a MemoryMember row in org B's group — the
+  // cross-org reach that must survive ORDINARY calls but vanish under an
+  // impersonation session scoped to org A or an explicit orgId=A list.
+  orgB = await db.organization.create({ data: { id: generateId(), name: 'g1208b', urn: `g1208b-${suffix}.com` } });
+  orgBGroupMem = await db.memory.create({
+    data: { id: generateId(), organizationId: orgB.id, urn: `${orgB.urn}:grp`, name: 'grpB', class: 'group', visibility: 'GROUP' },
+  });
+  crossOrgMember = await db.user.create({
+    data: { id: generateId(), githubId: 12084, githubUsername: `g1208-x-${suffix}`, roles: ['READER'] },
+  });
+  await db.orgMember.create({
+    data: { organizationId: org.id, userId: crossOrgMember.id, role: 'READER' },
+  });
+  await db.memoryMember.create({
+    data: { memoryId: orgBGroupMem.id, userId: crossOrgMember.id, role: 'reader' },
+  });
 });
 
 function userCtx(userId: string) {
@@ -80,6 +100,21 @@ function userCtx(userId: string) {
 
 function gqlCtx(userId: string): Context {
   return { db, userId, roles: [] };
+}
+
+/** An impersonation session scoped to `orgId`, driven AS `userId` (#3595). */
+function impersonationCtx(userId: string, orgId: string): Context {
+  return {
+    db,
+    userId,
+    roles: [],
+    impersonation: {
+      sessionId: generateId(),
+      actorUserId: generateId(),
+      orgId,
+      expiresAt: new Date(Date.now() + 3_600_000),
+    },
+  };
 }
 
 describe('#1208 group read gates vs MemoryMember (cor:acl:010:01)', () => {
@@ -140,5 +175,32 @@ describe('#1208 group read gates vs MemoryMember (cor:acl:010:01)', () => {
     const Q = resolvers.Query as any;
     const list = await Q.memories({}, {}, gqlCtx(orgMemberNoGroup.id));
     expect(list.items.map((m: { id: string }) => m.id)).not.toContain(appScopedGroupMem.id); // RED before the record fix
+  });
+
+  it('an impersonation session scoped to org A cannot reach the target\'s org-B group (node gate, #3595)', async () => {
+    // crossOrgMember is an org-A member AND a MemoryMember in org B's group.
+    // The shared-org session must see only org A: the org-B group is out even
+    // though the TARGET holds a live MemoryMember row there.
+    const ids = await getAccessibleMemoryIds(impersonationCtx(crossOrgMember.id, org.id), orgBGroupMem.id);
+    expect(ids).toEqual([]); // RED before the org-bound fix
+    // ...while the same caller's ORDINARY reach keeps the cross-org group.
+    expect(await getOrgReadableMemoryIds(db, crossOrgMember.id)).toContain(orgBGroupMem.id);
+  });
+
+  it('an impersonation session scoped to org A cannot LIST the target\'s org-B group (#3595)', async () => {
+    const Q = resolvers.Query as any;
+    const list = await Q.memories({}, {}, impersonationCtx(crossOrgMember.id, org.id));
+    const ids = list.items.map((m: { id: string }) => m.id);
+    expect(ids).toContain(knowledgeMem.id); // org A stays visible through the shared org
+    expect(ids).not.toContain(orgBGroupMem.id); // RED before the org-bound fix
+  });
+
+  it('an explicit orgId=A list does not include the caller\'s group memory in org B (#3595)', async () => {
+    const Q = resolvers.Query as any;
+    const scoped = await Q.memories({}, { orgId: org.id }, gqlCtx(crossOrgMember.id));
+    expect(scoped.items.map((m: { id: string }) => m.id)).not.toContain(orgBGroupMem.id); // RED before the org-bound fix
+    // Unscoped, the same caller's cross-org MemoryMember reach is retained.
+    const unscoped = await Q.memories({}, {}, gqlCtx(crossOrgMember.id));
+    expect(unscoped.items.map((m: { id: string }) => m.id)).toContain(orgBGroupMem.id);
   });
 });

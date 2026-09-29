@@ -98,7 +98,20 @@ export async function getOrgReadableMemoryIds(
         // reaches a shared one. MemoryMember has no deletedAt (removal is a
         // hard delete, FR-038), so `some: { userId }` is liveness. App-scoped
         // and per-user-holding group rows stay excluded (#653 parity).
-        { class: 'group' as any, appId: null, userMemoryOfAgentId: null, ownerUserId: null, memberships: { some: { userId } } },
+        //
+        // #3595: under `restrictToOrgId` (an impersonation session's ONE
+        // shared org) the membership clause is BOUND to that org — the
+        // target's MemoryMember rows in OTHER orgs must not ride the
+        // impersonation session's readable set. Ordinary calls stay
+        // unbounded: that is the cross-org reach described above.
+        {
+          class: 'group' as any,
+          appId: null,
+          userMemoryOfAgentId: null,
+          ownerUserId: null,
+          ...(restrictToOrgId ? { organizationId: restrictToOrgId } : {}),
+          memberships: { some: { userId } },
+        },
         // PUBLIC memories — defensively excluding personal/private, per-user
         // holdings, and app-scoped (#653) so a mis-set visibility can't expose them.
         // #758: `ownerUserId: null` — spec 047's invariant is that a USER-owned
