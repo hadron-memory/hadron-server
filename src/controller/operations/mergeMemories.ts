@@ -22,8 +22,7 @@ import type { MemorySchema } from '../../lib/memorySchema.js';
 import { acquireLockSet } from '../../lib/nodeSubtreeLock.js';
 import { recordUrnRename } from '../../lib/urnAlias.js';
 import { safeNodeUrnV2 } from '../../lib/urnEmit.js';
-import { isDraftCorpus } from '../../lib/specCorpus.js';
-import { SubtreeMovePlaceholderError } from '../../lib/nodeSubtreeMove.js';
+import { assertNoPlaceholdersLeaveDraft, isDraftCorpus } from '../../lib/specCorpus.js';
 
 /**
  * Batched, resumable execution of a memory→memory merge (spec cor:api:080).
@@ -212,6 +211,18 @@ export async function mergeMemoryGraph(
   // up front than eight pages in.
   await assertMemoryBulkMutable(db, sourceMemoryId, 'merge');
   await assertMemoryBulkMutable(db, targetMemoryId, 'merge into');
+  // #1450 — the same up-front refusal for placeholders, before any batch
+  // commits: a merge into a memory that is not a draft corpus would publish
+  // them. The per-batch check below still holds against one reserved mid-merge.
+  {
+    const target = await db.memory.findUnique({ where: { id: targetMemoryId }, select: { corpusDraft: true } });
+    const placeholders = await db.node.findMany({
+      where: { memoryId: sourceMemoryId, deletedAt: null, isPlaceholder: true },
+      select: { loc: true, isPlaceholder: true },
+      take: 1,
+    });
+    assertNoPlaceholdersLeaveDraft(placeholders, { isDraft: target?.corpusDraft === true, memoryId: targetMemoryId });
+  }
 
   // === Phase 1: classify + relocate, in one keyset-paged scan. ===
   // Page the live source node addresses by id and match each page against the
@@ -357,10 +368,7 @@ export async function mergeMemoryGraph(
           const [targetFlags] = await tx.$queryRaw<Array<{ corpus_draft: boolean }>>`
             SELECT corpus_draft FROM memories WHERE id = ${targetMemoryId}
           `;
-          const strandedPlaceholder = targetFlags?.corpus_draft === true ? undefined : rows.find((row) => row.isPlaceholder);
-          if (strandedPlaceholder) {
-            throw new SubtreeMovePlaceholderError(strandedPlaceholder.loc, targetMemoryId);
-          }
+          assertNoPlaceholdersLeaveDraft(rows, { isDraft: targetFlags?.corpus_draft === true, memoryId: targetMemoryId });
           for (const row of rows) {
             await createNodeRevision(
               tx,

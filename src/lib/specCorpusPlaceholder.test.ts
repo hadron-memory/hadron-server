@@ -5,6 +5,7 @@ import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
 import { generateId } from './id.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
+import { mergeMemoryGraph } from '../controller/operations/mergeMemories.js';
 
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -136,5 +137,46 @@ describe('placeholders never leave draft corpora (@codex P1 on #1452)', () => {
     const reserved = await reserve(draft.id, 'pas:070:01');
     await resolvers.Mutation.moveNode(null, { sourceRef: reserved.id, targetUrn: `hrn:node:${other.urn}:pas:070:01` }, as(admin.id));
     expect(await db.node.findUniqueOrThrow({ where: { id: reserved.id } })).toMatchObject({ memoryId: other.id, isPlaceholder: true });
+  });
+});
+
+describe('copies and merges never publish a placeholder (@codex P1 on #1452)', () => {
+  it('refuses to clone a draft that still has a placeholder; the clone is not created', async () => {
+    await reserve(draft.id, 'pas:080:01');
+    const code = await codeOf(resolvers.Mutation.cloneMemory(null, { ref: draft.id, targetUrn: `hrn:mem:${org.urn}:specs-copy` }, as(admin.id)));
+    expect(code).toBe('SPEC_PLACEHOLDER_OUTSIDE_DRAFT');
+    expect(await db.memory.count({ where: { urn: `${org.urn}:specs-copy` } })).toBe(0);
+  });
+
+  it('refuses to extract a subtree that contains a placeholder into a new memory', async () => {
+    const parent = await resolvers.Mutation.createSpecNode(null, {
+      input: { memoryId: draft.id, loc: 'pas:090', name: 'Feature', role: 'spec', nodeType: 'info', content: 'Body.' },
+    } as never, as(admin.id));
+    await reserve(draft.id, 'pas:090:01');
+    const code = await codeOf(resolvers.Mutation.extractParentNodeToMemory(
+      {}, { parentRef: parent.id, targetUrn: `hrn:mem:${org.urn}:extracted`, move: false } as never, as(admin.id),
+    ));
+    expect(code).toBe('SPEC_PLACEHOLDER_OUTSIDE_DRAFT');
+    expect(await db.memory.count({ where: { urn: `${org.urn}:extracted` } })).toBe(0);
+  });
+
+  it('refuses to merge a placeholder into a minted memory, even one whose spec role was removed', async () => {
+    // A role-less placeholder is not stopped by the governed merge guard, so the
+    // placeholder rule itself must hold.
+    // Plenty of ordinary rows ahead of it, so a per-batch-only check would
+    // already have committed some of them.
+    for (const n of ['pas:091', 'pas:092', 'pas:093']) {
+      await db.node.create({ data: { id: generateId(), memoryId: draft.id, loc: n, name: n, content: 'x' } });
+    }
+    await db.node.create({ data: { id: generateId(), memoryId: draft.id, loc: 'pas:095:01', name: 'x', isPlaceholder: true } });
+    const code = await codeOf(mergeMemoryGraph(db, {
+      sourceMemoryId: draft.id, targetMemoryId: minted.id, fields: new Set(['CONTENT', 'EDGES']),
+      deleteSourceMem: false, editor: { userId: admin.id }, batchSize: 1, classifyPageSize: 1,
+    }));
+    expect(code).toBe('SPEC_PLACEHOLDER_OUTSIDE_DRAFT');
+    expect(await db.node.count({ where: { memoryId: minted.id, loc: 'pas:095:01' } })).toBe(0);
+    // Refused up front: nothing from the draft was relocated, not even rows in
+    // an earlier batch than the placeholder's.
+    expect(await db.node.count({ where: { memoryId: minted.id, loc: { startsWith: 'pas:' } } })).toBe(0);
   });
 });

@@ -17,6 +17,8 @@
  * lands) all consult the same predicate.
  */
 
+import { GraphQLError } from 'graphql';
+
 export type CorpusState = 'DRAFT' | 'MINTED';
 
 /** Whether this memory is a draft spec corpus. */
@@ -45,4 +47,39 @@ export function placeholderFillPatch(
   return prior?.isPlaceholder === true && typeof content === 'string' && content.trim() !== ''
     ? { isPlaceholder: false }
     : {};
+}
+
+/**
+ * #1450 (@codex P1s, PR #1452) — a placeholder never leaves draft corpora.
+ *
+ * A placeholder is a reserved citation with no spec written; minting refuses
+ * while any remain, so a minted corpus has none. Any path that puts a node
+ * into a memory that is NOT a draft (a clone or extract into a brand-new,
+ * therefore minted, memory; a merge or move into a minted one) would publish a
+ * citation with no spec behind it, so it refuses instead. Write the spec (its
+ * content) or delete the placeholder first.
+ *
+ * `moveNodeSubtree` keeps its own typed SubtreeMovePlaceholderError (mapped on
+ * both move surfaces); every other copy or relocation path calls this.
+ *
+ * @throws GraphQLError `SPEC_PLACEHOLDER_OUTSIDE_DRAFT` naming the first placeholder.
+ */
+export function assertNoPlaceholdersLeaveDraft(
+  nodes: ReadonlyArray<{ loc: string; isPlaceholder?: boolean | null }>,
+  destination: { isDraft: boolean; memoryId?: string },
+): void {
+  if (destination.isDraft) return;
+  const placeholder = nodes.find((n) => n.isPlaceholder === true);
+  if (!placeholder) return;
+  throw new GraphQLError(
+    `Cannot copy or move placeholder "${placeholder.loc}" into a memory that is not a draft spec corpus: ` +
+      'write the spec (its content) or delete the placeholder first.',
+    {
+      extensions: {
+        code: 'SPEC_PLACEHOLDER_OUTSIDE_DRAFT',
+        loc: placeholder.loc,
+        ...(destination.memoryId ? { memoryId: destination.memoryId } : {}),
+      },
+    },
+  );
 }
