@@ -290,3 +290,35 @@ describe('git sync keeps an unwritten placeholder a spec (@codex P2 on #1452)', 
     expect(await row(draft.id, 'pas:170:01')).toMatchObject({ role: null, isPlaceholder: false });
   });
 });
+
+describe('a placeholder over a tombstone is indistinguishable from a fresh one (@codex P2 on #1452)', () => {
+  // Columns that legitimately differ between two separate reservations.
+  const IDENTITY_AND_BOOKKEEPING = new Set([
+    'id', 'loc', 'name', 'seq', 'createdAt', 'createdBy', 'updatedAt', 'updatedBy',
+    'deletedAt', 'deletedBy', 'revSeq', 'revisionContentHash', 'lastAccessedAt',
+    // Embedding-queue bookkeeping, not authored content: with no content there
+    // is nothing to embed, so a stale pending stamp only means an empty pass.
+    'embeddingPendingAt',
+  ]);
+
+  it('inherits nothing from the deleted spec: every other column matches a fresh reservation', async () => {
+    const fresh = await reserve(draft.id, 'pas:180:01');
+    const old = await resolvers.Mutation.createSpecNode(null, {
+      input: {
+        memoryId: draft.id, loc: 'pas:180:02', name: 'Old', role: 'spec', nodeType: 'info',
+        content: 'Old body.', abstract: 'Old abstract.', description: 'Old headline.', contentType: 'text/markdown',
+        alias: 'old-alias', tags: ['old', 'tags'], data: { old: true }, properties: { old: 1 },
+        llmModel: 'old-model', aiAgent: 'old-agent',
+      },
+    } as never, as(admin.id));
+    await resolvers.Mutation.deleteNode(null, { nodeRef: old.id }, as(admin.id));
+    const revived = await reserve(draft.id, 'pas:180:02');
+    expect(revived.id).toBe(old.id);
+
+    const a = await db.node.findUniqueOrThrow({ where: { id: fresh.id } });
+    const b = await db.node.findUniqueOrThrow({ where: { id: revived.id } });
+    const differing = Object.keys(a).filter((k) => !IDENTITY_AND_BOOKKEEPING.has(k)
+      && JSON.stringify((a as Record<string, unknown>)[k]) !== JSON.stringify((b as Record<string, unknown>)[k]));
+    expect(differing.map((k) => `${k}: ${JSON.stringify((b as Record<string, unknown>)[k])}`)).toEqual([]);
+  });
+});

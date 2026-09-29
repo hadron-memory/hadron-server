@@ -45,11 +45,18 @@ export const specCorpusMutations = {
           // soft-deleted node at this loc revives that row and keeps every field
           // the input omits, so a deleted spec's text would reappear inside a
           // "placeholder" that claims to have none.
-          content: null, abstract: null, description: null,
-          // (@codex P2, PR #1452) deleteNode leaves a tombstone's outgoing
-          // edges attached, and a revival keeps them unless told otherwise:
-          // an explicit empty set replaces them, so the placeholder starts
-          // with no relationships.
+          // Every authored field a node input can carry is RESET, not
+          // omitted (@codex P2s, PR #1452): a create over a soft-deleted node
+          // revives that row and keeps whatever the input omits, so a deleted
+          // spec's text, payload and provenance would reappear inside a
+          // "placeholder" that claims to have none. The test that pins this
+          // compares a revived reservation to a fresh one column by column, so
+          // a new node column that leaks fails it.
+          content: null, abstract: null, description: null, contentType: null,
+          alias: null, tags: [], data: null, properties: null,
+          llmModel: null, aiAgent: null, isLink: false, objectType: null,
+          // deleteNode leaves a tombstone's outgoing edges attached; an
+          // explicit empty set replaces them.
           edges: [],
         },
         withoutRequestCaches(ctx, tx),
