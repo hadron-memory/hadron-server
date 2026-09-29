@@ -138,7 +138,7 @@ import { validateMemoryNodes, formatFindingLine } from '../lib/memoryValidation.
 import { nextSiblingSeq } from '../lib/nodeSeq.js';
 import { BATCH_READ_MAX_NODES, BATCH_READ_MAX_BYTES } from '../lib/batchRead.js';
 import { isCiphertext } from '../lib/crypto.js';
-import { enqueueNodeEmbedding } from '../services/embedding/enqueue.js';
+import { enqueueNodeEmbedding, pendingAtForRevival } from '../services/embedding/enqueue.js';
 import { sessionKeyCache } from '../lib/sessionKeyCache.js';
 import {
   isSessionLive,
@@ -5398,10 +5398,11 @@ export function createMcpServerInstance(
           }
           // Invalidate an old in-flight embed before the asynchronous enqueue
           // restamps the marker after commit.
-          const revivalNowMs = Date.now();
+          const indexed = pre?.deletedAt
+            ? await tx.memory.findUniqueOrThrow({ where: { id: memoryId }, select: { vectorIndexEnabled: true } })
+            : null;
           const revivedPendingAt = pre?.deletedAt
-            ? new Date(revivalNowMs === pre.embeddingPendingAt?.getTime()
-              ? revivalNowMs + 1 : revivalNowMs)
+            ? pendingAtForRevival(pre.embeddingPendingAt, indexed!.vectorIndexEnabled)
             : undefined;
           const written = await tx.node.upsert({
             ...upsertArgs,

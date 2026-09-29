@@ -41,7 +41,7 @@ import {
   SearchReplaceInvalidPatternError,
   type Replacer,
 } from '../../../lib/searchReplace.js';
-import { enqueueNodeEmbedding } from '../../../services/embedding/enqueue.js';
+import { enqueueNodeEmbedding, pendingAtForRevival } from '../../../services/embedding/enqueue.js';
 import { canReadMemory } from '../../../mcp/access-control.js';
 import { sessionKeyCache } from '../../../lib/sessionKeyCache.js';
 import { enforceNodeSchemaOnWrite, normalizeObjectType } from '../../../lib/enforceNodeSchema.js';
@@ -1366,16 +1366,17 @@ export async function writeNodeCore(
             // vectors. Remove them in this transaction before making the row
             // live, so a revive cannot publish its previous incarnation's
             // plaintext while the new embed is pending or unavailable.
-            if (mode === 'create' && authoritative?.deletedAt) {
+            const reviving = mode === 'create' && !!authoritative?.deletedAt;
+            let revivedPendingAt: Date | null | undefined;
+            if (reviving && authoritative) {
               await tx.nodeEmbedding.deleteMany({ where: { nodeId: authoritative.id } });
+              const indexed = await tx.memory.findUniqueOrThrow({
+                where: { id: input.memoryId }, select: { vectorIndexEnabled: true },
+              });
+              // Invalidate an old embed before post-commit enqueue runs.
+              // Unindexed memories keep the normal null pending marker.
+              revivedPendingAt = pendingAtForRevival(authoritative.embeddingPendingAt, indexed.vectorIndexEnabled);
             }
-            // An embed that started before revival must fail its pending-at
-            // guard even if it finishes before the post-commit enqueue runs.
-            const revivalNowMs = Date.now();
-            const revivedPendingAt = mode === 'create' && authoritative?.deletedAt
-              ? new Date(revivalNowMs === authoritative.embeddingPendingAt?.getTime()
-                ? revivalNowMs + 1 : revivalNowMs)
-              : undefined;
 
             // #1183 — resurrect from the AUTHORITATIVE row, not the stale
             // probe. `updateExtras` above was built from `existing`, which may
@@ -1407,7 +1408,7 @@ export async function writeNodeCore(
                 // it to `upsert` would let an importer revive a soft-deleted
                 // node merely by writing to its loc — a behaviour change this
                 // fix has no business making (@copilot, PR #1184 round 4).
-                ...(mode === 'create' && authoritative?.deletedAt
+                ...(reviving
                   ? { deletedAt: null, deletedBy: null, embeddingPendingAt: revivedPendingAt }
                   : {}),
               } as Prisma.NodeUncheckedUpdateInput,

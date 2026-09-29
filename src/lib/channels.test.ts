@@ -231,6 +231,7 @@ describe('protection (S4)', () => {
     // a new incarnation, so it must not inherit a stale audience assertion.
     const oldChannel = await db.channel.findUniqueOrThrow({ where: { id: first.id } });
     const oldRoot = await db.node.findUniqueOrThrow({ where: { id: oldChannel.chatRootNodeId } });
+    const oldRootPendingAt = new Date('2026-01-01T00:00:00.000Z');
     await db.node.update({
       where: { id: oldRoot.id },
       data: {
@@ -238,7 +239,7 @@ describe('protection (S4)', () => {
         abstractOriginHash: 'deadbeef',
         content: 'old root payload',
         contentHash: 'cafebabe',
-        embeddingPendingAt: new Date(),
+        embeddingPendingAt: oldRootPendingAt,
         embeddingFailedAt: new Date(),
         embeddingAttempts: 3,
         embeddingError: 'old failure',
@@ -253,6 +254,7 @@ describe('protection (S4)', () => {
       },
     });
     await M.deleteChannel({}, { ref: first.id }, ctx(admin.id));
+    await db.memory.update({ where: { id: appMem.id }, data: { vectorIndexEnabled: true } });
 
     // #1460 — Channel creation also revives tombstoned containers around the
     // root. Their old vectors must not become searchable with the new room.
@@ -261,8 +263,12 @@ describe('protection (S4)', () => {
       select: { id: true },
     });
     expect(staleContainers).toHaveLength(2);
+    const oldContainerPendingAt = new Date('2026-01-01T00:00:00.000Z');
     for (const container of staleContainers) {
-      await db.node.update({ where: { id: container.id }, data: { deletedAt: new Date(), deletedBy: admin.id } });
+      await db.node.update({
+        where: { id: container.id },
+        data: { deletedAt: new Date(), deletedBy: admin.id, embeddingPendingAt: oldContainerPendingAt },
+      });
       await db.nodeEmbedding.create({
         data: { id: generateId(), nodeId: container.id, memoryId: appMem.id,
           kind: 'abstract', provider: 'old', model: 'old', dim: 768 },
@@ -290,14 +296,18 @@ describe('protection (S4)', () => {
     expect(cleanRoot.abstractOriginHash).toBeNull();
     expect(cleanRoot.content).toBeNull();
     expect(cleanRoot.contentHash).toBeNull();
-    expect(cleanRoot.embeddingPendingAt).toBeNull();
+    expect(cleanRoot.embeddingPendingAt).not.toBeNull();
+    expect(cleanRoot.embeddingPendingAt).not.toEqual(oldRootPendingAt);
     expect(cleanRoot.embeddingFailedAt).toBeNull();
     expect(cleanRoot.embeddingAttempts).toBe(0);
     expect(cleanRoot.embeddingError).toBeNull();
     expect(cleanRoot.tokens).toBeNull();
     expect(await db.nodeEmbedding.count({ where: { nodeId: cleanRoot.id } })).toBe(0);
     for (const container of staleContainers) {
-      expect((await db.node.findUniqueOrThrow({ where: { id: container.id } })).deletedAt).toBeNull();
+      const restored = await db.node.findUniqueOrThrow({ where: { id: container.id } });
+      expect(restored.deletedAt).toBeNull();
+      expect(restored.embeddingPendingAt).not.toBeNull();
+      expect(restored.embeddingPendingAt).not.toEqual(oldContainerPendingAt);
       expect(await db.nodeEmbedding.count({ where: { nodeId: container.id } })).toBe(0);
     }
     expect((await db.edge.findUniqueOrThrow({ where: { id: oldReply.id } })).deletedAt).not.toBeNull();

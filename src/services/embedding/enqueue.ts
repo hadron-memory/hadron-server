@@ -42,6 +42,13 @@ export interface EnqueueArgs {
   plaintext: EmbedPlaintext;
 }
 
+/** Invalidate an old embed on revival without queuing work for an unindexed memory. */
+export function pendingAtForRevival(previous: Date | null, vectorIndexEnabled: boolean): Date | null {
+  if (!vectorIndexEnabled) return null;
+  const now = Date.now();
+  return new Date(now === previous?.getTime() ? now + 1 : now);
+}
+
 /**
  * Mark a node for (re-)embedding and kick off the prompt-drain. No-op for
  * memories that aren't vector-indexed (one cheap SELECT, then return).

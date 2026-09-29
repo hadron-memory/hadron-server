@@ -74,6 +74,25 @@ describe('revival clears prior vectors without an embedding endpoint', () => {
     await expectOldVectorsGone();
   });
 
+  it('does not queue embedding when GraphQL revives in an unindexed memory', async () => {
+    await db.memory.update({ where: { id: memory.id }, data: { vectorIndexEnabled: false } });
+    const ctx: Context = { db, roles: ['ADMIN'], userId: adminId, clientId: `user:${adminId}` };
+    await writeNodeCore({ memoryId: memory.id, loc: 'reused', name: 'New', content: 'replacement only' }, ctx, 'create');
+    expect((await db.node.findUniqueOrThrow({ where: { id: nodeId } })).embeddingPendingAt).toBeNull();
+    await expectOldVectorsGone();
+  });
+
+  it('does not queue embedding when MCP revives in an unindexed memory', async () => {
+    await db.memory.update({ where: { id: memory.id }, data: { vectorIndexEnabled: false } });
+    const server = createTestableMcpServer({ userId: adminId, roles: ['ADMIN'], clientId: `user:${adminId}` });
+    const text = await server.callToolText('hadron_create_node', {
+      urn: `hrn:node:${memory.urn}:reused`, name: 'New', content: 'replacement only',
+    });
+    expect(text).toMatch(/Node saved/);
+    expect((await db.node.findUniqueOrThrow({ where: { id: nodeId } })).embeddingPendingAt).toBeNull();
+    await expectOldVectorsGone();
+  });
+
   it('invalidates an in-flight old embed before post-commit scheduling', async () => {
     const ctx: Context = { db, roles: ['ADMIN'], userId: adminId, clientId: `user:${adminId}` };
     const effects: Array<() => void> = [];
