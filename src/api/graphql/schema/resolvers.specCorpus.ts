@@ -813,6 +813,29 @@ async function fenceCorpusForMint(tx: Prisma.TransactionClient, memoryId: string
   await tx.$executeRaw`SET LOCAL lock_timeout TO DEFAULT`;
 }
 
+const CORPUS_MANAGER_SELECT = { class: true, userId: true, organizationId: true, ownerUserId: true } as const;
+
+/**
+ * Who may mint a corpus: whoever may manage the memory, keyed the way
+ * deleteMemory and requireMemoryWriteAccess key it (@codex P2, PR #1462). A
+ * personal or private memory is STRICTLY its principal's (`Memory.userId`,
+ * cor:acl:010:02), with no org-role path, and is identity-scoped, so an
+ * impersonating session is refused. Its `ownerUserId` is the TENANT axis and
+ * is null when the memory is org-anchored, so the updateMemory gate alone
+ * would leave such a corpus with nobody able to mint it. Any other memory
+ * takes the updateMemory gate: its user owner, or an ADMIN of its org.
+ */
+async function requireCorpusManager(
+  ctx: Context,
+  m: { class: string; userId: string | null; organizationId: string | null; ownerUserId: string | null },
+): Promise<void> {
+  if (m.class === 'personal' || m.class === 'private') {
+    if (!ctx.impersonation && ctx.userId && m.userId === ctx.userId) return;
+    throw new Error('Forbidden');
+  }
+  await requireOwnerOrOrgRole(ctx, m, 'ADMIN');
+}
+
 export const specCorpusMintMutations = {
   /**
    * #1448 — mint a DRAFT spec corpus: one step for the whole corpus, one-way
@@ -828,8 +851,9 @@ export const specCorpusMintMutations = {
    * abstracts while that switch is off, and open questions grouped by who
    * decides.
    *
-   * By anyone who can manage the corpus: its owner, or an ADMIN of its org
-   * (the updateMemory gate); an unreadable memory answers as not found.
+   * By anyone who can manage the corpus ({@link requireCorpusManager}): the
+   * principal of a personal/private corpus; otherwise its owner or an ADMIN of
+   * its org. An unreadable memory answers as not found.
    * A real run checks and flips inside {@link fenceCorpusForMint}, so no write
    * lands between the report and the mint; a dry run only reads.
    *
@@ -842,10 +866,8 @@ export const specCorpusMintMutations = {
     ctx: Context,
   ): Promise<MintReport> => {
     const { id } = await resolveMemoryRef(ctx.db, memoryRef);
-    const owner = await ctx.db.memory.findUniqueOrThrow({
-      where: { id }, select: { organizationId: true, ownerUserId: true },
-    });
-    await concealUnreadableDenial(ctx, id, memoryRef, () => requireOwnerOrOrgRole(ctx, owner, 'ADMIN'));
+    const owner = await ctx.db.memory.findUniqueOrThrow({ where: { id }, select: CORPUS_MANAGER_SELECT });
+    await concealUnreadableDenial(ctx, id, memoryRef, () => requireCorpusManager(ctx, owner));
 
     return ctx.db.$transaction(async (tx) => {
       if (dryRun) await tx.$queryRaw`SELECT id FROM memories WHERE id = ${id} FOR NO KEY UPDATE`;
@@ -855,10 +877,8 @@ export const specCorpusMintMutations = {
       // (updateMemory takes this row FOR UPDATE) may have committed between the
       // check above and this lock, and minting is irreversible, so the gate
       // must judge the owner the row has NOW.
-      const lockedOwner = await tx.memory.findUniqueOrThrow({
-        where: { id }, select: { organizationId: true, ownerUserId: true },
-      });
-      await concealUnreadableDenial(txCtx, id, memoryRef, () => requireOwnerOrOrgRole(txCtx, lockedOwner, 'ADMIN'));
+      const lockedOwner = await tx.memory.findUniqueOrThrow({ where: { id }, select: CORPUS_MANAGER_SELECT });
+      await concealUnreadableDenial(txCtx, id, memoryRef, () => requireCorpusManager(txCtx, lockedOwner));
       // Re-reads the draft flag and encryption under the lock just taken.
       const corpus = await loadScannableCorpus(txCtx, id);
       const nodes = await tx.node.findMany({

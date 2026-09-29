@@ -207,6 +207,21 @@ describe('mintSpecCorpus: who may mint (#1448)', () => {
     expect(await stateOf()).toBe('DRAFT');
   });
 
+  it('lets the principal of an org-anchored private corpus mint it, and nobody else (@codex P2 on #1462)', async () => {
+    const own = await db.memory.create({ data: {
+      id: generateId(), urn: `${org.urn}:readers-draft`, name: 'readers-draft', class: 'private',
+      organizationId: org.id, userId: reader.id, corpusDraft: true,
+    } });
+    await db.node.create({ data: {
+      id: generateId(), memoryId: own.id, loc: 'pas:010', name: 'pas:010', content: 'Body.', role: 'spec', nodeType: 'info', tags: ['spec'],
+    } });
+    // An org ADMIN cannot read it, so it is concealed from them.
+    const concealed = await codeOf(mint(false, admin.id, own.id));
+    expect(concealed).toBe(await codeOf(mint(false, admin.id, `hrn:mem:${org.urn}:no-such-corpus`)));
+    // The principal (a READER of the org) mints it.
+    expect(await mint(false, reader.id, own.id)).toMatchObject({ minted: true });
+  });
+
   it('refuses a memory that was never a draft', async () => {
     const plain = await resolvers.Mutation.createMemory(null, { orgId: org.id, name: 'plain' }, as());
     expect(await codeOf(mint(true, admin.id, plain.id))).toBe('SPEC_CORPUS_NOT_DRAFT');
