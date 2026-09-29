@@ -465,6 +465,24 @@ async function unresolvedReferencesIn(
         targetLoc: e.target.loc, text: e.name, reason: 'PLACEHOLDER',
       });
     }
+    // (@codex P2, PR #1462) deleteNode soft-deletes a spec but leaves the
+    // edges pointing at it, so a live edge from the corpus to a deleted spec of
+    // the corpus is a reference whose target no longer exists.
+    const dangling = await db.edge.findMany({
+      where: {
+        deletedAt: null,
+        source: { memoryId: corpus.id, deletedAt: null },
+        target: { memoryId: corpus.id, deletedAt: { not: null } },
+      },
+      select: { name: true, source: { select: { id: true, loc: true } }, target: { select: { loc: true } } },
+      orderBy: { id: 'asc' },
+    });
+    for (const e of dangling) {
+      out.push({
+        kind: 'EDGE', sourceNodeId: e.source.id, sourceLoc: e.source.loc, field: 'edge',
+        targetLoc: e.target.loc, text: e.name, reason: 'MISSING',
+      });
+    }
     // (@codex P2s, PR #1462) A PendingEdge is an edge not materialized yet,
     // and promotion can materialize it later: an unresolved reference like any
     // other. Its targetId has two DISJOINT encodings (pendingEdgePromotion.ts),

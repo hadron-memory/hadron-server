@@ -112,6 +112,26 @@ describe('mintSpecCorpus: blockers (#1448)', () => {
   });
 });
 
+describe('mintSpecCorpus: an edge to a deleted spec is unresolved (@codex P2 on #1462)', () => {
+  it('blocks while a live corpus edge points at a soft-deleted spec, and not once that edge is gone', async () => {
+    const source = await db.node.findFirstOrThrow({ where: { memoryId: draft.id, loc: 'pas:010' } });
+    const doomed = await spec('pas:030', 'Soon deleted.');
+    const edge = await db.edge.create({ data: {
+      memoryId: draft.id, sourceId: source.id, targetId: doomed.id, loc: 'pas:010:depends-on:pas:030', name: 'depends-on',
+    } });
+    expect((await mint(true)).blockers).toEqual([]);
+    await resolvers.Mutation.deleteNode(null, { nodeRef: doomed.id }, as());
+
+    expect((await mint(true)).blockers).toEqual([
+      expect.objectContaining({ kind: 'UNRESOLVED_REFERENCE', loc: 'pas:010', rule: 'MISSING', targetLoc: 'pas:030' }),
+    ]);
+    expect(await codeOf(mint())).toBe('SPEC_CORPUS_MINT_BLOCKED');
+
+    await db.edge.delete({ where: { id: edge.id } });
+    expect((await mint(true)).blockers).toEqual([]);
+  });
+});
+
 describe('mintSpecCorpus: pending edges are references too (@codex P2s on #1462)', () => {
   const pendingFrom = async (loc: string, targetId: string, name = 'depends-on') => {
     const source = await db.node.findFirstOrThrow({ where: { memoryId: draft.id, loc } });
