@@ -436,3 +436,199 @@ describe('#1294 — truthful selected/scanned/skipped reporting', () => {
     expect((await db.node.findUniqueOrThrow({ where: { id: hidden.id } })).content).toBe('needle');
   });
 });
+
+describe('#1298 — concurrent edits between selection and bulk write', () => {
+  async function beforeBulkTransaction(interleave: () => Promise<unknown>, run: () => Promise<unknown>) {
+    const original = db.$transaction.bind(db);
+    let fired = false;
+    const spy = vi.spyOn(db, '$transaction').mockImplementation((async (arg: unknown, opts?: unknown) => {
+      if (!fired && typeof arg === 'function') {
+        fired = true;
+        await interleave();
+      }
+      return (original as any)(arg, opts);
+    }) as never);
+    try {
+      return await run();
+    } finally {
+      spy.mockRestore();
+      expect(fired).toBe(true);
+    }
+  }
+
+  function pauseBulkAfterWriting(nodeId: string) {
+    const original = db.$transaction.bind(db);
+    let reached!: () => void;
+    let release!: () => void;
+    const atBulkWrite = new Promise<void>((resolve) => { reached = resolve; });
+    const mayCommit = new Promise<void>((resolve) => { release = resolve; });
+    let hooked = false;
+    const spy = vi.spyOn(db, '$transaction').mockImplementation((async (arg: unknown, opts?: unknown) => {
+      if (!hooked && typeof arg === 'function') {
+        hooked = true;
+        return (original as any)(async (tx: any) => {
+          const update = tx.node.update.bind(tx.node);
+          vi.spyOn(tx.node, 'update').mockImplementation(async (args: any) => {
+            const written = await update(args);
+            if (args.where.id === nodeId && args.data.content === 'dog') {
+              reached();
+              await mayCommit;
+            }
+            return written;
+          });
+          return arg(tx);
+        }, opts);
+      }
+      return (original as any)(arg, opts);
+    }) as never);
+    return { atBulkWrite, release, restore: () => spy.mockRestore() };
+  }
+
+  it('move-first refuses a selected node after it crosses into an unauthorized memory', async () => {
+    const node = await makeNode('move-first', { content: 'cat' });
+    const otherOrg = await db.organization.create({
+      data: { id: generateId(), name: 'other-org', urn: 'other-org' },
+    });
+    const destination = await db.memory.create({
+      data: { id: generateId(), organizationId: otherOrg.id, urn: 'other-org:dest', name: 'dest', class: 'knowledge' },
+    });
+    const writer = await db.user.create({
+      data: { githubId: 7779, githubUsername: 'sr-source-writer', roles: ['READER'] },
+    });
+    await db.orgMember.create({ data: { organizationId: org.id, userId: writer.id, role: 'CONTRIBUTOR' } });
+
+    await expect(beforeBulkTransaction(
+      () => resolvers.Mutation.moveNode({}, { sourceRef: node.id, targetMemoryRef: destination.id }, ctx()),
+      () => resolvers.Mutation.searchReplaceInNodes({}, {
+        input: { oldText: 'cat', newText: 'dog', nodeIds: [node.id], fields: ['content'] },
+      } as never, { db, roles: ['READER'], userId: writer.id } as Context),
+    )).rejects.toMatchObject({ extensions: { code: 'NODE_WRITE_CONFLICT' } });
+
+    const after = await db.node.findUniqueOrThrow({ where: { id: node.id } });
+    expect(after).toMatchObject({ memoryId: destination.id, content: 'cat', revSeq: 2 });
+    const history = await db.nodeRevision.findMany({ where: { nodeId: node.id }, orderBy: { revNo: 'asc' } });
+    expect(history.map((revision) => revision.revNo)).toEqual([1]);
+    expect(history[0]).toMatchObject({ memoryId: memory.id, content: 'cat' });
+  });
+
+  it('refuses a same-field edit that commits before the bulk lock without overwriting it', async () => {
+    const node = await makeNode('same-field', { content: 'cat' });
+    await expect(beforeBulkTransaction(
+      () => resolvers.Mutation.updateNode({}, {
+        input: { id: node.id, content: 'cat plus cat' },
+      } as never, ctx()),
+      () => call({ oldText: 'cat', newText: 'dog', nodeIds: [node.id], fields: ['content'] }),
+    )).rejects.toMatchObject({ extensions: { code: 'NODE_WRITE_CONFLICT' } });
+
+    const after = await db.node.findUniqueOrThrow({ where: { id: node.id } });
+    expect(after).toMatchObject({ content: 'cat plus cat', revSeq: 2 });
+    const history = await db.nodeRevision.findMany({ where: { nodeId: node.id }, orderBy: { revNo: 'asc' } });
+    expect(history.map((revision) => revision.revNo)).toEqual([1]);
+    expect(history[0]!.content).toBe('cat');
+  });
+
+  it('refuses the whole batch when one selected row changes before the lock', async () => {
+    const a = await makeNode('atomic:a', { content: 'cat' });
+    const b = await makeNode('atomic:b', { content: 'cat' });
+    await expect(beforeBulkTransaction(
+      () => resolvers.Mutation.updateNode({}, {
+        input: { id: b.id, content: 'cat changed' },
+      } as never, ctx()),
+      () => call({ oldText: 'cat', newText: 'dog', nodeIds: [a.id, b.id], fields: ['content'] }),
+    )).rejects.toMatchObject({ extensions: { code: 'NODE_WRITE_CONFLICT' } });
+
+    expect(await db.node.findUniqueOrThrow({ where: { id: a.id } })).toMatchObject({ content: 'cat', revSeq: 1 });
+    expect(await db.nodeRevision.count({ where: { nodeId: a.id } })).toBe(0);
+    expect(await db.node.findUniqueOrThrow({ where: { id: b.id } })).toMatchObject({ content: 'cat changed', revSeq: 2 });
+    expect(await db.nodeRevision.count({ where: { nodeId: b.id } })).toBe(1);
+  });
+
+  it('does not rewrite a node after a Channel claims its ancestor address', async () => {
+    const node = await makeNode('channel-race:child', { content: 'cat' });
+    const ordinary = await makeNode('ordinary', { content: 'cat' });
+    const result = await beforeBulkTransaction(
+      () => ensureChannelWithRoot(db, {
+        memoryId: memory.id, loc: 'channel-race', name: 'channel-race', createdBy: admin.id,
+      }),
+      () => call({ oldText: 'cat', newText: 'dog', nodeIds: [node.id, ordinary.id], fields: ['content'] }),
+    );
+    expect(result).toMatchObject({
+      nodesSelected: 2,
+      nodesScanned: 1,
+      nodesSkipped: 1,
+      skipCounts: { governed: 0, protectedAddress: 1 },
+      nodesChanged: 1,
+      totalReplacements: 1,
+    });
+    expect((await db.node.findUniqueOrThrow({ where: { id: node.id } })).content).toBe('cat');
+    expect(await db.nodeRevision.count({ where: { nodeId: node.id } })).toBe(0);
+    expect((await db.node.findUniqueOrThrow({ where: { id: ordinary.id } })).content).toBe('dog');
+  });
+
+  it('bulk-first holds the row lock until its write commits, then the move sees that content', async () => {
+    const node = await makeNode('bulk-first', { content: 'cat' });
+    const destination = await db.memory.create({
+      data: { id: generateId(), organizationId: org.id, urn: 'sr-org:dest', name: 'dest', class: 'knowledge' },
+    });
+    const paused = pauseBulkAfterWriting(node.id);
+
+    const bulk = call({ oldText: 'cat', newText: 'dog', nodeIds: [node.id], fields: ['content'] });
+    let move: Promise<unknown> | undefined;
+    try {
+      await paused.atBulkWrite;
+      move = resolvers.Mutation.moveNode({}, { sourceRef: node.id, targetMemoryRef: destination.id }, ctx());
+      await vi.waitFor(async () => {
+        const waits = await db.$queryRaw<Array<{ pid: number }>>`
+          SELECT pid FROM pg_stat_activity
+          WHERE datname = current_database() AND wait_event_type = 'Lock'
+            AND query LIKE '%nodes%' AND pid <> pg_backend_pid()
+        `;
+        expect(waits.length).toBeGreaterThan(0);
+      }, { timeout: 2_000, interval: 25 });
+    } finally {
+      paused.release();
+      paused.restore();
+    }
+    await bulk;
+    await move;
+    const after = await db.node.findUniqueOrThrow({ where: { id: node.id } });
+    expect(after).toMatchObject({ memoryId: destination.id, content: 'dog', revSeq: 3 });
+    const history = await db.nodeRevision.findMany({ where: { nodeId: node.id }, orderBy: { revNo: 'asc' } });
+    expect(history.map((revision) => revision.revNo)).toEqual([1, 2]);
+    expect(history[0]).toMatchObject({ memoryId: memory.id, content: 'cat' });
+    expect(history[1]).toMatchObject({ memoryId: memory.id, content: 'dog' });
+  });
+
+  it('bulk-first holds the Channel key until commit, then an ancestor Channel can claim the address', async () => {
+    const node = await makeNode('late-channel:child', { content: 'cat' });
+    const paused = pauseBulkAfterWriting(node.id);
+    const bulk = call({ oldText: 'cat', newText: 'dog', nodeIds: [node.id], fields: ['content'] });
+    let channel: Promise<unknown> | undefined;
+    try {
+      await paused.atBulkWrite;
+      channel = ensureChannelWithRoot(db, {
+        memoryId: memory.id, loc: 'late-channel', name: 'late-channel', createdBy: admin.id,
+      });
+      await vi.waitFor(async () => {
+        const waits = await db.$queryRaw<Array<{ pid: number }>>`
+          SELECT pid FROM pg_stat_activity
+          WHERE datname = current_database() AND wait_event_type = 'Lock'
+            AND query LIKE '%pg_advisory_xact_lock%' AND pid <> pg_backend_pid()
+        `;
+        expect(waits.length).toBeGreaterThan(0);
+      }, { timeout: 2_000, interval: 25 });
+    } finally {
+      paused.release();
+      paused.restore();
+    }
+    await bulk;
+    await channel;
+    expect(await db.node.findUniqueOrThrow({ where: { id: node.id } })).toMatchObject({
+      content: 'dog', revSeq: 2,
+    });
+    const history = await db.nodeRevision.findMany({ where: { nodeId: node.id } });
+    expect(history).toHaveLength(1);
+    expect(history[0]!.content).toBe('cat');
+    expect(await db.channel.count({ where: { memoryId: memory.id, loc: 'late-channel' } })).toBe(1);
+  });
+});
