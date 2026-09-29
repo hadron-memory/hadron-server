@@ -180,3 +180,28 @@ describe('copies and merges never publish a placeholder (@codex P1 on #1452)', (
     expect(await db.node.count({ where: { memoryId: minted.id, loc: { startsWith: 'pas:' } } })).toBe(0);
   });
 });
+
+describe('a placeholder stays a spec until written; cloneNode never copies one (@codex P1 on #1452)', () => {
+  it('refuses to drop the spec role from an unwritten placeholder, but allows it with content in the same write', async () => {
+    await reserve(draft.id, 'pas:100:01');
+    expect(await codeOf(updateSpec(draft.id, 'pas:100:01', { role: null }))).toBe('SPEC_PLACEHOLDER_ROLE_LOCKED');
+    expect(await codeOf(updateSpec(draft.id, 'pas:100:01', { role: 'note', content: '   ' }))).toBe('SPEC_PLACEHOLDER_ROLE_LOCKED');
+    expect(await row(draft.id, 'pas:100:01')).toMatchObject({ role: 'spec', isPlaceholder: true });
+
+    await updateSpec(draft.id, 'pas:100:01', { role: null, content: 'Now it is written.' });
+    expect(await row(draft.id, 'pas:100:01')).toMatchObject({ role: null, isPlaceholder: false });
+  });
+
+  it('refuses to cloneNode a placeholder, even one whose role was removed behind the API', async () => {
+    const reserved = await reserve(draft.id, 'pas:110:01');
+    expect(await codeOf(resolvers.Mutation.cloneNode(null, {
+      sourceRef: reserved.id, targetUrn: `hrn:node:${minted.urn}:pas:110:01`,
+    }, as(admin.id)))).toBe('SPEC_PLACEHOLDER_NOT_COPYABLE');
+
+    await db.node.update({ where: { id: reserved.id }, data: { role: null } });
+    expect(await codeOf(resolvers.Mutation.cloneNode(null, {
+      sourceRef: reserved.id, targetUrn: `hrn:node:${minted.urn}:pas:110:01`,
+    }, as(admin.id)))).toBe('SPEC_PLACEHOLDER_NOT_COPYABLE');
+    expect(await db.node.count({ where: { memoryId: minted.id, loc: 'pas:110:01' } })).toBe(0);
+  });
+});

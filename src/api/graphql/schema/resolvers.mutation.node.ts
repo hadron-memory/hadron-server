@@ -19,7 +19,7 @@ import {
   type GovernedContext,
   type GovernedMerge,
 } from '../../../lib/governedRole.js';
-import { placeholderFillPatch } from '../../../lib/specCorpus.js';
+import { assertPlaceholderKeepsSpecRole, placeholderFillPatch } from '../../../lib/specCorpus.js';
 import { carryGovernedSignals } from '../../../lib/governedSignals.js';
 import { computeContentHash } from '../../../lib/contentHash.js';
 import { decryptReadableRevisions } from '../../../lib/nodeRevisionRead.js';
@@ -1174,6 +1174,8 @@ export async function writeNodeCore(
               });
             }
 
+            // #1450 — a placeholder keeps its spec role until it is written.
+            assertPlaceholderKeepsSpecRole(current, { role: input.role, content: input.content });
             const data = {
               ...updatePayload,
               // The snapshot above keeps the old author. The new live content
@@ -1408,6 +1410,9 @@ export async function writeNodeCore(
             // both worlds" #543 exists to prevent, reachable again through the
             // window this transaction was added to close. The MCP path already
             // overrides the same way (src/mcp/server.ts).
+            if (authoritative && mode !== 'create') {
+              assertPlaceholderKeepsSpecRole(authoritative, { role: input.role, content: input.content });
+            }
             const upserted = await tx.node.upsert({
               ...upsertArgs,
               update: {
@@ -3277,6 +3282,15 @@ export const nodeMutations = {
       const { destMemoryId, destLoc } = await resolveRelocationTarget(
         ctx, source, targetUrn, targetMemoryRef,
       );
+      // #1450 (@codex P1, PR #1452) — a placeholder has nothing to copy, and
+      // writeNodeCore strips the flag, so a clone would be an ordinary blank
+      // node claiming the citation. Reserve the citation at the destination.
+      if (source.isPlaceholder) {
+        throw new GraphQLError(
+          `Cannot clone placeholder "${source.loc}": it has no spec to copy. Reserve the citation where you need it instead.`,
+          { extensions: { code: 'SPEC_PLACEHOLDER_NOT_COPYABLE', loc: source.loc } },
+        );
+      }
 
       // Decrypt the source with the SOURCE memory key so writeNodeCore can
       // re-encrypt the plaintext for the DESTINATION memory. Only content/
