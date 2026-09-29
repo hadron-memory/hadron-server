@@ -1105,9 +1105,14 @@ export async function canReadMemoryRecord(
   // grants access. A user-owned memory (org NULL) has no membership fast-path
   // and was already returned above. Under impersonation the fast-path only
   // applies inside the session's shared org.
+  // #1208 / cor:acl:010:01: a GROUP record never takes the org-member fast
+  // path — an org member without a MemoryMember row must fall through to the
+  // shared gate below, which admits group only through memberships. (A
+  // MemoryMember with no org role was already served by that same fallback.)
   const member =
     ctx.userId &&
     memory.organizationId &&
+    memory.class !== 'group' &&
     (!ctx.impersonation || ctx.impersonation.orgId === memory.organizationId)
       ? await ctx.db.orgMember.findFirst({
           where: { organizationId: memory.organizationId, userId: ctx.userId, deletedAt: null },
@@ -2311,27 +2316,51 @@ export async function requireMemoryWriteAccess(ctx: Context, memoryId: string): 
     throw memoryWriteForbidden();
   }
 
-  // Direct org member with CONTRIBUTOR+? findFirst + deletedAt so a REVOKED
-  // membership no longer grants write access (same rule as requireOrgRole).
-  const member = await ctx.db.orgMember.findFirst({
-    where: { organizationId: memory.organizationId, userId: ctx.userId, deletedAt: null },
-  });
-  if (member && (ROLE_ORDER[member.role] ?? -1) >= ROLE_ORDER['CONTRIBUTOR']) return;
-
-  // Cross-org subscription with CONTRIBUTOR role?
-  const userOrgs = await ctx.db.orgMember.findMany({
-    where: {
-      userId: ctx.userId,
-      deletedAt: null,
-      role: { in: ['CONTRIBUTOR', 'ADMIN', 'OWNER'] as any },
-    },
-    select: { organizationId: true },
-  });
-  for (const uo of userOrgs) {
-    const memorySub = await ctx.db.memorySubscription.findUnique({
-      where: { memoryId_organizationId: { memoryId, organizationId: uo.organizationId } },
+  // #1208 / cor:acl:010:01 — GROUP write is MemoryMember writer/owner ONLY.
+  // The plain org-CONTRIBUTOR path below must not fire for group: an org
+  // contributor the narrowed read gates no longer admit could otherwise
+  // still WRITE the memory (write wider than read — the incoherent state
+  // Baloo's #3677 review caught). Falls through to the cross-org
+  // subscription grant below, which stays: it is the subscription grant
+  // surface, symmetric with the read gates' subscription clause. MemoryMember
+  // rows hard-delete (FR-038), so existence is liveness.
+  if (memory.class === 'group') {
+    const groupWrite =
+      ctx.userId &&
+      (await ctx.db.memoryMember.findUnique({
+        where: { memoryId_userId: { memoryId, userId: ctx.userId } },
+        select: { role: true },
+      }));
+    if (groupWrite && (groupWrite.role === 'writer' || groupWrite.role === 'owner')) return;
+  } else {
+    // Direct org member with CONTRIBUTOR+? findFirst + deletedAt so a REVOKED
+    // membership no longer grants write access (same rule as requireOrgRole).
+    const member = await ctx.db.orgMember.findFirst({
+      where: { organizationId: memory.organizationId, userId: ctx.userId, deletedAt: null },
     });
-    if (memorySub && (ROLE_ORDER[memorySub.role] ?? -1) >= ROLE_ORDER['CONTRIBUTOR']) return;
+    if (member && (ROLE_ORDER[member.role] ?? -1) >= ROLE_ORDER['CONTRIBUTOR']) return;
+  }
+
+  // Cross-org subscription with CONTRIBUTOR role — for every class EXCEPT
+  // group (#3781): createMemorySubscription only admits PUBLIC memories and
+  // group visibility is CHECK-forced to GROUP, so a group-subscription row
+  // is API-invalid legacy state. For group, the MemoryMember writer/owner
+  // check above is the exclusive write grant (cor:acl:010:01).
+  if (memory.class !== 'group') {
+    const userOrgs = await ctx.db.orgMember.findMany({
+      where: {
+        userId: ctx.userId,
+        deletedAt: null,
+        role: { in: ['CONTRIBUTOR', 'ADMIN', 'OWNER'] as any },
+      },
+      select: { organizationId: true },
+    });
+    for (const uo of userOrgs) {
+      const memorySub = await ctx.db.memorySubscription.findUnique({
+        where: { memoryId_organizationId: { memoryId, organizationId: uo.organizationId } },
+      });
+      if (memorySub && (ROLE_ORDER[memorySub.role] ?? -1) >= ROLE_ORDER['CONTRIBUTOR']) return;
+    }
   }
 
   throw memoryWriteForbidden();
