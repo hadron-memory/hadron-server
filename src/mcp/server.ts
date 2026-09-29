@@ -6828,6 +6828,9 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
               // must still be the live node at the authorized (memory, loc),
               // or this would reconcile — and then rename — a row that moved.
               await tx.$queryRaw`SELECT "id" FROM "nodes" WHERE "id" = ${existing.id} FOR UPDATE`;
+              // This direct same-slot rename bypasses moveNodeSubtree but still
+              // snapshots history. Hold the source encryption flag before it.
+              await tx.$queryRaw`SELECT "id" FROM "memories" WHERE "id" = ${fromMemory.id} FOR SHARE`;
               const still = await tx.node.findUnique({
                 where: { id: existing.id },
                 select: { memoryId: true, loc: true, deletedAt: true },
