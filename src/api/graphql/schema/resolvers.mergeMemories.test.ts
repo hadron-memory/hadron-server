@@ -249,6 +249,33 @@ describe('mergeMemories — batched / resumable (#363)', () => {
     });
   }
 
+  it('refuses the next batch when encryption flips after a prior batch commits', async () => {
+    await makeNode(srcMem.id, 'later', { content: 'must stay in source' });
+    const findMany = db.node.findMany.bind(db.node);
+    let flipped = false;
+    const scan = vi.spyOn(db.node, 'findMany').mockImplementation((async (args: Parameters<typeof findMany>[0]) => {
+      const pageId = args?.where?.id;
+      if (!flipped && args?.where?.memoryId === srcMem.id &&
+        pageId && typeof pageId === 'object' && 'gt' in pageId) {
+        flipped = true;
+        await db.memory.update({
+          where: { id: tgtMem.id }, data: { isEncrypted: true, vectorIndexEnabled: false },
+        });
+      }
+      return findMany(args);
+    }) as never);
+    try {
+      await expect(mergeBatched({ classifyPageSize: 1 })).rejects.toMatchObject({
+        extensions: { code: 'ENCRYPTED_MEMORY_MERGE_UNSUPPORTED', memoryId: tgtMem.id },
+      });
+    } finally {
+      scan.mockRestore();
+    }
+    expect(flipped).toBe(true);
+    expect(await db.node.count({ where: { memoryId: srcMem.id, deletedAt: null } })).toBeGreaterThan(0);
+    expect(await db.node.count({ where: { memoryId: tgtMem.id, content: 'must stay in source' } })).toBe(0);
+  });
+
   it('folds every colliding node and relocates the rest across many batches', async () => {
     // Several collisions + several relocations, each landing in its own batch.
     for (let i = 0; i < 5; i++) {

@@ -146,15 +146,15 @@ function applyDecryption<T extends Partial<EncryptedNodeFields>>(
   key: EncryptionKey,
 ): T {
   // Spec 031 — abstract decrypts under the same envelope as content.
-  if (node.abstract != null && isAuthenticatedStringEnvelope(node.abstract, key)) {
+  if (node.abstract != null && isCiphertext(node.abstract)) {
     node.abstract = decryptString(stripCiphertextPrefix(node.abstract), key);
   }
-  if (node.content != null && isAuthenticatedStringEnvelope(node.content, key)) {
+  if (node.content != null && isCiphertext(node.content)) {
     node.content = decryptString(stripCiphertextPrefix(node.content), key);
   }
   if (node.data != null && typeof node.data === 'object') {
     const wrapped = node.data as { __enc?: string };
-    if (isAuthenticatedDataEnvelope(wrapped, key)) {
+    if (Object.keys(wrapped).length === 1 && typeof wrapped.__enc === 'string') {
       node.data = decryptJson(wrapped.__enc, key);
     }
   }

@@ -13,7 +13,7 @@ import { cleanDb } from '../../../test/helpers.js';
 import { resolvers, type Context } from './resolvers.js';
 import { generateId } from '../../../lib/id.js';
 import { isCiphertext, parseDataKey } from '../../../lib/crypto.js';
-import { decryptNodeFields, decryptNodeFieldsWithKey } from '../../../lib/nodeCrypto.js';
+import { decryptNodeFields, decryptNodeFieldsWithKey, encryptNodeFieldsWithKey } from '../../../lib/nodeCrypto.js';
 import { sessionKeyCache } from '../../../lib/sessionKeyCache.js';
 import { stageRequestMemoryKeys } from '../../../lib/memoryUnlock.js';
 import { requestKeyStorage } from '../../../lib/requestKeys.js';
@@ -372,6 +372,31 @@ describe('encryptMemory — locked conversion (#1346)', () => {
     await requestKeyStorage.run(new Map([[memoryId, key]]), async () => {
       const unlocked = await resolvers.Query.nodeRevision({}, { revisionId: prior.id }, ownerCtx());
       expect(unlocked).toMatchObject({ content, abstract, data });
+    });
+  });
+
+  it('fails a verifier-less historical read when the supplied key is wrong', async () => {
+    const key = parseDataKey(Buffer.alloc(32, 37).toString('base64'));
+    const wrongKey = parseDataKey(Buffer.alloc(32, 38).toString('base64'));
+    const stored = encryptNodeFieldsWithKey({
+      content: 'history secret', abstract: 'history abstract', data: { secret: true },
+    }, key);
+    await db.memory.update({
+      where: { id: memoryId }, data: { isEncrypted: true, keyVerifier: null, vectorIndexEnabled: false },
+    });
+    const revision = await db.nodeRevision.create({
+      data: {
+        id: generateId(), nodeId, memoryId, loc: 'entry-1', name: 'Entry 1',
+        content: stored.content, abstract: stored.abstract, data: stored.data as never,
+      },
+    });
+    await requestKeyStorage.run(new Map([[memoryId, wrongKey]]), async () => {
+      await expect(resolvers.Query.nodeRevision({}, { revisionId: revision.id }, ownerCtx()))
+        .rejects.toThrow();
+    });
+    await requestKeyStorage.run(new Map([[memoryId, key]]), async () => {
+      expect(await resolvers.Query.nodeRevision({}, { revisionId: revision.id }, ownerCtx()))
+        .toMatchObject({ content: 'history secret', abstract: 'history abstract', data: { secret: true } });
     });
   });
 

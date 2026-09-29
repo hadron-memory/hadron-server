@@ -17,4 +17,15 @@ describe('authenticated node envelopes', () => {
     expect(decryptNodeFieldsWithKey({ ...stored }, key)).toEqual(plain);
     expect(encryptNodeFieldsWithKey(stored, key)).toEqual(stored);
   });
+
+  it('rejects a wrong key for every stored envelope field', () => {
+    const key = generateDataKey();
+    const wrongKey = generateDataKey();
+    const stored = encryptNodeFieldsWithKey({
+      content: 'secret content', abstract: 'secret abstract', data: { secret: true },
+    }, key);
+    expect(() => decryptNodeFieldsWithKey({ content: stored.content }, wrongKey)).toThrow();
+    expect(() => decryptNodeFieldsWithKey({ abstract: stored.abstract }, wrongKey)).toThrow();
+    expect(() => decryptNodeFieldsWithKey({ data: stored.data }, wrongKey)).toThrow();
+  });
 });
