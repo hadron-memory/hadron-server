@@ -91,6 +91,53 @@ describe('revival clears prior vectors without an embedding endpoint', () => {
     expect(effects).toHaveLength(1);
   });
 
+  it('rejects an old abstract insert that began while revival held the node lock', async () => {
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    let signalLocked!: () => void;
+    const locked = new Promise<void>((resolve) => { signalLocked = resolve; });
+    const newPendingAt = new Date('2026-09-29T00:00:00.000Z');
+    const reviving = db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM nodes WHERE id = ${nodeId} FOR UPDATE`;
+      await tx.nodeEmbedding.deleteMany({ where: { nodeId } });
+      await tx.node.update({
+        where: { id: nodeId },
+        data: { deletedAt: null, deletedBy: null, embeddingPendingAt: newPendingAt, content: 'replacement only' },
+      });
+      signalLocked();
+      await held;
+    });
+    await locked;
+    const staleWrite = upsertAbstractVector(db, {
+      nodeId, memoryId: memory.id, provider: 'old-worker', model: 'old', dim: 768, embedding: query,
+    }, oldPendingAt);
+    let lockError: unknown;
+    try {
+      // Wait until the old writer is actually blocked inside Postgres. This
+      // proves its statement began before the revival transaction committed.
+      const deadline = Date.now() + 5_000;
+      for (;;) {
+        const [{ waiting }] = await db.$queryRaw<Array<{ waiting: bigint }>>`
+          SELECT count(*)::bigint AS waiting FROM pg_stat_activity
+          WHERE datname = current_database() AND wait_event_type = 'Lock'
+            AND query LIKE '%INSERT INTO node_embeddings%'
+        `;
+        if (waiting > 0n) break;
+        if (Date.now() > deadline) throw new Error('old abstract writer did not reach a database lock');
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+    } catch (error) {
+      lockError = error;
+    } finally {
+      release();
+    }
+    await reviving;
+    const wrote = await staleWrite;
+    if (lockError) throw lockError;
+    expect(wrote).toBe(false);
+    await expectOldVectorsGone();
+  }, 15_000);
+
   it('a refused create over a live node leaves its vectors intact', async () => {
     await db.node.update({ where: { id: nodeId }, data: { deletedAt: null, deletedBy: null } });
     const ctx: Context = { db, roles: ['ADMIN'], userId: adminId, clientId: `user:${adminId}` };
