@@ -107,7 +107,9 @@ function fenceOpener(trimmed: string): string {
  * fence is restored as prose from its opener onward.
  */
 export function withoutFencedCode(s: string): string {
-  const lines = s.split('\n');
+  // CRLF-authored bodies too (@codex P2, PR #1462): a residual `\r` would stop a
+  // closing fence from closing and a heading from parsing. Lines rejoin with `\n`.
+  const lines = s.split(/\r?\n/);
   const kept = new Array<string>(lines.length);
   let open = '';
   let openAt = -1;

@@ -67,6 +67,14 @@ describe('parseOpenQuestions (ruling (b))', () => {
     expect(parseOpenQuestions(body).map((q) => q.decider)).toEqual(['Ada', 'Bo']);
   });
 
+  it('parses a CRLF-authored section, fenced example included (@codex P2 on #1462)', () => {
+    const body = ['## Open Questions', '- First. Ada decides.', '```', '- Not a question.', '```', '- Second.'].join('\r\n');
+    expect(parseOpenQuestions(body)).toEqual([
+      { question: 'First. Ada decides.', decider: 'Ada' },
+      { question: 'Second.', decider: null },
+    ]);
+  });
+
   it('ignores fenced code and bodies without the section', () => {
     expect(parseOpenQuestions('```\n## Open Questions\n- x. Ada decides.\n```')).toEqual([]);
     expect(parseOpenQuestions('Just prose.')).toEqual([]);
