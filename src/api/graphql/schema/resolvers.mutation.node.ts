@@ -877,7 +877,7 @@ export async function writeNodeCore(
         await tx.edge.deleteMany({ where: { sourceId: writtenNode.id } });
         await tx.pendingEdge.deleteMany({ where: { sourceId: writtenNode.id } });
         if (resolvedEdges.length > 0) {
-          await tx.edge.createMany({
+          const { count } = await tx.edge.createMany({
             data: resolvedEdges.map((edge) => ({
               memoryId: writtenNode.memoryId,
               sourceId: writtenNode.id,
@@ -890,6 +890,14 @@ export async function writeNodeCore(
             })),
             skipDuplicates: true,
           });
+          // MCP's replaceOutgoingEdgesInTransaction checks the same count.
+          // Both inline writers must refuse a skipped edge and roll back the
+          // enclosing node mutation instead of reporting a partial save.
+          if (count !== resolvedEdges.length) {
+            throw new GraphQLError('An edge loc is already occupied; choose unique edge locs.', {
+              extensions: { code: 'EDGE_LOC_CONFLICT' },
+            });
+          }
         }
         const refreshed = await tx.node.findUniqueOrThrow({ where: { id: writtenNode.id }, include });
         return refreshed as unknown as T;

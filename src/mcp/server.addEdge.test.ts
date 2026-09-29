@@ -165,6 +165,26 @@ describe('addEdge — happy path', () => {
 });
 
 describe('addEdge — non-destructive + idempotent', () => {
+  it('refuses an occupied edge loc when it belongs to another source (#1469)', async () => {
+    const loc = deriveEdgeLoc(source.loc, 'cites', topLevel.loc);
+    const original = await db.edge.create({
+      data: {
+        id: generateId(), memoryId: memory.id, sourceId: nested.id,
+        targetId: topLevel.id, loc, name: 'cites',
+      },
+    });
+
+    const result = await addEdge({
+      sourceUrn: source.id, targetUrn: topLevel.id, name: 'cites', auth: adminAuth(),
+    });
+
+    expect(result).toEqual({ error: expect.stringMatching(/^\[edge_loc_conflict\]/) });
+    expect(await db.edge.count({ where: { sourceId: source.id, targetId: topLevel.id } })).toBe(0);
+    expect(await db.edge.findUnique({ where: { id: original.id } })).toMatchObject({
+      sourceId: nested.id, targetId: topLevel.id, loc,
+    });
+  });
+
   it('is idempotent: re-running with the same (source, target, name) does not duplicate', async () => {
     const args = {
       sourceUrn: `urn:node:${memory.urn}:${source.loc}`,
@@ -180,6 +200,42 @@ describe('addEdge — non-destructive + idempotent', () => {
     expect(await db.edge.count({
       where: { sourceId: source.id, targetId: topLevel.id, name: 'cites' },
     })).toBe(1);
+  });
+
+  it('does not call changed edge metadata at the same loc an idempotent save', async () => {
+    const loc = 'authored:edge';
+    const auth = adminAuth();
+    const first = await addEdge({
+      sourceUrn: source.id, targetUrn: topLevel.id, loc,
+      name: 'cites', description: 'original', auth,
+    });
+    expect(first).not.toHaveProperty('error');
+
+    const replay = await addEdge({
+      sourceUrn: source.id, targetUrn: topLevel.id, loc,
+      name: 'cites', description: 'original', auth,
+    });
+    expect(replay).not.toHaveProperty('error');
+    const changed = await addEdge({
+      sourceUrn: source.id, targetUrn: topLevel.id, loc,
+      name: 'cites', description: 'changed', auth,
+    });
+    expect(changed).toEqual({ error: expect.stringMatching(/^\[edge_loc_conflict\]/) });
+    expect(await db.edge.findUnique({ where: { loc_memoryId: { loc, memoryId: memory.id } } }))
+      .toMatchObject({ sourceId: source.id, targetId: topLevel.id, description: 'original' });
+  });
+
+  it('does not treat a soft-deleted edge at the same loc as saved', async () => {
+    const loc = deriveEdgeLoc(source.loc, 'cites', topLevel.loc);
+    await db.edge.create({
+      data: { id: generateId(), memoryId: memory.id, sourceId: source.id,
+        targetId: topLevel.id, loc, name: 'cites', deletedAt: new Date() },
+    });
+    const result = await addEdge({
+      sourceUrn: source.id, targetUrn: topLevel.id, name: 'cites', auth: adminAuth(),
+    });
+    expect(result).toEqual({ error: expect.stringMatching(/^\[edge_loc_conflict\]/) });
+    expect(await db.edge.count({ where: { sourceId: source.id, deletedAt: null } })).toBe(0);
   });
 
   it('leaves pre-existing edges on the same source intact (unlike hadron_update_node)', async () => {
