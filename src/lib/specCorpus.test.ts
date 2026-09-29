@@ -5,6 +5,7 @@ import { cleanDb } from '../test/helpers.js';
 import { generateId } from './id.js';
 import { resolveNodeRef } from './entityRef/nodeRef.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
+import { mergeMemoryGraph } from '../controller/operations/mergeMemories.js';
 
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -121,5 +122,38 @@ describe('draft corpus moves record no URN alias (#1448)', () => {
     const node = await createNode(minted.id, 'cor:040:01');
     await resolvers.Mutation.moveNode(null, { sourceRef: node.id, targetUrn: nodeUrn(minted, 'cor:040:02') }, ctx());
     expect((await aliasesFor(node.id)).map((a) => a.urn)).toEqual([`${minted.urn}:cor:040:01`]);
+  });
+});
+
+describe('draft corpus merges record no URN alias either (#1448, @codex P1 on #1451)', () => {
+  const merge = (sourceMemoryId: string, targetMemoryId: string) => mergeMemoryGraph(db, {
+    sourceMemoryId,
+    targetMemoryId,
+    fields: new Set(['CONTENT', 'EDGES']),
+    deleteSourceMem: false,
+    editor: { userId: admin.id },
+    batchSize: 1,
+    classifyPageSize: 2,
+  });
+
+  it('relocates out of a draft corpus without aliases', async () => {
+    const draft = await createMemory('specs-draft', true);
+    const minted = await createMemory('specs');
+    const node = await createNode(draft.id, 'pas:050:01');
+
+    await merge(draft.id, minted.id);
+
+    expect((await db.node.findUniqueOrThrow({ where: { id: node.id } })).memoryId).toBe(minted.id);
+    expect(await aliasesFor(node.id)).toEqual([]);
+  });
+
+  it('still records aliases when a minted memory merges into a draft one', async () => {
+    const draft = await createMemory('specs-draft', true);
+    const minted = await createMemory('specs');
+    const node = await createNode(minted.id, 'cor:050:01');
+
+    await merge(minted.id, draft.id);
+
+    expect((await aliasesFor(node.id)).map((a) => a.urn)).toEqual([`${minted.urn}:cor:050:01`]);
   });
 });

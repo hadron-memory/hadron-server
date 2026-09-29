@@ -22,6 +22,7 @@ import type { MemorySchema } from '../../lib/memorySchema.js';
 import { acquireLockSet } from '../../lib/nodeSubtreeLock.js';
 import { recordUrnRename } from '../../lib/urnAlias.js';
 import { safeNodeUrnV2 } from '../../lib/urnEmit.js';
+import { isDraftCorpus } from '../../lib/specCorpus.js';
 
 /**
  * Batched, resumable execution of a memory→memory merge (spec cor:api:080).
@@ -341,6 +342,14 @@ export async function mergeMemoryGraph(
           // The held Memory rows also pin both URNs against a concurrent rename.
           const sourceUrn = memoryUrns.get(sourceMemoryId)!;
           const targetUrn = memoryUrns.get(targetMemoryId)!;
+          // #1448 (@codex P1, PR #1451): relocating out of a DRAFT spec corpus
+          // leaves no alias, exactly like a move — a draft number was never
+          // published. Read under the Memory lock held above, so a concurrent
+          // mint cannot change the answer mid-batch.
+          const [sourceFlags] = await tx.$queryRaw<Array<{ corpus_draft: boolean }>>`
+            SELECT corpus_draft FROM memories WHERE id = ${sourceMemoryId}
+          `;
+          const recordAliases = !isDraftCorpus({ corpusDraft: sourceFlags?.corpus_draft === true });
           for (const row of rows) {
             await createNodeRevision(
               tx,
@@ -350,7 +359,7 @@ export async function mergeMemoryGraph(
             // Record the old address beside the write in this bounded tx;
             // folded/deleted identities never reach this relocation loop.
             // The mirror root has loc='' and no round-trippable v2 node URN.
-            if (row.loc) {
+            if (row.loc && recordAliases) {
               await recordUrnRename(tx, {
                 entityType: 'NODE',
                 entityId: row.id,
