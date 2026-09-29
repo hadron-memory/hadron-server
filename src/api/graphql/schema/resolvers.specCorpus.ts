@@ -159,6 +159,13 @@ interface ScannableCorpus {
    * resolveNodeRef treats it. Either way it is not ours.
    */
   shadowed: Map<string, string[]>;
+  /**
+   * (@codex P2, #1453) Other live memories that held the corpus's CURRENT URN
+   * in the past. A citation with the current URN resolves to the corpus when
+   * it has a live node at the loc (current-live precedence), and otherwise
+   * falls through to one of these if IT has that loc, so it is not ours.
+   */
+  currentUrnHistorical: string[];
 }
 
 /**
@@ -214,7 +221,17 @@ async function loadScannableCorpus(ctx: Context, memoryRef: string): Promise<Sca
     })).map((m) => m.id));
     for (const a of historical) if (live.has(a.entityId)) claim(a.urn.replace(/^(?:hrn|urn):mem(?:ory)?:/i, ''), a.entityId);
   }
-  return { id, urn: memory.urn, pattern: corpusReferencePattern(urns), shadowed };
+  const priorHolders = await ctx.db.urnAlias.findMany({
+    where: { entityType: 'MEMORY', urn: memory.urn, entityId: { not: id } },
+    select: { entityId: true },
+  });
+  const currentUrnHistorical = priorHolders.length
+    ? (await ctx.db.memory.findMany({
+        where: { id: { in: [...new Set(priorHolders.map((a) => a.entityId))] }, deletedAt: null },
+        select: { id: true },
+      })).map((m) => m.id)
+    : [];
+  return { id, urn: memory.urn, pattern: corpusReferencePattern(urns), shadowed, currentUrnHistorical };
 }
 
 /**
@@ -228,19 +245,25 @@ async function referenceAcceptor(
   corpus: ScannableCorpus,
   refs: ReadonlyArray<{ memoryUrn: string; targetLoc: string }>,
 ): Promise<(ref: { memoryUrn: string; targetLoc: string }) => boolean> {
-  const candidates = refs.filter((r) => corpus.shadowed.has(r.memoryUrn));
+  const claimantsOf = (ref: { memoryUrn: string }): string[] =>
+    ref.memoryUrn === corpus.urn ? corpus.currentUrnHistorical : (corpus.shadowed.get(ref.memoryUrn) ?? []);
+  const candidates = refs.filter((r) => claimantsOf(r).length > 0);
   if (candidates.length === 0) return () => true;
   const live = await db.node.findMany({
     where: {
       deletedAt: null,
-      OR: candidates.flatMap((r) => corpus.shadowed.get(r.memoryUrn)!.map((memoryId) => ({ memoryId, loc: r.targetLoc }))),
+      OR: candidates.flatMap((r) => [
+        ...claimantsOf(r).map((memoryId) => ({ memoryId, loc: r.targetLoc })),
+        // The corpus's own node wins for its current URN.
+        ...(r.memoryUrn === corpus.urn ? [{ memoryId: corpus.id, loc: r.targetLoc }] : []),
+      ]),
     },
     select: { memoryId: true, loc: true },
   });
   const taken = new Set(live.map((n) => `${n.memoryId}\u0000${n.loc}`));
   return (ref) => {
-    const claimants = corpus.shadowed.get(ref.memoryUrn);
-    return !claimants || !claimants.some((m) => taken.has(`${m}\u0000${ref.targetLoc}`));
+    if (ref.memoryUrn === corpus.urn && taken.has(`${corpus.id}\u0000${ref.targetLoc}`)) return true;
+    return !claimantsOf(ref).some((m) => taken.has(`${m}\u0000${ref.targetLoc}`));
   };
 }
 

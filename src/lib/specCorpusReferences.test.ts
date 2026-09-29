@@ -364,3 +364,24 @@ describe('renumber reports where each rewrite landed (@codex P2 on #1453)', () =
     expect(cites.every((c) => c.sourceLoc === 'pas:021')).toBe(true);
   });
 });
+
+describe('historical holders of the CURRENT corpus URN (@codex P2 on #1453)', () => {
+  it('does not report a citation as missing when a prior holder of our URN has that loc, and keeps ours first', async () => {
+    const prior = await resolvers.Mutation.createMemory(null, { orgId: org.id, name: 'shared' }, as());
+    const shared = prior.urn;
+    await db.node.create({ data: { id: generateId(), memoryId: prior.id, loc: 'pas:500', name: 'Theirs only' } });
+    await db.node.create({ data: { id: generateId(), memoryId: prior.id, loc: 'pas:010', name: 'Theirs too' } });
+    await resolvers.Mutation.updateMemory(null, { id: prior.id, urn: 'renamed-away' } as never, as());
+    await resolvers.Mutation.updateMemory(null, { id: draft.id, urn: 'shared' } as never, as());
+    expect((await db.memory.findUniqueOrThrow({ where: { id: draft.id } })).urn).toBe(shared);
+
+    await db.node.update({ where: { id: other.id }, data: {
+      content: `Falls through: hrn:node:${shared}:pas:500. Ours first: hrn:node:${shared}:pas:010.`,
+    } });
+
+    const unresolved = await resolvers.Query.specUnresolvedReferences(null, { memoryRef: draft.id }, as());
+    expect(unresolved.map((r) => r.targetLoc)).not.toContain('pas:500');
+    const toFeature = await resolvers.Query.specBacklinks(null, { memoryRef: draft.id, loc: 'pas:010' }, as());
+    expect(toFeature.some((r) => r.kind === 'URN' && r.sourceLoc === 'pas:020')).toBe(true);
+  });
+});
