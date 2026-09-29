@@ -19,6 +19,7 @@ import {
   type GovernedContext,
   type GovernedMerge,
 } from '../../../lib/governedRole.js';
+import { placeholderFillPatch } from '../../../lib/specCorpus.js';
 import { carryGovernedSignals } from '../../../lib/governedSignals.js';
 import { computeContentHash } from '../../../lib/contentHash.js';
 import { decryptReadableRevisions } from '../../../lib/nodeRevisionRead.js';
@@ -781,8 +782,14 @@ export async function writeNodeCore(
         nextAbstractOriginHash === undefined
           ? {}
           : { abstractOriginHash: nextAbstractOriginHash };
+      // #1450 — `isPlaceholder` is SERVER-set (reserveSpecCitation marks it,
+      // a real content write clears it). No node input type carries it, but a
+      // caller passing a parsed object through (an importer, an internal
+      // helper) must not be able to set or clear it, so it is stripped here
+      // with the same defence as the hash.
       const {
         abstractOriginHash: _stripCallerSupplied,
+        isPlaceholder: _stripCallerPlaceholder,
         ...nodeFieldsClean
       } = nodeFields as Record<string, unknown>;
 
@@ -1172,6 +1179,8 @@ export async function writeNodeCore(
               // has no verified author until the attestation/human gates land.
               ...(authoredContentChanged(changes) ? clearNodeAuthorship() : {}),
               ...(lockedAbstractHash !== undefined ? { abstractOriginHash: lockedAbstractHash } : {}),
+              // #1450 — writing real content to a reserved citation makes it a spec.
+              ...placeholderFillPatch(current, input.content),
               revisionContentHash: revisionStateHashRefreshMarker(),
             } as Prisma.NodeUncheckedUpdateInput;
 
@@ -1414,6 +1423,13 @@ export async function writeNodeCore(
                     ? clearNodeAuthorship() : {}),
                 ...(authoritativeAbstractHash !== undefined
                   ? { abstractOriginHash: authoritativeAbstractHash } : {}),
+                // #1450 — a create that revives a tombstone is a NEW node, so it
+                // must not inherit a dead placeholder's flag (reserve re-marks
+                // its own row afterwards). An upsert onto a live placeholder
+                // clears it only when it writes real content.
+                ...(mode === 'create'
+                  ? { isPlaceholder: false }
+                  : placeholderFillPatch(authoritative, input.content)),
                 revisionContentHash: revisionStateHashRefreshMarker(),
                 // create-ONLY, matching the `isResurrect` it corrects. Widening
                 // it to `upsert` would let an importer revive a soft-deleted

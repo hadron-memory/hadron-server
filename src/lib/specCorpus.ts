@@ -28,3 +28,21 @@ export function isDraftCorpus(memory: { corpusDraft: boolean }): boolean {
 export function corpusStateOf(memory: { corpusDraft: boolean }): CorpusState {
   return isDraftCorpus(memory) ? 'DRAFT' : 'MINTED';
 }
+
+/**
+ * #1450 — the write patch that turns a PLACEHOLDER spec into a real one.
+ *
+ * A placeholder is a reserved citation with no spec yet, marked by the
+ * server-set `Node.isPlaceholder`, never inferred from an empty body. Writing
+ * real content to it (anything but blank) is what writing the spec means, so
+ * that write clears the flag and the node stays at the same citation. A write
+ * that leaves the body blank (a rename, a tag) keeps it a placeholder.
+ */
+export function placeholderFillPatch(
+  prior: { isPlaceholder?: boolean | null } | null | undefined,
+  content: unknown,
+): { isPlaceholder: false } | Record<string, never> {
+  return prior?.isPlaceholder === true && typeof content === 'string' && content.trim() !== ''
+    ? { isPlaceholder: false }
+    : {};
+}

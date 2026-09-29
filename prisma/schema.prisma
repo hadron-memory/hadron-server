@@ -1110,6 +1110,12 @@ model Node {
   /// Colon-delimited path within the memory (e.g. "auth:tokens").
   loc                String
   isLink             Boolean   @default(false) @map("is_link")
+  /// #1450 — a RESERVED spec citation with no spec written yet (a placeholder
+  /// in a draft corpus; see src/lib/specCorpus.ts). Set only by the server's
+  /// `reserveSpecCitation`, never by a client write, and never inferred from an
+  /// empty body. Writing real content clears it; the node keeps its citation.
+  /// Minting refuses while any remain, so a minted corpus has none.
+  isPlaceholder      Boolean   @default(false) @map("is_placeholder")
   description        String?
   /// Paragraph-length summary of this node. Cap is 2000 characters,
   /// enforced at the API boundary (not as a DB CHECK — caps are
