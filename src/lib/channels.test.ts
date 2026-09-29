@@ -254,6 +254,21 @@ describe('protection (S4)', () => {
     });
     await M.deleteChannel({}, { ref: first.id }, ctx(admin.id));
 
+    // #1460 — Channel creation also revives tombstoned containers around the
+    // root. Their old vectors must not become searchable with the new room.
+    const staleContainers = await db.node.findMany({
+      where: { memoryId: appMem.id, loc: { in: ['chats', 'chats:team:messages'] } },
+      select: { id: true },
+    });
+    expect(staleContainers).toHaveLength(2);
+    for (const container of staleContainers) {
+      await db.node.update({ where: { id: container.id }, data: { deletedAt: new Date(), deletedBy: admin.id } });
+      await db.nodeEmbedding.create({
+        data: { id: generateId(), nodeId: container.id, memoryId: appMem.id,
+          kind: 'abstract', provider: 'old', model: 'old', dim: 768 },
+      });
+    }
+
     // Recreate at the SAME address. The schema forces a resurrection —
     // `@@unique([loc, memoryId])` has no `deletedAt`, so the tombstone holds
     // the loc and no second node can be inserted there.
@@ -281,6 +296,10 @@ describe('protection (S4)', () => {
     expect(cleanRoot.embeddingError).toBeNull();
     expect(cleanRoot.tokens).toBeNull();
     expect(await db.nodeEmbedding.count({ where: { nodeId: cleanRoot.id } })).toBe(0);
+    for (const container of staleContainers) {
+      expect((await db.node.findUniqueOrThrow({ where: { id: container.id } })).deletedAt).toBeNull();
+      expect(await db.nodeEmbedding.count({ where: { nodeId: container.id } })).toBe(0);
+    }
     expect((await db.edge.findUniqueOrThrow({ where: { id: oldReply.id } })).deletedAt).not.toBeNull();
 
     // A caller may retry the stable id it deleted before reuse. Reset already

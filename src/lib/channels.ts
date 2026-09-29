@@ -362,6 +362,9 @@ export async function ensureChannelWithRoot(
           );
         }
         if (existing.deletedAt) {
+          // Channel creation may also revive tombstoned ancestor and
+          // :messages nodes; their vectors belong to the old incarnation.
+          await tx.nodeEmbedding.deleteMany({ where: { nodeId: existing.id } });
           await tx.node.update({ where: { id: existing.id }, data: { deletedAt: null, deletedBy: null } });
         }
         return existing.id;

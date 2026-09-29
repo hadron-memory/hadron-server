@@ -1362,6 +1362,21 @@ export async function writeNodeCore(
               { platformWrite: opts?.platformWrite },
             );
 
+            // #1460 — a tombstone still owns its old abstract and chunk
+            // vectors. Remove them in this transaction before making the row
+            // live, so a revive cannot publish its previous incarnation's
+            // plaintext while the new embed is pending or unavailable.
+            if (mode === 'create' && authoritative?.deletedAt) {
+              await tx.nodeEmbedding.deleteMany({ where: { nodeId: authoritative.id } });
+            }
+            // An embed that started before revival must fail its pending-at
+            // guard even if it finishes before the post-commit enqueue runs.
+            const revivalNowMs = Date.now();
+            const revivedPendingAt = mode === 'create' && authoritative?.deletedAt
+              ? new Date(revivalNowMs === authoritative.embeddingPendingAt?.getTime()
+                ? revivalNowMs + 1 : revivalNowMs)
+              : undefined;
+
             // #1183 — resurrect from the AUTHORITATIVE row, not the stale
             // probe. `updateExtras` above was built from `existing`, which may
             // have seen nothing while another caller created AND soft-deleted
@@ -1393,7 +1408,7 @@ export async function writeNodeCore(
                 // node merely by writing to its loc — a behaviour change this
                 // fix has no business making (@copilot, PR #1184 round 4).
                 ...(mode === 'create' && authoritative?.deletedAt
-                  ? { deletedAt: null, deletedBy: null }
+                  ? { deletedAt: null, deletedBy: null, embeddingPendingAt: revivedPendingAt }
                   : {}),
               } as Prisma.NodeUncheckedUpdateInput,
             });

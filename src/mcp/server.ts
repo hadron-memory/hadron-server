@@ -5391,6 +5391,18 @@ export function createMcpServerInstance(
             priorRole: pre?.role ?? null,
             runnableAfter: mergedGovernedState(pre, { role, isRunnable }).isRunnable,
           });
+          // #1460 — the locked tombstone can retain vectors from its old
+          // plaintext. Purge both kinds before the upsert makes it searchable.
+          if (pre?.deletedAt) {
+            await tx.nodeEmbedding.deleteMany({ where: { nodeId: pre.id } });
+          }
+          // Invalidate an old in-flight embed before the asynchronous enqueue
+          // restamps the marker after commit.
+          const revivalNowMs = Date.now();
+          const revivedPendingAt = pre?.deletedAt
+            ? new Date(revivalNowMs === pre.embeddingPendingAt?.getTime()
+              ? revivalNowMs + 1 : revivalNowMs)
+            : undefined;
           const written = await tx.node.upsert({
             ...upsertArgs,
             // Resurrect (#543) on the authoritative row, not the stale probe: a
@@ -5399,7 +5411,7 @@ export function createMcpServerInstance(
             update: {
               ...upsertArgs.update,
               ...(pre ? clearNodeAuthorship() : {}),
-              ...(pre?.deletedAt ? { deletedAt: null, deletedBy: null } : {}),
+              ...(pre?.deletedAt ? { deletedAt: null, deletedBy: null, embeddingPendingAt: revivedPendingAt } : {}),
             } as any,
           });
           if (resolvedEdges !== null) {
