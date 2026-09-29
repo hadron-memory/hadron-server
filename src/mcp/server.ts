@@ -3199,16 +3199,6 @@ export function createMcpServerInstance(
       // Default name to the last loc atom (e.g. `services:db-helpers` → `db-helpers`).
       const name = rawName ?? loc.split(':').pop()!;
       const content = description ?? `Section: ${name}`;
-      const parentMemoryState = await db.memory.findUniqueOrThrow({
-        where: { id: memoryId }, select: { isEncrypted: true },
-      });
-      const parentKey = parentMemoryState.isEncrypted
-        ? sessionKeyCache.getByMemoryId(memoryId) : null;
-      if (parentMemoryState.isEncrypted && !parentKey) {
-        return textResult('This memory is encrypted and locked — call hadron_unlock_memory first (spec 041).');
-      }
-      const storedParentContent = parentKey
-        ? encryptNodeFieldsWithKey({ content }, parentKey).content : content;
 
       try {
         validateLoc(loc);
@@ -3219,6 +3209,17 @@ export function createMcpServerInstance(
       if (!(await canWriteToMemory(db, auth, memoryId))) {
         return textResult('Write access denied for this memory.');
       }
+
+      const parentMemoryState = await db.memory.findUniqueOrThrow({
+        where: { id: memoryId }, select: { isEncrypted: true },
+      });
+      const parentKey = parentMemoryState.isEncrypted
+        ? sessionKeyCache.getByMemoryId(memoryId) : null;
+      if (parentMemoryState.isEncrypted && !parentKey) {
+        return textResult('This memory is encrypted and locked — call hadron_unlock_memory first (spec 041).');
+      }
+      const storedParentContent = parentKey
+        ? encryptNodeFieldsWithKey({ content }, parentKey).content : content;
 
       // #1201 (@copilot, PR #1203 round 2). This helper writes through a RAW
       // upsert whose update branch preserves omitted fields, so pointed at an
