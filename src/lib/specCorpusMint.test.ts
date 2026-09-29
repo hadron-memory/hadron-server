@@ -93,6 +93,23 @@ describe('mintSpecCorpus: a citation-shaped memory root is not a spec (@codex P2
     expect((await mint(true, admin.id, pas.id)).blockers).toEqual([]);
   });
 
+  it('lints a different node that sits at a former or current name loc (Chip QA / Bob on #1462)', async () => {
+    const memory = await resolvers.Mutation.createMemory(null, { orgId: org.id, name: 'not-a-citation', draftCorpus: true }, as());
+    await resolvers.Mutation.updateMemory(null, { id: memory.id, name: 'pas' } as never, as());
+    await db.node.create({ data: { id: generateId(), memoryId: memory.id, loc: 'pas', name: 'Data', nodeType: 'data' } });
+    expect((await mint(true, admin.id, memory.id)).blockers.map((b) => [b.kind, b.loc, b.rule])).toEqual([
+      ['LINT', 'pas', 'nodetype-info'],
+      ['LINT', 'pas', 'tag-spec'],
+    ]);
+  });
+
+  it('never hands the exemption to a real node when the root was hard-deleted', async () => {
+    const memory = await resolvers.Mutation.createMemory(null, { orgId: org.id, name: 'spec-corpus', draftCorpus: true }, as());
+    await db.node.deleteMany({ where: { memoryId: memory.id } });
+    await db.node.create({ data: { id: generateId(), memoryId: memory.id, loc: 'pas:010', name: 'Unmarked', nodeType: 'info' } });
+    expect((await mint(true, admin.id, memory.id)).blockers.map((b) => [b.loc, b.rule])).toEqual([['pas:010', 'tag-spec']]);
+  });
+
   it('still lints a root that someone made a spec', async () => {
     const pas = await resolvers.Mutation.createMemory(null, { orgId: org.id, name: 'pas', draftCorpus: true }, as());
     await db.node.updateMany({ where: { memoryId: pas.id, loc: 'pas' }, data: { role: 'spec', nodeType: 'data' } });

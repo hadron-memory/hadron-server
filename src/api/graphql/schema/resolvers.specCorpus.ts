@@ -185,8 +185,8 @@ interface ScannableCorpus {
   /**
    * (@codex P2, PR #1462) Where the memory's root node can sit: createMemory
    * puts it at the memory's name, and a rename moves neither, so every name
-   * and URN slug the memory has held. A root is infrastructure, not a spec,
-   * even when that name happens to be citation-shaped (`pas`).
+   * and URN slug the memory has held. A GUARD only: which node is the root is
+   * decided by identity (the mint's first-row check), never by loc alone.
    */
   rootLocs: ReadonlySet<string>;
 }
@@ -899,10 +899,20 @@ export const specCorpusMintMutations = {
           name: true, description: true, abstract: true, content: true, abstractOriginHash: true,
         },
       });
-      // Citation-shaped nodes, less the memory's root: an unmarked node at a
-      // root loc is infrastructure (@codex P2, PR #1462). A root someone made
+      // Citation-shaped nodes, less the memory's ROOT (@codex P2, PR #1462):
+      // infrastructure, even at a citation-shaped name like `pas`. The root is
+      // identified by IDENTITY, not by loc (Chip's QA / Bob, PR #1462: after a
+      // rename, a different node can sit at a former name): it is the memory's
+      // first row, which createMemory writes before the memory's id is even
+      // returned, tombstones included so a replacement never inherits the
+      // exemption. The loc guard only narrows it further, so a hard-deleted
+      // root can never hand the exemption to a real spec. A root someone made
       // a spec carries the marker and is linted like any spec.
-      const cited = nodes.filter((n) => isCitationLoc(n.loc) && !(corpus.rootLocs.has(n.loc) && !hasSpecMarker(n)));
+      const firstRow = await tx.node.findFirst({
+        where: { memoryId: id }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }], select: { id: true },
+      });
+      const isRoot = (n: { id: string; loc: string }) => n.id === firstRow?.id && corpus.rootLocs.has(n.loc);
+      const cited = nodes.filter((n) => isCitationLoc(n.loc) && !(isRoot(n) && !hasSpecMarker(n)));
 
       const blockers: MintFinding[] = [];
       for (const n of nodes) {
