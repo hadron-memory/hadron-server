@@ -131,12 +131,19 @@ export async function mergeMemoryGraph(
   const withEdges = fields.has('EDGES');
 
   /** Hold both flags through a batch so encryptMemory cannot flip mid-write. */
-  const lockPlaintextMemories = async (tx: Prisma.TransactionClient): Promise<Map<string, string>> => {
+  const lockPlaintextMemories = async (
+    tx: Prisma.TransactionClient,
+    lockMode: 'share' | 'update' = 'share',
+  ): Promise<Map<string, string>> => {
     const urns = new Map<string, string>();
     for (const id of [sourceMemoryId, targetMemoryId].sort()) {
-      const [memory] = await tx.$queryRaw<Array<{ urn: string; is_encrypted: boolean }>>`
-        SELECT urn, is_encrypted FROM memories WHERE id = ${id} FOR SHARE
-      `;
+      const [memory] = lockMode === 'update'
+        ? await tx.$queryRaw<Array<{ urn: string; is_encrypted: boolean }>>`
+            SELECT urn, is_encrypted FROM memories WHERE id = ${id} FOR NO KEY UPDATE
+          `
+        : await tx.$queryRaw<Array<{ urn: string; is_encrypted: boolean }>>`
+            SELECT urn, is_encrypted FROM memories WHERE id = ${id} FOR SHARE
+          `;
       if (!memory) throw new Error(`merge memory ${id} disappeared while locking; retry the merge`);
       if (memory.is_encrypted) {
         throw new GraphQLError('mergeMemories does not support encrypted memories yet.', {
@@ -657,7 +664,10 @@ export async function mergeMemoryGraph(
       // the memory puts EVERY address in it out of reach, so any Channel at all
       // refuses.
       await lockMemoryForChannelChange(tx, sourceMemoryId);
-      await lockPlaintextMemories(tx);
+      // The later memory.update needs NO KEY UPDATE. Take it on BOTH rows in
+      // stable ID order now; opposing merges must not each upgrade a shared
+      // lock on a different source row after holding SHARE on both.
+      await lockPlaintextMemories(tx, 'update');
       await assertNoProtectedReach(tx, sourceMemoryId, 'all', 'delete');
       await tx.memory.update({ where: { id: sourceMemoryId }, data: { deletedAt: new Date() } });
     });
