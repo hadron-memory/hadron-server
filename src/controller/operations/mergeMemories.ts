@@ -392,6 +392,14 @@ export async function mergeMemoryGraph(
       let moved = 0;
       let dropped = 0;
 
+      // The authoritative gate below reacquires these keys after refreshing
+      // the fold rows. Take the complete Channel-memory set first: holding the
+      // Node/Memory rows while waiting for a Channel key would invert against
+      // final source disposition, which takes that key before its Memory rows.
+      for (const id of [...new Set([sourceMemoryId, targetMemoryId])].sort()) {
+        await lockMemoryForChannelChange(tx, id);
+      }
+
       // Read the target schema INSIDE the tx so the fold validates against the
       // schema current at fold time (a tightening committed between batches is
       // honored), consistent with this batch's other reads/writes.

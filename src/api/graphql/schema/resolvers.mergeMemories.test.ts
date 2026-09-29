@@ -11,6 +11,7 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { resolvers, type Context } from './resolvers.js';
 import { mergeMemoryGraph } from '../../../controller/operations/mergeMemories.js';
+import { lockMemoryForChannelChange } from '../../../lib/channels.js';
 import { generateId } from '../../../lib/id.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
@@ -202,6 +203,53 @@ describe('mergeMemories — edges', () => {
 });
 
 describe('mergeMemories — source disposition', () => {
+  it('waits for the Channel key before holding Memory rows in a fold', async () => {
+    await makeNode(srcMem.id, 'shared', { content: 'source' });
+    await makeNode(tgtMem.id, 'shared', { content: 'target' });
+    await makeNode(tgtMem.id, 'mm-src'); // the created source memory has a root node
+    let signalHeld!: () => void;
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { signalHeld = resolve; });
+    const mayRelease = new Promise<void>((resolve) => { release = resolve; });
+    const holder = db.$transaction(async (tx) => {
+      await lockMemoryForChannelChange(tx, srcMem.id);
+      signalHeld();
+      await mayRelease;
+    }, { timeout: 20_000 });
+    await held;
+    const folding = mergeMemoryGraph(db, {
+      sourceMemoryId: srcMem.id,
+      targetMemoryId: tgtMem.id,
+      fields: new Set(['CONTENT']),
+      deleteSourceMem: false,
+      editor: { userId: admin.id },
+      batchSize: 1,
+    });
+    try {
+      await vi.waitFor(async () => {
+        const waiting = await db.$queryRaw<Array<{ pid: number }>>`
+          SELECT pid FROM pg_stat_activity
+          WHERE datname = current_database() AND wait_event_type = 'Lock'
+            AND query LIKE '%pg_advisory_xact_lock%'
+        `;
+        expect(waiting.length).toBeGreaterThan(0);
+      }, { timeout: 5_000, interval: 25 });
+      // The fold is waiting on the Channel key. A final-disposition-style
+      // Memory lock must still be available; the old order held FOR SHARE here.
+      await db.$transaction(async (tx) => {
+        await tx.$executeRaw`SET LOCAL lock_timeout = '500ms'`;
+        const rows = await tx.$queryRaw<Array<{ id: string }>>`
+          SELECT id FROM memories WHERE id = ${srcMem.id} FOR NO KEY UPDATE
+        `;
+        expect(rows).toHaveLength(1);
+      });
+    } finally {
+      release();
+      await holder;
+    }
+    expect((await folding).foldedCount).toBe(2);
+  }, 20_000);
+
   it('soft-deletes the source memory when deleteSourceMem is true', async () => {
     await makeNode(srcMem.id, 'x', { content: 'x' });
     await merge({ source: srcMem.id, target: tgtMem.id, deleteSourceMem: true });
