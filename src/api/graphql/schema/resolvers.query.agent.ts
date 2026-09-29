@@ -298,6 +298,7 @@ export const agentQueries = {
         let resolvedAppId: string | null = null;
         let resolvedAgentId: string | null = null;
         let effectiveOrgId: string | null = null;
+        let userOwnedAgent = false;
         if (appRef) {
           const { id } = await resolveAppRef(ctx.db, appRef);
           resolvedAppId = id;
@@ -307,8 +308,14 @@ export const agentQueries = {
         if (agentRef) {
           const { id } = await resolveAgentRef(ctx.db, agentRef);
           resolvedAgentId = id;
+          const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id } });
+          userOwnedAgent = agent.ownerUserId !== null;
+          if (userOwnedAgent) {
+            // A personal Agent is strictly owner-only, even for platform
+            // admins and impersonated sessions (spec 047).
+            await requireOwnerOrOrgRole(ctx, agent, 'ADMIN');
+          }
           if (!effectiveOrgId) {
-            const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id } });
             effectiveOrgId = agent.organizationId;
           }
         }
@@ -317,7 +324,7 @@ export const agentQueries = {
         // this supersedes. Without app/agent context, platform admin only.
         if (effectiveOrgId) {
           await requireOrgRole(ctx, effectiveOrgId, 'ADMIN');
-        } else if (!isPlatformAdmin(ctx)) {
+        } else if (!userOwnedAgent && !isPlatformAdmin(ctx)) {
           throw new Error('Forbidden');
         }
         const resolved = await resolveAiConfigWithFallback(ctx.db, name ?? null, {
@@ -326,6 +333,12 @@ export const agentQueries = {
           organizationId: effectiveOrgId,
         });
         const { config, ownerType } = resolved;
+        if (userOwnedAgent && !effectiveOrgId && ownerType !== 'AGENT') {
+          // The owner may decrypt their own Agent config (as agentAIConfig
+          // already permits), but an org-less context does not grant access
+          // to the host's platform key through fallback resolution.
+          throw new NoAiConfigAvailableError(name ?? DEFAULT_AI_CONFIG_NAME, 'this Agent');
+        }
         if (!config.apiKeyEncrypted) {
           // Resolvable but unusable: a config without a key cannot back an
           // LLM call (spec 036 edge case — name the config + level, never
@@ -408,4 +421,3 @@ export const agentQueries = {
     },
 
 };
-
