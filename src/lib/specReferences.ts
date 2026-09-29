@@ -148,7 +148,10 @@ export function findTextCitations(
   if (!text) return [];
   const urnSpans = findCorpusReferences(text, pattern).map((r) => [r.start, r.end] as const);
   const insideUrn = (i: number) => urnSpans.some(([s, e]) => i >= s && i < e);
-  const re = new RegExp(`(?<![A-Za-z0-9._:-])${escapeRe(fromLoc)}(?::${ATOM})*(?![A-Za-z0-9_:-])`, 'g');
+  // (@codex P2, #1453) A dot followed by an atom character continues the loc
+  // (`pas:010.v2` is a different citation), while a dot ending a sentence
+  // does not, so the right boundary excludes only the continuation form.
+  const re = new RegExp(`(?<![A-Za-z0-9._:-])${escapeRe(fromLoc)}(?::${ATOM})*(?![A-Za-z0-9_:-]|\\.[A-Za-z0-9])`, 'g');
   const out: TextCitationMatch[] = [];
   for (const m of text.matchAll(re)) {
     if (insideUrn(m.index!)) continue;

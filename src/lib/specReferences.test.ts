@@ -75,4 +75,10 @@ describe('findTextCitations', () => {
   it('does not report a longer or unrelated citation', () => {
     expect(findTextCitations('pas:0101 and xpas:010 and pas:011', P, 'pas:010')).toEqual([]);
   });
+
+  it('treats a dotted continuation as a different citation, but not sentence punctuation (@codex P2)', () => {
+    expect(findTextCitations('Versioned pas:010.v2 stays.', P, 'pas:010')).toEqual([]);
+    expect(findTextCitations('See pas:010. Then more.', P, 'pas:010').map((c) => c.citation)).toEqual(['pas:010']);
+    expect(findTextCitations('See pas:010:01.v2 too', P, 'pas:010').map((c) => c.citation)).toEqual(['pas:010:01.v2']);
+  });
 });
