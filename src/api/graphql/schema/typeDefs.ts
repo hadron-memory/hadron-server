@@ -1155,7 +1155,7 @@ export const typeDefs = `#graphql
     reasons, not evidence that the client completed a filesystem write.
     """
     exportPlan: SkillExportPlanEntry
-    """Why an enabled source is out of export, or null when this category does not apply. Separate from the planned filesystem action."""
+    """Why an enabled source is out of export in STATUS or EXPORT, or null when this category does not apply. Separate from the planned filesystem action."""
     outOfExportReason: String
   }
 

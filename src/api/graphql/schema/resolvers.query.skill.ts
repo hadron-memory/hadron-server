@@ -1111,7 +1111,7 @@ async function planSkills(input: SkillPlanInput, ctx: Context, selectedRefs?: st
       // is blocked by lint. Only an attempted render can expose a render
       // failure; a protected file never gets rendered speculatively.
       const outOfExportReason =
-        input.intent === 'EXPORT' && nf.declaration?.enable === true && verdict.class !== 'unavailable'
+        input.intent !== 'LINT' && nf.declaration?.enable === true && verdict.class !== 'unavailable'
           ? findings
               .filter((finding) => finding.severity === 'error' && finding.rule !== 'skill-name-collision')
               .map((finding) => finding.message)

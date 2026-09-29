@@ -361,15 +361,21 @@ describe('classes and bodies', () => {
     const urn = (await plan({ intent: 'LINT' })).entries[0].urn as string;
     const fingerprint = hash(node.id, urn, 'my-skill', description, node.content!);
 
-    const got = await plan({ intent: 'EXPORT', files: [{
+    const files = [{
       dirName: 'my-skill', sourceUrn: urn, nodeId: node.id, headerHash: fingerprint, fileHash: fingerprint,
-    }] });
+    }];
+    const got = await plan({ intent: 'EXPORT', files });
     expect(got.entries[0]).toMatchObject({
       class: 'current', renderedBody: null,
       exportPlan: { action: 'SKIP', preservesExistingFile: true },
     });
     expect(got.entries[0].outOfExportReason).toContain('1083 characters');
     expect(got.orphans).toEqual([]);
+
+    const status = await plan({ intent: 'STATUS', files });
+    expect(status.entries[0]).toMatchObject({ class: 'current', renderedBody: null, exportPlan: null });
+    expect(status.entries[0].outOfExportReason).toBe(got.entries[0].outOfExportReason);
+    expect((await plan({ intent: 'LINT', files })).entries[0].outOfExportReason).toBeNull();
   });
 
   it('reports an invalid enabled source alongside local-edit and no-ID protections', async () => {
@@ -805,6 +811,11 @@ describe('classes and bodies', () => {
     });
     expect(got.entries[0].outOfExportReason).toBeNull();
     expect(got.orphans).toHaveLength(0);
+
+    const status = await plan({ intent: 'STATUS', files: [
+      { dirName: 'my-skill', sourceUrn: urn, nodeId: node.id, revision: 1, headerHash, fileHash: headerHash },
+    ] });
+    expect(status.entries[0].outOfExportReason).toBeNull();
   });
 
   it('treats an explicit null file revision as omitted', async () => {
@@ -1039,6 +1050,7 @@ describe('classes and bodies', () => {
     });
     expect(withFile.entries[0].outOfExportReason).toBeNull();
     expect(withoutFile.entries[0].outOfExportReason).toBeNull();
+    expect((await plan({ intent: 'STATUS', files: [] })).entries[0].outOfExportReason).toBeNull();
   });
 
   it('removes the paired disabled file even when an orphan occupies the renamed target', async () => {
@@ -1104,6 +1116,10 @@ describe('classes and bodies', () => {
       reasons: [{ code: 'skill-description-too-long' }],
     });
     expect(got.entries[0].outOfExportReason).toBeNull();
+    const status = await plan({ intent: 'STATUS', files: [
+      { dirName: 'my-skill', sourceUrn: urn, nodeId: node.id, headerHash, fileHash: headerHash },
+    ] });
+    expect(status.entries[0].outOfExportReason).toBeNull();
   });
 
   it('preserves a disabled installed file when any blocking lint finding remains', async () => {
