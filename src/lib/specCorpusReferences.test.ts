@@ -276,3 +276,26 @@ describe('renumber reports what it actually wrote (@codex P2 on #1453)', () => {
     expect(await content('pas:020')).toBe('No references any more.');
   });
 });
+
+describe('historical alias claimants make a reference ambiguous (@codex P2 on #1453)', () => {
+  it('does not claim a former URN reference when another live memory also held that URN and has the cited loc', async () => {
+    // Another memory held "corpus.example:shared" first and was renamed away.
+    const otherMem = await resolvers.Mutation.createMemory(null, { orgId: org.id, name: 'shared' }, as());
+    const shared = otherMem.urn;
+    await resolvers.Mutation.updateMemory(null, { id: otherMem.id, urn: 'someone-else' } as never, as());
+    await db.node.create({ data: { id: generateId(), memoryId: otherMem.id, loc: 'pas:010', name: 'Theirs' } });
+    // Our corpus then held the same URN and was renamed away too.
+    await resolvers.Mutation.updateMemory(null, { id: draft.id, urn: 'shared' } as never, as());
+    await resolvers.Mutation.updateMemory(null, { id: draft.id, urn: 'specs-final' } as never, as());
+    expect(await db.urnAlias.count({ where: { entityType: 'MEMORY', urn: shared } })).toBe(2);
+
+    await db.node.update({ where: { id: other.id }, data: {
+      content: `Ambiguous: hrn:node:${shared}:pas:010. Only ours: hrn:node:${shared}:pas:010:01.`,
+    } });
+
+    const toFeature = await resolvers.Query.specBacklinks(null, { memoryRef: draft.id, loc: 'pas:010' }, as());
+    expect(toFeature.filter((r) => r.kind === 'URN' && r.sourceLoc === 'pas:020')).toEqual([]);
+    const toRule = await resolvers.Query.specBacklinks(null, { memoryRef: draft.id, loc: 'pas:010:01' }, as());
+    expect(toRule.map((r) => r.sourceLoc).sort()).toEqual(['pas:010', 'pas:020']);
+  });
+});

@@ -151,12 +151,14 @@ interface ScannableCorpus {
   urn: string;
   pattern: RegExp;
   /**
-   * Former URNs of this corpus that another LIVE memory now holds, mapped to
-   * that memory's id. A reference written with one of them points at that
-   * memory whenever it has a live node at the cited loc (live-address
-   * precedence, as resolveNodeRef applies it), and only otherwise at us.
+   * Former URNs of this corpus that another LIVE memory also claims, mapped to
+   * those memories' ids: the one that holds it now, and any that held it
+   * before (its own alias row). A reference written with one of them points at
+   * us only if no other claimant has a live node at the cited loc; otherwise
+   * it resolves to that memory (live-address precedence) or is ambiguous, as
+   * resolveNodeRef treats it. Either way it is not ours.
    */
-  shadowed: Map<string, string>;
+  shadowed: Map<string, string[]>;
 }
 
 /**
@@ -193,15 +195,26 @@ async function loadScannableCorpus(ctx: Context, memoryRef: string): Promise<Sca
   });
   const urns = [memory.urn, ...aliases.map((a) => a.urn)].map((u) => u.replace(/^(?:hrn|urn):mem(?:ory)?:/i, ''));
   const former = urns.filter((u) => u !== memory.urn);
-  const holders = former.length
-    ? await ctx.db.memory.findMany({ where: { urn: { in: former }, deletedAt: null, id: { not: id } }, select: { id: true, urn: true } })
-    : [];
-  return {
-    id,
-    urn: memory.urn,
-    pattern: corpusReferencePattern(urns),
-    shadowed: new Map(holders.map((h) => [h.urn, h.id])),
-  };
+  const shadowed = new Map<string, string[]>();
+  if (former.length) {
+    const claim = (urn: string, memoryId: string) => shadowed.set(urn, [...new Set([...(shadowed.get(urn) ?? []), memoryId])]);
+    // Current holders of a former URN.
+    for (const h of await ctx.db.memory.findMany({
+      where: { urn: { in: former }, deletedAt: null, id: { not: id } },
+      select: { id: true, urn: true },
+    })) claim(h.urn, h.id);
+    // (@codex P2, #1453) Other live memories that held it in the past.
+    const historical = await ctx.db.urnAlias.findMany({
+      where: { entityType: 'MEMORY', urn: { in: former }, entityId: { not: id } },
+      select: { urn: true, entityId: true },
+    });
+    const live = new Set((await ctx.db.memory.findMany({
+      where: { id: { in: [...new Set(historical.map((a) => a.entityId))] }, deletedAt: null },
+      select: { id: true },
+    })).map((m) => m.id));
+    for (const a of historical) if (live.has(a.entityId)) claim(a.urn.replace(/^(?:hrn|urn):mem(?:ory)?:/i, ''), a.entityId);
+  }
+  return { id, urn: memory.urn, pattern: corpusReferencePattern(urns), shadowed };
 }
 
 /**
@@ -220,14 +233,14 @@ async function referenceAcceptor(
   const live = await db.node.findMany({
     where: {
       deletedAt: null,
-      OR: candidates.map((r) => ({ memoryId: corpus.shadowed.get(r.memoryUrn)!, loc: r.targetLoc })),
+      OR: candidates.flatMap((r) => corpus.shadowed.get(r.memoryUrn)!.map((memoryId) => ({ memoryId, loc: r.targetLoc }))),
     },
     select: { memoryId: true, loc: true },
   });
   const taken = new Set(live.map((n) => `${n.memoryId}\u0000${n.loc}`));
   return (ref) => {
-    const holder = corpus.shadowed.get(ref.memoryUrn);
-    return !holder || !taken.has(`${holder}\u0000${ref.targetLoc}`);
+    const claimants = corpus.shadowed.get(ref.memoryUrn);
+    return !claimants || !claimants.some((m) => taken.has(`${m}\u0000${ref.targetLoc}`));
   };
 }
 
