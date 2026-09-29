@@ -144,11 +144,14 @@ describe('#1404 mergeMemories node aliases', () => {
 
     const merging = merge();
     try {
+      // The batch encryption fence now pins both flags and URNs before the
+      // relocation snapshot. It is the first Memory lock to wait on rename.
       await vi.waitFor(async () => {
         const waiting = await db.$queryRaw<Array<{ pid: number }>>`
           SELECT pid FROM pg_stat_activity
           WHERE datname = current_database() AND wait_event_type = 'Lock'
-            AND query LIKE '%FROM memories WHERE id%' AND query LIKE '%FOR NO KEY UPDATE%'
+            AND query LIKE '%SELECT urn, is_encrypted FROM memories WHERE id%'
+            AND query LIKE '%FOR SHARE%'
         `;
         expect(waiting.length).toBeGreaterThan(0);
       }, { timeout: 5_000, interval: 25 });
