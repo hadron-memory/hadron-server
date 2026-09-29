@@ -9944,6 +9944,72 @@ function respondMcpSessionNotFound(res: Response): void {
   });
 }
 
+/** A transport session belongs to the principal that authenticated its initialize request. */
+function sameMcpPrincipal(bound: AuthContext, presented: AuthContext): boolean {
+  if (bound.userId) return presented.userId === bound.userId && !presented.impersonation;
+  if (bound.appId) return presented.appId === bound.appId && !presented.userId;
+  return !!bound.clientId && presented.clientId === bound.clientId;
+}
+
+/** Reuse the initialization 401 challenge for every known-session request. */
+function respondMcpAuthenticationRequired(req: Request, res: Response): void {
+  const origin = getServerOrigin(req);
+  if (!origin) {
+    res.status(400).json({ error: 'Missing Host header' });
+    return;
+  }
+  const prmUrl = `${origin}/.well-known/oauth-protected-resource`;
+  res.setHeader(
+    'WWW-Authenticate',
+    `Bearer realm="hadron", error="invalid_token", resource_metadata="${prmUrl}"`,
+  );
+  res.status(401).json({ error: 'Authentication required' });
+}
+
+/**
+ * A session ID routes to a transport; it never authenticates its bearer. The
+ * bearer must still be live, MCP-scoped, and bound to this transport's principal.
+ * Recheck the exact transport after credential resolution, which may await DB.
+ */
+async function authenticateBoundMcpSession(
+  req: Request,
+  res: Response,
+  sessionId: string,
+  active: ActiveMcpTransport,
+): Promise<AuthContext | null> {
+  let presented: AuthContext;
+  try {
+    presented = await resolveAuthContext(req, db);
+  } catch {
+    res.status(503).json({ error: 'Authentication temporarily unavailable' });
+    return null;
+  }
+  if (transports.get(sessionId) !== active) {
+    respondMcpSessionNotFound(res);
+    return null;
+  }
+  if (presented.impersonation || (!presented.userId && !presented.appId && !presented.clientId)) {
+    respondMcpAuthenticationRequired(req, res);
+    return null;
+  }
+  const surfaceRefusal = oauthSurfaceRefusal(presented, 'mcp');
+  if (surfaceRefusal) {
+    res.setHeader('WWW-Authenticate', 'Bearer error="insufficient_scope", scope="mcp"');
+    res.status(403).json({
+      error: oauthSurfaceRefusalMessage(surfaceRefusal, 'This OAuth credential does not grant MCP access'),
+      code: 'FORBIDDEN',
+      ...surfaceRefusal,
+    });
+    return null;
+  }
+  if (!sameMcpPrincipal(active.auth, presented)) {
+    // A foreign principal's session ID is indistinguishable from a missing one.
+    respondMcpSessionNotFound(res);
+    return null;
+  }
+  return presented;
+}
+
 /**
  * Remove state owned by one concrete transport. Session IDs can be reused by
  * a reconnecting initialize request while an older transport is still closing;
@@ -9966,10 +10032,9 @@ function unregisterMcpTransport(
  * Authenticates via Bearer token, creates or reuses transport sessions.
  */
 export async function handleMcpRequest(req: Request, res: Response): Promise<void> {
-  // Reuse the authenticated identity for an existing transport, but refresh
-  // its live platform roles before every tool-dispatch POST (#1251). `resolveJwt` only
-  // runs when the transport opens; without this, a demoted administrator keeps
-  // the captured role for the lifetime of an already-open MCP session.
+  // Recheck the presented credential for each request on an existing transport.
+  // Its principal was captured at initialization, while platform roles must
+  // still be refreshed before every tool-dispatch POST (#1251).
   const sessionId = req.headers['mcp-session-id'] as string | undefined;
 
   if (sessionId && transports.has(sessionId)) {
@@ -9981,6 +10046,7 @@ export async function handleMcpRequest(req: Request, res: Response): Promise<voi
     // role refresh or dispatch. GET does not dispatch role-gated tools and
     // therefore does not mutate the shared authorization snapshot.
     if (req.method === 'GET') {
+      if (!(await authenticateBoundMcpSession(req, res, sessionId, active))) return;
       await active.transport.handleRequest(req, res, req.body);
       return;
     }
@@ -9998,7 +10064,6 @@ export async function handleMcpRequest(req: Request, res: Response): Promise<voi
         respondMcpSessionNotFound(res);
         return;
       }
-
       let roles: Awaited<ReturnType<typeof getCurrentUserRoles>>;
       try {
         roles = await getCurrentUserRoles(db, active.auth);
@@ -10033,7 +10098,13 @@ export async function handleMcpRequest(req: Request, res: Response): Promise<voi
         return;
       }
 
-      active.auth.roles = roles;
+      // Credential validation shares this lock with role refresh and dispatch:
+      // a queued request may never borrow the prior request's bearer.
+      const presented = await authenticateBoundMcpSession(req, res, sessionId, active);
+      if (!presented) return;
+      // Credential resolution re-reads the live user after the liveness check
+      // above. A demotion between those reads must win before tool dispatch.
+      active.auth.roles = presented.roles ?? [];
       await active.transport.handleRequest(req, res, req.body);
     } finally {
       releaseRequest();
@@ -10115,21 +10186,7 @@ export async function handleMcpRequest(req: Request, res: Response): Promise<voi
     // the AS metadata but an `http://` URL in this WWW-Authenticate
     // header (or vice versa) — same root cause as the original
     // catch-all "everything is http://" production bug.
-    const origin = getServerOrigin(req);
-    if (!origin) {
-      // RFC 7230 §5.4 requires Host on every HTTP/1.1 request. A request
-      // without one is malformed; we can't synthesize a usable
-      // resource_metadata URL. Respond 400 honestly rather than emit a
-      // partially-formed URL that downstream clients would 404 against.
-      res.status(400).json({ error: 'Missing Host header' });
-      return;
-    }
-    const prmUrl = `${origin}/.well-known/oauth-protected-resource`;
-    res.setHeader(
-      'WWW-Authenticate',
-      `Bearer realm="hadron", error="invalid_token", resource_metadata="${prmUrl}"`,
-    );
-    res.status(401).json({ error: 'Authentication required' });
+    respondMcpAuthenticationRequired(req, res);
     return;
   }
 
@@ -10272,7 +10329,14 @@ export async function handleMcpDelete(req: Request, res: Response): Promise<void
     return;
   }
 
-  const { transport } = transports.get(sessionId)!;
+  const active = transports.get(sessionId)!;
+  if (!(await authenticateBoundMcpSession(req, res, sessionId, active))) return;
+  const { transport } = active;
+  // Another close/reconnect may have replaced the transport during auth.
+  if (transports.get(sessionId) !== active) {
+    respondMcpSessionNotFound(res);
+    return;
+  }
   await transport.close();
   // close() normally triggers onclose first. Keep this fallback for SDK paths
   // that do not, but make it identity-aware in case a same-ID replacement was
