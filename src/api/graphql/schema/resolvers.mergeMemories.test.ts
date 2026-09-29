@@ -203,6 +203,34 @@ describe('mergeMemories — edges', () => {
 });
 
 describe('mergeMemories — source disposition', () => {
+  it('finishes source deletion when the target encrypts after all content batches', async () => {
+    const findMany = db.edge.findMany.bind(db.edge);
+    let flipped = false;
+    const scan = vi.spyOn(db.edge, 'findMany').mockImplementation((async (args: Parameters<typeof findMany>[0]) => {
+      const rows = await findMany(args);
+      if (!flipped && args?.where?.memoryId === srcMem.id && rows.length === 0) {
+        flipped = true;
+        await db.memory.update({ where: { id: tgtMem.id }, data: { isEncrypted: true, vectorIndexEnabled: false } });
+      }
+      return rows;
+    }) as never);
+    try {
+      await mergeMemoryGraph(db, {
+        sourceMemoryId: srcMem.id,
+        targetMemoryId: tgtMem.id,
+        fields: new Set(['CONTENT']),
+        deleteSourceMem: true,
+        editor: { userId: admin.id },
+        batchSize: 1,
+      });
+    } finally {
+      scan.mockRestore();
+    }
+    expect(flipped).toBe(true);
+    expect((await db.memory.findUniqueOrThrow({ where: { id: srcMem.id } })).deletedAt).not.toBeNull();
+    expect((await db.memory.findUniqueOrThrow({ where: { id: tgtMem.id } })).isEncrypted).toBe(true);
+  });
+
   it('waits for the Channel key before holding Memory rows in a fold', async () => {
     await makeNode(srcMem.id, 'shared', { content: 'source' });
     await makeNode(tgtMem.id, 'shared', { content: 'target' });

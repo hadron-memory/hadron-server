@@ -59,6 +59,49 @@ beforeEach(async () => {
 });
 
 describe('moveNode (#564)', () => {
+  it('locks subtree rows before the Memory encryption fence', async () => {
+    const root = await createDbNode(db, { loc: 'parent', memoryId: memA.id });
+    const child = await createDbNode(db, { loc: 'parent:child', memoryId: memA.id });
+    let signalHeld!: () => void;
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { signalHeld = resolve; });
+    const mayRelease = new Promise<void>((resolve) => { release = resolve; });
+    const holder = db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM nodes WHERE id = ${child.id} FOR UPDATE`;
+      signalHeld();
+      await mayRelease;
+    }, { timeout: 20_000 });
+    await held;
+    const moving = db.$transaction(async (tx) => moveNodeSubtree(tx, {
+      source: root, destLoc: 'renamed', editor: { userId: user.id },
+    }), { timeout: 20_000 });
+    try {
+      await vi.waitFor(async () => {
+        const waiting = await db.$queryRaw<Array<{ pid: number }>>`
+          SELECT pid FROM pg_stat_activity
+          WHERE datname = current_database() AND wait_event_type = 'Lock'
+            AND query LIKE '%nodes%' AND pid <> pg_backend_pid()
+        `;
+        expect(waiting.length).toBeGreaterThan(0);
+      }, { timeout: 5_000, interval: 25 });
+      // A concurrent merge fold needs FOR SHARE on this memory while holding
+      // its Node locks. The move may wait on a Node, but cannot hold a
+      // conflicting Memory lock during that wait.
+      await db.$transaction(async (tx) => {
+        await tx.$executeRaw`SET LOCAL lock_timeout = '500ms'`;
+        const rows = await tx.$queryRaw<Array<{ id: string }>>`
+          SELECT id FROM memories WHERE id = ${memA.id} FOR SHARE
+        `;
+        expect(rows).toHaveLength(1);
+      });
+    } finally {
+      release();
+      await holder;
+    }
+    await moving;
+    expect((await db.node.findUniqueOrThrow({ where: { id: child.id } })).loc).toBe('renamed:child');
+  }, 20_000);
+
   it('holds the source encryption state before a same-memory move can snapshot history', async () => {
     const alpha = await createDbNode(db, { loc: 'alpha', memoryId: memA.id, content: 'plain source' });
     let reached!: () => void;
@@ -73,7 +116,9 @@ describe('moveNode (#564)', () => {
         let held = false;
         vi.spyOn(tx.node, 'findMany').mockImplementation((async (args: Parameters<typeof findNodes>[0]) => {
           const rows = await findNodes(args);
-          if (!held && args?.where?.memoryId === memA.id) {
+          // The full subtree read follows the Node locks and Memory fence,
+          // but still precedes the move's revision snapshot.
+          if (!held && args?.where?.memoryId === memA.id && !args.select) {
             held = true;
             reached();
             await resume;

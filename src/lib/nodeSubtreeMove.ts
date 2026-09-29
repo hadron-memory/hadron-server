@@ -229,20 +229,6 @@ export async function moveNodeSubtree(
   // the destination ancestor lock.
   await lockSourceForMove(tx, source);
 
-  // Reconciliation below can mint a NodeRevision. Fence the source flip before
-  // that first history write, including same-memory moves; a cross-memory move
-  // also holds the destination flag through the relocation. Take the lock mode
-  // needed by the later URN read NOW: upgrading two disjoint moves' FOR SHARE
-  // locks to FOR NO KEY UPDATE would deadlock. Opposing moves use one ID order.
-  const memoryUrns = new Map<string, string>();
-  for (const memoryId of [...new Set([srcMemoryId, destMemoryId])].sort()) {
-    const [memory] = await tx.$queryRaw<Array<{ urn: string }>>`
-      SELECT urn FROM memories WHERE id = ${memoryId} FOR NO KEY UPDATE
-    `;
-    if (!memory) throw new Error(`Move memory ${memoryId} disappeared while locking; retry.`);
-    memoryUrns.set(memoryId, memory.urn);
-  }
-
   // The subtree: the source node's descendants, on ':' path boundaries (so
   // `findings:auth` doesn't sweep in `findings:auth-v2`).
   const firstDescendants = await tx.node.findMany({
@@ -257,6 +243,27 @@ export async function moveNodeSubtree(
   // the rows as they are under their locks, and a source that moved or a
   // descendant set that changed in the meantime refuses as a retryable move.
   const reconcileIds = [source.id, ...firstDescendants.map((d) => d.id)].sort();
+  // Take the complete Node set before the Memory fence. A merge fold holds
+  // Node locks before its Memory FOR SHARE fence; taking Memory first here
+  // deadlocks when each operation waits on the other's row.
+  for (const id of reconcileIds) {
+    await tx.$queryRaw`SELECT id FROM nodes WHERE id = ${id} FOR UPDATE`;
+  }
+
+  // Reconciliation below can mint a NodeRevision. Fence the source flip before
+  // that first history write, including same-memory moves; a cross-memory move
+  // also holds the destination flag through the relocation. Take the lock mode
+  // needed by the later URN read now: upgrading two disjoint moves' FOR SHARE
+  // locks to FOR NO KEY UPDATE would deadlock. Opposing moves use one ID order.
+  const memoryUrns = new Map<string, string>();
+  for (const memoryId of [...new Set([srcMemoryId, destMemoryId])].sort()) {
+    const [memory] = await tx.$queryRaw<Array<{ urn: string }>>`
+      SELECT urn FROM memories WHERE id = ${memoryId} FOR NO KEY UPDATE
+    `;
+    if (!memory) throw new Error(`Move memory ${memoryId} disappeared while locking; retry.`);
+    memoryUrns.set(memoryId, memory.urn);
+  }
+
   for (const id of reconcileIds) {
     await ensureCurrentNodeRevisionInTransaction(tx, id, { expectedMemoryId: srcMemoryId });
   }

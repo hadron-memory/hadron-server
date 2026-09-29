@@ -131,9 +131,10 @@ export async function mergeMemoryGraph(
   const withEdges = fields.has('EDGES');
 
   /** Hold both flags through a batch so encryptMemory cannot flip mid-write. */
-  const lockPlaintextMemories = async (
+  const lockMergeMemoryRows = async (
     tx: Prisma.TransactionClient,
     lockMode: 'share' | 'update' = 'share',
+    requirePlaintext = true,
   ): Promise<Map<string, string>> => {
     const urns = new Map<string, string>();
     for (const id of [sourceMemoryId, targetMemoryId].sort()) {
@@ -145,7 +146,7 @@ export async function mergeMemoryGraph(
             SELECT urn, is_encrypted FROM memories WHERE id = ${id} FOR SHARE
           `;
       if (!memory) throw new Error(`merge memory ${id} disappeared while locking; retry the merge`);
-      if (memory.is_encrypted) {
+      if (requirePlaintext && memory.is_encrypted) {
         throw new GraphQLError('mergeMemories does not support encrypted memories yet.', {
           extensions: { code: 'ENCRYPTED_MEMORY_MERGE_UNSUPPORTED', memoryId: id },
         });
@@ -296,7 +297,7 @@ export async function mergeMemoryGraph(
           for (const id of [...ids].sort()) {
             await tx.$queryRaw`SELECT id FROM nodes WHERE id = ${id} FOR UPDATE`;
           }
-          const memoryUrns = await lockPlaintextMemories(tx);
+          const memoryUrns = await lockMergeMemoryRows(tx);
           rows = await tx.node.findMany({
             where: { id: { in: ids }, memoryId: sourceMemoryId, deletedAt: null },
           });
@@ -443,7 +444,7 @@ export async function mergeMemoryGraph(
       for (const id of foldIds) {
         await tx.$queryRaw`SELECT id FROM nodes WHERE id = ${id} FOR UPDATE`;
       }
-      await lockPlaintextMemories(tx);
+      await lockMergeMemoryRows(tx);
       for (const id of foldIds) {
         const reconciled = await ensureCurrentNodeRevisionInTransaction(tx, id, { expectedMemoryId: foldMemory.get(id)! });
         if (reconciled == null) throw new Error(`merge node ${id} moved or vanished during the fold; retry the merge`);
@@ -648,7 +649,7 @@ export async function mergeMemoryGraph(
     const drop = edges.filter((e) => taken.has(e.loc)).map((e) => e.id);
     const move = edges.filter((e) => !taken.has(e.loc)).map((e) => e.id);
     await db.$transaction(async (tx) => {
-      await lockPlaintextMemories(tx);
+      await lockMergeMemoryRows(tx);
       if (drop.length > 0) await tx.edge.deleteMany({ where: { id: { in: drop } } });
       if (move.length > 0) {
         await tx.edge.updateMany({ where: { id: { in: move } }, data: { memoryId: targetMemoryId } });
@@ -675,7 +676,10 @@ export async function mergeMemoryGraph(
       // The later memory.update needs NO KEY UPDATE. Take it on BOTH rows in
       // stable ID order now; opposing merges must not each upgrade a shared
       // lock on a different source row after holding SHARE on both.
-      await lockPlaintextMemories(tx, 'update');
+      // All content and edge writes have committed. Disposition only marks
+      // the source deleted, so a target encryption flip after those batches
+      // must not strand the requested cleanup.
+      await lockMergeMemoryRows(tx, 'update', false);
       await assertNoProtectedReach(tx, sourceMemoryId, 'all', 'delete');
       await tx.memory.update({ where: { id: sourceMemoryId }, data: { deletedAt: new Date() } });
     });
