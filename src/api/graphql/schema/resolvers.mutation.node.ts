@@ -68,6 +68,7 @@ import {
 import {
   moveNodeSubtree,
   SubtreeMoveCollisionError,
+  SubtreeMovePlaceholderError,
   SubtreeMoveIntoSelfError,
   SubtreeMoveSourceChangedError,
   CrossMemoryMoveUnsupportedError,
@@ -3212,6 +3213,11 @@ export const nodeMutations = {
         }
         if (e instanceof SubtreeMoveIntoSelfError) {
           throw new GraphQLError(e.message, { extensions: { code: 'BAD_USER_INPUT', loc: e.loc } });
+        }
+        if (e instanceof SubtreeMovePlaceholderError) {
+          throw new GraphQLError(e.message, {
+            extensions: { code: 'SPEC_PLACEHOLDER_OUTSIDE_DRAFT', loc: e.loc, memoryId: e.memoryId },
+          });
         }
         if (e instanceof SubtreeMoveSourceChangedError) {
           throw new GraphQLError(e.message, { extensions: { code: 'CONFLICT', nodeId: e.nodeId } });

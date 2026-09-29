@@ -23,6 +23,7 @@ import { acquireLockSet } from '../../lib/nodeSubtreeLock.js';
 import { recordUrnRename } from '../../lib/urnAlias.js';
 import { safeNodeUrnV2 } from '../../lib/urnEmit.js';
 import { isDraftCorpus } from '../../lib/specCorpus.js';
+import { SubtreeMovePlaceholderError } from '../../lib/nodeSubtreeMove.js';
 
 /**
  * Batched, resumable execution of a memory→memory merge (spec cor:api:080).
@@ -350,6 +351,16 @@ export async function mergeMemoryGraph(
             SELECT corpus_draft FROM memories WHERE id = ${sourceMemoryId}
           `;
           const recordAliases = !isDraftCorpus({ corpusDraft: sourceFlags?.corpus_draft === true });
+          // #1450 — a placeholder never leaves draft corpora (see
+          // SubtreeMovePlaceholderError); spec placeholders are also refused by
+          // the governed guard above, this covers one whose role was changed.
+          const [targetFlags] = await tx.$queryRaw<Array<{ corpus_draft: boolean }>>`
+            SELECT corpus_draft FROM memories WHERE id = ${targetMemoryId}
+          `;
+          const strandedPlaceholder = targetFlags?.corpus_draft === true ? undefined : rows.find((row) => row.isPlaceholder);
+          if (strandedPlaceholder) {
+            throw new SubtreeMovePlaceholderError(strandedPlaceholder.loc, targetMemoryId);
+          }
           for (const row of rows) {
             await createNodeRevision(
               tx,

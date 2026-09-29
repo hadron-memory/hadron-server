@@ -84,6 +84,26 @@ export class SubtreeMoveCollisionError extends Error {
   }
 }
 
+/**
+ * #1450 (@codex P1, PR #1452): the move would carry a PLACEHOLDER spec (a
+ * reserved citation with no spec written) into a memory that is not a draft
+ * corpus. Placeholders exist only in draft corpora, where minting refuses
+ * while any remain; outside one, a placeholder would be a published citation
+ * with no spec behind it.
+ */
+export class SubtreeMovePlaceholderError extends Error {
+  constructor(
+    public readonly loc: string,
+    public readonly memoryId: string,
+  ) {
+    super(
+      `Cannot move placeholder "${loc}" into a memory that is not a draft spec corpus: ` +
+        'write the spec first (its content), or move it within draft corpora only.',
+    );
+    this.name = 'SubtreeMovePlaceholderError';
+  }
+}
+
 /** The destination is inside the source's own subtree — a loc-prefix cycle. */
 export class SubtreeMoveIntoSelfError extends Error {
   constructor(public readonly loc: string) {
@@ -306,6 +326,13 @@ export async function moveNodeSubtree(
   });
   const blocker = occupants.find((o) => !movedIds.has(o.id));
   if (blocker) throw new SubtreeMoveCollisionError(blocker.loc, destMemoryId);
+
+  // #1450 — placeholders stay inside draft corpora (see the error's doc). The
+  // destination's flag was read under this move's Memory lock above.
+  if (!draftCorpus.get(destMemoryId)) {
+    const placeholder = subtree.find((n) => (n as { isPlaceholder?: boolean }).isPlaceholder === true);
+    if (placeholder) throw new SubtreeMovePlaceholderError(placeholder.loc, destMemoryId);
+  }
 
   // Cross-memory pre-checks — crossing a memory boundary must respect the
   // DESTINATION's encryption + schema (the write-path invariants), so validate

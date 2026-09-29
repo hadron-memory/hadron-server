@@ -108,3 +108,33 @@ describe('a placeholder becomes a real spec when its content is written (#1450)'
     expect(await row(draft.id, 'pas:040:05')).toMatchObject({ id: reserved.id, isPlaceholder: true });
   });
 });
+
+describe('placeholders never leave draft corpora (@codex P1 on #1452)', () => {
+  it('refuses to move a placeholder into a minted memory, and nothing moves', async () => {
+    const reserved = await reserve(draft.id, 'pas:050:01');
+    const code = await codeOf(resolvers.Mutation.moveNode(null, {
+      sourceRef: reserved.id, targetUrn: `hrn:node:${minted.urn}:pas:050:01`,
+    }, as(admin.id)));
+    expect(code).toBe('SPEC_PLACEHOLDER_OUTSIDE_DRAFT');
+    expect(await db.node.findUniqueOrThrow({ where: { id: reserved.id } })).toMatchObject({ memoryId: draft.id, isPlaceholder: true });
+  });
+
+  it('refuses a subtree that carries a placeholder among its descendants', async () => {
+    const parent = await resolvers.Mutation.createSpecNode(null, {
+      input: { memoryId: draft.id, loc: 'pas:060', name: 'Feature', role: 'spec', nodeType: 'info', content: 'Body.' },
+    } as never, as(admin.id));
+    await reserve(draft.id, 'pas:060:01');
+    const code = await codeOf(resolvers.Mutation.moveNode(null, {
+      sourceRef: parent.id, targetUrn: `hrn:node:${minted.urn}:pas:060`,
+    }, as(admin.id)));
+    expect(code).toBe('SPEC_PLACEHOLDER_OUTSIDE_DRAFT');
+    expect((await db.node.findUniqueOrThrow({ where: { id: parent.id } })).memoryId).toBe(draft.id);
+  });
+
+  it('allows a placeholder to move into another draft corpus, still a placeholder', async () => {
+    const other = await resolvers.Mutation.createMemory(null, { orgId: org.id, name: 'specs-draft-2', draftCorpus: true }, as(admin.id));
+    const reserved = await reserve(draft.id, 'pas:070:01');
+    await resolvers.Mutation.moveNode(null, { sourceRef: reserved.id, targetUrn: `hrn:node:${other.urn}:pas:070:01` }, as(admin.id));
+    expect(await db.node.findUniqueOrThrow({ where: { id: reserved.id } })).toMatchObject({ memoryId: other.id, isPlaceholder: true });
+  });
+});
