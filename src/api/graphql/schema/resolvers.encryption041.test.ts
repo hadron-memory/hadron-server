@@ -166,6 +166,8 @@ describe('encryptMemory — locked conversion (#1346)', () => {
         data: { secret: 'old stored data' }, nodeType: 'info',
       },
     });
+    expect(await resolvers.Query.nodeRevision({}, { revisionId: old.id }, ownerCtx()))
+      .toMatchObject({ content: null, abstract: null, data: null });
     const wrongKey = Buffer.alloc(32, 8).toString('base64');
     await expect(resolvers.Mutation.encryptMemory(
       {}, { memoryId, dataKey: wrongKey }, ownerCtx(),
@@ -189,6 +191,66 @@ describe('encryptMemory — locked conversion (#1346)', () => {
     const after = await db.memory.findUniqueOrThrow({ where: { id: memoryId } });
     expect([after.isEncrypted, after.keyVerifier, after.kdfSalt, after.kdfParams])
       .toEqual([before.isEncrypted, before.keyVerifier, before.kdfSalt, before.kdfParams]);
+  });
+
+  it('finds a revision committed after the first history scan reaches its end', async () => {
+    const findMany = db.nodeRevision.findMany.bind(db.nodeRevision);
+    let lateRevisionId: string | undefined;
+    const scan = vi.spyOn(db.nodeRevision, 'findMany').mockImplementation((async (args: Parameters<typeof findMany>[0]) => {
+      const rows = await findMany(args);
+      if (!lateRevisionId && args?.take === 200 && args.where?.OR && rows.length === 0) {
+        lateRevisionId = generateId();
+        await db.nodeRevision.create({
+          data: {
+            id: lateRevisionId, nodeId, memoryId, loc: 'entry-1', name: 'Entry 1',
+            content: 'late plaintext revision',
+          },
+        });
+      }
+      return rows;
+    }) as typeof db.nodeRevision.findMany);
+    try {
+      await resolvers.Mutation.encryptMemory({}, { memoryId, dataKey }, ownerCtx());
+    } finally {
+      scan.mockRestore();
+    }
+    expect(lateRevisionId).toBeTruthy();
+    expect(isCiphertext((await db.nodeRevision.findUniqueOrThrow({ where: { id: lateRevisionId! } })).content))
+      .toBe(true);
+  });
+
+  it('refuses a node writer that read plaintext state before the encryption flip', async () => {
+    const findMemory = db.memory.findUniqueOrThrow.bind(db.memory);
+    let reached!: () => void;
+    let release!: () => void;
+    const atOldFlag = new Promise<void>((resolve) => { reached = resolve; });
+    const resume = new Promise<void>((resolve) => { release = resolve; });
+    let held = false;
+    const lookup = vi.spyOn(db.memory, 'findUniqueOrThrow').mockImplementation((async (args: Parameters<typeof findMemory>[0]) => {
+      const row = await findMemory(args);
+      if (!held && args?.where?.id === memoryId && args.select?.isEncrypted === true) {
+        held = true;
+        reached();
+        await resume;
+      }
+      return row;
+    }) as unknown as typeof db.memory.findUniqueOrThrow);
+    try {
+      const writer = resolvers.Mutation.updateNode(
+        {}, { input: { id: nodeId, content: 'late plaintext update' } } as never, ownerCtx(),
+      );
+      await atOldFlag;
+      await resolvers.Mutation.encryptMemory({}, { memoryId, dataKey }, ownerCtx());
+      release();
+      await expect(writer).rejects.toMatchObject({ extensions: { code: 'NODE_WRITE_CONFLICT' } });
+    } finally {
+      release();
+      lookup.mockRestore();
+    }
+    const live = await db.node.findUniqueOrThrow({ where: { id: nodeId } });
+    expect(isCiphertext(live.content)).toBe(true);
+    expect((await db.nodeRevision.findMany({ where: { nodeId } }))
+      .every((revision) => revision.content == null || isCiphertext(revision.content))).toBe(true);
   });
 
   it('derives the stored passphrase key and refuses verifier-less completion', async () => {
@@ -446,7 +508,11 @@ describe('encryptMemory — locked conversion (#1346)', () => {
       [memoryId, parseDataKey(dataKey)],
       [destination.id, parseDataKey(destinationKey)],
     ]), async () => {
-      await resolvers.Mutation.restoreNodeRevision({}, { revisionId: prior.id }, ownerCtx());
+      const response = await resolvers.Mutation.restoreNodeRevision({}, { revisionId: prior.id }, ownerCtx());
+      expect(response).toMatchObject({
+        content: 'source snapshot secret', abstract: 'source snapshot abstract',
+        data: { secret: 'source snapshot data' },
+      });
     });
     const restored = await db.node.findUniqueOrThrow({ where: { id: nodeId } });
     expect(isCiphertext(restored.content)).toBe(true);

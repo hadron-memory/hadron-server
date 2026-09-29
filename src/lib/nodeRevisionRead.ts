@@ -1,5 +1,6 @@
 import type { PrismaClient } from '../generated/prisma/index.js';
 import { decryptNodeFieldsWithKey, type EncryptedNodeFields } from './nodeCrypto.js';
+import { isCiphertext } from './crypto.js';
 import { sessionKeyCache } from './sessionKeyCache.js';
 
 /** Decrypt only authorized snapshot rows, using each row's capture memory. */
@@ -17,8 +18,15 @@ export async function decryptReadableRevisions<
     const memoryId = revision.memoryId ?? fallbackMemoryId;
     if (!encrypted.has(memoryId)) return revision;
     const key = sessionKeyCache.getByMemoryId(memoryId);
-    // Node reads retain ciphertext when the memory is locked. Revision reads
-    // have the same response shape and never persist the decrypted copy.
-    return key ? decryptNodeFieldsWithKey({ ...revision }, key) : revision;
+    if (key) return decryptNodeFieldsWithKey({ ...revision }, key);
+    // A conversion interrupted before this row was visited can leave old
+    // plaintext in an encrypted memory. Never expose it on a locked read;
+    // already-encrypted fields retain the ordinary Node-read ciphertext shape.
+    const locked = { ...revision };
+    if (locked.content != null && !isCiphertext(locked.content)) locked.content = null;
+    if (locked.abstract != null && !isCiphertext(locked.abstract)) locked.abstract = null;
+    if (locked.data != null && !(typeof locked.data === 'object' &&
+      (locked.data as { __enc?: string }).__enc)) locked.data = null;
+    return locked;
   });
 }

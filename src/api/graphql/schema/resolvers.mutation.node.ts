@@ -816,6 +816,23 @@ export async function writeNodeCore(
       const inWriteTransaction = <T>(work: (tx: Prisma.TransactionClient) => Promise<T>): Promise<T> =>
         opts?.transaction ? work(opts.transaction.tx) : ctx.db.$transaction(work);
 
+      // encryptMemory flips the memory flag before its conversion scans. A
+      // writer that read the old flag above must not commit a plaintext live
+      // value or revision after that flip. Hold a shared memory-row lock until
+      // this write commits, so the flip either waits for us or we see it and
+      // refuse the stale encryption decision before any snapshot or update.
+      const assertEncryptionStateStable = async (tx: Prisma.TransactionClient) => {
+        await tx.$queryRaw`SELECT id FROM memories WHERE id = ${input.memoryId} FOR SHARE`;
+        const latest = await tx.memory.findUniqueOrThrow({
+          where: { id: input.memoryId }, select: { isEncrypted: true },
+        });
+        if (latest.isEncrypted !== memEncInfo.isEncrypted) {
+          throw new GraphQLError('Memory encryption changed while this node write waited; retry.', {
+            extensions: { code: 'NODE_WRITE_CONFLICT', memoryId: input.memoryId },
+          });
+        }
+      };
+
       // Inline edge replacement is part of the node mutation, not a follow-up
       // write. Acquire the complete endpoint-memory set BEFORE any loc lock or
       // source mutation, then revalidate and replace inside that same
@@ -1047,6 +1064,7 @@ export async function writeNodeCore(
             const candidate = await assertTargetStillWritable(tx);
             if (!candidate) return { conflict: false, node: null };
             await tx.$queryRaw`SELECT "id" FROM "nodes" WHERE "id" = ${candidate.id} FOR UPDATE`;
+            await assertEncryptionStateStable(tx);
             let current = await assertTargetStillWritable(tx);
             if (!current) return { conflict: false, node: null };
 
@@ -1266,6 +1284,7 @@ export async function writeNodeCore(
                 op: 'create',
               });
             }
+            await assertEncryptionStateStable(tx);
 
             // #1183 — THE AUTHORITATIVE read. The `existing` probe far above is
             // taken before this lock, so under concurrency both callers see no
@@ -2355,6 +2374,23 @@ export const nodeMutations = {
         // whose tracked state changed since then refuses the whole batch
         // (all-or-nothing, as below) instead of overwriting the newer write.
         const planMemory = new Map(plans.map((p) => [p.raw.id, p.raw.memoryId]));
+        for (const id of [...planMemory.keys()].sort()) {
+          await tx.$queryRaw`SELECT id FROM nodes WHERE id = ${id} FOR UPDATE`;
+        }
+        // Hold the memory state through this batch after the node locks: a
+        // pre-flip plan must not write plaintext after encryptMemory flips it.
+        const plannedEncryption = new Map(plans.map((plan) => [plan.raw.memoryId, plan.isEncrypted]));
+        for (const memoryId of [...plannedEncryption.keys()].sort()) {
+          await tx.$queryRaw`SELECT id FROM memories WHERE id = ${memoryId} FOR SHARE`;
+          const memory = await tx.memory.findUniqueOrThrow({
+            where: { id: memoryId }, select: { isEncrypted: true },
+          });
+          if (memory.isEncrypted !== plannedEncryption.get(memoryId)) {
+            throw new GraphQLError('Memory encryption changed while this replace was running; retry.', {
+              extensions: { code: 'NODE_WRITE_CONFLICT', memoryId },
+            });
+          }
+        }
         for (const id of [...planMemory.keys()].sort()) {
           await ensureCurrentNodeRevisionInTransaction(tx, id, { expectedMemoryId: planMemory.get(id)! });
         }
@@ -3501,6 +3537,23 @@ export const nodeMutations = {
         if (takesSource) {
           await lockNodeForDelete(tx, source.memoryId, source.loc);
         }
+        for (const id of [source.id, target.id].sort()) {
+          await tx.$queryRaw`SELECT id FROM nodes WHERE id = ${id} FOR UPDATE`;
+        }
+        // A merge plans encrypted fields before this transaction. Keep both
+        // memory flags stable through the write or refuse the stale plan.
+        for (const memoryId of [...new Set([source.memoryId, target.memoryId])].sort()) {
+          await tx.$queryRaw`SELECT id FROM memories WHERE id = ${memoryId} FOR SHARE`;
+          const memory = await tx.memory.findUniqueOrThrow({
+            where: { id: memoryId }, select: { isEncrypted: true },
+          });
+          const expected = memoryId === source.memoryId ? srcEnc.isEncrypted : tgtEnc.isEncrypted;
+          if (memory.isEncrypted !== expected) {
+            throw new GraphQLError('Memory encryption changed while this merge was running; retry.', {
+              extensions: { code: 'NODE_WRITE_CONFLICT', memoryId },
+            });
+          }
+        }
         // #1323 (@codex/@copilot, PR #1339): both endpoints are row-locked and
         // their unrevisioned drift reconciled as their OWN revisions (id order)
         // before the snapshot. The merge was computed from reads taken BEFORE
@@ -3850,7 +3903,7 @@ export const nodeMutations = {
 
       // Restore (+ optional truncate) in one transaction (#617) so the portal
       // never sequences restore + N deletes and can't half-apply on a crash.
-      const { restored, restoredPlaintext } = await ctx.db.$transaction(async (tx) => {
+      const { restored, restoredPlaintext, destinationEncrypted } = await ctx.db.$transaction(async (tx) => {
         // Spec 049 S4: lock-then-gate — the check above is the fast refusal.
         await lockLocForWrite(tx, node.memoryId, node.loc);
         // Row lock + drift reconciled as its own revision before the restore's
@@ -3999,7 +4052,7 @@ export const nodeMutations = {
           data: writeData,
           include: { outgoingEdges: { include: { target: true } }, incomingEdges: { include: { source: true } } },
         });
-        return { restored, restoredPlaintext: plaintextFields };
+        return { restored, restoredPlaintext: plaintextFields, destinationEncrypted: selectedDestination.isEncrypted };
       });
       // 033 — re-embed the restored content (revision snapshots are plaintext on
       // non-encrypted memories; ciphertext snapshots are handled by embedNode's
@@ -4013,7 +4066,9 @@ export const nodeMutations = {
       // other. The revision-pruning mutations below (delete/label/clear
       // history) are NOT: they touch snapshot rows, never the node.
       recordNodeWrite(ctx.db, toUsageNodeRef(restored), ctx);
-      return restored;
+      return destinationEncrypted
+        ? decryptNodeFieldsWithKey({ ...restored }, requireKey(restored.memoryId))
+        : restored;
     },
 
     // #617 — delete a single snapshot. Write-gated on the node's CURRENT memory
