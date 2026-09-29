@@ -8,6 +8,7 @@ describe('extractMentions — Markdown code (#1423)', () => {
     ['quoted command', 'the CLI example `hadron team chat post "@chip ping"` is wrong; @gil please fix', ['gil']],
     ['unclosed backtick remains ordinary text', 'an unmatched ` then @ada', ['ada']],
     ['escaped backtick remains ordinary text', 'literal \\` then @ada', ['ada']],
+    ['backslash inside code span does not escape its closer', '`code \\` @iris`', ['iris']],
     ['email and boundary outside code', 'x@example.com `@chip` (@iris) start@end @real-one', ['iris', 'real-one']],
     ['code-only body', '`@team` and ``@all``', []],
   ])('excludes %s without losing plain-text mentions', (_name, body, expected) => {
@@ -22,6 +23,10 @@ describe('extractMentions — Markdown code (#1423)', () => {
     ['tab indent', ['\t@liam indented code', 'end @ada'].join('\n'), ['ada']],
     ['paragraph continuation is not an indented block', ['hello', '    @chip still in paragraph'].join('\n'), ['chip']],
     ['unclosed fence', ['```', '@chip', '@ada'].join('\n'), []],
+    ['fence in a block quote', ['> ~~~', '> @iris', '> ~~~', '@ada'].join('\n'), ['ada']],
+    ['fence in a list item', ['- intro', '    ```', '    @iris', '    ```', '@ada'].join('\n'), ['ada']],
+    ['heading followed by indented code', ['# Example', '    @iris', '@ada'].join('\n'), ['ada']],
+    ['list paragraph after a blank line', ['- item', '', '    @iris', '@ada'].join('\n'), ['iris', 'ada']],
   ])('excludes %s', (_name, body, expected) => {
     expect(extractMentions(body)).toEqual(expected);
   });
