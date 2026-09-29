@@ -1105,9 +1105,14 @@ export async function canReadMemoryRecord(
   // grants access. A user-owned memory (org NULL) has no membership fast-path
   // and was already returned above. Under impersonation the fast-path only
   // applies inside the session's shared org.
+  // #1208 / cor:acl:010:01: a GROUP record never takes the org-member fast
+  // path — an org member without a MemoryMember row must fall through to the
+  // shared gate below, which admits group only through memberships. (A
+  // MemoryMember with no org role was already served by that same fallback.)
   const member =
     ctx.userId &&
     memory.organizationId &&
+    memory.class !== 'group' &&
     (!ctx.impersonation || ctx.impersonation.orgId === memory.organizationId)
       ? await ctx.db.orgMember.findFirst({
           where: { organizationId: memory.organizationId, userId: ctx.userId, deletedAt: null },

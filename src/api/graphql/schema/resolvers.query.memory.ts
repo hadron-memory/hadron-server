@@ -559,7 +559,16 @@ export const memoryQueries = {
           userMemoryOfAgentId: null,
           AND: [classFilter],
           OR: [
-            { organizationId: { in: orgIds }, class: { notIn: ['personal', 'private'] as any } },
+            { organizationId: { in: orgIds }, class: { notIn: ['personal', 'private', 'group'] as any } },
+            // #1208 / cor:acl:010:01 — group records list only through
+            // MemoryMember (reader/writer/owner), mirroring the shared read
+            // gate exactly: NOT nested under orgIds (a cross-org MemoryMember
+            // lists theirs), `appId: null` so an app-scoped group row's
+            // metadata stays App-internal (#653, record-side parity with the
+            // node gate), per-user holdings and user-owned rows excluded
+            // (#758). MemoryMember rows hard-delete (FR-038), so `some` is
+            // liveness.
+            { class: 'group' as any, appId: null, userMemoryOfAgentId: null, ownerUserId: null, memberships: { some: { userId: ctx.userId } } },
             { class: { notIn: ['personal', 'private'] as any }, subscriptions: { some: { organizationId: { in: orgIds } } } },
             // Admin impersonation: the identity-scoped clauses are dropped —
             // the shared-org session never lists the target's personal/private

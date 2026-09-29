@@ -26,10 +26,12 @@ import {
   getAccessibleMemoryIds,
   type Context,
 } from '../../api/graphql/schema/resolvers.helpers.js';
+import { resolvers } from '../../api/graphql/schema/resolvers.js';
 
 let org: { id: string; urn: string };
-let groupMem: { id: string };
+let groupMem: { id: string; urn: string };
 let knowledgeMem: { id: string };
+let appScopedGroupMem: { id: string };
 let orgMemberNoGroup: { id: string };
 let orgAdminNoGroup: { id: string };
 let memoryMemberNoOrgRole: { id: string };
@@ -40,6 +42,14 @@ beforeEach(async () => {
   org = await db.organization.create({ data: { id: generateId(), name: 'g1208', urn: `g1208-${suffix}.com` } });
   groupMem = await db.memory.create({
     data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:grp`, name: 'grp', class: 'group', visibility: 'GROUP' },
+  });
+  // #3567: an APP-SCOPED group row — its metadata must stay App-internal even
+  // for org members (#653 record-side parity).
+  const appRow = await db.app.create({
+    data: { id: generateId(), organizationId: org.id, name: 'g1208app', urn: `${org.urn}:g1208app` },
+  });
+  appScopedGroupMem = await db.memory.create({
+    data: { id: generateId(), organizationId: org.id, appId: appRow.id, urn: `${org.urn}:agr`, name: 'agr', class: 'group', visibility: 'GROUP' },
   });
   knowledgeMem = await db.memory.create({
     data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:km`, name: 'km', class: 'knowledge', visibility: 'ORGANIZATION' },
@@ -96,12 +106,39 @@ describe('#1208 group read gates vs MemoryMember (cor:acl:010:01)', () => {
   });
 
   it('the GraphQL point-read gate agrees (getAccessibleMemoryIds scoped control)', async () => {
-    // The scoped form is the Query.memory(id:)/memoryAccessFilter path — the
-    // result is [id] or [] with no set enumeration, same predicate as the
-    // unscoped gate by construction (resolvers.helpers.ts).
+    // The scoped form is the NODE-CONTENT point read (memoryAccessFilter /
+    // node-search side) — the result is [id] or [] with no set enumeration,
+    // same predicate as the unscoped gate by construction. It is NOT the
+    // Query.memory(ref:) path: that record read goes through
+    // canReadMemoryRecord first (controlled separately below, #3567).
     expect(await getAccessibleMemoryIds(gqlCtx(orgMemberNoGroup.id), groupMem.id)).toEqual([]);
     expect(await getAccessibleMemoryIds(gqlCtx(memoryMemberNoOrgRole.id), groupMem.id)).toEqual([
       groupMem.id,
     ]);
+  });
+
+  it('Query.memory(ref:) denies an org member without MemoryMember, serves a MemoryMember (#3567)', async () => {
+    const Q = resolvers.Query as any;
+    const denied = await Q.memory({}, { ref: groupMem.urn }, gqlCtx(orgMemberNoGroup.id));
+    expect(denied).toBeNull(); // record fields (description/data/…) — RED before the record fix
+    const allowed = await Q.memory({}, { ref: groupMem.urn }, gqlCtx(memoryMemberNoOrgRole.id));
+    expect(allowed?.id).toBe(groupMem.id);
+  });
+
+  it('Query.memories lists group only through MemoryMember (#3567)', async () => {
+    const Q = resolvers.Query as any;
+    const orgMemberList = await Q.memories({}, {}, gqlCtx(orgMemberNoGroup.id));
+    const orgMemberIds = orgMemberList.items.map((m: { id: string }) => m.id);
+    expect(orgMemberIds).toContain(knowledgeMem.id); // knowledge stays listed
+    expect(orgMemberIds).not.toContain(groupMem.id); // RED before the record fix
+
+    const memberList = await Q.memories({}, {}, gqlCtx(memoryMemberNoOrgRole.id));
+    expect(memberList.items.map((m: { id: string }) => m.id)).toContain(groupMem.id); // RED before the record fix
+  });
+
+  it('Query.memories does not leak app-scoped group metadata to org members (#3567)', async () => {
+    const Q = resolvers.Query as any;
+    const list = await Q.memories({}, {}, gqlCtx(orgMemberNoGroup.id));
+    expect(list.items.map((m: { id: string }) => m.id)).not.toContain(appScopedGroupMem.id); // RED before the record fix
   });
 });
