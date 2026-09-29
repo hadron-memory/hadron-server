@@ -159,4 +159,38 @@ describe('renumberSpec (#1449)', () => {
     expect(code).not.toBe('NO_ERROR');
     expect((await db.node.findUniqueOrThrow({ where: { id: feature.id } })).loc).toBe('pas:010');
   });
+
+  it('allows a renumber next to an unrelated node under toLoc, and an upward renumber (@codex P2)', async () => {
+    const notes = await spec('pas:040:notes', 'Notes', 'Unrelated.');
+    await renumber(false, 'pas:010', 'pas:040');
+    expect((await db.node.findUniqueOrThrow({ where: { id: feature.id } })).loc).toBe('pas:040');
+    expect((await db.node.findUniqueOrThrow({ where: { id: notes.id } })).loc).toBe('pas:040:notes');
+
+    // pas:060:01 exists with no pas:060 node: moving it up to pas:060 is valid
+    // even though the source sits beneath the target.
+    const orphan = await spec('pas:060:01', 'Orphan rule', 'Body.');
+    await renumber(false, 'pas:060:01', 'pas:060');
+    expect((await db.node.findUniqueOrThrow({ where: { id: orphan.id } })).loc).toBe('pas:060');
+  });
+
+  it('refuses a destination held by a soft-deleted node, even in a dry run', async () => {
+    const gone = await spec('pas:070', 'Gone', 'x');
+    await db.node.update({ where: { id: gone.id }, data: { deletedAt: new Date() } });
+    expect(await codeOf(renumber(true, 'pas:010', 'pas:070'))).toBe('NodeLocConflictError');
+  });
+});
+
+describe('deleted edges are not references (@codex P2 on #1453)', () => {
+  it('drops a soft-deleted edge from backlinks and unresolved', async () => {
+    await db.edge.updateMany({ where: { sourceId: other.id, targetId: feature.id }, data: { deletedAt: new Date() } });
+    const refs = await resolvers.Query.specBacklinks(null, { memoryRef: draft.id, loc: 'pas:010' }, as());
+    expect(refs.map((r) => r.kind)).toEqual(['URN']);
+
+    const placeholder = await db.node.findFirstOrThrow({ where: { memoryId: draft.id, loc: 'pas:030' } });
+    await db.edge.create({ data: {
+      memoryId: draft.id, sourceId: rule.id, targetId: placeholder.id, loc: 'pas:010:01:see:pas:030', name: 'see', deletedAt: new Date(),
+    } });
+    const unresolved = await resolvers.Query.specUnresolvedReferences(null, { memoryRef: draft.id }, as());
+    expect(unresolved.filter((r) => r.kind === 'EDGE')).toEqual([]);
+  });
 });

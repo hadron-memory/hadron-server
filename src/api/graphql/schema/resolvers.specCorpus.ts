@@ -259,11 +259,12 @@ const fromScan = (r: ScannedReference): SpecReferenceOut => ({
   kind: 'URN', sourceNodeId: r.sourceNodeId, sourceLoc: r.sourceLoc, field: r.field, targetLoc: r.targetLoc, text: r.urn,
 });
 
-/** Real edges whose source is a live node of this corpus, pointing at `targetIds`. */
+/** Live real edges whose source is a live node of this corpus, pointing at `targetIds`. */
 async function corpusEdgesTo(db: Context['db'], memoryId: string, targetIds: string[]) {
   if (targetIds.length === 0) return [];
   return db.edge.findMany({
-    where: { targetId: { in: targetIds }, source: { memoryId, deletedAt: null } },
+    // (@codex P2, #1453) Edges are soft-deleted: a deleted edge is not a reference.
+    where: { targetId: { in: targetIds }, deletedAt: null, source: { memoryId, deletedAt: null } },
     select: { name: true, source: { select: { id: true, loc: true } }, target: { select: { loc: true } } },
     orderBy: { id: 'asc' },
   });
@@ -392,16 +393,28 @@ export const specCorpusRenumberMutations = {
         extensions: { code: 'NODE_NOT_FOUND', loc: fromLoc, memoryId: corpus.id },
       });
     }
-    const occupied = nodes.find((n) => n.loc === toLoc || n.loc.startsWith(`${toLoc}:`));
+    const movingNodes = nodes.filter((n) => renumberedLoc(n.loc, fromLoc, toLoc) !== null);
+    const moved = movingNodes
+      .map((n) => ({ fromLoc: n.loc, toLoc: renumberedLoc(n.loc, fromLoc, toLoc)! }))
+      .sort((a, b) => a.fromLoc.localeCompare(b.fromLoc));
+    // (@codex P2, #1453) Exactly the shared mover's collision rule: a node
+    // OUTSIDE the moving set at one of the rebased destination locs, live or a
+    // tombstone (the (loc, memoryId) unique index covers both). An unrelated
+    // node elsewhere under toLoc is not a collision, and the source itself may
+    // sit under toLoc on an upward renumber.
+    const occupied = await ctx.db.node.findFirst({
+      where: {
+        memoryId: corpus.id,
+        loc: { in: moved.map((m) => m.toLoc) },
+        id: { notIn: movingNodes.map((n) => n.id) },
+      },
+      select: { loc: true },
+    });
     if (occupied) {
       throw new GraphQLError(`Cannot renumber to "${toLoc}": "${occupied.loc}" already exists there.`, {
         extensions: { code: 'NodeLocConflictError', loc: occupied.loc, memoryId: corpus.id },
       });
     }
-    const moved = nodes
-      .filter((n) => renumberedLoc(n.loc, fromLoc, toLoc) !== null)
-      .map((n) => ({ fromLoc: n.loc, toLoc: renumberedLoc(n.loc, fromLoc, toLoc)! }))
-      .sort((a, b) => a.fromLoc.localeCompare(b.fromLoc));
 
     if (!dryRun) {
       // Fail before any write, rather than after the move.
