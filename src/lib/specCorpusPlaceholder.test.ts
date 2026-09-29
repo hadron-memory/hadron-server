@@ -316,6 +316,8 @@ describe('a placeholder over a tombstone is indistinguishable from a fresh one (
     await resolvers.Mutation.deleteNode(null, { nodeRef: old.id }, as(admin.id));
     const revived = await reserve(draft.id, 'pas:180:02');
     expect(revived.id).toBe(old.id);
+    // The mutation's own result reports the reset provenance, not the tombstone's.
+    expect(revived).toMatchObject({ ownerRepo: null, contentHash: null, isPlaceholder: true });
 
     const a = await db.node.findUniqueOrThrow({ where: { id: fresh.id } });
     const b = await db.node.findUniqueOrThrow({ where: { id: revived.id } });

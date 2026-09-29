@@ -92,7 +92,9 @@ export const specCorpusMutations = {
       // deleted spec's text. A placeholder has no content, so it has no vectors.
       await tx.nodeEmbedding.deleteMany({ where: { nodeId: node.id } });
       // The node as the create door built it (relations included), now marked.
-      return { ...node, isPlaceholder: true };
+      // …with the values this transaction just reset, not the ones read
+      // before it (@codex P2, PR #1452): Node.ownerRepo is client-visible.
+      return { ...node, isPlaceholder: true, contentHash: null, ownerRepo: null };
     });
     for (const effect of effects) effect();
     return reserved;
