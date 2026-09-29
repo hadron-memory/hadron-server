@@ -358,5 +358,9 @@ describe('renumber reports where each rewrite landed (@codex P2 on #1453)', () =
     );
     expect(fired).toBe(true);
     expect(res.rewrites.find((r) => r.nodeId === other.id)).toMatchObject({ loc: 'pas:021', status: 'REWRITTEN' });
+    // (@codex P2) the bare-text report is built from current rows too
+    const cites = res.textCitations.filter((c) => c.sourceNodeId === other.id);
+    expect(cites.length).toBeGreaterThan(0);
+    expect(cites.every((c) => c.sourceLoc === 'pas:021')).toBe(true);
   });
 });

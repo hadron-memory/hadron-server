@@ -562,8 +562,11 @@ export const specCorpusRenumberMutations = {
       rewrites.push(row);
     }
 
-    // Bare-text copies of the moved citations, located in the corpus as it now stands.
-    const textCitations = nodes.flatMap((n) =>
+    // Bare-text copies of the moved citations, located in the corpus as it now
+    // stands (@codex P2, #1453): after a real run, re-read once, since a
+    // concurrent move or edit may have changed rows since the snapshot.
+    const current = dryRun ? nodes : await loadCorpusNodes(ctx.db, corpus.id);
+    const textCitations = current.flatMap((n) =>
       SCANNED_FIELDS.flatMap((field) =>
         findTextCitations(n.fields[field], corpus.pattern, fromLoc).map((c) => ({
           sourceNodeId: n.id, sourceLoc: n.loc, field, citation: c.citation, excerpt: c.excerpt,
