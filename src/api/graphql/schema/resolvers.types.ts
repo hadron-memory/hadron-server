@@ -70,6 +70,7 @@ import { getMemberOrgIds } from '../../../lib/auth/memberOrgIds.js';
 import { publicReadableMemoryWhere } from '../../../lib/orgDiscoverability.js';
 import { memoryRowToRef, agentRowToRef } from './publicRefs.js';
 import { WORKLOG_LOC } from './resolvers.teamWork.js';
+import { corpusStateOf } from '../../../lib/specCorpus.js';
 
 /**
  * #757 — a Prisma `where` fragment selecting the Agents this caller may read,
@@ -974,6 +975,15 @@ export const typeResolvers = {
     },
   },
   Memory: {
+    // #1448 — DRAFT | MINTED, projected from the stored flag in one place. A
+    // parent built from a narrowed select may not carry the column; reading it
+    // back is correct, while defaulting would report a draft corpus as MINTED.
+    corpusState: async (m: { id: string; corpusDraft?: boolean }, _: unknown, ctx: Context) =>
+      corpusStateOf(
+        typeof m.corpusDraft === 'boolean'
+          ? { corpusDraft: m.corpusDraft }
+          : await ctx.db.memory.findUniqueOrThrow({ where: { id: m.id }, select: { corpusDraft: true } }),
+      ),
     // spec 047: organizationId is nullable (a user-owned memory has no org) —
     // guard the fallback lookup so it resolves to null instead of calling
     // findUnique({ id: null }) (codex review, #685).

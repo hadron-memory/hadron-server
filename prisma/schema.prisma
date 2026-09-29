@@ -746,6 +746,15 @@ model Memory {
   /// `properties`/`objectType` are validated against it in the enforcement
   /// phase (a later PR) — free-form until then.
   schema               Json?
+  /// #1447/#1448 — this memory is a DRAFT spec corpus: its specs' citations
+  /// are not yet permanent, so they can be renumbered, moved and deleted
+  /// freely, and a move records no UrnAlias (nothing outside can cite a draft
+  /// number). Chosen ONLY at creation (`createMemory(draftCorpus: true)`); no
+  /// update path sets it, and minting clears it once, one-way. Every existing
+  /// memory, and every memory created without asking, is minted (false). A
+  /// dedicated Memory column rather than MemoryConfig so config-template apply
+  /// (which copies NodeRoleRule columns only) can never carry it.
+  corpusDraft          Boolean           @default(false) @map("corpus_draft")
   /// Classification tags for search and filtering.
   tags                 String[]
   /// License identifier (e.g. "MIT", "CC-BY-4.0", "proprietary").

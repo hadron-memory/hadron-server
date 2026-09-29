@@ -18,6 +18,12 @@ export const typeDefs = `#graphql
     ERROR
   }
 
+  """#1447 — a spec corpus's lifecycle state. DRAFT becomes MINTED once, one-way."""
+  enum CorpusState {
+    DRAFT
+    MINTED
+  }
+
   """
   035-visibility-enum-cleanup: meaningful only for knowledge
   (PUBLIC/ORGANIZATION) and group (GROUP); null otherwise. PERSONAL/PRIVATE
@@ -2691,6 +2697,14 @@ export const typeDefs = `#graphql
     On each new revision the oldest overflow is pruned. Default 10; minimum 1.
     """
     maxRevCount: Int!
+    """
+    #1447/#1448 — whether this memory is a DRAFT spec corpus or MINTED. In a
+    draft corpus spec citations are not yet permanent: specs can be moved,
+    renumbered and deleted, and a move records no URN alias. Chosen only at
+    creation (createMemory draftCorpus); minting is one-way. Every memory
+    created without asking for draft is MINTED.
+    """
+    corpusState: CorpusState!
     """
     Spec 033 FR-026 — timestamp at which the memory owner accepted the
     encrypted-memory vector-inversion disclosure. Set when the caller
@@ -7925,6 +7939,13 @@ export const typeDefs = `#graphql
       embeddingSource: EmbeddingSource
       """#621 — per-node revision-history cap (default 10, minimum 1)."""
       maxRevCount: Int
+      """
+      #1447/#1448 — create this memory as a DRAFT spec corpus, whose spec
+      citations stay changeable until the corpus is minted. This is the only
+      way to get a draft corpus: an existing memory can never be switched into
+      draft. Omitted or false creates an ordinary (minted) memory.
+      """
+      draftCorpus: Boolean
     ): Memory!
 
     """
