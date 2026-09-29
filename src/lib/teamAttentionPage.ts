@@ -215,7 +215,7 @@ export function verifyPageToken(
     // (Chip #3341: an 's' token with valid c_seq/c_loc plus prior c_num was
     // accepted here).
     if (!channelArraysOf(seqEraChannelArrays)
-      || Array.isArray(field('c_num')) || Array.isArray(field('c_ful'))) {
+      || field('c_num') !== undefined || field('c_ful') !== undefined) {
       fail('Invalid team-attention page token.', 'INVALID_ATTENTION_PAGE');
     }
     return value as PageContinuation;
@@ -229,12 +229,16 @@ export function verifyPageToken(
   // (current arrays under a prior marker, or c_ful on a marker-less token)
   // is malformed: no minted token ever looked like that.
   const commonPrior = ['c_inc', 'c_min', 'c_max', 'c_num'] as const;
-  const lacksCurrentArrays = !Array.isArray(field('c_seq')) && !Array.isArray(field('c_loc'));
+  // PRESENCE, not type: no minted token of any era carried another era's
+  // fields in ANY form — a scalar c_seq/c_num is as unminted as an array one
+  // (Chip #3566 / Atilla #3570: the Array.isArray guards accepted
+  // `c_num:'007'` under the current marker).
+  const lacksCurrentArrays = field('c_seq') === undefined && field('c_loc') === undefined;
   const staleRestart = (): never =>
     fail('This scan continuation predates the current scan era; poll again without page to restart from your committed watermark.', 'TEAM_ATTENTION_STALE_PAGE');
   if (value.o === undefined) {
     if (channelArraysOf(commonPrior) && lacksCurrentArrays
-      && !Array.isArray(field('c_front')) && !Array.isArray(field('c_ful'))) {
+      && field('c_front') === undefined && field('c_ful') === undefined) {
       staleRestart();
     }
     fail('Invalid team-attention page token.', 'INVALID_ATTENTION_PAGE');

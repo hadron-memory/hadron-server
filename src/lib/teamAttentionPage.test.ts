@@ -710,6 +710,12 @@ describe('family 14 — review #3153', () => {
       ['current token with prior c_num smuggled in', { ...realPayload, c_num: ['007'] }],
       ['C-era with scalar c_ful', { ...lateC(), c_ful: 'not-an-array' }],
       ['C-era with wrong-length c_ful', { ...lateC(), c_ful: ['a', 'b'] }],
+      // Chip #3566 / Atilla #3570 — PRESENCE gaps: scalar known-foreign
+      // fields must not ride through a type-only guard.
+      ['current token with scalar c_num', { ...realPayload, c_num: '007' }],
+      ['current token with scalar c_ful', { ...realPayload, c_ful: '007' }],
+      ['C-era with scalar c_seq smuggled in', { ...earlyC(), c_seq: '007' }],
+      ['marker-less pre-C with scalar c_front', { ...preC(), c_front: '007' }],
       ['current token missing c_front', (() => { const v = { ...realPayload }; delete v.c_front; return v; })()],
       ['broken t_w index', { ...lateC(), t_w: [99] }],
       ['missing ts timestamp', (() => { const v = lateC(); delete v.ts; return v; })()],
