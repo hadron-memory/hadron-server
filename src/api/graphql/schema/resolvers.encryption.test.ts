@@ -7,7 +7,7 @@ import { generateDataKey, parseDataKey } from '../../../lib/crypto.js';
 import { makeKeyVerifier } from '../../../lib/memoryUnlock.js';
 import { sessionKeyCache } from '../../../lib/sessionKeyCache.js';
 import { computeContentHash } from '../../../lib/contentHash.js';
-import { encryptNodeFields, encryptNodeFieldsWithKey } from '../../../lib/nodeCrypto.js';
+import { encryptNodeFields, encryptNodeFieldsWithKey, isAuthenticatedStringEnvelope } from '../../../lib/nodeCrypto.js';
 import { writeNodeCore } from './resolvers.mutation.node.js';
 
 // Prevent git writes
@@ -577,6 +577,62 @@ describe('encryptMemory', () => {
     await expect(resolvers.Mutation.encryptMemory(
       {}, { memoryId: session.memoryId!, dataKey: key }, appCtx(secretApp.id),
     )).rejects.toMatchObject({ extensions: { code: 'BAD_UNLOCK_INPUT' } });
+  });
+
+  it('refuses a later wrong-key witness without rewriting legacy nodes or history (#1441)', async () => {
+    const originalKey = generateDataKey().raw.toString('base64');
+    const wrongKey = generateDataKey().raw.toString('base64');
+    const first = await resolvers.Mutation.startAgentSession(
+      {}, { agentId: agent.id, externalUserId: 'mixed-legacy', dataKey: originalKey },
+      appCtx(secretApp.id),
+    );
+    const original = await resolvers.Mutation.createNode(
+      {}, { input: { memoryId: first.memoryId!, loc: 'original', name: 'original', content: 'original secret' } },
+      appCtx(secretApp.id, { sessionId: first.id, roles: ['ADMIN'] }),
+    );
+    await db.memory.update({ where: { id: first.memoryId! }, data: { keyVerifier: null } });
+    await resolvers.Mutation.endAgentSession({}, { sessionId: first.id }, appCtx(secretApp.id));
+    expect(sessionKeyCache.getByMemoryId(first.memoryId!)).toBeNull();
+
+    // The legacy session gate accepts another syntactically valid key once
+    // the original session's process-local key is gone.
+    const later = await resolvers.Mutation.startAgentSession(
+      {}, { agentId: agent.id, externalUserId: 'mixed-legacy', dataKey: wrongKey },
+      appCtx(secretApp.id),
+    );
+    const witness = await resolvers.Mutation.createNode(
+      {}, { input: { memoryId: later.memoryId!, loc: 'later', name: 'later', content: 'wrong-key witness' } },
+      appCtx(secretApp.id, { sessionId: later.id, roles: ['ADMIN'] }),
+    );
+    await resolvers.Mutation.endAgentSession({}, { sessionId: later.id }, appCtx(secretApp.id));
+
+    const beforeOriginal = await db.node.findUniqueOrThrow({ where: { id: original.id } });
+    const beforeWitness = await db.node.findUniqueOrThrow({ where: { id: witness.id } });
+    expect(isAuthenticatedStringEnvelope(beforeOriginal.content, parseDataKey(originalKey))).toBe(true);
+    expect(isAuthenticatedStringEnvelope(beforeOriginal.content, parseDataKey(wrongKey))).toBe(false);
+    expect(isAuthenticatedStringEnvelope(beforeWitness.content, parseDataKey(wrongKey))).toBe(true);
+    const tombstone = await db.node.create({
+      data: {
+        id: generateId(), memoryId: first.memoryId!, loc: 'deleted', name: 'deleted',
+        content: 'deleted plaintext', deletedAt: new Date(),
+      },
+    });
+    const legacyRevision = await db.nodeRevision.create({
+      data: {
+        id: generateId(), nodeId: original.id, memoryId: null,
+        loc: 'original', name: 'original', content: 'legacy plaintext',
+      },
+    });
+
+    await expect(resolvers.Mutation.encryptMemory(
+      {}, { memoryId: first.memoryId!, dataKey: wrongKey }, appCtx(secretApp.id),
+    )).rejects.toMatchObject({ extensions: { code: 'BAD_UNLOCK_INPUT', memoryId: first.memoryId } });
+    expect((await db.memory.findUniqueOrThrow({ where: { id: first.memoryId! } })).keyVerifier).toBeNull();
+    expect((await db.node.findUniqueOrThrow({ where: { id: original.id } })).content).toBe(beforeOriginal.content);
+    expect((await db.node.findUniqueOrThrow({ where: { id: witness.id } })).content).toBe(beforeWitness.content);
+    expect((await db.node.findUniqueOrThrow({ where: { id: tombstone.id } })).content).toBe('deleted plaintext');
+    expect((await db.nodeRevision.findUniqueOrThrow({ where: { id: legacyRevision.id } })).content)
+      .toBe('legacy plaintext');
   });
 
   // 007-entity-id-or-urn: encryptMemory accepts memoryId as ID or URN.
