@@ -93,6 +93,11 @@ describe('parseOpenQuestions (ruling (b))', () => {
     ]);
   });
 
+  it('takes the decider only from the literal trailing "<Name> decides." (period required)', () => {
+    const body = ['## Open Questions', '- First? Ada decides.', '- Second? Bo decides', '- Third? Cy decides. '].join('\n');
+    expect(parseOpenQuestions(body).map((q) => q.decider)).toEqual(['Ada', null, 'Cy']);
+  });
+
   it('ignores fenced code and bodies without the section', () => {
     expect(parseOpenQuestions('```\n## Open Questions\n- x. Ada decides.\n```')).toEqual([]);
     expect(parseOpenQuestions('Just prose.')).toEqual([]);

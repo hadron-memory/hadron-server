@@ -217,7 +217,7 @@ export function parseOpenQuestions(content: string | null | undefined): OpenQues
     const text = current.join(' ').replace(/\s+/g, ' ').trim();
     current = null;
     if (text === '') return;
-    const decides = /(?:^|[.;:!?)\]*]\s+)([^.;:!?]*?[^\s.;:!?])\s+decides\.?\s*$/i.exec(text);
+    const decides = /(?:^|[.;:!?)\]*]\s+)([^.;:!?]*?[^\s.;:!?])\s+decides\.\s*$/i.exec(text);
     const bold = /^\*\*(.+?)\*\*/.exec(text);
     out.push({
       question: (bold ? bold[1] : text).slice(0, 200).trim(),
