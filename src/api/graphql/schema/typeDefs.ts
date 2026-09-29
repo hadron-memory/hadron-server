@@ -7482,7 +7482,9 @@ export const typeDefs = `#graphql
     error over the citation-shaped nodes (nodetype-info, tag-spec,
     serialization-leak, duplicate-loc), or a stale abstract once
     staleAbstractsBlock is true. dryRun returns the full report without
-    minting. Owner or org ADMIN only. memoryRef accepts the ID or URN.
+    minting. Owner or org ADMIN only. memoryRef accepts the ID or URN. A real
+    run holds every write to the corpus off while it checks and flips, and
+    refuses SPEC_CORPUS_BUSY (retryable) if a write is already in flight.
     """
     mintSpecCorpus(memoryRef: ID!, dryRun: Boolean): SpecCorpusMintReport!
 

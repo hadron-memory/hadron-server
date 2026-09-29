@@ -177,7 +177,7 @@ describe('mintSpecCorpus serializes with in-flight node writes (#1448)', () => {
         const waiting = await db.$queryRaw<Array<{ pid: number }>>`
           SELECT pid FROM pg_stat_activity
           WHERE datname = current_database() AND wait_event_type = 'Lock'
-            AND query LIKE '%FROM memories WHERE id%' AND query LIKE '%FOR NO KEY UPDATE%'
+            AND query LIKE '%FROM memories WHERE id%' AND query LIKE '%FOR UPDATE%'
         `;
         expect(waiting.length).toBeGreaterThan(0);
       }, { timeout: 5_000, interval: 25 });
@@ -188,6 +188,68 @@ describe('mintSpecCorpus serializes with in-flight node writes (#1448)', () => {
     // The mint ran after the write committed, so it saw the missing reference.
     expect(await minting).toBe('SPEC_CORPUS_MINT_BLOCKED');
     expect(await stateOf()).toBe('DRAFT');
+  });
+});
+
+describe('mintSpecCorpus does not rely on writers taking its fence (@codex P2s on #1462)', () => {
+  it('waits for a direct insert that took no memory lock, and judges the corpus as it left it', async () => {
+    let release!: () => void;
+    let held!: () => void;
+    const inserted = new Promise<void>((r) => { held = r; });
+    const hold = new Promise<void>((r) => { release = r; });
+    // Like a Channel message post: a plain insert, no FOR SHARE on the memory.
+    const writer = db.$transaction(async (tx) => {
+      await tx.node.create({ data: {
+        id: generateId(), memoryId: draft.id, loc: 'pas:100', name: 'late', role: 'spec', nodeType: 'info', tags: ['spec'],
+        content: `Late: hrn:node:${draft.urn}:pas:404.`,
+      } });
+      held();
+      await hold;
+    }, { timeout: 20_000 });
+    await inserted;
+
+    const minting = codeOf(mint());
+    try {
+      await vi.waitFor(async () => {
+        const waiting = await db.$queryRaw<Array<{ pid: number }>>`
+          SELECT pid FROM pg_stat_activity
+          WHERE datname = current_database() AND wait_event_type = 'Lock'
+            AND query LIKE '%FROM memories WHERE id%' AND query LIKE '%FOR UPDATE%'
+        `;
+        expect(waiting.length).toBeGreaterThan(0);
+      }, { timeout: 5_000, interval: 25 });
+    } finally {
+      release();
+    }
+    await writer;
+    expect(await minting).toBe('SPEC_CORPUS_MINT_BLOCKED');
+    expect(await stateOf()).toBe('DRAFT');
+  });
+
+  it('refuses as retryable, minting nothing, while a direct update holds a node of the corpus', async () => {
+    let release!: () => void;
+    let held!: () => void;
+    const updated = new Promise<void>((r) => { held = r; });
+    const hold = new Promise<void>((r) => { release = r; });
+    const writer = db.$transaction(async (tx) => {
+      await tx.node.updateMany({
+        where: { memoryId: draft.id, loc: 'pas:010:01' },
+        data: { content: `Now cites hrn:node:${draft.urn}:pas:404.` },
+      });
+      held();
+      await hold;
+    }, { timeout: 20_000 });
+    await updated;
+
+    try {
+      expect(await codeOf(mint())).toBe('SPEC_CORPUS_BUSY');
+      expect(await stateOf()).toBe('DRAFT');
+    } finally {
+      release();
+    }
+    await writer;
+    // Once the write lands, the mint judges it.
+    expect(await codeOf(mint())).toBe('SPEC_CORPUS_MINT_BLOCKED');
   });
 });
 

@@ -3,6 +3,7 @@
 // #1450 — reserveSpecCitation. Contract:
 // https://github.com/hadron-memory/hadron-server/issues/1447#issuecomment-5895948862 §4.
 import { GraphQLError } from 'graphql';
+import { Prisma } from '../../../generated/prisma/index.js';
 import type { Context } from './resolvers.js';
 import { nodeMoveOps, writeNodeCore } from './resolvers.mutation.node.js';
 import {
@@ -728,6 +729,41 @@ type MintReport = {
 /** How many blockers a refusal carries in its error extensions (the dry run has them all). */
 const MINT_REFUSAL_BLOCKER_CAP = 50;
 
+/**
+ * Hold a corpus still for a mint's check-and-flip, WITHOUT relying on writers
+ * to cooperate (@codex P2s, PR #1462). The earlier fence was a memory-row lock
+ * that conflicted with the FOR SHARE every *cooperating* node write takes, and
+ * review found one direct writer after another that takes none (an extraction,
+ * a Channel message post). So the fence is the mint's own:
+ * - the memory row FOR UPDATE, which conflicts with the FOR KEY SHARE that the
+ *   `nodes.memory_id` foreign key takes on every insert or move INTO the
+ *   memory, whatever code path issues it;
+ * - then every node row of the memory, tombstones included, FOR UPDATE, which
+ *   blocks every update, revival or delete of an existing node, and every edge
+ *   write naming one as an endpoint (the edge FKs take FOR KEY SHARE on nodes).
+ *
+ * Memory first waits out cooperating writers, which hold the memory before
+ * their node rows. A writer holding a node row while it waits on the memory
+ * (a move, an extraction) would be a lock cycle, so the node locks give up
+ * after 500ms, under Postgres's default 1s deadlock_timeout, and the mint
+ * refuses as retryable rather than a deadlock abort landing on the writer.
+ */
+async function fenceCorpusForMint(tx: Prisma.TransactionClient, memoryId: string): Promise<void> {
+  await tx.$queryRaw`SELECT id FROM memories WHERE id = ${memoryId} FOR UPDATE`;
+  await tx.$executeRaw`SET LOCAL lock_timeout = '500ms'`;
+  try {
+    await tx.$queryRaw`SELECT id FROM nodes WHERE memory_id = ${memoryId} ORDER BY id FOR UPDATE`;
+  } catch (e) {
+    if (e instanceof Prisma.PrismaClientKnownRequestError && (e.meta as { code?: string } | undefined)?.code === '55P03') {
+      throw new GraphQLError('A write to this corpus is in flight, so it cannot be minted this moment. Retry.', {
+        extensions: { code: 'SPEC_CORPUS_BUSY', memoryId },
+      });
+    }
+    throw e;
+  }
+  await tx.$executeRaw`SET LOCAL lock_timeout TO DEFAULT`;
+}
+
 export const specCorpusMintMutations = {
   /**
    * #1448 — mint a DRAFT spec corpus: one step for the whole corpus, one-way
@@ -745,9 +781,11 @@ export const specCorpusMintMutations = {
    *
    * By anyone who can manage the corpus: its owner, or an ADMIN of its org
    * (the updateMemory gate); an unreadable memory answers as not found.
-   * The whole check and the flip run under a FOR NO KEY UPDATE lock on the
-   * memory row, which conflicts with the FOR SHARE lock every node write holds
-   * on it, so no write lands between the report and the mint.
+   * A real run checks and flips inside {@link fenceCorpusForMint}, so no write
+   * lands between the report and the mint; a dry run only reads.
+   *
+   * @throws GraphQLError `SPEC_CORPUS_BUSY` (retryable) when a node of the
+   *   corpus stays locked by an in-flight write.
    */
   mintSpecCorpus: async (
     _: unknown,
@@ -761,7 +799,8 @@ export const specCorpusMintMutations = {
     await concealUnreadableDenial(ctx, id, memoryRef, () => requireOwnerOrOrgRole(ctx, owner, 'ADMIN'));
 
     return ctx.db.$transaction(async (tx) => {
-      await tx.$queryRaw`SELECT id FROM memories WHERE id = ${id} FOR NO KEY UPDATE`;
+      if (dryRun) await tx.$queryRaw`SELECT id FROM memories WHERE id = ${id} FOR NO KEY UPDATE`;
+      else await fenceCorpusForMint(tx, id);
       const txCtx = withoutRequestCaches(ctx, tx);
       // (@codex P2, PR #1462) Re-authorize under the lock: an org transfer
       // (updateMemory takes this row FOR UPDATE) may have committed between the
