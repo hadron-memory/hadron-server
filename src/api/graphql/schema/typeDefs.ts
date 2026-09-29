@@ -3037,6 +3037,7 @@ export const typeDefs = `#graphql
     urn: String!
     name: String!
     description: String
+    "Templated Agent prompt. {{name}}/{{role}} bind to the Agent in chats or the named Worker in briefings."
     systemPrompt: String
     systemMemoryId: String
     visibility: AgentVisibility!
@@ -3050,8 +3051,6 @@ export const typeDefs = `#graphql
     # field here. Pure metadata: no server behavior forks on these fields.
     "Persona role - free string with conventions ('backend-engineer')."
     personaRole: String
-    "Persona identity TEMPLATE ('You are {{name}}, ...'); {{name}}/{{role}} are bound at casting time (Worker.prompt returns the bound result)."
-    personaPrompt: String
     # 036-ai-service-config: the four AI fields below are registry-backed
     # reads of the Agent's config named 'default' (legacy columns dropped).
     aiProvider: String
@@ -3556,7 +3555,7 @@ export const typeDefs = `#graphql
     "The App whose staff this casting fills."
     app: App
     """
-    The worker's boot prompt, resolved: the agent's personaPrompt template
+    The worker's boot prompt, resolved: the agent's systemPrompt template
     with {{name}}/{{role}} bound, then promptOverride appended as its own
     paragraph. Null when the agent carries no template and the worker no
     override.
@@ -3661,7 +3660,7 @@ export const typeDefs = `#graphql
     template and no override was given.
     """
     prompt: String
-    "Whether the agent's personaPrompt binds {{name}} — a nameless template silently produces workers whose prompt never names them. Null when the agent has no template."
+    "Whether the agent's systemPrompt binds {{name}} — a nameless template silently produces workers whose prompt never names them. Null when the agent has no template."
     hasNamePlaceholder: Boolean
   }
 
@@ -3669,8 +3668,8 @@ export const typeDefs = `#graphql
   A role definition (#960): the roles:<role> node in the Team Agent's system
   memory. #1050: it carries no name register — a role is a definition, not an
   allocation pool.
-  The persona prompt template is NOT here — with the Worker model (#974) it
-  lives on the role-agent as dressing (personaRole + personaPrompt); roleAgent
+  The prompt template is NOT here — with the Worker model (#974) it
+  lives on the role-agent (personaRole + systemPrompt); roleAgent
   points at it.
   """
   type TeamRole {
@@ -3707,7 +3706,7 @@ export const typeDefs = `#graphql
     """
     roleAgent: Agent
     """
-    Whether the role-agent's personaPrompt binds {{name}} — the check that
+    Whether the role-agent's systemPrompt binds {{name}} — the check that
     finds templates which silently produce nameless workers (role-agents
     authored before any guard existed). Null when no single role-agent
     resolves. Computed even when roleAgent itself is masked: it discloses one
@@ -8085,25 +8084,25 @@ export const typeDefs = `#graphql
     v2 — no @ sigil) and its system memory is user-owned too. Exactly one owner
     (org XOR user).
 
-    personaRole / personaPrompt are the persona dressing (cor:agt:020:01) —
-    the reusable role plus the '{{name}}'-templated identity prompt. The NAMED
+    personaRole and systemPrompt are the persona dressing (cor:agt:020:01) —
+    the reusable role plus the '{{name}}'-templated prompt. The NAMED
     identity is a Worker, cast with castWorker; names never live on agents.
 
     orgId accepts the org's ID or URN.
     """
-    createAgent(orgId: ID, name: String!, description: String, systemPrompt: String, systemMemoryId: String, visibility: AgentVisibility, type: AgentType, surfaces: [String!], personaRole: String, personaPrompt: String): Agent!
+    createAgent(orgId: ID, name: String!, description: String, systemPrompt: String, systemMemoryId: String, visibility: AgentVisibility, type: AgentType, surfaces: [String!], personaRole: String): Agent!
 
     """
     Update an Agent.
 
-    urn renames the slug (org-owned agents only). personaRole / personaPrompt
-    are the persona dressing (cor:agt:020:01); explicit null or blank clears,
-    omitted preserves. Worker castings referencing this agent are unaffected —
+    urn renames the slug (org-owned agents only). personaRole is normalized
+    (explicit null or blank clears, omitted preserves). Worker castings
+    referencing this agent are unaffected —
     the named identity lives on the Worker.
 
     Accepts the entity's ID or URN.
     """
-    updateAgent(ref: ID!, name: String, urn: String, description: String, systemPrompt: String, systemMemoryId: String, visibility: AgentVisibility, listedOnMarketplace: Boolean, type: AgentType, surfaces: [String!], personaRole: String, personaPrompt: String, registerDefaults: RegisterDefaultsInput): Agent!
+    updateAgent(ref: ID!, name: String, urn: String, description: String, systemPrompt: String, systemMemoryId: String, visibility: AgentVisibility, listedOnMarketplace: Boolean, type: AgentType, surfaces: [String!], personaRole: String, registerDefaults: RegisterDefaultsInput): Agent!
 
     """
     Soft-delete an Agent.
@@ -9088,7 +9087,7 @@ export const typeDefs = `#graphql
     \`promptOverride\` is the per-worker escape hatch (cor:agt:020:01), but it
     could only be set at CASTING time — fixing a casting's individuality at the
     one moment nobody yet knows what makes it individual. The role agent's
-    \`personaPrompt\` cannot stand in (it is SHARED by every casting of that
+    \`systemPrompt\` cannot stand in (it is SHARED by every casting of that
     role), and re-casting is barred by \`WORKER_IN_USE\` for any worker that has
     done work — precisely the ones with an identity to record.
 

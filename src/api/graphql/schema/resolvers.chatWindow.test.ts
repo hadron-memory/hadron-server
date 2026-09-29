@@ -367,6 +367,28 @@ describe("sendChatMessage hands the model the most recent window (#1111)", () =>
     return last!.messageHistory.map((h) => h.content);
   }
 
+  it('binds the Agent identity in both chat prompt paths and preserves the stage prompt', async () => {
+    await db.agent.update({
+      where: { id: agent.id },
+      data: { systemPrompt: 'You are {{name}}, a {{role}}.', personaRole: 'researcher' },
+    });
+
+    const start = await resolvers.Mutation.startChat({}, { agentId: agent.id }, adminCtx());
+    expect(start.systemMessage).toBe('You are research-agent, a researcher.\n\nScope the research.');
+
+    const turn = await resolvers.Mutation.sendChatMessage(
+      {}, { chatId: start.chatId, userMessage: 'first turn' }, adminCtx(),
+    );
+    expect(turn.systemMessage).toBe(start.systemMessage);
+
+    // Existing systemPrompt text without tokens remains byte-for-byte.
+    await db.agent.update({ where: { id: agent.id }, data: { systemPrompt: 'Existing prompt.' } });
+    const next = await resolvers.Mutation.sendChatMessage(
+      {}, { chatId: start.chatId, userMessage: 'second turn' }, adminCtx(),
+    );
+    expect(next.systemMessage).toBe('Existing prompt.\n\nScope the research.');
+  });
+
   it('includes the turn being answered on a chat longer than the window', async () => {
     const contents = await driveTurns(60);
     // The whole defect in one assertion: past the cap the model was handed

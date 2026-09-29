@@ -83,7 +83,7 @@ beforeEach(async () => {
       orgId: org.id,
       name: 'CWP Backend Engineer',
       personaRole: 'backend-engineer',
-      personaPrompt: 'You are {{name}}, a {{role}}.',
+      systemPrompt: 'You are {{name}}, a {{role}}.',
     },
     ctx(admin.id),
   );
@@ -183,7 +183,7 @@ describe('#964 — castWorkerPreview', () => {
   it('flags a nameless template before the name is burned', async () => {
     await db.agent.update({
       where: { id: roleAgent.id },
-      data: { personaPrompt: 'You are a {{role}}.' },
+      data: { systemPrompt: 'You are a {{role}}.' },
     });
     const p = await preview(ctx(admin.id), { role: 'backend-engineer', name: 'Gwen' });
     expect(p.hasNamePlaceholder).toBe(false);
@@ -196,7 +196,7 @@ describe('#964 — castWorkerPreview', () => {
     // silently produces a nameless worker.
     await db.agent.update({
       where: { id: roleAgent.id },
-      data: { personaPrompt: 'You are {{ name }}, a {{role}}.' },
+      data: { systemPrompt: 'You are {{ name }}, a {{role}}.' },
     });
     const p = await preview(ctx(admin.id), { role: 'backend-engineer', name: 'Gwen' });
     expect(p.hasNamePlaceholder).toBe(false);

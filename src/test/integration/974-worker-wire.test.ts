@@ -137,7 +137,7 @@ beforeAll(async () => {
       orgId: org.id,
       name: 'Wire Backend Engineer',
       personaRole: 'backend-engineer',
-      personaPrompt: 'You are {{name}}, a {{role}}.',
+      systemPrompt: 'You are {{name}}, a {{role}}.',
     },
     ctx,
   );

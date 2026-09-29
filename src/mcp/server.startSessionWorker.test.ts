@@ -204,7 +204,7 @@ describe('#990 — workerRef by name, and the briefing always comes back', () =>
   it('returns the RESOLVED briefing when the role agent carries a template', async () => {
     await db.agent.update({
       where: { id: agent.id },
-      data: { personaPrompt: 'You are {{name}}, a {{role}}. Ship carefully.', personaRole: 'backend-engineer' },
+      data: { systemPrompt: 'You are {{name}}, a {{role}}. Ship carefully.', personaRole: 'backend-engineer' },
     });
     await db.worker.update({ where: { id: worker.id }, data: { role: 'backend-engineer' } });
     const srv = createTestableMcpServer(hybridAuth());
@@ -227,7 +227,7 @@ describe('#990 — workerRef by name, and the briefing always comes back', () =>
   it('appends the per-worker override to the template', async () => {
     await db.agent.update({
       where: { id: agent.id },
-      data: { personaPrompt: 'You are {{name}}.', personaRole: 'backend-engineer' },
+      data: { systemPrompt: 'You are {{name}}.', personaRole: 'backend-engineer' },
     });
     await db.worker.update({
       where: { id: worker.id },
@@ -243,7 +243,7 @@ describe('#990 — workerRef by name, and the briefing always comes back', () =>
   });
 
   it('says so explicitly when there is no briefing to give', async () => {
-    // The seeded agent carries no personaPrompt and the worker no override —
+    // The seeded agent carries no systemPrompt and the worker no override —
     // emit a plain statement rather than a bare, confusing heading.
     const srv = createTestableMcpServer(hybridAuth());
     const out = await srv.callToolText('hadron_start_session', {

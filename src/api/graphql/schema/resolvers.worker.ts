@@ -1,6 +1,6 @@
 // Workers — #974 (re-cut): the named casting of an installed Agent into an
 // App (cor:dmo:050:11, cor:agt:020:01/:02). A persona is universal DRESSING on
-// an Agent (`personaRole` + the `personaPrompt` template); the Worker is the
+// an Agent (`personaRole` + the `systemPrompt` template); the Worker is the
 // local named identity ("Iris") that does attributable work. `castWorker`
 // supersedes `createTeamPersona`'s minting semantics: it no longer mints an
 // Agent at all — it casts an EXISTING installed agent under a name, allocating
@@ -637,7 +637,7 @@ type CastArgs = {
 type CastTarget = {
   appId: string;
   app: AppRow & { deletedAt: Date | null };
-  agent: { id: string; name: string; personaRole: string | null; personaPrompt: string | null };
+  agent: { id: string; name: string; personaRole: string | null; systemPrompt: string | null };
   workerRole: string | null;
   requestedName: string | null;
   override: string | null;
@@ -697,7 +697,7 @@ async function resolveCastTarget(ctx: Context, args: CastArgs): Promise<CastTarg
       where: { appId_agentId: { appId, agentId: id } },
       select: {
         agent: {
-          select: { id: true, name: true, personaRole: true, personaPrompt: true, deletedAt: true },
+          select: { id: true, name: true, personaRole: true, systemPrompt: true, deletedAt: true },
         },
       },
     });
@@ -719,7 +719,7 @@ async function resolveCastTarget(ctx: Context, args: CastArgs): Promise<CastTarg
       orderBy: { createdAt: 'asc' },
       select: {
         agent: {
-          select: { id: true, name: true, urn: true, personaRole: true, personaPrompt: true, deletedAt: true },
+          select: { id: true, name: true, urn: true, personaRole: true, systemPrompt: true, deletedAt: true },
         },
       },
     });
@@ -1182,7 +1182,7 @@ export const workerMutations = {
    * (cor:agt:020:01), but it could only be set at CASTING time and was
    * immutable thereafter — which inverts the natural order, fixing a casting's
    * individuality at the one moment nobody yet knows what makes it individual.
-   * Neither escape hatch covered it: the role agent's `personaPrompt` is SHARED
+   * Neither escape hatch covered it: the role agent's `systemPrompt` is SHARED
    * by every casting of that role (cor:agt:020:01 explicitly allows several), so
    * anything individual written there is claimed by all of them; and
    * `deleteWorker` + re-cast refuses `WORKER_IN_USE` the moment a session was
@@ -1557,7 +1557,7 @@ export const workerQueries = {
 
     // Prompt composition mirrors Worker.prompt exactly: the agent's template
     // with {{name}}/{{role}} bound, then the override as its own paragraph.
-    const template = agent.personaPrompt ?? null;
+    const template = agent.systemPrompt ?? null;
     const bound = template
       ? applyPersonaTemplate(template, name, workerRole ?? agent.personaRole ?? '')
       : null;
@@ -1752,9 +1752,9 @@ export async function composeWorkerPrompt(
   }
   const agent = await ctx.db.agent.findUnique({
     where: { id: worker.agentId },
-    select: { personaPrompt: true, personaRole: true, updatedAt: true },
+    select: { systemPrompt: true, personaRole: true, updatedAt: true },
   });
-  const template = agent?.personaPrompt ?? null;
+  const template = agent?.systemPrompt ?? null;
   const role = worker.role ?? agent?.personaRole ?? '';
   const bound = template ? applyPersonaTemplate(template, worker.name, role) : null;
   const authored = bound && worker.promptOverride ? `${bound}\n\n${worker.promptOverride}` : (worker.promptOverride ?? bound);
@@ -2226,7 +2226,7 @@ export const workerFieldResolvers = {
     },
     /**
      * The worker's boot prompt, resolved (cor:agt:020:01 — "how {{name}} and
-     * the override compose is tunable"): the agent's `personaPrompt` template
+     * the override compose is tunable"): the agent's `systemPrompt` template
      * with `{{name}}`/`{{role}}` bound, then the per-worker `promptOverride`
      * appended as its own paragraph. Null when the agent carries no template
      * and the worker no override.

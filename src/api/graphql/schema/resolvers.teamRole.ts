@@ -1,7 +1,7 @@
 // Team roles as a platform surface — #960 (cor:agt:020:01/:02), re-keyed by
 // the Worker model (#974): a role definition is the `roles:<role>` node in the
 // Team Agent's system memory. The persona prompt template is NOT here — it
-// lives on the role-agent as dressing (`Agent.personaRole` + `personaPrompt`),
+// lives on the role-agent as dressing (`Agent.personaRole` + `systemPrompt`),
 // which this surface only points at.
 //
 // #1050 — the NAME REGISTER is gone. `data.names` and its conventions
@@ -47,7 +47,7 @@ type WorkerRosterRow = Record<string, unknown> & { id: string; name: string };
 
 type RoleAgentEntry = {
   /** The single installed agent whose personaRole matches, or null (zero or 2+). */
-  agent: (Record<string, unknown> & { personaPrompt: string | null }) | null;
+  agent: (Record<string, unknown> & { systemPrompt: string | null }) | null;
   /** How many installed agents carry the role — 2+ means castWorker would refuse ambiguous. */
   matches: number;
 };
@@ -140,7 +140,7 @@ async function loadRoleNodes(
 /**
  * Assemble one TeamRole projection from a decrypted role node + the role-agent
  * index. `hasNamePlaceholder` moved to the role-AGENT's dressing with the
- * Worker model: it flags a `personaPrompt` that never binds `{{name}}` — the
+ * Worker model: it flags a `systemPrompt` that never binds `{{name}}` — the
  * silent-breakage check #960 kept on the read because agents authored before
  * the guard exist. Null when no single role-agent resolves.
  *
@@ -202,7 +202,7 @@ async function buildTeamRole(
     // Shared with applyPersonaTemplate's exact token (#985 review): a
     // whitespace-tolerant probe would bless `{{ name }}`, which the composer
     // leaves literal.
-    hasNamePlaceholder = templateBindsName(entry.agent.personaPrompt);
+    hasNamePlaceholder = templateBindsName(entry.agent.systemPrompt);
     // The agent OBJECT runs Query.agent's own read gate, masked to null on
     // deny — the same #552 posture as Worker.agent: a nested Agent hands the
     // caller its field resolvers (systemPrompt included).
