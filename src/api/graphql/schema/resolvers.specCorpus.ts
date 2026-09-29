@@ -265,6 +265,32 @@ interface ScannedNode {
 
 const SCAN_PAGE = 500;
 
+const SCANNED_SELECT = {
+  id: true, loc: true, isPlaceholder: true, revSeq: true, role: true,
+  name: true, description: true, abstract: true, content: true,
+} as const;
+
+/** Project a selected row into the scan's node shape. */
+function toScannedNode(n: {
+  id: string; loc: string; isPlaceholder: boolean; revSeq: number; role: string | null;
+  name: string; description: string | null; abstract: string | null; content: string | null;
+}): ScannedNode {
+  return {
+    id: n.id, loc: n.loc, isPlaceholder: n.isPlaceholder, revSeq: n.revSeq, role: n.role,
+    fields: { name: n.name, description: n.description, abstract: n.abstract, content: n.content },
+  };
+}
+
+/**
+ * (@codex P2, #1453) Re-read ONE node for a rewrite attempt, and only while it
+ * is still a live node of this corpus. Re-reading the whole corpus per rewrite
+ * made a renumber quadratic in a well-linked corpus.
+ */
+async function loadCorpusNode(db: Context['db'], memoryId: string, id: string): Promise<ScannedNode | undefined> {
+  const n = await db.node.findFirst({ where: { id, memoryId, deletedAt: null }, select: SCANNED_SELECT });
+  return n ? toScannedNode(n) : undefined;
+}
+
 /** Read every live node of the corpus, a page at a time, in id order. */
 async function loadCorpusNodes(db: Context['db'], memoryId: string): Promise<ScannedNode[]> {
   const nodes: ScannedNode[] = [];
@@ -274,17 +300,9 @@ async function loadCorpusNodes(db: Context['db'], memoryId: string): Promise<Sca
       where: { memoryId, deletedAt: null, ...(cursor ? { id: { gt: cursor } } : {}) },
       orderBy: { id: 'asc' },
       take: SCAN_PAGE,
-      select: {
-        id: true, loc: true, isPlaceholder: true, revSeq: true, role: true,
-        name: true, description: true, abstract: true, content: true,
-      },
+      select: SCANNED_SELECT,
     });
-    for (const n of page) {
-      nodes.push({
-        id: n.id, loc: n.loc, isPlaceholder: n.isPlaceholder, revSeq: n.revSeq, role: n.role,
-        fields: { name: n.name, description: n.description, abstract: n.abstract, content: n.content },
-      });
-    }
+    for (const n of page) nodes.push(toScannedNode(n));
     if (page.length < SCAN_PAGE) return nodes;
     cursor = page[page.length - 1].id;
   }
@@ -579,8 +597,8 @@ async function rewriteWithRetry(
     await ctx.db.$transaction((tx) =>
       ensureCurrentNodeRevisionInTransaction(tx, node!.id, { expectedMemoryId: corpus.id }),
     );
-    node = (await loadCorpusNodes(ctx.db, corpus.id)).find((n) => n.id === initial.id);
-    if (!node) return null; // deleted meanwhile: nothing left to rewrite
+    node = await loadCorpusNode(ctx.db, corpus.id, initial.id);
+    if (!node) return null; // deleted or moved out meanwhile: nothing left to rewrite
     const plan = planRewrite(node, corpus.pattern, fromLoc, toLoc, accept);
     if (!plan) return null; // a concurrent edit already removed the references
     try {

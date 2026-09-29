@@ -299,3 +299,33 @@ describe('historical alias claimants make a reference ambiguous (@codex P2 on #1
     expect(toRule.map((r) => r.sourceLoc).sort()).toEqual(['pas:010', 'pas:020']);
   });
 });
+
+describe('renumber cost does not grow with the number of citing nodes (@codex P2 on #1453)', () => {
+  it('reads the corpus a fixed number of times, not once per rewrite', async () => {
+    for (let i = 0; i < 8; i++) {
+      await spec(`pas:2${i}0`, `Citing ${i}`, `See hrn:node:${draft.urn}:pas:010 and ${link('Rule', 'pas:010:01')}.`);
+    }
+    let pageReads = 0;
+    const countingDb = new Proxy(db, {
+      get(target, prop, receiver) {
+        if (prop === 'node') {
+          const node = Reflect.get(target, prop, receiver) as typeof db.node;
+          return new Proxy(node, {
+            get(t, p, r) {
+              if (p === 'findMany') return (...a: Parameters<typeof db.node.findMany>) => { pageReads++; return t.findMany(...a); };
+              return Reflect.get(t, p, r);
+            },
+          });
+        }
+        return Reflect.get(target, prop, receiver);
+      },
+    });
+    const res = await specCorpusRenumberMutations.renumberSpec(
+      null, { memoryRef: draft.id, fromLoc: 'pas:010', toLoc: 'pas:040' }, { ...as(), db: countingDb },
+    );
+    expect(res.rewrites.filter((r) => r.status === 'REWRITTEN').length).toBeGreaterThanOrEqual(9);
+    // Corpus loads before and after the move plus a handful of fixed lookups;
+    // a per-rewrite corpus reload would add one per citing node (9+).
+    expect(pageReads).toBeLessThan(9);
+  });
+});
