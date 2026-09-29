@@ -48,6 +48,7 @@ import {
 } from './email-entry.template.js';
 import {
   buildEmailRecipientRateLimit,
+  buildEmailSendPerIpRateLimit,
   EMAIL_MAX_LENGTH,
   sendMagicLink,
   TOKEN_EXPIRY_MINUTES,
@@ -1157,42 +1158,6 @@ async function handleAuthorizePost(req: Request, res: Response): Promise<void> {
  * would only bloat the EmailVerificationToken row / the Resend call.
  */
 
-
-/**
- * Per-IP limiter for the magic-link send triggered from the OAuth
- * email-entry page, against being used as an email bomb / Resend quota
- * drain. 10 sends / 15 min / IP comfortably covers a human retrying a
- * typo'd address. `skipFailedRequests` uncounts 4xx/5xx so CSRF
- * failures and validation 400s don't consume the send budget — only
- * requests that actually reached Resend do.
- *
- * AMENDED (#560): this used to say "the existing send path (POST
- * /auth/email) is portal-gated by the mandatory #505 `client_state`
- * nonce", offered as the reason that path needed no limiter of its own.
- * That was wrong. The nonce is mandatory, but it is CALLER-SUPPLIED and
- * only ever hashed and written onto the token row — nothing validates it
- * against a pre-registered value, so any string satisfies it. It binds a
- * handoff code to one browser (session-fixation defense); it
- * authenticates nobody and throttles nothing. `POST /auth/email` now
- * carries its own per-IP and per-ADDRESS limiters
- * (`buildEmailSendPerIpRateLimit` / `buildEmailRecipientRateLimit`
- * in auth/email.ts), and this comment no longer vouches for it.
- *
- * Same in-process MemoryStore caveat as the DCR limiters above
- * (per-worker counters in a multi-worker deploy — acceptable, the
- * limit exists to stop abuse-shaped bursts, not to enforce a quota).
- */
-export function buildAuthorizeEmailRateLimit() {
-  return rateLimit({
-    windowMs: 15 * 60_000,
-    limit: 10,
-    standardHeaders: 'draft-7',
-    legacyHeaders: false,
-    skipFailedRequests: true,
-    message: RATE_LIMITED_BODY,
-  });
-}
-
 /**
  * App Review demo bypass (approved by Holger 2026-07-27: a curated,
  * trackable reviewer account for a password-less platform — Apple's
@@ -1772,23 +1737,12 @@ async function handleOAuthToken(req: Request, res: Response): Promise<void> {
  *   - POST /oauth/token                               (Phase 2D)
  */
 /**
- * #560 / @copilot on PR #1238: the per-RECIPIENT email limiter is owned by
- * server.ts and passed IN, rather than built here, so that this route and
- * `POST /auth/email` share ONE instance and therefore one store. Two
- * separately-built limiters would give a single victim the budget twice, which
- * is the bug this is fixing rather than a detail of how it is wired.
- *
- * It is OPTIONAL but never absent. Omitting it builds a local limiter instead
- * of mounting none — @copilot again, and the distinction is fail-safe versus
- * fail-open: an alternate mount (`buildOAuthRouter()` with no options, as in
- * 025-oauth-register.test.ts) would otherwise silently re-expose the
- * email-bomb path, and an injectable defence that defaults to OFF is the kind
- * that goes missing without anyone editing the route. The injected instance
- * still wins, because sharing the store is what bounds a victim across both
- * paths; a local one bounds this route alone, which is strictly better than
- * nothing.
+ * Both send limiters are injected from server.ts so the OAuth and portal
+ * routes share their IP and recipient stores (#560/#1239). A bare router
+ * mount builds local defaults; omitting injection never disables protection.
  */
 export interface OAuthRouteOptions {
+  emailSendPerIpRateLimit?: RequestHandler;
   emailRecipientRateLimit?: RequestHandler;
 }
 
@@ -1826,29 +1780,24 @@ export function buildOAuthRouter(opts: OAuthRouteOptions = {}): Router {
     handleAuthorizePost,
   );
 
-  // /oauth/authorize/email (#804): the email-entry form target. Rate
-  // limit first (cheap reject; counts only successful sends via
-  // skipFailedRequests), then the form-body parser, then CSRF — the
-  // same double-submit utilities as the consent POST, so the token
-  // minted by the GET's email branch validates here.
+  // /oauth/authorize/email (#804): parse, check CSRF, and reject every
+  // no-send case BEFORE either budget. Once admitted, both limiters count the
+  // send even if the client disconnects or the mail provider fails (#1239).
+  // The injected per-IP and recipient instances are shared with /auth/email;
+  // bare router mounts still build local defaults rather than running open.
   router.post(
     '/oauth/authorize/email',
-    buildAuthorizeEmailRateLimit(),
     express.urlencoded({ extended: false }),
     csrf.doubleCsrfProtection,
-    // Every no-send check runs BEFORE the shared recipient limiter, so a
-    // request that will not send mail cannot spend a victim's budget — which
-    // matters more now that the budget is shared with POST /auth/email
-    // (@copilot, PR #1238). The limiter then keys on the recipient, which is
-    // why it must also sit after the body parser.
     buildValidateAuthorizeEmailSend(csrf),
+    opts.emailSendPerIpRateLimit ?? buildEmailSendPerIpRateLimit(),
     opts.emailRecipientRateLimit ?? buildEmailRecipientRateLimit(),
     buildHandleAuthorizeEmailPost(csrf),
   );
 
   // /oauth/authorize/email/code: the App Review demo bypass's code
-  // form. Its limiter COUNTS failures (guessing brake), unlike the
-  // send limiter above.
+  // form. Its limiter counts failed guesses; the send limiters above
+  // count admitted mail attempts, including provider failures and aborts.
   router.post(
     '/oauth/authorize/email/code',
     buildAuthorizeEmailCodeRateLimit(),

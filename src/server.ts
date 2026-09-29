@@ -817,14 +817,12 @@ export async function createServer(): Promise<Express> {
   // absent from AS metadata, so advertising it (even if the URL
   // 404s until 2B lands) is what unblocks the OAuth dance discovery.
   //
-  // #560: the per-recipient email limiter is built ONCE here and shared with
-  // BOTH public send paths — `POST /auth/email` below and
-  // `POST /oauth/authorize/email` inside the OAuth router. Sharing the
-  // instance is what makes the cap mean anything: two separately-built
-  // limiters carry two MemoryStores, so one victim would receive the budget
-  // twice and an attacker could simply alternate paths (@copilot, PR #1238).
+  // #560/#1239: build both email-send limiters ONCE and share their stores
+  // across /auth/email and /oauth/authorize/email. Alternating routes must
+  // neither double one recipient's cap nor give one IP two send budgets.
+  const emailSendPerIpRateLimit = buildEmailSendPerIpRateLimit();
   const emailRecipientRateLimit = buildEmailRecipientRateLimit();
-  mountOAuthRoutes(app, { emailRecipientRateLimit });
+  mountOAuthRoutes(app, { emailSendPerIpRateLimit, emailRecipientRateLimit });
 
   // ---------------------------------------------------------------------------
   // Email magic-link auth
@@ -840,7 +838,7 @@ export async function createServer(): Promise<Express> {
     // actually attempt a send. See validateEmailSendRequest for why this
     // ordering is the fix rather than a style choice.
     validateEmailSendRequest,
-    buildEmailSendPerIpRateLimit(),
+    emailSendPerIpRateLimit,
     emailRecipientRateLimit,
     async (req, res) => {
       const { redirect } = req.body as { redirect?: string };
