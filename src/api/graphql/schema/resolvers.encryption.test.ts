@@ -3,10 +3,11 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { resolvers, type Context } from './resolvers.js';
 import { generateId } from '../../../lib/id.js';
-import { generateDataKey } from '../../../lib/crypto.js';
+import { generateDataKey, parseDataKey } from '../../../lib/crypto.js';
+import { makeKeyVerifier } from '../../../lib/memoryUnlock.js';
 import { sessionKeyCache } from '../../../lib/sessionKeyCache.js';
 import { computeContentHash } from '../../../lib/contentHash.js';
-import { encryptNodeFields } from '../../../lib/nodeCrypto.js';
+import { encryptNodeFields, encryptNodeFieldsWithKey } from '../../../lib/nodeCrypto.js';
 import { writeNodeCore } from './resolvers.mutation.node.js';
 
 // Prevent git writes
@@ -638,6 +639,56 @@ describe('encryptMemory', () => {
 // ---------------------------------------------------------------------------
 
 describe('linkMemoryToUser with encryption', () => {
+  it('does not replace a competing promotion key after its live-node scan', async () => {
+    const anon = await resolvers.Mutation.startAgentSession(
+      {}, { agentId: agent.id }, appCtx(plaintextApp.id),
+    );
+    const node = await db.node.create({
+      data: {
+        id: generateId(), memoryId: anon.memoryId!, loc: 'note', name: 'note',
+        content: 'anonymous draft',
+      },
+    });
+    const rivalKey = generateDataKey().raw.toString('base64');
+    const rivalVerifier = makeKeyVerifier(parseDataKey(rivalKey));
+    const rivalContent = encryptNodeFieldsWithKey(
+      { content: 'competing private draft' }, parseDataKey(rivalKey),
+    ).content;
+    const originalFindMany = db.node.findMany.bind(db.node);
+    let intervened = false;
+    const scan = vi.spyOn(db.node, 'findMany').mockImplementation((async (args: any) => {
+      const rows = await originalFindMany(args);
+      if (!intervened && args?.where?.memoryId === anon.memoryId && args?.select?.content === true) {
+        intervened = true;
+        const owner = await db.user.findFirstOrThrow({
+          where: { externalAppId: plaintextApp.id, externalId: 'claimant' },
+        });
+        await db.node.update({ where: { id: node.id }, data: { content: rivalContent } });
+        await db.memory.update({
+          where: { id: anon.memoryId! },
+          data: {
+            isEncrypted: true, keyVerifier: rivalVerifier,
+            class: 'private', userId: owner.id,
+          },
+        });
+      }
+      return rows;
+    }) as typeof db.node.findMany);
+    try {
+      await expect(resolvers.Mutation.linkMemoryToUser(
+        {}, { memoryId: anon.memoryId!, externalUserId: 'claimant', dataKey: generateDataKey().raw.toString('base64') },
+        appCtx(plaintextApp.id),
+      )).rejects.toMatchObject({ extensions: { code: 'MEMORY_WRITE_CONFLICT' } });
+    } finally {
+      scan.mockRestore();
+    }
+    expect(intervened).toBe(true);
+    expect((await db.memory.findUniqueOrThrow({ where: { id: anon.memoryId! } })).keyVerifier)
+      .toBe(rivalVerifier);
+    expect((await db.node.findUniqueOrThrow({ where: { id: node.id } })).content)
+      .toBe(rivalContent);
+  });
+
   it('encrypts the memory when a dataKey is provided at link time', async () => {
     // Start an anonymous session on a USER_ID app (no dataKey allowed)
     const anonSession = await resolvers.Mutation.startAgentSession(

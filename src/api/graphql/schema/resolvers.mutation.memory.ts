@@ -2120,8 +2120,18 @@ export const memoryMutations = {
             newUrn,
             createdBy: user.id,
           });
-          await tx.memory.update({
-            where: { id: resolvedMemoryId },
+          // A second promotion may have read the same anonymous row and
+          // supplied a different key. Claim the flag and verifier together;
+          // if another writer won after our pre-transaction scan, roll back
+          // every stale Node rewrite and alias in this transaction.
+          const claimed = await tx.memory.updateMany({
+            where: {
+              id: resolvedMemoryId,
+              isEncrypted: false,
+              keyVerifier: null,
+              urn: memory.urn,
+              userId: null,
+            },
             data: {
               urn: newUrn,
               createdBy: user.id,
@@ -2137,6 +2147,11 @@ export const memoryMutations = {
               updatedBy: ctx.appId,
             },
           });
+          if (claimed.count !== 1) {
+            throw new GraphQLError('Anonymous memory changed during promotion; retry.', {
+              extensions: { code: 'MEMORY_WRITE_CONFLICT', memoryId: resolvedMemoryId },
+            });
+          }
         });
         // Promotion's live-node rewrite does not cover tombstones or prior
         // snapshots. Reuse the bounded completion pass under the verifier we
