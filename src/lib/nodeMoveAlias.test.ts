@@ -215,7 +215,8 @@ describe('node move URN aliases', () => {
         const waiting = await db.$queryRaw<Array<{ pid: number }>>`
           SELECT pid FROM pg_stat_activity
           WHERE datname = current_database() AND wait_event_type = 'Lock'
-            AND query LIKE '%FROM "memories" WHERE "id"%' AND query LIKE '%FOR SHARE%'
+            AND query LIKE '%SELECT urn FROM memories WHERE id%'
+            AND query LIKE '%FOR NO KEY UPDATE%'
         `;
         expect(waiting.length).toBeGreaterThan(0);
       }, { timeout: 5_000, interval: 25 });

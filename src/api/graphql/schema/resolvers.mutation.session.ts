@@ -19,6 +19,7 @@ import {
   type EncryptionKey,
 } from '../../../lib/crypto.js';
 import { sessionKeyCache } from '../../../lib/sessionKeyCache.js';
+import { makeKeyVerifier, verifyDataKey } from '../../../lib/memoryUnlock.js';
 import { decryptNodesBatch } from '../../../lib/nodeCrypto.js';
 import {
   parseUrnInput,
@@ -1280,6 +1281,7 @@ export const sessionMutations = {
               appId: ctx.appId,
               // New user memories in SECRET mode are encrypted from creation.
               isEncrypted: parsedKey !== null,
+              keyVerifier: parsedKey ? makeKeyVerifier(parsedKey) : null,
               createdBy: userId,
             },
           });
@@ -1331,6 +1333,14 @@ export const sessionMutations = {
       // handles a later call with USER_ID mode on an already-encrypted mem.)
       if (memoryIsEncrypted && !parsedKey) {
         throw new Error('Memory is encrypted; dataKey is required');
+      }
+      if (memoryIsEncrypted && parsedKey) {
+        const keyProof = await ctx.db.memory.findUniqueOrThrow({
+          where: { id: memoryId }, select: { keyVerifier: true },
+        });
+        if (keyProof.keyVerifier && !verifyDataKey(keyProof.keyVerifier, parsedKey)) {
+          throw new Error('Wrong dataKey for encrypted memory');
+        }
       }
 
       // Clamp session timeout to the app's configured maximum (ceiling)

@@ -55,7 +55,7 @@ import {
   type Role,
   type MemoryVisibility,
 } from '../../../generated/prisma/index.js';
-import { parseDataKey } from '../../../lib/crypto.js';
+import { parseDataKey, type EncryptionKey } from '../../../lib/crypto.js';
 import {
   generateKdfSalt,
   deriveDataKeyFromPassphrase,
@@ -342,6 +342,47 @@ async function requireMemorySubscription(
   throw new GraphQLError('No subscription from that organization to this memory.', {
     extensions: { code: 'NOT_FOUND' },
   });
+}
+
+// Older SECRET memories and anonymous promotions were born encrypted without
+// a verifier. A completion key can be bound to such a row only if an existing
+// payload authenticates under it. Page IDs/fields so this proof does not load
+// an unbounded graph into memory. A genuinely empty legacy memory has no key
+// proof and must keep failing closed.
+async function legacyMemoryHasKeyProof(
+  ctx: Context,
+  memoryId: string,
+  key: EncryptionKey,
+): Promise<boolean> {
+  const authenticates = (row: { content: string | null; abstract: string | null; data: unknown }) =>
+    isAuthenticatedStringEnvelope(row.content, key) ||
+    isAuthenticatedStringEnvelope(row.abstract, key) ||
+    isAuthenticatedDataEnvelope(row.data, key);
+  let cursor: string | undefined;
+  for (;;) {
+    const rows = await ctx.db.node.findMany({
+      where: { memoryId, ...(cursor ? { id: { gt: cursor } } : {}) },
+      select: { id: true, content: true, abstract: true, data: true },
+      orderBy: { id: 'asc' }, take: 200,
+    });
+    if (rows.some(authenticates)) return true;
+    if (rows.length < 200) break;
+    cursor = rows[rows.length - 1].id;
+  }
+  cursor = undefined;
+  for (;;) {
+    const rows: Array<{ id: string; content: string | null; abstract: string | null; data: unknown }> = await ctx.db.nodeRevision.findMany({
+      where: {
+        ...(cursor ? { id: { gt: cursor } } : {}),
+        OR: [{ memoryId }, { memoryId: null, node: { memoryId } }],
+      },
+      select: { id: true, content: true, abstract: true, data: true },
+      orderBy: { id: 'asc' }, take: 200,
+    });
+    if (rows.some(authenticates)) return true;
+    if (rows.length < 200) return false;
+    cursor = rows[rows.length - 1].id;
+  }
 }
 
 export const memoryMutations = {
@@ -2086,6 +2127,7 @@ export const memoryMutations = {
               createdBy: user.id,
               anonymousExpiresAt: null,
               isEncrypted: true,
+              keyVerifier: makeKeyVerifier(key),
               // 041 (#516): encrypted ⇒ class='private'; set the owner so the
               // bidirectional chk_personal_visibility_user (private ⇔ userId)
               // holds. userMemoryOfAgentId + appId are already set on the anon
@@ -2096,6 +2138,12 @@ export const memoryMutations = {
             },
           });
         });
+        // Promotion's live-node rewrite does not cover tombstones or prior
+        // snapshots. Reuse the bounded completion pass under the verifier we
+        // just installed; an interrupted pass can be retried by the caller.
+        await memoryMutations.encryptMemory(
+          {}, { memoryId: resolvedMemoryId, dataKey }, ctx,
+        );
         return ctx.db.memory.findUniqueOrThrow({ where: { id: resolvedMemoryId } });
       }
 
@@ -2170,13 +2218,8 @@ export const memoryMutations = {
       // #1434: an encryption interrupted after the flip, or completed before
       // historical revisions were included, may leave plaintext rows behind.
       // A rerun is a completion under the EXISTING key, never a key rotation.
-      // Legacy rows without a verifier cannot prove the supplied key belongs
-      // to existing ciphertext, so automatic completion must fail closed.
-      if (memory.isEncrypted && !memory.keyVerifier) {
-        throw new GraphQLError('Encrypted memory has no key verifier for safe completion.', {
-          extensions: { code: 'BAD_UNLOCK_INPUT', memoryId: resolvedMemoryId },
-        });
-      }
+      // Verifier-less legacy rows need a ciphertext proof before claiming a
+      // verifier. Otherwise a wrong key could double-encrypt old history.
       // Vector indexing on an encrypted memory requires the FR-026 ack;
       // converting an INDEXED memory would violate chk_memory_vector_
       // encrypted_ack — surface it as a typed error, not a DB error.
@@ -2220,6 +2263,22 @@ export const memoryMutations = {
         throw new GraphQLError('Provide exactly one of dataKey or passphrase.', {
           extensions: { code: 'BAD_USER_INPUT' },
         });
+      }
+      if (memory.isEncrypted && !memory.keyVerifier) {
+        if (!(await legacyMemoryHasKeyProof(ctx, resolvedMemoryId, key))) {
+          throw new GraphQLError('Encrypted memory has no key proof for safe completion.', {
+            extensions: { code: 'BAD_UNLOCK_INPUT', memoryId: resolvedMemoryId },
+          });
+        }
+        const claimed = await ctx.db.memory.updateMany({
+          where: { id: resolvedMemoryId, isEncrypted: true, keyVerifier: null },
+          data: { keyVerifier: makeKeyVerifier(key) },
+        });
+        if (claimed.count !== 1) {
+          throw new GraphQLError('Encryption key was claimed concurrently; retry completion.', {
+            extensions: { code: 'ENCRYPTION_INCOMPLETE', memoryId: resolvedMemoryId },
+          });
+        }
       }
       // FLIP FIRST, then converge (PR-514 review, Copilot — conversion
       // race): once isEncrypted commits, every concurrent write path either

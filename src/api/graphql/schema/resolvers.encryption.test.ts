@@ -109,6 +109,7 @@ describe('startAgentSession with encryption', () => {
     );
     const mem = await db.memory.findUnique({ where: { id: session.memoryId! } });
     expect(mem?.isEncrypted).toBe(true);
+    expect(mem?.keyVerifier).toMatch(/^enc:v1:/);
     // 041/#516: SECRET-mode memories are born class='private' (the only
     // encryptable class), not 'personal'.
     expect(mem?.class).toBe('private');
@@ -158,7 +159,19 @@ describe('startAgentSession with encryption', () => {
         { agentId: agent.id, externalUserId: 'mm-1', dataKey: k2 },
         appCtx(secretApp.id),
       ),
-    ).rejects.toThrow(/conflict/);
+    ).rejects.toThrow(/Wrong dataKey|conflict/);
+  });
+
+  it('rejects the wrong key after the original SECRET session ends', async () => {
+    const key = generateDataKey().raw.toString('base64');
+    const wrong = generateDataKey().raw.toString('base64');
+    const first = await resolvers.Mutation.startAgentSession(
+      {}, { agentId: agent.id, externalUserId: 'mm-1', dataKey: key }, appCtx(secretApp.id),
+    );
+    await resolvers.Mutation.endAgentSession({}, { sessionId: first.id }, appCtx(secretApp.id));
+    await expect(resolvers.Mutation.startAgentSession(
+      {}, { agentId: agent.id, externalUserId: 'mm-1', dataKey: wrong }, appCtx(secretApp.id),
+    )).rejects.toThrow(/Wrong dataKey/);
   });
 
   it('accepts the same key on concurrent sessions (ref count increments)', async () => {
@@ -538,20 +551,31 @@ describe('encryptMemory', () => {
     expect(rows[1].data).toMatchObject({ __enc: expect.any(String) });
   });
 
-  it('refuses completion for an already-encrypted memory without a verifier', async () => {
+  it('completes an already-encrypted SECRET memory under its birth key', async () => {
     const key = generateDataKey().raw.toString('base64');
     const session = await resolvers.Mutation.startAgentSession(
       {},
       { agentId: agent.id, externalUserId: 'mm-1', dataKey: key },
       appCtx(secretApp.id),
     );
-    await expect(
-      resolvers.Mutation.encryptMemory(
-        {},
-        { memoryId: session.memoryId!, dataKey: key },
-        appCtx(secretApp.id),
-      ),
-    ).rejects.toMatchObject({ extensions: { code: 'BAD_UNLOCK_INPUT', memoryId: session.memoryId } });
+    const completed = await resolvers.Mutation.encryptMemory(
+      {},
+      { memoryId: session.memoryId!, dataKey: key },
+      appCtx(secretApp.id),
+    );
+    expect(completed.keyVerifier).toMatch(/^enc:v1:/);
+  });
+
+  it('refuses to claim a verifier for an empty legacy encrypted memory', async () => {
+    const key = generateDataKey().raw.toString('base64');
+    const session = await resolvers.Mutation.startAgentSession(
+      {}, { agentId: agent.id, externalUserId: 'empty-legacy', dataKey: key },
+      appCtx(secretApp.id),
+    );
+    await db.memory.update({ where: { id: session.memoryId! }, data: { keyVerifier: null } });
+    await expect(resolvers.Mutation.encryptMemory(
+      {}, { memoryId: session.memoryId!, dataKey: key }, appCtx(secretApp.id),
+    )).rejects.toMatchObject({ extensions: { code: 'BAD_UNLOCK_INPUT' } });
   });
 
   // 007-entity-id-or-urn: encryptMemory accepts memoryId as ID or URN.
@@ -635,6 +659,15 @@ describe('linkMemoryToUser with encryption', () => {
       where: { loc_memoryId: { loc: 'note', memoryId: anonSession.memoryId! } },
       data: { abstract: 'draft summary' },
     });
+    const noteBefore = await db.node.findFirstOrThrow({
+      where: { memoryId: anonSession.memoryId!, loc: 'note' },
+    });
+    const oldRevision = await db.nodeRevision.create({
+      data: {
+        id: generateId(), nodeId: noteBefore.id, memoryId: anonSession.memoryId!,
+        loc: 'note', name: 'note', content: 'earlier private draft',
+      },
+    });
 
     // Anonymous memory starts plaintext
     let mem = await db.memory.findUnique({ where: { id: anonSession.memoryId! } });
@@ -655,6 +688,7 @@ describe('linkMemoryToUser with encryption', () => {
 
     mem = await db.memory.findUnique({ where: { id: anonSession.memoryId! } });
     expect(mem?.isEncrypted).toBe(true);
+    expect(mem?.keyVerifier).toMatch(/^enc:v1:/);
     expect(mem?.anonymousExpiresAt).toBeNull();
     // 041/#516: an encrypted promotion lands class='private' owned by the
     // registered user (the anon scratch row was class='app', userId NULL).
@@ -672,6 +706,8 @@ describe('linkMemoryToUser with encryption', () => {
     });
     expect(note?.content?.startsWith('enc:v1:')).toBe(true);
     expect(note?.abstract?.startsWith('enc:v1:')).toBe(true);
+    expect((await db.nodeRevision.findUniqueOrThrow({ where: { id: oldRevision.id } })).content)
+      .toMatch(/^enc:v1:/);
   });
 
   it('leaves the memory plaintext when no dataKey is provided', async () => {
