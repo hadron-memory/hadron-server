@@ -1207,6 +1207,43 @@ describe('a file whose path cannot be a loc (#1224)', () => {
   });
 });
 
+// ── #280 / PR #1432 review P1: a malformed root must not delete its row ─────
+// The loader refuses a file whose YAML fails to parse, is empty, or is a
+// primitive. Those shapes already failed before #280. Every other object root,
+// including an array and a tagged Set/Map/Buffer, still loads as a partial node
+// (no id, no name). This pins the consequence that matters: sync updates the
+// existing git-owned row in place rather than dropping the file and letting the
+// repo-wins cleanup pass hard-delete the row. A mapping-only check in the
+// loader fails this test.
+describe('a malformed YAML root keeps its mirrored row (#280)', () => {
+  const repoRoot = () => join(mockSources, 'test-org', 'test/repo');
+
+  it.each([
+    ['an array', '- id: x\n- name: y'],
+    ['a !!set', '!!set {a: null}'],
+    ['a !!omap', '!!omap [a: 1]'],
+  ])('an existing node whose frontmatter becomes %s survives the next sync', async (_label, yamlBody) => {
+    const nodeId = 'eeee280000000000000000000000000001';
+    const full = join(repoRoot(), 'kept.md');
+    mkdirSync(repoRoot(), { recursive: true });
+    writeFileSync(full, `---\nid: ${nodeId}\nname: Kept\n---\n# Kept`, 'utf-8');
+    await syncGraphFromGithub(makeGraph());
+    expect(await db.node.findUnique({ where: { id: nodeId } })).not.toBeNull();
+
+    // Only the YAML root changes. The path, and so the loc, stays the same.
+    writeFileSync(full, `---\n${yamlBody}\n---\n# Kept`, 'utf-8');
+
+    const result = await syncGraphFromGithub(makeGraph());
+    expect(result.error).toBeUndefined();
+
+    const row = await db.node.findUnique({ where: { id: nodeId } });
+    expect(row).not.toBeNull();
+    expect(row!.loc).toBe('kept');
+    // An absent name is omitted from the update, so the stored one is kept.
+    expect(row!.name).toBe('Kept');
+  });
+});
+
 // ── #1348: git sync restores objectType, and absence never clears it ────────
 // cor:int:020:01 (amended 2026-09-25): a field absent from the file means no
 // opinion — on create it takes its default, on update the stored value is kept,

@@ -460,9 +460,12 @@ describe('loadNodeFromFs — abstractOriginHash validate-and-warn (spec 032)', (
 // #280 — the importer read frontmatter with an LF-only regex, so a CRLF file
 // (a Windows author, or `core.autocrlf=true` on the clone host) threw "No
 // frontmatter found" and was silently dropped from the loaded graph. And
-// `parse()` returns null / a scalar / an array for empty or malformed YAML,
-// which both loaders then indexed as a mapping. These fixtures are written
-// byte-for-byte rather than through `writeFrontmatterNode`, which only emits LF.
+// `parse()` returns null or a primitive for empty or bare-value YAML, which
+// both loaders then died on with a bare TypeError; those now fail naming the
+// file. Other non-mapping roots (arrays, tagged Set/Map/Buffer) still load as
+// before, because a refused file loses its row to git sync's cleanup pass (PR
+// #1432 review). These fixtures are written byte-for-byte rather than through
+// `writeFrontmatterNode`, which only emits LF.
 describe('loadNodeFromFs — line endings and YAML root shape (#280)', () => {
   const lfFile = [
     '---',
@@ -543,14 +546,13 @@ describe('loadNodeFromFs — line endings and YAML root shape (#280)', () => {
     );
   });
 
-  // Each of these used to reach `meta.id` on a non-mapping and die with a bare
-  // TypeError (null) or load a node with no id and no name (scalar / array).
+  // Each of these already failed to load before #280, with a bare TypeError
+  // (`meta.id` on null, or `'role' in` a primitive). Only the message changes.
   it.each([
     ['empty', '', 'empty'],
     ['a comment only', '# nothing here', 'empty'],
     ['a scalar', 'just a string', 'a string'],
     ['a number', '42', 'a number'],
-    ['an array', '- id: x\n- name: y', 'an array'],
   ])('refuses frontmatter that is %s, naming the file', async (_label, yamlBody, got) => {
     const mdPath = join(graphRoot, 'bad.md');
     // A blank line between the delimiters: the regex needs a newline before
@@ -591,7 +593,6 @@ describe('loadNodeFromFs — line endings and YAML root shape (#280)', () => {
   it.each([
     ['empty', '', 'empty'],
     ['a scalar', 'just a string', 'a string'],
-    ['an array', '- id: x', 'an array'],
   ])('refuses a legacy node.yaml that is %s, naming the file', async (_label, yamlBody, got) => {
     const nodeDir = join(graphRoot, 'org', 'legacy');
     const yamlPath = join(nodeDir, '.node', 'node.yaml');
@@ -613,4 +614,46 @@ describe('loadNodeFromFs — line endings and YAML root shape (#280)', () => {
       `Malformed node.yaml in ${yamlPath}:`,
     );
   });
+
+  // PR #1432 review P1/P2. These roots loaded before #280 as a node with no id
+  // and no name, and they must keep loading. Git sync then updates the existing
+  // row in place instead of dropping the file and hard-deleting the row in
+  // its cleanup pass. Tightening this to a mapping-only check is a deliberate
+  // later step, once sync keeps the row of a refused file. It must not happen
+  // as a side effect.
+  const nonMappingObjectRoots: Array<[string, string]> = [
+    ['an array', '- id: x\n- name: y'],
+    ['a !!set', '!!set {a: null}'],
+    ['a !!omap', '!!omap [a: 1]'],
+    ['a !!binary', '!!binary SGVsbG8='],
+  ];
+
+  it.each(nonMappingObjectRoots)(
+    'still loads frontmatter that is %s, as before #280 (no id, no name)',
+    async (_label, yamlBody) => {
+      const mdPath = join(graphRoot, 'odd.md');
+      writeFileSync(mdPath, `---\r\n${yamlBody.replace(/\n/g, '\r\n')}\r\n---\r\n\r\nBody\r\n`, 'utf-8');
+
+      const { node, edges } = await loadNodeFromFs(mdPath, graphRoot, 'test/repo');
+      expect(node.id).toBeUndefined();
+      expect(node.name).toBeUndefined();
+      expect(node.loc).toBe('odd');
+      expect(node.content).toBe('Body');
+      expect(edges).toEqual([]);
+    },
+  );
+
+  it.each(nonMappingObjectRoots)(
+    'still loads a legacy node.yaml that is %s, as before #280 (no id, no name)',
+    async (_label, yamlBody) => {
+      const nodeDir = join(graphRoot, 'org', 'legacy');
+      mkdirSync(join(nodeDir, '.node'), { recursive: true });
+      writeFileSync(join(nodeDir, '.node', 'node.yaml'), yamlBody, 'utf-8');
+
+      const { node } = await loadNodeFromFs(nodeDir, graphRoot, 'test/repo');
+      expect(node.id).toBeUndefined();
+      expect(node.name).toBeUndefined();
+      expect(node.loc).toBe('org:legacy');
+    },
+  );
 });

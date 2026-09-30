@@ -301,7 +301,7 @@ async function loadFrontmatterNode(
   const fmMatch = raw.match(/^---\n([\s\S]*?)\n---\n?([\s\S]*)$/);
   if (!fmMatch) throw new Error(`No frontmatter found in ${mdPath}`);
 
-  const meta = parseYamlMapping(fmMatch[1], `frontmatter in ${mdPath}`);
+  const meta = parseNodeYaml(fmMatch[1], `frontmatter in ${mdPath}`);
   const content = fmMatch[2]?.trim() || null;
   const loc = deriveValidatedLoc(mdPath, graphRoot, true, meta.id);
 
@@ -355,7 +355,7 @@ async function loadLegacyNode(
   const yamlPath = join(dirPath, '.node', 'node.yaml');
   const mdPath = join(dirPath, '.node', 'topic.md');
 
-  const meta = parseYamlMapping(readFileSync(yamlPath, 'utf-8'), `node.yaml in ${yamlPath}`);
+  const meta = parseNodeYaml(readFileSync(yamlPath, 'utf-8'), `node.yaml in ${yamlPath}`);
   const content = existsSync(mdPath) ? readFileSync(mdPath, 'utf-8') : null;
   // The LEGACY layout derives its loc the same way and needs the same guard —
   // handling only the frontmatter loader would leave the older of the two
@@ -404,36 +404,43 @@ async function loadLegacyNode(
 }
 
 /**
- * Parse a node's metadata YAML and require its root to be a mapping (#280).
+ * Parse a node's metadata YAML, refusing only the roots that already failed to
+ * load before #280, with an error that names the file.
  *
- * `parse()` returns `null` for empty input (or a comment), a scalar for a bare
- * value, and an array for a sequence. Every caller indexes the result as a
- * mapping, so any of those used to surface as a bare TypeError, or as a node
- * with no id and no name. Syntax errors are rethrown with the same prefix, so
- * every failure names the file it came from.
+ * This is a MESSAGE improvement, not a mapping guarantee. `parse()` returns
+ * `null` for empty input (or a comment only) and a primitive for a bare value.
+ * Both already failed further down the loader with a bare TypeError: `meta.id`
+ * on `null`, and the `in` check in `governedSignalsFromMeta` on a primitive.
+ * Syntax errors already threw too. Here each fails as `Malformed <what>: …`
+ * instead, so the operator can see which file it was.
+ *
+ * Every other object root still loads exactly as before. That includes an
+ * array, and a tagged non-mapping (`!!set`, `!!omap`, `!!binary`, which parse
+ * to a Set, Map and Buffer). Each loads as a node with no id and no name. That
+ * is deliberate. When a file fails to load, git sync drops it, and its
+ * repo-wins cleanup pass then hard-deletes the row the file used to mirror
+ * (`syncGraphFromGithub`). A partial load updates the row in place, so the row
+ * survives. Refusing these shapes here would turn a malformed edit into a
+ * deleted node (PR #1432 review, P1). Enforce a mapping root only once sync
+ * keeps the row of a file it refuses (Hadron finding
+ * `hadron-server:findings:git-sync-attestation-must-fail-in-transaction`).
  *
  * @param what Names the input in the error, e.g. `frontmatter in /path/a.md`.
- * @throws {Error} `Malformed <what>: …` when the YAML is invalid or its root
- *   is not a mapping.
+ * @throws {Error} `Malformed <what>: …` when the YAML is invalid, empty, or a
+ *   primitive.
  */
-function parseYamlMapping(text: string, what: string): NodeYaml & { nodes?: EdgeEntry[] } {
+function parseNodeYaml(text: string, what: string): NodeYaml & { nodes?: EdgeEntry[] } {
   let parsed: unknown;
   try {
     parsed = parse(text);
   } catch (err) {
     throw new Error(`Malformed ${what}: ${(err as Error).message}`);
   }
-  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    throw new Error(`Malformed ${what}: expected a YAML mapping, got ${describeYamlRoot(parsed)}`);
+  if (parsed == null) throw new Error(`Malformed ${what}: expected a YAML mapping, got empty`);
+  if (typeof parsed !== 'object') {
+    throw new Error(`Malformed ${what}: expected a YAML mapping, got a ${typeof parsed}`);
   }
   return parsed as NodeYaml & { nodes?: EdgeEntry[] };
-}
-
-/** Human-readable kind of a non-mapping YAML root, for `parseYamlMapping`'s error. */
-function describeYamlRoot(value: unknown): string {
-  if (value == null) return 'empty';
-  if (Array.isArray(value)) return 'an array';
-  return `a ${typeof value}`;
 }
 
 /**
