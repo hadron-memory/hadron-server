@@ -82,7 +82,23 @@ export const WARNING_FEATURE: Record<string, string> = {
  * tokens, the Test probe cap). The returned `settings.maxOutputTokens` is the
  * effective ceiling, the smaller of it and the config's `maxTokens`.
  */
-export function callSettingsFor(config: { provider: string; params?: unknown }, callerMaxTokens?: number): {
+/**
+ * Whether an Anthropic model accepts `thinking: {type: 'adaptive'}` (#1501
+ * review, @codex P1). Mirrors @ai-sdk/anthropic 4.0.7's own capability table
+ * (`getModelCapabilities`): Sonnet 4.6, Opus 4.6 and newer, which includes
+ * Opus 4.7/4.8, Fable 5 and Sonnet 5. Any later major family (5+) is assumed
+ * to support it too. Older models (4.5 and earlier) take only the manual
+ * `enabled` form and REJECT adaptive. Matched with `includes`, like the SDK,
+ * so Bedrock ids (`anthropic.claude-sonnet-4-6-…`) resolve the same way.
+ */
+export function supportsAdaptiveThinking(model: string | null | undefined): boolean {
+  if (!model) return false;
+  const m = model.toLowerCase();
+  if (['claude-sonnet-4-6', 'claude-opus-4-6', 'claude-opus-4-7', 'claude-opus-4-8'].some((id) => m.includes(id))) return true;
+  return /claude-[a-z]+-(?:[5-9]|\d{2,})(?:\b|[-.@:])/.test(m);
+}
+
+export function callSettingsFor(config: { provider: string; model?: string | null; params?: unknown }, callerMaxTokens?: number): {
   settings: CallSettings;
   knobs: KnobReport[];
 } {
@@ -110,7 +126,11 @@ export function callSettingsFor(config: { provider: string; params?: unknown }, 
       };
       knobs.push({ param, state: 'SENT' });
     } else if (param === 'thinking' && config.provider === 'anthropic' && typeof value === 'boolean') {
-      if (value) {
+      if (value && !supportsAdaptiveThinking(config.model)) {
+        // Adaptive is what was ruled; an older model would reject it, and
+        // the manual `enabled` form adds a budget ON TOP of max_tokens.
+        notSent(param, `Adaptive thinking needs a Claude 4.6 or newer model; "${config.model ?? ''}" only supports the manual budget form, which this platform does not send.`);
+      } else if (value) {
         settings.providerOptions = {
           ...settings.providerOptions,
           anthropic: { ...settings.providerOptions?.anthropic, thinking: { type: 'adaptive' } },

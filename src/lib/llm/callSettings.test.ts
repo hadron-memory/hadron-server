@@ -10,7 +10,7 @@
 import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
 import { createServer, type IncomingMessage, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { callSettingsFor, withAdapterWarnings, WARNING_FEATURE } from './callSettings.js';
+import { callSettingsFor, supportsAdaptiveThinking, withAdapterWarnings, WARNING_FEATURE } from './callSettings.js';
 import { generateExtraction, generateText, generateWithTools } from './index.js';
 import { encryptToken } from '../tokenCrypto.js';
 
@@ -102,7 +102,7 @@ describe('callSettingsFor — the params → settings map', () => {
   });
 
   it('slice 2: anthropic thinking:true is sent as ADAPTIVE; false is the default and not sent', () => {
-    expect(callSettingsFor({ provider: 'anthropic', params: { thinking: true, effort: 'low' } })).toEqual({
+    expect(callSettingsFor({ provider: 'anthropic', model: 'claude-sonnet-4-6', params: { thinking: true, effort: 'low' } })).toEqual({
       settings: { providerOptions: { anthropic: { thinking: { type: 'adaptive' }, effort: 'low' } } },
       knobs: [{ param: 'thinking', state: 'SENT', detail: 'adaptive' }, { param: 'effort', state: 'SENT' }],
     });
@@ -154,7 +154,7 @@ describe('withAdapterWarnings — the adapter has the last word', () => {
   it('every param the mapper can send has a warning feature, so no adapter drop reads as SENT (#1485 QA)', () => {
     const sendable = new Set<string>();
     for (const provider of ['anthropic', 'openai', 'glm', 'bedrock', 'openai-compatible']) {
-      const { knobs } = callSettingsFor({ provider, params: { temperature: 0.5, reasoningEffort: 'low', effort: 'low', thinking: true, maxTokens: 50 } });
+      const { knobs } = callSettingsFor({ provider, model: 'claude-opus-4-6', params: { temperature: 0.5, reasoningEffort: 'low', effort: 'low', thinking: true, maxTokens: 50 } });
       for (const k of knobs) if (k.state !== 'NOT_SENT') sendable.add(k.param);
     }
     expect([...sendable].sort()).toEqual(Object.keys(WARNING_FEATURE).sort());
@@ -269,7 +269,7 @@ describe('#1417 — the knobs on the wire, per call site', () => {
 
   it('slice 2: anthropic thinking reaches the wire as ADAPTIVE, with no budget on top of max_tokens', async () => {
     const out = await generateText(
-      config('anthropic', { thinking: true }, { model: 'claude-sonnet-4-5' }),
+      config('anthropic', { thinking: true }, { model: 'claude-sonnet-4-6' }),
       { prompt: 'hi', maxTokens: 16 },
     );
     expect(lastBody().thinking).toEqual({ type: 'adaptive' });
@@ -277,9 +277,30 @@ describe('#1417 — the knobs on the wire, per call site', () => {
     expect(out.knobs).toEqual([{ param: 'thinking', state: 'SENT', detail: 'adaptive' }]);
   });
 
+  it('adaptive thinking is gated by model: a 4.5 model is NOT sent it and would otherwise reject the call (@codex P1, #1501)', async () => {
+    const out = await generateText(
+      config('anthropic', { thinking: true }, { model: 'claude-sonnet-4-5' }),
+      { prompt: 'hi', maxTokens: 16 },
+    );
+    expect(lastBody().thinking).toBeUndefined();
+    expect(lastBody().max_tokens).toBe(16);
+    expect(out.knobs).toEqual([{ param: 'thinking', state: 'NOT_SENT', detail: expect.stringMatching(/4\.6 or newer/) }]);
+  });
+
+  it('supportsAdaptiveThinking mirrors the SDK capability table, Bedrock ids included, and assumes it for later families', () => {
+    for (const id of ['claude-sonnet-4-6', 'claude-opus-4-6', 'claude-opus-4-7', 'claude-opus-4-8', 'claude-fable-5-1',
+      'claude-sonnet-5-5', 'claude-opus-5-5', 'anthropic.claude-sonnet-4-6-20260101-v1:0', 'us.anthropic.claude-opus-4-7']) {
+      expect(supportsAdaptiveThinking(id)).toBe(true);
+    }
+    for (const id of ['claude-sonnet-4-5', 'claude-opus-4-5', 'claude-haiku-4-5-20251001', 'claude-opus-4-1', 'claude-3-haiku-20240307',
+      'anthropic.claude-sonnet-4-5-v1:0', '', null]) {
+      expect(supportsAdaptiveThinking(id)).toBe(false);
+    }
+  });
+
   it('slice 2: with thinking on, the adapter drops temperature and the report says so', async () => {
     const out = await generateText(
-      config('anthropic', { thinking: true, temperature: 0.4 }, { model: 'claude-sonnet-4-5' }),
+      config('anthropic', { thinking: true, temperature: 0.4 }, { model: 'claude-sonnet-4-6' }),
       { prompt: 'hi', maxTokens: 16 },
     );
     expect(lastBody().temperature).toBeUndefined();
