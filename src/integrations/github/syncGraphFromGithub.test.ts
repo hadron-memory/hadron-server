@@ -2006,6 +2006,22 @@ describe('#1330 — strict sub-roles through git sync', () => {
     expect(await edgesNotOnTheCopy(id)).toHaveLength(1);
   });
 
+  it('an APPLIED first claimant keeps the id when a later LOC-KEYED copy is refused (Charles QA Z4, #1411)', async () => {
+    await rules({ role: 'doc', strictSubRoles: true });
+    const id = generateId();
+    const copyRowId = generateId();
+    await db.node.create({ data: { id, memoryId: dbGraphId, loc: 'a', name: 'A', ownerRepo: 'test/repo' } });
+    await db.node.create({ data: { id: copyRowId, memoryId: dbGraphId, loc: 'b', name: 'B', ownerRepo: 'test/repo' } });
+    for (const d of ['a', 'b', 'g']) mkdirSync(join(repoRoot(), d), { recursive: true });
+    writeNodeFiles(join(repoRoot(), 'a'), { id, name: 'A' });
+    // A copy of A's id at another loc, refused: it resolves loc-keyed to the row at `b`.
+    writeNodeFiles(join(repoRoot(), 'b'), { id, name: 'B', role: 'doc.unknown' });
+    writeNodeFiles(join(repoRoot(), 'g'), { name: 'G', nodes: [{ id, rel: 'uses' }] });
+    await sync();
+    await edgesNotOnTheCopy(id);
+    expect(await db.edge.count({ where: { targetId: copyRowId } })).toBe(0);
+  });
+
   it('a refused first claimant that MOVES: its edges wait, and a later copy cannot take them', async () => {
     await rules({ role: 'doc', strictSubRoles: true });
     const id = generateId();
