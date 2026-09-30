@@ -31,6 +31,8 @@ import { Prisma, type Memory, type Node, type Organization } from '../../generat
 import { validateGitBranch } from '../../lib/gitRef.js';
 import { lockMemoryForChannelChange } from '../../lib/channels.js';
 import { lockMintedSpecsIn, lockMintedSpecUnmarks } from '../../lib/mintedSpecPermanence.js';
+import { recordUrnRename } from '../../lib/urnAlias.js';
+import { safeNodeUrnV2 } from '../../lib/urnEmit.js';
 import { reconcilePendingEdgeCount } from '../../lib/pendingEdgePromotion.js';
 import {
   buildNodeRevisionSnapshot,
@@ -615,6 +617,9 @@ export const syncGraphFromGithub = async (
       // carrying the same id (a copied file) must not be treated as a move
       // of the first; it gets a fresh id instead.
       const claimedFileIds = new Set<string>();
+      // #1468 — ids some file in this run carries: an occupant among them is
+      // re-homed by its own file, so parking it is a waypoint, not an eviction.
+      const repoFileIds = new Set(fsGraph.nodes.map((n) => n.id).filter((id): id is string => !!id));
       // A loc swap temporarily parks an occupant so the first move can land.
       // Preserve its committed pre-sync state; when its own file is processed,
       // one revision spans original -> final and the parking loc never enters
@@ -873,6 +878,20 @@ export const syncGraphFromGithub = async (
               incomingEdgesWait();
               continue;
             }
+            if (
+              occupant && occupant.id !== byId.id && !repoFileIds.has(occupant.id)
+              && (await lockMintedSpecsIn(tx, graph.id, [occupant.id])).length > 0
+            ) {
+              // #1468 — the occupant is a minted spec with no file of its own
+              // this run: parking it would hand its published citation to the
+              // incoming node while the prune keeps it at an invalid address.
+              // Refuse the competing move instead (the #1224 remedy above).
+              console.warn(
+                `[syncGraphFromGithub] "${graphName}": refusing move of ${byId.id} into "${loc}" — the occupant ${occupant.loc} is a minted spec, and minted specs are permanent (#1468)`,
+              );
+              protectedRowIds.add(byId.id);
+              continue;
+            }
             if (occupant && occupant.id !== byId.id) {
               await tx.$queryRaw`SELECT "id" FROM "nodes" WHERE "id" = ${occupant.id} FOR UPDATE`;
               await ensureCurrentNodeRevisionInTransaction(tx, occupant.id, { expectedMemoryId: graph.id });
@@ -889,6 +908,17 @@ export const syncGraphFromGithub = async (
               );
             }
             console.log(`[syncGraphFromGithub] "${graphName}": node ${byId.id} moved "${byId.loc}" → "${loc}"`);
+            // #1468 — a minted spec's published citation keeps resolving after
+            // a repo rename, as it does after moveNode. Same transaction.
+            if ((await lockMintedSpecsIn(tx, graph.id, [byId.id])).length > 0) {
+              await recordUrnRename(tx, {
+                entityType: 'NODE',
+                entityId: byId.id,
+                oldUrn: safeNodeUrnV2(graph.urn, byId.loc).slice('hrn:node:'.length),
+                newUrn: safeNodeUrnV2(graph.urn, loc).slice('hrn:node:'.length),
+                createdBy: 'system:github-sync',
+              });
+            }
           }
           await updateNodeFromGitSync(tx, byId, { ...update, ...placeholderMarkerFor(byId) }, parkedRevisionBases.get(byId.id), graph.id, (locked) =>
             objectTypeFor(locked.properties),

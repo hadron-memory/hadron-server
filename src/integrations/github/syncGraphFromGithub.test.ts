@@ -2404,6 +2404,53 @@ describe('#1468 — git sync pruning and minted specs', () => {
     expect(node.tags).toEqual(['other']);
   });
 
+  it("refuses a move that would displace a minted spec with no file of its own (Codex P1)", async () => {
+    const specId = 'aaaa146800000000000000000000000001';
+    const noteId = 'bbbb146800000000000000000000000002';
+    await db.node.create({ data: { id: specId, memoryId: dbGraphId, loc: 'pas:010', name: 'spec', tags: ['spec'], ownerRepo: 'test/repo' } });
+    await db.node.create({ data: { id: noteId, memoryId: dbGraphId, loc: 'notes', name: 'note', ownerRepo: 'test/repo' } });
+    await db.memory.update({ where: { id: dbGraphId }, data: { corpusMintedAt: new Date() } });
+    writeFrontmatterNode(join(repoRoot(), 'pas:010.md'), { id: noteId, name: 'note' }, 'Note.');
+
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    expect((await syncGraphFromGithub(makeGraph())).error).toBeUndefined();
+    expect(warn).toHaveBeenCalledWith(expect.stringMatching(/refusing move of .* the occupant pas:010 is a minted spec/));
+    warn.mockRestore();
+    expect(await db.node.findUniqueOrThrow({ where: { id: specId } })).toMatchObject({ loc: 'pas:010', deletedAt: null });
+    expect(await db.node.findUniqueOrThrow({ where: { id: noteId } })).toMatchObject({ loc: 'notes', deletedAt: null });
+  });
+
+  it('control: an unstamped memory still lets that move displace the occupant', async () => {
+    const specId = 'aaaa146800000000000000000000000003';
+    const noteId = 'bbbb146800000000000000000000000004';
+    await db.node.create({ data: { id: specId, memoryId: dbGraphId, loc: 'pas:010', name: 'spec', tags: ['spec'], ownerRepo: 'test/repo' } });
+    await db.node.create({ data: { id: noteId, memoryId: dbGraphId, loc: 'notes', name: 'note', ownerRepo: 'test/repo' } });
+    writeFrontmatterNode(join(repoRoot(), 'pas:010.md'), { id: noteId, name: 'note' }, 'Note.');
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    expect((await syncGraphFromGithub(makeGraph())).error).toBeUndefined();
+    warn.mockRestore();
+    expect(await db.node.findUniqueOrThrow({ where: { id: noteId } })).toMatchObject({ loc: 'pas:010' });
+  });
+
+  it("records a URN alias when a repo rename moves a minted spec, so its citation still resolves (Codex P1)", async () => {
+    const specId = 'aaaa146800000000000000000000000005';
+    await db.node.create({ data: { id: specId, memoryId: dbGraphId, loc: 'pas:010', name: 'spec', tags: ['spec'], ownerRepo: 'test/repo' } });
+    await db.memory.update({ where: { id: dbGraphId }, data: { corpusMintedAt: new Date() } });
+    writeFrontmatterNode(join(repoRoot(), 'pas:099.md'), { id: specId, name: 'spec', tags: ['spec'] }, 'Rule text.');
+    expect((await syncGraphFromGithub(makeGraph())).error).toBeUndefined();
+    expect(await db.node.findUniqueOrThrow({ where: { id: specId } })).toMatchObject({ loc: 'pas:099' });
+    const aliases = await db.urnAlias.findMany({ where: { entityId: specId } });
+    expect(aliases.map((a) => a.urn)).toEqual([expect.stringMatching(/:pas:010$/)]);
+  });
+
+  it('control: a repo rename in an unstamped memory records no alias (unchanged sync behaviour)', async () => {
+    const specId = 'aaaa146800000000000000000000000006';
+    await db.node.create({ data: { id: specId, memoryId: dbGraphId, loc: 'pas:010', name: 'spec', tags: ['spec'], ownerRepo: 'test/repo' } });
+    writeFrontmatterNode(join(repoRoot(), 'pas:099.md'), { id: specId, name: 'spec', tags: ['spec'] }, 'Rule text.');
+    expect((await syncGraphFromGithub(makeGraph())).error).toBeUndefined();
+    expect(await db.urnAlias.count({ where: { entityId: specId } })).toBe(0);
+  });
+
   it('control: an unstamped memory still prunes the spec whose file is gone', async () => {
     writeSpec('pas:010');
     writeSpec('pas:020');

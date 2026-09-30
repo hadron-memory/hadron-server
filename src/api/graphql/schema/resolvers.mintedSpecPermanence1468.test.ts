@@ -312,6 +312,16 @@ describe('#1468 — the spec marker stays on a minted spec (Vera #4403)', () => 
     });
   });
 
+  it('MCP hadron_create_parent_node refuses unmarking a post-mint spec tombstone it re-saves (Codex P1)', async () => {
+    const mintedAt = (await db.memory.findUniqueOrThrow({ where: { id: minted.id } })).corpusMintedAt!;
+    const tomb = await node(minted.id, 'pas', { tags: ['spec'], deletedAt: new Date(mintedAt.getTime() + 1000) });
+    const text = await createTestableMcpServer(auth()).callToolText('hadron_create_parent_node', {
+      urn: `hrn:node:${minted.urn}:pas`, description: 'the pas module',
+    });
+    expect(text).toMatch(/^\[spec_minted_permanent\]/);
+    expect(await db.node.findUniqueOrThrow({ where: { id: tomb.id } })).toMatchObject({ tags: ['spec'] });
+  });
+
   describe('the guard itself (role markers, which the generic doors refuse to edit anyway)', () => {
     const check = (id: string, change: { tags?: string[]; role?: string | null }) =>
       db.$transaction((tx) => assertNoMintedSpecUnmark(tx, minted.id, [{ id, ...change }], 'update'));
@@ -460,6 +470,50 @@ describe('#1468 — cascades: App reclaim, account erasure, anonymous expiry', (
     await cleanupAnonymousMemories(db);
     expect(await db.memory.findUnique({ where: { id: kept.id } })).not.toBeNull();
     expect(await db.memory.findUnique({ where: { id: swept.id } })).toBeNull();
+  });
+});
+
+describe('#1468 — address reclaims that erase a deleted minted corpus (Codex P1)', () => {
+  async function deletedCorpusAt(urn: string) {
+    const corpus = await db.memory.create({
+      data: {
+        id: generateId(), organizationId: org.id, urn, name: 'corpus', class: 'knowledge',
+        corpusDraft: false, corpusMintedAt: new Date(Date.now() - 60_000), deletedAt: new Date(),
+      },
+    });
+    await node(corpus.id, 'pas:010', { tags: ['spec'] });
+    return corpus;
+  }
+
+  it('createAgent refuses to reclaim its -system address from a deleted minted corpus', async () => {
+    const corpus = await deletedCorpusAt(`${org.urn}:spec-bot-system`);
+    await expect(resolvers.Mutation.createAgent({}, { orgId: org.id, name: 'Spec Bot' } as never, ctx()))
+      .rejects.toSatisfy(refusedPermanent);
+    expect(await db.memory.findUnique({ where: { id: corpus.id } })).not.toBeNull();
+    expect(await db.agent.findFirst({ where: { urn: `${org.urn}:spec-bot` } })).toBeNull();
+  });
+
+  it('control: createAgent still reclaims a deleted draft memory at its -system address', async () => {
+    await memory('draft-bot-system', { corpusDraft: true, deletedAt: new Date() });
+    const agent = await resolvers.Mutation.createAgent({}, { orgId: org.id, name: 'Draft Bot' } as never, ctx());
+    expect(agent).toMatchObject({ urn: `${org.urn}:draft-bot` });
+  });
+
+  it("a handle rename refuses to reclaim a deleted minted corpus in the new namespace", async () => {
+    const newRoot = await db.user.create({ data: { githubId: 14681, githubUsername: 'mp-u2', handle: 'mp-u2' } });
+    await db.user.delete({ where: { id: newRoot.id } }); // frees the handle; its namespace keeps the tombstone below
+    const corpus = await db.memory.create({
+      data: {
+        id: generateId(), ownerUserId: admin.id, userId: admin.id, urn: 'mp-u2:corpus', name: 'corpus',
+        class: 'personal', corpusDraft: false, corpusMintedAt: new Date(Date.now() - 60_000), deletedAt: new Date(),
+      },
+    });
+    await node(corpus.id, 'pas:010', { tags: ['spec'] });
+    await expect(resolvers.Mutation.updateMyProfile({}, { handle: 'mp-u2' }, ctx())).rejects.toSatisfy(
+      (e: unknown) => e instanceof GraphQLError && e.extensions.code === SPEC_MINTED_PERMANENT,
+    );
+    expect(await db.memory.findUnique({ where: { id: corpus.id } })).not.toBeNull();
+    expect((await db.user.findUniqueOrThrow({ where: { id: admin.id } })).handle).toBe('mp-admin');
   });
 });
 

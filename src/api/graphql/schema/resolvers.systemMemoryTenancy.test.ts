@@ -258,6 +258,23 @@ describe('#949 — audit + repair of an already-broken row', () => {
     expect(await findSystemMemoryOwnerMismatches(db)).toEqual([]);
   });
 
+  it('#1468 — refuses to reclaim the derived URN from a deleted minted corpus that holds a spec', async () => {
+    const { agent, foreignSys } = await makeMismatch();
+    const corpus = await db.memory.create({
+      data: {
+        id: generateId(), organizationId: orgA.id, urn: `${orgA.urn}:agent-team-system`, name: 'corpus',
+        class: 'knowledge', corpusDraft: false, corpusMintedAt: new Date(Date.now() - 60_000), deletedAt: new Date(),
+      },
+    });
+    await db.node.create({ data: { id: generateId(), memoryId: corpus.id, loc: 'pas:010', name: 'pas:010', tags: ['spec'] } });
+    await expectCode(
+      M.repairAgentSystemMemory(null, { agentRef: agent.id }, ctx(platformAdmin.id, ['ADMIN'])),
+      'SPEC_MINTED_PERMANENT',
+    );
+    expect(await db.memory.findUnique({ where: { id: corpus.id } })).not.toBeNull();
+    expect((await db.memory.findUniqueOrThrow({ where: { id: foreignSys.id } })).organizationId).toBe(orgB.id);
+  });
+
   it('is idempotent — a consistent pair is a no-op', async () => {
     const { agent } = await makeMismatch();
     const admin = ctx(platformAdmin.id, ['ADMIN']);

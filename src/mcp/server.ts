@@ -3392,6 +3392,11 @@ export function createMcpServerInstance(
               ...buildNodeRevisionSnapshot(current, editorFromAuth(auth), { changes }),
             });
           }
+          if (prior?.deletedAt) {
+            // #1468 — the upsert rewrites a tombstone's tags too (keeping it
+            // deleted), and a post-mint spec tombstone must stay marked.
+            await assertNoMintedSpecUnmark(tx, memoryId, [{ id: prior.id, tags: upsertArgs.update.tags }], 're-save');
+          }
           if (!prior || prior.deletedAt) {
             await assertMemoryEncryptionStateForWrite(tx, memoryId, parentMemoryState.isEncrypted, auth);
           }

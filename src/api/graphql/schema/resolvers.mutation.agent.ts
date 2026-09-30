@@ -66,6 +66,7 @@ import {
   AGENT_INCLUDE,
 } from './resolvers.helpers.js';
 import { recordUrnRename } from '../../../lib/urnAlias.js';
+import { reclaimTombstonedMemory } from '../../../lib/mintedSpecPermanence.js';
 
 /**
  * #928/#929 review: persona role is trimmed, and a blank-after-trim
@@ -228,19 +229,19 @@ export async function createAgentCore(ctx: Context, input: CreateAgentCoreInput)
       // hard-delete it first — mirrors createMemory's URN-reclaim path.
       const systemMemoryUrn = `${agentUrn}-system`;
       const staleHolder = await tx.memory.findUnique({ where: { urn: systemMemoryUrn } });
-      if (staleHolder) {
-        if (staleHolder.deletedAt) {
-          await tx.memory.delete({ where: { id: staleHolder.id } });
-        } else {
-          // #935: typed — under racing creates of the same name, the loser
-          // can land HERE (the winner's system memory committed between the
-          // agent-urn pre-check and this one), and allocation loops must see
-          // the same slot-occupied refusal as every other urn collision.
-          throw new AgentUrnTakenError(
-            agentUrn,
-            `A memory with URN "${systemMemoryUrn}" already exists`,
-          );
-        }
+      // #1468 — reclaim through the shared guard: a deleted mint-stamped
+      // corpus holding a protected spec refuses. A holder revived since the
+      // read above is live, the same slot-occupied case as below.
+      const reclaimed = !!staleHolder?.deletedAt && await reclaimTombstonedMemory(tx, staleHolder.id);
+      if (staleHolder && !reclaimed) {
+        // #935: typed — under racing creates of the same name, the loser
+        // can land HERE (the winner's system memory committed between the
+        // agent-urn pre-check and this one), and allocation loops must see
+        // the same slot-occupied refusal as every other urn collision.
+        throw new AgentUrnTakenError(
+          agentUrn,
+          `A memory with URN "${systemMemoryUrn}" already exists`,
+        );
       }
       const systemMemory = await tx.memory.create({
         data: {

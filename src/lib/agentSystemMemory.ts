@@ -27,6 +27,7 @@
 import { GraphQLError } from 'graphql';
 import type { PrismaClient } from '../generated/prisma/index.js';
 import { recordUrnRename } from './urnAlias.js';
+import { reclaimTombstonedMemory } from './mintedSpecPermanence.js';
 
 /** The owner columns every tenanted row carries (exactly one is non-null). */
 export interface OwnerColumns {
@@ -224,10 +225,11 @@ export async function repairAgentSystemMemoryOwner(
         where: { urn: derivedUrn },
         select: { id: true, deletedAt: true },
       });
-      if (holder && holder.deletedAt) {
-        await tx.memory.delete({ where: { id: holder.id } });
-      }
-      if (holder && !holder.deletedAt) {
+      // #1468 — reclaim through the shared guard: a deleted mint-stamped
+      // corpus holding a protected spec refuses. A holder revived since the
+      // read above stays, and is reported like any live holder.
+      const reclaimed = !!holder?.deletedAt && await reclaimTombstonedMemory(tx, holder.id);
+      if (holder && !reclaimed) {
         urnNote = `URN left as "${memory.urn}" — "${derivedUrn}" is held by live memory ${holder.id}.`;
       } else {
         urn = derivedUrn;
