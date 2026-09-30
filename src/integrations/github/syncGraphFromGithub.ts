@@ -741,16 +741,35 @@ export const syncGraphFromGithub = async (
 
         let rowId: string;
         if (byId && byId.memoryId === graph.id) {
+          // #1411 review (@codex P2) — an edge aimed at this file resolves to
+          // its row by raw id, and its loc is derived from the TARGET's
+          // current loc. When this file's MOVE is not applied, that loc is
+          // the old one: a later sync that lands the move derives a second
+          // edge under the new loc, and nothing removes the first. So a
+          // skipped move's incoming edges wait for the sync that applies it,
+          // and so do a late row's, which must not be touched under the
+          // rulebook lock. A refused file that does not move keeps its loc,
+          // so its incoming edges already resolve correctly.
+          const incomingEdgesWait = (): void => {
+            if (node.id && !fileIdToRowId.has(node.id)) unappliedFileIds.add(node.id);
+          };
           // The SOURCE loc of an id-first move is checked too: a file whose
           // new path is free must not drag a node out from under a Channel
           // (Copilot on PR #1165).
           if (byId.loc !== loc && isProtected(byId.loc)) {
             skippedProtected.push(`${byId.loc} → ${loc}`);
             protectedRowIds.add(byId.id);
+            incomingEdgesWait();
             continue;
           }
-          if (isLateRow(byId) && defer(byId)) continue;
-          if (await refusesRole(byId)) continue;
+          if (isLateRow(byId) && defer(byId)) {
+            incomingEdgesWait();
+            continue;
+          }
+          if (await refusesRole(byId)) {
+            if (byId.loc !== loc) incomingEdgesWait();
+            continue;
+          }
           if (byId.loc !== loc) {
             // Moving into a loc another row currently holds: repo-wins — the
             // occupant is stale at that loc (it either moves later this run
@@ -776,9 +795,13 @@ export const syncGraphFromGithub = async (
                 `[syncGraphFromGithub] "${graphName}": refusing move of ${byId.id} into "${loc}" — the occupant ${occupant.id} is held by a file whose path is not a valid loc`,
               );
               protectedRowIds.add(byId.id);
+              incomingEdgesWait();
               continue;
             }
-            if (occupant && occupant.id !== byId.id && isLateRow(occupant) && defer(occupant, byId)) continue;
+            if (occupant && occupant.id !== byId.id && isLateRow(occupant) && defer(occupant, byId)) {
+              incomingEdgesWait();
+              continue;
+            }
             if (occupant && occupant.id !== byId.id && unparkable.has(occupant.id)) {
               // #1411 review — an earlier attempt parked this occupant and its
               // own file never settled it. Hold the move instead: both rows
@@ -786,6 +809,7 @@ export const syncGraphFromGithub = async (
               heldMoves.push(`${byId.loc} → ${loc} (occupant ${occupant.id})`);
               protectedRowIds.add(byId.id);
               deferredLocs.add(loc);
+              incomingEdgesWait();
               continue;
             }
             if (occupant && occupant.id !== byId.id) {

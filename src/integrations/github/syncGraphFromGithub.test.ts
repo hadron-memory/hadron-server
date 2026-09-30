@@ -1791,6 +1791,43 @@ describe('#1330 — strict sub-roles through git sync', () => {
     expect(await db.edge.count()).toBe(0);
   });
 
+  it('a REFUSED id-first MOVE: an edge aimed at it waits, so the later move does not leave a duplicate under the old loc (@codex P2, #1411)', async () => {
+    await rules({ role: 'doc', strictSubRoles: true });
+    const id = generateId();
+    await db.node.create({ data: { id, memoryId: dbGraphId, loc: 'old', name: 'N', ownerRepo: 'test/repo' } });
+    mkdirSync(join(repoRoot(), 'new'), { recursive: true });
+    mkdirSync(join(repoRoot(), 'g'), { recursive: true });
+    writeNodeFiles(join(repoRoot(), 'new'), { id, name: 'N', role: 'doc.unknown' });
+    writeNodeFiles(join(repoRoot(), 'g'), { name: 'G', nodes: [{ id, rel: 'uses' }] });
+    const first = await sync();
+    expect(first.skippedUndeclaredRoles).toEqual([expect.objectContaining({ loc: 'new' })]);
+    expect(await db.node.findUniqueOrThrow({ where: { id } })).toMatchObject({ loc: 'old' });
+    expect(await db.edge.count()).toBe(0);
+    // Declare the role: the move lands, and so does exactly ONE edge, under the new loc.
+    await db.nodeRoleRule.create({
+      data: { id: generateId(), configId: (await db.memoryConfig.findFirstOrThrow({ where: { memoryId: dbGraphId } })).id, role: 'doc.unknown' },
+    });
+    await sync();
+    expect(await db.node.findUniqueOrThrow({ where: { id } })).toMatchObject({ loc: 'new' });
+    const edges = await db.edge.findMany({ where: { deletedAt: null }, select: { targetId: true, loc: true } });
+    expect(edges).toHaveLength(1);
+    expect(edges[0].targetId).toBe(id);
+    expect(edges[0].loc).toContain('new');
+  });
+
+  it('a REFUSED id-first file that does NOT move keeps its loc, so an edge aimed at it is written now', async () => {
+    await rules({ role: 'doc', strictSubRoles: true });
+    const id = generateId();
+    await db.node.create({ data: { id, memoryId: dbGraphId, loc: 'same', name: 'S', ownerRepo: 'test/repo' } });
+    mkdirSync(join(repoRoot(), 'same'), { recursive: true });
+    mkdirSync(join(repoRoot(), 'g'), { recursive: true });
+    writeNodeFiles(join(repoRoot(), 'same'), { id, name: 'S', role: 'doc.unknown' });
+    writeNodeFiles(join(repoRoot(), 'g'), { name: 'G', nodes: [{ id, rel: 'uses' }] });
+    await sync();
+    const edges = await db.edge.findMany({ where: { deletedAt: null }, select: { targetId: true } });
+    expect(edges).toEqual([{ targetId: id }]);
+  });
+
   it('a DEFERRED loc-keyed file with a foreign id: the edge waits, then lands on the row once the file applies', async () => {
     await rules({ role: 'doc', strictSubRoles: true });
     const foreign = await foreignNode();
