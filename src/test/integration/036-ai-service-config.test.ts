@@ -93,6 +93,7 @@ beforeEach(async () => {
   app = await db.app.create({
     data: { id: generateId(), name: 'Juno @ Acme', urn: 'acme-036:juno-app', organizationId: org.id },
   });
+  await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
   server = await db.hadronServer.create({
     data: { id: generateId(), url: 'https://test.hadron.local' },
   });
@@ -221,6 +222,10 @@ describe('resolveAIConfig precedence (US1)', () => {
     });
     await createConfig({ organizationId: org.id }, 'default', { apiKey: 'sk-install-org' });
     await createConfig({ organizationId: otherOrg.id }, 'default', { apiKey: 'sk-builder-org' });
+    await expect(resolvers.Query.resolveAIConfig(
+      {}, { appRef: app.id, agentRef: foreignAgent.id }, ctxFor(admin.id),
+    )).rejects.toThrow(/Forbidden/);
+    await db.appAgent.create({ data: { appId: app.id, agentId: foreignAgent.id } });
     const resolved = await resolvers.Query.resolveAIConfig(
       {},
       { appRef: app.id, agentRef: foreignAgent.id },
@@ -266,6 +271,98 @@ describe('resolveAIConfig precedence (US1)', () => {
   });
 });
 
+describe('resolveAIConfig user-owned App decrypt gate (#1487)', () => {
+  it('matches appAIConfig: owner succeeds, unrelated org admin and platform admin are denied', async () => {
+    const owner = await db.user.create({
+      data: { id: generateId(), handle: 'cfg-victim', githubId: 36006, name: 'Victim' },
+    });
+    const victimApp = await db.app.create({
+      data: { id: generateId(), name: 'Private App', urn: 'cfg-victim:private-app', ownerUserId: owner.id },
+    });
+    await createConfig({ appId: victimApp.id }, 'default', { apiKey: 'sk-victim-only' });
+
+    const ownerCtx = ctxFor(owner.id);
+    expect((await resolvers.Query.appAIConfig({}, { appRef: victimApp.id }, ownerCtx))?.apiKey)
+      .toBe('sk-victim-only');
+    expect((await resolvers.Query.resolveAIConfig({}, { appRef: victimApp.id }, ownerCtx)).apiKey)
+      .toBe('sk-victim-only');
+    expect((await resolvers.Query.resolveAIConfig(
+      {}, { appRef: 'hrn:app:cfg-victim:private-app' }, ownerCtx,
+    )).apiKey).toBe('sk-victim-only');
+
+    for (const deniedCtx of [ctxFor(admin.id), platformAdminCtx()]) {
+      await expect(resolvers.Query.appAIConfig({}, { appRef: victimApp.id }, deniedCtx))
+        .rejects.toThrow(/Forbidden/);
+      await expect(resolvers.Query.resolveAIConfig({}, { appRef: victimApp.id }, deniedCtx))
+        .rejects.toThrow(/Forbidden/);
+    }
+    // R1/R1e: an unrelated org ADMIN cannot borrow their own Agent's org
+    // as authority for the victim App, by either id or published URN.
+    for (const refs of [
+      { appRef: victimApp.id, agentRef: agent.id },
+      { appRef: 'hrn:app:cfg-victim:private-app', agentRef: 'hrn:agent:acme-036:juno' },
+    ]) {
+      await expect(resolvers.Query.resolveAIConfig({}, refs, ctxFor(admin.id)))
+        .rejects.toThrow(/Forbidden/);
+    }
+    // Even a real install does not make an org admin the App's owner.
+    await db.appAgent.create({ data: { appId: victimApp.id, agentId: agent.id } });
+    await expect(resolvers.Query.resolveAIConfig(
+      {}, { appRef: victimApp.id, agentRef: agent.id }, ctxFor(admin.id),
+    )).rejects.toThrow(/Forbidden/);
+  });
+
+  it('rejects a fabricated App-Agent pair before the App key is decrypted', async () => {
+    const owner = await db.user.create({
+      data: { id: generateId(), handle: 'cfg-install-owner', githubId: 36007, name: 'Owner' },
+    });
+    const ownAgent = await db.agent.create({
+      data: { id: generateId(), name: 'Personal', urn: 'cfg-install-owner:personal', ownerUserId: owner.id },
+    });
+    const ownApp = await db.app.create({
+      data: { id: generateId(), name: 'Personal App', urn: 'cfg-install-owner:app', ownerUserId: owner.id },
+    });
+    await createConfig({ appId: ownApp.id }, 'default', { apiKey: 'sk-owner-only' });
+    await expect(resolvers.Query.resolveAIConfig(
+      {}, { appRef: ownApp.id, agentRef: ownAgent.id }, ctxFor(owner.id),
+    )).rejects.toThrow(/Forbidden/);
+    await db.appAgent.create({ data: { appId: ownApp.id, agentId: ownAgent.id } });
+    expect((await resolvers.Query.resolveAIConfig(
+      {}, { appRef: ownApp.id, agentRef: ownAgent.id }, ctxFor(owner.id),
+    )).apiKey).toBe('sk-owner-only');
+  });
+
+  it('does not expose an installed org Agent’s organization key through a user-owned App', async () => {
+    const owner = await db.user.create({
+      data: { id: generateId(), handle: 'cfg-no-org-owner', githubId: 36008, name: 'Owner' },
+    });
+    const ownApp = await db.app.create({
+      data: { id: generateId(), name: 'User App', urn: 'cfg-no-org-owner:app', ownerUserId: owner.id },
+    });
+    await db.appAgent.create({ data: { appId: ownApp.id, agentId: agent.id } });
+    await createConfig({ organizationId: org.id }, 'default', { apiKey: 'sk-org-private' });
+
+    await expect(resolvers.Query.resolveAIConfig(
+      {}, { appRef: ownApp.id, agentRef: agent.id }, ctxFor(owner.id),
+    )).rejects.toThrow(/Forbidden/);
+    await expect(resolvers.Query.resolveAIConfig(
+      {}, { appRef: ownApp.id, agentRef: agent.id }, ctxFor(admin.id),
+    )).rejects.toThrow(/Forbidden/);
+
+    await db.aiServiceConfig.deleteMany({ where: { organizationId: org.id } });
+    await createConfig({ agentId: agent.id }, 'default', { apiKey: 'sk-agent-private' });
+    await expect(resolvers.Query.resolveAIConfig(
+      {}, { appRef: ownApp.id, agentRef: agent.id }, ctxFor(owner.id),
+    )).rejects.toThrow(/Forbidden/);
+
+    await db.aiServiceConfig.deleteMany({ where: { agentId: agent.id } });
+    await createConfig({ hadronServerId: server.id }, 'default', { apiKey: 'sk-host-private' });
+    await expect(resolvers.Query.resolveAIConfig(
+      {}, { appRef: ownApp.id, agentRef: agent.id }, ctxFor(owner.id),
+    )).rejects.toMatchObject({ extensions: { code: 'NoAiConfigAvailableError' } });
+  });
+});
+
 describe('resolveAIConfig for a user-owned Agent (#1363)', () => {
   it('lets its owner decrypt a user-owned App config before the Agent and host levels', async () => {
     const owner = await db.user.create({
@@ -277,6 +374,7 @@ describe('resolveAIConfig for a user-owned Agent (#1363)', () => {
     const personalApp = await db.app.create({
       data: { id: generateId(), name: 'Personal App', urn: 'personal-app-cfg-036', ownerUserId: owner.id },
     });
+    await db.appAgent.create({ data: { appId: personalApp.id, agentId: personalAgent.id } });
     await createConfig({ appId: personalApp.id }, 'default', { apiKey: 'sk-personal-app' });
     await createConfig({ agentId: personalAgent.id }, 'default', { apiKey: 'sk-personal-agent' });
     await createConfig({ hadronServerId: server.id }, 'default', { apiKey: 'sk-host' });
@@ -372,7 +470,6 @@ describe('resolveAiServiceConfigs (masked picker)', () => {
     member = await db.user.create({
       data: { id: generateId(), handle: 'cfg-member', githubId: 36003, name: 'Member' },
     });
-    await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
     // Role is arbitrary here — the gate is membership, not the member role.
     await db.appMember.create({ data: { appId: app.id, userId: member.id, role: 'member' } });
   });

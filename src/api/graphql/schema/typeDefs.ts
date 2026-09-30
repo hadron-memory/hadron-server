@@ -6893,11 +6893,15 @@ export const typeDefs = `#graphql
     portal chatbot) reference configs by name only — pass the name plus
     the execution context, never credentials.
 
-    Auth: org ADMIN of the effective context org, or platform
-    ADMIN/OWNER when no org or user-owned Agent is named. A user-owned Agent
-    is strictly owner-only, including when an App is also named. With no
-    effective org, its owner can decrypt that Agent's own config or a
-    user-owned App's config; a host fallback is unavailable through this query.
+    Auth: a named App uses its own owner/org ADMIN gate, including strict
+    owner-only access for a user-owned App. A named Agent must be installed
+    in that App. Without an App, an org Agent requires org ADMIN; a host-only
+    context requires platform ADMIN/OWNER. A user-owned Agent is strictly
+    owner-only, including when an App is also named. With no effective org,
+    its owner can decrypt that Agent's own config or a user-owned App's
+    config; a host fallback is unavailable through this query. A user-owned
+    App's owner needs the outer source's own authority to decrypt an installed
+    Agent or org config; its App ownership alone grants only its App config.
 
     appRef/agentRef accept the entity's ID or URN.
     """
