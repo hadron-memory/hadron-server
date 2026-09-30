@@ -246,6 +246,19 @@ describe('reserving over a deleted spec (@codex P2 on #1452)', () => {
   });
 });
 
+describe('a filled placeholder cannot be restored back to a blank non-placeholder (@codex P1 on #1452)', () => {
+  it('refuses restoring the pre-fill revision: a spec is governed, and the generic restore has no spec door', async () => {
+    const reserved = await reserve(draft.id, 'pas:170:01');
+    await updateSpec(draft.id, 'pas:170:01', { content: 'Written.' });
+    const revisions = await db.nodeRevision.findMany({ where: { nodeId: reserved.id }, orderBy: { createdAt: 'asc' } });
+    const blank = revisions.find((r) => (r.content ?? '').trim() === '');
+    expect(blank).toBeDefined();
+    expect(await codeOf(resolvers.Mutation.restoreNodeRevision(null, { revisionId: blank!.id }, as(admin.id))))
+      .toBe('ROLE_GOVERNED');
+    expect(await row(draft.id, 'pas:170:01')).toMatchObject({ content: 'Written.', isPlaceholder: false });
+  });
+});
+
 describe('git sync fills a placeholder too (@codex P2 on #1452)', () => {
   it('clears the flag when a synced file writes real content, and keeps it for a content-less update', async () => {
     const reserved = await reserve(draft.id, 'pas:150:01');
