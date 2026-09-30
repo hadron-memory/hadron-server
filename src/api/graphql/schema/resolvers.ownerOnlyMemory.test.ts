@@ -164,6 +164,33 @@ describe('private/personal access is owner-only', () => {
     expect(after.description).not.toBe('old admin edit');
   });
 
+  it('asks a manager of both orgs to retry after a concurrent transfer', async () => {
+    const mem = await resolvers.Mutation.createMemory(
+      null, { orgId: org.id, name: 'transfer-retry' }, asOrgAdmin(),
+    );
+    const destination = await db.organization.create({
+      data: { id: generateId(), name: 'managed-destination', urn: 'managed-destination' },
+    });
+    await db.orgMember.create({ data: { organizationId: destination.id, userId: orgAdmin.id, role: 'ADMIN' } });
+    const transaction = db.$transaction.bind(db);
+    const raceDb = new Proxy(db, {
+      get(target, key) {
+        if (key === '$transaction') {
+          return async (work: Parameters<typeof transaction>[0]) => {
+            await db.memory.update({ where: { id: mem.id }, data: { organizationId: destination.id } });
+            return transaction(work as any);
+          };
+        }
+        return Reflect.get(target, key);
+      },
+    });
+
+    await expect(resolvers.Mutation.updateMemory(null, { id: mem.id, description: 'stale calculation' }, ctx({
+      userId: orgAdmin.id, roles: ['READER'], db: raceDb,
+    }))).rejects.toMatchObject({ extensions: { code: 'CONFLICT' } });
+    expect((await db.memory.findUniqueOrThrow({ where: { id: mem.id } })).description).not.toBe('stale calculation');
+  });
+
   it.each(['private', 'personal'] as const)('other management mutations conceal an org-anchored %s memory from its admin', async (memoryClass) => {
     const mem = await resolvers.Mutation.createMemory(
       null, { orgId: org.id, name: `${memoryClass}-controls`, memoryClass } as any, asOwner(),
