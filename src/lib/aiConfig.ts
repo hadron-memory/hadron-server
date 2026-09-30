@@ -183,10 +183,28 @@ export interface ResolvedAiConfig {
 }
 
 /**
+ * Whether the walk may consult the HadronServer level.
+ *
+ * `cor:dmo:050:10` (D-2026-09-29-D, clarified by Holger in team chat #4542):
+ * a personal (user-owned) Agent used where no organization is in play never
+ * falls back to the platform's config — its owner brings their own key. Its
+ * own configs and a user-owned App's configs still answer; only the host
+ * level is closed. With an organization in play (the App's, the Agent's, or
+ * an explicit one) the rule does not apply and the host level stays open.
+ *
+ * Enforced here, in the shared walk, so every consumer inherits it: the
+ * decrypt query, the masked picker, and server-side runs (#1482).
+ */
+function hostLevelOpen(personalAgent: boolean, organizationId: string | null): boolean {
+  return !(personalAgent && !organizationId);
+}
+
+/**
  * Walk App -> Agent -> Org -> HadronServer for the first ENABLED config
  * with `name`. Levels absent from the context are skipped (a platform
- * job with no App/Agent/org resolves against the host only). Returns
- * null when no level matches.
+ * job with no App/Agent/org resolves against the host only). The host
+ * level is skipped for an org-less personal Agent ({@link hostLevelOpen}).
+ * Returns null when no level matches.
  */
 export async function resolveAiConfig(
   db: PrismaClient,
@@ -195,6 +213,7 @@ export async function resolveAiConfig(
 ): Promise<ResolvedAiConfig | null> {
   const { appId, agentId } = ctx;
   let organizationId = ctx.organizationId ?? null;
+  let personalAgent = false;
 
   // Each owner level is one query: the level's matching config and (for
   // App/Agent) its organizationId come back together, so a miss costs no
@@ -217,6 +236,7 @@ export async function resolveAiConfig(
     const config = agent?.aiServiceConfigs[0];
     if (config) return { config, ownerType: 'AGENT' };
     if (!organizationId) organizationId = agent?.organizationId ?? null;
+    personalAgent = agent?.ownerUserId != null;
   }
 
   if (organizationId) {
@@ -225,6 +245,8 @@ export async function resolveAiConfig(
     });
     if (config) return { config, ownerType: 'ORGANIZATION' };
   }
+
+  if (!hostLevelOpen(personalAgent, organizationId)) return null;
 
   const config = await db.aiServiceConfig.findFirst({
     where: { hadronServerId: { not: null }, name, enabled: true },
@@ -261,6 +283,7 @@ export async function resolveAiConfigs(
 ): Promise<ResolvedAiConfig[]> {
   const { appId, agentId } = ctx;
   let organizationId = ctx.organizationId ?? null;
+  let personalAgent = false;
 
   // Inner -> outer walk; keep the FIRST config seen per name so the innermost
   // owner wins, mirroring resolveAiConfig's single-name precedence.
@@ -287,6 +310,7 @@ export async function resolveAiConfigs(
     });
     if (agent) collect(agent.aiServiceConfigs, 'AGENT');
     if (!organizationId) organizationId = agent?.organizationId ?? null;
+    personalAgent = agent?.ownerUserId != null;
   }
 
   if (organizationId) {
@@ -296,13 +320,17 @@ export async function resolveAiConfigs(
     );
   }
 
-  collect(
-    await db.aiServiceConfig.findMany({
-      where: { hadronServerId: { not: null }, enabled: true },
-      orderBy: { createdAt: 'asc' },
-    }),
-    'HADRON_SERVER',
-  );
+  // Same host-level rule as resolveAiConfig, so the picker never offers a
+  // config the single-name walk would refuse to resolve.
+  if (hostLevelOpen(personalAgent, organizationId)) {
+    collect(
+      await db.aiServiceConfig.findMany({
+        where: { hadronServerId: { not: null }, enabled: true },
+        orderBy: { createdAt: 'asc' },
+      }),
+      'HADRON_SERVER',
+    );
+  }
 
   return [...byName.values()].sort((a, b) => a.config.name.localeCompare(b.config.name));
 }
