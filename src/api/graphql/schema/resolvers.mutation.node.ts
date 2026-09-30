@@ -9,6 +9,7 @@ import {
   type ProtectedSource,
 } from '../../../lib/protectedLoc.js';
 import { lockMemoryForChannelChange } from '../../../lib/channels.js';
+import { assertNoMintedSpecRemoval } from '../../../lib/mintedSpecPermanence.js';
 import {
   assertGovernedWrite,
   assertRoleDeclaredForWrite,
@@ -2924,13 +2925,20 @@ export const nodeMutations = {
             }
           }
 
-          if (hard) {
-            // Resolve the affected ids for the cross-memory edge gate +
-            // PendingEdge cleanup — the safeguards hadron_delete_node applies.
-            const affectedIds = useSubtree
-              ? (await tx.node.findMany({ where: subtree, select: { id: true } })).map((n) => n.id)
-              : [resolvedId];
+          // #1468 — the complete removal scope, under the address lock taken
+          // above (no row can join it now). A hard delete also removes
+          // tombstones, so they count; a soft delete removes live rows only.
+          // Hard deletes reuse these ids for the cross-memory edge gate +
+          // PendingEdge cleanup — the safeguards hadron_delete_node applies.
+          const affectedIds = useSubtree
+            ? (await tx.node.findMany({
+                where: hard ? subtree : { ...subtree, deletedAt: null },
+                select: { id: true },
+              })).map((n) => n.id)
+            : [resolvedId];
+          await assertNoMintedSpecRemoval(tx, memoryId, affectedIds, hard ? 'hard-delete' : 'delete');
 
+          if (hard) {
             // A hard delete cascades Edge rows on BOTH endpoints via FK. If an
             // edge bridges this memory to another, cascading silently removes it
             // from a memory the caller may not own — refuse unless acknowledged.

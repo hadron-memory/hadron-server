@@ -74,6 +74,7 @@ import type { Request, Response } from 'express';
 import { db } from '../integrations/db/client.js';
 import { acquireLockSet, ancestorLocs, lockAncestorsForCreate, lockLocForWrite, lockNodeForDelete } from '../lib/nodeSubtreeLock.js';
 import { lockMemoryForChannelChange } from '../lib/channels.js';
+import { assertNoMintedSpecRemoval, SPEC_MINTED_PERMANENT } from '../lib/mintedSpecPermanence.js';
 import { escapePrismaLikePattern } from '../lib/literalLocPrefix.js';
 import {
   moveNodeSubtree,
@@ -6626,6 +6627,7 @@ Refuses if the node has descendants under its URN prefix unless \`recursive: tru
         | { refused: 'crossMem'; count: number }
         | { refused: 'changed' }
         | { refused: 'access' }
+        | { refused: 'mintedSpec'; message: string }
         | { ok: true; descendantCount: number };
 
       const result: DeleteResult = await db.$transaction(async (tx) => {
@@ -6665,18 +6667,32 @@ Refuses if the node has descendants under its URN prefix unless \`recursive: tru
           return { refused: 'descendants', count: descendantCount };
         }
 
+        // #1468 — the complete removal scope, under the loc lock above. A hard
+        // delete also removes tombstones; a soft delete removes live rows. Hard
+        // deletes reuse these ids for the cross-memory check + PendingEdge
+        // cleanup.
+        const affectedIds =
+          recursive && descendantCount > 0
+            ? (await tx.node.findMany({
+                where: {
+                  memoryId: memory.id,
+                  ...(hard ? {} : { deletedAt: null }),
+                  OR: [{ id: existing.id }, { loc: { startsWith: escapePrismaLikePattern(loc + ':') } }],
+                },
+                select: { id: true },
+              })).map((n) => n.id)
+            : [existing.id];
+        // Refused before any write, so returning (not throwing) commits nothing.
+        try {
+          await assertNoMintedSpecRemoval(tx, memory.id, affectedIds, hard ? 'hard-delete' : 'delete');
+        } catch (e) {
+          if (e instanceof ScopeGraphQLError && e.extensions?.code === SPEC_MINTED_PERMANENT) {
+            return { refused: 'mintedSpec', message: e.message };
+          }
+          throw e;
+        }
+
         if (hard) {
-          // Resolve affected ids for cross-memory check + PendingEdge cleanup.
-          const affectedIds =
-            recursive && descendantCount > 0
-              ? (await tx.node.findMany({
-                  where: {
-                    memoryId: memory.id,
-                    OR: [{ id: existing.id }, { loc: { startsWith: escapePrismaLikePattern(loc + ':') } }],
-                  },
-                  select: { id: true },
-                })).map((n) => n.id)
-              : [existing.id];
 
           if (!cascadeCrossMemoryEdges) {
             const crossMemEdges = await tx.edge.count({
@@ -6735,6 +6751,9 @@ Refuses if the node has descendants under its URN prefix unless \`recursive: tru
         }
         if (result.refused === 'changed') {
           return textResult(`Node "${rawUrn}" moved while this delete waited; re-read it and retry.`);
+        }
+        if (result.refused === 'mintedSpec') {
+          return textResult(`[spec_minted_permanent] ${result.message}`);
         }
         if (result.refused === 'descendants') {
           const mode = hard ? 'hard delete' : 'soft delete';
