@@ -1006,6 +1006,51 @@ describe('an ambiguous citation blocks the mint as MISSING (#1505)', () => {
     await neitherAttributedNorRewritten();
   });
 
+  it('renumber does not rewrite a former-name citation with no confirmed corpus target (8eacfc78 rule)', async () => {
+    // Renamed, nothing else holds the former name, and the cited child exists
+    // nowhere. Under the CURRENT name such a citation would follow the move;
+    // under a former name only a confirmed corpus target is rewritten.
+    const formerUrn = draft.urn;
+    await resolvers.Mutation.updateMemory(null, { id: draft.id, urn: 'specs-draft-renamed' } as never, as());
+    await cite(`${formerUrn}:pas:010:99`);
+    const plan = await specCorpusRenumberMutations.renumberSpec(
+      null, { memoryRef: draft.id, fromLoc: 'pas:010', toLoc: 'pas:040', dryRun: true }, as(),
+    );
+    expect(plan.rewrites.filter((row) => row.nodeId === other.id)).toEqual([]);
+  });
+
+  it('an UNREADABLE current holder of a former name: MISSING uniformly, with or without its row (29c2245c + #1505)', async () => {
+    // The draft is renamed and a private memory of another user takes its
+    // former name. Every citation under that name must read the same whether
+    // or not the hidden holder has a row at the cited loc: no probe on any
+    // surface. And a reader's resolver lands on the hidden holder, so for the
+    // mint it is unresolvable -- MISSING, blocking.
+    const formerUrn = draft.urn;
+    await resolvers.Mutation.updateMemory(null, { id: draft.id, urn: 'specs-draft-renamed' } as never, as());
+    const hidden = await hiddenMemory('scratch-holder');
+    await db.memory.update({ where: { id: hidden.id }, data: { urn: formerUrn } });
+    await cite(`${formerUrn}:pas:010`);
+
+    const snapshot = async () => ({
+      unresolved: (await unresolvedAt('pas:010')).map((r) => r.reason),
+      blocks: await mintBlocksOn('pas:010'),
+      backlinks: (await resolvers.Query.specBacklinks(null, { memoryRef: draft.id, loc: 'pas:010' }, as()))
+        .filter((r) => r.kind === 'URN' && r.sourceLoc === 'pas:020'),
+      rewrites: (await specCorpusRenumberMutations.renumberSpec(
+        null, { memoryRef: draft.id, fromLoc: 'pas:010', toLoc: 'pas:040', dryRun: true }, as(),
+      )).rewrites.filter((row) => row.nodeId === other.id),
+    });
+    const withoutRow = await snapshot();
+    await db.node.create({ data: { id: generateId(), memoryId: hidden.id, loc: 'pas:010', name: 'Hidden' } });
+    const withRow = await snapshot();
+
+    expect(withRow).toEqual(withoutRow);
+    expect(withRow.unresolved).toEqual(['MISSING']);
+    expect(withRow.blocks).toBe(true);
+    expect(withRow.backlinks).toEqual([]);
+    expect(withRow.rewrites).toEqual([]);
+  });
+
   it('an UNREADABLE historical holder with the cited loc, next to the corpus row: MISSING', async () => {
     // A private memory held "shared" and was renamed away; then the corpus
     // held it and was renamed away too. Both have a live pas:010.
