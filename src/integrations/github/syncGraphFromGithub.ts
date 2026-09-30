@@ -617,9 +617,6 @@ export const syncGraphFromGithub = async (
       // carrying the same id (a copied file) must not be treated as a move
       // of the first; it gets a fresh id instead.
       const claimedFileIds = new Set<string>();
-      // #1468 — ids some file in this run carries: an occupant among them is
-      // re-homed by its own file, so parking it is a waypoint, not an eviction.
-      const repoFileIds = new Set(fsGraph.nodes.map((n) => n.id).filter((id): id is string => !!id));
       // A loc swap temporarily parks an occupant so the first move can land.
       // Preserve its committed pre-sync state; when its own file is processed,
       // one revision spans original -> final and the parking loc never enters
@@ -879,15 +876,19 @@ export const syncGraphFromGithub = async (
               continue;
             }
             if (
-              occupant && occupant.id !== byId.id && !repoFileIds.has(occupant.id)
+              occupant && occupant.id !== byId.id
               && (await lockMintedSpecsIn(tx, graph.id, [occupant.id])).length > 0
             ) {
-              // #1468 — the occupant is a minted spec with no file of its own
-              // this run: parking it would hand its published citation to the
-              // incoming node while the prune keeps it at an invalid address.
+              // #1468 — a minted spec is never parked. Parking hands its
+              // published citation to the incoming node, and whether the
+              // spec's own file re-homes it later this run cannot be known
+              // here: that file may be skipped (protected or invalid path) or
+              // its own move refused, leaving the spec at an invalid address.
               // Refuse the competing move instead (the #1224 remedy above).
+              // A swap of two minted specs' citations is therefore refused
+              // too: it is a renumbering of published citations.
               console.warn(
-                `[syncGraphFromGithub] "${graphName}": refusing move of ${byId.id} into "${loc}" — the occupant ${occupant.loc} is a minted spec, and minted specs are permanent (#1468)`,
+                `[syncGraphFromGithub] "${graphName}": refusing move of ${byId.id} into "${loc}" — the occupant ${occupant.loc} is a minted spec, and a minted spec keeps its citation (#1468)`,
               );
               protectedRowIds.add(byId.id);
               continue;

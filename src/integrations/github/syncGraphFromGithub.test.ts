@@ -2420,6 +2420,46 @@ describe('#1468 — git sync pruning and minted specs', () => {
     expect(await db.node.findUniqueOrThrow({ where: { id: noteId } })).toMatchObject({ loc: 'notes', deletedAt: null });
   });
 
+  it("never parks a minted spec, even when its own file is present but skipped as protected (Chip QA #4732)", async () => {
+    const specId = 'aaaa146800000000000000000000000007';
+    const noteId = 'bbbb146800000000000000000000000008';
+    await db.node.create({ data: { id: specId, memoryId: dbGraphId, loc: 'pas:010', name: 'spec', tags: ['spec'], ownerRepo: 'test/repo' } });
+    await db.node.create({ data: { id: noteId, memoryId: dbGraphId, loc: 'notes', name: 'note', ownerRepo: 'test/repo' } });
+    const { channel, rootId } = await ensureChannelWithRoot(db, { memoryId: dbGraphId, loc: 'chats:dead', name: 'dead', createdBy: null });
+    const deletedAt = new Date();
+    await db.$transaction([
+      db.channel.update({ where: { id: channel.id }, data: { deletedAt } }),
+      db.node.update({ where: { id: rootId }, data: { deletedAt } }),
+    ]);
+    await db.memory.update({ where: { id: dbGraphId }, data: { corpusMintedAt: new Date() } });
+    mkdirSync(join(repoRoot(), 'chats', 'dead', 'messages'), { recursive: true });
+    writeFrontmatterNode(join(repoRoot(), 'chats', 'dead', 'messages', 'kept.md'), { id: specId, name: 'spec', tags: ['spec'] }, 'Rule text.');
+    writeFrontmatterNode(join(repoRoot(), 'pas:010.md'), { id: noteId, name: 'note' }, 'Note.');
+
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    expect((await syncGraphFromGithub(makeGraph())).error).toBeUndefined();
+    warn.mockRestore();
+    expect(await db.node.findUniqueOrThrow({ where: { id: specId } })).toMatchObject({ loc: 'pas:010', deletedAt: null });
+    expect(await db.node.findUniqueOrThrow({ where: { id: noteId } })).toMatchObject({ loc: 'notes', deletedAt: null });
+  });
+
+  it('refuses a repo swap of two minted specs: both keep their published citations', async () => {
+    const aId = 'aaaa146800000000000000000000000009';
+    const bId = 'bbbb146800000000000000000000000010';
+    await db.node.create({ data: { id: aId, memoryId: dbGraphId, loc: 'pas:010', name: 'a', tags: ['spec'], ownerRepo: 'test/repo' } });
+    await db.node.create({ data: { id: bId, memoryId: dbGraphId, loc: 'pas:020', name: 'b', tags: ['spec'], ownerRepo: 'test/repo' } });
+    await db.memory.update({ where: { id: dbGraphId }, data: { corpusMintedAt: new Date() } });
+    writeFrontmatterNode(join(repoRoot(), 'pas:010.md'), { id: bId, name: 'b', tags: ['spec'] }, 'B.');
+    writeFrontmatterNode(join(repoRoot(), 'pas:020.md'), { id: aId, name: 'a', tags: ['spec'] }, 'A.');
+
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    expect((await syncGraphFromGithub(makeGraph())).error).toBeUndefined();
+    warn.mockRestore();
+    expect(await db.node.findUniqueOrThrow({ where: { id: aId } })).toMatchObject({ loc: 'pas:010', deletedAt: null });
+    expect(await db.node.findUniqueOrThrow({ where: { id: bId } })).toMatchObject({ loc: 'pas:020', deletedAt: null });
+    expect(await db.node.count({ where: { memoryId: dbGraphId, loc: { contains: '~' } } })).toBe(0);
+  });
+
   it('control: an unstamped memory still lets that move displace the occupant', async () => {
     const specId = 'aaaa146800000000000000000000000003';
     const noteId = 'bbbb146800000000000000000000000004';
