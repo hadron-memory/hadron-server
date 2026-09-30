@@ -1955,8 +1955,10 @@ function shallowMergeProperties(existing: unknown, patch: Record<string, unknown
 export const nodeMoveOps = {
   async moveWithResult(
     ctx: Context,
-    { sourceRef, targetUrn, targetMemoryRef, requireDraftSource, expectedSource }: {
+    { sourceRef, targetUrn, targetMemoryRef, requireDraftSource, expectedSource, mirrorAfterMove = true }: {
       sourceRef: string; targetUrn?: string | null; targetMemoryRef?: string | null;
+      /** A compound operation may mirror once after its follow-on edits. */
+      mirrorAfterMove?: boolean;
       /** #1449: refuse unless the source is a draft corpus under the move's lock (renumber). */
       requireDraftSource?: boolean;
       /**
@@ -2053,12 +2055,14 @@ export const nodeMoveOps = {
         // re-reads the post-move rows) and NOT awaited — a mirror never fails a
         // write that already landed. This is what replaced the blanket refusal
         // of any cross-memory move touching a git-backed memory.
-        void mirrorNodeMoveToGit(ctx.db, {
-          srcMemoryId: source.memoryId,
-          destMemoryId,
-          moved: relocated,
-          clientId: ctx.clientId ?? null,
-        });
+        if (mirrorAfterMove) {
+          void mirrorNodeMoveToGit(ctx.db, {
+            srcMemoryId: source.memoryId,
+            destMemoryId,
+            moved: relocated,
+            clientId: ctx.clientId ?? null,
+          });
+        }
         return { node: moved, relocated };
       } catch (e) {
         // Map the shared helper's typed errors (thrown from either branch) to the

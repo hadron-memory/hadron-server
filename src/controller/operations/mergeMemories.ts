@@ -27,7 +27,7 @@ import type { MemorySchema } from '../../lib/memorySchema.js';
 import { acquireLockSet } from '../../lib/nodeSubtreeLock.js';
 import { recordUrnRename } from '../../lib/urnAlias.js';
 import { safeNodeUrnV2 } from '../../lib/urnEmit.js';
-import { assertNoPlaceholdersLeaveDraft, isDraftCorpus } from '../../lib/specCorpus.js';
+import { assertNoPlaceholdersLeaveDraft, isDraftCorpus, placeholderFillPatch } from '../../lib/specCorpus.js';
 
 /**
  * Batched, resumable execution of a memory→memory merge (spec cor:api:080).
@@ -544,7 +544,10 @@ export async function mergeMemoryGraph(
             changes: Object.keys(merged.changed),
           }),
         );
-        if (Object.keys(merged.changed).length > 0) {
+        const fill = fields.has('CONTENT')
+          ? placeholderFillPatch(tgt, 'content' in merged.changed ? merged.changed.content : tgt.content)
+          : {};
+        if (Object.keys(merged.changed).length > 0 || Object.keys(fill).length > 0) {
           // #725/#737 — the folded target must still satisfy its collection.
           assertConformsAgainst(batchSchema, tgt.objectType, 'properties' in merged.changed ? merged.changed.properties : tgt.properties);
           // A collision fold authors a new target content state. Keep the
@@ -553,6 +556,7 @@ export async function mergeMemoryGraph(
           // enter this branch, and relocations preserve their source stamp.
           const writeData: Record<string, unknown> = {
             ...merged.changed,
+            ...fill,
             ...clearNodeAuthorship(),
             updatedBy: actorId,
           };

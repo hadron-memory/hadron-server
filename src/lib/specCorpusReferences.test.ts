@@ -6,7 +6,9 @@ import { cleanDb } from '../test/helpers.js';
 import { generateId } from './id.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import { specCorpusRenumberMutations } from '../api/graphql/schema/resolvers.specCorpus.js';
+import { resolveNodeRefForCaller } from '../api/graphql/schema/resolvers.nodeRefAccess.js';
 import { nodeMoveOps } from '../api/graphql/schema/resolvers.mutation.node.js';
+import { mirrorNodeMoveToGit } from '../integrations/github/mirrorNodeMove.js';
 
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -66,6 +68,18 @@ describe('specBacklinks (#1449)', () => {
     expect(toRule.map((r) => r.sourceLoc)).toEqual(['pas:010']);
   });
 
+  it('includes a live edge into a deleted target spec at its old citation (#1478)', async () => {
+    const target = await spec('pas:080', 'Soon deleted', 'Old rule.');
+    await db.edge.create({ data: {
+      memoryId: draft.id, sourceId: other.id, targetId: target.id,
+      loc: 'pas:020:cites:pas:080', name: 'cites',
+    } });
+    await db.node.update({ where: { id: target.id }, data: { deletedAt: new Date() } });
+    const refs = await resolvers.Query.specBacklinks(null, { memoryRef: draft.id, loc: 'pas:080' }, as());
+    expect(refs.map((ref) => [ref.kind, ref.sourceLoc, ref.targetLoc]))
+      .toEqual([['EDGE', 'pas:020', 'pas:080']]);
+  });
+
   it('refuses a minted corpus, and conceals an unreadable one as not found', async () => {
     expect(await codeOf(resolvers.Query.specBacklinks(null, { memoryRef: minted.id, loc: 'x' }, as()))).toBe('SPEC_CORPUS_NOT_DRAFT');
     const hidden = await codeOf(resolvers.Query.specBacklinks(null, { memoryRef: draft.id, loc: 'pas:010' }, as(outsider.id)));
@@ -97,6 +111,47 @@ describe('specUnresolvedReferences (#1449)', () => {
 describe('renumberSpec (#1449)', () => {
   const renumber = (dryRun?: boolean, fromLoc = 'pas:010', toLoc = 'pas:040') =>
     specCorpusRenumberMutations.renumberSpec(null, { memoryRef: draft.id, fromLoc, toLoc, ...(dryRun !== undefined ? { dryRun } : {}) }, as());
+
+  it('mirrors the moved subtree once, after its own references have been rewritten (#1478)', async () => {
+    vi.mocked(mirrorNodeMoveToGit).mockClear();
+    let mirroredContent: string | null | undefined;
+    vi.mocked(mirrorNodeMoveToGit).mockImplementationOnce(async () => {
+      mirroredContent = (await db.node.findUniqueOrThrow({ where: { id: feature.id } })).content;
+    });
+    await renumber();
+    await vi.waitFor(() => expect(mirroredContent).toContain(`hrn:node:${draft.urn}:pas:040:01`));
+    expect(mirrorNodeMoveToGit).toHaveBeenCalledTimes(1);
+  });
+
+  it('still schedules the move mirror when the post-move corpus reload fails', async () => {
+    let moved = false;
+    const failingDb = new Proxy(db, {
+      get(target, prop, receiver) {
+        if (prop === 'node') {
+          const node = Reflect.get(target, prop, receiver) as typeof db.node;
+          return new Proxy(node, {
+            get(t, p, r) {
+              if (p === 'findMany' && moved) return () => { throw new Error('post-move reload failed'); };
+              return Reflect.get(t, p, r);
+            },
+          });
+        }
+        return Reflect.get(target, prop, receiver);
+      },
+    });
+    const spy = vi.spyOn(nodeMoveOps, 'moveWithResult').mockImplementationOnce(async (...args) => {
+      spy.mockRestore();
+      const result = await nodeMoveOps.moveWithResult(...args);
+      moved = true;
+      return result;
+    });
+    vi.mocked(mirrorNodeMoveToGit).mockClear();
+    await expect(specCorpusRenumberMutations.renumberSpec(
+      null, { memoryRef: draft.id, fromLoc: 'pas:010', toLoc: 'pas:040' }, { ...as(), db: failingDb },
+    )).rejects.toThrow('post-move reload failed');
+    expect((await db.node.findUniqueOrThrow({ where: { id: feature.id } })).loc).toBe('pas:040');
+    expect(mirrorNodeMoveToGit).toHaveBeenCalledTimes(1);
+  });
 
   it('dry run: returns the plan and writes nothing', async () => {
     const before = await content('pas:020');
@@ -197,6 +252,59 @@ describe('deleted edges are not references (@codex P2 on #1453)', () => {
 });
 
 describe('former URNs use live-address precedence (@codex P2 on #1453)', () => {
+  it('does not claim a corpus row when a hidden current holder owns the former published address', async () => {
+    const formerUrn = draft.urn;
+    await resolvers.Mutation.updateMemory(null, { id: draft.id, urn: 'specs-draft-renamed' } as never, as());
+    const holder = await db.memory.create({ data: {
+      id: generateId(), urn: formerUrn, name: 'Private published holder',
+      class: 'private', organizationId: org.id, userId: outsider.id,
+    } });
+    await db.node.update({ where: { id: other.id }, data: {
+      content: `Published: hrn:node:${formerUrn}:pas:010.`,
+    } });
+    const beforeBacklinks = await resolvers.Query.specBacklinks(null, { memoryRef: draft.id, loc: 'pas:010' }, as());
+    const beforePlan = await specCorpusRenumberMutations.renumberSpec(
+      null, { memoryRef: draft.id, fromLoc: 'pas:010', toLoc: 'pas:040', dryRun: true }, as(),
+    );
+    const hiddenNode = await db.node.create({ data: {
+      id: generateId(), memoryId: holder.id, loc: 'pas:010', name: 'Private published node',
+    } });
+
+    await expect(resolveNodeRefForCaller(as(), `hrn:node:${formerUrn}:pas:010`))
+      .resolves.toEqual({ id: hiddenNode.id });
+    const backlinks = await resolvers.Query.specBacklinks(null, { memoryRef: draft.id, loc: 'pas:010' }, as());
+    expect(backlinks).toEqual(beforeBacklinks);
+    expect(backlinks.filter((ref) => ref.kind === 'URN' && ref.sourceLoc === 'pas:020')).toEqual([]);
+    const plan = await specCorpusRenumberMutations.renumberSpec(
+      null, { memoryRef: draft.id, fromLoc: 'pas:010', toLoc: 'pas:040', dryRun: true }, as(),
+    );
+    expect(plan.rewrites).toEqual(beforePlan.rewrites);
+    expect(plan.rewrites.filter((row) => row.nodeId === other.id)).toEqual([]);
+  });
+
+  it('does not rewrite an unconfirmed former-name descendant even when a hidden holder owns it', async () => {
+    const formerUrn = draft.urn;
+    await resolvers.Mutation.updateMemory(null, { id: draft.id, urn: 'specs-draft-renamed' } as never, as());
+    const holder = await db.memory.create({ data: {
+      id: generateId(), urn: formerUrn, name: 'Private published holder',
+      class: 'private', organizationId: org.id, userId: outsider.id,
+    } });
+    const citation = `hrn:node:${formerUrn}:pas:010:99`;
+    await db.node.update({ where: { id: other.id }, data: { content: `Foreign: ${citation}.` } });
+    const args = { memoryRef: draft.id, fromLoc: 'pas:010', toLoc: 'pas:040', dryRun: true };
+    const without = await specCorpusRenumberMutations.renumberSpec(null, args, as());
+    const hiddenNode = await db.node.create({ data: {
+      id: generateId(), memoryId: holder.id, loc: 'pas:010:99', name: 'Private published child',
+    } });
+    await expect(resolveNodeRefForCaller(as(), citation)).resolves.toEqual({ id: hiddenNode.id });
+    const withNode = await specCorpusRenumberMutations.renumberSpec(null, args, as());
+    expect(withNode.rewrites).toEqual(without.rewrites);
+    expect(withNode.rewrites.filter((row) => row.nodeId === other.id)).toEqual([]);
+
+    await specCorpusRenumberMutations.renumberSpec(null, { ...args, dryRun: false }, as());
+    expect(await content('pas:020')).toBe(`Foreign: ${citation}.`);
+  });
+
   it('leaves a reference through a reused former URN to the memory that now holds it, and still counts one it cannot resolve there', async () => {
     const oldUrn = draft.urn;
     await resolvers.Mutation.updateMemory(null, { id: draft.id, urn: 'specs-draft-renamed' } as never, as());
@@ -221,8 +329,209 @@ describe('former URNs use live-address precedence (@codex P2 on #1453)', () => {
     expect(res.rewrites.find((r) => r.loc === 'pas:020')).toMatchObject({ status: 'REWRITTEN', count: 1 });
     const after = await content('pas:020');
     expect(after).toContain(`hrn:node:${oldUrn}:pas:010.`);      // the squatter's node: untouched
-    expect(after).toContain(`hrn:node:${oldUrn}:pas:040:01`);    // ours: rewritten, spelling kept
+    expect(after).toContain(`hrn:node:${newUrn}:pas:040:01`);    // ours: canonical current memory
     expect(newUrn).not.toBe(oldUrn);
+  });
+
+  it('keeps a former-URN alias whose live target moved into this corpus', async () => {
+    const formerUrn = draft.urn;
+    await resolvers.Mutation.updateMemory(null, { id: draft.id, urn: 'specs-draft-renamed' } as never, as());
+    const newUrn = (await db.memory.findUniqueOrThrow({ where: { id: draft.id } })).urn;
+    const squatter = await resolvers.Mutation.createMemory(null, { orgId: org.id, name: 'specs-draft' }, as());
+    expect(squatter.urn).toBe(formerUrn);
+    // The former holder no longer has the address; its NODE alias resolves to
+    // this corpus's live spec at the cited loc.
+    await db.urnAlias.create({ data: {
+      urn: `${formerUrn}:pas:010`, entityType: 'NODE', entityId: feature.id, reason: 'RENAME',
+    } });
+    await db.node.update({ where: { id: other.id }, data: {
+      content: `Ours through the alias: hrn:node:${formerUrn}:pas:010.`,
+    } });
+
+    const backlinks = await resolvers.Query.specBacklinks(null, { memoryRef: draft.id, loc: 'pas:010' }, as());
+    expect(backlinks.some((ref) => ref.kind === 'URN' && ref.sourceLoc === 'pas:020')).toBe(true);
+    const result = await specCorpusRenumberMutations.renumberSpec(
+      null, { memoryRef: draft.id, fromLoc: 'pas:010', toLoc: 'pas:040' }, as(),
+    );
+    expect(result.rewrites.find((row) => row.nodeId === other.id)).toMatchObject({ status: 'REWRITTEN', count: 1 });
+    expect(await content('pas:020')).toContain(`hrn:node:${newUrn}:pas:040`);
+  });
+
+  it('rewrites a former-URN alias to the corpus current URN when the published destination is occupied', async () => {
+    const formerUrn = draft.urn;
+    await resolvers.Mutation.updateMemory(null, { id: draft.id, urn: 'specs-draft-renamed' } as never, as());
+    const currentUrn = (await db.memory.findUniqueOrThrow({ where: { id: draft.id } })).urn;
+    const holder = await resolvers.Mutation.createMemory(null, { orgId: org.id, name: 'specs-draft' }, as());
+    const occupant = await db.node.create({ data: {
+      id: generateId(), memoryId: holder.id, loc: 'pas:040', name: 'Published destination occupant',
+    } });
+    await db.urnAlias.create({ data: {
+      urn: `${formerUrn}:pas:500`, entityType: 'NODE', entityId: feature.id, reason: 'RENAME',
+    } });
+    await db.node.update({ where: { id: other.id }, data: {
+      content: `Alias: hrn:node:${formerUrn}:pas:500.`,
+    } });
+
+    const result = await specCorpusRenumberMutations.renumberSpec(
+      null, { memoryRef: draft.id, fromLoc: 'pas:010', toLoc: 'pas:040' }, as(),
+    );
+    expect(result.rewrites.find((row) => row.nodeId === other.id)).toMatchObject({ status: 'REWRITTEN', count: 1 });
+    expect(await content('pas:020')).toContain(`hrn:node:${currentUrn}:pas:040`);
+    await expect(resolveNodeRefForCaller(as(), `hrn:node:${currentUrn}:pas:040`)).resolves.toEqual({ id: feature.id });
+    await expect(resolveNodeRefForCaller(as(), `hrn:node:${formerUrn}:pas:040`)).resolves.toEqual({ id: occupant.id });
+  });
+
+  it('uses the target loc when a former-URN alias reaches this corpus at a different loc', async () => {
+    const formerUrn = draft.urn;
+    await resolvers.Mutation.updateMemory(null, { id: draft.id, urn: 'specs-draft-renamed' } as never, as());
+    const newUrn = (await db.memory.findUniqueOrThrow({ where: { id: draft.id } })).urn;
+    const squatter = await resolvers.Mutation.createMemory(null, { orgId: org.id, name: 'specs-draft' }, as());
+    expect(squatter.urn).toBe(formerUrn);
+    await db.urnAlias.create({ data: {
+      urn: `${formerUrn}:pas:500`, entityType: 'NODE', entityId: feature.id, reason: 'RENAME',
+    } });
+    await db.node.update({ where: { id: other.id }, data: {
+      content: `Alias: hrn:node:${formerUrn}:pas:500.`,
+    } });
+
+    const unresolved = await resolvers.Query.specUnresolvedReferences(null, { memoryRef: draft.id }, as());
+    expect(unresolved.map((ref) => ref.targetLoc)).not.toContain('pas:500');
+    const backlinks = await resolvers.Query.specBacklinks(null, { memoryRef: draft.id, loc: 'pas:010' }, as());
+    expect(backlinks.some((ref) => ref.kind === 'URN' && ref.sourceLoc === 'pas:020' && ref.targetLoc === 'pas:500')).toBe(true);
+
+    const result = await specCorpusRenumberMutations.renumberSpec(
+      null, { memoryRef: draft.id, fromLoc: 'pas:010', toLoc: 'pas:040' }, as(),
+    );
+    expect(result.rewrites.find((row) => row.nodeId === other.id)).toMatchObject({ status: 'REWRITTEN', count: 1 });
+    expect(await content('pas:020')).toContain(`hrn:node:${newUrn}:pas:040`);
+  });
+
+  it('does not choose arbitrarily among multiple live aliases for one former address', async () => {
+    const formerUrn = draft.urn;
+    await resolvers.Mutation.updateMemory(null, { id: draft.id, urn: 'specs-draft-renamed' } as never, as());
+    const squatter = await resolvers.Mutation.createMemory(null, { orgId: org.id, name: 'specs-draft' }, as());
+    const address = `${formerUrn}:pas:500`;
+    await db.urnAlias.createMany({ data: [feature.id, rule.id].map((entityId) => ({
+      urn: address, entityType: 'NODE' as const, entityId, reason: 'RENAME' as const,
+    })) });
+    await db.node.update({ where: { id: other.id }, data: { content: `Ambiguous: hrn:node:${address}.` } });
+
+    const noAliasBacklink = async () => {
+      const refs = await resolvers.Query.specBacklinks(null, { memoryRef: draft.id, loc: 'pas:010' }, as());
+      return refs.filter((ref) => ref.kind === 'URN' && ref.sourceLoc === 'pas:020');
+    };
+    const noAliasRewrite = async () => {
+      const plan = await specCorpusRenumberMutations.renumberSpec(
+        null, { memoryRef: draft.id, fromLoc: 'pas:010', toLoc: 'pas:040', dryRun: true }, as(),
+      );
+      return plan.rewrites.filter((row) => row.nodeId === other.id);
+    };
+    expect(await noAliasBacklink()).toEqual([]);
+    expect(await noAliasRewrite()).toEqual([]);
+
+    // A readable foreign target also makes the same address ambiguous.
+    const foreign = await db.node.create({ data: {
+      id: generateId(), memoryId: squatter.id, loc: 'pas:900', name: 'Foreign target',
+    } });
+    await db.urnAlias.delete({ where: {
+      urn_entityType_entityId: { urn: address, entityType: 'NODE', entityId: rule.id },
+    } });
+    await db.urnAlias.create({ data: { urn: address, entityType: 'NODE', entityId: foreign.id, reason: 'RENAME' } });
+    expect(await noAliasBacklink()).toEqual([]);
+    expect(await noAliasRewrite()).toEqual([]);
+  });
+
+  it('finds a former holder’s moved-node alias under that holder’s current memory URN', async () => {
+    const formerUrn = draft.urn;
+    await resolvers.Mutation.updateMemory(null, { id: draft.id, urn: 'specs-draft-renamed' } as never, as());
+    const holder = await resolvers.Mutation.createMemory(null, { orgId: org.id, name: 'specs-draft' }, as());
+    expect(holder.urn).toBe(formerUrn);
+    await resolvers.Mutation.updateMemory(null, { id: holder.id, urn: 'former-holder-renamed' } as never, as());
+    const holderUrn = (await db.memory.findUniqueOrThrow({ where: { id: holder.id } })).urn;
+    const foreign = await db.node.create({ data: {
+      id: generateId(), memoryId: holder.id, loc: 'pas:900', name: 'Moved foreign node',
+    } });
+    await db.urnAlias.createMany({ data: ['pas:010', 'pas:500'].map((loc) => ({
+      urn: `${holderUrn}:${loc}`, entityType: 'NODE' as const, entityId: foreign.id, reason: 'RENAME' as const,
+    })) });
+    await db.node.update({ where: { id: other.id }, data: {
+      content: `Ambiguous: hrn:node:${formerUrn}:pas:010. Foreign: hrn:node:${formerUrn}:pas:500.`,
+    } });
+
+    const backlinks = await resolvers.Query.specBacklinks(null, { memoryRef: draft.id, loc: 'pas:010' }, as());
+    expect(backlinks.filter((ref) => ref.kind === 'URN' && ref.sourceLoc === 'pas:020')).toEqual([]);
+    const unresolved = await resolvers.Query.specUnresolvedReferences(null, { memoryRef: draft.id }, as());
+    expect(unresolved.map((ref) => ref.targetLoc)).not.toContain('pas:500');
+    const plan = await specCorpusRenumberMutations.renumberSpec(
+      null, { memoryRef: draft.id, fromLoc: 'pas:010', toLoc: 'pas:040', dryRun: true }, as(),
+    );
+    expect(plan.rewrites.filter((row) => row.nodeId === other.id)).toEqual([]);
+  });
+
+  it('uses a deleted historical holder only to translate a live moved-node alias', async () => {
+    const formerUrn = draft.urn;
+    await resolvers.Mutation.updateMemory(null, { id: draft.id, urn: 'specs-draft-renamed' } as never, as());
+    const holder = await resolvers.Mutation.createMemory(null, { orgId: org.id, name: 'specs-draft' }, as());
+    await resolvers.Mutation.updateMemory(null, { id: holder.id, urn: 'deleted-holder-renamed' } as never, as());
+    const holderUrn = (await db.memory.findUniqueOrThrow({ where: { id: holder.id } })).urn;
+    const foreign = await db.node.create({ data: {
+      id: generateId(), memoryId: minted.id, loc: 'pas:900', name: 'Moved into readable memory',
+    } });
+    await db.urnAlias.create({ data: {
+      urn: `${holderUrn}:pas:500`, entityType: 'NODE', entityId: foreign.id, reason: 'RENAME',
+    } });
+    await db.memory.update({ where: { id: holder.id }, data: { deletedAt: new Date() } });
+    await db.node.update({ where: { id: other.id }, data: {
+      content: `Foreign: hrn:node:${formerUrn}:pas:500.`,
+    } });
+
+    await expect(resolveNodeRefForCaller(as(), `hrn:node:${formerUrn}:pas:500`)).resolves.toEqual({ id: foreign.id });
+    const unresolved = await resolvers.Query.specUnresolvedReferences(null, { memoryRef: draft.id }, as());
+    expect(unresolved.map((ref) => ref.targetLoc)).not.toContain('pas:500');
+    const backlinks = await resolvers.Query.specBacklinks(null, { memoryRef: draft.id, loc: 'pas:500' }, as());
+    expect(backlinks.filter((ref) => ref.kind === 'URN' && ref.sourceLoc === 'pas:020')).toEqual([]);
+  });
+
+  it('does not select a readable corpus alias over a hidden live alias at the same address', async () => {
+    const formerUrn = draft.urn;
+    await resolvers.Mutation.updateMemory(null, { id: draft.id, urn: 'specs-draft-renamed' } as never, as());
+    const hidden = await db.memory.create({ data: {
+      id: generateId(), urn: `${org.urn}:hidden-alias-holder`, name: 'Hidden alias holder',
+      class: 'private', organizationId: org.id, userId: outsider.id,
+    } });
+    const hiddenNode = await db.node.create({ data: {
+      id: generateId(), memoryId: hidden.id, loc: 'pas:900', name: 'Hidden target',
+    } });
+    await db.urnAlias.createMany({ data: [feature.id, hiddenNode.id].map((entityId) => ({
+      urn: `${formerUrn}:pas:010`, entityType: 'NODE' as const, entityId, reason: 'RENAME' as const,
+    })) });
+    await db.node.update({ where: { id: other.id }, data: {
+      content: `Ambiguous: hrn:node:${formerUrn}:pas:010.`,
+    } });
+
+    await expect(resolveNodeRefForCaller(as(), `hrn:node:${formerUrn}:pas:010`))
+      .rejects.toMatchObject({ name: 'AmbiguousLegacyUrnError' });
+    const backlinks = await resolvers.Query.specBacklinks(null, { memoryRef: draft.id, loc: 'pas:010' }, as());
+    expect(backlinks.filter((ref) => ref.kind === 'URN' && ref.sourceLoc === 'pas:020')).toEqual([]);
+    const plan = await specCorpusRenumberMutations.renumberSpec(
+      null, { memoryRef: draft.id, fromLoc: 'pas:010', toLoc: 'pas:040', dryRun: true }, as(),
+    );
+    expect(plan.rewrites.filter((row) => row.nodeId === other.id)).toEqual([]);
+
+    // The corpus's historical live row is itself a resolver candidate. Even
+    // without a corpus NODE alias, the hidden alias makes this address
+    // ambiguous to a caller who can read that corpus row.
+    await db.urnAlias.delete({ where: {
+      urn_entityType_entityId: { urn: `${formerUrn}:pas:010`, entityType: 'NODE', entityId: feature.id },
+    } });
+    await expect(resolveNodeRefForCaller(as(), `hrn:node:${formerUrn}:pas:010`))
+      .rejects.toMatchObject({ name: 'AmbiguousLegacyUrnError' });
+    const stillAmbiguous = await resolvers.Query.specBacklinks(null, { memoryRef: draft.id, loc: 'pas:010' }, as());
+    expect(stillAmbiguous.filter((ref) => ref.kind === 'URN' && ref.sourceLoc === 'pas:020')).toEqual([]);
+    const stillNoRewrite = await specCorpusRenumberMutations.renumberSpec(
+      null, { memoryRef: draft.id, fromLoc: 'pas:010', toLoc: 'pas:040', dryRun: true }, as(),
+    );
+    expect(stillNoRewrite.rewrites.filter((row) => row.nodeId === other.id)).toEqual([]);
   });
 });
 
@@ -423,6 +732,25 @@ describe('an alias claimant the caller cannot read decides nothing (@codex P1 on
     const unresolved = await resolvers.Query.specUnresolvedReferences(null, { memoryRef: draft.id }, readableCtx);
     expect(unresolved.map((r) => r.targetLoc)).not.toContain('pas:500');
   });
+
+  it('follows a moved claimant node alias only when its target memory is readable (#1478)', async () => {
+    const prior = await unreadablePriorHolder();
+    await cites500();
+    const moved = await db.node.create({ data: {
+      id: generateId(), memoryId: prior.id, loc: 'pas:900', name: 'Moved foreign node',
+    } });
+    await db.urnAlias.create({ data: {
+      urn: `${draft.urn}:pas:500`, entityType: 'NODE', entityId: moved.id, reason: 'RENAME',
+    } });
+
+    expect(await unresolvedLocs()).toContain('pas:500');
+    expect((await resolvers.Query.specBacklinks(null, { memoryRef: draft.id, loc: 'pas:500' }, as())).map((r) => r.sourceLoc))
+      .toEqual(['pas:020']);
+
+    await db.orgMember.updateMany({ where: { organizationId: org.id, userId: outsider.id }, data: { role: 'ADMIN' } });
+    const visible = await resolvers.Query.specUnresolvedReferences(null, { memoryRef: draft.id }, as(outsider.id));
+    expect(visible.map((r) => r.targetLoc)).not.toContain('pas:500');
+  });
 });
 
 describe('renumber decides reference ownership before the move (@codex P2 on #1453)', () => {
@@ -486,5 +814,21 @@ describe('renumber reports exactly what the mover moved (@codex P2 on #1453)', (
     });
     const res = await specCorpusRenumberMutations.renumberSpec(null, { memoryRef: draft.id, fromLoc: 'pas:010', toLoc: 'pas:040' }, as());
     expect(res.moved).toEqual([{ fromLoc: 'pas:010', toLoc: 'pas:040' }, { fromLoc: 'pas:010:01', toLoc: 'pas:040:01' }]);
+  });
+
+  it('does not rewrite a node created at the freed citation after the move (#1478)', async () => {
+    let newcomerId = '';
+    const original = `hrn:node:${draft.urn}:pas:010`;
+    const spy = vi.spyOn(nodeMoveOps, 'moveWithResult').mockImplementationOnce(async (...args) => {
+      spy.mockRestore();
+      const out = await nodeMoveOps.moveWithResult(...args);
+      newcomerId = (await spec('pas:010', 'New claimant', original)).id;
+      return out;
+    });
+    const res = await specCorpusRenumberMutations.renumberSpec(null, {
+      memoryRef: draft.id, fromLoc: 'pas:010', toLoc: 'pas:040',
+    }, as());
+    expect(res.rewrites.some((row) => row.nodeId === newcomerId)).toBe(false);
+    expect(await db.node.findUniqueOrThrow({ where: { id: newcomerId } })).toMatchObject({ content: original });
   });
 });

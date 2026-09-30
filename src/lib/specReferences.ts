@@ -20,8 +20,8 @@
  * location instead of rewriting them.
  */
 
-/** One loc atom (validateLoc's spec 021 charset): alphanumeric at both ends, dots/underscores/dashes inside. */
-const ATOM = '[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?';
+/** One loc atom (validateLoc's spec 021 charset and 64-character cap). */
+const ATOM = '[A-Za-z0-9](?:[A-Za-z0-9._-]{0,62}[A-Za-z0-9])?';
 /** A loc: atoms joined by single colons. */
 const LOC = `${ATOM}(?::${ATOM})*`;
 /** Separator between URN parts: canonical `::` or legacy `:`. */
@@ -70,7 +70,7 @@ export function corpusReferencePattern(memoryUrns: readonly string[]): RegExp {
     // `<corpus>::pas:010::x` names loc `x` in a deeper memory, not `pas:010`
     // here. Rejecting only `::` is not enough, since the loc would backtrack to
     // `pas`; a real loc already consumes every `:<atom>` greedily.
-    `(?<![A-Za-z0-9._:-])((?:[Hh][Rr][Nn]|[Uu][Rr][Nn]):[Nn][Oo][Dd][Ee]:)?(${memories.join('|')})${SEP}(${LOC})(?![A-Za-z0-9_-]|:[A-Za-z0-9:])`,
+    `(?<![A-Za-z0-9._:-])((?:[Hh][Rr][Nn]|[Uu][Rr][Nn]):[Nn][Oo][Dd][Ee]:)?(${memories.join('|')})${SEP}(${LOC})(?![A-Za-z0-9_-]|:[A-Za-z0-9:]|\\.[._-]*[A-Za-z0-9])`,
     'g',
   );
 }
@@ -114,25 +114,36 @@ export function renumberedLoc(loc: string, fromLoc: string, toLoc: string): stri
 }
 
 /**
- * Rewrite every reference into the renumbered subtree, keeping each URN's own
- * spelling (prefix, separators, URL around it) and replacing only its loc.
+ * Rewrite every reference into the renumbered subtree, keeping its prefix,
+ * separator style and surrounding URL. When supplied, canonicalMemoryUrn
+ * replaces a former memory name: a reused published name could resolve the
+ * new loc to a different memory after the move.
  */
 export function rewriteCorpusReferences(
   text: string,
   pattern: RegExp,
   fromLoc: string,
   toLoc: string,
-  /** Whether a match really points into the corpus (see TextReferenceMatch.memoryUrn). Default: all do. */
-  accept: (ref: TextReferenceMatch) => boolean = () => true,
+  /** False for a foreign reference; a loc for an alias into the corpus at a different address. */
+  accept: (ref: TextReferenceMatch) => boolean | string | null = () => true,
+  canonicalMemoryUrn?: string,
 ): { text: string; count: number } {
   let count = 0;
   let out = '';
   let last = 0;
   for (const ref of findCorpusReferences(text, pattern)) {
-    if (!accept(ref)) continue;
-    const next = renumberedLoc(ref.targetLoc, fromLoc, toLoc);
+    const resolved = accept(ref);
+    if (resolved === false || resolved === null) continue;
+    const next = renumberedLoc(typeof resolved === 'string' ? resolved : ref.targetLoc, fromLoc, toLoc);
     if (next === null) continue;
-    out += text.slice(last, ref.locStart) + next;
+    if (canonicalMemoryUrn && ref.memoryUrn !== canonicalMemoryUrn) {
+      const prefix = ref.urn.match(/^(?:hrn|urn):node:/i)?.[0] ?? '';
+      const separator = ref.urn.slice(0, -ref.targetLoc.length).endsWith('::') ? '::' : ':';
+      out += text.slice(last, ref.start) + prefix
+        + canonicalMemoryUrn.replace(/::/g, ':').replace(/:/g, separator) + separator + next;
+    } else {
+      out += text.slice(last, ref.locStart) + next;
+    }
     last = ref.end;
     count++;
   }
@@ -164,8 +175,9 @@ export function findTextCitations(
   const insideUrn = (i: number) => urnSpans.some(([s, e]) => i >= s && i < e);
   // (@codex P2, #1453) A dot followed by an atom character continues the loc
   // (`pas:010.v2` is a different citation), while a dot ending a sentence
-  // does not, so the right boundary excludes only the continuation form.
-  const re = new RegExp(`(?<![A-Za-z0-9._:-])${escapeRe(fromLoc)}(?::${ATOM})*(?![A-Za-z0-9_:-]|\\.[A-Za-z0-9])`, 'g');
+  // does not. Interior dots, underscores and dashes continue the atom only
+  // when an alphanumeric end follows (`pas:010..v2`, not `pas:010...`).
+  const re = new RegExp(`(?<![A-Za-z0-9._:-])${escapeRe(fromLoc)}(?::${ATOM})*(?![A-Za-z0-9_:-]|\\.[._-]*[A-Za-z0-9])`, 'g');
   const out: TextCitationMatch[] = [];
   for (const m of text.matchAll(re)) {
     if (insideUrn(m.index!)) continue;
