@@ -5,6 +5,7 @@ import { generateId } from '../../lib/id.js';
 import { softDeleteAsset } from './softDeleteAsset.js';
 import { resolvers } from '../../api/graphql/schema/resolvers.js';
 import { isOrgAdminFor as isAdminFor } from '../../api/graphql/schema/resolvers.helpers.js';
+import type { Prisma } from '../../generated/prisma/index.js';
 
 let org: { id: string; urn: string };
 let user: { id: string };
@@ -98,6 +99,49 @@ describe('softDeleteAsset', () => {
       .rejects.toMatchObject({ code: 'PERMISSION_DENIED' });
     expect(transferred).toBe(true);
     expect((await db.asset.findUniqueOrThrow({ where: { id: assetId } })).deletedAt).toBeNull();
+  });
+
+  it('holds transfer behind the final Asset write transaction', async () => {
+    await seed();
+    const nextOrg = await db.organization.create({ data: {
+      id: generateId(), name: 'Concurrent delete owner', urn: 'concurrent-delete-asset-owner',
+    } });
+    let reachedFinalWrite!: () => void;
+    let releaseWriter!: () => void;
+    const atFinalWrite = new Promise<void>((resolve) => { reachedFinalWrite = resolve; });
+    const release = new Promise<void>((resolve) => { releaseWriter = resolve; });
+    const transaction = db.$transaction.bind(db);
+    const raceDb = new Proxy(db, {
+      get(target, key) {
+        if (key === '$transaction') {
+          return async (work: Parameters<typeof transaction>[0]) => transaction(async (tx) => {
+            const result = await (work as (tx: Prisma.TransactionClient) => Promise<unknown>)(tx);
+            reachedFinalWrite();
+            await release;
+            return result;
+          });
+        }
+        return Reflect.get(target, key);
+      },
+    });
+    const writer = softDeleteAsset(raceDb, { userId: user.id }, { assetId }, isAdminFor);
+    await atFinalWrite;
+    let transferCommitted = false;
+    const transfer = resolvers.Mutation.transferMemoryOwnership(null, {
+      memoryRef: memory.id, orgRef: nextOrg.id,
+    }, { db, userId: admin.id, roles: ['ADMIN'] }).then(() => { transferCommitted = true; });
+    try {
+      // The transfer must wait on the Memory FOR SHARE lock even after the
+      // Asset's authorization and update have both completed inside the tx.
+      await db.$executeRaw`SELECT pg_sleep(0.05)`;
+      expect(transferCommitted).toBe(false);
+    } finally {
+      releaseWriter();
+      await writer;
+      await transfer;
+    }
+    expect((await db.memory.findUniqueOrThrow({ where: { id: memory.id } })).organizationId).toBe(nextOrg.id);
+    expect((await db.asset.findUniqueOrThrow({ where: { id: assetId } })).deletedAt).toBeInstanceOf(Date);
   });
 
   it('uses the receiving organization for the admin grant after transfer', async () => {
