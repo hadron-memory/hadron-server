@@ -5,6 +5,7 @@ import { GraphQLError } from 'graphql';
 import {
   getPrimaryAgent,
   getPrimaryAgentId,
+  isAgentInstalledAndLicensed,
   isGrantedAgentMemoryRole,
 } from '../../../lib/appAgent.js';
 import {
@@ -156,12 +157,6 @@ async function directReadableAgentFilter(ctx: Context): Promise<Record<string, u
     };
   }
   const or: Record<string, unknown>[] = [{ visibility: 'PUBLIC' }];
-  // A pure App-key principal may execute the Agents installed in its App,
-  // including licensed vendor Agents. Keep this separate from user sessions:
-  // membership in the customer's org does not expose the vendor definition.
-  if (ctx.appId && !ctx.userId && !ctx.impersonation) {
-    or.push({ appAgents: { some: { appId: ctx.appId } } });
-  }
   if (ctx.userId) {
     const orgIds = await getMemberOrgIds(ctx.db, ctx.userId, ctx.impersonation?.orgId);
     if (orgIds.length > 0) or.push({ organizationId: { in: orgIds } });
@@ -183,11 +178,9 @@ async function readableNestedAgent<T extends NestedAgentRow>(ctx: Context, agent
   if (!agent || agent.deletedAt) return null;
   if (agent.visibility === 'PUBLIC') return agent;
   if (ctx.appId && !ctx.userId && !ctx.impersonation) {
-    const installed = await ctx.db.appAgent.findUnique({
-      where: { appId_agentId: { appId: ctx.appId, agentId: agent.id } },
-      select: { appId: true },
-    });
-    if (installed) return agent;
+    // The join can outlive a revoked or expired grant. Reuse the live
+    // install+license predicate that gates App-key session memory scope.
+    if (await isAgentInstalledAndLicensed(ctx.db, ctx.appId, agent.id)) return agent;
   }
   try {
     await requireOwnerOrOrgRole(ctx, agent, 'READER');
@@ -207,13 +200,21 @@ async function readableNestedAgent<T extends NestedAgentRow>(ctx: Context, agent
  * relation. Both halves are cached on the request Context, mirroring `loadApp`.
  */
 function loadReadableAgent(ctx: Context, agentId: string): Promise<unknown | null> {
-  const filter = (ctx.readableAgentFilterCache ??= directReadableAgentFilter(ctx));
   const cache = (ctx.readableAgentCache ??= new Map<string, Promise<unknown | null>>());
   let pending = cache.get(agentId);
   if (!pending) {
-    pending = filter.then((readable) =>
-      ctx.db.agent.findFirst({ where: { id: agentId, ...readable } }),
-    );
+    if (ctx.appId && !ctx.userId && !ctx.impersonation) {
+      // Pure App keys have a live installed-Agent exception to Query.agent's
+      // user/org gate. The SQL audience filter cannot express grant lifecycle,
+      // so use the same checked path as eager nested Agent relations.
+      pending = ctx.db.agent.findUnique({ where: { id: agentId } })
+        .then((agent) => readableNestedAgent(ctx, agent));
+    } else {
+      const filter = (ctx.readableAgentFilterCache ??= directReadableAgentFilter(ctx));
+      pending = filter.then((readable) =>
+        ctx.db.agent.findFirst({ where: { id: agentId, ...readable } }),
+      );
+    }
     cache.set(agentId, pending);
   }
   return pending;

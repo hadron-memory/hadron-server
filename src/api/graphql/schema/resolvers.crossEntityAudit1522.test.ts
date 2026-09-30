@@ -78,6 +78,26 @@ describe('#1522 nested Agent read parity', () => {
     });
     const { app } = await createDbAppWithKey(db, 'nested-agent-customer-app', customer.org.id);
     await createDbAppAgent(db, app.id, agent.id);
+    const publicChild = await db.agent.create({
+      data: {
+        organizationId: vendor.org.id,
+        urn: 'nested-agent-vendor:public-child',
+        name: 'Public child Agent',
+        visibility: 'PUBLIC',
+      },
+    });
+    await db.agentOrgGrant.create({
+      data: { orgId: customer.org.id, agentId: publicChild.id, activatedAt: new Date() },
+    });
+    await db.agentImport.create({
+      data: {
+        parentAgentId: agent.id,
+        importedAgentId: publicChild.id,
+        agentOrgGrantOrgId: customer.org.id,
+        agentOrgGrantAgentId: publicChild.id,
+        position: 0,
+      },
+    });
 
     const contextValue = { db, userId: customerUser.id, roles: ['READER'] } as Context;
     const direct = await server.executeOperation(
@@ -121,6 +141,47 @@ describe('#1522 nested Agent read parity', () => {
       agent: { id: agent.id, systemPrompt: 'synthetic-vendor-private-prompt' },
       agents: [{ id: agent.id }],
       appAgents: [{ agent: { id: agent.id } }],
+    });
+    const importQuery = 'query ($ref: ID!) { agent(ref: $ref) { importedBy { parentAgent { systemPrompt } } } }';
+    const licensedImport = await server.executeOperation(
+      { query: importQuery, variables: { ref: publicChild.id } },
+      { contextValue: { db, appId: app.id, roles: [] } as Context },
+    );
+    expect(licensedImport.body.kind).toBe('single');
+    if (licensedImport.body.kind !== 'single') return;
+    expect(licensedImport.body.singleResult.data?.agent).toMatchObject({
+      importedBy: [{ parentAgent: { systemPrompt: 'synthetic-vendor-private-prompt' } }],
+    });
+
+    // The install row survives grant revocation; it is no longer authority
+    // for the App key to read or execute the vendor Agent.
+    await db.agentOrgGrant.update({
+      where: { orgId_agentId: { orgId: customer.org.id, agentId: agent.id } },
+      data: { revokedAt: new Date() },
+    });
+    const revokedKey = await server.executeOperation(
+      { query: '{ myApp { agent { id systemPrompt } agents { id } appAgents { agent { id } } } }' },
+      { contextValue: { db, appId: app.id, roles: [] } as Context },
+    );
+    expect(revokedKey.body.kind).toBe('single');
+    if (revokedKey.body.kind !== 'single') return;
+    expect(revokedKey.body.singleResult.errors).toBeUndefined();
+    expect(revokedKey.body.singleResult.data?.myApp).toEqual({
+      agent: null,
+      agents: [],
+      appAgents: [{ agent: null }],
+    });
+    expect(await resolvers.AppRun.agent(
+      { agentId: agent.id }, {}, { db, appId: app.id, roles: [] } as Context,
+    )).toBeNull();
+    const revokedImport = await server.executeOperation(
+      { query: importQuery, variables: { ref: publicChild.id } },
+      { contextValue: { db, appId: app.id, roles: [] } as Context },
+    );
+    expect(revokedImport.body.kind).toBe('single');
+    if (revokedImport.body.kind !== 'single') return;
+    expect(revokedImport.body.singleResult.data?.agent).toEqual({
+      importedBy: [{ parentAgent: null }],
     });
 
     const authorized = await server.executeOperation(
