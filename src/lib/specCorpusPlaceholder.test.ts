@@ -246,6 +246,37 @@ describe('reserving over a deleted spec (@codex P2 on #1452)', () => {
   });
 });
 
+describe('reserve authorizes before touching the tombstone (@codex P2 on #1452)', () => {
+  it('refuses an outsider without waiting on the tenant\'s locks, exactly as for a missing memory', async () => {
+    const old = await resolvers.Mutation.createSpecNode(null, {
+      input: { memoryId: draft.id, loc: 'pas:171:01', name: 'Old', role: 'spec', nodeType: 'info', content: 'Old.' },
+    } as never, as(admin.id));
+    await resolvers.Mutation.deleteNode(null, { nodeRef: old.id }, as(admin.id));
+    let release!: () => void;
+    let held!: () => void;
+    const lockHeld = new Promise<void>((r) => { held = r; });
+    const hold = new Promise<void>((r) => { release = r; });
+    // A legitimate writer holding the loc's address lock.
+    const writer = db.$transaction(async (tx) => {
+      await acquireLockSet(tx, [{ memoryId: draft.id, loc: 'pas:171:01' }]);
+      held();
+      await hold;
+    }, { timeout: 20_000 });
+    await lockHeld;
+    try {
+      const refused = await Promise.race([
+        codeOf(reserve(draft.id, 'pas:171:01', undefined, outsider.id)),
+        new Promise<string>((r) => setTimeout(() => r('WAITED_ON_LOCK'), 2_000)),
+      ]);
+      expect(refused).toBe(await codeOf(reserve(`hrn:mem:${org.urn}:no-such-memory`, 'pas:171:01', undefined, outsider.id)));
+    } finally {
+      release();
+    }
+    await writer;
+    expect(await db.node.findUniqueOrThrow({ where: { id: old.id } })).toMatchObject({ loc: 'pas:171:01' });
+  });
+});
+
 describe('a filled placeholder cannot be restored back to a blank non-placeholder (@codex P1 on #1452)', () => {
   it('refuses restoring the pre-fill revision: a spec is governed, and the generic restore has no spec door', async () => {
     const reserved = await reserve(draft.id, 'pas:170:01');

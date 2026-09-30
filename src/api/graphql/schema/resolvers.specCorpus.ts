@@ -5,7 +5,7 @@
 import { GraphQLError } from 'graphql';
 import type { Context } from './resolvers.js';
 import { writeNodeCore } from './resolvers.mutation.node.js';
-import { withoutRequestCaches } from './resolvers.helpers.js';
+import { concealUnreadableDenial, requireMemoryWriteAccess, withoutRequestCaches } from './resolvers.helpers.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { acquireLockSet, ancestorLocs } from '../../../lib/nodeSubtreeLock.js';
 import { archiveTombstone } from '../../../lib/tombstoneArchive.js';
@@ -39,6 +39,11 @@ export const specCorpusMutations = {
     ctx: Context,
   ) => {
     const { id: memoryId } = await resolveMemoryRef(ctx.db, memoryRef);
+    // (@codex P2, PR #1452) Authorize BEFORE taking any lock or touching the
+    // tombstone, with the same concealment writeNodeCore applies later: an
+    // unauthorized caller must not contend for this tenant's locks, and no
+    // archive-time error may reveal that a tombstone exists at the loc.
+    await concealUnreadableDenial(ctx, memoryId, memoryRef, () => requireMemoryWriteAccess(ctx, memoryId));
     const effects: Array<() => void> = [];
     const reserved = await ctx.db.$transaction(async (tx) => {
       // (@codex P1/P2s, PR #1452) Never REVIVE a deleted node as a placeholder.
