@@ -68,7 +68,7 @@ describe('omitted scope — the pre-049 promise', () => {
   it('returns the accessible set with scope: null', async () => {
     const r = await Q.findNodes({}, {}, ctx(reader.id));
     expect(r.scope ?? null).toBeNull();
-    expect(locsOf(r)).toEqual([`${memA1.id}:alpha`, `${memA2.id}:alpha`]);
+    expect(locsOf(r)).toEqual([`${memA1.id}:alpha`, `${memA2.id}:alpha`].sort());
   });
 });
 
@@ -131,7 +131,7 @@ describe('a scope named in the call', () => {
   it('`global` is the organization view: orgId, else the single membership, else ORG_REQUIRED', async () => {
     const named = await Q.findNodes({}, { scope: 'global', orgId: orgA.urn }, ctx(twoOrgs.id));
     expect(named.scope).toMatchObject({ kind: 'global', label: orgA.urn });
-    expect(locsOf(named)).toEqual([`${memA1.id}:alpha`, `${memA2.id}:alpha`]);
+    expect(locsOf(named)).toEqual([`${memA1.id}:alpha`, `${memA2.id}:alpha`].sort());
     const single = await Q.findNodes({}, { scope: 'global' }, ctx(reader.id));
     expect(single.scope.label).toBe(orgA.urn);
     // The envelope says what was searched — the org's readable memories, materialised.
