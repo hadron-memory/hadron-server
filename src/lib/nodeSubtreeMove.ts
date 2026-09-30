@@ -249,6 +249,8 @@ export async function moveNodeSubtree(
     renameSourceLeaf?: boolean;
     /** Refuse (SubtreeMoveSourceNotDraftError) unless the source memory is a draft corpus under this move's lock. */
     requireDraftSource?: boolean;
+    /** Recheck caller write authority after both Memory rows are locked. */
+    authorizeLockedMemory?: (memoryId: string) => Promise<void>;
   },
 ): Promise<MoveNodeSubtreeResult> {
   const { source, destLoc, editor, renameSourceLeaf } = opts;
@@ -303,6 +305,9 @@ export async function moveNodeSubtree(
     if (!memory) throw new Error(`Move memory ${memoryId} disappeared while locking; retry.`);
     memoryUrns.set(memoryId, memory.urn);
     draftCorpus.set(memoryId, memory.corpus_draft);
+  }
+  for (const memoryId of [...new Set([srcMemoryId, destMemoryId])].sort()) {
+    await opts.authorizeLockedMemory?.(memoryId);
   }
 
   for (const id of reconcileIds) {

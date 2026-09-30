@@ -271,6 +271,38 @@ describe('transferMemoryOwnership', () => {
     expect((await db.node.findUniqueOrThrow({ where: { id: node.id } })).content).toBe('Permanent citation');
   });
 
+  it.each(['move', 'delete'] as const)('does not let a former org writer %s a node after transfer', async (mode) => {
+    await transfer({ memoryRef: memory.id, orgRef: org.id, targetClass: 'knowledge' });
+    const nextOrg = await db.organization.create({ data: { id: generateId(), name: 'Next Node Owner', urn: 'next-node-operation-owner' } });
+    const transaction = db.$transaction.bind(db);
+    let transferred = false;
+    const raceDb = new Proxy(db, {
+      get(target, key) {
+        if (key === '$transaction') {
+          return async (work: Parameters<typeof transaction>[0], options?: Parameters<typeof transaction>[1]) => {
+            if (!transferred) {
+              transferred = true;
+              await resolvers.Mutation.transferMemoryOwnership(null, {
+                memoryRef: memory.id, orgRef: nextOrg.id,
+              }, { db, userId: outsider.id, roles: ['ADMIN'] });
+            }
+            return transaction(work as never, options as never);
+          };
+        }
+        return Reflect.get(target, key);
+      },
+    });
+    const raceCtx = { db: raceDb, userId: owner.id, roles: ['READER'] };
+    const pending = mode === 'move'
+      ? resolvers.Mutation.moveNode(null, { sourceRef: node.id, targetUrn: `hrn:node:${org.urn}:specs:moved` }, raceCtx)
+      : resolvers.Mutation.deleteNode(null, { nodeRef: node.id }, raceCtx);
+    await expect(pending).rejects.toThrow();
+    expect(transferred).toBe(true);
+    expect(await db.node.findUniqueOrThrow({ where: { id: node.id } })).toMatchObject({
+      loc: node.loc, deletedAt: null, content: 'Permanent citation',
+    });
+  });
+
   it('serializes a pending Channel creation behind a transfer of its host', async () => {
     await transfer({ memoryRef: memory.id, orgRef: org.id, targetClass: 'knowledge' });
     const nextOrg = await db.organization.create({ data: {
@@ -371,6 +403,57 @@ describe('transferMemoryOwnership', () => {
       { userId: owner.id, role: 'owner' },
     ]);
     expect((await resolveNodeRef(db, `hrn:node:${memory.urn}:${node.loc}`)).id).toBe(node.id);
+  });
+
+  it('does not let a former group owner add a member after the reset transfer', async () => {
+    await transfer({ memoryRef: memory.id, orgRef: org.id, targetClass: 'group' });
+    const nextOrg = await db.organization.create({ data: { id: generateId(), name: 'Next Group', urn: 'next-group-owner' } });
+    await db.orgMember.create({ data: { id: generateId(), organizationId: org.id, userId: receiver.id, role: 'ADMIN' } });
+    await db.orgMember.create({ data: { id: generateId(), organizationId: nextOrg.id, userId: receiver.id, role: 'ADMIN' } });
+    const transaction = db.$transaction.bind(db);
+    let transferred = false;
+    const raceDb = new Proxy(db, {
+      get(target, key) {
+        if (key === '$transaction') {
+          return async (work: Parameters<typeof transaction>[0], options?: Parameters<typeof transaction>[1]) => {
+            if (!transferred) {
+              transferred = true;
+              await transfer({ memoryRef: memory.id, orgRef: nextOrg.id, resetGroupMembers: true }, receiver.id);
+            }
+            return transaction(work as never, options as never);
+          };
+        }
+        return Reflect.get(target, key);
+      },
+    });
+    await expect(resolvers.Mutation.addMemoryMember(null, {
+      memoryRef: memory.id, userRef: outsider.id, role: 'reader',
+    }, { db: raceDb, userId: owner.id, roles: ['READER'] })).rejects.toMatchObject({
+      extensions: { code: 'FORBIDDEN' },
+    });
+    expect(transferred).toBe(true);
+    expect(await db.memoryMember.findUnique({ where: { memoryId_userId: { memoryId: memory.id, userId: outsider.id } } })).toBeNull();
+  });
+
+  it('holds a pending group-member insert behind the transfer fence', async () => {
+    await transfer({ memoryRef: memory.id, orgRef: org.id, targetClass: 'group' });
+    const nextOrg = await db.organization.create({ data: { id: generateId(), name: 'Waiting Group', urn: 'waiting-group-owner' } });
+    let pending: ReturnType<typeof resolvers.Mutation.addMemoryMember> | undefined;
+    await db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM memories WHERE id = ${memory.id} FOR UPDATE`;
+      pending = resolvers.Mutation.addMemoryMember(null, {
+        memoryRef: memory.id, userRef: outsider.id, role: 'reader',
+      }, ctx(owner.id));
+      void pending.catch(() => {});
+      await waitForLockWaiters(db);
+      await tx.memoryMember.deleteMany({ where: { memoryId: memory.id } });
+      await tx.memory.update({ where: { id: memory.id }, data: {
+        organizationId: nextOrg.id, urn: `${nextOrg.urn}:specs`,
+      } });
+      await tx.memoryMember.create({ data: { memoryId: memory.id, userId: receiver.id, role: 'owner' } });
+    }, { timeout: 10_000 });
+    await expect(pending!).rejects.toThrow();
+    expect(await db.memoryMember.findUnique({ where: { memoryId_userId: { memoryId: memory.id, userId: outsider.id } } })).toBeNull();
   });
 
   it('honors a live memory.delete grant for the source org, but never a revoked membership', async () => {

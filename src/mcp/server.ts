@@ -849,6 +849,18 @@ class NodeMovedDuringWriteError extends Error {}
 class MemoryEncryptionChangedDuringWriteError extends Error {}
 class MemoryWriteAccessChangedDuringWriteError extends Error {}
 
+async function assertLockedMemoryWriteAccess(
+  tx: Prisma.TransactionClient,
+  auth: AuthContext,
+  memoryId: string,
+): Promise<void> {
+  if (!(await canWriteToMemory(tx as typeof db, auth, memoryId))) {
+    throw new MemoryWriteAccessChangedDuringWriteError(
+      '[node_write_conflict] Memory write access changed while this write waited — re-read and retry.',
+    );
+  }
+}
+
 /** Serialize the memory's encryption and write authority with a prepared node write. */
 async function assertMemoryEncryptionStateForWrite(
   tx: Prisma.TransactionClient,
@@ -868,11 +880,7 @@ async function assertMemoryEncryptionStateForWrite(
   // A transfer may have committed after the preflight gate. Re-read through
   // the transaction client while the Memory row is held, then keep that lock
   // through commit so the destination tenant cannot inherit a late write.
-  if (!(await canWriteToMemory(tx as typeof db, auth, memoryId))) {
-    throw new MemoryWriteAccessChangedDuringWriteError(
-      '[node_write_conflict] Memory write access changed while this write waited — re-read and retry.',
-    );
-  }
+  await assertLockedMemoryWriteAccess(tx, auth, memoryId);
 }
 
 async function lockOutgoingEdgeMemories(
@@ -6601,12 +6609,17 @@ Refuses if the node has descendants under its URN prefix unless \`recursive: tru
         | { refused: 'descendants'; count: number }
         | { refused: 'crossMem'; count: number }
         | { refused: 'changed' }
+        | { refused: 'access' }
         | { ok: true; descendantCount: number };
 
       const result: DeleteResult = await db.$transaction(async (tx) => {
         // Keep the dead-Channel cleanup verdict stable through the delete.
         // Channel resurrection takes this same key before any loc key.
         await lockMemoryForChannelChange(tx, memory.id);
+        await tx.$queryRaw`SELECT id FROM memories WHERE id = ${memory.id} FOR SHARE`;
+        if (!(await canWriteToMemory(tx as typeof db, auth, memory.id))) {
+          return { refused: 'access' };
+        }
         // lockNodeForDelete acquires the loc lock and then re-runs the
         // protected-loc gate on a fresh snapshot. While this memory lock is
         // held, a reuse that already won is visible and a later reuse cannot
@@ -6701,6 +6714,9 @@ Refuses if the node has descendants under its URN prefix unless \`recursive: tru
       });
 
       if ('refused' in result) {
+        if (result.refused === 'access') {
+          return textResult(`Node "${rawUrn}" not found.`);
+        }
         if (result.refused === 'changed') {
           return textResult(`Node "${rawUrn}" moved while this delete waited; re-read it and retry.`);
         }
@@ -6902,6 +6918,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
               // This direct same-slot rename bypasses moveNodeSubtree but still
               // snapshots history. Hold the source encryption flag before it.
               await tx.$queryRaw`SELECT "id" FROM "memories" WHERE "id" = ${fromMemory.id} FOR SHARE`;
+              await assertLockedMemoryWriteAccess(tx, auth, fromMemory.id);
               const still = await tx.node.findUnique({
                 where: { id: existing.id },
                 select: { memoryId: true, loc: true, deletedAt: true },
@@ -6980,6 +6997,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
               destMemoryId: crossMemory ? toMemory.id : undefined,
               editor: editorFromAuth(auth),
               renameSourceLeaf: renameToLeaf === true,
+              authorizeLockedMemory: (memoryId) => assertLockedMemoryWriteAccess(tx, auth, memoryId),
             });
             relocated = subtreeResult.moved;
           }
@@ -7018,6 +7036,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         // here (mirrors extractParentNodeGraph / cloneMemory).
         { timeout: 120_000 });
       } catch (e) {
+        if (e instanceof MemoryWriteAccessChangedDuringWriteError) return textResult(e.message);
         // A descendant-slot collision (or a move-into-own-subtree) aborts the
         // whole transaction — including any overwrite eviction — and surfaces as
         // a refusal, not a partial move.

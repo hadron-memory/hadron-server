@@ -50,4 +50,43 @@ describe('MCP node writes while Memory ownership transfers', () => {
       expect((await db.node.findUniqueOrThrow({ where: { id: node.id } })).content).toBe('original');
     },
   );
+
+  it.each(['hadron_delete_node', 'hadron_move_node'] as const)(
+    'refuses a former owner through %s after the pending Memory lock resolves', async (tool) => {
+      const server = createTestableMcpServer({ userId: user.id, roles: ['READER'], clientId: `user:${user.id}` });
+      const urn = `hrn:node:${memory.urn}:entry`;
+      const args = tool === 'hadron_move_node'
+        ? { urn, targetUrn: `hrn:node:${memory.urn}:moved` }
+        : { urn };
+      let pending: Promise<string> | undefined;
+      await db.$transaction(async (tx) => {
+        await tx.$queryRaw`SELECT id FROM memories WHERE id = ${memory.id} FOR UPDATE`;
+        pending = server.callToolText(tool, args);
+        await waitForLockWaiters(db);
+        await tx.memory.update({ where: { id: memory.id }, data: {
+          ownerUserId: null, organizationId: receivingOrg.id, urn: 'mcp-transfer-receiver:notes',
+        } });
+      }, { timeout: 10_000 });
+      expect(await pending!).toMatch(/not found|Memory write access changed/);
+      expect(await db.node.findUniqueOrThrow({ where: { id: node.id } })).toMatchObject({
+        loc: 'entry', content: 'original', deletedAt: null,
+      });
+    },
+  );
+
+  it('refuses a same-slot leaf rename by a former owner after transfer', async () => {
+    const server = createTestableMcpServer({ userId: user.id, roles: ['READER'], clientId: `user:${user.id}` });
+    const urn = `hrn:node:${memory.urn}:entry`;
+    let pending: Promise<string> | undefined;
+    await db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM memories WHERE id = ${memory.id} FOR UPDATE`;
+      pending = server.callToolText('hadron_move_node', { urn, targetUrn: urn, renameToLeaf: true });
+      await waitForLockWaiters(db);
+      await tx.memory.update({ where: { id: memory.id }, data: {
+        ownerUserId: null, organizationId: receivingOrg.id, urn: 'mcp-transfer-receiver:notes',
+      } });
+    }, { timeout: 10_000 });
+    expect(await pending!).toContain('[node_write_conflict] Memory write access changed');
+    expect(await db.node.findUniqueOrThrow({ where: { id: node.id } })).toMatchObject({ name: 'Entry', loc: 'entry' });
+  });
 });

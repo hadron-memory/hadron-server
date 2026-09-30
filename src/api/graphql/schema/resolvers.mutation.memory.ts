@@ -2681,6 +2681,7 @@ export const memoryMutations = {
           userId: resolvedUserId,
           role,
           actorId: ctx.userId!,
+          authorizeLocked: (tx) => requireMemoryMemberOwner(withoutRequestCaches(ctx, tx), resolvedMemoryId),
         });
         return { memoryMember };
       } catch (e: unknown) {

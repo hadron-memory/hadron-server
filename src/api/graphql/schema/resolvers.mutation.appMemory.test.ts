@@ -424,6 +424,39 @@ describe('attachMemoryToApp', () => {
     expect(out.urn).toBe(mem.urn); // URN unchanged — no node re-addressing.
   });
 
+  it('refuses an attachment when ownership transfers before the Memory write', async () => {
+    const mem = await freeStandingPersonal(adminUser.id);
+    const nextOrg = await db.organization.create({ data: { id: generateId(), name: 'next-org', urn: 'next-org' } });
+    await db.orgMember.create({ data: { organizationId: nextOrg.id, userId: adminUser.id, role: 'ADMIN' } });
+    const transaction = db.$transaction.bind(db);
+    let transferred = false;
+    const raceDb = new Proxy(db, {
+      get(target, key) {
+        if (key === '$transaction') {
+          return async (work: Parameters<typeof transaction>[0]) => {
+            if (!transferred) {
+              transferred = true;
+              await resolvers.Mutation.transferMemoryOwnership(null, {
+                memoryRef: mem.id, orgRef: nextOrg.id, targetClass: 'knowledge',
+              }, asUser(adminUser.id));
+            }
+            return transaction(work as never);
+          };
+        }
+        return Reflect.get(target, key);
+      },
+    });
+    await expect(attachMemoryToApp(null, {
+      memoryRef: mem.id, appRef: app.id, agentRef: agent.id,
+    }, { db: raceDb, userId: adminUser.id, roles: [] })).rejects.toMatchObject({
+      extensions: { code: 'FORBIDDEN' },
+    });
+    expect(transferred).toBe(true);
+    expect(await db.memory.findUniqueOrThrow({ where: { id: mem.id } })).toMatchObject({
+      organizationId: nextOrg.id, appId: null, userMemoryOfAgentId: null,
+    });
+  });
+
   it('rejects a memory already scoped to an App', async () => {
     const mem = await createMemoryInApp(
       null,

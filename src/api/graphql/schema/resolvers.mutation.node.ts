@@ -2019,6 +2019,8 @@ export const nodeMoveOps = {
               destMemoryId: crossMemory ? destMemoryId : undefined,
               editor: editorFromAuth(ctx),
               requireDraftSource,
+              authorizeLockedMemory: (memoryId) =>
+                requireMemoryWriteAccess(withoutRequestCaches(ctx, tx), memoryId),
             });
             relocated = result.moved;
             return tx.node.findUniqueOrThrow({ where: { id: source.id }, include: withEdges });
@@ -2869,6 +2871,12 @@ export const nodeMutations = {
           // authoritative re-check must serialize with Channel resurrection.
           // Memory-before-loc matches ensureChannelWithRoot's global order.
           await lockMemoryForChannelChange(tx, memoryId);
+          await tx.$queryRaw`SELECT id FROM memories WHERE id = ${memoryId} FOR SHARE`;
+          const txCtx = withoutRequestCaches(ctx, tx);
+          await concealUnreadableNodeDenial(
+            txCtx, memoryId, () => nodeNotFoundError(nodeRef),
+            () => requireMemoryWriteAccess(txCtx, memoryId),
+          );
           // This helper acquires the loc lock AND runs assertLocWritable on a
           // fresh snapshot. Keep that re-check under the memory lock: if reuse
           // won while this request waited, the now-live Channel refuses the
