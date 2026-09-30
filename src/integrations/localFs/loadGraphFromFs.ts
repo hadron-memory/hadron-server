@@ -34,6 +34,7 @@ export interface GraphEdge {
   /** Relationship name (was `label`). */
   name: string | null;
   description?: string | null;
+  data?: unknown;
   isRunnable?: boolean | null;
   /** JSONLogic gating expression preserved through .node/ import. Null/undefined = always fires. */
   condition?: unknown;
@@ -117,6 +118,7 @@ export const loadGraphFromFs = async (
           targetId: edge.targetId,
           name: edge.name,
           ...(edge.description != null ? { description: edge.description } : {}),
+          ...(edge.data != null ? { data: edge.data } : {}),
           ...(edge.isRunnable != null ? { isRunnable: edge.isRunnable } : {}),
           ...(edge.condition !== undefined ? { condition: edge.condition } : {}),
           ...(edge.priority !== undefined ? { priority: edge.priority } : {}),

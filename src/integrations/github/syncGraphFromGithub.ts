@@ -830,6 +830,7 @@ export const syncGraphFromGithub = async (
               loc: edgeLoc,
               name: edge.name,
               description: edge.description ?? null,
+              ...(edge.data != null ? { data: edge.data as Prisma.InputJsonValue } : {}),
               isRunnable: edge.isRunnable ?? null,
               ...(edgeCondition !== null ? { condition: edgeCondition as Prisma.InputJsonValue } : {}),
               priority: edgePriority,
@@ -841,8 +842,8 @@ export const syncGraphFromGithub = async (
           // update:{} then returns that occupant without changing it. Refuse
           // inside the transaction so earlier node/edge writes roll back too.
           // Existing metadata remains untouched, as it did before this guard:
-          // API edits are not mirrored to Git, and the exporter omits some
-          // metadata (including data and empty descriptions).
+          // API edits are not mirrored to Git (#430), and this create-only
+          // importer does not reconcile them on an existing edge.
           if (
             savedEdge.deletedAt !== null ||
             savedEdge.sourceId !== edgeSourceId ||

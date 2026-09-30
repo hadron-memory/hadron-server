@@ -54,8 +54,10 @@ export interface EdgeForGit {
    *  from `target.loc`. Carried so a standalone export round-trips the edge's
    *  identity; emitted only when set. */
   loc?: string | null;
-  /** Edge description (spec 037); emitted only when set. */
+  /** Edge description (spec 037); an empty string is distinct from null. */
   description?: string | null;
+  /** Edge JSON metadata; emitted when non-null so a fresh import can restore it. */
+  data?: unknown;
   /** Whether the edge is runnable (spec 037); emitted (as `runnable: true`) only
    *  when true — false is the DB default and is omitted. */
   isRunnable?: boolean | null;
@@ -150,14 +152,16 @@ export function buildNodeFrontmatter(
  * `hadron node export` / `hadron node import`) so an exported file is
  * byte-identical to the CLI and the two never drift:
  *
- *   `id, loc, rel, edgeLoc, description, runnable, condition, priority`
+ *   `id, loc, rel, edgeLoc, description, data, runnable, condition, priority`
  *
  * `id` is the target node (the importer keys off `e.id ?? e.target`); `loc` is
  * the target's human-readable citation (readability); `rel` is the edge name
  * (empty string for a null name, never omitted); `edgeLoc` is the edge's OWN
- * loc. The omit-on-default rules mirror the CLI's `omitempty`: `loc`/`edgeLoc`/
- * `description` only when set, `runnable` only when true (false is the DB
- * default), `condition` only when non-null, `priority` only when non-zero.
+ * loc. The omit-on-default rules are: `loc`/`edgeLoc` when set,
+ * `description` when non-null (including `''`), `data` when non-null,
+ * `runnable` only when true (false is the DB default), `condition` only when
+ * non-null, and `priority` only when non-zero. The CLI's `edgeEntry` needs the
+ * corresponding shape for canonical-byte parity (#1479).
  *
  * Historical note: the server previously emitted `isRunnable` and no `edgeLoc`,
  * which silently diverged from the CLI export — this builder is now the single
@@ -176,7 +180,8 @@ export function buildEdgeFrontmatter(outgoingEdges: EdgeForGit[]): Array<Record<
       if (e.target.loc) entry.loc = e.target.loc;
       entry.rel = e.name ?? '';
       if (e.loc) entry.edgeLoc = e.loc;
-      if (e.description) entry.description = e.description;
+      if (e.description != null) entry.description = e.description;
+      if (e.data != null) entry.data = e.data;
       // `runnable` only when true (CLI omit-when-false). For an EDGE, false and
       // null are the same "not runnable" state — nothing distinguishes them (only
       // Node.isRunnable filtering treats false specially), and the CLI's edge

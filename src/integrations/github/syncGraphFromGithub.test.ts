@@ -13,6 +13,7 @@ import { acquireLockSet, ancestorLocs, lockAncestorsForCreate } from '../../lib/
 import { moveNodeSubtree } from '../../lib/nodeSubtreeMove.js';
 import { deriveEdgeLoc } from '../../lib/edgeLoc.js';
 import { waitForLockWaitersOfType } from '../../test/lockWait.js';
+import { buildNodeFrontmatter } from './nodeFrontmatter.js';
 
 // ---------------------------------------------------------------------------
 // Mock child_process.execFile so no actual git commands run
@@ -564,6 +565,26 @@ describe('syncGraphFromGithub', () => {
     expect(edge).toMatchObject({ condition, priority: 7 });
     expect((await syncGraphFromGithub(makeGraph())).error).toBeUndefined();
     expect(await db.edge.findUniqueOrThrow({ where: { id: edge.id } })).toMatchObject({ condition, priority: 7 });
+  });
+
+  it('restores edge data and an empty description from an exported file into a fresh memory', async () => {
+    const sourceId = generateId();
+    const targetId = generateId();
+    const root = join(mockSources, 'test-org', 'test/repo');
+    mkdirSync(root, { recursive: true });
+    const source = buildNodeFrontmatter({ id: sourceId, name: 'Source', tags: [] }, [
+      { target: { id: targetId, loc: 'target' }, name: 'uses', description: '', data: { weight: 3 } },
+    ]);
+    const target = buildNodeFrontmatter({ id: targetId, name: 'Target', tags: [] });
+    writeFileSync(join(root, 'source.md'), `---\n${stringify(source, { lineWidth: 0 }).trim()}\n---\n`, 'utf-8');
+    writeFileSync(join(root, 'target.md'), `---\n${stringify(target, { lineWidth: 0 }).trim()}\n---\n`, 'utf-8');
+
+    const result = await syncGraphFromGithub(makeGraph());
+    expect(result.error).toBeUndefined();
+    expect(await db.edge.findFirstOrThrow({ where: { sourceId, targetId } })).toMatchObject({
+      description: '',
+      data: { weight: 3 },
+    });
   });
 
   it('parks a cross-repo edge as PendingEdge when target is not yet in DB', async () => {
