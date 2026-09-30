@@ -1,5 +1,4 @@
 import { createDecipheriv } from 'crypto';
-import { isDeepStrictEqual } from 'node:util';
 import { governedSignalsFromMirror } from '../../lib/governedSignals.js';
 import { authoredContentChanged, clearNodeAuthorship } from '../../lib/nodeAuthorship.js';
 import { NodeSchemaViolation, validateNodeAgainstSchema } from '../../lib/validateNodeAgainstSchema.js';
@@ -820,20 +819,16 @@ export const syncGraphFromGithub = async (
           // was saved. An unrelated edge may already own the same derived loc;
           // update:{} then returns that occupant without changing it. Refuse
           // inside the transaction so earlier node/edge writes roll back too.
-          // The Git exporter omits runnable:false, which has the same edge
-          // behavior as null/absent.
+          // Existing metadata remains untouched, as it did before this guard:
+          // API edits are not mirrored to Git, and the exporter omits some
+          // metadata (including data and empty descriptions).
           if (
             savedEdge.deletedAt !== null ||
             savedEdge.sourceId !== edgeSourceId ||
             savedEdge.targetId !== edgeTargetId ||
-            savedEdge.name !== edge.name ||
-            savedEdge.description !== (edge.description ?? null) ||
-            (savedEdge.isRunnable === true) !== (edge.isRunnable === true) ||
-            !isDeepStrictEqual(savedEdge.condition, edgeCondition) ||
-            savedEdge.priority !== edgePriority ||
-            savedEdge.data !== null
+            savedEdge.name !== edge.name
           ) {
-            throw new Error(`Git sync edge loc "${edgeLoc}" is already occupied by a different edge state.`);
+            throw new Error(`Git sync edge loc "${edgeLoc}" is already occupied by a different edge.`);
           }
           await tx.pendingEdge.deleteMany({
             where: { sourceId: edgeSourceId, targetId: edgeTargetId },

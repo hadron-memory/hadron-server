@@ -547,7 +547,11 @@ describe('syncGraphFromGithub', () => {
     expect(await db.pendingEdge.count({ where: { sourceId: bId, targetId: tId } })).toBe(0);
   });
 
-  it('refuses an edge at the right loc with different routing state', async () => {
+  it.each([
+    ['data', { data: { edited: true } }],
+    ['empty description', { description: '' }],
+    ['priority', { priority: 1 }],
+  ] as const)('keeps %s-only edge drift without blocking repeated syncs', async (_field, edit) => {
     const tId = generateId();
     const aDir = join(mockSources, 'test-org', 'test/repo', 'a');
     const tDir = join(mockSources, 'test-org', 'test/repo', 't');
@@ -558,9 +562,10 @@ describe('syncGraphFromGithub', () => {
     expect((await syncGraphFromGithub(makeGraph())).error).toBeUndefined();
 
     const edge = await db.edge.findFirstOrThrow();
-    await db.edge.update({ where: { id: edge.id }, data: { priority: 1 } });
-    expect((await syncGraphFromGithub(makeGraph())).error).toContain('already occupied');
-    expect(await db.edge.findUniqueOrThrow({ where: { id: edge.id } })).toMatchObject({ priority: 1 });
+    await db.edge.update({ where: { id: edge.id }, data: edit });
+    expect((await syncGraphFromGithub(makeGraph())).error).toBeUndefined();
+    expect((await syncGraphFromGithub(makeGraph())).error).toBeUndefined();
+    expect(await db.edge.findUniqueOrThrow({ where: { id: edge.id } })).toMatchObject(edit);
   });
 
   it('persists a declared condition and priority and accepts an exact re-sync', async () => {
