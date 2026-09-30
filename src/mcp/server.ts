@@ -783,9 +783,13 @@ export async function addEdge(args: {
       const occupant = await tx.edge.findUnique({
         where: { loc_memoryId: { loc: edgeLoc, memoryId: locked.source.memoryId } },
       });
+      // condition/priority/data are not accepted by this MCP tool, so a new
+      // edge gets the database defaults. An existing edge with different
+      // behavior is not an idempotent replay, even if its endpoints match.
       if (!occupant || occupant.deletedAt || occupant.sourceId !== locked.source.id ||
           occupant.targetId !== locked.target.id || occupant.name !== name ||
-          occupant.description !== description || occupant.isRunnable !== isRunnable) {
+          occupant.description !== description || occupant.isRunnable !== isRunnable ||
+          occupant.condition !== null || occupant.priority !== 0 || occupant.data !== null) {
         return `[edge_loc_conflict] Edge loc "${edgeLoc}" is occupied; choose another loc.`;
       }
     }

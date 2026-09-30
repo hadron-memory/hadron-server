@@ -225,6 +225,25 @@ describe('addEdge — non-destructive + idempotent', () => {
       .toMatchObject({ sourceId: source.id, targetId: topLevel.id, description: 'original' });
   });
 
+  it('refuses replay when existing behavior differs from MCP creation defaults', async () => {
+    const variants = [
+      { loc: 'behavior:condition', condition: { '==': [1, 1] } },
+      { loc: 'behavior:priority', priority: 7 },
+      { loc: 'behavior:data', data: { route: 'special' } },
+    ];
+    for (const variant of variants) {
+      await db.edge.create({
+        data: { id: generateId(), memoryId: memory.id, sourceId: source.id,
+          targetId: topLevel.id, name: 'cites', ...variant },
+      });
+      const result = await addEdge({
+        sourceUrn: source.id, targetUrn: topLevel.id, loc: variant.loc,
+        name: 'cites', auth: adminAuth(),
+      });
+      expect(result).toEqual({ error: expect.stringMatching(/^\[edge_loc_conflict\]/) });
+    }
+  });
+
   it('does not treat a soft-deleted edge at the same loc as saved', async () => {
     const loc = deriveEdgeLoc(source.loc, 'cites', topLevel.loc);
     await db.edge.create({
