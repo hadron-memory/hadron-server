@@ -4279,6 +4279,27 @@ export const typeDefs = `#graphql
     activationCount: Int!
   }
 
+  """The invite-page view available to anyone holding the invitation slug."""
+  type PublicInvitation {
+    memberRole: Role!
+    maxActivations: Int
+    activationCount: Int!
+    expiresAt: DateTime
+    sender: PublicInvitationSender
+    organization: PublicInvitationOrganization
+  }
+
+  "Only the sender display fields needed on the invite page."
+  type PublicInvitationSender {
+    name: String
+    githubUsername: String
+  }
+
+  "Only the organization display name needed on the invite page."
+  type PublicInvitationOrganization {
+    name: String!
+  }
+
   """
   Outgoing edge on a node, used in NodeInput.edges
   """
@@ -6364,9 +6385,10 @@ export const typeDefs = `#graphql
     marketplaceMemories(limit: Int, offset: Int): PublicResourceRefPage!
 
     """
-    Invitation lookup (public — no auth required, used by invite acceptance page)
+    Invitation lookup (public to the slug holder). Returns only invite-page
+    display fields; accepting the slug still performs its own authorization.
     """
-    invitation(slug: String!): UserInvitation
+    invitation(slug: String!): PublicInvitation
 
     """
     Fetch a single Memory (org member, shared-read gate, or platform ADMIN).

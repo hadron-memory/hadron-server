@@ -619,18 +619,25 @@ export const orgQueries = {
     invitation: async (_: unknown, { slug }: { slug: string }, ctx: Context) => {
       const invite = await ctx.db.userInvitation.findUnique({
         where: { slug },
-        include: {
-          sender: true,
-          organization: true,
-          activations: true,
+        select: {
+          deletedAt: true,
+          memberRole: true,
+          maxActivations: true,
+          expiresAt: true,
+          sender: { select: { name: true, githubUsername: true } },
+          organization: { select: { name: true } },
+          _count: { select: { activations: true } },
         },
       });
       if (!invite || invite.deletedAt) return null;
       return {
-        ...invite,
-        activationCount: invite.activations.length,
+        memberRole: invite.memberRole,
+        maxActivations: invite.maxActivations,
+        expiresAt: invite.expiresAt,
+        sender: invite.sender,
+        organization: invite.organization,
+        activationCount: invite._count.activations,
       };
     },
 
 };
-
