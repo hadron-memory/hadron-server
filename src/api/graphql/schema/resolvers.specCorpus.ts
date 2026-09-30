@@ -538,11 +538,18 @@ async function unresolvedReferencesIn(
     for (const p of pending) {
       const stableId = pendingEdgeStableTargetId(p.targetId);
       const target = stableId === null ? undefined : stableTargets.get(stableId);
-      // (@codex P1, PR #1462) A stable key can name a node in ANOTHER memory.
-      // Only a memory the caller can read may decide anything here: otherwise
-      // whether this reports (and the loc it names) would reveal that tenant's
-      // node state. Concealed exactly like the foreign-edge branch below.
-      if (target && target.memoryId !== corpus.id && !(await isMemoryReadableCached(ctx, target.memoryId))) continue;
+      // (@codex P1 + P2, PR #1462) A stable key can name a node in ANOTHER
+      // memory. One the caller cannot read may not DECIDE anything (whether it
+      // reports, or what loc it names, would reveal that tenant's node state),
+      // but the pending relationship still exists and can still materialize,
+      // so it BLOCKS uniformly: unresolved, reported by its own recorded key.
+      if (target && target.memoryId !== corpus.id && !(await isMemoryReadableCached(ctx, target.memoryId))) {
+        out.push({
+          kind: 'EDGE', sourceNodeId: p.source.id, sourceLoc: p.source.loc, field: 'pendingEdge',
+          targetLoc: p.targetId, text: p.name, reason: 'MISSING',
+        });
+        continue;
+      }
       const live = target && !target.deletedAt ? target : undefined;
       if (live && !live.isPlaceholder) continue;
       out.push({

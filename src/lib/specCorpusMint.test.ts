@@ -237,6 +237,11 @@ describe('mintSpecCorpus: pending edges are references too (@codex P2s on #1462)
     expect(asPlaceholder).toEqual(asWritten);
     expect(asDeleted).toEqual(asWritten);
     expect(JSON.stringify(asWritten)).not.toContain('pas:700');
+    // ...but the pending relationship still blocks, whatever the target's state (@codex P2 on #1462).
+    expect(asWritten).toEqual([expect.objectContaining({
+      kind: 'UNRESOLVED_REFERENCE', loc: 'pas:010:01', rule: 'MISSING', targetLoc: pendingEdgeStableTargetKey(target.id),
+    })]);
+    expect(await codeOf(mint())).toBe('SPEC_CORPUS_MINT_BLOCKED');
   });
 
   it('decodes a stable key: skipped for a written spec, PLACEHOLDER for a placeholder, MISSING once deleted', async () => {
