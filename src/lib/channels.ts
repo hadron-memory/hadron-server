@@ -346,10 +346,10 @@ export async function ensureChannelWithRoot(
     // and a concurrent Channel create on an overlapping address both queue
     // here and re-check after the grant.
     await lockMemoryForChannelChange(tx, args.memoryId);
-    // Transfer locks this row while planning and applying a new owner. Hold it
-    // through Channel create/restore so a pre-transfer gate cannot authorize a
-    // Channel in the receiving tenant.
-    await tx.$queryRaw`SELECT id FROM memories WHERE id = ${args.memoryId} FOR UPDATE`;
+    // Transfer takes FOR UPDATE on this row. FOR SHARE fences it through
+    // Channel create/restore while allowing concurrent posts to take the FK's
+    // KEY SHARE lock after their path lock (FOR UPDATE deadlocks with that path).
+    await tx.$queryRaw`SELECT id FROM memories WHERE id = ${args.memoryId} FOR SHARE`;
     // Re-checked under that lock: the preflight above ran outside it.
     const live = await tx.memory.findFirst({
       where: { id: args.memoryId, deletedAt: null },
