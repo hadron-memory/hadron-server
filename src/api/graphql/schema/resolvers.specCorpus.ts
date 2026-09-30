@@ -473,15 +473,20 @@ async function unresolvedReferencesIn(
     // report an oracle for it (findings:classifying-by-another-memorys-rows-
     // is-an-existence-oracle). Its target is named by node URN, since a loc
     // alone does not say which memory it is in.
+    // A soft-deleted target there is as unresolved as one in the corpus
+    // (@codex P2, PR #1462): MISSING, behind the same read gate.
     const foreign = await db.edge.findMany({
       where: {
         deletedAt: null,
         source: { memoryId: corpus.id, deletedAt: null },
-        target: { memoryId: { not: corpus.id }, deletedAt: null, isPlaceholder: true },
+        target: {
+          memoryId: { not: corpus.id },
+          OR: [{ deletedAt: null, isPlaceholder: true }, { deletedAt: { not: null } }],
+        },
       },
       select: {
         name: true, source: { select: { id: true, loc: true } },
-        target: { select: { loc: true, memoryId: true, memory: { select: { urn: true } } } },
+        target: { select: { loc: true, memoryId: true, deletedAt: true, memory: { select: { urn: true } } } },
       },
       orderBy: { id: 'asc' },
     });
@@ -490,7 +495,7 @@ async function unresolvedReferencesIn(
       out.push({
         kind: 'EDGE', sourceNodeId: e.source.id, sourceLoc: e.source.loc, field: 'edge',
         targetLoc: `hrn:node:${e.target.memory.urn.replace(/^(?:hrn|urn):mem(?:ory)?:/i, '')}:${e.target.loc}`,
-        text: e.name, reason: 'PLACEHOLDER',
+        text: e.name, reason: e.target.deletedAt ? 'MISSING' : 'PLACEHOLDER',
       });
     }
     // (@codex P2, PR #1462) deleteNode soft-deletes a spec but leaves the

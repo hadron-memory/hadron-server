@@ -165,6 +165,19 @@ describe('mintSpecCorpus: an edge into another memory can point at a placeholder
     })]);
   });
 
+  it('blocks on a deleted node in another readable memory as MISSING (@codex P2 on #1462)', async () => {
+    const other = await resolvers.Mutation.createMemory(null, { orgId: org.id, name: 'other-specs' }, as());
+    const gone = await db.node.create({ data: {
+      id: generateId(), memoryId: other.id, loc: 'cor:010', name: 'cor:010', role: 'spec', nodeType: 'info', tags: ['spec'], content: 'Old.',
+    } });
+    await edgeFrom010To(gone.id);
+    expect((await mint(true)).blockers).toEqual([]);
+    await resolvers.Mutation.deleteNode(null, { nodeRef: gone.id }, as());
+    expect((await mint(true)).blockers).toEqual([expect.objectContaining({
+      kind: 'UNRESOLVED_REFERENCE', loc: 'pas:010', rule: 'MISSING', targetLoc: `hrn:node:${other.urn}:cor:010`,
+    })]);
+  });
+
   it('conceals one in a memory the caller cannot read', async () => {
     await db.orgMember.create({ data: { organizationId: org.id, userId: outsider.id, role: 'READER' } });
     const hidden = await db.memory.create({ data: {
@@ -174,7 +187,11 @@ describe('mintSpecCorpus: an edge into another memory can point at a placeholder
     const placeholder = await db.node.create({ data: {
       id: generateId(), memoryId: hidden.id, loc: 'pas:900', name: 'pas:900', role: 'spec', nodeType: 'info', isPlaceholder: true,
     } });
+    const deleted = await db.node.create({ data: {
+      id: generateId(), memoryId: hidden.id, loc: 'pas:901', name: 'pas:901', role: 'spec', nodeType: 'info', deletedAt: new Date(),
+    } });
     await edgeFrom010To(placeholder.id);
+    await edgeFrom010To(deleted.id);
     expect((await mint(true)).blockers).toEqual([]);
   });
 });
