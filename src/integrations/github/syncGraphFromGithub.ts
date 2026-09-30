@@ -727,6 +727,18 @@ export const syncGraphFromGithub = async (
         const refusesRole = async (prior: Node | null): Promise<boolean> => {
           const signals = governedSignalsFromMirror(node);
           if (signals.role == null) return false;
+          // #1411 review (@codex P2): judge the role the write will APPLY. An
+          // unwritten placeholder keeps role 'spec' whatever its blank mirror
+          // file says (`updateNodeFromGitSync` strips the role, #1450), so
+          // that file assigns nothing and must not be refused: refusing it
+          // would block the placeholder's other changes (name, tags,
+          // abstract) indefinitely. Same predicate, one source of truth.
+          try {
+            assertPlaceholderKeepsSpecRole(prior, { role: signals.role, content: node.content ?? null });
+          } catch (e) {
+            if (e instanceof GraphQLError && e.extensions?.code === 'SPEC_PLACEHOLDER_ROLE_LOCKED') return false;
+            throw e;
+          }
           const strictParent = await strictParentRefusingRole(tx, graph.id, {
             role: signals.role,
             priorRole: prior?.role ?? null,

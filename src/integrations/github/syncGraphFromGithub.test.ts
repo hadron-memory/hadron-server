@@ -2006,6 +2006,26 @@ describe('#1330 — strict sub-roles through git sync', () => {
     expect(await edgesNotOnTheCopy(id)).toHaveLength(1);
   });
 
+  it('an unwritten PLACEHOLDER\'s blank file with an undeclared role is not refused: its other changes sync, role stays spec (@codex P2, #1411)', async () => {
+    await rules({ role: 'spec', strictSubRoles: true });
+    const id = generateId();
+    await db.node.create({ data: { id, memoryId: dbGraphId, loc: 'p', name: 'Old', role: 'spec', isPlaceholder: true, ownerRepo: 'test/repo' } });
+    frontmatter('p', { id, name: 'New', role: 'spec.foo' }, '');
+    const result = await sync();
+    expect(result.skippedUndeclaredRoles).toEqual([]);
+    expect(await db.node.findUniqueOrThrow({ where: { id } })).toMatchObject({ name: 'New', role: 'spec', isPlaceholder: true });
+  });
+
+  it('a placeholder WRITTEN in the same file is judged normally: an undeclared role is refused', async () => {
+    await rules({ role: 'spec', strictSubRoles: true });
+    const id = generateId();
+    await db.node.create({ data: { id, memoryId: dbGraphId, loc: 'p', name: 'Old', role: 'spec', isPlaceholder: true, ownerRepo: 'test/repo' } });
+    frontmatter('p', { id, name: 'New', role: 'spec.foo' }, 'Now written.');
+    const result = await sync();
+    expect(result.skippedUndeclaredRoles).toEqual([expect.objectContaining({ loc: 'p', role: 'spec.foo' })]);
+    expect(await db.node.findUniqueOrThrow({ where: { id } })).toMatchObject({ name: 'Old', isPlaceholder: true });
+  });
+
   it('an APPLIED first claimant keeps the id when a later LOC-KEYED copy is refused (Charles QA Z4, #1411)', async () => {
     await rules({ role: 'doc', strictSubRoles: true });
     const id = generateId();
