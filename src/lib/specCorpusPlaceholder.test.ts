@@ -332,6 +332,34 @@ describe('reserving over a deleted spec (@codex P2 on #1452)', () => {
     expect(edge).toMatchObject({ loc: 'pas:140:01:cites:pas:149', sourceId: newChild.id });
     expect(reserved.id).not.toBe(parent.id);
   });
+
+  it('reserves over a tombstone while retaining live child branches at the old address', async () => {
+    const deletedAt = new Date();
+    const parent = await db.node.create({ data: {
+      id: generateId(), memoryId: draft.id, loc: 'pas:141', name: 'Old parent',
+      role: 'spec', nodeType: 'info', deletedAt,
+    } });
+    const liveChild = await db.node.create({ data: {
+      id: generateId(), memoryId: draft.id, loc: 'pas:141:01', name: 'Live child',
+      role: 'spec', nodeType: 'info',
+    } });
+    const deletedGrandchild = await db.node.create({ data: {
+      id: generateId(), memoryId: draft.id, loc: 'pas:141:01:a', name: 'Deleted grandchild',
+      role: 'spec', nodeType: 'info', deletedAt,
+    } });
+    const deletedSibling = await db.node.create({ data: {
+      id: generateId(), memoryId: draft.id, loc: 'pas:141:02', name: 'Deleted sibling',
+      role: 'spec', nodeType: 'info', deletedAt,
+    } });
+
+    const reserved = await reserve(draft.id, 'pas:141');
+    const archived = `pas:141__deleted-${parent.id}`;
+    expect(reserved.id).not.toBe(parent.id);
+    expect(await db.node.findUniqueOrThrow({ where: { id: parent.id } })).toMatchObject({ loc: archived });
+    expect(await db.node.findUniqueOrThrow({ where: { id: liveChild.id } })).toMatchObject({ loc: 'pas:141:01', deletedAt: null });
+    expect(await db.node.findUniqueOrThrow({ where: { id: deletedGrandchild.id } })).toMatchObject({ loc: 'pas:141:01:a' });
+    expect(await db.node.findUniqueOrThrow({ where: { id: deletedSibling.id } })).toMatchObject({ loc: `${archived}:02` });
+  });
 });
 
 describe('reserve authorizes before touching the tombstone (@codex P2 on #1452)', () => {

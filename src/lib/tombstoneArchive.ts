@@ -11,9 +11,10 @@ export function archivedTombstoneLoc(loc: string, id: string): string {
 }
 
 /**
- * Re-stamp a TOMBSTONE and its deleted descendants under
+ * Re-stamp a TOMBSTONE and deleted descendant branches under
  * {@link archivedTombstoneLoc} so a fresh node can take its address without
- * inheriting a recursively deleted subtree.
+ * inheriting a recursively deleted subtree. Live descendants and everything
+ * under them stay in place; a new parent already permits those live children.
  *
  * Soft deletion leaves nodes and their edges attached, and an edge's loc is usually
  * derived from its endpoints' locs (`deriveEdgeLoc`). Re-stamping only the node
@@ -48,17 +49,19 @@ export async function archiveTombstone(
     select: { id: true, loc: true, deletedAt: true },
     orderBy: { loc: 'asc' },
   });
-  // A live child must never silently become part of the old deleted tree.
-  // The address lock on `loc` excludes concurrent child creation here.
-  if (descendants.some((node) => node.deletedAt === null)) {
-    throw new Error(`Cannot archive tombstone ${loc}: a live descendant remains`);
+  // A live descendant belongs to the current address, not the old deleted
+  // branch. Keep its entire subtree in place, including any deleted children.
+  // Sorted locs put every ancestor before its descendants.
+  const retainedLive: string[] = [];
+  const moved = [{ id, oldLoc: loc, newLoc: archived }];
+  for (const node of descendants) {
+    if (retainedLive.some((liveLoc) => node.loc.startsWith(`${liveLoc}:`))) continue;
+    if (node.deletedAt === null) {
+      retainedLive.push(node.loc);
+      continue;
+    }
+    moved.push({ id: node.id, oldLoc: node.loc, newLoc: `${archived}${node.loc.slice(loc.length)}` });
   }
-  const moved = [
-    { id, oldLoc: loc, newLoc: archived },
-    ...descendants.map((node) => ({
-      id: node.id, oldLoc: node.loc, newLoc: `${archived}${node.loc.slice(loc.length)}`,
-    })),
-  ];
   const byId = new Map(moved.map((node) => [node.id, node]));
   // Re-stamp FIRST, then list the edges (Chip's QA, PR #1452). `loc` is in the
   // (loc, memory_id) unique index, so this update takes the row FOR UPDATE and
