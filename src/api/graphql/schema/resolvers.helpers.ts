@@ -1036,8 +1036,8 @@ export function nodeNotFoundError(ref: string): GraphQLError {
  * "reuse the shared access gate; a bespoke per-resolver gate drifts"). Order is
  * load-bearing and preserved exactly:
  *   1. personal/private → strict owner, or a MemoryShare grantee (#778).
- *   2. spec 047 user-owned → strict owner, BEFORE the platform-admin path so an
- *      ADMIN never reads another user's user-owned record (#676).
+ *   2. spec 047 user-owned → owner, or a Worker row's current holder under
+ *      cor:acl:010:01, BEFORE the platform-admin path (#676).
  *   3. app class → the shared node gate (team, Worker, session audiences).
  *   4. other non-strict classes → platform ADMIN/OWNER, a live org membership,
  *      or whatever the shared node gate already admits (PUBLIC, subscription).
@@ -1100,7 +1100,12 @@ export async function canReadMemoryRecord(
     // Impersonation: user-owned (spec 047) records are identity-scoped —
     // invisible for the same reason as personal/private above.
     if (ctx.impersonation) return false;
-    return !!ctx.userId && memory.ownerUserId === ctx.userId;
+    if (ctx.userId && memory.ownerUserId === ctx.userId) return true;
+    // A user-owned App's Worker row is also visible to its current holder.
+    // The shared content gate checks the casting and excludes team/session rows.
+    if (memory.class !== 'app') return false;
+    const ids = await getAccessibleMemoryIds(ctx, memory.id);
+    return ids !== null && ids.includes(memory.id);
   }
   if (ctx.appId && ctx.sessionId && !ctx.userId) {
     const ids = await getAccessibleMemoryIds(ctx, memory.id);
@@ -1943,12 +1948,11 @@ export async function getAccessibleMemoryIds(
       },
       select: { id: true },
     });
-    const readable = await filterReadableMemoryIds(
-      ctx.db,
-      ctx,
-      all.map((memory) => memory.id),
-    );
-    return all.map((memory) => memory.id).filter((id) => readable.has(id));
+    const workerIds = (await getWorkerMemoryAccess(ctx.db, ctx))
+      .filter((id) => !onlyMemoryId || id === onlyMemoryId);
+    const candidates = [...new Set([...all.map((memory) => memory.id), ...workerIds])];
+    const readable = await filterReadableMemoryIds(ctx.db, ctx, candidates);
+    return candidates.filter((id) => readable.has(id));
   }
 
   // App Key without an active session — the App's installed-agent reach:
@@ -2329,13 +2333,13 @@ export async function requireMemoryWriteAccess(ctx: Context, memoryId: string): 
     throw memoryWriteForbidden();
   }
 
-  // spec 047: a USER-owned memory is writable ONLY by its owner — STRICT
-  // ownership, so this runs BEFORE the ADMIN/OWNER bypass below (a platform
-  // admin does NOT get write to another user's user-owned memory, consistent
-  // with the personal/private carve-out above). Covers a user-owned
-  // non-personal memory, e.g. a user-owned agent's system/knowledge memory.
+  // spec 047: user-owned non-strict memories are owner-only, with the narrow
+  // cor:acl:010:01 exception for a Worker's current holder. This runs BEFORE
+  // the ADMIN/OWNER bypass: a platform admin does not gain another user's
+  // user-owned memory merely from that role.
   if (memory.ownerUserId !== null) {
     if (ctx.userId === memory.ownerUserId) return;
+    if (memory.class === 'app' && await canWriteToMemory(ctx.db, ctx, memoryId)) return;
     throw memoryWriteForbidden();
   }
 

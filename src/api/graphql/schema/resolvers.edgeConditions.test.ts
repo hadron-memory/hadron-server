@@ -62,6 +62,10 @@ function mockDb() {
         ownerUserId: null,
       }),
     },
+    // The edge authorization path also checks for Worker-held memory. These
+    // condition-validation tests have no Worker casting or org manager.
+    orgMember: { findMany: vi.fn().mockResolvedValue([]) },
+    worker: { findMany: vi.fn().mockResolvedValue([]) },
     edge: {
       create: vi.fn().mockImplementation(async ({ data }: { data: unknown }) => ({
         id: EDGE_ID,
