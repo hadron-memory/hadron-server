@@ -6,6 +6,7 @@ import {
   apiKeyPreviewOf,
   apiKeyWriteFields,
   validateAiConfigName,
+  validateParamRanges,
   validateProviderAndParams,
 } from './aiConfig.js';
 import { decryptToken } from './tokenCrypto.js';
@@ -61,6 +62,23 @@ describe('validateProviderAndParams', () => {
     );
     // #1373 D2: baseUrl is no longer a params key — the endpoint column
     // replaced it, and writing one is refused by refuseLegacyBaseUrl.
+  });
+});
+
+describe('validateParamRanges (#1417, Holger 2026-09-30)', () => {
+  it('enforces the known provider ranges: anthropic and bedrock temperature at most 1', () => {
+    for (const provider of ['anthropic', 'bedrock']) {
+      expect(() => validateParamRanges(provider, { temperature: 1.5 })).toThrow(/at most 1/);
+      expect(() => validateParamRanges(provider, { temperature: 1 })).not.toThrow();
+    }
+  });
+
+  it('leaves providers whose range is not known alone (we cannot validate all)', () => {
+    for (const provider of ['openai', 'glm', 'openai-compatible']) {
+      expect(() => validateParamRanges(provider, { temperature: 1.9 })).not.toThrow();
+    }
+    expect(() => validateParamRanges('anthropic', null)).not.toThrow();
+    expect(() => validateParamRanges('anthropic', { maxTokens: 10 })).not.toThrow();
   });
 });
 

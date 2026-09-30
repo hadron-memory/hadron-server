@@ -3229,7 +3229,7 @@ export const typeDefs = `#graphql
     apiStyle: AiApiStyle
     "A key to test with instead of the stored one. Never stored, never echoed."
     apiKey: String
-    "Edited params to test instead of the saved ones (#1413): validated exactly as a save validates them, including the params.baseUrl refusal, against the effective provider — before anything outbound. Used for the call, never stored. Omitted = the saved params; null = the edit clears them (the provider defaults). On the wire the probe exercises the effective provider/model/endpoint/key and (hard-capped at 16, per #1378's original ceiling pending a cost ruling) maxTokens, like its one-word prompt; the other knobs go through the same mapping every run uses (#1417): temperature, OpenAI reasoningEffort and Anthropic effort are sent; thinking and unrecognised keys are validated but not forwarded. knobs on the result reports what each one did."
+    "Edited params to test instead of the saved ones (#1413): validated exactly as a save validates them, including the params.baseUrl refusal, against the effective provider — before anything outbound. Used for the call, never stored. Omitted = the saved params; null = the edit clears them (the provider defaults). On the wire the probe exercises the effective provider/model/endpoint/key and (hard-capped at 16, per #1378's original ceiling pending a cost ruling) maxTokens, like its one-word prompt; the other knobs go through the same mapping every run uses (#1417): temperature, OpenAI reasoningEffort, Anthropic effort and Anthropic thinking (sent as adaptive) are sent, and maxTokens is an output ceiling (min of the config's and the probe's cap); unrecognised keys are accepted but not forwarded. A write, or an edit under test, is refused a value outside a provider's known range (Anthropic and Bedrock temperature at most 1); a saved row is not re-judged. knobs on the result reports what each one did."
     params: JSON
   }
 
@@ -3265,7 +3265,7 @@ export const typeDefs = `#graphql
     "The model's reply, truncated."
     reply: String
     error: AiServiceConfigTestError
-    "#1417: what each provider knob in the effective params did on the call. Empty unless the call completed (a failed call's adapter warnings are unknown), or when the params carry none. maxTokens (the probe's own cap governs) and toolCalling (a gate) are not provider knobs and are not listed."
+    "#1417: what each provider knob in the effective params did on the call. Empty unless the call completed (a failed call's adapter warnings are unknown), or when the params carry none. maxTokens is listed as the ceiling it set (ADJUSTED when the probe's cap is lower); toolCalling (a gate) is not a provider knob and is not listed."
     knobs: [AiConfigTestKnob!]!
   }
 

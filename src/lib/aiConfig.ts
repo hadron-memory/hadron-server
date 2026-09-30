@@ -143,6 +143,43 @@ export function validateProviderAndParams(provider: string, params: unknown): vo
   }
 }
 
+/**
+ * #1417 (Holger, 2026-09-30) — the provider-specific range a knob's value
+ * must fall in, where it is KNOWN. Only ranges the installed provider
+ * adapter itself enforces are listed: @ai-sdk/anthropic and
+ * @ai-sdk/amazon-bedrock clamp temperature to [0, 1] and say so. Every other
+ * provider keeps the generic schema range: "we can't validate all", and an
+ * OpenAI-compatible host's range is unknowable here.
+ */
+const PROVIDER_PARAM_RANGES: Partial<Record<AiProvider, Record<string, { max: number }>>> = {
+  anthropic: { temperature: { max: 1 } },
+  bedrock: { temperature: { max: 1 } },
+};
+
+/**
+ * Refuse a WRITTEN knob value outside its provider's known range.
+ *
+ * Deliberately separate from `validateProviderAndParams`, which also judges
+ * STORED rows (a saved-config Test, an update that leaves params alone): a
+ * row saved before this rule stays valid, runs, and is reported ADJUSTED by
+ * the knob report, rather than breaking. Call it only where params are being
+ * written or edited: create, an update that sets params or changes the
+ * provider, and a Test override doing either.
+ */
+export function validateParamRanges(provider: string, params: unknown): void {
+  const ranges = PROVIDER_PARAM_RANGES[provider as AiProvider];
+  if (!ranges || !params || typeof params !== 'object') return;
+  for (const [param, { max }] of Object.entries(ranges)) {
+    const value = (params as Record<string, unknown>)[param];
+    if (typeof value === 'number' && value > max) {
+      throw new UnknownAiProviderError(
+        provider,
+        `Invalid params for provider '${provider}': ${param}: must be at most ${max} for this provider (got ${value}).`,
+      );
+    }
+  }
+}
+
 // ── Key handling ─────────────────────────────────────────────────────────
 
 export function apiKeyPreviewOf(rawKey: string): string {

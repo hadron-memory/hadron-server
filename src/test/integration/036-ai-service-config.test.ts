@@ -558,6 +558,30 @@ describe('resolveAiServiceConfigs (masked picker)', () => {
 // T015 — US2: CRUD with masked secrets
 // ─────────────────────────────────────────────────────────────────────────
 
+describe('#1417 — known provider ranges bind what a write sets, never a stored row', () => {
+  it('create refuses an anthropic temperature above 1; 1 is fine', async () => {
+    const base = { ownerType: 'AGENT', ownerId: agent.id, provider: 'anthropic', model: 'claude-haiku-4-5-20251001', apiKey: 'sk-ant-x-1234' };
+    await expect(resolvers.Mutation.createAiServiceConfig({}, { ...base, name: 'hot', params: { temperature: 1.5 } } as never, ctxFor(admin.id)))
+      .rejects.toThrow(/at most 1/);
+    await expect(resolvers.Mutation.createAiServiceConfig({}, { ...base, name: 'ok', params: { temperature: 1 } } as never, ctxFor(admin.id)))
+      .resolves.toMatchObject({ name: 'ok' });
+  });
+
+  it('a stored legacy row stays updatable when the write leaves params and provider alone; setting a bad value is refused', async () => {
+    const legacy = await createConfig({ agentId: agent.id }, 'legacy');
+    await db.aiServiceConfig.update({ where: { id: legacy.id }, data: { params: { temperature: 1.5 } } });
+    await expect(resolvers.Mutation.updateAiServiceConfig({}, { id: legacy.id, enabled: false }, ctxFor(admin.id)))
+      .resolves.toMatchObject({ enabled: false });
+    await expect(resolvers.Mutation.updateAiServiceConfig({}, { id: legacy.id, params: { temperature: 1.2 } } as never, ctxFor(admin.id)))
+      .rejects.toThrow(/at most 1/);
+    // Switching an openai row with 1.5 to anthropic judges the resulting pair.
+    const oa = await createConfig({ agentId: agent.id }, 'oa', { provider: 'openai', model: 'gpt-4.1' });
+    await db.aiServiceConfig.update({ where: { id: oa.id }, data: { params: { temperature: 1.5 } } });
+    await expect(resolvers.Mutation.updateAiServiceConfig({}, { id: oa.id, provider: 'anthropic', model: 'claude-haiku-4-5-20251001' } as never, ctxFor(admin.id)))
+      .rejects.toThrow(/at most 1/);
+  });
+});
+
 describe('AiServiceConfig CRUD (US2)', () => {
   it('creates, lists, updates, deletes on an Agent owner; responses are always masked', async () => {
     const created = await resolvers.Mutation.createAiServiceConfig(

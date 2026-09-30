@@ -708,6 +708,15 @@ describe('testAiServiceConfig override.params review round (#1415)', () => {
   });
 });
 
+describe('#1417 — known provider ranges in the Test', () => {
+  it('a saved legacy anthropic row with temperature 1.5 still tests (not re-judged); an override above 1 is refused', async () => {
+    const cfg = await mkConfig({ organizationId: org.id, provider: 'anthropic', model: 'claude-sonnet-4-5', endpoint: `${origin}/v1`, params: { temperature: 1.5 } });
+    const r = await test(cfg.id, ctxFor(admin.id));
+    expect(r.error?.code).not.toBe('CONFIG_INVALID');
+    await expect(test(cfg.id, ctxFor(admin.id), { params: { temperature: 1.2 } })).rejects.toThrow(/at most 1/);
+  });
+});
+
 describe('#1417 — the Test sends the params\' knobs through the run mapping, and reports what each did', () => {
   it('saved params: temperature reaches the wire; a knob the platform does not forward is reported NOT_SENT', async () => {
     const cfg = await mkConfig({ organizationId: org.id, params: { temperature: 0.3, unknownKnob: true } });

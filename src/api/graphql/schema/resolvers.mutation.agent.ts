@@ -29,6 +29,7 @@ import {
   lockAiServiceConfig,
   validateAiConfigName,
   validateProviderAndParams,
+  validateParamRanges,
   type AiConfigOwnerType,
 } from '../../../lib/aiConfig.js';
 import {
@@ -1186,6 +1187,7 @@ export const agentMutations = {
         const { ownerWhere } = await requireAiConfigOwnerAdmin(ctx, args.ownerType, args.ownerId);
         const name = validateAiConfigName(args.name);
         validateProviderAndParams(args.provider, args.params ?? null);
+        validateParamRanges(args.provider, args.params ?? null);
         refuseLegacyBaseUrl(args.params);
         const endpoint = args.endpoint ? validateEndpoint(args.endpoint) : null;
         requireEndpointFor(args.provider, endpoint);
@@ -1257,6 +1259,9 @@ export const agentMutations = {
           const provider = args.provider ?? base.provider;
           const params = args.params === undefined ? base.params : args.params;
           validateProviderAndParams(provider, params ?? null);
+          // #1417: known provider ranges bind what this write sets; a row it
+          // leaves alone (no params, same provider) is not re-judged.
+          if (args.params !== undefined || args.provider != null) validateParamRanges(provider, params ?? null);
           validateApiStyle(provider, args.apiStyle === undefined ? base.apiStyle : args.apiStyle);
           const resultingEndpoint = endpoint === undefined ? base.endpoint : endpoint;
           requireEndpointFor(provider, resultingEndpoint);
