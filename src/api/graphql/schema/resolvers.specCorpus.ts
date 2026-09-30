@@ -562,6 +562,9 @@ export const specCorpusRenumberMutations = {
       const { relocated } = await nodeMoveOps.moveWithResult(ctx, {
         sourceRef: `hrn:node:${corpus.urn}:${fromLoc}`,
         targetUrn: `hrn:node:${corpus.urn}:${toLoc}`,
+        // (@codex P1, PR #1453) The draft check above ran before the move's
+        // lock; a mint can commit in between. Re-decided under the lock.
+        requireDraftSource: true,
       });
       nodes = await loadCorpusNodes(ctx.db, corpus.id);
       // (@codex P2, #1453) Report exactly what the atomic mover relocated,

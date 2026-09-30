@@ -440,6 +440,21 @@ describe('renumber decides reference ownership before the move (@codex P2 on #14
   });
 });
 
+describe('renumber re-decides draft state under the move\'s lock (@codex P1 on #1453)', () => {
+  it('refuses, moving nothing, when the corpus is minted between the check and the move', async () => {
+    const spy = vi.spyOn(nodeMoveOps, 'moveWithResult').mockImplementationOnce(async (...args) => {
+      spy.mockRestore();
+      // A mint that wins the memory lock after renumber's own draft check.
+      await db.memory.update({ where: { id: draft.id }, data: { corpusDraft: false } });
+      return nodeMoveOps.moveWithResult(...args);
+    });
+    expect(await codeOf(specCorpusRenumberMutations.renumberSpec(null, { memoryRef: draft.id, fromLoc: 'pas:010', toLoc: 'pas:040' }, as())))
+      .toBe('SPEC_CORPUS_NOT_DRAFT');
+    expect(await db.node.findUniqueOrThrow({ where: { id: feature.id } })).toMatchObject({ loc: 'pas:010' });
+    expect(await db.node.count({ where: { memoryId: draft.id, loc: { startsWith: 'pas:040' } } })).toBe(0);
+  });
+});
+
 describe('renumber reports exactly what the mover moved (@codex P2 on #1453)', () => {
   it('does not report a node created under toLoc right after the move', async () => {
     const spy = vi.spyOn(nodeMoveOps, 'moveWithResult').mockImplementationOnce(async (...args) => {

@@ -69,6 +69,7 @@ import {
   moveNodeSubtree,
   SubtreeMoveCollisionError,
   SubtreeMovePlaceholderError,
+  SubtreeMoveSourceNotDraftError,
   SubtreeMoveIntoSelfError,
   SubtreeMoveSourceChangedError,
   CrossMemoryMoveUnsupportedError,
@@ -1926,7 +1927,11 @@ function shallowMergeProperties(existing: unknown, patch: Record<string, unknown
 export const nodeMoveOps = {
   async moveWithResult(
     ctx: Context,
-    { sourceRef, targetUrn, targetMemoryRef }: { sourceRef: string; targetUrn?: string | null; targetMemoryRef?: string | null },
+    { sourceRef, targetUrn, targetMemoryRef, requireDraftSource }: {
+      sourceRef: string; targetUrn?: string | null; targetMemoryRef?: string | null;
+      /** #1449: refuse unless the source is a draft corpus under the move's lock (renumber). */
+      requireDraftSource?: boolean;
+    },
   ) {
       const source = await resolveExistingNode(ctx, sourceRef, { forWrite: true });
       const { destMemoryId, destLoc } = await resolveRelocationTarget(
@@ -1985,6 +1990,7 @@ export const nodeMoveOps = {
               destLoc,
               destMemoryId: crossMemory ? destMemoryId : undefined,
               editor: editorFromAuth(ctx),
+              requireDraftSource,
             });
             relocated = result.moved;
             return tx.node.findUniqueOrThrow({ where: { id: source.id }, include: withEdges });
@@ -2027,6 +2033,9 @@ export const nodeMoveOps = {
           throw new GraphQLError(e.message, {
             extensions: { code: 'SPEC_PLACEHOLDER_OUTSIDE_DRAFT', loc: e.loc, memoryId: e.memoryId },
           });
+        }
+        if (e instanceof SubtreeMoveSourceNotDraftError) {
+          throw new GraphQLError(e.message, { extensions: { code: 'SPEC_CORPUS_NOT_DRAFT', memoryId: e.memoryId } });
         }
         if (e instanceof SubtreeMoveSourceChangedError) {
           throw new GraphQLError(e.message, { extensions: { code: 'CONFLICT', nodeId: e.nodeId } });
