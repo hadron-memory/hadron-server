@@ -166,7 +166,7 @@ describe('#403 — hadron_find_nodes session isolation (App-Key + active session
       query: 'alpha',
       parentRel: `urn:node:${fx.siblingMemory.urn}::alpha-sibling`,
     });
-    expect(text).toMatch(/not found/i);
+    expect(text).toMatch(/no nodes found/i);
     expect(text).not.toContain('alpha in the sibling memory');
   });
 

@@ -3576,7 +3576,7 @@ export function createMcpServerInstance(
         // parent, rather than an empty search response that distinguishes the
         // two cases.
         if (!resolvedParent.memoryId && /^(?:hrn|urn):node:/.test(trimmedParentRel)) {
-          return textResult(`Node "${trimmedParentRel}" not found.`);
+          return textResult(`No nodes found matching "${safeQuery}".`);
         }
         filterLocPrefix = resolvedParent.loc;
         if (resolvedParent.memoryId) {
@@ -3584,7 +3584,7 @@ export function createMcpServerInstance(
             !(await canReadMemory(db, auth, resolvedParent.memoryId)) ||
             (sessionMemoryIds && !sessionMemoryIds.has(resolvedParent.memoryId))
           ) {
-            return textResult(`Node "${trimmedParentRel}" not found.`);
+            return textResult(`No nodes found matching "${safeQuery}".`);
           }
           filterMemoryIds = [resolvedParent.memoryId];
         }

@@ -24,8 +24,9 @@
  * `resolveMemoryAuthorization` predicate — so for `group` an org member's read
  * matches getOrgReadableMemoryIds, NOT the (stricter) MemoryMember-only
  * predicate. The app class is shape-aware: only team/free-standing rows grant
- * standing App-participant read/write, while Worker and session rows need their
- * own context. We never reveal access a per-table query wouldn't.
+ * standing App-participant read/write, Worker rows grant their current holder
+ * and App managers, and session rows need their binding. We never reveal access
+ * a per-table query wouldn't.
  *
  * Capabilities are derived from the grants, so an empty grant list always
  * means no access (canRead/canWrite/canManage/canDelete all false, role null).
@@ -71,7 +72,7 @@ type MemoryForAccess = {
   userId: string | null;
   appId: string | null;
   userMemoryOfAgentId: string | null;
-  workerOf: Array<{ id: string }>;
+  workerOf: Array<{ id: string; appId: string; heldByUserId: string | null }>;
   // spec 047: org-XOR-owner — exactly one of organizationId / ownerUserId is set.
   organizationId: string | null;
   ownerUserId: string | null;
@@ -86,7 +87,7 @@ const MEMORY_SELECT = {
   userId: true,
   appId: true,
   userMemoryOfAgentId: true,
-  workerOf: { select: { id: true } },
+  workerOf: { select: { id: true, appId: true, heldByUserId: true } },
   organizationId: true,
   ownerUserId: true,
   isEncrypted: true,
@@ -240,6 +241,16 @@ async function memoryGrants(
     memory.appId !== null && (memory.class === 'knowledge' || memory.class === 'group');
   const isAppTeamRow = memory.class === 'app' && memory.appId !== null &&
     memory.userMemoryOfAgentId === null && memory.workerOf.length === 0;
+  const hasWorkerShape = memory.class === 'app' && memory.appId !== null &&
+    memory.userMemoryOfAgentId === null && memory.workerOf.some((w) => w.appId === memory.appId);
+  const liveWorkerApp = hasWorkerShape && await db.app.findFirst({
+    where: { id: memory.appId!, deletedAt: null, uninstalledAt: null }, select: { id: true },
+  });
+  const isWorkerRow = Boolean(liveWorkerApp);
+  if (isWorkerRow && memory.workerOf.some((w) =>
+    w.appId === memory.appId && w.heldByUserId === subject.id)) {
+    grants.push({ source: 'MEMORY_PRINCIPAL', role: 'worker-holder', via: null, caps: WRITE });
+  }
 
   // Owning-org role. Mirrors the ENFORCED gates, not the (narrower) predicate:
   //   - ADMIN/OWNER → full: requireMemoryWriteAccess grants write,
@@ -258,7 +269,7 @@ async function memoryGrants(
   // actions are a separate gate the read/write narrowing does not touch, and
   // this audit's omission of them for group is the safe under-reporting
   // direction the module's notes already allow.
-  if (memory.class !== 'group' && (memory.class !== 'app' || isAppTeamRow)) {
+  if (memory.class !== 'group' && (memory.class !== 'app' || isAppTeamRow || isWorkerRow)) {
     if (memberRole === 'ADMIN' || memberRole === 'OWNER') {
       grants.push({
         source: 'ORG_ROLE',
@@ -266,7 +277,7 @@ async function memoryGrants(
         via: await orgUrn(db, memory.organizationId),
         caps: FULL,
       });
-    } else if (memberRole === 'CONTRIBUTOR' && !isAppScopedShared) {
+    } else if (memberRole === 'CONTRIBUTOR' && !isAppScopedShared && !isWorkerRow) {
       grants.push({
         source: 'ORG_ROLE',
         role: memberRole,

@@ -178,14 +178,13 @@ describe('Channel-addressed chat', () => {
   });
 
   it('item J both directions: refused when the driver cannot write the host memory; admitted, and marked, when they can', async () => {
-    // (a) member (an org READER) drives Iris (App A) and is a participant of B —
-    // so B's Channel is readable to them and the author gate is reached — but
-    // an org READER may not WRITE B's host memory: refused, with both Apps named.
+    // (a) an admin may drive another user's session, but the session's user
+    // must independently be a participant in B to author in B's host memory.
     // Deleting the memory check in resolveSessionAuthor turns this green.
     const memberSession = await boundSession(member.id, appA.id, workerA.id);
-    await db.appMember.create({ data: { appId: appB.id, userId: member.id, role: 'member' } });
+    const platformAdmin = { db, userId: admin.id, roles: ['ADMIN'] } as unknown as Context;
     await expect(
-      M.createChannelMessage({}, { channelRef: teamB.id, body: 'hi from A', sessionRef: memberSession.id }, ctx(member.id)),
+      M.createChannelMessage({}, { channelRef: teamB.id, body: 'hi from A', sessionRef: memberSession.id }, platformAdmin),
     ).rejects.toMatchObject({ extensions: { code: 'CHANNEL_HOST_NOT_WRITABLE', workerAppId: appA.id } });
     // (b) admin drives Iris (App A) and, as B's participant, may write B's host memory.
     const adminSession = await boundSession(admin.id, appA.id, workerA.id);
@@ -214,10 +213,8 @@ describe('PR #1169 review — the memory boundary and the on-behalf-of user', ()
   });
 
   it('cross-App rights are the SESSION user\'s, not the caller\'s: a platform admin driving a reader\'s session is refused', async () => {
-    // member (org READER, participant of A and B) drives Iris; a platform
-    // ADMIN posts through that session into B. The admin could write B's host
-    // memory; member may not — and it is member's authorship, so it refuses.
-    await db.appMember.create({ data: { appId: appB.id, userId: member.id, role: 'member' } });
+    // Member belongs to A only. The caller's platform role cannot supply the
+    // missing B participation to a session authored on the member's behalf.
     const memberSession = await boundSession(member.id, appA.id, workerA.id);
     const platformAdmin = { db, userId: admin.id, roles: ['ADMIN'] } as unknown as Context;
     await expect(

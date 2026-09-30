@@ -123,7 +123,10 @@ export async function getAppMemoryAccess(
                 select: {
                   memoryId: true,
                   role: true,
-                  memory: { select: { class: true, ownerUserId: true, appId: true, userMemoryOfAgentId: true } },
+                  memory: { select: {
+                    class: true, ownerUserId: true, appId: true, userMemoryOfAgentId: true,
+                    workerOf: { select: { id: true } },
+                  } },
                 },
               },
             },
@@ -197,7 +200,10 @@ type AppAccessRow = {
       memoryItems: Array<{
         memoryId: string;
         role: string | null;
-        memory: { class: string; ownerUserId: string | null; appId: string | null; userMemoryOfAgentId: string | null } | null;
+        memory: {
+          class: string; ownerUserId: string | null; appId: string | null;
+          userMemoryOfAgentId: string | null; workerOf: Array<{ id: string }>;
+        } | null;
       }>;
     } | null;
   }>;
@@ -233,9 +239,8 @@ type AppAccessRow = {
  *   - `workerOf: { none: {} }` excludes a Worker's casting-scoped working memory
  *     (#974) — the idiom `locateWorklogRoot` and the `App.sharedMemory` field
  *     resolver already use for this distinction, kept in lockstep with both.
- *     Whether those are readable by every App member or only by whoever drives
- *     that worker is an open policy question; it stays answered by
- *     `maySeeWorkerInternals`, not settled silently by a read-gate fix.
+ *     Their memory audience is the holder and App managers (cor:acl:010:01),
+ *     not ordinary App participants; their Worker fields have a separate gate.
  *   - `userMemoryOfAgentId: null` excludes SESSION memories — the anonymous
  *     scratch memory and the app-user memory `startAgentSession` provisions,
  *     which reuse `class='app'` for the App's bucket of records-through-an-agent.
@@ -351,6 +356,7 @@ function getPrimaryAgentAccess(
       // owner + subscription gate; legacy knowledge/app holdings never do.
       (item.memory.userMemoryOfAgentId == null ||
         item.memory.class === 'personal' || item.memory.class === 'private') &&
+      !(item.memory.class === 'app' && item.memory.workerOf.length > 0) &&
       (item.memory.appId == null || item.memory.appId === app.id) &&
       !foreignUserOwned(item.memory.ownerUserId))
     .map((item) => ({
@@ -388,15 +394,9 @@ function getPrimaryAgentAccess(
  *     App is in focus.
  *
  * #1003 (Codex P1) / #934: a PURE App-key principal bound to an active session
- * is hard-isolated to `sessionScopedMemoryIds` — the session's own memory plus
- * the bound agent's reach. That boundary is what keeps a multi-user agent's
- * end-user session from reading anything else the App can see, and unlike the
- * GraphQL gate (which checks the session branch FIRST) the MCP module has no
- * session branch: `hadron_get_node` gates on `canReadMemory` alone. So the App's
- * team space — never in the session scope — must NOT be folded in for that
- * shape, or an anonymous end-user session could read `chats:team` and `worklog`
- * by URN. Only the TEAM-SPACE fold is gated: the agent-derived half is untouched,
- * so this can never narrow a pre-existing reach.
+ * is hard-isolated to `sessionScopedMemoryIds` by `getMemoryAccess` before this
+ * fold runs. This helper also excludes the team space for that shape, so direct
+ * consumers cannot hand an anonymous session `chats:team` or `worklog`.
  *
  * Narrowed to the pure App-key shape (`!userId`), mirroring #934: a user
  * credential's session binding is heartbeat attribution, never a scope change,
@@ -590,10 +590,16 @@ async function admissibleFoldRows(
 
   const rows = await db.memory.findMany({
     where: { id: { in: ids } },
-    select: { id: true, class: true, appId: true, ownerUserId: true, userMemoryOfAgentId: true },
+    select: {
+      id: true, class: true, appId: true, ownerUserId: true, userMemoryOfAgentId: true,
+      workerOf: { select: { id: true } },
+    },
   });
   for (const row of rows) {
     if (row.userMemoryOfAgentId != null) continue;
+    // An AgentMemoryItem is not a Worker-memory grant to the whole App.
+    // Legacy/mistaken attachments must not bypass the holder/manager audience.
+    if (row.class === 'app' && row.workerOf.length > 0) continue;
     // Rule 3 — a fold is never authority for a strict-owner class.
     if (row.class === 'personal' || row.class === 'private') continue;
     // Rule 2 — strict ownership admits the owner alone, nobody else, and no
@@ -670,6 +676,7 @@ export async function getMemoryAccess(
       });
       for (const row of writable) access.set(row.id, 'READ_WRITE');
     }
+    for (const id of await getWorkerMemoryAccess(db, auth)) access.set(id, 'READ_WRITE');
   }
 
   // ── Direct org-read — parity with the portal getAccessibleMemoryIds ─────
@@ -716,6 +723,46 @@ export async function getMemoryAccess(
   }
 
   return access;
+}
+
+/** Worker working-memory access for its current holder and App managers. */
+export async function getWorkerMemoryAccess(
+  db: PrismaClient,
+  auth: Pick<AuthContext, 'userId' | 'impersonation'>,
+): Promise<string[]> {
+  if (!auth.userId) return [];
+  const managerMemberships = await db.orgMember.findMany({
+    where: {
+      userId: auth.userId, deletedAt: null, role: { in: ['ADMIN', 'OWNER'] },
+      ...(auth.impersonation ? { organizationId: auth.impersonation.orgId } : {}),
+    },
+    select: { organizationId: true },
+  });
+  const orgIds = managerMemberships.map((m) => m.organizationId);
+  const workers = await db.worker.findMany({
+    where: {
+      memoryId: { not: null },
+      app: { deletedAt: null, uninstalledAt: null },
+      OR: [
+        ...(!auth.impersonation ? [
+          { heldByUserId: auth.userId },
+          { app: { ownerUserId: auth.userId } },
+        ] : []),
+        { app: { organizationId: { in: orgIds } } },
+      ],
+    },
+    select: { memoryId: true, appId: true },
+  });
+  if (workers.length === 0) return [];
+  const memories = await db.memory.findMany({
+    where: {
+      id: { in: workers.map((w) => w.memoryId!).filter(Boolean) },
+      class: 'app', deletedAt: null, userMemoryOfAgentId: null, ownerUserId: null,
+    },
+    select: { id: true, appId: true },
+  });
+  const valid = new Set(memories.map((m) => `${m.id}:${m.appId}`));
+  return workers.filter((w) => valid.has(`${w.memoryId}:${w.appId}`)).map((w) => w.memoryId!);
 }
 
 /**
@@ -835,7 +882,11 @@ export async function canWriteToMemory(
     // Worker and session rows are not App-wide generic-write targets. In
     // particular, an org CONTRIBUTOR or AppMember may not turn participation
     // into a write on another principal's working/scratch memory.
-    if (memory.workerOf.length > 0 || memory.userMemoryOfAgentId !== null) {
+    if (memory.workerOf.length > 0) {
+      if (auth.roles?.includes('ADMIN') || auth.roles?.includes('OWNER')) return true;
+      return (await getWorkerMemoryAccess(db, auth)).includes(memoryId);
+    }
+    if (memory.userMemoryOfAgentId !== null) {
       return auth.roles?.includes('ADMIN') === true || auth.roles?.includes('OWNER') === true;
     }
     if (auth.roles?.includes('ADMIN') || auth.roles?.includes('OWNER')) return true;
