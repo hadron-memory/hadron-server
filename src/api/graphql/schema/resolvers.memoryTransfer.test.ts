@@ -396,11 +396,24 @@ describe('transferMemoryOwnership', () => {
     expect(await db.channel.findUniqueOrThrow({ where: { id: channel.id } })).toMatchObject({ deletedAt: expect.any(Date) });
   });
 
-  it('lets account erasure finish after an owned corpus is handed to a surviving org', async () => {
+  it('refuses erasure of a minted corpus until its owner hands it to a surviving org', async () => {
     await db.orgMember.create({ data: { id: generateId(), organizationId: org.id, userId: receiver.id, role: 'OWNER' } });
-    await transfer({ memoryRef: memory.id, orgRef: org.id, targetClass: 'knowledge' });
+    await db.memory.update({ where: { id: memory.id }, data: { corpusMintedAt: new Date() } });
+    await db.node.update({ where: { id: node.id }, data: { tags: ['spec'] } });
+    await expect(resolvers.Mutation.deleteUser(null, {}, ctx(owner.id))).rejects.toMatchObject({
+      extensions: { code: 'SPEC_MINTED_PERMANENT' },
+    });
+    expect((await db.memory.findUniqueOrThrow({ where: { id: memory.id } })).ownerUserId).toBe(owner.id);
+
+    const input = { memoryRef: memory.id, orgRef: org.id, targetClass: 'knowledge' };
+    const preview = await transfer({ ...input, dryRun: true });
+    expect(preview).toMatchObject({ canApply: true, applied: false, oldUrn: memory.urn });
+    await transfer({ ...input, expectedNewUrn: preview.newUrn });
     await resolvers.Mutation.deleteUser(null, {}, ctx(owner.id));
-    expect((await db.memory.findUniqueOrThrow({ where: { id: memory.id } })).organizationId).toBe(org.id);
+    expect(await db.memory.findUniqueOrThrow({ where: { id: memory.id } })).toMatchObject({
+      organizationId: org.id, ownerUserId: null, corpusMintedAt: expect.any(Date),
+      urn: preview.newUrn, legacyUrn: memory.urn,
+    });
     expect((await resolveNodeRef(db, `hrn:node:${memory.urn}:${node.loc}`)).id).toBe(node.id);
   });
 
