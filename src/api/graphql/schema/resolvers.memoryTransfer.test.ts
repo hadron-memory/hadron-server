@@ -3,6 +3,7 @@ import { db } from '../../../integrations/db/client.js';
 import { generateId } from '../../../lib/id.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { resolveNodeRef } from '../../../lib/entityRef/nodeRef.js';
+import { recordUrnRename } from '../../../lib/urnAlias.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { resolvers, type Context } from './resolvers.js';
 
@@ -141,9 +142,15 @@ describe('transferMemoryOwnership', () => {
     await db.memoryMember.create({ data: { memoryId: memory.id, userId: receiver.id, role: 'reader' } });
     const nextOrg = await db.organization.create({ data: { id: generateId(), name: 'Next', urn: 'next-transfer-org' } });
     await db.orgMember.create({ data: { id: generateId(), organizationId: nextOrg.id, userId: owner.id, role: 'ADMIN' } });
-    // The group owner may authorize the source even after leaving its org.
+    // A group owner-member left behind after org departure is not an org
+    // administrator and cannot rehome the org's memory.
     await db.orgMember.deleteMany({ where: { organizationId: org.id, userId: owner.id } });
     const input = { memoryRef: memory.id, orgRef: nextOrg.id };
+    await expect(transfer({ ...input, resetGroupMembers: true })).rejects.toThrow('Forbidden');
+    await expect(transfer({
+      memoryRef: memory.id, userRef: owner.id, targetClass: 'private', resetGroupMembers: true,
+    })).rejects.toThrow('Forbidden');
+    await db.orgMember.create({ data: { id: generateId(), organizationId: org.id, userId: owner.id, role: 'ADMIN' } });
     const blocked = await transfer({ ...input, dryRun: true });
     expect(blocked.canApply).toBe(false);
     expect(blocked.blockers).toEqual(expect.arrayContaining([
@@ -163,6 +170,24 @@ describe('transferMemoryOwnership', () => {
       { userId: owner.id, role: 'owner' },
     ]);
     expect((await resolveNodeRef(db, `hrn:node:${memory.urn}:${node.loc}`)).id).toBe(node.id);
+  });
+
+  it('honors a live memory.delete grant for the source org, but never a revoked membership', async () => {
+    await transfer({ memoryRef: memory.id, orgRef: org.id, targetClass: 'knowledge' });
+    const nextOrg = await db.organization.create({ data: { id: generateId(), name: 'Grant Target', urn: 'grant-target' } });
+    await db.orgMember.create({ data: { id: generateId(), organizationId: nextOrg.id, userId: owner.id, role: 'ADMIN' } });
+    await db.orgMember.updateMany({ where: { organizationId: org.id, userId: owner.id }, data: { role: 'CONTRIBUTOR' } });
+    const grant = await db.principalGrant.create({ data: {
+      id: generateId(), principalType: 'USER', principalId: owner.id,
+      organizationId: org.id, actions: ['memory.delete'],
+    } });
+    const input = { memoryRef: memory.id, orgRef: nextOrg.id, dryRun: true };
+    await expect(transfer(input)).resolves.toMatchObject({ canApply: true });
+    await db.orgMember.updateMany({ where: { organizationId: org.id, userId: owner.id }, data: { deletedAt: new Date() } });
+    await expect(transfer(input)).rejects.toMatchObject({ name: 'MemoryNotFoundError' });
+    await db.orgMember.updateMany({ where: { organizationId: org.id, userId: owner.id }, data: { deletedAt: null } });
+    await db.principalGrant.update({ where: { id: grant.id }, data: { deletedAt: new Date() } });
+    await expect(transfer(input)).rejects.toThrow('Forbidden');
   });
 
   it('revokes group members when converting a group to a user-owned private memory', async () => {
@@ -188,14 +213,24 @@ describe('transferMemoryOwnership', () => {
   });
 
   it('reports durable trigger URNs as dependents before changing their owner scope', async () => {
+    await transfer({ memoryRef: memory.id, orgRef: org.id, targetClass: 'knowledge' });
+    const nextOrg = await db.organization.create({ data: { id: generateId(), name: 'Next', urn: 'next-transfer-org' } });
+    await db.orgMember.create({ data: { id: generateId(), organizationId: nextOrg.id, userId: owner.id, role: 'ADMIN' } });
     const app = await db.app.create({ data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:app`, name: 'App' } });
+    const olderUrn = 'transfer-owner:older-specs';
+    await recordUrnRename(db, { entityType: 'MEMORY', entityId: memory.id, oldUrn: olderUrn, newUrn: `${org.urn}:specs` });
     await db.agentSchedule.create({ data: {
       id: generateId(), organizationId: org.id, appId: app.id, name: 'Nightly',
-      runAt: new Date('2030-01-01T00:00:00Z'), entryNodeUrn: `hrn:node:${memory.urn}:${node.loc}`,
+      runAt: new Date('2030-01-01T00:00:00Z'), entryNodeUrn: `hrn:node:${olderUrn}:${node.loc}`, enabled: false,
     } });
-    const preview = await transfer({ memoryRef: memory.id, orgRef: org.id, targetClass: 'knowledge', dryRun: true });
+    const foreignApp = await db.app.create({ data: { id: generateId(), organizationId: nextOrg.id, urn: `${nextOrg.urn}:app`, name: 'Foreign App' } });
+    await db.agentSchedule.create({ data: {
+      id: generateId(), organizationId: nextOrg.id, appId: foreignApp.id, name: 'Foreign',
+      runAt: new Date('2030-01-01T00:00:00Z'), entryNodeUrn: `hrn:node:${olderUrn}:${node.loc}`,
+    } });
+    const preview = await transfer({ memoryRef: memory.id, orgRef: nextOrg.id, dryRun: true });
     expect(preview.dependents).toEqual(expect.arrayContaining([
-      expect.objectContaining({ kind: 'Enabled schedules', count: 1, handling: 'REFUSE' }),
+      expect.objectContaining({ kind: 'Schedules', count: 1, handling: 'REFUSE' }),
     ]));
   });
 

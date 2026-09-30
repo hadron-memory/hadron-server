@@ -5,10 +5,10 @@ import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
 import { resolveUserRef } from '../../../lib/entityRef/userRef.js';
 import { mintLocalSlug } from '../../../lib/mintLocalSlug.js';
 import { recordUrnRename } from '../../../lib/urnAlias.js';
+import { requireOrgAction } from '../../../lib/auth/orgAction.js';
 import {
   type Context,
   concealUnreadableDenial,
-  isMemoryMemberOwner,
   isPlatformAdmin,
   requireOrgRole,
 } from './resolvers.helpers.js';
@@ -52,8 +52,7 @@ async function authorizeSource(ctx: Context, memory: Memory, ref: string): Promi
       return;
     }
     if (memory.organizationId !== null) {
-      if (memory.class === 'group' && await isMemoryMemberOwner(ctx, memory.id)) return;
-      await requireOrgRole(ctx, memory.organizationId, 'ADMIN');
+      await requireOrgAction(ctx, memory.organizationId, 'memory.delete');
       return;
     }
     throw new Error('Forbidden');
@@ -135,15 +134,24 @@ async function transferPreview(
   add('Active sessions', await tx.session.count({ where: { memoryId: id, endedAt: null } }), 'REFUSE');
   // Trigger records retain the entry node's URN rather than a Memory FK. A
   // transfer changes their authorization scope, so the owner must detach them.
-  const entryUrns = [memory.urn, memory.legacyUrn].filter((urn): urn is string => !!urn);
-  const entryRef = { OR: entryUrns.flatMap((urn) => [
-    { entryNodeUrn: { startsWith: `${urn}:` } },
-    { entryNodeUrn: { startsWith: `hrn:node:${urn}:` } },
-    { entryNodeUrn: { startsWith: `${urn.replace(':', '::')}::` } },
-  ]) };
-  add('Enabled schedules', await tx.agentSchedule.count({ where: { ...entryRef, enabled: true } }), 'REFUSE');
-  add('Enabled webhooks', await tx.agentWebhook.count({ where: { ...entryRef, enabled: true } }), 'REFUSE');
-  add('Active web-fetch polls', await tx.webFetchPollBinding.count({ where: { ...entryRef, cancelledAt: null } }), 'REFUSE');
+  const oldAliases = await tx.urnAlias.findMany({
+    where: { entityType: 'MEMORY', entityId: id }, select: { urn: true },
+  });
+  const entryUrns = [...new Set([memory.urn, memory.legacyUrn, ...oldAliases.map((a) => a.urn)]
+    .filter((urn): urn is string => !!urn))];
+  const entryPrefixes = entryUrns.flatMap((urn) => [
+    `${urn}:`, `hrn:node:${urn}:`, `${urn.replace(':', '::')}::`,
+    `hrn:node:${urn.replace(':', '::')}::`,
+  ]);
+  const entryRef = { OR: entryPrefixes.map((prefix) => ({ entryNodeUrn: { startsWith: prefix } })) };
+  // Only the source tenant's triggers are dependents the source owner can
+  // manage. Counting foreign tenants' refs would leak their trigger inventory
+  // and let one of them block a transfer indefinitely. Historical node URNs
+  // continue to resolve through aliases; ordinary run authorization applies.
+  const sourceOrgId = memory.organizationId;
+  add('Schedules', sourceOrgId ? await tx.agentSchedule.count({ where: { ...entryRef, organizationId: sourceOrgId } }) : 0, 'REFUSE');
+  add('Webhooks', sourceOrgId ? await tx.agentWebhook.count({ where: { ...entryRef, organizationId: sourceOrgId } }) : 0, 'REFUSE');
+  add('Active web-fetch polls', sourceOrgId ? await tx.webFetchPollBinding.count({ where: { ...entryRef, organizationId: sourceOrgId, cancelledAt: null } }) : 0, 'REFUSE');
   add('MCP selections (reauthorized on read)', await tx.mcpSessionState.count({ where: { memoryId: id } }), 'CARRY');
   add('Git mirror binding', Number(memory.source !== null || memory.sourceTokenEncrypted !== null || memory.sourceTokenExpiresAt !== null || memory.readBranch !== null || memory.writeBranch !== null), 'REFUSE');
   add('Node mirror provenance', await tx.node.count({ where: { memoryId: id, ownerRepo: { not: null } } }), 'REFUSE');
@@ -158,13 +166,11 @@ async function transferPreview(
   add('Usage history', await tx.usageEvent.count({ where: { memoryId: id } }), 'CARRY');
   add('Server log history', await tx.serverLogEntry.count({ where: { memoryId: id } }), 'CARRY');
   add('App log history', await tx.appLogEntry.count({ where: { memoryId: id } }), 'CARRY');
-  add('Active runs', await tx.appRun.count({ where: {
+  add('Active runs', sourceOrgId ? await tx.appRun.count({ where: {
+    organizationId: sourceOrgId,
     status: { in: ['PENDING', 'RUNNING'] },
-    OR: [...entryRef.OR, ...entryUrns.flatMap((urn) => [
-      { curNodeUrn: { startsWith: `${urn}:` } },
-      { curNodeUrn: { startsWith: `hrn:node:${urn}:` } },
-    ])],
-  } }), 'REFUSE');
+    OR: [...entryRef.OR, ...entryPrefixes.map((prefix) => ({ curNodeUrn: { startsWith: prefix } }))],
+  } }) : 0, 'REFUSE');
 
   if (memory.class === 'system' || memory.class === 'app') {
     blockers.unshift({ code: 'UNSUPPORTED_MEMORY_CLASS', message: `class='${memory.class}' cannot be transferred independently.` });
