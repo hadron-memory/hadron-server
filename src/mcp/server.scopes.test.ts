@@ -85,7 +85,10 @@ describe('scope tools', () => {
   it('a refusal is a [code] text envelope, not a thrown error', async () => {
     const asMember = server(member.id);
     const out = await asMember.callTool('hadron_create_scope', { name: 'nope', memoryUrns: [mem1.id] });
-    expect(out.content[0]?.text).toBe('[forbidden] Forbidden.');
+    // #1493: the gate's denial is a typed FORBIDDEN, so it takes the typed-error
+    // envelope. The [code] clients classify on is unchanged; the prose has no
+    // trailing period there.
+    expect(out.content[0]?.text).toBe('[forbidden] Forbidden');
     const reserved = await server(admin.id).callTool('hadron_create_scope', { name: 'global', memoryUrns: [mem1.id] });
     expect(reserved.content[0]?.text.startsWith('[bad_user_input]')).toBe(true);
     const none = await asMember.callToolText('hadron_scope_explain', { name: 'missing' });
