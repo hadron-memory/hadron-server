@@ -360,6 +360,33 @@ describe('former URNs use live-address precedence (@codex P2 on #1453)', () => {
     expect(await noAliasBacklink()).toEqual([]);
     expect(await noAliasRewrite()).toEqual([]);
   });
+
+  it('finds a former holder’s moved-node alias under that holder’s current memory URN', async () => {
+    const formerUrn = draft.urn;
+    await resolvers.Mutation.updateMemory(null, { id: draft.id, urn: 'specs-draft-renamed' } as never, as());
+    const holder = await resolvers.Mutation.createMemory(null, { orgId: org.id, name: 'specs-draft' }, as());
+    expect(holder.urn).toBe(formerUrn);
+    await resolvers.Mutation.updateMemory(null, { id: holder.id, urn: 'former-holder-renamed' } as never, as());
+    const holderUrn = (await db.memory.findUniqueOrThrow({ where: { id: holder.id } })).urn;
+    const foreign = await db.node.create({ data: {
+      id: generateId(), memoryId: holder.id, loc: 'pas:900', name: 'Moved foreign node',
+    } });
+    await db.urnAlias.createMany({ data: ['pas:010', 'pas:500'].map((loc) => ({
+      urn: `${holderUrn}:${loc}`, entityType: 'NODE' as const, entityId: foreign.id, reason: 'RENAME' as const,
+    })) });
+    await db.node.update({ where: { id: other.id }, data: {
+      content: `Ambiguous: hrn:node:${formerUrn}:pas:010. Foreign: hrn:node:${formerUrn}:pas:500.`,
+    } });
+
+    const backlinks = await resolvers.Query.specBacklinks(null, { memoryRef: draft.id, loc: 'pas:010' }, as());
+    expect(backlinks.filter((ref) => ref.kind === 'URN' && ref.sourceLoc === 'pas:020')).toEqual([]);
+    const unresolved = await resolvers.Query.specUnresolvedReferences(null, { memoryRef: draft.id }, as());
+    expect(unresolved.map((ref) => ref.targetLoc)).not.toContain('pas:500');
+    const plan = await specCorpusRenumberMutations.renumberSpec(
+      null, { memoryRef: draft.id, fromLoc: 'pas:010', toLoc: 'pas:040', dryRun: true }, as(),
+    );
+    expect(plan.rewrites.filter((row) => row.nodeId === other.id)).toEqual([]);
+  });
 });
 
 describe('renumber moves by address, atomically (@codex P2 on #1453)', () => {

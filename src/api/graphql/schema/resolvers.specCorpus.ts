@@ -298,11 +298,29 @@ async function referenceAcceptor(
     select: { memoryId: true, loc: true },
   }) : [];
   const taken = new Set(live.map((n) => `${n.memoryId}\u0000${n.loc}`));
-  // A former claimant may have MOVED its node away and left a NODE alias at
-  // the cited address. The row lookup above then misses it, but resolveNodeRef
-  // still follows it. Query each distinct address once; a target the caller
-  // cannot read must not alter the result (one-bit existence oracle).
-  const addresses = [...new Set(refs.map((ref) => `${ref.memoryUrn}:${ref.targetLoc}`))];
+  // A former claimant may have renamed its MEMORY before moving a node. The
+  // NODE alias is then stored under that claimant's current URN, while this
+  // corpus still cites the former URN. Match the shared resolver's translated
+  // lookup, without letting an unreadable claimant influence classification.
+  const claimantIds = [...new Set(candidates.flatMap((ref) => claimantsOf(ref)))];
+  const claimantUrns = new Map<string, string>();
+  for (let offset = 0; offset < claimantIds.length; offset += SCAN_PAGE) {
+    for (const memory of await db.memory.findMany({
+      where: { id: { in: claimantIds.slice(offset, offset + SCAN_PAGE) }, deletedAt: null },
+      select: { id: true, urn: true },
+    })) claimantUrns.set(memory.id, memory.urn);
+  }
+  const aliasKeysByAddress = new Map<string, string[]>();
+  for (const ref of refs) {
+    const address = `${ref.memoryUrn}:${ref.targetLoc}`;
+    const keys = new Set([address]);
+    for (const id of claimantsOf(ref)) {
+      const currentUrn = claimantUrns.get(id);
+      if (currentUrn) keys.add(`${currentUrn}:${ref.targetLoc}`);
+    }
+    aliasKeysByAddress.set(address, [...keys]);
+  }
+  const addresses = [...new Set([...aliasKeysByAddress.values()].flat())];
   const aliases: Array<{ urn: string; entityId: string }> = [];
   for (let offset = 0; offset < addresses.length; offset += SCAN_PAGE) {
     aliases.push(...await db.urnAlias.findMany({
@@ -318,24 +336,29 @@ async function referenceAcceptor(
       select: { id: true, memoryId: true, loc: true },
     })) aliasTargets.set(target.id, { memoryId: target.memoryId, loc: target.loc });
   }
-  const aliasCandidates = new Map<string, Map<string, string | null>>();
+  const visibleTargets = new Map<string, string | null>();
+  for (const [id, target] of aliasTargets) {
+    if (target.memoryId === corpus.id) visibleTargets.set(id, target.loc);
+    else if (await isMemoryReadableCached(ctx, target.memoryId)) visibleTargets.set(id, null);
+  }
+  const aliasesByUrn = new Map<string, Array<{ entityId: string }>>();
   for (const alias of aliases) {
-    const target = aliasTargets.get(alias.entityId);
-    // An alias whose live target moved INTO this corpus is ours, even when a
-    // different memory now holds the old URN. Only readable foreign targets
-    // compete for the citation.
-    if (!target) continue;
-    if (target.memoryId !== corpus.id && !await isMemoryReadableCached(ctx, target.memoryId)) continue;
-    const candidates = aliasCandidates.get(alias.urn) ?? new Map<string, string | null>();
-    candidates.set(alias.entityId, target.memoryId === corpus.id ? target.loc : null);
-    aliasCandidates.set(alias.urn, candidates);
+    const grouped = aliasesByUrn.get(alias.urn) ?? [];
+    grouped.push(alias);
+    aliasesByUrn.set(alias.urn, grouped);
   }
   // The alias table permits several targets for one address. Like
   // resolveNodeRef, never pick a target by query order when the visible
   // candidates disagree; an ambiguous citation cannot be safely rewritten.
   const aliasResolved = new Map<string, string | null>();
-  for (const [urn, candidates] of aliasCandidates) {
-    aliasResolved.set(urn, candidates.size === 1 ? candidates.values().next().value! : null);
+  for (const [address, keys] of aliasKeysByAddress) {
+    const targets = new Map<string, string | null>();
+    for (const key of keys) {
+      for (const alias of aliasesByUrn.get(key) ?? []) {
+        if (visibleTargets.has(alias.entityId)) targets.set(alias.entityId, visibleTargets.get(alias.entityId)!);
+      }
+    }
+    if (targets.size > 0) aliasResolved.set(address, targets.size === 1 ? targets.values().next().value! : null);
   }
   return (ref) => {
     if (ref.memoryUrn === corpus.urn && taken.has(`${corpus.id}\u0000${ref.targetLoc}`)) return ref.targetLoc;
