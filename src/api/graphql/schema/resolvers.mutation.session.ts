@@ -96,6 +96,23 @@ function dropNulls(t: { dateTime?: string | null; date?: string | null; timeZone
   };
 }
 
+/** Both session writers must refuse writes through an uninstalled App. */
+function requireSessionAppActive(
+  app: { deletedAt: Date | null; uninstalledAt: Date | null } | null,
+  appId: string,
+): void {
+  if (!app || app.deletedAt) {
+    throw new GraphQLError('Cannot start a session in an App that no longer exists.', {
+      extensions: { code: 'BAD_USER_INPUT' },
+    });
+  }
+  if (app.uninstalledAt) {
+    throw new GraphQLError('Cannot start a session in an uninstalled App.', {
+      extensions: { code: 'APP_UNINSTALLED', appId },
+    });
+  }
+}
+
 /**
  * Write a worker session's closing handoff (#1029).
  *
@@ -903,6 +920,18 @@ export const sessionMutations = {
       }
 
       return ctx.db.$transaction(async (tx) => {
+        // #1001: appId may have come only from an App key or an MCP active-App
+        // selection, so neither the appRef nor Worker branches necessarily
+        // checked lifecycle. Recheck the settled App in the transaction before
+        // claiming a name or inserting a session. An explicit Worker ref may
+        // have replaced a stale selection above; only the final App matters.
+        if (appId) {
+          const app = await tx.app.findUnique({
+            where: { id: appId },
+            select: { deletedAt: true, uninstalledAt: true },
+          });
+          requireSessionAppActive(app, appId);
+        }
         // Everything about the hold is settled INSIDE this transaction, so the
         // decision and the session insert commit together. The row read far
         // above is a snapshot; by now another bind may have claimed the name.
@@ -1169,6 +1198,9 @@ export const sessionMutations = {
     ) => {
       if (!ctx.appId) throw new Error('Forbidden: App Key required');
       const app = await ctx.db.app.findUniqueOrThrow({ where: { id: ctx.appId } });
+      // #1001: the retained AppAgent join still exists after soft uninstall.
+      // Refuse before provisioning personal/anonymous memory or a chatbot session.
+      requireSessionAppActive(app, ctx.appId);
 
       // 008: App→Agent is a direct FK; the App can operate exactly the Agent
       // referenced by App.agent_id (no AppAgent join). Orphan Apps (agent_id

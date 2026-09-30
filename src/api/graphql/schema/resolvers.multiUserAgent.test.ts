@@ -291,6 +291,22 @@ describe('createAppUser', () => {
 // ---------------------------------------------------------------------------
 
 describe('startAgentSession', () => {
+  it('refuses an uninstalled App key before provisioning anonymous memory (#1001)', async () => {
+    await db.app.update({ where: { id: app.id }, data: { uninstalledAt: new Date() } });
+    const memoryCount = await db.memory.count();
+    await expect(resolvers.Mutation.startAgentSession(
+      {}, { agentId: agent.id }, appCtx(app.id),
+    )).rejects.toMatchObject({ extensions: { code: 'APP_UNINSTALLED' } });
+    expect(await db.session.count()).toBe(0);
+    expect(await db.memory.count()).toBe(memoryCount);
+    await db.app.update({ where: { id: app.id }, data: { uninstalledAt: null } });
+    const session = await resolvers.Mutation.startAgentSession(
+      {}, { agentId: agent.id }, appCtx(app.id),
+    );
+    expect(session.appId).toBe(app.id);
+    expect(await db.memory.count()).toBe(memoryCount + 1);
+  });
+
   it('lazily provisions a user memory on first session', async () => {
     await resolvers.Mutation.createAppUser(
       {},

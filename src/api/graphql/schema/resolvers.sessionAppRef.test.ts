@@ -19,9 +19,12 @@
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { randomBytes } from 'node:crypto';
 import { GraphQLError } from 'graphql';
 import { buildSchema, type GraphQLInputObjectType } from 'graphql';
+import type { Request } from 'express';
 import { db } from '../../../integrations/db/client.js';
+import { hashAppKey, resolveAuthContext } from '../../../middleware/auth.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
@@ -281,6 +284,32 @@ describe('#943 — App-key precedence', () => {
     expect(s.appId).toBe(app.id);
   });
 
+  it('refuses a still-valid key of an uninstalled App without appRef (#1001)', async () => {
+    const rawKey = `hdr_app_${randomBytes(32).toString('hex')}`;
+    await db.appKey.create({ data: {
+      id: generateId(), appId: app.id, keyHash: hashAppKey(rawKey),
+      keyPreview: `${rawKey.slice(0, 12)}...`,
+    } });
+    await db.app.update({ where: { id: app.id }, data: { uninstalledAt: new Date() } });
+    const auth = await resolveAuthContext({
+      headers: { authorization: `Bearer ${rawKey}` },
+    } as unknown as Request, db);
+    expect(auth.appId).toBe(app.id);
+    await expectCode(startSession({ db, ...auth } as Context, {}), 'APP_UNINSTALLED');
+    expect(await db.session.count()).toBe(0);
+    await db.app.update({ where: { id: app.id }, data: { uninstalledAt: null } });
+    expect((await startSession({ db, ...auth } as Context, {})).appId).toBe(app.id);
+  });
+
+  it('refuses a stale active-App selection when no explicit App is named (#1001)', async () => {
+    await db.app.update({ where: { id: app.id }, data: { uninstalledAt: new Date() } });
+    await expectCode(startSession(ctx(contrib.id, app.id), {}), 'APP_UNINSTALLED');
+    expect(await db.session.count()).toBe(0);
+    // A user selection is a fallback, so an explicit live App still wins.
+    const named = await startSession(ctx(contrib.id, app.id), { appRef: otherApp.id });
+    expect(named.appId).toBe(otherApp.id);
+  });
+
   it('judges a HYBRID principal (user + active-App selection) on the USER', async () => {
     // MCP's requireAppScope fills auth.appId from the user's active-App
     // SELECTION, which is not a credential
@@ -496,6 +525,12 @@ describe('SessionInput.workerRef (#974) — binding the named identity', () => {
   it('refuses the derived-App path into an uninstalled App → APP_UNINSTALLED', async () => {
     await db.app.update({ where: { id: app.id }, data: { uninstalledAt: new Date() } });
     await expectCode(startSession(ctx(contrib.id), { workerRef: worker.id }), 'APP_UNINSTALLED');
+  });
+
+  it('refuses a worker id under an uninstalled ambient App (#1001)', async () => {
+    await db.app.update({ where: { id: app.id }, data: { uninstalledAt: new Date() } });
+    await expectCode(startSession(ctx(undefined, app.id), { workerRef: worker.id }), 'APP_UNINSTALLED');
+    expect(await db.session.count()).toBe(0);
   });
 
   it('refuses an agentRef that disagrees with the casting → BAD_USER_INPUT; a matching one is fine', async () => {
