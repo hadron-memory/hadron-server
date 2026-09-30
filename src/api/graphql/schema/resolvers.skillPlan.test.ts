@@ -8,11 +8,14 @@
  * lint is never handed a body.
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { buildSchema, type GraphQLInputObjectType, type GraphQLObjectType } from 'graphql';
+import { typeDefs } from './typeDefs.js';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { splitNodeUrn } from '../../../lib/urn.js';
 import { revisionStateHashRefreshMarker } from '../../../lib/nodeRevisionSnapshot.js';
+import { hash } from '../../../lib/skilldoc/hash.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -53,6 +56,19 @@ const plan = (input: Record<string, unknown>, c: Ctx = ctx()) =>
     { input },
     c,
   );
+
+const selectedPlan = (input: Record<string, unknown>, c: Ctx = ctx()) =>
+  (resolvers.Query as Record<string, (p: unknown, a: unknown, c: Ctx) => Promise<any>>).selectedSkillFilePlan(
+    {}, { input }, c,
+  );
+
+const mkScope = async (name: string, memoryIds: string[]) => {
+  const scope = await db.scope.create({ data: { id: generateId(), name, organizationId: org.id } });
+  await db.scopeMemory.createMany({
+    data: memoryIds.map((memoryId, position) => ({ scopeId: scope.id, memoryId, position })),
+  });
+  return scope;
+};
 
 beforeEach(async () => {
   await cleanDb(db);
@@ -131,6 +147,143 @@ describe('the access gate', () => {
   });
 });
 
+describe('server-owned Scope selection for plugin EXPORT', () => {
+  it('narrows by a live Scope, skips orphan assessment, and gives both hosts the same fingerprint', async () => {
+    const other = await resolvers.Mutation.createMemory({}, { orgId: org.id, name: `scope-other-${generateId()}` }, ctx());
+    const inside = await mkNode('tasks:inside', { properties: declaration({ name: 'inside-skill' }) });
+    const outside = await db.node.create({ data: {
+      id: generateId(), memoryId: other.id, loc: 'tasks:outside', name: 'outside',
+      isRunnable: true, content: '# Outside', properties: declaration({ name: 'outside-skill' }),
+    } });
+    const scope = await mkScope('one-memory', [mem.id]);
+    const files = [{ dirName: 'outside-skill', nodeId: outside.id, sourceUrn: 'old', headerHash: 'x', fileHash: 'x' }];
+
+    // Omission means unscoped, while an explicitly supplied null must refuse
+    // rather than silently widening from A to readable A+B (Chip, #1427).
+    expect((await plan({ intent: 'EXPORT' })).entries.map((e: { nodeId: string }) => e.nodeId).sort())
+      .toEqual([inside.id, outside.id].sort());
+    await expect(plan({ intent: 'EXPORT', scopeRef: null })).rejects.toMatchObject({
+      extensions: { code: 'BAD_USER_INPUT' },
+    });
+
+    const claude = await plan({ intent: 'EXPORT', host: 'claudeSkill', scopeRef: scope.id, files });
+    const codex = await plan({ intent: 'EXPORT', host: 'codexSkill', scopeRef: scope.id, files });
+    expect(claude.entries.map((e: { nodeId: string }) => e.nodeId)).toEqual([inside.id]);
+    expect(claude.scopeSelection).toMatchObject({
+      id: scope.id, name: scope.name, readableMemoryCount: 1, droppedCount: 0,
+    });
+    expect(claude.scopeSelection.fingerprint).toMatch(/^[a-f0-9]{64}$/);
+    expect(codex.scopeSelection.fingerprint).toBe(claude.scopeSelection.fingerprint);
+    expect(claude.orphans).toEqual([]);
+    expect(claude.orphanAssessmentSkipped).toBe(true);
+    expect(codex.orphanAssessmentSkipped).toBe(true);
+    const occupied = await plan({ intent: 'EXPORT', scopeRef: scope.id, files: [
+      { dirName: 'inside-skill', nodeId: outside.id, sourceUrn: 'old', headerHash: 'x', fileHash: 'x' },
+    ] });
+    expect(occupied.entries[0].exportPlan.action).toBe('REFUSE');
+    expect(occupied.orphans).toEqual([]);
+
+    // The ID stays constant while membership changes. Every plan resolves it
+    // afresh, and separate host calls expose the change to the CLI.
+    await db.scopeMemory.deleteMany({ where: { scopeId: scope.id } });
+    await db.scopeMemory.create({ data: { scopeId: scope.id, memoryId: other.id, position: 0 } });
+    const changed = await plan({ intent: 'EXPORT', host: 'claudeSkill', scopeRef: scope.id });
+    expect(changed.entries.map((e: { nodeId: string }) => e.nodeId)).toEqual([outside.id]);
+    expect(changed.scopeSelection.fingerprint).not.toBe(claude.scopeSelection.fingerprint);
+  });
+
+  it('keeps existing file-facts and force protections for a scoped entry', async () => {
+    const node = await mkNode('tasks:edited-in-scope', { properties: declaration() });
+    const scope = await mkScope('file-protection', [mem.id]);
+    const initial = await plan({ intent: 'EXPORT' });
+    const entry = initial.entries[0];
+    const file = {
+      dirName: 'my-skill', nodeId: node.id, sourceUrn: entry.urn,
+      headerHash: /hash=([0-9a-f]{16})/.exec(entry.renderedBody)![1]!,
+      fileHash: 'f'.repeat(16),
+    };
+
+    const unscoped = await plan({ intent: 'EXPORT', files: [file] });
+    const scoped = await plan({ intent: 'EXPORT', scopeRef: scope.id, files: [file] });
+    expect(scoped.entries[0].exportPlan).toEqual(unscoped.entries[0].exportPlan);
+    expect(scoped.entries[0].exportPlan).toMatchObject({ action: 'REFUSE', reasons: [{ code: 'locally-edited' }] });
+    expect(scoped.entries[0].renderedBody).toBeNull();
+
+    const unscopedForced = await plan({ intent: 'EXPORT', force: true, files: [file] });
+    const scopedForced = await plan({ intent: 'EXPORT', scopeRef: scope.id, force: true, files: [file] });
+    expect(scopedForced.entries[0].exportPlan).toEqual(unscopedForced.entries[0].exportPlan);
+    expect(scopedForced.entries[0].exportPlan).toMatchObject({ action: 'WRITE', reasons: [{ code: 'locally-edited-override' }] });
+    expect(scopedForced.orphans).toEqual([]);
+    expect(scopedForced.orphanAssessmentSkipped).toBe(true);
+  });
+
+  it('refuses duplicate installed files for an in-scope task without surfacing out-of-scope orphans', async () => {
+    const outsideMemory = await resolvers.Mutation.createMemory({}, { orgId: org.id, name: `dup-outside-${generateId()}` }, ctx());
+    const inside = await mkNode('tasks:inside-duplicate', { properties: declaration() });
+    const outside = await db.node.create({ data: {
+      id: generateId(), memoryId: outsideMemory.id, loc: 'tasks:outside-duplicate', name: 'outside',
+      isRunnable: true, content: '# Outside', properties: declaration({ name: 'outside-skill' }),
+    } });
+    const scope = await mkScope('duplicate-protection', [mem.id]);
+    const urn = (await plan({ intent: 'LINT', memories: [mem.id] })).entries[0].urn as string;
+    const files = [
+      { dirName: 'my-skill', nodeId: inside.id, sourceUrn: urn, headerHash: 'a'.repeat(16), fileHash: 'a'.repeat(16) },
+      { dirName: 'old-copy', nodeId: inside.id, sourceUrn: urn, headerHash: 'a'.repeat(16), fileHash: 'a'.repeat(16) },
+      { dirName: 'outside-skill', nodeId: outside.id, sourceUrn: 'old', headerHash: 'a'.repeat(16), fileHash: 'a'.repeat(16) },
+    ];
+
+    const got = await plan({ intent: 'EXPORT', scopeRef: scope.id, files, force: true });
+    expect(got.entries.map((e: { nodeId: string }) => e.nodeId)).toEqual([inside.id]);
+    expect(got.entries[0]).toMatchObject({
+      renderedBody: null,
+      exportPlan: { action: 'REFUSE', preservesExistingFile: true, reasons: [{ code: 'multiple-installed-files' }] },
+    });
+    expect(got.orphans).toEqual([]);
+    expect(got.orphanAssessmentSkipped).toBe(true);
+  });
+
+  it('refuses arbitrary EXPORT memories, including an empty list, while keeping LINT/STATUS filters', async () => {
+    await mkNode('tasks:inside', { properties: declaration() });
+    for (const memories of [[], [mem.id]]) {
+      await expect(plan({ intent: 'EXPORT', memories })).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
+    }
+    const scope = await mkScope('lint-not-export', [mem.id]);
+    await expect(plan({ intent: 'LINT', scopeRef: scope.id })).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
+    expect((await plan({ intent: 'LINT', memories: [mem.id] })).entries).toHaveLength(1);
+    expect((await plan({ intent: 'STATUS', memories: [mem.id] })).entries).toHaveLength(1);
+  });
+
+  it('refuses blank, missing, deleted, unreadable, and zero-readable scopes without widening', async () => {
+    await mkNode('tasks:inside', { properties: declaration() });
+    const scope = await mkScope('disappearing', [mem.id]);
+    for (const scopeRef of ['', generateId()]) {
+      await expect(plan({ intent: 'EXPORT', scopeRef })).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
+    }
+    await expect(plan({ intent: 'EXPORT', scopeRef: scope.id }, strangerCtx())).rejects.toMatchObject({
+      extensions: { code: 'BAD_USER_INPUT' },
+    });
+    await db.scope.update({ where: { id: scope.id }, data: { deletedAt: new Date() } });
+    await expect(plan({ intent: 'EXPORT', scopeRef: scope.id })).rejects.toMatchObject({
+      extensions: { code: 'BAD_USER_INPUT' },
+    });
+
+    // Even platform admins cannot see another user's owner-only personal
+    // memory. The shared access intersection drops it and reports the count.
+    const privateMemory = await db.memory.create({ data: {
+      id: generateId(), organizationId: org.id, urn: `${org.urn}:foreign-private-${generateId()}`,
+      name: 'foreign private', class: 'private', userId: outsider.id,
+    } });
+    const mixed = await mkScope('mixed', [mem.id, privateMemory.id]);
+    const narrowed = await plan({ intent: 'EXPORT', scopeRef: mixed.id });
+    expect(narrowed.scopeSelection).toMatchObject({ readableMemoryCount: 1, droppedCount: 1 });
+    expect(narrowed.entries).toHaveLength(1);
+    const empty = await mkScope('empty-for-admin', [privateMemory.id]);
+    await expect(plan({ intent: 'EXPORT', scopeRef: empty.id })).rejects.toMatchObject({
+      extensions: { code: 'BAD_USER_INPUT' },
+    });
+  });
+});
+
 describe('classes and bodies', () => {
   it('never-exported, with a body only for EXPORT', async () => {
     await mkNode('tasks:declared', { properties: declaration() });
@@ -169,6 +322,7 @@ describe('classes and bodies', () => {
       preservesExistingFile: true,
       reasons: [{ code: 'skill-name-invalid' }],
     });
+    expect(got.entries[0].outOfExportReason).toContain('Not_Kebab');
   });
 
   it('reports an over-limit description as out of export and preserves an installed file', async () => {
@@ -197,7 +351,57 @@ describe('classes and bodies', () => {
     });
     expect(got.entries[0].exportPlan.reasons[0].message).toContain('1083 characters');
     expect(got.entries[0].exportPlan.reasons[0].message).toContain('1024');
+    expect(got.entries[0].outOfExportReason).toBe(got.entries[0].exportPlan.reasons[0].message);
     expect(got.orphans).toEqual([]);
+  });
+
+  it('reports an enabled over-limit source even when its installed file is current', async () => {
+    const description = 'x'.repeat(1083);
+    const node = await mkNode('tasks:current-too-long', { properties: declaration({ description }) });
+    const urn = (await plan({ intent: 'LINT' })).entries[0].urn as string;
+    const fingerprint = hash(node.id, urn, 'my-skill', description, node.content!);
+
+    const files = [{
+      dirName: 'my-skill', sourceUrn: urn, nodeId: node.id, headerHash: fingerprint, fileHash: fingerprint,
+    }];
+    const got = await plan({ intent: 'EXPORT', files });
+    expect(got.entries[0]).toMatchObject({
+      class: 'current', renderedBody: null,
+      exportPlan: { action: 'SKIP', preservesExistingFile: true },
+    });
+    expect(got.entries[0].outOfExportReason).toContain('1083 characters');
+    expect(got.orphans).toEqual([]);
+
+    const status = await plan({ intent: 'STATUS', files });
+    expect(status.entries[0]).toMatchObject({ class: 'current', renderedBody: null, exportPlan: null });
+    expect(status.entries[0].outOfExportReason).toBe(got.entries[0].outOfExportReason);
+    expect((await plan({ intent: 'LINT', files })).entries[0].outOfExportReason).toBeNull();
+  });
+
+  it('reports an invalid enabled source alongside local-edit and no-ID protections', async () => {
+    const node = await mkNode('tasks:overlap-too-long', { properties: declaration({ description: 'x'.repeat(1083) }) });
+    const urn = (await plan({ intent: 'LINT' })).entries[0].urn as string;
+    const edited = await plan({ intent: 'EXPORT', files: [{
+      dirName: 'my-skill', sourceUrn: urn, nodeId: node.id,
+      headerHash: 'a'.repeat(16), fileHash: 'f'.repeat(16),
+    }] });
+    expect(edited.entries[0].exportPlan).toMatchObject({ action: 'REFUSE', preservesExistingFile: true });
+    expect(edited.entries[0].outOfExportReason).toContain('1083 characters');
+
+    const noId = await plan({ intent: 'EXPORT', files: [{ dirName: 'my-skill', sourceUrn: urn }] });
+    expect(noId.entries[0].exportPlan).toMatchObject({ action: 'SKIP', preservesExistingFile: true });
+    expect(noId.entries[0].outOfExportReason).toContain('1083 characters');
+    expect(noId.orphans).toEqual([]);
+  });
+
+  it('joins multiple blocking findings into one display-ready reason', async () => {
+    await mkNode('tasks:multiple-errors', {
+      properties: declaration({ name: 'Not_Kebab', description: 'x'.repeat(1083) }),
+    });
+    const got = await plan({ intent: 'EXPORT', files: [] });
+    expect(got.entries[0].outOfExportReason).toContain('Not_Kebab');
+    expect(got.entries[0].outOfExportReason).toContain('1083 characters');
+    expect(got.entries[0].exportPlan).toMatchObject({ action: 'SKIP', preservesExistingFile: true });
   });
 
   it('reports an unsafe render as a failure with the renderer reason', async () => {
@@ -213,6 +417,7 @@ describe('classes and bodies', () => {
       reasons: [{ code: 'render-failed' }],
     });
     expect(got.entries[0].exportPlan.reasons[0].message).toContain('provenance comment');
+    expect(got.entries[0].outOfExportReason).toBe(got.entries[0].exportPlan.reasons[0].message);
   });
 
   it('refuses a locally edited file and names the remedies', async () => {
@@ -240,6 +445,7 @@ describe('classes and bodies', () => {
       reasons: [{ code: 'locally-edited' }],
     });
     expect(got.entries[0].exportPlan.reasons[0].message).toContain('one-invocation override');
+    expect(got.entries[0].outOfExportReason).toBeNull();
 
     const forced = await plan({
       intent: 'EXPORT',
@@ -576,6 +782,7 @@ describe('classes and bodies', () => {
       preservesExistingFile: true,
       reasons: [{ code: 'parse-failed' }],
     });
+    expect(exported.entries[0].outOfExportReason).toBeNull();
   });
 
   it('pairs a file by its source URN and reports it current when everything agrees', async () => {
@@ -602,7 +809,13 @@ describe('classes and bodies', () => {
       preservesExistingFile: true,
       reasons: [{ code: 'current' }],
     });
+    expect(got.entries[0].outOfExportReason).toBeNull();
     expect(got.orphans).toHaveLength(0);
+
+    const status = await plan({ intent: 'STATUS', files: [
+      { dirName: 'my-skill', sourceUrn: urn, nodeId: node.id, revision: 1, headerHash, fileHash: headerHash },
+    ] });
+    expect(status.entries[0].outOfExportReason).toBeNull();
   });
 
   it('treats an explicit null file revision as omitted', async () => {
@@ -835,6 +1048,9 @@ describe('classes and bodies', () => {
       preservesExistingFile: true,
       reasons: [{ code: 'disabled' }],
     });
+    expect(withFile.entries[0].outOfExportReason).toBeNull();
+    expect(withoutFile.entries[0].outOfExportReason).toBeNull();
+    expect((await plan({ intent: 'STATUS', files: [] })).entries[0].outOfExportReason).toBeNull();
   });
 
   it('removes the paired disabled file even when an orphan occupies the renamed target', async () => {
@@ -899,6 +1115,11 @@ describe('classes and bodies', () => {
       preservesExistingFile: true,
       reasons: [{ code: 'skill-description-too-long' }],
     });
+    expect(got.entries[0].outOfExportReason).toBeNull();
+    const status = await plan({ intent: 'STATUS', files: [
+      { dirName: 'my-skill', sourceUrn: urn, nodeId: node.id, headerHash, fileHash: headerHash },
+    ] });
+    expect(status.entries[0].outOfExportReason).toBeNull();
   });
 
   it('preserves a disabled installed file when any blocking lint finding remains', async () => {
@@ -1129,6 +1350,12 @@ describe('review round 2 — @copilot', () => {
 });
 
 describe('the surface itself', () => {
+  it('exposes the server-owned out-of-export reason on each plan entry', () => {
+    const schema = buildSchema(typeDefs);
+    const entry = schema.getType('SkillPlanEntry') as GraphQLObjectType;
+    expect(String(entry.getFields().outOfExportReason.type)).toBe('String');
+  });
+
   it('is a QUERY, not a mutation — status and lint cannot write by construction', () => {
     // The guarantee §3 asks for. A mutation that promises not to write is a
     // promise; this is the structural version, and it is worth an assertion
@@ -1322,6 +1549,7 @@ describe('hosts (#1254)', () => {
     expect(codex.entries).toHaveLength(2);
     for (const e of codex.entries) {
       expect(e).toMatchObject({ class: 'collision', renderedBody: null, exportPlan: { action: 'REFUSE' } });
+      expect(e.outOfExportReason).toBeNull();
     }
     for (const e of claude.entries) {
       expect(e).toMatchObject({ class: 'never-exported', exportPlan: { action: 'WRITE' } });
@@ -1570,6 +1798,7 @@ describe('#1309 — a no-id legacy file pairs by its source URN in every accepte
       renderedBody: null,
       exportPlan: { action: 'SKIP', preservesExistingFile: true, reasons: [{ code: 'missing-node-id' }] },
     });
+    expect(got.entries[0].outOfExportReason).toBeNull();
 
     const forced = await plan({ intent: 'EXPORT', force: true, files: [file] });
     expect(forced.orphans).toEqual([]);
@@ -1878,5 +2107,229 @@ describe('#1318 review (@copilot): reserved directories are matched with the pla
       const got = await plan({ intent: 'EXPORT', host: 'claudeSkill', files: [{ dirName, sourceUrn: '' }] });
       expect(got.orphans, JSON.stringify(dirName)).toEqual([]);
     }
+  });
+});
+
+describe('#1406 selected individual skill files', () => {
+  const forHost = (host: 'claudeSkill' | 'codexSkill', name: string, enable = true) => ({
+    exports: { [host]: { name, description: 'Does a thing. Use when needed.', enable } },
+  });
+
+  it('exposes node selection only on the individual-file operation, not the plugin plan', () => {
+    const schema = buildSchema(typeDefs);
+    expect(schema.getQueryType()?.getFields().selectedSkillFilePlan).toBeDefined();
+    const oldInput = schema.getType('SkillPlanInput') as GraphQLInputObjectType;
+    const selectedInput = schema.getType('SelectedSkillFilePlanInput') as GraphQLInputObjectType;
+    expect(oldInput.getFields().nodes).toBeUndefined();
+    expect(oldInput.getFields().scopeRef).toBeDefined();
+    expect(selectedInput.getFields().nodes).toBeDefined();
+    expect(selectedInput.getFields().memories).toBeUndefined();
+    expect(selectedInput.getFields().scopeRef).toBeUndefined();
+  });
+
+  it('selects IDs and full URNs across memories once, without classifying other installed skills as orphans', async () => {
+    const other = await resolvers.Mutation.createMemory({}, { orgId: org.id, name: `other-${generateId()}` }, ctx());
+    const first = await mkNode('tasks:first', { properties: forHost('claudeSkill', 'first-skill') });
+    const second = await db.node.create({ data: {
+      id: generateId(), memoryId: other.id, loc: 'tasks:second', name: 'second',
+      isRunnable: true, content: '# Second', properties: forHost('claudeSkill', 'second-skill'),
+    } });
+    const unselected = await mkNode('tasks:unselected', { properties: forHost('claudeSkill', 'unselected-skill') });
+    const urn = (await plan({ intent: 'LINT' })).entries.find((e: { nodeId: string }) => e.nodeId === first.id).urn;
+    const files = [{ dirName: 'unselected-skill', nodeId: unselected.id, sourceUrn: 'old', headerHash: 'a'.repeat(16), fileHash: 'a'.repeat(16) }];
+
+    const got = await selectedPlan({ nodes: [first.id, urn, second.id], host: 'claudeSkill', files });
+    expect(got.entries.map((e: { nodeId: string }) => e.nodeId).sort()).toEqual([first.id, second.id].sort());
+    expect(got.entries.every((e: { exportPlan: { action: string } }) => e.exportPlan.action === 'WRITE')).toBe(true);
+    expect(got.selectionResults).toEqual([]);
+    expect(got.orphans).toEqual([]);
+    expect(got.orphanAssessmentSkipped).toBe(true);
+    expect(got.scanned).toBe(2);
+    expect(got.judged).toBe(2);
+    const old = await plan({ intent: 'EXPORT', host: 'claudeSkill', files });
+    expect(old.orphanAssessmentSkipped).toBe(false);
+    expect(old.selectionResults).toEqual([]);
+  });
+
+  it('rejects malformed selection and conceals denied refs like missing refs while continuing valid items', async () => {
+    for (const nodes of [[], ['tasks:relative'], ['hrn:mem:example.com:x'], ['hrn:node:example.com:tasks:x#data'], Array(501).fill('x')]) {
+      await expect(selectedPlan({ nodes })).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
+    }
+
+    const visible = await mkNode('tasks:visible', { properties: forHost('claudeSkill', 'visible-skill') });
+    await db.orgMember.create({ data: { organizationId: org.id, userId: outsider.id, role: 'READER' } });
+    const secretOrg = await db.organization.create({ data: { id: generateId(), name: 'secret', urn: `secret-${generateId()}` } });
+    const secretMem = await resolvers.Mutation.createMemory({}, { orgId: secretOrg.id, name: `secret-${generateId()}` }, ctx());
+    const secret = await db.node.create({ data: {
+      id: generateId(), memoryId: secretMem.id, loc: 'tasks:secret', name: 'secret',
+      isRunnable: true, content: '# Secret', properties: forHost('claudeSkill', 'secret-skill'),
+    } });
+    const missing = generateId();
+    const got = await selectedPlan({ nodes: [visible.id, secret.id, missing] }, strangerCtx());
+    expect(got.entries.map((e: { nodeId: string }) => e.nodeId)).toEqual([visible.id]);
+    expect(got.selectionResults).toEqual([
+      { ref: secret.id, nodeId: null, action: 'FAIL', reason: { code: 'node-unavailable', message: 'The named task is unavailable.' } },
+      { ref: missing, nodeId: null, action: 'FAIL', reason: { code: 'node-unavailable', message: 'The named task is unavailable.' } },
+    ]);
+    expect(JSON.stringify(got)).not.toContain('secret-skill');
+  });
+
+  it('refuses a selected/unselected name collision beyond 500 declarations; disabled and other-host names do not collide', async () => {
+    const selected = await mkNode('tasks:selected', { properties: forHost('claudeSkill', 'shared-name') });
+    await db.node.createMany({ data: Array.from({ length: 510 }, (_, i) => ({
+      id: generateId(), memoryId: mem.id, loc: `tasks:filler-${i}`, name: `filler-${i}`,
+      isRunnable: true, content: '# Filler', properties: forHost('claudeSkill', `filler-${i}`),
+    })) });
+    const secondOrg = await db.organization.create({ data: { id: generateId(), name: 'other-org', urn: `other-${generateId()}` } });
+    await db.orgMember.create({ data: { organizationId: secondOrg.id, userId: admin.id, role: 'ADMIN' } });
+    const other = await resolvers.Mutation.createMemory({}, { orgId: secondOrg.id, name: `other-${generateId()}` }, ctx());
+    await db.node.create({ data: {
+      id: generateId(), memoryId: other.id, loc: 'tasks:collider', name: 'collider',
+      isRunnable: true, content: '# Collider', properties: forHost('claudeSkill', 'shared-name'),
+    } });
+    const blocked = await selectedPlan({ nodes: [selected.id], host: 'claudeSkill', force: true });
+    expect(blocked.entries[0]).toMatchObject({ class: 'collision', renderedBody: null, exportPlan: { action: 'REFUSE' } });
+    expect(blocked.entries[0].findings.map((f: { rule: string }) => f.rule)).toContain('skill-name-collision');
+
+    const disabled = await mkNode('tasks:disabled', { properties: forHost('claudeSkill', 'free-name', false) });
+    await mkNode('tasks:other-host', { properties: forHost('codexSkill', 'free-name') });
+    const free = await mkNode('tasks:free', { properties: forHost('claudeSkill', 'free-name') });
+    const allowed = await selectedPlan({ nodes: [free.id], host: 'claudeSkill' });
+    expect(allowed.entries[0]).toMatchObject({ nodeId: free.id, exportPlan: { action: 'WRITE' } });
+    expect(disabled.id).not.toBe(free.id);
+  });
+
+  it('refuses a collision census whose unrelated properties exceed the byte ceiling', async () => {
+    const selected = await mkNode('tasks:small-selection', {
+      properties: forHost('claudeSkill', 'small-selection'),
+    });
+    await mkNode('tasks:large-properties', {
+      properties: {
+        ...forHost('codexSkill', 'other-host'),
+        unrelatedPayload: 'x'.repeat(33 * 1024 * 1024),
+      },
+    });
+    await expect(selectedPlan({ nodes: [selected.id], host: 'claudeSkill' })).rejects.toMatchObject({
+      extensions: { code: 'BAD_USER_INPUT' },
+    });
+  }, 30_000);
+
+  it('bounds selected no-op properties before deserializing them', async () => {
+    const codexOnly = await mkNode('tasks:large-selected-properties', {
+      properties: {
+        ...forHost('codexSkill', 'large-selected-properties'),
+        unrelatedPayload: 'x'.repeat(33 * 1024 * 1024),
+      },
+    });
+    await expect(selectedPlan({ nodes: [codexOnly.id], host: 'claudeSkill' })).rejects.toMatchObject({
+      extensions: { code: 'BAD_USER_INPUT' },
+    });
+  }, 30_000);
+
+  it('rechecks the properties bound when a selected node grows after the candidate snapshot', async () => {
+    const codexOnly = await mkNode('tasks:growing-selected-properties', {
+      properties: forHost('codexSkill', 'growing-selected-properties'),
+    });
+    const transaction = db.$transaction.bind(db);
+    const transactionSpy = vi.spyOn(db, '$transaction');
+    transactionSpy.mockImplementationOnce((async (...args: unknown[]) => {
+      const candidates = await (transaction as (...args: unknown[]) => Promise<unknown>)(...args);
+      await db.node.update({
+        where: { id: codexOnly.id },
+        data: { properties: {
+          ...forHost('codexSkill', 'growing-selected-properties'),
+          unrelatedPayload: 'x'.repeat(33 * 1024 * 1024),
+        } },
+      });
+      return candidates;
+    }) as typeof db.$transaction);
+    try {
+      await expect(selectedPlan({ nodes: [codexOnly.id], host: 'claudeSkill' })).rejects.toMatchObject({
+        extensions: { code: 'BAD_USER_INPUT' },
+      });
+    } finally {
+      transactionSpy.mockRestore();
+    }
+  }, 30_000);
+
+  it.each(['claudeSkill', 'codexSkill'] as const)('%s: preserves other files, local edits and duplicate selected installations', async (host) => {
+    const selected = await mkNode(`tasks:${host}`, { properties: forHost(host, `${host.toLowerCase()}-new`) });
+    const other = await mkNode(`tasks:${host}-other`, { properties: forHost(host, `${host.toLowerCase()}-other`) });
+    const source = { dirName: `${host.toLowerCase()}-old`, nodeId: selected.id, headerHash: 'a'.repeat(16), fileHash: 'a'.repeat(16) };
+    const unselected = { dirName: `${host.toLowerCase()}-other`, nodeId: other.id, headerHash: 'a'.repeat(16), fileHash: 'a'.repeat(16) };
+    const moved = await selectedPlan({ nodes: [selected.id], host, files: [source, unselected] });
+    expect(moved.entries[0]).toMatchObject({ class: 'renamed', movedFrom: source.dirName, exportPlan: { action: 'MOVE' } });
+    expect(moved.orphans).toEqual([]);
+
+    const noId = await selectedPlan({ nodes: [selected.id], host, files: [{
+      dirName: source.dirName, sourceUrn: moved.entries[0].urn, headerHash: '', fileHash: '',
+    }, unselected] });
+    expect(noId.entries[0]).toMatchObject({ exportPlan: { action: 'SKIP', reasons: [{ code: 'missing-node-id' }] } });
+    expect(noId.orphans).toEqual([]);
+
+    const alias = await selectedPlan({ nodes: [selected.id], host, files: [{
+      ...source, dirName: `${host.toLowerCase()}-NEW`,
+    }, unselected] });
+    expect(alias.entries[0]).toMatchObject({ renderedBody: null, exportPlan: {
+      action: 'REFUSE', reasons: [{ code: 'filesystem-alias-ambiguous' }],
+    } });
+
+    const edited = await selectedPlan({ nodes: [selected.id], host, files: [{ ...source, fileHash: 'f'.repeat(16) }, unselected] });
+    expect(edited.entries[0]).toMatchObject({ renderedBody: null, exportPlan: { action: 'REFUSE', preservesExistingFile: true } });
+    const duplicate = await selectedPlan({ nodes: [selected.id], host, force: true, files: [source, { ...source, dirName: 'another-copy' }, unselected] });
+    expect(duplicate.entries[0]).toMatchObject({ renderedBody: null, exportPlan: { action: 'REFUSE', reasons: [{ code: 'multiple-installed-files' }] } });
+    expect(duplicate.orphans).toEqual([]);
+
+    const occupied = await selectedPlan({ nodes: [selected.id], host, files: [source, { ...unselected, dirName: `${host.toLowerCase()}-new` }] });
+    expect(occupied.entries[0]).toMatchObject({ renderedBody: null, exportPlan: { action: 'REFUSE', reasons: [{ code: 'target-occupied' }] } });
+  });
+
+  it('reports a host with no declaration as a no-op and guards a selected disabled removal', async () => {
+    const codexOnly = await mkNode('tasks:codex-only', { properties: forHost('codexSkill', 'codex-only') });
+    const noHost = await selectedPlan({ nodes: [codexOnly.id], host: 'claudeSkill', files: [{ dirName: 'codex-only', nodeId: codexOnly.id }] });
+    expect(noHost.entries).toEqual([]);
+    expect(noHost.selectionResults).toEqual([{ ref: codexOnly.id, nodeId: codexOnly.id, action: 'SKIP', reason: {
+      code: 'host-not-declared', message: 'This task has no declaration for this host; its installed files are unchanged.',
+    } }]);
+    expect(noHost.orphans).toEqual([]);
+
+    const disabled = await mkNode('tasks:disabled-selected', { properties: forHost('claudeSkill', 'disabled-selected', false) });
+    const removed = await selectedPlan({ nodes: [disabled.id], host: 'claudeSkill', files: [{
+      dirName: 'disabled-selected', nodeId: disabled.id, headerHash: 'a'.repeat(16), fileHash: 'a'.repeat(16),
+    }] });
+    expect(removed.entries[0]).toMatchObject({ class: 'disabled', exportPlan: { action: 'REMOVE' } });
+  });
+
+  it('does not charge a large other-host no-op against the selected host body ceiling', async () => {
+    const codexOnly = await mkNode('tasks:huge-codex-only', {
+      properties: forHost('codexSkill', 'huge-codex-only'), content: 'x'.repeat(1_100_000),
+    });
+    const claude = await mkNode('tasks:small-claude', {
+      properties: forHost('claudeSkill', 'small-claude'),
+    });
+    const got = await selectedPlan({ nodes: [codexOnly.id, claude.id], host: 'claudeSkill' });
+    expect(got.entries).toHaveLength(1);
+    expect(got.entries[0]).toMatchObject({ nodeId: claude.id, exportPlan: { action: 'WRITE' } });
+    expect(got.selectionResults).toMatchObject([{ ref: codexOnly.id, action: 'SKIP', reason: { code: 'host-not-declared' } }]);
+    expect(got.scanned).toBe(2);
+    expect(got.judged).toBe(1);
+
+    await expect(selectedPlan({ nodes: [codexOnly.id], host: 'codexSkill' })).rejects.toMatchObject({
+      extensions: { code: 'BAD_USER_INPUT' },
+    });
+  });
+
+  it('never renders a selected locked source, even with force', async () => {
+    const locked = await mkNode('tasks:selected-locked', {
+      properties: forHost('claudeSkill', 'selected-locked'), content: 'enc:v1:AAAA:BBBB:CCCC',
+    });
+    const got = await selectedPlan({ nodes: [locked.id], host: 'claudeSkill', force: true, files: [{
+      dirName: 'selected-locked', nodeId: locked.id, headerHash: '', fileHash: '',
+    }] });
+    expect(got.entries[0]).toMatchObject({ class: 'unavailable', renderedBody: null, exportPlan: {
+      action: 'SKIP', preservesExistingFile: true, reasons: [{ code: 'unavailable' }],
+    } });
+    expect(got.selectionResults).toEqual([]);
+    expect(got.orphans).toEqual([]);
   });
 });

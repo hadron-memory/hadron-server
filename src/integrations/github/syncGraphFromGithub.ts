@@ -1,4 +1,6 @@
 import { createDecipheriv } from 'crypto';
+import { GraphQLError } from 'graphql';
+import { assertPlaceholderKeepsSpecRole, placeholderFillPatch } from '../../lib/specCorpus.js';
 import { governedSignalsFromMirror } from '../../lib/governedSignals.js';
 import { lockMemoryConfigShared, mergedGovernedState, strictParentRefusingRole } from '../../lib/governedRole.js';
 import { authoredContentChanged, clearNodeAuthorship } from '../../lib/nodeAuthorship.js';
@@ -82,6 +84,21 @@ export function describeSkippedUndeclaredRole(s: SkippedUndeclaredRole): string 
   return `${s.loc} (role "${s.role}", strict parent "${s.strictParent}")`;
 }
 
+export class GitSyncEncryptedMemoryError extends Error {
+  constructor() {
+    super('Git sync cannot write an encrypted memory without its data key.');
+    this.name = 'GitSyncEncryptedMemoryError';
+  }
+}
+
+async function assertGitSyncMemoryPlaintext(tx: Prisma.TransactionClient, memoryId: string): Promise<void> {
+  await tx.$queryRaw`SELECT "id" FROM "memories" WHERE "id" = ${memoryId} FOR SHARE`;
+  const memory = await tx.memory.findUniqueOrThrow({
+    where: { id: memoryId }, select: { isEncrypted: true },
+  });
+  if (memory.isEncrypted) throw new GitSyncEncryptedMemoryError();
+}
+
 /** Apply a Git-owned update without bypassing the live-revision contract. */
 export async function updateNodeFromGitSync(
   tx: Prisma.TransactionClient,
@@ -101,6 +118,7 @@ export async function updateNodeFromGitSync(
   if (!owner || owner.memoryId !== expectedMemoryId) {
     throw new GitSyncTargetMovedError(current.id, expectedMemoryId);
   }
+  await assertGitSyncMemoryPlaintext(tx, expectedMemoryId);
   // Unrevisioned drift gets its OWN revision before the Git edit's, never
   // folded into it (@codex P1 / @copilot, PR #1339) — the same order as the
   // GraphQL and MCP update paths. A swap base is exempt: its row was
@@ -115,6 +133,22 @@ export async function updateNodeFromGitSync(
   // captured pre-sync row rather than that mechanical waypoint.
   const before = revisionBase ?? locked;
   if (extra) update = { ...update, ...extra(locked) };
+  // #1450 (@codex P2, PR #1452): a placeholder stays a spec until it is
+  // written. Sync's rule for a file that would break an invariant applies (one
+  // bad file must not block the memory, and no nonconforming record is
+  // written): the stored role is KEPT, the rest of the file still applies, and
+  // the file is reported. Filtered BEFORE the diff (@codex P2, PR #1452): a
+  // kept role is not a change, so it must not record a revision.
+  if ('role' in update) {
+    try {
+      assertPlaceholderKeepsSpecRole(locked, { role: update.role as string | null, content: update.content });
+    } catch (e) {
+      if (!(e instanceof GraphQLError) || e.extensions?.code !== 'SPEC_PLACEHOLDER_ROLE_LOCKED') throw e;
+      console.warn(`[syncGraphFromGithub] kept role 'spec' on unwritten placeholder ${locked.loc}: ${e.message}`);
+      const { role: _kept, ...rest } = update;
+      update = rest;
+    }
+  }
   const changes = diffNodeChanges(before, update);
 
   if (changes.length > 0) {
@@ -133,6 +167,9 @@ export async function updateNodeFromGitSync(
     data: {
       ...(update as Prisma.NodeUncheckedUpdateInput),
       ...(authoredContentChanged(changes) ? clearNodeAuthorship() : {}),
+      // #1450 (@codex P2, PR #1452): filling a reserved citation by editing its
+      // mirrored file writes the spec, same as updateSpecNode.
+      ...placeholderFillPatch(locked, update.content),
       revisionContentHash: revisionStateHashRefreshMarker(),
     },
   });
@@ -218,6 +255,13 @@ export const syncGraphFromGithub = async (
     // showed a memory that simply never synced. Caught by the test below, not
     // by reading this.
     validateMemorySource(graph.source);
+
+    // Avoid clone/pull work for an encrypted memory. The transaction below
+    // repeats this check under a row lock because this preflight can go stale.
+    const encryptionState = await db.memory.findUnique({
+      where: { id: graph.id }, select: { isEncrypted: true },
+    });
+    if (encryptionState?.isEncrypted) throw new GitSyncEncryptedMemoryError();
 
     // Update sync status to SYNCING
     await db.memory.update({
@@ -380,6 +424,11 @@ export const syncGraphFromGithub = async (
         graph.id,
         writableLocs,
       );
+      // Moves take their source path before their Memory row lock. Take the
+      // Git path set first too, then fence the encryption flag before any
+      // NodeRevision or Node write. Holding FOR SHARE while waiting for a
+      // move's path would deadlock against its FOR NO KEY UPDATE Memory lock.
+      await assertGitSyncMemoryPlaintext(tx, graph.id);
 
       // A move that won before these locks were granted invalidates preflight.
       // Retry the whole collection phase so the endpoint's current memory and

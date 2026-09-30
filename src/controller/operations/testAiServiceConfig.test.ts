@@ -10,6 +10,7 @@ import type { AddressInfo } from 'node:net';
 import { GraphQLError } from 'graphql';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../../test/helpers.js';
+import { typeDefs } from '../../api/graphql/schema/typeDefs.js';
 import { generateId } from '../../lib/id.js';
 import { encryptToken } from '../../lib/tokenCrypto.js';
 import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
@@ -19,12 +20,19 @@ import {
   testAiServiceConfig,
   AI_CONFIG_TEST_LIMIT,
   AI_CONFIG_TEST_TOKEN_RESERVE,
+  // What a default platform-funded test reserves today: the base margin plus
+  // the probe's (default) output cap (#1413, QA #2596).
+  AI_CONFIG_TEST_PROBE_MAX_TOKENS,
   AI_CONFIG_TEST_WINDOW_MS,
   admitTest,
   aiConfigTestLimiterSize,
   resetAiConfigTestLimiter,
   scrub,
 } from './testAiServiceConfig.js';
+
+// What a default platform-funded test reserves: the base margin plus the
+// probe's output cap (#1413, QA #2596).
+const DEFAULT_RESERVE = AI_CONFIG_TEST_TOKEN_RESERVE + AI_CONFIG_TEST_PROBE_MAX_TOKENS;
 
 const SAVED_KEY = 'sk-saved-0123456789';
 const OVERRIDE_KEY = 'sk-override-9876543210';
@@ -151,7 +159,7 @@ describe('testAiServiceConfig (#1378)', () => {
   it('an override tests edited values without saving them, and says so field by field', async () => {
     const cfg = await mkConfig({ organizationId: org.id });
     const r = await test(cfg.id, ctxFor(admin.id), { model: 'GLM-5.4', apiKey: OVERRIDE_KEY, endpoint: `${origin}/other/v4` });
-    expect(r.used).toEqual({ provider: 'SAVED', model: 'OVERRIDE', endpoint: 'OVERRIDE', apiStyle: 'SAVED', key: 'OVERRIDE' });
+    expect(r.used).toEqual({ provider: 'SAVED', model: 'OVERRIDE', endpoint: 'OVERRIDE', apiStyle: 'SAVED', params: 'SAVED', key: 'OVERRIDE' });
     expect(captured[0]).toMatchObject({ path: '/other/v4/chat/completions', auth: `Bearer ${OVERRIDE_KEY}` });
     expect(JSON.stringify(r)).not.toContain(OVERRIDE_KEY);
     const row = await db.aiServiceConfig.findUniqueOrThrow({ where: { id: cfg.id } });
@@ -425,7 +433,7 @@ describe('testAiServiceConfig (#1378)', () => {
   it('platform-funded tests RESERVE quota atomically: concurrent tests cannot both pass a nearly spent allowance (#1385 review)', async () => {
     const limit = defaultQuotaLimit('org', 'llm.tokens');
     // Room for exactly one reservation.
-    await recordQuotaUsage(db, 'org', org.id, 'llm.tokens', limit, limit - AI_CONFIG_TEST_TOKEN_RESERVE - 10);
+    await recordQuotaUsage(db, 'org', org.id, 'llm.tokens', limit, limit - DEFAULT_RESERVE - 10);
     const host = await db.hadronServer.create({ data: { id: generateId(), url: 'https://test.hadron.local' } });
     const cfg = await mkConfig({ hadronServerId: host.id });
     const [a, b] = await Promise.all([
@@ -437,7 +445,7 @@ describe('testAiServiceConfig (#1378)', () => {
     expect(captured).toHaveLength(1);
     // Settled to the real spend (13 tokens), the unused reservation returned.
     const counter = await db.quotaCounter.findFirstOrThrow({ where: { scopeId: org.id, action: 'llm.tokens' } });
-    expect(counter.used).toBe(limit - AI_CONFIG_TEST_TOKEN_RESERVE - 10 + 13);
+    expect(counter.used).toBe(limit - DEFAULT_RESERVE - 10 + 13);
   });
 
   it('a platform Bedrock probe on the AWS credential chain withholds provider text it cannot redact (#1385 review)', async () => {
@@ -462,11 +470,11 @@ describe('testAiServiceConfig (#1378)', () => {
   });
 
   it('a low stored allowance that fits the probe is still testable (#1385 review)', async () => {
-    const limit = AI_CONFIG_TEST_TOKEN_RESERVE + 10;
+    const limit = DEFAULT_RESERVE + 10;
     await db.quotaCounter.create({
       data: { id: generateId(), scopeKind: 'org', scopeId: org.id, action: 'llm.tokens', window: 'day', used: 0, limit, resetAt: new Date(Date.now() + 86_400_000) },
     });
-    expect(AI_CONFIG_TEST_TOKEN_RESERVE).toBeLessThanOrEqual(64);
+    expect(DEFAULT_RESERVE).toBe(AI_CONFIG_TEST_TOKEN_RESERVE + AI_CONFIG_TEST_PROBE_MAX_TOKENS);
     const host = await db.hadronServer.create({ data: { id: generateId(), url: 'https://test.hadron.local' } });
     const cfg = await mkConfig({ hadronServerId: host.id });
     const r = await test(cfg.id, ctxFor(admin.id, { roles: ['ADMIN'], organizationId: org.id }));
@@ -550,7 +558,7 @@ describe('testAiServiceConfig (#1378)', () => {
         where: { scopeId: org.id, action: 'llm.tokens' },
         data: { used: 50, resetAt: new Date(Date.now() + 2 * 86_400_000) },
       });
-      return { text: 'OK', tokensIn: AI_CONFIG_TEST_TOKEN_RESERVE + 30, tokensOut: 10, provider: 'glm', model: 'GLM-5.3' } as never;
+      return { text: 'OK', tokensIn: DEFAULT_RESERVE + 30, tokensOut: 10, provider: 'glm', model: 'GLM-5.3' } as never;
     };
     const r = await testAiServiceConfig(ctxFor(admin.id, { roles: ['ADMIN'], organizationId: org.id }), cfg.id, {}, {
       generate: heavy,
@@ -565,14 +573,14 @@ describe('testAiServiceConfig (#1378)', () => {
   it('excess within the same window is charged (#1385 review)', async () => {
     const host = await db.hadronServer.create({ data: { id: generateId(), url: 'https://test.hadron.local' } });
     const cfg = await mkConfig({ hadronServerId: host.id });
-    const heavy = async () => ({ text: 'OK', tokensIn: AI_CONFIG_TEST_TOKEN_RESERVE + 30, tokensOut: 10, provider: 'glm', model: 'GLM-5.3' }) as never;
+    const heavy = async () => ({ text: 'OK', tokensIn: DEFAULT_RESERVE + 30, tokensOut: 10, provider: 'glm', model: 'GLM-5.3' }) as never;
     await testAiServiceConfig(ctxFor(admin.id, { roles: ['ADMIN'], organizationId: org.id }), cfg.id, {}, {
       generate: heavy,
       now: () => Date.now(),
       timeoutMs: 5_000,
       preflight: () => {},
     });
-    expect((await db.quotaCounter.findFirstOrThrow({ where: { scopeId: org.id, action: 'llm.tokens' } })).used).toBe(AI_CONFIG_TEST_TOKEN_RESERVE + 40);
+    expect((await db.quotaCounter.findFirstOrThrow({ where: { scopeId: org.id, action: 'llm.tokens' } })).used).toBe(DEFAULT_RESERVE + 40);
   });
 
   it('a reservation is only released into the window it was taken from: a rollover mid-probe keeps the new day\'s usage (#1385 review)', async () => {
@@ -617,5 +625,85 @@ describe('testAiServiceConfig (#1378)', () => {
     }
     expect(caught?.extensions).toMatchObject({ code: 'RATE_LIMITED' });
     expect(captured).toHaveLength(AI_CONFIG_TEST_LIMIT);
+  });
+});
+
+describe('testAiServiceConfig override.params (#2504 evidence)', () => {
+  it('an edited params override is TESTED, not the saved ones, and is never stored', async () => {
+    // The contract the portal needs (Gil #2504): an admin edits Parameters
+    // (maxTokens, toolCalling, …) and presses Test — the override must carry
+    // them, validated exactly as a save validates params (including the
+    // params.baseUrl refusal), used for the call, and never written back.
+    expect(typeDefs).toMatch(/input AiServiceConfigTestOverride \{[\s\S]*?params: JSON/);
+    const cfg = await mkConfig({ organizationId: org.id, params: { maxTokens: 32 } });
+    const r = await test(cfg.id, ctxFor(admin.id), { params: { maxTokens: 8 } });
+    expect(r.used).toMatchObject({ params: 'OVERRIDE' });
+    expect(captured[0].body).toMatchObject({ max_tokens: 8 });
+    expect((await db.aiServiceConfig.findUnique({ where: { id: cfg.id } }))?.params).toEqual({ maxTokens: 32 });
+  });
+
+  it('an override params.baseUrl is refused exactly as a save refuses it', async () => {
+    const cfg = await mkConfig({ organizationId: org.id, params: { maxTokens: 32 } });
+    await expect(test(cfg.id, ctxFor(admin.id), { params: { baseUrl: 'https://evil.example' } })).rejects.toMatchObject({
+      message: expect.stringMatching(/baseUrl is no longer read/),
+      extensions: { code: 'AiConfigValidationError' },
+    });
+    expect(captured).toEqual([]);
+  });
+});
+
+describe('testAiServiceConfig override.params null/clear semantics (#1413)', () => {
+  it('params: null tests the edit that CLEARS them: provider defaults sent, used.params = OVERRIDE, row untouched', async () => {
+    const cfg = await mkConfig({ organizationId: org.id, params: { maxTokens: 32 } });
+    const r = await test(cfg.id, ctxFor(admin.id), { params: null });
+    expect(r.used).toMatchObject({ params: 'OVERRIDE' });
+    // 16 is the client default; the saved 32 must NOT be sent.
+    expect(captured[0].body).toMatchObject({ max_tokens: 16 });
+    expect((await db.aiServiceConfig.findUnique({ where: { id: cfg.id } }))?.params).toEqual({ maxTokens: 32 });
+  });
+
+  it('omitted params keep testing the SAVED ones, and an invalid edited params pair is refused as a save would', async () => {
+    const cfg = await mkConfig({ organizationId: org.id, params: { maxTokens: 32 } });
+    const r = await test(cfg.id, ctxFor(admin.id));
+    expect(r.used).toMatchObject({ params: 'SAVED' });
+    // The probe's cap is its own: a saved maxTokens above it is capped on the
+    // wire (QA #2596) — validation still exercised the saved value.
+    expect(captured[0].body).toMatchObject({ max_tokens: 16 });
+    // Validated against the EFFECTIVE provider: an anthropic override meets
+    // anthropic's schema, an openai override meets openai's (maxTokens is
+    // well-known and type-checked for every provider).
+    await expect(
+      test(cfg.id, ctxFor(admin.id), { provider: 'openai', params: { maxTokens: 1.5 } }),
+    ).rejects.toMatchObject({ extensions: { code: 'UnknownAiProviderError' } });
+    expect(captured).toHaveLength(1); // no second call
+  });
+});
+
+describe('testAiServiceConfig override.params review round (#1415)', () => {
+  it('a corrected override can TEST A REPAIR of stale invalid saved params, as updateAiServiceConfig accepts it', async () => {
+    // Raw-created row bypassing save validation: a legacy pair no save would
+    // accept today. The override is the edit that fixes it — the test must
+    // judge the RESULTING pair, not refuse on the saved one.
+    const cfg = await mkConfig({ organizationId: org.id, params: { maxTokens: 1.5 } });
+    const r = await test(cfg.id, ctxFor(admin.id), { params: { maxTokens: 64 } });
+    expect(r.used).toMatchObject({ params: 'OVERRIDE' });
+    expect(captured[0].body).toMatchObject({ max_tokens: 16 });
+    expect((await db.aiServiceConfig.findUnique({ where: { id: cfg.id } }))?.params).toEqual({ maxTokens: 1.5 });
+  });
+
+  it('the probe output is HARD-CAPPED regardless of the edited or saved maxTokens', async () => {
+    for (const params of [{ maxTokens: 99999 }, undefined]) {
+      captured.length = 0;
+      const cfg = await mkConfig({ organizationId: org.id, ...(params ? { params } : {}) });
+      const ovr = params ? { params: { maxTokens: 99999 } } : { params: { maxTokens: 99999 } };
+      const r = await test(cfg.id, ctxFor(admin.id), ovr);
+      expect(r.ok).toBe(true);
+      expect(captured[0].body).toMatchObject({ max_tokens: 16 });
+    }
+    // Saved-only path too: the saved value is capped on the wire the same way.
+    captured.length = 0;
+    const cfg = await mkConfig({ organizationId: org.id, params: { maxTokens: 99999 } });
+    await test(cfg.id, ctxFor(admin.id));
+    expect(captured[0].body).toMatchObject({ max_tokens: 16 });
   });
 });

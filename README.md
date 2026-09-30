@@ -67,8 +67,6 @@ pnpm run db:use-pg
 | `RESEND_API_KEY` | — | Resend API key for magic-link emails |
 | `EMAIL_FROM` | `Hadron <noreply@hadrongraph.io>` | Sender address for emails |
 | `JWT_EXPIRY` | `7d` | JWT token lifetime |
-| `TEAM_ATTENTION_PILOT_USER_IDS` | — | Exact comma-separated User PK allowlist for the disabled-by-default #1353 pilot |
-| `TEAM_ATTENTION_PILOT_APP_IDS` | — | Exact comma-separated App PK allowlist; both pilot lists must match |
 | `TEAM_ATTENTION_TOKEN_SECRET` | `JWT_SECRET` | Optional separate HMAC secret for attention tokens and switchover proofs |
 
 See `.env.example` for the full list with generation instructions.

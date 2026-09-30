@@ -87,11 +87,11 @@ describe('resolveSuppliedKey', () => {
     ).rejects.toMatchObject({ code: 'BAD_UNLOCK_INPUT' });
   });
 
-  it('a pre-041 memory (no verifier) accepts a raw key as-supplied', async () => {
+  it('refuses a pre-041 memory without a verifier even when given its old key', async () => {
     const legacy = { kdfSalt: null, kdfParams: null, keyVerifier: null };
     const raw = generateDataKey();
-    const resolved = await resolveSuppliedKey(legacy, { dataKey: raw.raw.toString('base64') });
-    expect(resolved.raw.equals(raw.raw)).toBe(true);
+    await expect(resolveSuppliedKey(legacy, { dataKey: raw.raw.toString('base64') }))
+      .rejects.toMatchObject({ code: 'BAD_UNLOCK_INPUT' });
   });
 });
 
@@ -154,6 +154,16 @@ describe('stageRequestMemoryKeys', () => {
       await expect(
         stageRequestMemoryKeys(db, JSON.stringify([{ memory: memoryId, dataKey: wrong.raw.toString('base64') }]), ownerId),
       ).rejects.toMatchObject({ code: 'WRONG_KEY' });
+      expect(sessionKeyCache.getByMemoryId(memoryId)).toBeNull();
+    });
+  });
+
+  it('refuses a verifier-less memory before staging a request key', async () => {
+    await db.memory.update({ where: { id: memoryId }, data: { keyVerifier: null } });
+    await requestKeyStorage.run(new Map(), async () => {
+      await expect(stageRequestMemoryKeys(
+        db, JSON.stringify([{ memory: memoryId, dataKey: key.raw.toString('base64') }]), ownerId,
+      )).rejects.toMatchObject({ code: 'BAD_UNLOCK_INPUT' });
       expect(sessionKeyCache.getByMemoryId(memoryId)).toBeNull();
     });
   });

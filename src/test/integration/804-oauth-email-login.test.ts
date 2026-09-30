@@ -30,7 +30,7 @@ import { createServer as createHttpServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { createHash } from 'node:crypto';
 import { buildOAuthRouter } from '../../auth/oauth.js';
-import { buildEmailRecipientRateLimit } from '../../auth/email.js';
+import { buildEmailRecipientRateLimit, buildEmailSendPerIpRateLimit } from '../../auth/email.js';
 import { createServer } from '../../server.js';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../helpers.js';
@@ -154,12 +154,13 @@ async function startEmailEntryFlow(query?: string): Promise<{
 /** Submit POST /oauth/authorize/email as an anonymous browser form. */
 async function postAuthorizeEmail(
   fields: Record<string, string>,
-  opts: { csrfCookieValue?: string; ip?: string } = {},
+  opts: { csrfCookieValue?: string; ip?: string; signal?: AbortSignal } = {},
 ): Promise<Response> {
   const csrfCookie = opts.csrfCookieValue ? `_hadron_csrf=${opts.csrfCookieValue}` : '';
   return fetch(`${baseUrl}/oauth/authorize/email`, {
     method: 'POST',
     redirect: 'manual',
+    signal: opts.signal,
     headers: {
       'content-type': 'application/x-www-form-urlencoded',
       ...(csrfCookie ? { cookie: csrfCookie } : {}),
@@ -309,6 +310,96 @@ describe('POST /oauth/authorize/email', () => {
     const res = await postAuthorizeEmail(fields, { csrfCookieValue });
     expect(res.status).toBe(400);
     expect(sendMagicLinkMock).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * #1239 — an admitted send must consume the per-IP budget even if the client
+ * closes before the handler answers, and both public send routes share it.
+ * `sendMagicLink` is stubbed; no message leaves this process.
+ */
+describe('#1239 — shared, non-refunding email-send IP budget', () => {
+  it('counts an OAuth send after the client aborts while mail is in flight', async () => {
+    const ip = '198.51.100.230';
+    const { csrfToken, csrfCookieValue, returnTo } = await startEmailEntryFlow();
+
+    for (let i = 0; i < 10; i++) {
+      let markEntered!: () => void;
+      const entered = new Promise<void>((resolve) => { markEntered = resolve; });
+      let releaseSend!: () => void;
+      sendMagicLinkMock.mockImplementationOnce(() => {
+        markEntered();
+        return new Promise<void>((resolve) => { releaseSend = resolve; });
+      });
+      const controller = new AbortController();
+      const pending = postAuthorizeEmail(
+        { _csrf: csrfToken, return_to: returnTo, email: `aborted-${i}@example.test` },
+        { csrfCookieValue, ip, signal: controller.signal },
+      );
+      await entered; // The request passed CSRF, validation, and both limiters.
+      controller.abort();
+      await expect(pending).rejects.toThrow();
+      // Let the server observe res.close while sendMagicLink is still pending.
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      releaseSend(); // Node still completes the mail side effect after disconnect.
+    }
+
+    const blocked = await postAuthorizeEmail(
+      { _csrf: csrfToken, return_to: returnTo, email: 'after-aborts@example.test' },
+      { csrfCookieValue, ip },
+    );
+    expect(blocked.status).toBe(429);
+    expect(sendMagicLinkMock).toHaveBeenCalledTimes(10);
+
+    const otherIp = await postAuthorizeEmail(
+      { _csrf: csrfToken, return_to: returnTo, email: 'other-ip-after-aborts@example.test' },
+      { csrfCookieValue, ip: '198.51.100.231' },
+    );
+    expect(otherIp.status).toBe(200);
+  });
+
+  it('shares one IP budget across /auth/email and /oauth/authorize/email', async () => {
+    const ip = '198.51.100.232';
+    for (let i = 0; i < 10; i++) {
+      const res = await fetch(`${baseUrl}/auth/email`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-forwarded-for': ip },
+        body: JSON.stringify({ email: `cross-route-${i}@example.test`, client_state: 'nonce' }),
+      });
+      expect(res.status).toBe(200);
+    }
+
+    const { csrfToken, csrfCookieValue, returnTo } = await startEmailEntryFlow();
+    const blocked = await postAuthorizeEmail(
+      { _csrf: csrfToken, return_to: returnTo, email: 'cross-route-oauth@example.test' },
+      { csrfCookieValue, ip },
+    );
+    expect(blocked.status).toBe(429);
+    expect(sendMagicLinkMock).toHaveBeenCalledTimes(10);
+
+    const otherIp = await postAuthorizeEmail(
+      { _csrf: csrfToken, return_to: returnTo, email: 'cross-route-control@example.test' },
+      { csrfCookieValue, ip: '198.51.100.233' },
+    );
+    expect(otherIp.status).toBe(200);
+  });
+
+  it('rejects no-send OAuth submissions before charging the IP budget', async () => {
+    const ip = '198.51.100.234';
+    const { csrfToken, csrfCookieValue, returnTo } = await startEmailEntryFlow();
+    for (let i = 0; i < 11; i++) {
+      const rejected = await postAuthorizeEmail(
+        { _csrf: csrfToken, return_to: 'https://bad.example/path', email: 'victim@example.test' },
+        { csrfCookieValue, ip },
+      );
+      expect(rejected.status).toBe(400);
+    }
+    const valid = await postAuthorizeEmail(
+      { _csrf: csrfToken, return_to: returnTo, email: 'victim@example.test' },
+      { csrfCookieValue, ip },
+    );
+    expect(valid.status).toBe(200);
+    expect(sendMagicLinkMock).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -678,27 +769,15 @@ describe('#560 — refused OAuth submissions do not spend the shared budget', ()
 });
 
 /**
- * #560 — the recipient brake is present even when nobody injects one.
+ * #560/#1239 — bare OAuth router mounts keep both send limiters. The options
+ * let createServer inject the SAME instances used by /auth/email; omitting
+ * either option must create a local limiter, never disable that protection.
  *
- * @copilot on PR #1238: `emailRecipientRateLimit` is an option, and an option
- * that defaults to OFF is a defence that goes missing without anyone editing
- * the route. `buildOAuthRouter()` with no arguments — which
- * 025-oauth-register.test.ts does — would have mounted this route with no
- * per-recipient cap at all.
- *
- * This asserts the middleware STACK rather than a response, deliberately, and
- * the first version of it did the opposite and proved nothing. Driving the
- * route on a bare mount returns 403 at CSRF before the limiter is ever
- * reached, so every status is a 403 whether the limiter is mounted or not —
- * an assertion that cannot fail. Reaching it for real needs the full CSRF
- * handshake, which is what the shared-budget cases above already cover on the
- * properly-wired server.
- *
- * What is actually at risk here is the WIRING: a limiter silently absent from
- * one mount. So that is what gets measured — with the injected instance and
- * without it, the route must carry the same number of handlers.
+ * A bare mount cannot be probed through a CSRF-less POST: it returns 403
+ * before either limiter. Compare middleware stacks here, while the HTTP cases
+ * above verify the shared-store behavior on the real server mount.
  */
-describe('#560 — an un-injected OAuth router still throttles by recipient', () => {
+describe('#560/#1239 — a bare OAuth router still mounts both send limiters', () => {
   /** Handler count for POST /oauth/authorize/email in a built router. */
   function emailRouteHandlerCount(router: ReturnType<typeof buildOAuthRouter>): number {
     const layer = (router as unknown as {
@@ -708,9 +787,12 @@ describe('#560 — an un-injected OAuth router still throttles by recipient', ()
     return layer!.route!.stack.length;
   }
 
-  it('mounts the same handler chain with and without an injected limiter', () => {
+  it('mounts the same handler chain with and without injected limiters', () => {
     const injected = emailRouteHandlerCount(
-      buildOAuthRouter({ emailRecipientRateLimit: buildEmailRecipientRateLimit() }),
+      buildOAuthRouter({
+        emailSendPerIpRateLimit: buildEmailSendPerIpRateLimit(),
+        emailRecipientRateLimit: buildEmailRecipientRateLimit(),
+      }),
     );
     const bare = emailRouteHandlerCount(buildOAuthRouter());
 

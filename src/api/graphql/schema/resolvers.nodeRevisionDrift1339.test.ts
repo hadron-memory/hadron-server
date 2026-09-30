@@ -45,21 +45,51 @@ async function driftedNode(loc: string) {
   return node;
 }
 
-describe('#1339 review — drift is reconciled before the guard and the edit', () => {
-  it('a write guarded on the pre-drift revision is REFUSED, and writes nothing', async () => {
+describe('#1339/#1454 — drift is reconciled before the guard and the edit', () => {
+  it('a stale guarded edit refuses once, persists drift, and succeeds after a fresh read', async () => {
     const node = await driftedNode('drift:guarded');
-    const attempt = writeNodeCore({ memoryId, loc: node.loc, content: 'blind overwrite' }, ctx(), 'update', {
-      guardRevSeq: 1,
-    });
-    await expect(attempt).rejects.toSatisfy(
-      (e: unknown) => e instanceof GraphQLError && e.extensions.code === 'NODE_WRITE_CONFLICT',
+    const edit = (guardRevSeq: number) => writeNodeCore(
+      { memoryId, loc: node.loc, content: 'blind overwrite' }, ctx(), 'update', { guardRevSeq },
     );
+    const conflict = (e: unknown) => e instanceof GraphQLError && e.extensions.code === 'NODE_WRITE_CONFLICT';
+
+    await expect(edit(1)).rejects.toSatisfy(conflict);
     const after = await db.node.findUniqueOrThrow({ where: { id: node.id } });
     expect(after.content).toBe('changed by a raw writer');
-    // The refusal rolls back EVERYTHING, the drift reconcile included: a refused
-    // write consumes no revision and leaves no history (@copilot, PR #1339).
-    expect(after.revSeq).toBe(1);
-    expect(await db.nodeRevision.count({ where: { nodeId: node.id } })).toBe(0);
+    expect(after.revSeq).toBe(2);
+    let history = await db.nodeRevision.findMany({ where: { nodeId: node.id }, orderBy: { revNo: 'asc' } });
+    expect(history.map((r) => r.revNo)).toEqual([1]);
+    expect(history[0]!.revLabel).toMatch(/Reconciled state changed outside a revisioned writer/);
+    expect(history[0]!.editedBy).toBeNull();
+
+    // Replaying the old token remains a refusal and creates no second drift
+    // snapshot; the client must re-read the now-current revision.
+    await expect(edit(1)).rejects.toSatisfy(conflict);
+    expect((await db.node.findUniqueOrThrow({ where: { id: node.id } })).revSeq).toBe(2);
+    expect(await db.nodeRevision.count({ where: { nodeId: node.id } })).toBe(1);
+
+    const updated = await edit(after.revSeq);
+    expect(updated.revSeq).toBe(3);
+    expect(updated.content).toBe('blind overwrite');
+    history = await db.nodeRevision.findMany({ where: { nodeId: node.id }, orderBy: { revNo: 'asc' } });
+    expect(history.map((r) => r.revNo)).toEqual([1, 2]);
+    expect(history[1]!.content).toBe('changed by a raw writer');
+    expect(history[1]!.editedBy).toBe(admin.id);
+  });
+
+  it('a canonical revision read reconciles drift before a guarded edit', async () => {
+    const node = await driftedNode('drift:read-first');
+    const parent = await db.node.findUniqueOrThrow({ where: { id: node.id } });
+    const freshRevision = await resolvers.Node.revision(parent as never, {}, ctx());
+    expect(freshRevision).toBe(2);
+    const updated = await writeNodeCore(
+      { memoryId, loc: node.loc, content: 'edit after read' }, ctx(), 'update', { guardRevSeq: freshRevision },
+    );
+    expect(updated.revSeq).toBe(3);
+    const history = await db.nodeRevision.findMany({ where: { nodeId: node.id }, orderBy: { revNo: 'asc' } });
+    expect(history.map((r) => r.revNo)).toEqual([1, 2]);
+    expect(history[0]!.revLabel).toMatch(/Reconciled state changed outside a revisioned writer/);
+    expect(history[1]!.content).toBe('changed by a raw writer');
   });
 
   it('an unguarded edit over drift yields TWO revisions: the reconcile, then the edit', async () => {
@@ -79,6 +109,34 @@ describe('#1339 review — drift is reconciled before the guard and the edit', (
     const node = await db.node.create({ data: { id: generateId(), memoryId, loc: 'drift:none', name: 'n', content: 'x' } });
     const updated = await writeNodeCore({ memoryId, loc: node.loc, content: 'y' }, ctx(), 'update', { guardRevSeq: 1 });
     expect(updated.revSeq).toBe(2);
+  });
+
+  // @codex P2, PR #1458: a token that happens to equal the revision the
+  // reconcile is about to mint cannot name drift nobody has read yet.
+  it('a guard equal to the post-reconcile revision is still refused, and only the drift commits', async () => {
+    const node = await driftedNode('drift:aba');
+    await expect(
+      writeNodeCore({ memoryId, loc: node.loc, content: 'guessed overwrite' }, ctx(), 'update', { guardRevSeq: 2 }),
+    ).rejects.toSatisfy((e: unknown) => e instanceof GraphQLError && e.extensions.code === 'NODE_WRITE_CONFLICT');
+    const after = await db.node.findUniqueOrThrow({ where: { id: node.id } });
+    expect(after).toMatchObject({ content: 'changed by a raw writer', revSeq: 2 });
+    const history = await db.nodeRevision.findMany({ where: { nodeId: node.id } });
+    expect(history).toHaveLength(1);
+    expect(history[0]!.revLabel).toMatch(/Reconciled state changed outside a revisioned writer/);
+
+    // The same token is now a legitimate read of the reconciled state.
+    const updated = await writeNodeCore(
+      { memoryId, loc: node.loc, content: 'edit after reconcile' }, ctx(), 'update', { guardRevSeq: 2 },
+    );
+    expect(updated).toMatchObject({ content: 'edit after reconcile', revSeq: 3 });
+  });
+
+  it('a legacy null fingerprint is backfilled without refusing a current guard', async () => {
+    const node = await db.node.create({ data: { id: generateId(), memoryId, loc: 'drift:legacy', name: 'l', content: 'x' } });
+    await db.node.update({ where: { id: node.id }, data: { revisionContentHash: null } });
+    const updated = await writeNodeCore({ memoryId, loc: node.loc, content: 'y' }, ctx(), 'update', { guardRevSeq: 1 });
+    expect(updated).toMatchObject({ content: 'y', revSeq: 2 });
+    expect(await db.nodeRevision.count({ where: { nodeId: node.id } })).toBe(1);
   });
 });
 
@@ -276,4 +334,3 @@ describe('#1339 review round 9', () => {
     expect(await db.nodeRevision.count({ where: { nodeId: node.id } })).toBe(1);
   });
 });
-

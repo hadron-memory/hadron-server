@@ -1,6 +1,6 @@
 // Workers — #974 (re-cut): the named casting of an installed Agent into an
 // App (cor:dmo:050:11, cor:agt:020:01/:02). A persona is universal DRESSING on
-// an Agent (`personaRole` + the `personaPrompt` template); the Worker is the
+// an Agent (`personaRole` + the `systemPrompt` template); the Worker is the
 // local named identity ("Iris") that does attributable work. `castWorker`
 // supersedes `createTeamPersona`'s minting semantics: it no longer mints an
 // Agent at all — it casts an EXISTING installed agent under a name, allocating
@@ -513,17 +513,12 @@ function nameTaken(name: string, appId: string): GraphQLError {
 }
 
 /**
- * App-scoped critical section for REGISTER semantics (#984 review, Codex P1):
- * `SELECT … FOR UPDATE` on the Team Agent's system-memory row serializes every
- * register-consuming operation — role-definition writes (create/updateTeamRole,
- * whose check-then-write invariant runs would otherwise interleave: two
- * concurrent creates can each observe a name absent and both persist it) and
- * register-mode casting (which reads the register and mints against it). The
- * transaction is a LOCK BRACKET only: the work inside may run its own queries
- * and transactions on other pool connections (`writeNodeCore` does), which is
- * safe because the bracket commits — releasing the lock — only after `fn`
- * resolves. The `ensureWorklogSchema` FOR-UPDATE pattern, held across the
- * whole read-check-write window.
+ * App-scoped critical section for role-definition writes. The transaction is
+ * a LOCK BRACKET: `fn` runs on other pool connections, so its node writes must
+ * not wait on a row lock held here. A memory-row NO KEY UPDATE bracket worked
+ * while the nested writes only needed FK KEY SHARE, but the encryption-flip
+ * fence now takes FOR SHARE on that row. Use a dedicated advisory key to
+ * serialize role writes without blocking their own Memory fence.
  *
  * #1050 — renamed from `withRegisterLock`. It no longer guards a name
  * register (there is none); what it still guards is a role DEFINITION write:
@@ -538,14 +533,7 @@ export async function withRoleWriteLock<T>(
 ): Promise<T> {
   return ctx.db.$transaction(
     async (tx) => {
-      // FOR NO KEY UPDATE, deliberately NOT FOR UPDATE: the bracketed work
-      // INSERTS child rows referencing this memory (nodes via writeNodeCore),
-      // and an FK check takes FOR KEY SHARE on the referenced row from a
-      // DIFFERENT connection — which FOR UPDATE blocks, deadlocking the
-      // bracket against its own work until timeout. NO KEY UPDATE conflicts
-      // with other NO KEY UPDATE / UPDATE lockers (the mutual exclusion we
-      // want) while admitting KEY SHARE (the FK checks we cause).
-      await tx.$queryRaw`SELECT id FROM memories WHERE id = ${systemMemoryId} FOR NO KEY UPDATE`;
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${'role-write:' + systemMemoryId}))`;
       return fn();
     },
     // Generous: the bracket spans a full node write including the git mirror.
@@ -649,7 +637,7 @@ type CastArgs = {
 type CastTarget = {
   appId: string;
   app: AppRow & { deletedAt: Date | null };
-  agent: { id: string; name: string; personaRole: string | null; personaPrompt: string | null };
+  agent: { id: string; name: string; personaRole: string | null; systemPrompt: string | null };
   workerRole: string | null;
   requestedName: string | null;
   override: string | null;
@@ -709,7 +697,7 @@ async function resolveCastTarget(ctx: Context, args: CastArgs): Promise<CastTarg
       where: { appId_agentId: { appId, agentId: id } },
       select: {
         agent: {
-          select: { id: true, name: true, personaRole: true, personaPrompt: true, deletedAt: true },
+          select: { id: true, name: true, personaRole: true, systemPrompt: true, deletedAt: true },
         },
       },
     });
@@ -731,7 +719,7 @@ async function resolveCastTarget(ctx: Context, args: CastArgs): Promise<CastTarg
       orderBy: { createdAt: 'asc' },
       select: {
         agent: {
-          select: { id: true, name: true, urn: true, personaRole: true, personaPrompt: true, deletedAt: true },
+          select: { id: true, name: true, urn: true, personaRole: true, systemPrompt: true, deletedAt: true },
         },
       },
     });
@@ -1194,7 +1182,7 @@ export const workerMutations = {
    * (cor:agt:020:01), but it could only be set at CASTING time and was
    * immutable thereafter — which inverts the natural order, fixing a casting's
    * individuality at the one moment nobody yet knows what makes it individual.
-   * Neither escape hatch covered it: the role agent's `personaPrompt` is SHARED
+   * Neither escape hatch covered it: the role agent's `systemPrompt` is SHARED
    * by every casting of that role (cor:agt:020:01 explicitly allows several), so
    * anything individual written there is claimed by all of them; and
    * `deleteWorker` + re-cast refuses `WORKER_IN_USE` the moment a session was
@@ -1569,7 +1557,7 @@ export const workerQueries = {
 
     // Prompt composition mirrors Worker.prompt exactly: the agent's template
     // with {{name}}/{{role}} bound, then the override as its own paragraph.
-    const template = agent.personaPrompt ?? null;
+    const template = agent.systemPrompt ?? null;
     const bound = template
       ? applyPersonaTemplate(template, name, workerRole ?? agent.personaRole ?? '')
       : null;
@@ -1738,6 +1726,52 @@ export async function loadAppWorkerActivity(
  * deny (the #552 posture applied field-level, like Worker.app/agent).
  * Memoized per request+App: one gate check covers a whole session page.
  */
+/**
+ * #1090 — one composition of a worker's boot prompt, with the freshness facts
+ * a holder needs to tell whether the text is current. `renderedAt` is stamped
+ * once the text exists (an up-front clock could predate a concurrent template
+ * edit the same query picked up — review P2); `roleAgentUpdatedAt` comes from
+ * the SAME agent read that supplied the template, so the stamp describes the
+ * template actually rendered — a parallel agent read could race an edit and
+ * label an older prompt with a newer time (Andi, #2853). It is the Agent
+ * row's generic `updatedAt` (nullable), NOT a proven persona-template edit
+ * time; no separate prompt-override mtime exists, and none is invented here.
+ * Text is null when there is no template and no override — in that case
+ * callers show no stamps.
+ */
+export async function composeWorkerPrompt(
+  ctx: Context,
+  worker: { id: string; appId: string; agentId: string; name: string; role: string | null; promptOverride: string | null },
+): Promise<{ text: string | null; renderedAt: Date; roleAgentUpdatedAt: Date | null }> {
+  // Working-state path: the composed boot prompt embeds the agent's persona
+  // template, which this loads WITHOUT the Agent read gate — so every caller
+  // must sit behind the worker read gate itself (#983 review; see
+  // maySeeWorkerInternals).
+  if (!(await maySeeWorkerInternals(ctx, worker.appId))) {
+    return { text: null, renderedAt: new Date(), roleAgentUpdatedAt: null };
+  }
+  const agent = await ctx.db.agent.findUnique({
+    where: { id: worker.agentId },
+    select: { systemPrompt: true, personaRole: true, updatedAt: true },
+  });
+  const template = agent?.systemPrompt ?? null;
+  const role = worker.role ?? agent?.personaRole ?? '';
+  const bound = template ? applyPersonaTemplate(template, worker.name, role) : null;
+  const authored = bound && worker.promptOverride ? `${bound}\n\n${worker.promptOverride}` : (worker.promptOverride ?? bound);
+  // Spec 049 Phase 6: the register block is DERIVED data appended through the
+  // one composition point (`renderDerivedBlocks`), never authored prompt text
+  // — evaluated for the reader, so a briefing says what THIS driver may read
+  // and post, and re-renders live like the rest.
+  const derived = renderDerivedBlocks(await resolveRegister(ctx.db, { attendee: { workerId: worker.id }, actor: ctx }));
+  const text = !derived ? authored : authored ? `${authored}\n\n${derived}` : derived;
+  // #1090 review (Andi, P2): stamp the render time AFTER the text exists. A
+  // clock read taken up front could predate a concurrent template edit that
+  // the same query then picked up — an Agent stamp LATER than the claimed
+  // render time. Down here, renderedAt is a lower bound the printed text and
+  // its Agent stamp both satisfy.
+  return { text, renderedAt: new Date(), roleAgentUpdatedAt: agent?.updatedAt ?? null };
+}
+
 async function maySeeWorkerInternals(ctx: Context, appId: string): Promise<boolean> {
   type Cache = Map<string, Promise<boolean>>;
   const holder = ctx as Context & { workerInternalsCache?: Cache };
@@ -2192,7 +2226,7 @@ export const workerFieldResolvers = {
     },
     /**
      * The worker's boot prompt, resolved (cor:agt:020:01 — "how {{name}} and
-     * the override compose is tunable"): the agent's `personaPrompt` template
+     * the override compose is tunable"): the agent's `systemPrompt` template
      * with `{{name}}`/`{{role}}` bound, then the per-worker `promptOverride`
      * appended as its own paragraph. Null when the agent carries no template
      * and the worker no override.
@@ -2201,28 +2235,7 @@ export const workerFieldResolvers = {
       worker: { id: string; appId: string; agentId: string; name: string; role: string | null; promptOverride: string | null },
       _: unknown,
       ctx: Context,
-    ) => {
-      // Working-state field: the composed boot prompt embeds the agent's
-      // persona template, which this resolver loads WITHOUT the Agent read
-      // gate — so it must sit behind the worker read gate itself (#983
-      // review; see maySeeWorkerInternals).
-      if (!(await maySeeWorkerInternals(ctx, worker.appId))) return null;
-      const agent = await ctx.db.agent.findUnique({
-        where: { id: worker.agentId },
-        select: { personaPrompt: true, personaRole: true },
-      });
-      const template = agent?.personaPrompt ?? null;
-      const role = worker.role ?? agent?.personaRole ?? '';
-      const bound = template ? applyPersonaTemplate(template, worker.name, role) : null;
-      const authored = bound && worker.promptOverride ? `${bound}\n\n${worker.promptOverride}` : (worker.promptOverride ?? bound);
-      // Spec 049 Phase 6: the register block is DERIVED data appended through
-      // the one composition point (`renderDerivedBlocks`), never authored
-      // prompt text — evaluated for the reader, so a briefing says what THIS
-      // driver may read and post, and re-renders live like the rest.
-      const derived = renderDerivedBlocks(await resolveRegister(ctx.db, { attendee: { workerId: worker.id }, actor: ctx }));
-      if (!derived) return authored;
-      return authored ? `${authored}\n\n${derived}` : derived;
-    },
+    ) => (await composeWorkerPrompt(ctx, worker)).text,
     /**
      * #1029 — what a fresh binding inherits from the previous stint.
      *

@@ -247,31 +247,37 @@ async function memoryGrants(
   //     (getOrgReadableMemoryIds; app-class is reached via AppMember, not org
   //     membership).
   const memberRole = isHolding ? null : await orgMemberRole(db, memory.organizationId, subject.id);
-  if (memberRole === 'ADMIN' || memberRole === 'OWNER') {
-    grants.push({
-      source: 'ORG_ROLE',
-      role: memberRole,
-      via: await orgUrn(db, memory.organizationId),
-      caps: FULL,
-    });
-  } else if (memberRole === 'CONTRIBUTOR' && !isAppScopedShared) {
-    grants.push({
-      source: 'ORG_ROLE',
-      role: memberRole,
-      via: await orgUrn(db, memory.organizationId),
-      caps: WRITE,
-    });
-  } else if (
-    memberRole === 'READER' &&
-    !isAppScopedShared &&
-    (memory.class === 'knowledge' || memory.class === 'group')
-  ) {
-    grants.push({
-      source: 'ORG_ROLE',
-      role: memberRole,
-      via: await orgUrn(db, memory.organizationId),
-      caps: READ,
-    });
+  // #1208 / cor:acl:010:01 — the org-role tiers mirror the ENFORCED gates,
+  // and for GROUP those gates admit only MemoryMember: the MEMORY_MEMBER
+  // grant at the bottom of this function is group's exclusive membership
+  // source (owner/writer/reader → FULL/WRITE/READ). memberRole stays
+  // computed for the PrincipalGrant block below — org-admin manage/delete
+  // actions are a separate gate the read/write narrowing does not touch, and
+  // this audit's omission of them for group is the safe under-reporting
+  // direction the module's notes already allow.
+  if (memory.class !== 'group') {
+    if (memberRole === 'ADMIN' || memberRole === 'OWNER') {
+      grants.push({
+        source: 'ORG_ROLE',
+        role: memberRole,
+        via: await orgUrn(db, memory.organizationId),
+        caps: FULL,
+      });
+    } else if (memberRole === 'CONTRIBUTOR' && !isAppScopedShared) {
+      grants.push({
+        source: 'ORG_ROLE',
+        role: memberRole,
+        via: await orgUrn(db, memory.organizationId),
+        caps: WRITE,
+      });
+    } else if (memberRole === 'READER' && !isAppScopedShared && memory.class === 'knowledge') {
+      grants.push({
+        source: 'ORG_ROLE',
+        role: memberRole,
+        via: await orgUrn(db, memory.organizationId),
+        caps: READ,
+      });
+    }
   }
 
   // PUBLIC visibility → readable by anyone (but not a per-user holding, and not

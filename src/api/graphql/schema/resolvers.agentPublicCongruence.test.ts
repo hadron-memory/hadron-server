@@ -47,6 +47,13 @@ describe('updateAgent → PUBLIC', () => {
     expect((await setVisibility(agent.id))?.visibility).toBe('ORGANIZATION'); // unchanged
   });
 
+  it('ignores a stored link whose role grants no read when publishing the Agent', async () => {
+    await db.agentMemoryItem.create({
+      data: { id: generateId(), agentId: agent.id, memoryId: orgMem.id, role: 'bogus' },
+    });
+    expect((await M.updateAgent({}, { ref: agent.id, visibility: 'PUBLIC' }, ctx())).visibility).toBe('PUBLIC');
+  });
+
   it('allows when there are no links, or all linked knowledge is PUBLIC', async () => {
     // no links → congruent
     expect((await M.updateAgent({}, { ref: agent.id, visibility: 'PUBLIC' }, ctx())).visibility).toBe('PUBLIC');
@@ -76,6 +83,18 @@ describe('updateAgent → PUBLIC', () => {
     });
     expect((await M.updateAgent({}, { ref: agent.id, visibility: 'PUBLIC' }, ctx())).visibility).toBe('PUBLIC');
   });
+
+  it('a legacy per-user holding is outside the PUBLIC covered set even when its column is non-public', async () => {
+    const holding = await db.memory.create({
+      data: {
+        id: generateId(), organizationId: org.id, urn: `${org.urn}:covered-holding`,
+        name: 'Covered holding', class: 'knowledge', visibility: 'ORGANIZATION',
+        userMemoryOfAgentId: agent.id, createdBy: admin.id,
+      },
+    });
+    await db.agentMemoryItem.create({ data: { agentId: agent.id, memoryId: holding.id, role: 'read-write' } });
+    expect((await M.updateAgent({}, { ref: agent.id, visibility: 'PUBLIC' }, ctx())).visibility).toBe('PUBLIC');
+  });
 });
 
 describe('addMemoryToAgent onto a PUBLIC agent', () => {
@@ -96,6 +115,9 @@ describe('covered-set exclusions — app-scoped memories (#610 review / cor:acl:
     // excluded from the covered set — the createMemoryInApp path can't leave a
     // PUBLIC agent "linked to non-public data" in a way that matters.
     const app = await db.app.create({ data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:app`, name: 'app' } });
+    // The current attach gate admits App-scoped knowledge only read-only to
+    // an Agent installed in that same App. Keep this a supported-path control.
+    await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
     const appMem = await db.memory.create({
       data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:app-know`, name: 'app-know', class: 'knowledge', visibility: 'ORGANIZATION', appId: app.id },
     });
@@ -120,6 +142,15 @@ describe('updateMemory un-PUBLIC-ing knowledge of a PUBLIC agent', () => {
     // once the agent is no longer PUBLIC, the memory can change freely
     await M.updateAgent({}, { ref: agent.id, visibility: 'ORGANIZATION' }, ctx());
     expect((await M.updateMemory({}, { id: pubMem.id, visibility: 'ORGANIZATION' }, ctx())).visibility).toBe('ORGANIZATION');
+  });
+
+  it('ignores a stored link whose role grants no read when narrowing the Memory', async () => {
+    await M.updateAgent({}, { ref: agent.id, visibility: 'PUBLIC' }, ctx());
+    await db.agentMemoryItem.create({
+      data: { id: generateId(), agentId: agent.id, memoryId: pubMem.id, role: 'bogus' },
+    });
+    expect((await M.updateMemory({}, { id: pubMem.id, visibility: 'ORGANIZATION' }, ctx())).visibility)
+      .toBe('ORGANIZATION');
   });
 });
 
@@ -174,11 +205,52 @@ describe('Agent.memoryItems — non-public linked memories are gated (#759)', ()
     expect(items.map((i: { memoryId: string }) => i.memoryId)).toEqual([pubMem.id]);
   });
 
+  it('a malformed link role does not expose a PUBLIC memory through either load path', async () => {
+    await db.agentMemoryItem.update({
+      where: { agentId_memoryId: { agentId: pubAgent.id, memoryId: pubMem.id } },
+      data: { role: 'bogus' },
+    });
+    const eager = await A.memoryItems(await eagerAgent(), {}, anon());
+    const fetched = await A.memoryItems({ id: pubAgent.id }, {}, outsider(stranger.id));
+    expect(eager.map((i: { memoryId: string }) => i.memoryId)).not.toContain(pubMem.id);
+    expect(fetched.map((i: { memoryId: string }) => i.memoryId)).not.toContain(pubMem.id);
+  });
+
   it('the app-scoped memory’s scalars are unreachable to an outsider', async () => {
     const items = await A.memoryItems(await eagerAgent(), {}, outsider(stranger.id));
     const descriptions = items.map((i: { memory?: { description?: string | null } }) => i.memory?.description);
     expect(descriptions).not.toContain('SECRET-DESCRIPTION');
     expect(items.map((i: { memoryId: string }) => i.memoryId)).toEqual([pubMem.id]);
+  });
+
+  it('does not publish legacy per-user holding metadata through a PUBLIC Agent', async () => {
+    const holding = await db.memory.create({
+      data: {
+        id: generateId(), organizationId: org.id, urn: `${org.urn}:legacy-holding`,
+        name: 'Legacy Holding', class: 'knowledge', visibility: 'PUBLIC',
+        userMemoryOfAgentId: pubAgent.id, createdBy: admin.id,
+      },
+    });
+    await db.agentMemoryItem.create({ data: { agentId: pubAgent.id, memoryId: holding.id } });
+    const anonymous = await A.memoryItems(await eagerAgent(), {}, anon());
+    const outside = await A.memoryItems(await eagerAgent(), {}, outsider(stranger.id));
+    const creator = await A.memoryItems(await eagerAgent(), {}, outsider(admin.id));
+    expect(anonymous.map((i: { memoryId: string }) => i.memoryId)).not.toContain(holding.id);
+    expect(outside.map((i: { memoryId: string }) => i.memoryId)).not.toContain(holding.id);
+    expect(creator.map((i: { memoryId: string }) => i.memoryId)).toContain(holding.id);
+  });
+
+  it('does not admit a null creator to a caller-less App context', async () => {
+    const holding = await db.memory.create({
+      data: {
+        id: generateId(), organizationId: org.id, urn: `${org.urn}:null-creator-holding`,
+        name: 'Null creator holding', class: 'knowledge', visibility: 'PUBLIC',
+        userMemoryOfAgentId: pubAgent.id, createdBy: null,
+      },
+    });
+    await db.agentMemoryItem.create({ data: { agentId: pubAgent.id, memoryId: holding.id } });
+    const items = await A.memoryItems(await eagerAgent(), {}, { db, roles: [], userId: null } as unknown as Context);
+    expect(items.map((i: { memoryId: string }) => i.memoryId)).not.toContain(holding.id);
   });
 
   // PR #846 review (Copilot): this said "org member" but used ctx() — a

@@ -56,6 +56,7 @@ import {
 import { isSessionLive, loadLastEventBySession } from '../../../lib/sessionActivity.js';
 import { findOrCreateAppClassMemory } from './chat-scope.js';
 import { mentionTokenOf } from '../../../lib/mentionToken.js';
+import { extractMentions } from '../../../lib/teamChatMentions.js';
 import { TEAM_CHAT_LOC, TEAM_CHAT_MESSAGES_LOC } from '../../../lib/teamChatLoc.js';
 import { isTeamSpaceRow, teamSpaceAudienceFilter, teamSpaceOwnerFilter } from '../../../lib/auth/teamSpace.js';
 // Spec 049 Phase 4 — the Channel row the team chat became.
@@ -66,7 +67,6 @@ import { escapePrismaLikePattern } from '../../../lib/literalLocPrefix.js';
 import { nodeUrnRoundTrips, safeNodeUrnV2 } from '../../../lib/urnEmit.js';
 import {
   maybeAdvanceOwnChannelRead,
-  teamAttentionPilotOperatorEnabled,
 } from '../../../lib/teamAttention.js';
 
 // The team-chat locs moved to src/lib/teamChatLoc.ts (#1030): the agent-chat
@@ -87,24 +87,8 @@ const forbidden = (): GraphQLError =>
     extensions: { code: 'FORBIDDEN' },
   });
 
-/**
- * Extract mention tokens from a message body — the ONE mention format for
- * writer and reader (#939): `@` followed by a mention token
- * (`[A-Za-z0-9][A-Za-z0-9._-]*`, trailing punctuation dropped so "@iris."
- * mentions iris). The `@` must sit at a token boundary, so an email address
- * (`x@example.com`) is NOT a mention (Copilot review on PR #941). Tokens are
- * stored LOWERCASED and without the `@`; matching is case-insensitive on both
- * sides. hadron-client's client-side MENTION_RE retires with the dialect
- * change (see hadron-client#20).
- */
-export function extractMentions(body: string): string[] {
-  const seen = new Set<string>();
-  for (const match of body.matchAll(/(?<=^|[^A-Za-z0-9._-])@([A-Za-z0-9][A-Za-z0-9._-]*)/g)) {
-    const token = match[1].replace(/[^A-Za-z0-9]+$/, '').toLowerCase();
-    if (token) seen.add(token);
-  }
-  return [...seen];
-}
+// Keep the public resolver export for existing callers and tests.
+export { extractMentions };
 
 // The mention token moved to src/lib/mentionToken.ts (PR #978 review): worker
 // casting has to refuse a name whose token is taken, and that resolver must not
@@ -955,6 +939,12 @@ async function postToChannelRoot(
         content: msgFields.content ?? null,
         data: (msgFields.data ?? null) as InputJsonValue,
         seq,
+        // #1430: Channel membership in the SAME append transaction — the
+        // paged attention reader resolves this Channel's rows through
+        // Node.messageChannelId, so an unstamped append would be invisible
+        // to it forever (Andi #3280: fixtures stamping this field masked
+        // the production path).
+        messageChannelId: incarnation.id,
         // #914: the SENDER's user id — for worker posts, the human driver.
         createdBy,
       },
@@ -1245,14 +1235,16 @@ export const teamChatQueries = {
     // One gate, two entry points: the convenience runs the same host-memory
     // point check the Channel-addressed read runs (Copilot on PR #1169).
     if (!(await hostMemoryReadable(ctx, root.memoryId, app))) return { items: [], total: 0 };
-    // The pilot changes ordinary-read semantics only for an allowlisted
-    // operator and an exact Worker session. Outside that boundary this extra
-    // lookup is not even made.
-    // The Worker session may belong to a different pilot App that registered
-    // this App's Channel. The helper verifies that session's App allowlist and
-    // register entry before advancing; the Channel host is not the pilot key.
+    // The attention capture changes ordinary-read semantics only for a
+    // caller's exact Worker session. Outside that boundary this extra lookup
+    // is not even made (#1353: the pilot operator allowlist is gone; the
+    // session-scoped guards below are the boundary).
+    // The Worker session may belong to a different App that registered
+    // this App's Channel. The helper verifies that session's App
+    // participation and register entry before advancing; the Channel host
+    // is not the key.
     const pilotChannel =
-      ctx.sessionId && teamAttentionPilotOperatorEnabled(ctx.userId)
+      ctx.sessionId
         ? await ctx.db.channel.findFirst({
             where: { chatRootNodeId: root.id, deletedAt: null },
             select: { id: true, lastSeq: true },
@@ -1294,7 +1286,7 @@ export const teamChatQueries = {
   ): Promise<{ items: TeamChatMessageOut[]; total: number }> => {
     const target = await resolveChannelTarget(ctx, channelRef, 'read');
     const page = await readChannelRoot(ctx, target.app?.id ?? null, target.root, args);
-    if (ctx.sessionId && teamAttentionPilotOperatorEnabled(ctx.userId)) {
+    if (ctx.sessionId) {
       try {
         await maybeAdvanceOwnChannelRead(ctx, {
           channelId: target.channelId,

@@ -181,6 +181,27 @@ describe('#1196 — the App fold implements participation, not the member table'
     expect(await inAccessibleSet(userCtx(contributor.id), teamSpace.id)).toBe(false);
   });
 
+  it('a deleted organization revokes both contributor and AppMember participation', async () => {
+    const { app, teamSpace } = await fixture();
+    const contributor = await makeOrgUser('deleted-org-contributor', 'CONTRIBUTOR');
+    const member = await db.user.create({ data: { id: generateId(), name: 'deleted-org-member' } });
+    await createDbAppMember(db, app.id, member.id, 'reader');
+    const appRow = await db.app.findUniqueOrThrow({ where: { id: app.id } });
+    for (const principal of [contributor, member]) {
+      expect(await isAppParticipant(userCtx(principal.id), appRow)).toBe(true);
+      expect((await participantAppIds(db, { userId: principal.id }, { includeMemberships: true }))).toContain(app.id);
+      expect((await getPrincipalAppMemoryAccess(db, { userId: principal.id })).has(teamSpace.id)).toBe(true);
+    }
+
+    await db.organization.update({ where: { id: orgId }, data: { deletedAt: new Date() } });
+    for (const principal of [contributor, member]) {
+      expect(await isAppParticipant(userCtx(principal.id), appRow)).toBe(false);
+      expect((await participantAppIds(db, { userId: principal.id }, { includeMemberships: true }))).not.toContain(app.id);
+      expect((await getPrincipalAppMemoryAccess(db, { userId: principal.id })).has(teamSpace.id)).toBe(false);
+      expect((await getMemoryAccess(db, userAuth(principal.id))).has(teamSpace.id)).toBe(false);
+    }
+  });
+
   it('an org CONTRIBUTOR of ANOTHER org does not reach it', async () => {
     const { teamSpace } = await fixture();
     const otherOrg = await db.organization.create({

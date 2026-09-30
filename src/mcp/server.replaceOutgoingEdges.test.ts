@@ -18,6 +18,7 @@ import { cleanDb } from '../test/helpers.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import { resolveEdgeRefs, replaceOutgoingEdges, type ResolvedEdge } from './server.js';
 import { generateId } from '../lib/id.js';
+import { deriveEdgeLoc } from '../lib/edgeLoc.js';
 import type { AuthContext } from '../middleware/auth.js';
 
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({
@@ -171,6 +172,53 @@ describe('resolveEdgeRefs — error handling', () => {
 });
 
 describe('replaceOutgoingEdges — replacement semantics', () => {
+  it('refuses a loc held by another source and preserves the old edge set (#1469)', async () => {
+    const prior = await db.edge.create({
+      data: {
+        id: generateId(), memoryId: memory.id, sourceId: source.id,
+        targetId: nested.id, loc: 'old-source-edge', name: 'old',
+      },
+    });
+    const occupiedLoc = deriveEdgeLoc(source.loc, 'cites', topLevel.loc);
+    const blocker = await db.edge.create({
+      data: {
+        id: generateId(), memoryId: memory.id, sourceId: nested.id,
+        targetId: topLevel.id, loc: occupiedLoc, name: 'cites',
+      },
+    });
+
+    const error = await replaceOutgoingEdges({
+      sourceNodeId: source.id, sourceLoc: source.loc, sourceMemoryId: memory.id,
+      resolved: [{ targetNodeId: topLevel.id, targetLoc: topLevel.loc,
+        targetMemoryId: memory.id, name: 'cites', loc: null,
+        description: null, isRunnable: null }],
+      createdBy: admin.id,
+    });
+
+    expect(error).toMatch(/^\[edge_loc_conflict\]/);
+    expect(await db.edge.findUnique({ where: { id: prior.id } })).not.toBeNull();
+    expect(await db.edge.findUnique({ where: { id: blocker.id } })).toMatchObject({ sourceId: nested.id });
+    expect(await db.edge.count({ where: { sourceId: source.id } })).toBe(1);
+  });
+
+  it('refuses two requested edges with one loc and rolls back replacement', async () => {
+    const prior = await db.edge.create({
+      data: { id: generateId(), memoryId: memory.id, sourceId: source.id,
+        targetId: nested.id, loc: 'prior', name: 'prior' },
+    });
+    const error = await replaceOutgoingEdges({
+      sourceNodeId: source.id, sourceLoc: source.loc, sourceMemoryId: memory.id,
+      resolved: [topLevel, nested].map((target) => ({
+        targetNodeId: target.id, targetLoc: target.loc, targetMemoryId: memory.id,
+        name: 'cites', loc: 'shared:loc', description: null, isRunnable: null,
+      })),
+      createdBy: admin.id,
+    });
+    expect(error).toMatch(/^\[edge_loc_conflict\]/);
+    expect(await db.edge.findMany({ where: { sourceId: source.id } }))
+      .toEqual([expect.objectContaining({ id: prior.id, loc: 'prior' })]);
+  });
+
   it('fully replaces existing edges (prior set cleared, new set written)', async () => {
     // Seed an existing edge.
     await replaceOutgoingEdges({
@@ -212,10 +260,7 @@ describe('replaceOutgoingEdges — replacement semantics', () => {
     expect(await db.edge.count({ where: { sourceId: source.id } })).toBe(0);
   });
 
-  it('writes the deleteMany + createMany inside a single transaction', async () => {
-    // If a duplicate-row collision inside the input array would force
-    // the createMany to fail, the whole replacement must roll back —
-    // the prior edge stays intact, no half-written state.
+  it('preserves the prior edge set when an endpoint disappears before replacement', async () => {
     await replaceOutgoingEdges({
       sourceNodeId: source.id,
       sourceLoc: source.loc,
@@ -223,13 +268,8 @@ describe('replaceOutgoingEdges — replacement semantics', () => {
       resolved: [{ targetNodeId: topLevel.id, targetLoc: topLevel.loc, targetMemoryId: memory.id, name: 'seed', loc: null, description: null, isRunnable: null }],
       createdBy: admin.id,
     });
-    // Force a per-memory `loc` unique collision by passing two rows that
-    // derive the same loc and skipDuplicates: true. With skipDuplicates
-    // the duplicate is silently dropped and the transaction commits —
-    // but the prior `seed` edge is gone (a legitimate replacement). To
-    // assert atomicity under failure, we wrap the call in a try/catch
-    // and inject a failure by including a row whose targetId references
-    // a node that gets deleted between resolution and write.
+    // A stale target snapshot is refused before the old edge set is deleted.
+    // The collision tests above exercise rollback after deleteMany instead.
     const ghost = await db.node.create({
       data: { id: generateId(), memoryId: memory.id, loc: 'ghost', name: 'ghost' },
     });
@@ -242,8 +282,7 @@ describe('replaceOutgoingEdges — replacement semantics', () => {
       createdBy: admin.id,
     });
     expect(error).toBe(`Edge target not found: "${ghost.id}"`);
-    // Atomicity: the failed createMany must have rolled back the
-    // deleteMany, leaving the original `seed` edge intact.
+    // The missing endpoint did not remove the original edge.
     const edges = await db.edge.findMany({ where: { sourceId: source.id } });
     expect(edges).toHaveLength(1);
     expect(edges[0].name).toBe('seed');

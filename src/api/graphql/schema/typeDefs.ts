@@ -18,6 +18,12 @@ export const typeDefs = `#graphql
     ERROR
   }
 
+  """#1447 — a spec corpus's lifecycle state. DRAFT becomes MINTED once, one-way."""
+  enum CorpusState {
+    DRAFT
+    MINTED
+  }
+
   """
   035-visibility-enum-cleanup: meaningful only for knowledge
   (PUBLIC/ORGANIZATION) and group (GROUP); null otherwise. PERSONAL/PRIVATE
@@ -740,6 +746,52 @@ export const typeDefs = `#graphql
     workers: [TeamAttentionSwitchoverWorker!]!
   }
 
+  """
+  #1384 paged (v2): one bounded slice of an attention scan. Counts are exact
+  for the captured (seen, head] range of the issuing scan only, and items are
+  emitted solely from Channels that scan has exhausted.
+  """
+  type TeamAttentionPageItem {
+    worker: ID!
+    workerName: String!
+    workerUrn: String
+    channel: ID!
+    channelName: String!
+    unread: Int!
+    unreadMentions: Int!
+    firstUnreadSeq: Int
+    lastRelevantSeq: Int
+    "The frozen Channel head this item's counts are exact for."
+    lastSeq: Int!
+  }
+
+  type TeamAttentionPage {
+    items: [TeamAttentionPageItem!]!
+    "False while any Channel is unfinished or queued items remain undelivered."
+    scanComplete: Boolean!
+    "Continuation for the next pull; null on the final page."
+    nextPage: String
+    """
+    FINAL PAGE ONLY: a since-watermark token (same shape v1 issued) to adopt
+    after every listed nudge was accepted. Never present while scanComplete
+    is false.
+    """
+    adoptableSince: String
+  }
+
+  type TeamAttentionPreviewPage {
+    items: [TeamAttentionPageItem!]!
+    scanComplete: Boolean!
+    nextPage: String
+    """
+    FINAL PAGE ONLY: the short-lived switchover proof (frozen heads). An
+    incomplete preview never carries one, so a partial preview can never
+    silently discard an unscanned backlog.
+    """
+    proof: String
+    expiresAt: DateTime
+  }
+
   type TeamAttentionSwitchoverResult {
     applied: Boolean!
     workersAdvanced: Int!
@@ -1018,8 +1070,10 @@ export const typeDefs = `#graphql
 
   input SkillPlanInput {
     intent: SkillPlanIntent!
-    """Memory refs to scan. Omitted means every memory the caller can read."""
+    """Memory refs for LINT/STATUS only. EXPORT refuses this field, even an empty list."""
     memories: [String!]
+    """Persisted Scope ID for a narrowed EXPORT. Omit for unscoped export; explicit null refuses. Membership is resolved afresh for each call."""
+    scopeRef: ID
     """
     Target host, named by its D12 declaration key verbatim: claudeSkill (the default) or codexSkill. One host per call; the plan reads that host's declaration and applies its limits, and the retired top-level skill/claudeSkill keys alias to claudeSkill only. An unknown host is refused with BAD_USER_INPUT naming the supported hosts, never judged as another host and never answered with an empty plan.
     """
@@ -1027,6 +1081,15 @@ export const typeDefs = `#graphql
     """What the client found on disk. Empty for lint, which touches no disk."""
     files: [SkillFileFactsInput!]
     """With EXPORT only, explicitly override local-edit or missing-provenance-ID protection for this invocation."""
+    force: Boolean
+  }
+
+  """Plan installed individual skill files for explicit task refs; plugin exports use skillPlan."""
+  input SelectedSkillFilePlanInput {
+    """Nonempty node IDs or fully qualified node URNs. Relative locs are refused."""
+    nodes: [String!]!
+    host: String
+    files: [SkillFileFactsInput!]
     force: Boolean
   }
 
@@ -1098,6 +1161,8 @@ export const typeDefs = `#graphql
     reasons, not evidence that the client completed a filesystem write.
     """
     exportPlan: SkillExportPlanEntry
+    """Why an enabled source is out of export in STATUS or EXPORT, or null when this category does not apply. Separate from the planned filesystem action."""
+    outOfExportReason: String
   }
 
   """A file that paired with no declared node. Never removed without an explicit prune."""
@@ -1107,9 +1172,33 @@ export const typeDefs = `#graphql
     nodeId: String
   }
 
+  """A named task that cannot produce a host entry. An unavailable ref reveals no node metadata."""
+  type SkillSelectionResult {
+    ref: String!
+    nodeId: String
+    action: SkillExportAction!
+    reason: SkillExportReason!
+  }
+
+  """The live, access-intersected Scope selection used by this EXPORT plan."""
+  type SkillPlanScopeSelection {
+    id: ID!
+    name: String!
+    readableMemoryCount: Int!
+    droppedCount: Int!
+    """Stable digest for comparing separate host plans from one export."""
+    fingerprint: String!
+  }
+
   type SkillPlan {
     entries: [SkillPlanEntry!]!
     orphans: [SkillOrphan!]!
+    """True for scoped or selected exports: out-of-selection files are not classified as orphans."""
+    orphanAssessmentSkipped: Boolean!
+    """Non-null only when EXPORT selected a persisted Scope."""
+    scopeSelection: SkillPlanScopeSelection
+    """Opaque unavailable refs and selected nodes with no declaration for this host."""
+    selectionResults: [SkillSelectionResult!]!
     """
     How many nodes carrying ANY declaration key were in scope. A plan over an
     empty corpus and a plan the caller cannot see are otherwise the same empty
@@ -1233,6 +1322,13 @@ export const typeDefs = `#graphql
     clients render the field only when present.
     """
     portalUrl: String
+    """
+    #1450 — true for a RESERVED spec citation that has no spec written yet (a
+    placeholder in a draft corpus, created by reserveSpecCitation). Set only by
+    the server, never inferred from an empty body; writing real content through
+    updateSpecNode clears it. Minting refuses while any remain.
+    """
+    isPlaceholder: Boolean!
     isLink: Boolean!
     name: String!
     alias: String
@@ -2609,6 +2705,14 @@ export const typeDefs = `#graphql
     """
     maxRevCount: Int!
     """
+    #1447/#1448 — whether this memory is a DRAFT spec corpus or MINTED. In a
+    draft corpus spec citations are not yet permanent: specs can be moved,
+    renumbered and deleted, and a move records no URN alias. Chosen only at
+    creation (createMemory draftCorpus); minting is one-way. Every memory
+    created without asking for draft is MINTED.
+    """
+    corpusState: CorpusState!
+    """
     Spec 033 FR-026 — timestamp at which the memory owner accepted the
     encrypted-memory vector-inversion disclosure. Set when the caller
     passes acknowledgeVectorInversionRisk: true on updateMemory for an
@@ -2954,6 +3058,7 @@ export const typeDefs = `#graphql
     urn: String!
     name: String!
     description: String
+    "Templated Agent prompt. {{name}}/{{role}} bind to the Agent in chats or the named Worker in briefings."
     systemPrompt: String
     systemMemoryId: String
     visibility: AgentVisibility!
@@ -2967,8 +3072,6 @@ export const typeDefs = `#graphql
     # field here. Pure metadata: no server behavior forks on these fields.
     "Persona role - free string with conventions ('backend-engineer')."
     personaRole: String
-    "Persona identity TEMPLATE ('You are {{name}}, ...'); {{name}}/{{role}} are bound at casting time (Worker.prompt returns the bound result)."
-    personaPrompt: String
     # 036-ai-service-config: the four AI fields below are registry-backed
     # reads of the Agent's config named 'default' (legacy columns dropped).
     aiProvider: String
@@ -3124,6 +3227,8 @@ export const typeDefs = `#graphql
     apiStyle: AiApiStyle
     "A key to test with instead of the stored one. Never stored, never echoed."
     apiKey: String
+    "Edited params to test instead of the saved ones (#1413): validated exactly as a save validates them, including the params.baseUrl refusal, against the effective provider — before anything outbound. Used for the call, never stored. Omitted = the saved params; null = the edit clears them (the provider defaults). On the wire the probe exercises the effective provider/model/endpoint/key and (hard-capped at 16, per #1378's original ceiling pending a cost ruling) maxTokens, like its one-word prompt; the platform's request contract does not yet forward the other knobs (temperature, reasoningEffort, …) on any path, so they are validated and reported, not transmitted."
+    params: JSON
   }
 
   "#1378: per field, whether the test used the saved value or the override."
@@ -3132,6 +3237,7 @@ export const typeDefs = `#graphql
     model: AiConfigTestValueSource!
     endpoint: AiConfigTestValueSource!
     apiStyle: AiConfigTestValueSource!
+    params: AiConfigTestValueSource!
     key: AiConfigTestKeySource!
   }
 
@@ -3275,6 +3381,11 @@ export const typeDefs = `#graphql
 
   type TeamChatMessagesPage {
     items: [TeamChatMessage!]!
+    """
+    Number of canonical messages matching this read's sinceSeq/beforeSeq cursor
+    range and mentionsRef filter, before limit/offset. It is not the total
+    number of messages in the chat or Channel when a cursor/filter is present.
+    """
     total: Int!
   }
 
@@ -3307,6 +3418,8 @@ export const typeDefs = `#graphql
     at: DateTime!
     "Optional display extras (title, URL) — never filtered on."
     detail: JSON
+    "The LLM model that produced the work, snapshotted at record time (#1398): an explicit report wins over the recording session's model; null on records that predate the field or were made with none — never backfilled, so null always means unknown-at-record-time."
+    model: String
   }
 
   type TeamWorkItemsPage {
@@ -3463,7 +3576,7 @@ export const typeDefs = `#graphql
     "The App whose staff this casting fills."
     app: App
     """
-    The worker's boot prompt, resolved: the agent's personaPrompt template
+    The worker's boot prompt, resolved: the agent's systemPrompt template
     with {{name}}/{{role}} bound, then promptOverride appended as its own
     paragraph. Null when the agent carries no template and the worker no
     override.
@@ -3568,7 +3681,7 @@ export const typeDefs = `#graphql
     template and no override was given.
     """
     prompt: String
-    "Whether the agent's personaPrompt binds {{name}} — a nameless template silently produces workers whose prompt never names them. Null when the agent has no template."
+    "Whether the agent's systemPrompt binds {{name}} — a nameless template silently produces workers whose prompt never names them. Null when the agent has no template."
     hasNamePlaceholder: Boolean
   }
 
@@ -3576,8 +3689,8 @@ export const typeDefs = `#graphql
   A role definition (#960): the roles:<role> node in the Team Agent's system
   memory. #1050: it carries no name register — a role is a definition, not an
   allocation pool.
-  The persona prompt template is NOT here — with the Worker model (#974) it
-  lives on the role-agent as dressing (personaRole + personaPrompt); roleAgent
+  The prompt template is NOT here — with the Worker model (#974) it
+  lives on the role-agent (personaRole + systemPrompt); roleAgent
   points at it.
   """
   type TeamRole {
@@ -3614,7 +3727,7 @@ export const typeDefs = `#graphql
     """
     roleAgent: Agent
     """
-    Whether the role-agent's personaPrompt binds {{name}} — the check that
+    Whether the role-agent's systemPrompt binds {{name}} — the check that
     finds templates which silently produce nameless workers (role-agents
     authored before any guard existed). Null when no single role-agent
     resolves. Computed even when roleAgent itself is masked: it discloses one
@@ -4129,8 +4242,9 @@ export const typeDefs = `#graphql
   }
 
   """
-  Bulk-import node shape, used only by replaceSubtree (git-sync). Single-node
-  writes use CreateNodeInput / UpdateNodeInput (spec 039 Phase 0 D1).
+  Legacy bulk-import node shape retained for replaceSubtree compatibility.
+  replaceSubtree now refuses without writing; single-node writes use
+  CreateNodeInput / UpdateNodeInput (spec 039 Phase 0 D1).
   """
   input NodeInput {
     "Forced PK (importer-supplied UUIDv7 from node.yaml, stable across moves). Omit to mint."
@@ -4855,6 +4969,33 @@ export const typeDefs = `#graphql
     reason: String
   }
 
+  "Only text fields a spec bulk edit may change."
+  enum SpecTextField { content abstract }
+
+  """
+  Replace text in explicit nodes of one DRAFT spec corpus. A dry run returns
+  plan; apply must present that exact plan and refuses if any selected row,
+  protection, match, or corpus state changed. Minted corpora are never edited
+  through this door. Generic replacement keeps its governed-node protections.
+  """
+  input SpecSearchReplaceInput {
+    memoryRef: ID!
+    nodeIds: [ID!]!
+    oldText: String!
+    newText: String!
+    fields: [SpecTextField!]!
+    caseInsensitive: Boolean = false
+    regex: Boolean = false
+    "Literal mode only; matches the CLI's default ASCII word-boundary behavior."
+    wordBoundary: Boolean = true
+    dryRun: Boolean = false
+    "Required for apply; copied from the exact dry-run response."
+    expectedPlan: String
+    "Refuse the entire apply when more nodes would change."
+    maxNodesChanged: Int
+    reason: String
+  }
+
   type SearchReplaceFieldResult {
     field: NodeTextField!
     matches: Int!
@@ -4869,9 +5010,36 @@ export const typeDefs = `#graphql
     fields: [SearchReplaceFieldResult!]!
   }
 
+  "Mutually exclusive reasons selected nodes were protected from bulk replacement."
+  type SearchReplaceSkipCounts {
+    "Governed nodes of any kind. This is not a spec-only count."
+    governed: Int!
+    "Nodes at or below a Channel address."
+    protectedAddress: Int!
+  }
+
+  enum SearchReplaceSkipReason { OTHER_GOVERNED_KIND PROTECTED_ADDRESS }
+
+  type SearchReplaceSkip {
+    nodeId: ID!
+    loc: String!
+    memoryId: ID!
+    reason: SearchReplaceSkipReason!
+    governedKinds: [String!]!
+  }
+
   type SearchReplaceResult {
-    "Nodes the selection resolved to (after auth + prefix filtering)."
+    "Unique authorized nodes selected before bulk-write protections are applied."
+    nodesSelected: Int!
+    "Selected nodes whose requested text fields were actually inspected."
     nodesScanned: Int!
+    "Selected nodes protected from inspection and replacement."
+    nodesSkipped: Int!
+    """
+    Mutually exclusive skip reasons. Governance takes precedence over Channel
+    address protection, so a node carrying both signals counts once as governed.
+    """
+    skipCounts: SearchReplaceSkipCounts!
     "Nodes with at least one replacement."
     nodesChanged: Int!
     totalReplacements: Int!
@@ -4879,6 +5047,10 @@ export const typeDefs = `#graphql
     dryRun: Boolean!
     "Per-node breakdown; only nodes with at least one match are listed."
     results: [SearchReplaceNodeResult!]!
+    "Opaque exact preview fingerprint on the spec door; null on the generic door."
+    plan: String
+    "Node-addressed protected selections on the spec door; null on the generic door."
+    skips: [SearchReplaceSkip!]
   }
 
   input EdgeInput {
@@ -5754,6 +5926,8 @@ export const typeDefs = `#graphql
     body, so a client cannot write a file the server judged broken.
     """
     skillPlan(input: SkillPlanInput!): SkillPlan!
+    """Selected individual skill files only. Plugin bundles cannot use node selectors."""
+    selectedSkillFilePlan(input: SelectedSkillFilePlanInput!): SkillPlan!
 
     """
     DEPRECATED: use usageEvents(loc: <loc>). Carried for source-compat;
@@ -6513,16 +6687,42 @@ export const typeDefs = `#graphql
     channelReadState(attendeeRef: ID!, appRef: ID, channelRef: ID!): ChannelReadState
 
     """
-    #1353 internal pilot: compact attention for this operator's LIVE Workers.
-    The signed token is a pure poll watermark and never changes read state.
-    Omit since for all current unread. since:"now" is refused: discarding a
-    backlog requires the separate preview + confirmed switchover.
-
-    A router must adopt the returned token only after EVERY listed nudge was
-    accepted. On any partial failure retain the prior token; retries can
-    duplicate a nudge but cannot silently lose one.
+    #1353 v1 attention query, retired by #1384. This field always returns
+    UPGRADE_REQUIRED; use teamAttentionPage for bounded polling. Pass an
+    existing v1 since token to teamAttentionPage to carry its watermark
+    forward. Neither operation changes read state.
     """
     teamAttention(appRef: ID!, since: String): TeamAttentionResult!
+
+    """
+    #1384 paged (v2) attention poll — the bounded successor to teamAttention
+    (v1 answers UPGRADE_REQUIRED). Each call decrypts at most scanLimit rows
+    and emits at most limit Worker/Channel pairs; continue with page while
+    nextPage is present. The final page alone carries adoptableSince — adopt
+    it only after EVERY listed nudge was accepted; on any partial failure
+    retain the prior watermark and restart the scan (duplicates, never loss).
+    An existing v1 since token starts a scan, carrying the watermark forward.
+    Never changes read state.
+    """
+    teamAttentionPage(
+      appRef: ID!
+      since: String
+      page: String
+      limit: Int
+      scanLimit: Int
+    ): TeamAttentionPage!
+
+    """
+    #1384 paged switchover preview — same bounded scan as teamAttentionPage,
+    full-backlog accounting. The apply proof exists ONLY on the final page of
+    a completed preview; confirmTeamAttentionSwitchover (apply) is unchanged.
+    """
+    teamAttentionPreviewPage(
+      appRef: ID!
+      page: String
+      limit: Int
+      scanLimit: Int
+    ): TeamAttentionPreviewPage!
 
     """
     Preview the explicit baseline switchover for the operator's current live
@@ -6634,6 +6834,8 @@ export const typeDefs = `#graphql
     messages with seq STRICTLY LESS than it are considered, and the NEWEST
     limit of those come back -- the page immediately before the cursor, still
     ascending. The two compose, so passing both reads a bounded slice.
+    TeamChatMessagesPage.total counts that cursor range and the mentionsRef
+    filter before paging, not the whole team-chat history.
     offset is IGNORED when beforeSeq is given: a cursor exists precisely
     because a position is unstable while workers keep posting, and honouring
     both would put that race back. mentionsRef filters to messages whose stored envelope mentions the
@@ -6667,6 +6869,8 @@ export const typeDefs = `#graphql
     appRef → App.defaultChannel convenience over this. Authorization is the
     host App's team-chat read gate; a Channel you may not read — or one that
     does not exist — is CHANNEL_NOT_FOUND, identically.
+    TeamChatMessagesPage.total has the same cursor- and mention-filtered
+    meaning as for teamChatMessages, before paging.
     """
     channelMessages(
       channelRef: ID!
@@ -7100,6 +7304,16 @@ export const typeDefs = `#graphql
     which refuses, and that absence is the mechanism rather than an oversight.
     """
     createSpecNode(input: CreateNodeInput!): Node!
+    """
+    #1450 — reserve a citation in a DRAFT spec corpus as a placeholder: a spec
+    node at loc (role spec, nodeType info) marked isPlaceholder, so links can
+    point at it and the placeholders left are the corpus's to-do list. Writing
+    real content through updateSpecNode turns it into a real spec at the same
+    citation. Refuses SPEC_CORPUS_NOT_DRAFT in a minted memory, where a
+    citation is permanent once written, and NodeLocConflictError at a live loc.
+    memoryRef accepts the memory's ID or URN.
+    """
+    reserveSpecCitation(memoryRef: ID!, loc: String!, name: String): Node!
 
     """
     #1201 — the UPDATE door for the spec kind, and the counterpart of
@@ -7279,6 +7493,9 @@ export const typeDefs = `#graphql
     """
     searchReplaceInNodes(input: SearchReplaceInNodesInput!): SearchReplaceResult!
 
+    "Governed bulk replacement inside one draft spec corpus, with exact preview binding."
+    searchReplaceInSpecNodes(input: SpecSearchReplaceInput!): SearchReplaceResult!
+
     """
     Delete a node identified by 'nodeRef' (a node ID or fully-qualified URN;
     #542). Soft-delete by default (sets deletedAt; the node disappears from
@@ -7391,9 +7608,12 @@ export const typeDefs = `#graphql
     mergeMemories(input: MergeMemoriesInput!): Memory!
 
     """
-    Replace all nodes owned by a repo within a memory (collection tool)
+    Retired. Calls return REPLACE_SUBTREE_RETIRED without changing nodes or
+    edges. The field remains temporarily so existing clients get a clear
+    refusal rather than an unknown-field error.
     """
     replaceSubtree(ownerRepo: String!, memoryId: String!, nodes: [NodeInput!]!, edges: [EdgeInput!]!): Int!
+      @deprecated(reason: "Retired (#454): every authorized call refuses with REPLACE_SUBTREE_RETIRED and writes nothing. Use the canonical node write mutations.")
 
     # Edge CRUD — a GROUP note covering create/update/delete, which is why it
     # is allow-listed rather than published on createEdge alone (#1232).
@@ -7780,6 +8000,13 @@ export const typeDefs = `#graphql
       embeddingSource: EmbeddingSource
       """#621 — per-node revision-history cap (default 10, minimum 1)."""
       maxRevCount: Int
+      """
+      #1447/#1448 — create this memory as a DRAFT spec corpus, whose spec
+      citations stay changeable until the corpus is minted. This is the only
+      way to get a draft corpus: an existing memory can never be switched into
+      draft. Omitted or false creates an ordinary (minted) memory.
+      """
+      draftCorpus: Boolean
     ): Memory!
 
     """
@@ -7939,25 +8166,25 @@ export const typeDefs = `#graphql
     v2 — no @ sigil) and its system memory is user-owned too. Exactly one owner
     (org XOR user).
 
-    personaRole / personaPrompt are the persona dressing (cor:agt:020:01) —
-    the reusable role plus the '{{name}}'-templated identity prompt. The NAMED
+    personaRole and systemPrompt are the persona dressing (cor:agt:020:01) —
+    the reusable role plus the '{{name}}'-templated prompt. The NAMED
     identity is a Worker, cast with castWorker; names never live on agents.
 
     orgId accepts the org's ID or URN.
     """
-    createAgent(orgId: ID, name: String!, description: String, systemPrompt: String, systemMemoryId: String, visibility: AgentVisibility, type: AgentType, surfaces: [String!], personaRole: String, personaPrompt: String): Agent!
+    createAgent(orgId: ID, name: String!, description: String, systemPrompt: String, systemMemoryId: String, visibility: AgentVisibility, type: AgentType, surfaces: [String!], personaRole: String): Agent!
 
     """
     Update an Agent.
 
-    urn renames the slug (org-owned agents only). personaRole / personaPrompt
-    are the persona dressing (cor:agt:020:01); explicit null or blank clears,
-    omitted preserves. Worker castings referencing this agent are unaffected —
+    urn renames the slug (org-owned agents only). personaRole is normalized
+    (explicit null or blank clears, omitted preserves). Worker castings
+    referencing this agent are unaffected —
     the named identity lives on the Worker.
 
     Accepts the entity's ID or URN.
     """
-    updateAgent(ref: ID!, name: String, urn: String, description: String, systemPrompt: String, systemMemoryId: String, visibility: AgentVisibility, listedOnMarketplace: Boolean, type: AgentType, surfaces: [String!], personaRole: String, personaPrompt: String, registerDefaults: RegisterDefaultsInput): Agent!
+    updateAgent(ref: ID!, name: String, urn: String, description: String, systemPrompt: String, systemMemoryId: String, visibility: AgentVisibility, listedOnMarketplace: Boolean, type: AgentType, surfaces: [String!], personaRole: String, registerDefaults: RegisterDefaultsInput): Agent!
 
     """
     Soft-delete an Agent.
@@ -8613,11 +8840,11 @@ export const typeDefs = `#graphql
     advanceChannelReadState(attendeeRef: ID!, appRef: ID, channelRef: ID!, seq: Int!): ChannelReadState!
 
     """
-    #1353 internal pilot: explicitly advance the cursor owned by one exact,
+    #1353: explicitly advance the cursor owned by one exact,
     caller-owned live Worker session on one readable registered Channel.
-    Shares the MCP mark-read gate; unlike advanceChannelReadState this door is
-    operator+App pilot-gated and session-pinned. Monotonic; a seq beyond the
-    captured Channel watermark is refused.
+    Shares the MCP mark-read helper; unlike advanceChannelReadState this door
+    requires that session. Monotonic; a seq beyond the captured Channel
+    watermark is refused.
     """
     markOwnTeamChatRead(appRef: ID!, sessionRef: ID!, channelRef: ID!, seq: Int!): OwnTeamChatReadState!
 
@@ -8942,7 +9169,7 @@ export const typeDefs = `#graphql
     \`promptOverride\` is the per-worker escape hatch (cor:agt:020:01), but it
     could only be set at CASTING time — fixing a casting's individuality at the
     one moment nobody yet knows what makes it individual. The role agent's
-    \`personaPrompt\` cannot stand in (it is SHARED by every casting of that
+    \`systemPrompt\` cannot stand in (it is SHARED by every casting of that
     role), and re-casting is barred by \`WORKER_IN_USE\` for any worker that has
     done work — precisely the ones with an identity to record.
 
@@ -9156,6 +9383,8 @@ export const typeDefs = `#graphql
       ref: String!
       action: String!
       detail: JSON
+      "Optional explicit model report (#1398). Takes precedence over the session's model; a model switch or a late record should pass the model that actually did the work. Empty string is refused — pass nothing to fall back to the session's model."
+      model: String
     ): TeamWorkItem!
 
     """

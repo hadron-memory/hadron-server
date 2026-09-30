@@ -14,6 +14,8 @@ import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import { createTestableMcpServer } from '../mcp/server.js';
 import type { AuthContext } from '../middleware/auth.js';
 import {
+  teamAttentionPage,
+  teamAttentionPreviewPage,
   confirmTeamAttentionSwitchover,
   getTeamAttention,
   previewTeamAttentionSwitchover,
@@ -37,6 +39,55 @@ let channel: { id: string; memoryId: string; loc: string; chatRootNodeId: string
 let worker: { id: string; name: string };
 let sessionId: string;
 
+
+// ── #1384 v2 migration shims ─────────────────────────────────────────────────
+// The v1 doors answer UPGRADE_REQUIRED now; these helpers drain the paged
+// doors to completion and regroup results into the v1 shapes the legacy
+// assertions below speak, so the behavioral matrix keeps running unchanged.
+
+async function pollPaged(ctx: Context, appRef: string, since?: string | null) {
+  const items: Array<{ worker: string; workerName: string; workerUrn: string | null; channel: string; channelName: string; unread: number; unreadMentions: number; firstUnreadSeq: number | null; lastSeq: number }> = [];
+  let page: string | null = null;
+  let token: string | null = null;
+  for (let guard = 0; guard < 200; guard++) {
+    const r = await teamAttentionPage(ctx, appRef, { since: page ? null : since ?? null, page });
+    items.push(...r.items);
+    if (r.scanComplete) { token = r.adoptableSince; break; }
+    page = r.nextPage;
+    if (!page) break;
+  }
+  const workers = new Map<string, { worker: string; name: string; urn: string | null; live: boolean; channels: Array<Record<string, unknown>> }>();
+  for (const it of items) {
+    const w = workers.get(it.worker) ?? { worker: it.worker, name: it.workerName, urn: it.workerUrn, live: true, channels: [] };
+    w.channels.push({ channel: it.channel, name: it.channelName, unread: it.unread, unreadMentions: it.unreadMentions, firstUnreadSeq: it.firstUnreadSeq, lastSeq: it.lastSeq });
+    workers.set(it.worker, w);
+  }
+  return { token, workers: [...workers.values()] };
+}
+
+async function previewPaged(ctx: Context, appRef: string) {
+  const items: Array<{ worker: string; channel: string; channelName: string; unread: number; firstUnreadSeq: number | null; lastSeq: number }> = [];
+  let page: string | null = null;
+  let proof: string | null = null;
+  let expiresAt: Date | null = null;
+  for (let guard = 0; guard < 200; guard++) {
+    const r = await teamAttentionPreviewPage(ctx, appRef, { page });
+    items.push(...r.items);
+    if (r.scanComplete) { proof = r.proof; expiresAt = r.expiresAt; break; }
+    page = r.nextPage;
+    if (!page) break;
+  }
+  const workers = new Map<string, { worker: string; channels: Array<Record<string, unknown>> }>();
+  for (const it of items) {
+    const w = workers.get(it.worker) ?? { worker: it.worker, channels: [] };
+    // v1 preview carried the target's seen cursor as fromSeq; these tests
+    // exercise fresh cursors (seen 0), which the frozen span starts from.
+    w.channels.push({ channel: it.channel, name: it.channelName, fromSeq: 0, throughSeq: it.lastSeq, unread: it.unread });
+    workers.set(it.worker, w);
+  }
+  return { proof, expiresAt, workers: [...workers.values()] };
+}
+
 const userCtx = (extra: Partial<Context> = {}): Context => ({ db, userId: user.id, roles: ['READER'], ...extra }) as Context;
 
 async function post(body: string, options: { authorWorkerId?: string; mentions?: string[] } = {}) {
@@ -53,6 +104,7 @@ async function post(body: string, options: { authorWorkerId?: string; mentions?:
         name: msgNum,
         nodeType: 'chat-message',
         seq,
+        messageChannelId: channel.id,
         content: body,
         data: {
           mentions: options.mentions ?? [],
@@ -117,13 +169,9 @@ beforeEach(async () => {
   await db.session.create({
     data: { id: sessionId, appId: app.id, userId: user.id, workerId: worker.id, agentId: agent.id, type: 'DEVELOPER', startedAt: new Date() },
   });
-  process.env.TEAM_ATTENTION_PILOT_USER_IDS = user.id;
-  process.env.TEAM_ATTENTION_PILOT_APP_IDS = app.id;
 });
 
 afterEach(() => {
-  delete process.env.TEAM_ATTENTION_PILOT_USER_IDS;
-  delete process.env.TEAM_ATTENTION_PILOT_APP_IDS;
   delete process.env.TEAM_ATTENTION_TOKEN_SECRET;
   sessionKeyCache.clear();
 });
@@ -184,7 +232,10 @@ describe('worker-owned ordinary reads', () => {
     expect(await db.channelReadState.findFirst({ where: { workerId: worker.id, channelId: channel.id } })).toMatchObject({ lastSeenSeq: 1 });
 
     await db.channelReadState.deleteMany();
-    delete process.env.TEAM_ATTENTION_PILOT_USER_IDS;
+    // #1353: the pilot allowlist is gone — the boundary is the caller's OWN
+    // live Worker session. A session id that no longer exists captures
+    // nothing (the lost-participation shape).
+    await db.session.delete({ where: { id: sessionId } });
     await Q.channelMessages({}, { channelRef: channel.id, sinceSeq: 0, beforeSeq: null, mentionsRef: null, limit: 50, offset: 0 }, ctx);
     expect(await db.channelReadState.findFirst({ where: { workerId: worker.id, channelId: channel.id } })).toBeNull();
   });
@@ -239,25 +290,24 @@ describe('worker-owned ordinary reads', () => {
 describe('signed attention poll', () => {
   it('domain-separates attention signatures even when the configured secret is shared', async () => {
     process.env.TEAM_ATTENTION_TOKEN_SECRET = 'shared-test-secret';
-    const result = await getTeamAttention(userCtx(), app.id);
-    const [body, signature] = result.token.split('.');
+    const result = await pollPaged(userCtx(), app.id);
+    const [body, signature] = result.token!.split('.');
     const rawSharedSecretSignature = createHmac('sha256', 'shared-test-secret')
       .update(body)
       .digest('base64url');
 
     expect(signature).not.toBe(rawSharedSecretSignature);
-    await expect(getTeamAttention(userCtx(), app.id, result.token)).resolves.toMatchObject({ workers: [] });
+    await expect(pollPaged(userCtx(), app.id, result.token)).resolves.toMatchObject({ workers: [] });
   });
 
   it('conceals an existing App from a non-participant exactly like an absent App', async () => {
     const outsider = await db.user.create({
       data: { id: generateId(), githubId: 1353003, githubUsername: `outsider-${Date.now()}` },
     });
-    process.env.TEAM_ATTENTION_PILOT_USER_IDS = outsider.id;
     const outsiderCtx = { db, userId: outsider.id, roles: ['READER'] } as Context;
 
-    const existing = getTeamAttention(outsiderCtx, app.id).catch((error) => error);
-    const absent = getTeamAttention(outsiderCtx, generateId()).catch((error) => error);
+    const existing = pollPaged(outsiderCtx, app.id).catch((error) => error);
+    const absent = pollPaged(outsiderCtx, generateId()).catch((error) => error);
     const [existingError, absentError] = await Promise.all([existing, absent]);
 
     expect(existingError).toMatchObject({ message: 'App not found.', extensions: { code: 'APP_NOT_FOUND' } });
@@ -276,7 +326,7 @@ describe('signed attention poll', () => {
     await post('@someone unrelated', { mentions: ['someone'] });
     await post('@dara by Dara', { mentions: ['dara'], authorWorkerId: worker.id });
 
-    const result = await getTeamAttention(userCtx(), app.id);
+    const result = await pollPaged(userCtx(), app.id);
     expect(result.workers).toHaveLength(1);
     expect(result.workers[0].channels).toEqual([
       expect.objectContaining({ unread: 5, unreadMentions: 3, firstUnreadSeq: 1, lastSeq: 6 }),
@@ -292,7 +342,7 @@ describe('signed attention poll', () => {
     await post('@all @team by Dara', { mentions: ['all', 'team'], authorWorkerId: worker.id });
     await post('@all @team by Mira', { mentions: ['all', 'team'], authorWorkerId: mira.id });
 
-    const result = await getTeamAttention(userCtx(), app.id);
+    const result = await pollPaged(userCtx(), app.id);
     expect(result.workers).toHaveLength(2);
     expect(result.workers.find((row) => row.worker === worker.id)?.channels[0]).toMatchObject({
       unread: 1, unreadMentions: 1, firstUnreadSeq: 2, lastSeq: 2,
@@ -317,7 +367,7 @@ describe('signed attention poll', () => {
     // this backlog is decrypted once and fanned out to both Worker predicates.
     for (let i = 0; i < 48; i++) await post(`encrypted page filler ${i}`);
 
-    const result = await getTeamAttention(userCtx(), app.id);
+    const result = await pollPaged(userCtx(), app.id);
     expect(result.workers.find((row) => row.worker === worker.id)?.channels[0]).toMatchObject({
       unread: 50,
       unreadMentions: 1,
@@ -332,30 +382,30 @@ describe('signed attention poll', () => {
     });
 
     sessionKeyCache.clear();
-    await expect(getTeamAttention(userCtx(), app.id)).rejects.toMatchObject({
+    await expect(pollPaged(userCtx(), app.id)).rejects.toMatchObject({
       extensions: { code: 'SESSION_EXPIRED', memoryId: memory.id },
     });
   });
 
   it('retries the whole delivery set after a partial failure, while adopting the returned token suppresses it', async () => {
     const iris = await addWorker('Iris');
-    const baseline = await getTeamAttention(userCtx(), app.id);
+    const baseline = await pollPaged(userCtx(), app.id);
     await post('for both workers');
 
-    const first = await getTeamAttention(userCtx(), app.id, baseline.token);
+    const first = await pollPaged(userCtx(), app.id, baseline.token);
     expect(first.workers.map((w) => w.worker).sort()).toEqual([iris.id, worker.id].sort());
 
     // One nudge succeeded and one failed: retaining the old token returns the
     // entire atomic set again. Duplicates are visible; loss is impossible.
-    const retry = await getTeamAttention(userCtx(), app.id, baseline.token);
+    const retry = await pollPaged(userCtx(), app.id, baseline.token);
     expect(retry.workers.map((w) => w.worker).sort()).toEqual([iris.id, worker.id].sort());
-    expect((await getTeamAttention(userCtx(), app.id, first.token)).workers).toEqual([]);
+    expect((await pollPaged(userCtx(), app.id, first.token)).workers).toEqual([]);
   });
 
   it('handles delayed nudges, posts during polling, own posts, and a Worker first seen after the token', async () => {
-    const baseline = await getTeamAttention(userCtx(), app.id);
+    const baseline = await pollPaged(userCtx(), app.id);
     await post('new after the snapshot');
-    const pending = await getTeamAttention(userCtx(), app.id, baseline.token);
+    const pending = await pollPaged(userCtx(), app.id, baseline.token);
     expect(pending.workers[0].channels[0]).toMatchObject({ unread: 1, firstUnreadSeq: 1, lastSeq: 1 });
 
     // The Worker reads before a delayed nudge is delivered: unread state is
@@ -365,47 +415,43 @@ describe('signed attention poll', () => {
       { channelRef: channel.id, sinceSeq: 0, beforeSeq: null, mentionsRef: null, limit: 50, offset: 0 },
       userCtx({ sessionId }),
     );
-    expect((await getTeamAttention(userCtx(), app.id, baseline.token)).workers).toEqual([]);
+    expect((await pollPaged(userCtx(), app.id, baseline.token)).workers).toEqual([]);
 
-    const afterRead = await getTeamAttention(userCtx(), app.id);
+    const afterRead = await pollPaged(userCtx(), app.id);
     await post('written by Dara', { authorWorkerId: worker.id });
-    expect((await getTeamAttention(userCtx(), app.id, afterRead.token)).workers).toEqual([]);
+    expect((await pollPaged(userCtx(), app.id, afterRead.token)).workers).toEqual([]);
 
     await post('arrived during the next poll');
-    expect((await getTeamAttention(userCtx(), app.id, afterRead.token)).workers).toHaveLength(1);
+    expect((await pollPaged(userCtx(), app.id, afterRead.token)).workers).toHaveLength(1);
 
     const newcomer = await addWorker('Newcomer');
-    const seenBeforeNewcomer = await getTeamAttention(userCtx(), app.id);
+    const seenBeforeNewcomer = await pollPaged(userCtx(), app.id);
     expect(seenBeforeNewcomer.workers.some((w) => w.worker === newcomer.id)).toBe(true);
   });
 
   it('binds tokens to the exact operator and App, and refuses the backlog-skipping shortcut', async () => {
-    const result = await getTeamAttention(userCtx(), app.id);
-    process.env.TEAM_ATTENTION_PILOT_USER_IDS = `${user.id},${otherUser.id}`;
-    process.env.TEAM_ATTENTION_PILOT_APP_IDS = `${app.id},${otherApp.id}`;
-    await expect(getTeamAttention({ db, userId: otherUser.id, roles: ['READER'] } as Context, app.id, result.token)).rejects.toMatchObject({ extensions: { code: 'INVALID_ATTENTION_TOKEN' } });
-    await expect(getTeamAttention(userCtx(), otherApp.id, result.token)).rejects.toMatchObject({ extensions: { code: 'INVALID_ATTENTION_TOKEN' } });
-    await expect(getTeamAttention(userCtx(), app.id, 'now')).rejects.toMatchObject({ extensions: { code: 'SWITCHOVER_CONFIRMATION_REQUIRED' } });
+    const result = await pollPaged(userCtx(), app.id);
+    await expect(pollPaged({ db, userId: otherUser.id, roles: ['READER'] } as Context, app.id, result.token)).rejects.toMatchObject({ extensions: { code: 'INVALID_ATTENTION_TOKEN' } });
+    await expect(pollPaged(userCtx(), otherApp.id, result.token)).rejects.toMatchObject({ extensions: { code: 'INVALID_ATTENTION_TOKEN' } });
+    await expect(pollPaged(userCtx(), app.id, 'now')).rejects.toMatchObject({ extensions: { code: 'SWITCHOVER_CONFIRMATION_REQUIRED' } });
   });
 });
 
 describe('explicit switchover', () => {
   it('requires a fresh same-operator/App proof and leaves post-preview messages unread', async () => {
     await post('backlog');
-    const preview = await previewTeamAttentionSwitchover(userCtx(), app.id);
+    const preview = await previewPaged(userCtx(), app.id);
     expect(preview.workers[0].channels[0]).toMatchObject({ fromSeq: 0, throughSeq: 1, unread: 1 });
     await post('arrived after preview');
 
-    const applied = await confirmTeamAttentionSwitchover(userCtx(), app.id, preview.proof);
+    const applied = await confirmTeamAttentionSwitchover(userCtx(), app.id, preview.proof!);
     expect(applied).toMatchObject({ applied: true, workersAdvanced: 1, channelsAdvanced: 1 });
     expect(await db.channelReadState.findFirst({ where: { workerId: worker.id, channelId: channel.id } })).toMatchObject({ lastSeenSeq: 1 });
-    const remaining = await getTeamAttention(userCtx(), app.id);
+    const remaining = await pollPaged(userCtx(), app.id);
     expect(remaining.workers[0].channels[0]).toMatchObject({ unread: 1, firstUnreadSeq: 2, lastSeq: 2 });
 
-    process.env.TEAM_ATTENTION_PILOT_USER_IDS = `${user.id},${otherUser.id}`;
-    await expect(confirmTeamAttentionSwitchover({ db, userId: otherUser.id, roles: ['READER'] } as Context, app.id, preview.proof)).rejects.toMatchObject({ extensions: { code: 'INVALID_SWITCHOVER_PROOF' } });
-    process.env.TEAM_ATTENTION_PILOT_APP_IDS = `${app.id},${otherApp.id}`;
-    await expect(confirmTeamAttentionSwitchover(userCtx(), otherApp.id, preview.proof)).rejects.toMatchObject({ extensions: { code: 'INVALID_SWITCHOVER_PROOF' } });
+    await expect(confirmTeamAttentionSwitchover({ db, userId: otherUser.id, roles: ['READER'] } as Context, app.id, preview.proof!)).rejects.toMatchObject({ extensions: { code: 'INVALID_SWITCHOVER_PROOF' } });
+    await expect(confirmTeamAttentionSwitchover(userCtx(), otherApp.id, preview.proof!)).rejects.toMatchObject({ extensions: { code: 'INVALID_SWITCHOVER_PROOF' } });
   });
 
   it('an App whose org is deleted after the apply entry check advances nothing (#1362 review)', async () => {
@@ -433,12 +479,12 @@ describe('explicit switchover', () => {
       async ({ tx, seq, msgNum }) => tx.node.create({
         data: {
           id: generateId(), memoryId: independentMemory.id, loc: `chats:independent:messages:${msgNum}`,
-          name: msgNum, nodeType: 'chat-message', seq, content: 'backlog',
+          name: msgNum, nodeType: 'chat-message', seq, messageChannelId: made.channel.id, content: 'backlog',
         },
       }),
       { asChannel: true },
     );
-    const preview = await previewTeamAttentionSwitchover(userCtx(), app.id);
+    const preview = await previewPaged(userCtx(), app.id);
     // Hold apply between its entry check and its transaction: the window in
     // which the entry check goes stale.
     let release!: () => void;
@@ -458,7 +504,7 @@ describe('explicit switchover', () => {
         return typeof value === 'function' ? value.bind(target) : value;
       },
     });
-    const applying = confirmTeamAttentionSwitchover({ ...userCtx(), db: gatedDb } as Context, app.id, preview.proof).then(
+    const applying = confirmTeamAttentionSwitchover({ ...userCtx(), db: gatedDb } as Context, app.id, preview.proof!).then(
       () => 'applied',
       (e: { extensions?: { code?: string } }) => e.extensions?.code ?? String(e),
     );
@@ -476,14 +522,14 @@ describe('explicit switchover', () => {
 
   it('rejects cursor or live-scope drift atomically', async () => {
     await post('backlog');
-    const preview = await previewTeamAttentionSwitchover(userCtx(), app.id);
+    const preview = await previewPaged(userCtx(), app.id);
     await db.channelReadState.create({ data: { id: generateId(), workerId: worker.id, channelId: channel.id, lastSeenSeq: 1 } });
-    await expect(confirmTeamAttentionSwitchover(userCtx(), app.id, preview.proof)).rejects.toMatchObject({ extensions: { code: 'SWITCHOVER_PROOF_STALE' } });
+    await expect(confirmTeamAttentionSwitchover(userCtx(), app.id, preview.proof!)).rejects.toMatchObject({ extensions: { code: 'SWITCHOVER_PROOF_STALE' } });
 
     await db.channelReadState.deleteMany();
-    const second = await previewTeamAttentionSwitchover(userCtx(), app.id);
+    const second = await previewPaged(userCtx(), app.id);
     await addWorker('Scope Drift');
-    await expect(confirmTeamAttentionSwitchover(userCtx(), app.id, second.proof)).rejects.toMatchObject({ extensions: { code: 'SWITCHOVER_PROOF_STALE' } });
+    await expect(confirmTeamAttentionSwitchover(userCtx(), app.id, second.proof!)).rejects.toMatchObject({ extensions: { code: 'SWITCHOVER_PROOF_STALE' } });
     expect(await db.channelReadState.count()).toBe(0);
   });
 
@@ -491,10 +537,12 @@ describe('explicit switchover', () => {
     await db.channelReadState.create({
       data: { id: generateId(), workerId: worker.id, channelId: channel.id, lastSeenSeq: 5 },
     });
-    const preview = await previewTeamAttentionSwitchover(userCtx(), app.id);
-    expect(preview.workers[0].channels[0]).toMatchObject({ fromSeq: 5, throughSeq: 0, unread: 0 });
+    const preview = await previewPaged(userCtx(), app.id);
+    // v2 item shape carries no fromSeq (the frozen seen stays private); the
+    // point of this case is the preserved cursor sitting AHEAD of the head.
+    expect(preview.workers[0].channels[0]).toMatchObject({ throughSeq: 0, unread: 0 });
 
-    await expect(confirmTeamAttentionSwitchover(userCtx(), app.id, preview.proof)).resolves.toMatchObject({
+    await expect(confirmTeamAttentionSwitchover(userCtx(), app.id, preview.proof!)).resolves.toMatchObject({
       applied: true,
       workersAdvanced: 1,
       channelsAdvanced: 1,
@@ -594,23 +642,37 @@ describe('MCP parity and discovery gate', () => {
     expect(await probe()).not.toContain('team-attention');
   });
 
-  it('advertises the capability only inside the operator+App pilot and delegates the compact query', async () => {
+  it('lists the tools for any user principal while the capability stays participation-gated', async () => {
     const enabled = createTestableMcpServer(auth());
     expect(await enabled.callToolText('hadron_server_info', {})).toContain('team-attention');
+    expect(await enabled.callToolText('hadron_server_info', {})).toContain('team-attention-paged');
     await post('compact, no body in the result');
-    const out = await enabled.callToolText('hadron_team_attention', {});
+    const retired = await enabled.callToolText('hadron_team_attention', {});
+    expect(retired).toContain('[upgrade_required]');
+    const out = await enabled.callToolText('hadron_team_attention_page', {});
     expect(out).toContain(`"worker": "${worker.id}"`);
     expect(out).toContain('"unread": 1');
     expect(out).not.toContain('compact, no body in the result');
 
-    delete process.env.TEAM_ATTENTION_PILOT_USER_IDS;
-    const disabled = createTestableMcpServer(auth());
-    expect(await disabled.callToolText('hadron_server_info', {})).not.toContain('team-attention');
-    // A non-pilot operator's connection does not even list the pilot tools
-    // (#1362 review): discovery follows the operator allowlist.
-    const pilotTools = ['hadron_team_attention', 'hadron_team_attention_switchover', 'hadron_team_chat_mark_read'];
-    expect(enabled.toolNames()).toEqual(expect.arrayContaining(pilotTools));
-    for (const name of pilotTools) expect(disabled.toolNames()).not.toContain(name);
+    // #1353: the pilot operator allowlist no longer hides discovery — an
+    // ordinary non-participant still LISTS the tools (registration follows
+    // the user principal) but gets no capability advertisement (the probe
+    // requires live-App participation) and a concealed per-call refusal.
+    const outsider = await db.user.create({
+      data: { id: generateId(), githubId: 1353004, githubUsername: `unlisted-${Date.now()}` },
+    });
+    const outsiderServer = createTestableMcpServer({ ...auth(), userId: outsider.id });
+    const attentionTools = ['hadron_team_attention', 'hadron_team_attention_page', 'hadron_team_attention_switchover', 'hadron_team_chat_mark_read'];
+    expect(enabled.toolNames()).toEqual(expect.arrayContaining(attentionTools));
+    for (const name of attentionTools) expect(outsiderServer.toolNames()).toContain(name);
+    expect(await outsiderServer.callToolText('hadron_server_info', {})).not.toContain('team-attention');
+    // The RETIRED v1 stub refuses uniformly (UPGRADE_REQUIRED before any
+    // App resolution — no existence oracle), while the live paged doors
+    // carry the concealment: a non-participant learns nothing.
+    const refusedV1 = await outsiderServer.callTool('hadron_team_attention', { app: app.id });
+    expect((refusedV1.content[0]?.text ?? '')).toContain('[upgrade_required]');
+    const refused = await outsiderServer.callTool('hadron_team_attention_page', { app: app.id });
+    expect((refused.content[0]?.text ?? '')).toContain('[app_not_found] App not found.');
   });
 
   it('ordinary MCP reads own the cursor and the explicit mark-read door covers filtered reads', async () => {
@@ -666,12 +728,13 @@ describe('MCP parity and discovery gate', () => {
       userCtx(),
     )).rejects.toMatchObject({ extensions: { code: 'SEQ_BEYOND_WATERMARK', lastSeq: 2 } });
 
-    delete process.env.TEAM_ATTENTION_PILOT_USER_IDS;
+    // #1353: no allowlist — the boundary is own-session. Another user's
+    // context cannot mark this session's cursor (SESSION_NOT_LIVE).
     await expect(M.markOwnTeamChatRead(
       {},
       { appRef: app.id, sessionRef: sessionId, channelRef: channel.id, seq: 2 },
-      userCtx(),
-    )).rejects.toMatchObject({ extensions: { code: 'FEATURE_NOT_AVAILABLE' } });
+      { db, userId: otherUser.id, roles: ['READER'] } as Context,
+    )).rejects.toMatchObject({ extensions: { code: 'SESSION_NOT_LIVE' } });
   });
 
   it('an explicit MCP session advances only that Worker, not the different header-bound session', async () => {
@@ -775,7 +838,7 @@ describe('MCP parity and discovery gate', () => {
     expect(await db.channelReadState.findFirst({ where: { workerId: worker.id, channelId: independent.id } }))
       .toBeNull();
     // The pilot door answers a deleted org's App exactly like an absent one.
-    const error = await getTeamAttention(userCtx(), app.id).catch((e) => e);
+    const error = await pollPaged(userCtx(), app.id).catch((e) => e);
     expect(error).toMatchObject({ message: 'App not found.', extensions: { code: 'APP_NOT_FOUND' } });
   });
 

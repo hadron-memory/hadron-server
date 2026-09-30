@@ -66,25 +66,57 @@ export async function getOrgReadableMemoryIds(
       ...(onlyMemoryId ? { id: onlyMemoryId } : {}),
       deletedAt: null,
       OR: [
-        // Org-visible memories: knowledge (PUBLIC/ORGANIZATION) + group
-        // (GROUP). Per-user "holding" memories (userMemoryOfAgentId set —
-        // e.g. the startChat no-App knowledge downgrade) are owner-only and
-        // excluded here (caller re-admits its own via the identity clause).
+        // Org-visible memories: knowledge (PUBLIC/ORGANIZATION) stays
+        // org-member-readable. Per-user "holding" memories
+        // (userMemoryOfAgentId set — e.g. the startChat no-App knowledge
+        // downgrade) are owner-only and excluded here (caller re-admits its
+        // own via the identity clause).
         ...(orgIds.length > 0
           ? [
-              // #653: `appId: null` — an APP-SCOPED knowledge/group memory is
+              // #653: `appId: null` — an APP-SCOPED knowledge memory is
               // NOT org-wide readable; it's reachable only through the App
               // surface (getAppMemoryAccess), like an app-class memory. Without
               // this, a knowledge memory provisioned for App A would leak to
               // every org member (codex review on #660).
-              { organizationId: { in: orgIds }, class: { in: ['knowledge', 'group'] as any }, appId: null, userMemoryOfAgentId: null },
-              // Cross-org subscriptions never reach owner-only personal/private.
-              // `deletedAt: null` on the subscription so a REVOKED (soft-deleted)
-              // subscription stops granting read. `appId: null` — app-scoped
-              // memories are App-internal, never cross-org-subscription-readable.
-              { class: { notIn: ['personal', 'private'] as any }, appId: null, userMemoryOfAgentId: null, subscriptions: { some: { organizationId: { in: orgIds }, deletedAt: null } } },
+              { organizationId: { in: orgIds }, class: 'knowledge' as any, appId: null, userMemoryOfAgentId: null },
+              // Cross-org subscriptions never reach owner-only personal/private,
+              // and never GROUP (#3781): createMemorySubscription only admits
+              // PUBLIC memories while group visibility is CHECK-forced to
+              // GROUP, so a group-subscription row is API-invalid legacy state,
+              // not a grant cor:acl:010:01's exclusive MemoryMember audience
+              // should honor. `deletedAt: null` on the subscription so a
+              // REVOKED (soft-deleted) subscription stops granting read.
+              // `appId: null` — app-scoped memories are App-internal, never
+              // cross-org-subscription-readable.
+              { class: { notIn: ['personal', 'private', 'group'] as any }, appId: null, userMemoryOfAgentId: null, subscriptions: { some: { organizationId: { in: orgIds }, deletedAt: null } } },
             ]
           : []),
+        // #1208 / cor:acl:010:01 — group memories are readable ONLY through
+        // MemoryMember (reader/writer/owner), the symmetric counterpart of
+        // MemoryShare. Split out of the org clause for two reasons at once:
+        // org membership alone no longer reaches a group memory (it used to,
+        // via `group` riding the knowledge clause), and a MemoryMember with
+        // NO org role now DOES reach one (the join table's whole purpose —
+        // the shape the org arm could never admit). The relation filter is
+        // deliberately NOT nested under orgIds: a cross-org MemoryMember
+        // reaches its group memory the same way a cross-org MemoryShare
+        // reaches a shared one. MemoryMember has no deletedAt (removal is a
+        // hard delete, FR-038), so `some: { userId }` is liveness. App-scoped
+        // and per-user-holding group rows stay excluded (#653 parity).
+        //
+        // #3595: under `restrictToOrgId` (an impersonation session's ONE
+        // shared org) the membership clause is BOUND to that org — the
+        // target's MemoryMember rows in OTHER orgs must not ride the
+        // impersonation session's readable set. Ordinary calls stay
+        // unbounded: that is the cross-org reach described above.
+        {
+          class: 'group' as any,
+          appId: null,
+          userMemoryOfAgentId: null,
+          ownerUserId: null,
+          ...(restrictToOrgId ? { organizationId: restrictToOrgId } : {}),
+          memberships: { some: { userId } },
+        },
         // PUBLIC memories — defensively excluding personal/private, per-user
         // holdings, and app-scoped (#653) so a mis-set visibility can't expose them.
         // #758: `ownerUserId: null` — spec 047's invariant is that a USER-owned

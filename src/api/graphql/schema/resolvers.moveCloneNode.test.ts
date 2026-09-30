@@ -16,6 +16,7 @@ import { cleanDb, createDbOrgAndGraph, createDbNode } from '../../../test/helper
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
 import { mirrorNodeMoveToGit } from '../../../integrations/github/mirrorNodeMove.js';
+import { moveNodeSubtree } from '../../../lib/nodeSubtreeMove.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -58,6 +59,134 @@ beforeEach(async () => {
 });
 
 describe('moveNode (#564)', () => {
+  it('locks subtree rows before the Memory encryption fence', async () => {
+    const root = await createDbNode(db, { loc: 'parent', memoryId: memA.id });
+    const child = await createDbNode(db, { loc: 'parent:child', memoryId: memA.id });
+    let signalHeld!: () => void;
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { signalHeld = resolve; });
+    const mayRelease = new Promise<void>((resolve) => { release = resolve; });
+    const holder = db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM nodes WHERE id = ${child.id} FOR UPDATE`;
+      signalHeld();
+      await mayRelease;
+    }, { timeout: 20_000 });
+    await held;
+    const moving = db.$transaction(async (tx) => moveNodeSubtree(tx, {
+      source: root, destLoc: 'renamed', editor: { userId: user.id },
+    }), { timeout: 20_000 });
+    try {
+      await vi.waitFor(async () => {
+        const waiting = await db.$queryRaw<Array<{ pid: number }>>`
+          SELECT pid FROM pg_stat_activity
+          WHERE datname = current_database() AND wait_event_type = 'Lock'
+            AND query LIKE '%nodes%' AND pid <> pg_backend_pid()
+        `;
+        expect(waiting.length).toBeGreaterThan(0);
+      }, { timeout: 5_000, interval: 25 });
+      // A concurrent merge fold needs FOR SHARE on this memory while holding
+      // its Node locks. The move may wait on a Node, but cannot hold a
+      // conflicting Memory lock during that wait.
+      await db.$transaction(async (tx) => {
+        await tx.$executeRaw`SET LOCAL lock_timeout = '500ms'`;
+        const rows = await tx.$queryRaw<Array<{ id: string }>>`
+          SELECT id FROM memories WHERE id = ${memA.id} FOR SHARE
+        `;
+        expect(rows).toHaveLength(1);
+      });
+    } finally {
+      release();
+      await holder;
+    }
+    await moving;
+    expect((await db.node.findUniqueOrThrow({ where: { id: child.id } })).loc).toBe('renamed:child');
+  }, 20_000);
+
+  it('holds the source encryption state before a same-memory move can snapshot history', async () => {
+    const alpha = await createDbNode(db, { loc: 'alpha', memoryId: memA.id, content: 'plain source' });
+    let reached!: () => void;
+    let release!: () => void;
+    const atSubtreeRead = new Promise<void>((resolve) => { reached = resolve; });
+    const resume = new Promise<void>((resolve) => { release = resolve; });
+    let moved: Promise<unknown> | undefined;
+    let flip: Promise<unknown> | undefined;
+    try {
+      moved = db.$transaction(async (tx) => {
+        const findNodes = tx.node.findMany.bind(tx.node);
+        let held = false;
+        vi.spyOn(tx.node, 'findMany').mockImplementation((async (args: Parameters<typeof findNodes>[0]) => {
+          const rows = await findNodes(args);
+          // The full subtree read follows the Node locks and Memory fence,
+          // but still precedes the move's revision snapshot.
+          if (!held && args?.where?.memoryId === memA.id && !args.select) {
+            held = true;
+            reached();
+            await resume;
+          }
+          return rows;
+        }) as unknown as typeof tx.node.findMany);
+        await moveNodeSubtree(tx, {
+          source: alpha, destLoc: 'alpha-renamed', editor: { userId: user.id },
+        });
+      }, { timeout: 15_000 });
+      await atSubtreeRead;
+      let flipped = false;
+      flip = db.memory.update({ where: { id: memA.id }, data: { isEncrypted: true } })
+        .then(() => { flipped = true; });
+      await new Promise((resolve) => setTimeout(resolve, 75));
+      expect(flipped).toBe(false);
+    } finally {
+      release?.();
+      await Promise.allSettled([moved, flip]);
+    }
+    expect((await db.node.findUniqueOrThrow({ where: { id: alpha.id } })).loc).toBe('alpha-renamed');
+  });
+
+  it('holds the destination encryption state until a cross-memory relocation commits', async () => {
+    const alpha = await createDbNode(db, { loc: 'alpha', memoryId: memA.id, content: 'plain source' });
+    const dest = await db.memory.create({
+      data: {
+        id: generateId(), organizationId: org.id, urn: 'mc-org:private-dest',
+        name: 'private-dest', class: 'private', userId: user.id,
+      },
+    });
+    let reached!: () => void;
+    let release!: () => void;
+    const atCheck = new Promise<void>((resolve) => { reached = resolve; });
+    const resume = new Promise<void>((resolve) => { release = resolve; });
+    let moved: Promise<unknown> | undefined;
+    let flip: Promise<unknown> | undefined;
+    try {
+      moved = db.$transaction(async (tx) => {
+        const findMemory = tx.memory.findUnique.bind(tx.memory);
+        let held = false;
+        vi.spyOn(tx.memory, 'findUnique').mockImplementation((async (args: Parameters<typeof findMemory>[0]) => {
+          const row = await findMemory(args);
+          if (!held && args?.where?.id === dest.id && args.select?.isEncrypted === true) {
+            held = true;
+            reached();
+            await resume;
+          }
+          return row;
+        }) as unknown as typeof tx.memory.findUnique);
+        await moveNodeSubtree(tx, {
+          source: alpha, destLoc: 'alpha', destMemoryId: dest.id, editor: { userId: user.id },
+        });
+      }, { timeout: 15_000 });
+      await atCheck;
+      let flipped = false;
+      flip = db.memory.update({ where: { id: dest.id }, data: { isEncrypted: true } })
+        .then(() => { flipped = true; });
+      await new Promise((resolve) => setTimeout(resolve, 75));
+      expect(flipped).toBe(false);
+    } finally {
+      release?.();
+      await Promise.allSettled([moved, flip]);
+    }
+    expect((await db.node.findUniqueOrThrow({ where: { id: alpha.id } })).memoryId).toBe(dest.id);
+    expect((await db.memory.findUniqueOrThrow({ where: { id: dest.id } })).isEncrypted).toBe(true);
+  });
+
   it('moves within the same memory to a new loc, keeping id + edges', async () => {
     const alpha = await createDbNode(db, { loc: 'alpha', memoryId: memA.id, content: 'A' });
     const beta = await createDbNode(db, { loc: 'beta', memoryId: memA.id });
@@ -441,6 +570,76 @@ describe('moveNode subtree cascade (#768)', () => {
 });
 
 describe('cloneNode (#564)', () => {
+  it.each([
+    { role: null, isRunnable: null },
+    { role: 'weather', isRunnable: false },
+    { role: 'weather.widget', isRunnable: null },
+  ])('preserves ungoverned signals in same- and cross-memory clones: %j', async ({ role, isRunnable }) => {
+    const source = await createDbNode(db, { loc: 'alpha', memoryId: memA.id });
+    await db.node.update({ where: { id: source.id }, data: { role, isRunnable } });
+
+    const same = await M.cloneNode(null, { sourceRef: source.id, targetUrn: urnA('alpha-copy') }, asUser());
+    const cross = await M.cloneNode(null, { sourceRef: source.id, targetMemoryRef: memB.id }, asUser());
+    for (const clone of [same, cross]) {
+      expect({ role: clone.role, isRunnable: clone.isRunnable }).toEqual({ role, isRunnable });
+    }
+    expect((await db.node.findUniqueOrThrow({ where: { id: source.id } })).role).toBe(role);
+  });
+
+  it.each([
+    { role: 'spec', isRunnable: null },
+    { role: 'spec.rule', isRunnable: null },
+    { role: 'review', isRunnable: null },
+    { role: null, isRunnable: true },
+  ])('refuses a generic clone of governed signals without stripping them: %j', async ({ role, isRunnable }) => {
+    const source = await createDbNode(db, { loc: 'alpha', memoryId: memA.id });
+    await db.node.update({ where: { id: source.id }, data: { role, isRunnable } });
+
+    await expect(M.cloneNode(null, { sourceRef: source.id, targetUrn: urnA('alpha-copy') }, asUser()))
+      .rejects.toMatchObject({ extensions: { code: 'ROLE_GOVERNED' } });
+    await expect(M.cloneNode(null, { sourceRef: source.id, targetMemoryRef: memB.id }, asUser()))
+      .rejects.toMatchObject({ extensions: { code: 'ROLE_GOVERNED' } });
+    expect(await db.node.findFirst({ where: { memoryId: memA.id, loc: 'alpha-copy' } })).toBeNull();
+    expect(await db.node.findFirst({ where: { memoryId: memB.id, loc: 'alpha' } })).toBeNull();
+    expect(await db.node.findUniqueOrThrow({ where: { id: source.id } }))
+      .toMatchObject({ role, isRunnable });
+  });
+
+  it('clones only the named node, leaving a descendant at its original loc', async () => {
+    const source = await createDbNode(db, { loc: 'parent', memoryId: memA.id });
+    const child = await createDbNode(db, { loc: 'parent:child', memoryId: memA.id });
+    await db.node.update({ where: { id: source.id }, data: { role: 'weather.widget' } });
+    await db.node.update({ where: { id: child.id }, data: { role: 'spec.rule' } });
+
+    const clone = await M.cloneNode(null, { sourceRef: source.id, targetUrn: urnA('copy') }, asUser());
+    expect(clone.role).toBe('weather.widget');
+    expect(await db.node.findFirst({ where: { memoryId: memA.id, loc: 'copy:child' } })).toBeNull();
+    expect((await db.node.findUniqueOrThrow({ where: { id: child.id } })).role).toBe('spec.rule');
+  });
+
+  it('refuses a clone into a loc holding a soft-deleted governed node (resurrection merge)', async () => {
+    // The clone's carried signals are EXPLICIT (null-normalized by
+    // carryGovernedSignals), not omitted — which is exactly the input shape
+    // that could differ from an ordinary create in the #1203 resurrection
+    // merge. An ungoverned source over a governed tombstone must refuse on
+    // the tombstone's role, and the tombstone must stay a tombstone.
+    // (Andi's non-blocking coverage suggestion from the #1382 comparison;
+    // the generic-create route is pinned in governedRole1201.test.ts.)
+    const source = await createDbNode(db, { loc: 'live', memoryId: memA.id });
+    await db.node.update({ where: { id: source.id }, data: { role: 'weather', isRunnable: false } });
+    const dead = await createDbNode(db, { loc: 'grave', memoryId: memA.id, content: 'gone' });
+    await db.node.update({ where: { id: dead.id }, data: { role: 'review', deletedAt: new Date() } });
+
+    await expect(
+      M.cloneNode(null, { sourceRef: source.id, targetUrn: urnA('grave') }, asUser()),
+    ).rejects.toMatchObject({ extensions: { code: 'ROLE_GOVERNED' } });
+
+    const row = await db.node.findUniqueOrThrow({ where: { id: dead.id } });
+    expect(row.deletedAt).not.toBeNull();
+    expect(row.role).toBe('review');
+    expect(row.content).toBe('gone');
+  });
+
   it('carries already-stored task attribution without minting a new task claim (#1326)', async () => {
     const task = await createDbNode(db, { loc: 'author-task', memoryId: memA.id });
     const authoredAt = new Date('2026-09-26T20:00:00Z');
@@ -505,16 +704,16 @@ describe('cloneNode (#564)', () => {
     });
   });
 
-  it('clears attribution when the generic clone omits a governed role', async () => {
+  it('carries attribution with an open role because the authored fields are copied', async () => {
     const source = await db.node.create({
       data: {
-        id: generateId(), memoryId: memA.id, loc: 'copy-role', name: 'Role', role: 'task',
+        id: generateId(), memoryId: memA.id, loc: 'copy-role', name: 'Role', role: 'weather',
         authorshipKind: 'TASK', authoredByTask: generateId(), authoredByRevision: 1,
         authoredAt: new Date('2026-09-26T20:00:00Z'),
       },
     });
     const clone = await M.cloneNode(null, { sourceRef: source.id, targetUrn: urnA('copy-role-new') }, asUser());
-    expect(clone).toMatchObject({ role: null, authorshipKind: null, authoredByTask: null });
+    expect(clone).toMatchObject({ role: 'weather', authorshipKind: 'TASK', authoredByTask: source.authoredByTask });
   });
 
   it('clones fields to a NEW node (fresh id), leaving the source intact', async () => {

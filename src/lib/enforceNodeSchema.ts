@@ -7,8 +7,9 @@
  * (src/lib/validateNodeAgainstSchema.ts) with the memory-schema fetch + the
  * empty-objectType normalization + the BAD_USER_INPUT mapping.
  *
- * Used by writeNodeCore, replaceSubtree, mergeNodes, restoreNodeRevision, and
- * mergeMemories. (The MCP create/update tools surface violations as tool-error
+ * Used by writeNodeCore, mergeNodes, restoreNodeRevision, and mergeMemories.
+ * (replaceSubtree used it too until #454 retired that mutation to a no-write
+ * refusal.) (The MCP create/update tools surface violations as tool-error
  * text, so they call the pure validator directly rather than this GraphQL seam.)
  */
 import { GraphQLError } from 'graphql';

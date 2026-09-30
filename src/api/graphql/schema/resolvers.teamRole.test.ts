@@ -118,7 +118,7 @@ beforeEach(async () => {
       orgId: org.id,
       name: 'TR Backend Engineer',
       personaRole: 'backend-engineer',
-      personaPrompt: 'You are {{name}}, a {{role}}.',
+      systemPrompt: 'You are {{name}}, a {{role}}.',
     },
     ctx(admin.id),
   );
@@ -184,7 +184,7 @@ describe('#960 — teamRoles read', () => {
   it('flags a nameless template — the pre-guard corpus check', async () => {
     await db.agent.update({
       where: { id: roleAgent.id },
-      data: { personaPrompt: 'You are a {{role}} with no name.' },
+      data: { systemPrompt: 'You are a {{role}} with no name.' },
     });
     const page = await teamRoles(ctx(contrib.id));
     const be = page.items.find((r: any) => r.role === 'backend-engineer');
@@ -194,7 +194,7 @@ describe('#960 — teamRoles read', () => {
   it('detection shares the composer\'s exact token: "{{ name }}" is NOT bound (#985 review)', async () => {
     await db.agent.update({
       where: { id: roleAgent.id },
-      data: { personaPrompt: 'You are {{ name }}, a {{role}}.' },
+      data: { systemPrompt: 'You are {{ name }}, a {{role}}.' },
     });
     const page = await teamRoles(ctx(contrib.id));
     const be = page.items.find((r: any) => r.role === 'backend-engineer');

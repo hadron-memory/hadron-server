@@ -442,6 +442,34 @@ describe('createTeamChatMessage — sessionRef author derivation', () => {
 });
 
 describe('teamChatMessages — mentions round trip', () => {
+  it('stores only prose mentions when a worker name appears in Markdown code', async () => {
+    const s = await workerSession(appMember.id);
+    const token = `@${s.workerName}`;
+    const codeOnly = await post(ctx(admin.id), {
+      body: [`Example: \`${token}\``, '```sh', `notify ${token}`, '```'].join('\n'),
+    });
+    expect(codeOnly.mentions).toEqual([]);
+    const quotedFence = await post(ctx(admin.id), {
+      body: ['> ~~~', `> ${token}`, '> ~~~'].join('\n'),
+    });
+    expect(quotedFence.mentions).toEqual([]);
+    const headingCode = await post(ctx(admin.id), {
+      body: ['# Example', `    ${token}`].join('\n'),
+    });
+    expect(headingCode.mentions).toEqual([]);
+    const codeWithQuotePrefix = await post(ctx(admin.id), {
+      body: ['```sh', `> ${token}`, token, '```'].join('\n'),
+    });
+    expect(codeWithQuotePrefix.mentions).toEqual([]);
+    expect(await read(ctx(appMember.id), { mentionsRef: s.workerId })).toEqual({ items: [], total: 0 });
+
+    const addressed = await post(ctx(admin.id), { body: `\`${token}\` is an example. ${token}, please review.` });
+    expect(addressed.mentions).toEqual([s.workerName.toLowerCase()]);
+    const page = await read(ctx(appMember.id), { mentionsRef: s.workerId });
+    expect(page.total).toBe(1);
+    expect(page.items[0].seq).toBe(addressed.seq);
+  });
+
   it('write-time extraction feeds the read-time filter, for workers and users', async () => {
     const s = await workerSession(appMember.id);
     await post(ctx(appMember.id), { body: `@${s.workerName} please take auth` });

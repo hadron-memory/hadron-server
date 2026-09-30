@@ -162,24 +162,11 @@ function recipientKey(email: string): string {
  *    cannot do — distributing the same target across many IPs is exactly how
  *    an email bomb is actually sent.
  *
- * The per-IP cap is PER ROUTE and deliberately so; the per-recipient cap is
- * SHARED across both send paths. That asymmetry is the design, not an
- * oversight (@copilot raised it on PR #1238):
- *
- *  - `/oauth/authorize/email` keeps its own per-IP limiter
- *    (`buildAuthorizeEmailRateLimit`, the same 10 / 15 min), so one source
- *    address can get 10 through each route — 20 across both. A per-IP limit is
- *    a burst brake on ONE attacker, and an attacker willing to alternate
- *    routes is equally willing to use a second IP, which defeats any per-IP
- *    number. It buys ordering and noise reduction, not a bound.
- *  - The guarantee that actually protects a third party — how much mail one
- *    VICTIM receives — is carried by the recipient limiter, and THAT one is a
- *    single shared instance precisely because alternating routes must not
- *    double it.
- *
- * Unifying the per-IP store is worth doing, but it means reworking
- * `buildAuthorizeEmailRateLimit`, which #1239 already has to change for an
- * unrelated abort-refund bypass. Doing both there beats doing half here.
+ * Both limiter instances are SHARED across the public send routes. One source
+ * address gets one 10 / 15 min budget whether it uses `/auth/email`,
+ * `/oauth/authorize/email`, or alternates between them; the recipient cap
+ * likewise follows the mailbox across both paths. Each route validates its
+ * own no-send cases before entering these shared limiters.
  *
  * The per-email budget is tighter than the per-IP one because a human retrying
  * a typo'd address changes the address.

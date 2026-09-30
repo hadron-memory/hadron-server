@@ -40,11 +40,13 @@ import { GraphQLError } from 'graphql';
 import type { Prisma, PrismaClient } from '../generated/prisma/index.js';
 import type { InputJsonValue } from '../generated/prisma/runtime/library.js';
 import { generateId } from './id.js';
+import { escapePrismaLikePattern } from './literalLocPrefix.js';
 import { ancestorLocs, lockAncestorsForCreateMany } from './nodeSubtreeLock.js';
 import { getMemoryEncryptionInfo, decryptNodeFields, encryptNodeFields, type MemoryEncryptionInfo } from './nodeCrypto.js';
 import { locsOverlap } from './protectedLoc.js';
 import { ensureInstallRegisterRows } from './registerInstall.js';
 import { resolveAppTeamSpaceMemoryIds } from '../api/graphql/schema/resolvers.helpers.js';
+import { pendingAtForRevival } from '../services/embedding/enqueue.js';
 
 /** The name of every App's default Channel — the row `chats:team` became. */
 export const DEFAULT_CHANNEL_NAME = 'team';
@@ -156,6 +158,24 @@ export async function ensureChannelRow(
       if ((e as { code?: string }).code !== 'P2002') throw e;
       row = await db.channel.findUniqueOrThrow({ where: { chatRootNodeId: args.rootId } });
     }
+    // #1430: stamp membership for any live chat-message children this Channel
+    // adopted (pre-Channel rows under the messages prefix — the one-time
+    // migration cannot cover Channels created after it). Centralized here so
+    // both ensureChannelWithRoot and jobs/backfillChannels are covered.
+    // The prefix is ESCAPED (Andi #3279): Prisma's startsWith compiles to
+    // LIKE '…%', where an unescaped `_`/`%` in the Channel loc matches foreign
+    // rows (`chats_team` would claim `chatsXteam:messages:*`).
+    const prefix = `${args.loc}:messages:`;
+    await db.node.updateMany({
+      where: {
+        memoryId: args.memoryId,
+        loc: { startsWith: escapePrismaLikePattern(prefix) },
+        nodeType: 'chat-message',
+        deletedAt: null,
+        messageChannelId: null,
+      },
+      data: { messageChannelId: row.id },
+    });
   } else if (row.deletedAt || args.resetForReuse) {
     // The root was restored. Its allocator counter stays on the root so the
     // next message never reuses an old seq, but the Channel watermark describes
@@ -202,12 +222,13 @@ async function resetReusedChannel(
     messagesLoc: string;
     deletedBy: string | null;
     memEncInfo: MemoryEncryptionInfo;
+    vectorIndexEnabled: boolean;
   },
 ): Promise<void> {
   const now = new Date();
   const root = await tx.node.findUniqueOrThrow({
     where: { id: args.rootId },
-    select: { abstract: true, content: true, data: true },
+    select: { abstract: true, content: true, data: true, embeddingPendingAt: true },
   });
   const encrypted = translateSessionExpired(args.memoryId, () => {
     const plain = decryptNodeFields(root, args.memEncInfo);
@@ -228,7 +249,9 @@ async function resetReusedChannel(
       content: encrypted.content ?? null,
       contentHash: null,
       data: (encrypted.data ?? null) as InputJsonValue,
-      embeddingPendingAt: null,
+      // On a vector-indexed host the fresh marker from restoreOrCreate must
+      // survive this payload reset; an old worker may still be in flight.
+      embeddingPendingAt: args.vectorIndexEnabled ? root.embeddingPendingAt : null,
       embeddingFailedAt: null,
       embeddingAttempts: 0,
       embeddingError: null,
@@ -322,7 +345,10 @@ export async function ensureChannelWithRoot(
     // here and re-check after the grant.
     await lockMemoryForChannelChange(tx, args.memoryId);
     // Re-checked under that lock: the preflight above ran outside it.
-    const live = await tx.memory.findFirst({ where: { id: args.memoryId, deletedAt: null }, select: { id: true } });
+    const live = await tx.memory.findFirst({
+      where: { id: args.memoryId, deletedAt: null },
+      select: { id: true, vectorIndexEnabled: true },
+    });
     if (!live) throw new GraphQLError('Host memory not found.', { extensions: { code: 'NOT_FOUND' } });
     await lockAncestorsForCreateMany(tx, args.memoryId, [args.loc, messagesLoc], { owns: 'channel' });
     await assertNoChannelOverlap(tx, args.memoryId, args.loc);
@@ -333,7 +359,7 @@ export async function ensureChannelWithRoot(
     ): Promise<string> => {
       const existing = await tx.node.findUnique({
         where: { loc_memoryId: { loc, memoryId: args.memoryId } },
-        select: { id: true, deletedAt: true, nodeType: true },
+        select: { id: true, deletedAt: true, nodeType: true, embeddingPendingAt: true },
       });
       if (existing) {
         if (!accept(existing)) {
@@ -343,7 +369,16 @@ export async function ensureChannelWithRoot(
           );
         }
         if (existing.deletedAt) {
-          await tx.node.update({ where: { id: existing.id }, data: { deletedAt: null, deletedBy: null } });
+          // Channel creation may also revive tombstoned ancestor and
+          // :messages nodes; their vectors belong to the old incarnation.
+          await tx.nodeEmbedding.deleteMany({ where: { nodeId: existing.id } });
+          await tx.node.update({
+            where: { id: existing.id },
+            data: {
+              deletedAt: null, deletedBy: null,
+              embeddingPendingAt: pendingAtForRevival(existing.embeddingPendingAt, live.vectorIndexEnabled),
+            },
+          });
         }
         return existing.id;
       }
@@ -424,6 +459,7 @@ export async function ensureChannelWithRoot(
         messagesLoc,
         deletedBy: args.createdBy ?? null,
         memEncInfo,
+        vectorIndexEnabled: live.vectorIndexEnabled,
       });
     }
     const channel = await ensureChannelRow(tx, { ...args, rootId, resetForReuse: reusingDeadAddress });

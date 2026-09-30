@@ -19,6 +19,7 @@ import {
   type EncryptionKey,
 } from '../../../lib/crypto.js';
 import { sessionKeyCache } from '../../../lib/sessionKeyCache.js';
+import { makeKeyVerifier, verifyDataKey } from '../../../lib/memoryUnlock.js';
 import { decryptNodesBatch } from '../../../lib/nodeCrypto.js';
 import {
   parseUrnInput,
@@ -51,7 +52,7 @@ import { isRoutingName, routingNameOf } from '../../../lib/runner/selectNextEdge
 import { compileTemplate } from '../../../lib/template.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
-import { resolveNodeRef } from '../../../lib/entityRef/nodeRef.js';
+import { resolveNodeRefForCaller } from './resolvers.nodeRefAccess.js';
 import { NodeNotFoundError, AgentNotFoundError, AppNotFoundError } from '../../../lib/entityRef/errors.js';
 import { triggerManualRun } from './resolvers.appRun.js';
 import { GraphQLError } from 'graphql';
@@ -163,6 +164,10 @@ export async function endSessionFirstWins(
     where: { id },
     select: { endedAt: true, autoExpiredAt: true },
   });
+  // GraphQL and MCP close through this writer. Release this session's key
+  // holdings only after its durable end is confirmed; other sessions holding
+  // the same memory keep their independent references.
+  if (after?.endedAt) sessionKeyCache.evict(id);
   return {
     endedByThisCall: claimed.count > 0,
     endedAt: after?.endedAt ?? null,
@@ -1280,6 +1285,7 @@ export const sessionMutations = {
               appId: ctx.appId,
               // New user memories in SECRET mode are encrypted from creation.
               isEncrypted: parsedKey !== null,
+              keyVerifier: parsedKey ? makeKeyVerifier(parsedKey) : null,
               createdBy: userId,
             },
           });
@@ -1331,6 +1337,19 @@ export const sessionMutations = {
       // handles a later call with USER_ID mode on an already-encrypted mem.)
       if (memoryIsEncrypted && !parsedKey) {
         throw new Error('Memory is encrypted; dataKey is required');
+      }
+      if (memoryIsEncrypted && parsedKey) {
+        const keyProof = await ctx.db.memory.findUniqueOrThrow({
+          where: { id: memoryId }, select: { keyVerifier: true },
+        });
+        if (!keyProof.keyVerifier) {
+          throw new GraphQLError('Encrypted memory has no stored key verifier for safe session unlock.', {
+            extensions: { code: 'BAD_UNLOCK_INPUT', memoryId },
+          });
+        }
+        if (!verifyDataKey(keyProof.keyVerifier, parsedKey)) {
+          throw new Error('Wrong dataKey for encrypted memory');
+        }
       }
 
       // Clamp session timeout to the app's configured maximum (ceiling)
@@ -2243,7 +2262,7 @@ export const sessionMutations = {
       // loc without a memory rejects as UrnNotQualifiedError.
       let resolvedNodeId: string;
       try {
-        ({ id: resolvedNodeId } = await resolveNodeRef(ctx.db, ref));
+        ({ id: resolvedNodeId } = await resolveNodeRefForCaller(ctx, ref));
       } catch (e) {
         if (e instanceof NodeNotFoundError || e instanceof UrnNotQualifiedError) {
           throw new GraphQLError(e.message, { extensions: { code: 'NOT_FOUND' } });

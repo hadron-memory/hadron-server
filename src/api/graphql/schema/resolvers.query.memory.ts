@@ -25,6 +25,7 @@ import {
 import { getMemberOrgIds } from '../../../lib/auth/memberOrgIds.js';
 import { validateMemoryNodes } from '../../../lib/memoryValidation.js';
 import { emitNodeUrnV2 } from '../../../lib/urnEmit.js';
+import { activeAgentInstallLicenseIds, isGrantedAgentMemoryRole } from '../../../lib/appAgent.js';
 
 /** Compose a node URN, tolerating a memory urn the flat v2 shape can't express. */
 function safeCanonicalNodeUrn(memoryUrn: string, loc: string): string | null {
@@ -479,18 +480,23 @@ export const memoryQueries = {
           select: {
             organizationId: true,
             ownerUserId: true,
+            deletedAt: true,
+            uninstalledAt: true,
             appAgents: {
               select: {
                 agent: {
                   include: {
-                    memoryItems: { include: { memory: { include: MEMORY_INCLUDE } } },
+                    memoryItems: {
+                      where: { deletedAt: null, memory: { deletedAt: null } },
+                      include: { memory: { include: MEMORY_INCLUDE } },
+                    },
                   },
                 },
               },
             },
           },
         });
-        if (!app || app.appAgents.length === 0) return empty;
+        if (!app || app.deletedAt || app.uninstalledAt || app.appAgents.length === 0) return empty;
         // #758 — the twin of the #676 blocker-2 fix, which landed only in the
         // MCP `getAppMemoryAccess`. spec 047: a USER-owned memory is strictly
         // owner-only, so one owned by someone other than this App's owner must
@@ -498,12 +504,30 @@ export const memoryQueries = {
         // (ownerUserId NULL) are unaffected.
         const foreignUserOwned = (owner: string | null | undefined): boolean =>
           owner != null && owner !== app.ownerUserId;
+        const licensedAgentIds = await activeAgentInstallLicenseIds(
+          ctx.db, app,
+          app.appAgents.map((row) => row.agent).filter((agent) => agent.deletedAt === null),
+        );
         const memoryMap = new Map<string, any>();
         for (const aa of app.appAgents) {
+          if (!licensedAgentIds.has(aa.agent.id)) continue;
           for (const item of aa.agent.memoryItems) {
+            if (!isGrantedAgentMemoryRole(item.role)) continue;
             if (classSet ? !classSet.has(item.memory.class) : item.memory.class === 'system') continue;
             if (f.visibility && item.memory.visibility !== f.visibility) continue;
+            // AgentMemoryItem is global to the Agent. An App-scoped memory
+            // contributes only to its own App, even when the same Agent is
+            // installed elsewhere (#1357 review).
+            if (item.memory.appId != null && item.memory.appId !== ctx.appId) continue;
+            if (item.memory.userMemoryOfAgentId != null) continue;
             if (foreignUserOwned(item.memory.ownerUserId)) continue;
+            // A pure App key has no user principal for strict-owner records.
+            // If this is a user-bound App context, use the record gate for the
+            // rare personal/private or spec-047 owner-owned row.
+            if (item.memory.ownerUserId != null ||
+                item.memory.class === 'personal' || item.memory.class === 'private') {
+              if (!ctx.userId || !(await canReadMemoryRecord(ctx, item.memory))) continue;
+            }
             memoryMap.set(item.memory.id, item.memory);
           }
         }
@@ -529,14 +553,34 @@ export const memoryQueries = {
         // A caller with zero memberships still gets their own personal/private
         // memories: `in: []` in the org clauses simply matches nothing.
         const orgIds = scope.memberOrgIds;
+        // #3595: the group membership clause is bounded to the shared org
+        // under impersonation (the session sees ONE org — the target's
+        // MemoryMember rows elsewhere must not list) and to the explicitly
+        // selected org when `orgId` is supplied (a slice is a filter — an
+        // orgId=A page must not include the caller's group memory in B).
+        // Ordinary unscoped calls stay unbounded: cross-org MemoryMember
+        // reach, mirroring the shared read gate's restrictToOrgId posture.
+        const groupOrgBound = scope.scopedOrgId ?? ctx.impersonation?.orgId ?? null;
         return page({
           deletedAt: null,
           ...(f.visibility ? { visibility: f.visibility as any } : {}),
           userMemoryOfAgentId: null,
           AND: [classFilter],
           OR: [
-            { organizationId: { in: orgIds }, class: { notIn: ['personal', 'private'] as any } },
-            { class: { notIn: ['personal', 'private'] as any }, subscriptions: { some: { organizationId: { in: orgIds } } } },
+            { organizationId: { in: orgIds }, class: { notIn: ['personal', 'private', 'group'] as any } },
+            // #1208 / cor:acl:010:01 — group records list only through
+            // MemoryMember (reader/writer/owner), mirroring the shared read
+            // gate exactly: NOT nested under orgIds for ordinary calls (a
+            // cross-org MemoryMember lists theirs), `appId: null` so an
+            // app-scoped group row's metadata stays App-internal (#653,
+            // record-side parity with the node gate), per-user holdings and
+            // user-owned rows excluded (#758). MemoryMember rows hard-delete
+            // (FR-038), so `some` is liveness.
+            { class: 'group' as any, appId: null, userMemoryOfAgentId: null, ownerUserId: null, ...(groupOrgBound ? { organizationId: groupOrgBound } : {}), memberships: { some: { userId: ctx.userId } } },
+            // GROUP excluded (#3781): a group-subscription row is API-invalid
+            // state (createMemorySubscription admits PUBLIC only; group
+            // visibility is CHECK-forced to GROUP) — never a listing grant.
+            { class: { notIn: ['personal', 'private', 'group'] as any }, subscriptions: { some: { organizationId: { in: orgIds } } } },
             // Admin impersonation: the identity-scoped clauses are dropped —
             // the shared-org session never lists the target's personal/private
             // or user-owned memories (matches getAccessibleMemoryIds).

@@ -3,8 +3,12 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { resolvers, type Context } from './resolvers.js';
 import { generateId } from '../../../lib/id.js';
-import { generateDataKey } from '../../../lib/crypto.js';
+import { generateDataKey, parseDataKey } from '../../../lib/crypto.js';
+import { makeKeyVerifier } from '../../../lib/memoryUnlock.js';
 import { sessionKeyCache } from '../../../lib/sessionKeyCache.js';
+import { computeContentHash } from '../../../lib/contentHash.js';
+import { encryptNodeFields, encryptNodeFieldsWithKey, isAuthenticatedStringEnvelope } from '../../../lib/nodeCrypto.js';
+import { writeNodeCore } from './resolvers.mutation.node.js';
 
 // Prevent git writes
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
@@ -106,6 +110,7 @@ describe('startAgentSession with encryption', () => {
     );
     const mem = await db.memory.findUnique({ where: { id: session.memoryId! } });
     expect(mem?.isEncrypted).toBe(true);
+    expect(mem?.keyVerifier).toMatch(/^enc:v1:/);
     // 041/#516: SECRET-mode memories are born class='private' (the only
     // encryptable class), not 'personal'.
     expect(mem?.class).toBe('private');
@@ -155,7 +160,40 @@ describe('startAgentSession with encryption', () => {
         { agentId: agent.id, externalUserId: 'mm-1', dataKey: k2 },
         appCtx(secretApp.id),
       ),
-    ).rejects.toThrow(/conflict/);
+    ).rejects.toThrow(/Wrong dataKey|conflict/);
+  });
+
+  it('rejects the wrong key after the original SECRET session ends', async () => {
+    const key = generateDataKey().raw.toString('base64');
+    const wrong = generateDataKey().raw.toString('base64');
+    const first = await resolvers.Mutation.startAgentSession(
+      {}, { agentId: agent.id, externalUserId: 'mm-1', dataKey: key }, appCtx(secretApp.id),
+    );
+    await resolvers.Mutation.endAgentSession({}, { sessionId: first.id }, appCtx(secretApp.id));
+    await expect(resolvers.Mutation.startAgentSession(
+      {}, { agentId: agent.id, externalUserId: 'mm-1', dataKey: wrong }, appCtx(secretApp.id),
+    )).rejects.toThrow(/Wrong dataKey/);
+  });
+
+  it('refuses new sessions for a verifier-less encrypted memory before caching either key', async () => {
+    const originalKey = generateDataKey().raw.toString('base64');
+    const wrongKey = generateDataKey().raw.toString('base64');
+    const first = await resolvers.Mutation.startAgentSession(
+      {}, { agentId: agent.id, externalUserId: 'legacy-session', dataKey: originalKey },
+      appCtx(secretApp.id),
+    );
+    await db.memory.update({ where: { id: first.memoryId! }, data: { keyVerifier: null } });
+    await resolvers.Mutation.endAgentSession({}, { sessionId: first.id }, appCtx(secretApp.id));
+    const sessionCount = await db.session.count({ where: { memoryId: first.memoryId! } });
+
+    for (const dataKey of [originalKey, wrongKey]) {
+      await expect(resolvers.Mutation.startAgentSession(
+        {}, { agentId: agent.id, externalUserId: 'legacy-session', dataKey },
+        appCtx(secretApp.id),
+      )).rejects.toMatchObject({ extensions: { code: 'BAD_UNLOCK_INPUT', memoryId: first.memoryId } });
+      expect(sessionKeyCache.getByMemoryId(first.memoryId!)).toBeNull();
+    }
+    expect(await db.session.count({ where: { memoryId: first.memoryId! } })).toBe(sessionCount);
   });
 
   it('accepts the same key on concurrent sessions (ref count increments)', async () => {
@@ -293,6 +331,43 @@ describe('createNode with encryption', () => {
       sessionCtx,
     );
     expect(read?.abstract).toBe(ABSTRACT_PLAINTEXT);
+  });
+
+  it('re-affirms against the locked encrypted body after an interleaved edit', async () => {
+    const key = generateDataKey().raw.toString('base64');
+    const session = await resolvers.Mutation.startAgentSession(
+      {}, { agentId: agent.id, externalUserId: 'mm-locked-reaffirm', dataKey: key }, appCtx(secretApp.id),
+    );
+    const sessionCtx = appCtx(secretApp.id, { sessionId: session.id, roles: ['ADMIN'] });
+    const node = await resolvers.Mutation.createNode({}, {
+      input: { memoryId: session.memoryId!, loc: 'locked-reaffirm', name: 'locked-reaffirm',
+        abstract: 'Summary', content: 'Original body' },
+    }, sessionCtx);
+
+    const findUnique = db.node.findUnique.bind(db.node);
+    let changedAfterProbe = false;
+    const probe = vi.spyOn(db.node, 'findUnique').mockImplementation((async (args: Parameters<typeof findUnique>[0]) => {
+      const result = await findUnique(args);
+      if (!changedAfterProbe && 'loc_memoryId' in args.where &&
+          args.where.loc_memoryId?.loc === 'locked-reaffirm') {
+        changedAfterProbe = true;
+        const content = encryptNodeFields(
+          { content: 'Revised body' }, { id: session.memoryId!, isEncrypted: true },
+        ).content;
+        await db.node.update({ where: { id: node.id }, data: { content } });
+      }
+      return result;
+    }) as never);
+    try {
+      await writeNodeCore({ memoryId: session.memoryId!, loc: 'locked-reaffirm',
+        abstract: 'Summary' }, sessionCtx, 'update');
+    } finally {
+      probe.mockRestore();
+    }
+    expect(changedAfterProbe).toBe(true);
+    const stored = await db.node.findUniqueOrThrow({ where: { id: node.id } });
+    expect(stored.abstractOriginHash).toBe(computeContentHash('Revised body'));
+    expect(stored.content?.startsWith('enc:v1:')).toBe(true);
   });
 
   it('throws when writing to an encrypted memory without an active session', async () => {
@@ -498,20 +573,86 @@ describe('encryptMemory', () => {
     expect(rows[1].data).toMatchObject({ __enc: expect.any(String) });
   });
 
-  it('refuses to encrypt an already-encrypted memory', async () => {
+  it('completes an already-encrypted SECRET memory under its birth key', async () => {
     const key = generateDataKey().raw.toString('base64');
     const session = await resolvers.Mutation.startAgentSession(
       {},
       { agentId: agent.id, externalUserId: 'mm-1', dataKey: key },
       appCtx(secretApp.id),
     );
-    await expect(
-      resolvers.Mutation.encryptMemory(
-        {},
-        { memoryId: session.memoryId!, dataKey: key },
-        appCtx(secretApp.id),
-      ),
-    ).rejects.toThrow(/already encrypted/);
+    const completed = await resolvers.Mutation.encryptMemory(
+      {},
+      { memoryId: session.memoryId!, dataKey: key },
+      appCtx(secretApp.id),
+    );
+    expect(completed.keyVerifier).toMatch(/^enc:v1:/);
+  });
+
+  it('refuses to claim a verifier for an empty legacy encrypted memory', async () => {
+    const key = generateDataKey().raw.toString('base64');
+    const session = await resolvers.Mutation.startAgentSession(
+      {}, { agentId: agent.id, externalUserId: 'empty-legacy', dataKey: key },
+      appCtx(secretApp.id),
+    );
+    await db.memory.update({ where: { id: session.memoryId! }, data: { keyVerifier: null } });
+    await expect(resolvers.Mutation.encryptMemory(
+      {}, { memoryId: session.memoryId!, dataKey: key }, appCtx(secretApp.id),
+    )).rejects.toMatchObject({ extensions: { code: 'BAD_UNLOCK_INPUT' } });
+  });
+
+  it('refuses a mixed-key legacy witness without rewriting nodes or history (#1441)', async () => {
+    const originalKey = generateDataKey().raw.toString('base64');
+    const wrongKey = generateDataKey().raw.toString('base64');
+    const first = await resolvers.Mutation.startAgentSession(
+      {}, { agentId: agent.id, externalUserId: 'mixed-legacy', dataKey: originalKey },
+      appCtx(secretApp.id),
+    );
+    const original = await resolvers.Mutation.createNode(
+      {}, { input: { memoryId: first.memoryId!, loc: 'original', name: 'original', content: 'original secret' } },
+      appCtx(secretApp.id, { sessionId: first.id, roles: ['ADMIN'] }),
+    );
+    await db.memory.update({ where: { id: first.memoryId! }, data: { keyVerifier: null } });
+    await resolvers.Mutation.endAgentSession({}, { sessionId: first.id }, appCtx(secretApp.id));
+    expect(sessionKeyCache.getByMemoryId(first.memoryId!)).toBeNull();
+
+    // Model a witness written by an older server before the session gate.
+    const wrongEnvelope = encryptNodeFieldsWithKey(
+      { content: 'wrong-key witness' }, parseDataKey(wrongKey),
+    );
+    const witness = await db.node.create({
+      data: {
+        id: generateId(), memoryId: first.memoryId!, loc: 'later', name: 'later',
+        content: wrongEnvelope.content,
+      },
+    });
+
+    const beforeOriginal = await db.node.findUniqueOrThrow({ where: { id: original.id } });
+    const beforeWitness = await db.node.findUniqueOrThrow({ where: { id: witness.id } });
+    expect(isAuthenticatedStringEnvelope(beforeOriginal.content, parseDataKey(originalKey))).toBe(true);
+    expect(isAuthenticatedStringEnvelope(beforeOriginal.content, parseDataKey(wrongKey))).toBe(false);
+    expect(isAuthenticatedStringEnvelope(beforeWitness.content, parseDataKey(wrongKey))).toBe(true);
+    const tombstone = await db.node.create({
+      data: {
+        id: generateId(), memoryId: first.memoryId!, loc: 'deleted', name: 'deleted',
+        content: 'deleted plaintext', deletedAt: new Date(),
+      },
+    });
+    const legacyRevision = await db.nodeRevision.create({
+      data: {
+        id: generateId(), nodeId: original.id, memoryId: null,
+        loc: 'original', name: 'original', content: 'legacy plaintext',
+      },
+    });
+
+    await expect(resolvers.Mutation.encryptMemory(
+      {}, { memoryId: first.memoryId!, dataKey: wrongKey }, appCtx(secretApp.id),
+    )).rejects.toMatchObject({ extensions: { code: 'BAD_UNLOCK_INPUT', memoryId: first.memoryId } });
+    expect((await db.memory.findUniqueOrThrow({ where: { id: first.memoryId! } })).keyVerifier).toBeNull();
+    expect((await db.node.findUniqueOrThrow({ where: { id: original.id } })).content).toBe(beforeOriginal.content);
+    expect((await db.node.findUniqueOrThrow({ where: { id: witness.id } })).content).toBe(beforeWitness.content);
+    expect((await db.node.findUniqueOrThrow({ where: { id: tombstone.id } })).content).toBe('deleted plaintext');
+    expect((await db.nodeRevision.findUniqueOrThrow({ where: { id: legacyRevision.id } })).content)
+      .toBe('legacy plaintext');
   });
 
   // 007-entity-id-or-urn: encryptMemory accepts memoryId as ID or URN.
@@ -574,6 +715,56 @@ describe('encryptMemory', () => {
 // ---------------------------------------------------------------------------
 
 describe('linkMemoryToUser with encryption', () => {
+  it('does not replace a competing promotion key after its live-node scan', async () => {
+    const anon = await resolvers.Mutation.startAgentSession(
+      {}, { agentId: agent.id }, appCtx(plaintextApp.id),
+    );
+    const node = await db.node.create({
+      data: {
+        id: generateId(), memoryId: anon.memoryId!, loc: 'note', name: 'note',
+        content: 'anonymous draft',
+      },
+    });
+    const rivalKey = generateDataKey().raw.toString('base64');
+    const rivalVerifier = makeKeyVerifier(parseDataKey(rivalKey));
+    const rivalContent = encryptNodeFieldsWithKey(
+      { content: 'competing private draft' }, parseDataKey(rivalKey),
+    ).content;
+    const originalFindMany = db.node.findMany.bind(db.node);
+    let intervened = false;
+    const scan = vi.spyOn(db.node, 'findMany').mockImplementation((async (args: any) => {
+      const rows = await originalFindMany(args);
+      if (!intervened && args?.where?.memoryId === anon.memoryId && args?.select?.content === true) {
+        intervened = true;
+        const owner = await db.user.findFirstOrThrow({
+          where: { externalAppId: plaintextApp.id, externalId: 'claimant' },
+        });
+        await db.node.update({ where: { id: node.id }, data: { content: rivalContent } });
+        await db.memory.update({
+          where: { id: anon.memoryId! },
+          data: {
+            isEncrypted: true, keyVerifier: rivalVerifier,
+            class: 'private', userId: owner.id,
+          },
+        });
+      }
+      return rows;
+    }) as typeof db.node.findMany);
+    try {
+      await expect(resolvers.Mutation.linkMemoryToUser(
+        {}, { memoryId: anon.memoryId!, externalUserId: 'claimant', dataKey: generateDataKey().raw.toString('base64') },
+        appCtx(plaintextApp.id),
+      )).rejects.toMatchObject({ extensions: { code: 'MEMORY_WRITE_CONFLICT' } });
+    } finally {
+      scan.mockRestore();
+    }
+    expect(intervened).toBe(true);
+    expect((await db.memory.findUniqueOrThrow({ where: { id: anon.memoryId! } })).keyVerifier)
+      .toBe(rivalVerifier);
+    expect((await db.node.findUniqueOrThrow({ where: { id: node.id } })).content)
+      .toBe(rivalContent);
+  });
+
   it('encrypts the memory when a dataKey is provided at link time', async () => {
     // Start an anonymous session on a USER_ID app (no dataKey allowed)
     const anonSession = await resolvers.Mutation.startAgentSession(
@@ -595,6 +786,15 @@ describe('linkMemoryToUser with encryption', () => {
       where: { loc_memoryId: { loc: 'note', memoryId: anonSession.memoryId! } },
       data: { abstract: 'draft summary' },
     });
+    const noteBefore = await db.node.findFirstOrThrow({
+      where: { memoryId: anonSession.memoryId!, loc: 'note' },
+    });
+    const oldRevision = await db.nodeRevision.create({
+      data: {
+        id: generateId(), nodeId: noteBefore.id, memoryId: anonSession.memoryId!,
+        loc: 'note', name: 'note', content: 'earlier private draft',
+      },
+    });
 
     // Anonymous memory starts plaintext
     let mem = await db.memory.findUnique({ where: { id: anonSession.memoryId! } });
@@ -615,6 +815,7 @@ describe('linkMemoryToUser with encryption', () => {
 
     mem = await db.memory.findUnique({ where: { id: anonSession.memoryId! } });
     expect(mem?.isEncrypted).toBe(true);
+    expect(mem?.keyVerifier).toMatch(/^enc:v1:/);
     expect(mem?.anonymousExpiresAt).toBeNull();
     // 041/#516: an encrypted promotion lands class='private' owned by the
     // registered user (the anon scratch row was class='app', userId NULL).
@@ -632,6 +833,8 @@ describe('linkMemoryToUser with encryption', () => {
     });
     expect(note?.content?.startsWith('enc:v1:')).toBe(true);
     expect(note?.abstract?.startsWith('enc:v1:')).toBe(true);
+    expect((await db.nodeRevision.findUniqueOrThrow({ where: { id: oldRevision.id } })).content)
+      .toMatch(/^enc:v1:/);
   });
 
   it('leaves the memory plaintext when no dataKey is provided', async () => {

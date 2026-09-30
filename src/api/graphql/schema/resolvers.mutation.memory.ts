@@ -1,4 +1,5 @@
 // memoryMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
+import { Prisma } from '../../../generated/prisma/index.js';
 import { generateId } from '../../../lib/id.js';
 import { UrnNotQualifiedError } from '../../../lib/urn.js';
 import { AmbiguousLegacyUrnError } from '../../../lib/entityRef/errors.js';
@@ -6,13 +7,15 @@ import { mintMemoryUrnV2 } from '../../../lib/mintMemoryUrnV2.js';
 import { generateUniqueHandle, ensureUserHandle } from '../../../lib/userHandle.js';
 import { ensureUserPrincipal } from '../../../lib/principal/mintPrincipal.js';
 import {
+  ensureCurrentNodeRevisionInTransaction,
+  RECONCILE_EDITOR_INFO,
   revisionStateHashRefreshMarker,
   editorFromAuth,
 } from '../../../lib/nodeRevisionSnapshot.js';
 import { encryptToken } from '../../../lib/tokenCrypto.js';
 import {
   assertMemoryVisibilityChangeAllowed,
-  assertLinkAllowedForPublicAgent,
+  revokeLinksForeignToTenant,
 } from '../../../lib/agentPublicCongruence.js';
 import {
   backfillMemoryEmbeddings,
@@ -52,14 +55,20 @@ import {
   type Role,
   type MemoryVisibility,
 } from '../../../generated/prisma/index.js';
-import { parseDataKey, isCiphertext } from '../../../lib/crypto.js';
+import { parseDataKey } from '../../../lib/crypto.js';
 import {
   generateKdfSalt,
   deriveDataKeyFromPassphrase,
   makeKeyVerifier,
+  resolveSuppliedKey,
+  MemoryUnlockError,
   DEFAULT_KDF_PARAMS,
 } from '../../../lib/memoryUnlock.js';
-import { encryptNodeFieldsWithKey } from '../../../lib/nodeCrypto.js';
+import {
+  encryptNodeFieldsWithKey,
+  isAuthenticatedStringEnvelope,
+  isAuthenticatedDataEnvelope,
+} from '../../../lib/nodeCrypto.js';
 import {
   NodeAbstractTooLongError,
   NodeNotFoundError,
@@ -70,10 +79,11 @@ import {
 } from '../../../lib/entityRef/errors.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
-import { resolveNodeRef } from '../../../lib/entityRef/nodeRef.js';
+import { resolveNodeRefForCaller } from './resolvers.nodeRefAccess.js';
 import { resolveUserRefOrEmail } from '../../../lib/entityRef/userRef.js';
 import { canReadMemory } from '../../../mcp/access-control.js';
 import { MemoryNotFoundError } from '../../../lib/asset/gate.js';
+import { AgentNotFoundError } from '../../../lib/entityRef/errors.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
 import {
   agentSlugFromUrn,
@@ -104,6 +114,7 @@ import {
   requireOrgRole,
   requireOwnerOrOrgRole,
   concealUnreadableDenial,
+  requireAgentMemoryGrant,
   resolveMemoryRefForWrite,
   canOpenMemoryRecordById,
   refArgNotFoundError,
@@ -227,6 +238,66 @@ async function resolveGranteeId(
   });
 }
 
+/**
+ * Lock the (memory, agent) pair an attachment depends on, then re-read both
+ * inside the transaction (#1349, @codex on PR #1357).
+ *
+ * `requireAgentMemoryGrant` decides from a memory's VISIBILITY and tenancy and
+ * from the agent's VISIBILITY — three values another in-flight mutation may be
+ * changing. Read outside the write's transaction, every one of those checks is
+ * a check-then-act race:
+ *
+ *   - an attach reads the memory while it is PUBLIC, `updateMemory` narrows it
+ *     and finds no link to revoke, then the attach writes its grant from the
+ *     stale PUBLIC snapshot — a live foreign link to a now-private memory;
+ *   - an attach reads the agent as non-PUBLIC while `updateAgent` publishes it
+ *     and sees no read-write item — a PUBLIC agent holding write knowledge.
+ *
+ * Both writers already take `FOR UPDATE` on their own row (`updateMemory` on
+ * the memory, `updateAgent` on the agent), so taking BOTH here serializes the
+ * attach behind whichever is in flight and makes the re-read authoritative.
+ *
+ * LOCK ORDER IS MEMORY, THEN AGENT, and it matters: a pair of transactions
+ * taking the same two rows in opposite orders deadlocks. No other path locks an
+ * agent row and then a memory row (`updateAgent` syncs its system memory in a
+ * SEPARATE transaction), so this order is consistent with what exists.
+ */
+async function lockAttachmentPair(
+  tx: Prisma.TransactionClient,
+  memoryId: string,
+  agentId: string,
+  // The caller's own refs, for the miss errors below.
+  refs: { memoryRef: string; agentRef: string },
+) {
+  await tx.$queryRaw`SELECT id FROM memories WHERE id = ${memoryId} FOR UPDATE`;
+  await tx.$queryRaw`SELECT id FROM agents WHERE id = ${agentId} FOR UPDATE`;
+  const memory = await tx.memory.findUniqueOrThrow({
+    where: { id: memoryId },
+    select: {
+      deletedAt: true,
+      id: true,
+      class: true,
+      visibility: true,
+      appId: true,
+      userId: true,
+      ownerUserId: true,
+      organizationId: true,
+      userMemoryOfAgentId: true,
+    },
+  });
+  const agent = await tx.agent.findUniqueOrThrow({
+    where: { id: agentId },
+    select: { id: true, organizationId: true, ownerUserId: true, visibility: true, deletedAt: true },
+  });
+  // LIVENESS under the lock (@copilot, PR #1357). The resolvers refused a
+  // deleted row only BEFORE the transaction, so a concurrent deleteAgent — or a
+  // memory soft-delete — committing in between would otherwise get a grant
+  // written onto a row that no longer exists. Answered exactly as the
+  // resolvers answer a miss, agent first as they resolve.
+  if (agent.deletedAt) throw new AgentNotFoundError(refs.agentRef);
+  if (memory.deletedAt) throw new MemoryNotFoundError(refs.memoryRef);
+  return { memory, agent };
+}
 
 /**
  * Refuse a subscription mutation on a memory this caller cannot open, with
@@ -430,6 +501,7 @@ export const memoryMutations = {
         vectorIndexEnabled,
         embeddingSource,
         maxRevCount,
+        draftCorpus,
       }: {
         // spec 047: OPTIONAL — omitted ⇒ user-owned (caller's `@handle` namespace).
         orgId?: string | null; name: string;
@@ -444,6 +516,8 @@ export const memoryMutations = {
         embeddingSource?: 'abstract' | 'contentChunks' | 'both' | null;
         // #621 — per-node revision cap; omitted ⇒ column default (10).
         maxRevCount?: number | null;
+        // #1448 — the ONLY way a memory becomes a draft spec corpus.
+        draftCorpus?: boolean | null;
         // GraphQL passes the full MemoryClass enum; the resolver
         // allowlists the user-creatable values below. Spec 034 added
         // `personal`/`private` as owner-only, user-creatable classes
@@ -602,6 +676,9 @@ export const memoryMutations = {
             ownerUserId: userOwned ? ctx.userId : null,
             urn: memoryUrn,
             name,
+            // #1448 — draft is chosen here or never; explicit null reads as
+            // "not asked", same as omitted.
+            corpusDraft: draftCorpus === true,
             shortDescription,
             description,
             // Free-form metadata bag (no server-side semantics). Mirrors the
@@ -776,9 +853,25 @@ export const memoryMutations = {
       // cor:acl:080:03 — un-PUBLIC-ing a COVERED memory that a PUBLIC agent
       // links would break the congruence invariant; reject before persisting.
       // The helper excludes per-user + app-scoped memories (never public).
-      if (visibility !== undefined) {
-        await assertMemoryVisibilityChangeAllowed(ctx.db, memory, visibility);
+      // #1349 (@codex, PR #1357): the authoritative check moved INSIDE the
+      // transaction below, under the memory row lock, so a concurrent
+      // `updateAgent(visibility: PUBLIC)` cannot observe this memory as still
+      // PUBLIC while this call observes no PUBLIC agent. This early pass stays
+      // as the fail-fast, ahead of the URN/alias writes.
+      if (visibility !== undefined || newOrgId !== undefined) {
+        // Judged against the RESULTING tenant (@codex / @copilot, PR #1357): a
+        // call that also transfers the memory must not classify agents against
+        // the organization it is leaving; a transfer alone is checked too.
+        await assertMemoryVisibilityChangeAllowed(
+          ctx.db,
+          { ...memory, organizationId: newOrgId ?? memory.organizationId },
+          visibility ?? memory.visibility,
+        );
       }
+      // #1349 (@codex, PR #1357): narrowing out of PUBLIC also REVOKES the
+      // foreign-tenant agent links that only PUBLIC ever justified. Deferred
+      // until after the update below, so a failed write leaves the grants as
+      // they were.
       // #621 — friendly guard mirroring chk_memory_max_rev_count_positive.
       // The column is NOT NULL, so explicit `null` is rejected (omit the arg to
       // leave the cap unchanged); only `undefined` (omitted) or >= 1 passes.
@@ -906,7 +999,7 @@ export const memoryMutations = {
             createdBy: ctx.userId ?? ctx.clientId ?? null,
           });
         }
-        return tx.memory.update({
+        const row = await tx.memory.update({
         where: { id },
         data: {
           ...(name !== undefined ? { name } : {}),
@@ -953,6 +1046,33 @@ export const memoryMutations = {
         },
         include: MEMORY_INCLUDE,
         });
+        // #1349 (@codex, PR #1357) — inside the SAME transaction as the
+        // visibility write, so a memory can never be non-PUBLIC while the
+        // foreign links that only PUBLIC justified are still live.
+        // Fires on a visibility change OR an org transfer, and classifies
+        // against `row` — the POST-update state (@codex, PR #1357). Keyed on
+        // the pre-update row it read tenancy from the organization the memory
+        // had just left; skipped on a transfer, it left the source tenant's
+        // Apps reading a memory that had moved away from them.
+        // PINNED (harness #24): removing this re-check fails "a concurrent
+        // narrowing and agent publication cannot both win". An earlier note here
+        // called it unproven; later tests staged the interleaving — a
+        // publication committing between the pre-transaction check above and
+        // this row lock — which would otherwise leave a PUBLIC agent referencing
+        // knowledge this call makes non-public (cor:acl:080:03).
+        if (visibility !== undefined || newOrgId !== undefined) {
+          // The POST-update row, like the sweep below — a transfer in the same
+          // call otherwise had the two judge DIFFERENT tenants. And on a
+          // transfer ALONE too (@copilot, PR #1357): moving a non-PUBLIC memory
+          // into a tenant whose PUBLIC agent already links it would make that
+          // link same-tenant, so the sweep keeps it — a PUBLIC agent holding
+          // non-public knowledge. With no new visibility, the row's own counts.
+          await assertMemoryVisibilityChangeAllowed(tx, row, visibility ?? row.visibility);
+        }
+        if (visibility !== undefined || newOrgId !== undefined) {
+          await revokeLinksForeignToTenant(tx, row, ctx.userId ?? ctx.clientId ?? null);
+        }
+        return row;
       });
 
       // 033 — react to vector-index config changes (FR-004/FR-008/FR-026):
@@ -1279,7 +1399,7 @@ export const memoryMutations = {
       // NODE_NOT_FOUND rather than a raw resolver throw.
       let parentId: string;
       try {
-        ({ id: parentId } = await resolveNodeRef(ctx.db, parentRef));
+        ({ id: parentId } = await resolveNodeRefForCaller(ctx, parentRef));
       } catch (e) {
         if (e instanceof NodeNotFoundError) {
           throw new GraphQLError(`Node not found: "${parentRef}"`, {
@@ -1529,112 +1649,50 @@ export const memoryMutations = {
       const { id: resolvedMemoryId } = await resolveMemoryRef(ctx.db, memoryRef);
       const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
       await requireOwnerOrOrgRole(ctx, agent, 'ADMIN');
-      // System-class memories can only be linked via Agent.systemMemoryId.
-      // Attaching them as regular memory items would allow access patterns
-      // we don't want (e.g. another agent reading the linked agent's prompts).
-      const memory = await ctx.db.memory.findUniqueOrThrow({
-        where: { id: resolvedMemoryId },
-        select: { class: true, visibility: true, appId: true },
-      });
-      if (memory.class === 'system') {
-        throw new Error('Agent system memories can only be attached via systemMemoryId, not as a memory item');
-      }
-      // #1101 — strict-owner classes are not attachable, for a different reason
-      // than `system` above. `AgentMemoryItem` is a fold INPUT: an attached
-      // memory lands in `getAppMemoryAccess`, which the MCP access map and the
-      // GraphQL enumeration gate (#1092) both build on, and which is DOCUMENTED
-      // personal-free with `getAccessibleMemoryIds` consumers told to rely on
-      // it. Nothing enforced that. Measured before this gate existed: a pure
-      // App key's accessible set returned another user's personal memory, while
-      // MCP's `canReadMemory` refused the same principal the same row.
-      //
-      // The deeper reason it cannot be right is that an attach is a GRANT to an
-      // audience, and these two classes HAVE no audience beyond their owner
-      // (`cor:acl:010:01`/`:02` — not even a platform ADMIN). So the org ADMIN
-      // authorized to run this mutation is, by construction, granting reach over
-      // a memory they may not themselves read. There is no correct role for it,
-      // which is why this is a refusal rather than a stricter permission.
-      //
-      // MemoryShare is the supported way to give someone else a personal
-      // memory, and it is per-user rather than per-audience.
-      if (memory.class === 'personal' || memory.class === 'private') {
-        // Two messages, not one parameterized one (PR #1106 review, @copilot).
-        // The classes differ in the only respect the message is FOR — what the
-        // caller should do instead — so a shared sentence with a conditional
-        // tail told `private` to use a share that class cannot have.
-        //
-        // And `personal` is NOT "readable only by its owner": a MemoryShare
-        // grantee reads it, which is the whole subject of #1104/#1105, merged a
-        // day before this line was written. `cor:acl:010:01`'s shorthand is
-        // "owner-only" because it is contrasting with org-wide audiences; in an
-        // error message aimed at someone choosing their next action, that
-        // shorthand is simply wrong.
-        // The remedy is addressed to the OWNER, not to the caller (PR #1106
-        // review, @codex P2). The principal who reaches this refusal is an org
-        // ADMIN — and `createMemoryShare` gates on `isMemorySharePrincipal`,
-        // which is a bare `memory.userId === ctx.userId` with no admin path. So
-        // "use createMemoryShare" sent an authorized agent administrator into a
-        // guaranteed FORBIDDEN: two correct gates composing into a dead end,
-        // which is only visible if you check that the ACTOR the message speaks
-        // to can perform the act it names.
-        // THIS MESSAGE DELIBERATELY DOES NOT DESCRIBE WHO CAN READ THE MEMORY,
-        // and that is the third round of review talking (PR #1106: @copilot,
-        // then @codex ×2). Every attempt to state the read audience was wrong
-        // in a new way — "owner only" ignores share grantees (#1104); "owner
-        // and anyone they shared with" is false for an AGENT-SCOPED personal
-        // row, where `granteeShareAccess` excludes the share outright and
-        // `resolveMemoryAuthorization` additionally demands an active
-        // AgentSubscription. Three wordings, three wrong claims.
-        //
-        // The refusal never needed any of them. It rests on one property —
-        // this class has no AUDIENCE to grant to — which is true of every row
-        // in both classes and cannot rot. Stating the read set was a second
-        // claim the rule does not need, from a surface the rule does not
-        // govern; the same discipline `cor:urn:010:04` records for specs.
-        //
-        // What the message DOES owe the caller is the actor: access is the
-        // owner's to give and not an administrator's, so a non-owner is told to
-        // ask rather than sent to a mutation that will refuse them (@codex P2 —
-        // `isMemorySharePrincipal` is a bare owner check). Note it names
-        // createMemoryShare as the MECHANISM and the owner as the only caller,
-        // without claiming a share is by itself SUFFICIENT — for an
-        // agent-scoped row it is not.
-        throw new GraphQLError(
-          memory.class === 'private'
-            ? 'A private-class memory cannot be attached to an agent — an attach grants the agent’s whole audience, and this class has no audience to grant. Private memories are never shareable either, not even by their owner. If this content needs to reach an agent, it has to live in a memory whose class has readers.'
-            : 'A personal-class memory cannot be attached to an agent — an attach grants the agent’s whole audience, and this class has no audience to grant. Giving another person access is the owner’s to do, not an administrator’s: createMemoryShare is the mechanism and only the owner may call it, so if you are not the owner, ask them.',
-          {
-            extensions: {
-              code: 'UNSUPPORTED_MEMORY_CLASS',
-              memoryId: resolvedMemoryId,
-              memoryClass: memory.class,
-            },
-          },
-        );
-      }
-      // cor:acl:080:03 — a PUBLIC agent may reference only PUBLIC knowledge:
-      // reject linking a covered (non-per-user, non-app-scoped), non-PUBLIC
-      // memory to a PUBLIC agent.
-      await assertLinkAllowedForPublicAgent(agent.visibility, memory);
+      // #1349: the role is validated before anything is stored (the column is
+      // a free String, so an unknown value used to persist as an inert grant)
+      // — by the gate below, AFTER its concealment decision (@copilot, PR #1357).
+      // #1349 — the gate and the write are ONE transaction, over locked rows
+      // (see lockAttachmentPair). Everything the gate decides from — the
+      // memory's visibility and tenancy, the agent's visibility — is re-read
+      // under those locks, so no concurrent narrowing or publication can be
+      // stale by the time the grant is persisted.
+      await ctx.db.$transaction(async (tx) => {
+      const { memory, agent: lockedAgent } = await lockAttachmentPair(
+        tx,
+        resolvedMemoryId,
+        resolvedAgentId,
+        { memoryRef, agentRef },
+      );
+      const txCtx = { ...ctx, db: tx } as Context;
+      // The AUTHORITATIVE agent gate, re-run on the LOCKED agent (@copilot,
+      // PR #1357): the check above read the agent before the lock, so an owner
+      // transfer or a membership revocation committing in between would
+      // otherwise let a caller who no longer administers it write the grant.
+      await requireOwnerOrOrgRole(txCtx, lockedAgent, 'ADMIN');
+      // #1349 — THE MEMORY-SIDE GATE. It checks capability, class and PUBLIC
+      // congruence AFTER concealing an unreadable memory; re-role shares it.
+      const grantedRole = await requireAgentMemoryGrant(txCtx, lockedAgent, memory, role, memoryRef);
       // Upsert semantics (#501): granting is idempotent — re-attaching an
       // already-attached memory updates the role, and a soft-deleted grant
       // row (which still occupies the @@unique(agentId, memoryId) slot) is
       // resurrected instead of surfacing a raw P2002.
-      await ctx.db.agentMemoryItem.upsert({
+      await tx.agentMemoryItem.upsert({
         where: { agentId_memoryId: { agentId: resolvedAgentId, memoryId: resolvedMemoryId } },
         create: {
           agentId: resolvedAgentId,
           memoryId: resolvedMemoryId,
-          role: role ?? 'read',
+          role: grantedRole,
           createdBy: ctx.userId ?? ctx.clientId ?? null,
         },
         update: {
-          role: role ?? 'read',
+          role: grantedRole,
           deletedAt: null,
           deletedBy: null,
           updatedAt: new Date(),
           updatedBy: ctx.userId ?? ctx.clientId ?? null,
         },
+      });
       });
       return ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId }, include: AGENT_INCLUDE });
     },
@@ -1648,15 +1706,44 @@ export const memoryMutations = {
       const { id: resolvedMemoryId } = await resolveMemoryRef(ctx.db, memoryRef);
       const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
       await requireOwnerOrOrgRole(ctx, agent, 'ADMIN');
+      // #1349: re-role is its own escalation path — an existing `read` row
+      // becomes the write cap here — so the NEW role gets the same memory-side
+      // gate as a fresh attach, not merely the agent gate. The new role is
+      // parsed by that gate, after its concealment decision (@copilot, PR #1357).
+      // #1349 — gate and write in ONE transaction over locked rows, for the
+      // same reason as addMemoryToAgent: a re-role to `read-write` racing an
+      // `updateAgent(visibility: PUBLIC)` could otherwise leave a PUBLIC agent
+      // holding write knowledge, with both guards having passed.
+      const updated = await ctx.db.$transaction(async (tx) => {
+      const { memory, agent: lockedAgent } = await lockAttachmentPair(
+        tx,
+        resolvedMemoryId,
+        resolvedAgentId,
+        { memoryRef, agentRef },
+      );
+      // Authoritative agent gate on the LOCKED agent — see addMemoryToAgent.
+      await requireOwnerOrOrgRole({ ...ctx, db: tx } as Context, lockedAgent, 'ADMIN');
+      const grantedRole = await requireAgentMemoryGrant(
+        { ...ctx, db: tx } as Context,
+        lockedAgent,
+        memory,
+        role,
+        memoryRef,
+      );
       // #501: only a LIVE grant is updatable — updateMany + deletedAt:null
       // (findUnique on the composite PK can't filter soft-deletes; the
       // requireOrgRole-pattern rule from findings:revoked-membership-auth-
       // gates, PR-512 review). Zero rows = typed NOT_FOUND, never a raw
       // P2025 → 500; a soft-deleted grant stays inactive until
       // addMemoryToAgent resurrects it.
-      const updated = await ctx.db.agentMemoryItem.updateMany({
+      return tx.agentMemoryItem.updateMany({
         where: { agentId: resolvedAgentId, memoryId: resolvedMemoryId, deletedAt: null },
-        data: { role },
+        // #1349: stamp the actor. Before this the row recorded WHO escalated it
+        // nowhere, so a later audit could not tell an original grant from a
+        // re-role — which is what made a delegator-attribution containment
+        // strategy unworkable.
+        data: { role: grantedRole, updatedBy: ctx.userId ?? ctx.clientId ?? null },
+      });
       });
       if (updated.count === 0) {
         throw new GraphQLError(
@@ -1998,13 +2085,24 @@ export const memoryMutations = {
             newUrn,
             createdBy: user.id,
           });
-          await tx.memory.update({
-            where: { id: resolvedMemoryId },
+          // A second promotion may have read the same anonymous row and
+          // supplied a different key. Claim the flag and verifier together;
+          // if another writer won after our pre-transaction scan, roll back
+          // every stale Node rewrite and alias in this transaction.
+          const claimed = await tx.memory.updateMany({
+            where: {
+              id: resolvedMemoryId,
+              isEncrypted: false,
+              keyVerifier: null,
+              urn: memory.urn,
+              userId: null,
+            },
             data: {
               urn: newUrn,
               createdBy: user.id,
               anonymousExpiresAt: null,
               isEncrypted: true,
+              keyVerifier: makeKeyVerifier(key),
               // 041 (#516): encrypted ⇒ class='private'; set the owner so the
               // bidirectional chk_personal_visibility_user (private ⇔ userId)
               // holds. userMemoryOfAgentId + appId are already set on the anon
@@ -2014,7 +2112,18 @@ export const memoryMutations = {
               updatedBy: ctx.appId,
             },
           });
+          if (claimed.count !== 1) {
+            throw new GraphQLError('Anonymous memory changed during promotion; retry.', {
+              extensions: { code: 'MEMORY_WRITE_CONFLICT', memoryId: resolvedMemoryId },
+            });
+          }
         });
+        // Promotion's live-node rewrite does not cover tombstones or prior
+        // snapshots. Reuse the bounded completion pass under the verifier we
+        // just installed; an interrupted pass can be retried by the caller.
+        await memoryMutations.encryptMemory(
+          {}, { memoryId: resolvedMemoryId, dataKey }, ctx,
+        );
         return ctx.db.memory.findUniqueOrThrow({ where: { id: resolvedMemoryId } });
       }
 
@@ -2086,21 +2195,38 @@ export const memoryMutations = {
           { extensions: { code: 'BAD_USER_INPUT', memoryClass: memory.class } },
         );
       }
-      if (memory.isEncrypted) {
-        throw new Error('Memory is already encrypted');
-      }
+      // #1434: an encryption interrupted after the flip, or completed before
+      // historical revisions were included, may leave plaintext rows behind.
+      // A rerun is a completion under the EXISTING key, never a key rotation.
+      // Verifier-less legacy rows cannot safely complete: a later wrong-key
+      // session can create an authenticating envelope under that key (#1441).
+      // A matching envelope therefore does not prove the original memory key.
       // Vector indexing on an encrypted memory requires the FR-026 ack;
       // converting an INDEXED memory would violate chk_memory_vector_
       // encrypted_ack — surface it as a typed error, not a DB error.
-      if (memory.vectorIndexEnabled && !memory.vectorIndexEncryptedAckAt) {
+      if (!memory.isEncrypted && memory.vectorIndexEnabled && !memory.vectorIndexEncryptedAckAt) {
         throw new GraphQLError(
           'Disable the vector index (or acknowledge the inversion disclosure) before encrypting.',
           { extensions: { code: 'BAD_USER_INPUT' } },
         );
       }
+      if (memory.isEncrypted && !memory.keyVerifier) {
+        throw new GraphQLError('Encrypted memory has no stored key verifier for safe completion.', {
+          extensions: { code: 'BAD_UNLOCK_INPUT', memoryId: resolvedMemoryId },
+        });
+      }
       let key;
       let kdfFields: { kdfSalt?: string; kdfParams?: InputJsonValue } = {};
-      if (passphrase) {
+      if (memory.isEncrypted) {
+        try {
+          key = await resolveSuppliedKey(memory, { dataKey, passphrase });
+        } catch (e) {
+          if (e instanceof MemoryUnlockError) {
+            throw new GraphQLError(e.message, { extensions: { code: e.code, memoryId: resolvedMemoryId } });
+          }
+          throw e;
+        }
+      } else if (passphrase) {
         if (dataKey) {
           throw new GraphQLError('Provide exactly one of dataKey or passphrase.', {
             extensions: { code: 'BAD_USER_INPUT' },
@@ -2130,16 +2256,23 @@ export const memoryMutations = {
       // plaintext can no longer be ADDED. The encryption passes below then
       // converge on zero plaintext rows: a row written plaintext between
       // our scan and the flip is caught by the next pass. Idempotent by the
-      // enc:v1 prefix (isCiphertext), so re-running a pass is safe.
-      await ctx.db.memory.update({
-        where: { id: resolvedMemoryId },
-        data: {
-          isEncrypted: true,
-          keyVerifier: makeKeyVerifier(key),
-          ...kdfFields,
-          updatedBy: ctx.appId ?? ctx.userId ?? null,
-        },
-      });
+      // Authenticated envelopes stay unchanged, so re-running a pass is safe.
+      // Two callers may both have read the plaintext flag above. Claim the
+      // flip atomically so only one key can become the verifier/conversion key;
+      // otherwise a losing caller could replace the verifier while the winner
+      // encrypts rows under its own key (#1346).
+      if (!memory.isEncrypted) {
+        const flip = await ctx.db.memory.updateMany({
+          where: { id: resolvedMemoryId, isEncrypted: false },
+          data: {
+            isEncrypted: true,
+            keyVerifier: makeKeyVerifier(key),
+            ...kdfFields,
+            updatedBy: ctx.appId ?? ctx.userId ?? null,
+          },
+        });
+        if (flip.count !== 1) throw new Error('Memory is already encrypted');
+      }
       const BATCH = 200; // bound memory per pass (PR-514 review, Gemini)
       for (let pass = 0; pass < 5; pass++) {
         let converted = 0;
@@ -2147,10 +2280,13 @@ export const memoryMutations = {
         let cursor: string | undefined;
         for (;;) {
           const nodes = await ctx.db.node.findMany({
-            where: { memoryId: resolvedMemoryId, deletedAt: null },
-            // abstract encrypts alongside content since spec 031 — the old
-            // select missed it, leaving abstracts plaintext (spec-041 fix).
-            select: { id: true, content: true, abstract: true, data: true },
+            // Tombstones retain content and may later be restored. They are
+            // part of the at-rest conversion too (#1435 review P2).
+            where: { memoryId: resolvedMemoryId },
+            // This is only an id page. Fields must be read AFTER the row lock:
+            // a concurrent edit between enumeration and conversion otherwise
+            // gets overwritten with ciphertext of the older value (#1346).
+            select: { id: true },
             orderBy: { id: 'asc' },
             take: BATCH,
             ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
@@ -2158,26 +2294,78 @@ export const memoryMutations = {
           if (nodes.length === 0) break;
           cursor = nodes[nodes.length - 1].id;
           for (const node of nodes) {
-            const plaintextContent = node.content != null && !isCiphertext(node.content);
-            const plaintextAbstract = node.abstract != null && !isCiphertext(node.abstract);
-            const plaintextData =
-              node.data != null &&
-              !(typeof node.data === 'object' && (node.data as { __enc?: string }).__enc);
-            if (!plaintextContent && !plaintextAbstract && !plaintextData) continue;
-            const encrypted = encryptNodeFieldsWithKey(
-              { content: node.content, abstract: node.abstract, data: node.data },
-              key,
-            );
-            await ctx.db.node.update({
-              where: { id: node.id },
-              data: {
-                content: encrypted.content ?? null,
-                revisionContentHash: revisionStateHashRefreshMarker(),
-                abstract: encrypted.abstract ?? null,
-                data: (encrypted.data ?? null) as InputJsonValue,
-              },
+            const didConvert = await ctx.db.$transaction(async (tx) => {
+              // Lock first, then re-read. A moved row is outside this memory;
+              // a deleted row still belongs here and retains restorable
+              // content, so it must be reconciled and encrypted too. The
+              // reconciliation snapshot is encrypted below before commit.
+              // Each transaction holds only one node lock; id paging orders
+              // the conversions deterministically.
+              const locked = await tx.$queryRaw<Array<{ id: string }>>`
+                SELECT id FROM nodes WHERE id = ${node.id} FOR UPDATE
+              `;
+              if (locked.length === 0) return false;
+              const lockedNode = await tx.node.findUnique({
+                where: { id: node.id },
+              });
+              if (!lockedNode || lockedNode.memoryId !== resolvedMemoryId) return false;
+              // The helper reuses our row lock, scopes the reconcile to the
+              // authorized memory, and snapshots raw drift before conversion.
+              const revision = await ensureCurrentNodeRevisionInTransaction(tx, node.id, {
+                expectedMemoryId: resolvedMemoryId,
+              });
+              if (revision == null) return false;
+              const current = await tx.node.findUnique({ where: { id: node.id } });
+              if (!current || current.memoryId !== resolvedMemoryId) return false;
+
+              // Reconciliation can snapshot the raw plaintext change. Encrypt
+              // that newly minted snapshot before this transaction commits:
+              // once the memory flag is set, no new plaintext history may
+              // become visible at rest. Ordinary pre-existing revisions are
+              // outside this conversion's revision semantics.
+              if (revision > lockedNode.revSeq) {
+                const reconciled = await tx.nodeRevision.findFirst({
+                  where: {
+                    nodeId: node.id,
+                    revNo: revision - 1,
+                    editedByInfo: RECONCILE_EDITOR_INFO,
+                    memoryId: resolvedMemoryId,
+                  },
+                });
+                if (reconciled) {
+                  const encryptedRevision = encryptNodeFieldsWithKey(
+                    { content: reconciled.content, abstract: reconciled.abstract, data: reconciled.data }, key,
+                  );
+                  await tx.nodeRevision.update({
+                    where: { id: reconciled.id },
+                    data: {
+                      content: encryptedRevision.content ?? null,
+                      abstract: encryptedRevision.abstract ?? null,
+                      data: (encryptedRevision.data ?? null) as InputJsonValue,
+                    },
+                  });
+                }
+              }
+
+              const plaintextContent = current.content != null && !isAuthenticatedStringEnvelope(current.content, key);
+              const plaintextAbstract = current.abstract != null && !isAuthenticatedStringEnvelope(current.abstract, key);
+              const plaintextData = current.data != null && !isAuthenticatedDataEnvelope(current.data, key);
+              if (!plaintextContent && !plaintextAbstract && !plaintextData) return false;
+              const encrypted = encryptNodeFieldsWithKey(
+                { content: current.content, abstract: current.abstract, data: current.data }, key,
+              );
+              await tx.node.update({
+                where: { id: current.id },
+                data: {
+                  content: encrypted.content ?? null,
+                  revisionContentHash: revisionStateHashRefreshMarker(),
+                  abstract: encrypted.abstract ?? null,
+                  data: (encrypted.data ?? null) as InputJsonValue,
+                },
+              });
+              return true;
             });
-            converted += 1;
+            if (didConvert) converted += 1;
           }
           if (nodes.length < BATCH) break;
         }
@@ -2187,6 +2375,90 @@ export const memoryMutations = {
             `[encryptMemory] memory ${resolvedMemoryId} did not converge after 5 passes — investigate`,
           );
         }
+      }
+
+      // Historical snapshots belong to the memory where they were captured,
+      // even when their Node has since moved. Legacy NULL-memory snapshots
+      // follow the read gate's current-Node-memory fallback (#602). Page IDs
+      // only, then lock the parent and re-check that fallback before writing:
+      // a move between the page read and conversion must not encrypt history
+      // under the wrong memory key. Sanctioned writes after the flip create
+      // ciphertext snapshots; this pass converts the pre-flip history (#1434).
+      // Encryption stays in the application because the caller's key must
+      // never be passed to PostgreSQL for a bulk UPDATE. Use an id comparison
+      // for paging: a history prune can delete the last row of a page, so a
+      // Prisma cursor on that row would lose the remaining pages.
+      let revisionConverged = false;
+      for (let revisionPass = 0; revisionPass < 5; revisionPass++) {
+        let convertedRevisions = 0;
+        let revisionCursor: string | undefined;
+        for (;;) {
+          const revisions = await ctx.db.nodeRevision.findMany({
+            where: {
+              ...(revisionCursor ? { id: { gt: revisionCursor } } : {}),
+              OR: [
+                { memoryId: resolvedMemoryId },
+                { memoryId: null, node: { memoryId: resolvedMemoryId } },
+              ],
+            },
+            select: { id: true, nodeId: true },
+            orderBy: { id: 'asc' },
+            take: BATCH,
+          });
+          if (revisions.length === 0) break;
+          revisionCursor = revisions[revisions.length - 1].id;
+          for (const candidate of revisions) {
+            const didConvert = await ctx.db.$transaction(async (tx) => {
+              await tx.$queryRaw`SELECT id FROM nodes WHERE id = ${candidate.nodeId} FOR UPDATE`;
+              // A concurrent history prune may delete a page candidate. Lock
+              // the snapshot before reading it so a later delete cannot turn
+              // the selective update into a failed, half-finished conversion.
+              const lockedRevision = await tx.$queryRaw<Array<{ id: string }>>`
+                SELECT id FROM node_revisions WHERE id = ${candidate.id} FOR UPDATE
+              `;
+              if (lockedRevision.length === 0) return false;
+              const revision = await tx.nodeRevision.findUnique({ where: { id: candidate.id } });
+              if (!revision) return false;
+              if (revision.memoryId !== resolvedMemoryId) {
+                if (revision.memoryId !== null) return false;
+                const node = await tx.node.findUnique({
+                  where: { id: candidate.nodeId }, select: { memoryId: true },
+                });
+                if (node?.memoryId !== resolvedMemoryId) return false;
+              }
+              const plaintextContent = revision.content != null && !isAuthenticatedStringEnvelope(revision.content, key);
+              const plaintextAbstract = revision.abstract != null && !isAuthenticatedStringEnvelope(revision.abstract, key);
+              const plaintextData = revision.data != null && !isAuthenticatedDataEnvelope(revision.data, key);
+              if (!plaintextContent && !plaintextAbstract && !plaintextData) return false;
+              const encrypted = encryptNodeFieldsWithKey(
+                { content: revision.content, abstract: revision.abstract, data: revision.data }, key,
+              );
+              await tx.nodeRevision.update({
+                where: { id: revision.id },
+                data: {
+                  content: encrypted.content ?? null,
+                  abstract: encrypted.abstract ?? null,
+                  data: (encrypted.data ?? null) as InputJsonValue,
+                },
+              });
+              return true;
+            });
+            if (didConvert) convertedRevisions += 1;
+          }
+          if (revisions.length < BATCH) break;
+        }
+        // Always make a second pass: an old pre-flip writer can commit after
+        // the first scan reached its last page. Later passes stop only after
+        // observing no plaintext conversion across a complete traversal.
+        if (convertedRevisions === 0 && revisionPass > 0) {
+          revisionConverged = true;
+          break;
+        }
+      }
+      if (!revisionConverged) {
+        throw new GraphQLError('Encrypted revision history did not converge; retry completion.', {
+          extensions: { code: 'ENCRYPTION_INCOMPLETE', memoryId: resolvedMemoryId },
+        });
       }
       return ctx.db.memory.findUniqueOrThrow({ where: { id: resolvedMemoryId } });
     },

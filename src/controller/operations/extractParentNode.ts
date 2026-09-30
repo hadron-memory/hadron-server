@@ -7,6 +7,7 @@ import { carryGovernedSignals } from '../../lib/governedSignals.js';
 import { carryNodeAuthorship } from '../../lib/nodeAuthorship.js';
 import { deriveEdgeLoc } from '../../lib/edgeLoc.js';
 import type { MemoryClass, MemoryVisibility } from '../../generated/prisma/index.js';
+import { assertNoPlaceholdersLeaveDraft } from '../../lib/specCorpus.js';
 
 /**
  * Extract a parent node and its whole loc-subtree into a BRAND-NEW memory,
@@ -113,6 +114,8 @@ export async function extractParentNodeGraph(
       if (!parent) {
         throw new ParentNodeNotFoundError(args.parentLoc, args.sourceMemoryId);
       }
+      // #1450 — the extract lands in a brand-new memory, never a draft corpus.
+      assertNoPlaceholdersLeaveDraft(selectedNodes, { isDraft: false });
 
       // ── The two gates every per-node writer consults (#1191) ────────────
       // Counted on `main` before this: ZERO in this whole operation.

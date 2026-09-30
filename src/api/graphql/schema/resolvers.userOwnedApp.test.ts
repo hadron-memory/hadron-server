@@ -17,6 +17,7 @@ import { cleanDb, createDbAgentImport, createDbAgentOrgGrant } from '../../../te
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
 import { getAppMemoryAccess } from '../../../mcp/access-control.js';
+import { isAgentInstalledAndLicensed } from '../../../lib/appAgent.js';
 import { emitEntityUrnV2 } from '../../../lib/urnEmit.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 
@@ -95,6 +96,50 @@ describe('createApp — user-owned (no orgId), installing a PUBLIC agent', () =>
       where: { appId_userId: { appId: app.id, userId: ownerId } },
     });
     expect(member?.role).toBe('owner');
+  });
+
+  it('removes a foreign PUBLIC Agent from a personal App access fold and list when its subscription is revoked', async () => {
+    const memory = await db.memory.create({
+      data: {
+        id: generateId(), class: 'knowledge', name: 'Publisher note',
+        urn: `${generateId()}:publisher-note`, organizationId: pubOrgId, visibility: 'PUBLIC',
+      },
+    });
+    await db.agentMemoryItem.create({ data: { agentId: publicAgentId, memoryId: memory.id, role: 'read' } });
+    const app = await resolvers.Mutation.createApp(
+      {}, { agentRef: publicAgentId, name: 'Subscribed App' }, ctx({ userId: ownerId, roles: ['READER'] }),
+    );
+    const list = () => resolvers.Query.memories(null, { filter: { memoryClasses: ['knowledge'] } }, ctx({ appId: app.id }));
+    expect(await isAgentInstalledAndLicensed(db, app.id, publicAgentId)).toBe(true);
+    expect((await getAppMemoryAccess(db, app.id)).has(memory.id)).toBe(true);
+    expect((await list()).items.map((m: { id: string }) => m.id)).toContain(memory.id);
+
+    await db.agentSubscription.update({
+      where: { userId_agentId: { userId: ownerId, agentId: publicAgentId } },
+      data: { revokedAt: new Date() },
+    });
+    expect(await isAgentInstalledAndLicensed(db, app.id, publicAgentId)).toBe(false);
+    expect((await getAppMemoryAccess(db, app.id)).has(memory.id)).toBe(false);
+    expect((await list()).items.map((m: { id: string }) => m.id)).not.toContain(memory.id);
+  });
+
+  it('does not list the owner’s legacy holding to a pure personal App key', async () => {
+    const holding = await db.memory.create({
+      data: {
+        id: generateId(), class: 'knowledge', name: 'Owner holding',
+        urn: `@appowner:holding-${generateId()}`, ownerUserId: ownerId,
+        visibility: 'PUBLIC', userMemoryOfAgentId: publicAgentId, createdBy: ownerId,
+      },
+    });
+    await db.agentMemoryItem.create({ data: { agentId: publicAgentId, memoryId: holding.id, role: 'read' } });
+    const app = await resolvers.Mutation.createApp(
+      {}, { agentRef: publicAgentId, name: 'Holding App' }, ctx({ userId: ownerId, roles: ['READER'] }),
+    );
+    const page = await resolvers.Query.memories(
+      null, { filter: { memoryClasses: ['knowledge'] } }, ctx({ appId: app.id }),
+    );
+    expect(page.items.map((m: { id: string }) => m.id)).not.toContain(holding.id);
+    expect((await getAppMemoryAccess(db, app.id)).has(holding.id)).toBe(false);
   });
 
   it('rejects an empty-string orgId', async () => {
@@ -253,9 +298,12 @@ describe('getAppMemoryAccess — blocker 2 (foreign user-owned memory never fold
    * #758 — the GraphQL twin of the same blocker. The #676 fix landed only in
    * `getAppMemoryAccess` (MCP); the App-key branch of `Query.memories` folded
    * every `appAgents[].agent.memoryItems` row with no owner filter, so the same
-   * foreign user-owned memory was listed to an App-key caller.
+   * foreign user-owned memory was listed to an App-key caller. The older
+   * expectation that the App owner's row was listable by a pure App key was
+   * also too broad: strict ownership requires a user principal, even when
+   * the App and Memory share an owner.
    */
-  it('Query.memories (App-key) excludes a foreign user-owned memory, keeps the owner’s', async () => {
+  it('Query.memories (App-key) excludes both foreign and owner-owned memories', async () => {
     const foreignMem = await db.memory.create({
       data: { id: generateId(), class: 'knowledge', name: 'foreign', urn: `@appother:foreign-${generateId()}`, ownerUserId: otherId },
     });
@@ -278,7 +326,7 @@ describe('getAppMemoryAccess — blocker 2 (foreign user-owned memory never fold
     );
     const ids = page.items.map((m: { id: string }) => m.id);
     expect(ids).not.toContain(foreignMem.id);
-    expect(ids).toContain(ownMem.id);
+    expect(ids).not.toContain(ownMem.id);
   });
 
   it('Query.memories (App-key) still lists an ORG-owned memory (no regression)', async () => {

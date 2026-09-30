@@ -746,6 +746,15 @@ model Memory {
   /// `properties`/`objectType` are validated against it in the enforcement
   /// phase (a later PR) — free-form until then.
   schema               Json?
+  /// #1447/#1448 — this memory is a DRAFT spec corpus: its specs' citations
+  /// are not yet permanent, so they can be renumbered, moved and deleted
+  /// freely, and a move records no UrnAlias (nothing outside can cite a draft
+  /// number). Chosen ONLY at creation (`createMemory(draftCorpus: true)`); no
+  /// update path sets it, and minting clears it once, one-way. Every existing
+  /// memory, and every memory created without asking, is minted (false). A
+  /// dedicated Memory column rather than MemoryConfig so config-template apply
+  /// (which copies NodeRoleRule columns only) can never carry it.
+  corpusDraft          Boolean           @default(false) @map("corpus_draft")
   /// Classification tags for search and filtering.
   tags                 String[]
   /// License identifier (e.g. "MIT", "CC-BY-4.0", "proprietary").
@@ -1101,6 +1110,12 @@ model Node {
   /// Colon-delimited path within the memory (e.g. "auth:tokens").
   loc                String
   isLink             Boolean   @default(false) @map("is_link")
+  /// #1450 — a RESERVED spec citation with no spec written yet (a placeholder
+  /// in a draft corpus; see src/lib/specCorpus.ts). Set only by the server's
+  /// `reserveSpecCitation`, never by a client write, and never inferred from an
+  /// empty body. Writing real content clears it; the node keeps its citation.
+  /// Minting refuses while any remain, so a minted corpus has none.
+  isPlaceholder      Boolean   @default(false) @map("is_placeholder")
   description        String?
   /// Paragraph-length summary of this node. Cap is 2000 characters,
   /// enforced at the API boundary (not as a DB CHECK — caps are
@@ -1166,6 +1181,10 @@ model Node {
   /// Sort order among sibling nodes (lower values come first); used
   /// by `hadron_get_next_node` and portal drag-and-drop reordering.
   seq                Int?
+  /// #1430 paged attention: the owning Channel for chat-message transcript
+  /// rows — stamped in the append transaction, providing a Channel-local
+  /// seq-first access path (see the partial index below).
+  messageChannelId   String?          @map("message_channel_id")
   /// GitHub repo slug (e.g. "micromentor/mmdata").
   ownerRepo          String?   @map("owner_repo")
   /// If true, this node can be executed as a task.
@@ -1661,7 +1680,8 @@ model Agent {
   /// Display name of this agent.
   name                 String
   description          String?
-  /// System prompt sent to the LLM at session start.
+  /// Agent prompt template. {{name}}/{{role}} bind to the Worker's identity
+  /// for a worker briefing, or to this Agent's name/role for a chat.
   systemPrompt         String?         @map("system_prompt")
   /// Memory containing conversation designs (stages, prompts,
   /// partials). Universally read-only from any App context post-008
@@ -1733,11 +1753,6 @@ model Agent {
   /// A dedicated column so roster/casting queries can filter without
   /// parsing the prompt.
   personaRole          String?         @map("persona_role")
-  /// The persona identity TEMPLATE ("You are {{name}}, a senior backend
-  /// engineer ..."). `{{name}}` is bound at casting time with the Worker's
-  /// name (cor:agt:020:01); by CONVENTION clients compose the bound result
-  /// into the head of systemPrompt — the server does no injection.
-  personaPrompt        String?         @map("persona_prompt")
   createdAt            DateTime        @default(now()) @map("created_at")
   createdBy            String?         @map("created_by")
   updatedAt            DateTime?       @updatedAt @map("updated_at")
@@ -3277,7 +3292,7 @@ model AppAgent {
 
 /// #974 — a **Worker**: the named casting of an installed Agent into an App
 /// (cor:dmo:050:11, cor:agt:020:01). The Agent carries the reusable persona
-/// dressing (`personaRole` + the `personaPrompt` template); the Worker is the
+/// dressing (`personaRole` + the `systemPrompt` template); the Worker is the
 /// local named identity ("Iris") that does attributable work. Casting is
 /// opt-in (an installed agent with no Worker row is just an agent) and
 /// requires the agent installed in the App at cast time; multiple Workers may
@@ -4134,15 +4149,15 @@ model McpSessionState {
   @@map("mcp_session_state")
 }
 
-/// Which kind of entity a {@link UrnAlias} addresses. Only the four entities
-/// that STORE a urn column can be renamed; every other URN in the platform
-/// (node, edge, worker, apprun, …) is composed on read from one of these, so
-/// aliasing these four heals the derived URNs for free.
+/// Which kind of entity a {@link UrnAlias} addresses. The four stored-URN
+/// entities can be renamed; a Node also needs its own alias when a move
+/// rewrites its memory or loc without renaming either parent (#1391).
 enum UrnAliasEntityType {
   ORGANIZATION
   MEMORY
   AGENT
   APP
+  NODE
 }
 
 /// Why a {@link UrnAlias} row exists.
@@ -4160,17 +4175,18 @@ enum UrnAliasReason {
 ///
 /// A URN is the platform's stable, publishable identifier: it goes into commit
 /// trailers, PR descriptions, issue signatures, chat messages and exported
-/// documents, none of which can be rewritten after the fact. But four entities
-/// store their URN in a column, and all four can be renamed — so before this
-/// table a rename silently turned every published reference into a 404, and
-/// there was no record that the old URN had ever meant anything.
+/// documents, none of which can be rewritten after the fact. Four entities
+/// store their URN in a column, and all four can be renamed; a node's composed
+/// URN also changes when its loc or memory changes. Without this table those
+/// changes silently turned published references into a 404.
 ///
 /// The blast radius is wider than the four rows, because most URNs in the
 /// platform are COMPOSED on read from one of them: a node URN carries its
 /// memory's slug, a worker URN carries its App's slug, an apprun URN likewise.
 /// Renaming one memory therefore orphans every published node URN under it.
-/// Aliasing the four storing entities heals all of it, because the derived
-/// URNs resolve THROUGH their parent's ref resolver.
+/// Aliasing the four storing entities heals parent renames. A node move also
+/// records the old composed node URN, because its loc or memory can change
+/// while both stored parent URNs remain unchanged (#1391).
 ///
 /// **Liveness is not stored here.** A row records only that a URN once
 /// addressed an entity; whether that entity is still readable, uninstalled or

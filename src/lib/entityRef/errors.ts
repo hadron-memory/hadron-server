@@ -78,7 +78,7 @@ export class AmbiguousUserRefError extends Error {
  * `extensions.code: 'AmbiguousLegacyUrnError'`.
  */
 export class AmbiguousLegacyUrnError extends Error {
-  constructor(public ref: string) {
+  constructor(public ref: string, public candidateNodeIds?: readonly string[]) {
     super(`AMBIGUOUS_LEGACY_URN: ${ref}`);
     this.name = 'AmbiguousLegacyUrnError';
   }

@@ -207,7 +207,7 @@ describe('#980 — the #552 nested-gate audit, per principal shape', () => {
     });
     await db.agent.update({
       where: { id: agent.id },
-      data: { personaPrompt: 'You are {{name}}, a {{role}}.' },
+      data: { systemPrompt: 'You are {{name}}, a {{role}}.' },
     });
     const c = ctx(member.id); // org READER, no AppMember row
     const w = await workerViaSessions(c);
@@ -225,7 +225,7 @@ describe('#980 — the #552 nested-gate audit, per principal shape', () => {
     });
     await db.agent.update({
       where: { id: agent.id },
-      data: { personaPrompt: 'You are {{name}}, a {{role}}.' },
+      data: { systemPrompt: 'You are {{name}}, a {{role}}.' },
     });
     await db.appMember.create({ data: { appId: app.id, userId: member.id, role: 'member' } });
     const c = ctx(member.id);

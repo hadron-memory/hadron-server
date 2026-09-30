@@ -83,6 +83,49 @@ describe('validateNodeAgainstSchema — strict collections', () => {
     bad('strictThing', { id: 'x', toString: 'nope', constructor: 'evil' }));
 });
 
+describe('validateNodeAgainstSchema — platform-owned exports (#1286)', () => {
+  const exports = { claudeSkill: { name: 'typed-task', description: 'Use when testing.', enable: true } };
+  const collidingSchema: MemorySchema = {
+    objectTypes: {
+      task: {
+        strict: true,
+        fields: {
+          title: { type: 'text', required: true },
+          // A collection declaration cannot claim platform-owned exports,
+          // even when it marks its own field required or gives it a type.
+          exports: { type: 'text', required: true },
+        },
+      },
+    },
+  };
+
+  it.each([false, true])('allows exports on an otherwise valid collection, strict=%s', (strict) => {
+    const schema: MemorySchema = { objectTypes: { task: { strict, fields: { title: { type: 'text', required: true } } } } };
+    expect(() => validateNodeAgainstSchema(schema, 'task', { title: 'T', exports })).not.toThrow();
+    expect(() => validateNodeAgainstSchema(schema, 'task', { title: 'T', exports: null })).not.toThrow();
+    expect(() => validateNodeAgainstSchema(schema, 'task', { title: 'T', exports: 'malformed' })).not.toThrow();
+    const unrelated = () => validateNodeAgainstSchema(schema, 'task', { title: 'T', extra: 1, exports });
+    if (strict) expect(unrelated).toThrow(NodeSchemaViolation);
+    else expect(unrelated).not.toThrow();
+  });
+
+  it.each([false, true])('ignores a collection-owned exports field and its required flag, strict=%s', (strict) => {
+    const schema = structuredClone(collidingSchema);
+    schema.objectTypes.task.strict = strict;
+    expect(() => validateNodeAgainstSchema(schema, 'task', { title: 'T' })).not.toThrow();
+    expect(() => validateNodeAgainstSchema(schema, 'task', { title: 'T', exports })).not.toThrow();
+    expect(() => validateNodeAgainstSchema(schema, 'task', { title: 'T', exports: 'malformed' })).not.toThrow();
+    expect(() => validateNodeAgainstSchema(schema, 'task', { exports })).toThrow('required field "title" is missing');
+  });
+
+  it('still requires a declared collection and object-shaped properties', () => {
+    expect(() => validateNodeAgainstSchema(collidingSchema, 'unknown', { exports })).toThrow(NodeSchemaViolation);
+    expect(() => validateNodeAgainstSchema(collidingSchema, 'task', [] as unknown as Record<string, unknown>)).toThrow(
+      'properties must be an object',
+    );
+  });
+});
+
 describe('validateNodeAgainstSchema — Codex hardening', () => {
   it('rejects "" as an undeclared collection (no empty-string bypass)', () => bad('', { name: 'x' }));
   it('rejects non-object properties for a collection member', () => {

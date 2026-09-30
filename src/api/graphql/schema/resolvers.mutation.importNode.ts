@@ -21,7 +21,7 @@ import { splitNodeUrn } from '../../../lib/urn.js';
 import { splitWholeNodeUrn } from '../../../lib/splitNodeUrnTolerant.js';
 import { emitNodeUrnV2 } from '../../../lib/urnEmit.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
-import { resolveNodeRef } from '../../../lib/entityRef/nodeRef.js';
+import { resolveNodeRefForCaller } from './resolvers.nodeRefAccess.js';
 import { fetchWebPage } from '../../../lib/webFetch.js';
 import { extractArticle } from '../../../lib/articleExtract.js';
 import { writeNodeCore } from './resolvers.mutation.node.js';
@@ -126,7 +126,7 @@ export const importNodeMutations = {
           { extensions: { code: 'BAD_USER_INPUT' } },
         );
       }
-      const { id: taskNodeId } = await resolveNodeRef(ctx.db, input.taskRef);
+        const { id: taskNodeId } = await resolveNodeRefForCaller(ctx, input.taskRef);
       const taskNode = await ctx.db.node.findUniqueOrThrow({
         where: { id: taskNodeId },
         select: { loc: true, isRunnable: true, memory: { select: { urn: true } } },

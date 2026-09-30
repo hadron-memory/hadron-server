@@ -140,9 +140,8 @@ export interface SuppliedKeyInput {
 
 /**
  * Resolve exactly-one-of dataKey/passphrase into a VERIFIED key for a
- * memory row. Rows created before spec 041 have no verifier — those accept
- * the key as-supplied (legacy posture: a wrong key surfaces as failed GCM
- * decrypts downstream, exactly as before).
+ * memory row. Verifier-less encrypted memories cannot be unlocked: a
+ * supplied key has no durable proof of belonging to that memory (#1441).
  */
 export async function resolveSuppliedKey(
   memory: { kdfSalt: string | null; kdfParams: unknown; keyVerifier: string | null },
@@ -152,6 +151,9 @@ export async function resolveSuppliedKey(
   const hasPass = !!input.passphrase;
   if (hasKey === hasPass) {
     throw new MemoryUnlockError('Provide exactly one of dataKey or passphrase.', 'BAD_UNLOCK_INPUT');
+  }
+  if (!memory.keyVerifier) {
+    throw new MemoryUnlockError('Encrypted memory has no stored key verifier for safe unlock.', 'BAD_UNLOCK_INPUT');
   }
   let key: EncryptionKey;
   if (hasKey) {
@@ -173,7 +175,7 @@ export async function resolveSuppliedKey(
       parseKdfParams(memory.kdfParams),
     );
   }
-  if (memory.keyVerifier && !verifyDataKey(memory.keyVerifier, key)) {
+  if (!verifyDataKey(memory.keyVerifier, key)) {
     throw new MemoryUnlockError('Wrong passphrase or data key for this memory.', 'WRONG_KEY');
   }
   return key;

@@ -3,6 +3,18 @@ import { encryptToken } from '../../../lib/tokenCrypto.js';
 import { refuseLegacyBaseUrl, requireEndpointFor, requireKeyFor, validateApiStyle, validateEndpoint } from '../../../lib/aiEndpoint.js';
 import { testAiServiceConfig, type AiConfigTestOverride } from '../../../controller/operations/testAiServiceConfig.js';
 import { assertAgentPublicAllowed } from '../../../lib/agentPublicCongruence.js';
+
+/**
+ * Raised by the publication path when the agent's knowledge-link set changed
+ * between the pre-lock snapshot and the post-lock re-scan (#1364). Internal to
+ * this module: it never reaches a client, it only triggers the retry.
+ */
+class AgentLinkSetChangedError extends Error {
+  constructor() {
+    super('agent link set changed during publication');
+    this.name = 'AgentLinkSetChangedError';
+  }
+}
 import {
   assertSystemMemoryOwner,
   repairAgentSystemMemoryOwner,
@@ -55,7 +67,7 @@ import {
 import { recordUrnRename } from '../../../lib/urnAlias.js';
 
 /**
- * #928/#929 review: persona dressing fields are trimmed, and a blank-after-trim
+ * #928/#929 review: persona role is trimmed, and a blank-after-trim
  * value is NULL (absent on create, clear on update). undefined passes through
  * (omitted arg = no change on update).
  */
@@ -96,7 +108,6 @@ export interface CreateAgentCoreInput {
   type?: 'ASSISTANT' | 'CHATBOT';
   surfaces?: string[];
   personaRole?: string | null;
-  personaPrompt?: string | null;
 }
 
 /**
@@ -104,8 +115,8 @@ export interface CreateAgentCoreInput {
  * visibility defaults, and the one transaction that provisions the system
  * memory alongside the Agent row. (Extracted for #935; the Worker re-cut of
  * #974 removed its persona-minting caller, so createAgent is its one caller
- * again.) Persona dressing fields (`personaRole`/`personaPrompt` —
- * cor:agt:020:01) are normalized here (blank-after-trim ⇒ NULL); the named
+ * again.) The persona role (cor:agt:020:01) is normalized here
+ * (blank-after-trim ⇒ NULL); the named
  * identity lives on the Worker entity, never here.
  */
 export async function createAgentCore(ctx: Context, input: CreateAgentCoreInput) {
@@ -124,7 +135,6 @@ export async function createAgentCore(ctx: Context, input: CreateAgentCoreInput)
   // #929 review: normalize persona dressing inputs before anything touches
   // them.
   const personaRoleNorm = normalizePersonaField(input.personaRole);
-  const personaPromptNorm = normalizePersonaField(input.personaPrompt);
   // #574: slugify the display name — a raw name would persist a
   // case-sensitive / space-bearing URN (and the system memory URN derives
   // from this one, so it inherits the clean slug).
@@ -256,7 +266,7 @@ export async function createAgentCore(ctx: Context, input: CreateAgentCoreInput)
         type: inferredType,
         surfaces: surfaces ?? defaultSurfaces,
         // #928 persona dressing — pure metadata (see schema.prisma).
-        personaRole: personaRoleNorm, personaPrompt: personaPromptNorm,
+        personaRole: personaRoleNorm,
         createdBy: ctx.userId ?? ctx.clientId ?? null,
       },
       include: AGENT_INCLUDE,
@@ -278,10 +288,78 @@ export async function createAgentCore(ctx: Context, input: CreateAgentCoreInput)
   return createdAgent;
 }
 
+
+/**
+ * Bring an agent's system-memory URN in line with the agent's CURRENT URN,
+ * after a rename (#1357, @codex).
+ *
+ * Runs after the rename commits, so two renames of one agent can race: the
+ * second's sync can run first, find the memory still at the FIRST's old
+ * derived URN and skip, and the first's sync then advance it only to the
+ * intermediate URN — agent `C`, memory `B-system`. Writing the agent's URN as
+ * read now, under the memory row lock, converges instead: every sync starts
+ * after its own rename committed and syncs serialize on the memory lock, so
+ * the last one to run sees the latest agent. Locks the MEMORY only (the agent
+ * is read, not locked): locking the agent here would invert the attach path's
+ * memory-then-agent order.
+ *
+ * Rewrites only a URN still on the DERIVED pattern of this request's old agent
+ * URN — an author-chosen system-memory URN is never touched.
+ */
+export async function syncSystemMemoryUrn(
+  db: Context['db'],
+  args: { agentId: string; systemMemoryId: string; oldAgentUrn: string; actor: string | null },
+): Promise<void> {
+  const derivedOldUrn = `${args.oldAgentUrn}-system`;
+  await db.$transaction(async (tx) => {
+    const [lockedSys] = await tx.$queryRaw<{ urn: string }[]>`
+      SELECT urn FROM memories WHERE id = ${args.systemMemoryId} FOR UPDATE
+    `;
+    const currentSysUrn = lockedSys?.urn;
+    if (!currentSysUrn || currentSysUrn !== derivedOldUrn) return;
+    const current = await tx.agent.findUnique({ where: { id: args.agentId }, select: { urn: true } });
+    if (!current) return;
+    const targetUrn = `${current.urn}-system`;
+    if (targetUrn === currentSysUrn) return;
+    await tx.memory.update({
+      where: { id: args.systemMemoryId },
+      data: { urn: targetUrn, updatedBy: args.actor },
+    });
+    await recordUrnRename(tx, {
+      entityType: 'MEMORY',
+      entityId: args.systemMemoryId,
+      oldUrn: currentSysUrn,
+      newUrn: targetUrn,
+      createdBy: args.actor,
+    });
+  });
+}
+
+/**
+ * Bring an agent's system-memory name in line with the agent's CURRENT name
+ * (#1357, @codex): the same race as {@link syncSystemMemoryUrn} — two renames'
+ * syncs landing in reverse order would leave the OLDER name — closed the same
+ * way, by writing the agent's name as read under the memory row lock.
+ */
+export async function syncSystemMemoryName(
+  db: Context['db'],
+  args: { agentId: string; systemMemoryId: string; actor: string | null },
+): Promise<void> {
+  await db.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT id FROM memories WHERE id = ${args.systemMemoryId} FOR UPDATE`;
+    const current = await tx.agent.findUnique({ where: { id: args.agentId }, select: { name: true } });
+    if (!current) return;
+    await tx.memory.update({
+      where: { id: args.systemMemoryId },
+      data: { name: `${current.name} System`, updatedBy: args.actor },
+    });
+  });
+}
+
 export const agentMutations = {
     createAgent: async (
       _: unknown,
-      { orgId, name, description, systemPrompt, systemMemoryId, visibility, type, surfaces, personaRole, personaPrompt }: { orgId?: string | null; name: string; description?: string; systemPrompt?: string; systemMemoryId?: string; visibility?: string; type?: 'ASSISTANT' | 'CHATBOT'; surfaces?: string[]; personaRole?: string; personaPrompt?: string },
+      { orgId, name, description, systemPrompt, systemMemoryId, visibility, type, surfaces, personaRole }: { orgId?: string | null; name: string; description?: string; systemPrompt?: string; systemMemoryId?: string; visibility?: string; type?: 'ASSISTANT' | 'CHATBOT'; surfaces?: string[]; personaRole?: string },
       ctx: Context,
     ) => {
       // spec 047: an agent is owned by EXACTLY ONE of an org or a user. `orgId`
@@ -339,18 +417,16 @@ export const agentMutations = {
         type,
         surfaces,
         personaRole,
-        personaPrompt,
       });
     },
 
     updateAgent: async (
       _: unknown,
-      { ref, name, urn, description, systemPrompt, systemMemoryId, visibility, listedOnMarketplace, type, surfaces, personaRole, personaPrompt, registerDefaults }: { ref: string; name?: string; urn?: string; description?: string; systemPrompt?: string; systemMemoryId?: string; visibility?: string; listedOnMarketplace?: boolean; type?: 'ASSISTANT' | 'CHATBOT'; surfaces?: string[]; personaRole?: string | null; personaPrompt?: string | null; registerDefaults?: { mentionOnly?: boolean | null } | null },
+      { ref, name, urn, description, systemPrompt, systemMemoryId, visibility, listedOnMarketplace, type, surfaces, personaRole, registerDefaults }: { ref: string; name?: string; urn?: string; description?: string; systemPrompt?: string; systemMemoryId?: string; visibility?: string; listedOnMarketplace?: boolean; type?: 'ASSISTANT' | 'CHATBOT'; surfaces?: string[]; personaRole?: string | null; registerDefaults?: { mentionOnly?: boolean | null } | null },
       ctx: Context,
     ) => {
       // #929 review: normalize persona dressing (blank-after-trim clears).
       const personaRoleNorm = normalizePersonaField(personaRole);
-      const personaPromptNorm = normalizePersonaField(personaPrompt);
       // #789 / cor:api:140 — was a PK-only findUniqueOrThrow, so a caller
       // holding a URN or handle had to pre-resolve it. resolveAgentRef is a
       // pure lookup and does NOT authorize (#554): the resource-scoped
@@ -370,9 +446,21 @@ export const agentMutations = {
       // cor:acl:080:03 — congruence invariant: an agent may become PUBLIC only
       // if every knowledge memory it links (excluding per-user personal/private)
       // is itself PUBLIC. Checked against the CURRENT links before persisting.
-      if (visibility === 'PUBLIC') {
-        await assertAgentPublicAllowed(ctx.db, id);
-      }
+      // cor:acl:080:03 — congruence: an agent may become PUBLIC only if every
+      // knowledge memory it links is itself PUBLIC, and (#1349) only if it
+      // holds no read-write knowledge. Checked ONCE, under the agent row lock
+      // in the transaction below.
+      //
+      // There WAS an unlocked fail-fast here, added when the locked check was
+      // the only one and the systemMemoryId promotion still committed ahead of
+      // it: the fail-fast kept a refusal in front of that write. Deferring the
+      // promotion into the deciding transaction and moving the URN/name syncs
+      // after it removed every externally visible mutation that preceded the
+      // decision, which removed the fail-fast's last correctness role. It is
+      // deleted rather than kept as an optimisation: a duplicated
+      // authorization check that no test can distinguish is the drift
+      // `AGENTS.md` warns about, and its mutant went green the moment the last
+      // write moved out from behind it (@codex, PR #1357).
       let newUrn: string | undefined;
       if (urn !== undefined) {
         if (!agent.organizationId) {
@@ -387,6 +475,9 @@ export const agentMutations = {
       // Rationale: once an agent has a brain, swapping it destroys the
       // scaffold and confuses the UX. Users who want a different brain
       // should delete the agent and create a new one.
+      // Set when a first-attach promotion is due; performed inside the
+      // deciding transaction so a refusal cannot leave it half-applied (#1364).
+      let promoteSystemMemoryId: string | null = null;
       if (systemMemoryId !== undefined) {
         const incoming = systemMemoryId === '' ? null : systemMemoryId;
         if (agent.systemMemoryId && incoming !== agent.systemMemoryId) {
@@ -394,9 +485,21 @@ export const agentMutations = {
         }
         if (!agent.systemMemoryId && incoming) {
           // First-attach: verify the target memory exists, belongs to this
-          // org, isn't already another agent's system memory, and promote it
-          // to class='system'.
+          // org, and isn't already another agent's system memory. These are
+          // READS ONLY — the promotion WRITE now happens in the deciding
+          // transaction below (#1364, @codex on PR #1357).
+          //
+          // It used to be a bare `ctx.db.memory.update` right here, outside any
+          // transaction. That was safe only while the congruence check ran
+          // earlier in the function; once that check moved under the agent lock
+          // (to close a publication race), a refused publication could leave
+          // this memory converted to class='system' with its visibility cleared
+          // and uploads disabled, attached to nothing. Deferring the write is
+          // what makes the refusal and the promotion succeed or fail together.
           const target = await ctx.db.memory.findUniqueOrThrow({ where: { id: incoming } });
+          if (target.deletedAt) {
+            throw new GraphQLError('Memory not found', { extensions: { code: 'MEMORY_NOT_FOUND' } });
+          }
           // #949: was a bare `target.organizationId !== agent.organizationId`,
           // which for a USER-owned agent compares `null !== null` ⇒ false and
           // waves through ANOTHER user's memory
@@ -414,131 +517,43 @@ export const agentMutations = {
           if (otherAgent) {
             throw new Error('This memory is already the system memory of another agent');
           }
-          await ctx.db.memory.update({
-            where: { id: incoming },
-            data: {
-              // 035-visibility-enum-cleanup: mark via class; clear visibility
-              // (forbidden non-null on class='system'). Agent visibility no
-              // longer propagates onto the system memory.
-              class: 'system',
-              name: `${name ?? agent.name} System`,
-              visibility: null,
-              // system-class memories must opt out of uploads (schema.prisma,
-              // 006-asset-upload-redesign). #519 review.
-              acceptsUploads: false,
-            },
-          });
+          promoteSystemMemoryId = incoming;
+          // These validations are re-run under the row locks in the deciding
+          // transaction (@codex, PR #1357). Reading them here first keeps the
+          // common refusal cheap and its message early; the authoritative pass
+          // is the locked one, because two concurrent first-attaches could each
+          // observe `systemMemoryId` as null — or each see no other claimant —
+          // and both promote, leaving two promoted memories or one memory
+          // claimed by two agents.
         }
       }
 
-      // ── URN sync for an auto-derived system memory.
-      // An auto-provisioned system memory's URN is `${agentUrn}-system` (see
-      // createAgent). If the agent's URN changes we must move the memory's URN
-      // in lockstep — otherwise the stale `${oldUrn}-system` memory keeps the
-      // old slug reserved, and re-creating an agent at that slug fails the
-      // system-memory URN-reclaim check (#519 review). Only touch a memory whose
-      // URN still matches the derived pattern: a wizard-supplied system memory
-      // carries its own author-chosen URN we must not rewrite.
-      if (agent.systemMemoryId && newUrn !== undefined && newUrn !== agent.urn) {
-        const derivedOldUrn = `${agent.urn}-system`;
-        const sys = await ctx.db.memory.findUnique({
-          where: { id: agent.systemMemoryId },
-          select: { urn: true },
-        });
-        if (sys?.urn === derivedOldUrn) {
-          // #1079 (PR #1080 review, Codex + Copilot P2) — this renames a
-          // MEMORY, so it owes a MEMORY alias. Without one an agent rename
-          // silently 404'd every published node and edge URN under that
-          // agent's system memory — which for a Team Agent is its whole
-          // `roles:` branch, and for any agent is where its definition lives.
-          // I aliased the Agent and missed the memory it drags along.
-          //
-          // Wrapped in its OWN transaction rather than folded into the agent
-          // rename below, which preserves the best-effort contract this block
-          // already had: a URN collision here must not fail the agent rename.
-          // Folding it in would also break on the first caught error, because a
-          // failed statement poisons the enclosing Postgres transaction — the
-          // catch would swallow the error and every later write in that
-          // transaction would fail with "current transaction is aborted".
-          await ctx.db
-            .$transaction(async (tx) => {
-              const memId = agent.systemMemoryId as string;
-              // Lock and RE-READ inside the transaction (PR #1080 re-review,
-              // Codex P2). `sys.urn` was read before this transaction opened, so
-              // two concurrent agent renames could both see `A-system`; the
-              // first commits `B-system`, the second overwrites with `C-system`
-              // while still recording `A-system` as the predecessor — leaving
-              // the committed, possibly published `B-system` with no alias.
-              // Aliasing the urn actually superseded is the whole point.
-              const [lockedSys] = await tx.$queryRaw<{ urn: string }[]>`
-                SELECT urn FROM memories WHERE id = ${memId} FOR UPDATE
-              `;
-              const currentSysUrn = lockedSys?.urn;
-              // Re-check the derived-pattern guard against the LOCKED value: a
-              // concurrent rename may already have moved it off the pattern, and
-              // a wizard-supplied system memory carries an author-chosen URN we
-              // must never rewrite.
-              //
-              // UNPROVEN BY TEST, and kept anyway. Mutating this line away leaves
-              // the suite green, because the pre-transaction check above already
-              // excludes every input the suite can construct. Reaching it needs
-              // the pattern to match at that outer read and to have CHANGED by
-              // the time this lock is acquired — a genuine interleaving no test
-              // here can stage. Per `review:a-green-mutation-indicts-the-test`
-              // that green indicts the test, not the guard: it does not mean the
-              // check is redundant, only that nothing exercises it. It is the
-              // sole thing standing between a concurrent rename and this code
-              // rewriting an author-chosen system-memory URN from stale data.
-              if (!currentSysUrn || currentSysUrn !== derivedOldUrn) return;
-              await tx.memory.update({
-                where: { id: memId },
-                data: {
-                  urn: `${newUrn}-system`,
-                  updatedBy: ctx.userId ?? ctx.clientId ?? null,
-                },
-              });
-              await recordUrnRename(tx, {
-                entityType: 'MEMORY',
-                entityId: memId,
-                oldUrn: currentSysUrn,
-                newUrn: `${newUrn}-system`,
-                createdBy: ctx.userId ?? ctx.clientId ?? null,
-              });
-            })
-            .catch((err) => {
-              // Best-effort, like the name sync below: a rare collision on the
-              // new URN shouldn't fail the whole agent rename. The alias and the
-              // rename succeed or fail together, so a failure here leaves the
-              // memory at its old URN — still resolvable, which is the safe
-              // direction.
-              console.warn('[updateAgent] system memory URN sync failed:', err);
-            });
-        }
-      }
-
-      // ── Name sync for existing system memory.
-      // If the agent already has a system memory and the caller is updating
-      // the agent's name, propagate so they stay in lockstep.
-      // 035-visibility-enum-cleanup: visibility no longer propagates — a
-      // system memory's visibility is always NULL.
-      if (agent.systemMemoryId && name !== undefined) {
-        await ctx.db.memory.update({
-          where: { id: agent.systemMemoryId },
-          data: {
-            name: `${name} System`,
-            updatedBy: ctx.userId ?? ctx.clientId ?? null,
-          },
-        }).catch((err) => {
-          // Log but don't block the agent update — if the system memory
-          // has been manually renamed or deleted, we don't want to fail
-          // the whole operation.
-          console.warn('[updateAgent] system memory sync failed:', err);
-        });
-      }
-
+      // #1364 (@codex P2, PR #1357) — the system-memory URN and NAME syncs
+      // used to run HERE, each committing its own transaction BEFORE the
+      // deciding one below. A publication refused by the locked congruence
+      // check (an attach landing after the fail-fast) therefore left the system
+      // memory renamed or retitled under an agent that never changed. They are
+      // best-effort by design — a failure must not fail the agent update — so
+      // rather than fold them into the deciding transaction and change that,
+      // they now run AFTER it, where a refusal can no longer reach them.
       // #1079 — the rename and its alias record commit together (see the App arm
       // in resolvers.mutation.app.ts for why they cannot be separate).
-      return ctx.db.$transaction(async (tx) => {
+      // #1364 — bounded retry around the deciding transaction. The only thing
+      // that raises AgentLinkSetChangedError is the post-lock re-scan below,
+      // and once this transaction holds the agent lock no further link can be
+      // added, so a single retry is normally enough; the cap is there so a
+      // pathological loop fails loudly instead of spinning.
+      const MAX_PUBLISH_ATTEMPTS = 3;
+      let published: Awaited<ReturnType<typeof ctx.db.agent.update>> | undefined;
+      // The agent URN this request actually overwrote, read under the agent
+      // lock (@codex, PR #1357). The pre-transaction read can be stale: when a
+      // concurrent rename commits first, the URN this request replaces is
+      // THAT rename's, and a sync keyed on the stale read skips a memory the
+      // other request already advanced.
+      let predecessorUrn: string | undefined;
+      for (let attempt = 1; ; attempt++) {
+      try {
+      published = await ctx.db.$transaction(async (tx) => {
         // Lock and RE-READ the urn inside the transaction (PR #1080 review,
         // Codex + Copilot P2). The row above was read before the transaction
         // opened, so two concurrent renames could both record the SAME old urn
@@ -547,9 +562,151 @@ export const agentMutations = {
         // FOR UPDATE serializes the renames and makes each one record the urn it
         // actually superseded. `updateOrganization` already did this; the three
         // single-entity paths did not.
+        // #1349 (@codex, PR #1357) — publication must serialize with a
+        // concurrent narrowing of the knowledge it links. `updateMemory` takes
+        // `FOR UPDATE` on the memory row, so locking the linked memories here
+        // makes the two contend: otherwise this check saw them still PUBLIC
+        // while the narrowing's own check saw no PUBLIC agent yet, and both
+        // committed — a PUBLIC agent referencing non-public knowledge.
+        //
+        // LOCKED BEFORE THE AGENT ROW, and ordered by id. The attach path locks
+        // memory-then-agent (see lockAttachmentPair), so taking them in the
+        // other order here would deadlock against it; ordering the memory set
+        // by id keeps two concurrent publications consistent with each other.
+        // An attach that adds a link to a memory outside this set still cannot
+        // slip past: it must take the agent lock below, which this transaction
+        // holds until it commits.
+        let lockedMemoryIds: string[] = [];
+        if (visibility === 'PUBLIC') {
+          const linked = await tx.agentMemoryItem.findMany({
+            where: { agentId: id, deletedAt: null },
+            select: { memoryId: true },
+            orderBy: { memoryId: 'asc' },
+          });
+          lockedMemoryIds = linked.map((l: { memoryId: string }) => l.memoryId);
+        }
+        // The promotion target belongs in the SAME ordered lock set (@codex P2,
+        // PR #1357). Its `tx.memory.update` below would otherwise wait for that
+        // row's lock AFTER this transaction has taken the agent lock — an
+        // agent-then-memory acquisition, inverting `lockAttachmentPair`'s
+        // memory-then-agent order and deadlocking against a concurrent attach
+        // of the same pair. Exactly the hazard the lock-order note warns about;
+        // taking it here, in id order, with the rest, is the fix.
+        if (promoteSystemMemoryId && !lockedMemoryIds.includes(promoteSystemMemoryId)) {
+          lockedMemoryIds = [...lockedMemoryIds, promoteSystemMemoryId].sort();
+        }
+        for (const memoryId of lockedMemoryIds) {
+          await tx.$queryRaw`SELECT id FROM memories WHERE id = ${memoryId} FOR UPDATE`;
+        }
         const [lockedRow] = await tx.$queryRaw<{ urn: string }[]>`
           SELECT urn FROM agents WHERE id = ${id} FOR UPDATE
         `;
+        predecessorUrn = lockedRow?.urn;
+        if (visibility === 'PUBLIC') {
+          // Re-scan the link set now that the agent row is LOCKED (#1364,
+          // @codex on PR #1357). The scan above happened before this lock, so
+          // an attach could commit in between and add a link whose memory is
+          // therefore absent from `lockedMemoryIds` — and a concurrent
+          // narrowing of that memory would then be serialized against nothing.
+          //
+          // The repair is a RETRY, not a second round of locking: taking a
+          // memory lock while already holding the agent lock would be
+          // agent-then-memory, inverting the attach path's memory-then-agent
+          // order and deadlocking. Aborting releases both locks; the next
+          // attempt sees the new link in its snapshot and locks it properly.
+          // No attach can add a further link once this lock is held, so the
+          // retry converges.
+          // UNPROVEN BY TEST, and kept, for the same reason as the deferred
+          // promotion above: staging it needs THREE transactions to interleave
+          // (an attach committing between the snapshot and this lock, plus a
+          // narrowing of that new memory). The suite stays green without it;
+          // the hole it closes is a PUBLIC agent linked to non-public
+          // knowledge.
+          const afterLock = await tx.agentMemoryItem.findMany({
+            where: { agentId: id, deletedAt: null },
+            select: { memoryId: true },
+            orderBy: { memoryId: 'asc' },
+          });
+          const now = afterLock.map((l: { memoryId: string }) => l.memoryId);
+          // Compare against the LINK set, not the lock set: the lock set may
+          // additionally carry the promotion target, which is not a link.
+          if (now.some((m: string) => !lockedMemoryIds.includes(m))) {
+            throw new AgentLinkSetChangedError();
+          }
+        }
+        // cor:acl:080:03 — congruence invariant: an agent may become PUBLIC
+        // only if every knowledge memory it links (excluding per-user
+        // personal/private) is itself PUBLIC, and (#1349) only if it holds no
+        // read-write knowledge. Run under the row lock taken just above, so an
+        // attach or re-role racing this publication serializes behind it
+        // instead of both observing a state the other is about to change.
+        if (visibility === 'PUBLIC') {
+          await assertAgentPublicAllowed(tx, id);
+        }
+        // The deferred first-attach promotion (#1364): inside THIS transaction,
+        // after the congruence decision, so a refusal rolls it back with
+        // everything else instead of leaving a mutated orphan.
+        //
+        // PINNED, though not by the case it exists for (harness #25): moving
+        // this write back outside the transaction fails the two concurrent
+        // system-memory claim tests (they time out on the lock). The #1364
+        // orphan itself — a publication refused by a link committing between
+        // the early fail-fast and this locked decision, yet still promoting the
+        // memory — has never been staged (20 paired-race iterations), so that
+        // specific interleaving remains argued, not measured.
+        if (promoteSystemMemoryId) {
+          // AUTHORITATIVE re-validation, under the locks taken above (@codex,
+          // PR #1357). `lockedAgentRow` is this agent read inside the
+          // transaction; the target row is locked in the ordered set.
+          const lockedAgent = await tx.agent.findUniqueOrThrow({
+            where: { id },
+            select: { systemMemoryId: true, organizationId: true, ownerUserId: true, name: true },
+          });
+          if (lockedAgent.systemMemoryId && lockedAgent.systemMemoryId !== promoteSystemMemoryId) {
+            throw new GraphQLError(
+              "Cannot unset or change an agent's system memory. Delete the agent to replace it.",
+              { extensions: { code: 'BAD_USER_INPUT' } },
+            );
+          }
+          const lockedTarget = await tx.memory.findUniqueOrThrow({
+            where: { id: promoteSystemMemoryId },
+            select: { organizationId: true, ownerUserId: true, id: true, deletedAt: true },
+          });
+          if (lockedTarget.deletedAt) {
+            throw new GraphQLError('Memory not found', { extensions: { code: 'MEMORY_NOT_FOUND' } });
+          }
+          assertSystemMemoryOwner(lockedAgent, {
+            organizationId: lockedTarget.organizationId,
+            ownerUserId: lockedTarget.ownerUserId,
+            id: lockedTarget.id,
+          });
+          const claimedElsewhere = await tx.agent.findFirst({
+            where: { systemMemoryId: promoteSystemMemoryId, deletedAt: null, id: { not: id } },
+            select: { id: true },
+          });
+          if (claimedElsewhere) {
+            throw new GraphQLError('This memory is already the system memory of another agent', {
+              extensions: { code: 'BAD_USER_INPUT' },
+            });
+          }
+          await tx.memory.update({
+            where: { id: promoteSystemMemoryId },
+            data: {
+              // 035-visibility-enum-cleanup: mark via class; clear visibility
+              // (forbidden non-null on class='system'). Agent visibility no
+              // longer propagates onto the system memory.
+              class: 'system',
+              // The LOCKED agent's name, not the pre-transaction snapshot
+              // (@copilot, PR #1357): a rename committing in between would
+              // otherwise leave the promoted memory named after the old one.
+              name: `${name ?? lockedAgent.name} System`,
+              visibility: null,
+              // system-class memories must opt out of uploads (schema.prisma,
+              // 006-asset-upload-redesign). #519 review.
+              acceptsUploads: false,
+            },
+          });
+        }
         if (newUrn !== undefined) {
           await recordUrnRename(tx, {
             entityType: 'AGENT',
@@ -579,7 +736,6 @@ export const agentMutations = {
           // #928 persona dressing — pure metadata. An explicit null (or a
           // blank-after-trim string) clears the field; omitted preserves.
           ...(personaRoleNorm !== undefined ? { personaRole: personaRoleNorm } : {}),
-          ...(personaPromptNorm !== undefined ? { personaPrompt: personaPromptNorm } : {}),
           // Spec 049 Phase 5: the install-row defaults — a scalar declaration,
           // stored as given; null clears to the platform defaults.
           ...(registerDefaults !== undefined
@@ -589,6 +745,57 @@ export const agentMutations = {
         include: AGENT_INCLUDE,
         });
       });
+      } catch (err) {
+        if (err instanceof AgentLinkSetChangedError && attempt < MAX_PUBLISH_ATTEMPTS) continue;
+        if (err instanceof AgentLinkSetChangedError) {
+          throw new GraphQLError(
+            'The agent\'s knowledge links kept changing while publishing it; retry the request.',
+            { extensions: { code: 'CONFLICT', reason: 'AGENT_LINKS_CHANGED' } },
+          );
+        }
+        throw err;
+      }
+      break;
+      }
+
+      // ── URN sync for an auto-derived system memory.
+      // An auto-provisioned system memory's URN is `${agentUrn}-system` (see
+      // createAgent). If the agent's URN changes we must move the memory's URN
+      // in lockstep — otherwise the stale `${oldUrn}-system` memory keeps the
+      // old slug reserved, and re-creating an agent at that slug fails the
+      // system-memory URN-reclaim check (#519 review). Only touch a memory whose
+      // URN still matches the derived pattern: a wizard-supplied system memory
+      // carries its own author-chosen URN we must not rewrite.
+      // Post-commit syncs of the agent's system memory (URN, then name). Both
+      // write the agent's CURRENT state, read under the memory lock — not this
+      // request's values — so two concurrent renames converge on the latest
+      // (@codex, PR #1357). See syncSystemMemoryUrn / syncSystemMemoryName.
+      const replacedUrn = predecessorUrn ?? agent.urn;
+      // Gated on the COMMITTED row's system memory, not the pre-read (@copilot,
+      // PR #1357): for a first attach, or a rename racing one, the snapshot has
+      // no systemMemoryId and every sync was skipped.
+      const committedSystemMemoryId = published?.systemMemoryId ?? agent.systemMemoryId;
+      if (committedSystemMemoryId && newUrn !== undefined && newUrn !== replacedUrn) {
+        await syncSystemMemoryUrn(ctx.db, {
+          agentId: agent.id,
+          systemMemoryId: committedSystemMemoryId,
+          oldAgentUrn: replacedUrn,
+          actor: ctx.userId ?? ctx.clientId ?? null,
+        }).catch((err) => {
+          console.warn('[updateAgent] system memory URN sync failed:', err);
+        });
+      }
+      if (committedSystemMemoryId && name !== undefined) {
+        await syncSystemMemoryName(ctx.db, {
+          agentId: agent.id,
+          systemMemoryId: committedSystemMemoryId,
+          actor: ctx.userId ?? ctx.clientId ?? null,
+        }).catch((err) => {
+          console.warn('[updateAgent] system memory sync failed:', err);
+        });
+      }
+
+      return published!;
     },
 
     deleteAgent: async (_: unknown, { ref }: { ref: string }, ctx: Context) => {

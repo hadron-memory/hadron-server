@@ -3,8 +3,9 @@
  *
  * These are deliberately resolver-level concurrency tests: two callers keep
  * the same Node.revision, one commits, and the stale caller then reaches the
- * real transactional write core. The refusal must leave the winner's live
- * state, revision and history untouched.
+ * real transactional write core. An ordinary stale-writer refusal leaves the
+ * winner's live state, revision and history untouched. A refusal that first
+ * discovers raw drift commits only that drift's reconciliation (#1454).
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { GraphQLError } from 'graphql';
@@ -156,7 +157,7 @@ describe('GraphQL expectedRevision (#937)', () => {
     expect(await db.nodeRevision.count({ where: { nodeId: node.id } })).toBe(1);
   });
 
-  it('refuses a pre-drift baseline and rolls the reconciliation back with the refusal', async () => {
+  it('refuses a pre-drift baseline, commits drift, and permits a fresh guarded retry', async () => {
     const node = await seed('occ:drift');
     await db.node.update({ where: { id: node.id }, data: { content: 'raw drift' } });
 
@@ -166,9 +167,26 @@ describe('GraphQL expectedRevision (#937)', () => {
 
     expect(await db.node.findUniqueOrThrow({ where: { id: node.id } })).toMatchObject({
       content: 'raw drift',
-      revSeq: 1,
+      revSeq: 2,
     });
-    expect(await db.nodeRevision.count({ where: { nodeId: node.id } })).toBe(0);
+    let history = await db.nodeRevision.findMany({ where: { nodeId: node.id }, orderBy: { revNo: 'asc' } });
+    expect(history.map((revision) => revision.revNo)).toEqual([1]);
+    expect(history[0]).toMatchObject({ content: 'raw drift', editedBy: null });
+    expect(history[0]!.revLabel).toMatch(/Reconciled state changed outside a revisioned writer/);
+
+    await expect(
+      update('updateNode', { id: node.id, expectedRevision: 1, content: 'must not overwrite drift' }),
+    ).rejects.toSatisfy(isConflict);
+    expect(await db.nodeRevision.count({ where: { nodeId: node.id } })).toBe(1);
+
+    await update('updateNode', { id: node.id, expectedRevision: 2, content: 'edit after fresh read' });
+    expect(await db.node.findUniqueOrThrow({ where: { id: node.id } })).toMatchObject({
+      content: 'edit after fresh read',
+      revSeq: 3,
+    });
+    history = await db.nodeRevision.findMany({ where: { nodeId: node.id }, orderBy: { revNo: 'asc' } });
+    expect(history.map((revision) => revision.revNo)).toEqual([1, 2]);
+    expect(history[1]!.content).toBe('raw drift');
   });
 
   it('refuses a stale guard even when the requested value is already current', async () => {

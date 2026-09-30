@@ -60,7 +60,7 @@ beforeEach(async () => {
     data: {
       id: generateId(), organizationId: org.id, urn: `${org.urn}:backend`,
       name: 'Backend', visibility: 'ORGANIZATION',
-      personaRole: 'backend-engineer', personaPrompt: PERSONA_TEMPLATE,
+      personaRole: 'backend-engineer', systemPrompt: PERSONA_TEMPLATE,
     },
   });
   app = await db.app.create({
@@ -113,6 +113,30 @@ describe('#1015 — hadron_get_worker re-fetches the boot briefing', () => {
     // The briefing itself, with the template placeholders bound.
     expect(out).toContain('You are Iris, the backend-engineer on this team.');
     expect(out).toContain('Boot briefing');
+    // #1090: the receipt stamps THIS rendering — composition time plus the
+    // role Agent's generic updatedAt, both from the one agent read that
+    // supplied the template. No per-override mtime exists, so it says so.
+    expect(out).toMatch(/rendered at: \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/);
+    expect(out).toMatch(/role Agent updated at: \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/);
+    expect(out).toContain('no per-override mtime is tracked');
+  });
+
+  it('reports a null role-Agent updatedAt honestly instead of inventing a stamp (#1090)', async () => {
+    const nullStampAgent = await db.agent.create({
+      data: {
+        id: generateId(), organizationId: org.id, urn: `${org.urn}:null-stamp`,
+        name: 'Null stamp', visibility: 'ORGANIZATION',
+        personaRole: 'archivist', systemPrompt: 'You are {{name}}, the {{role}}.',
+        updatedAt: null,
+      },
+    });
+    await db.worker.create({
+      data: { id: generateId(), appId: app.id, agentId: nullStampAgent.id, name: 'Stale', slug: 'stale', role: 'archivist' },
+    });
+    const out = await createTestableMcpServer(hybridAuth()).callToolText('hadron_get_worker', { workerRef: 'Stale' });
+    expect(out).toContain('You are Stale, the archivist.');
+    expect(out).toContain('role Agent updated at: not recorded');
+    expect(out).toMatch(/rendered at: \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/);
   });
 
   it('resolves a name case-insensitively, the way a human types it', async () => {
@@ -181,7 +205,7 @@ describe('#1015 — hadron_get_worker re-fetches the boot briefing', () => {
 
     await db.agent.update({
       where: { id: agent.id },
-      data: { personaPrompt: 'You are {{name}}. The team ships on Fridays.' },
+      data: { systemPrompt: 'You are {{name}}. The team ships on Fridays.' },
     });
 
     const after = await srv.callToolText('hadron_get_worker', { workerRef: 'Iris' });
@@ -381,7 +405,7 @@ describe('#1015 — hadron_get_worker re-fetches the boot briefing', () => {
   });
 
   it('says so plainly when there is no briefing to give', async () => {
-    await db.agent.update({ where: { id: agent.id }, data: { personaPrompt: null } });
+    await db.agent.update({ where: { id: agent.id }, data: { systemPrompt: null } });
     await worker('Bare', 'bare');
     const out = await createTestableMcpServer(hybridAuth()).callToolText('hadron_get_worker', {
       workerRef: 'Bare',
@@ -590,7 +614,7 @@ describe('#1010 — a casting\'s individuality is amendable', () => {
   });
 
   it('does not touch a sibling casting of the same role agent', async () => {
-    // The whole reason the role agent's shared personaPrompt cannot hold this.
+    // The whole reason the role agent's shared systemPrompt cannot hold this.
     await worker('Iris', 'iris');
     const fred = await worker('Fred', 'fred');
     await createTestableMcpServer(hybridAuth()).callToolText('hadron_update_worker', {

@@ -8,6 +8,8 @@ import {
   createDbAppAgent,
 } from '../../../test/helpers.js';
 import { resolvers, type Context } from './resolvers.js';
+import { buildSchema } from 'graphql';
+import { typeDefs } from './typeDefs.js';
 
 // Prevent git writes
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
@@ -397,164 +399,75 @@ describe('Mutation.moveNode access control (#564 sourceRef/targetUrn)', () => {
 // Mutation: replaceSubtree
 // ---------------------------------------------------------------------------
 
-describe('Mutation.replaceSubtree access control', () => {
-  it('App with write access can replace', async () => {
-    const count = await resolvers.Mutation.replaceSubtree(
-      null,
-      {
-        ownerRepo: 'org-a/repo',
-        memoryId: graphA.id,
-        nodes: [
-          { memoryId: graphA.id, loc: 'org-a.repo.replaced', name: 'replaced' },
-        ],
-        edges: [],
-      },
-      ctx({ appId: appContributor.id }),
-    );
-    expect(count).toBe(1);
+describe('Mutation.replaceSubtree retirement (#454)', () => {
+  it('advertises the retirement to introspection and codegen via @deprecated', () => {
+    // The field is kept so old clients get a typed refusal rather than an
+    // unknown-field error; @deprecated is what tells codegen and GraphQL
+    // tooling not to build new callers against it.
+    const field = buildSchema(typeDefs).getMutationType()!.getFields().replaceSubtree;
+    expect(field).toBeDefined();
+    expect(field.deprecationReason).toContain('REPLACE_SUBTREE_RETIRED');
   });
 
-  // 007-entity-id-or-urn: replaceSubtree accepts memoryId as ID or URN.
-  // (The nested NodeInput.memoryId is data shape for the new nodes —
-  // also used via the same helper internally — but the top-level
-  // memoryId is the convention's gating arg.)
-  it('accepts a URN as the top-level memoryId input', async () => {
-    const memoryRow = await db.memory.findUniqueOrThrow({
-      where: { id: graphA.id },
-      select: { urn: true },
+  it('refuses authorized ID and URN calls before any node, edge, or history change', async () => {
+    const ownerRepo = 'org-a/repo';
+    const ordinary = await createDbNode(db, {
+      memoryId: graphA.id, loc: 'bulk.ordinary', name: 'ordinary', ownerRepo, content: 'original',
     });
-    const count = await resolvers.Mutation.replaceSubtree(
-      null,
-      {
-        ownerRepo: 'org-a/repo',
-        memoryId: memoryRow.urn,
-        nodes: [
-          { memoryId: graphA.id, loc: 'org-a.repo.replaced-by-urn', name: 'replaced-by-urn' },
-        ],
-        edges: [],
-      },
-      ctx({ appId: appContributor.id }),
-    );
-    expect(count).toBe(1);
-  });
-
-  it('App without write access is rejected', async () => {
-    await expect(
-      resolvers.Mutation.replaceSubtree(
-        null,
-        {
-          ownerRepo: 'org-a/repo',
-          memoryId: graphA.id,
-          nodes: [],
-          edges: [],
-        },
-        ctx({ appId: appReader.id }),
-      ),
-    ).rejects.toThrow('Forbidden');
-  });
-
-  it('App cannot replace subtree in other memory', async () => {
-    await expect(
-      resolvers.Mutation.replaceSubtree(
-        null,
-        {
-          ownerRepo: 'org-b/repo',
-          memoryId: graphB.id,
-          nodes: [],
-          edges: [],
-        },
-        ctx({ appId: appContributor.id }),
-      ),
-      // #1381: an inaccessible memory answers as a missing one.
-    ).rejects.toThrow(`MEMORY_NOT_FOUND: ${graphB.id}`);
-  });
-
-  // Regression: edge target resolution must be scoped to the memory. `loc` is
-  // unique only within a memory, so a same-loc node in another memory must not
-  // be picked up as the target.
-  it('does not resolve an edge target from a different memory on a loc collision', async () => {
-    // A node with this loc exists only in graph B.
-    await createDbNode(db, { memoryId: graphB.id, loc: 'collision.loc', name: 'in-b' });
-
-    await resolvers.Mutation.replaceSubtree(
-      null,
-      {
-        ownerRepo: 'org-a/repo',
-        memoryId: graphA.id,
-        nodes: [{ memoryId: graphA.id, loc: 'collision.src', name: 'src' }],
-        // Target loc exists only in graph B — must NOT resolve cross-memory.
-        edges: [{ sourceLoc: 'collision.src', targetLoc: 'collision.loc', name: 'rel' }],
-      },
-      ctx({ appId: appContributor.id }),
-    );
-
-    const edges = await db.edge.findMany({ where: { memoryId: graphA.id } });
-    expect(edges).toHaveLength(0);
-    // And graph B's node must not have gained an incoming edge either.
-    const bEdges = await db.edge.findMany({ where: { memoryId: graphB.id } });
-    expect(bEdges).toHaveLength(0);
-  });
-
-  // Regression: NodeInput carries non-column fields (edges/reason)
-  // that Prisma would reject if spread into node.create.
-  it('strips non-column NodeInput fields before creating nodes', async () => {
-    const count = await resolvers.Mutation.replaceSubtree(
-      null,
-      {
-        ownerRepo: 'org-a/repo',
-        memoryId: graphA.id,
-        nodes: [
-          {
-            memoryId: graphA.id,
-            loc: 'org-a.repo.with-extras',
-            name: 'with-extras',
-            tags: ['alpha', 'beta'],
-            edges: [{ targetId: 'ignored', name: 'x' }],
-            reason: 'import',
-          },
-        ],
-        edges: [],
-      },
-      ctx({ appId: appContributor.id }),
-    );
-    expect(count).toBe(1);
-    const created = await db.node.findFirstOrThrow({
-      where: { memoryId: graphA.id, loc: 'org-a.repo.with-extras' },
+    const runnable = await createDbNode(db, {
+      memoryId: graphA.id, loc: 'bulk.runnable', name: 'runnable', ownerRepo, isRunnable: true,
     });
-    expect(created.tags).toEqual(['alpha', 'beta']);
-  });
-
-  it('refuses bulk hard-delete when it would cascade an edge from another memory', async () => {
-    const source = await createDbNode(db, {
-      memoryId: graphA.id,
-      loc: 'chats.dead.messages.orphan',
-      ownerRepo: 'org-a/repo',
+    const governed = await createDbNode(db, {
+      memoryId: graphA.id, loc: 'bulk.governed', name: 'governed', ownerRepo,
     });
-    const target = await createDbNode(db, {
-      memoryId: graphB.id,
-      loc: 'external.target',
-      ownerRepo: 'org-b/repo',
-    });
+    await db.node.update({ where: { id: governed.id }, data: { role: 'task' } });
     const edge = await db.edge.create({
       data: {
-        memoryId: graphA.id,
-        sourceId: source.id,
-        targetId: target.id,
-        loc: 'chats.dead.messages.orphan:rel:external.target',
-        name: 'rel',
+        memoryId: graphA.id, sourceId: ordinary.id, targetId: runnable.id,
+        loc: 'bulk.ordinary:rel:bulk.runnable', name: 'rel',
       },
     });
+    const history = await db.nodeRevision.create({
+      data: {
+        nodeId: ordinary.id, memoryId: graphA.id, loc: ordinary.loc, name: ordinary.name,
+        tags: [], changes: [], revNo: 1, content: 'original',
+      },
+    });
+    const before = await db.node.findMany({ where: { memoryId: graphA.id }, orderBy: { loc: 'asc' } });
+    const { urn } = await db.memory.findUniqueOrThrow({ where: { id: graphA.id }, select: { urn: true } });
 
-    await expect(
-      resolvers.Mutation.replaceSubtree(
+    for (const memoryId of [graphA.id, urn]) {
+      await expect(resolvers.Mutation.replaceSubtree(
         null,
-        { ownerRepo: 'org-a/repo', memoryId: graphA.id, nodes: [], edges: [] },
+        {
+          ownerRepo, memoryId,
+          nodes: [
+            { memoryId: graphA.id, loc: 'bulk.new', name: 'new', content: 'replacement' },
+            { memoryId: graphA.id, loc: 'bulk.new-runnable', name: 'new-runnable', isRunnable: true },
+            { memoryId: graphA.id, loc: 'bulk.new-governed', name: 'new-governed', role: 'task' },
+          ],
+          edges: [{ sourceLoc: 'bulk.new', targetLoc: 'bulk.new-runnable', name: 'rel' }],
+        },
         ctx({ appId: appContributor.id }),
-      ),
-    ).rejects.toMatchObject({ extensions: { code: 'CROSS_MEMORY_EDGES', count: 1 } });
+      )).rejects.toMatchObject({ extensions: { code: 'REPLACE_SUBTREE_RETIRED' } });
+    }
 
-    expect(await db.node.findUnique({ where: { id: source.id } })).not.toBeNull();
-    expect(await db.edge.findUnique({ where: { id: edge.id } })).not.toBeNull();
+    expect(await db.node.findMany({ where: { memoryId: graphA.id }, orderBy: { loc: 'asc' } })).toEqual(before);
+    expect(await db.nodeRevision.findUnique({ where: { id: history.id } })).toMatchObject({ content: 'original' });
+    expect(await db.nodeRevision.count({ where: { nodeId: ordinary.id } })).toBe(1);
+    expect(await db.edge.findUnique({ where: { id: edge.id } })).toMatchObject({ sourceId: ordinary.id, targetId: runnable.id });
+    expect(await db.node.findUnique({ where: { id: governed.id } })).toMatchObject({ role: 'task' });
+  });
+
+  it('preserves write authorization and concealed-memory errors', async () => {
+    await expect(resolvers.Mutation.replaceSubtree(
+      null, { ownerRepo: 'org-a/repo', memoryId: graphA.id, nodes: [], edges: [] },
+      ctx({ appId: appReader.id }),
+    )).rejects.toThrow('Forbidden');
+    await expect(resolvers.Mutation.replaceSubtree(
+      null, { ownerRepo: 'org-b/repo', memoryId: graphB.id, nodes: [], edges: [] },
+      ctx({ appId: appContributor.id }),
+    )).rejects.toThrow(`MEMORY_NOT_FOUND: ${graphB.id}`);
   });
 });
 
