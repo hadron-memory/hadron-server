@@ -4962,6 +4962,33 @@ export const typeDefs = `#graphql
     reason: String
   }
 
+  "Only text fields a spec bulk edit may change."
+  enum SpecTextField { content abstract }
+
+  """
+  Replace text in explicit nodes of one DRAFT spec corpus. A dry run returns
+  plan; apply must present that exact plan and refuses if any selected row,
+  protection, match, or corpus state changed. Minted corpora are never edited
+  through this door. Generic replacement keeps its governed-node protections.
+  """
+  input SpecSearchReplaceInput {
+    memoryRef: ID!
+    nodeIds: [ID!]!
+    oldText: String!
+    newText: String!
+    fields: [SpecTextField!]!
+    caseInsensitive: Boolean = false
+    regex: Boolean = false
+    "Literal mode only; matches the CLI's default ASCII word-boundary behavior."
+    wordBoundary: Boolean = true
+    dryRun: Boolean = false
+    "Required for apply; copied from the exact dry-run response."
+    expectedPlan: String
+    "Refuse the entire apply when more nodes would change."
+    maxNodesChanged: Int
+    reason: String
+  }
+
   type SearchReplaceFieldResult {
     field: NodeTextField!
     matches: Int!
@@ -4984,6 +5011,16 @@ export const typeDefs = `#graphql
     protectedAddress: Int!
   }
 
+  enum SearchReplaceSkipReason { OTHER_GOVERNED_KIND PROTECTED_ADDRESS }
+
+  type SearchReplaceSkip {
+    nodeId: ID!
+    loc: String!
+    memoryId: ID!
+    reason: SearchReplaceSkipReason!
+    governedKinds: [String!]!
+  }
+
   type SearchReplaceResult {
     "Unique authorized nodes selected before bulk-write protections are applied."
     nodesSelected: Int!
@@ -5003,6 +5040,10 @@ export const typeDefs = `#graphql
     dryRun: Boolean!
     "Per-node breakdown; only nodes with at least one match are listed."
     results: [SearchReplaceNodeResult!]!
+    "Opaque exact preview fingerprint on the spec door; null on the generic door."
+    plan: String
+    "Node-addressed protected selections on the spec door; null on the generic door."
+    skips: [SearchReplaceSkip!]
   }
 
   input EdgeInput {
@@ -7434,6 +7475,9 @@ export const typeDefs = `#graphql
     staleness, and re-embedding. Supports dryRun preview.
     """
     searchReplaceInNodes(input: SearchReplaceInNodesInput!): SearchReplaceResult!
+
+    "Governed bulk replacement inside one draft spec corpus, with exact preview binding."
+    searchReplaceInSpecNodes(input: SpecSearchReplaceInput!): SearchReplaceResult!
 
     """
     Delete a node identified by 'nodeRef' (a node ID or fully-qualified URN;

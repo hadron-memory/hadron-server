@@ -27,6 +27,8 @@ export const MAX_REGEX_SOURCE = 1000;
 export interface ReplacerOptions {
   caseInsensitive?: boolean;
   regex?: boolean;
+  /** Literal mode only: match at ASCII word boundaries, as `hadron spec replace` does. */
+  wordBoundary?: boolean;
 }
 
 /**
@@ -73,7 +75,10 @@ export function buildReplacer(
   let re: RegExp;
 
   if (literal) {
-    re = new RegExp(escapeRegExp(oldText), flags);
+    const bounded = opts.wordBoundary
+      ? `${/^[A-Za-z0-9_]/.test(oldText) ? '\\b' : ''}${escapeRegExp(oldText)}${/[A-Za-z0-9_]$/.test(oldText) ? '\\b' : ''}`
+      : escapeRegExp(oldText);
+    re = new RegExp(bounded, flags);
   } else {
     if (oldText.length > MAX_REGEX_SOURCE) {
       throw new SearchReplaceInvalidPatternError(
