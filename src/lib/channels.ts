@@ -9,8 +9,9 @@
  * transaction (eager one-to-one is load-bearing — D-006's adversarial round;
  * a root committed before its row is an unprotected address for the length
  * of the gap, Codex/Copilot on PR #1165), under the ancestor lock the chat
- * surface already takes, with create-OR-RESTORE on the `@@unique([loc,
- * memoryId])` tombstone (a soft-deleted root still occupies the address).
+ * surface already takes. A soft-deleted root is restored at its unique
+ * address; tombstoned structural rows are archived before a fresh row takes
+ * theirs (#1463).
  *
  * Under that lock the core also decides the two things only the lock can
  * decide: that no other Channel's address overlaps this one (the resolver's
@@ -48,6 +49,7 @@ import { ensureInstallRegisterRows } from './registerInstall.js';
 import { resolveAppTeamSpaceMemoryIds } from '../api/graphql/schema/resolvers.helpers.js';
 import { pendingAtForRevival } from '../services/embedding/enqueue.js';
 import { assertNoMintedSpecRemoval } from './mintedSpecPermanence.js';
+import { archivedTombstoneLoc } from './tombstoneArchive.js';
 
 /** The name of every App's default Channel — the row `chats:team` became. */
 export const DEFAULT_CHANNEL_NAME = 'team';
@@ -305,9 +307,49 @@ async function resetReusedChannel(
 }
 
 /**
+ * A structural tombstone belongs to the previous Channel occupancy. Move it
+ * and every incident edge out of the reusable address while preserving their
+ * IDs and history on tombstones. This runs under the host memory's edge
+ * endpoint key and the structural address lock. Every edge writer naming this
+ * node needs that host key, including one whose source lives elsewhere.
+ */
+async function archiveChannelStructuralRow(
+  tx: Prisma.TransactionClient,
+  row: { id: string; loc: string; memoryId: string },
+  deletedBy: string | null,
+): Promise<void> {
+  // Re-stamping a protected spec would make its permanent citation name a
+  // blank successor. The old row is still a tombstone, but its address is
+  // part of the minted contract (#1475); check before moving it (#1519).
+  await assertNoMintedSpecRemoval(tx, row.memoryId, [row.id], 'reuse the Channel address over');
+  // Re-stamp first: the row UPDATE waits for any earlier edge insert's FK
+  // KEY SHARE lock. A fresh READ COMMITTED edge listing then includes it.
+  await tx.node.update({
+    where: { id: row.id },
+    data: { loc: archivedTombstoneLoc(row.loc, row.id), embeddingPendingAt: null },
+  });
+  await tx.nodeEmbedding.deleteMany({ where: { nodeId: row.id } });
+  const edges = await tx.edge.findMany({
+    where: { OR: [{ sourceId: row.id }, { targetId: row.id }] },
+    select: { id: true, loc: true, deletedAt: true },
+  });
+  const now = new Date();
+  for (const edge of edges) {
+    await tx.edge.update({
+      where: { id: edge.id },
+      data: {
+        loc: archivedTombstoneLoc(edge.loc, edge.id),
+        ...(edge.deletedAt ? {} : { deletedAt: now, deletedBy }),
+      },
+    });
+  }
+}
+
+/**
  * Create a Channel WITH its chat root — parents, root, `:messages` child, the
- * row and the App default link — in one transaction under the ancestor lock,
- * create-or-restore per node.
+ * row and the App default link — in one transaction under the ancestor lock.
+ * A tombstoned root is restored; tombstoned ancestors and :messages rows are
+ * archived and replaced so prior history cannot attach to the new Channel.
  *
  * Refuses a host memory that does not exist (`NOT_FOUND`), an address
  * overlapping another Channel's (`LOC_OVERLAPS_CHANNEL`), and a live occupant
@@ -375,6 +417,7 @@ export async function ensureChannelWithRoot(
       loc: string,
       create: () => Promise<{ id: string }>,
       accept: (row: { nodeType: string; deletedAt: Date | null }) => boolean = () => true,
+      structural = false,
     ): Promise<string> => {
       const existing = await tx.node.findUnique({
         where: { loc_memoryId: { loc, memoryId: args.memoryId } },
@@ -388,6 +431,12 @@ export async function ensureChannelWithRoot(
           );
         }
         if (existing.deletedAt) {
+          if (structural) {
+            await archiveChannelStructuralRow(tx, {
+              id: existing.id, loc, memoryId: args.memoryId,
+            }, args.createdBy);
+            return (await create()).id;
+          }
           // Channel creation may also revive tombstoned ancestor and
           // :messages nodes; their vectors belong to the old incarnation.
           await tx.nodeEmbedding.deleteMany({ where: { nodeId: existing.id } });
@@ -406,9 +455,12 @@ export async function ensureChannelWithRoot(
     for (const parent of ancestorLocs(args.loc)) {
       await restoreOrCreate(parent, () =>
         tx.node.create({
-          data: { id: generateId(), memoryId: args.memoryId, loc: parent, name: parent.split(':').pop()!, nodeType: 'record', createdBy: args.createdBy },
+          data: { id: generateId(), memoryId: args.memoryId, loc: parent, name: parent.split(':').pop()!, nodeType: 'record', createdBy: args.createdBy,
+            embeddingPendingAt: live.vectorIndexEnabled ? new Date() : null },
           select: { id: true },
         }),
+        () => true,
+        true,
       );
     }
     // #1226 — was the root a TOMBSTONE before this call? A resurrection means
@@ -443,15 +495,17 @@ export async function ensureChannelWithRoot(
     );
     await restoreOrCreate(messagesLoc, () =>
       tx.node.create({
-        data: { id: generateId(), memoryId: args.memoryId, loc: messagesLoc, name: 'messages', nodeType: 'record', createdBy: args.createdBy },
+        data: { id: generateId(), memoryId: args.memoryId, loc: messagesLoc, name: 'messages', nodeType: 'record', createdBy: args.createdBy,
+          embeddingPendingAt: live.vectorIndexEnabled ? new Date() : null },
         select: { id: true },
       }),
+      () => true,
+      true,
     );
     // #1226 — a Channel created at a tombstoned address starts CLEAN.
     //
-    // `@@unique([loc, memoryId])` carries no `deletedAt`, so a tombstone holds
-    // the loc and `restoreOrCreate` above MUST resurrect rather than insert —
-    // the schema forces it. Resurrecting the root lifts the transitive hide
+    // `@@unique([loc, memoryId])` carries no `deletedAt`, so the root tombstone
+    // holds the loc and is restored in place. Resurrecting it lifts the transitive hide
     // that `cor:dmo:010:04` relies on ("removing a parent transitively hides
     // its children"), and the previous Channel's messages — never tombstoned
     // by `deleteChannel` — become visible again under a new Channel.

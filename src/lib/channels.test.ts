@@ -29,6 +29,7 @@ import { encryptNodeFields, getMemoryEncryptionInfo } from './nodeCrypto.js';
 import { generateDataKey } from './crypto.js';
 import { sessionKeyCache } from './sessionKeyCache.js';
 import { createTestableMcpServer } from '../mcp/server.js';
+import { deriveEdgeLoc } from './edgeLoc.js';
 
 const Q = resolvers.Query as any;
 const M = resolvers.Mutation as any;
@@ -291,9 +292,8 @@ describe('protection (S4)', () => {
       });
     }
 
-    // Recreate at the SAME address. The schema forces a resurrection —
-    // `@@unique([loc, memoryId])` has no `deletedAt`, so the tombstone holds
-    // the loc and no second node can be inserted there.
+    // Recreate at the SAME address. Structural tombstones move aside so the
+    // new Channel does not inherit their old identities or history (#1463).
     const { channel: reborn } = await ensureChannelWithRoot(db, {
       memoryId: appMem.id, loc: 'chats:team', name: 'team', createdBy: admin.id,
     });
@@ -320,11 +320,17 @@ describe('protection (S4)', () => {
     expect(cleanRoot.tokens).toBeNull();
     expect(await db.nodeEmbedding.count({ where: { nodeId: cleanRoot.id } })).toBe(0);
     for (const container of staleContainers) {
-      const restored = await db.node.findUniqueOrThrow({ where: { id: container.id } });
-      expect(restored.deletedAt).toBeNull();
-      expect(restored.embeddingPendingAt).not.toBeNull();
-      expect(restored.embeddingPendingAt).not.toEqual(oldContainerPendingAt);
+      const archived = await db.node.findUniqueOrThrow({ where: { id: container.id } });
+      expect(archived.deletedAt).not.toBeNull();
+      expect(archived.loc).toContain(`__deleted-${container.id}`);
+      expect(archived.embeddingPendingAt).toBeNull();
       expect(await db.nodeEmbedding.count({ where: { nodeId: container.id } })).toBe(0);
+      const fresh = await db.node.findUniqueOrThrow({
+        where: { loc_memoryId: { loc: archived.loc.replace(`__deleted-${container.id}`, ''), memoryId: appMem.id } },
+      });
+      expect(fresh.id).not.toBe(container.id);
+      expect(fresh.embeddingPendingAt).not.toBeNull();
+      expect(fresh.embeddingPendingAt).not.toEqual(oldContainerPendingAt);
     }
     expect((await db.edge.findUniqueOrThrow({ where: { id: oldReply.id } })).deletedAt).not.toBeNull();
 
@@ -344,6 +350,190 @@ describe('protection (S4)', () => {
     expect(posted.seq).toBeGreaterThan(2);
     const after = await Q.channelMessages(null, { channelRef: reborn.id }, ctx(admin.id));
     expect(after.items.map((m: { body: string }) => m.body)).toEqual(['fresh']);
+  });
+
+  it('archives structural history and incident edges when a deleted Channel address is reused (#1463)', async () => {
+    const channels = await Q.channels(null, { filter: { memoryRef: appMem.urn } }, ctx(admin.id));
+    const channel = channels.items.find((item: { loc: string }) => item.loc === 'chats:team')!;
+    const oldRoot = (await db.channel.findUniqueOrThrow({ where: { id: channel.id } })).chatRootNodeId;
+    const oldRows = await db.node.findMany({
+      where: { memoryId: appMem.id, loc: { in: ['chats', 'chats:team:messages'] } },
+      orderBy: { loc: 'asc' },
+    });
+    expect(oldRows).toHaveLength(2);
+    const foreign = await db.memory.create({ data: {
+      id: generateId(), organizationId: org.id, urn: `${org.urn}:foreign`, name: 'foreign', class: 'knowledge',
+    } });
+    const localPeer = await db.node.create({ data: {
+      id: generateId(), memoryId: appMem.id, loc: 'peer', name: 'peer',
+    } });
+    const foreignPeer = await db.node.create({ data: {
+      id: generateId(), memoryId: foreign.id, loc: 'foreign-peer', name: 'foreign-peer',
+    } });
+    const oldEdges = [];
+    for (const row of oldRows) {
+      await db.node.update({ where: { id: row.id }, data: { content: `old ${row.loc}` } });
+      await db.nodeRevision.create({ data: {
+        id: generateId(), nodeId: row.id, memoryId: appMem.id,
+        loc: row.loc, name: row.name, content: `revision ${row.loc}`, tags: [], changes: [],
+      } });
+      const peer = row.loc === 'chats' ? foreignPeer : localPeer;
+      const edge = await db.edge.create({ data: {
+        id: generateId(), memoryId: peer.memoryId, sourceId: peer.id, targetId: row.id,
+        loc: deriveEdgeLoc(peer.loc, 'points-to', row.loc), name: 'points-to',
+      } });
+      oldEdges.push(edge);
+    }
+    await M.deleteChannel({}, { ref: channel.id }, ctx(admin.id));
+    await db.node.updateMany({
+      where: { id: { in: oldRows.map((row) => row.id) } },
+      data: { deletedAt: new Date(), deletedBy: admin.id },
+    });
+
+    const { rootId } = await ensureChannelWithRoot(db, {
+      memoryId: appMem.id, loc: 'chats:team', name: 'team', createdBy: admin.id,
+    });
+    expect(rootId).toBe(oldRoot); // root history is a separate policy question
+    for (const old of oldRows) {
+      const archived = await db.node.findUniqueOrThrow({ where: { id: old.id } });
+      const fresh = await db.node.findUniqueOrThrow({
+        where: { loc_memoryId: { loc: old.loc, memoryId: appMem.id } },
+      });
+      expect(archived.loc).toBe(`${old.loc}__deleted-${old.id}`);
+      expect(archived.deletedAt).not.toBeNull();
+      expect(archived.content).toBe(`old ${old.loc}`);
+      expect(fresh.id).not.toBe(old.id);
+      expect(fresh.content).toBeNull();
+      expect(await db.nodeRevision.count({ where: { nodeId: old.id } })).toBe(1);
+      expect(await db.nodeRevision.count({ where: { nodeId: fresh.id } })).toBe(0);
+      expect(await Q.node(null, { ref: old.id }, ctx(admin.id))).toBeNull();
+      expect((await Q.node(null, { ref: old.loc, memoryRef: appMem.urn }, ctx(admin.id))).id).toBe(fresh.id);
+
+      const oldEdge = oldEdges.find((edge) => edge.targetId === old.id)!;
+      const archivedEdge = await db.edge.findUniqueOrThrow({ where: { id: oldEdge.id } });
+      expect(archivedEdge.deletedAt).not.toBeNull();
+      expect(archivedEdge.loc).toBe(`${oldEdge.loc}__deleted-${oldEdge.id}`);
+      const peer = old.loc === 'chats' ? foreignPeer : localPeer;
+      const newEdge = await db.edge.create({ data: {
+        id: generateId(), memoryId: peer.memoryId, sourceId: peer.id, targetId: fresh.id,
+        loc: oldEdge.loc, name: 'points-to',
+      } });
+      expect(newEdge.targetId).toBe(fresh.id);
+    }
+  });
+
+  it('refuses to archive a structural spec tombstoned after its corpus was minted', async () => {
+    const channels = await Q.channels(null, { filter: { memoryRef: appMem.urn } }, ctx(admin.id));
+    const channel = channels.items.find((item: { loc: string }) => item.loc === 'chats:team')!;
+    const oldMessages = await db.node.findUniqueOrThrow({
+      where: { loc_memoryId: { loc: 'chats:team:messages', memoryId: appMem.id } },
+    });
+    await M.deleteChannel({}, { ref: channel.id }, ctx(admin.id));
+    await db.memory.update({ where: { id: appMem.id }, data: {
+      corpusMintedAt: new Date('2026-09-01T00:00:00Z'),
+    } });
+    await db.node.update({ where: { id: oldMessages.id }, data: {
+      tags: ['spec'], deletedAt: new Date('2026-09-02T00:00:00Z'),
+    } });
+
+    await expect(ensureChannelWithRoot(db, {
+      memoryId: appMem.id, loc: 'chats:team', name: 'team', createdBy: admin.id,
+    })).rejects.toMatchObject({ extensions: { code: 'SPEC_MINTED_PERMANENT' } });
+    expect(await db.node.findUniqueOrThrow({ where: { id: oldMessages.id } })).toMatchObject({
+      loc: oldMessages.loc, deletedAt: expect.any(Date), tags: ['spec'],
+    });
+    expect((await db.channel.findUniqueOrThrow({ where: { id: channel.id } })).deletedAt).not.toBeNull();
+  });
+
+  it('can archive a structural spec tombstoned before its corpus was minted', async () => {
+    const channels = await Q.channels(null, { filter: { memoryRef: appMem.urn } }, ctx(admin.id));
+    const channel = channels.items.find((item: { loc: string }) => item.loc === 'chats:team')!;
+    const oldMessages = await db.node.findUniqueOrThrow({
+      where: { loc_memoryId: { loc: 'chats:team:messages', memoryId: appMem.id } },
+    });
+    await M.deleteChannel({}, { ref: channel.id }, ctx(admin.id));
+    await db.node.update({ where: { id: oldMessages.id }, data: {
+      tags: ['spec'], deletedAt: new Date('2026-08-31T00:00:00Z'),
+    } });
+    await db.memory.update({ where: { id: appMem.id }, data: {
+      corpusMintedAt: new Date('2026-09-01T00:00:00Z'),
+    } });
+
+    await ensureChannelWithRoot(db, {
+      memoryId: appMem.id, loc: 'chats:team', name: 'team', createdBy: admin.id,
+    });
+    const archived = await db.node.findUniqueOrThrow({ where: { id: oldMessages.id } });
+    expect(archived.loc).toBe(`${oldMessages.loc}__deleted-${oldMessages.id}`);
+    expect(archived.deletedAt).not.toBeNull();
+    const fresh = await db.node.findUniqueOrThrow({
+      where: { loc_memoryId: { loc: oldMessages.loc, memoryId: appMem.id } },
+    });
+    expect(fresh.id).not.toBe(oldMessages.id);
+    expect(fresh.tags).toEqual([]);
+  });
+
+  it('refuses an edge update resolved before structural archive instead of reclaiming its address (#1463)', async () => {
+    const channels = await Q.channels(null, { filter: { memoryRef: appMem.urn } }, ctx(admin.id));
+    const channel = channels.items.find((item: { loc: string }) => item.loc === 'chats:team')!;
+    const oldContainer = await db.node.findUniqueOrThrow({
+      where: { loc_memoryId: { loc: 'chats:team:messages', memoryId: appMem.id } },
+    });
+    const peer = await db.node.create({ data: {
+      id: generateId(), memoryId: appMem.id, loc: 'update-peer', name: 'update-peer',
+    } });
+    const oldEdge = await db.edge.create({ data: {
+      id: generateId(), memoryId: appMem.id, sourceId: peer.id, targetId: oldContainer.id,
+      loc: deriveEdgeLoc(peer.loc, 'points-to', oldContainer.loc), name: 'points-to',
+    } });
+    await M.deleteChannel({}, { ref: channel.id }, ctx(admin.id));
+    await db.node.update({ where: { id: oldContainer.id }, data: { deletedAt: new Date() } });
+    const transaction = db.$transaction.bind(db);
+    let reused = false;
+    const raceDb = new Proxy(db, {
+      get(target, key) {
+        if (key === '$transaction') {
+          return async (work: Parameters<typeof transaction>[0]) => {
+            if (!reused) {
+              reused = true;
+              await ensureChannelWithRoot(db, {
+                memoryId: appMem.id, loc: 'chats:team', name: 'team', createdBy: admin.id,
+              });
+            }
+            return transaction(work as never);
+          };
+        }
+        return Reflect.get(target, key);
+      },
+    });
+
+    await expect(M.updateEdge({}, {
+      edgeRef: oldEdge.id, loc: oldEdge.loc,
+    }, { ...ctx(admin.id), db: raceDb })).rejects.toMatchObject({
+      extensions: { code: 'EDGE_NOT_FOUND' },
+    });
+    expect(reused).toBe(true);
+    const archived = await db.edge.findUniqueOrThrow({ where: { id: oldEdge.id } });
+    expect(archived.deletedAt).not.toBeNull();
+    expect(archived.loc).toBe(`${oldEdge.loc}__deleted-${oldEdge.id}`);
+  });
+
+  it('keeps a live ancestor shared with another Channel when one address is reused (#1463)', async () => {
+    const ancestor = await db.node.findUniqueOrThrow({
+      where: { loc_memoryId: { loc: 'chats', memoryId: appMem.id } },
+    });
+    const { channel: sibling } = await ensureChannelWithRoot(db, {
+      memoryId: appMem.id, loc: 'chats:other', name: 'other', createdBy: admin.id,
+    });
+    const channels = await Q.channels(null, { filter: { memoryRef: appMem.urn } }, ctx(admin.id));
+    const team = channels.items.find((item: { loc: string }) => item.loc === 'chats:team')!;
+    await M.deleteChannel({}, { ref: team.id }, ctx(admin.id));
+    await ensureChannelWithRoot(db, {
+      memoryId: appMem.id, loc: 'chats:team', name: 'team', createdBy: admin.id,
+    });
+    const stillShared = await db.node.findUniqueOrThrow({ where: { id: ancestor.id } });
+    expect(stillShared.loc).toBe('chats');
+    expect(stillShared.deletedAt).toBeNull();
+    expect((await db.channel.findUniqueOrThrow({ where: { id: sibling.id } })).deletedAt).toBeNull();
   });
 
   it('the default team-chat convenience path uses the SAME clean-reuse core (#1226)', async () => {
