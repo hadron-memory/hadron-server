@@ -252,6 +252,30 @@ describe('deleted edges are not references (@codex P2 on #1453)', () => {
 });
 
 describe('former URNs use live-address precedence (@codex P2 on #1453)', () => {
+  it('does not claim a corpus row when a hidden current holder owns the former published address', async () => {
+    const formerUrn = draft.urn;
+    await resolvers.Mutation.updateMemory(null, { id: draft.id, urn: 'specs-draft-renamed' } as never, as());
+    const holder = await db.memory.create({ data: {
+      id: generateId(), urn: formerUrn, name: 'Private published holder',
+      class: 'private', organizationId: org.id, userId: outsider.id,
+    } });
+    const hiddenNode = await db.node.create({ data: {
+      id: generateId(), memoryId: holder.id, loc: 'pas:010', name: 'Private published node',
+    } });
+    await db.node.update({ where: { id: other.id }, data: {
+      content: `Published: hrn:node:${formerUrn}:pas:010.`,
+    } });
+
+    await expect(resolveNodeRefForCaller(as(), `hrn:node:${formerUrn}:pas:010`))
+      .resolves.toEqual({ id: hiddenNode.id });
+    const backlinks = await resolvers.Query.specBacklinks(null, { memoryRef: draft.id, loc: 'pas:010' }, as());
+    expect(backlinks.filter((ref) => ref.kind === 'URN' && ref.sourceLoc === 'pas:020')).toEqual([]);
+    const plan = await specCorpusRenumberMutations.renumberSpec(
+      null, { memoryRef: draft.id, fromLoc: 'pas:010', toLoc: 'pas:040', dryRun: true }, as(),
+    );
+    expect(plan.rewrites.filter((row) => row.nodeId === other.id)).toEqual([]);
+  });
+
   it('leaves a reference through a reused former URN to the memory that now holds it, and still counts one it cannot resolve there', async () => {
     const oldUrn = draft.urn;
     await resolvers.Mutation.updateMemory(null, { id: draft.id, urn: 'specs-draft-renamed' } as never, as());

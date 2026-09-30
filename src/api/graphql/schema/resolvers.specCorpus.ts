@@ -184,6 +184,8 @@ interface ScannableCorpus {
   currentUrnHistorical: string[];
   /** Historical MEMORY holders, including deleted ones, used only to translate NODE alias keys. */
   historicalTranslators: Map<string, string[]>;
+  /** Live holders of a former published URN, retained before the read gate for direct-address precedence. */
+  publishedHolders: Map<string, string[]>;
 }
 
 /**
@@ -221,6 +223,7 @@ async function loadScannableCorpus(ctx: Context, memoryRef: string): Promise<Sca
   const urns = [memory.urn, ...aliases.map((a) => a.urn)].map((u) => u.replace(/^(?:hrn|urn):mem(?:ory)?:/i, ''));
   const former = urns.filter((u) => u !== memory.urn);
   const shadowed = new Map<string, string[]>();
+  const publishedHolders = new Map<string, string[]>();
   const historicalTranslators = new Map<string, string[]>();
   const addTranslator = (urn: string, memoryId: string) =>
     historicalTranslators.set(urn, [...new Set([...(historicalTranslators.get(urn) ?? []), memoryId])]);
@@ -230,7 +233,10 @@ async function loadScannableCorpus(ctx: Context, memoryRef: string): Promise<Sca
     for (const h of await ctx.db.memory.findMany({
       where: { urn: { in: former }, deletedAt: null, id: { not: id } },
       select: { id: true, urn: true },
-    })) claim(h.urn, h.id);
+    })) {
+      claim(h.urn, h.id);
+      publishedHolders.set(h.urn, [...(publishedHolders.get(h.urn) ?? []), h.id]);
+    }
     // (@codex P2, #1453) Other live memories that held it in the past.
     const historical = await ctx.db.urnAlias.findMany({
       where: { entityType: 'MEMORY', urn: { in: former }, entityId: { not: id } },
@@ -277,6 +283,7 @@ async function loadScannableCorpus(ctx: Context, memoryRef: string): Promise<Sca
     id, urn: memory.urn, pattern: corpusReferencePattern(urns), shadowed,
     currentUrnHistorical: await readable(currentUrnHistorical),
     historicalTranslators,
+    publishedHolders,
   };
 }
 
@@ -299,6 +306,7 @@ async function referenceAcceptor(
     for (const memoryId of [
       ...claimantsOf(ref),
       ...(corpus.historicalTranslators.get(ref.memoryUrn) ?? []),
+      ...(corpus.publishedHolders.get(ref.memoryUrn) ?? []),
       corpus.id,
     ]) {
       lookup.set(`${memoryId}\u0000${ref.targetLoc}`, { memoryId, loc: ref.targetLoc });
@@ -403,6 +411,12 @@ async function referenceAcceptor(
     if (ref.memoryUrn === corpus.urn && taken.has(`${corpus.id}\u0000${ref.targetLoc}`)) return ref.targetLoc;
     if (claimantsOf(ref).some((m) => taken.has(`${m}\u0000${ref.targetLoc}`))) return null;
     const address = `${ref.memoryUrn}:${ref.targetLoc}`;
+    // A live node in the memory that currently owns a former published URN
+    // wins before historical rows and aliases. If those would otherwise point
+    // to a readable corpus node, declining the citation matches node(ref:)
+    // without exposing a lone hidden published holder's node.
+    if (corpus.publishedHolders.get(ref.memoryUrn)?.some((m) => taken.has(`${m}\u0000${ref.targetLoc}`))
+      && (taken.has(`${corpus.id}\u0000${ref.targetLoc}`) || typeof aliasResolved.get(address) === 'string')) return null;
     return aliasResolved.has(address) ? aliasResolved.get(address)! : ref.targetLoc;
   };
 }
