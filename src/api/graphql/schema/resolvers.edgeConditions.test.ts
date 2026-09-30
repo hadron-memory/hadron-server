@@ -47,6 +47,10 @@ function mockDb() {
     // before any DB call; canReadMemory still reads the memory row to learn
     // its class, so stub a non-personal memory (ADMIN bypass → read allowed).
     memory: {
+      findMany: vi.fn().mockResolvedValue([{
+        id: 'mem-1', class: 'knowledge', userId: null, userMemoryOfAgentId: null,
+        appId: 'app-1', ownerUserId: null,
+      }]),
       findUnique: vi.fn().mockResolvedValue({
         class: 'knowledge',
         userId: null,
@@ -77,6 +81,7 @@ function mockDb() {
       findUnique: vi.fn().mockResolvedValue({ memoryId: 'mem-1' }),
     },
     $executeRaw: vi.fn().mockResolvedValue(1),
+    $queryRaw: vi.fn().mockResolvedValue([{ id: 'mem-1' }]),
     $transaction: vi.fn(),
   };
   client.$transaction.mockImplementation(async (fn: (tx: typeof client) => unknown) => fn(client));

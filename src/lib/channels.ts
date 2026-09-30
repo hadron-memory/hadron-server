@@ -316,6 +316,8 @@ export async function ensureChannelWithRoot(
     asDefaultOfAppId?: string | null;
     /** For the root's `description`. */
     hostLabel?: string;
+    /** Recheck an API caller's write grant after transfer serialization. */
+    authorizeLockedHost?: (tx: Prisma.TransactionClient) => Promise<void>;
   },
 ): Promise<{ channel: ChannelRow; rootId: string }> {
   const memory = await db.memory.findFirst({
@@ -344,12 +346,17 @@ export async function ensureChannelWithRoot(
     // and a concurrent Channel create on an overlapping address both queue
     // here and re-check after the grant.
     await lockMemoryForChannelChange(tx, args.memoryId);
+    // Transfer takes FOR UPDATE on this row. FOR SHARE fences it through
+    // Channel create/restore while allowing concurrent posts to take the FK's
+    // KEY SHARE lock after their path lock (FOR UPDATE deadlocks with that path).
+    await tx.$queryRaw`SELECT id FROM memories WHERE id = ${args.memoryId} FOR SHARE`;
     // Re-checked under that lock: the preflight above ran outside it.
     const live = await tx.memory.findFirst({
       where: { id: args.memoryId, deletedAt: null },
       select: { id: true, vectorIndexEnabled: true },
     });
     if (!live) throw new GraphQLError('Host memory not found.', { extensions: { code: 'NOT_FOUND' } });
+    await args.authorizeLockedHost?.(tx);
     await lockAncestorsForCreateMany(tx, args.memoryId, [args.loc, messagesLoc], { owns: 'channel' });
     await assertNoChannelOverlap(tx, args.memoryId, args.loc);
     const restoreOrCreate = async (

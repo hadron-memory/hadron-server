@@ -437,7 +437,7 @@ describe('#1349 — the agent\'s AUDIENCE, not just the memory\'s tenancy (@code
 });
 
 describe('#1349 — the checks are serialized with the writes they depend on (@codex, PR #1357)', () => {
-  it('an org TRANSFER revokes the links that belonged to the source tenant', async () => {
+  it('the legacy owner-change route refuses a transfer with source-tenant links', async () => {
     // The revocation used to fire only on a visibility change, and classified
     // tenancy from the PRE-update row — so a transfer left the source tenant's
     // links looking same-tenant against the org the memory had just left.
@@ -468,12 +468,12 @@ describe('#1349 — the checks are serialized with the writes they depend on (@c
     // Transfer to the other org. Visibility is NOT supplied — the trigger the
     // first version of this sweep missed entirely.
     const moved = await gql(moverKey, `mutation($id: ID!, $o: ID!) { updateMemory(id: $id, organizationId: $o) { id } }`, { id: moving.id, o: dstOrg.id });
-    expect(moved.errors, JSON.stringify(moved.errors)).toBeUndefined();
-    expect(await readsContent(appKey, 'moving')).toBeNull();
-    expect((await db.agentMemoryItem.findFirstOrThrow({ where: { agentId } })).deletedAt).not.toBeNull();
+    expect(code(moved)).toBe('USE_TRANSFER_MEMORY_OWNERSHIP');
+    expect(await readsContent(appKey, 'moving')).toBe('MOVING SECRET');
+    expect((await db.agentMemoryItem.findFirstOrThrow({ where: { agentId } })).deletedAt).toBeNull();
   });
 
-  it('transferring a PUBLIC memory revokes the now-foreign WRITABLE link but keeps foreign reads', async () => {
+  it('the legacy route preserves PUBLIC memory links when transfer is refused', async () => {
     // PUBLIC justifies a cross-tenant READ and nothing more. A PUBLIC memory
     // carrying a same-tenant read-write item and then transferred left that
     // item live and writable from what had become a foreign tenant, because
@@ -504,20 +504,18 @@ describe('#1349 — the checks are serialized with the writes they depend on (@c
 
     // Transfer. The memory stays PUBLIC; only its tenant changes.
     const moved = await gql(moverKey, `mutation($id: ID!, $o: ID!) { updateMemory(id: $id, organizationId: $o) { id visibility } }`, { id: pub.id, o: dstOrg.id });
-    expect(moved.errors, JSON.stringify(moved.errors)).toBeUndefined();
-    expect(moved.data!.updateMemory.visibility).toBe('PUBLIC');
+    expect(code(moved)).toBe('USE_TRANSFER_MEMORY_OWNERSHIP');
+    expect((await db.memory.findUniqueOrThrow({ where: { id: pub.id } })).visibility).toBe('PUBLIC');
 
-    // The writable link is now foreign and must be gone…
-    expect((await db.agentMemoryItem.findFirstOrThrow({ where: { agentId: writer } })).deletedAt).not.toBeNull();
-    expect(await writes(writerKey, 'pubmove')).toBe(false);
-    // …while the foreign READ link is still justified by PUBLIC.
+    expect((await db.agentMemoryItem.findFirstOrThrow({ where: { agentId: writer } })).deletedAt).toBeNull();
+    expect(await writes(writerKey, 'pubmove')).toBe(true);
     expect((await db.agentMemoryItem.findFirstOrThrow({ where: { agentId: reader } })).deletedAt).toBeNull();
     // Non-null rather than the original bytes: the legitimate write above
     // changed them, and what matters here is that the read link survived.
     expect(await readsContent(readerKey, 'pubmove')).not.toBeNull();
   });
 
-  it('transfer clears a legacy knowledge writer on a destination PUBLIC agent', async () => {
+  it('the legacy route refuses a transfer with a destination PUBLIC agent link', async () => {
     const memoryClass = 'knowledge';
     const srcOrg = await db.organization.create({ data: { id: generateId(), name: `legacy-src-${memoryClass}`, urn: `legacy-src-${memoryClass}-${suffix}` } });
     const dstOrg = await db.organization.create({ data: { id: generateId(), name: `legacy-dst-${memoryClass}`, urn: `legacy-dst-${memoryClass}-${suffix}` } });
@@ -538,8 +536,8 @@ describe('#1349 — the checks are serialized with the writes they depend on (@c
     });
 
     const moved = await gql(moverKey, `mutation($id: ID!, $o: ID!) { updateMemory(id: $id, organizationId: $o) { id visibility } }`, { id: moving.id, o: dstOrg.id });
-    expect(moved.errors, JSON.stringify(moved.errors)).toBeUndefined();
-    expect((await db.agentMemoryItem.findUniqueOrThrow({ where: { id: link.id } })).deletedAt).not.toBeNull();
+    expect(code(moved)).toBe('USE_TRANSFER_MEMORY_OWNERSHIP');
+    expect((await db.agentMemoryItem.findUniqueOrThrow({ where: { id: link.id } })).deletedAt).toBeNull();
   });
 
   it('a GROUP memory cannot transfer into a tenant whose PUBLIC agent links it', async () => {
@@ -558,7 +556,7 @@ describe('#1349 — the checks are serialized with the writes they depend on (@c
     await db.agent.update({ where: { id: agentId }, data: { visibility: 'PUBLIC' } });
     await db.agentMemoryItem.create({ data: { id: generateId(), agentId, memoryId: group.id, role: 'read-write' } });
     const moved = await gql(moverKey, `mutation($id: ID!, $o: ID!) { updateMemory(id: $id, organizationId: $o) { id } }`, { id: group.id, o: dst.id });
-    expect(moved.errors?.[0]?.message ?? '').toMatch(/knowledge of the PUBLIC agent/);
+    expect(code(moved)).toBe('USE_TRANSFER_MEMORY_OWNERSHIP');
     expect((await db.memory.findUniqueOrThrow({ where: { id: group.id } })).organizationId).toBe(src.id);
   });
 
@@ -1354,34 +1352,34 @@ describe('#1357 round 3 (@codex / @copilot, PR #1357)', () => {
     return { orgC, m };
   };
 
-  it('transfer + narrow in ONE call: a PUBLIC agent in the DESTINATION org blocks it', async () => {
+  it('the legacy route refuses a combined transfer and narrowing with a destination PUBLIC link', async () => {
     const { orgC, m } = await mkTransferFixture('xfer-dest');
     const destAgent = await db.agent.create({
       data: { id: generateId(), organizationId: orgC.id, name: 'destpub', urn: `c-xfer-dest-${suffix}:destpub`, visibility: 'PUBLIC' } as never,
     });
     await db.agentMemoryItem.create({ data: { id: generateId(), agentId: destAgent.id, memoryId: m.id, role: 'read' } });
     const r = await gql(key.victim!, TRANSFER, { id: m.id, o: orgC.id });
-    expect(r.errors?.[0]?.message ?? '').toMatch(/knowledge of the PUBLIC agent/);
+    expect(code(r)).toBe('USE_TRANSFER_MEMORY_OWNERSHIP');
     const after = await db.memory.findUniqueOrThrow({ where: { id: m.id } });
     expect({ org: after.organizationId, vis: after.visibility }).toEqual({ org: victimOrgId, vis: 'PUBLIC' });
   });
 
-  it('transfer + narrow in ONE call: a PUBLIC agent in the SOURCE org does not block it, and its link is revoked', async () => {
+  it('the legacy route preserves source PUBLIC links when a combined transfer is refused', async () => {
     const { orgC, m } = await mkTransferFixture('xfer-src');
     const srcAgent = await db.agent.create({
       data: { id: generateId(), organizationId: victimOrgId, name: 'srcpub', urn: `victim-${suffix}:srcpub`, visibility: 'PUBLIC' } as never,
     });
     await db.agentMemoryItem.create({ data: { id: generateId(), agentId: srcAgent.id, memoryId: m.id, role: 'read' } });
     const r = await gql(key.victim!, TRANSFER, { id: m.id, o: orgC.id });
-    expect(r.errors, JSON.stringify(r.errors)).toBeUndefined();
+    expect(code(r)).toBe('USE_TRANSFER_MEMORY_OWNERSHIP');
     const after = await db.memory.findUniqueOrThrow({ where: { id: m.id } });
-    expect({ org: after.organizationId, vis: after.visibility }).toEqual({ org: orgC.id, vis: 'ORGANIZATION' });
-    expect((await db.agentMemoryItem.findFirstOrThrow({ where: { agentId: srcAgent.id } })).deletedAt).not.toBeNull();
+    expect({ org: after.organizationId, vis: after.visibility }).toEqual({ org: victimOrgId, vis: 'PUBLIC' });
+    expect((await db.agentMemoryItem.findFirstOrThrow({ where: { agentId: srcAgent.id } })).deletedAt).toBeNull();
   });
 });
 
 describe('#1357 round 4 (@codex / @copilot, PR #1357)', () => {
-  it('a TRANSFER alone into a tenant whose PUBLIC agent links the memory is refused (congruence)', async () => {
+  it('the legacy route refuses a transfer with a destination PUBLIC link', async () => {
     const orgC = await db.organization.create({ data: { id: generateId(), name: 'c-xonly', urn: `c-xonly-${suffix}` } });
     const victim = await db.user.findFirstOrThrow({ where: { handle: `victim-${suffix}` } });
     await db.orgMember.create({ data: { organizationId: orgC.id, userId: victim.id, role: 'OWNER' } });
@@ -1394,7 +1392,7 @@ describe('#1357 round 4 (@codex / @copilot, PR #1357)', () => {
     // A pre-existing cross-tenant link — after the transfer it would be same-tenant and survive the sweep.
     await db.agentMemoryItem.create({ data: { id: generateId(), agentId: destPub.id, memoryId: m.id, role: 'read' } });
     const r = await gql(key.victim!, `mutation($id: ID!, $o: ID!) { updateMemory(id: $id, organizationId: $o) { id } }`, { id: m.id, o: orgC.id });
-    expect(r.errors?.[0]?.message ?? '').toMatch(/knowledge of the PUBLIC agent/);
+    expect(code(r)).toBe('USE_TRANSFER_MEMORY_OWNERSHIP');
     expect((await db.memory.findUniqueOrThrow({ where: { id: m.id } })).organizationId).toBe(victimOrgId);
   });
 
@@ -1484,8 +1482,8 @@ describe('#1357 round 4 — re-role TOCTOU', () => {
   });
 });
 
-describe('#1357 round 4 — the in-transaction congruence check on a transfer', () => {
-  it('a destination PUBLIC-agent link committing after the fail-fast is caught under the lock', async () => {
+describe('#1357 round 4 — retired owner-change route', () => {
+  it('rejects an owner change before opening the former transfer transaction', async () => {
     const orgC = await db.organization.create({ data: { id: generateId(), name: 'c-late', urn: `c-late-${suffix}` } });
     const victim = await db.user.findFirstOrThrow({ where: { handle: `victim-${suffix}` } });
     await db.orgMember.create({ data: { organizationId: orgC.id, userId: victim.id, role: 'OWNER' } });
@@ -1495,9 +1493,8 @@ describe('#1357 round 4 — the in-transaction congruence check on a transfer', 
     const destPub = await db.agent.create({
       data: { id: generateId(), organizationId: orgC.id, name: 'latepub', urn: `c-late-${suffix}:pub`, visibility: 'PUBLIC' } as never,
     });
-    // The fail-fast runs before any transaction and sees NO link. The link
-    // commits between it and the deciding transaction — the window only the
-    // in-transaction check covers (it was masked by the fail-fast otherwise).
+    // The former transaction hook must never run: owner changes now use the
+    // dedicated transfer mutation and its dependent blocker.
     const real = db.$transaction.bind(db) as (...a: unknown[]) => Promise<unknown>;
     let staged = false;
     const spy = vi.spyOn(db, '$transaction').mockImplementation((async (...a: unknown[]) => {
@@ -1509,8 +1506,8 @@ describe('#1357 round 4 — the in-transaction congruence check on a transfer', 
     }) as never);
     try {
       const r = await gql(key.victim!, `mutation($id: ID!, $o: ID!) { updateMemory(id: $id, organizationId: $o) { id } }`, { id: m.id, o: orgC.id });
-      expect(staged, 'the link was staged inside the window').toBe(true);
-      expect(r.errors?.[0]?.message ?? '').toMatch(/knowledge of the PUBLIC agent/);
+      expect(staged).toBe(false);
+      expect(code(r)).toBe('USE_TRANSFER_MEMORY_OWNERSHIP');
       expect((await db.memory.findUniqueOrThrow({ where: { id: m.id } })).organizationId).toBe(victimOrgId);
     } finally {
       spy.mockRestore();
@@ -1925,16 +1922,15 @@ describe('#1357 Claude review — licensed cross-org App knowledge survives a vi
     expect(restored.errors, JSON.stringify(restored.errors)).toBeUndefined();
     expect((await gql(appKey, READ, { r: node.id })).data?.node?.content).toBe('CROSS ORG RUNBOOK');
 
-    // A transfer to the Agent's org makes the link same-tenant with the Agent,
-    // but the memory is no longer in its App's tenant. The old App must lose it.
+    // The old owner-change route must refuse this App-scoped memory. The
+    // dedicated transfer path reports the App scope as a dependent blocker.
     const moved = await gql(bothKey,
       `mutation($id: ID!, $org: ID!) { updateMemory(id: $id, organizationId: $org) { id } }`,
       { id: memoryId, org: victimOrgId });
-    expect(moved.errors, JSON.stringify(moved.errors)).toBeUndefined();
-    expect((await db.agentMemoryItem.findFirstOrThrow({ where: { agentId: agent.id, memoryId } })).deletedAt).not.toBeNull();
-    expect((await gql(appKey, READ, { r: node.id })).data?.node).toBeNull();
-    const staleAttach = await gql(bothKey, ATTACH, { g: agent.id, m: memoryId, r: 'read' });
-    expect(code(staleAttach)).toBe('MEMORY_NOT_FOUND');
+    expect(code(moved)).toBe('USE_TRANSFER_MEMORY_OWNERSHIP');
+    expect((await db.memory.findUniqueOrThrow({ where: { id: memoryId } })).organizationId).toBe(attackerOrgId);
+    expect((await db.agentMemoryItem.findFirstOrThrow({ where: { agentId: agent.id, memoryId } })).deletedAt).toBeNull();
+    expect((await gql(appKey, READ, { r: node.id })).data?.node?.content).toBe('CROSS ORG RUNBOOK');
   });
 
   it('keeps a user-owned App link only while its foreign Agent subscription is live', async () => {

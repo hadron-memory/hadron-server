@@ -13,6 +13,7 @@ import { sessionKeyCache } from '../../lib/sessionKeyCache.js';
 import { generateDataKey, parseDataKey } from '../../lib/crypto.js';
 import { isEncryptedStorageKey } from '../../lib/asset/encryption.js';
 import { completeAssetUpload } from './completeAssetUpload.js';
+import { resolvers } from '../../api/graphql/schema/resolvers.js';
 
 const headObjectMock = vi.hoisted(() => vi.fn());
 const deleteObjectMock = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
@@ -82,6 +83,9 @@ beforeEach(async () => {
   user = await db.user.create({
     data: { githubId: 9501, githubUsername: 'asset-complete-user', roles: ['READER'] },
   });
+  await db.orgMember.create({
+    data: { organizationId: org.id, userId: user.id, role: 'CONTRIBUTOR' },
+  });
   memory = await db.memory.create({
     data: {
       class: 'knowledge',
@@ -132,6 +136,30 @@ describe('completeAssetUpload', () => {
     expect(asset.storageKey).toBe(entry.storageKey); // plaintext (memory is unencrypted)
     expect(asset.scanStatus).toBe('PENDING');
     expect(asset.uploadedBy).toBe(user.id);
+  });
+
+  it('refuses an upload ticket when its Memory transfers before the final insert', async () => {
+    const entry = buildEntry();
+    const nextOrg = await db.organization.create({ data: {
+      id: generateId(), name: 'Next asset owner', urn: 'next-asset-owner',
+    } });
+    const transferAdmin = await db.user.create({ data: {
+      id: generateId(), githubId: 9502, githubUsername: 'asset-transfer-admin', roles: ['ADMIN'],
+    } });
+    headObjectMock.mockResolvedValueOnce({
+      exists: true, contentLength: entry.expectedSizeBytes, contentType: entry.mimeType,
+    });
+    copyObjectMock.mockImplementationOnce(async () => {
+      await resolvers.Mutation.transferMemoryOwnership(null, {
+        memoryRef: memory.id, orgRef: nextOrg.id,
+      }, { db, userId: transferAdmin.id, roles: ['ADMIN'] });
+    });
+
+    await expect(completeAssetUpload(db, { userId: user.id }, { uploadId: entry.uploadId }))
+      .rejects.toMatchObject({ code: 'PERMISSION_DENIED' });
+    expect(await db.asset.count({ where: { memoryId: memory.id } })).toBe(0);
+    expect(deleteObjectMock).toHaveBeenCalledWith(entry.storageKey);
+    expect(deleteObjectMock).toHaveBeenCalledWith(entry.stagingKey);
   });
 
   it('rejects with NOT_FOUND when the upload ticket is missing or expired', async () => {

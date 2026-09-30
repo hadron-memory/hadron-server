@@ -2602,6 +2602,38 @@ export const typeDefs = `#graphql
     both
   }
 
+  enum MemoryTransferHandling {
+    CARRY
+    REFUSE
+    REMOVE
+    CREATE
+  }
+
+  type MemoryTransferDependent {
+    kind: String!
+    count: Int!
+    handling: MemoryTransferHandling!
+  }
+
+  type MemoryTransferBlocker {
+    code: String!
+    message: String!
+  }
+
+  type MemoryOwnerTransferPreview {
+    memoryId: ID!
+    oldUrn: String!
+    newUrn: String!
+    fromOwner: ID!
+    toOwner: ID!
+    currentClass: MemoryClass!
+    targetClass: MemoryClass!
+    dependents: [MemoryTransferDependent!]!
+    blockers: [MemoryTransferBlocker!]!
+    canApply: Boolean!
+    applied: Boolean!
+  }
+
   """
   A Hadron memory (git repo + branch settings).
   """
@@ -8266,6 +8298,18 @@ export const typeDefs = `#graphql
     non-encrypted memory the flag is a no-op.
     """
     updateMemory(id: ID!, name: String, urn: String, organizationId: ID, shortDescription: String, description: String, data: JSON, tags: [String!], license: String, category0: String, category1: String, category2: String, iconUrl: String, heroUrl: String, homeUrl: String, source: String, readBranch: String, writeBranch: String, visibility: MemoryVisibility, listedOnMarketplace: Boolean, vectorIndexEnabled: Boolean, embeddingSource: EmbeddingSource, acknowledgeVectorInversionRisk: Boolean, chunkTokens: Int, chunkOverlap: Int, forceFixedSize: Boolean, maxRevCount: Int, schema: JSON): Memory!
+
+    """
+    Transfer a free-standing Memory to exactly one new owner. dryRun previews
+    the new URN and dependent handling without writing; apply recomputes under
+    lock and can pin the preview with expectedNewUrn. A class change across
+    user/org ownership must be explicit. The caller needs authority on both
+    sides; unreadable source memories are concealed as not found. Group members
+    block transfer by default; resetGroupMembers explicitly revokes every old
+    membership inside the transfer transaction. A group destination then adds
+    the caller as its first owner-member.
+    """
+    transferMemoryOwnership(memoryRef: ID!, orgRef: ID, userRef: ID, targetClass: MemoryClass, expectedNewUrn: String, resetGroupMembers: Boolean = false, dryRun: Boolean = false): MemoryOwnerTransferPreview!
 
     """
     #882 — re-drive every FAILED embed in a memory (the operator recovery

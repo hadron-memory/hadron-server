@@ -38,7 +38,7 @@ import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { agentSlugFromUrn, deriveSlugFromName } from '../../../lib/urn.js';
 import { createNode } from '../../../controller/operations/createNode.js';
-import { type Context, requireOwnerOrOrgRole, MEMORY_INCLUDE, concealUnreadableDenial } from './resolvers.helpers.js';
+import { type Context, requireOwnerOrOrgRole, MEMORY_INCLUDE, concealUnreadableDenial, withoutRequestCaches } from './resolvers.helpers.js';
 
 /** App-associable memory classes (the DB CHECK forbids app_id only on system). */
 type AppMemoryClass = 'app' | 'knowledge' | 'personal' | 'private';
@@ -346,12 +346,46 @@ export const appMemoryMutations = {
       });
     }
 
-    // Set the (app, agent) pivot; keep URN/class/userId. Setting the agent
-    // satisfies chk_memory_personal_agent_id (app-scoped ⇒ agent required).
-    return ctx.db.memory.update({
-      where: { id: memory.id },
-      data: { appId: app.id, userMemoryOfAgentId: agent.id, updatedBy: ctx.userId },
-      include: MEMORY_INCLUDE,
+    // Transfer can change the owner, class and organization after the
+    // preflight checks. Recheck them under its Memory-row fence before setting
+    // the App/Agent pivot; a stale attachment must not scope the new tenant's
+    // knowledge or group memory to the former tenant's App.
+    return ctx.db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM memories WHERE id = ${memory.id} FOR NO KEY UPDATE`;
+      const current = await tx.memory.findUniqueOrThrow({
+        where: { id: memory.id },
+        select: { class: true, appId: true, userId: true, organizationId: true, deletedAt: true },
+      });
+      const txCtx = withoutRequestCaches(ctx, tx);
+      await concealUnreadableDenial(txCtx, memoryId, memoryRef, async () => {
+        if (!ctx.userId || current.deletedAt || current.userId !== ctx.userId) {
+          throw new GraphQLError('You can only attach a memory you own.', {
+            extensions: { code: 'FORBIDDEN' },
+          });
+        }
+      });
+      if (current.class !== 'personal' && current.class !== 'private') {
+        throw new GraphQLError(`Only personal/private memories can be attached to an App; this memory is class='${current.class}'.`, {
+          extensions: { code: 'UNSUPPORTED_MEMORY_CLASS' },
+        });
+      }
+      if (current.appId) {
+        throw new GraphQLError('This memory is already scoped to an App.', {
+          extensions: { code: 'MEMORY_ALREADY_APP_SCOPED' },
+        });
+      }
+      if (current.organizationId !== app.organizationId) {
+        throw new GraphQLError("The memory does not belong to this App's organization.", {
+          extensions: { code: 'ORGANIZATION_MISMATCH' },
+        });
+      }
+      // Keep URN/class/userId. Setting the agent satisfies
+      // chk_memory_personal_agent_id (app-scoped ⇒ agent required).
+      return tx.memory.update({
+        where: { id: memory.id },
+        data: { appId: app.id, userMemoryOfAgentId: agent.id, updatedBy: ctx.userId },
+        include: MEMORY_INCLUDE,
+      });
     });
   },
 };

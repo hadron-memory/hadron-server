@@ -87,6 +87,22 @@ beforeEach(async () => {
 });
 
 describe('creation', () => {
+  it('allows a concurrent node FK write while the host transfer fence is held', async () => {
+    // A post may already hold a Channel path key when it inserts its message.
+    // The host fence must conflict with transfer's FOR UPDATE, but remain
+    // compatible with that insert's FK KEY SHARE or the two paths deadlock.
+    await ensureChannelWithRoot(db, {
+      memoryId: knowledge.id, loc: 'chats:share-lock', name: 'share-lock', createdBy: admin.id,
+      authorizeLockedHost: async () => {
+        await db.node.create({ data: {
+          id: generateId(), memoryId: knowledge.id, loc: 'concurrent-fk',
+          name: 'concurrent-fk', nodeType: 'record', createdBy: admin.id,
+        } });
+      },
+    });
+    expect(await db.node.count({ where: { memoryId: knowledge.id, loc: 'concurrent-fk' } })).toBe(1);
+  });
+
   it('makes the root, its :messages child and the row together, and sets the App default', async () => {
     const { channel, rootId } = await ensureChannelWithRoot(db, {
       memoryId: appMem.id, loc: 'chats:team', name: 'team', createdBy: admin.id, asDefaultOfAppId: app.id,

@@ -139,6 +139,10 @@ export const channelMutations = {
       name,
       description: input.description ?? null,
       createdBy: ctx.userId,
+      authorizeLockedHost: (tx) => {
+        const txCtx = { ...ctx, db: tx } as Context;
+        return concealUnreadableDenial(txCtx, memoryId, memoryRef, () => requireMemoryWriteAccess(txCtx, memoryId));
+      },
     });
     return ctx.db.channel.findUniqueOrThrow({ where: { id: channel.id } });
   },

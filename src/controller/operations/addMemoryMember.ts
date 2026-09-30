@@ -63,17 +63,19 @@ export async function addMemoryMember(
     role: MemoryMemberRole;
     /** Actor identity recorded in `createdBy`. */
     actorId: string;
+    /** Resolver gate repeated after the transfer fence, before the upsert. */
+    authorizeLocked?: (tx: Prisma.TransactionClient) => Promise<void>;
   },
 ): Promise<MemoryMember> {
-  const memory = await db.memory.findUnique({
+  const preflightMemory = await db.memory.findUnique({
     where: { id: args.memoryId },
-    select: { id: true, class: true, deletedAt: true },
+    select: { class: true, deletedAt: true },
   });
-  if (!memory || memory.deletedAt) {
+  if (!preflightMemory || preflightMemory.deletedAt) {
     throw new MemoryNotFoundForMemberError(args.memoryId);
   }
-  if (memory.class !== 'group') {
-    throw new InvalidMemoryClassForMemberError(args.memoryId, memory.class);
+  if (preflightMemory.class !== 'group') {
+    throw new InvalidMemoryClassForMemberError(args.memoryId, preflightMemory.class);
   }
   // Confirm the user exists so a stale userId reference produces a
   // clear error instead of an FK-constraint failure deeper down.
@@ -86,6 +88,21 @@ export async function addMemoryMember(
   }
   return db.$transaction(
     async (tx) => {
+      // The transfer resets the old member set under Memory FOR UPDATE. Its
+      // FK wait alone does not revoke a pre-authorized insert: lock and re-run
+      // the owner gate before this transaction can create a new member.
+      await tx.$queryRaw`SELECT id FROM memories WHERE id = ${args.memoryId} FOR SHARE`;
+      await args.authorizeLocked?.(tx);
+      const memory = await tx.memory.findUnique({
+        where: { id: args.memoryId },
+        select: { class: true, deletedAt: true },
+      });
+      if (!memory || memory.deletedAt) {
+        throw new MemoryNotFoundForMemberError(args.memoryId);
+      }
+      if (memory.class !== 'group') {
+        throw new InvalidMemoryClassForMemberError(args.memoryId, memory.class);
+      }
       // FR-038: refuse to demote the sole remaining owner via the
       // idempotent upsert path. Only relevant when the requested role
       // is not `owner` — adding/keeping `owner` can never reduce the

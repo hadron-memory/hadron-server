@@ -301,15 +301,18 @@ export async function writeNodeCore(
       // narrowed: some App-session principals legitimately write a private
       // memory without record-read access. Internal callers pass no
       // concealUnreadable and keep the bare denial.
-      const authorizeWrite = () => requireMemoryWriteAccess(ctx, resolvedMemoryId);
       const conceal = opts?.concealUnreadable;
-      if (!conceal) {
-        await authorizeWrite();
-      } else if (conceal.entity === 'node') {
-        await concealUnreadableNodeDenial(ctx, resolvedMemoryId, () => nodeNotFoundError(conceal.ref), authorizeWrite);
-      } else {
-        await concealUnreadableDenial(ctx, resolvedMemoryId, conceal.ref, authorizeWrite);
-      }
+      const authorizeWrite = async (authCtx: Context) => {
+        const gate = () => requireMemoryWriteAccess(authCtx, resolvedMemoryId);
+        if (!conceal) {
+          await gate();
+        } else if (conceal.entity === 'node') {
+          await concealUnreadableNodeDenial(authCtx, resolvedMemoryId, () => nodeNotFoundError(conceal.ref), gate);
+        } else {
+          await concealUnreadableDenial(authCtx, resolvedMemoryId, conceal.ref, gate);
+        }
+      };
+      await authorizeWrite(ctx);
       // Spec 049 S4 / #1180: a protected address is written by its owning
       // operation only. Since #1201 the ONLY source is the Channel table, and
       // only a Channel's own operations pass the bypass; every node-authoring
@@ -826,12 +829,12 @@ export async function writeNodeCore(
       const inWriteTransaction = <T>(work: (tx: Prisma.TransactionClient) => Promise<T>): Promise<T> =>
         opts?.transaction ? work(opts.transaction.tx) : ctx.db.$transaction(work);
 
-      // encryptMemory flips the memory flag before its conversion scans. A
-      // writer that read the old flag above must not commit a plaintext live
-      // value or revision after that flip. Hold a shared memory-row lock until
-      // this write commits, so the flip either waits for us or we see it and
-      // refuse the stale encryption decision before any snapshot or update.
-      const assertEncryptionStateStable = async (tx: Prisma.TransactionClient) => {
+      // encryptMemory and ownership transfer both change what this writer may
+      // commit. Hold a shared memory-row lock through the write, then recheck
+      // encryption and authorization on the transaction's fresh view. The
+      // preflight gate above can precede a transfer while the transaction
+      // below follows it; request caches must not replay that old decision.
+      const assertMemoryWriteStateStable = async (tx: Prisma.TransactionClient) => {
         await tx.$queryRaw`SELECT id FROM memories WHERE id = ${input.memoryId} FOR SHARE`;
         const latest = await tx.memory.findUniqueOrThrow({
           where: { id: input.memoryId }, select: { isEncrypted: true },
@@ -841,6 +844,7 @@ export async function writeNodeCore(
             extensions: { code: 'NODE_WRITE_CONFLICT', memoryId: input.memoryId },
           });
         }
+        await authorizeWrite(withoutRequestCaches(ctx, tx));
       };
 
       // Inline edge replacement is part of the node mutation, not a follow-up
@@ -1080,7 +1084,7 @@ export async function writeNodeCore(
             const candidate = await assertTargetStillWritable(tx);
             if (!candidate) return { conflict: false, node: null };
             await tx.$queryRaw`SELECT "id" FROM "nodes" WHERE "id" = ${candidate.id} FOR UPDATE`;
-            await assertEncryptionStateStable(tx);
+            await assertMemoryWriteStateStable(tx);
             let current = await assertTargetStillWritable(tx);
             if (!current) return { conflict: false, node: null };
 
@@ -1325,7 +1329,7 @@ export async function writeNodeCore(
                 op: 'create',
               });
             }
-            await assertEncryptionStateStable(tx);
+            await assertMemoryWriteStateStable(tx);
 
             // #1183 — THE AUTHORITATIVE read. The `existing` probe far above is
             // taken before this lock, so under concurrency both callers see no
@@ -2015,6 +2019,8 @@ export const nodeMoveOps = {
               destMemoryId: crossMemory ? destMemoryId : undefined,
               editor: editorFromAuth(ctx),
               requireDraftSource,
+              authorizeLockedMemory: (memoryId) =>
+                requireMemoryWriteAccess(withoutRequestCaches(ctx, tx), memoryId),
             });
             relocated = result.moved;
             return tx.node.findUniqueOrThrow({ where: { id: source.id }, include: withEdges });
@@ -2865,6 +2871,12 @@ export const nodeMutations = {
           // authoritative re-check must serialize with Channel resurrection.
           // Memory-before-loc matches ensureChannelWithRoot's global order.
           await lockMemoryForChannelChange(tx, memoryId);
+          await tx.$queryRaw`SELECT id FROM memories WHERE id = ${memoryId} FOR SHARE`;
+          const txCtx = withoutRequestCaches(ctx, tx);
+          await concealUnreadableNodeDenial(
+            txCtx, memoryId, () => nodeNotFoundError(nodeRef),
+            () => requireMemoryWriteAccess(txCtx, memoryId),
+          );
           // This helper acquires the loc lock AND runs assertLocWritable on a
           // fresh snapshot. Keep that re-check under the memory lock: if reuse
           // won while this request waited, the now-live Channel refuses the
@@ -3115,6 +3127,23 @@ export const nodeMutations = {
             extensions: { code: 'NODE_NOT_FOUND' },
           });
         }
+        // A transfer of either endpoint Memory may have committed after
+        // preflight. Lock both in a stable order through the insert.
+        for (const memoryId of [...new Set([src.memoryId, tgt.memoryId])].sort()) {
+          await tx.$queryRaw`SELECT id FROM memories WHERE id = ${memoryId} FOR SHARE`;
+        }
+        const txCtx = withoutRequestCaches(ctx, tx);
+        if (!(await isMemoryReadableCached(txCtx, src.memoryId))) {
+          throw new GraphQLError(`Source node not found: "${sourceRef}"`, {
+            extensions: { code: 'NODE_NOT_FOUND' },
+          });
+        }
+        await requireMemoryWriteAccess(txCtx, src.memoryId);
+        if (!(await isMemoryReadableCached(txCtx, tgt.memoryId))) {
+          throw new GraphQLError(`Target node not found: "${targetRef}"`, {
+            extensions: { code: 'NODE_NOT_FOUND' },
+          });
+        }
         return tx.edge.create({
           data: {
             id: generateId(),
@@ -3239,19 +3268,29 @@ export const nodeMutations = {
         });
       }
       await requireMemoryWriteAccess(ctx, edgeMem.memoryId);
-      const updatedEdge = await ctx.db.edge.update({
-        where: { id: resolvedEdgeId },
-        data: {
-          ...(name !== undefined ? { name: name ?? null } : {}),
-          ...(loc != null && loc !== '' ? { loc } : {}),
-          ...(description !== undefined ? { description: description ?? null } : {}),
-          ...(isRunnable !== undefined ? { isRunnable: isRunnable ?? null } : {}),
-          ...(condition !== undefined ? { condition: (condition ?? null) as InputJsonValue } : {}),
-          ...(priority != null ? { priority } : {}),
-          ...(data !== undefined ? { data: data as InputJsonValue } : {}),
-          updatedBy: ctx.userId ?? ctx.clientId ?? null,
-        },
-        include: { source: true, target: true },
+      const updatedEdge = await ctx.db.$transaction(async (tx) => {
+        await tx.$queryRaw`SELECT id FROM memories WHERE id = ${edgeMem.memoryId} FOR SHARE`;
+        const txCtx = withoutRequestCaches(ctx, tx);
+        if (!(await isMemoryReadableCached(txCtx, edgeMem.memoryId))) {
+          throw new GraphQLError(`Edge not found: "${edgeRef}"`, {
+            extensions: { code: 'EDGE_NOT_FOUND', ref: edgeRef },
+          });
+        }
+        await requireMemoryWriteAccess(txCtx, edgeMem.memoryId);
+        return tx.edge.update({
+          where: { id: resolvedEdgeId },
+          data: {
+            ...(name !== undefined ? { name: name ?? null } : {}),
+            ...(loc != null && loc !== '' ? { loc } : {}),
+            ...(description !== undefined ? { description: description ?? null } : {}),
+            ...(isRunnable !== undefined ? { isRunnable: isRunnable ?? null } : {}),
+            ...(condition !== undefined ? { condition: (condition ?? null) as InputJsonValue } : {}),
+            ...(priority != null ? { priority } : {}),
+            ...(data !== undefined ? { data: data as InputJsonValue } : {}),
+            updatedBy: ctx.userId ?? ctx.clientId ?? null,
+          },
+          include: { source: true, target: true },
+        });
       });
       // #1061 — attributed to the source node, as createEdge is.
       recordNodeWrite(ctx.db, toUsageNodeRef(updatedEdge.source), ctx);
@@ -3309,7 +3348,17 @@ export const nodeMutations = {
         });
       }
       await requireMemoryWriteAccess(ctx, edgeMem.memoryId);
-      await ctx.db.edge.delete({ where: { id: resolvedEdgeId } });
+      await ctx.db.$transaction(async (tx) => {
+        await tx.$queryRaw`SELECT id FROM memories WHERE id = ${edgeMem.memoryId} FOR SHARE`;
+        const txCtx = withoutRequestCaches(ctx, tx);
+        if (!(await isMemoryReadableCached(txCtx, edgeMem.memoryId))) {
+          throw new GraphQLError(`Edge not found: "${edgeRef}"`, {
+            extensions: { code: 'EDGE_NOT_FOUND', ref: edgeRef },
+          });
+        }
+        await requireMemoryWriteAccess(txCtx, edgeMem.memoryId);
+        await tx.edge.delete({ where: { id: resolvedEdgeId } });
+      });
       // #1061 — attributed to the source node, as createEdge is.
       recordNodeWrite(ctx.db, toUsageNodeRef(edgeMem.source), ctx);
       return true;

@@ -17,6 +17,7 @@ import { decryptNodeFields, decryptNodeFieldsWithKey, encryptNodeFieldsWithKey }
 import { sessionKeyCache } from '../../../lib/sessionKeyCache.js';
 import { stageRequestMemoryKeys } from '../../../lib/memoryUnlock.js';
 import { requestKeyStorage } from '../../../lib/requestKeys.js';
+import { waitForLockWaiters } from '../../../test/lockWait.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -155,6 +156,27 @@ describe('encryptMemory — passphrase path (spec 041)', () => {
 
 describe('encryptMemory — locked conversion (#1346)', () => {
   const dataKey = Buffer.alloc(32, 7).toString('base64');
+
+  it('refuses the former owner when a transfer wins the memory row lock', async () => {
+    const destination = await db.organization.create({
+      data: { id: generateId(), name: 'Encryption receiver', urn: 'encryption-receiver' },
+    });
+    let pending: ReturnType<typeof resolvers.Mutation.encryptMemory> | undefined;
+    await db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM memories WHERE id = ${memoryId} FOR UPDATE`;
+      pending = resolvers.Mutation.encryptMemory({}, { memoryId, dataKey }, ownerCtx());
+      await waitForLockWaiters(db);
+      await tx.memory.update({ where: { id: memoryId }, data: {
+        organizationId: destination.id, userId: null, class: 'knowledge',
+      } });
+    }, { timeout: 10_000 });
+    await expect(pending!).rejects.toThrow();
+    expect(await db.memory.findUniqueOrThrow({ where: { id: memoryId } })).toMatchObject({
+      organizationId: destination.id, class: 'knowledge', isEncrypted: false, keyVerifier: null,
+    });
+    expect((await db.node.findUniqueOrThrow({ where: { id: nodeId } })).content)
+      .toBe('my secret plaintext');
+  });
 
   it('converts old plaintext history in a memory encrypted before this fix', async () => {
     await resolvers.Mutation.encryptMemory({}, { memoryId, dataKey }, ownerCtx());

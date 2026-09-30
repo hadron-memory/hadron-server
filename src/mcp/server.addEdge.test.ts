@@ -26,6 +26,7 @@ import { deriveEdgeLoc } from '../lib/edgeLoc.js';
 import type { AuthContext } from '../middleware/auth.js';
 import { generateId } from '../lib/id.js';
 import { lockMemoryForChannelChange } from '../lib/channels.js';
+import { canReadMemory, canWriteToMemory } from './access-control.js';
 
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -160,6 +161,57 @@ describe('addEdge — happy path', () => {
     } finally {
       release();
       await holder.catch(() => undefined);
+    }
+  }, 20_000);
+
+  it('refuses a former owner after its Memory transfers during the endpoint-lock wait', async () => {
+    const owner = await db.user.create({ data: {
+      id: generateId(), githubId: 9502, githubUsername: 'edge-transfer-owner',
+      handle: 'edge-transfer-owner', roles: ['READER'],
+    } });
+    const destination = await db.organization.findUniqueOrThrow({ where: { urn: 'addedge-org' } });
+    await db.orgMember.create({ data: {
+      organizationId: destination.id, userId: owner.id, role: 'ADMIN',
+    } });
+    const owned = await db.memory.create({ data: {
+      id: generateId(), ownerUserId: owner.id, userId: owner.id,
+      urn: 'edge-transfer-owner:notes', name: 'notes', class: 'private',
+    } });
+    const from = await db.node.create({ data: {
+      id: generateId(), memoryId: owned.id, loc: 'from', name: 'From',
+    } });
+    const to = await db.node.create({ data: {
+      id: generateId(), memoryId: owned.id, loc: 'to', name: 'To',
+    } });
+    const auth: AuthContext = { userId: owner.id, roles: ['READER'], clientId: `user:${owner.id}` };
+    expect(await canWriteToMemory(db, auth, owned.id)).toBe(true);
+
+    let release!: () => void;
+    let held!: () => void;
+    const mayRelease = new Promise<void>((resolve) => { release = resolve; });
+    const lockHeld = new Promise<void>((resolve) => { held = resolve; });
+    const holder = db.$transaction(async (tx) => {
+      await lockMemoryForChannelChange(tx, owned.id);
+      held();
+      await mayRelease;
+    }, { timeout: 20_000 });
+    await lockHeld;
+    const adding = addEdge({ sourceUrn: from.id, targetUrn: to.id, name: 'late', auth });
+    try {
+      await waitForChannelMemoryLockWaiter(owned.id);
+      await resolvers.Mutation.transferMemoryOwnership(null, {
+        memoryRef: owned.id, orgRef: destination.id, targetClass: 'knowledge',
+      }, { db, userId: owner.id, roles: ['READER'] });
+      expect(await canReadMemory(db, auth, owned.id)).toBe(true);
+      expect(await canWriteToMemory(db, auth, owned.id)).toBe(false);
+      release();
+      await holder;
+      await expect(adding).resolves.toEqual({ error: 'Write access denied for source memory.' });
+      expect(await db.edge.count({ where: { sourceId: from.id } })).toBe(0);
+    } finally {
+      release();
+      await holder.catch(() => undefined);
+      await adding.catch(() => undefined);
     }
   }, 20_000);
 });
