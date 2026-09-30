@@ -5,7 +5,7 @@ import { db } from '../db/client.js';
 import { cleanDb, createDbOrgAndGraph, makeTmpDir, writeFrontmatterNode, writeNodeFiles } from '../../test/helpers.js';
 import { splitGitArgv } from '../../test/gitArgv.js';
 import { GIT_TRANSPORT_GUARD } from './execGit.js';
-import { syncGraphFromGithub, updateNodeFromGitSync, GitSyncTargetMovedError, type MemoryWithOrg } from './syncGraphFromGithub.js';
+import { syncGraphFromGithub, updateNodeFromGitSync, GitSyncTargetMovedError, describeSyncOutcome, type MemoryWithOrg } from './syncGraphFromGithub.js';
 import { ensureChannelWithRoot, lockMemoryForChannelChange } from '../../lib/channels.js';
 import { generateId } from '../../lib/id.js';
 import { acquireLockSet, ancestorLocs, lockAncestorsForCreate } from '../../lib/nodeSubtreeLock.js';
@@ -1754,5 +1754,24 @@ describe('#1330 — strict sub-roles through git sync', () => {
     expect(next.heldMoves).toEqual([]);
     await noInvalidLocs();
     expect(await db.node.findUniqueOrThrow({ where: { id: aId } })).toMatchObject({ loc: 'b-old' });
+  });
+});
+
+describe('describeSyncOutcome — the on-demand sync report (#1411 review, @codex P2)', () => {
+  it('names every file the sync left unapplied', () => {
+    const report = describeSyncOutcome({
+      nodeCount: 4,
+      skippedUndeclaredRoles: [{ loc: 'bad', role: 'doc.x', strictParent: 'doc', code: 'ROLE_NOT_DECLARED' }],
+      deferredLateRows: ['late (node n1)'],
+      heldMoves: ['a-old → b-old (occupant n2)'],
+    });
+    expect(report).toContain('Synced 4 nodes.');
+    expect(report).toMatch(/Skipped 1 file\(s\), ROLE_NOT_DECLARED[^\n]*\n- bad \(role "doc\.x", strict parent "doc"\)/);
+    expect(report).toMatch(/Deferred 1 file\(s\)[^\n]*sync again[^\n]*\n- late \(node n1\)/);
+    expect(report).toMatch(/Held 1 move\(s\)[^\n]*\n- a-old → b-old \(occupant n2\)/);
+  });
+
+  it('a clean sync is one line', () => {
+    expect(describeSyncOutcome({ nodeCount: 2, skippedUndeclaredRoles: [], deferredLateRows: [], heldMoves: [] })).toBe('Synced 2 nodes.');
   });
 });

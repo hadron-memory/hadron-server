@@ -9895,7 +9895,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
       if (!memory.source) return textResult('Memory has no source repository configured.');
 
       // Import and call syncGraphFromGithub
-      const { syncGraphFromGithub, describeSkippedUndeclaredRole } = await import('../integrations/github/syncGraphFromGithub.js');
+      const { syncGraphFromGithub, describeSyncOutcome } = await import('../integrations/github/syncGraphFromGithub.js');
       const result = await syncGraphFromGithub(memory as Parameters<typeof syncGraphFromGithub>[0]);
 
       if (result.error) return textResult(`Sync failed: ${result.error}`);
@@ -9904,22 +9904,9 @@ function ageOf(at: Date, now: Date = new Date()): string {
       // webhook and startup batch-loop callers deliberately drop `writtenNodes`
       // on the floor, because an unattended sync is nobody's usage.
       recordNodeUsage(db, 'write', result.writtenNodes ?? [], auth);
-      // #1330 — a file refused by a strict parent rule is skipped, not failed;
-      // say so, or the caller reads a clean sync.
-      const refused = result.skippedUndeclaredRoles ?? [];
-      // #1411 review — a move held behind such a file is not applied either.
-      const held = result.heldMoves ?? [];
-      return textResult(
-        `Synced ${result.nodeCount ?? 0} nodes.` +
-          (refused.length > 0
-            ? `\nSkipped ${refused.length} file(s), ROLE_NOT_DECLARED (the role is not declared under a strict parent; declare it or change the file):\n` +
-              refused.map((s) => `- ${describeSkippedUndeclaredRole(s)}`).join('\n')
-            : '') +
-          (held.length > 0
-            ? `\nHeld ${held.length} move(s) whose destination is still occupied by a node this sync could not move (it lands once that node's file syncs):\n` +
-              held.map((m) => `- ${m}`).join('\n')
-            : ''),
-      );
+      // #1330 / #1411 review — refused, deferred and held files are skipped,
+      // not failed; say so, or the caller reads a clean sync.
+      return textResult(describeSyncOutcome(result));
     },
   );
 

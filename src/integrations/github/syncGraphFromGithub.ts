@@ -97,6 +97,36 @@ export function describeSkippedUndeclaredRole(s: SkippedUndeclaredRole): string 
   return `${s.loc} (role "${s.role}", strict parent "${s.strictParent}")`;
 }
 
+/**
+ * #1330 / #1411 review — the caller-facing report of an on-demand sync. Every
+ * file the sync left unapplied is named, or the caller reads a clean sync and
+ * never retries: an on-demand sync has no guaranteed follow-up (@codex P2).
+ */
+export function describeSyncOutcome(result: {
+  nodeCount?: number;
+  skippedUndeclaredRoles?: SkippedUndeclaredRole[];
+  deferredLateRows?: string[];
+  heldMoves?: string[];
+}): string {
+  const section = (items: string[] | undefined, heading: (n: number) => string): string =>
+    items && items.length > 0 ? `\n${heading(items.length)}\n${items.map((i) => `- ${i}`).join('\n')}` : '';
+  return (
+    `Synced ${result.nodeCount ?? 0} nodes.` +
+    section(
+      result.skippedUndeclaredRoles?.map(describeSkippedUndeclaredRole),
+      (n) => `Skipped ${n} file(s), ROLE_NOT_DECLARED (the role is not declared under a strict parent; declare it or change the file):`,
+    ) +
+    section(
+      result.deferredLateRows,
+      (n) => `Deferred ${n} file(s) whose node changed while this sync ran; sync again to apply them:`,
+    ) +
+    section(
+      result.heldMoves,
+      (n) => `Held ${n} move(s) whose destination is still occupied by a node this sync could not move; they land once that node's file syncs:`,
+    )
+  );
+}
+
 export class GitSyncEncryptedMemoryError extends Error {
   constructor() {
     super('Git sync cannot write an encrypted memory without its data key.');
