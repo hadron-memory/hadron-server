@@ -15,6 +15,7 @@ import { lockMemoryConfigExclusive } from '../../lib/governedRole.js';
 import { deriveEdgeLoc } from '../../lib/edgeLoc.js';
 import { waitForLockWaitersOfType } from '../../test/lockWait.js';
 import { buildNodeFrontmatter } from './nodeFrontmatter.js';
+import { pendingEdgeStableTargetKey, reconcilePendingEdgeCount } from '../../lib/pendingEdgePromotion.js';
 import { writeNodeFile } from './writeNodeToGit.js';
 
 // ---------------------------------------------------------------------------
@@ -2576,5 +2577,32 @@ describe('#1468 — git sync pruning and minted specs', () => {
     rmSync(join(repoRoot(), 'pas:010.md'));
     expect((await syncGraphFromGithub(makeGraph())).error).toBeUndefined();
     expect(await liveLocs()).toEqual(['pas:020']);
+  });
+});
+
+// ── #449: the repo-wins prune removes PendingEdges aimed at the pruned rows ──
+describe('#449 — git sync cleanup and PendingEdges aimed at pruned nodes', () => {
+  it('pruning a node removes the raw-id and stable-key rows aimed at it; a loc-keyed row stays', async () => {
+    const repo = join(mockSources, 'test-org', 'test/repo');
+    writeFrontmatterNode(join(repo, 'keep.md'), { name: 'keep' }, 'Kept.');
+    writeFrontmatterNode(join(repo, 'gone.md'), { name: 'gone' }, 'Pruned next sync.');
+    expect((await syncGraphFromGithub(makeGraph())).error).toBeUndefined();
+    const gone = await db.node.findFirstOrThrow({ where: { memoryId: dbGraphId, loc: 'gone' } });
+
+    // The rows' source lives in another memory, whose count must follow.
+    const other = await db.memory.create({
+      data: { id: generateId(), organizationId: dbOrgId, urn: 'test-org:pe-source', name: 'pe-source', class: 'knowledge' },
+    });
+    const source = await db.node.create({ data: { id: generateId(), memoryId: other.id, loc: 'src', name: 'src' } });
+    for (const targetId of [gone.id, pendingEdgeStableTargetKey(gone.id), 'gone']) {
+      await db.pendingEdge.create({ data: { id: generateId(), sourceId: source.id, targetId, name: 'cites' } });
+    }
+    await reconcilePendingEdgeCount(db, other.id);
+
+    rmSync(join(repo, 'gone.md'));
+    expect((await syncGraphFromGithub(makeGraph())).error).toBeUndefined();
+    expect(await db.node.findUnique({ where: { id: gone.id } })).toBeNull();
+    expect((await db.pendingEdge.findMany({ select: { targetId: true } })).map((p) => p.targetId)).toEqual(['gone']);
+    expect((await db.memory.findUniqueOrThrow({ where: { id: other.id } })).pendingEdgeCount).toBe(1);
   });
 });

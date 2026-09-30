@@ -33,7 +33,7 @@ import { lockMemoryForChannelChange } from '../../lib/channels.js';
 import { lockMintedSpecsIn, lockMintedSpecUnmarks } from '../../lib/mintedSpecPermanence.js';
 import { recordUrnRename } from '../../lib/urnAlias.js';
 import { safeNodeUrnV2 } from '../../lib/urnEmit.js';
-import { reconcilePendingEdgeCount } from '../../lib/pendingEdgePromotion.js';
+import { deletePendingEdgesTargetingNodes, reconcilePendingEdgeCount, reconcilePendingEdgeCounts } from '../../lib/pendingEdgePromotion.js';
 import {
   buildNodeRevisionSnapshot,
   createNodeRevision,
@@ -451,12 +451,17 @@ export const syncGraphFromGithub = async (
     ])].sort();
     const edgeEndpointMemoryIdSet = new Set(edgeEndpointMemoryIds);
 
+    // #449 — source memories whose pending-edge count the cleanup changed,
+    // reconciled after commit (the transaction holds the rulebook lock, so it
+    // must not wait on other memories' rows).
+    let pendingSourceMemories: string[] = [];
     for (;;) {
     // Every accumulator restarts with the attempt: a rolled-back attempt
     // wrote nothing, so nothing it reported is true.
     for (const acc of [pendingEmbeds, writtenNodes, skippedProtected, skippedObjectTypes, skippedUndeclaredRoles, deferredLateRows, heldMoves]) {
       acc.length = 0;
     }
+    pendingSourceMemories = [];
     try {
       await db.$transaction(async (tx: Parameters<Parameters<typeof db.$transaction>[0]>[0]) => {
       // Hold every endpoint memory key in one stable order for the ENTIRE
@@ -1144,6 +1149,10 @@ export const syncGraphFromGithub = async (
             `Git sync cleanup refused: ${crossMemoryEdges} edge(s) bridge nodes selected for hard-delete to another memory. Remove or relocate those edges explicitly first.`,
           );
         }
+        // #449 — PendingEdges aimed at the pruned rows: targetId is not a
+        // foreign key, so the row cascade never reaches them.
+        const prunedIds = (await tx.node.findMany({ where: cleanupWhere, select: { id: true } })).map((n) => n.id);
+        pendingSourceMemories = await deletePendingEdgesTargetingNodes(tx, prunedIds);
         await tx.node.deleteMany({
           // `skippedRowIds` joins the survivors for the same reason
           // `protectedRowIds` does (#1224): a file skipped for an unusable
@@ -1348,6 +1357,10 @@ export const syncGraphFromGithub = async (
       throw error;
     }
     }
+
+    await reconcilePendingEdgeCounts(db, pendingSourceMemories).catch((err) =>
+      console.warn(`[syncGraphFromGithub] "${graphName}": pending-edge count reconcile failed (the periodic repair will fix it):`, err),
+    );
 
     // 5. Record sync time and status
     await db.memory.update({

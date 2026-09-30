@@ -28,6 +28,7 @@ import { acquireLockSet } from '../../lib/nodeSubtreeLock.js';
 import { recordUrnRename } from '../../lib/urnAlias.js';
 import { safeNodeUrnV2 } from '../../lib/urnEmit.js';
 import { assertNoPlaceholdersLeaveDraft, isDraftCorpus, placeholderFillPatch } from '../../lib/specCorpus.js';
+import { deletePendingEdgesTargetingNodes, reconcilePendingEdgeCounts } from '../../lib/pendingEdgePromotion.js';
 
 /**
  * Batched, resumable execution of a memory→memory merge (spec cor:api:080).
@@ -666,13 +667,20 @@ export async function mergeMemoryGraph(
       //    folded, and only if still in the source memory, so a concurrently
       //    relocated row is never cross-memory deleted. Any edge not
       //    transferred above cascades away with the row. --
+      // #449 — PendingEdges aimed at the folded rows go with their ids:
+      // targetId is not a foreign key, so the row cascade never reaches them.
+      let pendingSourceMemories: string[] = [];
       if (foldedIds.length > 0) {
+        pendingSourceMemories = await deletePendingEdgesTargetingNodes(tx, foldedIds);
         await tx.node.deleteMany({ where: { id: { in: foldedIds }, memoryId: sourceMemoryId } });
       }
-      return { folded: foldedIds.length, moved, dropped };
+      return { folded: foldedIds.length, moved, dropped, pendingSourceMemories };
     }, BATCH_TX_OPTS);
 
     foldedCount += batch.folded;
+    await reconcilePendingEdgeCounts(db, batch.pendingSourceMemories).catch((err) =>
+      console.warn('[mergeMemories] pending-edge count reconcile failed (the periodic repair will fix it):', err),
+    );
     edgesMovedCount += batch.moved;
     edgesDroppedCount += batch.dropped;
   }

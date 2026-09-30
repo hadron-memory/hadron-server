@@ -71,6 +71,45 @@ export async function reconcileAllPendingEdgeCounts(db: PrismaClient): Promise<v
   `;
 }
 
+/**
+ * Delete the PendingEdges aimed at nodes a hard delete is about to erase
+ * (#449). `targetId` is not a foreign key, so the row cascade never reaches
+ * them, and a node-keyed row names its target in one of two forms: the raw
+ * node id (git sync parks a frontmatter id that does not resolve yet) or the
+ * stable `@node-id:` key (clone, promotion retries). Both are removed.
+ * Loc-keyed rows are left alone on purpose: they wait for an ADDRESS, not for
+ * the erased node, and a later node at that loc legitimately fulfils them.
+ *
+ * Run inside the hard delete's transaction, before or after the row delete.
+ * Returns the source memories whose `pendingEdgeCount` the removal changed;
+ * reconcile them after commit (`reconcilePendingEdgeCounts`) rather than here,
+ * so the delete never takes other memories' rows mid-transaction.
+ */
+export async function deletePendingEdgesTargetingNodes(
+  tx: Prisma.TransactionClient,
+  nodeIds: readonly string[],
+): Promise<string[]> {
+  if (nodeIds.length === 0) return [];
+  const targets = [...new Set(nodeIds)].flatMap((id) => [id, pendingEdgeStableTargetKey(id)]);
+  const removed = await tx.$queryRaw<Array<{ memory_id: string }>>`
+    WITH gone AS (
+      DELETE FROM pending_edges WHERE target_id = ANY(${targets}::text[])
+      RETURNING source_id
+    )
+    SELECT DISTINCT n.memory_id FROM gone JOIN nodes AS n ON n.id = gone.source_id`;
+  return removed.map((r) => r.memory_id);
+}
+
+/** Recompute `pendingEdgeCount` for each memory (deduplicated); best-effort callers catch. */
+export async function reconcilePendingEdgeCounts(
+  db: PrismaClient | Prisma.TransactionClient,
+  memoryIds: readonly string[],
+): Promise<void> {
+  for (const memoryId of [...new Set(memoryIds)].sort()) {
+    await reconcilePendingEdgeCount(db, memoryId);
+  }
+}
+
 async function consumePendingEdge(
   tx: Prisma.TransactionClient,
   pending: Pick<PendingEdge, 'id' | 'sourceId' | 'targetId'>,
