@@ -605,6 +605,12 @@ export const syncGraphFromGithub = async (
       // legitimate cross-repo references.
       const locToRowId = new Map<string, string>();
       const fileIdToRowId = new Map<string, string>();
+      // #1411 review (@codex P2) — frontmatter ids of loc-keyed files this run
+      // did NOT apply, with no row an edge could safely target. An edge
+      // aimed at one waits for the sync that applies the file: resolving it
+      // raw would point at a foreign memory's node (a foreign id), or park a
+      // spurious PendingEdge (an unknown id).
+      const unappliedFileIds = new Set<string>();
 
       for (const node of fsGraph.nodes) {
         const loc = node.loc!;
@@ -817,8 +823,27 @@ export const syncGraphFromGithub = async (
           const existingAtLoc = await tx.node.findUnique({
             where: { loc_memoryId: { loc, memoryId: graph.id } },
           });
-          if (isLateRow(existingAtLoc) && defer(existingAtLoc!)) continue;
-          if (await refusesRole(existingAtLoc)) continue;
+          // A skipped loc-keyed file still decides where edges aimed at its
+          // frontmatter id land (#1411 review, @codex P2). A refused file's
+          // row is locked and survives the sync, so it is the target, as a
+          // successful sync would have made it. A deferred file's row arrived
+          // after the scan and must not be touched under the rulebook lock,
+          // and a refused NEW file has no row: their incoming edges wait.
+          const skipped = (target: { id: string } | null): true => {
+            if (node.id && !fileIdToRowId.has(node.id)) {
+              if (target) fileIdToRowId.set(node.id, target.id);
+              else unappliedFileIds.add(node.id);
+            }
+            return true;
+          };
+          if (isLateRow(existingAtLoc) && defer(existingAtLoc!)) {
+            skipped(null);
+            continue;
+          }
+          if (await refusesRole(existingAtLoc)) {
+            skipped(existingAtLoc);
+            continue;
+          }
           if (existingAtLoc) {
             await updateNodeFromGitSync(
               tx,
@@ -976,6 +1001,7 @@ export const syncGraphFromGithub = async (
 
       for (const edge of edges) {
         if (refusedRoleLocs.has(edge.sourceLoc) || deferredLocs.has(edge.sourceLoc)) continue;
+        if (!fileIdToRowId.has(edge.targetId) && unappliedFileIds.has(edge.targetId)) continue;
         // Resolve endpoints through the remaps: the source is always a file
         // in this repo (by loc); the target prefers this repo's claimant of
         // the referenced id, else stays raw (a cross-repo target).

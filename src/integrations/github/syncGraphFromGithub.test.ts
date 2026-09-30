@@ -1755,6 +1755,63 @@ describe('#1330 — strict sub-roles through git sync', () => {
     await noInvalidLocs();
     expect(await db.node.findUniqueOrThrow({ where: { id: aId } })).toMatchObject({ loc: 'b-old' });
   });
+
+  /** #1411 review (@codex P2) — edges aimed at a skipped loc-keyed file. */
+  const foreignNode = async () => {
+    const { graph: other } = await createDbOrgAndGraph(db, { orgName: 'foreign-org-1411', graphName: 'foreign/repo-1411' });
+    return db.node.create({ data: { id: generateId(), memoryId: other.id, loc: 'elsewhere', name: 'Foreign' } });
+  };
+
+  it('a REFUSED loc-keyed file with a foreign id: an edge aimed at that id lands on this memory\'s row, never the foreign node', async () => {
+    await rules({ role: 'doc', strictSubRoles: true });
+    const foreign = await foreignNode();
+    const rowId = generateId();
+    await db.node.create({ data: { id: rowId, memoryId: dbGraphId, loc: 'f', name: 'F', ownerRepo: 'test/repo' } });
+    mkdirSync(join(repoRoot(), 'f'), { recursive: true });
+    mkdirSync(join(repoRoot(), 'g'), { recursive: true });
+    writeNodeFiles(join(repoRoot(), 'f'), { id: foreign.id, name: 'F', role: 'doc.unknown' });
+    writeNodeFiles(join(repoRoot(), 'g'), { name: 'G', nodes: [{ id: foreign.id, rel: 'uses' }] });
+    const result = await sync();
+    expect(result.skippedUndeclaredRoles).toEqual([expect.objectContaining({ loc: 'f' })]);
+    const edges = await db.edge.findMany({ where: { deletedAt: null }, select: { targetId: true } });
+    expect(edges).toEqual([{ targetId: rowId }]);
+    expect(await db.pendingEdge.count()).toBe(0);
+  });
+
+  it('a REFUSED new file with an unknown id: an edge aimed at it waits, no spurious PendingEdge', async () => {
+    await rules({ role: 'doc', strictSubRoles: true });
+    const unknownId = generateId();
+    mkdirSync(join(repoRoot(), 'n'), { recursive: true });
+    mkdirSync(join(repoRoot(), 'g'), { recursive: true });
+    writeNodeFiles(join(repoRoot(), 'n'), { id: unknownId, name: 'N', role: 'doc.unknown' });
+    writeNodeFiles(join(repoRoot(), 'g'), { name: 'G', nodes: [{ id: unknownId, rel: 'uses' }] });
+    const result = await sync();
+    expect(result.skippedUndeclaredRoles).toEqual([expect.objectContaining({ loc: 'n' })]);
+    expect(await db.pendingEdge.count()).toBe(0);
+    expect(await db.edge.count()).toBe(0);
+  });
+
+  it('a DEFERRED loc-keyed file with a foreign id: the edge waits, then lands on the row once the file applies', async () => {
+    await rules({ role: 'doc', strictSubRoles: true });
+    const foreign = await foreignNode();
+    frontmatter('r', { name: 'R', role: 'doc.unknown' });
+    frontmatter('late', { id: foreign.id, name: 'Late' });
+    mkdirSync(join(repoRoot(), 'g'), { recursive: true });
+    writeNodeFiles(join(repoRoot(), 'g'), { name: 'G', nodes: [{ id: foreign.id, rel: 'uses' }] });
+    const { result, lateId } = await raceLateRow(async () => {
+      const id = generateId();
+      await db.node.create({ data: { id, memoryId: dbGraphId, loc: 'late', name: 'Late', ownerRepo: 'test/repo' } });
+      return id;
+    });
+    expect(result.deferredLateRows).toEqual([`late (node ${lateId})`]);
+    // Nothing aimed at the file yet: not the foreign node, and not the late
+    // row, which this sync must not touch under the rulebook lock.
+    expect(await db.edge.count()).toBe(0);
+    expect(await db.pendingEdge.count()).toBe(0);
+    await sync();
+    const edges = await db.edge.findMany({ where: { deletedAt: null }, select: { targetId: true } });
+    expect(edges).toEqual([{ targetId: lateId }]);
+  });
 });
 
 describe('describeSyncOutcome — the on-demand sync report (#1411 review, @codex P2)', () => {
