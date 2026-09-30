@@ -533,16 +533,24 @@ async function unresolvedReferencesIn(
     const stableIds = [...new Set(pending.map((p) => pendingEdgeStableTargetId(p.targetId)).filter((id): id is string => id !== null))];
     const stableTargets = new Map(stableIds.length === 0 ? [] : (await db.node.findMany({
       where: { id: { in: stableIds } },
-      select: { id: true, loc: true, deletedAt: true, isPlaceholder: true },
+      select: { id: true, loc: true, deletedAt: true, isPlaceholder: true, memoryId: true, memory: { select: { urn: true } } },
     })).map((t) => [t.id, t]));
     for (const p of pending) {
       const stableId = pendingEdgeStableTargetId(p.targetId);
       const target = stableId === null ? undefined : stableTargets.get(stableId);
+      // (@codex P1, PR #1462) A stable key can name a node in ANOTHER memory.
+      // Only a memory the caller can read may decide anything here: otherwise
+      // whether this reports (and the loc it names) would reveal that tenant's
+      // node state. Concealed exactly like the foreign-edge branch below.
+      if (target && target.memoryId !== corpus.id && !(await isMemoryReadableCached(ctx, target.memoryId))) continue;
       const live = target && !target.deletedAt ? target : undefined;
       if (live && !live.isPlaceholder) continue;
       out.push({
         kind: 'EDGE', sourceNodeId: p.source.id, sourceLoc: p.source.loc, field: 'pendingEdge',
-        targetLoc: target?.loc ?? p.targetId, text: p.name,
+        targetLoc: !target ? p.targetId
+          : target.memoryId === corpus.id ? target.loc
+          : `hrn:node:${target.memory.urn.replace(/^(?:hrn|urn):mem(?:ory)?:/i, '')}:${target.loc}`,
+        text: p.name,
         reason: live ? 'PLACEHOLDER' : 'MISSING',
       });
     }

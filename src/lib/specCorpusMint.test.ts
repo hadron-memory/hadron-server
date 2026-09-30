@@ -219,6 +219,26 @@ describe('mintSpecCorpus: pending edges are references too (@codex P2s on #1462)
     ]);
   });
 
+  it('never lets an unreadable memory decide a stable pending edge (@codex P1 on #1462)', async () => {
+    await db.orgMember.create({ data: { organizationId: org.id, userId: outsider.id, role: 'READER' } });
+    const hidden = await db.memory.create({ data: {
+      id: generateId(), urn: `${org.urn}:outsiders-specs`, name: 'outsiders-specs', class: 'private',
+      organizationId: org.id, userId: outsider.id,
+    } });
+    const target = await db.node.create({ data: {
+      id: generateId(), memoryId: hidden.id, loc: 'pas:700', name: 'pas:700', role: 'spec', nodeType: 'info', isPlaceholder: true,
+    } });
+    await pendingFrom('pas:010:01', pendingEdgeStableTargetKey(target.id));
+    const asPlaceholder = (await mint(true)).blockers;
+    await db.node.update({ where: { id: target.id }, data: { isPlaceholder: false, content: 'Written.' } });
+    const asWritten = (await mint(true)).blockers;
+    await db.node.update({ where: { id: target.id }, data: { deletedAt: new Date() } });
+    const asDeleted = (await mint(true)).blockers;
+    expect(asPlaceholder).toEqual(asWritten);
+    expect(asDeleted).toEqual(asWritten);
+    expect(JSON.stringify(asWritten)).not.toContain('pas:700');
+  });
+
   it('decodes a stable key: skipped for a written spec, PLACEHOLDER for a placeholder, MISSING once deleted', async () => {
     const reserved = await resolvers.Mutation.reserveSpecCitation(null, { memoryRef: draft.id, loc: 'pas:020' }, as());
     const written = await db.node.findFirstOrThrow({ where: { memoryId: draft.id, loc: 'pas:010' } });
