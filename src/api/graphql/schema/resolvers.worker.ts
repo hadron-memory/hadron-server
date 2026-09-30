@@ -114,7 +114,8 @@ async function requireWorkerStaffAccess(ctx: Context, app: AppRow): Promise<void
       await requireOrgRole(ctx, app.organizationId, 'CONTRIBUTOR');
       return;
     } catch (e) {
-      // requireOrgRole signals denial with a plain Error('Forbidden'); anything
+      // requireOrgRole signals denial with a FORBIDDEN GraphQLError whose message
+      // is 'Forbidden' (#1493), which this match still catches; anything
       // else (a DB failure inside the membership lookup) must propagate rather
       // than read as "not a member" (review:narrow-catch-blocks).
       if (!(e instanceof Error && e.message === 'Forbidden')) throw e;
@@ -1043,7 +1044,8 @@ export const workerMutations = {
         try {
           await requireOrgRole(ctx, app.organizationId, 'ADMIN');
         } catch (e) {
-          // Narrow: requireOrgRole signals denial with Error('Forbidden'); a DB
+          // Narrow: requireOrgRole signals denial with a 'Forbidden' message (a
+          // FORBIDDEN GraphQLError since #1493); a DB
           // failure inside the membership lookup must propagate rather than
           // read as "not an admin" (review:narrow-catch-blocks).
           if (!(e instanceof Error && e.message === 'Forbidden')) throw e;
