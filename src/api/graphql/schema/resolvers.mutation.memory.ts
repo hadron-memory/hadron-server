@@ -19,6 +19,7 @@ import {
 } from '../../../lib/agentPublicCongruence.js';
 import {
   backfillMemoryEmbeddings,
+  publishEmbedWake,
   restampFailedEmbeddings,
 } from '../../../services/embedding/enqueue.js';
 import { deleteMemoryVectors } from '../../../services/embedding/vectors.js';
@@ -1156,8 +1157,21 @@ export const memoryMutations = {
       await concealUnreadableDenial(ctx, memory.id, memoryRef, () =>
         requireMemoryManageAccess(ctx, memory),
       );
-      if (!memory.vectorIndexEnabled) return 0;
-      return restampFailedEmbeddings(ctx.db, memory.id);
+      const count = await ctx.db.$transaction(async (tx) => {
+        // Ownership transfer also locks this row. Recheck after any wait so a
+        // former manager cannot restamp the receiving tenant's nodes.
+        await tx.$queryRaw`SELECT id FROM memories WHERE id = ${memoryId} FOR UPDATE`;
+        const current = await tx.memory.findUniqueOrThrow({ where: { id: memoryId } });
+        if (current.deletedAt) throw new MemoryNotFoundError(memoryRef);
+        const txCtx = withoutRequestCaches(ctx, tx);
+        await concealUnreadableDenial(txCtx, memoryId, memoryRef, () =>
+          requireMemoryManageAccess(txCtx, current),
+        );
+        if (!current.vectorIndexEnabled) return 0;
+        return restampFailedEmbeddings(tx, memoryId);
+      });
+      if (count > 0) void publishEmbedWake({});
+      return count;
     },
 
     deleteMemory: async (_: unknown, { id }: { id: string }, ctx: Context) => {
@@ -1644,13 +1658,21 @@ export const memoryMutations = {
       const memory = await ctx.db.memory.findUniqueOrThrow({ where: { id } });
       await concealUnreadableDenial(ctx, id, ref, () => requireMemoryManageAccess(ctx, memory));
       const encrypted = encryptToken(token);
-      return ctx.db.memory.update({
-        where: { id },
-        data: {
-          sourceTokenEncrypted: encrypted,
-          sourceTokenExpiresAt: expiresAt ? new Date(expiresAt) : null,
-        },
-        include: MEMORY_INCLUDE,
+      return ctx.db.$transaction(async (tx) => {
+        // A transfer must not land between the manage gate and the token write.
+        await tx.$queryRaw`SELECT id FROM memories WHERE id = ${id} FOR UPDATE`;
+        const current = await tx.memory.findUniqueOrThrow({ where: { id } });
+        if (current.deletedAt) throw new MemoryNotFoundError(ref);
+        const txCtx = withoutRequestCaches(ctx, tx);
+        await concealUnreadableDenial(txCtx, id, ref, () => requireMemoryManageAccess(txCtx, current));
+        return tx.memory.update({
+          where: { id },
+          data: {
+            sourceTokenEncrypted: encrypted,
+            sourceTokenExpiresAt: expiresAt ? new Date(expiresAt) : null,
+          },
+          include: MEMORY_INCLUDE,
+        });
       });
     },
 

@@ -13,6 +13,7 @@ import { cleanDb, createDbOrgAndGraph } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
 import { requireMemoryWriteAccess } from './resolvers.helpers.js';
+import { reassertManage } from './resolvers.memoryConfig.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -190,6 +191,92 @@ describe('private/personal access is owner-only', () => {
       userId: orgAdmin.id, roles: ['READER'], db: raceDb,
     }))).rejects.toMatchObject({ extensions: { code: 'CONFLICT' } });
     expect((await db.memory.findUniqueOrThrow({ where: { id: mem.id } })).description).not.toBe('stale calculation');
+  });
+
+  it('does not let a former strict owner set the source token after an owner change', async () => {
+    const mem = await createPrivate('token-race');
+    const transaction = db.$transaction.bind(db);
+    const raceDb = new Proxy(db, {
+      get(target, key) {
+        if (key === '$transaction') {
+          return async (work: Parameters<typeof transaction>[0]) => {
+            await db.memory.update({ where: { id: mem.id }, data: { userId: other.id } });
+            return transaction(work as any);
+          };
+        }
+        return Reflect.get(target, key);
+      },
+    });
+
+    await expect(resolvers.Mutation.setMemorySourceToken(null, {
+      id: mem.id, token: 'former-owner-token',
+    }, ctx({ userId: owner.id, roles: ['READER'], db: raceDb }))).rejects.toThrow('MEMORY_NOT_FOUND');
+    expect((await db.memory.findUniqueOrThrow({ where: { id: mem.id } })).sourceTokenEncrypted).toBeNull();
+  });
+
+  it('does not let a former manager restamp failed embeddings after an org transfer', async () => {
+    const mem = await resolvers.Mutation.createMemory(
+      null, { orgId: org.id, name: 'embedding-race' }, asOrgAdmin(),
+    );
+    const node = await db.node.create({
+      data: { id: generateId(), memoryId: mem.id, loc: 'failed-embedding', name: 'failed-embedding' },
+    });
+    const failedAt = new Date('2026-09-01T00:00:00.000Z');
+    await db.memory.update({ where: { id: mem.id }, data: { vectorIndexEnabled: true } });
+    await db.$executeRaw`
+      UPDATE nodes SET embedding_failed_at = ${failedAt}, embedding_pending_at = NULL
+      WHERE id = ${node.id}
+    `;
+    const storedFailedAt = (await db.node.findUniqueOrThrow({ where: { id: node.id } })).embeddingFailedAt;
+    expect(storedFailedAt).not.toBeNull();
+    const destination = await db.organization.create({
+      data: { id: generateId(), name: 'embedding-destination', urn: 'embedding-destination' },
+    });
+    const transaction = db.$transaction.bind(db);
+    const raceDb = new Proxy(db, {
+      get(target, key) {
+        if (key === '$transaction') {
+          return async (work: Parameters<typeof transaction>[0]) => {
+            await db.memory.update({ where: { id: mem.id }, data: { organizationId: destination.id } });
+            return transaction(work as any);
+          };
+        }
+        return Reflect.get(target, key);
+      },
+    });
+
+    await expect(resolvers.Mutation.retryFailedEmbeddings(null, { memoryRef: mem.id }, ctx({
+      userId: orgAdmin.id, roles: ['READER'], db: raceDb,
+    }))).rejects.toThrow('MEMORY_NOT_FOUND');
+    expect((await db.node.findUniqueOrThrow({ where: { id: node.id } })).embeddingFailedAt).toEqual(storedFailedAt);
+  });
+
+  it('holds memory-config management authority through the write transaction', async () => {
+    const mem = await createPrivate('config-transfer-race');
+    let gateReached!: () => void;
+    let releaseWriter!: () => void;
+    const atGate = new Promise<void>((resolve) => { gateReached = resolve; });
+    const release = new Promise<void>((resolve) => { releaseWriter = resolve; });
+    const writer = db.$transaction(async (tx) => {
+      await reassertManage(asOwner(), tx, mem.id, () => new Error('Forbidden'));
+      gateReached();
+      await release;
+    });
+    await atGate;
+    let transferCommitted = false;
+    const transfer = db.memory.update({ where: { id: mem.id }, data: { userId: other.id } })
+      .then(() => { transferCommitted = true; });
+    try {
+      // The transfer has its own DB connection and must wait for the writer's
+      // Memory row lock, even after the access check has already returned.
+      await db.$executeRaw`SELECT pg_sleep(0.05)`;
+      expect(transferCommitted).toBe(false);
+    } finally {
+      releaseWriter();
+      await writer;
+      await transfer;
+    }
+    expect((await db.memory.findUniqueOrThrow({ where: { id: mem.id } })).userId).toBe(other.id);
   });
 
   it.each(['private', 'personal'] as const)('other management mutations conceal an org-anchored %s memory from its admin', async (memoryClass) => {
