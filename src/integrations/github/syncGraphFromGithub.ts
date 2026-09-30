@@ -792,7 +792,7 @@ export const syncGraphFromGithub = async (
           // memory (= graph.id here; the source came from this repo). Derive
           // it deterministically so re-syncs are idempotent.
           const edgeLoc = deriveEdgeLoc(edge.sourceLoc, edge.name, targetExists.loc);
-          await tx.edge.upsert({
+          const savedEdge = await tx.edge.upsert({
             where: { loc_memoryId: { loc: edgeLoc, memoryId: graph.id } },
             create: {
               id: generateId(),
@@ -806,6 +806,23 @@ export const syncGraphFromGithub = async (
             },
             update: {},
           });
+          // A loc is an edge's address, not proof that this repo's relationship
+          // was saved. An unrelated edge may already own the same derived loc;
+          // update:{} then returns that occupant without changing it. Refuse
+          // inside the transaction so earlier node/edge writes roll back too.
+          if (
+            savedEdge.deletedAt !== null ||
+            savedEdge.sourceId !== edgeSourceId ||
+            savedEdge.targetId !== edgeTargetId ||
+            savedEdge.name !== edge.name ||
+            savedEdge.description !== (edge.description ?? null) ||
+            savedEdge.isRunnable !== (edge.isRunnable ?? null) ||
+            savedEdge.condition !== null ||
+            savedEdge.priority !== 0 ||
+            savedEdge.data !== null
+          ) {
+            throw new Error(`Git sync edge loc "${edgeLoc}" is already occupied by a different edge state.`);
+          }
           await tx.pendingEdge.deleteMany({
             where: { sourceId: edgeSourceId, targetId: edgeTargetId },
           });

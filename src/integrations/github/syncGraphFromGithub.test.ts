@@ -500,6 +500,62 @@ describe('syncGraphFromGithub', () => {
     const edges = await db.edge.findMany();
     expect(edges).toHaveLength(1);
     expect(edges[0].name).toBe('uses');
+
+    // An unchanged repo edge is an idempotent re-sync, not a collision.
+    expect((await syncGraphFromGithub(makeGraph())).error).toBeUndefined();
+    expect(await db.edge.findMany()).toMatchObject([{ id: edges[0].id }]);
+  });
+
+  it('refuses a repo edge when its derived loc belongs to another live edge', async () => {
+    const bId = generateId();
+    const tId = generateId();
+    const bDir = join(mockSources, 'test-org', 'test/repo', 'b');
+    const tDir = join(mockSources, 'test-org', 'test/repo', 't');
+    mkdirSync(bDir, { recursive: true });
+    mkdirSync(tDir, { recursive: true });
+    writeNodeFiles(bDir, { id: bId, name: 'before' });
+    writeNodeFiles(tDir, { id: tId, name: 'target' });
+    expect((await syncGraphFromGithub(makeGraph())).error).toBeUndefined();
+
+    const a = await db.node.create({
+      data: { id: generateId(), memoryId: dbGraphId, loc: 'a', name: 'unrelated' },
+    });
+    const occupied = await db.edge.create({
+      data: {
+        id: generateId(), memoryId: dbGraphId, sourceId: a.id, targetId: tId,
+        loc: deriveEdgeLoc('b', 'uses', 't'), name: 'unrelated',
+      },
+    });
+
+    // Put the non-colliding edge first so its insert also has to roll back.
+    writeNodeFiles(bDir, {
+      id: bId, name: 'after',
+      nodes: [{ id: tId, rel: 'control' }, { id: tId, rel: 'uses' }],
+    });
+    const result = await syncGraphFromGithub(makeGraph());
+    expect(result.error).toContain('already occupied');
+    expect(await db.node.findUniqueOrThrow({ where: { id: bId } })).toMatchObject({ name: 'before' });
+    expect(await db.edge.findUniqueOrThrow({ where: { id: occupied.id } })).toMatchObject({
+      sourceId: a.id, targetId: tId, name: 'unrelated', deletedAt: null,
+    });
+    expect(await db.edge.count({ where: { sourceId: bId, targetId: tId } })).toBe(0);
+    expect(await db.pendingEdge.count({ where: { sourceId: bId, targetId: tId } })).toBe(0);
+  });
+
+  it('refuses an edge at the right loc with different routing state', async () => {
+    const tId = generateId();
+    const aDir = join(mockSources, 'test-org', 'test/repo', 'a');
+    const tDir = join(mockSources, 'test-org', 'test/repo', 't');
+    mkdirSync(aDir, { recursive: true });
+    mkdirSync(tDir, { recursive: true });
+    writeNodeFiles(aDir, { name: 'a', nodes: [{ id: tId, rel: 'uses' }] });
+    writeNodeFiles(tDir, { id: tId, name: 't' });
+    expect((await syncGraphFromGithub(makeGraph())).error).toBeUndefined();
+
+    const edge = await db.edge.findFirstOrThrow();
+    await db.edge.update({ where: { id: edge.id }, data: { priority: 1 } });
+    expect((await syncGraphFromGithub(makeGraph())).error).toContain('already occupied');
+    expect(await db.edge.findUniqueOrThrow({ where: { id: edge.id } })).toMatchObject({ priority: 1 });
   });
 
   it('parks a cross-repo edge as PendingEdge when target is not yet in DB', async () => {
