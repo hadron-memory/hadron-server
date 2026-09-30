@@ -75,17 +75,22 @@ beforeEach(async () => {
 });
 
 async function createApp(name: string) {
-  return M.createApp(null, { orgRef: org.id, agentRef: agent.id, name }, ctx(admin.id));
+  const app = await M.createApp(null, { orgRef: org.id, agentRef: agent.id, name }, ctx(admin.id));
+  // The team memory's audience is App participation, not any org READER.
+  await db.appMember.create({ data: { appId: app.id, userId: member.id, role: 'member' } });
+  return app;
 }
 
 describe('#965 — App.sharedMemory', () => {
-  it('resolves the #951-provisioned agent-keyed shared memory for an org member', async () => {
+  it('resolves the #951-provisioned agent-keyed shared memory for an App participant', async () => {
     const app = await createApp('Eng Team');
     const mem = await A.sharedMemory(app, {}, ctx(member.id));
     expect(mem).not.toBeNull();
     expect(mem.appId).toBe(app.id);
     expect(mem.class).toBe('app');
     expect(mem.sharedMemoryOfAgentId).toBe(agent.id);
+    await db.appMember.delete({ where: { appId_userId: { appId: app.id, userId: member.id } } });
+    expect(await A.sharedMemory(app, {}, ctx(member.id))).toBeNull();
   });
 
   it('never answers with a Worker working memory (app-class but unkeyed)', async () => {
