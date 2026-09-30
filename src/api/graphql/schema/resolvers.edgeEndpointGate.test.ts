@@ -267,6 +267,30 @@ describe('inline edge targets honor a MemoryShare grantee (#844 review)', () => 
     expect(await db.edge.count({ where: { sourceId: created.id, targetId: target.id } })).toBe(1);
   });
 
+  it('createEdge: a writer share-grantee may target a node in the shared memory (#849)', async () => {
+    // The standalone mutation used the MCP canReadMemory for its target, which
+    // ignores MemoryShare, so the grantee could read the node back through an
+    // edge but could not create that edge. It now uses the same gate as above.
+    const grantee = await seedContributor('eg-grantee-849', 90106);
+    const { target } = await seedSharedPersonal(grantee.id);
+    const edge = await resolvers.Mutation.createEdge(
+      {}, { sourceRef: nodeA.id, targetRef: target.id, name: 'rel849' } as never, ctx(grantee.id, ['CONTRIBUTOR']),
+    );
+    expect(edge).toBeTruthy();
+    expect(await db.edge.count({ where: { sourceId: nodeA.id, targetId: target.id, deletedAt: null } })).toBe(1);
+  });
+
+  it('createEdge: a NON-grantee is still refused, with the not-found wording (#849)', async () => {
+    const stranger = await seedContributor('eg-stranger-849', 90107);
+    const { target } = await seedSharedPersonal(null);
+    await expect(
+      resolvers.Mutation.createEdge(
+        {}, { sourceRef: nodeA.id, targetRef: target.id, name: 'rel849' } as never, ctx(stranger.id, ['CONTRIBUTOR']),
+      ),
+    ).rejects.toThrow(/Target node not found/);
+    expect(await db.edge.count({ where: { sourceId: nodeA.id, targetId: target.id } })).toBe(0);
+  });
+
   it('a NON-grantee is still refused the same target', async () => {
     const stranger = await seedContributor('eg-stranger2', 90105);
     const { target } = await seedSharedPersonal(null);
