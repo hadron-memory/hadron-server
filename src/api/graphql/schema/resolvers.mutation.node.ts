@@ -602,12 +602,11 @@ export async function writeNodeCore(
             // exactly symmetric: you may link precisely what you could read
             // back, no more and no less.
             //
-            // Deliberately NOT the MCP `canReadMemory` that createEdge calls:
-            // its personal-memory branch tests `memory.userId` only and never
-            // consults MemoryShare, so a `writer` share-grantee adding an inline
-            // edge into that same shared memory would be refused NODE_NOT_FOUND
-            // (PR #844 review, Codex P2). createEdge has the same gap
-            // pre-existing — tracked separately rather than widened here.
+            // Deliberately NOT the MCP `canReadMemory`: its personal-memory
+            // branch tests `memory.userId` only and never consults MemoryShare,
+            // so a `writer` share-grantee adding an inline edge into that same
+            // shared memory would be refused NODE_NOT_FOUND (PR #844 review,
+            // Codex P2). createEdge uses this same gate since #849.
             //
             // The denial reuses the not-found wording so it can't be used as a
             // cross-memory existence oracle.
@@ -3131,7 +3130,12 @@ export const nodeMutations = {
         throw e;
       }
       const tgt = await ctx.db.node.findUnique({ where: { id: resolvedTargetId }, select: { loc: true, memoryId: true } });
-      if (!tgt || !(await canReadMemory(ctx.db, ctx, tgt.memoryId))) {
+      // #849: the shared node-content gate, as for the source above, the inline
+      // edges in writeNodeCore (#844), Edge.source/target hydration (#781) and
+      // this resolver's own in-transaction recheck below. The MCP
+      // `canReadMemory` it used ignored MemoryShare, so a share grantee who
+      // could read a node back through an edge could not create that edge.
+      if (!tgt || !(await isMemoryReadableCached(ctx, tgt.memoryId))) {
         throw new GraphQLError(`Target node not found: "${targetRef}"`, { extensions: { code: 'NODE_NOT_FOUND' } });
       }
       const edgeLoc = loc != null && loc !== '' ? loc : deriveEdgeLoc(src.loc, name ?? null, tgt.loc);
