@@ -228,6 +228,8 @@ interface EdgeEntry {
   id?: string;
   /** Edge description (spec 037). */
   description?: string;
+  /** Edge JSON metadata, preserved on a fresh import. */
+  data?: unknown;
   /** Whether the edge is runnable (spec 037). The CLI export (and the server's
    *  current writer) emit `runnable`; `isRunnable` is the legacy key still on
    *  already-pushed mirrors — `normalizeEdgeEntry` reads `runnable` first. */
@@ -264,6 +266,7 @@ export interface LoadedEdge {
   /** Relationship name (was `label`). */
   name: string | null;
   description?: string | null;
+  data?: unknown;
   isRunnable?: boolean | null;
   condition?: unknown;
   priority?: number;
@@ -517,6 +520,9 @@ function normalizeEdgeEntry(e: EdgeEntry): LoadedEdge {
   };
   if (typeof e.description === 'string') {
     out.description = e.description;
+  }
+  if (e.data != null) {
+    out.data = e.data;
   }
   // `runnable` is the canonical key (matches the CLI export); fall back to the
   // legacy `isRunnable` for edges in already-pushed git mirrors.

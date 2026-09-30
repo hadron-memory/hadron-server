@@ -57,6 +57,7 @@ export interface NodeForGit {
      *  loaded — no explicit select needed on either git path. */
     loc?: string | null;
     description?: string | null;
+    data?: unknown;
     isRunnable?: boolean | null;
     /** JSONLogic gating expression; null when the edge always fires. */
     condition?: unknown;
