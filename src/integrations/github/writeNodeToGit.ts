@@ -2,7 +2,9 @@ import { mkdirSync, writeFileSync, rmSync } from 'fs';
 import { dirname } from 'path';
 import { stringify } from 'yaml';
 import { withMirrorCheckout } from './gitMirrorCheckout.js';
+import { db } from '../db/client.js';
 import {
+  buildEdgeFrontmatter,
   buildNodeFrontmatter,
   preserveUnmanagedFrontmatter,
   nodeFilePath,
@@ -66,6 +68,33 @@ export interface NodeForGit {
     /** Resolution-order hook (lower fires first), DB default 0. */
     priority?: number | null;
   }>;
+  /** Internal freshness fence for plaintext snapshots of encrypted nodes. */
+  mirrorRevSeq?: number;
+}
+
+function canonicalJson(value: unknown): string {
+  return JSON.stringify(value, (_key, v) =>
+    v && typeof v === 'object' && !Array.isArray(v)
+      ? Object.fromEntries(Object.entries(v as Record<string, unknown>).sort(([a], [b]) => a.localeCompare(b)))
+      : v,
+  );
+}
+
+function edgeSignature(edges: NodeForGit['outgoingEdges']): string {
+  const entries = buildEdgeFrontmatter(edges);
+  entries.sort((a, b) => String(a.edgeLoc ?? a.id).localeCompare(String(b.edgeLoc ?? b.id)));
+  return canonicalJson(entries);
+}
+
+async function isCurrentEncryptedSnapshot(node: NodeForGit, memoryId: string): Promise<boolean> {
+  const current = await db.node.findUnique({
+    where: { id: node.id },
+    include: { outgoingEdges: { include: { target: true } } },
+  });
+  return current != null && current.deletedAt == null && current.memoryId === memoryId &&
+    current.revSeq === node.mirrorRevSeq &&
+    current.loc === node.loc && current.isPlaceholder === node.isPlaceholder &&
+    edgeSignature(current.outgoingEdges) === edgeSignature(node.outgoingEdges);
 }
 
 /**
@@ -175,6 +204,7 @@ export async function writeNodeToGit(
   ownerRepo: string,
   clientId?: string | null,
   memoryId?: string,
+  refresh?: () => Promise<NodeForGit | null>,
 ): Promise<void> {
   await withMirrorCheckout(
     {
@@ -184,6 +214,23 @@ export async function writeNodeToGit(
       commitSubject: `Update node ${node.loc}`,
       logPrefix: '[writeNodeToGit]',
     },
-    ({ localPath }) => writeNodeFile(localPath, node),
+    async ({ localPath }) => {
+      // The node.written subscriber supplies a loader. It must run AFTER the
+      // checkout lock is acquired: a snapshot taken while waiting could land
+      // after a newer write and roll the Git file backwards.
+      const latest = refresh ? await refresh() : node;
+      if (!latest) return false;
+      // Encrypted request-time exports cannot re-read plaintext after the
+      // request key disappears. Reject a prepared snapshot that went stale
+      // while waiting for another checkout writer; the later event owns the
+      // newest state. revSeq ignores operational updatedAt churn, while
+      // the edge signature catches Edge CRUD (which does not bump revSeq).
+      if (latest.mirrorRevSeq != null && memoryId &&
+          !(await isCurrentEncryptedSnapshot(latest, memoryId))) {
+        console.warn(`[git-mirror] Skipping stale encrypted snapshot for node ${latest.id}`);
+        return false;
+      }
+      writeNodeFile(localPath, latest);
+    },
   );
 }

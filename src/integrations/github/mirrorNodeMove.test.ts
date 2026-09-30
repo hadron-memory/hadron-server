@@ -203,6 +203,28 @@ describe('mirrorNodeMoveToGit — never throws', () => {
 });
 
 describe('mirrorNodeMoveToGit — same memory', () => {
+  it('re-reads moved nodes after entering the checkout, not while waiting for it', async () => {
+    const mem = await makeMemory('mem', { source: REPO });
+    const node = await makeNode(mem.id, 'new-loc');
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    vi.mocked(withMirrorCheckout).mockImplementationOnce(async (opts, mutate) => {
+      await gate;
+      await mutate({ localPath: `/repo/${opts.memoryId}`, branch: 'hadron-updates' });
+      return 'mirrored';
+    });
+
+    const moving = mirrorNodeMoveToGit(db, {
+      srcMemoryId: mem.id, destMemoryId: mem.id,
+      moved: [{ id: node.id, previousLoc: 'old-loc' }],
+    });
+    await vi.waitFor(() => expect(withMirrorCheckout).toHaveBeenCalledOnce());
+    await db.node.update({ where: { id: node.id }, data: { name: 'Updated after move' } });
+    release();
+    await moving;
+    expect(vi.mocked(writeNodeFile).mock.lastCall?.[1].name).toBe('Updated after move');
+  });
+
   it('removes the old paths and writes the new ones in ONE commit', async () => {
     const mem = await makeMemory('mem', { source: REPO });
     const parent = await makeNode(mem.id, 'q');

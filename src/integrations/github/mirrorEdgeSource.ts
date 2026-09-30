@@ -64,6 +64,7 @@ export async function mirrorEdgeSourceAfterCommit(
       isRunnable: node.isRunnable ?? null,
       isPlaceholder: node.isPlaceholder,
       outgoingEdges: node.outgoingEdges,
+      mirrorRevSeq: node.revSeq,
     }, source.ownerRepo ?? '', clientId, source.memoryId).catch((error) => {
       console.error('[edge-mirror] encrypted source Git write error:', error);
     });

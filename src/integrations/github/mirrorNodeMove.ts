@@ -118,16 +118,6 @@ async function mirrorMove(
   const removesFromRepo = srcMem?.source != null;
   if (!writesToRepo && !removesFromRepo) return;
 
-  // Re-read at the POST-move address. A node deleted (or moved again) between
-  // the commit and now is skipped rather than mirrored to a stale path.
-  const rows = writesToRepo
-    ? await db.node.findMany({
-        where: { id: { in: moved.map((m) => m.id) }, deletedAt: null },
-        include: { outgoingEdges: { include: { target: true } } },
-      })
-    : [];
-  const live = rows.filter((r) => r.memoryId === destMemoryId);
-
   const label = moved.length === 1
     ? `node ${moved[0].previousLoc}`
     : `${moved.length} nodes under ${moved[0].previousLoc}`;
@@ -142,7 +132,19 @@ async function mirrorMove(
           : `Move ${label}`,
         logPrefix: '[mirrorNodeMove]',
       },
-      ({ localPath }) => {
+      async ({ localPath }) => {
+        // Re-read only after the checkout lock is held. A later Node/Edge
+        // write or another move may have committed while this job waited;
+        // carrying a pre-lock row would write its old path/content last.
+        const currentMemory = await db.memory.findUnique({
+          where: { id: destMemoryId }, select: { isEncrypted: true },
+        });
+        if (!currentMemory || currentMemory.isEncrypted) return false;
+        const rows = await db.node.findMany({
+          where: { id: { in: moved.map((m) => m.id) }, deletedAt: null },
+          include: { outgoingEdges: { include: { target: true } } },
+        });
+        const live = rows.filter((r) => r.memoryId === destMemoryId);
         // Same-memory: the old paths live in THIS repo, so remove them in the
         // same commit.
         //

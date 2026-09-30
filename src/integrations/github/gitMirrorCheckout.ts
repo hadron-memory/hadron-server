@@ -25,6 +25,7 @@ import { prepareWriteBranch } from './gitBranch.js';
 import { execGit } from './execGit.js';
 import { sourceNamesRepo, validateMemorySource, GitSourceError } from '../../lib/gitSource.js';
 import { validateGitBranch } from '../../lib/gitRef.js';
+import { withMirrorCheckoutLock } from './mirrorCheckoutLock.js';
 
 /** The prepared checkout handed to a mutate callback. */
 export interface MirrorRepo {
@@ -64,7 +65,7 @@ export async function withMirrorCheckout(
     /** Log-line prefix identifying the calling mirror path. */
     logPrefix: string;
   },
-  mutate: (repo: MirrorRepo) => void | Promise<void>,
+  mutate: (repo: MirrorRepo) => void | boolean | Promise<void | boolean>,
 ): Promise<MirrorOutcome> {
   const { memoryId, ownerRepo, clientId, commitSubject, logPrefix } = opts;
 
@@ -117,107 +118,138 @@ export async function withMirrorCheckout(
   // user-owned memory has no org → nothing to mirror to.
   if (!memory.organization) return 'skipped';
 
-  const localPath = memoryLocalPath(memory.organization.urn, memory.urn);
-
-  if (!existsSync(join(localPath, '.git'))) {
-    console.warn(`${logPrefix} Repo not cloned yet at ${localPath} — skipping git write`);
-    return 'skipped';
-  }
-
-  // 2. Resolve the branch name.
-  const rawBranch = memory.writeBranch ?? 'hadron-updates';
-  const branch = rawBranch.replace('{client}', clientId ?? 'unknown');
-  // #1146: validate the SUBSTITUTED result, not the template. `branch` reaches
-  // `git checkout` and `git push` as a positional argument, and `clientId` is
-  // caller-supplied — a `writeBranch` of exactly `{client}` makes the whole
-  // branch name the client's to choose, leading `-` included. Neither the
-  // mutation guard nor a check on `rawBranch` would see that, because the
-  // dangerous value does not exist until this line.
+  // Hold one cross-process lock through checkout, file mutation, commit,
+  // push, and remote restoration. Node, Edge, and move mirrors all use this
+  // primitive, so a process-local queue would leave a race between workers.
   try {
-    validateGitBranch(branch, 'writeBranch');
-  } catch (e) {
-    console.warn(`${logPrefix} Refusing branch "${branch}" for ${memory.urn}: ${String(e)}`);
-    return 'skipped';
-  }
+    const resolvedMemoryId = memory.id;
+    return await withMirrorCheckoutLock(resolvedMemoryId, async () => {
+      // Source, branch, and organization may have changed while this mirror
+      // waited for another writer. Use the current config under the lock.
+      const memory = await db.memory.findUnique({
+        where: { id: resolvedMemoryId }, include: { organization: true },
+      });
+      if (!memory || !memory.organization || !memory.source) return 'skipped';
+      try {
+        validateMemorySource(memory.source);
+      } catch (e) {
+        if (e instanceof GitSourceError) {
+          console.warn(`${logPrefix} Refusing to mirror ${memory.urn}: ${e.message}`);
+          return 'skipped';
+        }
+        throw e;
+      }
 
-  // 3. Get the installation token.
-  let token: string | null = null;
-  if (memory.organization.githubInstallationId) {
-    try {
-      const org = memory.organization;
-      const credentials = org.githubAppId && org.githubAppPrivateKeyEncrypted
-        ? { appId: org.githubAppId, privateKeyPem: decryptToken(org.githubAppPrivateKeyEncrypted) }
-        : undefined;
-      token = await getInstallationToken(memory.organization.githubInstallationId, credentials);
-    } catch (err) {
-      console.error(`${logPrefix} Failed to get installation token:`, err);
-      return 'failed';
-    }
-  }
+      const localPath = memoryLocalPath(memory.organization.urn, memory.urn);
 
-  // 4. Checkout / create the branch. `prepareWriteBranch` selects checkout vs.
-  // create from the branch's real local+remote existence — the old
-  // "pull --ff-only; on failure checkout -b origin/main" path failed on a
-  // non-default branch with no upstream tracking (see gitBranch.ts).
-  try {
-    if (token) {
-      const tokenUrl = toHttpsUrl(memory.source, token);
-      await execGit(['remote', 'set-url', 'origin', tokenUrl], { cwd: localPath });
-    }
-    await execGit(['fetch', 'origin'], { cwd: localPath });
-    await prepareWriteBranch(localPath, branch, memory.readBranch ?? undefined);
+      if (!existsSync(join(localPath, '.git'))) {
+        console.warn(`${logPrefix} Repo not cloned yet at ${localPath} — skipping git write`);
+        return 'skipped';
+      }
+
+      // 2. Resolve the branch name.
+      const rawBranch = memory.writeBranch ?? 'hadron-updates';
+      const branch = rawBranch.replace('{client}', clientId ?? 'unknown');
+      // #1146: validate the SUBSTITUTED result, not the template. `branch` reaches
+      // `git checkout` and `git push` as a positional argument, and `clientId` is
+      // caller-supplied — a `writeBranch` of exactly `{client}` makes the whole
+      // branch name the client's to choose, leading `-` included. Neither the
+      // mutation guard nor a check on `rawBranch` would see that, because the
+      // dangerous value does not exist until this line.
+      try {
+        validateGitBranch(branch, 'writeBranch');
+      } catch (e) {
+        console.warn(`${logPrefix} Refusing branch "${branch}" for ${memory.urn}: ${String(e)}`);
+        return 'skipped';
+      }
+
+      // 3. Get the installation token.
+      let token: string | null = null;
+      if (memory.organization.githubInstallationId) {
+        try {
+          const org = memory.organization;
+          const credentials = org.githubAppId && org.githubAppPrivateKeyEncrypted
+            ? { appId: org.githubAppId, privateKeyPem: decryptToken(org.githubAppPrivateKeyEncrypted) }
+            : undefined;
+          token = await getInstallationToken(memory.organization.githubInstallationId, credentials);
+        } catch (err) {
+          console.error(`${logPrefix} Failed to get installation token:`, err);
+          return 'failed';
+        }
+      }
+
+      // 4. Checkout / create the branch. `prepareWriteBranch` selects checkout vs.
+      // create from the branch's real local+remote existence — the old
+      // "pull --ff-only; on failure checkout -b origin/main" path failed on a
+      // non-default branch with no upstream tracking (see gitBranch.ts).
+      try {
+        if (token) {
+          const tokenUrl = toHttpsUrl(memory.source, token);
+          await execGit(['remote', 'set-url', 'origin', tokenUrl], { cwd: localPath });
+        }
+        await execGit(['fetch', 'origin'], { cwd: localPath });
+        await prepareWriteBranch(localPath, branch, memory.readBranch ?? undefined);
+      } catch (err) {
+        console.error(`${logPrefix} Branch setup failed (${branch}) for ${commitSubject}:`, err);
+        await restoreRemote(localPath, memory.source);
+        return 'failed';
+      }
+
+      // 5. Let the caller reshape the working tree.
+      try {
+        const shouldCommit = await mutate({ localPath, branch });
+        if (shouldCommit === false) {
+          await restoreRemote(localPath, memory.source);
+          return 'skipped';
+        }
+      } catch (err) {
+        console.error(`${logPrefix} Mirror write failed for ${commitSubject}:`, err);
+        await restoreRemote(localPath, memory.source);
+        return 'failed';
+      }
+
+      // 6. Commit and push.
+      try {
+        await execGit(['add', '-A'], { cwd: localPath });
+        const { stdout } = await execGit(['status', '--porcelain'], { cwd: localPath });
+        if (!stdout.trim()) {
+          await restoreRemote(localPath, memory.source);
+          return 'no-changes';
+        }
+
+        const gitEnv = {
+          ...process.env,
+          GIT_AUTHOR_NAME: memory.organization.name,
+          GIT_AUTHOR_EMAIL: `hadron@${memory.organization.urn}`,
+          GIT_COMMITTER_NAME: memory.organization.name,
+          GIT_COMMITTER_EMAIL: `hadron@${memory.organization.urn}`,
+        };
+        await execGit([
+          'commit', '-m', `${commitSubject}\n\n[hadron-server]`,
+        ], { cwd: localPath, env: gitEnv });
+
+        try {
+          // `-u` sets upstream tracking so the branch isn't left tracking-less —
+          // the original root cause of the "branch already exists" failure.
+          // Explicit refspec — see pushMemoryToGit for why a bare name is parsed
+          // rather than used (@codex, PR #1247).
+          await execGit(
+            ['push', '-u', 'origin', `refs/heads/${branch}:refs/heads/${branch}`],
+            { cwd: localPath },
+          );
+          console.log(`${logPrefix} Pushed ${commitSubject} → ${memory.urn}@${branch}`);
+        } finally {
+          await restoreRemote(localPath, memory.source);
+        }
+        return 'mirrored';
+      } catch (err) {
+        console.error(`${logPrefix} Commit/push failed for ${commitSubject}:`, err);
+        await restoreRemote(localPath, memory.source);
+        return 'failed';
+      }
+    });
   } catch (err) {
-    console.error(`${logPrefix} Branch setup failed (${branch}) for ${commitSubject}:`, err);
-    restoreRemote(localPath, memory.source);
-    return 'failed';
-  }
-
-  // 5. Let the caller reshape the working tree.
-  try {
-    await mutate({ localPath, branch });
-  } catch (err) {
-    console.error(`${logPrefix} Mirror write failed for ${commitSubject}:`, err);
-    restoreRemote(localPath, memory.source);
-    return 'failed';
-  }
-
-  // 6. Commit and push.
-  try {
-    await execGit(['add', '-A'], { cwd: localPath });
-    const { stdout } = await execGit(['status', '--porcelain'], { cwd: localPath });
-    if (!stdout.trim()) {
-      restoreRemote(localPath, memory.source);
-      return 'no-changes';
-    }
-
-    const gitEnv = {
-      ...process.env,
-      GIT_AUTHOR_NAME: memory.organization.name,
-      GIT_AUTHOR_EMAIL: `hadron@${memory.organization.urn}`,
-      GIT_COMMITTER_NAME: memory.organization.name,
-      GIT_COMMITTER_EMAIL: `hadron@${memory.organization.urn}`,
-    };
-    await execGit([
-      'commit', '-m', `${commitSubject}\n\n[hadron-server]`,
-    ], { cwd: localPath, env: gitEnv });
-
-    try {
-      // `-u` sets upstream tracking so the branch isn't left tracking-less —
-      // the original root cause of the "branch already exists" failure.
-      // Explicit refspec — see pushMemoryToGit for why a bare name is parsed
-      // rather than used (@codex, PR #1247).
-      await execGit(
-        ['push', '-u', 'origin', `refs/heads/${branch}:refs/heads/${branch}`],
-        { cwd: localPath },
-      );
-      console.log(`${logPrefix} Pushed ${commitSubject} → ${memory.urn}@${branch}`);
-    } finally {
-      restoreRemote(localPath, memory.source);
-    }
-    return 'mirrored';
-  } catch (err) {
-    console.error(`${logPrefix} Commit/push failed for ${commitSubject}:`, err);
-    restoreRemote(localPath, memory.source);
+    console.error(`${logPrefix} Checkout lock failed for ${commitSubject}:`, err);
     return 'failed';
   }
 }
@@ -231,8 +263,12 @@ export function memoryLocalPath(orgUrn: string, memoryUrn: string): string {
   return join(GRAPHS_PATH, orgUrn, slug);
 }
 
-function restoreRemote(localPath: string, originalUrl: string): void {
-  execGit(['remote', 'set-url', 'origin', originalUrl], { cwd: localPath }).catch(() => {});
+async function restoreRemote(localPath: string, originalUrl: string): Promise<void> {
+  try {
+    await execGit(['remote', 'set-url', 'origin', originalUrl], { cwd: localPath });
+  } catch (err) {
+    console.error(`[git-mirror] Failed to restore remote URL at ${localPath}:`, err);
+  }
 }
 
 function decryptToken(ciphertext: string): string {

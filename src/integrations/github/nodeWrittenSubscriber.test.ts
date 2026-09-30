@@ -88,6 +88,33 @@ describe('handleNodeWrittenForGit', () => {
     expect(memId).toBe(memoryId);
   });
 
+  it('refreshes edge metadata when a queued Git write finally holds the checkout lock', async () => {
+    const target = await db.node.create({
+      data: { id: generateId(), memoryId, loc: 'target', name: 'Target', tags: [] },
+    });
+    const node = await db.node.create({
+      data: { id: generateId(), memoryId, loc: 'source', name: 'Source', tags: [] },
+    });
+    const edge = await db.edge.create({
+      data: {
+        id: generateId(), memoryId, sourceId: node.id, targetId: target.id,
+        loc: 'source:uses:target', name: 'uses', description: 'old',
+      },
+    });
+
+    await handleNodeWrittenForGit(db, { nodeId: node.id, memoryId });
+    const initial = mockWrite.mock.calls[0][0];
+    const refresh = mockWrite.mock.calls[0][4];
+    expect(initial.outgoingEdges[0].description).toBe('old');
+    expect(refresh).toBeTypeOf('function');
+
+    // The first event was already dispatched, but a later edge commit can
+    // happen while that job waits for another checkout writer.
+    await db.edge.update({ where: { id: edge.id }, data: { description: 'new' } });
+    const latest = await refresh!();
+    expect(latest?.outgoingEdges[0].description).toBe('new');
+  });
+
   it('defaults ownerRepo to "" and clientId to null when the event omits them', async () => {
     const node = await db.node.create({
       data: { id: generateId(), memoryId, loc: 'bare', name: 'Bare', tags: [] },
