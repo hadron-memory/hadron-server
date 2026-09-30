@@ -4,7 +4,7 @@
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { tmpdir, uptime } from 'node:os';
 import { join } from 'node:path';
 import {
   type Config, type Runner, type RunResult, RouterError, State, describeOutcome, loadConfig, pollOnce, status,
@@ -373,6 +373,64 @@ describe('Orca attention router — failures leave the token alone', () => {
     mkdirSync(join(c.stateDir, '.writer-lock'), { recursive: true });
     writeFileSync(join(c.stateDir, '.writer-lock', 'owner'), '1'); // launchd/init: alive, not ours
     expect(() => poll(c)).toThrow(RouterError);
+  });
+
+  const lockDir = (c: Config) => join(c.stateDir, '.writer-lock');
+  const writeOwner = (c: Config, rec: unknown) => {
+    mkdirSync(lockDir(c), { recursive: true });
+    writeFileSync(join(lockDir(c), 'owner'), typeof rec === 'string' ? rec : JSON.stringify(rec));
+  };
+  const boot = () => Date.now() - uptime() * 1000;
+
+  it('L1: a lock from before a REBOOT is reclaimed, even if its pid is alive now (@codex P2, #1490)', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    writeOwner(c, { pid: process.pid, boot: 0, startedAt: Date.now() });
+    expect(poll(c).adopted).toBe(true);
+  });
+
+  it('L2: a REUSED pid (its process started after the lock was taken) is not the owner: reclaimed', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    writeOwner(c, { pid: process.pid, boot: boot(), startedAt: 0 });
+    expect(poll(c).adopted).toBe(true);
+  });
+
+  it('L3: a genuinely live owner (same boot, pid alive, started before the lock) is never displaced', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    const rec = { pid: process.pid, boot: boot(), startedAt: Date.now() };
+    writeOwner(c, rec);
+    expect(() => poll(c)).toThrow(RouterError);
+    expect(readFileSync(join(lockDir(c), 'owner'), 'utf8')).toBe(JSON.stringify(rec));
+  });
+
+  it('L4: while another run holds the reclaim mutex, a dead lock is left alone (no double reclaim, @codex P2)', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    writeOwner(c, '999999');
+    mkdirSync(join(c.stateDir, '.writer-lock.reclaim'));
+    expect(() => poll(c)).toThrow(RouterError);
+    expect(readFileSync(join(lockDir(c), 'owner'), 'utf8')).toBe('999999');
+  });
+
+  it('L5: a reclaim mutex left by a crash is itself reclaimed after its grace', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    writeOwner(c, '999999');
+    const m = join(c.stateDir, '.writer-lock.reclaim');
+    mkdirSync(m);
+    const old = new Date(Date.now() - 5 * 60_000);
+    utimesSync(m, old, old);
+    expect(poll(c).adopted).toBe(true);
+    expect(existsSync(m)).toBe(false);
+  });
+
+  it('L6: release never deletes a lock this run no longer owns', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    const base = fake.run;
+    fake.run = (argv) => {
+      // Mid-run, the lock is (wrongly) taken over: our release must leave it.
+      if (argv[1] === 'api' && argv[2].includes('teamAttentionPage')) writeFileSync(join(lockDir(c), 'owner'), 'someone-else');
+      return base(argv);
+    };
+    poll(c);
+    expect(readFileSync(join(lockDir(c), 'owner'), 'utf8')).toBe('someone-else');
   });
 
   it('a lock left by a dead process is reclaimed (@codex P2, #1490)', () => {

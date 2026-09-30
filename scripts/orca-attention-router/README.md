@@ -42,7 +42,14 @@ Measured 2026-09-30; finding `hrn:node:hadronmemory.com:hadron-server:findings:o
 
 **Roster rule:** each roster worktree must be unique. The config is refused otherwise, because two workers would share one terminal.
 
-State lives in `stateDir` (`0700`; the token file is `0600`), separate from every other router's. The single-writer lock records its owner's pid. A lock left by a killed or crashed run is reclaimed on the next poll, and so is one whose owner record is missing and that is older than a minute. A live owner, even another user's, is never displaced. Keep `adopted.token` private: never print, paste or reset it.
+State lives in `stateDir` (`0700`; the token file is `0600`), separate from every other router's. The single-writer lock records its owner's pid, the host's boot time, and when the lock was taken. The next poll reclaims a lock whose owner is provably gone:
+- the host rebooted since;
+- no process has the pid;
+- the process now holding the pid started after the lock was taken (pid reuse).
+
+A lock with no owner record that is older than a minute is reclaimed too. A live owner, even another user's, is never displaced.
+
+Reclaim is serialized by a short-lived `.writer-lock.reclaim` mutex (itself reclaimed after a minute), and only the exact owner record judged dead is removed, so two runs cannot both reclaim. Release removes the lock only while it still holds this run's record. Keep `adopted.token` private: never print, paste or reset it.
 
 ## Commands
 

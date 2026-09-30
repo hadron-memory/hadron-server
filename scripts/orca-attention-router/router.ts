@@ -33,7 +33,7 @@ import { createHash } from 'node:crypto';
 import {
   chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, writeFileSync,
 } from 'node:fs';
-import { homedir } from 'node:os';
+import { homedir, uptime } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -206,55 +206,143 @@ function atomicWrite(path: string, text: string): void {
 
 /** A lock with no owner record is reclaimed once it is this old (a crash between mkdir and the write). */
 const OWNERLESS_LOCK_GRACE_MS = 60_000;
+/** A reclaim mutex older than this was left by a crash mid-reclaim. */
+const RECLAIM_MUTEX_GRACE_MS = 60_000;
+/** Two readings of the boot time closer than this are the same boot. */
+const BOOT_TOLERANCE_MS = 120_000;
 
-/** True unless the lock's recorded owner process is provably gone. */
-function lockHolderAlive(lock: string): boolean {
-  let pid: number;
+/** This host's boot time, derived from uptime. */
+const bootEpoch = (): number => Date.now() - uptime() * 1000;
+
+/**
+ * When a process started, or null when that cannot be read. Uses `ps`,
+ * which reads any user's processes.
+ */
+export function processStartedAt(pid: number): number | null {
+  const res = spawnSync('ps', ['-o', 'lstart=', '-p', String(pid)], { encoding: 'utf8' });
+  const t = Date.parse((res.stdout ?? '').trim());
+  return Number.isFinite(t) ? t : null;
+}
+
+interface LockOwner {
+  pid: number;
+  /** The host's boot time when the lock was taken: a reboot proves the owner gone. */
+  boot: number;
+  /** When the lock was taken: a process with this pid that started later is a REUSE of the pid. */
+  startedAt: number;
+}
+
+/** This process's owner record. */
+const ownRecord = (): string => JSON.stringify({ pid: process.pid, boot: bootEpoch(), startedAt: Date.now() } satisfies LockOwner);
+
+/** The lock's raw owner record, or null when there is none (yet). */
+function readOwner(lock: string): string | null {
   try {
-    pid = Number(readFileSync(join(lock, 'owner'), 'utf8').trim());
+    return readFileSync(join(lock, 'owner'), 'utf8');
   } catch {
+    return null;
+  }
+}
+
+/**
+ * True unless the recorded owner is provably gone. Gone means one of:
+ *  - the host rebooted since (the boot time moved);
+ *  - no process has the pid (ESRCH);
+ *  - the process with that pid started AFTER the lock was taken, so the pid
+ *    was reused (@codex P2, #1490).
+ * A live owner, including another user's (EPERM), is never displaced. An
+ * owner record that cannot be parsed is not trusted to be alive.
+ */
+export function lockHolderAlive(lock: string, raw: string | null): boolean {
+  if (raw === null) {
     try {
       return Date.now() - statSync(lock).mtimeMs < OWNERLESS_LOCK_GRACE_MS;
     } catch {
       return false;
     }
   }
-  if (!Number.isInteger(pid) || pid <= 0) return false;
+  let parsed: unknown = null;
   try {
-    process.kill(pid, 0);
-    return true;
+    parsed = JSON.parse(raw);
+  } catch {
+    /* not JSON */
+  }
+  // An older, pid-only record parses as a bare NUMBER (or not at all): read the pid.
+  const owner: Partial<LockOwner> = parsed !== null && typeof parsed === 'object'
+    ? (parsed as Partial<LockOwner>)
+    : { pid: Number(raw.trim()) };
+  const pid = owner.pid;
+  if (!Number.isInteger(pid) || (pid as number) <= 0) return false;
+  if (typeof owner.boot === 'number' && Math.abs(owner.boot - bootEpoch()) > BOOT_TOLERANCE_MS) return false;
+  try {
+    process.kill(pid as number, 0);
   } catch (e) {
     // EPERM: the process exists under another user; only ESRCH proves it gone.
-    return (e as NodeJS.ErrnoException).code !== 'ESRCH';
+    if ((e as NodeJS.ErrnoException).code === 'ESRCH') return false;
   }
+  if (typeof owner.startedAt === 'number') {
+    const started = processStartedAt(pid as number);
+    // `ps` reports whole seconds: allow for the truncation.
+    if (started !== null && started > owner.startedAt + 1000) return false;
+  }
+  return true;
 }
 
 /**
  * One writer at a time: a mkdir lock in the state directory, recording its
- * owner's pid. A lock whose owner is dead (killed, crashed, host restart) is
- * reclaimed, so a crash cannot silence the router until someone notices
- * (@codex P2, #1490). A live owner is never displaced.
+ * owner (pid, boot, start). A lock whose owner is provably gone (killed,
+ * crashed, host restart, pid reused) is reclaimed, so a crash cannot silence
+ * the router until someone notices (@codex P2, #1490). A live owner is never
+ * displaced.
+ *
+ * Reclaim is serialized by a short-lived reclaim mutex, and the owner record
+ * is re-read under it. Only the exact record judged dead is removed, so two
+ * runs that both saw the same stale lock cannot both win, and the second can
+ * never delete the lock the first just took (@codex P2, #1490). Release also
+ * removes the lock only while it still holds this run's record.
  */
 function withLock<T>(stateDir: string, fn: () => T): T {
   const lock = join(stateDir, '.writer-lock');
+  const reclaim = join(stateDir, '.writer-lock.reclaim');
+  const busy = () => new RouterError(`another router run holds ${lock}`);
+  const mine = ownRecord();
   const acquire = (): boolean => {
     try {
       mkdirSync(lock);
-      writeFileSync(join(lock, 'owner'), String(process.pid));
-      return true;
     } catch {
       return false;
     }
+    writeFileSync(join(lock, 'owner'), mine);
+    return true;
   };
+
   if (!acquire()) {
-    if (lockHolderAlive(lock)) throw new RouterError(`another router run holds ${lock}`);
-    rmSync(lock, { recursive: true, force: true });
-    if (!acquire()) throw new RouterError(`another router run holds ${lock}`);
+    const judged = readOwner(lock);
+    if (lockHolderAlive(lock, judged)) throw busy();
+    // A reclaim mutex left behind by a crash mid-reclaim is itself reclaimed.
+    try {
+      if (Date.now() - statSync(reclaim).mtimeMs > RECLAIM_MUTEX_GRACE_MS) rmSync(reclaim, { recursive: true, force: true });
+    } catch {
+      /* none */
+    }
+    try {
+      mkdirSync(reclaim);
+    } catch {
+      throw busy(); // another run is reclaiming right now
+    }
+    try {
+      // Still the very record judged dead? Anything else is someone's live lock.
+      if (readOwner(lock) !== judged) throw busy();
+      rmSync(lock, { recursive: true, force: true });
+      if (!acquire()) throw busy();
+    } finally {
+      rmSync(reclaim, { recursive: true, force: true });
+    }
   }
   try {
     return fn();
   } finally {
-    rmSync(lock, { recursive: true, force: true });
+    if (readOwner(lock) === mine) rmSync(lock, { recursive: true, force: true });
   }
 }
 
