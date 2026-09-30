@@ -184,8 +184,8 @@ interface ScannableCorpus {
   currentUrnHistorical: string[];
   /** Historical MEMORY holders, including deleted ones, used only to translate NODE alias keys. */
   historicalTranslators: Map<string, string[]>;
-  /** Live holders of a former published URN, retained before the read gate for direct-address precedence. */
-  publishedHolders: Map<string, string[]>;
+  /** Former names with a current holder the caller cannot read: decline uniformly, independent of its rows. */
+  unreadablePublishedUrns: Set<string>;
 }
 
 /**
@@ -274,6 +274,10 @@ async function loadScannableCorpus(ctx: Context, memoryRef: string): Promise<Sca
     for (const m of ids) if (await isMemoryReadableCached(ctx, m)) out.push(m);
     return out;
   };
+  const unreadablePublishedUrns = new Set<string>();
+  for (const [urn, ids] of publishedHolders) {
+    if ((await readable(ids)).length !== ids.length) unreadablePublishedUrns.add(urn);
+  }
   for (const [urn, ids] of shadowed) {
     const visible = await readable(ids);
     if (visible.length) shadowed.set(urn, visible);
@@ -283,7 +287,7 @@ async function loadScannableCorpus(ctx: Context, memoryRef: string): Promise<Sca
     id, urn: memory.urn, pattern: corpusReferencePattern(urns), shadowed,
     currentUrnHistorical: await readable(currentUrnHistorical),
     historicalTranslators,
-    publishedHolders,
+    unreadablePublishedUrns,
   };
 }
 
@@ -307,7 +311,6 @@ async function referenceAcceptor(
     for (const memoryId of [
       ...claimantsOf(ref),
       ...(corpus.historicalTranslators.get(ref.memoryUrn) ?? []),
-      ...(corpus.publishedHolders.get(ref.memoryUrn) ?? []),
       corpus.id,
     ]) {
       lookup.set(`${memoryId}\u0000${ref.targetLoc}`, { memoryId, loc: ref.targetLoc });
@@ -409,20 +412,17 @@ async function referenceAcceptor(
     }
   }
   return (ref) => {
+    // A current holder of a former name may be private. Classify every cited
+    // loc under that name the same way, whether or not that holder has a row:
+    // otherwise backlinks and renumber dry-runs become a foreign-loc probe.
+    if (corpus.unreadablePublishedUrns.has(ref.memoryUrn)) return null;
     if (ref.memoryUrn === corpus.urn && taken.has(`${corpus.id}\u0000${ref.targetLoc}`)) return ref.targetLoc;
     if (claimantsOf(ref).some((m) => taken.has(`${m}\u0000${ref.targetLoc}`))) return null;
     const address = `${ref.memoryUrn}:${ref.targetLoc}`;
-    // A live node in the memory that currently owns a former published URN
-    // wins before historical rows and aliases. If those would otherwise point
-    // to a readable corpus node, declining the citation matches node(ref:)
-    // without exposing a lone hidden published holder's node.
-    if (corpus.publishedHolders.get(ref.memoryUrn)?.some((m) => taken.has(`${m}\u0000${ref.targetLoc}`))
-      && (taken.has(`${corpus.id}\u0000${ref.targetLoc}`) || typeof aliasResolved.get(address) === 'string')) return null;
     if (forRewrite && ref.memoryUrn !== corpus.urn) {
       // A former name with no confirmed corpus target may now belong to a
       // hidden published holder. Decline it uniformly, with or without that
       // holder's row, so the dry-run cannot probe foreign child addresses.
-      if (corpus.publishedHolders.get(ref.memoryUrn)?.some((m) => taken.has(`${m}\u0000${ref.targetLoc}`))) return null;
       if (aliasResolved.has(address)) return aliasResolved.get(address)!;
       return taken.has(`${corpus.id}\u0000${ref.targetLoc}`) ? ref.targetLoc : null;
     }

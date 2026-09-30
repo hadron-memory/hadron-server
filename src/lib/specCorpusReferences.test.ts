@@ -259,20 +259,26 @@ describe('former URNs use live-address precedence (@codex P2 on #1453)', () => {
       id: generateId(), urn: formerUrn, name: 'Private published holder',
       class: 'private', organizationId: org.id, userId: outsider.id,
     } });
-    const hiddenNode = await db.node.create({ data: {
-      id: generateId(), memoryId: holder.id, loc: 'pas:010', name: 'Private published node',
-    } });
     await db.node.update({ where: { id: other.id }, data: {
       content: `Published: hrn:node:${formerUrn}:pas:010.`,
+    } });
+    const beforeBacklinks = await resolvers.Query.specBacklinks(null, { memoryRef: draft.id, loc: 'pas:010' }, as());
+    const beforePlan = await specCorpusRenumberMutations.renumberSpec(
+      null, { memoryRef: draft.id, fromLoc: 'pas:010', toLoc: 'pas:040', dryRun: true }, as(),
+    );
+    const hiddenNode = await db.node.create({ data: {
+      id: generateId(), memoryId: holder.id, loc: 'pas:010', name: 'Private published node',
     } });
 
     await expect(resolveNodeRefForCaller(as(), `hrn:node:${formerUrn}:pas:010`))
       .resolves.toEqual({ id: hiddenNode.id });
     const backlinks = await resolvers.Query.specBacklinks(null, { memoryRef: draft.id, loc: 'pas:010' }, as());
+    expect(backlinks).toEqual(beforeBacklinks);
     expect(backlinks.filter((ref) => ref.kind === 'URN' && ref.sourceLoc === 'pas:020')).toEqual([]);
     const plan = await specCorpusRenumberMutations.renumberSpec(
       null, { memoryRef: draft.id, fromLoc: 'pas:010', toLoc: 'pas:040', dryRun: true }, as(),
     );
+    expect(plan.rewrites).toEqual(beforePlan.rewrites);
     expect(plan.rewrites.filter((row) => row.nodeId === other.id)).toEqual([]);
   });
 
