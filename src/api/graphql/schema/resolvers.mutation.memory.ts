@@ -823,6 +823,11 @@ export const memoryMutations = {
       ({ id } = await resolveMemoryRef(ctx.db, ref));
       const memory = await ctx.db.memory.findUniqueOrThrow({ where: { id } });
       await concealUnreadableDenial(ctx, id, ref, () => requireMemoryManageAccess(ctx, memory));
+      if (newOrgId != null && newOrgId !== memory.organizationId) {
+        throw new GraphQLError('Use transferMemoryOwnership to change a memory owner.', {
+          extensions: { code: 'USE_TRANSFER_MEMORY_OWNERSHIP' },
+        });
+      }
       // #725 — validate the property schema for well-formedness BEFORE it is
       // stored: a malformed schema is BAD_USER_INPUT, never a persisted garbage
       // blob. `null` clears it; the stored value is the normalized schema (so
@@ -848,10 +853,6 @@ export const memoryMutations = {
       // an explicit null clears it (DB-only mode).
       assertValidMemorySource(source);
       assertValidBranches({ readBranch, writeBranch });
-      // If transferring to a new org, require ADMIN on the target org too
-      if (newOrgId && newOrgId !== memory.organizationId) {
-        await requireOrgRole(ctx, newOrgId, 'ADMIN');
-      }
       // cor:acl:080:03 — un-PUBLIC-ing a COVERED memory that a PUBLIC agent
       // links would break the congruence invariant; reject before persisting.
       // The helper excludes per-user + app-scoped memories (never public).
@@ -860,15 +861,8 @@ export const memoryMutations = {
       // `updateAgent(visibility: PUBLIC)` cannot observe this memory as still
       // PUBLIC while this call observes no PUBLIC agent. This early pass stays
       // as the fail-fast, ahead of the URN/alias writes.
-      if (visibility !== undefined || newOrgId !== undefined) {
-        // Judged against the RESULTING tenant (@codex / @copilot, PR #1357): a
-        // call that also transfers the memory must not classify agents against
-        // the organization it is leaving; a transfer alone is checked too.
-        await assertMemoryVisibilityChangeAllowed(
-          ctx.db,
-          { ...memory, organizationId: newOrgId ?? memory.organizationId },
-          visibility ?? memory.visibility,
-        );
+      if (visibility !== undefined) {
+        await assertMemoryVisibilityChangeAllowed(ctx.db, memory, visibility);
       }
       // #1349 (@codex, PR #1357): narrowing out of PUBLIC also REVOKES the
       // foreign-tenant agent links that only PUBLIC ever justified. Deferred
@@ -882,16 +876,16 @@ export const memoryMutations = {
           extensions: { code: 'BAD_USER_INPUT' },
         });
       }
-      // Rebuild URN if slug or org changed
-      const effectiveOrgId = newOrgId ?? memory.organizationId;
+      // Owner changes use transferMemoryOwnership; only a slug change reaches
+      // this path.
       let newUrn: string | undefined;
-      if (urn !== undefined || (newOrgId && newOrgId !== memory.organizationId)) {
-        if (!effectiveOrgId) {
-          throw new GraphQLError('Renaming or transferring the URN is not supported for a user-owned memory yet.', {
+      if (urn !== undefined) {
+        if (!memory.organizationId) {
+          throw new GraphQLError('Renaming the URN is not supported for a user-owned memory yet.', {
             extensions: { code: 'BAD_USER_INPUT' },
           });
         }
-        const org = await ctx.db.organization.findUniqueOrThrow({ where: { id: effectiveOrgId }, select: { urn: true } });
+        const org = await ctx.db.organization.findUniqueOrThrow({ where: { id: memory.organizationId }, select: { urn: true } });
         // Guard: a memory slug must be BARE — not a full or embedded URN. The
         // portal settings form once mis-derived the slug from a canonical
         // `hrn:memory:<org>::<slug>` and sent `memory:<org>::<slug>`, which
@@ -899,17 +893,14 @@ export const memoryMutations = {
         // (the prod /app/orgs outage). Reject a client-supplied slug carrying a
         // scheme prefix, a URN type marker at the start, or a `::` hierarchy
         // separator BEFORE the write, so a bad value can never be persisted.
-        // (The org-transfer fallback below derives the slug from the stored,
-        // already-valid URN, so it's only the client `urn` arg we validate.)
-        if (urn !== undefined && /^(hrn|urn|memory|agent|app|node|org):|::/.test(urn)) {
+        if (/^(hrn|urn|memory|agent|app|node|org):|::/.test(urn)) {
           throw new GraphQLError(
             `Invalid memory slug "${urn}": expected a bare slug (e.g. "experiments"), not a full or prefixed URN.`,
             { extensions: { code: 'BAD_USER_INPUT' } },
           );
         }
-        // #574: slugify an explicit client slug (lowercase, illegal chars → '-');
-        // the org-transfer fallback reuses the stored URN's already-valid slug.
-        const slug = urn !== undefined ? deriveSlugFromName(urn) : memory.urn.split(':').slice(1).join(':');
+        // #574: slugify an explicit client slug (lowercase, illegal chars → '-').
+        const slug = deriveSlugFromName(urn);
         newUrn = `${org.urn}:${slug}`;
       }
 
@@ -987,8 +978,8 @@ export const memoryMutations = {
         // FOR UPDATE serializes the renames and makes each one record the urn it
         // actually superseded. `updateOrganization` already did this; the three
         // single-entity paths did not.
-        const [lockedRow] = await tx.$queryRaw<{ urn: string }[]>`
-          SELECT urn FROM memories WHERE id = ${id} FOR UPDATE
+        const [lockedRow] = await tx.$queryRaw<{ urn: string; organizationId: string | null }[]>`
+          SELECT urn, organization_id AS "organizationId" FROM memories WHERE id = ${id} FOR UPDATE
         `;
         const lockedMemory = await tx.memory.findUniqueOrThrow({ where: { id } });
         const txCtx = withoutRequestCaches(ctx, tx);
@@ -1007,6 +998,11 @@ export const memoryMutations = {
             extensions: { code: 'CONFLICT' },
           });
         }
+        if (newOrgId != null && newOrgId !== lockedRow?.organizationId) {
+          throw new GraphQLError('Use transferMemoryOwnership to change a memory owner.', {
+            extensions: { code: 'USE_TRANSFER_MEMORY_OWNERSHIP' },
+          });
+        }
         if (newUrn !== undefined) {
           await recordUrnRename(tx, {
             entityType: 'MEMORY',
@@ -1022,7 +1018,6 @@ export const memoryMutations = {
         where: { id },
         data: {
           ...(name !== undefined ? { name } : {}),
-          ...(newOrgId ? { organizationId: newOrgId } : {}),
           ...(newUrn !== undefined ? { urn: newUrn } : {}),
           ...(shortDescription !== undefined ? { shortDescription } : {}),
           ...(description !== undefined ? { description } : {}),
@@ -1068,27 +1063,19 @@ export const memoryMutations = {
         // #1349 (@codex, PR #1357) — inside the SAME transaction as the
         // visibility write, so a memory can never be non-PUBLIC while the
         // foreign links that only PUBLIC justified are still live.
-        // Fires on a visibility change OR an org transfer, and classifies
-        // against `row` — the POST-update state (@codex, PR #1357). Keyed on
-        // the pre-update row it read tenancy from the organization the memory
-        // had just left; skipped on a transfer, it left the source tenant's
-        // Apps reading a memory that had moved away from them.
+        // Fires on a visibility change and classifies against `row` — the
+        // post-update state (@codex, PR #1357). Owner transfers use the
+        // dedicated mutation and cannot reach this path.
         // PINNED (harness #24): removing this re-check fails "a concurrent
         // narrowing and agent publication cannot both win". An earlier note here
         // called it unproven; later tests staged the interleaving — a
         // publication committing between the pre-transaction check above and
         // this row lock — which would otherwise leave a PUBLIC agent referencing
         // knowledge this call makes non-public (cor:acl:080:03).
-        if (visibility !== undefined || newOrgId !== undefined) {
-          // The POST-update row, like the sweep below — a transfer in the same
-          // call otherwise had the two judge DIFFERENT tenants. And on a
-          // transfer ALONE too (@copilot, PR #1357): moving a non-PUBLIC memory
-          // into a tenant whose PUBLIC agent already links it would make that
-          // link same-tenant, so the sweep keeps it — a PUBLIC agent holding
-          // non-public knowledge. With no new visibility, the row's own counts.
-          await assertMemoryVisibilityChangeAllowed(tx, row, visibility ?? row.visibility);
+        if (visibility !== undefined) {
+          await assertMemoryVisibilityChangeAllowed(tx, row, visibility);
         }
-        if (visibility !== undefined || newOrgId !== undefined) {
+        if (visibility !== undefined) {
           await revokeLinksForeignToTenant(tx, row, ctx.userId ?? ctx.clientId ?? null);
         }
         return row;
