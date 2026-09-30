@@ -7,17 +7,85 @@
   "busyWaitMs": 60000,
   "submitWaitS": 15,
   "roster": [
-    {"worker": "01a009180fe872c3bf9914738a9da361", "name": "Ada",     "worktree": "/Users/holger/orca/workspaces/hadron-server/ada"},
-    {"worker": "01a0d91d62727f5885f0f54834081b94", "name": "Andi",    "worktree": "/Users/holger/orca/workspaces/hadron-server/andi"},
-    {"worker": "01a0dfc713c471ad9650952cac71b682", "name": "Anne",    "worktree": "/Users/holger/orca/workspaces/hadron-server/anne"},
-    {"worker": "01a0e93ca2447c9a87ddcea9583e8c25", "name": "Baloo",   "worktree": "/Users/holger/orca/workspaces/hadron-server/baloo"},
-    {"worker": "01a0ef267ec17e9d972f6765e7fa4825", "name": "Bindi",   "worktree": "/Users/holger/orca/workspaces/hadron-server/bindi"},
-    {"worker": "01a0e3966ffe7434b97ce3daa02e75ac", "name": "Charles", "worktree": "/Users/holger/orca/workspaces/hadron-server/charles"},
-    {"worker": "01a00918116073139ebb081b1d70b87c", "name": "Dara",    "worktree": "/Users/holger/orca/workspaces/hadron-server/dara"},
-    {"worker": "01a0ef40baf07dac8ce23c6b330d93c3", "name": "Diego",   "worktree": "/Users/holger/orca/workspaces/hadron-server/diego"},
-    {"worker": "01a0a5ba59a377d2a01a8ea32ae98194", "name": "Eli",     "worktree": "/Users/holger/orca/workspaces/hadron-server/eli"},
-    {"worker": "01a0e0141aff706ab71515bcf77d0968", "name": "Ella",    "worktree": "/Users/holger/orca/workspaces/hadron-server/ella"},
-    {"worker": "01a0e920edc77ee1b3bf16a790668309", "name": "Gene",    "worktree": "/Users/holger/orca/workspaces/hadron-portal/gene"},
-    {"worker": "01a0d0a5245777df837bed606707d2d5", "name": "Jane",    "worktree": "/Users/holger/orca/workspaces/hadron-cli/jane"}
+    {
+      "worker": "01a009180fe872c3bf9914738a9da361",
+      "name": "Ada",
+      "worktree": "/Users/holger/orca/workspaces/hadron-server/ada"
+    },
+    {
+      "worker": "01a0d91d62727f5885f0f54834081b94",
+      "name": "Andi",
+      "worktree": "/Users/holger/orca/workspaces/hadron-server/andi"
+    },
+    {
+      "worker": "01a0dfc713c471ad9650952cac71b682",
+      "name": "Anne",
+      "worktree": "/Users/holger/orca/workspaces/hadron-server/anne"
+    },
+    {
+      "worker": "01a0e942bbf275ab8fe8f72b0c8552e9",
+      "name": "Atilla",
+      "worktree": "/Users/holger/orca/workspaces/hadron-server/atilla"
+    },
+    {
+      "worker": "01a0e93ca2447c9a87ddcea9583e8c25",
+      "name": "Baloo",
+      "worktree": "/Users/holger/orca/workspaces/hadron-server/baloo"
+    },
+    {
+      "worker": "01a0ef267ec17e9d972f6765e7fa4825",
+      "name": "Bindi",
+      "worktree": "/Users/holger/orca/workspaces/hadron-server/bindi"
+    },
+    {
+      "worker": "01a0e3966ffe7434b97ce3daa02e75ac",
+      "name": "Charles",
+      "worktree": "/Users/holger/orca/workspaces/hadron-server/charles"
+    },
+    {
+      "worker": "01a0d936b5bb7b99b8132e55ed9399e6",
+      "name": "Chip",
+      "worktree": "/Users/holger/orca/workspaces/hadron-server/chip"
+    },
+    {
+      "worker": "01a00918116073139ebb081b1d70b87c",
+      "name": "Dara",
+      "worktree": "/Users/holger/orca/workspaces/hadron-server/dara"
+    },
+    {
+      "worker": "01a0ef40baf07dac8ce23c6b330d93c3",
+      "name": "Diego",
+      "worktree": "/Users/holger/orca/workspaces/hadron-server/diego"
+    },
+    {
+      "worker": "01a0a5ba59a377d2a01a8ea32ae98194",
+      "name": "Eli",
+      "worktree": "/Users/holger/orca/workspaces/hadron-server/eli"
+    },
+    {
+      "worker": "01a0e0141aff706ab71515bcf77d0968",
+      "name": "Ella",
+      "worktree": "/Users/holger/orca/workspaces/hadron-server/ella"
+    },
+    {
+      "worker": "01a0e920edc77ee1b3bf16a790668309",
+      "name": "Gene",
+      "worktree": "/Users/holger/orca/workspaces/hadron-portal/gene"
+    },
+    {
+      "worker": "01a0091812cb7675b12f2a2b1c518836",
+      "name": "Gil",
+      "worktree": "/Users/holger/orca/workspaces/hadron-portal/gil"
+    },
+    {
+      "worker": "01a0d0a5245777df837bed606707d2d5",
+      "name": "Jane",
+      "worktree": "/Users/holger/orca/workspaces/hadron-cli/jane"
+    },
+    {
+      "worker": "01a00918141f76bbbf4acaaa5c028c3c",
+      "name": "Jonas",
+      "worktree": "/Users/holger/orca/workspaces/hadron-cli/jonas"
+    }
   ]
 }
