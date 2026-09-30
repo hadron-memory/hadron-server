@@ -83,6 +83,24 @@ describe('transferMemoryOwnership', () => {
     await expect(transfer({ memoryRef: memory.id, orgRef: org.id, targetClass: 'knowledge' })).rejects.toMatchObject({ extensions: { code: 'MEMORY_TRANSFER_DEPENDENTS' } });
   });
 
+  it('refuses an Agent memory grant before a transfer can change its tenant', async () => {
+    const agent = await db.agent.create({ data: {
+      id: generateId(), organizationId: org.id, urn: `${org.urn}:grant-agent`, name: 'Grant Agent',
+    } });
+    await db.agentMemoryItem.create({ data: {
+      id: generateId(), agentId: agent.id, memoryId: memory.id, role: 'read',
+    } });
+    const input = { memoryRef: memory.id, orgRef: org.id, targetClass: 'knowledge' };
+    const preview = await transfer({ ...input, dryRun: true });
+    expect(preview.dependents).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'Agent grants', count: 1, handling: 'REFUSE' }),
+    ]));
+    await expect(transfer(input)).rejects.toMatchObject({ extensions: { code: 'MEMORY_TRANSFER_DEPENDENTS' } });
+    expect(await db.memory.findUniqueOrThrow({ where: { id: memory.id } })).toMatchObject({
+      ownerUserId: owner.id, organizationId: null, urn: memory.urn,
+    });
+  });
+
   it('re-roots on collision and rejects a stale preview', async () => {
     await db.memory.create({ data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:specs`, name: 'Existing', class: 'knowledge', visibility: 'ORGANIZATION' } });
     const preview = await transfer({ memoryRef: memory.id, orgRef: org.id, targetClass: 'knowledge', dryRun: true });
