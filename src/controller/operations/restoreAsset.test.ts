@@ -4,6 +4,8 @@ import { cleanDb } from '../../test/helpers.js';
 import { generateId } from '../../lib/id.js';
 import { ASSET_RETENTION_WINDOW_MS } from '../../lib/asset/retention.js';
 import { restoreAsset } from './restoreAsset.js';
+import { resolvers } from '../../api/graphql/schema/resolvers.js';
+import { isOrgAdminFor as isAdminFor } from '../../api/graphql/schema/resolvers.helpers.js';
 
 const headObjectMock = vi.hoisted(() => vi.fn());
 
@@ -17,8 +19,6 @@ let admin: { id: string };
 let outsider: { id: string };
 let memory: { id: string; urn: string };
 let assetId: string;
-
-const isAdminFor = async (_db: unknown, userId: string, _orgId: string) => userId === admin.id;
 
 async function seed(over: { deletedAt?: Date | null; uploadedBy?: string } = {}) {
   assetId = generateId();
@@ -56,6 +56,10 @@ beforeEach(async () => {
   outsider = await db.user.create({
     data: { githubId: 9903, githubUsername: 'rs-outsider', roles: ['READER'] },
   });
+  await db.orgMember.createMany({ data: [
+    { organizationId: org.id, userId: user.id, role: 'CONTRIBUTOR' },
+    { organizationId: org.id, userId: admin.id, role: 'ADMIN' },
+  ] });
   memory = await db.memory.create({
     data: {
       class: 'knowledge',
@@ -77,6 +81,58 @@ describe('restoreAsset', () => {
       { assetId },
       isAdminFor,
     );
+    expect(result.deletedAt).toBeNull();
+  });
+
+  it('refuses the former uploader of a carried Asset before probing R2', async () => {
+    await seed();
+    const nextOrg = await db.organization.create({ data: {
+      id: generateId(), name: 'Next restore owner', urn: 'next-restore-asset-owner',
+    } });
+    await resolvers.Mutation.transferMemoryOwnership(null, {
+      memoryRef: memory.id, orgRef: nextOrg.id,
+    }, { db, userId: admin.id, roles: ['ADMIN'] });
+
+    await expect(restoreAsset(db, { userId: user.id }, { assetId }, isAdminFor))
+      .rejects.toMatchObject({ code: 'PERMISSION_DENIED' });
+    expect(headObjectMock).not.toHaveBeenCalled();
+    expect((await db.asset.findUniqueOrThrow({ where: { id: assetId } })).deletedAt).toBeInstanceOf(Date);
+  });
+
+  it('refuses a restore when Memory transfers during the R2 byte check', async () => {
+    await seed();
+    const nextOrg = await db.organization.create({ data: {
+      id: generateId(), name: 'Concurrent restore owner', urn: 'concurrent-restore-asset-owner',
+    } });
+    headObjectMock.mockImplementationOnce(async () => {
+      await resolvers.Mutation.transferMemoryOwnership(null, {
+        memoryRef: memory.id, orgRef: nextOrg.id,
+      }, { db, userId: admin.id, roles: ['ADMIN'] });
+      return { exists: true, contentLength: 1024, contentType: 'application/pdf' };
+    });
+
+    await expect(restoreAsset(db, { userId: user.id }, { assetId }, isAdminFor))
+      .rejects.toMatchObject({ code: 'PERMISSION_DENIED' });
+    expect(headObjectMock).toHaveBeenCalledOnce();
+    expect((await db.asset.findUniqueOrThrow({ where: { id: assetId } })).deletedAt).toBeInstanceOf(Date);
+  });
+
+  it('lets the receiving organization admin restore a carried Asset', async () => {
+    await seed();
+    const receiverAdmin = await db.user.create({ data: {
+      githubId: 9904, githubUsername: 'rs-receiver-admin', roles: ['READER'],
+    } });
+    const nextOrg = await db.organization.create({ data: {
+      id: generateId(), name: 'Receiving restore org', urn: 'receiving-restore-org',
+    } });
+    await db.orgMember.create({ data: {
+      organizationId: nextOrg.id, userId: receiverAdmin.id, role: 'ADMIN',
+    } });
+    await resolvers.Mutation.transferMemoryOwnership(null, {
+      memoryRef: memory.id, orgRef: nextOrg.id,
+    }, { db, userId: admin.id, roles: ['ADMIN'] });
+
+    const result = await restoreAsset(db, { userId: receiverAdmin.id }, { assetId }, isAdminFor);
     expect(result.deletedAt).toBeNull();
   });
 
