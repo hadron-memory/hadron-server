@@ -307,6 +307,34 @@ describe('startAgentSession', () => {
     expect(await db.memory.count()).toBe(memoryCount + 1);
   });
 
+  it('waits for an in-flight uninstall before provisioning anonymous memory', async () => {
+    let releaseUninstall!: () => void;
+    let didUpdate!: () => void;
+    const release = new Promise<void>((resolve) => { releaseUninstall = resolve; });
+    const updated = new Promise<void>((resolve) => { didUpdate = resolve; });
+    const memoryCount = await db.memory.count();
+    const uninstall = db.$transaction(async (tx) => {
+      await tx.app.update({ where: { id: app.id }, data: { uninstalledAt: new Date() } });
+      didUpdate();
+      await release;
+    });
+    await updated;
+    try {
+      const attempted = expect(resolvers.Mutation.startAgentSession(
+        {}, { agentId: agent.id }, appCtx(app.id),
+      )).rejects.toMatchObject({ extensions: { code: 'APP_UNINSTALLED' } });
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      releaseUninstall();
+      await uninstall;
+      await attempted;
+      expect(await db.session.count({ where: { appId: app.id } })).toBe(0);
+      expect(await db.memory.count()).toBe(memoryCount);
+    } finally {
+      releaseUninstall();
+      await uninstall;
+    }
+  });
+
   it('lazily provisions a user memory on first session', async () => {
     await resolvers.Mutation.createAppUser(
       {},

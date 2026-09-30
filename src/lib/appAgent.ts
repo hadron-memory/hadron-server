@@ -227,7 +227,7 @@ export async function getPrimaryAgent<
  * Check whether a specific Agent is installed in an App. Fast PK lookup.
  */
 export async function isAgentInstalled(
-  db: PrismaClient,
+  db: Pick<PrismaClient, 'appAgent'>,
   appId: string,
   agentId: string,
 ): Promise<boolean> {

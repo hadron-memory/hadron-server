@@ -12,7 +12,6 @@ import { authoredContentChanged, clearNodeAuthorship } from '../../../lib/nodeAu
 import { lockAncestorsForCreate, lockAncestorsForCreateMany } from '../../../lib/nodeSubtreeLock.js';
 import { mintMemoryUrnV2 } from '../../../lib/mintMemoryUrnV2.js';
 import { canReadMemory } from '../../../mcp/access-control.js';
-import { ensureAgentSubscription } from '../../../controller/operations/ensureAgentSubscription.js';
 import { isAgentInstalled } from '../../../lib/appAgent.js';
 import {
   parseDataKey,
@@ -57,6 +56,7 @@ import { NodeNotFoundError, AgentNotFoundError, AppNotFoundError } from '../../.
 import { triggerManualRun } from './resolvers.appRun.js';
 import { GraphQLError } from 'graphql';
 import { type InputJsonValue } from '../../../generated/prisma/runtime/library.js';
+import type { Prisma } from '../../../generated/prisma/index.js';
 import { serializeJson } from '../../../integrations/db/provider.js';
 import { deleteToolConnection, type ToolCalendarEvent } from '../../../lib/emailClient.js';
 import {
@@ -111,6 +111,15 @@ function requireSessionAppActive(
       extensions: { code: 'APP_UNINSTALLED', appId },
     });
   }
+}
+
+/** Hold the live App row through the session write so uninstall cannot pass the check mid-flight. */
+async function lockSessionAppActive(tx: Prisma.TransactionClient, appId: string): Promise<void> {
+  const [app] = await tx.$queryRaw<Array<{ deletedAt: Date | null; uninstalledAt: Date | null }>>`
+    SELECT deleted_at AS "deletedAt", uninstalled_at AS "uninstalledAt"
+    FROM apps WHERE id = ${appId} FOR SHARE
+  `;
+  requireSessionAppActive(app ?? null, appId);
 }
 
 /**
@@ -926,11 +935,7 @@ export const sessionMutations = {
         // claiming a name or inserting a session. An explicit Worker ref may
         // have replaced a stale selection above; only the final App matters.
         if (appId) {
-          const app = await tx.app.findUnique({
-            where: { id: appId },
-            select: { deletedAt: true, uninstalledAt: true },
-          });
-          requireSessionAppActive(app, appId);
+          await lockSessionAppActive(tx, appId);
         }
         // Everything about the hold is settled INSIDE this transaction, so the
         // decision and the session insert commit together. The row read far
@@ -1196,221 +1201,223 @@ export const sessionMutations = {
       },
       ctx: Context,
     ) => {
-      if (!ctx.appId) throw new Error('Forbidden: App Key required');
-      const app = await ctx.db.app.findUniqueOrThrow({ where: { id: ctx.appId } });
-      // #1001: the retained AppAgent join still exists after soft uninstall.
-      // Refuse before provisioning personal/anonymous memory or a chatbot session.
-      requireSessionAppActive(app, ctx.appId);
+      const appId = ctx.appId;
+      if (!appId) throw new Error('Forbidden: App Key required');
+      // Lock the App before provisioning any dependent row. The lock and all
+      // writes commit together, so uninstall cannot pass the check mid-flight.
+      const { session, memoryId, parsedKey } = await ctx.db.$transaction(async (tx) => {
+        await lockSessionAppActive(tx, appId);
+        const app = await tx.app.findUniqueOrThrow({ where: { id: appId } });
 
-      // 008: App→Agent is a direct FK; the App can operate exactly the Agent
-      // referenced by App.agent_id (no AppAgent join). Orphan Apps (agent_id
-      // IS NULL) cannot operate any agent.
-      // 023-app-shape Phase 2b: App↔Agent goes through AppAgent. Check
-      // that the requested Agent is installed in the calling App.
-      if (!(await isAgentInstalled(ctx.db, app.id, agentId))) {
-        throw new Error('Forbidden: App is not allowed to operate this agent');
-      }
+        // 008: App→Agent is a direct FK; the App can operate exactly the Agent
+        // referenced by App.agent_id (no AppAgent join). Orphan Apps (agent_id
+        // IS NULL) cannot operate any agent.
+        // 023-app-shape Phase 2b: App↔Agent goes through AppAgent. Check
+        // that the requested Agent is installed in the calling App.
+        if (!(await isAgentInstalled(tx, app.id, agentId))) {
+          throw new Error('Forbidden: App is not allowed to operate this agent');
+        }
 
-      const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: agentId } });
-      if (agent.deletedAt) throw new Error('Agent not found');
-      // Per-user/anonymous session memories are provisioned under the
-      // Agent's owning org (their URN is derived from the org's URN) — not
-      // yet modeled for a user-owned Agent.
-      if (!agent.organizationId) {
-        throw new GraphQLError('startAgentSession is not supported for a user-owned Agent yet.', { extensions: { code: 'BAD_USER_INPUT' } });
-      }
+        const agent = await tx.agent.findUniqueOrThrow({ where: { id: agentId } });
+        if (agent.deletedAt) throw new Error('Agent not found');
+        // Per-user/anonymous session memories are provisioned under the
+        // Agent's owning org (their URN is derived from the org's URN) — not
+        // yet modeled for a user-owned Agent.
+        if (!agent.organizationId) {
+          throw new GraphQLError('startAgentSession is not supported for a user-owned Agent yet.', { extensions: { code: 'BAD_USER_INPUT' } });
+        }
 
-      // SECRET mode requires a data key; USER_ID mode rejects it.
-      if (app.identifyUserMethod === 'SECRET' && !dataKey) {
-        throw new Error('dataKey is required when the app uses identifyUserMethod: SECRET');
-      }
-      if (app.identifyUserMethod === 'USER_ID' && dataKey) {
-        throw new Error('dataKey is only accepted when the app uses identifyUserMethod: SECRET');
-      }
+        // SECRET mode requires a data key; USER_ID mode rejects it.
+        if (app.identifyUserMethod === 'SECRET' && !dataKey) {
+          throw new Error('dataKey is required when the app uses identifyUserMethod: SECRET');
+        }
+        if (app.identifyUserMethod === 'USER_ID' && dataKey) {
+          throw new Error('dataKey is only accepted when the app uses identifyUserMethod: SECRET');
+        }
 
-      const parsedKey: EncryptionKey | null = dataKey ? parseDataKey(dataKey) : null;
+        const parsedKey: EncryptionKey | null = dataKey ? parseDataKey(dataKey) : null;
 
-      // Resolve user (optional — null means anonymous session)
-      let userId: string | null = null;
-      if (externalUserId) {
-        let user = await ctx.db.user.findFirst({
-          where: { externalAppId: ctx.appId, externalId: externalUserId, deletedAt: null },
-        });
-        if (!user) {
-          if (app.createUserPermission !== 'IMPLICIT') {
-            throw new Error('User not found. Call createAppUser first or set createUserPermission=IMPLICIT.');
-          }
-          // Handle is NOT NULL (spec 047). An implicitly-provisioned app
-          // end-user gets a RANDOM handle — it's addressed by (externalAppId,
-          // externalId), not by handle, and its externalId must not leak into a
-          // global handle.
-          const appUserHandle = await generateUniqueHandle(ctx.db);
-          user = await ctx.db.$transaction(async (tx) => {
-            const u = await tx.user.create({
+        // Resolve user (optional — null means anonymous session)
+        let userId: string | null = null;
+        if (externalUserId) {
+          let user = await tx.user.findFirst({
+            where: { externalAppId: appId, externalId: externalUserId, deletedAt: null },
+          });
+          if (!user) {
+            if (app.createUserPermission !== 'IMPLICIT') {
+              throw new Error('User not found. Call createAppUser first or set createUserPermission=IMPLICIT.');
+            }
+            // Handle is NOT NULL (spec 047). An implicitly-provisioned app
+            // end-user gets a RANDOM handle — it's addressed by (externalAppId,
+            // externalId), not by handle, and its externalId must not leak into a
+            // global handle.
+            const appUserHandle = await generateUniqueHandle(tx);
+            user = await tx.user.create({
               data: {
-                externalAppId: ctx.appId,
+                externalAppId: appId,
                 externalId: externalUserId,
                 identityProvider: 'APP',
                 handle: appUserHandle,
-                createdBy: ctx.appId,
+                createdBy: appId,
               },
             });
-            await ensureUserPrincipal(tx, u); // #692: pool principal
-            return u;
+            await ensureUserPrincipal(tx, user); // #692: pool principal
+          }
+          userId = user.id;
+        }
+
+        // 005-agent-subscription FR-002: auto-provision an AgentSubscription
+        // on the first user-attributed contact for (user, agent). Ignore a
+        // duplicate without aborting this PostgreSQL transaction.
+        if (userId) {
+          await tx.agentSubscription.createMany({
+            data: { userId, agentId, activatedAt: new Date() },
+            skipDuplicates: true,
           });
         }
-        userId = user.id;
-      }
 
-      // 005-agent-subscription FR-002: auto-provision an AgentSubscription
-      // on the first user-attributed contact for (user, agent). Idempotent.
-      if (userId) {
-        await ensureAgentSubscription(ctx.db, userId, agentId);
-      }
-
-      // Find or lazily provision the user memory for (agent, user)
-      let memoryId: string;
-      let memoryIsEncrypted = false;
-      if (userId) {
-        const existing = await ctx.db.memory.findFirst({
-          where: { userMemoryOfAgentId: agentId, createdBy: userId, deletedAt: null },
-        });
-        if (existing) {
-          memoryId = existing.id;
-          memoryIsEncrypted = existing.isEncrypted;
+        // Find or lazily provision the user memory for (agent, user)
+        let memoryId: string;
+        let memoryIsEncrypted = false;
+        if (userId) {
+          const existing = await tx.memory.findFirst({
+            where: { userMemoryOfAgentId: agentId, createdBy: userId, deletedAt: null },
+          });
+          if (existing) {
+            memoryId = existing.id;
+            memoryIsEncrypted = existing.isEncrypted;
+          } else {
+            const org = await tx.organization.findUniqueOrThrow({
+              where: { id: agent.organizationId }, select: { urn: true },
+            });
+            const opaqueId = generateId();
+            // #697 Stage 3: mint a FLAT single-atom v2 urn (`<org>:<opaqueId>`) —
+            // the `app-user` scope now lives in the row columns (class/userId/
+            // userMemoryOfAgentId/appId), not the URN path, so node URNs in this
+            // memory round-trip through splitNodeUrn. The opaque id can't collide,
+            // so this stores `<org>:<opaqueId>` unaliased.
+            const memoryUrn = await mintMemoryUrnV2(tx, {
+              root: org.urn,
+              desiredSlug: opaqueId,
+              authorRoot: agentSlugFromUrn(agent.urn),
+            });
+            const created = await tx.memory.create({
+              data: {
+                organizationId: agent.organizationId,
+                urn: memoryUrn,
+                name: `User memory (${agent.name})`,
+                // 005-agent-subscription: per-user memory keyed on userId.
+                // Bidirectional CHECK constraint requires class IN
+                // (personal,private) ⇔ userId IS NOT NULL.
+                userId,
+                // 041 (#516): 'private' is the ONLY encryptable class. In SECRET
+                // mode we birth the memory encrypted, so it must be born 'private'
+                // (owner-only, caller-held key — that IS the private threat model).
+                // Plaintext USER_ID memories stay 'personal'. Both satisfy the
+                // bidirectional CHECK class IN (personal,private) ⇔ userId IS NOT NULL.
+                class: parsedKey !== null ? 'private' : 'personal',
+                // 035-visibility-enum-cleanup: personal/private privacy is
+                // class-driven; visibility is NULL (was PERSONAL).
+                visibility: null,
+                userMemoryOfAgentId: agentId,
+                // 008-agent-installation: personal memories pivot on
+                // (app_id, user_id). The chk_memory_class_app_id constraint
+                // requires app_id when class IN ('app', 'personal').
+                appId,
+                // New user memories in SECRET mode are encrypted from creation.
+                isEncrypted: parsedKey !== null,
+                keyVerifier: parsedKey ? makeKeyVerifier(parsedKey) : null,
+                createdBy: userId,
+              },
+            });
+            memoryId = created.id;
+            memoryIsEncrypted = parsedKey !== null;
+          }
         } else {
-          const org = await ctx.db.organization.findUniqueOrThrow({
+          // Anonymous session — create a scratch memory with expiry. Anonymous
+          // memories are always plaintext until linkMemoryToUser promotes them.
+          const org = await tx.organization.findUniqueOrThrow({
             where: { id: agent.organizationId }, select: { urn: true },
           });
           const opaqueId = generateId();
-          // #697 Stage 3: mint a FLAT single-atom v2 urn (`<org>:<opaqueId>`) —
-          // the `app-user` scope now lives in the row columns (class/userId/
-          // userMemoryOfAgentId/appId), not the URN path, so node URNs in this
-          // memory round-trip through splitNodeUrn. The opaque id can't collide,
-          // so this stores `<org>:<opaqueId>` unaliased.
-          const memoryUrn = await mintMemoryUrnV2(ctx.db, {
+          const agentSlug = agentSlugFromUrn(agent.urn);
+          // #697 Stage 3: flat single-atom v2 urn (`<org>:<opaqueId>`) — the anon
+          // scope lives in the row columns, not the URN path (see the app-user
+          // branch above). Fresh opaque id ⇒ no collision, stored unaliased.
+          const memoryUrn = await mintMemoryUrnV2(tx, {
             root: org.urn,
             desiredSlug: opaqueId,
-            authorRoot: agentSlugFromUrn(agent.urn),
+            authorRoot: agentSlug,
           });
-          const created = await ctx.db.memory.create({
+          const expires = new Date(Date.now() + app.anonymousTtlDays * 24 * 60 * 60 * 1000);
+          const created = await tx.memory.create({
             data: {
               organizationId: agent.organizationId,
               urn: memoryUrn,
-              name: `User memory (${agent.name})`,
-              // 005-agent-subscription: per-user memory keyed on userId.
-              // Bidirectional CHECK constraint requires class IN
-              // (personal,private) ⇔ userId IS NOT NULL.
-              userId,
-              // 041 (#516): 'private' is the ONLY encryptable class. In SECRET
-              // mode we birth the memory encrypted, so it must be born 'private'
-              // (owner-only, caller-held key — that IS the private threat model).
-              // Plaintext USER_ID memories stay 'personal'. Both satisfy the
-              // bidirectional CHECK class IN (personal,private) ⇔ userId IS NOT NULL.
-              class: parsedKey !== null ? 'private' : 'personal',
-              // 035-visibility-enum-cleanup: personal/private privacy is
-              // class-driven; visibility is NULL (was PERSONAL).
+              name: `Anonymous session (${agent.name})`,
+              // Anonymous: no userId yet (linkMemoryToUser later may set
+              // it); class is 'app' since the data belongs to the App's
+              // bucket of records-through-this-agent until promoted.
+              class: 'app',
+              // 035-visibility-enum-cleanup: app-class visibility is NULL.
               visibility: null,
               userMemoryOfAgentId: agentId,
-              // 008-agent-installation: personal memories pivot on
-              // (app_id, user_id). The chk_memory_class_app_id constraint
-              // requires app_id when class IN ('app', 'personal').
-              appId: ctx.appId,
-              // New user memories in SECRET mode are encrypted from creation.
-              isEncrypted: parsedKey !== null,
-              keyVerifier: parsedKey ? makeKeyVerifier(parsedKey) : null,
-              createdBy: userId,
+              // 008-agent-installation: app-class memories require app_id
+              // (chk_memory_class_app_id).
+              appId,
+              anonymousExpiresAt: expires,
+              createdBy: appId,
             },
           });
           memoryId = created.id;
-          memoryIsEncrypted = parsedKey !== null;
+          memoryIsEncrypted = false;
         }
-      } else {
-        // Anonymous session — create a scratch memory with expiry. Anonymous
-        // memories are always plaintext until linkMemoryToUser promotes them.
-        const org = await ctx.db.organization.findUniqueOrThrow({
-          where: { id: agent.organizationId }, select: { urn: true },
-        });
-        const opaqueId = generateId();
-        const agentSlug = agentSlugFromUrn(agent.urn);
-        // #697 Stage 3: flat single-atom v2 urn (`<org>:<opaqueId>`) — the anon
-        // scope lives in the row columns, not the URN path (see the app-user
-        // branch above). Fresh opaque id ⇒ no collision, stored unaliased.
-        const memoryUrn = await mintMemoryUrnV2(ctx.db, {
-          root: org.urn,
-          desiredSlug: opaqueId,
-          authorRoot: agentSlug,
-        });
-        const expires = new Date(Date.now() + app.anonymousTtlDays * 24 * 60 * 60 * 1000);
-        const created = await ctx.db.memory.create({
+
+        // If the memory is encrypted, the caller must provide a matching key.
+        // (In SECRET mode we already required a dataKey above; this check also
+        // handles a later call with USER_ID mode on an already-encrypted mem.)
+        if (memoryIsEncrypted && !parsedKey) {
+          throw new Error('Memory is encrypted; dataKey is required');
+        }
+        if (memoryIsEncrypted && parsedKey) {
+          const keyProof = await tx.memory.findUniqueOrThrow({
+            where: { id: memoryId }, select: { keyVerifier: true },
+          });
+          if (!keyProof.keyVerifier) {
+            throw new GraphQLError('Encrypted memory has no stored key verifier for safe session unlock.', {
+              extensions: { code: 'BAD_UNLOCK_INPUT', memoryId },
+            });
+          }
+          if (!verifyDataKey(keyProof.keyVerifier, parsedKey)) {
+            throw new Error('Wrong dataKey for encrypted memory');
+          }
+        }
+
+        // Clamp session timeout to the app's configured maximum (ceiling)
+        const ttl = Math.min(
+          sessionTimeoutSeconds ?? app.sessionTimeoutSeconds,
+          app.sessionTimeoutSeconds,
+        );
+        const expiresAt = new Date(Date.now() + ttl * 1000);
+
+        const session = await tx.session.create({
           data: {
-            organizationId: agent.organizationId,
-            urn: memoryUrn,
-            name: `Anonymous session (${agent.name})`,
-            // Anonymous: no userId yet (linkMemoryToUser later may set
-            // it); class is 'app' since the data belongs to the App's
-            // bucket of records-through-this-agent until promoted.
-            class: 'app',
-            // 035-visibility-enum-cleanup: app-class visibility is NULL.
-            visibility: null,
-            userMemoryOfAgentId: agentId,
-            // 008-agent-installation: app-class memories require app_id
-            // (chk_memory_class_app_id).
-            appId: ctx.appId,
-            anonymousExpiresAt: expires,
-            createdBy: ctx.appId,
+            id: generateId(),
+            type: 'CHATBOT',
+            appId,
+            userId: userId ?? null,
+            agentId,
+            memoryId,
+            expiresAt,
+            createdBy: appId,
           },
         });
-        memoryId = created.id;
-        memoryIsEncrypted = false;
-      }
 
-      // If the memory is encrypted, the caller must provide a matching key.
-      // (In SECRET mode we already required a dataKey above; this check also
-      // handles a later call with USER_ID mode on an already-encrypted mem.)
-      if (memoryIsEncrypted && !parsedKey) {
-        throw new Error('Memory is encrypted; dataKey is required');
-      }
-      if (memoryIsEncrypted && parsedKey) {
-        const keyProof = await ctx.db.memory.findUniqueOrThrow({
-          where: { id: memoryId }, select: { keyVerifier: true },
-        });
-        if (!keyProof.keyVerifier) {
-          throw new GraphQLError('Encrypted memory has no stored key verifier for safe session unlock.', {
-            extensions: { code: 'BAD_UNLOCK_INPUT', memoryId },
-          });
-        }
-        if (!verifyDataKey(keyProof.keyVerifier, parsedKey)) {
-          throw new Error('Wrong dataKey for encrypted memory');
-        }
-      }
-
-      // Clamp session timeout to the app's configured maximum (ceiling)
-      const ttl = Math.min(
-        sessionTimeoutSeconds ?? app.sessionTimeoutSeconds,
-        app.sessionTimeoutSeconds,
-      );
-      const expiresAt = new Date(Date.now() + ttl * 1000);
-
-      const session = await ctx.db.session.create({
-        data: {
-          id: generateId(),
-          type: 'CHATBOT',
-          appId: ctx.appId,
-          userId: userId ?? null,
-          agentId,
-          memoryId,
-          expiresAt,
-          createdBy: ctx.appId,
-        },
+        return { session, memoryId, parsedKey };
       });
 
-      // Register the key in the session key cache so this session (and any
-      // concurrent one for the same memory) can decrypt content.
-      if (parsedKey) {
-        sessionKeyCache.set(session.id, memoryId, parsedKey);
-      }
-
+      // The cache must only observe a committed session.
+      if (parsedKey) sessionKeyCache.set(session.id, memoryId, parsedKey);
       return session;
     },
 

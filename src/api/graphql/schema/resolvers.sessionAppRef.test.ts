@@ -301,6 +301,30 @@ describe('#943 — App-key precedence', () => {
     expect((await startSession({ db, ...auth } as Context, {})).appId).toBe(app.id);
   });
 
+  it('waits for an in-flight uninstall before starting an ambient-App session', async () => {
+    let releaseUninstall!: () => void;
+    let didUpdate!: () => void;
+    const release = new Promise<void>((resolve) => { releaseUninstall = resolve; });
+    const updated = new Promise<void>((resolve) => { didUpdate = resolve; });
+    const uninstall = db.$transaction(async (tx) => {
+      await tx.app.update({ where: { id: app.id }, data: { uninstalledAt: new Date() } });
+      didUpdate();
+      await release;
+    });
+    await updated;
+    try {
+      const attempted = expectCode(startSession(ctx(undefined, app.id), {}), 'APP_UNINSTALLED');
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      releaseUninstall();
+      await uninstall;
+      await attempted;
+      expect(await db.session.count({ where: { appId: app.id } })).toBe(0);
+    } finally {
+      releaseUninstall();
+      await uninstall;
+    }
+  });
+
   it('refuses a stale active-App selection when no explicit App is named (#1001)', async () => {
     await db.app.update({ where: { id: app.id }, data: { uninstalledAt: new Date() } });
     await expectCode(startSession(ctx(contrib.id, app.id), {}), 'APP_UNINSTALLED');
