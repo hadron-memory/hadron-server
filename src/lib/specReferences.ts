@@ -20,8 +20,8 @@
  * location instead of rewriting them.
  */
 
-/** One loc atom (validateLoc's spec 021 charset): alphanumeric at both ends, dots/underscores/dashes inside. */
-const ATOM = '[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?';
+/** One loc atom (validateLoc's spec 021 charset and 64-character cap). */
+const ATOM = '[A-Za-z0-9](?:[A-Za-z0-9._-]{0,62}[A-Za-z0-9])?';
 /** A loc: atoms joined by single colons. */
 const LOC = `${ATOM}(?::${ATOM})*`;
 /** Separator between URN parts: canonical `::` or legacy `:`. */
@@ -164,8 +164,8 @@ export function findTextCitations(
   const insideUrn = (i: number) => urnSpans.some(([s, e]) => i >= s && i < e);
   // (@codex P2, #1453) A dot followed by an atom character continues the loc
   // (`pas:010.v2` is a different citation), while a dot ending a sentence
-  // does not, so the right boundary excludes only the continuation form.
-  const re = new RegExp(`(?<![A-Za-z0-9._:-])${escapeRe(fromLoc)}(?::${ATOM})*(?![A-Za-z0-9_:-]|\\.[A-Za-z0-9])`, 'g');
+  // does not. Underscores and dashes can follow that dot too (`pas:010._v2`).
+  const re = new RegExp(`(?<![A-Za-z0-9._:-])${escapeRe(fromLoc)}(?::${ATOM})*(?![A-Za-z0-9_:-]|\\.[A-Za-z0-9_-])`, 'g');
   const out: TextCitationMatch[] = [];
   for (const m of text.matchAll(re)) {
     if (insideUrn(m.index!)) continue;

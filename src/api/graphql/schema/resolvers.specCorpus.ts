@@ -4,6 +4,7 @@
 // https://github.com/hadron-memory/hadron-server/issues/1447#issuecomment-5895948862 §4.
 import { GraphQLError } from 'graphql';
 import { Prisma } from '../../../generated/prisma/index.js';
+import { mirrorNodeMoveToGit, type MovedNodeRef } from '../../../integrations/github/mirrorNodeMove.js';
 import type { Context } from './resolvers.js';
 import { nodeMoveOps, writeNodeCore } from './resolvers.mutation.node.js';
 import {
@@ -152,7 +153,7 @@ export const specCorpusMutations = {
       // …with the values this transaction just reset, not the ones read
       // before it (@codex P2, PR #1452): Node.ownerRepo is client-visible.
       return { ...node, isPlaceholder: true, contentHash: null, ownerRepo: null };
-    });
+    }, { timeout: 120_000 });
     for (const effect of effects) effect();
     return reserved;
   },
@@ -269,35 +270,63 @@ async function loadScannableCorpus(ctx: Context, memoryRef: string): Promise<Sca
 }
 
 /**
- * (@codex P2, #1453) Decide which scanned references really point into the
- * corpus: one written with a former URN that another live memory now holds
- * belongs to that memory when it has a live node at the cited loc. One query
- * for the whole scan; the returned predicate is synchronous.
+ * Decide which scanned references really point into the corpus. A live node
+ * at a competing address or a readable moved-node alias claims the citation;
+ * the corpus's own live row wins for its current URN. Batch the lookups and
+ * return a synchronous predicate for the scan.
  */
 async function referenceAcceptor(
-  db: Pick<Context['db'], 'node'>,
+  ctx: Context,
   corpus: ScannableCorpus,
   refs: ReadonlyArray<{ memoryUrn: string; targetLoc: string }>,
 ): Promise<(ref: { memoryUrn: string; targetLoc: string }) => boolean> {
+  const { db } = ctx;
   const claimantsOf = (ref: { memoryUrn: string }): string[] =>
     ref.memoryUrn === corpus.urn ? corpus.currentUrnHistorical : (corpus.shadowed.get(ref.memoryUrn) ?? []);
   const candidates = refs.filter((r) => claimantsOf(r).length > 0);
-  if (candidates.length === 0) return () => true;
-  const live = await db.node.findMany({
-    where: {
-      deletedAt: null,
-      OR: candidates.flatMap((r) => [
-        ...claimantsOf(r).map((memoryId) => ({ memoryId, loc: r.targetLoc })),
-        // The corpus's own node wins for its current URN.
-        ...(r.memoryUrn === corpus.urn ? [{ memoryId: corpus.id, loc: r.targetLoc }] : []),
-      ]),
-    },
+  const lookup = new Map<string, { memoryId: string; loc: string }>();
+  for (const ref of candidates) {
+    for (const memoryId of [
+      ...claimantsOf(ref),
+      ...(ref.memoryUrn === corpus.urn ? [corpus.id] : []),
+    ]) {
+      lookup.set(`${memoryId}\u0000${ref.targetLoc}`, { memoryId, loc: ref.targetLoc });
+    }
+  }
+  const live = lookup.size ? await db.node.findMany({
+    where: { deletedAt: null, OR: [...lookup.values()] },
     select: { memoryId: true, loc: true },
-  });
+  }) : [];
   const taken = new Set(live.map((n) => `${n.memoryId}\u0000${n.loc}`));
+  // A former claimant may have MOVED its node away and left a NODE alias at
+  // the cited address. The row lookup above then misses it, but resolveNodeRef
+  // still follows it. Query each distinct address once; a target the caller
+  // cannot read must not alter the result (one-bit existence oracle).
+  const addresses = [...new Set(refs.map((ref) => `${ref.memoryUrn}:${ref.targetLoc}`))];
+  const aliases: Array<{ urn: string; entityId: string }> = [];
+  for (let offset = 0; offset < addresses.length; offset += SCAN_PAGE) {
+    aliases.push(...await db.urnAlias.findMany({
+      where: { entityType: 'NODE', urn: { in: addresses.slice(offset, offset + SCAN_PAGE) } },
+      select: { urn: true, entityId: true },
+    }));
+  }
+  const targetIds = [...new Set(aliases.map((alias) => alias.entityId))];
+  const aliasTargets = new Map<string, string>();
+  for (let offset = 0; offset < targetIds.length; offset += SCAN_PAGE) {
+    for (const target of await db.node.findMany({
+      where: { id: { in: targetIds.slice(offset, offset + SCAN_PAGE) }, deletedAt: null, memory: { deletedAt: null } },
+      select: { id: true, memoryId: true },
+    })) aliasTargets.set(target.id, target.memoryId);
+  }
+  const aliasTaken = new Set<string>();
+  for (const alias of aliases) {
+    const memoryId = aliasTargets.get(alias.entityId);
+    if (memoryId && await isMemoryReadableCached(ctx, memoryId)) aliasTaken.add(alias.urn);
+  }
   return (ref) => {
     if (ref.memoryUrn === corpus.urn && taken.has(`${corpus.id}\u0000${ref.targetLoc}`)) return true;
-    return !claimantsOf(ref).some((m) => taken.has(`${m}\u0000${ref.targetLoc}`));
+    return !claimantsOf(ref).some((m) => taken.has(`${m}\u0000${ref.targetLoc}`))
+      && !aliasTaken.has(`${ref.memoryUrn}:${ref.targetLoc}`);
   };
 }
 
@@ -365,6 +394,19 @@ async function loadCorpusNodes(db: Pick<Context['db'], 'node'>, memoryId: string
   }
 }
 
+/** Re-read only rows present before a renumber's move; a new occupant of the freed loc cannot join its rewrite set. */
+async function reloadCorpusNodesById(db: Pick<Context['db'], 'node'>, memoryId: string, ids: readonly string[]): Promise<ScannedNode[]> {
+  const nodes: ScannedNode[] = [];
+  for (let offset = 0; offset < ids.length; offset += SCAN_PAGE) {
+    const page = await db.node.findMany({
+      where: { memoryId, deletedAt: null, id: { in: ids.slice(offset, offset + SCAN_PAGE) } },
+      select: SCANNED_SELECT,
+    });
+    nodes.push(...page.map(toScannedNode));
+  }
+  return nodes.sort((a, b) => a.id.localeCompare(b.id));
+}
+
 function scanReferences(nodes: ScannedNode[], pattern: RegExp): ScannedReference[] {
   const out: ScannedReference[] = [];
   for (const n of nodes) {
@@ -415,9 +457,14 @@ export const specCorpusQueries = {
     const corpus = await loadScannableCorpus(ctx, memoryRef);
     const nodes = await loadCorpusNodes(ctx.db, corpus.id);
     const scanned = scanReferences(nodes, corpus.pattern);
-    const accept = await referenceAcceptor(ctx.db, corpus, scanned);
+    const accept = await referenceAcceptor(ctx, corpus, scanned);
     const text = scanned.filter((r) => r.targetLoc === loc && accept(r)).map(fromScan);
-    const target = nodes.find((n) => n.loc === loc);
+    const target = nodes.find((n) => n.loc === loc)
+      ?? await ctx.db.node.findFirst({
+        where: { memoryId: corpus.id, loc, deletedAt: { not: null } }, select: { id: true },
+      });
+    // A live edge into a deleted spec still names its old citation. It is a
+    // backlink, even though the mint/unresolved scan calls it MISSING.
     const edges = target ? await corpusEdgesTo(ctx.db, corpus.id, [target.id]) : [];
     return [
       ...text,
@@ -452,7 +499,7 @@ async function unresolvedReferencesIn(
     const byLoc = new Map(nodes.map((n) => [n.loc, n]));
     const out: SpecReferenceOut[] = [];
     const scanned = scanReferences(nodes, corpus.pattern);
-    const accept = await referenceAcceptor(db, corpus, scanned);
+    const accept = await referenceAcceptor(ctx, corpus, scanned);
     for (const r of scanned) {
       if (!accept(r)) continue;
       const target = byLoc.get(r.targetLoc);
@@ -644,6 +691,8 @@ export const specCorpusRenumberMutations = {
       });
     }
     let nodes = await loadCorpusNodes(ctx.db, corpus.id);
+    const scannedIds = nodes.map((node) => node.id);
+    let movedForMirror: MovedNodeRef[] = [];
     const source = nodes.find((n) => n.loc === fromLoc);
     if (!source) {
       throw new GraphQLError(`No spec at "${fromLoc}" in this corpus.`, {
@@ -677,7 +726,7 @@ export const specCorpusRenumberMutations = {
     // When a prior holder of our URN also has a node at fromLoc, our own live
     // node there is what makes those references ours; once it has moved, the
     // prior holder's node would claim them and they would be left unrewritten.
-    const accept = await referenceAcceptor(ctx.db, corpus, scanReferences(nodes, corpus.pattern));
+    const accept = await referenceAcceptor(ctx, corpus, scanReferences(nodes, corpus.pattern));
 
     if (!dryRun) {
       // Fail before any write, rather than after the move.
@@ -693,11 +742,15 @@ export const specCorpusRenumberMutations = {
         sourceRef: source.id,
         expectedSource: { memoryId: corpus.id, loc: fromLoc },
         targetUrn: `hrn:node:${corpus.urn}:${toLoc}`,
+        // The move's intermediate body can still cite its old subtree. Mirror
+        // once after the revisioned rewrites, from the final database state.
+        mirrorAfterMove: false,
         // (@codex P1, PR #1453) The draft check above ran before the move's
         // lock; a mint can commit in between. Re-decided under the lock.
         requireDraftSource: true,
       });
-      nodes = await loadCorpusNodes(ctx.db, corpus.id);
+      movedForMirror = relocated.map((node) => ({ id: node.id, previousLoc: node.previousLoc }));
+      nodes = await reloadCorpusNodesById(ctx.db, corpus.id, scannedIds);
       // (@codex P2, #1453) Report exactly what the atomic mover relocated,
       // with the loc each node left, not a reconstruction from a later read.
       moved = relocated
@@ -734,6 +787,13 @@ export const specCorpusRenumberMutations = {
         }
       }
       rewrites.push(row);
+    }
+
+    if (movedForMirror.length > 0) {
+      void mirrorNodeMoveToGit(ctx.db, {
+        srcMemoryId: corpus.id, destMemoryId: corpus.id,
+        moved: movedForMirror, clientId: ctx.clientId ?? null,
+      });
     }
 
     // Bare-text copies of the moved citations, located in the corpus as it now

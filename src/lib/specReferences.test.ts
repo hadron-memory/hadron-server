@@ -53,6 +53,12 @@ describe('findCorpusReferences', () => {
     expect(locs('Cite micromentor.org:specs-draft:v1.2:intro, then')).toEqual(['v1.2:intro']);
   });
 
+  it('does not report references with an atom longer than the 64-character loc limit (#1478)', () => {
+    expect(locs(`hrn:node:micromentor.org:specs-draft:${'a'.repeat(64)}`)).toEqual(['a'.repeat(64)]);
+    expect(locs(`hrn:node:micromentor.org:specs-draft:${'a'.repeat(65)}`)).toEqual([]);
+    expect(locs(`hrn:node:micromentor.org:specs-draft:pas:${'b'.repeat(65)}`)).toEqual([]);
+  });
+
   it('also matches under a URN the corpus was published under before a rename', () => {
     const renamed = corpusReferencePattern(['micromentor.org:specs-draft', 'micromentor.org:specs-new']);
     expect(findCorpusReferences('hrn:node:micromentor.org:specs-new:pas:1 and hrn:node:micromentor.org:specs-draft:pas:2', renamed)
@@ -96,5 +102,6 @@ describe('findTextCitations', () => {
     expect(findTextCitations('Versioned pas:010.v2 stays.', P, 'pas:010')).toEqual([]);
     expect(findTextCitations('See pas:010. Then more.', P, 'pas:010').map((c) => c.citation)).toEqual(['pas:010']);
     expect(findTextCitations('See pas:010:01.v2 too', P, 'pas:010').map((c) => c.citation)).toEqual(['pas:010:01.v2']);
+    expect(findTextCitations('See pas:010._v2 too', P, 'pas:010')).toEqual([]);
   });
 });

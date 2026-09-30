@@ -254,6 +254,27 @@ describe('every content write fills a placeholder (@codex P2 on #1452)', () => {
       .toMatchObject({ content: 'The written rule.', isPlaceholder: false });
   });
 
+  it('mergeMemoryGraph: a collision fold with real content fills the destination placeholder (#1478)', async () => {
+    const placeholder = await reserve(draft.id, 'pas:121:01');
+    // The generic merge door refuses governed spec rows. This follow-up is
+    // reachable only for the legacy role-drifted placeholder in the issue.
+    await db.node.update({ where: { id: placeholder.id }, data: { role: null } });
+    const source = await resolvers.Mutation.createMemory(null, {
+      orgId: org.id, name: 'source-draft', draftCorpus: true,
+    }, as(admin.id));
+    await db.node.create({ data: {
+      id: generateId(), memoryId: source.id, loc: 'pas:121:01', name: 'Written spec',
+      nodeType: 'info', content: 'The real rule.',
+    } });
+    await mergeMemoryGraph(db, {
+      sourceMemoryId: source.id, targetMemoryId: draft.id,
+      fields: new Set(['CONTENT']), deleteSourceMem: false, editor: { userId: admin.id },
+    });
+    expect(await db.node.findUniqueOrThrow({ where: { id: placeholder.id } })).toMatchObject({
+      content: 'The real rule.', isPlaceholder: false,
+    });
+  });
+
   it('re-saving real content that is already there clears a stuck placeholder', async () => {
     const reserved = await reserve(draft.id, 'pas:130:01');
     // A write outside the fill hook left real content on a still-marked placeholder.
@@ -275,6 +296,41 @@ describe('reserving over a deleted spec (@codex P2 on #1452)', () => {
     expect(await row(draft.id, 'pas:140:01')).toMatchObject({
       isPlaceholder: true, content: null, abstract: null, description: null,
     });
+  });
+
+  it('archives recursively deleted descendants and their derived edge addresses with the parent', async () => {
+    const target = await db.node.create({ data: {
+      id: generateId(), memoryId: draft.id, loc: 'pas:149', name: 'Target', role: 'spec', nodeType: 'info',
+    } });
+    const parent = await db.node.create({ data: {
+      id: generateId(), memoryId: draft.id, loc: 'pas:140', name: 'Old parent', role: 'spec', nodeType: 'info',
+    } });
+    const child = await db.node.create({ data: {
+      id: generateId(), memoryId: draft.id, loc: 'pas:140:01', name: 'Old child', role: 'spec', nodeType: 'info',
+    } });
+    await db.edge.create({ data: {
+      memoryId: draft.id, sourceId: child.id, targetId: target.id,
+      loc: 'pas:140:01:cites:pas:149', name: 'cites',
+    } });
+    await resolvers.Mutation.deleteNode(null, { nodeRef: parent.id, recursive: true }, as(admin.id));
+
+    const reserved = await reserve(draft.id, 'pas:140');
+    const archived = `pas:140__deleted-${parent.id}`;
+    expect(await db.node.findUniqueOrThrow({ where: { id: child.id } })).toMatchObject({
+      loc: `${archived}:01`, deletedAt: expect.any(Date),
+    });
+    expect(await db.edge.findFirstOrThrow({ where: { sourceId: child.id } }))
+      .toMatchObject({ loc: `${archived}:01:cites:pas:149` });
+    expect(await db.node.count({ where: { memoryId: draft.id, loc: { startsWith: 'pas:140:' } } })).toBe(0);
+
+    const newChild = await db.node.create({ data: {
+      id: generateId(), memoryId: draft.id, loc: 'pas:140:01', name: 'New child', role: 'spec', nodeType: 'info',
+    } });
+    const edge = await resolvers.Mutation.createEdge(null, {
+      sourceRef: newChild.id, targetRef: target.id, name: 'cites',
+    }, as(admin.id));
+    expect(edge).toMatchObject({ loc: 'pas:140:01:cites:pas:149', sourceId: newChild.id });
+    expect(reserved.id).not.toBe(parent.id);
   });
 });
 

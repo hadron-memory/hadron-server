@@ -7,6 +7,7 @@ import { generateId } from './id.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import { specCorpusRenumberMutations } from '../api/graphql/schema/resolvers.specCorpus.js';
 import { nodeMoveOps } from '../api/graphql/schema/resolvers.mutation.node.js';
+import { mirrorNodeMoveToGit } from '../integrations/github/mirrorNodeMove.js';
 
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -66,6 +67,18 @@ describe('specBacklinks (#1449)', () => {
     expect(toRule.map((r) => r.sourceLoc)).toEqual(['pas:010']);
   });
 
+  it('includes a live edge into a deleted target spec at its old citation (#1478)', async () => {
+    const target = await spec('pas:080', 'Soon deleted', 'Old rule.');
+    await db.edge.create({ data: {
+      memoryId: draft.id, sourceId: other.id, targetId: target.id,
+      loc: 'pas:020:cites:pas:080', name: 'cites',
+    } });
+    await db.node.update({ where: { id: target.id }, data: { deletedAt: new Date() } });
+    const refs = await resolvers.Query.specBacklinks(null, { memoryRef: draft.id, loc: 'pas:080' }, as());
+    expect(refs.map((ref) => [ref.kind, ref.sourceLoc, ref.targetLoc]))
+      .toEqual([['EDGE', 'pas:020', 'pas:080']]);
+  });
+
   it('refuses a minted corpus, and conceals an unreadable one as not found', async () => {
     expect(await codeOf(resolvers.Query.specBacklinks(null, { memoryRef: minted.id, loc: 'x' }, as()))).toBe('SPEC_CORPUS_NOT_DRAFT');
     const hidden = await codeOf(resolvers.Query.specBacklinks(null, { memoryRef: draft.id, loc: 'pas:010' }, as(outsider.id)));
@@ -97,6 +110,17 @@ describe('specUnresolvedReferences (#1449)', () => {
 describe('renumberSpec (#1449)', () => {
   const renumber = (dryRun?: boolean, fromLoc = 'pas:010', toLoc = 'pas:040') =>
     specCorpusRenumberMutations.renumberSpec(null, { memoryRef: draft.id, fromLoc, toLoc, ...(dryRun !== undefined ? { dryRun } : {}) }, as());
+
+  it('mirrors the moved subtree once, after its own references have been rewritten (#1478)', async () => {
+    vi.mocked(mirrorNodeMoveToGit).mockClear();
+    let mirroredContent: string | null | undefined;
+    vi.mocked(mirrorNodeMoveToGit).mockImplementationOnce(async () => {
+      mirroredContent = (await db.node.findUniqueOrThrow({ where: { id: feature.id } })).content;
+    });
+    await renumber();
+    await vi.waitFor(() => expect(mirroredContent).toContain(`hrn:node:${draft.urn}:pas:040:01`));
+    expect(mirrorNodeMoveToGit).toHaveBeenCalledTimes(1);
+  });
 
   it('dry run: returns the plan and writes nothing', async () => {
     const before = await content('pas:020');
@@ -423,6 +447,25 @@ describe('an alias claimant the caller cannot read decides nothing (@codex P1 on
     const unresolved = await resolvers.Query.specUnresolvedReferences(null, { memoryRef: draft.id }, readableCtx);
     expect(unresolved.map((r) => r.targetLoc)).not.toContain('pas:500');
   });
+
+  it('follows a moved claimant node alias only when its target memory is readable (#1478)', async () => {
+    const prior = await unreadablePriorHolder();
+    await cites500();
+    const moved = await db.node.create({ data: {
+      id: generateId(), memoryId: prior.id, loc: 'pas:900', name: 'Moved foreign node',
+    } });
+    await db.urnAlias.create({ data: {
+      urn: `${draft.urn}:pas:500`, entityType: 'NODE', entityId: moved.id, reason: 'RENAME',
+    } });
+
+    expect(await unresolvedLocs()).toContain('pas:500');
+    expect((await resolvers.Query.specBacklinks(null, { memoryRef: draft.id, loc: 'pas:500' }, as())).map((r) => r.sourceLoc))
+      .toEqual(['pas:020']);
+
+    await db.orgMember.updateMany({ where: { organizationId: org.id, userId: outsider.id }, data: { role: 'ADMIN' } });
+    const visible = await resolvers.Query.specUnresolvedReferences(null, { memoryRef: draft.id }, as(outsider.id));
+    expect(visible.map((r) => r.targetLoc)).not.toContain('pas:500');
+  });
 });
 
 describe('renumber decides reference ownership before the move (@codex P2 on #1453)', () => {
@@ -486,5 +529,21 @@ describe('renumber reports exactly what the mover moved (@codex P2 on #1453)', (
     });
     const res = await specCorpusRenumberMutations.renumberSpec(null, { memoryRef: draft.id, fromLoc: 'pas:010', toLoc: 'pas:040' }, as());
     expect(res.moved).toEqual([{ fromLoc: 'pas:010', toLoc: 'pas:040' }, { fromLoc: 'pas:010:01', toLoc: 'pas:040:01' }]);
+  });
+
+  it('does not rewrite a node created at the freed citation after the move (#1478)', async () => {
+    let newcomerId = '';
+    const original = `hrn:node:${draft.urn}:pas:010`;
+    const spy = vi.spyOn(nodeMoveOps, 'moveWithResult').mockImplementationOnce(async (...args) => {
+      spy.mockRestore();
+      const out = await nodeMoveOps.moveWithResult(...args);
+      newcomerId = (await spec('pas:010', 'New claimant', original)).id;
+      return out;
+    });
+    const res = await specCorpusRenumberMutations.renumberSpec(null, {
+      memoryRef: draft.id, fromLoc: 'pas:010', toLoc: 'pas:040',
+    }, as());
+    expect(res.rewrites.some((row) => row.nodeId === newcomerId)).toBe(false);
+    expect(await db.node.findUniqueOrThrow({ where: { id: newcomerId } })).toMatchObject({ content: original });
   });
 });
