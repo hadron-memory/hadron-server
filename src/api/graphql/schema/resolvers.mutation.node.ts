@@ -95,6 +95,7 @@ import {
   serializeTags,
 } from '../../../integrations/db/provider.js';
 import { writeNodeToGit } from '../../../integrations/github/writeNodeToGit.js';
+import { mirrorEdgeSourceAfterCommit } from '../../../integrations/github/mirrorEdgeSource.js';
 import { publishNodeWritten } from '../../../lib/events/nodeWritten.js';
 import {
   recordNodeRead,
@@ -3178,6 +3179,7 @@ export const nodeMutations = {
         { id: resolvedSourceId, loc: src.loc, memoryId: src.memoryId },
         ctx,
       );
+      await mirrorEdgeSourceAfterCommit(ctx.db, edge.source, ctx.clientId);
       return edge;
     },
 
@@ -3294,6 +3296,7 @@ export const nodeMutations = {
       });
       // #1061 — attributed to the source node, as createEdge is.
       recordNodeWrite(ctx.db, toUsageNodeRef(updatedEdge.source), ctx);
+      await mirrorEdgeSourceAfterCommit(ctx.db, updatedEdge.source, ctx.clientId);
       return updatedEdge;
     },
 
@@ -3331,7 +3334,7 @@ export const nodeMutations = {
         where: { id: resolvedEdgeId },
         select: {
           memoryId: true,
-          source: { select: { id: true, loc: true, memoryId: true } },
+          source: { select: { id: true, loc: true, memoryId: true, ownerRepo: true } },
         },
       });
       if (!edgeMem) {
@@ -3361,6 +3364,7 @@ export const nodeMutations = {
       });
       // #1061 — attributed to the source node, as createEdge is.
       recordNodeWrite(ctx.db, toUsageNodeRef(edgeMem.source), ctx);
+      await mirrorEdgeSourceAfterCommit(ctx.db, edgeMem.source, ctx.clientId);
       return true;
     },
 

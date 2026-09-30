@@ -1,9 +1,10 @@
 /**
  * `evt.node.written.v1` — the platform's first domain event.
  *
- * Published by every node write surface (GraphQL writeNodeCore /
+ * Published by node write surfaces (GraphQL writeNodeCore /
  * searchReplaceInNodes / mergeNodes, MCP hadron_create_node /
- * hadron_update_node) AFTER the write is committed. Payload is IDs and
+ * hadron_update_node) and standalone Edge CRUD after commit: outgoing edges
+ * are serialized in the source node's Git file. Payload is IDs and
  * routing metadata ONLY — never node content (plaintext must not transit
  * the broker; subscribers re-read from the DB, which is also what makes
  * duplicate delivery harmless).
