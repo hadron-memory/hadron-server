@@ -69,6 +69,7 @@ import {
   moveNodeSubtree,
   SubtreeMoveCollisionError,
   SubtreeMovePlaceholderError,
+  SubtreeMoveSourceNotDraftError,
   SubtreeMoveIntoSelfError,
   SubtreeMoveSourceChangedError,
   CrossMemoryMoveUnsupportedError,
@@ -1916,6 +1917,153 @@ function shallowMergeProperties(existing: unknown, patch: Record<string, unknown
     : patch;
 }
 
+/**
+ * moveNode's implementation, which also reports EXACTLY which rows the atomic
+ * subtree mover relocated, with the loc each one left (#1449, @codex P2 on
+ * #1453). renumberSpec needs that list; rebuilding it from a later snapshot
+ * would include nodes created under the target afterwards, or miss one moved
+ * away again. Held in an object so tests can intercept it.
+ */
+export const nodeMoveOps = {
+  async moveWithResult(
+    ctx: Context,
+    { sourceRef, targetUrn, targetMemoryRef, requireDraftSource, expectedSource }: {
+      sourceRef: string; targetUrn?: string | null; targetMemoryRef?: string | null;
+      /** #1449: refuse unless the source is a draft corpus under the move's lock (renumber). */
+      requireDraftSource?: boolean;
+      /**
+       * #1449 (@codex P2, PR #1453): refuse (CONFLICT) unless the resolved
+       * source still sits at this memory + loc. With `sourceRef` an id, the
+       * move is pinned to one node: an address can fall through to another
+       * memory's historical holder, and an id cannot; the mover then
+       * re-validates this same memory + loc under its row lock.
+       */
+      expectedSource?: { memoryId: string; loc: string };
+    },
+  ) {
+      const source = await resolveExistingNode(ctx, sourceRef, { forWrite: true });
+      if (expectedSource && (source.memoryId !== expectedSource.memoryId || source.loc !== expectedSource.loc)) {
+        throw new GraphQLError('The node moved since it was read, so nothing was moved. Re-read and retry.', {
+          extensions: { code: 'CONFLICT', nodeId: source.id },
+        });
+      }
+      const { destMemoryId, destLoc } = await resolveRelocationTarget(
+        ctx, source, targetUrn, targetMemoryRef,
+      );
+
+      // The subtree leaves the source memory and lands in the destination — write
+      // access to both (a same-memory move checks once).
+      await requireMemoryWriteAccess(ctx, source.memoryId);
+      // Spec 049 S4: a move whose SOURCE subtree contains a Channel is refused
+      // here; a destination entering one is refused by the create lock.
+      await assertLocWritable(ctx.db, source.memoryId, source.loc, 'move');
+      const crossMemory = destMemoryId !== source.memoryId;
+      if (crossMemory) {
+        await requireMemoryWriteAccess(ctx, destMemoryId);
+      }
+
+      const isSameSlot = !crossMemory && destLoc === source.loc;
+
+      const withEdges = {
+        outgoingEdges: { include: { target: true } },
+        incomingEdges: { include: { source: true } },
+      } as const;
+
+      try {
+        let relocated: MoveNodeSubtreeResult['moved'] = [];
+        const moved = await ctx.db.$transaction(
+          async (tx) => {
+            // #1187 — DECLARE the complete key set first, in the one global
+            // order: the destination ancestor path AND the source path that
+            // `lockSourceForMove` takes further down. Previously those were two
+            // separate acquisitions in caller order (destination, then source),
+            // which is one of the three pairwise inversions #1187 catalogues.
+            // Both helpers below still run for their gates and the source
+            // revalidation; their re-acquisitions are re-entrant no-ops.
+            await acquireLockSet(tx, [
+              ...ancestorLocs(destLoc).map((loc) => ({ memoryId: destMemoryId, loc })),
+              ...ancestorLocs(source.loc).map((loc) => ({ memoryId: source.memoryId, loc })),
+              { memoryId: source.memoryId, loc: source.loc },
+            ]);
+            // #664/#752: moving a node INTO a subtree is the same orphan vector as
+            // a create there — a concurrent non-recursive delete of a destination
+            // ancestor could count zero descendants, then this move lands the row
+            // under it. Lock the destination ancestor path. Root-level → no-op.
+            await lockAncestorsForCreate(tx, destMemoryId, destLoc);
+
+            if (isSameSlot) {
+              return tx.node.findUniqueOrThrow({ where: { id: source.id }, include: withEdges });
+            }
+
+            // Rebase the whole loc-subtree via the shared helper (it locks +
+            // revalidates the source, carries embeddings/edges cross-memory, and
+            // fails loud on a destination collision).
+            const result = await moveNodeSubtree(tx, {
+              source,
+              destLoc,
+              destMemoryId: crossMemory ? destMemoryId : undefined,
+              editor: editorFromAuth(ctx),
+              requireDraftSource,
+            });
+            relocated = result.moved;
+            return tx.node.findUniqueOrThrow({ where: { id: source.id }, include: withEdges });
+          },
+          // A large subtree touches many rows; the default 5s interactive-txn
+          // timeout is too tight (mirrors extractParentNodeGraph / cloneMemory).
+          { timeout: 120_000 },
+        );
+        // #1061 — a move is a write, recorded against the node's POST-move
+        // address (the loc and, on a cross-memory move, the memory it now
+        // lives in): that is where a reader of the usage series will look for
+        // it. As with a recursive delete, the rebased descendants are not
+        // counted individually — one caller edit, one event.
+        recordNodeWrite(ctx.db, toUsageNodeRef(moved), ctx);
+        // #1095 — mirror the move into the affected repos: the destination gains
+        // the files, the source loses them. Fired AFTER the commit (the mirror
+        // re-reads the post-move rows) and NOT awaited — a mirror never fails a
+        // write that already landed. This is what replaced the blanket refusal
+        // of any cross-memory move touching a git-backed memory.
+        void mirrorNodeMoveToGit(ctx.db, {
+          srcMemoryId: source.memoryId,
+          destMemoryId,
+          moved: relocated,
+          clientId: ctx.clientId ?? null,
+        });
+        return { node: moved, relocated };
+      } catch (e) {
+        // Map the shared helper's typed errors (thrown from either branch) to the
+        // GraphQL surface.
+        if (e instanceof SubtreeMoveCollisionError) {
+          throw new GraphQLError(
+            `A node already occupies loc "${e.loc}" in the destination memory.`,
+            { extensions: { code: 'NODE_ALREADY_EXISTS', loc: e.loc, memoryId: e.memoryId } },
+          );
+        }
+        if (e instanceof SubtreeMoveIntoSelfError) {
+          throw new GraphQLError(e.message, { extensions: { code: 'BAD_USER_INPUT', loc: e.loc } });
+        }
+        if (e instanceof SubtreeMovePlaceholderError) {
+          throw new GraphQLError(e.message, {
+            extensions: { code: 'SPEC_PLACEHOLDER_OUTSIDE_DRAFT', loc: e.loc, memoryId: e.memoryId },
+          });
+        }
+        if (e instanceof SubtreeMoveSourceNotDraftError) {
+          throw new GraphQLError(e.message, { extensions: { code: 'SPEC_CORPUS_NOT_DRAFT', memoryId: e.memoryId } });
+        }
+        if (e instanceof SubtreeMoveSourceChangedError) {
+          throw new GraphQLError(e.message, { extensions: { code: 'CONFLICT', nodeId: e.nodeId } });
+        }
+        if (
+          e instanceof CrossMemoryMoveUnsupportedError ||
+          e instanceof SubtreeMoveSchemaViolationError
+        ) {
+          throw new GraphQLError(e.message, { extensions: { code: 'BAD_USER_INPUT' } });
+        }
+        throw e;
+      }
+  },
+};
+
 export const nodeMutations = {
     // Create a single node (spec 039 Phase 0 D1/D4). Create-only: a live
     // node at (memoryId, loc) rejects with NodeLocConflictError; a
@@ -3172,121 +3320,9 @@ export const nodeMutations = {
     // cross-memory edges gated by #783) — moveNodeSubtree handles both.
     moveNode: async (
       _: unknown,
-      { sourceRef, targetUrn, targetMemoryRef }: { sourceRef: string; targetUrn?: string | null; targetMemoryRef?: string | null },
+      args: { sourceRef: string; targetUrn?: string | null; targetMemoryRef?: string | null },
       ctx: Context,
-    ) => {
-      const source = await resolveExistingNode(ctx, sourceRef, { forWrite: true });
-      const { destMemoryId, destLoc } = await resolveRelocationTarget(
-        ctx, source, targetUrn, targetMemoryRef,
-      );
-
-      // The subtree leaves the source memory and lands in the destination — write
-      // access to both (a same-memory move checks once).
-      await requireMemoryWriteAccess(ctx, source.memoryId);
-      // Spec 049 S4: a move whose SOURCE subtree contains a Channel is refused
-      // here; a destination entering one is refused by the create lock.
-      await assertLocWritable(ctx.db, source.memoryId, source.loc, 'move');
-      const crossMemory = destMemoryId !== source.memoryId;
-      if (crossMemory) {
-        await requireMemoryWriteAccess(ctx, destMemoryId);
-      }
-
-      const isSameSlot = !crossMemory && destLoc === source.loc;
-
-      const withEdges = {
-        outgoingEdges: { include: { target: true } },
-        incomingEdges: { include: { source: true } },
-      } as const;
-
-      try {
-        let relocated: MoveNodeSubtreeResult['moved'] = [];
-        const moved = await ctx.db.$transaction(
-          async (tx) => {
-            // #1187 — DECLARE the complete key set first, in the one global
-            // order: the destination ancestor path AND the source path that
-            // `lockSourceForMove` takes further down. Previously those were two
-            // separate acquisitions in caller order (destination, then source),
-            // which is one of the three pairwise inversions #1187 catalogues.
-            // Both helpers below still run for their gates and the source
-            // revalidation; their re-acquisitions are re-entrant no-ops.
-            await acquireLockSet(tx, [
-              ...ancestorLocs(destLoc).map((loc) => ({ memoryId: destMemoryId, loc })),
-              ...ancestorLocs(source.loc).map((loc) => ({ memoryId: source.memoryId, loc })),
-              { memoryId: source.memoryId, loc: source.loc },
-            ]);
-            // #664/#752: moving a node INTO a subtree is the same orphan vector as
-            // a create there — a concurrent non-recursive delete of a destination
-            // ancestor could count zero descendants, then this move lands the row
-            // under it. Lock the destination ancestor path. Root-level → no-op.
-            await lockAncestorsForCreate(tx, destMemoryId, destLoc);
-
-            if (isSameSlot) {
-              return tx.node.findUniqueOrThrow({ where: { id: source.id }, include: withEdges });
-            }
-
-            // Rebase the whole loc-subtree via the shared helper (it locks +
-            // revalidates the source, carries embeddings/edges cross-memory, and
-            // fails loud on a destination collision).
-            const result = await moveNodeSubtree(tx, {
-              source,
-              destLoc,
-              destMemoryId: crossMemory ? destMemoryId : undefined,
-              editor: editorFromAuth(ctx),
-            });
-            relocated = result.moved;
-            return tx.node.findUniqueOrThrow({ where: { id: source.id }, include: withEdges });
-          },
-          // A large subtree touches many rows; the default 5s interactive-txn
-          // timeout is too tight (mirrors extractParentNodeGraph / cloneMemory).
-          { timeout: 120_000 },
-        );
-        // #1061 — a move is a write, recorded against the node's POST-move
-        // address (the loc and, on a cross-memory move, the memory it now
-        // lives in): that is where a reader of the usage series will look for
-        // it. As with a recursive delete, the rebased descendants are not
-        // counted individually — one caller edit, one event.
-        recordNodeWrite(ctx.db, toUsageNodeRef(moved), ctx);
-        // #1095 — mirror the move into the affected repos: the destination gains
-        // the files, the source loses them. Fired AFTER the commit (the mirror
-        // re-reads the post-move rows) and NOT awaited — a mirror never fails a
-        // write that already landed. This is what replaced the blanket refusal
-        // of any cross-memory move touching a git-backed memory.
-        void mirrorNodeMoveToGit(ctx.db, {
-          srcMemoryId: source.memoryId,
-          destMemoryId,
-          moved: relocated,
-          clientId: ctx.clientId ?? null,
-        });
-        return moved;
-      } catch (e) {
-        // Map the shared helper's typed errors (thrown from either branch) to the
-        // GraphQL surface.
-        if (e instanceof SubtreeMoveCollisionError) {
-          throw new GraphQLError(
-            `A node already occupies loc "${e.loc}" in the destination memory.`,
-            { extensions: { code: 'NODE_ALREADY_EXISTS', loc: e.loc, memoryId: e.memoryId } },
-          );
-        }
-        if (e instanceof SubtreeMoveIntoSelfError) {
-          throw new GraphQLError(e.message, { extensions: { code: 'BAD_USER_INPUT', loc: e.loc } });
-        }
-        if (e instanceof SubtreeMovePlaceholderError) {
-          throw new GraphQLError(e.message, {
-            extensions: { code: 'SPEC_PLACEHOLDER_OUTSIDE_DRAFT', loc: e.loc, memoryId: e.memoryId },
-          });
-        }
-        if (e instanceof SubtreeMoveSourceChangedError) {
-          throw new GraphQLError(e.message, { extensions: { code: 'CONFLICT', nodeId: e.nodeId } });
-        }
-        if (
-          e instanceof CrossMemoryMoveUnsupportedError ||
-          e instanceof SubtreeMoveSchemaViolationError
-        ) {
-          throw new GraphQLError(e.message, { extensions: { code: 'BAD_USER_INPUT' } });
-        }
-        throw e;
-      }
-    },
+    ) => (await nodeMoveOps.moveWithResult(ctx, args)).node,
 
     // #564 — clone a node to a new location, returning the NEW node (fresh id).
     // `sourceRef` + (`targetUrn` XOR `targetMemoryRef`) mirror moveNode. Copies
