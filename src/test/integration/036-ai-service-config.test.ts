@@ -25,6 +25,7 @@ import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../helpers.js';
 import { generateId } from '../../lib/id.js';
 import { decryptToken, encryptToken } from '../../lib/tokenCrypto.js';
+import { resolveAiConfigWithFallback } from '../../lib/aiConfig.js';
 import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
 
 let org: { id: string };
@@ -185,10 +186,13 @@ describe('resolveAIConfig precedence (US1)', () => {
     expect(viaOrg.apiKey).toBe('sk-org');
 
     await db.aiServiceConfig.deleteMany({ where: { organizationId: org.id } });
+    await expect(resolvers.Query.resolveAIConfig(
+      {}, { appRef: app.id, agentRef: agent.id }, ctxFor(admin.id),
+    )).rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
     const viaHost = await resolvers.Query.resolveAIConfig(
       {},
       { appRef: app.id, agentRef: agent.id },
-      ctxFor(admin.id),
+      platformAdminCtx(),
     );
     expect(viaHost.ownerType).toBe('HADRON_SERVER');
     expect(viaHost.apiKey).toBe('sk-host');
@@ -360,6 +364,64 @@ describe('resolveAIConfig user-owned App decrypt gate (#1487)', () => {
     await expect(resolvers.Query.resolveAIConfig(
       {}, { appRef: ownApp.id, agentRef: agent.id }, ctxFor(owner.id),
     )).rejects.toMatchObject({ extensions: { code: 'NoAiConfigAvailableError' } });
+  });
+});
+
+describe('resolveAIConfig platform key boundary (#4645)', () => {
+  it('never decrypts the host key for an org admin through Agent, App, or both', async () => {
+    await createConfig({ hadronServerId: server.id }, 'default', { apiKey: 'sk-platform-private' });
+    const contexts = [
+      { agentRef: agent.id },
+      { appRef: app.id },
+      { appRef: app.id, agentRef: agent.id },
+    ];
+    for (const refs of contexts) {
+      let denied: unknown;
+      try {
+        await resolvers.Query.resolveAIConfig({}, refs, ctxFor(admin.id));
+      } catch (error) {
+        denied = error;
+      }
+      expect(denied, JSON.stringify(refs)).toMatchObject({ extensions: { code: 'FORBIDDEN' } });
+      expect(String(denied)).toContain("'default'");
+      expect(String(denied)).toContain('HADRON_SERVER');
+      expect(JSON.stringify(denied)).not.toContain('sk-platform-private');
+
+      const platform = await resolvers.Query.resolveAIConfig({}, refs, platformAdminCtx());
+      expect(platform).toMatchObject({ name: 'default', ownerType: 'HADRON_SERVER', apiKey: 'sk-platform-private' });
+    }
+  });
+
+  it('refuses a READER-created org OWNER while server-side fallback remains available', async () => {
+    const reader = await db.user.create({
+      data: { id: generateId(), handle: 'host-key-reader', githubId: 36009, name: 'Reader' },
+    });
+    const readerCtx = ctxFor(reader.id, { roles: ['READER'] });
+    const createdOrg = await resolvers.Mutation.createOrganization(
+      {}, { name: 'Reader Org', urn: 'reader-host-key.example' }, readerCtx,
+    );
+    expect(await db.orgMember.findFirst({
+      where: { organizationId: createdOrg.id, userId: reader.id, role: 'OWNER' },
+    })).not.toBeNull();
+    const ownAgent = await db.agent.create({
+      data: { id: generateId(), name: 'Reader Agent', urn: 'reader-host-key.example:agent', organizationId: createdOrg.id },
+    });
+    const ownApp = await db.app.create({
+      data: { id: generateId(), name: 'Reader App', urn: 'reader-host-key.example:app', organizationId: createdOrg.id },
+    });
+    await db.appAgent.create({ data: { appId: ownApp.id, agentId: ownAgent.id } });
+    await createConfig({ hadronServerId: server.id }, 'default', { apiKey: 'sk-platform-only' });
+
+    await expect(resolvers.Query.resolveAIConfig(
+      {}, { appRef: ownApp.id, agentRef: ownAgent.id }, readerCtx,
+    )).rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
+    const serverSide = await resolveAiConfigWithFallback(db, null, {
+      appId: ownApp.id, agentId: ownAgent.id, organizationId: createdOrg.id,
+    });
+    expect(serverSide.ownerType).toBe('HADRON_SERVER');
+    expect(decryptToken(serverSide.config.apiKeyEncrypted!)).toBe('sk-platform-only');
+    expect(await resolvers.Query.agentAIConfig({}, { agentRef: ownAgent.id }, readerCtx)).toBeNull();
+    expect(await resolvers.Query.appAIConfig({}, { appRef: ownApp.id }, readerCtx)).toBeNull();
   });
 });
 
