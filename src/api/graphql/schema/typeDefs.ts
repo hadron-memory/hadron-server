@@ -2605,6 +2605,8 @@ export const typeDefs = `#graphql
   enum MemoryTransferHandling {
     CARRY
     REFUSE
+    REMOVE
+    CREATE
   }
 
   type MemoryTransferDependent {
@@ -8302,9 +8304,12 @@ export const typeDefs = `#graphql
     the new URN and dependent handling without writing; apply recomputes under
     lock and can pin the preview with expectedNewUrn. A class change across
     user/org ownership must be explicit. The caller needs authority on both
-    sides; unreadable source memories are concealed as not found.
+    sides; unreadable source memories are concealed as not found. Group members
+    block transfer by default; resetGroupMembers explicitly revokes every old
+    membership inside the transfer transaction. A group destination then adds
+    the caller as its first owner-member.
     """
-    transferMemoryOwnership(memoryRef: ID!, orgRef: ID, userRef: ID, targetClass: MemoryClass, expectedNewUrn: String, dryRun: Boolean = false): MemoryOwnerTransferPreview!
+    transferMemoryOwnership(memoryRef: ID!, orgRef: ID, userRef: ID, targetClass: MemoryClass, expectedNewUrn: String, resetGroupMembers: Boolean = false, dryRun: Boolean = false): MemoryOwnerTransferPreview!
 
     """
     #882 — re-drive every FAILED embed in a memory (the operator recovery

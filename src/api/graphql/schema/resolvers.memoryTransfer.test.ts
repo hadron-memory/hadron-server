@@ -136,6 +136,48 @@ describe('transferMemoryOwnership', () => {
     expect(await db.memoryMember.findUniqueOrThrow({ where: { memoryId_userId: { memoryId: memory.id, userId: owner.id } } })).toMatchObject({ role: 'owner' });
   });
 
+  it('requires an explicit member reset to transfer a valid group memory', async () => {
+    await transfer({ memoryRef: memory.id, orgRef: org.id, targetClass: 'group' });
+    await db.memoryMember.create({ data: { memoryId: memory.id, userId: receiver.id, role: 'reader' } });
+    const nextOrg = await db.organization.create({ data: { id: generateId(), name: 'Next', urn: 'next-transfer-org' } });
+    await db.orgMember.create({ data: { id: generateId(), organizationId: nextOrg.id, userId: owner.id, role: 'ADMIN' } });
+    // The group owner may authorize the source even after leaving its org.
+    await db.orgMember.deleteMany({ where: { organizationId: org.id, userId: owner.id } });
+    const input = { memoryRef: memory.id, orgRef: nextOrg.id };
+    const blocked = await transfer({ ...input, dryRun: true });
+    expect(blocked.canApply).toBe(false);
+    expect(blocked.blockers).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: 'MEMORY_TRANSFER_DEPENDENTS', message: expect.stringContaining('resetGroupMembers') }),
+    ]));
+    const preview = await transfer({ ...input, resetGroupMembers: true, dryRun: true });
+    expect(preview.canApply).toBe(true);
+    expect(preview.dependents).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'Memory members', count: 2, handling: 'REMOVE' }),
+      expect.objectContaining({ kind: 'Receiving group owner', count: 1, handling: 'CREATE' }),
+    ]));
+    await transfer({ ...input, resetGroupMembers: true, expectedNewUrn: preview.newUrn });
+    expect(await db.memory.findUniqueOrThrow({ where: { id: memory.id } })).toMatchObject({
+      organizationId: nextOrg.id, urn: `${nextOrg.urn}:specs`, class: 'group', visibility: 'GROUP',
+    });
+    expect(await db.memoryMember.findMany({ where: { memoryId: memory.id } })).toMatchObject([
+      { userId: owner.id, role: 'owner' },
+    ]);
+    expect((await resolveNodeRef(db, `hrn:node:${memory.urn}:${node.loc}`)).id).toBe(node.id);
+  });
+
+  it('revokes group members when converting a group to a user-owned private memory', async () => {
+    await transfer({ memoryRef: memory.id, orgRef: org.id, targetClass: 'group' });
+    await db.memoryMember.create({ data: { memoryId: memory.id, userId: receiver.id, role: 'reader' } });
+    const result = await resolvers.Mutation.transferMemoryOwnership(null, {
+      memoryRef: memory.id, userRef: receiver.id, targetClass: 'private', resetGroupMembers: true,
+    }, { db, userId: outsider.id, roles: ['ADMIN'] });
+    expect(result.applied).toBe(true);
+    expect(await db.memoryMember.count({ where: { memoryId: memory.id } })).toBe(0);
+    expect(await db.memory.findUniqueOrThrow({ where: { id: memory.id } })).toMatchObject({
+      organizationId: null, ownerUserId: receiver.id, userId: receiver.id, class: 'private', visibility: null,
+    });
+  });
+
   it('refuses to carry git provenance into a new owner', async () => {
     await db.node.update({ where: { id: node.id }, data: { ownerRepo: 'old-owner/specs' } });
     const preview = await transfer({ memoryRef: memory.id, orgRef: org.id, targetClass: 'knowledge', dryRun: true });

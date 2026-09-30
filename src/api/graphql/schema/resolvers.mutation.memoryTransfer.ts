@@ -8,6 +8,7 @@ import { recordUrnRename } from '../../../lib/urnAlias.js';
 import {
   type Context,
   concealUnreadableDenial,
+  isMemoryMemberOwner,
   isPlatformAdmin,
   requireOrgRole,
 } from './resolvers.helpers.js';
@@ -25,9 +26,10 @@ type TransferInput = {
   userRef?: string | null;
   targetClass?: TransferClass | null;
   expectedNewUrn?: string | null;
+  resetGroupMembers?: boolean | null;
   dryRun?: boolean | null;
 };
-type Dependent = { kind: string; count: number; handling: 'CARRY' | 'REFUSE' };
+type Dependent = { kind: string; count: number; handling: 'CARRY' | 'REFUSE' | 'REMOVE' | 'CREATE' };
 type Blocker = { code: string; message: string };
 
 function refusal(code: string, message: string): GraphQLError {
@@ -50,6 +52,7 @@ async function authorizeSource(ctx: Context, memory: Memory, ref: string): Promi
       return;
     }
     if (memory.organizationId !== null) {
+      if (memory.class === 'group' && await isMemoryMemberOwner(ctx, memory.id)) return;
       await requireOrgRole(ctx, memory.organizationId, 'ADMIN');
       return;
     }
@@ -86,6 +89,8 @@ async function transferPreview(
   memory: Memory,
   destination: Destination,
   requestedClass: TransferClass | null | undefined,
+  resetGroupMembers: boolean | null | undefined,
+  actorUserId: string | undefined,
 ) {
   const oldRoot = memory.urn.slice(0, memory.urn.indexOf(':'));
   const desiredSlug = memory.urn.slice(memory.urn.lastIndexOf(':') + 1);
@@ -105,7 +110,12 @@ async function transferPreview(
   const add = (kind: string, count: number, handling: Dependent['handling']) => {
     dependents.push({ kind, count, handling });
     if (count > 0 && handling === 'REFUSE') {
-      blockers.push({ code: 'MEMORY_TRANSFER_DEPENDENTS', message: `Remove or detach ${kind} (${count}) before transfer.` });
+      blockers.push({
+        code: 'MEMORY_TRANSFER_DEPENDENTS',
+        message: kind === 'Memory members' && memory.class === 'group'
+          ? `Pass resetGroupMembers: true to revoke all ${count} group member(s) as part of the transfer.`
+          : `Remove or detach ${kind} (${count}) before transfer.`,
+      });
     }
   };
   const id = memory.id;
@@ -113,7 +123,8 @@ async function transferPreview(
   add('Agent scope', Number(memory.userMemoryOfAgentId !== null) + Number(memory.sharedMemoryOfAgentId !== null), 'REFUSE');
   add('Agent system-memory link', await tx.agent.count({ where: { systemMemoryId: id, deletedAt: null } }), 'REFUSE');
   add('Worker link', await tx.worker.count({ where: { memoryId: id } }), 'REFUSE');
-  add('Memory members', await tx.memoryMember.count({ where: { memoryId: id } }), 'REFUSE');
+  add('Memory members', await tx.memoryMember.count({ where: { memoryId: id } }),
+    memory.class === 'group' && resetGroupMembers === true ? 'REMOVE' : 'REFUSE');
   add('Memory shares', await tx.memoryShare.count({ where: { memoryId: id } }), 'REFUSE');
   add('Agent grants', await tx.agentMemoryItem.count({ where: { memoryId: id, deletedAt: null } }), 'REFUSE');
   add('Scope grants', await tx.scopeMemory.count({ where: { memoryId: id } }), 'REFUSE');
@@ -166,7 +177,13 @@ async function transferPreview(
   }
   if (targetClass === 'group' && destination.kind === 'organization') {
     // The receiving administrator becomes the first group owner on apply.
-    add('Receiving group owner', 1, 'CARRY');
+    add('Receiving group owner', 1, 'CREATE');
+    if (!actorUserId) {
+      blockers.unshift({ code: 'MEMORY_TRANSFER_GROUP_OWNER_REQUIRED', message: 'A receiving user is required as the first group owner.' });
+    }
+  }
+  if (resetGroupMembers === true && memory.class !== 'group') {
+    blockers.unshift({ code: 'MEMORY_TRANSFER_MEMBER_RESET_INVALID', message: 'resetGroupMembers applies only to a group-class source.' });
   }
   if (memory.isEncrypted) {
     blockers.unshift({ code: 'ENCRYPTED_MEMORY_TRANSFER_UNSUPPORTED', message: 'Encrypted memories cannot be transferred until data-key custody is supported.' });
@@ -194,7 +211,7 @@ export const memoryTransferMutations = {
     const memory = await ctx.db.memory.findUniqueOrThrow({ where: { id } });
     await authorizeSource(ctx, memory, input.memoryRef);
     const destination = await resolveDestination(ctx, input);
-    if (input.dryRun === true) return transferPreview(ctx.db as TransferDb, memory, destination, input.targetClass);
+    if (input.dryRun === true) return transferPreview(ctx.db as TransferDb, memory, destination, input.targetClass, input.resetGroupMembers, ctx.userId);
 
     try {
       return await ctx.db.$transaction(async (tx) => {
@@ -206,13 +223,13 @@ export const memoryTransferMutations = {
         const txCtx = { ...ctx, db: tx } as Context;
         await authorizeSource(txCtx, current, input.memoryRef);
         const currentDestination = await resolveDestination(txCtx, input);
-        const plan = await transferPreview(tx, current, currentDestination, input.targetClass);
+        const plan = await transferPreview(tx, current, currentDestination, input.targetClass, input.resetGroupMembers, ctx.userId);
         if (plan.blockers.length > 0) throw refusal(plan.blockers[0].code, plan.blockers[0].message);
-        if (plan.targetClass === 'group' && !ctx.userId) {
-          throw refusal('MEMORY_TRANSFER_GROUP_OWNER_REQUIRED', 'A receiving user is required as the first group owner.');
-        }
         if (input.expectedNewUrn != null && input.expectedNewUrn !== plan.newUrn) {
           throw refusal('STALE_TRANSFER_PREVIEW', 'The target URN changed since the preview; run a new dryRun.');
+        }
+        if (current.class === 'group' && input.resetGroupMembers === true) {
+          await tx.memoryMember.deleteMany({ where: { memoryId: id } });
         }
         await tx.memory.update({
           where: { id },
@@ -253,8 +270,9 @@ export const memoryTransferMutations = {
             detail: {
               oldUrn: current.urn, newUrn: plan.newUrn,
               fromOwner: plan.fromOwner, toOwner: plan.toOwner,
-              fromClass: current.class, toClass: plan.targetClass,
-              actorId: ctx.userId ?? ctx.clientId ?? null,
+            fromClass: current.class, toClass: plan.targetClass,
+            removedGroupMembers: plan.dependents.find((d) => d.kind === 'Memory members' && d.handling === 'REMOVE')?.count ?? 0,
+            actorId: ctx.userId ?? ctx.clientId ?? null,
             },
             createdBy: ctx.userId ?? ctx.clientId ?? null,
           },
