@@ -11,6 +11,7 @@ import { generateId } from '../../lib/id.js';
 import { acquireLockSet, ancestorLocs, lockAncestorsForCreate } from '../../lib/nodeSubtreeLock.js';
 import { moveNodeSubtree } from '../../lib/nodeSubtreeMove.js';
 import { deriveEdgeLoc } from '../../lib/edgeLoc.js';
+import { waitForLockWaitersOfType } from '../../test/lockWait.js';
 
 // ---------------------------------------------------------------------------
 // Mock child_process.execFile so no actual git commands run
@@ -147,30 +148,6 @@ async function waitForChannelMemoryLockWaiters(
   }
 }
 
-async function waitForLockWaiters(
-  locktype: 'advisory' | 'transactionid',
-  minimumWaiters: number,
-  timeoutMs = 10_000,
-): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  for (;;) {
-    const [{ count }] = await db.$queryRaw<Array<{ count: bigint }>>`
-      SELECT count(*)::bigint AS count
-      FROM pg_locks
-      WHERE locktype = ${locktype}
-        AND NOT granted
-        AND (
-          locktype = 'transactionid'
-          OR database = (SELECT oid FROM pg_database WHERE datname = current_database())
-        )
-    `;
-    if (Number(count) >= minimumWaiters) return;
-    if (Date.now() > deadline) {
-      throw new Error(`timed out waiting for ${minimumWaiters} ${locktype} waiter(s)`);
-    }
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
-}
 
 describe('syncGraphFromGithub', () => {
   it('refuses an encrypted memory before Git I/O or a Node write', async () => {
@@ -237,7 +214,7 @@ describe('syncGraphFromGithub', () => {
 
     const syncing = syncGraphFromGithub(makeGraph());
     try {
-      await waitForLockWaiters('advisory', 1);
+      await waitForLockWaitersOfType(db, 'advisory', 1);
     } finally {
       releaseMove();
     }
@@ -965,7 +942,7 @@ describe('Channel-protected mirror cleanup (#1226)', () => {
     try {
       // The edge insert has reached the target FK and is blocked while the
       // sync transaction still holds the source's complete path lock.
-      await waitForLockWaiters('transactionid', 1);
+      await waitForLockWaitersOfType(db, 'transactionid', 1);
       const moving = db.$transaction(async (tx) => {
         await acquireLockSet(tx, [
           ...ancestorLocs('moved:source').map((loc) => ({ memoryId: movedMemory.id, loc })),
@@ -984,7 +961,7 @@ describe('Channel-protected mirror cleanup (#1226)', () => {
       // Mutation-test of the source-path fix: without the exact path lock the
       // move completes here and snapshots no edge; the later insert is stranded
       // in dbGraphId with a source that now belongs to movedMemory.
-      await waitForLockWaiters('advisory', 1);
+      await waitForLockWaitersOfType(db, 'advisory', 1);
       releaseTarget();
       await targetHolder;
 
