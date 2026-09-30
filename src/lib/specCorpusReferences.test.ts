@@ -455,6 +455,26 @@ describe('renumber re-decides draft state under the move\'s lock (@codex P1 on #
   });
 });
 
+describe('renumber moves only the scanned node (@codex P2 on #1453)', () => {
+  it('refuses, moving nothing, when the source left fromLoc and a former holder of our URN has that loc', async () => {
+    const prior = await resolvers.Mutation.createMemory(null, { orgId: org.id, name: 'shared', draftCorpus: true }, as());
+    const theirs = await db.node.create({ data: { id: generateId(), memoryId: prior.id, loc: 'pas:010', name: 'Theirs', role: 'spec', nodeType: 'info', tags: ['spec'], content: 'Theirs.' } });
+    await resolvers.Mutation.updateMemory(null, { id: prior.id, urn: 'renamed-away' } as never, as());
+    await resolvers.Mutation.updateMemory(null, { id: draft.id, urn: 'shared' } as never, as());
+
+    const spy = vi.spyOn(nodeMoveOps, 'moveWithResult').mockImplementationOnce(async (...args) => {
+      spy.mockRestore();
+      // Another request moves our scanned spec away just before the move.
+      await db.node.update({ where: { id: feature.id }, data: { loc: 'pas:011' } });
+      return nodeMoveOps.moveWithResult(...args);
+    });
+    expect(await codeOf(specCorpusRenumberMutations.renumberSpec(null, { memoryRef: draft.id, fromLoc: 'pas:010', toLoc: 'pas:040' }, as())))
+      .toBe('CONFLICT');
+    expect(await db.node.findUniqueOrThrow({ where: { id: theirs.id } })).toMatchObject({ memoryId: prior.id, loc: 'pas:010' });
+    expect(await db.node.count({ where: { memoryId: draft.id, loc: { startsWith: 'pas:040' } } })).toBe(0);
+  });
+});
+
 describe('renumber reports exactly what the mover moved (@codex P2 on #1453)', () => {
   it('does not report a node created under toLoc right after the move', async () => {
     const spy = vi.spyOn(nodeMoveOps, 'moveWithResult').mockImplementationOnce(async (...args) => {

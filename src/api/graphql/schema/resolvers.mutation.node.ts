@@ -1927,13 +1927,26 @@ function shallowMergeProperties(existing: unknown, patch: Record<string, unknown
 export const nodeMoveOps = {
   async moveWithResult(
     ctx: Context,
-    { sourceRef, targetUrn, targetMemoryRef, requireDraftSource }: {
+    { sourceRef, targetUrn, targetMemoryRef, requireDraftSource, expectedSource }: {
       sourceRef: string; targetUrn?: string | null; targetMemoryRef?: string | null;
       /** #1449: refuse unless the source is a draft corpus under the move's lock (renumber). */
       requireDraftSource?: boolean;
+      /**
+       * #1449 (@codex P2, PR #1453): refuse (CONFLICT) unless the resolved
+       * source still sits at this memory + loc. With `sourceRef` an id, the
+       * move is pinned to one node: an address can fall through to another
+       * memory's historical holder, and an id cannot; the mover then
+       * re-validates this same memory + loc under its row lock.
+       */
+      expectedSource?: { memoryId: string; loc: string };
     },
   ) {
       const source = await resolveExistingNode(ctx, sourceRef, { forWrite: true });
+      if (expectedSource && (source.memoryId !== expectedSource.memoryId || source.loc !== expectedSource.loc)) {
+        throw new GraphQLError('The node moved since it was read, so nothing was moved. Re-read and retry.', {
+          extensions: { code: 'CONFLICT', nodeId: source.id },
+        });
+      }
       const { destMemoryId, destLoc } = await resolveRelocationTarget(
         ctx, source, targetUrn, targetMemoryRef,
       );

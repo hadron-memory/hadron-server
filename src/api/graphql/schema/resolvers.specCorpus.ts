@@ -554,13 +554,16 @@ export const specCorpusRenumberMutations = {
     if (!dryRun) {
       // Fail before any write, rather than after the move.
       await requireMemoryWriteAccess(ctx, corpus.id);
-      // (@codex P2, #1453) Move BY ADDRESS, not by stable id: the shared mover
-      // revalidates this source under its row lock, so a spec that another
-      // request moved since the scan refuses instead of being moved from
-      // wherever it now is. In a draft the old address leaves no alias, so a
-      // second concurrent renumber of the same spec fails cleanly too.
+      // (@codex P2s, #1453) Move the SCANNED node, by id, and only while it
+      // is still at (corpus, fromLoc): a spec another request moved since the
+      // scan refuses rather than being moved from wherever it now is. An
+      // address is not enough: when our node has left fromLoc, resolving the
+      // address falls through to a memory that historically held our URN,
+      // and would move ITS node into this corpus. The mover re-validates the
+      // same memory + loc under its row lock.
       const { relocated } = await nodeMoveOps.moveWithResult(ctx, {
-        sourceRef: `hrn:node:${corpus.urn}:${fromLoc}`,
+        sourceRef: source.id,
+        expectedSource: { memoryId: corpus.id, loc: fromLoc },
         targetUrn: `hrn:node:${corpus.urn}:${toLoc}`,
         // (@codex P1, PR #1453) The draft check above ran before the move's
         // lock; a mint can commit in between. Re-decided under the lock.
