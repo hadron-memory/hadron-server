@@ -1178,26 +1178,28 @@ export const memoryMutations = {
       // guard or idempotency short-circuit.
       // #1381: a caller who cannot open this memory gets resolveMemoryRef's
       // miss — the owner-only refusals below also named the memory's class.
-      await concealUnreadableDenial(ctx, resolvedId, id, async () => {
-        if (memory.class === 'personal' || memory.class === 'private') {
-          if (!ctx.userId || memory.userId !== ctx.userId) {
-            throw new Error(`Forbidden: only the owner can delete a ${memory.class} memory`);
+      const authorizeDelete = (authCtx: Context, current: typeof memory) =>
+        concealUnreadableDenial(authCtx, resolvedId, id, async () => {
+          if (current.class === 'personal' || current.class === 'private') {
+            if (!authCtx.userId || current.userId !== authCtx.userId) {
+              throw new Error(`Forbidden: only the owner can delete a ${current.class} memory`);
+            }
+          } else if (current.ownerUserId !== null) {
+            // spec 047: a user-owned memory is deletable only by its owner.
+            if (authCtx.userId !== current.ownerUserId) {
+              throw new Error('Forbidden: only the owner can delete this memory');
+            }
+          } else {
+            // Org-owned (the XOR CHECK guarantees ownerUserId is null here ⇒ org is
+            // set); assert it explicitly rather than fall back to an empty org id.
+            if (current.organizationId === null) {
+              throw new Error('Invariant: org-owned memory has no organizationId');
+            }
+            // Grant-model gate (design:grant-model P2a) — was requireOrgRole(ADMIN).
+            await requireOrgAction(authCtx, current.organizationId, 'memory.delete');
           }
-        } else if (memory.ownerUserId !== null) {
-          // spec 047: a user-owned memory is deletable only by its owner.
-          if (ctx.userId !== memory.ownerUserId) {
-            throw new Error('Forbidden: only the owner can delete this memory');
-          }
-        } else {
-          // Org-owned (the XOR CHECK guarantees ownerUserId is null here ⇒ org is
-          // set); assert it explicitly rather than fall back to an empty org id.
-          if (memory.organizationId === null) {
-            throw new Error('Invariant: org-owned memory has no organizationId');
-          }
-          // Grant-model gate (design:grant-model P2a) — was requireOrgRole(ADMIN).
-          await requireOrgAction(ctx, memory.organizationId, 'memory.delete');
-        }
-      });
+        });
+      await authorizeDelete(ctx, memory);
       // System-class memories are owned by their agent and can only be
       // removed by deleting the agent. This prevents the agent from ending
       // up with no brain via a stray deleteMemory call.
@@ -1211,6 +1213,16 @@ export const memoryMutations = {
         // also takes (`lockMemoryForChannelChange`), so a Channel cannot land
         // between the check and the tombstone (Copilot on PR #1165, round 2).
         await lockMemoryForChannelChange(tx, resolvedId);
+        // A transfer can commit after the first authorization and before this
+        // transaction starts. Lock and recheck the current owner before the
+        // tombstone write; the pre-transfer caller must not delete the new
+        // tenant's memory after waiting on the row.
+        await tx.$queryRaw`SELECT id FROM memories WHERE id = ${resolvedId} FOR UPDATE`;
+        const current = await tx.memory.findUniqueOrThrow({ where: { id: resolvedId } });
+        await authorizeDelete({ ...ctx, db: tx } as Context, current);
+        if (current.class === 'system') {
+          throw new Error('Cannot delete an agent system memory directly. Delete the owning agent instead.');
+        }
         const hosted = await tx.channel.findFirst({
           where: { memoryId: resolvedId, deletedAt: null },
           select: { id: true, name: true, loc: true },

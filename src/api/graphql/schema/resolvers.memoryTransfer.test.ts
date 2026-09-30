@@ -5,6 +5,7 @@ import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { resolveNodeRef } from '../../../lib/entityRef/nodeRef.js';
 import { recordUrnRename } from '../../../lib/urnAlias.js';
 import { cleanDb } from '../../../test/helpers.js';
+import { waitForLockWaiters } from '../../../test/lockWait.js';
 import { resolvers, type Context } from './resolvers.js';
 
 let owner: { id: string };
@@ -163,6 +164,51 @@ describe('transferMemoryOwnership', () => {
     });
     expect((await resolveNodeRef(db, `hrn:node:${memory.urn}:${node.loc}`)).id).toBe(node.id);
     expect((await resolveNodeRef(db, `hrn:node:${org.urn}:specs:${node.loc}`)).id).toBe(node.id);
+  });
+
+  it('uses the current destination handle when it changes during transfer', async () => {
+    await transfer({ memoryRef: memory.id, orgRef: org.id, targetClass: 'knowledge' });
+    let pending: ReturnType<typeof transfer> | undefined;
+    await db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM users WHERE id = ${receiver.id} FOR UPDATE`;
+      pending = resolvers.Mutation.transferMemoryOwnership(null, {
+        memoryRef: memory.id, userRef: receiver.id, targetClass: 'private',
+      }, { db, userId: outsider.id, roles: ['ADMIN'] });
+      await waitForLockWaiters(db);
+      await tx.user.update({ where: { id: receiver.id }, data: { handle: 'transfer-renamed' } });
+    }, { timeout: 10_000 });
+    const result = await pending!;
+    expect(result.newUrn).toBe('transfer-renamed:specs');
+    expect(await db.memory.findUniqueOrThrow({ where: { id: memory.id } })).toMatchObject({
+      ownerUserId: receiver.id, urn: 'transfer-renamed:specs',
+    });
+  });
+
+  it('does not let a former org admin delete a memory after its ownership changes', async () => {
+    await transfer({ memoryRef: memory.id, orgRef: org.id, targetClass: 'knowledge' });
+    const nextOrg = await db.organization.create({ data: {
+      id: generateId(), name: 'Next Delete Owner', urn: 'next-delete-owner',
+    } });
+    const transaction = db.$transaction.bind(db);
+    const raceDb = new Proxy(db, {
+      get(target, key) {
+        if (key === '$transaction') {
+          return async (work: Parameters<typeof transaction>[0]) => {
+            await resolvers.Mutation.transferMemoryOwnership(null, {
+              memoryRef: memory.id, orgRef: nextOrg.id,
+            }, { db, userId: outsider.id, roles: ['ADMIN'] });
+            return transaction(work as never);
+          };
+        }
+        return Reflect.get(target, key);
+      },
+    });
+    await expect(resolvers.Mutation.deleteMemory(null, { id: memory.id }, {
+      db: raceDb, userId: owner.id, roles: ['READER'],
+    })).rejects.toMatchObject({ name: 'MemoryNotFoundError' });
+    expect(await db.memory.findUniqueOrThrow({ where: { id: memory.id } })).toMatchObject({
+      organizationId: nextOrg.id, deletedAt: null,
+    });
   });
 
   it('lets account erasure finish after an owned corpus is handed to a surviving org', async () => {

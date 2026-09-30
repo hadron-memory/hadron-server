@@ -86,6 +86,19 @@ async function resolveDestination(ctx: Context, input: TransferInput, source: Me
   return { kind: 'user', id, root: user.handle };
 }
 
+/** Serialize destination root renames before locking the source Memory. */
+async function lockDestinationRoot(tx: TransferDb, destination: Destination): Promise<void> {
+  // Both rename paths lock their owner row first, then cascade into Memory
+  // rows. Follow that order so a rename cannot finish between root lookup
+  // and the transfer's ownership/URN update.
+  const rows = destination.kind === 'user'
+    ? await tx.$queryRaw<{ id: string }[]>`SELECT id FROM users WHERE id = ${destination.id} FOR UPDATE`
+    : await tx.$queryRaw<{ id: string }[]>`SELECT id FROM organizations WHERE id = ${destination.id} FOR UPDATE`;
+  if (rows.length === 0) {
+    throw refusal('STALE_TRANSFER_PREVIEW', 'The destination changed since the preview; run a new dryRun.');
+  }
+}
+
 function targetClassOf(memory: Memory, requested: TransferClass | null | undefined): TransferClass {
   const current = memory.class as TransferClass;
   return requested ?? current;
@@ -229,6 +242,7 @@ export const memoryTransferMutations = {
 
     try {
       return await ctx.db.$transaction(async (tx) => {
+        await lockDestinationRoot(tx, destination);
         // The FK KEY SHARE taken by new dependents conflicts with this row lock;
         // plan and apply from the same locked snapshot.
         await tx.$queryRaw`SELECT id FROM memories WHERE id = ${id} FOR UPDATE`;
