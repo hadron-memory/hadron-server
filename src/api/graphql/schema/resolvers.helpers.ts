@@ -23,6 +23,7 @@ import {
   canWriteToMemory,
   filterReadableMemoryIds,
   getPrincipalAppMemoryAccess,
+  getWorkerMemoryAccess,
 } from '../../../mcp/access-control.js';
 import { ensureAgentOrgGrant } from '../../../controller/operations/ensureAgentOrgGrant.js';
 import { ensureAgentSubscription } from '../../../controller/operations/ensureAgentSubscription.js';
@@ -1024,8 +1025,9 @@ export function nodeNotFoundError(ref: string): GraphQLError {
  * `isMemoryReadableCached` above, which answers "may they read its NODES?".
  *
  * The two are deliberately different (see that function's note): the record
- * gate keeps an org-member fast-path that admits app/system-class memory
- * RECORDS which `getOrgReadableMemoryIds` excludes from the node-content set.
+ * gate keeps an org-member fast-path for system/knowledge memory RECORDS which
+ * `getOrgReadableMemoryIds` excludes from the node-content set. App-class
+ * records now use their shape-aware content audience.
  * Using the node gate for a record-level question silently drops memories the
  * caller can open directly via `Query.memory` — the #759 review finding
  * (Codex P1 / Copilot on PR #846).
@@ -1036,11 +1038,9 @@ export function nodeNotFoundError(ref: string): GraphQLError {
  *   1. personal/private → strict owner, or a MemoryShare grantee (#778).
  *   2. spec 047 user-owned → strict owner, BEFORE the platform-admin path so an
  *      ADMIN never reads another user's user-owned record (#676).
- *   3. otherwise → platform ADMIN/OWNER, a live org membership, a live
- *      AppMember of an App-scoped row (#982 review — the external/B2C member
- *      shape), or whatever the shared node gate already admits (PUBLIC,
- *      subscription, App session) — the #362 fallback that keeps record reads
- *      in step with node reads.
+ *   3. app class → the shared node gate (team, Worker, session audiences).
+ *   4. other non-strict classes → platform ADMIN/OWNER, a live org membership,
+ *      or whatever the shared node gate already admits (PUBLIC, subscription).
  */
 export async function canReadMemoryRecord(
   ctx: Context,
@@ -1102,7 +1102,18 @@ export async function canReadMemoryRecord(
     if (ctx.impersonation) return false;
     return !!ctx.userId && memory.ownerUserId === ctx.userId;
   }
+  if (ctx.appId && ctx.sessionId && !ctx.userId) {
+    const ids = await getAccessibleMemoryIds(ctx, memory.id);
+    return ids === null || ids.includes(memory.id);
+  }
   if (ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER')) return true;
+  // All app-class shapes use their node-content audience. The historical
+  // record fast paths below are wider: an org READER or AppMember could open
+  // a Worker/session memory record even when their nodes were concealed.
+  if (memory.class === 'app') {
+    const ids = await getAccessibleMemoryIds(ctx, memory.id);
+    return ids === null || ids.includes(memory.id);
+  }
   // findFirst (not findUnique) so a REVOKED (soft-deleted) membership no longer
   // grants access. A user-owned memory (org NULL) has no membership fast-path
   // and was already returned above. Under impersonation the fast-path only
@@ -1853,6 +1864,7 @@ export async function granteeShareAccess(
 async function appDerivedMemoryIds(ctx: Context, onlyMemoryId?: string): Promise<string[]> {
   const all = await (ctx.appDerivedMemoryIdCache ??= (async () => {
     const folded = [...(await getPrincipalAppMemoryAccess(ctx.db, ctx)).keys()];
+    if (ctx.userId) folded.push(...await getWorkerMemoryAccess(ctx.db, ctx));
     if (folded.length === 0) return [];
     const rows = await ctx.db.memory.findMany({
       where: {
@@ -2265,7 +2277,8 @@ export function safeCanonicalUrn(type: CanonicalUrnType, raw: string): string {
  *    where strict ownership applies per FR-016)
  * 2. App-keyed callers: write resolved by canWriteToMemory which folds
  *    AppAgent.role + AgentMemoryItem.role + AgentSubscription gates
- * 3. Users: org member with CONTRIBUTOR+, or cross-org subscription with CONTRIBUTOR role
+ * 3. Users: app-class rows through the MCP shape/participation gate; other
+ *    shared classes through their own membership, org, or subscription rules
  */
 export async function requireMemoryWriteAccess(ctx: Context, memoryId: string): Promise<void> {
   // App-keyed callers: delegate to the class-aware MCP gate. The ADMIN/OWNER
@@ -2284,6 +2297,7 @@ export async function requireMemoryWriteAccess(ctx: Context, memoryId: string): 
     if (strictOwner && ctx.userId && !ctx.sessionId && !ctx.impersonation &&
         memory.userId === ctx.userId) return;
     if (!strictOwner && memory.ownerUserId === null &&
+        !(ctx.appId && ctx.sessionId && !ctx.userId) &&
         (ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER'))) return;
     if (await canWriteToMemory(ctx.db, ctx, memoryId)) return;
     throw memoryWriteForbidden();
@@ -2327,6 +2341,14 @@ export async function requireMemoryWriteAccess(ctx: Context, memoryId: string): 
 
   // Non-personal/private, org-owned: global ADMIN/OWNER bypass.
   if (ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER')) return;
+
+  // The app class contains team, Worker, and session rows with distinct
+  // audiences. Use the same shape-aware gate as MCP rather than allowing a
+  // blanket org-CONTRIBUTOR write below.
+  if (memory.class === 'app') {
+    if (await canWriteToMemory(ctx.db, ctx, memoryId)) return;
+    throw memoryWriteForbidden();
+  }
 
   // #653: an APP-SCOPED knowledge/group memory is App-internal — it must NOT be
   // writable via the org-member CONTRIBUTOR / cross-org-subscription grants

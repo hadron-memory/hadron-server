@@ -402,10 +402,8 @@ describe('createTeamChatMessage — sessionRef author derivation', () => {
   });
 
   it("refuses a worker of a DIFFERENT App whose driver may not write this host memory — CHANNEL_HOST_NOT_WRITABLE (item J, the successor of the worker-App pin)", async () => {
-    // A session OF this App, hand-bound to another App's worker. Before spec
-    // 049 Phase 8 the worker-App pin refused this outright; item J refuses it
-    // only because the driver (an App member with no org role) may not write
-    // the Channel's host memory — the host memory decides, not the pin.
+    // A session OF this App, hand-bound to another App's worker. Its driver
+    // is outside this App, so the host-memory check refuses the cross-App post.
     const otherApp = await db.app.create({
       data: { id: generateId(), organizationId: org.id, name: 'Other App W', urn: `${org.urn}:other-w` },
     });
@@ -415,9 +413,9 @@ describe('createTeamChatMessage — sessionRef author derivation', () => {
     });
     const sessionId = generateId();
     await db.session.create({
-      data: { id: sessionId, appId: app.id, userId: appMember.id, agentId: teamAgent.id, workerId: foreignWorker.id },
+      data: { id: sessionId, appId: app.id, userId: outsider.id, agentId: teamAgent.id, workerId: foreignWorker.id },
     });
-    await expectCode(post(ctx(appMember.id), { sessionRef: sessionId }), 'CHANNEL_HOST_NOT_WRITABLE');
+    await expectCode(post({ ...ctx(admin.id), roles: ['ADMIN'] }, { sessionRef: sessionId }), 'CHANNEL_HOST_NOT_WRITABLE');
   });
 
   it('a retired worker stops authoring at once — WORKER_RETIRED at post time (#974)', async () => {

@@ -156,7 +156,7 @@ describe('team-chat monitor (#1265)', () => {
     expect(first).toContain('mentions: @iris');
     expect(first).toContain(`route to: hrn:worker:${org.urn}:app:iris`);
     expect(first).not.toContain(`route to: hrn:worker:${org.urn}:app:mira`);
-    expect(first).toContain('watching with HOST_MEMORY_NOT_WRITABLE');
+    expect(first).not.toContain('HOST_MEMORY_NOT_WRITABLE');
     const checkpoints = checkpointsOf(first);
     expect(checkpoints).toEqual(expect.arrayContaining([
       expect.objectContaining({ worker: worker.id, channel: channel.id, seq: 1 }),
