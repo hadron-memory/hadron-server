@@ -616,6 +616,30 @@ export async function getMemoryAccess(
   db: PrismaClient,
   auth: AuthContext,
 ): Promise<Map<string, string>> {
+  // A pure App key inside a session is confined to that session's verified
+  // reach on point reads as well as GraphQL enumeration. The ordinary App
+  // fold may include sibling AgentMemoryItems, so it cannot answer this shape.
+  if (auth.appId && auth.sessionId && !auth.userId) {
+    const ids = await sessionScopedMemoryIds(db, auth.appId, auth.sessionId);
+    const session = await db.session.findUnique({
+      where: { id: auth.sessionId }, select: { appId: true, memoryId: true },
+    });
+    if (!session || session.appId !== auth.appId || ids.length === 0) return new Map();
+    const rows = await db.memory.findMany({
+      where: { id: { in: ids }, deletedAt: null },
+      select: { id: true, class: true, userMemoryOfAgentId: true, workerOf: { select: { id: true } } },
+    });
+    const scoped = new Map<string, string>();
+    for (const row of rows) {
+      // A session row misbound to the team's or a Worker's app-class memory
+      // passes the read-scope provenance check; it is not session memory.
+      if (row.class === 'app' &&
+        (row.id !== session.memoryId || row.userMemoryOfAgentId === null || row.workerOf.length > 0)) continue;
+      scoped.set(row.id, row.class === 'app' ? 'READ_WRITE' : 'READ_ONLY');
+    }
+    return scoped;
+  }
+
   const access = new Map<string, string>();
 
   // ── Base: App-derived access ────────────────────────────────────────────
@@ -940,7 +964,10 @@ export async function canReadMemory(
     },
   });
   if (!memory) return false;
-  return canReadMemoryRow(db, auth, memory, opts);
+  // A caller-supplied App fold cannot override a bound session's hard scope.
+  const sessionBoundKey = Boolean(auth.appId && auth.sessionId && !auth.userId);
+  return canReadMemoryRow(db, auth, memory,
+    sessionBoundKey ? { access: await getMemoryAccess(db, auth) } : opts);
 }
 
 /**
@@ -975,7 +1002,10 @@ export async function filterReadableMemoryIds(
   });
 
   const isPlatformAdmin = auth.roles?.includes('ADMIN') || auth.roles?.includes('OWNER');
-  const access = opts.access ?? (isPlatformAdmin ? undefined : await getMemoryAccess(db, auth));
+  const sessionBoundKey = Boolean(auth.appId && auth.sessionId && !auth.userId);
+  const access = sessionBoundKey
+    ? await getMemoryAccess(db, auth)
+    : opts.access ?? (isPlatformAdmin ? undefined : await getMemoryAccess(db, auth));
   let installedAgentIds: Set<string> | undefined;
   let subscriptionsByAgentId: Map<string, SubscriptionReadRow> | undefined;
 

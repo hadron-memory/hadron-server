@@ -6,11 +6,9 @@
  * getAccessibleMemoryIds hard-isolates an App-Key + active-session caller to the
  * session's memory (+ the agent's system memory) — THE security boundary for
  * multi-user agents (checked ahead of any role). The MCP pre-scope memoryUrn /
- * parentRel gates use canReadMemory, which for an App-Key caller grants EVERY
- * memory the App's agent can read (not just the session's). Without the extra
- * session gate, an out-of-session memoryUrn would pass canReadMemory and then
- * silently yield "No nodes found" instead of the contract "Memory not found" —
- * a session-boundary access oracle (PR #404 review, Copilot).
+ * parentRel gates use canReadMemory. The point-read map now applies the same
+ * session scope; the extra pre-scope check preserves the not-found envelope
+ * for a denied or absent selector (PR #404 review, Copilot).
  *
  * This file pins: (1) an out-of-session memoryUrn/parentRel returns the "not
  * found" envelope, indistinguishable from a genuinely-absent memory; (2) the
@@ -23,6 +21,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { db } from '../integrations/db/client.js';
 import { cleanDb, createDbNode } from '../test/helpers.js';
 import { createTestableMcpServer } from './server.js';
+import { canReadMemory, filterReadableMemoryIds } from './access-control.js';
 import type { AuthContext } from '../middleware/auth.js';
 import { generateId } from '../lib/id.js';
 
@@ -130,6 +129,16 @@ beforeEach(async () => {
 
 describe('#403 — hadron_find_nodes session isolation (App-Key + active session)', () => {
   it('memoryUrn scoped to a sibling (App-readable but out-of-session) returns "Memory not found"', async () => {
+    expect(await canReadMemory(db, appSessionAuth(), fx.sessionMemory.id)).toBe(true);
+    expect(await canReadMemory(db, appSessionAuth(), fx.siblingMemory.id)).toBe(false);
+    // A caller's wider App fold must not override the bound session in either
+    // point or batch reads.
+    const appFold = new Map([[fx.siblingMemory.id, 'READ_WRITE']]);
+    expect(await canReadMemory(db, appSessionAuth(), fx.siblingMemory.id,
+      { access: appFold })).toBe(false);
+    expect(await filterReadableMemoryIds(db, appSessionAuth(),
+      [fx.sessionMemory.id, fx.siblingMemory.id], { access: appFold }))
+      .toEqual(new Set([fx.sessionMemory.id]));
     const srv = createTestableMcpServer(appSessionAuth());
     const text = await srv.callToolText('hadron_find_nodes', {
       query: 'alpha',

@@ -3450,11 +3450,10 @@ export function createMcpServerInstance(
       // App Key + active session hard-isolates reads to the session's memory
       // (+ the agent's system memory) — findNodes enforces this downstream
       // (getAccessibleMemoryIds, checked first, ahead of any role). The
-      // pre-scope memoryUrn / parentRel gates must enforce the SAME boundary,
-      // or an out-of-session ref would pass canReadMemory here and then
-      // silently yield "No nodes found" instead of the contract "not found"
-      // (a session-boundary access oracle). Mirrors the resolver's
-      // getAccessibleMemoryIds app+session branch.
+      // pre-scope memoryUrn / parentRel gates enforce the SAME boundary and
+      // preserve the contract's not-found envelope for a denied selector.
+      // The MCP point-read map also applies the session scope (#324); this
+      // explicit check keeps the envelope stable even if that map changes.
       let sessionMemoryIds: Set<string> | null = null;
       // #934: pure App-key shape only (`!auth.userId`) — mirrors the resolver
       // branch's guard: a user-credential caller's session binding is
@@ -3572,6 +3571,13 @@ export function createMcpServerInstance(
       // enforces the personal/private gate uniformly.
       if (trimmedParentRel) {
         const resolvedParent = await resolveLocFromUrn(trimmedParentRel, accessibleMemoryIds);
+        // A qualified parent hidden by the session scope resolves no memory
+        // id. Give it the same not-found envelope as a resolved-but-denied
+        // parent, rather than an empty search response that distinguishes the
+        // two cases.
+        if (!resolvedParent.memoryId && /^(?:hrn|urn):node:/.test(trimmedParentRel)) {
+          return textResult(`Node "${trimmedParentRel}" not found.`);
+        }
         filterLocPrefix = resolvedParent.loc;
         if (resolvedParent.memoryId) {
           if (

@@ -397,7 +397,9 @@ describe('#1003 — App members can read the App team space', () => {
       id: generateId(), appId: app.id, agentId: agent.id, memoryId: sessionMemory.id,
     } });
     const appKey = { appId: app.id, sessionId: session.id, roles: [] } as AuthContext;
+    expect(await canReadMemory(db, appKey, sessionMemory.id)).toBe(true);
     expect(await canWriteToMemory(db, appKey, sessionMemory.id)).toBe(true);
+    expect(await canReadMemory(db, appKey, shared.id)).toBe(false);
     expect(await canWriteToMemory(db, appKey, shared.id)).toBe(false);
     expect(await canWriteToMemory(db, appKey, workerMemory.id)).toBe(false);
     await expect(requireMemoryWriteAccess({ db, ...appKey } as Context, sessionMemory.id)).resolves.toBeUndefined();
@@ -406,6 +408,7 @@ describe('#1003 — App members can read the App team space', () => {
       id: generateId(), appId: app.id, agentId: agent.id, memoryId: shared.id,
     } });
     expect(await sessionScopedMemoryIds(db, app.id, misbound.id)).toContain(shared.id);
+    expect(await canReadMemory(db, { appId: app.id, sessionId: misbound.id }, shared.id)).toBe(false);
     expect(await canWriteToMemory(db,
       { appId: app.id, sessionId: misbound.id, roles: [] }, shared.id)).toBe(false);
   });
