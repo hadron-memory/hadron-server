@@ -30,7 +30,7 @@ import { acquireLockSet, ancestorLocs, lockAncestorsForCreateMany } from '../../
 import { Prisma, type Memory, type Node, type Organization } from '../../generated/prisma/index.js';
 import { validateGitBranch } from '../../lib/gitRef.js';
 import { lockMemoryForChannelChange } from '../../lib/channels.js';
-import { assertNoMintedSpecRemoval } from '../../lib/mintedSpecPermanence.js';
+import { lockMintedSpecsIn } from '../../lib/mintedSpecPermanence.js';
 import { reconcilePendingEdgeCount } from '../../lib/pendingEdgePromotion.js';
 import {
   buildNodeRevisionSnapshot,
@@ -971,11 +971,39 @@ export const syncGraphFromGithub = async (
           `[syncGraphFromGithub] "${graphName}": destructive cleanup SUPPRESSED — ${unprotectableSkips.length} file(s) have a path that is not a valid loc and carry no id naming a row in this memory: ${unprotectableSkips.join(', ')}`,
         );
       } else {
+        // #1468 (Holger: skip and warn, not refuse) — a spec whose file is
+        // gone from the repo is NOT pruned from a mint-stamped corpus: minted
+        // specs are permanent. It is kept, like a Channel-protected row, and
+        // reported; the rest of the cleanup proceeds. Found and locked BEFORE
+        // the edge gate below, so a kept spec's cross-memory edges don't refuse
+        // a delete that will not happen.
+        const candidateIds = (await tx.node.findMany({
+          where: {
+            ownerRepo,
+            memoryId: graph.id,
+            id: {
+              notIn: [...upsertedIds, ...protectedRowIds, ...skippedRowIds],
+              // Same bound as the cleanup below (#1330): locking a row that
+              // arrived after the scan would wait under the rulebook lock.
+              ...(prelockedIds ? { in: prelockedIds } : {}),
+            },
+            ...(deletionFilter.notClauses.length
+              ? { NOT: { OR: deletionFilter.notClauses as Prisma.NodeWhereInput[] } }
+              : {}),
+          },
+          select: { id: true },
+        })).map((n) => n.id);
+        const keptMintedSpecs = await lockMintedSpecsIn(tx, graph.id, candidateIds);
+        if (keptMintedSpecs.length > 0) {
+          console.warn(
+            `[syncGraphFromGithub] "${graphName}": kept ${keptMintedSpecs.length} minted spec(s) whose file is gone from the repo — minted specs are permanent (restore the file, or supersede the spec): ${keptMintedSpecs.map((k) => k.loc).join(', ')}`,
+          );
+        }
         const cleanupWhere: Prisma.NodeWhereInput = {
           ownerRepo,
           memoryId: graph.id,
           id: {
-            notIn: [...upsertedIds, ...protectedRowIds, ...skippedRowIds],
+            notIn: [...upsertedIds, ...protectedRowIds, ...skippedRowIds, ...keptMintedSpecs.map((k) => k.id)],
             // #1330 — only rows this sync already holds, once it holds the rulebook lock.
             ...(prelockedIds ? { in: prelockedIds } : {}),
           },
@@ -993,16 +1021,12 @@ export const syncGraphFromGithub = async (
             `Git sync cleanup refused: ${crossMemoryEdges} edge(s) bridge nodes selected for hard-delete to another memory. Remove or relocate those edges explicitly first.`,
           );
         }
-        // #1468 — a spec missing from the repo is NOT pruned from a minted
-        // corpus: the whole sync refuses (fail closed, like the edge gate
-        // above), so the repo must restore the file or supersede the spec.
-        const cleanupIds = (await tx.node.findMany({ where: cleanupWhere, select: { id: true } })).map((n) => n.id);
-        await assertNoMintedSpecRemoval(tx, graph.id, cleanupIds, 'prune from git sync');
         await tx.node.deleteMany({
           // `skippedRowIds` joins the survivors for the same reason
           // `protectedRowIds` does (#1224): a file skipped for an unusable
           // path is absent from `fsGraph.nodes`, so `notIn: upsertedIds`
-          // would hard-delete the row it names.
+          // would hard-delete the row it names. Kept minted specs (#1468)
+          // join them too.
           where: cleanupWhere,
         });
       }

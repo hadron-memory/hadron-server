@@ -76,24 +76,25 @@ export function mintedSpecRemovalError(
 }
 
 /**
- * Lock the given node rows, then refuse if removing them would remove a spec
- * from a mint-stamped corpus. Run inside the removal's transaction, before the
- * write.
+ * Lock the given node rows, then return the ones the mint protects: the spec
+ * rows a removal would take from a mint-stamped corpus (empty when the corpus
+ * is not stamped). Run inside the removal's transaction, before the write; the
+ * row locks are held to commit, so the answer stays true through the removal.
  *
  * `nodeIds` must all belong to `memoryId` (the memory the operation removes
  * them FROM). Rows that have since left the memory are ignored here; the
  * caller's own concurrency checks own that case.
  *
- * @throws GraphQLError `SPEC_MINTED_PERMANENT` when the corpus is stamped and
- *   any locked row carries the spec marker.
+ * Most callers want `assertNoMintedSpecRemoval`, which refuses. Use this
+ * directly only where the removal SKIPS protected rows instead (git sync's
+ * repo-wins prune).
  */
-export async function assertNoMintedSpecRemoval(
+export async function lockMintedSpecsIn(
   tx: Prisma.TransactionClient,
   memoryId: string,
   nodeIds: readonly string[],
-  op: string,
-): Promise<void> {
-  if (nodeIds.length === 0) return;
+): Promise<Array<{ id: string; loc: string }>> {
+  if (nodeIds.length === 0) return [];
   const ids = [...new Set(nodeIds)].sort();
   // Node rows first (id order, the global multi-row order), then the markers
   // re-read under those locks.
@@ -105,14 +106,33 @@ export async function assertNoMintedSpecRemoval(
     ORDER BY id FOR NO KEY UPDATE`;
   const specs = rows.filter((r) => hasSpecMarker({ tags: r.tags ?? [], role: r.role }));
   // No spec in scope: nothing this guard protects, and no memory lock taken.
-  if (specs.length === 0) return;
+  if (specs.length === 0) return [];
   const [memory] = await tx.$queryRaw<Array<{ corpus_minted_at: Date | null }>>`
     SELECT corpus_minted_at FROM memories WHERE id = ${memoryId} FOR SHARE`;
-  if (!memory || memory.corpus_minted_at === null) return;
+  if (!memory || memory.corpus_minted_at === null) return [];
   const mintedAt = memory.corpus_minted_at;
-  const protectedSpecs = specs.filter((s) => isProtectedAfterMint(s.deleted_at, mintedAt));
-  if (protectedSpecs.length === 0) return;
-  throw mintedSpecRemovalError(memoryId, protectedSpecs.map((s) => s.loc).sort(), op);
+  return specs
+    .filter((s) => isProtectedAfterMint(s.deleted_at, mintedAt))
+    .map((s) => ({ id: s.id, loc: s.loc }))
+    .sort((a, b) => a.loc.localeCompare(b.loc));
+}
+
+/**
+ * Lock the given node rows, then refuse if removing them would remove a spec
+ * from a mint-stamped corpus. Run inside the removal's transaction, before the
+ * write. See `lockMintedSpecsIn` for the scope contract.
+ *
+ * @throws GraphQLError `SPEC_MINTED_PERMANENT` when the corpus is stamped and
+ *   any locked row carries the spec marker.
+ */
+export async function assertNoMintedSpecRemoval(
+  tx: Prisma.TransactionClient,
+  memoryId: string,
+  nodeIds: readonly string[],
+  op: string,
+): Promise<void> {
+  const protectedSpecs = await lockMintedSpecsIn(tx, memoryId, nodeIds);
+  if (protectedSpecs.length > 0) throw mintedSpecRemovalError(memoryId, protectedSpecs.map((s) => s.loc), op);
 }
 
 /**

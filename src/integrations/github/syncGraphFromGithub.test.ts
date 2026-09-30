@@ -2340,16 +2340,44 @@ describe('#1468 — git sync pruning and minted specs', () => {
     (await db.node.findMany({ where: { memoryId: dbGraphId, deletedAt: null }, select: { loc: true } }))
       .map((n) => n.loc).sort();
 
-  it('refuses the whole sync instead of deleting a minted spec whose file is gone', async () => {
+  const writeNote = (loc: string) =>
+    writeFrontmatterNode(join(repoRoot(), `${loc}.md`), { name: loc }, 'Note.');
+
+  it('keeps a minted spec whose file is gone, warns, and still prunes the rest', async () => {
     writeSpec('pas:010');
     writeSpec('pas:020');
+    writeNote('notes');
     expect((await syncGraphFromGithub(makeGraph())).error).toBeUndefined();
     await db.memory.update({ where: { id: dbGraphId }, data: { corpusMintedAt: new Date() } });
 
     rmSync(join(repoRoot(), 'pas:010.md'));
+    rmSync(join(repoRoot(), 'notes.md'));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const result = await syncGraphFromGithub(makeGraph());
-    expect(result.error).toMatch(/minted specs are permanent/);
+    expect(result.error).toBeUndefined();
     expect(await liveLocs()).toEqual(['pas:010', 'pas:020']);
+    expect(warn).toHaveBeenCalledWith(expect.stringMatching(/kept 1 minted spec.*pas:010/));
+    warn.mockRestore();
+  });
+
+  it("a kept minted spec's cross-memory edge does not refuse the prune", async () => {
+    writeSpec('pas:010');
+    writeNote('notes');
+    expect((await syncGraphFromGithub(makeGraph())).error).toBeUndefined();
+    await db.memory.update({ where: { id: dbGraphId }, data: { corpusMintedAt: new Date() } });
+    const other = await db.memory.create({
+      data: { id: generateId(), organizationId: dbOrgId, urn: 'test-org:other', name: 'other', class: 'knowledge' },
+    });
+    const citer = await db.node.create({ data: { id: generateId(), memoryId: other.id, loc: 'citer', name: 'citer' } });
+    const spec = await db.node.findFirstOrThrow({ where: { memoryId: dbGraphId, loc: 'pas:010' } });
+    await db.edge.create({ data: { id: generateId(), memoryId: other.id, sourceId: citer.id, targetId: spec.id, loc: 'citer:cites:pas:010', name: 'cites' } });
+
+    rmSync(join(repoRoot(), 'pas:010.md'));
+    rmSync(join(repoRoot(), 'notes.md'));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    expect((await syncGraphFromGithub(makeGraph())).error).toBeUndefined();
+    warn.mockRestore();
+    expect(await liveLocs()).toEqual(['pas:010']);
   });
 
   it('control: an unstamped memory still prunes the spec whose file is gone', async () => {
