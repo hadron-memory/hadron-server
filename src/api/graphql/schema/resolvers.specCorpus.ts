@@ -3,13 +3,28 @@
 // #1450 — reserveSpecCitation. Contract:
 // https://github.com/hadron-memory/hadron-server/issues/1447#issuecomment-5895948862 §4.
 import { GraphQLError } from 'graphql';
+import { Prisma } from '../../../generated/prisma/index.js';
 import type { Context } from './resolvers.js';
 import { nodeMoveOps, writeNodeCore } from './resolvers.mutation.node.js';
-import { concealUnreadableDenial, isMemoryReadableCached, requireMemoryWriteAccess, withoutRequestCaches } from './resolvers.helpers.js';
+import {
+  concealUnreadableDenial,
+  isMemoryReadableCached,
+  requireMemoryWriteAccess,
+  requireOwnerOrOrgRole,
+  withoutRequestCaches,
+} from './resolvers.helpers.js';
+import { isAbstractUnverified } from '../../../lib/contentHash.js';
+import {
+  STALE_ABSTRACT_BLOCKS_MINT,
+  lintCorpusForMint,
+  mintLintSelects,
+  parseOpenQuestions,
+} from '../../../lib/specMint.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { acquireLockSet, ancestorLocs } from '../../../lib/nodeSubtreeLock.js';
 import { archiveTombstone } from '../../../lib/tombstoneArchive.js';
 import { lockEdgeEndpointMemories } from '../../../lib/edgeEndpointLock.js';
+import { pendingEdgeStableTargetId } from '../../../lib/pendingEdgePromotion.js';
 import { MemoryNotFoundError } from '../../../lib/asset/gate.js';
 import { ensureCurrentNodeRevisionInTransaction } from '../../../lib/nodeRevisionSnapshot.js';
 import { isDraftCorpus } from '../../../lib/specCorpus.js';
@@ -260,7 +275,7 @@ async function loadScannableCorpus(ctx: Context, memoryRef: string): Promise<Sca
  * for the whole scan; the returned predicate is synchronous.
  */
 async function referenceAcceptor(
-  db: Context['db'],
+  db: Pick<Context['db'], 'node'>,
   corpus: ScannableCorpus,
   refs: ReadonlyArray<{ memoryUrn: string; targetLoc: string }>,
 ): Promise<(ref: { memoryUrn: string; targetLoc: string }) => boolean> {
@@ -328,13 +343,13 @@ function toScannedNode(n: {
  * is still a live node of this corpus. Re-reading the whole corpus per rewrite
  * made a renumber quadratic in a well-linked corpus.
  */
-async function loadCorpusNode(db: Context['db'], memoryId: string, id: string): Promise<ScannedNode | undefined> {
+async function loadCorpusNode(db: Pick<Context['db'], 'node'>, memoryId: string, id: string): Promise<ScannedNode | undefined> {
   const n = await db.node.findFirst({ where: { id, memoryId, deletedAt: null }, select: SCANNED_SELECT });
   return n ? toScannedNode(n) : undefined;
 }
 
 /** Read every live node of the corpus, a page at a time, in id order. */
-async function loadCorpusNodes(db: Context['db'], memoryId: string): Promise<ScannedNode[]> {
+async function loadCorpusNodes(db: Pick<Context['db'], 'node'>, memoryId: string): Promise<ScannedNode[]> {
   const nodes: ScannedNode[] = [];
   let cursor: string | undefined;
   for (;;) {
@@ -378,7 +393,7 @@ const fromScan = (r: ScannedReference): SpecReferenceOut => ({
 });
 
 /** Live real edges whose source is a live node of this corpus, pointing at `targetIds`. */
-async function corpusEdgesTo(db: Context['db'], memoryId: string, targetIds: string[]) {
+async function corpusEdgesTo(db: Pick<Context['db'], 'edge'>, memoryId: string, targetIds: string[]) {
   if (targetIds.length === 0) return [];
   return db.edge.findMany({
     // (@codex P2, #1453) Edges are soft-deleted: a deleted edge is not a reference.
@@ -420,11 +435,24 @@ export const specCorpusQueries = {
    */
   specUnresolvedReferences: async (_: unknown, { memoryRef }: { memoryRef: string }, ctx: Context): Promise<SpecReferenceOut[]> => {
     const corpus = await loadScannableCorpus(ctx, memoryRef);
-    const nodes = await loadCorpusNodes(ctx.db, corpus.id);
+    return unresolvedReferencesIn(ctx, corpus, await loadCorpusNodes(ctx.db, corpus.id));
+  },
+};
+
+/**
+ * The references in a corpus that do not reach a written spec (MISSING or
+ * PLACEHOLDER), shared by specUnresolvedReferences and the mint report.
+ */
+async function unresolvedReferencesIn(
+  ctx: Context,
+  corpus: ScannableCorpus,
+  nodes: ScannedNode[],
+): Promise<SpecReferenceOut[]> {
+    const { db } = ctx;
     const byLoc = new Map(nodes.map((n) => [n.loc, n]));
     const out: SpecReferenceOut[] = [];
     const scanned = scanReferences(nodes, corpus.pattern);
-    const accept = await referenceAcceptor(ctx.db, corpus, scanned);
+    const accept = await referenceAcceptor(db, corpus, scanned);
     for (const r of scanned) {
       if (!accept(r)) continue;
       const target = byLoc.get(r.targetLoc);
@@ -432,15 +460,115 @@ export const specCorpusQueries = {
       else if (target.isPlaceholder) out.push({ ...fromScan(r), reason: 'PLACEHOLDER' });
     }
     const placeholders = nodes.filter((n) => n.isPlaceholder).map((n) => n.id);
-    for (const e of await corpusEdgesTo(ctx.db, corpus.id, placeholders)) {
+    for (const e of await corpusEdgesTo(db, corpus.id, placeholders)) {
       out.push({
         kind: 'EDGE', sourceNodeId: e.source.id, sourceLoc: e.source.loc, field: 'edge',
         targetLoc: e.target.loc, text: e.name, reason: 'PLACEHOLDER',
       });
     }
+    // (@codex P2, PR #1462) An edge may cross into another readable memory
+    // (createEdge admits readable targets), so a placeholder there is an
+    // unwritten spec this corpus points at. Only a memory the CALLER can read
+    // is consulted: classifying by an unreadable one's rows would make this
+    // report an oracle for it (findings:classifying-by-another-memorys-rows-
+    // is-an-existence-oracle). Its target is named by node URN, since a loc
+    // alone does not say which memory it is in.
+    // A soft-deleted target there is as unresolved as one in the corpus
+    // (@codex P2, PR #1462): MISSING, behind the same read gate.
+    // (@codex P2, PR #1462) An edge into a memory the caller can NOT read
+    // (access revoked after it was created) cannot be classified without
+    // revealing that tenant's node state, and cannot be vouched for either, so
+    // it BLOCKS uniformly, whatever its target's state, named only by the
+    // target id this corpus's own edge row already carries.
+    const foreign = await db.edge.findMany({
+      where: {
+        deletedAt: null,
+        source: { memoryId: corpus.id, deletedAt: null },
+        target: { memoryId: { not: corpus.id } },
+      },
+      select: {
+        name: true, targetId: true, source: { select: { id: true, loc: true } },
+        target: { select: { loc: true, memoryId: true, deletedAt: true, isPlaceholder: true, memory: { select: { urn: true } } } },
+      },
+      orderBy: { id: 'asc' },
+    });
+    for (const e of foreign) {
+      const readable = await isMemoryReadableCached(ctx, e.target.memoryId);
+      if (readable && !e.target.deletedAt && !e.target.isPlaceholder) continue;
+      out.push({
+        kind: 'EDGE', sourceNodeId: e.source.id, sourceLoc: e.source.loc, field: 'edge',
+        targetLoc: readable
+          ? `hrn:node:${e.target.memory.urn.replace(/^(?:hrn|urn):mem(?:ory)?:/i, '')}:${e.target.loc}`
+          : e.targetId,
+        text: e.name,
+        reason: readable && !e.target.deletedAt ? 'PLACEHOLDER' : 'MISSING',
+      });
+    }
+    // (@codex P2, PR #1462) deleteNode soft-deletes a spec but leaves the
+    // edges pointing at it, so a live edge from the corpus to a deleted spec of
+    // the corpus is a reference whose target no longer exists.
+    const dangling = await db.edge.findMany({
+      where: {
+        deletedAt: null,
+        source: { memoryId: corpus.id, deletedAt: null },
+        target: { memoryId: corpus.id, deletedAt: { not: null } },
+      },
+      select: { name: true, source: { select: { id: true, loc: true } }, target: { select: { loc: true } } },
+      orderBy: { id: 'asc' },
+    });
+    for (const e of dangling) {
+      out.push({
+        kind: 'EDGE', sourceNodeId: e.source.id, sourceLoc: e.source.loc, field: 'edge',
+        targetLoc: e.target.loc, text: e.name, reason: 'MISSING',
+      });
+    }
+    // (@codex P2s, PR #1462) A PendingEdge is an edge not materialized yet,
+    // and promotion can materialize it later: an unresolved reference like any
+    // other. Its targetId has two DISJOINT encodings (pendingEdgePromotion.ts),
+    // and the kind is never inferred from the value or from an id join:
+    // - a stable `@node-id:<id>` key is promotion retry work for a known node,
+    //   so it is unresolved only while that node is missing, deleted or a
+    //   placeholder;
+    // - anything else is a reference no node has resolved yet (a loc, a Git
+    //   file id, a URN), reported as recorded.
+    const pending = await db.pendingEdge.findMany({
+      where: { deletedAt: null, source: { memoryId: corpus.id, deletedAt: null } },
+      select: { name: true, targetId: true, source: { select: { id: true, loc: true } } },
+      orderBy: { id: 'asc' },
+    });
+    const stableIds = [...new Set(pending.map((p) => pendingEdgeStableTargetId(p.targetId)).filter((id): id is string => id !== null))];
+    const stableTargets = new Map(stableIds.length === 0 ? [] : (await db.node.findMany({
+      where: { id: { in: stableIds } },
+      select: { id: true, loc: true, deletedAt: true, isPlaceholder: true, memoryId: true, memory: { select: { urn: true } } },
+    })).map((t) => [t.id, t]));
+    for (const p of pending) {
+      const stableId = pendingEdgeStableTargetId(p.targetId);
+      const target = stableId === null ? undefined : stableTargets.get(stableId);
+      // (@codex P1 + P2, PR #1462) A stable key can name a node in ANOTHER
+      // memory. One the caller cannot read may not DECIDE anything (whether it
+      // reports, or what loc it names, would reveal that tenant's node state),
+      // but the pending relationship still exists and can still materialize,
+      // so it BLOCKS uniformly: unresolved, reported by its own recorded key.
+      if (target && target.memoryId !== corpus.id && !(await isMemoryReadableCached(ctx, target.memoryId))) {
+        out.push({
+          kind: 'EDGE', sourceNodeId: p.source.id, sourceLoc: p.source.loc, field: 'pendingEdge',
+          targetLoc: p.targetId, text: p.name, reason: 'MISSING',
+        });
+        continue;
+      }
+      const live = target && !target.deletedAt ? target : undefined;
+      if (live && !live.isPlaceholder) continue;
+      out.push({
+        kind: 'EDGE', sourceNodeId: p.source.id, sourceLoc: p.source.loc, field: 'pendingEdge',
+        targetLoc: !target ? p.targetId
+          : target.memoryId === corpus.id ? target.loc
+          : `hrn:node:${target.memory.urn.replace(/^(?:hrn|urn):mem(?:ory)?:/i, '')}:${target.loc}`,
+        text: p.name,
+        reason: live ? 'PLACEHOLDER' : 'MISSING',
+      });
+    }
     return out;
-  },
-};
+}
 
 /** How many times a reference rewrite re-reads and retries after a concurrent edit. */
 const REWRITE_ATTEMPTS = 3;
@@ -677,3 +805,214 @@ function validateLocOrThrow(loc: string): void {
     throw err;
   }
 }
+
+// ─── #1448 — minting: draft → minted, once, one-way ─────────────────────────
+
+/** Why the mint report lists an item. */
+type MintFindingKind = 'PLACEHOLDER' | 'UNRESOLVED_REFERENCE' | 'LINT' | 'STALE_ABSTRACT';
+
+type MintFinding = {
+  kind: MintFindingKind;
+  loc: string;
+  rule: string | null;
+  message: string;
+  targetLoc: string | null;
+};
+
+type MintReport = {
+  memoryId: string;
+  dryRun: boolean;
+  minted: boolean;
+  blockers: MintFinding[];
+  staleAbstracts: MintFinding[];
+  staleAbstractsBlock: boolean;
+  openQuestions: Array<{ decider: string | null; questions: Array<{ loc: string; question: string }> }>;
+};
+
+/** How many blockers a refusal carries in its error extensions (the dry run has them all). */
+const MINT_REFUSAL_BLOCKER_CAP = 50;
+
+/**
+ * Hold a corpus still for a mint's check-and-flip, WITHOUT relying on writers
+ * to cooperate (@codex P2s, PR #1462). The earlier fence was a memory-row lock
+ * that conflicted with the FOR SHARE every *cooperating* node write takes, and
+ * review found one direct writer after another that takes none (an extraction,
+ * a Channel message post). So the fence is the mint's own:
+ * - the memory row FOR UPDATE, which conflicts with the FOR KEY SHARE that the
+ *   `nodes.memory_id` foreign key takes on every insert or move INTO the
+ *   memory, whatever code path issues it;
+ * - then every node row of the memory, tombstones included, FOR UPDATE, which
+ *   blocks every update, revival or delete of an existing node, and every edge
+ *   write naming one as an endpoint (the edge FKs take FOR KEY SHARE on nodes).
+ *
+ * Memory first waits out cooperating writers, which hold the memory before
+ * their node rows. A writer holding a node row while it waits on the memory
+ * (a move, an extraction) would be a lock cycle, so the node locks give up
+ * after 500ms, under Postgres's default 1s deadlock_timeout, and the mint
+ * refuses as retryable rather than a deadlock abort landing on the writer.
+ */
+async function fenceCorpusForMint(tx: Prisma.TransactionClient, memoryId: string): Promise<void> {
+  await tx.$queryRaw`SELECT id FROM memories WHERE id = ${memoryId} FOR UPDATE`;
+  await tx.$executeRaw`SET LOCAL lock_timeout = '500ms'`;
+  try {
+    await tx.$queryRaw`SELECT id FROM nodes WHERE memory_id = ${memoryId} ORDER BY id FOR UPDATE`;
+  } catch (e) {
+    if (e instanceof Prisma.PrismaClientKnownRequestError && (e.meta as { code?: string } | undefined)?.code === '55P03') {
+      throw new GraphQLError('A write to this corpus is in flight, so it cannot be minted this moment. Retry.', {
+        extensions: { code: 'SPEC_CORPUS_BUSY', memoryId },
+      });
+    }
+    throw e;
+  }
+  await tx.$executeRaw`SET LOCAL lock_timeout TO DEFAULT`;
+}
+
+const CORPUS_MANAGER_SELECT = { class: true, userId: true, organizationId: true, ownerUserId: true } as const;
+
+/**
+ * Who may mint a corpus: whoever may manage the memory, keyed the way
+ * deleteMemory and requireMemoryWriteAccess key it (@codex P2, PR #1462). A
+ * personal or private memory is STRICTLY its principal's (`Memory.userId`,
+ * cor:acl:010:02), with no org-role path, and is identity-scoped, so an
+ * impersonating session is refused. Its `ownerUserId` is the TENANT axis and
+ * is null when the memory is org-anchored, so the updateMemory gate alone
+ * would leave such a corpus with nobody able to mint it. Any other memory
+ * takes the updateMemory gate: its user owner, or an ADMIN of its org.
+ */
+async function requireCorpusManager(
+  ctx: Context,
+  m: { class: string; userId: string | null; organizationId: string | null; ownerUserId: string | null },
+): Promise<void> {
+  if (m.class === 'personal' || m.class === 'private') {
+    if (!ctx.impersonation && ctx.userId && m.userId === ctx.userId) return;
+    throw new Error('Forbidden');
+  }
+  await requireOwnerOrOrgRole(ctx, m, 'ADMIN');
+}
+
+export const specCorpusMintMutations = {
+  /**
+   * #1448 — mint a DRAFT spec corpus: one step for the whole corpus, one-way
+   * (contract §5). After minting, today's rules apply unchanged: citations are
+   * permanent, moves record URN aliases again, and no placeholder can be
+   * reserved. `dryRun` returns the same report without minting.
+   *
+   * Blocks (and a real run refuses `SPEC_CORPUS_MINT_BLOCKED` while any hold):
+   * a placeholder remains; a reference points to a missing spec or a
+   * placeholder; a structural lint error (the four server-owned rules, over
+   * the citation-shaped nodes); and a stale abstract once
+   * STALE_ABSTRACT_BLOCKS_MINT is switched on (#1408). Reported only: stale
+   * abstracts while that switch is off, and open questions grouped by who
+   * decides.
+   *
+   * By anyone who can manage the corpus ({@link requireCorpusManager}): the
+   * principal of a personal/private corpus; otherwise its owner or an ADMIN of
+   * its org. An unreadable memory answers as not found.
+   * A real run checks and flips inside {@link fenceCorpusForMint}, so no write
+   * lands between the report and the mint; a dry run only reads.
+   *
+   * @throws GraphQLError `SPEC_CORPUS_BUSY` (retryable) when a node of the
+   *   corpus stays locked by an in-flight write.
+   */
+  mintSpecCorpus: async (
+    _: unknown,
+    { memoryRef, dryRun }: { memoryRef: string; dryRun?: boolean | null },
+    ctx: Context,
+  ): Promise<MintReport> => {
+    const { id } = await resolveMemoryRef(ctx.db, memoryRef);
+    const owner = await ctx.db.memory.findUniqueOrThrow({ where: { id }, select: CORPUS_MANAGER_SELECT });
+    await concealUnreadableDenial(ctx, id, memoryRef, () => requireCorpusManager(ctx, owner));
+
+    return ctx.db.$transaction(async (tx) => {
+      if (dryRun) await tx.$queryRaw`SELECT id FROM memories WHERE id = ${id} FOR NO KEY UPDATE`;
+      else await fenceCorpusForMint(tx, id);
+      const txCtx = withoutRequestCaches(ctx, tx);
+      // (@codex P2, PR #1462) Re-authorize under the lock: an org transfer
+      // (updateMemory takes this row FOR UPDATE) may have committed between the
+      // check above and this lock, and minting is irreversible, so the gate
+      // must judge the owner the row has NOW.
+      const lockedOwner = await tx.memory.findUniqueOrThrow({ where: { id }, select: CORPUS_MANAGER_SELECT });
+      await concealUnreadableDenial(txCtx, id, memoryRef, () => requireCorpusManager(txCtx, lockedOwner));
+      // Re-reads the draft flag and encryption under the lock just taken.
+      const corpus = await loadScannableCorpus(txCtx, id);
+      const nodes = await tx.node.findMany({
+        where: { memoryId: id, deletedAt: null },
+        orderBy: { loc: 'asc' },
+        select: {
+          id: true, loc: true, nodeType: true, tags: true, role: true, isPlaceholder: true, revSeq: true,
+          name: true, description: true, abstract: true, content: true, abstractOriginHash: true,
+        },
+      });
+      // The lint scope is exactly the CLI's (`lintSelects`, hadron-cli #708;
+      // ruling (a) in team chat #4086): every spec-marked node at ANY loc, plus
+      // every citation-shaped node, marked or not, so a spec that lost its tag
+      // is still caught. A memory root at a citation-shaped name (`pas`)
+      // occupies that citation and is linted like any node there, as the CLI
+      // lints it; one at an ordinary name (`specs-draft`) is outside.
+      const cited = nodes.filter(mintLintSelects);
+
+      const blockers: MintFinding[] = [];
+      for (const n of nodes) {
+        if (n.isPlaceholder) {
+          blockers.push({ kind: 'PLACEHOLDER', loc: n.loc, rule: null, message: 'reserved citation with no spec written', targetLoc: null });
+        }
+      }
+      const scanned: ScannedNode[] = nodes.map((n) => ({
+        id: n.id, loc: n.loc, isPlaceholder: n.isPlaceholder, revSeq: n.revSeq, role: n.role,
+        fields: { name: n.name, description: n.description, abstract: n.abstract, content: n.content },
+      }));
+      for (const r of await unresolvedReferencesIn(txCtx, corpus, scanned)) {
+        blockers.push({
+          kind: 'UNRESOLVED_REFERENCE', loc: r.sourceLoc, rule: r.reason ?? null, targetLoc: r.targetLoc,
+          message: r.reason === 'PLACEHOLDER'
+            ? `${r.kind === 'EDGE' ? 'edge' : r.field} points at placeholder ${r.targetLoc}`
+            : `${r.kind === 'EDGE' ? 'edge' : r.field} cites ${r.targetLoc}, which does not exist`,
+        });
+      }
+      for (const f of lintCorpusForMint(cited)) {
+        blockers.push({ kind: 'LINT', loc: f.loc, rule: f.rule, message: f.message, targetLoc: null });
+      }
+      const staleAbstracts: MintFinding[] = cited
+        .filter((n) => isAbstractUnverified(n))
+        .map((n) => ({
+          kind: 'STALE_ABSTRACT' as const, loc: n.loc, rule: null, targetLoc: null,
+          message: 'the abstract was written for an earlier body; re-affirm or rewrite it',
+        }));
+      if (STALE_ABSTRACT_BLOCKS_MINT) blockers.push(...staleAbstracts);
+
+      const byDecider = new Map<string | null, Array<{ loc: string; question: string }>>();
+      for (const n of cited) {
+        for (const q of parseOpenQuestions(n.content)) {
+          byDecider.set(q.decider, [...(byDecider.get(q.decider) ?? []), { loc: n.loc, question: q.question }]);
+        }
+      }
+      const openQuestions = [...byDecider.entries()]
+        .sort(([a], [b]) => (a === null ? 1 : b === null ? -1 : a.localeCompare(b)))
+        .map(([decider, questions]) => ({ decider, questions }));
+
+      const report: MintReport = {
+        memoryId: id, dryRun: !!dryRun, minted: false, blockers,
+        staleAbstracts, staleAbstractsBlock: STALE_ABSTRACT_BLOCKS_MINT, openQuestions,
+      };
+      if (dryRun) return report;
+      if (blockers.length > 0) {
+        throw new GraphQLError(
+          `Minting refused: ${blockers.length} blocking item(s) remain. Run mintSpecCorpus with dryRun: true for the full report.`,
+          {
+            extensions: {
+              code: 'SPEC_CORPUS_MINT_BLOCKED',
+              memoryId: id,
+              blockerCount: blockers.length,
+              blockers: blockers.slice(0, MINT_REFUSAL_BLOCKER_CAP),
+            },
+          },
+        );
+      }
+      await tx.memory.update({
+        where: { id },
+        data: { corpusDraft: false, corpusMintedAt: new Date(), corpusMintedBy: ctx.userId ?? ctx.clientId ?? null },
+      });
+      return { ...report, minted: true };
+    }, { timeout: 120_000 });
+  },
+};

@@ -57,7 +57,12 @@ import { teamAttentionMutations, teamAttentionQueries } from './resolvers.teamAt
 import { teamWorkMutations, teamWorkQueries } from './resolvers.teamWork.js';
 import { memoryConfigMutations, memoryConfigQueries, memoryConfigFieldResolvers } from './resolvers.memoryConfig.js';
 import { memoryConfigApplyMutations } from './resolvers.memoryConfigApply.js';
-import { specCorpusMutations, specCorpusQueries, specCorpusRenumberMutations } from './resolvers.specCorpus.js';
+import {
+  specCorpusMintMutations,
+  specCorpusMutations,
+  specCorpusQueries,
+  specCorpusRenumberMutations,
+} from './resolvers.specCorpus.js';
 import {
   memoryConfigTemplateFieldResolvers,
   memoryConfigTemplateMutations,
@@ -154,6 +159,7 @@ export const resolvers = {
     ...memoryConfigApplyMutations,
     ...specCorpusMutations,
     ...specCorpusRenumberMutations,
+    ...specCorpusMintMutations,
     ...scopeMutations,
     ...channelMutations,
     ...registerMutations,
