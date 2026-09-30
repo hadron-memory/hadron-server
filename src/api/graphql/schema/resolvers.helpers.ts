@@ -2292,10 +2292,9 @@ export async function requireMemoryWriteAccess(ctx: Context, memoryId: string): 
     });
     if (!memory) throw memoryWriteForbidden();
     const strictOwner = memory.class === 'personal' || memory.class === 'private';
-    // App selection on a user credential does not remove direct ownership.
-    // A session or impersonation context cannot use this identity shortcut.
-    if (strictOwner && ctx.userId && !ctx.sessionId && !ctx.impersonation &&
-        memory.userId === ctx.userId) return;
+    // A strict owner's direct rights under App selection are decided by the
+    // shared gate below (canWriteToMemory, #1503), the same rule MCP applies,
+    // so the two surfaces cannot drift again.
     if (!strictOwner && memory.ownerUserId === null &&
         !(ctx.appId && ctx.sessionId && !ctx.userId) &&
         (ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER'))) return;

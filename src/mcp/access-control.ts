@@ -766,6 +766,25 @@ export async function getWorkerMemoryAccess(
 }
 
 /**
+ * (#1503) Is this caller a DIRECT user credential: a user id, not inside a bound
+ * session, not an impersonation? For such a caller, a personal/private memory's
+ * strict owner keeps direct rights under ANY App selection. On MCP, `auth.appId`
+ * on a user credential is a SELECTION (connection state), not a credential
+ * (findings:auth-appid-credential-vs-selection), and a selection must never
+ * outrank the owner's explicit reference (cor:acl:020:01). Direct ownership
+ * needs no AgentSubscription (cor:acl:010:02).
+ *
+ * The per-App isolation that follows the owner check still governs everything
+ * else: a pure App key (no user id), a session-bound caller (a session must not
+ * become a way out of its App scope), and an impersonation. This is the ONE
+ * copy of the rule: `canWriteToMemory`, `canReadMemoryRow` and, through them,
+ * the GraphQL `requireMemoryWriteAccess` all apply it.
+ */
+function isDirectUserCredential(auth: AuthContext): boolean {
+  return Boolean(auth.userId) && !auth.sessionId && !auth.impersonation;
+}
+
+/**
  * Check if a caller has write access to a specific memory.
  *
  * Personal-class memories (FR-016 + 008 FR-011): strict ownership — only
@@ -807,6 +826,9 @@ export async function canWriteToMemory(
     if (memory.appId === null && memory.userMemoryOfAgentId === null) {
       return true;
     }
+
+    // #1503: the owner through a direct user credential, whatever App is selected.
+    if (isDirectUserCredential(auth)) return true;
 
     if (auth.appId) {
       // Per-App isolation: a session through App A cannot write the personal
@@ -941,6 +963,10 @@ async function canReadMemoryRow(
     if (memory.appId === null && memory.userMemoryOfAgentId === null) {
       return true;
     }
+
+    // #1503: the owner through a direct user credential, whatever App is
+    // selected. The same rule as canWriteToMemory, so read and write agree.
+    if (isDirectUserCredential(auth)) return true;
 
     if (auth.appId) {
       // Same legacy guard as canWriteToMemory: when memory.appId is NULL,
