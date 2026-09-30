@@ -14,6 +14,7 @@ import { moveNodeSubtree } from '../../lib/nodeSubtreeMove.js';
 import { deriveEdgeLoc } from '../../lib/edgeLoc.js';
 import { waitForLockWaitersOfType } from '../../test/lockWait.js';
 import { buildNodeFrontmatter } from './nodeFrontmatter.js';
+import { writeNodeFile } from './writeNodeToGit.js';
 
 // ---------------------------------------------------------------------------
 // Mock child_process.execFile so no actual git commands run
@@ -1496,5 +1497,77 @@ describe('#1348 — objectType through git sync', () => {
     await sync();
     expect(await stored('r')).toEqual({ objectType: 'insight', role: 'review' });
     expect(await stored('s')).toEqual({ objectType: 'insight', role: 'review' });
+  });
+});
+
+describe('#1477 Git placeholder marker', () => {
+  const file = (meta: { id?: string; name: string; role?: string; placeholder?: boolean }, content?: string) => {
+    const path = join(mockSources, 'test-org', 'test/repo', 'pas', '010', '01.md');
+    writeFrontmatterNode(path, meta, content);
+  };
+  const stored = () => db.node.findUniqueOrThrow({ where: { loc_memoryId: { loc: 'pas:010:01', memoryId: dbGraphId } } });
+
+  it('recreates a reserved citation from an incremental mirror file', async () => {
+    await db.memory.update({ where: { id: dbGraphId }, data: { corpusDraft: true } });
+    const id = generateId();
+    const reserved = await db.node.create({ data: {
+      id, memoryId: dbGraphId, loc: 'pas:010:01', name: 'Reserved',
+      role: 'spec', isPlaceholder: true, ownerRepo: 'test/repo',
+    } });
+    writeNodeFile(join(mockSources, 'test-org', 'test/repo'), {
+      id: reserved.id, loc: reserved.loc, name: reserved.name, tags: [],
+      role: reserved.role, isRunnable: reserved.isRunnable,
+      isPlaceholder: reserved.isPlaceholder, outgoingEdges: [],
+    });
+    await db.node.delete({ where: { id } });
+    expect((await syncGraphFromGithub(makeGraph())).error).toBeUndefined();
+    expect(await stored()).toMatchObject({ id, role: 'spec', content: null, isPlaceholder: true });
+  });
+
+  it('restores a blank spec reservation in a draft, including a dotted spec role', async () => {
+    await db.memory.update({ where: { id: dbGraphId }, data: { corpusDraft: true } });
+    file({ name: 'Reserved', role: 'spec.rule', placeholder: true });
+    expect((await syncGraphFromGithub(makeGraph())).error).toBeUndefined();
+    expect(await stored()).toMatchObject({ role: 'spec.rule', content: null, isPlaceholder: true });
+  });
+
+  it.each([
+    ['minted memory', false, 'spec', undefined],
+    ['non-spec role', true, 'review', undefined],
+    ['lookalike role', true, 'special', undefined],
+    ['written body', true, 'spec', 'The rule.'],
+  ] as const)('ignores and reports a marker in a %s while syncing the node', async (_case, draft, role, content) => {
+    await db.memory.update({ where: { id: dbGraphId }, data: { corpusDraft: draft } });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      file({ name: 'Still imported', role, placeholder: true }, content);
+      expect((await syncGraphFromGithub(makeGraph())).error).toBeUndefined();
+      expect(await stored()).toMatchObject({ name: 'Still imported', role, isPlaceholder: false });
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('ignored placeholder marker'));
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('preserves an old mirrored placeholder when the key is absent and clears it when the file writes content', async () => {
+    await db.memory.update({ where: { id: dbGraphId }, data: { corpusDraft: true } });
+    const id = generateId();
+    await db.node.create({ data: {
+      id, memoryId: dbGraphId, loc: 'pas:010:01', name: 'Reserved',
+      role: 'spec', isPlaceholder: true, ownerRepo: 'test/repo',
+    } });
+    file({ id, name: 'Renamed' });
+    expect((await syncGraphFromGithub(makeGraph())).error).toBeUndefined();
+    expect(await stored()).toMatchObject({ name: 'Renamed', role: 'spec', isPlaceholder: true });
+
+    file({ id, name: 'Written', role: 'spec', placeholder: true }, 'The rule.');
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      expect((await syncGraphFromGithub(makeGraph())).error).toBeUndefined();
+      expect(await stored()).toMatchObject({ name: 'Written', content: 'The rule.', isPlaceholder: false });
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('ignored placeholder marker'));
+    } finally {
+      warn.mockRestore();
+    }
   });
 });

@@ -156,6 +156,7 @@ export async function pushMemoryToGit(
       // two export paths disagree about what a faithful mirror contains.
       role: node.role,
       isRunnable: node.isRunnable,
+      isPlaceholder: node.isPlaceholder,
     }, node.outgoingEdges);
     preserveUnmanagedFrontmatter(frontmatter, mdPath);
 

@@ -16,7 +16,7 @@
  * A test that only checked values would pass against the broken version.
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { mkdtempSync, writeFileSync, rmSync, mkdirSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
@@ -27,6 +27,10 @@ import { loadNodeFromFs } from '../localFs/loadNodeFromFs.js';
 const base = { id: 'n1', name: 'N', tags: [] as string[] };
 
 describe('export — governed signals reach the frontmatter', () => {
+  it('emits a placeholder marker only for a reserved citation', () => {
+    expect(buildNodeFrontmatter({ ...base, role: 'spec', isPlaceholder: true }).placeholder).toBe(true);
+    expect(buildNodeFrontmatter({ ...base, role: 'spec', isPlaceholder: false })).not.toHaveProperty('placeholder');
+  });
   it('emits role and runnable when set', () => {
     const fm = buildNodeFrontmatter({ ...base, role: 'review', isRunnable: true });
     expect(fm.role).toBe('review');
@@ -54,6 +58,18 @@ describe('export — governed signals reach the frontmatter', () => {
 });
 
 describe('export — the INCREMENTAL mirror path emits them too', () => {
+  it('writeNodeFile carries the server-set placeholder marker', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'placeholder-write-'));
+    try {
+      writeNodeFile(dir, {
+        id: 'reserved', loc: 'pas:010:01', name: 'Reserved', tags: [],
+        role: 'spec', isRunnable: null, isPlaceholder: true, outgoingEdges: [],
+      });
+      expect(readFileSync(join(dir, 'pas', '010', '01.md'), 'utf-8')).toMatch(/^placeholder: true$/m);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
   it('writeNodeFile puts role and runnable in the file it writes', async () => {
     // The gap a mutation found, not review: wiring `pushMemoryToGit` and the
     // `NodeForGit` type left `writeNodeFile` — the path ordinary writes and
@@ -69,6 +85,7 @@ describe('export — the INCREMENTAL mirror path emits them too', () => {
         tags: [],
         role: 'review',
         isRunnable: true,
+        isPlaceholder: false,
         outgoingEdges: [],
       });
       const written = readFileSync(join(dir, 'topic.md'), 'utf-8');
@@ -85,6 +102,7 @@ describe('export — the INCREMENTAL mirror path emits them too', () => {
       writeNodeFile(dir, {
         id: 'n6', loc: 'plain', name: 'P', tags: [],
         role: null, isRunnable: null, outgoingEdges: [],
+        isPlaceholder: false,
       });
       const written = readFileSync(join(dir, 'plain.md'), 'utf-8');
       expect(written).not.toMatch(/^role:/m);
@@ -114,6 +132,19 @@ describe('import — absence is preserved, presence is applied', () => {
     // and the stored value survives. `role: null` here would be the bug.
     expect('role' in node).toBe(false);
     expect('isRunnable' in node).toBe(false);
+    expect('isPlaceholder' in node).toBe(false);
+  });
+
+  it('loads only a true placeholder marker, warning on malformed claims', async () => {
+    expect((await load('placeholder: true\n')).isPlaceholder).toBe(true);
+    expect('isPlaceholder' in await load('placeholder: false\n')).toBe(false);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      expect('isPlaceholder' in await load('placeholder: "true"\n')).toBe(false);
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('non-boolean placeholder marker'));
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it('a file WITH role sets it', async () => {
@@ -154,11 +185,12 @@ describe('import — absence is preserved, presence is applied', () => {
     try {
       const nodeDir = join(dir, 'topic', '.node');
       mkdirSync(nodeDir, { recursive: true });
-      writeFileSync(join(nodeDir, 'node.yaml'), 'id: n9\nname: N\nrole: spec\nrunnable: true\n', 'utf-8');
+      writeFileSync(join(nodeDir, 'node.yaml'), 'id: n9\nname: N\nrole: spec\nrunnable: true\nplaceholder: true\n', 'utf-8');
       writeFileSync(join(nodeDir, 'topic.md'), 'body\n', 'utf-8');
       const { node } = await loadNodeFromFs(join(dir, 'topic'), dir, 'owner/repo');
       expect((node as Record<string, unknown>).role).toBe('spec');
       expect((node as Record<string, unknown>).isRunnable).toBe(true);
+      expect((node as Record<string, unknown>).isPlaceholder).toBe(true);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
