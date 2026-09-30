@@ -325,6 +325,41 @@ describe('former URNs use live-address precedence (@codex P2 on #1453)', () => {
     expect(result.rewrites.find((row) => row.nodeId === other.id)).toMatchObject({ status: 'REWRITTEN', count: 1 });
     expect(await content('pas:020')).toContain(`hrn:node:${formerUrn}:pas:040`);
   });
+
+  it('does not choose arbitrarily among multiple live aliases for one former address', async () => {
+    const formerUrn = draft.urn;
+    await resolvers.Mutation.updateMemory(null, { id: draft.id, urn: 'specs-draft-renamed' } as never, as());
+    const squatter = await resolvers.Mutation.createMemory(null, { orgId: org.id, name: 'specs-draft' }, as());
+    const address = `${formerUrn}:pas:500`;
+    await db.urnAlias.createMany({ data: [feature.id, rule.id].map((entityId) => ({
+      urn: address, entityType: 'NODE' as const, entityId, reason: 'RENAME' as const,
+    })) });
+    await db.node.update({ where: { id: other.id }, data: { content: `Ambiguous: hrn:node:${address}.` } });
+
+    const noAliasBacklink = async () => {
+      const refs = await resolvers.Query.specBacklinks(null, { memoryRef: draft.id, loc: 'pas:010' }, as());
+      return refs.filter((ref) => ref.kind === 'URN' && ref.sourceLoc === 'pas:020');
+    };
+    const noAliasRewrite = async () => {
+      const plan = await specCorpusRenumberMutations.renumberSpec(
+        null, { memoryRef: draft.id, fromLoc: 'pas:010', toLoc: 'pas:040', dryRun: true }, as(),
+      );
+      return plan.rewrites.filter((row) => row.nodeId === other.id);
+    };
+    expect(await noAliasBacklink()).toEqual([]);
+    expect(await noAliasRewrite()).toEqual([]);
+
+    // A readable foreign target also makes the same address ambiguous.
+    const foreign = await db.node.create({ data: {
+      id: generateId(), memoryId: squatter.id, loc: 'pas:900', name: 'Foreign target',
+    } });
+    await db.urnAlias.delete({ where: {
+      urn_entityType_entityId: { urn: address, entityType: 'NODE', entityId: rule.id },
+    } });
+    await db.urnAlias.create({ data: { urn: address, entityType: 'NODE', entityId: foreign.id, reason: 'RENAME' } });
+    expect(await noAliasBacklink()).toEqual([]);
+    expect(await noAliasRewrite()).toEqual([]);
+  });
 });
 
 describe('renumber moves by address, atomically (@codex P2 on #1453)', () => {

@@ -318,14 +318,24 @@ async function referenceAcceptor(
       select: { id: true, memoryId: true, loc: true },
     })) aliasTargets.set(target.id, { memoryId: target.memoryId, loc: target.loc });
   }
-  const aliasResolved = new Map<string, string | null>();
+  const aliasCandidates = new Map<string, Map<string, string | null>>();
   for (const alias of aliases) {
     const target = aliasTargets.get(alias.entityId);
     // An alias whose live target moved INTO this corpus is ours, even when a
     // different memory now holds the old URN. Only readable foreign targets
     // compete for the citation.
-    if (target?.memoryId === corpus.id) aliasResolved.set(alias.urn, target.loc);
-    else if (target && await isMemoryReadableCached(ctx, target.memoryId)) aliasResolved.set(alias.urn, null);
+    if (!target) continue;
+    if (target.memoryId !== corpus.id && !await isMemoryReadableCached(ctx, target.memoryId)) continue;
+    const candidates = aliasCandidates.get(alias.urn) ?? new Map<string, string | null>();
+    candidates.set(alias.entityId, target.memoryId === corpus.id ? target.loc : null);
+    aliasCandidates.set(alias.urn, candidates);
+  }
+  // The alias table permits several targets for one address. Like
+  // resolveNodeRef, never pick a target by query order when the visible
+  // candidates disagree; an ambiguous citation cannot be safely rewritten.
+  const aliasResolved = new Map<string, string | null>();
+  for (const [urn, candidates] of aliasCandidates) {
+    aliasResolved.set(urn, candidates.size === 1 ? candidates.values().next().value! : null);
   }
   return (ref) => {
     if (ref.memoryUrn === corpus.urn && taken.has(`${corpus.id}\u0000${ref.targetLoc}`)) return ref.targetLoc;
