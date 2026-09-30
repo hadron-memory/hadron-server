@@ -968,3 +968,43 @@ describe('family 18 — structural review corrections (#3280/#3283/#3257)', () =
     expect(mine[0]).toMatchObject({ unread: 4, lastSeq: 4 });
   });
 });
+
+describe('family 19 — #1496 MAX_WORKERS aligned with MAX_TARGETS', () => {
+  it('a 23-live-Worker team (the production blocker shape) polls instead of refusing the whole call', async () => {
+    // No register rows for the extra workers: the v1 cap refused inside
+    // liveOwnWorkers BEFORE register lookup, so live sessions alone reproduce
+    // #4678 — the fixed code must scan to completion (workers contribute no
+    // targets without register rows, so the poll legitimately returns none
+    // for them while Dara's real target still counts).
+    for (let i = 0; i < 22; i++) {
+      const extraAgent = await db.agent.create({
+        data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:extra-${i}`, name: `Extra ${i}`, visibility: 'ORGANIZATION' },
+      });
+      const extraWorker = await db.worker.create({
+        data: { id: generateId(), appId: app.id, agentId: extraAgent.id, name: `Extra ${i}`, slug: `extra-${i}` },
+      });
+      await db.session.create({
+        data: { id: generateId(), appId: app.id, userId: user.id, workerId: extraWorker.id, agentId: extraAgent.id, type: 'DEVELOPER', startedAt: new Date() },
+      });
+      await db.appAgent.create({ data: { appId: app.id, agentId: extraAgent.id } });
+    }
+    await post('m0');
+    const drained = await drainPages({}, {});
+    const mine = drained.items.filter((i) => i.worker === worker.id);
+    expect(mine).toHaveLength(1);
+    expect(mine[0]).toMatchObject({ unread: 1, lastSeq: 1 });
+    expect(drained.adoptableSince).toBeTruthy();
+  });
+
+  it('the scope guards remain aligned: MAX_WORKERS === MAX_TARGETS === OPEN_SESSION_SCAN_CAP', async () => {
+    const { OPEN_SESSION_SCAN_CAP } = await import('./sessionActivity.js');
+    const attention = await import('./teamAttention.js');
+    // The caps are module-private; assert them via the exported refusal
+    // messages' bounds instead — the constants must agree so a single
+    // scope guard (#1496) is the contract.
+    expect(OPEN_SESSION_SCAN_CAP).toBe(200);
+    expect(attention.MAX_WORKERS_PUBLIC).toBe(200);
+    expect(attention.MAX_TARGETS_PUBLIC).toBe(200);
+  });
+});
+
