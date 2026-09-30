@@ -2380,6 +2380,30 @@ describe('#1468 — git sync pruning and minted specs', () => {
     expect(await liveLocs()).toEqual(['pas:010']);
   });
 
+  it('keeps the spec marker when a file drops it from a minted spec, and applies the rest (#4403)', async () => {
+    writeSpec('pas:010');
+    expect((await syncGraphFromGithub(makeGraph())).error).toBeUndefined();
+    await db.memory.update({ where: { id: dbGraphId }, data: { corpusMintedAt: new Date() } });
+
+    writeFrontmatterNode(join(repoRoot(), 'pas:010.md'), { name: 'pas:010', tags: ['other'] }, 'Edited rule text.');
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    expect((await syncGraphFromGithub(makeGraph())).error).toBeUndefined();
+    expect(warn).toHaveBeenCalledWith(expect.stringMatching(/kept the spec marker on minted spec pas:010/));
+    warn.mockRestore();
+    const spec = await db.node.findFirstOrThrow({ where: { memoryId: dbGraphId, loc: 'pas:010' } });
+    expect(spec).toMatchObject({ tags: ['spec'], content: 'Edited rule text.' });
+  });
+
+  it('control: an unstamped memory takes the marker drop from the file', async () => {
+    writeSpec('pas:010');
+    expect((await syncGraphFromGithub(makeGraph())).error).toBeUndefined();
+
+    writeFrontmatterNode(join(repoRoot(), 'pas:010.md'), { name: 'pas:010', tags: ['other'] }, 'Rule text.');
+    expect((await syncGraphFromGithub(makeGraph())).error).toBeUndefined();
+    const node = await db.node.findFirstOrThrow({ where: { memoryId: dbGraphId, loc: 'pas:010' } });
+    expect(node.tags).toEqual(['other']);
+  });
+
   it('control: an unstamped memory still prunes the spec whose file is gone', async () => {
     writeSpec('pas:010');
     writeSpec('pas:020');

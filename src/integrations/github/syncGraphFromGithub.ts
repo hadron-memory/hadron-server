@@ -30,7 +30,7 @@ import { acquireLockSet, ancestorLocs, lockAncestorsForCreateMany } from '../../
 import { Prisma, type Memory, type Node, type Organization } from '../../generated/prisma/index.js';
 import { validateGitBranch } from '../../lib/gitRef.js';
 import { lockMemoryForChannelChange } from '../../lib/channels.js';
-import { lockMintedSpecsIn } from '../../lib/mintedSpecPermanence.js';
+import { lockMintedSpecsIn, lockMintedSpecUnmarks } from '../../lib/mintedSpecPermanence.js';
 import { reconcilePendingEdgeCount } from '../../lib/pendingEdgePromotion.js';
 import {
   buildNodeRevisionSnapshot,
@@ -190,6 +190,24 @@ export async function updateNodeFromGitSync(
       if (!(e instanceof GraphQLError) || e.extensions?.code !== 'SPEC_PLACEHOLDER_ROLE_LOCKED') throw e;
       console.warn(`[syncGraphFromGithub] kept role 'spec' on unwritten placeholder ${locked.loc}: ${e.message}`);
       const { role: _kept, ...rest } = update;
+      update = rest;
+    }
+  }
+  // #1468 — a file that drops the spec marker from a minted spec would make
+  // it deletable. Same keep-and-report rule as above: the stored tags and role
+  // are KEPT, the rest of the file applies, and nothing fails the sync.
+  if ('tags' in update || 'role' in update) {
+    const unmarked = await lockMintedSpecUnmarks(tx, expectedMemoryId, [{
+      id: locked.id,
+      tags: 'tags' in update ? (update.tags as string[]) : undefined,
+      role: 'role' in update ? (update.role as string | null) : undefined,
+    }]);
+    if (unmarked.length > 0) {
+      console.warn(
+        `[syncGraphFromGithub] kept the spec marker on minted spec ${locked.loc}: ` +
+          'the file drops it, and a minted spec stays a spec (#1468).',
+      );
+      const { tags: _keptTags, role: _keptRole, ...rest } = update;
       update = rest;
     }
   }

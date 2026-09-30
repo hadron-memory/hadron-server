@@ -16,7 +16,11 @@
  *
  * WHICH nodes: anything carrying the spec marker (`hasSpecMarker` — a `spec`
  * tag or a `spec`/`spec.*` role; both are plaintext at rest even in encrypted
- * memories).
+ * memories). Because the removal guards pick specs out BY that marker,
+ * dropping it is itself a removal path, and the marker is guarded too
+ * (`assertNoMintedSpecUnmark`, Vera team chat #4403): every door that can
+ * rewrite `tags` or `role` refuses to leave a minted spec unmarked, and git
+ * sync keeps the stored marker and reports the file.
  *
  * Race safety against a concurrent mint. The mint fences with Memory
  * `FOR UPDATE`, then every node row `FOR UPDATE` with a 500ms lock timeout
@@ -133,6 +137,88 @@ export async function assertNoMintedSpecRemoval(
 ): Promise<void> {
   const protectedSpecs = await lockMintedSpecsIn(tx, memoryId, nodeIds);
   if (protectedSpecs.length > 0) throw mintedSpecRemovalError(memoryId, protectedSpecs.map((s) => s.loc), op);
+}
+
+/** A node's marker fields after a proposed update; an omitted field is left unchanged. */
+export interface NodeMarkerChange {
+  id: string;
+  tags?: readonly string[];
+  role?: string | null;
+}
+
+/**
+ * Lock the given node rows, then return the ones whose proposed update would
+ * take the spec marker off a protected spec of a mint-stamped corpus (#1468,
+ * Vera team chat #4403). Dropping the marker is a removal path in disguise:
+ * the removal guards pick specs out BY their marker, so an unmarked spec can
+ * then be deleted like any note. Keeping or swapping the marker (a `spec` tag
+ * swapped for a `spec.rule` role) is not a removal and stays allowed.
+ *
+ * Same locking order and strength as `lockMintedSpecsIn` (node rows
+ * `FOR NO KEY UPDATE` in id order, then the memory row `FOR SHARE`), so it
+ * cooperates with a concurrent mint the same way, and the answer holds until
+ * the caller's write commits. Run inside the update's transaction, before it.
+ *
+ * Most callers want `assertNoMintedSpecUnmark`, which refuses. Use this
+ * directly only where the write KEEPS the marker instead (git sync).
+ */
+export async function lockMintedSpecUnmarks(
+  tx: Prisma.TransactionClient,
+  memoryId: string,
+  changes: readonly NodeMarkerChange[],
+): Promise<Array<{ id: string; loc: string }>> {
+  // Only a change that touches a marker field can unmark anything.
+  const touching = changes.filter((c) => c.tags !== undefined || c.role !== undefined);
+  if (touching.length === 0) return [];
+  const next = new Map(touching.map((c) => [c.id, c]));
+  const ids = [...next.keys()].sort();
+  const rows = await tx.$queryRaw<
+    Array<{ id: string; loc: string; tags: string[]; role: string | null; deleted_at: Date | null }>
+  >`
+    SELECT id, loc, tags, role, deleted_at FROM nodes
+    WHERE id = ANY(${ids}::text[]) AND memory_id = ${memoryId}
+    ORDER BY id FOR NO KEY UPDATE`;
+  const unmarked = rows.filter((r) => {
+    const before = { tags: r.tags ?? [], role: r.role };
+    if (!hasSpecMarker(before)) return false;
+    const change = next.get(r.id)!;
+    return !hasSpecMarker({
+      tags: change.tags ?? before.tags,
+      role: change.role !== undefined ? change.role : before.role,
+    });
+  });
+  if (unmarked.length === 0) return [];
+  const [memory] = await tx.$queryRaw<Array<{ corpus_minted_at: Date | null }>>`
+    SELECT corpus_minted_at FROM memories WHERE id = ${memoryId} FOR SHARE`;
+  if (!memory || memory.corpus_minted_at === null) return [];
+  const mintedAt = memory.corpus_minted_at;
+  return unmarked
+    .filter((r) => isProtectedAfterMint(r.deleted_at, mintedAt))
+    .map((r) => ({ id: r.id, loc: r.loc }))
+    .sort((a, b) => a.loc.localeCompare(b.loc));
+}
+
+/** The way forward an unmark refusal names: the marker is what keeps a minted spec a spec. */
+const UNMARK_REMEDY =
+  'Removing the spec marker (the "spec" tag, or a spec/spec.* role) would let it be deleted; ' +
+  'keep a marker, or supersede the spec to replace it.';
+
+/**
+ * Refuse an update that would take the spec marker off a protected spec of a
+ * mint-stamped corpus. See `lockMintedSpecUnmarks` for the rule and locking.
+ *
+ * @throws GraphQLError `SPEC_MINTED_PERMANENT` naming the specs it would unmark.
+ */
+export async function assertNoMintedSpecUnmark(
+  tx: Prisma.TransactionClient,
+  memoryId: string,
+  changes: readonly NodeMarkerChange[],
+  op: string,
+): Promise<void> {
+  const unmarked = await lockMintedSpecUnmarks(tx, memoryId, changes);
+  if (unmarked.length > 0) {
+    throw mintedSpecRemovalError(memoryId, unmarked.map((s) => s.loc), op, UNMARK_REMEDY);
+  }
 }
 
 /**

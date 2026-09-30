@@ -74,7 +74,7 @@ import type { Request, Response } from 'express';
 import { db } from '../integrations/db/client.js';
 import { acquireLockSet, ancestorLocs, lockAncestorsForCreate, lockLocForWrite, lockNodeForDelete } from '../lib/nodeSubtreeLock.js';
 import { lockMemoryForChannelChange } from '../lib/channels.js';
-import { assertNoMintedSpecRemoval, SPEC_MINTED_PERMANENT } from '../lib/mintedSpecPermanence.js';
+import { assertNoMintedSpecRemoval, assertNoMintedSpecUnmark, SPEC_MINTED_PERMANENT } from '../lib/mintedSpecPermanence.js';
 import { escapePrismaLikePattern } from '../lib/literalLocPrefix.js';
 import {
   moveNodeSubtree,
@@ -3374,6 +3374,9 @@ export function createMcpServerInstance(
                 `[write_conflict] the section at "${loc}" moved while this write waited — re-read and retry.`,
               );
             }
+            // #1468 — a re-save writes omitted tags as [], which must not
+            // strip the marker off a minted spec.
+            await assertNoMintedSpecUnmark(tx, memoryId, [{ id: current.id, tags: upsertArgs.update.tags }], 're-save');
             // Compare logical plaintext. Fresh AES-GCM ciphertext differs on
             // every save even when the section body is unchanged.
             const currentForDiff = parentKey
@@ -3403,6 +3406,9 @@ export function createMcpServerInstance(
         if (e instanceof NodeMovedDuringWriteError) return textResult(e.message);
         if (e instanceof MemoryEncryptionChangedDuringWriteError) return textResult(e.message);
         if (e instanceof MemoryWriteAccessChangedDuringWriteError) return textResult(e.message);
+        if (e instanceof ScopeGraphQLError && e.extensions?.code === SPEC_MINTED_PERMANENT) {
+          return textResult(`[spec_minted_permanent] ${e.message}`);
+        }
         throw e;
       }
 
@@ -5447,6 +5453,9 @@ export function createMcpServerInstance(
 
           if (authoritative) {
             await tx.$queryRaw`SELECT "id" FROM "nodes" WHERE "id" = ${authoritative.id} FOR UPDATE`;
+            // #1468 — reviving a spec tombstone kept for recovery after the
+            // mint must not also strip its marker. Parity with writeNodeCore.
+            await assertNoMintedSpecUnmark(tx, memoryId, [{ id: authoritative.id, tags: tags ?? [], role }], 'overwrite');
           }
           await assertMemoryEncryptionStateForWrite(tx, memoryId, memEncRow?.isEncrypted ?? false, auth);
 
@@ -5509,6 +5518,9 @@ export function createMcpServerInstance(
         if (e instanceof EdgeLocConflictError) return textResult(e.message);
         if (e instanceof MemoryEncryptionChangedDuringWriteError) return textResult(e.message);
         if (e instanceof MemoryWriteAccessChangedDuringWriteError) return textResult(e.message);
+        if (e instanceof ScopeGraphQLError && e.extensions?.code === SPEC_MINTED_PERMANENT) {
+          return textResult(`[spec_minted_permanent] ${e.message}`);
+        }
         throw e;
       }
 
@@ -5870,6 +5882,8 @@ export function createMcpServerInstance(
                 `[write_conflict] ${rawUrn} moved, was deleted or changed memory while this update waited — re-read it and retry.`,
               );
             }
+            // #1468 — dropping the spec marker would make a minted spec deletable.
+            await assertNoMintedSpecUnmark(tx, memory.id, [{ id: current.id, tags, role }], 'update');
             // #937 — bind a client-side read/modify/write to the Revision it
             // actually read. The row lock + #1339 reconciliation above make
             // this the same atomic revSeq guard used by writeNodeCore. Do not
@@ -5929,6 +5943,9 @@ export function createMcpServerInstance(
           if (e instanceof InlineEdgeEndpointError) return textResult(e.message);
           if (e instanceof EdgeLocConflictError) return textResult(e.message);
           if (e instanceof RoleNotDeclaredError) return textResult(`[role_not_declared] ${e.message}`);
+          if (e instanceof ScopeGraphQLError && e.extensions?.code === SPEC_MINTED_PERMANENT) {
+            return textResult(`[spec_minted_permanent] ${e.message}`);
+          }
           if (e instanceof ScopeGraphQLError && e.extensions?.code === 'NODE_WRITE_CONFLICT') {
             return textResult(`[node_write_conflict] ${e.message}`);
           }

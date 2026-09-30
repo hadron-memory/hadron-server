@@ -9,7 +9,7 @@ import {
   type ProtectedSource,
 } from '../../../lib/protectedLoc.js';
 import { lockMemoryForChannelChange } from '../../../lib/channels.js';
-import { assertNoMintedSpecRemoval } from '../../../lib/mintedSpecPermanence.js';
+import { assertNoMintedSpecRemoval, assertNoMintedSpecUnmark } from '../../../lib/mintedSpecPermanence.js';
 import {
   assertGovernedWrite,
   assertRoleDeclaredForWrite,
@@ -669,6 +669,13 @@ export async function writeNodeCore(
       // replaces.
       const tags = serializeTags(input.tags ?? []) as string[];
       const updateTagsPayload = input.tags === undefined ? {} : { tags };
+      // #1468 — what this write does to an existing row's spec marker, for
+      // the guard that keeps a minted spec a spec (omitted = unchanged).
+      const markerChange = (nodeId: string) => ({
+        id: nodeId,
+        tags: input.tags === undefined ? undefined : tags,
+        role: input.role,
+      });
       const id = input.id ?? generateId();
       // Strip GraphQL-only fields + `tags` from the Prisma payload.
       // `edges` is consumed above (resolved into `resolvedEdges`) and applied
@@ -1199,6 +1206,7 @@ export async function writeNodeCore(
 
             // #1450 — a placeholder keeps its spec role until it is written.
             assertPlaceholderKeepsSpecRole(current, { role: input.role, content: input.content });
+            await assertNoMintedSpecUnmark(tx, input.memoryId, [markerChange(current.id)], 'update');
             const data = {
               ...updatePayload,
               // The snapshot above keeps the old author. The new live content
@@ -1435,6 +1443,9 @@ export async function writeNodeCore(
             // overrides the same way (src/mcp/server.ts).
             if (authoritative && mode !== 'create') {
               assertPlaceholderKeepsSpecRole(authoritative, { role: input.role, content: input.content });
+            }
+            if (authoritative) {
+              await assertNoMintedSpecUnmark(tx, input.memoryId, [markerChange(authoritative.id)], 'overwrite');
             }
             const upserted = await tx.node.upsert({
               ...upsertArgs,
@@ -2654,6 +2665,14 @@ export const nodeMutations = {
               extensions: { code: 'NODE_WRITE_CONFLICT', memoryId },
             });
           }
+        }
+        // #1468 — a tag replace must not strip the spec marker off a minted
+        // spec; one refusal refuses the whole batch, like every check here.
+        for (const memoryId of [...plannedEncryption.keys()].sort()) {
+          const changes = plans
+            .filter((plan) => plan.raw.memoryId === memoryId && 'tags' in plan.changed)
+            .map((plan) => ({ id: plan.raw.id, tags: serializeTags(plan.changed.tags as string[]) as string[] }));
+          await assertNoMintedSpecUnmark(tx, memoryId, changes, 'replace text in');
         }
         for (const id of [...planMemory.keys()].sort()) {
           await ensureCurrentNodeRevisionInTransaction(tx, id, { expectedMemoryId: planMemory.get(id)! });
@@ -4288,6 +4307,13 @@ export const nodeMutations = {
           writeData.data = jsonOrDbNull(writeData.data as never);
         }
         writeData.revisionContentHash = revisionStateHashRefreshMarker();
+        // #1468 — restoring a pre-mark revision must not unmark a minted spec.
+        const restoredMarker = restoreFields as { tags?: string[]; role?: string | null };
+        await assertNoMintedSpecUnmark(tx, current.memoryId, [{
+          id: current.id,
+          tags: 'tags' in restoredMarker ? restoredMarker.tags : undefined,
+          role: 'role' in restoredMarker ? restoredMarker.role : undefined,
+        }], 'restore a revision of');
         const restored = await tx.node.update({
           where: { id: current.id },
           data: writeData,

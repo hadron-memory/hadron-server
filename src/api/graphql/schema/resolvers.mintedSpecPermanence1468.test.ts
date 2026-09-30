@@ -15,7 +15,7 @@ import { resolvers, type Context } from './resolvers.js';
 import { createTestableMcpServer } from '../../../mcp/server.js';
 import type { AuthContext } from '../../../middleware/auth.js';
 import { generateId } from '../../../lib/id.js';
-import { SPEC_MINTED_PERMANENT } from '../../../lib/mintedSpecPermanence.js';
+import { SPEC_MINTED_PERMANENT, assertNoMintedSpecUnmark } from '../../../lib/mintedSpecPermanence.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -229,6 +229,114 @@ describe('#1468 — mergeNodes, moves and extract', () => {
       parentRef: parent.id, targetUrn: `hrn:mem:${org.urn}:extracted-copy`, move: false,
     }, ctx());
     expect(await liveIds(minted.id)).toEqual(['pas', 'pas:010', 'readme']);
+  });
+});
+
+describe('#1468 — the spec marker stays on a minted spec (Vera #4403)', () => {
+  const update = (id: string, input: Record<string, unknown>) =>
+    resolvers.Mutation.updateNode({}, { input: { id, ...input } } as never, ctx());
+  const tagsOf = async (id: string) => (await db.node.findUniqueOrThrow({ where: { id } })).tags;
+
+  it("closes the bypass: dropping a minted spec's tag is refused, so the delete after it still refuses", async () => {
+    const spec = await node(minted.id, 'pas:010', { tags: ['spec', 'core'] });
+    await expect(update(spec.id, { tags: ['core'] })).rejects.toSatisfy(refusedPermanent);
+    expect(await tagsOf(spec.id)).toEqual(['spec', 'core']);
+    await expect(resolvers.Mutation.deleteNode({}, { nodeRef: spec.id }, ctx())).rejects.toSatisfy(refusedPermanent);
+  });
+
+  it('control: a minted spec still takes edits that keep its marker, including tag edits', async () => {
+    const spec = await node(minted.id, 'pas:010', { tags: ['spec'] });
+    await update(spec.id, { content: 'revised', tags: ['spec', 'core'] });
+    expect(await db.node.findUniqueOrThrow({ where: { id: spec.id } })).toMatchObject({
+      content: 'revised', tags: ['spec', 'core'],
+    });
+  });
+
+  it('control: a draft corpus, and a never-stamped memory, still allow dropping the marker', async () => {
+    const a = await node(draft.id, 'pas:010', { tags: ['spec'] });
+    const b = await node(unstamped.id, 'pas:010', { tags: ['spec'] });
+    await update(a.id, { tags: [] });
+    await update(b.id, { tags: [] });
+    expect([await tagsOf(a.id), await tagsOf(b.id)]).toEqual([[], []]);
+  });
+
+  it('MCP hadron_update_node refuses tags:[] on a minted spec', async () => {
+    const spec = await node(minted.id, 'pas:010', { tags: ['spec'] });
+    const text = await createTestableMcpServer(auth()).callToolText('hadron_update_node', {
+      urn: `hrn:node:${minted.urn}:pas:010`, tags: [],
+    });
+    expect(text).toMatch(/^\[spec_minted_permanent\].*[Ss]upersede/);
+    expect(await tagsOf(spec.id)).toEqual(['spec']);
+  });
+
+  it('MCP hadron_create_parent_node refuses a re-save whose omitted tags would clear the marker', async () => {
+    const spec = await node(minted.id, 'pas', { tags: ['spec'] });
+    const text = await createTestableMcpServer(auth()).callToolText('hadron_create_parent_node', {
+      urn: `hrn:node:${minted.urn}:pas`, description: 'the pas module',
+    });
+    expect(text).toMatch(/^\[spec_minted_permanent\]/);
+    expect(await tagsOf(spec.id)).toEqual(['spec']);
+  });
+
+  it('searchReplaceInNodes refuses a tag replace that unmarks a minted spec, writing nothing', async () => {
+    const spec = await node(minted.id, 'pas:010', { tags: ['spec'] });
+    const note = await node(minted.id, 'notes', { tags: ['spec-draft'] });
+    await expect(resolvers.Mutation.searchReplaceInNodes({}, {
+      input: { oldText: '^spec', newText: 'was', regex: true, fields: ['tags'], nodeIds: [spec.id, note.id] },
+    } as never, ctx())).rejects.toSatisfy(refusedPermanent);
+    expect([await tagsOf(spec.id), await tagsOf(note.id)]).toEqual([['spec'], ['spec-draft']]);
+  });
+
+  it('restoreNodeRevision refuses restoring a pre-mark revision of a minted spec', async () => {
+    const n = await node(minted.id, 'pas:010');
+    await update(n.id, { tags: ['spec'] });
+    const before = await db.nodeRevision.findFirstOrThrow({ where: { nodeId: n.id, tags: { isEmpty: true } } });
+    await expect(resolvers.Mutation.restoreNodeRevision({}, { revisionId: before.id }, ctx()))
+      .rejects.toSatisfy(refusedPermanent);
+    expect(await tagsOf(n.id)).toEqual(['spec']);
+  });
+
+  it('createNode over a post-mint spec tombstone refuses to revive it unmarked, GraphQL and MCP', async () => {
+    const mintedAt = (await db.memory.findUniqueOrThrow({ where: { id: minted.id } })).corpusMintedAt!;
+    const tomb = await node(minted.id, 'pas:010', { tags: ['spec'], deletedAt: new Date(mintedAt.getTime() + 1000) });
+    await expect(resolvers.Mutation.createNode({}, {
+      input: { memoryId: minted.id, loc: 'pas:010', name: 'n', content: 'x', tags: ['other'] },
+    } as never, ctx())).rejects.toSatisfy(refusedPermanent);
+    // MCP writes omitted tags as [], so the plain create is the unmark there.
+    const text = await createTestableMcpServer(auth()).callToolText('hadron_create_node', {
+      urn: `hrn:node:${minted.urn}:pas:010`, name: 'n', content: 'x',
+    });
+    expect(text).toMatch(/^\[spec_minted_permanent\]/);
+    expect(await db.node.findUniqueOrThrow({ where: { id: tomb.id } })).toMatchObject({
+      tags: ['spec'], deletedAt: expect.any(Date),
+    });
+  });
+
+  describe('the guard itself (role markers, which the generic doors refuse to edit anyway)', () => {
+    const check = (id: string, change: { tags?: string[]; role?: string | null }) =>
+      db.$transaction((tx) => assertNoMintedSpecUnmark(tx, minted.id, [{ id, ...change }], 'update'));
+
+    it('refuses clearing the only marker, a role', async () => {
+      const spec = await node(minted.id, 'pas:010', { role: 'spec.rule' });
+      await expect(check(spec.id, { role: null })).rejects.toSatisfy(refusedPermanent);
+      await expect(check(spec.id, { role: 'note' })).rejects.toSatisfy(refusedPermanent);
+    });
+
+    it('allows swapping one marker for another, and changes that leave the marker alone', async () => {
+      const spec = await node(minted.id, 'pas:010', { tags: ['spec'], role: 'spec' });
+      await check(spec.id, { role: null });
+      await check(spec.id, { tags: [] });
+      await check(spec.id, { tags: ['spec'], role: 'spec.rule' });
+      await check(spec.id, {});
+    });
+
+    it('protects a post-mint tombstone, but not one deleted before the mint', async () => {
+      const mintedAt = (await db.memory.findUniqueOrThrow({ where: { id: minted.id } })).corpusMintedAt!;
+      const late = await node(minted.id, 'pas:010', { tags: ['spec'], deletedAt: new Date(mintedAt.getTime() + 1000) });
+      const early = await node(minted.id, 'pas:020', { tags: ['spec'], deletedAt: new Date(mintedAt.getTime() - 1000) });
+      await expect(check(late.id, { tags: [] })).rejects.toSatisfy(refusedPermanent);
+      await check(early.id, { tags: [] });
+    });
   });
 });
 
