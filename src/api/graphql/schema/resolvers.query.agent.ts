@@ -1,4 +1,5 @@
 // agentQueries — extracted from resolvers.ts Query (split step 3). No behavior change.
+import { GraphQLError } from 'graphql';
 import { decryptToken } from '../../../lib/tokenCrypto.js';
 import { AI_PROVIDER_ENDPOINTS, effectiveApiStyle, effectiveEndpoint } from '../../../lib/aiEndpoint.js';
 import {
@@ -369,6 +370,14 @@ export const agentQueries = {
           // A personal Agent may use its own config or one on the user-owned
           // App it runs through. Neither context may reach the platform key.
           throw new NoAiConfigAvailableError(name ?? DEFAULT_AI_CONFIG_NAME, 'this Agent');
+        }
+        if (ownerType === 'HADRON_SERVER' && config.apiKeyEncrypted && !isPlatformAdmin(ctx)) {
+          // Tenant admins may use the platform fallback for server-side calls,
+          // but the platform's provider credential must not leave the server.
+          throw new GraphQLError(
+            `AI configuration '${config.name}' resolved at the HADRON_SERVER level; only a platform administrator may decrypt its API key.`,
+            { extensions: { code: 'FORBIDDEN' } },
+          );
         }
         if (!config.apiKeyEncrypted) {
           // Resolvable but unusable: a config without a key cannot back an

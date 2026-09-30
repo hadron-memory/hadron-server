@@ -316,14 +316,15 @@ describe('mergeNodes — encryption', () => {
     await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
 
     const key = generateDataKey().raw.toString('base64');
-    const appCtx: Context = { db, appId: app.id, roles: ['ADMIN'], organizationId: org.id };
+    const appCtx: Context = { db, appId: app.id, roles: [], organizationId: org.id };
     const session = await resolvers.Mutation.startAgentSession(
       {},
       { agentId: agent.id, externalUserId: 'mm-1', dataKey: key },
       appCtx,
     );
     const memId = session.memoryId!;
-    const sCtx: Context = { ...appCtx, sessionId: session.id };
+    const driver = await db.session.findUniqueOrThrow({ where: { id: session.id }, select: { userId: true } });
+    const sCtx: Context = { ...appCtx, userId: driver.userId!, sessionId: session.id };
 
     const src = await resolvers.Mutation.createNode(
       {}, { input: { memoryId: memId, loc: 'src', name: 'src', content: 'secret source' } }, sCtx,
@@ -355,12 +356,13 @@ describe('mergeNodes — encryption', () => {
     await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
 
     const key = generateDataKey().raw.toString('base64');
-    const appCtx: Context = { db, appId: app.id, roles: ['ADMIN'], organizationId: org.id };
+    const appCtx: Context = { db, appId: app.id, roles: [], organizationId: org.id };
     const session = await resolvers.Mutation.startAgentSession(
       {}, { agentId: agent.id, externalUserId: 'mm-eo', dataKey: key }, appCtx,
     );
     const memId = session.memoryId!;
-    const sCtx: Context = { ...appCtx, sessionId: session.id };
+    const driver = await db.session.findUniqueOrThrow({ where: { id: session.id }, select: { userId: true } });
+    const sCtx: Context = { ...appCtx, userId: driver.userId!, sessionId: session.id };
 
     const src = await resolvers.Mutation.createNode({}, { input: { memoryId: memId, loc: 'src', name: 'src', content: 'secret s' } }, sCtx);
     const tgt = await resolvers.Mutation.createNode({}, { input: { memoryId: memId, loc: 'tgt', name: 'tgt', content: 'secret t' } }, sCtx);
@@ -372,7 +374,8 @@ describe('mergeNodes — encryption', () => {
     sessionKeyCache.clear();
 
     const out = await resolvers.Mutation.mergeNodes(
-      {}, { input: { source: src.id, target: tgt.id, include: ['EDGES'], deleteSource: true } } as never, sCtx,
+      {}, { input: { source: src.id, target: tgt.id, include: ['EDGES'], deleteSource: true } } as never,
+      { ...sCtx, sessionId: undefined },
     );
 
     // Merge succeeded: the edge transferred to the target.

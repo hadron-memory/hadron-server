@@ -77,11 +77,21 @@ interface NodeYaml {
   role?: string | null;
   runnable?: boolean | null;
   isRunnable?: boolean | null;
+  /** An untrusted mirror claim, validated against the destination by Git sync. */
+  placeholder?: unknown;
   tags?: string[];
   nodes?: Array<{ id: string; rel: string; loc?: string }>;
   alias?: string;
   author?: string;
   contentHash?: string;
+}
+
+function placeholderFromMeta(meta: NodeYaml, source: string): { isPlaceholder: true } | Record<string, never> {
+  if (meta.placeholder === true) return { isPlaceholder: true };
+  if (meta.placeholder != null && meta.placeholder !== false) {
+    console.warn(`[loadNodeFromFs] ignored non-boolean placeholder marker in ${source}`);
+  }
+  return {};
 }
 
 /**
@@ -228,6 +238,8 @@ interface EdgeEntry {
   id?: string;
   /** Edge description (spec 037). */
   description?: string;
+  /** Edge JSON metadata, preserved on a fresh import. */
+  data?: unknown;
   /** Whether the edge is runnable (spec 037). The CLI export (and the server's
    *  current writer) emit `runnable`; `isRunnable` is the legacy key still on
    *  already-pushed mirrors — `normalizeEdgeEntry` reads `runnable` first. */
@@ -264,6 +276,7 @@ export interface LoadedEdge {
   /** Relationship name (was `label`). */
   name: string | null;
   description?: string | null;
+  data?: unknown;
   isRunnable?: boolean | null;
   condition?: unknown;
   priority?: number;
@@ -288,12 +301,20 @@ async function loadFrontmatterNode(
   graphRoot: string,
   ownerRepo: string,
 ): Promise<{ node: Partial<Node>; edges: Array<LoadedEdge> }> {
-  const raw = readFileSync(mdPath, 'utf-8');
+  // Normalize CRLF to LF before splitting (#280). The LF-only split used to
+  // reject a CRLF file (a Windows author, or git core.autocrlf on the clone
+  // host), which drops the node from the loaded graph. Normalizing the whole
+  // file, body included, rather than only tolerating CRLF in the delimiters is
+  // what the CLI's ParseMarkdown does (hadron-cli internal/nodedoc), so one
+  // file imports as the same node through either surface (cor:int:020:01). It
+  // also means a checkout that flips a file's line endings does not rewrite the
+  // stored content on the next sync.
+  const raw = readFileSync(mdPath, 'utf-8').replace(/\r\n/g, '\n');
 
   const fmMatch = raw.match(/^---\n([\s\S]*?)\n---\n?([\s\S]*)$/);
   if (!fmMatch) throw new Error(`No frontmatter found in ${mdPath}`);
 
-  const meta = parse(fmMatch[1]) as NodeYaml & { nodes?: EdgeEntry[] };
+  const meta = parseNodeYaml(fmMatch[1], `frontmatter in ${mdPath}`);
   const content = fmMatch[2]?.trim() || null;
   const loc = deriveValidatedLoc(mdPath, graphRoot, true, meta.id);
 
@@ -331,6 +352,7 @@ async function loadFrontmatterNode(
       // #1218 — spread, NOT `?? null`: an absent key must stay absent so the
       // sync update preserves the stored value. See the NodeYaml doc above.
       ...governedSignalsFromMeta(meta),
+      ...placeholderFromMeta(meta, mdPath),
     },
     edges,
   };
@@ -347,7 +369,7 @@ async function loadLegacyNode(
   const yamlPath = join(dirPath, '.node', 'node.yaml');
   const mdPath = join(dirPath, '.node', 'topic.md');
 
-  const meta = parse(readFileSync(yamlPath, 'utf-8')) as NodeYaml & { nodes?: EdgeEntry[] };
+  const meta = parseNodeYaml(readFileSync(yamlPath, 'utf-8'), `node.yaml in ${yamlPath}`);
   const content = existsSync(mdPath) ? readFileSync(mdPath, 'utf-8') : null;
   // The LEGACY layout derives its loc the same way and needs the same guard —
   // handling only the frontmatter loader would leave the older of the two
@@ -390,9 +412,50 @@ async function loadLegacyNode(
       // memory ungoverned — the same defect, reachable through the older of
       // the two formats. Same reader, same absent-means-preserve rule.
       ...governedSignalsFromMeta(meta),
+      ...placeholderFromMeta(meta, yamlPath),
     },
     edges,
   };
+}
+
+/**
+ * Parse a node's metadata YAML, refusing only the roots that already failed to
+ * load before #280, with an error that names the file.
+ *
+ * This is a MESSAGE improvement, not a mapping guarantee. `parse()` returns
+ * `null` for empty input (or a comment only) and a primitive for a bare value.
+ * Both already failed further down the loader with a bare TypeError: `meta.id`
+ * on `null`, and the `in` check in `governedSignalsFromMeta` on a primitive.
+ * Syntax errors already threw too. Here each fails as `Malformed <what>: …`
+ * instead, so the operator can see which file it was.
+ *
+ * Every other object root still loads exactly as before. That includes an
+ * array, and a tagged non-mapping (`!!set`, `!!omap`, `!!binary`, which parse
+ * to a Set, Map and Buffer). Each loads as a node with no id and no name. That
+ * is deliberate. When a file fails to load, git sync drops it, and its
+ * repo-wins cleanup pass then hard-deletes the row the file used to mirror
+ * (`syncGraphFromGithub`). A partial load updates the row in place, so the row
+ * survives. Refusing these shapes here would turn a malformed edit into a
+ * deleted node (PR #1432 review, P1). Enforce a mapping root only once sync
+ * keeps the row of a file it refuses (Hadron finding
+ * `hadron-server:findings:git-sync-attestation-must-fail-in-transaction`).
+ *
+ * @param what Names the input in the error, e.g. `frontmatter in /path/a.md`.
+ * @throws {Error} `Malformed <what>: …` when the YAML is invalid, empty, or a
+ *   primitive.
+ */
+function parseNodeYaml(text: string, what: string): NodeYaml & { nodes?: EdgeEntry[] } {
+  let parsed: unknown;
+  try {
+    parsed = parse(text);
+  } catch (err) {
+    throw new Error(`Malformed ${what}: ${(err as Error).message}`);
+  }
+  if (parsed == null) throw new Error(`Malformed ${what}: expected a YAML mapping, got empty`);
+  if (typeof parsed !== 'object') {
+    throw new Error(`Malformed ${what}: expected a YAML mapping, got a ${typeof parsed}`);
+  }
+  return parsed as NodeYaml & { nodes?: EdgeEntry[] };
 }
 
 /**
@@ -517,6 +580,9 @@ function normalizeEdgeEntry(e: EdgeEntry): LoadedEdge {
   };
   if (typeof e.description === 'string') {
     out.description = e.description;
+  }
+  if (e.data != null) {
+    out.data = e.data;
   }
   // `runnable` is the canonical key (matches the CLI export); fall back to the
   // legacy `isRunnable` for edges in already-pushed git mirrors.

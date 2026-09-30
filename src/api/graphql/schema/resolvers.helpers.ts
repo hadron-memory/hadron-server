@@ -66,6 +66,7 @@ import {
   Prisma,
   type PrismaClient,
 } from '../../../generated/prisma/index.js';
+import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
 
 /**
  * The STORED (uncompiled) content of a Node whose `content` a read resolver
@@ -492,9 +493,10 @@ export async function resolveNodeReadableMemoryRef(
 /**
  * True for an ORDINARY authorization denial — the only error an existence
  * classification may replace. The platform's gates deny in three spellings:
- * a `FORBIDDEN`-coded GraphQLError, a plain `Error('Forbidden')` /
- * `Error('Forbidden: …')` (requireOrgRole, requireOrgAction,
- * requireOwnerOrOrgRole), and `Error('Unauthenticated')`. Anything else — a DB
+ * a `FORBIDDEN`-coded GraphQLError (every shared gate since #1493:
+ * requireOrgRole, requireOrgAction, requireOwnerOrOrgRole and the rest), a
+ * plain `Error('Forbidden')` / `Error('Forbidden: …')` (gates outside the shared
+ * set that are not yet typed), and `Error('Unauthenticated')`. Anything else — a DB
  * fault, a typed domain refusal, a malformed ref — is not a denial and must
  * propagate as itself (#1316: no blanket catch-all).
  */
@@ -1148,7 +1150,7 @@ export { ROLE_ORDER };
 
 export function requireRole(ctx: Context, required: 'OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER') {
   const highest = ctx.roles ? Math.max(...ctx.roles.map((r) => ROLE_ORDER[r] ?? -1)) : -1;
-  if (highest < ROLE_ORDER[required]) throw new Error('Forbidden');
+  if (highest < ROLE_ORDER[required]) throw authorizationDenied();
 }
 
 /**
@@ -1198,10 +1200,10 @@ export async function requireOrgRole(
   // would honor the target's memberships in their OTHER orgs. Checked before
   // the platform short-circuit (inert under impersonation anyway — roles: []).
   if (ctx.impersonation && orgId !== ctx.impersonation.orgId) {
-    throw new Error('Forbidden');
+    throw authorizationDenied();
   }
   if (ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER')) return;
-  if (!ctx.userId) throw new Error('Forbidden');
+  if (!ctx.userId) throw authorizationDenied();
   // findFirst (not findUnique on the composite PK) so a REVOKED (soft-deleted)
   // membership no longer authorizes — matches getMemberOrgIds / resolveOrgScope
   // and the memory(ref) resolver's own membership check (PR-475 review, Codex
@@ -1210,7 +1212,7 @@ export async function requireOrgRole(
     where: { organizationId: orgId, userId: ctx.userId, deletedAt: null },
   });
   if (!member || (ROLE_ORDER[member.role] ?? -1) < ROLE_ORDER[required]) {
-    throw new Error('Forbidden');
+    throw authorizationDenied();
   }
 }
 
@@ -1249,16 +1251,16 @@ export async function requireOwnerOrOrgRole(
   if (entity.ownerUserId !== null) {
     // Impersonation: user-owned entities are identity-scoped — the target
     // owning it does NOT admit the impersonated (shared-org-only) session.
-    if (ctx.impersonation) throw new Error('Forbidden');
+    if (ctx.impersonation) throw authorizationDenied();
     if (ctx.userId && ctx.userId === entity.ownerUserId) return;
-    throw new Error('Forbidden');
+    throw authorizationDenied();
   }
   if (isPlatformAdmin(ctx)) return;
   if (entity.organizationId !== null) {
     await requireOrgRole(ctx, entity.organizationId, required);
     return;
   }
-  throw new Error('Forbidden');
+  throw authorizationDenied();
 }
 
 /**
@@ -1278,7 +1280,7 @@ export async function requireMemoryManageAccess(
 ): Promise<void> {
   if (memory.class === 'personal' || memory.class === 'private') {
     if (!ctx.impersonation && ctx.userId && memory.userId === ctx.userId) return;
-    throw new Error('Forbidden');
+    throw authorizationDenied();
   }
   await requireOwnerOrOrgRole(ctx, memory, required);
 }
@@ -1401,7 +1403,8 @@ export async function isAppParticipant(
       await requireOrgRole(ctx, app.organizationId, 'CONTRIBUTOR');
       return true;
     } catch (e) {
-      // requireOrgRole signals denial with a plain Error('Forbidden'); anything
+      // requireOrgRole signals denial with a FORBIDDEN GraphQLError whose message
+      // is 'Forbidden' (#1493), which this match still catches; anything
       // else (a DB failure inside the membership lookup) must propagate rather
       // than read as "not a member" (review:narrow-catch-blocks — the
       // team-chat original swallowed everything here).
@@ -1600,7 +1603,7 @@ export async function requireAiConfigOwnerAdmin(
 ): Promise<{ ownerWhere: Record<string, string>; resolvedOwnerId: string }> {
   switch (ownerType) {
     case 'HADRON_SERVER': {
-      if (!isPlatformAdmin(ctx)) throw new Error('Forbidden');
+      if (!isPlatformAdmin(ctx)) throw authorizationDenied();
       const server = await ctx.db.hadronServer.findUnique({ where: { id: ownerId } });
       if (!server) throw new AiServiceConfigNotFoundError(`hadron server ${ownerId}`);
       return { ownerWhere: { hadronServerId: server.id }, resolvedOwnerId: server.id };
@@ -1648,16 +1651,16 @@ export async function requireAiConfigPickerAccess(
   agentId: string | null,
 ): Promise<void> {
   if (isPlatformAdmin(ctx)) return;
-  if (!ctx.userId) throw new Error('Forbidden');
-  if (!appId) throw new Error('Forbidden');
+  if (!ctx.userId) throw authorizationDenied();
+  if (!appId) throw authorizationDenied();
   const member = await ctx.db.appMember.findUnique({
     where: { appId_userId: { appId, userId: ctx.userId } },
   });
-  if (!member) throw new Error('Forbidden');
+  if (!member) throw authorizationDenied();
   // The named Agent must be installed in this App, or the walk could be
   // pointed at an unrelated Agent's (masked) configs.
   if (agentId && !(await isAgentInstalled(ctx.db, appId, agentId))) {
-    throw new Error('Forbidden');
+    throw authorizationDenied();
   }
 }
 
@@ -2125,7 +2128,7 @@ export function requireSessionWriteAccess(
   // Context built from MCP auth (userId + selected appId) can't widen.
   if (!ctx.userId && ctx.appId && session.appId === ctx.appId) return;
   if (ctx.userId && session.userId === ctx.userId && !ctx.impersonation) return;
-  throw new Error('Forbidden');
+  throw authorizationDenied();
 }
 
 /** Prisma `where` clause that restricts sessions to the caller's scope. */
@@ -2266,21 +2269,22 @@ export function safeCanonicalUrn(type: CanonicalUrnType, raw: string): string {
  */
 export async function requireMemoryWriteAccess(ctx: Context, memoryId: string): Promise<void> {
   // App-keyed callers: delegate to the class-aware MCP gate. The ADMIN/OWNER
-  // short-circuit stands (the documented app+admin short-circuit — App Keys
-  // carry no roles, so this only fires for a platform-admin JWT with an active
-  // App), EXCEPT for a spec-047 user-owned memory: strict ownership means even
-  // a platform admin gets no write, so we skip the bypass and let
-  // canWriteToMemory enforce owner-only (gemini review, #676). (The pre-existing
-  // personal/private app+admin bypass is deliberately left as-is here — it's
-  // load-bearing for agent session writes and out of scope for 2c-2a.)
+  // shortcut applies only to non-strict org memories. A platform-admin USER
+  // with an active App still cannot write another user's personal/private
+  // memory (#1492); ownerUserId is null on those org-anchored rows.
   if (ctx.appId) {
-    if (ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER')) {
-      const m = await ctx.db.memory.findUnique({
-        where: { id: memoryId },
-        select: { ownerUserId: true },
-      });
-      if (m?.ownerUserId == null) return;
-    }
+    const memory = await ctx.db.memory.findUnique({
+      where: { id: memoryId },
+      select: { ownerUserId: true, userId: true, class: true },
+    });
+    if (!memory) throw memoryWriteForbidden();
+    const strictOwner = memory.class === 'personal' || memory.class === 'private';
+    // App selection on a user credential does not remove direct ownership.
+    // A session or impersonation context cannot use this identity shortcut.
+    if (strictOwner && ctx.userId && !ctx.sessionId && !ctx.impersonation &&
+        memory.userId === ctx.userId) return;
+    if (!strictOwner && memory.ownerUserId === null &&
+        (ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER'))) return;
     if (await canWriteToMemory(ctx.db, ctx, memoryId)) return;
     throw memoryWriteForbidden();
   }
@@ -2999,7 +3003,7 @@ export async function requireEmailConnection(
   // reading an employee's private mail, calendar, and Drive exports. A
   // blanket deny is correct: no impersonated operation on this surface is
   // in-scope, so there is no per-operation carve-out to make.
-  if (ctx.impersonation) throw new Error('Forbidden');
+  if (ctx.impersonation) throw authorizationDenied();
   // findFirst (not findUnique) so deletedAt filters in the query — the
   // revoked-membership pattern (PR #475). The `select` is load-bearing: it
   // keeps the legacy encrypted-token column out of the returned object, so
@@ -3025,7 +3029,7 @@ export async function requireEmailConnection(
     // App / headless-run context — a covering grant is mandatory (fail-closed),
     // even for an on-behalf-of-owner run. Unmapped operation ⇒ owner-only ⇒ deny.
     const scope = scopeForOperation(operation);
-    if (!scope) throw new Error('Forbidden');
+    if (!scope) throw authorizationDenied();
     const grant = await ctx.db.connectionGrant.findFirst({
       where: {
         connectionId: connection.id,
@@ -3043,10 +3047,10 @@ export async function requireEmailConnection(
       },
       select: { id: true },
     });
-    if (!grant) throw new Error('Forbidden');
+    if (!grant) throw authorizationDenied();
   } else if (!ctx.userId || ctx.userId !== connection.userId) {
     // Pure user principal that isn't the owner (org admins included) → denied.
-    throw new Error('Forbidden');
+    throw authorizationDenied();
   }
   // else: interactive owner (no appId, userId === owner) — allowed for all ops.
 

@@ -115,7 +115,7 @@ describe('buildEdgeFrontmatter', () => {
 
   it('emits edgeLoc and runnable in the CLI key order, omitting runnable when false', () => {
     // Full shape, exercising the CLI-aligned order: id, loc, rel, edgeLoc,
-    // description, runnable, condition, priority.
+    // description, data, runnable, condition, priority.
     const condition = { '==': [1, 1] };
     const [full] = buildEdgeFrontmatter([
       {
@@ -123,15 +123,16 @@ describe('buildEdgeFrontmatter', () => {
         name: 'gated',
         loc: 'src:edge:01',
         description: 'why',
+        data: { weight: 3 },
         isRunnable: true,
         condition,
         priority: 3,
       },
     ]);
-    expect(Object.keys(full)).toEqual(['id', 'loc', 'rel', 'edgeLoc', 'description', 'runnable', 'condition', 'priority']);
+    expect(Object.keys(full)).toEqual(['id', 'loc', 'rel', 'edgeLoc', 'description', 'data', 'runnable', 'condition', 'priority']);
     expect(full).toEqual({
       id: 't1', loc: 'a:b', rel: 'gated', edgeLoc: 'src:edge:01',
-      description: 'why', runnable: true, condition, priority: 3,
+      description: 'why', data: { weight: 3 }, runnable: true, condition, priority: 3,
     });
 
     // runnable:false is the DB default → omitted entirely (matches the CLI's
@@ -336,6 +337,25 @@ describe('exporter → importer round-trip (frontmatter format)', () => {
         priority: 7,
       }),
     );
+  });
+
+  it('round-trips edge data and an empty description through a fresh graph load', async () => {
+    const fm = buildNodeFrontmatter({ id: 'src1', name: 'Source', tags: [] }, [
+      {
+        target: { id: 'tgt1', loc: 'target' },
+        name: 'uses',
+        description: '',
+        data: { weight: 3 },
+      },
+    ]);
+    const mdPath = nodeFilePath(graphRoot, 'source');
+    writeFileSync(mdPath, `---\n${stringify(fm, { lineWidth: 0 }).trim()}\n---\n\nbody\n`, 'utf-8');
+
+    const { edges } = await loadGraphFromFs(graphRoot, 'specs', 'org/repo');
+    expect(edges).toContainEqual(expect.objectContaining({
+      sourceId: 'src1', targetId: 'tgt1', name: 'uses',
+      description: '', data: { weight: 3 },
+    }));
   });
 
   it('round-trips a runnable edge via the `runnable` key written by the builder', async () => {

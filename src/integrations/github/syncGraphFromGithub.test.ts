@@ -14,6 +14,8 @@ import { moveNodeSubtree } from '../../lib/nodeSubtreeMove.js';
 import { lockMemoryConfigExclusive } from '../../lib/governedRole.js';
 import { deriveEdgeLoc } from '../../lib/edgeLoc.js';
 import { waitForLockWaitersOfType } from '../../test/lockWait.js';
+import { buildNodeFrontmatter } from './nodeFrontmatter.js';
+import { writeNodeFile } from './writeNodeToGit.js';
 
 // ---------------------------------------------------------------------------
 // Mock child_process.execFile so no actual git commands run
@@ -565,6 +567,26 @@ describe('syncGraphFromGithub', () => {
     expect(edge).toMatchObject({ condition, priority: 7 });
     expect((await syncGraphFromGithub(makeGraph())).error).toBeUndefined();
     expect(await db.edge.findUniqueOrThrow({ where: { id: edge.id } })).toMatchObject({ condition, priority: 7 });
+  });
+
+  it('restores edge data and an empty description from an exported file into a fresh memory', async () => {
+    const sourceId = generateId();
+    const targetId = generateId();
+    const root = join(mockSources, 'test-org', 'test/repo');
+    mkdirSync(root, { recursive: true });
+    const source = buildNodeFrontmatter({ id: sourceId, name: 'Source', tags: [] }, [
+      { target: { id: targetId, loc: 'target' }, name: 'uses', description: '', data: { weight: 3 } },
+    ]);
+    const target = buildNodeFrontmatter({ id: targetId, name: 'Target', tags: [] });
+    writeFileSync(join(root, 'source.md'), `---\n${stringify(source, { lineWidth: 0 }).trim()}\n---\n`, 'utf-8');
+    writeFileSync(join(root, 'target.md'), `---\n${stringify(target, { lineWidth: 0 }).trim()}\n---\n`, 'utf-8');
+
+    const result = await syncGraphFromGithub(makeGraph());
+    expect(result.error).toBeUndefined();
+    expect(await db.edge.findFirstOrThrow({ where: { sourceId, targetId } })).toMatchObject({
+      description: '',
+      data: { weight: 3 },
+    });
   });
 
   it('parks a cross-repo edge as PendingEdge when target is not yet in DB', async () => {
@@ -1365,6 +1387,43 @@ describe('a file whose path cannot be a loc (#1224)', () => {
   });
 });
 
+// ── #280 / PR #1432 review P1: a malformed root must not delete its row ─────
+// The loader refuses a file whose YAML fails to parse, is empty, or is a
+// primitive. Those shapes already failed before #280. Every other object root,
+// including an array and a tagged Set/Map/Buffer, still loads as a partial node
+// (no id, no name). This pins the consequence that matters: sync updates the
+// existing git-owned row in place rather than dropping the file and letting the
+// repo-wins cleanup pass hard-delete the row. A mapping-only check in the
+// loader fails this test.
+describe('a malformed YAML root keeps its mirrored row (#280)', () => {
+  const repoRoot = () => join(mockSources, 'test-org', 'test/repo');
+
+  it.each([
+    ['an array', '- id: x\n- name: y'],
+    ['a !!set', '!!set {a: null}'],
+    ['a !!omap', '!!omap [a: 1]'],
+  ])('an existing node whose frontmatter becomes %s survives the next sync', async (_label, yamlBody) => {
+    const nodeId = 'eeee280000000000000000000000000001';
+    const full = join(repoRoot(), 'kept.md');
+    mkdirSync(repoRoot(), { recursive: true });
+    writeFileSync(full, `---\nid: ${nodeId}\nname: Kept\n---\n# Kept`, 'utf-8');
+    await syncGraphFromGithub(makeGraph());
+    expect(await db.node.findUnique({ where: { id: nodeId } })).not.toBeNull();
+
+    // Only the YAML root changes. The path, and so the loc, stays the same.
+    writeFileSync(full, `---\n${yamlBody}\n---\n# Kept`, 'utf-8');
+
+    const result = await syncGraphFromGithub(makeGraph());
+    expect(result.error).toBeUndefined();
+
+    const row = await db.node.findUnique({ where: { id: nodeId } });
+    expect(row).not.toBeNull();
+    expect(row!.loc).toBe('kept');
+    // An absent name is omitted from the update, so the stored one is kept.
+    expect(row!.name).toBe('Kept');
+  });
+});
+
 // ── #1348: git sync restores objectType, and absence never clears it ────────
 // cor:int:020:01 (amended 2026-09-25): a field absent from the file means no
 // opinion — on create it takes its default, on update the stored value is kept,
@@ -2107,5 +2166,77 @@ describe('describeSyncOutcome — the on-demand sync report (#1411 review, @code
 
   it('a clean sync is one line', () => {
     expect(describeSyncOutcome({ nodeCount: 2, skippedUndeclaredRoles: [], deferredLateRows: [], heldMoves: [] })).toBe('Synced 2 nodes.');
+  });
+});
+
+describe('#1477 Git placeholder marker', () => {
+  const file = (meta: { id?: string; name: string; role?: string; placeholder?: boolean }, content?: string) => {
+    const path = join(mockSources, 'test-org', 'test/repo', 'pas', '010', '01.md');
+    writeFrontmatterNode(path, meta, content);
+  };
+  const stored = () => db.node.findUniqueOrThrow({ where: { loc_memoryId: { loc: 'pas:010:01', memoryId: dbGraphId } } });
+
+  it('recreates a reserved citation from an incremental mirror file', async () => {
+    await db.memory.update({ where: { id: dbGraphId }, data: { corpusDraft: true } });
+    const id = generateId();
+    const reserved = await db.node.create({ data: {
+      id, memoryId: dbGraphId, loc: 'pas:010:01', name: 'Reserved',
+      role: 'spec', isPlaceholder: true, ownerRepo: 'test/repo',
+    } });
+    writeNodeFile(join(mockSources, 'test-org', 'test/repo'), {
+      id: reserved.id, loc: reserved.loc, name: reserved.name, tags: [],
+      role: reserved.role, isRunnable: reserved.isRunnable,
+      isPlaceholder: reserved.isPlaceholder, outgoingEdges: [],
+    });
+    await db.node.delete({ where: { id } });
+    expect((await syncGraphFromGithub(makeGraph())).error).toBeUndefined();
+    expect(await stored()).toMatchObject({ id, role: 'spec', content: null, isPlaceholder: true });
+  });
+
+  it('restores a blank spec reservation in a draft, including a dotted spec role', async () => {
+    await db.memory.update({ where: { id: dbGraphId }, data: { corpusDraft: true } });
+    file({ name: 'Reserved', role: 'spec.rule', placeholder: true });
+    expect((await syncGraphFromGithub(makeGraph())).error).toBeUndefined();
+    expect(await stored()).toMatchObject({ role: 'spec.rule', content: null, isPlaceholder: true });
+  });
+
+  it.each([
+    ['minted memory', false, 'spec', undefined],
+    ['non-spec role', true, 'review', undefined],
+    ['lookalike role', true, 'special', undefined],
+    ['written body', true, 'spec', 'The rule.'],
+  ] as const)('ignores and reports a marker in a %s while syncing the node', async (_case, draft, role, content) => {
+    await db.memory.update({ where: { id: dbGraphId }, data: { corpusDraft: draft } });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      file({ name: 'Still imported', role, placeholder: true }, content);
+      expect((await syncGraphFromGithub(makeGraph())).error).toBeUndefined();
+      expect(await stored()).toMatchObject({ name: 'Still imported', role, isPlaceholder: false });
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('ignored placeholder marker'));
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('preserves an old mirrored placeholder when the key is absent and clears it when the file writes content', async () => {
+    await db.memory.update({ where: { id: dbGraphId }, data: { corpusDraft: true } });
+    const id = generateId();
+    await db.node.create({ data: {
+      id, memoryId: dbGraphId, loc: 'pas:010:01', name: 'Reserved',
+      role: 'spec', isPlaceholder: true, ownerRepo: 'test/repo',
+    } });
+    file({ id, name: 'Renamed' });
+    expect((await syncGraphFromGithub(makeGraph())).error).toBeUndefined();
+    expect(await stored()).toMatchObject({ name: 'Renamed', role: 'spec', isPlaceholder: true });
+
+    file({ id, name: 'Written', role: 'spec', placeholder: true }, 'The rule.');
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      expect((await syncGraphFromGithub(makeGraph())).error).toBeUndefined();
+      expect(await stored()).toMatchObject({ name: 'Written', content: 'The rule.', isPlaceholder: false });
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('ignored placeholder marker'));
+    } finally {
+      warn.mockRestore();
+    }
   });
 });

@@ -10,7 +10,7 @@
 import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
 import { createServer, type IncomingMessage, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { callSettingsFor, withAdapterWarnings, WARNING_FEATURE } from './callSettings.js';
+import { callSettingsFor, supportsAdaptiveThinking, withAdapterWarnings, WARNING_FEATURE } from './callSettings.js';
 import { generateExtraction, generateText, generateWithTools } from './index.js';
 import { encryptToken } from '../tokenCrypto.js';
 
@@ -101,25 +101,42 @@ describe('callSettingsFor — the params → settings map', () => {
     });
   });
 
-  it('forwards nothing it is not ruled to: thinking, a knob on the wrong provider, passthrough keys', () => {
-    const { settings, knobs } = callSettingsFor({
-      provider: 'anthropic',
-      params: { thinking: true, reasoningEffort: 'high', bedrockRegion: 'us-east-1' },
+  it('slice 2: anthropic thinking:true is sent as ADAPTIVE; false is the default and not sent', () => {
+    expect(callSettingsFor({ provider: 'anthropic', model: 'claude-sonnet-4-6', params: { thinking: true, effort: 'low' } })).toEqual({
+      settings: { providerOptions: { anthropic: { thinking: { type: 'adaptive' }, effort: 'low' } } },
+      knobs: [{ param: 'thinking', state: 'SENT', detail: 'adaptive' }, { param: 'effort', state: 'SENT' }],
     });
-    expect(settings).toEqual({});
-    expect(knobs.map((k) => [k.param, k.state])).toEqual([
-      ['thinking', 'NOT_SENT'],
-      ['reasoningEffort', 'NOT_SENT'],
-      ['bedrockRegion', 'NOT_SENT'],
-    ]);
-    expect(knobs[0].detail).toMatch(/#1417/);
+    const off = callSettingsFor({ provider: 'anthropic', params: { thinking: false } });
+    expect(off.settings).toEqual({});
+    expect(off.knobs).toEqual([expect.objectContaining({ param: 'thinking', state: 'NOT_SENT' })]);
   });
 
-  it('leaves the caller-shaped params out of both the settings and the report', () => {
-    expect(callSettingsFor({ provider: 'openai-compatible', params: { maxTokens: 99, toolCalling: true } })).toEqual({
-      settings: {},
-      knobs: [],
+  it('forwards nothing unmapped: a knob on the wrong provider, passthrough keys (accepted, labelled not sent)', () => {
+    const { settings, knobs } = callSettingsFor({
+      provider: 'anthropic',
+      params: { reasoningEffort: 'high', bedrockRegion: 'us-east-1' },
     });
+    expect(settings).toEqual({});
+    expect(knobs.map((k) => [k.param, k.state])).toEqual([['reasoningEffort', 'NOT_SENT'], ['bedrockRegion', 'NOT_SENT']]);
+  });
+
+  it('slice 2: maxTokens is a per-config CEILING, min(params.maxTokens, the caller\'s budget)', () => {
+    expect(callSettingsFor({ provider: 'glm', params: { maxTokens: 50 } }, 200)).toEqual({
+      settings: { maxOutputTokens: 50 },
+      knobs: [{ param: 'maxTokens', state: 'SENT', detail: 'output ceiling 50' }],
+    });
+    // The caller's own budget is never raised by a config.
+    expect(callSettingsFor({ provider: 'glm', params: { maxTokens: 50 } }, 16)).toEqual({
+      settings: { maxOutputTokens: 16 },
+      knobs: [{ param: 'maxTokens', state: 'ADJUSTED', detail: expect.stringMatching(/own budget \(16\)/) }],
+    });
+    expect(callSettingsFor({ provider: 'glm', params: { maxTokens: 50 } }).settings).toEqual({ maxOutputTokens: 50 });
+    // No config ceiling: the caller's budget passes through, unreported.
+    expect(callSettingsFor({ provider: 'glm', params: null }, 200)).toEqual({ settings: { maxOutputTokens: 200 }, knobs: [] });
+  });
+
+  it('toolCalling stays out of both the settings and the report', () => {
+    expect(callSettingsFor({ provider: 'openai-compatible', params: { toolCalling: true } })).toEqual({ settings: {}, knobs: [] });
     expect(callSettingsFor({ provider: 'glm', params: null })).toEqual({ settings: {}, knobs: [] });
   });
 });
@@ -137,8 +154,8 @@ describe('withAdapterWarnings — the adapter has the last word', () => {
   it('every param the mapper can send has a warning feature, so no adapter drop reads as SENT (#1485 QA)', () => {
     const sendable = new Set<string>();
     for (const provider of ['anthropic', 'openai', 'glm', 'bedrock', 'openai-compatible']) {
-      const { knobs } = callSettingsFor({ provider, params: { temperature: 0.5, reasoningEffort: 'low', effort: 'low', thinking: true } });
-      for (const k of knobs) if (k.state === 'SENT') sendable.add(k.param);
+      const { knobs } = callSettingsFor({ provider, model: 'claude-opus-4-6', params: { temperature: 0.5, reasoningEffort: 'low', effort: 'low', thinking: true, maxTokens: 50 } });
+      for (const k of knobs) if (k.state !== 'NOT_SENT') sendable.add(k.param);
     }
     expect([...sendable].sort()).toEqual(Object.keys(WARNING_FEATURE).sort());
   });
@@ -161,10 +178,11 @@ describe('#1417 — the knobs on the wire, per call site', () => {
     const out = await generateText(config('glm', { temperature: 0.2, maxTokens: 50, bogus: 1 }), { prompt: 'hi' });
     expect(out.knobs).toEqual([
       { param: 'temperature', state: 'SENT' },
+      { param: 'maxTokens', state: 'SENT', detail: 'output ceiling 50' },
       expect.objectContaining({ param: 'bogus', state: 'NOT_SENT' }),
     ]);
-    // maxTokens is the caller's: it is not forwarded from params.
-    expect(lastBody().max_tokens).toBeUndefined();
+    // Slice 2 (Holger 2026-09-30): the config's maxTokens is the output ceiling.
+    expect(lastBody().max_tokens).toBe(50);
   });
 
   it('generateWithTools: the tool loop sends the same settings', async () => {
@@ -249,14 +267,86 @@ describe('#1417 — the knobs on the wire, per call site', () => {
     ]);
   });
 
-  it('negative: anthropic thinking is validated but NOT sent, and no budget rides on top of max_tokens', async () => {
+  it('slice 2: anthropic thinking reaches the wire as ADAPTIVE, with no budget on top of max_tokens', async () => {
+    const out = await generateText(
+      config('anthropic', { thinking: true }, { model: 'claude-sonnet-4-6' }),
+      { prompt: 'hi', maxTokens: 16 },
+    );
+    expect(lastBody().thinking).toEqual({ type: 'adaptive' });
+    expect(lastBody().max_tokens).toBe(16);
+    expect(out.knobs).toEqual([{ param: 'thinking', state: 'SENT', detail: 'adaptive' }]);
+  });
+
+  it('adaptive thinking is gated by model: a 4.5 model is NOT sent it and would otherwise reject the call (@codex P1, #1501)', async () => {
     const out = await generateText(
       config('anthropic', { thinking: true }, { model: 'claude-sonnet-4-5' }),
       { prompt: 'hi', maxTokens: 16 },
     );
     expect(lastBody().thinking).toBeUndefined();
     expect(lastBody().max_tokens).toBe(16);
-    expect(out.knobs).toEqual([expect.objectContaining({ param: 'thinking', state: 'NOT_SENT' })]);
+    expect(out.knobs).toEqual([{ param: 'thinking', state: 'NOT_SENT', detail: expect.stringMatching(/4\.6 or newer/) }]);
+  });
+
+  it('supportsAdaptiveThinking mirrors the SDK capability table, Bedrock ids included, and assumes it for later families', () => {
+    for (const id of ['claude-sonnet-4-6', 'claude-opus-4-6', 'claude-opus-4-7', 'claude-opus-4-8', 'claude-fable-5-1',
+      'claude-sonnet-5-5', 'claude-opus-5-5', 'anthropic.claude-sonnet-4-6-20260101-v1:0', 'us.anthropic.claude-opus-4-7']) {
+      expect(supportsAdaptiveThinking(id)).toBe(true);
+    }
+    for (const id of ['claude-sonnet-4-5', 'claude-opus-4-5', 'claude-haiku-4-5-20251001', 'claude-opus-4-1', 'claude-3-haiku-20240307',
+      'anthropic.claude-sonnet-4-5-v1:0', '', null]) {
+      expect(supportsAdaptiveThinking(id)).toBe(false);
+    }
+  });
+
+  it('slice 2: with thinking on, the adapter drops temperature and the report says so', async () => {
+    const out = await generateText(
+      config('anthropic', { thinking: true, temperature: 0.4 }, { model: 'claude-sonnet-4-6' }),
+      { prompt: 'hi', maxTokens: 16 },
+    );
+    expect(lastBody().temperature).toBeUndefined();
+    expect(out.knobs).toContainEqual({ param: 'temperature', state: 'DROPPED', detail: expect.stringMatching(/thinking/) });
+  });
+
+  it('slice 2: the maxTokens ceiling binds every call site: runs, the tool loop, and extraction', async () => {
+    await generateText(config('glm', { maxTokens: 40 }), { prompt: 'hi', maxTokens: 500 });
+    expect(lastBody().max_tokens).toBe(40);
+    await generateWithTools(
+      config('openai-compatible', { toolCalling: true, maxTokens: 41 }, { apiStyle: 'CHAT_COMPLETIONS' }),
+      { prompt: 'hi', maxTokens: 500 }, [], { toolCtx: {} as never },
+    );
+    expect(lastBody().max_tokens).toBe(41);
+    await generateExtraction(
+      config('openai', { maxTokens: 42 }, { model: 'gpt-4.1', apiStyle: 'CHAT_COMPLETIONS' }),
+      { prompt: 'hi', maxTokens: 500 }, [{ field: 'answer' }],
+    );
+    expect(bodies[bodies.length - 1].body.max_tokens ?? bodies[bodies.length - 1].body.max_completion_tokens).toBe(42);
+    // A smaller caller budget wins: a run never spends past what it has left.
+    const out = await generateText(config('glm', { maxTokens: 40 }), { prompt: 'hi', maxTokens: 10 });
+    expect(lastBody().max_tokens).toBe(10);
+    expect(out.knobs).toEqual([expect.objectContaining({ param: 'maxTokens', state: 'ADJUSTED' })]);
+  });
+
+  it('a ceiling lowered by the caller AND then by the model maximum reports the value that reached the wire (@codex P2, #1501)', async () => {
+    // Config 100k, caller budget 32k, model maximum 4096 (claude-3-haiku).
+    const out = await generateText(config('anthropic', { maxTokens: 100_000 }, { model: 'claude-3-haiku-20240307' }), { prompt: 'hi', maxTokens: 32_000 });
+    expect(lastBody().max_tokens).toBe(4096);
+    expect(out.knobs).toEqual([{
+      param: 'maxTokens', state: 'ADJUSTED',
+      detail: expect.stringMatching(/own budget \(32000\).*then .*limited to 4096/),
+    }]);
+  });
+
+  it('an ADJUSTED knob the adapter then removes is reported DROPPED', () => {
+    expect(withAdapterWarnings(
+      [{ param: 'maxTokens', state: 'ADJUSTED', detail: 'x' }],
+      [{ type: 'unsupported', feature: 'maxOutputTokens', details: 'not supported by this model' }],
+    )).toEqual([{ param: 'maxTokens', state: 'DROPPED', detail: 'x; then not supported by this model' }]);
+  });
+
+  it('slice 2: a ceiling above the model\'s own maximum is limited by the adapter and reported ADJUSTED', async () => {
+    const out = await generateText(config('anthropic', { maxTokens: 10_000_000 }, { model: 'claude-sonnet-4-5' }), { prompt: 'hi' });
+    expect(lastBody().max_tokens).toBeLessThan(10_000_000);
+    expect(out.knobs).toEqual([{ param: 'maxTokens', state: 'ADJUSTED', detail: expect.stringMatching(/limited to/) }]);
   });
 
   it('negative: a knob validated for another provider rides passthrough on glm and is NOT sent', async () => {

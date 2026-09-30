@@ -276,7 +276,7 @@ export async function generateExtraction(
   if (JSON_PROMPT_ONLY_PROVIDERS.has(provider)) {
     return extractViaJsonPrompt(resolved, req, fields);
   }
-  const { settings, knobs } = callSettingsFor(resolved.config);
+  const { settings, knobs } = callSettingsFor(resolved.config, req.maxTokens);
   try {
     const out = await aiGenerateObject({
       model: modelFor(resolved),
@@ -284,7 +284,6 @@ export async function generateExtraction(
       prompt: req.prompt,
       schema: extractionSchema(fields),
       ...settings,
-      ...(req.maxTokens != null ? { maxOutputTokens: req.maxTokens } : {}),
       abortSignal: AbortSignal.timeout(EXTRACTION_NATIVE_TIMEOUT_MS),
     });
     return {
@@ -501,7 +500,7 @@ export async function generateWithTools(
     ]),
   );
 
-  const { settings, knobs } = callSettingsFor(resolved.config);
+  const { settings, knobs } = callSettingsFor(resolved.config, req.maxTokens);
   try {
     const out = await aiGenerateText({
       model: modelFor(resolved),
@@ -510,7 +509,6 @@ export async function generateWithTools(
       tools: sdkTools,
       stopWhen: stepCountIs(opts.stepCap ?? DEFAULT_TOOL_STEP_CAP),
       ...settings,
-      ...(req.maxTokens != null ? { maxOutputTokens: req.maxTokens } : {}),
     });
     const usage = out.totalUsage ?? out.usage; // summed across steps (spike-pinned)
     return {
@@ -546,14 +544,13 @@ export async function generateText(
   req: LlmRequest,
 ): Promise<LlmResult> {
   const { provider, model } = resolved.config;
-  const { settings, knobs } = callSettingsFor(resolved.config);
+  const { settings, knobs } = callSettingsFor(resolved.config, req.maxTokens);
   try {
     const out = await aiGenerateText({
       model: modelFor(resolved),
       ...(req.system ? { system: req.system } : {}),
       prompt: req.prompt,
       ...settings,
-      ...(req.maxTokens != null ? { maxOutputTokens: req.maxTokens } : {}),
       ...(req.timeoutMs != null ? { abortSignal: AbortSignal.timeout(req.timeoutMs), maxRetries: 0 } : {}),
     });
     return {

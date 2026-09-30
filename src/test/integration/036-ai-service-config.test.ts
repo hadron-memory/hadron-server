@@ -25,7 +25,16 @@ import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../helpers.js';
 import { generateId } from '../../lib/id.js';
 import { decryptToken, encryptToken } from '../../lib/tokenCrypto.js';
+import { resolveAiConfigWithFallback } from '../../lib/aiConfig.js';
 import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
+import {
+  NoAiConfigAvailableError,
+  resolveAiConfig,
+  resolveAiConfigs,
+  resolveAiConfigWithFallback,
+} from '../../lib/aiConfig.js';
+import { makeProdRunDeps } from '../../jobs/appRunDeps.js';
+import type { AppRun } from '../../generated/prisma/index.js';
 
 let org: { id: string };
 let otherOrg: { id: string };
@@ -185,10 +194,13 @@ describe('resolveAIConfig precedence (US1)', () => {
     expect(viaOrg.apiKey).toBe('sk-org');
 
     await db.aiServiceConfig.deleteMany({ where: { organizationId: org.id } });
+    await expect(resolvers.Query.resolveAIConfig(
+      {}, { appRef: app.id, agentRef: agent.id }, ctxFor(admin.id),
+    )).rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
     const viaHost = await resolvers.Query.resolveAIConfig(
       {},
       { appRef: app.id, agentRef: agent.id },
-      ctxFor(admin.id),
+      platformAdminCtx(),
     );
     expect(viaHost.ownerType).toBe('HADRON_SERVER');
     expect(viaHost.apiKey).toBe('sk-host');
@@ -360,6 +372,64 @@ describe('resolveAIConfig user-owned App decrypt gate (#1487)', () => {
     await expect(resolvers.Query.resolveAIConfig(
       {}, { appRef: ownApp.id, agentRef: agent.id }, ctxFor(owner.id),
     )).rejects.toMatchObject({ extensions: { code: 'NoAiConfigAvailableError' } });
+  });
+});
+
+describe('resolveAIConfig platform key boundary (#4645)', () => {
+  it('never decrypts the host key for an org admin through Agent, App, or both', async () => {
+    await createConfig({ hadronServerId: server.id }, 'default', { apiKey: 'sk-platform-private' });
+    const contexts = [
+      { agentRef: agent.id },
+      { appRef: app.id },
+      { appRef: app.id, agentRef: agent.id },
+    ];
+    for (const refs of contexts) {
+      let denied: unknown;
+      try {
+        await resolvers.Query.resolveAIConfig({}, refs, ctxFor(admin.id));
+      } catch (error) {
+        denied = error;
+      }
+      expect(denied, JSON.stringify(refs)).toMatchObject({ extensions: { code: 'FORBIDDEN' } });
+      expect(String(denied)).toContain("'default'");
+      expect(String(denied)).toContain('HADRON_SERVER');
+      expect(JSON.stringify(denied)).not.toContain('sk-platform-private');
+
+      const platform = await resolvers.Query.resolveAIConfig({}, refs, platformAdminCtx());
+      expect(platform).toMatchObject({ name: 'default', ownerType: 'HADRON_SERVER', apiKey: 'sk-platform-private' });
+    }
+  });
+
+  it('refuses a READER-created org OWNER while server-side fallback remains available', async () => {
+    const reader = await db.user.create({
+      data: { id: generateId(), handle: 'host-key-reader', githubId: 36009, name: 'Reader' },
+    });
+    const readerCtx = ctxFor(reader.id, { roles: ['READER'] });
+    const createdOrg = await resolvers.Mutation.createOrganization(
+      {}, { name: 'Reader Org', urn: 'reader-host-key.example' }, readerCtx,
+    );
+    expect(await db.orgMember.findFirst({
+      where: { organizationId: createdOrg.id, userId: reader.id, role: 'OWNER' },
+    })).not.toBeNull();
+    const ownAgent = await db.agent.create({
+      data: { id: generateId(), name: 'Reader Agent', urn: 'reader-host-key.example:agent', organizationId: createdOrg.id },
+    });
+    const ownApp = await db.app.create({
+      data: { id: generateId(), name: 'Reader App', urn: 'reader-host-key.example:app', organizationId: createdOrg.id },
+    });
+    await db.appAgent.create({ data: { appId: ownApp.id, agentId: ownAgent.id } });
+    await createConfig({ hadronServerId: server.id }, 'default', { apiKey: 'sk-platform-only' });
+
+    await expect(resolvers.Query.resolveAIConfig(
+      {}, { appRef: ownApp.id, agentRef: ownAgent.id }, readerCtx,
+    )).rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
+    const serverSide = await resolveAiConfigWithFallback(db, null, {
+      appId: ownApp.id, agentId: ownAgent.id, organizationId: createdOrg.id,
+    });
+    expect(serverSide.ownerType).toBe('HADRON_SERVER');
+    expect(decryptToken(serverSide.config.apiKeyEncrypted!)).toBe('sk-platform-only');
+    expect(await resolvers.Query.agentAIConfig({}, { agentRef: ownAgent.id }, readerCtx)).toBeNull();
+    expect(await resolvers.Query.appAIConfig({}, { appRef: ownApp.id }, readerCtx)).toBeNull();
   });
 });
 
@@ -654,6 +724,30 @@ describe('resolveAiServiceConfigs (masked picker)', () => {
 // ─────────────────────────────────────────────────────────────────────────
 // T015 — US2: CRUD with masked secrets
 // ─────────────────────────────────────────────────────────────────────────
+
+describe('#1417 — known provider ranges bind what a write sets, never a stored row', () => {
+  it('create refuses an anthropic temperature above 1; 1 is fine', async () => {
+    const base = { ownerType: 'AGENT', ownerId: agent.id, provider: 'anthropic', model: 'claude-haiku-4-5-20251001', apiKey: 'sk-ant-x-1234' };
+    await expect(resolvers.Mutation.createAiServiceConfig({}, { ...base, name: 'hot', params: { temperature: 1.5 } } as never, ctxFor(admin.id)))
+      .rejects.toThrow(/at most 1/);
+    await expect(resolvers.Mutation.createAiServiceConfig({}, { ...base, name: 'ok', params: { temperature: 1 } } as never, ctxFor(admin.id)))
+      .resolves.toMatchObject({ name: 'ok' });
+  });
+
+  it('a stored legacy row stays updatable when the write leaves params and provider alone; setting a bad value is refused', async () => {
+    const legacy = await createConfig({ agentId: agent.id }, 'legacy');
+    await db.aiServiceConfig.update({ where: { id: legacy.id }, data: { params: { temperature: 1.5 } } });
+    await expect(resolvers.Mutation.updateAiServiceConfig({}, { id: legacy.id, enabled: false }, ctxFor(admin.id)))
+      .resolves.toMatchObject({ enabled: false });
+    await expect(resolvers.Mutation.updateAiServiceConfig({}, { id: legacy.id, params: { temperature: 1.2 } } as never, ctxFor(admin.id)))
+      .rejects.toThrow(/at most 1/);
+    // Switching an openai row with 1.5 to anthropic judges the resulting pair.
+    const oa = await createConfig({ agentId: agent.id }, 'oa', { provider: 'openai', model: 'gpt-4.1' });
+    await db.aiServiceConfig.update({ where: { id: oa.id }, data: { params: { temperature: 1.5 } } });
+    await expect(resolvers.Mutation.updateAiServiceConfig({}, { id: oa.id, provider: 'anthropic', model: 'claude-haiku-4-5-20251001' } as never, ctxFor(admin.id)))
+      .rejects.toThrow(/at most 1/);
+  });
+});
 
 describe('AiServiceConfig CRUD (US2)', () => {
   it('creates, lists, updates, deletes on an Agent owner; responses are always masked', async () => {
@@ -1365,5 +1459,94 @@ describe('updateApp legacy: omitted provider/model come from the LOCKED row (#13
     await holder;
     await pending;
     expect(await db.aiServiceConfig.findUniqueOrThrow({ where: { id: c.id } })).toMatchObject({ provider: 'openai', model: 'gpt-new' });
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────
+// #1482 — cor:dmo:050:10 (D-2026-09-29-D, clarified in team chat #4542): a
+// personal Agent with no organization in play never reaches the platform's
+// config. Enforced in the shared walk, so every entry point inherits it; one
+// regression per entry point, plus the org-in-play control.
+// ─────────────────────────────────────────────────────────────────────────
+
+describe('#1482 — an org-less personal Agent never falls back to the host config', () => {
+  let owner: { id: string };
+  let personalAgent: { id: string };
+  let personalApp: { id: string };
+
+  beforeEach(async () => {
+    owner = await db.user.create({
+      data: { id: generateId(), handle: 'no-host-1482', githubId: 1482001, name: 'Owner' },
+    });
+    personalAgent = await db.agent.create({
+      data: { id: generateId(), name: 'Personal', urn: 'no-host-1482:agent', ownerUserId: owner.id },
+    });
+    personalApp = await db.app.create({
+      data: { id: generateId(), name: 'Personal App', urn: 'no-host-1482:app', ownerUserId: owner.id },
+    });
+    await db.appAgent.create({ data: { appId: personalApp.id, agentId: personalAgent.id } });
+    await db.appMember.create({ data: { appId: personalApp.id, userId: owner.id, role: 'owner' } });
+    await createConfig({ hadronServerId: server.id }, 'default', { apiKey: 'sk-host-1482' });
+  });
+
+  it('single-name walk: no host row for the Agent alone or through its user-owned App', async () => {
+    expect(await resolveAiConfig(db, 'default', { agentId: personalAgent.id })).toBeNull();
+    expect(await resolveAiConfig(db, 'default', { appId: personalApp.id, agentId: personalAgent.id })).toBeNull();
+    await expect(resolveAiConfigWithFallback(db, null, { agentId: personalAgent.id }))
+      .rejects.toBeInstanceOf(NoAiConfigAvailableError);
+    // An explicit name misses, then the 'default' fallback misses too.
+    await expect(resolveAiConfigWithFallback(db, 'fast', { agentId: personalAgent.id }))
+      .rejects.toBeInstanceOf(NoAiConfigAvailableError);
+  });
+
+  it('the Agent\'s own and its user-owned App\'s configs still answer (only the host level closes)', async () => {
+    await createConfig({ agentId: personalAgent.id }, 'default', { apiKey: 'sk-agent-1482' });
+    expect((await resolveAiConfig(db, 'default', { agentId: personalAgent.id }))?.ownerType).toBe('AGENT');
+    await createConfig({ appId: personalApp.id }, 'default', { apiKey: 'sk-app-1482' });
+    expect((await resolveAiConfig(db, 'default', { appId: personalApp.id, agentId: personalAgent.id }))?.ownerType)
+      .toBe('APP');
+  });
+
+  it('list walk offers no host config', async () => {
+    await createConfig({ appId: personalApp.id }, 'mine', { apiKey: 'sk-app-mine' });
+    const listed = await resolveAiConfigs(db, { appId: personalApp.id, agentId: personalAgent.id });
+    expect(listed.map((r) => `${r.ownerType}:${r.config.name}`)).toEqual(['APP:mine']);
+  });
+
+  it('masked picker (resolveAiServiceConfigs) offers no host config to the owner', async () => {
+    await createConfig({ appId: personalApp.id }, 'mine', { apiKey: 'sk-app-mine' });
+    const picked = await resolvers.Query.resolveAiServiceConfigs(
+      {}, { appRef: personalApp.id, agentRef: personalAgent.id }, ctxFor(owner.id),
+    );
+    expect(picked.map((c: { name: string; ownerType: string }) => `${c.ownerType}:${c.name}`)).toEqual(['APP:mine']);
+  });
+
+  it('decrypt query (resolveAIConfig) refuses with NoAiConfigAvailableError, never the host key', async () => {
+    const err = await resolvers.Query.resolveAIConfig({}, { agentRef: personalAgent.id }, ctxFor(owner.id))
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(GraphQLError);
+    expect((err as GraphQLError).extensions.code).toBe('NoAiConfigAvailableError');
+    expect(JSON.stringify(err)).not.toContain('sk-host-1482');
+  });
+
+  it('server-side run config: an org-less run context gets no host config (latent path, pinned)', async () => {
+    // Every AppRun has an organization today (NOT NULL; mintAppRun requires the
+    // App's org), so this context can't be minted yet. Pinned so the day
+    // user-owned Apps get runs, the rule already holds on the run path.
+    const run = { appId: personalApp.id, agentId: personalAgent.id, organizationId: null, eventData: null } as unknown as AppRun;
+    await expect(makeProdRunDeps(db).resolveConfig(run)).rejects.toBeInstanceOf(NoAiConfigAvailableError);
+  });
+
+  it('control: with an organization in play the host level stays open, for the walk and for runs', async () => {
+    const orgApp = await db.app.create({
+      data: { id: generateId(), name: 'Org App', urn: 'acme-036:app-1482', organizationId: org.id },
+    });
+    await db.appAgent.create({ data: { appId: orgApp.id, agentId: personalAgent.id } });
+    const viaOrg = await resolveAiConfig(db, 'default', { appId: orgApp.id, agentId: personalAgent.id });
+    expect(viaOrg?.ownerType).toBe('HADRON_SERVER');
+    const run = { appId: orgApp.id, agentId: personalAgent.id, organizationId: org.id, eventData: null } as unknown as AppRun;
+    expect((await makeProdRunDeps(db).resolveConfig(run)).ownerType).toBe('HADRON_SERVER');
+    // An org Agent with no org config still falls back to the host, as before.
+    expect((await resolveAiConfig(db, 'default', { agentId: agent.id }))?.ownerType).toBe('HADRON_SERVER');
   });
 });

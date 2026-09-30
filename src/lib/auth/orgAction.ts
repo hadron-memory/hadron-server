@@ -32,6 +32,7 @@ import {
   type PolicyAction,
 } from '@hadron-memory/access-control';
 import type { PrismaClient } from '../../generated/prisma/index.js';
+import { authorizationDenied } from './authorizationDenied.js';
 
 /** Minimal caller shape — `Context` satisfies this structurally. */
 export interface OrgActionCaller {
@@ -60,9 +61,9 @@ export async function requireOrgAction(
 ): Promise<void> {
   // Impersonation: only the session's shared org is in scope (mirrors
   // requireOrgRole; checked before the platform bypass).
-  if (ctx.impersonation && orgId !== ctx.impersonation.orgId) throw new Error('Forbidden');
+  if (ctx.impersonation && orgId !== ctx.impersonation.orgId) throw authorizationDenied();
   if (ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER')) return;
-  if (!ctx.userId) throw new Error('Forbidden');
+  if (!ctx.userId) throw authorizationDenied();
 
   const [member, grants] = await Promise.all([
     ctx.db.orgMember.findFirst({
@@ -85,9 +86,9 @@ export async function requireOrgAction(
   // substitute: with no LIVE OrgMember row, even a live grant row does not
   // authorize (findings:revoked-membership-auth-gates — revoking the
   // membership instantly cuts every capability, grants included).
-  if (!member) throw new Error('Forbidden');
+  if (!member) throw authorizationDenied();
 
   const roles: OrgRole[] = [member.role as OrgRole];
   const { allowed } = evaluateActionAuthorization({ action, roles, grants });
-  if (!allowed) throw new Error('Forbidden');
+  if (!allowed) throw authorizationDenied();
 }

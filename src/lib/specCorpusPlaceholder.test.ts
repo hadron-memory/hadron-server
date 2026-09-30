@@ -9,6 +9,9 @@ import { mergeMemoryGraph } from '../controller/operations/mergeMemories.js';
 import { updateNodeFromGitSync } from '../integrations/github/syncGraphFromGithub.js';
 import { acquireLockSet, ancestorLocs } from './nodeSubtreeLock.js';
 import { lockEdgeEndpointMemories } from './edgeEndpointLock.js';
+import { generateDataKey } from './crypto.js';
+import { sessionKeyCache } from './sessionKeyCache.js';
+import { writeNodeToGit } from '../integrations/github/writeNodeToGit.js';
 
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -46,6 +49,21 @@ beforeEach(async () => {
 });
 
 describe('reserveSpecCitation (#1450)', () => {
+  it('exports the committed marker through the direct encrypted mirror path', async () => {
+    await db.memory.update({ where: { id: draft.id }, data: { isEncrypted: true, vectorIndexEnabled: false } });
+    sessionKeyCache.set('placeholder-encrypted-mirror', draft.id, generateDataKey());
+    const mirror = vi.mocked(writeNodeToGit);
+    mirror.mockClear();
+    try {
+      const reserved = await reserve(draft.id, 'pas:010:09');
+      await vi.waitFor(() => expect(mirror).toHaveBeenCalled());
+      expect(mirror.mock.calls.at(-1)?.[0]).toMatchObject({ id: reserved.id, isPlaceholder: true });
+      expect(await row(draft.id, 'pas:010:09')).toMatchObject({ isPlaceholder: true });
+    } finally {
+      sessionKeyCache.clear();
+    }
+  });
+
   it('creates a spec node at the citation, marked as a placeholder by the server', async () => {
     const node = await reserve(draft.id, 'pas:010:01');
     expect(node).toMatchObject({ loc: 'pas:010:01', name: 'pas:010:01', isPlaceholder: true });
@@ -193,6 +211,20 @@ describe('a placeholder stays a spec until written; cloneNode never copies one (
 
     await updateSpec(draft.id, 'pas:100:01', { role: null, content: 'Now it is written.' });
     expect(await row(draft.id, 'pas:100:01')).toMatchObject({ role: null, isPlaceholder: false });
+  });
+
+  it('accepts an unchanged dotted spec role on an imported placeholder but locks a different role', async () => {
+    await db.node.create({ data: {
+      id: generateId(), memoryId: draft.id, loc: 'pas:105:01', name: 'Imported',
+      role: 'spec.rule', isPlaceholder: true,
+    } });
+    await updateSpec(draft.id, 'pas:105:01', { role: 'spec.rule', name: 'Renamed' });
+    expect(await row(draft.id, 'pas:105:01')).toMatchObject({
+      name: 'Renamed', role: 'spec.rule', isPlaceholder: true,
+    });
+    expect(await codeOf(updateSpec(draft.id, 'pas:105:01', { role: 'spec.flow' })))
+      .toBe('SPEC_PLACEHOLDER_ROLE_LOCKED');
+    expect(await row(draft.id, 'pas:105:01')).toMatchObject({ role: 'spec.rule', isPlaceholder: true });
   });
 
   it('refuses to cloneNode a placeholder, even one whose role was removed behind the API', async () => {

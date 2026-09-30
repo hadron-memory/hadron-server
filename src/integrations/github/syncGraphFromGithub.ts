@@ -456,9 +456,6 @@ export const syncGraphFromGithub = async (
       // (#1047). Skipped and reported, never a failed sync.
       const protectedLocs = await protectedLocsIn(tx, graph.id);
       const isProtected = (loc: string) => protectedLocs.some((p) => protectedLocCovers(p, loc));
-      // #1348 — the property schema a restored objectType must satisfy.
-      const memorySchema = ((await tx.memory.findUnique({ where: { id: graph.id }, select: { schema: true } }))
-        ?.schema ?? null) as MemorySchema | null;
       const writableLocs = fsGraph.nodes
         .map((n) => n.loc)
         .filter((l): l is string => typeof l === 'string' && l !== '' && !isProtected(l));
@@ -492,6 +489,13 @@ export const syncGraphFromGithub = async (
       // NodeRevision or Node write. Holding FOR SHARE while waiting for a
       // move's path would deadlock against its FOR NO KEY UPDATE Memory lock.
       await assertGitSyncMemoryPlaintext(tx, graph.id);
+      // Read draft state only after the Memory FOR SHARE fence. Minting cannot
+      // flip the corpus out of draft between this check and the node writes.
+      // #1348 uses the same fenced read for the property schema.
+      const memoryState = await tx.memory.findUniqueOrThrow({
+        where: { id: graph.id }, select: { schema: true, corpusDraft: true },
+      });
+      const memorySchema = memoryState.schema as MemorySchema | null;
 
       // A move that won before these locks were granted invalidates preflight.
       // Retry the whole collection phase so the endpoint's current memory and
@@ -675,6 +679,24 @@ export const syncGraphFromGithub = async (
           ...governedSignalsFromMirror(node),
         };
 
+        // A repo file can restore a server-exported reservation, but only in
+        // the state reserveSpecCitation could have created: a blank spec in a
+        // draft corpus. Decide inside the write transaction, against the
+        // stored role when an older file has no role key. Invalid claims leave
+        // the rest of the file syncable and are reported rather than skipped;
+        // skipping could feed the destructive mirror cleanup below.
+        const placeholderMarkerFor = (existing: Node | null): { isPlaceholder: true } | Record<string, never> => {
+          if (node.isPlaceholder !== true) return {};
+          const role = 'role' in node ? node.role : existing?.role;
+          const specRole = role === 'spec' || (typeof role === 'string' && role.startsWith('spec.'));
+          if (memoryState.corpusDraft && specRole && !node.content?.trim()) return { isPlaceholder: true };
+          console.warn(
+            `[syncGraphFromGithub] "${graphName}" loc "${loc}": ignored placeholder marker ` +
+            '(requires a draft corpus, spec-family role, and blank content)',
+          );
+          return {};
+        };
+
         // #1348 — the collection discriminator, by the same absent-means-
         // preserve rule: `loadNodeFromFs` yields the key only for a non-blank
         // value (a file never clears it — cor:int:020:01, CLI import #725), so
@@ -850,7 +872,7 @@ export const syncGraphFromGithub = async (
             }
             console.log(`[syncGraphFromGithub] "${graphName}": node ${byId.id} moved "${byId.loc}" → "${loc}"`);
           }
-          await updateNodeFromGitSync(tx, byId, update, parkedRevisionBases.get(byId.id), graph.id, (locked) =>
+          await updateNodeFromGitSync(tx, byId, { ...update, ...placeholderMarkerFor(byId) }, parkedRevisionBases.get(byId.id), graph.id, (locked) =>
             objectTypeFor(locked.properties),
           );
           parkedRevisionBases.delete(byId.id);
@@ -893,7 +915,7 @@ export const syncGraphFromGithub = async (
             await updateNodeFromGitSync(
               tx,
               existingAtLoc,
-              update,
+              { ...update, ...placeholderMarkerFor(existingAtLoc) },
               parkedRevisionBases.get(existingAtLoc.id),
               graph.id,
               (locked) => objectTypeFor(locked.properties),
@@ -909,6 +931,7 @@ export const syncGraphFromGithub = async (
                 id: createId,
                 memoryId: graph.id,
                 ...update,
+                ...placeholderMarkerFor(null),
                 ...objectTypeFor(null),
                 revisionContentHash: revisionStateHashRefreshMarker(),
               },
@@ -1095,6 +1118,7 @@ export const syncGraphFromGithub = async (
               loc: edgeLoc,
               name: edge.name,
               description: edge.description ?? null,
+              ...(edge.data != null ? { data: edge.data as Prisma.InputJsonValue } : {}),
               isRunnable: edge.isRunnable ?? null,
               ...(edgeCondition !== null ? { condition: edgeCondition as Prisma.InputJsonValue } : {}),
               priority: edgePriority,
@@ -1106,8 +1130,8 @@ export const syncGraphFromGithub = async (
           // update:{} then returns that occupant without changing it. Refuse
           // inside the transaction so earlier node/edge writes roll back too.
           // Existing metadata remains untouched, as it did before this guard:
-          // API edits are not mirrored to Git, and the exporter omits some
-          // metadata (including data and empty descriptions).
+          // API edits are not mirrored to Git (#430), and this create-only
+          // importer does not reconcile them on an existing edge.
           if (
             savedEdge.deletedAt !== null ||
             savedEdge.sourceId !== edgeSourceId ||

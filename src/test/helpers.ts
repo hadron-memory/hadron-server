@@ -455,6 +455,7 @@ interface NodeMeta {
   role?: string;
   /** #1330: the other governed signal — a runnable node is exempt from strictSubRoles. */
   isRunnable?: boolean;
+  placeholder?: boolean;
 }
 
 /** Write a legacy node (`.node/node.yaml` + `topic.md`). */
