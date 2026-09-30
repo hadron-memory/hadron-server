@@ -137,9 +137,16 @@ async function transferPreview(
   add('Git mirror binding', Number(memory.source !== null || memory.sourceTokenEncrypted !== null || memory.sourceTokenExpiresAt !== null || memory.readBranch !== null || memory.writeBranch !== null), 'REFUSE');
   add('Node mirror provenance', await tx.node.count({ where: { memoryId: id, ownerRepo: { not: null } } }), 'REFUSE');
   add('Nodes', await tx.node.count({ where: { memoryId: id } }), 'CARRY');
+  add('Node embeddings', await tx.nodeEmbedding.count({ where: { memoryId: id } }), 'CARRY');
+  add('Node revisions', await tx.nodeRevision.count({ where: { memoryId: id } }), 'CARRY');
+  add('Node validation reports', await tx.nodeContentValidationReport.count({ where: { memoryId: id } }), 'CARRY');
   add('Edges', await tx.edge.count({ where: { memoryId: id } }), 'CARRY');
   add('Assets', await tx.asset.count({ where: { memoryId: id } }), 'CARRY');
+  add('Memory configuration', await tx.memoryConfig.count({ where: { memoryId: id } }), 'CARRY');
   add('Log history', await tx.memoryLogEntry.count({ where: { memoryId: id } }), 'CARRY');
+  add('Usage history', await tx.usageEvent.count({ where: { memoryId: id } }), 'CARRY');
+  add('Server log history', await tx.serverLogEntry.count({ where: { memoryId: id } }), 'CARRY');
+  add('App log history', await tx.appLogEntry.count({ where: { memoryId: id } }), 'CARRY');
   add('Active runs', await tx.appRun.count({ where: {
     status: { in: ['PENDING', 'RUNNING'] },
     OR: [...entryRef.OR, ...entryUrns.flatMap((urn) => [
@@ -189,69 +196,79 @@ export const memoryTransferMutations = {
     const destination = await resolveDestination(ctx, input);
     if (input.dryRun === true) return transferPreview(ctx.db as TransferDb, memory, destination, input.targetClass);
 
-    return ctx.db.$transaction(async (tx) => {
-      // The FK KEY SHARE taken by new dependents conflicts with this row lock;
-      // plan and apply from the same locked snapshot.
-      await tx.$queryRaw`SELECT id FROM memories WHERE id = ${id} FOR UPDATE`;
-      const current = await tx.memory.findUniqueOrThrow({ where: { id } });
-      if (current.deletedAt) throw refusal('MEMORY_NOT_FOUND', 'Memory not found.');
-      const txCtx = { ...ctx, db: tx } as Context;
-      await authorizeSource(txCtx, current, input.memoryRef);
-      const currentDestination = await resolveDestination(txCtx, input);
-      const plan = await transferPreview(tx, current, currentDestination, input.targetClass);
-      if (plan.blockers.length > 0) throw refusal(plan.blockers[0].code, plan.blockers[0].message);
-      if (plan.targetClass === 'group' && !ctx.userId) {
-        throw refusal('MEMORY_TRANSFER_GROUP_OWNER_REQUIRED', 'A receiving user is required as the first group owner.');
-      }
-      if (input.expectedNewUrn != null && input.expectedNewUrn !== plan.newUrn) {
-        throw refusal('STALE_TRANSFER_PREVIEW', 'The target URN changed since the preview; run a new dryRun.');
-      }
-      await tx.memory.update({
-        where: { id },
-        data: {
-          organizationId: currentDestination.kind === 'organization' ? currentDestination.id : null,
-          ownerUserId: currentDestination.kind === 'user' ? currentDestination.id : null,
-          userId: plan.targetClass === 'personal' || plan.targetClass === 'private' ? currentDestination.id : null,
-          class: plan.targetClass,
-          visibility: plan.targetClass === 'group' ? 'GROUP' : plan.targetClass === 'knowledge'
-            ? (current.class === 'knowledge' ? current.visibility : 'ORGANIZATION') : null,
-          listedOnMarketplace: false,
-          urn: plan.newUrn,
-          legacyUrn: current.urn,
-          updatedBy: ctx.userId ?? ctx.clientId ?? null,
-        },
-      });
-      if (plan.targetClass === 'group') {
-        await tx.memoryMember.create({
-          data: { memoryId: id, userId: ctx.userId!, role: 'owner', createdBy: ctx.userId },
+    try {
+      return await ctx.db.$transaction(async (tx) => {
+        // The FK KEY SHARE taken by new dependents conflicts with this row lock;
+        // plan and apply from the same locked snapshot.
+        await tx.$queryRaw`SELECT id FROM memories WHERE id = ${id} FOR UPDATE`;
+        const current = await tx.memory.findUniqueOrThrow({ where: { id } });
+        if (current.deletedAt) throw refusal('MEMORY_NOT_FOUND', 'Memory not found.');
+        const txCtx = { ...ctx, db: tx } as Context;
+        await authorizeSource(txCtx, current, input.memoryRef);
+        const currentDestination = await resolveDestination(txCtx, input);
+        const plan = await transferPreview(tx, current, currentDestination, input.targetClass);
+        if (plan.blockers.length > 0) throw refusal(plan.blockers[0].code, plan.blockers[0].message);
+        if (plan.targetClass === 'group' && !ctx.userId) {
+          throw refusal('MEMORY_TRANSFER_GROUP_OWNER_REQUIRED', 'A receiving user is required as the first group owner.');
+        }
+        if (input.expectedNewUrn != null && input.expectedNewUrn !== plan.newUrn) {
+          throw refusal('STALE_TRANSFER_PREVIEW', 'The target URN changed since the preview; run a new dryRun.');
+        }
+        await tx.memory.update({
+          where: { id },
+          data: {
+            organizationId: currentDestination.kind === 'organization' ? currentDestination.id : null,
+            ownerUserId: currentDestination.kind === 'user' ? currentDestination.id : null,
+            userId: plan.targetClass === 'personal' || plan.targetClass === 'private' ? currentDestination.id : null,
+            class: plan.targetClass,
+            visibility: plan.targetClass === 'group' ? 'GROUP' : plan.targetClass === 'knowledge'
+              ? (current.class === 'knowledge' ? current.visibility : 'ORGANIZATION') : null,
+            listedOnMarketplace: false,
+            urn: plan.newUrn,
+            legacyUrn: current.urn,
+            updatedBy: ctx.userId ?? ctx.clientId ?? null,
+          },
         });
-      }
-      await recordUrnRename(tx, {
-        entityType: 'MEMORY', entityId: id,
-        oldUrn: current.urn, newUrn: plan.newUrn,
-        createdBy: ctx.userId ?? ctx.clientId ?? null,
-      });
-      if (current.legacyUrn && current.legacyUrn !== current.urn) {
+        if (plan.targetClass === 'group') {
+          await tx.memoryMember.create({
+            data: { memoryId: id, userId: ctx.userId!, role: 'owner', createdBy: ctx.userId },
+          });
+        }
         await recordUrnRename(tx, {
           entityType: 'MEMORY', entityId: id,
-          oldUrn: current.legacyUrn, newUrn: plan.newUrn,
+          oldUrn: current.urn, newUrn: plan.newUrn,
           createdBy: ctx.userId ?? ctx.clientId ?? null,
         });
-      }
-      await tx.memoryLogEntry.create({
-        data: {
-          memoryId: id, level: 'INFO', eventType: 'OTHER',
-          message: `Memory transferred from ${plan.fromOwner} to ${plan.toOwner}.`,
-          detail: {
-            oldUrn: current.urn, newUrn: plan.newUrn,
-            fromOwner: plan.fromOwner, toOwner: plan.toOwner,
-            fromClass: current.class, toClass: plan.targetClass,
-            actorId: ctx.userId ?? ctx.clientId ?? null,
+        if (current.legacyUrn && current.legacyUrn !== current.urn) {
+          await recordUrnRename(tx, {
+            entityType: 'MEMORY', entityId: id,
+            oldUrn: current.legacyUrn, newUrn: plan.newUrn,
+            createdBy: ctx.userId ?? ctx.clientId ?? null,
+          });
+        }
+        await tx.memoryLogEntry.create({
+          data: {
+            memoryId: id, level: 'INFO', eventType: 'OTHER',
+            message: `Memory transferred from ${plan.fromOwner} to ${plan.toOwner}.`,
+            detail: {
+              oldUrn: current.urn, newUrn: plan.newUrn,
+              fromOwner: plan.fromOwner, toOwner: plan.toOwner,
+              fromClass: current.class, toClass: plan.targetClass,
+              actorId: ctx.userId ?? ctx.clientId ?? null,
+            },
+            createdBy: ctx.userId ?? ctx.clientId ?? null,
           },
-          createdBy: ctx.userId ?? ctx.clientId ?? null,
-        },
-      });
-      return { ...plan, applied: true };
-    });
+        });
+        return { ...plan, applied: true };
+      }, { timeout: 15_000 });
+    } catch (error) {
+      // Two source rows can transfer toward the same free destination URN at
+      // once. The unique index is the final arbiter; ask the loser to preview
+      // again instead of surfacing Prisma's constraint error.
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+        throw refusal('STALE_TRANSFER_PREVIEW', 'The target URN was claimed by another transfer; run a new dryRun.');
+      }
+      throw error;
+    }
   },
 };
