@@ -655,6 +655,11 @@ export const syncGraphFromGithub = async (
       // is not upserted, and `notIn: upsertedIds` would otherwise hard-delete
       // it — a root deletion cascading its Channel row (Copilot on PR #1165).
       const protectedRowIds = new Set<string>();
+      // #1468 (Codex on #1475) — file locs whose id-first move was REFUSED:
+      // the row stays at its old loc, so the file's outgoing edges (declared
+      // from the new loc) are skipped this run rather than failing the edge
+      // phase's endpoint check on every retry. They land with the move.
+      const refusedMoveLocs = new Set<string>();
       // File frontmatter ids already claimed in THIS run — a second file
       // carrying the same id (a copied file) must not be treated as a move
       // of the first; it gets a fresh id instead.
@@ -861,6 +866,7 @@ export const syncGraphFromGithub = async (
           if (byId.loc !== loc && isProtected(byId.loc)) {
             skippedProtected.push(`${byId.loc} → ${loc}`);
             protectedRowIds.add(byId.id);
+            refusedMoveLocs.add(loc);
             incomingEdgesWait();
             continue;
           }
@@ -880,6 +886,7 @@ export const syncGraphFromGithub = async (
               `[syncGraphFromGithub] "${graphName}": refusing move of ${byId.id} "${byId.loc}" → "${loc}" — the loc is held by a row that will not move this run (a minted spec keeps its citation, #1468)`,
             );
             protectedRowIds.add(byId.id);
+            refusedMoveLocs.add(loc);
             continue;
           }
           if (byId.loc !== loc) {
@@ -907,6 +914,7 @@ export const syncGraphFromGithub = async (
                 `[syncGraphFromGithub] "${graphName}": refusing move of ${byId.id} into "${loc}" — the occupant ${occupant.id} is held by a file whose path is not a valid loc`,
               );
               protectedRowIds.add(byId.id);
+              refusedMoveLocs.add(loc);
               incomingEdgesWait();
               continue;
             }
@@ -940,6 +948,7 @@ export const syncGraphFromGithub = async (
                 `[syncGraphFromGithub] "${graphName}": refusing move of ${byId.id} into "${loc}" — the occupant ${occupant.loc} is a minted spec, and a minted spec keeps its citation (#1468)`,
               );
               protectedRowIds.add(byId.id);
+              refusedMoveLocs.add(loc);
               continue;
             }
             if (occupant && occupant.id !== byId.id) {
@@ -1144,7 +1153,7 @@ export const syncGraphFromGithub = async (
       }
 
       for (const edge of edges) {
-        if (refusedRoleLocs.has(edge.sourceLoc) || deferredLocs.has(edge.sourceLoc)) continue;
+        if (refusedRoleLocs.has(edge.sourceLoc) || deferredLocs.has(edge.sourceLoc) || refusedMoveLocs.has(edge.sourceLoc)) continue;
         if (!fileIdToRowId.has(edge.targetId) && unappliedFileIds.has(edge.targetId)) continue;
         // Resolve endpoints through the remaps: the source is always a file
         // in this repo (by loc); the target prefers this repo's claimant of
