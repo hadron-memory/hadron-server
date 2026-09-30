@@ -3127,6 +3127,23 @@ export const nodeMutations = {
             extensions: { code: 'NODE_NOT_FOUND' },
           });
         }
+        // A transfer of either endpoint Memory may have committed after
+        // preflight. Lock both in a stable order through the insert.
+        for (const memoryId of [...new Set([src.memoryId, tgt.memoryId])].sort()) {
+          await tx.$queryRaw`SELECT id FROM memories WHERE id = ${memoryId} FOR SHARE`;
+        }
+        const txCtx = withoutRequestCaches(ctx, tx);
+        if (!(await isMemoryReadableCached(txCtx, src.memoryId))) {
+          throw new GraphQLError(`Source node not found: "${sourceRef}"`, {
+            extensions: { code: 'NODE_NOT_FOUND' },
+          });
+        }
+        await requireMemoryWriteAccess(txCtx, src.memoryId);
+        if (!(await isMemoryReadableCached(txCtx, tgt.memoryId))) {
+          throw new GraphQLError(`Target node not found: "${targetRef}"`, {
+            extensions: { code: 'NODE_NOT_FOUND' },
+          });
+        }
         return tx.edge.create({
           data: {
             id: generateId(),
@@ -3251,19 +3268,29 @@ export const nodeMutations = {
         });
       }
       await requireMemoryWriteAccess(ctx, edgeMem.memoryId);
-      const updatedEdge = await ctx.db.edge.update({
-        where: { id: resolvedEdgeId },
-        data: {
-          ...(name !== undefined ? { name: name ?? null } : {}),
-          ...(loc != null && loc !== '' ? { loc } : {}),
-          ...(description !== undefined ? { description: description ?? null } : {}),
-          ...(isRunnable !== undefined ? { isRunnable: isRunnable ?? null } : {}),
-          ...(condition !== undefined ? { condition: (condition ?? null) as InputJsonValue } : {}),
-          ...(priority != null ? { priority } : {}),
-          ...(data !== undefined ? { data: data as InputJsonValue } : {}),
-          updatedBy: ctx.userId ?? ctx.clientId ?? null,
-        },
-        include: { source: true, target: true },
+      const updatedEdge = await ctx.db.$transaction(async (tx) => {
+        await tx.$queryRaw`SELECT id FROM memories WHERE id = ${edgeMem.memoryId} FOR SHARE`;
+        const txCtx = withoutRequestCaches(ctx, tx);
+        if (!(await isMemoryReadableCached(txCtx, edgeMem.memoryId))) {
+          throw new GraphQLError(`Edge not found: "${edgeRef}"`, {
+            extensions: { code: 'EDGE_NOT_FOUND', ref: edgeRef },
+          });
+        }
+        await requireMemoryWriteAccess(txCtx, edgeMem.memoryId);
+        return tx.edge.update({
+          where: { id: resolvedEdgeId },
+          data: {
+            ...(name !== undefined ? { name: name ?? null } : {}),
+            ...(loc != null && loc !== '' ? { loc } : {}),
+            ...(description !== undefined ? { description: description ?? null } : {}),
+            ...(isRunnable !== undefined ? { isRunnable: isRunnable ?? null } : {}),
+            ...(condition !== undefined ? { condition: (condition ?? null) as InputJsonValue } : {}),
+            ...(priority != null ? { priority } : {}),
+            ...(data !== undefined ? { data: data as InputJsonValue } : {}),
+            updatedBy: ctx.userId ?? ctx.clientId ?? null,
+          },
+          include: { source: true, target: true },
+        });
       });
       // #1061 — attributed to the source node, as createEdge is.
       recordNodeWrite(ctx.db, toUsageNodeRef(updatedEdge.source), ctx);
@@ -3321,7 +3348,17 @@ export const nodeMutations = {
         });
       }
       await requireMemoryWriteAccess(ctx, edgeMem.memoryId);
-      await ctx.db.edge.delete({ where: { id: resolvedEdgeId } });
+      await ctx.db.$transaction(async (tx) => {
+        await tx.$queryRaw`SELECT id FROM memories WHERE id = ${edgeMem.memoryId} FOR SHARE`;
+        const txCtx = withoutRequestCaches(ctx, tx);
+        if (!(await isMemoryReadableCached(txCtx, edgeMem.memoryId))) {
+          throw new GraphQLError(`Edge not found: "${edgeRef}"`, {
+            extensions: { code: 'EDGE_NOT_FOUND', ref: edgeRef },
+          });
+        }
+        await requireMemoryWriteAccess(txCtx, edgeMem.memoryId);
+        await tx.edge.delete({ where: { id: resolvedEdgeId } });
+      });
       // #1061 — attributed to the source node, as createEdge is.
       recordNodeWrite(ctx.db, toUsageNodeRef(edgeMem.source), ctx);
       return true;

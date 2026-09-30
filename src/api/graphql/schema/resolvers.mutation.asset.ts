@@ -103,7 +103,7 @@ export const assetMutations = {
       if (!ctx.userId) throw new Error('Unauthenticated');
       return completeAssetUpload(
         ctx.db,
-        { userId: ctx.userId, appId: ctx.appId },
+        { userId: ctx.userId, appId: ctx.appId, roles: ctx.roles, organizationId: ctx.organizationId },
         input,
       );
     },
@@ -151,4 +151,3 @@ export const assetMutations = {
     },
 
 };
-

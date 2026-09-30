@@ -13,6 +13,7 @@
  */
 
 import type { Asset, PrismaClient } from '../../generated/prisma/index.js';
+import { GraphQLError } from 'graphql';
 import { consumeUpload } from '../../lib/asset/uploadRegistry.js';
 import { logAssetEvent } from '../../lib/asset/audit.js';
 import { encryptStorageKeyForMemory } from '../../lib/asset/encryption.js';
@@ -30,7 +31,8 @@ import { sessionKeyCache } from '../../lib/sessionKeyCache.js';
 import { isScanConfigured } from '../../lib/scanClient.js';
 import { scanAssetRow } from '../../lib/asset/scan.js';
 import { AssetUploadError } from './beginAssetUpload.js';
-import type { AssetCallerContext } from './beginAssetUpload.js';
+import type { AssetCallerContextV2 } from './beginAssetUpload.js';
+import { requireMemoryWriteAccess, type Context } from '../../api/graphql/schema/resolvers.helpers.js';
 
 export interface CompleteAssetUploadInput {
   uploadId: string;
@@ -38,7 +40,7 @@ export interface CompleteAssetUploadInput {
 
 export async function completeAssetUpload(
   db: PrismaClient,
-  caller: AssetCallerContext,
+  caller: AssetCallerContextV2,
   input: CompleteAssetUploadInput,
 ): Promise<Asset> {
   const entry = consumeUpload(input.uploadId);
@@ -135,29 +137,6 @@ export async function completeAssetUpload(
       'staging-path completion not yet supported (US4)',
     );
   }
-  const memory = await db.memory.findUniqueOrThrow({
-    where: { id: entry.memoryId },
-    select: { id: true, isEncrypted: true },
-  });
-  let storedStorageKey = entry.storageKey;
-  if (memory.isEncrypted) {
-    const key = sessionKeyCache.getByMemoryId(memory.id);
-    if (!key) {
-      // The PUT already succeeded; clean up the orphan and surface the
-      // typed error matching the edge-conditions pattern.
-      await deleteObject(entry.stagingKey).catch(() => {});
-      throw new AssetUploadError(
-        'MEMORY_ENCRYPTED_NO_KEY',
-        'encrypted memory has no active session key; cannot persist asset',
-      );
-    }
-    storedStorageKey = encryptStorageKeyForMemory(
-      entry.storageKey,
-      memory,
-      key,
-    );
-  }
-
   // Scan posture (#896). When the scan tool is configured, the row is
   // born PENDING and scanned INLINE right below — the scanner wins and
   // HADRON_ASSET_SCAN_AUTO_CLEAN is ignored, so flipping the hatch off
@@ -190,23 +169,56 @@ export async function completeAssetUpload(
 
   let asset: Asset;
   try {
-    asset = await db.asset.create({
-      data: {
-        id: entry.assetId,
-        memoryId: entry.memoryId,
-        filename: entry.filename,
-        mimeType: entry.mimeType,
-        sizeBytes: entry.expectedSizeBytes,
-        storageKey: storedStorageKey,
-        scanStatus: autoClean ? 'CLEAN' : 'PENDING',
-        // Any PENDING row is born due-now so a crash between here and
-        // the inline scan below leaves a queued row, not a stuck one —
-        // and rows born while no scanner is configured are already
-        // queued the day one appears.
-        scanDueAt: autoClean ? null : new Date(),
-        description: entry.description,
-        uploadedBy: entry.userId,
-      },
+    asset = await db.$transaction(async (tx) => {
+      // Transfer takes FOR UPDATE on this row. Its owner change and our final
+      // authority check + Asset insert must be ordered as one operation.
+      const locked = await tx.$queryRaw<Array<{ id: string; is_encrypted: boolean }>>`
+        SELECT id, is_encrypted FROM memories WHERE id = ${entry.memoryId} AND deleted_at IS NULL FOR SHARE
+      `;
+      const memory = locked[0];
+      if (!memory) {
+        throw new AssetUploadError('PERMISSION_DENIED', 'caller does not have write access to target memory');
+      }
+      try {
+        await requireMemoryWriteAccess({
+          db: tx, userId: caller.userId, appId: caller.appId,
+          roles: caller.roles, organizationId: caller.organizationId,
+        } as Context, entry.memoryId!);
+      } catch (error) {
+        if (error instanceof GraphQLError && error.extensions?.code === 'FORBIDDEN') {
+          throw new AssetUploadError('PERMISSION_DENIED', 'caller does not have write access to target memory');
+        }
+        throw error;
+      }
+      let storedStorageKey = entry.storageKey;
+      if (memory.is_encrypted) {
+        const key = sessionKeyCache.getByMemoryId(memory.id);
+        if (!key) {
+          throw new AssetUploadError(
+            'MEMORY_ENCRYPTED_NO_KEY',
+            'encrypted memory has no active session key; cannot persist asset',
+          );
+        }
+        storedStorageKey = encryptStorageKeyForMemory(entry.storageKey, { isEncrypted: true }, key);
+      }
+      return tx.asset.create({
+        data: {
+          id: entry.assetId,
+          memoryId: entry.memoryId,
+          filename: entry.filename,
+          mimeType: entry.mimeType,
+          sizeBytes: entry.expectedSizeBytes,
+          storageKey: storedStorageKey,
+          scanStatus: autoClean ? 'CLEAN' : 'PENDING',
+          // Any PENDING row is born due-now so a crash between here and
+          // the inline scan below leaves a queued row, not a stuck one —
+          // and rows born while no scanner is configured are already
+          // queued the day one appears.
+          scanDueAt: autoClean ? null : new Date(),
+          description: entry.description,
+          uploadedBy: entry.userId,
+        },
+      });
     });
   } catch (err) {
     // The copy already landed; without this the promoted object outlives

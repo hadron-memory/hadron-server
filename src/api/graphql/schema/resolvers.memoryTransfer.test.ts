@@ -271,6 +271,46 @@ describe('transferMemoryOwnership', () => {
     expect((await db.node.findUniqueOrThrow({ where: { id: node.id } })).content).toBe('Permanent citation');
   });
 
+  it.each(['create', 'update', 'delete'] as const)('does not let a former org writer %s an edge after transfer', async (mode) => {
+    await transfer({ memoryRef: memory.id, orgRef: org.id, targetClass: 'knowledge' });
+    const target = await db.node.create({ data: { id: generateId(), memoryId: memory.id, loc: 'edge-target', name: 'Target' } });
+    const edge = mode === 'create' ? null : await db.edge.create({ data: {
+      id: generateId(), memoryId: memory.id, sourceId: node.id, targetId: target.id,
+      loc: 'edge-before-transfer', name: 'Before',
+    } });
+    const nextOrg = await db.organization.create({ data: {
+      id: generateId(), name: 'Next Edge Owner', urn: 'next-edge-owner',
+    } });
+    const transaction = db.$transaction.bind(db);
+    let transferred = false;
+    const raceDb = new Proxy(db, {
+      get(targetDb, key) {
+        if (key === '$transaction') {
+          return async (work: Parameters<typeof transaction>[0], options?: Parameters<typeof transaction>[1]) => {
+            if (!transferred) {
+              transferred = true;
+              await resolvers.Mutation.transferMemoryOwnership(null, {
+                memoryRef: memory.id, orgRef: nextOrg.id,
+              }, { db, userId: outsider.id, roles: ['ADMIN'] });
+            }
+            return transaction(work as never, options as never);
+          };
+        }
+        return Reflect.get(targetDb, key);
+      },
+    });
+    const raceCtx = { db: raceDb, userId: owner.id, roles: ['READER'] };
+    const pending = mode === 'create'
+      ? resolvers.Mutation.createEdge(null, { sourceRef: node.id, targetRef: target.id, name: 'Late' }, raceCtx)
+      : mode === 'update'
+        ? resolvers.Mutation.updateEdge(null, { edgeRef: edge!.id, name: 'Late' }, raceCtx)
+        : resolvers.Mutation.deleteEdge(null, { edgeRef: edge!.id }, raceCtx);
+    await expect(pending).rejects.toThrow();
+    expect(transferred).toBe(true);
+    expect(await db.edge.count({ where: { memoryId: memory.id } })).toBe(mode === 'create' ? 0 : 1);
+    if (edge) expect(await db.edge.findUniqueOrThrow({ where: { id: edge.id } })).toMatchObject({ name: 'Before' });
+  });
+
   it.each(['move', 'delete'] as const)('does not let a former org writer %s a node after transfer', async (mode) => {
     await transfer({ memoryRef: memory.id, orgRef: org.id, targetClass: 'knowledge' });
     const nextOrg = await db.organization.create({ data: { id: generateId(), name: 'Next Node Owner', urn: 'next-node-operation-owner' } });
