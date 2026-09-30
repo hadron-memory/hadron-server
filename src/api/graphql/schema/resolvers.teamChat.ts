@@ -87,6 +87,25 @@ const forbidden = (): GraphQLError =>
     extensions: { code: 'FORBIDDEN' },
   });
 
+/**
+ * (#1509) The refusal for a caller with NO principal at all: no user and no App
+ * key (no token, an expired JWT, a garbage bearer). It is not a lack of rights,
+ * so it must not read as FORBIDDEN ("needs App membership"): a client has to be
+ * able to tell "sign in again" from "you are not a participant" without parsing
+ * prose (`conventions:the-error-code-is-the-contract-the-prose-is-not`).
+ */
+const unauthenticated = (): GraphQLError =>
+  new GraphQLError('Authentication required', { extensions: { code: 'UNAUTHENTICATED' } });
+
+/**
+ * (#1509) Refuse a principal-less caller BEFORE any lookup, so the answer is
+ * the same whether or not the App (or anything it names) exists. Called first
+ * on the appRef team-chat surfaces, which never admit an anonymous caller.
+ */
+function requirePrincipal(ctx: Context): void {
+  if (!ctx.userId && !ctx.appId) throw unauthenticated();
+}
+
 // Keep the public resolver export for existing callers and tests.
 export { extractMentions };
 
@@ -142,6 +161,10 @@ async function requireTeamChatAccess(
   if (!ctx.userId) {
     // Pure App-key principal: read-only, and only for its own App.
     if (mode === 'read' && ctx.appId && ctx.appId === app.id) return;
+    // A caller with NO principal never reaches here on the appRef surfaces:
+    // they refuse it UNAUTHENTICATED before any lookup (requirePrincipal,
+    // #1509). The Channel surfaces deliberately answer it CHANNEL_NOT_FOUND
+    // instead, identically to a missing ref, so the refusal stays FORBIDDEN.
     throw forbidden();
   }
   // The user branch is the shared App-participation predicate (#943 extracted
@@ -1133,6 +1156,7 @@ export const teamChatMutations = {
     }: { appRef: string; body: string; replyToSeq?: number | null; sessionRef?: string | null },
     ctx: Context,
   ): Promise<TeamChatMessageOut> => {
+    requirePrincipal(ctx);
     assertBody(body);
     const { id: appId } = await resolveAppRef(ctx.db, appRef);
     const app = await ctx.db.app.findUniqueOrThrow({ where: { id: appId } });
@@ -1220,6 +1244,7 @@ export const teamChatQueries = {
     },
     ctx: Context,
   ): Promise<{ items: TeamChatMessageOut[]; total: number }> => {
+    requirePrincipal(ctx);
     const { id: appId } = await resolveAppRef(ctx.db, appRef);
     const app = await ctx.db.app.findUniqueOrThrow({ where: { id: appId } });
     await requireTeamChatAccess(ctx, app, 'read');

@@ -666,8 +666,11 @@ describe('auth matrix — one case per principal shape', () => {
     await expectCode(read(ctx(outsider.id)), 'FORBIDDEN');
   });
 
-  it('an unauthenticated caller is refused', async () => {
-    await expectCode(post(ctx(undefined), {}), 'FORBIDDEN');
+  it('an unauthenticated caller is refused as UNAUTHENTICATED, not FORBIDDEN (#1509)', async () => {
+    // No principal is not a lack of rights: a client must be able to tell
+    // "sign in again" from "not a participant" (hadron-portal#974).
+    await expectCode(post(ctx(undefined), {}), 'UNAUTHENTICATED');
+    await expectCode(read(ctx(undefined)), 'UNAUTHENTICATED');
   });
 
   it('a pure App-key principal cannot post but may read its own team chat', async () => {
