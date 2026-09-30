@@ -276,6 +276,10 @@ export async function promotePendingEdgeForTarget(
               targetId: currentTarget.id,
               loc: pEdgeLoc,
               name: currentPending.name,
+              description: currentPending.description,
+              ...(currentPending.data != null
+                ? { data: currentPending.data as Prisma.InputJsonValue }
+                : {}),
             },
             update: {},
           });

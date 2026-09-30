@@ -26,8 +26,7 @@ import { execGit } from './execGit.js';
 import { validateMemorySource } from '../../lib/gitSource.js';
 import { enqueueNodeEmbedding } from '../../services/embedding/enqueue.js';
 import { acquireLockSet, ancestorLocs, lockAncestorsForCreateMany } from '../../lib/nodeSubtreeLock.js';
-import type { Prisma } from '../../generated/prisma/index.js';
-import type { Memory, Node, Organization } from '../../generated/prisma/index.js';
+import { Prisma, type Memory, type Node, type Organization } from '../../generated/prisma/index.js';
 import { validateGitBranch } from '../../lib/gitRef.js';
 import { lockMemoryForChannelChange } from '../../lib/channels.js';
 import { reconcilePendingEdgeCount } from '../../lib/pendingEdgePromotion.js';
@@ -731,6 +730,8 @@ export const syncGraphFromGithub = async (
                 targetId: p.targetId,
                 loc: pLoc,
                 name: p.name,
+                description: p.description,
+                ...(p.data != null ? { data: p.data as Prisma.InputJsonValue } : {}),
               },
               update: {},
             });
@@ -883,8 +884,16 @@ export const syncGraphFromGithub = async (
           // promotion time (once the target arrives and its loc is known).
           await tx.pendingEdge.upsert({
             where: { sourceId_targetId: { sourceId: edgeSourceId, targetId: edgeTargetId } },
-            create: { id: generateId(), sourceId: edgeSourceId, targetId: edgeTargetId, name: edge.name },
-            update: { name: edge.name },
+            create: {
+              id: generateId(), sourceId: edgeSourceId, targetId: edgeTargetId,
+              name: edge.name, description: edge.description ?? null,
+              ...(edge.data != null ? { data: edge.data as Prisma.InputJsonValue } : {}),
+            },
+            update: {
+              name: edge.name,
+              description: edge.description ?? null,
+              data: edge.data != null ? edge.data as Prisma.InputJsonValue : Prisma.DbNull,
+            },
           });
         }
         }

@@ -1424,22 +1424,26 @@ model Edge {
 /// a foreign key to the target. When the target Node is synced, the
 /// PendingEdge is converted to a regular Edge.
 model PendingEdge {
-  id        String    @id @default(cuid())
-  sourceId  String    @map("source_id")
+  id          String    @id @default(cuid())
+  sourceId    String    @map("source_id")
   /// Intended target node id — **NOT a foreign key**; resolved at
   /// promotion time.
-  targetId  String    @map("target_id")
+  targetId    String    @map("target_id")
   /// Edge loc carried so an authored loc survives until promotion; the
   /// promoted Edge derives one when this is null. (Mirrors `Edge.loc`.)
-  loc       String?
+  loc         String?
   /// Free-form relationship name (was `label`).
-  name      String?
-  createdAt DateTime  @default(now()) @map("created_at")
-  createdBy String?   @map("created_by")
-  updatedAt DateTime? @updatedAt @map("updated_at")
-  updatedBy String?   @map("updated_by")
-  deletedAt DateTime? @map("deleted_at")
-  deletedBy String?   @map("deleted_by")
+  name        String?
+  /// Preserved until the unresolved edge is promoted; empty differs from null.
+  description String?
+  /// Structured edge payload carried through deferred Git sync and cloning.
+  data        Json?
+  createdAt   DateTime  @default(now()) @map("created_at")
+  createdBy   String?   @map("created_by")
+  updatedAt   DateTime? @updatedAt @map("updated_at")
+  updatedBy   String?   @map("updated_by")
+  deletedAt   DateTime? @map("deleted_at")
+  deletedBy   String?   @map("deleted_by")
 
   source Node @relation(fields: [sourceId], references: [id], onDelete: Cascade)
 

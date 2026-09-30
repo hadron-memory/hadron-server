@@ -391,6 +391,8 @@ export async function cloneMemoryGraph(
           targetId,
           loc: p.loc,
           name: p.name,
+          description: p.description,
+          data: jsonOrDbNull(p.data),
           createdBy: args.actorId,
         });
       }
