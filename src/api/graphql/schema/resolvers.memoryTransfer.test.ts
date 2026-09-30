@@ -558,6 +558,41 @@ describe('transferMemoryOwnership', () => {
     ]));
   });
 
+  it('ignores deleted triggers but still blocks on disabled live triggers', async () => {
+    await transfer({ memoryRef: memory.id, orgRef: org.id, targetClass: 'knowledge' });
+    const nextOrg = await db.organization.create({ data: {
+      id: generateId(), name: 'Trigger receiver', urn: 'trigger-receiver',
+    } });
+    await db.orgMember.create({ data: {
+      id: generateId(), organizationId: nextOrg.id, userId: owner.id, role: 'ADMIN',
+    } });
+    const app = await db.app.create({ data: {
+      id: generateId(), organizationId: org.id, urn: `${org.urn}:trigger-app`, name: 'Trigger App',
+    } });
+    const entryNodeUrn = `hrn:node:${org.urn}:specs:${node.loc}`;
+    const schedule = await db.agentSchedule.create({ data: {
+      id: generateId(), organizationId: org.id, appId: app.id, name: 'Deleted schedule',
+      runAt: new Date('2030-01-01T00:00:00Z'), entryNodeUrn, enabled: false,
+      deletedAt: new Date(),
+    } });
+    await db.agentWebhook.create({ data: {
+      id: generateId(), organizationId: org.id, appId: app.id, name: 'Deleted webhook',
+      secret: `deleted-${generateId()}`, entryNodeUrn, enabled: false, deletedAt: new Date(),
+    } });
+    const input = { memoryRef: memory.id, orgRef: nextOrg.id };
+    const preview = await transfer({ ...input, dryRun: true });
+    expect(preview.dependents).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'Schedules', count: 0 }),
+      expect.objectContaining({ kind: 'Webhooks', count: 0 }),
+    ]));
+    expect(preview.canApply).toBe(true);
+    await db.agentSchedule.update({ where: { id: schedule.id }, data: { deletedAt: null } });
+    const live = await transfer({ ...input, dryRun: true });
+    expect(live.dependents).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'Schedules', count: 1, handling: 'REFUSE' }),
+    ]));
+  });
+
   it('closes updateMemory’s original org-to-org owner-change path', async () => {
     await transfer({ memoryRef: memory.id, orgRef: org.id, targetClass: 'knowledge' });
     const otherOrg = await db.organization.create({ data: { id: generateId(), name: 'Other', urn: 'other-transfer-org' } });

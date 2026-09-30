@@ -2281,16 +2281,48 @@ export const memoryMutations = {
       // otherwise a losing caller could replace the verifier while the winner
       // encrypts rows under its own key (#1346).
       if (!memory.isEncrypted) {
-        const flip = await ctx.db.memory.updateMany({
-          where: { id: resolvedMemoryId, isEncrypted: false },
-          data: {
-            isEncrypted: true,
-            keyVerifier: makeKeyVerifier(key),
-            ...kdfFields,
-            updatedBy: ctx.appId ?? ctx.userId ?? null,
-          },
+        await ctx.db.$transaction(async (tx) => {
+          // A transfer may win after the preflight above. Hold the same row
+          // lock as transfer while checking the current owner and class, so
+          // the former owner's key cannot encrypt the receiver's nodes.
+          await tx.$queryRaw`SELECT id FROM memories WHERE id = ${resolvedMemoryId} FOR UPDATE`;
+          const current = await tx.memory.findUniqueOrThrow({ where: { id: resolvedMemoryId } });
+          const txCtx = { ...ctx, db: tx } as Context;
+          await concealUnreadableDenial(txCtx, resolvedMemoryId, memoryId, async () => {
+            if (current.deletedAt) throw new GraphQLError('Memory not found.', { extensions: { code: 'FORBIDDEN' } });
+            if (ctx.appId) {
+              const app = await tx.app.findUniqueOrThrow({ where: { id: ctx.appId } });
+              if (current.organizationId !== app.organizationId) {
+                throw new Error('Forbidden: memory does not belong to this app\'s organization');
+              }
+            } else if (!ctx.userId || current.userId !== ctx.userId) {
+              throw new GraphQLError('Only the memory owner (or an org App) may encrypt it.', {
+                extensions: { code: 'FORBIDDEN' },
+              });
+            }
+          });
+          if (current.class !== 'private') {
+            throw new GraphQLError("Only class='private' memories support encryption (D-2026-07-06-B).", {
+              extensions: { code: 'BAD_USER_INPUT', memoryClass: current.class },
+            });
+          }
+          if (current.vectorIndexEnabled && !current.vectorIndexEncryptedAckAt) {
+            throw new GraphQLError(
+              'Disable the vector index (or acknowledge the inversion disclosure) before encrypting.',
+              { extensions: { code: 'BAD_USER_INPUT' } },
+            );
+          }
+          const flip = await tx.memory.updateMany({
+            where: { id: resolvedMemoryId, isEncrypted: false },
+            data: {
+              isEncrypted: true,
+              keyVerifier: makeKeyVerifier(key),
+              ...kdfFields,
+              updatedBy: ctx.appId ?? ctx.userId ?? null,
+            },
+          });
+          if (flip.count !== 1) throw new Error('Memory is already encrypted');
         });
-        if (flip.count !== 1) throw new Error('Memory is already encrypted');
       }
       const BATCH = 200; // bound memory per pass (PR-514 review, Gemini)
       for (let pass = 0; pass < 5; pass++) {

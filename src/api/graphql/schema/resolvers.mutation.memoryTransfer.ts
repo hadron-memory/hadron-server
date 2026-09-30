@@ -170,8 +170,8 @@ async function transferPreview(
   // and let one of them block a transfer indefinitely. Historical node URNs
   // continue to resolve through aliases; ordinary run authorization applies.
   const sourceOrgId = memory.organizationId;
-  add('Schedules', sourceOrgId ? await tx.agentSchedule.count({ where: { ...entryRef, organizationId: sourceOrgId } }) : 0, 'REFUSE');
-  add('Webhooks', sourceOrgId ? await tx.agentWebhook.count({ where: { ...entryRef, organizationId: sourceOrgId } }) : 0, 'REFUSE');
+  add('Schedules', sourceOrgId ? await tx.agentSchedule.count({ where: { ...entryRef, organizationId: sourceOrgId, deletedAt: null } }) : 0, 'REFUSE');
+  add('Webhooks', sourceOrgId ? await tx.agentWebhook.count({ where: { ...entryRef, organizationId: sourceOrgId, deletedAt: null } }) : 0, 'REFUSE');
   add('Active web-fetch polls', sourceOrgId ? await tx.webFetchPollBinding.count({ where: { ...entryRef, organizationId: sourceOrgId, cancelledAt: null } }) : 0, 'REFUSE');
   add('MCP selections (reauthorized on read)', await tx.mcpSessionState.count({ where: { memoryId: id } }), 'CARRY');
   add('Git mirror binding', Number(memory.source !== null || memory.sourceTokenEncrypted !== null || memory.sourceTokenExpiresAt !== null || memory.readBranch !== null || memory.writeBranch !== null), 'REFUSE');
