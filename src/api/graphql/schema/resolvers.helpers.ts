@@ -2269,21 +2269,22 @@ export function safeCanonicalUrn(type: CanonicalUrnType, raw: string): string {
  */
 export async function requireMemoryWriteAccess(ctx: Context, memoryId: string): Promise<void> {
   // App-keyed callers: delegate to the class-aware MCP gate. The ADMIN/OWNER
-  // short-circuit stands (the documented app+admin short-circuit — App Keys
-  // carry no roles, so this only fires for a platform-admin JWT with an active
-  // App), EXCEPT for a spec-047 user-owned memory: strict ownership means even
-  // a platform admin gets no write, so we skip the bypass and let
-  // canWriteToMemory enforce owner-only (gemini review, #676). (The pre-existing
-  // personal/private app+admin bypass is deliberately left as-is here — it's
-  // load-bearing for agent session writes and out of scope for 2c-2a.)
+  // shortcut applies only to non-strict org memories. A platform-admin USER
+  // with an active App still cannot write another user's personal/private
+  // memory (#1492); ownerUserId is null on those org-anchored rows.
   if (ctx.appId) {
-    if (ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER')) {
-      const m = await ctx.db.memory.findUnique({
-        where: { id: memoryId },
-        select: { ownerUserId: true },
-      });
-      if (m?.ownerUserId == null) return;
-    }
+    const memory = await ctx.db.memory.findUnique({
+      where: { id: memoryId },
+      select: { ownerUserId: true, userId: true, class: true },
+    });
+    if (!memory) throw memoryWriteForbidden();
+    const strictOwner = memory.class === 'personal' || memory.class === 'private';
+    // App selection on a user credential does not remove direct ownership.
+    // A session or impersonation context cannot use this identity shortcut.
+    if (strictOwner && ctx.userId && !ctx.sessionId && !ctx.impersonation &&
+        memory.userId === ctx.userId) return;
+    if (!strictOwner && memory.ownerUserId === null &&
+        (ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER'))) return;
     if (await canWriteToMemory(ctx.db, ctx, memoryId)) return;
     throw memoryWriteForbidden();
   }

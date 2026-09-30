@@ -31,6 +31,15 @@ function appCtx(appId: string, overrides: Partial<Context> = {}): Context {
   return { db, appId, roles: [], organizationId: orgA.id, ...overrides };
 }
 
+// Exercise encrypted writes as the real session owner with an App selection.
+// App credentials carry no platform role; a fabricated ADMIN masked the
+// strict-owner gate in these tests before #1492.
+async function sessionOwnerCtx(appId: string, sessionId: string, active = true): Promise<Context> {
+  const session = await db.session.findUniqueOrThrow({ where: { id: sessionId }, select: { userId: true } });
+  if (!session.userId) throw new Error('Expected an identified session owner');
+  return appCtx(appId, { userId: session.userId, ...(active ? { sessionId } : {}) });
+}
+
 beforeEach(async () => {
   await cleanDb(db);
   sessionKeyCache.clear();
@@ -229,7 +238,7 @@ describe('createNode with encryption', () => {
       { agentId: agent.id, externalUserId: 'mm-1', dataKey: key },
       appCtx(secretApp.id),
     );
-    const sessionCtx = appCtx(secretApp.id, { sessionId: session.id, roles: ['ADMIN'] });
+    const sessionCtx = await sessionOwnerCtx(secretApp.id, session.id);
 
     const upserted = await resolvers.Mutation.createNode(
       {},
@@ -263,7 +272,7 @@ describe('createNode with encryption', () => {
       { agentId: agent.id, externalUserId: 'mm-1', dataKey: key },
       appCtx(secretApp.id),
     );
-    const sessionCtx = appCtx(secretApp.id, { sessionId: session.id, roles: ['ADMIN'] });
+    const sessionCtx = await sessionOwnerCtx(secretApp.id, session.id);
 
     const node = await resolvers.Mutation.createNode(
       {},
@@ -298,7 +307,7 @@ describe('createNode with encryption', () => {
       { agentId: agent.id, externalUserId: 'mm-1', dataKey: key },
       appCtx(secretApp.id),
     );
-    const sessionCtx = appCtx(secretApp.id, { sessionId: session.id, roles: ['ADMIN'] });
+    const sessionCtx = await sessionOwnerCtx(secretApp.id, session.id);
 
     const ABSTRACT_PLAINTEXT =
       'Paragraph-length summary that would leak ~2000 chars of content if stored plaintext.';
@@ -338,7 +347,7 @@ describe('createNode with encryption', () => {
     const session = await resolvers.Mutation.startAgentSession(
       {}, { agentId: agent.id, externalUserId: 'mm-locked-reaffirm', dataKey: key }, appCtx(secretApp.id),
     );
-    const sessionCtx = appCtx(secretApp.id, { sessionId: session.id, roles: ['ADMIN'] });
+    const sessionCtx = await sessionOwnerCtx(secretApp.id, session.id);
     const node = await resolvers.Mutation.createNode({}, {
       input: { memoryId: session.memoryId!, loc: 'locked-reaffirm', name: 'locked-reaffirm',
         abstract: 'Summary', content: 'Original body' },
@@ -391,7 +400,7 @@ describe('createNode with encryption', () => {
             content: 'should fail',
           },
         },
-        appCtx(secretApp.id, { roles: ['ADMIN'] }),
+        await sessionOwnerCtx(secretApp.id, session.id, false),
       ),
     ).rejects.toThrow(/SESSION_EXPIRED/);
   });
@@ -403,7 +412,7 @@ describe('createNode with encryption', () => {
       { agentId: agent.id, externalUserId: 'mm-1', dataKey: key },
       appCtx(secretApp.id),
     );
-    const sessionCtx = appCtx(secretApp.id, { sessionId: session.id, roles: ['ADMIN'] });
+    const sessionCtx = await sessionOwnerCtx(secretApp.id, session.id);
     const node = await resolvers.Mutation.createNode(
       {},
       { input: { memoryId: session.memoryId!, loc: 'profile', name: 'profile', data: { a: 1 } } },
@@ -416,7 +425,7 @@ describe('createNode with encryption', () => {
       resolvers.Mutation.updateNodeData(
         {},
         { nodeRef: node.id, data: { b: 2 } },
-        appCtx(secretApp.id, { roles: ['ADMIN'] }),
+        await sessionOwnerCtx(secretApp.id, session.id, false),
       ),
     ).rejects.toThrow(/SESSION_EXPIRED/);
   });
@@ -428,7 +437,7 @@ describe('createNode with encryption', () => {
       { agentId: agent.id, externalUserId: 'mm-1', dataKey: key },
       appCtx(secretApp.id),
     );
-    const sessionCtx = appCtx(secretApp.id, { sessionId: session.id, roles: ['ADMIN'] });
+    const sessionCtx = await sessionOwnerCtx(secretApp.id, session.id);
     const node = await resolvers.Mutation.createNode(
       {},
       { input: { memoryId: session.memoryId!, loc: 'profile', name: 'profile', properties: { a: 1 } } },
@@ -452,7 +461,7 @@ describe('createNode with encryption', () => {
       { agentId: agent.id, externalUserId: 'mm-1', dataKey: key },
       appCtx(secretApp.id),
     );
-    const sessionCtx = appCtx(secretApp.id, { sessionId: session.id, roles: ['ADMIN'] });
+    const sessionCtx = await sessionOwnerCtx(secretApp.id, session.id);
     const node = await resolvers.Mutation.createNode(
       {},
       { input: { memoryId: session.memoryId!, loc: 'profile', name: 'profile', properties: { a: 1 } } },
@@ -465,7 +474,7 @@ describe('createNode with encryption', () => {
       (resolvers.Mutation as any).updateNodeProperties(
         {},
         { nodeRef: node.id, properties: { b: 2 } },
-        appCtx(secretApp.id, { roles: ['ADMIN'] }),
+        await sessionOwnerCtx(secretApp.id, session.id, false),
       ),
     ).rejects.toThrow(/SESSION_EXPIRED/);
   });
@@ -483,7 +492,7 @@ describe('read path decryption', () => {
       { agentId: agent.id, externalUserId: 'mm-1', dataKey: key },
       appCtx(secretApp.id),
     );
-    const sessionCtx = appCtx(secretApp.id, { sessionId: session.id, roles: ['ADMIN'] });
+    const sessionCtx = await sessionOwnerCtx(secretApp.id, session.id);
     const written = await resolvers.Mutation.createNode(
       {},
       {
@@ -504,7 +513,7 @@ describe('read path decryption', () => {
       { agentId: agent.id, externalUserId: 'mm-1', dataKey: key },
       appCtx(secretApp.id),
     );
-    const sessionCtx = appCtx(secretApp.id, { sessionId: session.id, roles: ['ADMIN'] });
+    const sessionCtx = await sessionOwnerCtx(secretApp.id, session.id);
     const written = await resolvers.Mutation.createNode(
       {},
       {
@@ -539,7 +548,7 @@ describe('encryptMemory', () => {
       { agentId: agent.id, externalUserId: 'mm-1' },
       appCtx(plaintextApp.id),
     );
-    const sessionCtx = appCtx(plaintextApp.id, { sessionId: session.id, roles: ['ADMIN'] });
+    const sessionCtx = await sessionOwnerCtx(plaintextApp.id, session.id);
     await resolvers.Mutation.createNode(
       {},
       { input: { memoryId: session.memoryId!, loc: 'a', name: 'a', content: 'alpha' } },
@@ -609,7 +618,7 @@ describe('encryptMemory', () => {
     );
     const original = await resolvers.Mutation.createNode(
       {}, { input: { memoryId: first.memoryId!, loc: 'original', name: 'original', content: 'original secret' } },
-      appCtx(secretApp.id, { sessionId: first.id, roles: ['ADMIN'] }),
+      await sessionOwnerCtx(secretApp.id, first.id),
     );
     await db.memory.update({ where: { id: first.memoryId! }, data: { keyVerifier: null } });
     await resolvers.Mutation.endAgentSession({}, { sessionId: first.id }, appCtx(secretApp.id));
@@ -662,7 +671,7 @@ describe('encryptMemory', () => {
       { agentId: agent.id, externalUserId: 'urn-input-user' },
       appCtx(plaintextApp.id),
     );
-    const sessionCtx = appCtx(plaintextApp.id, { sessionId: session.id, roles: ['ADMIN'] });
+    const sessionCtx = await sessionOwnerCtx(plaintextApp.id, session.id);
     await resolvers.Mutation.createNode(
       {},
       { input: { memoryId: session.memoryId!, loc: 'x', name: 'x', content: 'gamma' } },
