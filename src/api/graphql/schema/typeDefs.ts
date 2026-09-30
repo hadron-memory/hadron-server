@@ -1783,7 +1783,7 @@ export const typeDefs = `#graphql
   type User {
     id: ID!
     handle: String
-    "User-layer action-policy link (cor:acl:040:02, #510) — constrains runs made on the user's behalf. Null = no restriction. Self-authored via updateMyPolicy."
+    "User-layer action-policy link (cor:acl:040:02, #510) — constrains runs made on the user's behalf. Null = no restriction, or hidden from viewers without personal-field access. Self-authored via updateMyPolicy."
     policy: JSON
     """
     Canonical \`hrn:user:<handle>\` URN (spec cor:urn:010:01). Computed from the
@@ -1806,6 +1806,7 @@ export const typeDefs = `#graphql
     googleId: String
     "Apple account subject id (#837). Same gate and rationale as googleId."
     appleId: String
+    "Account metadata, visible to self, platform admins, and co-members."
     identityProvider: String
     externalId: String
     externalAppId: String
@@ -1813,6 +1814,7 @@ export const typeDefs = `#graphql
     name: String
     email: String
     avatarUrl: String
+    "Platform roles; an empty list is returned to viewers without personal-field access."
     roles: [Role!]!
     maxReferrals: Int
     """

@@ -1695,6 +1695,23 @@ export const typeResolvers = {
     // Canonical hrn:user:<handle> URN (spec cor:urn:010:01) — lowercase, and
     // null for a handle-less or not-URN-legal (grandfathered) handle.
     urn: (u: { handle?: string | null }) => userUrn(u.handle),
+    // #1522: a readable relation (such as AppMember.user) can carry a User
+    // who is not readable through Query.user. Keep identity available, while
+    // checking the target User before resolving account and policy data.
+    policy: async (u: { id: string; policy?: unknown }, _: unknown, ctx: Context) =>
+      (await canSeeUserPersonalFields(ctx, u.id)) ? (u.policy ?? null) : null,
+    identityProvider: async (u: { id: string; identityProvider?: string | null }, _: unknown, ctx: Context) =>
+      (await canSeeUserPersonalFields(ctx, u.id)) ? (u.identityProvider ?? null) : null,
+    externalId: async (u: { id: string; externalId?: string | null }, _: unknown, ctx: Context) =>
+      (await canSeeUserPersonalFields(ctx, u.id)) ? (u.externalId ?? null) : null,
+    externalAppId: async (u: { id: string; externalAppId?: string | null }, _: unknown, ctx: Context) =>
+      (await canSeeUserPersonalFields(ctx, u.id)) ? (u.externalAppId ?? null) : null,
+    linkedAt: async (u: { id: string; linkedAt?: Date | null }, _: unknown, ctx: Context) =>
+      (await canSeeUserPersonalFields(ctx, u.id)) ? (u.linkedAt ?? null) : null,
+    roles: async (u: { id: string; roles?: string[] }, _: unknown, ctx: Context) =>
+      (await canSeeUserPersonalFields(ctx, u.id)) ? (u.roles ?? []) : [],
+    maxReferrals: async (u: { id: string; maxReferrals?: number | null }, _: unknown, ctx: Context) =>
+      (await canSeeUserPersonalFields(ctx, u.id)) ? (u.maxReferrals ?? null) : null,
     // #384: field-level visibility. name/email are PII — withheld (null)
     // from any viewer who isn't the user themselves, a platform admin, or a
     // co-member of one of the user's orgs. Applied here so EVERY surface that
