@@ -70,10 +70,12 @@ function mockDb() {
       create: vi.fn().mockImplementation(async ({ data }: { data: unknown }) => ({
         id: EDGE_ID,
         ...(data as Record<string, unknown>),
+        source: { id: SRC_ID, loc: 'l', memoryId: 'mem-1', ownerRepo: null },
       })),
       update: vi.fn().mockImplementation(async ({ where, data }: { where: { id: string }; data: unknown }) => ({
         id: where.id,
         ...(data as Record<string, unknown>),
+        source: { id: SRC_ID, loc: 'l', memoryId: 'mem-1', ownerRepo: null },
       })),
       // #542 Tier 2: resolveEdgeRef's PK path does a findFirst (deletedAt: null +
       // memory-liveness). Echo the requested id so update/delete resolve it.

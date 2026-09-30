@@ -87,6 +87,7 @@ import {
   type MoveNodeSubtreeResult,
 } from '../lib/nodeSubtreeMove.js';
 import { mirrorNodeMoveToGit } from '../integrations/github/mirrorNodeMove.js';
+import { mirrorEdgeSourceAfterCommit } from '../integrations/github/mirrorEdgeSource.js';
 import {
   oauthSurfaceRefusal,
   oauthSurfaceRefusalMessage,
@@ -822,6 +823,7 @@ export async function addEdge(args: {
   // hadron_update_node replaces, but that path already records its own write on
   // the node, so it is called only from hadron_create_edge.
   recordNodeWrite(db, sourceNode, auth);
+  await mirrorEdgeSourceAfterCommit(db, sourceNode, auth.clientId);
 
   const savedSourceUrn = await nodeUrn(sourceNode.loc, sourceNode.memoryId);
   const savedTargetUrn = await nodeUrn(target.loc, target.memoryId);
