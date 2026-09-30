@@ -39,7 +39,7 @@ import { GraphQLError } from 'graphql';
 import type { AiServiceConfig } from '../../generated/prisma/index.js';
 import type { Context } from '../../api/graphql/schema/resolvers.helpers.js';
 import { aiConfigOwnerOf, requireAiConfigOwnerAdmin } from '../../api/graphql/schema/resolvers.helpers.js';
-import { AiServiceConfigNotFoundError, validateProviderAndParams, type AiConfigOwnerType } from '../../lib/aiConfig.js';
+import { AiServiceConfigNotFoundError, validateParamRanges, validateProviderAndParams, type AiConfigOwnerType } from '../../lib/aiConfig.js';
 import {
   defaultEndpoint,
   effectiveApiStyle,
@@ -383,6 +383,9 @@ export async function testAiServiceConfig(
     refuseLegacyBaseUrl(override.params);
     validateProviderAndParams(provider, override.params);
   }
+  // #1417: an edit under test is judged as its save would be; saved params
+  // alone are not re-judged (a legacy row tests as it runs).
+  if (override.params !== undefined || override.provider != null) validateParamRanges(provider, params ?? null);
   // #1413: the probe's output cap — the effective params' maxTokens (saved,
   // or the edit under test) bounded by the probe's hard cap, defaulting to
   // the probe's own 16. Used by both the call and the platform-funded
