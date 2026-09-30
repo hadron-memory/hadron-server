@@ -182,6 +182,8 @@ interface ScannableCorpus {
    * falls through to one of these if IT has that loc, so it is not ours.
    */
   currentUrnHistorical: string[];
+  /** Historical MEMORY holders, including deleted ones, used only to translate NODE alias keys. */
+  historicalTranslators: Map<string, string[]>;
 }
 
 /**
@@ -219,6 +221,9 @@ async function loadScannableCorpus(ctx: Context, memoryRef: string): Promise<Sca
   const urns = [memory.urn, ...aliases.map((a) => a.urn)].map((u) => u.replace(/^(?:hrn|urn):mem(?:ory)?:/i, ''));
   const former = urns.filter((u) => u !== memory.urn);
   const shadowed = new Map<string, string[]>();
+  const historicalTranslators = new Map<string, string[]>();
+  const addTranslator = (urn: string, memoryId: string) =>
+    historicalTranslators.set(urn, [...new Set([...(historicalTranslators.get(urn) ?? []), memoryId])]);
   if (former.length) {
     const claim = (urn: string, memoryId: string) => shadowed.set(urn, [...new Set([...(shadowed.get(urn) ?? []), memoryId])]);
     // Current holders of a former URN.
@@ -235,12 +240,17 @@ async function loadScannableCorpus(ctx: Context, memoryRef: string): Promise<Sca
       where: { id: { in: [...new Set(historical.map((a) => a.entityId))] }, deletedAt: null },
       select: { id: true },
     })).map((m) => m.id));
-    for (const a of historical) if (live.has(a.entityId)) claim(a.urn.replace(/^(?:hrn|urn):mem(?:ory)?:/i, ''), a.entityId);
+    for (const a of historical) {
+      const urn = a.urn.replace(/^(?:hrn|urn):mem(?:ory)?:/i, '');
+      addTranslator(urn, a.entityId);
+      if (live.has(a.entityId)) claim(urn, a.entityId);
+    }
   }
   const priorHolders = await ctx.db.urnAlias.findMany({
     where: { entityType: 'MEMORY', urn: memory.urn, entityId: { not: id } },
     select: { entityId: true },
   });
+  for (const a of priorHolders) addTranslator(memory.urn, a.entityId);
   const currentUrnHistorical = priorHolders.length
     ? (await ctx.db.memory.findMany({
         where: { id: { in: [...new Set(priorHolders.map((a) => a.entityId))] }, deletedAt: null },
@@ -266,6 +276,7 @@ async function loadScannableCorpus(ctx: Context, memoryRef: string): Promise<Sca
   return {
     id, urn: memory.urn, pattern: corpusReferencePattern(urns), shadowed,
     currentUrnHistorical: await readable(currentUrnHistorical),
+    historicalTranslators,
   };
 }
 
@@ -283,38 +294,47 @@ async function referenceAcceptor(
   const { db } = ctx;
   const claimantsOf = (ref: { memoryUrn: string }): string[] =>
     ref.memoryUrn === corpus.urn ? corpus.currentUrnHistorical : (corpus.shadowed.get(ref.memoryUrn) ?? []);
-  const candidates = refs.filter((r) => claimantsOf(r).length > 0);
   const lookup = new Map<string, { memoryId: string; loc: string }>();
-  for (const ref of candidates) {
+  for (const ref of refs) {
     for (const memoryId of [
       ...claimantsOf(ref),
-      ...(ref.memoryUrn === corpus.urn ? [corpus.id] : []),
+      ...(corpus.historicalTranslators.get(ref.memoryUrn) ?? []),
+      corpus.id,
     ]) {
       lookup.set(`${memoryId}\u0000${ref.targetLoc}`, { memoryId, loc: ref.targetLoc });
     }
   }
-  const live = lookup.size ? await db.node.findMany({
-    where: { deletedAt: null, OR: [...lookup.values()] },
-    select: { memoryId: true, loc: true },
-  }) : [];
+  const live: Array<{ id: string; memoryId: string; loc: string }> = [];
+  const locations = [...lookup.values()];
+  for (let offset = 0; offset < locations.length; offset += SCAN_PAGE) {
+    live.push(...await db.node.findMany({
+      where: { deletedAt: null, memory: { deletedAt: null }, OR: locations.slice(offset, offset + SCAN_PAGE) },
+      select: { id: true, memoryId: true, loc: true },
+    }));
+  }
+  const liveByAddress = new Map(live.map((n) => [`${n.memoryId}\u0000${n.loc}`, n]));
   const taken = new Set(live.map((n) => `${n.memoryId}\u0000${n.loc}`));
   // A former claimant may have renamed its MEMORY before moving a node. The
   // NODE alias is then stored under that claimant's current URN, while this
   // corpus still cites the former URN. Match the shared resolver's translated
-  // lookup, without letting an unreadable claimant influence classification.
-  const claimantIds = [...new Set(candidates.flatMap((ref) => claimantsOf(ref)))];
+  // lookup; live targets are gated for readability after ambiguity detection.
+  const claimantIds = [...new Set(refs.flatMap((ref) => [
+    ...claimantsOf(ref), ...(corpus.historicalTranslators.get(ref.memoryUrn) ?? []),
+  ]))];
   const claimantUrns = new Map<string, string>();
   for (let offset = 0; offset < claimantIds.length; offset += SCAN_PAGE) {
     for (const memory of await db.memory.findMany({
-      where: { id: { in: claimantIds.slice(offset, offset + SCAN_PAGE) }, deletedAt: null },
+      where: { id: { in: claimantIds.slice(offset, offset + SCAN_PAGE) } },
       select: { id: true, urn: true },
     })) claimantUrns.set(memory.id, memory.urn);
   }
   const aliasKeysByAddress = new Map<string, string[]>();
+  const refByAddress = new Map<string, { memoryUrn: string; targetLoc: string }>();
   for (const ref of refs) {
     const address = `${ref.memoryUrn}:${ref.targetLoc}`;
+    refByAddress.set(address, ref);
     const keys = new Set([address]);
-    for (const id of claimantsOf(ref)) {
+    for (const id of [...claimantsOf(ref), ...(corpus.historicalTranslators.get(ref.memoryUrn) ?? [])]) {
       const currentUrn = claimantUrns.get(id);
       if (currentUrn) keys.add(`${currentUrn}:${ref.targetLoc}`);
     }
@@ -336,10 +356,9 @@ async function referenceAcceptor(
       select: { id: true, memoryId: true, loc: true },
     })) aliasTargets.set(target.id, { memoryId: target.memoryId, loc: target.loc });
   }
-  const visibleTargets = new Map<string, string | null>();
-  for (const [id, target] of aliasTargets) {
-    if (target.memoryId === corpus.id) visibleTargets.set(id, target.loc);
-    else if (await isMemoryReadableCached(ctx, target.memoryId)) visibleTargets.set(id, null);
+  const readableMemories = new Set([corpus.id]);
+  for (const memoryId of new Set([...live, ...aliasTargets.values()].map((target) => target.memoryId))) {
+    if (memoryId === corpus.id || await isMemoryReadableCached(ctx, memoryId)) readableMemories.add(memoryId);
   }
   const aliasesByUrn = new Map<string, Array<{ entityId: string }>>();
   for (const alias of aliases) {
@@ -352,13 +371,33 @@ async function referenceAcceptor(
   // candidates disagree; an ambiguous citation cannot be safely rewritten.
   const aliasResolved = new Map<string, string | null>();
   for (const [address, keys] of aliasKeysByAddress) {
-    const targets = new Map<string, string | null>();
+    const targets = new Map<string, { memoryId: string; loc: string }>();
+    const ref = refByAddress.get(address)!;
+    // resolveNodeRef combines live nodes in historical holders with moved-node
+    // aliases. A former corpus URN can still reach a live corpus node at the
+    // cited loc, and a second (even hidden) alias then makes it ambiguous.
+    for (const id of [
+      ...(corpus.historicalTranslators.get(ref.memoryUrn) ?? []),
+      ...(ref.memoryUrn === corpus.urn ? [] : [corpus.id]),
+    ]) {
+      const node = liveByAddress.get(`${id}\u0000${ref.targetLoc}`);
+      if (node) targets.set(node.id, { memoryId: node.memoryId, loc: node.loc });
+    }
     for (const key of keys) {
       for (const alias of aliasesByUrn.get(key) ?? []) {
-        if (visibleTargets.has(alias.entityId)) targets.set(alias.entityId, visibleTargets.get(alias.entityId)!);
+        const target = aliasTargets.get(alias.entityId);
+        if (target) targets.set(alias.entityId, target);
       }
     }
-    if (targets.size > 0) aliasResolved.set(address, targets.size === 1 ? targets.values().next().value! : null);
+    if (targets.size === 1) {
+      const target = targets.values().next().value!;
+      if (readableMemories.has(target.memoryId)) aliasResolved.set(address, target.memoryId === corpus.id ? target.loc : null);
+    } else if ([...targets.values()].some((target) => readableMemories.has(target.memoryId))) {
+      // The shared resolver exposes ambiguity when at least one candidate is
+      // readable, even if another candidate is hidden. Never select the one
+      // readable alias by dropping its hidden competitor.
+      aliasResolved.set(address, null);
+    }
   }
   return (ref) => {
     if (ref.memoryUrn === corpus.urn && taken.has(`${corpus.id}\u0000${ref.targetLoc}`)) return ref.targetLoc;
