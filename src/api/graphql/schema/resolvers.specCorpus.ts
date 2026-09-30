@@ -273,13 +273,13 @@ async function loadScannableCorpus(ctx: Context, memoryRef: string): Promise<Sca
  * Decide which scanned references really point into the corpus. A live node
  * at a competing address or a readable moved-node alias claims the citation;
  * the corpus's own live row wins for its current URN. Batch the lookups and
- * return a synchronous predicate for the scan.
+ * return the resolved corpus loc for the scan (or null for a foreign claim).
  */
 async function referenceAcceptor(
   ctx: Context,
   corpus: ScannableCorpus,
   refs: ReadonlyArray<{ memoryUrn: string; targetLoc: string }>,
-): Promise<(ref: { memoryUrn: string; targetLoc: string }) => boolean> {
+): Promise<(ref: { memoryUrn: string; targetLoc: string }) => string | null> {
   const { db } = ctx;
   const claimantsOf = (ref: { memoryUrn: string }): string[] =>
     ref.memoryUrn === corpus.urn ? corpus.currentUrnHistorical : (corpus.shadowed.get(ref.memoryUrn) ?? []);
@@ -311,27 +311,27 @@ async function referenceAcceptor(
     }));
   }
   const targetIds = [...new Set(aliases.map((alias) => alias.entityId))];
-  const aliasTargets = new Map<string, string>();
+  const aliasTargets = new Map<string, { memoryId: string; loc: string }>();
   for (let offset = 0; offset < targetIds.length; offset += SCAN_PAGE) {
     for (const target of await db.node.findMany({
       where: { id: { in: targetIds.slice(offset, offset + SCAN_PAGE) }, deletedAt: null, memory: { deletedAt: null } },
-      select: { id: true, memoryId: true },
-    })) aliasTargets.set(target.id, target.memoryId);
+      select: { id: true, memoryId: true, loc: true },
+    })) aliasTargets.set(target.id, { memoryId: target.memoryId, loc: target.loc });
   }
-  const aliasTaken = new Set<string>();
+  const aliasResolved = new Map<string, string | null>();
   for (const alias of aliases) {
-    const memoryId = aliasTargets.get(alias.entityId);
+    const target = aliasTargets.get(alias.entityId);
     // An alias whose live target moved INTO this corpus is ours, even when a
     // different memory now holds the old URN. Only readable foreign targets
     // compete for the citation.
-    if (memoryId && memoryId !== corpus.id && await isMemoryReadableCached(ctx, memoryId)) {
-      aliasTaken.add(alias.urn);
-    }
+    if (target?.memoryId === corpus.id) aliasResolved.set(alias.urn, target.loc);
+    else if (target && await isMemoryReadableCached(ctx, target.memoryId)) aliasResolved.set(alias.urn, null);
   }
   return (ref) => {
-    if (ref.memoryUrn === corpus.urn && taken.has(`${corpus.id}\u0000${ref.targetLoc}`)) return true;
-    return !claimantsOf(ref).some((m) => taken.has(`${m}\u0000${ref.targetLoc}`))
-      && !aliasTaken.has(`${ref.memoryUrn}:${ref.targetLoc}`);
+    if (ref.memoryUrn === corpus.urn && taken.has(`${corpus.id}\u0000${ref.targetLoc}`)) return ref.targetLoc;
+    if (claimantsOf(ref).some((m) => taken.has(`${m}\u0000${ref.targetLoc}`))) return null;
+    const address = `${ref.memoryUrn}:${ref.targetLoc}`;
+    return aliasResolved.has(address) ? aliasResolved.get(address)! : ref.targetLoc;
   };
 }
 
@@ -463,7 +463,7 @@ export const specCorpusQueries = {
     const nodes = await loadCorpusNodes(ctx.db, corpus.id);
     const scanned = scanReferences(nodes, corpus.pattern);
     const accept = await referenceAcceptor(ctx, corpus, scanned);
-    const text = scanned.filter((r) => r.targetLoc === loc && accept(r)).map(fromScan);
+    const text = scanned.filter((r) => accept(r) === loc).map(fromScan);
     const target = nodes.find((n) => n.loc === loc)
       ?? await ctx.db.node.findFirst({
         where: { memoryId: corpus.id, loc, deletedAt: { not: null } }, select: { id: true },
@@ -506,8 +506,9 @@ async function unresolvedReferencesIn(
     const scanned = scanReferences(nodes, corpus.pattern);
     const accept = await referenceAcceptor(ctx, corpus, scanned);
     for (const r of scanned) {
-      if (!accept(r)) continue;
-      const target = byLoc.get(r.targetLoc);
+      const resolvedLoc = accept(r);
+      if (resolvedLoc === null) continue;
+      const target = byLoc.get(resolvedLoc);
       if (!target) out.push({ ...fromScan(r), reason: 'MISSING' });
       else if (target.isPlaceholder) out.push({ ...fromScan(r), reason: 'PLACEHOLDER' });
     }
@@ -648,7 +649,7 @@ function planRewrite(
   pattern: RegExp,
   fromLoc: string,
   toLoc: string,
-  accept: (ref: { memoryUrn: string; targetLoc: string }) => boolean,
+  accept: (ref: { memoryUrn: string; targetLoc: string }) => string | null,
 ) {
   const patch: Partial<Record<ScannedField, string>> = {};
   let count = 0;
@@ -834,7 +835,7 @@ async function rewriteWithRetry(
   initial: ScannedNode,
   fromLoc: string,
   toLoc: string,
-  accept: (ref: { memoryUrn: string; targetLoc: string }) => boolean,
+  accept: (ref: { memoryUrn: string; targetLoc: string }) => string | null,
 ): Promise<{ fields: string[]; count: number; loc: string } | null> {
   let node: ScannedNode | undefined = initial;
   for (let attempt = 1; ; attempt++) {

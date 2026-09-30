@@ -301,6 +301,30 @@ describe('former URNs use live-address precedence (@codex P2 on #1453)', () => {
     expect(result.rewrites.find((row) => row.nodeId === other.id)).toMatchObject({ status: 'REWRITTEN', count: 1 });
     expect(await content('pas:020')).toContain(`hrn:node:${formerUrn}:pas:040`);
   });
+
+  it('uses the target loc when a former-URN alias reaches this corpus at a different loc', async () => {
+    const formerUrn = draft.urn;
+    await resolvers.Mutation.updateMemory(null, { id: draft.id, urn: 'specs-draft-renamed' } as never, as());
+    const squatter = await resolvers.Mutation.createMemory(null, { orgId: org.id, name: 'specs-draft' }, as());
+    expect(squatter.urn).toBe(formerUrn);
+    await db.urnAlias.create({ data: {
+      urn: `${formerUrn}:pas:500`, entityType: 'NODE', entityId: feature.id, reason: 'RENAME',
+    } });
+    await db.node.update({ where: { id: other.id }, data: {
+      content: `Alias: hrn:node:${formerUrn}:pas:500.`,
+    } });
+
+    const unresolved = await resolvers.Query.specUnresolvedReferences(null, { memoryRef: draft.id }, as());
+    expect(unresolved.map((ref) => ref.targetLoc)).not.toContain('pas:500');
+    const backlinks = await resolvers.Query.specBacklinks(null, { memoryRef: draft.id, loc: 'pas:010' }, as());
+    expect(backlinks.some((ref) => ref.kind === 'URN' && ref.sourceLoc === 'pas:020' && ref.targetLoc === 'pas:500')).toBe(true);
+
+    const result = await specCorpusRenumberMutations.renumberSpec(
+      null, { memoryRef: draft.id, fromLoc: 'pas:010', toLoc: 'pas:040' }, as(),
+    );
+    expect(result.rewrites.find((row) => row.nodeId === other.id)).toMatchObject({ status: 'REWRITTEN', count: 1 });
+    expect(await content('pas:020')).toContain(`hrn:node:${formerUrn}:pas:040`);
+  });
 });
 
 describe('renumber moves by address, atomically (@codex P2 on #1453)', () => {

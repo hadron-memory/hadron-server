@@ -122,15 +122,16 @@ export function rewriteCorpusReferences(
   pattern: RegExp,
   fromLoc: string,
   toLoc: string,
-  /** Whether a match really points into the corpus (see TextReferenceMatch.memoryUrn). Default: all do. */
-  accept: (ref: TextReferenceMatch) => boolean = () => true,
+  /** False for a foreign reference; a loc for an alias into the corpus at a different address. */
+  accept: (ref: TextReferenceMatch) => boolean | string | null = () => true,
 ): { text: string; count: number } {
   let count = 0;
   let out = '';
   let last = 0;
   for (const ref of findCorpusReferences(text, pattern)) {
-    if (!accept(ref)) continue;
-    const next = renumberedLoc(ref.targetLoc, fromLoc, toLoc);
+    const resolved = accept(ref);
+    if (resolved === false || resolved === null) continue;
+    const next = renumberedLoc(typeof resolved === 'string' ? resolved : ref.targetLoc, fromLoc, toLoc);
     if (next === null) continue;
     out += text.slice(last, ref.locStart) + next;
     last = ref.end;
