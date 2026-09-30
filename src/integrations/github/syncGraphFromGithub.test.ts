@@ -1981,6 +1981,44 @@ describe('#1330 — strict sub-roles through git sync', () => {
     expect(edges[0].loc).toContain('new');
   });
 
+  /**
+   * #1411 review (@codex P2): a later COPY of a skipped first claimant's
+   * frontmatter id must never take the id over. Which file the loader reaches
+   * first is filesystem order (unsorted readdir), so each test asserts the
+   * order-independent invariant: no edge aimed at the shared id lands on the
+   * copy's fresh row. (`a-…` before `b-…` on APFS is the order that exposed it.)
+   */
+  const edgesNotOnTheCopy = async (sharedId: string) => {
+    const edges = await db.edge.findMany({ where: { deletedAt: null }, select: { targetId: true } });
+    for (const e of edges) expect(e.targetId).toBe(sharedId);
+    return edges;
+  };
+
+  it('a refused first claimant that does NOT move keeps the id: a later copy cannot take its edges', async () => {
+    await rules({ role: 'doc', strictSubRoles: true });
+    const id = generateId();
+    await db.node.create({ data: { id, memoryId: dbGraphId, loc: 'a-first', name: 'A', ownerRepo: 'test/repo' } });
+    for (const d of ['a-first', 'b-copy', 'g']) mkdirSync(join(repoRoot(), d), { recursive: true });
+    writeNodeFiles(join(repoRoot(), 'a-first'), { id, name: 'A', role: 'doc.unknown' });
+    writeNodeFiles(join(repoRoot(), 'b-copy'), { id, name: 'Copy' });
+    writeNodeFiles(join(repoRoot(), 'g'), { name: 'G', nodes: [{ id, rel: 'uses' }] });
+    await sync();
+    expect(await edgesNotOnTheCopy(id)).toHaveLength(1);
+  });
+
+  it('a refused first claimant that MOVES: its edges wait, and a later copy cannot take them', async () => {
+    await rules({ role: 'doc', strictSubRoles: true });
+    const id = generateId();
+    await db.node.create({ data: { id, memoryId: dbGraphId, loc: 'old', name: 'A', ownerRepo: 'test/repo' } });
+    for (const d of ['a-new', 'b-copy', 'g']) mkdirSync(join(repoRoot(), d), { recursive: true });
+    writeNodeFiles(join(repoRoot(), 'a-new'), { id, name: 'A', role: 'doc.unknown' });
+    writeNodeFiles(join(repoRoot(), 'b-copy'), { id, name: 'Copy' });
+    writeNodeFiles(join(repoRoot(), 'g'), { name: 'G', nodes: [{ id, rel: 'uses' }] });
+    await sync();
+    await edgesNotOnTheCopy(id);
+    expect(await db.pendingEdge.count()).toBe(0);
+  });
+
   it('a REFUSED id-first file that does NOT move keeps its loc, so an edge aimed at it is written now', async () => {
     await rules({ role: 'doc', strictSubRoles: true });
     const id = generateId();

@@ -612,6 +612,11 @@ export const syncGraphFromGithub = async (
       // raw would point at a foreign memory's node (a foreign id), or park a
       // spurious PendingEdge (an unknown id).
       const unappliedFileIds = new Set<string>();
+      // The FIRST file carrying a frontmatter id decides where edges aimed at
+      // it land, applied or not: a later copy (minted a fresh row) must never
+      // take the id over because the first was skipped (#1411 review, @codex
+      // P2). An id is "settled" once it is mapped OR waiting.
+      const idSettled = (id: string): boolean => fileIdToRowId.has(id) || unappliedFileIds.has(id);
 
       for (const node of fsGraph.nodes) {
         const loc = node.loc!;
@@ -752,7 +757,7 @@ export const syncGraphFromGithub = async (
           // rulebook lock. A refused file that does not move keeps its loc,
           // so its incoming edges already resolve correctly.
           const incomingEdgesWait = (): void => {
-            if (node.id && !fileIdToRowId.has(node.id)) unappliedFileIds.add(node.id);
+            if (node.id && !idSettled(node.id)) unappliedFileIds.add(node.id);
           };
           // The SOURCE loc of an id-first move is checked too: a file whose
           // new path is free must not drag a node out from under a Channel
@@ -769,6 +774,9 @@ export const syncGraphFromGithub = async (
           }
           if (await refusesRole(byId)) {
             if (byId.loc !== loc) incomingEdgesWait();
+            // Not moving: the row keeps its loc and IS the target, so claim
+            // the id for it now, before any later copy can.
+            else if (node.id && !idSettled(node.id)) fileIdToRowId.set(node.id, byId.id);
             continue;
           }
           if (byId.loc !== loc) {
@@ -855,7 +863,7 @@ export const syncGraphFromGithub = async (
           // after the scan and must not be touched under the rulebook lock,
           // and a refused NEW file has no row: their incoming edges wait.
           const skipped = (target: { id: string } | null): true => {
-            if (node.id && !fileIdToRowId.has(node.id)) {
+            if (node.id && !idSettled(node.id)) {
               if (target) fileIdToRowId.set(node.id, target.id);
               else unappliedFileIds.add(node.id);
             }
@@ -900,7 +908,7 @@ export const syncGraphFromGithub = async (
         upsertedIds.push(rowId);
         writtenNodes.push({ id: rowId, loc, memoryId: graph.id });
         locToRowId.set(loc, rowId);
-        if (node.id && !fileIdToRowId.has(node.id)) fileIdToRowId.set(node.id, rowId);
+        if (node.id && !idSettled(node.id)) fileIdToRowId.set(node.id, rowId);
         pendingEmbeds.push({
           nodeId: rowId,
           plaintext: { content: node.content ?? null, abstract: node.abstract ?? null },
