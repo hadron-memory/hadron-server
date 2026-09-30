@@ -3304,6 +3304,17 @@ export const nodeMutations = {
           });
         }
         await requireMemoryWriteAccess(txCtx, edgeMem.memoryId);
+        // A Channel reuse may archive this edge after resolveEdgeRef's
+        // preflight. Serialize with that archive's edge UPDATE and refuse a
+        // tombstone instead of letting a stale update reoccupy its old loc.
+        const [current] = await tx.$queryRaw<Array<{ id: string; deleted_at: Date | null }>>`
+          SELECT id, deleted_at FROM edges WHERE id = ${resolvedEdgeId} FOR UPDATE
+        `;
+        if (!current || current.deleted_at) {
+          throw new GraphQLError(`Edge not found: "${edgeRef}"`, {
+            extensions: { code: 'EDGE_NOT_FOUND', ref: edgeRef },
+          });
+        }
         return tx.edge.update({
           where: { id: resolvedEdgeId },
           data: {
