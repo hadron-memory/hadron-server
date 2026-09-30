@@ -15,8 +15,8 @@
  *   rendered the page empty with no console error.
  *
  * Fix: deeply include AGENT_INCLUDE on App.agent in ORG_INCLUDE.
- * This test fails on the pre-fix resolver (errors with the non-null
- * violation) and passes after.
+ * The later nested-entity gate (#1522) masks a soft-deleted Agent to null,
+ * matching Query.agent, without breaking the organizations response.
  */
 
 import { describe, it, expect, beforeEach } from 'vitest';
@@ -50,7 +50,7 @@ beforeEach(async () => {
 });
 
 describe('myOrganizations — Apps with soft-deleted Agent (regression)', () => {
-  it('returns the org + apps + the app.agent payload (with memoryItems list) when the linked Agent is soft-deleted', async () => {
+  it('returns the org + apps while masking a soft-deleted linked Agent', async () => {
     // Step 1: create an Agent + memory + memory-item association.
     const memory = await db.memory.create({
       data: {
@@ -108,20 +108,14 @@ describe('myOrganizations — Apps with soft-deleted Agent (regression)', () => 
     // 023-app-shape: App.agent is no longer a Prisma scalar relation — it
     // resolves via the AppAgent join through the App.agent resolver. Call
     // the resolver to bridge from the eager Prisma payload to the GraphQL
-    // shape. The original regression (Agent.memoryItems non-null contract
-    // when the agent is soft-deleted) is still what we're guarding here.
+    // shape. A deleted Agent now resolves to null at the nullable App.agent
+    // field, so it cannot violate Agent.memoryItems' non-null contract.
     const linkedAgent = (await resolvers.App.agent(
       apps[0] as { id: string; appAgents?: unknown },
       {},
       ctx(user.id),
     )) as { id: string; memoryItems: unknown[] } | null;
-    expect(linkedAgent).not.toBeNull();
-    expect(linkedAgent!.id).toBe(agent.id);
-    expect(Array.isArray(linkedAgent!.memoryItems)).toBe(true);
-    // The memoryItem persists; the deletedAt filter on memoryItems
-    // (`memoryItems.where: { deletedAt: null, memory.deletedAt: null }`)
-    // doesn't drop rows when only the parent Agent is soft-deleted.
-    expect(linkedAgent!.memoryItems).toHaveLength(1);
+    expect(linkedAgent).toBeNull();
   });
 
   it('also returns memoryItems for an App whose Agent is alive — the eager include is the same code path', async () => {
