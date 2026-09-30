@@ -30,6 +30,7 @@ import { createTestableMcpServer } from './server.js';
 import type { AuthContext } from '../middleware/auth.js';
 import { generateId } from '../lib/id.js';
 import { deriveEdgeLoc } from '../lib/edgeLoc.js';
+import { lockLiveEdgeEndpoints } from '../lib/edgeEndpointLock.js';
 import { revisionStateHashRefreshMarker } from '../lib/nodeRevisionSnapshot.js';
 
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({
@@ -651,6 +652,168 @@ describe('hadron_move_node — collision policy (#185 F2)', () => {
     });
     expect(oldOccupant?.deletedAt).toBeInstanceOf(Date);
   });
+
+  it('rekeys the evicted target edge so a new edge at the freed loc belongs to the mover (#1466)', async () => {
+    const { moveTarget, moveSource, edgeTarget } = fx.nodes;
+    const oldLoc = deriveEdgeLoc(moveTarget.loc, 'cites', edgeTarget.loc);
+    const oldEdge = await db.edge.create({
+      data: {
+        id: generateId(), memoryId: fx.memory.id, sourceId: moveTarget.id,
+        targetId: edgeTarget.id, loc: oldLoc, name: 'cites',
+      },
+    });
+    const owner = await db.memory.findUniqueOrThrow({ where: { id: fx.memory.id } });
+    const foreignMemory = await resolvers.Mutation.createMemory(
+      {}, { orgId: owner.organizationId!, name: 'foreign-edge-source' },
+      { db, roles: ['ADMIN'], userId: fx.admin.id } as Context,
+    );
+    const foreignSource = await db.node.create({
+      data: {
+        id: generateId(), memoryId: foreignMemory.id, loc: 'foreign:source',
+        name: 'Foreign source', nodeType: 'info', tags: [],
+      },
+    });
+    const foreignEdge = await db.edge.create({
+      data: {
+        id: generateId(), memoryId: foreignMemory.id,
+        sourceId: foreignSource.id, targetId: moveTarget.id,
+        loc: deriveEdgeLoc(foreignSource.loc, 'points-to', moveTarget.loc),
+        name: 'points-to',
+      },
+    });
+    const srv = createTestableMcpServer(adminAuth());
+    const moved = await srv.callToolText('hadron_move_node', {
+      urn: `urn:node:${fx.memory.urn}:${moveSource.loc}`,
+      targetUrn: `urn:node:${fx.memory.urn}:${moveTarget.loc}`,
+      overwrite: true,
+    });
+    expect(moved).toMatch(/Moved/);
+
+    const archived = await db.node.findUniqueOrThrow({ where: { id: moveTarget.id } });
+    expect(archived.deletedAt).toBeInstanceOf(Date);
+    const archivedEdge = await db.edge.findUniqueOrThrow({ where: { id: oldEdge.id } });
+    expect(archivedEdge.sourceId).toBe(moveTarget.id);
+    expect(archivedEdge.loc).toBe(deriveEdgeLoc(archived.loc, 'cites', edgeTarget.loc));
+    // The incoming edge lives in another memory; this move has no authority
+    // to rewrite that memory's edge address.
+    expect((await db.edge.findUniqueOrThrow({ where: { id: foreignEdge.id } })).loc)
+      .toBe(foreignEdge.loc);
+
+    const saved = await srv.callToolText('hadron_create_edge', {
+      sourceUrn: moveSource.id, targetUrn: edgeTarget.id, name: 'cites',
+    });
+    expect(saved).toMatch(/Edge saved/);
+    const newEdge = await db.edge.findUniqueOrThrow({
+      where: { loc_memoryId: { loc: oldLoc, memoryId: fx.memory.id } },
+    });
+    expect(newEdge.id).not.toBe(oldEdge.id);
+    expect(newEdge.sourceId).toBe(moveSource.id);
+  });
+
+  it('frees the derived loc for an inline edge write after overwriting a tombstone (#1466)', async () => {
+    const { moveTombstone, moveSource, edgeTarget } = fx.nodes;
+    const edgeLoc = deriveEdgeLoc(moveTombstone.loc, 'cites', edgeTarget.loc);
+    const oldEdge = await db.edge.create({
+      data: {
+        id: generateId(), memoryId: fx.memory.id, sourceId: moveTombstone.id,
+        targetId: edgeTarget.id, loc: edgeLoc, name: 'cites',
+      },
+    });
+    const srv = createTestableMcpServer(adminAuth());
+    expect(await srv.callToolText('hadron_move_node', {
+      urn: `urn:node:${fx.memory.urn}:${moveSource.loc}`,
+      targetUrn: `urn:node:${fx.memory.urn}:${moveTombstone.loc}`,
+    })).toMatch(/Moved/);
+
+    expect(await srv.callToolText('hadron_update_node', {
+      urn: `urn:node:${fx.memory.urn}:${moveTombstone.loc}`,
+      edges: [{ targetUrn: edgeTarget.id, name: 'cites' }],
+    })).toMatch(/Node updated/);
+    const newEdge = await db.edge.findUniqueOrThrow({
+      where: { loc_memoryId: { loc: edgeLoc, memoryId: fx.memory.id } },
+    });
+    expect(newEdge.id).not.toBe(oldEdge.id);
+    expect(newEdge.sourceId).toBe(moveSource.id);
+    expect((await db.edge.findUniqueOrThrow({ where: { id: oldEdge.id } })).sourceId)
+      .toBe(moveTombstone.id);
+  });
+
+  it('waits for a validated edge writer before archiving its target loc (#1466)', async () => {
+    const { moveTarget, moveSource, edgeTarget } = fx.nodes;
+    const oldLoc = deriveEdgeLoc(moveTarget.loc, 'cites', edgeTarget.loc);
+    const oldEdgeId = generateId();
+    let releaseEdge!: () => void;
+    const edgeHeld = new Promise<void>((resolve) => { releaseEdge = resolve; });
+    let signalValidated!: () => void;
+    const validated = new Promise<void>((resolve) => { signalValidated = resolve; });
+    const edgeWrite = db.$transaction(async (tx) => {
+      const live = await lockLiveEdgeEndpoints(
+        tx,
+        { id: moveTarget.id, loc: moveTarget.loc, memoryId: fx.memory.id },
+        { id: edgeTarget.id, loc: edgeTarget.loc, memoryId: fx.memory.id },
+      );
+      expect(live.source?.id).toBe(moveTarget.id);
+      expect(live.target?.id).toBe(edgeTarget.id);
+      // The edge writer has authorized and validated the OLD address but has
+      // not inserted yet. A row lock cannot close this validate-to-insert gap;
+      // the move must wait on the memory key held by lockLiveEdgeEndpoints.
+      signalValidated();
+      await edgeHeld;
+      await tx.edge.create({
+        data: {
+          id: oldEdgeId, memoryId: fx.memory.id, sourceId: moveTarget.id,
+          targetId: edgeTarget.id, loc: oldLoc, name: 'cites',
+        },
+      });
+    }, { timeout: 20_000 });
+    await Promise.race([validated, edgeWrite]);
+
+    const srv = createTestableMcpServer(adminAuth());
+    let moveSettled = false;
+    const move = srv.callToolText('hadron_move_node', {
+      urn: `urn:node:${fx.memory.urn}:${moveSource.loc}`,
+      targetUrn: `urn:node:${fx.memory.urn}:${moveTarget.loc}`,
+      overwrite: true,
+    });
+    void move.then(() => { moveSettled = true; }, () => { moveSettled = true; });
+    let waitError: unknown;
+    try {
+      const deadline = Date.now() + 5_000;
+      for (;;) {
+        // With the key, the move waits here. Without it, the move finishes
+        // before the old writer inserts, which is the bug this test must kill.
+        if (moveSettled) break;
+        const [{ waiting }] = await db.$queryRaw<Array<{ waiting: bigint }>>`
+          SELECT count(*)::bigint AS waiting FROM pg_stat_activity
+          WHERE datname = current_database() AND pid <> pg_backend_pid()
+            AND wait_event_type = 'Lock'
+        `;
+        if (waiting > 0n) break;
+        if (Date.now() > deadline) throw new Error('move neither waited nor completed');
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+    } catch (error) {
+      waitError = error;
+    } finally {
+      releaseEdge();
+    }
+    await edgeWrite;
+    const moved = await move;
+    if (waitError) throw waitError;
+    expect(moved).toMatch(/Moved/);
+
+    const archived = await db.node.findUniqueOrThrow({ where: { id: moveTarget.id } });
+    expect((await db.edge.findUniqueOrThrow({ where: { id: oldEdgeId } })).loc)
+      .toBe(deriveEdgeLoc(archived.loc, 'cites', edgeTarget.loc));
+    expect(await srv.callToolText('hadron_create_edge', {
+      sourceUrn: moveSource.id, targetUrn: edgeTarget.id, name: 'cites',
+    })).toMatch(/Edge saved/);
+    const newEdge = await db.edge.findUniqueOrThrow({
+      where: { loc_memoryId: { loc: oldLoc, memoryId: fx.memory.id } },
+    });
+    expect(newEdge.id).not.toBe(oldEdgeId);
+    expect(newEdge.sourceId).toBe(moveSource.id);
+  }, 20_000);
 
   it('re-stamp uses the full id so two eviction collisions in the same ms-window don\'t crash', async () => {
     // PR-189 review caught that the old `id.slice(0, 8)` was timestamp-
