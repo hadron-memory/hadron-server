@@ -12,6 +12,7 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb, createDbOrgAndGraph } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
+import { requireMemoryWriteAccess } from './resolvers.helpers.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -247,6 +248,53 @@ describe('private/personal access is owner-only', () => {
     await expect(
       resolvers.Mutation.createNode(null, { input: { memoryId: mem.id, loc: 'micromentor.repo.adminedit', name: 'x' } } as any, asAdmin()),
     ).rejects.toThrow('MEMORY_NOT_FOUND');
+  });
+
+  it.each(['private', 'personal'] as const)(
+    'an App-selected platform admin cannot replace text in another user\'s %s memory',
+    async (memoryClass) => {
+      const mem = await resolvers.Mutation.createMemory(
+        null, { orgId: org.id, name: `${memoryClass}-replace`, memoryClass } as any, asOwner(),
+      );
+      const node = await db.node.create({
+        data: { id: generateId(), memoryId: mem.id, loc: 'sentinel', name: 'sentinel', content: 'cat sentinel' },
+      });
+      const app = await db.app.create({
+        data: { id: generateId(), organizationId: org.id, urn: `micromentor:${memoryClass}-app`, name: `${memoryClass}-app` },
+      });
+      const input = { oldText: 'cat', newText: 'dog', nodeIds: [node.id], fields: ['content'] };
+      await expect(resolvers.Mutation.searchReplaceInNodes(
+        {}, { input } as never, ctx({ userId: admin.id, roles: ['OWNER'], appId: app.id }),
+      )).rejects.toThrow();
+      expect((await db.node.findUniqueOrThrow({ where: { id: node.id } })).content).toBe('cat sentinel');
+
+      const result = await resolvers.Mutation.searchReplaceInNodes(
+        {}, { input } as never, asOwner(),
+      );
+      expect(result.nodesChanged).toBe(1);
+      expect((await db.node.findUniqueOrThrow({ where: { id: node.id } })).content).toBe('dog sentinel');
+    },
+  );
+
+  it.each(['private', 'personal'] as const)('an App selection preserves the %s owner, not a pure App key', async (memoryClass) => {
+    const mem = await resolvers.Mutation.createMemory(
+      null, { orgId: org.id, name: `${memoryClass}-selected`, memoryClass } as any, asOwner(),
+    );
+    const app = await db.app.create({
+      data: { id: generateId(), organizationId: org.id, urn: `micromentor:${memoryClass}-selected-app`, name: 'selected-app' },
+    });
+    const agent = await db.agent.create({
+      data: { id: generateId(), organizationId: org.id, urn: `micromentor:${memoryClass}-selected-agent`,
+        name: 'selected-agent', type: 'CHATBOT', surfaces: ['api'] },
+    });
+    await db.memory.update({ where: { id: mem.id }, data: { appId: app.id, userMemoryOfAgentId: agent.id } });
+    // No AgentSubscription exists. Direct ownership needs none.
+    await expect(requireMemoryWriteAccess(ctx({ appId: app.id, userId: owner.id, roles: ['READER'] }), mem.id))
+      .resolves.toBeUndefined();
+    await expect(requireMemoryWriteAccess(ctx({ appId: app.id }), mem.id))
+      .rejects.toThrow('Forbidden');
+    await expect(requireMemoryWriteAccess(ctx({ appId: app.id, userId: admin.id, roles: ['OWNER'] }), mem.id))
+      .rejects.toThrow('Forbidden');
   });
 });
 
