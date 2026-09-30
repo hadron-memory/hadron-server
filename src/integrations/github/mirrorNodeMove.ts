@@ -186,7 +186,7 @@ function toNodeForGit(
     alias: string | null; description: string | null; abstract: string | null;
     abstractOriginHash: string | null; contentHash: string | null; content: string | null;
     tags: string[] | string; seq: number | null; data: unknown; properties: unknown;
-    role?: string | null; isRunnable?: boolean | null;
+    role?: string | null; isRunnable?: boolean | null; isPlaceholder?: boolean;
     outgoingEdges?: NodeForGit['outgoingEdges'];
   },
 ): NodeForGit {
@@ -210,6 +210,7 @@ function toNodeForGit(
     // its repo is not rebuilt ungoverned.
     role: row.role ?? null,
     isRunnable: row.isRunnable ?? null,
+    isPlaceholder: row.isPlaceholder ?? false,
     outgoingEdges: row.outgoingEdges ?? [],
   };
 }

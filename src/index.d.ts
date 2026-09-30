@@ -18,6 +18,7 @@ export interface Node {
   tags: string[];
   ownerRepo: string | null;
   isRunnable: boolean | null;
+  isPlaceholder: boolean;
   objectType: string | null;
   createdAt: string;
   updatedAt: string;

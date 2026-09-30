@@ -37,6 +37,8 @@ export interface FrontmatterNodeFields {
    */
   role?: string | null;
   isRunnable?: boolean | null;
+  /** Server-set reserved-citation state; false is the ordinary-node default. */
+  isPlaceholder?: boolean;
 }
 
 /**
@@ -77,7 +79,8 @@ export interface EdgeForGit {
  *
  * **Round-trip invariant — the load-bearing rule.** Every field the importer
  * (`loadNodeFromFs` → `syncGraphFromGithub`) reads back MUST be emitted here
- * when set: `abstract`, `abstractOriginHash`, `contentHash`, and `type`
+ * when set: `abstract`, `abstractOriginHash`, `contentHash`, `type`, and the
+ * server-set `placeholder` marker
  * (consumed as `isLink: type === 'link'`). The importer upserts each as
  * `field ?? null`, so a field missing from the exported frontmatter is
  * actively NULLED on the next sync — i.e. omitting `abstract` here silently
@@ -136,6 +139,9 @@ export function buildNodeFrontmatter(
   // mirrored (measured), so no file on disk gains a key today.
   if (node.role != null) frontmatter.role = node.role;
   if (node.isRunnable != null) frontmatter.runnable = node.isRunnable;
+  // #1477 — only the positive server-owned reservation needs an on-disk key.
+  // Older mirrors with no key leave a stored placeholder alone on re-sync.
+  if (node.isPlaceholder === true) frontmatter.placeholder = true;
   // Node-level JSON — not importer-consumed yet, but part of a faithful mirror.
   if (node.data != null) frontmatter.data = node.data;
   if (node.properties != null) frontmatter.properties = node.properties;

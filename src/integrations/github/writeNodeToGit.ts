@@ -49,6 +49,8 @@ export interface NodeForGit {
    */
   role: string | null;
   isRunnable: boolean | null;
+  /** Required so every incremental producer decides the server-set marker. */
+  isPlaceholder: boolean;
   outgoingEdges: Array<{
     target: { id: string; loc?: string | null };
     name: string | null;
@@ -106,6 +108,7 @@ export function writeNodeFile(localPath: string, node: NodeForGit): void {
     // through the path it is written by most often.
     role: node.role,
     isRunnable: node.isRunnable,
+    isPlaceholder: node.isPlaceholder,
   }, node.outgoingEdges);
   preserveUnmanagedFrontmatter(frontmatter, mdPath);
 

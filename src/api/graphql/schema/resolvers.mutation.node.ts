@@ -1521,6 +1521,7 @@ export async function writeNodeCore(
       // When the caller owns the transaction, delay every effect until its
       // commit succeeds. The callback uses the pooled client, never the tx.
       const afterCommit = () => {
+        const pooledDb = opts?.transaction?.pooledDb ?? ctx.db;
         void publishNodeWritten({
           nodeId: finalNode.id,
           memoryId: input.memoryId,
@@ -1528,33 +1529,43 @@ export async function writeNodeCore(
           clientId: ctx.clientId,
         });
         if (memEncInfo.isEncrypted) {
-          writeNodeToGit({
-            id: finalNode.id,
-            loc: finalNode.loc,
-            name: finalNode.name,
-            nodeType: finalNode.nodeType,
-            alias: finalNode.alias,
-            description: finalNode.description,
-            abstract: finalNode.abstract,
-            abstractOriginHash: finalNode.abstractOriginHash,
-            contentHash: finalNode.contentHash,
-            content: finalNode.content,
-            tags: deserializeTags(finalNode.tags) as string[],
-            seq: finalNode.seq,
-            data: finalNode.data,
-            properties: finalNode.properties,
-            // #1218 — the mirror carries the governed signals.
-            role: finalNode.role ?? null,
-            isRunnable: finalNode.isRunnable ?? null,
-            outgoingEdges: finalNode.outgoingEdges ?? [],
-          }, input.ownerRepo ?? '', ctx.clientId, input.memoryId).catch((err) => {
+          // reserveSpecCitation marks the new row AFTER writeNodeCore returns,
+          // in its enclosing transaction. The direct encrypted mirror path is
+          // the only exporter for that memory, so read the committed marker
+          // rather than serializing finalNode's pre-reservation false value.
+          void (async () => {
+            const committed = await pooledDb.node.findUnique({
+              where: { id: finalNode.id }, select: { isPlaceholder: true },
+            });
+            if (!committed) return;
+            await writeNodeToGit({
+              id: finalNode.id,
+              loc: finalNode.loc,
+              name: finalNode.name,
+              nodeType: finalNode.nodeType,
+              alias: finalNode.alias,
+              description: finalNode.description,
+              abstract: finalNode.abstract,
+              abstractOriginHash: finalNode.abstractOriginHash,
+              contentHash: finalNode.contentHash,
+              content: finalNode.content,
+              tags: deserializeTags(finalNode.tags) as string[],
+              seq: finalNode.seq,
+              data: finalNode.data,
+              properties: finalNode.properties,
+              // #1218 — the mirror carries the governed signals.
+              role: finalNode.role ?? null,
+              isRunnable: finalNode.isRunnable ?? null,
+              isPlaceholder: committed.isPlaceholder,
+              outgoingEdges: finalNode.outgoingEdges ?? [],
+            }, input.ownerRepo ?? '', ctx.clientId, input.memoryId);
+          })().catch((err) => {
             console.error('[writeNodeCore] git write error:', err);
           });
         }
 
         // 033 — (re-)embed on write. finalNode is decrypted (plaintext) here,
         // so the prompt-drain embeds correctly on encrypted memories (FR-027).
-        const pooledDb = opts?.transaction?.pooledDb ?? ctx.db;
         void enqueueNodeEmbedding(pooledDb, {
           nodeId: finalNode.id,
           memoryId: input.memoryId,
@@ -2754,6 +2765,7 @@ export const nodeMutations = {
                 // #1218 — the mirror carries the governed signals.
                 role: fresh.role ?? null,
                 isRunnable: fresh.isRunnable ?? null,
+                isPlaceholder: fresh.isPlaceholder,
                 outgoingEdges: fresh.outgoingEdges ?? [],
               },
               p.ownerRepo,
@@ -3903,6 +3915,7 @@ export const nodeMutations = {
             // #1218 — the mirror carries the governed signals.
             role: finalNode.role ?? null,
             isRunnable: finalNode.isRunnable ?? null,
+            isPlaceholder: finalNode.isPlaceholder,
             outgoingEdges: finalNode.outgoingEdges ?? [],
           },
           (finalNode as { ownerRepo?: string | null }).ownerRepo ?? '',
