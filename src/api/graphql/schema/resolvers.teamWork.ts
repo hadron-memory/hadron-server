@@ -56,6 +56,7 @@ import {
   type Context,
   isAppParticipant,
   requireOwnerOrOrgRole,
+  requireMemoryManageAccess,
   requireSessionWriteAccess,
   clampListTake,
   resolveAppTeamSpaceMemoryIds,
@@ -663,12 +664,12 @@ export const teamWorkMutations = {
     const root = (await locateWorklogRoot(ctx, appId)) ?? (await bootstrapWorklog(ctx, app));
     const memory = await ctx.db.memory.findUniqueOrThrow({
       where: { id: root.memoryId },
-      select: { id: true, organizationId: true, ownerUserId: true },
+      select: { id: true, class: true, userId: true, organizationId: true, ownerUserId: true },
     });
     // Re-asked on the memory itself: it is the subject of the schema edit, and
     // this is the exact bar updateMemory applies (kept so the two cannot drift
     // if a memory's owner ever diverges from its App's).
-    await requireOwnerOrOrgRole(ctx, memory, 'ADMIN');
+    await requireMemoryManageAccess(ctx, memory);
     const changed = await convergeWorklogSchema(ctx, memory.id);
     return { memoryId: memory.id, collections: [WORKLOG_OBJECT_TYPE], changed };
   },

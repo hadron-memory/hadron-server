@@ -755,6 +755,10 @@ model Memory {
   /// dedicated Memory column rather than MemoryConfig so config-template apply
   /// (which copies NodeRoleRule columns only) can never carry it.
   corpusDraft          Boolean           @default(false) @map("corpus_draft")
+  /// #1448 — when this spec corpus was minted (draft → minted, once, one-way),
+  /// and by whom. Null for a corpus that was never a draft.
+  corpusMintedAt       DateTime?         @map("corpus_minted_at")
+  corpusMintedBy       String?           @map("corpus_minted_by")
   /// Classification tags for search and filtering.
   tags                 String[]
   /// License identifier (e.g. "MIT", "CC-BY-4.0", "proprietary").

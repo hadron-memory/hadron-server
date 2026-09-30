@@ -51,7 +51,7 @@ import {
   refuseLegacyBaseUrl,
   type AiApiStyle,
 } from '../../lib/aiEndpoint.js';
-import { assertModelBuildable, generateText, LlmInvocationError, type LlmRequest, type LlmResult } from '../../lib/llm/index.js';
+import { assertModelBuildable, generateText, LlmInvocationError, type KnobReport, type LlmRequest, type LlmResult } from '../../lib/llm/index.js';
 import { recordLlmUsage } from '../../lib/metering/index.js';
 import { decryptToken, encryptToken } from '../../lib/tokenCrypto.js';
 import { defaultQuotaLimit, reserveQuota, settleReservation } from '../../jobs/appRuns.js';
@@ -94,6 +94,13 @@ export interface AiConfigTestResult {
   latencyMs: number;
   reply: string | null;
   error: { code: string; message: string; transient: boolean } | null;
+  /**
+   * #1417: what each provider knob in the effective params did on the call.
+   * Additive: `used.params` still says only whether those params were the
+   * saved ones or the override. Empty unless the call completed: a failed
+   * call's adapter warnings are unknown, so its knobs cannot be reported truthfully.
+   */
+  knobs: KnobReport[];
 }
 
 /** The fixed probe: a one-word answer, so a test costs a few dozen tokens. */
@@ -426,6 +433,7 @@ export async function testAiServiceConfig(
     endpoint: probeTarget(tested, null, process.env),
     apiStyle: effectiveApiStyle(tested),
     used,
+    knobs: [] as KnobReport[],
   };
   if (keySource === 'NONE') {
     return {
@@ -596,6 +604,8 @@ export async function testAiServiceConfig(
     ok: out != null,
     latencyMs,
     reply: out ? scrub(out.text, secrets).slice(0, 200) : null,
+    // Only a completed call knows the adapter's warnings, so only it reports.
+    knobs: out?.knobs ?? [],
     error,
   };
 }

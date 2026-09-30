@@ -18,6 +18,7 @@ import { join, dirname } from 'path';
 import { GRAPHS_PATH } from '../../config.js';
 import { loadGraphFromFs } from '../localFs/loadGraphFromFs.js';
 import { deriveEdgeLoc } from '../../lib/edgeLoc.js';
+import { validateEdgeCondition } from '../../lib/edge-conditions/validator.js';
 import { countCrossMemoryEdgesForNodeDelete } from '../../lib/crossMemoryEdgeDelete.js';
 import { db } from '../db/client.js';
 import { serializeTags } from '../db/provider.js';
@@ -1058,7 +1059,13 @@ export const syncGraphFromGithub = async (
           // memory (= graph.id here; the source came from this repo). Derive
           // it deterministically so re-syncs are idempotent.
           const edgeLoc = deriveEdgeLoc(edge.sourceLoc, edge.name, targetExists.loc);
-          await tx.edge.upsert({
+          const edgeCondition = edge.condition ?? null;
+          const edgePriority = edge.priority ?? 0;
+          const conditionValidation = validateEdgeCondition(edgeCondition);
+          if (!conditionValidation.ok) {
+            throw new Error(`Git sync edge loc "${edgeLoc}" has an invalid condition: ${conditionValidation.error.message}`);
+          }
+          const savedEdge = await tx.edge.upsert({
             where: { loc_memoryId: { loc: edgeLoc, memoryId: graph.id } },
             create: {
               id: generateId(),
@@ -1069,9 +1076,26 @@ export const syncGraphFromGithub = async (
               name: edge.name,
               description: edge.description ?? null,
               isRunnable: edge.isRunnable ?? null,
+              ...(edgeCondition !== null ? { condition: edgeCondition as Prisma.InputJsonValue } : {}),
+              priority: edgePriority,
             },
             update: {},
           });
+          // A loc is an edge's address, not proof that this repo's relationship
+          // was saved. An unrelated edge may already own the same derived loc;
+          // update:{} then returns that occupant without changing it. Refuse
+          // inside the transaction so earlier node/edge writes roll back too.
+          // Existing metadata remains untouched, as it did before this guard:
+          // API edits are not mirrored to Git, and the exporter omits some
+          // metadata (including data and empty descriptions).
+          if (
+            savedEdge.deletedAt !== null ||
+            savedEdge.sourceId !== edgeSourceId ||
+            savedEdge.targetId !== edgeTargetId ||
+            savedEdge.name !== edge.name
+          ) {
+            throw new Error(`Git sync edge loc "${edgeLoc}" is already occupied by a different edge.`);
+          }
           await tx.pendingEdge.deleteMany({
             where: { sourceId: edgeSourceId, targetId: edgeTargetId },
           });

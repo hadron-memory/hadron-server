@@ -85,6 +85,20 @@ export class SubtreeMoveCollisionError extends Error {
 }
 
 /**
+ * #1449 (@codex P1, PR #1453): the caller required a DRAFT source corpus (a
+ * renumber: draft-only, because a minted corpus's citations are permanent),
+ * and the source memory is not one when read under this move's own Memory
+ * lock. A mint that commits between the caller's check and this lock is the
+ * case: the move must refuse, not relocate citations in a minted corpus.
+ */
+export class SubtreeMoveSourceNotDraftError extends Error {
+  constructor(public readonly memoryId: string) {
+    super('The corpus is no longer a draft (it was minted meanwhile): its citations are permanent, so nothing was moved.');
+    this.name = 'SubtreeMoveSourceNotDraftError';
+  }
+}
+
+/**
  * #1450 (@codex P1, PR #1452): the move would carry a PLACEHOLDER spec (a
  * reserved citation with no spec written) into a memory that is not a draft
  * corpus. Placeholders exist only in draft corpora, where minting refuses
@@ -233,6 +247,8 @@ export async function moveNodeSubtree(
      * opt-in `renameToLeaf` argument, and GraphQL `moveNode` still never sets it.
      */
     renameSourceLeaf?: boolean;
+    /** Refuse (SubtreeMoveSourceNotDraftError) unless the source memory is a draft corpus under this move's lock. */
+    requireDraftSource?: boolean;
   },
 ): Promise<MoveNodeSubtreeResult> {
   const { source, destLoc, editor, renameSourceLeaf } = opts;
@@ -326,6 +342,12 @@ export async function moveNodeSubtree(
   });
   const blocker = occupants.find((o) => !movedIds.has(o.id));
   if (blocker) throw new SubtreeMoveCollisionError(blocker.loc, destMemoryId);
+
+  // #1449 — a draft-only caller (renumber) re-decides draft state HERE, under
+  // the lock, before anything moves (@codex P1, PR #1453).
+  if (opts.requireDraftSource && !isDraftCorpus({ corpusDraft: draftCorpus.get(srcMemoryId)! })) {
+    throw new SubtreeMoveSourceNotDraftError(srcMemoryId);
+  }
 
   // #1450 — placeholders stay inside draft corpora (see the error's doc). The
   // destination's flag was read under this move's Memory lock above.

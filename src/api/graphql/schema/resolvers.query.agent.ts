@@ -11,6 +11,7 @@ import {
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { AgentNotFoundError } from '../../../lib/entityRef/errors.js';
+import { isAgentInstalled } from '../../../lib/appAgent.js';
 import {
   type Context,
   aiConfigOwnerOf,
@@ -293,32 +294,58 @@ export const agentQueries = {
       ctx: Context,
     ) => {
       try {
-        // Resolve refs (007 ID-or-URN) and compute the effective org for
-        // the auth gate — the same org the walk itself will consult.
+        // Resolve refs (007 ID-or-URN). The named App has its own auth gate;
+        // an unrelated Agent's org cannot authorize its decrypted key.
         let resolvedAppId: string | null = null;
         let resolvedAgentId: string | null = null;
         let effectiveOrgId: string | null = null;
+        let userOwnedAgent = false;
+        let personalAgentOwnerId: string | null = null;
+        let appOwnerUserId: string | null = null;
+        let agentOwner: { organizationId: string | null; ownerUserId: string | null } | null = null;
         if (appRef) {
           const { id } = await resolveAppRef(ctx.db, appRef);
           resolvedAppId = id;
           const app = await ctx.db.app.findUniqueOrThrow({ where: { id } });
           effectiveOrgId = app.organizationId;
+          appOwnerUserId = app.ownerUserId;
+          // The same owner-aware gate protects appAIConfig's decrypted key.
+          await requireOwnerOrOrgRole(ctx, app, 'ADMIN');
         }
         if (agentRef) {
           const { id } = await resolveAgentRef(ctx.db, agentRef);
           resolvedAgentId = id;
+          const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id } });
+          agentOwner = agent;
+          userOwnedAgent = agent.ownerUserId !== null;
+          personalAgentOwnerId = agent.ownerUserId;
+          if (userOwnedAgent) {
+            // A personal Agent is strictly owner-only, even for platform
+            // admins and impersonated sessions (spec 047).
+            await requireOwnerOrOrgRole(ctx, agent, 'ADMIN');
+          }
           if (!effectiveOrgId) {
-            const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id } });
             effectiveOrgId = agent.organizationId;
           }
+        }
+        if (resolvedAppId && resolvedAgentId && !(await isAgentInstalled(ctx.db, resolvedAppId, resolvedAgentId))) {
+          throw new Error('Forbidden');
+        }
+        // A user-owned App's config is eligible only when it belongs to the
+        // same owner as the named personal Agent. Otherwise naming another
+        // user's App would turn the Agent-owner gate into a cross-user decrypt.
+        if (userOwnedAgent && resolvedAppId && !effectiveOrgId && appOwnerUserId !== personalAgentOwnerId) {
+          throw new Error('Forbidden');
         }
         // Privileged surface (decrypted key): org ADMIN of the effective
         // org — same gate as the legacy agentAIConfig/appAIConfig queries
         // this supersedes. Without app/agent context, platform admin only.
-        if (effectiveOrgId) {
-          await requireOrgRole(ctx, effectiveOrgId, 'ADMIN');
-        } else if (!isPlatformAdmin(ctx)) {
-          throw new Error('Forbidden');
+        if (!resolvedAppId) {
+          if (effectiveOrgId) {
+            await requireOrgRole(ctx, effectiveOrgId, 'ADMIN');
+          } else if (!userOwnedAgent && !isPlatformAdmin(ctx)) {
+            throw new Error('Forbidden');
+          }
         }
         const resolved = await resolveAiConfigWithFallback(ctx.db, name ?? null, {
           appId: resolvedAppId,
@@ -326,6 +353,23 @@ export const agentQueries = {
           organizationId: effectiveOrgId,
         });
         const { config, ownerType } = resolved;
+        if (appOwnerUserId !== null) {
+          // The shared walk can derive an installed Agent's org even when the
+          // App is user-owned. The App's owner may decrypt their own App row,
+          // but an outer org or Agent row still needs its own owner gate.
+          if (ownerType === 'ORGANIZATION') {
+            await requireOrgRole(ctx, config.organizationId!, 'ADMIN');
+          } else if (ownerType === 'AGENT' && agentOwner) {
+            await requireOwnerOrOrgRole(ctx, agentOwner, 'ADMIN');
+          } else if (ownerType === 'HADRON_SERVER') {
+            throw new NoAiConfigAvailableError(name ?? DEFAULT_AI_CONFIG_NAME, 'this App');
+          }
+        }
+        if (userOwnedAgent && !effectiveOrgId && ownerType === 'HADRON_SERVER') {
+          // A personal Agent may use its own config or one on the user-owned
+          // App it runs through. Neither context may reach the platform key.
+          throw new NoAiConfigAvailableError(name ?? DEFAULT_AI_CONFIG_NAME, 'this Agent');
+        }
         if (!config.apiKeyEncrypted) {
           // Resolvable but unusable: a config without a key cannot back an
           // LLM call (spec 036 edge case — name the config + level, never
@@ -408,4 +452,3 @@ export const agentQueries = {
     },
 
 };
-

@@ -1,0 +1,19 @@
+{
+  "about": "Shared cases for the four mint-blocking spec lint rules (#1448, ruling (a) in team chat #4086). The server's src/lib/specMint.ts and hadron-cli's spec lint should both satisfy every case, so the two copies cannot drift. `expect` lists the rule ids a node produces, in order.",
+  "cases": [
+    { "name": "clean tagged spec", "node": { "nodeType": "info", "tags": ["spec"], "role": null, "abstract": "A.", "content": "Body." }, "expect": [] },
+    { "name": "untagged spec.rule role passes the marker", "node": { "nodeType": "info", "tags": [], "role": "spec.rule", "abstract": null, "content": "Body." }, "expect": [] },
+    { "name": "bare spec role passes the marker", "node": { "nodeType": "info", "tags": [], "role": "spec", "abstract": null, "content": null }, "expect": [] },
+    { "name": "a role that only starts with spec is not the family", "node": { "nodeType": "info", "tags": [], "role": "special", "abstract": null, "content": null }, "expect": ["tag-spec"] },
+    { "name": "no marker at all", "node": { "nodeType": "info", "tags": ["other"], "role": null, "abstract": null, "content": null }, "expect": ["tag-spec"] },
+    { "name": "wrong nodeType", "node": { "nodeType": "data", "tags": ["spec"], "role": null, "abstract": null, "content": null }, "expect": ["nodetype-info"] },
+    { "name": "missing nodeType", "node": { "nodeType": null, "tags": ["spec"], "role": null, "abstract": null, "content": null }, "expect": ["nodetype-info"] },
+    { "name": "marker leaked into the abstract", "node": { "nodeType": "info", "tags": ["spec"], "role": null, "abstract": "Summary </abstract><content> body", "content": "Body." }, "expect": ["serialization-leak"] },
+    { "name": "marker inside a fenced block is documentation", "node": { "nodeType": "info", "tags": ["spec"], "role": null, "abstract": null, "content": "Text\n```\n<invoke name=\"x\">\n```\nMore." }, "expect": [] },
+    { "name": "a CRLF-authored fence still closes: its marker is documentation", "node": { "nodeType": "info", "tags": ["spec"], "role": null, "abstract": null, "content": "Text\r\n```\r\n<invoke name=\"x\">\r\n```\r\nMore." }, "expect": [] },
+    { "name": "an unclosed fence is restored and scanned", "node": { "nodeType": "info", "tags": ["spec"], "role": null, "abstract": null, "content": "Text\n```\n<invoke name=\"x\">" }, "expect": ["serialization-leak"] },
+    { "name": "a backtick fence whose info string has a backtick is not a fence", "node": { "nodeType": "info", "tags": ["spec"], "role": null, "abstract": null, "content": "``` a`b\n</parameter>\n```" }, "expect": ["serialization-leak"] },
+    { "name": "a fence indented four columns is not a fence", "node": { "nodeType": "info", "tags": ["spec"], "role": null, "abstract": null, "content": "    ```\n</content>\n    ```" }, "expect": ["serialization-leak"] },
+    { "name": "several failures on one node, in rule order", "node": { "nodeType": "data", "tags": [], "role": null, "abstract": "<abstract>", "content": "</function_calls>" }, "expect": ["nodetype-info", "tag-spec", "serialization-leak", "serialization-leak"] }
+  ]
+}
