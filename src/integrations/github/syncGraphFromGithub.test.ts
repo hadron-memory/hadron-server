@@ -2330,3 +2330,35 @@ describe('#1477 Git placeholder marker', () => {
     }
   });
 });
+
+// ── #1468: git sync never prunes a spec from a mint-stamped corpus ──────────
+describe('#1468 — git sync pruning and minted specs', () => {
+  const repoRoot = () => join(mockSources, 'test-org', 'test/repo');
+  const writeSpec = (loc: string) =>
+    writeFrontmatterNode(join(repoRoot(), `${loc}.md`), { name: loc, tags: ['spec'] }, 'Rule text.');
+  const liveLocs = async () =>
+    (await db.node.findMany({ where: { memoryId: dbGraphId, deletedAt: null }, select: { loc: true } }))
+      .map((n) => n.loc).sort();
+
+  it('refuses the whole sync instead of deleting a minted spec whose file is gone', async () => {
+    writeSpec('pas:010');
+    writeSpec('pas:020');
+    expect((await syncGraphFromGithub(makeGraph())).error).toBeUndefined();
+    await db.memory.update({ where: { id: dbGraphId }, data: { corpusMintedAt: new Date() } });
+
+    rmSync(join(repoRoot(), 'pas:010.md'));
+    const result = await syncGraphFromGithub(makeGraph());
+    expect(result.error).toMatch(/minted specs are permanent/);
+    expect(await liveLocs()).toEqual(['pas:010', 'pas:020']);
+  });
+
+  it('control: an unstamped memory still prunes the spec whose file is gone', async () => {
+    writeSpec('pas:010');
+    writeSpec('pas:020');
+    expect((await syncGraphFromGithub(makeGraph())).error).toBeUndefined();
+
+    rmSync(join(repoRoot(), 'pas:010.md'));
+    expect((await syncGraphFromGithub(makeGraph())).error).toBeUndefined();
+    expect(await liveLocs()).toEqual(['pas:020']);
+  });
+});

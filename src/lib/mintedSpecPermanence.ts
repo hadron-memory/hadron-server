@@ -22,7 +22,7 @@
  * `FOR UPDATE`, then every node row `FOR UPDATE` with a 500ms lock timeout
  * that turns into a retryable `SPEC_CORPUS_BUSY` (`fenceCorpusForMint`). This
  * guard takes the opposite, cooperating order that node writers use: the
- * scope's node rows `FOR UPDATE` (sorted by id), THEN the memory row
+ * scope's node rows `FOR NO KEY UPDATE` (sorted by id), THEN the memory row
  * `FOR SHARE`, and reads `corpus_minted_at` under that lock. Either the mint
  * committed first (the guard sees the stamp and refuses), or the guard holds
  * rows the mint needs (the mint times out and retries after this removal —
@@ -30,6 +30,15 @@
  * row (the mint waits and then fences the post-removal corpus). Locking the
  * rows first also stops a concurrent edit from adding a spec marker between
  * the check and the removal.
+ *
+ * Why `FOR NO KEY UPDATE`, not `FOR UPDATE`: it is exactly what a soft
+ * delete's own `UPDATE` takes, so the guard adds no new wait. `FOR UPDATE`
+ * would also conflict with the `FOR KEY SHARE` an in-flight edge insert holds
+ * on its endpoint through the FK, and a soft delete must not wait for that
+ * (specCorpusPlaceholder "waits for the edge insert holding the tombstone").
+ * It still conflicts with a marker edit (also `NO KEY UPDATE`) and with the
+ * mint's node fence (`FOR UPDATE`). A hard delete escalates at its own
+ * `DELETE`, as it always did.
  *
  * Callers pass the COMPLETE set of rows the operation removes from the memory
  * (subtree descendants and, for hard deletes, tombstones), inside the same
@@ -83,7 +92,7 @@ export async function assertNoMintedSpecRemoval(
   const rows = await tx.$queryRaw<Array<{ id: string; loc: string; tags: string[]; role: string | null }>>`
     SELECT id, loc, tags, role FROM nodes
     WHERE id = ANY(${ids}::text[]) AND memory_id = ${memoryId}
-    ORDER BY id FOR UPDATE`;
+    ORDER BY id FOR NO KEY UPDATE`;
   const specs = rows.filter((r) => hasSpecMarker({ tags: r.tags ?? [], role: r.role }));
   // No spec in scope: nothing this guard protects, and no memory lock taken.
   if (specs.length === 0) return;
@@ -91,4 +100,71 @@ export async function assertNoMintedSpecRemoval(
     SELECT corpus_minted_at FROM memories WHERE id = ${memoryId} FOR SHARE`;
   if (!memory || memory.corpus_minted_at === null) return;
   throw mintedSpecRemovalError(memoryId, specs.map((s) => s.loc).sort(), op);
+}
+
+type NodeReader = Pick<Prisma.TransactionClient, 'node' | 'memory'>;
+
+/** The Prisma form of `hasSpecMarker`, for whole-memory scans. Keep in step with it. */
+const SPEC_MARKER_WHERE: Prisma.NodeWhereInput = {
+  OR: [{ tags: { has: 'spec' } }, { role: 'spec' }, { role: { startsWith: 'spec.' } }],
+};
+
+/**
+ * The spec locs a whole-memory removal would take from a mint-stamped corpus;
+ * empty when the memory is not stamped. UNLOCKED: use it for a fail-fast
+ * preflight, never as the authoritative check (a paged operation can outlive
+ * it). `includeTombstones` for hard (cascading) removals, which erase
+ * tombstones too.
+ */
+export async function mintedSpecLocsIn(
+  db: NodeReader,
+  memoryId: string,
+  opts: { includeTombstones: boolean },
+): Promise<string[]> {
+  const memory = await db.memory.findUnique({ where: { id: memoryId }, select: { corpusMintedAt: true } });
+  if (!memory?.corpusMintedAt) return [];
+  const specs = await db.node.findMany({
+    where: { memoryId, ...(opts.includeTombstones ? {} : { deletedAt: null }), ...SPEC_MARKER_WHERE },
+    select: { loc: true },
+    orderBy: { loc: 'asc' },
+  });
+  return specs.map((s) => s.loc);
+}
+
+/** Fail-fast form of the whole-memory check: throws the typed refusal if the preflight finds specs. */
+export async function preflightNoMintedCorpusRemoval(
+  db: NodeReader,
+  memoryId: string,
+  op: string,
+  opts: { includeTombstones: boolean },
+): Promise<void> {
+  const locs = await mintedSpecLocsIn(db, memoryId, opts);
+  if (locs.length > 0) throw mintedSpecRemovalError(memoryId, locs, op);
+}
+
+/**
+ * Whole-memory removal guard (#1468, Holger team chat #4308): deleting a
+ * mint-stamped corpus, directly or by a parent's cascade, removes every spec
+ * in it and is refused while it holds any. Run inside the removal's
+ * transaction.
+ *
+ * Locking: takes the memory row `FOR SHARE` (re-entrant under a caller's
+ * stronger lock) before reading the stamp, so a concurrent mint — Memory
+ * `FOR UPDATE` first — either committed before this read or waits until this
+ * removal commits. Node rows are NOT locked (a whole memory can be large), so
+ * one narrow race is accepted rather than closed: a stamped corpus holding no
+ * spec at all, deleted at the same moment a writer that does not take the
+ * memory row marks its first spec.
+ */
+export async function assertNoMintedCorpusRemoval(
+  tx: Prisma.TransactionClient,
+  memoryId: string,
+  op: string,
+  opts: { includeTombstones: boolean },
+): Promise<void> {
+  const [memory] = await tx.$queryRaw<Array<{ corpus_minted_at: Date | null }>>`
+    SELECT corpus_minted_at FROM memories WHERE id = ${memoryId} FOR SHARE`;
+  if (!memory || memory.corpus_minted_at === null) return;
+  const locs = await mintedSpecLocsIn(tx, memoryId, opts);
+  if (locs.length > 0) throw mintedSpecRemovalError(memoryId, locs, op);
 }

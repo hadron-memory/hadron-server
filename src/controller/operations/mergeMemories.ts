@@ -1,5 +1,10 @@
 import type { Prisma, PrismaClient } from '../../generated/prisma/index.js';
 import { assertBatchMutable, assertMemoryBulkMutable, assertNoProtectedReach } from '../../lib/bulkMutationGate.js';
+import {
+  assertNoMintedCorpusRemoval,
+  assertNoMintedSpecRemoval,
+  preflightNoMintedCorpusRemoval,
+} from '../../lib/mintedSpecPermanence.js';
 import { lockMemoryForChannelChange } from '../../lib/channels.js';
 import { computeContentHash } from '../../lib/contentHash.js';
 import { clearNodeAuthorship } from '../../lib/nodeAuthorship.js';
@@ -211,6 +216,11 @@ export async function mergeMemoryGraph(
   // up front than eight pages in.
   await assertMemoryBulkMutable(db, sourceMemoryId, 'merge');
   await assertMemoryBulkMutable(db, targetMemoryId, 'merge into');
+  // #1468 — every source node leaves the source memory (relocated, or folded
+  // and deleted) and the source memory is then deleted: a mint-stamped source
+  // corpus holding a spec cannot be merged away. Fail fast here; each batch
+  // and the final disposition re-check under their own locks.
+  await preflightNoMintedCorpusRemoval(db, sourceMemoryId, 'merge out of its corpus', { includeTombstones: false });
   // #1450 — the same up-front refusal for placeholders, before any batch
   // commits: a merge into a memory that is not a draft corpus would publish
   // them. The per-batch check below still holds against one reserved mid-merge.
@@ -314,6 +324,8 @@ export async function mergeMemoryGraph(
           rows = await tx.node.findMany({
             where: { id: { in: ids }, memoryId: sourceMemoryId, deletedAt: null },
           });
+          // #1468 — authoritative for this batch, under its node + memory locks.
+          await assertNoMintedSpecRemoval(tx, sourceMemoryId, rows.map((r) => r.id), 'merge out of its corpus');
           for (const row of rows) {
             if (row.loc !== classifiedLocById.get(row.id)) {
               throw new Error(`merge source node ${row.id} moved during classification; retry the merge`);
@@ -473,6 +485,8 @@ export async function mergeMemoryGraph(
         await tx.$queryRaw`SELECT id FROM nodes WHERE id = ${id} FOR UPDATE`;
       }
       await lockMergeMemoryRows(tx);
+      // #1468 — the folded source rows are deleted below: authoritative here.
+      await assertNoMintedSpecRemoval(tx, sourceMemoryId, srcRows.map((r) => r.id), 'merge out of its corpus');
       for (const id of foldIds) {
         const reconciled = await ensureCurrentNodeRevisionInTransaction(tx, id, { expectedMemoryId: foldMemory.get(id)! });
         if (reconciled == null) throw new Error(`merge node ${id} moved or vanished during the fold; retry the merge`);
@@ -709,6 +723,8 @@ export async function mergeMemoryGraph(
       // must not strand the requested cleanup.
       await lockMergeMemoryRows(tx, 'update', false);
       await assertNoProtectedReach(tx, sourceMemoryId, 'all', 'delete');
+      // #1468 — the source memory's deletion: whatever the batches left.
+      await assertNoMintedCorpusRemoval(tx, sourceMemoryId, 'merge out of its corpus', { includeTombstones: false });
       await tx.memory.update({ where: { id: sourceMemoryId }, data: { deletedAt: new Date() } });
     });
   }

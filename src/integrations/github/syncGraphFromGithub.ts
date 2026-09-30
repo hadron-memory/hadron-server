@@ -30,6 +30,7 @@ import { acquireLockSet, ancestorLocs, lockAncestorsForCreateMany } from '../../
 import { Prisma, type Memory, type Node, type Organization } from '../../generated/prisma/index.js';
 import { validateGitBranch } from '../../lib/gitRef.js';
 import { lockMemoryForChannelChange } from '../../lib/channels.js';
+import { assertNoMintedSpecRemoval } from '../../lib/mintedSpecPermanence.js';
 import { reconcilePendingEdgeCount } from '../../lib/pendingEdgePromotion.js';
 import {
   buildNodeRevisionSnapshot,
@@ -992,6 +993,11 @@ export const syncGraphFromGithub = async (
             `Git sync cleanup refused: ${crossMemoryEdges} edge(s) bridge nodes selected for hard-delete to another memory. Remove or relocate those edges explicitly first.`,
           );
         }
+        // #1468 — a spec missing from the repo is NOT pruned from a minted
+        // corpus: the whole sync refuses (fail closed, like the edge gate
+        // above), so the repo must restore the file or supersede the spec.
+        const cleanupIds = (await tx.node.findMany({ where: cleanupWhere, select: { id: true } })).map((n) => n.id);
+        await assertNoMintedSpecRemoval(tx, graph.id, cleanupIds, 'prune from git sync');
         await tx.node.deleteMany({
           // `skippedRowIds` joins the survivors for the same reason
           // `protectedRowIds` does (#1224): a file skipped for an unusable

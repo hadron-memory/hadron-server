@@ -7035,6 +7035,17 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
               authorizeLockedMemory: (memoryId) => assertLockedMemoryWriteAccess(tx, auth, memoryId),
             });
             relocated = subtreeResult.moved;
+            // #1468 — evicting the destination occupant removes it from its
+            // corpus and hands its citation to another node: refused for a
+            // minted spec. Checked AFTER the helper on purpose: it already holds
+            // the occupant row (the eviction update) and the destination memory
+            // FOR NO KEY UPDATE, so the guard takes nothing new; checking first
+            // would take that memory FOR SHARE and then upgrade it inside the
+            // helper, the deadlock its header warns about. A refusal rolls the
+            // whole transaction back.
+            if (existingTarget) {
+              await assertNoMintedSpecRemoval(tx, toMemory.id, [existingTarget.id], 'overwrite');
+            }
           }
 
           // Move BY ID — id is stable across moves, so this refetch can't race a
@@ -7086,6 +7097,9 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         }
         if (e instanceof SubtreeMovePlaceholderError) {
           return textResult(`SPEC_PLACEHOLDER_OUTSIDE_DRAFT: ${e.message}`);
+        }
+        if (e instanceof ScopeGraphQLError && e.extensions?.code === SPEC_MINTED_PERMANENT) {
+          return textResult(`[spec_minted_permanent] ${e.message}`);
         }
         if (e instanceof SubtreeMoveSourceChangedError) {
           return textResult('The node was moved concurrently; re-read it and retry.');

@@ -3773,6 +3773,12 @@ export const nodeMutations = {
             });
           }
         }
+        // #1468 — `deleteSource` hard-deletes the source, so a minted spec
+        // may not be the source (supersede it instead). Same node-then-memory
+        // order as the locks just taken, which the guard re-enters.
+        if (deleteSource) {
+          await assertNoMintedSpecRemoval(tx, source.memoryId, [source.id], 'merge-and-delete');
+        }
         // #1323 (@codex/@copilot, PR #1339): both endpoints are row-locked and
         // their unrevisioned drift reconciled as their OWN revisions (id order)
         // before the snapshot. The merge was computed from reads taken BEFORE
