@@ -2521,6 +2521,22 @@ describe('#1468 — git sync pruning and minted specs', () => {
     expect(await db.node.count({ where: { memoryId: dbGraphId, loc: { contains: '~' } } })).toBe(0);
   });
 
+  it("an edge aimed at a refused mover waits with the move (#1411's skipped-move contract)", async () => {
+    const specId = 'aaaa146800000000000000000000000018';
+    const noteId = 'bbbb146800000000000000000000000019';
+    await db.node.create({ data: { id: specId, memoryId: dbGraphId, loc: 'pas:010', name: 'spec', tags: ['spec'], ownerRepo: 'test/repo' } });
+    await db.node.create({ data: { id: noteId, memoryId: dbGraphId, loc: 'notes', name: 'note', ownerRepo: 'test/repo' } });
+    await db.memory.update({ where: { id: dbGraphId }, data: { corpusMintedAt: new Date() } });
+    writeFrontmatterNode(join(repoRoot(), 'pas:010.md'), { id: noteId, name: 'note' }, 'Note.');
+    writeFrontmatterNode(join(repoRoot(), 'citer.md'), { name: 'citer' }, 'Cites the note.', [{ target: 'x', id: noteId, rel: 'uses' }]);
+
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    expect((await syncGraphFromGithub(makeGraph())).error).toBeUndefined();
+    warn.mockRestore();
+    expect(await db.node.findUniqueOrThrow({ where: { id: noteId } })).toMatchObject({ loc: 'notes' });
+    expect(await db.edge.count({ where: { targetId: noteId, deletedAt: null } })).toBe(0);
+  });
+
   it('control: an unstamped memory still lets that move displace the occupant', async () => {
     const specId = 'aaaa146800000000000000000000000003';
     const noteId = 'bbbb146800000000000000000000000004';

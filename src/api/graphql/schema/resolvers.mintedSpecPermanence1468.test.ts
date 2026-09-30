@@ -653,11 +653,14 @@ describe('#1468 — race against a concurrent mint', () => {
 
     const deleting = resolvers.Mutation.deleteNode({}, { nodeRef: spec.id }, ctx());
     try {
-      // The delete blocks on the memory row the mint holds.
+      // The delete blocks on the memory row the mint holds. Since #1481 that
+      // can be deleteNode's own write-gate lock (`SELECT id FROM memories …
+      // FOR SHARE`) rather than the guard's stamp read; either way it waits
+      // behind the mint, and the guard reads the stamp only after it commits.
       await vi.waitFor(async () => {
         const waits = await db.$queryRaw<Array<{ pid: number }>>`
           SELECT pid FROM pg_stat_activity
-          WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE '%corpus_minted_at%'`;
+          WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE '%FROM memories WHERE id%'`;
         expect(waits.length).toBeGreaterThan(0);
       }, { timeout: 5_000, interval: 25 });
     } finally {

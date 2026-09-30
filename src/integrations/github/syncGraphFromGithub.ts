@@ -645,7 +645,9 @@ export const syncGraphFromGithub = async (
         const staying = new Set<string>([
           ...skippedRowIds,
           ...pinned.map((r) => r.id),
-          ...(await lockMintedSpecsIn(tx, graph.id, occupants.map((o) => o.id))).map((m) => m.id),
+          // Never a row that arrived after #1330's scan: locking it would wait
+          // under the rulebook lock. A move onto one is deferred in the loop.
+          ...(await lockMintedSpecsIn(tx, graph.id, occupants.filter((o) => !isLateRow(o)).map((o) => o.id))).map((m) => m.id),
         ]);
         const refused = new Set<string>();
         for (let changed = true; changed;) {
@@ -898,6 +900,7 @@ export const syncGraphFromGithub = async (
             );
             protectedRowIds.add(byId.id);
             refusedMoveLocs.add(loc);
+            incomingEdgesWait();
             continue;
           }
           if (byId.loc !== loc) {
@@ -960,6 +963,7 @@ export const syncGraphFromGithub = async (
               );
               protectedRowIds.add(byId.id);
               refusedMoveLocs.add(loc);
+              incomingEdgesWait();
               continue;
             }
             if (occupant && occupant.id !== byId.id) {
