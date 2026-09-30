@@ -15,6 +15,7 @@ import { resolvers, type Context } from './resolvers.js';
 import { createTestableMcpServer } from '../../../mcp/server.js';
 import type { AuthContext } from '../../../middleware/auth.js';
 import { generateId } from '../../../lib/id.js';
+import { ensureChannelWithRoot } from '../../../lib/channels.js';
 import { SPEC_MINTED_PERMANENT, assertNoMintedSpecUnmark } from '../../../lib/mintedSpecPermanence.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
@@ -515,6 +516,72 @@ describe('#1468 — address reclaims that erase a deleted minted corpus (Codex P
     expect(await db.memory.findUnique({ where: { id: corpus.id } })).not.toBeNull();
     expect((await db.user.findUniqueOrThrow({ where: { id: admin.id } })).handle).toBe('mp-admin');
   });
+});
+
+describe('#1468 — chat and Channel deletions (Codex P1)', () => {
+  it('deleteChat refuses a legacy chat whose subtree holds a minted spec, deleting nothing', async () => {
+    await node(minted.id, 'chats:legacy');
+    await node(minted.id, 'chats:legacy:m1', { tags: ['spec'] });
+    await expect(resolvers.Mutation.deleteChat({}, { chatId: 'chats:legacy' }, ctx())).rejects.toSatisfy(refusedPermanent);
+    expect(await liveIds(minted.id)).toEqual(['chats:legacy', 'chats:legacy:m1']);
+  });
+
+  it('control: deleteChat still deletes a legacy chat in a draft corpus', async () => {
+    await node(draft.id, 'chats:legacy');
+    await node(draft.id, 'chats:legacy:m1', { tags: ['spec'] });
+    expect(await resolvers.Mutation.deleteChat({}, { chatId: 'chats:legacy' }, ctx())).toBe(true);
+    expect(await liveIds(draft.id)).toEqual([]);
+  });
+
+  it("deleteChannel refuses when the Channel's root is a minted spec", async () => {
+    const { channel, rootId } = await ensureChannelWithRoot(db, { memoryId: minted.id, loc: 'chats:c', name: 'c', createdBy: null });
+    await db.node.update({ where: { id: rootId }, data: { tags: ['spec'] } });
+    await expect((resolvers.Mutation as any).deleteChannel({}, { ref: channel.id }, ctx())).rejects.toSatisfy(refusedPermanent);
+    expect(await db.channel.findUniqueOrThrow({ where: { id: channel.id } })).toMatchObject({ deletedAt: null });
+  });
+});
+
+describe('#1468 — a whole-corpus delete cannot race the first spec (Codex P1)', () => {
+  /** Run `writer` in a transaction held open until the returned release is called. */
+  async function holdOpen(writer: (tx: Parameters<Parameters<typeof db.$transaction>[0]>[0]) => Promise<void>) {
+    let release!: () => void;
+    let written!: () => void;
+    const hold = new Promise<void>((r) => { release = r; });
+    const isWritten = new Promise<void>((r) => { written = r; });
+    const done = db.$transaction(async (tx) => { await writer(tx); written(); await hold; }, { timeout: 20_000 });
+    await isWritten;
+    return { release, done };
+  }
+  const deleteWaits = () => vi.waitFor(async () => {
+    const waits = await db.$queryRaw<Array<{ pid: number }>>`
+      SELECT pid FROM pg_stat_activity
+      WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE '%FROM memories WHERE id%'`;
+    expect(waits.length).toBeGreaterThan(0);
+  }, { timeout: 5_000, interval: 25 });
+
+  it('an update marking the first spec, in flight, makes deleteMemory wait and then refuse', async () => {
+    const n = await node(minted.id, 'pas:010');
+    const { release, done } = await holdOpen(async (tx) => {
+      await assertNoMintedSpecUnmark(tx, minted.id, [{ id: n.id, tags: ['spec'] }], 'update');
+      await tx.node.update({ where: { id: n.id }, data: { tags: ['spec'] } });
+    });
+    const deleting = resolvers.Mutation.deleteMemory({}, { id: minted.id }, ctx());
+    try { await deleteWaits(); } finally { release(); }
+    await done;
+    await expect(deleting).rejects.toSatisfy(refusedPermanent);
+    expect(await db.memory.findUniqueOrThrow({ where: { id: minted.id } })).toMatchObject({ deletedAt: null });
+  }, 20_000);
+
+  it('an insert of the first spec, in flight, makes deleteMemory wait and then refuse', async () => {
+    const { release, done } = await holdOpen(async (tx) => {
+      await tx.node.create({ data: { id: generateId(), memoryId: minted.id, loc: 'pas:020', name: 'pas:020', tags: ['spec'] } });
+    });
+    const deleting = resolvers.Mutation.deleteMemory({}, { id: minted.id }, ctx());
+    try { await deleteWaits(); } finally { release(); }
+    await done;
+    await expect(deleting).rejects.toSatisfy(refusedPermanent);
+    expect(await db.memory.findUniqueOrThrow({ where: { id: minted.id } })).toMatchObject({ deletedAt: null });
+  }, 20_000);
 });
 
 describe('#1468 — race against a concurrent mint', () => {

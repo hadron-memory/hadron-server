@@ -49,6 +49,7 @@ import {
   appendRouteEntry,
   loadPublishedSnapshot,
 } from './resolvers.helpers.js';
+import { assertNoMintedSpecRemoval } from '../../../lib/mintedSpecPermanence.js';
 
 /**
  * How many of a chat's most recent messages `sendChatMessage` hands the model.
@@ -1513,16 +1514,27 @@ export const chatMutations = {
           throw new Error('Forbidden');
         }
       }
-      // Soft-delete the chat node and all its message children by loc prefix
-      await ctx.db.node.updateMany({
-        where: {
-          memoryId: chatNode.memoryId,
-          OR: [
-            { id: chatNode.id },
-            { loc: { startsWith: `${chatId}:` } },
-          ],
-        },
-        data: { deletedAt: new Date(), deletedBy: ctx.userId },
+      // Soft-delete the chat node and all its message children by loc prefix.
+      // #1468 (Codex on #1475) — a legacy chat is an ordinary writable node,
+      // so it can carry the spec marker in a minted corpus: the rows are
+      // locked and checked before the tombstone, and only those are written.
+      await ctx.db.$transaction(async (tx) => {
+        const scope = (await tx.node.findMany({
+          where: {
+            memoryId: chatNode.memoryId,
+            deletedAt: null,
+            OR: [
+              { id: chatNode.id },
+              { loc: { startsWith: `${chatId}:` } },
+            ],
+          },
+          select: { id: true },
+        })).map((n) => n.id);
+        await assertNoMintedSpecRemoval(tx, chatNode.memoryId, scope, 'delete the chat holding');
+        await tx.node.updateMany({
+          where: { id: { in: scope }, deletedAt: null },
+          data: { deletedAt: new Date(), deletedBy: ctx.userId },
+        });
       });
       return true;
     },

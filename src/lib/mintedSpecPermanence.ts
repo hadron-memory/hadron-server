@@ -178,19 +178,30 @@ export async function lockMintedSpecUnmarks(
     SELECT id, loc, tags, role, deleted_at FROM nodes
     WHERE id = ANY(${ids}::text[]) AND memory_id = ${memoryId}
     ORDER BY id FOR NO KEY UPDATE`;
-  const unmarked = rows.filter((r) => {
-    const before = { tags: r.tags ?? [], role: r.role };
-    if (!hasSpecMarker(before)) return false;
+  const markedBefore = (r: (typeof rows)[number]) => hasSpecMarker({ tags: r.tags ?? [], role: r.role });
+  const markedAfter = (r: (typeof rows)[number]) => {
     const change = next.get(r.id)!;
-    return !hasSpecMarker({
-      tags: change.tags ?? before.tags,
-      role: change.role !== undefined ? change.role : before.role,
+    return hasSpecMarker({
+      tags: change.tags ?? r.tags ?? [],
+      role: change.role !== undefined ? change.role : r.role,
     });
-  });
-  if (unmarked.length === 0) return [];
+  };
+  const unmarked = rows.filter((r) => markedBefore(r) && !markedAfter(r));
+  // A write that marks a node's FIRST spec must not race a whole-corpus
+  // delete that has just found none (Codex on #1475): taking the memory row
+  // FOR SHARE below conflicts with deleteMemory's FOR UPDATE, so one of the
+  // two commits first and the other sees it.
+  const newlyMarked = rows.some((r) => !markedBefore(r) && markedAfter(r));
+  if (unmarked.length === 0 && !newlyMarked) return [];
+  // Unlocked stamp probe first, so ordinary spec edits in never-stamped
+  // memories take no memory lock. It is stable for these rows: the mint must
+  // lock them FOR UPDATE, which waits on (or times out behind) ours.
+  const [probe] = await tx.$queryRaw<Array<{ corpus_minted_at: Date | null }>>`
+    SELECT corpus_minted_at FROM memories WHERE id = ${memoryId}`;
+  if (!probe || probe.corpus_minted_at === null) return [];
   const [memory] = await tx.$queryRaw<Array<{ corpus_minted_at: Date | null }>>`
     SELECT corpus_minted_at FROM memories WHERE id = ${memoryId} FOR SHARE`;
-  if (!memory || memory.corpus_minted_at === null) return [];
+  if (!memory || memory.corpus_minted_at === null || unmarked.length === 0) return [];
   const mintedAt = memory.corpus_minted_at;
   return unmarked
     .filter((r) => isProtectedAfterMint(r.deleted_at, mintedAt))
@@ -286,13 +297,15 @@ export async function preflightNoMintedCorpusRemoval(
  * in it and is refused while it holds any. Run inside the removal's
  * transaction.
  *
- * Locking: takes the memory row `FOR SHARE` (re-entrant under a caller's
- * stronger lock) before reading the stamp, so a concurrent mint — Memory
- * `FOR UPDATE` first — either committed before this read or waits until this
- * removal commits. Node rows are NOT locked (a whole memory can be large), so
- * one narrow race is accepted rather than closed: a stamped corpus holding no
- * spec at all, deleted at the same moment a writer that does not take the
- * memory row marks its first spec.
+ * Locking: the CALLER takes the memory row `FOR UPDATE` first (deleteMemory,
+ * deleteAgent, the merge disposition, reclaim and cascade all do). That lock
+ * conflicts with a concurrent mint (Memory `FOR UPDATE`), with the FK
+ * `KEY SHARE` every node insert or move-in takes, and with the `FOR SHARE` a
+ * write takes when it marks a spec (`lockMintedSpecUnmarks`), so no spec can
+ * appear between this scan and the tombstone (Codex on #1475 closed the race
+ * this guard used to accept). The `FOR SHARE` read here re-enters it. Node
+ * rows are not locked: a whole memory can be large, and the memory lock is
+ * what excludes new specs.
  */
 export async function assertNoMintedCorpusRemoval(
   tx: Prisma.TransactionClient,

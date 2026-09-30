@@ -815,6 +815,9 @@ export const agentMutations = {
       // transaction as both soft-deletes, under the memory row lock.
       await ctx.db.$transaction(async (tx) => {
         if (agent.systemMemoryId) {
+          // FOR UPDATE first: see deleteMemory — no spec may appear between
+          // the scan and the tombstone.
+          await tx.$queryRaw`SELECT id FROM memories WHERE id = ${agent.systemMemoryId} FOR UPDATE`;
           await assertNoMintedCorpusRemoval(tx, agent.systemMemoryId, 'delete the agent whose system memory holds', {
             includeTombstones: false,
             remedy: 'Deleting the agent would delete its minted corpus; keep the agent.',

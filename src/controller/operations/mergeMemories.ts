@@ -139,12 +139,21 @@ export async function mergeMemoryGraph(
   /** Hold both flags through a batch so encryptMemory cannot flip mid-write. */
   const lockMergeMemoryRows = async (
     tx: Prisma.TransactionClient,
-    lockMode: 'share' | 'update' = 'share',
+    lockMode: 'share' | 'update' | 'delete-source' = 'share',
     requirePlaintext = true,
   ): Promise<Map<string, string>> => {
     const urns = new Map<string, string>();
     for (const id of [sourceMemoryId, targetMemoryId].sort()) {
-      const [memory] = lockMode === 'update'
+      // 'delete-source' (#1468): the disposition deletes the source, so it
+      // takes that row FOR UPDATE — the lock that excludes a concurrent node
+      // insert (FK KEY SHARE) or first-spec mark (FOR SHARE) between the
+      // minted-corpus scan and the tombstone. First lock on the row in its
+      // transaction, so nothing is upgraded.
+      const [memory] = lockMode === 'delete-source' && id === sourceMemoryId
+        ? await tx.$queryRaw<Array<{ urn: string; is_encrypted: boolean }>>`
+            SELECT urn, is_encrypted FROM memories WHERE id = ${id} FOR UPDATE
+          `
+        : lockMode !== 'share'
         ? await tx.$queryRaw<Array<{ urn: string; is_encrypted: boolean }>>`
             SELECT urn, is_encrypted FROM memories WHERE id = ${id} FOR NO KEY UPDATE
           `
@@ -721,7 +730,7 @@ export async function mergeMemoryGraph(
       // All content and edge writes have committed. Disposition only marks
       // the source deleted, so a target encryption flip after those batches
       // must not strand the requested cleanup.
-      await lockMergeMemoryRows(tx, 'update', false);
+      await lockMergeMemoryRows(tx, 'delete-source', false);
       await assertNoProtectedReach(tx, sourceMemoryId, 'all', 'delete');
       // #1468 — the source memory's deletion: whatever the batches left.
       await assertNoMintedCorpusRemoval(tx, sourceMemoryId, 'merge out of its corpus', { includeTombstones: false });

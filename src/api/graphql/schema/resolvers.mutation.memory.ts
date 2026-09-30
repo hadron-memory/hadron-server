@@ -1242,11 +1242,14 @@ export const memoryMutations = {
         // memory-scoped secrets to sweep here anymore.
         //
         // #1468 — deleting a mint-stamped corpus removes every spec in it.
-        // Take the row at the strength the update below needs, so the guard's
-        // FOR SHARE read re-enters instead of being upgraded later. A re-delete
-        // removes nothing, so it stays idempotent and unguarded.
+        // FOR UPDATE, not the update's own NO KEY UPDATE (Codex on #1475):
+        // it conflicts with the FK KEY SHARE every node insert or move-in
+        // takes and with the FOR SHARE a write takes when it marks a spec
+        // (lockMintedSpecUnmarks), so no spec can appear between the scan
+        // below and the tombstone. The guard's FOR SHARE re-enters. A
+        // re-delete removes nothing, so it stays idempotent and unguarded.
         const [row] = await tx.$queryRaw<Array<{ deleted_at: Date | null }>>`
-          SELECT deleted_at FROM memories WHERE id = ${resolvedId} FOR NO KEY UPDATE`;
+          SELECT deleted_at FROM memories WHERE id = ${resolvedId} FOR UPDATE`;
         if (row && row.deleted_at === null) {
           await assertNoMintedCorpusRemoval(tx, resolvedId, 'delete the corpus', { includeTombstones: false });
         }

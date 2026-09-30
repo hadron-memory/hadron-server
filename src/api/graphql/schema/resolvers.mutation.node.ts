@@ -3830,6 +3830,11 @@ export const nodeMutations = {
         );
 
         if (Object.keys(changed).length > 0) {
+          // #1468 — the tags union can mark the target's FIRST spec; the guard
+          // takes the lock that serializes that with a whole-corpus delete.
+          if ('tags' in changed) {
+            await assertNoMintedSpecUnmark(tx, target.memoryId, [{ id: target.id, tags: changed.tags as string[] }], 'merge into');
+          }
           await tx.node.update({
             where: { id: target.id },
             data: {
