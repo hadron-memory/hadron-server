@@ -188,6 +188,13 @@ describe('worker-owned ordinary reads', () => {
     expect(await db.channelReadState.findFirst({ where: { workerId: worker.id, channelId: channel.id } })).toMatchObject({ lastSeenSeq: 2 });
   });
 
+  it('does not mark a cursor-less tail even when the whole chat fits', async () => {
+    await post('only message');
+    const page = await Q.channelMessages({}, { channelRef: channel.id }, userCtx({ sessionId }));
+    expect(page.items.map((m: { seq: number }) => m.seq)).toEqual([1]);
+    expect(await db.channelReadState.findFirst({ where: { workerId: worker.id, channelId: channel.id } })).toBeNull();
+  });
+
   it('a partial page ending inside a legacy duplicate seq stops one short (#1362 review)', async () => {
     await post('one');
     await post('two, first of a pre-#919 duplicate pair');
@@ -884,7 +891,7 @@ describe('MCP parity and discovery gate', () => {
       { asChannel: true },
     );
 
-    const page = await Q.teamChatMessages({}, { appRef: otherApp.id }, userCtx({ sessionId }));
+    const page = await Q.teamChatMessages({}, { appRef: otherApp.id, sinceSeq: 0 }, userCtx({ sessionId }));
     expect(page.total).toBe(1);
     expect(await db.channelReadState.findFirst({ where: { workerId: worker.id, channelId: made.channel.id } }))
       .toMatchObject({ lastSeenSeq: 1 });
