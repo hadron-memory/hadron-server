@@ -5,8 +5,10 @@ import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
 import { generateId } from './id.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
-import { specCorpusRenumberMutations } from '../api/graphql/schema/resolvers.specCorpus.js';
+import { specCorpusRenumberMutations, specCorpusMintMutations } from '../api/graphql/schema/resolvers.specCorpus.js';
 import { resolveNodeRefForCaller } from '../api/graphql/schema/resolvers.nodeRefAccess.js';
+import { resolveNodeRef } from './entityRef/nodeRef.js';
+import { AmbiguousLegacyUrnError, NodeNotFoundError } from './entityRef/errors.js';
 import { nodeMoveOps } from '../api/graphql/schema/resolvers.mutation.node.js';
 import { mirrorNodeMoveToGit } from '../integrations/github/mirrorNodeMove.js';
 
@@ -830,5 +832,199 @@ describe('renumber reports exactly what the mover moved (@codex P2 on #1453)', (
     }, as());
     expect(res.rewrites.some((row) => row.nodeId === newcomerId)).toBe(false);
     expect(await db.node.findUniqueOrThrow({ where: { id: newcomerId } })).toMatchObject({ content: original });
+  });
+});
+
+describe('an ambiguous citation blocks the mint as MISSING (#1505)', () => {
+  /** Rename the draft away and let a new memory take its former URN; return that former URN and the squatter. */
+  const vacateFormerUrn = async () => {
+    const formerUrn = draft.urn;
+    await resolvers.Mutation.updateMemory(null, { id: draft.id, urn: 'specs-draft-renamed' } as never, as());
+    const squatter = await resolvers.Mutation.createMemory(null, { orgId: org.id, name: 'specs-draft' }, as());
+    expect(squatter.urn).toBe(formerUrn);
+    return { formerUrn, squatter };
+  };
+  const cite = (address: string) => db.node.update({ where: { id: other.id }, data: { content: `Cites hrn:node:${address}.` } });
+  const unresolvedAt = async (targetLoc: string, userId = admin.id) =>
+    (await resolvers.Query.specUnresolvedReferences(null, { memoryRef: draft.id }, as(userId)))
+      .filter((r) => r.sourceLoc === 'pas:020' && r.targetLoc === targetLoc);
+  const mintBlocksOn = async (targetLoc: string) => {
+    const report = await specCorpusMintMutations.mintSpecCorpus(null, { memoryRef: draft.id, dryRun: true }, as());
+    return report.blockers.some((b) => b.kind === 'UNRESOLVED_REFERENCE' && b.targetLoc === targetLoc);
+  };
+  /** The shared resolver's verdict on the same address: the report must agree with it. */
+  const resolverRefuses = async (address: string) => {
+    try { await resolveNodeRef(db, `hrn:node:${address}`); return false; } catch (e) { return e instanceof AmbiguousLegacyUrnError; }
+  };
+  const neitherAttributedNorRewritten = async () => {
+    for (const loc of ['pas:010', 'pas:010:01']) {
+      const refs = await resolvers.Query.specBacklinks(null, { memoryRef: draft.id, loc }, as());
+      expect(refs.filter((r) => r.kind === 'URN' && r.sourceLoc === 'pas:020'), loc).toEqual([]);
+    }
+    const plan = await specCorpusRenumberMutations.renumberSpec(
+      null, { memoryRef: draft.id, fromLoc: 'pas:010', toLoc: 'pas:040', dryRun: true }, as(),
+    );
+    expect(plan.rewrites.filter((row) => row.nodeId === other.id)).toEqual([]);
+  };
+
+  it('two corpus targets at one address (its own row and an alias to another spec): MISSING, and the mint blocks', async () => {
+    const { formerUrn } = await vacateFormerUrn();
+    // Cite the loc being renumbered, so a wrongful rewrite would be visible.
+    const address = `${formerUrn}:pas:010`;
+    await db.urnAlias.createMany({ data: [feature.id, rule.id].map((entityId) => ({
+      urn: address, entityType: 'NODE' as const, entityId, reason: 'RENAME' as const,
+    })) });
+    await cite(address);
+
+    expect(await resolverRefuses(address)).toBe(true);
+    expect((await unresolvedAt('pas:010')).map((r) => r.reason)).toEqual(['MISSING']);
+    expect(await mintBlocksOn('pas:010')).toBe(true);
+    await neitherAttributedNorRewritten();
+  });
+
+  it('a corpus alias target plus a READABLE foreign one: MISSING, and the mint blocks', async () => {
+    const { formerUrn, squatter } = await vacateFormerUrn();
+    // Cite the loc being renumbered, so a wrongful rewrite would be visible.
+    const address = `${formerUrn}:pas:010`;
+    const foreign = await db.node.create({ data: { id: generateId(), memoryId: squatter.id, loc: 'pas:900', name: 'Foreign target' } });
+    await db.urnAlias.createMany({ data: [feature.id, foreign.id].map((entityId) => ({
+      urn: address, entityType: 'NODE' as const, entityId, reason: 'RENAME' as const,
+    })) });
+    await cite(address);
+
+    expect(await resolverRefuses(address)).toBe(true);
+    expect((await unresolvedAt('pas:010')).map((r) => r.reason)).toEqual(['MISSING']);
+    expect(await mintBlocksOn('pas:010')).toBe(true);
+    await neitherAttributedNorRewritten();
+  });
+
+  it('two historical holders of a former URN with the cited loc (the corpus one of them): MISSING', async () => {
+    // Another memory held "shared" first and was renamed away; then the corpus
+    // held it and was renamed away too. Both have a live pas:010.
+    const otherMem = await resolvers.Mutation.createMemory(null, { orgId: org.id, name: 'shared' }, as());
+    const shared = otherMem.urn;
+    await resolvers.Mutation.updateMemory(null, { id: otherMem.id, urn: 'someone-else' } as never, as());
+    await db.node.create({ data: { id: generateId(), memoryId: otherMem.id, loc: 'pas:010', name: 'Theirs' } });
+    await resolvers.Mutation.updateMemory(null, { id: draft.id, urn: 'shared' } as never, as());
+    await resolvers.Mutation.updateMemory(null, { id: draft.id, urn: 'specs-final' } as never, as());
+    await cite(`${shared}:pas:010`);
+
+    expect(await resolverRefuses(`${shared}:pas:010`)).toBe(true);
+    expect((await unresolvedAt('pas:010')).map((r) => r.reason)).toEqual(['MISSING']);
+    expect(await mintBlocksOn('pas:010')).toBe(true);
+    await neitherAttributedNorRewritten();
+  });
+
+  it('CONTROL: the corpus row and an alias to that SAME node are one candidate, not an ambiguity', async () => {
+    const { formerUrn } = await vacateFormerUrn();
+    const address = `${formerUrn}:pas:010`;
+    await db.urnAlias.create({ data: { urn: address, entityType: 'NODE', entityId: feature.id, reason: 'RENAME' } });
+    await cite(address);
+
+    expect(await resolverRefuses(address)).toBe(false);
+    expect(await unresolvedAt('pas:010')).toEqual([]);
+    const refs = await resolvers.Query.specBacklinks(null, { memoryRef: draft.id, loc: 'pas:010' }, as());
+    expect(refs.some((r) => r.kind === 'URN' && r.sourceLoc === 'pas:020')).toBe(true);
+  });
+
+  it('CONTROL: a live node at the published address wins; that is not ambiguity', async () => {
+    const { formerUrn, squatter } = await vacateFormerUrn();
+    const address = `${formerUrn}:pas:500`;
+    await db.node.create({ data: { id: generateId(), memoryId: squatter.id, loc: 'pas:500', name: 'Published' } });
+    await db.urnAlias.create({ data: { urn: address, entityType: 'NODE', entityId: feature.id, reason: 'RENAME' } });
+    await cite(address);
+
+    expect(await resolverRefuses(address)).toBe(false);
+    expect(await unresolvedAt('pas:500')).toEqual([]);
+    expect(await mintBlocksOn('pas:500')).toBe(false);
+  });
+
+  it('CONTROL: an address claimed only by readable foreign targets stays foreign, even when ambiguous there', async () => {
+    const { formerUrn, squatter } = await vacateFormerUrn();
+    const address = `${formerUrn}:pas:500`;
+    const [a, b] = await Promise.all(['pas:901', 'pas:902'].map((loc) =>
+      db.node.create({ data: { id: generateId(), memoryId: squatter.id, loc, name: loc } })));
+    await db.urnAlias.createMany({ data: [a.id, b.id].map((entityId) => ({
+      urn: address, entityType: 'NODE' as const, entityId, reason: 'RENAME' as const,
+    })) });
+    await cite(address);
+
+    expect(await unresolvedAt('pas:500')).toEqual([]);
+    expect(await mintBlocksOn('pas:500')).toBe(false);
+  });
+
+  /** A private memory of another user: the caller (admin) cannot read it. */
+  const hiddenMemory = async (slug: string) => {
+    await db.orgMember.upsert({
+      where: { organizationId_userId: { organizationId: org.id, userId: outsider.id } },
+      create: { organizationId: org.id, userId: outsider.id, role: 'READER' }, update: {},
+    });
+    return db.memory.create({ data: {
+      id: generateId(), urn: `${org.urn}:${slug}`, name: slug, class: 'private', organizationId: org.id, userId: outsider.id,
+    } });
+  };
+  /** What the CALLER's own resolver says about the address: the shared concealment rule applied. */
+  const callerSees = async (address: string) => {
+    try { await resolveNodeRefForCaller(as(), `hrn:node:${address}`); return 'RESOLVED'; } catch (e) {
+      if (e instanceof AmbiguousLegacyUrnError) return 'AMBIGUOUS';
+      if (e instanceof NodeNotFoundError) return 'NOT_FOUND';
+      throw e;
+    }
+  };
+
+  it('a corpus alias target plus an UNREADABLE foreign one: MISSING, as the reader\'s own resolver refuses it (@codex P1 on #1506)', async () => {
+    const { formerUrn } = await vacateFormerUrn();
+    const address = `${formerUrn}:pas:010`;
+    const hidden = await hiddenMemory('outsiders-private');
+    const target = await db.node.create({ data: { id: generateId(), memoryId: hidden.id, loc: 'pas:777', name: 'Hidden' } });
+    await db.urnAlias.createMany({ data: [feature.id, target.id].map((entityId) => ({
+      urn: address, entityType: 'NODE' as const, entityId, reason: 'RENAME' as const,
+    })) });
+    await cite(address);
+
+    // The corpus target is readable, so the shared concealment rule does NOT
+    // hide the ambiguity: this caller already gets the refusal from node(ref:).
+    expect(await callerSees(address)).toBe('AMBIGUOUS');
+    expect((await unresolvedAt('pas:010')).map((r) => r.reason)).toEqual(['MISSING']);
+    expect(await mintBlocksOn('pas:010')).toBe(true);
+    await neitherAttributedNorRewritten();
+  });
+
+  it('an UNREADABLE historical holder with the cited loc, next to the corpus row: MISSING', async () => {
+    // A private memory held "shared" and was renamed away; then the corpus
+    // held it and was renamed away too. Both have a live pas:010.
+    const hidden = await hiddenMemory('shared');
+    const shared = hidden.urn;
+    await db.memory.update({ where: { id: hidden.id }, data: { urn: `${org.urn}:hidden-renamed` } });
+    await db.urnAlias.create({ data: { urn: shared, entityType: 'MEMORY', entityId: hidden.id, reason: 'RENAME' } });
+    await db.node.create({ data: { id: generateId(), memoryId: hidden.id, loc: 'pas:010', name: 'Hidden' } });
+    await resolvers.Mutation.updateMemory(null, { id: draft.id, urn: 'shared' } as never, as());
+    await resolvers.Mutation.updateMemory(null, { id: draft.id, urn: 'specs-final' } as never, as());
+    await cite(`${shared}:pas:010`);
+
+    expect(await callerSees(`${shared}:pas:010`)).toBe('AMBIGUOUS');
+    expect((await unresolvedAt('pas:010')).map((r) => r.reason)).toEqual(['MISSING']);
+    expect(await mintBlocksOn('pas:010')).toBe(true);
+  });
+
+  it('CONTROL: when EVERY candidate is unreadable the ambiguity is concealed, and the report is what no alias at all would give', async () => {
+    const { formerUrn } = await vacateFormerUrn();
+    const address = `${formerUrn}:pas:500`;
+    await cite(address);
+    const baseline = await unresolvedAt('pas:500');
+    const baselineMint = await mintBlocksOn('pas:500');
+    const baselineBacklinks = await resolvers.Query.specBacklinks(null, { memoryRef: draft.id, loc: 'pas:500' }, as());
+
+    const hidden = await hiddenMemory('outsiders-private');
+    const [a, b] = await Promise.all(['pas:771', 'pas:772'].map((loc) =>
+      db.node.create({ data: { id: generateId(), memoryId: hidden.id, loc, name: loc } })));
+    await db.urnAlias.createMany({ data: [a.id, b.id].map((entityId) => ({
+      urn: address, entityType: 'NODE' as const, entityId, reason: 'RENAME' as const,
+    })) });
+
+    expect(await callerSees(address)).toBe('NOT_FOUND');
+    expect(await unresolvedAt('pas:500')).toEqual(baseline);
+    expect(await mintBlocksOn('pas:500')).toBe(baselineMint);
+    expect(await resolvers.Query.specBacklinks(null, { memoryRef: draft.id, loc: 'pas:500' }, as())).toEqual(baselineBacklinks);
   });
 });

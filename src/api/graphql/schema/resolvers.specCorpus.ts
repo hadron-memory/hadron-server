@@ -176,15 +176,41 @@ interface ScannableCorpus {
    */
   shadowed: Map<string, string[]>;
   /**
+   * (#1505) The subset of {@link shadowed} that HOLDS each former URN now: the
+   * published address. A live node there wins outright, before any alias, as in
+   * resolveNodeRef. Historical claimants do not win; they compete.
+   */
+  publishedHolders: Map<string, string[]>;
+  /**
    * (@codex P2, #1453) Other live memories that held the corpus's CURRENT URN
    * in the past. A citation with the current URN resolves to the corpus when
    * it has a live node at the loc (current-live precedence), and otherwise
    * falls through to one of these if IT has that loc, so it is not ours.
    */
   currentUrnHistorical: string[];
-  /** Historical MEMORY holders, including deleted ones, used only to translate NODE alias keys. */
+  /**
+   * (#1505, @codex P1 on #1506) The claimants the caller can NOT read, which
+   * {@link shadowed} and {@link currentUrnHistorical} omit. They never decide a
+   * citation alone. But the shared resolver still counts them when a readable
+   * candidate makes an ambiguity visible (isConcealedNodeRefAmbiguity), so the
+   * ambiguity decision must count them too.
+   */
+  hiddenShadowed: Map<string, string[]>;
+  hiddenCurrentUrnHistorical: string[];
+  /**
+   * (aa503a4c, #1494) Every memory that historically held a URN, DELETED ones
+   * included. Used only to translate NODE alias keys: resolveNodeRef follows a
+   * deleted memory's old prefix to a moved node's alias, but a deleted memory's
+   * own rows never compete.
+   */
   historicalTranslators: Map<string, string[]>;
-  /** Former names with a current holder the caller cannot read: decline uniformly, independent of its rows. */
+  /**
+   * (29c2245c, #1494) Former names whose CURRENT holder the caller cannot read.
+   * Every citation under such a name is classified the same way, whether or
+   * not that holder has a row at the cited loc, so backlinks, renumber and the
+   * unresolved report cannot probe it. A reader's resolver lands on that hidden
+   * holder, so for #1505 the citation is unresolvable: MISSING, blocking.
+   */
   unreadablePublishedUrns: Set<string>;
 }
 
@@ -278,75 +304,111 @@ async function loadScannableCorpus(ctx: Context, memoryRef: string): Promise<Sca
   for (const [urn, ids] of publishedHolders) {
     if ((await readable(ids)).length !== ids.length) unreadablePublishedUrns.add(urn);
   }
+  const hiddenShadowed = new Map<string, string[]>();
   for (const [urn, ids] of shadowed) {
     const visible = await readable(ids);
+    const hidden = ids.filter((m) => !visible.includes(m));
+    if (hidden.length) hiddenShadowed.set(urn, hidden);
     if (visible.length) shadowed.set(urn, visible);
     else shadowed.delete(urn);
   }
+  const visibleCurrentUrnHistorical = await readable(currentUrnHistorical);
+  for (const [urn, ids] of publishedHolders) {
+    const visible = (shadowed.get(urn) ?? []).filter((m) => ids.includes(m));
+    if (visible.length) publishedHolders.set(urn, visible);
+    else publishedHolders.delete(urn);
+  }
   return {
-    id, urn: memory.urn, pattern: corpusReferencePattern(urns), shadowed,
-    currentUrnHistorical: await readable(currentUrnHistorical),
+    id, urn: memory.urn, pattern: corpusReferencePattern(urns), shadowed, publishedHolders,
+    currentUrnHistorical: visibleCurrentUrnHistorical,
+    hiddenShadowed,
+    hiddenCurrentUrnHistorical: currentUrnHistorical.filter((m) => !visibleCurrentUrnHistorical.includes(m)),
     historicalTranslators,
     unreadablePublishedUrns,
   };
 }
 
 /**
- * Decide which scanned references really point into the corpus. A live node
- * at a competing address or a readable moved-node alias claims the citation;
- * the corpus's own live row wins for its current URN. Batch the lookups and
- * return the resolved corpus loc for the scan (or null for a foreign claim).
+ * (#1505) A citation of this corpus that a reader could not resolve, for one of
+ * two reasons:
+ * - the shared resolver refuses its address as ambiguous
+ *   (`AmbiguousLegacyUrnError`) while a candidate the caller can see is in
+ *   this corpus;
+ * - it is written under a former name whose CURRENT holder the caller cannot
+ *   read (29c2245c), so a reader's resolver lands on that hidden holder.
+ * It is not ours to attribute or rewrite, but a mint must not pass over it
+ * either. The unresolved report lists it as MISSING, uniformly, with no probe
+ * of hidden rows. A unique symbol, so it can never equal a loc a consumer
+ * compares against.
+ */
+const UNRESOLVABLE_REFERENCE: unique symbol = Symbol('unresolvable spec reference');
+
+/** One resolver candidate for a cited address: its corpus loc (null when in another memory) and whether the caller can read it. */
+interface Candidate { loc: string | null; readable: boolean }
+
+/** What a scanned reference resolves to: a corpus loc, another memory (null), or neither ({@link UNRESOLVABLE_REFERENCE}). */
+type ReferenceResolution = string | null | typeof UNRESOLVABLE_REFERENCE;
+
+/**
+ * Decide which scanned references really point into the corpus, mirroring
+ * resolveNodeRef as the CALLER sees it.
+ * 1. A live node at the published address wins outright: the corpus's own node
+ *    for its current URN, or the current holder's node for a former URN.
+ * 2. Otherwise the candidates are the resolver's: live nodes at the loc in
+ *    memories that historically held the URN (the corpus among them, for a
+ *    former URN), plus live targets of NODE aliases at the address. They are
+ *    keyed by node id, so a node counted twice is still one candidate.
+ * 3. No candidate: the loc is ours, and reports MISSING if nothing is there.
+ *    One candidate: ours if it is in the corpus, else another memory's.
+ *    Several: {@link UNRESOLVABLE_REFERENCE} when one is in the corpus, as the
+ *    resolver refuses it, else another memory's. The corpus's own candidate is
+ *    always readable, so a hidden second candidate still makes it ambiguous.
+ *
+ * Readability follows the resolver's own concealment rule
+ * (isConcealedNodeRefAmbiguity). An unreadable claimant or alias target never
+ * decides a citation on its own, so the report is no oracle for it
+ * (cor:api:140:03). But once a readable candidate makes the ambiguity visible,
+ * the hidden ones count, exactly as they do when a reader resolves the address.
  */
 async function referenceAcceptor(
   ctx: Context,
   corpus: ScannableCorpus,
   refs: ReadonlyArray<{ memoryUrn: string; targetLoc: string }>,
   forRewrite = false,
-): Promise<(ref: { memoryUrn: string; targetLoc: string }) => string | null> {
+): Promise<(ref: { memoryUrn: string; targetLoc: string }) => ReferenceResolution> {
   const { db } = ctx;
   const claimantsOf = (ref: { memoryUrn: string }): string[] =>
     ref.memoryUrn === corpus.urn ? corpus.currentUrnHistorical : (corpus.shadowed.get(ref.memoryUrn) ?? []);
-  const lookup = new Map<string, { memoryId: string; loc: string }>();
-  for (const ref of refs) {
-    for (const memoryId of [
-      ...claimantsOf(ref),
-      ...(corpus.historicalTranslators.get(ref.memoryUrn) ?? []),
-      corpus.id,
-    ]) {
-      lookup.set(`${memoryId}\u0000${ref.targetLoc}`, { memoryId, loc: ref.targetLoc });
-    }
-  }
-  const live: Array<{ id: string; memoryId: string; loc: string }> = [];
-  const locations = [...lookup.values()];
-  for (let offset = 0; offset < locations.length; offset += SCAN_PAGE) {
-    live.push(...await db.node.findMany({
-      where: { deletedAt: null, memory: { deletedAt: null }, OR: locations.slice(offset, offset + SCAN_PAGE) },
-      select: { id: true, memoryId: true, loc: true },
-    }));
-  }
-  const liveByAddress = new Map(live.map((n) => [`${n.memoryId}\u0000${n.loc}`, n]));
-  const taken = new Set(live.map((n) => `${n.memoryId}\u0000${n.loc}`));
-  // A former claimant may have renamed its MEMORY before moving a node. The
-  // NODE alias is then stored under that claimant's current URN, while this
-  // corpus still cites the former URN. Match the shared resolver's translated
-  // lookup; live targets are gated for readability after ambiguity detection.
-  const claimantIds = [...new Set(refs.flatMap((ref) => [
-    ...claimantsOf(ref), ...(corpus.historicalTranslators.get(ref.memoryUrn) ?? []),
-  ]))];
+  const hiddenClaimantsOf = (ref: { memoryUrn: string }): string[] =>
+    ref.memoryUrn === corpus.urn ? corpus.hiddenCurrentUrnHistorical : (corpus.hiddenShadowed.get(ref.memoryUrn) ?? []);
+  /** Every live claimant, readable or not: the resolver's own candidate source. */
+  const allClaimantsOf = (ref: { memoryUrn: string }): string[] => [...claimantsOf(ref), ...hiddenClaimantsOf(ref)];
+  const publishedOf = (ref: { memoryUrn: string }): string[] =>
+    ref.memoryUrn === corpus.urn ? [corpus.id] : (corpus.publishedHolders.get(ref.memoryUrn) ?? []);
+  // A former claimant may have MOVED its node away and left a NODE alias at
+  // the cited address. The row lookup below then misses it, but resolveNodeRef
+  // still follows it. (48fc896f) The claimant may also have renamed its MEMORY
+  // before the move, which stores the NODE alias under that claimant's CURRENT
+  // URN while this corpus still cites the former one; match the resolver's
+  // translated lookup too. Query each distinct key once. Unreadable claimants
+  // are included here, because the resolver follows their aliases too; their
+  // candidates count only when the ambiguity is visible anyway (see below).
+  const translatorsOf = (ref: { memoryUrn: string }): string[] =>
+    [...new Set([...allClaimantsOf(ref), ...(corpus.historicalTranslators.get(ref.memoryUrn) ?? [])])];
+  const claimantIds = [...new Set(refs.flatMap((ref) => translatorsOf(ref)))];
   const claimantUrns = new Map<string, string>();
   for (let offset = 0; offset < claimantIds.length; offset += SCAN_PAGE) {
     for (const memory of await db.memory.findMany({
+      // Deleted memories included (aa503a4c): they still translate an alias key.
       where: { id: { in: claimantIds.slice(offset, offset + SCAN_PAGE) } },
       select: { id: true, urn: true },
     })) claimantUrns.set(memory.id, memory.urn);
   }
   const aliasKeysByAddress = new Map<string, string[]>();
-  const refByAddress = new Map<string, { memoryUrn: string; targetLoc: string }>();
   for (const ref of refs) {
     const address = `${ref.memoryUrn}:${ref.targetLoc}`;
-    refByAddress.set(address, ref);
     const keys = new Set([address]);
-    for (const id of [...claimantsOf(ref), ...(corpus.historicalTranslators.get(ref.memoryUrn) ?? [])]) {
+    for (const id of translatorsOf(ref)) {
       const currentUrn = claimantUrns.get(id);
       if (currentUrn) keys.add(`${currentUrn}:${ref.targetLoc}`);
     }
@@ -368,65 +430,95 @@ async function referenceAcceptor(
       select: { id: true, memoryId: true, loc: true },
     })) aliasTargets.set(target.id, { memoryId: target.memoryId, loc: target.loc });
   }
-  const readableMemories = new Set([corpus.id]);
-  for (const memoryId of new Set([...live, ...aliasTargets.values()].map((target) => target.memoryId))) {
-    if (memoryId === corpus.id || await isMemoryReadableCached(ctx, memoryId)) readableMemories.add(memoryId);
+  // Every live alias target, with its corpus loc (null when it is in another
+  // memory) and whether the caller can read it. An alias whose live target
+  // moved INTO this corpus is a corpus candidate even when a different memory
+  // now holds the old URN. The corpus is readable (loadScannableCorpus gates it).
+  const targetInfo = new Map<string, Candidate>();
+  for (const [id, target] of aliasTargets) {
+    targetInfo.set(id, target.memoryId === corpus.id
+      ? { loc: target.loc, readable: true }
+      : { loc: null, readable: await isMemoryReadableCached(ctx, target.memoryId) });
   }
-  const aliasesByUrn = new Map<string, Array<{ entityId: string }>>();
-  for (const alias of aliases) {
-    const grouped = aliasesByUrn.get(alias.urn) ?? [];
-    grouped.push(alias);
-    aliasesByUrn.set(alias.urn, grouped);
-  }
-  // The alias table permits several targets for one address. Like
-  // resolveNodeRef, never pick a target by query order when the visible
-  // candidates disagree; an ambiguous citation cannot be safely rewritten.
-  const aliasResolved = new Map<string, string | null>();
+  const aliasesByUrn = new Map<string, string[]>();
+  for (const alias of aliases) aliasesByUrn.set(alias.urn, [...(aliasesByUrn.get(alias.urn) ?? []), alias.entityId]);
+  // Per cited address, every live alias target reached through any of its keys.
+  const aliasCandidates = new Map<string, Map<string, Candidate>>();
   for (const [address, keys] of aliasKeysByAddress) {
-    const targets = new Map<string, { memoryId: string; loc: string }>();
-    const ref = refByAddress.get(address)!;
-    // resolveNodeRef combines live nodes in historical holders with moved-node
-    // aliases. A former corpus URN can still reach a live corpus node at the
-    // cited loc, and a second (even hidden) alias then makes it ambiguous.
-    for (const id of [
-      ...(corpus.historicalTranslators.get(ref.memoryUrn) ?? []),
-      ...(ref.memoryUrn === corpus.urn ? [] : [corpus.id]),
-    ]) {
-      const node = liveByAddress.get(`${id}\u0000${ref.targetLoc}`);
-      if (node) targets.set(node.id, { memoryId: node.memoryId, loc: node.loc });
-    }
+    const targets = new Map<string, Candidate>();
     for (const key of keys) {
-      for (const alias of aliasesByUrn.get(key) ?? []) {
-        const target = aliasTargets.get(alias.entityId);
-        if (target) targets.set(alias.entityId, target);
+      for (const id of aliasesByUrn.get(key) ?? []) {
+        const info = targetInfo.get(id);
+        if (info) targets.set(id, info);
       }
     }
-    if (targets.size === 1) {
-      const target = targets.values().next().value!;
-      if (readableMemories.has(target.memoryId)) aliasResolved.set(address, target.memoryId === corpus.id ? target.loc : null);
-    } else if ([...targets.values()].some((target) => readableMemories.has(target.memoryId))) {
-      // The shared resolver exposes ambiguity when at least one candidate is
-      // readable, even if another candidate is hidden. Never select the one
-      // readable alias by dropping its hidden competitor.
-      aliasResolved.set(address, null);
+    if (targets.size) aliasCandidates.set(address, targets);
+  }
+  // Live rows at the cited loc, only where something competes with the
+  // corpus: a claimant, or an alias at the address. The corpus's own row is
+  // looked up for both the current URN (the published address) and a former
+  // one (where it is one historical holder among others).
+  const lookup = new Map<string, { memoryId: string; loc: string }>();
+  for (const ref of refs) {
+    const claimants = allClaimantsOf(ref);
+    if (!claimants.length && !aliasCandidates.has(`${ref.memoryUrn}:${ref.targetLoc}`)) continue;
+    for (const memoryId of [...claimants, corpus.id]) {
+      lookup.set(`${memoryId}\u0000${ref.targetLoc}`, { memoryId, loc: ref.targetLoc });
     }
   }
+  const live = new Map<string, string>();
+  const keys = [...lookup.values()];
+  for (let offset = 0; offset < keys.length; offset += SCAN_PAGE) {
+    for (const n of await db.node.findMany({
+      where: { deletedAt: null, memory: { deletedAt: null }, OR: keys.slice(offset, offset + SCAN_PAGE) },
+      select: { id: true, memoryId: true, loc: true },
+    })) live.set(`${n.memoryId}\u0000${n.loc}`, n.id);
+  }
   return (ref) => {
-    // A current holder of a former name may be private. Classify every cited
-    // loc under that name the same way, whether or not that holder has a row:
-    // otherwise backlinks and renumber dry-runs become a foreign-loc probe.
-    if (corpus.unreadablePublishedUrns.has(ref.memoryUrn)) return null;
-    if (ref.memoryUrn === corpus.urn && taken.has(`${corpus.id}\u0000${ref.targetLoc}`)) return ref.targetLoc;
-    if (claimantsOf(ref).some((m) => taken.has(`${m}\u0000${ref.targetLoc}`))) return null;
-    const address = `${ref.memoryUrn}:${ref.targetLoc}`;
-    if (forRewrite && ref.memoryUrn !== corpus.urn) {
-      // A former name with no confirmed corpus target may now belong to a
-      // hidden published holder. Decline it uniformly, with or without that
-      // holder's row, so the dry-run cannot probe foreign child addresses.
-      if (aliasResolved.has(address)) return aliasResolved.get(address)!;
-      return taken.has(`${corpus.id}\u0000${ref.targetLoc}`) ? ref.targetLoc : null;
+    // (29c2245c) A current holder of a former name may be hidden. Classify
+    // every cited loc under that name the same way, with or without its row,
+    // so no surface becomes a foreign-loc probe. #1505: a reader resolves the
+    // address to that hidden holder, so it is unresolvable, not "someone
+    // else's" -- the mint blocks; backlinks and renumber never take it.
+    if (corpus.unreadablePublishedUrns.has(ref.memoryUrn)) return UNRESOLVABLE_REFERENCE;
+    const loc = ref.targetLoc;
+    const at = (memoryId: string) => live.get(`${memoryId}\u0000${loc}`);
+    // 1. The published address wins before any alias.
+    if (ref.memoryUrn === corpus.urn && at(corpus.id)) return loc;
+    const published = publishedOf(ref);
+    if (ref.memoryUrn !== corpus.urn && published.some((m) => at(m))) return null;
+    // 2. The resolver's candidates, keyed by node id, readable or not.
+    const candidates = new Map<string, Candidate>();
+    for (const m of claimantsOf(ref)) {
+      const id = !published.includes(m) ? at(m) : undefined;
+      if (id) candidates.set(id, { loc: null, readable: true });
     }
-    return aliasResolved.has(address) ? aliasResolved.get(address)! : ref.targetLoc;
+    for (const m of hiddenClaimantsOf(ref)) {
+      const id = at(m);
+      if (id) candidates.set(id, { loc: null, readable: false });
+    }
+    const own = ref.memoryUrn !== corpus.urn ? at(corpus.id) : undefined;
+    if (own) candidates.set(own, { loc, readable: true });
+    for (const [id, c] of aliasCandidates.get(`${ref.memoryUrn}:${loc}`) ?? []) candidates.set(id, c);
+    // 3. Decide, with the resolver's concealment rule
+    // (isConcealedNodeRefAmbiguity, cor:urn:030:01/:02): an ambiguity is
+    // visible to this caller iff it can read at least one candidate. Until
+    // then, unreadable candidates decide nothing, so the report cannot become
+    // an oracle for them. Once one candidate is readable, the resolver already
+    // refuses the address to this caller (node(ref:) answers
+    // AmbiguousLegacyUrnError), so counting the hidden ones discloses nothing
+    // new. Leaving them out would mint a citation no reader can resolve
+    // (@codex P1 on #1506).
+    const visible = [...candidates.values()].filter((c) => c.readable);
+    if (visible.length === 0) {
+      // (8eacfc78, #1494) A renumber rewrites a former-name citation only with
+      // a CONFIRMED corpus target. Without one, the name may now belong to a
+      // hidden published holder; decline uniformly, with or without that
+      // holder's row, so a dry run cannot probe foreign child addresses.
+      return forRewrite && ref.memoryUrn !== corpus.urn ? null : loc;
+    }
+    if (candidates.size === 1) return visible[0].loc;
+    return visible.some((c) => c.loc !== null) ? UNRESOLVABLE_REFERENCE : null;
   };
 }
 
@@ -602,6 +694,13 @@ async function unresolvedReferencesIn(
     const accept = await referenceAcceptor(ctx, corpus, scanned);
     for (const r of scanned) {
       const resolvedLoc = accept(r);
+      // (#1505) The shared resolver refuses this address as ambiguous, and one
+      // of the candidates it can see is ours. Report it as MISSING so the mint
+      // blocks on it, and name it only by the citation already in our own text.
+      if (resolvedLoc === UNRESOLVABLE_REFERENCE) {
+        out.push({ ...fromScan(r), reason: 'MISSING' });
+        continue;
+      }
       if (resolvedLoc === null) continue;
       const target = byLoc.get(resolvedLoc);
       if (!target) out.push({ ...fromScan(r), reason: 'MISSING' });
@@ -829,7 +928,14 @@ export const specCorpusRenumberMutations = {
     // When a prior holder of our URN also has a node at fromLoc, our own live
     // node there is what makes those references ours; once it has moved, the
     // prior holder's node would claim them and they would be left unrewritten.
-    const accept = await referenceAcceptor(ctx, corpus, scanReferences(nodes, corpus.pattern), true);
+    const resolve = await referenceAcceptor(ctx, corpus, scanReferences(nodes, corpus.pattern), true);
+    // (#1505) Only a reference that resolves to a corpus loc is rewritten. An
+    // ambiguous one is not ours to pick a target for: the rewriter treats any
+    // non-null value as "rewrite", so narrow here.
+    const accept = (ref: { memoryUrn: string; targetLoc: string }): string | null => {
+      const resolved = resolve(ref);
+      return typeof resolved === 'string' ? resolved : null;
+    };
 
     const rewrites: RewriteOut[] = [];
     try {
