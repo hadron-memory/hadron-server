@@ -707,3 +707,42 @@ describe('testAiServiceConfig override.params review round (#1415)', () => {
     expect(captured[0].body).toMatchObject({ max_tokens: 16 });
   });
 });
+
+describe('#1417 — the Test sends the params\' knobs through the run mapping, and reports what each did', () => {
+  it('saved params: temperature reaches the wire; a knob the platform does not forward is reported NOT_SENT', async () => {
+    const cfg = await mkConfig({ organizationId: org.id, params: { temperature: 0.3, unknownKnob: true } });
+    const r = await test(cfg.id, ctxFor(admin.id));
+    expect(r.ok).toBe(true);
+    expect(captured[0].body).toMatchObject({ temperature: 0.3 });
+    expect(captured[0].body).not.toHaveProperty('unknownKnob');
+    expect(r.knobs).toEqual([
+      { param: 'temperature', state: 'SENT' },
+      expect.objectContaining({ param: 'unknownKnob', state: 'NOT_SENT' }),
+    ]);
+    // Additive: used.params keeps its meaning, saved vs override.
+    expect(r.used.params).toBe('SAVED');
+  });
+
+  it('override params: the edit\'s temperature is sent, never stored, and reported', async () => {
+    const cfg = await mkConfig({ organizationId: org.id, params: { temperature: 0.1 } });
+    const r = await test(cfg.id, ctxFor(admin.id), { params: { temperature: 0.9 } });
+    expect(captured[0].body).toMatchObject({ temperature: 0.9 });
+    expect(r.knobs).toEqual([{ param: 'temperature', state: 'SENT' }]);
+    expect(r.used.params).toBe('OVERRIDE');
+    expect((await db.aiServiceConfig.findUniqueOrThrow({ where: { id: cfg.id } })).params).toEqual({ temperature: 0.1 });
+  });
+
+  it('knobs are empty unless the call completed: no key, or a failed call', async () => {
+    const keyless = await mkConfig({ organizationId: org.id, apiKeyEncrypted: null, apiKeyPreview: null, params: { temperature: 0.5 } });
+    expect((await test(keyless.id, ctxFor(admin.id))).knobs).toEqual([]);
+    const failing = await mkConfig({ organizationId: org.id, endpoint: `${origin}/echo-key/v4`, params: { temperature: 0.5 } });
+    const r = await test(failing.id, ctxFor(admin.id));
+    expect(r.ok).toBe(false);
+    expect(r.knobs).toEqual([]);
+  });
+
+  it('the SDL exposes knobs on the result', () => {
+    expect(typeDefs).toMatch(/knobs: \[AiConfigTestKnob!\]!/);
+    expect(typeDefs).toMatch(/type AiConfigTestKnob \{/);
+  });
+});
