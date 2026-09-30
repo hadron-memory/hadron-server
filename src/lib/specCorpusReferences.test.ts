@@ -300,13 +300,14 @@ describe('former URNs use live-address precedence (@codex P2 on #1453)', () => {
     expect(res.rewrites.find((r) => r.loc === 'pas:020')).toMatchObject({ status: 'REWRITTEN', count: 1 });
     const after = await content('pas:020');
     expect(after).toContain(`hrn:node:${oldUrn}:pas:010.`);      // the squatter's node: untouched
-    expect(after).toContain(`hrn:node:${oldUrn}:pas:040:01`);    // ours: rewritten, spelling kept
+    expect(after).toContain(`hrn:node:${newUrn}:pas:040:01`);    // ours: canonical current memory
     expect(newUrn).not.toBe(oldUrn);
   });
 
   it('keeps a former-URN alias whose live target moved into this corpus', async () => {
     const formerUrn = draft.urn;
     await resolvers.Mutation.updateMemory(null, { id: draft.id, urn: 'specs-draft-renamed' } as never, as());
+    const newUrn = (await db.memory.findUniqueOrThrow({ where: { id: draft.id } })).urn;
     const squatter = await resolvers.Mutation.createMemory(null, { orgId: org.id, name: 'specs-draft' }, as());
     expect(squatter.urn).toBe(formerUrn);
     // The former holder no longer has the address; its NODE alias resolves to
@@ -324,12 +325,37 @@ describe('former URNs use live-address precedence (@codex P2 on #1453)', () => {
       null, { memoryRef: draft.id, fromLoc: 'pas:010', toLoc: 'pas:040' }, as(),
     );
     expect(result.rewrites.find((row) => row.nodeId === other.id)).toMatchObject({ status: 'REWRITTEN', count: 1 });
-    expect(await content('pas:020')).toContain(`hrn:node:${formerUrn}:pas:040`);
+    expect(await content('pas:020')).toContain(`hrn:node:${newUrn}:pas:040`);
+  });
+
+  it('rewrites a former-URN alias to the corpus current URN when the published destination is occupied', async () => {
+    const formerUrn = draft.urn;
+    await resolvers.Mutation.updateMemory(null, { id: draft.id, urn: 'specs-draft-renamed' } as never, as());
+    const currentUrn = (await db.memory.findUniqueOrThrow({ where: { id: draft.id } })).urn;
+    const holder = await resolvers.Mutation.createMemory(null, { orgId: org.id, name: 'specs-draft' }, as());
+    const occupant = await db.node.create({ data: {
+      id: generateId(), memoryId: holder.id, loc: 'pas:040', name: 'Published destination occupant',
+    } });
+    await db.urnAlias.create({ data: {
+      urn: `${formerUrn}:pas:500`, entityType: 'NODE', entityId: feature.id, reason: 'RENAME',
+    } });
+    await db.node.update({ where: { id: other.id }, data: {
+      content: `Alias: hrn:node:${formerUrn}:pas:500.`,
+    } });
+
+    const result = await specCorpusRenumberMutations.renumberSpec(
+      null, { memoryRef: draft.id, fromLoc: 'pas:010', toLoc: 'pas:040' }, as(),
+    );
+    expect(result.rewrites.find((row) => row.nodeId === other.id)).toMatchObject({ status: 'REWRITTEN', count: 1 });
+    expect(await content('pas:020')).toContain(`hrn:node:${currentUrn}:pas:040`);
+    await expect(resolveNodeRefForCaller(as(), `hrn:node:${currentUrn}:pas:040`)).resolves.toEqual({ id: feature.id });
+    await expect(resolveNodeRefForCaller(as(), `hrn:node:${formerUrn}:pas:040`)).resolves.toEqual({ id: occupant.id });
   });
 
   it('uses the target loc when a former-URN alias reaches this corpus at a different loc', async () => {
     const formerUrn = draft.urn;
     await resolvers.Mutation.updateMemory(null, { id: draft.id, urn: 'specs-draft-renamed' } as never, as());
+    const newUrn = (await db.memory.findUniqueOrThrow({ where: { id: draft.id } })).urn;
     const squatter = await resolvers.Mutation.createMemory(null, { orgId: org.id, name: 'specs-draft' }, as());
     expect(squatter.urn).toBe(formerUrn);
     await db.urnAlias.create({ data: {
@@ -348,7 +374,7 @@ describe('former URNs use live-address precedence (@codex P2 on #1453)', () => {
       null, { memoryRef: draft.id, fromLoc: 'pas:010', toLoc: 'pas:040' }, as(),
     );
     expect(result.rewrites.find((row) => row.nodeId === other.id)).toMatchObject({ status: 'REWRITTEN', count: 1 });
-    expect(await content('pas:020')).toContain(`hrn:node:${formerUrn}:pas:040`);
+    expect(await content('pas:020')).toContain(`hrn:node:${newUrn}:pas:040`);
   });
 
   it('does not choose arbitrarily among multiple live aliases for one former address', async () => {

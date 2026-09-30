@@ -736,13 +736,14 @@ function planRewrite(
   fromLoc: string,
   toLoc: string,
   accept: (ref: { memoryUrn: string; targetLoc: string }) => string | null,
+  currentMemoryUrn: string,
 ) {
   const patch: Partial<Record<ScannedField, string>> = {};
   let count = 0;
   for (const field of SCANNED_FIELDS) {
     const before = n.fields[field];
     if (!before) continue;
-    const r = rewriteCorpusReferences(before, pattern, fromLoc, toLoc, accept);
+    const r = rewriteCorpusReferences(before, pattern, fromLoc, toLoc, accept, currentMemoryUrn);
     if (r.count > 0) {
       patch[field] = r.text;
       count += r.count;
@@ -756,8 +757,9 @@ export const specCorpusRenumberMutations = {
    * #1449 — renumber a spec in a DRAFT corpus: move it and its subtree from
    * `fromLoc` to `toLoc` (no URN alias, since it is a draft), then rewrite
    * every node URN in the corpus that cites the moved specs, each as a normal
-   * edit with revision history. Only the loc inside each URN changes; its
-   * spelling and any URL around it are kept.
+   * edit with revision history. A former memory name is replaced by the
+   * corpus's current name so the new loc cannot resolve to a reused holder;
+   * the prefix, separator style and any URL around it are kept.
    *
    * A citation written only as TEXT (a link label, a name, prose) cannot be
    * told from other characters, so it is REPORTED with its location and left
@@ -853,7 +855,7 @@ export const specCorpusRenumberMutations = {
       }
 
       for (const n of nodes) {
-        const plan = planRewrite(n, corpus.pattern, fromLoc, toLoc, accept);
+        const plan = planRewrite(n, corpus.pattern, fromLoc, toLoc, accept, corpus.urn);
         if (!plan) continue;
         const row: RewriteOut = {
           nodeId: n.id, loc: n.loc, fields: Object.keys(plan.patch), count: plan.count,
@@ -936,7 +938,7 @@ async function rewriteWithRetry(
     );
     node = await loadCorpusNode(ctx.db, corpus.id, initial.id);
     if (!node) return null; // deleted or moved out meanwhile: nothing left to rewrite
-    const plan = planRewrite(node, corpus.pattern, fromLoc, toLoc, accept);
+    const plan = planRewrite(node, corpus.pattern, fromLoc, toLoc, accept, corpus.urn);
     if (!plan) return null; // a concurrent edit already removed the references
     try {
       await writeNodeCore(

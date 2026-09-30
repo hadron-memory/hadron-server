@@ -114,8 +114,10 @@ export function renumberedLoc(loc: string, fromLoc: string, toLoc: string): stri
 }
 
 /**
- * Rewrite every reference into the renumbered subtree, keeping each URN's own
- * spelling (prefix, separators, URL around it) and replacing only its loc.
+ * Rewrite every reference into the renumbered subtree, keeping its prefix,
+ * separator style and surrounding URL. When supplied, canonicalMemoryUrn
+ * replaces a former memory name: a reused published name could resolve the
+ * new loc to a different memory after the move.
  */
 export function rewriteCorpusReferences(
   text: string,
@@ -124,6 +126,7 @@ export function rewriteCorpusReferences(
   toLoc: string,
   /** False for a foreign reference; a loc for an alias into the corpus at a different address. */
   accept: (ref: TextReferenceMatch) => boolean | string | null = () => true,
+  canonicalMemoryUrn?: string,
 ): { text: string; count: number } {
   let count = 0;
   let out = '';
@@ -133,7 +136,14 @@ export function rewriteCorpusReferences(
     if (resolved === false || resolved === null) continue;
     const next = renumberedLoc(typeof resolved === 'string' ? resolved : ref.targetLoc, fromLoc, toLoc);
     if (next === null) continue;
-    out += text.slice(last, ref.locStart) + next;
+    if (canonicalMemoryUrn && ref.memoryUrn !== canonicalMemoryUrn) {
+      const prefix = ref.urn.match(/^(?:hrn|urn):node:/i)?.[0] ?? '';
+      const separator = ref.urn.slice(0, -ref.targetLoc.length).endsWith('::') ? '::' : ':';
+      out += text.slice(last, ref.start) + prefix
+        + canonicalMemoryUrn.replace(/::/g, ':').replace(/:/g, separator) + separator + next;
+    } else {
+      out += text.slice(last, ref.locStart) + next;
+    }
     last = ref.end;
     count++;
   }

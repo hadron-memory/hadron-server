@@ -92,6 +92,18 @@ describe('renumber rewrite', () => {
       + 'micromentor.org::specs-draft::pas:020, hrn:node:micromentor.org:specs-draft:pas:011');
   });
 
+  it('uses the current memory name for former URNs while keeping their separator style and URL', () => {
+    const pattern = corpusReferencePattern(['micromentor.org:specs-old', 'micromentor.org:specs-new']);
+    const text = '[x](https://h/app/u/URN:NODE:micromentor.org::specs-old::pas:010) '
+      + 'hrn:node:micromentor.org:specs-old:pas:010';
+    expect(rewriteCorpusReferences(text, pattern, 'pas:010', 'pas:040', () => true, 'micromentor.org:specs-new'))
+      .toEqual({
+        text: '[x](https://h/app/u/URN:NODE:micromentor.org::specs-new::pas:040) '
+          + 'hrn:node:micromentor.org:specs-new:pas:040',
+        count: 2,
+      });
+  });
+
   it('returns the text unchanged when nothing matches', () => {
     expect(rewriteCorpusReferences('no refs here', P, 'pas:010', 'pas:020')).toEqual({ text: 'no refs here', count: 0 });
   });
