@@ -201,11 +201,9 @@ export async function managedMemory(ctx: Context, memoryRef: string): Promise<Me
  * must not still save. Asked FRESH — without the request's memos, which would
  * replay the pre-check — on the memory row as it reads now, and refused with
  * the same not-found answer as the pre-check, and on the transaction's own
- * connection (see `withoutRequestCaches`). Residual, as in `lockRuleRefs`:
- * neither the memory row nor the membership is locked, so a revocation that
- * commits after this read and before our commit still saves. That window is
- * every authorize-then-write surface's; this keeps our own lock waits from
- * widening it.
+ * connection (see `withoutRequestCaches`). The Memory row is locked before
+ * this recheck so an ownership transfer cannot commit between it and the
+ * rule write. Membership revocation still needs its own serialization.
  */
 export async function reassertManage(
   ctx: Context,
@@ -213,6 +211,7 @@ export async function reassertManage(
   memoryId: string,
   notFound: () => Error,
 ): Promise<void> {
+  await tx.$queryRaw`SELECT id FROM memories WHERE id = ${memoryId} FOR UPDATE`;
   const memory = await tx.memory.findFirst({ where: { id: memoryId, deletedAt: null }, select: MEMORY_GATE_SELECT });
   if (!memory || !(await canManageMemoryConfig(withoutRequestCaches(ctx, tx), memory))) throw notFound();
 }

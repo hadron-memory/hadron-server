@@ -11,7 +11,7 @@
  * Never throws onto the caller's request path.
  */
 
-import type { PrismaClient } from '../../generated/prisma/index.js';
+import type { Prisma, PrismaClient } from '../../generated/prisma/index.js';
 import { isEmbeddingConfigured } from '../../lib/embedding/index.js';
 import { embedNode, EMBED_WAKE_SUBJECT, type EmbedPlaintext } from '../../jobs/embedNodes.js';
 import { getBusClient } from '../../lib/bus/index.js';
@@ -141,11 +141,11 @@ export async function backfillMemoryEmbeddings(
  * failures whose pending marker was cleared (previously recoverable only by
  * hand-written SQL) and retryable-class failures sitting out a backoff
  * (made immediately eligible). Resets the failure state exactly like a
- * fresh write would, then pings the bus so recovery doesn't wait for sweep
- * ticks. Returns the count re-stamped.
+ * fresh write would. The caller pings the bus after its transaction commits,
+ * so the prompt drain can see the durable marker. Returns the count re-stamped.
  */
 export async function restampFailedEmbeddings(
-  db: PrismaClient,
+  db: PrismaClient | Prisma.TransactionClient,
   memoryId: string,
 ): Promise<number> {
   const res = await db.node.updateMany({
@@ -157,6 +157,5 @@ export async function restampFailedEmbeddings(
       embeddingAttempts: 0,
     },
   });
-  if (res.count > 0) void publishEmbedWake({});
   return res.count;
 }
