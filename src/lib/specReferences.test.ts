@@ -51,6 +51,8 @@ describe('findCorpusReferences', () => {
   it('does not swallow sentence punctuation, but keeps dots inside an atom', () => {
     expect(locs('Cite micromentor.org:specs-draft:pas:010:01.')).toEqual(['pas:010:01']);
     expect(locs('Cite micromentor.org:specs-draft:v1.2:intro, then')).toEqual(['v1.2:intro']);
+    expect(locs('Cite micromentor.org:specs-draft:pas:010...')).toEqual(['pas:010']);
+    expect(locs('Cite micromentor.org:specs-draft:pas:010.. next')).toEqual(['pas:010']);
   });
 
   it('does not report references with an atom longer than the 64-character loc limit (#1478)', () => {
@@ -111,5 +113,7 @@ describe('findTextCitations', () => {
     expect(findTextCitations('See pas:010:01.v2 too', P, 'pas:010').map((c) => c.citation)).toEqual(['pas:010:01.v2']);
     expect(findTextCitations('See pas:010._v2 too', P, 'pas:010')).toEqual([]);
     expect(findTextCitations('See pas:010..v2 too', P, 'pas:010')).toEqual([]);
+    expect(findTextCitations('See pas:010... Then more.', P, 'pas:010').map((c) => c.citation)).toEqual(['pas:010']);
+    expect(findTextCitations('See pas:010.. next', P, 'pas:010').map((c) => c.citation)).toEqual(['pas:010']);
   });
 });

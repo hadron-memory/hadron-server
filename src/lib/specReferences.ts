@@ -70,7 +70,7 @@ export function corpusReferencePattern(memoryUrns: readonly string[]): RegExp {
     // `<corpus>::pas:010::x` names loc `x` in a deeper memory, not `pas:010`
     // here. Rejecting only `::` is not enough, since the loc would backtrack to
     // `pas`; a real loc already consumes every `:<atom>` greedily.
-    `(?<![A-Za-z0-9._:-])((?:[Hh][Rr][Nn]|[Uu][Rr][Nn]):[Nn][Oo][Dd][Ee]:)?(${memories.join('|')})${SEP}(${LOC})(?![A-Za-z0-9_-]|:[A-Za-z0-9:]|\\.[A-Za-z0-9._-])`,
+    `(?<![A-Za-z0-9._:-])((?:[Hh][Rr][Nn]|[Uu][Rr][Nn]):[Nn][Oo][Dd][Ee]:)?(${memories.join('|')})${SEP}(${LOC})(?![A-Za-z0-9_-]|:[A-Za-z0-9:]|\\.[._-]*[A-Za-z0-9])`,
     'g',
   );
 }
@@ -164,9 +164,9 @@ export function findTextCitations(
   const insideUrn = (i: number) => urnSpans.some(([s, e]) => i >= s && i < e);
   // (@codex P2, #1453) A dot followed by an atom character continues the loc
   // (`pas:010.v2` is a different citation), while a dot ending a sentence
-  // does not. Atom interiors also permit underscores, dashes and another dot
-  // (`pas:010._v2`, `pas:010..v2`).
-  const re = new RegExp(`(?<![A-Za-z0-9._:-])${escapeRe(fromLoc)}(?::${ATOM})*(?![A-Za-z0-9_:-]|\\.[A-Za-z0-9._-])`, 'g');
+  // does not. Interior dots, underscores and dashes continue the atom only
+  // when an alphanumeric end follows (`pas:010..v2`, not `pas:010...`).
+  const re = new RegExp(`(?<![A-Za-z0-9._:-])${escapeRe(fromLoc)}(?::${ATOM})*(?![A-Za-z0-9_:-]|\\.[._-]*[A-Za-z0-9])`, 'g');
   const out: TextCitationMatch[] = [];
   for (const m of text.matchAll(re)) {
     if (insideUrn(m.index!)) continue;
