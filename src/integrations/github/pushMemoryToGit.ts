@@ -16,6 +16,7 @@ import {
   orphanedLegacyPaths,
 } from './nodeFrontmatter.js';
 import { validateGitBranch } from '../../lib/gitRef.js';
+import { withMirrorCheckoutLock } from './mirrorCheckoutLock.js';
 
 function memoryLocalPath(orgUrn: string, memoryUrn: string): string {
   const slug = memoryUrn.includes(':') ? memoryUrn.split(':').slice(1).join(':') : memoryUrn;
@@ -29,6 +30,20 @@ function memoryLocalPath(orgUrn: string, memoryUrn: string): string {
  * Returns { nodeCount, error? }
  */
 export async function pushMemoryToGit(
+  memoryId: string,
+): Promise<{ nodeCount: number; error?: string }> {
+  // A manual full push uses the same clone as incremental Node/Edge mirrors.
+  // Hold their cross-process checkout lock through the entire push, including
+  // the final remote-URL restoration.
+  try {
+    return await withMirrorCheckoutLock(memoryId, () => pushMemoryToGitUnderLock(memoryId));
+  } catch (err) {
+    console.error('[pushMemoryToGit] Checkout lock failed:', err);
+    return { nodeCount: 0, error: `Git checkout lock failed: ${String(err)}` };
+  }
+}
+
+async function pushMemoryToGitUnderLock(
   memoryId: string,
 ): Promise<{ nodeCount: number; error?: string }> {
   // 1. Load memory + org
@@ -116,7 +131,7 @@ export async function pushMemoryToGit(
     }
     await prepareWriteBranch(localPath, branch, memory.readBranch ?? undefined);
   } catch (err) {
-    restoreRemote(localPath, memory.source);
+    await restoreRemote(localPath, memory.source);
     return { nodeCount: 0, error: `Git setup failed: ${(err as Error).message}` };
   }
 
@@ -196,7 +211,7 @@ export async function pushMemoryToGit(
     await execGit(['add', '-A'], { cwd: localPath });
     const { stdout } = await execGit(['status', '--porcelain'], { cwd: localPath });
     if (!stdout.trim()) {
-      restoreRemote(localPath, memory.source);
+      await restoreRemote(localPath, memory.source);
       return { nodeCount: nodes.length, error: undefined };
     }
 
@@ -232,19 +247,23 @@ export async function pushMemoryToGit(
       );
       console.log(`[pushMemoryToGit] Pushed ${nodes.length} nodes → ${memory.urn}@${branch}`);
     } finally {
-      restoreRemote(localPath, memory.source);
+      await restoreRemote(localPath, memory.source);
     }
 
     return { nodeCount: nodes.length };
   } catch (err) {
-    restoreRemote(localPath, memory.source);
+    await restoreRemote(localPath, memory.source);
     return { nodeCount: 0, error: `Commit/push failed: ${(err as Error).message}` };
   }
 }
 
-function restoreRemote(localPath: string, originalUrl: string): void {
+async function restoreRemote(localPath: string, originalUrl: string): Promise<void> {
   if (existsSync(join(localPath, '.git'))) {
-    execGit(['remote', 'set-url', 'origin', originalUrl], { cwd: localPath }).catch(() => {});
+    try {
+      await execGit(['remote', 'set-url', 'origin', originalUrl], { cwd: localPath });
+    } catch (err) {
+      console.error(`[pushMemoryToGit] Failed to restore remote URL at ${localPath}:`, err);
+    }
   }
 }
 

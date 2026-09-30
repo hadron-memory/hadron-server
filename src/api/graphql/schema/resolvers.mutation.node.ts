@@ -1575,6 +1575,7 @@ export async function writeNodeCore(
               isRunnable: finalNode.isRunnable ?? null,
               isPlaceholder: committed.isPlaceholder,
               outgoingEdges: finalNode.outgoingEdges ?? [],
+              mirrorRevSeq: finalNode.revSeq,
             }, input.ownerRepo ?? '', ctx.clientId, input.memoryId);
           })().catch((err) => {
             console.error('[writeNodeCore] git write error:', err);
@@ -2798,6 +2799,7 @@ export const nodeMutations = {
                 isRunnable: fresh.isRunnable ?? null,
                 isPlaceholder: fresh.isPlaceholder,
                 outgoingEdges: fresh.outgoingEdges ?? [],
+                mirrorRevSeq: fresh.revSeq,
               },
               p.ownerRepo,
               ctx.clientId,
@@ -4023,6 +4025,7 @@ export const nodeMutations = {
             isRunnable: finalNode.isRunnable ?? null,
             isPlaceholder: finalNode.isPlaceholder,
             outgoingEdges: finalNode.outgoingEdges ?? [],
+            mirrorRevSeq: finalNode.revSeq,
           },
           (finalNode as { ownerRepo?: string | null }).ownerRepo ?? '',
           ctx.clientId,

@@ -426,6 +426,7 @@ export async function searchReplaceInSpecNodes(
           role: fresh.role ?? null, isRunnable: fresh.isRunnable ?? null,
           isPlaceholder: fresh.isPlaceholder,
           outgoingEdges: fresh.outgoingEdges ?? [],
+          mirrorRevSeq: fresh.revSeq,
         }, node.raw.ownerRepo ?? '', ctx.clientId, fresh.memoryId);
       })().catch((cause) => console.error('[searchReplaceInSpecNodes] git write error:', cause));
     }

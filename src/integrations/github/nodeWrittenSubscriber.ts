@@ -24,7 +24,7 @@ import {
   type NodeWrittenEvent,
 } from '../../lib/events/nodeWritten.js';
 import { deserializeTags } from '../db/provider.js';
-import { writeNodeToGit } from './writeNodeToGit.js';
+import { writeNodeToGit, type NodeForGit } from './writeNodeToGit.js';
 
 /** Durable-consumer + local-fallback registration name. */
 export const GIT_MIRROR_SUBSCRIBER = 'git-mirror';
@@ -40,11 +40,26 @@ export async function handleNodeWrittenForGit(
   db: PrismaClient,
   evt: NodeWrittenEvent,
 ): Promise<void> {
+  const node = await loadNodeForGit(db, evt);
+  if (!node) return;
+  await writeNodeToGit(
+    node,
+    evt.ownerRepo ?? '',
+    evt.clientId ?? null,
+    evt.memoryId,
+    () => loadNodeForGit(db, evt),
+  );
+}
+
+async function loadNodeForGit(
+  db: PrismaClient,
+  evt: NodeWrittenEvent,
+): Promise<NodeForGit | null> {
   const node = await db.node.findUnique({
     where: { id: evt.nodeId },
     include: { outgoingEdges: { include: { target: true } } },
   });
-  if (!node || node.deletedAt) return;
+  if (!node || node.deletedAt) return null;
   // The event's memoryId must agree with the node's actual memory: routing
   // (target repo) and the encryption gate below both key off it, so a
   // mismatched (corrupt/forged) event could mirror one memory's node into
@@ -54,16 +69,14 @@ export async function handleNodeWrittenForGit(
       `[git-mirror] node.written memoryId mismatch — node ${evt.nodeId} lives in ` +
         `${node.memoryId}, event claims ${evt.memoryId}; skipping`,
     );
-    return;
+    return null;
   }
   const memory = await db.memory.findUnique({
     where: { id: evt.memoryId },
     select: { isEncrypted: true },
   });
-  if (!memory) return;
-  if (memory.isEncrypted) return; // request-time direct write owns encrypted mirrors
-  await writeNodeToGit(
-    {
+  if (!memory || memory.isEncrypted) return null; // request-time direct write owns encrypted mirrors
+  return {
       id: node.id,
       loc: node.loc,
       name: node.name,
@@ -84,11 +97,7 @@ export async function handleNodeWrittenForGit(
       isRunnable: node.isRunnable ?? null,
       isPlaceholder: node.isPlaceholder,
       outgoingEdges: node.outgoingEdges ?? [],
-    },
-    evt.ownerRepo ?? '',
-    evt.clientId ?? null,
-    evt.memoryId,
-  );
+    };
 }
 
 /**
