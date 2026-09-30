@@ -95,6 +95,39 @@ describe('searchReplaceInSpecNodes', () => {
       .rejects.toMatchObject({ extensions: { code: 'SEARCH_REPLACE_PLAN_STALE' } });
   });
 
+  it('keeps drifted previews read-only and recovers through a canonical node read', async () => {
+    const spec = await node('pas:010:05');
+    const oldPlan = (await call(request([spec.id]))).plan;
+    await db.node.update({ where: { id: spec.id }, data: { content: 'cat revised' } });
+    const drifted = await db.node.findUniqueOrThrow({ where: { id: spec.id } });
+
+    for (let attempt = 0; attempt < 2; attempt++) {
+      await expect(call(request([spec.id])))
+        .rejects.toMatchObject({
+          message: expect.stringContaining(`node(ref: "${spec.id}", raw: true)`),
+          extensions: { code: 'NODE_WRITE_CONFLICT' },
+        });
+    }
+    await expect(call(request([spec.id], { dryRun: false, expectedPlan: oldPlan })))
+      .rejects.toMatchObject({ extensions: { code: 'SEARCH_REPLACE_PLAN_STALE' } });
+    expect(await db.node.findUniqueOrThrow({ where: { id: spec.id } })).toMatchObject({
+      content: drifted.content,
+      revSeq: drifted.revSeq,
+      revisionContentHash: drifted.revisionContentHash,
+    });
+    expect(await db.nodeRevision.count({ where: { nodeId: spec.id } })).toBe(0);
+
+    const read = await resolvers.Query.node({}, { ref: spec.id, raw: true }, ctx());
+    expect(read?.content).toBe('cat revised');
+    expect(await db.nodeRevision.count({ where: { nodeId: spec.id } })).toBe(1);
+
+    const fresh = await call(request([spec.id]));
+    expect(fresh).toMatchObject({ nodesChanged: 1, totalReplacements: 1, dryRun: true });
+    expect(fresh.plan).not.toBe(oldPlan);
+    await call(request([spec.id], { dryRun: false, expectedPlan: fresh.plan }));
+    expect((await db.node.findUniqueOrThrow({ where: { id: spec.id } })).content).toBe('dog revised');
+  });
+
   it('returns plan-stale when a selected node moved, even if its draft URN no longer resolves', async () => {
     const spec = await node('pas:010:01');
     const urn = `hrn:node:${draft.urn}:pas:010:01`;

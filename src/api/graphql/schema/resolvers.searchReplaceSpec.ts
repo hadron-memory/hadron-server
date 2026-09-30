@@ -232,7 +232,10 @@ export async function searchReplaceInSpecNodes(
         skips.push({ nodeId: row.id, loc: row.loc, memoryId, reason: 'PROTECTED_ADDRESS', governedKinds: [] });
       } else {
         if (row.revisionContentHash !== stateHash) {
-          throw applying ? stale() : error('A selected node has unrevisioned drift; read and retry.', 'NODE_WRITE_CONFLICT');
+          throw applying ? stale() : error(
+            `Selected node ${row.loc} (${row.id}) has unrevisioned drift. Read it with node(ref: "${row.id}", raw: true) to reconcile its revision, then run a new dry run.`,
+            'NODE_WRITE_CONFLICT',
+          );
         }
         scanned++;
         scannedIds.push(row.id);
