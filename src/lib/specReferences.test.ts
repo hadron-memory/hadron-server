@@ -60,6 +60,10 @@ describe('findCorpusReferences', () => {
     const dotted = `hrn:node:micromentor.org:specs-draft:${'a'.repeat(64)}.x`;
     expect(locs(dotted)).toEqual([]);
     expect(rewriteCorpusReferences(dotted, P, 'a'.repeat(64), 'pas:040')).toEqual({ text: dotted, count: 0 });
+    const repeatedDot = `hrn:node:micromentor.org:specs-draft:${'a'.repeat(64)}..x`;
+    expect(locs(repeatedDot)).toEqual([]);
+    expect(rewriteCorpusReferences(repeatedDot, P, 'a'.repeat(64), 'pas:040'))
+      .toEqual({ text: repeatedDot, count: 0 });
   });
 
   it('also matches under a URN the corpus was published under before a rename', () => {
@@ -106,5 +110,6 @@ describe('findTextCitations', () => {
     expect(findTextCitations('See pas:010. Then more.', P, 'pas:010').map((c) => c.citation)).toEqual(['pas:010']);
     expect(findTextCitations('See pas:010:01.v2 too', P, 'pas:010').map((c) => c.citation)).toEqual(['pas:010:01.v2']);
     expect(findTextCitations('See pas:010._v2 too', P, 'pas:010')).toEqual([]);
+    expect(findTextCitations('See pas:010..v2 too', P, 'pas:010')).toEqual([]);
   });
 });
