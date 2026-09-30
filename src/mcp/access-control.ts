@@ -32,6 +32,7 @@ import { participantAppIds } from '../lib/auth/appParticipation.js';
 import { activeAgentInstallLicenseIds, isAgentInstalled, isGrantedAgentMemoryRole } from '../lib/appAgent.js';
 import { resolveUserApps } from '../auth/user-app-resolution.js';
 import { getOrgReadableMemoryIds } from '../lib/auth/orgReadableMemory.js';
+import { sessionScopedMemoryIds } from '../lib/auth/sessionScopedMemoryIds.js';
 
 // ---------------------------------------------------------------------------
 // Shared fold algorithm
@@ -245,11 +246,9 @@ type AppAccessRow = {
  *     Legacy team spaces are safely on the null side: the pre-#723 mint set
  *     `userId: null` and never touched this column.
  *
- * READ_ONLY, deliberately: the reported failure is a READ gate, and the writes
- * this memory receives (team chat, worklog) go through their own participant
- * gates rather than the map. Granting READ_WRITE here would additionally open
- * the generic node-mutation tools on the team space — a widening nobody asked
- * for.
+ * This fold stays READ_ONLY for pure App keys. getMemoryAccess upgrades these
+ * rows for human App participants, whose generic node-write audience now
+ * matches their read audience. Team chat and worklog still use their own gates.
  */
 async function getAppTeamSpaceAccess(
   db: PrismaClient,
@@ -631,6 +630,24 @@ export async function getMemoryAccess(
     }
   }
 
+  // The team-space read fold remains READ_ONLY for a pure App key. A USER who
+  // participates in an App may also write generic nodes into its team space
+  // and free-standing app memories; the Worker and session shapes stay out.
+  if (auth.userId) {
+    const participantIds = await participantAppIds(db, auth, { includeMemberships: true });
+    if (participantIds.length > 0) {
+      const writable = await db.memory.findMany({
+        where: {
+          appId: { in: participantIds }, class: 'app', deletedAt: null,
+          workerOf: { none: {} }, userMemoryOfAgentId: null,
+          OR: [{ ownerUserId: null }, { ownerUserId: auth.userId }],
+        },
+        select: { id: true },
+      });
+      for (const row of writable) access.set(row.id, 'READ_WRITE');
+    }
+  }
+
   // ── Direct org-read — parity with the portal getAccessibleMemoryIds ─────
   // A User principal can read org / public / subscription memories by virtue
   // of org membership, INDEPENDENT of App membership. This closes the
@@ -640,9 +657,9 @@ export async function getMemoryAccess(
   // getOrgReadableMemoryIds helper guarantees the two surfaces compute the
   // same set.
   //
-  // Granted READ_ONLY: org membership confers read; write stays gated by the
-  // App/agent path above (so an org member with no App membership gets read,
-  // not write — the canWriteToMemory map check below sees READ_ONLY). Gated
+  // Granted READ_ONLY: org membership confers read; writes on ordinary org
+  // memories stay gated by the App/agent path above. The separate participant
+  // upgrade above handles app-class team rows. Gated
   // on auth.userId, so App Key callers (no userId) are unaffected — their
   // App/session isolation is unchanged. personal/private memories are never
   // in this set; their strict-owner path in canReadMemory / canWriteToMemory
@@ -701,7 +718,10 @@ export async function canWriteToMemory(
 ): Promise<boolean> {
   const memory = await db.memory.findUnique({
     where: { id: memoryId },
-    select: { class: true, userId: true, userMemoryOfAgentId: true, appId: true, ownerUserId: true },
+    select: {
+      class: true, userId: true, userMemoryOfAgentId: true, appId: true,
+      ownerUserId: true, workerOf: { select: { id: true } },
+    },
   });
 
   if (!memory) return false;
@@ -773,6 +793,30 @@ export async function canWriteToMemory(
   // by the block above (strict on userId + per-App isolation).
   if (memory.ownerUserId !== null) {
     return auth.userId === memory.ownerUserId;
+  }
+
+  if (memory.class === 'app') {
+    // A session-bound App key may write only its own bound memory. The scope
+    // helper rechecks the live App, install and memory provenance; its other
+    // admissible row (the agent's system memory) is deliberately not writable.
+    if (auth.appId && auth.sessionId && !auth.userId) {
+      if (memory.workerOf.length > 0 || memory.userMemoryOfAgentId === null) return false;
+      const session = await db.session.findUnique({
+        where: { id: auth.sessionId },
+        select: { appId: true, memoryId: true },
+      });
+      return session?.appId === auth.appId && session.memoryId === memoryId &&
+        (await sessionScopedMemoryIds(db, auth.appId, auth.sessionId)).includes(memoryId);
+    }
+    // Worker and session rows are not App-wide generic-write targets. In
+    // particular, an org CONTRIBUTOR or AppMember may not turn participation
+    // into a write on another principal's working/scratch memory.
+    if (memory.workerOf.length > 0 || memory.userMemoryOfAgentId !== null) {
+      return auth.roles?.includes('ADMIN') === true || auth.roles?.includes('OWNER') === true;
+    }
+    if (auth.roles?.includes('ADMIN') || auth.roles?.includes('OWNER')) return true;
+    if (!auth.userId || !memory.appId) return false;
+    return (await participantAppIds(db, auth, { includeMemberships: true })).includes(memory.appId);
   }
 
   // Non-personal memory: standard checks. Per D-2026-05-21-003, when

@@ -139,7 +139,7 @@ describe('#1196 — the App fold implements participation, not the member table'
     expect(await inAccessibleSet(ctx, teamSpace.id)).toBe(true);
 
     // And over MCP, which consumes the same fold.
-    expect((await getMemoryAccess(db, userAuth(contributor.id))).get(teamSpace.id)).toBe('READ_ONLY');
+    expect((await getMemoryAccess(db, userAuth(contributor.id))).get(teamSpace.id)).toBe('READ_WRITE');
   });
 
   it('the agent-derived half is NOT widened — participation buys the team space only', async () => {

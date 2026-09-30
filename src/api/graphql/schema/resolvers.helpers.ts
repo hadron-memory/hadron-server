@@ -2265,7 +2265,8 @@ export function safeCanonicalUrn(type: CanonicalUrnType, raw: string): string {
  *    where strict ownership applies per FR-016)
  * 2. App-keyed callers: write resolved by canWriteToMemory which folds
  *    AppAgent.role + AgentMemoryItem.role + AgentSubscription gates
- * 3. Users: org member with CONTRIBUTOR+, or cross-org subscription with CONTRIBUTOR role
+ * 3. Users: app-class rows through the MCP shape/participation gate; other
+ *    shared classes through their own membership, org, or subscription rules
  */
 export async function requireMemoryWriteAccess(ctx: Context, memoryId: string): Promise<void> {
   // App-keyed callers: delegate to the class-aware MCP gate. The ADMIN/OWNER
@@ -2327,6 +2328,14 @@ export async function requireMemoryWriteAccess(ctx: Context, memoryId: string): 
 
   // Non-personal/private, org-owned: global ADMIN/OWNER bypass.
   if (ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER')) return;
+
+  // The app class contains team, Worker, and session rows with distinct
+  // audiences. Use the same shape-aware gate as MCP rather than allowing a
+  // blanket org-CONTRIBUTOR write below.
+  if (memory.class === 'app') {
+    if (await canWriteToMemory(ctx.db, ctx, memoryId)) return;
+    throw memoryWriteForbidden();
+  }
 
   // #653: an APP-SCOPED knowledge/group memory is App-internal — it must NOT be
   // writable via the org-member CONTRIBUTOR / cross-org-subscription grants
