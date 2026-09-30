@@ -1176,14 +1176,14 @@ describe('teamChatMessages beforeSeq (#1116)', () => {
   });
 
   it('selects both ends of a chat longer than the 200-message cap', async () => {
-    await post(ctx(admin.id), { body: 'm1' });
-    const root = await db.node.findFirstOrThrow({ where: { loc: TEAM_CHAT_LOC, nodeType: 'chat' }, select: { memoryId: true } });
+    const first = await post(ctx(admin.id), { body: 'm1' });
+    const firstRow = await db.node.findUniqueOrThrow({ where: { id: first.nodeId }, select: { memoryId: true } });
     // Canonical imported messages cross the cap without 204 transaction-heavy
     // posts; the read path intentionally supports such imported rows.
     await db.node.createMany({ data: Array.from({ length: 204 }, (_, index) => {
       const seq = index + 2;
       return {
-        id: generateId(), memoryId: root.memoryId,
+        id: generateId(), memoryId: firstRow.memoryId,
         loc: `${TEAM_CHAT_MESSAGES_LOC}:${String(seq).padStart(4, '0')}-${generateId()}`,
         name: `m${seq}`, nodeType: 'chat-message', seq, content: `m${seq}`,
       };
