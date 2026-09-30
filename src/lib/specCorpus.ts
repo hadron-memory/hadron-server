@@ -87,7 +87,8 @@ export function assertNoPlaceholdersLeaveDraft(
 /**
  * #1450 (@codex P1, PR #1452) — a placeholder stays a SPEC until it is written.
  *
- * Every placeholder carries `role: 'spec'`, and the governed-spec gates are
+ * A reserved placeholder starts with `role: 'spec'`, and a Git-restored one
+ * may carry a dotted spec-family role. The governed-spec gates are
  * what keep generic writers and copy paths away from it. A write that removed
  * the role while leaving the body unwritten would turn it into an ungoverned
  * blank node that still claims to be a reserved citation, and copy paths would
@@ -97,10 +98,13 @@ export function assertNoPlaceholdersLeaveDraft(
  * @throws GraphQLError `SPEC_PLACEHOLDER_ROLE_LOCKED`.
  */
 export function assertPlaceholderKeepsSpecRole(
-  prior: { isPlaceholder?: boolean | null; loc?: string } | null | undefined,
+  prior: { isPlaceholder?: boolean | null; loc?: string; role: string | null } | null | undefined,
   input: { role?: string | null; content?: unknown },
 ): void {
-  if (prior?.isPlaceholder !== true || input.role === undefined || input.role === 'spec') return;
+  if (prior?.isPlaceholder !== true || input.role === undefined) return;
+  const wasSpec = prior.role === 'spec' || (prior.role?.startsWith('spec.') ?? false);
+  if (wasSpec && input.role === prior.role) return; // re-sending the stored role is not a change
+  if (!wasSpec && input.role === 'spec') return; // repair a drifted role
   if (Object.keys(placeholderFillPatch(prior, input.content)).length > 0) return; // written in this same write
   throw new GraphQLError(
     `Placeholder${prior.loc ? ` "${prior.loc}"` : ''} must stay a spec until it is written: ` +

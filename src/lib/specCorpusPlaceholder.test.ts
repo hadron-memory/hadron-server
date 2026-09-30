@@ -213,6 +213,20 @@ describe('a placeholder stays a spec until written; cloneNode never copies one (
     expect(await row(draft.id, 'pas:100:01')).toMatchObject({ role: null, isPlaceholder: false });
   });
 
+  it('accepts an unchanged dotted spec role on an imported placeholder but locks a different role', async () => {
+    await db.node.create({ data: {
+      id: generateId(), memoryId: draft.id, loc: 'pas:105:01', name: 'Imported',
+      role: 'spec.rule', isPlaceholder: true,
+    } });
+    await updateSpec(draft.id, 'pas:105:01', { role: 'spec.rule', name: 'Renamed' });
+    expect(await row(draft.id, 'pas:105:01')).toMatchObject({
+      name: 'Renamed', role: 'spec.rule', isPlaceholder: true,
+    });
+    expect(await codeOf(updateSpec(draft.id, 'pas:105:01', { role: 'spec.flow' })))
+      .toBe('SPEC_PLACEHOLDER_ROLE_LOCKED');
+    expect(await row(draft.id, 'pas:105:01')).toMatchObject({ role: 'spec.rule', isPlaceholder: true });
+  });
+
   it('refuses to cloneNode a placeholder, even one whose role was removed behind the API', async () => {
     const reserved = await reserve(draft.id, 'pas:110:01');
     expect(await codeOf(resolvers.Mutation.cloneNode(null, {
