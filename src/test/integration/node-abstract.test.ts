@@ -462,7 +462,7 @@ describe('spec 032 — upsertNode maintains abstractOriginHash', () => {
     },
   );
 
-  it('rolls back a guarded re-affirmation after an interleaved body edit', async () => {
+  it('refuses a guarded re-affirmation but commits an interleaved body drift', async () => {
     const loc = 's3-race-guarded';
     const created = await upsertNode({ loc, name: loc, abstract: 'A', content: 'B' });
     const findUnique = db.node.findUnique.bind(db.node);
@@ -488,9 +488,28 @@ describe('spec 032 — upsertNode maintains abstractOriginHash', () => {
     expect(changedAfterProbe).toBe(true);
     const stored = await db.node.findUniqueOrThrow({ where: { id: created.id } });
     expect(stored.content).toBe("B'");
+    expect(stored.abstract).toBe('A');
     expect(stored.abstractOriginHash).toBe(computeContentHash('B'));
-    expect(stored.revSeq).toBe(1);
-    expect(await db.nodeRevision.count({ where: { nodeId: created.id } })).toBe(0);
+    expect(stored.revSeq).toBe(2);
+    let history = await db.nodeRevision.findMany({
+      where: { nodeId: created.id }, orderBy: { revNo: 'asc' },
+    });
+    expect(history.map((revision) => revision.revNo)).toEqual([1]);
+    expect(history[0]!.content).toBe("B'");
+    expect(history[0]!.revLabel).toMatch(/Reconciled state changed outside a revisioned writer/);
+
+    const affirmed = await writeNodeCore(
+      { memoryId: fx.memory.id, loc, abstract: 'A' }, fx.ctx, 'update', { guardRevSeq: stored.revSeq },
+    );
+    expect(affirmed.revSeq).toBe(3);
+    expect(affirmed.content).toBe("B'");
+    expect(affirmed.abstractOriginHash).toBe(computeContentHash("B'"));
+    history = await db.nodeRevision.findMany({
+      where: { nodeId: created.id }, orderBy: { revNo: 'asc' },
+    });
+    expect(history.map((revision) => revision.revNo)).toEqual([1, 2]);
+    expect(history[1]!.content).toBe("B'");
+    expect(history[1]!.changes).toEqual(['abstractOriginHash']);
   });
 
   it('abstract cleared: hash cleared', async () => {

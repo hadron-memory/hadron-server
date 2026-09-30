@@ -46,6 +46,7 @@ import { getMemoryEncryptionInfo, decryptNodeFields, encryptNodeFields, type Mem
 import { locsOverlap } from './protectedLoc.js';
 import { ensureInstallRegisterRows } from './registerInstall.js';
 import { resolveAppTeamSpaceMemoryIds } from '../api/graphql/schema/resolvers.helpers.js';
+import { pendingAtForRevival } from '../services/embedding/enqueue.js';
 
 /** The name of every App's default Channel — the row `chats:team` became. */
 export const DEFAULT_CHANNEL_NAME = 'team';
@@ -221,12 +222,13 @@ async function resetReusedChannel(
     messagesLoc: string;
     deletedBy: string | null;
     memEncInfo: MemoryEncryptionInfo;
+    vectorIndexEnabled: boolean;
   },
 ): Promise<void> {
   const now = new Date();
   const root = await tx.node.findUniqueOrThrow({
     where: { id: args.rootId },
-    select: { abstract: true, content: true, data: true },
+    select: { abstract: true, content: true, data: true, embeddingPendingAt: true },
   });
   const encrypted = translateSessionExpired(args.memoryId, () => {
     const plain = decryptNodeFields(root, args.memEncInfo);
@@ -247,7 +249,9 @@ async function resetReusedChannel(
       content: encrypted.content ?? null,
       contentHash: null,
       data: (encrypted.data ?? null) as InputJsonValue,
-      embeddingPendingAt: null,
+      // On a vector-indexed host the fresh marker from restoreOrCreate must
+      // survive this payload reset; an old worker may still be in flight.
+      embeddingPendingAt: args.vectorIndexEnabled ? root.embeddingPendingAt : null,
       embeddingFailedAt: null,
       embeddingAttempts: 0,
       embeddingError: null,
@@ -341,7 +345,10 @@ export async function ensureChannelWithRoot(
     // here and re-check after the grant.
     await lockMemoryForChannelChange(tx, args.memoryId);
     // Re-checked under that lock: the preflight above ran outside it.
-    const live = await tx.memory.findFirst({ where: { id: args.memoryId, deletedAt: null }, select: { id: true } });
+    const live = await tx.memory.findFirst({
+      where: { id: args.memoryId, deletedAt: null },
+      select: { id: true, vectorIndexEnabled: true },
+    });
     if (!live) throw new GraphQLError('Host memory not found.', { extensions: { code: 'NOT_FOUND' } });
     await lockAncestorsForCreateMany(tx, args.memoryId, [args.loc, messagesLoc], { owns: 'channel' });
     await assertNoChannelOverlap(tx, args.memoryId, args.loc);
@@ -352,7 +359,7 @@ export async function ensureChannelWithRoot(
     ): Promise<string> => {
       const existing = await tx.node.findUnique({
         where: { loc_memoryId: { loc, memoryId: args.memoryId } },
-        select: { id: true, deletedAt: true, nodeType: true },
+        select: { id: true, deletedAt: true, nodeType: true, embeddingPendingAt: true },
       });
       if (existing) {
         if (!accept(existing)) {
@@ -362,7 +369,16 @@ export async function ensureChannelWithRoot(
           );
         }
         if (existing.deletedAt) {
-          await tx.node.update({ where: { id: existing.id }, data: { deletedAt: null, deletedBy: null } });
+          // Channel creation may also revive tombstoned ancestor and
+          // :messages nodes; their vectors belong to the old incarnation.
+          await tx.nodeEmbedding.deleteMany({ where: { nodeId: existing.id } });
+          await tx.node.update({
+            where: { id: existing.id },
+            data: {
+              deletedAt: null, deletedBy: null,
+              embeddingPendingAt: pendingAtForRevival(existing.embeddingPendingAt, live.vectorIndexEnabled),
+            },
+          });
         }
         return existing.id;
       }
@@ -443,6 +459,7 @@ export async function ensureChannelWithRoot(
         messagesLoc,
         deletedBy: args.createdBy ?? null,
         memEncInfo,
+        vectorIndexEnabled: live.vectorIndexEnabled,
       });
     }
     const channel = await ensureChannelRow(tx, { ...args, rootId, resetForReuse: reusingDeadAddress });

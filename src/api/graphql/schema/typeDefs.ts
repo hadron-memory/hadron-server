@@ -18,6 +18,12 @@ export const typeDefs = `#graphql
     ERROR
   }
 
+  """#1447 — a spec corpus's lifecycle state. DRAFT becomes MINTED once, one-way."""
+  enum CorpusState {
+    DRAFT
+    MINTED
+  }
+
   """
   035-visibility-enum-cleanup: meaningful only for knowledge
   (PUBLIC/ORGANIZATION) and group (GROUP); null otherwise. PERSONAL/PRIVATE
@@ -1316,6 +1322,13 @@ export const typeDefs = `#graphql
     clients render the field only when present.
     """
     portalUrl: String
+    """
+    #1450 — true for a RESERVED spec citation that has no spec written yet (a
+    placeholder in a draft corpus, created by reserveSpecCitation). Set only by
+    the server, never inferred from an empty body; writing real content through
+    updateSpecNode clears it. Minting refuses while any remain.
+    """
+    isPlaceholder: Boolean!
     isLink: Boolean!
     name: String!
     alias: String
@@ -2691,6 +2704,16 @@ export const typeDefs = `#graphql
     On each new revision the oldest overflow is pruned. Default 10; minimum 1.
     """
     maxRevCount: Int!
+    """
+    #1447/#1448 — whether this memory is a DRAFT spec corpus or MINTED. In a
+    draft corpus spec citations are not yet permanent: specs can be moved,
+    renumbered and deleted, and a move records no URN alias. Chosen only at
+    creation (createMemory draftCorpus); minting is one-way. Every memory
+    created without asking for draft is MINTED.
+    """
+    corpusState: CorpusState!
+    "#1448 — when this corpus was minted (draft → minted). Null if it was never a draft."
+    corpusMintedAt: DateTime
     """
     Spec 033 FR-026 — timestamp at which the memory owner accepted the
     encrypted-memory vector-inversion disclosure. Set when the caller
@@ -4948,6 +4971,33 @@ export const typeDefs = `#graphql
     reason: String
   }
 
+  "Only text fields a spec bulk edit may change."
+  enum SpecTextField { content abstract }
+
+  """
+  Replace text in explicit nodes of one DRAFT spec corpus. A dry run returns
+  plan; apply must present that exact plan and refuses if any selected row,
+  protection, match, or corpus state changed. Minted corpora are never edited
+  through this door. Generic replacement keeps its governed-node protections.
+  """
+  input SpecSearchReplaceInput {
+    memoryRef: ID!
+    nodeIds: [ID!]!
+    oldText: String!
+    newText: String!
+    fields: [SpecTextField!]!
+    caseInsensitive: Boolean = false
+    regex: Boolean = false
+    "Literal mode only; matches the CLI's default ASCII word-boundary behavior."
+    wordBoundary: Boolean = true
+    dryRun: Boolean = false
+    "Required for apply; copied from the exact dry-run response."
+    expectedPlan: String
+    "Refuse the entire apply when more nodes would change."
+    maxNodesChanged: Int
+    reason: String
+  }
+
   type SearchReplaceFieldResult {
     field: NodeTextField!
     matches: Int!
@@ -4970,6 +5020,16 @@ export const typeDefs = `#graphql
     protectedAddress: Int!
   }
 
+  enum SearchReplaceSkipReason { OTHER_GOVERNED_KIND PROTECTED_ADDRESS }
+
+  type SearchReplaceSkip {
+    nodeId: ID!
+    loc: String!
+    memoryId: ID!
+    reason: SearchReplaceSkipReason!
+    governedKinds: [String!]!
+  }
+
   type SearchReplaceResult {
     "Unique authorized nodes selected before bulk-write protections are applied."
     nodesSelected: Int!
@@ -4989,6 +5049,10 @@ export const typeDefs = `#graphql
     dryRun: Boolean!
     "Per-node breakdown; only nodes with at least one match are listed."
     results: [SearchReplaceNodeResult!]!
+    "Opaque exact preview fingerprint on the spec door; null on the generic door."
+    plan: String
+    "Node-addressed protected selections on the spec door; null on the generic door."
+    skips: [SearchReplaceSkip!]
   }
 
   input EdgeInput {
@@ -5609,6 +5673,141 @@ export const typeDefs = `#graphql
     rowSpan: Int!
     "Widget-instance settings; shape is widget-defined (#788)."
     config: JSON
+  }
+
+  """#1449 — how a spec corpus reference was found."""
+  enum SpecReferenceKind {
+    "A node URN in the corpus text (name, description, abstract or content), including inside a URL."
+    URN
+    "A real edge from a corpus node."
+    EDGE
+  }
+
+  """#1449 — why a reference does not reach a written spec."""
+  enum SpecReferenceProblem {
+    "No live node at the cited loc."
+    MISSING
+    "The cited node is a placeholder: a reserved citation with no spec written yet."
+    PLACEHOLDER
+  }
+
+  """
+  #1449 — one reference to a spec in a draft corpus. For kind URN, field is
+  the text field it was found in and text the URN as written; for kind EDGE,
+  field is 'edge' and text the edge's relationship name.
+  """
+  type SpecReference {
+    kind: SpecReferenceKind!
+    sourceNodeId: ID!
+    sourceLoc: String!
+    "The scanned field; edge for a real edge; pendingEdge for an edge whose target is not a node yet."
+    field: String!
+    "The cited loc; for an edge into another memory, the target's node URN; for a pendingEdge not yet resolved to a node, its target as recorded (a loc, file id or URN)."
+    targetLoc: String!
+    text: String
+    "Set only by specUnresolvedReferences."
+    reason: SpecReferenceProblem
+  }
+
+  """#1449 — one spec a renumber moves (the spec or a descendant)."""
+  type SpecRenumberMove {
+    fromLoc: String!
+    toLoc: String!
+  }
+
+  """#1449 — state of one node's reference rewrite in a renumber."""
+  enum SpecRewriteStatus {
+    "Dry run: this rewrite would be made."
+    PLANNED
+    REWRITTEN
+    "A concurrent edit removed the references (or the node) before the rewrite, so nothing was written."
+    UNCHANGED
+    "The rewrite was refused or kept conflicting; error says why. The move itself stands."
+    FAILED
+  }
+
+  """#1449 — one node whose URN references a renumber rewrites."""
+  type SpecRenumberRewrite {
+    nodeId: ID!
+    loc: String!
+    "The text fields rewritten."
+    fields: [String!]!
+    "How many URN references were rewritten."
+    count: Int!
+    status: SpecRewriteStatus!
+    error: String
+  }
+
+  """
+  #1449 — a moved citation that appears as bare TEXT (a link label, a node
+  name, prose). Reported, never rewritten: it cannot be told apart from other
+  characters in prose.
+  """
+  type SpecTextCitation {
+    sourceNodeId: ID!
+    sourceLoc: String!
+    field: String!
+    citation: String!
+    "A short window of text around the citation."
+    excerpt: String!
+  }
+
+  """#1449 — the result (or, with dryRun, the plan) of renumberSpec."""
+  type SpecRenumberResult {
+    dryRun: Boolean!
+    moved: [SpecRenumberMove!]!
+    rewrites: [SpecRenumberRewrite!]!
+    textCitations: [SpecTextCitation!]!
+  }
+
+  """#1448 — why the mint report lists an item."""
+  enum SpecMintFindingKind {
+    "A reserved citation with no spec written yet."
+    PLACEHOLDER
+    "A reference to a spec that does not exist, or to a placeholder (rule: MISSING | PLACEHOLDER)."
+    UNRESOLVED_REFERENCE
+    "A structural lint error (rule: nodetype-info | tag-spec | serialization-leak | duplicate-loc)."
+    LINT
+    "An abstract written for an earlier body."
+    STALE_ABSTRACT
+  }
+
+  """#1448 — one item in a mint report. loc is where it was found; targetLoc the cited spec, for a reference."""
+  type SpecMintFinding {
+    kind: SpecMintFindingKind!
+    loc: String!
+    rule: String
+    message: String!
+    targetLoc: String
+  }
+
+  """#1448 — one open question in the corpus (report-only, never blocks minting)."""
+  type SpecOpenQuestion {
+    loc: String!
+    question: String!
+  }
+
+  """#1448 — open questions grouped by who decides; decider null means unassigned."""
+  type SpecOpenQuestionGroup {
+    decider: String
+    questions: [SpecOpenQuestion!]!
+  }
+
+  """
+  #1448 — the mint report. blockers must all be gone for a mint to succeed.
+  staleAbstracts are listed separately; they block only when
+  staleAbstractsBlock is true (once abstract re-affirmation is saved and
+  deployed, server#1408). openQuestions never block.
+  """
+  type SpecCorpusMintReport {
+    memoryId: ID!
+    dryRun: Boolean!
+    "True when this call minted the corpus."
+    minted: Boolean!
+    blockers: [SpecMintFinding!]!
+    staleAbstracts: [SpecMintFinding!]!
+    staleAbstractsBlock: Boolean!
+    openQuestions: [SpecOpenQuestionGroup!]!
   }
 
   type Query {
@@ -7085,6 +7284,22 @@ export const typeDefs = `#graphql
     """
     validateMemory(memoryRef: ID!, limit: Int): MemoryValidationResult!
 
+    """
+    #1449 — what refers to the spec at loc in a DRAFT spec corpus: node URNs
+    in the corpus text (inside URLs too) plus real edges from corpus nodes.
+    Exact citation, not descendants. Refuses SPEC_CORPUS_NOT_DRAFT for a
+    minted memory. memoryRef accepts the memory's ID or URN.
+    """
+    specBacklinks(memoryRef: ID!, loc: String!): [SpecReference!]!
+
+    """
+    #1449 — references in a DRAFT spec corpus that do not reach a written
+    spec: URNs citing a missing loc or a placeholder, edges to a
+    placeholder or to a deleted spec of the corpus, and pending edges (field pendingEdge) whose target is not
+    a written node yet. Minting refuses while any remain.
+    """
+    specUnresolvedReferences(memoryRef: ID!): [SpecReference!]!
+
     "One run (cor:agt:010:02). ref is an AppRun ID or an hrn:apprun:<root>:<app>:<run-id> URN (#696)."
     appRun(ref: ID!): AppRun
     "The latest run of an App resolved to a concrete run (#696) — 'current/latest/previous' are queries, never magic run-ids in URN space (cor:urn:010:02). previous: true returns the run before the latest."
@@ -7249,6 +7464,39 @@ export const typeDefs = `#graphql
     which refuses, and that absence is the mechanism rather than an oversight.
     """
     createSpecNode(input: CreateNodeInput!): Node!
+    """
+    #1450 — reserve a citation in a DRAFT spec corpus as a placeholder: a spec
+    node at loc (role spec, nodeType info) marked isPlaceholder, so links can
+    point at it and the placeholders left are the corpus's to-do list. Writing
+    real content through updateSpecNode turns it into a real spec at the same
+    citation. Refuses SPEC_CORPUS_NOT_DRAFT in a minted memory, where a
+    citation is permanent once written, and NodeLocConflictError at a live loc.
+    memoryRef accepts the memory's ID or URN.
+    """
+    reserveSpecCitation(memoryRef: ID!, loc: String!, name: String): Node!
+    """
+    #1449 — renumber a spec in a DRAFT spec corpus: move it and its subtree
+    from fromLoc to toLoc (no URN alias in a draft), then rewrite every node
+    URN in the corpus that cites the moved specs, each as a normal edit. Bare
+    text citations (labels, names) are reported in textCitations, not
+    rewritten. dryRun returns the plan and writes nothing. The move is atomic;
+    each rewrite is a separate guarded edit, and one that fails is reported
+    FAILED without undoing the move.
+    """
+    renumberSpec(memoryRef: ID!, fromLoc: String!, toLoc: String!, dryRun: Boolean): SpecRenumberResult!
+    """
+    #1448 — mint a DRAFT spec corpus: once, one-way, for the whole corpus.
+    After minting, citations are permanent (moves record URN aliases again) and
+    no placeholder can be reserved. Refuses SPEC_CORPUS_MINT_BLOCKED while any
+    blocker remains: a placeholder, an unresolved reference, a structural lint
+    error over the citation-shaped nodes (nodetype-info, tag-spec,
+    serialization-leak, duplicate-loc), or a stale abstract once
+    staleAbstractsBlock is true. dryRun returns the full report without
+    minting. Owner or org ADMIN only. memoryRef accepts the ID or URN. A real
+    run holds every write to the corpus off while it checks and flips, and
+    refuses SPEC_CORPUS_BUSY (retryable) if a write is already in flight.
+    """
+    mintSpecCorpus(memoryRef: ID!, dryRun: Boolean): SpecCorpusMintReport!
 
     """
     #1201 — the UPDATE door for the spec kind, and the counterpart of
@@ -7427,6 +7675,9 @@ export const typeDefs = `#graphql
     staleness, and re-embedding. Supports dryRun preview.
     """
     searchReplaceInNodes(input: SearchReplaceInNodesInput!): SearchReplaceResult!
+
+    "Governed bulk replacement inside one draft spec corpus, with exact preview binding."
+    searchReplaceInSpecNodes(input: SpecSearchReplaceInput!): SearchReplaceResult!
 
     """
     Delete a node identified by 'nodeRef' (a node ID or fully-qualified URN;
@@ -7932,6 +8183,13 @@ export const typeDefs = `#graphql
       embeddingSource: EmbeddingSource
       """#621 — per-node revision-history cap (default 10, minimum 1)."""
       maxRevCount: Int
+      """
+      #1447/#1448 — create this memory as a DRAFT spec corpus, whose spec
+      citations stay changeable until the corpus is minted. This is the only
+      way to get a draft corpus: an existing memory can never be switched into
+      draft. Omitted or false creates an ordinary (minted) memory.
+      """
+      draftCorpus: Boolean
     ): Memory!
 
     """

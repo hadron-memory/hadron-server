@@ -746,6 +746,19 @@ model Memory {
   /// `properties`/`objectType` are validated against it in the enforcement
   /// phase (a later PR) — free-form until then.
   schema               Json?
+  /// #1447/#1448 — this memory is a DRAFT spec corpus: its specs' citations
+  /// are not yet permanent, so they can be renumbered, moved and deleted
+  /// freely, and a move records no UrnAlias (nothing outside can cite a draft
+  /// number). Chosen ONLY at creation (`createMemory(draftCorpus: true)`); no
+  /// update path sets it, and minting clears it once, one-way. Every existing
+  /// memory, and every memory created without asking, is minted (false). A
+  /// dedicated Memory column rather than MemoryConfig so config-template apply
+  /// (which copies NodeRoleRule columns only) can never carry it.
+  corpusDraft          Boolean           @default(false) @map("corpus_draft")
+  /// #1448 — when this spec corpus was minted (draft → minted, once, one-way),
+  /// and by whom. Null for a corpus that was never a draft.
+  corpusMintedAt       DateTime?         @map("corpus_minted_at")
+  corpusMintedBy       String?           @map("corpus_minted_by")
   /// Classification tags for search and filtering.
   tags                 String[]
   /// License identifier (e.g. "MIT", "CC-BY-4.0", "proprietary").
@@ -1101,6 +1114,12 @@ model Node {
   /// Colon-delimited path within the memory (e.g. "auth:tokens").
   loc                String
   isLink             Boolean   @default(false) @map("is_link")
+  /// #1450 — a RESERVED spec citation with no spec written yet (a placeholder
+  /// in a draft corpus; see src/lib/specCorpus.ts). Set only by the server's
+  /// `reserveSpecCitation`, never by a client write, and never inferred from an
+  /// empty body. Writing real content clears it; the node keeps its citation.
+  /// Minting refuses while any remain, so a minted corpus has none.
+  isPlaceholder      Boolean   @default(false) @map("is_placeholder")
   description        String?
   /// Paragraph-length summary of this node. Cap is 2000 characters,
   /// enforced at the API boundary (not as a DB CHECK — caps are

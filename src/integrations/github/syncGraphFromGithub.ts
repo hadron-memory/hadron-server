@@ -1,4 +1,6 @@
 import { createDecipheriv } from 'crypto';
+import { GraphQLError } from 'graphql';
+import { assertPlaceholderKeepsSpecRole, placeholderFillPatch } from '../../lib/specCorpus.js';
 import { governedSignalsFromMirror } from '../../lib/governedSignals.js';
 import { authoredContentChanged, clearNodeAuthorship } from '../../lib/nodeAuthorship.js';
 import { NodeSchemaViolation, validateNodeAgainstSchema } from '../../lib/validateNodeAgainstSchema.js';
@@ -15,6 +17,7 @@ import { join, dirname } from 'path';
 import { GRAPHS_PATH } from '../../config.js';
 import { loadGraphFromFs } from '../localFs/loadGraphFromFs.js';
 import { deriveEdgeLoc } from '../../lib/edgeLoc.js';
+import { validateEdgeCondition } from '../../lib/edge-conditions/validator.js';
 import { countCrossMemoryEdgesForNodeDelete } from '../../lib/crossMemoryEdgeDelete.js';
 import { db } from '../db/client.js';
 import { serializeTags } from '../db/provider.js';
@@ -118,6 +121,22 @@ export async function updateNodeFromGitSync(
   // captured pre-sync row rather than that mechanical waypoint.
   const before = revisionBase ?? locked;
   if (extra) update = { ...update, ...extra(locked) };
+  // #1450 (@codex P2, PR #1452): a placeholder stays a spec until it is
+  // written. Sync's rule for a file that would break an invariant applies (one
+  // bad file must not block the memory, and no nonconforming record is
+  // written): the stored role is KEPT, the rest of the file still applies, and
+  // the file is reported. Filtered BEFORE the diff (@codex P2, PR #1452): a
+  // kept role is not a change, so it must not record a revision.
+  if ('role' in update) {
+    try {
+      assertPlaceholderKeepsSpecRole(locked, { role: update.role as string | null, content: update.content });
+    } catch (e) {
+      if (!(e instanceof GraphQLError) || e.extensions?.code !== 'SPEC_PLACEHOLDER_ROLE_LOCKED') throw e;
+      console.warn(`[syncGraphFromGithub] kept role 'spec' on unwritten placeholder ${locked.loc}: ${e.message}`);
+      const { role: _kept, ...rest } = update;
+      update = rest;
+    }
+  }
   const changes = diffNodeChanges(before, update);
 
   if (changes.length > 0) {
@@ -136,6 +155,9 @@ export async function updateNodeFromGitSync(
     data: {
       ...(update as Prisma.NodeUncheckedUpdateInput),
       ...(authoredContentChanged(changes) ? clearNodeAuthorship() : {}),
+      // #1450 (@codex P2, PR #1452): filling a reserved citation by editing its
+      // mirrored file writes the spec, same as updateSpecNode.
+      ...placeholderFillPatch(locked, update.content),
       revisionContentHash: revisionStateHashRefreshMarker(),
     },
   });
@@ -792,7 +814,13 @@ export const syncGraphFromGithub = async (
           // memory (= graph.id here; the source came from this repo). Derive
           // it deterministically so re-syncs are idempotent.
           const edgeLoc = deriveEdgeLoc(edge.sourceLoc, edge.name, targetExists.loc);
-          await tx.edge.upsert({
+          const edgeCondition = edge.condition ?? null;
+          const edgePriority = edge.priority ?? 0;
+          const conditionValidation = validateEdgeCondition(edgeCondition);
+          if (!conditionValidation.ok) {
+            throw new Error(`Git sync edge loc "${edgeLoc}" has an invalid condition: ${conditionValidation.error.message}`);
+          }
+          const savedEdge = await tx.edge.upsert({
             where: { loc_memoryId: { loc: edgeLoc, memoryId: graph.id } },
             create: {
               id: generateId(),
@@ -803,9 +831,26 @@ export const syncGraphFromGithub = async (
               name: edge.name,
               description: edge.description ?? null,
               isRunnable: edge.isRunnable ?? null,
+              ...(edgeCondition !== null ? { condition: edgeCondition as Prisma.InputJsonValue } : {}),
+              priority: edgePriority,
             },
             update: {},
           });
+          // A loc is an edge's address, not proof that this repo's relationship
+          // was saved. An unrelated edge may already own the same derived loc;
+          // update:{} then returns that occupant without changing it. Refuse
+          // inside the transaction so earlier node/edge writes roll back too.
+          // Existing metadata remains untouched, as it did before this guard:
+          // API edits are not mirrored to Git, and the exporter omits some
+          // metadata (including data and empty descriptions).
+          if (
+            savedEdge.deletedAt !== null ||
+            savedEdge.sourceId !== edgeSourceId ||
+            savedEdge.targetId !== edgeTargetId ||
+            savedEdge.name !== edge.name
+          ) {
+            throw new Error(`Git sync edge loc "${edgeLoc}" is already occupied by a different edge.`);
+          }
           await tx.pendingEdge.deleteMany({
             where: { sourceId: edgeSourceId, targetId: edgeTargetId },
           });

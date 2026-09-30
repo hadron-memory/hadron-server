@@ -7,6 +7,7 @@ import { carryGovernedSignals } from '../../lib/governedSignals.js';
 import { carryNodeAuthorship } from '../../lib/nodeAuthorship.js';
 import { deriveEdgeLoc } from '../../lib/edgeLoc.js';
 import type { MemoryClass, MemoryVisibility } from '../../generated/prisma/index.js';
+import { assertNoPlaceholdersLeaveDraft } from '../../lib/specCorpus.js';
 
 /**
  * Extract a parent node and its whole loc-subtree into a BRAND-NEW memory,
@@ -113,6 +114,8 @@ export async function extractParentNodeGraph(
       if (!parent) {
         throw new ParentNodeNotFoundError(args.parentLoc, args.sourceMemoryId);
       }
+      // #1450 — the extract lands in a brand-new memory, never a draft corpus.
+      assertNoPlaceholdersLeaveDraft(selectedNodes, { isDraft: false });
 
       // ── The two gates every per-node writer consults (#1191) ────────────
       // Counted on `main` before this: ZERO in this whole operation.
@@ -192,6 +195,25 @@ export async function extractParentNodeGraph(
         // the door refuses the wrong TOOL and never the wrong PRINCIPAL.
         { governed: 'carry' },
       );
+      // (@codex P2, PR #1462) A move soft-deletes the source subtree, so it
+      // holds the source memory's row fence (FOR SHARE) like every other node
+      // write: a mint, which takes that row FOR NO KEY UPDATE, then either sees
+      // this extraction committed or finishes before it starts. Node rows are
+      // locked first, in id order, then the memory: the order moves and merge
+      // folds use, so the fence cannot close a cycle with them. A row that was
+      // deleted or moved since the selection refuses as a retry.
+      if (args.move) {
+        const selectedLoc = new Map(selectedNodes.map((n) => [n.id, n.loc]));
+        for (const id of [...selectedLoc.keys()].sort()) {
+          const [locked] = await tx.$queryRaw<Array<{ memory_id: string; loc: string; deleted_at: Date | null }>>`
+            SELECT memory_id, loc, deleted_at FROM nodes WHERE id = ${id} FOR UPDATE
+          `;
+          if (!locked || locked.deleted_at || locked.memory_id !== args.sourceMemoryId || locked.loc !== selectedLoc.get(id)) {
+            throw new Error('extractParentNode: a source node changed during the copy; retry.');
+          }
+        }
+        await tx.$queryRaw`SELECT id FROM memories WHERE id = ${args.sourceMemoryId} FOR SHARE`;
+      }
       // The gate's signal snapshot does not validate authorship. A direct raw
       // edit may leave a stale stamp on a selected source. Reconcile stamped
       // sources in stable row-lock order, then copy their current content and

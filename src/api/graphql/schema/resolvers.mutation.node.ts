@@ -19,6 +19,7 @@ import {
   type GovernedContext,
   type GovernedMerge,
 } from '../../../lib/governedRole.js';
+import { assertPlaceholderKeepsSpecRole, placeholderFillPatch } from '../../../lib/specCorpus.js';
 import { carryGovernedSignals } from '../../../lib/governedSignals.js';
 import { computeContentHash } from '../../../lib/contentHash.js';
 import { decryptReadableRevisions } from '../../../lib/nodeRevisionRead.js';
@@ -41,7 +42,7 @@ import {
   SearchReplaceInvalidPatternError,
   type Replacer,
 } from '../../../lib/searchReplace.js';
-import { enqueueNodeEmbedding } from '../../../services/embedding/enqueue.js';
+import { enqueueNodeEmbedding, pendingAtForRevival } from '../../../services/embedding/enqueue.js';
 import { canReadMemory } from '../../../mcp/access-control.js';
 import { sessionKeyCache } from '../../../lib/sessionKeyCache.js';
 import { enforceNodeSchemaOnWrite, normalizeObjectType } from '../../../lib/enforceNodeSchema.js';
@@ -67,6 +68,8 @@ import {
 import {
   moveNodeSubtree,
   SubtreeMoveCollisionError,
+  SubtreeMovePlaceholderError,
+  SubtreeMoveSourceNotDraftError,
   SubtreeMoveIntoSelfError,
   SubtreeMoveSourceChangedError,
   CrossMemoryMoveUnsupportedError,
@@ -138,6 +141,7 @@ import {
   type MergeNodesInput,
 } from './resolvers.helpers.js';
 import { type ToolDriveFile } from '../../../lib/emailClient.js';
+import { searchReplaceInSpecNodes } from './resolvers.searchReplaceSpec.js';
 
 // ── Shared node-write core (spec 039 Phase 0 D1) ────────────────────────────
 //
@@ -781,8 +785,14 @@ export async function writeNodeCore(
         nextAbstractOriginHash === undefined
           ? {}
           : { abstractOriginHash: nextAbstractOriginHash };
+      // #1450 — `isPlaceholder` is SERVER-set (reserveSpecCitation marks it,
+      // a real content write clears it). No node input type carries it, but a
+      // caller passing a parsed object through (an importer, an internal
+      // helper) must not be able to set or clear it, so it is stripped here
+      // with the same defence as the hash.
       const {
         abstractOriginHash: _stripCallerSupplied,
+        isPlaceholder: _stripCallerPlaceholder,
         ...nodeFieldsClean
       } = nodeFields as Record<string, unknown>;
 
@@ -877,7 +887,7 @@ export async function writeNodeCore(
         await tx.edge.deleteMany({ where: { sourceId: writtenNode.id } });
         await tx.pendingEdge.deleteMany({ where: { sourceId: writtenNode.id } });
         if (resolvedEdges.length > 0) {
-          await tx.edge.createMany({
+          const { count } = await tx.edge.createMany({
             data: resolvedEdges.map((edge) => ({
               memoryId: writtenNode.memoryId,
               sourceId: writtenNode.id,
@@ -890,6 +900,14 @@ export async function writeNodeCore(
             })),
             skipDuplicates: true,
           });
+          // MCP's replaceOutgoingEdgesInTransaction checks the same count.
+          // Both inline writers must refuse a skipped edge and roll back the
+          // enclosing node mutation instead of reporting a partial save.
+          if (count !== resolvedEdges.length) {
+            throw new GraphQLError('An edge loc is already occupied; choose unique edge locs.', {
+              extensions: { code: 'EDGE_LOC_CONFLICT' },
+            });
+          }
         }
         const refreshed = await tx.node.findUniqueOrThrow({ where: { id: writtenNode.id }, include });
         return refreshed as unknown as T;
@@ -1044,13 +1062,11 @@ export async function writeNodeCore(
         if (mode === 'update') {
           // #1072/#1185/#1323 — ONE transaction owns the authoritative
           // pre-state, optional OCC claim, snapshot, visible update and inline
-          // edges. A refusal or rollback therefore leaves neither a consumed
-          // revision nor an orphan snapshot, and concurrent supported writers
-          // serialize before their snapshot is built.
-          // A refusal is THROWN inside the transaction, never returned from it:
-          // a drift reconcile taken above must roll back with the refused write,
-          // or a refused guarded write would still have consumed a revision
-          // (@copilot, PR #1339).
+          // edges. Concurrent supported writers serialize before their snapshot
+          // is built. Ordinary refusals throw inside the transaction and leave
+          // no artifact. The exception is an already-authorized row's raw drift:
+          // commit its reconciliation before reporting a stale guard, so a
+          // fresh read and guarded retry can use the new revision (#1454).
           const writeConflict = () =>
             new GraphQLError(`Node at loc "${input.loc}" changed since it was read — re-read and retry.`, {
               extensions: { code: 'NODE_WRITE_CONFLICT', loc: input.loc, memoryId: input.memoryId },
@@ -1076,9 +1092,22 @@ export async function writeNodeCore(
             // hid the drift transition once the fingerprint was refreshed
             // (@codex P1, PR #1339). The row lock is already held.
             if (current.revisionContentHash !== await computeRevisionStateHash(tx, current.id)) {
+              const preReconcileRevSeq = current.revSeq;
               await ensureCurrentNodeRevisionInTransaction(tx, current.id, { expectedMemoryId: input.memoryId });
               current = await assertTargetStillWritable(tx);
               if (!current) return { conflict: false, node: null };
+              // A guarded write that itself reconciled drift is refused even when
+              // its token equals the NEW revision: every exposed read reconciles,
+              // so no token can name drift first seen here, and a token matching
+              // the freshly minted number is a guess or a stale ABA collision
+              // (@codex P2, PR #1458). A legacy null-fingerprint backfill mints no
+              // revision and falls through to the ordinary guard below.
+              // Return rather than throw: the transaction commits only the
+              // reconciled drift. The caller's edit and inline edges have not
+              // run, and the conflict is surfaced after commit below.
+              if (opts?.guardRevSeq !== undefined && current.revSeq !== preReconcileRevSeq) {
+                return { conflict: true, node: null };
+              }
             }
 
             // #1330 — H1 strict sub-roles, judged on the locked row: a role the
@@ -1123,6 +1152,14 @@ export async function writeNodeCore(
               if (opts?.guardRevSeq !== undefined && current.revSeq !== opts.guardRevSeq) {
                 throw writeConflict();
               }
+              // #1450 (@codex P2, PR #1452): a placeholder that already holds
+              // real content (a merge or raw write put it there) is cleared by
+              // re-saving that content, even though nothing else changes. Not
+              // a revisioned field, so no revision.
+              const fill = placeholderFillPatch(current, input.content);
+              if (Object.keys(fill).length > 0) {
+                await tx.node.update({ where: { id: current.id }, data: fill });
+              }
               const unchanged = await tx.node.findUniqueOrThrow({
                 where: { id: current.id },
                 include,
@@ -1155,12 +1192,16 @@ export async function writeNodeCore(
               });
             }
 
+            // #1450 — a placeholder keeps its spec role until it is written.
+            assertPlaceholderKeepsSpecRole(current, { role: input.role, content: input.content });
             const data = {
               ...updatePayload,
               // The snapshot above keeps the old author. The new live content
               // has no verified author until the attestation/human gates land.
               ...(authoredContentChanged(changes) ? clearNodeAuthorship() : {}),
               ...(lockedAbstractHash !== undefined ? { abstractOriginHash: lockedAbstractHash } : {}),
+              // #1450 — writing real content to a reserved citation makes it a spec.
+              ...placeholderFillPatch(current, input.content),
               revisionContentHash: revisionStateHashRefreshMarker(),
             } as Prisma.NodeUncheckedUpdateInput;
 
@@ -1362,6 +1403,22 @@ export async function writeNodeCore(
               { platformWrite: opts?.platformWrite },
             );
 
+            // #1460 — a tombstone still owns its old abstract and chunk
+            // vectors. Remove them in this transaction before making the row
+            // live, so a revive cannot publish its previous incarnation's
+            // plaintext while the new embed is pending or unavailable.
+            const reviving = mode === 'create' && !!authoritative?.deletedAt;
+            let revivedPendingAt: Date | null | undefined;
+            if (reviving && authoritative) {
+              await tx.nodeEmbedding.deleteMany({ where: { nodeId: authoritative.id } });
+              const indexed = await tx.memory.findUniqueOrThrow({
+                where: { id: input.memoryId }, select: { vectorIndexEnabled: true },
+              });
+              // Invalidate an old embed before post-commit enqueue runs.
+              // Unindexed memories keep the normal null pending marker.
+              revivedPendingAt = pendingAtForRevival(authoritative.embeddingPendingAt, indexed.vectorIndexEnabled);
+            }
+
             // #1183 — resurrect from the AUTHORITATIVE row, not the stale
             // probe. `updateExtras` above was built from `existing`, which may
             // have seen nothing while another caller created AND soft-deleted
@@ -1371,6 +1428,9 @@ export async function writeNodeCore(
             // both worlds" #543 exists to prevent, reachable again through the
             // window this transaction was added to close. The MCP path already
             // overrides the same way (src/mcp/server.ts).
+            if (authoritative && mode !== 'create') {
+              assertPlaceholderKeepsSpecRole(authoritative, { role: input.role, content: input.content });
+            }
             const upserted = await tx.node.upsert({
               ...upsertArgs,
               update: {
@@ -1387,13 +1447,20 @@ export async function writeNodeCore(
                     ? clearNodeAuthorship() : {}),
                 ...(authoritativeAbstractHash !== undefined
                   ? { abstractOriginHash: authoritativeAbstractHash } : {}),
+                // #1450 — a create that revives a tombstone is a NEW node, so it
+                // must not inherit a dead placeholder's flag (reserve re-marks
+                // its own row afterwards). An upsert onto a live placeholder
+                // clears it only when it writes real content.
+                ...(mode === 'create'
+                  ? { isPlaceholder: false }
+                  : placeholderFillPatch(authoritative, input.content)),
                 revisionContentHash: revisionStateHashRefreshMarker(),
                 // create-ONLY, matching the `isResurrect` it corrects. Widening
                 // it to `upsert` would let an importer revive a soft-deleted
                 // node merely by writing to its loc — a behaviour change this
                 // fix has no business making (@copilot, PR #1184 round 4).
-                ...(mode === 'create' && authoritative?.deletedAt
-                  ? { deletedAt: null, deletedBy: null }
+                ...(reviving
+                  ? { deletedAt: null, deletedBy: null, embeddingPendingAt: revivedPendingAt }
                   : {}),
               } as Prisma.NodeUncheckedUpdateInput,
             });
@@ -1849,6 +1916,153 @@ function shallowMergeProperties(existing: unknown, patch: Record<string, unknown
     ? { ...(existing as Record<string, unknown>), ...patch }
     : patch;
 }
+
+/**
+ * moveNode's implementation, which also reports EXACTLY which rows the atomic
+ * subtree mover relocated, with the loc each one left (#1449, @codex P2 on
+ * #1453). renumberSpec needs that list; rebuilding it from a later snapshot
+ * would include nodes created under the target afterwards, or miss one moved
+ * away again. Held in an object so tests can intercept it.
+ */
+export const nodeMoveOps = {
+  async moveWithResult(
+    ctx: Context,
+    { sourceRef, targetUrn, targetMemoryRef, requireDraftSource, expectedSource }: {
+      sourceRef: string; targetUrn?: string | null; targetMemoryRef?: string | null;
+      /** #1449: refuse unless the source is a draft corpus under the move's lock (renumber). */
+      requireDraftSource?: boolean;
+      /**
+       * #1449 (@codex P2, PR #1453): refuse (CONFLICT) unless the resolved
+       * source still sits at this memory + loc. With `sourceRef` an id, the
+       * move is pinned to one node: an address can fall through to another
+       * memory's historical holder, and an id cannot; the mover then
+       * re-validates this same memory + loc under its row lock.
+       */
+      expectedSource?: { memoryId: string; loc: string };
+    },
+  ) {
+      const source = await resolveExistingNode(ctx, sourceRef, { forWrite: true });
+      if (expectedSource && (source.memoryId !== expectedSource.memoryId || source.loc !== expectedSource.loc)) {
+        throw new GraphQLError('The node moved since it was read, so nothing was moved. Re-read and retry.', {
+          extensions: { code: 'CONFLICT', nodeId: source.id },
+        });
+      }
+      const { destMemoryId, destLoc } = await resolveRelocationTarget(
+        ctx, source, targetUrn, targetMemoryRef,
+      );
+
+      // The subtree leaves the source memory and lands in the destination — write
+      // access to both (a same-memory move checks once).
+      await requireMemoryWriteAccess(ctx, source.memoryId);
+      // Spec 049 S4: a move whose SOURCE subtree contains a Channel is refused
+      // here; a destination entering one is refused by the create lock.
+      await assertLocWritable(ctx.db, source.memoryId, source.loc, 'move');
+      const crossMemory = destMemoryId !== source.memoryId;
+      if (crossMemory) {
+        await requireMemoryWriteAccess(ctx, destMemoryId);
+      }
+
+      const isSameSlot = !crossMemory && destLoc === source.loc;
+
+      const withEdges = {
+        outgoingEdges: { include: { target: true } },
+        incomingEdges: { include: { source: true } },
+      } as const;
+
+      try {
+        let relocated: MoveNodeSubtreeResult['moved'] = [];
+        const moved = await ctx.db.$transaction(
+          async (tx) => {
+            // #1187 — DECLARE the complete key set first, in the one global
+            // order: the destination ancestor path AND the source path that
+            // `lockSourceForMove` takes further down. Previously those were two
+            // separate acquisitions in caller order (destination, then source),
+            // which is one of the three pairwise inversions #1187 catalogues.
+            // Both helpers below still run for their gates and the source
+            // revalidation; their re-acquisitions are re-entrant no-ops.
+            await acquireLockSet(tx, [
+              ...ancestorLocs(destLoc).map((loc) => ({ memoryId: destMemoryId, loc })),
+              ...ancestorLocs(source.loc).map((loc) => ({ memoryId: source.memoryId, loc })),
+              { memoryId: source.memoryId, loc: source.loc },
+            ]);
+            // #664/#752: moving a node INTO a subtree is the same orphan vector as
+            // a create there — a concurrent non-recursive delete of a destination
+            // ancestor could count zero descendants, then this move lands the row
+            // under it. Lock the destination ancestor path. Root-level → no-op.
+            await lockAncestorsForCreate(tx, destMemoryId, destLoc);
+
+            if (isSameSlot) {
+              return tx.node.findUniqueOrThrow({ where: { id: source.id }, include: withEdges });
+            }
+
+            // Rebase the whole loc-subtree via the shared helper (it locks +
+            // revalidates the source, carries embeddings/edges cross-memory, and
+            // fails loud on a destination collision).
+            const result = await moveNodeSubtree(tx, {
+              source,
+              destLoc,
+              destMemoryId: crossMemory ? destMemoryId : undefined,
+              editor: editorFromAuth(ctx),
+              requireDraftSource,
+            });
+            relocated = result.moved;
+            return tx.node.findUniqueOrThrow({ where: { id: source.id }, include: withEdges });
+          },
+          // A large subtree touches many rows; the default 5s interactive-txn
+          // timeout is too tight (mirrors extractParentNodeGraph / cloneMemory).
+          { timeout: 120_000 },
+        );
+        // #1061 — a move is a write, recorded against the node's POST-move
+        // address (the loc and, on a cross-memory move, the memory it now
+        // lives in): that is where a reader of the usage series will look for
+        // it. As with a recursive delete, the rebased descendants are not
+        // counted individually — one caller edit, one event.
+        recordNodeWrite(ctx.db, toUsageNodeRef(moved), ctx);
+        // #1095 — mirror the move into the affected repos: the destination gains
+        // the files, the source loses them. Fired AFTER the commit (the mirror
+        // re-reads the post-move rows) and NOT awaited — a mirror never fails a
+        // write that already landed. This is what replaced the blanket refusal
+        // of any cross-memory move touching a git-backed memory.
+        void mirrorNodeMoveToGit(ctx.db, {
+          srcMemoryId: source.memoryId,
+          destMemoryId,
+          moved: relocated,
+          clientId: ctx.clientId ?? null,
+        });
+        return { node: moved, relocated };
+      } catch (e) {
+        // Map the shared helper's typed errors (thrown from either branch) to the
+        // GraphQL surface.
+        if (e instanceof SubtreeMoveCollisionError) {
+          throw new GraphQLError(
+            `A node already occupies loc "${e.loc}" in the destination memory.`,
+            { extensions: { code: 'NODE_ALREADY_EXISTS', loc: e.loc, memoryId: e.memoryId } },
+          );
+        }
+        if (e instanceof SubtreeMoveIntoSelfError) {
+          throw new GraphQLError(e.message, { extensions: { code: 'BAD_USER_INPUT', loc: e.loc } });
+        }
+        if (e instanceof SubtreeMovePlaceholderError) {
+          throw new GraphQLError(e.message, {
+            extensions: { code: 'SPEC_PLACEHOLDER_OUTSIDE_DRAFT', loc: e.loc, memoryId: e.memoryId },
+          });
+        }
+        if (e instanceof SubtreeMoveSourceNotDraftError) {
+          throw new GraphQLError(e.message, { extensions: { code: 'SPEC_CORPUS_NOT_DRAFT', memoryId: e.memoryId } });
+        }
+        if (e instanceof SubtreeMoveSourceChangedError) {
+          throw new GraphQLError(e.message, { extensions: { code: 'CONFLICT', nodeId: e.nodeId } });
+        }
+        if (
+          e instanceof CrossMemoryMoveUnsupportedError ||
+          e instanceof SubtreeMoveSchemaViolationError
+        ) {
+          throw new GraphQLError(e.message, { extensions: { code: 'BAD_USER_INPUT' } });
+        }
+        throw e;
+      }
+  },
+};
 
 export const nodeMutations = {
     // Create a single node (spec 039 Phase 0 D1/D4). Create-only: a live
@@ -2367,6 +2581,38 @@ export const nodeMutations = {
 
       // ── Write pass: revision snapshot + node update, all-or-nothing ──
       await ctx.db.$transaction(async (tx) => {
+        // A Channel can claim an ancestor after selection but before this
+        // transaction. Take its per-memory key BEFORE any node row lock (the
+        // Channel/create and delete paths use the same order), then classify
+        // again under that key. Newly protected rows are SKIPPED, as if the
+        // Channel had existed at selection time; no snapshot or update for
+        // them may reach the Channel-owned address (#1298).
+        const channelMemoryIds = [...new Set([...nodeById.values()].map((row) => row.memoryId))].sort();
+        for (const memoryId of channelMemoryIds) {
+          await lockMemoryForChannelChange(tx, memoryId);
+        }
+        const newlyProtected = new Set<string>();
+        const currentProtected = new Map<string, ProtectedLoc[]>();
+        for (const row of scannedNodes) {
+          let locs = currentProtected.get(row.memoryId);
+          if (!locs) {
+            locs = await protectedLocsIn(tx, row.memoryId);
+            currentProtected.set(row.memoryId, locs);
+          }
+          if (locs.some((entry) => protectedLocCovers(entry, row.loc))) {
+            newlyProtected.add(row.id);
+          }
+        }
+        if (newlyProtected.size > 0) {
+          skipCounts.protectedAddress += newlyProtected.size;
+          for (let i = scannedNodes.length - 1; i >= 0; i--) {
+            if (newlyProtected.has(scannedNodes[i]!.id)) scannedNodes.splice(i, 1);
+          }
+          for (let i = plans.length - 1; i >= 0; i--) {
+            if (newlyProtected.has(plans[i]!.raw.id)) plans.splice(i, 1);
+          }
+        }
+
         // #1323 (@codex/@copilot, PR #1339): each planned row is row-locked and
         // its unrevisioned drift reconciled as its OWN revision (id order, one
         // global order for multi-row writers) before its snapshot. The
@@ -2522,6 +2768,8 @@ export const nodeMutations = {
 
       return buildResult();
     },
+
+    searchReplaceInSpecNodes,
 
     deleteNode: async (
       _: unknown,
@@ -3072,116 +3320,9 @@ export const nodeMutations = {
     // cross-memory edges gated by #783) — moveNodeSubtree handles both.
     moveNode: async (
       _: unknown,
-      { sourceRef, targetUrn, targetMemoryRef }: { sourceRef: string; targetUrn?: string | null; targetMemoryRef?: string | null },
+      args: { sourceRef: string; targetUrn?: string | null; targetMemoryRef?: string | null },
       ctx: Context,
-    ) => {
-      const source = await resolveExistingNode(ctx, sourceRef, { forWrite: true });
-      const { destMemoryId, destLoc } = await resolveRelocationTarget(
-        ctx, source, targetUrn, targetMemoryRef,
-      );
-
-      // The subtree leaves the source memory and lands in the destination — write
-      // access to both (a same-memory move checks once).
-      await requireMemoryWriteAccess(ctx, source.memoryId);
-      // Spec 049 S4: a move whose SOURCE subtree contains a Channel is refused
-      // here; a destination entering one is refused by the create lock.
-      await assertLocWritable(ctx.db, source.memoryId, source.loc, 'move');
-      const crossMemory = destMemoryId !== source.memoryId;
-      if (crossMemory) {
-        await requireMemoryWriteAccess(ctx, destMemoryId);
-      }
-
-      const isSameSlot = !crossMemory && destLoc === source.loc;
-
-      const withEdges = {
-        outgoingEdges: { include: { target: true } },
-        incomingEdges: { include: { source: true } },
-      } as const;
-
-      try {
-        let relocated: MoveNodeSubtreeResult['moved'] = [];
-        const moved = await ctx.db.$transaction(
-          async (tx) => {
-            // #1187 — DECLARE the complete key set first, in the one global
-            // order: the destination ancestor path AND the source path that
-            // `lockSourceForMove` takes further down. Previously those were two
-            // separate acquisitions in caller order (destination, then source),
-            // which is one of the three pairwise inversions #1187 catalogues.
-            // Both helpers below still run for their gates and the source
-            // revalidation; their re-acquisitions are re-entrant no-ops.
-            await acquireLockSet(tx, [
-              ...ancestorLocs(destLoc).map((loc) => ({ memoryId: destMemoryId, loc })),
-              ...ancestorLocs(source.loc).map((loc) => ({ memoryId: source.memoryId, loc })),
-              { memoryId: source.memoryId, loc: source.loc },
-            ]);
-            // #664/#752: moving a node INTO a subtree is the same orphan vector as
-            // a create there — a concurrent non-recursive delete of a destination
-            // ancestor could count zero descendants, then this move lands the row
-            // under it. Lock the destination ancestor path. Root-level → no-op.
-            await lockAncestorsForCreate(tx, destMemoryId, destLoc);
-
-            if (isSameSlot) {
-              return tx.node.findUniqueOrThrow({ where: { id: source.id }, include: withEdges });
-            }
-
-            // Rebase the whole loc-subtree via the shared helper (it locks +
-            // revalidates the source, carries embeddings/edges cross-memory, and
-            // fails loud on a destination collision).
-            const result = await moveNodeSubtree(tx, {
-              source,
-              destLoc,
-              destMemoryId: crossMemory ? destMemoryId : undefined,
-              editor: editorFromAuth(ctx),
-            });
-            relocated = result.moved;
-            return tx.node.findUniqueOrThrow({ where: { id: source.id }, include: withEdges });
-          },
-          // A large subtree touches many rows; the default 5s interactive-txn
-          // timeout is too tight (mirrors extractParentNodeGraph / cloneMemory).
-          { timeout: 120_000 },
-        );
-        // #1061 — a move is a write, recorded against the node's POST-move
-        // address (the loc and, on a cross-memory move, the memory it now
-        // lives in): that is where a reader of the usage series will look for
-        // it. As with a recursive delete, the rebased descendants are not
-        // counted individually — one caller edit, one event.
-        recordNodeWrite(ctx.db, toUsageNodeRef(moved), ctx);
-        // #1095 — mirror the move into the affected repos: the destination gains
-        // the files, the source loses them. Fired AFTER the commit (the mirror
-        // re-reads the post-move rows) and NOT awaited — a mirror never fails a
-        // write that already landed. This is what replaced the blanket refusal
-        // of any cross-memory move touching a git-backed memory.
-        void mirrorNodeMoveToGit(ctx.db, {
-          srcMemoryId: source.memoryId,
-          destMemoryId,
-          moved: relocated,
-          clientId: ctx.clientId ?? null,
-        });
-        return moved;
-      } catch (e) {
-        // Map the shared helper's typed errors (thrown from either branch) to the
-        // GraphQL surface.
-        if (e instanceof SubtreeMoveCollisionError) {
-          throw new GraphQLError(
-            `A node already occupies loc "${e.loc}" in the destination memory.`,
-            { extensions: { code: 'NODE_ALREADY_EXISTS', loc: e.loc, memoryId: e.memoryId } },
-          );
-        }
-        if (e instanceof SubtreeMoveIntoSelfError) {
-          throw new GraphQLError(e.message, { extensions: { code: 'BAD_USER_INPUT', loc: e.loc } });
-        }
-        if (e instanceof SubtreeMoveSourceChangedError) {
-          throw new GraphQLError(e.message, { extensions: { code: 'CONFLICT', nodeId: e.nodeId } });
-        }
-        if (
-          e instanceof CrossMemoryMoveUnsupportedError ||
-          e instanceof SubtreeMoveSchemaViolationError
-        ) {
-          throw new GraphQLError(e.message, { extensions: { code: 'BAD_USER_INPUT' } });
-        }
-        throw e;
-      }
-    },
+    ) => (await nodeMoveOps.moveWithResult(ctx, args)).node,
 
     // #564 — clone a node to a new location, returning the NEW node (fresh id).
     // `sourceRef` + (`targetUrn` XOR `targetMemoryRef`) mirror moveNode. Copies
@@ -3228,6 +3369,15 @@ export const nodeMutations = {
       const { destMemoryId, destLoc } = await resolveRelocationTarget(
         ctx, source, targetUrn, targetMemoryRef,
       );
+      // #1450 (@codex P1, PR #1452) — a placeholder has nothing to copy, and
+      // writeNodeCore strips the flag, so a clone would be an ordinary blank
+      // node claiming the citation. Reserve the citation at the destination.
+      if (source.isPlaceholder) {
+        throw new GraphQLError(
+          `Cannot clone placeholder "${source.loc}": it has no spec to copy. Reserve the citation where you need it instead.`,
+          { extensions: { code: 'SPEC_PLACEHOLDER_NOT_COPYABLE', loc: source.loc } },
+        );
+      }
 
       // Decrypt the source with the SOURCE memory key so writeNodeCore can
       // re-encrypt the plaintext for the DESTINATION memory. Only content/
@@ -3586,7 +3736,16 @@ export const nodeMutations = {
         );
 
         if (Object.keys(changed).length > 0) {
-          await tx.node.update({ where: { id: target.id }, data: { ...writeData, ...clearNodeAuthorship() } });
+          await tx.node.update({
+            where: { id: target.id },
+            data: {
+              ...writeData,
+              ...clearNodeAuthorship(),
+              // #1450 (@codex P2, PR #1452): merging real content into a
+              // reserved citation writes the spec, same as updateSpecNode.
+              ...placeholderFillPatch(lockedTarget, 'content' in changed ? changed.content : undefined),
+            },
+          });
         }
 
         if (fields.has('EDGES')) {

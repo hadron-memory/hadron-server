@@ -113,6 +113,7 @@ import {
   requireRole,
   requireOrgRole,
   requireOwnerOrOrgRole,
+  requireMemoryManageAccess,
   concealUnreadableDenial,
   requireAgentMemoryGrant,
   resolveMemoryRefForWrite,
@@ -120,6 +121,7 @@ import {
   refArgNotFoundError,
   chosenRefArg,
   requireMemoryWriteAccess,
+  withoutRequestCaches,
   MEMORY_INCLUDE,
   AGENT_INCLUDE,
   ORG_INCLUDE,
@@ -501,6 +503,7 @@ export const memoryMutations = {
         vectorIndexEnabled,
         embeddingSource,
         maxRevCount,
+        draftCorpus,
       }: {
         // spec 047: OPTIONAL — omitted ⇒ user-owned (caller's `@handle` namespace).
         orgId?: string | null; name: string;
@@ -515,6 +518,8 @@ export const memoryMutations = {
         embeddingSource?: 'abstract' | 'contentChunks' | 'both' | null;
         // #621 — per-node revision cap; omitted ⇒ column default (10).
         maxRevCount?: number | null;
+        // #1448 — the ONLY way a memory becomes a draft spec corpus.
+        draftCorpus?: boolean | null;
         // GraphQL passes the full MemoryClass enum; the resolver
         // allowlists the user-creatable values below. Spec 034 added
         // `personal`/`private` as owner-only, user-creatable classes
@@ -673,6 +678,9 @@ export const memoryMutations = {
             ownerUserId: userOwned ? ctx.userId : null,
             urn: memoryUrn,
             name,
+            // #1448 — draft is chosen here or never; explicit null reads as
+            // "not asked", same as omitted.
+            corpusDraft: draftCorpus === true,
             shortDescription,
             description,
             // Free-form metadata bag (no server-side semantics). Mirrors the
@@ -814,7 +822,7 @@ export const memoryMutations = {
       const ref = id;
       ({ id } = await resolveMemoryRef(ctx.db, ref));
       const memory = await ctx.db.memory.findUniqueOrThrow({ where: { id } });
-      await concealUnreadableDenial(ctx, id, ref, () => requireOwnerOrOrgRole(ctx, memory, 'ADMIN'));
+      await concealUnreadableDenial(ctx, id, ref, () => requireMemoryManageAccess(ctx, memory));
       // #725 — validate the property schema for well-formedness BEFORE it is
       // stored: a malformed schema is BAD_USER_INPUT, never a persisted garbage
       // blob. `null` clears it; the stored value is the normalized schema (so
@@ -982,6 +990,23 @@ export const memoryMutations = {
         const [lockedRow] = await tx.$queryRaw<{ urn: string }[]>`
           SELECT urn FROM memories WHERE id = ${id} FOR UPDATE
         `;
+        const lockedMemory = await tx.memory.findUniqueOrThrow({ where: { id } });
+        const txCtx = withoutRequestCaches(ctx, tx);
+        await concealUnreadableDenial(txCtx, id, ref, () => requireMemoryManageAccess(txCtx, lockedMemory));
+        // Calculations above used the pre-transaction owner and class. A
+        // concurrent transfer can change both before this row lock is taken.
+        // Refuse that stale computation even when the caller also manages the
+        // new tenant; they can retry against the settled row.
+        if (
+          lockedMemory.organizationId !== memory.organizationId ||
+          lockedMemory.ownerUserId !== memory.ownerUserId ||
+          lockedMemory.userId !== memory.userId ||
+          lockedMemory.class !== memory.class
+        ) {
+          throw new GraphQLError('Memory ownership changed during update; retry.', {
+            extensions: { code: 'CONFLICT' },
+          });
+        }
         if (newUrn !== undefined) {
           await recordUrnRename(tx, {
             entityType: 'MEMORY',
@@ -1127,7 +1152,8 @@ export const memoryMutations = {
     /**
      * #882 — re-drive every failed embed in a memory (the operator recovery
      * surface; previously a hand-written SQL re-stamp). Same gate as
-     * updateMemory: memory owner or org-ADMIN. Returns the count re-stamped;
+     * updateMemory: strict owner for personal/private, otherwise tenant owner
+     * or org-ADMIN. Returns the count re-stamped;
      * 0 (without stamping) when the memory isn't vector-indexed, so the
      * mutation can't queue work the worker would only discard.
      */
@@ -1141,7 +1167,7 @@ export const memoryMutations = {
       // #1316: a caller who cannot open the memory's record is denied as if
       // it were missing (MEMORY_NOT_FOUND); one who can keeps the Forbidden.
       await concealUnreadableDenial(ctx, memory.id, memoryRef, () =>
-        requireOwnerOrOrgRole(ctx, memory, 'ADMIN'),
+        requireMemoryManageAccess(ctx, memory),
       );
       if (!memory.vectorIndexEnabled) return 0;
       return restampFailedEmbeddings(ctx.db, memory.id);
@@ -1617,7 +1643,7 @@ export const memoryMutations = {
       const ref = id;
       ({ id } = await resolveMemoryRef(ctx.db, ref));
       const memory = await ctx.db.memory.findUniqueOrThrow({ where: { id } });
-      await concealUnreadableDenial(ctx, id, ref, () => requireOwnerOrOrgRole(ctx, memory, 'ADMIN'));
+      await concealUnreadableDenial(ctx, id, ref, () => requireMemoryManageAccess(ctx, memory));
       const encrypted = encryptToken(token);
       return ctx.db.memory.update({
         where: { id },
@@ -1841,7 +1867,7 @@ export const memoryMutations = {
       const memory = await ctx.db.memory.findUniqueOrThrow({ where: { id: resolvedMemoryId } });
       // Only callers who can open the memory reach here (#1381), so this
       // denial discloses nothing they did not already know.
-      await requireOwnerOrOrgRole(ctx, memory, 'ADMIN');
+      await requireMemoryManageAccess(ctx, memory);
       // A missing subscription is a typed NOT_FOUND, not Prisma's P2025 text.
       await requireMemorySubscription(ctx, resolvedMemoryId, resolvedOrgId, chosenRefArg({ ref: memoryRef, id: memoryId })!);
       return ctx.db.memorySubscription.update({
@@ -1940,7 +1966,7 @@ export const memoryMutations = {
         where: { id },
         include: { organization: true },
       });
-      await concealUnreadableDenial(ctx, id, ref, () => requireOwnerOrOrgRole(ctx, memory, 'CONTRIBUTOR'));
+      await concealUnreadableDenial(ctx, id, ref, () => requireMemoryManageAccess(ctx, memory, 'CONTRIBUTOR'));
 
       const result = await syncGraphFromGithub(memory);
       if (result.error) throw new Error(result.error);
@@ -1960,7 +1986,7 @@ export const memoryMutations = {
       const ref = id;
       ({ id } = await resolveMemoryRef(ctx.db, ref));
       const memory = await ctx.db.memory.findUniqueOrThrow({ where: { id } });
-      await concealUnreadableDenial(ctx, id, ref, () => requireOwnerOrOrgRole(ctx, memory, 'ADMIN'));
+      await concealUnreadableDenial(ctx, id, ref, () => requireMemoryManageAccess(ctx, memory));
 
       const { pushMemoryToGit: push } = await import('../../../integrations/github/pushMemoryToGit.js');
       const result = await push(id);

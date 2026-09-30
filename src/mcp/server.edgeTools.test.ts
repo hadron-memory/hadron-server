@@ -20,6 +20,7 @@ import { ensureChannelWithRoot, lockMemoryForChannelChange } from '../lib/channe
 import { acquireLockSet } from '../lib/nodeSubtreeLock.js';
 import { runPendingEdgePromotionSweep } from '../jobs/promotePendingEdges.js';
 import { pendingEdgeStableTargetKey } from '../lib/pendingEdgePromotion.js';
+import { waitForLockWaitersOfType } from '../test/lockWait.js';
 
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -72,30 +73,6 @@ async function waitForChannelMemoryLockWaiters(
   }
 }
 
-async function waitForLockWaiters(
-  lockType: 'advisory' | 'transactionid',
-  minimumWaiters: number,
-  timeoutMs = 10_000,
-): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  for (;;) {
-    const [{ count }] = await db.$queryRaw<Array<{ count: bigint }>>`
-      SELECT count(*)::bigint AS count
-      FROM pg_locks
-      WHERE locktype = ${lockType}
-        AND NOT granted
-        AND (
-          locktype = 'transactionid'
-          OR database = (SELECT oid FROM pg_database WHERE datname = current_database())
-        )
-    `;
-    if (Number(count) >= minimumWaiters) return;
-    if (Date.now() > deadline) {
-      throw new Error(`timed out waiting for ${minimumWaiters} ${lockType} lock waiter(s)`);
-    }
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
-}
 
 async function holdNodeLocLock(memoryId: string, loc: string): Promise<{
   release: () => void;
@@ -447,14 +424,14 @@ describe('the hazard #835 exists to remove', () => {
         urn: `urn:node:${memUrn}:review`,
         targetUrn: `urn:node:${movedMemory.urn}:moved:review`,
       });
-      await waitForLockWaiters('transactionid', 1);
+      await waitForLockWaitersOfType(db, 'transactionid', 1);
 
       signalMemoryRelease();
       await memoryHolder;
       // The promotion must now wait on the ancestor key held by the move. This
       // assertion mutation-tests the fix: exact endpoint locks produce no
       // advisory waiter and the test times out here.
-      await waitForLockWaiters('advisory', 1);
+      await waitForLockWaitersOfType(db, 'advisory', 1);
 
       signalEdgeRelease();
       await edgeHolder;
@@ -522,7 +499,7 @@ describe('the hazard #835 exists to remove', () => {
       // release. Attempts 1–3 alternate the same way. The final A3 lock stays
       // held while `creating` resolves, proving there was no hidden fifth retry
       // after the documented budget was exhausted.
-      await waitForLockWaiters('advisory', 1);
+      await waitForLockWaitersOfType(db, 'advisory', 1);
       const b1 = await hold(movedMemory.id, 'bounce-b1:review:item');
       await db.node.update({
         where: { id: source.id },
@@ -531,7 +508,7 @@ describe('the hazard #835 exists to remove', () => {
       a1.release();
       await a1.done;
 
-      await waitForLockWaiters('advisory', 1);
+      await waitForLockWaitersOfType(db, 'advisory', 1);
       const a2 = await hold(memId, 'bounce-a2:review:item');
       await db.node.update({
         where: { id: source.id },
@@ -540,7 +517,7 @@ describe('the hazard #835 exists to remove', () => {
       b1.release();
       await b1.done;
 
-      await waitForLockWaiters('advisory', 1);
+      await waitForLockWaitersOfType(db, 'advisory', 1);
       const b2 = await hold(movedMemory.id, 'bounce-b2:review:item');
       await db.node.update({
         where: { id: source.id },
@@ -549,7 +526,7 @@ describe('the hazard #835 exists to remove', () => {
       a2.release();
       await a2.done;
 
-      await waitForLockWaiters('advisory', 1);
+      await waitForLockWaitersOfType(db, 'advisory', 1);
       await hold(memId, 'bounce-a3:review:item');
       await db.node.update({
         where: { id: source.id },

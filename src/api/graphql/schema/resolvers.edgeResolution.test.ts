@@ -11,6 +11,7 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { resolvers, type Context } from './resolvers.js';
 import { generateId } from '../../../lib/id.js';
+import { deriveEdgeLoc } from '../../../lib/edgeLoc.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -80,6 +81,25 @@ async function pendingEdgeCount(sourceId: string) {
 }
 
 describe('createNode — edge target resolution (issue #105)', () => {
+  it('rolls back a source create when an inline edge loc belongs to another source (#1469)', async () => {
+    const other = await db.node.create({
+      data: { id: generateId(), memoryId: memory.id, loc: 'other', name: 'other' },
+    });
+    const loc = deriveEdgeLoc('review:db-type-agnostic', 'use this pattern', target.loc);
+    const blocker = await db.edge.create({
+      data: { id: generateId(), memoryId: memory.id, sourceId: other.id,
+        targetId: target.id, loc, name: 'use this pattern' },
+    });
+
+    await expect(upsertSourceWithTarget(target.id)).rejects.toMatchObject({
+      extensions: { code: 'EDGE_LOC_CONFLICT' },
+    });
+    expect(await db.node.findUnique({ where: {
+      loc_memoryId: { loc: 'review:db-type-agnostic', memoryId: memory.id },
+    } })).toBeNull();
+    expect(await db.edge.findUnique({ where: { id: blocker.id } })).toMatchObject({ sourceId: other.id });
+  });
+
   it('persists a real edge when targetId is the bare node ID', async () => {
     const node = await upsertSourceWithTarget(target.id);
     expect(await edgeCount(node.id)).toBe(1);

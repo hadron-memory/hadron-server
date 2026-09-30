@@ -96,13 +96,17 @@ export async function upsertAbstractVector(
   expectedPendingAt?: PendingAtGuard,
 ): Promise<boolean> {
   // INSERT ... SELECT rather than VALUES so the guard is part of the same
-  // statement: if the marker has moved, the SELECT yields no row and nothing
-  // is written. A separate pre-check could not promise that.
+  // statement. Lock the node as the chunk writer does: without the lock, this
+  // SELECT can read an old marker before a revival commits, then wait on the
+  // vector's unique/FK constraint and insert stale bytes AFTER revival's
+  // transactional delete. The row lock makes the guard re-check the committed
+  // marker after waiting. NO KEY UPDATE admits the INSERT's FK KEY SHARE lock.
   const written = await db.$executeRaw(Prisma.sql`
     INSERT INTO node_embeddings (id, node_id, memory_id, kind, provider, model, dim, embedding, created_at)
     SELECT ${generateId()}, ${row.nodeId}, ${row.memoryId}, 'abstract', ${row.provider}, ${row.model}, ${row.dim}, ${toVectorLiteral(row.embedding)}::vector, now()
     FROM nodes n
     WHERE n.id = ${row.nodeId} AND ${pendingGuard(expectedPendingAt)}
+    FOR NO KEY UPDATE OF n
     ON CONFLICT (node_id) WHERE kind = 'abstract'
     DO UPDATE SET
       memory_id  = EXCLUDED.memory_id,

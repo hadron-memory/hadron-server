@@ -60,6 +60,7 @@ import { normalizeObjectType } from '../lib/enforceNodeSchema.js';
 import type { MemorySchema } from '../lib/memorySchema.js';
 import { validateLoc, InvalidLocError } from '../lib/validateLoc.js';
 import { deriveEdgeLoc } from '../lib/edgeLoc.js';
+import { archiveTombstone } from '../lib/tombstoneArchive.js';
 import { promotePendingEdgeForTarget } from '../lib/pendingEdgePromotion.js';
 import {
   liveEdgeEndpointSet,
@@ -77,6 +78,7 @@ import { escapePrismaLikePattern } from '../lib/literalLocPrefix.js';
 import {
   moveNodeSubtree,
   SubtreeMoveCollisionError,
+  SubtreeMovePlaceholderError,
   SubtreeMoveIntoSelfError,
   SubtreeMoveSourceChangedError,
   CrossMemoryMoveUnsupportedError,
@@ -138,7 +140,7 @@ import { validateMemoryNodes, formatFindingLine } from '../lib/memoryValidation.
 import { nextSiblingSeq } from '../lib/nodeSeq.js';
 import { BATCH_READ_MAX_NODES, BATCH_READ_MAX_BYTES } from '../lib/batchRead.js';
 import { isCiphertext } from '../lib/crypto.js';
-import { enqueueNodeEmbedding } from '../services/embedding/enqueue.js';
+import { enqueueNodeEmbedding, pendingAtForRevival } from '../services/embedding/enqueue.js';
 import { sessionKeyCache } from '../lib/sessionKeyCache.js';
 import {
   isSessionLive,
@@ -610,10 +612,10 @@ export async function resolveEdgeRefs(
 /**
  * Add a single outgoing edge from `sourceUrn` to `targetUrn`, non-
  * destructively (other edges on the source are left alone) and
- * idempotently (re-running with the same loc is a no-op against
- * the `@@unique([loc, memoryId])` identity). Backs the
+ * idempotently (re-running the same edge at the same loc is a no-op;
+ * an occupied loc with different endpoints or payload is refused). Backs the
  * `hadron_create_edge` MCP tool — extracted so the auth-gated flow (resolve
- * source → check write → resolve target → check read → upsert) is
+ * source → check write → resolve target → check read → insert/verify) is
  * directly testable without wiring a full MCP transport handshake.
  *
  * Returns either a `{ urn }`-shaped success carrying the canonical
@@ -761,9 +763,12 @@ export async function addEdge(args: {
     if (!locked.source) return `Source node not found: "${rawSource}".`;
     if (!locked.target) return `Edge target not found: "${rawTarget}"`;
 
-    await tx.edge.upsert({
-      where: { loc_memoryId: { loc: edgeLoc, memoryId: locked.source.memoryId } },
-      create: {
+    // ON CONFLICT DO NOTHING is race-safe for simultaneous first creates.
+    // A skipped insert proves only that the ADDRESS exists, not that the
+    // requested relation was saved (#1469). Verify the occupying row before
+    // issuing a success receipt; a tombstone cannot satisfy the request.
+    const { count } = await tx.edge.createMany({
+      data: [{
         id: generateId(),
         memoryId: locked.source.memoryId,
         sourceId: locked.source.id,
@@ -773,9 +778,23 @@ export async function addEdge(args: {
         description,
         isRunnable,
         createdBy: auth.clientId ?? null,
-      },
-      update: {},
+      }],
+      skipDuplicates: true,
     });
+    if (count === 0) {
+      const occupant = await tx.edge.findUnique({
+        where: { loc_memoryId: { loc: edgeLoc, memoryId: locked.source.memoryId } },
+      });
+      // condition/priority/data are not accepted by this MCP tool, so a new
+      // edge gets the database defaults. An existing edge with different
+      // behavior is not an idempotent replay, even if its endpoints match.
+      if (!occupant || occupant.deletedAt || occupant.sourceId !== locked.source.id ||
+          occupant.targetId !== locked.target.id || occupant.name !== name ||
+          occupant.description !== description || occupant.isRunnable !== isRunnable ||
+          occupant.condition !== null || occupant.priority !== 0 || occupant.data !== null) {
+        return `[edge_loc_conflict] Edge loc "${edgeLoc}" is occupied; choose another loc.`;
+      }
+    }
     return null;
   });
   if (writeError) return { error: writeError };
@@ -812,13 +831,19 @@ export async function replaceOutgoingEdges(args: {
   resolved: ResolvedEdge[];
   createdBy: string | null;
 }): Promise<string | null> {
-  return db.$transaction(async (tx) => {
-    await lockOutgoingEdgeMemories(tx, args.sourceMemoryId, args.resolved);
-    return replaceOutgoingEdgesInTransaction(tx, args);
-  });
+  try {
+    return await db.$transaction(async (tx) => {
+      await lockOutgoingEdgeMemories(tx, args.sourceMemoryId, args.resolved);
+      return replaceOutgoingEdgesInTransaction(tx, args);
+    });
+  } catch (e) {
+    if (e instanceof EdgeLocConflictError) return e.message;
+    throw e;
+  }
 }
 
 class InlineEdgeEndpointError extends Error {}
+class EdgeLocConflictError extends Error {}
 /** The target moved, was deleted or changed memory while this write waited for its row lock (PR #1339 review). */
 class NodeMovedDuringWriteError extends Error {}
 class MemoryEncryptionChangedDuringWriteError extends Error {}
@@ -879,7 +904,7 @@ async function replaceOutgoingEdgesInTransaction(
   await tx.edge.deleteMany({ where: { sourceId: args.sourceNodeId } });
   await tx.pendingEdge.deleteMany({ where: { sourceId: args.sourceNodeId } });
   if (args.resolved.length > 0) {
-    await tx.edge.createMany({
+    const { count } = await tx.edge.createMany({
       data: args.resolved.map((e) => ({
         id: generateId(),
         memoryId: args.sourceMemoryId,
@@ -893,6 +918,12 @@ async function replaceOutgoingEdgesInTransaction(
       })),
       skipDuplicates: true,
     });
+    // createMany's skipped rows may belong to another source or be duplicate
+    // locs in this request. Abort the enclosing node+edge transaction so the
+    // old outgoing set and any node edit remain intact.
+    if (count !== args.resolved.length) {
+      throw new EdgeLocConflictError('[edge_loc_conflict] An edge loc is already occupied; choose unique edge locs.');
+    }
   }
   return null;
 }
@@ -5391,6 +5422,19 @@ export function createMcpServerInstance(
             priorRole: pre?.role ?? null,
             runnableAfter: mergedGovernedState(pre, { role, isRunnable }).isRunnable,
           });
+          // #1460 — the locked tombstone can retain vectors from its old
+          // plaintext. Purge both kinds before the upsert makes it searchable.
+          if (pre?.deletedAt) {
+            await tx.nodeEmbedding.deleteMany({ where: { nodeId: pre.id } });
+          }
+          // Invalidate an old in-flight embed before the asynchronous enqueue
+          // restamps the marker after commit.
+          const indexed = pre?.deletedAt
+            ? await tx.memory.findUniqueOrThrow({ where: { id: memoryId }, select: { vectorIndexEnabled: true } })
+            : null;
+          const revivedPendingAt = pre?.deletedAt
+            ? pendingAtForRevival(pre.embeddingPendingAt, indexed!.vectorIndexEnabled)
+            : undefined;
           const written = await tx.node.upsert({
             ...upsertArgs,
             // Resurrect (#543) on the authoritative row, not the stale probe: a
@@ -5399,7 +5443,7 @@ export function createMcpServerInstance(
             update: {
               ...upsertArgs.update,
               ...(pre ? clearNodeAuthorship() : {}),
-              ...(pre?.deletedAt ? { deletedAt: null, deletedBy: null } : {}),
+              ...(pre?.deletedAt ? { deletedAt: null, deletedBy: null, embeddingPendingAt: revivedPendingAt } : {}),
             } as any,
           });
           if (resolvedEdges !== null) {
@@ -5420,6 +5464,7 @@ export function createMcpServerInstance(
         }
         if (e instanceof RoleNotDeclaredError) return textResult(`[role_not_declared] ${e.message}`);
         if (e instanceof InlineEdgeEndpointError) return textResult(e.message);
+        if (e instanceof EdgeLocConflictError) return textResult(e.message);
         if (e instanceof MemoryEncryptionChangedDuringWriteError) return textResult(e.message);
         throw e;
       }
@@ -5838,6 +5883,7 @@ export function createMcpServerInstance(
           if (e instanceof NodeMovedDuringWriteError) return textResult(e.message);
           if (e instanceof MemoryEncryptionChangedDuringWriteError) return textResult(e.message);
           if (e instanceof InlineEdgeEndpointError) return textResult(e.message);
+          if (e instanceof EdgeLocConflictError) return textResult(e.message);
           if (e instanceof RoleNotDeclaredError) return textResult(`[role_not_declared] ${e.message}`);
           if (e instanceof ScopeGraphQLError && e.extensions?.code === 'NODE_WRITE_CONFLICT') {
             return textResult(`[node_write_conflict] ${e.message}`);
@@ -6363,11 +6409,11 @@ export function createMcpServerInstance(
   // which means the only way to add a single edge to an existing node
   // without hadron_create_edge is to re-send EVERY existing edge plus the new
   // one. Easy to drop edges by accident. This tool fills that gap with
-  // an idempotent single-edge upsert that leaves all other edges alone.
+  // an idempotent single-edge insert that leaves all other edges alone.
 
   server.tool(
     'hadron_create_edge',
-    'Add a single outgoing edge from one node to another. Non-destructive — leaves all other edges on the source node intact (unlike hadron_update_node, which replaces the full edge set). Idempotent: re-running with the same loc is a no-op (loc is the edge identity; omit it and the same source/target/name always derive the same loc). Both endpoints may be given as an ID-shape PK OR a fully-qualified node URN (hrn:node:<root>:<memory>:<loc>). Prefer the PK: it is immutable, so an edge created against it survives a later move/rename of the node, whereas a URN does not (#322). Both endpoints must already exist — use hadron_create_node first to create them. Cross-memory edges are supported, but the caller must have read access on the target memory.',
+    'Add a single outgoing edge from one node to another. Non-destructive — leaves all other edges on the source node intact (unlike hadron_update_node, which replaces the full edge set). Idempotent: re-running the same edge at the same loc is a no-op (loc is the edge identity; omit it and the same source/target/name always derive the same loc). An occupied loc with different endpoints or metadata returns [edge_loc_conflict]. Both endpoints may be given as an ID-shape PK OR a fully-qualified node URN (hrn:node:<root>:<memory>:<loc>). Prefer the PK: it is immutable, so an edge created against it survives a later move/rename of the node, whereas a URN does not (#322). Both endpoints must already exist — use hadron_create_node first to create them. Cross-memory edges are supported, but the caller must have read access on the target memory.',
     {
       sourceUrn: z.string().describe('Source node, as an ID-shape PK (preferred — immutable across move/rename) OR a fully-qualified URN, e.g. "hrn:node:acme.com:mmdata:services:db-helper". The source node must already exist; this tool will not create it.'),
       targetUrn: z.string().describe('Target node, as an ID-shape PK (preferred) OR a fully-qualified URN. The target must already exist; use hadron_create_node first if it does not.'),
@@ -6801,10 +6847,15 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           // Enumerating the multi-key callers from the GraphQL resolvers alone
           // is how this was missed; the writers are enumerated by STATE (who
           // takes two keys), never by the call sites one happens to know.
+          // #1466: an edge writer holds this memory key across endpoint
+          // validation and insertion. Take it before any loc lock so an edge
+          // cannot land after archiveTombstone enumerates the target's edges.
+          await lockEdgeEndpointMemories(tx, [toMemory.id]);
           await acquireLockSet(tx, [
             ...ancestorLocs(toLoc).map((loc) => ({ memoryId: toMemory.id, loc })),
             ...ancestorLocs(fromLoc).map((loc) => ({ memoryId: fromMemory.id, loc })),
             { memoryId: fromMemory.id, loc: fromLoc },
+            { memoryId: toMemory.id, loc: toLoc },
           ]);
           await lockAncestorsForCreate(tx, toMemory.id, toLoc);
 
@@ -6876,16 +6927,16 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
               return { refused: 'urn-exists', targetUrn };
             }
             if (existingTarget) {
-              const archivedLoc = `${toLoc}__deleted-${existingTarget.id}`;
-              await tx.node.update({
-                where: { id: existingTarget.id },
-                data: {
-                  loc: archivedLoc,
-                  ...(existingTarget.deletedAt
-                    ? {}
-                    : { deletedAt: new Date(), deletedBy: auth.userId ?? auth.clientId ?? null }),
-                },
-              });
+              if (!existingTarget.deletedAt) {
+                await tx.node.update({
+                  where: { id: existingTarget.id },
+                  data: { deletedAt: new Date(), deletedBy: auth.userId ?? auth.clientId ?? null },
+                });
+              }
+              // #1466: the old node's edges keep locs derived from this address.
+              // Rekey them with the tombstone inside the same move transaction,
+              // before the mover takes the address and can create its own edges.
+              await archiveTombstone(tx, existingTarget);
             }
 
             // #768/#781: rebase the whole loc-subtree via the shared helper (the
@@ -6959,6 +7010,9 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         }
         if (e instanceof SubtreeMoveIntoSelfError) {
           return textResult('Cannot move a node into its own subtree.');
+        }
+        if (e instanceof SubtreeMovePlaceholderError) {
+          return textResult(`SPEC_PLACEHOLDER_OUTSIDE_DRAFT: ${e.message}`);
         }
         if (e instanceof SubtreeMoveSourceChangedError) {
           return textResult('The node was moved concurrently; re-read it and retry.');

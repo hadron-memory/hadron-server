@@ -22,6 +22,7 @@ import type { MemorySchema } from '../../lib/memorySchema.js';
 import { acquireLockSet } from '../../lib/nodeSubtreeLock.js';
 import { recordUrnRename } from '../../lib/urnAlias.js';
 import { safeNodeUrnV2 } from '../../lib/urnEmit.js';
+import { assertNoPlaceholdersLeaveDraft, isDraftCorpus } from '../../lib/specCorpus.js';
 
 /**
  * Batched, resumable execution of a memory→memory merge (spec cor:api:080).
@@ -210,6 +211,18 @@ export async function mergeMemoryGraph(
   // up front than eight pages in.
   await assertMemoryBulkMutable(db, sourceMemoryId, 'merge');
   await assertMemoryBulkMutable(db, targetMemoryId, 'merge into');
+  // #1450 — the same up-front refusal for placeholders, before any batch
+  // commits: a merge into a memory that is not a draft corpus would publish
+  // them. The per-batch check below still holds against one reserved mid-merge.
+  {
+    const target = await db.memory.findUnique({ where: { id: targetMemoryId }, select: { corpusDraft: true } });
+    const placeholders = await db.node.findMany({
+      where: { memoryId: sourceMemoryId, deletedAt: null, isPlaceholder: true },
+      select: { loc: true, isPlaceholder: true },
+      take: 1,
+    });
+    assertNoPlaceholdersLeaveDraft(placeholders, { isDraft: target?.corpusDraft === true, memoryId: targetMemoryId });
+  }
 
   // === Phase 1: classify + relocate, in one keyset-paged scan. ===
   // Page the live source node addresses by id and match each page against the
@@ -341,6 +354,21 @@ export async function mergeMemoryGraph(
           // The held Memory rows also pin both URNs against a concurrent rename.
           const sourceUrn = memoryUrns.get(sourceMemoryId)!;
           const targetUrn = memoryUrns.get(targetMemoryId)!;
+          // #1448 (@codex P1, PR #1451): relocating out of a DRAFT spec corpus
+          // leaves no alias, exactly like a move — a draft number was never
+          // published. Read under the Memory lock held above, so a concurrent
+          // mint cannot change the answer mid-batch.
+          const [sourceFlags] = await tx.$queryRaw<Array<{ corpus_draft: boolean }>>`
+            SELECT corpus_draft FROM memories WHERE id = ${sourceMemoryId}
+          `;
+          const recordAliases = !isDraftCorpus({ corpusDraft: sourceFlags?.corpus_draft === true });
+          // #1450 — a placeholder never leaves draft corpora (see
+          // SubtreeMovePlaceholderError); spec placeholders are also refused by
+          // the governed guard above, this covers one whose role was changed.
+          const [targetFlags] = await tx.$queryRaw<Array<{ corpus_draft: boolean }>>`
+            SELECT corpus_draft FROM memories WHERE id = ${targetMemoryId}
+          `;
+          assertNoPlaceholdersLeaveDraft(rows, { isDraft: targetFlags?.corpus_draft === true, memoryId: targetMemoryId });
           for (const row of rows) {
             await createNodeRevision(
               tx,
@@ -350,7 +378,7 @@ export async function mergeMemoryGraph(
             // Record the old address beside the write in this bounded tx;
             // folded/deleted identities never reach this relocation loop.
             // The mirror root has loc='' and no round-trippable v2 node URN.
-            if (row.loc) {
+            if (row.loc && recordAliases) {
               await recordUrnRename(tx, {
                 entityType: 'NODE',
                 entityId: row.id,
