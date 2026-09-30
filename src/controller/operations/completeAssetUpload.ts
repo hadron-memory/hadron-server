@@ -13,7 +13,6 @@
  */
 
 import type { Asset, PrismaClient } from '../../generated/prisma/index.js';
-import { GraphQLError } from 'graphql';
 import { consumeUpload } from '../../lib/asset/uploadRegistry.js';
 import { logAssetEvent } from '../../lib/asset/audit.js';
 import { encryptStorageKeyForMemory } from '../../lib/asset/encryption.js';
@@ -32,7 +31,7 @@ import { isScanConfigured } from '../../lib/scanClient.js';
 import { scanAssetRow } from '../../lib/asset/scan.js';
 import { AssetUploadError } from './beginAssetUpload.js';
 import type { AssetCallerContextV2 } from './beginAssetUpload.js';
-import { requireMemoryWriteAccess, type Context } from '../../api/graphql/schema/resolvers.helpers.js';
+import { requireCurrentAssetMemoryWrite } from './assetMemoryWriteGate.js';
 
 export interface CompleteAssetUploadInput {
   uploadId: string;
@@ -172,26 +171,9 @@ export async function completeAssetUpload(
     asset = await db.$transaction(async (tx) => {
       // Transfer takes FOR UPDATE on this row. Its owner change and our final
       // authority check + Asset insert must be ordered as one operation.
-      const locked = await tx.$queryRaw<Array<{ id: string; is_encrypted: boolean }>>`
-        SELECT id, is_encrypted FROM memories WHERE id = ${entry.memoryId} AND deleted_at IS NULL FOR SHARE
-      `;
-      const memory = locked[0];
-      if (!memory) {
-        throw new AssetUploadError('PERMISSION_DENIED', 'caller does not have write access to target memory');
-      }
-      try {
-        await requireMemoryWriteAccess({
-          db: tx, userId: caller.userId, appId: caller.appId,
-          roles: caller.roles, organizationId: caller.organizationId,
-        } as Context, entry.memoryId!);
-      } catch (error) {
-        if (error instanceof GraphQLError && error.extensions?.code === 'FORBIDDEN') {
-          throw new AssetUploadError('PERMISSION_DENIED', 'caller does not have write access to target memory');
-        }
-        throw error;
-      }
+      const memory = await requireCurrentAssetMemoryWrite(tx, caller, entry.memoryId!);
       let storedStorageKey = entry.storageKey;
-      if (memory.is_encrypted) {
+      if (memory.isEncrypted) {
         const key = sessionKeyCache.getByMemoryId(memory.id);
         if (!key) {
           throw new AssetUploadError(

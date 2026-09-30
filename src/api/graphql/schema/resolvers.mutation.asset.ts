@@ -57,6 +57,8 @@ export const assetMutations = {
           appId: ctx.appId,
           roles: ctx.roles,
           organizationId: ctx.organizationId,
+          sessionId: ctx.sessionId,
+          impersonation: ctx.impersonation,
         },
         input,
       );
@@ -103,7 +105,7 @@ export const assetMutations = {
       if (!ctx.userId) throw new Error('Unauthenticated');
       return completeAssetUpload(
         ctx.db,
-        { userId: ctx.userId, appId: ctx.appId, roles: ctx.roles, organizationId: ctx.organizationId },
+        { userId: ctx.userId, appId: ctx.appId, roles: ctx.roles, organizationId: ctx.organizationId, sessionId: ctx.sessionId, impersonation: ctx.impersonation },
         input,
       );
     },
@@ -130,7 +132,7 @@ export const assetMutations = {
       if (!ctx.userId) throw new Error('Unauthenticated');
       return softDeleteAsset(
         ctx.db,
-        { userId: ctx.userId, appId: ctx.appId },
+        { userId: ctx.userId, appId: ctx.appId, roles: ctx.roles, organizationId: ctx.organizationId, sessionId: ctx.sessionId, impersonation: ctx.impersonation },
         { assetId },
         isOrgAdminFor,
       );
@@ -144,7 +146,7 @@ export const assetMutations = {
       if (!ctx.userId) throw new Error('Unauthenticated');
       return restoreAsset(
         ctx.db,
-        { userId: ctx.userId, appId: ctx.appId },
+        { userId: ctx.userId, appId: ctx.appId, roles: ctx.roles, organizationId: ctx.organizationId, sessionId: ctx.sessionId, impersonation: ctx.impersonation },
         { assetId },
         isOrgAdminFor,
       );

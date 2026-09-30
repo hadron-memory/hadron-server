@@ -277,6 +277,8 @@ export interface BeginAssetUploadV2Input {
 export interface AssetCallerContextV2 extends AssetCallerContext {
   roles?: AuthContext['roles'];
   organizationId?: string;
+  sessionId?: AuthContext['sessionId'];
+  impersonation?: AuthContext['impersonation'];
 }
 
 /**

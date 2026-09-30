@@ -6,7 +6,8 @@
  *
  * Spec: spec-kits/specs/004-asset-upload/contracts/controller-api.md
  *
- * Per FR-019. Caller must be the uploader OR an org admin.
+ * Per FR-019. Caller needs current Memory write access and must be the
+ * uploader or an admin of the Memory's current organization.
  */
 
 import type { Asset, PrismaClient } from '../../generated/prisma/index.js';
@@ -19,8 +20,9 @@ import {
   isWithinRetentionWindow,
 } from '../../lib/asset/retention.js';
 import { AssetUploadError } from './beginAssetUpload.js';
-import type { AssetCallerContext } from './beginAssetUpload.js';
+import type { AssetCallerContextV2 } from './beginAssetUpload.js';
 import type { IsAdminFor } from './softDeleteAsset.js';
+import { requireCurrentAssetMemoryWrite } from './assetMemoryWriteGate.js';
 
 export interface RestoreAssetInput {
   assetId: string;
@@ -28,7 +30,7 @@ export interface RestoreAssetInput {
 
 export async function restoreAsset(
   db: PrismaClient,
-  caller: AssetCallerContext,
+  caller: AssetCallerContextV2,
   input: RestoreAssetInput,
   isAdminFor: IsAdminFor,
 ): Promise<Asset> {
@@ -76,6 +78,10 @@ export async function restoreAsset(
     );
   }
 
+  // Refuse a former tenant before probing the R2 object. The final write
+  // repeats this gate under its own lock because a transfer may follow HEAD.
+  await db.$transaction((tx) => requireCurrentAssetMemoryWrite(tx, caller, asset.memoryId!));
+
   // Verify the R2 bytes are still there. If the janitor swept ahead of
   // schedule (or a race lost), we can't actually recover the asset; tell
   // the caller honestly.
@@ -99,9 +105,31 @@ export async function restoreAsset(
     );
   }
 
-  const updated = await db.asset.update({
-    where: { id: asset.id },
-    data: { deletedAt: null },
+  const updated = await db.$transaction(async (tx) => {
+    const memory = await requireCurrentAssetMemoryWrite(tx, caller, asset.memoryId!);
+    if (!memory.organizationId) {
+      throw new AssetUploadError('NOT_FOUND', 'asset restore is not supported for a user-owned memory yet');
+    }
+    const current = await tx.asset.findUnique({
+      where: { id: asset.id }, select: { id: true, memoryId: true, deletedAt: true, uploadedBy: true },
+    });
+    if (!current || current.memoryId !== memory.id) {
+      throw new AssetUploadError('NOT_FOUND', 'asset not found');
+    }
+    if (!current.deletedAt) {
+      throw new AssetUploadError('ASSET_NOT_DELETED', 'asset is not soft-deleted');
+    }
+    if (!isWithinRetentionWindow(current.deletedAt)) {
+      throw new AssetUploadError('ASSET_BYTES_GONE', `retention window of ${ASSET_RETENTION_WINDOW_MS / 1000}s expired`);
+    }
+    const isCurrentUploader = current.uploadedBy === caller.userId;
+    const isCurrentAdmin = isCurrentUploader ? false : await isAdminFor(tx as PrismaClient, caller.userId, memory.organizationId);
+    if (!isCurrentUploader && !isCurrentAdmin) {
+      throw new AssetUploadError('PERMISSION_DENIED', 'caller is not the uploader or an org admin');
+    }
+    return tx.asset.update({
+      where: { id: current.id }, data: { deletedAt: null },
+    });
   });
 
   logAssetEvent({

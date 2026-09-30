@@ -5,13 +5,15 @@
  *
  * Spec: spec-kits/specs/004-asset-upload/contracts/controller-api.md
  *
- * Per FR-017/FR-022. Caller must be the uploader OR an org admin.
+ * Per FR-017/FR-022. Caller needs current Memory write access and must
+ * be the uploader or an admin of the Memory's current organization.
  */
 
 import type { Asset, PrismaClient } from '../../generated/prisma/index.js';
 import { logAssetEvent } from '../../lib/asset/audit.js';
 import { AssetUploadError } from './beginAssetUpload.js';
-import type { AssetCallerContext } from './beginAssetUpload.js';
+import type { AssetCallerContextV2 } from './beginAssetUpload.js';
+import { requireCurrentAssetMemoryWrite } from './assetMemoryWriteGate.js';
 
 export interface SoftDeleteAssetInput {
   assetId: string;
@@ -25,7 +27,7 @@ export type IsAdminFor = (
 
 export async function softDeleteAsset(
   db: PrismaClient,
-  caller: AssetCallerContext,
+  caller: AssetCallerContextV2,
   input: SoftDeleteAssetInput,
   isAdminFor: IsAdminFor,
 ): Promise<Asset> {
@@ -50,20 +52,25 @@ export async function softDeleteAsset(
     throw new AssetUploadError('NOT_FOUND', 'asset soft-delete is not supported for a user-owned memory yet');
   }
 
-  const isUploader = asset.uploadedBy === caller.userId;
-  const isAdmin = isUploader
-    ? false
-    : await isAdminFor(db, caller.userId, asset.memory.organizationId);
-  if (!isUploader && !isAdmin) {
-    throw new AssetUploadError(
-      'PERMISSION_DENIED',
-      'caller is not the uploader or an org admin',
-    );
-  }
-
-  const updated = await db.asset.update({
-    where: { id: asset.id },
-    data: { deletedAt: new Date() },
+  const updated = await db.$transaction(async (tx) => {
+    const memory = await requireCurrentAssetMemoryWrite(tx, caller, asset.memoryId!);
+    if (!memory.organizationId) {
+      throw new AssetUploadError('NOT_FOUND', 'asset soft-delete is not supported for a user-owned memory yet');
+    }
+    const current = await tx.asset.findUnique({
+      where: { id: asset.id }, select: { id: true, memoryId: true, deletedAt: true, uploadedBy: true },
+    });
+    if (!current || current.deletedAt || current.memoryId !== memory.id) {
+      throw new AssetUploadError('NOT_FOUND', 'asset not found');
+    }
+    const isUploader = current.uploadedBy === caller.userId;
+    const isAdmin = isUploader ? false : await isAdminFor(tx as PrismaClient, caller.userId, memory.organizationId);
+    if (!isUploader && !isAdmin) {
+      throw new AssetUploadError('PERMISSION_DENIED', 'caller is not the uploader or an org admin');
+    }
+    return tx.asset.update({
+      where: { id: current.id }, data: { deletedAt: new Date() },
+    });
   });
 
   logAssetEvent({
