@@ -60,6 +60,19 @@ class EdgeEndpointPreflightStale extends Error {}
 const MAX_EDGE_ENDPOINT_PREFLIGHT_RETRIES = 3;
 
 /**
+ * #1411 review (Andi) — a loc swap parked an occupant at `<loc>~displaced-<id>`
+ * and nothing later in the run settled it: its own file was deferred or
+ * refused, or the cleanup that would have pruned it did not run. Committing
+ * would persist a loc `validateLoc` refuses, so the transaction is rolled back
+ * and rerun with these rows marked unparkable.
+ */
+class GitSyncUnsettledParking extends Error {
+  constructor(readonly nodeIds: string[]) {
+    super(`Git sync parked ${nodeIds.join(', ')} and could not settle them`);
+  }
+}
+
+/**
  * The row left the memory being synced between the preflight lookup and its
  * row lock (a concurrent cross-memory move). Applying the repo's update by id
  * would rewrite a node that now belongs to ANOTHER memory, so the sync aborts
@@ -215,6 +228,14 @@ export const syncGraphFromGithub = async (
    * the sync holds the rulebook lock.
    */
   deferredLateRows?: string[];
+  /**
+   * #1411 review — id-first moves NOT applied this sync (`old → new (occupant
+   * <id>)`) because the node holding the destination could not be moved out
+   * of the way: its own file was deferred or refused, so parking it would
+   * have left it at an invalid `~displaced-` loc. The mover keeps its old
+   * loc; the move lands on a sync that can settle the occupant.
+   */
+  heldMoves?: string[];
 }> => {
   try {
     const graphName = graph.urn;
@@ -315,6 +336,11 @@ export const syncGraphFromGithub = async (
     const skippedObjectTypes: string[] = [];
     const skippedUndeclaredRoles: SkippedUndeclaredRole[] = [];
     const deferredLateRows: string[] = [];
+    const heldMoves: string[] = [];
+    // #1411 review — occupants a previous attempt parked and could not settle.
+    // Grows by a distinct row (one sitting at a file's loc) per retry, so the
+    // attempts are bounded by the file count.
+    const unparkable = new Set<string>();
 
     // #1226 / PR #1257 — collect every memory whose node may become an edge
     // endpoint in this transaction BEFORE taking any Channel-memory key. Git
@@ -374,6 +400,12 @@ export const syncGraphFromGithub = async (
     ])].sort();
     const edgeEndpointMemoryIdSet = new Set(edgeEndpointMemoryIds);
 
+    for (;;) {
+    // Every accumulator restarts with the attempt: a rolled-back attempt
+    // wrote nothing, so nothing it reported is true.
+    for (const acc of [pendingEmbeds, writtenNodes, skippedProtected, skippedObjectTypes, skippedUndeclaredRoles, deferredLateRows, heldMoves]) {
+      acc.length = 0;
+    }
     try {
       await db.$transaction(async (tx: Parameters<Parameters<typeof db.$transaction>[0]>[0]) => {
       // Hold every endpoint memory key in one stable order for the ENTIRE
@@ -711,6 +743,15 @@ export const syncGraphFromGithub = async (
               continue;
             }
             if (occupant && occupant.id !== byId.id && isLateRow(occupant) && defer(occupant, byId)) continue;
+            if (occupant && occupant.id !== byId.id && unparkable.has(occupant.id)) {
+              // #1411 review — an earlier attempt parked this occupant and its
+              // own file never settled it. Hold the move instead: both rows
+              // keep valid addresses, and the mover's edges wait with it.
+              heldMoves.push(`${byId.loc} → ${loc} (occupant ${occupant.id})`);
+              protectedRowIds.add(byId.id);
+              deferredLocs.add(loc);
+              continue;
+            }
             if (occupant && occupant.id !== byId.id) {
               await tx.$queryRaw`SELECT "id" FROM "nodes" WHERE "id" = ${occupant.id} FOR UPDATE`;
               await ensureCurrentNodeRevisionInTransaction(tx, occupant.id, { expectedMemoryId: graph.id });
@@ -890,6 +931,19 @@ export const syncGraphFromGithub = async (
         });
       }
 
+      // #1411 review (Andi) — a parked row is settled by its own file (which
+      // deletes it from this map) or pruned by the cleanup above. One that
+      // survives both would commit at `<loc>~displaced-<id>`: its file was
+      // deferred or refused, or the cleanup was suppressed. Roll back and rerun
+      // with it unparkable, so the move that displaced it is held instead.
+      if (parkedRevisionBases.size > 0) {
+        const unsettled = await tx.node.findMany({
+          where: { id: { in: [...parkedRevisionBases.keys()] } },
+          select: { id: true },
+        });
+        if (unsettled.length > 0) throw new GitSyncUnsettledParking(unsettled.map((n) => n.id));
+      }
+
       for (const edge of edges) {
         if (refusedRoleLocs.has(edge.sourceLoc) || deferredLocs.has(edge.sourceLoc)) continue;
         // Resolve endpoints through the remaps: the source is always a file
@@ -953,7 +1007,16 @@ export const syncGraphFromGithub = async (
         }
         await reconcilePendingEdgeCount(tx, graph.id);
       });
+      break;
     } catch (error) {
+      if (error instanceof GitSyncUnsettledParking) {
+        const fresh = error.nodeIds.filter((id) => !unparkable.has(id));
+        // An unparkable row is never parked, so a repeat means the guard
+        // failed; fail loudly rather than loop.
+        if (fresh.length === 0) throw error;
+        for (const id of fresh) unparkable.add(id);
+        continue;
+      }
       if (
         error instanceof EdgeEndpointPreflightStale &&
         edgeEndpointPreflightAttempt < MAX_EDGE_ENDPOINT_PREFLIGHT_RETRIES
@@ -965,6 +1028,7 @@ export const syncGraphFromGithub = async (
         return syncGraphFromGithub(graph, edgeEndpointPreflightAttempt + 1);
       }
       throw error;
+    }
     }
 
     // 5. Record sync time and status
@@ -1004,7 +1068,12 @@ export const syncGraphFromGithub = async (
         `Sync of "${graphName}": skipped ${skippedUndeclaredRoles.length} file(s) whose role is not declared under a strict parent (ROLE_NOT_DECLARED): ${skippedUndeclaredRoles.map(describeSkippedUndeclaredRole).join('; ')}`,
       );
     }
-    return { nodeCount: fsGraph.nodes.length, writtenNodes, skippedProtected, skippedObjectTypes, skippedUndeclaredRoles, deferredLateRows };
+    if (heldMoves.length > 0) {
+      console.warn(
+        `Sync of "${graphName}": held ${heldMoves.length} move(s) whose destination's occupant could not be moved out of the way this sync: ${heldMoves.join('; ')}`,
+      );
+    }
+    return { nodeCount: fsGraph.nodes.length, writtenNodes, skippedProtected, skippedObjectTypes, skippedUndeclaredRoles, deferredLateRows, heldMoves };
   } catch (error) {
     // Update sync status to ERROR
     await db.memory.update({

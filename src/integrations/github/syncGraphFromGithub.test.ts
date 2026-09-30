@@ -1191,6 +1191,39 @@ describe('a file whose path cannot be a loc (#1224)', () => {
     expect(line).toMatch(/no-id--> evil\.md/);
   });
 
+  it('a suppressed cleanup cannot leave a parked occupant behind: the move that displaced it is held (#1411 review)', async () => {
+    // The parking step relies on the cleanup to collect an occupant whose file
+    // is gone. When the cleanup is suppressed, that occupant would commit at
+    // `<loc>~displaced-<id>`.
+    const occupantId = 'eeee000000000000000000000000000021';
+    const moverId = 'eeee000000000000000000000000000022';
+    writeMd('a', occupantId, 'occupant');
+    writeMd('b', moverId, 'mover');
+    await syncGraphFromGithub(makeGraph());
+
+    rmSync(join(repoRoot(), 'a.md'));
+    rmSync(join(repoRoot(), 'b.md'));
+    writeMd('a', moverId, 'mover');
+    writeFileSync(join(repoRoot(), 'no-id--> evil.md'), `---\nname: no id here\n---\n# x`, 'utf-8');
+
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const result = await syncGraphFromGithub(makeGraph());
+    warn.mockRestore();
+    expect(result.error).toBeUndefined();
+    expect(result.heldMoves).toEqual([`b → a (occupant ${occupantId})`]);
+    const rows = await db.node.findMany({ where: { memoryId: dbGraphId }, select: { id: true, loc: true } });
+    expect(rows.filter((r) => r.loc.includes('~'))).toEqual([]);
+    expect(rows.find((r) => r.id === occupantId)?.loc).toBe('a');
+    expect(rows.find((r) => r.id === moverId)?.loc).toBe('b');
+
+    // Once the bad file is fixed the cleanup runs, and the move lands.
+    rmSync(join(repoRoot(), 'no-id--> evil.md'));
+    const next = await syncGraphFromGithub(makeGraph());
+    expect(next.heldMoves).toEqual([]);
+    expect(await db.node.findUnique({ where: { id: occupantId } })).toBeNull();
+    expect(await db.node.findUniqueOrThrow({ where: { id: moverId } })).toMatchObject({ loc: 'a' });
+  });
+
   it('still deletes a row whose file is genuinely GONE', async () => {
     // The control for the test above: sparing skipped rows must not spare
     // every row, or "repo-wins" would stop meaning anything and the
@@ -1654,5 +1687,72 @@ describe('#1330 — strict sub-roles through git sync', () => {
     expect(result.error).toBeUndefined();
     expect(await db.node.findUnique({ where: { id: taskId } })).toBeNull();
     expect((await db.nodeRoleRule.findUniqueOrThrow({ where: { id: rule.id } })).descriptionNodeId).toBeNull();
+  });
+
+  /**
+   * #1411 review (Andi) — the swap shape: A's file takes B's loc `b-old`, which
+   * parks B at `b-old~displaced-<id>`, and B's own file (`dest`) would settle
+   * it. If B's file is then deferred or refused, B must not commit parked.
+   */
+  const seedSwap = async () => {
+    const aId = generateId();
+    const bId = generateId();
+    await db.node.create({ data: { id: aId, memoryId: dbGraphId, loc: 'a-old', name: 'A', ownerRepo: 'test/repo' } });
+    await db.node.create({ data: { id: bId, memoryId: dbGraphId, loc: 'b-old', name: 'B', ownerRepo: 'test/repo' } });
+    frontmatter('b-old', { id: aId, name: 'A' });
+    return { aId, bId };
+  };
+  const noInvalidLocs = async () => {
+    const rows = await db.node.findMany({ where: { memoryId: dbGraphId }, select: { loc: true } });
+    expect(rows.filter((r) => r.loc.includes('~'))).toEqual([]);
+  };
+
+  it('a later file REFUSED for its role cannot leave an earlier move\'s parked occupant committed (#1411 review)', async () => {
+    await rules({ role: 'doc', strictSubRoles: true });
+    const { aId, bId } = await seedSwap();
+    frontmatter('dest', { id: bId, name: 'B', role: 'doc.unknown' });
+    const result = await sync();
+    expect(result.skippedUndeclaredRoles).toEqual([expect.objectContaining({ loc: 'dest' })]);
+    expect(result.heldMoves).toEqual([`a-old → b-old (occupant ${bId})`]);
+    await noInvalidLocs();
+    expect(await db.node.findUniqueOrThrow({ where: { id: aId } })).toMatchObject({ loc: 'a-old' });
+    expect(await db.node.findUniqueOrThrow({ where: { id: bId } })).toMatchObject({ loc: 'b-old' });
+    expect(result.writtenNodes!.map((n) => n.id)).not.toContain(aId);
+
+    // Declare the role: B's file syncs, so the swap completes.
+    frontmatter('dest', { id: bId, name: 'B', role: 'doc.guide' });
+    await db.nodeRoleRule.create({
+      data: { id: generateId(), configId: (await db.memoryConfig.findFirstOrThrow({ where: { memoryId: dbGraphId } })).id, role: 'doc.guide' },
+    });
+    const next = await sync();
+    expect(next.heldMoves).toEqual([]);
+    await noInvalidLocs();
+    expect(await db.node.findUniqueOrThrow({ where: { id: aId } })).toMatchObject({ loc: 'b-old' });
+    expect(await db.node.findUniqueOrThrow({ where: { id: bId } })).toMatchObject({ loc: 'dest' });
+  });
+
+  it('a later file DEFERRED for a late occupant cannot leave an earlier move\'s parked occupant committed (#1411 review)', async () => {
+    await rules({ role: 'doc', strictSubRoles: true });
+    const { aId, bId } = await seedSwap();
+    frontmatter('dest', { id: bId, name: 'B' });
+    frontmatter('r', { name: 'R', role: 'doc.unknown' });
+    const { result, lateId } = await raceLateRow(async () => {
+      const id = generateId();
+      await db.node.create({ data: { id, memoryId: dbGraphId, loc: 'dest', name: 'Late', ownerRepo: 'test/repo' } });
+      return id;
+    });
+    // The first attempt deferred B's file and rolled back; the rerun locks the
+    // late row from the start, so nothing is deferred and only A's move waits.
+    expect(result.heldMoves).toEqual([`a-old → b-old (occupant ${bId})`]);
+    expect(result.deferredLateRows).toEqual([]);
+    await noInvalidLocs();
+    expect(await db.node.findUniqueOrThrow({ where: { id: aId } })).toMatchObject({ loc: 'a-old' });
+    expect(await db.node.findUniqueOrThrow({ where: { id: bId } })).toMatchObject({ loc: 'dest' });
+    expect(await db.node.findUnique({ where: { id: lateId } })).toBeNull();
+
+    const next = await sync();
+    expect(next.heldMoves).toEqual([]);
+    await noInvalidLocs();
+    expect(await db.node.findUniqueOrThrow({ where: { id: aId } })).toMatchObject({ loc: 'b-old' });
   });
 });

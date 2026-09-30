@@ -9907,11 +9907,17 @@ function ageOf(at: Date, now: Date = new Date()): string {
       // #1330 — a file refused by a strict parent rule is skipped, not failed;
       // say so, or the caller reads a clean sync.
       const refused = result.skippedUndeclaredRoles ?? [];
+      // #1411 review — a move held behind such a file is not applied either.
+      const held = result.heldMoves ?? [];
       return textResult(
         `Synced ${result.nodeCount ?? 0} nodes.` +
           (refused.length > 0
             ? `\nSkipped ${refused.length} file(s), ROLE_NOT_DECLARED (the role is not declared under a strict parent; declare it or change the file):\n` +
               refused.map((s) => `- ${describeSkippedUndeclaredRole(s)}`).join('\n')
+            : '') +
+          (held.length > 0
+            ? `\nHeld ${held.length} move(s) whose destination is still occupied by a node this sync could not move (it lands once that node's file syncs):\n` +
+              held.map((m) => `- ${m}`).join('\n')
             : ''),
       );
     },
