@@ -445,6 +445,15 @@ describe('#1003 — App members can read the App team space', () => {
     expect(await canReadMemory(db, { appId: app.id, sessionId: misbound.id }, shared.id)).toBe(false);
     expect(await canWriteToMemory(db,
       { appId: app.id, sessionId: misbound.id, roles: [] }, shared.id)).toBe(false);
+    const elevatedBoundKey = {
+      appId: app.id, sessionId: misbound.id, roles: ['ADMIN'] as const,
+    } as AuthContext;
+    expect(await canReadMemory(db, elevatedBoundKey, shared.id)).toBe(false);
+    expect(await canWriteToMemory(db, elevatedBoundKey, shared.id)).toBe(false);
+    expect(await canReadMemoryRecord({ db, ...elevatedBoundKey } as Context,
+      await db.memory.findUniqueOrThrow({ where: { id: shared.id } }))).toBe(false);
+    await expect(requireMemoryWriteAccess({ db, ...elevatedBoundKey } as Context, shared.id))
+      .rejects.toThrow('Forbidden');
     const workerMisbound = await db.session.create({ data: {
       id: generateId(), appId: app.id, agentId: agent.id, memoryId: workerMemory.id,
     } });

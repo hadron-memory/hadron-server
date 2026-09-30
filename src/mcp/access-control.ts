@@ -894,6 +894,10 @@ export async function canWriteToMemory(
     return (await participantAppIds(db, auth, { includeMemberships: true })).includes(memory.appId);
   }
 
+  // A bound pure App key cannot use a role shortcut to leave its session.
+  // The scoped map gives non-app memories read reach at most.
+  if (auth.appId && auth.sessionId && !auth.userId) return false;
+
   // Non-personal memory: standard checks. Per D-2026-05-21-003, when
   // auth.appId is unset (multi-App OAuth caller without selection),
   // getMemoryAccess unions across all the user's accessible Apps —
@@ -974,6 +978,11 @@ async function canReadMemoryRow(
   // already handled above.
   if (memory.ownerUserId !== null) {
     return auth.userId === memory.ownerUserId;
+  }
+
+  if (auth.appId && auth.sessionId && !auth.userId) {
+    const access = opts.access ?? await getMemoryAccess(db, auth);
+    return access.has(memory.id);
   }
 
   // Non-personal memory: ADMIN/OWNER bypass + access map check.

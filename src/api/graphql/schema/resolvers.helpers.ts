@@ -1102,6 +1102,10 @@ export async function canReadMemoryRecord(
     if (ctx.impersonation) return false;
     return !!ctx.userId && memory.ownerUserId === ctx.userId;
   }
+  if (ctx.appId && ctx.sessionId && !ctx.userId) {
+    const ids = await getAccessibleMemoryIds(ctx, memory.id);
+    return ids === null || ids.includes(memory.id);
+  }
   if (ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER')) return true;
   // All app-class shapes use their node-content audience. The historical
   // record fast paths below are wider: an org READER or AppMember could open
@@ -2293,6 +2297,7 @@ export async function requireMemoryWriteAccess(ctx: Context, memoryId: string): 
     if (strictOwner && ctx.userId && !ctx.sessionId && !ctx.impersonation &&
         memory.userId === ctx.userId) return;
     if (!strictOwner && memory.ownerUserId === null &&
+        !(ctx.appId && ctx.sessionId && !ctx.userId) &&
         (ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER'))) return;
     if (await canWriteToMemory(ctx.db, ctx, memoryId)) return;
     throw memoryWriteForbidden();
