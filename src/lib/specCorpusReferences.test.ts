@@ -927,6 +927,22 @@ describe('an ambiguous citation blocks the mint as MISSING (#1505)', () => {
     expect(refs.some((r) => r.kind === 'URN' && r.sourceLoc === 'pas:020')).toBe(true);
   });
 
+  it('CONTROL: an unclaimed former-name citation is still rewritten, canonicalized to the current URN (@codex P2 on #1506)', async () => {
+    // Renamed, and nothing else claims the former URN: no holder, no alias.
+    // The corpus's own row is then the only thing that confirms the target.
+    const formerUrn = draft.urn;
+    await resolvers.Mutation.updateMemory(null, { id: draft.id, urn: 'specs-draft-renamed' } as never, as());
+    const currentUrn = (await db.memory.findUniqueOrThrow({ where: { id: draft.id } })).urn;
+    await cite(`${formerUrn}:pas:010`);
+
+    expect(await unresolvedAt('pas:010')).toEqual([]);
+    const res = await specCorpusRenumberMutations.renumberSpec(
+      null, { memoryRef: draft.id, fromLoc: 'pas:010', toLoc: 'pas:040' }, as(),
+    );
+    expect(res.rewrites.find((row) => row.nodeId === other.id)).toMatchObject({ status: 'REWRITTEN', count: 1 });
+    expect(await content('pas:020')).toContain(`hrn:node:${currentUrn}:pas:040`);
+  });
+
   it('CONTROL: a live node at the published address wins; that is not ambiguity', async () => {
     const { formerUrn, squatter } = await vacateFormerUrn();
     const address = `${formerUrn}:pas:500`;

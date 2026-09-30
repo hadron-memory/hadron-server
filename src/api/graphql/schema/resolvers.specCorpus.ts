@@ -454,15 +454,15 @@ async function referenceAcceptor(
     }
     if (targets.size) aliasCandidates.set(address, targets);
   }
-  // Live rows at the cited loc, only where something competes with the
-  // corpus: a claimant, or an alias at the address. The corpus's own row is
-  // looked up for both the current URN (the published address) and a former
-  // one (where it is one historical holder among others).
+  // Live rows at the cited loc: every claimant's, and the corpus's own, for
+  // both the current URN (the published address) and a former one (where it
+  // is one historical holder among others).
+  // The corpus's own row is looked up for EVERY citation (@codex P2 on
+  // #1506): with no competitor it is still what confirms a former-name
+  // rewrite target, and skipping it would leave a valid citation unrewritten.
   const lookup = new Map<string, { memoryId: string; loc: string }>();
   for (const ref of refs) {
-    const claimants = allClaimantsOf(ref);
-    if (!claimants.length && !aliasCandidates.has(`${ref.memoryUrn}:${ref.targetLoc}`)) continue;
-    for (const memoryId of [...claimants, corpus.id]) {
+    for (const memoryId of [...allClaimantsOf(ref), corpus.id]) {
       lookup.set(`${memoryId}\u0000${ref.targetLoc}`, { memoryId, loc: ref.targetLoc });
     }
   }
