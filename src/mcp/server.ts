@@ -610,10 +610,10 @@ export async function resolveEdgeRefs(
 /**
  * Add a single outgoing edge from `sourceUrn` to `targetUrn`, non-
  * destructively (other edges on the source are left alone) and
- * idempotently (re-running with the same loc is a no-op against
- * the `@@unique([loc, memoryId])` identity). Backs the
+ * idempotently (re-running the same edge at the same loc is a no-op;
+ * an occupied loc with different endpoints or payload is refused). Backs the
  * `hadron_create_edge` MCP tool — extracted so the auth-gated flow (resolve
- * source → check write → resolve target → check read → upsert) is
+ * source → check write → resolve target → check read → insert/verify) is
  * directly testable without wiring a full MCP transport handshake.
  *
  * Returns either a `{ urn }`-shaped success carrying the canonical
@@ -761,9 +761,12 @@ export async function addEdge(args: {
     if (!locked.source) return `Source node not found: "${rawSource}".`;
     if (!locked.target) return `Edge target not found: "${rawTarget}"`;
 
-    await tx.edge.upsert({
-      where: { loc_memoryId: { loc: edgeLoc, memoryId: locked.source.memoryId } },
-      create: {
+    // ON CONFLICT DO NOTHING is race-safe for simultaneous first creates.
+    // A skipped insert proves only that the ADDRESS exists, not that the
+    // requested relation was saved (#1469). Verify the occupying row before
+    // issuing a success receipt; a tombstone cannot satisfy the request.
+    const { count } = await tx.edge.createMany({
+      data: [{
         id: generateId(),
         memoryId: locked.source.memoryId,
         sourceId: locked.source.id,
@@ -773,9 +776,23 @@ export async function addEdge(args: {
         description,
         isRunnable,
         createdBy: auth.clientId ?? null,
-      },
-      update: {},
+      }],
+      skipDuplicates: true,
     });
+    if (count === 0) {
+      const occupant = await tx.edge.findUnique({
+        where: { loc_memoryId: { loc: edgeLoc, memoryId: locked.source.memoryId } },
+      });
+      // condition/priority/data are not accepted by this MCP tool, so a new
+      // edge gets the database defaults. An existing edge with different
+      // behavior is not an idempotent replay, even if its endpoints match.
+      if (!occupant || occupant.deletedAt || occupant.sourceId !== locked.source.id ||
+          occupant.targetId !== locked.target.id || occupant.name !== name ||
+          occupant.description !== description || occupant.isRunnable !== isRunnable ||
+          occupant.condition !== null || occupant.priority !== 0 || occupant.data !== null) {
+        return `[edge_loc_conflict] Edge loc "${edgeLoc}" is occupied; choose another loc.`;
+      }
+    }
     return null;
   });
   if (writeError) return { error: writeError };
@@ -812,13 +829,19 @@ export async function replaceOutgoingEdges(args: {
   resolved: ResolvedEdge[];
   createdBy: string | null;
 }): Promise<string | null> {
-  return db.$transaction(async (tx) => {
-    await lockOutgoingEdgeMemories(tx, args.sourceMemoryId, args.resolved);
-    return replaceOutgoingEdgesInTransaction(tx, args);
-  });
+  try {
+    return await db.$transaction(async (tx) => {
+      await lockOutgoingEdgeMemories(tx, args.sourceMemoryId, args.resolved);
+      return replaceOutgoingEdgesInTransaction(tx, args);
+    });
+  } catch (e) {
+    if (e instanceof EdgeLocConflictError) return e.message;
+    throw e;
+  }
 }
 
 class InlineEdgeEndpointError extends Error {}
+class EdgeLocConflictError extends Error {}
 /** The target moved, was deleted or changed memory while this write waited for its row lock (PR #1339 review). */
 class NodeMovedDuringWriteError extends Error {}
 class MemoryEncryptionChangedDuringWriteError extends Error {}
@@ -879,7 +902,7 @@ async function replaceOutgoingEdgesInTransaction(
   await tx.edge.deleteMany({ where: { sourceId: args.sourceNodeId } });
   await tx.pendingEdge.deleteMany({ where: { sourceId: args.sourceNodeId } });
   if (args.resolved.length > 0) {
-    await tx.edge.createMany({
+    const { count } = await tx.edge.createMany({
       data: args.resolved.map((e) => ({
         id: generateId(),
         memoryId: args.sourceMemoryId,
@@ -893,6 +916,12 @@ async function replaceOutgoingEdgesInTransaction(
       })),
       skipDuplicates: true,
     });
+    // createMany's skipped rows may belong to another source or be duplicate
+    // locs in this request. Abort the enclosing node+edge transaction so the
+    // old outgoing set and any node edit remain intact.
+    if (count !== args.resolved.length) {
+      throw new EdgeLocConflictError('[edge_loc_conflict] An edge loc is already occupied; choose unique edge locs.');
+    }
   }
   return null;
 }
@@ -5433,6 +5462,7 @@ export function createMcpServerInstance(
         }
         if (e instanceof RoleNotDeclaredError) return textResult(`[role_not_declared] ${e.message}`);
         if (e instanceof InlineEdgeEndpointError) return textResult(e.message);
+        if (e instanceof EdgeLocConflictError) return textResult(e.message);
         if (e instanceof MemoryEncryptionChangedDuringWriteError) return textResult(e.message);
         throw e;
       }
@@ -5851,6 +5881,7 @@ export function createMcpServerInstance(
           if (e instanceof NodeMovedDuringWriteError) return textResult(e.message);
           if (e instanceof MemoryEncryptionChangedDuringWriteError) return textResult(e.message);
           if (e instanceof InlineEdgeEndpointError) return textResult(e.message);
+          if (e instanceof EdgeLocConflictError) return textResult(e.message);
           if (e instanceof RoleNotDeclaredError) return textResult(`[role_not_declared] ${e.message}`);
           if (e instanceof ScopeGraphQLError && e.extensions?.code === 'NODE_WRITE_CONFLICT') {
             return textResult(`[node_write_conflict] ${e.message}`);
@@ -6376,11 +6407,11 @@ export function createMcpServerInstance(
   // which means the only way to add a single edge to an existing node
   // without hadron_create_edge is to re-send EVERY existing edge plus the new
   // one. Easy to drop edges by accident. This tool fills that gap with
-  // an idempotent single-edge upsert that leaves all other edges alone.
+  // an idempotent single-edge insert that leaves all other edges alone.
 
   server.tool(
     'hadron_create_edge',
-    'Add a single outgoing edge from one node to another. Non-destructive — leaves all other edges on the source node intact (unlike hadron_update_node, which replaces the full edge set). Idempotent: re-running with the same loc is a no-op (loc is the edge identity; omit it and the same source/target/name always derive the same loc). Both endpoints may be given as an ID-shape PK OR a fully-qualified node URN (hrn:node:<root>:<memory>:<loc>). Prefer the PK: it is immutable, so an edge created against it survives a later move/rename of the node, whereas a URN does not (#322). Both endpoints must already exist — use hadron_create_node first to create them. Cross-memory edges are supported, but the caller must have read access on the target memory.',
+    'Add a single outgoing edge from one node to another. Non-destructive — leaves all other edges on the source node intact (unlike hadron_update_node, which replaces the full edge set). Idempotent: re-running the same edge at the same loc is a no-op (loc is the edge identity; omit it and the same source/target/name always derive the same loc). An occupied loc with different endpoints or metadata returns [edge_loc_conflict]. Both endpoints may be given as an ID-shape PK OR a fully-qualified node URN (hrn:node:<root>:<memory>:<loc>). Prefer the PK: it is immutable, so an edge created against it survives a later move/rename of the node, whereas a URN does not (#322). Both endpoints must already exist — use hadron_create_node first to create them. Cross-memory edges are supported, but the caller must have read access on the target memory.',
     {
       sourceUrn: z.string().describe('Source node, as an ID-shape PK (preferred — immutable across move/rename) OR a fully-qualified URN, e.g. "hrn:node:acme.com:mmdata:services:db-helper". The source node must already exist; this tool will not create it.'),
       targetUrn: z.string().describe('Target node, as an ID-shape PK (preferred) OR a fully-qualified URN. The target must already exist; use hadron_create_node first if it does not.'),
