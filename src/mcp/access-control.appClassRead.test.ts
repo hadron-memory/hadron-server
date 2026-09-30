@@ -20,14 +20,14 @@
  *   |-----------------------|-----------------------|---------------------|----------|----------|
  *   | Team space (adopted)  | set                   | null                | none     | YES      |
  *   | Team space (legacy)   | null                  | null                | none     | YES      |
- *   | Worker working memory | null                  | null                | one      | NO       |
+ *   | Worker working memory | null                  | null                | one      | holder/managers only |
  *   | Session memory        | null                  | SET                 | none     | NO       |
  *
  * The legacy row is why the predicate does not key on
  * `sharedMemoryOfAgentId: { not: null }` — that would leave pre-#723 unadopted
  * Apps with the exact symptom this fixes. The worker and session rows are why it
  * is not simply `appId + class='app'`: a Worker's casting-scoped working memory
- * (#974) is an open policy question deliberately not settled by a read-gate fix,
+ * (#974) has a holder/manager audience,
  * and a session memory is reachable only through its binding — admitting it
  * would hand every App member every anonymous end-user session (#934/#967).
  */
@@ -44,6 +44,9 @@ import { createTestableMcpServer } from './server.js';
 import { canReadMemory, canWriteToMemory, getMemoryAccess } from './access-control.js';
 import type { AuthContext } from '../middleware/auth.js';
 import { generateId } from '../lib/id.js';
+import { canReadMemoryRecord, getAccessibleMemoryIds, requireMemoryWriteAccess, type Context } from '../api/graphql/schema/resolvers.helpers.js';
+import { computeEffectiveAccess } from '../lib/auth/effectiveAccess.js';
+import { sessionScopedMemoryIds } from '../lib/auth/sessionScopedMemoryIds.js';
 
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -132,15 +135,12 @@ describe('#1003 — App members can read the App team space', () => {
     expect(read).toContain('Team chat');
   });
 
-  it('grants READ only — the team space does not become writable through the map', async () => {
-    // The writes this memory receives (team chat, worklog) run their own
-    // participant gates; the read-gate fix must not open the generic
-    // node-mutation tools on it as a side effect.
+  it('grants generic write to a human App participant', async () => {
     const { member, app, shared } = await fixture();
     const auth = memberAuth(member.id, app.id);
 
-    expect((await getMemoryAccess(db, auth)).get(shared.id)).toBe('READ_ONLY');
-    expect(await canWriteToMemory(db, auth, shared.id)).toBe(false);
+    expect((await getMemoryAccess(db, auth)).get(shared.id)).toBe('READ_WRITE');
+    expect(await canWriteToMemory(db, auth, shared.id)).toBe(true);
   });
 
   it('a LEGACY team space (no sharedMemoryOfAgentId) is readable too', async () => {
@@ -161,14 +161,14 @@ describe('#1003 — App members can read the App team space', () => {
     });
 
     const auth = memberAuth(member.id, app.id);
-    expect((await getMemoryAccess(db, auth)).get(legacy.id)).toBe('READ_ONLY');
+    expect((await getMemoryAccess(db, auth)).get(legacy.id)).toBe('READ_WRITE');
     expect(await canReadMemory(db, auth, legacy.id)).toBe(true);
+    expect(await canWriteToMemory(db, auth, legacy.id)).toBe(true);
   });
 
   it('a Worker working memory stays OUT of the map — exposure is not widened', async () => {
     // #974 casting-scoped memory: also an app-class row carrying this App's
-    // appId. Whether every App member may read it is an open policy question,
-    // still answered by maySeeWorkerInternals — not by this gate.
+    // appId. Ordinary App membership alone cannot read it.
     const { member, agent, app } = await fixture();
     const working = await db.memory.create({
       data: {
@@ -262,6 +262,7 @@ describe('#1003 — App members can read the App team space', () => {
 
     expect((await getMemoryAccess(db, appKey)).get(shared.id)).toBe('READ_ONLY');
     expect(await canReadMemory(db, appKey, shared.id)).toBe(true);
+    expect(await canWriteToMemory(db, appKey, shared.id)).toBe(false);
   });
 
   it("a MEMBER's own session binding does not cost them the team space (#934)", async () => {
@@ -273,8 +274,9 @@ describe('#1003 — App members can read the App team space', () => {
     });
     const auth = { ...memberAuth(member.id, app.id), sessionId: session.id } as AuthContext;
 
-    expect((await getMemoryAccess(db, auth)).get(shared.id)).toBe('READ_ONLY');
+    expect((await getMemoryAccess(db, auth)).get(shared.id)).toBe('READ_WRITE');
     expect(await canReadMemory(db, auth, shared.id)).toBe(true);
+    expect(await canWriteToMemory(db, auth, shared.id)).toBe(true);
   });
 
   it('a USER-OWNED App: the owner reads its team space, another member does not (spec 047)', async () => {
@@ -323,11 +325,154 @@ describe('#1003 — App members can read the App team space', () => {
     // agree; a leak in either is the spec-047 blocker.
     expect((await getMemoryAccess(db, coMemberAuth)).has(shared.id)).toBe(false);
     expect(await canReadMemory(db, coMemberAuth, shared.id)).toBe(false);
+    expect(await canWriteToMemory(db, coMemberAuth, shared.id)).toBe(false);
     const listed = await createTestableMcpServer(coMemberAuth).callToolText(
       'hadron_list_memories',
       {},
     );
     expect(listed).not.toContain('solo-app-shared');
+  });
+
+  it('org CONTRIBUTOR without AppMember can write a team row; revoked membership cannot', async () => {
+    const { shared } = await fixture();
+    const contributor = await db.user.create({ data: { id: generateId(), name: 'contributor' } });
+    const member = await db.orgMember.create({
+      data: { id: generateId(), organizationId: orgId, userId: contributor.id, role: 'CONTRIBUTOR' },
+    });
+    const auth = { userId: contributor.id, roles: [] } as AuthContext;
+    expect(await canWriteToMemory(db, auth, shared.id)).toBe(true);
+    await expect(requireMemoryWriteAccess({ db, ...auth } as Context, shared.id)).resolves.toBeUndefined();
+    const teamRow = await db.memory.findUniqueOrThrow({ where: { id: shared.id }, include: { workerOf: true } });
+    expect((await computeEffectiveAccess(db, { id: contributor.id, roles: [] },
+      { kind: 'memory', memory: teamRow })).canWrite).toBe(true);
+
+    await db.orgMember.update({ where: { id: member.id }, data: { deletedAt: new Date() } });
+    expect(await canWriteToMemory(db, auth, shared.id)).toBe(false);
+    await expect(requireMemoryWriteAccess({ db, ...auth } as Context, shared.id)).rejects.toThrow('Forbidden');
+  });
+
+  it('an org READER cannot write a team row, while an org ADMIN can', async () => {
+    const { shared } = await fixture();
+    const reader = await db.user.create({ data: { id: generateId(), name: 'reader' } });
+    const admin = await db.user.create({ data: { id: generateId(), name: 'org-admin' } });
+    for (const [userId, role] of [[reader.id, 'READER'], [admin.id, 'ADMIN']] as const) {
+      await db.orgMember.create({ data: { id: generateId(), organizationId: orgId, userId, role } });
+    }
+    expect(await canWriteToMemory(db, { userId: reader.id, roles: [] }, shared.id)).toBe(false);
+    expect(await canWriteToMemory(db, { userId: admin.id, roles: [] }, shared.id)).toBe(true);
+  });
+
+  it('an AppMember without org role writes the team row, not Worker or session rows', async () => {
+    const { member, agent, app, shared } = await fixture();
+    const workerMemory = await db.memory.create({ data: {
+      id: generateId(), class: 'app', name: 'worker', urn: `${orgId}:worker`,
+      organizationId: orgId, appId: app.id,
+    } });
+    const worker = await db.worker.create({ data: {
+      id: generateId(), appId: app.id, agentId: agent.id,
+      name: 'Worker', slug: 'worker', memoryId: workerMemory.id,
+    } });
+    await db.agentMemoryItem.create({ data: {
+      agentId: agent.id, memoryId: workerMemory.id, role: 'read-write',
+    } });
+    const sessionMemory = await db.memory.create({ data: {
+      id: generateId(), class: 'app', name: 'session', urn: `${orgId}:session`,
+      organizationId: orgId, appId: app.id, userMemoryOfAgentId: agent.id,
+    } });
+    const auth = { userId: member.id, roles: [] } as AuthContext;
+    expect(await canWriteToMemory(db, auth, shared.id)).toBe(true);
+    expect(await canWriteToMemory(db, auth, workerMemory.id)).toBe(false);
+    expect(await canReadMemory(db, auth, workerMemory.id)).toBe(false);
+    expect(await canWriteToMemory(db, auth, sessionMemory.id)).toBe(false);
+    const workerRecord = await db.memory.findUniqueOrThrow({ where: { id: workerMemory.id } });
+    const sessionRecord = await db.memory.findUniqueOrThrow({ where: { id: sessionMemory.id } });
+    expect(await canReadMemoryRecord({ db, ...auth } as Context, workerRecord)).toBe(false);
+    expect(await canReadMemoryRecord({ db, ...auth } as Context, sessionRecord)).toBe(false);
+    const platformAdmin = { userId: member.id, roles: ['ADMIN'] as const } as AuthContext;
+    expect(await canWriteToMemory(db, platformAdmin, workerMemory.id)).toBe(true);
+    expect(await canWriteToMemory(db, platformAdmin, sessionMemory.id)).toBe(true);
+    for (const [id, expected] of [[shared.id, true], [workerMemory.id, false], [sessionMemory.id, false]] as const) {
+      const row = await db.memory.findUniqueOrThrow({ where: { id }, include: { workerOf: true } });
+      expect((await computeEffectiveAccess(db, { id: member.id, roles: [] },
+        { kind: 'memory', memory: row })).canWrite).toBe(expected);
+    }
+    for (const id of [workerMemory.id, sessionMemory.id]) {
+      await expect(requireMemoryWriteAccess({ db, ...auth } as Context, id)).rejects.toThrow('Forbidden');
+    }
+
+    // The current holder and an org ADMIN manage this Worker's memory;
+    // ordinary App membership never grants that working-state access.
+    const holder = await db.user.create({ data: { id: generateId(), name: 'holder' } });
+    await db.worker.update({ where: { id: worker.id }, data: { heldByUserId: holder.id } });
+    const manager = await db.user.create({ data: { id: generateId(), name: 'manager' } });
+    const managerRole = await db.orgMember.create({ data: {
+      id: generateId(), organizationId: orgId, userId: manager.id, role: 'ADMIN',
+    } });
+    const contributor = await db.user.create({ data: { id: generateId(), name: 'contributor' } });
+    await db.orgMember.create({ data: {
+      id: generateId(), organizationId: orgId, userId: contributor.id, role: 'CONTRIBUTOR',
+    } });
+    const contributorAuth = { userId: contributor.id, roles: [] } as AuthContext;
+    expect(await canReadMemory(db, contributorAuth, workerMemory.id)).toBe(false);
+    expect(await canWriteToMemory(db, contributorAuth, workerMemory.id)).toBe(false);
+    await expect(requireMemoryWriteAccess({ db, ...contributorAuth } as Context, workerMemory.id))
+      .rejects.toThrow('Forbidden');
+    const contributorRow = await db.memory.findUniqueOrThrow({
+      where: { id: workerMemory.id }, include: { workerOf: true },
+    });
+    expect((await computeEffectiveAccess(db, { id: contributor.id, roles: [] },
+      { kind: 'memory', memory: contributorRow })).canWrite).toBe(false);
+    for (const userId of [holder.id, manager.id]) {
+      const principal = { userId, roles: [] } as AuthContext;
+      expect(await canReadMemory(db, principal, workerMemory.id)).toBe(true);
+      expect(await canWriteToMemory(db, principal, workerMemory.id)).toBe(true);
+      expect(await getAccessibleMemoryIds({ db, ...principal } as Context, workerMemory.id))
+        .toContain(workerMemory.id);
+      expect(await canReadMemoryRecord({ db, ...principal } as Context, workerRecord)).toBe(true);
+      await expect(requireMemoryWriteAccess({ db, ...principal } as Context, workerMemory.id))
+        .resolves.toBeUndefined();
+      const row = await db.memory.findUniqueOrThrow({ where: { id: workerMemory.id }, include: { workerOf: true } });
+      expect((await computeEffectiveAccess(db, { id: userId, roles: [] },
+        { kind: 'memory', memory: row })).canWrite).toBe(true);
+      expect(await canWriteToMemory(db, principal, sessionMemory.id)).toBe(false);
+    }
+    await db.orgMember.update({ where: { id: managerRole.id }, data: { deletedAt: new Date() } });
+    expect(await canWriteToMemory(db, { userId: manager.id, roles: [] }, workerMemory.id)).toBe(false);
+
+    const session = await db.session.create({ data: {
+      id: generateId(), appId: app.id, agentId: agent.id, memoryId: sessionMemory.id,
+    } });
+    const appKey = { appId: app.id, sessionId: session.id, roles: [] } as AuthContext;
+    expect(await canReadMemory(db, appKey, sessionMemory.id)).toBe(true);
+    expect(await canWriteToMemory(db, appKey, sessionMemory.id)).toBe(true);
+    expect(await canReadMemory(db, appKey, shared.id)).toBe(false);
+    expect(await canWriteToMemory(db, appKey, shared.id)).toBe(false);
+    expect(await canWriteToMemory(db, appKey, workerMemory.id)).toBe(false);
+    await expect(requireMemoryWriteAccess({ db, ...appKey } as Context, sessionMemory.id)).resolves.toBeUndefined();
+    await expect(requireMemoryWriteAccess({ db, ...appKey } as Context, shared.id)).rejects.toThrow('Forbidden');
+    const misbound = await db.session.create({ data: {
+      id: generateId(), appId: app.id, agentId: agent.id, memoryId: shared.id,
+    } });
+    expect(await sessionScopedMemoryIds(db, app.id, misbound.id)).not.toContain(shared.id);
+    expect(await getAccessibleMemoryIds({ db, appId: app.id, sessionId: misbound.id } as Context, shared.id))
+      .not.toContain(shared.id);
+    expect(await canReadMemory(db, { appId: app.id, sessionId: misbound.id }, shared.id)).toBe(false);
+    expect(await canWriteToMemory(db,
+      { appId: app.id, sessionId: misbound.id, roles: [] }, shared.id)).toBe(false);
+    const elevatedBoundKey = {
+      appId: app.id, sessionId: misbound.id, roles: ['ADMIN'] as const,
+    } as AuthContext;
+    expect(await canReadMemory(db, elevatedBoundKey, shared.id)).toBe(false);
+    expect(await canWriteToMemory(db, elevatedBoundKey, shared.id)).toBe(false);
+    expect(await canReadMemoryRecord({ db, ...elevatedBoundKey } as Context,
+      await db.memory.findUniqueOrThrow({ where: { id: shared.id } }))).toBe(false);
+    await expect(requireMemoryWriteAccess({ db, ...elevatedBoundKey } as Context, shared.id))
+      .rejects.toThrow('Forbidden');
+    const workerMisbound = await db.session.create({ data: {
+      id: generateId(), appId: app.id, agentId: agent.id, memoryId: workerMemory.id,
+    } });
+    expect(await sessionScopedMemoryIds(db, app.id, workerMisbound.id)).not.toContain(workerMemory.id);
+    expect(await canReadMemory(db, { appId: app.id, sessionId: workerMisbound.id }, workerMemory.id)).toBe(false);
   });
 
   it('a soft-deleted team space is not readable', async () => {

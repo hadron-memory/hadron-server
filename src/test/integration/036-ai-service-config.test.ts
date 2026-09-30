@@ -25,7 +25,6 @@ import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../helpers.js';
 import { generateId } from '../../lib/id.js';
 import { decryptToken, encryptToken } from '../../lib/tokenCrypto.js';
-import { resolveAiConfigWithFallback } from '../../lib/aiConfig.js';
 import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
 import {
   NoAiConfigAvailableError,

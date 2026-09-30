@@ -651,15 +651,9 @@ async function hostMemoryReadable(
  * Split by host class, because `cor:acl:010:01` splits it — and this is the one
  * place #1196's *"write → `requireMemoryWriteAccess`"* shorthand does not hold:
  *
- *   - **App-hosted** → the App's participation gate. The law is explicit that
- *     this is not an oversight: *"Membership confers READ, not write. The team
- *     space receives writes through surfaces that run their own participant
- *     gates (team chat, worklog). App membership does not by itself authorize
- *     arbitrary node writes into the team space."* Routing this arm through
- *     `requireMemoryWriteAccess` instead would have broken the supported B2C
- *     shape outright — that gate's user path grants an app-class write to an org
- *     CONTRIBUTOR+ and to nobody else, so an EXTERNAL AppMember (no org role),
- *     who posts today, would have been refused.
+ *   - **App-hosted** → the App's participation gate. The generic app-class
+ *     memory write gate now also grants human participants, but Channel
+ *     addresses remain governed and can only be written through chat operations.
  *   - **No App** → the host memory's own per-class write rules. This is what
  *     closes the escalation #1196 names: posting was gated on a READ check, and
  *     `MemoryShare` has a `reader` role, so a reader-grantee could append. On

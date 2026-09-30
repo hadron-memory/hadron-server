@@ -71,11 +71,12 @@ beforeEach(async () => {
   const memory = await db.memory.create({
     data: {
       id: generateId(), organizationId: orgId, name: 'filestore',
-      urn: MEM_URN, class: 'app', appId,
+      urn: MEM_URN, class: 'knowledge', visibility: 'ORGANIZATION',
     },
   });
   memoryId = memory.id;
-  // Run-principal write access rides the App's installed Agent's memory map.
+  // A headless App run may write an explicitly granted knowledge memory;
+  // the App key alone cannot write its team space (cor:acl:010:01).
   const agent = await db.agent.create({
     data: { id: generateId(), organizationId: orgId, name: 'store-agent', urn: `${ORG_URN}:store-agent` },
   });

@@ -74,11 +74,11 @@ beforeEach(async () => {
     data: { id: generateId(), organizationId: orgId, name: 'flow-app', urn: `${ORG_URN}::flow-app` },
   });
   appId = app.id;
-  // App-class memory (chk_memory_class_app_id requires appId for class=app).
+  // Headless runs write an explicitly granted knowledge memory, not team space.
   const memory = await db.memory.create({
     data: {
       id: generateId(), organizationId: orgId, name: 'flowmem',
-      urn: MEM_URN, class: 'app', appId,
+      urn: MEM_URN, class: 'knowledge', visibility: 'ORGANIZATION',
     },
   });
   memoryId = memory.id;

@@ -80,6 +80,7 @@ export async function sessionScopedMemoryIds(
         select: {
           id: true, appId: true, userMemoryOfAgentId: true,
           class: true, userId: true, ownerUserId: true, createdBy: true, deletedAt: true,
+          workerOf: { select: { id: true } },
         },
       },
       agent: {
@@ -119,7 +120,11 @@ export async function sessionScopedMemoryIds(
   const mem = session.memory;
   // A soft-deleted memory leaves the session row pointing at it (`deleteMemory`
   // stamps only the Memory), so a stale session would keep it readable.
-  if (mem && mem.deletedAt === null) {
+  // `Session.memoryId` is caller-influenced. A same-App team or Worker row
+  // satisfies the old App-provenance check but is not session scratch memory.
+  if (mem && mem.deletedAt === null &&
+      (mem.class !== 'app' ||
+        (mem.userMemoryOfAgentId !== null && mem.workerOf.length === 0))) {
     // AgentMemoryItem is global to an Agent. An App B session cannot use it
     // (or the agent-own pointer) to read App A's knowledge or scratch memory.
     // Keep the existing personal/private reuse path: startAgentSession itself
