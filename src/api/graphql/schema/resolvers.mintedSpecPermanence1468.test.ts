@@ -354,3 +354,40 @@ describe('#1468 — cascades: App reclaim, account erasure, anonymous expiry', (
     expect(await db.memory.findUnique({ where: { id: swept.id } })).toBeNull();
   });
 });
+
+describe('#1468 — race against a concurrent mint', () => {
+  it('a delete waiting on a mint in flight reads the stamp after it commits, and refuses', async () => {
+    const racing = await memory('racing', { corpusDraft: true });
+    const spec = await node(racing.id, 'pas:010', { tags: ['spec'] });
+
+    // Stand-in for mintSpecCorpus's fence + flip: the memory row FOR UPDATE,
+    // the stamp written, and the transaction held open.
+    let release!: () => void;
+    let flipped!: () => void;
+    const hold = new Promise<void>((r) => { release = r; });
+    const isFlipped = new Promise<void>((r) => { flipped = r; });
+    const mint = db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM memories WHERE id = ${racing.id} FOR UPDATE`;
+      await tx.memory.update({ where: { id: racing.id }, data: { corpusDraft: false, corpusMintedAt: new Date() } });
+      flipped();
+      await hold;
+    }, { timeout: 20_000 });
+    await isFlipped;
+
+    const deleting = resolvers.Mutation.deleteNode({}, { nodeRef: spec.id }, ctx());
+    try {
+      // The delete blocks on the memory row the mint holds.
+      await vi.waitFor(async () => {
+        const waits = await db.$queryRaw<Array<{ pid: number }>>`
+          SELECT pid FROM pg_stat_activity
+          WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE '%corpus_minted_at%'`;
+        expect(waits.length).toBeGreaterThan(0);
+      }, { timeout: 5_000, interval: 25 });
+    } finally {
+      release();
+    }
+    await mint;
+    await expect(deleting).rejects.toSatisfy(refusedPermanent);
+    expect(await db.node.findUniqueOrThrow({ where: { id: spec.id } })).toMatchObject({ deletedAt: null });
+  });
+});
