@@ -12,6 +12,7 @@ import { lockEdgeEndpointMemories } from './edgeEndpointLock.js';
 import { generateDataKey } from './crypto.js';
 import { sessionKeyCache } from './sessionKeyCache.js';
 import { writeNodeToGit } from '../integrations/github/writeNodeToGit.js';
+import { archiveTombstone } from './tombstoneArchive.js';
 
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -359,6 +360,55 @@ describe('reserving over a deleted spec (@codex P2 on #1452)', () => {
     expect(await db.node.findUniqueOrThrow({ where: { id: liveChild.id } })).toMatchObject({ loc: 'pas:141:01', deletedAt: null });
     expect(await db.node.findUniqueOrThrow({ where: { id: deletedGrandchild.id } })).toMatchObject({ loc: 'pas:141:01:a' });
     expect(await db.node.findUniqueOrThrow({ where: { id: deletedSibling.id } })).toMatchObject({ loc: `${archived}:02` });
+  });
+
+  it.each([
+    { change: 'deleted', initialDeletedAt: null, finalDeletedAt: new Date(), archiveChild: true },
+    { change: 'revived', initialDeletedAt: new Date(), finalDeletedAt: null, archiveChild: false },
+  ])('re-reads a child $change after the initial descendant scan', async ({ initialDeletedAt, finalDeletedAt, archiveChild }) => {
+    const parent = await db.node.create({ data: {
+      id: generateId(), memoryId: draft.id, loc: 'pas:142', name: 'Old parent', deletedAt: new Date(),
+    } });
+    const child = await db.node.create({ data: {
+      id: generateId(), memoryId: draft.id, loc: 'pas:142:01', name: 'Changing child', deletedAt: initialDeletedAt,
+    } });
+    let scanned!: () => void;
+    let resume!: () => void;
+    const scannedPromise = new Promise<void>((resolve) => { scanned = resolve; });
+    const pause = new Promise<void>((resolve) => { resume = resolve; });
+    const archive = db.$transaction(async (tx) => {
+      await lockEdgeEndpointMemories(tx, [draft.id]);
+      await acquireLockSet(tx, [...ancestorLocs(parent.loc), parent.loc].map((loc) => ({ memoryId: draft.id, loc })));
+      const gatedTx = new Proxy(tx, {
+        get(target, key, receiver) {
+          if (key !== 'node') return Reflect.get(target, key, receiver);
+          return new Proxy(target.node, {
+            get(delegate, method, delegateReceiver) {
+              if (method !== 'findMany') return Reflect.get(delegate, method, delegateReceiver);
+              return async (...args: unknown[]) => {
+                const rows = await (Reflect.get(delegate, method, delegateReceiver) as (...a: unknown[]) => Promise<unknown>)(...args);
+                scanned();
+                await pause;
+                return rows;
+              };
+            },
+          });
+        },
+      });
+      await archiveTombstone(gatedTx, { id: parent.id, loc: parent.loc, memoryId: draft.id });
+    }, { timeout: 20_000 });
+    await scannedPromise;
+    try {
+      await db.node.update({ where: { id: child.id }, data: { deletedAt: finalDeletedAt } });
+    } finally {
+      resume();
+    }
+    await archive;
+    expect(await db.node.findUniqueOrThrow({ where: { id: child.id } }))
+      .toMatchObject({
+        loc: archiveChild ? `pas:142__deleted-${parent.id}:01` : 'pas:142:01',
+        deletedAt: archiveChild ? expect.any(Date) : null,
+      });
   });
 });
 

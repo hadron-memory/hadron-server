@@ -4,6 +4,7 @@
  */
 import type { Prisma } from '../generated/prisma/index.js';
 import { deriveEdgeLoc } from './edgeLoc.js';
+import { acquireLockSet } from './nodeSubtreeLock.js';
 
 /** The loc a tombstone is archived at: id-unique, outside any real loc namespace. */
 export function archivedTombstoneLoc(loc: string, id: string): string {
@@ -44,11 +45,24 @@ export async function archiveTombstone(
 ): Promise<string> {
   const { id, loc, memoryId } = tombstone;
   const archived = archivedTombstoneLoc(loc, id);
-  const descendants = await tx.node.findMany({
+  const addresses = await tx.node.findMany({
     where: { memoryId, loc: { startsWith: `${loc}:` } },
-    select: { id: true, loc: true, deletedAt: true },
-    orderBy: { loc: 'asc' },
+    select: { loc: true },
   });
+  // The root address lock held by the caller fences new descendants. Existing
+  // descendants can still be deleted or revived at their own addresses, so
+  // acquire those keys in root-to-leaf order and re-read their rows under a
+  // lock. A deletion that commits after the first list is then classified
+  // from its committed state, not the stale list (@codex P2, PR #1494).
+  await acquireLockSet(tx, addresses.map((node) => ({ memoryId, loc: node.loc })));
+  const prefix = `${loc}:`;
+  const descendants = await tx.$queryRaw<Array<{ id: string; loc: string; deletedAt: Date | null }>>`
+    SELECT id, loc, deleted_at AS "deletedAt"
+    FROM nodes
+    WHERE memory_id = ${memoryId} AND left(loc, ${prefix.length}::integer) = ${prefix}
+    ORDER BY char_length(loc), loc
+    FOR NO KEY UPDATE
+  `;
   // A live descendant belongs to the current address, not the old deleted
   // branch. Keep its entire subtree in place, including any deleted children.
   // Sorted locs put every ancestor before its descendants.
