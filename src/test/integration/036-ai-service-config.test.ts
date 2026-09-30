@@ -267,6 +267,38 @@ describe('resolveAIConfig precedence (US1)', () => {
 });
 
 describe('resolveAIConfig for a user-owned Agent (#1363)', () => {
+  it('lets its owner decrypt a user-owned App config before the Agent and host levels', async () => {
+    const owner = await db.user.create({
+      data: { id: generateId(), handle: 'personal-app-cfg-owner', githubId: 36005, name: 'Owner' },
+    });
+    const personalAgent = await db.agent.create({
+      data: { id: generateId(), name: 'Personal', urn: 'personal-app-cfg-036', ownerUserId: owner.id },
+    });
+    const personalApp = await db.app.create({
+      data: { id: generateId(), name: 'Personal App', urn: 'personal-app-cfg-036', ownerUserId: owner.id },
+    });
+    await createConfig({ appId: personalApp.id }, 'default', { apiKey: 'sk-personal-app' });
+    await createConfig({ agentId: personalAgent.id }, 'default', { apiKey: 'sk-personal-agent' });
+    await createConfig({ hadronServerId: server.id }, 'default', { apiKey: 'sk-host' });
+
+    const resolved = await resolvers.Query.resolveAIConfig(
+      {}, { appRef: personalApp.id, agentRef: personalAgent.id }, ctxFor(owner.id),
+    );
+    expect(resolved.ownerType).toBe('APP');
+    expect(resolved.apiKey).toBe('sk-personal-app');
+    await expect(resolvers.Query.resolveAIConfig(
+      {}, { appRef: personalApp.id, agentRef: personalAgent.id }, platformAdminCtx(),
+    )).rejects.toThrow(/Forbidden/);
+
+    const foreignApp = await db.app.create({
+      data: { id: generateId(), name: 'Foreign App', urn: 'foreign-app-cfg-036', ownerUserId: outsider.id },
+    });
+    await createConfig({ appId: foreignApp.id }, 'default', { apiKey: 'sk-foreign-app' });
+    await expect(resolvers.Query.resolveAIConfig(
+      {}, { appRef: foreignApp.id, agentRef: personalAgent.id }, ctxFor(owner.id),
+    )).rejects.toThrow(/Forbidden/);
+  });
+
   it('uses the Agent owner gate for its own key, including admin and impersonation denials', async () => {
     const owner = await db.user.create({
       data: { id: generateId(), handle: 'personal-cfg-owner', githubId: 36003, name: 'Owner' },

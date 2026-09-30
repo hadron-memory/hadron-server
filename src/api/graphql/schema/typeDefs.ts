@@ -6685,8 +6685,8 @@ export const typeDefs = `#graphql
     Auth: org ADMIN of the effective context org, or platform
     ADMIN/OWNER when no org or user-owned Agent is named. A user-owned Agent
     is strictly owner-only, including when an App is also named. With no
-    effective org, its owner can decrypt only that Agent's own config;
-    a host fallback is unavailable through this query.
+    effective org, its owner can decrypt that Agent's own config or a
+    user-owned App's config; a host fallback is unavailable through this query.
 
     appRef/agentRef accept the entity's ID or URN.
     """

@@ -299,17 +299,21 @@ export const agentQueries = {
         let resolvedAgentId: string | null = null;
         let effectiveOrgId: string | null = null;
         let userOwnedAgent = false;
+        let personalAgentOwnerId: string | null = null;
+        let appOwnerUserId: string | null = null;
         if (appRef) {
           const { id } = await resolveAppRef(ctx.db, appRef);
           resolvedAppId = id;
           const app = await ctx.db.app.findUniqueOrThrow({ where: { id } });
           effectiveOrgId = app.organizationId;
+          appOwnerUserId = app.ownerUserId;
         }
         if (agentRef) {
           const { id } = await resolveAgentRef(ctx.db, agentRef);
           resolvedAgentId = id;
           const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id } });
           userOwnedAgent = agent.ownerUserId !== null;
+          personalAgentOwnerId = agent.ownerUserId;
           if (userOwnedAgent) {
             // A personal Agent is strictly owner-only, even for platform
             // admins and impersonated sessions (spec 047).
@@ -318,6 +322,12 @@ export const agentQueries = {
           if (!effectiveOrgId) {
             effectiveOrgId = agent.organizationId;
           }
+        }
+        // A user-owned App's config is eligible only when it belongs to the
+        // same owner as the named personal Agent. Otherwise naming another
+        // user's App would turn the Agent-owner gate into a cross-user decrypt.
+        if (userOwnedAgent && resolvedAppId && !effectiveOrgId && appOwnerUserId !== personalAgentOwnerId) {
+          throw new Error('Forbidden');
         }
         // Privileged surface (decrypted key): org ADMIN of the effective
         // org — same gate as the legacy agentAIConfig/appAIConfig queries
@@ -333,10 +343,9 @@ export const agentQueries = {
           organizationId: effectiveOrgId,
         });
         const { config, ownerType } = resolved;
-        if (userOwnedAgent && !effectiveOrgId && ownerType !== 'AGENT') {
-          // The owner may decrypt their own Agent config (as agentAIConfig
-          // already permits), but an org-less context does not grant access
-          // to the host's platform key through fallback resolution.
+        if (userOwnedAgent && !effectiveOrgId && ownerType === 'HADRON_SERVER') {
+          // A personal Agent may use its own config or one on the user-owned
+          // App it runs through. Neither context may reach the platform key.
           throw new NoAiConfigAvailableError(name ?? DEFAULT_AI_CONFIG_NAME, 'this Agent');
         }
         if (!config.apiKeyEncrypted) {
