@@ -178,7 +178,7 @@ describe('mintSpecCorpus: an edge into another memory can point at a placeholder
     })]);
   });
 
-  it('conceals one in a memory the caller cannot read', async () => {
+  it('blocks uniformly, revealing nothing, on edges into a memory the caller cannot read', async () => {
     await db.orgMember.create({ data: { organizationId: org.id, userId: outsider.id, role: 'READER' } });
     const hidden = await db.memory.create({ data: {
       id: generateId(), urn: `${org.urn}:outsiders-draft`, name: 'outsiders-draft', class: 'private',
@@ -190,9 +190,19 @@ describe('mintSpecCorpus: an edge into another memory can point at a placeholder
     const deleted = await db.node.create({ data: {
       id: generateId(), memoryId: hidden.id, loc: 'pas:901', name: 'pas:901', role: 'spec', nodeType: 'info', deletedAt: new Date(),
     } });
+    const written = await db.node.create({ data: {
+      id: generateId(), memoryId: hidden.id, loc: 'pas:902', name: 'pas:902', role: 'spec', nodeType: 'info', content: 'Written.',
+    } });
     await edgeFrom010To(placeholder.id);
     await edgeFrom010To(deleted.id);
-    expect((await mint(true)).blockers).toEqual([]);
+    await edgeFrom010To(written.id);
+    // (@codex P2 on #1462) Every edge into the unreadable memory blocks the
+    // same way, whatever its target's state, named only by its target id.
+    const blockers = (await mint(true)).blockers;
+    expect(blockers.map((b) => [b.rule, b.targetLoc]).sort()).toEqual(
+      [placeholder.id, deleted.id, written.id].map((t) => ['MISSING', t]).sort(),
+    );
+    expect(JSON.stringify(blockers)).not.toMatch(/pas:90[012]/);
   });
 });
 

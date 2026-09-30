@@ -475,27 +475,33 @@ async function unresolvedReferencesIn(
     // alone does not say which memory it is in.
     // A soft-deleted target there is as unresolved as one in the corpus
     // (@codex P2, PR #1462): MISSING, behind the same read gate.
+    // (@codex P2, PR #1462) An edge into a memory the caller can NOT read
+    // (access revoked after it was created) cannot be classified without
+    // revealing that tenant's node state, and cannot be vouched for either, so
+    // it BLOCKS uniformly, whatever its target's state, named only by the
+    // target id this corpus's own edge row already carries.
     const foreign = await db.edge.findMany({
       where: {
         deletedAt: null,
         source: { memoryId: corpus.id, deletedAt: null },
-        target: {
-          memoryId: { not: corpus.id },
-          OR: [{ deletedAt: null, isPlaceholder: true }, { deletedAt: { not: null } }],
-        },
+        target: { memoryId: { not: corpus.id } },
       },
       select: {
-        name: true, source: { select: { id: true, loc: true } },
-        target: { select: { loc: true, memoryId: true, deletedAt: true, memory: { select: { urn: true } } } },
+        name: true, targetId: true, source: { select: { id: true, loc: true } },
+        target: { select: { loc: true, memoryId: true, deletedAt: true, isPlaceholder: true, memory: { select: { urn: true } } } },
       },
       orderBy: { id: 'asc' },
     });
     for (const e of foreign) {
-      if (!(await isMemoryReadableCached(ctx, e.target.memoryId))) continue;
+      const readable = await isMemoryReadableCached(ctx, e.target.memoryId);
+      if (readable && !e.target.deletedAt && !e.target.isPlaceholder) continue;
       out.push({
         kind: 'EDGE', sourceNodeId: e.source.id, sourceLoc: e.source.loc, field: 'edge',
-        targetLoc: `hrn:node:${e.target.memory.urn.replace(/^(?:hrn|urn):mem(?:ory)?:/i, '')}:${e.target.loc}`,
-        text: e.name, reason: e.target.deletedAt ? 'MISSING' : 'PLACEHOLDER',
+        targetLoc: readable
+          ? `hrn:node:${e.target.memory.urn.replace(/^(?:hrn|urn):mem(?:ory)?:/i, '')}:${e.target.loc}`
+          : e.targetId,
+        text: e.name,
+        reason: readable && !e.target.deletedAt ? 'PLACEHOLDER' : 'MISSING',
       });
     }
     // (@codex P2, PR #1462) deleteNode soft-deletes a spec but leaves the
