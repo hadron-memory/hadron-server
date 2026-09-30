@@ -618,14 +618,24 @@ export const syncGraphFromGithub = async (
       // target is free. Only the first claimant of a file id is a move.
       const refusedMoverIds = await (async () => {
         const firstClaim = new Map<string, string>();
+        // Ids named by files under a protected loc: those files are skipped,
+        // so the rows they name do not move this run (Codex on #1475).
+        const protectedFileIds = new Set<string>();
         for (const n of fsGraph.nodes) {
-          if (n.id && !firstClaim.has(n.id) && !isProtected(n.loc!)) firstClaim.set(n.id, n.loc!);
+          if (!n.id) continue;
+          if (isProtected(n.loc!)) protectedFileIds.add(n.id);
+          else if (!firstClaim.has(n.id)) firstClaim.set(n.id, n.loc!);
         }
         if (firstClaim.size === 0) return new Set<string>();
-        const movers = (await tx.node.findMany({
-          where: { id: { in: [...firstClaim.keys()] }, memoryId: graph.id },
+        const named = await tx.node.findMany({
+          where: { id: { in: [...firstClaim.keys(), ...protectedFileIds] }, memoryId: graph.id },
           select: { id: true, loc: true },
-        })).filter((r) => r.loc !== firstClaim.get(r.id) && !isProtected(r.loc));
+        });
+        // A row whose move is refused for its protected SOURCE loc stays too.
+        const pinned = named.filter((r) => protectedFileIds.has(r.id) || (firstClaim.has(r.id) && isProtected(r.loc)));
+        const movers = named.filter(
+          (r) => firstClaim.has(r.id) && r.loc !== firstClaim.get(r.id) && !isProtected(r.loc) && !protectedFileIds.has(r.id),
+        );
         if (movers.length === 0) return new Set<string>();
         const occupants = await tx.node.findMany({
           where: { memoryId: graph.id, loc: { in: movers.map((m) => firstClaim.get(m.id)!) } },
@@ -634,6 +644,7 @@ export const syncGraphFromGithub = async (
         const occupantAt = new Map(occupants.map((o) => [o.loc, o.id]));
         const staying = new Set<string>([
           ...skippedRowIds,
+          ...pinned.map((r) => r.id),
           ...(await lockMintedSpecsIn(tx, graph.id, occupants.map((o) => o.id))).map((m) => m.id),
         ]);
         const refused = new Set<string>();

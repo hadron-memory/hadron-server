@@ -2497,6 +2497,30 @@ describe('#1468 — git sync pruning and minted specs', () => {
     expect(await db.edge.count({ where: { sourceId: noteId } })).toBe(0);
   });
 
+  it("never parks a row whose own file is skipped under a protected loc (Codex P1, pinned rows)", async () => {
+    const aId = 'aaaa146800000000000000000000000016';
+    const bId = 'bbbb146800000000000000000000000017';
+    await db.node.create({ data: { id: aId, memoryId: dbGraphId, loc: 'a', name: 'a', ownerRepo: 'test/repo' } });
+    await db.node.create({ data: { id: bId, memoryId: dbGraphId, loc: 'b', name: 'b', ownerRepo: 'test/repo' } });
+    const { channel, rootId } = await ensureChannelWithRoot(db, { memoryId: dbGraphId, loc: 'chats:dead', name: 'dead', createdBy: null });
+    const deletedAt = new Date();
+    await db.$transaction([
+      db.channel.update({ where: { id: channel.id }, data: { deletedAt } }),
+      db.node.update({ where: { id: rootId }, data: { deletedAt } }),
+    ]);
+    // Unstamped on purpose: stranding any row at a waypoint is the defect.
+    mkdirSync(join(repoRoot(), 'chats', 'dead', 'messages'), { recursive: true });
+    writeFrontmatterNode(join(repoRoot(), 'chats', 'dead', 'messages', 'b.md'), { id: bId, name: 'b' }, 'B.');
+    writeFrontmatterNode(join(repoRoot(), 'b.md'), { id: aId, name: 'a' }, 'A.');
+
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    expect((await syncGraphFromGithub(makeGraph())).error).toBeUndefined();
+    warn.mockRestore();
+    expect(await db.node.findUniqueOrThrow({ where: { id: bId } })).toMatchObject({ loc: 'b', deletedAt: null });
+    expect(await db.node.findUniqueOrThrow({ where: { id: aId } })).toMatchObject({ loc: 'a', deletedAt: null });
+    expect(await db.node.count({ where: { memoryId: dbGraphId, loc: { contains: '~' } } })).toBe(0);
+  });
+
   it('control: an unstamped memory still lets that move displace the occupant', async () => {
     const specId = 'aaaa146800000000000000000000000003';
     const noteId = 'bbbb146800000000000000000000000004';
