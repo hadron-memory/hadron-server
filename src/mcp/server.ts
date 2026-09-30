@@ -763,6 +763,22 @@ export async function addEdge(args: {
     if (!locked.source) return `Source node not found: "${rawSource}".`;
     if (!locked.target) return `Edge target not found: "${rawTarget}"`;
 
+    // Ownership may transfer after preflight while this transaction waits on
+    // the endpoint keys. Fence both Memories through the insert, then rerun
+    // the same source-write and target-read gates on the transaction client.
+    for (const memoryId of [...new Set([sourceNode.memoryId, target.memoryId])].sort()) {
+      await tx.$queryRaw`SELECT id FROM memories WHERE id = ${memoryId} FOR SHARE`;
+    }
+    if (!(await canReadMemory(tx as typeof db, auth, sourceNode.memoryId))) {
+      return `Source node not found: "${rawSource}".`;
+    }
+    if (!(await canWriteToMemory(tx as typeof db, auth, sourceNode.memoryId))) {
+      return 'Write access denied for source memory.';
+    }
+    if (!(await canReadMemory(tx as typeof db, auth, target.memoryId))) {
+      return `Edge target not found: "${rawTarget}"`;
+    }
+
     // ON CONFLICT DO NOTHING is race-safe for simultaneous first creates.
     // A skipped insert proves only that the ADDRESS exists, not that the
     // requested relation was saved (#1469). Verify the occupying row before
