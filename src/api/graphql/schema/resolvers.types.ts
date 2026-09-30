@@ -1728,10 +1728,9 @@ export const typeResolvers = {
     // case (pre-merge duplicate triage) is a platform admin or the user
     // themselves, both of which this gate admits, so nothing is lost.
     //
-    // NOTE the asymmetry with `githubId`/`githubUsername`/`externalId`, which
-    // remain ungated. Adding the gate there is a behavior change to shipped
-    // fields with unknown consumers — tracked separately rather than smuggled
-    // in here.
+    // Legacy `githubId`/`githubUsername` and `avatarUrl` remain ungated.
+    // `externalId` and other account metadata use the #384 gate as of #1522.
+    // Changing the legacy fields needs a separate consumer/contract audit.
     googleId: async (u: { id: string; googleId?: string | null }, _: unknown, ctx: Context) =>
       (await canSeeUserPersonalFields(ctx, u.id)) ? (u.googleId ?? null) : null,
     appleId: async (u: { id: string; appleId?: string | null }, _: unknown, ctx: Context) =>
