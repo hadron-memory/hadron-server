@@ -7042,6 +7042,10 @@ export const typeDefs = `#graphql
     Authorization: an AppMember of the App (any role), an org member with
     CONTRIBUTOR+ on the App's org, the owner of a user-owned App, or the
     App's own key (a pure App-key principal may READ its team chat).
+    Error codes (extensions.code): FORBIDDEN (an authenticated caller who is
+    not a participant), UNAUTHENTICATED (no principal at all; checked before
+    the App is resolved, so it answers identically whether or not the App
+    exists).
 
     appRef and mentionsRef accept the entity's ID or URN.
     """
@@ -9558,7 +9562,10 @@ export const typeDefs = `#graphql
     SESSION_NOT_WORKER_BOUND, CHANNEL_HOST_NOT_WRITABLE, WORKER_RETIRED,
     SESSION_EXPIRED (encrypted team memory without an active session key),
     TEAM_AGENT_NOT_FOUND / TEAM_AGENT_AMBIGUOUS (first-post bootstrap could
-    not locate the Team Agent), APP_UNINSTALLED, FORBIDDEN.
+    not locate the Team Agent), APP_UNINSTALLED, FORBIDDEN (an authenticated
+    caller who is not a participant), UNAUTHENTICATED (no principal at all: no
+    token, an expired or unverifiable one; checked before the App is resolved,
+    so it answers identically whether or not the App exists).
 
     appRef accepts the entity's ID or URN; sessionRef is the session id.
     """
