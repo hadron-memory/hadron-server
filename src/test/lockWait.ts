@@ -18,3 +18,35 @@ export async function waitForLockWaiters(db: PrismaClient, n = 1, timeoutMs = 10
     await new Promise((r) => setTimeout(r, 20));
   }
 }
+
+/**
+ * The typed barrier: resolve once `n` backends in THIS database hold an
+ * ungranted lock of `locktype`. Use it when a race stages waits of different
+ * kinds in sequence, so an earlier row-lock waiter cannot satisfy a later
+ * advisory wait.
+ *
+ * Scoped by the waiting backend's database, not `pg_locks.database`: that
+ * column is NULL for `transactionid` locks, so filtering on it let another
+ * vitest worker's row-lock wait (its own database clone) satisfy this count
+ * before the test's own blocked write existed (#1470).
+ */
+export async function waitForLockWaitersOfType(
+  db: PrismaClient,
+  locktype: 'advisory' | 'transactionid',
+  n = 1,
+  timeoutMs = 10_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const [{ waiting }] = await db.$queryRaw<Array<{ waiting: number }>>`
+      SELECT count(*)::int AS waiting FROM pg_locks
+      WHERE locktype = ${locktype}
+        AND NOT granted
+        AND pid IN (SELECT pid FROM pg_stat_activity WHERE datname = current_database())`;
+    if (waiting >= n) return;
+    if (Date.now() > deadline) {
+      throw new Error(`waitForLockWaitersOfType: timed out waiting for ${n} ${locktype} lock waiter(s)`);
+    }
+    await new Promise((r) => setTimeout(r, 10));
+  }
+}
