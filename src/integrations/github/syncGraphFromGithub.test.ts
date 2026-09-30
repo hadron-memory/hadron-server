@@ -2414,7 +2414,7 @@ describe('#1468 — git sync pruning and minted specs', () => {
 
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     expect((await syncGraphFromGithub(makeGraph())).error).toBeUndefined();
-    expect(warn).toHaveBeenCalledWith(expect.stringMatching(/refusing move of .* the occupant pas:010 is a minted spec/));
+    expect(warn).toHaveBeenCalledWith(expect.stringMatching(/refusing move of .* → "pas:010" — the loc is held by a row that will not move/));
     warn.mockRestore();
     expect(await db.node.findUniqueOrThrow({ where: { id: specId } })).toMatchObject({ loc: 'pas:010', deletedAt: null });
     expect(await db.node.findUniqueOrThrow({ where: { id: noteId } })).toMatchObject({ loc: 'notes', deletedAt: null });
@@ -2458,6 +2458,25 @@ describe('#1468 — git sync pruning and minted specs', () => {
     expect(await db.node.findUniqueOrThrow({ where: { id: aId } })).toMatchObject({ loc: 'pas:010', deletedAt: null });
     expect(await db.node.findUniqueOrThrow({ where: { id: bId } })).toMatchObject({ loc: 'pas:020', deletedAt: null });
     expect(await db.node.count({ where: { memoryId: dbGraphId, loc: { contains: '~' } } })).toBe(0);
+  });
+
+  it('refuses a move chain ending on a minted spec before parking anything (Codex P1, chain)', async () => {
+    const aId = 'aaaa146800000000000000000000000011';
+    const bId = 'bbbb146800000000000000000000000012';
+    const cId = 'cccc146800000000000000000000000013';
+    await db.node.create({ data: { id: aId, memoryId: dbGraphId, loc: 'a', name: 'a', ownerRepo: 'test/repo' } });
+    await db.node.create({ data: { id: bId, memoryId: dbGraphId, loc: 'b', name: 'b', ownerRepo: 'test/repo' } });
+    await db.node.create({ data: { id: cId, memoryId: dbGraphId, loc: 'pas:010', name: 'c', tags: ['spec'], ownerRepo: 'test/repo' } });
+    await db.memory.update({ where: { id: dbGraphId }, data: { corpusMintedAt: new Date() } });
+    // File order puts A's move (onto b) before B's (onto the minted spec).
+    writeFrontmatterNode(join(repoRoot(), 'b.md'), { id: aId, name: 'a' }, 'A.');
+    writeFrontmatterNode(join(repoRoot(), 'pas:010.md'), { id: bId, name: 'b' }, 'B.');
+
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    expect((await syncGraphFromGithub(makeGraph())).error).toBeUndefined();
+    warn.mockRestore();
+    const locs = Object.fromEntries((await db.node.findMany({ where: { memoryId: dbGraphId, deletedAt: null } })).map((n) => [n.id, n.loc]));
+    expect(locs).toEqual({ [aId]: 'a', [bId]: 'b', [cId]: 'pas:010' });
   });
 
   it('control: an unstamped memory still lets that move displace the occupant', async () => {

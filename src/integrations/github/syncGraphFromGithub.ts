@@ -608,6 +608,48 @@ export const syncGraphFromGithub = async (
         else unprotectableSkips.push(skipped.source);
       }
 
+      // #1468 — decide, BEFORE anything is parked, which id-first moves are
+      // refused because the loc they target will not be vacated: it holds a
+      // minted spec (never parked), a row whose file is unusable (#1224), or
+      // a row whose own move is refused — a fixed point, so a chain
+      // (A onto B, B onto a minted spec) refuses A too instead of parking B
+      // at an invalid address it can then never leave. Judged on the rows as
+      // they stand now; a move this refuses lands on a later sync once its
+      // target is free. Only the first claimant of a file id is a move.
+      const refusedMoverIds = await (async () => {
+        const firstClaim = new Map<string, string>();
+        for (const n of fsGraph.nodes) {
+          if (n.id && !firstClaim.has(n.id) && !isProtected(n.loc!)) firstClaim.set(n.id, n.loc!);
+        }
+        if (firstClaim.size === 0) return new Set<string>();
+        const movers = (await tx.node.findMany({
+          where: { id: { in: [...firstClaim.keys()] }, memoryId: graph.id },
+          select: { id: true, loc: true },
+        })).filter((r) => r.loc !== firstClaim.get(r.id) && !isProtected(r.loc));
+        if (movers.length === 0) return new Set<string>();
+        const occupants = await tx.node.findMany({
+          where: { memoryId: graph.id, loc: { in: movers.map((m) => firstClaim.get(m.id)!) } },
+          select: { id: true, loc: true },
+        });
+        const occupantAt = new Map(occupants.map((o) => [o.loc, o.id]));
+        const staying = new Set<string>([
+          ...skippedRowIds,
+          ...(await lockMintedSpecsIn(tx, graph.id, occupants.map((o) => o.id))).map((m) => m.id),
+        ]);
+        const refused = new Set<string>();
+        for (let changed = true; changed;) {
+          changed = false;
+          for (const m of movers) {
+            const occ = occupantAt.get(firstClaim.get(m.id)!);
+            if (!refused.has(m.id) && occ && occ !== m.id && (staying.has(occ) || refused.has(occ))) {
+              refused.add(m.id);
+              changed = true;
+            }
+          }
+        }
+        return refused;
+      })();
+
       const upsertedIds: string[] = [];
       // Rows the cleanup pass below must leave alone: a protected file's row
       // is not upserted, and `notIn: upsertedIds` would otherwise hard-delete
@@ -833,6 +875,13 @@ export const syncGraphFromGithub = async (
             else if (node.id && !idSettled(node.id)) fileIdToRowId.set(node.id, byId.id);
             continue;
           }
+          if (byId.loc !== loc && refusedMoverIds.has(byId.id)) {
+            console.warn(
+              `[syncGraphFromGithub] "${graphName}": refusing move of ${byId.id} "${byId.loc}" → "${loc}" — the loc is held by a row that will not move this run (a minted spec keeps its citation, #1468)`,
+            );
+            protectedRowIds.add(byId.id);
+            continue;
+          }
           if (byId.loc !== loc) {
             // Moving into a loc another row currently holds: repo-wins — the
             // occupant is stale at that loc (it either moves later this run
@@ -915,7 +964,8 @@ export const syncGraphFromGithub = async (
               await recordUrnRename(tx, {
                 entityType: 'NODE',
                 entityId: byId.id,
-                oldUrn: safeNodeUrnV2(graph.urn, byId.loc).slice('hrn:node:'.length),
+                // The pre-parking address: a waypoint loc was never published.
+                oldUrn: safeNodeUrnV2(graph.urn, (parkedRevisionBases.get(byId.id) ?? byId).loc).slice('hrn:node:'.length),
                 newUrn: safeNodeUrnV2(graph.urn, loc).slice('hrn:node:'.length),
                 createdBy: 'system:github-sync',
               });
