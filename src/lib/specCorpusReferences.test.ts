@@ -122,6 +122,36 @@ describe('renumberSpec (#1449)', () => {
     expect(mirrorNodeMoveToGit).toHaveBeenCalledTimes(1);
   });
 
+  it('still schedules the move mirror when the post-move corpus reload fails', async () => {
+    let moved = false;
+    const failingDb = new Proxy(db, {
+      get(target, prop, receiver) {
+        if (prop === 'node') {
+          const node = Reflect.get(target, prop, receiver) as typeof db.node;
+          return new Proxy(node, {
+            get(t, p, r) {
+              if (p === 'findMany' && moved) return () => { throw new Error('post-move reload failed'); };
+              return Reflect.get(t, p, r);
+            },
+          });
+        }
+        return Reflect.get(target, prop, receiver);
+      },
+    });
+    const spy = vi.spyOn(nodeMoveOps, 'moveWithResult').mockImplementationOnce(async (...args) => {
+      spy.mockRestore();
+      const result = await nodeMoveOps.moveWithResult(...args);
+      moved = true;
+      return result;
+    });
+    vi.mocked(mirrorNodeMoveToGit).mockClear();
+    await expect(specCorpusRenumberMutations.renumberSpec(
+      null, { memoryRef: draft.id, fromLoc: 'pas:010', toLoc: 'pas:040' }, { ...as(), db: failingDb },
+    )).rejects.toThrow('post-move reload failed');
+    expect((await db.node.findUniqueOrThrow({ where: { id: feature.id } })).loc).toBe('pas:040');
+    expect(mirrorNodeMoveToGit).toHaveBeenCalledTimes(1);
+  });
+
   it('dry run: returns the plan and writes nothing', async () => {
     const before = await content('pas:020');
     const plan = await renumber(true);
@@ -247,6 +277,29 @@ describe('former URNs use live-address precedence (@codex P2 on #1453)', () => {
     expect(after).toContain(`hrn:node:${oldUrn}:pas:010.`);      // the squatter's node: untouched
     expect(after).toContain(`hrn:node:${oldUrn}:pas:040:01`);    // ours: rewritten, spelling kept
     expect(newUrn).not.toBe(oldUrn);
+  });
+
+  it('keeps a former-URN alias whose live target moved into this corpus', async () => {
+    const formerUrn = draft.urn;
+    await resolvers.Mutation.updateMemory(null, { id: draft.id, urn: 'specs-draft-renamed' } as never, as());
+    const squatter = await resolvers.Mutation.createMemory(null, { orgId: org.id, name: 'specs-draft' }, as());
+    expect(squatter.urn).toBe(formerUrn);
+    // The former holder no longer has the address; its NODE alias resolves to
+    // this corpus's live spec at the cited loc.
+    await db.urnAlias.create({ data: {
+      urn: `${formerUrn}:pas:010`, entityType: 'NODE', entityId: feature.id, reason: 'RENAME',
+    } });
+    await db.node.update({ where: { id: other.id }, data: {
+      content: `Ours through the alias: hrn:node:${formerUrn}:pas:010.`,
+    } });
+
+    const backlinks = await resolvers.Query.specBacklinks(null, { memoryRef: draft.id, loc: 'pas:010' }, as());
+    expect(backlinks.some((ref) => ref.kind === 'URN' && ref.sourceLoc === 'pas:020')).toBe(true);
+    const result = await specCorpusRenumberMutations.renumberSpec(
+      null, { memoryRef: draft.id, fromLoc: 'pas:010', toLoc: 'pas:040' }, as(),
+    );
+    expect(result.rewrites.find((row) => row.nodeId === other.id)).toMatchObject({ status: 'REWRITTEN', count: 1 });
+    expect(await content('pas:020')).toContain(`hrn:node:${formerUrn}:pas:040`);
   });
 });
 

@@ -321,7 +321,12 @@ async function referenceAcceptor(
   const aliasTaken = new Set<string>();
   for (const alias of aliases) {
     const memoryId = aliasTargets.get(alias.entityId);
-    if (memoryId && await isMemoryReadableCached(ctx, memoryId)) aliasTaken.add(alias.urn);
+    // An alias whose live target moved INTO this corpus is ours, even when a
+    // different memory now holds the old URN. Only readable foreign targets
+    // compete for the citation.
+    if (memoryId && memoryId !== corpus.id && await isMemoryReadableCached(ctx, memoryId)) {
+      aliasTaken.add(alias.urn);
+    }
   }
   return (ref) => {
     if (ref.memoryUrn === corpus.urn && taken.has(`${corpus.id}\u0000${ref.targetLoc}`)) return true;
@@ -728,72 +733,78 @@ export const specCorpusRenumberMutations = {
     // prior holder's node would claim them and they would be left unrewritten.
     const accept = await referenceAcceptor(ctx, corpus, scanReferences(nodes, corpus.pattern));
 
-    if (!dryRun) {
-      // Fail before any write, rather than after the move.
-      await requireMemoryWriteAccess(ctx, corpus.id);
-      // (@codex P2s, #1453) Move the SCANNED node, by id, and only while it
-      // is still at (corpus, fromLoc): a spec another request moved since the
-      // scan refuses rather than being moved from wherever it now is. An
-      // address is not enough: when our node has left fromLoc, resolving the
-      // address falls through to a memory that historically held our URN,
-      // and would move ITS node into this corpus. The mover re-validates the
-      // same memory + loc under its row lock.
-      const { relocated } = await nodeMoveOps.moveWithResult(ctx, {
-        sourceRef: source.id,
-        expectedSource: { memoryId: corpus.id, loc: fromLoc },
-        targetUrn: `hrn:node:${corpus.urn}:${toLoc}`,
-        // The move's intermediate body can still cite its old subtree. Mirror
-        // once after the revisioned rewrites, from the final database state.
-        mirrorAfterMove: false,
-        // (@codex P1, PR #1453) The draft check above ran before the move's
-        // lock; a mint can commit in between. Re-decided under the lock.
-        requireDraftSource: true,
-      });
-      movedForMirror = relocated.map((node) => ({ id: node.id, previousLoc: node.previousLoc }));
-      nodes = await reloadCorpusNodesById(ctx.db, corpus.id, scannedIds);
-      // (@codex P2, #1453) Report exactly what the atomic mover relocated,
-      // with the loc each node left, not a reconstruction from a later read.
-      moved = relocated
-        .map((r) => ({ fromLoc: r.previousLoc, toLoc: r.loc }))
-        .sort((a, b) => a.fromLoc.localeCompare(b.fromLoc));
-    }
-
     const rewrites: RewriteOut[] = [];
-    for (const n of nodes) {
-      const plan = planRewrite(n, corpus.pattern, fromLoc, toLoc, accept);
-      if (!plan) continue;
-      const row: RewriteOut = {
-        nodeId: n.id, loc: n.loc, fields: Object.keys(plan.patch), count: plan.count,
-        status: dryRun ? 'PLANNED' : 'REWRITTEN', error: null,
-      };
+    try {
       if (!dryRun) {
-        try {
-          // (@codex P2, #1453) Report what was actually written: a concurrent
-          // edit can change or remove the references between plan and write.
-          const done = await rewriteWithRetry(ctx, corpus, n, fromLoc, toLoc, accept);
-          if (done) {
-            row.fields = done.fields;
-            row.count = done.count;
-            // (@codex P2, #1453) where it was written, if it moved meanwhile
-            row.loc = done.loc;
-          } else {
-            row.status = 'UNCHANGED';
-            row.fields = [];
-            row.count = 0;
-          }
-        } catch (e) {
-          row.status = 'FAILED';
-          row.error = e instanceof Error ? e.message : String(e);
-        }
+        // Fail before any write, rather than after the move.
+        await requireMemoryWriteAccess(ctx, corpus.id);
+        // (@codex P2s, #1453) Move the SCANNED node, by id, and only while it
+        // is still at (corpus, fromLoc): a spec another request moved since the
+        // scan refuses rather than being moved from wherever it now is. An
+        // address is not enough: when our node has left fromLoc, resolving the
+        // address falls through to a memory that historically held our URN,
+        // and would move ITS node into this corpus. The mover re-validates the
+        // same memory + loc under its row lock.
+        const { relocated } = await nodeMoveOps.moveWithResult(ctx, {
+          sourceRef: source.id,
+          expectedSource: { memoryId: corpus.id, loc: fromLoc },
+          targetUrn: `hrn:node:${corpus.urn}:${toLoc}`,
+          // The move's intermediate body can still cite its old subtree. Mirror
+          // once after the revisioned rewrites, from the final database state.
+          mirrorAfterMove: false,
+          // (@codex P1, PR #1453) The draft check above ran before the move's
+          // lock; a mint can commit in between. Re-decided under the lock.
+          requireDraftSource: true,
+        });
+        movedForMirror = relocated.map((node) => ({ id: node.id, previousLoc: node.previousLoc }));
+        nodes = await reloadCorpusNodesById(ctx.db, corpus.id, scannedIds);
+        // (@codex P2, #1453) Report exactly what the atomic mover relocated,
+        // with the loc each node left, not a reconstruction from a later read.
+        moved = relocated
+          .map((r) => ({ fromLoc: r.previousLoc, toLoc: r.loc }))
+          .sort((a, b) => a.fromLoc.localeCompare(b.fromLoc));
       }
-      rewrites.push(row);
-    }
 
-    if (movedForMirror.length > 0) {
-      void mirrorNodeMoveToGit(ctx.db, {
-        srcMemoryId: corpus.id, destMemoryId: corpus.id,
-        moved: movedForMirror, clientId: ctx.clientId ?? null,
-      });
+      for (const n of nodes) {
+        const plan = planRewrite(n, corpus.pattern, fromLoc, toLoc, accept);
+        if (!plan) continue;
+        const row: RewriteOut = {
+          nodeId: n.id, loc: n.loc, fields: Object.keys(plan.patch), count: plan.count,
+          status: dryRun ? 'PLANNED' : 'REWRITTEN', error: null,
+        };
+        if (!dryRun) {
+          try {
+            // (@codex P2, #1453) Report what was actually written: a concurrent
+            // edit can change or remove the references between plan and write.
+            const done = await rewriteWithRetry(ctx, corpus, n, fromLoc, toLoc, accept);
+            if (done) {
+              row.fields = done.fields;
+              row.count = done.count;
+              // (@codex P2, #1453) where it was written, if it moved meanwhile
+              row.loc = done.loc;
+            } else {
+              row.status = 'UNCHANGED';
+              row.fields = [];
+              row.count = 0;
+            }
+          } catch (e) {
+            row.status = 'FAILED';
+            row.error = e instanceof Error ? e.message : String(e);
+          }
+        }
+        rewrites.push(row);
+      }
+
+    } finally {
+      // The move commits before the per-node rewrites. If a reload or rewrite
+      // step throws, still remove the old mirror paths from the committed move.
+      // The helper re-reads the latest DB state and never throws to the caller.
+      if (movedForMirror.length > 0) {
+        void mirrorNodeMoveToGit(ctx.db, {
+          srcMemoryId: corpus.id, destMemoryId: corpus.id,
+          moved: movedForMirror, clientId: ctx.clientId ?? null,
+        });
+      }
     }
 
     // Bare-text copies of the moved citations, located in the corpus as it now
