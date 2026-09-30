@@ -3291,9 +3291,10 @@ export const typeDefs = `#graphql
 
   """
   036-ai-service-config: privileged resolution result. Carries the
-  DECRYPTED key — only returned by resolveAIConfig (org ADMIN of the
-  effective context org, or platform ADMIN/OWNER); successor to
-  agentAIConfig / appAIConfig.
+  DECRYPTED key — only returned by resolveAIConfig. A resolved platform
+  credential is decrypted only for platform ADMIN/OWNER; org ADMIN may
+  decrypt an authorized tenant-owned config. Successor to agentAIConfig /
+  appAIConfig.
   """
   type ResolvedAiConfig {
     configId: ID!
@@ -6902,6 +6903,9 @@ export const typeDefs = `#graphql
     config; a host fallback is unavailable through this query. A user-owned
     App's owner needs the outer source's own authority to decrypt an installed
     Agent or org config; its App ownership alone grants only its App config.
+    A HADRON_SERVER fallback can back a server-side call, but only a platform
+    ADMIN/OWNER may receive its plaintext key. Other callers get a typed
+    refusal naming the resolved config and HADRON_SERVER level.
 
     appRef/agentRef accept the entity's ID or URN.
     """
