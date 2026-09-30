@@ -48,9 +48,8 @@ export const appQueries = {
         // App-key callers (no ctx.userId) get an empty page.
         // #876: identical to the agents list — user-owned Apps are
         // identity-scoped and invisible under impersonation. These carry the
-        // sharper payload: App.keys / App.members are ungated field resolvers,
-        // so a leaked App handed over key previews, labels, last-used stamps,
-        // and the member roster that appKeys(appRef:) gates at org-ADMIN.
+        // sharper payload: a leaked App handed over its own scalar fields;
+        // keys and members now also enforce their own read gate (#1521).
         if (!ctx.userId || ctx.impersonation) return { items: [], total: 0 };
         where = { deletedAt: null, organizationId: null, ownerUserId: ctx.userId };
       } else {
@@ -191,4 +190,3 @@ export const appQueries = {
       });
     },
 };
-

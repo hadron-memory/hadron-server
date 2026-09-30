@@ -52,6 +52,7 @@ import {
   loadMemoryUrn,
   loadAppUrn,
   loadApp,
+  requireOrgRole,
   requireOwnerOrOrgRole,
   defaultAiConfigOf,
   isOrgMemberOrAdmin,
@@ -161,6 +162,53 @@ function loadReadableAgent(ctx: Context, agentId: string): Promise<unknown | nul
     cache.set(agentId, pending);
   }
   return pending;
+}
+
+/** A nested App object carries keys and members whose fields trust the App gate. */
+async function loadReadableNestedApp(ctx: Context, appId: string) {
+  const app = await loadApp(ctx, appId);
+  if (!app || app.deletedAt) return null;
+  try {
+    await requireOwnerOrOrgRole(ctx, app, 'READER');
+  } catch (error) {
+    if (error instanceof GraphQLError && error.extensions.code === 'FORBIDDEN') return null;
+    throw error;
+  }
+  return app;
+}
+
+async function filterReadableAppRows<T extends {
+  id: string;
+  organizationId: string | null;
+  ownerUserId: string | null;
+  deletedAt: Date | null;
+}>(ctx: Context, apps: T[]): Promise<T[]> {
+  if (apps.length === 0) return apps;
+  // These callers already fetched the App rows. Use the same live-membership
+  // scope as requireOrgRole once for the whole list, rather than reloading
+  // each App and issuing one membership lookup per row.
+  const orgIds = ctx.userId
+    ? await getMemberOrgIds(ctx.db, ctx.userId, ctx.impersonation?.orgId)
+    : [];
+  const readableOrgIds = new Set(orgIds);
+  const platformAdmin = ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER');
+  return apps.filter((app) => {
+    if (app.deletedAt) return false;
+    if (app.ownerUserId !== null) {
+      return !ctx.impersonation && !!ctx.userId && app.ownerUserId === ctx.userId;
+    }
+    return app.organizationId !== null && (platformAdmin || readableOrgIds.has(app.organizationId));
+  });
+}
+
+async function loadReadableNestedOrganization(ctx: Context, orgId: string) {
+  try {
+    await requireOrgRole(ctx, orgId, 'READER');
+  } catch (error) {
+    if (error instanceof GraphQLError && error.extensions.code === 'FORBIDDEN') return null;
+    throw error;
+  }
+  return ctx.db.organization.findUnique({ where: { id: orgId } });
 }
 
 /**
@@ -878,7 +926,7 @@ export const typeResolvers = {
     // #831 — relation fields so a CROSS-APP audit list can render names instead
     // of raw cuids. Each is gated on its OWN entity, never on the outer
     // `appRuns` org-READER gate: a nested object hands the caller that type's
-    // whole field-resolver surface, and `App.keys` / `App.members` do NOT
+    // whole field-resolver surface, including App scalars that cannot
     // re-check (findings:broadening-read-gate-leaks-nested-objects, #552).
     //
     // Every one is nullable and denial is silent. Throwing would fail the whole
@@ -992,32 +1040,14 @@ export const typeResolvers = {
           ? { corpusDraft: m.corpusDraft }
           : await ctx.db.memory.findUniqueOrThrow({ where: { id: m.id }, select: { corpusDraft: true } }),
       ),
-    // spec 047: organizationId is nullable (a user-owned memory has no org) —
-    // guard the fallback lookup so it resolves to null instead of calling
-    // findUnique({ id: null }) (codex review, #685).
-    organization: (g: { organizationId: string | null; organization?: unknown }, _: unknown, ctx: Context) =>
-      (g as Record<string, unknown>).organization ??
-      (g.organizationId ? ctx.db.organization.findUnique({ where: { id: g.organizationId } }) : null),
-    // 008-agent-installation: app pivot for app/personal-class memories.
-    app: async (g: { appId?: string | null; app?: unknown }, _: unknown, ctx: Context) => {
-      if (!g.appId) return null;
-      const app = g.app !== undefined
-        ? g.app as { organizationId: string | null; ownerUserId: string | null } | null
-        : await ctx.db.app.findUnique({ where: { id: g.appId } });
-      if (!app) return null;
-      // A Worker holder may now read a user-owned App's working memory, but
-      // that grant does not expose the App object (including keys/members).
-      // Its own read gate remains owner-only under spec 047.
-      if (app.ownerUserId !== null) {
-        try {
-          await requireOwnerOrOrgRole(ctx, app, 'READER');
-        } catch (error) {
-          if (error instanceof GraphQLError && error.extensions.code === 'FORBIDDEN') return null;
-          throw error;
-        }
-      }
-      return app;
-    },
+    // A Memory reader may be external to its owning org. The nested object
+    // exposes org policy and relations, so apply organization(ref:)'s gate.
+    organization: (g: { organizationId: string | null }, _: unknown, ctx: Context) =>
+      g.organizationId ? loadReadableNestedOrganization(ctx, g.organizationId) : null,
+    // A Memory read grants neither its user-owned nor its org-owned App.
+    // Return null on App denial, matching the nullable relation contract.
+    app: (g: { appId?: string | null }, _: unknown, ctx: Context) =>
+      g.appId ? loadReadableNestedApp(ctx, g.appId) : null,
     // 005-agent-subscription FR-024: userId is gated. Resolves to the
     // actual User.id only for the memory owner or ADMIN/OWNER of the
     // memory's organization. End users querying other users' memories
@@ -1341,12 +1371,14 @@ export const typeResolvers = {
       return rows.map((r) => r.agent).filter((ag) => ag && !ag.deletedAt);
     },
     members: async (a: { id: string }, _: unknown, ctx: Context) => {
+      if (!(await loadReadableNestedApp(ctx, a.id))) return [];
       return ctx.db.appMember.findMany({
         where: { appId: a.id },
         orderBy: { createdAt: 'asc' },
       });
     },
     memberCount: async (a: { id: string }, _: unknown, ctx: Context) => {
+      if (!(await loadReadableNestedApp(ctx, a.id))) return 0;
       return ctx.db.appMember.count({ where: { appId: a.id } });
     },
     /**
@@ -1401,6 +1433,8 @@ export const typeResolvers = {
       return (await canReadMemoryRecord(ctx, memory)) ? memory : null;
     },
     keys: async (a: { id: string; keys?: unknown[] }, _: unknown, ctx: Context) => {
+      // Check before serving an eager key list as well as the DB fallback.
+      if (!(await loadReadableNestedApp(ctx, a.id))) return [];
       if (a.keys) return a.keys;
       return ctx.db.appKey.findMany({
         where: { appId: a.id, revokedAt: null },
@@ -1440,8 +1474,8 @@ export const typeResolvers = {
   },
   // 023-app-shape US1: the App↔Agent N:M join.
   AppAgent: {
-    app: async (aa: { appId: string; app?: unknown }, _: unknown, ctx: Context) =>
-      aa.app ?? ctx.db.app.findUniqueOrThrow({ where: { id: aa.appId } }),
+    app: (aa: { appId: string }, _: unknown, ctx: Context) =>
+      loadReadableNestedApp(ctx, aa.appId),
     agent: async (aa: { agentId: string; agent?: unknown }, _: unknown, ctx: Context) =>
       aa.agent ??
       ctx.db.agent.findUniqueOrThrow({
@@ -1463,8 +1497,10 @@ export const typeResolvers = {
   },
   // 008-agent-installation: User↔App membership join.
   AppMember: {
-    app: async (s: { appId: string; app?: unknown }, _: unknown, ctx: Context) =>
-      s.app ?? ctx.db.app.findUnique({ where: { id: s.appId } }),
+    // The user's own AppMember row may be readable without org membership.
+    // It does not grant the App object or its ungated keys/members fields.
+    app: (s: { appId: string }, _: unknown, ctx: Context) =>
+      loadReadableNestedApp(ctx, s.appId),
     user: async (s: { userId: string; user?: unknown }, _: unknown, ctx: Context) =>
       s.user ?? ctx.db.user.findUnique({ where: { id: s.userId } }),
     // 023-app-shape US2 / FR-011: derived from the absence of an
@@ -1533,10 +1569,17 @@ export const typeResolvers = {
         revokedAt: s.revokedAt ?? null,
         expiresAt: s.expiresAt ?? null,
       }),
-    organization: async (s: { orgId: string }, _: unknown, ctx: Context) =>
-      ctx.db.organization.findUnique({ where: { id: s.orgId } }),
+    // Reading the vendor's grant does not authorize the customer org object.
+    organization: (s: { orgId: string }, _: unknown, ctx: Context) =>
+      loadReadableNestedOrganization(ctx, s.orgId),
     agent: async (s: { agentId: string }, _: unknown, ctx: Context) =>
       ctx.db.agent.findUnique({ where: { id: s.agentId } }),
+  },
+  MemorySubscription: {
+    // A readable Memory may list subscribers outside the caller's orgs. Ignore
+    // the eager relation and apply organization(ref:)'s gate to each org.
+    organization: (s: { organizationId: string }, _: unknown, ctx: Context) =>
+      loadReadableNestedOrganization(ctx, s.organizationId),
   },
   // 008-agent-installation: Agent declarative knobs are stored as JSON on
   // the row; the type resolvers pluck the known keys for ergonomic client
@@ -1650,12 +1693,19 @@ export const typeResolvers = {
   Organization: {
     hasGithubAppPrivateKey: (o: { githubAppPrivateKeyEncrypted?: string | null }) => !!o.githubAppPrivateKeyEncrypted,
     apps: async (org: { id: string; apps?: unknown[] }, _: unknown, ctx: Context) => {
-      if (org.apps) return org.apps;
-      return ctx.db.app.findMany({
+      // An Organization may be nested under a readable Memory even when its
+      // Apps are not. Scope each returned App to its own read audience.
+      const apps = org.apps ?? await ctx.db.app.findMany({
         where: { organizationId: org.id, deletedAt: null },
         include: APP_INCLUDE,
         orderBy: { name: 'asc' },
       });
+      return filterReadableAppRows(ctx, apps as Array<{
+        id: string;
+        organizationId: string | null;
+        ownerUserId: string | null;
+        deletedAt: Date | null;
+      }>);
     },
     agents: async (org: { id: string }, _: unknown, ctx: Context) => {
       const where: Record<string, unknown> = { organizationId: org.id, deletedAt: null };
@@ -1883,11 +1933,12 @@ export const typeResolvers = {
     //
     // The "who USES this agent" fields below are different: they surface OTHER
     // tenants' data, so they are NOT public. `apps` / `appAgents` return full
-    // `App` objects whose own field resolvers (App.keys / App.members) assume
-    // the outer org gate already ran — so returning a foreign org's App here
-    // would leak its key previews + member list (PR #552 review). Scope them to
-    // Apps in orgs the CALLER belongs to (platform ADMIN/OWNER → all): a
-    // non-member gets [], and no cross-org App object is ever exposed.
+    // `App` objects, including scalars such as systemPrompt. Returning a
+    // foreign App here leaks data even though keys and members re-check.
+    // Scope them to
+    // Apps in orgs the CALLER belongs to, then apply each App's own read
+    // gate. Platform ADMIN/OWNER can read org-owned Apps but not another
+    // user's user-owned App (spec 047 strict ownership).
     apps: async (a: { id: string }, _: unknown, ctx: Context) => {
       const where: Record<string, unknown> = {
         appAgents: { some: { agentId: a.id } },
@@ -1900,7 +1951,8 @@ export const typeResolvers = {
         if (orgIds.length === 0) return [];
         where.organizationId = { in: orgIds };
       }
-      return ctx.db.app.findMany({ where, orderBy: { createdAt: 'asc' } });
+      const apps = await ctx.db.app.findMany({ where, orderBy: { createdAt: 'asc' } });
+      return filterReadableAppRows(ctx, apps);
     },
     // Adoption count — the agent's owning-org view only (a bare number, but
     // still "who uses this"); non-members get 0.
@@ -1921,11 +1973,14 @@ export const typeResolvers = {
         if (orgIds.length === 0) return [];
         appWhere.organizationId = { in: orgIds };
       }
-      return ctx.db.appAgent.findMany({
+      const rows = await ctx.db.appAgent.findMany({
         where: { agentId: a.id, app: appWhere, agent: { deletedAt: null } },
         orderBy: { createdAt: 'asc' },
         include: { app: true, agent: { include: AGENT_INCLUDE } },
       });
+      const readableApps = await filterReadableAppRows(ctx, rows.map((row) => row.app));
+      const readableIds = new Set(readableApps.map((app) => app.id));
+      return rows.filter((row) => readableIds.has(row.appId));
     },
     // The agent's customer list (which orgs were granted it) — owning-org view
     // only; non-members get [].

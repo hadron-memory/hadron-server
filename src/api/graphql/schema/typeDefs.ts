@@ -1925,7 +1925,8 @@ export const typeDefs = `#graphql
   column (training mode is per-App, on App.trainingMode).
   """
   type AppAgent {
-    app: App!
+    "The App when this caller may read it; strict user ownership still applies."
+    app: App
     agent: Agent!
     createdAt: DateTime!
     createdBy: String
@@ -2196,7 +2197,8 @@ export const typeDefs = `#graphql
   type AppMember {
     appId: ID!
     userId: ID!
-    app: App!
+    "The App when the caller may read it; an external App member can still see their membership row."
+    app: App
     user: User!
     role: String!
     """
@@ -2255,7 +2257,8 @@ export const typeDefs = `#graphql
   type AgentOrgGrant {
     orgId: ID!
     agentId: ID!
-    organization: Organization!
+    "The customer Organization when the caller may read it; a vendor grant alone does not authorize it."
+    organization: Organization
     agent: Agent!
     activatedAt: DateTime
     expiresAt: DateTime
@@ -2640,6 +2643,7 @@ export const typeDefs = `#graphql
   type Memory {
     id: ID!
     organizationId: String
+    "The owning Organization when the caller may read that Organization; a Memory read alone does not grant it."
     organization: Organization
     """
     The memory's URN, grammar v2 (cor:urn:010:01): hrn:mem:<root>:<slug...>,
@@ -2772,6 +2776,7 @@ export const typeDefs = `#graphql
     #1232.)
     """
     appId: ID
+    "The linked App when the caller may read that App; a Memory read alone does not grant it."
     app: App
     """
     Populated only for class = system — the agent this memory is
@@ -3823,7 +3828,8 @@ export const typeDefs = `#graphql
   type MemorySubscription {
     id: ID!
     memory: Memory!
-    organization: Organization!
+    "The subscriber Organization when the caller may read it; memory access alone does not authorize it."
+    organization: Organization
     role: Role!
     activated: Boolean!
     createdAt: DateTime!
@@ -4597,8 +4603,8 @@ export const typeDefs = `#graphql
 
     # --- Relations (#831). All NULLABLE and independently gated: the appRuns
     # org-READER gate authorizes the RUN, not everything hanging off it, and a
-    # nested object inherits its own type's field resolvers (App.keys /
-    # App.members do not re-check — the #552 class). Denied and deleted both
+    # nested object inherits its own type's fields, including ungated App
+    # scalars (the #552 class). Denied and deleted both
     # read as null; the FK scalars above stay the durable audit record.
     """
     The App this run activated. Null when the caller may not read that App, or
