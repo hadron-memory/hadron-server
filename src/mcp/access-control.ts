@@ -560,9 +560,9 @@ async function participantTeamSpaceFolds(
  * knowledge memory the Agent carries) is App-agnostic and always admissible.
  * This is the enumeration half of #1097.
  *
- * **2. Spec-047 strict ownership.** `ownerUserId` is a SECOND owner-only axis,
- * orthogonal to `class`: `canReadMemory` and `canWriteToMemory` both enforce it
- * as a bare `auth.userId === ownerUserId` with no ADMIN, org or App path. But
+ * **2. Spec-047 strict ownership.** `ownerUserId` is a SECOND owner axis,
+ * orthogonal to `class`: `canReadMemory` and `canWriteToMemory` enforce it
+ * without an ADMIN, org or App path (except a Worker's current holder). But
  * `getPrimaryAgentAccess` drops a user-owned row only when its owner differs
  * from the APP's owner — it takes no caller into account at all — so a
  * user-owned App's OWNER's memories folded in for every member. An App-key
@@ -703,13 +703,14 @@ export async function getMemoryAccess(
   }
 
   // ── spec 047: user-owned (non-personal) memories ────────────────────────
-  // A user-owned memory (ownerUserId === caller) is STRICTLY owner-only and
-  // grants READ_WRITE to its owner. Only NON-personal classes go in this map
+  // A user-owned memory (ownerUserId === caller) grants READ_WRITE to its owner.
+  // The narrow Worker-holder exception was folded above. Only NON-personal
+  // classes go in this map
   // — the map is personal-free by design (hadron_list_memories folds the
   // caller's own personal/private rows in separately, and getAccessibleMemoryIds
   // consumers rely on it staying personal-free). App-Key callers (no userId)
   // never match, preserving per-App isolation. canReadMemory / canWriteToMemory
-  // remain the canonical per-memory gates (strict owner-only, no admin bypass).
+  // remain the canonical per-memory gates (no role-only admin bypass).
   if (auth.userId) {
     const owned = await db.memory.findMany({
       where: {
@@ -725,7 +726,11 @@ export async function getMemoryAccess(
   return access;
 }
 
-/** Worker working-memory access for its current holder and App managers. */
+/**
+ * Worker working-memory access for its current holder and App managers
+ * (cor:acl:010:01), including a user-owned App's distinct holder. The memory
+ * must belong to the same App and tenant owner as the live casting.
+ */
 export async function getWorkerMemoryAccess(
   db: PrismaClient,
   auth: Pick<AuthContext, 'userId' | 'impersonation'>,
@@ -745,24 +750,27 @@ export async function getWorkerMemoryAccess(
       app: { deletedAt: null, uninstalledAt: null },
       OR: [
         ...(!auth.impersonation ? [
-          { heldByUserId: auth.userId },
+          { heldByUserId: auth.userId, retiredAt: null },
           { app: { ownerUserId: auth.userId } },
         ] : []),
         { app: { organizationId: { in: orgIds } } },
       ],
     },
-    select: { memoryId: true, appId: true },
+    select: { memoryId: true, appId: true, app: { select: { ownerUserId: true } } },
   });
   if (workers.length === 0) return [];
   const memories = await db.memory.findMany({
     where: {
       id: { in: workers.map((w) => w.memoryId!).filter(Boolean) },
-      class: 'app', deletedAt: null, userMemoryOfAgentId: null, ownerUserId: null,
+      class: 'app', deletedAt: null, userMemoryOfAgentId: null,
     },
-    select: { id: true, appId: true },
+    select: { id: true, appId: true, ownerUserId: true },
   });
-  const valid = new Set(memories.map((m) => `${m.id}:${m.appId}`));
-  return workers.filter((w) => valid.has(`${w.memoryId}:${w.appId}`)).map((w) => w.memoryId!);
+  const valid = new Map(memories.map((m) => [m.id, m]));
+  return workers.filter((w) => {
+    const memory = valid.get(w.memoryId!);
+    return !!memory && memory.appId === w.appId && memory.ownerUserId === w.app.ownerUserId;
+  }).map((w) => w.memoryId!);
 }
 
 /**
@@ -857,13 +865,13 @@ export async function canWriteToMemory(
     return true;
   }
 
-  // spec 047: a USER-owned non-personal memory (ownerUserId set — e.g. a
-  // user-owned agent's system/knowledge memory) is STRICTLY owner-only. No
-  // ADMIN/OWNER bypass, no App/org path; an App-Key caller (no userId) never
-  // matches, so is denied. Personal/private user-owned rows are already handled
-  // by the block above (strict on userId + per-App isolation).
+  // spec 047: user-owned non-personal memories are owner-only, except a
+  // Worker's working memory also admits its current holder. The shared Worker
+  // gate checks the live casting, row shape, and matching App tenant owner.
   if (memory.ownerUserId !== null) {
-    return auth.userId === memory.ownerUserId;
+    if (auth.userId === memory.ownerUserId) return true;
+    return memory.class === 'app' &&
+      (await getWorkerMemoryAccess(db, auth)).includes(memoryId);
   }
 
   if (memory.class === 'app') {
@@ -917,6 +925,7 @@ type SubscriptionReadRow = Pick<AgentSubscription, 'activatedAt' | 'expiresAt' |
 
 interface MemoryReadRowOptions {
   access?: Map<string, string>;
+  workerMemoryIds?: ReadonlySet<string>;
   installedAgentIds?: ReadonlySet<string>;
   subscriptionsByAgentId?: ReadonlyMap<string, SubscriptionReadRow>;
 }
@@ -972,12 +981,12 @@ async function canReadMemoryRow(
     return true;
   }
 
-  // spec 047: a USER-owned non-personal memory (ownerUserId set) is STRICTLY
-  // owner-only to read — no ADMIN/OWNER bypass, no App/org path. An App-Key
-  // caller (no userId) never matches. Personal/private user-owned rows are
-  // already handled above.
+  // The only non-owner reach into a user-owned non-strict memory is the
+  // current holder of a live Worker's working memory.
   if (memory.ownerUserId !== null) {
-    return auth.userId === memory.ownerUserId;
+    if (auth.userId === memory.ownerUserId) return true;
+    return memory.class === 'app' &&
+      (opts.workerMemoryIds ?? new Set(await getWorkerMemoryAccess(db, auth))).has(memory.id);
   }
 
   if (auth.appId && auth.sessionId && !auth.userId) {
@@ -1066,6 +1075,9 @@ export async function filterReadableMemoryIds(
   const access = sessionBoundKey
     ? await getMemoryAccess(db, auth)
     : opts.access ?? (isPlatformAdmin ? undefined : await getMemoryAccess(db, auth));
+  const workerMemoryIds = memories.some((memory) =>
+    memory.class === 'app' && memory.ownerUserId !== null && memory.ownerUserId !== auth.userId)
+    ? new Set(await getWorkerMemoryAccess(db, auth)) : undefined;
   let installedAgentIds: Set<string> | undefined;
   let subscriptionsByAgentId: Map<string, SubscriptionReadRow> | undefined;
 
@@ -1118,6 +1130,7 @@ export async function filterReadableMemoryIds(
     if (
       await canReadMemoryRow(db, auth, memory, {
         access,
+        workerMemoryIds,
         installedAgentIds,
         subscriptionsByAgentId,
       })

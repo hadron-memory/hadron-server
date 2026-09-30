@@ -72,7 +72,7 @@ type MemoryForAccess = {
   userId: string | null;
   appId: string | null;
   userMemoryOfAgentId: string | null;
-  workerOf: Array<{ id: string; appId: string; heldByUserId: string | null }>;
+  workerOf: Array<{ id: string; appId: string; heldByUserId: string | null; retiredAt: Date | null }>;
   // spec 047: org-XOR-owner — exactly one of organizationId / ownerUserId is set.
   organizationId: string | null;
   ownerUserId: string | null;
@@ -87,7 +87,7 @@ const MEMORY_SELECT = {
   userId: true,
   appId: true,
   userMemoryOfAgentId: true,
-  workerOf: { select: { id: true, appId: true, heldByUserId: true } },
+  workerOf: { select: { id: true, appId: true, heldByUserId: true, retiredAt: true } },
   organizationId: true,
   ownerUserId: true,
   isEncrypted: true,
@@ -187,14 +187,24 @@ async function memoryGrants(
 
   // ── Non-strict classes (system / app / knowledge / group) ────────────────
 
-  // spec 047: a USER-owned memory (ownerUserId set — e.g. a user-owned agent's
-  // system/knowledge memory) is STRICTLY owner-only in this audit too, mirroring
-  // canReadMemory / requireMemoryWriteAccess: only the owner has grants — no
-  // platform-admin, no org, no PUBLIC, and this overrides the system-class
-  // universal-read below (a user-owned agent's definition is owner-only in v1).
+  const hasWorkerShape = memory.class === 'app' && memory.appId !== null &&
+    memory.userMemoryOfAgentId === null && memory.workerOf.some((w) =>
+      w.appId === memory.appId);
+  const workerApp = hasWorkerShape && await db.app.findFirst({
+    where: { id: memory.appId!, deletedAt: null, uninstalledAt: null },
+    select: { ownerUserId: true },
+  });
+  const isWorkerRow = Boolean(workerApp && workerApp.ownerUserId === memory.ownerUserId);
+
+  // spec 047: user-owned non-strict memories are owner-only except a Worker's
+  // working memory, which also grants its current holder read and write. The
+  // casting must belong to a live App with the same tenant owner as the row.
   if (memory.ownerUserId !== null) {
     if (memory.ownerUserId === subject.id) {
       grants.push({ source: 'MEMORY_PRINCIPAL', role: 'owner', via: null, caps: FULL });
+    } else if (isWorkerRow && memory.workerOf.some((w) =>
+      w.appId === memory.appId && w.retiredAt === null && w.heldByUserId === subject.id)) {
+      grants.push({ source: 'MEMORY_PRINCIPAL', role: 'worker-holder', via: null, caps: WRITE });
     }
     return grants;
   }
@@ -241,14 +251,8 @@ async function memoryGrants(
     memory.appId !== null && (memory.class === 'knowledge' || memory.class === 'group');
   const isAppTeamRow = memory.class === 'app' && memory.appId !== null &&
     memory.userMemoryOfAgentId === null && memory.workerOf.length === 0;
-  const hasWorkerShape = memory.class === 'app' && memory.appId !== null &&
-    memory.userMemoryOfAgentId === null && memory.workerOf.some((w) => w.appId === memory.appId);
-  const liveWorkerApp = hasWorkerShape && await db.app.findFirst({
-    where: { id: memory.appId!, deletedAt: null, uninstalledAt: null }, select: { id: true },
-  });
-  const isWorkerRow = Boolean(liveWorkerApp);
   if (isWorkerRow && memory.workerOf.some((w) =>
-    w.appId === memory.appId && w.heldByUserId === subject.id)) {
+    w.appId === memory.appId && w.retiredAt === null && w.heldByUserId === subject.id)) {
     grants.push({ source: 'MEMORY_PRINCIPAL', role: 'worker-holder', via: null, caps: WRITE });
   }
 

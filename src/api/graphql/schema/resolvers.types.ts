@@ -1,6 +1,7 @@
 // typeResolvers — GraphQL type-level field resolvers extracted from resolvers.ts
 // (split step 3). No behavior change.
 import { isLifecycleActive } from '@hadron-memory/access-control';
+import { GraphQLError } from 'graphql';
 import {
   getPrimaryAgent,
   getPrimaryAgentId,
@@ -999,9 +1000,23 @@ export const typeResolvers = {
       (g.organizationId ? ctx.db.organization.findUnique({ where: { id: g.organizationId } }) : null),
     // 008-agent-installation: app pivot for app/personal-class memories.
     app: async (g: { appId?: string | null; app?: unknown }, _: unknown, ctx: Context) => {
-      if (g.app !== undefined) return g.app ?? null;
       if (!g.appId) return null;
-      return ctx.db.app.findUnique({ where: { id: g.appId } });
+      const app = g.app !== undefined
+        ? g.app as { organizationId: string | null; ownerUserId: string | null } | null
+        : await ctx.db.app.findUnique({ where: { id: g.appId } });
+      if (!app) return null;
+      // A Worker holder may now read a user-owned App's working memory, but
+      // that grant does not expose the App object (including keys/members).
+      // Its own read gate remains owner-only under spec 047.
+      if (app.ownerUserId !== null) {
+        try {
+          await requireOwnerOrOrgRole(ctx, app, 'READER');
+        } catch (error) {
+          if (error instanceof GraphQLError && error.extensions.code === 'FORBIDDEN') return null;
+          throw error;
+        }
+      }
+      return app;
     },
     // 005-agent-subscription FR-024: userId is gated. Resolves to the
     // actual User.id only for the memory owner or ADMIN/OWNER of the

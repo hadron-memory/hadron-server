@@ -41,12 +41,13 @@ import {
   createDbAppMember,
 } from '../test/helpers.js';
 import { createTestableMcpServer } from './server.js';
-import { canReadMemory, canWriteToMemory, getMemoryAccess } from './access-control.js';
+import { canReadMemory, canWriteToMemory, getMemoryAccess, getWorkerMemoryAccess } from './access-control.js';
 import type { AuthContext } from '../middleware/auth.js';
 import { generateId } from '../lib/id.js';
 import { canReadMemoryRecord, getAccessibleMemoryIds, requireMemoryWriteAccess, type Context } from '../api/graphql/schema/resolvers.helpers.js';
 import { computeEffectiveAccess } from '../lib/auth/effectiveAccess.js';
 import { sessionScopedMemoryIds } from '../lib/auth/sessionScopedMemoryIds.js';
+import { resolvers } from '../api/graphql/schema/resolvers.js';
 
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -333,6 +334,122 @@ describe('#1003 — App members can read the App team space', () => {
     expect(listed).not.toContain('solo-app-shared');
   });
 
+  it('a user-owned App Worker holder reaches only their working memory (#1513)', async () => {
+    const owner = await db.user.create({ data: { id: generateId(), name: 'personal-app-owner' } });
+    const holder = await db.user.create({ data: { id: generateId(), name: 'personal-worker-holder' } });
+    const member = await db.user.create({ data: { id: generateId(), name: 'personal-app-member' } });
+    const agent = await db.agent.create({ data: {
+      id: generateId(), name: 'Personal Agent', urn: `${owner.id}:agent`, ownerUserId: owner.id,
+    } });
+    const app = await db.app.create({ data: {
+      id: generateId(), name: 'personal-app', urn: `${owner.id}:app`, ownerUserId: owner.id,
+    } });
+    await createDbAppAgent(db, app.id, agent.id);
+    await createDbAppMember(db, app.id, member.id, 'member');
+    const makeMemory = (
+      name: string,
+      extra: { sharedMemoryOfAgentId?: string; userMemoryOfAgentId?: string } = {},
+    ) => db.memory.create({ data: {
+      id: generateId(), class: 'app', name, urn: `${owner.id}:${name}`,
+      ownerUserId: owner.id, appId: app.id, ...extra,
+    } });
+    const working = await makeMemory('personal-worker');
+    const team = await makeMemory('personal-team', { sharedMemoryOfAgentId: agent.id });
+    const scratch = await makeMemory('personal-session', { userMemoryOfAgentId: agent.id });
+    const worker = await db.worker.create({ data: {
+      id: generateId(), appId: app.id, agentId: agent.id, name: 'Worker', slug: 'worker',
+      memoryId: working.id, heldByUserId: holder.id,
+    } });
+    await db.node.create({ data: {
+      id: generateId(), memoryId: working.id, loc: 'note', name: 'Worker note',
+    } });
+    const workingRow = await db.memory.findUniqueOrThrow({ where: { id: working.id }, include: { workerOf: true } });
+    const holderAuth = { userId: holder.id, roles: [] } as AuthContext;
+    const memberAuth = { userId: member.id, roles: ['ADMIN'] } as AuthContext;
+    const ownerAuth = { userId: owner.id, roles: [] } as AuthContext;
+
+    expect((await getMemoryAccess(db, holderAuth)).get(working.id)).toBe('READ_WRITE');
+    expect(await canReadMemory(db, holderAuth, working.id)).toBe(true);
+    expect(await canWriteToMemory(db, holderAuth, working.id)).toBe(true);
+    expect(await createTestableMcpServer(holderAuth).callToolText('hadron_list_memories', {}))
+      .toContain('personal-worker');
+    expect(await createTestableMcpServer(holderAuth).callToolText('hadron_get_node', {
+      urn: `hrn:node:${owner.id}:personal-worker:note`,
+    })).toContain('Worker note');
+    expect(await getAccessibleMemoryIds({ db, ...holderAuth } as Context, working.id)).toContain(working.id);
+    expect(await getAccessibleMemoryIds({ db, ...holderAuth, roles: ['ADMIN'] } as Context, working.id))
+      .toContain(working.id);
+    expect(await canReadMemoryRecord({ db, ...holderAuth } as Context, working)).toBe(true);
+    expect(await resolvers.Memory.app(working, {}, { db, ...holderAuth } as Context)).toBeNull();
+    const eagerWorking = await db.memory.findUniqueOrThrow({
+      where: { id: working.id }, include: { app: true },
+    });
+    expect(await resolvers.Memory.app(eagerWorking, {}, { db, ...holderAuth } as Context)).toBeNull();
+    await expect(requireMemoryWriteAccess({ db, ...holderAuth } as Context, working.id)).resolves.toBeUndefined();
+    expect((await computeEffectiveAccess(db, { id: holder.id, roles: [] },
+      { kind: 'memory', memory: workingRow })).canWrite).toBe(true);
+
+    for (const memory of [team, scratch]) {
+      expect(await canReadMemory(db, holderAuth, memory.id)).toBe(false);
+      expect(await canWriteToMemory(db, holderAuth, memory.id)).toBe(false);
+      expect(await getAccessibleMemoryIds({ db, ...holderAuth } as Context, memory.id)).not.toContain(memory.id);
+    }
+    for (const principal of [memberAuth, { userId: generateId(), roles: [] } as AuthContext]) {
+      expect(await canReadMemory(db, principal, working.id)).toBe(false);
+      expect(await canWriteToMemory(db, principal, working.id)).toBe(false);
+      expect(await getAccessibleMemoryIds({ db, ...principal } as Context, working.id)).not.toContain(working.id);
+      expect(await canReadMemoryRecord({ db, ...principal } as Context, working)).toBe(false);
+    }
+    expect(await canReadMemory(db, ownerAuth, working.id)).toBe(true);
+    expect(await canWriteToMemory(db, ownerAuth, working.id)).toBe(true);
+    expect(await getWorkerMemoryAccess(db, ownerAuth)).toContain(working.id);
+    expect(await resolvers.Memory.app(working, {}, { db, ...ownerAuth } as Context))
+      .toMatchObject({ id: app.id });
+    expect((await computeEffectiveAccess(db, { id: owner.id, roles: [] },
+      { kind: 'memory', memory: workingRow })).canWrite).toBe(true);
+    await db.worker.update({ where: { id: worker.id }, data: { heldByUserId: null } });
+    expect(await canReadMemory(db, holderAuth, working.id)).toBe(false);
+    expect(await canWriteToMemory(db, holderAuth, working.id)).toBe(false);
+    expect(await getAccessibleMemoryIds({ db, ...holderAuth } as Context, working.id)).not.toContain(working.id);
+    expect(await canReadMemory(db, ownerAuth, working.id)).toBe(true);
+
+    // A malformed cross-tenant pointer must not turn a foreign user's memory
+    // into this Worker's holding merely because the appId and holder match.
+    const foreignOwner = await db.user.create({ data: { id: generateId(), name: 'foreign-owner' } });
+    const foreignMemory = await db.memory.create({ data: {
+      id: generateId(), class: 'app', name: 'foreign-worker', urn: `${foreignOwner.id}:foreign-worker`,
+      ownerUserId: foreignOwner.id, appId: app.id,
+    } });
+    await db.worker.update({ where: { id: worker.id }, data: {
+      memoryId: foreignMemory.id, heldByUserId: holder.id,
+    } });
+    expect(await getWorkerMemoryAccess(db, holderAuth)).not.toContain(foreignMemory.id);
+    expect(await canReadMemory(db, holderAuth, foreignMemory.id)).toBe(false);
+    expect(await canWriteToMemory(db, holderAuth, foreignMemory.id)).toBe(false);
+    expect(await getAccessibleMemoryIds({ db, ...holderAuth } as Context, foreignMemory.id))
+      .not.toContain(foreignMemory.id);
+
+    // Retirement leaves the casting and its hold recorded, but ends holder access.
+    await db.worker.update({ where: { id: worker.id }, data: {
+      memoryId: working.id, retiredAt: new Date(),
+    } });
+    const retiredWorking = await db.memory.findUniqueOrThrow({
+      where: { id: working.id }, include: { workerOf: true },
+    });
+    expect(await getWorkerMemoryAccess(db, holderAuth)).not.toContain(working.id);
+    expect(await canReadMemory(db, holderAuth, working.id)).toBe(false);
+    expect(await canWriteToMemory(db, holderAuth, working.id)).toBe(false);
+    expect((await getMemoryAccess(db, holderAuth)).has(working.id)).toBe(false);
+    expect(await getAccessibleMemoryIds({ db, ...holderAuth } as Context, working.id))
+      .not.toContain(working.id);
+    expect(await canReadMemoryRecord({ db, ...holderAuth } as Context, retiredWorking)).toBe(false);
+    await expect(requireMemoryWriteAccess({ db, ...holderAuth } as Context, working.id))
+      .rejects.toThrow();
+    expect((await computeEffectiveAccess(db, { id: holder.id, roles: [] },
+      { kind: 'memory', memory: retiredWorking })).canWrite).toBe(false);
+    expect(await canReadMemory(db, ownerAuth, working.id)).toBe(true);
+  });
+
   it('org CONTRIBUTOR without AppMember can write a team row; revoked membership cannot', async () => {
     const { shared } = await fixture();
     const contributor = await db.user.create({ data: { id: generateId(), name: 'contributor' } });
@@ -436,6 +553,23 @@ describe('#1003 — App members can read the App team space', () => {
         { kind: 'memory', memory: row })).canWrite).toBe(true);
       expect(await canWriteToMemory(db, principal, sessionMemory.id)).toBe(false);
     }
+    // Retirement ends the recorded holder's grant, but the App manager keeps
+    // access to the casting's working memory.
+    await db.worker.update({ where: { id: worker.id }, data: { retiredAt: new Date() } });
+    const retiredHolder = { userId: holder.id, roles: [] } as AuthContext;
+    const managerAuth = { userId: manager.id, roles: [] } as AuthContext;
+    expect(await getWorkerMemoryAccess(db, retiredHolder)).not.toContain(workerMemory.id);
+    expect(await canWriteToMemory(db, retiredHolder, workerMemory.id)).toBe(false);
+    expect(await getWorkerMemoryAccess(db, managerAuth)).toContain(workerMemory.id);
+    expect(await canReadMemory(db, managerAuth, workerMemory.id)).toBe(true);
+    expect(await canWriteToMemory(db, managerAuth, workerMemory.id)).toBe(true);
+    expect(await getAccessibleMemoryIds({ db, ...managerAuth } as Context, workerMemory.id))
+      .toContain(workerMemory.id);
+    const retiredWorkerRow = await db.memory.findUniqueOrThrow({
+      where: { id: workerMemory.id }, include: { workerOf: true },
+    });
+    expect((await computeEffectiveAccess(db, { id: manager.id, roles: [] },
+      { kind: 'memory', memory: retiredWorkerRow })).canWrite).toBe(true);
     await db.orgMember.update({ where: { id: managerRole.id }, data: { deletedAt: new Date() } });
     expect(await canWriteToMemory(db, { userId: manager.id, roles: [] }, workerMemory.id)).toBe(false);
 
