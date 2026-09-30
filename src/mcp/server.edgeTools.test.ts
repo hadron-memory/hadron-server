@@ -14,7 +14,8 @@ import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
 import { generateId } from '../lib/id.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
-import { createTestableMcpServer } from './server.js';
+import { createTestableMcpServer, describeEdgeUpdate, EDGE_DESCRIPTION_DOC } from './server.js';
+import { typeDefs } from '../api/graphql/schema/typeDefs.js';
 import type { AuthContext } from '../middleware/auth.js';
 import { ensureChannelWithRoot, lockMemoryForChannelChange } from '../lib/channels.js';
 import { acquireLockSet } from '../lib/nodeSubtreeLock.js';
@@ -596,6 +597,34 @@ describe('hadron_update_edge — the single-edge intent (#835)', () => {
     expect((await db.edge.findUniqueOrThrow({ where: { id: target.id } })).name).toBe('relates-to-v2');
   });
 
+  it('#1057: the receipt echoes what CHANGED, read back from the store — never the untouched name', async () => {
+    const target = (await edgesOf()).find((e) => e.name === 'documented-by')!;
+    const out = await call('hadron_update_edge', { edgeRef: target.id, description: 'why this applies' });
+    expect(out).toMatch(/Edge updated: .* — description → "why this applies"$/);
+    // The URN legitimately contains the name (edge locs derive from it); what
+    // must not appear is the old "(name)" echo or any claim the name changed.
+    expect(out).not.toMatch(/\(documented-by\)|name →/);
+  });
+
+  it('#1057: a rename echoes the NEW name; an explicit null says cleared', async () => {
+    const target = (await edgesOf()).find((e) => e.name === 'applies-when')!;
+    expect(await call('hadron_update_edge', { edgeRef: target.id, name: 'applies-when-v3' }))
+      .toMatch(/— name → "applies-when-v3"$/);
+    await call('hadron_update_edge', { edgeRef: target.id, description: 'x' });
+    expect(await call('hadron_update_edge', { edgeRef: target.id, description: null }))
+      .toMatch(/— description cleared$/);
+  });
+
+  it('#1057: routing and structured fields report what they became; several fields are all listed', async () => {
+    const target = (await edgesOf()).find((e) => e.name === 'relates-to')!;
+    const out = await call('hadron_update_edge', {
+      edgeRef: target.id, priority: 3, condition: { '==': [1, 1] }, data: { k: 'v' }, isRunnable: true,
+    });
+    expect(out).toMatch(/— isRunnable → true; priority → 3; condition set; data set$/);
+    expect(await call('hadron_update_edge', { edgeRef: target.id, condition: null, data: null }))
+      .toMatch(/— condition cleared; data cleared$/);
+  });
+
   it('returns tool-error text (not a crash) for an unknown edge', async () => {
     const out = await call('hadron_update_edge', { edgeRef: generateId(), name: 'x' });
     expect(out).toMatch(/not found/i);
@@ -714,5 +743,20 @@ describe('the destructive semantics are legible at the callsite (#835 item 2)', 
     const src = serverSource();
     expect(src).toMatch(/To change ONE edge, use hadron_update_edge instead/);
     expect(src).toMatch(/to add one without touching the others, use hadron_create_edge/);
+  });
+});
+
+describe('#1057 — describeEdgeUpdate and the edge description doc', () => {
+  it('clips a long text value and says so when nothing was passed', () => {
+    const long = 'x'.repeat(200);
+    expect(describeEdgeUpdate({ description: long }, { loc: 'l', name: 'n', description: long }))
+      .toBe(`description → "${'x'.repeat(79)}…"`);
+    expect(describeEdgeUpdate({}, { loc: 'l', name: 'n' })).toBe('no fields were passed, so nothing changed');
+  });
+
+  it('documents description as structured-only, on the tools and in the SDL', () => {
+    expect(EDGE_DESCRIPTION_DOC).toMatch(/NOT rendered on node reads/);
+    expect(EDGE_DESCRIPTION_DOC).toMatch(/`name`/);
+    expect(typeDefs).toMatch(/NOT rendered on agent node reads[\s\S]{0,200}\n\s+description: String/);
   });
 });
