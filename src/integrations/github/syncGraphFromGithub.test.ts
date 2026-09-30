@@ -1255,6 +1255,66 @@ describe('a file whose path cannot be a loc (#1224)', () => {
     expect(line).toMatch(/no-id--> evil\.md/);
   });
 
+  /** #1411 review (@codex P2; Charles QA V3/V5/V7): an edge aimed at a mover whose move is skipped waits for the move. */
+  const edgeTo = (id: string) => {
+    mkdirSync(join(repoRoot(), 'g'), { recursive: true });
+    writeNodeFiles(join(repoRoot(), 'g'), { name: 'G', nodes: [{ id, rel: 'uses' }] });
+  };
+  const edgesTo = (id: string) => db.edge.findMany({ where: { targetId: id, deletedAt: null }, select: { loc: true } });
+
+  it('V3: a move blocked by a Channel at its SOURCE loc — an edge aimed at the mover waits', async () => {
+    await ensureChannelWithRoot(db, { memoryId: dbGraphId, loc: 'chats:live', name: 'live', createdBy: null });
+    const moverId = generateId();
+    await db.node.create({ data: { id: moverId, memoryId: dbGraphId, loc: 'chats:live:messages:m', name: 'M', ownerRepo: 'test/repo' } });
+    writeMd('moved', moverId, 'M');
+    edgeTo(moverId);
+    const result = await syncGraphFromGithub(makeGraph());
+    expect(result.error).toBeUndefined();
+    expect(result.skippedProtected).toContain('chats:live:messages:m → moved');
+    expect(await db.node.findUniqueOrThrow({ where: { id: moverId } })).toMatchObject({ loc: 'chats:live:messages:m' });
+    expect(await edgesTo(moverId)).toEqual([]);
+  });
+
+  it('V5: a move refused because its occupant\'s file has an invalid path — an edge aimed at the mover waits', async () => {
+    const occupantId = 'eeee000000000000000000000000000031';
+    const moverId = 'eeee000000000000000000000000000032';
+    writeMd('a', occupantId, 'occupant');
+    writeMd('b', moverId, 'mover');
+    await syncGraphFromGithub(makeGraph());
+    rmSync(join(repoRoot(), 'a.md'));
+    rmSync(join(repoRoot(), 'b.md'));
+    writeMd('a--> evil', occupantId, 'occupant');
+    writeMd('a', moverId, 'mover');
+    edgeTo(moverId);
+    const result = await syncGraphFromGithub(makeGraph());
+    expect(result.error).toBeUndefined();
+    expect(await db.node.findUniqueOrThrow({ where: { id: moverId } })).toMatchObject({ loc: 'b' });
+    expect(await edgesTo(moverId)).toEqual([]);
+  });
+
+  it('V7: a move HELD behind an unsettleable occupant — its incoming edge waits, then lands once under the new loc', async () => {
+    const occupantId = 'eeee000000000000000000000000000041';
+    const moverId = 'eeee000000000000000000000000000042';
+    writeMd('a', occupantId, 'occupant');
+    writeMd('b', moverId, 'mover');
+    await syncGraphFromGithub(makeGraph());
+    rmSync(join(repoRoot(), 'a.md'));
+    rmSync(join(repoRoot(), 'b.md'));
+    writeMd('a', moverId, 'mover');
+    writeFileSync(join(repoRoot(), 'no-id--> evil.md'), `---\nname: no id here\n---\n# x`, 'utf-8');
+    edgeTo(moverId);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const held = await syncGraphFromGithub(makeGraph());
+    warn.mockRestore();
+    expect(held.heldMoves).toEqual([`b → a (occupant ${occupantId})`]);
+    expect(await edgesTo(moverId)).toEqual([]);
+    rmSync(join(repoRoot(), 'no-id--> evil.md'));
+    await syncGraphFromGithub(makeGraph());
+    expect(await db.node.findUniqueOrThrow({ where: { id: moverId } })).toMatchObject({ loc: 'a' });
+    const edges = await edgesTo(moverId);
+    expect(edges).toHaveLength(1);
+  });
+
   it('a suppressed cleanup cannot leave a parked occupant behind: the move that displaced it is held (#1411 review)', async () => {
     // The parking step relies on the cleanup to collect an occupant whose file
     // is gone. When the cleanup is suppressed, that occupant would commit at
@@ -1595,7 +1655,7 @@ describe('#1330 — strict sub-roles through git sync', () => {
     );
     await holding;
     const syncing = syncGraphFromGithub(makeGraph());
-    await waitForLockWaiters('transactionid', 1);
+    await waitForLockWaitersOfType(db, 'transactionid', 1);
     release();
     await ruleWrite;
     const result = await syncing;
@@ -1621,7 +1681,7 @@ describe('#1330 — strict sub-roles through git sync', () => {
     }, { timeout: 15_000 });
     await holdSignal.gate;
     const syncing = syncGraphFromGithub(makeGraph());
-    await waitForLockWaiters('advisory', 1);
+    await waitForLockWaitersOfType(db, 'advisory', 1);
     // 2. A repo-owned row the cleanup would select, inserted after the scan.
     const lateId = generateId();
     await db.node.create({ data: { id: lateId, memoryId: dbGraphId, loc: 'late', name: 'Late', ownerRepo: 'test/repo' } });
@@ -1630,7 +1690,7 @@ describe('#1330 — strict sub-roles through git sync', () => {
       await tx.$queryRaw`SELECT "id" FROM "nodes" WHERE "id" = ${lateId} FOR SHARE`;
       await lockMemoryConfigExclusive(tx, dbGraphId);
     }, { timeout: 15_000 });
-    await waitForLockWaiters('advisory', 2);
+    await waitForLockWaitersOfType(db, 'advisory', 2);
     holdGate.open();
     await holder;
     const [result] = await Promise.all([syncing, ruleWrite]);
@@ -1658,13 +1718,13 @@ describe('#1330 — strict sub-roles through git sync', () => {
     }, { timeout: 15_000 });
     await held.gate;
     const syncing = syncGraphFromGithub(makeGraph());
-    await waitForLockWaiters('advisory', 1);
+    await waitForLockWaitersOfType(db, 'advisory', 1);
     const lateId = await createLate();
     const ruleWrite = db.$transaction(async (tx) => {
       await tx.$queryRaw`SELECT "id" FROM "nodes" WHERE "id" = ${lateId} FOR SHARE`;
       await lockMemoryConfigExclusive(tx, dbGraphId);
     }, { timeout: 15_000 });
-    await waitForLockWaiters('advisory', 2);
+    await waitForLockWaitersOfType(db, 'advisory', 2);
     done.open();
     await holder;
     const [result] = await Promise.all([syncing, ruleWrite]);
@@ -1745,7 +1805,7 @@ describe('#1330 — strict sub-roles through git sync', () => {
     }, { timeout: 15_000 });
     await holding;
     const syncing = syncGraphFromGithub(makeGraph());
-    await waitForLockWaiters('transactionid', 1);
+    await waitForLockWaitersOfType(db, 'transactionid', 1);
     go();
     const [result] = await Promise.all([syncing, ruleWrite]);
     expect(result.error).toBeUndefined();
@@ -1825,6 +1885,48 @@ describe('#1330 — strict sub-roles through git sync', () => {
     const { graph: other } = await createDbOrgAndGraph(db, { orgName: 'foreign-org-1411', graphName: 'foreign/repo-1411' });
     return db.node.create({ data: { id: generateId(), memoryId: other.id, loc: 'elsewhere', name: 'Foreign' } });
   };
+
+  const edgeFrom = (id: string) => {
+    mkdirSync(join(repoRoot(), 'g'), { recursive: true });
+    writeNodeFiles(join(repoRoot(), 'g'), { name: 'G', nodes: [{ id, rel: 'uses' }] });
+  };
+
+  it('V4: a DEFERRED id-first move (the node arrived late) — its incoming edge waits, then lands once under the new loc', async () => {
+    await rules({ role: 'doc', strictSubRoles: true });
+    const fileId = generateId();
+    frontmatter('r', { name: 'R', role: 'doc.unknown' });
+    frontmatter('x', { id: fileId, name: 'X' });
+    edgeFrom(fileId);
+    const { result } = await raceLateRow(async () => {
+      await db.node.create({ data: { id: fileId, memoryId: dbGraphId, loc: 'elsewhere', name: 'X', ownerRepo: 'test/repo' } });
+      return fileId;
+    });
+    expect(result.deferredLateRows).toEqual([`x (node ${fileId})`]);
+    expect(await db.edge.count({ where: { targetId: fileId } })).toBe(0);
+    await sync();
+    expect(await db.node.findUniqueOrThrow({ where: { id: fileId } })).toMatchObject({ loc: 'x' });
+    expect(await db.edge.count({ where: { targetId: fileId, deletedAt: null } })).toBe(1);
+  });
+
+  it('V6: a move DEFERRED behind a late occupant — its incoming edge waits, then lands once under the new loc', async () => {
+    await rules({ role: 'doc', strictSubRoles: true });
+    const moverId = generateId();
+    await db.node.create({ data: { id: moverId, memoryId: dbGraphId, loc: 'old', name: 'M', ownerRepo: 'test/repo' } });
+    frontmatter('r', { name: 'R', role: 'doc.unknown' });
+    frontmatter('dest', { id: moverId, name: 'M' });
+    edgeFrom(moverId);
+    const { result } = await raceLateRow(async () => {
+      const id = generateId();
+      await db.node.create({ data: { id, memoryId: dbGraphId, loc: 'dest', name: 'Occupant', ownerRepo: 'test/repo' } });
+      return id;
+    });
+    expect(result.deferredLateRows).toHaveLength(1);
+    expect(await db.node.findUniqueOrThrow({ where: { id: moverId } })).toMatchObject({ loc: 'old' });
+    expect(await db.edge.count({ where: { targetId: moverId } })).toBe(0);
+    await sync();
+    expect(await db.node.findUniqueOrThrow({ where: { id: moverId } })).toMatchObject({ loc: 'dest' });
+    expect(await db.edge.count({ where: { targetId: moverId, deletedAt: null } })).toBe(1);
+  });
 
   it('a REFUSED loc-keyed file with a foreign id: an edge aimed at that id lands on this memory\'s row, never the foreign node', async () => {
     await rules({ role: 'doc', strictSubRoles: true });
