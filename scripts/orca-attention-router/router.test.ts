@@ -3,11 +3,11 @@
  * `hadron team attention` and `orca terminal list|wait|send`.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir, uptime } from 'node:os';
 import { join } from 'node:path';
 import {
-  type Config, type Runner, type RunResult, RouterError, State, describeOutcome, loadConfig, pollOnce, status,
+  type Config, type Runner, type RunResult, RouterError, State, breakStaleLock, describeOutcome, loadConfig, pollOnce, status,
 } from './router.js';
 
 const TOKEN_1 = 'tok-one-SECRET';
@@ -402,34 +402,39 @@ describe('Orca attention router — failures leave the token alone', () => {
     expect(readFileSync(join(lockDir(c), 'owner'), 'utf8')).toBe(JSON.stringify(rec));
   });
 
-  it('L4: while another run holds the reclaim mutex, a dead lock is left alone (no double reclaim, @codex P2)', () => {
+  const tombs = (c: Config) => readdirSync(c.stateDir).filter((n) => n.includes('.tomb-'));
+
+  it('C1 (Chip QA): a racer with a STALE judgement cannot break the lock another racer just took; the live lock is restored', () => {
     const c = cfg(['w-eli', 'Eli']);
-    writeOwner(c, '999999');
-    mkdirSync(join(c.stateDir, '.writer-lock.reclaim'));
-    expect(() => poll(c)).toThrow(RouterError);
-    expect(readFileSync(join(lockDir(c), 'owner'), 'utf8')).toBe('999999');
+    writeOwner(c, '999999'); // stale: judged dead by both racers
+    expect(breakStaleLock(lockDir(c), '999999')).toBe('retry'); // racer A breaks it...
+    writeOwner(c, 'A-live-record'); // ...and takes the lock
+    expect(breakStaleLock(lockDir(c), '999999')).toBe('busy'); // racer B, same outdated judgement
+    expect(readFileSync(join(lockDir(c), 'owner'), 'utf8')).toBe('A-live-record');
+    expect(tombs(c)).toEqual([]);
   });
 
-  it('L5: a reclaim mutex left by a crash is itself reclaimed after its grace', () => {
+  it('C2/C3: a stale lock breaks cleanly; an already-broken one reads as free', () => {
     const c = cfg(['w-eli', 'Eli']);
     writeOwner(c, '999999');
-    const m = join(c.stateDir, '.writer-lock.reclaim');
-    mkdirSync(m);
-    const old = new Date(Date.now() - 5 * 60_000);
-    utimesSync(m, old, old);
-    expect(poll(c).adopted).toBe(true);
-    expect(existsSync(m)).toBe(false);
+    expect(breakStaleLock(lockDir(c), '999999')).toBe('retry');
+    expect(existsSync(lockDir(c))).toBe(false);
+    expect(tombs(c)).toEqual([]);
+    expect(breakStaleLock(lockDir(c), '999999')).toBe('retry');
   });
 
-  it('L6: release never deletes a lock this run no longer owns', () => {
+  it('C4: a run that loses its lock mid-poll stops before any send or adoption, and never deletes the other lock', () => {
     const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli');
+    fake.attention.workers = [worker('w-eli', 'Eli')];
     const base = fake.run;
     fake.run = (argv) => {
-      // Mid-run, the lock is (wrongly) taken over: our release must leave it.
       if (argv[1] === 'api' && argv[2].includes('teamAttentionPage')) writeFileSync(join(lockDir(c), 'owner'), 'someone-else');
       return base(argv);
     };
-    poll(c);
+    expect(() => poll(c)).toThrow(/lost the writer lock/);
+    expect(fake.sent).toEqual([]);
+    expect(adopted(c)).toBeNull();
     expect(readFileSync(join(lockDir(c), 'owner'), 'utf8')).toBe('someone-else');
   });
 

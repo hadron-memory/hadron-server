@@ -206,8 +206,6 @@ function atomicWrite(path: string, text: string): void {
 
 /** A lock with no owner record is reclaimed once it is this old (a crash between mkdir and the write). */
 const OWNERLESS_LOCK_GRACE_MS = 60_000;
-/** A reclaim mutex older than this was left by a crash mid-reclaim. */
-const RECLAIM_MUTEX_GRACE_MS = 60_000;
 /** Two readings of the boot time closer than this are the same boot. */
 const BOOT_TOLERANCE_MS = 120_000;
 
@@ -289,21 +287,56 @@ export function lockHolderAlive(lock: string, raw: string | null): boolean {
 }
 
 /**
+ * Break a stale lock without ever deleting a LIVE one (@codex P2 and Chip QA,
+ * #1490). Any "check it is stale, then delete it by path" races: another run
+ * can break and re-take the lock between the check and the delete, and a
+ * separate reclaim mutex only moves that race one level up.
+ *
+ * So the lock is MOVED, atomically, to a unique tomb (exactly one racer moves
+ * whatever is at the path), and the tomb's owner record is compared with the
+ * record judged dead. If they match, the stale lock is gone and the caller
+ * may try `mkdir` again, which is atomic too. If they differ, another run
+ * broke the stale lock and took it first: its live lock is renamed straight
+ * back and this run backs off.
+ *
+ * @returns 'retry' when the lock path is free to try again; 'busy' otherwise.
+ */
+export function breakStaleLock(lock: string, judged: string | null): 'retry' | 'busy' {
+  const tomb = `${lock}.tomb-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  try {
+    renameSync(lock, tomb);
+  } catch (e) {
+    // Someone else broke it first (ENOENT): the path may already be free.
+    return (e as NodeJS.ErrnoException).code === 'ENOENT' ? 'retry' : 'busy';
+  }
+  if (readOwner(tomb) === judged) {
+    rmSync(tomb, { recursive: true, force: true });
+    return 'retry';
+  }
+  // Not the lock judged dead: put it back. A live owner is never displaced.
+  try {
+    renameSync(tomb, lock);
+  } catch {
+    // A third run took the path meanwhile. The owner of the moved lock sees
+    // it lost (the per-step ownership check below) and stops cleanly.
+    rmSync(tomb, { recursive: true, force: true });
+  }
+  return 'busy';
+}
+
+/**
  * One writer at a time: a mkdir lock in the state directory, recording its
  * owner (pid, boot, start). A lock whose owner is provably gone (killed,
- * crashed, host restart, pid reused) is reclaimed, so a crash cannot silence
- * the router until someone notices (@codex P2, #1490). A live owner is never
- * displaced.
+ * crashed, host restart, pid reused) is broken via `breakStaleLock`, so a
+ * crash cannot silence the router. A live owner is never displaced.
  *
- * Reclaim is serialized by a short-lived reclaim mutex, and the owner record
- * is re-read under it. Only the exact record judged dead is removed, so two
- * runs that both saw the same stale lock cannot both win, and the second can
- * never delete the lock the first just took (@codex P2, #1490). Release also
- * removes the lock only while it still holds this run's record.
+ * `fn` receives `stillOwner()`: the poll re-checks it before every send and
+ * before adopting the token, so a run that somehow lost the lock stops
+ * instead of acting alongside another. Release removes the lock only while
+ * it still holds this run's record.
  */
-function withLock<T>(stateDir: string, fn: () => T): T {
+function withLock<T>(stateDir: string, fn: (stillOwner: () => boolean) => T): T {
   const lock = join(stateDir, '.writer-lock');
-  const reclaim = join(stateDir, '.writer-lock.reclaim');
   const busy = () => new RouterError(`another router run holds ${lock}`);
   const mine = ownRecord();
   const acquire = (): boolean => {
@@ -315,34 +348,19 @@ function withLock<T>(stateDir: string, fn: () => T): T {
     writeFileSync(join(lock, 'owner'), mine);
     return true;
   };
-
-  if (!acquire()) {
+  let acquired = acquire();
+  for (let attempt = 0; !acquired && attempt < 2; attempt++) {
     const judged = readOwner(lock);
     if (lockHolderAlive(lock, judged)) throw busy();
-    // A reclaim mutex left behind by a crash mid-reclaim is itself reclaimed.
-    try {
-      if (Date.now() - statSync(reclaim).mtimeMs > RECLAIM_MUTEX_GRACE_MS) rmSync(reclaim, { recursive: true, force: true });
-    } catch {
-      /* none */
-    }
-    try {
-      mkdirSync(reclaim);
-    } catch {
-      throw busy(); // another run is reclaiming right now
-    }
-    try {
-      // Still the very record judged dead? Anything else is someone's live lock.
-      if (readOwner(lock) !== judged) throw busy();
-      rmSync(lock, { recursive: true, force: true });
-      if (!acquire()) throw busy();
-    } finally {
-      rmSync(reclaim, { recursive: true, force: true });
-    }
+    if (breakStaleLock(lock, judged) === 'busy') throw busy();
+    acquired = acquire();
   }
+  if (!acquired) throw busy();
+  const stillOwner = () => readOwner(lock) === mine;
   try {
-    return fn();
+    return fn(stillOwner);
   } finally {
-    if (readOwner(lock) === mine) rmSync(lock, { recursive: true, force: true });
+    if (stillOwner()) rmSync(lock, { recursive: true, force: true });
   }
 }
 
@@ -597,7 +615,10 @@ export function describeOutcome(o: Outcome): string {
 export function pollOnce(cfg: Config, run: Runner = runCommand, log: (line: string) => void = console.log): Outcome {
   const state = new State(cfg.stateDir);
   state.ensure();
-  return withLock(cfg.stateDir, () => {
+  return withLock(cfg.stateDir, (stillOwner) => {
+    const mustOwn = (): void => {
+      if (!stillOwner()) throw new RouterError('lost the writer lock mid-poll; stopping without further sends or adoption');
+    };
     const attention = pollAttention(cfg, state.token(), run);
     const ledger = state.ledger();
     const targets: Array<[RosterEntry, AttentionItem]> = [];
@@ -628,6 +649,7 @@ export function pollOnce(cfg: Config, run: Runner = runCommand, log: (line: stri
         outcome.held[entry.name] = `busy for ${Math.round(cfg.busyWaitMs / 1000)}s`;
         continue;
       }
+      mustOwn();
       const [ok, how] = sendNudge(cfg, handle, nudgeText(seen.unread, seen.unreadMentions), run);
       if (!ok) {
         outcome.held[entry.name] = how;
@@ -648,6 +670,7 @@ export function pollOnce(cfg: Config, run: Runner = runCommand, log: (line: stri
       state.saveLedger(ledger);
       if (fresh.length) log(`orca-attention-router: ${fresh.map(([n, r]) => `${n}: ${r}`).join('; ')}`);
     } else {
+      mustOwn();
       state.adopt(attention.token);
       outcome.adopted = true;
     }

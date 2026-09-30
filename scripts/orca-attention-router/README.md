@@ -49,7 +49,13 @@ State lives in `stateDir` (`0700`; the token file is `0600`), separate from ever
 
 A lock with no owner record that is older than a minute is reclaimed too. A live owner, even another user's, is never displaced.
 
-Reclaim is serialized by a short-lived `.writer-lock.reclaim` mutex (itself reclaimed after a minute), and only the exact owner record judged dead is removed, so two runs cannot both reclaim. Release removes the lock only while it still holds this run's record. Keep `adopted.token` private: never print, paste or reset it.
+A stale lock is never deleted "by path after a check" (that races). It is **renamed atomically** to a unique tomb, and the tomb's owner record is compared with the record judged dead:
+- if they match, the stale lock is gone and the run retries `mkdir`;
+- if they don't, another run broke the stale lock and took it first, so its live lock is renamed straight back and this run backs off.
+
+The poll re-checks that it still owns the lock before every send and before adopting the token, and stops cleanly if it doesn't. Release removes the lock only while it still holds this run's record.
+
+**Residual:** a *third* run taking the path during the brief window when a live lock is moved aside makes the rename-back fail. The moved lock's owner then stops at its next check, so at most one in-flight send can overlap. That needs three simultaneous pollers racing a stale lock; the loop is the only scheduled poller. Keep `adopted.token` private: never print, paste or reset it.
 
 ## Commands
 
