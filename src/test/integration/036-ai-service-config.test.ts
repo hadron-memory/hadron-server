@@ -266,6 +266,98 @@ describe('resolveAIConfig precedence (US1)', () => {
   });
 });
 
+describe('resolveAIConfig for a user-owned Agent (#1363)', () => {
+  it('lets its owner decrypt a user-owned App config before the Agent and host levels', async () => {
+    const owner = await db.user.create({
+      data: { id: generateId(), handle: 'personal-app-cfg-owner', githubId: 36005, name: 'Owner' },
+    });
+    const personalAgent = await db.agent.create({
+      data: { id: generateId(), name: 'Personal', urn: 'personal-app-cfg-036', ownerUserId: owner.id },
+    });
+    const personalApp = await db.app.create({
+      data: { id: generateId(), name: 'Personal App', urn: 'personal-app-cfg-036', ownerUserId: owner.id },
+    });
+    await createConfig({ appId: personalApp.id }, 'default', { apiKey: 'sk-personal-app' });
+    await createConfig({ agentId: personalAgent.id }, 'default', { apiKey: 'sk-personal-agent' });
+    await createConfig({ hadronServerId: server.id }, 'default', { apiKey: 'sk-host' });
+
+    const resolved = await resolvers.Query.resolveAIConfig(
+      {}, { appRef: personalApp.id, agentRef: personalAgent.id }, ctxFor(owner.id),
+    );
+    expect(resolved.ownerType).toBe('APP');
+    expect(resolved.apiKey).toBe('sk-personal-app');
+    await expect(resolvers.Query.resolveAIConfig(
+      {}, { appRef: personalApp.id, agentRef: personalAgent.id }, platformAdminCtx(),
+    )).rejects.toThrow(/Forbidden/);
+
+    const foreignApp = await db.app.create({
+      data: { id: generateId(), name: 'Foreign App', urn: 'foreign-app-cfg-036', ownerUserId: outsider.id },
+    });
+    await createConfig({ appId: foreignApp.id }, 'default', { apiKey: 'sk-foreign-app' });
+    await expect(resolvers.Query.resolveAIConfig(
+      {}, { appRef: foreignApp.id, agentRef: personalAgent.id }, ctxFor(owner.id),
+    )).rejects.toThrow(/Forbidden/);
+  });
+
+  it('uses the Agent owner gate for its own key, including admin and impersonation denials', async () => {
+    const owner = await db.user.create({
+      data: { id: generateId(), handle: 'personal-cfg-owner', githubId: 36003, name: 'Owner' },
+    });
+    const personalAgent = await db.agent.create({
+      data: { id: generateId(), name: 'Personal', urn: 'personal-036', ownerUserId: owner.id },
+    });
+    const config = await createConfig({ agentId: personalAgent.id }, 'default', { apiKey: 'sk-personal' });
+
+    const masked = await resolvers.Query.aiServiceConfig({}, { ref: config.id }, ctxFor(owner.id));
+    expect(masked?.hasApiKey).toBe(true);
+    expect(masked).not.toHaveProperty('apiKey');
+    expect((await resolvers.Query.agentAIConfig({}, { agentRef: personalAgent.id }, ctxFor(owner.id)))?.apiKey)
+      .toBe('sk-personal');
+
+    const resolved = await resolvers.Query.resolveAIConfig(
+      {}, { agentRef: personalAgent.id }, ctxFor(owner.id),
+    );
+    expect(resolved.ownerType).toBe('AGENT');
+    expect(resolved.apiKey).toBe('sk-personal');
+
+    const impersonated = ctxFor(owner.id, {
+      impersonation: { sessionId: 'synthetic', actorUserId: admin.id, orgId: org.id, expiresAt: new Date(Date.now() + 60_000) },
+    });
+    for (const deniedCtx of [ctxFor(outsider.id), platformAdminCtx(), impersonated]) {
+      await expect(resolvers.Query.resolveAIConfig({}, { agentRef: personalAgent.id }, deniedCtx))
+        .rejects.toThrow(/Forbidden/);
+    }
+
+    // An App context must not let an org admin bypass strict ownership of
+    // the named personal Agent, even if the App has its own config.
+    await createConfig({ appId: app.id }, 'default', { apiKey: 'sk-app' });
+    await expect(resolvers.Query.resolveAIConfig(
+      {}, { appRef: app.id, agentRef: personalAgent.id }, ctxFor(admin.id),
+    )).rejects.toThrow(/Forbidden/);
+  });
+
+  it('does not expose a host fallback key through the personal Agent', async () => {
+    const owner = await db.user.create({
+      data: { id: generateId(), handle: 'personal-cfg-fallback', githubId: 36004, name: 'Owner' },
+    });
+    const personalAgent = await db.agent.create({
+      data: { id: generateId(), name: 'Personal', urn: 'personal-fallback-036', ownerUserId: owner.id },
+    });
+    await createConfig({ hadronServerId: server.id }, 'default', { apiKey: 'sk-host' });
+
+    await expect(resolvers.Query.resolveAIConfig({}, { agentRef: personalAgent.id }, ctxFor(owner.id)))
+      .rejects.toMatchObject({ extensions: { code: 'NoAiConfigAvailableError' } });
+    await expect(resolvers.Query.resolveAIConfig({}, { agentRef: personalAgent.id }, platformAdminCtx()))
+      .rejects.toThrow(/Forbidden/);
+
+    // An enabled, nearer keyless row is unusable; it cannot fall through to
+    // the host's keyed row or expose that key in the error.
+    await createConfig({ agentId: personalAgent.id }, 'default', { apiKey: null });
+    await expect(resolvers.Query.resolveAIConfig({}, { agentRef: personalAgent.id }, ctxFor(owner.id)))
+      .rejects.toMatchObject({ extensions: { code: 'NoAiConfigAvailableError' } });
+  });
+});
+
 // ─────────────────────────────────────────────────────────────────────────
 // resolveAiServiceConfigs — masked resolvable set (chatbot config picker)
 // ─────────────────────────────────────────────────────────────────────────
