@@ -126,7 +126,9 @@ async function resolveNodeUrnField(
 
 async function callerReadableAgentFilter(ctx: Context): Promise<Record<string, unknown>> {
   const live = { deletedAt: null };
-  // Platform ADMIN/OWNER: unscoped EXCEPT soft-deleted rows.
+  // This is the importedBy ROW-list audience, which includes the App's own
+  // installed parents so App-key callers can see their adoption links. The
+  // AgentImport.parentAgent object is separately checked against Query.agent.
   if (ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER')) return live;
   const or: Record<string, unknown>[] = [{ visibility: 'PUBLIC' }];
   if (ctx.userId) {
@@ -136,11 +138,50 @@ async function callerReadableAgentFilter(ctx: Context): Promise<Record<string, u
     // under impersonation (the shared-org session never sees user-owned rows).
     if (!ctx.impersonation) or.push({ ownerUserId: ctx.userId });
   }
-  // App-key principal (ctx.appId, no ctx.userId): the App is already authorized
-  // for the agents installed in it via `myApp.agents`, so dropping those parents
-  // would regress `importedBy` for deployed Apps (PR #843 review, Codex P2).
   if (ctx.appId) or.push({ appAgents: { some: { appId: ctx.appId } } });
   return { ...live, OR: or };
+}
+
+async function directReadableAgentFilter(ctx: Context): Promise<Record<string, unknown>> {
+  const live = { deletedAt: null };
+  // Query.agent applies strict user ownership before its org/admin branch.
+  if (ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER')) {
+    return {
+      ...live,
+      OR: [
+        { visibility: 'PUBLIC' },
+        { ownerUserId: null },
+        ...(!ctx.impersonation && ctx.userId ? [{ ownerUserId: ctx.userId }] : []),
+      ],
+    };
+  }
+  const or: Record<string, unknown>[] = [{ visibility: 'PUBLIC' }];
+  if (ctx.userId) {
+    const orgIds = await getMemberOrgIds(ctx.db, ctx.userId, ctx.impersonation?.orgId);
+    if (orgIds.length > 0) or.push({ organizationId: { in: orgIds } });
+    if (!ctx.impersonation) or.push({ ownerUserId: ctx.userId });
+  }
+  return { ...live, OR: or };
+}
+
+type NestedAgentRow = {
+  deletedAt: Date | null;
+  visibility: string;
+  organizationId: string | null;
+  ownerUserId: string | null;
+};
+
+/** Match Query.agent's PUBLIC-or-owner/org-READER gate for eager relations. */
+async function readableNestedAgent<T extends NestedAgentRow>(ctx: Context, agent: T | null | undefined): Promise<T | null> {
+  if (!agent || agent.deletedAt) return null;
+  if (agent.visibility === 'PUBLIC') return agent;
+  try {
+    await requireOwnerOrOrgRole(ctx, agent, 'READER');
+    return agent;
+  } catch (error) {
+    if (error instanceof GraphQLError && error.extensions.code === 'FORBIDDEN') return null;
+    throw error;
+  }
 }
 
 /**
@@ -152,7 +193,7 @@ async function callerReadableAgentFilter(ctx: Context): Promise<Record<string, u
  * relation. Both halves are cached on the request Context, mirroring `loadApp`.
  */
 function loadReadableAgent(ctx: Context, agentId: string): Promise<unknown | null> {
-  const filter = (ctx.readableAgentFilterCache ??= callerReadableAgentFilter(ctx));
+  const filter = (ctx.readableAgentFilterCache ??= directReadableAgentFilter(ctx));
   const cache = (ctx.readableAgentCache ??= new Map<string, Promise<unknown | null>>());
   let pending = cache.get(agentId);
   if (!pending) {
@@ -1094,10 +1135,11 @@ export const typeResolvers = {
     // the Agent side via Agent.systemMemoryId.
     agent: async (g: { id: string; class?: string }, _: unknown, ctx: Context) => {
       if (g.class !== 'system') return null;
-      return ctx.db.agent.findFirst({
+      const agent = await ctx.db.agent.findFirst({
         where: { systemMemoryId: g.id, deletedAt: null },
         include: AGENT_INCLUDE,
       });
+      return readableNestedAgent(ctx, agent);
     },
     // 023-app-shape US3: cross-user grants on this Memory. Empty for
     // non-personal-class memories. Visible to (a) the principal
@@ -1348,9 +1390,10 @@ export const typeResolvers = {
       _: unknown,
       ctx: Context,
     ) => {
-      const eager = readPrimaryAgentRecordFromEager(a);
-      if (eager !== undefined) return eager;
-      return getPrimaryAgent(ctx.db, a.id, { include: AGENT_INCLUDE });
+      const eager = readPrimaryAgentRecordFromEager(a) as (NestedAgentRow & Record<string, unknown>) | null | undefined;
+      if (eager !== undefined) return readableNestedAgent(ctx, eager);
+      const agent = await getPrimaryAgent(ctx.db, a.id, { include: AGENT_INCLUDE });
+      return readableNestedAgent(ctx, agent);
     },
     agents: async (
       a: { id: string; appAgents?: unknown },
@@ -1359,16 +1402,18 @@ export const typeResolvers = {
     ) => {
       const eagerAll = readAllAgentRecordsFromEager(a);
       if (eagerAll !== undefined) {
-        return eagerAll.filter((ag): ag is { deletedAt: Date | null } & object =>
-          ag !== null && !(ag as { deletedAt?: Date | null }).deletedAt,
-        );
+        const visible = await Promise.all(eagerAll.map((ag) =>
+          readableNestedAgent(ctx, ag as (NestedAgentRow & Record<string, unknown>) | null),
+        ));
+        return visible.filter((ag): ag is NonNullable<typeof ag> => ag !== null);
       }
       const rows = await ctx.db.appAgent.findMany({
         where: { appId: a.id },
         orderBy: { createdAt: 'asc' },
         include: { agent: { include: AGENT_INCLUDE } },
       });
-      return rows.map((r) => r.agent).filter((ag) => ag && !ag.deletedAt);
+      const visible = await Promise.all(rows.map((r) => readableNestedAgent(ctx, r.agent)));
+      return visible.filter((ag): ag is NonNullable<typeof ag> => ag !== null);
     },
     members: async (a: { id: string }, _: unknown, ctx: Context) => {
       if (!(await loadReadableNestedApp(ctx, a.id))) return [];
@@ -1476,12 +1521,12 @@ export const typeResolvers = {
   AppAgent: {
     app: (aa: { appId: string }, _: unknown, ctx: Context) =>
       loadReadableNestedApp(ctx, aa.appId),
-    agent: async (aa: { agentId: string; agent?: unknown }, _: unknown, ctx: Context) =>
-      aa.agent ??
-      ctx.db.agent.findUniqueOrThrow({
-        where: { id: aa.agentId },
-        include: AGENT_INCLUDE,
-      }),
+    agent: async (aa: { agentId: string; agent?: unknown }, _: unknown, ctx: Context) => {
+      const agent = aa.agent !== undefined
+        ? aa.agent as (NestedAgentRow & Record<string, unknown>) | null
+        : await ctx.db.agent.findUnique({ where: { id: aa.agentId }, include: AGENT_INCLUDE });
+      return readableNestedAgent(ctx, agent);
+    },
   },
   AgentSubscription: {
     isActive: (s: { activatedAt?: Date | null; revokedAt?: Date | null; expiresAt?: Date | null }) =>
@@ -1492,8 +1537,12 @@ export const typeResolvers = {
       }),
     user: async (s: { userId: string; user?: unknown }, _: unknown, ctx: Context) =>
       s.user ?? ctx.db.user.findUnique({ where: { id: s.userId } }),
-    agent: async (s: { agentId: string; agent?: unknown }, _: unknown, ctx: Context) =>
-      s.agent ?? ctx.db.agent.findUnique({ where: { id: s.agentId } }),
+    agent: async (s: { agentId: string; agent?: unknown }, _: unknown, ctx: Context) => {
+      const agent = s.agent !== undefined
+        ? s.agent as (NestedAgentRow & Record<string, unknown>) | null
+        : await ctx.db.agent.findUnique({ where: { id: s.agentId } });
+      return readableNestedAgent(ctx, agent);
+    },
   },
   // 008-agent-installation: User↔App membership join.
   AppMember: {
@@ -1557,9 +1606,9 @@ export const typeResolvers = {
   // 008-agent-installation: Agent dependency edge.
   AgentImport: {
     parentAgent: async (s: { parentAgentId: string }, _: unknown, ctx: Context) =>
-      ctx.db.agent.findUnique({ where: { id: s.parentAgentId } }),
+      readableNestedAgent(ctx, await ctx.db.agent.findUnique({ where: { id: s.parentAgentId } })),
     importedAgent: async (s: { importedAgentId: string }, _: unknown, ctx: Context) =>
-      ctx.db.agent.findUnique({ where: { id: s.importedAgentId } }),
+      readableNestedAgent(ctx, await ctx.db.agent.findUnique({ where: { id: s.importedAgentId } })),
   },
   // 008-agent-installation: Org↔Agent license — sibling to AgentSubscription.
   AgentOrgGrant: {
@@ -1573,7 +1622,7 @@ export const typeResolvers = {
     organization: (s: { orgId: string }, _: unknown, ctx: Context) =>
       loadReadableNestedOrganization(ctx, s.orgId),
     agent: async (s: { agentId: string }, _: unknown, ctx: Context) =>
-      ctx.db.agent.findUnique({ where: { id: s.agentId } }),
+      readableNestedAgent(ctx, await ctx.db.agent.findUnique({ where: { id: s.agentId } })),
   },
   MemorySubscription: {
     // A readable Memory may list subscribers outside the caller's orgs. Ignore
@@ -1905,18 +1954,16 @@ export const typeResolvers = {
         orderBy: { position: 'asc' },
       }),
     // #757 — `importedBy` surfaces the agents that import THIS one, i.e. OTHER
-    // tenants' parent agents, and `AgentImport.parentAgent` hydrates each one
-    // with a bare `findUnique`. On a PUBLIC agent (readable by anyone,
+    // tenants' parent agents. On a PUBLIC agent (readable by anyone,
     // including anonymous) that handed out foreign orgs' private parent-agent
     // definitions — `systemPrompt`, description, linked-memory metadata — the
     // exact #552 class. `publishAgentImport` puts no visibility constraint on
     // the parent, so this is the intended marketplace flow, not a rare shape.
     //
-    // Scope to parents the CALLER may read, mirroring the `agent(ref:)` gate
-    // (PUBLIC → anyone; else the caller's member orgs, their own user-owned
-    // agents, or the agents installed in an App-key caller's App; platform
-    // ADMIN/OWNER → unscoped but still live-only). A non-member simply sees
-    // fewer rows — the list is an adoption signal, not a correctness input.
+    // The row list retains the established App-key installed-parent audience
+    // (an adoption signal, not an Agent definition grant). Its parentAgent
+    // object resolver now applies Query.agent's own read gate, so a visible
+    // import row cannot reveal an unreadable parent's systemPrompt.
     importedBy: async (a: { id: string }, _: unknown, ctx: Context) => {
       const parentAgent = await callerReadableAgentFilter(ctx);
       return ctx.db.agentImport.findMany({

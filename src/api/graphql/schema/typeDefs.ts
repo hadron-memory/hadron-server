@@ -1927,7 +1927,8 @@ export const typeDefs = `#graphql
   type AppAgent {
     "The App when this caller may read it; strict user ownership still applies."
     app: App
-    agent: Agent!
+    "The installed Agent when this caller may read its definition; an installation license alone does not grant that read."
+    agent: Agent
     createdAt: DateTime!
     createdBy: String
     updatedAt: DateTime
@@ -2242,8 +2243,10 @@ export const typeDefs = `#graphql
   type AgentImport {
     parentAgentId: ID!
     importedAgentId: ID!
-    parentAgent: Agent!
-    importedAgent: Agent!
+    "The parent Agent when this caller may read its definition."
+    parentAgent: Agent
+    "The dependency Agent when this caller may read its definition; a builder grant alone does not grant that read."
+    importedAgent: Agent
     position: Int!
     required: Boolean!
     createdAt: DateTime!
@@ -2259,7 +2262,8 @@ export const typeDefs = `#graphql
     agentId: ID!
     "The customer Organization when the caller may read it; a vendor grant alone does not authorize it."
     organization: Organization
-    agent: Agent!
+    "The licensed Agent when this caller may read its definition."
+    agent: Agent
     activatedAt: DateTime
     expiresAt: DateTime
     revokedAt: DateTime

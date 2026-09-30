@@ -779,10 +779,17 @@ describe('Memory.agent derived field', () => {
   it('returns the owning agent for an AGENT_SYSTEM memory', async () => {
     const { agent, sys: updated } = await createAgentWithSystem('juno');
 
-    const resolved = await resolvers.Memory.agent(
+    const denied = await resolvers.Memory.agent(
       { id: updated.id, class: updated.class },
       {},
       { db } as Context,
+    );
+    expect(denied).toBeNull();
+
+    const resolved = await resolvers.Memory.agent(
+      { id: updated.id, class: updated.class },
+      {},
+      adminCtx(),
     );
     expect(resolved?.id).toBe(agent.id);
   });

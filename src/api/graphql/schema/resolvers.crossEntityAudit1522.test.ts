@@ -1,0 +1,203 @@
+import { ApolloServer } from '@apollo/server';
+import { beforeEach, describe, expect, it } from 'vitest';
+import { db } from '../../../integrations/db/client.js';
+import { cleanDb, createDbAppAgent, createDbAppWithKey, createDbOrgAndGraph } from '../../../test/helpers.js';
+import { resolvers, type Context } from './resolvers.js';
+import { typeDefs } from './typeDefs.js';
+
+const server = new ApolloServer<Context>({ typeDefs, resolvers });
+
+describe('#1522 nested Agent read parity', () => {
+  beforeEach(async () => cleanDb(db));
+
+  it('hides a foreign non-public Agent through every App install relation, retaining authorized reads', async () => {
+    const vendor = await createDbOrgAndGraph(db, { orgName: 'nested-agent-vendor', graphName: 'vendor-memory' });
+    const customer = await createDbOrgAndGraph(db, { orgName: 'nested-agent-customer', graphName: 'customer-memory' });
+    const customerUser = await db.user.create({
+      data: { githubId: 9182201, githubUsername: 'nested-agent-customer', roles: ['READER'] },
+    });
+    const vendorCustomerUser = await db.user.create({
+      data: { githubId: 9182204, githubUsername: 'nested-agent-co-member', roles: ['READER'] },
+    });
+    await db.orgMember.create({
+      data: { organizationId: customer.org.id, userId: customerUser.id, role: 'READER' },
+    });
+    await db.orgMember.createMany({
+      data: [
+        { organizationId: vendor.org.id, userId: vendorCustomerUser.id, role: 'READER' },
+        { organizationId: customer.org.id, userId: vendorCustomerUser.id, role: 'READER' },
+      ],
+    });
+    const agent = await db.agent.create({
+      data: {
+        organizationId: vendor.org.id,
+        urn: 'nested-agent-vendor:private-agent',
+        name: 'Private vendor Agent',
+        systemPrompt: 'synthetic-vendor-private-prompt',
+        visibility: 'ORGANIZATION',
+      },
+    });
+    await db.agentOrgGrant.create({
+      data: { orgId: customer.org.id, agentId: agent.id, activatedAt: new Date() },
+    });
+    const { app } = await createDbAppWithKey(db, 'nested-agent-customer-app', customer.org.id);
+    await createDbAppAgent(db, app.id, agent.id);
+
+    const contextValue = { db, userId: customerUser.id, roles: ['READER'] } as Context;
+    const direct = await server.executeOperation(
+      { query: 'query ($ref: ID!) { agent(ref: $ref) { id systemPrompt } }', variables: { ref: agent.id } },
+      { contextValue },
+    );
+    expect(direct.body.kind).toBe('single');
+    if (direct.body.kind !== 'single') return;
+    expect(direct.body.singleResult.errors?.[0]?.extensions?.code).toBe('FORBIDDEN');
+
+    const nested = await server.executeOperation(
+      {
+        query: 'query ($ref: ID!) { app(ref: $ref) { agent { id systemPrompt } agents { id systemPrompt } appAgents { agent { id systemPrompt } } } }',
+        variables: { ref: app.id },
+      },
+      { contextValue },
+    );
+    expect(nested.body.kind).toBe('single');
+    if (nested.body.kind !== 'single') return;
+    expect(nested.body.singleResult.data?.app).toEqual({
+      agent: null,
+      agents: [],
+      appAgents: [{ agent: null }],
+    });
+    expect(await resolvers.AppRun.agent(
+      { agentId: agent.id },
+      {},
+      { db, appId: app.id, roles: [] } as Context,
+    )).toBeNull();
+
+    const authorized = await server.executeOperation(
+      {
+        query: 'query ($ref: ID!) { app(ref: $ref) { agent { id systemPrompt } agents { id systemPrompt } appAgents { agent { id systemPrompt } } } }',
+        variables: { ref: app.id },
+      },
+      { contextValue: { db, userId: vendorCustomerUser.id, roles: ['READER'] } as Context },
+    );
+    expect(authorized.body.kind).toBe('single');
+    if (authorized.body.kind !== 'single') return;
+    expect(authorized.body.singleResult.data?.app).toMatchObject({
+      agent: { id: agent.id, systemPrompt: 'synthetic-vendor-private-prompt' },
+      agents: [{ id: agent.id, systemPrompt: 'synthetic-vendor-private-prompt' }],
+      appAgents: [{ agent: { id: agent.id, systemPrompt: 'synthetic-vendor-private-prompt' } }],
+    });
+
+    await db.agent.update({ where: { id: agent.id }, data: { visibility: 'PUBLIC' } });
+    const publicResult = await server.executeOperation(
+      {
+        query: 'query ($ref: ID!) { app(ref: $ref) { agent { id systemPrompt } agents { id } appAgents { agent { id } } } }',
+        variables: { ref: app.id },
+      },
+      { contextValue },
+    );
+    expect(publicResult.body.kind).toBe('single');
+    if (publicResult.body.kind !== 'single') return;
+    expect(publicResult.body.singleResult.data?.app).toMatchObject({
+      agent: { id: agent.id, systemPrompt: 'synthetic-vendor-private-prompt' },
+      agents: [{ id: agent.id }],
+      appAgents: [{ agent: { id: agent.id } }],
+    });
+  });
+
+  it('does not turn licenses and imports into reads of a private Agent definition', async () => {
+    const vendor = await createDbOrgAndGraph(db, { orgName: 'nested-license-vendor', graphName: 'vendor-memory' });
+    const customer = await createDbOrgAndGraph(db, { orgName: 'nested-license-customer', graphName: 'customer-memory' });
+    const reader = await db.user.create({
+      data: { githubId: 9182205, githubUsername: 'nested-license-reader', roles: ['READER'] },
+    });
+    await db.orgMember.create({
+      data: { organizationId: customer.org.id, userId: reader.id, role: 'ADMIN' },
+    });
+    const privateAgent = await db.agent.create({
+      data: {
+        organizationId: vendor.org.id,
+        urn: 'nested-license-vendor:private-agent',
+        name: 'Private vendor Agent',
+        systemPrompt: 'synthetic-license-private-prompt',
+        visibility: 'ORGANIZATION',
+      },
+    });
+    const publicParent = await db.agent.create({
+      data: {
+        organizationId: customer.org.id,
+        urn: 'nested-license-customer:public-parent',
+        name: 'Public parent Agent',
+        visibility: 'PUBLIC',
+      },
+    });
+    await db.agentOrgGrant.create({
+      data: { orgId: customer.org.id, agentId: privateAgent.id, activatedAt: new Date() },
+    });
+    await db.agentSubscription.create({
+      data: { userId: reader.id, agentId: privateAgent.id, activatedAt: new Date() },
+    });
+    await db.agentImport.create({
+      data: {
+        parentAgentId: publicParent.id,
+        importedAgentId: privateAgent.id,
+        agentOrgGrantOrgId: customer.org.id,
+        agentOrgGrantAgentId: privateAgent.id,
+        position: 100,
+      },
+    });
+    const contextValue = { db, userId: reader.id, organizationId: customer.org.id, roles: ['READER'] } as Context;
+    const result = await server.executeOperation(
+      {
+        query: `query ($org: ID!, $parent: ID!) {
+          organization(ref: $org) { agentOrgGrants { agentId agent { id systemPrompt } } }
+          myAgentSubscriptions { agentId agent { id systemPrompt } }
+          agent(ref: $parent) { imports { importedAgentId importedAgent { id systemPrompt } } }
+        }`,
+        variables: { org: customer.org.id, parent: publicParent.id },
+      },
+      { contextValue },
+    );
+    expect(result.body.kind).toBe('single');
+    if (result.body.kind !== 'single') return;
+    expect(result.body.singleResult.errors).toBeUndefined();
+    expect(result.body.singleResult.data).toMatchObject({
+      organization: { agentOrgGrants: [{ agentId: privateAgent.id, agent: null }] },
+      myAgentSubscriptions: [{ agentId: privateAgent.id, agent: null }],
+      agent: { imports: [{ importedAgentId: privateAgent.id, importedAgent: null }] },
+    });
+    // AppRun has a separate Agent loader. A run audit must not turn the
+    // customer license into the vendor's full private Agent definition.
+    expect(await resolvers.AppRun.agent({ agentId: privateAgent.id }, {}, contextValue)).toBeNull();
+  });
+
+  it('keeps user-owned Agent definitions private from unrelated platform admins', async () => {
+    const owner = await db.user.create({
+      data: { githubId: 9182206, githubUsername: 'nested-agent-personal-owner', handle: 'nested-agent-owner' },
+    });
+    const admin = await db.user.create({
+      data: { githubId: 9182207, githubUsername: 'nested-agent-platform-admin', roles: ['ADMIN'] },
+    });
+    const agent = await db.agent.create({
+      data: {
+        ownerUserId: owner.id,
+        urn: 'nested-agent-owner:private-agent',
+        name: 'Owner-only Agent',
+        systemPrompt: 'synthetic-owner-only-prompt',
+      },
+    });
+    const adminCtx = { db, userId: admin.id, roles: ['ADMIN'] } as Context;
+    const direct = await server.executeOperation(
+      { query: 'query ($ref: ID!) { agent(ref: $ref) { systemPrompt } }', variables: { ref: agent.id } },
+      { contextValue: adminCtx },
+    );
+    expect(direct.body.kind).toBe('single');
+    if (direct.body.kind !== 'single') return;
+    expect(direct.body.singleResult.errors?.[0]?.extensions?.code).toBe('FORBIDDEN');
+    expect(await resolvers.AppRun.agent({ agentId: agent.id }, {}, adminCtx)).toBeNull();
+    expect(await resolvers.AppRun.agent(
+      { agentId: agent.id },
+      {},
+      { db, userId: owner.id, roles: ['READER'] } as Context,
+    )).toMatchObject({ id: agent.id, systemPrompt: 'synthetic-owner-only-prompt' });
+  });
+});
