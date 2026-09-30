@@ -318,6 +318,10 @@ async function archiveChannelStructuralRow(
   row: { id: string; loc: string; memoryId: string },
   deletedBy: string | null,
 ): Promise<void> {
+  // Re-stamping a protected spec would make its permanent citation name a
+  // blank successor. The old row is still a tombstone, but its address is
+  // part of the minted contract (#1475); check before moving it (#1519).
+  await assertNoMintedSpecRemoval(tx, row.memoryId, [row.id], 'reuse the Channel address over');
   // Re-stamp first: the row UPDATE waits for any earlier edge insert's FK
   // KEY SHARE lock. A fresh READ COMMITTED edge listing then includes it.
   await tx.node.update({

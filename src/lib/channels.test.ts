@@ -422,6 +422,56 @@ describe('protection (S4)', () => {
     }
   });
 
+  it('refuses to archive a structural spec tombstoned after its corpus was minted', async () => {
+    const channels = await Q.channels(null, { filter: { memoryRef: appMem.urn } }, ctx(admin.id));
+    const channel = channels.items.find((item: { loc: string }) => item.loc === 'chats:team')!;
+    const oldMessages = await db.node.findUniqueOrThrow({
+      where: { loc_memoryId: { loc: 'chats:team:messages', memoryId: appMem.id } },
+    });
+    await M.deleteChannel({}, { ref: channel.id }, ctx(admin.id));
+    await db.memory.update({ where: { id: appMem.id }, data: {
+      corpusMintedAt: new Date('2026-09-01T00:00:00Z'),
+    } });
+    await db.node.update({ where: { id: oldMessages.id }, data: {
+      tags: ['spec'], deletedAt: new Date('2026-09-02T00:00:00Z'),
+    } });
+
+    await expect(ensureChannelWithRoot(db, {
+      memoryId: appMem.id, loc: 'chats:team', name: 'team', createdBy: admin.id,
+    })).rejects.toMatchObject({ extensions: { code: 'SPEC_MINTED_PERMANENT' } });
+    expect(await db.node.findUniqueOrThrow({ where: { id: oldMessages.id } })).toMatchObject({
+      loc: oldMessages.loc, deletedAt: expect.any(Date), tags: ['spec'],
+    });
+    expect((await db.channel.findUniqueOrThrow({ where: { id: channel.id } })).deletedAt).not.toBeNull();
+  });
+
+  it('can archive a structural spec tombstoned before its corpus was minted', async () => {
+    const channels = await Q.channels(null, { filter: { memoryRef: appMem.urn } }, ctx(admin.id));
+    const channel = channels.items.find((item: { loc: string }) => item.loc === 'chats:team')!;
+    const oldMessages = await db.node.findUniqueOrThrow({
+      where: { loc_memoryId: { loc: 'chats:team:messages', memoryId: appMem.id } },
+    });
+    await M.deleteChannel({}, { ref: channel.id }, ctx(admin.id));
+    await db.node.update({ where: { id: oldMessages.id }, data: {
+      tags: ['spec'], deletedAt: new Date('2026-08-31T00:00:00Z'),
+    } });
+    await db.memory.update({ where: { id: appMem.id }, data: {
+      corpusMintedAt: new Date('2026-09-01T00:00:00Z'),
+    } });
+
+    await ensureChannelWithRoot(db, {
+      memoryId: appMem.id, loc: 'chats:team', name: 'team', createdBy: admin.id,
+    });
+    const archived = await db.node.findUniqueOrThrow({ where: { id: oldMessages.id } });
+    expect(archived.loc).toBe(`${oldMessages.loc}__deleted-${oldMessages.id}`);
+    expect(archived.deletedAt).not.toBeNull();
+    const fresh = await db.node.findUniqueOrThrow({
+      where: { loc_memoryId: { loc: oldMessages.loc, memoryId: appMem.id } },
+    });
+    expect(fresh.id).not.toBe(oldMessages.id);
+    expect(fresh.tags).toEqual([]);
+  });
+
   it('refuses an edge update resolved before structural archive instead of reclaiming its address (#1463)', async () => {
     const channels = await Q.channels(null, { filter: { memoryRef: appMem.urn } }, ctx(admin.id));
     const channel = channels.items.find((item: { loc: string }) => item.loc === 'chats:team')!;
