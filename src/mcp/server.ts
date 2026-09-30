@@ -9955,7 +9955,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
       if (!memory.source) return textResult('Memory has no source repository configured.');
 
       // Import and call syncGraphFromGithub
-      const { syncGraphFromGithub } = await import('../integrations/github/syncGraphFromGithub.js');
+      const { syncGraphFromGithub, describeSyncOutcome } = await import('../integrations/github/syncGraphFromGithub.js');
       const result = await syncGraphFromGithub(memory as Parameters<typeof syncGraphFromGithub>[0]);
 
       if (result.error) return textResult(`Sync failed: ${result.error}`);
@@ -9964,7 +9964,9 @@ function ageOf(at: Date, now: Date = new Date()): string {
       // webhook and startup batch-loop callers deliberately drop `writtenNodes`
       // on the floor, because an unattended sync is nobody's usage.
       recordNodeUsage(db, 'write', result.writtenNodes ?? [], auth);
-      return textResult(`Synced ${result.nodeCount ?? 0} nodes.`);
+      // #1330 / #1411 review — refused, deferred and held files are skipped,
+      // not failed; say so, or the caller reads a clean sync.
+      return textResult(describeSyncOutcome(result));
     },
   );
 

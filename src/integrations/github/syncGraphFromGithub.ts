@@ -2,6 +2,7 @@ import { createDecipheriv } from 'crypto';
 import { GraphQLError } from 'graphql';
 import { assertPlaceholderKeepsSpecRole, placeholderFillPatch } from '../../lib/specCorpus.js';
 import { governedSignalsFromMirror } from '../../lib/governedSignals.js';
+import { lockMemoryConfigShared, mergedGovernedState, strictParentRefusingRole } from '../../lib/governedRole.js';
 import { authoredContentChanged, clearNodeAuthorship } from '../../lib/nodeAuthorship.js';
 import { NodeSchemaViolation, validateNodeAgainstSchema } from '../../lib/validateNodeAgainstSchema.js';
 import type { MemorySchema } from '../../lib/memorySchema.js';
@@ -59,6 +60,19 @@ class EdgeEndpointPreflightStale extends Error {}
 const MAX_EDGE_ENDPOINT_PREFLIGHT_RETRIES = 3;
 
 /**
+ * #1411 review (Andi) — a loc swap parked an occupant at `<loc>~displaced-<id>`
+ * and nothing later in the run settled it: its own file was deferred or
+ * refused, or the cleanup that would have pruned it did not run. Committing
+ * would persist a loc `validateLoc` refuses, so the transaction is rolled back
+ * and rerun with these rows marked unparkable.
+ */
+class GitSyncUnsettledParking extends Error {
+  constructor(readonly nodeIds: string[]) {
+    super(`Git sync parked ${nodeIds.join(', ')} and could not settle them`);
+  }
+}
+
+/**
  * The row left the memory being synced between the preflight lookup and its
  * row lock (a concurrent cross-memory move). Applying the repo's update by id
  * would rewrite a node that now belongs to ANOTHER memory, so the sync aborts
@@ -69,6 +83,48 @@ export class GitSyncTargetMovedError extends Error {
     super(`Git sync target ${nodeId} left memory ${expectedMemoryId} while the sync ran; retry the sync.`);
     this.name = 'GitSyncTargetMovedError';
   }
+}
+
+/** #1330 — a synced file refused because its role is undeclared under a strict parent. */
+export interface SkippedUndeclaredRole {
+  loc: string;
+  role: string;
+  strictParent: string;
+  code: 'ROLE_NOT_DECLARED';
+}
+
+export function describeSkippedUndeclaredRole(s: SkippedUndeclaredRole): string {
+  return `${s.loc} (role "${s.role}", strict parent "${s.strictParent}")`;
+}
+
+/**
+ * #1330 / #1411 review — the caller-facing report of an on-demand sync. Every
+ * file the sync left unapplied is named, or the caller reads a clean sync and
+ * never retries: an on-demand sync has no guaranteed follow-up (@codex P2).
+ */
+export function describeSyncOutcome(result: {
+  nodeCount?: number;
+  skippedUndeclaredRoles?: SkippedUndeclaredRole[];
+  deferredLateRows?: string[];
+  heldMoves?: string[];
+}): string {
+  const section = (items: string[] | undefined, heading: (n: number) => string): string =>
+    items && items.length > 0 ? `\n${heading(items.length)}\n${items.map((i) => `- ${i}`).join('\n')}` : '';
+  return (
+    `Synced ${result.nodeCount ?? 0} nodes.` +
+    section(
+      result.skippedUndeclaredRoles?.map(describeSkippedUndeclaredRole),
+      (n) => `Skipped ${n} file(s), ROLE_NOT_DECLARED (the role is not declared under a strict parent; declare it or change the file):`,
+    ) +
+    section(
+      result.deferredLateRows,
+      (n) => `Deferred ${n} file(s) whose node changed while this sync ran; sync again to apply them:`,
+    ) +
+    section(
+      result.heldMoves,
+      (n) => `Held ${n} move(s) whose destination is still occupied by a node this sync could not move; they land once that node's file syncs:`,
+    )
+  );
 }
 
 export class GitSyncEncryptedMemoryError extends Error {
@@ -189,6 +245,27 @@ export const syncGraphFromGithub = async (
    * reason`). The node itself is still synced; its stored objectType is kept.
    */
   skippedObjectTypes?: string[];
+  /**
+   * #1330 — files NOT synced because the role they assign is undeclared under
+   * a strict parent rule (`ROLE_NOT_DECLARED`, the same judgement every other
+   * write path makes). The file is skipped whole and its existing row, if any,
+   * is kept as it was; every other file still syncs.
+   */
+  skippedUndeclaredRoles?: SkippedUndeclaredRole[];
+  /**
+   * #1330 — files left for the next sync because the node they would write
+   * arrived after this sync locked its rows (`loc (node <id>)`). Only while
+   * the sync holds the rulebook lock.
+   */
+  deferredLateRows?: string[];
+  /**
+   * #1411 review — id-first moves NOT applied this sync (`old → new (occupant
+   * <id>)`) because the node holding the destination could not be moved out
+   * of the way: its own file was deferred or refused, so parking it would
+   * have left it at an invalid `~displaced-` loc. The mover keeps its old
+   * loc; the move lands on a sync that can settle the occupant.
+   */
+  heldMoves?: string[];
 }> => {
   try {
     const graphName = graph.urn;
@@ -287,6 +364,13 @@ export const syncGraphFromGithub = async (
     const writtenNodes: { id: string; loc: string; memoryId: string }[] = [];
     const skippedProtected: string[] = [];
     const skippedObjectTypes: string[] = [];
+    const skippedUndeclaredRoles: SkippedUndeclaredRole[] = [];
+    const deferredLateRows: string[] = [];
+    const heldMoves: string[] = [];
+    // #1411 review — occupants a previous attempt parked and could not settle.
+    // Grows by a distinct row (one sitting at a file's loc) per retry, so the
+    // attempts are bounded by the file count.
+    const unparkable = new Set<string>();
 
     // #1226 / PR #1257 — collect every memory whose node may become an edge
     // endpoint in this transaction BEFORE taking any Channel-memory key. Git
@@ -346,6 +430,12 @@ export const syncGraphFromGithub = async (
     ])].sort();
     const edgeEndpointMemoryIdSet = new Set(edgeEndpointMemoryIds);
 
+    for (;;) {
+    // Every accumulator restarts with the attempt: a rolled-back attempt
+    // wrote nothing, so nothing it reported is true.
+    for (const acc of [pendingEmbeds, writtenNodes, skippedProtected, skippedObjectTypes, skippedUndeclaredRoles, deferredLateRows, heldMoves]) {
+      acc.length = 0;
+    }
     try {
       await db.$transaction(async (tx: Parameters<Parameters<typeof db.$transaction>[0]>[0]) => {
       // Hold every endpoint memory key in one stable order for the ENTIRE
@@ -423,6 +513,53 @@ export const syncGraphFromGithub = async (
           throw new EdgeEndpointPreflightStale(`Edge endpoint ${stale.id} moved after preflight`);
         }
       }
+      // #1330 — a file that assigns a role is judged against the memory's
+      // strict-sub-role rules under the rulebook lock (`lockMemoryConfigShared`),
+      // whose contract is that no transaction waits on a row while holding it:
+      // a rule write holds its referenced nodes FOR SHARE and then waits for
+      // that lock exclusively. A sync writes many rows, so it takes every row
+      // lock in this memory FIRST, in id order, and only then the rulebook lock.
+      // Every row it later updates, parks or deletes must be one of these; a
+      // row that arrives after the scan is left for the next sync (below).
+      // Skipped when no file carries a role, which nothing then needs to judge.
+      //
+      // `prelockedIds` also BOUNDS the cleanup pass below: a row inserted after
+      // this scan is not locked, and deleting it would wait on a row while
+      // holding the rulebook lock, a deadlock Anne reproduced (#1411 review).
+      // Such a late row survives this sync and is pruned by the next one, the
+      // deferrable direction.
+      const judgesRoles = fsGraph.nodes.some(
+        (n) => !isProtected(n.loc!) && governedSignalsFromMirror(n).role != null,
+      );
+      let prelockedIds: string[] | null = null;
+      if (judgesRoles) {
+        const rows = await tx.$queryRaw<Array<{ id: string }>>`
+          SELECT "id" FROM "nodes" WHERE "memory_id" = ${graph.id} ORDER BY "id" FOR UPDATE`;
+        prelockedIds = rows.map((r) => r.id);
+        // And this memory's rule rows: deleting a node a rule references fires
+        // that rule's ON DELETE SET NULL, a row a rule writer may hold FOR
+        // UPDATE while it waits for the rulebook lock. Nodes, then rules, then
+        // the rulebook: the order every rule writer takes them in.
+        await tx.$queryRaw`
+          SELECT r."id" FROM "node_role_rules" r
+          JOIN "memory_configs" c ON c."id" = r."config_id"
+          WHERE c."memory_id" = ${graph.id}
+          ORDER BY r."id" FOR UPDATE OF r`;
+        await lockMemoryConfigShared(tx, graph.id);
+      }
+      // Locs of files refused for their role: nothing of theirs is written,
+      // including the edges they declare.
+      const refusedRoleLocs = new Set<string>();
+      // Rows the scan did not lock, which arrived after it. While the sync holds
+      // the rulebook lock it must not wait on one, so a file whose write would
+      // touch such a row is DEFERRED to the next sync, which locks it from the
+      // start (@codex P2, PR #1411: a root loc has no ancestor lock to keep a
+      // concurrent create out). Its edges are deferred with it.
+      const prelockedIdSet = prelockedIds ? new Set(prelockedIds) : null;
+      const isLateRow = (row: { id: string } | null | undefined): boolean =>
+        prelockedIdSet !== null && row != null && !prelockedIdSet.has(row.id);
+      const deferredLocs = new Set<string>();
+
       // #1224 — files whose path cannot be a loc, resolved to the rows they
       // name. @copilot on PR #1229: the cleanup pass keys on the SURVIVING
       // ROW id, and a file's frontmatter id is not that id — the loc-keyed
@@ -472,6 +609,17 @@ export const syncGraphFromGithub = async (
       // legitimate cross-repo references.
       const locToRowId = new Map<string, string>();
       const fileIdToRowId = new Map<string, string>();
+      // #1411 review (@codex P2) — frontmatter ids of loc-keyed files this run
+      // did NOT apply, with no row an edge could safely target. An edge
+      // aimed at one waits for the sync that applies the file: resolving it
+      // raw would point at a foreign memory's node (a foreign id), or park a
+      // spurious PendingEdge (an unknown id).
+      const unappliedFileIds = new Set<string>();
+      // The FIRST file carrying a frontmatter id decides where edges aimed at
+      // it land, applied or not: a later copy (minted a fresh row) must never
+      // take the id over because the first was skipped (#1411 review, @codex
+      // P2). An id is "settled" once it is mapped OR waiting.
+      const idSettled = (id: string): boolean => fileIdToRowId.has(id) || unappliedFileIds.has(id);
 
       for (const node of fsGraph.nodes) {
         const loc = node.loc!;
@@ -586,6 +734,44 @@ export const syncGraphFromGithub = async (
         //     already claimed by an earlier file this run → never steal it;
         //     fall through to the loc-keyed upsert with a fresh id
         //   - no id / unknown id → loc-keyed upsert as before
+        // #1330 — git sync is authoring, so a role the file ASSIGNS goes
+        // through the strict-sub-role rule like any other write (Holger,
+        // 2026-09-27). `prior` is the row the file would write, current under
+        // the locks above; a file with no role key assigns nothing. A refused
+        // file is skipped and reported, and its row survives the cleanup pass.
+        const defer = (late: { id: string }, keep?: { id: string }): true => {
+          deferredLateRows.push(`${loc} (node ${late.id})`);
+          deferredLocs.add(loc);
+          if (keep) protectedRowIds.add(keep.id);
+          return true;
+        };
+        const refusesRole = async (prior: Node | null): Promise<boolean> => {
+          const signals = governedSignalsFromMirror(node);
+          if (signals.role == null) return false;
+          // #1411 review (@codex P2): judge the role the write will APPLY. An
+          // unwritten placeholder keeps role 'spec' whatever its blank mirror
+          // file says (`updateNodeFromGitSync` strips the role, #1450), so
+          // that file assigns nothing and must not be refused: refusing it
+          // would block the placeholder's other changes (name, tags,
+          // abstract) indefinitely. Same predicate, one source of truth.
+          try {
+            assertPlaceholderKeepsSpecRole(prior, { role: signals.role, content: node.content ?? null });
+          } catch (e) {
+            if (e instanceof GraphQLError && e.extensions?.code === 'SPEC_PLACEHOLDER_ROLE_LOCKED') return false;
+            throw e;
+          }
+          const strictParent = await strictParentRefusingRole(tx, graph.id, {
+            role: signals.role,
+            priorRole: prior?.role ?? null,
+            runnableAfter: mergedGovernedState(prior, signals).isRunnable,
+          });
+          if (strictParent === null) return false;
+          skippedUndeclaredRoles.push({ loc, role: signals.role, strictParent, code: 'ROLE_NOT_DECLARED' });
+          if (prior) protectedRowIds.add(prior.id);
+          refusedRoleLocs.add(loc);
+          return true;
+        };
+
         const fileId = node.id && !claimedFileIds.has(node.id) ? node.id : null;
         const byId = fileId
           ? await tx.node.findUnique({ where: { id: fileId } })
@@ -594,12 +780,36 @@ export const syncGraphFromGithub = async (
 
         let rowId: string;
         if (byId && byId.memoryId === graph.id) {
+          // #1411 review (@codex P2) — an edge aimed at this file resolves to
+          // its row by raw id, and its loc is derived from the TARGET's
+          // current loc. When this file's MOVE is not applied, that loc is
+          // the old one: a later sync that lands the move derives a second
+          // edge under the new loc, and nothing removes the first. So a
+          // skipped move's incoming edges wait for the sync that applies it,
+          // and so do a late row's, which must not be touched under the
+          // rulebook lock. A refused file that does not move keeps its loc,
+          // so its incoming edges already resolve correctly.
+          const incomingEdgesWait = (): void => {
+            if (node.id && !idSettled(node.id)) unappliedFileIds.add(node.id);
+          };
           // The SOURCE loc of an id-first move is checked too: a file whose
           // new path is free must not drag a node out from under a Channel
           // (Copilot on PR #1165).
           if (byId.loc !== loc && isProtected(byId.loc)) {
             skippedProtected.push(`${byId.loc} → ${loc}`);
             protectedRowIds.add(byId.id);
+            incomingEdgesWait();
+            continue;
+          }
+          if (isLateRow(byId) && defer(byId)) {
+            incomingEdgesWait();
+            continue;
+          }
+          if (await refusesRole(byId)) {
+            if (byId.loc !== loc) incomingEdgesWait();
+            // Not moving: the row keeps its loc and IS the target, so claim
+            // the id for it now, before any later copy can.
+            else if (node.id && !idSettled(node.id)) fileIdToRowId.set(node.id, byId.id);
             continue;
           }
           if (byId.loc !== loc) {
@@ -627,6 +837,21 @@ export const syncGraphFromGithub = async (
                 `[syncGraphFromGithub] "${graphName}": refusing move of ${byId.id} into "${loc}" — the occupant ${occupant.id} is held by a file whose path is not a valid loc`,
               );
               protectedRowIds.add(byId.id);
+              incomingEdgesWait();
+              continue;
+            }
+            if (occupant && occupant.id !== byId.id && isLateRow(occupant) && defer(occupant, byId)) {
+              incomingEdgesWait();
+              continue;
+            }
+            if (occupant && occupant.id !== byId.id && unparkable.has(occupant.id)) {
+              // #1411 review — an earlier attempt parked this occupant and its
+              // own file never settled it. Hold the move instead: both rows
+              // keep valid addresses, and the mover's edges wait with it.
+              heldMoves.push(`${byId.loc} → ${loc} (occupant ${occupant.id})`);
+              protectedRowIds.add(byId.id);
+              deferredLocs.add(loc);
+              incomingEdgesWait();
               continue;
             }
             if (occupant && occupant.id !== byId.id) {
@@ -664,6 +889,27 @@ export const syncGraphFromGithub = async (
           const existingAtLoc = await tx.node.findUnique({
             where: { loc_memoryId: { loc, memoryId: graph.id } },
           });
+          // A skipped loc-keyed file still decides where edges aimed at its
+          // frontmatter id land (#1411 review, @codex P2). A refused file's
+          // row is locked and survives the sync, so it is the target, as a
+          // successful sync would have made it. A deferred file's row arrived
+          // after the scan and must not be touched under the rulebook lock,
+          // and a refused NEW file has no row: their incoming edges wait.
+          const skipped = (target: { id: string } | null): true => {
+            if (node.id && !idSettled(node.id)) {
+              if (target) fileIdToRowId.set(node.id, target.id);
+              else unappliedFileIds.add(node.id);
+            }
+            return true;
+          };
+          if (isLateRow(existingAtLoc) && defer(existingAtLoc!)) {
+            skipped(null);
+            continue;
+          }
+          if (await refusesRole(existingAtLoc)) {
+            skipped(existingAtLoc);
+            continue;
+          }
           if (existingAtLoc) {
             await updateNodeFromGitSync(
               tx,
@@ -696,7 +942,7 @@ export const syncGraphFromGithub = async (
         upsertedIds.push(rowId);
         writtenNodes.push({ id: rowId, loc, memoryId: graph.id });
         locToRowId.set(loc, rowId);
-        if (node.id && !fileIdToRowId.has(node.id)) fileIdToRowId.set(node.id, rowId);
+        if (node.id && !idSettled(node.id)) fileIdToRowId.set(node.id, rowId);
         pendingEmbeds.push({
           nodeId: rowId,
           plaintext: { content: node.content ?? null, abstract: node.abstract ?? null },
@@ -727,7 +973,11 @@ export const syncGraphFromGithub = async (
         const cleanupWhere: Prisma.NodeWhereInput = {
           ownerRepo,
           memoryId: graph.id,
-          id: { notIn: [...upsertedIds, ...protectedRowIds, ...skippedRowIds] },
+          id: {
+            notIn: [...upsertedIds, ...protectedRowIds, ...skippedRowIds],
+            // #1330 — only rows this sync already holds, once it holds the rulebook lock.
+            ...(prelockedIds ? { in: prelockedIds } : {}),
+          },
           ...(deletionFilter.notClauses.length
             ? { NOT: { OR: deletionFilter.notClauses as Prisma.NodeWhereInput[] } }
             : {}),
@@ -751,7 +1001,22 @@ export const syncGraphFromGithub = async (
         });
       }
 
+      // #1411 review (Andi) — a parked row is settled by its own file (which
+      // deletes it from this map) or pruned by the cleanup above. One that
+      // survives both would commit at `<loc>~displaced-<id>`: its file was
+      // deferred or refused, or the cleanup was suppressed. Roll back and rerun
+      // with it unparkable, so the move that displaced it is held instead.
+      if (parkedRevisionBases.size > 0) {
+        const unsettled = await tx.node.findMany({
+          where: { id: { in: [...parkedRevisionBases.keys()] } },
+          select: { id: true },
+        });
+        if (unsettled.length > 0) throw new GitSyncUnsettledParking(unsettled.map((n) => n.id));
+      }
+
       for (const edge of edges) {
+        if (refusedRoleLocs.has(edge.sourceLoc) || deferredLocs.has(edge.sourceLoc)) continue;
+        if (!fileIdToRowId.has(edge.targetId) && unappliedFileIds.has(edge.targetId)) continue;
         // Resolve endpoints through the remaps: the source is always a file
         // in this repo (by loc); the target prefers this repo's claimant of
         // the referenced id, else stays raw (a cross-repo target).
@@ -907,7 +1172,16 @@ export const syncGraphFromGithub = async (
         }
         await reconcilePendingEdgeCount(tx, graph.id);
       });
+      break;
     } catch (error) {
+      if (error instanceof GitSyncUnsettledParking) {
+        const fresh = error.nodeIds.filter((id) => !unparkable.has(id));
+        // An unparkable row is never parked, so a repeat means the guard
+        // failed; fail loudly rather than loop.
+        if (fresh.length === 0) throw error;
+        for (const id of fresh) unparkable.add(id);
+        continue;
+      }
       if (
         error instanceof EdgeEndpointPreflightStale &&
         edgeEndpointPreflightAttempt < MAX_EDGE_ENDPOINT_PREFLIGHT_RETRIES
@@ -919,6 +1193,7 @@ export const syncGraphFromGithub = async (
         return syncGraphFromGithub(graph, edgeEndpointPreflightAttempt + 1);
       }
       throw error;
+    }
     }
 
     // 5. Record sync time and status
@@ -948,7 +1223,22 @@ export const syncGraphFromGithub = async (
         `Sync of "${graphName}": kept the stored objectType of ${skippedObjectTypes.length} node(s) whose file's value would violate the memory schema: ${skippedObjectTypes.join('; ')}`,
       );
     }
-    return { nodeCount: fsGraph.nodes.length, writtenNodes, skippedProtected, skippedObjectTypes };
+    if (deferredLateRows.length > 0) {
+      console.warn(
+        `Sync of "${graphName}": deferred ${deferredLateRows.length} file(s) to the next sync, whose node arrived while this one ran: ${deferredLateRows.join('; ')}`,
+      );
+    }
+    if (skippedUndeclaredRoles.length > 0) {
+      console.warn(
+        `Sync of "${graphName}": skipped ${skippedUndeclaredRoles.length} file(s) whose role is not declared under a strict parent (ROLE_NOT_DECLARED): ${skippedUndeclaredRoles.map(describeSkippedUndeclaredRole).join('; ')}`,
+      );
+    }
+    if (heldMoves.length > 0) {
+      console.warn(
+        `Sync of "${graphName}": held ${heldMoves.length} move(s) whose destination's occupant could not be moved out of the way this sync: ${heldMoves.join('; ')}`,
+      );
+    }
+    return { nodeCount: fsGraph.nodes.length, writtenNodes, skippedProtected, skippedObjectTypes, skippedUndeclaredRoles, deferredLateRows, heldMoves };
   } catch (error) {
     // Update sync status to ERROR
     await db.memory.update({

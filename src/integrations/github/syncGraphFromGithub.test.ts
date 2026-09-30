@@ -6,11 +6,12 @@ import { db } from '../db/client.js';
 import { cleanDb, createDbOrgAndGraph, makeTmpDir, writeFrontmatterNode, writeNodeFiles } from '../../test/helpers.js';
 import { splitGitArgv } from '../../test/gitArgv.js';
 import { GIT_TRANSPORT_GUARD } from './execGit.js';
-import { syncGraphFromGithub, updateNodeFromGitSync, GitSyncTargetMovedError, type MemoryWithOrg } from './syncGraphFromGithub.js';
+import { syncGraphFromGithub, updateNodeFromGitSync, GitSyncTargetMovedError, describeSyncOutcome, type MemoryWithOrg } from './syncGraphFromGithub.js';
 import { ensureChannelWithRoot, lockMemoryForChannelChange } from '../../lib/channels.js';
 import { generateId } from '../../lib/id.js';
 import { acquireLockSet, ancestorLocs, lockAncestorsForCreate } from '../../lib/nodeSubtreeLock.js';
 import { moveNodeSubtree } from '../../lib/nodeSubtreeMove.js';
+import { lockMemoryConfigExclusive } from '../../lib/governedRole.js';
 import { deriveEdgeLoc } from '../../lib/edgeLoc.js';
 import { waitForLockWaitersOfType } from '../../test/lockWait.js';
 import { buildNodeFrontmatter } from './nodeFrontmatter.js';
@@ -1366,6 +1367,99 @@ describe('a file whose path cannot be a loc (#1224)', () => {
     expect(line).toMatch(/no-id--> evil\.md/);
   });
 
+  /** #1411 review (@codex P2; Charles QA V3/V5/V7): an edge aimed at a mover whose move is skipped waits for the move. */
+  const edgeTo = (id: string) => {
+    mkdirSync(join(repoRoot(), 'g'), { recursive: true });
+    writeNodeFiles(join(repoRoot(), 'g'), { name: 'G', nodes: [{ id, rel: 'uses' }] });
+  };
+  const edgesTo = (id: string) => db.edge.findMany({ where: { targetId: id, deletedAt: null }, select: { loc: true } });
+
+  it('V3: a move blocked by a Channel at its SOURCE loc — an edge aimed at the mover waits', async () => {
+    await ensureChannelWithRoot(db, { memoryId: dbGraphId, loc: 'chats:live', name: 'live', createdBy: null });
+    const moverId = generateId();
+    await db.node.create({ data: { id: moverId, memoryId: dbGraphId, loc: 'chats:live:messages:m', name: 'M', ownerRepo: 'test/repo' } });
+    writeMd('moved', moverId, 'M');
+    edgeTo(moverId);
+    const result = await syncGraphFromGithub(makeGraph());
+    expect(result.error).toBeUndefined();
+    expect(result.skippedProtected).toContain('chats:live:messages:m → moved');
+    expect(await db.node.findUniqueOrThrow({ where: { id: moverId } })).toMatchObject({ loc: 'chats:live:messages:m' });
+    expect(await edgesTo(moverId)).toEqual([]);
+  });
+
+  it('V5: a move refused because its occupant\'s file has an invalid path — an edge aimed at the mover waits', async () => {
+    const occupantId = 'eeee000000000000000000000000000031';
+    const moverId = 'eeee000000000000000000000000000032';
+    writeMd('a', occupantId, 'occupant');
+    writeMd('b', moverId, 'mover');
+    await syncGraphFromGithub(makeGraph());
+    rmSync(join(repoRoot(), 'a.md'));
+    rmSync(join(repoRoot(), 'b.md'));
+    writeMd('a--> evil', occupantId, 'occupant');
+    writeMd('a', moverId, 'mover');
+    edgeTo(moverId);
+    const result = await syncGraphFromGithub(makeGraph());
+    expect(result.error).toBeUndefined();
+    expect(await db.node.findUniqueOrThrow({ where: { id: moverId } })).toMatchObject({ loc: 'b' });
+    expect(await edgesTo(moverId)).toEqual([]);
+  });
+
+  it('V7: a move HELD behind an unsettleable occupant — its incoming edge waits, then lands once under the new loc', async () => {
+    const occupantId = 'eeee000000000000000000000000000041';
+    const moverId = 'eeee000000000000000000000000000042';
+    writeMd('a', occupantId, 'occupant');
+    writeMd('b', moverId, 'mover');
+    await syncGraphFromGithub(makeGraph());
+    rmSync(join(repoRoot(), 'a.md'));
+    rmSync(join(repoRoot(), 'b.md'));
+    writeMd('a', moverId, 'mover');
+    writeFileSync(join(repoRoot(), 'no-id--> evil.md'), `---\nname: no id here\n---\n# x`, 'utf-8');
+    edgeTo(moverId);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const held = await syncGraphFromGithub(makeGraph());
+    warn.mockRestore();
+    expect(held.heldMoves).toEqual([`b → a (occupant ${occupantId})`]);
+    expect(await edgesTo(moverId)).toEqual([]);
+    rmSync(join(repoRoot(), 'no-id--> evil.md'));
+    await syncGraphFromGithub(makeGraph());
+    expect(await db.node.findUniqueOrThrow({ where: { id: moverId } })).toMatchObject({ loc: 'a' });
+    const edges = await edgesTo(moverId);
+    expect(edges).toHaveLength(1);
+  });
+
+  it('a suppressed cleanup cannot leave a parked occupant behind: the move that displaced it is held (#1411 review)', async () => {
+    // The parking step relies on the cleanup to collect an occupant whose file
+    // is gone. When the cleanup is suppressed, that occupant would commit at
+    // `<loc>~displaced-<id>`.
+    const occupantId = 'eeee000000000000000000000000000021';
+    const moverId = 'eeee000000000000000000000000000022';
+    writeMd('a', occupantId, 'occupant');
+    writeMd('b', moverId, 'mover');
+    await syncGraphFromGithub(makeGraph());
+
+    rmSync(join(repoRoot(), 'a.md'));
+    rmSync(join(repoRoot(), 'b.md'));
+    writeMd('a', moverId, 'mover');
+    writeFileSync(join(repoRoot(), 'no-id--> evil.md'), `---\nname: no id here\n---\n# x`, 'utf-8');
+
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const result = await syncGraphFromGithub(makeGraph());
+    warn.mockRestore();
+    expect(result.error).toBeUndefined();
+    expect(result.heldMoves).toEqual([`b → a (occupant ${occupantId})`]);
+    const rows = await db.node.findMany({ where: { memoryId: dbGraphId }, select: { id: true, loc: true } });
+    expect(rows.filter((r) => r.loc.includes('~'))).toEqual([]);
+    expect(rows.find((r) => r.id === occupantId)?.loc).toBe('a');
+    expect(rows.find((r) => r.id === moverId)?.loc).toBe('b');
+
+    // Once the bad file is fixed the cleanup runs, and the move lands.
+    rmSync(join(repoRoot(), 'no-id--> evil.md'));
+    const next = await syncGraphFromGithub(makeGraph());
+    expect(next.heldMoves).toEqual([]);
+    expect(await db.node.findUnique({ where: { id: occupantId } })).toBeNull();
+    expect(await db.node.findUniqueOrThrow({ where: { id: moverId } })).toMatchObject({ loc: 'a' });
+  });
+
   it('still deletes a row whose file is genuinely GONE', async () => {
     // The control for the test above: sparing skipped rows must not spare
     // every row, or "repo-wins" would stop meaning anything and the
@@ -1587,6 +1681,581 @@ describe('#1348 — objectType through git sync', () => {
     await sync();
     expect(await stored('r')).toEqual({ objectType: 'insight', role: 'review' });
     expect(await stored('s')).toEqual({ objectType: 'insight', role: 'review' });
+  });
+});
+
+describe('#1330 — strict sub-roles through git sync', () => {
+  const repoRoot = () => join(mockSources, 'test-org', 'test/repo');
+  const frontmatter = (loc: string, meta: Parameters<typeof writeFrontmatterNode>[1], body = 'Body.') =>
+    writeFrontmatterNode(join(repoRoot(), `${loc}.md`), meta, body);
+  const stored = (loc: string) =>
+    db.node.findFirst({ where: { loc, memoryId: dbGraphId }, select: { id: true, role: true, content: true } });
+  const rules = async (...rs: Array<{ role: string; strictSubRoles?: boolean }>) => {
+    const config = await db.memoryConfig.create({ data: { id: generateId(), memoryId: dbGraphId } });
+    for (const r of rs) await db.nodeRoleRule.create({ data: { id: generateId(), configId: config.id, ...r } });
+  };
+  const sync = async () => {
+    const result = await syncGraphFromGithub(makeGraph());
+    expect(result.error).toBeUndefined();
+    return result;
+  };
+
+  it('a file creating an undeclared sub-role is skipped and reported; the rest of the memory syncs', async () => {
+    await rules({ role: 'doc', strictSubRoles: true }, { role: 'doc.guide' });
+    frontmatter('bad', { name: 'Bad', role: 'doc.unknown' });
+    frontmatter('guide', { name: 'Guide', role: 'doc.guide' });
+    frontmatter('parent', { name: 'Parent', role: 'doc' });
+    frontmatter('other', { name: 'Other', role: 'notes.anything' });
+    frontmatter('plain', { name: 'Plain' });
+    const result = await sync();
+    expect(result.skippedUndeclaredRoles).toEqual([
+      { loc: 'bad', role: 'doc.unknown', strictParent: 'doc', code: 'ROLE_NOT_DECLARED' },
+    ]);
+    expect(await stored('bad')).toBeNull();
+    for (const loc of ['guide', 'parent', 'other', 'plain']) expect(await stored(loc)).not.toBeNull();
+    expect(result.writtenNodes!.map((n) => n.loc).sort()).toEqual(['guide', 'other', 'parent', 'plain']);
+  });
+
+  it('a file ASSIGNING an undeclared role to an existing row leaves that row exactly as it was, and the cleanup keeps it', async () => {
+    const id = generateId();
+    await db.node.create({ data: { id, memoryId: dbGraphId, loc: 'a', name: 'A', content: 'old', role: 'doc.legacy', ownerRepo: 'test/repo' } });
+    await rules({ role: 'doc', strictSubRoles: true });
+    frontmatter('a', { id, name: 'A', role: 'doc.other' }, 'new');
+    const result = await sync();
+    expect(result.skippedUndeclaredRoles).toEqual([expect.objectContaining({ loc: 'a', role: 'doc.other', strictParent: 'doc' })]);
+    expect(await stored('a')).toEqual({ id, role: 'doc.legacy', content: 'old' });
+  });
+
+  it('the same refusal on the LOC-KEYED path (file id unknown to this memory)', async () => {
+    const id = generateId();
+    await db.node.create({ data: { id, memoryId: dbGraphId, loc: 'a', name: 'A', content: 'old', role: 'doc.legacy', ownerRepo: 'test/repo' } });
+    await rules({ role: 'doc', strictSubRoles: true });
+    frontmatter('a', { name: 'A', role: 'doc.other' }, 'new');
+    const result = await sync();
+    expect(result.skippedUndeclaredRoles).toHaveLength(1);
+    expect(await stored('a')).toEqual({ id, role: 'doc.legacy', content: 'old' });
+  });
+
+  it('an ID-FIRST MOVE that assigns an undeclared role does not move the node', async () => {
+    const id = generateId();
+    await db.node.create({ data: { id, memoryId: dbGraphId, loc: 'old', name: 'N', content: 'x', ownerRepo: 'test/repo' } });
+    await rules({ role: 'doc', strictSubRoles: true });
+    frontmatter('new', { id, name: 'N', role: 'doc.unknown' });
+    const result = await sync();
+    expect(result.skippedUndeclaredRoles).toEqual([expect.objectContaining({ loc: 'new' })]);
+    expect(await db.node.findUniqueOrThrow({ where: { id } })).toMatchObject({ loc: 'old', role: null });
+  });
+
+  it('no retroactive effect: a file keeping a now-undeclared role still syncs its other changes', async () => {
+    const id = generateId();
+    await db.node.create({ data: { id, memoryId: dbGraphId, loc: 'a', name: 'A', content: 'old', role: 'doc.legacy', ownerRepo: 'test/repo' } });
+    await rules({ role: 'doc', strictSubRoles: true });
+    frontmatter('a', { id, name: 'A', role: 'doc.legacy' }, 'new');
+    const result = await sync();
+    expect(result.skippedUndeclaredRoles).toEqual([]);
+    expect(await stored('a')).toMatchObject({ role: 'doc.legacy', content: expect.stringContaining('new') });
+  });
+
+  it('exempt: a file whose node is runnable after the sync', async () => {
+    await rules({ role: 'doc', strictSubRoles: true });
+    frontmatter('t', { name: 'T', role: 'doc.task', isRunnable: true });
+    const result = await sync();
+    expect(result.skippedUndeclaredRoles).toEqual([]);
+    expect(await stored('t')).toMatchObject({ role: 'doc.task' });
+  });
+
+  it('a refused file declares no edges, and does not fail the sync over them', async () => {
+    await rules({ role: 'doc', strictSubRoles: true });
+    const bId = generateId();
+    mkdirSync(join(repoRoot(), 'a'), { recursive: true });
+    mkdirSync(join(repoRoot(), 'b'), { recursive: true });
+    writeNodeFiles(join(repoRoot(), 'a'), { name: 'a', role: 'doc.unknown', nodes: [{ id: bId, rel: 'uses' }] });
+    writeNodeFiles(join(repoRoot(), 'b'), { id: bId, name: 'b' });
+    const result = await sync();
+    expect(result.skippedUndeclaredRoles).toEqual([expect.objectContaining({ loc: 'a' })]);
+    expect(await stored('b')).not.toBeNull();
+    expect(await db.edge.count()).toBe(0);
+    expect(await db.pendingEdge.count()).toBe(0);
+  });
+
+  it('takes its row locks BEFORE the rulebook lock: a rule write holding a node the sync updates does not deadlock it', async () => {
+    await rules({ role: 'doc', strictSubRoles: true });
+    const zId = generateId();
+    await db.node.create({ data: { id: zId, memoryId: dbGraphId, loc: 'z', name: 'Z', content: 'old', ownerRepo: 'test/repo' } });
+    // The judged file sorts BEFORE the row the rule write holds, so a sync
+    // taking the rulebook lock at its first judgement would then wait on `z`
+    // while holding it.
+    frontmatter('a', { name: 'A', role: 'doc.unknown' });
+    frontmatter('z', { id: zId, name: 'Z' }, 'new');
+    let held!: () => void;
+    const holding = new Promise<void>((r) => (held = r));
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    // The shape of a rule write (#1400 / #1399): its referenced node FOR
+    // SHARE first, the memory's rulebook lock exclusively after.
+    const ruleWrite = db.$transaction(
+      async (tx) => {
+        await tx.$queryRaw`SELECT "id" FROM "nodes" WHERE "id" = ${zId} FOR SHARE`;
+        held();
+        await gate;
+        await lockMemoryConfigExclusive(tx, dbGraphId);
+      },
+      { timeout: 15_000 },
+    );
+    await holding;
+    const syncing = syncGraphFromGithub(makeGraph());
+    await waitForLockWaitersOfType(db, 'transactionid', 1);
+    release();
+    await ruleWrite;
+    const result = await syncing;
+    expect(result.error).toBeUndefined();
+    expect(result.skippedUndeclaredRoles).toEqual([expect.objectContaining({ loc: 'a' })]);
+    expect(await stored('z')).toMatchObject({ content: expect.stringContaining('new') });
+  });
+
+  it('a row inserted AFTER the up-front lock is left for the next sync, not deleted under the rulebook lock (#1411 review)', async () => {
+    await rules({ role: 'doc', strictSubRoles: true });
+    frontmatter('a', { name: 'A', role: 'doc.unknown' });
+    const release = <T,>() => {
+      let open!: (v: T) => void;
+      return { gate: new Promise<T>((r) => (open = r)), open };
+    };
+    // 1. Hold the rulebook lock so the sync stops right after its row scan.
+    const holdSignal = release<void>();
+    const holdGate = release<void>();
+    const holder = db.$transaction(async (tx) => {
+      await lockMemoryConfigExclusive(tx, dbGraphId);
+      holdSignal.open();
+      await holdGate.gate;
+    }, { timeout: 15_000 });
+    await holdSignal.gate;
+    const syncing = syncGraphFromGithub(makeGraph());
+    await waitForLockWaitersOfType(db, 'advisory', 1);
+    // 2. A repo-owned row the cleanup would select, inserted after the scan.
+    const lateId = generateId();
+    await db.node.create({ data: { id: lateId, memoryId: dbGraphId, loc: 'late', name: 'Late', ownerRepo: 'test/repo' } });
+    // 3. A rule write: that row FOR SHARE, then the rulebook lock exclusively.
+    const ruleWrite = db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT "id" FROM "nodes" WHERE "id" = ${lateId} FOR SHARE`;
+      await lockMemoryConfigExclusive(tx, dbGraphId);
+    }, { timeout: 15_000 });
+    await waitForLockWaitersOfType(db, 'advisory', 2);
+    holdGate.open();
+    await holder;
+    const [result] = await Promise.all([syncing, ruleWrite]);
+    expect(result.error).toBeUndefined();
+    expect(result.skippedUndeclaredRoles).toEqual([expect.objectContaining({ loc: 'a' })]);
+    expect(await db.node.findUnique({ where: { id: lateId } })).not.toBeNull();
+    // The next sync owns it from the start, and prunes it as usual.
+    await sync();
+    expect(await db.node.findUnique({ where: { id: lateId } })).toBeNull();
+  });
+
+  /**
+   * The late-row schedule: the sync scans and queues for the rulebook lock;
+   * then a row is created, a rule write holds it FOR SHARE and queues for the
+   * lock exclusively, and the first holder releases.
+   */
+  async function raceLateRow(createLate: () => Promise<string>) {
+    const signal = (() => { let open!: () => void; const gate = new Promise<void>((r) => (open = r)); return { gate, open }; });
+    const held = signal();
+    const done = signal();
+    const holder = db.$transaction(async (tx) => {
+      await lockMemoryConfigExclusive(tx, dbGraphId);
+      held.open();
+      await done.gate;
+    }, { timeout: 15_000 });
+    await held.gate;
+    const syncing = syncGraphFromGithub(makeGraph());
+    await waitForLockWaitersOfType(db, 'advisory', 1);
+    const lateId = await createLate();
+    const ruleWrite = db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT "id" FROM "nodes" WHERE "id" = ${lateId} FOR SHARE`;
+      await lockMemoryConfigExclusive(tx, dbGraphId);
+    }, { timeout: 15_000 });
+    await waitForLockWaitersOfType(db, 'advisory', 2);
+    done.open();
+    await holder;
+    const [result] = await Promise.all([syncing, ruleWrite]);
+    expect(result.error).toBeUndefined();
+    return { result, lateId };
+  }
+
+  it('a node CREATED at a file\'s root loc after the up-front lock defers that file to the next sync (@codex P2, #1411)', async () => {
+    await rules({ role: 'doc', strictSubRoles: true });
+    frontmatter('r', { name: 'R', role: 'doc.unknown' });
+    frontmatter('late', { name: 'Late' }, 'from-file');
+    const { result, lateId } = await raceLateRow(async () => {
+      const id = generateId();
+      await db.node.create({ data: { id, memoryId: dbGraphId, loc: 'late', name: 'Late', content: 'concurrent', ownerRepo: 'test/repo' } });
+      return id;
+    });
+    expect(result.deferredLateRows).toEqual([`late (node ${lateId})`]);
+    expect(result.writtenNodes!.map((n) => n.loc)).not.toContain('late');
+    expect(await stored('late')).toMatchObject({ id: lateId, content: 'concurrent' });
+    const next = await sync();
+    expect(next.deferredLateRows).toEqual([]);
+    expect(await stored('late')).toMatchObject({ id: lateId, content: expect.stringContaining('from-file') });
+  });
+
+  it('a MOVE into a loc whose occupant arrived after the up-front lock is deferred, and the mover is kept', async () => {
+    await rules({ role: 'doc', strictSubRoles: true });
+    const moverId = generateId();
+    await db.node.create({ data: { id: moverId, memoryId: dbGraphId, loc: 'old', name: 'M', content: 'x', ownerRepo: 'test/repo' } });
+    frontmatter('r', { name: 'R', role: 'doc.unknown' });
+    frontmatter('dest', { id: moverId, name: 'M' });
+    const { result, lateId } = await raceLateRow(async () => {
+      const id = generateId();
+      await db.node.create({ data: { id, memoryId: dbGraphId, loc: 'dest', name: 'Occupant', ownerRepo: 'test/repo' } });
+      return id;
+    });
+    expect(result.deferredLateRows).toEqual([`dest (node ${lateId})`]);
+    expect(await db.node.findUniqueOrThrow({ where: { id: moverId } })).toMatchObject({ loc: 'old', deletedAt: null });
+    expect(await db.node.findUniqueOrThrow({ where: { id: lateId } })).toMatchObject({ loc: 'dest' });
+    await sync();
+    expect(await db.node.findUniqueOrThrow({ where: { id: moverId } })).toMatchObject({ loc: 'dest' });
+  });
+
+  it('a node carrying the file\'s id that arrived after the up-front lock is deferred too (id-first path)', async () => {
+    await rules({ role: 'doc', strictSubRoles: true });
+    const fileId = generateId();
+    frontmatter('r', { name: 'R', role: 'doc.unknown' });
+    frontmatter('x', { id: fileId, name: 'X' }, 'from-file');
+    const { result } = await raceLateRow(async () => {
+      await db.node.create({ data: { id: fileId, memoryId: dbGraphId, loc: 'elsewhere', name: 'X', content: 'concurrent', ownerRepo: 'test/repo' } });
+      return fileId;
+    });
+    expect(result.deferredLateRows).toEqual([`x (node ${fileId})`]);
+    expect(await db.node.findUniqueOrThrow({ where: { id: fileId } })).toMatchObject({ loc: 'elsewhere', content: 'concurrent' });
+    await sync();
+    expect(await db.node.findUniqueOrThrow({ where: { id: fileId } })).toMatchObject({ loc: 'x' });
+  });
+
+  it('locks the memory\'s rule rows before the rulebook lock: a pruned node a rule references cannot deadlock a rule writer (SET NULL)', async () => {
+    const taskId = generateId();
+    await db.node.create({ data: { id: taskId, memoryId: dbGraphId, loc: 'gone', name: 'Gone', ownerRepo: 'test/repo' } });
+    const config = await db.memoryConfig.create({ data: { id: generateId(), memoryId: dbGraphId } });
+    const rule = await db.nodeRoleRule.create({
+      data: { id: generateId(), configId: config.id, role: 'doc', strictSubRoles: true, descriptionNodeId: taskId },
+    });
+    // No file for `gone`: the cleanup prunes it, and its FK sets the rule's
+    // descriptionNodeId to NULL.
+    frontmatter('r', { name: 'R', role: 'doc.unknown' });
+    let held!: () => void;
+    const holding = new Promise<void>((r) => (held = r));
+    let go!: () => void;
+    const gate = new Promise<void>((r) => (go = r));
+    // A rule writer's shape: its rule row FOR UPDATE, then the rulebook lock.
+    const ruleWrite = db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT "id" FROM "node_role_rules" WHERE "id" = ${rule.id} FOR UPDATE`;
+      held();
+      await gate;
+      await lockMemoryConfigExclusive(tx, dbGraphId);
+    }, { timeout: 15_000 });
+    await holding;
+    const syncing = syncGraphFromGithub(makeGraph());
+    await waitForLockWaitersOfType(db, 'transactionid', 1);
+    go();
+    const [result] = await Promise.all([syncing, ruleWrite]);
+    expect(result.error).toBeUndefined();
+    expect(await db.node.findUnique({ where: { id: taskId } })).toBeNull();
+    expect((await db.nodeRoleRule.findUniqueOrThrow({ where: { id: rule.id } })).descriptionNodeId).toBeNull();
+  });
+
+  /**
+   * #1411 review (Andi) — the swap shape: A's file takes B's loc `b-old`, which
+   * parks B at `b-old~displaced-<id>`, and B's own file (`dest`) would settle
+   * it. If B's file is then deferred or refused, B must not commit parked.
+   */
+  const seedSwap = async () => {
+    const aId = generateId();
+    const bId = generateId();
+    await db.node.create({ data: { id: aId, memoryId: dbGraphId, loc: 'a-old', name: 'A', ownerRepo: 'test/repo' } });
+    await db.node.create({ data: { id: bId, memoryId: dbGraphId, loc: 'b-old', name: 'B', ownerRepo: 'test/repo' } });
+    frontmatter('b-old', { id: aId, name: 'A' });
+    return { aId, bId };
+  };
+  const noInvalidLocs = async () => {
+    const rows = await db.node.findMany({ where: { memoryId: dbGraphId }, select: { loc: true } });
+    expect(rows.filter((r) => r.loc.includes('~'))).toEqual([]);
+  };
+
+  it('a later file REFUSED for its role cannot leave an earlier move\'s parked occupant committed (#1411 review)', async () => {
+    await rules({ role: 'doc', strictSubRoles: true });
+    const { aId, bId } = await seedSwap();
+    frontmatter('dest', { id: bId, name: 'B', role: 'doc.unknown' });
+    const result = await sync();
+    expect(result.skippedUndeclaredRoles).toEqual([expect.objectContaining({ loc: 'dest' })]);
+    expect(result.heldMoves).toEqual([`a-old → b-old (occupant ${bId})`]);
+    await noInvalidLocs();
+    expect(await db.node.findUniqueOrThrow({ where: { id: aId } })).toMatchObject({ loc: 'a-old' });
+    expect(await db.node.findUniqueOrThrow({ where: { id: bId } })).toMatchObject({ loc: 'b-old' });
+    expect(result.writtenNodes!.map((n) => n.id)).not.toContain(aId);
+
+    // Declare the role: B's file syncs, so the swap completes.
+    frontmatter('dest', { id: bId, name: 'B', role: 'doc.guide' });
+    await db.nodeRoleRule.create({
+      data: { id: generateId(), configId: (await db.memoryConfig.findFirstOrThrow({ where: { memoryId: dbGraphId } })).id, role: 'doc.guide' },
+    });
+    const next = await sync();
+    expect(next.heldMoves).toEqual([]);
+    await noInvalidLocs();
+    expect(await db.node.findUniqueOrThrow({ where: { id: aId } })).toMatchObject({ loc: 'b-old' });
+    expect(await db.node.findUniqueOrThrow({ where: { id: bId } })).toMatchObject({ loc: 'dest' });
+  });
+
+  it('a later file DEFERRED for a late occupant cannot leave an earlier move\'s parked occupant committed (#1411 review)', async () => {
+    await rules({ role: 'doc', strictSubRoles: true });
+    const { aId, bId } = await seedSwap();
+    frontmatter('dest', { id: bId, name: 'B' });
+    frontmatter('r', { name: 'R', role: 'doc.unknown' });
+    const { result, lateId } = await raceLateRow(async () => {
+      const id = generateId();
+      await db.node.create({ data: { id, memoryId: dbGraphId, loc: 'dest', name: 'Late', ownerRepo: 'test/repo' } });
+      return id;
+    });
+    // The first attempt deferred B's file and rolled back; the rerun locks the
+    // late row from the start, so nothing is deferred and only A's move waits.
+    expect(result.heldMoves).toEqual([`a-old → b-old (occupant ${bId})`]);
+    expect(result.deferredLateRows).toEqual([]);
+    await noInvalidLocs();
+    expect(await db.node.findUniqueOrThrow({ where: { id: aId } })).toMatchObject({ loc: 'a-old' });
+    expect(await db.node.findUniqueOrThrow({ where: { id: bId } })).toMatchObject({ loc: 'dest' });
+    expect(await db.node.findUnique({ where: { id: lateId } })).toBeNull();
+
+    const next = await sync();
+    expect(next.heldMoves).toEqual([]);
+    await noInvalidLocs();
+    expect(await db.node.findUniqueOrThrow({ where: { id: aId } })).toMatchObject({ loc: 'b-old' });
+  });
+
+  /** #1411 review (@codex P2) — edges aimed at a skipped loc-keyed file. */
+  const foreignNode = async () => {
+    const { graph: other } = await createDbOrgAndGraph(db, { orgName: 'foreign-org-1411', graphName: 'foreign/repo-1411' });
+    return db.node.create({ data: { id: generateId(), memoryId: other.id, loc: 'elsewhere', name: 'Foreign' } });
+  };
+
+  const edgeFrom = (id: string) => {
+    mkdirSync(join(repoRoot(), 'g'), { recursive: true });
+    writeNodeFiles(join(repoRoot(), 'g'), { name: 'G', nodes: [{ id, rel: 'uses' }] });
+  };
+
+  it('V4: a DEFERRED id-first move (the node arrived late) — its incoming edge waits, then lands once under the new loc', async () => {
+    await rules({ role: 'doc', strictSubRoles: true });
+    const fileId = generateId();
+    frontmatter('r', { name: 'R', role: 'doc.unknown' });
+    frontmatter('x', { id: fileId, name: 'X' });
+    edgeFrom(fileId);
+    const { result } = await raceLateRow(async () => {
+      await db.node.create({ data: { id: fileId, memoryId: dbGraphId, loc: 'elsewhere', name: 'X', ownerRepo: 'test/repo' } });
+      return fileId;
+    });
+    expect(result.deferredLateRows).toEqual([`x (node ${fileId})`]);
+    expect(await db.edge.count({ where: { targetId: fileId } })).toBe(0);
+    await sync();
+    expect(await db.node.findUniqueOrThrow({ where: { id: fileId } })).toMatchObject({ loc: 'x' });
+    expect(await db.edge.count({ where: { targetId: fileId, deletedAt: null } })).toBe(1);
+  });
+
+  it('V6: a move DEFERRED behind a late occupant — its incoming edge waits, then lands once under the new loc', async () => {
+    await rules({ role: 'doc', strictSubRoles: true });
+    const moverId = generateId();
+    await db.node.create({ data: { id: moverId, memoryId: dbGraphId, loc: 'old', name: 'M', ownerRepo: 'test/repo' } });
+    frontmatter('r', { name: 'R', role: 'doc.unknown' });
+    frontmatter('dest', { id: moverId, name: 'M' });
+    edgeFrom(moverId);
+    const { result } = await raceLateRow(async () => {
+      const id = generateId();
+      await db.node.create({ data: { id, memoryId: dbGraphId, loc: 'dest', name: 'Occupant', ownerRepo: 'test/repo' } });
+      return id;
+    });
+    expect(result.deferredLateRows).toHaveLength(1);
+    expect(await db.node.findUniqueOrThrow({ where: { id: moverId } })).toMatchObject({ loc: 'old' });
+    expect(await db.edge.count({ where: { targetId: moverId } })).toBe(0);
+    await sync();
+    expect(await db.node.findUniqueOrThrow({ where: { id: moverId } })).toMatchObject({ loc: 'dest' });
+    expect(await db.edge.count({ where: { targetId: moverId, deletedAt: null } })).toBe(1);
+  });
+
+  it('a REFUSED loc-keyed file with a foreign id: an edge aimed at that id lands on this memory\'s row, never the foreign node', async () => {
+    await rules({ role: 'doc', strictSubRoles: true });
+    const foreign = await foreignNode();
+    const rowId = generateId();
+    await db.node.create({ data: { id: rowId, memoryId: dbGraphId, loc: 'f', name: 'F', ownerRepo: 'test/repo' } });
+    mkdirSync(join(repoRoot(), 'f'), { recursive: true });
+    mkdirSync(join(repoRoot(), 'g'), { recursive: true });
+    writeNodeFiles(join(repoRoot(), 'f'), { id: foreign.id, name: 'F', role: 'doc.unknown' });
+    writeNodeFiles(join(repoRoot(), 'g'), { name: 'G', nodes: [{ id: foreign.id, rel: 'uses' }] });
+    const result = await sync();
+    expect(result.skippedUndeclaredRoles).toEqual([expect.objectContaining({ loc: 'f' })]);
+    const edges = await db.edge.findMany({ where: { deletedAt: null }, select: { targetId: true } });
+    expect(edges).toEqual([{ targetId: rowId }]);
+    expect(await db.pendingEdge.count()).toBe(0);
+  });
+
+  it('a REFUSED new file with an unknown id: an edge aimed at it waits, no spurious PendingEdge', async () => {
+    await rules({ role: 'doc', strictSubRoles: true });
+    const unknownId = generateId();
+    mkdirSync(join(repoRoot(), 'n'), { recursive: true });
+    mkdirSync(join(repoRoot(), 'g'), { recursive: true });
+    writeNodeFiles(join(repoRoot(), 'n'), { id: unknownId, name: 'N', role: 'doc.unknown' });
+    writeNodeFiles(join(repoRoot(), 'g'), { name: 'G', nodes: [{ id: unknownId, rel: 'uses' }] });
+    const result = await sync();
+    expect(result.skippedUndeclaredRoles).toEqual([expect.objectContaining({ loc: 'n' })]);
+    expect(await db.pendingEdge.count()).toBe(0);
+    expect(await db.edge.count()).toBe(0);
+  });
+
+  it('a REFUSED id-first MOVE: an edge aimed at it waits, so the later move does not leave a duplicate under the old loc (@codex P2, #1411)', async () => {
+    await rules({ role: 'doc', strictSubRoles: true });
+    const id = generateId();
+    await db.node.create({ data: { id, memoryId: dbGraphId, loc: 'old', name: 'N', ownerRepo: 'test/repo' } });
+    mkdirSync(join(repoRoot(), 'new'), { recursive: true });
+    mkdirSync(join(repoRoot(), 'g'), { recursive: true });
+    writeNodeFiles(join(repoRoot(), 'new'), { id, name: 'N', role: 'doc.unknown' });
+    writeNodeFiles(join(repoRoot(), 'g'), { name: 'G', nodes: [{ id, rel: 'uses' }] });
+    const first = await sync();
+    expect(first.skippedUndeclaredRoles).toEqual([expect.objectContaining({ loc: 'new' })]);
+    expect(await db.node.findUniqueOrThrow({ where: { id } })).toMatchObject({ loc: 'old' });
+    expect(await db.edge.count()).toBe(0);
+    // Declare the role: the move lands, and so does exactly ONE edge, under the new loc.
+    await db.nodeRoleRule.create({
+      data: { id: generateId(), configId: (await db.memoryConfig.findFirstOrThrow({ where: { memoryId: dbGraphId } })).id, role: 'doc.unknown' },
+    });
+    await sync();
+    expect(await db.node.findUniqueOrThrow({ where: { id } })).toMatchObject({ loc: 'new' });
+    const edges = await db.edge.findMany({ where: { deletedAt: null }, select: { targetId: true, loc: true } });
+    expect(edges).toHaveLength(1);
+    expect(edges[0].targetId).toBe(id);
+    expect(edges[0].loc).toContain('new');
+  });
+
+  /**
+   * #1411 review (@codex P2): a later COPY of a skipped first claimant's
+   * frontmatter id must never take the id over. Which file the loader reaches
+   * first is filesystem order (unsorted readdir), so each test asserts the
+   * order-independent invariant: no edge aimed at the shared id lands on the
+   * copy's fresh row. (`a-…` before `b-…` on APFS is the order that exposed it.)
+   */
+  const edgesNotOnTheCopy = async (sharedId: string) => {
+    const edges = await db.edge.findMany({ where: { deletedAt: null }, select: { targetId: true } });
+    for (const e of edges) expect(e.targetId).toBe(sharedId);
+    return edges;
+  };
+
+  it('a refused first claimant that does NOT move keeps the id: a later copy cannot take its edges', async () => {
+    await rules({ role: 'doc', strictSubRoles: true });
+    const id = generateId();
+    await db.node.create({ data: { id, memoryId: dbGraphId, loc: 'a-first', name: 'A', ownerRepo: 'test/repo' } });
+    for (const d of ['a-first', 'b-copy', 'g']) mkdirSync(join(repoRoot(), d), { recursive: true });
+    writeNodeFiles(join(repoRoot(), 'a-first'), { id, name: 'A', role: 'doc.unknown' });
+    writeNodeFiles(join(repoRoot(), 'b-copy'), { id, name: 'Copy' });
+    writeNodeFiles(join(repoRoot(), 'g'), { name: 'G', nodes: [{ id, rel: 'uses' }] });
+    await sync();
+    expect(await edgesNotOnTheCopy(id)).toHaveLength(1);
+  });
+
+  it('an unwritten PLACEHOLDER\'s blank file with an undeclared role is not refused: its other changes sync, role stays spec (@codex P2, #1411)', async () => {
+    await rules({ role: 'spec', strictSubRoles: true });
+    const id = generateId();
+    await db.node.create({ data: { id, memoryId: dbGraphId, loc: 'p', name: 'Old', role: 'spec', isPlaceholder: true, ownerRepo: 'test/repo' } });
+    frontmatter('p', { id, name: 'New', role: 'spec.foo' }, '');
+    const result = await sync();
+    expect(result.skippedUndeclaredRoles).toEqual([]);
+    expect(await db.node.findUniqueOrThrow({ where: { id } })).toMatchObject({ name: 'New', role: 'spec', isPlaceholder: true });
+  });
+
+  it('a placeholder WRITTEN in the same file is judged normally: an undeclared role is refused', async () => {
+    await rules({ role: 'spec', strictSubRoles: true });
+    const id = generateId();
+    await db.node.create({ data: { id, memoryId: dbGraphId, loc: 'p', name: 'Old', role: 'spec', isPlaceholder: true, ownerRepo: 'test/repo' } });
+    frontmatter('p', { id, name: 'New', role: 'spec.foo' }, 'Now written.');
+    const result = await sync();
+    expect(result.skippedUndeclaredRoles).toEqual([expect.objectContaining({ loc: 'p', role: 'spec.foo' })]);
+    expect(await db.node.findUniqueOrThrow({ where: { id } })).toMatchObject({ name: 'Old', isPlaceholder: true });
+  });
+
+  it('an APPLIED first claimant keeps the id when a later LOC-KEYED copy is refused (Charles QA Z4, #1411)', async () => {
+    await rules({ role: 'doc', strictSubRoles: true });
+    const id = generateId();
+    const copyRowId = generateId();
+    await db.node.create({ data: { id, memoryId: dbGraphId, loc: 'a', name: 'A', ownerRepo: 'test/repo' } });
+    await db.node.create({ data: { id: copyRowId, memoryId: dbGraphId, loc: 'b', name: 'B', ownerRepo: 'test/repo' } });
+    for (const d of ['a', 'b', 'g']) mkdirSync(join(repoRoot(), d), { recursive: true });
+    writeNodeFiles(join(repoRoot(), 'a'), { id, name: 'A' });
+    // A copy of A's id at another loc, refused: it resolves loc-keyed to the row at `b`.
+    writeNodeFiles(join(repoRoot(), 'b'), { id, name: 'B', role: 'doc.unknown' });
+    writeNodeFiles(join(repoRoot(), 'g'), { name: 'G', nodes: [{ id, rel: 'uses' }] });
+    await sync();
+    await edgesNotOnTheCopy(id);
+    expect(await db.edge.count({ where: { targetId: copyRowId } })).toBe(0);
+  });
+
+  it('a refused first claimant that MOVES: its edges wait, and a later copy cannot take them', async () => {
+    await rules({ role: 'doc', strictSubRoles: true });
+    const id = generateId();
+    await db.node.create({ data: { id, memoryId: dbGraphId, loc: 'old', name: 'A', ownerRepo: 'test/repo' } });
+    for (const d of ['a-new', 'b-copy', 'g']) mkdirSync(join(repoRoot(), d), { recursive: true });
+    writeNodeFiles(join(repoRoot(), 'a-new'), { id, name: 'A', role: 'doc.unknown' });
+    writeNodeFiles(join(repoRoot(), 'b-copy'), { id, name: 'Copy' });
+    writeNodeFiles(join(repoRoot(), 'g'), { name: 'G', nodes: [{ id, rel: 'uses' }] });
+    await sync();
+    await edgesNotOnTheCopy(id);
+    expect(await db.pendingEdge.count()).toBe(0);
+  });
+
+  it('a REFUSED id-first file that does NOT move keeps its loc, so an edge aimed at it is written now', async () => {
+    await rules({ role: 'doc', strictSubRoles: true });
+    const id = generateId();
+    await db.node.create({ data: { id, memoryId: dbGraphId, loc: 'same', name: 'S', ownerRepo: 'test/repo' } });
+    mkdirSync(join(repoRoot(), 'same'), { recursive: true });
+    mkdirSync(join(repoRoot(), 'g'), { recursive: true });
+    writeNodeFiles(join(repoRoot(), 'same'), { id, name: 'S', role: 'doc.unknown' });
+    writeNodeFiles(join(repoRoot(), 'g'), { name: 'G', nodes: [{ id, rel: 'uses' }] });
+    await sync();
+    const edges = await db.edge.findMany({ where: { deletedAt: null }, select: { targetId: true } });
+    expect(edges).toEqual([{ targetId: id }]);
+  });
+
+  it('a DEFERRED loc-keyed file with a foreign id: the edge waits, then lands on the row once the file applies', async () => {
+    await rules({ role: 'doc', strictSubRoles: true });
+    const foreign = await foreignNode();
+    frontmatter('r', { name: 'R', role: 'doc.unknown' });
+    frontmatter('late', { id: foreign.id, name: 'Late' });
+    mkdirSync(join(repoRoot(), 'g'), { recursive: true });
+    writeNodeFiles(join(repoRoot(), 'g'), { name: 'G', nodes: [{ id: foreign.id, rel: 'uses' }] });
+    const { result, lateId } = await raceLateRow(async () => {
+      const id = generateId();
+      await db.node.create({ data: { id, memoryId: dbGraphId, loc: 'late', name: 'Late', ownerRepo: 'test/repo' } });
+      return id;
+    });
+    expect(result.deferredLateRows).toEqual([`late (node ${lateId})`]);
+    // Nothing aimed at the file yet: not the foreign node, and not the late
+    // row, which this sync must not touch under the rulebook lock.
+    expect(await db.edge.count()).toBe(0);
+    expect(await db.pendingEdge.count()).toBe(0);
+    await sync();
+    const edges = await db.edge.findMany({ where: { deletedAt: null }, select: { targetId: true } });
+    expect(edges).toEqual([{ targetId: lateId }]);
+  });
+});
+
+describe('describeSyncOutcome — the on-demand sync report (#1411 review, @codex P2)', () => {
+  it('names every file the sync left unapplied', () => {
+    const report = describeSyncOutcome({
+      nodeCount: 4,
+      skippedUndeclaredRoles: [{ loc: 'bad', role: 'doc.x', strictParent: 'doc', code: 'ROLE_NOT_DECLARED' }],
+      deferredLateRows: ['late (node n1)'],
+      heldMoves: ['a-old → b-old (occupant n2)'],
+    });
+    expect(report).toContain('Synced 4 nodes.');
+    expect(report).toMatch(/Skipped 1 file\(s\), ROLE_NOT_DECLARED[^\n]*\n- bad \(role "doc\.x", strict parent "doc"\)/);
+    expect(report).toMatch(/Deferred 1 file\(s\)[^\n]*sync again[^\n]*\n- late \(node n1\)/);
+    expect(report).toMatch(/Held 1 move\(s\)[^\n]*\n- a-old → b-old \(occupant n2\)/);
+  });
+
+  it('a clean sync is one line', () => {
+    expect(describeSyncOutcome({ nodeCount: 2, skippedUndeclaredRoles: [], deferredLateRows: [], heldMoves: [] })).toBe('Synced 2 nodes.');
   });
 });
 
