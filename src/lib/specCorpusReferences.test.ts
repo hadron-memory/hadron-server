@@ -276,6 +276,29 @@ describe('former URNs use live-address precedence (@codex P2 on #1453)', () => {
     expect(plan.rewrites.filter((row) => row.nodeId === other.id)).toEqual([]);
   });
 
+  it('does not rewrite an unconfirmed former-name descendant even when a hidden holder owns it', async () => {
+    const formerUrn = draft.urn;
+    await resolvers.Mutation.updateMemory(null, { id: draft.id, urn: 'specs-draft-renamed' } as never, as());
+    const holder = await db.memory.create({ data: {
+      id: generateId(), urn: formerUrn, name: 'Private published holder',
+      class: 'private', organizationId: org.id, userId: outsider.id,
+    } });
+    const citation = `hrn:node:${formerUrn}:pas:010:99`;
+    await db.node.update({ where: { id: other.id }, data: { content: `Foreign: ${citation}.` } });
+    const args = { memoryRef: draft.id, fromLoc: 'pas:010', toLoc: 'pas:040', dryRun: true };
+    const without = await specCorpusRenumberMutations.renumberSpec(null, args, as());
+    const hiddenNode = await db.node.create({ data: {
+      id: generateId(), memoryId: holder.id, loc: 'pas:010:99', name: 'Private published child',
+    } });
+    await expect(resolveNodeRefForCaller(as(), citation)).resolves.toEqual({ id: hiddenNode.id });
+    const withNode = await specCorpusRenumberMutations.renumberSpec(null, args, as());
+    expect(withNode.rewrites).toEqual(without.rewrites);
+    expect(withNode.rewrites.filter((row) => row.nodeId === other.id)).toEqual([]);
+
+    await specCorpusRenumberMutations.renumberSpec(null, { ...args, dryRun: false }, as());
+    expect(await content('pas:020')).toBe(`Foreign: ${citation}.`);
+  });
+
   it('leaves a reference through a reused former URN to the memory that now holds it, and still counts one it cannot resolve there', async () => {
     const oldUrn = draft.urn;
     await resolvers.Mutation.updateMemory(null, { id: draft.id, urn: 'specs-draft-renamed' } as never, as());

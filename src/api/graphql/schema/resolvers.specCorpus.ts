@@ -297,6 +297,7 @@ async function referenceAcceptor(
   ctx: Context,
   corpus: ScannableCorpus,
   refs: ReadonlyArray<{ memoryUrn: string; targetLoc: string }>,
+  forRewrite = false,
 ): Promise<(ref: { memoryUrn: string; targetLoc: string }) => string | null> {
   const { db } = ctx;
   const claimantsOf = (ref: { memoryUrn: string }): string[] =>
@@ -417,6 +418,14 @@ async function referenceAcceptor(
     // without exposing a lone hidden published holder's node.
     if (corpus.publishedHolders.get(ref.memoryUrn)?.some((m) => taken.has(`${m}\u0000${ref.targetLoc}`))
       && (taken.has(`${corpus.id}\u0000${ref.targetLoc}`) || typeof aliasResolved.get(address) === 'string')) return null;
+    if (forRewrite && ref.memoryUrn !== corpus.urn) {
+      // A former name with no confirmed corpus target may now belong to a
+      // hidden published holder. Decline it uniformly, with or without that
+      // holder's row, so the dry-run cannot probe foreign child addresses.
+      if (corpus.publishedHolders.get(ref.memoryUrn)?.some((m) => taken.has(`${m}\u0000${ref.targetLoc}`))) return null;
+      if (aliasResolved.has(address)) return aliasResolved.get(address)!;
+      return taken.has(`${corpus.id}\u0000${ref.targetLoc}`) ? ref.targetLoc : null;
+    }
     return aliasResolved.has(address) ? aliasResolved.get(address)! : ref.targetLoc;
   };
 }
@@ -820,7 +829,7 @@ export const specCorpusRenumberMutations = {
     // When a prior holder of our URN also has a node at fromLoc, our own live
     // node there is what makes those references ours; once it has moved, the
     // prior holder's node would claim them and they would be left unrewritten.
-    const accept = await referenceAcceptor(ctx, corpus, scanReferences(nodes, corpus.pattern));
+    const accept = await referenceAcceptor(ctx, corpus, scanReferences(nodes, corpus.pattern), true);
 
     const rewrites: RewriteOut[] = [];
     try {
