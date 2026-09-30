@@ -601,6 +601,7 @@ describe('syncGraphFromGithub', () => {
     expect(pending).toHaveLength(1);
     expect(pending[0].targetId).toBe(missingId);
     expect(pending[0].name).toBe('depends on');
+    expect(pending[0]).toMatchObject({ description: null, data: null });
   });
 
   it('resolves a PendingEdge to a real Edge when the target node is later synced', async () => {
@@ -621,6 +622,87 @@ describe('syncGraphFromGithub', () => {
     const edges = await db.edge.findMany();
     expect(edges).toHaveLength(1);
     expect(edges[0].name).toBe('depends on');
+  });
+
+  it('preserves edge data and an empty description when the target arrives after the source sync', async () => {
+    const sourceId = generateId();
+    const targetId = generateId();
+    const root = join(mockSources, 'test-org', 'test/repo');
+    mkdirSync(root, { recursive: true });
+    const source = buildNodeFrontmatter({ id: sourceId, name: 'Source', tags: [] }, [
+      { target: { id: targetId, loc: 'target' }, name: 'uses', description: '', data: { weight: 3 } },
+    ]);
+    writeFileSync(join(root, 'source.md'), `---\n${stringify(source, { lineWidth: 0 }).trim()}\n---\n`, 'utf-8');
+
+    expect((await syncGraphFromGithub(makeGraph())).error).toBeUndefined();
+    expect(await db.pendingEdge.findUniqueOrThrow({
+      where: { sourceId_targetId: { sourceId, targetId } },
+    })).toMatchObject({ description: '', data: { weight: 3 } });
+    expect(await db.edge.count({ where: { sourceId, targetId } })).toBe(0);
+
+    const target = buildNodeFrontmatter({ id: targetId, name: 'Target', tags: [] });
+    writeFileSync(join(root, 'target.md'), `---\n${stringify(target, { lineWidth: 0 }).trim()}\n---\n`, 'utf-8');
+    expect((await syncGraphFromGithub(makeGraph())).error).toBeUndefined();
+    expect(await db.pendingEdge.count({ where: { sourceId, targetId, deletedAt: null } })).toBe(0);
+    expect(await db.edge.findFirstOrThrow({ where: { sourceId, targetId } })).toMatchObject({
+      description: '',
+      data: { weight: 3 },
+    });
+  });
+
+  it('uses current Git metadata when an older pending edge and its target resolve in the same sync', async () => {
+    const sourceId = generateId();
+    const targetId = generateId();
+    const root = join(mockSources, 'test-org', 'test/repo');
+    mkdirSync(root, { recursive: true });
+    const writeSource = (description?: string, data?: unknown) => {
+      const source = buildNodeFrontmatter({ id: sourceId, name: 'Source', tags: [] }, [
+        { target: { id: targetId, loc: 'target' }, name: 'uses', description, data },
+      ]);
+      writeFileSync(join(root, 'source.md'), `---\n${stringify(source, { lineWidth: 0 }).trim()}\n---\n`, 'utf-8');
+    };
+
+    writeSource();
+    expect((await syncGraphFromGithub(makeGraph())).error).toBeUndefined();
+    expect(await db.pendingEdge.findUniqueOrThrow({
+      where: { sourceId_targetId: { sourceId, targetId } },
+    })).toMatchObject({ description: null, data: null });
+
+    writeSource('', { weight: 3 });
+    const target = buildNodeFrontmatter({ id: targetId, name: 'Target', tags: [] });
+    writeFileSync(join(root, 'target.md'), `---\n${stringify(target, { lineWidth: 0 }).trim()}\n---\n`, 'utf-8');
+    expect((await syncGraphFromGithub(makeGraph())).error).toBeUndefined();
+    expect(await db.edge.findFirstOrThrow({ where: { sourceId, targetId } })).toMatchObject({
+      description: '', data: { weight: 3 },
+    });
+  });
+
+  it('refreshes a parked edge from the latest Git file, including cleared metadata', async () => {
+    const sourceId = generateId();
+    const targetId = generateId();
+    const root = join(mockSources, 'test-org', 'test/repo');
+    mkdirSync(root, { recursive: true });
+    const writeSource = (description?: string, data?: unknown) => {
+      const source = buildNodeFrontmatter({ id: sourceId, name: 'Source', tags: [] }, [
+        { target: { id: targetId, loc: 'target' }, name: 'uses', description, data },
+      ]);
+      writeFileSync(join(root, 'source.md'), `---\n${stringify(source, { lineWidth: 0 }).trim()}\n---\n`, 'utf-8');
+    };
+    const pending = () => db.pendingEdge.findUniqueOrThrow({
+      where: { sourceId_targetId: { sourceId, targetId } },
+    });
+
+    writeSource('', { weight: 3 });
+    expect((await syncGraphFromGithub(makeGraph())).error).toBeUndefined();
+    expect(await pending()).toMatchObject({ description: '', data: { weight: 3 } });
+
+    writeSource('revised', { weight: 4 });
+    expect((await syncGraphFromGithub(makeGraph())).error).toBeUndefined();
+    expect(await pending()).toMatchObject({ description: 'revised', data: { weight: 4 } });
+
+    writeSource();
+    expect((await syncGraphFromGithub(makeGraph())).error).toBeUndefined();
+    expect(await pending()).toMatchObject({ description: null, data: null });
   });
 
   it('does not promote a soft-deleted PendingEdge when its target is synced', async () => {
@@ -663,7 +745,10 @@ describe('syncGraphFromGithub', () => {
     });
     const targetId = 'eeee000000000000000000000000000000';
     const pending = await db.pendingEdge.create({
-      data: { id: generateId(), sourceId: source.id, targetId, name: 'cross-memory' },
+      data: {
+        id: generateId(), sourceId: source.id, targetId, name: 'cross-memory',
+        description: '', data: { weight: 3 },
+      },
     });
     await db.memory.update({
       where: { id: sourceMemory.id },
@@ -678,7 +763,7 @@ describe('syncGraphFromGithub', () => {
     expect(await db.pendingEdge.findUnique({ where: { id: pending.id } })).toBeNull();
     expect(await db.edge.findFirst({
       where: { memoryId: sourceMemory.id, sourceId: source.id, targetId, deletedAt: null },
-    })).not.toBeNull();
+    })).toMatchObject({ description: '', data: { weight: 3 } });
     expect((await db.memory.findUniqueOrThrow({ where: { id: sourceMemory.id } })).pendingEdgeCount).toBe(0);
   });
 
@@ -706,7 +791,10 @@ describe('syncGraphFromGithub', () => {
       },
     });
     const pending = await db.pendingEdge.create({
-      data: { id: generateId(), sourceId: source.id, targetId, name: 'cross-memory' },
+      data: {
+        id: generateId(), sourceId: source.id, targetId, name: 'cross-memory',
+        description: '', data: { weight: 3 },
+      },
     });
     await db.memory.update({
       where: { id: sourceMemory.id },
@@ -720,7 +808,9 @@ describe('syncGraphFromGithub', () => {
     await expect(syncGraphFromGithub(makeGraph())).resolves.toMatchObject({
       error: expect.stringContaining('already occupied'),
     });
-    expect(await db.pendingEdge.findUnique({ where: { id: pending.id } })).not.toBeNull();
+    expect(await db.pendingEdge.findUnique({ where: { id: pending.id } })).toMatchObject({
+      description: '', data: { weight: 3 },
+    });
     expect(await db.edge.findUniqueOrThrow({ where: { id: occupied.id } })).toMatchObject({
       sourceId: source.id,
       targetId: otherTarget.id,

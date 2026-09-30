@@ -39,6 +39,8 @@ async function seedStablePending() {
       sourceId: source.id,
       targetId: pendingEdgeStableTargetKey(target.id),
       name: 'durable',
+      description: '',
+      data: { weight: 3 },
     },
   });
   await db.memory.update({
@@ -60,7 +62,7 @@ describe('durable PendingEdge promotion sweep', () => {
     expect(await db.pendingEdge.findUnique({ where: { id: pending.id } })).toBeNull();
     expect(await db.edge.findFirst({
       where: { sourceId: source.id, targetId: target.id, name: 'durable', deletedAt: null },
-    })).not.toBeNull();
+    })).toMatchObject({ description: '', data: { weight: 3 } });
     expect((await db.memory.findUniqueOrThrow({ where: { id: memoryId } })).pendingEdgeCount).toBe(0);
   });
 

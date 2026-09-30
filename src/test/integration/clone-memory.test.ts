@@ -212,7 +212,10 @@ describe('cloneMemory', () => {
       },
     });
     await db.pendingEdge.create({
-      data: { sourceId: guide.id, targetId: 'org-a::src-mem::missing:loc', name: 'pends' },
+      data: {
+        sourceId: guide.id, targetId: 'org-a::src-mem::missing:loc', name: 'pends',
+        description: '', data: { weight: 3 },
+      },
     });
     await db.pendingEdge.create({
       data: {
@@ -296,6 +299,9 @@ describe('cloneMemory', () => {
     expect(clonePending.find((p) => p.name === 'pends')?.targetId).toBe(
       'org-a::clone-mem::missing:loc',
     );
+    expect(clonePending.find((p) => p.name === 'pends')).toMatchObject({
+      description: '', data: { weight: 3 },
+    });
     expect(clonePending.find((p) => p.name === 'durable-internal')?.targetId).toBe(
       pendingEdgeStableTargetKey(cloneSetup.id),
     );
