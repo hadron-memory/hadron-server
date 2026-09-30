@@ -36,6 +36,7 @@
 import type { Prisma } from '../generated/prisma/index.js';
 import { mintLocalSlug } from './mintLocalSlug.js';
 import { recordUrnRename } from './urnAlias.js';
+import { reclaimTombstonedMemory } from './mintedSpecPermanence.js';
 
 export interface MergeOwnerUrnsArgs {
   sourceUserId: string;
@@ -99,7 +100,10 @@ export async function mergeOwnerNamespacedUrns(
     // a dead row here would abort the re-root — but scoping the delete to the
     // one claimed URN never touches an unrelated tombstoned resource elsewhere
     // in the target's namespace (mint already routed past every live holder).
-    await tx.memory.deleteMany({ where: { urn: newUrn, deletedAt: { not: null } } });
+    // #1468 — through the shared reclaim, refused for a stamped corpus still
+    // holding a spec.
+    const dead = await tx.memory.findFirst({ where: { urn: newUrn, deletedAt: { not: null } }, select: { id: true } });
+    if (dead) await reclaimTombstonedMemory(tx, dead.id);
     await tx.memory.update({
       where: { id: m.id },
       // Record the pre-merge URN so old `@source:slug` references still resolve

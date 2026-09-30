@@ -96,6 +96,7 @@ import {
 import { GraphQLError } from 'graphql';
 // Spec 049 §8.5 — the memory-level lock Channel creation shares with deleteMemory.
 import { lockMemoryForChannelChange } from '../../../lib/channels.js';
+import { assertNoMintedCorpusRemoval, reclaimTombstonedMemory } from '../../../lib/mintedSpecPermanence.js';
 import { type InputJsonValue } from '../../../generated/prisma/runtime/library.js';
 import { validateMemorySchema, MemorySchemaError } from '../../../lib/memorySchema.js';
 import { validateMemorySource, GitSourceError } from '../../../lib/gitSource.js';
@@ -655,7 +656,8 @@ export const memoryMutations = {
       const existing = await ctx.db.memory.findUnique({ where: { urn: memoryUrn } });
       if (existing) {
         if (existing.deletedAt) {
-          await ctx.db.memory.delete({ where: { id: existing.id } });
+          // #1468 — refused for a stamped corpus still holding a spec.
+          await ctx.db.$transaction((tx) => reclaimTombstonedMemory(tx, existing.id));
         } else {
           throw new Error(`A memory with URN "${memoryUrn}" already exists`);
         }
@@ -1238,6 +1240,16 @@ export const memoryMutations = {
         // conditional updateMany closes the read-then-write race so deletedAt is
         // set once. Secrets are org/user-owned only (#696), so there are no
         // memory-scoped secrets to sweep here anymore.
+        //
+        // #1468 — deleting a mint-stamped corpus removes every spec in it.
+        // Take the row at the strength the update below needs, so the guard's
+        // FOR SHARE read re-enters instead of being upgraded later. A re-delete
+        // removes nothing, so it stays idempotent and unguarded.
+        const [row] = await tx.$queryRaw<Array<{ deleted_at: Date | null }>>`
+          SELECT deleted_at FROM memories WHERE id = ${resolvedId} FOR NO KEY UPDATE`;
+        if (row && row.deleted_at === null) {
+          await assertNoMintedCorpusRemoval(tx, resolvedId, 'delete the corpus', { includeTombstones: false });
+        }
         await tx.memory.updateMany({
           where: { id: resolvedId, deletedAt: null },
           data: { deletedAt: new Date() },
@@ -1376,7 +1388,8 @@ export const memoryMutations = {
       const existing = await ctx.db.memory.findUnique({ where: { urn: newUrn } });
       if (existing) {
         if (existing.deletedAt) {
-          await ctx.db.memory.delete({ where: { id: existing.id } });
+          // #1468 — refused for a stamped corpus still holding a spec.
+          await ctx.db.$transaction((tx) => reclaimTombstonedMemory(tx, existing.id));
         } else {
           throw new Error(`A memory with URN "${newUrn}" already exists`);
         }
@@ -1594,7 +1607,8 @@ export const memoryMutations = {
       const existing = await ctx.db.memory.findUnique({ where: { urn: newUrn } });
       if (existing) {
         if (existing.deletedAt) {
-          await ctx.db.memory.delete({ where: { id: existing.id } });
+          // #1468 — refused for a stamped corpus still holding a spec.
+          await ctx.db.$transaction((tx) => reclaimTombstonedMemory(tx, existing.id));
         } else {
           throw new Error(`A memory with URN "${newUrn}" already exists`);
         }

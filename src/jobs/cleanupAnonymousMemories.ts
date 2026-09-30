@@ -12,6 +12,10 @@ export async function cleanupAnonymousMemories(db: PrismaClient): Promise<number
     where: {
       anonymousExpiresAt: { lt: new Date() },
       userMemoryOfAgentId: { not: null },
+      // #1468 — a mint-stamped corpus is never swept away by expiry. Anonymous
+      // memories are not created as draft corpora, so none should ever be
+      // stamped; the exclusion keeps this bulk delete safe if one is.
+      corpusMintedAt: null,
     },
   });
   return result.count;

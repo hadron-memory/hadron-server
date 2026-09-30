@@ -55,14 +55,22 @@ export const SPEC_MINTED_PERMANENT = 'SPEC_MINTED_PERMANENT';
 /** How many offending locs a refusal names in its message and extensions. */
 const NAMED_LOC_CAP = 10;
 
-/** Build the typed refusal: names the specs (capped) and supersede as the way forward. */
-export function mintedSpecRemovalError(memoryId: string, locs: string[], op: string): GraphQLError {
+/** The way forward a refusal names by default: replace a minted spec, never remove it. */
+const SUPERSEDE_REMEDY = 'Supersede a spec to replace it.';
+
+/** Build the typed refusal: names the specs (capped) and the way forward (supersede, by default). */
+export function mintedSpecRemovalError(
+  memoryId: string,
+  locs: string[],
+  op: string,
+  remedy: string = SUPERSEDE_REMEDY,
+): GraphQLError {
   const named = locs.slice(0, NAMED_LOC_CAP);
   const more = locs.length > named.length ? ` (and ${locs.length - named.length} more)` : '';
   return new GraphQLError(
     `Refused to ${op}: ${named.map((l) => `"${l}"`).join(', ')}${more} ` +
       `${locs.length === 1 ? 'is a spec' : 'are specs'} in a minted corpus, and minted specs are permanent. ` +
-      'Supersede a spec to replace it.',
+      remedy,
     { extensions: { code: SPEC_MINTED_PERMANENT, memoryId, locs: named, count: locs.length, op } },
   );
 }
@@ -89,8 +97,10 @@ export async function assertNoMintedSpecRemoval(
   const ids = [...new Set(nodeIds)].sort();
   // Node rows first (id order, the global multi-row order), then the markers
   // re-read under those locks.
-  const rows = await tx.$queryRaw<Array<{ id: string; loc: string; tags: string[]; role: string | null }>>`
-    SELECT id, loc, tags, role FROM nodes
+  const rows = await tx.$queryRaw<
+    Array<{ id: string; loc: string; tags: string[]; role: string | null; deleted_at: Date | null }>
+  >`
+    SELECT id, loc, tags, role, deleted_at FROM nodes
     WHERE id = ANY(${ids}::text[]) AND memory_id = ${memoryId}
     ORDER BY id FOR NO KEY UPDATE`;
   const specs = rows.filter((r) => hasSpecMarker({ tags: r.tags ?? [], role: r.role }));
@@ -99,7 +109,22 @@ export async function assertNoMintedSpecRemoval(
   const [memory] = await tx.$queryRaw<Array<{ corpus_minted_at: Date | null }>>`
     SELECT corpus_minted_at FROM memories WHERE id = ${memoryId} FOR SHARE`;
   if (!memory || memory.corpus_minted_at === null) return;
-  throw mintedSpecRemovalError(memoryId, specs.map((s) => s.loc).sort(), op);
+  const mintedAt = memory.corpus_minted_at;
+  const protectedSpecs = specs.filter((s) => isProtectedAfterMint(s.deleted_at, mintedAt));
+  if (protectedSpecs.length === 0) return;
+  throw mintedSpecRemovalError(memoryId, protectedSpecs.map((s) => s.loc).sort(), op);
+}
+
+/**
+ * Which spec rows the mint promised to keep: every live one, and a tombstone
+ * only if it was deleted AT OR AFTER the mint. A tombstone deleted before the
+ * mint is a legitimate draft-era deletion that never belonged to the minted
+ * corpus, so hard-deleting it (or reclaiming its memory) stays allowed. One
+ * deleted after the mint can only have come from a path that bypassed this
+ * guard, and keeping it recoverable is the point.
+ */
+function isProtectedAfterMint(deletedAt: Date | null, mintedAt: Date): boolean {
+  return deletedAt === null || deletedAt >= mintedAt;
 }
 
 type NodeReader = Pick<Prisma.TransactionClient, 'node' | 'memory'>;
@@ -114,7 +139,7 @@ const SPEC_MARKER_WHERE: Prisma.NodeWhereInput = {
  * empty when the memory is not stamped. UNLOCKED: use it for a fail-fast
  * preflight, never as the authoritative check (a paged operation can outlive
  * it). `includeTombstones` for hard (cascading) removals, which erase
- * tombstones too.
+ * tombstones too — those deleted after the mint (see isProtectedAfterMint).
  */
 export async function mintedSpecLocsIn(
   db: NodeReader,
@@ -124,7 +149,14 @@ export async function mintedSpecLocsIn(
   const memory = await db.memory.findUnique({ where: { id: memoryId }, select: { corpusMintedAt: true } });
   if (!memory?.corpusMintedAt) return [];
   const specs = await db.node.findMany({
-    where: { memoryId, ...(opts.includeTombstones ? {} : { deletedAt: null }), ...SPEC_MARKER_WHERE },
+    where: {
+      memoryId,
+      // See isProtectedAfterMint: a tombstone counts only if deleted after the mint.
+      ...(opts.includeTombstones
+        ? { OR: [{ deletedAt: null }, { deletedAt: { gte: memory.corpusMintedAt } }] }
+        : { deletedAt: null }),
+      AND: [SPEC_MARKER_WHERE],
+    },
     select: { loc: true },
     orderBy: { loc: 'asc' },
   });
@@ -160,11 +192,56 @@ export async function assertNoMintedCorpusRemoval(
   tx: Prisma.TransactionClient,
   memoryId: string,
   op: string,
-  opts: { includeTombstones: boolean },
+  opts: { includeTombstones: boolean; remedy?: string },
 ): Promise<void> {
   const [memory] = await tx.$queryRaw<Array<{ corpus_minted_at: Date | null }>>`
     SELECT corpus_minted_at FROM memories WHERE id = ${memoryId} FOR SHARE`;
   if (!memory || memory.corpus_minted_at === null) return;
   const locs = await mintedSpecLocsIn(tx, memoryId, opts);
-  if (locs.length > 0) throw mintedSpecRemovalError(memoryId, locs, op);
+  if (locs.length > 0) throw mintedSpecRemovalError(memoryId, locs, op, opts.remedy);
+}
+
+/**
+ * Hard-delete a SOFT-DELETED memory to reclaim its URN for a new one (#1468):
+ * the tombstone-reclaim step of createMemory, cloneMemory, extract, App-memory
+ * provisioning and owner-namespace merges. The FK cascade erases its nodes, so
+ * a mint-stamped corpus still holding a protected spec is refused.
+ *
+ * Locks the memory row `FOR UPDATE` (the delete's own strength, so the guard's
+ * `FOR SHARE` re-enters) and re-checks it is still a tombstone: a row revived
+ * since the caller's unlocked read is left alone. Returns whether it deleted.
+ */
+export async function reclaimTombstonedMemory(
+  tx: Prisma.TransactionClient,
+  memoryId: string,
+): Promise<boolean> {
+  const [row] = await tx.$queryRaw<Array<{ deleted_at: Date | null }>>`
+    SELECT deleted_at FROM memories WHERE id = ${memoryId} FOR UPDATE`;
+  if (!row || row.deleted_at === null) return false;
+  await assertNoMintedCorpusRemoval(tx, memoryId, 'reclaim the address of the deleted corpus holding', {
+    includeTombstones: true,
+  });
+  await tx.memory.delete({ where: { id: memoryId } });
+  return true;
+}
+
+/**
+ * Refuse a PARENT hard delete whose FK cascade would erase a mint-stamped
+ * corpus still holding a protected spec (#1468, Holger team chat #4308): an
+ * App reclaim (`Memory.appId` cascades), and anything else that deletes the
+ * owner of a memory set. Run in the same transaction as the parent delete.
+ *
+ * Locks each doomed memory row `FOR UPDATE` (the strength the cascade itself
+ * takes) in id order, the global multi-row order, before checking it.
+ */
+export async function assertNoMintedCorpusCascade(
+  tx: Prisma.TransactionClient,
+  memoryIds: readonly string[],
+  op: string,
+  remedy?: string,
+): Promise<void> {
+  for (const id of [...new Set(memoryIds)].sort()) {
+    await tx.$queryRaw`SELECT id FROM memories WHERE id = ${id} FOR UPDATE`;
+    await assertNoMintedCorpusRemoval(tx, id, op, { includeTombstones: true, remedy });
+  }
 }

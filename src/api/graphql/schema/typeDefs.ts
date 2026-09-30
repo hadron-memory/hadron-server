@@ -7547,6 +7547,13 @@ export const typeDefs = `#graphql
     minting. Owner or org ADMIN only. memoryRef accepts the ID or URN. A real
     run holds every write to the corpus off while it checks and flips, and
     refuses SPEC_CORPUS_BUSY (retryable) if a write is already in flight.
+    #1468 — a minted spec is then permanent: every path that would remove one
+    from the corpus refuses SPEC_MINTED_PERMANENT, naming the specs (deleteNode
+    soft or hard, a move to another memory or an overwrite of its citation,
+    mergeNodes with deleteSource, extracting with move, a merge or deletion of
+    the whole corpus, git-sync pruning, and account erasure while the owner
+    still holds it). Supersede a spec to replace it; a rename within the corpus
+    still records its URN alias.
     """
     mintSpecCorpus(memoryRef: ID!, dryRun: Boolean): SpecCorpusMintReport!
 

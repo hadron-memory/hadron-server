@@ -35,7 +35,7 @@ const auth = (): AuthContext => ({ userId: admin.id, roles: ['ADMIN'], clientId:
 const refusedPermanent = (e: unknown) =>
   e instanceof GraphQLError && e.extensions.code === SPEC_MINTED_PERMANENT && /[Ss]upersede/.test(e.message);
 
-async function memory(name: string, state: { corpusDraft?: boolean; corpusMintedAt?: Date | null }) {
+async function memory(name: string, state: { corpusDraft?: boolean; corpusMintedAt?: Date | null; deletedAt?: Date | null }) {
   return db.memory.create({
     data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:${name}`, name, class: 'knowledge', ...state },
     select: { id: true, urn: true },
@@ -247,5 +247,110 @@ describe('#1468 — mergeMemories', () => {
     await node(draft.id, 'pas:010', { tags: ['spec'] });
     await resolvers.Mutation.mergeMemories({}, { input: { source: draft.id, target: unstamped.id } } as never, ctx());
     expect(await liveIds(unstamped.id)).toEqual(['pas:010']);
+  });
+});
+
+describe('#1468 — tombstones: only post-mint ones are protected', () => {
+  it('hard-deletes a spec tombstone deleted BEFORE the mint (a draft-era deletion)', async () => {
+    const mintedAt = (await db.memory.findUniqueOrThrow({ where: { id: minted.id } })).corpusMintedAt!;
+    const draftEra = await node(minted.id, 'pas:050', { tags: ['spec'], deletedAt: new Date(mintedAt.getTime() - 86_400_000) });
+    expect(await resolvers.Mutation.deleteNode({}, { nodeRef: draftEra.id, hard: true }, ctx())).toBe(true);
+    expect(await db.node.findUnique({ where: { id: draftEra.id } })).toBeNull();
+  });
+});
+
+describe('#1468 — whole-corpus removal', () => {
+  const deleteMemory = (id: string) => resolvers.Mutation.deleteMemory({}, { id }, ctx());
+
+  it('deleteMemory refuses a minted corpus holding a spec; the memory stays live', async () => {
+    await node(minted.id, 'pas:010', { tags: ['spec'] });
+    await expect(deleteMemory(minted.id)).rejects.toSatisfy(refusedPermanent);
+    expect(await db.memory.findUniqueOrThrow({ where: { id: minted.id } })).toMatchObject({ deletedAt: null });
+  });
+
+  it('deleteMemory: a minted corpus with no spec, a draft corpus, and an unstamped memory all delete', async () => {
+    await node(minted.id, 'notes');
+    await node(draft.id, 'pas:010', { tags: ['spec'] });
+    await node(unstamped.id, 'pas:010', { tags: ['spec'] });
+    for (const m of [minted, draft, unstamped]) expect(await deleteMemory(m.id)).toBe(true);
+  });
+
+  it('deleteMemory stays idempotent on an already-deleted minted corpus', async () => {
+    await node(minted.id, 'pas:010', { tags: ['spec'] });
+    await db.memory.update({ where: { id: minted.id }, data: { deletedAt: new Date() } });
+    expect(await deleteMemory(minted.id)).toBe(true);
+  });
+
+  it('createMemory refuses to reclaim the URN of a deleted minted corpus that still holds a spec', async () => {
+    const dead = await memory('reuse', { corpusMintedAt: new Date(), deletedAt: new Date() });
+    await node(dead.id, 'pas:010', { tags: ['spec'] });
+    await expect(resolvers.Mutation.createMemory({}, { orgId: org.id, name: 'reuse' } as never, ctx()))
+      .rejects.toSatisfy(refusedPermanent);
+    expect(await db.memory.findUnique({ where: { id: dead.id } })).not.toBeNull();
+  });
+
+  it('control: createMemory still reclaims a deleted draft corpus', async () => {
+    const dead = await memory('reuse', { corpusDraft: true, deletedAt: new Date() });
+    await node(dead.id, 'pas:010', { tags: ['spec'] });
+    await resolvers.Mutation.createMemory({}, { orgId: org.id, name: 'reuse' } as never, ctx());
+    expect(await db.memory.findUnique({ where: { id: dead.id } })).toBeNull();
+  });
+});
+
+describe('#1468 — cascades: App reclaim, account erasure, anonymous expiry', () => {
+  async function agent(slug: string) {
+    return db.agent.create({ data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:${slug}`, name: slug, visibility: 'PUBLIC' } });
+  }
+
+  it('createApp refuses to reclaim a deleted App whose cascade would erase a minted corpus', async () => {
+    const a = await agent('suite');
+    const retired = await db.app.create({
+      data: { id: generateId(), organizationId: org.id, name: 'Suite', urn: `${org.urn}:suite`, deletedAt: new Date() },
+    });
+    const appMem = await db.memory.create({
+      data: { id: generateId(), organizationId: org.id, appId: retired.id, urn: `${org.urn}:suite-mem`, name: 'suite-mem', class: 'app', corpusMintedAt: new Date() },
+    });
+    await node(appMem.id, 'pas:010', { tags: ['spec'] });
+    await expect(resolvers.Mutation.createApp({}, { orgRef: org.id, agentRef: a.id, name: 'Suite' } as never, ctx()))
+      .rejects.toSatisfy(refusedPermanent);
+    expect(await db.app.findUnique({ where: { id: retired.id } })).not.toBeNull();
+    expect(await db.memory.findUnique({ where: { id: appMem.id } })).not.toBeNull();
+  });
+
+  it('account erasure refuses while the user owns a minted corpus holding a spec, naming the handoff', async () => {
+    const user = await db.user.create({ data: { id: generateId(), handle: 'mp-leaver', email: 'mp-leaver@example.com', roles: ['READER'] } });
+    const owned = await db.memory.create({
+      data: { id: generateId(), userId: user.id, ownerUserId: user.id, urn: 'mp-leaver:corpus', name: 'corpus', class: 'private', corpusMintedAt: new Date() },
+    });
+    await node(owned.id, 'pas:010', { tags: ['spec'] });
+    const leaver = { db, userId: user.id, roles: ['READER'] } as Context;
+    await expect(resolvers.Mutation.deleteUser({}, {}, leaver)).rejects.toSatisfy(
+      (e: unknown) => e instanceof GraphQLError && e.extensions.code === SPEC_MINTED_PERMANENT && /transfer ownership/.test(e.message),
+    );
+    expect(await db.user.findUniqueOrThrow({ where: { id: user.id } })).toMatchObject({ deletedAt: null });
+    expect(await db.memory.findUnique({ where: { id: owned.id } })).not.toBeNull();
+
+    // Control: without the stamp, erasure proceeds and takes the memory.
+    await db.memory.update({ where: { id: owned.id }, data: { corpusMintedAt: null } });
+    expect(await resolvers.Mutation.deleteUser({}, {}, leaver)).toBe(true);
+    expect(await db.memory.findUnique({ where: { id: owned.id } })).toBeNull();
+  });
+
+  it('anonymous-memory expiry never sweeps a stamped corpus', async () => {
+    const { cleanupAnonymousMemories } = await import('../../../jobs/cleanupAnonymousMemories.js');
+    const a = await agent('anon-host');
+    const app = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'Anon', urn: `${org.urn}:anon` } });
+    const expired = new Date(Date.now() - 60_000);
+    const mk = (slug: string, stamped: boolean) => db.memory.create({
+      data: {
+        id: generateId(), organizationId: org.id, appId: app.id, userMemoryOfAgentId: a.id, urn: `${org.urn}:${slug}`,
+        name: slug, class: 'app', anonymousExpiresAt: expired, corpusMintedAt: stamped ? new Date() : null,
+      },
+    });
+    const kept = await mk('anon-stamped', true);
+    const swept = await mk('anon-plain', false);
+    await cleanupAnonymousMemories(db);
+    expect(await db.memory.findUnique({ where: { id: kept.id } })).not.toBeNull();
+    expect(await db.memory.findUnique({ where: { id: swept.id } })).toBeNull();
   });
 });

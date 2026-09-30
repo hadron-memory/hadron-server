@@ -4,6 +4,7 @@ import { deleteToolConnection } from '../../lib/emailClient.js';
 import { deleteSecretsForOwner } from '../../lib/secrets.js';
 import { releasePrincipal } from '../../lib/principal/mintPrincipal.js';
 import { softDeleteOrganizationCore } from './softDeleteOrganization.js';
+import { assertNoMintedCorpusCascade } from '../../lib/mintedSpecPermanence.js';
 import {
   collectAssetKeysForMemories,
   purgeCollectedAssetObjects,
@@ -148,6 +149,23 @@ async function runDeletionTxn(
         WHERE id = ${targetUserId} AND deleted_at IS NULL FOR UPDATE
       `;
       if (locked.length === 0) throw new Error('User not found');
+
+      // #1468 (Holger, team chat): erasure never takes a mint-stamped corpus
+      // that still holds specs with it. Refused until the corpus is handed off,
+      // before any write in this transaction. The set is every memory the
+      // cascades below erase, the same set as the asset-key pass further down
+      // (keep them in step): the user's personal/private and user-owned
+      // memories, and the app-scoped memories of the user's own Apps.
+      const erasedMemories = await tx.memory.findMany({
+        where: { OR: [{ app: { ownerUserId: targetUserId } }, { userId: targetUserId }, { ownerUserId: targetUserId }] },
+        select: { id: true },
+      });
+      await assertNoMintedCorpusCascade(
+        tx,
+        erasedMemories.map((m) => m.id),
+        'erase the account that owns it; the corpus holding',
+        'Ask an administrator to transfer ownership of the corpus before erasing this account.',
+      );
 
       // ── 1. Org memberships ──────────────────────────────────────────
       const memberships = await tx.orgMember.findMany({

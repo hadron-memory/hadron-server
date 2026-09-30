@@ -62,6 +62,7 @@ import { findOrCreateAppClassMemory } from './chat-scope.js';
 // Spec 049 Phase 4 — the App's default Channel, created with the App.
 import { ensureDefaultChannelForApp } from '../../../lib/channels.js';
 import { recordUrnRename } from '../../../lib/urnAlias.js';
+import { assertNoMintedCorpusCascade } from '../../../lib/mintedSpecPermanence.js';
 import { requireEndpointFor, requireKeyFor } from '../../../lib/aiEndpoint.js';
 
 /**
@@ -382,7 +383,13 @@ export const appMutations = {
           // with it and recycle their permanently-reserved names. Refuse
           // instead.
           await assertNoWorkers(ctx.db, existing.id, appUrn, 'reclaim');
-          await ctx.db.app.delete({ where: { id: existing.id } });
+          // #1468 — the delete cascades the App's memories: refused while one
+          // is a stamped corpus still holding a spec.
+          await ctx.db.$transaction(async (tx) => {
+            const doomed = await tx.memory.findMany({ where: { appId: existing.id }, select: { id: true } });
+            await assertNoMintedCorpusCascade(tx, doomed.map((m) => m.id), 'reclaim the App URN over');
+            await tx.app.delete({ where: { id: existing.id } });
+          });
         } else {
           throw new Error(`An app with URN "${appUrn}" already exists`);
         }
@@ -534,7 +541,12 @@ export const appMutations = {
               // cascades, so hard-deleting a retired App here would delete its
               // castings and recycle their permanently-reserved names.
               await assertNoWorkers(ctx.db, depCollision.id, depUrn, 'reclaim');
-              await ctx.db.app.delete({ where: { id: depCollision.id } });
+              // #1468 — same cascade rule as the parent App branch.
+              await ctx.db.$transaction(async (tx) => {
+                const doomed = await tx.memory.findMany({ where: { appId: depCollision.id }, select: { id: true } });
+                await assertNoMintedCorpusCascade(tx, doomed.map((m) => m.id), 'reclaim the App URN over');
+                await tx.app.delete({ where: { id: depCollision.id } });
+              });
             } else {
               depUrn = `${depUrn}:${imp.importedAgentId.slice(-8)}`;
             }
