@@ -847,12 +847,14 @@ class EdgeLocConflictError extends Error {}
 /** The target moved, was deleted or changed memory while this write waited for its row lock (PR #1339 review). */
 class NodeMovedDuringWriteError extends Error {}
 class MemoryEncryptionChangedDuringWriteError extends Error {}
+class MemoryWriteAccessChangedDuringWriteError extends Error {}
 
-/** Serialize the memory's encryption flag with a write prepared outside the transaction. */
+/** Serialize the memory's encryption and write authority with a prepared node write. */
 async function assertMemoryEncryptionStateForWrite(
   tx: Prisma.TransactionClient,
   memoryId: string,
   expectedEncrypted: boolean,
+  auth: AuthContext,
 ): Promise<void> {
   await tx.$queryRaw`SELECT "id" FROM "memories" WHERE "id" = ${memoryId} FOR SHARE`;
   const current = await tx.memory.findUniqueOrThrow({
@@ -861,6 +863,14 @@ async function assertMemoryEncryptionStateForWrite(
   if (current.isEncrypted !== expectedEncrypted) {
     throw new MemoryEncryptionChangedDuringWriteError(
       '[node_write_conflict] Memory encryption changed while this write waited — re-read and retry.',
+    );
+  }
+  // A transfer may have committed after the preflight gate. Re-read through
+  // the transaction client while the Memory row is held, then keep that lock
+  // through commit so the destination tenant cannot inherit a late write.
+  if (!(await canWriteToMemory(tx as typeof db, auth, memoryId))) {
+    throw new MemoryWriteAccessChangedDuringWriteError(
+      '[node_write_conflict] Memory write access changed while this write waited — re-read and retry.',
     );
   }
 }
@@ -3328,7 +3338,7 @@ export function createMcpServerInstance(
           let sectionChanged = false;
           if (prior && !prior.deletedAt) {
             await tx.$queryRaw`SELECT "id" FROM "nodes" WHERE "id" = ${prior.id} FOR UPDATE`;
-            await assertMemoryEncryptionStateForWrite(tx, memoryId, parentMemoryState.isEncrypted);
+            await assertMemoryEncryptionStateForWrite(tx, memoryId, parentMemoryState.isEncrypted, auth);
             // Reconcile only while the row is still in this memory.
             await ensureCurrentNodeRevisionInTransaction(tx, prior.id, { expectedMemoryId: memoryId });
             const current = await tx.node.findUniqueOrThrow({ where: { id: prior.id } });
@@ -3355,7 +3365,7 @@ export function createMcpServerInstance(
             });
           }
           if (!prior || prior.deletedAt) {
-            await assertMemoryEncryptionStateForWrite(tx, memoryId, parentMemoryState.isEncrypted);
+            await assertMemoryEncryptionStateForWrite(tx, memoryId, parentMemoryState.isEncrypted, auth);
           }
           const row = await tx.node.upsert({
             ...upsertArgs,
@@ -3367,6 +3377,7 @@ export function createMcpServerInstance(
         if (e instanceof LocProtectedError) return textResult(`[loc_protected] ${e.message}`);
         if (e instanceof NodeMovedDuringWriteError) return textResult(e.message);
         if (e instanceof MemoryEncryptionChangedDuringWriteError) return textResult(e.message);
+        if (e instanceof MemoryWriteAccessChangedDuringWriteError) return textResult(e.message);
         throw e;
       }
 
@@ -5412,7 +5423,7 @@ export function createMcpServerInstance(
           if (authoritative) {
             await tx.$queryRaw`SELECT "id" FROM "nodes" WHERE "id" = ${authoritative.id} FOR UPDATE`;
           }
-          await assertMemoryEncryptionStateForWrite(tx, memoryId, memEncRow?.isEncrypted ?? false);
+          await assertMemoryEncryptionStateForWrite(tx, memoryId, memEncRow?.isEncrypted ?? false, auth);
 
           const pre = await snapshotOverwrittenNode(tx);
 
@@ -5472,6 +5483,7 @@ export function createMcpServerInstance(
         if (e instanceof InlineEdgeEndpointError) return textResult(e.message);
         if (e instanceof EdgeLocConflictError) return textResult(e.message);
         if (e instanceof MemoryEncryptionChangedDuringWriteError) return textResult(e.message);
+        if (e instanceof MemoryWriteAccessChangedDuringWriteError) return textResult(e.message);
         throw e;
       }
 
@@ -5816,7 +5828,7 @@ export function createMcpServerInstance(
             // and the update, and the refreshed fingerprint would then hide it.
             // Same order as the GraphQL update path.
             await tx.$queryRaw`SELECT "id" FROM "nodes" WHERE "id" = ${existing.id} FOR UPDATE`;
-            await assertMemoryEncryptionStateForWrite(tx, memory.id, updMemEnc?.isEncrypted ?? false);
+            await assertMemoryEncryptionStateForWrite(tx, memory.id, updMemEnc?.isEncrypted ?? false, auth);
             // Unreconciled drift becomes its OWN revision before this edit's,
             // as on the GraphQL path — never folded into the edit.
             await ensureCurrentNodeRevisionInTransaction(tx, existing.id, { expectedMemoryId: memory.id });
@@ -5888,6 +5900,7 @@ export function createMcpServerInstance(
           if (e instanceof LocProtectedError) return textResult(`[loc_protected] ${e.message}`);
           if (e instanceof NodeMovedDuringWriteError) return textResult(e.message);
           if (e instanceof MemoryEncryptionChangedDuringWriteError) return textResult(e.message);
+          if (e instanceof MemoryWriteAccessChangedDuringWriteError) return textResult(e.message);
           if (e instanceof InlineEdgeEndpointError) return textResult(e.message);
           if (e instanceof EdgeLocConflictError) return textResult(e.message);
           if (e instanceof RoleNotDeclaredError) return textResult(`[role_not_declared] ${e.message}`);

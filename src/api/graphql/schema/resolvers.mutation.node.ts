@@ -301,15 +301,18 @@ export async function writeNodeCore(
       // narrowed: some App-session principals legitimately write a private
       // memory without record-read access. Internal callers pass no
       // concealUnreadable and keep the bare denial.
-      const authorizeWrite = () => requireMemoryWriteAccess(ctx, resolvedMemoryId);
       const conceal = opts?.concealUnreadable;
-      if (!conceal) {
-        await authorizeWrite();
-      } else if (conceal.entity === 'node') {
-        await concealUnreadableNodeDenial(ctx, resolvedMemoryId, () => nodeNotFoundError(conceal.ref), authorizeWrite);
-      } else {
-        await concealUnreadableDenial(ctx, resolvedMemoryId, conceal.ref, authorizeWrite);
-      }
+      const authorizeWrite = async (authCtx: Context) => {
+        const gate = () => requireMemoryWriteAccess(authCtx, resolvedMemoryId);
+        if (!conceal) {
+          await gate();
+        } else if (conceal.entity === 'node') {
+          await concealUnreadableNodeDenial(authCtx, resolvedMemoryId, () => nodeNotFoundError(conceal.ref), gate);
+        } else {
+          await concealUnreadableDenial(authCtx, resolvedMemoryId, conceal.ref, gate);
+        }
+      };
+      await authorizeWrite(ctx);
       // Spec 049 S4 / #1180: a protected address is written by its owning
       // operation only. Since #1201 the ONLY source is the Channel table, and
       // only a Channel's own operations pass the bypass; every node-authoring
@@ -826,12 +829,12 @@ export async function writeNodeCore(
       const inWriteTransaction = <T>(work: (tx: Prisma.TransactionClient) => Promise<T>): Promise<T> =>
         opts?.transaction ? work(opts.transaction.tx) : ctx.db.$transaction(work);
 
-      // encryptMemory flips the memory flag before its conversion scans. A
-      // writer that read the old flag above must not commit a plaintext live
-      // value or revision after that flip. Hold a shared memory-row lock until
-      // this write commits, so the flip either waits for us or we see it and
-      // refuse the stale encryption decision before any snapshot or update.
-      const assertEncryptionStateStable = async (tx: Prisma.TransactionClient) => {
+      // encryptMemory and ownership transfer both change what this writer may
+      // commit. Hold a shared memory-row lock through the write, then recheck
+      // encryption and authorization on the transaction's fresh view. The
+      // preflight gate above can precede a transfer while the transaction
+      // below follows it; request caches must not replay that old decision.
+      const assertMemoryWriteStateStable = async (tx: Prisma.TransactionClient) => {
         await tx.$queryRaw`SELECT id FROM memories WHERE id = ${input.memoryId} FOR SHARE`;
         const latest = await tx.memory.findUniqueOrThrow({
           where: { id: input.memoryId }, select: { isEncrypted: true },
@@ -841,6 +844,7 @@ export async function writeNodeCore(
             extensions: { code: 'NODE_WRITE_CONFLICT', memoryId: input.memoryId },
           });
         }
+        await authorizeWrite(withoutRequestCaches(ctx, tx));
       };
 
       // Inline edge replacement is part of the node mutation, not a follow-up
@@ -1080,7 +1084,7 @@ export async function writeNodeCore(
             const candidate = await assertTargetStillWritable(tx);
             if (!candidate) return { conflict: false, node: null };
             await tx.$queryRaw`SELECT "id" FROM "nodes" WHERE "id" = ${candidate.id} FOR UPDATE`;
-            await assertEncryptionStateStable(tx);
+            await assertMemoryWriteStateStable(tx);
             let current = await assertTargetStillWritable(tx);
             if (!current) return { conflict: false, node: null };
 
@@ -1325,7 +1329,7 @@ export async function writeNodeCore(
                 op: 'create',
               });
             }
-            await assertEncryptionStateStable(tx);
+            await assertMemoryWriteStateStable(tx);
 
             // #1183 — THE AUTHORITATIVE read. The `existing` probe far above is
             // taken before this lock, so under concurrency both callers see no

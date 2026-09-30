@@ -237,6 +237,40 @@ describe('transferMemoryOwnership', () => {
     expect(await db.memory.findUniqueOrThrow({ where: { id: memory.id } })).toMatchObject({ organizationId: nextOrg.id });
   });
 
+  it.each(['create', 'update'] as const)('does not let a former org writer %s a node after transfer', async (mode) => {
+    await transfer({ memoryRef: memory.id, orgRef: org.id, targetClass: 'knowledge' });
+    const nextOrg = await db.organization.create({ data: {
+      id: generateId(), name: 'Next Node Owner', urn: 'next-node-owner',
+    } });
+    const transaction = db.$transaction.bind(db);
+    let transferred = false;
+    const raceDb = new Proxy(db, {
+      get(target, key) {
+        if (key === '$transaction') {
+          return async (work: Parameters<typeof transaction>[0]) => {
+            if (!transferred) {
+              transferred = true;
+              await resolvers.Mutation.transferMemoryOwnership(null, {
+                memoryRef: memory.id, orgRef: nextOrg.id,
+              }, { db, userId: outsider.id, roles: ['ADMIN'] });
+            }
+            return transaction(work as never);
+          };
+        }
+        return Reflect.get(target, key);
+      },
+    });
+    const input = mode === 'create'
+      ? { memoryId: memory.id, loc: 'late-node', name: 'Late', content: 'late write' }
+      : { memoryId: memory.id, loc: node.loc, content: 'late write' };
+    const mutation = mode === 'create' ? resolvers.Mutation.createNode : resolvers.Mutation.updateNode;
+    await expect(mutation(null, { input }, { db: raceDb, userId: owner.id, roles: ['READER'] }))
+      .rejects.toMatchObject({ name: 'MemoryNotFoundError' });
+    expect(transferred).toBe(true);
+    expect(await db.node.count({ where: { memoryId: memory.id, loc: 'late-node' } })).toBe(0);
+    expect((await db.node.findUniqueOrThrow({ where: { id: node.id } })).content).toBe('Permanent citation');
+  });
+
   it('serializes a pending Channel creation behind a transfer of its host', async () => {
     await transfer({ memoryRef: memory.id, orgRef: org.id, targetClass: 'knowledge' });
     const nextOrg = await db.organization.create({ data: {
