@@ -650,6 +650,33 @@ describe('syncGraphFromGithub', () => {
     });
   });
 
+  it('uses current Git metadata when an older pending edge and its target resolve in the same sync', async () => {
+    const sourceId = generateId();
+    const targetId = generateId();
+    const root = join(mockSources, 'test-org', 'test/repo');
+    mkdirSync(root, { recursive: true });
+    const writeSource = (description?: string, data?: unknown) => {
+      const source = buildNodeFrontmatter({ id: sourceId, name: 'Source', tags: [] }, [
+        { target: { id: targetId, loc: 'target' }, name: 'uses', description, data },
+      ]);
+      writeFileSync(join(root, 'source.md'), `---\n${stringify(source, { lineWidth: 0 }).trim()}\n---\n`, 'utf-8');
+    };
+
+    writeSource();
+    expect((await syncGraphFromGithub(makeGraph())).error).toBeUndefined();
+    expect(await db.pendingEdge.findUniqueOrThrow({
+      where: { sourceId_targetId: { sourceId, targetId } },
+    })).toMatchObject({ description: null, data: null });
+
+    writeSource('', { weight: 3 });
+    const target = buildNodeFrontmatter({ id: targetId, name: 'Target', tags: [] });
+    writeFileSync(join(root, 'target.md'), `---\n${stringify(target, { lineWidth: 0 }).trim()}\n---\n`, 'utf-8');
+    expect((await syncGraphFromGithub(makeGraph())).error).toBeUndefined();
+    expect(await db.edge.findFirstOrThrow({ where: { sourceId, targetId } })).toMatchObject({
+      description: '', data: { weight: 3 },
+    });
+  });
+
   it('refreshes a parked edge from the latest Git file, including cleared metadata', async () => {
     const sourceId = generateId();
     const targetId = generateId();

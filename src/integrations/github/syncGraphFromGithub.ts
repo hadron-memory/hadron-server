@@ -702,60 +702,6 @@ export const syncGraphFromGithub = async (
           plaintext: { content: node.content ?? null, abstract: node.abstract ?? null },
         });
 
-        // Resolve any cross-repo PendingEdges that were waiting for this node.
-        // Spec 037: the promoted Edge lives in its SOURCE node's memory (which
-        // may differ from this repo's memory for cross-repo edges); derive its
-        // loc from the source loc + name + this node's (target) loc.
-        const pending = await tx.pendingEdge.findMany({
-          where: { targetId: rowId, deletedAt: null },
-        });
-        for (const p of pending) {
-          const pSrc = await tx.node.findUnique({
-            where: { id: p.sourceId, deletedAt: null },
-            select: { loc: true, memoryId: true },
-          });
-          if (pSrc && !edgeEndpointMemoryIdSet.has(pSrc.memoryId)) {
-            throw new EdgeEndpointPreflightStale(
-              `PendingEdge source ${p.sourceId} became live in unlocked memory ${pSrc.memoryId}`,
-            );
-          }
-          if (pSrc) {
-            const pLoc = p.loc ?? deriveEdgeLoc(pSrc.loc, p.name, loc);
-            const promotedEdge = await tx.edge.upsert({
-              where: { loc_memoryId: { loc: pLoc, memoryId: pSrc.memoryId } },
-              create: {
-                id: generateId(),
-                memoryId: pSrc.memoryId,
-                sourceId: p.sourceId,
-                targetId: p.targetId,
-                loc: pLoc,
-                name: p.name,
-                description: p.description,
-                ...(p.data != null ? { data: p.data as Prisma.InputJsonValue } : {}),
-              },
-              update: {},
-            });
-            // Loc is the edge identity. A no-op upsert can return another
-            // relationship already occupying the same loc, so consuming the
-            // queue row is safe only when the returned edge is exactly the
-            // requested live relationship.
-            if (
-              promotedEdge.deletedAt ||
-              promotedEdge.sourceId !== p.sourceId ||
-              promotedEdge.targetId !== p.targetId ||
-              promotedEdge.name !== p.name
-            ) {
-              throw new Error(
-                `Pending edge ${p.id} cannot promote: edge loc ${pLoc} is already occupied`,
-              );
-            }
-            await tx.pendingEdge.delete({ where: { id: p.id } });
-            // The queue item belongs to its SOURCE memory, not necessarily to
-            // the Git memory that supplied the target. Keep that memory's
-            // dashboard projection exact in this same transaction.
-            await reconcilePendingEdgeCount(tx, pSrc.memoryId);
-          }
-        }
       }
 
       // Spec 049 S4: never delete a row under (or above) a Channel's address,
@@ -896,6 +842,68 @@ export const syncGraphFromGithub = async (
             },
           });
         }
+        }
+
+        // Process the current repo's edges before promoting older PendingEdges.
+        // A parked row may predate metadata storage, or its source file may
+        // change metadata in the same commit that adds the target. The edge
+        // loop above writes that file's current values and consumes the queue
+        // row; remaining rows belong to other repos (or have no current edge).
+        // Spec 037: a promoted cross-repo Edge lives in its SOURCE memory.
+        for (const targetId of new Set(upsertedIds)) {
+          const target = await tx.node.findUnique({
+            where: { id: targetId, deletedAt: null },
+            select: { loc: true },
+          });
+          if (!target) continue;
+          const pending = await tx.pendingEdge.findMany({
+            where: { targetId, deletedAt: null },
+          });
+          for (const p of pending) {
+            const pSrc = await tx.node.findUnique({
+              where: { id: p.sourceId, deletedAt: null },
+              select: { loc: true, memoryId: true },
+            });
+            if (pSrc && !edgeEndpointMemoryIdSet.has(pSrc.memoryId)) {
+              throw new EdgeEndpointPreflightStale(
+                `PendingEdge source ${p.sourceId} became live in unlocked memory ${pSrc.memoryId}`,
+              );
+            }
+            if (pSrc) {
+              const pLoc = p.loc ?? deriveEdgeLoc(pSrc.loc, p.name, target.loc);
+              const promotedEdge = await tx.edge.upsert({
+                where: { loc_memoryId: { loc: pLoc, memoryId: pSrc.memoryId } },
+                create: {
+                  id: generateId(),
+                  memoryId: pSrc.memoryId,
+                  sourceId: p.sourceId,
+                  targetId: p.targetId,
+                  loc: pLoc,
+                  name: p.name,
+                  description: p.description,
+                  ...(p.data != null ? { data: p.data as Prisma.InputJsonValue } : {}),
+                },
+                update: {},
+              });
+              // A loc is the edge identity. A no-op upsert can return another
+              // relationship already occupying the same loc, so consume only
+              // when the returned edge is this live relationship.
+              if (
+                promotedEdge.deletedAt ||
+                promotedEdge.sourceId !== p.sourceId ||
+                promotedEdge.targetId !== p.targetId ||
+                promotedEdge.name !== p.name
+              ) {
+                throw new Error(
+                  `Pending edge ${p.id} cannot promote: edge loc ${pLoc} is already occupied`,
+                );
+              }
+              await tx.pendingEdge.delete({ where: { id: p.id } });
+              // The queue item belongs to its SOURCE memory, which may differ
+              // from the Git memory that supplied the target.
+              await reconcilePendingEdgeCount(tx, pSrc.memoryId);
+            }
+          }
         }
         await reconcilePendingEdgeCount(tx, graph.id);
       });
