@@ -155,8 +155,8 @@ export function callSettingsFor(config: { provider: string; model?: string | nul
 }
 
 /**
- * Fold the adapter's warnings into the report: a SENT knob the adapter warned
- * about was changed or removed on the wire. A clamp keeps a value (ADJUSTED);
+ * Fold the adapter's warnings into the report: a SENT (or already ADJUSTED)
+ * knob the adapter warned about was changed or removed on the wire. A clamp keeps a value (ADJUSTED);
  * anything else removed it (DROPPED). The adapter's text is kept verbatim.
  */
 export function withAdapterWarnings(
@@ -166,16 +166,22 @@ export function withAdapterWarnings(
   if (!warnings?.length) return knobs;
   return knobs.map((knob) => {
     const feature = WARNING_FEATURE[knob.param];
-    if (knob.state !== 'SENT' || !feature) return knob;
+    // ADJUSTED knobs too: a ceiling already lowered by the caller's budget
+    // can be lowered AGAIN by the model's own maximum, and the report must
+    // name what reached the wire (#1501 review, @codex P2).
+    if ((knob.state !== 'SENT' && knob.state !== 'ADJUSTED') || !feature) return knob;
     const warning = warnings.find(
       (w): w is Extract<CallWarning, { feature: string }> => 'feature' in w && w.feature === feature,
     );
     if (!warning) return knob;
+    // A clamp or a limit keeps a value on the wire; anything else removed it.
+    const kept = /clamp|limited to/i.test(warning.details ?? '');
+    const adapter = warning.details ?? '';
     return {
       ...knob,
-      // A clamp or a limit keeps a value on the wire; anything else removed it.
-      state: /clamp|limited to/i.test(warning.details ?? '') ? 'ADJUSTED' : 'DROPPED',
-      ...(warning.details ? { detail: warning.details } : {}),
+      state: kept ? 'ADJUSTED' : 'DROPPED',
+      // Keep the earlier reason when there was one: both steps shaped the value.
+      ...(adapter ? { detail: knob.state === 'ADJUSTED' && knob.detail ? `${knob.detail}; then ${adapter}` : adapter } : {}),
     };
   });
 }

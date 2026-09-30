@@ -326,6 +326,23 @@ describe('#1417 — the knobs on the wire, per call site', () => {
     expect(out.knobs).toEqual([expect.objectContaining({ param: 'maxTokens', state: 'ADJUSTED' })]);
   });
 
+  it('a ceiling lowered by the caller AND then by the model maximum reports the value that reached the wire (@codex P2, #1501)', async () => {
+    // Config 100k, caller budget 32k, model maximum 4096 (claude-3-haiku).
+    const out = await generateText(config('anthropic', { maxTokens: 100_000 }, { model: 'claude-3-haiku-20240307' }), { prompt: 'hi', maxTokens: 32_000 });
+    expect(lastBody().max_tokens).toBe(4096);
+    expect(out.knobs).toEqual([{
+      param: 'maxTokens', state: 'ADJUSTED',
+      detail: expect.stringMatching(/own budget \(32000\).*then .*limited to 4096/),
+    }]);
+  });
+
+  it('an ADJUSTED knob the adapter then removes is reported DROPPED', () => {
+    expect(withAdapterWarnings(
+      [{ param: 'maxTokens', state: 'ADJUSTED', detail: 'x' }],
+      [{ type: 'unsupported', feature: 'maxOutputTokens', details: 'not supported by this model' }],
+    )).toEqual([{ param: 'maxTokens', state: 'DROPPED', detail: 'x; then not supported by this model' }]);
+  });
+
   it('slice 2: a ceiling above the model\'s own maximum is limited by the adapter and reported ADJUSTED', async () => {
     const out = await generateText(config('anthropic', { maxTokens: 10_000_000 }, { model: 'claude-sonnet-4-5' }), { prompt: 'hi' });
     expect(lastBody().max_tokens).toBeLessThan(10_000_000);
