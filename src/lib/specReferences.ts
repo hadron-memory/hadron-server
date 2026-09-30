@@ -70,7 +70,7 @@ export function corpusReferencePattern(memoryUrns: readonly string[]): RegExp {
     // `<corpus>::pas:010::x` names loc `x` in a deeper memory, not `pas:010`
     // here. Rejecting only `::` is not enough, since the loc would backtrack to
     // `pas`; a real loc already consumes every `:<atom>` greedily.
-    `(?<![A-Za-z0-9._:-])((?:[Hh][Rr][Nn]|[Uu][Rr][Nn]):[Nn][Oo][Dd][Ee]:)?(${memories.join('|')})${SEP}(${LOC})(?![A-Za-z0-9_-]|:[A-Za-z0-9:])`,
+    `(?<![A-Za-z0-9._:-])((?:[Hh][Rr][Nn]|[Uu][Rr][Nn]):[Nn][Oo][Dd][Ee]:)?(${memories.join('|')})${SEP}(${LOC})(?![A-Za-z0-9_-]|:[A-Za-z0-9:]|\\.[A-Za-z0-9_-])`,
     'g',
   );
 }

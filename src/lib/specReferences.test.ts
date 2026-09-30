@@ -57,6 +57,9 @@ describe('findCorpusReferences', () => {
     expect(locs(`hrn:node:micromentor.org:specs-draft:${'a'.repeat(64)}`)).toEqual(['a'.repeat(64)]);
     expect(locs(`hrn:node:micromentor.org:specs-draft:${'a'.repeat(65)}`)).toEqual([]);
     expect(locs(`hrn:node:micromentor.org:specs-draft:pas:${'b'.repeat(65)}`)).toEqual([]);
+    const dotted = `hrn:node:micromentor.org:specs-draft:${'a'.repeat(64)}.x`;
+    expect(locs(dotted)).toEqual([]);
+    expect(rewriteCorpusReferences(dotted, P, 'a'.repeat(64), 'pas:040')).toEqual({ text: dotted, count: 0 });
   });
 
   it('also matches under a URN the corpus was published under before a rename', () => {
