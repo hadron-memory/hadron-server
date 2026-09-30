@@ -1010,8 +1010,10 @@ async function postToChannelRoot(
 
 /**
  * Read a Channel's root — the one read path (#939, #1116): seq-ordered
- * ascending as a uniform `{ items, total }` page; `sinceSeq` a watermark
- * cursor (strictly greater), `beforeSeq` its backward mirror; `mentionsRef`
+ * ascending as a uniform `{ items, total }` page. Without a cursor or offset,
+ * select the newest page; `sinceSeq` is a forward watermark (strictly greater),
+ * `beforeSeq` its backward mirror. An explicit offset retains the legacy
+ * oldest-first selection for callers migrating to cursors. `mentionsRef`
  * filters on the STORED envelope mentions, resolved against the host App's
  * staff and members (an unresolvable or foreign ref collapses to the empty
  * page — never an existence oracle).
@@ -1059,17 +1061,15 @@ async function readChannelRoot(
     { createdAt: 'asc' as const },
     { loc: 'asc' as const },
   ];
-  // #1116: `beforeSeq` pages BACKWARD, so it needs the NEWEST page of what it
-  // narrowed to — the messages immediately before the cursor — where the
-  // forward reader wants the oldest. Selecting that means reading from the
-  // other end and flipping back, exactly as the agent-transcript window does
-  // (cor:cht:050:01), rather than an ascending read at a computed offset.
+  // #1116: `beforeSeq` pages backward. #1536: an unqualified read also takes
+  // the newest page. A forward sinceSeq or explicit offset keeps its original
+  // oldest-first selection. Every result is returned ascending for rendering.
   //
   // `offset` is deliberately IGNORED alongside `beforeSeq`: a cursor exists
   // because a position is unstable under concurrent posting, so honouring
   // both would reintroduce the race the cursor was added to remove. Stated
   // in the SDL rather than silently applied.
-  const backward = beforeSeq != null;
+  const backward = beforeSeq != null || (sinceSeq == null && offset == null);
   const readOrder = backward
     ? [
         { seq: 'desc' as const },

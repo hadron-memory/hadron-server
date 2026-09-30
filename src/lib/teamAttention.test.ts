@@ -177,6 +177,17 @@ afterEach(() => {
 });
 
 describe('worker-owned ordinary reads', () => {
+  it('does not mark a partial newest page as a contiguous read', async () => {
+    for (let i = 1; i <= 5; i++) await post(`message ${i}`);
+    const ctx = userCtx({ sessionId });
+    const latest = await Q.channelMessages({}, { channelRef: channel.id, limit: 2 }, ctx);
+    expect(latest.items.map((m: { seq: number }) => m.seq)).toEqual([4, 5]);
+    expect(await db.channelReadState.findFirst({ where: { workerId: worker.id, channelId: channel.id } })).toBeNull();
+
+    await Q.channelMessages({}, { channelRef: channel.id, sinceSeq: 0, limit: 2 }, ctx);
+    expect(await db.channelReadState.findFirst({ where: { workerId: worker.id, channelId: channel.id } })).toMatchObject({ lastSeenSeq: 2 });
+  });
+
   it('a partial page ending inside a legacy duplicate seq stops one short (#1362 review)', async () => {
     await post('one');
     await post('two, first of a pre-#919 duplicate pair');

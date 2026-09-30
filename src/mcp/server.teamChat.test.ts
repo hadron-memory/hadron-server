@@ -108,6 +108,19 @@ describe('hadron_team_chat_post / hadron_team_chat_read (#939)', () => {
     expect(page).not.toContain('msg-6');
   });
 
+  it('defaults to the newest MCP page, with explicit sinceSeq retaining forward paging', async () => {
+    const srv = createTestableMcpServer(hybridAuth(admin.id));
+    for (let i = 1; i <= 5; i++) await srv.callToolText('hadron_team_chat_post', { body: `msg-${i}` });
+    const latest = await srv.callToolText('hadron_team_chat_read', { limit: 2 });
+    expect(latest).toContain('msg-4');
+    expect(latest).toContain('msg-5');
+    expect(latest).not.toContain('msg-1');
+    const oldest = await srv.callToolText('hadron_team_chat_read', { sinceSeq: 0, limit: 2 });
+    expect(oldest).toContain('msg-1');
+    expect(oldest).toContain('msg-2');
+    expect(oldest).not.toContain('msg-5');
+  });
+
   it('accepts an explicit app URN and a replyToSeq', async () => {
     const srv = createTestableMcpServer(hybridAuth(admin.id));
     await srv.callToolText('hadron_team_chat_post', { body: 'question?', app: app.urn });

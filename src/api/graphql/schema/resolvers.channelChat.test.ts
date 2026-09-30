@@ -132,6 +132,15 @@ describe('Channel-addressed chat', () => {
     await expect(M.createChannelMessage({}, { channelRef: release.id, body: 'x', replyToSeq: 99 }, ctx(admin.id))).rejects.toMatchObject({ extensions: { code: 'TEAM_CHAT_REPLY_NOT_FOUND' } });
   });
 
+  it('returns the newest Channel page unless a forward cursor or legacy offset is explicit', async () => {
+    for (let i = 1; i <= 5; i++) await M.createChannelMessage({}, { channelRef: release.id, body: `m${i}` }, ctx(admin.id));
+    const read = (args: Record<string, unknown>) => Q.channelMessages({}, { channelRef: release.id, limit: 2, ...args }, ctx(admin.id));
+    expect((await read({})).items.map((m: { seq: number }) => m.seq)).toEqual([4, 5]);
+    expect((await read({ sinceSeq: 0 })).items.map((m: { seq: number }) => m.seq)).toEqual([1, 2]);
+    expect((await read({ offset: 0 })).items.map((m: { seq: number }) => m.seq)).toEqual([1, 2]);
+    expect((await read({ beforeSeq: 4 })).items.map((m: { seq: number }) => m.seq)).toEqual([2, 3]);
+  });
+
   it('treats `_` and `%` in Channel locs literally for reads, replies, and seq allocation (#1226)', async () => {
     const underscored = (await ensureChannelWithRoot(db, {
       memoryId: memA.id, loc: 'chats_team', name: 'underscored', createdBy: admin.id,

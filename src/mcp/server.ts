@@ -8860,14 +8860,14 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
 
   server.tool(
     'hadron_channel_read',
-    'Read a Channel by id or ADDRESS (the chat-root URN hadron_list_channels prints; spec 049), oldest first by seq — hadron_team_chat_read\'s contract (sinceSeq watermark, beforeSeq backward paging, mentions filter) addressed by Channel. A Channel you may not read is [channel_not_found].',
+    'Read a Channel by id or ADDRESS (the chat-root URN hadron_list_channels prints; spec 049). With no cursor or offset, returns the newest page, ascending by seq; sinceSeq reads forward and beforeSeq pages backward. A Channel you may not read is [channel_not_found].',
     {
       channel: z.string().describe('The Channel — its id, or its address (the chat root node URN hadron_list_channels prints). Copy one of those; a ref naming nothing reads as a Channel you may not see.'),
       sinceSeq: z.number().int().optional().describe('Only messages with seq strictly greater than this watermark.'),
       beforeSeq: z.number().int().optional().describe('Page BACKWARD: only messages with seq strictly less than this, newest page of those. Ignores offset.'),
       mentions: z.string().optional().describe('Filter to messages mentioning this worker (name or id) or user (handle/id) of the host App.'),
       limit: z.number().int().optional().describe('Page size (default 50, cap 200).'),
-      offset: z.number().int().optional().describe('Page offset.'),
+      offset: z.number().int().optional().describe('Legacy oldest-first page offset. Prefer sinceSeq or beforeSeq for stable paging.'),
       session: z.string().optional().describe('Your session id — passing it keeps that session alive (#1081).'),
     },
     async ({ channel, sinceSeq, beforeSeq, mentions, limit, offset, session: rawSession }) => {
@@ -8967,13 +8967,13 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
 
   server.tool(
     'hadron_team_chat_read',
-    'Read the team App\'s chat (#939), oldest first by seq. Ordinary reads take sinceSeq / beforeSeq / mentions. For unattended routing (#1265), pass monitor:true: the tool derives each of your LIVE Worker sessions\' cursor from ChannelReadState and its WATCH/BOTH + mentionOnly policy from the register, returns each message once with the Workers it concerns, and never routes a message back to its Worker author. It NEVER advances state merely by reading. After routing/action succeeds, call again with monitor:true and the returned acknowledge checkpoint. This makes a restart duplicate work rather than skip it. monitorFor narrows to one of your live Workers; monitoring never wakes sessions or observes another operator\'s sessions.',
+    'Read the team App\'s chat (#939), newest page by default, ascending within the page. sinceSeq (including 0) reads forward; beforeSeq pages backward; explicit offset retains oldest-first paging. For unattended routing (#1265), pass monitor:true: the tool derives each of your LIVE Worker sessions\' cursor from ChannelReadState and its WATCH/BOTH + mentionOnly policy from the register, returns each message once with the Workers it concerns, and never routes a message back to its Worker author. It NEVER advances state merely by reading. After routing/action succeeds, call again with monitor:true and the returned acknowledge checkpoint. This makes a restart duplicate work rather than skip it. monitorFor narrows to one of your live Workers; monitoring never wakes sessions or observes another operator\'s sessions.',
     {
       sinceSeq: z.number().int().optional().describe('Only messages with seq strictly greater than this watermark.'),
       beforeSeq: z.number().int().optional().describe('Page BACKWARD (#1116): only messages with seq strictly LESS than this, returning the NEWEST such page — pass the oldest seq you have seen. Stable under concurrent posting where offset is not. Ignores offset.'),
       mentions: z.string().optional().describe('Filter to messages mentioning this worker (name or id) or user (handle/id).'),
       limit: z.number().int().optional().describe('Page size (default 50, cap 200).'),
-      offset: z.number().int().optional().describe('Page offset.'),
+      offset: z.number().int().optional().describe('Legacy oldest-first page offset. Prefer sinceSeq or beforeSeq for stable paging.'),
       session: z.string().optional().describe('Your session id — used to resolve which team App to read when app is omitted. On an ordinary read, passing it keeps that session alive (#1081). Monitor mode uses it only as an App hint and does not heartbeat or wake the session.'),
       app: z.string().optional().describe('The team App — an App URN or ID. Omit to use the session\'s active App.'),
       channel: z.string().optional().describe('Spec 049: read THIS Channel (its id or address, from hadron_list_channels) instead of the App\'s default team chat.'),
