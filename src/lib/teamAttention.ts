@@ -41,8 +41,18 @@ import {
   recentlyTouchedFilter,
 } from './sessionActivity.js';
 
-const MAX_WORKERS = 20;
+// #1496: aligned with MAX_TARGETS/OPEN_SESSION_SCAN_CAP as the single scope
+// guard. The v1 value (20) guarded per-REQUEST work; the paged v2 bounds
+// work with limit/scanLimit, so a live Worker now costs one continuation
+// dictionary entry and one freeze-time register read. A 23-live-Worker team
+// is the production shape that the v1 cap refused outright (#4678).
+const MAX_WORKERS = 200;
 const MAX_TARGETS = 200;
+
+/** #1496 test surface: the scope-guard constants, so tests pin their
+ * alignment with OPEN_SESSION_SCAN_CAP (one guard, one value). */
+export const MAX_WORKERS_PUBLIC = MAX_WORKERS;
+export const MAX_TARGETS_PUBLIC = MAX_TARGETS;
 const MAX_TOKEN_CHARS = 65_536;
 const SWITCHOVER_PROOF_TTL_MS = 10 * 60 * 1000;
 const ENCRYPTED_MESSAGE_PAGE_SIZE = 50;
