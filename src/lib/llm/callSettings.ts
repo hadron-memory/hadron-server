@@ -48,8 +48,18 @@ export interface CallSettings {
 /** Not provider knobs: shaped by the caller, never forwarded from params. */
 const CALL_SHAPING_PARAMS = new Set(['maxTokens', 'toolCalling']);
 
-/** The SDK `feature` name an adapter warning about a mapped param carries. */
-const WARNING_FEATURE: Record<string, string> = { temperature: 'temperature' };
+/**
+ * The SDK `feature` name an adapter warning about each MAPPED param carries.
+ * Every param `callSettingsFor` can send must be here, or an adapter that
+ * drops it is reported as SENT (#1485 QA, Charles: @ai-sdk/openai drops
+ * `reasoningEffort` on a non-reasoning Responses model and warns under that
+ * name). The mapping test pins this list to the mapper's.
+ */
+export const WARNING_FEATURE: Record<string, string> = {
+  temperature: 'temperature',
+  reasoningEffort: 'reasoningEffort',
+  effort: 'effort',
+};
 
 /**
  * Map a config's saved params to call settings, with a report of what each

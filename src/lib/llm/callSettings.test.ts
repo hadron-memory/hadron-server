@@ -10,7 +10,7 @@
 import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
 import { createServer, type IncomingMessage, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { callSettingsFor, withAdapterWarnings } from './callSettings.js';
+import { callSettingsFor, withAdapterWarnings, WARNING_FEATURE } from './callSettings.js';
 import { generateExtraction, generateText, generateWithTools } from './index.js';
 import { encryptToken } from '../tokenCrypto.js';
 
@@ -134,6 +134,15 @@ describe('withAdapterWarnings — the adapter has the last word', () => {
       .toMatchObject({ state: 'DROPPED' });
   });
 
+  it('every param the mapper can send has a warning feature, so no adapter drop reads as SENT (#1485 QA)', () => {
+    const sendable = new Set<string>();
+    for (const provider of ['anthropic', 'openai', 'glm', 'bedrock', 'openai-compatible']) {
+      const { knobs } = callSettingsFor({ provider, params: { temperature: 0.5, reasoningEffort: 'low', effort: 'low', thinking: true } });
+      for (const k of knobs) if (k.state === 'SENT') sendable.add(k.param);
+    }
+    expect([...sendable].sort()).toEqual(Object.keys(WARNING_FEATURE).sort());
+  });
+
   it('a warning about some other feature changes nothing', () => {
     expect(withAdapterWarnings(sent, [{ type: 'unsupported', feature: 'topK' }])).toEqual(sent);
     expect(withAdapterWarnings(sent, undefined)).toEqual(sent);
@@ -199,6 +208,20 @@ describe('#1417 — the knobs on the wire, per call site', () => {
     await generateText(config('openai', { reasoningEffort: 'medium' }, { model: 'o3-mini' }), { prompt: 'hi' });
     expect(bodies[0].path).toMatch(/\/responses$/);
     expect(lastBody().reasoning).toMatchObject({ effort: 'medium' });
+  });
+
+  it('negative: reasoningEffort on a NON-reasoning Responses model is DROPPED by the adapter and reported so (#1485 QA, Charles)', async () => {
+    const out = await generateText(
+      config('openai', { temperature: 0.3, reasoningEffort: 'low' }, { model: 'gpt-4.1' }),
+      { prompt: 'hi' },
+    );
+    expect(bodies[0].path).toMatch(/\/responses$/);
+    expect(lastBody().reasoning).toBeUndefined();
+    expect(lastBody().temperature).toBe(0.3);
+    expect(out.knobs).toEqual([
+      { param: 'temperature', state: 'SENT' },
+      { param: 'reasoningEffort', state: 'DROPPED', detail: expect.stringMatching(/non-reasoning/) },
+    ]);
   });
 
   it('negative: temperature on an openai reasoning model is DROPPED by the adapter and reported so', async () => {
