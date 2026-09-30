@@ -117,15 +117,39 @@ describe('transferMemoryOwnership', () => {
     expect((await resolveNodeRef(db, `hrn:node:transfer-owner:old-specs:${node.loc}`)).id).toBe(node.id);
   });
 
-  it('allows a platform admin to move a private memory to another user', async () => {
-    const result = await resolvers.Mutation.transferMemoryOwnership(null, {
-      memoryRef: memory.id, userRef: receiver.id,
-    }, { db, userId: outsider.id, roles: ['ADMIN'] });
-    expect(result.newUrn).toBe('transfer-receiver:specs');
+  it('does not let a platform admin transfer another user\'s personal or private memory', async () => {
+    const adminCtx = { db, userId: outsider.id, roles: ['ADMIN'] };
+    for (const sourceClass of ['private', 'personal'] as const) {
+      await db.memory.update({ where: { id: memory.id }, data: { class: sourceClass } });
+      for (const destination of [
+        { orgRef: org.id, targetClass: 'knowledge' },
+        { userRef: receiver.id },
+      ]) {
+        for (const dryRun of [true, false]) {
+          await expect(resolvers.Mutation.transferMemoryOwnership(null, {
+            memoryRef: memory.id, ...destination, dryRun,
+          }, adminCtx)).rejects.toMatchObject({ name: 'MemoryNotFoundError' });
+        }
+      }
+    }
     expect(await db.memory.findUniqueOrThrow({ where: { id: memory.id } })).toMatchObject({
-      ownerUserId: receiver.id, organizationId: null, userId: receiver.id, class: 'private',
+      ownerUserId: owner.id, organizationId: null, userId: owner.id, class: 'personal', urn: memory.urn,
     });
-    expect((await resolveNodeRef(db, `hrn:node:${memory.urn}:${node.loc}`)).id).toBe(node.id);
+  });
+
+  it('refuses a personal or private source to any user target before resolving that user', async () => {
+    for (const sourceClass of ['private', 'personal'] as const) {
+      await db.memory.update({ where: { id: memory.id }, data: { class: sourceClass } });
+      for (const userRef of [receiver.id, 'nonexistent-user']) {
+        for (const dryRun of [true, false]) {
+          await expect(transfer({ memoryRef: memory.id, userRef, dryRun }))
+            .rejects.toMatchObject({ extensions: { code: 'MEMORY_TRANSFER_USER_TARGET_UNSUPPORTED' } });
+        }
+      }
+    }
+    expect(await db.memory.findUniqueOrThrow({ where: { id: memory.id } })).toMatchObject({
+      ownerUserId: owner.id, organizationId: null, userId: owner.id, class: 'personal', urn: memory.urn,
+    });
   });
 
   it('can move org ownership back to a user while preserving both former roots', async () => {

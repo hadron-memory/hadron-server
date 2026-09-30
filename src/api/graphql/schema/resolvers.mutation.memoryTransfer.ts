@@ -39,7 +39,6 @@ function refusal(code: string, message: string): GraphQLError {
 /** The source gate runs before any dependency or destination detail is returned. */
 async function authorizeSource(ctx: Context, memory: Memory, ref: string): Promise<void> {
   await concealUnreadableDenial(ctx, memory.id, ref, async () => {
-    if (isPlatformAdmin(ctx) && !ctx.impersonation) return;
     if (!ctx.userId || ctx.impersonation) throw new Error('Forbidden');
     // personal/private's strict owner is separate from the tenant owner. An
     // org ADMIN cannot read, edit, or transfer someone else's private content.
@@ -47,6 +46,7 @@ async function authorizeSource(ctx: Context, memory: Memory, ref: string): Promi
       if (memory.userId !== ctx.userId) throw new Error('Forbidden');
       return;
     }
+    if (isPlatformAdmin(ctx)) return;
     if (memory.ownerUserId !== null) {
       if (memory.ownerUserId !== ctx.userId) throw new Error('Forbidden');
       return;
@@ -59,9 +59,17 @@ async function authorizeSource(ctx: Context, memory: Memory, ref: string): Promi
   });
 }
 
-async function resolveDestination(ctx: Context, input: TransferInput): Promise<Destination> {
+/** Resolve a target only after source authorization, preserving the strict-owner transfer boundary. */
+async function resolveDestination(ctx: Context, input: TransferInput, source: Memory): Promise<Destination> {
   if ((input.orgRef == null) === (input.userRef == null)) {
     throw refusal('BAD_USER_INPUT', 'Provide exactly one of orgRef or userRef.');
+  }
+  // cor:acl:010:02: strict-owned content may leave the owner's namespace
+  // only for an organization they administer, with an explicit class change.
+  // Check before resolving userRef so a target user's existence is not exposed.
+  if (source.userId !== null && input.userRef != null) {
+    throw refusal('MEMORY_TRANSFER_USER_TARGET_UNSUPPORTED',
+      'A personal or private memory can be transferred only to an organization the owner administers.');
   }
   if (input.orgRef != null) {
     const { id } = await resolveOrgRef(ctx.db, input.orgRef);
@@ -216,7 +224,7 @@ export const memoryTransferMutations = {
     const { id } = await resolveMemoryRef(ctx.db, input.memoryRef);
     const memory = await ctx.db.memory.findUniqueOrThrow({ where: { id } });
     await authorizeSource(ctx, memory, input.memoryRef);
-    const destination = await resolveDestination(ctx, input);
+    const destination = await resolveDestination(ctx, input, memory);
     if (input.dryRun === true) return transferPreview(ctx.db as TransferDb, memory, destination, input.targetClass, input.resetGroupMembers, ctx.userId);
 
     try {
@@ -228,7 +236,7 @@ export const memoryTransferMutations = {
         if (current.deletedAt) throw refusal('MEMORY_NOT_FOUND', 'Memory not found.');
         const txCtx = { ...ctx, db: tx } as Context;
         await authorizeSource(txCtx, current, input.memoryRef);
-        const currentDestination = await resolveDestination(txCtx, input);
+        const currentDestination = await resolveDestination(txCtx, input, current);
         const plan = await transferPreview(tx, current, currentDestination, input.targetClass, input.resetGroupMembers, ctx.userId);
         if (plan.blockers.length > 0) throw refusal(plan.blockers[0].code, plan.blockers[0].message);
         if (input.expectedNewUrn != null && input.expectedNewUrn !== plan.newUrn) {
