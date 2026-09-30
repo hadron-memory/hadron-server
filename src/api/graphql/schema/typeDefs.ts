@@ -3227,7 +3227,7 @@ export const typeDefs = `#graphql
     apiStyle: AiApiStyle
     "A key to test with instead of the stored one. Never stored, never echoed."
     apiKey: String
-    "Edited params to test instead of the saved ones (#1413): validated exactly as a save validates them, including the params.baseUrl refusal, against the effective provider — before anything outbound. Used for the call, never stored. Omitted = the saved params; null = the edit clears them (the provider defaults). On the wire the probe exercises the effective provider/model/endpoint/key and (hard-capped at 16, per #1378's original ceiling pending a cost ruling) maxTokens, like its one-word prompt; the platform's request contract does not yet forward the other knobs (temperature, reasoningEffort, …) on any path, so they are validated and reported, not transmitted."
+    "Edited params to test instead of the saved ones (#1413): validated exactly as a save validates them, including the params.baseUrl refusal, against the effective provider — before anything outbound. Used for the call, never stored. Omitted = the saved params; null = the edit clears them (the provider defaults). On the wire the probe exercises the effective provider/model/endpoint/key and (hard-capped at 16, per #1378's original ceiling pending a cost ruling) maxTokens, like its one-word prompt; the other knobs go through the same mapping every run uses (#1417): temperature, OpenAI reasoningEffort and Anthropic effort are sent; thinking and unrecognised keys are validated but not forwarded. knobs on the result reports what each one did."
     params: JSON
   }
 
@@ -3263,6 +3263,18 @@ export const typeDefs = `#graphql
     "The model's reply, truncated."
     reply: String
     error: AiServiceConfigTestError
+    "#1417: what each provider knob in the effective params did on the call. Empty unless the call completed (a failed call's adapter warnings are unknown), or when the params carry none. maxTokens (the probe's own cap governs) and toolCalling (a gate) are not provider knobs and are not listed."
+    knobs: [AiConfigTestKnob!]!
+  }
+
+  "#1417: what one provider knob in the effective params did on the call."
+  type AiConfigTestKnob {
+    "The params key, e.g. temperature."
+    param: String!
+    "SENT (carried to the provider, no adapter warning) | ADJUSTED (sent, but the adapter changed the value, e.g. clamped to its range) | DROPPED (the adapter removed it, e.g. temperature on a reasoning model) | NOT_SENT (the platform does not forward it; see detail)"
+    state: String!
+    "Why it was not sent, or the adapter's own warning text."
+    detail: String
   }
 
   "#1373: one known endpoint for a provider, from the server's single suggestion list."

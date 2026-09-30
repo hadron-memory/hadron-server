@@ -30,6 +30,9 @@ import type { ResolvedAiConfig } from '../aiConfig.js';
 import { decryptToken } from '../tokenCrypto.js';
 import { defaultEndpoint, effectiveApiStyle, explicitEndpoint, usesProcessCredential } from '../aiEndpoint.js';
 import { guardedEndpointFetch } from './endpointFetch.js';
+import { callSettingsFor, withAdapterWarnings, type KnobReport } from './callSettings.js';
+
+export type { KnobReport, KnobState } from './callSettings.js';
 
 export interface LlmRequest {
   system?: string;
@@ -52,6 +55,11 @@ export interface LlmResult {
   tokensOut: number;
   provider: string;
   model: string;
+  /**
+   * #1417 — what each saved provider knob did on this call (sent, adjusted or
+   * dropped by the adapter, or not forwarded). Empty when the config has none.
+   */
+  knobs?: KnobReport[];
 }
 
 export class LlmInvocationError extends Error {
@@ -184,6 +192,8 @@ export interface LlmObjectResult {
   tokensOut: number;
   provider: string;
   model: string;
+  /** #1417 — see LlmResult.knobs. */
+  knobs?: KnobReport[];
 }
 
 /**
@@ -266,12 +276,14 @@ export async function generateExtraction(
   if (JSON_PROMPT_ONLY_PROVIDERS.has(provider)) {
     return extractViaJsonPrompt(resolved, req, fields);
   }
+  const { settings, knobs } = callSettingsFor(resolved.config);
   try {
     const out = await aiGenerateObject({
       model: modelFor(resolved),
       ...(req.system ? { system: req.system } : {}),
       prompt: req.prompt,
       schema: extractionSchema(fields),
+      ...settings,
       ...(req.maxTokens != null ? { maxOutputTokens: req.maxTokens } : {}),
       abortSignal: AbortSignal.timeout(EXTRACTION_NATIVE_TIMEOUT_MS),
     });
@@ -281,6 +293,7 @@ export async function generateExtraction(
       tokensOut: out.usage?.outputTokens ?? 0,
       provider,
       model,
+      knobs: withAdapterWarnings(knobs, out.warnings),
     };
   } catch (err) {
     if (err instanceof LlmInvocationError) throw err;
@@ -349,6 +362,7 @@ async function extractViaJsonPrompt(
     tokensOut: out.tokensOut,
     provider: out.provider,
     model: out.model,
+    knobs: out.knobs,
   };
 }
 
@@ -487,6 +501,7 @@ export async function generateWithTools(
     ]),
   );
 
+  const { settings, knobs } = callSettingsFor(resolved.config);
   try {
     const out = await aiGenerateText({
       model: modelFor(resolved),
@@ -494,6 +509,7 @@ export async function generateWithTools(
       prompt: req.prompt,
       tools: sdkTools,
       stopWhen: stepCountIs(opts.stepCap ?? DEFAULT_TOOL_STEP_CAP),
+      ...settings,
       ...(req.maxTokens != null ? { maxOutputTokens: req.maxTokens } : {}),
     });
     const usage = out.totalUsage ?? out.usage; // summed across steps (spike-pinned)
@@ -503,6 +519,8 @@ export async function generateWithTools(
       tokensOut: usage?.outputTokens ?? 0,
       provider,
       model,
+      // Every step sends the same settings; a warning on any step counts.
+      knobs: withAdapterWarnings(knobs, out.steps.flatMap((step) => step.warnings ?? [])),
       toolCalls,
     };
   } catch (err) {
@@ -528,11 +546,13 @@ export async function generateText(
   req: LlmRequest,
 ): Promise<LlmResult> {
   const { provider, model } = resolved.config;
+  const { settings, knobs } = callSettingsFor(resolved.config);
   try {
     const out = await aiGenerateText({
       model: modelFor(resolved),
       ...(req.system ? { system: req.system } : {}),
       prompt: req.prompt,
+      ...settings,
       ...(req.maxTokens != null ? { maxOutputTokens: req.maxTokens } : {}),
       ...(req.timeoutMs != null ? { abortSignal: AbortSignal.timeout(req.timeoutMs), maxRetries: 0 } : {}),
     });
@@ -542,6 +562,7 @@ export async function generateText(
       tokensOut: out.usage?.outputTokens ?? 0,
       provider,
       model,
+      knobs: withAdapterWarnings(knobs, out.warnings),
     };
   } catch (err) {
     if (err instanceof LlmInvocationError) throw err;
