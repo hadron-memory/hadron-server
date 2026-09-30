@@ -10,6 +10,42 @@ const server = new ApolloServer<Context>({ typeDefs, resolvers });
 describe('#1522 nested Agent read parity', () => {
   beforeEach(async () => cleanDb(db));
 
+  it('keeps a pure App key on its own installed Agent, never another App install', async () => {
+    const owner = await createDbOrgAndGraph(db, { orgName: 'nested-key-owner', graphName: 'owner-memory' });
+    const agent = await db.agent.create({
+      data: {
+        organizationId: owner.org.id,
+        urn: 'nested-key-owner:private-agent',
+        name: 'Owner Agent',
+        systemPrompt: 'synthetic-owner-private-prompt',
+        visibility: 'ORGANIZATION',
+      },
+    });
+    const { app } = await createDbAppWithKey(db, 'nested-key-installed', owner.org.id);
+    const { app: otherApp } = await createDbAppWithKey(db, 'nested-key-other', owner.org.id);
+    await createDbAppAgent(db, app.id, agent.id);
+
+    const query = '{ myApp { agent { id systemPrompt } agents { id } appAgents { agent { id } } } }';
+    const own = await server.executeOperation(
+      { query },
+      { contextValue: { db, appId: app.id, roles: [] } as Context },
+    );
+    expect(own.body.kind).toBe('single');
+    if (own.body.kind !== 'single') return;
+    expect(own.body.singleResult.errors).toBeUndefined();
+    expect(own.body.singleResult.data?.myApp).toMatchObject({
+      agent: { id: agent.id, systemPrompt: 'synthetic-owner-private-prompt' },
+      agents: [{ id: agent.id }],
+      appAgents: [{ agent: { id: agent.id } }],
+    });
+    expect(await resolvers.AppRun.agent(
+      { agentId: agent.id }, {}, { db, appId: app.id, roles: [] } as Context,
+    )).toMatchObject({ id: agent.id });
+    expect(await resolvers.AppRun.agent(
+      { agentId: agent.id }, {}, { db, appId: otherApp.id, roles: [] } as Context,
+    )).toBeNull();
+  });
+
   it('hides a foreign non-public Agent through every App install relation, retaining authorized reads', async () => {
     const vendor = await createDbOrgAndGraph(db, { orgName: 'nested-agent-vendor', graphName: 'vendor-memory' });
     const customer = await createDbOrgAndGraph(db, { orgName: 'nested-agent-customer', graphName: 'customer-memory' });
@@ -70,7 +106,22 @@ describe('#1522 nested Agent read parity', () => {
       { agentId: agent.id },
       {},
       { db, appId: app.id, roles: [] } as Context,
-    )).toBeNull();
+    )).toMatchObject({ id: agent.id, systemPrompt: 'synthetic-vendor-private-prompt' });
+
+    // An App credential executes its installed Agent, including a licensed
+    // vendor Agent. That authority does not extend to customer-org users.
+    const appKey = await server.executeOperation(
+      { query: '{ myApp { agent { id systemPrompt } agents { id } appAgents { agent { id } } } }' },
+      { contextValue: { db, appId: app.id, roles: [] } as Context },
+    );
+    expect(appKey.body.kind).toBe('single');
+    if (appKey.body.kind !== 'single') return;
+    expect(appKey.body.singleResult.errors).toBeUndefined();
+    expect(appKey.body.singleResult.data?.myApp).toMatchObject({
+      agent: { id: agent.id, systemPrompt: 'synthetic-vendor-private-prompt' },
+      agents: [{ id: agent.id }],
+      appAgents: [{ agent: { id: agent.id } }],
+    });
 
     const authorized = await server.executeOperation(
       {

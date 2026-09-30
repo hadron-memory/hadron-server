@@ -156,6 +156,12 @@ async function directReadableAgentFilter(ctx: Context): Promise<Record<string, u
     };
   }
   const or: Record<string, unknown>[] = [{ visibility: 'PUBLIC' }];
+  // A pure App-key principal may execute the Agents installed in its App,
+  // including licensed vendor Agents. Keep this separate from user sessions:
+  // membership in the customer's org does not expose the vendor definition.
+  if (ctx.appId && !ctx.userId && !ctx.impersonation) {
+    or.push({ appAgents: { some: { appId: ctx.appId } } });
+  }
   if (ctx.userId) {
     const orgIds = await getMemberOrgIds(ctx.db, ctx.userId, ctx.impersonation?.orgId);
     if (orgIds.length > 0) or.push({ organizationId: { in: orgIds } });
@@ -165,16 +171,24 @@ async function directReadableAgentFilter(ctx: Context): Promise<Record<string, u
 }
 
 type NestedAgentRow = {
+  id: string;
   deletedAt: Date | null;
   visibility: string;
   organizationId: string | null;
   ownerUserId: string | null;
 };
 
-/** Match Query.agent's PUBLIC-or-owner/org-READER gate for eager relations. */
+/** Match the Agent read gate, including the App credential's installed-Agent authority. */
 async function readableNestedAgent<T extends NestedAgentRow>(ctx: Context, agent: T | null | undefined): Promise<T | null> {
   if (!agent || agent.deletedAt) return null;
   if (agent.visibility === 'PUBLIC') return agent;
+  if (ctx.appId && !ctx.userId && !ctx.impersonation) {
+    const installed = await ctx.db.appAgent.findUnique({
+      where: { appId_agentId: { appId: ctx.appId, agentId: agent.id } },
+      select: { appId: true },
+    });
+    if (installed) return agent;
+  }
   try {
     await requireOwnerOrOrgRole(ctx, agent, 'READER');
     return agent;
