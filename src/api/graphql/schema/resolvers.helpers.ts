@@ -1227,10 +1227,9 @@ export function isPlatformAdmin(ctx: Context): boolean {
  * `requireOrgRole(ctx, entity.organizationId, role)` on those entities so a
  * user-owned row is authorized by its owner, not by an org role.
  *
- *   - Platform ADMIN/OWNER: bypass (same as `requireOrgRole`; a user-owned
- *     App/Agent/Memory-tenant is NOT the strict-personal case — the
- *     personal/private strict-owner gate on `Memory.userId` is separate and
- *     lives in `canReadMemory`/`canWriteToMemory`, and DOES deny admins).
+ *   - Platform ADMIN/OWNER: bypass only for org-owned entities. Memory
+ *     personal/private strict ownership is handled by
+ *     `requireMemoryManageAccess`, not by this tenant-only helper.
  *   - `ownerUserId` set (user-owned): owner-only — `ctx.userId === ownerUserId`;
  *     no org-role path, and the `required` role is moot (the owner has full
  *     authority over their own entity).
@@ -1260,6 +1259,28 @@ export async function requireOwnerOrOrgRole(
     return;
   }
   throw new Error('Forbidden');
+}
+
+/**
+ * Manage a Memory's settings and operational controls. Personal/private
+ * memories have a strict owner in `userId` (cor:acl:010:02), independent of
+ * the tenant owner in `ownerUserId`; every other class uses the tenant gate.
+ */
+export async function requireMemoryManageAccess(
+  ctx: Context,
+  memory: {
+    class: string;
+    userId: string | null;
+    organizationId: string | null;
+    ownerUserId: string | null;
+  },
+  required: 'OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER' = 'ADMIN',
+): Promise<void> {
+  if (memory.class === 'personal' || memory.class === 'private') {
+    if (!ctx.impersonation && ctx.userId && memory.userId === ctx.userId) return;
+    throw new Error('Forbidden');
+  }
+  await requireOwnerOrOrgRole(ctx, memory, required);
 }
 
 /**

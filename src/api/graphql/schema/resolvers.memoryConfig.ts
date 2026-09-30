@@ -12,8 +12,8 @@
  * Holger's H3/H4 (#1325, 2026-09-25): a config is read and changed only by the
  * people who manage the memory —
  *   - personal/private: the STRICT owner (`Memory.userId`) only, as for
- *     `deleteMemory`/`encryptMemory`. NOT the org admins `updateMemory` admits;
- *   - everything else: `requireOwnerOrOrgRole(…, 'ADMIN')`, `updateMemory`'s gate
+ *     `deleteMemory`/`encryptMemory`/`updateMemory`;
+ *   - everything else: the shared `requireMemoryManageAccess` gate
  *     (a user-owned memory's owner, else an org ADMIN/OWNER or platform admin).
  * "Whoever can read the memory" is deliberately NOT the read rule (H4): a writer
  * who cannot see the rules is served by the actionable refusal on write (#1329).
@@ -60,7 +60,7 @@ import {
   isMemoryReadableCached,
   isMemoryReadableFresh,
   requireOrgRole,
-  requireOwnerOrOrgRole,
+  requireMemoryManageAccess,
   withoutRequestCaches,
 } from './resolvers.helpers.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
@@ -122,11 +122,8 @@ export type MemoryGateRow = {
  * to the one shared org — and `requireWriter` refuses every mutation.
  */
 export async function canManageMemoryConfig(ctx: Context, memory: MemoryGateRow): Promise<boolean> {
-  if (memory.class === 'personal' || memory.class === 'private') {
-    return !ctx.impersonation && !!ctx.userId && memory.userId === ctx.userId;
-  }
   try {
-    await requireOwnerOrOrgRole(ctx, memory, 'ADMIN');
+    await requireMemoryManageAccess(ctx, memory);
     return true;
   } catch (e) {
     if (e instanceof Error && e.message === 'Forbidden') return false;

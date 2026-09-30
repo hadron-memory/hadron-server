@@ -35,6 +35,7 @@ let org: { id: string };
 let owner: { id: string }; // org READER who creates + owns the memory
 let other: { id: string }; // another org READER
 let admin: { id: string }; // global OWNER (platform operator)
+let orgAdmin: { id: string }; // org ADMIN, not the strict owner
 
 beforeEach(async () => {
   await cleanDb(db);
@@ -43,13 +44,16 @@ beforeEach(async () => {
   owner = await db.user.create({ data: { githubId: 5001, githubUsername: 'harneet', roles: ['READER'] } });
   other = await db.user.create({ data: { githubId: 5002, githubUsername: 'other', roles: ['READER'] } });
   admin = await db.user.create({ data: { githubId: 5003, githubUsername: 'operator', roles: ['OWNER'] } });
+  orgAdmin = await db.user.create({ data: { githubId: 5005, githubUsername: 'org-admin', roles: ['READER'] } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: owner.id, role: 'READER' } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: other.id, role: 'READER' } });
+  await db.orgMember.create({ data: { organizationId: org.id, userId: orgAdmin.id, role: 'ADMIN' } });
 });
 
 const asOwner = () => ctx({ userId: owner.id, roles: ['READER'] });
 const asOther = () => ctx({ userId: other.id, roles: ['READER'] });
 const asAdmin = () => ctx({ userId: admin.id, roles: ['OWNER'] });
+const asOrgAdmin = () => ctx({ userId: orgAdmin.id, roles: ['READER'] });
 
 async function createPrivate(name = 'my-private') {
   return resolvers.Mutation.createMemory(null, { orgId: org.id, name, memoryClass: 'private' } as any, asOwner());
@@ -88,6 +92,101 @@ describe('createMemory — owner-owned classes', () => {
 });
 
 describe('private/personal access is owner-only', () => {
+  it.each(['private', 'personal'] as const)('updateMemory manages an org-anchored %s memory only for its strict owner', async (memoryClass) => {
+    const mem = await resolvers.Mutation.createMemory(
+      null, { orgId: org.id, name: `${memoryClass}-settings`, memoryClass } as any, asOwner(),
+    );
+    await db.memory.update({
+      where: { id: mem.id },
+      data: { shortDescription: 'private sentinel', data: { secret: 'private sentinel' } },
+    });
+
+    expect((await resolvers.Mutation.updateMemory(null, { id: mem.id, description: 'owner edit' }, asOwner())).description)
+      .toBe('owner edit');
+    expect(await resolvers.Query.memory(null, { ref: mem.id }, asOrgAdmin())).toBeNull();
+    await expect(resolvers.Mutation.updateMemory(null, { id: mem.id }, asOrgAdmin()))
+      .rejects.toThrow('MEMORY_NOT_FOUND');
+    await expect(resolvers.Mutation.updateMemory(null, { id: mem.id, description: 'admin edit' }, asOrgAdmin()))
+      .rejects.toThrow('MEMORY_NOT_FOUND');
+    await expect(resolvers.Mutation.updateMemory(null, { id: mem.id }, asAdmin()))
+      .rejects.toThrow('MEMORY_NOT_FOUND');
+    expect((await db.memory.findUniqueOrThrow({ where: { id: mem.id } })).description).toBe('owner edit');
+  });
+
+  it('rechecks the locked owner before updateMemory writes', async () => {
+    const mem = await createPrivate('owner-race');
+    const transaction = db.$transaction.bind(db);
+    const raceDb = new Proxy(db, {
+      get(target, key) {
+        if (key === '$transaction') {
+          return async (work: Parameters<typeof transaction>[0]) => {
+            await db.memory.update({ where: { id: mem.id }, data: { userId: other.id } });
+            return transaction(work as any);
+          };
+        }
+        return Reflect.get(target, key);
+      },
+    });
+
+    await expect(resolvers.Mutation.updateMemory(null, { id: mem.id, description: 'stale owner edit' }, ctx({
+      userId: owner.id, roles: ['READER'], db: raceDb,
+    }))).rejects.toThrow('MEMORY_NOT_FOUND');
+    const after = await db.memory.findUniqueOrThrow({ where: { id: mem.id } });
+    expect(after.userId).toBe(other.id);
+    expect(after.description).not.toBe('stale owner edit');
+  });
+
+  it('does not let an old org admin write after a concurrent ownership transfer', async () => {
+    const mem = await resolvers.Mutation.createMemory(
+      null, { orgId: org.id, name: 'transferring-memory' }, asOrgAdmin(),
+    );
+    const destination = await db.organization.create({
+      data: { id: generateId(), name: 'destination', urn: 'destination' },
+    });
+    const transaction = db.$transaction.bind(db);
+    const raceDb = new Proxy(db, {
+      get(target, key) {
+        if (key === '$transaction') {
+          return async (work: Parameters<typeof transaction>[0]) => {
+            await db.memory.update({ where: { id: mem.id }, data: { organizationId: destination.id } });
+            return transaction(work as any);
+          };
+        }
+        return Reflect.get(target, key);
+      },
+    });
+
+    await expect(resolvers.Mutation.updateMemory(null, { id: mem.id, description: 'old admin edit' }, ctx({
+      userId: orgAdmin.id, roles: ['READER'], db: raceDb,
+    }))).rejects.toThrow('MEMORY_NOT_FOUND');
+    const after = await db.memory.findUniqueOrThrow({ where: { id: mem.id } });
+    expect(after.organizationId).toBe(destination.id);
+    expect(after.description).not.toBe('old admin edit');
+  });
+
+  it.each(['private', 'personal'] as const)('other management mutations conceal an org-anchored %s memory from its admin', async (memoryClass) => {
+    const mem = await resolvers.Mutation.createMemory(
+      null, { orgId: org.id, name: `${memoryClass}-controls`, memoryClass } as any, asOwner(),
+    );
+    const controls = [
+      () => resolvers.Mutation.retryFailedEmbeddings(null, { memoryRef: mem.id }, asOrgAdmin()),
+      () => resolvers.Mutation.setMemorySourceToken(null, { id: mem.id, token: 'synthetic-token' }, asOrgAdmin()),
+      () => resolvers.Mutation.syncMemory(null, { id: mem.id }, asOrgAdmin()),
+      () => resolvers.Mutation.pushMemoryToGit(null, { id: mem.id }, asOrgAdmin()),
+      () => resolvers.Mutation.updateMemorySubscription(
+        null, { memoryRef: mem.id, orgRef: org.id, role: 'READER' }, asOrgAdmin(),
+      ),
+    ];
+    for (const control of controls) {
+      await expect(control()).rejects.toThrow(/MEMORY_NOT_FOUND|not found|No match for memoryRef/i);
+    }
+
+    expect(await resolvers.Mutation.retryFailedEmbeddings(null, { memoryRef: mem.id }, asOwner())).toBe(0);
+    await resolvers.Mutation.setMemorySourceToken(null, { id: mem.id, token: 'owner-token' }, asOwner());
+    expect((await db.memory.findUniqueOrThrow({ where: { id: mem.id } })).sourceTokenEncrypted).toBeTruthy();
+    await expect(resolvers.Mutation.syncMemory(null, { id: mem.id }, asOwner())).resolves.toBeTruthy();
+  });
+
   it('the owner can read, list, and write their private memory', async () => {
     const mem = await createPrivate();
     // read via memory(id)
