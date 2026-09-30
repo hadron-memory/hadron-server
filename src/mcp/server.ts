@@ -74,6 +74,7 @@ import type { Request, Response } from 'express';
 import { db } from '../integrations/db/client.js';
 import { acquireLockSet, ancestorLocs, lockAncestorsForCreate, lockLocForWrite, lockNodeForDelete } from '../lib/nodeSubtreeLock.js';
 import { lockMemoryForChannelChange } from '../lib/channels.js';
+import { assertNoMintedSpecRemoval, assertNoMintedSpecUnmark, SPEC_MINTED_PERMANENT } from '../lib/mintedSpecPermanence.js';
 import { escapePrismaLikePattern } from '../lib/literalLocPrefix.js';
 import {
   moveNodeSubtree,
@@ -3373,6 +3374,9 @@ export function createMcpServerInstance(
                 `[write_conflict] the section at "${loc}" moved while this write waited — re-read and retry.`,
               );
             }
+            // #1468 — a re-save writes omitted tags as [], which must not
+            // strip the marker off a minted spec.
+            await assertNoMintedSpecUnmark(tx, memoryId, [{ id: current.id, tags: upsertArgs.update.tags }], 're-save');
             // Compare logical plaintext. Fresh AES-GCM ciphertext differs on
             // every save even when the section body is unchanged.
             const currentForDiff = parentKey
@@ -3388,6 +3392,11 @@ export function createMcpServerInstance(
               ...buildNodeRevisionSnapshot(current, editorFromAuth(auth), { changes }),
             });
           }
+          if (prior?.deletedAt) {
+            // #1468 — the upsert rewrites a tombstone's tags too (keeping it
+            // deleted), and a post-mint spec tombstone must stay marked.
+            await assertNoMintedSpecUnmark(tx, memoryId, [{ id: prior.id, tags: upsertArgs.update.tags }], 're-save');
+          }
           if (!prior || prior.deletedAt) {
             await assertMemoryEncryptionStateForWrite(tx, memoryId, parentMemoryState.isEncrypted, auth);
           }
@@ -3402,6 +3411,9 @@ export function createMcpServerInstance(
         if (e instanceof NodeMovedDuringWriteError) return textResult(e.message);
         if (e instanceof MemoryEncryptionChangedDuringWriteError) return textResult(e.message);
         if (e instanceof MemoryWriteAccessChangedDuringWriteError) return textResult(e.message);
+        if (e instanceof ScopeGraphQLError && e.extensions?.code === SPEC_MINTED_PERMANENT) {
+          return textResult(`[spec_minted_permanent] ${e.message}`);
+        }
         throw e;
       }
 
@@ -5446,6 +5458,9 @@ export function createMcpServerInstance(
 
           if (authoritative) {
             await tx.$queryRaw`SELECT "id" FROM "nodes" WHERE "id" = ${authoritative.id} FOR UPDATE`;
+            // #1468 — reviving a spec tombstone kept for recovery after the
+            // mint must not also strip its marker. Parity with writeNodeCore.
+            await assertNoMintedSpecUnmark(tx, memoryId, [{ id: authoritative.id, tags: tags ?? [], role }], 'overwrite');
           }
           await assertMemoryEncryptionStateForWrite(tx, memoryId, memEncRow?.isEncrypted ?? false, auth);
 
@@ -5508,6 +5523,9 @@ export function createMcpServerInstance(
         if (e instanceof EdgeLocConflictError) return textResult(e.message);
         if (e instanceof MemoryEncryptionChangedDuringWriteError) return textResult(e.message);
         if (e instanceof MemoryWriteAccessChangedDuringWriteError) return textResult(e.message);
+        if (e instanceof ScopeGraphQLError && e.extensions?.code === SPEC_MINTED_PERMANENT) {
+          return textResult(`[spec_minted_permanent] ${e.message}`);
+        }
         throw e;
       }
 
@@ -5869,6 +5887,8 @@ export function createMcpServerInstance(
                 `[write_conflict] ${rawUrn} moved, was deleted or changed memory while this update waited — re-read it and retry.`,
               );
             }
+            // #1468 — dropping the spec marker would make a minted spec deletable.
+            await assertNoMintedSpecUnmark(tx, memory.id, [{ id: current.id, tags, role }], 'update');
             // #937 — bind a client-side read/modify/write to the Revision it
             // actually read. The row lock + #1339 reconciliation above make
             // this the same atomic revSeq guard used by writeNodeCore. Do not
@@ -5928,6 +5948,9 @@ export function createMcpServerInstance(
           if (e instanceof InlineEdgeEndpointError) return textResult(e.message);
           if (e instanceof EdgeLocConflictError) return textResult(e.message);
           if (e instanceof RoleNotDeclaredError) return textResult(`[role_not_declared] ${e.message}`);
+          if (e instanceof ScopeGraphQLError && e.extensions?.code === SPEC_MINTED_PERMANENT) {
+            return textResult(`[spec_minted_permanent] ${e.message}`);
+          }
           if (e instanceof ScopeGraphQLError && e.extensions?.code === 'NODE_WRITE_CONFLICT') {
             return textResult(`[node_write_conflict] ${e.message}`);
           }
@@ -6626,6 +6649,7 @@ Refuses if the node has descendants under its URN prefix unless \`recursive: tru
         | { refused: 'crossMem'; count: number }
         | { refused: 'changed' }
         | { refused: 'access' }
+        | { refused: 'mintedSpec'; message: string }
         | { ok: true; descendantCount: number };
 
       const result: DeleteResult = await db.$transaction(async (tx) => {
@@ -6665,18 +6689,32 @@ Refuses if the node has descendants under its URN prefix unless \`recursive: tru
           return { refused: 'descendants', count: descendantCount };
         }
 
+        // #1468 — the complete removal scope, under the loc lock above. A hard
+        // delete also removes tombstones; a soft delete removes live rows. Hard
+        // deletes reuse these ids for the cross-memory check + PendingEdge
+        // cleanup.
+        const affectedIds =
+          recursive && descendantCount > 0
+            ? (await tx.node.findMany({
+                where: {
+                  memoryId: memory.id,
+                  ...(hard ? {} : { deletedAt: null }),
+                  OR: [{ id: existing.id }, { loc: { startsWith: escapePrismaLikePattern(loc + ':') } }],
+                },
+                select: { id: true },
+              })).map((n) => n.id)
+            : [existing.id];
+        // Refused before any write, so returning (not throwing) commits nothing.
+        try {
+          await assertNoMintedSpecRemoval(tx, memory.id, affectedIds, hard ? 'hard-delete' : 'delete');
+        } catch (e) {
+          if (e instanceof ScopeGraphQLError && e.extensions?.code === SPEC_MINTED_PERMANENT) {
+            return { refused: 'mintedSpec', message: e.message };
+          }
+          throw e;
+        }
+
         if (hard) {
-          // Resolve affected ids for cross-memory check + PendingEdge cleanup.
-          const affectedIds =
-            recursive && descendantCount > 0
-              ? (await tx.node.findMany({
-                  where: {
-                    memoryId: memory.id,
-                    OR: [{ id: existing.id }, { loc: { startsWith: escapePrismaLikePattern(loc + ':') } }],
-                  },
-                  select: { id: true },
-                })).map((n) => n.id)
-              : [existing.id];
 
           if (!cascadeCrossMemoryEdges) {
             const crossMemEdges = await tx.edge.count({
@@ -6735,6 +6773,9 @@ Refuses if the node has descendants under its URN prefix unless \`recursive: tru
         }
         if (result.refused === 'changed') {
           return textResult(`Node "${rawUrn}" moved while this delete waited; re-read it and retry.`);
+        }
+        if (result.refused === 'mintedSpec') {
+          return textResult(`[spec_minted_permanent] ${result.message}`);
         }
         if (result.refused === 'descendants') {
           const mode = hard ? 'hard delete' : 'soft delete';
@@ -7016,6 +7057,17 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
               authorizeLockedMemory: (memoryId) => assertLockedMemoryWriteAccess(tx, auth, memoryId),
             });
             relocated = subtreeResult.moved;
+            // #1468 — evicting the destination occupant removes it from its
+            // corpus and hands its citation to another node: refused for a
+            // minted spec. Checked AFTER the helper on purpose: it already holds
+            // the occupant row (the eviction update) and the destination memory
+            // FOR NO KEY UPDATE, so the guard takes nothing new; checking first
+            // would take that memory FOR SHARE and then upgrade it inside the
+            // helper, the deadlock its header warns about. A refusal rolls the
+            // whole transaction back.
+            if (existingTarget) {
+              await assertNoMintedSpecRemoval(tx, toMemory.id, [existingTarget.id], 'overwrite');
+            }
           }
 
           // Move BY ID — id is stable across moves, so this refetch can't race a
@@ -7067,6 +7119,9 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         }
         if (e instanceof SubtreeMovePlaceholderError) {
           return textResult(`SPEC_PLACEHOLDER_OUTSIDE_DRAFT: ${e.message}`);
+        }
+        if (e instanceof ScopeGraphQLError && e.extensions?.code === SPEC_MINTED_PERMANENT) {
+          return textResult(`[spec_minted_permanent] ${e.message}`);
         }
         if (e instanceof SubtreeMoveSourceChangedError) {
           return textResult('The node was moved concurrently; re-read it and retry.');

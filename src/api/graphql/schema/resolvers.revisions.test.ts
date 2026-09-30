@@ -403,3 +403,55 @@ describe('Editor lock', () => {
     expect(updated?.editorLockUserId).toBeNull();
   });
 });
+
+// #1468 (Codex on #1475) — createAgent may promote an existing memory into an
+// agent's system memory, so a system memory can hold a minted corpus.
+describe('#1468 — minted specs in an agent system memory', () => {
+  const permanent = (e: unknown) =>
+    (e as { extensions?: { code?: string } }).extensions?.code === 'SPEC_MINTED_PERMANENT';
+  const stamp = () => db.memory.update({ where: { id: systemMemory.id }, data: { corpusDraft: false, corpusMintedAt: new Date() } });
+
+  it('restoreRevision refuses a snapshot that would drop a live minted spec', async () => {
+    await resolvers.Mutation.createRevision({}, { agentId: agent.id, description: 'before the spec' }, adminCtx());
+    const spec = await db.node.create({
+      data: { id: generateId(), memoryId: systemMemory.id, loc: 'pas:010', name: 'pas:010', tags: ['spec'] },
+    });
+    await stamp();
+    await expect(resolvers.Mutation.restoreRevision({}, { agentId: agent.id, revisionLoc: 'revisions:rev-1' }, adminCtx()))
+      .rejects.toSatisfy(permanent);
+    expect(await db.node.findUniqueOrThrow({ where: { id: spec.id } })).toMatchObject({ deletedAt: null });
+  });
+
+  it('restoreRevision refuses restoring a minted spec from a snapshot without its marker', async () => {
+    const n = await db.node.create({ data: { id: generateId(), memoryId: systemMemory.id, loc: 'pas:020', name: 'pas:020' } });
+    await resolvers.Mutation.createRevision({}, { agentId: agent.id, description: 'unmarked' }, adminCtx());
+    await db.node.update({ where: { id: n.id }, data: { tags: ['spec'], revisionContentHash: revisionStateHashRefreshMarker() } });
+    await stamp();
+    await expect(resolvers.Mutation.restoreRevision({}, { agentId: agent.id, revisionLoc: 'revisions:rev-1' }, adminCtx()))
+      .rejects.toSatisfy(permanent);
+    expect(await db.node.findUniqueOrThrow({ where: { id: n.id } })).toMatchObject({ tags: ['spec'], deletedAt: null });
+  });
+
+  it('control: restoreRevision still restores over an unstamped system memory holding a spec', async () => {
+    await resolvers.Mutation.createRevision({}, { agentId: agent.id, description: 'before the spec' }, adminCtx());
+    const spec = await db.node.create({
+      data: { id: generateId(), memoryId: systemMemory.id, loc: 'pas:030', name: 'pas:030', tags: ['spec'] },
+    });
+    await resolvers.Mutation.restoreRevision({}, { agentId: agent.id, revisionLoc: 'revisions:rev-1' }, adminCtx());
+    expect((await db.node.findUniqueOrThrow({ where: { id: spec.id } })).deletedAt).not.toBeNull();
+  });
+
+  it('deleteAgent refuses while its system memory holds a minted spec, deleting nothing', async () => {
+    await db.node.create({ data: { id: generateId(), memoryId: systemMemory.id, loc: 'pas:040', name: 'pas:040', role: 'spec' } });
+    await stamp();
+    await expect(resolvers.Mutation.deleteAgent({}, { ref: agent.id }, adminCtx())).rejects.toSatisfy(permanent);
+    expect(await db.agent.findUniqueOrThrow({ where: { id: agent.id } })).toMatchObject({ deletedAt: null });
+    expect(await db.memory.findUniqueOrThrow({ where: { id: systemMemory.id } })).toMatchObject({ deletedAt: null });
+  });
+
+  it('control: deleteAgent still deletes an agent whose system memory holds no minted spec', async () => {
+    expect(await resolvers.Mutation.deleteAgent({}, { ref: agent.id }, adminCtx())).toBe(true);
+    expect((await db.agent.findUniqueOrThrow({ where: { id: agent.id } })).deletedAt).not.toBeNull();
+    expect((await db.memory.findUniqueOrThrow({ where: { id: systemMemory.id } })).deletedAt).not.toBeNull();
+  });
+});

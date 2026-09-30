@@ -30,6 +30,9 @@ import { acquireLockSet, ancestorLocs, lockAncestorsForCreateMany } from '../../
 import { Prisma, type Memory, type Node, type Organization } from '../../generated/prisma/index.js';
 import { validateGitBranch } from '../../lib/gitRef.js';
 import { lockMemoryForChannelChange } from '../../lib/channels.js';
+import { lockMintedSpecsIn, lockMintedSpecUnmarks } from '../../lib/mintedSpecPermanence.js';
+import { recordUrnRename } from '../../lib/urnAlias.js';
+import { safeNodeUrnV2 } from '../../lib/urnEmit.js';
 import { reconcilePendingEdgeCount } from '../../lib/pendingEdgePromotion.js';
 import {
   buildNodeRevisionSnapshot,
@@ -189,6 +192,24 @@ export async function updateNodeFromGitSync(
       if (!(e instanceof GraphQLError) || e.extensions?.code !== 'SPEC_PLACEHOLDER_ROLE_LOCKED') throw e;
       console.warn(`[syncGraphFromGithub] kept role 'spec' on unwritten placeholder ${locked.loc}: ${e.message}`);
       const { role: _kept, ...rest } = update;
+      update = rest;
+    }
+  }
+  // #1468 — a file that drops the spec marker from a minted spec would make
+  // it deletable. Same keep-and-report rule as above: the stored tags and role
+  // are KEPT, the rest of the file applies, and nothing fails the sync.
+  if ('tags' in update || 'role' in update) {
+    const unmarked = await lockMintedSpecUnmarks(tx, expectedMemoryId, [{
+      id: locked.id,
+      tags: 'tags' in update ? (update.tags as string[]) : undefined,
+      role: 'role' in update ? (update.role as string | null) : undefined,
+    }]);
+    if (unmarked.length > 0) {
+      console.warn(
+        `[syncGraphFromGithub] kept the spec marker on minted spec ${locked.loc}: ` +
+          'the file drops it, and a minted spec stays a spec (#1468).',
+      );
+      const { tags: _keptTags, role: _keptRole, ...rest } = update;
       update = rest;
     }
   }
@@ -587,11 +608,71 @@ export const syncGraphFromGithub = async (
         else unprotectableSkips.push(skipped.source);
       }
 
+      // #1468 — decide, BEFORE anything is parked, which id-first moves are
+      // refused because the loc they target will not be vacated: it holds a
+      // minted spec (never parked), a row whose file is unusable (#1224), or
+      // a row whose own move is refused — a fixed point, so a chain
+      // (A onto B, B onto a minted spec) refuses A too instead of parking B
+      // at an invalid address it can then never leave. Judged on the rows as
+      // they stand now; a move this refuses lands on a later sync once its
+      // target is free. Only the first claimant of a file id is a move.
+      const refusedMoverIds = await (async () => {
+        const firstClaim = new Map<string, string>();
+        // Ids named by files under a protected loc: those files are skipped,
+        // so the rows they name do not move this run (Codex on #1475).
+        const protectedFileIds = new Set<string>();
+        for (const n of fsGraph.nodes) {
+          if (!n.id) continue;
+          if (isProtected(n.loc!)) protectedFileIds.add(n.id);
+          else if (!firstClaim.has(n.id)) firstClaim.set(n.id, n.loc!);
+        }
+        if (firstClaim.size === 0) return new Set<string>();
+        const named = await tx.node.findMany({
+          where: { id: { in: [...firstClaim.keys(), ...protectedFileIds] }, memoryId: graph.id },
+          select: { id: true, loc: true },
+        });
+        // A row whose move is refused for its protected SOURCE loc stays too.
+        const pinned = named.filter((r) => protectedFileIds.has(r.id) || (firstClaim.has(r.id) && isProtected(r.loc)));
+        const movers = named.filter(
+          (r) => firstClaim.has(r.id) && r.loc !== firstClaim.get(r.id) && !isProtected(r.loc) && !protectedFileIds.has(r.id),
+        );
+        if (movers.length === 0) return new Set<string>();
+        const occupants = await tx.node.findMany({
+          where: { memoryId: graph.id, loc: { in: movers.map((m) => firstClaim.get(m.id)!) } },
+          select: { id: true, loc: true },
+        });
+        const occupantAt = new Map(occupants.map((o) => [o.loc, o.id]));
+        const staying = new Set<string>([
+          ...skippedRowIds,
+          ...pinned.map((r) => r.id),
+          // Never a row that arrived after #1330's scan: locking it would wait
+          // under the rulebook lock. A move onto one is deferred in the loop.
+          ...(await lockMintedSpecsIn(tx, graph.id, occupants.filter((o) => !isLateRow(o)).map((o) => o.id))).map((m) => m.id),
+        ]);
+        const refused = new Set<string>();
+        for (let changed = true; changed;) {
+          changed = false;
+          for (const m of movers) {
+            const occ = occupantAt.get(firstClaim.get(m.id)!);
+            if (!refused.has(m.id) && occ && occ !== m.id && (staying.has(occ) || refused.has(occ))) {
+              refused.add(m.id);
+              changed = true;
+            }
+          }
+        }
+        return refused;
+      })();
+
       const upsertedIds: string[] = [];
       // Rows the cleanup pass below must leave alone: a protected file's row
       // is not upserted, and `notIn: upsertedIds` would otherwise hard-delete
       // it — a root deletion cascading its Channel row (Copilot on PR #1165).
       const protectedRowIds = new Set<string>();
+      // #1468 (Codex on #1475) — file locs whose id-first move was REFUSED:
+      // the row stays at its old loc, so the file's outgoing edges (declared
+      // from the new loc) are skipped this run rather than failing the edge
+      // phase's endpoint check on every retry. They land with the move.
+      const refusedMoveLocs = new Set<string>();
       // File frontmatter ids already claimed in THIS run — a second file
       // carrying the same id (a copied file) must not be treated as a move
       // of the first; it gets a fresh id instead.
@@ -798,6 +879,7 @@ export const syncGraphFromGithub = async (
           if (byId.loc !== loc && isProtected(byId.loc)) {
             skippedProtected.push(`${byId.loc} → ${loc}`);
             protectedRowIds.add(byId.id);
+            refusedMoveLocs.add(loc);
             incomingEdgesWait();
             continue;
           }
@@ -810,6 +892,15 @@ export const syncGraphFromGithub = async (
             // Not moving: the row keeps its loc and IS the target, so claim
             // the id for it now, before any later copy can.
             else if (node.id && !idSettled(node.id)) fileIdToRowId.set(node.id, byId.id);
+            continue;
+          }
+          if (byId.loc !== loc && refusedMoverIds.has(byId.id)) {
+            console.warn(
+              `[syncGraphFromGithub] "${graphName}": refusing move of ${byId.id} "${byId.loc}" → "${loc}" — the loc is held by a row that will not move this run (a minted spec keeps its citation, #1468)`,
+            );
+            protectedRowIds.add(byId.id);
+            refusedMoveLocs.add(loc);
+            incomingEdgesWait();
             continue;
           }
           if (byId.loc !== loc) {
@@ -837,6 +928,7 @@ export const syncGraphFromGithub = async (
                 `[syncGraphFromGithub] "${graphName}": refusing move of ${byId.id} into "${loc}" — the occupant ${occupant.id} is held by a file whose path is not a valid loc`,
               );
               protectedRowIds.add(byId.id);
+              refusedMoveLocs.add(loc);
               incomingEdgesWait();
               continue;
             }
@@ -851,6 +943,26 @@ export const syncGraphFromGithub = async (
               heldMoves.push(`${byId.loc} → ${loc} (occupant ${occupant.id})`);
               protectedRowIds.add(byId.id);
               deferredLocs.add(loc);
+              incomingEdgesWait();
+              continue;
+            }
+            if (
+              occupant && occupant.id !== byId.id
+              && (await lockMintedSpecsIn(tx, graph.id, [occupant.id])).length > 0
+            ) {
+              // #1468 — a minted spec is never parked. Parking hands its
+              // published citation to the incoming node, and whether the
+              // spec's own file re-homes it later this run cannot be known
+              // here: that file may be skipped (protected or invalid path) or
+              // its own move refused, leaving the spec at an invalid address.
+              // Refuse the competing move instead (the #1224 remedy above).
+              // A swap of two minted specs' citations is therefore refused
+              // too: it is a renumbering of published citations.
+              console.warn(
+                `[syncGraphFromGithub] "${graphName}": refusing move of ${byId.id} into "${loc}" — the occupant ${occupant.loc} is a minted spec, and a minted spec keeps its citation (#1468)`,
+              );
+              protectedRowIds.add(byId.id);
+              refusedMoveLocs.add(loc);
               incomingEdgesWait();
               continue;
             }
@@ -870,6 +982,18 @@ export const syncGraphFromGithub = async (
               );
             }
             console.log(`[syncGraphFromGithub] "${graphName}": node ${byId.id} moved "${byId.loc}" → "${loc}"`);
+            // #1468 — a minted spec's published citation keeps resolving after
+            // a repo rename, as it does after moveNode. Same transaction.
+            if ((await lockMintedSpecsIn(tx, graph.id, [byId.id])).length > 0) {
+              await recordUrnRename(tx, {
+                entityType: 'NODE',
+                entityId: byId.id,
+                // The pre-parking address: a waypoint loc was never published.
+                oldUrn: safeNodeUrnV2(graph.urn, (parkedRevisionBases.get(byId.id) ?? byId).loc).slice('hrn:node:'.length),
+                newUrn: safeNodeUrnV2(graph.urn, loc).slice('hrn:node:'.length),
+                createdBy: 'system:github-sync',
+              });
+            }
           }
           await updateNodeFromGitSync(tx, byId, { ...update, ...placeholderMarkerFor(byId) }, parkedRevisionBases.get(byId.id), graph.id, (locked) =>
             objectTypeFor(locked.properties),
@@ -970,11 +1094,39 @@ export const syncGraphFromGithub = async (
           `[syncGraphFromGithub] "${graphName}": destructive cleanup SUPPRESSED — ${unprotectableSkips.length} file(s) have a path that is not a valid loc and carry no id naming a row in this memory: ${unprotectableSkips.join(', ')}`,
         );
       } else {
+        // #1468 (Holger: skip and warn, not refuse) — a spec whose file is
+        // gone from the repo is NOT pruned from a mint-stamped corpus: minted
+        // specs are permanent. It is kept, like a Channel-protected row, and
+        // reported; the rest of the cleanup proceeds. Found and locked BEFORE
+        // the edge gate below, so a kept spec's cross-memory edges don't refuse
+        // a delete that will not happen.
+        const candidateIds = (await tx.node.findMany({
+          where: {
+            ownerRepo,
+            memoryId: graph.id,
+            id: {
+              notIn: [...upsertedIds, ...protectedRowIds, ...skippedRowIds],
+              // Same bound as the cleanup below (#1330): locking a row that
+              // arrived after the scan would wait under the rulebook lock.
+              ...(prelockedIds ? { in: prelockedIds } : {}),
+            },
+            ...(deletionFilter.notClauses.length
+              ? { NOT: { OR: deletionFilter.notClauses as Prisma.NodeWhereInput[] } }
+              : {}),
+          },
+          select: { id: true },
+        })).map((n) => n.id);
+        const keptMintedSpecs = await lockMintedSpecsIn(tx, graph.id, candidateIds);
+        if (keptMintedSpecs.length > 0) {
+          console.warn(
+            `[syncGraphFromGithub] "${graphName}": kept ${keptMintedSpecs.length} minted spec(s) whose file is gone from the repo — minted specs are permanent (restore the file, or supersede the spec): ${keptMintedSpecs.map((k) => k.loc).join(', ')}`,
+          );
+        }
         const cleanupWhere: Prisma.NodeWhereInput = {
           ownerRepo,
           memoryId: graph.id,
           id: {
-            notIn: [...upsertedIds, ...protectedRowIds, ...skippedRowIds],
+            notIn: [...upsertedIds, ...protectedRowIds, ...skippedRowIds, ...keptMintedSpecs.map((k) => k.id)],
             // #1330 — only rows this sync already holds, once it holds the rulebook lock.
             ...(prelockedIds ? { in: prelockedIds } : {}),
           },
@@ -996,7 +1148,8 @@ export const syncGraphFromGithub = async (
           // `skippedRowIds` joins the survivors for the same reason
           // `protectedRowIds` does (#1224): a file skipped for an unusable
           // path is absent from `fsGraph.nodes`, so `notIn: upsertedIds`
-          // would hard-delete the row it names.
+          // would hard-delete the row it names. Kept minted specs (#1468)
+          // join them too.
           where: cleanupWhere,
         });
       }
@@ -1015,7 +1168,7 @@ export const syncGraphFromGithub = async (
       }
 
       for (const edge of edges) {
-        if (refusedRoleLocs.has(edge.sourceLoc) || deferredLocs.has(edge.sourceLoc)) continue;
+        if (refusedRoleLocs.has(edge.sourceLoc) || deferredLocs.has(edge.sourceLoc) || refusedMoveLocs.has(edge.sourceLoc)) continue;
         if (!fileIdToRowId.has(edge.targetId) && unappliedFileIds.has(edge.targetId)) continue;
         // Resolve endpoints through the remaps: the source is always a file
         // in this repo (by loc); the target prefers this repo's claimant of

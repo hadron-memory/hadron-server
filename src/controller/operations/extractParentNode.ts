@@ -1,5 +1,6 @@
 import type { PrismaClient } from '../../generated/prisma/index.js';
 import { assertBatchMutable } from '../../lib/bulkMutationGate.js';
+import { assertNoMintedSpecRemoval } from '../../lib/mintedSpecPermanence.js';
 import { Prisma } from '../../generated/prisma/index.js';
 import { generateId } from '../../lib/id.js';
 import { ensureCurrentNodeRevisionInTransaction, jsonOrDbNull } from '../../lib/nodeRevisionSnapshot.js';
@@ -213,6 +214,10 @@ export async function extractParentNodeGraph(
           }
         }
         await tx.$queryRaw`SELECT id FROM memories WHERE id = ${args.sourceMemoryId} FOR SHARE`;
+        // #1468 — the move disposition soft-deletes the whole selected subtree
+        // from the source memory; a minted spec in it is refused (copy-only is
+        // not a removal). Under the fence just taken, in its order.
+        await assertNoMintedSpecRemoval(tx, args.sourceMemoryId, [...selectedLoc.keys()], 'extract-and-move');
       }
       // The gate's signal snapshot does not validate authorship. A direct raw
       // edit may leave a stale stamp on a selected source. Reconcile stamped

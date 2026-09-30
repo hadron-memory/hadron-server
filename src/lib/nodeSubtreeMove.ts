@@ -59,6 +59,7 @@ import type { Prisma } from '../generated/prisma/index.js';
 import { normalizeObjectType } from './enforceNodeSchema.js';
 import { recordUrnRename } from './urnAlias.js';
 import { isDraftCorpus } from './specCorpus.js';
+import { assertNoMintedSpecRemoval } from './mintedSpecPermanence.js';
 import { safeNodeUrnV2 } from './urnEmit.js';
 import { validateNodeAgainstSchema, NodeSchemaViolation } from './validateNodeAgainstSchema.js';
 import type { MemorySchema } from './memorySchema.js';
@@ -328,6 +329,12 @@ export async function moveNodeSubtree(
   const lockedIds = [source.id, ...descendants.map((d) => d.id)].sort();
   if (lockedIds.length !== reconcileIds.length || lockedIds.some((id, i) => id !== reconcileIds[i])) {
     throw new SubtreeMoveSourceChangedError(source.id);
+  }
+  // #1468 — moving a spec OUT of a minted corpus removes it from the corpus.
+  // A same-memory move is a rename that keeps its UrnAlias, so it stays
+  // allowed. Rows and memory are already locked in the guard's order.
+  if (crossMemory) {
+    await assertNoMintedSpecRemoval(tx, srcMemoryId, lockedIds, 'move out of its corpus');
   }
   const subtree: SnapshotSourceNode[] = [lockedSource, ...descendants];
   // Rebase a source-subtree loc onto the destination: source.loc → destLoc,

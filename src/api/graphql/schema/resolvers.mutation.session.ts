@@ -81,6 +81,7 @@ import {
   type SessionInput,
   type UsageEventInput,
 } from './resolvers.helpers.js';
+import { assertNoMintedSpecRemoval, assertNoMintedSpecUnmark } from '../../../lib/mintedSpecPermanence.js';
 
 /**
  * Strip explicit GraphQL nulls from a CalendarEventTimeInput so the tool's
@@ -1555,13 +1556,28 @@ export const sessionMutations = {
             snapshot.nodes.map((n) => n.loc as string).filter((l) => typeof l === 'string' && l !== ''),
           );
 
-          // Delete all current non-revision nodes in the system memory
+          // Delete all current non-revision nodes in the system memory.
+          //
+          // #1468 (Codex on #1475) — a system memory can hold a minted corpus
+          // (createAgent may promote one into it). A live minted spec the
+          // snapshot does not restore is a removal; one it restores must not
+          // come back without its marker. Both are checked under the guard's
+          // row locks, and only the locked rows are tombstoned.
+          const live = await tx.node.findMany({
+            where: { memoryId: sysMemId, deletedAt: null, NOT: { loc: { startsWith: 'revisions' } } },
+            select: { id: true, loc: true },
+          });
+          const snapshotTags = new Map(snapshot.nodes.map((n) => [n.loc as string, (n.tags as string[]) ?? []]));
+          await assertNoMintedSpecRemoval(
+            tx, sysMemId, live.filter((n) => !snapshotTags.has(n.loc)).map((n) => n.id), 'restore a snapshot that drops',
+          );
+          await assertNoMintedSpecUnmark(
+            tx, sysMemId,
+            live.filter((n) => snapshotTags.has(n.loc)).map((n) => ({ id: n.id, tags: snapshotTags.get(n.loc)! })),
+            'restore a snapshot of',
+          );
           await tx.node.updateMany({
-            where: {
-              memoryId: sysMemId,
-              deletedAt: null,
-              NOT: { loc: { startsWith: 'revisions' } },
-            },
+            where: { id: { in: live.map((n) => n.id) }, deletedAt: null },
             data: { deletedAt: new Date() },
           });
 

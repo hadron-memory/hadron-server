@@ -9,6 +9,7 @@ import {
   type ProtectedSource,
 } from '../../../lib/protectedLoc.js';
 import { lockMemoryForChannelChange } from '../../../lib/channels.js';
+import { assertNoMintedSpecRemoval, assertNoMintedSpecUnmark } from '../../../lib/mintedSpecPermanence.js';
 import {
   assertGovernedWrite,
   assertRoleDeclaredForWrite,
@@ -668,6 +669,13 @@ export async function writeNodeCore(
       // replaces.
       const tags = serializeTags(input.tags ?? []) as string[];
       const updateTagsPayload = input.tags === undefined ? {} : { tags };
+      // #1468 — what this write does to an existing row's spec marker, for
+      // the guard that keeps a minted spec a spec (omitted = unchanged).
+      const markerChange = (nodeId: string) => ({
+        id: nodeId,
+        tags: input.tags === undefined ? undefined : tags,
+        role: input.role,
+      });
       const id = input.id ?? generateId();
       // Strip GraphQL-only fields + `tags` from the Prisma payload.
       // `edges` is consumed above (resolved into `resolvedEdges`) and applied
@@ -1198,6 +1206,7 @@ export async function writeNodeCore(
 
             // #1450 — a placeholder keeps its spec role until it is written.
             assertPlaceholderKeepsSpecRole(current, { role: input.role, content: input.content });
+            await assertNoMintedSpecUnmark(tx, input.memoryId, [markerChange(current.id)], 'update');
             const data = {
               ...updatePayload,
               // The snapshot above keeps the old author. The new live content
@@ -1434,6 +1443,9 @@ export async function writeNodeCore(
             // overrides the same way (src/mcp/server.ts).
             if (authoritative && mode !== 'create') {
               assertPlaceholderKeepsSpecRole(authoritative, { role: input.role, content: input.content });
+            }
+            if (authoritative) {
+              await assertNoMintedSpecUnmark(tx, input.memoryId, [markerChange(authoritative.id)], 'overwrite');
             }
             const upserted = await tx.node.upsert({
               ...upsertArgs,
@@ -2654,6 +2666,14 @@ export const nodeMutations = {
             });
           }
         }
+        // #1468 — a tag replace must not strip the spec marker off a minted
+        // spec; one refusal refuses the whole batch, like every check here.
+        for (const memoryId of [...plannedEncryption.keys()].sort()) {
+          const changes = plans
+            .filter((plan) => plan.raw.memoryId === memoryId && 'tags' in plan.changed)
+            .map((plan) => ({ id: plan.raw.id, tags: serializeTags(plan.changed.tags as string[]) as string[] }));
+          await assertNoMintedSpecUnmark(tx, memoryId, changes, 'replace text in');
+        }
         for (const id of [...planMemory.keys()].sort()) {
           await ensureCurrentNodeRevisionInTransaction(tx, id, { expectedMemoryId: planMemory.get(id)! });
         }
@@ -2924,13 +2944,20 @@ export const nodeMutations = {
             }
           }
 
-          if (hard) {
-            // Resolve the affected ids for the cross-memory edge gate +
-            // PendingEdge cleanup — the safeguards hadron_delete_node applies.
-            const affectedIds = useSubtree
-              ? (await tx.node.findMany({ where: subtree, select: { id: true } })).map((n) => n.id)
-              : [resolvedId];
+          // #1468 — the complete removal scope, under the address lock taken
+          // above (no row can join it now). A hard delete also removes
+          // tombstones, so they count; a soft delete removes live rows only.
+          // Hard deletes reuse these ids for the cross-memory edge gate +
+          // PendingEdge cleanup — the safeguards hadron_delete_node applies.
+          const affectedIds = useSubtree
+            ? (await tx.node.findMany({
+                where: hard ? subtree : { ...subtree, deletedAt: null },
+                select: { id: true },
+              })).map((n) => n.id)
+            : [resolvedId];
+          await assertNoMintedSpecRemoval(tx, memoryId, affectedIds, hard ? 'hard-delete' : 'delete');
 
+          if (hard) {
             // A hard delete cascades Edge rows on BOTH endpoints via FK. If an
             // edge bridges this memory to another, cascading silently removes it
             // from a memory the caller may not own — refuse unless acknowledged.
@@ -3765,6 +3792,12 @@ export const nodeMutations = {
             });
           }
         }
+        // #1468 — `deleteSource` hard-deletes the source, so a minted spec
+        // may not be the source (supersede it instead). Same node-then-memory
+        // order as the locks just taken, which the guard re-enters.
+        if (deleteSource) {
+          await assertNoMintedSpecRemoval(tx, source.memoryId, [source.id], 'merge-and-delete');
+        }
         // #1323 (@codex/@copilot, PR #1339): both endpoints are row-locked and
         // their unrevisioned drift reconciled as their OWN revisions (id order)
         // before the snapshot. The merge was computed from reads taken BEFORE
@@ -3797,6 +3830,11 @@ export const nodeMutations = {
         );
 
         if (Object.keys(changed).length > 0) {
+          // #1468 — the tags union can mark the target's FIRST spec; the guard
+          // takes the lock that serializes that with a whole-corpus delete.
+          if ('tags' in changed) {
+            await assertNoMintedSpecUnmark(tx, target.memoryId, [{ id: target.id, tags: changed.tags as string[] }], 'merge into');
+          }
           await tx.node.update({
             where: { id: target.id },
             data: {
@@ -4274,6 +4312,13 @@ export const nodeMutations = {
           writeData.data = jsonOrDbNull(writeData.data as never);
         }
         writeData.revisionContentHash = revisionStateHashRefreshMarker();
+        // #1468 — restoring a pre-mark revision must not unmark a minted spec.
+        const restoredMarker = restoreFields as { tags?: string[]; role?: string | null };
+        await assertNoMintedSpecUnmark(tx, current.memoryId, [{
+          id: current.id,
+          tags: 'tags' in restoredMarker ? restoredMarker.tags : undefined,
+          role: 'role' in restoredMarker ? restoredMarker.role : undefined,
+        }], 'restore a revision of');
         const restored = await tx.node.update({
           where: { id: current.id },
           data: writeData,

@@ -40,6 +40,7 @@
  */
 
 import type { Prisma } from '../generated/prisma/index.js';
+import { assertNoMintedCorpusCascade } from './mintedSpecPermanence.js';
 
 /**
  * Rewrite the caller's owner-owned URNs onto the `@<newHandle>` namespace.
@@ -69,6 +70,16 @@ export async function renameOwnerNamespacedUrns(
     DELETE FROM agents
     WHERE deleted_at IS NOT NULL AND starts_with(urn, ${newColon})
   `;
+  // #1468 — the reclaim erases each tombstone's nodes by FK cascade, so a
+  // deleted mint-stamped corpus still holding a protected spec refuses it.
+  const reclaimed = await tx.$queryRaw<Array<{ id: string }>>`
+    SELECT id FROM memories WHERE deleted_at IS NOT NULL AND starts_with(urn, ${newColon})`;
+  await assertNoMintedCorpusCascade(
+    tx,
+    reclaimed.map((m) => m.id),
+    'rename the handle over the deleted corpus holding',
+    'Choose a different handle; the deleted corpus keeps its address.',
+  );
   await tx.$executeRaw`
     DELETE FROM memories
     WHERE deleted_at IS NOT NULL AND starts_with(urn, ${newColon})

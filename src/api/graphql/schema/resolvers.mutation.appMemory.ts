@@ -38,6 +38,7 @@ import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { agentSlugFromUrn, deriveSlugFromName } from '../../../lib/urn.js';
 import { createNode } from '../../../controller/operations/createNode.js';
+import { reclaimTombstonedMemory } from '../../../lib/mintedSpecPermanence.js';
 import { type Context, requireOwnerOrOrgRole, MEMORY_INCLUDE, concealUnreadableDenial, withoutRequestCaches } from './resolvers.helpers.js';
 
 /** App-associable memory classes (the DB CHECK forbids app_id only on system). */
@@ -219,7 +220,8 @@ export const appMemoryMutations = {
       where: { urn: `${memRoot}:${desiredSlug}`, deletedAt: { not: null } },
       select: { id: true },
     });
-    if (tombstone) await ctx.db.memory.delete({ where: { id: tombstone.id } });
+    // #1468 — refused for a stamped corpus still holding a spec.
+    if (tombstone) await ctx.db.$transaction((tx) => reclaimTombstonedMemory(tx, tombstone.id));
     // A LIVE collision on a name-addressable app-mem slug now DETERMINISTICALLY
     // aliases (`<slug>-<agent>`) via mintLocalSlug — replacing the pre-v2 hard
     // MEMORY_URN_CONFLICT — so two apps/agents in one org can each name a memory

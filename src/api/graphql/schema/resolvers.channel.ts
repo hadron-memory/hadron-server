@@ -26,6 +26,7 @@ import { nodeUrnRoundTrips, safeNodeUrnV2 } from '../../../lib/urnEmit.js';
 import { ensureChannelWithRoot, lockMemoryForChannelChange } from '../../../lib/channels.js';
 import { lockPathForCreateUnder } from '../../../lib/nodeSubtreeLock.js';
 import { validateLoc } from '../../../lib/validateLoc.js';
+import { assertNoMintedSpecRemoval } from '../../../lib/mintedSpecPermanence.js';
 
 /**
  * A Channel row as a field resolver may receive it: the `channels` page
@@ -193,6 +194,9 @@ export const channelMutations = {
       }
       // Row and root together; the address stays protected while either
       // exists (a tombstoned Channel still guards — protectedLoc.ts).
+      // #1468 — the root is a node like any other; a marked one in a minted
+      // corpus is permanent.
+      await assertNoMintedSpecRemoval(tx, row.memoryId, [row.chatRootNodeId], 'delete the Channel whose root is');
       await tx.channel.update({ where: { id: row.id }, data: { deletedAt: now, deletedBy: ctx.userId ?? null } });
       await tx.node.updateMany({
         where: { id: row.chatRootNodeId, deletedAt: null },

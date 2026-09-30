@@ -47,6 +47,7 @@ import { locsOverlap } from './protectedLoc.js';
 import { ensureInstallRegisterRows } from './registerInstall.js';
 import { resolveAppTeamSpaceMemoryIds } from '../api/graphql/schema/resolvers.helpers.js';
 import { pendingAtForRevival } from '../services/embedding/enqueue.js';
+import { assertNoMintedSpecRemoval } from './mintedSpecPermanence.js';
 
 /** The name of every App's default Channel — the row `chats:team` became. */
 export const DEFAULT_CHANNEL_NAME = 'team';
@@ -263,6 +264,17 @@ async function resetReusedChannel(
   // can retain the previous incarnation's plaintext in `chunk_text`, so they
   // must leave atomically with the payload reset.
   await tx.nodeEmbedding.deleteMany({ where: { nodeId: args.rootId } });
+  // #1468 (Codex on #1475) — a node under `:messages:` is an ordinary node
+  // until this reset tombstones it, and one can carry the spec marker in a
+  // minted corpus (written before the Channel existed, or before the mint).
+  // Lock and check the live descendants first; the tombstone below takes
+  // only these rows, so nothing unchecked is removed.
+  const doomed = (await tx.$queryRaw<Array<{ id: string }>>`
+    SELECT id FROM nodes
+    WHERE memory_id = ${args.memoryId}
+      AND deleted_at IS NULL
+      AND starts_with(loc, ${`${args.messagesLoc}:`})`).map((r) => r.id);
+  await assertNoMintedSpecRemoval(tx, args.memoryId, doomed, 'reuse the Channel address over');
   // Reply edges are first-class rows with their own liveness. Tombstoning
   // only the endpoint nodes is insufficient: edge reads can still resolve
   // deleted endpoints by stable id and expose the old message payload.
@@ -288,7 +300,7 @@ async function resetReusedChannel(
     SET deleted_at = ${now}, deleted_by = ${args.deletedBy}, updated_at = ${now}
     WHERE memory_id = ${args.memoryId}
       AND deleted_at IS NULL
-      AND starts_with(loc, ${`${args.messagesLoc}:`})
+      AND id = ANY(${doomed}::text[])
   `;
 }
 

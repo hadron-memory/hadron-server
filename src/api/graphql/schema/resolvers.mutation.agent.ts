@@ -66,6 +66,7 @@ import {
   AGENT_INCLUDE,
 } from './resolvers.helpers.js';
 import { recordUrnRename } from '../../../lib/urnAlias.js';
+import { assertNoMintedCorpusRemoval, reclaimTombstonedMemory } from '../../../lib/mintedSpecPermanence.js';
 
 /**
  * #928/#929 review: persona role is trimmed, and a blank-after-trim
@@ -228,19 +229,19 @@ export async function createAgentCore(ctx: Context, input: CreateAgentCoreInput)
       // hard-delete it first — mirrors createMemory's URN-reclaim path.
       const systemMemoryUrn = `${agentUrn}-system`;
       const staleHolder = await tx.memory.findUnique({ where: { urn: systemMemoryUrn } });
-      if (staleHolder) {
-        if (staleHolder.deletedAt) {
-          await tx.memory.delete({ where: { id: staleHolder.id } });
-        } else {
-          // #935: typed — under racing creates of the same name, the loser
-          // can land HERE (the winner's system memory committed between the
-          // agent-urn pre-check and this one), and allocation loops must see
-          // the same slot-occupied refusal as every other urn collision.
-          throw new AgentUrnTakenError(
-            agentUrn,
-            `A memory with URN "${systemMemoryUrn}" already exists`,
-          );
-        }
+      // #1468 — reclaim through the shared guard: a deleted mint-stamped
+      // corpus holding a protected spec refuses. A holder revived since the
+      // read above is live, the same slot-occupied case as below.
+      const reclaimed = !!staleHolder?.deletedAt && await reclaimTombstonedMemory(tx, staleHolder.id);
+      if (staleHolder && !reclaimed) {
+        // #935: typed — under racing creates of the same name, the loser
+        // can land HERE (the winner's system memory committed between the
+        // agent-urn pre-check and this one), and allocation loops must see
+        // the same slot-occupied refusal as every other urn collision.
+        throw new AgentUrnTakenError(
+          agentUrn,
+          `A memory with URN "${systemMemoryUrn}" already exists`,
+        );
       }
       const systemMemory = await tx.memory.create({
         data: {
@@ -807,12 +808,26 @@ export const agentMutations = {
       // Soft-delete the agent and its owned system memory (if any) in the
       // same pass. System memories are owned by the agent and cannot be
       // detached, so deleting the agent is the only way they get cleaned up.
-      await ctx.db.agent.update({ where: { id }, data: { deletedAt: new Date() } });
-      if (agent.systemMemoryId) {
-        await ctx.db.memory
-          .update({ where: { id: agent.systemMemoryId }, data: { deletedAt: new Date() } })
-          .catch((err) => console.warn('[deleteAgent] system memory cleanup failed:', err));
-      }
+      //
+      // #1468 (Codex on #1475) — a system memory can hold a minted corpus
+      // (createAgent may promote an existing memory into it), and deleting
+      // the agent would take the corpus with it. Refused in the same
+      // transaction as both soft-deletes, under the memory row lock.
+      await ctx.db.$transaction(async (tx) => {
+        if (agent.systemMemoryId) {
+          // FOR UPDATE first: see deleteMemory — no spec may appear between
+          // the scan and the tombstone.
+          await tx.$queryRaw`SELECT id FROM memories WHERE id = ${agent.systemMemoryId} FOR UPDATE`;
+          await assertNoMintedCorpusRemoval(tx, agent.systemMemoryId, 'delete the agent whose system memory holds', {
+            includeTombstones: false,
+            remedy: 'Deleting the agent would delete its minted corpus; keep the agent.',
+          });
+        }
+        await tx.agent.update({ where: { id }, data: { deletedAt: new Date() } });
+        if (agent.systemMemoryId) {
+          await tx.memory.updateMany({ where: { id: agent.systemMemoryId }, data: { deletedAt: new Date() } });
+        }
+      });
       return true;
     },
 
