@@ -408,6 +408,20 @@ describe('#1003 — App members can read the App team space', () => {
     const managerRole = await db.orgMember.create({ data: {
       id: generateId(), organizationId: orgId, userId: manager.id, role: 'ADMIN',
     } });
+    const contributor = await db.user.create({ data: { id: generateId(), name: 'contributor' } });
+    await db.orgMember.create({ data: {
+      id: generateId(), organizationId: orgId, userId: contributor.id, role: 'CONTRIBUTOR',
+    } });
+    const contributorAuth = { userId: contributor.id, roles: [] } as AuthContext;
+    expect(await canReadMemory(db, contributorAuth, workerMemory.id)).toBe(false);
+    expect(await canWriteToMemory(db, contributorAuth, workerMemory.id)).toBe(false);
+    await expect(requireMemoryWriteAccess({ db, ...contributorAuth } as Context, workerMemory.id))
+      .rejects.toThrow('Forbidden');
+    const contributorRow = await db.memory.findUniqueOrThrow({
+      where: { id: workerMemory.id }, include: { workerOf: true },
+    });
+    expect((await computeEffectiveAccess(db, { id: contributor.id, roles: [] },
+      { kind: 'memory', memory: contributorRow })).canWrite).toBe(false);
     for (const userId of [holder.id, manager.id]) {
       const principal = { userId, roles: [] } as AuthContext;
       expect(await canReadMemory(db, principal, workerMemory.id)).toBe(true);
