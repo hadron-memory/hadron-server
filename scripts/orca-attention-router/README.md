@@ -12,7 +12,7 @@ Nudges **Orca-hosted** Hadron team workers when they are mentioned in team chat.
 
 1. `hadron team attention --app … [--since <adopted token>] --json` (read-only).
 2. For each **roster** worker the server lists with `unreadMentions > 0`:
-   - **Register check.** The worker must have a worker-specific **mention-only** register row on the team Channel. Without one, the server reports the worker for *any* new message, with its whole unread-mention backlog as the count. So a missing row is held and reported as a configuration error, never nudged.
+   - **Register check.** The worker's *effective* registration on the team Channel must be its own **mention-only** row. That is the winning row from `attendeeRegister`, resolved as the server does: App over organization, Worker over Agent over everyone. So an organization-owned worker row counts. Without such a row, the server reports the worker for *any* new message, with its whole unread-mention backlog as the count. So it's held and reported as a configuration error, never nudged.
    - **Skip** the worker if a nudge sent under the current token still covers its backlog (the ledger, below).
    - **Resolve** its terminal: the ONE `claude`/`codex` agent terminal (Orca's `agentIdentity`) whose `worktreePath` is the roster entry's `worktree`. Zero or several means *held*; it never guesses. If the worktree carries a CLI worker binding (`<gitdir>/hadron-team-session.json`), the binding must name this worker.
    - **Gate:** `orca terminal wait --for tui-idle --timeout-ms <busyWaitMs>`. Only positive proof of idle passes.
@@ -39,7 +39,9 @@ Measured 2026-09-30; finding `hrn:node:hadronmemory.com:hadron-server:findings:o
 3. **Codex Desktop roster:** remove every worker you add here from the Codex Desktop router's roster **in the same change**.
 4. **Run:** `pnpm tsx scripts/orca-attention-router/router.ts poll`. The first poll has no token, so every roster worker with any unread mention is nudged once.
 
-State lives in `stateDir` (`0700`; the token file is `0600`), separate from every other router's. Keep `adopted.token` private: never print, paste or reset it.
+**Roster rule:** each roster worktree must be unique. The config is refused otherwise, because two workers would share one terminal.
+
+State lives in `stateDir` (`0700`; the token file is `0600`), separate from every other router's. The single-writer lock records its owner's pid. A lock left by a killed or crashed run is reclaimed on the next poll, and so is one whose owner record is missing and that is older than a minute. A live owner, even another user's, is never displaced. Keep `adopted.token` private: never print, paste or reset it.
 
 ## Commands
 

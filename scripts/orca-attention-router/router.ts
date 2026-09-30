@@ -31,7 +31,7 @@
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
-  chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmdirSync, rmSync, statSync, writeFileSync,
+  chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, writeFileSync,
 } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
@@ -101,6 +101,10 @@ export function loadConfig(path: string): Config {
     }
   }
   if (new Set(roster.map((e) => e.worker)).size !== roster.length) throw new RouterError('roster names a worker twice');
+  // Two workers on one worktree would resolve to the same terminal: one
+  // nudge recorded as delivered twice, one worker never told (@codex P2, #1490).
+  const worktrees = roster.map((e) => real(e.worktree));
+  if (new Set(worktrees).size !== worktrees.length) throw new RouterError('roster assigns one worktree to two workers');
   if (typeof raw.app !== 'string' || typeof raw.stateDir !== 'string' || typeof raw.channel !== 'string') {
     throw new RouterError('config needs "app", "channel" and "stateDir"');
   }
@@ -199,18 +203,57 @@ function atomicWrite(path: string, text: string): void {
   }
 }
 
-/** One writer at a time: a mkdir lock in the state directory. */
+/** A lock with no owner record is reclaimed once it is this old (a crash between mkdir and the write). */
+const OWNERLESS_LOCK_GRACE_MS = 60_000;
+
+/** True unless the lock's recorded owner process is provably gone. */
+function lockHolderAlive(lock: string): boolean {
+  let pid: number;
+  try {
+    pid = Number(readFileSync(join(lock, 'owner'), 'utf8').trim());
+  } catch {
+    try {
+      return Date.now() - statSync(lock).mtimeMs < OWNERLESS_LOCK_GRACE_MS;
+    } catch {
+      return false;
+    }
+  }
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    // EPERM: the process exists under another user; only ESRCH proves it gone.
+    return (e as NodeJS.ErrnoException).code !== 'ESRCH';
+  }
+}
+
+/**
+ * One writer at a time: a mkdir lock in the state directory, recording its
+ * owner's pid. A lock whose owner is dead (killed, crashed, host restart) is
+ * reclaimed, so a crash cannot silence the router until someone notices
+ * (@codex P2, #1490). A live owner is never displaced.
+ */
 function withLock<T>(stateDir: string, fn: () => T): T {
   const lock = join(stateDir, '.writer-lock');
-  try {
-    mkdirSync(lock);
-  } catch {
-    throw new RouterError(`another router run holds ${lock}`);
+  const acquire = (): boolean => {
+    try {
+      mkdirSync(lock);
+      writeFileSync(join(lock, 'owner'), String(process.pid));
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  if (!acquire()) {
+    if (lockHolderAlive(lock)) throw new RouterError(`another router run holds ${lock}`);
+    rmSync(lock, { recursive: true, force: true });
+    if (!acquire()) throw new RouterError(`another router run holds ${lock}`);
   }
   try {
     return fn();
   } finally {
-    rmdirSync(lock);
+    rmSync(lock, { recursive: true, force: true });
   }
 }
 
@@ -255,20 +298,25 @@ export function pollAttention(cfg: Config, token: string | null, run: Runner): {
 }
 
 /**
- * Workers with a worker-specific, mention-only register row on the Channel.
+ * Whether the worker's EFFECTIVE registration on the Channel is its own,
+ * mention-only row.
  *
  * Without one, the server reports a worker for ANY new message, with its
  * FULL unread-mention backlog as the count, so an old unread mention would
  * make every chat message wake it (observed in the live run, 2026-09-30).
- * The row is what makes the attention API mention-triggered.
+ * Asks `attendeeRegister`, which returns the WINNING row per Channel exactly
+ * as the attention API resolves it (App over organization; Worker over Agent
+ * over everyone), so an organization-owned worker row counts too (@codex P2,
+ * #1490). A query failure throws: absence of evidence is not a verdict.
  */
-export function mentionOnlyWorkers(cfg: Config, run: Runner): Set<string> {
-  const query = 'query($o: ID, $c: ID) { registerEntries(filter: {ownerRef: $o, channelRef: $c}, limit: 200) '
-    + '{ items { attendeeWorkerId mentionOnly } } }';
-  const data = parse(run([cfg.hadronCli, 'api', query, '-F', `o=${cfg.app}`, '-F', `c=${cfg.channel}`]), 'register query');
-  const items = data.data?.registerEntries?.items;
-  if (!Array.isArray(items)) throw new RouterError(`register query failed: ${JSON.stringify(data.errors ?? data.error ?? null).slice(0, 300)}`);
-  return new Set(items.filter((i) => i.mentionOnly && i.attendeeWorkerId).map((i) => i.attendeeWorkerId as string));
+export function hasMentionOnlyRow(cfg: Config, workerId: string, run: Runner): boolean {
+  const query = 'query($w: ID, $a: ID) { attendeeRegister(workerRef: $w, appRef: $a) '
+    + '{ namedBy channel { id } entry { mentionOnly } } }';
+  const data = parse(run([cfg.hadronCli, 'api', query, '-F', `w=${workerId}`, '-F', `a=${cfg.app}`]), 'register query');
+  const rows = data.data?.attendeeRegister;
+  if (!Array.isArray(rows)) throw new RouterError(`register query failed: ${JSON.stringify(data.errors ?? data.error ?? null).slice(0, 300)}`);
+  const winning = rows.find((r) => r.channel?.id === cfg.channel);
+  return Boolean(winning && winning.namedBy === 'WORKER' && winning.entry?.mentionOnly);
 }
 
 interface Terminal {
@@ -464,9 +512,8 @@ export function pollOnce(cfg: Config, run: Runner = runCommand, log: (line: stri
 
     const outcome: Outcome = { nudged: [], covered: [], held: {}, adopted: false };
     const terminals = targets.length ? listTerminals(cfg, run) : [];
-    const mentionOnly = targets.length ? mentionOnlyWorkers(cfg, run) : new Set<string>();
     for (const [entry, seen] of targets) {
-      if (!mentionOnly.has(entry.worker)) {
+      if (!hasMentionOnlyRow(cfg, entry.worker, run)) {
         // A configuration error, not a delivery: never nudge on every message.
         outcome.held[entry.name] = 'no worker-specific mention-only register row on the team Channel';
         continue;

@@ -3,7 +3,7 @@
  * `hadron team attention` and `orca terminal list|wait|send`.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -31,6 +31,8 @@ class FakeCLIs {
   sent: Array<[string, string]> = [];
   /** Workers with a mention-only row; `null` = every worker queried has one. */
   mentionOnly: Set<string> | null = null;
+  /** Override the winning register row a worker resolves to. */
+  registerRow: ((worker: string) => unknown) | null = null;
   calls: string[][] = [];
 
   constructor(readonly root: string) {}
@@ -49,8 +51,11 @@ class FakeCLIs {
       return this.attentionOk ? out(this.attention) : out({ error: { message: 'boom' } }, 1);
     }
     if (argv[1] === 'api') {
+      // attendeeRegister: the winning row for the team Channel.
+      const w = argv[argv.indexOf('-F') + 1].replace(/^w=/, '');
       const ids = this.mentionOnly ?? new Set(['w-eli', 'w-baloo', 'w-ada']);
-      return out({ data: { registerEntries: { items: [...ids].map((id) => ({ attendeeWorkerId: id, mentionOnly: true })) } } });
+      const row = this.registerRow?.(w) ?? { namedBy: 'WORKER', channel: { id: CHANNEL }, entry: { mentionOnly: ids.has(w) } };
+      return out({ data: { attendeeRegister: [row] } });
     }
     if (verb === 'terminal list') return out({ ok: true, result: { terminals: this.terminals } });
     const handle = argv[argv.indexOf('--terminal') + 1];
@@ -225,15 +230,31 @@ describe('Orca attention router — the mention-only register prerequisite', () 
     expect(poll(c).nudged).toEqual(['Eli']);
   });
 
-  it('a row that is not mention-only does not count', () => {
+  it('a winning row that is not mention-only does not count', () => {
     const c = cfg(['w-eli', 'Eli']);
     fake.terminal('eli');
-    const base = fake.run;
-    fake.run = (argv) => (argv[1] === 'api'
-      ? { code: 0, stderr: '', stdout: JSON.stringify({ data: { registerEntries: { items: [{ attendeeWorkerId: 'w-eli', mentionOnly: false }] } } }) }
-      : base(argv));
+    fake.registerRow = () => ({ namedBy: 'WORKER', channel: { id: CHANNEL }, entry: { mentionOnly: false } });
     fake.attention.workers = [worker('w-eli', 'Eli')];
     expect(poll(c).held.Eli).toMatch(/mention-only/);
+  });
+
+  it('a winning row not named by the worker (e.g. an everyone row) does not count', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli');
+    fake.registerRow = () => ({ namedBy: 'EVERYONE', channel: { id: CHANNEL }, entry: { mentionOnly: true } });
+    fake.attention.workers = [worker('w-eli', 'Eli')];
+    expect(poll(c).held.Eli).toMatch(/mention-only/);
+  });
+
+  it('an organization-owned worker row counts: the check reads the EFFECTIVE registration (@codex P2, #1490)', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli');
+    fake.registerRow = () => ({ namedBy: 'WORKER', channel: { id: CHANNEL }, entry: { mentionOnly: true, ownerType: 'ORGANIZATION' } });
+    fake.attention.workers = [worker('w-eli', 'Eli')];
+    expect(poll(c).nudged).toEqual(['Eli']);
+    const q = fake.calls.find((a) => a[1] === 'api')!;
+    expect(q[2]).toContain('attendeeRegister');
+    expect(q[2]).not.toContain('ownerRef');
   });
 
   it('a failed register query throws and changes nothing', () => {
@@ -267,10 +288,36 @@ describe('Orca attention router — failures leave the token alone', () => {
     expect(adopted(c)).toBe(TOKEN_1);
   });
 
-  it('a second concurrent run is refused', () => {
+  it('a second concurrent run is refused while its owner is alive', () => {
     const c = cfg(['w-eli', 'Eli']);
     mkdirSync(join(c.stateDir, '.writer-lock'), { recursive: true });
+    writeFileSync(join(c.stateDir, '.writer-lock', 'owner'), String(process.pid));
     expect(() => poll(c)).toThrow(RouterError);
+  });
+
+  it('a lock owned by a live process of ANOTHER user (kill → EPERM) is never reclaimed', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    mkdirSync(join(c.stateDir, '.writer-lock'), { recursive: true });
+    writeFileSync(join(c.stateDir, '.writer-lock', 'owner'), '1'); // launchd/init: alive, not ours
+    expect(() => poll(c)).toThrow(RouterError);
+  });
+
+  it('a lock left by a dead process is reclaimed (@codex P2, #1490)', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    mkdirSync(join(c.stateDir, '.writer-lock'), { recursive: true });
+    writeFileSync(join(c.stateDir, '.writer-lock', 'owner'), '999999');
+    expect(poll(c).adopted).toBe(true);
+    expect(existsSync(join(c.stateDir, '.writer-lock'))).toBe(false);
+  });
+
+  it('a fresh lock with no owner record yet is respected; an old one is reclaimed', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    const lock = join(c.stateDir, '.writer-lock');
+    mkdirSync(lock, { recursive: true });
+    expect(() => poll(c)).toThrow(RouterError);
+    const old = new Date(Date.now() - 5 * 60_000);
+    utimesSync(lock, old, old);
+    expect(poll(c).adopted).toBe(true);
   });
 });
 
@@ -300,5 +347,8 @@ describe('Orca attention router — nothing secret leaks', () => {
     const entry = { worker: 'w', name: 'E', worktree: '/x' };
     writeFileSync(path, JSON.stringify({ ...base, roster: [entry, entry] }));
     expect(() => loadConfig(path)).toThrow(RouterError);
+    // Two workers on one worktree (@codex P2, #1490).
+    writeFileSync(path, JSON.stringify({ ...base, roster: [entry, { ...entry, worker: 'w2', name: 'F' }] }));
+    expect(() => loadConfig(path)).toThrow(/one worktree to two workers/);
   });
 });
