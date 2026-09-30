@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { join } from 'path';
 import { mkdirSync, rmSync, writeFileSync } from 'fs';
+import { stringify } from 'yaml';
 import { db } from '../db/client.js';
 import { cleanDb, createDbOrgAndGraph, makeTmpDir, writeFrontmatterNode, writeNodeFiles } from '../../test/helpers.js';
 import { splitGitArgv } from '../../test/gitArgv.js';
@@ -504,6 +505,10 @@ describe('syncGraphFromGithub', () => {
     // An unchanged repo edge is an idempotent re-sync, not a collision.
     expect((await syncGraphFromGithub(makeGraph())).error).toBeUndefined();
     expect(await db.edge.findMany()).toMatchObject([{ id: edges[0].id }]);
+
+    // Git's edge exporter omits runnable: false; absent and false mean the same thing.
+    await db.edge.update({ where: { id: edges[0].id }, data: { isRunnable: false } });
+    expect((await syncGraphFromGithub(makeGraph())).error).toBeUndefined();
   });
 
   it('refuses a repo edge when its derived loc belongs to another live edge', async () => {
@@ -556,6 +561,27 @@ describe('syncGraphFromGithub', () => {
     await db.edge.update({ where: { id: edge.id }, data: { priority: 1 } });
     expect((await syncGraphFromGithub(makeGraph())).error).toContain('already occupied');
     expect(await db.edge.findUniqueOrThrow({ where: { id: edge.id } })).toMatchObject({ priority: 1 });
+  });
+
+  it('persists a declared condition and priority and accepts an exact re-sync', async () => {
+    const aId = generateId();
+    const tId = generateId();
+    const condition = { '==': [{ var: 'agent.role' }, 'mentor'] };
+    const aDir = join(mockSources, 'test-org', 'test/repo', 'a');
+    const tDir = join(mockSources, 'test-org', 'test/repo', 't');
+    mkdirSync(aDir, { recursive: true });
+    mkdirSync(tDir, { recursive: true });
+    writeNodeFiles(aDir, { id: aId, name: 'a' });
+    writeFileSync(join(aDir, '.node', 'node.yaml'), stringify({
+      id: aId, name: 'a', nodes: [{ id: tId, rel: 'gated', condition, priority: 7 }],
+    }));
+    writeNodeFiles(tDir, { id: tId, name: 't' });
+
+    expect((await syncGraphFromGithub(makeGraph())).error).toBeUndefined();
+    const edge = await db.edge.findFirstOrThrow();
+    expect(edge).toMatchObject({ condition, priority: 7 });
+    expect((await syncGraphFromGithub(makeGraph())).error).toBeUndefined();
+    expect(await db.edge.findUniqueOrThrow({ where: { id: edge.id } })).toMatchObject({ condition, priority: 7 });
   });
 
   it('parks a cross-repo edge as PendingEdge when target is not yet in DB', async () => {
