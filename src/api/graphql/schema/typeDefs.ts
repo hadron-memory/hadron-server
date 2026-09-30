@@ -1322,6 +1322,13 @@ export const typeDefs = `#graphql
     clients render the field only when present.
     """
     portalUrl: String
+    """
+    #1450 — true for a RESERVED spec citation that has no spec written yet (a
+    placeholder in a draft corpus, created by reserveSpecCitation). Set only by
+    the server, never inferred from an empty body; writing real content through
+    updateSpecNode clears it. Minting refuses while any remain.
+    """
+    isPlaceholder: Boolean!
     isLink: Boolean!
     name: String!
     alias: String
@@ -7297,6 +7304,16 @@ export const typeDefs = `#graphql
     which refuses, and that absence is the mechanism rather than an oversight.
     """
     createSpecNode(input: CreateNodeInput!): Node!
+    """
+    #1450 — reserve a citation in a DRAFT spec corpus as a placeholder: a spec
+    node at loc (role spec, nodeType info) marked isPlaceholder, so links can
+    point at it and the placeholders left are the corpus's to-do list. Writing
+    real content through updateSpecNode turns it into a real spec at the same
+    citation. Refuses SPEC_CORPUS_NOT_DRAFT in a minted memory, where a
+    citation is permanent once written, and NodeLocConflictError at a live loc.
+    memoryRef accepts the memory's ID or URN.
+    """
+    reserveSpecCitation(memoryRef: ID!, loc: String!, name: String): Node!
 
     """
     #1201 — the UPDATE door for the spec kind, and the counterpart of

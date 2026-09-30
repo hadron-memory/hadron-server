@@ -3457,11 +3457,13 @@ export interface NodeInput {
   role?: string | null;
   loc: string;
   name: string;
-  alias?: string;
-  description?: string;
+  alias?: string | null;
+  /** Nullable on the wire (CreateNodeInput/UpdateNodeInput `description: String`); `null` clears. */
+  description?: string | null;
   /** Paragraph-length summary. Spec 031. Optional; `null` clears, omitted preserves. */
   abstract?: string | null;
-  content?: string;
+  /** Nullable on the wire (`content: String`); `null` clears. */
+  content?: string | null;
   /**
    * MIME type of `content` (#476, spec cor:cnv:010:01). 'text/markdown'
    * (default) stores as-is; 'text/html' converts to Markdown via
@@ -3470,12 +3472,12 @@ export interface NodeInput {
    * seam — never persisted.
    */
   contentType?: string | null;
-  data?: Record<string, unknown>;
+  data?: Record<string, unknown> | null;
   seq?: number;
   tags?: string[];
-  properties?: Record<string, unknown>;
-  llmModel?: string;
-  aiAgent?: string;
+  properties?: Record<string, unknown> | null;
+  llmModel?: string | null;
+  aiAgent?: string | null;
   ownerRepo?: string;
   edges?: NodeEdgeInput[];
   /** Why this change was made — stored in revision history (NodeRevision.revLabel, #620). Issue #88. */

@@ -1,4 +1,6 @@
 import { createDecipheriv } from 'crypto';
+import { GraphQLError } from 'graphql';
+import { assertPlaceholderKeepsSpecRole, placeholderFillPatch } from '../../lib/specCorpus.js';
 import { governedSignalsFromMirror } from '../../lib/governedSignals.js';
 import { authoredContentChanged, clearNodeAuthorship } from '../../lib/nodeAuthorship.js';
 import { NodeSchemaViolation, validateNodeAgainstSchema } from '../../lib/validateNodeAgainstSchema.js';
@@ -118,6 +120,22 @@ export async function updateNodeFromGitSync(
   // captured pre-sync row rather than that mechanical waypoint.
   const before = revisionBase ?? locked;
   if (extra) update = { ...update, ...extra(locked) };
+  // #1450 (@codex P2, PR #1452): a placeholder stays a spec until it is
+  // written. Sync's rule for a file that would break an invariant applies (one
+  // bad file must not block the memory, and no nonconforming record is
+  // written): the stored role is KEPT, the rest of the file still applies, and
+  // the file is reported. Filtered BEFORE the diff (@codex P2, PR #1452): a
+  // kept role is not a change, so it must not record a revision.
+  if ('role' in update) {
+    try {
+      assertPlaceholderKeepsSpecRole(locked, { role: update.role as string | null, content: update.content });
+    } catch (e) {
+      if (!(e instanceof GraphQLError) || e.extensions?.code !== 'SPEC_PLACEHOLDER_ROLE_LOCKED') throw e;
+      console.warn(`[syncGraphFromGithub] kept role 'spec' on unwritten placeholder ${locked.loc}: ${e.message}`);
+      const { role: _kept, ...rest } = update;
+      update = rest;
+    }
+  }
   const changes = diffNodeChanges(before, update);
 
   if (changes.length > 0) {
@@ -136,6 +154,9 @@ export async function updateNodeFromGitSync(
     data: {
       ...(update as Prisma.NodeUncheckedUpdateInput),
       ...(authoredContentChanged(changes) ? clearNodeAuthorship() : {}),
+      // #1450 (@codex P2, PR #1452): filling a reserved citation by editing its
+      // mirrored file writes the spec, same as updateSpecNode.
+      ...placeholderFillPatch(locked, update.content),
       revisionContentHash: revisionStateHashRefreshMarker(),
     },
   });

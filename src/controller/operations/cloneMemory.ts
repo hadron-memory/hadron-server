@@ -5,6 +5,7 @@ import { ensureCurrentNodeRevisionInTransaction, jsonOrDbNull } from '../../lib/
 import { carryGovernedSignals } from '../../lib/governedSignals.js';
 import { carryNodeAuthorship, clearNodeAuthorship } from '../../lib/nodeAuthorship.js';
 import { computeContentHash } from '../../lib/contentHash.js';
+import { assertNoPlaceholdersLeaveDraft } from '../../lib/specCorpus.js';
 import {
   pendingEdgeStableTargetId,
   pendingEdgeStableTargetKey,
@@ -191,6 +192,9 @@ export async function cloneMemoryGraph(
       const selectedNodes = await tx.node.findMany({
         where: { memoryId: source.id, deletedAt: null },
       });
+      // #1450 — a clone is a brand-new memory and never a draft corpus, so a
+      // copied placeholder would become a published citation with no spec.
+      assertNoPlaceholdersLeaveDraft(selectedNodes, { isDraft: false, memoryId: memoryId });
       // A raw writer may have changed a stamped source without advancing its
       // revision. Reconcile and refetch stamped rows before the destination
       // insert can certify a stale claim against freshly copied content.

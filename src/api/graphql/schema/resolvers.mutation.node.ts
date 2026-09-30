@@ -19,6 +19,7 @@ import {
   type GovernedContext,
   type GovernedMerge,
 } from '../../../lib/governedRole.js';
+import { assertPlaceholderKeepsSpecRole, placeholderFillPatch } from '../../../lib/specCorpus.js';
 import { carryGovernedSignals } from '../../../lib/governedSignals.js';
 import { computeContentHash } from '../../../lib/contentHash.js';
 import { decryptReadableRevisions } from '../../../lib/nodeRevisionRead.js';
@@ -67,6 +68,7 @@ import {
 import {
   moveNodeSubtree,
   SubtreeMoveCollisionError,
+  SubtreeMovePlaceholderError,
   SubtreeMoveIntoSelfError,
   SubtreeMoveSourceChangedError,
   CrossMemoryMoveUnsupportedError,
@@ -782,8 +784,14 @@ export async function writeNodeCore(
         nextAbstractOriginHash === undefined
           ? {}
           : { abstractOriginHash: nextAbstractOriginHash };
+      // #1450 — `isPlaceholder` is SERVER-set (reserveSpecCitation marks it,
+      // a real content write clears it). No node input type carries it, but a
+      // caller passing a parsed object through (an importer, an internal
+      // helper) must not be able to set or clear it, so it is stripped here
+      // with the same defence as the hash.
       const {
         abstractOriginHash: _stripCallerSupplied,
+        isPlaceholder: _stripCallerPlaceholder,
         ...nodeFieldsClean
       } = nodeFields as Record<string, unknown>;
 
@@ -1143,6 +1151,14 @@ export async function writeNodeCore(
               if (opts?.guardRevSeq !== undefined && current.revSeq !== opts.guardRevSeq) {
                 throw writeConflict();
               }
+              // #1450 (@codex P2, PR #1452): a placeholder that already holds
+              // real content (a merge or raw write put it there) is cleared by
+              // re-saving that content, even though nothing else changes. Not
+              // a revisioned field, so no revision.
+              const fill = placeholderFillPatch(current, input.content);
+              if (Object.keys(fill).length > 0) {
+                await tx.node.update({ where: { id: current.id }, data: fill });
+              }
               const unchanged = await tx.node.findUniqueOrThrow({
                 where: { id: current.id },
                 include,
@@ -1175,12 +1191,16 @@ export async function writeNodeCore(
               });
             }
 
+            // #1450 — a placeholder keeps its spec role until it is written.
+            assertPlaceholderKeepsSpecRole(current, { role: input.role, content: input.content });
             const data = {
               ...updatePayload,
               // The snapshot above keeps the old author. The new live content
               // has no verified author until the attestation/human gates land.
               ...(authoredContentChanged(changes) ? clearNodeAuthorship() : {}),
               ...(lockedAbstractHash !== undefined ? { abstractOriginHash: lockedAbstractHash } : {}),
+              // #1450 — writing real content to a reserved citation makes it a spec.
+              ...placeholderFillPatch(current, input.content),
               revisionContentHash: revisionStateHashRefreshMarker(),
             } as Prisma.NodeUncheckedUpdateInput;
 
@@ -1407,6 +1427,9 @@ export async function writeNodeCore(
             // both worlds" #543 exists to prevent, reachable again through the
             // window this transaction was added to close. The MCP path already
             // overrides the same way (src/mcp/server.ts).
+            if (authoritative && mode !== 'create') {
+              assertPlaceholderKeepsSpecRole(authoritative, { role: input.role, content: input.content });
+            }
             const upserted = await tx.node.upsert({
               ...upsertArgs,
               update: {
@@ -1423,6 +1446,13 @@ export async function writeNodeCore(
                     ? clearNodeAuthorship() : {}),
                 ...(authoritativeAbstractHash !== undefined
                   ? { abstractOriginHash: authoritativeAbstractHash } : {}),
+                // #1450 — a create that revives a tombstone is a NEW node, so it
+                // must not inherit a dead placeholder's flag (reserve re-marks
+                // its own row afterwards). An upsert onto a live placeholder
+                // clears it only when it writes real content.
+                ...(mode === 'create'
+                  ? { isPlaceholder: false }
+                  : placeholderFillPatch(authoritative, input.content)),
                 revisionContentHash: revisionStateHashRefreshMarker(),
                 // create-ONLY, matching the `isResurrect` it corrects. Widening
                 // it to `upsert` would let an importer revive a soft-deleted
@@ -3240,6 +3270,11 @@ export const nodeMutations = {
         if (e instanceof SubtreeMoveIntoSelfError) {
           throw new GraphQLError(e.message, { extensions: { code: 'BAD_USER_INPUT', loc: e.loc } });
         }
+        if (e instanceof SubtreeMovePlaceholderError) {
+          throw new GraphQLError(e.message, {
+            extensions: { code: 'SPEC_PLACEHOLDER_OUTSIDE_DRAFT', loc: e.loc, memoryId: e.memoryId },
+          });
+        }
         if (e instanceof SubtreeMoveSourceChangedError) {
           throw new GraphQLError(e.message, { extensions: { code: 'CONFLICT', nodeId: e.nodeId } });
         }
@@ -3298,6 +3333,15 @@ export const nodeMutations = {
       const { destMemoryId, destLoc } = await resolveRelocationTarget(
         ctx, source, targetUrn, targetMemoryRef,
       );
+      // #1450 (@codex P1, PR #1452) — a placeholder has nothing to copy, and
+      // writeNodeCore strips the flag, so a clone would be an ordinary blank
+      // node claiming the citation. Reserve the citation at the destination.
+      if (source.isPlaceholder) {
+        throw new GraphQLError(
+          `Cannot clone placeholder "${source.loc}": it has no spec to copy. Reserve the citation where you need it instead.`,
+          { extensions: { code: 'SPEC_PLACEHOLDER_NOT_COPYABLE', loc: source.loc } },
+        );
+      }
 
       // Decrypt the source with the SOURCE memory key so writeNodeCore can
       // re-encrypt the plaintext for the DESTINATION memory. Only content/
@@ -3656,7 +3700,16 @@ export const nodeMutations = {
         );
 
         if (Object.keys(changed).length > 0) {
-          await tx.node.update({ where: { id: target.id }, data: { ...writeData, ...clearNodeAuthorship() } });
+          await tx.node.update({
+            where: { id: target.id },
+            data: {
+              ...writeData,
+              ...clearNodeAuthorship(),
+              // #1450 (@codex P2, PR #1452): merging real content into a
+              // reserved citation writes the spec, same as updateSpecNode.
+              ...placeholderFillPatch(lockedTarget, 'content' in changed ? changed.content : undefined),
+            },
+          });
         }
 
         if (fields.has('EDGES')) {
