@@ -10,7 +10,7 @@ Nudges **Orca-hosted** Hadron team workers when they are mentioned in team chat.
 
 ## How one poll works
 
-1. `hadron team attention --app … [--since <adopted token>] --json` (read-only).
+1. **Poll:** the paged attention query `teamAttentionPage` (via `hadron api`, read-only), drained page by page from the adopted token. Only the final page's `adoptableSince` can be adopted, and only a completed scan counts. The CLI's `hadron team attention` output lacks `lastRelevantSeq`, which the ledger needs.
 2. For each **roster** worker the server lists with `unreadMentions > 0`:
    - **Register check.** The worker's *effective* registration on the team Channel must be its own **mention-only** row. That is the winning row from `attendeeRegister`, resolved as the server does: App over organization, Worker over Agent over everyone. So an organization-owned worker row counts. Without such a row, the server reports the worker for *any* new message, with its whole unread-mention backlog as the count. So it's held and reported as a configuration error, never nudged.
    - **Skip** the worker if a nudge sent under the current token still covers its backlog (the ledger, below).
@@ -19,7 +19,8 @@ Nudges **Orca-hosted** Hadron team workers when they are mentioned in team chat.
    - **Send:** `orca terminal send --text <nudge> --enter --wait-submit <s>`. An ambiguous transport failure is retried once with Orca's durable request id. It never re-sends on silence.
 3. **Adopt the token only if no roster worker is held.** Otherwise:
    - the token stays, and the ledger records who was nudged, so the next poll retries only the held workers;
-   - a worker who has since read past its nudge and has a new mention is nudged again;
+   - a worker is nudged again only for a **new** mention: one whose seq is above the `lastRelevantSeq` it was nudged for, however much older unrelated chat it has left unread;
+   - each accepted nudge is written to the ledger **immediately**, so a crash or a failure later in the same poll can't resend it;
    - each held reason is logged once per token, not every poll.
 4. Workers off the roster belong to another host's router. They are ignored and never block adoption.
 

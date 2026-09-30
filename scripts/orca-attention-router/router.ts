@@ -123,7 +123,8 @@ export function loadConfig(path: string): Config {
 // ── State ───────────────────────────────────────────────────────────────
 
 interface NudgeRecord {
-  lastSeq: number | null;
+  /** The worker's last RELEVANT (mention) seq this nudge was about. */
+  relevantSeq: number;
   at: number;
   stages: string;
 }
@@ -267,34 +268,62 @@ function parse(res: RunResult, what: string): Record<string, any> {
   }
 }
 
-interface AttentionChannel {
-  channel: string;
-  unread?: number;
-  unreadMentions?: number;
-  firstUnreadSeq?: number | null;
-  lastSeq?: number | null;
-}
-interface AttentionWorker {
+/** One Worker/Channel pair from the paged attention poll (`TeamAttentionPageItem`). */
+export interface AttentionItem {
   worker: string;
-  name: string;
-  channels?: AttentionChannel[];
+  workerName: string;
+  channel: string;
+  unread: number;
+  unreadMentions: number;
+  firstUnreadSeq: number | null;
+  /** The highest seq that counts for this worker: for a mention-only row, its latest mention. */
+  lastRelevantSeq: number | null;
+  lastSeq: number;
 }
 
-/** One attention poll. Read-only; the returned token is adopted later, if at all. */
-export function pollAttention(cfg: Config, token: string | null, run: Runner): { token: string; workers: AttentionWorker[] } {
-  const argv = [cfg.hadronCli, 'team', 'attention', '--app', cfg.app, '--json', ...(token ? ['--since', token] : [])];
-  const res = run(argv);
-  let data: Record<string, any> = {};
-  try {
-    data = JSON.parse(res.stdout);
-  } catch {
-    /* reported below */
+/** Upper bound on pages drained per poll: a runaway continuation must fail, never spin. */
+const MAX_PAGES = 1000;
+
+const PAGE_QUERY = 'query($a: ID!, $s: String, $p: String) { teamAttentionPage(appRef: $a, since: $s, page: $p) '
+  + '{ scanComplete nextPage adoptableSince items { worker workerName channel unread unreadMentions firstUnreadSeq lastRelevantSeq lastSeq } } }';
+
+/**
+ * One attention poll: drain the paged v2 scan (#1384). Read-only; the final
+ * page's `adoptableSince` is adopted later, if at all.
+ *
+ * Paged v2 rather than the CLI's v1-shaped output because only v2 carries
+ * `lastRelevantSeq`, the mention frontier the ledger needs (@codex P1, #1490).
+ */
+export function pollAttention(cfg: Config, token: string | null, run: Runner): { token: string; items: AttentionItem[] } {
+  const items: AttentionItem[] = [];
+  let page: string | null = null;
+  for (let n = 0; n < MAX_PAGES; n++) {
+    const argv = [cfg.hadronCli, 'api', PAGE_QUERY, '-F', `a=${cfg.app}`];
+    if (page) argv.push('-F', `p=${page}`);
+    else if (token) argv.push('-F', `s=${token}`);
+    const res = run(argv);
+    let data: Record<string, any> = {};
+    try {
+      data = JSON.parse(res.stdout);
+    } catch {
+      /* reported below */
+    }
+    const result = data.data?.teamAttentionPage;
+    if (res.code !== 0 || !result || !Array.isArray(result.items)) {
+      const message = data.errors?.[0]?.message ?? data.error?.message ?? res.stderr.trim().slice(0, 300);
+      throw new RouterError(`attention poll failed: ${message || 'malformed result'}`);
+    }
+    items.push(...(result.items as AttentionItem[]));
+    if (result.nextPage) {
+      page = result.nextPage as string;
+      continue;
+    }
+    if (!result.scanComplete || typeof result.adoptableSince !== 'string' || !result.adoptableSince) {
+      throw new RouterError('attention poll failed: the final page carried no adoptable token');
+    }
+    return { token: result.adoptableSince, items };
   }
-  if (res.code !== 0 || typeof data.token !== 'string' || !data.token || !Array.isArray(data.workers)) {
-    const message = data.error?.message ?? res.stderr.trim().slice(0, 300) ?? 'malformed result';
-    throw new RouterError(`attention poll failed: ${message || 'malformed result'}`);
-  }
-  return { token: data.token, workers: data.workers };
+  throw new RouterError(`attention poll failed: more than ${MAX_PAGES} pages`);
 }
 
 /**
@@ -443,36 +472,18 @@ export function resolveTerminal(entry: RosterEntry, terminals: Terminal[]): [str
   return [agents[0].handle, agents[0].agentIdentity ?? ''];
 }
 
-interface Seen {
-  unread: number;
-  mentions: number;
-  firstUnreadSeq: number | null;
-  lastSeq: number | null;
-}
-
-/** Sum the counts for the configured channel (or every channel if none). */
-export function attentionFor(worker: AttentionWorker, channel: string): Seen {
-  const chans = (worker.channels ?? []).filter((c) => c.channel === channel);
-  const firsts = chans.map((c) => c.firstUnreadSeq).filter((v): v is number => typeof v === 'number');
-  const lasts = chans.map((c) => c.lastSeq).filter((v): v is number => typeof v === 'number');
-  return {
-    unread: chans.reduce((n, c) => n + (c.unread ?? 0), 0),
-    mentions: chans.reduce((n, c) => n + (c.unreadMentions ?? 0), 0),
-    firstUnreadSeq: firsts.length ? Math.min(...firsts) : null,
-    lastSeq: lasts.length ? Math.max(...lasts) : null,
-  };
-}
-
 /**
- * A nudge sent under this token still covers the worker's current backlog.
+ * A nudge sent under this token still covers the worker's current attention.
  *
- * It covers it while the worker has not read past what that nudge was about:
- * its first unread message is no later than the head we nudged at. Once it
- * reads past that, anything unread is new, and it is nudged again.
+ * It covers it while nothing relevant has arrived since: the worker's last
+ * relevant (mention) seq is no later than the one the nudge was about. A new
+ * mention always has a higher seq, so it is never mistaken for covered, no
+ * matter how much older, unrelated chat the worker has left unread (@codex
+ * P1, #1490: the first version compared firstUnreadSeq against the head).
  */
-export function alreadyNudged(record: NudgeRecord | undefined, seen: Seen): boolean {
-  if (!record || seen.firstUnreadSeq === null || record.lastSeq === null) return false;
-  return seen.firstUnreadSeq <= record.lastSeq;
+export function alreadyNudged(record: NudgeRecord | undefined, item: AttentionItem): boolean {
+  if (!record || typeof record.relevantSeq !== 'number' || item.lastRelevantSeq === null) return false;
+  return item.lastRelevantSeq <= record.relevantSeq;
 }
 
 // ── One poll ────────────────────────────────────────────────────────────
@@ -501,13 +512,11 @@ export function pollOnce(cfg: Config, run: Runner = runCommand, log: (line: stri
   return withLock(cfg.stateDir, () => {
     const attention = pollAttention(cfg, state.token(), run);
     const ledger = state.ledger();
-    const byId = new Map(attention.workers.map((w) => [w.worker, w]));
-    const targets: Array<[RosterEntry, Seen]> = [];
+    const targets: Array<[RosterEntry, AttentionItem]> = [];
     for (const entry of cfg.roster) {
-      const worker = byId.get(entry.worker);
-      if (!worker) continue;
-      const seen = attentionFor(worker, cfg.channel);
-      if (seen.mentions > 0) targets.push([entry, seen]);
+      const item = attention.items.find((i) => i.worker === entry.worker && i.channel === cfg.channel);
+      // Something relevant (for a mention-only row: a mention) since the token.
+      if (item && item.lastRelevantSeq !== null && item.unreadMentions > 0) targets.push([entry, item]);
     }
 
     const outcome: Outcome = { nudged: [], covered: [], held: {}, adopted: false };
@@ -531,12 +540,15 @@ export function pollOnce(cfg: Config, run: Runner = runCommand, log: (line: stri
         outcome.held[entry.name] = `busy for ${Math.round(cfg.busyWaitMs / 1000)}s`;
         continue;
       }
-      const [ok, how] = sendNudge(cfg, handle, nudgeText(seen.unread, seen.mentions), run);
+      const [ok, how] = sendNudge(cfg, handle, nudgeText(seen.unread, seen.unreadMentions), run);
       if (!ok) {
         outcome.held[entry.name] = how;
         continue;
       }
-      ledger.nudged[entry.worker] = { lastSeq: seen.lastSeq, at: Date.now(), stages: how };
+      ledger.nudged[entry.worker] = { relevantSeq: seen.lastRelevantSeq!, at: Date.now(), stages: how };
+      // Persisted at once: a crash or a later failure in this poll must not
+      // cause the same nudge to be sent again (@codex P2, #1490).
+      state.saveLedger(ledger);
       outcome.nudged.push(entry.name);
     }
 

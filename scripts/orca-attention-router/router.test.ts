@@ -14,11 +14,10 @@ const TOKEN_1 = 'tok-one-SECRET';
 const TOKEN_2 = 'tok-two-SECRET';
 const CHANNEL = 'chan-team';
 
-function worker(id: string, name: string, o: { mentions?: number; unread?: number; first?: number; last?: number } = {}) {
+function worker(id: string, name: string, o: { mentions?: number; unread?: number; first?: number; relevant?: number | null; head?: number } = {}) {
   return {
-    worker: id, name, live: true,
-    channels: [{ channel: CHANNEL, unread: o.unread ?? 3, unreadMentions: o.mentions ?? 1,
-      firstUnreadSeq: o.first ?? 100, lastSeq: o.last ?? 110 }],
+    worker: id, workerName: name, channel: CHANNEL, unread: o.unread ?? 3, unreadMentions: o.mentions ?? 1,
+    firstUnreadSeq: o.first ?? 100, lastRelevantSeq: o.relevant === undefined ? 110 : o.relevant, lastSeq: o.head ?? 120,
   };
 }
 
@@ -31,6 +30,10 @@ class FakeCLIs {
   sent: Array<[string, string]> = [];
   /** Workers with a mention-only row; `null` = every worker queried has one. */
   mentionOnly: Set<string> | null = null;
+  pages = 1;
+  dropFinalToken = false;
+  incompleteFinal = false;
+  registerFails = new Set<string>();
   /** Override the winning register row a worker resolves to. */
   registerRow: ((worker: string) => unknown) | null = null;
   calls: string[][] = [];
@@ -47,10 +50,22 @@ class FakeCLIs {
     this.calls.push(argv);
     const out = (d: unknown, code = 0): RunResult => ({ code, stdout: JSON.stringify(d), stderr: '' });
     const verb = argv.slice(1, 3).join(' ');
-    if (verb === 'team attention') {
-      return this.attentionOk ? out(this.attention) : out({ error: { message: 'boom' } }, 1);
+    if (argv[1] === 'api' && argv[2].includes('teamAttentionPage')) {
+      if (!this.attentionOk) return out({ errors: [{ message: 'boom' }] }, 1);
+      // Serve `pages` pages; the items all ride the last one; only it carries the token.
+      const pageArg = argv.find((a) => a.startsWith('p='));
+      const n = pageArg ? Number(pageArg.slice(2)) : 1;
+      const last = n >= this.pages;
+      return out({ data: { teamAttentionPage: {
+        scanComplete: last && !this.incompleteFinal, nextPage: last ? null : String(n + 1),
+        adoptableSince: last && !this.dropFinalToken ? this.attention.token : null,
+        items: last ? this.attention.workers : [],
+      } } });
     }
     if (argv[1] === 'api') {
+      if (this.registerFails.size && this.registerFails.has(argv[argv.indexOf('-F') + 1].replace(/^w=/, ''))) {
+        return out({ errors: [{ message: 'register down' }] }, 1);
+      }
       // attendeeRegister: the winning row for the team Channel.
       const w = argv[argv.indexOf('-F') + 1].replace(/^w=/, '');
       const ids = this.mentionOnly ?? new Set(['w-eli', 'w-baloo', 'w-ada']);
@@ -115,9 +130,9 @@ describe('Orca attention router — the happy path', () => {
     poll(c);
     fake.attention.token = TOKEN_2;
     poll(c);
-    const polls = fake.calls.filter((a) => a[1] === 'team');
-    expect(polls[0]).not.toContain('--since');
-    expect(polls[1][polls[1].indexOf('--since') + 1]).toBe(TOKEN_1);
+    const polls = fake.calls.filter((a) => a[1] === 'api' && a[2].includes('teamAttentionPage'));
+    expect(polls[0].some((a) => a.startsWith('s='))).toBe(false);
+    expect(polls[1]).toContain(`s=${TOKEN_1}`);
   });
 
   it('leaves workers off the roster, and roster workers without a mention, alone', () => {
@@ -149,16 +164,74 @@ describe('Orca attention router — busy: never typed into; hold the token', () 
     expect(sentHandles()).toEqual(['term_eli', 'term_baloo']);
   });
 
-  it('nudges again a worker who read past its nudge and has a new mention', () => {
+  it('a held token does not re-nudge a worker whose latest mention is unchanged', () => {
     const c = cfg(['w-eli', 'Eli'], ['w-baloo', 'Baloo']);
     fake.terminal('eli');
     fake.terminal('baloo');
     fake.busy.add('term_baloo');
-    fake.attention.workers = [worker('w-eli', 'Eli', { first: 100, last: 110 }), worker('w-baloo', 'Baloo')];
+    fake.attention.workers = [worker('w-eli', 'Eli', { relevant: 110 }), worker('w-baloo', 'Baloo')];
     poll(c);
-    fake.attention.workers = [worker('w-eli', 'Eli', { first: 115, last: 115 }), worker('w-baloo', 'Baloo')];
+    // Unrelated chat moved the head; Eli's latest mention is still 110.
+    fake.attention.workers = [worker('w-eli', 'Eli', { relevant: 110, head: 140 }), worker('w-baloo', 'Baloo')];
+    expect(poll(c).covered).toEqual(['Eli']);
+    expect(sentHandles()).toEqual(['term_eli']);
+  });
+
+  it('a NEW mention re-nudges even when the worker left older unrelated chat unread (@codex P1, #1490)', () => {
+    const c = cfg(['w-eli', 'Eli'], ['w-baloo', 'Baloo']);
+    fake.terminal('eli');
+    fake.terminal('baloo');
+    fake.busy.add('term_baloo');
+    fake.attention.workers = [worker('w-eli', 'Eli', { first: 100, relevant: 110, head: 120 }), worker('w-baloo', 'Baloo')];
+    poll(c);
+    // Eli read only its mention: firstUnreadSeq is still 100 (at or below the old head),
+    // and a new mention arrived at 125. The first version called this covered.
+    fake.attention.workers = [worker('w-eli', 'Eli', { first: 100, relevant: 125, head: 130 }), worker('w-baloo', 'Baloo')];
     expect(poll(c).nudged).toEqual(['Eli']);
     expect(sentHandles()).toEqual(['term_eli', 'term_eli']);
+  });
+
+  it('an accepted nudge is persisted at once: a later failure in the same poll cannot resend it (@codex P2, #1490)', () => {
+    const c = cfg(['w-eli', 'Eli'], ['w-baloo', 'Baloo']);
+    fake.terminal('eli');
+    fake.terminal('baloo');
+    fake.registerFails.add('w-baloo'); // Baloo's check throws AFTER Eli was nudged
+    fake.attention.workers = [worker('w-eli', 'Eli'), worker('w-baloo', 'Baloo')];
+    expect(() => poll(c)).toThrow(RouterError);
+    expect(sentHandles()).toEqual(['term_eli']);
+    fake.registerFails.clear();
+    const out = poll(c);
+    expect(out).toMatchObject({ covered: ['Eli'], nudged: ['Baloo'], adopted: true });
+    expect(sentHandles()).toEqual(['term_eli', 'term_baloo']);
+  });
+
+  it('drains every page and adopts only the final page\'s token', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli');
+    fake.pages = 3;
+    fake.attention.workers = [worker('w-eli', 'Eli')];
+    expect(poll(c)).toMatchObject({ nudged: ['Eli'], adopted: true });
+    expect(fake.calls.filter((a) => a[1] === 'api' && a[2].includes('teamAttentionPage'))).toHaveLength(3);
+    expect(adopted(c)).toBe(TOKEN_1);
+  });
+
+  it('a final page that reports an incomplete scan is refused, even carrying a token', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli');
+    fake.incompleteFinal = true;
+    fake.attention.workers = [worker('w-eli', 'Eli')];
+    expect(() => poll(c)).toThrow(RouterError);
+    expect(adopted(c)).toBeNull();
+  });
+
+  it('a final page with no adoptable token fails the poll and changes nothing', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli');
+    fake.dropFinalToken = true;
+    fake.attention.workers = [worker('w-eli', 'Eli')];
+    expect(() => poll(c)).toThrow(/no adoptable token/);
+    expect(fake.sent).toEqual([]);
+    expect(adopted(c)).toBeNull();
   });
 });
 
@@ -252,8 +325,8 @@ describe('Orca attention router — the mention-only register prerequisite', () 
     fake.registerRow = () => ({ namedBy: 'WORKER', channel: { id: CHANNEL }, entry: { mentionOnly: true, ownerType: 'ORGANIZATION' } });
     fake.attention.workers = [worker('w-eli', 'Eli')];
     expect(poll(c).nudged).toEqual(['Eli']);
-    const q = fake.calls.find((a) => a[1] === 'api')!;
-    expect(q[2]).toContain('attendeeRegister');
+    const q = fake.calls.find((a) => a[1] === 'api' && a[2].includes('attendeeRegister'))!;
+    expect(q).toBeDefined();
     expect(q[2]).not.toContain('ownerRef');
   });
 
