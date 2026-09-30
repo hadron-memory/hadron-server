@@ -2394,6 +2394,38 @@ export const nodeMutations = {
 
       // ── Write pass: revision snapshot + node update, all-or-nothing ──
       await ctx.db.$transaction(async (tx) => {
+        // A Channel can claim an ancestor after selection but before this
+        // transaction. Take its per-memory key BEFORE any node row lock (the
+        // Channel/create and delete paths use the same order), then classify
+        // again under that key. Newly protected rows are SKIPPED, as if the
+        // Channel had existed at selection time; no snapshot or update for
+        // them may reach the Channel-owned address (#1298).
+        const channelMemoryIds = [...new Set([...nodeById.values()].map((row) => row.memoryId))].sort();
+        for (const memoryId of channelMemoryIds) {
+          await lockMemoryForChannelChange(tx, memoryId);
+        }
+        const newlyProtected = new Set<string>();
+        const currentProtected = new Map<string, ProtectedLoc[]>();
+        for (const row of scannedNodes) {
+          let locs = currentProtected.get(row.memoryId);
+          if (!locs) {
+            locs = await protectedLocsIn(tx, row.memoryId);
+            currentProtected.set(row.memoryId, locs);
+          }
+          if (locs.some((entry) => protectedLocCovers(entry, row.loc))) {
+            newlyProtected.add(row.id);
+          }
+        }
+        if (newlyProtected.size > 0) {
+          skipCounts.protectedAddress += newlyProtected.size;
+          for (let i = scannedNodes.length - 1; i >= 0; i--) {
+            if (newlyProtected.has(scannedNodes[i]!.id)) scannedNodes.splice(i, 1);
+          }
+          for (let i = plans.length - 1; i >= 0; i--) {
+            if (newlyProtected.has(plans[i]!.raw.id)) plans.splice(i, 1);
+          }
+        }
+
         // #1323 (@codex/@copilot, PR #1339): each planned row is row-locked and
         // its unrevisioned drift reconciled as its OWN revision (id order, one
         // global order for multi-row writers) before its snapshot. The
