@@ -541,6 +541,31 @@ describe('#1468 — chat and Channel deletions (Codex P1)', () => {
   });
 });
 
+describe('#1468 — Channel reuse over a minted spec (Codex P1, Chip #4912)', () => {
+  async function deadChannelWithSpecBelow(memoryId: string) {
+    const { channel, rootId } = await ensureChannelWithRoot(db, { memoryId, loc: 'chats:c', name: 'c', createdBy: null });
+    const deletedAt = new Date();
+    await db.$transaction([
+      db.channel.update({ where: { id: channel.id }, data: { deletedAt } }),
+      db.node.update({ where: { id: rootId }, data: { deletedAt } }),
+    ]);
+    return node(memoryId, 'chats:c:messages:kept', { tags: ['spec'] });
+  }
+
+  it('refuses reusing a dead Channel address whose :messages: subtree holds a live minted spec', async () => {
+    const spec = await deadChannelWithSpecBelow(minted.id);
+    await expect(ensureChannelWithRoot(db, { memoryId: minted.id, loc: 'chats:c', name: 'c', createdBy: null }))
+      .rejects.toSatisfy(refusedPermanent);
+    expect(await db.node.findUniqueOrThrow({ where: { id: spec.id } })).toMatchObject({ deletedAt: null });
+  });
+
+  it('control: reuse in a draft corpus still tombstones the old subtree', async () => {
+    const spec = await deadChannelWithSpecBelow(draft.id);
+    await ensureChannelWithRoot(db, { memoryId: draft.id, loc: 'chats:c', name: 'c', createdBy: null });
+    expect((await db.node.findUniqueOrThrow({ where: { id: spec.id } })).deletedAt).not.toBeNull();
+  });
+});
+
 describe('#1468 — a whole-corpus delete cannot race the first spec (Codex P1)', () => {
   /** Run `writer` in a transaction held open until the returned release is called. */
   async function holdOpen(writer: (tx: Parameters<Parameters<typeof db.$transaction>[0]>[0]) => Promise<void>) {
