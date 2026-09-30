@@ -211,6 +211,85 @@ describe('transferMemoryOwnership', () => {
     });
   });
 
+  it('does not let a former org writer create a Channel after transfer', async () => {
+    await transfer({ memoryRef: memory.id, orgRef: org.id, targetClass: 'knowledge' });
+    const nextOrg = await db.organization.create({ data: {
+      id: generateId(), name: 'Next Channel Owner', urn: 'next-channel-owner',
+    } });
+    const transaction = db.$transaction.bind(db);
+    const raceDb = new Proxy(db, {
+      get(target, key) {
+        if (key === '$transaction') {
+          return async (work: Parameters<typeof transaction>[0]) => {
+            await resolvers.Mutation.transferMemoryOwnership(null, {
+              memoryRef: memory.id, orgRef: nextOrg.id,
+            }, { db, userId: outsider.id, roles: ['ADMIN'] });
+            return transaction(work as never);
+          };
+        }
+        return Reflect.get(target, key);
+      },
+    });
+    await expect(resolvers.Mutation.createChannel(null, { input: {
+      memoryRef: memory.id, loc: 'chats:late', name: 'late',
+    } }, { db: raceDb, userId: owner.id, roles: ['READER'] })).rejects.toMatchObject({ name: 'MemoryNotFoundError' });
+    expect(await db.channel.count({ where: { memoryId: memory.id } })).toBe(0);
+    expect(await db.memory.findUniqueOrThrow({ where: { id: memory.id } })).toMatchObject({ organizationId: nextOrg.id });
+  });
+
+  it('serializes a pending Channel creation behind a transfer of its host', async () => {
+    await transfer({ memoryRef: memory.id, orgRef: org.id, targetClass: 'knowledge' });
+    const nextOrg = await db.organization.create({ data: {
+      id: generateId(), name: 'Concurrent Channel Owner', urn: 'concurrent-channel-owner',
+    } });
+    let pendingTransfer: ReturnType<typeof transfer> | undefined;
+    let pendingCreate: ReturnType<typeof resolvers.Mutation.createChannel> | undefined;
+    await db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM memories WHERE id = ${memory.id} FOR UPDATE`;
+      pendingTransfer = resolvers.Mutation.transferMemoryOwnership(null, {
+        memoryRef: memory.id, orgRef: nextOrg.id,
+      }, { db, userId: outsider.id, roles: ['ADMIN'] });
+      await waitForLockWaiters(db);
+      pendingCreate = resolvers.Mutation.createChannel(null, { input: {
+        memoryRef: memory.id, loc: 'chats:pending', name: 'pending',
+      } }, ctx(owner.id));
+      void pendingCreate.catch(() => {});
+      await waitForLockWaiters(db, 2);
+    }, { timeout: 10_000 });
+    await expect(pendingTransfer!).resolves.toMatchObject({ applied: true });
+    await expect(pendingCreate!).rejects.toMatchObject({ name: 'MemoryNotFoundError' });
+    expect(await db.channel.count({ where: { memoryId: memory.id } })).toBe(0);
+  });
+
+  it('does not revive a tombstoned Channel after its host transfers', async () => {
+    await transfer({ memoryRef: memory.id, orgRef: org.id, targetClass: 'knowledge' });
+    const channel = await resolvers.Mutation.createChannel(null, { input: {
+      memoryRef: memory.id, loc: 'chats:former', name: 'former',
+    } }, ctx(owner.id));
+    await resolvers.Mutation.deleteChannel(null, { ref: channel.id }, ctx(owner.id));
+    const nextOrg = await db.organization.create({ data: {
+      id: generateId(), name: 'Next Restored Owner', urn: 'next-restored-owner',
+    } });
+    const transaction = db.$transaction.bind(db);
+    const raceDb = new Proxy(db, {
+      get(target, key) {
+        if (key === '$transaction') {
+          return async (work: Parameters<typeof transaction>[0]) => {
+            await resolvers.Mutation.transferMemoryOwnership(null, {
+              memoryRef: memory.id, orgRef: nextOrg.id,
+            }, { db, userId: outsider.id, roles: ['ADMIN'] });
+            return transaction(work as never);
+          };
+        }
+        return Reflect.get(target, key);
+      },
+    });
+    await expect(resolvers.Mutation.createChannel(null, { input: {
+      memoryRef: memory.id, loc: 'chats:former', name: 'former',
+    } }, { db: raceDb, userId: owner.id, roles: ['READER'] })).rejects.toMatchObject({ name: 'MemoryNotFoundError' });
+    expect(await db.channel.findUniqueOrThrow({ where: { id: channel.id } })).toMatchObject({ deletedAt: expect.any(Date) });
+  });
+
   it('lets account erasure finish after an owned corpus is handed to a surviving org', async () => {
     await db.orgMember.create({ data: { id: generateId(), organizationId: org.id, userId: receiver.id, role: 'OWNER' } });
     await transfer({ memoryRef: memory.id, orgRef: org.id, targetClass: 'knowledge' });
