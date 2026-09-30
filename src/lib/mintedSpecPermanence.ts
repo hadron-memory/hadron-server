@@ -199,8 +199,19 @@ export async function lockMintedSpecUnmarks(
   const [probe] = await tx.$queryRaw<Array<{ corpus_minted_at: Date | null }>>`
     SELECT corpus_minted_at FROM memories WHERE id = ${memoryId}`;
   if (!probe || probe.corpus_minted_at === null) return [];
-  const [memory] = await tx.$queryRaw<Array<{ corpus_minted_at: Date | null }>>`
-    SELECT corpus_minted_at FROM memories WHERE id = ${memoryId} FOR SHARE`;
+  const [memory] = await tx.$queryRaw<Array<{ corpus_minted_at: Date | null; deleted_at: Date | null }>>`
+    SELECT corpus_minted_at, deleted_at FROM memories WHERE id = ${memoryId} FOR SHARE`;
+  // The opposite order (Codex on #1475): a whole-corpus delete took the row
+  // first, this lock waited for it, and the corpus is now deleted. Marking a
+  // spec into it would report success for a spec that is already
+  // unreachable, so the write is refused as a conflict; a retry then meets
+  // the ordinary deleted-memory refusal of whatever door it came through.
+  if (memory?.deleted_at && newlyMarked) {
+    throw new GraphQLError(
+      'The memory was deleted while this write waited; nothing was written — re-read and retry.',
+      { extensions: { code: 'NODE_WRITE_CONFLICT', memoryId } },
+    );
+  }
   if (!memory || memory.corpus_minted_at === null || unmarked.length === 0) return [];
   const mintedAt = memory.corpus_minted_at;
   return unmarked

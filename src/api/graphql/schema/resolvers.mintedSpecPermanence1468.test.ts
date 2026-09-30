@@ -597,6 +597,29 @@ describe('#1468 — a whole-corpus delete cannot race the first spec (Codex P1)'
     expect(await db.memory.findUniqueOrThrow({ where: { id: minted.id } })).toMatchObject({ deletedAt: null });
   }, 20_000);
 
+  it('the opposite order: a first-spec mark waiting on a delete that commits is refused, writing nothing (Chip #4947)', async () => {
+    const n = await node(minted.id, 'pas:030');
+    // Stand-in for deleteMemory: the row FOR UPDATE and the tombstone, held open.
+    const { release, done } = await holdOpen(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM memories WHERE id = ${minted.id} FOR UPDATE`;
+      await tx.memory.update({ where: { id: minted.id }, data: { deletedAt: new Date() } });
+    });
+    const marking = resolvers.Mutation.updateNode({}, { input: { id: n.id, tags: ['spec'] } } as never, ctx());
+    try {
+      await vi.waitFor(async () => {
+        const waits = await db.$queryRaw<Array<{ pid: number }>>`
+          SELECT pid FROM pg_stat_activity
+          WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE '%FROM memories WHERE id%FOR SHARE%'`;
+        expect(waits.length).toBeGreaterThan(0);
+      }, { timeout: 5_000, interval: 25 });
+    } finally { release(); }
+    await done;
+    await expect(marking).rejects.toSatisfy(
+      (e: unknown) => e instanceof GraphQLError && e.extensions.code === 'NODE_WRITE_CONFLICT',
+    );
+    expect(await db.node.findUniqueOrThrow({ where: { id: n.id } })).toMatchObject({ tags: [] });
+  }, 20_000);
+
   it('an insert of the first spec, in flight, makes deleteMemory wait and then refuse', async () => {
     const { release, done } = await holdOpen(async (tx) => {
       await tx.node.create({ data: { id: generateId(), memoryId: minted.id, loc: 'pas:020', name: 'pas:020', tags: ['spec'] } });
