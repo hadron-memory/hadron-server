@@ -162,7 +162,10 @@ async function attendeeAccessActor(
     select: { id: true, organizationId: true, ownerUserId: true },
   });
   if (!app || !(await isAppParticipant(actor, app))) {
-    return { actor: null, unavailableReason: 'DRIVER_NOT_PARTICIPANT' };
+    // The holder is no longer an eligible Worker driver. No actor can be
+    // supplied for this projection; HOST/DRIVER_NOT_PARTICIPANT would claim
+    // something about the Channel's host App that may be false.
+    return { actor: null, unavailableReason: 'UNKNOWN_ACTOR' };
   }
   return { actor, unavailableReason: null };
 }
@@ -444,9 +447,7 @@ export function renderDerivedBlocks(view: RegisterView | null): string {
     const where = r.channel.hostMemoryUrn ? `${r.channel.hostMemoryUrn}:${r.channel.loc}` : `${r.channel.loc} (host memory hidden from this viewer)`;
     let standing: string;
     if (r.disclosure === 'UNKNOWN_ACTOR' && r.canPost === false) {
-      standing = 'no current driver (read + post unavailable)';
-    } else if (r.disclosure === 'DRIVER_NOT_PARTICIPANT' && !r.canRead) {
-      standing = 'driver is not a current participant of this Worker\'s App (read + post unavailable)';
+      standing = 'no eligible driver (read + post unavailable)';
     } else if (r.disclosure) {
       standing = describeDisclosure(r.disclosure);
     } else {

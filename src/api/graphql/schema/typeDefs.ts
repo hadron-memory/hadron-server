@@ -680,7 +680,7 @@ export const typeDefs = `#graphql
     "Phase 7 — the attendee's cursor; null until read-state lands."
     lastSeenSeq: Int
     canRead: Boolean!
-    "False for an unheld Worker (UNKNOWN_ACTOR); null only when no access subject was supplied."
+    "False for a Worker without an eligible driver (UNKNOWN_ACTOR); null only when no access subject was supplied."
     canPost: Boolean
     disclosure: RegisterDisclosure
     attendeeUrn: String

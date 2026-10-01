@@ -147,17 +147,17 @@ describe('resolveRegister', () => {
     await db.worker.update({ where: { id: worker.id }, data: { heldByUserId: reader.id } });
     const held = await Q.attendeeRegister({}, { workerRef: worker.id }, ctx(admin.id));
     expect(held[0]).toMatchObject({
-      canRead: false, canPost: false, disclosure: 'DRIVER_NOT_PARTICIPANT',
+      canRead: false, canPost: false, disclosure: 'UNKNOWN_ACTOR',
       channel: { hostMemoryId: appMem.id },
     });
     const w = await db.worker.findUniqueOrThrow({ where: { id: worker.id } });
-    expect(await W.prompt(w, {}, ctx(admin.id))).toContain('driver is not a current participant of this Worker\'s App');
+    expect(await W.prompt(w, {}, ctx(admin.id))).toContain('no eligible driver (read + post unavailable)');
     expect(await Q.attendeeRegister({}, { workerRef: worker.id }, ctx(stranger.id))).toEqual([]);
 
     await db.worker.update({ where: { id: worker.id }, data: { heldByUserId: null, heldAt: null } });
     const unheld = await Q.attendeeRegister({}, { workerRef: worker.id }, ctx(admin.id));
     expect(unheld[0]).toMatchObject({ canRead: false, canPost: false, disclosure: 'UNKNOWN_ACTOR' });
-    expect(await W.prompt(w, {}, ctx(admin.id))).toContain('no current driver (read + post unavailable)');
+    expect(await W.prompt(w, {}, ctx(admin.id))).toContain('no eligible driver (read + post unavailable)');
   });
 
   it('does not mistake a revoked holder\'s independent Channel read for Worker access', async () => {
@@ -180,7 +180,7 @@ describe('resolveRegister', () => {
     // cannot act as that Worker and must not inherit their personal read.
     const effective = await Q.attendeeRegister({}, { workerRef: worker.id }, { db, appId: app.id } as Context);
     expect(effective.find((row: { channel: { id: string } }) => row.channel.id === independentChannel.id))
-      .toMatchObject({ canRead: false, canPost: false, disclosure: 'DRIVER_NOT_PARTICIPANT' });
+      .toMatchObject({ canRead: false, canPost: false, disclosure: 'UNKNOWN_ACTOR' });
   });
 
   it('mintAppRun snapshots the Agent-in-App register; AppRun.register evaluates its App principal', async () => {
