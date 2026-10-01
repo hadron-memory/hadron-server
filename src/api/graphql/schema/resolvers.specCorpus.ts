@@ -198,10 +198,10 @@ interface ScannableCorpus {
   hiddenShadowed: Map<string, string[]>;
   hiddenCurrentUrnHistorical: string[];
   /**
-   * (aa503a4c, #1494) Every memory that historically held a URN, DELETED ones
-   * included. Used only to translate NODE alias keys: resolveNodeRef follows a
-   * deleted memory's old prefix to a moved node's alias, but a deleted memory's
-   * own rows never compete.
+   * (aa503a4c, #1494; #1511) Every memory that historically held a URN,
+   * including this corpus and DELETED holders. Used only to translate NODE
+   * alias keys: resolveNodeRef follows an old prefix to each holder's current
+   * URN. A deleted memory's own rows never compete.
    */
   historicalTranslators: Map<string, string[]>;
   /**
@@ -253,6 +253,10 @@ async function loadScannableCorpus(ctx: Context, memoryRef: string): Promise<Sca
   const historicalTranslators = new Map<string, string[]>();
   const addTranslator = (urn: string, memoryId: string) =>
     historicalTranslators.set(urn, [...new Set([...(historicalTranslators.get(urn) ?? []), memoryId])]);
+  // #1511: the corpus is itself a historical holder of every former name.
+  // Its current URN may carry a NODE alias left by an earlier holder; the
+  // shared resolver probes that key even when the citation uses a former name.
+  for (const urn of former) addTranslator(urn, id);
   if (former.length) {
     const claim = (urn: string, memoryId: string) => shadowed.set(urn, [...new Set([...(shadowed.get(urn) ?? []), memoryId])]);
     // Current holders of a former URN.
