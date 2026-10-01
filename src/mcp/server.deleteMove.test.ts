@@ -961,6 +961,29 @@ describe('hadron_move_node — cross-memory move + permission denial', () => {
     ).toBeNull();
   });
 
+  it('returns cross-memory link warnings in the move result (#1392)', async () => {
+    const otherMemory = await resolvers.Mutation.createMemory(
+      {},
+      { orgId: (await db.organization.findFirst())!.id, name: 'sister-links' },
+      { db, roles: ['ADMIN'], userId: fx.admin.id } as Context,
+    );
+    await db.node.update({
+      where: { id: fx.nodes.moveSource.id },
+      data: { content: 'The source still has [[stay|a linked node]].' },
+    });
+    await db.node.create({ data: {
+      id: generateId(), memoryId: fx.memory.id, loc: 'stay', name: 'Stay', nodeType: 'info', tags: [],
+    } });
+
+    const text = await createTestableMcpServer(adminAuth()).callToolText('hadron_move_node', {
+      urn: `urn:node:${fx.memory.urn}:${fx.nodes.moveSource.loc}`,
+      targetUrn: `urn:node:${otherMemory.urn}:imported`,
+    });
+
+    expect(text).toContain('Broken content links (1)');
+    expect(text).toContain('imported: [[stay|a linked node]] — missing in destination');
+  });
+
   it('relocates a whole SUBTREE across memories (#781)', async () => {
     const otherMemory = await resolvers.Mutation.createMemory(
       {},

@@ -1280,8 +1280,21 @@ export const typeDefs = `#graphql
     score: Float!
   }
 
+  enum NodeMoveLinkStatus { MISSING RETARGETED AMBIGUOUS }
+
+  type NodeMoveLinkWarning {
+    nodeId: ID!
+    nodeLoc: String!
+    raw: String!
+    target: String!
+    "RETARGETED names a different node; AMBIGUOUS has multiple live alias claimants."
+    status: NodeMoveLinkStatus!
+  }
+
   type Node {
     id: ID!
+    "#1392 — warnings from a cross-memory move. Null on other Node reads; [] when a move changes no local content links. Raw content is preserved."
+    moveLinkWarnings: [NodeMoveLinkWarning!]
     "#1323 — current live revision. Creation is revision 1; each committed authoring change advances it. NodeRevision.revNo N is the retained snapshot of this node when revision N was current, before the edit that advanced it."
     revision: Int!
     "#1326 — attribution of this content state. Null means legacy or unknown. Task identity is redacted unless its memory is independently readable."
@@ -7854,7 +7867,8 @@ export const typeDefs = `#graphql
     keeps its id, so all incoming/outgoing edge references stay valid. Fails
     loudly with NODE_ALREADY_EXISTS if a live node already occupies the
     destination. Requires write access to both the source and destination
-    memories.
+    memories. On a cross-memory move, select Node.moveLinkWarnings to see
+    raw relative content links that now miss or resolve to another node.
     """
     moveNode(sourceRef: ID!, targetUrn: String, targetMemoryRef: ID): Node!
 

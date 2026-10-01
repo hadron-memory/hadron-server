@@ -11,12 +11,16 @@
  * destination.
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { ApolloServer } from '@apollo/server';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb, createDbOrgAndGraph, createDbNode } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
+import { typeDefs } from './typeDefs.js';
 import { mirrorNodeMoveToGit } from '../../../integrations/github/mirrorNodeMove.js';
 import { moveNodeSubtree } from '../../../lib/nodeSubtreeMove.js';
+import { resolveNodeRef } from '../../../lib/entityRef/nodeRef.js';
+import { AmbiguousLegacyUrnError } from '../../../lib/entityRef/errors.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -31,6 +35,7 @@ vi.mock('../../../integrations/github/mirrorNodeMove.js', () => ({
 }));
 
 const M = resolvers.Mutation as any;
+const server = new ApolloServer<Context>({ typeDefs, resolvers });
 const ctx = (o: Partial<Context> = {}): Context => ({ db, ...o });
 
 let org: { id: string };
@@ -212,6 +217,81 @@ describe('moveNode (#564)', () => {
     const moved = await M.moveNode(null, { sourceRef: alpha.id, targetUrn: urnB('alpha-in-b') }, asUser());
     expect(moved.memoryId).toBe(memB.id);
     expect(moved.loc).toBe('alpha-in-b');
+  });
+
+  it('reports relative links that a cross-memory move breaks or retargets (#1392)', async () => {
+    const parent = await createDbNode(db, {
+      loc: 'p', memoryId: memA.id,
+      content: `Moved [[p:c|child]], left [[stay]], changed [[shadow]], already missing [[absent]], ` +
+        `malformed [[bad#ref]], ` +
+        `and stable [[hrn:node:${memA.urn}:p:c|full URN]].`,
+    });
+    const child = await createDbNode(db, { loc: 'p:c', memoryId: memA.id, content: 'Child also links [[stay]].' });
+    await createDbNode(db, { loc: 'stay', memoryId: memA.id });
+    await createDbNode(db, { loc: 'shadow', memoryId: memA.id });
+    await createDbNode(db, { loc: 'shadow', memoryId: memB.id });
+
+    const moved = await M.moveNode(null, { sourceRef: parent.id, targetUrn: urnB('q') }, asUser());
+
+    expect(moved.content).toContain('[[p:c|child]]'); // raw body is preserved
+    expect(moved.moveLinkWarnings).toEqual([
+      { nodeId: parent.id, nodeLoc: 'q', raw: '[[p:c|child]]', target: 'p:c', status: 'MISSING' },
+      { nodeId: parent.id, nodeLoc: 'q', raw: '[[stay]]', target: 'stay', status: 'MISSING' },
+      { nodeId: parent.id, nodeLoc: 'q', raw: '[[shadow]]', target: 'shadow', status: 'RETARGETED' },
+      { nodeId: child.id, nodeLoc: 'q:c', raw: '[[stay]]', target: 'stay', status: 'MISSING' },
+    ]);
+    expect((await db.node.findUniqueOrThrow({ where: { id: child.id } })).loc).toBe('q:c');
+  });
+
+  it('selects cross-memory link warnings through the GraphQL moveNode field (#1392)', async () => {
+    const source = await createDbNode(db, { loc: 'source', memoryId: memA.id, content: '[[stay]]' });
+    await createDbNode(db, { loc: 'stay', memoryId: memA.id });
+    const response = await server.executeOperation(
+      {
+        query: `mutation ($source: ID!, $target: String) {
+          moveNode(sourceRef: $source, targetUrn: $target) {
+            id moveLinkWarnings { nodeId nodeLoc raw target status }
+          }
+        }`,
+        variables: { source: source.id, target: urnB('moved') },
+      },
+      { contextValue: asUser() },
+    );
+    expect(response.body.kind).toBe('single');
+    if (response.body.kind !== 'single') throw new Error('Expected a single GraphQL result');
+    expect(response.body.singleResult.errors).toBeUndefined();
+    expect(response.body.singleResult.data?.moveNode).toEqual({
+      id: source.id,
+      moveLinkWarnings: [
+        { nodeId: source.id, nodeLoc: 'moved', raw: '[[stay]]', target: 'stay', status: 'MISSING' },
+      ],
+    });
+  });
+
+  it('classifies relative links through source and destination aliases (#1392)', async () => {
+    const sourceAliasTarget = await createDbNode(db, { loc: 'old-source', memoryId: memA.id });
+    await M.moveNode(null, { sourceRef: sourceAliasTarget.id, targetUrn: urnA('new-source') }, asUser());
+    const destinationAliasTarget = await createDbNode(db, { loc: 'old-dest', memoryId: memB.id });
+    await M.moveNode(null, { sourceRef: destinationAliasTarget.id, targetUrn: urnB('new-dest') }, asUser());
+    await createDbNode(db, { loc: 'old-dest', memoryId: memA.id });
+    const firstAmbiguous = await createDbNode(db, { loc: 'old-ambiguous', memoryId: memB.id });
+    await M.moveNode(null, { sourceRef: firstAmbiguous.id, targetUrn: urnB('new-ambiguous-1') }, asUser());
+    const secondAmbiguous = await createDbNode(db, { loc: 'old-ambiguous', memoryId: memB.id });
+    await M.moveNode(null, { sourceRef: secondAmbiguous.id, targetUrn: urnB('new-ambiguous-2') }, asUser());
+    await createDbNode(db, { loc: 'old-ambiguous', memoryId: memA.id });
+    expect((await resolveNodeRef(db, 'old-source', memA.id)).id).toBe(sourceAliasTarget.id);
+    expect((await resolveNodeRef(db, 'old-dest', memB.id)).id).toBe(destinationAliasTarget.id);
+    await expect(resolveNodeRef(db, 'old-ambiguous', memB.id)).rejects.toBeInstanceOf(AmbiguousLegacyUrnError);
+
+    const parent = await createDbNode(db, {
+      loc: 'parent', memoryId: memA.id, content: '[[old-source]] [[old-dest]] [[old-ambiguous]]',
+    });
+    const moved = await M.moveNode(null, { sourceRef: parent.id, targetUrn: urnB('moved') }, asUser());
+    expect(moved.moveLinkWarnings).toEqual([
+      { nodeId: parent.id, nodeLoc: 'moved', raw: '[[old-source]]', target: 'old-source', status: 'MISSING' },
+      { nodeId: parent.id, nodeLoc: 'moved', raw: '[[old-dest]]', target: 'old-dest', status: 'RETARGETED' },
+      { nodeId: parent.id, nodeLoc: 'moved', raw: '[[old-ambiguous]]', target: 'old-ambiguous', status: 'AMBIGUOUS' },
+    ]);
   });
 
   it('fails loudly (NODE_ALREADY_EXISTS) when the destination loc is occupied', async () => {

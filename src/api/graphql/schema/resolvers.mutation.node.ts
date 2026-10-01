@@ -2002,6 +2002,7 @@ export const nodeMoveOps = {
 
       try {
         let relocated: MoveNodeSubtreeResult['moved'] = [];
+        let linkWarnings: MoveNodeSubtreeResult['linkWarnings'] = [];
         const moved = await ctx.db.$transaction(
           async (tx) => {
             // #1187 — DECLARE the complete key set first, in the one global
@@ -2039,6 +2040,7 @@ export const nodeMoveOps = {
                 requireMemoryWriteAccess(withoutRequestCaches(ctx, tx), memoryId),
             });
             relocated = result.moved;
+            linkWarnings = result.linkWarnings;
             return tx.node.findUniqueOrThrow({ where: { id: source.id }, include: withEdges });
           },
           // A large subtree touches many rows; the default 5s interactive-txn
@@ -2064,7 +2066,7 @@ export const nodeMoveOps = {
             clientId: ctx.clientId ?? null,
           });
         }
-        return { node: moved, relocated };
+        return { node: { ...moved, moveLinkWarnings: linkWarnings }, relocated };
       } catch (e) {
         // Map the shared helper's typed errors (thrown from either branch) to the
         // GraphQL surface.
