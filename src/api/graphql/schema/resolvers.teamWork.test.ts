@@ -796,6 +796,19 @@ describe('teamWorkItems — the workerRef filter (#1035)', () => {
     return { worker, session };
   }
 
+  it('composes ownerless suffix paging with worker, session, tool, and kind filters', async () => {
+    const iris = await workerWithRecords('Iris', 'iris', ['one/hadron-cli#793', 'two/cli#793']);
+    await workerWithRecords('Henry', 'henry', ['three/cli#793']);
+
+    const page = await items(ctx(contrib.id), {
+      ref: 'cli#793', workerRef: iris.worker.id, sessionRef: iris.session.id,
+      tool: 'github', kind: 'pr', limit: 1, offset: 1,
+    });
+    expect(page.total).toBe(2);
+    expect(page.items).toHaveLength(1);
+    expect(['one/hadron-cli#793', 'two/cli#793']).toContain(page.items[0].ref);
+  });
+
   it('returns only that worker\'s records — across ALL their sessions, with a correct total', async () => {
     const iris = await workerWithRecords('Iris', 'iris', ['o/r#1', 'o/r#2']);
     await workerWithRecords('Henry', 'henry', ['o/r#3']);
