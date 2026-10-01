@@ -35,6 +35,7 @@ import { resolveChannelRefId } from './entityRef/channelRef.js';
 import { resolveOrgRef } from './entityRef/orgRef.js';
 import { resolveWorkerRef } from './entityRef/workerRef.js';
 import { resolveAgentRef } from './entityRef/agentRef.js';
+import { LIVE_ORG_MEMBERSHIP } from './auth/liveOrgMembership.js';
 
 export type RegisterOwnerType = 'ORGANIZATION' | 'APP';
 
@@ -253,7 +254,7 @@ export async function readableRegisterWhere(ctx: Context): Promise<Prisma.Regist
   const memberships = await ctx.db.orgMember.findMany({
     where: {
       userId: ctx.userId,
-      deletedAt: null,
+      ...LIVE_ORG_MEMBERSHIP,
       ...(ctx.impersonation ? { organizationId: ctx.impersonation.orgId } : {}),
     },
     select: { organizationId: true, role: true },

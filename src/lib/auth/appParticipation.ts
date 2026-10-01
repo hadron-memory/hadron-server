@@ -33,6 +33,7 @@
 
 import type { Prisma, PrismaClient } from '../../generated/prisma/index.js';
 import { orgRoleAtLeast } from './orgRole.js';
+import { LIVE_ORG_MEMBERSHIP } from './liveOrgMembership.js';
 
 /**
  * The ids of every live App this user PARTICIPATES in.
@@ -84,7 +85,7 @@ export async function participantAppWhere(
   const memberships = await db.orgMember.findMany({
     where: {
       userId,
-      deletedAt: null,
+      ...LIVE_ORG_MEMBERSHIP,
       ...(principal.impersonation ? { organizationId: principal.impersonation.orgId } : {}),
     },
     select: { organizationId: true, role: true },

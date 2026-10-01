@@ -74,6 +74,7 @@ import { publicReadableMemoryWhere } from '../../../lib/orgDiscoverability.js';
 import { memoryRowToRef, agentRowToRef } from './publicRefs.js';
 import { WORKLOG_LOC } from './resolvers.teamWork.js';
 import { corpusStateOf } from '../../../lib/specCorpus.js';
+import { LIVE_ORG_MEMBERSHIP } from '../../../lib/auth/liveOrgMembership.js';
 
 /**
  * #757 — a Prisma `where` fragment selecting the Agents this caller may read,
@@ -1200,13 +1201,8 @@ export const typeResolvers = {
         // A user-owned memory (no organizationId) has no org-admin fallback —
         // only the principal (checked above) can read its shares.
         if (!orgId) return [];
-        const member = await ctx.db.orgMember.findUnique({
-          where: {
-            organizationId_userId: {
-              organizationId: orgId,
-              userId: ctx.userId,
-            },
-          },
+        const member = await ctx.db.orgMember.findFirst({
+          where: { organizationId: orgId, userId: ctx.userId, ...LIVE_ORG_MEMBERSHIP },
           select: { role: true, deletedAt: true },
         });
         if (
@@ -1276,13 +1272,8 @@ export const typeResolvers = {
           // fallback — only an existing member (checked above) can read.
           if (!orgId) return [];
           // Fall back to org admin.
-          const orgMember = await ctx.db.orgMember.findUnique({
-            where: {
-              organizationId_userId: {
-                organizationId: orgId,
-                userId: ctx.userId,
-              },
-            },
+          const orgMember = await ctx.db.orgMember.findFirst({
+            where: { organizationId: orgId, userId: ctx.userId, ...LIVE_ORG_MEMBERSHIP },
             select: { role: true, deletedAt: true },
           });
           if (
@@ -1824,7 +1815,7 @@ export const typeResolvers = {
           where: {
             organizationId: org.id,
             userId: ctx.userId ?? '',
-            deletedAt: null,
+            ...LIVE_ORG_MEMBERSHIP,
             role: { in: ['ADMIN', 'OWNER'] },
           },
         });

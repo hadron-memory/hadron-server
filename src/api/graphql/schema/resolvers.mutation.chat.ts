@@ -50,6 +50,7 @@ import {
   loadPublishedSnapshot,
 } from './resolvers.helpers.js';
 import { assertNoMintedSpecRemoval } from '../../../lib/mintedSpecPermanence.js';
+import { LIVE_ORG_MEMBERSHIP } from '../../../lib/auth/liveOrgMembership.js';
 
 /**
  * How many of a chat's most recent messages `sendChatMessage` hands the model.
@@ -332,7 +333,7 @@ export const chatMutations = {
 
           const ownerOrgIds = (
             await ctx.db.orgMember.findMany({
-              where: { userId: ctx.userId, deletedAt: null },
+              where: { userId: ctx.userId, ...LIVE_ORG_MEMBERSHIP },
               select: { organizationId: true },
             })
           ).map((m) => m.organizationId);

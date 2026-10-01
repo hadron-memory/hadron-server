@@ -30,6 +30,7 @@ import {
   runOwnedEmailOperation,
 } from './resolvers.helpers.js';
 import { resolveWorkerRef } from '../../../lib/entityRef/workerRef.js';
+import { LIVE_ORG_MEMBERSHIP } from '../../../lib/auth/liveOrgMembership.js';
 
 export const sessionQueries = {
     sessions: async (
@@ -106,12 +107,10 @@ export const sessionQueries = {
           // single-read path has its own inline predicate.
           if (app.ownerUserId === ctx.userId && !ctx.impersonation) return session;
         } else if (app?.organizationId) {
-          const member = await ctx.db.orgMember.findUnique({
-            where: {
-              organizationId_userId: { organizationId: app.organizationId, userId: ctx.userId },
-            },
+          const member = await ctx.db.orgMember.findFirst({
+            where: { organizationId: app.organizationId, userId: ctx.userId, ...LIVE_ORG_MEMBERSHIP },
           });
-          if (member && !member.deletedAt) return session;
+          if (member) return session;
         }
       }
       return null;

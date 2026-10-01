@@ -64,6 +64,7 @@ import { ensureDefaultChannelForApp } from '../../../lib/channels.js';
 import { recordUrnRename } from '../../../lib/urnAlias.js';
 import { assertNoMintedCorpusCascade } from '../../../lib/mintedSpecPermanence.js';
 import { requireEndpointFor, requireKeyFor } from '../../../lib/aiEndpoint.js';
+import { LIVE_ORG_MEMBERSHIP } from '../../../lib/auth/liveOrgMembership.js';
 
 /**
  * #974 / cor:agt:020:02: a soft-deleted App keeps reserving its workers'
@@ -111,7 +112,7 @@ async function callerManagesAppMembers(
       where: {
         organizationId: app.organizationId,
         userId: ctx.userId ?? '',
-        deletedAt: null,
+        ...LIVE_ORG_MEMBERSHIP,
         role: { in: ['ADMIN', 'OWNER'] },
       },
     });

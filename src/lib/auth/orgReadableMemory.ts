@@ -31,6 +31,7 @@
  */
 
 import type { PrismaClient } from '../../generated/prisma/index.js';
+import { LIVE_ORG_MEMBERSHIP } from './liveOrgMembership.js';
 
 export async function getOrgReadableMemoryIds(
   db: PrismaClient,
@@ -54,7 +55,7 @@ export async function getOrgReadableMemoryIds(
   const memberships = await db.orgMember.findMany({
     where: {
       userId,
-      deletedAt: null,
+      ...LIVE_ORG_MEMBERSHIP,
       ...(restrictToOrgId ? { organizationId: restrictToOrgId } : {}),
     },
     select: { organizationId: true },

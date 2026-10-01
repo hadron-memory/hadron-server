@@ -33,6 +33,7 @@ import { activeAgentInstallLicenseIds, isAgentInstalled, isGrantedAgentMemoryRol
 import { resolveUserApps } from '../auth/user-app-resolution.js';
 import { getOrgReadableMemoryIds } from '../lib/auth/orgReadableMemory.js';
 import { sessionScopedMemoryIds } from '../lib/auth/sessionScopedMemoryIds.js';
+import { LIVE_ORG_MEMBERSHIP } from '../lib/auth/liveOrgMembership.js';
 
 // ---------------------------------------------------------------------------
 // Shared fold algorithm
@@ -738,7 +739,7 @@ export async function getWorkerMemoryAccess(
   if (!auth.userId) return [];
   const managerMemberships = await db.orgMember.findMany({
     where: {
-      userId: auth.userId, deletedAt: null, role: { in: ['ADMIN', 'OWNER'] },
+      userId: auth.userId, ...LIVE_ORG_MEMBERSHIP, role: { in: ['ADMIN', 'OWNER'] },
       ...(auth.impersonation ? { organizationId: auth.impersonation.orgId } : {}),
     },
     select: { organizationId: true },

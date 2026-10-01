@@ -33,6 +33,7 @@ import {
 } from '@hadron-memory/access-control';
 import type { PrismaClient } from '../../generated/prisma/index.js';
 import { authorizationDenied } from './authorizationDenied.js';
+import { LIVE_ORG_MEMBERSHIP } from './liveOrgMembership.js';
 
 /** Minimal caller shape — `Context` satisfies this structurally. */
 export interface OrgActionCaller {
@@ -67,7 +68,7 @@ export async function requireOrgAction(
 
   const [member, grants] = await Promise.all([
     ctx.db.orgMember.findFirst({
-      where: { organizationId: orgId, userId: ctx.userId, deletedAt: null },
+      where: { organizationId: orgId, userId: ctx.userId, ...LIVE_ORG_MEMBERSHIP },
       select: { role: true },
     }),
     ctx.db.principalGrant.findMany({

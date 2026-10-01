@@ -68,6 +68,7 @@ import {
   type PrismaClient,
 } from '../../../generated/prisma/index.js';
 import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
+import { LIVE_ORG_MEMBERSHIP } from '../../../lib/auth/liveOrgMembership.js';
 
 /**
  * The STORED (uncompiled) content of a Node whose `content` a read resolver
@@ -1133,7 +1134,7 @@ export async function canReadMemoryRecord(
     memory.class !== 'group' &&
     (!ctx.impersonation || ctx.impersonation.orgId === memory.organizationId)
       ? await ctx.db.orgMember.findFirst({
-          where: { organizationId: memory.organizationId, userId: ctx.userId, deletedAt: null },
+          where: { organizationId: memory.organizationId, userId: ctx.userId, ...LIVE_ORG_MEMBERSHIP },
         })
       : null;
   if (member) return true;
@@ -1225,7 +1226,7 @@ export async function requireOrgRole(
   // and the memory(ref) resolver's own membership check (PR-475 review, Codex
   // P1: a removed member who still knew an agent/app ref could read it).
   const member = await ctx.db.orgMember.findFirst({
-    where: { organizationId: orgId, userId: ctx.userId, deletedAt: null },
+    where: { organizationId: orgId, userId: ctx.userId, ...LIVE_ORG_MEMBERSHIP },
   });
   if (!member || (ROLE_ORDER[member.role] ?? -1) < ROLE_ORDER[required]) {
     throw authorizationDenied();
@@ -1336,7 +1337,7 @@ export async function isOrgMemberOrAdmin(ctx: Context, orgId: string): Promise<b
   if (isPlatformAdmin(ctx)) return true;
   if (!ctx.userId) return false;
   const member = await ctx.db.orgMember.findFirst({
-    where: { organizationId: orgId, userId: ctx.userId, deletedAt: null },
+    where: { organizationId: orgId, userId: ctx.userId, ...LIVE_ORG_MEMBERSHIP },
   });
   return !!member;
 }
@@ -1753,7 +1754,7 @@ export async function resolveOrgScope(
     const memberships = await ctx.db.orgMember.findMany({
       where: {
         userId: ctx.userId,
-        deletedAt: null,
+        ...LIVE_ORG_MEMBERSHIP,
         // Impersonation: only the session's shared org counts as "member".
         ...(ctx.impersonation ? { organizationId: ctx.impersonation.orgId } : {}),
       },
@@ -1823,7 +1824,7 @@ export async function granteeShareAccess(
   if (memory.organizationId === null) return true;
   // Org-owned — the grantee must still be a current member of the org.
   const member = await db.orgMember.findFirst({
-    where: { organizationId: memory.organizationId, userId, deletedAt: null },
+    where: { organizationId: memory.organizationId, userId, ...LIVE_ORG_MEMBERSHIP },
     select: { userId: true },
   });
   return !!member;
@@ -2162,7 +2163,7 @@ export async function sessionScopeFilter(ctx: Context): Promise<Record<string, u
     const memberships = await ctx.db.orgMember.findMany({
       where: {
         userId: ctx.userId,
-        deletedAt: null,
+        ...LIVE_ORG_MEMBERSHIP,
         // Impersonation: sessions of the shared org's Apps only.
         ...(ctx.impersonation ? { organizationId: ctx.impersonation.orgId } : {}),
       },
@@ -2387,7 +2388,7 @@ export async function requireMemoryWriteAccess(ctx: Context, memoryId: string): 
     // Direct org member with CONTRIBUTOR+? findFirst + deletedAt so a REVOKED
     // membership no longer grants write access (same rule as requireOrgRole).
     const member = await ctx.db.orgMember.findFirst({
-      where: { organizationId: memory.organizationId, userId: ctx.userId, deletedAt: null },
+      where: { organizationId: memory.organizationId, userId: ctx.userId, ...LIVE_ORG_MEMBERSHIP },
     });
     if (member && (ROLE_ORDER[member.role] ?? -1) >= ROLE_ORDER['CONTRIBUTOR']) return;
   }
@@ -2401,7 +2402,7 @@ export async function requireMemoryWriteAccess(ctx: Context, memoryId: string): 
     const userOrgs = await ctx.db.orgMember.findMany({
       where: {
         userId: ctx.userId,
-        deletedAt: null,
+        ...LIVE_ORG_MEMBERSHIP,
         role: { in: ['CONTRIBUTOR', 'ADMIN', 'OWNER'] as any },
       },
       select: { organizationId: true },
@@ -3391,7 +3392,7 @@ export async function isOrgAdminFor(
   // Same soft-revocation rule as requireOrgRole: a deleted membership row
   // must not keep granting org-admin authority.
   const member = await db.orgMember.findFirst({
-    where: { organizationId, userId, deletedAt: null },
+    where: { organizationId, userId, ...LIVE_ORG_MEMBERSHIP },
   });
   return !!member && (member.role === 'ADMIN' || member.role === 'OWNER');
 }
