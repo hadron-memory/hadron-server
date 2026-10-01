@@ -498,6 +498,15 @@ export function isIdle(cfg: Config, handle: string, timeoutMs: number, run: Runn
  */
 const CODEX_PLACEHOLDERS = new Set(['Ask Codex to do anything']);
 
+/**
+ * The suffix Claude Code's status line carries only while its composer is
+ * EMPTY. Typing anything, a single space included, removes it; clearing the
+ * composer restores it. Same in auto, manual, accept-edits and plan mode.
+ * If Claude Code renames it, every Claude worker is held and the reason is
+ * logged once: fail closed, loudly.
+ */
+const CLAUDE_EMPTY_HINT = '· ← for agents';
+
 /** Collapse ASCII whitespace AND NBSP: Codex draws its prompt as `›` + U+00A0. */
 const squash = (s: string): string => s.replace(/[\s\u00a0]+/g, ' ').trim();
 
@@ -514,6 +523,8 @@ const squash = (s: string): string => s.replace(/[\s\u00a0]+/g, ' ').trim();
  *  - Claude Code: the input box is the region between the last two column-0
  *    `───` rules. Its first line must be the bare `❯` marker and every other
  *    line in it blank, so a multi-line draft is caught whatever it contains.
+ *    And because typed WHITESPACE renders as nothing, the status line below
+ *    the box must carry the empty-input hint (`CLAUDE_EMPTY_HINT`).
  *  - Codex: the last column-0 `›` line shows the idle placeholder, and every
  *    line below it is footer (blank, `? for shortcuts`, or the `model · path`
  *    status line). Codex never draws pending text: real text shows only in
@@ -528,8 +539,16 @@ export function promptLineIsEmpty(lines: string[], agent: string): boolean {
   if (agent === 'claude') {
     const rules = lines.flatMap((l, i) => (/^─{3,}[\s\u00a0]*$/.test(l) ? [i] : []));
     if (rules.length < 2) return false;
-    const box = lines.slice(rules[rules.length - 2] + 1, rules[rules.length - 1]);
-    return box.length > 0 && /^❯[\s\u00a0]*$/.test(box[0]) && box.slice(1).every((l) => squash(l) === '');
+    const close = rules[rules.length - 1];
+    const box = lines.slice(rules[rules.length - 2] + 1, close);
+    if (!(box.length > 0 && /^❯[\s\u00a0]*$/.test(box[0]) && box.slice(1).every((l) => squash(l) === ''))) return false;
+    // A box that LOOKS empty may hold whitespace (Chip #5756): Claude draws
+    // typed spaces as nothing. The status line's empty-input hint is the
+    // proof — `· ← for agents` shows exactly while the composer is empty, in
+    // every permission mode (live probe, 2026-10-01), since ← only switches
+    // agents when there is no text for it to move through.
+    const status = lines.slice(close + 1).find((l) => squash(l) !== '');
+    return status !== undefined && squash(status).endsWith(CLAUDE_EMPTY_HINT);
   }
   if (agent !== 'codex') return false;
   let at = -1;

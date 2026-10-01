@@ -13,7 +13,8 @@ import {
 
 /** Rendered screens as Orca returned them on 2026-10-01 (idle, nobody typing). */
 const RULE = '─'.repeat(60);
-const CLAUDE_IDLE = ['⏺ Done.', '❯ an earlier submitted turn', '✻ Cogitated for 1m 3s', RULE, '❯\u00a0', RULE, '  ⏵⏵ bypass permissions on (shift+tab to cycle)'];
+const CLAUDE_HINT = '  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents';
+const CLAUDE_IDLE = ['⏺ Done.', '❯ an earlier submitted turn', '✻ Cogitated for 1m 3s', RULE, '❯\u00a0', RULE, CLAUDE_HINT];
 const CODEX_IDLE = ['  Worked for 33s • 16:32', '› Ask Codex to do anything', '  GPT-6-Sol high · ~/orca/workspaces/hadron-server/andi · Start worker session as Andi', '  ? for shortcuts'];
 const withPrompt = (screen: string[], marker: string, text: string) => {
   const i = screen.map((l) => l.trimStart().startsWith(marker)).lastIndexOf(true);
@@ -536,7 +537,19 @@ describe('Orca attention router — a human typing: never appended to; hold the 
     // Codex: a typed `›` continuation is indented, so it cannot pose as the prompt.
     expect(promptLineIsEmpty(['› half typed', '  ›', '  ? for shortcuts'], 'codex')).toBe(false);
     // Rules in earlier transcript output do not matter: the box is the LAST pair.
-    expect(promptLineIsEmpty([RULE, 'output', RULE, '❯ old turn', RULE, '❯', RULE], 'claude')).toBe(true);
+    expect(promptLineIsEmpty([RULE, 'output', RULE, '❯ old turn', RULE, '❯', RULE, CLAUDE_HINT], 'claude')).toBe(true);
+  });
+
+  it('Claude: a box that looks empty holds whitespace unless the empty-input hint shows (Chip #5756, live 2026-10-01)', () => {
+    // Three spaces typed: the box renders a bare `❯`, and only the hint vanished.
+    expect(promptLineIsEmpty([RULE, '❯', RULE, '  ⏵⏵ bypass permissions on (shift+tab to cycle)'], 'claude')).toBe(false);
+    // The hint is present in every permission mode while empty.
+    for (const mode of ['⏵⏵ auto mode on (shift+tab to cycle)', '⏸ manual mode on', '⏵⏵ accept edits on (shift+tab to cycle)', '⏸ plan mode on (shift+tab to cycle)']) {
+      expect(promptLineIsEmpty([RULE, '❯', RULE, `  ${mode} · ← for agents`], 'claude')).toBe(true);
+      expect(promptLineIsEmpty([RULE, '❯', RULE, `  ${mode}`], 'claude')).toBe(false);
+    }
+    // No status line at all cannot prove it.
+    expect(promptLineIsEmpty([RULE, '❯', RULE], 'claude')).toBe(false);
   });
 
   it('Codex: only the placeholder proves empty; a bare prompt or a dialog holds (live 2026-10-01)', () => {
