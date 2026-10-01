@@ -79,9 +79,13 @@ describe('#1573: membership capacity is serialized across both doors', () => {
     const viaJoin = M.joinApp(null, { appId: app.id }, ctxFor(joiner.id));
     const viaEnsure = M.ensureAppMember(null, { appId: app.id, userId: invited.id, role: 'member' }, ctxFor(admin.id, ['ADMIN']));
     // Both doors are blocked on the SAME capacity key: proof they participate.
-    await waitForLockWaitersOfType(db, 'advisory', 2);
-    holder.release();
-    await holder.done;
+    try {
+      await waitForLockWaitersOfType(db, 'advisory', 2);
+    } finally {
+      // Always release, so a failed barrier cannot wedge later tests.
+      holder.release();
+      await holder.done;
+    }
 
     const outcomes = await Promise.allSettled([viaJoin, viaEnsure]);
     const rejected = outcomes.filter((o): o is PromiseRejectedResult => o.status === 'rejected');
@@ -119,11 +123,70 @@ describe('#1573: revokeAgentSubscription is an exclusive revoker on [agent, targ
     });
     const revoke = M.revokeAgentSubscription(null, { agentId: agent.id, userId: target.id }, ctxFor(admin.id, ['ADMIN']));
     // The revoker is blocked on the writer's anchors, not racing past it.
-    await waitForLockWaitersOfType(db, 'advisory', 1);
-    writer.release();
-    await writer.done;
+    try {
+      await waitForLockWaitersOfType(db, 'advisory', 1);
+    } finally {
+      // Always release, so a failed barrier cannot wedge later tests.
+      writer.release();
+      await writer.done;
+    }
     await revoke;
     const sub = await db.agentSubscription.findUniqueOrThrow({ where: { userId_agentId: { userId: target.id, agentId: agent.id } } });
     expect(sub.revokedAt).not.toBeNull();
+  });
+});
+
+describe('#1573: App-scoped memory writes are fenced by the App revokers', () => {
+  it('createMemoryInApp waits for an in-flight App delete, then is refused; no memory or link is written', async () => {
+    // A revoker that holds the App exclusively and deletes it, uncommitted.
+    const revoker = await hold(async (tx) => {
+      await lockAuthorityAnchors(tx, [{ kind: 'app', id: app.id }], 'exclusive');
+      await tx.app.update({ where: { id: app.id }, data: { deletedAt: new Date() } });
+    });
+    const create = M.createMemoryInApp(null, {
+      appRef: app.id, agentRef: agent.id, memoryClass: 'knowledge', name: 'late-knowledge',
+    }, ctxFor(admin.id, ['ADMIN']));
+    try {
+      await waitForLockWaitersOfType(db, 'advisory', 1);
+    } finally {
+      // Always release, so a failed barrier cannot wedge later tests.
+      revoker.release();
+      await revoker.done;
+    }
+    await expect(create).rejects.toBeTruthy();
+    expect(await db.memory.count({ where: { appId: app.id, name: 'late-knowledge' } })).toBe(0);
+    expect(await db.agentMemoryItem.count({ where: { agentId: agent.id } })).toBe(0);
+  });
+
+  it('CONTROL: with no revoker, createMemoryInApp writes the knowledge memory and its read link', async () => {
+    const memory = await M.createMemoryInApp(null, {
+      appRef: app.id, agentRef: agent.id, memoryClass: 'knowledge', name: 'kept-knowledge',
+    }, ctxFor(admin.id, ['ADMIN']));
+    expect(await db.agentMemoryItem.count({ where: { agentId: agent.id, memoryId: memory.id } })).toBe(1);
+  });
+
+  it('attachMemoryToApp waits for an in-flight membership removal, then is refused', async () => {
+    const owner = await mkUser(8);
+    await db.orgMember.create({ data: { organizationId: org.id, userId: owner.id, role: 'READER' } });
+    await db.agent.update({ where: { id: agent.id }, data: { installationPolicy: { maxMembers: 'unlimited', memberRoles: ['member'] } as never } });
+    await db.appMember.create({ data: { appId: app.id, userId: owner.id, role: 'member' } });
+    const personal = await db.memory.create({ data: {
+      id: generateId(), organizationId: org.id, urn: `${org.urn}:p-${generateId().slice(-6)}`, name: 'mine',
+      class: 'personal', userId: owner.id,
+    } });
+    const revoker = await hold(async (tx) => {
+      await lockAuthorityAnchors(tx, [{ kind: 'app', id: app.id }], 'exclusive');
+      await tx.appMember.delete({ where: { appId_userId: { appId: app.id, userId: owner.id } } });
+    });
+    const attach = M.attachMemoryToApp(null, { memoryRef: personal.id, appRef: app.id, agentRef: agent.id }, ctxFor(owner.id));
+    try {
+      await waitForLockWaitersOfType(db, 'advisory', 1);
+    } finally {
+      // Always release, so a failed barrier cannot wedge later tests.
+      revoker.release();
+      await revoker.done;
+    }
+    await expect(attach).rejects.toBeTruthy();
+    expect((await db.memory.findUniqueOrThrow({ where: { id: personal.id } })).appId).toBeNull();
   });
 });
