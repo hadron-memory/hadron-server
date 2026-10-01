@@ -336,6 +336,12 @@ export const appMutations = {
       const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentRef);
       let selectedImports: Array<{ importedAgentId: string }> = [];
       if (resolvedOrgId) {
+        // Conceal an unlicensed foreign parent before resolving caller-supplied
+        // optional refs. Their lookup errors must not reveal that it exists.
+        const autoGrantIds: string[] = [];
+        if (await planOrgAgentInstallGrant(ctx.db, resolvedOrgId, resolvedAgentId, agentRef)) {
+          autoGrantIds.push(resolvedAgentId);
+        }
         // Resolve the full install set before any grant/App write. A required
         // or opted-in dependency may belong to another org even when the
         // parent Agent is ours; checking it after app.create left a partial
@@ -352,10 +358,6 @@ export const appMutations = {
         }
         selectedImports = imports.filter((imp) => imp.required || optionalIds.has(imp.importedAgentId));
 
-        const autoGrantIds: string[] = [];
-        if (await planOrgAgentInstallGrant(ctx.db, resolvedOrgId, resolvedAgentId, agentRef)) {
-          autoGrantIds.push(resolvedAgentId);
-        }
         for (const imp of selectedImports) {
           if (await planOrgAgentInstallGrant(ctx.db, resolvedOrgId, imp.importedAgentId, agentRef, true)) {
             autoGrantIds.push(imp.importedAgentId);

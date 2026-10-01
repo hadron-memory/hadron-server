@@ -49,6 +49,23 @@ describe('#1580 createApp AgentOrgGrant boundary', () => {
     expect(await db.app.count({ where: { organizationId: installerOrg.id } })).toBe(0);
   });
 
+  it('conceals an unlicensed private parent before resolving invalid optional refs', async () => {
+    const privateAgent = await agent(vendorOrg, 'hidden-parent', 'ORGANIZATION');
+    const optionalRef = generateId();
+    const call = (agentRef: string) => M.createApp(null, {
+      orgRef: installerOrg.id, agentRef, name: 'Probe', installOptional: [optionalRef],
+    }, ctx());
+
+    const hiddenError = await call(privateAgent.id).catch((error: Error) => error);
+    const missingParentId = generateId();
+    const missingError = await call(missingParentId).catch((error: Error) => error);
+    expect(hiddenError.message).toBe(missingError.message.replace(missingParentId, privateAgent.id));
+    expect(hiddenError.message).toContain('AGENT_NOT_FOUND');
+    expect(hiddenError.message).not.toContain(optionalRef);
+    expect(await db.agentOrgGrant.count({ where: { orgId: installerOrg.id } })).toBe(0);
+    expect(await db.app.count({ where: { organizationId: installerOrg.id } })).toBe(0);
+  });
+
   it('auto-provisions only the owning org and refuses an inactive own grant', async () => {
     const ownAgent = await agent(installerOrg, 'own', 'ORGANIZATION');
     const app = await M.createApp(null, { orgRef: installerOrg.id, agentRef: ownAgent.id, name: 'Own' }, ctx());
