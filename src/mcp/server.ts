@@ -6890,7 +6890,7 @@ The node's \`name\` (its human-authored display title) is PRESERVED — a move c
 
 Atomicity: collision-evict → per-node NodeRevision snapshot → subtree move all run inside a single db.$transaction so a partial failure cannot leave the URN slot empty.
 
-On success returns the moved node's record: new URN, name, type, tags, edge counts, and immediate-child count (empty sections omitted).`,
+On success returns the moved node's record: new URN, name, type, tags, edge counts, and immediate-child count (empty sections omitted). A cross-memory move also reports raw relative content links that now miss or point to a different node; content is not rewritten.`,
     {
       urn: z.string().describe('Current node fully-qualified URN, e.g. "hrn:node:acme.com:mmdata:services:db-helper"'),
       targetUrn: z.string().describe('Destination node fully-qualified URN. Different memory in the target URN performs a cross-memory move.'),
@@ -6978,6 +6978,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       // inside the transaction so the git mirror can run after it commits. Empty
       // for the same-slot no-op branch, which relocates nothing.
       let relocated: MoveNodeSubtreeResult['moved'] = [];
+      let linkWarnings: MoveNodeSubtreeResult['linkWarnings'] = [];
       try {
         result = await db.$transaction(async (tx) => {
           // #664/#752: moving a node INTO a subtree is the same orphan vector as
@@ -7118,6 +7119,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
               authorizeLockedMemory: (memoryId) => assertLockedMemoryWriteAccess(tx, auth, memoryId),
             });
             relocated = subtreeResult.moved;
+            linkWarnings = subtreeResult.linkWarnings;
             // #1468 — evicting the destination occupant removes it from its
             // corpus and hands its citation to another node: refused for a
             // minted spec. Checked AFTER the helper on purpose: it already holds
@@ -7245,6 +7247,15 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       }
       if (childCount > 0) {
         lines.push(`Children: ${childCount} immediate descendant(s).`);
+      }
+      if (linkWarnings.length > 0) {
+        lines.push('', `Broken content links (${linkWarnings.length}):`);
+        for (const warning of linkWarnings) {
+          lines.push(
+            `${warning.nodeLoc}: ${warning.raw} — ` +
+              (warning.status === 'MISSING' ? 'missing in destination' : 'points to a different node in destination'),
+          );
+        }
       }
 
       return textResult(lines.join('\n'));
