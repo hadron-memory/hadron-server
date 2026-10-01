@@ -944,6 +944,19 @@ describe('#1540 — a mark-read through a live session keeps it live', () => {
       .resolves.toMatchObject({ lastSeenSeq: 2 });
   });
 
+  it('a read that does not advance the cursor (newest page, mention filter) still keeps the session live (Codex P1)', async () => {
+    const t0 = (await db.session.findUniqueOrThrow({ where: { id: sessionId } })).startedAt;
+    await post('one');
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date(t0.getTime() + 20 * H));
+    // The newest-page default and a mentions filter both return before any cursor advance.
+    await Q.teamChatMessages({}, { appRef: app.urn }, userCtx({ sessionId }));
+    await Q.teamChatMessages({}, { appRef: app.urn, sinceSeq: 0, mentionsRef: worker.name }, userCtx({ sessionId }));
+    vi.setSystemTime(new Date(t0.getTime() + 30 * H));
+    await expect(M.markOwnTeamChatRead({}, { appRef: app.urn, sessionRef: sessionId, channelRef: channel.id, seq: 1 }, userCtx()))
+      .resolves.toMatchObject({ lastSeenSeq: 1 });
+  });
+
   it('control: a session nobody drove for a whole window still cannot mark read', async () => {
     const t0 = (await db.session.findUniqueOrThrow({ where: { id: sessionId } })).startedAt;
     await post('one');

@@ -1257,13 +1257,19 @@ export async function maybeAdvanceOwnChannelRead(
   },
 ): Promise<number | null> {
   const sessionRef = args.sessionRef?.trim() || ctx.sessionId?.trim();
-  if (!sessionRef || args.mentionsRef || args.beforeSeq != null || (args.offset ?? 0) !== 0 || (args.limit ?? 1) <= 0) return null;
+  if (!sessionRef) return null;
+  // #1540 (Codex P1 on #1542): EVERY successful read through an owned, live
+  // session is its driver driving it, whether or not the page qualifies to
+  // advance the cursor below. Resolving the session first runs the keep-alive
+  // in `ownLiveSessionWorker` before the eligibility returns, so a driver that
+  // reads only newest pages, mention filters or backward windows stays live.
+  const session = await ownLiveSessionWorker(ctx, sessionRef);
+  if (!session) return null;
+  if (args.mentionsRef || args.beforeSeq != null || (args.offset ?? 0) !== 0 || (args.limit ?? 1) <= 0) return null;
   // #1536: no cursor and no offset now selects the newest page. Even when
   // total says it is complete, count and fetch are separate queries: a post
   // between them could make the fetched tail skip earlier unseen messages.
   if (args.sinceSeq == null && args.offset == null) return null;
-  const session = await ownLiveSessionWorker(ctx, sessionRef);
-  if (!session) return null;
   const { workerId } = session;
   const view = await resolveRegister(ctx.db, { attendee: { workerId }, actor: ctx });
   const row = view?.rows.find((r) => r.channel.id === args.channelId);
