@@ -1122,7 +1122,39 @@ export const appMutations = {
       let resolvedAppId: string;
       try {
         ({ id: resolvedAppId } = await resolveAppRef(ctx.db, appId));
-        await joinApp(ctx.db, { appId: resolvedAppId, userId: ctx.userId });
+        // #1573: self-service membership is an authority write. Hold the App
+        // and its owner (org or user) shared, alongside the joining user the
+        // helper adds, so removeAppMember / deleteApp / uninstall (exclusive on
+        // the same anchors) cannot pass a join that is about to commit; the
+        // owner tuple is re-checked on the locked row. ensureAppMember's
+        // capacity lock (inside the same transaction) serializes joins at the cap.
+        const owner = await ctx.db.app.findUniqueOrThrow({
+          where: { id: resolvedAppId },
+          select: { organizationId: true, ownerUserId: true, deletedAt: true, uninstalledAt: true },
+        });
+        // Keep the typed lifecycle errors for the ordinary case; only a
+        // delete/uninstall racing this join meets the helper's generic denial.
+        if (owner.deletedAt) throw new AppNotFoundError(resolvedAppId);
+        if (owner.uninstalledAt) throw new AppUninstalledError(resolvedAppId);
+        const joiningUserId = ctx.userId;
+        await withAuthorizedTx(
+          ctx,
+          [
+            { kind: 'app', id: resolvedAppId },
+            ...(owner.organizationId ? [{ kind: 'org' as const, id: owner.organizationId }] : []),
+            ...(owner.ownerUserId ? [{ kind: 'user' as const, id: owner.ownerUserId }] : []),
+          ],
+          async (txCtx) => {
+            const current = await txCtx.db.app.findUniqueOrThrow({
+              where: { id: resolvedAppId },
+              select: { organizationId: true, ownerUserId: true },
+            });
+            if (current.organizationId !== owner.organizationId || current.ownerUserId !== owner.ownerUserId) {
+              throw new Error('App ownership changed; retry the operation');
+            }
+          },
+          (tx) => joinApp(tx, { appId: resolvedAppId, userId: joiningUserId }),
+        );
       } catch (e: unknown) {
         // Surface typed errors with their canonical messages (Constitution
         // Principle III — plain-language banner-friendly).

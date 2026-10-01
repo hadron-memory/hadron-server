@@ -36,7 +36,7 @@
  * or becomes admin-only.
  */
 
-import type { PrismaClient } from '../../generated/prisma/index.js';
+import type { Prisma, PrismaClient } from '../../generated/prisma/index.js';
 import {
   ensureAppMember,
   OrphanAppError,
@@ -72,7 +72,7 @@ type InstallationPolicyShape = {
 };
 
 export async function joinApp(
-  db: PrismaClient,
+  db: PrismaClient | Prisma.TransactionClient,
   args: { appId: string; userId: string },
 ): Promise<{ appId: string; userId: string; role: string }> {
   // Verify the App exists, isn't soft-deleted, and isn't in the
@@ -123,7 +123,7 @@ export async function joinApp(
   return { appId: args.appId, userId: args.userId, role: defaultRole };
 }
 
-async function pickDefaultRole(db: PrismaClient, appId: string): Promise<string> {
+async function pickDefaultRole(db: PrismaClient | Prisma.TransactionClient, appId: string): Promise<string> {
   // The Agent's installation_policy.memberRoles is the source of truth.
   // We look up the primary installed Agent's policy here, but defer
   // the "no installed Agent" error to ensureAppMember (it throws
