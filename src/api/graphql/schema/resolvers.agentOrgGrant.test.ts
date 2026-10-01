@@ -13,6 +13,7 @@ import { cleanDb, createDbAgentImport } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
 import { typeDefs } from './typeDefs.js';
+import { waitForLockWaitersOfType } from '../../../test/lockWait.js';
 
 const M = resolvers.Mutation as any;
 
@@ -115,6 +116,44 @@ beforeEach(async () => {
       name: 'Private Agent',
       visibility: 'ORGANIZATION',
     },
+  });
+});
+
+describe('#1551 AgentOrgGrant revocation fence', () => {
+  it('revoke waits for an in-flight grant, then deactivates it', async () => {
+    let release!: () => void;
+    let held!: () => void;
+    const holdGate = new Promise<void>((resolve) => { release = resolve; });
+    const locked = new Promise<void>((resolve) => { held = resolve; });
+    const holder = db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM agents WHERE id = ${publicAgent.id} FOR UPDATE`;
+      held();
+      await holdGate;
+    }, { timeout: 20_000 });
+    await locked;
+
+    const grant = M.createAgentOrgGrant(null, {
+      agentRef: publicAgent.id, orgRef: subscriberOrg.id,
+    }, ctx(subscriberAdmin.id));
+    try {
+      await waitForLockWaitersOfType(db, 'transactionid', 1);
+      let revoked = false;
+      const revoke = M.revokeAgentOrgGrant(null, {
+        agentRef: publicAgent.id, orgRef: subscriberOrg.id,
+      }, ctx(subscriberOwner.id)).then((value: unknown) => { revoked = true; return value; });
+      await waitForLockWaitersOfType(db, 'advisory', 1);
+      expect(revoked).toBe(false);
+      release();
+      await holder;
+      await grant;
+      await revoke;
+      expect((await db.agentOrgGrant.findUniqueOrThrow({ where: {
+        orgId_agentId: { orgId: subscriberOrg.id, agentId: publicAgent.id },
+      } })).revokedAt).not.toBeNull();
+    } finally {
+      release();
+      await Promise.allSettled([holder, grant]);
+    }
   });
 });
 

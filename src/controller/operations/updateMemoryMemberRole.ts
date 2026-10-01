@@ -67,67 +67,71 @@ export async function updateMemoryMemberRole(
     actorId: string;
   },
 ): Promise<MemoryMember> {
-  return db.$transaction(
-    async (tx) => {
-      // Entity-status invariants (mirrors addMemoryMember). The
-      // GraphQL guard `requireMemoryMemberOwner` covers these for
-      // user-driven calls, but a controller-level caller (jobs,
-      // tests, future code) can reach this function directly — so
-      // enforce here too rather than trusting the upstream guard.
-      const memory = await tx.memory.findUnique({
-        where: { id: args.memoryId },
-        select: { class: true, deletedAt: true },
-      });
-      if (!memory || memory.deletedAt) {
-        throw new MemoryNotFoundForMemberError(args.memoryId);
-      }
-      if (memory.class !== 'group') {
-        throw new InvalidMemoryClassForMemberError(args.memoryId, memory.class);
-      }
-      const current = await tx.memoryMember.findUnique({
-        where: {
-          memoryId_userId: { memoryId: args.memoryId, userId: args.userId },
-        },
-        select: { role: true },
-      });
-      if (!current) {
-        throw new MemoryMemberNotFoundError(args.memoryId, args.userId);
-      }
-      // FR-038: refuse to demote the sole remaining owner. Under
-      // SERIALIZABLE isolation two concurrent self-demotes can't
-      // both observe ownerCount > 1 — one will fail with 40001 on
-      // commit and Prisma will surface that as a transient error
-      // the caller can retry.
-      if (current.role === 'owner' && args.role !== 'owner') {
-        const ownerCount = await tx.memoryMember.count({
-          where: { memoryId: args.memoryId, role: 'owner' },
-        });
-        if (ownerCount <= 1) {
-          throw new LastOwnerProtectedError(args.memoryId);
-        }
-      }
-      try {
-        return await tx.memoryMember.update({
-          where: {
-            memoryId_userId: { memoryId: args.memoryId, userId: args.userId },
-          },
-          data: {
-            role: args.role,
-            updatedBy: args.actorId,
-          },
-        });
-      } catch (e) {
-        // Race: a concurrent revoke between the pre-read and the
-        // update would surface as P2025 here. Map to the typed error.
-        if (
-          e instanceof Prisma.PrismaClientKnownRequestError &&
-          e.code === 'P2025'
-        ) {
-          throw new MemoryMemberNotFoundError(args.memoryId, args.userId);
-        }
-        throw e;
-      }
+  return db.$transaction((tx) => updateMemoryMemberRoleInTx(tx, args),
+    { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+}
+
+/** Transaction body for callers that already hold the authority anchor. */
+export async function updateMemoryMemberRoleInTx(
+  tx: Prisma.TransactionClient,
+  args: Parameters<typeof updateMemoryMemberRole>[1],
+): Promise<MemoryMember> {
+  // Entity-status invariants (mirrors addMemoryMember). The
+  // GraphQL guard `requireMemoryMemberOwner` covers these for
+  // user-driven calls, but a controller-level caller (jobs,
+  // tests, future code) can reach this function directly — so
+  // enforce here too rather than trusting the upstream guard.
+  const memory = await tx.memory.findUnique({
+    where: { id: args.memoryId },
+    select: { class: true, deletedAt: true },
+  });
+  if (!memory || memory.deletedAt) {
+    throw new MemoryNotFoundForMemberError(args.memoryId);
+  }
+  if (memory.class !== 'group') {
+    throw new InvalidMemoryClassForMemberError(args.memoryId, memory.class);
+  }
+  const current = await tx.memoryMember.findUnique({
+    where: {
+      memoryId_userId: { memoryId: args.memoryId, userId: args.userId },
     },
-    { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
-  );
+    select: { role: true },
+  });
+  if (!current) {
+    throw new MemoryMemberNotFoundError(args.memoryId, args.userId);
+  }
+  // FR-038: refuse to demote the sole remaining owner. Under
+  // SERIALIZABLE isolation two concurrent self-demotes can't
+  // both observe ownerCount > 1 — one will fail with 40001 on
+  // commit and Prisma will surface that as a transient error
+  // the caller can retry.
+  if (current.role === 'owner' && args.role !== 'owner') {
+    const ownerCount = await tx.memoryMember.count({
+      where: { memoryId: args.memoryId, role: 'owner' },
+    });
+    if (ownerCount <= 1) {
+      throw new LastOwnerProtectedError(args.memoryId);
+    }
+  }
+  try {
+    return await tx.memoryMember.update({
+      where: {
+        memoryId_userId: { memoryId: args.memoryId, userId: args.userId },
+      },
+      data: {
+        role: args.role,
+        updatedBy: args.actorId,
+      },
+    });
+  } catch (e) {
+    // Race: a concurrent revoke between the pre-read and the
+    // update would surface as P2025 here. Map to the typed error.
+    if (
+      e instanceof Prisma.PrismaClientKnownRequestError &&
+      e.code === 'P2025'
+    ) {
+      throw new MemoryMemberNotFoundError(args.memoryId, args.userId);
+    }
+    throw e;
+  }
 }

@@ -1,5 +1,6 @@
 import type { PrismaClient } from '../../generated/prisma/index.js';
 import { deleteSecretsForOwner } from '../../lib/secrets.js';
+import { revokeAllOrgInvitations } from '../../lib/auth/revokeOrgInvitations.js';
 
 /**
  * The ONE org soft-delete cascade (extracted from the `deleteOrganization`
@@ -19,7 +20,7 @@ import { deleteSecretsForOwner } from '../../lib/secrets.js';
  * deleteOrganization historically records none and passes nothing).
  */
 export async function softDeleteOrganizationCore(
-  db: Pick<PrismaClient, 'organization' | 'secret'>,
+  db: Pick<PrismaClient, 'organization' | 'secret' | 'userInvitation' | 'orgMemberInvitation'>,
   orgId: string,
   deletedBy?: string | null,
 ): Promise<void> {
@@ -27,5 +28,6 @@ export async function softDeleteOrganizationCore(
     where: { id: orgId, deletedAt: null },
     data: { deletedAt: new Date(), ...(deletedBy != null ? { deletedBy } : {}) },
   });
+  await revokeAllOrgInvitations(db, orgId, deletedBy ?? null);
   await deleteSecretsForOwner(db, 'org', orgId);
 }

@@ -19,17 +19,18 @@ import { readFileSync } from 'node:fs';
 /** Reads that manage or clean up membership ROWS, which must see dead orgs' rows too. */
 const EXEMPT: Array<{ file: string; fn: string; fragment: string; why: string }> = [
   { file: 'src/api/graphql/schema/resolvers.mutation.org.ts', fn: 'acceptInvitation', fragment: 'organizationId_userId', why: 'upsert of the invitee row; the invite path checks the org itself' },
+  { file: 'src/api/graphql/schema/resolvers.mutation.org.ts', fn: 'acceptInvitation', fragment: 'userId: invite.senderUserId', why: 'inviter authority recheck inside an org-anchored transaction that verifies org liveness' },
   { file: 'src/api/graphql/schema/resolvers.mutation.org.ts', fn: 'addOrgMember', fragment: 'organizationId_userId', why: 'target-row lookup behind requireOrgRole, which refuses a dead org' },
-  { file: 'src/api/graphql/schema/resolvers.mutation.org.ts', fn: 'updateOrgMember', fragment: 'userId: resolvedUserId', why: 'target-row lookup behind requireOrgRole' },
   { file: 'src/api/graphql/schema/resolvers.mutation.org.ts', fn: 'updateOrgMember', fragment: "role: 'OWNER'", why: 'last-owner count behind requireOrgRole' },
   { file: 'src/api/graphql/schema/resolvers.mutation.org.ts', fn: 'removeOrgMember', fragment: 'organizationId_userId', why: 'target-row lookup behind requireOrgRole' },
   { file: 'src/api/graphql/schema/resolvers.mutation.org.ts', fn: 'removeOrgMember', fragment: "role: 'OWNER'", why: 'last-owner count behind requireOrgRole' },
   { file: 'src/api/graphql/schema/resolvers.impersonation.ts', fn: 'startImpersonation', fragment: 'userId: targetId', why: "the TARGET's role, read after the caller's live-org gate" },
   { file: 'src/api/graphql/schema/resolvers.types.ts', fn: 'isOrgExternal', fragment: 'userId: s.userId', why: 'classification of another user, paired with isOrgExternalAppMember' },
   { file: 'src/lib/auth/isOrgExternalAppMember.ts', fn: 'isOrgExternalAppMember', fragment: 'userId: args.userId', why: 'classification, paired with Member.isOrgExternal' },
-  { file: 'src/controller/operations/deleteUser.ts', fn: 'runDeletionTxn', fragment: 'userId: targetUserId, deletedAt: null', why: 'account deletion sweeps every membership' },
-  { file: 'src/controller/operations/deleteUser.ts', fn: 'runDeletionTxn', fragment: 'userId: { not: targetUserId }, deletedAt: null', why: 'account deletion: other live members of the org' },
-  { file: 'src/controller/operations/deleteUser.ts', fn: 'runDeletionTxn', fragment: "role: 'OWNER'", why: 'account deletion: other owners of the org' },
+  { file: 'src/controller/operations/deleteUser.ts', fn: 'membershipScope', fragment: 'userId: targetUserId, deletedAt: null', why: 'account deletion pre-reads every membership to lock its org anchor' },
+  { file: 'src/controller/operations/deleteUser.ts', fn: 'freshScope', fragment: 'userId: targetUserId, deletedAt: null', why: 'account deletion checks the anchored membership scope, then sweeps every membership' },
+  { file: 'src/controller/operations/deleteUser.ts', fn: 'freshScope', fragment: 'userId: { not: targetUserId }, deletedAt: null', why: 'account deletion: other members of an already verified live org' },
+  { file: 'src/controller/operations/deleteUser.ts', fn: 'freshScope', fragment: "role: 'OWNER'", why: 'account deletion: other owners of an already verified live org' },
 ];
 
 // Whitespace and newlines may separate the client property from the method

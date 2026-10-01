@@ -8,6 +8,7 @@ import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
 import { resolveUserRef } from '../../../lib/entityRef/userRef.js';
 import { generateId } from '../../../lib/id.js';
 import { LIVE_ORG_MEMBERSHIP } from '../../../lib/auth/liveOrgMembership.js';
+import { withAuthorizedTx } from './authorizedTx.js';
 
 const badInput = (message: string) =>
   new GraphQLError(message, { extensions: { code: 'BAD_USER_INPUT' } });
@@ -193,14 +194,6 @@ export const principalGrantMutations = {
     const actionSet = [...new Set(actions)];
 
     const { id: principalId } = await resolveUserRef(ctx.db, userRef);
-    const membership = await ctx.db.orgMember.findFirst({
-      where: { organizationId: orgId, userId: principalId, ...LIVE_ORG_MEMBERSHIP },
-      select: { userId: true },
-    });
-    if (!membership) {
-      throw badInput('The grantee must be a member of the organization.');
-    }
-
     let expiry: Date | null = null;
     if (expiresAt != null) {
       // Require an explicit timezone — a naive string parses in the server's
@@ -215,18 +208,31 @@ export const principalGrantMutations = {
       expiry = d;
     }
 
-    const grant = (await ctx.db.principalGrant.create({
-      data: {
-        id: generateId(),
-        principalType: 'USER',
-        principalId,
-        organizationId: orgId,
-        actions: actionSet,
-        expiresAt: expiry,
-        createdBy: ctx.userId ?? null,
+    const grant = await withAuthorizedTx(
+      ctx,
+      [{ kind: 'org', id: orgId }, { kind: 'user', id: principalId }],
+      async (txCtx) => {
+        if (!isInteractiveUser(txCtx)) throw new GraphQLError('Forbidden', { extensions: { code: 'FORBIDDEN' } });
+        await requireOrgRole(txCtx, orgId, 'ADMIN');
+        const membership = await txCtx.db.orgMember.findFirst({
+          where: { organizationId: orgId, userId: principalId, ...LIVE_ORG_MEMBERSHIP },
+          select: { userId: true },
+        });
+        if (!membership) throw badInput('The grantee must be a member of the organization.');
       },
-      select: GRANT_SELECT,
-    })) as GrantRow;
+      (tx) => tx.principalGrant.create({
+        data: {
+          id: generateId(),
+          principalType: 'USER',
+          principalId,
+          organizationId: orgId,
+          actions: actionSet,
+          expiresAt: expiry,
+          createdBy: ctx.userId ?? null,
+        },
+        select: GRANT_SELECT,
+      }),
+    ) as GrantRow;
     return projectGrant(grant);
   },
 
@@ -243,10 +249,24 @@ export const principalGrantMutations = {
     if (!grant || !(await isOrgAdmin(ctx, grant.organizationId))) {
       throw new GraphQLError('Grant not found', { extensions: { code: 'NOT_FOUND' } });
     }
-    await ctx.db.principalGrant.update({
-      where: { id: grant.id },
-      data: { deletedAt: new Date(), deletedBy: ctx.userId ?? null },
-    });
+    await withAuthorizedTx(
+      ctx,
+      [{ kind: 'org', id: grant.organizationId }],
+      async (txCtx) => {
+        if (!isInteractiveUser(txCtx)) throw new GraphQLError('Forbidden', { extensions: { code: 'FORBIDDEN' } });
+        await requireOrgRole(txCtx, grant.organizationId, 'ADMIN');
+      },
+      (tx) => tx.principalGrant.update({
+        where: { id: grant.id },
+        data: { deletedAt: new Date(), deletedBy: ctx.userId ?? null },
+      }),
+      {
+        lockMode: 'exclusive',
+        afterLock: async (tx) => {
+          await tx.$queryRaw`SELECT id FROM principal_grants WHERE id = ${grant.id} FOR UPDATE`;
+        },
+      },
+    );
     return true;
   },
 };

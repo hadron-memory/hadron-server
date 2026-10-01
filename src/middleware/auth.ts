@@ -1,6 +1,7 @@
 import { createHash, randomBytes } from 'crypto';
 import type { Request } from 'express';
-import type { PrismaClient, UserApiKey } from '../generated/prisma/index.js';
+import type { Prisma, PrismaClient, UserApiKey } from '../generated/prisma/index.js';
+import { lockAuthorityAnchors } from '../lib/auth/authorityAnchors.js';
 import { verifyJwt } from '../auth/jwt.js';
 import { canImpersonate, type ImpersonationContext } from '../lib/auth/impersonation.js';
 import { LIVE_ORG_MEMBERSHIP } from '../lib/auth/liveOrgMembership.js';
@@ -410,6 +411,20 @@ export interface MintUserApiKeyResult {
 
 export async function mintUserApiKey(
   db: PrismaClient,
+  input: MintUserApiKeyInput,
+): Promise<MintUserApiKeyResult> {
+  return db.$transaction(async (tx) => {
+    await lockAuthorityAnchors(tx, [{ kind: 'user', id: input.userId }], 'shared');
+    const live = await tx.$queryRaw<Array<{ id: string }>>`
+      SELECT id FROM users WHERE id = ${input.userId} AND deleted_at IS NULL FOR SHARE`;
+    if (!live[0]) throw new Error('User not found');
+    return mintUserApiKeyInTx(tx, input);
+  });
+}
+
+/** The GraphQL authority transaction already holds the user anchor. */
+export async function mintUserApiKeyInTx(
+  db: Pick<Prisma.TransactionClient, 'userApiKey'>,
   input: MintUserApiKeyInput,
 ): Promise<MintUserApiKeyResult> {
   // 32 bytes / 256 bits / 64 hex chars + the hdr_user_ prefix. Same

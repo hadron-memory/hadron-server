@@ -6,6 +6,7 @@ import { type Context, clampListTake, toISO, safeCanonicalUrn } from './resolver
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { AppNotFoundError } from '../../../lib/entityRef/errors.js';
 import { generateId } from '../../../lib/id.js';
+import { withAuthorizedTx } from './authorizedTx.js';
 import {
   CONNECTION_GRANT_SCOPES,
   isConnectionGrantScope,
@@ -179,18 +180,30 @@ export const connectionGrantMutations = {
       expiry = d;
     }
 
-    const grant = (await ctx.db.connectionGrant.create({
-      data: {
-        id: generateId(),
-        connectionId: conn.id,
-        granteeAppId,
-        grantedByUserId: ctx.userId!,
-        scopes: scopeSet,
-        expiresAt: expiry,
-        createdBy: ctx.userId ?? ctx.clientId ?? null,
+    const grant = await withAuthorizedTx(
+      ctx,
+      [{ kind: 'connection', id: conn.id }, { kind: 'app', id: granteeAppId }],
+      async (txCtx) => {
+        if (!(await loadOwnedConnection(txCtx, connectionRef))) {
+          throw new GraphQLError('Connection not found', { extensions: { code: 'NOT_FOUND' } });
+        }
       },
-      select: GRANT_SELECT,
-    })) as GrantRow;
+      (tx) => tx.connectionGrant.create({
+        data: {
+          id: generateId(),
+          connectionId: conn.id,
+          granteeAppId,
+          grantedByUserId: ctx.userId!,
+          scopes: scopeSet,
+          expiresAt: expiry,
+          createdBy: ctx.userId ?? ctx.clientId ?? null,
+        },
+        select: GRANT_SELECT,
+      }),
+      { afterLock: async (tx) => {
+        await tx.$queryRaw`SELECT id FROM exchange_connections WHERE id = ${conn.id} FOR KEY SHARE`;
+      } },
+    ) as GrantRow;
     return projectGrant(grant);
   },
 
@@ -201,14 +214,29 @@ export const connectionGrantMutations = {
     if (!isInteractiveUser(ctx)) throw new GraphQLError('Forbidden', { extensions: { code: 'FORBIDDEN' } });
     const grant = await ctx.db.connectionGrant.findFirst({
       where: { id: ref, deletedAt: null, grantedByUserId: ctx.userId },
-      select: { id: true },
+      select: { id: true, connectionId: true },
     });
     // A grant the caller didn't create (or doesn't exist) is indistinguishable.
     if (!grant) throw new GraphQLError('Grant not found', { extensions: { code: 'NOT_FOUND' } });
-    await ctx.db.connectionGrant.update({
-      where: { id: grant.id },
-      data: { deletedAt: new Date(), deletedBy: ctx.userId ?? ctx.clientId ?? null },
-    });
+    await withAuthorizedTx(
+      ctx,
+      [{ kind: 'connection', id: grant.connectionId }],
+      async (txCtx) => {
+        if (!(await loadOwnedConnection(txCtx, grant.connectionId))) {
+          throw new GraphQLError('Grant not found', { extensions: { code: 'NOT_FOUND' } });
+        }
+      },
+      (tx) => tx.connectionGrant.update({
+        where: { id: grant.id },
+        data: { deletedAt: new Date(), deletedBy: ctx.userId ?? ctx.clientId ?? null },
+      }),
+      {
+        lockMode: 'exclusive',
+        afterLock: async (tx) => {
+          await tx.$queryRaw`SELECT id FROM connection_grants WHERE id = ${grant.id} FOR UPDATE`;
+        },
+      },
+    );
     return true;
   },
 };

@@ -29,6 +29,7 @@ import { generateId } from '../../../lib/id.js';
 import { typeDefs } from './typeDefs.js';
 import { resolvers, type Context } from './resolvers.js';
 import { requireEmailConnection } from './resolvers.helpers.js';
+import { waitForLockWaitersOfType } from '../../../test/lockWait.js';
 
 const server = new ApolloServer<Context>({ typeDefs, resolvers });
 async function gql(query: string, ctx: Partial<Context>, variables?: Record<string, unknown>) {
@@ -244,5 +245,45 @@ describe('#593 management surface (GraphQL, owner-only)', () => {
     const ok = await gql(REVOKE, ownerCtx(), { r: grant.id });
     expect(ok.data?.revokeConnectionGrant).toBe(true);
     await expect(gate(appCtx(grantedApp), connId, 'list-messages')).rejects.toThrow('Forbidden');
+  });
+});
+
+describe('#1551 connection grant revocation fence', () => {
+  it('connection deletion waits for an in-flight grant, then makes it unusable', async () => {
+    await db.orgMember.create({ data: {
+      id: generateId(), organizationId: orgA, userId: owner, role: 'ADMIN',
+    } });
+    let release!: () => void;
+    let held!: () => void;
+    const holdGate = new Promise<void>((resolve) => { release = resolve; });
+    const locked = new Promise<void>((resolve) => { held = resolve; });
+    const holder = db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM exchange_connections WHERE id = ${connId} FOR UPDATE`;
+      held();
+      await holdGate;
+    }, { timeout: 20_000 });
+    await locked;
+
+    const grant = resolvers.Mutation.createConnectionGrant(null, {
+      connectionRef: connId, appRef: grantedApp, scopes: ['mail.read'],
+    }, { db, ...ownerCtx() } as Context);
+    try {
+      await waitForLockWaitersOfType(db, 'transactionid', 1);
+      let deleted = false;
+      const deletion = resolvers.Mutation.deleteExchangeConnection(null, { id: connId },
+        { db, ...ownerCtx() } as Context).then((value: unknown) => { deleted = true; return value; });
+      await waitForLockWaitersOfType(db, 'advisory', 1);
+      expect(deleted).toBe(false);
+      release();
+      await holder;
+      await grant;
+      await deletion;
+      expect((await db.exchangeConnection.findUniqueOrThrow({ where: { id: connId } })).deletedAt).not.toBeNull();
+      await expect(gate(appCtx(grantedApp), connId, 'list-messages')).rejects.toThrow('Connection not found');
+    } finally {
+      release();
+      await Promise.allSettled([holder, grant]);
+    }
+
   });
 });

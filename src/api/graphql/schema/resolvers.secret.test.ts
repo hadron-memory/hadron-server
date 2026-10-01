@@ -294,6 +294,7 @@ describe('owner deletion cleans up secrets', () => {
   it('deleteOrganization hard-deletes the org-scoped secrets', async () => {
     const secret = await createSecret({ ownerType: 'org', ownerRef: org.id }, ctxFor(admin.id));
     // deleteOrganization requires platform ADMIN (requireRole).
+    await db.user.update({ where: { id: admin.id }, data: { roles: ['ADMIN'] } });
     await expect(
       resolvers.Mutation.deleteOrganization({}, { id: org.id }, ctxFor(admin.id, ['ADMIN'])),
     ).resolves.toBe(true);

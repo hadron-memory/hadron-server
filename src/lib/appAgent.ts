@@ -195,7 +195,7 @@ export async function isAgentInstalledAndLicensed(
 }
 
 export async function getPrimaryAgentId(
-  db: PrismaClient,
+  db: Pick<PrismaClient, 'appAgent'>,
   appId: string,
 ): Promise<string | null> {
   const row = await db.appAgent.findFirst({

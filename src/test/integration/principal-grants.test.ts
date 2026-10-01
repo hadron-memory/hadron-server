@@ -17,6 +17,7 @@ import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../helpers.js';
 import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
 import { generateId } from '../../lib/id.js';
+import { waitForLockWaitersOfType } from '../lockWait.js';
 
 let org: { id: string; urn: string };
 let orgAdmin: { id: string };
@@ -54,6 +55,54 @@ beforeEach(async () => {
       { organizationId: org.id, userId: contributor.id, role: 'CONTRIBUTOR' },
       { organizationId: org.id, userId: reader.id, role: 'READER' },
     ],
+  });
+});
+
+describe('#1551 principal-grant authority fence', () => {
+  it('admin removal waits for an in-flight principal grant to commit', async () => {
+    const owner = await db.user.create({ data: {
+      id: generateId(), githubId: 1551101, githubUsername: `grant-owner-${generateId()}`,
+    } });
+    await db.orgMember.create({ data: {
+      id: generateId(), organizationId: org.id, userId: owner.id, role: 'OWNER',
+    } });
+    let release!: () => void;
+    let held!: () => void;
+    const holdGate = new Promise<void>((resolve) => { release = resolve; });
+    const locked = new Promise<void>((resolve) => { held = resolve; });
+    const holder = db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM organizations WHERE id = ${org.id} FOR UPDATE`;
+      held();
+      await holdGate;
+    }, { timeout: 20_000 });
+    await locked;
+
+    const grant = resolvers.Mutation.createPrincipalGrant(null, {
+      orgRef: org.id, userRef: contributor.id, actions: ['memory.clone'],
+    }, orgAdminCtx());
+    try {
+      await waitForLockWaitersOfType(db, 'transactionid', 1);
+      let removed = false;
+      const removal = resolvers.Mutation.removeOrgMember(null, {
+        orgId: org.id, userId: orgAdmin.id,
+      }, { db, userId: owner.id, roles: [] } as Context)
+        .then((value: unknown) => { removed = true; return value; });
+      await waitForLockWaitersOfType(db, 'advisory', 1);
+      expect(removed).toBe(false);
+      release();
+      await holder;
+      await grant;
+      await removal;
+      expect(await db.principalGrant.count({ where: {
+        organizationId: org.id, principalId: contributor.id, deletedAt: null,
+      } })).toBe(1);
+      expect((await db.orgMember.findUniqueOrThrow({ where: {
+        organizationId_userId: { organizationId: org.id, userId: orgAdmin.id },
+      } })).deletedAt).not.toBeNull();
+    } finally {
+      release();
+      await Promise.allSettled([holder, grant]);
+    }
   });
 });
 
