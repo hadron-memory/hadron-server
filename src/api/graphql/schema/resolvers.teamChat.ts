@@ -53,7 +53,7 @@ import {
   getAccessibleMemoryIds,
   clampListTake,
 } from './resolvers.helpers.js';
-import { isSessionLive, loadLastEventBySession } from '../../../lib/sessionActivity.js';
+import { isSessionLive, loadLastEventBySession, touchLiveSession } from '../../../lib/sessionActivity.js';
 import { findOrCreateAppClassMemory } from './chat-scope.js';
 import { mentionTokenOf } from '../../../lib/mentionToken.js';
 import { extractMentions } from '../../../lib/teamChatMentions.js';
@@ -461,7 +461,10 @@ async function resolveSessionAuthor(
   const events = await loadLastEventBySession(ctx.db as never, [session.id]);
   if (!isSessionLive(session, events.get(session.id), now)) {
     throw new GraphQLError(
-      `Session "${sessionRef}" is not live — nothing has driven it inside its idle window, so its worker cannot author through it. Drive the session (any team tool heartbeats it) or start a new one.`,
+      `Session "${sessionRef}" is not live — nothing has driven it inside its idle window, so its worker cannot author through it. ` +
+        'A lapsed session is not revived by posting through it; start a new session for this worker ' +
+        '(CLI: `hadron team session start --as <worker>`; MCP: `hadron_start_session`). While a session is live, ' +
+        'posting, reading and marking read through it keep it live.',
       { extensions: { code: 'SESSION_NOT_LIVE' } },
     );
   }
@@ -535,6 +538,11 @@ async function resolveSessionAuthor(
       );
     }
   }
+  // #1540 — authoring through the session is its driver driving it. Every
+  // gate above passed, so the session is live, owned and may author here:
+  // keep it alive. Without this a CLI-bound worker posting all day went
+  // SESSION_NOT_LIVE one idle window after binding.
+  if (!ctx.impersonation) await touchLiveSession(ctx.db, session.id);
   return { workerId: worker.id, name: worker.name, sessionId: session.id, workerAppId: worker.appId, crossApp };
 }
 

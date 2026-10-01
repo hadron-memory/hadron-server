@@ -926,3 +926,30 @@ describe('MCP parity and discovery gate', () => {
     }
   });
 });
+
+describe('#1540 — a mark-read through a live session keeps it live', () => {
+  const H = 60 * 60 * 1000;
+  afterEach(() => vi.useRealTimers());
+
+  it('marking read inside the window keeps the session live past startedAt + window', async () => {
+    const t0 = (await db.session.findUniqueOrThrow({ where: { id: sessionId } })).startedAt;
+    await post('one');
+    await post('two');
+    // Only Date is faked: the server's own clock moves, Prisma's timers do not.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date(t0.getTime() + 20 * H));
+    await M.markOwnTeamChatRead({}, { appRef: app.urn, sessionRef: sessionId, channelRef: channel.id, seq: 1 }, userCtx());
+    vi.setSystemTime(new Date(t0.getTime() + 30 * H));
+    await expect(M.markOwnTeamChatRead({}, { appRef: app.urn, sessionRef: sessionId, channelRef: channel.id, seq: 2 }, userCtx()))
+      .resolves.toMatchObject({ lastSeenSeq: 2 });
+  });
+
+  it('control: a session nobody drove for a whole window still cannot mark read', async () => {
+    const t0 = (await db.session.findUniqueOrThrow({ where: { id: sessionId } })).startedAt;
+    await post('one');
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date(t0.getTime() + 30 * H));
+    await expect(M.markOwnTeamChatRead({}, { appRef: app.urn, sessionRef: sessionId, channelRef: channel.id, seq: 1 }, userCtx()))
+      .rejects.toMatchObject({ extensions: { code: 'SESSION_NOT_LIVE' } });
+  });
+});

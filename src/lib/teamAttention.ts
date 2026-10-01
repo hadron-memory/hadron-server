@@ -39,6 +39,7 @@ import {
   loadLastEventBySession,
   OPEN_SESSION_SCAN_CAP,
   recentlyTouchedFilter,
+  touchLiveSession,
 } from './sessionActivity.js';
 
 // #1496: aligned with MAX_TARGETS/OPEN_SESSION_SCAN_CAP as the single scope
@@ -1229,9 +1230,11 @@ async function ownLiveSessionWorker(
   });
   if (!app || !(await isAppParticipant(ctx, app))) return null;
   const events = await loadLastEventBySession(ctx.db as never, [session.id]);
-  return isSessionLive(session, events.get(session.id), new Date())
-    ? { workerId: session.workerId, appId: session.appId }
-    : null;
+  if (!isSessionLive(session, events.get(session.id), new Date())) return null;
+  // #1540 — a read or mark-read through the session is its driver driving it.
+  // Owned, eligible and live are all established above, so keep it alive.
+  await touchLiveSession(ctx.db, session.id);
+  return { workerId: session.workerId, appId: session.appId };
 }
 
 /**
