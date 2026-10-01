@@ -8,11 +8,12 @@
  * - the owner can read and write it by naming it, and every MCP surface agrees
  *   (before the fix `hadron_replace_text` wrote through GraphQL's #1500
  *   shortcut while `hadron_update_node` and `hadron_get_node` refused);
- * - listings stay confined to the selected App;
+ * - listings and traversals (stored edges, linked task refs) stay confined to
+ *   the selected App: substitution is opt-in at the gate, for explicit refs;
  * - the substitution needs exactly what selecting App A would need (a live
  *   AppMember row on a live App), plus the active subscription;
- * - a bound session, an impersonation, a pure App key and a platform OWNER get
- *   nothing from it.
+ * - a bound session, an impersonation, an AppRun, a pure App key and a
+ *   platform OWNER get nothing from it.
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { db } from '../integrations/db/client.js';
@@ -21,7 +22,7 @@ import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import { createTestableMcpServer } from './server.js';
 import type { AuthContext } from '../middleware/auth.js';
 import { generateId } from '../lib/id.js';
-import { canReadMemory, canWriteToMemory, filterReadableMemoryIds } from './access-control.js';
+import { canReadMemory, canWriteToMemory, EXPLICIT_REF, filterReadableMemoryIds } from './access-control.js';
 
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -111,13 +112,36 @@ describe.each(['personal', 'private'] as const)('#1503 (c): own %s memory in App
     expect(browse).not.toContain(`${mem.urn}:sentinel`);
   });
 
-  it('the gates expose the listing mode: selectionOnly keeps the selected App', async () => {
+  it('substitution is opt-in at the gates: only an explicit reference is evaluated as App A', async () => {
     const { mem } = await ownedAppAMemory(memoryClass);
     const auth = userSelecting(owner.id, appB.id);
-    expect(await canReadMemory(db, auth, mem.id)).toBe(true);
-    expect(await canWriteToMemory(db, auth, mem.id)).toBe(true);
-    expect(await canReadMemory(db, auth, mem.id, { selectionOnly: true })).toBe(false);
-    expect(await canWriteToMemory(db, auth, mem.id, { selectionOnly: true })).toBe(false);
+    expect(await canReadMemory(db, auth, mem.id, EXPLICIT_REF)).toBe(true);
+    expect(await canWriteToMemory(db, auth, mem.id, EXPLICIT_REF)).toBe(true);
+    // The default is the selected App, so a traversal or listing that omits
+    // the option fails closed.
+    expect(await canReadMemory(db, auth, mem.id)).toBe(false);
+    expect(await canWriteToMemory(db, auth, mem.id)).toBe(false);
+  });
+
+  it('a traversal stays with the selected App: a task link into App A renders as restricted in get_node and get_nodes alike', async () => {
+    const { node: task } = await ownedAppAMemory(memoryClass);
+    // A source node in the owner's App-B personal memory, authored by the App-A task.
+    const ownerCtx: Context = { db, userId: owner.id, roles: ['READER'] };
+    const memB = await resolvers.Mutation.createMemory(null, { orgId: org.id, name: `${memoryClass}-b-1503`, memoryClass } as never, ownerCtx);
+    const agentB = await db.agent.create({ data: {
+      id: generateId(), organizationId: org.id, urn: `org-1503.example:${memoryClass}-agent-b`, name: 'agent b',
+      type: 'CHATBOT', surfaces: ['api'],
+    } });
+    await db.memory.update({ where: { id: memB.id }, data: { appId: appB.id, userMemoryOfAgentId: agentB.id } });
+    await db.agentSubscription.create({ data: { userId: owner.id, agentId: agentB.id, activatedAt: new Date() } });
+    await db.node.create({ data: {
+      id: generateId(), memoryId: memB.id, loc: 'authored', name: 'authored', content: 'by a task',
+      authorshipKind: 'TASK', authoredByTask: task.id, authoredByRevision: 1, authoredAt: new Date(),
+    } as never });
+    const mcp = createTestableMcpServer(userSelecting(owner.id, appB.id));
+    const urn = `hrn:node:${memB.urn}:authored`;
+    expect(await mcp.callToolText('hadron_get_node', { urn })).toContain('Authored by task: restricted');
+    expect(await mcp.callToolText('hadron_get_nodes', { refs: [urn] })).toContain('Authored by task: restricted');
   });
 
   it('REFUSED when the owner could not select App A (no AppMember row): both write tools and the read agree', async () => {
@@ -141,15 +165,15 @@ describe.each(['personal', 'private'] as const)('#1503 (c): own %s memory in App
       data: { revokedAt: new Date() },
     });
     expect(await tryBothWrites(userSelecting(owner.id, appB.id), urn, node.id)).toBe('cat sentinel');
-    expect(await canReadMemory(db, userSelecting(owner.id, appB.id), mem.id)).toBe(false);
+    expect(await canReadMemory(db, userSelecting(owner.id, appB.id), mem.id, EXPLICIT_REF)).toBe(false);
   });
 
   it('CONTROL: a pure App key of either App is refused, and nothing is written', async () => {
     const { mem, node, urn } = await ownedAppAMemory(memoryClass);
     for (const appId of [appA.id, appB.id]) {
       expect(await tryBothWrites({ appId, clientId: `app:${appId}` }, urn, node.id)).toBe('cat sentinel');
-      expect(await canWriteToMemory(db, { appId }, mem.id)).toBe(false);
-      expect(await canReadMemory(db, { appId }, mem.id)).toBe(false);
+      expect(await canWriteToMemory(db, { appId }, mem.id, EXPLICIT_REF)).toBe(false);
+      expect(await canReadMemory(db, { appId }, mem.id, EXPLICIT_REF)).toBe(false);
     }
   });
 
@@ -167,14 +191,22 @@ describe.each(['personal', 'private'] as const)('#1503 (c): own %s memory in App
       userId: owner.id, roles: [], appId: appB.id,
       impersonation: { sessionId: generateId(), actorUserId: admin.id, orgId: org.id, expiresAt: new Date(Date.now() + 60_000) },
     };
-    expect(await canWriteToMemory(db, impersonating, mem.id)).toBe(false);
-    expect(await canReadMemory(db, impersonating, mem.id)).toBe(false);
+    expect(await canWriteToMemory(db, impersonating, mem.id, EXPLICIT_REF)).toBe(false);
+    expect(await canReadMemory(db, impersonating, mem.id, EXPLICIT_REF)).toBe(false);
   });
 
   it('CONTROL: inside a bound session the owner is not substituted (a session must not leave its App)', async () => {
     const { mem } = await ownedAppAMemory(memoryClass);
     const inSession = userSelecting(owner.id, appB.id, { sessionId: generateId() });
-    expect(await canWriteToMemory(db, inSession, mem.id)).toBe(false);
-    expect(await canReadMemory(db, inSession, mem.id)).toBe(false);
+    expect(await canWriteToMemory(db, inSession, mem.id, EXPLICIT_REF)).toBe(false);
+    expect(await canReadMemory(db, inSession, mem.id, EXPLICIT_REF)).toBe(false);
+  });
+
+  it('CONTROL: an AppRun on the owner\'s behalf in App B is not substituted (a run acts for its App)', async () => {
+    const { mem } = await ownedAppAMemory(memoryClass);
+    // runContext's shape: App + on-behalf-of user, clientId run:<id>, no session.
+    const run: AuthContext = { appId: appB.id, userId: owner.id, organizationId: org.id, clientId: `run:${generateId()}` };
+    expect(await canWriteToMemory(db, run, mem.id, EXPLICIT_REF)).toBe(false);
+    expect(await canReadMemory(db, run, mem.id, EXPLICIT_REF)).toBe(false);
   });
 });

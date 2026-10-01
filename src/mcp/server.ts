@@ -124,6 +124,7 @@ const MULTIPLE_APPS_DOCS_URL =
 import {
   canReadMemory,
   canWriteToMemory,
+  EXPLICIT_REF,
   filterReadableMemoryIds,
   getAccessibleMemoryIds,
   getMemoryAccess,
@@ -589,7 +590,7 @@ export async function resolveEdgeRefs(
         where: { id: targetNodeId },
         select: { loc: true, memoryId: true },
       });
-      if (!tgt || !(await canReadMemory(db, auth, tgt.memoryId))) {
+      if (!tgt || !(await canReadMemory(db, auth, tgt.memoryId, EXPLICIT_REF))) {
         return { error: `Edge target not found: "${edge.targetId}"` };
       }
       resolved.push({
@@ -720,7 +721,7 @@ export async function addEdge(args: {
     sourceNode = { id: found.id, loc: found.loc, memoryId: found.memoryId };
   }
 
-  if (!(await canWriteToMemory(db, auth, sourceNode.memoryId))) {
+  if (!(await canWriteToMemory(db, auth, sourceNode.memoryId, EXPLICIT_REF))) {
     return { error: 'Write access denied for source memory.' };
   }
 
@@ -740,7 +741,7 @@ export async function addEdge(args: {
     where: { id: targetNodeId },
     select: { loc: true, memoryId: true },
   });
-  if (!target || !(await canReadMemory(db, auth, target.memoryId))) {
+  if (!target || !(await canReadMemory(db, auth, target.memoryId, EXPLICIT_REF))) {
     return { error: `Edge target not found: "${rawTarget}"` };
   }
 
@@ -771,13 +772,13 @@ export async function addEdge(args: {
     for (const memoryId of [...new Set([sourceNode.memoryId, target.memoryId])].sort()) {
       await tx.$queryRaw`SELECT id FROM memories WHERE id = ${memoryId} FOR SHARE`;
     }
-    if (!(await canReadMemory(tx as typeof db, auth, sourceNode.memoryId))) {
+    if (!(await canReadMemory(tx as typeof db, auth, sourceNode.memoryId, EXPLICIT_REF))) {
       return `Source node not found: "${rawSource}".`;
     }
-    if (!(await canWriteToMemory(tx as typeof db, auth, sourceNode.memoryId))) {
+    if (!(await canWriteToMemory(tx as typeof db, auth, sourceNode.memoryId, EXPLICIT_REF))) {
       return 'Write access denied for source memory.';
     }
-    if (!(await canReadMemory(tx as typeof db, auth, target.memoryId))) {
+    if (!(await canReadMemory(tx as typeof db, auth, target.memoryId, EXPLICIT_REF))) {
       return `Edge target not found: "${rawTarget}"`;
     }
 
@@ -873,7 +874,7 @@ async function assertLockedMemoryWriteAccess(
   auth: AuthContext,
   memoryId: string,
 ): Promise<void> {
-  if (!(await canWriteToMemory(tx as typeof db, auth, memoryId))) {
+  if (!(await canWriteToMemory(tx as typeof db, auth, memoryId, EXPLICIT_REF))) {
     throw new MemoryWriteAccessChangedDuringWriteError(
       '[node_write_conflict] Memory write access changed while this write waited — re-read and retry.',
     );
@@ -1278,8 +1279,10 @@ async function isMemoryHiddenFrom(
   // admit them. This makes "never narrow a writer" hold by construction instead
   // of by that implication, which lives in another file and nothing pins. A
   // mutant deleting this line therefore survives — that is expected, not a gap.
-  if (need === 'write' && (await canWriteToMemory(db, auth, memoryId))) return false;
-  return !(await canReadMemory(db, auth, memoryId));
+  // Both callers hand in a memory the request named (a URN, or a node looked up
+  // by a caller-supplied key), so this is an explicit reference (#1503).
+  if (need === 'write' && (await canWriteToMemory(db, auth, memoryId, EXPLICIT_REF))) return false;
+  return !(await canReadMemory(db, auth, memoryId, EXPLICIT_REF));
 }
 
 // Access control lives in ./access-control.ts.
@@ -2364,10 +2367,8 @@ export function createMcpServerInstance(
         await Promise.all(
           owned.map(async ({ id }) => {
             if (levels.has(id)) return;
-            // A listing, not an explicit reference: stay with the selected
-            // App, as the scope line below promises (#1503).
-            if (!(await canReadMemory(db, auth, id, { selectionOnly: true }))) return;
-            levels.set(id, (await canWriteToMemory(db, auth, id, { selectionOnly: true })) ? 'READ_WRITE' : 'READ_ONLY');
+            if (!(await canReadMemory(db, auth, id))) return;
+            levels.set(id, (await canWriteToMemory(db, auth, id)) ? 'READ_WRITE' : 'READ_ONLY');
           }),
         );
       }
@@ -3325,7 +3326,7 @@ export function createMcpServerInstance(
         return textResult((e as Error).message);
       }
 
-      if (!(await canWriteToMemory(db, auth, memoryId))) {
+      if (!(await canWriteToMemory(db, auth, memoryId, EXPLICIT_REF))) {
         return textResult('Write access denied for this memory.');
       }
 
@@ -3606,7 +3607,7 @@ export function createMcpServerInstance(
         const mem = await resolveMemoryByUrn(memoryUrn);
         if (
           !mem ||
-          !(await canReadMemory(db, auth, mem.id)) ||
+          !(await canReadMemory(db, auth, mem.id, EXPLICIT_REF)) ||
           (sessionMemoryIds && !sessionMemoryIds.has(mem.id))
         ) {
           return textResult(
@@ -3633,7 +3634,7 @@ export function createMcpServerInstance(
             const mem = await resolveMemoryByUrn(urn);
             if (
               !mem ||
-              !(await canReadMemory(db, auth, mem.id)) ||
+              !(await canReadMemory(db, auth, mem.id, EXPLICIT_REF)) ||
               (sessionMemoryIds && !sessionMemoryIds.has(mem.id))
             ) {
               return {
@@ -3680,7 +3681,7 @@ export function createMcpServerInstance(
         filterLocPrefix = resolvedParent.loc;
         if (resolvedParent.memoryId) {
           if (
-            !(await canReadMemory(db, auth, resolvedParent.memoryId)) ||
+            !(await canReadMemory(db, auth, resolvedParent.memoryId, EXPLICIT_REF)) ||
             (sessionMemoryIds && !sessionMemoryIds.has(resolvedParent.memoryId))
           ) {
             return textResult(`No nodes found matching "${safeQuery}".`);
@@ -4001,7 +4002,7 @@ export function createMcpServerInstance(
         if (error instanceof AmbiguousLegacyUrnError) return null;
         throw error;
       });
-      const sourceReadable = !!memory && await canReadMemory(db, auth, memory.id);
+      const sourceReadable = !!memory && await canReadMemory(db, auth, memory.id, EXPLICIT_REF);
       const missing = () => textResult(sourceReadable
         ? `Node "${rawUrn}" not found.`
         : `Memory not found: "${memoryUrn}".`);
@@ -4076,7 +4077,7 @@ export function createMcpServerInstance(
           where: { id: movedId, deletedAt: null },
           select: { memoryId: true },
         });
-        if (!target || !(await canReadMemory(db, auth, target.memoryId))) return missing();
+        if (!target || !(await canReadMemory(db, auth, target.memoryId, EXPLICIT_REF))) return missing();
         node = await db.node.findFirst({
           where: { id: movedId, memoryId: target.memoryId, deletedAt: null },
           include: nodeReadInclude,
@@ -4109,7 +4110,7 @@ export function createMcpServerInstance(
         !current ||
         current.memoryId !== node.memoryId ||
         current.loc !== node.loc ||
-        !(await canReadMemory(db, auth, current.memoryId))
+        !(await canReadMemory(db, auth, current.memoryId, EXPLICIT_REF))
       ) {
         return textResult(`Node "${rawUrn}" not found.`);
       }
@@ -4227,7 +4228,7 @@ export function createMcpServerInstance(
       if (hasPrefix) {
         // ── Prefix subtree (one memory, gated once) ──────────────────────────
         const mem = await resolveMemoryByUrn(memoryUrn!);
-        if (!mem || !(await canReadMemory(db, auth, mem.id))) {
+        if (!mem || !(await canReadMemory(db, auth, mem.id, EXPLICIT_REF))) {
           // Don't leak existence — mirror the single read's phrasing.
           return textResult(`Memory not found: "${memoryUrn}".`);
         }
@@ -4327,7 +4328,7 @@ export function createMcpServerInstance(
             if (error instanceof AmbiguousLegacyUrnError) return null;
             throw error;
           });
-          if (!mem || !(await canReadMemory(db, auth, mem.id))) {
+          if (!mem || !(await canReadMemory(db, auth, mem.id, EXPLICIT_REF))) {
             movedFallbacks.push(...group);
             continue;
           }
@@ -4403,7 +4404,7 @@ export function createMcpServerInstance(
           : [];
         const readableMemory = new Map<string, boolean>();
         await Promise.all([...new Set(movedProbes.map((n) => n.memoryId))].map(async (memoryId) => {
-          readableMemory.set(memoryId, await canReadMemory(db, auth, memoryId));
+          readableMemory.set(memoryId, await canReadMemory(db, auth, memoryId, EXPLICIT_REF));
         }));
         const allowedProbes = movedProbes.filter((n) => readableMemory.get(n.memoryId));
         const movedRows = allowedProbes.length
@@ -4439,7 +4440,7 @@ export function createMcpServerInstance(
           });
           const readable = new Map<string, boolean>();
           for (const memId of new Set(probes.map((p) => p.memoryId))) {
-            readable.set(memId, await canReadMemory(db, auth, memId));
+            readable.set(memId, await canReadMemory(db, auth, memId, EXPLICIT_REF));
           }
           const allowedIds = probes.filter((p) => readable.get(p.memoryId)).map((p) => p.id);
           const rowById = new Map(
@@ -4498,7 +4499,7 @@ export function createMcpServerInstance(
           !n ||
           n.memoryId !== selected.memoryId ||
           n.loc !== selected.loc ||
-          !(await canReadMemory(db, auth, n.memoryId))
+          !(await canReadMemory(db, auth, n.memoryId, EXPLICIT_REF))
         ) {
           unavailable.push(echoByNodeId.get(selected.id) ?? selected.id);
           continue;
@@ -4606,7 +4607,7 @@ export function createMcpServerInstance(
       if (!memory) {
         return textResult(`Memory not found: "${memoryUrn}".`);
       }
-      if (!(await canReadMemory(db, auth, memory.id))) {
+      if (!(await canReadMemory(db, auth, memory.id, EXPLICIT_REF))) {
         return textResult(`Memory not found: "${memoryUrn}".`);
       }
       const prefix = parentLoc + ':';
@@ -4742,7 +4743,7 @@ export function createMcpServerInstance(
         // resolveLocFromUrn's accessibleMemoryIds filter handles non-
         // admin scope, but ADMIN/OWNER pass null and would otherwise
         // be able to browse another user's personal/private memory.
-        if (memoryId && !(await canReadMemory(db, auth, memoryId))) {
+        if (memoryId && !(await canReadMemory(db, auth, memoryId, EXPLICIT_REF))) {
           return textResult(`Node "${trimmedParentRel}" not found.`);
         }
       } else {
@@ -4765,7 +4766,7 @@ export function createMcpServerInstance(
           }
           // #188 (Gemini): canReadMemory gate — same shape as the
           // hadron_find_nodes memoryUrn branch.
-          if (!(await canReadMemory(db, auth, mem.id))) {
+          if (!(await canReadMemory(db, auth, mem.id, EXPLICIT_REF))) {
             return textResult(
               `Memory not found or invalid: '${memoryUrn}'. Use hadron_list_memories to see what is available.`,
             );
@@ -5115,7 +5116,7 @@ export function createMcpServerInstance(
         return textResult((e as Error).message);
       }
 
-      if (!(await canWriteToMemory(db, auth, memoryId))) {
+      if (!(await canWriteToMemory(db, auth, memoryId, EXPLICIT_REF))) {
         return textResult('Write access denied for this memory.');
       }
 
@@ -5678,7 +5679,7 @@ export function createMcpServerInstance(
       // existing-but-forbidden node while "access denied" for others would be
       // a membership oracle (Gemini review). Gate on the resolved memory.id
       // first — matches hadron_create_node's auth-first ordering.
-      if (!(await canWriteToMemory(db, auth, memory.id))) {
+      if (!(await canWriteToMemory(db, auth, memory.id, EXPLICIT_REF))) {
         return textResult('Write access denied for this memory.');
       }
       // Spec 049 S4: an in-place update takes no lock, so the gate is explicit.
@@ -6683,7 +6684,7 @@ Refuses if the node has descendants under its URN prefix unless \`recursive: tru
       if (!memory) {
         return textResult(`Node "${rawUrn}" not found.`);
       }
-      if (!(await canWriteToMemory(db, auth, memory.id))) {
+      if (!(await canWriteToMemory(db, auth, memory.id, EXPLICIT_REF))) {
         // Match the "not found" phrasing used elsewhere on access denial
         // so the response doesn't distinguish absence from denial.
         return textResult(`Node "${rawUrn}" not found.`);
@@ -6717,7 +6718,7 @@ Refuses if the node has descendants under its URN prefix unless \`recursive: tru
         // Channel resurrection takes this same key before any loc key.
         await lockMemoryForChannelChange(tx, memory.id);
         await tx.$queryRaw`SELECT id FROM memories WHERE id = ${memory.id} FOR SHARE`;
-        if (!(await canWriteToMemory(tx as typeof db, auth, memory.id))) {
+        if (!(await canWriteToMemory(tx as typeof db, auth, memory.id, EXPLICIT_REF))) {
           return { refused: 'access' };
         }
         // lockNodeForDelete acquires the loc lock and then re-runs the
@@ -6946,10 +6947,10 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       });
       if (!existing) return textResult(`Node "${rawFrom}" not found.`);
 
-      if (!(await canWriteToMemory(db, auth, fromMemory.id))) {
+      if (!(await canWriteToMemory(db, auth, fromMemory.id, EXPLICIT_REF))) {
         return textResult('Write access denied for source memory.');
       }
-      if (toMemory.id !== fromMemory.id && !(await canWriteToMemory(db, auth, toMemory.id))) {
+      if (toMemory.id !== fromMemory.id && !(await canWriteToMemory(db, auth, toMemory.id, EXPLICIT_REF))) {
         return textResult('Write access denied for target memory.');
       }
 
@@ -10076,7 +10077,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
       // #1316: hidden from this caller ⇒ the missing branch; a reader keeps the denial.
       const memoryRef = await resolveVisibleMemoryByUrn(auth, memoryUrn, 'write');
       if (!memoryRef) return textResult(`Memory not found: "${memoryUrn}".`);
-      if (!(await canWriteToMemory(db, auth, memoryRef.id))) {
+      if (!(await canWriteToMemory(db, auth, memoryRef.id, EXPLICIT_REF))) {
         return textResult('Access denied.');
       }
 

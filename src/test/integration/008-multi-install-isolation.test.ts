@@ -29,6 +29,7 @@ import {
 } from '../helpers.js';
 import { generateId } from '../../lib/id.js';
 import {
+  EXPLICIT_REF,
   canReadMemory,
   canWriteToMemory,
   getAppMemoryAccess,
@@ -258,31 +259,31 @@ describe('T054 (c): cross-App access to Mike\'s personal memory (SC-003, amended
   });
 
   it('Mike through App A, naming his memory at App B explicitly, is evaluated as App B (#1503)', async () => {
-    expect(await canReadMemory(db, ctxFor('A', 'mike'), f.mikePersonalAtB.id)).toBe(true);
-    expect(await canWriteToMemory(db, ctxFor('A', 'mike'), f.mikePersonalAtB.id)).toBe(true);
+    expect(await canReadMemory(db, ctxFor('A', 'mike'), f.mikePersonalAtB.id, EXPLICIT_REF)).toBe(true);
+    expect(await canWriteToMemory(db, ctxFor('A', 'mike'), f.mikePersonalAtB.id, EXPLICIT_REF)).toBe(true);
   });
 
   it('a listing or a bound session through App A is still DENIED his memory at App B', async () => {
-    const listing = { selectionOnly: true };
-    expect(await canReadMemory(db, ctxFor('A', 'mike'), f.mikePersonalAtB.id, listing)).toBe(false);
-    expect(await canWriteToMemory(db, ctxFor('A', 'mike'), f.mikePersonalAtB.id, listing)).toBe(false);
+    // A listing or traversal does not ask about an explicit reference.
+    expect(await canReadMemory(db, ctxFor('A', 'mike'), f.mikePersonalAtB.id)).toBe(false);
+    expect(await canWriteToMemory(db, ctxFor('A', 'mike'), f.mikePersonalAtB.id)).toBe(false);
     const session: AuthContext = { ...ctxFor('A', 'mike'), sessionId: generateId() };
-    expect(await canReadMemory(db, session, f.mikePersonalAtB.id)).toBe(false);
-    expect(await canWriteToMemory(db, session, f.mikePersonalAtB.id)).toBe(false);
+    expect(await canReadMemory(db, session, f.mikePersonalAtB.id, EXPLICIT_REF)).toBe(false);
+    expect(await canWriteToMemory(db, session, f.mikePersonalAtB.id, EXPLICIT_REF)).toBe(false);
   });
 
   it('Mike through App B, naming his memory at App A explicitly, is evaluated as App A (#1503)', async () => {
-    expect(await canReadMemory(db, ctxFor('B', 'mike'), f.mikePersonalAtA.id)).toBe(true);
-    expect(await canWriteToMemory(db, ctxFor('B', 'mike'), f.mikePersonalAtA.id)).toBe(true);
+    expect(await canReadMemory(db, ctxFor('B', 'mike'), f.mikePersonalAtA.id, EXPLICIT_REF)).toBe(true);
+    expect(await canWriteToMemory(db, ctxFor('B', 'mike'), f.mikePersonalAtA.id, EXPLICIT_REF)).toBe(true);
   });
 
   it('a listing or a bound session through App B is still DENIED his memory at App A', async () => {
-    const listing = { selectionOnly: true };
-    expect(await canReadMemory(db, ctxFor('B', 'mike'), f.mikePersonalAtA.id, listing)).toBe(false);
-    expect(await canWriteToMemory(db, ctxFor('B', 'mike'), f.mikePersonalAtA.id, listing)).toBe(false);
+    // A listing or traversal does not ask about an explicit reference.
+    expect(await canReadMemory(db, ctxFor('B', 'mike'), f.mikePersonalAtA.id)).toBe(false);
+    expect(await canWriteToMemory(db, ctxFor('B', 'mike'), f.mikePersonalAtA.id)).toBe(false);
     const session: AuthContext = { ...ctxFor('B', 'mike'), sessionId: generateId() };
-    expect(await canReadMemory(db, session, f.mikePersonalAtA.id)).toBe(false);
-    expect(await canWriteToMemory(db, session, f.mikePersonalAtA.id)).toBe(false);
+    expect(await canReadMemory(db, session, f.mikePersonalAtA.id, EXPLICIT_REF)).toBe(false);
+    expect(await canWriteToMemory(db, session, f.mikePersonalAtA.id, EXPLICIT_REF)).toBe(false);
   });
 
   it('Mike\'s session through App B can read his memory at App B', async () => {

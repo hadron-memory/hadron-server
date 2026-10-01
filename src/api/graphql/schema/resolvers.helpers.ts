@@ -21,6 +21,7 @@ import {
 import { effectiveApiStyle, effectiveEndpoint } from '../../../lib/aiEndpoint.js';
 import {
   canWriteToMemory,
+  EXPLICIT_REF,
   filterReadableMemoryIds,
   getPrincipalAppMemoryAccess,
   getWorkerMemoryAccess,
@@ -2305,7 +2306,8 @@ export async function requireMemoryWriteAccess(ctx: Context, memoryId: string): 
     if (!strictOwner && memory.ownerUserId === null &&
         !(ctx.appId && ctx.sessionId && !ctx.userId) &&
         (ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER'))) return;
-    if (await canWriteToMemory(ctx.db, ctx, memoryId)) return;
+    // A write always names its target: an explicit reference (#1503).
+    if (await canWriteToMemory(ctx.db, ctx, memoryId, EXPLICIT_REF)) return;
     throw memoryWriteForbidden();
   }
 

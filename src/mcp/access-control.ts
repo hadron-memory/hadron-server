@@ -34,6 +34,7 @@ import { isAppSelectableBy, resolveUserApps } from '../auth/user-app-resolution.
 import { getOrgReadableMemoryIds } from '../lib/auth/orgReadableMemory.js';
 import { sessionScopedMemoryIds } from '../lib/auth/sessionScopedMemoryIds.js';
 import { LIVE_ORG_MEMBERSHIP } from '../lib/auth/liveOrgMembership.js';
+import { isRunPrincipal } from '../lib/auth/runPrincipal.js';
 
 // ---------------------------------------------------------------------------
 // Shared fold algorithm
@@ -780,13 +781,17 @@ export async function getWorkerMemoryAccess(
  */
 export interface MemoryGateOptions {
   /**
-   * Evaluate a strict owner's App-scoped personal/private memory against the
-   * SELECTED App only (#1503). Set by listing and discovery surfaces, which
-   * must stay confined to the selected App. Leave unset where the caller named
-   * this memory or one of its nodes explicitly.
+   * The caller named this memory, or one of its nodes, explicitly in the
+   * request (#1503). Only then may a strict owner's memory in another App be
+   * evaluated as that App. Opt-in: traversals (stored edges, linked task
+   * refs), listings and discovery leave it unset and stay with the selected
+   * App, so a forgotten option fails closed.
    */
-  selectionOnly?: boolean;
+  explicitRef?: boolean;
 }
+
+/** {@link MemoryGateOptions} for a gate on a caller-supplied memory or node reference. */
+export const EXPLICIT_REF: MemoryGateOptions = Object.freeze({ explicitRef: true });
 
 /**
  * The App a strict owner's personal/private memory is evaluated against
@@ -802,11 +807,14 @@ export interface MemoryGateOptions {
  * revoked or expired subscription still closes the memory.
  *
  * Not substituted:
+ * - unless the gate was called for an explicit reference
+ *   (`opts.explicitRef`): traversals, listings and discovery stay with the
+ *   selected App;
  * - for a bound session or an impersonation, which must not leave their App
  *   scope;
- * - for a pure App key, which has no user id and never owns a personal memory;
- * - under `selectionOnly`, which listing and discovery surfaces set so they
- *   stay confined to the selected App.
+ * - for an AppRun ({@link isRunPrincipal}), which carries the on-behalf-of
+ *   user's id but acts for its own App;
+ * - for a pure App key, which has no user id and never owns a personal memory.
  */
 async function strictOwnerCallAppId(
   db: PrismaClient,
@@ -815,8 +823,9 @@ async function strictOwnerCallAppId(
   opts: MemoryGateOptions,
 ): Promise<string | undefined> {
   if (
-    !opts.selectionOnly && auth.appId && auth.userId && !auth.sessionId &&
-    !auth.impersonation && memory.appId !== null && memory.appId !== auth.appId &&
+    opts.explicitRef && auth.appId && auth.userId && !auth.sessionId &&
+    !auth.impersonation && !isRunPrincipal(auth) &&
+    memory.appId !== null && memory.appId !== auth.appId &&
     (await isAppSelectableBy(auth.userId, memory.appId, db))
   ) {
     return memory.appId;
@@ -1023,9 +1032,7 @@ async function canReadMemoryRow(
       }
 
       if (!memory.userMemoryOfAgentId || !memory.userId) return false;
-      // The batch caches were built for the SELECTED App's candidates, so they
-      // answer nothing about a memory evaluated as another App (#1503).
-      const sub = opts.subscriptionsByAgentId && callAppId === auth.appId
+      const sub = opts.subscriptionsByAgentId
         ? opts.subscriptionsByAgentId.get(memory.userMemoryOfAgentId)
         : await db.agentSubscription.findUnique({
             where: {
@@ -1192,9 +1199,6 @@ export async function filterReadableMemoryIds(
         workerMemoryIds,
         installedAgentIds,
         subscriptionsByAgentId,
-        // Discovery: a candidate set, not an explicit reference, so a strict
-        // owner's memory in another App stays out (#1503).
-        selectionOnly: true,
       })
     ) {
       readable.add(memory.id);

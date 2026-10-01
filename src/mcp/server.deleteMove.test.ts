@@ -1054,9 +1054,10 @@ describe('hadron_move_node — cross-memory move + permission denial', () => {
       new URL('./server.ts', import.meta.url),
       'utf8',
     );
-    expect(src).toMatch(/canWriteToMemory\(db, auth, fromMemory\.id\)/);
+    // #1503: both are explicit references (the caller named both memories).
+    expect(src).toMatch(/canWriteToMemory\(db, auth, fromMemory\.id, EXPLICIT_REF\)/);
     expect(src).toMatch(
-      /canWriteToMemory\(db, auth, toMemory\.id\)/,
+      /canWriteToMemory\(db, auth, toMemory\.id, EXPLICIT_REF\)/,
     );
   });
 });

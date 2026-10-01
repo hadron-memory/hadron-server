@@ -18,6 +18,7 @@ import {
 } from '../helpers.js';
 import { generateId } from '../../lib/id.js';
 import {
+  EXPLICIT_REF,
   canReadMemory,
   canWriteToMemory,
 } from '../../mcp/access-control.js';
@@ -162,21 +163,20 @@ describe('T049: access-control gate 3 enforces Memory.app_id === the call\'s App
     // 2026-10-01). Naming the memory explicitly while appAtY is selected
     // evaluates it as appAtX, the memory's own App (cor:acl:020:01), so the
     // same isolation and subscription checks pass as above.
-    expect(await canReadMemory(db, ctxAtY, memX.id)).toBe(true);
-    expect(await canWriteToMemory(db, ctxAtY, memX.id)).toBe(true);
-    // Isolation still holds everywhere the reference is not explicit, or the
-    // caller is not the owner acting directly:
-    // a listing through appAtY,
-    expect(await canReadMemory(db, ctxAtY, memX.id, { selectionOnly: true })).toBe(false);
-    expect(await canWriteToMemory(db, ctxAtY, memX.id, { selectionOnly: true })).toBe(false);
-    // a bound session through appAtY,
-    const sessionAtY: AuthContext = { ...ctxAtY, sessionId: generateId() };
-    expect(await canReadMemory(db, sessionAtY, memX.id)).toBe(false);
-    expect(await canWriteToMemory(db, sessionAtY, memX.id)).toBe(false);
-    // and a caller who could not select appAtX.
-    await db.appMember.deleteMany({ where: { appId: appAtX.id, userId: mike.id } });
+    expect(await canReadMemory(db, ctxAtY, memX.id, EXPLICIT_REF)).toBe(true);
+    expect(await canWriteToMemory(db, ctxAtY, memX.id, EXPLICIT_REF)).toBe(true);
+    // Isolation still holds everywhere else:
+    // a gate that was not asked about an explicit reference (a listing or a traversal),
     expect(await canReadMemory(db, ctxAtY, memX.id)).toBe(false);
     expect(await canWriteToMemory(db, ctxAtY, memX.id)).toBe(false);
+    // a bound session through appAtY,
+    const sessionAtY: AuthContext = { ...ctxAtY, sessionId: generateId() };
+    expect(await canReadMemory(db, sessionAtY, memX.id, EXPLICIT_REF)).toBe(false);
+    expect(await canWriteToMemory(db, sessionAtY, memX.id, EXPLICIT_REF)).toBe(false);
+    // and a caller who could not select appAtX.
+    await db.appMember.deleteMany({ where: { appId: appAtX.id, userId: mike.id } });
+    expect(await canReadMemory(db, ctxAtY, memX.id, EXPLICIT_REF)).toBe(false);
+    expect(await canWriteToMemory(db, ctxAtY, memX.id, EXPLICIT_REF)).toBe(false);
   });
 
   it('Bob (a different user) cannot read Mike\'s personal memory through any App (FR-016)', async () => {
