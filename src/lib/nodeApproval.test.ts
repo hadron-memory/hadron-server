@@ -12,6 +12,8 @@ import {
   revisionStateHashRefreshMarker,
 } from './nodeRevisionSnapshot.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
+import { isCiphertext, parseDataKey } from './crypto.js';
+import { sessionKeyCache } from './sessionKeyCache.js';
 
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -220,12 +222,11 @@ describe('verifyNode / verifyMemoryNodes (#1591)', () => {
     await db.$executeRaw`UPDATE nodes SET content = 'quietly changed' WHERE id = ${n.id}`;
     expect((await verify(n.id)).state).toBe('TAMPERED');
 
-    // Any ordinary read reconciles the drift into a new revision. The finding
-    // must survive it: the snapshot of the approved revision holds the
-    // tampered text.
-    const row = await db.node.findUniqueOrThrow({ where: { id: n.id } });
-    expect(await resolvers.Node.revision(row, {}, as())).toBe(2);
+    // The status read reconciles the drift into a new revision by itself, so
+    // the changed text never reads as approved. The tamper finding must
+    // survive that: the snapshot of the approved revision holds the changed text.
     expect((await statusOf(n.id)).state).toBe('SUPERSEDED');
+    expect((await db.node.findUniqueOrThrow({ where: { id: n.id } })).revSeq).toBe(2);
     expect((await verify(n.id)).state).toBe('TAMPERED');
   });
 
@@ -276,10 +277,15 @@ describe('findNodes approvalState filter (#1591)', () => {
     await approve(approved.id);
     await approve(superseded.id);
     await edit(superseded.id, 'changed');
-    const locsFor = async (approvalState: string, query?: string) => {
+    const locsFor = async (approvalState: string, opts: { query?: string; viaSql?: boolean; limit?: number } = {}) => {
       const res = await resolvers.Query.findNodes(null, {
-        ...(query ? { query, mode: 'keyword' } : {}),
-        filter: { memoryIds: [memory.id], approvalState },
+        ...(opts.query ? { query: opts.query, mode: 'keyword' } : {}),
+        ...(opts.limit ? { limit: opts.limit } : {}),
+        // A `where` predicate routes the no-query browse through the SQL path.
+        filter: {
+          memoryIds: [memory.id], approvalState,
+          ...(opts.viaSql ? { where: { path: ['k'], eq: 'v' } } : {}),
+        },
       }, as());
       // The memory's root node is never approved; leave it out of the comparison.
       return res.hits.map((h: { node: { loc: string } }) => h.node.loc).filter((l: string) => l !== 'approvals').sort();
@@ -287,7 +293,43 @@ describe('findNodes approvalState filter (#1591)', () => {
     expect(await locsFor('APPROVED')).toEqual(['a:1']);
     expect(await locsFor('SUPERSEDED')).toEqual(['a:2']);
     expect(await locsFor('NOT_APPROVED')).toEqual(['a:3']);
-    // The lexical SQL path applies the same predicate.
-    expect(await locsFor('APPROVED', 'Title')).toEqual(['a:1']);
+    // The keyword path and the SQL browse path apply the same predicate.
+    expect(await locsFor('APPROVED', { query: 'Title' })).toEqual(['a:1']);
+    await db.node.updateMany({ where: { memoryId: memory.id }, data: { properties: { k: 'v' } } });
+    expect(await locsFor('APPROVED', { viaSql: true })).toEqual(['a:1']);
+    expect(await locsFor('SUPERSEDED', { viaSql: true })).toEqual(['a:2']);
+    expect(await locsFor('NOT_APPROVED', { viaSql: true })).toEqual(['a:3']);
+    // The SQL page itself is filtered, not only the hydration after it: one
+    // row, loc order, must be the first NOT_APPROVED node (a:3), not a:1.
+    expect(await locsFor('NOT_APPROVED', { viaSql: true, limit: 1 })).toEqual(['a:3']);
+  });
+});
+
+describe('approvals on an encrypted memory (#1591)', () => {
+  it('hashes the plaintext, and refuses SESSION_EXPIRED without the session key', async () => {
+    const enc = await resolvers.Mutation.createMemory(null, {
+      orgId: (await db.memory.findUniqueOrThrow({ where: { id: memory.id } })).organizationId!,
+      name: 'approvals-encrypted', memoryClass: 'private',
+    }, as());
+    const n = await db.node.create({
+      data: { id: generateId(), memoryId: enc.id, loc: 'e:1', name: 'Secret', abstract: 'Hidden summary', content: 'Hidden body' },
+    });
+    const dataKey = Buffer.alloc(32, 7).toString('base64');
+    await resolvers.Mutation.encryptMemory(null, { memoryId: enc.id, dataKey }, as());
+    const stored = await db.node.findUniqueOrThrow({ where: { id: n.id } });
+    expect(isCiphertext(stored.content)).toBe(true);
+
+    sessionKeyCache.clear();
+    expect(await codeOf(approve(n.id))).toBe('SESSION_EXPIRED');
+    expect(await codeOf(verify(n.id))).toBe('SESSION_EXPIRED');
+
+    sessionKeyCache.set('approval-test', enc.id, parseDataKey(dataKey));
+    try {
+      const { approval } = await approve(n.id);
+      expect(approval.hash).toBe(hashOf({ name: 'Secret', abstract: 'Hidden summary', content: 'Hidden body' }));
+      expect((await verify(n.id)).state).toBe('INTACT');
+    } finally {
+      sessionKeyCache.clear();
+    }
   });
 });
