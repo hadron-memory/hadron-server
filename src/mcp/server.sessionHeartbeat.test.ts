@@ -267,3 +267,45 @@ describe('#1082 review — the heartbeat genuinely cannot fail a tool call', () 
     spy.mockRestore();
   });
 });
+
+/** A session nobody has driven for longer than its idle window: started AND last touched long ago. */
+async function lapsedSession(userId = user.id): Promise<string> {
+  const s = await db.session.create({
+    data: { id: generateId(), workerId: worker.id, appId: app.id, userId },
+  });
+  await db.$executeRaw`UPDATE sessions SET started_at = ${LONG_AGO}, updated_at = ${LONG_AGO} WHERE id = ${s.id}`;
+  return s.id;
+}
+
+describe('#1543 — the heartbeat keeps a LIVE session alive and never revives a lapsed one', () => {
+  it('a team tool called through a lapsed session leaves it untouched', async () => {
+    for (const [tool, args] of [
+      ['hadron_team_chat_read', { sinceSeq: 0 }],
+      ['hadron_list_workers', {}],
+      ['hadron_team_work_items', {}],
+    ] as const) {
+      const id = await lapsedSession();
+      const before = await updatedAt(id);
+      const srv = createTestableMcpServer(auth());
+      await srv.callToolText(tool, { ...(args as object), session: id } as never);
+      expect((await updatedAt(id))!.getTime(), tool).toBe(before!.getTime());
+    }
+  });
+
+  it('a post through a lapsed session is refused by the post gate instead of resurrecting it', async () => {
+    const id = await lapsedSession();
+    const before = await updatedAt(id);
+    const srv = createTestableMcpServer(auth());
+    const text = await srv.callToolText('hadron_team_chat_post', { session: id, body: 'too late' });
+    expect(text).toMatch(/not live/i);
+    expect((await updatedAt(id))!.getTime()).toBe(before!.getTime());
+  });
+
+  it('control: a live session is still heartbeated by the same tools', async () => {
+    const id = await staleSession(); // started now, so live; only its updatedAt is old
+    const before = await updatedAt(id);
+    const srv = createTestableMcpServer(auth());
+    await srv.callToolText('hadron_team_work_items', { session: id });
+    expect((await updatedAt(id))!.getTime()).toBeGreaterThan(before!.getTime());
+  });
+});
