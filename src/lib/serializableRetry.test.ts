@@ -58,6 +58,31 @@ describe('retryOnSerializationFailure', () => {
     expect(delays).toEqual([5, 10, 20]);
   });
 
+  // Jane's #1570 delta: recording the requested delays is not proof the retry
+  // WAITS for them. Hold the timer: no re-run may start until it fires.
+  it('does not re-run until the backoff timer fires', async () => {
+    vi.spyOn(Math, 'random').mockReturnValue(0.5);
+    const held: Array<() => void> = [];
+    vi.spyOn(globalThis, 'setTimeout').mockImplementation(((fn: () => void) => {
+      held.push(fn);
+      return 0;
+    }) as unknown as typeof setTimeout);
+    let calls = 0;
+    const done = retryOnSerializationFailure(async () => {
+      calls++;
+      if (calls === 1) throw p2034();
+      return 'ok';
+    });
+    // Let the first attempt fail and the retry reach its sleep.
+    for (let i = 0; i < 20 && held.length === 0; i++) await Promise.resolve();
+    expect(held).toHaveLength(1);
+    for (let i = 0; i < 20; i++) await Promise.resolve();
+    expect(calls).toBe(1); // still waiting: no lockstep re-run
+    held[0]();
+    await expect(done).resolves.toBe('ok');
+    expect(calls).toBe(2);
+  });
+
   it('the delay spans the whole jitter range: randomness 0 waits nothing, near 1 waits almost the ceiling', async () => {
     const delaysFor = async (r: number) => {
       vi.spyOn(Math, 'random').mockReturnValue(r);
