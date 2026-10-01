@@ -353,7 +353,9 @@ describe('syncGraphFromGithub', () => {
     expect(first.error).toContain('GIT_SYNC_REVIEW_REQUIRED');
     expect(first.error).toContain('hadron-note');
     expect(await db.node.findUnique({ where: { id: hadronId } })).toMatchObject({ deletedAt: null, ownerRepo: 'test/repo' });
-    expect(await db.node.findFirst({ where: { memoryId: dbGraphId, loc: 'main-change' } })).not.toBeNull();
+    // The warning aborts the whole sync under cor:int:010:01; no partial
+    // upsert may commit beside a held deletion.
+    expect(await db.node.findFirst({ where: { memoryId: dbGraphId, loc: 'main-change' } })).toBeNull();
     expect(await db.memory.findUnique({ where: { id: dbGraphId } })).toMatchObject({
       syncStatus: 'ERROR', syncError: expect.stringContaining('GIT_SYNC_REVIEW_REQUIRED'),
     });
@@ -361,11 +363,13 @@ describe('syncGraphFromGithub', () => {
     // A later boot/webhook still cannot prune it without human review.
     expect((await syncGraphFromGithub(makeGraph({ readBranch: null }))).error).toContain('GIT_SYNC_REVIEW_REQUIRED');
     expect(await db.node.findUnique({ where: { id: hadronId } })).not.toBeNull();
+    expect(await db.node.findFirst({ where: { memoryId: dbGraphId, loc: 'main-change' } })).toBeNull();
 
     // Explicit Read branch is the post-review path for normal repo-wins cleanup.
     await db.memory.update({ where: { id: dbGraphId }, data: { readBranch: 'main' } });
     expect((await syncGraphFromGithub(makeGraph({ readBranch: 'main' }))).error).toBeUndefined();
     expect(await db.node.findUnique({ where: { id: hadronId } })).toBeNull();
+    expect(await db.node.findFirst({ where: { memoryId: dbGraphId, loc: 'main-change' } })).not.toBeNull();
   });
 
   it('waits for the mirror checkout lock before any Git or filesystem read', async () => {

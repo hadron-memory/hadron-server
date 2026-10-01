@@ -76,6 +76,18 @@ class GitSyncUnsettledParking extends Error {
   }
 }
 
+/** #1566: an old blank-read sync may have adopted write-branch-only nodes. */
+class GitSyncRecoveryReviewRequired extends Error {
+  constructor(locs: string[]) {
+    super(
+      `GIT_SYNC_REVIEW_REQUIRED: ${locs.length} repo-owned node(s) are absent from the default read branch ` +
+      `(${locs.slice(0, 20).join(', ')}${locs.length > 20 ? ', …' : ''}). ` +
+      'No changes were applied. Review these nodes, then set readBranch explicitly to authorize repo-wins cleanup.',
+    );
+    this.name = 'GitSyncRecoveryReviewRequired';
+  }
+}
+
 /**
  * The row left the memory being synced between the preflight lookup and its
  * row lock (a concurrent cross-memory move). Applying the repo's update by id
@@ -414,7 +426,6 @@ export const syncGraphFromGithub = async (
     const skippedUndeclaredRoles: SkippedUndeclaredRole[] = [];
     const deferredLateRows: string[] = [];
     const heldMoves: string[] = [];
-    const heldRepoNodes: string[] = [];
     // #1411 review — occupants a previous attempt parked and could not settle.
     // Grows by a distinct row (one sitting at a file's loc) per retry, so the
     // attempts are bounded by the file count.
@@ -485,7 +496,7 @@ export const syncGraphFromGithub = async (
     for (;;) {
     // Every accumulator restarts with the attempt: a rolled-back attempt
     // wrote nothing, so nothing it reported is true.
-    for (const acc of [pendingEmbeds, writtenNodes, skippedProtected, skippedObjectTypes, skippedUndeclaredRoles, deferredLateRows, heldMoves, heldRepoNodes]) {
+    for (const acc of [pendingEmbeds, writtenNodes, skippedProtected, skippedObjectTypes, skippedUndeclaredRoles, deferredLateRows, heldMoves]) {
       acc.length = 0;
     }
     pendingSourceMemories = [];
@@ -1204,9 +1215,10 @@ export const syncGraphFromGithub = async (
           // adopt Hadron-created nodes as repo-owned. Boot sync runs before an
           // operator can inspect them. Keep EVERY absent repo-owned row while
           // Read branch is blank; an explicit branch is the human's review/
-          // cleanup decision. A persistent, coded sync error below makes this
-          // visible instead of silently reporting OK after partial sync.
-          heldRepoNodes.push(...pruned.map((node) => node.loc));
+          // cleanup decision. Roll back the WHOLE transaction to preserve the
+          // all-or-nothing Git-sync contract (cor:int:010:01). The outer catch
+          // records this coded error on the Memory for operator review.
+          throw new GitSyncRecoveryReviewRequired(pruned.map((node) => node.loc));
         } else {
           const crossMemoryEdges = await countCrossMemoryEdgesForNodeDelete(
             tx,
@@ -1450,21 +1462,10 @@ export const syncGraphFromGithub = async (
     );
 
     // 5. Record sync time and status
-    const recoveryWarning = heldRepoNodes.length > 0
-      ? `GIT_SYNC_REVIEW_REQUIRED: Kept ${heldRepoNodes.length} repo-owned node(s) absent from the default read branch (${heldRepoNodes.slice(0, 20).join(', ')}${heldRepoNodes.length > 20 ? ', …' : ''}). Review these nodes, then set readBranch explicitly to authorize repo-wins cleanup.`
-      : null;
-    if (recoveryWarning) {
-      // The warning is part of the safety contract, not optional telemetry.
-      await db.memory.update({
-        where: { id: graph.id },
-        data: { syncStatus: 'ERROR', syncError: recoveryWarning },
-      });
-    } else {
-      await db.memory.update({
-        where: { id: graph.id },
-        data: { lastSyncedAt: new Date(), syncStatus: 'OK', syncError: null },
-      }).catch(() => {});
-    }
+    await db.memory.update({
+      where: { id: graph.id },
+      data: { lastSyncedAt: new Date(), syncStatus: 'OK', syncError: null },
+    }).catch(() => {});
 
     // 6. Spec 033 T029 — enqueue embedding for each upserted node now that
     // the transaction has committed. Fire-and-forget; enqueueNodeEmbedding
@@ -1502,7 +1503,7 @@ export const syncGraphFromGithub = async (
         `Sync of "${graphName}": held ${heldMoves.length} move(s) whose destination's occupant could not be moved out of the way this sync: ${heldMoves.join('; ')}`,
       );
     }
-    return { nodeCount: fsGraph.nodes.length, writtenNodes, skippedProtected, skippedObjectTypes, skippedUndeclaredRoles, deferredLateRows, heldMoves, ...(recoveryWarning ? { error: recoveryWarning } : {}) };
+    return { nodeCount: fsGraph.nodes.length, writtenNodes, skippedProtected, skippedObjectTypes, skippedUndeclaredRoles, deferredLateRows, heldMoves };
   } catch (error) {
     // Update sync status to ERROR
     await db.memory.update({
