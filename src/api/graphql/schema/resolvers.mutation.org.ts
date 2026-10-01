@@ -19,6 +19,7 @@ import {
 } from '../../../controller/operations/deleteUser.js';
 import { softDeleteOrganizationCore } from '../../../controller/operations/softDeleteOrganization.js';
 import { validateOrgSlug } from '../../../lib/urn.js';
+import { retryOnSerializationFailure } from '../../../lib/serializableRetry.js';
 import {
   mintPrincipal,
   releasePrincipal,
@@ -699,31 +700,40 @@ export const orgMutations = {
       const resolvedOrgId = await resolveOrgRefArg(ctx.db, { ref: orgRef, id: orgId });
       await requireOrgRole(ctx, resolvedOrgId, 'ADMIN');
       const resolvedUserId = await resolveUserRefArg(ctx.db, { ref: userRef, id: userId });
-      // Refuse to edit a soft-revoked row — silently retitling a tombstone
-      // (which no UI surfaces) would be API-misuse-only behavior; rejoin goes
-      // through addOrgMember / invitation reactivation.
-      const existing = await ctx.db.orgMember.findFirst({
-        where: { organizationId: resolvedOrgId, userId: resolvedUserId, deletedAt: null },
-      });
-      if (!existing) {
-        throw new Error('User is not a member of this organization');
-      }
-      // Demoting the last LIVE owner would leave the org unmanageable — same
-      // invariant removeOrgMember enforces (PR-480 Gemini review; the gap
-      // predates the lifecycle change but this is its home).
-      if (existing.role === 'OWNER' && role !== 'OWNER') {
-        const owners = await ctx.db.orgMember.findMany({
-          where: { organizationId: resolvedOrgId, role: 'OWNER', deletedAt: null },
+      // #1544: the last-owner guard is count-then-act, so the read, the count
+      // and the write share ONE SERIALIZABLE transaction. Two admins demoting
+      // (or removing) the org's two owners at once would otherwise each count
+      // two and both commit, leaving zero owners. Every writer that can lower
+      // the owner count is SERIALIZABLE (removeOrgMember, deleteUser), so
+      // Postgres aborts one side and the retry re-decides on the winner's
+      // committed state (conventions:count-then-act-serializable-txn).
+      return retryOnSerializationFailure(() => ctx.db.$transaction(async (tx) => {
+        // Refuse to edit a soft-revoked row — silently retitling a tombstone
+        // (which no UI surfaces) would be API-misuse-only behavior; rejoin goes
+        // through addOrgMember / invitation reactivation.
+        const existing = await tx.orgMember.findFirst({
+          where: { organizationId: resolvedOrgId, userId: resolvedUserId, deletedAt: null },
         });
-        if (owners.length <= 1) {
-          throw new Error('Cannot demote the last owner of an organization');
+        if (!existing) {
+          throw new Error('User is not a member of this organization');
         }
-      }
-      return ctx.db.orgMember.update({
-        where: { organizationId_userId: { organizationId: resolvedOrgId, userId: resolvedUserId } },
-        data: { role: role as Role },
-        include: { user: true },
-      });
+        // Demoting the last LIVE owner would leave the org unmanageable — same
+        // invariant removeOrgMember enforces (PR-480 Gemini review; the gap
+        // predates the lifecycle change but this is its home).
+        if (existing.role === 'OWNER' && role !== 'OWNER') {
+          const owners = await tx.orgMember.count({
+            where: { organizationId: resolvedOrgId, role: 'OWNER', deletedAt: null },
+          });
+          if (owners <= 1) {
+            throw new Error('Cannot demote the last owner of an organization');
+          }
+        }
+        return tx.orgMember.update({
+          where: { organizationId_userId: { organizationId: resolvedOrgId, userId: resolvedUserId } },
+          data: { role: role as Role },
+          include: { user: true },
+        });
+      }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable }));
     },
 
     removeOrgMember: async (
@@ -745,33 +755,37 @@ export const orgMutations = {
       const resolvedOrgId = await resolveOrgRefArg(ctx.db, { ref: orgRef, id: orgId });
       await requireOrgRole(ctx, resolvedOrgId, 'ADMIN');
       const resolvedUserId = await resolveUserRefArg(ctx.db, { ref: userRef, id: userId });
-      const member = await ctx.db.orgMember.findUniqueOrThrow({
-        where: { organizationId_userId: { organizationId: resolvedOrgId, userId: resolvedUserId } },
-      });
-      // Already revoked → idempotent success. Checked BEFORE the last-owner
-      // guard: a revoked ex-OWNER isn't in the live owners count, so the
-      // guard would otherwise mis-fire "last owner" on a no-op re-removal.
-      if (member.deletedAt) return true;
-      // Cannot remove the last LIVE owner (revoked owners don't count — and
-      // this implicitly protects personal workspaces, whose user is the sole
-      // OWNER of their personal org).
-      if (member.role === 'OWNER') {
-        const owners = await ctx.db.orgMember.findMany({
-          where: { organizationId: resolvedOrgId, role: 'OWNER', deletedAt: null },
+      // #1544: one SERIALIZABLE transaction for the read, the last-owner count
+      // and the revocation, for the reason updateOrgMember gives above.
+      await retryOnSerializationFailure(() => ctx.db.$transaction(async (tx) => {
+        const member = await tx.orgMember.findUniqueOrThrow({
+          where: { organizationId_userId: { organizationId: resolvedOrgId, userId: resolvedUserId } },
         });
-        if (owners.length <= 1) {
-          throw new Error('Cannot remove the last owner of an organization');
+        // Already revoked → idempotent success. Checked BEFORE the last-owner
+        // guard: a revoked ex-OWNER isn't in the live owners count, so the
+        // guard would otherwise mis-fire "last owner" on a no-op re-removal.
+        if (member.deletedAt) return;
+        // Cannot remove the last LIVE owner (revoked owners don't count — and
+        // this implicitly protects personal workspaces, whose user is the sole
+        // OWNER of their personal org).
+        if (member.role === 'OWNER') {
+          const owners = await tx.orgMember.count({
+            where: { organizationId: resolvedOrgId, role: 'OWNER', deletedAt: null },
+          });
+          if (owners <= 1) {
+            throw new Error('Cannot remove the last owner of an organization');
+          }
         }
-      }
-      // Revocation is a SOFT delete (OrgMember carries the audit tuple; the
-      // platform hard-deletes only pure join rows — cor:dmo:010:04). Every
-      // read/auth gate filters deletedAt, and rejoin reactivates the row via
-      // addOrgMember / invitation acceptance, so history is preserved without
-      // ever authorizing a revoked member.
-      await ctx.db.orgMember.update({
-        where: { organizationId_userId: { organizationId: resolvedOrgId, userId: resolvedUserId } },
-        data: { deletedAt: new Date(), deletedBy: ctx.userId ?? ctx.clientId ?? null },
-      });
+        // Revocation is a SOFT delete (OrgMember carries the audit tuple; the
+        // platform hard-deletes only pure join rows — cor:dmo:010:04). Every
+        // read/auth gate filters deletedAt, and rejoin reactivates the row via
+        // addOrgMember / invitation acceptance, so history is preserved without
+        // ever authorizing a revoked member.
+        await tx.orgMember.update({
+          where: { organizationId_userId: { organizationId: resolvedOrgId, userId: resolvedUserId } },
+          data: { deletedAt: new Date(), deletedBy: ctx.userId ?? ctx.clientId ?? null },
+        });
+      }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable }));
       return true;
     },
 
