@@ -75,7 +75,7 @@ function viewerOrgIds(ctx: UserVisibilityCtx, viewerId: string): Promise<string[
       .findMany({
         where: {
           userId: viewerId,
-          deletedAt: null,
+          ...LIVE_ORG_MEMBERSHIP,
           // Impersonation: co-membership counts only within the shared org.
           ...(ctx.impersonation ? { organizationId: ctx.impersonation.orgId } : {}),
         },
@@ -112,7 +112,7 @@ function viewerRoleInOrg(ctx: UserVisibilityCtx, viewerId: string, orgId: string
   if (!p) {
     p = ctx.db.orgMember
       .findFirst({
-        where: { userId: viewerId, organizationId: orgId, deletedAt: null },
+        where: { userId: viewerId, organizationId: orgId, ...LIVE_ORG_MEMBERSHIP },
         select: { role: true },
       })
       .then((r) => r?.role ?? null);

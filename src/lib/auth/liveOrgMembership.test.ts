@@ -32,10 +32,14 @@ const EXEMPT: Array<{ file: string; fn: string; fragment: string; why: string }>
   { file: 'src/controller/operations/deleteUser.ts', fn: 'runDeletionTxn', fragment: "role: 'OWNER'", why: 'account deletion: other owners of the org' },
 ];
 
-const READ = /orgMember\.(findFirst|findMany|findUnique|findUniqueOrThrow|findFirstOrThrow|count)\(/;
+// Whitespace and newlines may separate the client property from the method
+// (`ctx.db.orgMember\n  .findMany(`): a single-line pattern let two
+// authorizing reads in userVisibility.ts slip past (@codex P2 on #1539).
+const READ = /orgMember\s*\.\s*(findFirst|findMany|findUnique|findUniqueOrThrow|findFirstOrThrow|count)\s*\(/g;
 
-function enclosingFunction(lines: string[], idx: number): string {
-  for (let i = idx; i >= 0; i--) {
+function enclosingFunction(text: string, offset: number): string {
+  const lines = text.slice(0, offset).split('\n');
+  for (let i = lines.length - 1; i >= 0; i--) {
     const m = lines[i].match(/^\s*(?:export\s+)?(?:async\s+)?function\s+(\w+)/)
       ?? lines[i].match(/^\s{2,6}(\w+):\s*async/)
       ?? lines[i].match(/^\s*(?:export\s+)?const\s+(\w+)\s*=\s*(?:async\s*)?\(/);
@@ -44,16 +48,14 @@ function enclosingFunction(lines: string[], idx: number): string {
   return '?';
 }
 
-/** The call's argument text: from the read up to its balanced closing paren. */
-function callArgs(lines: string[], idx: number): string {
-  const text = lines.slice(idx, idx + 25).join('\n');
-  const start = text.search(READ);
+/** The call's argument text: from the read to its balanced closing paren. */
+function callArgs(text: string, from: number): string {
   let depth = 0;
-  for (let i = text.indexOf('(', start); i < text.length; i++) {
+  for (let i = text.indexOf('(', from); i < text.length; i++) {
     if (text[i] === '(') depth++;
-    else if (text[i] === ')' && --depth === 0) return text.slice(start, i + 1);
+    else if (text[i] === ')' && --depth === 0) return text.slice(from, i + 1);
   }
-  return text.slice(start);
+  return text.slice(from);
 }
 
 describe('#1370 ratchet: orgMember reads carry org liveness', () => {
@@ -63,16 +65,15 @@ describe('#1370 ratchet: orgMember reads carry org liveness', () => {
     const offenders: string[] = [];
     const usedExemptions = new Set<number>();
     for (const file of files) {
-      const lines = readFileSync(file, 'utf8').split('\n');
-      lines.forEach((line, idx) => {
-        if (!READ.test(line)) return;
-        const args = callArgs(lines, idx);
-        if (args.includes('LIVE_ORG_MEMBERSHIP') || /organization:\s*\{\s*deletedAt:\s*null/.test(args)) return;
-        const fn = enclosingFunction(lines, idx);
+      const text = readFileSync(file, 'utf8');
+      for (const m of text.matchAll(READ)) {
+        const args = callArgs(text, m.index!);
+        if (args.includes('LIVE_ORG_MEMBERSHIP') || /organization:\s*\{\s*deletedAt:\s*null/.test(args)) continue;
+        const fn = enclosingFunction(text, m.index!);
         const ex = EXEMPT.findIndex((e) => e.file === file && e.fn === fn && args.includes(e.fragment));
-        if (ex >= 0) { usedExemptions.add(ex); return; }
-        offenders.push(`${file}:${idx + 1} [${fn}]`);
-      });
+        if (ex >= 0) { usedExemptions.add(ex); continue; }
+        offenders.push(`${file}:${text.slice(0, m.index!).split('\n').length} [${fn}]`);
+      }
     }
     expect(offenders, 'authorizing orgMember reads without org liveness (#1370)').toEqual([]);
     // A stale exception (its read was removed or fixed) must be deleted, so the list stays honest.
