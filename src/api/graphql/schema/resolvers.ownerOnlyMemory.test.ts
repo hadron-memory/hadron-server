@@ -14,6 +14,7 @@ import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
 import { requireMemoryWriteAccess } from './resolvers.helpers.js';
 import { reassertManage } from './resolvers.memoryConfig.js';
+import { syncGraphFromGithub } from '../../../integrations/github/syncGraphFromGithub.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -34,6 +35,7 @@ async function listNodes(args: any, c: any) {
 }
 
 let org: { id: string };
+let graphId: string;
 let owner: { id: string }; // org READER who creates + owns the memory
 let other: { id: string }; // another org READER
 let admin: { id: string }; // global OWNER (platform operator)
@@ -43,6 +45,7 @@ beforeEach(async () => {
   await cleanDb(db);
   const a = await createDbOrgAndGraph(db, { orgName: 'micromentor', graphName: 'micromentor/repo', visibility: 'ORGANIZATION' });
   org = a.org;
+  graphId = a.graph.id;
   owner = await db.user.create({ data: { githubId: 5001, githubUsername: 'harneet', roles: ['READER'] } });
   other = await db.user.create({ data: { githubId: 5002, githubUsername: 'other', roles: ['READER'] } });
   admin = await db.user.create({ data: { githubId: 5003, githubUsername: 'operator', roles: ['OWNER'] } });
@@ -56,6 +59,19 @@ const asOwner = () => ctx({ userId: owner.id, roles: ['READER'] });
 const asOther = () => ctx({ userId: other.id, roles: ['READER'] });
 const asAdmin = () => ctx({ userId: admin.id, roles: ['OWNER'] });
 const asOrgAdmin = () => ctx({ userId: orgAdmin.id, roles: ['READER'] });
+
+it('syncMemory exposes a missing Git name as typed input error', async () => {
+  vi.mocked(syncGraphFromGithub).mockResolvedValueOnce({
+    error: 'Git sync cannot import "glossary/noname.md": name must be a non-empty string.',
+    errorCode: 'BAD_USER_INPUT',
+  });
+
+  await expect(resolvers.Mutation.syncMemory(null, { id: graphId }, asOrgAdmin()))
+    .rejects.toMatchObject({
+      message: 'Git sync cannot import "glossary/noname.md": name must be a non-empty string.',
+      extensions: { code: 'BAD_USER_INPUT' },
+    });
+});
 
 async function createPrivate(name = 'my-private') {
   return resolvers.Mutation.createMemory(null, { orgId: org.id, name, memoryClass: 'private' } as any, asOwner());

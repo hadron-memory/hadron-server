@@ -16,7 +16,7 @@ import { generateId } from '../../lib/id.js';
 import { existsSync, mkdirSync } from 'fs';
 import { join, dirname } from 'path';
 import { GRAPHS_PATH } from '../../config.js';
-import { loadGraphFromFs } from '../localFs/loadGraphFromFs.js';
+import { InvalidNodeNameError, loadGraphFromFs } from '../localFs/loadGraphFromFs.js';
 import { deriveEdgeLoc } from '../../lib/edgeLoc.js';
 import { validateEdgeCondition } from '../../lib/edge-conditions/validator.js';
 import { countCrossMemoryEdgesForNodeDelete } from '../../lib/crossMemoryEdgeDelete.js';
@@ -248,6 +248,7 @@ export const syncGraphFromGithub = async (
   edgeEndpointPreflightAttempt = 0,
 ): Promise<{
   error?: string;
+  errorCode?: 'BAD_USER_INPUT';
   nodeCount?: number;
   /**
    * #1061 — the nodes this run actually wrote, for a caller that HAS a
@@ -1437,7 +1438,10 @@ export const syncGraphFromGithub = async (
       data: { syncStatus: 'ERROR', syncError: (error as Error).message },
     }).catch(() => {});
     console.error(`Failed to sync memory "${graph.name}":`, error);
-    return { error: (error as Error).message };
+    return {
+      error: (error as Error).message,
+      ...(error instanceof InvalidNodeNameError ? { errorCode: 'BAD_USER_INPUT' as const } : {}),
+    };
   }
 };
 

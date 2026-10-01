@@ -1,5 +1,5 @@
 import { readdirSync, existsSync } from 'fs';
-import { join } from 'path';
+import { join, relative, sep } from 'path';
 import type { Node } from '../../index.d.js';
 import { InvalidNodeLocError, loadNodeFromFs } from './loadNodeFromFs.js';
 
@@ -24,6 +24,14 @@ export interface SkippedFile {
   source: string;
   /** The file's frontmatter id, if it carried one. */
   nodeId?: string;
+}
+
+/** A loaded file whose metadata cannot supply Prisma's required Node.name. */
+export class InvalidNodeNameError extends Error {
+  constructor(readonly file: string) {
+    super(`Git sync cannot import ${JSON.stringify(file)}: name must be a non-empty string.`);
+    this.name = 'InvalidNodeNameError';
+  }
 }
 
 export interface GraphEdge {
@@ -109,6 +117,12 @@ export const loadGraphFromFs = async (
   for (const source of nodeSources) {
     try {
       const result = await loadNodeFromFs(source, graphPath, ownerRepo);
+      // Refuse the whole graph before sync can write or run repo-wins cleanup.
+      // A per-file skip would turn a missing name into deletion of its old row.
+      if (result.metadataIsMapping && (typeof result.node.name !== 'string' || !result.node.name.trim())) {
+        const metadataPath = source.endsWith('.md') ? source : join(source, '.node', 'node.yaml');
+        throw new InvalidNodeNameError(relative(graphPath, metadataPath).split(sep).join('/'));
+      }
       nodes.push(result.node);
 
       for (const edge of result.edges) {
@@ -125,6 +139,7 @@ export const loadGraphFromFs = async (
         });
       }
     } catch (err) {
+      if (err instanceof InvalidNodeNameError) throw err;
       if (err instanceof InvalidNodeLocError) {
         // Recorded even WITHOUT an id: an id-less skip is the case the caller
         // most needs to hear about, because it is the one it cannot protect.

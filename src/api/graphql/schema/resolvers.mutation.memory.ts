@@ -2008,7 +2008,10 @@ export const memoryMutations = {
       await concealUnreadableDenial(ctx, id, ref, () => requireMemoryManageAccess(ctx, memory, 'CONTRIBUTOR'));
 
       const result = await syncGraphFromGithub(memory);
-      if (result.error) throw new Error(result.error);
+      if (result.error) {
+        if (result.errorCode) throw new GraphQLError(result.error, { extensions: { code: result.errorCode } });
+        throw new Error(result.error);
+      }
 
       // #1061 — one write per node the sync actually wrote. This mutation and
       // the `hadron_sync_graph` MCP tool are the two sync entry points with a
