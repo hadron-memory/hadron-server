@@ -122,8 +122,9 @@ export async function appKeySessionMatchesAgent(ctx: Context, agentId: string): 
  *   for a pure App key, or for a user every live App they are a member of
  *   that installs the Agent (the AppMember path).
  *
- * Only live Apps are anchored, because `withAuthorizedTx` refuses a deleted
- * App among its anchors; the gate re-runs on the transaction afterwards.
+ * Only live Apps with a live owner are anchored, because `withAuthorizedTx`
+ * refuses a deleted App, org or user among its anchors; the gate re-runs on
+ * the transaction afterwards.
  */
 export async function chatAuthorityAnchors(
   ctx: Context,
@@ -144,8 +145,19 @@ export async function chatAuthorityAnchors(
         })).map((m) => m.appId)
       : [];
   if (appIds.length > 0) {
+    // Only Apps that can actually carry the read right: live, and with a live
+    // owner. withAuthorizedTx refuses a deleted org or user among its anchors,
+    // so a stale membership in a dead tenant's App would otherwise block a chat
+    // the caller reaches by another path, e.g. a PUBLIC Agent (Codex/Copilot
+    // on #1585). Org deletion deliberately leaves the App rows intact.
     const apps = await ctx.db.app.findMany({
-      where: { id: { in: appIds }, deletedAt: null, uninstalledAt: null },
+      where: {
+        id: { in: appIds },
+        deletedAt: null,
+        uninstalledAt: null,
+        OR: [{ organizationId: null }, { organization: { deletedAt: null } }],
+        AND: [{ OR: [{ ownerUserId: null }, { ownerUser: { deletedAt: null } }] }],
+      },
       select: { id: true, organizationId: true, ownerUserId: true },
     });
     for (const app of apps) {

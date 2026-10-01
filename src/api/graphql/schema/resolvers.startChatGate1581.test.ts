@@ -317,6 +317,23 @@ describe('#1581: canChatWithAgent for a pure App key', () => {
 // authority anchor the gate can admit through. A revoker holding one of them
 // exclusively cannot return while the license is about to commit, and after
 // it commits the re-run gate refuses.
+describe('#1585 review: a stale membership in a dead tenant\'s App does not block a chat', () => {
+  it('a PUBLIC Agent stays reachable when the caller is also a member of an App whose org was soft-deleted', async () => {
+    await db.agent.update({ where: { id: agent.id }, data: { visibility: 'PUBLIC' } });
+    const deadOrg = await db.organization.create({ data: { id: generateId(), name: 'dead', urn: 'dead-1585.example' } });
+    const deadApp = await db.app.create({ data: {
+      id: generateId(), name: 'dead-app', urn: `${deadOrg.urn}:app`, organizationId: deadOrg.id,
+      appAgents: { create: { agentId: agent.id } },
+    } });
+    await db.appMember.create({ data: { appId: deadApp.id, userId: stranger.id, role: 'member' } });
+    // Org deletion deliberately leaves the App row intact.
+    await db.organization.update({ where: { id: deadOrg.id }, data: { deletedAt: new Date() } });
+    const out = await M.startChat(null, { agentId: agent.id }, userCtx(stranger.id));
+    expect(out.chatId).toMatch(/^chats:/);
+    expect(await subsFor(agent.id)).toEqual([stranger.id]);
+  });
+});
+
 describe('#1573: startChat waits for an in-flight revocation of its read right', () => {
   /** Hold an exclusive anchor and apply `revoke` uncommitted until released. */
   async function holdRevocation(anchor: { kind: 'org' | 'app'; id: string }, revoke: (tx: any) => Promise<unknown>) {
