@@ -35,6 +35,75 @@ beforeEach(async () => {
 const ctx = (): Context => ({ db, userId: ownerId, roles: ['READER'] }) as Context;
 
 describe('#1551 actual mutation races', () => {
+  it('does not add a member after the target User is tombstoned during its row-lock wait', async () => {
+    const target = await db.user.create({ data: {
+      id: generateId(), githubId: 1551010, githubUsername: `deleted-target-${generateId()}`,
+    } });
+    let release!: () => void;
+    let held!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const locked = new Promise<void>((resolve) => { held = resolve; });
+    const deletion = db.$transaction(async (tx) => {
+      await tx.user.update({ where: { id: target.id }, data: { deletedAt: new Date() } });
+      held();
+      await gate;
+    }, { timeout: 20_000 });
+    await locked;
+
+    const grant = M.addOrgMember(null, { orgId, userId: target.id, role: 'READER' }, ctx())
+      .then(() => ({ ok: true }), (error: unknown) => ({ ok: false, error }));
+    try {
+      await waitForLockWaitersOfType(db, 'transactionid', 1);
+      release();
+      await deletion;
+      const result = await grant;
+      expect(result.ok).toBe(false);
+      expect((result.error as Error)?.message).toMatch(/Forbidden/);
+      expect(await db.orgMember.count({ where: { organizationId: orgId, userId: target.id } })).toBe(0);
+    } finally {
+      release();
+      await Promise.allSettled([deletion, grant]);
+    }
+  });
+
+  it('does not create an Agent org grant after the Agent is tombstoned during its row-lock wait', async () => {
+    const agent = await db.agent.create({ data: {
+      id: generateId(), organizationId: orgId, urn: `authority-agent-${generateId()}`,
+      name: 'Deleted target', visibility: 'PUBLIC',
+    } });
+    const subscriberOrg = await db.organization.create({ data: {
+      id: generateId(), urn: `subscriber-${generateId()}`, name: 'Subscriber',
+    } });
+    await db.orgMember.create({ data: {
+      id: generateId(), organizationId: subscriberOrg.id, userId: ownerId, role: 'ADMIN',
+    } });
+    let release!: () => void;
+    let held!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const locked = new Promise<void>((resolve) => { held = resolve; });
+    const deletion = db.$transaction(async (tx) => {
+      await tx.agent.update({ where: { id: agent.id }, data: { deletedAt: new Date() } });
+      held();
+      await gate;
+    }, { timeout: 20_000 });
+    await locked;
+
+    const grant = M.createAgentOrgGrant(null, { agentRef: agent.id, orgRef: subscriberOrg.id }, ctx())
+      .then(() => ({ ok: true }), (error: unknown) => ({ ok: false, error }));
+    try {
+      await waitForLockWaitersOfType(db, 'transactionid', 1);
+      release();
+      await deletion;
+      const result = await grant;
+      expect(result.ok).toBe(false);
+      expect((result.error as Error)?.message).toMatch(/Forbidden/);
+      expect(await db.agentOrgGrant.count({ where: { orgId: subscriberOrg.id, agentId: agent.id } })).toBe(0);
+    } finally {
+      release();
+      await Promise.allSettled([deletion, grant]);
+    }
+  });
+
   it('reloads platform roles before an App-key grant', async () => {
     const formerAdmin = await db.user.create({ data: {
       id: generateId(), githubId: 1551003, githubUsername: `former-admin-${generateId()}`,

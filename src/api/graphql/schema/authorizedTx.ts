@@ -90,8 +90,16 @@ export async function withAuthorizedTx<T>(
           if (!row || row.deletedAt || row.uninstalledAt) throw authorizationDenied();
           break;
         }
-        case 'user':
-        case 'agent':
+        case 'user': {
+          const row = await tx.user.findUnique({ where: { id: anchor.id }, select: { deletedAt: true } });
+          if (!row || row.deletedAt) throw authorizationDenied();
+          break;
+        }
+        case 'agent': {
+          const row = await tx.agent.findUnique({ where: { id: anchor.id }, select: { deletedAt: true } });
+          if (!row || row.deletedAt) throw authorizationDenied();
+          break;
+        }
         case 'connection':
         case 'invitation':
           break;

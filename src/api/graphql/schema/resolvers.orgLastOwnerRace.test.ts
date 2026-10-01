@@ -11,8 +11,9 @@
  *
  * #1551 adds an exclusive org authority anchor to removals and demotions.
  * Contenders now serialize before their gate and owner count, so the old
- * two-row-lock barrier cannot be reached by both calls at once. The outcome
- * assertion still proves the last owner cannot be removed.
+ * two-row-lock barrier cannot be reached by both calls at once. Hold the org
+ * row until the first call has its org anchor and waits on that row; then
+ * prove the second call waits on the anchor before releasing the row.
  */
 import { describe, it, expect, beforeEach } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
@@ -20,6 +21,7 @@ import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
 import { deleteUserAccount } from '../../../controller/operations/deleteUser.js';
+import { waitForLockWaitersOfType } from '../../../test/lockWait.js';
 
 const M = resolvers.Mutation as any;
 
@@ -38,7 +40,38 @@ async function race(
   first: () => Promise<unknown>,
   second: () => Promise<unknown>,
 ): Promise<PromiseSettledResult<unknown>[]> {
-  return Promise.allSettled([first(), second()]);
+  let release!: () => void;
+  let held!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const locked = new Promise<void>((resolve) => { held = resolve; });
+  const holder = db.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT id FROM organizations WHERE id = ${org.id} FOR UPDATE`;
+    held();
+    await gate;
+  }, { timeout: 20_000 });
+  await locked;
+
+  let firstOutcome: Promise<PromiseSettledResult<unknown>> | undefined;
+  let outcomes: Promise<PromiseSettledResult<unknown>[]> | undefined;
+  try {
+    firstOutcome = first().then(
+      (value): PromiseFulfilledResult<unknown> => ({ status: 'fulfilled', value }),
+      (reason): PromiseRejectedResult => ({ status: 'rejected', reason }),
+    );
+    await waitForLockWaitersOfType(db, 'transactionid', 1);
+    const secondOutcome = second().then(
+      (value): PromiseFulfilledResult<unknown> => ({ status: 'fulfilled', value }),
+      (reason): PromiseRejectedResult => ({ status: 'rejected', reason }),
+    );
+    outcomes = Promise.all([firstOutcome, secondOutcome]);
+    await waitForLockWaitersOfType(db, 'advisory', 1);
+    release();
+    await holder;
+    return outcomes;
+  } finally {
+    release();
+    await Promise.allSettled([holder, firstOutcome, outcomes]);
+  }
 }
 
 beforeEach(async () => {
