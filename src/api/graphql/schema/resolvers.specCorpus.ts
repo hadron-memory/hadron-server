@@ -22,6 +22,8 @@ import {
   parseOpenQuestions,
 } from '../../../lib/specMint.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
+import { normalizeUrnForLookup, parseUrnInput } from '../../../lib/urn.js';
+import { emitNodeUrnV2 } from '../../../lib/urnEmit.js';
 import { acquireLockSet, ancestorLocs } from '../../../lib/nodeSubtreeLock.js';
 import { archiveTombstone } from '../../../lib/tombstoneArchive.js';
 import { lockEdgeEndpointMemories } from '../../../lib/edgeEndpointLock.js';
@@ -214,6 +216,13 @@ interface ScannableCorpus {
   unreadablePublishedUrns: Set<string>;
 }
 
+/** A stored Memory URN may still use `org::memory`; scan keys use the resolver's lookup spelling. */
+const normalizedMemoryUrn = (urn: string): string =>
+  normalizeUrnForLookup(parseUrnInput(urn).value);
+
+/** SQL equality sees both stored spellings, while the resolver treats them as one address. */
+const storedMemoryUrnSpellings = (urn: string): string[] => [urn, urn.replace(/:/g, '::')];
+
 /**
  * Resolve a corpus for a reference scan. Order matters for disclosure: an
  * unreadable memory answers exactly like a missing one (the shared node-content
@@ -246,8 +255,10 @@ async function loadScannableCorpus(ctx: Context, memoryRef: string): Promise<Sca
     where: { entityType: 'MEMORY', entityId: id },
     select: { urn: true },
   });
-  const urns = [memory.urn, ...aliases.map((a) => a.urn)].map((u) => u.replace(/^(?:hrn|urn):mem(?:ory)?:/i, ''));
-  const former = urns.filter((u) => u !== memory.urn);
+  const currentUrn = normalizedMemoryUrn(memory.urn);
+  const urns = [...new Set([memory.urn, ...aliases.map((a) => a.urn)].map(normalizedMemoryUrn))];
+  const former = urns.filter((u) => u !== currentUrn);
+  const formerSpellings = [...new Set(former.flatMap(storedMemoryUrnSpellings))];
   const shadowed = new Map<string, string[]>();
   const publishedHolders = new Map<string, string[]>();
   const historicalTranslators = new Map<string, string[]>();
@@ -257,15 +268,16 @@ async function loadScannableCorpus(ctx: Context, memoryRef: string): Promise<Sca
     const claim = (urn: string, memoryId: string) => shadowed.set(urn, [...new Set([...(shadowed.get(urn) ?? []), memoryId])]);
     // Current holders of a former URN.
     for (const h of await ctx.db.memory.findMany({
-      where: { urn: { in: former }, deletedAt: null, id: { not: id } },
+      where: { urn: { in: formerSpellings }, deletedAt: null, id: { not: id } },
       select: { id: true, urn: true },
     })) {
-      claim(h.urn, h.id);
-      publishedHolders.set(h.urn, [...(publishedHolders.get(h.urn) ?? []), h.id]);
+      const urn = normalizedMemoryUrn(h.urn);
+      claim(urn, h.id);
+      publishedHolders.set(urn, [...(publishedHolders.get(urn) ?? []), h.id]);
     }
     // (@codex P2, #1453) Other live memories that held it in the past.
     const historical = await ctx.db.urnAlias.findMany({
-      where: { entityType: 'MEMORY', urn: { in: former }, entityId: { not: id } },
+      where: { entityType: 'MEMORY', urn: { in: formerSpellings }, entityId: { not: id } },
       select: { urn: true, entityId: true },
     });
     const live = new Set((await ctx.db.memory.findMany({
@@ -273,16 +285,16 @@ async function loadScannableCorpus(ctx: Context, memoryRef: string): Promise<Sca
       select: { id: true },
     })).map((m) => m.id));
     for (const a of historical) {
-      const urn = a.urn.replace(/^(?:hrn|urn):mem(?:ory)?:/i, '');
+      const urn = normalizedMemoryUrn(a.urn);
       addTranslator(urn, a.entityId);
       if (live.has(a.entityId)) claim(urn, a.entityId);
     }
   }
   const priorHolders = await ctx.db.urnAlias.findMany({
-    where: { entityType: 'MEMORY', urn: memory.urn, entityId: { not: id } },
+    where: { entityType: 'MEMORY', urn: { in: storedMemoryUrnSpellings(currentUrn) }, entityId: { not: id } },
     select: { entityId: true },
   });
-  for (const a of priorHolders) addTranslator(memory.urn, a.entityId);
+  for (const a of priorHolders) addTranslator(currentUrn, a.entityId);
   const currentUrnHistorical = priorHolders.length
     ? (await ctx.db.memory.findMany({
         where: { id: { in: [...new Set(priorHolders.map((a) => a.entityId))] }, deletedAt: null },
@@ -319,7 +331,7 @@ async function loadScannableCorpus(ctx: Context, memoryRef: string): Promise<Sca
     else publishedHolders.delete(urn);
   }
   return {
-    id, urn: memory.urn, pattern: corpusReferencePattern(urns), shadowed, publishedHolders,
+    id, urn: currentUrn, pattern: corpusReferencePattern(urns), shadowed, publishedHolders,
     currentUrnHistorical: visibleCurrentUrnHistorical,
     hiddenShadowed,
     hiddenCurrentUrnHistorical: currentUrnHistorical.filter((m) => !visibleCurrentUrnHistorical.includes(m)),
@@ -402,7 +414,7 @@ async function referenceAcceptor(
       // Deleted memories included (aa503a4c): they still translate an alias key.
       where: { id: { in: claimantIds.slice(offset, offset + SCAN_PAGE) } },
       select: { id: true, urn: true },
-    })) claimantUrns.set(memory.id, memory.urn);
+    })) claimantUrns.set(memory.id, normalizedMemoryUrn(memory.urn));
   }
   const aliasKeysByAddress = new Map<string, string[]>();
   for (const ref of refs) {
@@ -952,7 +964,7 @@ export const specCorpusRenumberMutations = {
         const { relocated } = await nodeMoveOps.moveWithResult(ctx, {
           sourceRef: source.id,
           expectedSource: { memoryId: corpus.id, loc: fromLoc },
-          targetUrn: `hrn:node:${corpus.urn}:${toLoc}`,
+          targetUrn: emitNodeUrnV2(corpus.urn, toLoc),
           // The move's intermediate body can still cite its old subtree. Mirror
           // once after the revisioned rewrites, from the final database state.
           mirrorAfterMove: false,

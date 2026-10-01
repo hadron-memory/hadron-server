@@ -59,10 +59,19 @@ export async function resolveMemoryRef(
   if (!options?.includeDeleted) {
     where.deletedAt = null;
   }
-  const memory = await db.memory.findFirst({
+  let memory = await db.memory.findFirst({
     where,
     select: { id: true },
   });
+  // A few stored rows still carry the canonical `org::memory` spelling.
+  // The flat lookup remains first for existing v2 rows; if it misses, try
+  // the canonical storage spelling before consulting historical aliases.
+  if (!memory && lookupUrn !== null) {
+    memory = await db.memory.findFirst({
+      where: { urn: lookupUrn.replace(/:/g, '::'), ...deletedFilter },
+      select: { id: true },
+    });
+  }
   if (memory) {
     return { id: memory.id };
   }

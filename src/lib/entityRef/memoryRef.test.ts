@@ -57,6 +57,24 @@ describe('resolveMemoryRef', () => {
     expect(result).toEqual({ id: memory.id });
   });
 
+  it('resolves both input spellings when the stored memory URN uses double colons (#1478)', async () => {
+    const org = await db.organization.create({
+      data: { name: 'memref-test-canonical-org', urn: `memref-test-canonical-org-${Date.now()}` },
+    });
+    const memory = await db.memory.create({
+      data: {
+        organizationId: org.id,
+        urn: `${org.urn}::memref-test-canonical`,
+        name: 'memref-test-canonical',
+        class: 'knowledge',
+      },
+    });
+    await expect(resolveMemoryRef(db, `hrn:mem:${org.urn}:memref-test-canonical`))
+      .resolves.toEqual({ id: memory.id });
+    await expect(resolveMemoryRef(db, `hrn:memory:${memory.urn}`))
+      .resolves.toEqual({ id: memory.id });
+  });
+
   it('resolves a bare URN-shaped reference to the row', async () => {
     const memory = await db.memory.create({
       data: {

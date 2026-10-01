@@ -770,6 +770,59 @@ describe('renumber decides reference ownership before the move (@codex P2 on #14
   });
 });
 
+describe('#1478 item 6 — a corpus stored with the canonical double-colon Memory URN', () => {
+  const storeCanonicalUrn = async () => {
+    const canonical = `${org.urn}::specs-draft`;
+    await db.memory.update({ where: { id: draft.id }, data: { urn: canonical } });
+    draft.urn = canonical;
+    return canonical;
+  };
+
+  it('renumbers through the shared node URN shape and preserves both reference spellings', async () => {
+    const canonical = await storeCanonicalUrn();
+    const legacy = `${org.urn}:specs-draft`;
+    await db.node.update({ where: { id: feature.id }, data: {
+      content: `Rule: hrn:node:${canonical}::pas:010:01`,
+    } });
+    await db.node.update({ where: { id: other.id }, data: {
+      content: `Canonical: hrn:node:${canonical}::pas:010. Legacy: hrn:node:${legacy}:pas:010.`,
+    } });
+
+    const result = await specCorpusRenumberMutations.renumberSpec(
+      null, { memoryRef: draft.id, fromLoc: 'pas:010', toLoc: 'pas:040' }, as(),
+    );
+    expect(result.moved).toEqual([
+      { fromLoc: 'pas:010', toLoc: 'pas:040' },
+      { fromLoc: 'pas:010:01', toLoc: 'pas:040:01' },
+    ]);
+    expect(await content('pas:040')).toBe(`Rule: hrn:node:${canonical}::pas:040:01`);
+    expect(await content('pas:020')).toBe(
+      `Canonical: hrn:node:${canonical}::pas:040. Legacy: hrn:node:${legacy}:pas:040.`,
+    );
+  });
+
+  it('lets a prior holder claim an absent loc under either spelling of the current URN', async () => {
+    const canonical = await storeCanonicalUrn();
+    const legacy = `${org.urn}:specs-draft`;
+    const prior = await resolvers.Mutation.createMemory(null, { orgId: org.id, name: 'prior-holder' }, as());
+    const foreign = await db.node.create({ data: {
+      id: generateId(), memoryId: prior.id, loc: 'pas:500', name: 'Prior holder spec',
+    } });
+    await db.urnAlias.create({ data: {
+      urn: legacy, entityType: 'MEMORY', entityId: prior.id, reason: 'RENAME',
+    } });
+    await db.node.update({ where: { id: other.id }, data: {
+      content: `Canonical: hrn:node:${canonical}::pas:500. Legacy: hrn:node:${legacy}:pas:500.`,
+    } });
+
+    expect(await resolveNodeRef(db, `hrn:node:${canonical}::pas:500`)).toEqual({ id: foreign.id });
+    expect(await resolveNodeRef(db, `hrn:node:${legacy}:pas:500`)).toEqual({ id: foreign.id });
+    const unresolved = await resolvers.Query.specUnresolvedReferences(null, { memoryRef: draft.id }, as());
+    expect(unresolved.filter((r) => r.targetLoc === 'pas:500')).toEqual([]);
+    expect(await resolvers.Query.specBacklinks(null, { memoryRef: draft.id, loc: 'pas:500' }, as())).toEqual([]);
+  });
+});
+
 describe('renumber re-decides draft state under the move\'s lock (@codex P1 on #1453)', () => {
   it('refuses, moving nothing, when the corpus is minted between the check and the move', async () => {
     const spy = vi.spyOn(nodeMoveOps, 'moveWithResult').mockImplementationOnce(async (...args) => {
