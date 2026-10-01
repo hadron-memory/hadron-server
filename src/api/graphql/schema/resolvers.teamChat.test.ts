@@ -629,6 +629,14 @@ describe('teamChatMessages — pagination + sinceSeq', () => {
     expect(page.items.map((m: { seq: number }) => m.seq)).toEqual([3, 4]);
   });
 
+  it('takes the newest page by default while explicit sinceSeq and offset keep forward paging', async () => {
+    const latest = await read(ctx(appMember.id), { limit: 2 });
+    expect(latest.total).toBe(5);
+    expect(latest.items.map((m: { seq: number }) => m.seq)).toEqual([4, 5]);
+    expect((await read(ctx(appMember.id), { sinceSeq: 0, limit: 2 })).items.map((m: { seq: number }) => m.seq)).toEqual([1, 2]);
+    expect((await read(ctx(appMember.id), { offset: 0, limit: 2 })).items.map((m: { seq: number }) => m.seq)).toEqual([1, 2]);
+  });
+
   it('sinceSeq is a strictly-greater watermark', async () => {
     const page = await read(ctx(appMember.id), { sinceSeq: 3 });
     expect(page.total).toBe(2);
@@ -1142,24 +1150,16 @@ describe('teamChatMessages beforeSeq (#1116)', () => {
     expect(bodies(page)).toEqual(['m5', 'm6', 'm7', 'm8']);
   });
 
-  /**
-   * Unlike `chatHistory`, this query's DEFAULT page is the OLDEST one — it is a
-   * forward reader with a watermark, not a tail window, and #1116 deliberately
-   * did not change that. So a scroll-up client seeks the end once (the
-   * total-then-offset step it already performs) and pages back from there.
-   * The walk is asserted end-to-end because a cursor that is correct per-page
-   * can still lose a message at the seam between two pages.
-   */
+  /** A backward walk must not lose or repeat a message at a page seam. */
   it('walks the whole transcript backward without a gap or a repeat', async () => {
     await postN(11);
-    const { total } = await read(ctx(admin.id), { limit: 0 });
     const seen: string[] = [];
     let cursor: number | undefined;
     for (let guard = 0; guard < 10; guard++) {
       const page = await read(
         ctx(admin.id),
         cursor === undefined
-          ? { limit: 4, offset: Math.max(0, total - 4) }
+          ? { limit: 4 }
           : { beforeSeq: cursor, limit: 4 },
       );
       if (page.items.length === 0) break;
@@ -1169,12 +1169,33 @@ describe('teamChatMessages beforeSeq (#1116)', () => {
     expect(seen).toEqual(Array.from({ length: 11 }, (_, i) => `m${i + 1}`));
   });
 
-  it('CONTROL: without beforeSeq the forward reader is unchanged', async () => {
+  it('an explicit sinceSeq retains the oldest-first forward reader', async () => {
     await postN(12);
-    const page = await read(ctx(admin.id), { limit: 3 });
-    // Forward paging still starts at the OLDEST — this query is not a tail
-    // window, and adding a backward cursor must not have turned it into one.
+    const page = await read(ctx(admin.id), { sinceSeq: 0, limit: 3 });
     expect(bodies(page)).toEqual(['m1', 'm2', 'm3']);
+  });
+
+  it('selects both ends of a chat longer than the 200-message cap', async () => {
+    const first = await post(ctx(admin.id), { body: 'm1' });
+    const firstRow = await db.node.findUniqueOrThrow({ where: { id: first.nodeId }, select: { memoryId: true } });
+    // Canonical imported messages cross the cap without 204 transaction-heavy
+    // posts; the read path intentionally supports such imported rows.
+    await db.node.createMany({ data: Array.from({ length: 204 }, (_, index) => {
+      const seq = index + 2;
+      return {
+        id: generateId(), memoryId: firstRow.memoryId,
+        loc: `${TEAM_CHAT_MESSAGES_LOC}:${String(seq).padStart(4, '0')}-${generateId()}`,
+        name: `m${seq}`, nodeType: 'chat-message', seq, content: `m${seq}`,
+      };
+    }) });
+
+    const newest = await read(ctx(admin.id));
+    expect(newest.total).toBe(205);
+    expect(newest.items.map((m: { seq: number }) => m.seq)).toEqual(Array.from({ length: 50 }, (_, i) => i + 156));
+    expect((await read(ctx(admin.id), { beforeSeq: 156 })).items.map((m: { seq: number }) => m.seq)).toEqual(Array.from({ length: 50 }, (_, i) => i + 106));
+    expect((await read(ctx(admin.id), { sinceSeq: 0 })).items.map((m: { seq: number }) => m.seq)).toEqual(Array.from({ length: 50 }, (_, i) => i + 1));
+    // The old portal's second request remains correct during rollout.
+    expect((await read(ctx(admin.id), { offset: 5, limit: 200 })).items.at(-1)?.seq).toBe(205);
   });
 
   it('reports the full narrowed total, not the page size', async () => {
@@ -1216,6 +1237,15 @@ describe('teamChatMessages beforeSeq (#1116)', () => {
       '@' + s.workerName + ' note 3',
       '@' + s.workerName + ' note 4',
     ]);
+  });
+
+  it('takes the newest matching mentions without a cursor', async () => {
+    const s = await workerSession(appMember.id);
+    for (let i = 1; i <= 5; i++) await post(ctx(appMember.id), { body: `@${s.workerName} note ${i}` });
+    await post(ctx(admin.id), { body: 'unrelated' });
+    const page = await read(ctx(appMember.id), { mentionsRef: s.workerId, limit: 2 });
+    expect(bodies(page)).toEqual([`@${s.workerName} note 4`, `@${s.workerName} note 5`]);
+    expect(page.total).toBe(5);
   });
 });
 

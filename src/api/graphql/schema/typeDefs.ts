@@ -7056,15 +7056,19 @@ export const typeDefs = `#graphql
     Read a team App's chat (#939), seq-ordered ascending, as a uniform
     { items, total } page. sinceSeq is a watermark cursor: only messages with
     seq STRICTLY GREATER than it are returned (pass the last seq you have
-    seen). beforeSeq (#1116) is its BACKWARD mirror for scroll-up paging: only
+    seen). With neither cursor nor offset, the NEWEST page is returned, still
+    ascending. Pass sinceSeq: 0 to start a forward walk at the oldest message.
+    beforeSeq (#1116) is its BACKWARD mirror for scroll-up paging: only
     messages with seq STRICTLY LESS than it are considered, and the NEWEST
     limit of those come back -- the page immediately before the cursor, still
     ascending. The two compose, so passing both reads a bounded slice.
     TeamChatMessagesPage.total counts that cursor range and the mentionsRef
     filter before paging, not the whole team-chat history.
-    offset is IGNORED when beforeSeq is given: a cursor exists precisely
-    because a position is unstable while workers keep posting, and honouring
-    both would put that race back. mentionsRef filters to messages whose stored envelope mentions the
+    An explicit offset retains oldest-first positional paging for existing
+    clients; prefer cursors for new reads. offset is IGNORED when beforeSeq is
+    given: a cursor exists precisely because a position is unstable while
+    workers keep posting, and honouring both would put that race back.
+    mentionsRef filters to messages whose stored envelope mentions the
     referenced worker (a Worker id or name of THIS App, retired included) or
     user (handle/id) — matching runs against the mention tokens extracted at
     write time, never by re-parsing bodies. The ref must name this App's own

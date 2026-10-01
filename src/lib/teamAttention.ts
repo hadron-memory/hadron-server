@@ -1236,8 +1236,8 @@ async function ownLiveSessionWorker(
 
 /**
  * Advance only a contiguous, unfiltered forward page. A skipped offset,
- * backward window, mentions filter, count-only read, or sinceSeq gap is a
- * read but not evidence that the unseen interval was consumed.
+ * cursor-less tail, backward window, mentions filter, count-only read, or
+ * sinceSeq gap is not evidence that the unseen interval was consumed.
  */
 export async function maybeAdvanceOwnChannelRead(
   ctx: Context,
@@ -1255,6 +1255,10 @@ export async function maybeAdvanceOwnChannelRead(
 ): Promise<number | null> {
   const sessionRef = args.sessionRef?.trim() || ctx.sessionId?.trim();
   if (!sessionRef || args.mentionsRef || args.beforeSeq != null || (args.offset ?? 0) !== 0 || (args.limit ?? 1) <= 0) return null;
+  // #1536: no cursor and no offset now selects the newest page. Even when
+  // total says it is complete, count and fetch are separate queries: a post
+  // between them could make the fetched tail skip earlier unseen messages.
+  if (args.sinceSeq == null && args.offset == null) return null;
   const session = await ownLiveSessionWorker(ctx, sessionRef);
   if (!session) return null;
   const { workerId } = session;
