@@ -3,9 +3,9 @@
  * spec FR-002 — concurrent first-contacts converge on a single row.
  */
 
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
+import { waitForLockWaitersOfType } from '../../test/lockWait.js';
 import { db } from '../../integrations/db/client.js';
-import { Prisma } from '../../generated/prisma/index.js';
 import { cleanDb } from '../../test/helpers.js';
 import { generateId } from '../../lib/id.js';
 import { ensureAgentSubscription } from './ensureAgentSubscription.js';
@@ -72,55 +72,51 @@ describe('ensureAgentSubscription', () => {
   // run the race may not actually fire — these tests guarantee a future
   // refactor can't silently delete or weaken the catch.
 
-  it('treats a P2002 on the (userId, agentId) composite PK as success', async () => {
-    const spy = vi.spyOn(db.agentSubscription, 'upsert').mockRejectedValueOnce(
-      new Prisma.PrismaClientKnownRequestError('Unique constraint failed', {
-        code: 'P2002',
-        clientVersion: '6.19.2',
-        meta: { target: ['userId', 'agentId'] },
-      }),
-    );
-    await expect(ensureAgentSubscription(db, userId, agentId)).resolves.toBeUndefined();
-    spy.mockRestore();
+  // #1581 review (Atilla): startChat now provisions INSIDE its chat
+  // transaction. Under the old upsert-and-catch, the losing concurrent first
+  // contact caught P2002 and its transaction was left aborted (25P02), so
+  // the chat's next statement failed. Staged deterministically: tx A inserts
+  // and holds, tx B's insert blocks on A's uncommitted key, then A commits.
+  it('a concurrent first contact inside a transaction leaves that transaction usable (no 25P02)', async () => {
+    let releaseA!: () => void;
+    const holdA = new Promise<void>((r) => { releaseA = r; });
+    let aInserted!: () => void;
+    const aDone = new Promise<void>((r) => { aInserted = r; });
+    const txA = db.$transaction(async (tx) => {
+      await ensureAgentSubscription(tx, userId, agentId);
+      aInserted();
+      await holdA;
+    }, { timeout: 20_000 });
+    await aDone;
+    const txB = db.$transaction(async (tx) => {
+      await ensureAgentSubscription(tx, userId, agentId);
+      // The statement after the helper must still run: the transaction is live.
+      const [{ ok }] = await tx.$queryRaw<Array<{ ok: number }>>`SELECT 1 AS ok`;
+      return ok;
+    }, { timeout: 20_000 });
+    await waitForLockWaitersOfType(db, 'transactionid', 1);
+    releaseA();
+    await txA;
+    await expect(txB).resolves.toBe(1);
+    expect(await db.agentSubscription.count({ where: { userId, agentId } })).toBe(1);
   });
 
-  it('treats a P2002 with snake_case target on the same composite PK as success', async () => {
-    const spy = vi.spyOn(db.agentSubscription, 'upsert').mockRejectedValueOnce(
-      new Prisma.PrismaClientKnownRequestError('Unique constraint failed', {
-        code: 'P2002',
-        clientVersion: '6.19.2',
-        meta: { target: ['user_id', 'agent_id'] },
-      }),
-    );
-    await expect(ensureAgentSubscription(db, userId, agentId)).resolves.toBeUndefined();
-    spy.mockRestore();
+  // #1581 review: the helper is now one INSERT … ON CONFLICT (user_id,
+  // agent_id) DO NOTHING, so these run against the real database instead of a
+  // mocked upsert, and pin the same contract.
+  it('still raises a foreign-key violation (an unknown user)', async () => {
+    await expect(ensureAgentSubscription(db, 'no-such-user-1581', agentId)).rejects.toBeTruthy();
   });
 
-  it('re-throws non-P2002 Prisma errors (e.g. P2003 FK violation)', async () => {
-    const spy = vi.spyOn(db.agentSubscription, 'upsert').mockRejectedValueOnce(
-      new Prisma.PrismaClientKnownRequestError('Foreign key constraint failed', {
-        code: 'P2003',
-        clientVersion: '6.19.2',
-        meta: { field_name: 'AgentSubscription_userId_fkey' },
-      }),
-    );
-    await expect(ensureAgentSubscription(db, userId, agentId)).rejects.toMatchObject({
-      code: 'P2003',
-    });
-    spy.mockRestore();
-  });
-
-  it('re-throws P2002 from an unrelated unique constraint (defensive against future @unique fields)', async () => {
-    const spy = vi.spyOn(db.agentSubscription, 'upsert').mockRejectedValueOnce(
-      new Prisma.PrismaClientKnownRequestError('Unique constraint failed', {
-        code: 'P2002',
-        clientVersion: '6.19.2',
-        meta: { target: ['stripeSubscriptionId'] },
-      }),
-    );
-    await expect(ensureAgentSubscription(db, userId, agentId)).rejects.toMatchObject({
-      code: 'P2002',
-    });
-    spy.mockRestore();
+  it('still raises a conflict on a DIFFERENT unique constraint (only the composite PK is absorbed)', async () => {
+    const other = await db.user.create({ data: { githubId: 158199, githubUsername: 'other-1581' } });
+    await ensureAgentSubscription(db, userId, agentId);
+    // A stand-in for a future unique field: one subscription per Agent.
+    await db.$executeRawUnsafe('CREATE UNIQUE INDEX tmp_1581_one_sub_per_agent ON agent_subscriptions (agent_id)');
+    try {
+      await expect(ensureAgentSubscription(db, other.id, agentId)).rejects.toBeTruthy();
+    } finally {
+      await db.$executeRawUnsafe('DROP INDEX IF EXISTS tmp_1581_one_sub_per_agent');
+    }
   });
 });

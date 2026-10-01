@@ -26,6 +26,9 @@ import {
 } from '../../../lib/edge-conditions/index.js';
 import { buildPrismaMemoryLayer } from '../../../lib/edge-conditions/prisma-memory-layer.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
+import { AgentNotFoundError, UserNotFoundError } from '../../../lib/entityRef/errors.js';
+import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
+import { appKeyMayActFor, appKeySessionMatchesAgent, canChatWithAgent } from './agentChatAccess.js';
 import { activeAppInstallLicenseIdsForAgent, isAgentInstalledAndLicensed } from '../../../lib/appAgent.js';
 import { GraphQLError } from 'graphql';
 import { type InputJsonValue } from '../../../generated/prisma/runtime/library.js';
@@ -85,7 +88,11 @@ export const chatMutations = {
       },
       ctx: Context,
     ) => {
-      requireRole(ctx, 'READER');
+      // #1581 review (Atilla, Copilot): a pure App key carries no platform
+      // roles. It is authorized by canChatWithAgent's App-install rule below,
+      // not by a role, so the role check applies to user principals only.
+      const pureAppKey = Boolean(ctx.appId && !ctx.userId);
+      if (!pureAppKey) requireRole(ctx, 'READER');
 
       // Spec 017: default per FR-003. The GraphQL schema also defaults
       // scope to `private`; the resolver default is a defensive belt.
@@ -94,23 +101,56 @@ export const chatMutations = {
       // 007-entity-id-or-urn: agentId may be ID, bare URN, or prefixed URN.
       const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentId);
 
+      // #1581: the caller must be able to reach this Agent BEFORE anything is
+      // read from it (its system prompt is returned below) or provisioned for
+      // it. Refused exactly like an unknown Agent, so it discloses nothing.
+      const gateRow = await ctx.db.agent.findUnique({
+        where: { id: resolvedAgentId },
+        select: { id: true, organizationId: true, ownerUserId: true, visibility: true, deletedAt: true },
+      });
+      if (!gateRow || !(await canChatWithAgent(ctx, gateRow))) {
+        throw new AgentNotFoundError(agentId);
+      }
+      // A session-bound App key chats only with its session's Agent: the chat
+      // is hosted in the session's memory (Ada #6070).
+      if (pureAppKey && !(await appKeySessionMatchesAgent(ctx, resolvedAgentId))) {
+        throw new AgentNotFoundError(agentId);
+      }
+
       // Resolve effective user id. The portal calls with userId omitted and
       // we use ctx.userId. The App Key path can pass an externalUserId.
       // Legacy callers with no user get "anonymous".
-      const effectiveUserId = userId ?? ctx.userId ?? 'anonymous';
-
-      // 005-agent-subscription FR-002: auto-provision an AgentSubscription
-      // on the first user-attributed contact for (user, agent). Idempotent.
-      // Skip for the "anonymous" sentinel — there is no User row.
       //
-      // Spec 019: also skip when `isTestRun` is true. AgentSubscription is
-      // the platform's license-grant entity, narrowed in
-      // 2026-05-12-user-installing-app to "user is licensed to interact
-      // with this Agent at all." A side-effect of clicking "Test" once
-      // silently granting that license re-broadens what we narrowed.
-      if (effectiveUserId !== 'anonymous' && !isTestRun) {
-        await ensureAgentSubscription(ctx.db, effectiveUserId, resolvedAgentId);
+      // #1581: only a pure App key acts on behalf of another user. A signed-in
+      // user acts as themselves; naming someone else is refused rather than
+      // provisioning a license onto that person's account.
+      // The acting user. A session-bound App key ALWAYS acts as its session's
+      // user (Chip, #1583 QA): omitting `userId` must not skip the check below
+      // and write an "anonymous" chat into that user's session memory. A
+      // supplied `userId` must equal the session's user.
+      let actingUserId: string | undefined = userId ?? undefined;
+      if (pureAppKey && ctx.sessionId) {
+        const session = await ctx.db.session.findUnique({
+          where: { id: ctx.sessionId },
+          select: { userId: true },
+        });
+        if (session?.userId) {
+          if (userId != null && userId !== session.userId) throw new UserNotFoundError(userId);
+          actingUserId = session.userId;
+        }
       }
+      if (actingUserId != null && actingUserId !== ctx.userId) {
+        if (!pureAppKey) {
+          throw authorizationDenied('Forbidden: only an App key can start a chat on behalf of another user.');
+        }
+        // Ada's ruling (#6055, tightened #6070): an App key acts only for a
+        // live AppMember of THAT App, and a session-bound key only for its
+        // session's own user. Anything else reads as an unknown user.
+        if (!(await appKeyMayActFor(ctx, actingUserId))) {
+          throw new UserNotFoundError(actingUserId);
+        }
+      }
+      const effectiveUserId = actingUserId ?? ctx.userId ?? 'anonymous';
 
       // Load agent with system memory
       const agent = await ctx.db.agent.findUniqueOrThrow({
@@ -506,6 +546,21 @@ export const chatMutations = {
       // the writes are recorded only after it commits.
       const startedNodes: { id: string; loc: string; memoryId: string }[] = [];
       await ctx.db.$transaction(async (tx) => {
+        // 005-agent-subscription FR-002: auto-provision an AgentSubscription
+        // on the first user-attributed contact for (user, agent). Idempotent.
+        // Skip for the "anonymous" sentinel — there is no User row.
+        //
+        // Spec 019: also skip when `isTestRun` is true. AgentSubscription is
+        // the platform's license-grant entity, narrowed in
+        // 2026-05-12-user-installing-app to "user is licensed to interact
+        // with this Agent at all." A side-effect of clicking "Test" once
+        // silently granting that license re-broadens what we narrowed.
+        //
+        // #1581: provisioned in the SAME transaction that creates the chat,
+        // after the Agent gate above, so a chat that fails leaves no license.
+        if (effectiveUserId !== 'anonymous' && !isTestRun) {
+          await ensureAgentSubscription(tx, effectiveUserId, resolvedAgentId);
+        }
         await lockAncestorsForCreateMany(tx, targetMemoryId, [chatLoc, `${chatLoc}:messages`]);
         const chatNodeId = generateId();
         startedNodes.push({ id: chatNodeId, loc: chatLoc, memoryId: targetMemoryId });

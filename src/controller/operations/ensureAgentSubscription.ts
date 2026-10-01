@@ -7,17 +7,15 @@
  * and the MCP session-start tool path). Pure read paths do NOT
  * auto-provision.
  *
- * Idempotency comes from the composite UNIQUE primary key. Prisma's
- * `upsert` is not race-safe under concurrent first-contacts (two
- * transactions can both observe "no row" and both INSERT, with one
- * raising P2002 — see prisma/prisma#3242). Since `update: {}` is a
- * no-op, catching P2002 lands us in exactly the post-condition the
- * function promises: a single row exists for (userId, agentId).
- *
- * The catch is scoped to the composite-PK constraint via `err.meta.target`
- * so that any future unique constraint added to AgentSubscription (e.g.
- * a billing-side `@unique([stripeSubscriptionId])`) does NOT get silently
- * swallowed.
+ * Idempotency comes from the composite PRIMARY KEY: one
+ * `INSERT … ON CONFLICT (user_id, agent_id) DO NOTHING`. It is race-safe
+ * under concurrent first contacts and, unlike the earlier upsert plus a
+ * caught P2002, it never errors inside a caller's transaction (where a
+ * caught P2002 would leave the transaction aborted, 25P02; #1581 review).
+ * The conflict target is the composite PK only, so a future unique
+ * constraint (e.g. a billing-side `stripeSubscriptionId`) still raises
+ * rather than being silently swallowed. An existing row is left untouched:
+ * a REVOKED subscription stays revoked.
  *
  * Forward-warning: when billing lands and activation becomes deferred
  * (activatedAt = null until payment), the race semantics need a fresh
@@ -29,45 +27,19 @@
 import { Prisma, type PrismaClient } from '../../generated/prisma/index.js';
 
 export async function ensureAgentSubscription(
-  db: Pick<PrismaClient, 'agentSubscription'>,
+  db: Pick<PrismaClient, '$executeRaw'> | Prisma.TransactionClient,
   userId: string,
   agentId: string,
 ): Promise<void> {
-  try {
-    await db.agentSubscription.upsert({
-      where: { userId_agentId: { userId, agentId } },
-      create: {
-        userId,
-        agentId,
-        // v1 default: activate immediately on creation since billing is
-        // out of scope. A future spec adding billing introduces a
-        // deferred-activation path (activatedAt = null until payment).
-        activatedAt: new Date(),
-      },
-      update: {},
-    });
-  } catch (err) {
-    if (
-      err instanceof Prisma.PrismaClientKnownRequestError &&
-      err.code === 'P2002' &&
-      isCompositePkViolation(err.meta)
-    ) {
-      return;
-    }
-    throw err;
-  }
-}
-
-function isCompositePkViolation(meta: unknown): boolean {
-  if (!meta || typeof meta !== 'object' || !('target' in meta)) return false;
-  const target = (meta as { target?: unknown }).target;
-  if (!Array.isArray(target) || target.length !== 2) return false;
-  const fields = new Set(target.map(String));
-  // Prisma emits target as field names (camelCase) on @@id; tolerate
-  // snake_case mapping as a hedge — the same composite-PK constraint
-  // can surface either way across Prisma engine versions.
-  return (
-    (fields.has('userId') && fields.has('agentId')) ||
-    (fields.has('user_id') && fields.has('agent_id'))
-  );
+  // #1581 review (Atilla): a single statement that cannot fail on the
+  // composite key, because this now runs INSIDE the caller's transaction
+  // (startChat provisions in the chat transaction). A caught P2002 there
+  // leaves Postgres in "current transaction is aborted" (25P02), so the old
+  // upsert-and-catch idempotency broke the chat. The conflict target is the
+  // composite PK only, so any future unique constraint still raises rather
+  // than being swallowed (the scoping the old catch had).
+  await db.$executeRaw`
+    INSERT INTO agent_subscriptions (user_id, agent_id, activated_at)
+    VALUES (${userId}, ${agentId}, now())
+    ON CONFLICT (user_id, agent_id) DO NOTHING`;
 }
