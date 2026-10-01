@@ -131,8 +131,9 @@ export function describeSyncOutcome(result: {
 }
 
 /**
- * #1568: a file in the repo could not be read (missing or invalid frontmatter)
- * and it sits on the loc of an existing node. Repo-wins cleanup would read
+ * #1568: a file in the repo could not be loaded (missing or invalid frontmatter,
+ * malformed YAML in a node or edge file, a read error) and it sits on the loc
+ * of an existing node. Repo-wins cleanup would read
  * that as "removed from the repo" and hard-delete the node, so the whole sync
  * is refused before anything is written, the same posture #1567 takes for a
  * missing name. An unreadable file with no node at its loc is skipped as
@@ -142,7 +143,7 @@ export class GitSyncUnreadableFileError extends Error {
   constructor(readonly files: ReadonlyArray<UnreadableFile>) {
     const list = files.map((f) => JSON.stringify(f.file)).join(', ');
     super(
-      `Git sync cannot read ${list}: missing or invalid frontmatter. ` +
+      `Git sync cannot read ${list}: the file could not be read or parsed (for example missing or invalid frontmatter, or malformed YAML). ` +
       `${files.length === 1 ? 'It holds an existing node' : 'They hold existing nodes'}, ` +
       'which this sync would otherwise delete. Fix or remove the file; nothing was written.',
     );
@@ -524,9 +525,13 @@ export const syncGraphFromGithub = async (
             loc,
           })),
         ),
-        // #1568: hold the loc of every unreadable file, so a node created
-        // there concurrently cannot slip past the check below.
-        ...unreadable.filter((f) => f.loc !== '').map((f) => ({ memoryId: graph.id, loc: f.loc })),
+        // #1568: hold every unreadable file's loc AND its strict ancestors,
+        // the keys createNode (exact + ancestors), create-parent and move
+        // (ancestors) take, root included. A top-level move takes no key at
+        // all, so the cleanup below also never deletes at these locs.
+        ...unreadable.flatMap((f) =>
+          [...ancestorLocs(f.loc), f.loc].map((loc) => ({ memoryId: graph.id, loc })),
+        ),
       ]);
       // #1568: refuse before any write if an unreadable file sits on a live
       // node, instead of letting repo-wins cleanup hard-delete it.
@@ -1140,6 +1145,13 @@ export const syncGraphFromGithub = async (
         // reported; the rest of the cleanup proceeds. Found and locked BEFORE
         // the edge gate below, so a kept spec's cross-memory edges don't refuse
         // a delete that will not happen.
+        // #1568 (Codex P1 / Copilot on #1575): never delete at an unreadable
+        // file's loc. The refusal above covers rows that existed when it ran;
+        // this covers one a concurrent writer put there afterwards, including
+        // a top-level move that takes no advisory key the sync could hold.
+        const unreadableLocFilter: Prisma.NodeWhereInput = unreadable.length
+          ? { loc: { notIn: unreadable.map((f) => f.loc) } }
+          : {};
         const candidateIds = (await tx.node.findMany({
           where: {
             ownerRepo,
@@ -1153,6 +1165,7 @@ export const syncGraphFromGithub = async (
             ...(deletionFilter.notClauses.length
               ? { NOT: { OR: deletionFilter.notClauses as Prisma.NodeWhereInput[] } }
               : {}),
+            ...unreadableLocFilter,
           },
           select: { id: true },
         })).map((n) => n.id);
@@ -1173,6 +1186,7 @@ export const syncGraphFromGithub = async (
           ...(deletionFilter.notClauses.length
             ? { NOT: { OR: deletionFilter.notClauses as Prisma.NodeWhereInput[] } }
             : {}),
+          ...unreadableLocFilter,
         };
         const crossMemoryEdges = await countCrossMemoryEdgesForNodeDelete(
           tx,
