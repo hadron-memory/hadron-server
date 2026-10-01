@@ -10,7 +10,7 @@ Nodes are stored in PostgreSQL and cloned locally for filesystem operations.
 ## Prerequisites
 
 - Node.js 20+
-- PostgreSQL 15+ (or SQLite for single-developer mode)
+- PostgreSQL 15+ with the pgvector extension
 
 ## Quick start
 
@@ -19,32 +19,11 @@ pnpm install
 cp .env.example .env   # edit DATABASE_URL, JWT_SECRET, HADRON_ENCRYPTION_KEY
 ```
 
-### PostgreSQL (default)
+### PostgreSQL
 
 ```bash
 pnpm run db:push        # push schema to database (first time)
 pnpm run dev            # http://localhost:4000
-```
-
-### SQLite (single-developer / offline)
-
-No external database required — everything lives in a single file.
-
-```bash
-# 1. Switch the Prisma schema to SQLite and regenerate
-pnpm run db:use-sqlite
-
-# 2. Push the schema
-DB_PROVIDER=sqlite DATABASE_URL="file:./hadron.db" pnpm prisma db push
-
-# 3. Start the server
-DB_PROVIDER=sqlite DATABASE_URL="file:./hadron.db" pnpm run dev
-```
-
-To switch back to PostgreSQL:
-
-```bash
-pnpm run db:use-pg
 ```
 
 ### Environment variables
@@ -52,7 +31,7 @@ pnpm run db:use-pg
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `DATABASE_URL` | — | Prisma connection string |
-| `DB_PROVIDER` | `postgresql` | `postgresql` or `sqlite` |
+| `DB_PROVIDER` | `postgresql` | Leave unset. PostgreSQL is the only supported database (see below). |
 | `JWT_SECRET` | — | HS256 signing secret (≥ 32 chars) |
 | `HADRON_ENCRYPTION_KEY` | — | AES-256-GCM key for encrypting secrets at rest (32 bytes, hex) |
 | `GRAPHS_PATH` | `./graphs` | Root directory for cloned graph repos |
@@ -302,19 +281,10 @@ to prevent concurrent writes to the shared test database.
 | `pnpm run db:push` | Push schema to database |
 | `pnpm run db:migrate` | Run Prisma migrations (PostgreSQL) |
 | `pnpm run db:studio` | Open Prisma Studio |
-| `pnpm run db:use-pg` | Switch to PostgreSQL schema |
-| `pnpm run db:use-sqlite` | Switch to SQLite schema |
 | `pnpm run db:test-setup` | Create/update the `hadron_test` database |
 
 ## Database provider adapter
 
-`src/integrations/db/provider.ts` abstracts the differences between the two engines.
-The server reads `DB_PROVIDER` at startup:
+**SQLite is not supported.** PostgreSQL (with pgvector) is the only database the server runs on. The SQLite schema and the `db:use-*` scripts that switched to it were removed in #426, because the schema had fallen far behind (13 models against today's 76) and running either script overwrote the live `prisma/schema.prisma`.
 
-| Feature | PostgreSQL | SQLite |
-|---------|-----------|--------|
-| Tags | `String[]` (native array) | `String` (JSON-serialized) |
-| JSON fields | `Json` type | `String` (JSON-serialized) |
-| Tag filter | Prisma `hasEvery` | `AND` + `contains` on JSON string |
-| Case-insensitive search | `mode: 'insensitive'` | Omitted (SQLite LIKE is already case-insensitive) |
-| Enums | `enum Role / StationType` | `String` with defaults |
+`src/integrations/db/provider.ts` is a vestige of that toggle: it still reads `DB_PROVIDER` at startup and, with the default (unset), passes values through unchanged.
