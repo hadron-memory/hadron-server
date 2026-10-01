@@ -112,6 +112,15 @@ describe('#1565 review — run starters read their own run; foreign runs stay ma
     expect(await getRun(member.id, r.id)).toBe(`Run "${r.id}" not found.`);
   });
 
+  it("another App's key cannot read this App's run (Cody's cross-App-key control)", async () => {
+    // The widened gate admits an App key ONLY for its own App's runs; an
+    // any-key-reads-anything gate must fail here.
+    const otherApp = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'Other', urn: `${org.urn}:other` } });
+    const r = await run({ createdBy: null });
+    const foreignKey = createTestableMcpServer({ appId: otherApp.id, roles: [], clientId: `app:${otherApp.id}` } as AuthContext);
+    expect(await foreignKey.callToolText('hadron_get_run', { ref: r.id })).toBe(`Run "${r.id}" not found.`);
+  });
+
   it("a pure App key reads its own App's run; a user's App SELECTION is not that credential", async () => {
     const r = await run({ createdBy: null });
     const appKey = createTestableMcpServer({ appId: app.id, roles: [], clientId: `app:${app.id}` } as AuthContext);
