@@ -1446,6 +1446,11 @@ export const typeDefs = `#graphql
     spec 037 — loc is the identity. (Was the required 'label'.)
     """
     name: String
+    """
+    Longer gloss carried for API consumers. NOT rendered on agent node reads,
+    whose Related:/Referenced by: lines show the edge name (#721: name is the
+    display label). Put the label you want seen in name (#1057).
+    """
     description: String
     """
     If true, this edge can be executed/run (task automation, conversation

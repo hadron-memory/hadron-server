@@ -1600,6 +1600,54 @@ async function renderNodeReadProjection(
 // MCP Server factory — one McpServer per transport session
 // ---------------------------------------------------------------------------
 
+
+/**
+ * #1057 — the ONE statement of what an edge's `description` is for. `name` is
+ * the label every agent read renders ("Related:" / "Referenced by:" on node
+ * reads, per #721); `description` is carried for API consumers and is NOT
+ * shown there. Undocumented, the field that is called "description" is where
+ * an agent puts the text it wants seen, and it vanishes.
+ */
+export const EDGE_DESCRIPTION_DOC =
+  'Longer gloss carried for API consumers (GraphQL, `hadron edge list --json`). NOT rendered on node reads: '
+  + 'Related:/Referenced by: show the edge `name`, so put the label you want seen in `name`.';
+
+/** The stored fields an edge-update receipt reports. */
+export interface EdgeUpdateReadback {
+  loc: string;
+  name: string | null;
+  description?: string | null;
+  isRunnable?: boolean | null;
+  priority?: number | null;
+  condition?: unknown;
+  data?: unknown;
+}
+
+const clip = (text: string, max = 80): string => (text.length > max ? `${text.slice(0, max - 1)}…` : text);
+
+/**
+ * #1057 — describe what an edge update changed: one entry per field the
+ * caller PASSED (undefined means left alone), each showing the value the
+ * store now holds. Structured fields report set or cleared rather than
+ * their contents.
+ */
+export function describeEdgeUpdate(
+  passed: { name?: unknown; loc?: unknown; description?: unknown; isRunnable?: unknown; priority?: unknown; condition?: unknown; data?: unknown },
+  e: EdgeUpdateReadback,
+): string {
+  const parts: string[] = [];
+  const text = (field: string, value: string | null | undefined) =>
+    parts.push(value == null ? `${field} cleared` : `${field} → "${clip(value)}"`);
+  if (passed.name !== undefined) text('name', e.name);
+  if (passed.loc !== undefined) text('loc', e.loc);
+  if (passed.description !== undefined) text('description', e.description);
+  if (passed.isRunnable !== undefined) parts.push(`isRunnable → ${e.isRunnable ?? false}`);
+  if (passed.priority !== undefined) parts.push(`priority → ${e.priority ?? 'unset'}`);
+  if (passed.condition !== undefined) parts.push(e.condition == null ? 'condition cleared' : 'condition set');
+  if (passed.data !== undefined) parts.push(e.data == null ? 'data cleared' : 'data set');
+  return parts.length ? parts.join('; ') : 'no fields were passed, so nothing changed';
+}
+
 export function createMcpServerInstance(
   auth: AuthContext,
   getSessionId: () => string | undefined,
@@ -5033,7 +5081,7 @@ export function createMcpServerInstance(
         targetUrn: z.string().describe('Target node fully-qualified URN'),
         name: z.string().optional().describe('Relationship name (was "label"), e.g. depends-on, documents'),
         loc: z.string().optional().describe('Explicit edge loc. Omit to derive <sourceLoc>:<name>:<targetLoc>.'),
-        description: z.string().optional().describe('Edge description'),
+        description: z.string().optional().describe(EDGE_DESCRIPTION_DOC),
         isRunnable: z.boolean().optional().describe('Whether this edge can be run/executed (task/conversation flows)'),
       })).optional().describe('Outgoing edges (replaces the full set on the source node)'),
     },
@@ -5601,7 +5649,7 @@ export function createMcpServerInstance(
         targetUrn: z.string().describe('Target node fully-qualified URN'),
         name: z.string().optional().describe('Relationship name (was "label"), e.g. depends-on, documents'),
         loc: z.string().optional().describe('Explicit edge loc. Omit to derive <sourceLoc>:<name>:<targetLoc>.'),
-        description: z.string().optional().describe('Edge description'),
+        description: z.string().optional().describe(EDGE_DESCRIPTION_DOC),
         isRunnable: z.boolean().optional().describe('Whether this edge can be run/executed (task/conversation flows)'),
       })).optional().describe('REPLACES the node\'s ENTIRE outgoing edge set — it does NOT merge. Any existing edge you do not re-supply here is DELETED, silently and without a diff. Unlike every other argument on this tool (omit `content` and content is preserved, omit `tags` and tags are preserved), omitting an edge does not preserve it. To change ONE edge, use hadron_update_edge instead; to add one without touching the others, use hadron_create_edge. If you must use this argument, read the node first and re-supply every edge you want to keep.'),
       reason: z.string().optional().describe('Why this change was made (stored in revision history)'),
@@ -6487,7 +6535,7 @@ export function createMcpServerInstance(
       targetUrn: z.string().describe('Target node, as an ID-shape PK (preferred) OR a fully-qualified URN. The target must already exist; use hadron_create_node first if it does not.'),
       name: z.string().optional().describe('Relationship name (was "label"), e.g. "depends-on", "documents", "supersedes". Optional — loc is the identity.'),
       loc: z.string().optional().describe('Explicit edge loc (its identity + URN suffix hrn:edge:<root>:<memory>:<loc>). Omit to derive <sourceLoc>:<name>:<targetLoc>.'),
-      description: z.string().optional().describe('Human-readable description of the edge.'),
+      description: z.string().optional().describe(EDGE_DESCRIPTION_DOC),
       isRunnable: z.boolean().optional().describe('Whether this edge can be run/executed (task automation, conversation transitions).'),
     },
     async ({ sourceUrn, targetUrn, name, loc, description, isRunnable }) => {
@@ -6519,7 +6567,7 @@ export function createMcpServerInstance(
       edgeRef: z.string().describe('Edge to update, as an ID-shape PK (preferred — immutable) OR a fully-qualified edge URN.'),
       name: z.string().nullable().optional().describe('New relationship name, e.g. "depends-on". Pass null to clear it.'),
       loc: z.string().optional().describe('New edge loc (its identity + URN suffix). Changing this changes the edge URN.'),
-      description: z.string().nullable().optional().describe('New human-readable description. Pass null to clear it.'),
+      description: z.string().nullable().optional().describe(`${EDGE_DESCRIPTION_DOC} Pass null to clear it.`),
       isRunnable: z.boolean().optional().describe('Whether this edge can be run/executed.'),
       priority: z.number().int().optional().describe('Routing priority among sibling edges. Must be an integer.'),
       condition: z.record(z.string(), z.unknown()).nullable().optional().describe('JSONLogic routing condition evaluated when the walker picks an outgoing edge. Pass null to clear it (an unconditional edge).'),
@@ -6535,9 +6583,15 @@ export function createMcpServerInstance(
           { edgeRef, name, loc, description, isRunnable, priority, condition, data },
           objectCtx(),
         );
-        const e = edge as { loc: string; name: string | null; memoryId: string };
+        const e = edge as EdgeUpdateReadback & { memoryId: string };
+        // #1057: echo what changed, read back from the STORED edge, not the
+        // untouched name. A receipt that repeats a field you did not write
+        // makes a correct write read as a no-op, and the next move is a retry.
         return textResult(
-          `Edge updated: ${await edgeUrn(e.loc, e.memoryId)}${e.name ? ` (${e.name})` : ''}`,
+          `Edge updated: ${await edgeUrn(e.loc, e.memoryId)} — ${describeEdgeUpdate(
+            { name, loc, description, isRunnable, priority, condition, data },
+            e,
+          )}`,
         );
       } catch (err) {
         return textResult(String((err as Error)?.message ?? err));
