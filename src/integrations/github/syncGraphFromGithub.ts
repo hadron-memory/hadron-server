@@ -493,6 +493,7 @@ export const syncGraphFromGithub = async (
     // reconciled after commit (the transaction holds the rulebook lock, so it
     // must not wait on other memories' rows).
     let pendingSourceMemories: string[] = [];
+    let correctionCheckCompleted = false;
     for (;;) {
     // Every accumulator restarts with the attempt: a rolled-back attempt
     // wrote nothing, so nothing it reported is true.
@@ -500,6 +501,7 @@ export const syncGraphFromGithub = async (
       acc.length = 0;
     }
     pendingSourceMemories = [];
+    correctionCheckCompleted = false;
     try {
       await db.$transaction(async (tx: Parameters<Parameters<typeof db.$transaction>[0]>[0]) => {
       // Hold every endpoint memory key in one stable order for the ENTIRE
@@ -1235,6 +1237,10 @@ export const syncGraphFromGithub = async (
           await tx.node.deleteMany({ where: cleanupWhere });
         }
       }
+      // A suppressed cleanup cannot prove that an old write-branch import is
+      // absent. Keep the first-sync guard pending until a complete pass checks
+      // it. An explicit Read branch is itself the operator's release action.
+      correctionCheckCompleted = memoryState.readBranch != null || unprotectableSkips.length === 0;
 
       // #1411 review (Andi) — a parked row is settled by its own file (which
       // deletes it from this map) or pruned by the cleanup above. One that
@@ -1463,7 +1469,10 @@ export const syncGraphFromGithub = async (
     // 5. Record sync time and status
     await db.memory.update({
       where: { id: graph.id },
-      data: { lastSyncedAt: new Date(), syncStatus: 'OK', syncError: null, readBranchCorrected: true },
+      data: {
+        lastSyncedAt: new Date(), syncStatus: 'OK', syncError: null,
+        ...(correctionCheckCompleted ? { readBranchCorrected: true } : {}),
+      },
     }).catch(() => {});
 
     // 6. Spec 033 T029 — enqueue embedding for each upserted node now that

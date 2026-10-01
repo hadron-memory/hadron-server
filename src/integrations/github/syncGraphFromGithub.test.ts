@@ -390,6 +390,24 @@ describe('syncGraphFromGithub', () => {
     expect(await db.node.findFirst({ where: { memoryId: dbGraphId, loc: 'ordinary' } })).toBeNull();
   });
 
+  it('keeps the first-sync guard pending when an unusable file suppresses cleanup', async () => {
+    await db.memory.update({ where: { id: dbGraphId }, data: { readBranch: null } });
+    const repoPath = join(mockSources, 'test-org', 'test/repo');
+    mkdirSync(join(repoPath, '.git'), { recursive: true });
+    const adoptedId = generateId();
+    await db.node.create({ data: {
+      id: adoptedId, memoryId: dbGraphId, loc: 'adopted-on-write', name: 'Adopted', ownerRepo: 'test/repo',
+    } });
+    const unusableFile = join(repoPath, 'no-id--> evil.md');
+    writeFileSync(unusableFile, '---\nname: unusable\n---\n# unusable', 'utf-8');
+
+    expect((await syncGraphFromGithub(makeGraph({ readBranch: null }))).error).toBeUndefined();
+    expect((await db.memory.findUniqueOrThrow({ where: { id: dbGraphId } })).readBranchCorrected).toBe(false);
+    rmSync(unusableFile);
+    expect((await syncGraphFromGithub(makeGraph({ readBranch: null }))).error).toContain('GIT_SYNC_REVIEW_REQUIRED');
+    expect(await db.node.findUnique({ where: { id: adoptedId } })).not.toBeNull();
+  });
+
   it('waits for the mirror checkout lock before any Git or filesystem read', async () => {
     await db.memory.update({ where: { id: dbGraphId }, data: { readBranch: null } });
     const external = new Client({ connectionString: process.env.DATABASE_URL });
