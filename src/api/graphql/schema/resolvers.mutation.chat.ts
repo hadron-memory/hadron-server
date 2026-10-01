@@ -28,7 +28,7 @@ import { buildPrismaMemoryLayer } from '../../../lib/edge-conditions/prisma-memo
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { AgentNotFoundError, UserNotFoundError } from '../../../lib/entityRef/errors.js';
 import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
-import { appKeyMayActFor, canChatWithAgent } from './agentChatAccess.js';
+import { appKeyMayActFor, appKeySessionMatchesAgent, canChatWithAgent } from './agentChatAccess.js';
 import { activeAppInstallLicenseIdsForAgent, isAgentInstalledAndLicensed } from '../../../lib/appAgent.js';
 import { GraphQLError } from 'graphql';
 import { type InputJsonValue } from '../../../generated/prisma/runtime/library.js';
@@ -111,6 +111,11 @@ export const chatMutations = {
       if (!gateRow || !(await canChatWithAgent(ctx, gateRow))) {
         throw new AgentNotFoundError(agentId);
       }
+      // A session-bound App key chats only with its session's Agent: the chat
+      // is hosted in the session's memory (Ada #6070).
+      if (pureAppKey && !(await appKeySessionMatchesAgent(ctx, resolvedAgentId))) {
+        throw new AgentNotFoundError(agentId);
+      }
 
       // Resolve effective user id. The portal calls with userId omitted and
       // we use ctx.userId. The App Key path can pass an externalUserId.
@@ -123,10 +128,10 @@ export const chatMutations = {
         if (!pureAppKey) {
           throw authorizationDenied('Forbidden: only an App key can start a chat on behalf of another user.');
         }
-        // Ada's ruling (#6055): an App key acts only for a user with a live
-        // relationship to THAT App (and, when session-bound, only for the
-        // session's own user). Anything else reads as an unknown user.
-        if (!(await appKeyMayActFor(ctx, userId, resolvedAgentId))) {
+        // Ada's ruling (#6055, tightened #6070): an App key acts only for a
+        // live AppMember of THAT App, and a session-bound key only for its
+        // session's own user. Anything else reads as an unknown user.
+        if (!(await appKeyMayActFor(ctx, userId))) {
           throw new UserNotFoundError(userId);
         }
       }

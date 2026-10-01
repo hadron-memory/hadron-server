@@ -8901,10 +8901,11 @@ export const typeDefs = `#graphql
     # an AppMember of an App with a live licensed install; a pure App key: the
     # Agent installed and licensed in its App), or the call fails exactly like
     # an unknown Agent. userId (acting for another user) is accepted only
-    # from a pure App key, and only for a user with a live relationship to
-    # that App (an AppMember, or an active subscription to this Agent); a
-    # session-bound key only for its session's own user. Anything else reads
-    # as an unknown user. A signed-in user acts as themselves. The
+    # from a pure App key, and only for a live AppMember of that App (a
+    # subscription carries no App, so it does not count); a session-bound key
+    # only for its session's own user, never from an anonymous session, and
+    # only with its session's Agent. Anything else reads as an unknown user
+    # or Agent. A signed-in user acts as themselves. The
     # subscription is provisioned in the transaction that creates the chat.
     startChat(agentId: ID!, userId: String, conversationName: String, scope: ChatScope = private, isTestRun: Boolean = false): ChatStartResult!
     """

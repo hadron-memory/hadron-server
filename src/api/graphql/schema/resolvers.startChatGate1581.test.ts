@@ -150,13 +150,13 @@ describe('#1581: startChat gates the Agent before reading or licensing anything'
 // with a live relationship to THAT App, and a session-bound key only for its
 // session's own user; anything else reads as an unknown user.
 describe('#1581: startChat through a pure App key (resolver level)', () => {
-  async function appKeySessionFor(userId: string | null, appId = app.id) {
+  async function appKeySessionFor(userId: string | null, appId = app.id, sessionAgentId = agent.id) {
     const mem = await db.memory.create({ data: {
       id: generateId(), organizationId: orgA.id, urn: `${orgA.urn}:session-${generateId().slice(-8)}`,
       name: 'session memory', class: 'app', appId,
     } });
     const session = await db.session.create({ data: {
-      id: generateId(), appId, userId, agentId: agent.id, memoryId: mem.id, type: 'CHATBOT', startedAt: new Date(),
+      id: generateId(), appId, userId, agentId: sessionAgentId, memoryId: mem.id, type: 'CHATBOT', startedAt: new Date(),
     } as never });
     return { db, appId, sessionId: session.id, roles: [] } as unknown as Context;
   }
@@ -180,6 +180,38 @@ describe('#1581: startChat through a pure App key (resolver level)', () => {
     const ctx = await appKeySessionFor(endUser.id);
     await expect(M.startChat(null, { agentId: agent.id, userId: victim.id }, ctx))
       .rejects.toMatchObject({ name: 'UserNotFoundError' });
+    expect(await subsFor(agent.id)).toEqual([]);
+  });
+
+  it('an App key may not act for a user licensed only through ANOTHER App (a subscription carries no App)', async () => {
+    // appY installs the same Agent; `subUser` holds an active subscription to
+    // the Agent (as if through some other App) but is no member of appY.
+    const appY = await db.app.create({ data: {
+      id: generateId(), name: 'app-y', urn: `${orgA.urn}:app-y`, organizationId: orgA.id,
+      appAgents: { create: { agentId: agent.id } },
+    } });
+    const subUser = await db.user.create({ data: { githubId: 158190, githubUsername: 'sub-1581', roles: ['READER'] } });
+    await db.agentSubscription.create({ data: { userId: subUser.id, agentId: agent.id, activatedAt: new Date() } });
+    const ctx = await appKeySessionFor(subUser.id, appY.id);
+    await expect(M.startChat(null, { agentId: agent.id, userId: subUser.id }, ctx))
+      .rejects.toMatchObject({ name: 'UserNotFoundError' });
+  });
+
+  it('an anonymous session (no user) names nobody, not even an AppMember', async () => {
+    const ctx = await appKeySessionFor(null);
+    await expect(M.startChat(null, { agentId: agent.id, userId: endUser.id }, ctx))
+      .rejects.toMatchObject({ name: 'UserNotFoundError' });
+    expect(await subsFor(agent.id)).toEqual([]);
+  });
+
+  it("a session-bound App key may chat only with its session's Agent", async () => {
+    const otherAgent = await db.agent.create({ data: {
+      id: generateId(), organizationId: orgA.id, urn: `${orgA.urn}:other-agent`, name: 'other', type: 'CHATBOT', surfaces: ['api'],
+    } as never });
+    await db.appAgent.create({ data: { appId: app.id, agentId: otherAgent.id } });
+    const ctx = await appKeySessionFor(endUser.id, app.id, otherAgent.id);
+    await expect(M.startChat(null, { agentId: agent.id, userId: endUser.id }, ctx))
+      .rejects.toMatchObject({ name: 'AgentNotFoundError' });
     expect(await subsFor(agent.id)).toEqual([]);
   });
 

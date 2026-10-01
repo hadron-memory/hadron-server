@@ -1,7 +1,6 @@
 import type { Context } from './resolvers.helpers.js';
 import { isAuthorizationDenial, requireOwnerOrOrgRole } from './resolvers.helpers.js';
 import { activeAppInstallLicenseIdsForAgent, isAgentInstalledAndLicensed } from '../../../lib/appAgent.js';
-import { isActiveAgentSubscription } from '../../../lib/agentSubscription.js';
 
 /** The Agent columns {@link canChatWithAgent} decides from. */
 export interface ChatAgentRow {
@@ -61,16 +60,15 @@ export async function canChatWithAgent(ctx: Context, agent: ChatAgentRow): Promi
 }
 
 /**
- * May a pure App key start a chat on behalf of `userId` (#1581, Ada #6055)?
- * Only for a user with a live relationship to THAT App: an AppMember of it,
- * or a user holding an active subscription to the Agent being chatted with
- * (which `canChatWithAgent` has already required to be installed and
- * licensed in the App). A session-bound key is further confined to its
- * session's own user, so it cannot license user B while writing the chat
- * into user A's session memory. Callers refuse anything else as an unknown
- * user.
+ * May a pure App key start a chat on behalf of `userId` (#1581; Ada #6055,
+ * tightened #6070)? Only for a LIVE AppMember of that very App. An
+ * `AgentSubscription` does not count: it is keyed (user, Agent) with no App,
+ * so a user licensed through App X would otherwise pass App Y's check whenever
+ * Y installs the same Agent. A session-bound key may act only for its
+ * session's own user, and an anonymous session (no user) names nobody.
+ * Callers refuse anything else as an unknown user.
  */
-export async function appKeyMayActFor(ctx: Context, userId: string, agentId: string): Promise<boolean> {
+export async function appKeyMayActFor(ctx: Context, userId: string): Promise<boolean> {
   if (!ctx.appId) return false;
   if (ctx.sessionId) {
     const session = await ctx.db.session.findUnique({
@@ -78,15 +76,26 @@ export async function appKeyMayActFor(ctx: Context, userId: string, agentId: str
       select: { appId: true, userId: true },
     });
     if (!session || session.appId !== ctx.appId) return false;
-    if (session.userId !== null && session.userId !== userId) return false;
+    if (session.userId === null || session.userId !== userId) return false;
   }
   const member = await ctx.db.appMember.findUnique({
     where: { appId_userId: { appId: ctx.appId, userId } },
     select: { userId: true },
   });
-  if (member) return true;
-  const subscription = await ctx.db.agentSubscription.findUnique({
-    where: { userId_agentId: { userId, agentId } },
+  return member !== null;
+}
+
+/**
+ * Is a session-bound pure App key starting a chat with the Agent its session
+ * is bound to (#1581, Atilla; Ada #6070)? `startChat` hosts the chat in the
+ * session's memory, so a key with Agents A and B installed must not put B's
+ * chat into A's session.
+ */
+export async function appKeySessionMatchesAgent(ctx: Context, agentId: string): Promise<boolean> {
+  if (!ctx.appId || !ctx.sessionId) return true;
+  const session = await ctx.db.session.findUnique({
+    where: { id: ctx.sessionId },
+    select: { appId: true, agentId: true },
   });
-  return subscription !== null && isActiveAgentSubscription(subscription);
+  return session !== null && session.appId === ctx.appId && session.agentId === agentId;
 }
