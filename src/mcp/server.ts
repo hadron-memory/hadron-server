@@ -8337,8 +8337,8 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       if (sessions.length === 0) {
         return textResult(
           includeEnded
-            ? 'You have no sessions. Start one with hadron_start_session(workerRef: "<name>") to work as a teammate.'
-            : 'You have no open sessions. Start one with hadron_start_session(workerRef: "<name>"); pass includeEnded to see recent ended ones.',
+            ? 'You have no sessions. Start one with hadron_start_session(description: "<task>", workerRef: "<name>") to work as a teammate.'
+            : 'You have no open sessions. Start one with hadron_start_session(description: "<task>", workerRef: "<name>"); pass includeEnded to see recent ended ones.',
         );
       }
 
@@ -9498,7 +9498,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
         );
         return textResult(
           `${page.items.length} of ${page.total} worker(s):\n${lines.join('\n')}\n\n` +
-            'Work as one with hadron_start_session(workerRef: "<name>") — it returns that worker\'s boot briefing.',
+            'Work as one with hadron_start_session(description: "<task>", workerRef: "<name>") — it returns that worker\'s boot briefing.',
         );
       } catch (e) {
         return textResult(`Error: ${e instanceof Error ? e.message : 'listing workers failed'}`);
