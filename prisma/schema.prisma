@@ -786,6 +786,9 @@ model Memory {
   sourceTokenExpiresAt DateTime?         @map("source_token_expires_at")
   /// Branch to clone/pull from (default: repo default branch).
   readBranch           String?           @map("read_branch")
+  /// #1566: false until one safe sync using the corrected branch commits.
+  /// This is conservative for both existing and newly created memories.
+  readBranchCorrected Boolean           @default(false) @map("read_branch_corrected")
   /// Branch for mutations (default: "hadron-updates").
   writeBranch          String?           @map("write_branch")
   /// 035-visibility-enum-cleanup: nullable, no default. Set only for

@@ -17,14 +17,29 @@ import { waitForLockWaitersOfType } from '../../test/lockWait.js';
 import { buildNodeFrontmatter } from './nodeFrontmatter.js';
 import { pendingEdgeStableTargetKey, reconcilePendingEdgeCount } from '../../lib/pendingEdgePromotion.js';
 import { writeNodeFile } from './writeNodeToGit.js';
+import { withMirrorCheckout } from './gitMirrorCheckout.js';
+import { mirrorCheckoutLockKey } from './mirrorCheckoutLock.js';
+import { Client } from 'pg';
+import * as fsLoader from '../localFs/loadGraphFromFs.js';
 
 // ---------------------------------------------------------------------------
 // Mock child_process.execFile so no actual git commands run
 // ---------------------------------------------------------------------------
+let mockDefaultBranch = 'main';
+let mockLocalBranchExists = true;
 vi.mock('child_process', () => {
   const execFile = vi.fn((...args: unknown[]) => {
+    const argv = (args[1] as string[]);
     const cb = args[args.length - 1] as Function;
-    if (typeof cb === 'function') cb(null, '', '');
+    if (typeof cb !== 'function') return;
+    if (argv.includes('show-ref') && !mockLocalBranchExists) {
+      cb(new Error('reference missing'), '', '');
+      return;
+    }
+    cb(null, {
+      stdout: argv.includes('ls-remote') ? `ref: refs/heads/${mockDefaultBranch}\tHEAD\n` : '',
+      stderr: '',
+    });
   });
   return { execFile };
 });
@@ -67,7 +82,7 @@ function makeGraph(overrides?: Partial<MemoryWithOrg>): MemoryWithOrg {
     urn: 'test-org:test/repo',
     name: 'test/repo',
     source: 'git@github.com:test/repo.git',
-    readBranch: null,
+    readBranch: 'main',
     writeBranch: null,
     visibility: 'ORGANIZATION',
     syncStatus: 'PENDING',
@@ -99,6 +114,8 @@ function makeGraph(overrides?: Partial<MemoryWithOrg>): MemoryWithOrg {
 }
 
 beforeEach(async () => {
+  mockDefaultBranch = 'main';
+  mockLocalBranchExists = true;
   ({ dir: mockSources, cleanup } = makeTmpDir());
   await cleanDb(db);
   // Create org and graph in DB so FK constraints are satisfied
@@ -108,6 +125,7 @@ beforeEach(async () => {
   });
   dbGraphId = graph.id;
   dbOrgId = org.id;
+  await db.memory.update({ where: { id: graph.id }, data: { readBranch: 'main' } });
   // Set githubInstallationId on the org
   await db.organization.update({
     where: { id: org.id },
@@ -236,16 +254,223 @@ describe('syncGraphFromGithub', () => {
     expect(result.error).toBeUndefined();
   });
 
-  it('calls git pull when .git directory already exists', async () => {
+  it('selects the remote default and fast-forwards it when .git already exists', async () => {
+    await db.memory.update({ where: { id: dbGraphId }, data: { readBranch: null } });
     // Pre-create .git directory so it looks like an existing clone
     const repoPath = join(mockSources, 'test-org', 'test/repo');
     mkdirSync(join(repoPath, '.git'), { recursive: true });
 
-    await syncGraphFromGithub(makeGraph());
+    await syncGraphFromGithub(makeGraph({ readBranch: null }));
 
-    const pullCall = (await gitCalls()).find((c) => c.args[0] === 'pull');
-    expect(pullCall).toBeDefined();
-    expect(pullCall!.args).toContain('--ff-only');
+    const calls = (await gitCalls()).map((c) => c.args);
+    expect(calls).toContainEqual(['ls-remote', '--symref', 'origin', 'HEAD']);
+    expect(calls).toContainEqual(['checkout', 'main']);
+    expect(calls).toContainEqual(['merge', '--ff-only', 'origin/main']);
+    expect(calls.some((c) => c[0] === 'pull')).toBe(false);
+  });
+
+  it('selects a custom remote default after a mirror has left the checkout elsewhere', async () => {
+    await db.memory.update({ where: { id: dbGraphId }, data: { readBranch: null } });
+    mockDefaultBranch = 'release/v2';
+    mockLocalBranchExists = false;
+    mkdirSync(join(mockSources, 'test-org', 'test/repo', '.git'), { recursive: true });
+
+    const result = await syncGraphFromGithub(makeGraph({ readBranch: null }));
+
+    expect(result.error).toBeUndefined();
+    const calls = (await gitCalls()).map((c) => c.args);
+    expect(calls).toContainEqual(['checkout', '-b', 'release/v2', 'origin/release/v2']);
+    expect(calls).toContainEqual(['merge', '--ff-only', 'origin/release/v2']);
+  });
+
+  it('reads the default branch after a Hadron mirror checks out the write branch', async () => {
+    mkdirSync(join(mockSources, 'test-org', 'test/repo', '.git'), { recursive: true });
+    await db.memory.update({
+      where: { id: dbGraphId },
+      data: { source: 'git@github.com:test/repo.git', readBranch: null, writeBranch: 'hadron-qa' },
+    });
+
+    expect(await withMirrorCheckout({
+      memoryId: dbGraphId,
+      commitSubject: 'test write',
+      logPrefix: '[test]',
+    }, async () => {})).toBe('no-changes');
+    const result = await syncGraphFromGithub(makeGraph({ readBranch: null, writeBranch: 'hadron-qa' }));
+
+    expect(result.error).toBeUndefined();
+    const calls = (await gitCalls()).map((c) => c.args);
+    const writeCheckout = calls.findIndex((c) => c[0] === 'checkout' && c[1] === 'hadron-qa');
+    const readCheckout = calls.findIndex((c) => c[0] === 'checkout' && c[1] === 'main');
+    expect(writeCheckout).toBeGreaterThan(-1);
+    expect(readCheckout).toBeGreaterThan(writeCheckout);
+    expect(calls).toContainEqual(['merge', '--ff-only', 'origin/main']);
+  });
+
+  it('honors an explicit read branch without querying the remote default', async () => {
+    await db.memory.update({ where: { id: dbGraphId }, data: { readBranch: 'docs' } });
+    mkdirSync(join(mockSources, 'test-org', 'test/repo', '.git'), { recursive: true });
+
+    const result = await syncGraphFromGithub(makeGraph({ readBranch: 'docs' }));
+
+    expect(result.error).toBeUndefined();
+    const calls = (await gitCalls()).map((c) => c.args);
+    expect(calls).toContainEqual(['checkout', 'docs']);
+    expect(calls).toContainEqual(['merge', '--ff-only', 'origin/docs']);
+    expect(calls.some((c) => c[0] === 'ls-remote')).toBe(false);
+  });
+
+  it('fails closed when the remote default cannot be resolved', async () => {
+    await db.memory.update({ where: { id: dbGraphId }, data: { readBranch: null } });
+    mockDefaultBranch = '';
+    mkdirSync(join(mockSources, 'test-org', 'test/repo', '.git'), { recursive: true });
+
+    const result = await syncGraphFromGithub(makeGraph({ readBranch: null }));
+
+    expect(result.error).toContain('could not resolve the remote default branch');
+    const calls = (await gitCalls()).map((c) => c.args);
+    expect(calls.some((c) => c[0] === 'checkout' || c[0] === 'merge')).toBe(false);
+  });
+
+  it('holds nodes adopted by an old write-branch sync until an explicit Read branch is reviewed', async () => {
+    await db.memory.update({ where: { id: dbGraphId }, data: { readBranch: 'hadron-qa' } });
+    const repoPath = join(mockSources, 'test-org', 'test/repo');
+    mkdirSync(join(repoPath, '.git'), { recursive: true });
+    const hadronId = generateId();
+    await db.node.create({
+      data: { id: hadronId, memoryId: dbGraphId, loc: 'hadron-note', name: 'Hadron note' },
+    });
+    const writeOnlyPath = join(repoPath, 'hadron-note');
+    writeNodeFiles(writeOnlyPath, { id: hadronId, name: 'Hadron note' }, 'from Hadron');
+    // Reproduce the persisted state of an earlier wrong-branch sync: the
+    // Hadron-created node was imported from the write branch as repo-owned.
+    expect((await syncGraphFromGithub(makeGraph({ readBranch: 'hadron-qa' }))).error).toBeUndefined();
+    expect((await db.node.findUniqueOrThrow({ where: { id: hadronId } })).ownerRepo).toBe('test/repo');
+
+    rmSync(writeOnlyPath, { recursive: true, force: true });
+    writeNodeFiles(join(repoPath, 'main-change'), { name: 'Main change' }, 'from main');
+    await db.memory.update({ where: { id: dbGraphId }, data: { readBranch: null, readBranchCorrected: false } });
+    const first = await syncGraphFromGithub(makeGraph({ readBranch: null }));
+    expect(first.error).toContain('GIT_SYNC_REVIEW_REQUIRED');
+    expect(first.error).toContain('hadron-note');
+    expect(await db.node.findUnique({ where: { id: hadronId } })).toMatchObject({ deletedAt: null, ownerRepo: 'test/repo' });
+    // The warning aborts the whole sync under cor:int:010:01; no partial
+    // upsert may commit beside a held deletion.
+    expect(await db.node.findFirst({ where: { memoryId: dbGraphId, loc: 'main-change' } })).toBeNull();
+    expect(await db.memory.findUnique({ where: { id: dbGraphId } })).toMatchObject({
+      syncStatus: 'ERROR', syncError: expect.stringContaining('GIT_SYNC_REVIEW_REQUIRED'), readBranchCorrected: false,
+    });
+
+    // A later boot/webhook still cannot prune it without human review.
+    expect((await syncGraphFromGithub(makeGraph({ readBranch: null }))).error).toContain('GIT_SYNC_REVIEW_REQUIRED');
+    expect(await db.node.findUnique({ where: { id: hadronId } })).not.toBeNull();
+    expect(await db.node.findFirst({ where: { memoryId: dbGraphId, loc: 'main-change' } })).toBeNull();
+
+    // Explicit Read branch is the post-review path for normal repo-wins cleanup.
+    await db.memory.update({ where: { id: dbGraphId }, data: { readBranch: 'main' } });
+    expect((await syncGraphFromGithub(makeGraph({ readBranch: 'main' }))).error).toBeUndefined();
+    expect(await db.node.findUnique({ where: { id: hadronId } })).toBeNull();
+    expect(await db.node.findFirst({ where: { memoryId: dbGraphId, loc: 'main-change' } })).not.toBeNull();
+    expect((await db.memory.findUniqueOrThrow({ where: { id: dbGraphId } })).readBranchCorrected).toBe(true);
+  });
+
+  it('marks a clean first corrected sync, then permits later default-branch deletions', async () => {
+    // New and pre-fix rows both begin pending; a clean first sync releases
+    // normal repo-wins cleanup without an operator round-trip.
+    expect((await db.memory.findUniqueOrThrow({ where: { id: dbGraphId } })).readBranchCorrected).toBe(false);
+    await db.memory.update({ where: { id: dbGraphId }, data: { readBranch: null } });
+    const repoPath = join(mockSources, 'test-org', 'test/repo');
+    mkdirSync(join(repoPath, '.git'), { recursive: true });
+    const nodePath = join(repoPath, 'ordinary');
+    writeNodeFiles(nodePath, { name: 'Ordinary' }, 'from main');
+
+    expect((await syncGraphFromGithub(makeGraph({ readBranch: null }))).error).toBeUndefined();
+    expect((await db.memory.findUniqueOrThrow({ where: { id: dbGraphId } })).readBranchCorrected).toBe(true);
+    rmSync(nodePath, { recursive: true, force: true });
+    expect((await syncGraphFromGithub(makeGraph({ readBranch: null }))).error).toBeUndefined();
+    expect(await db.node.findFirst({ where: { memoryId: dbGraphId, loc: 'ordinary' } })).toBeNull();
+  });
+
+  it('keeps the first-sync guard pending when an unusable file suppresses cleanup', async () => {
+    await db.memory.update({ where: { id: dbGraphId }, data: { readBranch: null } });
+    const repoPath = join(mockSources, 'test-org', 'test/repo');
+    mkdirSync(join(repoPath, '.git'), { recursive: true });
+    const adoptedId = generateId();
+    await db.node.create({ data: {
+      id: adoptedId, memoryId: dbGraphId, loc: 'adopted-on-write', name: 'Adopted', ownerRepo: 'test/repo',
+    } });
+    const unusableFile = join(repoPath, 'no-id--> evil.md');
+    writeFileSync(unusableFile, '---\nname: unusable\n---\n# unusable', 'utf-8');
+
+    expect((await syncGraphFromGithub(makeGraph({ readBranch: null }))).error).toBeUndefined();
+    expect((await db.memory.findUniqueOrThrow({ where: { id: dbGraphId } })).readBranchCorrected).toBe(false);
+    rmSync(unusableFile);
+    expect((await syncGraphFromGithub(makeGraph({ readBranch: null }))).error).toContain('GIT_SYNC_REVIEW_REQUIRED');
+    expect(await db.node.findUnique({ where: { id: adoptedId } })).not.toBeNull();
+  });
+
+  it('waits for the mirror checkout lock before any Git or filesystem read', async () => {
+    await db.memory.update({ where: { id: dbGraphId }, data: { readBranch: null } });
+    const external = new Client({ connectionString: process.env.DATABASE_URL });
+    await external.connect();
+    const key = mirrorCheckoutLockKey(dbGraphId);
+    await external.query('SELECT pg_advisory_lock($1::bigint)', [key]);
+    let syncing: ReturnType<typeof syncGraphFromGithub> | undefined;
+    try {
+      syncing = syncGraphFromGithub(makeGraph({ readBranch: null }));
+      await waitForLockWaitersOfType(db, 'advisory', 1, 2_000);
+      expect(await gitCalls()).toHaveLength(0);
+    } finally {
+      await external.query('SELECT pg_advisory_unlock($1::bigint)', [key]);
+      await external.end();
+    }
+    expect((await syncing).error).toBeUndefined();
+    expect((await gitCalls()).some((c) => c.args[0] === 'clone')).toBe(true);
+  }, 15_000);
+
+  it('keeps the checkout lock until filesystem loading completes', async () => {
+    let signalLoadEntered!: () => void;
+    let releaseLoad!: () => void;
+    const loadEntered = new Promise<void>((resolve) => { signalLoadEntered = resolve; });
+    const mayFinishLoad = new Promise<void>((resolve) => { releaseLoad = resolve; });
+    const realLoad = fsLoader.loadGraphFromFs;
+    const loader = vi.spyOn(fsLoader, 'loadGraphFromFs').mockImplementation(async (...args) => {
+      signalLoadEntered();
+      await mayFinishLoad;
+      return realLoad(...args);
+    });
+    let syncing: ReturnType<typeof syncGraphFromGithub> | undefined;
+    const keyBits = BigInt.asUintN(64, BigInt(mirrorCheckoutLockKey(dbGraphId)));
+    const classId = Number(keyBits >> 32n);
+    const objectId = Number(keyBits & 0xffffffffn);
+    try {
+      syncing = syncGraphFromGithub(makeGraph());
+      await loadEntered;
+      const [{ held }] = await db.$queryRaw<Array<{ held: number }>>`
+        SELECT count(*)::int AS held FROM pg_locks
+        WHERE locktype = 'advisory' AND granted AND objsubid = 1
+          AND classid = ${classId}::oid AND objid = ${objectId}::oid
+          AND database = (SELECT oid FROM pg_database WHERE datname = current_database())`;
+      expect(held).toBe(1);
+    } finally {
+      releaseLoad();
+      await Promise.allSettled([syncing]);
+      loader.mockRestore();
+    }
+    expect((await syncing).error).toBeUndefined();
+  }, 15_000);
+
+  it('refuses cleanup when Read branch config changes during sync', async () => {
+    const node = await db.node.create({
+      data: { id: generateId(), memoryId: dbGraphId, loc: 'missing', name: 'Missing', ownerRepo: 'test/repo' },
+    });
+    // The caller fetched `main`, then an admin cleared Read branch before the
+    // transactional fence. The tree loaded under the old config cannot prune.
+    await db.memory.update({ where: { id: dbGraphId }, data: { readBranch: null } });
+
+    const result = await syncGraphFromGithub(makeGraph({ readBranch: 'main' }));
+
+    expect(result.error).toContain('Read branch changed while syncing');
+    expect(await db.node.findUnique({ where: { id: node.id } })).not.toBeNull();
   });
 
   // ── #561: the transport guard reaches the clone ───────────────────────────

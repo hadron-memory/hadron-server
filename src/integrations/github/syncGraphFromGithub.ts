@@ -29,6 +29,7 @@ import { enqueueNodeEmbedding } from '../../services/embedding/enqueue.js';
 import { acquireLockSet, ancestorLocs, lockAncestorsForCreateMany } from '../../lib/nodeSubtreeLock.js';
 import { Prisma, type Memory, type Node, type Organization } from '../../generated/prisma/index.js';
 import { validateGitBranch } from '../../lib/gitRef.js';
+import { withMirrorCheckoutLock } from './mirrorCheckoutLock.js';
 import { lockMemoryForChannelChange } from '../../lib/channels.js';
 import { lockMintedSpecsIn, lockMintedSpecUnmarks } from '../../lib/mintedSpecPermanence.js';
 import { recordUrnRename } from '../../lib/urnAlias.js';
@@ -72,6 +73,18 @@ const MAX_EDGE_ENDPOINT_PREFLIGHT_RETRIES = 3;
 class GitSyncUnsettledParking extends Error {
   constructor(readonly nodeIds: string[]) {
     super(`Git sync parked ${nodeIds.join(', ')} and could not settle them`);
+  }
+}
+
+/** #1566: an old blank-read sync may have adopted write-branch-only nodes. */
+class GitSyncRecoveryReviewRequired extends Error {
+  constructor(locs: string[]) {
+    super(
+      `GIT_SYNC_REVIEW_REQUIRED: ${locs.length} repo-owned node(s) are absent from the default read branch ` +
+      `(${locs.slice(0, 20).join(', ')}${locs.length > 20 ? ', …' : ''}). ` +
+      'No changes were applied. Review these nodes, then set readBranch explicitly to authorize repo-wins cleanup.',
+    );
+    this.name = 'GitSyncRecoveryReviewRequired';
   }
 }
 
@@ -385,10 +398,13 @@ export const syncGraphFromGithub = async (
     const cloneUrl = toHttpsUrl(graph.source, token);
 
     // 2. Clone or pull the repo
-    await gitSync(cloneUrl, localPath, graph.readBranch ?? undefined);
-
-    // 3. Load the graph from the filesystem
-    const { graph: fsGraph, edges, skippedInvalidLoc, unreadable } = await loadGraphFromFs(localPath, graphName, ownerRepo);
+    // Mirror writes use this same checkout. Hold their lock through the read:
+    // otherwise a writer can switch to the write branch between checkout and
+    // loadGraphFromFs, even when the read branch was selected correctly.
+    const { graph: fsGraph, edges, skippedInvalidLoc, unreadable } = await withMirrorCheckoutLock(graph.id, async () => {
+      await gitSync(cloneUrl, localPath, graph.readBranch ?? undefined);
+      return loadGraphFromFs(localPath, graphName, ownerRepo);
+    });
 
     // 4. Upsert all nodes and edges into the database (transactional)
     // Spec 033 T029 — defer embedding enqueue until after the transaction
@@ -477,6 +493,7 @@ export const syncGraphFromGithub = async (
     // reconciled after commit (the transaction holds the rulebook lock, so it
     // must not wait on other memories' rows).
     let pendingSourceMemories: string[] = [];
+    let correctionCheckCompleted = false;
     for (;;) {
     // Every accumulator restarts with the attempt: a rolled-back attempt
     // wrote nothing, so nothing it reported is true.
@@ -484,6 +501,7 @@ export const syncGraphFromGithub = async (
       acc.length = 0;
     }
     pendingSourceMemories = [];
+    correctionCheckCompleted = false;
     try {
       await db.$transaction(async (tx: Parameters<Parameters<typeof db.$transaction>[0]>[0]) => {
       // Hold every endpoint memory key in one stable order for the ENTIRE
@@ -558,8 +576,13 @@ export const syncGraphFromGithub = async (
       // flip the corpus out of draft between this check and the node writes.
       // #1348 uses the same fenced read for the property schema.
       const memoryState = await tx.memory.findUniqueOrThrow({
-        where: { id: graph.id }, select: { urn: true, schema: true, corpusDraft: true },
+        where: { id: graph.id }, select: { urn: true, schema: true, corpusDraft: true, readBranch: true, readBranchCorrected: true },
       });
+      // `graph` was fetched before Git I/O. A branch edit during that window
+      // must not authorize cleanup from a tree fetched under the old config.
+      if (memoryState.readBranch !== graph.readBranch) {
+        throw new Error('Git sync Read branch changed while syncing; retry with the current Memory config.');
+      }
       const memorySchema = memoryState.schema as MemorySchema | null;
 
       // A move that won before these locks were granted invalidates preflight.
@@ -1188,29 +1211,36 @@ export const syncGraphFromGithub = async (
             : {}),
           ...unreadableLocFilter,
         };
-        const crossMemoryEdges = await countCrossMemoryEdgesForNodeDelete(
-          tx,
-          graph.id,
-          cleanupWhere,
-        );
-        if (crossMemoryEdges > 0) {
-          throw new Error(
-            `Git sync cleanup refused: ${crossMemoryEdges} edge(s) bridge nodes selected for hard-delete to another memory. Remove or relocate those edges explicitly first.`,
+        const pruned = await tx.node.findMany({ where: cleanupWhere, select: { id: true, loc: true } });
+        if (memoryState.readBranch == null && !memoryState.readBranchCorrected && pruned.length > 0) {
+          // #1566: old blank-read syncs could ingest the write branch and
+          // adopt Hadron-created nodes as repo-owned. Boot sync runs before an
+          // operator can inspect them. On this memory's FIRST corrected sync,
+          // an absent repo-owned row needs human review. Roll back the WHOLE
+          // transaction (cor:int:010:01); the outer catch records the coded
+          // error. An explicit Read branch is the review/cleanup decision.
+          throw new GitSyncRecoveryReviewRequired(pruned.map((node) => node.loc));
+        } else {
+          const crossMemoryEdges = await countCrossMemoryEdgesForNodeDelete(
+            tx,
+            graph.id,
+            cleanupWhere,
           );
+          if (crossMemoryEdges > 0) {
+            throw new Error(
+              `Git sync cleanup refused: ${crossMemoryEdges} edge(s) bridge nodes selected for hard-delete to another memory. Remove or relocate those edges explicitly first.`,
+            );
+          }
+          // #449 — PendingEdges aimed at the pruned rows: targetId is not a
+          // foreign key, so the row cascade never reaches them.
+          pendingSourceMemories = await deletePendingEdgesTargetingNodes(tx, pruned.map((n) => n.id));
+          await tx.node.deleteMany({ where: cleanupWhere });
         }
-        // #449 — PendingEdges aimed at the pruned rows: targetId is not a
-        // foreign key, so the row cascade never reaches them.
-        const prunedIds = (await tx.node.findMany({ where: cleanupWhere, select: { id: true } })).map((n) => n.id);
-        pendingSourceMemories = await deletePendingEdgesTargetingNodes(tx, prunedIds);
-        await tx.node.deleteMany({
-          // `skippedRowIds` joins the survivors for the same reason
-          // `protectedRowIds` does (#1224): a file skipped for an unusable
-          // path is absent from `fsGraph.nodes`, so `notIn: upsertedIds`
-          // would hard-delete the row it names. Kept minted specs (#1468)
-          // join them too.
-          where: cleanupWhere,
-        });
       }
+      // A suppressed cleanup cannot prove that an old write-branch import is
+      // absent. Keep the first-sync guard pending until a complete pass checks
+      // it. An explicit Read branch is itself the operator's release action.
+      correctionCheckCompleted = memoryState.readBranch != null || unprotectableSkips.length === 0;
 
       // #1411 review (Andi) — a parked row is settled by its own file (which
       // deletes it from this map) or pruned by the cleanup above. One that
@@ -1439,7 +1469,10 @@ export const syncGraphFromGithub = async (
     // 5. Record sync time and status
     await db.memory.update({
       where: { id: graph.id },
-      data: { lastSyncedAt: new Date(), syncStatus: 'OK', syncError: null },
+      data: {
+        lastSyncedAt: new Date(), syncStatus: 'OK', syncError: null,
+        ...(correctionCheckCompleted ? { readBranchCorrected: true } : {}),
+      },
     }).catch(() => {});
 
     // 6. Spec 033 T029 — enqueue embedding for each upserted node now that
@@ -1505,10 +1538,13 @@ async function gitSync(cloneUrl: string, localPath: string, readBranch?: string)
   if (existsSync(join(localPath, '.git'))) {
     // Update remote URL with fresh token before pulling
     await execGit(['remote', 'set-url', 'origin', cloneUrl], { cwd: localPath });
-    if (readBranch) {
-      await execGit(['checkout', readBranch], { cwd: localPath });
-    }
-    await execGit(['pull', '--ff-only'], { cwd: localPath });
+    // A mirror may have left HEAD on the write branch. With no configured
+    // readBranch, resolve the remote's CURRENT default rather than trusting
+    // the checkout (or a possibly stale local origin/HEAD symbolic ref).
+    const branch = readBranch ?? await remoteDefaultBranch(localPath);
+    await execGit(['fetch', 'origin'], { cwd: localPath });
+    await checkoutReadBranch(localPath, branch);
+    await execGit(['merge', '--ff-only', `origin/${branch}`], { cwd: localPath });
   } else {
     mkdirSync(dirname(localPath), { recursive: true });
     const cloneArgs = ['clone'];
@@ -1527,6 +1563,27 @@ async function gitSync(cloneUrl: string, localPath: string, readBranch?: string)
     cloneArgs.push('--', cloneUrl, localPath);
     await execGit(cloneArgs);
   }
+}
+
+async function remoteDefaultBranch(localPath: string): Promise<string> {
+  const { stdout } = await execGit(['ls-remote', '--symref', 'origin', 'HEAD'], { cwd: localPath });
+  const match = stdout.match(/^ref: refs\/heads\/([^\t\r\n]+)\tHEAD\r?$/m);
+  if (!match) throw new Error('Git sync could not resolve the remote default branch; set readBranch explicitly.');
+  validateGitBranch(match[1], 'remote default branch');
+  return match[1];
+}
+
+async function checkoutReadBranch(localPath: string, branch: string): Promise<void> {
+  let localExists = true;
+  try {
+    await execGit(['show-ref', '--verify', '--quiet', `refs/heads/${branch}`], { cwd: localPath });
+  } catch {
+    localExists = false;
+  }
+  // A failed checkout (dirty tree, lock, etc.) must not be misread as a
+  // missing local ref and retried as `checkout -b`.
+  if (localExists) await execGit(['checkout', branch], { cwd: localPath });
+  else await execGit(['checkout', '-b', branch, `origin/${branch}`], { cwd: localPath });
 }
 
 function extractOwnerRepo(gitUrl: string): string {
