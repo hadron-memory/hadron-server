@@ -181,6 +181,84 @@ describe('family 1 — bounded multi-page scanning and partial-count retention',
   });
 });
 
+// #1365 acceptance: the bounded scan must never suppress a mention-only
+// Worker's nudge whose ONLY relevant mention lies beyond the first page, for
+// several Workers sharing one encrypted Channel, across a restart after partial
+// work. `lastRelevantSeq` is the nudge signal; counts must be exact on the
+// final page and the Worker's own post excluded.
+describe('family 1b — #1365: a mention-only nudge beyond the scan bound', () => {
+  async function addMentionOnlyDaraAndMira() {
+    await db.registerEntry.updateMany({
+      where: { appId: app.id, channelId: channel.id, attendeeWorkerId: worker.id },
+      data: { mentionOnly: true },
+    });
+    const mira = await db.worker.create({ data: { id: generateId(), appId: app.id, agentId: agent.id, name: 'Mira', slug: 'mira' } });
+    await db.registerEntry.create({
+      data: { id: generateId(), appId: app.id, channelId: channel.id, attendeeWorkerId: mira.id, role: 'BOTH' },
+    });
+    await db.session.create({
+      data: { id: generateId(), appId: app.id, userId: user.id, workerId: mira.id, agentId: agent.id, type: 'DEVELOPER', startedAt: new Date() },
+    });
+    return mira;
+  }
+
+  /** Seven messages; Dara's own self-mention at seq 6, the only other mention of Dara at seq 7. */
+  async function postLateMentionBacklog() {
+    for (let i = 0; i < 5; i++) await post(`filler ${i}`);
+    await post('@dara by Dara herself', { mentions: ['dara'], authorWorkerId: worker.id });
+    await post('@dara the only relevant mention', { mentions: ['dara'] });
+  }
+
+  it('surfaces the mention-only Worker whose only mention is past the first page, with exact counts for both Workers', async () => {
+    const mira = await addMentionOnlyDaraAndMira();
+    await postLateMentionBacklog();
+    const first = await teamAttentionPage(userCtx(), app.id, { scanLimit: 2 });
+    expect(first.scanComplete).toBe(false);
+    // The mention is not on the first page, and nothing half-scanned is emitted.
+    expect(first.items.filter((i) => i.worker === worker.id)).toHaveLength(0);
+
+    const drained = await drainPages({}, { scanLimit: 2 });
+    const dara = drained.items.filter((i) => i.worker === worker.id);
+    expect(dara).toHaveLength(1);
+    // Own post (seq 6) excluded: 6 unread, 1 relevant mention at seq 7.
+    expect(dara[0]).toMatchObject({ unread: 6, unreadMentions: 1, lastRelevantSeq: 7, lastSeq: 7 });
+    const miraItems = drained.items.filter((i) => i.worker === mira.id);
+    expect(miraItems).toHaveLength(1);
+    expect(miraItems[0]).toMatchObject({ unread: 7, unreadMentions: 0, lastSeq: 7 });
+    expect(drained.adoptableSince).toBeTruthy();
+  });
+
+  it('keeps the late mention across a restart after partial work (a lost continuation redelivers, never loses)', async () => {
+    await addMentionOnlyDaraAndMira();
+    await postLateMentionBacklog();
+    // Partial work: two pages, then the router loses the continuation.
+    const p1 = await teamAttentionPage(userCtx(), app.id, { scanLimit: 2 });
+    const p2 = await teamAttentionPage(userCtx(), app.id, { page: p1.nextPage, scanLimit: 2 });
+    expect(p2.scanComplete).toBe(false);
+    const restarted = await drainPages({}, { scanLimit: 2 });
+    expect(restarted.items.find((i) => i.worker === worker.id))
+      .toMatchObject({ unreadMentions: 1, lastRelevantSeq: 7 });
+    // Resuming the ORIGINAL continuation instead also reaches it.
+    const resumed: Item[] = [];
+    let page: string | null = p2.nextPage;
+    for (let n = 0; page && n < 20; n++) {
+      const r = await teamAttentionPage(userCtx(), app.id, { page, scanLimit: 2 });
+      resumed.push(...r.items);
+      page = r.scanComplete ? null : r.nextPage;
+    }
+    expect(resumed.find((i) => i.worker === worker.id)).toMatchObject({ unreadMentions: 1, lastRelevantSeq: 7 });
+  });
+
+  it('CONTROL: without a mention a mention-only Worker carries no relevance, however long the backlog', async () => {
+    await addMentionOnlyDaraAndMira();
+    for (let i = 0; i < 7; i++) await post(`filler ${i}`);
+    const drained = await drainPages({}, { scanLimit: 2 });
+    const dara = drained.items.find((i) => i.worker === worker.id);
+    expect(dara?.lastRelevantSeq ?? null).toBeNull();
+    expect(dara?.unreadMentions ?? 0).toBe(0);
+  });
+});
+
 describe('family 2 — budgets, round-robin and fairness', () => {
   it('bounds decrypted rows per request across a single large encrypted channel', async () => {
     for (let i = 0; i < 9; i++) await post(`m${i}`);
