@@ -11,7 +11,7 @@ import {
   type WebPollCondition,
 } from '../../webfetchClient.js';
 import { loadWebFetchAuthSecret } from '../secrets.js';
-import { isSecretOwnerType, type SecretOwnerType } from '../../secrets.js';
+import { isSecretOwnerType, SECRET_OWNER_TYPES, SECRET_SCOPE_ORDER, type SecretOwnerType } from '../../secrets.js';
 import { redactUrl } from '../../webUrl.js';
 import type { RunToolDef } from './types.js';
 import { coerceHeaders } from './webTools.js';
@@ -55,8 +55,9 @@ export const webPollStart: RunToolDef = {
   description:
     'Start a durable GET-only watch on an http(s) URL. The sidecar evaluates the supplied HTML/JSON ' +
     'conditions until they trigger or the mandatory TTL expires. Use credentialName to inject a ' +
-    'webfetch-auth secret whose urlPrefix covers this URL — it resolves server-side (memory, app, ' +
-    'user, org cascade) and the value never enters your context; never put secrets in headers or arguments.',
+    'webfetch-auth secret whose urlPrefix covers this URL — it resolves server-side ' +
+    `(${SECRET_SCOPE_ORDER.join(', then ')} cascade) and the value never enters your context; ` +
+    'never put secrets in headers or arguments.',
   inputSchema: {
     type: 'object',
     properties: {
@@ -82,8 +83,13 @@ export const webPollStart: RunToolDef = {
       },
       credentialScope: {
         type: 'string',
-        enum: ['memory', 'app', 'user', 'org'],
-        description: 'Optional: resolve credentialName at exactly this scope instead of the cascade.',
+        // #1564: derived from the secret store's own owner list, so the
+        // advertised scopes can never drift from what it accepts again (the
+        // app/memory owners were removed by #696 and kept being offered here).
+        enum: [...SECRET_OWNER_TYPES],
+        description:
+          'Optional: resolve credentialName at exactly this scope instead of the cascade ' +
+          `(user, then org). One of: ${SECRET_OWNER_TYPES.join(', ')}.`,
       },
       headers: {
         type: 'object',
@@ -115,7 +121,7 @@ export const webPollStart: RunToolDef = {
     let credentialScope: SecretOwnerType | undefined;
     if (args.credentialScope != null) {
       if (!isSecretOwnerType(args.credentialScope)) {
-        throw new Error('web_poll_start: "credentialScope" must be one of memory, app, user, org.');
+        throw new Error(`web_poll_start: "credentialScope" must be one of ${SECRET_OWNER_TYPES.join(', ')}.`);
       }
       credentialScope = args.credentialScope;
     }

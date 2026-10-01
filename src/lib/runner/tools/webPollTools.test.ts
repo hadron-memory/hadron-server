@@ -15,6 +15,7 @@ import { encryptToken } from '../../tokenCrypto.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { cancelPoll, createPoll, listPolls } from '../../webfetchClient.js';
 import { resolveRunTools, webPollCancel, webPollList, webPollStart } from './index.js';
+import { SECRET_OWNER_TYPES } from '../../secrets.js';
 import type { RunToolContext } from './types.js';
 
 async function seedContext(): Promise<{ ctx: RunToolContext; credentialName: string; secretId: string }> {
@@ -244,5 +245,33 @@ describe('web poll run tools', () => {
 
     await webPollList.execute(ctx, {});
     expect(listPolls).toHaveBeenCalledWith(ctx.run.organizationId);
+  });
+});
+
+describe('#1564 — web_poll_start advertises only the secret scopes the store accepts', () => {
+  it('the registered credentialScope enum is exactly the secret owner types (no app or memory)', () => {
+    const props = (webPollStart.inputSchema as { properties: Record<string, { enum?: string[]; description?: string }> }).properties;
+    expect(props.credentialScope.enum).toEqual([...SECRET_OWNER_TYPES]);
+    expect(props.credentialScope.enum).not.toContain('app');
+    expect(props.credentialScope.enum).not.toContain('memory');
+    expect(props.credentialScope.description).not.toMatch(/\b(app|memory)\b/);
+  });
+
+  it('the tool-level description names the same cascade and no removed owner (Gene P2)', () => {
+    // The whole advertised surface is pinned, not just the property: the
+    // description is what every model listing tools reads first.
+    expect(webPollStart.description).toMatch(/user, then org cascade/);
+    expect(webPollStart.description).not.toMatch(/\b(app|memory)\b/);
+  });
+
+  it('a removed scope is refused with an error naming exactly the accepted owners', async () => {
+    await expect(webPollStart.execute({} as never, {
+      url: 'https://api.example.test/v1/orders',
+      conditions: [{ id: 'x', type: 'content_changed' }],
+      intervalSeconds: 60,
+      ttlSeconds: 3600,
+      credentialName: 'watch-auth',
+      credentialScope: 'app',
+    })).rejects.toThrow(`"credentialScope" must be one of ${SECRET_OWNER_TYPES.join(', ')}.`);
   });
 });
