@@ -22,6 +22,7 @@ import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import { createTestableMcpServer } from './server.js';
 import type { AuthContext } from '../middleware/auth.js';
 import { generateId } from '../lib/id.js';
+import { deriveEdgeLoc } from '../lib/edgeLoc.js';
 import { canReadMemory, canWriteToMemory, EXPLICIT_REF, filterReadableMemoryIds } from './access-control.js';
 
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({
@@ -93,6 +94,27 @@ describe.each(['personal', 'private'] as const)('#1503 (c): own %s memory in App
 
     await mcp.callToolText('hadron_replace_text', { oldText: 'dog', newText: 'cow', nodeUrns: [urn], fields: ['content'] });
     expect(await content(node.id)).toBe('cow sentinel');
+  });
+
+  it('an inferred run dependency stays with the selected App: run_action under App B does not inline the App-A memory (Anne P1)', async () => {
+    const { node: target, urn: targetUrn } = await ownedAppAMemory(memoryClass);
+    // An org-readable runnable node whose edge points at the owner's App-A memory.
+    const ownerCtx: Context = { db, userId: owner.id, roles: ['READER'] };
+    const open = await resolvers.Mutation.createMemory(null, { orgId: org.id, name: `open-${memoryClass}-1503` } as never, ownerCtx);
+    const runner = await db.node.create({ data: {
+      id: generateId(), memoryId: open.id, loc: 'tasks:run-me', name: 'Run me', nodeType: 'info',
+      content: 'the runnable body', isRunnable: true, tags: [],
+    } });
+    await db.edge.create({ data: {
+      id: generateId(), memoryId: open.id, sourceId: runner.id, targetId: target.id,
+      loc: deriveEdgeLoc(runner.loc, 'depends-on', 'sentinel'), name: 'depends-on',
+    } });
+    const underB = createTestableMcpServer(userSelecting(owner.id, appB.id));
+    const ran = await underB.callToolText('hadron_run_action', { urn: `hrn:node:${open.urn}:tasks:run-me` });
+    expect(ran).toContain('the runnable body');
+    expect(ran).not.toContain('cat sentinel');
+    // Positive control: naming the App-A node explicitly still works under App B.
+    expect(await underB.callToolText('hadron_get_node', { urn: targetUrn })).toContain('cat sentinel');
   });
 
   it('a listing stays with the selected App: hadron_list_memories under App B omits it, under App A shows it', async () => {
