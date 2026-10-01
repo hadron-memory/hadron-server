@@ -571,11 +571,24 @@ export const chatMutations = {
               where: { id: resolvedAgentId },
               select: { id: true, organizationId: true, ownerUserId: true, visibility: true, deletedAt: true },
             });
+            // Chip (#1585 QA): read the carrier Apps ONCE. Prove each is
+            // anchored, then admit only from that same set. Two separate
+            // reads let a carrier admit the gate, be deleted unanchored, and
+            // vanish from the second read.
+            const carriers = await chatCarrierApps(txCtx, resolvedAgentId);
+            for (const app of carriers) {
+              const needed = [
+                `app:${app.id}`,
+                ...(app.organizationId ? [`org:${app.organizationId}`] : []),
+                ...(app.ownerUserId ? [`user:${app.ownerUserId}`] : []),
+              ];
+              if (needed.some((key) => !anchored.has(key))) throw new ChatAuthorityScopeChanged();
+            }
             if (
               !current ||
               current.organizationId !== gateRow.organizationId ||
               current.ownerUserId !== gateRow.ownerUserId ||
-              !(await canChatWithAgent(txCtx, current))
+              !(await canChatWithAgent(txCtx, current, { carriers }))
             ) {
               throw new AgentNotFoundError(agentId);
             }
@@ -584,14 +597,6 @@ export const chatMutations = {
             }
             if (actingUserId != null && actingUserId !== ctx.userId && !(await appKeyMayActFor(txCtx, actingUserId))) {
               throw new UserNotFoundError(actingUserId);
-            }
-            for (const app of await chatCarrierApps(txCtx, resolvedAgentId)) {
-              const needed = [
-                `app:${app.id}`,
-                ...(app.organizationId ? [`org:${app.organizationId}`] : []),
-                ...(app.ownerUserId ? [`user:${app.ownerUserId}`] : []),
-              ];
-              if (needed.some((key) => !anchored.has(key))) throw new ChatAuthorityScopeChanged();
             }
           }, async (tx) => {
             // 005-agent-subscription FR-002: auto-provision an AgentSubscription

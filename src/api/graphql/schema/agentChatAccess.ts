@@ -65,14 +65,20 @@ export async function chatCarrierApps(
  *   members reach it (`chatCarrierApps`, shared with the anchor selection).
  *
  * Anything else, including an anonymous caller and a soft-deleted Agent, is
- * refused. Callers answer a refusal exactly as an unknown Agent, so it
+ * refused. `opts.carriers` lets a caller decide from a carrier set it has
+ * already read and verified (startChat's anchored transaction, #1585), so the
+ * admission and the anchor-coverage proof come from ONE read. Callers answer a refusal exactly as an unknown Agent, so it
  * discloses nothing.
  */
-export async function canChatWithAgent(ctx: Context, agent: ChatAgentRow): Promise<boolean> {
+export async function canChatWithAgent(
+  ctx: Context,
+  agent: ChatAgentRow,
+  opts: { carriers?: ReadonlyArray<{ id: string }> } = {},
+): Promise<boolean> {
   if (agent.deletedAt) return false;
 
   if (ctx.appId && !ctx.userId) {
-    return (await chatCarrierApps(ctx, agent.id)).length > 0;
+    return (opts.carriers ?? await chatCarrierApps(ctx, agent.id)).length > 0;
   }
   if (!ctx.userId) return false;
 
@@ -87,7 +93,7 @@ export async function canChatWithAgent(ctx: Context, agent: ChatAgentRow): Promi
     }
   }
 
-  return (await chatCarrierApps(ctx, agent.id)).length > 0;
+  return (opts.carriers ?? await chatCarrierApps(ctx, agent.id)).length > 0;
 }
 
 /**

@@ -19,6 +19,7 @@ import { cleanDb } from '../../../test/helpers.js';
 import { resolvers, type Context } from './resolvers.js';
 import { generateId } from '../../../lib/id.js';
 import { canChatWithAgent } from './agentChatAccess.js';
+import { readFileSync } from 'node:fs';
 import { lockAuthorityAnchors } from '../../../lib/auth/authorityAnchors.js';
 import { waitForLockWaitersOfType } from '../../../test/lockWait.js';
 
@@ -470,5 +471,27 @@ describe('#1573: startChat waits for an in-flight revocation of its read right',
     }
     await expect(chat).rejects.toMatchObject({ name: 'AgentNotFoundError' });
     expect(await subsFor(agent.id)).toEqual([]);
+  });
+});
+
+// Chip (#1585 QA at 861b6504): the gate and the anchor-coverage proof read the
+// carrier Apps separately, so a carrier could admit the gate, be deleted
+// unanchored, and vanish from the coverage read. They now share ONE read: the
+// in-transaction gate admits only from the carrier set it just proved
+// anchored. Pinned at both ends.
+describe('#1585 review: admission and anchor coverage come from one carrier read', () => {
+  it('canChatWithAgent admits only from the carrier set it is given, never a fresh read', async () => {
+    // endUser is an AppMember of a live, licensed App: a fresh read admits.
+    expect(await canChatWithAgent(userCtx(endUser.id), agent)).toBe(true);
+    // Handed an empty verified set, it must not go and find that App itself.
+    expect(await canChatWithAgent(userCtx(endUser.id), agent, { carriers: [] })).toBe(false);
+  });
+
+  it('startChat\'s in-transaction gate passes its verified carrier set to canChatWithAgent', () => {
+    const src = readFileSync('src/api/graphql/schema/resolvers.mutation.chat.ts', 'utf8');
+    const start = src.indexOf('await withAuthorizedTx(ctx, chatAnchors, async (txCtx) => {');
+    const gate = src.slice(start, src.indexOf('}, async (tx) => {', start));
+    expect(gate.match(/chatCarrierApps\(/g)).toHaveLength(1);
+    expect(gate).toContain('canChatWithAgent(txCtx, current, { carriers })');
   });
 });
