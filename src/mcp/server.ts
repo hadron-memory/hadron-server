@@ -418,6 +418,37 @@ export function mcpDoorCanReplay(
   return true;
 }
 
+
+/** Cap on any one JSON field hadron_get_run renders, so a large envelope or trail cannot blow the MCP result ceiling (#1041). */
+const RUN_FIELD_RENDER_CAP = 20_000;
+
+/** Render one JSON field for hadron_get_run, capped with an honest truncation note. */
+function renderRunJson(label: string, value: unknown): string {
+  if (value === null || value === undefined) return `${label}: (none)`;
+  const text = JSON.stringify(value, null, 2);
+  if (text.length <= RUN_FIELD_RENDER_CAP) return `${label}:\n${text}`;
+  return `${label} (truncated to ${RUN_FIELD_RENDER_CAP} of ${text.length} characters; read it in full via GraphQL appRun(ref:)):\n${text.slice(0, RUN_FIELD_RENDER_CAP)}`;
+}
+
+/** #1561 — the plain-text view of an AppRun row that hadron_get_run returns. */
+function renderAppRun(run: Record<string, unknown>): string {
+  const iso = (v: unknown) => (v instanceof Date ? v.toISOString() : v ?? '—');
+  const hops = Array.isArray(run.hops) ? run.hops : null;
+  const lines = [
+    `Run ${run.id}${run.urn ? ` (${run.urn})` : ''}`,
+    `Status: ${run.status}`,
+    `Entry: ${run.entryNodeUrn}`,
+    `Current node: ${run.curNodeUrn ?? '—'}`,
+    `Trigger: ${run.triggerKind}${run.parentRunId ? ` · spawned by run ${run.parentRunId}` : ''}`,
+    `Started: ${iso(run.startedAt)} · Finished: ${iso(run.finishedAt)} · Attempts: ${run.attempts ?? 0}`,
+    `Spent: ${run.tokensSpent ?? 0} tokens of ${run.budgetTokens ?? '—'} · ${run.actionsSpent ?? 0} actions of ${run.budgetActions ?? '—'}`,
+    renderRunJson('Failure', run.failure),
+    renderRunJson('Data (run envelope)', run.data),
+    renderRunJson(`Hops${hops ? ` (${hops.length} completed)` : ''}`, run.hops),
+  ];
+  return lines.join('\n');
+}
+
 export function createTestableMcpServer(
   auth: AuthContext,
   opts?: {
@@ -7740,6 +7771,39 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
 
   // ── hadron_run_task ─────────────────────────────────────────────────────────────
 
+  // ── hadron_get_run ──────────────────────────────────────────────────────────
+
+  /**
+   * #1561 — read an app run: the counterpart of hadron_run_task, which starts
+   * one and replies with its id. Delegates to GraphQL `appRun(ref:)`
+   * (findings:node-write-surface-invariants: MCP tools delegate, never
+   * re-implement), so the gate is exactly that resolver's: platform admin, or
+   * READER in the run's organization. A denial reads as not found, the same
+   * answer as a missing run, so the tool is no existence oracle.
+   */
+  server.tool(
+    'hadron_get_run',
+    "Read an app run you started (or may read): its status, where it is or stopped (curNodeUrn), why it failed (failure), what it extracted (data, the run envelope) and the path it walked (hops: one entry per completed hop, with the edge it took). Pass the run id or hrn:apprun URN that hadron_run_task printed. Gated like appRun: you need READ on the run's organization; a run you cannot read answers 'not found', the same as one that does not exist. Read-only.",
+    {
+      ref: z.string().describe('The run: its id, or its hrn:apprun:<root>:<app>:<run-id> URN (hadron_run_task prints the id).'),
+    },
+    async ({ ref }) => {
+      if (!auth.userId && !auth.appId) return textResult('Not authenticated.');
+      const runRef = typeof ref === 'string' ? ref.trim() : '';
+      if (!runRef) return textResult('Pass the run id or hrn:apprun URN that hadron_run_task printed.');
+      let run: Record<string, unknown> | null;
+      try {
+        run = (await resolvers.Query.appRun({}, { ref: runRef }, chatCtx())) as Record<string, unknown> | null;
+      } catch (e) {
+        // A denied read is indistinguishable from a missing run (no oracle).
+        if (/^(Forbidden|Unauthenticated)/.test((e as Error)?.message ?? '')) run = null;
+        else throw e;
+      }
+      if (!run) return textResult(`Run "${runRef}" not found.`);
+      return textResult(renderAppRun(run));
+    },
+  );
+
   server.tool(
     'hadron_run_task',
     "Run a task — a runnable node (isRunnable=true) — by loose name, without a fully-qualified URN. Give `task` (and optionally `memory`); the server resolves both against what you can read and runs the match. When a name is ambiguous or omitted you get a list to choose from (an interactive picker where the client supports it, otherwise a numbered list to re-invoke with `urn`). Pass a fully-qualified `urn` to skip resolution and run directly. By DEFAULT this RENDERS the task — returns the assembled instructions ({{arg}} substitution + inlined dependencies) for YOU to execute. Pass `appRef` to EXECUTE server-side instead (#529): the server mints a MANUAL app run and returns the run id to poll. Spec cor:api:060.",
@@ -7819,7 +7883,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
               ctx,
             );
             return textResult(
-              `Run started: ${runId}\nPoll its status/output via the app-run surface (appRun(ref: "${runId}")).`,
+              `Run started: ${runId}\nRead its status, output and path with hadron_get_run(ref: "${runId}").`,
             );
           } catch (err) {
             return textResult(`Could not start run: ${(err as Error).message}`);
