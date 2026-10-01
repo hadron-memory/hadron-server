@@ -10,7 +10,7 @@ Nodes are stored in PostgreSQL and cloned locally for filesystem operations.
 ## Prerequisites
 
 - Node.js 20+
-- PostgreSQL 15+ (or SQLite for single-developer mode)
+- PostgreSQL 15+ with the pgvector extension
 
 ## Quick start
 
@@ -287,12 +287,4 @@ to prevent concurrent writes to the shared test database.
 
 **SQLite is not supported.** PostgreSQL (with pgvector) is the only database the server runs on. The SQLite schema and the `db:use-*` scripts that switched to it were removed in #426, because the schema had fallen far behind (13 models against today's 76) and running either script overwrote the live `prisma/schema.prisma`.
 
-`src/integrations/db/provider.ts` is a vestige of that toggle: it still reads `DB_PROVIDER` at startup, and with the default it is a pass-through. It used to abstract these differences between the two engines:
-
-| Feature | PostgreSQL | SQLite |
-|---------|-----------|--------|
-| Tags | `String[]` (native array) | `String` (JSON-serialized) |
-| JSON fields | `Json` type | `String` (JSON-serialized) |
-| Tag filter | Prisma `hasEvery` | `AND` + `contains` on JSON string |
-| Case-insensitive search | `mode: 'insensitive'` | Omitted (SQLite LIKE is already case-insensitive) |
-| Enums | `enum Role / StationType` | `String` with defaults |
+`src/integrations/db/provider.ts` is a vestige of that toggle: it still reads `DB_PROVIDER` at startup and, with the default (unset), passes values through unchanged.

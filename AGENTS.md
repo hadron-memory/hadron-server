@@ -188,9 +188,10 @@ two-layer model without further setup:
 
 ## Where things live
 
-- **Schema**: `prisma/schema.prisma` (Postgres). The other two `.prisma`
-  files are stale leftovers from a Postgres/SQLite toggle that's no longer
-  maintained.
+- **Schema**: `prisma/schema.prisma` (Postgres, the only supported
+  database). The old SQLite/Postgres toggle's alternate schemas and
+  `db:use-*` scripts were removed in #426; `src/integrations/db/provider.ts`
+  is the toggle's remaining vestige (a pass-through unless `DB_PROVIDER` is set).
 - **Migrations**: `prisma/migrations/<timestamp>_<name>/migration.sql`.
   Hand-edited where Prisma's generator can't express what's needed (the 005
   + 008 migrations both have hand-crafted SQL). The migration directory's
