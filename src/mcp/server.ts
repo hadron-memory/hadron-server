@@ -2073,6 +2073,11 @@ export function createMcpServerInstance(
    * - **It cannot revive the dead.** Guarded on `endedAt: null`, so a heartbeat
    *   racing `endSession` or the reaper updates zero rows rather than
    *   resurrecting a closed session — and never clears `autoExpiredAt`.
+   * - **It cannot revive the lapsed either (#1543).** It touches only a session
+   *   `isSessionLive` still holds for. An open session nobody drove inside its
+   *   idle window is left as it is; its next tool call meets the handler's own
+   *   gate instead of being silently resurrected (another driver may have
+   *   bound the worker since). Same rule as the GraphQL door (#1540).
    * - **It cannot fail a tool call.** A heartbeat is bookkeeping; a caller's
    *   read must not 500 because liveness bookkeeping had a bad day.
    */
@@ -2109,6 +2114,19 @@ export function createMcpServerInstance(
       // PR's own commit messages keep naming. Either step throwing means no
       // heartbeat, which is the safe direction: the session simply ages.
       if (auth.userId && !(await callerStillDrives(id))) return;
+      // #1543 — keep a LIVE session alive; never revive a lapsed one. A
+      // session nobody drove inside its idle window may already have been
+      // bound by another driver (the bind gate is derived, #1114), so reviving
+      // it here would silently put a second live session on that worker. The
+      // handler then meets its own gate (SESSION_NOT_LIVE on a post), exactly
+      // as the GraphQL door does since #1540.
+      const row = await db.session.findFirst({
+        where: { id, endedAt: null, deletedAt: null, ...owner },
+        select: { type: true, startedAt: true, updatedAt: true, autoExpiredAt: true, endedAt: true },
+      });
+      if (!row) return;
+      const lastEvent = (await loadLastEventBySession(db as never, [id])).get(id);
+      if (!isSessionLive(row, lastEvent, new Date())) return;
       await db.session.updateMany({
         where: { id, endedAt: null, deletedAt: null, ...owner },
         data: { updatedAt: new Date() },

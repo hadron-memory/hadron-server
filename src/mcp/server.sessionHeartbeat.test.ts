@@ -26,6 +26,7 @@ import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
 import { generateId } from '../lib/id.js';
 import { createTestableMcpServer } from './server.js';
+import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import type { AuthContext } from '../middleware/auth.js';
 
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({
@@ -265,5 +266,72 @@ describe('#1082 review — the heartbeat genuinely cannot fail a tool call', () 
     // …and it did NOT heartbeat, which is the safe direction: the session ages.
     expect((await updatedAt(id))!.getTime()).toBe(before!.getTime());
     spy.mockRestore();
+  });
+});
+
+/** A session nobody has driven for longer than its idle window: started AND last touched long ago. */
+async function lapsedSession(userId = user.id): Promise<string> {
+  const s = await db.session.create({
+    data: { id: generateId(), workerId: worker.id, appId: app.id, userId },
+  });
+  await db.$executeRaw`UPDATE sessions SET started_at = ${LONG_AGO}, updated_at = ${LONG_AGO} WHERE id = ${s.id}`;
+  return s.id;
+}
+
+describe('#1543 — the heartbeat keeps a LIVE session alive and never revives a lapsed one', () => {
+  it('a team tool called through a lapsed session leaves it untouched', async () => {
+    for (const [tool, args] of [
+      ['hadron_team_chat_read', { sinceSeq: 0 }],
+      ['hadron_list_workers', {}],
+      ['hadron_team_work_items', {}],
+    ] as const) {
+      const id = await lapsedSession();
+      const before = await updatedAt(id);
+      const srv = createTestableMcpServer(auth());
+      await srv.callToolText(tool, { ...(args as object), session: id } as never);
+      expect((await updatedAt(id))!.getTime(), tool).toBe(before!.getTime());
+    }
+  });
+
+  it('a post through a lapsed session is refused by the post gate instead of resurrecting it', async () => {
+    const id = await lapsedSession();
+    const before = await updatedAt(id);
+    const srv = createTestableMcpServer(auth());
+    const text = await srv.callToolText('hadron_team_chat_post', { session: id, body: 'too late' });
+    expect(text).toMatch(/not live/i);
+    expect((await updatedAt(id))!.getTime()).toBe(before!.getTime());
+  });
+
+  it("a kind:'pr' work record still attributes to a lapsed session, but does not revive it (Codex P1 on #1553)", async () => {
+    const id = await lapsedSession();
+    const before = await updatedAt(id);
+    const srv = createTestableMcpServer(auth());
+    await srv.callToolText('hadron_record_work', {
+      session: id, tool: 'github', kind: 'pr', ref: 'o/r#42', action: 'opened',
+    });
+    const after = await db.session.findUniqueOrThrow({ where: { id }, select: { prNumber: true, updatedAt: true } });
+    expect(after.prNumber).toBe(42); // late attribution still lands
+    expect(after.updatedAt!.getTime()).toBe(before!.getTime());
+  });
+
+  it('GraphQL updateSession (pr/branch) does not revive a lapsed session; a live one still advances', async () => {
+    const userCtx = { db, userId: user.id, roles: ['CONTRIBUTOR'] } as unknown as Context;
+    const lapsed = await lapsedSession();
+    const lapsedBefore = await updatedAt(lapsed);
+    await (resolvers.Mutation as any).updateSession({}, { id: lapsed, branch: 'feat/late' }, userCtx);
+    expect((await updatedAt(lapsed))!.getTime()).toBe(lapsedBefore!.getTime());
+
+    const live = await staleSession(); // started now: live
+    const liveBefore = await updatedAt(live);
+    await (resolvers.Mutation as any).updateSession({}, { id: live, branch: 'feat/now' }, userCtx);
+    expect((await updatedAt(live))!.getTime()).toBeGreaterThan(liveBefore!.getTime());
+  });
+
+  it('control: a live session is still heartbeated by the same tools', async () => {
+    const id = await staleSession(); // started now, so live; only its updatedAt is old
+    const before = await updatedAt(id);
+    const srv = createTestableMcpServer(auth());
+    await srv.callToolText('hadron_team_work_items', { session: id });
+    expect((await updatedAt(id))!.getTime()).toBeGreaterThan(before!.getTime());
   });
 });

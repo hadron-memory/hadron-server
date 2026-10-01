@@ -106,6 +106,7 @@ import {
   isGoogleDriveConnectConfigured,
 } from './integrations/googleDrive/auth.js';
 import { mountMailboxConnectRoutes } from './integrations/mailboxConnect.js';
+import { preserveHeartbeatIfLapsed } from './lib/sessionActivity.js';
 
 /**
  * #557: named once, because the raw-body capture in the body parser and the
@@ -1289,6 +1290,8 @@ export async function createServer(): Promise<Express> {
       await db.session.update({
         where: { id },
         data: {
+          // #1543 — an outcome report is not anyone driving the session.
+          ...(await preserveHeartbeatIfLapsed(db as never, id)),
           outcome,
           outcomeRef,
           outcomeMeta: serializeJson(outcomeMeta) as typeof outcomeMeta,

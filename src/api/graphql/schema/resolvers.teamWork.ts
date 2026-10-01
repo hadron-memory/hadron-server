@@ -64,6 +64,7 @@ import {
 import { findOrCreateAppClassMemory } from './chat-scope.js';
 import { locateTeamAgent } from './resolvers.worker.js';
 import { recordNodeUsage, recordNodeWrite } from '../../../lib/usageRecorder.js';
+import { preserveHeartbeatIfLapsed } from '../../../lib/sessionActivity.js';
 
 /** Canonical loc of the worklog collection root in a team App's shared memory. */
 export const WORKLOG_LOC = 'worklog';
@@ -825,11 +826,17 @@ export const teamWorkMutations = {
       if (workKind === 'pr') {
         const numberMatch = /#([1-9][0-9]*)$/.exec(canonicalRef);
         if (numberMatch) {
+          // #1543 (Codex P1 on #1553): late attribution to a LAPSED session is
+          // allowed, but must not count as driving it. Prisma's @updatedAt
+          // would advance the heartbeat column and revive the session, which
+          // another driver may already have bound since. Keep the stored
+          // updatedAt unless the session is still live.
           await tx.session.update({
             where: { id: sessionId },
             data: {
               prNumber: Number(numberMatch[1]),
               updatedBy: ctx.userId ?? ctx.clientId ?? null,
+              ...(await preserveHeartbeatIfLapsed(tx as never, sessionId)),
             },
           });
         }

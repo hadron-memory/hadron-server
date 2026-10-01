@@ -279,6 +279,35 @@ export async function touchLiveSession(
 }
 
 /**
+ * The `updatedAt` patch for a write to a Session row that must never REVIVE a
+ * lapsed session (#1543). Prisma's `@updatedAt` advances the heartbeat column
+ * on every `update`, so a display-only or late-attribution write (the kind:pr
+ * `prNumber` denormalization, `updateSession`'s pr/branch, an outcome report)
+ * would otherwise make a session nobody drove inside its window read live
+ * again — after another driver may already have bound its worker (#1114).
+ *
+ * Returns `{}` for a live session (the write keeps it alive, as before) and
+ * `{ updatedAt: <stored> }` for a lapsed one, which pins the column. Spread it
+ * into the update's `data`. Ended sessions are already not live whatever the
+ * column says (`sessionActivityAt` caps at `endedAt`), so they pass through.
+ */
+export async function preserveHeartbeatIfLapsed(
+  db: {
+    session: { findUnique: (args: { where: { id: string }; select: Record<string, true> }) => Promise<unknown> };
+    usageEvent: { groupBy: (args: unknown) => Promise<{ sessionId: string | null; _max: { createdAt: Date | null } }[]> };
+  },
+  sessionId: string,
+): Promise<{ updatedAt?: Date | null }> {
+  const current = (await db.session.findUnique({
+    where: { id: sessionId },
+    select: { type: true, startedAt: true, updatedAt: true, autoExpiredAt: true, endedAt: true },
+  })) as { type: SessionType; startedAt: Date; updatedAt: Date | null; autoExpiredAt: Date | null; endedAt: Date | null } | null;
+  if (!current || current.endedAt) return {};
+  const lastEvent = (await loadLastEventBySession(db, [sessionId])).get(sessionId);
+  return isSessionLive(current, lastEvent, new Date()) ? {} : { updatedAt: current.updatedAt };
+}
+
+/**
  * Backstop cap on how many OPEN sessions any liveness read will scan.
  *
  * #1114 removed the only thing that closed abandoned sessions, so the count of
