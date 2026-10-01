@@ -6,6 +6,7 @@ import { resolveUserRef } from '../../../lib/entityRef/userRef.js';
 import { mintLocalSlug } from '../../../lib/mintLocalSlug.js';
 import { recordUrnRename } from '../../../lib/urnAlias.js';
 import { requireOrgAction } from '../../../lib/auth/orgAction.js';
+import { withAuthorizedTx } from './authorizedTx.js';
 import {
   type Context,
   concealUnreadableDenial,
@@ -241,16 +242,31 @@ export const memoryTransferMutations = {
     if (input.dryRun === true) return transferPreview(ctx.db as TransferDb, memory, destination, input.targetClass, input.resetGroupMembers, ctx.userId);
 
     try {
-      return await ctx.db.$transaction(async (tx) => {
-        await lockDestinationRoot(tx, destination);
-        // The FK KEY SHARE taken by new dependents conflicts with this row lock;
-        // plan and apply from the same locked snapshot.
-        await tx.$queryRaw`SELECT id FROM memories WHERE id = ${id} FOR UPDATE`;
-        const current = await tx.memory.findUniqueOrThrow({ where: { id } });
-        if (current.deletedAt) throw refusal('MEMORY_NOT_FOUND', 'Memory not found.');
-        const txCtx = { ...ctx, db: tx } as Context;
-        await authorizeSource(txCtx, current, input.memoryRef);
-        const currentDestination = await resolveDestination(txCtx, input, current);
+      let current: Memory;
+      let currentDestination: Destination;
+      return await withAuthorizedTx(
+        ctx,
+        [
+          { kind: 'memory', id },
+          ...(memory.organizationId ? [{ kind: 'org' as const, id: memory.organizationId }] : []),
+          ...(memory.ownerUserId ? [{ kind: 'user' as const, id: memory.ownerUserId }] : []),
+          ...(memory.userId ? [{ kind: 'user' as const, id: memory.userId }] : []),
+          destination.kind === 'organization'
+            ? { kind: 'org', id: destination.id }
+            : { kind: 'user', id: destination.id },
+        ],
+        async (txCtx) => {
+          if (current.organizationId !== memory.organizationId ||
+              current.ownerUserId !== memory.ownerUserId || current.userId !== memory.userId) {
+            throw refusal('STALE_TRANSFER_PREVIEW', 'Memory ownership changed since the preview; run a new dryRun.');
+          }
+          await authorizeSource(txCtx, current, input.memoryRef);
+          currentDestination = await resolveDestination(txCtx, input, current);
+          if (currentDestination.kind !== destination.kind || currentDestination.id !== destination.id) {
+            throw refusal('STALE_TRANSFER_PREVIEW', 'The destination changed since the preview; run a new dryRun.');
+          }
+        },
+        async (tx) => {
         const plan = await transferPreview(tx, current, currentDestination, input.targetClass, input.resetGroupMembers, ctx.userId);
         if (plan.blockers.length > 0) throw refusal(plan.blockers[0].code, plan.blockers[0].message);
         if (input.expectedNewUrn != null && input.expectedNewUrn !== plan.newUrn) {
@@ -306,7 +322,16 @@ export const memoryTransferMutations = {
           },
         });
         return { ...plan, applied: true };
-      }, { timeout: 15_000 });
+        },
+        { lockMode: 'exclusive', timeout: 15_000, afterLock: async (tx) => {
+          // Destination root locks precede the Memory row lock, matching the
+          // rename cascade. Both row locks follow the authority anchors.
+          await lockDestinationRoot(tx, destination);
+          await tx.$queryRaw`SELECT id FROM memories WHERE id = ${id} FOR UPDATE`;
+          current = await tx.memory.findUniqueOrThrow({ where: { id } });
+          if (current.deletedAt) throw refusal('MEMORY_NOT_FOUND', 'Memory not found.');
+        } },
+      );
     } catch (error) {
       // Two source rows can transfer toward the same free destination URN at
       // once. The unique index is the final arbiter; ask the loser to preview

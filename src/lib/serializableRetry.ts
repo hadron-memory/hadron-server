@@ -1,4 +1,5 @@
 import { Prisma } from '../generated/prisma/index.js';
+import { AuthoritySnapshotStale } from './auth/authorityAnchors.js';
 
 /**
  * How many times a SERIALIZABLE transaction is re-run after a P2034
@@ -40,7 +41,7 @@ export async function retryOnSerializationFailure<T>(
     try {
       return await run();
     } catch (e) {
-      if (!isSerializationFailure(e) || attempt > retries) throw e;
+      if ((!isSerializationFailure(e) && !(e instanceof AuthoritySnapshotStale)) || attempt > retries) throw e;
       const ceiling = BASE_BACKOFF_MS * 2 ** (attempt - 1);
       await new Promise((resolve) => setTimeout(resolve, Math.random() * ceiling));
     }

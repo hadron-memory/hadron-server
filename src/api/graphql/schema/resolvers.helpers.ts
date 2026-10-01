@@ -27,6 +27,7 @@ import {
   getWorkerMemoryAccess,
 } from '../../../mcp/access-control.js';
 import { ensureAgentOrgGrant } from '../../../controller/operations/ensureAgentOrgGrant.js';
+import { withAuthorizedTx } from './authorizedTx.js';
 import { ensureAgentSubscription } from '../../../controller/operations/ensureAgentSubscription.js';
 import {
   getPrimaryAgent,
@@ -2875,62 +2876,80 @@ export async function installAgentIntoAppCore(
     select: { appId: true },
   });
   if (existing) throw new DuplicateAppAgentError(resolvedAppId, resolvedAgentId);
-  // Auto-provision AgentOrgGrant (cross-org gate symmetry). spec 047: an
-  // AgentOrgGrant is org-scoped — a user-owned App has no org, so a personal
-  // install rides the owner's AgentSubscription instead (no grant needed).
-  if (app.organizationId) {
-    await ensureAgentOrgGrant(ctx.db, app.organizationId, resolvedAgentId);
-  } else if (app.ownerUserId && agent.ownerUserId !== app.ownerUserId) {
-    // #756: license the personal install the same way createApp does, so a
-    // marketplace agent added through THIS path is subscribed rather than run
-    // unlicensed. Skipped for the owner's own agent — ownership licenses it.
-    await ensureAgentSubscription(ctx.db, app.ownerUserId, resolvedAgentId);
-  }
-  // Wrap the App trainingMode update + the AppAgent create in a single
-  // transaction. The App update goes FIRST so a subsequent re-fetch of
-  // `appAgent.app` in the same response reflects the new trainingMode
-  // (avoiding stale-data-in-payload). The AppAgent create is in a
-  // try/catch that translates the P2002 unique violation (concurrent
-  // install) to the typed DuplicateAppAgentError.
-  const created = await ctx.db.$transaction(async (tx) => {
-    if (args.trainingMode !== undefined) {
-      await tx.app.update({
-        where: { id: resolvedAppId },
-        data: {
-          trainingMode: args.trainingMode,
-          updatedBy: ctx.userId ?? ctx.appId ?? ctx.clientId ?? null,
-        },
-      });
-    }
-    try {
-      return await tx.appAgent.create({
-        data: {
-          appId: resolvedAppId,
-          agentId: resolvedAgentId,
-          createdBy: ctx.userId ?? ctx.appId ?? ctx.clientId ?? null,
-        },
-        include: {
-          app: true,
-          agent: { include: AGENT_INCLUDE },
-        },
-      });
-    } catch (e) {
-      if (
-        e instanceof Prisma.PrismaClientKnownRequestError &&
-        e.code === 'P2002'
-      ) {
-        throw new DuplicateAppAgentError(resolvedAppId, resolvedAgentId);
+  // The license, install and default Channel register row all mint authority.
+  // Keep them in one transaction under the App owner's anchor, so a revoker
+  // cannot return while a post-check grant is still waiting to commit.
+  let currentAgentOwnerUserId: string | null = agent.ownerUserId;
+  const created = await withAuthorizedTx(
+    ctx,
+    [
+      { kind: 'app', id: resolvedAppId },
+      { kind: 'agent', id: resolvedAgentId },
+      ...(app.organizationId ? [{ kind: 'org' as const, id: app.organizationId }] : []),
+      ...(app.ownerUserId ? [{ kind: 'user' as const, id: app.ownerUserId }] : []),
+    ],
+    async (txCtx) => {
+      const currentApp = await txCtx.db.app.findUniqueOrThrow({ where: { id: resolvedAppId } });
+      const currentAgent = await txCtx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
+      currentAgentOwnerUserId = currentAgent.ownerUserId;
+      if (currentApp.organizationId !== app.organizationId || currentApp.ownerUserId !== app.ownerUserId) {
+        throw new Error('App ownership changed; retry the installation');
       }
-      throw e;
-    }
-  });
-  // Spec 049 Phase 5 (D2): the install's materialised register row for the
-  // App's default Channel — a no-op until the App has one (then written by
-  // `ensureChannelRow`). Race-safe insert; idempotent.
-  await ensureInstallRegisterRows(ctx.db, resolvedAppId, {
-    agentId: resolvedAgentId,
-    createdBy: ctx.userId ?? ctx.appId ?? ctx.clientId ?? null,
-  });
+      if (currentAgent.deletedAt) throw new Error('Agent not found');
+      if (currentApp.uninstalledAt) {
+        throw new GraphQLError('Cannot install Agent into an uninstalled App.', {
+          extensions: { code: 'APP_UNINSTALLED', appId: resolvedAppId },
+        });
+      }
+      await requireOwnerOrOrgRole(txCtx, currentApp, 'CONTRIBUTOR');
+      const ownAgent = currentAgent.ownerUserId !== null && currentAgent.ownerUserId === currentApp.ownerUserId;
+      if (currentApp.organizationId === null) {
+        if (currentAgent.visibility !== 'PUBLIC' && !ownAgent) {
+          throw new GraphQLError('A personal App may only install a PUBLIC agent or your own personal agent.', {
+            extensions: { code: 'ORGANIZATION_MISMATCH', appId: resolvedAppId, agentId: resolvedAgentId },
+          });
+        }
+      } else if (currentAgent.organizationId !== currentApp.organizationId && currentAgent.visibility !== 'PUBLIC') {
+        throw new GraphQLError('Agent must belong to the same organization as the App, or be PUBLIC.', {
+          extensions: { code: 'ORGANIZATION_MISMATCH', appId: resolvedAppId, agentId: resolvedAgentId },
+        });
+      }
+    },
+    async (tx) => {
+      if (app.organizationId) {
+        await ensureAgentOrgGrant(tx, app.organizationId, resolvedAgentId);
+      } else if (app.ownerUserId && currentAgentOwnerUserId !== app.ownerUserId) {
+        await ensureAgentSubscription(tx, app.ownerUserId, resolvedAgentId);
+      }
+      if (args.trainingMode !== undefined) {
+        await tx.app.update({
+          where: { id: resolvedAppId },
+          data: { trainingMode: args.trainingMode, updatedBy: ctx.userId ?? ctx.appId ?? ctx.clientId ?? null },
+        });
+      }
+      let installed;
+      try {
+        installed = await tx.appAgent.create({
+          data: { appId: resolvedAppId, agentId: resolvedAgentId, createdBy: ctx.userId ?? ctx.appId ?? ctx.clientId ?? null },
+          include: { app: true, agent: { include: AGENT_INCLUDE } },
+        });
+      } catch (e) {
+        if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') {
+          throw new DuplicateAppAgentError(resolvedAppId, resolvedAgentId);
+        }
+        throw e;
+      }
+      await ensureInstallRegisterRows(tx, resolvedAppId, {
+        agentId: resolvedAgentId,
+        createdBy: ctx.userId ?? ctx.appId ?? ctx.clientId ?? null,
+      });
+      return installed;
+    },
+    { afterLock: async (tx) => {
+      await tx.$queryRaw`SELECT id FROM apps WHERE id = ${resolvedAppId} FOR SHARE`;
+      await tx.$queryRaw`SELECT id FROM agents WHERE id = ${resolvedAgentId} FOR SHARE`;
+    } },
+  );
   return {
     appId: resolvedAppId,
     agentId: resolvedAgentId,
@@ -2952,12 +2971,29 @@ export async function uninstallAgentFromAppCore(
   // Idempotent delete — `deleteMany` returns a count, never throws on
   // absent rows. The (App, Agent, *) memories persist as orphans per
   // spec 023 FR-005.
-  await ctx.db.appAgent.deleteMany({
-    where: { appId: resolvedAppId, agentId: resolvedAgentId },
-  });
-  // Spec 049 Phase 5 (D4): the attendee has left the App — its App-owned
-  // register rows go with it (soft-deleted; an org's rows are the org's).
-  await removeRegisterRowsForUninstall(ctx.db, resolvedAppId, resolvedAgentId, ctx.userId ?? null);
+  await withAuthorizedTx(
+    ctx,
+    [
+      { kind: 'app', id: resolvedAppId },
+      { kind: 'agent', id: resolvedAgentId },
+      ...(app.organizationId ? [{ kind: 'org' as const, id: app.organizationId }] : []),
+      ...(app.ownerUserId ? [{ kind: 'user' as const, id: app.ownerUserId }] : []),
+    ],
+    async (txCtx) => {
+      const current = await txCtx.db.app.findUniqueOrThrow({ where: { id: resolvedAppId } });
+      if (current.organizationId !== app.organizationId || current.ownerUserId !== app.ownerUserId) {
+        throw new Error('App ownership changed; retry the uninstall');
+      }
+      await requireOwnerOrOrgRole(txCtx, current, 'CONTRIBUTOR');
+    },
+    async (tx) => {
+      await tx.appAgent.deleteMany({ where: { appId: resolvedAppId, agentId: resolvedAgentId } });
+      await removeRegisterRowsForUninstall(tx, resolvedAppId, resolvedAgentId, ctx.userId ?? null);
+    },
+    { lockMode: 'exclusive', afterLock: async (tx) => {
+      await tx.$queryRaw`SELECT id FROM apps WHERE id = ${resolvedAppId} FOR SHARE`;
+    } },
+  );
   return { appId: resolvedAppId, agentId: resolvedAgentId };
 }
 

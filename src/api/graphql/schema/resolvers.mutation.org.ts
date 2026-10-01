@@ -40,6 +40,9 @@ import {
   ORG_INCLUDE,
 } from './resolvers.helpers.js';
 import { recordUrnRename } from '../../../lib/urnAlias.js';
+import { withAuthorizedTx } from './authorizedTx.js';
+import { AuthoritySnapshotStale } from '../../../lib/auth/authorityAnchors.js';
+import { assertIssuerInvitationSnapshotFresh, revokeOrgInvitationsByIssuer } from '../../../lib/auth/revokeOrgInvitations.js';
 
 /**
  * Map a `RootNameTakenError` from the #692 principal pool to a user-facing
@@ -160,7 +163,21 @@ export const orgMutations = {
       ctx: Context,
     ) => {
       requireRole(ctx, 'ADMIN');
-      return ctx.db.user.update({ where: { id: userId }, data: { roles } });
+      return withAuthorizedTx(
+        ctx,
+        [{ kind: 'user', id: userId }],
+        async (txCtx) => { requireRole(txCtx, 'ADMIN'); },
+        (tx) => tx.user.update({ where: { id: userId }, data: { roles } }),
+        {
+          lockMode: 'exclusive',
+          afterLock: async (tx) => {
+            // The actor's role was already read under FOR SHARE. Upgrade only
+            // the target row: upgrading a shared actor row in two unrelated
+            // role changes could deadlock the two transactions.
+            await tx.$queryRaw`SELECT id FROM users WHERE id = ${userId} FOR UPDATE`;
+          },
+        },
+      );
     },
 
     mergeUsers: async (
@@ -408,9 +425,13 @@ export const orgMutations = {
       // (#677) — the ONE org soft-delete cascade, shared with deleteUser's
       // sole-member-org branch (see softDeleteOrganizationCore for the
       // idempotency + secret-sweep rationale).
-      await ctx.db.$transaction(async (tx) => {
-        await softDeleteOrganizationCore(tx, resolvedId);
-      });
+      await withAuthorizedTx(
+        ctx,
+        [{ kind: 'org', id: resolvedId }],
+        async (txCtx) => { requireRole(txCtx, 'ADMIN'); },
+        (tx) => softDeleteOrganizationCore(tx, resolvedId),
+        { lockMode: 'exclusive', allowDeletedOrg: true },
+      );
       return true;
     },
 
@@ -485,27 +506,31 @@ export const orgMutations = {
     ) => {
       // 007-entity-id-or-urn: orgId may be ID, bare URN, or prefixed URN.
       const { id: resolvedOrgId } = await resolveOrgRef(ctx.db, orgId);
-      await requireOrgRole(ctx, resolvedOrgId, 'ADMIN');
       const slug = generateId().slice(0, 16);
       const expiresAt = expiresInDays
         ? new Date(Date.now() + expiresInDays * 24 * 60 * 60 * 1000)
         : null;
-      const invite = await ctx.db.userInvitation.create({
-        data: {
-          id: generateId(),
-          slug,
-          senderUserId: ctx.userId ?? null,
-          organizationId: resolvedOrgId,
-          memberRole: (memberRole as Role) ?? 'READER',
-          name: name ?? null,
-          email: email ?? null,
-          githubUsername: githubUsername ?? null,
-          maxActivations: maxActivations ?? 1,
-          expiresAt,
-          createdBy: ctx.userId ?? ctx.clientId ?? null,
-        },
-        include: { sender: true, organization: true, activations: true },
-      });
+      const invite = await withAuthorizedTx(
+        ctx,
+        [{ kind: 'org', id: resolvedOrgId }],
+        (txCtx) => requireOrgRole(txCtx, resolvedOrgId, 'ADMIN'),
+        (tx) => tx.userInvitation.create({
+          data: {
+            id: generateId(),
+            slug,
+            senderUserId: ctx.userId ?? null,
+            organizationId: resolvedOrgId,
+            memberRole: (memberRole as Role) ?? 'READER',
+            name: name ?? null,
+            email: email ?? null,
+            githubUsername: githubUsername ?? null,
+            maxActivations: maxActivations ?? 1,
+            expiresAt,
+            createdBy: ctx.userId ?? ctx.clientId ?? null,
+          },
+          include: { sender: true, organization: true, activations: true },
+        }),
+      );
       return { ...invite, activationCount: invite.activations.length };
     },
 
@@ -548,79 +573,94 @@ export const orgMutations = {
     ) => {
       if (!ctx.userId) throw new Error('You must be signed in to accept an invitation');
 
-      const invite = await ctx.db.userInvitation.findUnique({
-        where: { slug },
-        include: { activations: true },
+      // Resolve only the anchor shape outside the transaction. The invitation
+      // and activation decisions are re-read after its row lock below.
+      const candidate = await ctx.db.userInvitation.findUnique({
+        where: { slug }, select: { id: true, organizationId: true, senderUserId: true },
       });
-      if (!invite || invite.deletedAt) throw new Error('Invitation not found');
-      if (invite.expiresAt && invite.expiresAt < new Date()) throw new Error('Invitation has expired');
-      if (invite.maxActivations && invite.activations.length >= invite.maxActivations) {
-        throw new Error('Invitation has reached its maximum number of uses');
-      }
+      if (!candidate) throw new Error('Invitation not found');
+      return withAuthorizedTx(
+        ctx,
+        [
+          ...(candidate.organizationId ? [{ kind: 'org' as const, id: candidate.organizationId }] : []),
+          ...(candidate.senderUserId ? [{ kind: 'user' as const, id: candidate.senderUserId }] : []),
+        ],
+        async () => {},
+        async (tx, txCtx) => {
+          const invite = await tx.userInvitation.findUnique({
+            where: { id: candidate.id }, include: { activations: true },
+          });
+          if (!invite || invite.deletedAt || invite.organizationId !== candidate.organizationId ||
+              invite.senderUserId !== candidate.senderUserId) {
+            throw new Error('Invitation not found');
+          }
+          if (invite.expiresAt && invite.expiresAt < new Date()) throw new Error('Invitation has expired');
+          if (invite.maxActivations && invite.activations.length >= invite.maxActivations) {
+            throw new Error('Invitation has reached its maximum number of uses');
+          }
+          if (invite.activations.some((a) => a.userId === ctx.userId)) {
+            throw new Error('You have already accepted this invitation');
+          }
+          if (invite.organizationId && invite.senderUserId) {
+            const issuer = await tx.user.findFirst({
+              where: { id: invite.senderUserId, deletedAt: null }, select: { roles: true },
+            });
+            if (!issuer) throw new Error('Invitation has been revoked');
+            try {
+              await requireOrgRole({
+                ...txCtx, userId: invite.senderUserId, roles: issuer.roles,
+                apiKeyId: undefined, appId: undefined, clientId: undefined,
+                impersonation: undefined,
+              }, invite.organizationId, 'ADMIN');
+            } catch (error) {
+              if (error instanceof GraphQLError && error.extensions.code === 'FORBIDDEN') {
+                throw new Error('Invitation has been revoked');
+              }
+              throw error;
+            }
+          }
 
-      // Check if user already activated this invite
-      if (invite.activations.some((a: any) => a.userId === ctx.userId)) {
-        throw new Error('You have already accepted this invitation');
-      }
-
-      // Create activation record
-      await ctx.db.userInvitationActivation.create({
-        data: {
-          id: generateId(),
-          invitationId: invite.id,
-          userId: ctx.userId!,
-          createdBy: ctx.userId ?? null,
+          await tx.userInvitationActivation.create({
+            data: {
+              id: generateId(), invitationId: invite.id, userId: ctx.userId!, createdBy: ctx.userId,
+            },
+          });
+          // A tombstoned composite membership is reactivated, with every
+          // revoked capability cleared. A live membership remains a no-op.
+          if (invite.organizationId) {
+            const existing = await tx.orgMember.findUnique({
+              where: { organizationId_userId: { organizationId: invite.organizationId, userId: ctx.userId! } },
+            });
+            if (!existing) {
+              await tx.orgMember.create({
+                data: {
+                  id: generateId(), organizationId: invite.organizationId, userId: ctx.userId!,
+                  role: invite.memberRole as Role, createdBy: ctx.userId,
+                },
+              });
+            } else if (existing.deletedAt) {
+              await tx.orgMember.update({
+                where: { organizationId_userId: { organizationId: invite.organizationId, userId: ctx.userId! } },
+                data: {
+                  deletedAt: null, deletedBy: null, role: invite.memberRole as Role,
+                  canInvite: false, updatedBy: ctx.userId,
+                },
+              });
+            }
+          }
+          return true;
         },
-      });
-
-      // Add user to org if not already a LIVE member. A soft-revoked row
-      // (membership revocation is a soft delete — the audit tuple persists)
-      // is REACTIVATED with the invite's role: accepting a fresh invitation
-      // is the sanctioned rejoin path for a removed ex-member, and the
-      // composite (org, user) PK means a second row can't be created anyway.
-      if (invite.organizationId) {
-        const existing = await ctx.db.orgMember.findUnique({
-          where: {
-            organizationId_userId: {
-              organizationId: invite.organizationId,
-              userId: ctx.userId!,
-            },
+        {
+          afterLock: async (tx) => {
+            await tx.$queryRaw`SELECT id FROM user_invitations WHERE id = ${candidate.id} FOR UPDATE`;
+            if (candidate.organizationId) {
+              await tx.$queryRaw`
+                SELECT id FROM org_members
+                WHERE organization_id = ${candidate.organizationId} AND user_id = ${ctx.userId} FOR UPDATE`;
+            }
           },
-        });
-        if (!existing) {
-          await ctx.db.orgMember.create({
-            data: {
-              id: generateId(),
-              organizationId: invite.organizationId,
-              userId: ctx.userId!,
-              role: invite.memberRole as Role,
-              createdBy: ctx.userId ?? null,
-            },
-          });
-        } else if (existing.deletedAt) {
-          await ctx.db.orgMember.update({
-            where: {
-              organizationId_userId: {
-                organizationId: invite.organizationId,
-                userId: ctx.userId!,
-              },
-            },
-            data: {
-              deletedAt: null,
-              deletedBy: null,
-              role: invite.memberRole as Role,
-              // Revocation clears ALL membership capabilities — a fresh row
-              // would default canInvite=false, so reactivation must not
-              // resurrect a stale invite grant (PR-480 review).
-              canInvite: false,
-              updatedBy: ctx.userId ?? null,
-            },
-          });
-        }
-        // A live membership is a no-op (the activation is still recorded).
-      }
-
-      return true;
+        },
+      );
     },
 
     // ── Organization membership ─────────────────────────────────────────
@@ -648,35 +688,43 @@ export const orgMutations = {
       const resolvedOrgId = await resolveOrgRefArg(ctx.db, { ref: orgRef, id: orgId });
       await requireOrgRole(ctx, resolvedOrgId, 'ADMIN');
       const resolvedUserId = await resolveUserRefArg(ctx.db, { ref: userRef, id: userId });
-      // Membership revocation is a soft delete, so the composite (org, user)
-      // PK may hold a tombstone. Reactivate it with the new role instead of
-      // letting the create fail with a raw P2002; a LIVE duplicate gets a
-      // clean typed error instead of P2002 too.
-      const existing = await ctx.db.orgMember.findUnique({
-        where: { organizationId_userId: { organizationId: resolvedOrgId, userId: resolvedUserId } },
-      });
-      if (existing && !existing.deletedAt) {
-        throw new Error('User is already a member of this organization');
-      }
-      if (existing) {
-        return ctx.db.orgMember.update({
-          where: { organizationId_userId: { organizationId: resolvedOrgId, userId: resolvedUserId } },
-          data: {
-            deletedAt: null,
-            deletedBy: null,
-            role: role as Role,
-            // Revocation clears ALL membership capabilities — reactivation
-            // must not resurrect a stale canInvite grant (PR-480 review).
-            canInvite: false,
-            updatedBy: ctx.userId ?? ctx.clientId ?? null,
-          },
-          include: { user: true },
-        });
-      }
-      return ctx.db.orgMember.create({
-        data: { id: generateId(), organizationId: resolvedOrgId, userId: resolvedUserId, role: role as Role, createdBy: ctx.userId ?? ctx.clientId ?? null },
-        include: { user: true },
-      });
+      return withAuthorizedTx(
+        ctx,
+        [{ kind: 'org', id: resolvedOrgId }, { kind: 'user', id: resolvedUserId }],
+        (txCtx) => requireOrgRole(txCtx, resolvedOrgId, 'ADMIN'),
+        async (tx) => {
+          // Membership revocation is a soft delete, so the composite (org,
+          // user) PK may hold a tombstone. Reactivate it rather than insert a
+          // duplicate, but never let the pre-transaction read decide this.
+          const existing = await tx.orgMember.findUnique({
+            where: { organizationId_userId: { organizationId: resolvedOrgId, userId: resolvedUserId } },
+          });
+          if (existing && !existing.deletedAt) {
+            throw new Error('User is already a member of this organization');
+          }
+          if (existing) {
+            return tx.orgMember.update({
+              where: { organizationId_userId: { organizationId: resolvedOrgId, userId: resolvedUserId } },
+              data: {
+                deletedAt: null,
+                deletedBy: null,
+                role: role as Role,
+                // Revocation clears ALL membership capabilities.
+                canInvite: false,
+                updatedBy: ctx.userId ?? ctx.clientId ?? null,
+              },
+              include: { user: true },
+            });
+          }
+          return tx.orgMember.create({
+            data: { id: generateId(), organizationId: resolvedOrgId, userId: resolvedUserId, role: role as Role, createdBy: ctx.userId ?? ctx.clientId ?? null },
+            include: { user: true },
+          });
+        },
+        { afterLock: async (tx) => {
+          await tx.$queryRaw`SELECT id FROM org_members WHERE organization_id = ${resolvedOrgId} AND user_id = ${resolvedUserId} FOR UPDATE`;
+        } },
+      );
     },
 
     updateOrgMember: async (
@@ -707,20 +755,16 @@ export const orgMutations = {
       // the owner count is SERIALIZABLE (removeOrgMember, deleteUser), so
       // Postgres aborts one side and the retry re-decides on the winner's
       // committed state (conventions:count-then-act-serializable-txn).
-      return retryOnSerializationFailure(() => ctx.db.$transaction(async (tx) => {
-        // Refuse to edit a soft-revoked row — silently retitling a tombstone
-        // (which no UI surfaces) would be API-misuse-only behavior; rejoin goes
-        // through addOrgMember / invitation reactivation.
-        const existing = await tx.orgMember.findFirst({
-          where: { organizationId: resolvedOrgId, userId: resolvedUserId, deletedAt: null },
-        });
-        if (!existing) {
-          throw new Error('User is not a member of this organization');
-        }
+      let existingRole: Role | null = null;
+      return retryOnSerializationFailure(() => withAuthorizedTx(
+        ctx,
+        [{ kind: 'org', id: resolvedOrgId }, { kind: 'user', id: resolvedUserId }],
+        (txCtx) => requireOrgRole(txCtx, resolvedOrgId, 'ADMIN'),
+        async (tx) => {
         // Demoting the last LIVE owner would leave the org unmanageable — same
         // invariant removeOrgMember enforces (PR-480 Gemini review; the gap
         // predates the lifecycle change but this is its home).
-        if (existing.role === 'OWNER' && role !== 'OWNER') {
+        if (existingRole === 'OWNER' && role !== 'OWNER') {
           const owners = await tx.orgMember.count({
             where: { organizationId: resolvedOrgId, role: 'OWNER', deletedAt: null },
           });
@@ -728,12 +772,46 @@ export const orgMutations = {
             throw new Error('Cannot demote the last owner of an organization');
           }
         }
+        if ((existingRole === 'OWNER' || existingRole === 'ADMIN') &&
+            role !== 'OWNER' && role !== 'ADMIN') {
+          await assertIssuerInvitationSnapshotFresh(tx, ctx.db, resolvedOrgId, resolvedUserId);
+          await revokeOrgInvitationsByIssuer(
+            tx, resolvedOrgId, resolvedUserId, ctx.userId ?? ctx.clientId ?? null,
+          );
+        }
         return tx.orgMember.update({
           where: { organizationId_userId: { organizationId: resolvedOrgId, userId: resolvedUserId } },
           data: { role: role as Role },
           include: { user: true },
         });
-      }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable }));
+        },
+        {
+          afterLock: async (tx) => {
+            // The authority anchor is held before these row locks. Under
+            // SERIALIZABLE the actor's locking read forces 40001 if a revoke
+            // committed while this transaction waited on the anchor.
+            const rows = await tx.$queryRaw<Array<{ role: Role }>>`
+              SELECT role FROM org_members
+              WHERE organization_id = ${resolvedOrgId} AND user_id = ${resolvedUserId}
+                AND deleted_at IS NULL FOR UPDATE`;
+            const fresh = await ctx.db.$queryRaw<Array<{ role: Role }>>`
+              SELECT role FROM org_members
+              WHERE organization_id = ${resolvedOrgId} AND user_id = ${resolvedUserId}
+                AND deleted_at IS NULL`;
+            if (Boolean(rows[0]) !== Boolean(fresh[0])) throw new AuthoritySnapshotStale();
+            existingRole = rows[0]?.role ?? null;
+            if (!existingRole) throw new Error('User is not a member of this organization');
+            if (ctx.userId) {
+              await tx.$queryRaw`
+                SELECT id FROM org_members
+                WHERE organization_id = ${resolvedOrgId} AND user_id = ${ctx.userId}
+                  AND deleted_at IS NULL FOR SHARE`;
+            }
+          },
+          lockMode: 'exclusive',
+          isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
+        },
+      ));
     },
 
     removeOrgMember: async (
@@ -757,7 +835,11 @@ export const orgMutations = {
       const resolvedUserId = await resolveUserRefArg(ctx.db, { ref: userRef, id: userId });
       // #1544: one SERIALIZABLE transaction for the read, the last-owner count
       // and the revocation, for the reason updateOrgMember gives above.
-      await retryOnSerializationFailure(() => ctx.db.$transaction(async (tx) => {
+      await retryOnSerializationFailure(() => withAuthorizedTx(
+        ctx,
+        [{ kind: 'org', id: resolvedOrgId }, { kind: 'user', id: resolvedUserId }],
+        (txCtx) => requireOrgRole(txCtx, resolvedOrgId, 'ADMIN'),
+        async (tx) => {
         const member = await tx.orgMember.findUniqueOrThrow({
           where: { organizationId_userId: { organizationId: resolvedOrgId, userId: resolvedUserId } },
         });
@@ -776,6 +858,7 @@ export const orgMutations = {
             throw new Error('Cannot remove the last owner of an organization');
           }
         }
+        await assertIssuerInvitationSnapshotFresh(tx, ctx.db, resolvedOrgId, resolvedUserId);
         // Revocation is a SOFT delete (OrgMember carries the audit tuple; the
         // platform hard-deletes only pure join rows — cor:dmo:010:04). Every
         // read/auth gate filters deletedAt, and rejoin reactivates the row via
@@ -785,7 +868,30 @@ export const orgMutations = {
           where: { organizationId_userId: { organizationId: resolvedOrgId, userId: resolvedUserId } },
           data: { deletedAt: new Date(), deletedBy: ctx.userId ?? ctx.clientId ?? null },
         });
-      }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable }));
+        await revokeOrgInvitationsByIssuer(
+          tx, resolvedOrgId, resolvedUserId, ctx.userId ?? ctx.clientId ?? null,
+        );
+        },
+        {
+          lockMode: 'exclusive',
+          isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
+          afterLock: async (tx) => {
+            const rows = await tx.$queryRaw<Array<{ id: string }>>`
+              SELECT id FROM org_members
+              WHERE organization_id = ${resolvedOrgId} AND user_id = ${resolvedUserId} FOR UPDATE`;
+            const fresh = await ctx.db.$queryRaw<Array<{ id: string }>>`
+              SELECT id FROM org_members
+              WHERE organization_id = ${resolvedOrgId} AND user_id = ${resolvedUserId}`;
+            if (Boolean(rows[0]) !== Boolean(fresh[0])) throw new AuthoritySnapshotStale();
+            if (ctx.userId) {
+              await tx.$queryRaw`
+                SELECT id FROM org_members
+                WHERE organization_id = ${resolvedOrgId} AND user_id = ${ctx.userId}
+                  AND deleted_at IS NULL FOR SHARE`;
+            }
+          },
+        },
+      ));
       return true;
     },
 

@@ -18,6 +18,7 @@
  */
 
 import { GraphQLError } from 'graphql';
+import { withAuthorizedTx } from './authorizedTx.js';
 import { signJwt } from '../../../auth/jwt.js';
 import { canImpersonate, impersonationTtlSeconds } from '../../../lib/auth/impersonation.js';
 import { USER_API_KEY_LABEL_MAX_LEN } from '../../../middleware/auth.js';
@@ -135,16 +136,39 @@ export const impersonationMutations = {
 
     const ttlSeconds = impersonationTtlSeconds();
     const expiresAt = new Date(Date.now() + ttlSeconds * 1000);
-    const session = await ctx.db.impersonationSession.create({
-      data: {
-        adminUserId: ctx.userId,
-        targetUserId: targetId,
-        organizationId: orgId,
-        // Cap follows the UserApiKey label precedent — truncate, don't reject.
-        reason: reason ? reason.slice(0, USER_API_KEY_LABEL_MAX_LEN) : null,
-        expiresAt,
+    const session = await withAuthorizedTx(
+      ctx,
+      [{ kind: 'org', id: orgId }, { kind: 'user', id: targetId }],
+      async (txCtx) => {
+        if (txCtx.impersonation || !txCtx.userId) throw forbidden();
+        const currentActor = await txCtx.db.orgMember.findFirst({
+          where: { organizationId: orgId, userId: txCtx.userId, ...LIVE_ORG_MEMBERSHIP },
+          select: { role: true },
+        });
+        const currentTarget = await txCtx.db.orgMember.findFirst({
+          where: { organizationId: orgId, userId: targetId, ...LIVE_ORG_MEMBERSHIP },
+          select: { role: true },
+        });
+        const targetUser = await txCtx.db.user.findFirst({
+          where: { id: targetId, deletedAt: null }, select: { id: true },
+        });
+        if (!currentTarget || !targetUser) {
+          throw badInput('The target user is not an active member of the organization.');
+        }
+        if (!canImpersonate({
+          actorIsPlatformAdmin: isPlatformAdmin(txCtx),
+          actorOrgRole: currentActor?.role ?? null,
+          targetOrgRole: currentTarget.role,
+        })) throw forbidden();
       },
-    });
+      (tx) => tx.impersonationSession.create({
+        data: {
+          adminUserId: ctx.userId!, targetUserId: targetId, organizationId: orgId,
+          reason: reason ? reason.slice(0, USER_API_KEY_LABEL_MAX_LEN) : null,
+          expiresAt,
+        },
+      }),
+    );
 
     // `sub` = target; `roles: []` — the impersonated context never inherits
     // platform roles (resolveImpersonationJwt re-asserts this server-side).

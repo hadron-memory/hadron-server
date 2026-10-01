@@ -31,45 +31,50 @@ export async function removeMemoryMember(
   db: PrismaClient,
   args: { memoryId: string; userId: string },
 ): Promise<{ memoryId: string; userId: string }> {
-  await db.$transaction(
-    async (tx) => {
-      const target = await tx.memoryMember.findUnique({
-        where: {
-          memoryId_userId: { memoryId: args.memoryId, userId: args.userId },
-        },
-        select: { role: true },
-      });
-      if (!target) return; // idempotent — no row, no-op.
+  await db.$transaction((tx) => removeMemoryMemberInTx(tx, args),
+    { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+  return { memoryId: args.memoryId, userId: args.userId };
+}
 
-      if (target.role === 'owner') {
-        const ownerCount = await tx.memoryMember.count({
-          where: { memoryId: args.memoryId, role: 'owner' },
-        });
-        if (ownerCount <= 1) {
-          throw new LastOwnerProtectedError(args.memoryId);
-        }
-      }
-
-      try {
-        await tx.memoryMember.delete({
-          where: {
-            memoryId_userId: { memoryId: args.memoryId, userId: args.userId },
-          },
-        });
-      } catch (e) {
-        // Concurrent delete between pre-read and our delete surfaces
-        // as P2025. Fold into the idempotent path — the desired end
-        // state (row absent) is already reached.
-        if (
-          e instanceof Prisma.PrismaClientKnownRequestError &&
-          e.code === 'P2025'
-        ) {
-          return;
-        }
-        throw e;
-      }
+/** Transaction body for callers that already hold the authority anchor. */
+export async function removeMemoryMemberInTx(
+  tx: Prisma.TransactionClient,
+  args: Parameters<typeof removeMemoryMember>[1],
+): Promise<{ memoryId: string; userId: string }> {
+  const target = await tx.memoryMember.findUnique({
+    where: {
+      memoryId_userId: { memoryId: args.memoryId, userId: args.userId },
     },
-    { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
-  );
+    select: { role: true },
+  });
+  if (!target) return args; // idempotent — no row, no-op.
+
+  if (target.role === 'owner') {
+    const ownerCount = await tx.memoryMember.count({
+      where: { memoryId: args.memoryId, role: 'owner' },
+    });
+    if (ownerCount <= 1) {
+      throw new LastOwnerProtectedError(args.memoryId);
+    }
+  }
+
+  try {
+    await tx.memoryMember.delete({
+      where: {
+        memoryId_userId: { memoryId: args.memoryId, userId: args.userId },
+      },
+    });
+  } catch (e) {
+    // Concurrent delete between pre-read and our delete surfaces
+    // as P2025. Fold into the idempotent path — the desired end
+    // state (row absent) is already reached.
+    if (
+      e instanceof Prisma.PrismaClientKnownRequestError &&
+      e.code === 'P2025'
+    ) {
+      return args;
+    }
+    throw e;
+  }
   return { memoryId: args.memoryId, userId: args.userId };
 }

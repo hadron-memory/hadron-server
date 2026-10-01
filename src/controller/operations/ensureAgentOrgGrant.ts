@@ -25,7 +25,7 @@
 import { Prisma, type PrismaClient } from '../../generated/prisma/index.js';
 
 export async function ensureAgentOrgGrant(
-  db: PrismaClient,
+  db: Pick<PrismaClient, 'agentOrgGrant'>,
   orgId: string,
   agentId: string,
   opts: { createdBy?: string | null } = {},

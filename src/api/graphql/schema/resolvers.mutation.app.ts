@@ -19,7 +19,7 @@ import {
   oauthSurfaceRefusal,
   oauthSurfaceRefusalMessage,
   hashAppKey,
-  mintUserApiKey,
+  mintUserApiKeyInTx,
 } from '../../../middleware/auth.js';
 import { ensureAgentOrgGrant } from '../../../controller/operations/ensureAgentOrgGrant.js';
 import { ensureAgentSubscription } from '../../../controller/operations/ensureAgentSubscription.js';
@@ -65,6 +65,7 @@ import { recordUrnRename } from '../../../lib/urnAlias.js';
 import { assertNoMintedCorpusCascade } from '../../../lib/mintedSpecPermanence.js';
 import { requireEndpointFor, requireKeyFor } from '../../../lib/aiEndpoint.js';
 import { LIVE_ORG_MEMBERSHIP } from '../../../lib/auth/liveOrgMembership.js';
+import { withAuthorizedTx } from './authorizedTx.js';
 
 /**
  * #974 / cor:agt:020:02: a soft-deleted App keeps reserving its workers'
@@ -187,29 +188,45 @@ export const appMutations = {
       // enforces OWNER-ONLY on a user-owned App — the old `if (!isPlatformAdmin)`
       // skip bypassed that owner-only rule.
       await requireOwnerOrOrgRole(ctx, existing, 'ADMIN');
-
-      // Revoke all active keys, then create a fresh one.
-      await ctx.db.appKey.updateMany({
-        where: { appId: resolvedId, revokedAt: null },
-        data: { revokedAt: new Date() },
-      });
       const rawKey = `${APP_KEY_PREFIX}${randomBytes(32).toString('hex')}`;
       const keyHash = createHash('sha256').update(rawKey).digest('hex');
-      await ctx.db.appKey.create({
-        data: {
-          id: generateId(),
-          appId: resolvedId,
-          keyHash,
-          keyPreview: rawKey.slice(-4),
-          label: 'Regenerated key',
-          createdBy: ctx.userId ?? ctx.appId ?? ctx.clientId ?? null,
+      return withAuthorizedTx(
+        ctx,
+        [{ kind: 'app', id: resolvedId }, ...(existing.organizationId
+          ? [{ kind: 'org' as const, id: existing.organizationId }]
+          : [{ kind: 'user' as const, id: existing.ownerUserId! }])],
+        async (txCtx) => {
+          const current = await txCtx.db.app.findUniqueOrThrow({ where: { id: resolvedId } });
+          if (current.organizationId !== existing.organizationId || current.ownerUserId !== existing.ownerUserId) {
+            throw new Error('App ownership changed; retry key regeneration');
+          }
+          await requireOwnerOrOrgRole(txCtx, current, 'ADMIN');
         },
-      });
-      const fresh = await ctx.db.app.findUniqueOrThrow({
-        where: { id: resolvedId },
-        include: APP_INCLUDE,
-      });
-      return { app: fresh, rawKey };
+        async (tx) => {
+          // Revocation and replacement are one atomic authority change.
+          await tx.appKey.updateMany({
+            where: { appId: resolvedId, revokedAt: null },
+            data: { revokedAt: new Date() },
+          });
+          await tx.appKey.create({
+            data: {
+              id: generateId(),
+              appId: resolvedId,
+              keyHash,
+              keyPreview: rawKey.slice(-4),
+              label: 'Regenerated key',
+              createdBy: ctx.userId ?? ctx.appId ?? ctx.clientId ?? null,
+            },
+          });
+          const fresh = await tx.app.findUniqueOrThrow({
+            where: { id: resolvedId }, include: APP_INCLUDE,
+          });
+          return { app: fresh, rawKey };
+        },
+        { lockMode: 'exclusive', afterLock: async (tx) => {
+          await tx.$queryRaw`SELECT id FROM apps WHERE id = ${resolvedId} FOR SHARE`;
+        } },
+      );
     },
 
     createApp: async (
@@ -831,10 +848,28 @@ export const appMutations = {
       // Soft-delete the App. Secrets are org/user-owned only (#696), so there
       // are no app-owned secrets to sweep here anymore. The deletedAt-null guard
       // keeps the original deletedAt under a concurrent double-delete.
-      await ctx.db.app.updateMany({
-        where: { id: resolvedId, deletedAt: null },
-        data: { deletedAt: new Date() },
-      });
+      await withAuthorizedTx(
+        ctx,
+        [
+          { kind: 'app', id: resolvedId },
+          ...(app.organizationId ? [{ kind: 'org' as const, id: app.organizationId }] : []),
+          ...(app.ownerUserId ? [{ kind: 'user' as const, id: app.ownerUserId }] : []),
+        ],
+        async (txCtx) => {
+          const current = await txCtx.db.app.findUniqueOrThrow({ where: { id: resolvedId } });
+          if (current.organizationId !== app.organizationId || current.ownerUserId !== app.ownerUserId) {
+            throw new Error('App ownership changed; retry deletion');
+          }
+          await requireOwnerOrOrgRole(txCtx, current, 'ADMIN');
+        },
+        (tx) => tx.app.updateMany({
+          where: { id: resolvedId, deletedAt: null },
+          data: { deletedAt: new Date() },
+        }).then(() => undefined),
+        { lockMode: 'exclusive', afterLock: async (tx) => {
+          await tx.$queryRaw`SELECT id FROM apps WHERE id = ${resolvedId} FOR UPDATE`;
+        } },
+      );
       return true;
     },
 
@@ -935,9 +970,32 @@ export const appMutations = {
       // users.
       const resolvedUserId = await resolveUserRefArg(ctx.db, { ref: userRef, id: userId });
       try {
-        await ensureAppMember(ctx.db, resolvedAppId, resolvedUserId, role, {
-          actorId: ctx.userId ?? null,
-        });
+        await withAuthorizedTx(
+          ctx,
+          [
+            { kind: 'app', id: resolvedAppId }, { kind: 'user', id: resolvedUserId },
+            ...(app.organizationId ? [{ kind: 'org' as const, id: app.organizationId }] : []),
+            ...(app.ownerUserId ? [{ kind: 'user' as const, id: app.ownerUserId }] : []),
+          ],
+          async (txCtx) => {
+            const current = await txCtx.db.app.findUniqueOrThrow({ where: { id: resolvedAppId } });
+            if (current.organizationId !== app.organizationId || current.ownerUserId !== app.ownerUserId) {
+              throw new Error('App ownership changed; retry member management');
+            }
+            if (!(await callerManagesAppMembers(txCtx, current, resolvedAppId))) {
+              throw new Error('Forbidden: only org admins or App owners can manage members');
+            }
+          },
+          (tx) => ensureAppMember(tx, resolvedAppId, resolvedUserId, role, {
+            actorId: ctx.userId ?? null,
+          }),
+          { afterLock: async (tx) => {
+            await tx.$queryRaw`SELECT id FROM apps WHERE id = ${resolvedAppId} FOR SHARE`;
+            await tx.$queryRaw`
+              SELECT user_id FROM app_members
+              WHERE app_id = ${resolvedAppId} AND user_id = ${ctx.userId} FOR SHARE`;
+          } },
+        );
       } catch (e: unknown) {
         // Surface typed errors with their canonical messages so the portal
         // can render plain-language banners (Constitution Principle III).
@@ -1003,9 +1061,32 @@ export const appMutations = {
         if (resolvedUserId !== ctx.userId) throw forbidRemove();
       }
 
-      await ctx.db.appMember
-        .delete({ where: { appId_userId: { appId: resolvedAppId, userId: resolvedUserId } } })
-        .catch(() => {}); // idempotent: missing row → no-op
+      await withAuthorizedTx(
+        ctx,
+        [
+          { kind: 'app', id: resolvedAppId }, { kind: 'user', id: resolvedUserId },
+          ...(app.organizationId ? [{ kind: 'org' as const, id: app.organizationId }] : []),
+          ...(app.ownerUserId ? [{ kind: 'user' as const, id: app.ownerUserId }] : []),
+        ],
+        async (txCtx) => {
+          const current = await txCtx.db.app.findUniqueOrThrow({ where: { id: resolvedAppId } });
+          if (current.organizationId !== app.organizationId || current.ownerUserId !== app.ownerUserId) {
+            throw new Error('App ownership changed; retry member management');
+          }
+          if (!(await callerManagesAppMembers(txCtx, current, resolvedAppId)) && resolvedUserId !== txCtx.userId) {
+            throw forbidRemove();
+          }
+        },
+        (tx) => tx.appMember.deleteMany({
+          where: { appId: resolvedAppId, userId: resolvedUserId },
+        }).then(() => undefined),
+        { lockMode: 'exclusive', afterLock: async (tx) => {
+          await tx.$queryRaw`SELECT id FROM apps WHERE id = ${resolvedAppId} FOR SHARE`;
+          await tx.$queryRaw`
+            SELECT user_id FROM app_members
+            WHERE app_id = ${resolvedAppId} AND user_id = ${resolvedUserId} FOR UPDATE`;
+        } },
+      );
       return true;
     },
 
@@ -1091,15 +1172,31 @@ export const appMutations = {
       const rawKey = APP_KEY_PREFIX + randomBytes(32).toString('hex');
       const keyHash = hashAppKey(rawKey);
       const keyPreview = rawKey.slice(0, 12) + '...' + rawKey.slice(-4);
-      const appKey = await ctx.db.appKey.create({
-        data: {
-          appId: resolvedAppId,
-          keyHash,
-          keyPreview,
-          label: label ?? null,
-          createdBy: ctx.userId ?? null,
+      const appKey = await withAuthorizedTx(
+        ctx,
+        [{ kind: 'app', id: resolvedAppId }, ...(app.organizationId
+          ? [{ kind: 'org' as const, id: app.organizationId }]
+          : [{ kind: 'user' as const, id: app.ownerUserId! }])],
+        async (txCtx) => {
+          const current = await txCtx.db.app.findUniqueOrThrow({ where: { id: resolvedAppId } });
+          if (current.organizationId !== app.organizationId || current.ownerUserId !== app.ownerUserId) {
+            throw new Error('App ownership changed; retry key creation');
+          }
+          await requireOwnerOrOrgRole(txCtx, current, 'ADMIN');
         },
-      });
+        (tx) => tx.appKey.create({
+          data: {
+            appId: resolvedAppId,
+            keyHash,
+            keyPreview,
+            label: label ?? null,
+            createdBy: ctx.userId ?? null,
+          },
+        }),
+        { afterLock: async (tx) => {
+          await tx.$queryRaw`SELECT id FROM apps WHERE id = ${resolvedAppId} FOR SHARE`;
+        } },
+      );
       return { key: appKey, rawKey };
     },
 
@@ -1109,7 +1206,23 @@ export const appMutations = {
         include: { app: true },
       });
       await requireOwnerOrOrgRole(ctx, key.app, 'ADMIN');
-      await ctx.db.appKey.update({ where: { id }, data: { revokedAt: new Date() } });
+      await withAuthorizedTx(
+        ctx,
+        [
+          { kind: 'app', id: key.app.id },
+          ...(key.app.organizationId ? [{ kind: 'org' as const, id: key.app.organizationId }] : []),
+          ...(key.app.ownerUserId ? [{ kind: 'user' as const, id: key.app.ownerUserId }] : []),
+        ],
+        async (txCtx) => {
+          const current = await txCtx.db.app.findUniqueOrThrow({ where: { id: key.app.id } });
+          if (current.organizationId !== key.app.organizationId || current.ownerUserId !== key.app.ownerUserId) {
+            throw new Error('App ownership changed; retry key revocation');
+          }
+          await requireOwnerOrOrgRole(txCtx, current, 'ADMIN');
+        },
+        (tx) => tx.appKey.update({ where: { id }, data: { revokedAt: new Date() } }),
+        { lockMode: 'exclusive' },
+      );
       return true;
     },
 
@@ -1150,12 +1263,21 @@ export const appMutations = {
       // Single insert path shared with the OAuth /token endpoint
       // (FR-015) — both call mintUserApiKey so the prefix, entropy,
       // hashing primitive, and persisted-field shape never drift.
-      const { rawKey, userApiKey } = await mintUserApiKey(ctx.db, {
-        userId: ctx.userId,
-        label: label ?? null,
-        createdBy: ctx.userId,
-        issuedVia: 'portal',
-      });
+      const { rawKey, userApiKey } = await withAuthorizedTx(
+        ctx,
+        [{ kind: 'user', id: ctx.userId }],
+        async (txCtx) => {
+          if (txCtx.userId !== ctx.userId || txCtx.impersonation) {
+            throw new GraphQLError('Forbidden', { extensions: { code: 'FORBIDDEN' } });
+          }
+        },
+        (tx) => mintUserApiKeyInTx(tx, {
+          userId: ctx.userId!,
+          label: label ?? null,
+          createdBy: ctx.userId!,
+          issuedVia: 'portal',
+        }),
+      );
       return { userApiKey, rawKey };
     },
 
@@ -1188,18 +1310,28 @@ export const appMutations = {
       // (a) match the id, (b) are owned by the caller, AND
       // (c) are not already revoked. Returns count=0 for any
       // non-matching row, which we disambiguate below.
-      await ctx.db.userApiKey.updateMany({
-        where: { id, userId: ctx.userId, revokedAt: null },
-        data: { revokedAt: new Date() },
-      });
+      const row = await withAuthorizedTx(
+        ctx,
+        [{ kind: 'user', id: ctx.userId }],
+        async (txCtx) => {
+          if (txCtx.userId !== ctx.userId || txCtx.impersonation) {
+            throw new GraphQLError('Forbidden', { extensions: { code: 'FORBIDDEN' } });
+          }
+        },
+        async (tx) => {
+          await tx.userApiKey.updateMany({
+            where: { id, userId: ctx.userId, revokedAt: null },
+            data: { revokedAt: new Date() },
+          });
+          return tx.userApiKey.findFirst({ where: { id, userId: ctx.userId } });
+        },
+        { lockMode: 'exclusive' },
+      );
       // Read back via findFirst scoped to `{ id, userId }`. If the row
       // is missing, the id is either unknown OR belongs to a different
       // user — collapse both to NOT_FOUND. If present, return it
       // unchanged (idempotent path: revokedAt was already set, so
       // updateMany did nothing).
-      const row = await ctx.db.userApiKey.findFirst({
-        where: { id, userId: ctx.userId },
-      });
       if (!row) {
         throw new GraphQLError(`UserApiKey ${id} not found.`, {
           extensions: { code: 'NOT_FOUND' },

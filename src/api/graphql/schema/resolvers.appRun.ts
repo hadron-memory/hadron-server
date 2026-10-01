@@ -29,6 +29,7 @@ import { AppRunNotFoundError } from '../../../lib/entityRef/errors.js';
 import { isId } from '../../../lib/entityRef/shape.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { type Context, requireOrgRole, requireOwnerOrOrgRole, isPlatformAdmin } from './resolvers.helpers.js';
+import { withAuthorizedTx } from './authorizedTx.js';
 
 /** Orderable columns on the appRuns list (#833). Mirrors the SDL enum. */
 export type AppRunSortField = 'createdAt' | 'startedAt' | 'finishedAt' | 'status';
@@ -628,8 +629,20 @@ export const appRunMutations = {
         extensions: { code: 'BAD_USER_INPUT' },
       });
     }
-    const webhook = await ctx.db.agentWebhook.create({
-      data: {
+    const webhook = await withAuthorizedTx(
+      ctx,
+      [{ kind: 'org', id: app.organizationId }, { kind: 'app', id: app.id },
+        ...(agentId ? [{ kind: 'agent' as const, id: agentId }] : [])],
+      async (txCtx) => {
+        const currentApp = await requireScheduleAdmin(txCtx, input.appRef);
+        if (currentApp.id !== app.id || currentApp.organizationId !== app.organizationId) {
+          throw new Error('App scope changed; retry webhook creation');
+        }
+        if (agentId) await resolveInstalledAgent(txCtx, app.id, input.agentRef);
+        if (input.scopeRef?.trim()) await resolveScopeForTrigger(txCtx, app.id, input.scopeRef);
+      },
+      (tx) => tx.agentWebhook.create({
+        data: {
         id: generateId(),
         organizationId: app.organizationId,
         appId: app.id,
@@ -645,8 +658,12 @@ export const appRunMutations = {
         aiConfigName: input.aiConfigName ?? null,
         enabled: input.enabled ?? true,
         createdBy: ctx.userId ?? ctx.clientId ?? null,
-      },
-    });
+        },
+      }),
+      { afterLock: async (tx) => {
+        await tx.$queryRaw`SELECT id FROM apps WHERE id = ${app.id} FOR SHARE`;
+      } },
+    );
     const token = await mintWebhookPlatformToken(webhook.id);
     return { webhook, path: `/hooks/${webhook.secret}/${webhook.name}`, token };
   },
@@ -656,10 +673,24 @@ export const appRunMutations = {
     const existing = await ctx.db.agentWebhook.findFirst({ where: { id, deletedAt: null } });
     if (!existing) throw new GraphQLError('Webhook not found.', { extensions: { code: 'NOT_FOUND' } });
     await requireOrgRole(ctx, existing.organizationId, 'ADMIN');
-    const webhook = await ctx.db.agentWebhook.update({
-      where: { id },
-      data: { secret: generateWebhookSecret(), updatedBy: ctx.userId ?? ctx.clientId ?? null },
-    });
+    const webhook = await withAuthorizedTx(
+      ctx,
+      [{ kind: 'org', id: existing.organizationId }, { kind: 'app', id: existing.appId }],
+      async (txCtx) => {
+        await requireOrgRole(txCtx, existing.organizationId, 'ADMIN');
+        const current = await txCtx.db.agentWebhook.findFirst({ where: { id, deletedAt: null } });
+        if (!current || current.appId !== existing.appId) {
+          throw new GraphQLError('Webhook not found.', { extensions: { code: 'NOT_FOUND' } });
+        }
+      },
+      (tx) => tx.agentWebhook.update({
+        where: { id },
+        data: { secret: generateWebhookSecret(), updatedBy: ctx.userId ?? ctx.clientId ?? null },
+      }),
+      { afterLock: async (tx) => {
+        await tx.$queryRaw`SELECT id FROM agent_webhooks WHERE id = ${id} FOR UPDATE`;
+      } },
+    );
     const token = await mintWebhookPlatformToken(webhook.id);
     return { webhook, path: `/hooks/${webhook.secret}/${webhook.name}`, token };
   },
@@ -668,10 +699,20 @@ export const appRunMutations = {
     const existing = await ctx.db.agentWebhook.findFirst({ where: { id, deletedAt: null } });
     if (!existing) throw new GraphQLError('Webhook not found.', { extensions: { code: 'NOT_FOUND' } });
     await requireOrgRole(ctx, existing.organizationId, 'ADMIN');
-    await ctx.db.agentWebhook.update({
-      where: { id },
-      data: { deletedAt: new Date(), deletedBy: ctx.userId ?? ctx.clientId ?? null, enabled: false },
-    });
+    await withAuthorizedTx(
+      ctx,
+      [{ kind: 'org', id: existing.organizationId }, { kind: 'app', id: existing.appId }],
+      async (txCtx) => {
+        await requireOrgRole(txCtx, existing.organizationId, 'ADMIN');
+      },
+      (tx) => tx.agentWebhook.updateMany({
+        where: { id, deletedAt: null },
+        data: { deletedAt: new Date(), deletedBy: ctx.userId ?? ctx.clientId ?? null, enabled: false },
+      }),
+      { lockMode: 'exclusive', afterLock: async (tx) => {
+        await tx.$queryRaw`SELECT id FROM agent_webhooks WHERE id = ${id} FOR UPDATE`;
+      } },
+    );
     return true;
   },
 

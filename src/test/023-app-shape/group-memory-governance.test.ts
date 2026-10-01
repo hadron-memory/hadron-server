@@ -31,6 +31,7 @@ import {
   type MemoryForAuth,
 } from '@hadron-memory/access-control';
 import { prismaAuthDeps } from '../../lib/auth/prismaAuthDeps.js';
+import { waitForLockWaitersOfType } from '../lockWait.js';
 
 // ─────────────────────────────────────────────────────────────────────────
 // Fixture
@@ -135,6 +136,43 @@ describe('US4: group memory governance via MemoryMember', () => {
   beforeEach(async () => {
     await cleanDb(db);
     fx = await setupFixture();
+  });
+
+  it('removes a member inserted while a serializable revoker waits on its anchor', async () => {
+    const memory = await resolvers.Mutation.createMemory({}, {
+      orgId: fx.orgId, name: 'concurrent-group', memoryClass: 'group', visibility: 'GROUP',
+    }, adminCtx(fx.ownerUserId));
+    let release!: () => void;
+    let held!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const locked = new Promise<void>((resolve) => { held = resolve; });
+    const holder = db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM memories WHERE id = ${memory.id} FOR UPDATE`;
+      held();
+      await gate;
+    }, { timeout: 20_000 });
+    await locked;
+
+    const addition = resolvers.Mutation.addMemoryMember({}, {
+      memoryId: memory.id, userId: fx.u1Id, role: 'reader',
+    }, userCtx(fx.ownerUserId));
+    try {
+      await waitForLockWaitersOfType(db, 'transactionid', 1);
+      const removal = resolvers.Mutation.removeMemoryMember({}, {
+        memoryId: memory.id, userId: fx.u1Id,
+      }, userCtx(fx.ownerUserId));
+      await waitForLockWaitersOfType(db, 'advisory', 1);
+      release();
+      await holder;
+      await addition;
+      await removal;
+      expect(await db.memoryMember.findUnique({
+        where: { memoryId_userId: { memoryId: memory.id, userId: fx.u1Id } },
+      })).toBeNull();
+    } finally {
+      release();
+      await Promise.allSettled([holder, addition]);
+    }
   });
 
   it('createMemory(memoryClass: group) bootstraps the creator as the first owner', async () => {

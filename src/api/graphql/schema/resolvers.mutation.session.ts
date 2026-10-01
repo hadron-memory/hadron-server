@@ -83,6 +83,7 @@ import {
 } from './resolvers.helpers.js';
 import { assertNoMintedSpecRemoval, assertNoMintedSpecUnmark } from '../../../lib/mintedSpecPermanence.js';
 import { preserveHeartbeatIfLapsed } from '../../../lib/sessionActivity.js';
+import { withAuthorizedTx } from './authorizedTx.js';
 
 /**
  * Strip explicit GraphQL nulls from a CalendarEventTimeInput so the tool's
@@ -1790,10 +1791,21 @@ export const sessionMutations = {
     deleteExchangeConnection: async (_: unknown, { id }: { id: string }, ctx: Context) => {
       const connection = await ctx.db.exchangeConnection.findUniqueOrThrow({ where: { id } });
       await requireOrgRole(ctx, connection.organizationId, 'ADMIN');
-      await ctx.db.exchangeConnection.update({
-        where: { id },
-        data: { deletedAt: new Date(), deletedBy: ctx.userId ?? ctx.clientId ?? null },
-      });
+      await withAuthorizedTx(
+        ctx,
+        [{ kind: 'connection', id }, { kind: 'org', id: connection.organizationId }],
+        (txCtx) => requireOrgRole(txCtx, connection.organizationId, 'ADMIN'),
+        (tx) => tx.exchangeConnection.update({
+          where: { id },
+          data: { deletedAt: new Date(), deletedBy: ctx.userId ?? ctx.clientId ?? null },
+        }),
+        {
+          lockMode: 'exclusive',
+          afterLock: async (tx) => {
+            await tx.$queryRaw`SELECT id FROM exchange_connections WHERE id = ${id} FOR UPDATE`;
+          },
+        },
+      );
       // Tear down the provider tool's side (token + Graph subscriptions) —
       // best-effort fire-and-forget (deleteToolConnection never throws); the
       // soft-delete above already committed and must not wait on the tool.

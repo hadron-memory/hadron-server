@@ -5,7 +5,7 @@ import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { resolveNodeRef } from '../../../lib/entityRef/nodeRef.js';
 import { recordUrnRename } from '../../../lib/urnAlias.js';
 import { cleanDb } from '../../../test/helpers.js';
-import { waitForLockWaiters } from '../../../test/lockWait.js';
+import { waitForLockWaiters, waitForLockWaitersOfType } from '../../../test/lockWait.js';
 import { resolvers, type Context } from './resolvers.js';
 
 let owner: { id: string };
@@ -23,7 +23,7 @@ beforeEach(async () => {
   await cleanDb(db);
   owner = await db.user.create({ data: { id: generateId(), githubId: 147601, githubUsername: 'transfer-owner', handle: 'transfer-owner', roles: ['READER'] } });
   receiver = await db.user.create({ data: { id: generateId(), githubId: 147602, githubUsername: 'transfer-receiver', handle: 'transfer-receiver', roles: ['READER'] } });
-  outsider = await db.user.create({ data: { id: generateId(), githubId: 147603, githubUsername: 'transfer-outsider', handle: 'transfer-outsider', roles: ['READER'] } });
+  outsider = await db.user.create({ data: { id: generateId(), githubId: 147603, githubUsername: 'transfer-outsider', handle: 'transfer-outsider', roles: ['ADMIN'] } });
   org = await db.organization.create({ data: { id: generateId(), name: 'Transfer Org', urn: 'transfer-org' } });
   await db.orgMember.create({ data: { id: generateId(), organizationId: org.id, userId: owner.id, role: 'ADMIN' } });
   memory = await db.memory.create({ data: {
@@ -34,6 +34,38 @@ beforeEach(async () => {
 });
 
 describe('transferMemoryOwnership', () => {
+  it('transfer waits for an in-flight share, then refuses the new dependent', async () => {
+    await db.memory.update({ where: { id: memory.id }, data: { class: 'personal' } });
+    let release!: () => void;
+    let held!: () => void;
+    const holdGate = new Promise<void>((resolve) => { release = resolve; });
+    const locked = new Promise<void>((resolve) => { held = resolve; });
+    const holder = db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM memories WHERE id = ${memory.id} FOR UPDATE`;
+      held();
+      await holdGate;
+    }, { timeout: 20_000 });
+    await locked;
+
+    const share = resolvers.Mutation.createMemoryShare(null, {
+      memoryId: memory.id, granteeId: receiver.id, role: 'reader',
+    }, ctx(owner.id));
+    try {
+      await waitForLockWaitersOfType(db, 'transactionid', 1);
+      const move = transfer({ memoryRef: memory.id, orgRef: org.id, targetClass: 'knowledge' });
+      await waitForLockWaitersOfType(db, 'advisory', 1);
+      release();
+      await holder;
+      await share;
+      await expect(move).rejects.toMatchObject({ extensions: { code: 'MEMORY_TRANSFER_DEPENDENTS' } });
+      expect((await db.memory.findUniqueOrThrow({ where: { id: memory.id } })).ownerUserId).toBe(owner.id);
+      expect(await db.memoryShare.count({ where: { memoryId: memory.id, granteeId: receiver.id } })).toBe(1);
+    } finally {
+      release();
+      await Promise.allSettled([holder, share]);
+    }
+  });
+
   it('previews without writes, then moves a minted corpus and preserves old citations and an audit log', async () => {
     const input = { memoryRef: memory.id, orgRef: org.id, targetClass: 'knowledge' };
     const preview = await transfer({ ...input, dryRun: true });
@@ -343,7 +375,7 @@ describe('transferMemoryOwnership', () => {
     });
   });
 
-  it('serializes a pending Channel creation behind a transfer of its host', async () => {
+  it('serializes a pending Channel creation with transfer of its host', async () => {
     await transfer({ memoryRef: memory.id, orgRef: org.id, targetClass: 'knowledge' });
     const nextOrg = await db.organization.create({ data: {
       id: generateId(), name: 'Concurrent Channel Owner', urn: 'concurrent-channel-owner',
@@ -362,9 +394,19 @@ describe('transferMemoryOwnership', () => {
       void pendingCreate.catch(() => {});
       await waitForLockWaiters(db, 2);
     }, { timeout: 10_000 });
-    await expect(pendingTransfer!).resolves.toMatchObject({ applied: true });
-    await expect(pendingCreate!).rejects.toMatchObject({ name: 'MemoryNotFoundError' });
-    expect(await db.channel.count({ where: { memoryId: memory.id } })).toBe(0);
+    const [moved, created] = await Promise.allSettled([pendingTransfer!, pendingCreate!]);
+    const current = await db.memory.findUniqueOrThrow({ where: { id: memory.id } });
+    if (moved.status === 'fulfilled') {
+      expect(moved.value).toMatchObject({ applied: true });
+      expect(created.status).toBe('rejected');
+      expect(await db.channel.count({ where: { memoryId: memory.id } })).toBe(0);
+      expect(current.organizationId).toBe(nextOrg.id);
+    } else {
+      expect(moved.reason).toMatchObject({ extensions: { code: 'MEMORY_TRANSFER_DEPENDENTS' } });
+      expect(created.status).toBe('fulfilled');
+      expect(await db.channel.count({ where: { memoryId: memory.id } })).toBe(1);
+      expect(current.organizationId).toBe(org.id);
+    }
   });
 
   it('does not revive a tombstoned Channel after its host transfers', async () => {

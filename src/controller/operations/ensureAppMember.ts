@@ -22,7 +22,7 @@
  * OrgMember invite flow.
  */
 
-import type { PrismaClient } from '../../generated/prisma/index.js';
+import type { Prisma, PrismaClient } from '../../generated/prisma/index.js';
 import { getPrimaryAgentId } from '../../lib/appAgent.js';
 
 export class InvalidRoleError extends Error {
@@ -59,7 +59,7 @@ type InstallationPolicy = {
 };
 
 export async function ensureAppMember(
-  db: PrismaClient,
+  db: PrismaClient | Prisma.TransactionClient,
   appId: string,
   userId: string,
   role: string,

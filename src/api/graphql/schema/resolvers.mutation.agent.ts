@@ -66,6 +66,7 @@ import {
   AGENT_INCLUDE,
 } from './resolvers.helpers.js';
 import { recordUrnRename } from '../../../lib/urnAlias.js';
+import { withAuthorizedTx } from './authorizedTx.js';
 import { assertNoMintedCorpusRemoval, reclaimTombstonedMemory } from '../../../lib/mintedSpecPermanence.js';
 
 /**
@@ -890,9 +891,25 @@ export const agentMutations = {
         });
       }
 
-      await ensureAgentOrgGrant(ctx.db, resolvedOrgId, resolvedAgentId, {
-        createdBy: ctx.userId ?? ctx.clientId ?? null,
-      });
+      await withAuthorizedTx(
+        ctx,
+        [{ kind: 'org', id: resolvedOrgId }, { kind: 'agent', id: resolvedAgentId }],
+        async (txCtx) => {
+          await requireOrgRole(txCtx, resolvedOrgId, 'ADMIN');
+          const current = await txCtx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
+          if (current.organizationId === resolvedOrgId || current.visibility !== 'PUBLIC') {
+            throw new GraphQLError('Only PUBLIC agents from another organization can be subscribed to.', {
+              extensions: { code: 'AGENT_NOT_PUBLIC', agentId: resolvedAgentId },
+            });
+          }
+        },
+        (tx) => ensureAgentOrgGrant(tx, resolvedOrgId, resolvedAgentId, {
+          createdBy: ctx.userId ?? ctx.clientId ?? null,
+        }),
+        { afterLock: async (tx) => {
+          await tx.$queryRaw`SELECT id FROM agents WHERE id = ${resolvedAgentId} FOR SHARE`;
+        } },
+      );
 
       const grant = await ctx.db.agentOrgGrant.findUniqueOrThrow({
         where: { orgId_agentId: { orgId: resolvedOrgId, agentId: resolvedAgentId } },
@@ -926,22 +943,37 @@ export const agentMutations = {
 
       await requireAgentOrgGrantRevokeRole(ctx, resolvedOrgId, agent);
 
-      await ctx.db.agentOrgGrant.updateMany({
-        where: {
-          orgId: resolvedOrgId,
-          agentId: resolvedAgentId,
-          revokedAt: null,
+      const grant = await withAuthorizedTx(
+        ctx,
+        [
+          { kind: 'org', id: resolvedOrgId },
+          { kind: 'agent', id: resolvedAgentId },
+          ...(agent.organizationId ? [{ kind: 'org' as const, id: agent.organizationId }] : []),
+          ...(agent.ownerUserId ? [{ kind: 'user' as const, id: agent.ownerUserId }] : []),
+        ],
+        async (txCtx) => {
+          const current = await txCtx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
+          if (current.organizationId !== agent.organizationId || current.ownerUserId !== agent.ownerUserId) {
+            throw new Error('Agent ownership changed; retry the operation');
+          }
+          await requireAgentOrgGrantRevokeRole(txCtx, resolvedOrgId, current);
         },
-        data: {
-          revokedAt: new Date(),
-          revokedBy: ctx.userId ?? null,
-          updatedBy: ctx.userId ?? ctx.clientId ?? null,
+        async (tx) => {
+          await tx.agentOrgGrant.updateMany({
+            where: { orgId: resolvedOrgId, agentId: resolvedAgentId, revokedAt: null },
+            data: {
+              revokedAt: new Date(), revokedBy: ctx.userId ?? null,
+              updatedBy: ctx.userId ?? ctx.clientId ?? null,
+            },
+          });
+          return tx.agentOrgGrant.findUnique({
+            where: { orgId_agentId: { orgId: resolvedOrgId, agentId: resolvedAgentId } },
+          });
         },
-      });
-
-      const grant = await ctx.db.agentOrgGrant.findUnique({
-        where: { orgId_agentId: { orgId: resolvedOrgId, agentId: resolvedAgentId } },
-      });
+        { lockMode: 'exclusive', afterLock: async (tx) => {
+          await tx.$queryRaw`SELECT id FROM agents WHERE id = ${resolvedAgentId} FOR SHARE`;
+        } },
+      );
       if (!grant) {
         throw new GraphQLError('AgentOrgGrant not found for this organization and Agent.', {
           extensions: {

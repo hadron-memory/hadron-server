@@ -9,10 +9,11 @@
  * SERIALIZABLE transaction, matching deleteUser, so Postgres aborts one side
  * and its retry re-decides on the winner's committed state.
  *
- * Staging: a third transaction holds both owner rows `FOR SHARE`. Both calls
- * read and count freely, then block on their own write. The barrier waits until
- * both are blocked, which proves both counted two owners, and only then releases
- * them. Without the fix both writes commit; that is the mutation control.
+ * #1551 adds an exclusive org authority anchor to removals and demotions.
+ * Contenders now serialize before their gate and owner count, so the old
+ * two-row-lock barrier cannot be reached by both calls at once. Hold the org
+ * row until the first call has its org anchor and waits on that row; then
+ * prove the second call waits on the anchor before releasing the row.
  */
 import { describe, it, expect, beforeEach } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
@@ -34,42 +35,43 @@ const ctx = (userId: string): Context => ({ db, userId, roles: ['READER'] }) as 
 const liveOwners = () =>
   db.orgMember.count({ where: { organizationId: org.id, role: 'OWNER', deletedAt: null } });
 
-/**
- * Holds both owner rows `FOR SHARE` until the returned `release` is called.
- * Reads pass this lock; each racing call's write to an owner row waits on it.
- */
-async function holdOwnerRows(): Promise<{ release: () => void; done: Promise<unknown> }> {
-  let release!: () => void;
-  const gate = new Promise<void>((r) => { release = r; });
-  let locked!: () => void;
-  const isLocked = new Promise<void>((r) => { locked = r; });
-  const done = db.$transaction(async (tx) => {
-    await tx.$queryRaw`
-      SELECT user_id FROM org_members
-      WHERE organization_id = ${org.id} AND role = 'OWNER' AND deleted_at IS NULL
-      FOR SHARE`;
-    locked();
-    await gate;
-  }, { timeout: 20_000 });
-  await isLocked;
-  return { release, done };
-}
-
-/**
- * Runs two owner-lowering operations against the held rows, releases them once
- * both are blocked on their writes, and returns both outcomes.
- */
+/** Run two owner-lowering operations concurrently and return both outcomes. */
 async function race(
   first: () => Promise<unknown>,
   second: () => Promise<unknown>,
 ): Promise<PromiseSettledResult<unknown>[]> {
-  const holder = await holdOwnerRows();
-  const outcomes = Promise.allSettled([first(), second()]);
-  // Both calls have counted two live owners and are now waiting to write.
-  await waitForLockWaitersOfType(db, 'transactionid', 2);
-  holder.release();
-  await holder.done;
-  return outcomes;
+  let release!: () => void;
+  let held!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const locked = new Promise<void>((resolve) => { held = resolve; });
+  const holder = db.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT id FROM organizations WHERE id = ${org.id} FOR UPDATE`;
+    held();
+    await gate;
+  }, { timeout: 20_000 });
+  await locked;
+
+  let firstOutcome: Promise<PromiseSettledResult<unknown>> | undefined;
+  let outcomes: Promise<PromiseSettledResult<unknown>[]> | undefined;
+  try {
+    firstOutcome = first().then(
+      (value): PromiseFulfilledResult<unknown> => ({ status: 'fulfilled', value }),
+      (reason): PromiseRejectedResult => ({ status: 'rejected', reason }),
+    );
+    await waitForLockWaitersOfType(db, 'transactionid', 1);
+    const secondOutcome = second().then(
+      (value): PromiseFulfilledResult<unknown> => ({ status: 'fulfilled', value }),
+      (reason): PromiseRejectedResult => ({ status: 'rejected', reason }),
+    );
+    outcomes = Promise.all([firstOutcome, secondOutcome]);
+    await waitForLockWaitersOfType(db, 'advisory', 1);
+    release();
+    await holder;
+    return outcomes;
+  } finally {
+    release();
+    await Promise.allSettled([holder, firstOutcome, outcomes]);
+  }
 }
 
 beforeEach(async () => {

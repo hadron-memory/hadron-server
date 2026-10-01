@@ -4,6 +4,8 @@ import { deleteToolConnection } from '../../lib/emailClient.js';
 import { deleteSecretsForOwner } from '../../lib/secrets.js';
 import { releasePrincipal } from '../../lib/principal/mintPrincipal.js';
 import { softDeleteOrganizationCore } from './softDeleteOrganization.js';
+import { assertIssuerInvitationSnapshotFresh, revokeOrgInvitationsByIssuer } from '../../lib/auth/revokeOrgInvitations.js';
+import { AuthoritySnapshotStale, lockAuthorityAnchors } from '../../lib/auth/authorityAnchors.js';
 import { retryOnSerializationFailure } from '../../lib/serializableRetry.js';
 import { assertNoMintedCorpusCascade } from '../../lib/mintedSpecPermanence.js';
 import {
@@ -35,6 +37,36 @@ export interface DeleteUserAccountArgs {
   actorUserId: string;
 }
 
+/**
+ * A SERIALIZABLE delete can retain a pre-anchor snapshot of grants inserted
+ * by a writer that committed while the delete waited. Those rows would be
+ * skipped by the sweeps below. Compare the grant identities with a fresh
+ * connection while the target-user anchor excludes new participating writes.
+ */
+async function assertUserGrantSnapshotFresh(
+  tx: Prisma.TransactionClient,
+  db: PrismaClient,
+  userId: string,
+): Promise<void> {
+  const grants = Prisma.sql`
+    SELECT grant_key FROM (
+      SELECT 'key:' || id AS grant_key FROM user_api_keys WHERE user_id = ${userId} AND revoked_at IS NULL
+      UNION ALL SELECT 'principal:' || id FROM principal_grants WHERE principal_id = ${userId}
+      UNION ALL SELECT 'share:' || memory_id || ':' || grantee_id FROM memory_shares
+        WHERE grantee_id = ${userId} OR grantor_id = ${userId}
+      UNION ALL SELECT 'member:' || memory_id FROM memory_members WHERE user_id = ${userId}
+      UNION ALL SELECT 'app-member:' || app_id FROM app_members WHERE user_id = ${userId}
+      UNION ALL SELECT 'agent-sub:' || agent_id FROM agent_subscriptions WHERE user_id = ${userId}
+      UNION ALL SELECT 'connection:' || id FROM exchange_connections WHERE user_id = ${userId}
+      UNION ALL SELECT 'connection-grant:' || id FROM connection_grants WHERE granted_by_user_id = ${userId}
+    ) AS user_grants ORDER BY grant_key`;
+  const snapshot = await tx.$queryRaw<Array<{ grant_key: string }>>(grants);
+  const fresh = await db.$queryRaw<Array<{ grant_key: string }>>(grants);
+  if (snapshot.length !== fresh.length ||
+      snapshot.some((row, index) => row.grant_key !== fresh[index].grant_key)) {
+    throw new AuthoritySnapshotStale();
+  }
+}
 /**
  * Self-serve account deletion (issue #662; Apple App Store 5.1.1(v) + GDPR
  * erasure posture). One SERIALIZABLE transaction (the org-owner blocking check
@@ -83,13 +115,17 @@ export async function deleteUserAccount(
   db: PrismaClient,
   { targetUserId, actorUserId }: DeleteUserAccountArgs,
 ): Promise<void> {
-  // Retried as a whole on a serialization abort, with jittered backoff so
-  // two transactions that abort each other do not retry in lockstep (#1544).
-  // The body is side-effect-free outside the DB (no enqueues / emails / git
-  // writes), so a re-run is safe (conventions:count-then-act-serializable-txn).
-  const { toolConnections, assetKeys } = await retryOnSerializationFailure(() =>
-    runDeletionTxn(db, targetUserId, actorUserId),
-  );
+  // Resolve org domains before opening the SERIALIZABLE transaction so every
+  // authority anchor precedes its row locks. A fresh cross-connection check
+  // after the anchors retries with the complete set if membership changed.
+  // The shared retry includes jitter for both P2034 and stale snapshots.
+  const { toolConnections, assetKeys } = await retryOnSerializationFailure(async () => {
+    const membershipScope = (await db.orgMember.findMany({
+      where: { userId: targetUserId, deletedAt: null },
+      select: { organizationId: true },
+    })).map((m) => m.organizationId).sort();
+    return runDeletionTxn(db, targetUserId, actorUserId, membershipScope);
+  });
   // Provider-sidecar teardown AFTER the commit: the tools hold their own
   // copy of the OAuth credential + change subscriptions, so deleting the
   // core ExchangeConnection rows alone would leave those live. Outside
@@ -101,12 +137,8 @@ export async function deleteUserAccount(
   }
   // Same posture for the deleted memories' files: the Asset rows went
   // with the cascade, so these keys are the last record of the bytes.
-  // Post-commit and best-effort — a dead object store must not fail an
-  // account deletion (src/lib/asset/purge.ts).
-  void purgeCollectedAssetObjects(
-    assetKeys,
-    `deleteUserAccount(${targetUserId})`,
-  );
+  // Post-commit and best-effort — a dead object store must log, not fail.
+  void purgeCollectedAssetObjects(assetKeys, `deleteUserAccount(${targetUserId})`);
 }
 
 /**
@@ -119,6 +151,7 @@ async function runDeletionTxn(
   db: PrismaClient,
   targetUserId: string,
   actorUserId: string,
+  membershipScope: string[],
 ): Promise<{
   toolConnections: Array<{ provider: string; toolConnectionId: string }>;
   /** Object-store keys of the deleted memories' assets — purged post-commit. */
@@ -127,6 +160,26 @@ async function runDeletionTxn(
   return db.$transaction(
     async (tx) => {
       const now = new Date();
+      await lockAuthorityAnchors(tx, [
+        ...membershipScope.map((id) => ({ kind: 'org' as const, id })),
+        { kind: 'user', id: targetUserId },
+        { kind: 'user', id: actorUserId },
+      ], 'exclusive');
+      const freshScope = (await db.orgMember.findMany({
+        where: { userId: targetUserId, deletedAt: null },
+        select: { organizationId: true },
+      })).map((m) => m.organizationId).sort();
+      if (freshScope.length !== membershipScope.length ||
+          freshScope.some((id, i) => id !== membershipScope[i])) {
+        throw new AuthoritySnapshotStale();
+      }
+      if (actorUserId !== targetUserId) {
+        await tx.$queryRaw`SELECT id FROM users WHERE id = ${actorUserId} FOR SHARE`;
+        const actor = await tx.user.findUnique({ where: { id: actorUserId }, select: { roles: true, deletedAt: true } });
+        if (!actor || actor.deletedAt || !actor.roles.some((r) => r === 'ADMIN' || r === 'OWNER')) {
+          throw new Error('Forbidden');
+        }
+      }
       // Lock + liveness re-check under the lock (mergeUsers precedent):
       // resolution happened in the GraphQL layer, so a concurrent delete
       // could otherwise slip between resolve and act.
@@ -135,6 +188,13 @@ async function runDeletionTxn(
         WHERE id = ${targetUserId} AND deleted_at IS NULL FOR UPDATE
       `;
       if (locked.length === 0) throw new Error('User not found');
+      await assertUserGrantSnapshotFresh(tx, db, targetUserId);
+      for (const orgId of membershipScope) {
+        await tx.$queryRaw`
+          SELECT id FROM org_members
+          WHERE organization_id = ${orgId} AND user_id = ${targetUserId} FOR UPDATE`;
+        await assertIssuerInvitationSnapshotFresh(tx, db, orgId, targetUserId);
+      }
 
       // #1468 (Holger, team chat): erasure never takes a mint-stamped corpus
       // that still holds specs with it. Refused until the corpus is handed off,
@@ -203,6 +263,9 @@ async function runDeletionTxn(
         where: { userId: targetUserId, deletedAt: null },
         data: { deletedAt: now, deletedBy: actorUserId },
       });
+      for (const orgId of membershipScope) {
+        await revokeOrgInvitationsByIssuer(tx, orgId, targetUserId, actorUserId);
+      }
 
       // ── 2. Hard-erase owned data (FK-safe order) ────────────────────
       //

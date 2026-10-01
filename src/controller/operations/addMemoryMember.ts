@@ -86,62 +86,66 @@ export async function addMemoryMember(
   if (!user || user.deletedAt) {
     throw new MemoryMemberUserMissingError(args.userId);
   }
-  return db.$transaction(
-    async (tx) => {
-      // The transfer resets the old member set under Memory FOR UPDATE. Its
-      // FK wait alone does not revoke a pre-authorized insert: lock and re-run
-      // the owner gate before this transaction can create a new member.
-      await tx.$queryRaw`SELECT id FROM memories WHERE id = ${args.memoryId} FOR SHARE`;
-      await args.authorizeLocked?.(tx);
-      const memory = await tx.memory.findUnique({
-        where: { id: args.memoryId },
-        select: { class: true, deletedAt: true },
-      });
-      if (!memory || memory.deletedAt) {
-        throw new MemoryNotFoundForMemberError(args.memoryId);
-      }
-      if (memory.class !== 'group') {
-        throw new InvalidMemoryClassForMemberError(args.memoryId, memory.class);
-      }
-      // FR-038: refuse to demote the sole remaining owner via the
-      // idempotent upsert path. Only relevant when the requested role
-      // is not `owner` — adding/keeping `owner` can never reduce the
-      // owner count.
-      if (args.role !== 'owner') {
-        const current = await tx.memoryMember.findUnique({
-          where: {
-            memoryId_userId: {
-              memoryId: args.memoryId,
-              userId: args.userId,
-            },
-          },
-          select: { role: true },
-        });
-        if (current?.role === 'owner') {
-          const ownerCount = await tx.memoryMember.count({
-            where: { memoryId: args.memoryId, role: 'owner' },
-          });
-          if (ownerCount <= 1) {
-            throw new LastOwnerProtectedError(args.memoryId);
-          }
-        }
-      }
-      return tx.memoryMember.upsert({
-        where: {
-          memoryId_userId: { memoryId: args.memoryId, userId: args.userId },
-        },
-        create: {
+  return db.$transaction((tx) => addMemoryMemberInTx(tx, args),
+    { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+}
+
+/** Transaction body for callers that already hold the authority anchor. */
+export async function addMemoryMemberInTx(
+  tx: Prisma.TransactionClient,
+  args: Parameters<typeof addMemoryMember>[1],
+): Promise<MemoryMember> {
+  // The transfer resets the old member set under Memory FOR UPDATE. Its
+  // FK wait alone does not revoke a pre-authorized insert: lock and re-run
+  // the owner gate before this transaction can create a new member.
+  await tx.$queryRaw`SELECT id FROM memories WHERE id = ${args.memoryId} FOR SHARE`;
+  await args.authorizeLocked?.(tx);
+  const memory = await tx.memory.findUnique({
+    where: { id: args.memoryId },
+    select: { class: true, deletedAt: true },
+  });
+  if (!memory || memory.deletedAt) {
+    throw new MemoryNotFoundForMemberError(args.memoryId);
+  }
+  if (memory.class !== 'group') {
+    throw new InvalidMemoryClassForMemberError(args.memoryId, memory.class);
+  }
+  // FR-038: refuse to demote the sole remaining owner via the
+  // idempotent upsert path. Only relevant when the requested role
+  // is not `owner` — adding/keeping `owner` can never reduce the
+  // owner count.
+  if (args.role !== 'owner') {
+    const current = await tx.memoryMember.findUnique({
+      where: {
+        memoryId_userId: {
           memoryId: args.memoryId,
           userId: args.userId,
-          role: args.role,
-          createdBy: args.actorId,
         },
-        update: {
-          role: args.role,
-          updatedBy: args.actorId,
-        },
+      },
+      select: { role: true },
+    });
+    if (current?.role === 'owner') {
+      const ownerCount = await tx.memoryMember.count({
+        where: { memoryId: args.memoryId, role: 'owner' },
       });
+      if (ownerCount <= 1) {
+        throw new LastOwnerProtectedError(args.memoryId);
+      }
+    }
+  }
+  return tx.memoryMember.upsert({
+    where: {
+      memoryId_userId: { memoryId: args.memoryId, userId: args.userId },
     },
-    { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
-  );
+    create: {
+      memoryId: args.memoryId,
+      userId: args.userId,
+      role: args.role,
+      createdBy: args.actorId,
+    },
+    update: {
+      role: args.role,
+      updatedBy: args.actorId,
+    },
+  });
 }

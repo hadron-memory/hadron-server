@@ -33,23 +33,24 @@ import {
 import { cloneMemoryGraph } from '../../../controller/operations/cloneMemory.js';
 import { extractParentNodeGraph } from '../../../controller/operations/extractParentNode.js';
 import { mergeMemoryGraph } from '../../../controller/operations/mergeMemories.js';
-import { deleteMemoryShare } from '../../../controller/operations/deleteMemoryShare.js';
 import {
   updateMemoryShareRole,
   MemoryShareNotFoundError,
 } from '../../../controller/operations/updateMemoryShareRole.js';
 import {
-  addMemoryMember,
+  addMemoryMemberInTx,
   InvalidMemoryClassForMemberError,
   MemoryNotFoundForMemberError,
   MemoryMemberUserMissingError,
 } from '../../../controller/operations/addMemoryMember.js';
 import {
-  updateMemoryMemberRole,
+  updateMemoryMemberRoleInTx,
   MemoryMemberNotFoundError,
   LastOwnerProtectedError,
 } from '../../../controller/operations/updateMemoryMemberRole.js';
-import { removeMemoryMember } from '../../../controller/operations/removeMemoryMember.js';
+import { removeMemoryMemberInTx } from '../../../controller/operations/removeMemoryMember.js';
+import { retryOnSerializationFailure } from '../../../lib/serializableRetry.js';
+import { AuthoritySnapshotStale } from '../../../lib/auth/authorityAnchors.js';
 import {
   type MemoryShareRole as MemoryShareRoleType,
   type MemoryMemberRole as MemoryMemberRoleType,
@@ -95,6 +96,7 @@ import {
   hasSchemePrefix,
 } from '../../../lib/urn.js';
 import { GraphQLError } from 'graphql';
+import { withAuthorizedMemoryTx } from './authorizedTx.js';
 // Spec 049 §8.5 — the memory-level lock Channel creation shares with deleteMemory.
 import { lockMemoryForChannelChange } from '../../../lib/channels.js';
 import { assertNoMintedCorpusRemoval, reclaimTombstonedMemory } from '../../../lib/mintedSpecPermanence.js';
@@ -1716,27 +1718,25 @@ export const memoryMutations = {
       // memory's visibility and tenancy, the agent's visibility — is re-read
       // under those locks, so no concurrent narrowing or publication can be
       // stale by the time the grant is persisted.
-      await ctx.db.$transaction(async (tx) => {
-      const { memory, agent: lockedAgent } = await lockAttachmentPair(
-        tx,
-        resolvedMemoryId,
-        resolvedAgentId,
-        { memoryRef, agentRef },
-      );
-      const txCtx = { ...ctx, db: tx } as Context;
-      // The AUTHORITATIVE agent gate, re-run on the LOCKED agent (@copilot,
-      // PR #1357): the check above read the agent before the lock, so an owner
-      // transfer or a membership revocation committing in between would
-      // otherwise let a caller who no longer administers it write the grant.
-      await requireOwnerOrOrgRole(txCtx, lockedAgent, 'ADMIN');
-      // #1349 — THE MEMORY-SIDE GATE. It checks capability, class and PUBLIC
-      // congruence AFTER concealing an unreadable memory; re-role shares it.
-      const grantedRole = await requireAgentMemoryGrant(txCtx, lockedAgent, memory, role, memoryRef);
-      // Upsert semantics (#501): granting is idempotent — re-attaching an
-      // already-attached memory updates the role, and a soft-deleted grant
-      // row (which still occupies the @@unique(agentId, memoryId) slot) is
-      // resurrected instead of surfacing a raw P2002.
-      await tx.agentMemoryItem.upsert({
+      let lockedPair: Awaited<ReturnType<typeof lockAttachmentPair>>;
+      let grantedRole: Awaited<ReturnType<typeof requireAgentMemoryGrant>>;
+      await withAuthorizedMemoryTx(
+        ctx, resolvedMemoryId,
+        [
+          { kind: 'agent', id: resolvedAgentId },
+          ...(agent.organizationId ? [{ kind: 'org' as const, id: agent.organizationId }] : []),
+          ...(agent.ownerUserId ? [{ kind: 'user' as const, id: agent.ownerUserId }] : []),
+        ],
+        async (txCtx) => {
+          if (lockedPair.agent.organizationId !== agent.organizationId ||
+              lockedPair.agent.ownerUserId !== agent.ownerUserId) {
+            throw new Error('Agent ownership changed; retry the operation');
+          }
+          await requireOwnerOrOrgRole(txCtx, lockedPair.agent, 'ADMIN');
+          grantedRole = await requireAgentMemoryGrant(txCtx, lockedPair.agent, lockedPair.memory, role, memoryRef);
+        },
+        async (tx) => {
+          await tx.agentMemoryItem.upsert({
         where: { agentId_memoryId: { agentId: resolvedAgentId, memoryId: resolvedMemoryId } },
         create: {
           agentId: resolvedAgentId,
@@ -1751,8 +1751,12 @@ export const memoryMutations = {
           updatedAt: new Date(),
           updatedBy: ctx.userId ?? ctx.clientId ?? null,
         },
-      });
-      });
+          });
+        },
+        { lockMode: 'exclusive', afterLock: async (tx) => {
+          lockedPair = await lockAttachmentPair(tx, resolvedMemoryId, resolvedAgentId, { memoryRef, agentRef });
+        } },
+      );
       return ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId }, include: AGENT_INCLUDE });
     },
 
@@ -1773,37 +1777,43 @@ export const memoryMutations = {
       // same reason as addMemoryToAgent: a re-role to `read-write` racing an
       // `updateAgent(visibility: PUBLIC)` could otherwise leave a PUBLIC agent
       // holding write knowledge, with both guards having passed.
-      const updated = await ctx.db.$transaction(async (tx) => {
-      const { memory, agent: lockedAgent } = await lockAttachmentPair(
-        tx,
-        resolvedMemoryId,
-        resolvedAgentId,
-        { memoryRef, agentRef },
-      );
-      // Authoritative agent gate on the LOCKED agent — see addMemoryToAgent.
-      await requireOwnerOrOrgRole({ ...ctx, db: tx } as Context, lockedAgent, 'ADMIN');
-      const grantedRole = await requireAgentMemoryGrant(
-        { ...ctx, db: tx } as Context,
-        lockedAgent,
-        memory,
-        role,
-        memoryRef,
-      );
+      let lockedPair: Awaited<ReturnType<typeof lockAttachmentPair>>;
+      let grantedRole: Awaited<ReturnType<typeof requireAgentMemoryGrant>>;
+      const updated = await withAuthorizedMemoryTx(
+        ctx, resolvedMemoryId,
+        [
+          { kind: 'agent', id: resolvedAgentId },
+          ...(agent.organizationId ? [{ kind: 'org' as const, id: agent.organizationId }] : []),
+          ...(agent.ownerUserId ? [{ kind: 'user' as const, id: agent.ownerUserId }] : []),
+        ],
+        async (txCtx) => {
+          if (lockedPair.agent.organizationId !== agent.organizationId ||
+              lockedPair.agent.ownerUserId !== agent.ownerUserId) {
+            throw new Error('Agent ownership changed; retry the operation');
+          }
+          await requireOwnerOrOrgRole(txCtx, lockedPair.agent, 'ADMIN');
+          grantedRole = await requireAgentMemoryGrant(txCtx, lockedPair.agent, lockedPair.memory, role, memoryRef);
+        },
+        async (tx) => {
       // #501: only a LIVE grant is updatable — updateMany + deletedAt:null
       // (findUnique on the composite PK can't filter soft-deletes; the
       // requireOrgRole-pattern rule from findings:revoked-membership-auth-
       // gates, PR-512 review). Zero rows = typed NOT_FOUND, never a raw
       // P2025 → 500; a soft-deleted grant stays inactive until
       // addMemoryToAgent resurrects it.
-      return tx.agentMemoryItem.updateMany({
+          return tx.agentMemoryItem.updateMany({
         where: { agentId: resolvedAgentId, memoryId: resolvedMemoryId, deletedAt: null },
         // #1349: stamp the actor. Before this the row recorded WHO escalated it
         // nowhere, so a later audit could not tell an original grant from a
         // re-role — which is what made a delegator-attribution containment
         // strategy unworkable.
         data: { role: grantedRole, updatedBy: ctx.userId ?? ctx.clientId ?? null },
-      });
-      });
+          });
+        },
+        { lockMode: 'exclusive', afterLock: async (tx) => {
+          lockedPair = await lockAttachmentPair(tx, resolvedMemoryId, resolvedAgentId, { memoryRef, agentRef });
+        } },
+      );
       if (updated.count === 0) {
         throw new GraphQLError(
           'No active grant exists for this agent+memory pair — use addMemoryToAgent to create one.',
@@ -1822,9 +1832,28 @@ export const memoryMutations = {
       const { id: resolvedMemoryId } = await resolveMemoryRef(ctx.db, memoryRef);
       const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
       await requireOwnerOrOrgRole(ctx, agent, 'ADMIN');
-      await ctx.db.agentMemoryItem.delete({
-        where: { agentId_memoryId: { agentId: resolvedAgentId, memoryId: resolvedMemoryId } },
-      });
+      let lockedPair: Awaited<ReturnType<typeof lockAttachmentPair>>;
+      await withAuthorizedMemoryTx(
+        ctx, resolvedMemoryId,
+        [
+          { kind: 'agent', id: resolvedAgentId },
+          ...(agent.organizationId ? [{ kind: 'org' as const, id: agent.organizationId }] : []),
+          ...(agent.ownerUserId ? [{ kind: 'user' as const, id: agent.ownerUserId }] : []),
+        ],
+        async (txCtx) => {
+          if (lockedPair.agent.organizationId !== agent.organizationId ||
+              lockedPair.agent.ownerUserId !== agent.ownerUserId) {
+            throw new Error('Agent ownership changed; retry the operation');
+          }
+          await requireOwnerOrOrgRole(txCtx, lockedPair.agent, 'ADMIN');
+        },
+        (tx) => tx.agentMemoryItem.delete({
+          where: { agentId_memoryId: { agentId: resolvedAgentId, memoryId: resolvedMemoryId } },
+        }).then(() => undefined),
+        { lockMode: 'exclusive', afterLock: async (tx) => {
+          lockedPair = await lockAttachmentPair(tx, resolvedMemoryId, resolvedAgentId, { memoryRef, agentRef });
+        } },
+      );
       return ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId }, include: AGENT_INCLUDE });
     },
 
@@ -1873,10 +1902,24 @@ export const memoryMutations = {
         throw new Error('Owner organization has implicit access and cannot subscribe');
       }
 
-      return ctx.db.memorySubscription.create({
-        data: { id: generateId(), memoryId: resolvedMemoryId, organizationId: resolvedOrgId, role: role as Role, createdBy: ctx.userId ?? ctx.clientId ?? null },
-        include: { memory: { include: MEMORY_INCLUDE }, organization: { include: ORG_INCLUDE } },
-      });
+      return withAuthorizedMemoryTx(
+        ctx, resolvedMemoryId, [{ kind: 'org', id: resolvedOrgId }],
+        async (txCtx) => {
+          await refuseHiddenSubscriptionMemory(txCtx, resolvedMemoryId, { ref: memoryRef, id: memoryId });
+          await requireOrgRole(txCtx, resolvedOrgId, 'ADMIN');
+          const current = await txCtx.db.memory.findUniqueOrThrow({ where: { id: resolvedMemoryId } });
+          if (current.visibility !== 'PUBLIC') {
+            throw new Error('Only public memories can be subscribed to by other organizations');
+          }
+          if (current.organizationId === resolvedOrgId) {
+            throw new Error('Owner organization has implicit access and cannot subscribe');
+          }
+        },
+        (tx) => tx.memorySubscription.create({
+          data: { id: generateId(), memoryId: resolvedMemoryId, organizationId: resolvedOrgId, role: role as Role, createdBy: ctx.userId ?? ctx.clientId ?? null },
+          include: { memory: { include: MEMORY_INCLUDE }, organization: { include: ORG_INCLUDE } },
+        }),
+      );
     },
 
     updateMemorySubscription: async (
@@ -1909,11 +1952,21 @@ export const memoryMutations = {
       await requireMemoryManageAccess(ctx, memory);
       // A missing subscription is a typed NOT_FOUND, not Prisma's P2025 text.
       await requireMemorySubscription(ctx, resolvedMemoryId, resolvedOrgId, chosenRefArg({ ref: memoryRef, id: memoryId })!);
-      return ctx.db.memorySubscription.update({
-        where: { memoryId_organizationId: { memoryId: resolvedMemoryId, organizationId: resolvedOrgId } },
-        data: { role: role as Role },
-        include: { memory: { include: MEMORY_INCLUDE }, organization: { include: ORG_INCLUDE } },
-      });
+      return withAuthorizedMemoryTx(
+        ctx, resolvedMemoryId, [{ kind: 'org', id: resolvedOrgId }],
+        async (txCtx) => {
+          await refuseHiddenSubscriptionMemory(txCtx, resolvedMemoryId, { ref: memoryRef, id: memoryId });
+          const current = await txCtx.db.memory.findUniqueOrThrow({ where: { id: resolvedMemoryId } });
+          await requireMemoryManageAccess(txCtx, current);
+          await requireMemorySubscription(txCtx, resolvedMemoryId, resolvedOrgId, chosenRefArg({ ref: memoryRef, id: memoryId })!);
+        },
+        (tx) => tx.memorySubscription.update({
+          where: { memoryId_organizationId: { memoryId: resolvedMemoryId, organizationId: resolvedOrgId } },
+          data: { role: role as Role },
+          include: { memory: { include: MEMORY_INCLUDE }, organization: { include: ORG_INCLUDE } },
+        }),
+        { lockMode: 'exclusive' },
+      );
     },
 
     deleteMemorySubscription: async (
@@ -1991,9 +2044,31 @@ export const memoryMutations = {
       // memory at all, so the missing-row case must conceal too — it used to
       // surface Prisma's own error text, server paths included.
       await requireMemorySubscription(ctx, resolvedMemoryId, resolvedOrgId, chosen);
-      await ctx.db.memorySubscription.delete({
-        where: { memoryId_organizationId: { memoryId: resolvedMemoryId, organizationId: resolvedOrgId } },
-      });
+      await withAuthorizedMemoryTx(
+        ctx, resolvedMemoryId, [{ kind: 'org', id: resolvedOrgId }],
+        async (txCtx) => {
+          const current = await txCtx.db.memory.findUniqueOrThrow({ where: { id: resolvedMemoryId } });
+          const platformAdmin = txCtx.roles?.includes('ADMIN') || txCtx.roles?.includes('OWNER');
+          const ownerAdmin = current.organizationId && txCtx.userId
+            ? await txCtx.db.orgMember.findFirst({
+                where: { organizationId: current.organizationId, userId: txCtx.userId, ...LIVE_ORG_MEMBERSHIP,
+                  role: { in: ['ADMIN', 'OWNER'] } }, select: { id: true },
+              })
+            : null;
+          const subscriberAdmin = txCtx.userId
+            ? await txCtx.db.orgMember.findFirst({
+                where: { organizationId: resolvedOrgId, userId: txCtx.userId, ...LIVE_ORG_MEMBERSHIP,
+                  role: { in: ['ADMIN', 'OWNER'] } }, select: { id: true },
+              })
+            : null;
+          if (!platformAdmin && !ownerAdmin && !subscriberAdmin) throw new Error('Forbidden');
+          await requireMemorySubscription(txCtx, resolvedMemoryId, resolvedOrgId, chosen);
+        },
+        (tx) => tx.memorySubscription.delete({
+          where: { memoryId_organizationId: { memoryId: resolvedMemoryId, organizationId: resolvedOrgId } },
+        }).then(() => undefined),
+        { lockMode: 'exclusive' },
+      );
       return true;
     },
 
@@ -2581,12 +2656,27 @@ export const memoryMutations = {
       await requireMemorySharePrincipal(ctx, memoryId);
       const resolvedGranteeId = await resolveGranteeId(ctx, { granteeRef, granteeId });
       try {
-        const memoryShare = await createMemoryShare(ctx.db, {
+        const memoryShare = await withAuthorizedMemoryTx(
+          ctx,
           memoryId,
-          granteeId: resolvedGranteeId,
-          role,
-          actorId: ctx.userId,
-        });
+          [{ kind: 'user', id: resolvedGranteeId }],
+          (txCtx) => requireMemorySharePrincipal(txCtx, memoryId),
+          (_tx, txCtx) => createMemoryShare(txCtx.db, {
+            memoryId,
+            granteeId: resolvedGranteeId,
+            role,
+            actorId: ctx.userId!,
+          }),
+          {
+            afterLock: async (tx) => {
+              await tx.$queryRaw`
+                SELECT memory_id FROM memory_shares
+                WHERE memory_id = ${memoryId} AND grantee_id = ${resolvedGranteeId} FOR UPDATE`;
+            },
+            // The upsert may lower an existing writer to reader.
+            lockMode: 'exclusive',
+          },
+        );
         return { memoryShare };
       } catch (e: unknown) {
         if (
@@ -2677,10 +2767,31 @@ export const memoryMutations = {
         });
         if (!ownShare) throw memoryShareForbidden();
       }
-      await deleteMemoryShare(ctx.db, {
-        memoryId: resolvedMemoryId,
-        granteeId: resolvedGranteeId,
-      });
+      await withAuthorizedMemoryTx(
+        ctx, resolvedMemoryId, [{ kind: 'user', id: resolvedGranteeId }],
+        async (txCtx) => {
+          const principal = await isMemorySharePrincipal(txCtx, resolvedMemoryId!);
+          if (!principal) {
+            if (resolvedGranteeId !== txCtx.userId) throw memoryShareForbidden();
+            const ownShare = await txCtx.db.memoryShare.findUnique({
+              where: { memoryId_granteeId: { memoryId: resolvedMemoryId!, granteeId: resolvedGranteeId } },
+              select: { memoryId: true },
+            });
+            if (!ownShare) throw memoryShareForbidden();
+          }
+        },
+        (tx) => tx.memoryShare.deleteMany({
+          where: { memoryId: resolvedMemoryId!, granteeId: resolvedGranteeId },
+        }).then(() => undefined),
+        {
+          lockMode: 'exclusive', allowDeletedMemory: true, allowDeletedOrg: true,
+          afterLock: async (tx) => {
+            await tx.$queryRaw`
+              SELECT memory_id FROM memory_shares
+              WHERE memory_id = ${resolvedMemoryId} AND grantee_id = ${resolvedGranteeId} FOR UPDATE`;
+          },
+        },
+      );
       // Return the RESOLVED PKs so the client can correlate the deletion.
       return { memoryId: resolvedMemoryId, granteeId: resolvedGranteeId };
     },
@@ -2706,12 +2817,26 @@ export const memoryMutations = {
       await requireMemorySharePrincipal(ctx, memoryId);
       const resolvedGranteeId = await resolveGranteeId(ctx, { granteeRef, granteeId });
       try {
-        const memoryShare = await updateMemoryShareRole(ctx.db, {
+        const memoryShare = await withAuthorizedMemoryTx(
+          ctx,
           memoryId,
-          granteeId: resolvedGranteeId,
-          role,
-          actorId: ctx.userId,
-        });
+          [{ kind: 'user', id: resolvedGranteeId }],
+          (txCtx) => requireMemorySharePrincipal(txCtx, memoryId),
+          (_tx, txCtx) => updateMemoryShareRole(txCtx.db, {
+            memoryId,
+            granteeId: resolvedGranteeId,
+            role,
+            actorId: ctx.userId!,
+          }),
+          {
+            afterLock: async (tx) => {
+              await tx.$queryRaw`
+                SELECT memory_id FROM memory_shares
+                WHERE memory_id = ${memoryId} AND grantee_id = ${resolvedGranteeId} FOR UPDATE`;
+            },
+            lockMode: 'exclusive',
+          },
+        );
         return { memoryShare };
       } catch (e: unknown) {
         if (e instanceof MemoryShareNotFoundError) {
@@ -2751,13 +2876,29 @@ export const memoryMutations = {
       await requireMemoryMemberOwner(ctx, resolvedMemoryId);
       const resolvedUserId = await resolveUserRefArg(ctx.db, { ref: userRef, id: userId });
       try {
-        const memoryMember = await addMemoryMember(ctx.db, {
-          memoryId: resolvedMemoryId,
-          userId: resolvedUserId,
-          role,
-          actorId: ctx.userId!,
-          authorizeLocked: (tx) => requireMemoryMemberOwner(withoutRequestCaches(ctx, tx), resolvedMemoryId),
-        });
+        const memoryMember = await retryOnSerializationFailure(() => withAuthorizedMemoryTx(
+          ctx, resolvedMemoryId, [{ kind: 'user', id: resolvedUserId }],
+          (txCtx) => requireMemoryMemberOwner(txCtx, resolvedMemoryId),
+          (tx) => addMemoryMemberInTx(tx, {
+            memoryId: resolvedMemoryId, userId: resolvedUserId, role, actorId: ctx.userId!,
+          }),
+          {
+            lockMode: 'exclusive',
+            isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
+            afterLock: async (tx) => {
+              if (ctx.userId) await tx.$queryRaw`
+                SELECT user_id FROM memory_members
+                WHERE memory_id = ${resolvedMemoryId} AND user_id = ${ctx.userId} FOR SHARE`;
+              const rows = await tx.$queryRaw<Array<{ user_id: string }>>`
+                SELECT user_id FROM memory_members
+                WHERE memory_id = ${resolvedMemoryId} AND user_id = ${resolvedUserId} FOR UPDATE`;
+              const fresh = await ctx.db.$queryRaw<Array<{ user_id: string }>>`
+                SELECT user_id FROM memory_members
+                WHERE memory_id = ${resolvedMemoryId} AND user_id = ${resolvedUserId}`;
+              if (Boolean(rows[0]) !== Boolean(fresh[0])) throw new AuthoritySnapshotStale();
+            },
+          },
+        ));
         return { memoryMember };
       } catch (e: unknown) {
         if (
@@ -2800,12 +2941,29 @@ export const memoryMutations = {
       await requireMemoryMemberOwner(ctx, resolvedMemoryId);
       const resolvedUserId = await resolveUserRefArg(ctx.db, { ref: userRef, id: userId });
       try {
-        const memoryMember = await updateMemoryMemberRole(ctx.db, {
-          memoryId: resolvedMemoryId,
-          userId: resolvedUserId,
-          role,
-          actorId: ctx.userId!,
-        });
+        const memoryMember = await retryOnSerializationFailure(() => withAuthorizedMemoryTx(
+          ctx, resolvedMemoryId, [{ kind: 'user', id: resolvedUserId }],
+          (txCtx) => requireMemoryMemberOwner(txCtx, resolvedMemoryId),
+          (tx) => updateMemoryMemberRoleInTx(tx, {
+            memoryId: resolvedMemoryId, userId: resolvedUserId, role, actorId: ctx.userId!,
+          }),
+          {
+            lockMode: 'exclusive',
+            isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
+            afterLock: async (tx) => {
+              if (ctx.userId) await tx.$queryRaw`
+                SELECT user_id FROM memory_members
+                WHERE memory_id = ${resolvedMemoryId} AND user_id = ${ctx.userId} FOR SHARE`;
+              const rows = await tx.$queryRaw<Array<{ user_id: string }>>`
+                SELECT user_id FROM memory_members
+                WHERE memory_id = ${resolvedMemoryId} AND user_id = ${resolvedUserId} FOR UPDATE`;
+              const fresh = await ctx.db.$queryRaw<Array<{ user_id: string }>>`
+                SELECT user_id FROM memory_members
+                WHERE memory_id = ${resolvedMemoryId} AND user_id = ${resolvedUserId}`;
+              if (Boolean(rows[0]) !== Boolean(fresh[0])) throw new AuthoritySnapshotStale();
+            },
+          },
+        ));
         return { memoryMember };
       } catch (e: unknown) {
         if (
@@ -2855,7 +3013,27 @@ export const memoryMutations = {
       }
       await requireMemoryMemberOwnerOrSelf(ctx, resolvedMemoryId, resolvedUserId);
       try {
-        return await removeMemoryMember(ctx.db, { memoryId: resolvedMemoryId, userId: resolvedUserId });
+        return await retryOnSerializationFailure(() => withAuthorizedMemoryTx(
+          ctx, resolvedMemoryId, [{ kind: 'user', id: resolvedUserId }],
+          (txCtx) => requireMemoryMemberOwnerOrSelf(txCtx, resolvedMemoryId, resolvedUserId),
+          (tx) => removeMemoryMemberInTx(tx, { memoryId: resolvedMemoryId, userId: resolvedUserId }),
+          {
+            lockMode: 'exclusive',
+            isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
+            afterLock: async (tx) => {
+              if (ctx.userId) await tx.$queryRaw`
+                SELECT user_id FROM memory_members
+                WHERE memory_id = ${resolvedMemoryId} AND user_id = ${ctx.userId} FOR SHARE`;
+              const rows = await tx.$queryRaw<Array<{ user_id: string }>>`
+                SELECT user_id FROM memory_members
+                WHERE memory_id = ${resolvedMemoryId} AND user_id = ${resolvedUserId} FOR UPDATE`;
+              const fresh = await ctx.db.$queryRaw<Array<{ user_id: string }>>`
+                SELECT user_id FROM memory_members
+                WHERE memory_id = ${resolvedMemoryId} AND user_id = ${resolvedUserId}`;
+              if (Boolean(rows[0]) !== Boolean(fresh[0])) throw new AuthoritySnapshotStale();
+            },
+          },
+        ));
       } catch (e: unknown) {
         if (e instanceof LastOwnerProtectedError) {
           throw new GraphQLError(e.message, {

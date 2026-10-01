@@ -508,13 +508,13 @@ describe('POST /oauth/token — expiry', () => {
 // ── DB failure containment ───────────────────────────────────────────
 
 describe('POST /oauth/token — DB failure containment', () => {
-  it('userApiKey.create throws → 500 server_error (not a crash, AuthCode stays claimed)', async () => {
+  it('key mint transaction throws → 500 server_error (not a crash, AuthCode stays claimed)', async () => {
     // Same posture as Phase 2B/2C: Express 4 doesn't auto-forward
     // async rejections; the try/catch keeps the failure local to
     // the request.
     const { rawCode, verifier, authCodeId } = await seedAuthCode();
     const spy = vi
-      .spyOn(db.userApiKey, 'create')
+      .spyOn(db, '$transaction')
       .mockRejectedValueOnce(new Error('simulated DB outage'));
     try {
       const res = await postToken(defaultFields(rawCode, verifier));
