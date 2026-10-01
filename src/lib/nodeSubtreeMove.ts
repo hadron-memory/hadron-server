@@ -61,6 +61,10 @@ import { recordUrnRename } from './urnAlias.js';
 import { isDraftCorpus } from './specCorpus.js';
 import { assertNoMintedSpecRemoval } from './mintedSpecPermanence.js';
 import { safeNodeUrnV2 } from './urnEmit.js';
+import { UrnNotQualifiedError, UrnParseError } from './urn.js';
+import { resolveNodeRef } from './entityRef/nodeRef.js';
+import { AmbiguousLegacyUrnError, NodeNotFoundError } from './entityRef/errors.js';
+import { isId } from './entityRef/shape.js';
 import { validateNodeAgainstSchema, NodeSchemaViolation } from './validateNodeAgainstSchema.js';
 import type { MemorySchema } from './memorySchema.js';
 import { clearNodeAuthorship } from './nodeAuthorship.js';
@@ -179,7 +183,7 @@ export interface MoveLinkWarning {
   /** Link text, including its optional label. Content itself is never rewritten. */
   raw: string;
   target: string;
-  status: 'MISSING' | 'RETARGETED';
+  status: 'MISSING' | 'RETARGETED' | 'AMBIGUOUS';
 }
 
 /** Wikilinks in raw content, in occurrence order. A qualified ref cannot be memory-relative. */
@@ -187,11 +191,34 @@ function relativeContentLinks(content: string): Array<{ raw: string; target: str
   const links: Array<{ raw: string; target: string }> = [];
   for (const match of content.matchAll(/\[\[([^\]\r\n]+)\]\]/g)) {
     const target = match[1].split('|', 1)[0].trim();
-    if (target && !target.startsWith('hrn:') && !target.startsWith('urn:')) {
+    if (target && !isId(target) && !target.startsWith('hrn:') && !target.startsWith('urn:')) {
       links.push({ raw: match[0], target });
     }
   }
   return links;
+}
+
+/** A miss at a live loc may still resolve through a historical NODE alias. */
+async function aliasTargetId(
+  tx: Prisma.TransactionClient,
+  target: string,
+  memoryId: string,
+): Promise<string | 'AMBIGUOUS' | null> {
+  try {
+    const { id } = await resolveNodeRef(tx, target, memoryId);
+    // The report is about a memory-relative link. A bare qualified spelling
+    // that happens to parse here cannot turn this into a foreign-memory probe.
+    const node = await tx.node.findUnique({ where: { id }, select: { memoryId: true } });
+    return node?.memoryId === memoryId ? id : null;
+  } catch (error) {
+    if (
+      error instanceof NodeNotFoundError ||
+      error instanceof UrnNotQualifiedError ||
+      error instanceof UrnParseError
+    ) return null;
+    if (error instanceof AmbiguousLegacyUrnError) return 'AMBIGUOUS';
+    throw error;
+  }
 }
 
 /**
@@ -381,28 +408,18 @@ export async function moveNodeSubtree(
       })))
     : [];
   const targets = [...new Set(contentLinks.map((link) => link.target))];
-  const [sourceTargets, destinationTargets] = targets.length
-    ? await Promise.all([
-        tx.node.findMany({
-          where: { memoryId: srcMemoryId, loc: { in: targets }, deletedAt: null },
-          select: { id: true, loc: true },
-        }),
-        tx.node.findMany({
-          where: { memoryId: destMemoryId, loc: { in: targets }, deletedAt: null },
-          select: { id: true, loc: true },
-        }),
-      ])
-    : [[], []];
+  const sourceTargets = targets.length
+    ? await tx.node.findMany({
+        where: { memoryId: srcMemoryId, loc: { in: targets }, deletedAt: null },
+        select: { id: true, loc: true },
+      })
+    : [];
   const sourceIdByLoc = new Map(sourceTargets.map((n) => [n.loc, n.id]));
-  const destinationIdByLoc = new Map(destinationTargets.map((n) => [n.loc, n.id]));
-  for (const n of subtree) destinationIdByLoc.set(newLocById.get(n.id)!, n.id);
-  const linkWarnings: MoveLinkWarning[] = contentLinks.flatMap((link) => {
-    const originalId = sourceIdByLoc.get(link.target);
-    if (!originalId) return [];
-    const nextId = destinationIdByLoc.get(link.target);
-    if (nextId === originalId) return [];
-    return [{ ...link, status: nextId ? 'RETARGETED' : 'MISSING' }];
-  });
+  for (const target of targets) {
+    if (sourceIdByLoc.has(target)) continue;
+    const id = await aliasTargetId(tx, target, srcMemoryId);
+    if (id && id !== 'AMBIGUOUS') sourceIdByLoc.set(target, id);
+  }
 
   // Fail loudly if any node OUTSIDE the moving set already occupies a
   // destination slot. Live OR soft-deleted blocks: the (loc, memoryId) unique
@@ -574,7 +591,7 @@ export async function moveNodeSubtree(
   const result: MoveNodeSubtreeResult = {
     movedCount: subtree.length,
     moved: subtree.map((n) => ({ id: n.id, previousLoc: n.loc, loc: newLocById.get(n.id)! })),
-    linkWarnings,
+    linkWarnings: [],
   };
   for (const n of subtree) {
     await tx.node.update({ where: { id: n.id }, data: { loc: `__moving-${n.id}` } });
@@ -602,6 +619,30 @@ export async function moveNodeSubtree(
     // Same-memory: no memoryId changes anywhere, edges left untouched (#768).
     return result;
   }
+
+  // Read the destination AFTER the rows and NODE aliases have moved. A live
+  // occupant has precedence over aliases, and an alias to a node newly moved
+  // into this memory can now resolve. Both cases are missed by a pre-move map.
+  const destinationTargets = targets.length
+    ? await tx.node.findMany({
+        where: { memoryId: destMemoryId, loc: { in: targets }, deletedAt: null },
+        select: { id: true, loc: true },
+      })
+    : [];
+  const destinationIdByLoc = new Map<string, string>(destinationTargets.map((n) => [n.loc, n.id]));
+  for (const target of targets) {
+    if (destinationIdByLoc.has(target)) continue;
+    const id = await aliasTargetId(tx, target, destMemoryId);
+    if (id) destinationIdByLoc.set(target, id);
+  }
+  result.linkWarnings = contentLinks.flatMap((link) => {
+    const originalId = sourceIdByLoc.get(link.target);
+    if (!originalId) return [];
+    const nextId = destinationIdByLoc.get(link.target);
+    if (nextId === originalId) return [];
+    const status = nextId === 'AMBIGUOUS' ? 'AMBIGUOUS' : nextId ? 'RETARGETED' : 'MISSING';
+    return [{ ...link, status }];
+  });
 
   // ── Cross-memory carry-over ─────────────────────────────────────────────
   const movedIdList = [...movedIds];

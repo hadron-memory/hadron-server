@@ -1280,14 +1280,14 @@ export const typeDefs = `#graphql
     score: Float!
   }
 
-  enum NodeMoveLinkStatus { MISSING RETARGETED }
+  enum NodeMoveLinkStatus { MISSING RETARGETED AMBIGUOUS }
 
   type NodeMoveLinkWarning {
     nodeId: ID!
     nodeLoc: String!
     raw: String!
     target: String!
-    "RETARGETED means the link now names a different node."
+    "RETARGETED names a different node; AMBIGUOUS has multiple live alias claimants."
     status: NodeMoveLinkStatus!
   }
 

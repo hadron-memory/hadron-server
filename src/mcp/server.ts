@@ -7253,7 +7253,11 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         for (const warning of linkWarnings) {
           lines.push(
             `${warning.nodeLoc}: ${warning.raw} — ` +
-              (warning.status === 'MISSING' ? 'missing in destination' : 'points to a different node in destination'),
+              (warning.status === 'MISSING'
+                ? 'missing in destination'
+                : warning.status === 'AMBIGUOUS'
+                  ? 'ambiguous in destination'
+                  : 'points to a different node in destination'),
           );
         }
       }

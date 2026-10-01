@@ -19,6 +19,8 @@ import { resolvers, type Context } from './resolvers.js';
 import { typeDefs } from './typeDefs.js';
 import { mirrorNodeMoveToGit } from '../../../integrations/github/mirrorNodeMove.js';
 import { moveNodeSubtree } from '../../../lib/nodeSubtreeMove.js';
+import { resolveNodeRef } from '../../../lib/entityRef/nodeRef.js';
+import { AmbiguousLegacyUrnError } from '../../../lib/entityRef/errors.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -221,6 +223,7 @@ describe('moveNode (#564)', () => {
     const parent = await createDbNode(db, {
       loc: 'p', memoryId: memA.id,
       content: `Moved [[p:c|child]], left [[stay]], changed [[shadow]], already missing [[absent]], ` +
+        `malformed [[bad#ref]], ` +
         `and stable [[hrn:node:${memA.urn}:p:c|full URN]].`,
     });
     const child = await createDbNode(db, { loc: 'p:c', memoryId: memA.id, content: 'Child also links [[stay]].' });
@@ -263,6 +266,32 @@ describe('moveNode (#564)', () => {
         { nodeId: source.id, nodeLoc: 'moved', raw: '[[stay]]', target: 'stay', status: 'MISSING' },
       ],
     });
+  });
+
+  it('classifies relative links through source and destination aliases (#1392)', async () => {
+    const sourceAliasTarget = await createDbNode(db, { loc: 'old-source', memoryId: memA.id });
+    await M.moveNode(null, { sourceRef: sourceAliasTarget.id, targetUrn: urnA('new-source') }, asUser());
+    const destinationAliasTarget = await createDbNode(db, { loc: 'old-dest', memoryId: memB.id });
+    await M.moveNode(null, { sourceRef: destinationAliasTarget.id, targetUrn: urnB('new-dest') }, asUser());
+    await createDbNode(db, { loc: 'old-dest', memoryId: memA.id });
+    const firstAmbiguous = await createDbNode(db, { loc: 'old-ambiguous', memoryId: memB.id });
+    await M.moveNode(null, { sourceRef: firstAmbiguous.id, targetUrn: urnB('new-ambiguous-1') }, asUser());
+    const secondAmbiguous = await createDbNode(db, { loc: 'old-ambiguous', memoryId: memB.id });
+    await M.moveNode(null, { sourceRef: secondAmbiguous.id, targetUrn: urnB('new-ambiguous-2') }, asUser());
+    await createDbNode(db, { loc: 'old-ambiguous', memoryId: memA.id });
+    expect((await resolveNodeRef(db, 'old-source', memA.id)).id).toBe(sourceAliasTarget.id);
+    expect((await resolveNodeRef(db, 'old-dest', memB.id)).id).toBe(destinationAliasTarget.id);
+    await expect(resolveNodeRef(db, 'old-ambiguous', memB.id)).rejects.toBeInstanceOf(AmbiguousLegacyUrnError);
+
+    const parent = await createDbNode(db, {
+      loc: 'parent', memoryId: memA.id, content: '[[old-source]] [[old-dest]] [[old-ambiguous]]',
+    });
+    const moved = await M.moveNode(null, { sourceRef: parent.id, targetUrn: urnB('moved') }, asUser());
+    expect(moved.moveLinkWarnings).toEqual([
+      { nodeId: parent.id, nodeLoc: 'moved', raw: '[[old-source]]', target: 'old-source', status: 'MISSING' },
+      { nodeId: parent.id, nodeLoc: 'moved', raw: '[[old-dest]]', target: 'old-dest', status: 'RETARGETED' },
+      { nodeId: parent.id, nodeLoc: 'moved', raw: '[[old-ambiguous]]', target: 'old-ambiguous', status: 'AMBIGUOUS' },
+    ]);
   });
 
   it('fails loudly (NODE_ALREADY_EXISTS) when the destination loc is occupied', async () => {
