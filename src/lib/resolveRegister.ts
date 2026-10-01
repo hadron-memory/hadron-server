@@ -145,14 +145,26 @@ async function attendeeColumns(
 async function attendeeAccessActor(
   db: Context['db'],
   columns: NonNullable<Awaited<ReturnType<typeof attendeeColumns>>>,
-): Promise<Context | null> {
-  if (!columns.workerId) return { db, appId: columns.appId };
-  if (!columns.heldByUserId) return null;
+): Promise<{ actor: Context; unavailableReason: null } | { actor: null; unavailableReason: RegisterDisclosure }> {
+  if (!columns.workerId) return { actor: { db, appId: columns.appId }, unavailableReason: null };
+  if (!columns.heldByUserId) return { actor: null, unavailableReason: 'UNKNOWN_ACTOR' };
   const holder = await db.user.findFirst({
     where: { id: columns.heldByUserId, deletedAt: null },
     select: { id: true, roles: true },
   });
-  return holder ? { db, userId: holder.id, roles: holder.roles } : null;
+  if (!holder) return { actor: null, unavailableReason: 'UNKNOWN_ACTOR' };
+  const actor: Context = { db, userId: holder.id, roles: holder.roles };
+  // A holder can lose participation while retaining independent access to a
+  // Channel. Then they cannot act AS this Worker even if they can read it as
+  // themselves (the same current-App gate as Worker cursor ownership, #1353).
+  const app = await db.app.findFirst({
+    where: { id: columns.appId, deletedAt: null, uninstalledAt: null },
+    select: { id: true, organizationId: true, ownerUserId: true },
+  });
+  if (!app || !(await isAppParticipant(actor, app))) {
+    return { actor: null, unavailableReason: 'DRIVER_NOT_PARTICIPANT' };
+  }
+  return { actor, unavailableReason: null };
 }
 
 /** Precedence: App › org; within an owner Worker › Agent › everyone. Lower is stronger. */
@@ -218,8 +230,11 @@ export async function resolveRegister(db: Context['db'], args: ResolveRegisterAr
   if (!collected) return null;
   const { columns, rows } = collected;
   const viewer = args.actor ?? null;
-  const actor = args.accessActor === 'ATTENDEE'
+  const attendeeAccess = args.accessActor === 'ATTENDEE'
     ? await attendeeAccessActor(db, columns)
+    : null;
+  const actor: Context | null = args.accessActor === 'ATTENDEE'
+    ? attendeeAccess!.actor
     : args.accessActor === undefined ? viewer : args.accessActor;
   const channelIds = [...new Set(rows.map((r) => r.channelId))];
   const channels = new Map(
@@ -270,7 +285,7 @@ export async function resolveRegister(db: Context['db'], args: ResolveRegisterAr
       disclosure = 'CHANNEL_DELETED';
       canPost = actor || args.accessActor === 'ATTENDEE' ? false : 'UNKNOWN';
     } else if (!actor) {
-      disclosure = 'UNKNOWN_ACTOR';
+      disclosure = attendeeAccess?.unavailableReason ?? 'UNKNOWN_ACTOR';
       // An unheld Worker has no driver, so the attendee-facing projection
       // reports false rather than an unevaluated posting capability.
       if (args.accessActor === 'ATTENDEE') canPost = false;
@@ -430,6 +445,8 @@ export function renderDerivedBlocks(view: RegisterView | null): string {
     let standing: string;
     if (r.disclosure === 'UNKNOWN_ACTOR' && r.canPost === false) {
       standing = 'no current driver (read + post unavailable)';
+    } else if (r.disclosure === 'DRIVER_NOT_PARTICIPANT' && !r.canRead) {
+      standing = 'driver is not a current participant of this Worker\'s App (read + post unavailable)';
     } else if (r.disclosure) {
       standing = describeDisclosure(r.disclosure);
     } else {

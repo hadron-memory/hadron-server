@@ -147,17 +147,40 @@ describe('resolveRegister', () => {
     await db.worker.update({ where: { id: worker.id }, data: { heldByUserId: reader.id } });
     const held = await Q.attendeeRegister({}, { workerRef: worker.id }, ctx(admin.id));
     expect(held[0]).toMatchObject({
-      canRead: false, canPost: false, disclosure: 'HOST_MEMORY_NOT_READABLE',
+      canRead: false, canPost: false, disclosure: 'DRIVER_NOT_PARTICIPANT',
       channel: { hostMemoryId: appMem.id },
     });
     const w = await db.worker.findUniqueOrThrow({ where: { id: worker.id } });
-    expect(await W.prompt(w, {}, ctx(admin.id))).toContain('you cannot read its host memory');
+    expect(await W.prompt(w, {}, ctx(admin.id))).toContain('driver is not a current participant of this Worker\'s App');
     expect(await Q.attendeeRegister({}, { workerRef: worker.id }, ctx(stranger.id))).toEqual([]);
 
     await db.worker.update({ where: { id: worker.id }, data: { heldByUserId: null, heldAt: null } });
     const unheld = await Q.attendeeRegister({}, { workerRef: worker.id }, ctx(admin.id));
     expect(unheld[0]).toMatchObject({ canRead: false, canPost: false, disclosure: 'UNKNOWN_ACTOR' });
     expect(await W.prompt(w, {}, ctx(admin.id))).toContain('no current driver (read + post unavailable)');
+  });
+
+  it('does not mistake a revoked holder\'s independent Channel read for Worker access', async () => {
+    const independent = await db.memory.create({
+      data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:independent`, name: 'independent', class: 'knowledge', visibility: 'ORGANIZATION' },
+    });
+    const independentChannel = (await ensureChannelWithRoot(db, {
+      memoryId: independent.id, loc: 'chats:independent', name: 'independent', createdBy: admin.id,
+    })).channel;
+    await M.createRegisterEntry({}, {
+      input: { ownerRef: org.urn, channelRef: independentChannel.id, attendeeRef: worker.id, role: 'WATCH' },
+    }, ctx(admin.id));
+    await db.appMember.delete({ where: { appId_userId: { appId: app.id, userId: admin.id } } });
+    await db.orgMember.updateMany({ where: { organizationId: org.id, userId: admin.id }, data: { role: 'READER' } });
+
+    // The former driver still reads this org Channel as themselves.
+    const personal = await resolveRegister(db, { attendee: { workerId: worker.id }, actor: ctx(admin.id) });
+    expect(personal?.rows.find((row) => row.channel.id === independentChannel.id)?.canRead).toBe(true);
+    // The App key may inspect its Worker's register, but the revoked holder
+    // cannot act as that Worker and must not inherit their personal read.
+    const effective = await Q.attendeeRegister({}, { workerRef: worker.id }, { db, appId: app.id } as Context);
+    expect(effective.find((row: { channel: { id: string } }) => row.channel.id === independentChannel.id))
+      .toMatchObject({ canRead: false, canPost: false, disclosure: 'DRIVER_NOT_PARTICIPANT' });
   });
 
   it('mintAppRun snapshots the Agent-in-App register; AppRun.register evaluates its App principal', async () => {
