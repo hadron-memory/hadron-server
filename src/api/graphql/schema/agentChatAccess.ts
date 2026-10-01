@@ -1,6 +1,6 @@
 import type { Context } from './resolvers.helpers.js';
 import { isAuthorizationDenial, requireOwnerOrOrgRole } from './resolvers.helpers.js';
-import { activeAppInstallLicenseIdsForAgent, isAgentInstalledAndLicensed } from '../../../lib/appAgent.js';
+import { activeAppInstallLicenseIdsForAgent } from '../../../lib/appAgent.js';
 import type { AuthorityAnchor } from '../../../lib/auth/authorityAnchors.js';
 
 /** The Agent columns {@link canChatWithAgent} decides from. */
@@ -13,18 +13,56 @@ export interface ChatAgentRow {
 }
 
 /**
+ * The Apps that can carry this caller's right to chat with this Agent (#1585
+ * review, Atilla): ONE set shared by the gate (`canChatWithAgent`) and the
+ * anchor selection (`chatAuthorityAnchors`), so the two cannot drift apart.
+ * An App qualifies only if it is live, not uninstalled, its owner is live (a
+ * dead tenant's App grants nothing, the #1370 rule; `withAuthorizedTx` also
+ * refuses a deleted org or user anchor), and its install of the Agent holds a
+ * live license. The candidates are the calling App for a pure App key, or for
+ * a user every App they are a member of that installs the Agent.
+ */
+export async function chatCarrierApps(
+  ctx: Context,
+  agentId: string,
+): Promise<Array<{ id: string; organizationId: string | null; ownerUserId: string | null }>> {
+  const candidateIds = ctx.appId && !ctx.userId
+    ? [ctx.appId]
+    : ctx.userId
+      ? (await ctx.db.appMember.findMany({
+          where: { userId: ctx.userId, app: { appAgents: { some: { agentId } } } },
+          select: { appId: true },
+        })).map((m) => m.appId)
+      : [];
+  if (candidateIds.length === 0) return [];
+  const apps = await ctx.db.app.findMany({
+    where: {
+      id: { in: candidateIds },
+      deletedAt: null,
+      uninstalledAt: null,
+      OR: [{ organizationId: null }, { organization: { deletedAt: null } }],
+      AND: [{ OR: [{ ownerUserId: null }, { ownerUser: { deletedAt: null } }] }],
+    },
+    select: { id: true, organizationId: true, ownerUserId: true },
+  });
+  if (apps.length === 0) return [];
+  const licensed = await activeAppInstallLicenseIdsForAgent(ctx.db, agentId, apps.map((a) => a.id));
+  return apps.filter((a) => licensed.has(a.id));
+}
+
+/**
  * May this caller start a chat with this Agent (#1581)? Starting a chat reads
  * the Agent's definition (its system prompt and conversation structure) and
  * auto-provisions the caller's `AgentSubscription`, so it needs the same reach
  * as reading the Agent, plus the one extra path an App's end users rely on:
  *
  * - a pure App key: the Agent is installed in that App with a live license
- *   (`isAgentInstalledAndLicensed`, the #1526 App-key rule);
+ *   with a live owner (`chatCarrierApps`; the #1526 App-key rule);
  * - a user: the Agent is PUBLIC, the user's own, or in an org the user can
  *   read (`requireOwnerOrOrgRole(…, 'READER')`, the `Query.agent` gate), OR the
- *   user is an AppMember of an App with a live, licensed install of the Agent,
- *   which is how an App's end users who are not org members reach it
- *   (`activeAppInstallLicenseIdsForAgent`, the shared-chat rule).
+ *   user is an AppMember of an App with a live owner and a live, licensed
+ *   install of the Agent, which is how an App's end users who are not org
+ *   members reach it (`chatCarrierApps`, shared with the anchor selection).
  *
  * Anything else, including an anonymous caller and a soft-deleted Agent, is
  * refused. Callers answer a refusal exactly as an unknown Agent, so it
@@ -34,7 +72,7 @@ export async function canChatWithAgent(ctx: Context, agent: ChatAgentRow): Promi
   if (agent.deletedAt) return false;
 
   if (ctx.appId && !ctx.userId) {
-    return isAgentInstalledAndLicensed(ctx.db, ctx.appId, agent.id);
+    return (await chatCarrierApps(ctx, agent.id)).length > 0;
   }
   if (!ctx.userId) return false;
 
@@ -49,15 +87,7 @@ export async function canChatWithAgent(ctx: Context, agent: ChatAgentRow): Promi
     }
   }
 
-  const memberships = await ctx.db.appMember.findMany({
-    where: { userId: ctx.userId, app: { appAgents: { some: { agentId: agent.id } } } },
-    select: { appId: true },
-  });
-  if (memberships.length === 0) return false;
-  const licensed = await activeAppInstallLicenseIdsForAgent(
-    ctx.db, agent.id, memberships.map((m) => m.appId),
-  );
-  return licensed.size > 0;
+  return (await chatCarrierApps(ctx, agent.id)).length > 0;
 }
 
 /**
@@ -118,9 +148,8 @@ export async function appKeySessionMatchesAgent(ctx: Context, agentId: string): 
  * - the Agent, and the subscription's TARGET user (an App key has no actor
  *   user for `withAuthorizedTx` to add);
  * - the Agent's owner (org or user), which a direct read right comes from;
- * - each LIVE App that can carry the right, plus its owner: the calling App
- *   for a pure App key, or for a user every live App they are a member of
- *   that installs the Agent (the AppMember path).
+ * - each App that can carry the right, plus its owner: exactly
+ *   `chatCarrierApps`, the same set the gate admits through.
  *
  * Only live Apps with a live owner are anchored, because `withAuthorizedTx`
  * refuses a deleted App, org or user among its anchors; the gate re-runs on
@@ -136,35 +165,10 @@ export async function chatAuthorityAnchors(
   if (agent.organizationId) anchors.push({ kind: 'org', id: agent.organizationId });
   if (agent.ownerUserId) anchors.push({ kind: 'user', id: agent.ownerUserId });
 
-  const appIds = ctx.appId && !ctx.userId
-    ? [ctx.appId]
-    : ctx.userId
-      ? (await ctx.db.appMember.findMany({
-          where: { userId: ctx.userId, app: { appAgents: { some: { agentId: agent.id } } } },
-          select: { appId: true },
-        })).map((m) => m.appId)
-      : [];
-  if (appIds.length > 0) {
-    // Only Apps that can actually carry the read right: live, and with a live
-    // owner. withAuthorizedTx refuses a deleted org or user among its anchors,
-    // so a stale membership in a dead tenant's App would otherwise block a chat
-    // the caller reaches by another path, e.g. a PUBLIC Agent (Codex/Copilot
-    // on #1585). Org deletion deliberately leaves the App rows intact.
-    const apps = await ctx.db.app.findMany({
-      where: {
-        id: { in: appIds },
-        deletedAt: null,
-        uninstalledAt: null,
-        OR: [{ organizationId: null }, { organization: { deletedAt: null } }],
-        AND: [{ OR: [{ ownerUserId: null }, { ownerUser: { deletedAt: null } }] }],
-      },
-      select: { id: true, organizationId: true, ownerUserId: true },
-    });
-    for (const app of apps) {
-      anchors.push({ kind: 'app', id: app.id });
-      if (app.organizationId) anchors.push({ kind: 'org', id: app.organizationId });
-      if (app.ownerUserId) anchors.push({ kind: 'user', id: app.ownerUserId });
-    }
+  for (const app of await chatCarrierApps(ctx, agent.id)) {
+    anchors.push({ kind: 'app', id: app.id });
+    if (app.organizationId) anchors.push({ kind: 'org', id: app.organizationId });
+    if (app.ownerUserId) anchors.push({ kind: 'user', id: app.ownerUserId });
   }
   return anchors;
 }

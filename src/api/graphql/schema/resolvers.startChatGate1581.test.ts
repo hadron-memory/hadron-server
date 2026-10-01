@@ -334,6 +334,36 @@ describe('#1585 review: a stale membership in a dead tenant\'s App does not bloc
   });
 });
 
+describe('#1585 review: the gate and the anchors agree on which Apps carry the right', () => {
+  /** A personal (user-owned) App whose owner is then soft-deleted. */
+  async function deadOwnerApp(memberId: string) {
+    const owner = await db.user.create({ data: { githubId: 158170, githubUsername: 'owner-1585', roles: ['READER'] } });
+    const personal = await db.app.create({ data: {
+      id: generateId(), name: 'personal-app', urn: 'owner-1585:personal-app', ownerUserId: owner.id,
+      appAgents: { create: { agentId: agent.id } },
+    } });
+    // The owner licensed the (foreign, org-private) Agent for the personal App.
+    await db.agentSubscription.create({ data: { userId: owner.id, agentId: agent.id, activatedAt: new Date() } });
+    await db.appMember.create({ data: { appId: personal.id, userId: memberId, role: 'member' } });
+    await db.user.update({ where: { id: owner.id }, data: { deletedAt: new Date() } });
+    return personal;
+  }
+
+  it("Atilla's case: a dead owner's personal App carries nothing, so its member is refused (no unanchored path)", async () => {
+    await deadOwnerApp(stranger.id);
+    await expect(M.startChat(null, { agentId: agent.id }, userCtx(stranger.id)))
+      .rejects.toMatchObject({ name: 'AgentNotFoundError' });
+    expect(await subsFor(agent.id)).not.toContain(stranger.id);
+  });
+
+  it("CONTROL (Chip): a PUBLIC Agent stays reachable for a member of a dead owner's App", async () => {
+    await db.agent.update({ where: { id: agent.id }, data: { visibility: 'PUBLIC' } });
+    await deadOwnerApp(stranger.id);
+    const out = await M.startChat(null, { agentId: agent.id }, userCtx(stranger.id));
+    expect(out.chatId).toMatch(/^chats:/);
+  });
+});
+
 describe('#1573: startChat waits for an in-flight revocation of its read right', () => {
   /** Hold an exclusive anchor and apply `revoke` uncommitted until released. */
   async function holdRevocation(anchor: { kind: 'org' | 'app'; id: string }, revoke: (tx: any) => Promise<unknown>) {
