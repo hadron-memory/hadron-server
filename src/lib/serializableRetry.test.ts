@@ -2,8 +2,9 @@
  * #1544 follow-up: the shared SERIALIZABLE retry re-runs only on P2034, gives
  * up after SERIALIZATION_RETRIES, and waits a bounded random delay between
  * attempts so two mutually aborting transactions stop retrying in lockstep.
+ * The delay itself is pinned deterministically (Math.random and setTimeout spied).
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import { Prisma } from '../generated/prisma/index.js';
 import { retryOnSerializationFailure, SERIALIZATION_RETRIES } from './serializableRetry.js';
 
@@ -38,12 +39,39 @@ describe('retryOnSerializationFailure', () => {
     expect(calls).toBe(1);
   });
 
-  it('waits between attempts (jittered backoff), and the total wait stays bounded', async () => {
-    const stamps: number[] = [];
-    await expect(retryOnSerializationFailure(async () => { stamps.push(Date.now()); throw p2034(); }, 3))
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  // Deterministic pin (Charles's #1570 QA, Jane's review): with randomness fixed
+  // at 0.5 each retry sleeps half its ceiling, and the ceiling doubles. Fails on
+  // "no sleep" and on "fixed delay, no jitter"; the old upper-bound-only timing
+  // test passed with the sleep removed.
+  it('waits a jittered delay whose ceiling doubles per retry', async () => {
+    vi.spyOn(Math, 'random').mockReturnValue(0.5);
+    const delays: number[] = [];
+    const real = globalThis.setTimeout;
+    vi.spyOn(globalThis, 'setTimeout').mockImplementation(((fn: () => void, ms?: number) => {
+      delays.push(ms ?? 0);
+      return real(fn, 0);
+    }) as typeof setTimeout);
+    await expect(retryOnSerializationFailure(async () => { throw p2034(); }, 3))
       .rejects.toMatchObject({ code: 'P2034' });
-    expect(stamps).toHaveLength(4);
-    // Ceilings 10 + 20 + 40 ms: never longer than that plus scheduling slack.
-    expect(stamps[3] - stamps[0]).toBeLessThan(70 + 200);
+    expect(delays).toEqual([5, 10, 20]);
+  });
+
+  it('the delay spans the whole jitter range: randomness 0 waits nothing, near 1 waits almost the ceiling', async () => {
+    const delaysFor = async (r: number) => {
+      vi.spyOn(Math, 'random').mockReturnValue(r);
+      const delays: number[] = [];
+      const real = globalThis.setTimeout;
+      vi.spyOn(globalThis, 'setTimeout').mockImplementation(((fn: () => void, ms?: number) => {
+        delays.push(ms ?? 0);
+        return real(fn, 0);
+      }) as typeof setTimeout);
+      await expect(retryOnSerializationFailure(async () => { throw p2034(); }, 2)).rejects.toBeTruthy();
+      vi.restoreAllMocks();
+      return delays;
+    };
+    expect(await delaysFor(0)).toEqual([0, 0]);
+    expect(await delaysFor(0.999)).toEqual([9.99, 19.98]);
   });
 });
