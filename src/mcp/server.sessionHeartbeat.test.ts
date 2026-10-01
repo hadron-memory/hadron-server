@@ -26,6 +26,7 @@ import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
 import { generateId } from '../lib/id.js';
 import { createTestableMcpServer } from './server.js';
+import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import type { AuthContext } from '../middleware/auth.js';
 
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({
@@ -299,6 +300,31 @@ describe('#1543 — the heartbeat keeps a LIVE session alive and never revives a
     const text = await srv.callToolText('hadron_team_chat_post', { session: id, body: 'too late' });
     expect(text).toMatch(/not live/i);
     expect((await updatedAt(id))!.getTime()).toBe(before!.getTime());
+  });
+
+  it("a kind:'pr' work record still attributes to a lapsed session, but does not revive it (Codex P1 on #1553)", async () => {
+    const id = await lapsedSession();
+    const before = await updatedAt(id);
+    const srv = createTestableMcpServer(auth());
+    await srv.callToolText('hadron_record_work', {
+      session: id, tool: 'github', kind: 'pr', ref: 'o/r#42', action: 'opened',
+    });
+    const after = await db.session.findUniqueOrThrow({ where: { id }, select: { prNumber: true, updatedAt: true } });
+    expect(after.prNumber).toBe(42); // late attribution still lands
+    expect(after.updatedAt!.getTime()).toBe(before!.getTime());
+  });
+
+  it('GraphQL updateSession (pr/branch) does not revive a lapsed session; a live one still advances', async () => {
+    const userCtx = { db, userId: user.id, roles: ['CONTRIBUTOR'] } as unknown as Context;
+    const lapsed = await lapsedSession();
+    const lapsedBefore = await updatedAt(lapsed);
+    await (resolvers.Mutation as any).updateSession({}, { id: lapsed, branch: 'feat/late' }, userCtx);
+    expect((await updatedAt(lapsed))!.getTime()).toBe(lapsedBefore!.getTime());
+
+    const live = await staleSession(); // started now: live
+    const liveBefore = await updatedAt(live);
+    await (resolvers.Mutation as any).updateSession({}, { id: live, branch: 'feat/now' }, userCtx);
+    expect((await updatedAt(live))!.getTime()).toBeGreaterThan(liveBefore!.getTime());
   });
 
   it('control: a live session is still heartbeated by the same tools', async () => {

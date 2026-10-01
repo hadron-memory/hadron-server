@@ -179,6 +179,16 @@ describe('#556 — a credentialed reporter still works', () => {
     expect(row?.outcomeRef).toBe('f3a9c1d2-feedback-form');
   });
 
+  it('#1543 — an outcome report on a lapsed session does not revive it', async () => {
+    const longAgo = new Date('2026-01-01T00:00:00.000Z');
+    await db.$executeRaw`UPDATE sessions SET started_at = ${longAgo}, updated_at = ${longAgo} WHERE id = ${sessionId}`;
+    const before = (await db.session.findUniqueOrThrow({ where: { id: sessionId } })).updatedAt;
+    expect(await report(sessionId, contributorJwt, { outcome: 0.5 })).toBe(200);
+    const row = await db.session.findUniqueOrThrow({ where: { id: sessionId } });
+    expect(row.outcome).toBe(0.5); // the report still lands
+    expect(row.updatedAt!.getTime()).toBe(before!.getTime());
+  });
+
   it('accepts an account-scoped OAuth user key', async () => {
     expect(await report(sessionId, accountContributorKey, { outcome: 0.6 })).toBe(200);
     expect((await db.session.findUniqueOrThrow({ where: { id: sessionId } })).outcome).toBe(0.6);

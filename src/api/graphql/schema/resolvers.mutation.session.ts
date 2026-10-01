@@ -82,6 +82,7 @@ import {
   type UsageEventInput,
 } from './resolvers.helpers.js';
 import { assertNoMintedSpecRemoval, assertNoMintedSpecUnmark } from '../../../lib/mintedSpecPermanence.js';
+import { preserveHeartbeatIfLapsed } from '../../../lib/sessionActivity.js';
 
 /**
  * Strip explicit GraphQL nulls from a CalendarEventTimeInput so the tool's
@@ -1089,6 +1090,8 @@ export const sessionMutations = {
           ...(prNumber !== undefined ? { prNumber } : {}),
           ...(branch !== undefined ? { branch } : {}),
           updatedBy: ctx.userId ?? ctx.clientId ?? null,
+          // #1543 — a pr/branch edit must not revive a lapsed session.
+          ...(await preserveHeartbeatIfLapsed(ctx.db as never, id)),
         },
         include: SESSION_INCLUDE,
       });
