@@ -165,8 +165,7 @@ describe('#1565 review — Liam P3, Copilot and Jane P2 cases', () => {
   it('the registered description advertises the real read rule, not org-READER-only (Jane P2)', () => {
     const description = createTestableMcpServer(auth(reader.id)).toolDescription('hadron_get_run');
     expect(description).toMatch(/READER in its organization/);
-    expect(description).toMatch(/on your behalf/);
-    expect(description).toMatch(/started it manually/);
+    expect(description).toMatch(/on your behalf or you started it manually, while you keep a live relationship with its App/);
     expect(description).toMatch(/App's own key/);
     expect(description).not.toMatch(/you need READ on the run's organization/);
   });

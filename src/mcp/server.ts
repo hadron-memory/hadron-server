@@ -7791,7 +7791,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
    */
   server.tool(
     'hadron_get_run',
-    "Read an app run you started (or may read): its status, where it is or stopped (curNodeUrn), why it failed (failure), what it extracted (data, the run envelope) and the path it walked (hops: one entry per completed hop, with the edge it took). Pass the run id or hrn:apprun URN that hadron_run_task printed. Gated like appRun: you may read a run if you are a READER in its organization, if it runs on your behalf, if you started it manually and still belong to its App (App member or active subscriber), or if you hold that App's own key. A run you cannot read answers 'not found', the same as one that does not exist. Read-only.",
+    "Read an app run you started (or may read): its status, where it is or stopped (curNodeUrn), why it failed (failure), what it extracted (data, the run envelope) and the path it walked (hops: one entry per completed hop, with the edge it took). Pass the run id or hrn:apprun URN that hadron_run_task printed. Gated like appRun: you may read a run if you are a READER in its organization; if it runs on your behalf or you started it manually, while you keep a live relationship with its App (App member or active subscriber); or if you hold that App's own key. A run you cannot read answers 'not found', the same as one that does not exist. Read-only.",
     {
       ref: z.string().describe('The run: its id, or its hrn:apprun:<root>:<app>:<run-id> URN (hadron_run_task prints the id).'),
     },
