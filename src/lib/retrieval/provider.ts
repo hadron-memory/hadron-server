@@ -6,6 +6,7 @@
  * FTS (ts_rank_cd) and pgvector, which another backend would reimplement,
  * possibly at lower fidelity.
  */
+import type { NodeApprovalState } from '../nodeApproval.js';
 import type { PrismaClient } from '../../generated/prisma/index.js';
 import type { VectorHit, ChunkHit } from '../../services/embedding/vectors.js';
 import type { NodeWhere, NodePropertySort } from './nodeWhere.js';
@@ -50,6 +51,8 @@ export interface NodeSqlFilter {
    * above. See {@link file://./nodeWhere.ts}.
    */
   where?: NodeWhere | null;
+  /** #1591 — approval state; see `approvalStateSql`. */
+  approvalState?: NodeApprovalState | null;
 }
 
 /** Ordering for the no-query browse (relevance is meaningless without a query). */

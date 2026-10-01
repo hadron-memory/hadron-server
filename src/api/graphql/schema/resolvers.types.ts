@@ -105,7 +105,7 @@ import type { SessionType } from '../../../generated/prisma/index.js';
  * Shared by `Node.urn` and `Node.portalUrl` (#881) so a node's URN and the link
  * that opens it are always the same string.
  */
-async function resolveNodeUrnField(
+export async function resolveNodeUrnField(
   n: { loc: string; memoryId: string; memory?: { urn?: string } | null },
   ctx: Context,
 ): Promise<string> {
@@ -403,7 +403,7 @@ async function lookupRevisionEditorCandidate(
  * loadEdgeEndpointNode) — a 50-row history costs one query per DISTINCT
  * candidate, negative results included.
  */
-function resolveRevisionEditor(
+export function resolveRevisionEditor(
   ctx: Context,
   candidates: Array<string | null | undefined>,
 ): Promise<{ handle: string; urn: string | null } | null> {

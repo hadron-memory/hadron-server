@@ -252,6 +252,39 @@ export async function ensureCurrentNodeRevisionInTransaction(
   return node.revSeq + 1;
 }
 
+/** The live node's approval columns (#1591). */
+const NODE_APPROVAL_SELECT = {
+  approvedRevNo: true,
+  approvedBy: true,
+  approvedByInfo: true,
+  approvedAt: true,
+  approvalHash: true,
+} as const;
+
+interface NodeApprovalColumns {
+  approvedRevNo: number | null;
+  approvedBy: string | null;
+  approvedByInfo: string | null;
+  approvedAt: Date | null;
+  approvalHash: string | null;
+}
+
+/**
+ * #1591 — the approval a snapshot of revision `revNo` carries: the live node's
+ * approval when it names exactly that revision, otherwise none. This is how an
+ * approval moves into history when its revision is edited away, so every
+ * revision-write site gets it without passing anything.
+ */
+function approvalForSnapshot(node: NodeApprovalColumns | null, revNo: number) {
+  if (!node || node.approvedRevNo !== revNo) return {};
+  return {
+    approvedBy: node.approvedBy,
+    approvedByInfo: node.approvedByInfo,
+    approvedAt: node.approvedAt,
+    approvalHash: node.approvalHash,
+  };
+}
+
 /**
  * Create a NodeRevision and prune the node's history to `Memory.maxRevCount`
  * (#621). Every revision-write site goes through here (not a bare
@@ -273,15 +306,19 @@ export async function createNodeRevision(
   // gives the snapshot number. Skip when a guarded caller already claimed and
   // supplied the pre-edit number.
   let revNo = data.revNo ?? null;
+  let approval: NodeApprovalColumns | null;
   if (revNo == null) {
     const bumped = await db.node.update({
       where: { id: data.nodeId },
       data: { revSeq: { increment: 1 } },
-      select: { revSeq: true },
+      select: { revSeq: true, ...NODE_APPROVAL_SELECT },
     });
     revNo = bumped.revSeq - 1;
+    approval = bumped;
+  } else {
+    approval = await db.node.findUnique({ where: { id: data.nodeId }, select: NODE_APPROVAL_SELECT });
   }
-  await db.nodeRevision.create({ data: { ...data, revNo } });
+  await db.nodeRevision.create({ data: { ...data, revNo, ...approvalForSnapshot(approval, revNo) } });
 
   // The cap is per (node, memory). A node MOVED across memories keeps its id
   // and carries revisions from each memory it lived in (moveNode snapshots the

@@ -1243,6 +1243,21 @@ model Node {
   /// reconciles a mismatch by taking a server-authored revision. Included
   /// partials/template data and operational fields are deliberately outside it.
   revisionContentHash String?   @map("revision_content_hash")
+  /// #1591 — the node's LATEST approval, kept here rather than only on a
+  /// NodeRevision row because the live revision has no row (rows are pre-edit
+  /// snapshots) and rows are prunable and deletable. The current revision is
+  /// approved iff `approvedRevNo = revSeq`; an older number means it was
+  /// edited since. `approvedBy` is a User.id when one is known, with no FK so a
+  /// user deletion cannot rewrite who approved; otherwise `approvedByInfo`
+  /// holds the principal (the NodeRevision.editedByInfo convention).
+  /// `approvalHash` is the full SHA-256 of approval hash v1
+  /// (src/lib/approvalHash.ts) at approval time. All five are set together or
+  /// not at all (chk_node_approval_complete).
+  approvedRevNo      Int?      @map("approved_rev_no")
+  approvedBy         String?   @map("approved_by")
+  approvedByInfo     String?   @map("approved_by_info")
+  approvedAt         DateTime? @map("approved_at")
+  approvalHash       String?   @map("approval_hash")
   createdAt          DateTime  @default(now()) @map("created_at")
   createdBy          String?   @map("created_by")
   updatedAt          DateTime  @updatedAt @map("updated_at")
@@ -2319,9 +2334,17 @@ model NodeRevision {
   /// state, so `changes` describes the delta between this snapshot and
   /// the state that replaced it. Empty for legacy rows (NULL reads as []).
   changes            String[]
-  /// #620: reserved — User who approved this revision. No write surface
-  /// yet; the approve flow lands later.
+  /// #620/#1591: User who approved this revision, copied from the live
+  /// node's approval when this revision is snapshotted (edited away) while
+  /// approved. The approval of record is on Node (see Node.approvedRevNo);
+  /// these columns are its history.
   approvedBy         String?  @map("approved_by")
+  /// #1591: the approving principal when no User.id is known.
+  approvedByInfo     String?  @map("approved_by_info")
+  /// #1591: when this revision was approved.
+  approvedAt         DateTime? @map("approved_at")
+  /// #1591: approval hash v1 recorded when this revision was approved.
+  approvalHash       String?  @map("approval_hash")
   /// #696: per-node MONOTONIC revision number (1, 2, 3, …) — the stable atom
   /// in the `hrn:noderev:<root>:<mem>:<loc...>:<rev>` URN (rendered `r<N>`).
   /// Minted race-safely from `Node.revSeq` (atomic increment) inside the same

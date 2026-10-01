@@ -58,6 +58,7 @@ import { teamAttentionMutations, teamAttentionQueries } from './resolvers.teamAt
 import { teamWorkMutations, teamWorkQueries } from './resolvers.teamWork.js';
 import { memoryConfigMutations, memoryConfigQueries, memoryConfigFieldResolvers } from './resolvers.memoryConfig.js';
 import { memoryConfigApplyMutations } from './resolvers.memoryConfigApply.js';
+import { nodeApprovalFieldResolvers, nodeApprovalMutations, nodeApprovalQueries } from './resolvers.nodeApproval.js';
 import {
   specCorpusMintMutations,
   specCorpusMutations,
@@ -96,6 +97,9 @@ export const resolvers = {
   Agent: { ...typeResolvers.Agent, ...registerFieldResolvers.Agent },
   // Same for Memory: the config field joins the existing type block (#1325).
   Memory: { ...typeResolvers.Memory, ...memoryConfigFieldResolvers.Memory },
+  // #1591: approval status joins the existing Node block.
+  Node: { ...typeResolvers.Node, ...nodeApprovalFieldResolvers.Node },
+  NodeApproval: nodeApprovalFieldResolvers.NodeApproval,
   MemoryConfig: memoryConfigFieldResolvers.MemoryConfig,
   NodeRoleRule: memoryConfigFieldResolvers.NodeRoleRule,
   MemoryConfigTemplate: memoryConfigTemplateFieldResolvers.MemoryConfigTemplate,
@@ -103,6 +107,7 @@ export const resolvers = {
   Query: {
     ...nodeQueries,
     ...specCorpusQueries,
+    ...nodeApprovalQueries,
     ...skillQueries,
     ...objectQueries,
     ...edgeQueries,
@@ -162,6 +167,7 @@ export const resolvers = {
     ...specCorpusMutations,
     ...specCorpusRenumberMutations,
     ...specCorpusMintMutations,
+    ...nodeApprovalMutations,
     ...scopeMutations,
     ...channelMutations,
     ...registerMutations,

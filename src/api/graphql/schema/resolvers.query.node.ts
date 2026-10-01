@@ -84,6 +84,7 @@ import {
   toUsageNodeRefs,
 } from '../../../lib/usageRecorder.js';
 import { ensureCurrentNodeRevisionInTransaction } from '../../../lib/nodeRevisionSnapshot.js';
+import { approvalStatePrismaWhere, type NodeApprovalState } from '../../../lib/nodeApproval.js';
 import { LIVE_ORG_MEMBERSHIP } from '../../../lib/auth/liveOrgMembership.js';
 
 /** findNodes' arguments (cor:api:090), shared by the resolver and its spec-049 scope wrapper. */
@@ -105,6 +106,8 @@ export interface FindNodesArgs {
     updatedBefore?: string | null;
     includeDeleted?: boolean | null;
     where?: NodeWhere | null;
+    /** #1591 */
+    approvalState?: NodeApprovalState | null;
   } | null;
   fields?: string[] | null;
   sort?: 'relevance' | 'loc' | 'seq' | 'updatedAt' | null;
@@ -1071,6 +1074,7 @@ export const nodeQueries = {
               ...(f.updatedBefore ? { lte: new Date(f.updatedBefore) } : {}),
             } }
           : {}),
+        ...approvalStatePrismaWhere(f.approvalState, ctx.db),
       };
       const nodeInclude = {
         memory: true,
@@ -1094,6 +1098,7 @@ export const nodeQueries = {
         updatedAfter: f.updatedAfter ?? null,
         updatedBefore: f.updatedBefore ?? null,
         where: f.where ?? null,
+        approvalState: f.approvalState ?? null,
       };
 
       // #1061 — one `read` per node this query hands back, across every branch
@@ -1171,7 +1176,7 @@ export const nodeQueries = {
       // from the retrieval layer to keep the page full after post-filtering + offset.
       const hasStructuredFilters = !!(
         f.nodeType || f.objectType || f.isRunnable != null || f.role != null || f.tags?.length || f.locPrefix ||
-        f.createdBy || f.updatedAfter || f.updatedBefore || f.includeDeleted || f.where
+        f.createdBy || f.updatedAfter || f.updatedBefore || f.includeDeleted || f.where || f.approvalState
       );
       const page = off + finalLimit;
       const VECTOR_FETCH_CAP = 2000;
@@ -2068,6 +2073,8 @@ export const nodeQueries = {
           updatedAfter?: string | null;
           updatedBefore?: string | null;
           includeDeleted?: boolean | null;
+          /** #1591 */
+          approvalState?: NodeApprovalState | null;
         } | null;
         limit?: number;
       },
@@ -2254,6 +2261,7 @@ export const nodeQueries = {
                 ...(f.updatedBefore ? { lte: new Date(f.updatedBefore) } : {}),
               } }
             : {}),
+          ...approvalStatePrismaWhere(f.approvalState, ctx.db),
         },
         orderBy: { loc: 'asc' },
         take: limit ?? 500,
