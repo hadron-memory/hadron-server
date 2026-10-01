@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { join } from 'path';
 import { mkdirSync, writeFileSync } from 'fs';
 import { makeTmpDir, writeNodeFiles } from '../../test/helpers.js';
-import { loadGraphFromFs } from './loadGraphFromFs.js';
+import { InvalidNodeNameError, loadGraphFromFs } from './loadGraphFromFs.js';
 
 let graphRoot: string;
 let cleanup: () => void;
@@ -28,6 +28,32 @@ describe('loadGraphFromFs', () => {
     expect(graph.nodes).toHaveLength(1);
     expect(graph.nodes[0].loc).toBe('my-org:my-graph');
     expect(graph.nodes[0].name).toBe('my-graph');
+  });
+
+  it.each([
+    ['missing', 'description: no name here'],
+    ['blank', 'name: "   "'],
+    ['non-string', 'name: 42'],
+  ])('refuses a frontmatter file with a %s name instead of skipping it', async (_case, metadata) => {
+    const file = join(graphRoot, 'glossary', 'noname.md');
+    mkdirSync(join(graphRoot, 'glossary'), { recursive: true });
+    writeFileSync(file, `---\n${metadata}\n---\nBody`);
+
+    await expect(loadGraphFromFs(graphRoot, 'org/graph', 'test/repo'))
+      .rejects.toMatchObject({
+        name: 'InvalidNodeNameError',
+        file: 'glossary/noname.md',
+        message: 'Git sync cannot import "glossary/noname.md": name must be a non-empty string.',
+      } satisfies Partial<InvalidNodeNameError>);
+  });
+
+  it('names legacy node.yaml when its name is missing', async () => {
+    const dir = join(graphRoot, 'legacy');
+    mkdirSync(join(dir, '.node'), { recursive: true });
+    writeFileSync(join(dir, '.node', 'node.yaml'), 'description: no name here\n');
+
+    await expect(loadGraphFromFs(graphRoot, 'org/graph', 'test/repo'))
+      .rejects.toMatchObject({ file: 'legacy/.node/node.yaml' } satisfies Partial<InvalidNodeNameError>);
   });
 
   it('sets graph name and ownerRepo correctly', async () => {

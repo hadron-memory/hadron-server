@@ -362,6 +362,31 @@ describe('syncGraphFromGithub', () => {
     expect(inDb!.name).toBe('nodeA');
   });
 
+  it('reports a missing name without exposing a server path or changing nodes', async () => {
+    const repo = join(mockSources, 'test-org', 'test/repo');
+    const glossary = join(repo, 'glossary');
+    mkdirSync(glossary, { recursive: true });
+    const file = join(glossary, 'noname.md');
+    const keptId = 'aaaa1567000000000000000000000001';
+    writeFileSync(file, `---\nid: ${keptId}\nname: Existing\n---\nOld body`);
+    expect((await syncGraphFromGithub(makeGraph())).error).toBeUndefined();
+
+    writeFileSync(file, `---\nid: ${keptId}\ndescription: no name here\n---\nNew body`);
+    writeFileSync(join(repo, 'new.md'), '---\nname: New\n---\nNew node');
+    const result = await syncGraphFromGithub(makeGraph());
+
+    expect(result).toMatchObject({
+      error: 'Git sync cannot import "glossary/noname.md": name must be a non-empty string.',
+      errorCode: 'BAD_USER_INPUT',
+    });
+    expect(result.error).not.toContain(mockSources);
+    expect(await db.node.findUniqueOrThrow({ where: { id: keptId } }))
+      .toMatchObject({ name: 'Existing', content: 'Old body' });
+    expect(await db.node.findFirst({ where: { memoryId: dbGraphId, loc: 'new' } })).toBeNull();
+    expect(await db.memory.findUniqueOrThrow({ where: { id: dbGraphId } }))
+      .toMatchObject({ syncStatus: 'ERROR', syncError: result.error });
+  });
+
   it('re-sync preserves node IDs for unchanged nodes', async () => {
     const nodeId = 'aaaa000000000000000000000000000000';
     const nodeA = join(mockSources, 'test-org', 'test/repo', 'nodeA');

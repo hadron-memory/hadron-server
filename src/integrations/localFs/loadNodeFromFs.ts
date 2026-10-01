@@ -286,7 +286,7 @@ export const loadNodeFromFs = async (
   source: string,
   graphRoot: string,
   ownerRepo: string,
-): Promise<{ node: Partial<Node>; edges: Array<LoadedEdge> }> => {
+): Promise<{ node: Partial<Node>; edges: Array<LoadedEdge>; metadataIsMapping: boolean }> => {
   if (source.endsWith('.md')) {
     return loadFrontmatterNode(source, graphRoot, ownerRepo);
   }
@@ -300,7 +300,7 @@ async function loadFrontmatterNode(
   mdPath: string,
   graphRoot: string,
   ownerRepo: string,
-): Promise<{ node: Partial<Node>; edges: Array<LoadedEdge> }> {
+): Promise<{ node: Partial<Node>; edges: Array<LoadedEdge>; metadataIsMapping: boolean }> {
   // Normalize CRLF to LF before splitting (#280). The LF-only split used to
   // reject a CRLF file (a Windows author, or git core.autocrlf on the clone
   // host), which drops the node from the loaded graph. Normalizing the whole
@@ -334,6 +334,7 @@ async function loadFrontmatterNode(
   );
 
   return {
+    metadataIsMapping: isYamlMapping(meta),
     node: {
       id: meta.id,
       loc,
@@ -365,7 +366,7 @@ async function loadLegacyNode(
   dirPath: string,
   graphRoot: string,
   ownerRepo: string,
-): Promise<{ node: Partial<Node>; edges: Array<LoadedEdge> }> {
+): Promise<{ node: Partial<Node>; edges: Array<LoadedEdge>; metadataIsMapping: boolean }> {
   const yamlPath = join(dirPath, '.node', 'node.yaml');
   const mdPath = join(dirPath, '.node', 'topic.md');
 
@@ -391,6 +392,7 @@ async function loadLegacyNode(
   );
 
   return {
+    metadataIsMapping: isYamlMapping(meta),
     node: {
       id: meta.id,
       loc,
@@ -416,6 +418,12 @@ async function loadLegacyNode(
     },
     edges,
   };
+}
+
+/** #280: tagged YAML collections are accepted partial nodes, not mappings. */
+function isYamlMapping(value: object): boolean {
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
 }
 
 /**
