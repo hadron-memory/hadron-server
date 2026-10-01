@@ -37,9 +37,10 @@ const DELEGATED = [
   ['resolvers.mutation.app.ts', 'addAgentToApp', 'installAgentIntoAppCore'],
 ] as const;
 
-// Related writes outside #1551's named grant-mutation scope. Keep these
-// visible and count their call sites so a new indirect writer changes this
-// ratchet instead of silently joining the exception.
+// Related writes outside #1551's named grant-mutation scope. #1573 tracks the
+// createApp/startChat atomicity review. Keep these visible and count their
+// call sites so a new indirect writer changes this ratchet instead of silently
+// joining the exception.
 const EXEMPT = [
   { file: 'resolvers.mutation.org.ts', name: 'inviteUser', callee: 'ctx.db.userInvitation.create', count: 1,
     why: 'A referral invitation has no organization and cannot mint an OrgMember.' },
