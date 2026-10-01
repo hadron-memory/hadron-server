@@ -1,6 +1,7 @@
 import type { Context } from './resolvers.helpers.js';
 import { isAuthorizationDenial, requireOwnerOrOrgRole } from './resolvers.helpers.js';
 import { activeAppInstallLicenseIdsForAgent, isAgentInstalledAndLicensed } from '../../../lib/appAgent.js';
+import { isActiveAgentSubscription } from '../../../lib/agentSubscription.js';
 
 /** The Agent columns {@link canChatWithAgent} decides from. */
 export interface ChatAgentRow {
@@ -57,4 +58,35 @@ export async function canChatWithAgent(ctx: Context, agent: ChatAgentRow): Promi
     ctx.db, agent.id, memberships.map((m) => m.appId),
   );
   return licensed.size > 0;
+}
+
+/**
+ * May a pure App key start a chat on behalf of `userId` (#1581, Ada #6055)?
+ * Only for a user with a live relationship to THAT App: an AppMember of it,
+ * or a user holding an active subscription to the Agent being chatted with
+ * (which `canChatWithAgent` has already required to be installed and
+ * licensed in the App). A session-bound key is further confined to its
+ * session's own user, so it cannot license user B while writing the chat
+ * into user A's session memory. Callers refuse anything else as an unknown
+ * user.
+ */
+export async function appKeyMayActFor(ctx: Context, userId: string, agentId: string): Promise<boolean> {
+  if (!ctx.appId) return false;
+  if (ctx.sessionId) {
+    const session = await ctx.db.session.findUnique({
+      where: { id: ctx.sessionId },
+      select: { appId: true, userId: true },
+    });
+    if (!session || session.appId !== ctx.appId) return false;
+    if (session.userId !== null && session.userId !== userId) return false;
+  }
+  const member = await ctx.db.appMember.findUnique({
+    where: { appId_userId: { appId: ctx.appId, userId } },
+    select: { userId: true },
+  });
+  if (member) return true;
+  const subscription = await ctx.db.agentSubscription.findUnique({
+    where: { userId_agentId: { userId, agentId } },
+  });
+  return subscription !== null && isActiveAgentSubscription(subscription);
 }

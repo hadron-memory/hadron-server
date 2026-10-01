@@ -145,6 +145,62 @@ describe('#1581: startChat gates the Agent before reading or licensing anything'
   });
 });
 
+// #1581 review (Atilla, Copilot): real App-key contexts carry roles: [] and
+// reach startChat itself. Ada's ruling (#6055): an App key acts only for a user
+// with a live relationship to THAT App, and a session-bound key only for its
+// session's own user; anything else reads as an unknown user.
+describe('#1581: startChat through a pure App key (resolver level)', () => {
+  async function appKeySessionFor(userId: string | null, appId = app.id) {
+    const mem = await db.memory.create({ data: {
+      id: generateId(), organizationId: orgA.id, urn: `${orgA.urn}:session-${generateId().slice(-8)}`,
+      name: 'session memory', class: 'app', appId,
+    } });
+    const session = await db.session.create({ data: {
+      id: generateId(), appId, userId, agentId: agent.id, memoryId: mem.id, type: 'CHATBOT', startedAt: new Date(),
+    } as never });
+    return { db, appId, sessionId: session.id, roles: [] } as unknown as Context;
+  }
+
+  it('an App key starts a chat for its session user, an AppMember, and licenses them', async () => {
+    const ctx = await appKeySessionFor(endUser.id);
+    const out = await M.startChat(null, { agentId: agent.id, userId: endUser.id }, ctx);
+    expect(out.chatId).toMatch(/^chats:/);
+    expect(await subsFor(agent.id)).toEqual([endUser.id]);
+  });
+
+  it('an App key may NOT act for a user with no relationship to its App', async () => {
+    const ctx = await appKeySessionFor(null);
+    await expect(M.startChat(null, { agentId: agent.id, userId: stranger.id }, ctx))
+      .rejects.toMatchObject({ name: 'UserNotFoundError' });
+    expect(await subsFor(agent.id)).toEqual([]);
+  });
+
+  it('a session-bound App key may not license a DIFFERENT user than its session user, even an AppMember', async () => {
+    await db.appMember.create({ data: { appId: app.id, userId: victim.id, role: 'member' } });
+    const ctx = await appKeySessionFor(endUser.id);
+    await expect(M.startChat(null, { agentId: agent.id, userId: victim.id }, ctx))
+      .rejects.toMatchObject({ name: 'UserNotFoundError' });
+    expect(await subsFor(agent.id)).toEqual([]);
+  });
+
+  it('an App key whose App does not install the Agent is refused as not found', async () => {
+    const ctx = await appKeySessionFor(endUser.id, otherApp.id);
+    await expect(M.startChat(null, { agentId: agent.id, userId: endUser.id }, ctx))
+      .rejects.toMatchObject({ name: 'AgentNotFoundError' });
+  });
+});
+
+describe('#1581 review: two concurrent first chats for the same user both complete', () => {
+  it('neither chat transaction is aborted, and exactly one subscription exists', async () => {
+    const results = await Promise.allSettled([
+      M.startChat(null, { agentId: agent.id }, userCtx(member.id)),
+      M.startChat(null, { agentId: agent.id }, userCtx(member.id)),
+    ]);
+    expect(results.map((r) => r.status)).toEqual(['fulfilled', 'fulfilled']);
+    expect(await subsFor(agent.id)).toEqual([member.id]);
+  });
+});
+
 describe('#1581: canChatWithAgent for a pure App key', () => {
   it('allows the App the Agent is installed and licensed in, and refuses any other App', async () => {
     expect(await canChatWithAgent({ db, appId: app.id } as Context, agent)).toBe(true);

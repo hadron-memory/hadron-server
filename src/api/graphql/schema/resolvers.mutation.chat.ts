@@ -26,9 +26,9 @@ import {
 } from '../../../lib/edge-conditions/index.js';
 import { buildPrismaMemoryLayer } from '../../../lib/edge-conditions/prisma-memory-layer.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
-import { AgentNotFoundError } from '../../../lib/entityRef/errors.js';
+import { AgentNotFoundError, UserNotFoundError } from '../../../lib/entityRef/errors.js';
 import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
-import { canChatWithAgent } from './agentChatAccess.js';
+import { appKeyMayActFor, canChatWithAgent } from './agentChatAccess.js';
 import { activeAppInstallLicenseIdsForAgent, isAgentInstalledAndLicensed } from '../../../lib/appAgent.js';
 import { GraphQLError } from 'graphql';
 import { type InputJsonValue } from '../../../generated/prisma/runtime/library.js';
@@ -88,7 +88,11 @@ export const chatMutations = {
       },
       ctx: Context,
     ) => {
-      requireRole(ctx, 'READER');
+      // #1581 review (Atilla, Copilot): a pure App key carries no platform
+      // roles. It is authorized by canChatWithAgent's App-install rule below,
+      // not by a role, so the role check applies to user principals only.
+      const pureAppKey = Boolean(ctx.appId && !ctx.userId);
+      if (!pureAppKey) requireRole(ctx, 'READER');
 
       // Spec 017: default per FR-003. The GraphQL schema also defaults
       // scope to `private`; the resolver default is a defensive belt.
@@ -115,8 +119,16 @@ export const chatMutations = {
       // #1581: only a pure App key acts on behalf of another user. A signed-in
       // user acts as themselves; naming someone else is refused rather than
       // provisioning a license onto that person's account.
-      if (userId != null && userId !== ctx.userId && !(ctx.appId && !ctx.userId)) {
-        throw authorizationDenied('Forbidden: only an App key can start a chat on behalf of another user.');
+      if (userId != null && userId !== ctx.userId) {
+        if (!pureAppKey) {
+          throw authorizationDenied('Forbidden: only an App key can start a chat on behalf of another user.');
+        }
+        // Ada's ruling (#6055): an App key acts only for a user with a live
+        // relationship to THAT App (and, when session-bound, only for the
+        // session's own user). Anything else reads as an unknown user.
+        if (!(await appKeyMayActFor(ctx, userId, resolvedAgentId))) {
+          throw new UserNotFoundError(userId);
+        }
       }
       const effectiveUserId = userId ?? ctx.userId ?? 'anonymous';
 
