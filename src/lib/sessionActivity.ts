@@ -247,6 +247,38 @@ export function isSessionLive(
 }
 
 /**
+ * Record that a caller just drove a LIVE session through a team-chat call
+ * (#1540): bump `Session.updatedAt`, the same heartbeat column the MCP track
+ * writes (`heartbeatSession`, #1081), so `isSessionLive` — and with it the
+ * roster, the bind gate's WORKER_TAKEN and the post gate — sees the activity.
+ * Before this, a CLI/GraphQL-bound worker that posted and read every few
+ * minutes still went SESSION_NOT_LIVE one idle window after `startedAt`,
+ * because nothing on that track touched any of the predicate's inputs.
+ *
+ * The CALLER must already have established that the session is live and that
+ * it owns and may still drive it; this does no authorization of its own. It
+ * keeps a live session alive and never revives a lapsed one: callers run it
+ * only after their liveness check passes, and the `endedAt: null` guard means
+ * a touch racing `endSession` updates nothing.
+ *
+ * Bookkeeping, never a failure: an error is logged and swallowed, so a
+ * caller's post or read cannot fail because liveness bookkeeping did.
+ */
+export async function touchLiveSession(
+  db: { session: { updateMany: (args: { where: Record<string, unknown>; data: { updatedAt: Date } }) => Promise<unknown> } },
+  sessionId: string,
+): Promise<void> {
+  try {
+    await db.session.updateMany({
+      where: { id: sessionId, endedAt: null, deletedAt: null },
+      data: { updatedAt: new Date() },
+    });
+  } catch (err) {
+    console.warn('[touchLiveSession] heartbeat failed:', err);
+  }
+}
+
+/**
  * Backstop cap on how many OPEN sessions any liveness read will scan.
  *
  * #1114 removed the only thing that closed abandoned sessions, so the count of

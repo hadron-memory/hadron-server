@@ -39,6 +39,7 @@ import {
   loadLastEventBySession,
   OPEN_SESSION_SCAN_CAP,
   recentlyTouchedFilter,
+  touchLiveSession,
 } from './sessionActivity.js';
 
 // #1496: aligned with MAX_TARGETS/OPEN_SESSION_SCAN_CAP as the single scope
@@ -225,6 +226,24 @@ const LIVE_APP_WHERE: Prisma.AppWhereInput = {
   uninstalledAt: null,
   OR: [{ organizationId: null }, { organization: { deletedAt: null } }],
 };
+
+/**
+ * May this caller STILL drive a worker of `appId` (#1540, Codex-worker P1 on
+ * #1542)? A session's `userId` is historical — stamped at bind, never revoked —
+ * so keeping a session alive needs CURRENT eligibility, the rule
+ * `ownLiveSessionWorker` and the MCP heartbeat already apply: a user must still
+ * participate in the worker's live App (its org not deleted); a pure App-key
+ * caller only for its own App. Impersonation never drives anything.
+ */
+export async function mayStillDriveWorkerApp(ctx: Context, appId: string): Promise<boolean> {
+  if (ctx.impersonation) return false;
+  if (!ctx.userId) return !!ctx.appId && ctx.appId === appId;
+  const app = await ctx.db.app.findFirst({
+    where: { id: appId, ...LIVE_APP_WHERE },
+    select: { id: true, organizationId: true, ownerUserId: true },
+  });
+  return !!app && (await isAppParticipant(ctx, app));
+}
 
 async function resolvePilotApp(ctx: Context, appRef: string): Promise<AppRow> {
   if (!ctx.userId || ctx.impersonation) fail('Team attention is available only to an ordinary user.', 'FORBIDDEN');
@@ -1229,9 +1248,11 @@ async function ownLiveSessionWorker(
   });
   if (!app || !(await isAppParticipant(ctx, app))) return null;
   const events = await loadLastEventBySession(ctx.db as never, [session.id]);
-  return isSessionLive(session, events.get(session.id), new Date())
-    ? { workerId: session.workerId, appId: session.appId }
-    : null;
+  if (!isSessionLive(session, events.get(session.id), new Date())) return null;
+  // #1540 — a read or mark-read through the session is its driver driving it.
+  // Owned, eligible and live are all established above, so keep it alive.
+  await touchLiveSession(ctx.db, session.id);
+  return { workerId: session.workerId, appId: session.appId };
 }
 
 /**
@@ -1254,13 +1275,19 @@ export async function maybeAdvanceOwnChannelRead(
   },
 ): Promise<number | null> {
   const sessionRef = args.sessionRef?.trim() || ctx.sessionId?.trim();
-  if (!sessionRef || args.mentionsRef || args.beforeSeq != null || (args.offset ?? 0) !== 0 || (args.limit ?? 1) <= 0) return null;
+  if (!sessionRef) return null;
+  // #1540 (Codex P1 on #1542): EVERY successful read through an owned, live
+  // session is its driver driving it, whether or not the page qualifies to
+  // advance the cursor below. Resolving the session first runs the keep-alive
+  // in `ownLiveSessionWorker` before the eligibility returns, so a driver that
+  // reads only newest pages, mention filters or backward windows stays live.
+  const session = await ownLiveSessionWorker(ctx, sessionRef);
+  if (!session) return null;
+  if (args.mentionsRef || args.beforeSeq != null || (args.offset ?? 0) !== 0 || (args.limit ?? 1) <= 0) return null;
   // #1536: no cursor and no offset now selects the newest page. Even when
   // total says it is complete, count and fetch are separate queries: a post
   // between them could make the fetched tail skip earlier unseen messages.
   if (args.sinceSeq == null && args.offset == null) return null;
-  const session = await ownLiveSessionWorker(ctx, sessionRef);
-  if (!session) return null;
   const { workerId } = session;
   const view = await resolveRegister(ctx.db, { attendee: { workerId }, actor: ctx });
   const row = view?.rows.find((r) => r.channel.id === args.channelId);

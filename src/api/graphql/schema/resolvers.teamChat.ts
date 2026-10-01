@@ -53,7 +53,7 @@ import {
   getAccessibleMemoryIds,
   clampListTake,
 } from './resolvers.helpers.js';
-import { isSessionLive, loadLastEventBySession } from '../../../lib/sessionActivity.js';
+import { isSessionLive, loadLastEventBySession, touchLiveSession } from '../../../lib/sessionActivity.js';
 import { findOrCreateAppClassMemory } from './chat-scope.js';
 import { mentionTokenOf } from '../../../lib/mentionToken.js';
 import { extractMentions } from '../../../lib/teamChatMentions.js';
@@ -67,6 +67,7 @@ import { escapePrismaLikePattern } from '../../../lib/literalLocPrefix.js';
 import { nodeUrnRoundTrips, safeNodeUrnV2 } from '../../../lib/urnEmit.js';
 import {
   maybeAdvanceOwnChannelRead,
+  mayStillDriveWorkerApp,
 } from '../../../lib/teamAttention.js';
 
 // The team-chat locs moved to src/lib/teamChatLoc.ts (#1030): the agent-chat
@@ -461,7 +462,10 @@ async function resolveSessionAuthor(
   const events = await loadLastEventBySession(ctx.db as never, [session.id]);
   if (!isSessionLive(session, events.get(session.id), now)) {
     throw new GraphQLError(
-      `Session "${sessionRef}" is not live — nothing has driven it inside its idle window, so its worker cannot author through it. Drive the session (any team tool heartbeats it) or start a new one.`,
+      `Session "${sessionRef}" is not live — nothing has driven it inside its idle window, so its worker cannot author through it. ` +
+        'A lapsed session is not revived by posting through it; start a new session for this worker ' +
+        '(CLI: `hadron team session start --as <worker>`; MCP: `hadron_start_session`). While a session is live, ' +
+        'posting, reading and marking read through it keep it live.',
       { extensions: { code: 'SESSION_NOT_LIVE' } },
     );
   }
@@ -535,6 +539,18 @@ async function resolveSessionAuthor(
       );
     }
   }
+  // #1540 — authoring through the session is its driver driving it. Every
+  // gate above passed, so the session is live and may author here; keep it
+  // alive. Without this a CLI-bound worker posting all day went
+  // SESSION_NOT_LIVE one idle window after binding.
+  //
+  // Only on CURRENT eligibility to drive the worker (Codex-worker P1 on
+  // #1542): the gates above judge the session's historical user and the
+  // DESTINATION's host memory, so a cross-App or free-standing Channel post
+  // could otherwise keep alive a session whose driver has since lost the
+  // worker's own App. The post itself is authorized as before; only the
+  // keep-alive is withheld.
+  if (await mayStillDriveWorkerApp(ctx, worker.appId)) await touchLiveSession(ctx.db, session.id);
   return { workerId: worker.id, name: worker.name, sessionId: session.id, workerAppId: worker.appId, crossApp };
 }
 

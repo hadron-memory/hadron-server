@@ -13,7 +13,7 @@
  *     carries authorAppId; a pure App-key session is never widened.
  */
 
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
@@ -285,6 +285,66 @@ describe('PR #1169 review, round 2 — liveness and the convenience read', () =>
     await M.createTeamChatMessage({}, { appRef: appA.urn, body: 'team hello' }, ctx(admin.id));
     expect(await Q.teamChatMessages({}, { appRef: appA.urn }, endUser)).toEqual({ items: [], total: 0 });
     expect((await Q.teamChatMessages({}, { appRef: appA.urn }, ctx(admin.id))).total).toBe(1);
+  });
+});
+
+describe('#1540 — authoring through a live session keeps it live', () => {
+  const H = 60 * 60 * 1000;
+  // Only Date is faked: the server's own clock (Session.updatedAt, the
+  // liveness cutoff) moves, while Prisma and pg keep their real timers.
+  afterEach(() => vi.useRealTimers());
+
+  async function bindAt(t0: Date) {
+    return db.session.create({
+      data: { id: generateId(), appId: appA.id, userId: admin.id, workerId: workerA.id, type: 'DEVELOPER', startedAt: t0 } as never,
+    });
+  }
+  const post = (sessionId: string, body: string) =>
+    M.createChannelMessage({}, { channelRef: release.id, body, sessionRef: sessionId }, ctx(admin.id));
+
+  it('a session that posts inside its window is still live past startedAt + window', async () => {
+    const t0 = new Date();
+    const session = await bindAt(t0);
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date(t0.getTime() + 20 * H));
+    await post(session.id, 'at 20h');
+    expect((await db.session.findUniqueOrThrow({ where: { id: session.id } })).updatedAt!.getTime())
+      .toBeGreaterThanOrEqual(t0.getTime() + 20 * H);
+    vi.setSystemTime(new Date(t0.getTime() + 30 * H)); // past startedAt + 24h, inside 24h of the last post
+    await expect(post(session.id, 'at 30h')).resolves.toBeTruthy();
+  });
+
+  it("a post through a Channel the driver may write does NOT heartbeat a worker whose App they no longer drive (Codex-worker P1)", async () => {
+    // The worker lives in a user-owned App that `stranger` does not
+    // participate in (owner-only); `stranger` still ADMINs org B, so may write
+    // a free-standing Channel's host memory there and the post is authorized.
+    const strangerUser = await db.user.findUniqueOrThrow({ where: { id: stranger.id }, select: { handle: true } });
+    const adminUser = await db.user.findUniqueOrThrow({ where: { id: admin.id }, select: { handle: true } });
+    const orgB = await db.orgMember.findFirstOrThrow({ where: { userId: stranger.id }, select: { organizationId: true } });
+    const appU = await db.app.create({ data: { id: generateId(), ownerUserId: admin.id, name: 'U', urn: `${adminUser.handle}:u` } });
+    const workerU = await db.worker.create({ data: { id: generateId(), appId: appU.id, agentId: agent.id, name: 'Kit', slug: 'kit' } });
+    const memK = await db.memory.create({ data: { id: generateId(), organizationId: orgB.organizationId, urn: `${strangerUser.handle}-k`, name: 'k', class: 'knowledge' } });
+    const free = (await ensureChannelWithRoot(db, { memoryId: memK.id, loc: 'chats:k', name: 'k', createdBy: stranger.id })).channel;
+    const before = new Date(Date.now() - 2 * H);
+    const session = await db.session.create({
+      data: { id: generateId(), appId: appU.id, userId: stranger.id, workerId: workerU.id, type: 'DEVELOPER', startedAt: before } as never,
+    });
+    await db.session.update({ where: { id: session.id }, data: { updatedAt: before } });
+
+    await M.createChannelMessage({}, { channelRef: free.id, body: 'cross-App', sessionRef: session.id }, ctx(stranger.id));
+    expect((await db.session.findUniqueOrThrow({ where: { id: session.id } })).updatedAt!.getTime()).toBe(before.getTime());
+  });
+
+  it('control: a genuinely silent session is still refused, and the refusal names a remedy that exists', async () => {
+    const t0 = new Date();
+    const session = await bindAt(t0);
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date(t0.getTime() + 30 * H));
+    const refused = post(session.id, 'too late');
+    await expect(refused).rejects.toMatchObject({ extensions: { code: 'SESSION_NOT_LIVE' } });
+    await expect(refused).rejects.toThrow(/hadron team session start --as|hadron_start_session/);
+    // A refused post does not revive it either.
+    await expect(post(session.id, 'still too late')).rejects.toMatchObject({ extensions: { code: 'SESSION_NOT_LIVE' } });
   });
 });
 
