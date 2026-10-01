@@ -27,6 +27,7 @@ import {
   getWorkerMemoryAccess,
 } from '../../../mcp/access-control.js';
 import { ensureAgentOrgGrant } from '../../../controller/operations/ensureAgentOrgGrant.js';
+import { planOrgAgentInstallGrant } from '../../../lib/auth/orgAgentInstallLicense.js';
 import { withAuthorizedTx } from './authorizedTx.js';
 import { ensureAgentSubscription } from '../../../controller/operations/ensureAgentSubscription.js';
 import {
@@ -2857,14 +2858,6 @@ export async function installAgentIntoAppCore(
         extensions: { code: 'ORGANIZATION_MISMATCH', appId: resolvedAppId, agentId: resolvedAgentId },
       });
     }
-  } else if (agent.organizationId !== app.organizationId && agent.visibility !== 'PUBLIC') {
-    // #551: a foreign Agent may be installed cross-org WHEN it is PUBLIC (the
-    // marketplace / AgentOrgGrant path — the grant is auto-provisioned below).
-    // A non-PUBLIC agent still must belong to the App's own org (pre-023
-    // behavior — you can't reach into another org's private agents).
-    throw new GraphQLError('Agent must belong to the same organization as the App, or be PUBLIC.', {
-      extensions: { code: 'ORGANIZATION_MISMATCH', appId: resolvedAppId, agentId: resolvedAgentId },
-    });
   }
   // Best-effort pre-check for the typed `DUPLICATE_APP_AGENT` error.
   // The race-safe fallback lives inside the transaction below — under
@@ -2880,6 +2873,7 @@ export async function installAgentIntoAppCore(
   // Keep them in one transaction under the App owner's anchor, so a revoker
   // cannot return while a post-check grant is still waiting to commit.
   let currentAgentOwnerUserId: string | null = agent.ownerUserId;
+  let autoProvisionOrgGrant = false;
   const created = await withAuthorizedTx(
     ctx,
     [
@@ -2909,14 +2903,16 @@ export async function installAgentIntoAppCore(
             extensions: { code: 'ORGANIZATION_MISMATCH', appId: resolvedAppId, agentId: resolvedAgentId },
           });
         }
-      } else if (currentAgent.organizationId !== currentApp.organizationId && currentAgent.visibility !== 'PUBLIC') {
-        throw new GraphQLError('Agent must belong to the same organization as the App, or be PUBLIC.', {
-          extensions: { code: 'ORGANIZATION_MISMATCH', appId: resolvedAppId, agentId: resolvedAgentId },
-        });
+      } else {
+        // Check the grant while the org/Agent anchors are held. A concurrent
+        // revoke must not race a cross-org installation past this decision.
+        autoProvisionOrgGrant = await planOrgAgentInstallGrant(
+          txCtx.db, currentApp.organizationId, resolvedAgentId, args.agentRef,
+        );
       }
     },
     async (tx) => {
-      if (app.organizationId) {
+      if (app.organizationId && autoProvisionOrgGrant) {
         await ensureAgentOrgGrant(tx, app.organizationId, resolvedAgentId);
       } else if (app.ownerUserId && currentAgentOwnerUserId !== app.ownerUserId) {
         await ensureAgentSubscription(tx, app.ownerUserId, resolvedAgentId);

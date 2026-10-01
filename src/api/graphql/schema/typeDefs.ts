@@ -9231,18 +9231,17 @@ export const typeDefs = `#graphql
     by that Organization and requires org ADMIN; without orgRef, it is owned by
     the authenticated User and remains owner-only.
 
-    An org-owned install auto-provisions an AgentOrgGrant for (orgId, agentId).
+    An org-owned install auto-provisions an AgentOrgGrant only for its own
+    Agent. A cross-org install requires an existing active grant; subscribe to
+    a PUBLIC Agent through createAgentOrgGrant before creating the App.
     It adds the caller as an AppMember with role 'owner' only when that role is
     present in the Agent's installationPolicy and the caller is a User.
     Required AgentImports cascade automatically for org-owned Apps; optional
     imports cascade only when their id appears in installOptional. Personal
     Apps reject dependency cascades in v1.
 
-    009-install-agent-flow: the cross-org install restriction (FR-009) is
-    enforced at the portal — the Install affordance is hidden for Agents
-    not owned by the calling org. The server still auto-provisions grants
-    on first install (preserved from 008); a hard server-side cross-org
-    gate is reserved for the marketplace spec.
+    Selected dependencies must also be licensed before any App is created.
+    The server enforces this even when a caller bypasses the portal.
 
     Accepts the entity's ID or URN.
     """
@@ -9257,10 +9256,9 @@ export const typeDefs = `#graphql
       """
       The initial Agent installed into this new App. Required as of
       009-install-agent-flow: every new App starts with an installed Agent.
-      For an org-owned App the
-      server accepts any resolvable Agent and auto-provisions an AgentOrgGrant
-      (008 behavior preserved); the portal's install flow restricts the
-      affordance to Agents owned by the caller org. A personal App accepts only
+      For an org-owned App, the server auto-provisions a grant only for an
+      Agent owned by that org; any cross-org Agent needs an existing active
+      AgentOrgGrant. A personal App accepts only
       a PUBLIC Agent or one owned by the caller, and licenses a foreign PUBLIC
       Agent through the owner's AgentSubscription.
       """

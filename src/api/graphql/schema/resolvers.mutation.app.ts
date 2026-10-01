@@ -22,6 +22,7 @@ import {
   mintUserApiKeyInTx,
 } from '../../../middleware/auth.js';
 import { ensureAgentOrgGrant } from '../../../controller/operations/ensureAgentOrgGrant.js';
+import { planOrgAgentInstallGrant } from '../../../lib/auth/orgAgentInstallLicense.js';
 import { ensureAgentSubscription } from '../../../controller/operations/ensureAgentSubscription.js';
 import { normalizeHandleOrNull } from '../../../lib/userHandle.js';
 import {
@@ -333,11 +334,38 @@ export const appMutations = {
       // 009-install-agent-flow: agentRef is required (typeDef gate). Resolve the
       // Agent (resolveAgentRef rejects soft-deleted Agents).
       const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentRef);
+      let selectedImports: Array<{ importedAgentId: string }> = [];
       if (resolvedOrgId) {
-        // Org path: auto-provision the AgentOrgGrant (008 behavior; portal hides
-        // the cross-org Install affordance — a hard server gate is the
-        // marketplace spec's job).
-        await ensureAgentOrgGrant(ctx.db, resolvedOrgId, resolvedAgentId);
+        // Conceal an unlicensed foreign parent before resolving caller-supplied
+        // optional refs. Their lookup errors must not reveal that it exists.
+        const autoGrantIds: string[] = [];
+        if (await planOrgAgentInstallGrant(ctx.db, resolvedOrgId, resolvedAgentId, agentRef)) {
+          autoGrantIds.push(resolvedAgentId);
+        }
+        // Resolve the full install set before any grant/App write. A required
+        // or opted-in dependency may belong to another org even when the
+        // parent Agent is ours; checking it after app.create left a partial
+        // install when its license was missing.
+        const imports = await ctx.db.agentImport.findMany({
+          where: { parentAgentId: resolvedAgentId },
+          orderBy: { position: 'asc' },
+          select: { importedAgentId: true, required: true },
+        });
+        const optionalIds = new Set<string>();
+        for (const ref of installOptional ?? []) {
+          const { id } = await resolveAgentRef(ctx.db, ref);
+          optionalIds.add(id);
+        }
+        selectedImports = imports.filter((imp) => imp.required || optionalIds.has(imp.importedAgentId));
+
+        for (const imp of selectedImports) {
+          if (await planOrgAgentInstallGrant(ctx.db, resolvedOrgId, imp.importedAgentId, agentRef, true)) {
+            autoGrantIds.push(imp.importedAgentId);
+          }
+        }
+        for (const id of new Set(autoGrantIds)) {
+          await ensureAgentOrgGrant(ctx.db, resolvedOrgId, id);
+        }
       } else {
         // spec 047 personal path: no org ⇒ no AgentOrgGrant. The install is
         // licensed by the OWNER's AgentSubscription instead. A user may install
@@ -499,24 +527,7 @@ export const appMutations = {
       // scope the cascade to org-owned Apps.
       if (resolvedOrgId) {
         const org = await ctx.db.organization.findUniqueOrThrow({ where: { id: resolvedOrgId }, select: { urn: true } });
-        const imports = await ctx.db.agentImport.findMany({
-          where: { parentAgentId: resolvedAgentId },
-          orderBy: { position: 'asc' },
-        });
-
-        // Resolve `installOptional` URNs/ids to canonical ids so callers
-        // can pass either form.
-        const optionalIds = new Set<string>();
-        if (installOptional && installOptional.length > 0) {
-          for (const ref of installOptional) {
-            const { id } = await resolveAgentRef(ctx.db, ref);
-            optionalIds.add(id);
-          }
-        }
-
-        for (const imp of imports) {
-          const shouldInstall = imp.required || optionalIds.has(imp.importedAgentId);
-          if (!shouldInstall) continue;
+        for (const imp of selectedImports) {
 
           // Reuse an existing App for the same (org, dep agent) — one App per
           // (org, Agent) pair (v1 doesn't support per-bundle namespacing of
@@ -530,10 +541,6 @@ export const appMutations = {
             select: { id: true },
           });
           if (existingDepApp) continue;
-
-          // Auto-provision the AgentOrgGrant for the dep too — every App we
-          // create is gated on having an active grant.
-          await ensureAgentOrgGrant(ctx.db, resolvedOrgId, imp.importedAgentId);
 
           // Derive a sensible URN for the dep's App. Use the imported
           // Agent's slug; fall back to `dep-${id}` if the URN doesn't have

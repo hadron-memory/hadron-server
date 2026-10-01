@@ -2,10 +2,11 @@
  * Idempotent auto-provisioning of an AgentOrgGrant. Per spec
  * 008-agent-installation FR-006 + research.md §R-2.
  *
- * Mirrors `ensureAgentSubscription` (User↔Agent, from 005). Called from:
- *   - `createApp` mutation when an org creates an App for an Agent it
- *     doesn't yet have a grant for.
- *   - `publishAgentImport` mutation when a Builder declares a dep import.
+ * Mirrors `ensureAgentSubscription` (User↔Agent, from 005). This is a
+ * low-level idempotent writer, not an authorization gate. Install callers
+ * must first use `planOrgAgentInstallGrant`: only a same-org Agent may be
+ * auto-provisioned; cross-org installs require an existing active grant.
+ * `createAgentOrgGrant` is the explicit PUBLIC cross-org subscription path.
  *
  * Idempotency comes from the composite UNIQUE primary key (`org_id`,
  * `agent_id`). Prisma's `upsert` is not race-safe under concurrent
@@ -15,11 +16,8 @@
  * post-condition this function promises: a single row exists for
  * (orgId, agentId). The fix mirrors `ensureAgentSubscription` (#198).
  *
- * v1 auto-provisions on first contact regardless of cross-org or same-org
- * — a future spec adds the explicit "subscribe to Agent" UX for the
- * marketplace flow. The same-org case is implicitly authorized (the
- * Agent's owning org has the right to deploy its own Agent); the cross-org
- * case is currently auto-approved because there's no marketplace yet.
+ * The same-org case is implicitly authorized; this helper must not be called
+ * as a substitute for checking an install's cross-org license.
  */
 
 import { Prisma, type PrismaClient } from '../../generated/prisma/index.js';

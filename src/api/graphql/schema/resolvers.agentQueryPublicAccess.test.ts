@@ -241,17 +241,20 @@ describe('installAgentIntoApp — CONTRIBUTOR floor + cross-org PUBLIC (issue #5
     ).rejects.toThrow('Forbidden');
   });
 
-  it('a foreign PUBLIC agent installs cross-org and auto-provisions the AgentOrgGrant', async () => {
+  it('a foreign PUBLIC agent requires an existing active AgentOrgGrant', async () => {
+    await expect(M.installAgentIntoApp(null, { appRef: app.id, agentRef: foreignPub.id }, ctx(contributor.id)))
+      .rejects.toMatchObject({ extensions: { code: 'AGENT_ORG_GRANT_REQUIRED' } });
+    await createDbAgentOrgGrant(db, orgA.id, foreignPub.id);
     const res = await M.installAgentIntoApp(null, { appRef: app.id, agentRef: foreignPub.id }, ctx(contributor.id));
     expect(res.appAgent.agentId).toBe(foreignPub.id);
     const grant = await db.agentOrgGrant.findFirst({ where: { orgId: orgA.id, agentId: foreignPub.id } });
     expect(grant).not.toBeNull();
   });
 
-  it('a foreign NON-PUBLIC agent is still rejected (ORGANIZATION_MISMATCH)', async () => {
+  it('a foreign NON-PUBLIC agent without a grant is concealed', async () => {
     await expect(
       M.installAgentIntoApp(null, { appRef: app.id, agentRef: foreignPriv.id }, ctx(contributor.id)),
-    ).rejects.toThrow(/organization/i);
+    ).rejects.toThrow(/AGENT_NOT_FOUND/);
   });
 });
 
