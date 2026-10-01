@@ -8,6 +8,7 @@ import { signJwt } from '../../auth/jwt.js';
 import { generateId } from '../../lib/id.js';
 import { mkdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
+import { inspect } from 'node:util';
 import { pushMemoryToGit } from '../../integrations/github/pushMemoryToGit.js';
 import { memoryLocalPath, withMirrorCheckout } from '../../integrations/github/gitMirrorCheckout.js';
 
@@ -98,7 +99,11 @@ describe('#1578 git failure credential containment', () => {
         () => { throw new Error('unreachable mutation'); },
       );
       expect(mirror).toBe('failed');
-      expect(JSON.stringify({ row: row.syncError, failed, read, push, mirror, logged })).not.toContain(token);
+      // JSON.stringify(Error) omits its message/stack, so inspect the actual
+      // console arguments rather than letting a token-bearing Error pass.
+      const logText = logged.map((args) => args.map((arg) => inspect(arg)).join(' ')).join('\n');
+      expect(JSON.stringify({ row: row.syncError, failed, read, push, mirror })).not.toContain(token);
+      expect(logText).not.toContain(token);
     } finally {
       log.mockRestore();
     }
