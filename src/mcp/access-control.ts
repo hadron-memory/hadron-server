@@ -30,10 +30,11 @@ import type { AuthContext } from '../middleware/auth.js';
 import { isActiveAgentSubscription } from '../lib/agentSubscription.js';
 import { participantAppIds } from '../lib/auth/appParticipation.js';
 import { activeAgentInstallLicenseIds, isAgentInstalled, isGrantedAgentMemoryRole } from '../lib/appAgent.js';
-import { resolveUserApps } from '../auth/user-app-resolution.js';
+import { isAppSelectableBy, resolveUserApps } from '../auth/user-app-resolution.js';
 import { getOrgReadableMemoryIds } from '../lib/auth/orgReadableMemory.js';
 import { sessionScopedMemoryIds } from '../lib/auth/sessionScopedMemoryIds.js';
 import { LIVE_ORG_MEMBERSHIP } from '../lib/auth/liveOrgMembership.js';
+import { isRunPrincipal } from '../lib/auth/runPrincipal.js';
 
 // ---------------------------------------------------------------------------
 // Shared fold algorithm
@@ -775,6 +776,64 @@ export async function getWorkerMemoryAccess(
 }
 
 /**
+ * Options of the single-memory gates ({@link canReadMemory},
+ * {@link canWriteToMemory}).
+ */
+export interface MemoryGateOptions {
+  /**
+   * The caller named this memory, or one of its nodes, explicitly in the
+   * request (#1503). Only then may a strict owner's memory in another App be
+   * evaluated as that App. Opt-in: traversals (stored edges, linked task
+   * refs), listings and discovery leave it unset and stay with the selected
+   * App, so a forgotten option fails closed.
+   */
+  explicitRef?: boolean;
+}
+
+/** {@link MemoryGateOptions} for a gate on a caller-supplied memory or node reference. */
+export const EXPLICIT_REF: MemoryGateOptions = Object.freeze({ explicitRef: true });
+
+/**
+ * The App a strict owner's personal/private memory is evaluated against
+ * (#1503, Holger's ruling (c) of 2026-10-01).
+ *
+ * Normally this is the selected App (`auth.appId`). When a DIRECT user
+ * credential (a user id, no bound session, no impersonation) explicitly names
+ * its own memory that belongs to a different App, the memory's own App is the
+ * call's App: an explicit reference outranks the selection
+ * (`cor:acl:020:01`). The substitution is admitted only when the user could
+ * have selected that App themselves ({@link isAppSelectableBy}). App
+ * isolation and the FR-019 subscription check then run against it, so a
+ * revoked or expired subscription still closes the memory.
+ *
+ * Not substituted:
+ * - unless the gate was called for an explicit reference
+ *   (`opts.explicitRef`): traversals, listings and discovery stay with the
+ *   selected App;
+ * - for a bound session or an impersonation, which must not leave their App
+ *   scope;
+ * - for an AppRun ({@link isRunPrincipal}), which carries the on-behalf-of
+ *   user's id but acts for its own App;
+ * - for a pure App key, which has no user id and never owns a personal memory.
+ */
+async function strictOwnerCallAppId(
+  db: PrismaClient,
+  auth: AuthContext,
+  memory: { appId: string | null },
+  opts: MemoryGateOptions,
+): Promise<string | undefined> {
+  if (
+    opts.explicitRef && auth.appId && auth.userId && !auth.sessionId &&
+    !auth.impersonation && !isRunPrincipal(auth) &&
+    memory.appId !== null && memory.appId !== auth.appId &&
+    (await isAppSelectableBy(auth.userId, memory.appId, db))
+  ) {
+    return memory.appId;
+  }
+  return auth.appId;
+}
+
+/**
  * Check if a caller has write access to a specific memory.
  *
  * Personal-class memories (FR-016 + 008 FR-011): strict ownership — only
@@ -795,6 +854,7 @@ export async function canWriteToMemory(
   db: PrismaClient,
   auth: AuthContext,
   memoryId: string,
+  opts: MemoryGateOptions = {},
 ): Promise<boolean> {
   const memory = await db.memory.findUnique({
     where: { id: memoryId },
@@ -817,7 +877,10 @@ export async function canWriteToMemory(
       return true;
     }
 
-    if (auth.appId) {
+    // #1503: an explicit reference to the owner's own memory in another App
+    // is evaluated as that App (see strictOwnerCallAppId).
+    const callAppId = await strictOwnerCallAppId(db, auth, memory, opts);
+    if (callAppId) {
       // Per-App isolation: a session through App A cannot write the personal
       // memory at (B.id, user.id) for some other App B of the same Agent.
       // Existing rows that pre-date the migration may have appId = NULL —
@@ -827,7 +890,7 @@ export async function canWriteToMemory(
       // Agents) and then touch a legacy memory that was actually created
       // for Agent X.
       if (memory.appId !== null) {
-        if (memory.appId !== auth.appId) return false;
+        if (memory.appId !== callAppId) return false;
       } else {
         // Legacy row: require the calling App to have the memory's Agent
         // installed. If userMemoryOfAgentId is null (pre-005 ghost row) we
@@ -843,7 +906,7 @@ export async function canWriteToMemory(
         // (Phase 2c) lands its own cache.
         if (
           !memory.userMemoryOfAgentId ||
-          !(await isAgentInstalled(db, auth.appId, memory.userMemoryOfAgentId))
+          !(await isAgentInstalled(db, callAppId, memory.userMemoryOfAgentId))
         ) {
           return false;
         }
@@ -924,7 +987,7 @@ type MemoryReadRow = Pick<
 >;
 type SubscriptionReadRow = Pick<AgentSubscription, 'activatedAt' | 'expiresAt' | 'revokedAt'>;
 
-interface MemoryReadRowOptions {
+interface MemoryReadRowOptions extends MemoryGateOptions {
   access?: Map<string, string>;
   workerMemoryIds?: ReadonlySet<string>;
   installedAgentIds?: ReadonlySet<string>;
@@ -952,17 +1015,19 @@ async function canReadMemoryRow(
       return true;
     }
 
-    if (auth.appId) {
+    // #1503: the same call-App rule as canWriteToMemory, so read and write agree.
+    const callAppId = await strictOwnerCallAppId(db, auth, memory, opts);
+    if (callAppId) {
       // Same legacy guard as canWriteToMemory: when memory.appId is NULL,
       // require the calling App to have the memory's Agent installed via
       // AppAgent.
       if (memory.appId !== null) {
-        if (memory.appId !== auth.appId) return false;
+        if (memory.appId !== callAppId) return false;
       } else {
         if (!memory.userMemoryOfAgentId) return false;
         const installed = opts.installedAgentIds
           ? opts.installedAgentIds.has(memory.userMemoryOfAgentId)
-          : await isAgentInstalled(db, auth.appId, memory.userMemoryOfAgentId);
+          : await isAgentInstalled(db, callAppId, memory.userMemoryOfAgentId);
         if (!installed) return false;
       }
 
@@ -1020,7 +1085,7 @@ export async function canReadMemory(
   db: PrismaClient,
   auth: AuthContext,
   memoryId: string,
-  opts: { access?: Map<string, string> } = {},
+  opts: { access?: Map<string, string> } & MemoryGateOptions = {},
 ): Promise<boolean> {
   const memory = await db.memory.findUnique({
     where: { id: memoryId },
@@ -1037,7 +1102,7 @@ export async function canReadMemory(
   // A caller-supplied App fold cannot override a bound session's hard scope.
   const sessionBoundKey = Boolean(auth.appId && auth.sessionId && !auth.userId);
   return canReadMemoryRow(db, auth, memory,
-    sessionBoundKey ? { access: await getMemoryAccess(db, auth) } : opts);
+    sessionBoundKey ? { ...opts, access: await getMemoryAccess(db, auth) } : opts);
 }
 
 /**

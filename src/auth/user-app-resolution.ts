@@ -102,6 +102,28 @@ export async function resolveUserApps(
 }
 
 /**
+ * Could this user select this App? The same admission `resolveUserApps` and
+ * `hadron_set_active_app` apply: a live AppMember row on an App that is
+ * neither soft-deleted nor uninstalled.
+ *
+ * #1503 uses it to evaluate an explicit reference to the user's own
+ * App-scoped personal memory as that memory's App (`cor:acl:020:01`): the
+ * substitution is admitted only when the user could have selected that App
+ * themselves.
+ */
+export async function isAppSelectableBy(
+  userId: string,
+  appId: string,
+  db: PrismaClient,
+): Promise<boolean> {
+  const member = await db.appMember.findFirst({
+    where: { userId, appId, app: { is: { deletedAt: null, uninstalledAt: null } } },
+    select: { appId: true },
+  });
+  return member !== null;
+}
+
+/**
  * Wraps `resolveUserApps` in the FR-020 dispatch shape. Pure
  * (no side effects beyond the DB read) so the handler's dispatch
  * branches are testable in isolation — production code asserts on

@@ -38,6 +38,7 @@ import {
   unknownHaToolNames,
 } from '../lib/runner/tools/haTools.js';
 import { splitNodeUrn } from '../lib/urn.js';
+import { RUN_CLIENT_PREFIX } from '../lib/auth/runPrincipal.js';
 import type { RunExecutionDeps, RunNodeSpec } from './appRuns.js';
 import { dispatchRunCallback } from '../api/webhooks.js';
 
@@ -49,7 +50,7 @@ export function runContext(db: PrismaClient, run: AppRun): Context {
     appId: run.appId,
     userId: run.userId ?? undefined,
     organizationId: run.organizationId,
-    clientId: `run:${run.id}`,
+    clientId: `${RUN_CLIENT_PREFIX}${run.id}`,
   };
 }
 
