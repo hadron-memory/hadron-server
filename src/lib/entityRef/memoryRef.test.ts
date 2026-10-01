@@ -75,6 +75,24 @@ describe('resolveMemoryRef', () => {
       .resolves.toEqual({ id: memory.id });
   });
 
+  it('preserves the marker:id boundary in a canonical stored compound Memory URN (#1478)', async () => {
+    const org = await db.organization.create({
+      data: { name: 'memref-test-compound-org', urn: `memref-test-compound-org-${Date.now()}` },
+    });
+    const memory = await db.memory.create({
+      data: {
+        organizationId: org.id,
+        urn: `${org.urn}::agent::app-user:abc123`,
+        name: 'memref-test-compound',
+        class: 'knowledge',
+      },
+    });
+    await expect(resolveMemoryRef(db, `hrn:mem:${org.urn}:agent:app-user:abc123`))
+      .resolves.toEqual({ id: memory.id });
+    await expect(resolveMemoryRef(db, `hrn:memory:${memory.urn}`))
+      .resolves.toEqual({ id: memory.id });
+  });
+
   it('resolves a bare URN-shaped reference to the row', async () => {
     const memory = await db.memory.create({
       data: {

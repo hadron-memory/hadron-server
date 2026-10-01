@@ -22,7 +22,7 @@ import {
   parseOpenQuestions,
 } from '../../../lib/specMint.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
-import { normalizeUrnForLookup, parseUrnInput } from '../../../lib/urn.js';
+import { legacyMemoryUrnToCanonical, normalizeUrnForLookup, parseUrnInput } from '../../../lib/urn.js';
 import { emitNodeUrnV2 } from '../../../lib/urnEmit.js';
 import { acquireLockSet, ancestorLocs } from '../../../lib/nodeSubtreeLock.js';
 import { archiveTombstone } from '../../../lib/tombstoneArchive.js';
@@ -221,7 +221,7 @@ const normalizedMemoryUrn = (urn: string): string =>
   normalizeUrnForLookup(parseUrnInput(urn).value);
 
 /** SQL equality sees both stored spellings, while the resolver treats them as one address. */
-const storedMemoryUrnSpellings = (urn: string): string[] => [urn, urn.replace(/:/g, '::')];
+const storedMemoryUrnSpellings = (urn: string): string[] => [urn, legacyMemoryUrnToCanonical(urn)];
 
 /**
  * Resolve a corpus for a reference scan. Order matters for disclosure: an

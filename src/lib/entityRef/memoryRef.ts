@@ -20,7 +20,7 @@
 
 import type { PrismaClient } from '../../generated/prisma/index.js';
 import { isId as isIdFunc } from './shape.js';
-import { parseUrnInput, assertFullyQualifiedUrn, normalizeUrnForLookup } from '../urn.js';
+import { parseUrnInput, assertFullyQualifiedUrn, normalizeUrnForLookup, legacyMemoryUrnToCanonical } from '../urn.js';
 import { MemoryNotFoundError } from '../asset/gate.js';
 import { resolveLegacyAlias } from './legacyAlias.js';
 import { findLiveUrnAliasTargets, dedupeById } from '../urnAlias.js';
@@ -68,7 +68,7 @@ export async function resolveMemoryRef(
   // the canonical storage spelling before consulting historical aliases.
   if (!memory && lookupUrn !== null) {
     memory = await db.memory.findFirst({
-      where: { urn: lookupUrn.replace(/:/g, '::'), ...deletedFilter },
+      where: { urn: legacyMemoryUrnToCanonical(lookupUrn), ...deletedFilter },
       select: { id: true },
     });
   }
