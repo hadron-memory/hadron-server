@@ -1561,6 +1561,17 @@ export const typeDefs = `#graphql
     startedAt: DateTime!
     endedAt: DateTime
     autoExpiredAt: DateTime
+    """
+    hadron-cli#791 / cor:agt:020:11: whether THIS session is live: not ended,
+    AND driven inside its type's idle window (activity is the latest of
+    startedAt, the heartbeat updatedAt, and the latest attributed usage
+    event, capped at endedAt). The same derived predicate as startSession's
+    WORKER_TAKEN gate and Worker.hasLiveSession, so the three always agree.
+    An open session that is not live has LAPSED: nobody drove it inside the
+    window, so another driver may bind its worker; it is not ended, and can
+    still be ended with a handoff. False for an ended session.
+    """
+    isLive: Boolean!
     events: [UsageEvent!]!
   }
 
