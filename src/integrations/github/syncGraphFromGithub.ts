@@ -414,6 +414,7 @@ export const syncGraphFromGithub = async (
     const skippedUndeclaredRoles: SkippedUndeclaredRole[] = [];
     const deferredLateRows: string[] = [];
     const heldMoves: string[] = [];
+    const heldRepoNodes: string[] = [];
     // #1411 review — occupants a previous attempt parked and could not settle.
     // Grows by a distinct row (one sitting at a file's loc) per retry, so the
     // attempts are bounded by the file count.
@@ -484,7 +485,7 @@ export const syncGraphFromGithub = async (
     for (;;) {
     // Every accumulator restarts with the attempt: a rolled-back attempt
     // wrote nothing, so nothing it reported is true.
-    for (const acc of [pendingEmbeds, writtenNodes, skippedProtected, skippedObjectTypes, skippedUndeclaredRoles, deferredLateRows, heldMoves]) {
+    for (const acc of [pendingEmbeds, writtenNodes, skippedProtected, skippedObjectTypes, skippedUndeclaredRoles, deferredLateRows, heldMoves, heldRepoNodes]) {
       acc.length = 0;
     }
     pendingSourceMemories = [];
@@ -562,8 +563,13 @@ export const syncGraphFromGithub = async (
       // flip the corpus out of draft between this check and the node writes.
       // #1348 uses the same fenced read for the property schema.
       const memoryState = await tx.memory.findUniqueOrThrow({
-        where: { id: graph.id }, select: { urn: true, schema: true, corpusDraft: true },
+        where: { id: graph.id }, select: { urn: true, schema: true, corpusDraft: true, readBranch: true },
       });
+      // `graph` was fetched before Git I/O. A branch edit during that window
+      // must not authorize cleanup from a tree fetched under the old config.
+      if (memoryState.readBranch !== graph.readBranch) {
+        throw new Error('Git sync Read branch changed while syncing; retry with the current Memory config.');
+      }
       const memorySchema = memoryState.schema as MemorySchema | null;
 
       // A move that won before these locks were granted invalidates preflight.
@@ -1192,28 +1198,31 @@ export const syncGraphFromGithub = async (
             : {}),
           ...unreadableLocFilter,
         };
-        const crossMemoryEdges = await countCrossMemoryEdgesForNodeDelete(
-          tx,
-          graph.id,
-          cleanupWhere,
-        );
-        if (crossMemoryEdges > 0) {
-          throw new Error(
-            `Git sync cleanup refused: ${crossMemoryEdges} edge(s) bridge nodes selected for hard-delete to another memory. Remove or relocate those edges explicitly first.`,
+        const pruned = await tx.node.findMany({ where: cleanupWhere, select: { id: true, loc: true } });
+        if (memoryState.readBranch == null && pruned.length > 0) {
+          // #1566: old blank-read syncs could ingest the write branch and
+          // adopt Hadron-created nodes as repo-owned. Boot sync runs before an
+          // operator can inspect them. Keep EVERY absent repo-owned row while
+          // Read branch is blank; an explicit branch is the human's review/
+          // cleanup decision. A persistent, coded sync error below makes this
+          // visible instead of silently reporting OK after partial sync.
+          heldRepoNodes.push(...pruned.map((node) => node.loc));
+        } else {
+          const crossMemoryEdges = await countCrossMemoryEdgesForNodeDelete(
+            tx,
+            graph.id,
+            cleanupWhere,
           );
+          if (crossMemoryEdges > 0) {
+            throw new Error(
+              `Git sync cleanup refused: ${crossMemoryEdges} edge(s) bridge nodes selected for hard-delete to another memory. Remove or relocate those edges explicitly first.`,
+            );
+          }
+          // #449 — PendingEdges aimed at the pruned rows: targetId is not a
+          // foreign key, so the row cascade never reaches them.
+          pendingSourceMemories = await deletePendingEdgesTargetingNodes(tx, pruned.map((n) => n.id));
+          await tx.node.deleteMany({ where: cleanupWhere });
         }
-        // #449 — PendingEdges aimed at the pruned rows: targetId is not a
-        // foreign key, so the row cascade never reaches them.
-        const prunedIds = (await tx.node.findMany({ where: cleanupWhere, select: { id: true } })).map((n) => n.id);
-        pendingSourceMemories = await deletePendingEdgesTargetingNodes(tx, prunedIds);
-        await tx.node.deleteMany({
-          // `skippedRowIds` joins the survivors for the same reason
-          // `protectedRowIds` does (#1224): a file skipped for an unusable
-          // path is absent from `fsGraph.nodes`, so `notIn: upsertedIds`
-          // would hard-delete the row it names. Kept minted specs (#1468)
-          // join them too.
-          where: cleanupWhere,
-        });
       }
 
       // #1411 review (Andi) — a parked row is settled by its own file (which
@@ -1441,10 +1450,21 @@ export const syncGraphFromGithub = async (
     );
 
     // 5. Record sync time and status
-    await db.memory.update({
-      where: { id: graph.id },
-      data: { lastSyncedAt: new Date(), syncStatus: 'OK', syncError: null },
-    }).catch(() => {});
+    const recoveryWarning = heldRepoNodes.length > 0
+      ? `GIT_SYNC_REVIEW_REQUIRED: Kept ${heldRepoNodes.length} repo-owned node(s) absent from the default read branch (${heldRepoNodes.slice(0, 20).join(', ')}${heldRepoNodes.length > 20 ? ', …' : ''}). Review these nodes, then set readBranch explicitly to authorize repo-wins cleanup.`
+      : null;
+    if (recoveryWarning) {
+      // The warning is part of the safety contract, not optional telemetry.
+      await db.memory.update({
+        where: { id: graph.id },
+        data: { syncStatus: 'ERROR', syncError: recoveryWarning },
+      });
+    } else {
+      await db.memory.update({
+        where: { id: graph.id },
+        data: { lastSyncedAt: new Date(), syncStatus: 'OK', syncError: null },
+      }).catch(() => {});
+    }
 
     // 6. Spec 033 T029 — enqueue embedding for each upserted node now that
     // the transaction has committed. Fire-and-forget; enqueueNodeEmbedding
@@ -1482,7 +1502,7 @@ export const syncGraphFromGithub = async (
         `Sync of "${graphName}": held ${heldMoves.length} move(s) whose destination's occupant could not be moved out of the way this sync: ${heldMoves.join('; ')}`,
       );
     }
-    return { nodeCount: fsGraph.nodes.length, writtenNodes, skippedProtected, skippedObjectTypes, skippedUndeclaredRoles, deferredLateRows, heldMoves };
+    return { nodeCount: fsGraph.nodes.length, writtenNodes, skippedProtected, skippedObjectTypes, skippedUndeclaredRoles, deferredLateRows, heldMoves, ...(recoveryWarning ? { error: recoveryWarning } : {}) };
   } catch (error) {
     // Update sync status to ERROR
     await db.memory.update({
