@@ -19,7 +19,6 @@ import { readFileSync } from 'node:fs';
 /** Reads that manage or clean up membership ROWS, which must see dead orgs' rows too. */
 const EXEMPT: Array<{ file: string; fn: string; fragment: string; why: string }> = [
   { file: 'src/api/graphql/schema/resolvers.mutation.org.ts', fn: 'acceptInvitation', fragment: 'organizationId_userId', why: 'upsert of the invitee row; the invite path checks the org itself' },
-  { file: 'src/api/graphql/schema/resolvers.mutation.org.ts', fn: 'acceptInvitation', fragment: 'userId: invite.senderUserId', why: 'inviter authority recheck inside an org-anchored transaction that verifies org liveness' },
   { file: 'src/api/graphql/schema/resolvers.mutation.org.ts', fn: 'addOrgMember', fragment: 'organizationId_userId', why: 'target-row lookup behind requireOrgRole, which refuses a dead org' },
   { file: 'src/api/graphql/schema/resolvers.mutation.org.ts', fn: 'updateOrgMember', fragment: "role: 'OWNER'", why: 'last-owner count behind requireOrgRole' },
   { file: 'src/api/graphql/schema/resolvers.mutation.org.ts', fn: 'removeOrgMember', fragment: 'organizationId_userId', why: 'target-row lookup behind requireOrgRole' },
