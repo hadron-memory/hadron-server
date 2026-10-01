@@ -2561,12 +2561,13 @@ describe('#1468 — git sync pruning and minted specs', () => {
     expect(aliases.map((a) => a.urn)).toEqual([expect.stringMatching(/:pas:010$/)]);
   });
 
-  it('control: a repo rename in an unstamped memory records no alias (unchanged sync behaviour)', async () => {
+  it('a repo rename in an unstamped memory also records the old address (#1404)', async () => {
     const specId = 'aaaa146800000000000000000000000006';
     await db.node.create({ data: { id: specId, memoryId: dbGraphId, loc: 'pas:010', name: 'spec', tags: ['spec'], ownerRepo: 'test/repo' } });
     writeFrontmatterNode(join(repoRoot(), 'pas:099.md'), { id: specId, name: 'spec', tags: ['spec'] }, 'Rule text.');
     expect((await syncGraphFromGithub(makeGraph())).error).toBeUndefined();
-    expect(await db.urnAlias.count({ where: { entityId: specId } })).toBe(0);
+    expect((await db.urnAlias.findMany({ where: { entityId: specId } })).map((a) => a.urn))
+      .toEqual([expect.stringMatching(/:pas:010$/)]);
   });
 
   it('control: an unstamped memory still prunes the spec whose file is gone', async () => {

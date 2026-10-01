@@ -518,7 +518,7 @@ export const syncGraphFromGithub = async (
       // flip the corpus out of draft between this check and the node writes.
       // #1348 uses the same fenced read for the property schema.
       const memoryState = await tx.memory.findUniqueOrThrow({
-        where: { id: graph.id }, select: { schema: true, corpusDraft: true },
+        where: { id: graph.id }, select: { urn: true, schema: true, corpusDraft: true },
       });
       const memorySchema = memoryState.schema as MemorySchema | null;
 
@@ -687,6 +687,10 @@ export const syncGraphFromGithub = async (
       // one revision spans original -> final and the parking loc never enters
       // retained history (or consumes a maxRevCount slot).
       const parkedRevisionBases = new Map<string, Node>();
+      // A file can move a row directly or first park it while another file
+      // claims its loc. Retain the address held before this transaction's
+      // writes; parking is a waypoint, never a published address.
+      const originalLocs = new Map<string, string>();
       // Edge-endpoint remapping (PR-576 codex review): when a fresh id is
       // minted for a file (foreign-memory or duplicate frontmatter id), the
       // edges loadGraphFromFs captured still carry the file's ORIGINAL id.
@@ -809,6 +813,13 @@ export const syncGraphFromGithub = async (
             skippedObjectTypes.push(`${loc} (${fileObjectType}): ${e.message}`);
             return {};
           }
+        };
+        // `byId` and `existingAtLoc` are lookup snapshots. Capture only from
+        // the row update's locked, current version, before it writes the file's
+        // loc; another writer may have moved the node since that lookup.
+        const objectTypeAndOriginalLoc = (locked: Node): { objectType?: string | null } => {
+          if (locked.loc !== loc && !originalLocs.has(locked.id)) originalLocs.set(locked.id, locked.loc);
+          return objectTypeFor(locked.properties);
         };
 
         // Identity is ID-FIRST (repo wins): a file that kept its frontmatter
@@ -978,6 +989,7 @@ export const syncGraphFromGithub = async (
               if (!parkedRevisionBases.has(occupant.id)) {
                 parkedRevisionBases.set(occupant.id, lockedOccupant);
               }
+              if (!originalLocs.has(occupant.id)) originalLocs.set(occupant.id, lockedOccupant.loc);
               await tx.node.update({
                 where: { id: occupant.id },
                 data: { loc: `${loc}~displaced-${occupant.id}` },
@@ -987,21 +999,9 @@ export const syncGraphFromGithub = async (
               );
             }
             console.log(`[syncGraphFromGithub] "${graphName}": node ${byId.id} moved "${byId.loc}" → "${loc}"`);
-            // #1468 — a minted spec's published citation keeps resolving after
-            // a repo rename, as it does after moveNode. Same transaction.
-            if ((await lockMintedSpecsIn(tx, graph.id, [byId.id])).length > 0) {
-              await recordUrnRename(tx, {
-                entityType: 'NODE',
-                entityId: byId.id,
-                // The pre-parking address: a waypoint loc was never published.
-                oldUrn: safeNodeUrnV2(graph.urn, (parkedRevisionBases.get(byId.id) ?? byId).loc).slice('hrn:node:'.length),
-                newUrn: safeNodeUrnV2(graph.urn, loc).slice('hrn:node:'.length),
-                createdBy: 'system:github-sync',
-              });
-            }
           }
           await updateNodeFromGitSync(tx, byId, { ...update, ...placeholderMarkerFor(byId) }, parkedRevisionBases.get(byId.id), graph.id, (locked) =>
-            objectTypeFor(locked.properties),
+            objectTypeAndOriginalLoc(locked),
           );
           parkedRevisionBases.delete(byId.id);
           rowId = byId.id;
@@ -1046,7 +1046,7 @@ export const syncGraphFromGithub = async (
               { ...update, ...placeholderMarkerFor(existingAtLoc) },
               parkedRevisionBases.get(existingAtLoc.id),
               graph.id,
-              (locked) => objectTypeFor(locked.properties),
+              objectTypeAndOriginalLoc,
             );
             parkedRevisionBases.delete(existingAtLoc.id);
             // The SURVIVING id: an update keeps the existing row's id, which
@@ -1174,6 +1174,31 @@ export const syncGraphFromGithub = async (
           select: { id: true },
         });
         if (unsettled.length > 0) throw new GitSyncUnsettledParking(unsettled.map((n) => n.id));
+      }
+
+      // cor:urn:030:01 — compare committed pre-sync addresses with surviving
+      // final addresses, after cleanup has removed displaced/deleted rows.
+      // The memory's URN comes from the row fenced above, not the caller's
+      // possibly stale `graph`. A draft corpus has no published URNs to retain;
+      // its source moves are the rule's sole exception. The mirror root has no
+      // round-trippable v2 node URN to alias *from*, but a published non-root
+      // address still needs an alias when its node moves *into* the root.
+      if (!memoryState.corpusDraft && originalLocs.size > 0) {
+        const survivors = await tx.node.findMany({
+          where: { id: { in: [...originalLocs.keys()] }, memoryId: graph.id, deletedAt: null },
+          select: { id: true, loc: true },
+        });
+        for (const row of survivors) {
+          const originalLoc = originalLocs.get(row.id)!;
+          if (!originalLoc || originalLoc === row.loc) continue;
+          await recordUrnRename(tx, {
+            entityType: 'NODE',
+            entityId: row.id,
+            oldUrn: safeNodeUrnV2(memoryState.urn, originalLoc).slice('hrn:node:'.length),
+            newUrn: safeNodeUrnV2(memoryState.urn, row.loc).slice('hrn:node:'.length),
+            createdBy: 'system:github-sync',
+          });
+        }
       }
 
       for (const edge of edges) {
