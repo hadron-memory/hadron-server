@@ -492,7 +492,7 @@ export const appMutations = {
             await ensureAgentOrgGrant(tx, resolvedOrgId!, id);
           }
           if (personalSubscription) await ensureAgentSubscription(tx, ctx.userId!, resolvedAgentId);
-        return tx.app.create({
+        const app = await tx.app.create({
           data: {
             organizationId: resolvedOrgId,
             ownerUserId,
@@ -515,6 +515,24 @@ export const appMutations = {
           },
           include: APP_INCLUDE,
         });
+          // 009-install-agent-flow T015: the installer is auto-added as an
+          // AppMember with role 'owner' when the Agent's installationPolicy
+          // permits it, routed through ensureAppMember so the memberRoles +
+          // maxMembers invariants from 008 R-7 hold. #1573 (Chip, Atilla):
+          // granted INSIDE the transaction that creates the App, so no
+          // deleteApp / removeAppMember can act on the App between its
+          // creation and this membership grant. ctx.userId may be absent for a
+          // platform-admin caller; there is then no user to grant it to.
+          const installerAgent = await tx.agent.findUniqueOrThrow({
+            where: { id: resolvedAgentId },
+            select: { installationPolicy: true },
+          });
+          const allowedRoles = (installerAgent.installationPolicy as { memberRoles?: string[] })
+            ?.memberRoles ?? ['owner'];
+          if (allowedRoles.includes('owner') && ctx.userId) {
+            await ensureAppMember(tx, app.id, ctx.userId, 'owner', { actorId: ctx.userId });
+          }
+          return app;
         },
       );
 
@@ -662,32 +680,6 @@ export const appMutations = {
           // its shared memory at install time too, not on first chat.
           await provisionAppSharedMemory(ctx, depApp, imp.importedAgentId);
         }
-      }
-
-      // 009-install-agent-flow T015: the installer is auto-added as an
-      // AppMember with role 'owner' when the Agent's installationPolicy
-      // permits it. Routed through ensureAppMember so the memberRoles +
-      // maxMembers invariants from 008 R-7 are honored (a raw upsert would
-      // bypass them — see hadron-server#98 review).
-      //
-      // Some Agents customize `memberRoles` without 'owner' (e.g.,
-      // ['principal', 'guide']); in that case the install still succeeds
-      // but no auto-membership is granted — the installer can add
-      // themselves explicitly via ensureAppMember with a role from the
-      // policy. ctx.userId may be absent for a platform-admin caller —
-      // requireOrgRole short-circuits on ADMIN/OWNER before its userId
-      // check — and there's no user to grant owner membership to in that
-      // case, so guard on it rather than asserting.
-      const installerAgent = await ctx.db.agent.findUniqueOrThrow({
-        where: { id: resolvedAgentId },
-        select: { installationPolicy: true },
-      });
-      const allowedRoles = (installerAgent.installationPolicy as { memberRoles?: string[] })
-        ?.memberRoles ?? ['owner'];
-      if (allowedRoles.includes('owner') && ctx.userId) {
-        await ensureAppMember(ctx.db, createdApp.id, ctx.userId, 'owner', {
-          actorId: ctx.userId,
-        });
       }
 
       return createdApp;

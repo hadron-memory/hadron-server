@@ -235,9 +235,24 @@ describe('#1573: createApp licenses and installs under its revokers\' anchors', 
     expect(grant.revokedAt).not.toBeNull();
   });
 
-  it('CONTROL: an org ADMIN creates an App for an own-org Agent; the grant and install land together', async () => {
+  it('CONTROL: an org ADMIN creates an App for an own-org Agent; grant, install and installer membership land together', async () => {
+    await db.agent.update({ where: { id: agent.id }, data: { installationPolicy: { maxMembers: 'unlimited', memberRoles: ['owner', 'member'] } as never } });
     const created = await M.createApp(null, { orgRef: org.id, name: 'Fine App', agentRef: agent.id }, ctxFor(admin.id, ['ADMIN']));
     expect(await db.appAgent.count({ where: { appId: created.id, agentId: agent.id } })).toBe(1);
     expect(await db.agentOrgGrant.count({ where: { orgId: org.id, agentId: agent.id, revokedAt: null } })).toBe(1);
+    expect(await db.appMember.findUnique({ where: { appId_userId: { appId: created.id, userId: admin.id } } }))
+      .toMatchObject({ role: 'owner' });
+  });
+
+  // Chip + Atilla on 91779043: the installer's AppMember was granted AFTER the
+  // anchored transaction committed, so deleteApp / removeAppMember could act
+  // on the new App in between. It is now granted inside the transaction that
+  // creates the App. There is no longer a gap to race into, so pin the
+  // atomicity itself: if the membership grant fails, the App must not exist.
+  it('the installer membership commits atomically with the App: a refused membership leaves no App behind', async () => {
+    await db.agent.update({ where: { id: agent.id }, data: { installationPolicy: { maxMembers: 0, memberRoles: ['owner'] } as never } });
+    await expect(M.createApp(null, { orgRef: org.id, name: 'Full App', agentRef: agent.id }, ctxFor(admin.id, ['ADMIN'])))
+      .rejects.toThrow(/membership is full/);
+    expect(await db.app.count({ where: { name: 'Full App' } })).toBe(0);
   });
 });
