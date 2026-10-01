@@ -523,6 +523,16 @@ function deriveValidatedLoc(
 }
 
 /**
+ * The loc a node source occupies, from its PATH alone: no parsing, no
+ * validation (#1568). A file that cannot be read still sits at this address,
+ * so Git sync uses it to tell whether an unreadable file is hiding an existing
+ * node, which repo-wins cleanup would otherwise hard-delete.
+ */
+export function locForNodeSource(source: string, graphRoot: string): string {
+  return deriveLoc(source, graphRoot, source.endsWith('.md'));
+}
+
+/**
  * Derive a colon-delimited loc from a file/directory path relative to graphRoot.
  */
 function deriveLoc(path: string, graphRoot: string, isMdFile: boolean): string {

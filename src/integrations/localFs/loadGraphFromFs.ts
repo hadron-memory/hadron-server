@@ -1,7 +1,7 @@
 import { readdirSync, existsSync } from 'fs';
 import { join, relative, sep } from 'path';
 import type { Node } from '../../index.d.js';
-import { InvalidNodeLocError, loadNodeFromFs } from './loadNodeFromFs.js';
+import { InvalidNodeLocError, loadNodeFromFs, locForNodeSource } from './loadNodeFromFs.js';
 
 interface FsGraph {
   name: string;
@@ -24,6 +24,17 @@ export interface SkippedFile {
   source: string;
   /** The file's frontmatter id, if it carried one. */
   nodeId?: string;
+}
+
+/**
+ * A node source that exists in the repo but could not be loaded (#1568): its
+ * frontmatter is missing or is not valid YAML, or the file could not be read.
+ * `file` is repo-relative with `/` separators; `loc` is where the source sits,
+ * derived from its path alone (`locForNodeSource`).
+ */
+export interface UnreadableFile {
+  file: string;
+  loc: string;
 }
 
 /** A loaded file whose metadata cannot supply Prisma's required Node.name. */
@@ -63,7 +74,7 @@ export const loadGraphFromFs = async (
   graphPath: string,
   graphName: string,
   ownerRepo: string,
-): Promise<{ graph: FsGraph; edges: GraphEdge[]; skippedInvalidLoc: SkippedFile[] }> => {
+): Promise<{ graph: FsGraph; edges: GraphEdge[]; skippedInvalidLoc: SkippedFile[]; unreadable: UnreadableFile[] }> => {
   const nodes: Partial<Node>[] = [];
   const edges: GraphEdge[] = [];
   // Files skipped for an unusable path (#1224). The caller must keep the rows
@@ -72,10 +83,15 @@ export const loadGraphFromFs = async (
   // destroy the node instead of failing to move it.
   //
   // Scoped to THIS failure class on purpose. Every other load failure (broken
-  // YAML, an unreadable file) keeps its pre-existing behaviour — the row is
-  // cleaned up — because widening that here would change how a class of
-  // failures this PR is not about behaves, silently.
+  // YAML, missing frontmatter, an unreadable file) is collected separately in
+  // `unreadable` below, and the sync refuses rather than cleaning up the row
+  // it sits on (#1568).
   const skippedInvalidLoc: SkippedFile[] = [];
+  // Every OTHER load failure (#1568). Repo-wins cleanup deletes a row absent
+  // from the loaded graph, so an unreadable file silently became the
+  // permanent deletion of the node it held. The caller refuses the sync when
+  // one of these sits on an existing node's loc.
+  const unreadable: UnreadableFile[] = [];
 
   // Collect node sources: either directory paths (legacy) or .md file paths (frontmatter)
   const nodeSources: string[] = [];
@@ -144,6 +160,12 @@ export const loadGraphFromFs = async (
         // Recorded even WITHOUT an id: an id-less skip is the case the caller
         // most needs to hear about, because it is the one it cannot protect.
         skippedInvalidLoc.push({ source: err.source, ...(err.nodeId ? { nodeId: err.nodeId } : {}) });
+      } else {
+        const metadataPath = source.endsWith('.md') ? source : join(source, '.node', 'node.yaml');
+        unreadable.push({
+          file: relative(graphPath, metadataPath).split(sep).join('/'),
+          loc: locForNodeSource(source, graphPath),
+        });
       }
       console.warn(`Failed to load node at ${source}:`, (err as Error).message);
     }
@@ -157,5 +179,6 @@ export const loadGraphFromFs = async (
     },
     edges,
     skippedInvalidLoc,
+    unreadable,
   };
 };

@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { join } from 'path';
+import { dirname, join } from 'path';
 import { mkdirSync, rmSync, writeFileSync } from 'fs';
 import { stringify } from 'yaml';
 import { db } from '../db/client.js';
@@ -385,6 +385,116 @@ describe('syncGraphFromGithub', () => {
     expect(await db.node.findFirst({ where: { memoryId: dbGraphId, loc: 'new' } })).toBeNull();
     expect(await db.memory.findUniqueOrThrow({ where: { id: dbGraphId } }))
       .toMatchObject({ syncStatus: 'ERROR', syncError: result.error });
+  });
+
+  describe('#1568: an unreadable file never silently deletes the node it holds', () => {
+    const repo = () => join(mockSources, 'test-org', 'test/repo');
+    const id = (n: number) => `aaaa15680000000000000000000000${String(n).padStart(2, '0')}`;
+
+    /** Sync once so the node exists, then break the file and add a new node in the same push. */
+    async function breakAfterSync(rel: string, nodeId: string, broken: string) {
+      const file = join(repo(), rel);
+      mkdirSync(dirname(file), { recursive: true });
+      writeFileSync(file, `---\nid: ${nodeId}\nname: Existing\n---\nOld body`);
+      expect((await syncGraphFromGithub(makeGraph())).error).toBeUndefined();
+      writeFileSync(file, broken);
+      writeFileSync(join(repo(), 'new.md'), '---\nname: New\n---\nNew node');
+      return syncGraphFromGithub(makeGraph());
+    }
+
+    async function expectRefusedAndUntouched(result: Awaited<ReturnType<typeof syncGraphFromGithub>>, rel: string, nodeId: string) {
+      expect(result.errorCode).toBe('BAD_USER_INPUT');
+      expect(result.error).toContain(JSON.stringify(rel));
+      expect(result.error).toContain('nothing was written');
+      expect(result.error).not.toContain(mockSources);
+      expect(await db.node.findUniqueOrThrow({ where: { id: nodeId } }))
+        .toMatchObject({ name: 'Existing', content: 'Old body', deletedAt: null });
+      expect(await db.node.findFirst({ where: { memoryId: dbGraphId, loc: 'new' } })).toBeNull();
+      expect(await db.memory.findUniqueOrThrow({ where: { id: dbGraphId } }))
+        .toMatchObject({ syncStatus: 'ERROR', syncError: result.error });
+    }
+
+    it('broken YAML on a node that has an id: refused, node kept, nothing written', async () => {
+      const result = await breakAfterSync('glossary/stage.md', id(1), `---\nid: ${id(1)}\nname: [broken\n---\nNew body`);
+      await expectRefusedAndUntouched(result, 'glossary/stage.md', id(1));
+    });
+
+    it('frontmatter removed: refused, node kept', async () => {
+      const result = await breakAfterSync('decisions/retention-policy.md', id(2), 'Just a body, no frontmatter');
+      await expectRefusedAndUntouched(result, 'decisions/retention-policy.md', id(2));
+    });
+
+    it('the root README broken: refused, the root node kept', async () => {
+      const result = await breakAfterSync('README.md', id(3), `---\nname: [broken\n---\nRoot`);
+      await expectRefusedAndUntouched(result, 'README.md', id(3));
+    });
+
+    it('CONTROL: an unreadable file with no node at its path is skipped, and the rest syncs', async () => {
+      mkdirSync(repo(), { recursive: true });
+      writeFileSync(join(repo(), 'stray.md'), 'A plain document with no frontmatter');
+      writeFileSync(join(repo(), 'real.md'), '---\nname: Real\n---\nBody');
+      const result = await syncGraphFromGithub(makeGraph());
+      expect(result.error).toBeUndefined();
+      expect(await db.node.findFirst({ where: { memoryId: dbGraphId, loc: 'real' } })).not.toBeNull();
+      expect(await db.node.findFirst({ where: { memoryId: dbGraphId, loc: 'stray' } })).toBeNull();
+    });
+
+    it('CONTROL: deleting the file from the repo still deletes its node (repo-wins unchanged)', async () => {
+      mkdirSync(repo(), { recursive: true });
+      const file = join(repo(), 'gone.md');
+      writeFileSync(file, `---\nid: ${id(4)}\nname: Gone\n---\nBody`);
+      expect((await syncGraphFromGithub(makeGraph())).error).toBeUndefined();
+      rmSync(file);
+      expect((await syncGraphFromGithub(makeGraph())).error).toBeUndefined();
+      expect(await db.node.findUnique({ where: { id: id(4) } })).toBeNull();
+    });
+
+    it('a row that appears at an unreadable path AFTER the refusal check is not deleted by cleanup (Codex P1 / Copilot)', async () => {
+      // A stray, unreadable file with no node at its path: the check passes and
+      // the sync proceeds. Then a concurrent writer puts a row at that path
+      // (simulated right after the check's query, through another connection).
+      mkdirSync(repo(), { recursive: true });
+      writeFileSync(join(repo(), 'anchor.md'), '---\nname: Anchor\n---\nBody');
+      expect((await syncGraphFromGithub(makeGraph())).error).toBeUndefined();
+      const ownerRepo = (await db.node.findFirstOrThrow({ where: { memoryId: dbGraphId, loc: 'anchor' } })).ownerRepo;
+      writeFileSync(join(repo(), 'stray.md'), 'no frontmatter here');
+
+      const lateId = id(9);
+      const realTransaction = db.$transaction.bind(db) as (...a: unknown[]) => Promise<unknown>;
+      const spy = vi.spyOn(db, '$transaction').mockImplementation(((fn: unknown, opts?: unknown) => {
+        if (typeof fn !== 'function') return realTransaction(fn, opts);
+        return realTransaction(async (tx: { node: { findMany: (a: unknown) => Promise<unknown> } }) => {
+          const findMany = tx.node.findMany.bind(tx.node);
+          let injected = false;
+          tx.node.findMany = async (args: unknown) => {
+            const out = await findMany(args);
+            const where = (args as { where?: { loc?: { in?: string[] } } })?.where;
+            if (!injected && where?.loc?.in?.includes('stray')) {
+              injected = true;
+              await db.node.create({ data: {
+                id: lateId, memoryId: dbGraphId, loc: 'stray', name: 'Late', content: 'written concurrently', ownerRepo,
+              } });
+            }
+            return out;
+          };
+          return (fn as (tx: unknown) => Promise<unknown>)(tx);
+        }, opts);
+      }) as never);
+      try {
+        expect((await syncGraphFromGithub(makeGraph())).error).toBeUndefined();
+      } finally {
+        spy.mockRestore();
+      }
+      expect(await db.node.findUnique({ where: { id: lateId } })).toMatchObject({ loc: 'stray', deletedAt: null });
+    });
+
+    it('fixing the file lets the next sync apply it', async () => {
+      const result = await breakAfterSync('glossary/fixed.md', id(5), `---\nid: ${id(5)}\nname: [broken\n---\nNew body`);
+      expect(result.errorCode).toBe('BAD_USER_INPUT');
+      writeFileSync(join(repo(), 'glossary/fixed.md'), `---\nid: ${id(5)}\nname: Fixed\n---\nNew body`);
+      expect((await syncGraphFromGithub(makeGraph())).error).toBeUndefined();
+      expect(await db.node.findUniqueOrThrow({ where: { id: id(5) } })).toMatchObject({ name: 'Fixed', content: 'New body' });
+    });
   });
 
   it('re-sync preserves node IDs for unchanged nodes', async () => {
