@@ -41,6 +41,74 @@ beforeEach(async () => {
 });
 
 describe('#1558 inviter revocation', () => {
+  it('accepts an invitation from a platform admin without org membership', async () => {
+    const platformAdmin = await db.user.create({ data: {
+      id: generateId(), githubId: 155804, githubUsername: `platform-inviter-${generateId()}`,
+      roles: ['ADMIN'],
+    } });
+    const issued = await M.createUserInvitation(null, {
+      orgId, memberRole: 'READER', maxActivations: 1,
+    }, ctx(platformAdmin.id));
+    expect(await db.orgMember.findFirst({ where: { organizationId: orgId, userId: platformAdmin.id } }))
+      .toBeNull();
+    expect(await M.acceptInvitation(null, { slug: issued.slug }, ctx(inviteeId))).toBe(true);
+    expect(await db.userInvitationActivation.count({ where: { invitationId: issued.id } })).toBe(1);
+  });
+
+  it('rejects a platform admin invitation after the issuer loses that role', async () => {
+    const platformAdmin = await db.user.create({ data: {
+      id: generateId(), githubId: 155805, githubUsername: `former-platform-inviter-${generateId()}`,
+      roles: ['ADMIN'],
+    } });
+    const issued = await M.createUserInvitation(null, {
+      orgId, memberRole: 'READER', maxActivations: 1,
+    }, ctx(platformAdmin.id));
+    await db.user.update({ where: { id: platformAdmin.id }, data: { roles: ['READER'] } });
+    await expect(M.acceptInvitation(null, { slug: issued.slug }, ctx(inviteeId)))
+      .rejects.toThrow('Invitation has been revoked');
+    expect(await db.userInvitationActivation.count({ where: { invitationId: issued.id } })).toBe(0);
+  });
+
+  it('acceptance queued behind platform-role removal cannot activate the invitation', async () => {
+    await db.user.update({ where: { id: ownerId }, data: { roles: ['ADMIN'] } });
+    const platformAdmin = await db.user.create({ data: {
+      id: generateId(), githubId: 155806, githubUsername: `racing-platform-inviter-${generateId()}`,
+      roles: ['ADMIN'],
+    } });
+    const issued = await M.createUserInvitation(null, {
+      orgId, memberRole: 'READER', maxActivations: 1,
+    }, ctx(platformAdmin.id));
+    let release!: () => void;
+    let held!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const locked = new Promise<void>((resolve) => { held = resolve; });
+    const holder = db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM users WHERE id = ${platformAdmin.id} FOR SHARE`;
+      held();
+      await gate;
+    }, { timeout: 20_000 });
+    await locked;
+
+    const demotion = M.updateUserRoles(null, { userId: platformAdmin.id, roles: ['READER'] },
+      { ...ctx(ownerId), roles: ['ADMIN'] });
+    let acceptance: Promise<{ ok: boolean }> | undefined;
+    try {
+      await waitForLockWaitersOfType(db, 'transactionid', 1);
+      acceptance = M.acceptInvitation(null, { slug: issued.slug }, ctx(inviteeId)).then(
+        () => ({ ok: true }), () => ({ ok: false }),
+      );
+      await waitForLockWaitersOfType(db, 'advisory', 1);
+      release();
+      await holder;
+      await demotion;
+      expect((await acceptance).ok).toBe(false);
+      expect(await db.userInvitationActivation.count({ where: { invitationId: issued.id } })).toBe(0);
+    } finally {
+      release();
+      await Promise.allSettled([holder, demotion, acceptance]);
+    }
+  });
+
   it('removal revokes only the removed admin’s invitations', async () => {
     const removed = await invite(adminId);
     const remaining = await invite(ownerId);

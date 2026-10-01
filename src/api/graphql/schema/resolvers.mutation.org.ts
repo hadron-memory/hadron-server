@@ -576,18 +576,22 @@ export const orgMutations = {
       // Resolve only the anchor shape outside the transaction. The invitation
       // and activation decisions are re-read after its row lock below.
       const candidate = await ctx.db.userInvitation.findUnique({
-        where: { slug }, select: { id: true, organizationId: true },
+        where: { slug }, select: { id: true, organizationId: true, senderUserId: true },
       });
       if (!candidate) throw new Error('Invitation not found');
       return withAuthorizedTx(
         ctx,
-        candidate.organizationId ? [{ kind: 'org', id: candidate.organizationId }] : [],
+        [
+          ...(candidate.organizationId ? [{ kind: 'org' as const, id: candidate.organizationId }] : []),
+          ...(candidate.senderUserId ? [{ kind: 'user' as const, id: candidate.senderUserId }] : []),
+        ],
         async () => {},
-        async (tx) => {
+        async (tx, txCtx) => {
           const invite = await tx.userInvitation.findUnique({
             where: { id: candidate.id }, include: { activations: true },
           });
-          if (!invite || invite.deletedAt || invite.organizationId !== candidate.organizationId) {
+          if (!invite || invite.deletedAt || invite.organizationId !== candidate.organizationId ||
+              invite.senderUserId !== candidate.senderUserId) {
             throw new Error('Invitation not found');
           }
           if (invite.expiresAt && invite.expiresAt < new Date()) throw new Error('Invitation has expired');
@@ -598,16 +602,22 @@ export const orgMutations = {
             throw new Error('You have already accepted this invitation');
           }
           if (invite.organizationId && invite.senderUserId) {
-            const inviter = await tx.orgMember.findFirst({
-              where: {
-                organizationId: invite.organizationId,
-                userId: invite.senderUserId,
-                role: { in: ['ADMIN', 'OWNER'] },
-                deletedAt: null,
-              },
-              select: { id: true },
+            const issuer = await tx.user.findFirst({
+              where: { id: invite.senderUserId, deletedAt: null }, select: { roles: true },
             });
-            if (!inviter) throw new Error('Invitation has been revoked');
+            if (!issuer) throw new Error('Invitation has been revoked');
+            try {
+              await requireOrgRole({
+                ...txCtx, userId: invite.senderUserId, roles: issuer.roles,
+                apiKeyId: undefined, appId: undefined, clientId: undefined,
+                impersonation: undefined,
+              }, invite.organizationId, 'ADMIN');
+            } catch (error) {
+              if (error instanceof GraphQLError && error.extensions.code === 'FORBIDDEN') {
+                throw new Error('Invitation has been revoked');
+              }
+              throw error;
+            }
           }
 
           await tx.userInvitationActivation.create({

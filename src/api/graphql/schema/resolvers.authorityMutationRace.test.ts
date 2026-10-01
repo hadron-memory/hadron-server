@@ -6,6 +6,7 @@ import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
 import { deleteUserAccount } from '../../../controller/operations/deleteUser.js';
 import { mintUserApiKey } from '../../../middleware/auth.js';
+import { withAuthorizedTx } from './authorizedTx.js';
 
 const M = resolvers.Mutation as any;
 let ownerId: string;
@@ -34,6 +35,65 @@ beforeEach(async () => {
 const ctx = (): Context => ({ db, userId: ownerId, roles: ['READER'] }) as Context;
 
 describe('#1551 actual mutation races', () => {
+  it('reloads platform roles before an App-key grant', async () => {
+    const formerAdmin = await db.user.create({ data: {
+      id: generateId(), githubId: 1551003, githubUsername: `former-admin-${generateId()}`,
+      roles: ['READER'],
+    } });
+    await expect(M.createAppKey(null, { appRef: appId, label: 'stale role' },
+      { db, userId: formerAdmin.id, roles: ['ADMIN'] } as Context))
+      .rejects.toThrow(/Forbidden/);
+    expect(await db.appKey.count({ where: { appId } })).toBe(0);
+  });
+
+  it('keeps platform roles empty in an impersonated transaction context', async () => {
+    await db.user.update({ where: { id: ownerId }, data: { roles: ['ADMIN'] } });
+    const result = await withAuthorizedTx({
+      db, userId: ownerId, roles: [],
+      impersonation: { sessionId: generateId(), actorUserId: ownerId, orgId, expiresAt: new Date(Date.now() + 60_000) },
+    }, [{ kind: 'org', id: orgId }], async (txCtx) => {
+      expect(txCtx.roles).toEqual([]);
+      expect(txCtx.impersonation?.orgId).toBe(orgId);
+    }, async () => true);
+    expect(result).toBe(true);
+  });
+
+  it('a queued grant cannot use the user key revoked before its authority gate', async () => {
+    const { userApiKey } = await mintUserApiKey(db, {
+      userId: ownerId, createdBy: ownerId, label: 'presented key', issuedVia: 'portal',
+    });
+    let release!: () => void;
+    let held!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const locked = new Promise<void>((resolve) => { held = resolve; });
+    const holder = db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM user_api_keys WHERE id = ${userApiKey.id} FOR SHARE`;
+      held();
+      await gate;
+    }, { timeout: 20_000 });
+    await locked;
+
+    const revocation = M.revokeUserApiKey(null, { id: userApiKey.id }, ctx());
+    let grant: Promise<{ ok: boolean; error?: unknown }> | undefined;
+    try {
+      await waitForLockWaitersOfType(db, 'transactionid', 1);
+      grant = M.createAppKey(null, { appRef: appId, label: 'revoked caller' },
+        { ...ctx(), apiKeyId: userApiKey.id })
+        .then(() => ({ ok: true }), (error: unknown) => ({ ok: false, error }));
+      await waitForLockWaitersOfType(db, 'advisory', 1);
+      release();
+      await holder;
+      await revocation;
+      const result = await grant;
+      expect(result?.ok).toBe(false);
+      expect((result?.error as Error)?.message).toMatch(/Forbidden/);
+      expect(await db.appKey.count({ where: { appId } })).toBe(0);
+    } finally {
+      release();
+      await Promise.allSettled([holder, revocation, grant]);
+    }
+  });
+
   it('OAuth/bootstrap mint helper cannot issue a key after account deletion', async () => {
     let release!: () => void;
     let held!: () => void;

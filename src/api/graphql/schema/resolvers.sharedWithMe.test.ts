@@ -18,6 +18,8 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
+import { lockLocForWrite } from '../../../lib/nodeSubtreeLock.js';
+import { waitForLockWaitersOfType } from '../../../test/lockWait.js';
 import { resolvers, type Context } from './resolvers.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
@@ -222,6 +224,37 @@ describe('Query.memory grantee read gate (#778)', () => {
 
 // ─── write gate (requireMemoryWriteAccess via createNode) ───────────────────
 describe('writer-share write gate (#778)', () => {
+  it('refuses a node write queued behind a share revocation', async () => {
+    const loc = 'sw-revoked-race';
+    let release!: () => void;
+    let held!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const locked = new Promise<void>((resolve) => { held = resolve; });
+    const holder = db.$transaction(async (tx) => {
+      await lockLocForWrite(tx, writerShared.id, loc, { op: 'create' });
+      held();
+      await gate;
+    }, { timeout: 20_000 });
+    await locked;
+
+    const write = M.createNode(null, {
+      input: { memoryId: writerShared.id, loc, name: 'queued note' },
+    }, ctx(grantee.id)).then(
+      () => ({ ok: true }), (error: unknown) => ({ ok: false, error }),
+    );
+    try {
+      await waitForLockWaitersOfType(db, 'advisory', 1);
+      await M.deleteMemoryShare(null, { memoryRef: writerShared.id, granteeId: grantee.id }, ctx(owner.id));
+      release();
+      await holder;
+      expect((await write).ok).toBe(false);
+      expect(await db.node.count({ where: { memoryId: writerShared.id, loc } })).toBe(0);
+    } finally {
+      release();
+      await Promise.allSettled([holder, write]);
+    }
+  });
+
   it('a WRITER grantee may create a node; a READER grantee may not', async () => {
     const written = await M.createNode(
       null, { input: { memoryId: writerShared.id, loc: 'sw:writer-note', name: 'n' } }, ctx(grantee.id),
