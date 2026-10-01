@@ -444,8 +444,10 @@ function renderAppRun(run: Record<string, unknown>): string {
     // Codex-worker P2 (Jane): budgetTokens/budgetActions are REMAINING
     // balances, decremented as the run spends, so the denominator is the
     // initial budget; and a null spend means unknown (legacy runs), never 0.
-    `Spent: ${run.tokensSpent ?? 'unknown'} tokens of ${run.budgetTokensInitial ?? run.budgetTokens ?? '—'} · ` +
-      `${run.actionsSpent ?? 'unknown'} actions of ${run.budgetActionsInitial ?? run.budgetActions ?? '—'}`,
+    // A legacy run with no initial-budget column has an UNKNOWN budget: the
+    // remaining balance is not the budget (Copilot on #1565).
+    `Spent: ${run.tokensSpent ?? 'unknown'} tokens of ${run.budgetTokensInitial ?? 'unknown'} · ` +
+      `${run.actionsSpent ?? 'unknown'} actions of ${run.budgetActionsInitial ?? 'unknown'}`,
     renderRunJson('Failure', run.failure),
     renderRunJson('Data (run envelope)', run.data),
     renderRunJson(`Hops${hops ? ` (${hops.length} completed)` : ''}`, run.hops),
@@ -7781,13 +7783,15 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
    * #1561 — read an app run: the counterpart of hadron_run_task, which starts
    * one and replies with its id. Delegates to GraphQL `appRun(ref:)`
    * (findings:node-write-surface-invariants: MCP tools delegate, never
-   * re-implement), so the gate is exactly that resolver's: platform admin, or
-   * READER in the run's organization. A denial reads as not found, the same
-   * answer as a missing run, so the tool is no existence oracle.
+   * re-implement), so the gate is exactly that resolver's: a platform admin, a
+   * READER in the run's organization, the run's own App key, or a user with a
+   * live App relationship for a run on their behalf or a MANUAL run they
+   * started (`mayReadAppRunWithoutOrgRole`). A denial reads as not found, the
+   * same answer as a missing run, so the tool is no existence oracle.
    */
   server.tool(
     'hadron_get_run',
-    "Read an app run you started (or may read): its status, where it is or stopped (curNodeUrn), why it failed (failure), what it extracted (data, the run envelope) and the path it walked (hops: one entry per completed hop, with the edge it took). Pass the run id or hrn:apprun URN that hadron_run_task printed. Gated like appRun: you need READ on the run's organization; a run you cannot read answers 'not found', the same as one that does not exist. Read-only.",
+    "Read an app run you started (or may read): its status, where it is or stopped (curNodeUrn), why it failed (failure), what it extracted (data, the run envelope) and the path it walked (hops: one entry per completed hop, with the edge it took). Pass the run id or hrn:apprun URN that hadron_run_task printed. Gated like appRun: you may read a run if you are a READER in its organization, if it runs on your behalf, if you started it manually and still belong to its App (App member or active subscriber), or if you hold that App's own key. A run you cannot read answers 'not found', the same as one that does not exist. Read-only.",
     {
       ref: z.string().describe('The run: its id, or its hrn:apprun:<root>:<app>:<run-id> URN (hadron_run_task prints the id).'),
     },

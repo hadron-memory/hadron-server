@@ -231,20 +231,24 @@ async function hasAppRelationship(
  *   - a PURE App-key principal (no userId) for its own App's runs — a user's
  *     App SELECTION is not that credential
  *     (findings:auth-appid-credential-vs-selection);
- *   - a user for a run they started or that runs on their behalf, while they
- *     STILL have a live relationship with the run's App (revoked membership
- *     authorizes nothing). Other members' runs stay masked: a run's envelope
- *     can carry another user's data.
+ *   - a user for a run that runs on their behalf (`userId`), or a MANUAL run
+ *     they started (`createdBy`), while they STILL have a live relationship
+ *     with the run's App (revoked membership authorizes nothing). `createdBy`
+ *     counts only on MANUAL runs: scheduled and webhook runs copy the
+ *     trigger configuration's creator into it (scheduler.ts, webhooks.ts), so
+ *     on those it does not mean "started this run" (Copilot on #1565).
+ *     Other members' runs stay masked: an envelope can carry another user's
+ *     data.
  * Anyone else falls through to the org-READER gate, unchanged.
  */
 export async function mayReadAppRunWithoutOrgRole(
   ctx: Context,
-  run: { appId: string; userId: string | null; createdBy: string | null },
+  run: { appId: string; userId: string | null; createdBy: string | null; triggerKind: string },
 ): Promise<boolean> {
   if (isPlatformAdmin(ctx)) return true;
   if (!ctx.userId) return !!ctx.appId && ctx.appId === run.appId;
   if (ctx.impersonation) return false;
-  const own = run.userId === ctx.userId || run.createdBy === ctx.userId;
+  const own = run.userId === ctx.userId || (run.triggerKind === 'MANUAL' && run.createdBy === ctx.userId);
   return own && (await hasAppRelationship(ctx.db, run.appId, ctx.userId));
 }
 

@@ -1,8 +1,10 @@
 /**
  * #1561 — `hadron_get_run`: the MCP read of an app run, the counterpart of
  * hadron_run_task. Delegates to GraphQL `appRun(ref:)`, so its gate is that
- * resolver's (platform admin, or READER in the run's organization), and a run
- * the caller cannot read answers exactly like a missing one.
+ * resolver's: platform admin, org READER, the run's own App key, or a user
+ * with a live App relationship for a run on their behalf or a MANUAL run they
+ * started (`mayReadAppRunWithoutOrgRole`). A run the caller cannot read
+ * answers exactly like a missing one.
  */
 import { describe, it, expect, beforeEach } from 'vitest';
 import { db } from '../integrations/db/client.js';
@@ -130,7 +132,52 @@ describe('#1565 review — run starters read their own run; foreign runs stay ma
   });
 });
 
+describe('#1565 review — Liam P3, Copilot and Jane P2 cases', () => {
+  let member: { id: string };
+  let subscriber: { id: string };
+  beforeEach(async () => {
+    const t = `${Date.now()}-${Math.floor(Math.random() * 100_000)}`;
+    member = await db.user.create({ data: { id: generateId(), githubId: 15614, githubUsername: `gr-m3-${t}`, handle: `gr-m3-${t}` } });
+    subscriber = await db.user.create({ data: { id: generateId(), githubId: 15615, githubUsername: `gr-s-${t}`, handle: `gr-s-${t}` } });
+    await db.appMember.create({ data: { appId: app.id, userId: member.id, role: 'member' } });
+    const agent = await db.agent.create({ data: { id: generateId(), organizationId: org.id, name: 'a', urn: `${org.urn}:agent-${t}`, visibility: 'ORGANIZATION' } });
+    await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
+    await db.agentSubscription.create({ data: { agentId: agent.id, userId: subscriber.id, activatedAt: new Date() } as never });
+  });
+
+  it('a run on your behalf is readable even when someone else started it (on-behalf-of leg)', async () => {
+    const r = await run({ userId: member.id, createdBy: reader.id });
+    expect(await getRun(member.id, r.id)).toContain(`Run ${r.id}`);
+  });
+
+  it('an active subscriber (no AppMember, no org row) reads the manual run they started', async () => {
+    const r = await run({ createdBy: subscriber.id });
+    expect(await getRun(subscriber.id, r.id)).toContain(`Run ${r.id}`);
+  });
+
+  it('createdBy on a scheduled or webhook run is the trigger config\'s creator, not a starter: not readable (Copilot)', async () => {
+    for (const triggerKind of ['SCHEDULE', 'WEBHOOK'] as const) {
+      const r = await run({ triggerKind, createdBy: member.id });
+      expect(await getRun(member.id, r.id), triggerKind).toBe(`Run "${r.id}" not found.`);
+    }
+  });
+
+  it('the registered description advertises the real read rule, not org-READER-only (Jane P2)', () => {
+    const description = createTestableMcpServer(auth(reader.id)).toolDescription('hadron_get_run');
+    expect(description).toMatch(/READER in its organization/);
+    expect(description).toMatch(/on your behalf/);
+    expect(description).toMatch(/started it manually/);
+    expect(description).toMatch(/App's own key/);
+    expect(description).not.toMatch(/you need READ on the run's organization/);
+  });
+});
+
 describe('#1565 review — spend is reported against the initial budget (Codex-worker P2)', () => {
+  it('a legacy run with no initial budget reports the budget as unknown, never the remaining balance (Copilot)', async () => {
+    const r = await run({ tokensSpent: 10, budgetTokens: 90, budgetTokensInitial: null, actionsSpent: 1, budgetActions: 4, budgetActionsInitial: null });
+    expect(await getRun(reader.id, r.id)).toContain('Spent: 10 tokens of unknown · 1 actions of unknown');
+  });
+
   it('uses the initial budgets as denominators, and a null spend reads as unknown', async () => {
     const spent = await run({ tokensSpent: 420, budgetTokens: 99580, budgetTokensInitial: 100000, actionsSpent: 3, budgetActions: 47, budgetActionsInitial: 50 });
     expect(await getRun(reader.id, spent.id)).toContain('Spent: 420 tokens of 100000 · 3 actions of 50');
