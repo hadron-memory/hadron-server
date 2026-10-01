@@ -6,6 +6,7 @@ import { cleanDb } from '../test/helpers.js';
 import { waitForLockWaitersOfType } from '../test/lockWait.js';
 import { generateId } from './id.js';
 import { computeApprovalHash } from './approvalHash.js';
+import type { NodeApprovalState } from './nodeApproval.js';
 import {
   buildNodeRevisionSnapshot,
   createNodeRevision,
@@ -187,7 +188,7 @@ describe('approveMemoryNodes (#1591)', () => {
     // createMemory made the memory's root node, which is live and unapproved too.
     const result = await approveAll();
     expect(result.approvedCount).toBe(2);
-    expect(result.approved.map((r) => r.loc)).toEqual(['a:2', 'approvals']);
+    expect(result.approved.map((r: { loc: string }) => r.loc)).toEqual(['a:2', 'approvals']);
     expect(result.alreadyApprovedCount).toBe(1);
     expect(result.skippedPlaceholders).toEqual(['a:3']);
     expect((await statusOf(b.id)).state).toBe('APPROVED');
@@ -278,7 +279,7 @@ describe('findNodes approvalState filter (#1591)', () => {
     await approve(approved.id);
     await approve(superseded.id);
     await edit(superseded.id, 'changed');
-    const locsFor = async (approvalState: string, opts: { query?: string; viaSql?: boolean; limit?: number } = {}) => {
+    const locsFor = async (approvalState: NodeApprovalState, opts: { query?: string; viaSql?: boolean; limit?: number } = {}) => {
       const res = await resolvers.Query.findNodes(null, {
         ...(opts.query ? { query: opts.query, mode: 'keyword' } : {}),
         ...(opts.limit ? { limit: opts.limit } : {}),
