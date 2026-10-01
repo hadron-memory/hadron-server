@@ -29,6 +29,7 @@ import { enqueueNodeEmbedding } from '../../services/embedding/enqueue.js';
 import { acquireLockSet, ancestorLocs, lockAncestorsForCreateMany } from '../../lib/nodeSubtreeLock.js';
 import { Prisma, type Memory, type Node, type Organization } from '../../generated/prisma/index.js';
 import { validateGitBranch } from '../../lib/gitRef.js';
+import { withMirrorCheckoutLock } from './mirrorCheckoutLock.js';
 import { lockMemoryForChannelChange } from '../../lib/channels.js';
 import { lockMintedSpecsIn, lockMintedSpecUnmarks } from '../../lib/mintedSpecPermanence.js';
 import { recordUrnRename } from '../../lib/urnAlias.js';
@@ -385,10 +386,13 @@ export const syncGraphFromGithub = async (
     const cloneUrl = toHttpsUrl(graph.source, token);
 
     // 2. Clone or pull the repo
-    await gitSync(cloneUrl, localPath, graph.readBranch ?? undefined);
-
-    // 3. Load the graph from the filesystem
-    const { graph: fsGraph, edges, skippedInvalidLoc, unreadable } = await loadGraphFromFs(localPath, graphName, ownerRepo);
+    // Mirror writes use this same checkout. Hold their lock through the read:
+    // otherwise a writer can switch to the write branch between checkout and
+    // loadGraphFromFs, even when the read branch was selected correctly.
+    const { graph: fsGraph, edges, skippedInvalidLoc, unreadable } = await withMirrorCheckoutLock(graph.id, async () => {
+      await gitSync(cloneUrl, localPath, graph.readBranch ?? undefined);
+      return loadGraphFromFs(localPath, graphName, ownerRepo);
+    });
 
     // 4. Upsert all nodes and edges into the database (transactional)
     // Spec 033 T029 — defer embedding enqueue until after the transaction
@@ -1505,10 +1509,13 @@ async function gitSync(cloneUrl: string, localPath: string, readBranch?: string)
   if (existsSync(join(localPath, '.git'))) {
     // Update remote URL with fresh token before pulling
     await execGit(['remote', 'set-url', 'origin', cloneUrl], { cwd: localPath });
-    if (readBranch) {
-      await execGit(['checkout', readBranch], { cwd: localPath });
-    }
-    await execGit(['pull', '--ff-only'], { cwd: localPath });
+    // A mirror may have left HEAD on the write branch. With no configured
+    // readBranch, resolve the remote's CURRENT default rather than trusting
+    // the checkout (or a possibly stale local origin/HEAD symbolic ref).
+    const branch = readBranch ?? await remoteDefaultBranch(localPath);
+    await execGit(['fetch', 'origin'], { cwd: localPath });
+    await checkoutReadBranch(localPath, branch);
+    await execGit(['merge', '--ff-only', `origin/${branch}`], { cwd: localPath });
   } else {
     mkdirSync(dirname(localPath), { recursive: true });
     const cloneArgs = ['clone'];
@@ -1527,6 +1534,27 @@ async function gitSync(cloneUrl: string, localPath: string, readBranch?: string)
     cloneArgs.push('--', cloneUrl, localPath);
     await execGit(cloneArgs);
   }
+}
+
+async function remoteDefaultBranch(localPath: string): Promise<string> {
+  const { stdout } = await execGit(['ls-remote', '--symref', 'origin', 'HEAD'], { cwd: localPath });
+  const match = stdout.match(/^ref: refs\/heads\/([^\t\r\n]+)\tHEAD\r?$/m);
+  if (!match) throw new Error('Git sync could not resolve the remote default branch; set readBranch explicitly.');
+  validateGitBranch(match[1], 'remote default branch');
+  return match[1];
+}
+
+async function checkoutReadBranch(localPath: string, branch: string): Promise<void> {
+  let localExists = true;
+  try {
+    await execGit(['show-ref', '--verify', '--quiet', `refs/heads/${branch}`], { cwd: localPath });
+  } catch {
+    localExists = false;
+  }
+  // A failed checkout (dirty tree, lock, etc.) must not be misread as a
+  // missing local ref and retried as `checkout -b`.
+  if (localExists) await execGit(['checkout', branch], { cwd: localPath });
+  else await execGit(['checkout', '-b', branch, `origin/${branch}`], { cwd: localPath });
 }
 
 function extractOwnerRepo(gitUrl: string): string {

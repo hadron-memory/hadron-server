@@ -17,14 +17,26 @@ import { waitForLockWaitersOfType } from '../../test/lockWait.js';
 import { buildNodeFrontmatter } from './nodeFrontmatter.js';
 import { pendingEdgeStableTargetKey, reconcilePendingEdgeCount } from '../../lib/pendingEdgePromotion.js';
 import { writeNodeFile } from './writeNodeToGit.js';
+import { withMirrorCheckout } from './gitMirrorCheckout.js';
 
 // ---------------------------------------------------------------------------
 // Mock child_process.execFile so no actual git commands run
 // ---------------------------------------------------------------------------
+let mockDefaultBranch = 'main';
+let mockLocalBranchExists = true;
 vi.mock('child_process', () => {
   const execFile = vi.fn((...args: unknown[]) => {
+    const argv = (args[1] as string[]);
     const cb = args[args.length - 1] as Function;
-    if (typeof cb === 'function') cb(null, '', '');
+    if (typeof cb !== 'function') return;
+    if (argv.includes('show-ref') && !mockLocalBranchExists) {
+      cb(new Error('reference missing'), '', '');
+      return;
+    }
+    cb(null, {
+      stdout: argv.includes('ls-remote') ? `ref: refs/heads/${mockDefaultBranch}\tHEAD\n` : '',
+      stderr: '',
+    });
   });
   return { execFile };
 });
@@ -99,6 +111,8 @@ function makeGraph(overrides?: Partial<MemoryWithOrg>): MemoryWithOrg {
 }
 
 beforeEach(async () => {
+  mockDefaultBranch = 'main';
+  mockLocalBranchExists = true;
   ({ dir: mockSources, cleanup } = makeTmpDir());
   await cleanDb(db);
   // Create org and graph in DB so FK constraints are satisfied
@@ -236,16 +250,77 @@ describe('syncGraphFromGithub', () => {
     expect(result.error).toBeUndefined();
   });
 
-  it('calls git pull when .git directory already exists', async () => {
+  it('selects the remote default and fast-forwards it when .git already exists', async () => {
     // Pre-create .git directory so it looks like an existing clone
     const repoPath = join(mockSources, 'test-org', 'test/repo');
     mkdirSync(join(repoPath, '.git'), { recursive: true });
 
     await syncGraphFromGithub(makeGraph());
 
-    const pullCall = (await gitCalls()).find((c) => c.args[0] === 'pull');
-    expect(pullCall).toBeDefined();
-    expect(pullCall!.args).toContain('--ff-only');
+    const calls = (await gitCalls()).map((c) => c.args);
+    expect(calls).toContainEqual(['ls-remote', '--symref', 'origin', 'HEAD']);
+    expect(calls).toContainEqual(['checkout', 'main']);
+    expect(calls).toContainEqual(['merge', '--ff-only', 'origin/main']);
+    expect(calls.some((c) => c[0] === 'pull')).toBe(false);
+  });
+
+  it('selects a custom remote default after a mirror has left the checkout elsewhere', async () => {
+    mockDefaultBranch = 'release/v2';
+    mockLocalBranchExists = false;
+    mkdirSync(join(mockSources, 'test-org', 'test/repo', '.git'), { recursive: true });
+
+    const result = await syncGraphFromGithub(makeGraph());
+
+    expect(result.error).toBeUndefined();
+    const calls = (await gitCalls()).map((c) => c.args);
+    expect(calls).toContainEqual(['checkout', '-b', 'release/v2', 'origin/release/v2']);
+    expect(calls).toContainEqual(['merge', '--ff-only', 'origin/release/v2']);
+  });
+
+  it('reads the default branch after a Hadron mirror checks out the write branch', async () => {
+    mkdirSync(join(mockSources, 'test-org', 'test/repo', '.git'), { recursive: true });
+    await db.memory.update({
+      where: { id: dbGraphId },
+      data: { source: 'git@github.com:test/repo.git', writeBranch: 'hadron-qa' },
+    });
+
+    expect(await withMirrorCheckout({
+      memoryId: dbGraphId,
+      commitSubject: 'test write',
+      logPrefix: '[test]',
+    }, async () => {})).toBe('no-changes');
+    const result = await syncGraphFromGithub(makeGraph({ writeBranch: 'hadron-qa' }));
+
+    expect(result.error).toBeUndefined();
+    const calls = (await gitCalls()).map((c) => c.args);
+    const writeCheckout = calls.findIndex((c) => c[0] === 'checkout' && c[1] === 'hadron-qa');
+    const readCheckout = calls.findIndex((c) => c[0] === 'checkout' && c[1] === 'main');
+    expect(writeCheckout).toBeGreaterThan(-1);
+    expect(readCheckout).toBeGreaterThan(writeCheckout);
+    expect(calls).toContainEqual(['merge', '--ff-only', 'origin/main']);
+  });
+
+  it('honors an explicit read branch without querying the remote default', async () => {
+    mkdirSync(join(mockSources, 'test-org', 'test/repo', '.git'), { recursive: true });
+
+    const result = await syncGraphFromGithub(makeGraph({ readBranch: 'docs' }));
+
+    expect(result.error).toBeUndefined();
+    const calls = (await gitCalls()).map((c) => c.args);
+    expect(calls).toContainEqual(['checkout', 'docs']);
+    expect(calls).toContainEqual(['merge', '--ff-only', 'origin/docs']);
+    expect(calls.some((c) => c[0] === 'ls-remote')).toBe(false);
+  });
+
+  it('fails closed when the remote default cannot be resolved', async () => {
+    mockDefaultBranch = '';
+    mkdirSync(join(mockSources, 'test-org', 'test/repo', '.git'), { recursive: true });
+
+    const result = await syncGraphFromGithub(makeGraph());
+
+    expect(result.error).toContain('could not resolve the remote default branch');
+    const calls = (await gitCalls()).map((c) => c.args);
+    expect(calls.some((c) => c[0] === 'checkout' || c[0] === 'merge')).toBe(false);
   });
 
   // ── #561: the transport guard reaches the clone ───────────────────────────
