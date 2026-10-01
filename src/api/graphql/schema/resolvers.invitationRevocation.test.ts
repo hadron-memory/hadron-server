@@ -101,7 +101,7 @@ describe('#1558 inviter revocation', () => {
       release();
       await holder;
       await demotion;
-      expect((await acceptance).ok).toBe(false);
+      expect((await acceptance)?.ok).toBe(false);
       expect(await db.userInvitationActivation.count({ where: { invitationId: issued.id } })).toBe(0);
     } finally {
       release();
