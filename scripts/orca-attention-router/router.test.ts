@@ -7,8 +7,19 @@ import { existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, 
 import { tmpdir, uptime } from 'node:os';
 import { join } from 'node:path';
 import {
-  type Config, type Runner, type RunResult, RouterError, State, breakStaleLock, describeOutcome, loadConfig, pollOnce, status,
+  type Config, type Runner, type RunResult, RouterError, State, breakStaleLock, describeOutcome, loadConfig, pollOnce,
+  promptLineIsEmpty, status,
 } from './router.js';
+
+/** Rendered screens as Orca returned them on 2026-10-01 (idle, nobody typing). */
+const RULE = '─'.repeat(60);
+const CLAUDE_HINT = '  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents';
+const CLAUDE_IDLE = ['⏺ Done.', '❯ an earlier submitted turn', '✻ Cogitated for 1m 3s', RULE, '❯\u00a0', RULE, CLAUDE_HINT];
+const CODEX_IDLE = ['  Worked for 33s • 16:32', '› Ask Codex to do anything', '  GPT-6-Sol high · ~/orca/workspaces/hadron-server/andi · Start worker session as Andi', '  ? for shortcuts'];
+const withPrompt = (screen: string[], marker: string, text: string) => {
+  const i = screen.map((l) => l.trimStart().startsWith(marker)).lastIndexOf(true);
+  return [...screen.slice(0, i), `${marker} ${text}`, ...screen.slice(i + 1)];
+};
 
 const TOKEN_1 = 'tok-one-SECRET';
 const TOKEN_2 = 'tok-two-SECRET';
@@ -27,6 +38,8 @@ class FakeCLIs {
   terminals: Array<Record<string, unknown>> = [];
   busy = new Set<string>();
   reject = new Set<string>();
+  /** The rendered screen per handle; set by terminal() to an idle prompt for its agent. */
+  screens = new Map<string, { tail?: unknown; draft?: string; source?: string; ok?: boolean }>();
   sent: Array<[string, string]> = [];
   /** Workers with a mention-only row; `null` = every worker queried has one. */
   mentionOnly: Set<string> | null = null;
@@ -43,7 +56,9 @@ class FakeCLIs {
   terminal(name: string, agent: string | null = 'claude', handle?: string) {
     const wt = join(this.root, 'workspaces', name);
     mkdirSync(wt, { recursive: true });
-    this.terminals.push({ handle: handle ?? `term_${name}`, worktreePath: wt, agentIdentity: agent, connected: true, writable: true });
+    const h = handle ?? `term_${name}`;
+    this.terminals.push({ handle: h, worktreePath: wt, agentIdentity: agent, connected: true, writable: true });
+    this.screens.set(h, { tail: agent === 'codex' ? CODEX_IDLE : CLAUDE_IDLE });
   }
 
   run: Runner = (argv) => {
@@ -78,6 +93,11 @@ class FakeCLIs {
       return this.busy.has(handle)
         ? out({ ok: false, error: { code: 'timeout', message: 'timeout' } })
         : out({ ok: true, result: { wait: { satisfied: true } } });
+    }
+    if (verb === 'terminal read') {
+      const sc = this.screens.get(handle);
+      if (!sc || sc.ok === false) return out({ ok: false, error: { code: 'terminal_handle_stale' } }, 1);
+      return out({ ok: true, result: { terminal: { handle, source: sc.source ?? 'screen', tail: sc.tail, ...(sc.draft !== undefined ? { draft: sc.draft } : {}) } } });
     }
     if (verb === 'terminal send') {
       if (this.reject.has(handle)) return out({ ok: false, error: { code: 'terminal_handle_stale' } }, 1);
@@ -122,7 +142,8 @@ describe('Orca attention router — the happy path', () => {
     expect(fake.sent[0][0]).toBe('term_eli');
     expect(fake.sent[0][1]).toContain('5 relevant unread (2 mentions)');
     const verbs = fake.calls.map((a) => a.slice(1, 3).join(' '));
-    expect(verbs.indexOf('terminal wait')).toBeLessThan(verbs.indexOf('terminal send'));
+    expect(verbs.indexOf('terminal wait')).toBeLessThan(verbs.indexOf('terminal read'));
+    expect(verbs.indexOf('terminal read')).toBeLessThan(verbs.indexOf('terminal send'));
   });
 
   it('passes the adopted token back on the next poll', () => {
@@ -486,5 +507,110 @@ describe('Orca attention router — nothing secret leaks', () => {
     // Two workers on one worktree (@codex P2, #1490).
     writeFileSync(path, JSON.stringify({ ...base, roster: [entry, { ...entry, worker: 'w2', name: 'F' }] }));
     expect(() => loadConfig(path)).toThrow(/one worktree to two workers/);
+  });
+});
+
+describe('Orca attention router — a human typing: never appended to; hold the token (#5473)', () => {
+  it('reads an idle Claude Code and Codex screen as empty, including Codex NBSP and its placeholder', () => {
+    expect(promptLineIsEmpty(CLAUDE_IDLE, 'claude')).toBe(true);
+    expect(promptLineIsEmpty(CODEX_IDLE, 'codex')).toBe(true);
+    expect(promptLineIsEmpty(['›\u00a0Ask Codex to do anything', '  ? for shortcuts'], 'codex')).toBe(true);
+  });
+
+  it('reads typed text as not empty: the last prompt line, a multi-line draft, or an unknown footer', () => {
+    expect(promptLineIsEmpty(withPrompt(CLAUDE_IDLE, '❯', 'half-typed message'), 'claude')).toBe(false);
+    expect(promptLineIsEmpty(withPrompt(CODEX_IDLE, '›', 'half-typed message'), 'codex')).toBe(false);
+    // Claude: the first line is empty but a continuation line inside the box is not.
+    expect(promptLineIsEmpty([RULE, '❯', '  second line of a draft', RULE], 'claude')).toBe(false);
+    // Codex: something below the prompt that is not footer.
+    expect(promptLineIsEmpty(['›', '  second line of a draft', '  ? for shortcuts'], 'codex')).toBe(false);
+  });
+
+  it('a typed line that looks like chrome is still draft: the literal-marker case, live 2026-10-01 (@codex P2, Gene #1555)', () => {
+    // Exactly as Orca rendered a two-line Claude draft whose second line is `❯`.
+    expect(promptLineIsEmpty([RULE, '❯\u00a0first line', '  ❯', RULE, '  ⏵⏵ bypass permissions on'], 'claude')).toBe(false);
+    expect(promptLineIsEmpty([RULE, '❯', '  ❯', RULE], 'claude')).toBe(false);
+    // Chip's QA repro (#5724), with the marker even at column 0.
+    expect(promptLineIsEmpty([RULE, '❯ half typed', '❯', RULE], 'claude')).toBe(false);
+    // A typed rule is indented too, so it cannot fake the box's opening rule.
+    expect(promptLineIsEmpty([RULE, '❯ text', `  ${RULE}`, '❯', RULE], 'claude')).toBe(false);
+    // Codex: a typed `›` continuation is indented, so it cannot pose as the prompt.
+    expect(promptLineIsEmpty(['› half typed', '  ›', '  ? for shortcuts'], 'codex')).toBe(false);
+    // Rules in earlier transcript output do not matter: the box is the LAST pair.
+    expect(promptLineIsEmpty([RULE, 'output', RULE, '❯ old turn', RULE, '❯', RULE, CLAUDE_HINT], 'claude')).toBe(true);
+  });
+
+  it('Claude: a box that looks empty holds whitespace unless the empty-input hint shows (Chip #5756, live 2026-10-01)', () => {
+    // Three spaces typed: the box renders a bare `❯`, and only the hint vanished.
+    expect(promptLineIsEmpty([RULE, '❯', RULE, '  ⏵⏵ bypass permissions on (shift+tab to cycle)'], 'claude')).toBe(false);
+    // The hint is present in every permission mode while empty.
+    for (const mode of ['⏵⏵ auto mode on (shift+tab to cycle)', '⏸ manual mode on', '⏵⏵ accept edits on (shift+tab to cycle)', '⏸ plan mode on (shift+tab to cycle)']) {
+      expect(promptLineIsEmpty([RULE, '❯', RULE, `  ${mode} · ← for agents`], 'claude')).toBe(true);
+      expect(promptLineIsEmpty([RULE, '❯', RULE, `  ${mode}`], 'claude')).toBe(false);
+    }
+    // No status line at all cannot prove it.
+    expect(promptLineIsEmpty([RULE, '❯', RULE], 'claude')).toBe(false);
+  });
+
+  it('Codex: only the placeholder proves empty; a bare prompt or a dialog holds (live 2026-10-01)', () => {
+    // Whitespace typed into Codex: the placeholder vanished, and Orca reported no draft.
+    expect(promptLineIsEmpty(['  Got a minute and a mildly unreasonable idea?', '›', '  GPT-6-Sol high · ~/orca/workspaces/hadron-server/eli'], 'codex')).toBe(false);
+    expect(promptLineIsEmpty(['›', '', '  ? for shortcuts'], 'codex')).toBe(false);
+    // Codex's update menu: the cursor line is a menu option, not the composer.
+    expect(promptLineIsEmpty(['  Update available · 0.159.0 → 0.159.3', '› 1. Update now (runs `brew upgrade --cask codex`)', '  2. Skip', '  3. Skip until next version', '  enter continue · esc skip'], 'codex')).toBe(false);
+  });
+
+  it('cannot prove empty without a prompt marker, the closing rule, or a known agent', () => {
+    expect(promptLineIsEmpty(['plain shell $'], 'claude')).toBe(false);
+    expect(promptLineIsEmpty([RULE, '❯'], 'claude')).toBe(false);
+    expect(promptLineIsEmpty(CODEX_IDLE, 'gemini')).toBe(false);
+    expect(promptLineIsEmpty([], 'codex')).toBe(false);
+  });
+
+  it('holds an idle worker whose prompt has text, then nudges it once the prompt is empty', () => {
+    const c = cfg(['w-eli', 'Eli'], ['w-baloo', 'Baloo']);
+    fake.terminal('eli');
+    fake.terminal('baloo', 'codex');
+    fake.screens.set('term_baloo', { tail: withPrompt(CODEX_IDLE, '›', 'Holger typing here') });
+    fake.attention.workers = [worker('w-eli', 'Eli'), worker('w-baloo', 'Baloo')];
+    let out = poll(c);
+    expect(out.nudged).toEqual(['Eli']);
+    expect(out.held).toEqual({ Baloo: 'prompt not empty (text in the prompt)' });
+    expect(out.adopted).toBe(false);
+    expect(sentHandles()).toEqual(['term_eli']);
+    // The held reason never carries the typed text.
+    expect(logs.join('\n')).not.toContain('Holger typing here');
+
+    fake.screens.set('term_baloo', { tail: CODEX_IDLE });
+    out = poll(c);
+    expect(out).toMatchObject({ covered: ['Eli'], nudged: ['Baloo'], adopted: true });
+  });
+
+  it('holds a Codex worker whose typed text shows only in the draft, over an empty-looking prompt', () => {
+    // As observed live: Codex draws `›` empty while Orca reports the text as draft.
+    const c = cfg(['w-baloo', 'Baloo']);
+    fake.terminal('baloo', 'codex');
+    fake.screens.set('term_baloo', { tail: ['  permissions: YOLO mode', '›', '  GPT-6-Sol high · ~/orca/workspaces/hadron-server/baloo'], draft: 'half typed' });
+    fake.attention.workers = [worker('w-baloo', 'Baloo')];
+    expect(poll(c).held).toEqual({ Baloo: 'prompt not empty (text in the composer draft)' });
+    expect(fake.sent).toEqual([]);
+  });
+
+  it('holds on a composer draft, a non-screen read, or an unreadable terminal', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli');
+    fake.attention.workers = [worker('w-eli', 'Eli')];
+    for (const [screen, why] of [
+      [{ tail: CLAUDE_IDLE, draft: 'typed in Orca' }, 'text in the composer draft'],
+      // Whitespace is typing too (Gene, #1555): the gate promises nobody is typing.
+      [{ tail: CLAUDE_IDLE, draft: '   ' }, 'text in the composer draft'],
+      [{ tail: CLAUDE_IDLE, source: 'screen-unavailable' }, 'screen unreadable'],
+      [{ ok: false }, 'screen unreadable'],
+    ] as const) {
+      fake.screens.set('term_eli', screen);
+      const out = poll(c);
+      expect(out.held).toEqual({ Eli: `prompt not empty (${why})` });
+      expect(fake.sent).toEqual([]);
+    }
   });
 });

@@ -14,6 +14,9 @@
  *  - A prompt typed into a BUSY Codex agent steers its turn, and it silently
  *    drops the rest of its task. So a nudge is sent only after
  *    `orca terminal wait --for tui-idle` proves the terminal idle.
+ *  - `tui-idle` also reports idle while a HUMAN is typing, so a nudge got
+ *    appended to Holger's half-typed text and submitted it (#5473). So the
+ *    screen read must also prove the prompt empty (`promptIsEmpty`).
  *  - Tab titles are not identity (agents retitle their own tabs), and a
  *    worktree's name does not prove which worker drives it. So each roster
  *    entry names its worktree; the terminal is the ONE agent terminal there,
@@ -486,6 +489,110 @@ export function isIdle(cfg: Config, handle: string, timeoutMs: number, run: Runn
   }
 }
 
+/**
+ * What an idle, EMPTY Codex composer shows. It is rendered dim, but a screen
+ * read returns it as ordinary text, so it has to be recognized by value. An
+ * unknown placeholder reads as typed text and holds the nudge: the safe
+ * direction. If Codex ever changes it, every Codex worker is held and the
+ * reason is logged once — loud, not silent.
+ */
+const CODEX_PLACEHOLDERS = new Set(['Ask Codex to do anything']);
+
+/**
+ * The suffix Claude Code's status line carries only while its composer is
+ * EMPTY. Typing anything, a single space included, removes it; clearing the
+ * composer restores it. Same in auto, manual, accept-edits and plan mode.
+ * If Claude Code renames it, every Claude worker is held and the reason is
+ * logged once: fail closed, loudly.
+ */
+const CLAUDE_EMPTY_HINT = '· ← for agents';
+
+/** Collapse ASCII whitespace AND NBSP: Codex draws its prompt as `›` + U+00A0. */
+const squash = (s: string): string => s.replace(/[\s\u00a0]+/g, ' ').trim();
+
+/**
+ * True only on positive proof the agent's prompt holds no typed text.
+ *
+ * `tui-idle` alone is not enough (#5473): it reports idle while a HUMAN is
+ * typing in that terminal, and a nudge sent then is appended to their
+ * half-typed message and submitted with it. So the rendered screen must show
+ * the input empty. Both agents draw their real chrome at COLUMN 0 and indent
+ * anything the user typed onto a continuation line (live probe, 2026-10-01),
+ * so only column-0 lines count as chrome; a typed `❯` or `───` never does
+ * (@codex P2 and Gene, #1555):
+ *  - Claude Code: the input box is the region between the last two column-0
+ *    `───` rules. Its first line must be the bare `❯` marker and every other
+ *    line in it blank, so a multi-line draft is caught whatever it contains.
+ *    And because typed WHITESPACE renders as nothing, the status line below
+ *    the box must carry the empty-input hint (`CLAUDE_EMPTY_HINT`).
+ *  - Codex: the last column-0 `›` line shows the idle placeholder, and every
+ *    line below it is footer (blank, `? for shortcuts`, or the `model · path`
+ *    status line). Codex never draws pending text: real text shows only in
+ *    `draft` (checked first, by `promptIsEmpty`), and whitespace shows
+ *    nowhere except as the placeholder's absence. A Codex dialog (e.g. its
+ *    update menu, `› 1. Update now`) is not the placeholder either, so it
+ *    holds — sending there would pick a menu option.
+ * Anything unrecognized — no box, no marker, an unknown footer or agent —
+ * reads as NOT empty.
+ */
+export function promptLineIsEmpty(lines: string[], agent: string): boolean {
+  if (agent === 'claude') {
+    const rules = lines.flatMap((l, i) => (/^─{3,}[\s\u00a0]*$/.test(l) ? [i] : []));
+    if (rules.length < 2) return false;
+    const close = rules[rules.length - 1];
+    const box = lines.slice(rules[rules.length - 2] + 1, close);
+    if (!(box.length > 0 && /^❯[\s\u00a0]*$/.test(box[0]) && box.slice(1).every((l) => squash(l) === ''))) return false;
+    // A box that LOOKS empty may hold whitespace (Chip #5756): Claude draws
+    // typed spaces as nothing. The status line's empty-input hint is the
+    // proof — `· ← for agents` shows exactly while the composer is empty, in
+    // every permission mode (live probe, 2026-10-01), since ← only switches
+    // agents when there is no text for it to move through.
+    const status = lines.slice(close + 1).find((l) => squash(l) !== '');
+    return status !== undefined && squash(status).endsWith(CLAUDE_EMPTY_HINT);
+  }
+  if (agent !== 'codex') return false;
+  let at = -1;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (lines[i].startsWith('›')) {
+      at = i;
+      break;
+    }
+  }
+  if (at < 0) return false;
+  // Only the placeholder proves empty: a BARE `›` means the composer holds
+  // something it does not draw — whitespace typed live left `›` bare with no
+  // `draft` at all (2026-10-01), and real text leaves it bare WITH a draft.
+  if (!CODEX_PLACEHOLDERS.has(squash(lines[at].slice(1)))) return false;
+  return lines.slice(at + 1).map(squash).every((l) => l === '' || l === '? for shortcuts' || l.includes(' · '));
+}
+
+/**
+ * [empty, detail]: whether the terminal's rendered prompt is empty right now.
+ *
+ * Two signals, and each agent needs a different one (live probe, 2026-10-01,
+ * Orca 1.4.217, Claude Code + Codex 0.159.0, text typed but not submitted):
+ *  - Claude Code renders the typed text on its `❯` line; `draft` is absent.
+ *  - Codex renders an EMPTY `›` line; the typed text is only in the read's
+ *    `draft` field. A screen-only check would have nudged straight into it.
+ * So a non-empty `draft` holds first, then the rendered SCREEN must show an
+ * empty prompt (the default stream read returns repaint fragments, useless
+ * here). Never logs the text.
+ */
+export function promptIsEmpty(cfg: Config, handle: string, agent: string, run: Runner): [boolean, string] {
+  let terminal: Record<string, any> | undefined;
+  try {
+    const data = JSON.parse(run([cfg.orcaCli, 'terminal', 'read', '--terminal', handle, '--screen', '--json']).stdout);
+    terminal = data.ok ? data.result?.terminal : undefined;
+  } catch {
+    terminal = undefined;
+  }
+  if (!terminal || terminal.source !== 'screen' || !Array.isArray(terminal.tail)) return [false, 'screen unreadable'];
+  // ANY draft holds, whitespace included: this gate promises "nobody is
+  // typing", not "nothing meaningful typed" (Gene, #1555).
+  if (terminal.draft !== undefined && terminal.draft !== null && terminal.draft !== '') return [false, 'text in the composer draft'];
+  return promptLineIsEmpty(terminal.tail as string[], agent) ? [true, ''] : [false, 'text in the prompt'];
+}
+
 /** The first `requestId` anywhere in a receipt: Orca reports it for a durable retry. */
 function findRequestId(node: unknown): string | null {
   if (Array.isArray(node)) {
@@ -647,6 +754,13 @@ export function pollOnce(cfg: Config, run: Runner = runCommand, log: (line: stri
       }
       if (!isIdle(cfg, handle, cfg.busyWaitMs, run)) {
         outcome.held[entry.name] = `busy for ${Math.round(cfg.busyWaitMs / 1000)}s`;
+        continue;
+      }
+      // Checked AFTER idle, as close to the send as possible: idle says the
+      // agent is not working, this says nobody is typing into it (#5473).
+      const [empty, why] = promptIsEmpty(cfg, handle, detail, run);
+      if (!empty) {
+        outcome.held[entry.name] = `prompt not empty (${why})`;
         continue;
       }
       mustOwn();
