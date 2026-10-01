@@ -988,6 +988,38 @@ describe('an ambiguous citation blocks the mint as MISSING (#1505)', () => {
     }
   };
 
+  it.each(['readable', 'hidden'] as const)(
+    'a former-name citation counts a %s alias under the corpus current URN (#1511)',
+    async (visibility) => {
+      const formerUrn = draft.urn;
+      const prior = await resolvers.Mutation.createMemory(null, { orgId: org.id, name: 'specs-current' }, as());
+      const currentUrn = prior.urn;
+      await resolvers.Mutation.updateMemory(null, { id: prior.id, urn: 'prior-renamed' } as never, as());
+      await resolvers.Mutation.updateMemory(null, { id: draft.id, urn: 'specs-current' } as never, as());
+      expect((await db.memory.findUniqueOrThrow({ where: { id: draft.id } })).urn).toBe(currentUrn);
+      const address = `${formerUrn}:pas:010`;
+      await cite(address);
+
+      // Before the moved-node alias, the corpus row is the sole candidate.
+      expect(await callerSees(address)).toBe('RESOLVED');
+      const before = await resolvers.Query.specBacklinks(null, { memoryRef: draft.id, loc: 'pas:010' }, as());
+      expect(before.some((r) => r.kind === 'URN' && r.sourceLoc === 'pas:020')).toBe(true);
+
+      const targetMemory = visibility === 'hidden' ? await hiddenMemory('private-target') : minted;
+      const foreign = await db.node.create({ data: {
+        id: generateId(), memoryId: targetMemory.id, loc: 'pas:900', name: 'Prior holder target',
+      } });
+      await db.urnAlias.create({ data: {
+        urn: `${currentUrn}:pas:010`, entityType: 'NODE', entityId: foreign.id, reason: 'RENAME',
+      } });
+
+      expect(await callerSees(address)).toBe('AMBIGUOUS');
+      expect((await unresolvedAt('pas:010')).map((r) => r.reason)).toEqual(['MISSING']);
+      expect(await mintBlocksOn('pas:010')).toBe(true);
+      await neitherAttributedNorRewritten();
+    },
+  );
+
   it('a corpus alias target plus an UNREADABLE foreign one: MISSING, as the reader\'s own resolver refuses it (@codex P1 on #1506)', async () => {
     const { formerUrn } = await vacateFormerUrn();
     const address = `${formerUrn}:pas:010`;
