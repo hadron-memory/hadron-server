@@ -109,7 +109,7 @@ export const registerQueries = {
     if (!app) return [];
     const admitted = ctx.userId ? await isAppParticipant(ctx, app) : ctx.appId === app.id;
     if (!admitted) return [];
-    const view = await resolveRegister(ctx.db, { attendee, actor: ctx });
+    const view = await resolveRegister(ctx.db, { attendee, actor: ctx, accessActor: 'ATTENDEE' });
     return view ? toGqlRegisterRows(view) : [];
   },
 
@@ -272,7 +272,8 @@ async function readStateRow(ctx: Context, attendee: RegisterAttendee, channelId:
   const row = await ctx.db.channelReadState.findFirst({
     where: { channelId, ...('workerId' in attendee ? { workerId: attendee.workerId } : { agentId: attendee.agentId, appId: attendee.appId }) },
   });
-  const view = await resolveRegister(ctx.db, { attendee, actor: ctx, rows: [] });
+  // Only the attendee URN is needed here; no access fields are projected.
+  const view = await resolveRegister(ctx.db, { attendee, rows: [] });
   return { attendeeUrn: view?.attendeeUrn ?? null, channelId, lastSeenSeq: row?.lastSeenSeq ?? 0, updatedAt: row?.updatedAt ?? new Date(0) };
 }
 

@@ -1,9 +1,8 @@
 /**
  * Spec 049 Phase 6 — resolveRegister and its consumers, what is pinned:
  *   - the install default applies to a Worker through its Agent-in-App
- *     (namedBy AGENT), and canRead / canPost are the ACTOR's real standing:
- *     a participant reads + posts, an org READER outside the App gets
- *     HOST_MEMORY_NOT_READABLE, no actor gets UNKNOWN_ACTOR;
+ *     (namedBy AGENT); operational views use the ACTOR's standing, while
+ *     GraphQL effective views use the attendee's current standing;
  *   - precedence per Channel: App › org, Worker › Agent › everyone — never
  *     unioned; a bare Agent-in-App attendee does not inherit a Worker row;
  *   - a deleted Channel is disclosed (CHANNEL_DELETED), impersonation is
@@ -61,7 +60,7 @@ beforeEach(async () => {
   appMem = await db.memory.create({
     data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:team-shared`, name: 'shared', class: 'app', appId: app.id, sharedMemoryOfAgentId: agent.id },
   });
-  worker = await db.worker.create({ data: { id: generateId(), appId: app.id, agentId: agent.id, name: 'Iris', slug: 'iris' } });
+  worker = await db.worker.create({ data: { id: generateId(), appId: app.id, agentId: agent.id, name: 'Iris', slug: 'iris', heldByUserId: admin.id } });
   channel = (await ensureChannelWithRoot(db, { memoryId: appMem.id, loc: 'chats:team', name: 'team', createdBy: admin.id, asDefaultOfAppId: app.id })).channel;
   const node = await db.node.create({ data: { id: generateId(), memoryId: appMem.id, loc: 'tasks:go', name: 'go', nodeType: 'task', content: 'go', isRunnable: true } });
   entry = `hrn:node:${appMem.urn}:${node.loc}`;
@@ -82,6 +81,24 @@ describe('resolveRegister', () => {
     const noActor = await resolveRegister(db, { attendee: { workerId: worker.id } });
     expect(noActor?.rows[0]).toMatchObject({ canRead: false, canPost: 'UNKNOWN', disclosure: 'UNKNOWN_ACTOR' });
     expect(await resolveRegister(db, { attendee: { workerId: 'nope' }, actor: ctx(admin.id) })).toBeNull();
+  });
+
+  it('separates the access subject from the viewer without revealing a hidden host memory', async () => {
+    const subjectDenied = await resolveRegister(db, {
+      attendee: { workerId: worker.id }, actor: ctx(admin.id), accessActor: ctx(reader.id),
+    });
+    expect(subjectDenied?.rows[0]).toMatchObject({
+      canRead: false, canPost: false, disclosure: 'HOST_MEMORY_NOT_READABLE',
+      channel: { hostMemoryId: appMem.id, hostMemoryUrn: `hrn:mem:${appMem.urn}` },
+    });
+
+    const viewerDenied = await resolveRegister(db, {
+      attendee: { workerId: worker.id }, actor: ctx(reader.id), accessActor: ctx(admin.id),
+    });
+    expect(viewerDenied?.rows[0]).toMatchObject({
+      canRead: true, canPost: true, disclosure: null,
+      channel: { hostMemoryId: null, hostMemoryUrn: null },
+    });
   });
 
   it('precedence per Channel: App › org, Worker › Agent › everyone; never unioned', async () => {
@@ -126,7 +143,24 @@ describe('resolveRegister', () => {
     expect(await W.prompt(w, {}, ctx(admin.id))).toBe('You are Iris, the engineer.');
   });
 
-  it('mintAppRun snapshots the Agent-in-App register; no Agent, no attendee; AppRun.register evaluates for the caller', async () => {
+  it('reports the Worker holder\'s access to an admin viewer, and no access when unheld', async () => {
+    await db.worker.update({ where: { id: worker.id }, data: { heldByUserId: reader.id } });
+    const held = await Q.attendeeRegister({}, { workerRef: worker.id }, ctx(admin.id));
+    expect(held[0]).toMatchObject({
+      canRead: false, canPost: false, disclosure: 'HOST_MEMORY_NOT_READABLE',
+      channel: { hostMemoryId: appMem.id },
+    });
+    const w = await db.worker.findUniqueOrThrow({ where: { id: worker.id } });
+    expect(await W.prompt(w, {}, ctx(admin.id))).toContain('you cannot read its host memory');
+    expect(await Q.attendeeRegister({}, { workerRef: worker.id }, ctx(stranger.id))).toEqual([]);
+
+    await db.worker.update({ where: { id: worker.id }, data: { heldByUserId: null, heldAt: null } });
+    const unheld = await Q.attendeeRegister({}, { workerRef: worker.id }, ctx(admin.id));
+    expect(unheld[0]).toMatchObject({ canRead: false, canPost: false, disclosure: 'UNKNOWN_ACTOR' });
+    expect(await W.prompt(w, {}, ctx(admin.id))).toContain('no current driver (read + post unavailable)');
+  });
+
+  it('mintAppRun snapshots the Agent-in-App register; AppRun.register evaluates its App principal', async () => {
     const run = await mintAppRun(db, {
       organizationId: org.id, appId: app.id, agentId: agent.id, userId: admin.id, triggerKind: 'MANUAL', entryNodeUrn: entry, publish: false,
     });
@@ -139,9 +173,12 @@ describe('resolveRegister', () => {
     expect(snap!.rows[0].createdAt).toBe(installRow.createdAt.toISOString());
     const rows = await R.register(run, {}, ctx(admin.id));
     expect(rows).toHaveLength(1);
-    expect(rows[0]).toMatchObject({ namedBy: 'AGENT', canRead: true, canPost: true, channel: { id: channel.id } });
+    expect(rows[0]).toMatchObject({ namedBy: 'AGENT', canRead: true, canPost: false, disclosure: 'HOST_MEMORY_NOT_WRITABLE', channel: { id: channel.id } });
     expect((rows[0].entry as { createdAt: Date }).createdAt.getTime()).toBeGreaterThan(0);
-    expect(await R.register(run, {}, ctx(reader.id))).toEqual([expect.objectContaining({ canRead: false, disclosure: 'HOST_MEMORY_NOT_READABLE' })]);
+    expect(await R.register(run, {}, ctx(reader.id))).toEqual([expect.objectContaining({
+      canRead: true, canPost: false, disclosure: 'HOST_MEMORY_NOT_WRITABLE',
+      channel: expect.objectContaining({ hostMemoryId: null, hostMemoryUrn: null }),
+    })]);
     const bare = await mintAppRun(db, { organizationId: org.id, appId: app.id, userId: admin.id, triggerKind: 'MANUAL', entryNodeUrn: entry, publish: false });
     expect(bare.registerSnapshot).toBeNull();
     expect(await R.register(bare, {}, ctx(admin.id))).toEqual([]);
@@ -151,10 +188,18 @@ describe('resolveRegister', () => {
     const mine = await Q.attendeeRegister({}, { workerRef: worker.id }, ctx(admin.id));
     expect(mine).toHaveLength(1);
     expect(mine[0].entry.id).toBeDefined();
-    expect(await Q.attendeeRegister({}, { agentRef: agent.urn, appRef: app.urn }, ctx(admin.id))).toHaveLength(1);
+    expect(await Q.attendeeRegister({}, { agentRef: agent.urn, appRef: app.urn }, ctx(admin.id))).toEqual([
+      expect.objectContaining({ canRead: true, canPost: false, disclosure: 'HOST_MEMORY_NOT_WRITABLE' }),
+    ]);
     expect(await Q.attendeeRegister({}, { workerRef: worker.id }, ctx(stranger.id))).toEqual([]);
     expect(await Q.attendeeRegister({}, { workerRef: 'nope' }, ctx(admin.id))).toEqual([]);
     await expect(Q.attendeeRegister({}, {}, ctx(admin.id))).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
+  });
+
+  it('channelReadState returns the attendee cursor without evaluating the viewer\'s access', async () => {
+    const state = await Q.channelReadState({}, { attendeeRef: worker.id, channelRef: channel.id }, ctx(admin.id));
+    expect(state).toMatchObject({ attendeeUrn: `hrn:worker:${org.urn}:team:iris`, channelId: channel.id, lastSeenSeq: 0 });
+    expect(await Q.channelReadState({}, { attendeeRef: worker.id, channelRef: channel.id }, ctx(stranger.id))).toBeNull();
   });
 });
 
