@@ -14,6 +14,7 @@ import {
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import { isCiphertext, parseDataKey } from './crypto.js';
 import { sessionKeyCache } from './sessionKeyCache.js';
+import { createTestableMcpServer } from '../mcp/server.js';
 
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -331,5 +332,23 @@ describe('approvals on an encrypted memory (#1591)', () => {
     } finally {
       sessionKeyCache.clear();
     }
+  });
+});
+
+describe('hadron_get_node Approval line (#1591)', () => {
+  const getNode = async (loc: string) => {
+    const mcp = createTestableMcpServer({ userId: admin.id, roles: [], clientId: `user:${admin.id}` });
+    const text = await mcp.callToolText('hadron_get_node', { urn: `hrn:node:${memory.urn}:${loc}` });
+    return text.split('\n').find((line) => line.startsWith('Approval:'));
+  };
+
+  it('shows not approved, approved, and superseded with the last approval', async () => {
+    const n = await node('a:1');
+    expect(await getNode('a:1')).toBe('Approval: not approved (r1)');
+    const { approval } = await approve(n.id);
+    const record = `r1 by hrn:user:approve-admin at ${approval.approvedAt.toISOString()}`;
+    expect(await getNode('a:1')).toBe(`Approval: approved ${record}`);
+    await edit(n.id, 'changed');
+    expect(await getNode('a:1')).toBe(`Approval: not approved (r2; last approved ${record})`);
   });
 });
