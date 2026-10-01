@@ -44,7 +44,7 @@ const DELEGATED = [
 const EXEMPT = [
   { file: 'resolvers.mutation.org.ts', name: 'inviteUser', callee: 'ctx.db.userInvitation.create', count: 1,
     why: 'A referral invitation has no organization and cannot mint an OrgMember.' },
-  { file: 'resolvers.mutation.app.ts', name: 'createApp', callee: 'ensureAgentOrgGrant', count: 2,
+  { file: 'resolvers.mutation.app.ts', name: 'createApp', callee: 'ensureAgentOrgGrant', count: 1,
     why: 'Primary and dependency licenses are incidental to new-App creation, outside the named grant mutations.' },
   { file: 'resolvers.mutation.app.ts', name: 'createApp', callee: 'ensureAgentSubscription', count: 1,
     why: 'Personal-App auto-license is an incidental createApp side effect.' },
@@ -110,7 +110,7 @@ describe('#1551 authority writer ratchet', () => {
     }
     const expectedByFile = new Map([
       ['resolvers.mutation.agent.ts', 1],
-      ['resolvers.mutation.app.ts', 3],
+      ['resolvers.mutation.app.ts', 2],
       ['resolvers.mutation.chat.ts', 1],
       ['resolvers.helpers.ts', 2],
     ]);

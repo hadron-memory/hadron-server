@@ -3065,9 +3065,8 @@ model AppMember {
 ///
 /// For **same-org installs** (an Org deploying its own Agent), the
 /// grant is auto-provisioned by `ensureAgentOrgGrant` on first
-/// contact. **Cross-org installs** require an explicit grant; the v1
-/// surface auto-provisions on first contact (the marketplace UX for
-/// explicit subscribe lands in a future spec).
+/// contact. **Cross-org installs** require an existing active grant;
+/// PUBLIC Agents can be subscribed to through createAgentOrgGrant.
 ///
 /// **No deletedAt** — soft-delete is redundant with the
 /// `revokedAt` lifecycle.

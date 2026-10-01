@@ -197,7 +197,7 @@ describe('App CRUD', () => {
     expect(await getPrimaryAgentId(db, app.id)).toBe(agent.id);
   });
 
-  it('refuses to add an agent from a different org to an app', async () => {
+  it('conceals a foreign non-public agent without an active grant', async () => {
     const otherAgent = await db.agent.create({
       data: {
         id: generateId(),
@@ -212,7 +212,7 @@ describe('App CRUD', () => {
         { appRef: app.id, agentRef: otherAgent.id },
         adminCtx(),
       ),
-    ).rejects.toThrow(/same organization/);
+    ).rejects.toThrow(/AGENT_NOT_FOUND/);
   });
 });
 

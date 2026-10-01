@@ -3,8 +3,7 @@
  *
  * Walks the build → install → run flow end-to-end:
  *   (a) Bea creates Agent "Mealplan" with declarative knobs.
- *   (b) Org-X creates an App referencing Mealplan (verifies AgentOrgGrant
- *       is auto-provisioned by createApp).
+ *   (b) Org-X explicitly subscribes to Mealplan, then creates an App.
  *   (c) Org-X invites Mike as a member through ensureAppMember.
  *   (d) The App's AI override supersedes the Agent's default for resolution.
  *   (e) maxMembers is enforced at invite-acceptance time (SC-004 cross-check).
@@ -116,12 +115,11 @@ describe('US1 Step (a): Bea creates Mealplan agent (FR-001 / FR-008 / FR-009)', 
 });
 
 // ─────────────────────────────────────────────────────────────────────────
-// Step (b): Org-X installs Mealplan (createApp with agentId auto-provisions
-//           AgentOrgGrant — the load-bearing T032 check)
+// Step (b): Org-X subscribes before installing cross-org Mealplan
 // ─────────────────────────────────────────────────────────────────────────
 
 describe('US1 Step (b): Org-X installs Mealplan via createApp (T032)', () => {
-  it('auto-provisions an AgentOrgGrant(orgX.id, mealplan.id) on createApp', async () => {
+  it('requires an explicit AgentOrgGrant(orgX.id, mealplan.id) before createApp', async () => {
     const mealplan = await resolvers.Mutation.createAgent(
       {},
       { orgId: beaOrg.id, name: 'Mealplan', visibility: 'PUBLIC' },
@@ -134,7 +132,14 @@ describe('US1 Step (b): Org-X installs Mealplan via createApp (T032)', () => {
     });
     expect(before).toBeNull();
 
-    // Org-X creates an App for Mealplan. The grant should auto-provision.
+    await expect(resolvers.Mutation.createApp(
+      {}, { orgRef: orgX.id, agentRef: mealplan.id, name: 'Mealplan @ Org X' }, adminCtx(mike.id),
+    )).rejects.toMatchObject({ extensions: { code: 'AGENT_ORG_GRANT_REQUIRED' } });
+    await resolvers.Mutation.createAgentOrgGrant(
+      {}, { orgRef: orgX.id, agentRef: mealplan.id }, adminCtx(mike.id),
+    );
+
+    // The explicit grant now licenses the App.
     const app = await resolvers.Mutation.createApp(
       {},
       {
@@ -176,6 +181,7 @@ describe('US1 Step (c): ensureAppMember adds Mike as a cook (FR-004)', () => {
         },
       },
     });
+    await createDbAgentOrgGrant(db, orgX.id, mealplan.id);
     const app = await resolvers.Mutation.createApp(
       {},
       { orgRef: orgX.id, agentRef: mealplan.id, name: 'Mealplan @ Org X' },
@@ -224,6 +230,7 @@ describe('US1 Step (d): App.aiProvider overrides Agent default for that App\'s s
       },
       adminCtx(bea.id),
     );
+    await createDbAgentOrgGrant(db, orgX.id, mealplan.id);
 
     // Org-X installs and overrides with their own provider.
     const app = await resolvers.Mutation.createApp(
@@ -298,6 +305,7 @@ describe('US1 Step (e): installationPolicy.maxMembers=2 rejects the third member
         },
       },
     });
+    await createDbAgentOrgGrant(db, orgX.id, knowYourself.id);
     const app = await resolvers.Mutation.createApp(
       {},
       { orgRef: orgX.id, agentRef: knowYourself.id, name: 'KY @ Org X' },

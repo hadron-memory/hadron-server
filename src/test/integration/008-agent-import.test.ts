@@ -39,6 +39,10 @@ function adminCtx(userId: string, organizationId?: string): Context {
   return { db, roles: ['ADMIN'], userId, organizationId };
 }
 
+async function subscribe(orgId: string, ...agentIds: string[]): Promise<void> {
+  for (const agentId of agentIds) await createDbAgentOrgGrant(db, orgId, agentId);
+}
+
 beforeEach(async () => {
   await cleanDb(db);
 
@@ -86,9 +90,8 @@ beforeEach(async () => {
   calendar = await make('calendar');
   notes = await make('notes');
 
-  // Bea's org gets grants for its own Agents (same-org auto-provisioning;
-  // ensureAgentOrgGrant would do this on first contact, but seeding it
-  // directly skips that resolver call here).
+  // Bea's org gets grants for the dependencies it bundles. Subscriber orgs
+  // explicitly license each Agent before installing it (cor:dmo:050:07).
   await createDbAgentOrgGrant(db, beaOrg.id, calendar.id);
   await createDbAgentOrgGrant(db, beaOrg.id, notes.id);
 });
@@ -99,6 +102,7 @@ beforeEach(async () => {
 
 describe('T062: cascade install — required deps cascade; optional deps gate on installOptional', () => {
   it('installs Calendar (required) but NOT Notes (optional) when installOptional is empty', async () => {
+    await subscribe(orgX.id, suite.id, calendar.id);
     await publishAgentImport(db, {
       parentAgentId: suite.id,
       importedAgentId: calendar.id,
@@ -133,6 +137,7 @@ describe('T062: cascade install — required deps cascade; optional deps gate on
   });
 
   it('installs Notes too when installOptional includes Notes', async () => {
+    await subscribe(orgX.id, suite.id, calendar.id, notes.id);
     await publishAgentImport(db, {
       parentAgentId: suite.id,
       importedAgentId: calendar.id,
@@ -166,7 +171,8 @@ describe('T062: cascade install — required deps cascade; optional deps gate on
     expect(agentIds).toEqual(new Set([suite.id, calendar.id, notes.id]));
   });
 
-  it('cascade-installed dep Apps get an auto-provisioned AgentOrgGrant', async () => {
+  it('cascade-installed dep Apps use their existing active AgentOrgGrant', async () => {
+    await subscribe(orgX.id, suite.id, calendar.id);
     await publishAgentImport(db, {
       parentAgentId: suite.id,
       importedAgentId: calendar.id,
@@ -197,6 +203,7 @@ describe('T062: cascade install — required deps cascade; optional deps gate on
 
 describe('T063: cascade reuses an existing App in the same org for the same dep', () => {
   it('does not create a second Calendar App when Org X already has one', async () => {
+    await subscribe(orgX.id, suite.id, calendar.id);
     await publishAgentImport(db, {
       parentAgentId: suite.id,
       importedAgentId: calendar.id,
@@ -232,6 +239,8 @@ describe('T063: cascade reuses an existing App in the same org for the same dep'
 
 describe('T064: removeAgentImport leaves existing Apps in place; future installs skip the dep', () => {
   it('Apps already cascaded continue to function; new installs into other orgs do NOT cascade', async () => {
+    await subscribe(orgX.id, suite.id, calendar.id);
+    await subscribe(orgY.id, suite.id);
     await publishAgentImport(db, {
       parentAgentId: suite.id,
       importedAgentId: calendar.id,
@@ -291,6 +300,8 @@ describe('T064: removeAgentImport leaves existing Apps in place; future installs
 
 describe('T065: integration — full Suite/Calendar/Notes scenario (SC-006)', () => {
   it('publishing Suite without a grant for Calendar fails; with the grant, Org X gets cascaded installs', async () => {
+    await subscribe(orgX.id, suite.id, calendar.id, notes.id);
+    await subscribe(orgY.id, suite.id, calendar.id);
     // SC-006: publish-time grant gate. Drop the calendar grant first so
     // Bea has no license to bundle Calendar. Publishing should fail.
     await db.agentOrgGrant.delete({
@@ -368,6 +379,7 @@ describe('T065: integration — full Suite/Calendar/Notes scenario (SC-006)', ()
 
 describe('App-tombstone URN reclaim respects Worker castings (#974, cor:agt:020:02)', () => {
   it("refuses WORKER_NAMES_RESERVED while the soft-deleted App still has Worker rows", async () => {
+    await subscribe(orgX.id, suite.id);
     // `Worker.appId` is onDelete: Cascade, so hard-deleting the tombstone
     // would silently take the castings with it and recycle their permanently
     // reserved names (PR trailers and chat archives reference them). The
