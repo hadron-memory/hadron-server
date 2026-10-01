@@ -124,18 +124,33 @@ export const chatMutations = {
       // #1581: only a pure App key acts on behalf of another user. A signed-in
       // user acts as themselves; naming someone else is refused rather than
       // provisioning a license onto that person's account.
-      if (userId != null && userId !== ctx.userId) {
+      // The acting user. A session-bound App key ALWAYS acts as its session's
+      // user (Chip, #1583 QA): omitting `userId` must not skip the check below
+      // and write an "anonymous" chat into that user's session memory. A
+      // supplied `userId` must equal the session's user.
+      let actingUserId: string | undefined = userId ?? undefined;
+      if (pureAppKey && ctx.sessionId) {
+        const session = await ctx.db.session.findUnique({
+          where: { id: ctx.sessionId },
+          select: { userId: true },
+        });
+        if (session?.userId) {
+          if (userId != null && userId !== session.userId) throw new UserNotFoundError(userId);
+          actingUserId = session.userId;
+        }
+      }
+      if (actingUserId != null && actingUserId !== ctx.userId) {
         if (!pureAppKey) {
           throw authorizationDenied('Forbidden: only an App key can start a chat on behalf of another user.');
         }
         // Ada's ruling (#6055, tightened #6070): an App key acts only for a
         // live AppMember of THAT App, and a session-bound key only for its
         // session's own user. Anything else reads as an unknown user.
-        if (!(await appKeyMayActFor(ctx, userId))) {
-          throw new UserNotFoundError(userId);
+        if (!(await appKeyMayActFor(ctx, actingUserId))) {
+          throw new UserNotFoundError(actingUserId);
         }
       }
-      const effectiveUserId = userId ?? ctx.userId ?? 'anonymous';
+      const effectiveUserId = actingUserId ?? ctx.userId ?? 'anonymous';
 
       // Load agent with system memory
       const agent = await ctx.db.agent.findUniqueOrThrow({

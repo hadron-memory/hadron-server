@@ -222,6 +222,72 @@ describe('#1581: startChat through a pure App key (resolver level)', () => {
   });
 });
 
+// Chip's #1583 QA + Ada #6098, through the PRODUCT mutations: createAppUser
+// mints a user stamped with the App (externalAppId) but no AppMember row, and
+// startAgentSession binds a session to that user. A session-bound key always
+// acts as its session's user, and an App-minted user satisfies the gate.
+describe('#1581: App-minted users through createAppUser + startAgentSession', () => {
+  const appKey = (appId: string, sessionId?: string) =>
+    ({ db, appId, roles: [], ...(sessionId ? { sessionId } : {}) }) as unknown as Context;
+
+  /** Chat nodes startChat wrote into a session's memory. */
+  async function chatNodesIn(sessionId: string) {
+    const session = await db.session.findUniqueOrThrow({ where: { id: sessionId }, select: { memoryId: true } });
+    if (!session.memoryId) return 0;
+    return db.node.count({ where: { memoryId: session.memoryId, loc: { startsWith: 'chats:' } } });
+  }
+
+  async function mintedSession(appId: string, externalId: string) {
+    const user = await M.createAppUser({}, { externalId }, appKey(appId));
+    const started = await M.startAgentSession({}, { agentId: agent.id, externalUserId: externalId }, appKey(appId));
+    const sessionId: string = started.sessionId ?? started.session?.id ?? started.id;
+    return { user, sessionId };
+  }
+
+  beforeEach(async () => {
+    await db.app.update({ where: { id: app.id }, data: { createUserPermission: 'EXPLICIT' } });
+  });
+
+  it('a user THIS App minted chats with userId omitted; the chat and the license are theirs', async () => {
+    const { user, sessionId } = await mintedSession(app.id, 'ext-own');
+    const out = await M.startChat(null, { agentId: agent.id }, appKey(app.id, sessionId));
+    expect(out.chatId).toMatch(/^chats:/);
+    expect(await subsFor(agent.id)).toEqual([user.id]);
+  });
+
+  it('a supplied userId must equal the session user', async () => {
+    const { sessionId } = await mintedSession(app.id, 'ext-own-2');
+    await expect(M.startChat(null, { agentId: agent.id, userId: endUser.id }, appKey(app.id, sessionId)))
+      .rejects.toMatchObject({ name: 'UserNotFoundError' });
+  });
+
+  it('a deleted minted user is refused, even with userId omitted (no anonymous bypass)', async () => {
+    const { user, sessionId } = await mintedSession(app.id, 'ext-gone');
+    await db.user.update({ where: { id: user.id }, data: { deletedAt: new Date() } });
+    await expect(M.startChat(null, { agentId: agent.id }, appKey(app.id, sessionId)))
+      .rejects.toMatchObject({ name: 'UserNotFoundError' });
+    // startAgentSession may already have licensed the user; startChat wrote nothing.
+    expect(await chatNodesIn(sessionId)).toBe(0);
+  });
+
+  it('a user minted by ANOTHER App is refused, even with userId omitted', async () => {
+    // appZ installs the same Agent and mints a user; the session is then
+    // re-bound to App A's key context, as a stolen session id would be.
+    const appZ = await db.app.create({ data: {
+      id: generateId(), name: 'app-z', urn: `${orgA.urn}:app-z`, organizationId: orgA.id,
+      createUserPermission: 'EXPLICIT', appAgents: { create: { agentId: agent.id } },
+    } as never });
+    const { user } = await mintedSession(appZ.id, 'ext-foreign');
+    const session = await db.session.create({ data: {
+      id: generateId(), appId: app.id, userId: user.id, agentId: agent.id, type: 'CHATBOT', startedAt: new Date(),
+    } as never });
+    const before = await subsFor(agent.id);
+    await expect(M.startChat(null, { agentId: agent.id }, appKey(app.id, session.id)))
+      .rejects.toMatchObject({ name: 'UserNotFoundError' });
+    expect(await subsFor(agent.id)).toEqual(before);
+  });
+});
+
 describe('#1581 review: two concurrent first chats for the same user both complete', () => {
   it('neither chat transaction is aborted, and exactly one subscription exists', async () => {
     const results = await Promise.allSettled([

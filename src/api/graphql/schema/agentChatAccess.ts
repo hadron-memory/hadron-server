@@ -61,7 +61,8 @@ export async function canChatWithAgent(ctx: Context, agent: ChatAgentRow): Promi
 
 /**
  * May a pure App key start a chat on behalf of `userId` (#1581; Ada #6055,
- * tightened #6070)? Only for a LIVE AppMember of that very App. An
+ * #6070, #6098)? Only for a LIVE AppMember of that very App, or a user that
+ * very App minted (`User.externalAppId`, not deleted). An
  * `AgentSubscription` does not count: it is keyed (user, Agent) with no App,
  * so a user licensed through App X would otherwise pass App Y's check whenever
  * Y installs the same Agent. A session-bound key may act only for its
@@ -82,7 +83,15 @@ export async function appKeyMayActFor(ctx: Context, userId: string): Promise<boo
     where: { appId_userId: { appId: ctx.appId, userId } },
     select: { userId: true },
   });
-  return member !== null;
+  if (member !== null) return true;
+  // Ada #6098: or a user THIS App minted (createAppUser stamps externalAppId).
+  // App-scoped by construction, and the only satisfying path for App-created
+  // users, who never get an AppMember row (Chip, #1583 QA).
+  const minted = await ctx.db.user.findFirst({
+    where: { id: userId, externalAppId: ctx.appId, deletedAt: null },
+    select: { id: true },
+  });
+  return minted !== null;
 }
 
 /**
