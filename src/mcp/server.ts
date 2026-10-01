@@ -441,7 +441,11 @@ function renderAppRun(run: Record<string, unknown>): string {
     `Current node: ${run.curNodeUrn ?? '—'}`,
     `Trigger: ${run.triggerKind}${run.parentRunId ? ` · spawned by run ${run.parentRunId}` : ''}`,
     `Started: ${iso(run.startedAt)} · Finished: ${iso(run.finishedAt)} · Attempts: ${run.attempts ?? 0}`,
-    `Spent: ${run.tokensSpent ?? 0} tokens of ${run.budgetTokens ?? '—'} · ${run.actionsSpent ?? 0} actions of ${run.budgetActions ?? '—'}`,
+    // Codex-worker P2 (Jane): budgetTokens/budgetActions are REMAINING
+    // balances, decremented as the run spends, so the denominator is the
+    // initial budget; and a null spend means unknown (legacy runs), never 0.
+    `Spent: ${run.tokensSpent ?? 'unknown'} tokens of ${run.budgetTokensInitial ?? run.budgetTokens ?? '—'} · ` +
+      `${run.actionsSpent ?? 'unknown'} actions of ${run.budgetActionsInitial ?? run.budgetActions ?? '—'}`,
     renderRunJson('Failure', run.failure),
     renderRunJson('Data (run envelope)', run.data),
     renderRunJson(`Hops${hops ? ` (${hops.length} completed)` : ''}`, run.hops),

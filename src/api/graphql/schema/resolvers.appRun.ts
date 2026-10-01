@@ -220,6 +220,34 @@ async function hasAppRelationship(
   return !!sub;
 }
 
+/**
+ * #1565 (Codex-worker P1, Jane): who may read a run WITHOUT an org READER row.
+ * `hadron_run_task` lets an App's own key and a user with a live App
+ * relationship (AppMember or active subscriber) launch a run, and points them
+ * at `hadron_get_run` to read it; the org-READER gate alone refused exactly
+ * those starters. Shared by GraphQL `appRun` and the MCP tool, so the two
+ * never drift. Admits:
+ *   - a platform admin;
+ *   - a PURE App-key principal (no userId) for its own App's runs — a user's
+ *     App SELECTION is not that credential
+ *     (findings:auth-appid-credential-vs-selection);
+ *   - a user for a run they started or that runs on their behalf, while they
+ *     STILL have a live relationship with the run's App (revoked membership
+ *     authorizes nothing). Other members' runs stay masked: a run's envelope
+ *     can carry another user's data.
+ * Anyone else falls through to the org-READER gate, unchanged.
+ */
+export async function mayReadAppRunWithoutOrgRole(
+  ctx: Context,
+  run: { appId: string; userId: string | null; createdBy: string | null },
+): Promise<boolean> {
+  if (isPlatformAdmin(ctx)) return true;
+  if (!ctx.userId) return !!ctx.appId && ctx.appId === run.appId;
+  if (ctx.impersonation) return false;
+  const own = run.userId === ctx.userId || run.createdBy === ctx.userId;
+  return own && (await hasAppRelationship(ctx.db, run.appId, ctx.userId));
+}
+
 async function requireManualRunAccess(ctx: Context, appRef: string) {
   const { id } = await resolveAppRef(ctx.db, appRef);
   const app = await ctx.db.app.findFirst({
@@ -924,7 +952,7 @@ export const appRunQueries = {
     }
     const run = await ctx.db.appRun.findUnique({ where: { id } });
     if (!run) return null;
-    if (!isPlatformAdmin(ctx)) await requireOrgRole(ctx, run.organizationId, 'READER');
+    if (!(await mayReadAppRunWithoutOrgRole(ctx, run))) await requireOrgRole(ctx, run.organizationId, 'READER');
     return run;
   },
 

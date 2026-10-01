@@ -83,3 +83,49 @@ describe('#1561 — hadron_get_run', () => {
     expect(await getRun(reader.id, '   ')).toMatch(/Pass the run id/);
   });
 });
+
+describe('#1565 review — run starters read their own run; foreign runs stay masked (Codex-worker P1)', () => {
+  let member: { id: string };
+  let otherMember: { id: string };
+  beforeEach(async () => {
+    const t = `${Date.now()}-${Math.floor(Math.random() * 100_000)}`;
+    member = await db.user.create({ data: { id: generateId(), githubId: 15612, githubUsername: `gr-m-${t}`, handle: `gr-m-${t}` } });
+    otherMember = await db.user.create({ data: { id: generateId(), githubId: 15613, githubUsername: `gr-o2-${t}`, handle: `gr-o2-${t}` } });
+    // App members with NO org membership: the launch gate admits them, the org-READER gate alone did not.
+    await db.appMember.create({ data: { appId: app.id, userId: member.id, role: 'member' } });
+    await db.appMember.create({ data: { appId: app.id, userId: otherMember.id, role: 'member' } });
+  });
+
+  it('an App member reads the run they started', async () => {
+    const r = await run({ createdBy: member.id });
+    expect(await getRun(member.id, r.id)).toContain(`Run ${r.id}`);
+  });
+
+  it("another member's run reads as not found", async () => {
+    const r = await run({ createdBy: otherMember.id });
+    expect(await getRun(member.id, r.id)).toBe(`Run "${r.id}" not found.`);
+  });
+
+  it('a starter whose App membership was revoked can no longer read it', async () => {
+    const r = await run({ createdBy: member.id });
+    await db.appMember.deleteMany({ where: { appId: app.id, userId: member.id } });
+    expect(await getRun(member.id, r.id)).toBe(`Run "${r.id}" not found.`);
+  });
+
+  it("a pure App key reads its own App's run; a user's App SELECTION is not that credential", async () => {
+    const r = await run({ createdBy: null });
+    const appKey = createTestableMcpServer({ appId: app.id, roles: [], clientId: `app:${app.id}` } as AuthContext);
+    expect(await appKey.callToolText('hadron_get_run', { ref: r.id })).toContain(`Run ${r.id}`);
+    const selecting = createTestableMcpServer({ userId: outsider.id, appId: app.id, roles: ['READER'], clientId: `user:${outsider.id}` } as AuthContext);
+    expect(await selecting.callToolText('hadron_get_run', { ref: r.id })).toBe(`Run "${r.id}" not found.`);
+  });
+});
+
+describe('#1565 review — spend is reported against the initial budget (Codex-worker P2)', () => {
+  it('uses the initial budgets as denominators, and a null spend reads as unknown', async () => {
+    const spent = await run({ tokensSpent: 420, budgetTokens: 99580, budgetTokensInitial: 100000, actionsSpent: 3, budgetActions: 47, budgetActionsInitial: 50 });
+    expect(await getRun(reader.id, spent.id)).toContain('Spent: 420 tokens of 100000 · 3 actions of 50');
+    const legacy = await run({ tokensSpent: null, actionsSpent: null, budgetTokensInitial: 100000, budgetActionsInitial: 50 });
+    expect(await getRun(reader.id, legacy.id)).toContain('Spent: unknown tokens of 100000 · unknown actions of 50');
+  });
+});
