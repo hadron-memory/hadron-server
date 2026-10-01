@@ -107,15 +107,35 @@ export interface ExecGitOptions {
 }
 
 /**
+ * Never expose an execFile rejection: Node includes the full argv in its
+ * message/cmd, and git may repeat the authenticated remote in stderr. The
+ * installation token is in that argv for clone and remote set-url. Keep no
+ * cause or child-process fields on this error, including in log inspection.
+ */
+export class GitCommandError extends Error {
+  readonly code = 'GIT_COMMAND_FAILED';
+
+  constructor() {
+    super('Git command failed. Check the repository and branch, then retry.');
+    this.name = 'GitCommandError';
+  }
+}
+
+/**
  * Run `git` with the transport guard applied.
  *
  * `args` is the command's own argv (`['clone', url, path]`), WITHOUT the guard —
- * callers never spell it. Resolves with the process output; rejects the way
- * `execFile` does, so existing error handling is unchanged.
+ * callers never spell it. Resolves with the process output. A failed command
+ * rejects with fixed copy, never with execFile's credential-bearing argv or
+ * git's stderr.
  */
 export async function execGit(
   args: string[],
   options: ExecGitOptions = {},
 ): Promise<{ stdout: string; stderr: string }> {
-  return execFile('git', [...GIT_TRANSPORT_GUARD, ...args], options);
+  try {
+    return await execFile('git', [...GIT_TRANSPORT_GUARD, ...args], options);
+  } catch {
+    throw new GitCommandError();
+  }
 }

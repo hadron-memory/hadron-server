@@ -344,7 +344,8 @@ describe('syncGraphFromGithub', () => {
     });
 
     const result = await syncGraphFromGithub(makeGraph());
-    expect(result.error).toContain('git authentication failed');
+    expect(result.error).toBe('Git command failed. Check the repository and branch, then retry.');
+    expect((await db.memory.findUniqueOrThrow({ where: { id: dbGraphId } })).syncError).toBe(result.error);
   });
 
   it('loads nodes from the filesystem and upserts them into the DB', async () => {

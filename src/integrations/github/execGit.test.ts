@@ -26,12 +26,13 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 const calls: string[][] = [];
+let failure: Error | null = null;
 
 vi.mock('child_process', () => ({
   execFile: vi.fn((...args: unknown[]) => {
     calls.push(args[1] as string[]);
     const cb = args[args.length - 1] as (e: Error | null, o: string, err: string) => void;
-    cb(null, '', '');
+    cb(failure, '', failure ? String((failure as Error & { stderr?: string }).stderr ?? '') : '');
   }),
 }));
 
@@ -39,6 +40,7 @@ const { execGit, GIT_TRANSPORT_GUARD } = await import('./execGit.js');
 
 beforeEach(() => {
   calls.length = 0;
+  failure = null;
 });
 
 describe('GIT_TRANSPORT_GUARD', () => {
@@ -91,5 +93,33 @@ describe('execGit', () => {
     const { execFile } = await import('child_process');
     await execGit(['status', '--porcelain'], { cwd: '/repo' });
     expect((execFile as unknown as ReturnType<typeof vi.fn>).mock.calls[0][0]).toBe('git');
+  });
+
+  it('discards argv, URL userinfo, token shapes, and stderr on failure', async () => {
+    const token = 'ghs_SYNTHETIC_INSTALLATION_TOKEN_1578';
+    const url = `https://x-access-token:${token}@github.com/o/r.git`;
+    failure = Object.assign(new Error(`Command failed: git clone ${url}`), {
+      cmd: `git clone ${url}`,
+      stderr: `fatal: unable to access '${url}': ${token}`,
+      stdout: token,
+    });
+
+    let caught: unknown;
+    try {
+      await execGit(['clone', '--', url, '/tmp/r']);
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toMatchObject({
+      name: 'GitCommandError',
+      code: 'GIT_COMMAND_FAILED',
+      message: 'Git command failed. Check the repository and branch, then retry.',
+    });
+    expect(String(caught)).not.toContain(token);
+    expect(JSON.stringify(caught)).not.toContain(token);
+    expect((caught as Error & { cause?: unknown }).cause).toBeUndefined();
+    expect((caught as Error & { cmd?: string }).cmd).toBeUndefined();
+    expect((caught as Error & { stderr?: string }).stderr).toBeUndefined();
   });
 });
