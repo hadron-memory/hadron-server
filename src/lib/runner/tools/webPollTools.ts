@@ -11,7 +11,7 @@ import {
   type WebPollCondition,
 } from '../../webfetchClient.js';
 import { loadWebFetchAuthSecret } from '../secrets.js';
-import { isSecretOwnerType, SECRET_OWNER_TYPES, type SecretOwnerType } from '../../secrets.js';
+import { isSecretOwnerType, SECRET_OWNER_TYPES, SECRET_SCOPE_ORDER, type SecretOwnerType } from '../../secrets.js';
 import { redactUrl } from '../../webUrl.js';
 import type { RunToolDef } from './types.js';
 import { coerceHeaders } from './webTools.js';
@@ -55,8 +55,9 @@ export const webPollStart: RunToolDef = {
   description:
     'Start a durable GET-only watch on an http(s) URL. The sidecar evaluates the supplied HTML/JSON ' +
     'conditions until they trigger or the mandatory TTL expires. Use credentialName to inject a ' +
-    'webfetch-auth secret whose urlPrefix covers this URL — it resolves server-side (memory, app, ' +
-    'user, org cascade) and the value never enters your context; never put secrets in headers or arguments.',
+    'webfetch-auth secret whose urlPrefix covers this URL — it resolves server-side ' +
+    `(${SECRET_SCOPE_ORDER.join(', then ')} cascade) and the value never enters your context; ` +
+    'never put secrets in headers or arguments.',
   inputSchema: {
     type: 'object',
     properties: {

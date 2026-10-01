@@ -257,6 +257,13 @@ describe('#1564 — web_poll_start advertises only the secret scopes the store a
     expect(props.credentialScope.description).not.toMatch(/\b(app|memory)\b/);
   });
 
+  it('the tool-level description names the same cascade and no removed owner (Gene P2)', () => {
+    // The whole advertised surface is pinned, not just the property: the
+    // description is what every model listing tools reads first.
+    expect(webPollStart.description).toMatch(/user, then org cascade/);
+    expect(webPollStart.description).not.toMatch(/\b(app|memory)\b/);
+  });
+
   it('a removed scope is refused with an error naming exactly the accepted owners', async () => {
     await expect(webPollStart.execute({} as never, {
       url: 'https://api.example.test/v1/orders',
