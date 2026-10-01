@@ -529,6 +529,8 @@ describe('Orca attention router — a human typing: never appended to; hold the 
     // Exactly as Orca rendered a two-line Claude draft whose second line is `❯`.
     expect(promptLineIsEmpty([RULE, '❯\u00a0first line', '  ❯', RULE, '  ⏵⏵ bypass permissions on'], 'claude')).toBe(false);
     expect(promptLineIsEmpty([RULE, '❯', '  ❯', RULE], 'claude')).toBe(false);
+    // Chip's QA repro (#5724), with the marker even at column 0.
+    expect(promptLineIsEmpty([RULE, '❯ half typed', '❯', RULE], 'claude')).toBe(false);
     // A typed rule is indented too, so it cannot fake the box's opening rule.
     expect(promptLineIsEmpty([RULE, '❯ text', `  ${RULE}`, '❯', RULE], 'claude')).toBe(false);
     // Codex: a typed `›` continuation is indented, so it cannot pose as the prompt.
