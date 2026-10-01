@@ -29,7 +29,7 @@
 import { Prisma, type PrismaClient } from '../../generated/prisma/index.js';
 
 export async function ensureAgentSubscription(
-  db: Pick<PrismaClient, 'agentSubscription'>,
+  db: Pick<PrismaClient, 'agentSubscription'> | Prisma.TransactionClient,
   userId: string,
   agentId: string,
 ): Promise<void> {
