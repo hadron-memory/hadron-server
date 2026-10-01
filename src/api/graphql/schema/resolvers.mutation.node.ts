@@ -144,6 +144,7 @@ import {
 } from './resolvers.helpers.js';
 import { type ToolDriveFile } from '../../../lib/emailClient.js';
 import { searchReplaceInSpecNodes } from './resolvers.searchReplaceSpec.js';
+import { deletePendingEdgesTargetingNodes, reconcilePendingEdgeCounts } from '../../../lib/pendingEdgePromotion.js';
 
 // ── Shared node-write core (spec 039 Phase 0 D1) ────────────────────────────
 //
@@ -2882,6 +2883,8 @@ export const nodeMutations = {
         memoryId,
         OR: [{ loc: node.loc }, { loc: { startsWith: escapePrismaLikePattern(`${node.loc}:`) } }],
       };
+      // #449 — source memories whose pending-edge count a hard delete changed.
+      let pendingSourceMemories: string[] = [];
       try {
         // The count and the delete run in one transaction (parity with
         // hadron_delete_node). #664: an advisory lock on this node's loc — taken
@@ -2986,8 +2989,8 @@ export const nodeMutations = {
             }
             // PendingEdge.targetId is intentionally NOT a foreign key, so the FK
             // cascade misses pending rows aimed at the deleted nodes — clean them
-            // up explicitly (PR-189 pattern).
-            await tx.pendingEdge.deleteMany({ where: { targetId: { in: affectedIds } } });
+            // up explicitly (PR-189 pattern), in both node-keyed forms (#449).
+            pendingSourceMemories = await deletePendingEdgesTargetingNodes(tx, affectedIds);
 
             if (useSubtree) {
               await tx.node.deleteMany({ where: subtree });
@@ -3038,6 +3041,9 @@ export const nodeMutations = {
         }
         throw e;
       }
+      await reconcilePendingEdgeCounts(ctx.db, pendingSourceMemories).catch((err) =>
+        console.warn('[deleteNode] pending-edge count reconcile failed (the periodic repair will fix it):', err),
+      );
       // #1061 — a delete is a write. Recorded for the addressed node only, not
       // per descendant of a recursive delete: the subtree is removed by one
       // `updateMany` whose row identities are never materialized, and counting
@@ -3779,6 +3785,7 @@ export const nodeMutations = {
 
       // ── Atomic write: revision snapshot → target update → edge re-point →
       //    source delete ──────────────────────────────────────────────────
+      let pendingSourceMemories: string[] = []; // #449
       await ctx.db.$transaction(async (tx) => {
         // #1187 — DECLARE the complete key set first, in the one global order.
         // A merge takes two keys and used to take them target-then-source,
@@ -3976,9 +3983,14 @@ export const nodeMutations = {
         if (deleteSource) {
           // Hard delete (matches deleteNode). Edges re-pointed above survive;
           // any the caller chose not to transfer cascade away with the row.
+          // #449 — so do the PendingEdges aimed at the source: its id is gone.
+          pendingSourceMemories = await deletePendingEdgesTargetingNodes(tx, [source.id]);
           await tx.node.delete({ where: { id: source.id } });
         }
       });
+      await reconcilePendingEdgeCounts(ctx.db, pendingSourceMemories).catch((err) =>
+        console.warn('[mergeNodes] pending-edge count reconcile failed (the periodic repair will fix it):', err),
+      );
 
       // Re-fetch the merged target with edges, decrypt for the response +
       // side effects. Only decrypt when a session key is actually available:

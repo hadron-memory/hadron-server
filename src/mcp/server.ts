@@ -61,7 +61,7 @@ import type { MemorySchema } from '../lib/memorySchema.js';
 import { validateLoc, InvalidLocError } from '../lib/validateLoc.js';
 import { deriveEdgeLoc } from '../lib/edgeLoc.js';
 import { archiveTombstone } from '../lib/tombstoneArchive.js';
-import { promotePendingEdgeForTarget } from '../lib/pendingEdgePromotion.js';
+import { deletePendingEdgesTargetingNodes, promotePendingEdgeForTarget, reconcilePendingEdgeCounts } from '../lib/pendingEdgePromotion.js';
 import {
   liveEdgeEndpointSet,
   lockEdgeEndpointMemories,
@@ -6708,6 +6708,8 @@ Refuses if the node has descendants under its URN prefix unless \`recursive: tru
         | { refused: 'mintedSpec'; message: string }
         | { ok: true; descendantCount: number };
 
+      // #449 — source memories whose pending-edge count a hard delete changed.
+      let pendingSourceMemories: string[] = [];
       const result: DeleteResult = await db.$transaction(async (tx) => {
         // Keep the dead-Channel cleanup verdict stable through the delete.
         // Channel resurrection takes this same key before any loc key.
@@ -6787,8 +6789,8 @@ Refuses if the node has descendants under its URN prefix unless \`recursive: tru
           }
 
           // PendingEdge target-side cleanup — NOT a FK, so the cascade
-          // misses these (PR-189 review caught this).
-          await tx.pendingEdge.deleteMany({ where: { targetId: { in: affectedIds } } });
+          // misses these (PR-189 review caught this), in both node-keyed forms (#449).
+          pendingSourceMemories = await deletePendingEdgesTargetingNodes(tx, affectedIds);
 
           if (recursive && descendantCount > 0) {
             await tx.node.deleteMany({
@@ -6822,6 +6824,9 @@ Refuses if the node has descendants under its URN prefix unless \`recursive: tru
 
         return { ok: true, descendantCount };
       });
+      await reconcilePendingEdgeCounts(db, pendingSourceMemories).catch((err) =>
+        console.warn('[hadron_delete_node] pending-edge count reconcile failed (the periodic repair will fix it):', err),
+      );
 
       if ('refused' in result) {
         if (result.refused === 'access') {
