@@ -364,6 +364,69 @@ describe('#1585 review: the gate and the anchors agree on which Apps carry the r
   });
 });
 
+// Chip (#1585 QA at 3918a7f9): anchors are chosen before the transaction, so an
+// App that becomes a carrier in between (newly licensed) could admit the caller
+// unanchored while deleteApp commits. Now the in-transaction gate checks every
+// carrier was anchored and otherwise retries with fresh anchors.
+describe('#1585 review: a carrier App that appears after anchor selection is fenced too', () => {
+  async function holdTx(work: (tx: any) => Promise<unknown>) {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    let held!: () => void;
+    const isHeld = new Promise<void>((r) => { held = r; });
+    const done = db.$transaction(async (tx) => { await work(tx); held(); await gate; }, { timeout: 20_000 });
+    await isHeld;
+    return { release, done };
+  }
+
+  it('a chat admitted only through a newly licensed App waits for that App\'s deletion and is refused', async () => {
+    await db.agent.update({ where: { id: agent.id }, data: { visibility: 'PUBLIC' } });
+    const orgX = await db.organization.create({ data: { id: generateId(), name: 'org-x', urn: 'org-x-1585.example' } });
+    const appX = await db.app.create({ data: {
+      id: generateId(), name: 'app-x', urn: `${orgX.urn}:app`, organizationId: orgX.id,
+      appAgents: { create: { agentId: agent.id } },
+    } });
+    await db.appMember.create({ data: { appId: appX.id, userId: stranger.id, role: 'member' } });
+
+    // H2: deleteApp in flight on App X (exclusive App anchor, uncommitted).
+    const deleting = await holdTx(async (tx) => {
+      await lockAuthorityAnchors(tx, [{ kind: 'app', id: appX.id }], 'exclusive');
+      await tx.app.update({ where: { id: appX.id }, data: { deletedAt: new Date() } });
+    });
+    // H1: holds the Agent anchor so the chat blocks AFTER choosing its anchors
+    // (App X is unlicensed then, so not a carrier and not anchored).
+    let releaseH1!: () => void;
+    const h1Gate = new Promise<void>((r) => { releaseH1 = r; });
+    let h1Held!: () => void;
+    const h1IsHeld = new Promise<void>((r) => { h1Held = r; });
+    const h1 = db.$transaction(async (tx) => {
+      await lockAuthorityAnchors(tx, [{ kind: 'agent', id: agent.id }], 'exclusive');
+      h1Held();
+      await h1Gate;
+      // Before releasing: App X becomes licensed, and the Agent stops being
+      // PUBLIC, so the chat can now be admitted ONLY through App X.
+      await tx.agentOrgGrant.create({ data: { orgId: orgX.id, agentId: agent.id, activatedAt: new Date() } });
+      await tx.agent.update({ where: { id: agent.id }, data: { visibility: 'ORGANIZATION' } });
+    }, { timeout: 20_000 });
+    await h1IsHeld;
+
+    const chat = M.startChat(null, { agentId: agent.id }, userCtx(stranger.id));
+    try {
+      await waitForLockWaitersOfType(db, 'advisory', 1); // the chat waits on H1
+      releaseH1();
+      await h1;
+      // With the fix the chat retries with App X anchored and now waits on H2.
+      await waitForLockWaitersOfType(db, 'advisory', 1);
+    } finally {
+      releaseH1();
+      deleting.release();
+      await deleting.done;
+    }
+    await expect(chat).rejects.toBeTruthy();
+    expect(await subsFor(agent.id)).toEqual([]);
+  });
+});
+
 describe('#1573: startChat waits for an in-flight revocation of its read right', () => {
   /** Hold an exclusive anchor and apply `revoke` uncommitted until released. */
   async function holdRevocation(anchor: { kind: 'org' | 'app'; id: string }, revoke: (tx: any) => Promise<unknown>) {
