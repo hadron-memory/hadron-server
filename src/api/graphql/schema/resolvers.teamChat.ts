@@ -67,6 +67,7 @@ import { escapePrismaLikePattern } from '../../../lib/literalLocPrefix.js';
 import { nodeUrnRoundTrips, safeNodeUrnV2 } from '../../../lib/urnEmit.js';
 import {
   maybeAdvanceOwnChannelRead,
+  mayStillDriveWorkerApp,
 } from '../../../lib/teamAttention.js';
 
 // The team-chat locs moved to src/lib/teamChatLoc.ts (#1030): the agent-chat
@@ -539,10 +540,17 @@ async function resolveSessionAuthor(
     }
   }
   // #1540 — authoring through the session is its driver driving it. Every
-  // gate above passed, so the session is live, owned and may author here:
-  // keep it alive. Without this a CLI-bound worker posting all day went
+  // gate above passed, so the session is live and may author here; keep it
+  // alive. Without this a CLI-bound worker posting all day went
   // SESSION_NOT_LIVE one idle window after binding.
-  if (!ctx.impersonation) await touchLiveSession(ctx.db, session.id);
+  //
+  // Only on CURRENT eligibility to drive the worker (Codex-worker P1 on
+  // #1542): the gates above judge the session's historical user and the
+  // DESTINATION's host memory, so a cross-App or free-standing Channel post
+  // could otherwise keep alive a session whose driver has since lost the
+  // worker's own App. The post itself is authorized as before; only the
+  // keep-alive is withheld.
+  if (await mayStillDriveWorkerApp(ctx, worker.appId)) await touchLiveSession(ctx.db, session.id);
   return { workerId: worker.id, name: worker.name, sessionId: session.id, workerAppId: worker.appId, crossApp };
 }
 

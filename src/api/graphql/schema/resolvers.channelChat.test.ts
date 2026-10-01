@@ -314,6 +314,27 @@ describe('#1540 — authoring through a live session keeps it live', () => {
     await expect(post(session.id, 'at 30h')).resolves.toBeTruthy();
   });
 
+  it("a post through a Channel the driver may write does NOT heartbeat a worker whose App they no longer drive (Codex-worker P1)", async () => {
+    // The worker lives in a user-owned App that `stranger` does not
+    // participate in (owner-only); `stranger` still ADMINs org B, so may write
+    // a free-standing Channel's host memory there and the post is authorized.
+    const strangerUser = await db.user.findUniqueOrThrow({ where: { id: stranger.id }, select: { handle: true } });
+    const adminUser = await db.user.findUniqueOrThrow({ where: { id: admin.id }, select: { handle: true } });
+    const orgB = await db.orgMember.findFirstOrThrow({ where: { userId: stranger.id }, select: { organizationId: true } });
+    const appU = await db.app.create({ data: { id: generateId(), ownerUserId: admin.id, name: 'U', urn: `${adminUser.handle}:u` } });
+    const workerU = await db.worker.create({ data: { id: generateId(), appId: appU.id, agentId: agent.id, name: 'Kit', slug: 'kit' } });
+    const memK = await db.memory.create({ data: { id: generateId(), organizationId: orgB.organizationId, urn: `${strangerUser.handle}-k`, name: 'k', class: 'knowledge' } });
+    const free = (await ensureChannelWithRoot(db, { memoryId: memK.id, loc: 'chats:k', name: 'k', createdBy: stranger.id })).channel;
+    const before = new Date(Date.now() - 2 * H);
+    const session = await db.session.create({
+      data: { id: generateId(), appId: appU.id, userId: stranger.id, workerId: workerU.id, type: 'DEVELOPER', startedAt: before } as never,
+    });
+    await db.session.update({ where: { id: session.id }, data: { updatedAt: before } });
+
+    await M.createChannelMessage({}, { channelRef: free.id, body: 'cross-App', sessionRef: session.id }, ctx(stranger.id));
+    expect((await db.session.findUniqueOrThrow({ where: { id: session.id } })).updatedAt!.getTime()).toBe(before.getTime());
+  });
+
   it('control: a genuinely silent session is still refused, and the refusal names a remedy that exists', async () => {
     const t0 = new Date();
     const session = await bindAt(t0);

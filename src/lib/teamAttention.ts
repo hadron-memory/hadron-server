@@ -227,6 +227,24 @@ const LIVE_APP_WHERE: Prisma.AppWhereInput = {
   OR: [{ organizationId: null }, { organization: { deletedAt: null } }],
 };
 
+/**
+ * May this caller STILL drive a worker of `appId` (#1540, Codex-worker P1 on
+ * #1542)? A session's `userId` is historical — stamped at bind, never revoked —
+ * so keeping a session alive needs CURRENT eligibility, the rule
+ * `ownLiveSessionWorker` and the MCP heartbeat already apply: a user must still
+ * participate in the worker's live App (its org not deleted); a pure App-key
+ * caller only for its own App. Impersonation never drives anything.
+ */
+export async function mayStillDriveWorkerApp(ctx: Context, appId: string): Promise<boolean> {
+  if (ctx.impersonation) return false;
+  if (!ctx.userId) return !!ctx.appId && ctx.appId === appId;
+  const app = await ctx.db.app.findFirst({
+    where: { id: appId, ...LIVE_APP_WHERE },
+    select: { id: true, organizationId: true, ownerUserId: true },
+  });
+  return !!app && (await isAppParticipant(ctx, app));
+}
+
 async function resolvePilotApp(ctx: Context, appRef: string): Promise<AppRow> {
   if (!ctx.userId || ctx.impersonation) fail('Team attention is available only to an ordinary user.', 'FORBIDDEN');
   let id: string;
