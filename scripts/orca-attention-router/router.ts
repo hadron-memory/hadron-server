@@ -490,9 +490,11 @@ export function isIdle(cfg: Config, handle: string, timeoutMs: number, run: Runn
 }
 
 /**
- * What an idle Codex composer shows. It is rendered dim, but a screen read
- * returns it as ordinary text, so it has to be recognized by value. An unknown
- * placeholder reads as typed text and holds the nudge: the safe direction.
+ * What an idle, EMPTY Codex composer shows. It is rendered dim, but a screen
+ * read returns it as ordinary text, so it has to be recognized by value. An
+ * unknown placeholder reads as typed text and holds the nudge: the safe
+ * direction. If Codex ever changes it, every Codex worker is held and the
+ * reason is logged once — loud, not silent.
  */
 const CODEX_PLACEHOLDERS = new Set(['Ask Codex to do anything']);
 
@@ -505,36 +507,44 @@ const squash = (s: string): string => s.replace(/[\s\u00a0]+/g, ' ').trim();
  * `tui-idle` alone is not enough (#5473): it reports idle while a HUMAN is
  * typing in that terminal, and a nudge sent then is appended to their
  * half-typed message and submitted with it. So the rendered screen must show
- * the input line empty:
- *  - Claude Code: the LAST `❯` line (earlier ones are submitted turns) has
- *    nothing after the marker, and every line down to the input box's closing
- *    `───` rule is blank, so a multi-line draft is caught too.
- *  - Codex: the last `›` line is empty or the idle placeholder, and every
+ * the input empty. Both agents draw their real chrome at COLUMN 0 and indent
+ * anything the user typed onto a continuation line (live probe, 2026-10-01),
+ * so only column-0 lines count as chrome; a typed `❯` or `───` never does
+ * (@codex P2 and Gene, #1555):
+ *  - Claude Code: the input box is the region between the last two column-0
+ *    `───` rules. Its first line must be the bare `❯` marker and every other
+ *    line in it blank, so a multi-line draft is caught whatever it contains.
+ *  - Codex: the last column-0 `›` line shows the idle placeholder, and every
  *    line below it is footer (blank, `? for shortcuts`, or the `model · path`
- *    status line).
- * Anything unrecognized — no prompt marker, no closing rule, an unknown footer
- * or agent — reads as NOT empty.
+ *    status line). Codex never draws pending text: real text shows only in
+ *    `draft` (checked first, by `promptIsEmpty`), and whitespace shows
+ *    nowhere except as the placeholder's absence. A Codex dialog (e.g. its
+ *    update menu, `› 1. Update now`) is not the placeholder either, so it
+ *    holds — sending there would pick a menu option.
+ * Anything unrecognized — no box, no marker, an unknown footer or agent —
+ * reads as NOT empty.
  */
 export function promptLineIsEmpty(lines: string[], agent: string): boolean {
-  const marker = agent === 'claude' ? '❯' : agent === 'codex' ? '›' : null;
-  if (!marker) return false;
+  if (agent === 'claude') {
+    const rules = lines.flatMap((l, i) => (/^─{3,}[\s\u00a0]*$/.test(l) ? [i] : []));
+    if (rules.length < 2) return false;
+    const box = lines.slice(rules[rules.length - 2] + 1, rules[rules.length - 1]);
+    return box.length > 0 && /^❯[\s\u00a0]*$/.test(box[0]) && box.slice(1).every((l) => squash(l) === '');
+  }
+  if (agent !== 'codex') return false;
   let at = -1;
   for (let i = lines.length - 1; i >= 0; i--) {
-    if (lines[i].replace(/^[\s\u00a0]+/, '').startsWith(marker)) {
+    if (lines[i].startsWith('›')) {
       at = i;
       break;
     }
   }
   if (at < 0) return false;
-  const typed = squash(lines[at].replace(/^[\s\u00a0]+/, '').slice(marker.length));
-  const below = lines.slice(at + 1).map(squash);
-  if (agent === 'claude') {
-    if (typed !== '') return false;
-    const rule = below.findIndex((l) => /^─{3,}/.test(l));
-    return rule >= 0 && below.slice(0, rule).every((l) => l === '');
-  }
-  if (typed !== '' && !CODEX_PLACEHOLDERS.has(typed)) return false;
-  return below.every((l) => l === '' || l === '? for shortcuts' || l.includes(' · '));
+  // Only the placeholder proves empty: a BARE `›` means the composer holds
+  // something it does not draw — whitespace typed live left `›` bare with no
+  // `draft` at all (2026-10-01), and real text leaves it bare WITH a draft.
+  if (!CODEX_PLACEHOLDERS.has(squash(lines[at].slice(1)))) return false;
+  return lines.slice(at + 1).map(squash).every((l) => l === '' || l === '? for shortcuts' || l.includes(' · '));
 }
 
 /**
@@ -558,7 +568,9 @@ export function promptIsEmpty(cfg: Config, handle: string, agent: string, run: R
     terminal = undefined;
   }
   if (!terminal || terminal.source !== 'screen' || !Array.isArray(terminal.tail)) return [false, 'screen unreadable'];
-  if (typeof terminal.draft === 'string' && terminal.draft.trim() !== '') return [false, 'text in the composer draft'];
+  // ANY draft holds, whitespace included: this gate promises "nobody is
+  // typing", not "nothing meaningful typed" (Gene, #1555).
+  if (terminal.draft !== undefined && terminal.draft !== null && terminal.draft !== '') return [false, 'text in the composer draft'];
   return promptLineIsEmpty(terminal.tail as string[], agent) ? [true, ''] : [false, 'text in the prompt'];
 }
 

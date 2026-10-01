@@ -514,7 +514,6 @@ describe('Orca attention router — a human typing: never appended to; hold the 
     expect(promptLineIsEmpty(CLAUDE_IDLE, 'claude')).toBe(true);
     expect(promptLineIsEmpty(CODEX_IDLE, 'codex')).toBe(true);
     expect(promptLineIsEmpty(['›\u00a0Ask Codex to do anything', '  ? for shortcuts'], 'codex')).toBe(true);
-    expect(promptLineIsEmpty(['›', '', '  ? for shortcuts'], 'codex')).toBe(true);
   });
 
   it('reads typed text as not empty: the last prompt line, a multi-line draft, or an unknown footer', () => {
@@ -524,6 +523,26 @@ describe('Orca attention router — a human typing: never appended to; hold the 
     expect(promptLineIsEmpty([RULE, '❯', '  second line of a draft', RULE], 'claude')).toBe(false);
     // Codex: something below the prompt that is not footer.
     expect(promptLineIsEmpty(['›', '  second line of a draft', '  ? for shortcuts'], 'codex')).toBe(false);
+  });
+
+  it('a typed line that looks like chrome is still draft: the literal-marker case, live 2026-10-01 (@codex P2, Gene #1555)', () => {
+    // Exactly as Orca rendered a two-line Claude draft whose second line is `❯`.
+    expect(promptLineIsEmpty([RULE, '❯\u00a0first line', '  ❯', RULE, '  ⏵⏵ bypass permissions on'], 'claude')).toBe(false);
+    expect(promptLineIsEmpty([RULE, '❯', '  ❯', RULE], 'claude')).toBe(false);
+    // A typed rule is indented too, so it cannot fake the box's opening rule.
+    expect(promptLineIsEmpty([RULE, '❯ text', `  ${RULE}`, '❯', RULE], 'claude')).toBe(false);
+    // Codex: a typed `›` continuation is indented, so it cannot pose as the prompt.
+    expect(promptLineIsEmpty(['› half typed', '  ›', '  ? for shortcuts'], 'codex')).toBe(false);
+    // Rules in earlier transcript output do not matter: the box is the LAST pair.
+    expect(promptLineIsEmpty([RULE, 'output', RULE, '❯ old turn', RULE, '❯', RULE], 'claude')).toBe(true);
+  });
+
+  it('Codex: only the placeholder proves empty; a bare prompt or a dialog holds (live 2026-10-01)', () => {
+    // Whitespace typed into Codex: the placeholder vanished, and Orca reported no draft.
+    expect(promptLineIsEmpty(['  Got a minute and a mildly unreasonable idea?', '›', '  GPT-6-Sol high · ~/orca/workspaces/hadron-server/eli'], 'codex')).toBe(false);
+    expect(promptLineIsEmpty(['›', '', '  ? for shortcuts'], 'codex')).toBe(false);
+    // Codex's update menu: the cursor line is a menu option, not the composer.
+    expect(promptLineIsEmpty(['  Update available · 0.159.0 → 0.159.3', '› 1. Update now (runs `brew upgrade --cask codex`)', '  2. Skip', '  3. Skip until next version', '  enter continue · esc skip'], 'codex')).toBe(false);
   });
 
   it('cannot prove empty without a prompt marker, the closing rule, or a known agent', () => {
@@ -568,6 +587,8 @@ describe('Orca attention router — a human typing: never appended to; hold the 
     fake.attention.workers = [worker('w-eli', 'Eli')];
     for (const [screen, why] of [
       [{ tail: CLAUDE_IDLE, draft: 'typed in Orca' }, 'text in the composer draft'],
+      // Whitespace is typing too (Gene, #1555): the gate promises nobody is typing.
+      [{ tail: CLAUDE_IDLE, draft: '   ' }, 'text in the composer draft'],
       [{ tail: CLAUDE_IDLE, source: 'screen-unavailable' }, 'screen unreadable'],
       [{ ok: false }, 'screen unreadable'],
     ] as const) {
