@@ -23,46 +23,22 @@
 import { Prisma, type PrismaClient } from '../../generated/prisma/index.js';
 
 export async function ensureAgentOrgGrant(
-  db: Pick<PrismaClient, 'agentOrgGrant'>,
+  db: Pick<PrismaClient, '$executeRaw'> | Prisma.TransactionClient,
   orgId: string,
   agentId: string,
   opts: { createdBy?: string | null } = {},
 ): Promise<void> {
-  try {
-    await db.agentOrgGrant.upsert({
-      where: { orgId_agentId: { orgId, agentId } },
-      create: {
-        orgId,
-        agentId,
-        // v1 default: activate immediately on creation since billing is out
-        // of scope. Mirrors the AgentSubscription pattern from 005.
-        activatedAt: new Date(),
-        createdBy: opts.createdBy ?? null,
-      },
-      update: {},
-    });
-  } catch (err) {
-    if (
-      err instanceof Prisma.PrismaClientKnownRequestError &&
-      err.code === 'P2002' &&
-      isCompositePkViolation(err.meta)
-    ) {
-      return;
-    }
-    throw err;
-  }
-}
-
-function isCompositePkViolation(meta: unknown): boolean {
-  if (!meta || typeof meta !== 'object' || !('target' in meta)) return false;
-  const target = (meta as { target?: unknown }).target;
-  if (!Array.isArray(target) || target.length !== 2) return false;
-  const fields = new Set(target.map(String));
-  // Prisma emits target as field names (camelCase) on @@id; tolerate
-  // snake_case mapping as a hedge — the same composite-PK constraint
-  // can surface either way across Prisma engine versions.
-  return (
-    (fields.has('orgId') && fields.has('agentId')) ||
-    (fields.has('org_id') && fields.has('agent_id'))
-  );
+  // #1573: one statement that cannot fail on the composite key. This runs
+  // INSIDE anchored transactions (createApp, installAgentIntoAppCore), where a
+  // caught P2002 from the old upsert-and-catch would leave the transaction
+  // aborted (25P02), the hazard Atilla found in ensureAgentSubscription
+  // (#1583). The conflict target is the composite PK only, so any other
+  // unique constraint still raises. An existing row (including a REVOKED
+  // grant) is left untouched. v1 default: activate immediately on creation,
+  // since billing is out of scope (mirrors the AgentSubscription pattern).
+  // activated_at is timestamp(3) WITHOUT time zone here, so write UTC.
+  await db.$executeRaw`
+    INSERT INTO agent_org_grants (org_id, agent_id, activated_at, created_by)
+    VALUES (${orgId}, ${agentId}, (now() AT TIME ZONE 'UTC'), ${opts.createdBy ?? null})
+    ON CONFLICT (org_id, agent_id) DO NOTHING`;
 }

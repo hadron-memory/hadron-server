@@ -335,6 +335,10 @@ export const appMutations = {
       // Agent (resolveAgentRef rejects soft-deleted Agents).
       const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentRef);
       let selectedImports: Array<{ importedAgentId: string }> = [];
+      // #1573: the personal path licenses the install with the owner's
+      // subscription, written inside the anchored App-creation transaction.
+      let personalSubscription = false;
+      let txAutoGrantIds: string[] = [];
       if (resolvedOrgId) {
         // Conceal an unlicensed foreign parent before resolving caller-supplied
         // optional refs. Their lookup errors must not reveal that it exists.
@@ -363,9 +367,10 @@ export const appMutations = {
             autoGrantIds.push(imp.importedAgentId);
           }
         }
-        for (const id of new Set(autoGrantIds)) {
-          await ensureAgentOrgGrant(ctx.db, resolvedOrgId, id);
-        }
+        // #1573: the grant WRITES happen inside the anchored transaction below,
+        // which re-plans on txCtx. This pre-check only surfaces typed refusals
+        // (and conceals an unlicensed foreign parent) before any write.
+        void autoGrantIds;
       } else {
         // spec 047 personal path: no org ⇒ no AgentOrgGrant. The install is
         // licensed by the OWNER's AgentSubscription instead. A user may install
@@ -405,7 +410,7 @@ export const appMutations = {
         // License the install with the owner's subscription (idempotent,
         // activates immediately in v1). Skipped for the owner's own agent —
         // ownership already licenses it.
-        if (!isOwnAgent) await ensureAgentSubscription(ctx.db, ctx.userId!, resolvedAgentId);
+        personalSubscription = !isOwnAgent;
       }
 
       // Hard-delete a soft-deleted collision so the URN can be reused
@@ -443,29 +448,75 @@ export const appMutations = {
       // 023-app-shape Phase 2b: App↔Agent moved from `App.agentId` to the
       // N:M `AppAgent` join. Create the App, then immediately link the
       // requested Agent via an AppAgent row.
-      const createdApp = await ctx.db.app.create({
-        data: {
-          organizationId: resolvedOrgId,
-          ownerUserId,
-          name,
-          urn: appUrn,
-          surfaces: surfaces ?? undefined, // undefined → use the schema default ['chat']
-          trainingMode: trainingMode ?? false,
-          appType: appType ?? 'WORKSTATION',
-          role: role ?? 'READER',
-          description: description ?? null,
-          systemPrompt: systemPrompt ?? null,
-          agentTools: agentTools ?? [],
-          expiresAt: expiresAt ? new Date(expiresAt) : undefined,
-          createUserPermission: createUserPermission ?? 'EXPLICIT',
-          identifyUserMethod: identifyUserMethod ?? 'USER_ID',
-          sessionTimeoutSeconds: sessionTimeoutSeconds ?? 900,
-          anonymousTtlDays: anonymousTtlDays ?? 7,
-          createdBy: ctx.userId ?? null,
-          appAgents: { create: { agentId: resolvedAgentId, createdBy: ctx.userId ?? null } },
+      // #1573: the license writes (org grants for the Agent and each selected
+      // dependency, or the personal owner's subscription) and the App + its
+      // AppAgent install commit TOGETHER under the anchors their revokers take
+      // exclusively: the owning org (or the owning user, added by the helper as
+      // the actor) and every Agent being licensed. After the anchor wait the
+      // gate re-runs on txCtx: org ADMIN and the #1584 license plan, or the
+      // personal PUBLIC-or-own rule.
+      const licensedAgentIds = [resolvedAgentId, ...selectedImports.map((imp) => imp.importedAgentId)];
+      const createdApp = await withAuthorizedTx(
+        ctx,
+        [
+          ...(resolvedOrgId ? [{ kind: 'org' as const, id: resolvedOrgId }] : []),
+          ...[...new Set(licensedAgentIds)].map((id) => ({ kind: 'agent' as const, id })),
+        ],
+        async (txCtx) => {
+          if (resolvedOrgId) {
+            await requireOrgRole(txCtx, resolvedOrgId, 'ADMIN');
+            txAutoGrantIds = [];
+            if (await planOrgAgentInstallGrant(txCtx.db, resolvedOrgId, resolvedAgentId, agentRef)) {
+              txAutoGrantIds.push(resolvedAgentId);
+            }
+            for (const imp of selectedImports) {
+              if (await planOrgAgentInstallGrant(txCtx.db, resolvedOrgId, imp.importedAgentId, agentRef, true)) {
+                txAutoGrantIds.push(imp.importedAgentId);
+              }
+            }
+          } else {
+            const current = await txCtx.db.agent.findUnique({
+              where: { id: resolvedAgentId },
+              select: { visibility: true, ownerUserId: true, deletedAt: true },
+            });
+            const own = current?.ownerUserId != null && current.ownerUserId === ctx.userId;
+            if (!current || current.deletedAt || (current.visibility !== 'PUBLIC' && !own)) {
+              throw new GraphQLError('A personal App may only install a PUBLIC agent or your own personal agent.', {
+                extensions: { code: 'ORGANIZATION_MISMATCH', agentId: resolvedAgentId },
+              });
+            }
+          }
         },
-        include: APP_INCLUDE,
-      });
+        async (tx) => {
+          for (const id of new Set(txAutoGrantIds)) {
+            await ensureAgentOrgGrant(tx, resolvedOrgId!, id);
+          }
+          if (personalSubscription) await ensureAgentSubscription(tx, ctx.userId!, resolvedAgentId);
+        return tx.app.create({
+          data: {
+            organizationId: resolvedOrgId,
+            ownerUserId,
+            name,
+            urn: appUrn,
+            surfaces: surfaces ?? undefined, // undefined → use the schema default ['chat']
+            trainingMode: trainingMode ?? false,
+            appType: appType ?? 'WORKSTATION',
+            role: role ?? 'READER',
+            description: description ?? null,
+            systemPrompt: systemPrompt ?? null,
+            agentTools: agentTools ?? [],
+            expiresAt: expiresAt ? new Date(expiresAt) : undefined,
+            createUserPermission: createUserPermission ?? 'EXPLICIT',
+            identifyUserMethod: identifyUserMethod ?? 'USER_ID',
+            sessionTimeoutSeconds: sessionTimeoutSeconds ?? 900,
+            anonymousTtlDays: anonymousTtlDays ?? 7,
+            createdBy: ctx.userId ?? null,
+            appAgents: { create: { agentId: resolvedAgentId, createdBy: ctx.userId ?? null } },
+          },
+          include: APP_INCLUDE,
+        });
+        },
+      );
 
       // #951 — provision the App's own class='app' shared memory NOW, the way
       // an Agent's system memory is provisioned at Agent-create time. Until
@@ -577,19 +628,36 @@ export const appMutations = {
             }
           }
 
-          const depApp = await ctx.db.app.create({
-            data: {
-              organizationId: resolvedOrgId,
-              name: `${depAgent.name} (cascaded from ${name})`,
-              urn: depUrn,
-              surfaces: ['chat'], // dep installs default to chat surface
-              trainingMode: false,
-              createdBy: ctx.userId ?? null,
-              appAgents: {
-                create: { agentId: imp.importedAgentId, createdBy: ctx.userId ?? null },
-              },
+          // #1573: each dependency App's install commits under the org and the
+          // imported Agent's anchors (revokeAgentOrgGrant / org-role revokers
+          // hold them exclusively), with org ADMIN and the dependency's license
+          // re-checked on txCtx; a same-org grant that is missing is written in
+          // the same transaction.
+          let depAutoGrant = false;
+          const depApp = await withAuthorizedTx(
+            ctx,
+            [{ kind: 'org', id: resolvedOrgId }, { kind: 'agent', id: imp.importedAgentId }],
+            async (txCtx) => {
+              await requireOrgRole(txCtx, resolvedOrgId, 'ADMIN');
+              depAutoGrant = await planOrgAgentInstallGrant(txCtx.db, resolvedOrgId, imp.importedAgentId, agentRef, true);
             },
-          });
+            async (tx) => {
+              if (depAutoGrant) await ensureAgentOrgGrant(tx, resolvedOrgId, imp.importedAgentId);
+              return tx.app.create({
+                data: {
+                  organizationId: resolvedOrgId,
+                  name: `${depAgent.name} (cascaded from ${name})`,
+                  urn: depUrn,
+                  surfaces: ['chat'], // dep installs default to chat surface
+                  trainingMode: false,
+                  createdBy: ctx.userId ?? null,
+                  appAgents: {
+                    create: { agentId: imp.importedAgentId, createdBy: ctx.userId ?? null },
+                  },
+                },
+              });
+            },
+          );
           // #951: a cascaded dependency App is an App like any other — it gets
           // its shared memory at install time too, not on first chat.
           await provisionAppSharedMemory(ctx, depApp, imp.importedAgentId);

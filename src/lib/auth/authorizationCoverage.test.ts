@@ -28,6 +28,10 @@ const DIRECT = [
   ['resolvers.mutation.memoryTransfer.ts', 'transferMemoryOwnership'],
   ['resolvers.impersonation.ts', 'startImpersonation'],
   ['resolvers.mutation.app.ts', 'ensureAppMember'],
+  // #1573: the indirect authority writers, now anchored.
+  ['resolvers.mutation.app.ts', 'createApp'],
+  ['resolvers.mutation.app.ts', 'joinApp'],
+  ['resolvers.mutation.chat.ts', 'startChat'],
 ] as const;
 
 // These public mutations deliberately delegate to one shared implementation.
@@ -37,20 +41,16 @@ const DELEGATED = [
   ['resolvers.mutation.app.ts', 'addAgentToApp', 'installAgentIntoAppCore'],
 ] as const;
 
-// Related writes outside #1551's named grant-mutation scope. #1573 tracks the
-// createApp/startChat atomicity review. Keep these visible and count their
-// call sites so a new indirect writer changes this ratchet instead of silently
-// joining the exception.
+// Writes that look like grants but mint none. #1573 moved createApp and
+// startChat out of this list into DIRECT (anchored). Keep the count, so a new
+// indirect writer changes this ratchet instead of silently joining it.
 const EXEMPT = [
   { file: 'resolvers.mutation.org.ts', name: 'inviteUser', callee: 'ctx.db.userInvitation.create', count: 1,
     why: 'A referral invitation has no organization and cannot mint an OrgMember.' },
-  { file: 'resolvers.mutation.app.ts', name: 'createApp', callee: 'ensureAgentOrgGrant', count: 1,
-    why: 'Primary and dependency licenses are incidental to new-App creation, outside the named grant mutations.' },
-  { file: 'resolvers.mutation.app.ts', name: 'createApp', callee: 'ensureAgentSubscription', count: 1,
-    why: 'Personal-App auto-license is an incidental createApp side effect.' },
-  { file: 'resolvers.mutation.chat.ts', name: 'startChat', callee: 'ensureAgentSubscription', count: 1,
-    why: 'Legacy chat startup auto-provisions a license; the session workflow needs its own atomicity review.' },
 ] as const;
+
+// #1573: App-scoped memory writers delegate to ONE anchored helper.
+const APP_MEMORY_DELEGATED = ['createMemoryInApp', 'attachMemoryToApp'] as const;
 
 function mutationBody(file: string, name: string): ts.Node {
   const path = `src/api/graphql/schema/${file}`;
@@ -102,6 +102,15 @@ describe('#1551 authority writer ratchet', () => {
       helper.indexOf('export async function uninstallAgentFromAppCore'))).toContain('withAuthorizedTx(');
   });
 
+  it('App-scoped memory writers go through the one anchored helper (#1573)', () => {
+    const missing = APP_MEMORY_DELEGATED.filter((name) =>
+      !calls(mutationBody('resolvers.mutation.appMemory.ts', name), 'withAppMemoryAuthorityTx'));
+    expect(missing).toEqual([]);
+    const src = readFileSync('src/api/graphql/schema/resolvers.mutation.appMemory.ts', 'utf8');
+    const helper = src.slice(src.indexOf('async function withAppMemoryAuthorityTx'), src.indexOf('export const appMemoryMutations'));
+    expect(helper).toContain('withAuthorizedTx(');
+  });
+
   it('out-of-scope indirect grant writers have an explicit, current inventory', () => {
     for (const exception of EXEMPT) {
       expect(exception.why.length).toBeGreaterThan(20);
@@ -110,7 +119,7 @@ describe('#1551 authority writer ratchet', () => {
     }
     const expectedByFile = new Map([
       ['resolvers.mutation.agent.ts', 1],
-      ['resolvers.mutation.app.ts', 2],
+      ['resolvers.mutation.app.ts', 3],
       ['resolvers.mutation.chat.ts', 1],
       ['resolvers.helpers.ts', 2],
     ]);

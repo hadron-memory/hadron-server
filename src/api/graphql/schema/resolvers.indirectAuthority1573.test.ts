@@ -190,3 +190,54 @@ describe('#1573: App-scoped memory writes are fenced by the App revokers', () =>
     expect((await db.memory.findUniqueOrThrow({ where: { id: personal.id } })).appId).toBeNull();
   });
 });
+
+describe('#1573: createApp licenses and installs under its revokers\' anchors', () => {
+  it('an org ADMIN whose membership is being removed cannot finish creating an App', async () => {
+    const creator = await mkUser(9);
+    await db.orgMember.create({ data: { organizationId: org.id, userId: creator.id, role: 'ADMIN' } });
+    const holder = await hold(async (tx) => {
+      await lockAuthorityAnchors(tx, [{ kind: 'org', id: org.id }], 'exclusive');
+      await tx.orgMember.updateMany({ where: { organizationId: org.id, userId: creator.id }, data: { deletedAt: new Date() } });
+    });
+    const create = M.createApp(null, { orgRef: org.id, name: 'Late App', agentRef: agent.id }, ctxFor(creator.id));
+    try {
+      await waitForLockWaitersOfType(db, 'advisory', 1);
+    } finally {
+      holder.release();
+      await holder.done;
+    }
+    await expect(create).rejects.toBeTruthy();
+    expect(await db.app.count({ where: { name: 'Late App' } })).toBe(0);
+  });
+
+  it('a cross-org license being revoked stops the install: no App, no fresh grant', async () => {
+    const vendor = await db.organization.create({ data: { id: generateId(), name: 'v1573', urn: 'v1573.example' } });
+    const vendorAgent = await db.agent.create({ data: {
+      id: generateId(), organizationId: vendor.id, urn: `${vendor.urn}:va`, name: 'vendor agent', visibility: 'ORGANIZATION',
+    } as never });
+    await db.agentOrgGrant.create({ data: { orgId: org.id, agentId: vendorAgent.id, activatedAt: new Date() } });
+    const holder = await hold(async (tx) => {
+      await lockAuthorityAnchors(tx, [{ kind: 'agent', id: vendorAgent.id }], 'exclusive');
+      await tx.agentOrgGrant.update({
+        where: { orgId_agentId: { orgId: org.id, agentId: vendorAgent.id } }, data: { revokedAt: new Date() },
+      });
+    });
+    const create = M.createApp(null, { orgRef: org.id, name: 'Vendor App', agentRef: vendorAgent.id }, ctxFor(admin.id, ['ADMIN']));
+    try {
+      await waitForLockWaitersOfType(db, 'advisory', 1);
+    } finally {
+      holder.release();
+      await holder.done;
+    }
+    await expect(create).rejects.toBeTruthy();
+    expect(await db.app.count({ where: { name: 'Vendor App' } })).toBe(0);
+    const grant = await db.agentOrgGrant.findUniqueOrThrow({ where: { orgId_agentId: { orgId: org.id, agentId: vendorAgent.id } } });
+    expect(grant.revokedAt).not.toBeNull();
+  });
+
+  it('CONTROL: an org ADMIN creates an App for an own-org Agent; the grant and install land together', async () => {
+    const created = await M.createApp(null, { orgRef: org.id, name: 'Fine App', agentRef: agent.id }, ctxFor(admin.id, ['ADMIN']));
+    expect(await db.appAgent.count({ where: { appId: created.id, agentId: agent.id } })).toBe(1);
+    expect(await db.agentOrgGrant.count({ where: { orgId: org.id, agentId: agent.id, revokedAt: null } })).toBe(1);
+  });
+});
