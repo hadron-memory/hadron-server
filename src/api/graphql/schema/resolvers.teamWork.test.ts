@@ -473,6 +473,72 @@ describe('recordTeamWork — storage, governance, and races', () => {
 });
 
 describe('teamWorkItems — the provenance read surface', () => {
+  it('ownerless repo-number refs find every matching owner without changing qualified lookups', async () => {
+    await record(ctx(contrib.id), { ref: 'hadron-memory/hadron-cli#793' });
+    await record(ctx(contrib.id), { ref: 'other/cli#793' });
+    await record(ctx(contrib.id), { ref: 'other/clip#793' });
+    await record(ctx(contrib.id), { ref: 'other/cli#1793' });
+    await record(ctx(contrib.id), { kind: 'repo', ref: 'hadron-memory/hadron-cli' });
+
+    const tail = await items(ctx(contrib.id), { ref: 'cli#793' });
+    expect(tail.total).toBe(2);
+    expect(new Set(tail.items.map((item: { ref: string }) => item.ref))).toEqual(
+      new Set(['hadron-memory/hadron-cli#793', 'other/cli#793']),
+    );
+    expect((await items(ctx(contrib.id), { ref: 'hadron-cli#793' })).total).toBe(1);
+    expect((await items(ctx(contrib.id), { ref: 'other/cli#793' })).total).toBe(1);
+    expect((await items(ctx(contrib.id), { ref: '#793' })).total).toBe(0);
+    expect((await items(ctx(contrib.id), { ref: '793' })).total).toBe(0);
+    expect((await items(ctx(contrib.id), { ref: 'cli', kind: 'repo' })).total).toBe(1);
+
+    const page = await items(ctx(contrib.id), { ref: 'cli#793', limit: 1, offset: 1 });
+    expect(page.total).toBe(2);
+    expect(page.items).toHaveLength(1);
+    expect(await items(ctx(contrib.id), { ref: 'cli#793', limit: 0 })).toEqual({ items: [], total: 2 });
+  });
+
+  it('ownerless suffixes are literal, tool-aware, and limited to the canonical worklog', async () => {
+    await record(ctx(contrib.id), { ref: 'one/cli_#793' });
+    await record(ctx(contrib.id), { ref: 'two/cliX#793' });
+    await record(ctx(contrib.id), { tool: 'jira', kind: 'issue', ref: 'cli_#793' });
+
+    expect((await items(ctx(contrib.id), { ref: 'cli_#793', tool: 'github' })).total).toBe(1);
+    expect((await items(ctx(contrib.id), { ref: 'cli_#793', tool: 'jira' })).total).toBe(1);
+    expect((await items(ctx(contrib.id), { ref: 'cli_#793' })).total).toBe(2);
+    expect((await items(ctx(contrib.id), { ref: 'cli_#793', kind: 'repo' })).total).toBe(0);
+
+    const otherMemory = await db.memory.create({
+      data: {
+        id: generateId(),
+        name: 'other shared',
+        urn: `${org.urn}:other-shared-${generateId().slice(-6)}`,
+        class: 'app',
+        appId: app.id,
+        organizationId: org.id,
+      },
+    });
+    await db.node.create({
+      data: {
+        id: generateId(),
+        memoryId: otherMemory.id,
+        loc: `worklog:stray-${generateId().slice(-6)}`,
+        name: 'stray',
+        nodeType: 'record',
+        objectType: WORKLOG_OBJECT_TYPE,
+        properties: {
+          sessionId: contribSession.id,
+          workerName: 'stray',
+          tool: 'github',
+          kind: 'pr',
+          ref: 'outside/cli_#793',
+          action: 'opened',
+          at: new Date().toISOString(),
+        },
+      },
+    });
+    expect((await items(ctx(contrib.id), { ref: 'cli_#793', tool: 'github' })).total).toBe(1);
+  });
+
   it('acceptance: a pr record is found by EVERY accepted spelling and resolves to the session + transcript', async () => {
     await record(ctx(contrib.id), { ref: 'https://github.com/Acme/Widgets/pull/371', detail: { title: 'Add widgets' } });
 
@@ -729,6 +795,19 @@ describe('teamWorkItems — the workerRef filter (#1035)', () => {
     }
     return { worker, session };
   }
+
+  it('composes ownerless suffix paging with worker, session, tool, and kind filters', async () => {
+    const iris = await workerWithRecords('Iris', 'iris', ['one/hadron-cli#793', 'two/cli#793']);
+    await workerWithRecords('Henry', 'henry', ['three/cli#793']);
+
+    const page = await items(ctx(contrib.id), {
+      ref: 'cli#793', workerRef: iris.worker.id, sessionRef: iris.session.id,
+      tool: 'github', kind: 'pr', limit: 1, offset: 1,
+    });
+    expect(page.total).toBe(2);
+    expect(page.items).toHaveLength(1);
+    expect(['one/hadron-cli#793', 'two/cli#793']).toContain(page.items[0].ref);
+  });
 
   it('returns only that worker\'s records — across ALL their sessions, with a correct total', async () => {
     const iris = await workerWithRecords('Iris', 'iris', ['o/r#1', 'o/r#2']);

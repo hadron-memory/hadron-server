@@ -34,6 +34,7 @@
 // the generic node-write surface stays open (off-road writes are legal and,
 // once the schema is declared, are themselves held to it by the #725 seam).
 import { GraphQLError } from 'graphql';
+import { Prisma } from '../../../generated/prisma/index.js';
 import type { InputJsonValue } from '../../../generated/prisma/runtime/library.js';
 import { generateId } from '../../../lib/id.js';
 import { lockAncestorsForCreateMany } from '../../../lib/nodeSubtreeLock.js';
@@ -49,6 +50,7 @@ import {
   WORK_KINDS,
   type WorkKind,
   normalizeWorkRef,
+  parseOwnerlessWorkRef,
   parseWorkRef,
   WorkRefInvalidError,
 } from '../../../lib/workRef.js';
@@ -867,9 +869,11 @@ export const teamWorkQueries = {
   /**
    * #947 — the provenance read surface: worklog records of a team App, newest
    * first, as a uniform `{ items, total }` page (conventions:
-   * uniform-read-surface; limit 0 = count-only). `ref` is normalized before
-   * matching (accept every spelling, match canonical — a spelling that fits no
-   * github form matches verbatim, covering non-github tools); `sessionRef` /
+   * uniform-read-surface; limit 0 = count-only). Qualified `ref` is normalized
+   * before matching; an ownerless github ref matches every canonical repo
+   * whose name ends with its slug, within this App's worklog (#1554). A
+   * spelling that fits neither form matches verbatim for non-github tools.
+   * `sessionRef` /
    * `tool` / `kind` are equality filters. This is hadron-cli's
    * `team session list --pr <ref>` engine: worklog-by-ref → sessionIds →
    * sessions (with transcripts).
@@ -931,14 +935,20 @@ export const teamWorkQueries = {
     // lowercased into never matching). tool 'github' ⇒ match canonical;
     // another tool ⇒ match verbatim; no tool ⇒ match EITHER spelling. A read
     // filter never throws WORK_REF_INVALID — an unmatched spelling is simply
-    // an empty page.
+    // an empty page. #1554: an ownerless github spelling is a read-only suffix
+    // filter over this App's worklog; it may match several owners. Stored refs
+    // remain canonical, and no single repository is inferred.
     const propEq = (key: string, value: string) => ({
       properties: { path: [key], equals: value },
     });
     let refClause: Record<string, unknown> | undefined;
+    let ownerless: ReturnType<typeof parseOwnerlessWorkRef> = null;
+    let verbatimRef: string | undefined;
     if (ref != null && ref.trim() !== '') {
       const verbatim = ref.trim();
+      verbatimRef = verbatim;
       const canonical = parseWorkRef(verbatim)?.ref;
+      ownerless = canonical === undefined ? parseOwnerlessWorkRef(verbatim) : null;
       const candidates =
         toolFilter === 'github'
           ? [canonical ?? verbatim]
@@ -1021,6 +1031,58 @@ export const teamWorkQueries = {
       workerIdFilter = resolved;
     }
 
+    const take = clampListTake(limit);
+    const skip = Math.max(0, offset ?? 0);
+    if (ownerless && verbatimRef && (toolFilter === undefined || toolFilter === 'github')) {
+      // #1554: keep the suffix predicate in BOTH SQL queries. Materializing
+      // matching IDs first makes even a count-only read grow with the entire
+      // append-only worklog (Codex P2 on #1556). RIGHT is literal: Prisma's
+      // JSON string_ends_with uses LIKE, where '_' in a repo is a wildcard.
+      // The anchored shape rejects branch tails and malformed off-road refs;
+      // the accepted shapes mirror parseWorkRef's owner/repo grammar.
+      const ownerRepoShape = '[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?/[A-Za-z0-9._-]+';
+      const refShape = ownerless.kinds.includes('pr')
+        ? `^${ownerRepoShape}#[1-9][0-9]*$`
+        : ownerless.kinds.includes('commit')
+          ? `^${ownerRepoShape}@[0-9a-fA-F]{7,40}$`
+          : ownerless.kinds.includes('branch')
+            ? `^${ownerRepoShape}:[^[:space:]:]+$`
+            : `^${ownerRepoShape}$`;
+      const scoped = Prisma.sql`
+        FROM nodes n
+        WHERE n.deleted_at IS NULL
+          AND n.object_type = ${WORKLOG_OBJECT_TYPE}
+          AND n.memory_id = ${root.memoryId}
+          AND (
+            n.properties->>'ref' = ${verbatimRef}
+            OR (n.properties->>'tool' = 'github'
+              AND right(n.properties->>'ref', length(${ownerless.ref})) = ${ownerless.ref}
+              AND n.properties->>'ref' ~ ${refShape})
+          )
+          ${sessionRef != null && sessionRef !== '' ? Prisma.sql`AND n.properties->>'sessionId' = ${sessionRef}` : Prisma.empty}
+          ${workerIdFilter !== undefined ? Prisma.sql`AND n.properties->>'workerId' = ${workerIdFilter}` : Prisma.empty}
+          ${toolFilter !== undefined ? Prisma.sql`AND n.properties->>'tool' = ${toolFilter}` : Prisma.empty}
+          ${kind != null ? Prisma.sql`AND n.properties->>'kind' = ${kind}` : Prisma.empty}
+      `;
+      const [{ total: rawTotal }] = await ctx.db.$queryRaw<Array<{ total: bigint }>>(
+        Prisma.sql`SELECT count(*) AS total ${scoped}`,
+      );
+      const total = Number(rawTotal);
+      if (take === 0) return { items: [], total };
+      const rows = await ctx.db.$queryRaw<Array<WorkRow & { loc: string }>>(
+        Prisma.sql`SELECT n.id, n.loc, n.properties, n.created_at AS "createdAt"
+          ${scoped} ORDER BY n.created_at DESC, n.id DESC
+          OFFSET ${skip}::bigint LIMIT ${take}::int`,
+      );
+      recordNodeUsage(
+        ctx.db,
+        'read',
+        rows.map((r) => ({ id: r.id, loc: r.loc, memoryId: root.memoryId })),
+        ctx,
+      );
+      return { items: rows.map(projectWorkItem), total };
+    }
+
     const where = {
       deletedAt: null,
       objectType: WORKLOG_OBJECT_TYPE,
@@ -1037,8 +1099,6 @@ export const teamWorkQueries = {
       ],
     };
 
-    const take = clampListTake(limit);
-    const skip = Math.max(0, offset ?? 0);
     const total = await ctx.db.node.count({ where });
     if (take === 0) return { items: [], total };
     const rows = await ctx.db.node.findMany({

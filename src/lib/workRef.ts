@@ -151,6 +151,16 @@ export function parseWorkRef(raw: string): ParsedWorkRef | null {
   return BRANCH_RE.test(tail) ? { ref: `${or}:${tail}`, kinds: ['branch'] } : null;
 }
 
+/** Read-filter-only spelling with no owner. It identifies a suffix, never a
+ * canonical ref: several repositories may match it. Bare numbers stay invalid
+ * because they contain no repository hint at all. */
+export function parseOwnerlessWorkRef(raw: string): ParsedWorkRef | null {
+  const input = raw.trim();
+  if (input === '' || input.includes('/') || NUMBER_RE.test(input)) return null;
+  const parsed = parseWorkRef(`x/${input}`);
+  return parsed ? { ref: parsed.ref.slice(2), kinds: parsed.kinds } : null;
+}
+
 /**
  * Normalize a github work ref to its ONE canonical spelling, checking it
  * against the declared artifact kind. Throws {@link WorkRefInvalidError} when

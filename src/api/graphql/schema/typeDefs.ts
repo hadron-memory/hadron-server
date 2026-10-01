@@ -7150,9 +7150,12 @@ export const typeDefs = `#graphql
     { items, total } page. ref accepts ANY accepted spelling (URL, short form,
     canonical) and is matched tool-awarely: with tool 'github' (or none) it is
     normalized, so 'https://github.com/o/r/pull/371' and 'o/r#371' return the
-    same records; with another tool it matches the stored verbatim ref; with
-    no tool it matches either spelling. sessionRef / tool / kind are equality
-    filters; kind must be one of pr, issue, commit, branch, repo when given.
+    same records. An ownerless github ref such as cli#793 matches every
+    readable canonical ref whose repository ends in cli and number is 793;
+    it never selects one owner. With another tool ref matches the stored
+    verbatim spelling; with no tool it matches either. sessionRef / tool / kind
+    are equality filters; kind must be one of pr, issue, commit, branch, repo
+    when given.
     limit defaults to 50 (cap 200); limit: 0 returns only total.
 
     Authorization: an AppMember of the App (any role), an org member with
