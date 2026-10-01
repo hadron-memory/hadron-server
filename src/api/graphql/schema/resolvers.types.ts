@@ -75,6 +75,8 @@ import { memoryRowToRef, agentRowToRef } from './publicRefs.js';
 import { WORKLOG_LOC } from './resolvers.teamWork.js';
 import { corpusStateOf } from '../../../lib/specCorpus.js';
 import { LIVE_ORG_MEMBERSHIP } from '../../../lib/auth/liveOrgMembership.js';
+import { isSessionLive, loadLastEventBySession } from '../../../lib/sessionActivity.js';
+import type { SessionType } from '../../../generated/prisma/index.js';
 
 /**
  * #757 — a Prisma `where` fragment selecting the Agents this caller may read,
@@ -672,6 +674,30 @@ async function flushValidationBatch(
   } catch (error) {
     for (const item of pending) item.reject(error);
   }
+}
+
+
+/**
+ * hadron-cli#791 — the latest attributed usage event for a session, batched
+ * per request: every `Session.isLive` resolved in the same tick shares ONE
+ * grouped query. The repo has no DataLoader; GraphQL invokes a list's item
+ * resolvers synchronously, so the whole page joins the batch before the
+ * microtask that runs it.
+ */
+const lastEventBatches = new WeakMap<object, { ids: Set<string>; result: Promise<Map<string, Date | null>> }>();
+function lastEventAtBatched(ctx: Context, sessionId: string): Promise<Date | null | undefined> {
+  let batch = lastEventBatches.get(ctx);
+  if (!batch) {
+    const ids = new Set<string>();
+    const result = Promise.resolve().then(() => {
+      lastEventBatches.delete(ctx);
+      return loadLastEventBySession(ctx.db as never, [...ids]);
+    });
+    batch = { ids, result };
+    lastEventBatches.set(ctx, batch);
+  }
+  batch.ids.add(sessionId);
+  return batch.result.then((byId) => byId.get(sessionId));
 }
 
 export const typeResolvers = {
@@ -1742,6 +1768,41 @@ export const typeResolvers = {
   },
   Session: {
     outcomeMeta: (session: { outcomeMeta: unknown }) => deserializeJson(session.outcomeMeta),
+    /**
+     * hadron-cli#791: the exact per-session form of the shared liveness
+     * predicate (`isSessionLive`, cor:agt:020:11), so a client can tell a
+     * LIVE binding from a lapsed one without re-deriving the rule. No new
+     * read surface: it resolves only on a Session the caller already read,
+     * from columns that are readable on it. The last-event lookup is batched
+     * per request, so a session list costs one grouped query, not one per row.
+     */
+    isLive: async (
+      s: {
+        id: string;
+        type?: SessionType;
+        startedAt?: Date;
+        updatedAt?: Date | null;
+        autoExpiredAt?: Date | null;
+        endedAt?: Date | null;
+        deletedAt?: Date | null;
+      },
+      _: unknown,
+      ctx: Context,
+    ) => {
+      const row = s.type && s.startedAt && s.deletedAt !== undefined
+        ? s
+        : await ctx.db.session.findUnique({
+            where: { id: s.id },
+            select: { id: true, type: true, startedAt: true, updatedAt: true, autoExpiredAt: true, endedAt: true, deletedAt: true },
+          });
+      if (!row || !row.type || !row.startedAt) return false;
+      // A soft-deleted session drives nothing (Codex-worker P2 on #1547): the
+      // bind gate and Worker.hasLiveSession both exclude it, and isLive must
+      // agree with them even where a Session read can still return the row.
+      if (row.endedAt || row.deletedAt) return false;
+      const lastEventAt = await lastEventAtBatched(ctx, row.id);
+      return isSessionLive(row as Parameters<typeof isSessionLive>[0], lastEventAt, new Date());
+    },
     /**
      * #980: the bound Worker, nested — prefers the eager row SESSION_INCLUDE
      * loads (the one-query list path; no DataLoader in this repo) and falls
