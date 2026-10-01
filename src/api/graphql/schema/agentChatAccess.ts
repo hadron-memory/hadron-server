@@ -1,6 +1,7 @@
 import type { Context } from './resolvers.helpers.js';
 import { isAuthorizationDenial, requireOwnerOrOrgRole } from './resolvers.helpers.js';
 import { activeAppInstallLicenseIdsForAgent, isAgentInstalledAndLicensed } from '../../../lib/appAgent.js';
+import type { AuthorityAnchor } from '../../../lib/auth/authorityAnchors.js';
 
 /** The Agent columns {@link canChatWithAgent} decides from. */
 export interface ChatAgentRow {
@@ -107,4 +108,51 @@ export async function appKeySessionMatchesAgent(ctx: Context, agentId: string): 
     select: { appId: true, agentId: true },
   });
   return session !== null && session.appId === ctx.appId && session.agentId === agentId;
+}
+
+/**
+ * The authority anchors a chat start must hold (#1573; Atilla's anchor-set
+ * review): every source `canChatWithAgent` can admit, so no revoker of any of
+ * them can return while the new subscription is still about to commit.
+ *
+ * - the Agent, and the subscription's TARGET user (an App key has no actor
+ *   user for `withAuthorizedTx` to add);
+ * - the Agent's owner (org or user), which a direct read right comes from;
+ * - each LIVE App that can carry the right, plus its owner: the calling App
+ *   for a pure App key, or for a user every live App they are a member of
+ *   that installs the Agent (the AppMember path).
+ *
+ * Only live Apps are anchored, because `withAuthorizedTx` refuses a deleted
+ * App among its anchors; the gate re-runs on the transaction afterwards.
+ */
+export async function chatAuthorityAnchors(
+  ctx: Context,
+  agent: { id: string; organizationId: string | null; ownerUserId: string | null },
+  subjectUserId: string | null,
+): Promise<AuthorityAnchor[]> {
+  const anchors: AuthorityAnchor[] = [{ kind: 'agent', id: agent.id }];
+  if (subjectUserId) anchors.push({ kind: 'user', id: subjectUserId });
+  if (agent.organizationId) anchors.push({ kind: 'org', id: agent.organizationId });
+  if (agent.ownerUserId) anchors.push({ kind: 'user', id: agent.ownerUserId });
+
+  const appIds = ctx.appId && !ctx.userId
+    ? [ctx.appId]
+    : ctx.userId
+      ? (await ctx.db.appMember.findMany({
+          where: { userId: ctx.userId, app: { appAgents: { some: { agentId: agent.id } } } },
+          select: { appId: true },
+        })).map((m) => m.appId)
+      : [];
+  if (appIds.length > 0) {
+    const apps = await ctx.db.app.findMany({
+      where: { id: { in: appIds }, deletedAt: null, uninstalledAt: null },
+      select: { id: true, organizationId: true, ownerUserId: true },
+    });
+    for (const app of apps) {
+      anchors.push({ kind: 'app', id: app.id });
+      if (app.organizationId) anchors.push({ kind: 'org', id: app.organizationId });
+      if (app.ownerUserId) anchors.push({ kind: 'user', id: app.ownerUserId });
+    }
+  }
+  return anchors;
 }

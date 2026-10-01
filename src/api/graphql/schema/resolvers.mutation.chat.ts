@@ -28,7 +28,8 @@ import { buildPrismaMemoryLayer } from '../../../lib/edge-conditions/prisma-memo
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { AgentNotFoundError, UserNotFoundError } from '../../../lib/entityRef/errors.js';
 import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
-import { appKeyMayActFor, appKeySessionMatchesAgent, canChatWithAgent } from './agentChatAccess.js';
+import { appKeyMayActFor, appKeySessionMatchesAgent, canChatWithAgent, chatAuthorityAnchors } from './agentChatAccess.js';
+import { withAuthorizedTx } from './authorizedTx.js';
 import { activeAppInstallLicenseIdsForAgent, isAgentInstalledAndLicensed } from '../../../lib/appAgent.js';
 import { GraphQLError } from 'graphql';
 import { type InputJsonValue } from '../../../generated/prisma/runtime/library.js';
@@ -545,7 +546,34 @@ export const chatMutations = {
       // #1061 — the ids are minted inside the transaction; collected here so
       // the writes are recorded only after it commits.
       const startedNodes: { id: string; loc: string; memoryId: string }[] = [];
-      await ctx.db.$transaction(async (tx) => {
+      // #1573: the gate and the license write commit together under every
+      // authority anchor the gate can admit through (chatAuthorityAnchors),
+      // the keys revokeAgentSubscription / removeAppMember / deleteApp /
+      // uninstall / org-role changes hold exclusively. The gate re-runs on the
+      // transaction after the anchor wait.
+      const chatAnchors = await chatAuthorityAnchors(
+        ctx, gateRow, effectiveUserId !== 'anonymous' ? effectiveUserId : null,
+      );
+      await withAuthorizedTx(ctx, chatAnchors, async (txCtx) => {
+        const current = await txCtx.db.agent.findUnique({
+          where: { id: resolvedAgentId },
+          select: { id: true, organizationId: true, ownerUserId: true, visibility: true, deletedAt: true },
+        });
+        if (
+          !current ||
+          current.organizationId !== gateRow.organizationId ||
+          current.ownerUserId !== gateRow.ownerUserId ||
+          !(await canChatWithAgent(txCtx, current))
+        ) {
+          throw new AgentNotFoundError(agentId);
+        }
+        if (pureAppKey && !(await appKeySessionMatchesAgent(txCtx, resolvedAgentId))) {
+          throw new AgentNotFoundError(agentId);
+        }
+        if (actingUserId != null && actingUserId !== ctx.userId && !(await appKeyMayActFor(txCtx, actingUserId))) {
+          throw new UserNotFoundError(actingUserId);
+        }
+      }, async (tx) => {
         // 005-agent-subscription FR-002: auto-provision an AgentSubscription
         // on the first user-attributed contact for (user, agent). Idempotent.
         // Skip for the "anonymous" sentinel — there is no User row.

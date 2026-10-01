@@ -19,6 +19,8 @@ import { cleanDb } from '../../../test/helpers.js';
 import { resolvers, type Context } from './resolvers.js';
 import { generateId } from '../../../lib/id.js';
 import { canChatWithAgent } from './agentChatAccess.js';
+import { lockAuthorityAnchors } from '../../../lib/auth/authorityAnchors.js';
+import { waitForLockWaitersOfType } from '../../../test/lockWait.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -308,5 +310,55 @@ describe('#1581: canChatWithAgent for a pure App key', () => {
   it('refuses an anonymous caller and a soft-deleted Agent', async () => {
     expect(await canChatWithAgent({ db } as Context, agent)).toBe(false);
     expect(await canChatWithAgent(userCtx(member.id), { ...agent, deletedAt: new Date() })).toBe(false);
+  });
+});
+
+// #1573: the chat start's gate and license write commit under every
+// authority anchor the gate can admit through. A revoker holding one of them
+// exclusively cannot return while the license is about to commit, and after
+// it commits the re-run gate refuses.
+describe('#1573: startChat waits for an in-flight revocation of its read right', () => {
+  /** Hold an exclusive anchor and apply `revoke` uncommitted until released. */
+  async function holdRevocation(anchor: { kind: 'org' | 'app'; id: string }, revoke: (tx: any) => Promise<unknown>) {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    let held!: () => void;
+    const isHeld = new Promise<void>((r) => { held = r; });
+    const done = db.$transaction(async (tx) => {
+      await lockAuthorityAnchors(tx, [anchor], 'exclusive');
+      await revoke(tx);
+      held();
+      await gate;
+    }, { timeout: 20_000 });
+    await isHeld;
+    return { release, done };
+  }
+
+  it('an org READER whose membership is being removed is refused after the removal commits', async () => {
+    const holder = await holdRevocation({ kind: 'org', id: orgA.id }, (tx) =>
+      tx.orgMember.updateMany({ where: { organizationId: orgA.id, userId: member.id }, data: { deletedAt: new Date() } }));
+    const chat = M.startChat(null, { agentId: agent.id }, userCtx(member.id));
+    try {
+      await waitForLockWaitersOfType(db, 'advisory', 1);
+    } finally {
+      holder.release();
+      await holder.done;
+    }
+    await expect(chat).rejects.toMatchObject({ name: 'AgentNotFoundError' });
+    expect(await subsFor(agent.id)).toEqual([]);
+  });
+
+  it('an App end user whose App membership is being removed is refused after the removal commits', async () => {
+    const holder = await holdRevocation({ kind: 'app', id: app.id }, (tx) =>
+      tx.appMember.delete({ where: { appId_userId: { appId: app.id, userId: endUser.id } } }));
+    const chat = M.startChat(null, { agentId: agent.id }, userCtx(endUser.id));
+    try {
+      await waitForLockWaitersOfType(db, 'advisory', 1);
+    } finally {
+      holder.release();
+      await holder.done;
+    }
+    await expect(chat).rejects.toMatchObject({ name: 'AgentNotFoundError' });
+    expect(await subsFor(agent.id)).toEqual([]);
   });
 });
