@@ -1181,7 +1181,8 @@ export const syncGraphFromGithub = async (
       // The memory's URN comes from the row fenced above, not the caller's
       // possibly stale `graph`. A draft corpus has no published URNs to retain;
       // its source moves are the rule's sole exception. The mirror root has no
-      // round-trippable v2 node URN.
+      // round-trippable v2 node URN to alias *from*, but a published non-root
+      // address still needs an alias when its node moves *into* the root.
       if (!memoryState.corpusDraft && originalLocs.size > 0) {
         const survivors = await tx.node.findMany({
           where: { id: { in: [...originalLocs.keys()] }, memoryId: graph.id, deletedAt: null },
@@ -1189,7 +1190,7 @@ export const syncGraphFromGithub = async (
         });
         for (const row of survivors) {
           const originalLoc = originalLocs.get(row.id)!;
-          if (!originalLoc || !row.loc || originalLoc === row.loc) continue;
+          if (!originalLoc || originalLoc === row.loc) continue;
           await recordUrnRename(tx, {
             entityType: 'NODE',
             entityId: row.id,

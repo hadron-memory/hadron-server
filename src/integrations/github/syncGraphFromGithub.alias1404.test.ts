@@ -1,7 +1,7 @@
 /** #1404: Git mirror rewrites preserve only surviving node identities. */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { join } from 'path';
-import { mkdirSync, rmSync } from 'fs';
+import { mkdirSync, rmSync, writeFileSync } from 'fs';
 import { db } from '../db/client.js';
 import { deriveEdgeLoc } from '../../lib/edgeLoc.js';
 import { cleanDb, createDbOrgAndGraph, makeTmpDir, writeNodeFiles } from '../../test/helpers.js';
@@ -160,6 +160,19 @@ describe('#1404 Git-sync node aliases', () => {
     expect((await syncGraphFromGithub(graph)).error).toBeUndefined();
     expect((await aliasesFor(id)).map((alias) => alias.urn)).toEqual([`${currentUrn}:old`]);
     expect(await resolveNodeRef(db, `hrn:node:${currentUrn}:old`)).toEqual({ id });
+  });
+
+  it('retains a published old address when its node moves into the mirror root', async () => {
+    const id = 'aaaa1404000000000000000000000015';
+    file('old', id);
+    expect((await syncGraphFromGithub(graph)).error).toBeUndefined();
+    rmSync(join(repoRoot(), 'old'), { recursive: true });
+    writeFileSync(join(repoRoot(), 'README.md'), `---\nid: ${id}\nname: root\n---\n`);
+
+    expect((await syncGraphFromGithub(graph)).error).toBeUndefined();
+    expect(await db.node.findUniqueOrThrow({ where: { id } })).toMatchObject({ loc: '' });
+    expect((await aliasesFor(id)).map((alias) => alias.urn)).toEqual([`${graph.urn}:old`]);
+    expect(await resolveNodeRef(db, nodeUrn('old'))).toEqual({ id });
   });
 
   it('does not retain addresses moved while the source is a draft spec corpus', async () => {
