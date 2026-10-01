@@ -49,6 +49,7 @@ import {
   WORK_KINDS,
   type WorkKind,
   normalizeWorkRef,
+  parseOwnerlessWorkRef,
   parseWorkRef,
   WorkRefInvalidError,
 } from '../../../lib/workRef.js';
@@ -860,9 +861,11 @@ export const teamWorkQueries = {
   /**
    * #947 — the provenance read surface: worklog records of a team App, newest
    * first, as a uniform `{ items, total }` page (conventions:
-   * uniform-read-surface; limit 0 = count-only). `ref` is normalized before
-   * matching (accept every spelling, match canonical — a spelling that fits no
-   * github form matches verbatim, covering non-github tools); `sessionRef` /
+   * uniform-read-surface; limit 0 = count-only). Qualified `ref` is normalized
+   * before matching; an ownerless github ref matches every canonical repo
+   * whose name ends with its slug, within this App's worklog (#1554). A
+   * spelling that fits neither form matches verbatim for non-github tools.
+   * `sessionRef` /
    * `tool` / `kind` are equality filters. This is hadron-cli's
    * `team session list --pr <ref>` engine: worklog-by-ref → sessionIds →
    * sessions (with transcripts).
@@ -924,7 +927,9 @@ export const teamWorkQueries = {
     // lowercased into never matching). tool 'github' ⇒ match canonical;
     // another tool ⇒ match verbatim; no tool ⇒ match EITHER spelling. A read
     // filter never throws WORK_REF_INVALID — an unmatched spelling is simply
-    // an empty page.
+    // an empty page. #1554: an ownerless github spelling is a read-only suffix
+    // filter over this App's worklog; it may match several owners. Stored refs
+    // remain canonical, and no single repository is inferred.
     const propEq = (key: string, value: string) => ({
       properties: { path: [key], equals: value },
     });
@@ -932,6 +937,7 @@ export const teamWorkQueries = {
     if (ref != null && ref.trim() !== '') {
       const verbatim = ref.trim();
       const canonical = parseWorkRef(verbatim)?.ref;
+      const ownerless = canonical === undefined ? parseOwnerlessWorkRef(verbatim) : null;
       const candidates =
         toolFilter === 'github'
           ? [canonical ?? verbatim]
@@ -942,6 +948,22 @@ export const teamWorkQueries = {
         candidates.length === 1
           ? propEq('ref', candidates[0])
           : { OR: candidates.map((c) => propEq('ref', c)) };
+      if (ownerless && (toolFilter === undefined || toolFilter === 'github')) {
+        // RIGHT compares literal text. Prisma's JSON string_ends_with becomes
+        // LIKE, where a legal repository underscore would be a wildcard.
+        const suffixRows = await ctx.db.$queryRaw<Array<{ id: string; ref: string }>>`
+          SELECT id, properties->>'ref' AS ref FROM nodes
+          WHERE memory_id = ${root.memoryId}
+            AND deleted_at IS NULL
+            AND object_type = ${WORKLOG_OBJECT_TYPE}
+            AND properties->>'tool' = 'github'
+            AND right(properties->>'ref', length(${ownerless.ref})) = ${ownerless.ref}
+        `;
+        const matchingIds = suffixRows
+          .filter((row) => parseWorkRef(row.ref)?.kinds.some((k) => ownerless.kinds.includes(k)))
+          .map((row) => row.id);
+        refClause = { OR: [refClause, { id: { in: matchingIds } }] };
+      }
     }
 
     // #1035: filter by WORKER — "what has this worker done", which otherwise

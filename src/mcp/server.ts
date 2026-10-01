@@ -9931,9 +9931,9 @@ function ageOf(at: Date, now: Date = new Date()): string {
 
   server.tool(
     'hadron_team_work_items',
-    'Read the team App\'s worklog (#947) — the provenance query. Two directions: which sessions produced this PR/artifact (pass ref, in ANY accepted spelling — github URL, owner/repo#N, owner/repo@sha, owner/repo:branch, owner/repo — normalized before matching), and what has one WORKER done (pass worker, by name, id or URN — #1035; a retired worker still resolves, because retirement ends the casting, not the history). Newest first. Filter further by session, tool, or kind, and combine filters freely. Each item carries the sessionId; read the session for its transcript path.',
+    'Read the team App\'s worklog (#947) — the provenance query. Two directions: which sessions produced this PR/artifact (pass ref as a github URL or owner/repo#N, owner/repo@sha, owner/repo:branch, owner/repo; an ownerless cli#793 matches every readable repo whose name ends in cli, never guesses an owner), and what has one WORKER done (pass worker, by name, id or URN — #1035; a retired worker still resolves, because retirement ends the casting, not the history). Newest first. Filter further by session, tool, or kind, and combine filters freely. Each item carries the sessionId; read the session for its transcript path.',
     {
-      ref: z.string().optional().describe('The artifact to look up, in any accepted spelling (e.g. a PR URL or owner/repo#371).'),
+      ref: z.string().optional().describe('Artifact filter: a PR URL or owner/repo#371 matches canonically; an ownerless repo suffix such as cli#793 finds all matching GitHub repositories in this App.'),
       session: z.string().optional().describe('Filter to records of this session id.'),
       worker: z.string().optional().describe('Filter to ONE worker\'s records — its name ("Iris"), id, or URN. Everything that worker has done, across all of their sessions. A retired worker still resolves.'),
       tool: z.string().optional().describe('Filter by tool (e.g. "github").'),

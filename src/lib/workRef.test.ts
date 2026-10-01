@@ -6,7 +6,21 @@
  * never infers a repo).
  */
 import { describe, it, expect } from 'vitest';
-import { parseWorkRef, normalizeWorkRef, WorkRefInvalidError, type WorkKind } from './workRef.js';
+import { parseOwnerlessWorkRef, parseWorkRef, normalizeWorkRef, WorkRefInvalidError, type WorkKind } from './workRef.js';
+
+describe('parseOwnerlessWorkRef (#1554 read filter)', () => {
+  it('retains the artifact kind while normalizing only the repo suffix', () => {
+    expect(parseOwnerlessWorkRef('Hadron-CLI#793')).toEqual({ ref: 'hadron-cli#793', kinds: ['pr', 'issue'] });
+    expect(parseOwnerlessWorkRef('CLI')).toEqual({ ref: 'cli', kinds: ['repo'] });
+    expect(parseOwnerlessWorkRef('CLI:Feat-X')).toEqual({ ref: 'cli:Feat-X', kinds: ['branch'] });
+  });
+
+  it('requires a repo hint but no owner', () => {
+    for (const ref of ['793', '#793', 'owner/repo#793', 'cli#0', 'cli#bad', '']) {
+      expect(parseOwnerlessWorkRef(ref)).toBeNull();
+    }
+  });
+});
 
 describe('parseWorkRef / normalizeWorkRef (#947)', () => {
   // ── the accepted-spelling table ────────────────────────────────────────────
