@@ -11,7 +11,7 @@ import {
   type WebPollCondition,
 } from '../../webfetchClient.js';
 import { loadWebFetchAuthSecret } from '../secrets.js';
-import { isSecretOwnerType, type SecretOwnerType } from '../../secrets.js';
+import { isSecretOwnerType, SECRET_OWNER_TYPES, type SecretOwnerType } from '../../secrets.js';
 import { redactUrl } from '../../webUrl.js';
 import type { RunToolDef } from './types.js';
 import { coerceHeaders } from './webTools.js';
@@ -82,8 +82,13 @@ export const webPollStart: RunToolDef = {
       },
       credentialScope: {
         type: 'string',
-        enum: ['memory', 'app', 'user', 'org'],
-        description: 'Optional: resolve credentialName at exactly this scope instead of the cascade.',
+        // #1564: derived from the secret store's own owner list, so the
+        // advertised scopes can never drift from what it accepts again (the
+        // app/memory owners were removed by #696 and kept being offered here).
+        enum: [...SECRET_OWNER_TYPES],
+        description:
+          'Optional: resolve credentialName at exactly this scope instead of the cascade ' +
+          `(user, then org). One of: ${SECRET_OWNER_TYPES.join(', ')}.`,
       },
       headers: {
         type: 'object',
@@ -115,7 +120,7 @@ export const webPollStart: RunToolDef = {
     let credentialScope: SecretOwnerType | undefined;
     if (args.credentialScope != null) {
       if (!isSecretOwnerType(args.credentialScope)) {
-        throw new Error('web_poll_start: "credentialScope" must be one of memory, app, user, org.');
+        throw new Error(`web_poll_start: "credentialScope" must be one of ${SECRET_OWNER_TYPES.join(', ')}.`);
       }
       credentialScope = args.credentialScope;
     }
