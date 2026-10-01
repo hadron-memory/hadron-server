@@ -202,11 +202,48 @@ describe('family 1b — #1365: a mention-only nudge beyond the scan bound', () =
     return mira;
   }
 
+  /**
+   * Append a message whose content AND routing envelope are encrypted, as a
+   * real append into this encrypted memory stores them (Anne's #1559 note:
+   * the suite's `post()` keeps `data` plaintext), so this family exercises
+   * the decrypting scan rather than the plaintext fallback.
+   */
+  async function postEncrypted(body: string, options: { authorWorkerId?: string; mentions?: string[] } = {}) {
+    const enc = await getMemoryEncryptionInfo(db, channel.memoryId);
+    const fields = encryptNodeFields({
+      content: body,
+      data: {
+        mentions: options.mentions ?? [],
+        ...(options.authorWorkerId ? { authorWorkerId: options.authorWorkerId } : {}),
+      },
+    }, enc);
+    return appendChatMessage(
+      db,
+      { id: channel.chatRootNodeId, memoryId: channel.memoryId, loc: channel.loc },
+      enc,
+      async ({ tx, seq, msgNum }) => tx.node.create({
+        data: {
+          id: generateId(), memoryId: channel.memoryId, loc: `${channel.loc}:messages:${msgNum}`,
+          name: msgNum, nodeType: 'chat-message', seq, messageChannelId: channel.id,
+          content: fields.content ?? null, data: (fields.data ?? null) as object,
+        },
+      }),
+      { asChannel: true },
+    );
+  }
+
   /** Seven messages; Dara's own self-mention at seq 6, the only other mention of Dara at seq 7. */
   async function postLateMentionBacklog() {
-    for (let i = 0; i < 5; i++) await post(`filler ${i}`);
-    await post('@dara by Dara herself', { mentions: ['dara'], authorWorkerId: worker.id });
-    await post('@dara the only relevant mention', { mentions: ['dara'] });
+    for (let i = 0; i < 5; i++) await postEncrypted(`filler ${i}`);
+    await postEncrypted('@dara by Dara herself', { mentions: ['dara'], authorWorkerId: worker.id });
+    await postEncrypted('@dara the only relevant mention', { mentions: ['dara'] });
+    // The fixture is literal: no routing envelope is stored in plaintext.
+    const rows = await db.node.findMany({ where: { messageChannelId: channel.id }, select: { data: true, content: true } });
+    expect(rows).toHaveLength(7);
+    for (const row of rows) {
+      expect(JSON.stringify(row.data)).not.toContain('dara');
+      expect(row.content ?? '').not.toContain('dara');
+    }
   }
 
   it('surfaces the mention-only Worker whose only mention is past the first page, with exact counts for both Workers', async () => {
@@ -251,7 +288,7 @@ describe('family 1b — #1365: a mention-only nudge beyond the scan bound', () =
 
   it('CONTROL: without a mention a mention-only Worker carries no relevance, however long the backlog', async () => {
     await addMentionOnlyDaraAndMira();
-    for (let i = 0; i < 7; i++) await post(`filler ${i}`);
+    for (let i = 0; i < 7; i++) await postEncrypted(`filler ${i}`);
     const drained = await drainPages({}, { scanLimit: 2 });
     const dara = drained.items.find((i) => i.worker === worker.id);
     expect(dara?.lastRelevantSeq ?? null).toBeNull();
