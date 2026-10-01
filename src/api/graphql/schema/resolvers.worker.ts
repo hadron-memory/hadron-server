@@ -1762,9 +1762,9 @@ export async function composeWorkerPrompt(
   const authored = bound && worker.promptOverride ? `${bound}\n\n${worker.promptOverride}` : (worker.promptOverride ?? bound);
   // Spec 049 Phase 6: the register block is DERIVED data appended through the
   // one composition point (`renderDerivedBlocks`), never authored prompt text
-  // — evaluated for the reader, so a briefing says what THIS driver may read
-  // and post, and re-renders live like the rest.
-  const derived = renderDerivedBlocks(await resolveRegister(ctx.db, { attendee: { workerId: worker.id }, actor: ctx }));
+  // — evaluated for the Worker's durable holder, so an admin reading another
+  // Worker's briefing sees that Worker's standing, not the admin's.
+  const derived = renderDerivedBlocks(await resolveRegister(ctx.db, { attendee: { workerId: worker.id }, actor: ctx, accessActor: 'ATTENDEE' }));
   const text = !derived ? authored : authored ? `${authored}\n\n${derived}` : derived;
   // #1090 review (Andi, P2): stamp the render time AFTER the text exists. A
   // clock read taken up front could predate a concurrent template edit that

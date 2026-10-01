@@ -650,14 +650,14 @@ export const typeDefs = `#graphql
     EVERYONE
   }
 
-  "The Channel half of a register view row; the host memory's URN only when YOU may read it."
+  "The Channel half of a register view row; the host memory's URN only when the viewer may read it."
   type RegisterViewChannel {
     id: ID!
     name: String!
     kind: ChannelKind!
     loc: String!
     hostMemoryUrn: String
-    "The host memory's id — like the URN, only when YOU may read it."
+    "The host memory's id — like the URN, only when the viewer may read it."
     hostMemoryId: ID
     "The Channel's watermark — the highest seq issued, not a count."
     lastSeq: Int!
@@ -668,10 +668,10 @@ export const typeDefs = `#graphql
   """
   One row of an attendee's RESOLVED register (spec 049 §4.3): the winning
   register entry for a Channel (App › organization, Worker › Agent › everyone,
-  never unioned), the Channel's watermark, and the CALLER's real standing on
+  never unioned), the Channel's watermark, and the ATTENDEE's real standing on
   the host memory — canRead / canPost are the existing gates, the register
-  grants nothing. A row the caller cannot act on is returned with its reason,
-  never dropped.
+  grants nothing. A row the attendee cannot act on is returned with its reason,
+  never dropped. Host memory identifiers remain gated for the VIEWER.
   """
   type RegisterViewRow {
     entry: RegisterEntry!
@@ -680,7 +680,7 @@ export const typeDefs = `#graphql
     "Phase 7 — the attendee's cursor; null until read-state lands."
     lastSeenSeq: Int
     canRead: Boolean!
-    "Null when no actor could be evaluated (UNKNOWN_ACTOR in disclosure)."
+    "False for a Worker without an eligible driver (UNKNOWN_ACTOR); null only when no access subject was supplied."
     canPost: Boolean
     disclosure: RegisterDisclosure
     attendeeUrn: String

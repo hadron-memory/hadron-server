@@ -18,12 +18,11 @@
  * › everyone). Joined with the Channel's watermark (`lastSeq`,
  * `lastMessageAt`) and the attendee's read-state (Phase 7 — null until then).
  *
- * The register NEVER grants (D-008): `canRead` / `canPost` are the EXISTING
- * host-memory gates evaluated for the ACTOR (`getAccessibleMemoryIds`,
- * `requireMemoryWriteAccess`, `isAppParticipant`). An entry the actor cannot
- * act on is returned with S5's reason and the attendee's URN — watch-only,
- * never dropped (D11). No actor ⇒ `canPost` is `UNKNOWN_ACTOR`, not a guess.
- * The host memory is disclosed by URN only when the actor may read it (§8.2).
+ * The register NEVER grants (D-008): `canRead` / `canPost` use the EXISTING
+ * host-memory gates (`getAccessibleMemoryIds`, `requireMemoryWriteAccess`,
+ * `isAppParticipant`). Operational callers evaluate their authenticated actor;
+ * attendee-facing projections may supply a separate access subject. The host
+ * memory's identity is disclosed only when the VIEWER may read it (§8.2).
  */
 
 import type { Prisma, RegisterEntry } from '../generated/prisma/index.js';
@@ -75,7 +74,7 @@ export interface RegisterViewRow {
     name: string;
     kind: string;
     loc: string;
-    /** The host memory's URN — only when the actor may read it (§8.2); else null. */
+    /** The host memory's URN — only when the viewer may read it (§8.2); else null. */
     hostMemoryUrn: string | null;
     hostMemoryId: string | null;
     lastSeq: number;
@@ -85,9 +84,9 @@ export interface RegisterViewRow {
   /** Phase 7 — the attendee's cursor; null until read-state lands. */
   readState: { lastSeenSeq: number } | null;
   canRead: boolean;
-  /** `UNKNOWN` when no actor was supplied. */
+  /** `UNKNOWN` when no access subject was supplied. */
   canPost: boolean | 'UNKNOWN';
-  /** S5 — why the actor cannot act, when it cannot. */
+  /** S5 — why the access subject cannot act, when it cannot. */
   disclosure: RegisterDisclosure | null;
   attendeeUrn: string | null;
   /** The winning register row itself — what the GraphQL `entry` field serves. */
@@ -106,11 +105,11 @@ type EntryRow = RegisterEntry;
 async function attendeeColumns(
   db: Context['db'],
   attendee: RegisterAttendee,
-): Promise<{ workerId: string | null; agentId: string; appId: string; organizationId: string | null; attendeeUrn: string | null } | null> {
+): Promise<{ workerId: string | null; agentId: string; appId: string; organizationId: string | null; attendeeUrn: string | null; heldByUserId: string | null } | null> {
   if ('workerId' in attendee) {
     const w = await db.worker.findUnique({
       where: { id: attendee.workerId },
-      select: { id: true, agentId: true, appId: true, slug: true, app: { select: { urn: true, organizationId: true } } },
+      select: { id: true, agentId: true, appId: true, slug: true, heldByUserId: true, app: { select: { urn: true, organizationId: true } } },
     });
     if (!w) return null;
     let urn: string | null = null;
@@ -119,7 +118,7 @@ async function attendeeColumns(
     } catch {
       urn = null;
     }
-    return { workerId: w.id, agentId: w.agentId, appId: w.appId, organizationId: w.app.organizationId, attendeeUrn: urn };
+    return { workerId: w.id, agentId: w.agentId, appId: w.appId, organizationId: w.app.organizationId, attendeeUrn: urn, heldByUserId: w.heldByUserId };
   }
   // An Agent-in-App attendee EXISTS only as a live install: without the
   // AppAgent row the pair is fabricated, and resolving it would hand the
@@ -138,7 +137,37 @@ async function attendeeColumns(
     appId: attendee.appId,
     organizationId: app.organizationId,
     attendeeUrn: safeEmitEntityUrnV2('agent', agent.urn),
+    heldByUserId: null,
   };
+}
+
+/** A Worker has no credential: its durable holder is the driver to evaluate. */
+async function attendeeAccessActor(
+  db: Context['db'],
+  columns: NonNullable<Awaited<ReturnType<typeof attendeeColumns>>>,
+): Promise<{ actor: Context; unavailableReason: null } | { actor: null; unavailableReason: RegisterDisclosure }> {
+  if (!columns.workerId) return { actor: { db, appId: columns.appId }, unavailableReason: null };
+  if (!columns.heldByUserId) return { actor: null, unavailableReason: 'UNKNOWN_ACTOR' };
+  const holder = await db.user.findFirst({
+    where: { id: columns.heldByUserId, deletedAt: null },
+    select: { id: true, roles: true },
+  });
+  if (!holder) return { actor: null, unavailableReason: 'UNKNOWN_ACTOR' };
+  const actor: Context = { db, userId: holder.id, roles: holder.roles };
+  // A holder can lose participation while retaining independent access to a
+  // Channel. Then they cannot act AS this Worker even if they can read it as
+  // themselves (the same current-App gate as Worker cursor ownership, #1353).
+  const app = await db.app.findFirst({
+    where: { id: columns.appId, deletedAt: null, uninstalledAt: null },
+    select: { id: true, organizationId: true, ownerUserId: true },
+  });
+  if (!app || !(await isAppParticipant(actor, app))) {
+    // The holder is no longer an eligible Worker driver. No actor can be
+    // supplied for this projection; HOST/DRIVER_NOT_PARTICIPANT would claim
+    // something about the Channel's host App that may be false.
+    return { actor: null, unavailableReason: 'UNKNOWN_ACTOR' };
+  }
+  return { actor, unavailableReason: null };
 }
 
 /** Precedence: App › org; within an owner Worker › Agent › everyone. Lower is stronger. */
@@ -181,16 +210,18 @@ export async function collectRegisterRows(db: Context['db'], attendee: RegisterA
 
 export interface ResolveRegisterArgs {
   attendee: RegisterAttendee;
-  /** The principal acting — decides canRead / canPost. Absent ⇒ UNKNOWN_ACTOR on canPost. */
+  /** The authenticated viewer. Also decides canRead / canPost by default. */
   actor?: Context | null;
+  /** Display-only override; ATTENDEE resolves a Worker's holder or an Agent's App principal. */
+  accessActor?: Context | null | 'ATTENDEE';
   /** Rows already collected (a run's snapshot) — otherwise collected live. */
   rows?: EntryRow[];
 }
 
 /**
  * The attendee's register as a VIEW: one row per Channel, the watermark, and
- * the actor's real read/post standing on the host memory with S5's reason
- * when it cannot act. Null when the attendee does not exist.
+ * the access subject's real read/post standing on the host memory with S5's
+ * reason when it cannot act. Null when the attendee does not exist.
  */
 export async function resolveRegister(db: Context['db'], args: ResolveRegisterArgs): Promise<RegisterView | null> {
   const collected = args.rows
@@ -201,7 +232,13 @@ export async function resolveRegister(db: Context['db'], args: ResolveRegisterAr
     : await collectRegisterRows(db, args.attendee);
   if (!collected) return null;
   const { columns, rows } = collected;
-  const actor = args.actor ?? null;
+  const viewer = args.actor ?? null;
+  const attendeeAccess = args.accessActor === 'ATTENDEE'
+    ? await attendeeAccessActor(db, columns)
+    : null;
+  const actor: Context | null = args.accessActor === 'ATTENDEE'
+    ? attendeeAccess!.actor
+    : args.accessActor === undefined ? viewer : args.accessActor;
   const channelIds = [...new Set(rows.map((r) => r.channelId))];
   const channels = new Map(
     (
@@ -214,7 +251,8 @@ export async function resolveRegister(db: Context['db'], args: ResolveRegisterAr
       })
     ).map((c) => [c.id, c]),
   );
-  const accessible = actor ? await getAccessibleMemoryIds(actor) : null;
+  const viewerAccessible = viewer ? await getAccessibleMemoryIds(viewer) : null;
+  const accessible = actor === viewer ? viewerAccessible : actor ? await getAccessibleMemoryIds(actor) : null;
   // The two post-side gates, decided ONCE per host App and per host memory:
   // a register is unbounded and this runs on every briefing render, so the
   // N rows of one App must not cost N gate round trips (Copilot on PR #1167).
@@ -243,13 +281,17 @@ export async function resolveRegister(db: Context['db'], args: ResolveRegisterAr
     const c = channels.get(e.channelId);
     if (!c) continue;
     const canRead = !!actor && (accessible === null || accessible.includes(c.memoryId));
+    const viewerCanRead = !!viewer && (viewerAccessible === null || viewerAccessible.includes(c.memoryId));
     let canPost: boolean | 'UNKNOWN' = 'UNKNOWN';
     let disclosure: RegisterDisclosure | null = null;
     if (c.deletedAt) {
       disclosure = 'CHANNEL_DELETED';
-      canPost = actor ? false : 'UNKNOWN';
+      canPost = actor || args.accessActor === 'ATTENDEE' ? false : 'UNKNOWN';
     } else if (!actor) {
-      disclosure = 'UNKNOWN_ACTOR';
+      disclosure = attendeeAccess?.unavailableReason ?? 'UNKNOWN_ACTOR';
+      // An unheld Worker has no driver, so the attendee-facing projection
+      // reports false rather than an unevaluated posting capability.
+      if (args.accessActor === 'ATTENDEE') canPost = false;
     } else if (actor.impersonation) {
       canPost = false;
       disclosure = canRead ? 'IMPERSONATION' : 'HOST_MEMORY_NOT_READABLE';
@@ -291,8 +333,8 @@ export async function resolveRegister(db: Context['db'], args: ResolveRegisterAr
         // Both the URN and the id are disclosed under the canonical read gate
         // (§8.2): an unreadable host memory's primary key is as much an
         // existence oracle as its URN (Codex P1 on PR #1167).
-        hostMemoryUrn: canRead ? safeEmitEntityUrnV2('memory', c.memory.urn) : null,
-        hostMemoryId: canRead ? c.memoryId : null,
+        hostMemoryUrn: viewerCanRead ? safeEmitEntityUrnV2('memory', c.memory.urn) : null,
+        hostMemoryId: viewerCanRead ? c.memoryId : null,
         lastSeq: c.lastSeq,
         lastMessageAt: c.lastMessageAt,
         deleted: !!c.deletedAt,
@@ -402,9 +444,15 @@ export function describeDisclosure(d: RegisterDisclosure): string {
 export function renderDerivedBlocks(view: RegisterView | null): string {
   if (!view || view.rows.length === 0) return '';
   const lines = view.rows.map((r) => {
-    const where = r.channel.hostMemoryUrn ? `${r.channel.hostMemoryUrn}:${r.channel.loc}` : `${r.channel.loc} (host memory not readable to you)`;
-    const standing =
-      r.disclosure ? describeDisclosure(r.disclosure) : r.canPost === true ? 'read + post' : r.canPost === false ? 'read only' : 'read';
+    const where = r.channel.hostMemoryUrn ? `${r.channel.hostMemoryUrn}:${r.channel.loc}` : `${r.channel.loc} (host memory hidden from this viewer)`;
+    let standing: string;
+    if (r.disclosure === 'UNKNOWN_ACTOR' && r.canPost === false) {
+      standing = 'no eligible driver (read + post unavailable)';
+    } else if (r.disclosure) {
+      standing = describeDisclosure(r.disclosure);
+    } else {
+      standing = r.canPost === true ? 'read + post' : r.canPost === false ? 'read only' : 'read';
+    }
     const flags = [r.entry.role.toLowerCase(), ...(r.entry.mentionOnly ? ['mention-only'] : []), ...(r.entry.installDefault ? ['install default'] : [])].join(', ');
     const seen = r.readState?.lastSeenSeq ?? 0;
     const water =

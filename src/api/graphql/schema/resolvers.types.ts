@@ -966,14 +966,13 @@ export const typeResolvers = {
      * when the run carries no named scope (its view is then `app`).
      */
     /**
-     * Spec 049 Phase 6 — the run's register snapshot as the CALLER may act on
-     * it: rows from the snapshot, watermarks live, gates evaluated now (a
-     * snapshot is data, never a grant that outlives a revoked membership).
+     * Spec 049 Phase 6 — snapshot rows, with the Agent-in-App attendee's
+     * current access. The viewer still controls host-memory identity redaction.
      */
     register: async (r: { registerSnapshot: unknown }, _: unknown, ctx: Context) => {
       const snap = parseRunRegisterSnapshot(r.registerSnapshot);
       if (!snap) return [];
-      const view = await resolveRegister(ctx.db, { attendee: snap.attendee, actor: ctx, rows: snapshotRowsAsEntries(snap) });
+      const view = await resolveRegister(ctx.db, { attendee: snap.attendee, actor: ctx, accessActor: 'ATTENDEE', rows: snapshotRowsAsEntries(snap) });
       return view ? toGqlRegisterRows(view) : [];
     },
     scope: async (r: { appId: string; scopeSnapshot: unknown }, _: unknown, ctx: Context) => {
