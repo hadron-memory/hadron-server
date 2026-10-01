@@ -997,7 +997,18 @@ export const appRunQueries = {
     }
     const run = await ctx.db.appRun.findUnique({ where: { id } });
     if (!run) return null;
-    if (!(await mayReadAppRunWithoutOrgRole(ctx, run))) await requireOrgRole(ctx, run.organizationId, 'READER');
+    if (await mayReadAppRunWithoutOrgRole(ctx, run)) return run;
+    // #1577 — an unreadable run reads as MISSING, never Forbidden: the
+    // difference was an existence oracle over run ids. The platform's
+    // concealment posture (#1316, #1381; Ada #5919) and what MCP
+    // hadron_get_run already does. Only an authorization denial is concealed;
+    // any other error still surfaces.
+    try {
+      await requireOrgRole(ctx, run.organizationId, 'READER');
+    } catch (err) {
+      if (err instanceof GraphQLError && err.extensions?.code === 'FORBIDDEN') return null;
+      throw err;
+    }
     return run;
   },
 

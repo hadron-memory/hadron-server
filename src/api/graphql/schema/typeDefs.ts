@@ -7422,7 +7422,14 @@ export const typeDefs = `#graphql
     """
     specUnresolvedReferences(memoryRef: ID!): [SpecReference!]!
 
-    "One run (cor:agt:010:02). ref is an AppRun ID or an hrn:apprun:<root>:<app>:<run-id> URN (#696)."
+    """
+    One run (cor:agt:010:02). ref is an AppRun ID or an
+    hrn:apprun:<root>:<app>:<run-id> URN (#696). Readable by a platform admin,
+    a READER of the run's organization, the run's own App key, or a user with a
+    live App relationship for a run on their behalf or a MANUAL run they
+    started. A run the caller may not read returns null, exactly like a
+    missing one (#1577: no existence oracle).
+    """
     appRun(ref: ID!): AppRun
     "The latest run of an App resolved to a concrete run (#696) — 'current/latest/previous' are queries, never magic run-ids in URN space (cor:urn:010:02). previous: true returns the run before the latest."
     latestAppRun(appRef: String!, previous: Boolean): AppRun
