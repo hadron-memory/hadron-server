@@ -2364,8 +2364,10 @@ export function createMcpServerInstance(
         await Promise.all(
           owned.map(async ({ id }) => {
             if (levels.has(id)) return;
-            if (!(await canReadMemory(db, auth, id))) return;
-            levels.set(id, (await canWriteToMemory(db, auth, id)) ? 'READ_WRITE' : 'READ_ONLY');
+            // A listing, not an explicit reference: stay with the selected
+            // App, as the scope line below promises (#1503).
+            if (!(await canReadMemory(db, auth, id, { selectionOnly: true }))) return;
+            levels.set(id, (await canWriteToMemory(db, auth, id, { selectionOnly: true })) ? 'READ_WRITE' : 'READ_ONLY');
           }),
         );
       }

@@ -239,7 +239,11 @@ describe('T054 (a)+(b): Mike\'s personal memories pivot on (app_id, mike.id)', (
 // (c): App-A session can NEVER read App-B's personal memory and vice versa
 // ─────────────────────────────────────────────────────────────────────────
 
-describe('T054 (c): cross-App reads of Mike\'s personal memory are denied (SC-003)', () => {
+// SC-003 as amended by #1503 (Holger's ruling (c), 2026-10-01): an EXPLICIT
+// reference to Mike's own memory in the other App is evaluated as that
+// memory's App (cor:acl:020:01). Isolation still holds for listings, bound
+// sessions, impersonation and other users.
+describe('T054 (c): cross-App access to Mike\'s personal memory (SC-003, amended by #1503)', () => {
   function ctxFor(app: 'A' | 'B', user: 'mike' | 'dana'): AuthContext {
     return {
       appId: app === 'A' ? f.appA.id : f.appB.id,
@@ -253,14 +257,32 @@ describe('T054 (c): cross-App reads of Mike\'s personal memory are denied (SC-00
     expect(await canWriteToMemory(db, ctxFor('A', 'mike'), f.mikePersonalAtA.id)).toBe(true);
   });
 
-  it('Mike\'s session through App A is DENIED reading his memory at App B', async () => {
-    expect(await canReadMemory(db, ctxFor('A', 'mike'), f.mikePersonalAtB.id)).toBe(false);
-    expect(await canWriteToMemory(db, ctxFor('A', 'mike'), f.mikePersonalAtB.id)).toBe(false);
+  it('Mike through App A, naming his memory at App B explicitly, is evaluated as App B (#1503)', async () => {
+    expect(await canReadMemory(db, ctxFor('A', 'mike'), f.mikePersonalAtB.id)).toBe(true);
+    expect(await canWriteToMemory(db, ctxFor('A', 'mike'), f.mikePersonalAtB.id)).toBe(true);
   });
 
-  it('Mike\'s session through App B is DENIED reading his memory at App A', async () => {
-    expect(await canReadMemory(db, ctxFor('B', 'mike'), f.mikePersonalAtA.id)).toBe(false);
-    expect(await canWriteToMemory(db, ctxFor('B', 'mike'), f.mikePersonalAtA.id)).toBe(false);
+  it('a listing or a bound session through App A is still DENIED his memory at App B', async () => {
+    const listing = { selectionOnly: true };
+    expect(await canReadMemory(db, ctxFor('A', 'mike'), f.mikePersonalAtB.id, listing)).toBe(false);
+    expect(await canWriteToMemory(db, ctxFor('A', 'mike'), f.mikePersonalAtB.id, listing)).toBe(false);
+    const session: AuthContext = { ...ctxFor('A', 'mike'), sessionId: generateId() };
+    expect(await canReadMemory(db, session, f.mikePersonalAtB.id)).toBe(false);
+    expect(await canWriteToMemory(db, session, f.mikePersonalAtB.id)).toBe(false);
+  });
+
+  it('Mike through App B, naming his memory at App A explicitly, is evaluated as App A (#1503)', async () => {
+    expect(await canReadMemory(db, ctxFor('B', 'mike'), f.mikePersonalAtA.id)).toBe(true);
+    expect(await canWriteToMemory(db, ctxFor('B', 'mike'), f.mikePersonalAtA.id)).toBe(true);
+  });
+
+  it('a listing or a bound session through App B is still DENIED his memory at App A', async () => {
+    const listing = { selectionOnly: true };
+    expect(await canReadMemory(db, ctxFor('B', 'mike'), f.mikePersonalAtA.id, listing)).toBe(false);
+    expect(await canWriteToMemory(db, ctxFor('B', 'mike'), f.mikePersonalAtA.id, listing)).toBe(false);
+    const session: AuthContext = { ...ctxFor('B', 'mike'), sessionId: generateId() };
+    expect(await canReadMemory(db, session, f.mikePersonalAtA.id)).toBe(false);
+    expect(await canWriteToMemory(db, session, f.mikePersonalAtA.id)).toBe(false);
   });
 
   it('Mike\'s session through App B can read his memory at App B', async () => {

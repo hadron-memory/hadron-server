@@ -363,7 +363,7 @@ describe('private/personal access is owner-only', () => {
     },
   );
 
-  it.each(['private', 'personal'] as const)('an App selection preserves the %s owner, not a pure App key', async (memoryClass) => {
+  it.each(['private', 'personal'] as const)('an App selection admits the subscribed %s owner, not a pure App key or a platform OWNER', async (memoryClass) => {
     const mem = await resolvers.Mutation.createMemory(
       null, { orgId: org.id, name: `${memoryClass}-selected`, memoryClass } as any, asOwner(),
     );
@@ -375,9 +375,14 @@ describe('private/personal access is owner-only', () => {
         name: 'selected-agent', type: 'CHATBOT', surfaces: ['api'] },
     });
     await db.memory.update({ where: { id: mem.id }, data: { appId: app.id, userMemoryOfAgentId: agent.id } });
-    // No AgentSubscription exists. Direct ownership needs none.
-    await expect(requireMemoryWriteAccess(ctx({ appId: app.id, userId: owner.id, roles: ['READER'] }), mem.id))
-      .resolves.toBeUndefined();
+    // #1503 (Holger's ruling (c), 2026-10-01): under App selection the owner is
+    // judged by the shared gate, the same as MCP, so FR-019 applies. With no
+    // AgentSubscription the write is refused (#1500's inline shortcut used to
+    // skip it, so GraphQL and MCP disagreed); with an active one it succeeds.
+    const asSelectingOwner = ctx({ appId: app.id, userId: owner.id, roles: ['READER'] });
+    await expect(requireMemoryWriteAccess(asSelectingOwner, mem.id)).rejects.toThrow('Forbidden');
+    await db.agentSubscription.create({ data: { userId: owner.id, agentId: agent.id, activatedAt: new Date() } });
+    await expect(requireMemoryWriteAccess(asSelectingOwner, mem.id)).resolves.toBeUndefined();
     await expect(requireMemoryWriteAccess(ctx({ appId: app.id }), mem.id))
       .rejects.toThrow('Forbidden');
     await expect(requireMemoryWriteAccess(ctx({ appId: app.id, userId: admin.id, roles: ['OWNER'] }), mem.id))

@@ -2297,10 +2297,11 @@ export async function requireMemoryWriteAccess(ctx: Context, memoryId: string): 
     });
     if (!memory) throw memoryWriteForbidden();
     const strictOwner = memory.class === 'personal' || memory.class === 'private';
-    // App selection on a user credential does not remove direct ownership.
-    // A session or impersonation context cannot use this identity shortcut.
-    if (strictOwner && ctx.userId && !ctx.sessionId && !ctx.impersonation &&
-        memory.userId === ctx.userId) return;
+    // A strict owner's rights under App selection are decided by the shared
+    // gate below, the same rule MCP applies (#1503, ruling (c)): an explicit
+    // reference to the owner's memory in another App is evaluated as that App,
+    // with isolation and the subscription check. An inline identity shortcut
+    // here (#1500) let GraphQL drift from MCP, so there is no second copy.
     if (!strictOwner && memory.ownerUserId === null &&
         !(ctx.appId && ctx.sessionId && !ctx.userId) &&
         (ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER'))) return;
