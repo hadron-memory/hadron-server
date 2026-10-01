@@ -4,6 +4,7 @@ import { deleteToolConnection } from '../../lib/emailClient.js';
 import { deleteSecretsForOwner } from '../../lib/secrets.js';
 import { releasePrincipal } from '../../lib/principal/mintPrincipal.js';
 import { softDeleteOrganizationCore } from './softDeleteOrganization.js';
+import { retryOnSerializationFailure } from '../../lib/serializableRetry.js';
 import { assertNoMintedCorpusCascade } from '../../lib/mintedSpecPermanence.js';
 import {
   collectAssetKeysForMemories,
@@ -33,14 +34,6 @@ export interface DeleteUserAccountArgs {
   /** The authenticated actor (self, or a platform admin deleting another user). */
   actorUserId: string;
 }
-
-/**
- * How many times the SERIALIZABLE transaction is retried on a P2034
- * serialization abort before the error propagates. The transaction body is
- * side-effect-free outside the DB (no enqueues / emails / git writes), so a
- * bounded re-run is safe (conventions:count-then-act-serializable-txn).
- */
-const SERIALIZATION_RETRIES = 3;
 
 /**
  * Self-serve account deletion (issue #662; Apple App Store 5.1.1(v) + GDPR
@@ -90,37 +83,30 @@ export async function deleteUserAccount(
   db: PrismaClient,
   { targetUserId, actorUserId }: DeleteUserAccountArgs,
 ): Promise<void> {
-  for (let attempt = 1; ; attempt++) {
-    try {
-      const { toolConnections, assetKeys } = await runDeletionTxn(
-        db,
-        targetUserId,
-        actorUserId,
-      );
-      // Provider-sidecar teardown AFTER the commit: the tools hold their own
-      // copy of the OAuth credential + change subscriptions, so deleting the
-      // core ExchangeConnection rows alone would leave those live. Outside
-      // the transaction (external I/O must not ride a retried SERIALIZABLE
-      // body) and fire-and-forget per the deleteToolConnection contract —
-      // the DB effect is already durable, a dead sidecar must log, not fail.
-      for (const c of toolConnections) {
-        void deleteToolConnection(c.provider, c.toolConnectionId);
-      }
-      // Same posture for the deleted memories' files: the Asset rows went
-      // with the cascade, so these keys are the last record of the bytes.
-      // Post-commit and best-effort — a dead object store must not fail an
-      // account deletion (src/lib/asset/purge.ts).
-      void purgeCollectedAssetObjects(
-        assetKeys,
-        `deleteUserAccount(${targetUserId})`,
-      );
-      return;
-    } catch (e) {
-      const serializationAbort =
-        e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2034';
-      if (!serializationAbort || attempt > SERIALIZATION_RETRIES) throw e;
-    }
+  // Retried as a whole on a serialization abort, with jittered backoff so
+  // two transactions that abort each other do not retry in lockstep (#1544).
+  // The body is side-effect-free outside the DB (no enqueues / emails / git
+  // writes), so a re-run is safe (conventions:count-then-act-serializable-txn).
+  const { toolConnections, assetKeys } = await retryOnSerializationFailure(() =>
+    runDeletionTxn(db, targetUserId, actorUserId),
+  );
+  // Provider-sidecar teardown AFTER the commit: the tools hold their own
+  // copy of the OAuth credential + change subscriptions, so deleting the
+  // core ExchangeConnection rows alone would leave those live. Outside
+  // the transaction (external I/O must not ride a retried SERIALIZABLE
+  // body) and fire-and-forget per the deleteToolConnection contract —
+  // the DB effect is already durable, a dead sidecar must log, not fail.
+  for (const c of toolConnections) {
+    void deleteToolConnection(c.provider, c.toolConnectionId);
   }
+  // Same posture for the deleted memories' files: the Asset rows went
+  // with the cascade, so these keys are the last record of the bytes.
+  // Post-commit and best-effort — a dead object store must not fail an
+  // account deletion (src/lib/asset/purge.ts).
+  void purgeCollectedAssetObjects(
+    assetKeys,
+    `deleteUserAccount(${targetUserId})`,
+  );
 }
 
 /**

@@ -4,7 +4,10 @@ import { Prisma } from '../generated/prisma/index.js';
  * How many times a SERIALIZABLE transaction is re-run after a P2034
  * serialization abort before the error propagates.
  */
-export const SERIALIZATION_RETRIES = 3;
+export const SERIALIZATION_RETRIES = 5;
+
+/** Upper bound, in ms, of the first retry's random delay; it doubles per attempt. */
+const BASE_BACKOFF_MS = 10;
 
 /** True when `e` is Postgres's serialization failure (40001) as Prisma reports it. */
 export function isSerializationFailure(e: unknown): boolean {
@@ -21,6 +24,13 @@ export function isSerializationFailure(e: unknown): boolean {
  * retry is what turns the abort into the right answer instead of an error.
  * `run` must have no effects outside the database, because it can run more
  * than once.
+ *
+ * Each retry waits a random delay ("full jitter": uniform in
+ * `[0, BASE_BACKOFF_MS * 2^(attempt-1)]`). Without it, two transactions that
+ * abort EACH OTHER retry in lockstep and can keep colliding until the retries
+ * run out. That escaped as a raw P2034 under CI load: 4 of 40 parallel runs of
+ * the #1544 race tests before this delay, including a removal racing
+ * `deleteUser`.
  */
 export async function retryOnSerializationFailure<T>(
   run: () => Promise<T>,
@@ -31,6 +41,8 @@ export async function retryOnSerializationFailure<T>(
       return await run();
     } catch (e) {
       if (!isSerializationFailure(e) || attempt > retries) throw e;
+      const ceiling = BASE_BACKOFF_MS * 2 ** (attempt - 1);
+      await new Promise((resolve) => setTimeout(resolve, Math.random() * ceiling));
     }
   }
 }
