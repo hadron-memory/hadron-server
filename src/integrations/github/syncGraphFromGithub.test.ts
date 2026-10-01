@@ -20,6 +20,7 @@ import { writeNodeFile } from './writeNodeToGit.js';
 import { withMirrorCheckout } from './gitMirrorCheckout.js';
 import { mirrorCheckoutLockKey } from './mirrorCheckoutLock.js';
 import { Client } from 'pg';
+import * as fsLoader from '../localFs/loadGraphFromFs.js';
 
 // ---------------------------------------------------------------------------
 // Mock child_process.execFile so no actual git commands run
@@ -384,6 +385,38 @@ describe('syncGraphFromGithub', () => {
     }
     expect((await syncing).error).toBeUndefined();
     expect((await gitCalls()).some((c) => c.args[0] === 'clone')).toBe(true);
+  }, 15_000);
+
+  it('keeps the checkout lock until filesystem loading completes', async () => {
+    let signalLoadEntered!: () => void;
+    let releaseLoad!: () => void;
+    const loadEntered = new Promise<void>((resolve) => { signalLoadEntered = resolve; });
+    const mayFinishLoad = new Promise<void>((resolve) => { releaseLoad = resolve; });
+    const realLoad = fsLoader.loadGraphFromFs;
+    const loader = vi.spyOn(fsLoader, 'loadGraphFromFs').mockImplementation(async (...args) => {
+      signalLoadEntered();
+      await mayFinishLoad;
+      return realLoad(...args);
+    });
+    let syncing: ReturnType<typeof syncGraphFromGithub> | undefined;
+    const keyBits = BigInt.asUintN(64, BigInt(mirrorCheckoutLockKey(dbGraphId)));
+    const classId = Number(keyBits >> 32n);
+    const objectId = Number(keyBits & 0xffffffffn);
+    try {
+      syncing = syncGraphFromGithub(makeGraph());
+      await loadEntered;
+      const [{ held }] = await db.$queryRaw<Array<{ held: number }>>`
+        SELECT count(*)::int AS held FROM pg_locks
+        WHERE locktype = 'advisory' AND granted AND objsubid = 1
+          AND classid = ${classId}::oid AND objid = ${objectId}::oid
+          AND database = (SELECT oid FROM pg_database WHERE datname = current_database())`;
+      expect(held).toBe(1);
+    } finally {
+      releaseLoad();
+      await Promise.allSettled([syncing]);
+      loader.mockRestore();
+    }
+    expect((await syncing).error).toBeUndefined();
   }, 15_000);
 
   it('refuses cleanup when Read branch config changes during sync', async () => {
