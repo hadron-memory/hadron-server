@@ -19,6 +19,9 @@ import { cleanDb } from '../../../test/helpers.js';
 import { resolvers, type Context } from './resolvers.js';
 import { generateId } from '../../../lib/id.js';
 import { canChatWithAgent } from './agentChatAccess.js';
+import { readFileSync } from 'node:fs';
+import { lockAuthorityAnchors } from '../../../lib/auth/authorityAnchors.js';
+import { waitForLockWaitersOfType } from '../../../test/lockWait.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -308,5 +311,187 @@ describe('#1581: canChatWithAgent for a pure App key', () => {
   it('refuses an anonymous caller and a soft-deleted Agent', async () => {
     expect(await canChatWithAgent({ db } as Context, agent)).toBe(false);
     expect(await canChatWithAgent(userCtx(member.id), { ...agent, deletedAt: new Date() })).toBe(false);
+  });
+});
+
+// #1573: the chat start's gate and license write commit under every
+// authority anchor the gate can admit through. A revoker holding one of them
+// exclusively cannot return while the license is about to commit, and after
+// it commits the re-run gate refuses.
+describe('#1585 review: a stale membership in a dead tenant\'s App does not block a chat', () => {
+  it('a PUBLIC Agent stays reachable when the caller is also a member of an App whose org was soft-deleted', async () => {
+    await db.agent.update({ where: { id: agent.id }, data: { visibility: 'PUBLIC' } });
+    const deadOrg = await db.organization.create({ data: { id: generateId(), name: 'dead', urn: 'dead-1585.example' } });
+    const deadApp = await db.app.create({ data: {
+      id: generateId(), name: 'dead-app', urn: `${deadOrg.urn}:app`, organizationId: deadOrg.id,
+      appAgents: { create: { agentId: agent.id } },
+    } });
+    await db.appMember.create({ data: { appId: deadApp.id, userId: stranger.id, role: 'member' } });
+    // Org deletion deliberately leaves the App row intact.
+    await db.organization.update({ where: { id: deadOrg.id }, data: { deletedAt: new Date() } });
+    const out = await M.startChat(null, { agentId: agent.id }, userCtx(stranger.id));
+    expect(out.chatId).toMatch(/^chats:/);
+    expect(await subsFor(agent.id)).toEqual([stranger.id]);
+  });
+});
+
+describe('#1585 review: the gate and the anchors agree on which Apps carry the right', () => {
+  /** A personal (user-owned) App whose owner is then soft-deleted. */
+  async function deadOwnerApp(memberId: string) {
+    const owner = await db.user.create({ data: { githubId: 158170, githubUsername: 'owner-1585', roles: ['READER'] } });
+    const personal = await db.app.create({ data: {
+      id: generateId(), name: 'personal-app', urn: 'owner-1585:personal-app', ownerUserId: owner.id,
+      appAgents: { create: { agentId: agent.id } },
+    } });
+    // The owner licensed the (foreign, org-private) Agent for the personal App.
+    await db.agentSubscription.create({ data: { userId: owner.id, agentId: agent.id, activatedAt: new Date() } });
+    await db.appMember.create({ data: { appId: personal.id, userId: memberId, role: 'member' } });
+    await db.user.update({ where: { id: owner.id }, data: { deletedAt: new Date() } });
+    return personal;
+  }
+
+  it("Atilla's case: a dead owner's personal App carries nothing, so its member is refused (no unanchored path)", async () => {
+    await deadOwnerApp(stranger.id);
+    await expect(M.startChat(null, { agentId: agent.id }, userCtx(stranger.id)))
+      .rejects.toMatchObject({ name: 'AgentNotFoundError' });
+    expect(await subsFor(agent.id)).not.toContain(stranger.id);
+  });
+
+  it("CONTROL (Chip): a PUBLIC Agent stays reachable for a member of a dead owner's App", async () => {
+    await db.agent.update({ where: { id: agent.id }, data: { visibility: 'PUBLIC' } });
+    await deadOwnerApp(stranger.id);
+    const out = await M.startChat(null, { agentId: agent.id }, userCtx(stranger.id));
+    expect(out.chatId).toMatch(/^chats:/);
+  });
+});
+
+// Chip (#1585 QA at 3918a7f9): anchors are chosen before the transaction, so an
+// App that becomes a carrier in between (newly licensed) could admit the caller
+// unanchored while deleteApp commits. Now the in-transaction gate checks every
+// carrier was anchored and otherwise retries with fresh anchors.
+describe('#1585 review: a carrier App that appears after anchor selection is fenced too', () => {
+  async function holdTx(work: (tx: any) => Promise<unknown>) {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    let held!: () => void;
+    const isHeld = new Promise<void>((r) => { held = r; });
+    const done = db.$transaction(async (tx) => { await work(tx); held(); await gate; }, { timeout: 20_000 });
+    await isHeld;
+    return { release, done };
+  }
+
+  it('a chat admitted only through a newly licensed App waits for that App\'s deletion and is refused', async () => {
+    await db.agent.update({ where: { id: agent.id }, data: { visibility: 'PUBLIC' } });
+    const orgX = await db.organization.create({ data: { id: generateId(), name: 'org-x', urn: 'org-x-1585.example' } });
+    const appX = await db.app.create({ data: {
+      id: generateId(), name: 'app-x', urn: `${orgX.urn}:app`, organizationId: orgX.id,
+      appAgents: { create: { agentId: agent.id } },
+    } });
+    await db.appMember.create({ data: { appId: appX.id, userId: stranger.id, role: 'member' } });
+
+    // H2: deleteApp in flight on App X (exclusive App anchor, uncommitted).
+    const deleting = await holdTx(async (tx) => {
+      await lockAuthorityAnchors(tx, [{ kind: 'app', id: appX.id }], 'exclusive');
+      await tx.app.update({ where: { id: appX.id }, data: { deletedAt: new Date() } });
+    });
+    // H1: holds the Agent anchor so the chat blocks AFTER choosing its anchors
+    // (App X is unlicensed then, so not a carrier and not anchored).
+    let releaseH1!: () => void;
+    const h1Gate = new Promise<void>((r) => { releaseH1 = r; });
+    let h1Held!: () => void;
+    const h1IsHeld = new Promise<void>((r) => { h1Held = r; });
+    const h1 = db.$transaction(async (tx) => {
+      await lockAuthorityAnchors(tx, [{ kind: 'agent', id: agent.id }], 'exclusive');
+      h1Held();
+      await h1Gate;
+      // Before releasing: App X becomes licensed, and the Agent stops being
+      // PUBLIC, so the chat can now be admitted ONLY through App X.
+      await tx.agentOrgGrant.create({ data: { orgId: orgX.id, agentId: agent.id, activatedAt: new Date() } });
+      await tx.agent.update({ where: { id: agent.id }, data: { visibility: 'ORGANIZATION' } });
+    }, { timeout: 20_000 });
+    await h1IsHeld;
+
+    const chat = M.startChat(null, { agentId: agent.id }, userCtx(stranger.id));
+    try {
+      await waitForLockWaitersOfType(db, 'advisory', 1); // the chat waits on H1
+      releaseH1();
+      await h1;
+      // With the fix the chat retries with App X anchored and now waits on H2.
+      await waitForLockWaitersOfType(db, 'advisory', 1);
+    } finally {
+      releaseH1();
+      deleting.release();
+      await deleting.done;
+    }
+    await expect(chat).rejects.toBeTruthy();
+    expect(await subsFor(agent.id)).toEqual([]);
+  });
+});
+
+describe('#1573: startChat waits for an in-flight revocation of its read right', () => {
+  /** Hold an exclusive anchor and apply `revoke` uncommitted until released. */
+  async function holdRevocation(anchor: { kind: 'org' | 'app'; id: string }, revoke: (tx: any) => Promise<unknown>) {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    let held!: () => void;
+    const isHeld = new Promise<void>((r) => { held = r; });
+    const done = db.$transaction(async (tx) => {
+      await lockAuthorityAnchors(tx, [anchor], 'exclusive');
+      await revoke(tx);
+      held();
+      await gate;
+    }, { timeout: 20_000 });
+    await isHeld;
+    return { release, done };
+  }
+
+  it('an org READER whose membership is being removed is refused after the removal commits', async () => {
+    const holder = await holdRevocation({ kind: 'org', id: orgA.id }, (tx) =>
+      tx.orgMember.updateMany({ where: { organizationId: orgA.id, userId: member.id }, data: { deletedAt: new Date() } }));
+    const chat = M.startChat(null, { agentId: agent.id }, userCtx(member.id));
+    try {
+      await waitForLockWaitersOfType(db, 'advisory', 1);
+    } finally {
+      holder.release();
+      await holder.done;
+    }
+    await expect(chat).rejects.toMatchObject({ name: 'AgentNotFoundError' });
+    expect(await subsFor(agent.id)).toEqual([]);
+  });
+
+  it('an App end user whose App membership is being removed is refused after the removal commits', async () => {
+    const holder = await holdRevocation({ kind: 'app', id: app.id }, (tx) =>
+      tx.appMember.delete({ where: { appId_userId: { appId: app.id, userId: endUser.id } } }));
+    const chat = M.startChat(null, { agentId: agent.id }, userCtx(endUser.id));
+    try {
+      await waitForLockWaitersOfType(db, 'advisory', 1);
+    } finally {
+      holder.release();
+      await holder.done;
+    }
+    await expect(chat).rejects.toMatchObject({ name: 'AgentNotFoundError' });
+    expect(await subsFor(agent.id)).toEqual([]);
+  });
+});
+
+// Chip (#1585 QA at 861b6504): the gate and the anchor-coverage proof read the
+// carrier Apps separately, so a carrier could admit the gate, be deleted
+// unanchored, and vanish from the coverage read. They now share ONE read: the
+// in-transaction gate admits only from the carrier set it just proved
+// anchored. Pinned at both ends.
+describe('#1585 review: admission and anchor coverage come from one carrier read', () => {
+  it('canChatWithAgent admits only from the carrier set it is given, never a fresh read', async () => {
+    // endUser is an AppMember of a live, licensed App: a fresh read admits.
+    expect(await canChatWithAgent(userCtx(endUser.id), agent)).toBe(true);
+    // Handed an empty verified set, it must not go and find that App itself.
+    expect(await canChatWithAgent(userCtx(endUser.id), agent, { carriers: [] })).toBe(false);
+  });
+
+  it('startChat\'s in-transaction gate passes its verified carrier set to canChatWithAgent', () => {
+    const src = readFileSync('src/api/graphql/schema/resolvers.mutation.chat.ts', 'utf8');
+    const start = src.indexOf('await withAuthorizedTx(ctx, chatAnchors, async (txCtx) => {');
+    const gate = src.slice(start, src.indexOf('}, async (tx) => {', start));
+    expect(gate.match(/chatCarrierApps\(/g)).toHaveLength(1);
+    expect(gate).toContain('canChatWithAgent(txCtx, current, { carriers })');
   });
 });

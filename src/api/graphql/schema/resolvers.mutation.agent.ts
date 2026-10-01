@@ -1069,13 +1069,35 @@ export const agentMutations = {
       await requireOwnerOrOrgRole(ctx, agent, 'ADMIN');
       const resolvedUserId = await resolveUserRefArg(ctx.db, { ref: userRef, id: userId });
 
-      const updated = await ctx.db.agentSubscription.update({
-        where: { userId_agentId: { userId: resolvedUserId, agentId: resolvedAgentId } },
-        data: {
-          revokedAt: new Date(),
-          revokedBy: ctx.userId ?? null,
+      // #1573: the revoker of the subscription writers (startChat, personal
+      // createApp, install). It takes the same [agent, target user] anchors
+      // they hold shared, EXCLUSIVE and through the revokedAt write, so a
+      // revocation cannot return while a new subscription for this pair is
+      // still about to commit. The Agent's owner anchor fences the ADMIN gate.
+      const updated = await withAuthorizedTx(
+        ctx,
+        [
+          { kind: 'agent', id: resolvedAgentId },
+          { kind: 'user', id: resolvedUserId },
+          ...(agent.organizationId ? [{ kind: 'org' as const, id: agent.organizationId }] : []),
+          ...(agent.ownerUserId ? [{ kind: 'user' as const, id: agent.ownerUserId }] : []),
+        ],
+        async (txCtx) => {
+          const current = await txCtx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
+          if (current.organizationId !== agent.organizationId || current.ownerUserId !== agent.ownerUserId) {
+            throw new Error('Agent ownership changed; retry the operation');
+          }
+          await requireOwnerOrOrgRole(txCtx, current, 'ADMIN');
         },
-      });
+        (tx) => tx.agentSubscription.update({
+          where: { userId_agentId: { userId: resolvedUserId, agentId: resolvedAgentId } },
+          data: {
+            revokedAt: new Date(),
+            revokedBy: ctx.userId ?? null,
+          },
+        }),
+        { lockMode: 'exclusive' },
+      );
 
       // FR-029: empty per-user Memory at revocation time → hard-delete. The
       // auto-provisioned memory is class='personal' (plaintext USER_ID mode) or

@@ -32,6 +32,8 @@ import { GraphQLError } from 'graphql';
 import { generateId } from '../../../lib/id.js';
 import { mintMemoryUrnV2 } from '../../../lib/mintMemoryUrnV2.js';
 import { Prisma, type EmbeddingSource } from '../../../generated/prisma/index.js';
+import { withAuthorizedTx } from './authorizedTx.js';
+import { isAgentInstalledAndLicensed } from '../../../lib/appAgent.js';
 import { type InputJsonValue } from '../../../generated/prisma/runtime/library.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
@@ -132,6 +134,49 @@ async function resolveInstalledAgent(
     });
   }
   return appAgent.agent;
+}
+
+/**
+ * #1573: an App-scoped memory write is an authority write. `createMemoryInApp`
+ * (an `AgentMemoryItem` read link, or a personal/private memory pivoted on the
+ * App's agent) and `attachMemoryToApp` (scoping a user's memory to the App and
+ * its agent) both decide from the caller's App role or membership and from the
+ * agent's install. Run the gate and the write in ONE anchored transaction,
+ * holding the App, its owner (org or user), and the agent, the anchors their
+ * revokers take exclusively (`removeAppMember`, `deleteApp`, uninstall,
+ * `revokeAgentOrgGrant`). Inside it the App owner tuple is compared with the
+ * locked row, the class gate re-runs on `txCtx`, and the install must still be
+ * LIVE and licensed (`isAgentInstalledAndLicensed`): a retained AppAgent
+ * pointer alone is not authority (#1526).
+ */
+async function withAppMemoryAuthorityTx<T>(
+  ctx: Context,
+  app: { id: string; organizationId: string | null; ownerUserId: string | null },
+  agentId: string,
+  klass: AppMemoryClass,
+  write: (tx: Prisma.TransactionClient, txCtx: Context) => Promise<T>,
+): Promise<T> {
+  return withAuthorizedTx(
+    ctx,
+    [
+      { kind: 'app', id: app.id },
+      ...(app.organizationId ? [{ kind: 'org' as const, id: app.organizationId }] : []),
+      ...(app.ownerUserId ? [{ kind: 'user' as const, id: app.ownerUserId }] : []),
+      { kind: 'agent', id: agentId },
+    ],
+    async (txCtx) => {
+      const locked = await loadAppAndAuthorize(txCtx, app.id, klass);
+      if (locked.organizationId !== app.organizationId || locked.ownerUserId !== app.ownerUserId) {
+        throw new Error('App ownership changed; retry the operation');
+      }
+      if (!(await isAgentInstalledAndLicensed(txCtx.db, app.id, agentId))) {
+        throw new GraphQLError('That Agent is not installed in this App.', {
+          extensions: { code: 'AGENT_NOT_INSTALLED' },
+        });
+      }
+    },
+    write,
+  );
 }
 
 export const appMemoryMutations = {
@@ -235,7 +280,8 @@ export const appMemoryMutations = {
 
     let memory;
     try {
-      memory = await ctx.db.memory.create({
+      memory = await withAppMemoryAuthorityTx(ctx, app, agent.id, klass, async (tx) => {
+      const created = await tx.memory.create({
         data: {
           id: generateId(),
           organizationId: app.organizationId,
@@ -265,6 +311,25 @@ export const appMemoryMutations = {
         },
         include: MEMORY_INCLUDE,
       });
+      // #653: link an app-scoped knowledge memory to the App's agent so it is
+      // readable via the App surface (getAppMemoryAccess → READ_ONLY). Nothing
+      // else grants read on it — it is excluded from every org-wide gate, so this
+      // link is the ONLY read path (besides platform ADMIN/OWNER). role='read':
+      // agents read this reference content; writes stay with the org admin.
+      // #1573: written in the same anchored transaction as the memory.
+      if (klass === 'knowledge') {
+        await tx.agentMemoryItem.create({
+          data: {
+            id: generateId(),
+            agentId: agent.id,
+            memoryId: created.id,
+            role: 'read',
+            createdBy: ctx.userId ?? ctx.clientId ?? null,
+          },
+        });
+      }
+      return created;
+      });
     } catch (err) {
       // Race backstop: a concurrent create claimed the just-minted urn between
       // the mint probe and this insert (mintMemoryUrnV2 aliases around known
@@ -275,23 +340,6 @@ export const appMemoryMutations = {
         });
       }
       throw err;
-    }
-
-    // #653: link an app-scoped knowledge memory to the App's agent so it is
-    // readable via the App surface (getAppMemoryAccess → READ_ONLY). Nothing
-    // else grants read on it — it is excluded from every org-wide gate, so this
-    // link is the ONLY read path (besides platform ADMIN/OWNER). role='read':
-    // agents read this reference content; writes stay with the org admin.
-    if (klass === 'knowledge') {
-      await ctx.db.agentMemoryItem.create({
-        data: {
-          id: generateId(),
-          agentId: agent.id,
-          memoryId: memory.id,
-          role: 'read',
-          createdBy: ctx.userId ?? ctx.clientId ?? null,
-        },
-      });
     }
 
     // Root node, as createMemory does.
@@ -352,7 +400,7 @@ export const appMemoryMutations = {
     // preflight checks. Recheck them under its Memory-row fence before setting
     // the App/Agent pivot; a stale attachment must not scope the new tenant's
     // knowledge or group memory to the former tenant's App.
-    return ctx.db.$transaction(async (tx) => {
+    return withAppMemoryAuthorityTx(ctx, app, agent.id, memory.class as AppMemoryClass, async (tx) => {
       await tx.$queryRaw`SELECT id FROM memories WHERE id = ${memory.id} FOR NO KEY UPDATE`;
       const current = await tx.memory.findUniqueOrThrow({
         where: { id: memory.id },

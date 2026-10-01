@@ -89,27 +89,47 @@ export async function ensureAppMember(
 
   // Updating an existing member's role: skip the maxMembers check (no new
   // seat is being consumed). Creating a new member: count + compare.
-  const existing = await db.appMember.findUnique({
-    where: { appId_userId: { appId, userId } },
-  });
-  if (!existing && policy.maxMembers !== 'unlimited') {
-    const current = await db.appMember.count({ where: { appId } });
-    if (current >= policy.maxMembers) {
-      throw new MaxMembersExceededError(policy.maxMembers);
+  const maxMembers = policy.maxMembers;
+  const admit = async (tx: Prisma.TransactionClient): Promise<void> => {
+    // #1573: maxMembers is count-then-act. Every door that adds a member
+    // (joinApp, the GraphQL ensureAppMember) reaches this point, so one
+    // exclusive per-App capacity lock held through the count and the insert
+    // serializes them; two concurrent joins can no longer both see room.
+    // A dedicated advisory key rather than an App-row lock: callers already
+    // hold the App row FOR SHARE (withAuthorizedTx), and upgrading that to
+    // FOR UPDATE would deadlock two joiners.
+    if (maxMembers !== 'unlimited') {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('app-capacity'), hashtext(${appId}))`;
     }
-  }
+    const existing = await tx.appMember.findUnique({
+      where: { appId_userId: { appId, userId } },
+    });
+    if (!existing && maxMembers !== 'unlimited') {
+      const current = await tx.appMember.count({ where: { appId } });
+      if (current >= maxMembers) {
+        throw new MaxMembersExceededError(maxMembers);
+      }
+    }
 
-  await db.appMember.upsert({
-    where: { appId_userId: { appId, userId } },
-    create: {
-      appId,
-      userId,
-      role,
-      createdBy: ctx.actorId ?? null,
-    },
-    update: {
-      role,
-      updatedBy: ctx.actorId ?? null,
-    },
-  });
+    await tx.appMember.upsert({
+      where: { appId_userId: { appId, userId } },
+      create: {
+        appId,
+        userId,
+        role,
+        createdBy: ctx.actorId ?? null,
+      },
+      update: {
+        role,
+        updatedBy: ctx.actorId ?? null,
+      },
+    });
+  };
+  // A transaction-scoped lock needs a transaction: run in the caller's, or
+  // open one.
+  if ('$transaction' in db && typeof db.$transaction === 'function') {
+    await (db as PrismaClient).$transaction((tx) => admit(tx));
+  } else {
+    await admit(db as Prisma.TransactionClient);
+  }
 }

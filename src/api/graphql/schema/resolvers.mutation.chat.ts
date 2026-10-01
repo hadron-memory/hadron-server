@@ -28,7 +28,8 @@ import { buildPrismaMemoryLayer } from '../../../lib/edge-conditions/prisma-memo
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { AgentNotFoundError, UserNotFoundError } from '../../../lib/entityRef/errors.js';
 import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
-import { appKeyMayActFor, appKeySessionMatchesAgent, canChatWithAgent } from './agentChatAccess.js';
+import { appKeyMayActFor, appKeySessionMatchesAgent, canChatWithAgent, chatAuthorityAnchors, chatCarrierApps } from './agentChatAccess.js';
+import { withAuthorizedTx } from './authorizedTx.js';
 import { activeAppInstallLicenseIdsForAgent, isAgentInstalledAndLicensed } from '../../../lib/appAgent.js';
 import { GraphQLError } from 'graphql';
 import { type InputJsonValue } from '../../../generated/prisma/runtime/library.js';
@@ -65,6 +66,9 @@ import { LIVE_ORG_MEMBERSHIP } from '../../../lib/auth/liveOrgMembership.js';
  * the messages it covers) is the real answer and is deliberately not this.
  */
 const MODEL_HISTORY_LIMIT = 50;
+
+/** A carrier App appeared after the anchors were chosen (#1585, Chip); retry with fresh anchors. */
+class ChatAuthorityScopeChanged extends Error {}
 
 export const chatMutations = {
     startChat: async (
@@ -545,52 +549,108 @@ export const chatMutations = {
       // #1061 — the ids are minted inside the transaction; collected here so
       // the writes are recorded only after it commits.
       const startedNodes: { id: string; loc: string; memoryId: string }[] = [];
-      await ctx.db.$transaction(async (tx) => {
-        // 005-agent-subscription FR-002: auto-provision an AgentSubscription
-        // on the first user-attributed contact for (user, agent). Idempotent.
-        // Skip for the "anonymous" sentinel — there is no User row.
-        //
-        // Spec 019: also skip when `isTestRun` is true. AgentSubscription is
-        // the platform's license-grant entity, narrowed in
-        // 2026-05-12-user-installing-app to "user is licensed to interact
-        // with this Agent at all." A side-effect of clicking "Test" once
-        // silently granting that license re-broadens what we narrowed.
-        //
-        // #1581: provisioned in the SAME transaction that creates the chat,
-        // after the Agent gate above, so a chat that fails leaves no license.
-        if (effectiveUserId !== 'anonymous' && !isTestRun) {
-          await ensureAgentSubscription(tx, effectiveUserId, resolvedAgentId);
+      // #1573: the gate and the license write commit together under every
+      // authority anchor the gate can admit through (chatAuthorityAnchors),
+      // the keys revokeAgentSubscription / removeAppMember / deleteApp /
+      // uninstall / org-role changes hold exclusively. The gate re-runs on the
+      // transaction after the anchor wait.
+      // Chip (#1585 QA): the anchors are chosen BEFORE the transaction, so an
+      // App that became a carrier in between (newly licensed, say) could admit
+      // the caller unanchored. After the gate re-runs inside the transaction,
+      // every carrier App (and its owner) must already be anchored; if not, the
+      // attempt aborts before any write and retries with fresh anchors.
+      let chatStarted = false;
+      for (let attempt = 0; attempt < 3 && !chatStarted; attempt++) {
+        const chatAnchors = await chatAuthorityAnchors(
+          ctx, gateRow, effectiveUserId !== 'anonymous' ? effectiveUserId : null,
+        );
+        const anchored = new Set(chatAnchors.map((a) => `${a.kind}:${a.id}`));
+        try {
+          await withAuthorizedTx(ctx, chatAnchors, async (txCtx) => {
+            const current = await txCtx.db.agent.findUnique({
+              where: { id: resolvedAgentId },
+              select: { id: true, organizationId: true, ownerUserId: true, visibility: true, deletedAt: true },
+            });
+            // Chip (#1585 QA): read the carrier Apps ONCE. Prove each is
+            // anchored, then admit only from that same set. Two separate
+            // reads let a carrier admit the gate, be deleted unanchored, and
+            // vanish from the second read.
+            const carriers = await chatCarrierApps(txCtx, resolvedAgentId);
+            for (const app of carriers) {
+              const needed = [
+                `app:${app.id}`,
+                ...(app.organizationId ? [`org:${app.organizationId}`] : []),
+                ...(app.ownerUserId ? [`user:${app.ownerUserId}`] : []),
+              ];
+              if (needed.some((key) => !anchored.has(key))) throw new ChatAuthorityScopeChanged();
+            }
+            if (
+              !current ||
+              current.organizationId !== gateRow.organizationId ||
+              current.ownerUserId !== gateRow.ownerUserId ||
+              !(await canChatWithAgent(txCtx, current, { carriers }))
+            ) {
+              throw new AgentNotFoundError(agentId);
+            }
+            if (pureAppKey && !(await appKeySessionMatchesAgent(txCtx, resolvedAgentId))) {
+              throw new AgentNotFoundError(agentId);
+            }
+            if (actingUserId != null && actingUserId !== ctx.userId && !(await appKeyMayActFor(txCtx, actingUserId))) {
+              throw new UserNotFoundError(actingUserId);
+            }
+          }, async (tx) => {
+            // 005-agent-subscription FR-002: auto-provision an AgentSubscription
+            // on the first user-attributed contact for (user, agent). Idempotent.
+            // Skip for the "anonymous" sentinel — there is no User row.
+            //
+            // Spec 019: also skip when `isTestRun` is true. AgentSubscription is
+            // the platform's license-grant entity, narrowed in
+            // 2026-05-12-user-installing-app to "user is licensed to interact
+            // with this Agent at all." A side-effect of clicking "Test" once
+            // silently granting that license re-broadens what we narrowed.
+            //
+            // #1581: provisioned in the SAME transaction that creates the chat,
+            // after the Agent gate above, so a chat that fails leaves no license.
+            if (effectiveUserId !== 'anonymous' && !isTestRun) {
+              await ensureAgentSubscription(tx, effectiveUserId, resolvedAgentId);
+            }
+            await lockAncestorsForCreateMany(tx, targetMemoryId, [chatLoc, `${chatLoc}:messages`]);
+            const chatNodeId = generateId();
+            startedNodes.push({ id: chatNodeId, loc: chatLoc, memoryId: targetMemoryId });
+            await tx.node.create({
+              data: {
+                id: chatNodeId, memoryId: targetMemoryId, loc: chatLoc, name: chatName,
+                nodeType: 'record',
+                description: `Chat: ${convName}`,
+                data: initialChatData as InputJsonValue,
+                // #914: record the creator on the audit column too, not only
+                // inside `data.userId`. The column survives encryption and is
+                // what #915's audit expects to find. It stays PROVENANCE — the
+                // chat's creator is never an authorization gate (cor:acl:030:01),
+                // because every member of the host may post here.
+                createdBy: ctx.userId ?? null,
+              },
+            });
+            // Create the messages parent (so the chat subtree is well-formed)
+            const messagesNodeId = generateId();
+            startedNodes.push({
+              id: messagesNodeId, loc: `${chatLoc}:messages`, memoryId: targetMemoryId,
+            });
+            await tx.node.create({
+              data: {
+                id: messagesNodeId, memoryId: targetMemoryId, loc: `${chatLoc}:messages`,
+                name: 'messages', nodeType: 'record',
+                createdBy: ctx.userId ?? null,
+              },
+            });
+          });
+          chatStarted = true;
+        } catch (error) {
+          if (error instanceof ChatAuthorityScopeChanged) continue;
+          throw error;
         }
-        await lockAncestorsForCreateMany(tx, targetMemoryId, [chatLoc, `${chatLoc}:messages`]);
-        const chatNodeId = generateId();
-        startedNodes.push({ id: chatNodeId, loc: chatLoc, memoryId: targetMemoryId });
-        await tx.node.create({
-          data: {
-            id: chatNodeId, memoryId: targetMemoryId, loc: chatLoc, name: chatName,
-            nodeType: 'record',
-            description: `Chat: ${convName}`,
-            data: initialChatData as InputJsonValue,
-            // #914: record the creator on the audit column too, not only
-            // inside `data.userId`. The column survives encryption and is
-            // what #915's audit expects to find. It stays PROVENANCE — the
-            // chat's creator is never an authorization gate (cor:acl:030:01),
-            // because every member of the host may post here.
-            createdBy: ctx.userId ?? null,
-          },
-        });
-        // Create the messages parent (so the chat subtree is well-formed)
-        const messagesNodeId = generateId();
-        startedNodes.push({
-          id: messagesNodeId, loc: `${chatLoc}:messages`, memoryId: targetMemoryId,
-        });
-        await tx.node.create({
-          data: {
-            id: messagesNodeId, memoryId: targetMemoryId, loc: `${chatLoc}:messages`,
-            name: 'messages', nodeType: 'record',
-            createdBy: ctx.userId ?? null,
-          },
-        });
-      });
+      }
+      if (!chatStarted) throw new Error('The Agent\'s access changed repeatedly while starting the chat; retry.');
 
       // #1061 — starting a chat creates two real nodes (the chat record and its
       // messages parent), so it is two writes.
