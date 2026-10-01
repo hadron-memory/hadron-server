@@ -56,6 +56,16 @@ describe('hadron-cli#791 — Session.isLive', () => {
     });
   });
 
+  it('a soft-deleted session is never live, matching the bind gate and Worker.hasLiveSession (Codex-worker P2)', async () => {
+    const deleted = await db.session.create({
+      data: { id: generateId(), userId: admin.id, type: 'DEVELOPER', startedAt: new Date(Date.now() - 1 * H), deletedAt: new Date() } as never,
+    });
+    const res = await server.executeOperation({ query: 'query($id: ID!) { session(id: $id) { id isLive } }', variables: { id: deleted.id } }, { contextValue: ctx() });
+    if (res.body.kind !== 'single') throw new Error('unexpected incremental response');
+    expect(res.body.singleResult.errors).toBeUndefined();
+    expect(res.body.singleResult.data).toEqual({ session: { id: deleted.id, isLive: false } });
+  });
+
   it('a session list costs ONE grouped usage-event query, not one per row', async () => {
     for (let i = 0; i < 6; i++) await session({ startedAt: new Date(Date.now() - i * H) });
     const groupBy = vi.spyOn(db.usageEvent, 'groupBy');

@@ -1784,18 +1784,22 @@ export const typeResolvers = {
         updatedAt?: Date | null;
         autoExpiredAt?: Date | null;
         endedAt?: Date | null;
+        deletedAt?: Date | null;
       },
       _: unknown,
       ctx: Context,
     ) => {
-      const row = s.type && s.startedAt
+      const row = s.type && s.startedAt && s.deletedAt !== undefined
         ? s
         : await ctx.db.session.findUnique({
             where: { id: s.id },
-            select: { id: true, type: true, startedAt: true, updatedAt: true, autoExpiredAt: true, endedAt: true },
+            select: { id: true, type: true, startedAt: true, updatedAt: true, autoExpiredAt: true, endedAt: true, deletedAt: true },
           });
       if (!row || !row.type || !row.startedAt) return false;
-      if (row.endedAt) return false;
+      // A soft-deleted session drives nothing (Codex-worker P2 on #1547): the
+      // bind gate and Worker.hasLiveSession both exclude it, and isLive must
+      // agree with them even where a Session read can still return the row.
+      if (row.endedAt || row.deletedAt) return false;
       const lastEventAt = await lastEventAtBatched(ctx, row.id);
       return isSessionLive(row as Parameters<typeof isSessionLive>[0], lastEventAt, new Date());
     },

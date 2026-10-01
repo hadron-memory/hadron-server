@@ -1569,7 +1569,7 @@ export const typeDefs = `#graphql
     WORKER_TAKEN gate and Worker.hasLiveSession, so the three always agree.
     An open session that is not live has LAPSED: nobody drove it inside the
     window, so another driver may bind its worker; it is not ended, and can
-    still be ended with a handoff. False for an ended session.
+    still be ended with a handoff. False for an ended or deleted session.
     """
     isLive: Boolean!
     events: [UsageEvent!]!
