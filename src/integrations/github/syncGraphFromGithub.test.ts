@@ -348,7 +348,7 @@ describe('syncGraphFromGithub', () => {
 
     rmSync(writeOnlyPath, { recursive: true, force: true });
     writeNodeFiles(join(repoPath, 'main-change'), { name: 'Main change' }, 'from main');
-    await db.memory.update({ where: { id: dbGraphId }, data: { readBranch: null } });
+    await db.memory.update({ where: { id: dbGraphId }, data: { readBranch: null, readBranchCorrected: false } });
     const first = await syncGraphFromGithub(makeGraph({ readBranch: null }));
     expect(first.error).toContain('GIT_SYNC_REVIEW_REQUIRED');
     expect(first.error).toContain('hadron-note');
@@ -357,7 +357,7 @@ describe('syncGraphFromGithub', () => {
     // upsert may commit beside a held deletion.
     expect(await db.node.findFirst({ where: { memoryId: dbGraphId, loc: 'main-change' } })).toBeNull();
     expect(await db.memory.findUnique({ where: { id: dbGraphId } })).toMatchObject({
-      syncStatus: 'ERROR', syncError: expect.stringContaining('GIT_SYNC_REVIEW_REQUIRED'),
+      syncStatus: 'ERROR', syncError: expect.stringContaining('GIT_SYNC_REVIEW_REQUIRED'), readBranchCorrected: false,
     });
 
     // A later boot/webhook still cannot prune it without human review.
@@ -370,6 +370,24 @@ describe('syncGraphFromGithub', () => {
     expect((await syncGraphFromGithub(makeGraph({ readBranch: 'main' }))).error).toBeUndefined();
     expect(await db.node.findUnique({ where: { id: hadronId } })).toBeNull();
     expect(await db.node.findFirst({ where: { memoryId: dbGraphId, loc: 'main-change' } })).not.toBeNull();
+    expect((await db.memory.findUniqueOrThrow({ where: { id: dbGraphId } })).readBranchCorrected).toBe(true);
+  });
+
+  it('marks a clean first corrected sync, then permits later default-branch deletions', async () => {
+    // New and pre-fix rows both begin pending; a clean first sync releases
+    // normal repo-wins cleanup without an operator round-trip.
+    expect((await db.memory.findUniqueOrThrow({ where: { id: dbGraphId } })).readBranchCorrected).toBe(false);
+    await db.memory.update({ where: { id: dbGraphId }, data: { readBranch: null } });
+    const repoPath = join(mockSources, 'test-org', 'test/repo');
+    mkdirSync(join(repoPath, '.git'), { recursive: true });
+    const nodePath = join(repoPath, 'ordinary');
+    writeNodeFiles(nodePath, { name: 'Ordinary' }, 'from main');
+
+    expect((await syncGraphFromGithub(makeGraph({ readBranch: null }))).error).toBeUndefined();
+    expect((await db.memory.findUniqueOrThrow({ where: { id: dbGraphId } })).readBranchCorrected).toBe(true);
+    rmSync(nodePath, { recursive: true, force: true });
+    expect((await syncGraphFromGithub(makeGraph({ readBranch: null }))).error).toBeUndefined();
+    expect(await db.node.findFirst({ where: { memoryId: dbGraphId, loc: 'ordinary' } })).toBeNull();
   });
 
   it('waits for the mirror checkout lock before any Git or filesystem read', async () => {

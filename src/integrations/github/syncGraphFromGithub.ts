@@ -574,7 +574,7 @@ export const syncGraphFromGithub = async (
       // flip the corpus out of draft between this check and the node writes.
       // #1348 uses the same fenced read for the property schema.
       const memoryState = await tx.memory.findUniqueOrThrow({
-        where: { id: graph.id }, select: { urn: true, schema: true, corpusDraft: true, readBranch: true },
+        where: { id: graph.id }, select: { urn: true, schema: true, corpusDraft: true, readBranch: true, readBranchCorrected: true },
       });
       // `graph` was fetched before Git I/O. A branch edit during that window
       // must not authorize cleanup from a tree fetched under the old config.
@@ -1210,14 +1210,13 @@ export const syncGraphFromGithub = async (
           ...unreadableLocFilter,
         };
         const pruned = await tx.node.findMany({ where: cleanupWhere, select: { id: true, loc: true } });
-        if (memoryState.readBranch == null && pruned.length > 0) {
+        if (memoryState.readBranch == null && !memoryState.readBranchCorrected && pruned.length > 0) {
           // #1566: old blank-read syncs could ingest the write branch and
           // adopt Hadron-created nodes as repo-owned. Boot sync runs before an
-          // operator can inspect them. Keep EVERY absent repo-owned row while
-          // Read branch is blank; an explicit branch is the human's review/
-          // cleanup decision. Roll back the WHOLE transaction to preserve the
-          // all-or-nothing Git-sync contract (cor:int:010:01). The outer catch
-          // records this coded error on the Memory for operator review.
+          // operator can inspect them. On this memory's FIRST corrected sync,
+          // an absent repo-owned row needs human review. Roll back the WHOLE
+          // transaction (cor:int:010:01); the outer catch records the coded
+          // error. An explicit Read branch is the review/cleanup decision.
           throw new GitSyncRecoveryReviewRequired(pruned.map((node) => node.loc));
         } else {
           const crossMemoryEdges = await countCrossMemoryEdgesForNodeDelete(
@@ -1464,7 +1463,7 @@ export const syncGraphFromGithub = async (
     // 5. Record sync time and status
     await db.memory.update({
       where: { id: graph.id },
-      data: { lastSyncedAt: new Date(), syncStatus: 'OK', syncError: null },
+      data: { lastSyncedAt: new Date(), syncStatus: 'OK', syncError: null, readBranchCorrected: true },
     }).catch(() => {});
 
     // 6. Spec 033 T029 — enqueue embedding for each upserted node now that
