@@ -38,6 +38,7 @@ import {
   isAuthorizationDenial,
   requireOwnerOrOrgRole,
 } from './resolvers.helpers.js';
+import { LIVE_ORG_MEMBERSHIP } from '../../../lib/auth/liveOrgMembership.js';
 
 /**
  * May this caller OPEN the resolved resource? (`cor:acl:060:01`, amended
@@ -225,7 +226,7 @@ export const orgQueries = {
             deletedAt: null,
             // Impersonation: co-membership counts only in the shared org.
             ...(ctx.impersonation ? { organizationId: ctx.impersonation.orgId } : {}),
-            organization: { members: { some: { userId: id, deletedAt: null } } },
+            organization: { deletedAt: null, members: { some: { userId: id, deletedAt: null } } },
           },
           select: { organizationId: true },
         });
@@ -503,7 +504,7 @@ export const orgQueries = {
       const isMember =
         ctx.userId && (!ctx.impersonation || ctx.impersonation.orgId === resolvedId)
           ? !!(await ctx.db.orgMember.findFirst({
-              where: { organizationId: resolvedId, userId: ctx.userId, deletedAt: null },
+              where: { organizationId: resolvedId, userId: ctx.userId, ...LIVE_ORG_MEMBERSHIP },
             }))
           : false;
       if (!isMember) {

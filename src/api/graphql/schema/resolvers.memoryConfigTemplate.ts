@@ -61,6 +61,7 @@ import {
   requireWriter,
   ruleRefFieldResolvers,
 } from './resolvers.memoryConfig.js';
+import { LIVE_ORG_MEMBERSHIP } from '../../../lib/auth/liveOrgMembership.js';
 
 export type TemplateOwnerType = 'HADRON_SERVER' | 'ORGANIZATION' | 'USER' | 'APP';
 
@@ -346,9 +347,8 @@ async function manageableWhere(ctx: Context): Promise<Prisma.MemoryConfigTemplat
     const rows = await ctx.db.orgMember.findMany({
       where: {
         userId: ctx.userId,
-        deletedAt: null,
+        ...LIVE_ORG_MEMBERSHIP,
         role: { in: ['ADMIN', 'OWNER'] },
-        organization: { deletedAt: null },
         ...(ctx.impersonation ? { organizationId: ctx.impersonation.orgId } : {}),
       },
       select: { organizationId: true },

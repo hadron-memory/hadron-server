@@ -61,6 +61,7 @@ export type {
   EffectiveAccessResult,
   Subject,
 } from '@hadron-memory/access-control';
+import { LIVE_ORG_MEMBERSHIP } from './liveOrgMembership.js';
 
 // ─── Resource resolution ────────────────────────────────────────────────────
 
@@ -118,11 +119,11 @@ async function orgMemberRole(
   orgId: string,
   userId: string,
 ): Promise<'OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER' | null> {
-  const m = await db.orgMember.findUnique({
-    where: { organizationId_userId: { organizationId: orgId, userId } },
-    select: { role: true, deletedAt: true },
+  const m = await db.orgMember.findFirst({
+    where: { organizationId: orgId, userId, ...LIVE_ORG_MEMBERSHIP },
+    select: { role: true },
   });
-  if (!m || m.deletedAt) return null;
+  if (!m) return null;
   return m.role as 'OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER';
 }
 
@@ -516,7 +517,7 @@ async function agentGrants(
   const memberships = await db.orgMember.findMany({
     where: {
       userId: subject.id,
-      deletedAt: null,
+      ...LIVE_ORG_MEMBERSHIP,
       ...(restrictOrgId ? { organizationId: restrictOrgId } : {}),
     },
     select: { organizationId: true },

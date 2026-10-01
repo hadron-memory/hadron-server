@@ -7,6 +7,7 @@ import { type Context, clampListTake, toISO, requireOrgRole } from './resolvers.
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
 import { resolveUserRef } from '../../../lib/entityRef/userRef.js';
 import { generateId } from '../../../lib/id.js';
+import { LIVE_ORG_MEMBERSHIP } from '../../../lib/auth/liveOrgMembership.js';
 
 const badInput = (message: string) =>
   new GraphQLError(message, { extensions: { code: 'BAD_USER_INPUT' } });
@@ -193,7 +194,7 @@ export const principalGrantMutations = {
 
     const { id: principalId } = await resolveUserRef(ctx.db, userRef);
     const membership = await ctx.db.orgMember.findFirst({
-      where: { organizationId: orgId, userId: principalId, deletedAt: null },
+      where: { organizationId: orgId, userId: principalId, ...LIVE_ORG_MEMBERSHIP },
       select: { userId: true },
     });
     if (!membership) {

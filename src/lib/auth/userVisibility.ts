@@ -1,4 +1,5 @@
 import type { PrismaClient } from '../../generated/prisma/index.js';
+import { LIVE_ORG_MEMBERSHIP } from './liveOrgMembership.js';
 
 /**
  * Field-level user-visibility rules — hadron-server#384.
@@ -93,7 +94,7 @@ function sharesOrgWith(ctx: UserVisibilityCtx, viewerId: string, targetUserId: s
       const orgIds = await viewerOrgIds(ctx, viewerId);
       if (orgIds.length === 0) return false;
       const row = await ctx.db.orgMember.findFirst({
-        where: { userId: targetUserId, organizationId: { in: orgIds }, deletedAt: null },
+        where: { userId: targetUserId, organizationId: { in: orgIds }, ...LIVE_ORG_MEMBERSHIP },
         select: { userId: true },
       });
       return row !== null;

@@ -142,6 +142,7 @@ import {
   type MergeMemoriesInput,
 } from './resolvers.helpers.js';
 import { requireOrgAction } from '../../../lib/auth/orgAction.js';
+import { LIVE_ORG_MEMBERSHIP } from '../../../lib/auth/liveOrgMembership.js';
 
 /**
  * #561 — refuse a `Memory.source` that is not a GitHub repository URL.
@@ -599,10 +600,10 @@ export const memoryMutations = {
         // NOT requireOrgRole, whose global ADMIN/OWNER bypass would let a
         // platform admin create a personal/private memory in an org they don't
         // belong to.
-        const orgMembership = await ctx.db.orgMember.findUnique({
-          where: { organizationId_userId: { organizationId: resolvedOrgId!, userId: ctx.userId! } },
+        const orgMembership = await ctx.db.orgMember.findFirst({
+          where: { organizationId: resolvedOrgId!, userId: ctx.userId!, ...LIVE_ORG_MEMBERSHIP },
         });
-        if (!orgMembership || orgMembership.deletedAt) {
+        if (!orgMembership) {
           throw new GraphQLError(
             'You must be a member of the organization to create a personal/private memory in it.',
             { extensions: { code: 'FORBIDDEN' } },
@@ -1386,7 +1387,7 @@ export const memoryMutations = {
           );
         }
         const membership = await ctx.db.orgMember.findFirst({
-          where: { organizationId: targetOrgId, userId: ctx.userId, deletedAt: null },
+          where: { organizationId: targetOrgId, userId: ctx.userId, ...LIVE_ORG_MEMBERSHIP },
         });
         if (!membership || membership.role === 'READER') {
           throw new GraphQLError(
@@ -1559,7 +1560,7 @@ export const memoryMutations = {
           );
         }
         const membership = await ctx.db.orgMember.findFirst({
-          where: { organizationId: targetOrgId, userId: ctx.userId, deletedAt: null },
+          where: { organizationId: targetOrgId, userId: ctx.userId, ...LIVE_ORG_MEMBERSHIP },
         });
         if (!membership) {
           throw new GraphQLError(
@@ -1603,7 +1604,7 @@ export const memoryMutations = {
             );
           }
           const membership = await ctx.db.orgMember.findFirst({
-            where: { organizationId: targetOrgId, userId: ctx.userId, deletedAt: null },
+            where: { organizationId: targetOrgId, userId: ctx.userId, ...LIVE_ORG_MEMBERSHIP },
           });
           if (!membership || membership.role === 'READER') {
             throw new GraphQLError(
@@ -1962,14 +1963,14 @@ export const memoryMutations = {
         // spec 047: a user-owned memory has no org — no org-admin via this path.
         if (memory.organizationId === null) return false;
         const m = await ctx.db.orgMember.findFirst({
-          where: { organizationId: memory.organizationId, userId: ctx.userId, deletedAt: null },
+          where: { organizationId: memory.organizationId, userId: ctx.userId, ...LIVE_ORG_MEMBERSHIP },
         });
         return m?.role === 'ADMIN' || m?.role === 'OWNER';
       };
       const isSubscriberAdmin = async () => {
         if (!ctx.userId) return false;
         const m = await ctx.db.orgMember.findFirst({
-          where: { organizationId: resolvedOrgId, userId: ctx.userId, deletedAt: null },
+          where: { organizationId: resolvedOrgId, userId: ctx.userId, ...LIVE_ORG_MEMBERSHIP },
         });
         return m?.role === 'ADMIN' || m?.role === 'OWNER';
       };

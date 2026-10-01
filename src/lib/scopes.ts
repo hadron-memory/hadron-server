@@ -41,6 +41,7 @@ import { resolveOrgRef } from './entityRef/orgRef.js';
 import { narrowToAccessible } from './auth/narrowToAccessible.js';
 import { resolveActiveOrg, type ActiveOrgResolution } from './auth/activeOrg.js';
 import { isLifecycleActive } from '@hadron-memory/access-control';
+import { LIVE_ORG_MEMBERSHIP } from './auth/liveOrgMembership.js';
 
 /** The ladder's built-in tokens (D-2026-09-13-002); a scope may not take either name. */
 export const RESERVED_SCOPE_NAMES: ReadonlySet<string> = new Set(['global', 'app']);
@@ -280,7 +281,7 @@ export async function readableScopesWhere(
     await ctx.db.orgMember.findMany({
       where: {
         userId: ctx.userId,
-        deletedAt: null,
+        ...LIVE_ORG_MEMBERSHIP,
         role: { in: ['CONTRIBUTOR', 'ADMIN', 'OWNER'] },
         organizationId: { in: memberOrgIds },
       },

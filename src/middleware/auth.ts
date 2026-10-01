@@ -3,6 +3,7 @@ import type { Request } from 'express';
 import type { PrismaClient, UserApiKey } from '../generated/prisma/index.js';
 import { verifyJwt } from '../auth/jwt.js';
 import { canImpersonate, type ImpersonationContext } from '../lib/auth/impersonation.js';
+import { LIVE_ORG_MEMBERSHIP } from '../lib/auth/liveOrgMembership.js';
 
 export interface AuthContext {
   clientId?: string;       // "github:<username>" / "email:<addr>" — only set for OAuth/JWT users
@@ -561,11 +562,11 @@ async function resolveImpersonationJwt(
 
   const [targetMembership, adminMembership] = await Promise.all([
     db.orgMember.findFirst({
-      where: { organizationId: imp.org, userId: session.targetUserId, deletedAt: null },
+      where: { organizationId: imp.org, userId: session.targetUserId, ...LIVE_ORG_MEMBERSHIP },
       select: { role: true },
     }),
     db.orgMember.findFirst({
-      where: { organizationId: imp.org, userId: session.adminUserId, deletedAt: null },
+      where: { organizationId: imp.org, userId: session.adminUserId, ...LIVE_ORG_MEMBERSHIP },
       select: { role: true },
     }),
   ]);

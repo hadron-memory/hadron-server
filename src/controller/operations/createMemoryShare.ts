@@ -33,6 +33,7 @@ import type {
   MemoryShareRole,
   MemoryShare,
 } from '../../generated/prisma/index.js';
+import { LIVE_ORG_MEMBERSHIP } from '../../lib/auth/liveOrgMembership.js';
 
 export class InvalidMemoryClassForShareError extends Error {
   constructor(memoryId: string, actualClass: string) {
@@ -132,7 +133,7 @@ export async function createMemoryShare(
   // deletedAt: null so a REVOKED membership no longer qualifies.
   if (memory.organizationId !== null && memory.userMemoryOfAgentId === null) {
     const member = await db.orgMember.findFirst({
-      where: { organizationId: memory.organizationId, userId: args.granteeId, deletedAt: null },
+      where: { organizationId: memory.organizationId, userId: args.granteeId, ...LIVE_ORG_MEMBERSHIP },
       select: { userId: true },
     });
     if (!member) {

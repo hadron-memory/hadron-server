@@ -28,6 +28,7 @@ import {
   resolveOrgRefArg,
   resolveUserRefArg,
 } from './resolvers.helpers.js';
+import { LIVE_ORG_MEMBERSHIP } from '../../../lib/auth/liveOrgMembership.js';
 
 const forbidden = () =>
   new GraphQLError('Forbidden', { extensions: { code: 'FORBIDDEN' } });
@@ -62,7 +63,7 @@ async function canAdministerSession(
     where: {
       organizationId: session.organizationId,
       userId: ctx.userId,
-      deletedAt: null,
+      ...LIVE_ORG_MEMBERSHIP,
       role: { in: ['ADMIN', 'OWNER'] },
     },
     select: { userId: true },
@@ -95,7 +96,7 @@ export const impersonationMutations = {
     // live ADMIN/OWNER membership in the named org is required.
     const platformAdmin = isPlatformAdmin(ctx);
     const callerMembership = await ctx.db.orgMember.findFirst({
-      where: { organizationId: orgId, userId: ctx.userId, deletedAt: null },
+      where: { organizationId: orgId, userId: ctx.userId, ...LIVE_ORG_MEMBERSHIP },
       select: { role: true },
     });
     const callerOrgRole = callerMembership?.role ?? null;
@@ -255,7 +256,7 @@ export const impersonationQueries = {
         where: {
           organizationId: scopedOrgId!,
           userId: ctx.userId,
-          deletedAt: null,
+          ...LIVE_ORG_MEMBERSHIP,
           role: { in: ['ADMIN', 'OWNER'] },
         },
         select: { userId: true },

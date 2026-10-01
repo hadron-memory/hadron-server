@@ -84,6 +84,7 @@ import {
   toUsageNodeRefs,
 } from '../../../lib/usageRecorder.js';
 import { ensureCurrentNodeRevisionInTransaction } from '../../../lib/nodeRevisionSnapshot.js';
+import { LIVE_ORG_MEMBERSHIP } from '../../../lib/auth/liveOrgMembership.js';
 
 /** findNodes' arguments (cor:api:090), shared by the resolver and its spec-049 scope wrapper. */
 export interface FindNodesArgs {
@@ -340,7 +341,7 @@ export const nodeQueries = {
         if (isGlobalAdmin) return true;
         if (!ctx.userId) return false;
         const member = await ctx.db.orgMember.findFirst({
-          where: { organizationId: orgId, userId: ctx.userId, deletedAt: null },
+          where: { organizationId: orgId, userId: ctx.userId, ...LIVE_ORG_MEMBERSHIP },
         });
         return !!member;
       };
@@ -518,7 +519,7 @@ export const nodeQueries = {
                 deletedAt: null,
                 // Impersonation: co-membership counts only in the shared org.
                 ...(ctx.impersonation ? { organizationId: ctx.impersonation.orgId } : {}),
-                organization: { members: { some: { userId: id, deletedAt: null } } },
+                organization: { deletedAt: null, members: { some: { userId: id, deletedAt: null } } },
               },
               select: { organizationId: true },
             });
