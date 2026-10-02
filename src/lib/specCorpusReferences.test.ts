@@ -204,6 +204,8 @@ describe('renumberSpec (#1449)', () => {
     expect(await codeOf(renumber(false, 'pas:010', 'pas:010:02'))).toBe('BAD_USER_INPUT');
     // #1591: draft rights are per node, so one minted descendant refuses the whole renumber.
     await db.node.updateMany({ where: { memoryId: draft.id, loc: 'pas:010:01' }, data: { mintedAt: new Date(), mintedByInfo: 'test' } });
+    // A dry run refuses exactly as the real run does (Atilla, PR #1593).
+    expect(await codeOf(renumber(true, 'pas:010', 'pas:040'))).toBe('NODE_MINTED');
     expect(await codeOf(renumber(false, 'pas:010', 'pas:040'))).toBe('NODE_MINTED');
     expect((await db.node.findUniqueOrThrow({ where: { id: feature.id } })).loc).toBe('pas:010');
     expect(await db.node.count({ where: { memoryId: draft.id, loc: { startsWith: 'pas:040' } } })).toBe(0);

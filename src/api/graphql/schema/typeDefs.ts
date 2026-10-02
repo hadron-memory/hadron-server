@@ -5993,6 +5993,8 @@ export const typeDefs = `#graphql
     STALE_ABSTRACT
     "#1591 — the node's current revision is not approved."
     NOT_APPROVED
+    "#1591 — the approved revision's text changed outside the revision system, so it no longer matches its approval hash. Re-approve it."
+    TAMPERED
     "#1591 — an edge into another memory's node that is not minted yet (targetLoc is its URN)."
     CITES_UNMINTED
   }
@@ -7747,7 +7749,8 @@ export const typeDefs = `#graphql
     nodes: a placeholder, an unresolved reference, a structural lint error over
     the citation-shaped nodes (nodetype-info, tag-spec, serialization-leak,
     duplicate-loc), a stale abstract once staleAbstractsBlock is true,
-    NOT_APPROVED (the current revision is not approved), or CITES_UNMINTED (an
+    NOT_APPROVED (the current revision is not approved), TAMPERED (approved
+    text changed outside the revision system), or CITES_UNMINTED (an
     edge into another memory's node that is not minted). Nodes minted earlier
     are not re-checked. dryRun returns the full report without minting. Any
     writer of the memory. memoryRef accepts the ID or URN. A real run holds

@@ -115,6 +115,33 @@ describe('mintMemoryNodes (#1591)', () => {
   });
 });
 
+describe('mint certifies the text it stamps (Atilla, PR #1593)', () => {
+  it('refuses TAMPERED when approved text changed outside the revision system; re-approving clears it', async () => {
+    const n = await spec('pas:010');
+    await approveAll();
+    // A direct write: the revision number and the approval both stay put.
+    await db.$executeRaw`UPDATE nodes SET content = 'Quietly changed.' WHERE id = ${n.id}`;
+    expect((await rowOf(n.id)).approvedRevNo).toBe((await rowOf(n.id)).revSeq);
+
+    const dry = await mint(true);
+    expect(dry.blockers).toEqual([expect.objectContaining({ kind: 'TAMPERED', loc: 'pas:010' })]);
+    expect(await codeOf(mint())).toBe('SPEC_CORPUS_MINT_BLOCKED');
+    expect((await rowOf(n.id)).mintedAt).toBeNull();
+    const report = await resolvers.Query.verifyMemoryNodes(null, { memoryRef: memory.id }, as());
+    expect(report.problems.map((p: { loc: string; state: string }) => [p.loc, p.state])).toContainEqual(['pas:010', 'TAMPERED']);
+
+    // Approve reconciles the drift into a new revision first, so re-approving
+    // approves the changed text, and the mint then stamps exactly that.
+    const again = await approveAll();
+    expect(again.approved.map((r: { loc: string }) => r.loc)).toEqual(['pas:010']);
+    const done = await mint();
+    expect(done).toMatchObject({ minted: true, mintLocs: ['pas:010', 'specs'] });
+    const row = await rowOf(n.id);
+    expect(row.mintedRevNo).toBe(2);
+    expect(row.mintedHash).toBe(row.approvalHash);
+  });
+});
+
 describe('approveMemoryNodes skips minted nodes (#1591)', () => {
   it('approves only unminted ones', async () => {
     const minted = await spec('pas:010', { mintedAt: new Date(), mintedByInfo: 'test' });

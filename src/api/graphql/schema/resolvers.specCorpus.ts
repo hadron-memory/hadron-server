@@ -30,6 +30,8 @@ import { pendingEdgeStableTargetId } from '../../../lib/pendingEdgePromotion.js'
 import { MemoryNotFoundError } from '../../../lib/asset/gate.js';
 import { editorFromAuth, ensureCurrentNodeRevisionInTransaction } from '../../../lib/nodeRevisionSnapshot.js';
 import { mayMintNodes } from './resolvers.nodeApproval.js';
+import { computeApprovalHash } from '../../../lib/approvalHash.js';
+import { SubtreeMoveMintedError } from '../../../lib/nodeSubtreeMove.js';
 import { InvalidLocError, validateLoc } from '../../../lib/validateLoc.js';
 import {
   SCANNED_FIELDS,
@@ -918,6 +920,20 @@ export const specCorpusRenumberMutations = {
         extensions: { code: 'NodeLocConflictError', loc: occupied.loc, memoryId: corpus.id },
       });
     }
+    // #1591: the same per-node draft-rights rule the mover enforces under its
+    // locks, decided here too so a dry run plans only what a real run would
+    // do (Atilla, PR #1593). The mover still re-decides it under the locks.
+    const mintedLocs = (await ctx.db.node.findMany({
+      where: { id: { in: movingNodes.map((n) => n.id) }, mintedAt: { not: null } },
+      select: { loc: true },
+      orderBy: { loc: 'asc' },
+    })).map((n) => n.loc);
+    if (mintedLocs.length > 0) {
+      const refusal = new SubtreeMoveMintedError(corpus.id, mintedLocs);
+      throw new GraphQLError(refusal.message, {
+        extensions: { code: 'NODE_MINTED', memoryId: corpus.id, locs: mintedLocs.slice(0, 10), count: mintedLocs.length },
+      });
+    }
 
     // (@codex P2, #1453) Decide which references are ours BEFORE the move.
     // When a prior holder of our URN also has a node at fromLoc, our own live
@@ -1079,7 +1095,7 @@ function validateLocOrThrow(loc: string): void {
 // ─── #1448 — minting: draft → minted, once, one-way ─────────────────────────
 
 /** Why the mint report lists an item. */
-type MintFindingKind = 'PLACEHOLDER' | 'UNRESOLVED_REFERENCE' | 'LINT' | 'STALE_ABSTRACT' | 'NOT_APPROVED' | 'CITES_UNMINTED';
+type MintFindingKind = 'PLACEHOLDER' | 'UNRESOLVED_REFERENCE' | 'LINT' | 'STALE_ABSTRACT' | 'NOT_APPROVED' | 'TAMPERED' | 'CITES_UNMINTED';
 
 type MintFinding = {
   kind: MintFindingKind;
@@ -1194,7 +1210,7 @@ async function mintMemoryNodes(
       select: {
         id: true, loc: true, nodeType: true, tags: true, role: true, isPlaceholder: true, revSeq: true,
         name: true, description: true, abstract: true, content: true, abstractOriginHash: true,
-        mintedAt: true, approvedRevNo: true,
+        mintedAt: true, approvedRevNo: true, approvalHash: true,
       },
     });
     const inScope = nodes.filter((n) => n.mintedAt === null);
@@ -1235,7 +1251,21 @@ async function mintMemoryNodes(
       blockers.push({ kind: 'LINT', loc: f.loc, rule: f.rule, message: f.message, targetLoc: null });
     }
     for (const n of inScope) {
-      if (n.isPlaceholder || n.approvedRevNo === n.revSeq) continue;
+      if (n.isPlaceholder) continue;
+      if (n.approvedRevNo === n.revSeq) {
+        // The approval names the current revision, but a write outside the
+        // revision system leaves that number unchanged: recompute the hash
+        // the mint is about to certify (Atilla, PR #1593). The memory is
+        // plaintext here (an encrypted one is refused above).
+        const actual = computeApprovalHash({ title: n.name, abstract: n.abstract, content: n.content });
+        if (actual !== n.approvalHash) {
+          blockers.push({
+            kind: 'TAMPERED', loc: n.loc, rule: null, targetLoc: null,
+            message: `revision ${n.revSeq} changed after it was approved, outside the revision system; re-approve it`,
+          });
+        }
+        continue;
+      }
       blockers.push({
         kind: 'NOT_APPROVED', loc: n.loc, rule: null, targetLoc: null,
         message: n.approvedRevNo === null
@@ -1308,8 +1338,9 @@ async function mintMemoryNodes(
     if (inScope.length === 0) return report;
     const now = new Date();
     const minter = editorFromAuth(ctx);
-    // Every node in scope passed NOT_APPROVED under this fence, so each one's
-    // approval names its current revision: stamp that revision and its hash.
+    // Every node in scope passed NOT_APPROVED and TAMPERED under this fence,
+    // so each one's approval names its current revision and its stored hash
+    // equals the text being minted: stamp that revision and that hash.
     const ids = [...inScopeIds];
     const mintedCount = await tx.$executeRaw`
       UPDATE nodes SET
