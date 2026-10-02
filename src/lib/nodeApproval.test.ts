@@ -177,6 +177,61 @@ describe('approve racing an edit (#1591)', () => {
   });
 });
 
+describe('the re-read under the lock is pinned to a live row in the gated memory (PR #1592 review)', () => {
+  it('refuses NODE_NOT_FOUND, stamping nothing, when a soft delete commits while approve waits on the row', async () => {
+    const n = await node('a:1');
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    let locked!: () => void;
+    const isLocked = new Promise<void>((r) => { locked = r; });
+    const deleting = db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM nodes WHERE id = ${n.id} FOR UPDATE`;
+      await tx.node.update({ where: { id: n.id }, data: { deletedAt: new Date() } });
+      locked();
+      await gate;
+    }, { timeout: 20_000 });
+    await isLocked;
+    // Passes the live-node precheck (the delete is not committed), then waits.
+    const approving = codeOf(approve(n.id));
+    await waitForLockWaitersOfType(db, 'transactionid');
+    release();
+    await deleting;
+    expect(await approving).toBe('NODE_NOT_FOUND');
+    expect(await db.node.findUniqueOrThrow({ where: { id: n.id } })).toMatchObject({ approvedRevNo: null, approvalHash: null });
+  });
+
+  it('verifyNode answers NODE_NOT_FOUND, disclosing nothing, when the node moves to an unreadable memory after the gate', async () => {
+    const n = await node('a:1');
+    const hidden = await db.memory.create({ data: {
+      id: generateId(), urn: 'approve.example:hidden', name: 'hidden', class: 'private',
+      userId: outsider.id, ownerUserId: outsider.id,
+    } });
+    // Move the node right after verifyNode's read gate passes: the next thing
+    // it does is look up the memory's encryption flag.
+    const moveOnce = { done: false };
+    const interleaved = new Proxy(db, {
+      get(target, prop, receiver) {
+        if (prop !== 'memory') return Reflect.get(target, prop, receiver);
+        return new Proxy(target.memory, {
+          get(m, mp, mr) {
+            if (mp !== 'findUniqueOrThrow') return Reflect.get(m, mp, mr);
+            return async (args: Parameters<typeof m.findUniqueOrThrow>[0]) => {
+              if (!moveOnce.done) {
+                moveOnce.done = true;
+                await db.node.update({ where: { id: n.id }, data: { memoryId: hidden.id, content: 'private text' } });
+              }
+              return m.findUniqueOrThrow(args);
+            };
+          },
+        });
+      },
+    }) as typeof db;
+    const code = await codeOf(resolvers.Query.verifyNode(null, { nodeRef: n.id }, { db: interleaved, userId: admin.id, roles: [] }));
+    expect(moveOnce.done).toBe(true);
+    expect(code).toBe('NODE_NOT_FOUND');
+  });
+});
+
 describe('approveMemoryNodes (#1591)', () => {
   it('approves every unapproved live node, skips placeholders, and leaves approved ones alone', async () => {
     const a = await node('a:1');

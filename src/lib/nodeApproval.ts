@@ -137,10 +137,15 @@ export async function approveNodeInTransaction(
 ): Promise<{ node: NodeApprovalRow; approvedNow: boolean }> {
   const revision = await ensureCurrentNodeRevisionInTransaction(tx, nodeId, { expectedMemoryId: opts.memoryId });
   if (revision == null) throw new NodeApprovalRefusal('NODE_NOT_FOUND', 'Node not found');
-  const { updatedAt, ...node } = await tx.node.findUniqueOrThrow({
-    where: { id: nodeId },
+  // Re-read under the lock, pinned to the authorized memory and to a LIVE row:
+  // a soft delete that committed while this waited must not get an approval
+  // stamped on its tombstone (Atilla/Chip, PR #1592).
+  const locked = await tx.node.findFirst({
+    where: { id: nodeId, memoryId: opts.memoryId, deletedAt: null },
     select: { ...NODE_APPROVAL_ROW_SELECT, updatedAt: true },
   });
+  if (!locked) throw new NodeApprovalRefusal('NODE_NOT_FOUND', 'Node not found');
+  const { updatedAt, ...node } = locked;
   if (opts.expectedRevision != null && opts.expectedRevision !== node.revSeq) {
     throw new NodeApprovalRefusal(
       'REVISION_MISMATCH',

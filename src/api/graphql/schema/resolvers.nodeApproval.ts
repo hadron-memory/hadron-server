@@ -128,7 +128,14 @@ export const nodeApprovalQueries = {
     const { id, memoryId } = await resolveLiveNode(ctx, nodeRef);
     if (!(await isMemoryReadableCached(ctx, memoryId))) throw nodeNotFound(nodeRef);
     const key = await keyForMemory(ctx, memoryId);
-    const node = await ctx.db.node.findUniqueOrThrow({ where: { id }, select: NODE_APPROVAL_ROW_SELECT });
+    // Pinned to the memory the read gate admitted, and live: a node moved into
+    // another memory since the gate must not disclose that memory's loc or a
+    // hash of its text (Atilla/Chip, PR #1592).
+    const node = await ctx.db.node.findFirst({
+      where: { id, memoryId, deletedAt: null },
+      select: NODE_APPROVAL_ROW_SELECT,
+    });
+    if (!node) throw nodeNotFound(nodeRef);
     const [result] = await integrityOf(ctx, memoryId, [node], key);
     return integrityCheckView(ctx, result!, memoryId);
   },
