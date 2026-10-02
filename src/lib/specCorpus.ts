@@ -1,34 +1,35 @@
 /**
- * Draft spec corpora (#1447, contract
- * https://github.com/hadron-memory/hadron-server/issues/1447#issuecomment-5895948862).
+ * Spec corpus state (#1447/#1448), per node since #1591.
  *
- * A spec corpus is DRAFT or MINTED. Draft is chosen only when the memory is
- * created (`createMemory(draftCorpus: true)`), and minting turns it into a
- * minted corpus once, one-way, for the whole memory. Every memory that exists
- * today, and every memory created without asking for draft, is minted.
- *
- * Inside a draft corpus a spec's citation is not yet permanent: specs can be
- * renumbered, moved and deleted, and a move records NO `UrnAlias`, because
- * nothing outside the corpus can cite a draft number (#1448). After minting,
- * the ordinary rules apply unchanged.
- *
- * This module is the ONE definition of "is this memory a draft corpus?", so
- * the relaxations (alias skipping here, the #1204 move/delete gate when it
- * lands) all consult the same predicate.
+ * Minting is recorded on each node (`Node.mintedAt`), not on the memory
+ * (Holger's #1447 round-3 rulings). A new node starts unminted and has draft
+ * rights: it can be renumbered, moved without leaving a `UrnAlias` (nothing
+ * outside can cite a number that was never published), and bulk-replaced.
+ * A memory's corpus state is derived from its nodes: DRAFT while none of its
+ * live nodes is minted, MINTED once any is. Minting protects nothing by itself
+ * (#1591 permanence ruling).
  */
 
 import { GraphQLError } from 'graphql';
+import type { PrismaClient } from '../generated/prisma/index.js';
 
 export type CorpusState = 'DRAFT' | 'MINTED';
 
-/** Whether this memory is a draft spec corpus. */
-export function isDraftCorpus(memory: { corpusDraft: boolean }): boolean {
-  return memory.corpusDraft;
-}
-
-/** The GraphQL `Memory.corpusState` projection of the stored flag. */
-export function corpusStateOf(memory: { corpusDraft: boolean }): CorpusState {
-  return isDraftCorpus(memory) ? 'DRAFT' : 'MINTED';
+/**
+ * #1591 — a memory's derived corpus state: DRAFT while no live node is minted;
+ * otherwise MINTED, with `mintedAt` the latest mint time among its live nodes.
+ * For a corpus backfilled as minted by the #1591 migration that is its newest
+ * node's creation time, which is when that node became permanent then.
+ */
+export async function corpusMintStateOf(
+  db: Pick<PrismaClient, 'node'>,
+  memoryId: string,
+): Promise<{ state: CorpusState; mintedAt: Date | null }> {
+  const { _max } = await db.node.aggregate({
+    where: { memoryId, deletedAt: null },
+    _max: { mintedAt: true },
+  });
+  return { state: _max.mintedAt ? 'MINTED' : 'DRAFT', mintedAt: _max.mintedAt ?? null };
 }
 
 /**
@@ -47,41 +48,6 @@ export function placeholderFillPatch(
   return prior?.isPlaceholder === true && typeof content === 'string' && content.trim() !== ''
     ? { isPlaceholder: false }
     : {};
-}
-
-/**
- * #1450 (@codex P1s, PR #1452) — a placeholder never leaves draft corpora.
- *
- * A placeholder is a reserved citation with no spec written; minting refuses
- * while any remain, so a minted corpus has none. Any path that puts a node
- * into a memory that is NOT a draft (a clone or extract into a brand-new,
- * therefore minted, memory; a merge or move into a minted one) would publish a
- * citation with no spec behind it, so it refuses instead. Write the spec (its
- * content) or delete the placeholder first.
- *
- * `moveNodeSubtree` keeps its own typed SubtreeMovePlaceholderError (mapped on
- * both move surfaces); every other copy or relocation path calls this.
- *
- * @throws GraphQLError `SPEC_PLACEHOLDER_OUTSIDE_DRAFT` naming the first placeholder.
- */
-export function assertNoPlaceholdersLeaveDraft(
-  nodes: ReadonlyArray<{ loc: string; isPlaceholder?: boolean | null }>,
-  destination: { isDraft: boolean; memoryId?: string },
-): void {
-  if (destination.isDraft) return;
-  const placeholder = nodes.find((n) => n.isPlaceholder === true);
-  if (!placeholder) return;
-  throw new GraphQLError(
-    `Cannot copy or move placeholder "${placeholder.loc}" into a memory that is not a draft spec corpus: ` +
-      'write the spec (its content) or delete the placeholder first.',
-    {
-      extensions: {
-        code: 'SPEC_PLACEHOLDER_OUTSIDE_DRAFT',
-        loc: placeholder.loc,
-        ...(destination.memoryId ? { memoryId: destination.memoryId } : {}),
-      },
-    },
-  );
 }
 
 /**

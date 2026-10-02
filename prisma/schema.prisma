@@ -1258,6 +1258,22 @@ model Node {
   approvedByInfo     String?   @map("approved_by_info")
   approvedAt         DateTime? @map("approved_at")
   approvalHash       String?   @map("approval_hash")
+  /// #1591 — per-node minting. A node is minted iff `mintedAt` is set; a new
+  /// node starts unminted, with draft rights (renumber, move without an alias,
+  /// bulk replace). Minting stamps every unminted live node of a memory at once
+  /// (`mintMemoryNodes`), after its checks, including an approved current
+  /// revision. `mintedRevNo` / `mintedHash` record that revision and its
+  /// approval hash; both are null for nodes backfilled as minted by the #1591
+  /// migration, whose minted revision is unknown. `mintedBy` is a User.id (no
+  /// FK, like `approvedBy`), else `mintedByInfo` holds the principal
+  /// ("backfill" for the migration). Minting protects nothing by itself
+  /// (Holger, 2026-10-01: no minted-spec permanence for now).
+  /// chk_node_mint_complete.
+  mintedAt           DateTime? @map("minted_at")
+  mintedBy           String?   @map("minted_by")
+  mintedByInfo       String?   @map("minted_by_info")
+  mintedRevNo        Int?      @map("minted_rev_no")
+  mintedHash         String?   @map("minted_hash")
   createdAt          DateTime  @default(now()) @map("created_at")
   createdBy          String?   @map("created_by")
   updatedAt          DateTime  @updatedAt @map("updated_at")

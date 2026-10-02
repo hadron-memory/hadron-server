@@ -56,6 +56,7 @@ function filterClause(f: NodeSqlFilter | undefined, bind: (v: unknown) => string
   if (flt.where) parts.push(`(${compileNodeWhere(flt.where, bind)})`);
   const approval = approvalStateSql(flt.approvalState); // #1591
   if (approval) parts.push(approval);
+  if (flt.minted != null) parts.push(flt.minted ? 'minted_at IS NOT NULL' : 'minted_at IS NULL'); // #1591
   return parts.length ? ' AND ' + parts.join(' AND ') : '';
 }
 

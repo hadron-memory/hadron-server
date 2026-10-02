@@ -79,7 +79,6 @@ import { escapePrismaLikePattern } from '../lib/literalLocPrefix.js';
 import {
   moveNodeSubtree,
   SubtreeMoveCollisionError,
-  SubtreeMovePlaceholderError,
   SubtreeMoveIntoSelfError,
   SubtreeMoveSourceChangedError,
   CrossMemoryMoveUnsupportedError,
@@ -1347,6 +1346,11 @@ type ReadProjectionNode = {
   approvedBy: string | null;
   approvedByInfo: string | null;
   approvedAt: Date | null;
+  /** #1591 — the mint record. */
+  mintedAt: Date | null;
+  mintedBy: string | null;
+  mintedByInfo: string | null;
+  mintedRevNo: number | null;
   name: string;
   loc: string;
   memoryId: string;
@@ -1474,7 +1478,7 @@ async function batchReadableTaskRefs(
 
 async function batchHumanNames(nodes: readonly ReadProjectionNode[]): Promise<Map<string, string>> {
   // #1591: approvers render by handle too, from the same lookup.
-  const ids = [...new Set(nodes.flatMap((n) => [n.authoredByHuman, n.approvedBy]).filter((id): id is string => !!id))];
+  const ids = [...new Set(nodes.flatMap((n) => [n.authoredByHuman, n.approvedBy, n.mintedBy]).filter((id): id is string => !!id))];
   if (ids.length === 0) return new Map();
   const users = await db.user.findMany({ where: { id: { in: ids }, deletedAt: null }, select: { id: true, handle: true } });
   return new Map(users.filter((user) => !!user.handle).map((user) => [user.id, user.handle!]));
@@ -1601,6 +1605,23 @@ async function renderNodeReadProjection(
       : `Approval: not approved (r${revision}; last approved ${record})`;
   }
 
+  // #1591: the mint line. A node backfilled as minted has no minted revision.
+  let mintLine = 'Minted: no';
+  if (node.mintedAt) {
+    const at = node.mintedAt.toISOString();
+    if (node.mintedRevNo == null) {
+      mintLine = `Minted: at ${at} (backfilled)`;
+    } else {
+      const handle = node.mintedBy
+        ? (opts.batch
+          ? opts.batch.humanNames.get(node.mintedBy)
+          : (await db.user.findFirst({ where: { id: node.mintedBy, deletedAt: null }, select: { handle: true } }))?.handle)
+        : null;
+      const minter = handle ? userUrn(handle) : node.mintedByInfo ?? 'a former user';
+      mintLine = `Minted: r${node.mintedRevNo} at ${at} by ${minter}`;
+    }
+  }
+
   // #186: surface nodeType so callers can tell `parent` from `info`.
   const meta = [
     `**${node.name}**`,
@@ -1614,6 +1635,7 @@ async function renderNodeReadProjection(
     authorshipLine,
     validationLine,
     approvalLine,
+    mintLine,
     node.description ? `> ${node.description}` : '',
     `Type: ${node.nodeType}`,
     // #1201 (@codex P2, PR #1203). Without these a governed node reads as an
@@ -7261,9 +7283,6 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         }
         if (e instanceof SubtreeMoveIntoSelfError) {
           return textResult('Cannot move a node into its own subtree.');
-        }
-        if (e instanceof SubtreeMovePlaceholderError) {
-          return textResult(`SPEC_PLACEHOLDER_OUTSIDE_DRAFT: ${e.message}`);
         }
         if (e instanceof ScopeGraphQLError && e.extensions?.code === SPEC_MINTED_PERMANENT) {
           return textResult(`[spec_minted_permanent] ${e.message}`);

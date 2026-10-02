@@ -100,6 +100,7 @@ export const resolvers = {
   // #1591: approval status joins the existing Node block.
   Node: { ...typeResolvers.Node, ...nodeApprovalFieldResolvers.Node },
   NodeApproval: nodeApprovalFieldResolvers.NodeApproval,
+  NodeMintStatus: nodeApprovalFieldResolvers.NodeMintStatus,
   MemoryConfig: memoryConfigFieldResolvers.MemoryConfig,
   NodeRoleRule: memoryConfigFieldResolvers.NodeRoleRule,
   MemoryConfigTemplate: memoryConfigTemplateFieldResolvers.MemoryConfigTemplate,
