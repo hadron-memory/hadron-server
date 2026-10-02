@@ -1593,7 +1593,8 @@ async function renderNodeReadProjection(
         ? opts.batch.humanNames.get(node.approvedBy)
         : (await db.user.findFirst({ where: { id: node.approvedBy, deletedAt: null }, select: { handle: true } }))?.handle)
       : null;
-    const approver = handle ? userUrn(handle) : node.approvedByInfo ?? 'a former user';
+    // userUrn is null for a grandfathered, non-URN-legal handle (@copilot, PR #1592).
+    const approver = (handle ? userUrn(handle) : null) ?? node.approvedByInfo ?? 'a former user';
     const record = `r${node.approvedRevNo} by ${approver} at ${node.approvedAt.toISOString()}`;
     approvalLine = node.approvedRevNo === revision
       ? `Approval: approved ${record}`

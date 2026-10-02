@@ -408,3 +408,21 @@ describe('hadron_get_node Approval line (#1591)', () => {
     expect(await getNode('a:1')).toBe(`Approval: not approved (r2; last approved ${record})`);
   });
 });
+
+describe('approve authorizes before checking the session key (@copilot, PR #1592)', () => {
+  it('refuses a reader of an encrypted memory as FORBIDDEN, key or no key', async () => {
+    const n = await node('a:1');
+    // Only the gate order matters here, so flag the org memory encrypted
+    // directly (encryptMemory is owner-only, and an org memory has none).
+    const dataKey = Buffer.alloc(32, 5).toString('base64');
+    await db.memory.update({ where: { id: memory.id }, data: { isEncrypted: true, vectorIndexEnabled: false } });
+    sessionKeyCache.clear();
+    try {
+      expect(await codeOf(approve(n.id, { userId: reader.id }))).toBe('FORBIDDEN');
+      sessionKeyCache.set('approval-gate-test', memory.id, parseDataKey(dataKey));
+      expect(await codeOf(approve(n.id, { userId: reader.id }))).toBe('FORBIDDEN');
+    } finally {
+      sessionKeyCache.clear();
+    }
+  });
+});

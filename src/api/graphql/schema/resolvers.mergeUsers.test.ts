@@ -547,3 +547,24 @@ describe('Mutation.mergeUsers — worker holds (#1050)', () => {
       .toBe(other.id);
   });
 });
+
+describe('Mutation.mergeUsers — node approvals (#1591)', () => {
+  it('moves the live approval of record, and the revision copy, to the survivor', async () => {
+    const org = await db.organization.create({ data: { id: generateId(), name: 'ap-org', urn: `ap-${Date.now()}.com` } });
+    const memory = await db.memory.create({ data: {
+      id: generateId(), organizationId: org.id, urn: `${org.urn}:m`, name: 'm', class: 'knowledge', visibility: 'ORGANIZATION',
+    } });
+    const approval = { approvedRevNo: 1, approvedAt: new Date(), approvalHash: 'a'.repeat(64) };
+    const mine = await db.node.create({ data: { id: generateId(), memoryId: memory.id, loc: 'a', name: 'a', approvedBy: source.id, ...approval } });
+    const theirs = await db.node.create({ data: { id: generateId(), memoryId: memory.id, loc: 'b', name: 'b', approvedBy: admin.id, ...approval } });
+    const revision = await db.nodeRevision.create({ data: {
+      id: generateId(), nodeId: mine.id, memoryId: memory.id, loc: 'a', name: 'a', approvedBy: source.id, revNo: 1,
+    } });
+
+    await merge(source.id, target.id);
+
+    expect((await db.node.findUniqueOrThrow({ where: { id: mine.id } })).approvedBy).toBe(target.id);
+    expect((await db.node.findUniqueOrThrow({ where: { id: theirs.id } })).approvedBy).toBe(admin.id);
+    expect((await db.nodeRevision.findUniqueOrThrow({ where: { id: revision.id } })).approvedBy).toBe(target.id);
+  });
+});

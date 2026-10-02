@@ -473,6 +473,9 @@ async function runMergeTxn(
       ['agent_webhooks', 'user_id'],
       ['assets', 'uploaded_by'],
       ['agents', 'editor_lock_user_id'],
+      // #1591: the approval of record on the live node (no FK, so nothing
+      // else would carry it). The revision-row copy is rewritten above.
+      ['nodes', 'approved_by'],
     ];
     for (const [table, column] of directReferences) {
       await runWithIds(`UPDATE "${table}" SET "${column}" = $1 WHERE "${column}" = $2`);

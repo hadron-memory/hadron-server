@@ -179,6 +179,10 @@ export const nodeApprovalMutations = {
   ) => {
     const { id, memoryId } = await resolveLiveNode(ctx, nodeRef);
     if (await isMemoryHiddenForWrite(ctx, memoryId, 'node')) throw nodeNotFound(nodeRef);
+    // Authorize before looking at key availability, so a reader of an
+    // encrypted memory meets FORBIDDEN whether or not a key is cached
+    // (@copilot, PR #1592). Re-checked inside the fenced transaction below.
+    await mayApproveNodes(ctx, memoryId);
     const key = await keyForMemory(ctx, memoryId);
     try {
       const { node } = await withAuthorizedMemoryTx(
