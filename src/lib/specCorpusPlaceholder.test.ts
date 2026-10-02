@@ -75,9 +75,14 @@ describe('reserveSpecCitation (#1450)', () => {
     expect(await reserve(draft.id, 'pas:010:02', 'Consent')).toMatchObject({ name: 'Consent', isPlaceholder: true });
   });
 
-  it('refuses in a minted memory and leaves nothing behind', async () => {
-    expect(await codeOf(reserve(minted.id, 'cor:010:01'))).toBe('SPEC_CORPUS_NOT_DRAFT');
-    expect(await db.node.count({ where: { memoryId: minted.id, loc: 'cor:010:01' } })).toBe(0);
+  it('reserves in any memory, unminted, even one with minted nodes (#1591)', async () => {
+    const published = await db.node.create({ data: {
+      id: generateId(), memoryId: minted.id, loc: 'cor:010', name: 'cor:010', content: 'Body.', role: 'spec',
+      nodeType: 'info', mintedAt: new Date(), mintedByInfo: 'test',
+    } });
+    const reserved = await reserve(minted.id, 'cor:010:01');
+    expect(await db.node.findUniqueOrThrow({ where: { id: reserved.id } })).toMatchObject({ isPlaceholder: true, mintedAt: null });
+    expect((await db.node.findUniqueOrThrow({ where: { id: published.id } })).mintedAt).not.toBeNull();
   });
 
   it('does not reveal a memory\'s draft state to a caller who cannot write it', async () => {
@@ -132,74 +137,54 @@ describe('a placeholder becomes a real spec when its content is written (#1450)'
   });
 });
 
-describe('placeholders never leave draft corpora (@codex P1 on #1452)', () => {
-  it('refuses to move a placeholder into a minted memory, and nothing moves', async () => {
+describe('placeholders may live in any memory (#1591; was draft-only, @codex P1 on #1452)', () => {
+  // A placeholder is an unminted node, and any memory's mint refuses while one
+  // remains, so moving, copying or merging it publishes nothing.
+  it('moves a placeholder, or a subtree carrying one, into a memory with minted nodes, still a placeholder', async () => {
+    await db.node.updateMany({ where: { memoryId: minted.id }, data: { mintedAt: new Date(), mintedByInfo: 'test' } });
     const reserved = await reserve(draft.id, 'pas:050:01');
-    const code = await codeOf(resolvers.Mutation.moveNode(null, {
+    await resolvers.Mutation.moveNode(null, {
       sourceRef: reserved.id, targetUrn: `hrn:node:${minted.urn}:pas:050:01`,
-    }, as(admin.id)));
-    expect(code).toBe('SPEC_PLACEHOLDER_OUTSIDE_DRAFT');
-    expect(await db.node.findUniqueOrThrow({ where: { id: reserved.id } })).toMatchObject({ memoryId: draft.id, isPlaceholder: true });
-  });
+    }, as(admin.id));
+    expect(await db.node.findUniqueOrThrow({ where: { id: reserved.id } }))
+      .toMatchObject({ memoryId: minted.id, isPlaceholder: true, mintedAt: null });
 
-  it('refuses a subtree that carries a placeholder among its descendants', async () => {
     const parent = await resolvers.Mutation.createSpecNode(null, {
       input: { memoryId: draft.id, loc: 'pas:060', name: 'Feature', role: 'spec', nodeType: 'info', content: 'Body.' },
     } as never, as(admin.id));
-    await reserve(draft.id, 'pas:060:01');
-    const code = await codeOf(resolvers.Mutation.moveNode(null, {
-      sourceRef: parent.id, targetUrn: `hrn:node:${minted.urn}:pas:060`,
-    }, as(admin.id)));
-    expect(code).toBe('SPEC_PLACEHOLDER_OUTSIDE_DRAFT');
-    expect((await db.node.findUniqueOrThrow({ where: { id: parent.id } })).memoryId).toBe(draft.id);
-  });
-
-  it('allows a placeholder to move into another draft corpus, still a placeholder', async () => {
-    const other = await resolvers.Mutation.createMemory(null, { orgId: org.id, name: 'specs-draft-2', draftCorpus: true }, as(admin.id));
-    const reserved = await reserve(draft.id, 'pas:070:01');
-    await resolvers.Mutation.moveNode(null, { sourceRef: reserved.id, targetUrn: `hrn:node:${other.urn}:pas:070:01` }, as(admin.id));
-    expect(await db.node.findUniqueOrThrow({ where: { id: reserved.id } })).toMatchObject({ memoryId: other.id, isPlaceholder: true });
+    const child = await reserve(draft.id, 'pas:060:01');
+    await resolvers.Mutation.moveNode(null, { sourceRef: parent.id, targetUrn: `hrn:node:${minted.urn}:pas:060` }, as(admin.id));
+    expect(await db.node.findUniqueOrThrow({ where: { id: child.id } })).toMatchObject({ memoryId: minted.id, isPlaceholder: true });
   });
 });
 
-describe('copies and merges never publish a placeholder (@codex P1 on #1452)', () => {
-  it('refuses to clone a draft that still has a placeholder; the clone is not created', async () => {
+describe('copies and merges keep a placeholder a placeholder (#1591; was refused, @codex P1 on #1452)', () => {
+  it('clones a memory with a placeholder; the copy is an unminted placeholder', async () => {
     await reserve(draft.id, 'pas:080:01');
-    const code = await codeOf(resolvers.Mutation.cloneMemory(null, { ref: draft.id, targetUrn: `hrn:mem:${org.urn}:specs-copy` }, as(admin.id)));
-    expect(code).toBe('SPEC_PLACEHOLDER_OUTSIDE_DRAFT');
-    expect(await db.memory.count({ where: { urn: `${org.urn}:specs-copy` } })).toBe(0);
+    const clone = await resolvers.Mutation.cloneMemory(null, { ref: draft.id, targetUrn: `hrn:mem:${org.urn}:specs-copy` }, as(admin.id));
+    expect(await db.node.findFirstOrThrow({ where: { memoryId: clone.id, loc: 'pas:080:01' } }))
+      .toMatchObject({ isPlaceholder: true, mintedAt: null });
   });
 
-  it('refuses to extract a subtree that contains a placeholder into a new memory', async () => {
+  it('extracts a subtree containing a placeholder; the copy is a placeholder', async () => {
     const parent = await resolvers.Mutation.createSpecNode(null, {
       input: { memoryId: draft.id, loc: 'pas:090', name: 'Feature', role: 'spec', nodeType: 'info', content: 'Body.' },
     } as never, as(admin.id));
     await reserve(draft.id, 'pas:090:01');
-    const code = await codeOf(resolvers.Mutation.extractParentNodeToMemory(
+    const extracted = await resolvers.Mutation.extractParentNodeToMemory(
       {}, { parentRef: parent.id, targetUrn: `hrn:mem:${org.urn}:extracted`, move: false } as never, as(admin.id),
-    ));
-    expect(code).toBe('SPEC_PLACEHOLDER_OUTSIDE_DRAFT');
-    expect(await db.memory.count({ where: { urn: `${org.urn}:extracted` } })).toBe(0);
+    ) as { id: string };
+    const copies = await db.node.findMany({ where: { memoryId: extracted.id, isPlaceholder: true }, select: { loc: true } });
+    expect(copies.map((c) => c.loc)).toEqual([expect.stringMatching(/:01$/)]);
   });
 
-  it('refuses to merge a placeholder into a minted memory, even one whose spec role was removed', async () => {
-    // A role-less placeholder is not stopped by the governed merge guard, so the
-    // placeholder rule itself must hold.
-    // Plenty of ordinary rows ahead of it, so a per-batch-only check would
-    // already have committed some of them.
-    for (const n of ['pas:091', 'pas:092', 'pas:093']) {
-      await db.node.create({ data: { id: generateId(), memoryId: draft.id, loc: n, name: n, content: 'x' } });
-    }
+  it('merges a placeholder into another memory; it relocates, still a placeholder', async () => {
     await db.node.create({ data: { id: generateId(), memoryId: draft.id, loc: 'pas:095:01', name: 'x', isPlaceholder: true } });
-    const code = await codeOf(mergeMemoryGraph(db, {
+    await mergeMemoryGraph(db, {
       sourceMemoryId: draft.id, targetMemoryId: minted.id, fields: new Set(['CONTENT', 'EDGES']),
       deleteSourceMem: false, editor: { userId: admin.id }, batchSize: 1, classifyPageSize: 1,
-    }));
-    expect(code).toBe('SPEC_PLACEHOLDER_OUTSIDE_DRAFT');
-    expect(await db.node.count({ where: { memoryId: minted.id, loc: 'pas:095:01' } })).toBe(0);
-    // Refused up front: nothing from the draft was relocated, not even rows in
-    // an earlier batch than the placeholder's.
-    expect(await db.node.count({ where: { memoryId: minted.id, loc: { startsWith: 'pas:' } } })).toBe(0);
+    });
+    expect(await db.node.findFirstOrThrow({ where: { memoryId: minted.id, loc: 'pas:095:01' } })).toMatchObject({ isPlaceholder: true });
   });
 });
 

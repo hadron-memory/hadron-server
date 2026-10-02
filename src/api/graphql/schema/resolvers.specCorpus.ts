@@ -128,12 +128,7 @@ export const specCorpusMutations = {
       // stay owned by the old repo, where sync's cleanup could delete it.
       await tx.node.update({
         where: { id: node.id },
-        // #1591: a placeholder is unminted by definition. A revived tombstone
-        // that was minted starts over, so the mint check sees the placeholder.
-        data: {
-          isPlaceholder: true, contentHash: null, ownerRepo: null,
-          mintedAt: null, mintedBy: null, mintedByInfo: null, mintedRevNo: null, mintedHash: null,
-        },
+        data: { isPlaceholder: true, contentHash: null, ownerRepo: null },
         select: { id: true },
       });
       // (@codex P1, PR #1452) Soft deletion keeps a node's vectors, and vector
@@ -144,10 +139,7 @@ export const specCorpusMutations = {
       // The node as the create door built it (relations included), now marked.
       // …with the values this transaction just reset, not the ones read
       // before it (@codex P2, PR #1452): Node.ownerRepo is client-visible.
-      return {
-        ...node, isPlaceholder: true, contentHash: null, ownerRepo: null,
-        mintedAt: null, mintedBy: null, mintedByInfo: null, mintedRevNo: null, mintedHash: null,
-      };
+      return { ...node, isPlaceholder: true, contentHash: null, ownerRepo: null };
     }, { timeout: 120_000 });
     for (const effect of effects) effect();
     return reserved;

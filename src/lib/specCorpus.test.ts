@@ -1,4 +1,4 @@
-/** #1448: a spec corpus can be created in draft; draft moves record no URN alias. */
+/** #1448, per node since #1591: corpus state is derived from node mint state; unminted moves record no URN alias. */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
@@ -25,8 +25,11 @@ const createNode = (memoryId: string, loc: string) => db.node.create({
 const aliasesFor = (id: string) => db.urnAlias.findMany({ where: { entityType: 'NODE', entityId: id } });
 const createMemory = (name: string, draftCorpus?: boolean | null) =>
   resolvers.Mutation.createMemory(null, { orgId: org.id, name, ...(draftCorpus !== undefined ? { draftCorpus } : {}) }, ctx());
-const corpusState = (memory: { id: string; corpusDraft?: boolean }) =>
+const corpusState = (memory: { id: string }) =>
   resolvers.Memory.corpusState(memory, {}, ctx());
+/** Stamp a node minted directly (the mint flow has its own tests). */
+const mintInDb = (id: string) =>
+  db.node.update({ where: { id }, data: { mintedAt: new Date(), mintedByInfo: 'test' } });
 
 beforeEach(async () => {
   await cleanDb(db);
@@ -35,41 +38,30 @@ beforeEach(async () => {
   await db.orgMember.create({ data: { organizationId: org.id, userId: admin.id, role: 'ADMIN' } });
 });
 
-describe('draft spec corpus state (#1448)', () => {
-  it('is DRAFT only when asked for at creation; omitted or null is MINTED', async () => {
-    const draft = await createMemory('specs-draft', true);
-    const plain = await createMemory('plain');
-    const explicitNull = await createMemory('null-draft', null);
-    const explicitFalse = await createMemory('false-draft', false);
-
-    expect(await corpusState(draft)).toBe('DRAFT');
-    expect(await corpusState(plain)).toBe('MINTED');
-    expect(await corpusState(explicitNull)).toBe('MINTED');
-    expect(await corpusState(explicitFalse)).toBe('MINTED');
+describe('corpus state is derived from the nodes (#1591)', () => {
+  it('is DRAFT while no live node is minted, whatever createMemory was asked', async () => {
+    for (const draftCorpus of [true, false, null, undefined]) {
+      const memory = await createMemory(`specs-${String(draftCorpus)}`, draftCorpus);
+      expect(await corpusState(memory)).toBe('DRAFT');
+    }
   });
 
-  it('reads the stored flag when the parent row was projected without it', async () => {
-    const draft = await createMemory('specs-draft', true);
-    // A narrowed parent must not silently read as MINTED.
-    expect(await corpusState({ id: draft.id })).toBe('DRAFT');
+  it('is MINTED once any live node is minted, and ignores a minted tombstone', async () => {
+    const memory = await createMemory('specs');
+    const node = await createNode(memory.id, 'cor:010');
+    await mintInDb(node.id);
+    expect(await corpusState(memory)).toBe('MINTED');
+    await db.node.update({ where: { id: node.id }, data: { deletedAt: new Date() } });
+    expect(await corpusState(memory)).toBe('DRAFT');
   });
 
-  it('cannot be switched into draft by an update', async () => {
-    const plain = await createMemory('plain');
-    // updateMemory has no draftCorpus argument; a caller smuggling one is ignored.
-    await resolvers.Mutation.updateMemory(
-      null,
-      { id: plain.id, description: 'edited', draftCorpus: true } as unknown as Parameters<typeof resolvers.Mutation.updateMemory>[1],
-      ctx(),
-    );
-    expect(await corpusState({ id: plain.id })).toBe('MINTED');
-  });
-
-  it('is not carried by a clone: a clone of a draft corpus is MINTED', async () => {
-    const draft = await createMemory('specs-draft', true);
-    const clone = await resolvers.Mutation.cloneMemory(null, { ref: draft.id, targetUrn: `hrn:mem:${org.urn}:specs-clone` }, ctx());
-    expect(await corpusState({ id: clone.id })).toBe('MINTED');
-    expect(await corpusState({ id: draft.id })).toBe('DRAFT');
+  it('is not carried by a clone: copies are new, unminted nodes', async () => {
+    const source = await createMemory('specs');
+    await mintInDb((await createNode(source.id, 'cor:010')).id);
+    const clone = await resolvers.Mutation.cloneMemory(null, { ref: source.id, targetUrn: `hrn:mem:${org.urn}:specs-clone` }, ctx());
+    expect(await corpusState({ id: clone.id })).toBe('DRAFT');
+    expect(await db.node.count({ where: { memoryId: clone.id, mintedAt: { not: null } } })).toBe(0);
+    expect(await corpusState({ id: source.id })).toBe('MINTED');
   });
 });
 
@@ -103,7 +95,7 @@ describe('draft corpus moves record no URN alias (#1448)', () => {
     expect(await db.urnAlias.count({ where: { entityType: 'NODE', entityId: { in: [a.id, b.id] } } })).toBe(0);
   });
 
-  it('keys on the SOURCE memory: out of a draft records none, into a draft from a minted memory records one', async () => {
+  it('keys on the NODE (#1591): an unminted node leaves none, a minted one leaves its alias anywhere', async () => {
     const draft = await createMemory('specs-draft', true);
     const minted = await createMemory('specs');
 
@@ -112,16 +104,20 @@ describe('draft corpus moves record no URN alias (#1448)', () => {
     expect(await aliasesFor(leaving.id)).toEqual([]);
 
     const arriving = await createNode(minted.id, 'cor:010');
+    await mintInDb(arriving.id);
     await resolvers.Mutation.moveNode(null, { sourceRef: arriving.id, targetUrn: nodeUrn(draft, 'cor:010') }, ctx());
     expect((await aliasesFor(arriving.id)).map((a) => a.urn)).toEqual([`${minted.urn}:cor:010`]);
     expect(await resolveNodeRef(db, nodeUrn(minted, 'cor:010'))).toEqual({ id: arriving.id });
   });
 
-  it('still records aliases for moves inside an ordinary (minted) memory', async () => {
+  it('records aliases for minted nodes, and only those, when a subtree moves', async () => {
     const minted = await createMemory('specs');
     const node = await createNode(minted.id, 'cor:040:01');
+    const child = await createNode(minted.id, 'cor:040:01:a');
+    await mintInDb(node.id);
     await resolvers.Mutation.moveNode(null, { sourceRef: node.id, targetUrn: nodeUrn(minted, 'cor:040:02') }, ctx());
     expect((await aliasesFor(node.id)).map((a) => a.urn)).toEqual([`${minted.urn}:cor:040:01`]);
+    expect(await aliasesFor(child.id)).toEqual([]);
   });
 });
 
@@ -163,13 +159,16 @@ describe('draft corpus merges record no URN alias either (#1448, @codex P1 on #1
     expect(await aliasesFor(specNode.id)).toEqual([]);
   });
 
-  it('still records aliases when a minted memory merges into a draft one', async () => {
+  it('records aliases for the minted nodes of a merge, and only those (#1591)', async () => {
     const draft = await createMemory('specs-draft', true);
     const minted = await createMemory('specs');
     const node = await createNode(minted.id, 'cor:050:01');
+    const unminted = await createNode(minted.id, 'cor:050:02');
+    await mintInDb(node.id);
 
     await merge(minted.id, draft.id);
 
     expect((await aliasesFor(node.id)).map((a) => a.urn)).toEqual([`${minted.urn}:cor:050:01`]);
+    expect(await aliasesFor(unminted.id)).toEqual([]);
   });
 });

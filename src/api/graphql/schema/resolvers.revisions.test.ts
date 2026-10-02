@@ -1,12 +1,18 @@
 /**
  * Tests for chatbot revisions: snapshot, publish, restore, editor lock.
  */
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, vi, beforeAll, afterAll } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { resolvers, type Context } from './resolvers.js';
 import { generateId } from '../../../lib/id.js';
 import { revisionStateHashRefreshMarker } from '../../../lib/nodeRevisionSnapshot.js';
+import { setMintedSpecPermanenceEnforcedForTests } from '../../../lib/mintedSpecPermanence.js';
+
+// #1591: minted-spec permanence is switched off in production for now; the
+// #1468 guard's own assertions run with it on.
+beforeAll(() => setMintedSpecPermanenceEnforcedForTests(true));
+afterAll(() => setMintedSpecPermanenceEnforcedForTests(false));
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),

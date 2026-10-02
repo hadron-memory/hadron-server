@@ -5,6 +5,7 @@ import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
 import { generateId } from './id.js';
 import { computeContentHash } from './contentHash.js';
+import { computeApprovalHash } from './approvalHash.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import { specCorpusMintMutations } from '../api/graphql/schema/resolvers.specCorpus.js';
 import { pendingEdgeStableTargetKey } from './pendingEdgePromotion.js';
@@ -23,8 +24,34 @@ let org: { id: string; urn: string };
 let draft: { id: string; urn: string };
 
 const as = (userId = admin.id): Context => ({ db, userId, roles: [] });
-const mint = (dryRun?: boolean, userId = admin.id, memoryRef = draft.id) =>
-  specCorpusMintMutations.mintSpecCorpus(null, { memoryRef, ...(dryRun !== undefined ? { dryRun } : {}) }, as(userId));
+/**
+ * #1591: minting requires each unminted node's current revision to be
+ * approved. These tests are about the other checks, so record the approvals
+ * directly (revision + hash), bypassing the approve gate; the approval flow
+ * and NOT_APPROVED have their own tests in nodeMint.test.ts.
+ */
+const approveAllInDb = (memoryId: string) => db.$transaction(async (tx) => {
+  // SKIP LOCKED: the race tests hold a node row while the mint waits on it;
+  // approving must not wait on that hold. A skipped node stays unapproved,
+  // which those tests never reach (the mint refuses or blocks first).
+  const nodes = await tx.$queryRaw<Array<{ id: string; rev_seq: number; name: string; abstract: string | null; content: string | null }>>`
+    SELECT id, rev_seq, name, abstract, content FROM nodes
+    WHERE memory_id = ${memoryId} AND deleted_at IS NULL AND minted_at IS NULL
+    FOR UPDATE SKIP LOCKED`;
+  for (const n of nodes) {
+    await tx.node.update({
+      where: { id: n.id },
+      data: {
+        approvedRevNo: n.rev_seq, approvedByInfo: 'test', approvedAt: new Date(),
+        approvalHash: computeApprovalHash({ title: n.name, abstract: n.abstract, content: n.content }),
+      },
+    });
+  }
+});
+const mint = async (dryRun?: boolean, userId = admin.id, memoryRef = draft.id) => {
+  if (await db.memory.findUnique({ where: { id: memoryRef }, select: { id: true } })) await approveAllInDb(memoryRef);
+  return specCorpusMintMutations.mintSpecCorpus(null, { memoryRef, ...(dryRun !== undefined ? { dryRun } : {}) }, as(userId));
+};
 const spec = (loc: string, content: string, extra: Record<string, unknown> = {}) => db.node.create({
   data: { id: generateId(), memoryId: draft.id, loc, name: loc, content, role: 'spec', nodeType: 'info', tags: ['spec'], ...extra },
 });
@@ -63,10 +90,13 @@ describe('mintSpecCorpus: a clean corpus (#1448)', () => {
     expect(row.corpusMintedAt).toBeInstanceOf(Date);
     expect(row.corpusMintedBy).toBe(admin.id);
 
-    // One-way: no second mint, no reservation, and moves record aliases again.
-    expect(await codeOf(mint())).toBe('SPEC_CORPUS_NOT_DRAFT');
+    // #1591: per node. A second mint has nothing left to mint; a new
+    // reservation is an unminted node, which the next mint must clear; and a
+    // minted node's move records its alias.
+    expect(await mint()).toMatchObject({ minted: false, mintedCount: 0, mintLocs: [] });
     expect(await codeOf(resolvers.Mutation.reserveSpecCitation(null, { memoryRef: draft.id, loc: 'pas:020' }, as())))
-      .toBe('SPEC_CORPUS_NOT_DRAFT');
+      .toBe('NO_ERROR');
+    expect((await mint(true)).blockers).toEqual([expect.objectContaining({ kind: 'PLACEHOLDER', loc: 'pas:020' })]);
     const rule = await db.node.findFirstOrThrow({ where: { memoryId: draft.id, loc: 'pas:010:01' } });
     await resolvers.Mutation.moveNode(null, { sourceRef: rule.id, targetUrn: `hrn:node:${draft.urn}:pas:010:02` }, as());
     expect(await db.urnAlias.count({ where: { entityType: 'NODE', entityId: rule.id } })).toBe(1);
@@ -171,6 +201,11 @@ describe('mintSpecCorpus: an edge into another memory can point at a placeholder
       id: generateId(), memoryId: other.id, loc: 'cor:010', name: 'cor:010', role: 'spec', nodeType: 'info', tags: ['spec'], content: 'Old.',
     } });
     await edgeFrom010To(gone.id);
+    // #1591: a live target that is not minted is CITES_UNMINTED; minted, it is fine.
+    expect((await mint(true)).blockers).toEqual([expect.objectContaining({
+      kind: 'CITES_UNMINTED', loc: 'pas:010', targetLoc: `hrn:node:${other.urn}:cor:010`,
+    })]);
+    await db.node.update({ where: { id: gone.id }, data: { mintedAt: new Date(), mintedByInfo: 'test' } });
     expect((await mint(true)).blockers).toEqual([]);
     await resolvers.Mutation.deleteNode(null, { nodeRef: gone.id }, as());
     expect((await mint(true)).blockers).toEqual([expect.objectContaining({
@@ -321,9 +356,11 @@ describe('mintSpecCorpus: who may mint (#1448)', () => {
     expect(await mint(false, reader.id, own.id)).toMatchObject({ minted: true });
   });
 
-  it('refuses a memory that was never a draft', async () => {
+  it('mints a memory that was never asked to be a draft: minting is per node (#1591)', async () => {
     const plain = await resolvers.Mutation.createMemory(null, { orgId: org.id, name: 'plain' }, as());
-    expect(await codeOf(mint(true, admin.id, plain.id))).toBe('SPEC_CORPUS_NOT_DRAFT');
+    expect(await resolvers.Memory.corpusState({ id: plain.id }, {}, as())).toBe('DRAFT');
+    expect(await mint(false, admin.id, plain.id)).toMatchObject({ minted: true, mintedCount: 1 });
+    expect(await resolvers.Memory.corpusState({ id: plain.id }, {}, as())).toBe('MINTED');
   });
 });
 
@@ -500,12 +537,12 @@ describe('mintSpecCorpus re-authorizes under the lock (@codex P2 on #1462)', () 
   });
 });
 
-describe('Memory.corpusMintedAt reads through a narrowed parent (@codex P2 on #1462)', () => {
-  it('reloads the column when the parent was projected without it', async () => {
+describe('Memory.corpusMintedAt is derived from the nodes (#1591)', () => {
+  it('is the latest node mint time, whatever the parent carries', async () => {
+    expect(await resolvers.Memory.corpusMintedAt({ id: draft.id }, {}, as())).toBeNull();
     await mint();
-    const at = (await db.memory.findUniqueOrThrow({ where: { id: draft.id } })).corpusMintedAt;
-    expect(at).toBeInstanceOf(Date);
-    expect(await resolvers.Memory.corpusMintedAt({ id: draft.id }, {}, as())).toEqual(at);
-    expect(await resolvers.Memory.corpusMintedAt({ id: draft.id, corpusMintedAt: null }, {}, as())).toBeNull();
+    const latest = (await db.node.aggregate({ where: { memoryId: draft.id }, _max: { mintedAt: true } }))._max.mintedAt;
+    expect(latest).toBeInstanceOf(Date);
+    expect(await resolvers.Memory.corpusMintedAt({ id: draft.id }, {}, as())).toEqual(latest);
   });
 });

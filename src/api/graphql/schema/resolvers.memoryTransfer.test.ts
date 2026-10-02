@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, beforeAll, afterAll } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
 import { generateId } from '../../../lib/id.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
@@ -7,6 +7,12 @@ import { recordUrnRename } from '../../../lib/urnAlias.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { waitForLockWaiters, waitForLockWaitersOfType } from '../../../test/lockWait.js';
 import { resolvers, type Context } from './resolvers.js';
+import { setMintedSpecPermanenceEnforcedForTests } from '../../../lib/mintedSpecPermanence.js';
+
+// #1591: minted-spec permanence is switched off in production for now; the
+// #1468 guard's own assertions run with it on.
+beforeAll(() => setMintedSpecPermanenceEnforcedForTests(true));
+afterAll(() => setMintedSpecPermanenceEnforcedForTests(false));
 
 let owner: { id: string };
 let receiver: { id: string };
