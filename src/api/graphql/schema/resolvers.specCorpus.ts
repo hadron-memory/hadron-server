@@ -923,8 +923,11 @@ export const specCorpusRenumberMutations = {
     // #1591: the same per-node draft-rights rule the mover enforces under its
     // locks, decided here too so a dry run plans only what a real run would
     // do (Atilla, PR #1593). The mover still re-decides it under the locks.
+    // Pinned to this corpus and to live rows: a node that moved into another
+    // memory since the scan must not lend that memory's loc to the refusal
+    // (Atilla, PR #1593). The mover re-decides the moved set under its locks.
     const mintedLocs = (await ctx.db.node.findMany({
-      where: { id: { in: movingNodes.map((n) => n.id) }, mintedAt: { not: null } },
+      where: { id: { in: movingNodes.map((n) => n.id) }, memoryId: corpus.id, deletedAt: null, mintedAt: { not: null } },
       select: { loc: true },
       orderBy: { loc: 'asc' },
     })).map((n) => n.loc);

@@ -827,6 +827,43 @@ describe('#1478 item 6 — a corpus stored with the canonical double-colon Memor
   });
 });
 
+describe('renumber\'s minted check reads only this corpus (Atilla, PR #1593)', () => {
+  it('never names a node\'s loc in another memory it moved into after the scan', async () => {
+    const hidden = await db.memory.create({ data: {
+      id: generateId(), urn: `${org.urn}:outsiders-private`, name: 'outsiders-private',
+      class: 'private', organizationId: org.id, userId: outsider.id,
+    } });
+    // Move the rule (part of the moving set) into the unreadable memory, minted,
+    // right after renumber's scan: its collision check is the next node read.
+    let moved = false;
+    const interleaved = new Proxy(db, {
+      get(target, prop, receiver) {
+        if (prop !== 'node') return Reflect.get(target, prop, receiver);
+        return new Proxy(target.node, {
+          get(n, np, nr) {
+            if (np !== 'findFirst') return Reflect.get(n, np, nr);
+            return async (args: Parameters<typeof n.findFirst>[0]) => {
+              if (!moved) {
+                moved = true;
+                await db.node.update({ where: { id: rule.id }, data: {
+                  memoryId: hidden.id, loc: 'secret', mintedAt: new Date(), mintedByInfo: 'test',
+                } });
+              }
+              return n.findFirst(args);
+            };
+          },
+        });
+      },
+    }) as typeof db;
+    const outcome = await specCorpusRenumberMutations.renumberSpec(
+      null, { memoryRef: draft.id, fromLoc: 'pas:010', toLoc: 'pas:040', dryRun: true },
+      { db: interleaved, userId: admin.id, roles: [] },
+    ).then((r) => JSON.stringify(r), (e: unknown) => JSON.stringify({ message: (e as Error).message, ext: (e as GraphQLError).extensions }));
+    expect(moved).toBe(true);
+    expect(outcome).not.toContain('secret');
+  });
+});
+
 describe('renumber re-decides draft state under the move\'s lock (@codex P1 on #1453)', () => {
   it('refuses, moving nothing, when the spec is minted between the check and the move', async () => {
     const spy = vi.spyOn(nodeMoveOps, 'moveWithResult').mockImplementationOnce(async (...args) => {
