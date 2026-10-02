@@ -212,6 +212,8 @@ export const typeDefs = `#graphql
     includeDeleted: Boolean
     "Structured predicate over the node's properties/data JSONB (#719)."
     where: NodeWhereInput
+    "#1591 — only nodes in this approval state (read from the stored revision; a node changed outside a revisioned writer is reconciled on its next read)."
+    approvalState: NodeApprovalState
   }
 
   "Per-hit vector-retrieval lineage (cor:api:090:04), present when a hit came from the vector index."
@@ -1301,6 +1303,8 @@ export const typeDefs = `#graphql
     authorship: NodeAuthorship
     "#1326 — advisory validation for this exact revision. A report for an older revision is STALE."
     contentValidation: NodeContentValidationStatus!
+    "#1591 — whether the current revision is approved, and the latest approval on record."
+    approvalStatus: NodeApprovalStatus!
     memoryId: String!
     """
     The PLATFORM-kind axis (info / task / prompt / record / …). Load-bearing for
@@ -1742,6 +1746,93 @@ export const typeDefs = `#graphql
     note: String
   }
 
+  "#1591 — whether a node's current revision is approved."
+  enum NodeApprovalState {
+    "Never approved."
+    NOT_APPROVED
+    "The current revision is approved."
+    APPROVED
+    "Approved once, edited since: the approval covers an older revision."
+    SUPERSEDED
+  }
+
+  "#1591 — one recorded approval of a node revision."
+  type NodeApproval {
+    "The approved revision number (Node.revision at approval time)."
+    revision: Int!
+    "The approving user's public identifiers; null when the approver was not a user (see approvedByInfo)."
+    approvedBy: NodeRevisionEditor
+    "The approving principal when no user is known, e.g. app:<id>."
+    approvedByInfo: String
+    approvedAt: DateTime!
+    "Approval hash v1 at approval time: 64 lowercase hex of SHA-256 over the canonical title/abstract/content serialization (src/lib/approvalHash.ts)."
+    hash: String!
+  }
+
+  "#1591 — a node's approval state plus its latest approval."
+  type NodeApprovalStatus {
+    state: NodeApprovalState!
+    "The latest approval on record; null when NOT_APPROVED."
+    approval: NodeApproval
+  }
+
+  "#1591 — the tamper check's verdict."
+  enum NodeIntegrityState {
+    "The current revision is approved and its text still hashes to the approval."
+    INTACT
+    "Approved text no longer hashes to its approval: it changed outside the revision system."
+    TAMPERED
+    "Edited (a new revision) since the last approval. Not a tamper finding."
+    SUPERSEDED
+    "Never approved: nothing to verify against."
+    NOT_APPROVED
+  }
+
+  "#1591 — one node's tamper check."
+  type NodeIntegrityCheck {
+    nodeId: ID!
+    urn: String!
+    loc: String!
+    state: NodeIntegrityState!
+    "The current revision."
+    revision: Int!
+    approvedRevision: Int
+    "The approval hash on record."
+    expectedHash: String
+    "The approval hash recomputed from the current title/abstract/content."
+    actualHash: String!
+  }
+
+  "#1591 — the tamper check over every live node of a memory."
+  type MemoryIntegrityReport {
+    checked: Int!
+    intact: Int!
+    tampered: Int!
+    superseded: Int!
+    notApproved: Int!
+    "Every node that is not INTACT, ordered by loc."
+    problems: [NodeIntegrityCheck!]!
+  }
+
+  "#1591 — a node and its approval, returned by the approve mutations."
+  type NodeApprovalReceipt {
+    nodeId: ID!
+    urn: String!
+    loc: String!
+    approval: NodeApproval!
+  }
+
+  "#1591 — the outcome of approving every node of a memory."
+  type ApproveMemoryNodesResult {
+    approvedCount: Int!
+    "Nodes newly approved by this call, ordered by loc."
+    approved: [NodeApprovalReceipt!]!
+    "Nodes whose current revision was already approved (left unchanged)."
+    alreadyApprovedCount: Int!
+    "Locs of reserved placeholders, which have no spec to approve yet."
+    skippedPlaceholders: [String!]!
+  }
+
   type NodeRevision {
     id: ID!
     "#1326 — attribution of the content captured before the next edit."
@@ -1806,6 +1897,12 @@ export const typeDefs = `#graphql
     approvedBy: String
     "approvedBy resolved to public identifiers (handle + URN), like editedByUser."
     approvedByUser: NodeRevisionEditor
+    "#1591 — the approving principal when no user is known, e.g. app:<id>."
+    approvedByInfo: String
+    "#1591 — when this revision was approved; null unless it was approved before it was edited away."
+    approvedAt: DateTime
+    "#1591 — approval hash v1 recorded when this revision was approved."
+    approvalHash: String
     createdAt: DateTime!
   }
 
@@ -6248,6 +6345,10 @@ export const typeDefs = `#graphql
     disclosure).
     """
     nodeRevisions(nodeRef: ID!, limit: Int): [NodeRevision!]!
+    "#1591 — the tamper check: recompute the node's approval hash from its current title/abstract/content and compare it with the approval on record. A pure read; an encrypted memory needs its session key (SESSION_EXPIRED otherwise)."
+    verifyNode(nodeRef: ID!): NodeIntegrityCheck!
+    "#1591 — the tamper check over every live node of a memory (ID or fully-qualified URN)."
+    verifyMemoryNodes(memoryRef: String!): MemoryIntegrityReport!
 
     """
     A single node-revision snapshot by its id (#617 Display).
@@ -7871,6 +7972,17 @@ export const typeDefs = `#graphql
     unreadable memory answers the same NOT_FOUND as an unknown id.
     """
     updateNodeRevision(revisionId: ID!, revLabel: String): NodeRevision!
+    """
+    #1591 — approve the node's CURRENT revision: record who, when, and the
+    approval hash of its title/abstract/content. Pass revision to approve only
+    if it is still the one you read (REVISION_MISMATCH otherwise). Any writer of
+    the memory may approve, the author included. Idempotent: an approved
+    revision keeps its existing approval. Refuses NODE_IS_PLACEHOLDER, and
+    SESSION_EXPIRED on an encrypted memory without its session key.
+    """
+    approveNode(nodeRef: ID!, revision: Int): NodeApprovalReceipt!
+    "#1591 — approve the current revision of every live node of a memory (ID or fully-qualified URN) that isn't approved yet, in one transaction. Placeholders are skipped and reported."
+    approveMemoryNodes(memoryRef: String!): ApproveMemoryNodesResult!
 
     """
     Delete ALL NodeRevision rows for a node, returning the count deleted (#617).

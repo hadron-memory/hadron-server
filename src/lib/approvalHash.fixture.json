@@ -1,0 +1,106 @@
+{
+  "description": "hadron-server #1591 approval hash v1 conformance fixture. canonical is the exact serialized bytes (base64); hash is lowercase hex SHA-256 over them. Copies in other repos must match byte for byte; regenerate only by bumping the version prefix.",
+  "version": "hadron-approval-v1",
+  "cases": [
+    {
+      "name": "all-null",
+      "input": {
+        "title": null,
+        "abstract": null,
+        "content": null
+      },
+      "canonical": "aGFkcm9uLWFwcHJvdmFsLXYxCnRpdGxlIG51bGwKYWJzdHJhY3QgbnVsbApjb250ZW50IG51bGwK",
+      "hash": "bfba40eda4e7198d8added693b2b51572babb3f83af64590bb5ebbf37aeaf14c"
+    },
+    {
+      "name": "empty-strings-differ-from-null",
+      "input": {
+        "title": "",
+        "abstract": "",
+        "content": ""
+      },
+      "canonical": "aGFkcm9uLWFwcHJvdmFsLXYxCnRpdGxlIDAKCmFic3RyYWN0IDAKCmNvbnRlbnQgMAoK",
+      "hash": "bbddf126ca88d6f60b60dfaf78d4d1953876856bd2b9a18c209ef2042503ee6b"
+    },
+    {
+      "name": "plain-ascii",
+      "input": {
+        "title": "Approvals",
+        "abstract": "Who may approve.",
+        "content": "Any writer may approve.\n"
+      },
+      "canonical": "aGFkcm9uLWFwcHJvdmFsLXYxCnRpdGxlIDkKQXBwcm92YWxzCmFic3RyYWN0IDE2CldobyBtYXkgYXBwcm92ZS4KY29udGVudCAyNApBbnkgd3JpdGVyIG1heSBhcHByb3ZlLgoK",
+      "hash": "14362639449d8a8f810ee4ccef5d61731b9f1e572332d2587e5f7aee84db6815"
+    },
+    {
+      "name": "crlf-normalized",
+      "input": {
+        "title": "Line endings",
+        "abstract": "a\r\nb",
+        "content": "one\r\ntwo\r\n"
+      },
+      "canonical": "aGFkcm9uLWFwcHJvdmFsLXYxCnRpdGxlIDEyCkxpbmUgZW5kaW5ncwphYnN0cmFjdCAzCmEKYgpjb250ZW50IDgKb25lCnR3bwoK",
+      "hash": "1ac9bd36a1542902bd0c85ae32b45f368f1e682cae1cdfbbecb9d6d421f48dc1"
+    },
+    {
+      "name": "lone-cr-normalized",
+      "input": {
+        "title": "Old Mac",
+        "abstract": null,
+        "content": "one\rtwo\r"
+      },
+      "canonical": "aGFkcm9uLWFwcHJvdmFsLXYxCnRpdGxlIDcKT2xkIE1hYwphYnN0cmFjdCBudWxsCmNvbnRlbnQgOApvbmUKdHdvCgo=",
+      "hash": "c790d36c3ef135da16339ab274645336a062112fdab6f471bfa2e1a12ed89f95"
+    },
+    {
+      "name": "lf-equals-crlf-twin",
+      "input": {
+        "title": "Line endings",
+        "abstract": "a\nb",
+        "content": "one\ntwo\n"
+      },
+      "canonical": "aGFkcm9uLWFwcHJvdmFsLXYxCnRpdGxlIDEyCkxpbmUgZW5kaW5ncwphYnN0cmFjdCAzCmEKYgpjb250ZW50IDgKb25lCnR3bwoK",
+      "hash": "1ac9bd36a1542902bd0c85ae32b45f368f1e682cae1cdfbbecb9d6d421f48dc1"
+    },
+    {
+      "name": "multibyte-utf8",
+      "input": {
+        "title": "Grüße 👋",
+        "abstract": "naïve café",
+        "content": "日本語のテキスト\n— em dash"
+      },
+      "canonical": "aGFkcm9uLWFwcHJvdmFsLXYxCnRpdGxlIDEyCkdyw7zDn2Ug8J+RiwphYnN0cmFjdCAxMgpuYcOvdmUgY2Fmw6kKY29udGVudCAzNgrml6XmnKzoqp7jga7jg4bjgq3jgrnjg4gK4oCUIGVtIGRhc2gK",
+      "hash": "702af08212e4da3e13608bed857fb18faedf970c31e1af2d64b547b3ef8fd850"
+    },
+    {
+      "name": "no-unicode-normalization-nfd",
+      "input": {
+        "title": "Grüße",
+        "abstract": null,
+        "content": null
+      },
+      "canonical": "aGFkcm9uLWFwcHJvdmFsLXYxCnRpdGxlIDgKR3J1zIjDn2UKYWJzdHJhY3QgbnVsbApjb250ZW50IG51bGwK",
+      "hash": "fc83eaf46e0828523ae9f655a9f31bcc0867fdeb1ed9bec9e912581721c697e2"
+    },
+    {
+      "name": "field-boundary-injection",
+      "input": {
+        "title": "x\nabstract 0\n",
+        "abstract": null,
+        "content": "content null\n"
+      },
+      "canonical": "aGFkcm9uLWFwcHJvdmFsLXYxCnRpdGxlIDEzCngKYWJzdHJhY3QgMAoKYWJzdHJhY3QgbnVsbApjb250ZW50IDEzCmNvbnRlbnQgbnVsbAoK",
+      "hash": "99929520f08892cd2c5ebaf1b611229aaf99834ee116fe3ecc0fedc9c0b01ebb"
+    },
+    {
+      "name": "whitespace-preserved",
+      "input": {
+        "title": "  padded  ",
+        "abstract": "\t",
+        "content": "\n\n"
+      },
+      "canonical": "aGFkcm9uLWFwcHJvdmFsLXYxCnRpdGxlIDEwCiAgcGFkZGVkICAKYWJzdHJhY3QgMQoJCmNvbnRlbnQgMgoKCgo=",
+      "hash": "ed3385e3a483b65654778f75f18c1662ea3fe4c5dda49cf479992eca1a1ed655"
+    }
+  ]
+}

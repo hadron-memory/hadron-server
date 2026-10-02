@@ -7,6 +7,7 @@
  * tsquery expression (tsquery.ts). Vector search delegates to the existing
  * pgvector helpers.
  */
+import { approvalStateSql } from '../nodeApproval.js';
 import type {
   NodeRetrievalProvider,
   LexicalHit,
@@ -53,6 +54,8 @@ function filterClause(f: NodeSqlFilter | undefined, bind: (v: unknown) => string
   // #719 — structured predicate over properties/data JSONB, compiled to a
   // parameterized boolean expr sharing this query's `bind` accumulator.
   if (flt.where) parts.push(`(${compileNodeWhere(flt.where, bind)})`);
+  const approval = approvalStateSql(flt.approvalState); // #1591
+  if (approval) parts.push(approval);
   return parts.length ? ' AND ' + parts.join(' AND ') : '';
 }
 

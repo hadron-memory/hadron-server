@@ -1342,6 +1342,11 @@ type ReadProjectionNode = {
   authoredByRevision: number | null;
   authoredByHuman: string | null;
   authoredAt: Date | null;
+  /** #1591 — the latest approval on record. */
+  approvedRevNo: number | null;
+  approvedBy: string | null;
+  approvedByInfo: string | null;
+  approvedAt: Date | null;
   name: string;
   loc: string;
   memoryId: string;
@@ -1468,7 +1473,8 @@ async function batchReadableTaskRefs(
 }
 
 async function batchHumanNames(nodes: readonly ReadProjectionNode[]): Promise<Map<string, string>> {
-  const ids = [...new Set(nodes.map((n) => n.authoredByHuman).filter((id): id is string => !!id))];
+  // #1591: approvers render by handle too, from the same lookup.
+  const ids = [...new Set(nodes.flatMap((n) => [n.authoredByHuman, n.approvedBy]).filter((id): id is string => !!id))];
   if (ids.length === 0) return new Map();
   const users = await db.user.findMany({ where: { id: { in: ids }, deletedAt: null }, select: { id: true, handle: true } });
   return new Map(users.filter((user) => !!user.handle).map((user) => [user.id, user.handle!]));
@@ -1578,6 +1584,23 @@ async function renderNodeReadProjection(
     ? `Validation: ${validationState.toLowerCase()} (node revision ${report.nodeRevSeq}; validator ${validatorRef ? `${validatorRef} @ revision ${report.validationTaskRevSeq}` : 'restricted'})`
     : 'Validation: unvalidated';
 
+  // #1591: the approval line. Approver by handle when a user is known, else
+  // the stored principal info.
+  let approvalLine = `Approval: not approved (r${revision})`;
+  if (node.approvedRevNo != null && node.approvedAt) {
+    const handle = node.approvedBy
+      ? (opts.batch
+        ? opts.batch.humanNames.get(node.approvedBy)
+        : (await db.user.findFirst({ where: { id: node.approvedBy, deletedAt: null }, select: { handle: true } }))?.handle)
+      : null;
+    // userUrn is null for a grandfathered, non-URN-legal handle (@copilot, PR #1592).
+    const approver = (handle ? userUrn(handle) : null) ?? node.approvedByInfo ?? 'a former user';
+    const record = `r${node.approvedRevNo} by ${approver} at ${node.approvedAt.toISOString()}`;
+    approvalLine = node.approvedRevNo === revision
+      ? `Approval: approved ${record}`
+      : `Approval: not approved (r${revision}; last approved ${record})`;
+  }
+
   // #186: surface nodeType so callers can tell `parent` from `info`.
   const meta = [
     `**${node.name}**`,
@@ -1590,6 +1613,7 @@ async function renderNodeReadProjection(
     portalUrl ? `URL: ${portalUrl}` : '',
     authorshipLine,
     validationLine,
+    approvalLine,
     node.description ? `> ${node.description}` : '',
     `Type: ${node.nodeType}`,
     // #1201 (@codex P2, PR #1203). Without these a governed node reads as an
