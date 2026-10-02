@@ -555,7 +555,10 @@ describe('Mutation.mergeUsers — node approvals (#1591)', () => {
       id: generateId(), organizationId: org.id, urn: `${org.urn}:m`, name: 'm', class: 'knowledge', visibility: 'ORGANIZATION',
     } });
     const approval = { approvedRevNo: 1, approvedAt: new Date(), approvalHash: 'a'.repeat(64) };
-    const mine = await db.node.create({ data: { id: generateId(), memoryId: memory.id, loc: 'a', name: 'a', approvedBy: source.id, ...approval } });
+    const mine = await db.node.create({ data: {
+      id: generateId(), memoryId: memory.id, loc: 'a', name: 'a', approvedBy: source.id, ...approval,
+      mintedAt: new Date(), mintedBy: source.id, mintedRevNo: 1, mintedHash: 'a'.repeat(64),
+    } });
     const theirs = await db.node.create({ data: { id: generateId(), memoryId: memory.id, loc: 'b', name: 'b', approvedBy: admin.id, ...approval } });
     const revision = await db.nodeRevision.create({ data: {
       id: generateId(), nodeId: mine.id, memoryId: memory.id, loc: 'a', name: 'a', approvedBy: source.id, revNo: 1,
@@ -563,7 +566,7 @@ describe('Mutation.mergeUsers — node approvals (#1591)', () => {
 
     await merge(source.id, target.id);
 
-    expect((await db.node.findUniqueOrThrow({ where: { id: mine.id } })).approvedBy).toBe(target.id);
+    expect(await db.node.findUniqueOrThrow({ where: { id: mine.id } })).toMatchObject({ approvedBy: target.id, mintedBy: target.id });
     expect((await db.node.findUniqueOrThrow({ where: { id: theirs.id } })).approvedBy).toBe(admin.id);
     expect((await db.nodeRevision.findUniqueOrThrow({ where: { id: revision.id } })).approvedBy).toBe(target.id);
   });

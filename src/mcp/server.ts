@@ -1617,7 +1617,7 @@ async function renderNodeReadProjection(
           ? opts.batch.humanNames.get(node.mintedBy)
           : (await db.user.findFirst({ where: { id: node.mintedBy, deletedAt: null }, select: { handle: true } }))?.handle)
         : null;
-      const minter = handle ? userUrn(handle) : node.mintedByInfo ?? 'a former user';
+      const minter = (handle ? userUrn(handle) : null) ?? node.mintedByInfo ?? 'a former user';
       mintLine = `Minted: r${node.mintedRevNo} at ${at} by ${minter}`;
     }
   }

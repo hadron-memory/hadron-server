@@ -476,6 +476,7 @@ async function runMergeTxn(
       // #1591: the approval of record on the live node (no FK, so nothing
       // else would carry it). The revision-row copy is rewritten above.
       ['nodes', 'approved_by'],
+      ['nodes', 'minted_by'],
     ];
     for (const [table, column] of directReferences) {
       await runWithIds(`UPDATE "${table}" SET "${column}" = $1 WHERE "${column}" = $2`);
