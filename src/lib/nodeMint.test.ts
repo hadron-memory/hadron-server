@@ -23,6 +23,7 @@ let reader: { id: string };
 let org: { id: string; urn: string };
 let memory: { id: string; urn: string };
 
+type Finding = { kind: string; loc: string };
 const as = (userId = admin.id): Context => ({ db, userId, roles: [] });
 const spec = (loc: string, extra: Record<string, unknown> = {}) => db.node.create({
   data: { id: generateId(), memoryId: memory.id, loc, name: loc, content: `Body of ${loc}.`, role: 'spec', nodeType: 'info', tags: ['spec'], ...extra },
@@ -58,7 +59,7 @@ describe('mintMemoryNodes (#1591)', () => {
     const a = await spec('pas:010');
     const b = await spec('pas:010:01');
     const dry = await mint(true);
-    expect(dry.blockers.filter((f) => f.kind === 'NOT_APPROVED').map((f) => f.loc).sort())
+    expect(dry.blockers.filter((f: Finding) => f.kind === 'NOT_APPROVED').map((f: Finding) => f.loc).sort())
       .toEqual(['pas:010', 'pas:010:01', 'specs'].sort());
     expect(await codeOf(mint())).toBe('SPEC_CORPUS_MINT_BLOCKED');
 
@@ -86,7 +87,7 @@ describe('mintMemoryNodes (#1591)', () => {
     const added = await spec('pas:030');
     const dry = await mint(true);
     expect(dry.mintLocs).toEqual(['pas:030']);
-    expect(dry.blockers.map((f) => [f.kind, f.loc])).toEqual([['NOT_APPROVED', 'pas:030']]);
+    expect(dry.blockers.map((f: Finding) => [f.kind, f.loc])).toEqual([['NOT_APPROVED', 'pas:030']]);
     await approveAll();
     expect(await mint()).toMatchObject({ mintedCount: 1, mintLocs: ['pas:030'] });
     expect((await rowOf(added.id)).mintedAt).not.toBeNull();
