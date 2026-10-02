@@ -82,8 +82,8 @@ describe('specBacklinks (#1449)', () => {
       .toEqual([['EDGE', 'pas:020', 'pas:080']]);
   });
 
-  it('refuses a minted corpus, and conceals an unreadable one as not found', async () => {
-    expect(await codeOf(resolvers.Query.specBacklinks(null, { memoryRef: minted.id, loc: 'x' }, as()))).toBe('SPEC_CORPUS_NOT_DRAFT');
+  it('scans any memory (#1591), and conceals an unreadable one as not found', async () => {
+    expect(await resolvers.Query.specBacklinks(null, { memoryRef: minted.id, loc: 'x' }, as())).toEqual([]);
     const hidden = await codeOf(resolvers.Query.specBacklinks(null, { memoryRef: draft.id, loc: 'pas:010' }, as(outsider.id)));
     expect(hidden).toBe('MemoryNotFoundError');
     const missing = await codeOf(resolvers.Query.specBacklinks(null, { memoryRef: `hrn:mem:${org.urn}:no-such`, loc: 'pas:010' }, as(outsider.id)));
@@ -199,12 +199,16 @@ describe('renumberSpec (#1449)', () => {
     expect(unresolved.map((r) => r.targetLoc).sort()).toEqual(['pas:030', 'pas:099']);
   });
 
-  it('refuses an occupied destination, the spec\'s own subtree, and a minted corpus, writing nothing', async () => {
+  it('refuses an occupied destination, the spec\'s own subtree, and a minted node in the subtree, writing nothing', async () => {
     expect(await codeOf(renumber(false, 'pas:010', 'pas:020'))).toBe('NodeLocConflictError');
     expect(await codeOf(renumber(false, 'pas:010', 'pas:010:02'))).toBe('BAD_USER_INPUT');
-    expect(await codeOf(specCorpusRenumberMutations.renumberSpec(null, { memoryRef: minted.id, fromLoc: 'a', toLoc: 'b' }, as())))
-      .toBe('SPEC_CORPUS_NOT_DRAFT');
+    // #1591: draft rights are per node, so one minted descendant refuses the whole renumber.
+    await db.node.updateMany({ where: { memoryId: draft.id, loc: 'pas:010:01' }, data: { mintedAt: new Date(), mintedByInfo: 'test' } });
+    // A dry run refuses exactly as the real run does (Atilla, PR #1593).
+    expect(await codeOf(renumber(true, 'pas:010', 'pas:040'))).toBe('NODE_MINTED');
+    expect(await codeOf(renumber(false, 'pas:010', 'pas:040'))).toBe('NODE_MINTED');
     expect((await db.node.findUniqueOrThrow({ where: { id: feature.id } })).loc).toBe('pas:010');
+    expect(await db.node.count({ where: { memoryId: draft.id, loc: { startsWith: 'pas:040' } } })).toBe(0);
   });
 
   it('does not let a reader renumber', async () => {
@@ -823,16 +827,53 @@ describe('#1478 item 6 — a corpus stored with the canonical double-colon Memor
   });
 });
 
+describe('renumber\'s minted check reads only this corpus (Atilla, PR #1593)', () => {
+  it('never names a node\'s loc in another memory it moved into after the scan', async () => {
+    const hidden = await db.memory.create({ data: {
+      id: generateId(), urn: `${org.urn}:outsiders-private`, name: 'outsiders-private',
+      class: 'private', organizationId: org.id, userId: outsider.id,
+    } });
+    // Move the rule (part of the moving set) into the unreadable memory, minted,
+    // right after renumber's scan: its collision check is the next node read.
+    let moved = false;
+    const interleaved = new Proxy(db, {
+      get(target, prop, receiver) {
+        if (prop !== 'node') return Reflect.get(target, prop, receiver);
+        return new Proxy(target.node, {
+          get(n, np, nr) {
+            if (np !== 'findFirst') return Reflect.get(n, np, nr);
+            return async (args: Parameters<typeof n.findFirst>[0]) => {
+              if (!moved) {
+                moved = true;
+                await db.node.update({ where: { id: rule.id }, data: {
+                  memoryId: hidden.id, loc: 'secret', mintedAt: new Date(), mintedByInfo: 'test',
+                } });
+              }
+              return n.findFirst(args);
+            };
+          },
+        });
+      },
+    }) as typeof db;
+    const outcome = await specCorpusRenumberMutations.renumberSpec(
+      null, { memoryRef: draft.id, fromLoc: 'pas:010', toLoc: 'pas:040', dryRun: true },
+      { db: interleaved, userId: admin.id, roles: [] },
+    ).then((r) => JSON.stringify(r), (e: unknown) => JSON.stringify({ message: (e as Error).message, ext: (e as GraphQLError).extensions }));
+    expect(moved).toBe(true);
+    expect(outcome).not.toContain('secret');
+  });
+});
+
 describe('renumber re-decides draft state under the move\'s lock (@codex P1 on #1453)', () => {
-  it('refuses, moving nothing, when the corpus is minted between the check and the move', async () => {
+  it('refuses, moving nothing, when the spec is minted between the check and the move', async () => {
     const spy = vi.spyOn(nodeMoveOps, 'moveWithResult').mockImplementationOnce(async (...args) => {
       spy.mockRestore();
-      // A mint that wins the memory lock after renumber's own draft check.
-      await db.memory.update({ where: { id: draft.id }, data: { corpusDraft: false } });
+      // A mint that commits after renumber's own scan, before the move's locks (#1591: per node).
+      await db.node.update({ where: { id: feature.id }, data: { mintedAt: new Date(), mintedByInfo: 'test' } });
       return nodeMoveOps.moveWithResult(...args);
     });
     expect(await codeOf(specCorpusRenumberMutations.renumberSpec(null, { memoryRef: draft.id, fromLoc: 'pas:010', toLoc: 'pas:040' }, as())))
-      .toBe('SPEC_CORPUS_NOT_DRAFT');
+      .toBe('NODE_MINTED');
     expect(await db.node.findUniqueOrThrow({ where: { id: feature.id } })).toMatchObject({ loc: 'pas:010' });
     expect(await db.node.count({ where: { memoryId: draft.id, loc: { startsWith: 'pas:040' } } })).toBe(0);
   });

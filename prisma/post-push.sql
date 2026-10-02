@@ -521,6 +521,17 @@ ALTER TABLE "node_revisions" ADD CONSTRAINT "chk_node_revisions_authorship_shape
   WHEN "authorship_kind" = 'HUMAN' THEN
     "authored_by_task" IS NULL AND "authored_by_revision" IS NULL AND "authored_by_human" IS NOT NULL AND "authored_at" IS NOT NULL
   ELSE false END);
+-- #1591: a mint record is complete or absent. Synced with the migration and
+-- src/test/globalSetup.ts.
+ALTER TABLE "nodes" DROP CONSTRAINT IF EXISTS "chk_node_mint_complete";
+ALTER TABLE "nodes" ADD CONSTRAINT "chk_node_mint_complete" CHECK (CASE
+  WHEN "minted_at" IS NULL THEN
+    "minted_by" IS NULL AND "minted_by_info" IS NULL AND "minted_rev_no" IS NULL AND "minted_hash" IS NULL
+  ELSE
+    ("minted_by" IS NOT NULL OR "minted_by_info" IS NOT NULL)
+      AND ("minted_rev_no" IS NULL) = ("minted_hash" IS NULL)
+      AND ("minted_rev_no" IS NULL OR "minted_rev_no" > 0)
+  END);
 -- #1591: an approval is complete or absent. Synced with the migration and
 -- src/test/globalSetup.ts.
 ALTER TABLE "nodes" DROP CONSTRAINT IF EXISTS "chk_node_approval_complete";

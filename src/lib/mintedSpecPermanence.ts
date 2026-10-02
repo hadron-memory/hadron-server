@@ -53,6 +53,28 @@ import { GraphQLError } from 'graphql';
 import type { Prisma } from '../generated/prisma/index.js';
 import { hasSpecMarker } from './specMint.js';
 
+/**
+ * #1591 — the permanence policy: is minted-spec permanence enforced at all?
+ *
+ * Holger, 2026-10-01 (#1591): no minted spec is permanent for now, including
+ * the corpora this guard protected since #1468. Every guard below answers
+ * "nothing protected" while this is false. The guard stays so a later ruling
+ * re-enables it here, in one place; its own tests run with it on. Note that it
+ * still keys on the legacy `Memory.corpusMintedAt` stamp, so re-enabling it
+ * under per-node minting needs a decision on which nodes it covers.
+ */
+let permanenceEnforced = false;
+
+/** Whether minted-spec permanence is enforced (#1591: not for now). */
+export function isMintedSpecPermanenceEnforced(): boolean {
+  return permanenceEnforced;
+}
+
+/** Test hook: the guard's own tests run with permanence enforced. */
+export function setMintedSpecPermanenceEnforcedForTests(enforced: boolean): void {
+  permanenceEnforced = enforced;
+}
+
 /** The one error every minted-spec removal refusal raises. */
 export const SPEC_MINTED_PERMANENT = 'SPEC_MINTED_PERMANENT';
 
@@ -98,7 +120,7 @@ export async function lockMintedSpecsIn(
   memoryId: string,
   nodeIds: readonly string[],
 ): Promise<Array<{ id: string; loc: string }>> {
-  if (nodeIds.length === 0) return [];
+  if (!isMintedSpecPermanenceEnforced() || nodeIds.length === 0) return [];
   const ids = [...new Set(nodeIds)].sort();
   // Node rows first (id order, the global multi-row order), then the markers
   // re-read under those locks.
@@ -186,7 +208,11 @@ export async function lockMintedSpecUnmarks(
       role: change.role !== undefined ? change.role : r.role,
     });
   };
-  const unmarked = rows.filter((r) => markedBefore(r) && !markedAfter(r));
+  // #1591: with permanence off, unmarking protects nothing. The deleted-memory
+  // conflict below for a NEWLY marked spec is not permanence and still applies.
+  const unmarked = isMintedSpecPermanenceEnforced()
+    ? rows.filter((r) => markedBefore(r) && !markedAfter(r))
+    : [];
   // A write that marks a node's FIRST spec must not race a whole-corpus
   // delete that has just found none (Codex on #1475): taking the memory row
   // FOR SHARE below conflicts with deleteMemory's FOR UPDATE, so one of the
@@ -274,6 +300,7 @@ export async function mintedSpecLocsIn(
   memoryId: string,
   opts: { includeTombstones: boolean },
 ): Promise<string[]> {
+  if (!isMintedSpecPermanenceEnforced()) return [];
   const memory = await db.memory.findUnique({ where: { id: memoryId }, select: { corpusMintedAt: true } });
   if (!memory?.corpusMintedAt) return [];
   const specs = await db.node.findMany({
@@ -324,6 +351,7 @@ export async function assertNoMintedCorpusRemoval(
   op: string,
   opts: { includeTombstones: boolean; remedy?: string },
 ): Promise<void> {
+  if (!isMintedSpecPermanenceEnforced()) return;
   const [memory] = await tx.$queryRaw<Array<{ corpus_minted_at: Date | null }>>`
     SELECT corpus_minted_at FROM memories WHERE id = ${memoryId} FOR SHARE`;
   if (!memory || memory.corpus_minted_at === null) return;

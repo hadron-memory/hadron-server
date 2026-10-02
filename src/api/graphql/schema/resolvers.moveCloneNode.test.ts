@@ -269,14 +269,20 @@ describe('moveNode (#564)', () => {
   });
 
   it('classifies relative links through source and destination aliases (#1392)', async () => {
+    // #1591: only a minted node's move records an alias (its address was published).
+    const mintInDb = (id: string) => db.node.update({ where: { id }, data: { mintedAt: new Date(), mintedByInfo: 'test' } });
     const sourceAliasTarget = await createDbNode(db, { loc: 'old-source', memoryId: memA.id });
+    await mintInDb(sourceAliasTarget.id);
     await M.moveNode(null, { sourceRef: sourceAliasTarget.id, targetUrn: urnA('new-source') }, asUser());
     const destinationAliasTarget = await createDbNode(db, { loc: 'old-dest', memoryId: memB.id });
+    await mintInDb(destinationAliasTarget.id);
     await M.moveNode(null, { sourceRef: destinationAliasTarget.id, targetUrn: urnB('new-dest') }, asUser());
     await createDbNode(db, { loc: 'old-dest', memoryId: memA.id });
     const firstAmbiguous = await createDbNode(db, { loc: 'old-ambiguous', memoryId: memB.id });
+    await mintInDb(firstAmbiguous.id);
     await M.moveNode(null, { sourceRef: firstAmbiguous.id, targetUrn: urnB('new-ambiguous-1') }, asUser());
     const secondAmbiguous = await createDbNode(db, { loc: 'old-ambiguous', memoryId: memB.id });
+    await mintInDb(secondAmbiguous.id);
     await M.moveNode(null, { sourceRef: secondAmbiguous.id, targetUrn: urnB('new-ambiguous-2') }, asUser());
     await createDbNode(db, { loc: 'old-ambiguous', memoryId: memA.id });
     expect((await resolveNodeRef(db, 'old-source', memA.id)).id).toBe(sourceAliasTarget.id);

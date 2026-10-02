@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, beforeAll, afterAll, vi } from 'vitest';
 import { dirname, join } from 'path';
 import { mkdirSync, rmSync, writeFileSync } from 'fs';
 import { stringify } from 'yaml';
@@ -9,6 +9,7 @@ import { GIT_TRANSPORT_GUARD } from './execGit.js';
 import { syncGraphFromGithub, updateNodeFromGitSync, GitSyncTargetMovedError, describeSyncOutcome, type MemoryWithOrg } from './syncGraphFromGithub.js';
 import { ensureChannelWithRoot, lockMemoryForChannelChange } from '../../lib/channels.js';
 import { generateId } from '../../lib/id.js';
+import { setMintedSpecPermanenceEnforcedForTests } from '../../lib/mintedSpecPermanence.js';
 import { acquireLockSet, ancestorLocs, lockAncestorsForCreate } from '../../lib/nodeSubtreeLock.js';
 import { moveNodeSubtree } from '../../lib/nodeSubtreeMove.js';
 import { lockMemoryConfigExclusive } from '../../lib/governedRole.js';
@@ -2652,8 +2653,24 @@ describe('#1477 Git placeholder marker', () => {
     expect(await stored()).toMatchObject({ role: 'spec.rule', content: null, isPlaceholder: true });
   });
 
+  it('ignores and reports a marker on a MINTED node while syncing it (#1591: per node)', async () => {
+    const id = generateId();
+    await db.node.create({ data: {
+      id, memoryId: dbGraphId, loc: 'pas:010:01', name: 'Published', role: 'spec', ownerRepo: 'test/repo',
+      mintedAt: new Date(), mintedByInfo: 'test',
+    } });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      file({ id, name: 'Still imported', role: 'spec', placeholder: true });
+      expect((await syncGraphFromGithub(makeGraph())).error).toBeUndefined();
+      expect(await stored()).toMatchObject({ name: 'Still imported', isPlaceholder: false });
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('ignored placeholder marker'));
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it.each([
-    ['minted memory', false, 'spec', undefined],
     ['non-spec role', true, 'review', undefined],
     ['lookalike role', true, 'special', undefined],
     ['written body', true, 'spec', 'The rule.'],
@@ -2695,6 +2712,10 @@ describe('#1477 Git placeholder marker', () => {
 
 // ── #1468: git sync never prunes a spec from a mint-stamped corpus ──────────
 describe('#1468 — git sync pruning and minted specs', () => {
+  // #1591: minted-spec permanence is switched off in production for now; the
+  // guard's own assertions run with it on.
+  beforeAll(() => setMintedSpecPermanenceEnforcedForTests(true));
+  afterAll(() => setMintedSpecPermanenceEnforcedForTests(false));
   const repoRoot = () => join(mockSources, 'test-org', 'test/repo');
   const writeSpec = (loc: string) =>
     writeFrontmatterNode(join(repoRoot(), `${loc}.md`), { name: loc, tags: ['spec'] }, 'Rule text.');
@@ -2913,7 +2934,8 @@ describe('#1468 — git sync pruning and minted specs', () => {
 
   it("records a URN alias when a repo rename moves a minted spec, so its citation still resolves (Codex P1)", async () => {
     const specId = 'aaaa146800000000000000000000000005';
-    await db.node.create({ data: { id: specId, memoryId: dbGraphId, loc: 'pas:010', name: 'spec', tags: ['spec'], ownerRepo: 'test/repo' } });
+    // #1591: a minted node's old address is published, so its rename leaves an alias.
+    await db.node.create({ data: { id: specId, memoryId: dbGraphId, loc: 'pas:010', name: 'spec', tags: ['spec'], ownerRepo: 'test/repo', mintedAt: new Date(), mintedByInfo: 'test' } });
     await db.memory.update({ where: { id: dbGraphId }, data: { corpusMintedAt: new Date() } });
     writeFrontmatterNode(join(repoRoot(), 'pas:099.md'), { id: specId, name: 'spec', tags: ['spec'] }, 'Rule text.');
     expect((await syncGraphFromGithub(makeGraph())).error).toBeUndefined();
@@ -2924,7 +2946,8 @@ describe('#1468 — git sync pruning and minted specs', () => {
 
   it('a repo rename in an unstamped memory also records the old address (#1404)', async () => {
     const specId = 'aaaa146800000000000000000000000006';
-    await db.node.create({ data: { id: specId, memoryId: dbGraphId, loc: 'pas:010', name: 'spec', tags: ['spec'], ownerRepo: 'test/repo' } });
+    // #1591: a minted node's old address is published, so its rename leaves an alias.
+    await db.node.create({ data: { id: specId, memoryId: dbGraphId, loc: 'pas:010', name: 'spec', tags: ['spec'], ownerRepo: 'test/repo', mintedAt: new Date(), mintedByInfo: 'test' } });
     writeFrontmatterNode(join(repoRoot(), 'pas:099.md'), { id: specId, name: 'spec', tags: ['spec'] }, 'Rule text.');
     expect((await syncGraphFromGithub(makeGraph())).error).toBeUndefined();
     expect((await db.urnAlias.findMany({ where: { entityId: specId } })).map((a) => a.urn))

@@ -11,7 +11,6 @@ import {
   concealUnreadableDenial,
   isMemoryReadableCached,
   requireMemoryWriteAccess,
-  requireOwnerOrOrgRole,
   withoutRequestCaches,
 } from './resolvers.helpers.js';
 import { isAbstractUnverified } from '../../../lib/contentHash.js';
@@ -29,8 +28,10 @@ import { archiveTombstone } from '../../../lib/tombstoneArchive.js';
 import { lockEdgeEndpointMemories } from '../../../lib/edgeEndpointLock.js';
 import { pendingEdgeStableTargetId } from '../../../lib/pendingEdgePromotion.js';
 import { MemoryNotFoundError } from '../../../lib/asset/gate.js';
-import { ensureCurrentNodeRevisionInTransaction } from '../../../lib/nodeRevisionSnapshot.js';
-import { isDraftCorpus } from '../../../lib/specCorpus.js';
+import { editorFromAuth, ensureCurrentNodeRevisionInTransaction } from '../../../lib/nodeRevisionSnapshot.js';
+import { mayMintNodes } from './resolvers.nodeApproval.js';
+import { computeApprovalHash } from '../../../lib/approvalHash.js';
+import { SubtreeMoveMintedError } from '../../../lib/nodeSubtreeMove.js';
 import { InvalidLocError, validateLoc } from '../../../lib/validateLoc.js';
 import {
   SCANNED_FIELDS,
@@ -54,15 +55,10 @@ export const specCorpusMutations = {
    * It writes through the spec door's own create path (the `spec` governed
    * kind), so every other gate applies unchanged: memory write access (an
    * unreadable memory is concealed as not found), mint-or-refuse at a live loc,
-   * Channel address protection. Only a draft corpus accepts a reservation,
-   * which is what keeps placeholders out of minted corpora.
-   *
-   * The draft check reads the memory row FOR SHARE AFTER the node write, inside
-   * the same transaction: node then memory is the order moves use (the reverse
-   * deadlocks against a merge fold), a concurrent mint's row lock serializes
-   * with it, and the check never answers for a memory the caller cannot write.
-   *
-   * @throws GraphQLError `SPEC_CORPUS_NOT_DRAFT` when the memory is minted.
+   * Channel address protection. Any memory accepts a reservation (#1591): a
+   * placeholder is an unminted node, and the mint refuses while one remains.
+   * A concurrent mint serializes with it through its fence (the memory row
+   * FOR UPDATE conflicts with the node insert's foreign-key lock).
    */
   reserveSpecCitation: async (
     _: unknown,
@@ -128,15 +124,6 @@ export const specCorpusMutations = {
           transaction: { tx, pooledDb: ctx.db, afterCommit: (effect) => effects.push(effect) },
         },
       );
-      const [memory] = await tx.$queryRaw<Array<{ corpus_draft: boolean }>>`
-        SELECT corpus_draft FROM memories WHERE id = ${memoryId} FOR SHARE
-      `;
-      if (!memory?.corpus_draft) {
-        throw new GraphQLError(
-          'Only a draft spec corpus can reserve a citation: this memory is minted, where a citation is permanent once written. Create the spec directly instead.',
-          { extensions: { code: 'SPEC_CORPUS_NOT_DRAFT', memoryId } },
-        );
-      }
       // Git provenance is not a node-input field, so it is reset here, in the
       // same write that marks the placeholder (@codex P2, PR #1452): a revived
       // git-synced tombstone would otherwise keep the deleted body's hash and
@@ -163,7 +150,7 @@ export const specCorpusMutations = {
 
 // ─── #1449 — reference scan: backlinks, unresolved references, renumber ────
 
-/** The corpus a scan runs over: readable, draft, plaintext. */
+/** The corpus a scan runs over: readable and plaintext (any memory since #1591). */
 interface ScannableCorpus {
   id: string;
   urn: string;
@@ -228,7 +215,7 @@ const storedMemoryUrnSpellings = (urn: string): string[] => [urn, legacyMemoryUr
  * unreadable memory answers exactly like a missing one (the shared node-content
  * read gate), and only then is its draft state or encryption revealed.
  *
- * Draft only (contract §3). Encrypted corpora are refused: their text is
+ * Any memory (#1591: draft rights are per node now). Encrypted corpora are refused: their text is
  * ciphertext at rest, and scanning it needs a decryption path this slice does
  * not add.
  */
@@ -237,14 +224,8 @@ async function loadScannableCorpus(ctx: Context, memoryRef: string): Promise<Sca
   if (!(await isMemoryReadableCached(ctx, id))) throw new MemoryNotFoundError(memoryRef);
   const memory = await ctx.db.memory.findUniqueOrThrow({
     where: { id },
-    select: { urn: true, corpusDraft: true, isEncrypted: true },
+    select: { urn: true, isEncrypted: true },
   });
-  if (!isDraftCorpus(memory)) {
-    throw new GraphQLError(
-      'References are scanned only in a draft spec corpus: a minted corpus keeps its citations permanent.',
-      { extensions: { code: 'SPEC_CORPUS_NOT_DRAFT', memoryId: id } },
-    );
-  }
   if (memory.isEncrypted) {
     throw new GraphQLError('Reference scans do not support encrypted memories yet.', {
       extensions: { code: 'SPEC_CORPUS_ENCRYPTED_UNSUPPORTED', memoryId: id },
@@ -939,6 +920,23 @@ export const specCorpusRenumberMutations = {
         extensions: { code: 'NodeLocConflictError', loc: occupied.loc, memoryId: corpus.id },
       });
     }
+    // #1591: the same per-node draft-rights rule the mover enforces under its
+    // locks, decided here too so a dry run plans only what a real run would
+    // do (Atilla, PR #1593). The mover still re-decides it under the locks.
+    // Pinned to this corpus and to live rows: a node that moved into another
+    // memory since the scan must not lend that memory's loc to the refusal
+    // (Atilla, PR #1593). The mover re-decides the moved set under its locks.
+    const mintedLocs = (await ctx.db.node.findMany({
+      where: { id: { in: movingNodes.map((n) => n.id) }, memoryId: corpus.id, deletedAt: null, mintedAt: { not: null } },
+      select: { loc: true },
+      orderBy: { loc: 'asc' },
+    })).map((n) => n.loc);
+    if (mintedLocs.length > 0) {
+      const refusal = new SubtreeMoveMintedError(corpus.id, mintedLocs);
+      throw new GraphQLError(refusal.message, {
+        extensions: { code: 'NODE_MINTED', memoryId: corpus.id, locs: mintedLocs.slice(0, 10), count: mintedLocs.length },
+      });
+    }
 
     // (@codex P2, #1453) Decide which references are ours BEFORE the move.
     // When a prior holder of our URN also has a node at fromLoc, our own live
@@ -974,7 +972,7 @@ export const specCorpusRenumberMutations = {
           mirrorAfterMove: false,
           // (@codex P1, PR #1453) The draft check above ran before the move's
           // lock; a mint can commit in between. Re-decided under the lock.
-          requireDraftSource: true,
+          requireUnminted: true,
         });
         movedForMirror = relocated.map((node) => ({ id: node.id, previousLoc: node.previousLoc }));
         nodes = await reloadCorpusNodesById(ctx.db, corpus.id, scannedIds);
@@ -1100,7 +1098,7 @@ function validateLocOrThrow(loc: string): void {
 // ─── #1448 — minting: draft → minted, once, one-way ─────────────────────────
 
 /** Why the mint report lists an item. */
-type MintFindingKind = 'PLACEHOLDER' | 'UNRESOLVED_REFERENCE' | 'LINT' | 'STALE_ABSTRACT';
+type MintFindingKind = 'PLACEHOLDER' | 'UNRESOLVED_REFERENCE' | 'LINT' | 'STALE_ABSTRACT' | 'NOT_APPROVED' | 'TAMPERED' | 'CITES_UNMINTED';
 
 type MintFinding = {
   kind: MintFindingKind;
@@ -1118,6 +1116,10 @@ type MintReport = {
   staleAbstracts: MintFinding[];
   staleAbstractsBlock: boolean;
   openQuestions: Array<{ decider: string | null; questions: Array<{ loc: string; question: string }> }>;
+  /** #1591 — how many nodes this call minted (0 on a dry run or refusal). */
+  mintedCount: number;
+  /** #1591 — the locs this call minted, or would mint on a dry run, by loc. */
+  mintLocs: string[];
 };
 
 /** How many blockers a refusal carries in its error extensions (the dry run has them all). */
@@ -1158,152 +1160,229 @@ async function fenceCorpusForMint(tx: Prisma.TransactionClient, memoryId: string
   await tx.$executeRaw`SET LOCAL lock_timeout TO DEFAULT`;
 }
 
-const CORPUS_MANAGER_SELECT = { class: true, userId: true, organizationId: true, ownerUserId: true } as const;
-
 /**
- * Who may mint a corpus: whoever may manage the memory, keyed the way
- * deleteMemory and requireMemoryWriteAccess key it (@codex P2, PR #1462). A
- * personal or private memory is STRICTLY its principal's (`Memory.userId`,
- * cor:acl:010:02), with no org-role path, and is identity-scoped, so an
- * impersonating session is refused. Its `ownerUserId` is the TENANT axis and
- * is null when the memory is org-anchored, so the updateMemory gate alone
- * would leave such a corpus with nobody able to mint it. Any other memory
- * takes the updateMemory gate: its user owner, or an ADMIN of its org.
+ * #1591 — mint every unminted live node of a memory, once, after its checks.
+ * `mintMemoryNodes` and the older `mintSpecCorpus` are this one operation.
+ *
+ * Scope (Holger's #1447 round-3 ruling 2b): the memory's live nodes with no
+ * `mintedAt`. Findings are reported only for those nodes; a node minted
+ * earlier neither blocks nor is linted again, so an existing corpus's legacy
+ * issues cannot block minting its new specs. The scans still read the whole
+ * memory, because a new spec's citation of a minted one must resolve.
+ *
+ * Blocks (a real run refuses `SPEC_CORPUS_MINT_BLOCKED` while any hold):
+ * a placeholder; a reference to a missing spec or a placeholder; one of the
+ * four server lint rules over the citation-shaped nodes; a stale abstract once
+ * STALE_ABSTRACT_BLOCKS_MINT is on (#1408); `NOT_APPROVED`, a node whose
+ * current revision is not approved (ruling 2c); and `CITES_UNMINTED`, an edge
+ * into another memory's node that is not minted yet ("a minted node may not
+ * cite an unminted one"). A citation inside the memory cannot be unminted
+ * after the mint, since every node in scope is minted together. A TEXT
+ * citation of another memory's node is not resolved by the reference scan,
+ * so it is not checked here (#1591 follow-up).
+ *
+ * By any writer of the memory ({@link mayMintNodes}, ruling 2a). The check and
+ * the stamp run inside {@link fenceCorpusForMint}, so no write lands between
+ * the report and the mint, and each node is stamped with the revision and
+ * approval hash the check just accepted. A dry run only reads. Minting
+ * protects nothing by itself (#1591 permanence ruling).
+ *
+ * @throws GraphQLError `SPEC_CORPUS_BUSY` (retryable) when a node of the
+ *   memory stays locked by an in-flight write.
  */
-async function requireCorpusManager(
+async function mintMemoryNodes(
   ctx: Context,
-  m: { class: string; userId: string | null; organizationId: string | null; ownerUserId: string | null },
-): Promise<void> {
-  if (m.class === 'personal' || m.class === 'private') {
-    if (!ctx.impersonation && ctx.userId && m.userId === ctx.userId) return;
-    throw new Error('Forbidden');
-  }
-  await requireOwnerOrOrgRole(ctx, m, 'ADMIN');
+  memoryRef: string,
+  dryRun: boolean,
+): Promise<MintReport> {
+  const { id } = await resolveMemoryRef(ctx.db, memoryRef);
+  await concealUnreadableDenial(ctx, id, memoryRef, () => mayMintNodes(ctx, id));
+
+  return ctx.db.$transaction(async (tx) => {
+    if (dryRun) await tx.$queryRaw`SELECT id FROM memories WHERE id = ${id} FOR NO KEY UPDATE`;
+    else await fenceCorpusForMint(tx, id);
+    const txCtx = withoutRequestCaches(ctx, tx);
+    // Re-authorize under the lock: an org transfer or a lost membership may
+    // have committed between the check above and this lock.
+    await concealUnreadableDenial(txCtx, id, memoryRef, () => mayMintNodes(txCtx, id));
+    // Re-reads encryption under the lock just taken.
+    const corpus = await loadScannableCorpus(txCtx, id);
+    const nodes = await tx.node.findMany({
+      where: { memoryId: id, deletedAt: null },
+      orderBy: { loc: 'asc' },
+      select: {
+        id: true, loc: true, nodeType: true, tags: true, role: true, isPlaceholder: true, revSeq: true,
+        name: true, description: true, abstract: true, content: true, abstractOriginHash: true,
+        mintedAt: true, approvedRevNo: true, approvalHash: true,
+      },
+    });
+    const inScope = nodes.filter((n) => n.mintedAt === null);
+    const inScopeIds = new Set(inScope.map((n) => n.id));
+    const inScopeLocs = new Set(inScope.map((n) => n.loc));
+    // The lint scope is exactly the CLI's (`lintSelects`, hadron-cli #708;
+    // ruling (a) in team chat #4086): every spec-marked node at ANY loc, plus
+    // every citation-shaped node, marked or not, so a spec that lost its tag
+    // is still caught. A memory root at a citation-shaped name (`pas`)
+    // occupies that citation and is linted like any node there, as the CLI
+    // lints it; one at an ordinary name (`specs-draft`) is outside. Linted
+    // over the whole memory (duplicate-loc compares across it), reported for
+    // the nodes in scope.
+    const cited = nodes.filter(mintLintSelects);
+    const citedInScope = cited.filter((n) => inScopeIds.has(n.id));
+
+    const blockers: MintFinding[] = [];
+    for (const n of inScope) {
+      if (n.isPlaceholder) {
+        blockers.push({ kind: 'PLACEHOLDER', loc: n.loc, rule: null, message: 'reserved citation with no spec written', targetLoc: null });
+      }
+    }
+    const scanned: ScannedNode[] = nodes.map((n) => ({
+      id: n.id, loc: n.loc, isPlaceholder: n.isPlaceholder, revSeq: n.revSeq, role: n.role,
+      fields: { name: n.name, description: n.description, abstract: n.abstract, content: n.content },
+    }));
+    for (const r of await unresolvedReferencesIn(txCtx, corpus, scanned)) {
+      if (!inScopeIds.has(r.sourceNodeId)) continue;
+      blockers.push({
+        kind: 'UNRESOLVED_REFERENCE', loc: r.sourceLoc, rule: r.reason ?? null, targetLoc: r.targetLoc,
+        message: r.reason === 'PLACEHOLDER'
+          ? `${r.kind === 'EDGE' ? 'edge' : r.field} points at placeholder ${r.targetLoc}`
+          : `${r.kind === 'EDGE' ? 'edge' : r.field} cites ${r.targetLoc}, which does not exist`,
+      });
+    }
+    for (const f of lintCorpusForMint(cited)) {
+      if (!inScopeLocs.has(f.loc)) continue;
+      blockers.push({ kind: 'LINT', loc: f.loc, rule: f.rule, message: f.message, targetLoc: null });
+    }
+    for (const n of inScope) {
+      if (n.isPlaceholder) continue;
+      if (n.approvedRevNo === n.revSeq) {
+        // The approval names the current revision, but a write outside the
+        // revision system leaves that number unchanged: recompute the hash
+        // the mint is about to certify (Atilla, PR #1593). The memory is
+        // plaintext here (an encrypted one is refused above).
+        const actual = computeApprovalHash({ title: n.name, abstract: n.abstract, content: n.content });
+        if (actual !== n.approvalHash) {
+          blockers.push({
+            kind: 'TAMPERED', loc: n.loc, rule: null, targetLoc: null,
+            message: `revision ${n.revSeq} changed after it was approved, outside the revision system; re-approve it`,
+          });
+        }
+        continue;
+      }
+      blockers.push({
+        kind: 'NOT_APPROVED', loc: n.loc, rule: null, targetLoc: null,
+        message: n.approvedRevNo === null
+          ? `revision ${n.revSeq} is not approved`
+          : `revision ${n.revSeq} is not approved (revision ${n.approvedRevNo} was)`,
+      });
+    }
+    // An edge from a node in scope into another memory's live node that is
+    // not minted yet. Only a memory the caller can read is classified (an
+    // unreadable target already blocks as MISSING above, uniformly); naming it
+    // by URN discloses nothing the edge row and the read gate do not already.
+    const foreignTargets = await tx.edge.findMany({
+      where: {
+        deletedAt: null,
+        source: { memoryId: id, deletedAt: null, mintedAt: null },
+        target: { memoryId: { not: id }, deletedAt: null, isPlaceholder: false, mintedAt: null },
+      },
+      select: {
+        source: { select: { loc: true } },
+        target: { select: { loc: true, memoryId: true, memory: { select: { urn: true } } } },
+      },
+      orderBy: { id: 'asc' },
+    });
+    for (const e of foreignTargets) {
+      if (!(await isMemoryReadableCached(txCtx, e.target.memoryId))) continue;
+      const targetUrn = `hrn:node:${e.target.memory.urn.replace(/^(?:hrn|urn):mem(?:ory)?:/i, '')}:${e.target.loc}`;
+      blockers.push({
+        kind: 'CITES_UNMINTED', loc: e.source.loc, rule: null, targetLoc: targetUrn,
+        message: `edge points at ${targetUrn}, which is not minted yet`,
+      });
+    }
+    const staleAbstracts: MintFinding[] = citedInScope
+      .filter((n) => isAbstractUnverified(n))
+      .map((n) => ({
+        kind: 'STALE_ABSTRACT' as const, loc: n.loc, rule: null, targetLoc: null,
+        message: 'the abstract was written for an earlier body; re-affirm or rewrite it',
+      }));
+    if (STALE_ABSTRACT_BLOCKS_MINT) blockers.push(...staleAbstracts);
+
+    const byDecider = new Map<string | null, Array<{ loc: string; question: string }>>();
+    for (const n of citedInScope) {
+      for (const q of parseOpenQuestions(n.content)) {
+        byDecider.set(q.decider, [...(byDecider.get(q.decider) ?? []), { loc: n.loc, question: q.question }]);
+      }
+    }
+    const openQuestions = [...byDecider.entries()]
+      .sort(([a], [b]) => (a === null ? 1 : b === null ? -1 : a.localeCompare(b)))
+      .map(([decider, questions]) => ({ decider, questions }));
+
+    const mintLocs = inScope.map((n) => n.loc);
+    const report: MintReport = {
+      memoryId: id, dryRun, minted: false, blockers,
+      staleAbstracts, staleAbstractsBlock: STALE_ABSTRACT_BLOCKS_MINT, openQuestions,
+      mintedCount: 0, mintLocs,
+    };
+    if (dryRun) return report;
+    if (blockers.length > 0) {
+      throw new GraphQLError(
+        `Minting refused: ${blockers.length} blocking item(s) remain. Run mintMemoryNodes with dryRun: true for the full report.`,
+        {
+          extensions: {
+            code: 'SPEC_CORPUS_MINT_BLOCKED',
+            memoryId: id,
+            blockerCount: blockers.length,
+            blockers: blockers.slice(0, MINT_REFUSAL_BLOCKER_CAP),
+          },
+        },
+      );
+    }
+    if (inScope.length === 0) return report;
+    const now = new Date();
+    const minter = editorFromAuth(ctx);
+    // Every node in scope passed NOT_APPROVED and TAMPERED under this fence,
+    // so each one's approval names its current revision and its stored hash
+    // equals the text being minted: stamp that revision and that hash.
+    const ids = [...inScopeIds];
+    const mintedCount = await tx.$executeRaw`
+      UPDATE nodes SET
+        minted_at = ${now},
+        minted_by = ${minter.userId ?? null},
+        minted_by_info = ${minter.userId ? null : minter.info ?? 'unknown'},
+        minted_rev_no = rev_seq,
+        minted_hash = approval_hash
+      WHERE memory_id = ${id} AND deleted_at IS NULL AND minted_at IS NULL
+        AND id = ANY(${ids}::text[]) AND approved_rev_no = rev_seq`;
+    if (mintedCount !== ids.length) {
+      // Unreachable under the fence; refuse rather than mint a partial set.
+      throw new Error(`Mint stamped ${mintedCount} of ${ids.length} nodes; the memory changed under the fence`);
+    }
+    // The legacy corpus stamp (#1448), kept for one release as the record of
+    // the latest mint; corpus state itself is derived from the nodes.
+    await tx.memory.update({
+      where: { id },
+      data: { corpusDraft: false, corpusMintedAt: now, corpusMintedBy: ctx.userId ?? ctx.clientId ?? null },
+    });
+    return { ...report, minted: true, mintedCount };
+  }, { timeout: 120_000 });
 }
 
 export const specCorpusMintMutations = {
-  /**
-   * #1448 — mint a DRAFT spec corpus: one step for the whole corpus, one-way
-   * (contract §5). After minting, today's rules apply unchanged: citations are
-   * permanent, moves record URN aliases again, and no placeholder can be
-   * reserved. `dryRun` returns the same report without minting.
-   *
-   * Blocks (and a real run refuses `SPEC_CORPUS_MINT_BLOCKED` while any hold):
-   * a placeholder remains; a reference points to a missing spec or a
-   * placeholder; a structural lint error (the four server-owned rules, over
-   * the citation-shaped nodes); and a stale abstract once
-   * STALE_ABSTRACT_BLOCKS_MINT is switched on (#1408). Reported only: stale
-   * abstracts while that switch is off, and open questions grouped by who
-   * decides.
-   *
-   * By anyone who can manage the corpus ({@link requireCorpusManager}): the
-   * principal of a personal/private corpus; otherwise its owner or an ADMIN of
-   * its org. An unreadable memory answers as not found.
-   * A real run checks and flips inside {@link fenceCorpusForMint}, so no write
-   * lands between the report and the mint; a dry run only reads.
-   *
-   * @throws GraphQLError `SPEC_CORPUS_BUSY` (retryable) when a node of the
-   *   corpus stays locked by an in-flight write.
-   */
-  mintSpecCorpus: async (
+  /** #1591 — mint every unminted live node of a memory. See {@link mintMemoryNodes}. */
+  mintMemoryNodes: (
     _: unknown,
     { memoryRef, dryRun }: { memoryRef: string; dryRun?: boolean | null },
     ctx: Context,
-  ): Promise<MintReport> => {
-    const { id } = await resolveMemoryRef(ctx.db, memoryRef);
-    const owner = await ctx.db.memory.findUniqueOrThrow({ where: { id }, select: CORPUS_MANAGER_SELECT });
-    await concealUnreadableDenial(ctx, id, memoryRef, () => requireCorpusManager(ctx, owner));
+  ): Promise<MintReport> => mintMemoryNodes(ctx, memoryRef, !!dryRun),
 
-    return ctx.db.$transaction(async (tx) => {
-      if (dryRun) await tx.$queryRaw`SELECT id FROM memories WHERE id = ${id} FOR NO KEY UPDATE`;
-      else await fenceCorpusForMint(tx, id);
-      const txCtx = withoutRequestCaches(ctx, tx);
-      // (@codex P2, PR #1462) Re-authorize under the lock: an org transfer
-      // (updateMemory takes this row FOR UPDATE) may have committed between the
-      // check above and this lock, and minting is irreversible, so the gate
-      // must judge the owner the row has NOW.
-      const lockedOwner = await tx.memory.findUniqueOrThrow({ where: { id }, select: CORPUS_MANAGER_SELECT });
-      await concealUnreadableDenial(txCtx, id, memoryRef, () => requireCorpusManager(txCtx, lockedOwner));
-      // Re-reads the draft flag and encryption under the lock just taken.
-      const corpus = await loadScannableCorpus(txCtx, id);
-      const nodes = await tx.node.findMany({
-        where: { memoryId: id, deletedAt: null },
-        orderBy: { loc: 'asc' },
-        select: {
-          id: true, loc: true, nodeType: true, tags: true, role: true, isPlaceholder: true, revSeq: true,
-          name: true, description: true, abstract: true, content: true, abstractOriginHash: true,
-        },
-      });
-      // The lint scope is exactly the CLI's (`lintSelects`, hadron-cli #708;
-      // ruling (a) in team chat #4086): every spec-marked node at ANY loc, plus
-      // every citation-shaped node, marked or not, so a spec that lost its tag
-      // is still caught. A memory root at a citation-shaped name (`pas`)
-      // occupies that citation and is linted like any node there, as the CLI
-      // lints it; one at an ordinary name (`specs-draft`) is outside.
-      const cited = nodes.filter(mintLintSelects);
-
-      const blockers: MintFinding[] = [];
-      for (const n of nodes) {
-        if (n.isPlaceholder) {
-          blockers.push({ kind: 'PLACEHOLDER', loc: n.loc, rule: null, message: 'reserved citation with no spec written', targetLoc: null });
-        }
-      }
-      const scanned: ScannedNode[] = nodes.map((n) => ({
-        id: n.id, loc: n.loc, isPlaceholder: n.isPlaceholder, revSeq: n.revSeq, role: n.role,
-        fields: { name: n.name, description: n.description, abstract: n.abstract, content: n.content },
-      }));
-      for (const r of await unresolvedReferencesIn(txCtx, corpus, scanned)) {
-        blockers.push({
-          kind: 'UNRESOLVED_REFERENCE', loc: r.sourceLoc, rule: r.reason ?? null, targetLoc: r.targetLoc,
-          message: r.reason === 'PLACEHOLDER'
-            ? `${r.kind === 'EDGE' ? 'edge' : r.field} points at placeholder ${r.targetLoc}`
-            : `${r.kind === 'EDGE' ? 'edge' : r.field} cites ${r.targetLoc}, which does not exist`,
-        });
-      }
-      for (const f of lintCorpusForMint(cited)) {
-        blockers.push({ kind: 'LINT', loc: f.loc, rule: f.rule, message: f.message, targetLoc: null });
-      }
-      const staleAbstracts: MintFinding[] = cited
-        .filter((n) => isAbstractUnverified(n))
-        .map((n) => ({
-          kind: 'STALE_ABSTRACT' as const, loc: n.loc, rule: null, targetLoc: null,
-          message: 'the abstract was written for an earlier body; re-affirm or rewrite it',
-        }));
-      if (STALE_ABSTRACT_BLOCKS_MINT) blockers.push(...staleAbstracts);
-
-      const byDecider = new Map<string | null, Array<{ loc: string; question: string }>>();
-      for (const n of cited) {
-        for (const q of parseOpenQuestions(n.content)) {
-          byDecider.set(q.decider, [...(byDecider.get(q.decider) ?? []), { loc: n.loc, question: q.question }]);
-        }
-      }
-      const openQuestions = [...byDecider.entries()]
-        .sort(([a], [b]) => (a === null ? 1 : b === null ? -1 : a.localeCompare(b)))
-        .map(([decider, questions]) => ({ decider, questions }));
-
-      const report: MintReport = {
-        memoryId: id, dryRun: !!dryRun, minted: false, blockers,
-        staleAbstracts, staleAbstractsBlock: STALE_ABSTRACT_BLOCKS_MINT, openQuestions,
-      };
-      if (dryRun) return report;
-      if (blockers.length > 0) {
-        throw new GraphQLError(
-          `Minting refused: ${blockers.length} blocking item(s) remain. Run mintSpecCorpus with dryRun: true for the full report.`,
-          {
-            extensions: {
-              code: 'SPEC_CORPUS_MINT_BLOCKED',
-              memoryId: id,
-              blockerCount: blockers.length,
-              blockers: blockers.slice(0, MINT_REFUSAL_BLOCKER_CAP),
-            },
-          },
-        );
-      }
-      await tx.memory.update({
-        where: { id },
-        data: { corpusDraft: false, corpusMintedAt: new Date(), corpusMintedBy: ctx.userId ?? ctx.clientId ?? null },
-      });
-      return { ...report, minted: true };
-    }, { timeout: 120_000 });
-  },
+  /**
+   * #1448, generalized by #1591: the same operation as `mintMemoryNodes`, kept
+   * under its original name for the shipped CLI (`hadron spec mint`).
+   */
+  mintSpecCorpus: (
+    _: unknown,
+    { memoryRef, dryRun }: { memoryRef: string; dryRun?: boolean | null },
+    ctx: Context,
+  ): Promise<MintReport> => mintMemoryNodes(ctx, memoryRef, !!dryRun),
 };

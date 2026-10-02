@@ -73,7 +73,7 @@ import { getMemberOrgIds } from '../../../lib/auth/memberOrgIds.js';
 import { publicReadableMemoryWhere } from '../../../lib/orgDiscoverability.js';
 import { memoryRowToRef, agentRowToRef } from './publicRefs.js';
 import { WORKLOG_LOC } from './resolvers.teamWork.js';
-import { corpusStateOf } from '../../../lib/specCorpus.js';
+import { corpusMintStateOf } from '../../../lib/specCorpus.js';
 import { LIVE_ORG_MEMBERSHIP } from '../../../lib/auth/liveOrgMembership.js';
 import { isSessionLive, loadLastEventBySession } from '../../../lib/sessionActivity.js';
 import type { SessionType } from '../../../generated/prisma/index.js';
@@ -1106,22 +1106,12 @@ export const typeResolvers = {
     },
   },
   Memory: {
-    // #1448 — DRAFT | MINTED, projected from the stored flag in one place. A
-    // parent built from a narrowed select may not carry the column; reading it
-    // back is correct, while defaulting would report a draft corpus as MINTED.
-    // #1448 (@codex P2, PR #1462) — same read-back as corpusState: a parent
-    // projected without the column must not report a minted corpus as never
-    // minted. `undefined` means "not selected"; null is a real value.
-    corpusMintedAt: async (m: { id: string; corpusMintedAt?: Date | null }, _: unknown, ctx: Context) =>
-      m.corpusMintedAt !== undefined
-        ? m.corpusMintedAt
-        : (await ctx.db.memory.findUniqueOrThrow({ where: { id: m.id }, select: { corpusMintedAt: true } })).corpusMintedAt,
-    corpusState: async (m: { id: string; corpusDraft?: boolean }, _: unknown, ctx: Context) =>
-      corpusStateOf(
-        typeof m.corpusDraft === 'boolean'
-          ? { corpusDraft: m.corpusDraft }
-          : await ctx.db.memory.findUniqueOrThrow({ where: { id: m.id }, select: { corpusDraft: true } }),
-      ),
+    // #1448, derived from the nodes since #1591 (corpusMintStateOf): DRAFT
+    // while no live node is minted; corpusMintedAt is the latest node mint.
+    corpusMintedAt: async (m: { id: string }, _: unknown, ctx: Context) =>
+      (await corpusMintStateOf(ctx.db, m.id)).mintedAt,
+    corpusState: async (m: { id: string }, _: unknown, ctx: Context) =>
+      (await corpusMintStateOf(ctx.db, m.id)).state,
     // A Memory reader may be external to its owning org. The nested object
     // exposes org policy and relations, so apply organization(ref:)'s gate.
     organization: (g: { organizationId: string | null }, _: unknown, ctx: Context) =>

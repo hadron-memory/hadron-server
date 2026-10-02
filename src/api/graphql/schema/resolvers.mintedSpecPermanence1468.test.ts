@@ -7,7 +7,7 @@
  * behaviour. A spec is anything with the spec marker: a `spec` tag or a
  * `spec`/`spec.*` role.
  */
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, vi, beforeAll, afterAll } from 'vitest';
 import { GraphQLError } from 'graphql';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
@@ -17,6 +17,12 @@ import type { AuthContext } from '../../../middleware/auth.js';
 import { generateId } from '../../../lib/id.js';
 import { ensureChannelWithRoot } from '../../../lib/channels.js';
 import { SPEC_MINTED_PERMANENT, assertNoMintedSpecUnmark } from '../../../lib/mintedSpecPermanence.js';
+import { setMintedSpecPermanenceEnforcedForTests } from '../../../lib/mintedSpecPermanence.js';
+
+// #1591: minted-spec permanence is switched off in production for now; the
+// #1468 guard's own assertions run with it on.
+beforeAll(() => setMintedSpecPermanenceEnforcedForTests(true));
+afterAll(() => setMintedSpecPermanenceEnforcedForTests(false));
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),

@@ -58,7 +58,6 @@ import { lockAncestorsForCreate, lockNodeForDelete } from './nodeSubtreeLock.js'
 import type { Prisma } from '../generated/prisma/index.js';
 import { normalizeObjectType } from './enforceNodeSchema.js';
 import { recordUrnRename } from './urnAlias.js';
-import { isDraftCorpus } from './specCorpus.js';
 import { assertNoMintedSpecRemoval } from './mintedSpecPermanence.js';
 import { safeNodeUrnV2 } from './urnEmit.js';
 import { UrnNotQualifiedError, UrnParseError } from './urn.js';
@@ -90,37 +89,28 @@ export class SubtreeMoveCollisionError extends Error {
 }
 
 /**
- * #1449 (@codex P1, PR #1453): the caller required a DRAFT source corpus (a
- * renumber: draft-only, because a minted corpus's citations are permanent),
- * and the source memory is not one when read under this move's own Memory
- * lock. A mint that commits between the caller's check and this lock is the
- * case: the move must refuse, not relocate citations in a minted corpus.
+ * #1591: the caller required an UNMINTED subtree (a renumber: draft rights are
+ * per node, and a minted node's address was published), and some node of the
+ * subtree is minted when read under this move's own locks. A mint that
+ * commits between the caller's check and those locks is the race case: the
+ * move refuses rather than renumber a minted node without an alias.
  */
-export class SubtreeMoveSourceNotDraftError extends Error {
-  constructor(public readonly memoryId: string) {
-    super('The corpus is no longer a draft (it was minted meanwhile): its citations are permanent, so nothing was moved.');
-    this.name = 'SubtreeMoveSourceNotDraftError';
+export class SubtreeMoveMintedError extends Error {
+  constructor(
+    public readonly memoryId: string,
+    public readonly locs: string[],
+  ) {
+    super(
+      `Refused: ${locs.slice(0, 10).map((l) => `"${l}"`).join(', ')}${locs.length > 10 ? ` (and ${locs.length - 10} more)` : ''} ` +
+        `${locs.length === 1 ? 'is' : 'are'} minted, so only an unminted node can be renumbered. Move it instead, which keeps its old address resolving.`,
+    );
+    this.name = 'SubtreeMoveMintedError';
   }
 }
 
-/**
- * #1450 (@codex P1, PR #1452): the move would carry a PLACEHOLDER spec (a
- * reserved citation with no spec written) into a memory that is not a draft
- * corpus. Placeholders exist only in draft corpora, where minting refuses
- * while any remain; outside one, a placeholder would be a published citation
- * with no spec behind it.
- */
-export class SubtreeMovePlaceholderError extends Error {
-  constructor(
-    public readonly loc: string,
-    public readonly memoryId: string,
-  ) {
-    super(
-      `Cannot move placeholder "${loc}" into a memory that is not a draft spec corpus: ` +
-        'write the spec first (its content), or move it within draft corpora only.',
-    );
-    this.name = 'SubtreeMovePlaceholderError';
-  }
+/** #1591 — whether a locked node row is minted (full rows carry `mintedAt`). */
+function isMintedRow(n: SnapshotSourceNode): boolean {
+  return (n as SnapshotSourceNode & { mintedAt?: Date | null }).mintedAt != null;
 }
 
 /** The destination is inside the source's own subtree — a loc-prefix cycle. */
@@ -299,8 +289,8 @@ export async function moveNodeSubtree(
      * opt-in `renameToLeaf` argument, and GraphQL `moveNode` still never sets it.
      */
     renameSourceLeaf?: boolean;
-    /** Refuse (SubtreeMoveSourceNotDraftError) unless the source memory is a draft corpus under this move's lock. */
-    requireDraftSource?: boolean;
+    /** Refuse (SubtreeMoveMintedError) when any moved node is minted, read under this move's locks (#1591). */
+    requireUnminted?: boolean;
     /** Recheck caller write authority after both Memory rows are locked. */
     authorizeLockedMemory?: (memoryId: string) => Promise<void>;
   },
@@ -347,16 +337,14 @@ export async function moveNodeSubtree(
   // needed by the later URN read now: upgrading two disjoint moves' FOR SHARE
   // locks to FOR NO KEY UPDATE would deadlock. Opposing moves use one ID order.
   const memoryUrns = new Map<string, string>();
-  // #1448: whether each memory is a draft spec corpus, read under the same
-  // lock, so a concurrent mint (which takes this row too) cannot interleave.
-  const draftCorpus = new Map<string, boolean>();
+  // A concurrent mint takes this row FOR UPDATE, so it cannot interleave with
+  // the per-node mint state read below under the node locks.
   for (const memoryId of [...new Set([srcMemoryId, destMemoryId])].sort()) {
-    const [memory] = await tx.$queryRaw<Array<{ urn: string; corpus_draft: boolean }>>`
-      SELECT urn, corpus_draft FROM memories WHERE id = ${memoryId} FOR NO KEY UPDATE
+    const [memory] = await tx.$queryRaw<Array<{ urn: string }>>`
+      SELECT urn FROM memories WHERE id = ${memoryId} FOR NO KEY UPDATE
     `;
     if (!memory) throw new Error(`Move memory ${memoryId} disappeared while locking; retry.`);
     memoryUrns.set(memoryId, memory.urn);
-    draftCorpus.set(memoryId, memory.corpus_draft);
   }
   for (const memoryId of [...new Set([srcMemoryId, destMemoryId])].sort()) {
     await opts.authorizeLockedMemory?.(memoryId);
@@ -431,17 +419,13 @@ export async function moveNodeSubtree(
   const blocker = occupants.find((o) => !movedIds.has(o.id));
   if (blocker) throw new SubtreeMoveCollisionError(blocker.loc, destMemoryId);
 
-  // #1449 — a draft-only caller (renumber) re-decides draft state HERE, under
-  // the lock, before anything moves (@codex P1, PR #1453).
-  if (opts.requireDraftSource && !isDraftCorpus({ corpusDraft: draftCorpus.get(srcMemoryId)! })) {
-    throw new SubtreeMoveSourceNotDraftError(srcMemoryId);
-  }
-
-  // #1450 — placeholders stay inside draft corpora (see the error's doc). The
-  // destination's flag was read under this move's Memory lock above.
-  if (!draftCorpus.get(destMemoryId)) {
-    const placeholder = subtree.find((n) => (n as { isPlaceholder?: boolean }).isPlaceholder === true);
-    if (placeholder) throw new SubtreeMovePlaceholderError(placeholder.loc, destMemoryId);
+  // #1591 — a caller that needs draft rights (renumber) re-decides them HERE,
+  // per node, under the locks, before anything moves (@codex P1, PR #1453).
+  // A placeholder may move anywhere: it is an unminted node, and the
+  // destination's mint refuses while it remains.
+  if (opts.requireUnminted) {
+    const minted = subtree.filter(isMintedRow).map((n) => n.loc).sort();
+    if (minted.length > 0) throw new SubtreeMoveMintedError(srcMemoryId, minted);
   }
 
   // Cross-memory pre-checks — crossing a memory boundary must respect the
@@ -555,18 +539,16 @@ export async function moveNodeSubtree(
   // The earlier NO KEY UPDATE locks pin both URNs against Memory rename and
   // remain compatible with child-row FK KEY SHARE checks.
   //
-  // #1448: except out of a DRAFT spec corpus. A draft number was never
-  // published, so nothing outside can cite it; recording it would make two
-  // specs moved through the same number resolve as ambiguous, and keep
-  // draft-era numbers resolving after the corpus is minted. Keyed on the
-  // SOURCE memory: a move from a minted memory into a draft one leaves a
-  // public address behind and still records it.
+  // #1448, per node since #1591: except for an UNMINTED node. A draft number
+  // was never published, so nothing outside can cite it; recording it would
+  // make two specs moved through the same number resolve as ambiguous, and
+  // keep draft-era numbers resolving after the mint. A minted node's address
+  // was published, so it leaves an alias behind wherever it moves.
   const sourceMemoryUrn = memoryUrns.get(srcMemoryId)!;
   const targetMemoryUrn = memoryUrns.get(destMemoryId)!;
   const aliasKey = (memoryUrn: string, loc: string) =>
     safeNodeUrnV2(memoryUrn, loc).slice('hrn:node:'.length);
-  const recordAliases = !isDraftCorpus({ corpusDraft: draftCorpus.get(srcMemoryId)! });
-  for (const n of recordAliases ? subtree : []) {
+  for (const n of subtree.filter(isMintedRow)) {
     await recordUrnRename(tx, {
       entityType: 'NODE',
       entityId: n.id,

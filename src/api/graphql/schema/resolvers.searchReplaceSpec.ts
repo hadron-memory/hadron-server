@@ -9,7 +9,6 @@ import { GraphQLError } from 'graphql';
 import { Prisma } from '../../../generated/prisma/index.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { NodeNotFoundError, NodeAbstractTooLongError } from '../../../lib/entityRef/errors.js';
-import { isDraftCorpus } from '../../../lib/specCorpus.js';
 import { governedKindsOf } from '../../../lib/governedRole.js';
 import { lockMemoryForChannelChange } from '../../../lib/channels.js';
 import { protectedLocsIn, protectedLocCovers } from '../../../lib/protectedLoc.js';
@@ -180,23 +179,32 @@ export async function searchReplaceInSpecNodes(
   const snapshot = async (tx: DbTx, applying: boolean): Promise<Snapshot> => {
     const memory = await tx.memory.findUnique({
       where: { id: memoryId },
-      select: { id: true, deletedAt: true, corpusDraft: true, isEncrypted: true },
+      select: { id: true, deletedAt: true, isEncrypted: true },
     });
-    if (!memory || memory.deletedAt || !isDraftCorpus(memory)) {
-      throw applying ? stale() : error('Spec bulk replacement requires a draft corpus.', 'SEARCH_REPLACE_NOT_DRAFT');
-    }
+    if (!memory || memory.deletedAt) throw applying ? stale() : error('The corpus was deleted.', 'SEARCH_REPLACE_PLAN_STALE');
 
     const meta = await tx.node.findMany({
       where: { id: { in: selectedIds } },
       orderBy: { id: 'asc' },
       select: {
         id: true, memoryId: true, deletedAt: true, loc: true,
-        role: true, isRunnable: true, revSeq: true, revisionContentHash: true,
+        role: true, isRunnable: true, revSeq: true, revisionContentHash: true, mintedAt: true,
       },
     });
     if (meta.length !== selectedIds.length ||
         meta.some((row) => row.deletedAt || row.memoryId !== memoryId)) {
       throw applying ? stale() : error('Selected nodes changed or left the draft corpus.', 'SEARCH_REPLACE_MIXED_CORPUS');
+    }
+    // #1591: bulk replacement is a draft right, so every target must be
+    // unminted. Read under the snapshot's own transaction, so a mint that
+    // commits after the dry run makes the apply stale rather than rewrite it.
+    const minted = meta.filter((row) => row.mintedAt !== null).map((row) => row.loc).sort();
+    if (minted.length > 0) {
+      throw applying ? stale() : error(
+        `Spec bulk replacement applies only to unminted nodes; minted: ${minted.slice(0, 10).join(', ')}` +
+          `${minted.length > 10 ? ` (and ${minted.length - 10} more)` : ''}.`,
+        'SEARCH_REPLACE_NOT_DRAFT',
+      );
     }
 
     const protectedLocs = await protectedLocsIn(tx, memoryId);

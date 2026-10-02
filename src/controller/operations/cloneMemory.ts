@@ -5,7 +5,6 @@ import { ensureCurrentNodeRevisionInTransaction, jsonOrDbNull } from '../../lib/
 import { carryGovernedSignals } from '../../lib/governedSignals.js';
 import { carryNodeAuthorship, clearNodeAuthorship } from '../../lib/nodeAuthorship.js';
 import { computeContentHash } from '../../lib/contentHash.js';
-import { assertNoPlaceholdersLeaveDraft } from '../../lib/specCorpus.js';
 import {
   pendingEdgeStableTargetId,
   pendingEdgeStableTargetKey,
@@ -192,9 +191,6 @@ export async function cloneMemoryGraph(
       const selectedNodes = await tx.node.findMany({
         where: { memoryId: source.id, deletedAt: null },
       });
-      // #1450 — a clone is a brand-new memory and never a draft corpus, so a
-      // copied placeholder would become a published citation with no spec.
-      assertNoPlaceholdersLeaveDraft(selectedNodes, { isDraft: false, memoryId: memoryId });
       // A raw writer may have changed a stamped source without advancing its
       // revision. Reconcile and refetch stamped rows before the destination
       // insert can certify a stale claim against freshly copied content.
@@ -252,6 +248,11 @@ export async function cloneMemoryGraph(
           data: jsonOrDbNull(n.data),
           seq: n.seq,
           ownerRepo: n.ownerRepo,
+          // #1591: a placeholder's copy is a placeholder. Draft rights are per
+          // node, and the copy is a new, unminted node (no mint record or
+          // approval is copied), so the destination's mint refuses while it
+          // remains rather than publishing a citation with no spec.
+          isPlaceholder: n.isPlaceholder,
           // #1218 — clone is an OWNING OPERATION: it carries the governed
           // signals (`role`, `isRunnable`) instead of dropping them. Before
           // this, `isRunnable` was copied by hand and `role` was not, so a

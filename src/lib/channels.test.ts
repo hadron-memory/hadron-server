@@ -15,7 +15,7 @@
  *     never-posted Apps, and is idempotent.
  */
 
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, beforeAll, afterAll } from 'vitest';
 import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
 import { generateId } from './id.js';
@@ -30,6 +30,12 @@ import { generateDataKey } from './crypto.js';
 import { sessionKeyCache } from './sessionKeyCache.js';
 import { createTestableMcpServer } from '../mcp/server.js';
 import { deriveEdgeLoc } from './edgeLoc.js';
+import { setMintedSpecPermanenceEnforcedForTests } from './mintedSpecPermanence.js';
+
+// #1591: minted-spec permanence is switched off in production for now; the
+// #1468 guard's own assertions run with it on.
+beforeAll(() => setMintedSpecPermanenceEnforcedForTests(true));
+afterAll(() => setMintedSpecPermanenceEnforcedForTests(false));
 
 const Q = resolvers.Query as any;
 const M = resolvers.Mutation as any;

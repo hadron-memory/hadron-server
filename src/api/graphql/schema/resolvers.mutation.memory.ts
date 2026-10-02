@@ -684,8 +684,9 @@ export const memoryMutations = {
             ownerUserId: userOwned ? ctx.userId : null,
             urn: memoryUrn,
             name,
-            // #1448 — draft is chosen here or never; explicit null reads as
-            // "not asked", same as omitted.
+            // #1448 legacy flag. Since #1591 nothing reads it: corpus state
+            // is derived from per-node minting, and every new node starts
+            // unminted whether or not draft was asked for.
             corpusDraft: draftCorpus === true,
             shortDescription,
             description,

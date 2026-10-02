@@ -576,7 +576,7 @@ export const syncGraphFromGithub = async (
       // flip the corpus out of draft between this check and the node writes.
       // #1348 uses the same fenced read for the property schema.
       const memoryState = await tx.memory.findUniqueOrThrow({
-        where: { id: graph.id }, select: { urn: true, schema: true, corpusDraft: true, readBranch: true, readBranchCorrected: true },
+        where: { id: graph.id }, select: { urn: true, schema: true, readBranch: true, readBranchCorrected: true },
       });
       // `graph` was fetched before Git I/O. A branch edit during that window
       // must not authorize cleanup from a tree fetched under the old config.
@@ -841,10 +841,12 @@ export const syncGraphFromGithub = async (
           if (node.isPlaceholder !== true) return {};
           const role = 'role' in node ? node.role : existing?.role;
           const specRole = role === 'spec' || (typeof role === 'string' && role.startsWith('spec.'));
-          if (memoryState.corpusDraft && specRole && !node.content?.trim()) return { isPlaceholder: true };
+          // #1591: a placeholder is an unminted node; draft rights are per node.
+          const unminted = existing?.mintedAt == null;
+          if (unminted && specRole && !node.content?.trim()) return { isPlaceholder: true };
           console.warn(
             `[syncGraphFromGithub] "${graphName}" loc "${loc}": ignored placeholder marker ` +
-            '(requires a draft corpus, spec-family role, and blank content)',
+            '(requires an unminted node, spec-family role, and blank content)',
           );
           return {};
         };
@@ -1258,13 +1260,13 @@ export const syncGraphFromGithub = async (
       // cor:urn:030:01 — compare committed pre-sync addresses with surviving
       // final addresses, after cleanup has removed displaced/deleted rows.
       // The memory's URN comes from the row fenced above, not the caller's
-      // possibly stale `graph`. A draft corpus has no published URNs to retain;
-      // its source moves are the rule's sole exception. The mirror root has no
+      // possibly stale `graph`. An unminted node has no published URN to retain
+      // (#1591, per node); its moves are the rule's sole exception. The mirror root has no
       // round-trippable v2 node URN to alias *from*, but a published non-root
       // address still needs an alias when its node moves *into* the root.
-      if (!memoryState.corpusDraft && originalLocs.size > 0) {
+      if (originalLocs.size > 0) {
         const survivors = await tx.node.findMany({
-          where: { id: { in: [...originalLocs.keys()] }, memoryId: graph.id, deletedAt: null },
+          where: { id: { in: [...originalLocs.keys()] }, memoryId: graph.id, deletedAt: null, mintedAt: { not: null } },
           select: { id: true, loc: true },
         });
         for (const row of survivors) {

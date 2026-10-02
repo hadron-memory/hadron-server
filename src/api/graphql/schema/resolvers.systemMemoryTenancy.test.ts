@@ -16,7 +16,7 @@
  *   - `repairAgentSystemMemory` re-owns it, is idempotent, and is platform-
  *     admin-only.
  */
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, vi, beforeAll, afterAll } from 'vitest';
 import { GraphQLError } from 'graphql';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
@@ -26,6 +26,12 @@ import {
   sameOwner,
   findSystemMemoryOwnerMismatches,
 } from '../../../lib/agentSystemMemory.js';
+import { setMintedSpecPermanenceEnforcedForTests } from '../../../lib/mintedSpecPermanence.js';
+
+// #1591: minted-spec permanence is switched off in production for now; the
+// #1468 guard's own assertions run with it on.
+beforeAll(() => setMintedSpecPermanenceEnforcedForTests(true));
+afterAll(() => setMintedSpecPermanenceEnforcedForTests(false));
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),

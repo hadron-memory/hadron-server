@@ -232,12 +232,15 @@ describe('searchReplaceInSpecNodes', () => {
     expect((await db.node.findUniqueOrThrow({ where: { id: spec.id } })).content).toBe('dog dog scatter');
   }, 20_000);
 
-  it('rejects minted and mixed corpora while the generic door still skips specs', async () => {
+  it('rejects minted nodes and mixed corpora while the generic door still skips specs', async () => {
     const spec = await node('pas:010:01');
     const minted = await memory('minted', false);
     const outside = await node('pas:020:01', {}, minted.id);
     await expect(call(request([spec.id, outside.id])))
       .rejects.toMatchObject({ extensions: { code: 'SEARCH_REPLACE_MIXED_CORPUS' } });
+    // #1591: per node. An unminted node in any memory is a draft; a minted one is not.
+    await expect(call(request([outside.id], { memoryRef: minted.id }))).resolves.toBeTruthy();
+    await db.node.update({ where: { id: outside.id }, data: { mintedAt: new Date(), mintedByInfo: 'test' } });
     await expect(call(request([outside.id], { memoryRef: minted.id })))
       .rejects.toMatchObject({ extensions: { code: 'SEARCH_REPLACE_NOT_DRAFT' } });
     const generic = await resolvers.Mutation.searchReplaceInNodes(null, {

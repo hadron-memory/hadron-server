@@ -39,6 +39,15 @@ export async function mayApproveNodes(ctx: Context, memoryId: string): Promise<v
   await requireMemoryWriteAccess(ctx, memoryId);
 }
 
+/**
+ * #1591 — the mint policy: may this caller mint the nodes of this memory?
+ * Holger's ruling (#1447 round 3, question 2a): any writer of the memory. The
+ * ONE place that decides it, for a later MemoryConfig setting.
+ */
+export async function mayMintNodes(ctx: Context, memoryId: string): Promise<void> {
+  await requireMemoryWriteAccess(ctx, memoryId);
+}
+
 /** The session key of an encrypted memory, or `SESSION_EXPIRED`; null for a plaintext memory. */
 async function keyForMemory(ctx: Context, memoryId: string): Promise<EncryptionKey | null> {
   const memory = await ctx.db.memory.findUniqueOrThrow({ where: { id: memoryId }, select: { isEncrypted: true } });
@@ -202,9 +211,9 @@ export const nodeApprovalMutations = {
   },
 
   /**
-   * #1591 — approve the current revision of every live node of a memory that
-   * isn't approved yet, in one transaction. Placeholders are skipped and
-   * reported. PR 2 narrows the scope to unminted nodes.
+   * #1591 — approve the current revision of every live, UNMINTED node of a
+   * memory that isn't approved yet, in one transaction. Placeholders are
+   * skipped and reported.
    */
   approveMemoryNodes: async (_: unknown, { memoryRef }: { memoryRef: string }, ctx: Context) => {
     const { id: memoryId } = await resolveMemoryRef(ctx.db, memoryRef);
@@ -215,8 +224,11 @@ export const nodeApprovalMutations = {
       (txCtx) => mayApproveNodes(txCtx, memoryId),
       async (tx) => {
         // Lock in id order, so two bulk approvals cannot deadlock each other.
+        // #1591: only unminted nodes are approved in bulk; a minted node's
+        // later edits are approved one at a time.
         const ids = await tx.$queryRaw<Array<{ id: string }>>`
-          SELECT id FROM nodes WHERE memory_id = ${memoryId} AND deleted_at IS NULL ORDER BY id FOR UPDATE`;
+          SELECT id FROM nodes WHERE memory_id = ${memoryId} AND deleted_at IS NULL AND minted_at IS NULL
+          ORDER BY id FOR UPDATE`;
         const approved: NodeApprovalRow[] = [];
         const skippedPlaceholders: string[] = [];
         let alreadyApprovedCount = 0;
@@ -252,6 +264,33 @@ export const nodeApprovalMutations = {
   },
 };
 
+const MINT_SELECT = {
+  mintedAt: true, mintedBy: true, mintedByInfo: true, mintedRevNo: true, mintedHash: true,
+} as const;
+
+type MintParent = { id: string } & Partial<{
+  mintedAt: Date | null;
+  mintedBy: string | null;
+  mintedByInfo: string | null;
+  mintedRevNo: number | null;
+  mintedHash: string | null;
+}>;
+
+/** The NodeMintStatus projection of a node's mint columns. */
+function mintStatusOf(row: Required<Omit<MintParent, 'id'>> | null) {
+  if (!row?.mintedAt) {
+    return { minted: false, mintedAt: null, mintedBy: null, mintedByInfo: null, revision: null, hash: null };
+  }
+  return {
+    minted: true,
+    mintedAt: row.mintedAt,
+    mintedBy: row.mintedBy,
+    mintedByInfo: row.mintedByInfo,
+    revision: row.mintedRevNo,
+    hash: row.mintedHash,
+  };
+}
+
 type ApprovalParent = { id: string; revSeq: number } & Partial<Pick<NodeApprovalRow,
   'approvedRevNo' | 'approvedBy' | 'approvedByInfo' | 'approvedAt' | 'approvalHash'>>;
 
@@ -273,9 +312,20 @@ export const nodeApprovalFieldResolvers = {
       const approval = row ? approvalRecordOf(row as Parameters<typeof approvalRecordOf>[0]) : null;
       return { state: approvalStateOf(approval?.revision ?? null, revision), approval };
     },
+    /** #1591 — whether the node is minted, and the record of it. */
+    mintStatus: async (n: MintParent, _: unknown, ctx: Context) => {
+      const row = n.mintedAt !== undefined
+        ? n
+        : await ctx.db.node.findUnique({ where: { id: n.id }, select: MINT_SELECT });
+      return mintStatusOf(row as Required<Omit<MintParent, 'id'>> | null);
+    },
   },
   NodeApproval: {
     approvedBy: (a: NodeApprovalRecord, _: unknown, ctx: Context) =>
       a.approvedBy ? resolveRevisionEditor(ctx, [a.approvedBy]) : null,
+  },
+  NodeMintStatus: {
+    mintedBy: (m: { mintedBy: string | null }, _: unknown, ctx: Context) =>
+      m.mintedBy ? resolveRevisionEditor(ctx, [m.mintedBy]) : null,
   },
 };

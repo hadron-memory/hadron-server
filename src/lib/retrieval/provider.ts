@@ -53,6 +53,8 @@ export interface NodeSqlFilter {
   where?: NodeWhere | null;
   /** #1591 — approval state; see `approvalStateSql`. */
   approvalState?: NodeApprovalState | null;
+  /** #1591 — minted (true) or unminted (false) nodes only. */
+  minted?: boolean | null;
 }
 
 /** Ordering for the no-query browse (relevance is meaningless without a query). */

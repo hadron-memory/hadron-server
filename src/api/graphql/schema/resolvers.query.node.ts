@@ -108,6 +108,8 @@ export interface FindNodesArgs {
     where?: NodeWhere | null;
     /** #1591 */
     approvalState?: NodeApprovalState | null;
+    /** #1591 */
+    minted?: boolean | null;
   } | null;
   fields?: string[] | null;
   sort?: 'relevance' | 'loc' | 'seq' | 'updatedAt' | null;
@@ -1075,6 +1077,7 @@ export const nodeQueries = {
             } }
           : {}),
         ...approvalStatePrismaWhere(f.approvalState, ctx.db),
+        ...(f.minted != null ? { mintedAt: f.minted ? { not: null } : null } : {}),
       };
       const nodeInclude = {
         memory: true,
@@ -1099,6 +1102,7 @@ export const nodeQueries = {
         updatedBefore: f.updatedBefore ?? null,
         where: f.where ?? null,
         approvalState: f.approvalState ?? null,
+        minted: f.minted ?? null,
       };
 
       // #1061 — one `read` per node this query hands back, across every branch
@@ -1176,7 +1180,7 @@ export const nodeQueries = {
       // from the retrieval layer to keep the page full after post-filtering + offset.
       const hasStructuredFilters = !!(
         f.nodeType || f.objectType || f.isRunnable != null || f.role != null || f.tags?.length || f.locPrefix ||
-        f.createdBy || f.updatedAfter || f.updatedBefore || f.includeDeleted || f.where || f.approvalState
+        f.createdBy || f.updatedAfter || f.updatedBefore || f.includeDeleted || f.where || f.approvalState || f.minted != null
       );
       const page = off + finalLimit;
       const VECTOR_FETCH_CAP = 2000;
@@ -2075,6 +2079,8 @@ export const nodeQueries = {
           includeDeleted?: boolean | null;
           /** #1591 */
           approvalState?: NodeApprovalState | null;
+          /** #1591 */
+          minted?: boolean | null;
         } | null;
         limit?: number;
       },
@@ -2262,6 +2268,7 @@ export const nodeQueries = {
               } }
             : {}),
           ...approvalStatePrismaWhere(f.approvalState, ctx.db),
+          ...(f.minted != null ? { mintedAt: f.minted ? { not: null } : null } : {}),
         },
         orderBy: { loc: 'asc' },
         take: limit ?? 500,

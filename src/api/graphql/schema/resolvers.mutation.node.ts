@@ -69,8 +69,7 @@ import {
 import {
   moveNodeSubtree,
   SubtreeMoveCollisionError,
-  SubtreeMovePlaceholderError,
-  SubtreeMoveSourceNotDraftError,
+  SubtreeMoveMintedError,
   SubtreeMoveIntoSelfError,
   SubtreeMoveSourceChangedError,
   CrossMemoryMoveUnsupportedError,
@@ -1956,12 +1955,12 @@ function shallowMergeProperties(existing: unknown, patch: Record<string, unknown
 export const nodeMoveOps = {
   async moveWithResult(
     ctx: Context,
-    { sourceRef, targetUrn, targetMemoryRef, requireDraftSource, expectedSource, mirrorAfterMove = true }: {
+    { sourceRef, targetUrn, targetMemoryRef, requireUnminted, expectedSource, mirrorAfterMove = true }: {
       sourceRef: string; targetUrn?: string | null; targetMemoryRef?: string | null;
       /** A compound operation may mirror once after its follow-on edits. */
       mirrorAfterMove?: boolean;
-      /** #1449: refuse unless the source is a draft corpus under the move's lock (renumber). */
-      requireDraftSource?: boolean;
+      /** #1449/#1591: refuse (NODE_MINTED) when any moved node is minted, under the move's locks (renumber). */
+      requireUnminted?: boolean;
       /**
        * #1449 (@codex P2, PR #1453): refuse (CONFLICT) unless the resolved
        * source still sits at this memory + loc. With `sourceRef` an id, the
@@ -2035,7 +2034,7 @@ export const nodeMoveOps = {
               destLoc,
               destMemoryId: crossMemory ? destMemoryId : undefined,
               editor: editorFromAuth(ctx),
-              requireDraftSource,
+              requireUnminted,
               authorizeLockedMemory: (memoryId) =>
                 requireMemoryWriteAccess(withoutRequestCaches(ctx, tx), memoryId),
             });
@@ -2079,13 +2078,10 @@ export const nodeMoveOps = {
         if (e instanceof SubtreeMoveIntoSelfError) {
           throw new GraphQLError(e.message, { extensions: { code: 'BAD_USER_INPUT', loc: e.loc } });
         }
-        if (e instanceof SubtreeMovePlaceholderError) {
+        if (e instanceof SubtreeMoveMintedError) {
           throw new GraphQLError(e.message, {
-            extensions: { code: 'SPEC_PLACEHOLDER_OUTSIDE_DRAFT', loc: e.loc, memoryId: e.memoryId },
+            extensions: { code: 'NODE_MINTED', memoryId: e.memoryId, locs: e.locs.slice(0, 10), count: e.locs.length },
           });
-        }
-        if (e instanceof SubtreeMoveSourceNotDraftError) {
-          throw new GraphQLError(e.message, { extensions: { code: 'SPEC_CORPUS_NOT_DRAFT', memoryId: e.memoryId } });
         }
         if (e instanceof SubtreeMoveSourceChangedError) {
           throw new GraphQLError(e.message, { extensions: { code: 'CONFLICT', nodeId: e.nodeId } });

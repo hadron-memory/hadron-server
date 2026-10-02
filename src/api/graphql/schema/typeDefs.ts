@@ -18,7 +18,7 @@ export const typeDefs = `#graphql
     ERROR
   }
 
-  """#1447 — a spec corpus's lifecycle state. DRAFT becomes MINTED once, one-way."""
+  """#1447 — a spec corpus's state, derived from its nodes since #1591: DRAFT while no live node is minted, MINTED once any is."""
   enum CorpusState {
     DRAFT
     MINTED
@@ -214,6 +214,8 @@ export const typeDefs = `#graphql
     where: NodeWhereInput
     "#1591 — only nodes in this approval state (read from the stored revision; a node changed outside a revisioned writer is reconciled on its next read)."
     approvalState: NodeApprovalState
+    "#1591 — only minted (true) or unminted (false) nodes."
+    minted: Boolean
   }
 
   "Per-hit vector-retrieval lineage (cor:api:090:04), present when a hit came from the vector index."
@@ -1305,6 +1307,8 @@ export const typeDefs = `#graphql
     contentValidation: NodeContentValidationStatus!
     "#1591 — whether the current revision is approved, and the latest approval on record."
     approvalStatus: NodeApprovalStatus!
+    "#1591 — whether this node is minted, and the record of it."
+    mintStatus: NodeMintStatus!
     memoryId: String!
     """
     The PLATFORM-kind axis (info / task / prompt / record / …). Load-bearing for
@@ -1767,6 +1771,20 @@ export const typeDefs = `#graphql
     approvedAt: DateTime!
     "Approval hash v1 at approval time: 64 lowercase hex of SHA-256 over the canonical title/abstract/content serialization (src/lib/approvalHash.ts)."
     hash: String!
+  }
+
+  "#1591 — whether a node is minted, and the record of it. Minting protects nothing by itself (permanence is off for now)."
+  type NodeMintStatus {
+    minted: Boolean!
+    mintedAt: DateTime
+    "The minting user's public identifiers; null when not a user (see mintedByInfo)."
+    mintedBy: NodeRevisionEditor
+    "The minting principal when no user is known, e.g. app:<id>, or backfill for nodes minted by the #1591 migration."
+    mintedByInfo: String
+    "The revision that was minted. Null for nodes backfilled as minted, whose minted revision is unknown."
+    revision: Int
+    "The approval hash of the minted revision. Null for backfilled nodes, which were never approved."
+    hash: String
   }
 
   "#1591 — a node's approval state plus its latest approval."
@@ -2873,14 +2891,13 @@ export const typeDefs = `#graphql
     """
     maxRevCount: Int!
     """
-    #1447/#1448 — whether this memory is a DRAFT spec corpus or MINTED. In a
-    draft corpus spec citations are not yet permanent: specs can be moved,
-    renumbered and deleted, and a move records no URN alias. Chosen only at
-    creation (createMemory draftCorpus); minting is one-way. Every memory
-    created without asking for draft is MINTED.
+    #1447/#1448, derived per node since #1591 — DRAFT while none of this
+    memory's live nodes is minted, MINTED once any is. Draft rights are per
+    node: an unminted node can be renumbered, moved without a URN alias, and
+    bulk-replaced, in any memory (see Node.mintStatus).
     """
     corpusState: CorpusState!
-    "#1448 — when this corpus was minted (draft → minted). Null if it was never a draft."
+    "#1448/#1591 — the latest mint time among this memory's live nodes; null while none is minted."
     corpusMintedAt: DateTime
     """
     Spec 033 FR-026 — timestamp at which the memory owner accepted the
@@ -5974,6 +5991,12 @@ export const typeDefs = `#graphql
     LINT
     "An abstract written for an earlier body."
     STALE_ABSTRACT
+    "#1591 — the node's current revision is not approved."
+    NOT_APPROVED
+    "#1591 — the approved revision's text changed outside the revision system, so it no longer matches its approval hash. Re-approve it."
+    TAMPERED
+    "#1591 — an edge into another memory's node that is not minted yet (targetLoc is its URN)."
+    CITES_UNMINTED
   }
 
   """#1448 — one item in a mint report. loc is where it was found; targetLoc the cited spec, for a reference."""
@@ -6012,6 +6035,10 @@ export const typeDefs = `#graphql
     staleAbstracts: [SpecMintFinding!]!
     staleAbstractsBlock: Boolean!
     openQuestions: [SpecOpenQuestionGroup!]!
+    "#1591 — how many nodes this call minted (0 on a dry run or refusal)."
+    mintedCount: Int!
+    "#1591 — the locs this call minted, or would mint on a dry run, ordered by loc."
+    mintLocs: [String!]!
   }
 
   type Query {
@@ -7508,15 +7535,15 @@ export const typeDefs = `#graphql
     validateMemory(memoryRef: ID!, limit: Int): MemoryValidationResult!
 
     """
-    #1449 — what refers to the spec at loc in a DRAFT spec corpus: node URNs
-    in the corpus text (inside URLs too) plus real edges from corpus nodes.
-    Exact citation, not descendants. Refuses SPEC_CORPUS_NOT_DRAFT for a
-    minted memory. memoryRef accepts the memory's ID or URN.
+    #1449 — what refers to the spec at loc in a spec corpus (any memory since
+    #1591): node URNs in the corpus text (inside URLs too) plus real edges from
+    corpus nodes. Exact citation, not descendants. memoryRef accepts the
+    memory's ID or URN.
     """
     specBacklinks(memoryRef: ID!, loc: String!): [SpecReference!]!
 
     """
-    #1449 — references in a DRAFT spec corpus that do not reach a written
+    #1449 — references in a spec corpus (any memory since #1591) that do not reach a written
     spec: URNs citing a missing loc or a placeholder, edges to a
     placeholder or to a deleted spec of the corpus, and pending edges (field pendingEdge) whose target is not
     a written node yet. Minting refuses while any remain.
@@ -7695,18 +7722,18 @@ export const typeDefs = `#graphql
     """
     createSpecNode(input: CreateNodeInput!): Node!
     """
-    #1450 — reserve a citation in a DRAFT spec corpus as a placeholder: a spec
-    node at loc (role spec, nodeType info) marked isPlaceholder, so links can
-    point at it and the placeholders left are the corpus's to-do list. Writing
-    real content through updateSpecNode turns it into a real spec at the same
-    citation. Refuses SPEC_CORPUS_NOT_DRAFT in a minted memory, where a
-    citation is permanent once written, and NodeLocConflictError at a live loc.
-    memoryRef accepts the memory's ID or URN.
+    #1450 — reserve a citation as a placeholder, in any memory since #1591: an
+    unminted spec node at loc (role spec, nodeType info) marked isPlaceholder,
+    so links can point at it and the placeholders left are the corpus's to-do
+    list. Writing real content through updateSpecNode turns it into a real spec
+    at the same citation; minting refuses while a placeholder remains. Refuses
+    NodeLocConflictError at a live loc. memoryRef accepts the memory's ID or URN.
     """
     reserveSpecCitation(memoryRef: ID!, loc: String!, name: String): Node!
     """
-    #1449 — renumber a spec in a DRAFT spec corpus: move it and its subtree
-    from fromLoc to toLoc (no URN alias in a draft), then rewrite every node
+    #1449 — renumber an UNMINTED spec (#1591: draft rights are per node): move
+    it and its subtree from fromLoc to toLoc with no URN alias, refusing
+    NODE_MINTED { locs } if any moved node is minted, then rewrite every node
     URN in the corpus that cites the moved specs, each as a normal edit. Bare
     text citations (labels, names) are reported in textCitations, not
     rewritten. dryRun returns the plan and writes nothing. The move is atomic;
@@ -7715,24 +7742,25 @@ export const typeDefs = `#graphql
     """
     renumberSpec(memoryRef: ID!, fromLoc: String!, toLoc: String!, dryRun: Boolean): SpecRenumberResult!
     """
-    #1448 — mint a DRAFT spec corpus: once, one-way, for the whole corpus.
-    After minting, citations are permanent (moves record URN aliases again) and
-    no placeholder can be reserved. Refuses SPEC_CORPUS_MINT_BLOCKED while any
-    blocker remains: a placeholder, an unresolved reference, a structural lint
-    error over the citation-shaped nodes (nodetype-info, tag-spec,
-    serialization-leak, duplicate-loc), or a stale abstract once
-    staleAbstractsBlock is true. dryRun returns the full report without
-    minting. Owner or org ADMIN only. memoryRef accepts the ID or URN. A real
-    run holds every write to the corpus off while it checks and flips, and
-    refuses SPEC_CORPUS_BUSY (retryable) if a write is already in flight.
-    #1468 — a minted spec is then permanent: every path that would remove one
-    from the corpus refuses SPEC_MINTED_PERMANENT, naming the specs (deleteNode
-    soft or hard, a move to another memory or an overwrite of its citation,
-    mergeNodes with deleteSource, extracting with move, a merge or deletion of
-    the whole corpus, git-sync pruning, and account erasure while the owner
-    still holds it). Supersede a spec to replace it; a rename within the corpus
-    still records its URN alias.
+    #1591 — mint every unminted live node of a memory, at once. Each node is
+    stamped with its current revision and that revision's approval hash
+    (Node.mintStatus); a minted node's moves then record URN aliases. Refuses
+    SPEC_CORPUS_MINT_BLOCKED while any blocker remains among the unminted
+    nodes: a placeholder, an unresolved reference, a structural lint error over
+    the citation-shaped nodes (nodetype-info, tag-spec, serialization-leak,
+    duplicate-loc), a stale abstract once staleAbstractsBlock is true,
+    NOT_APPROVED (the current revision is not approved), TAMPERED (approved
+    text changed outside the revision system), or CITES_UNMINTED (an
+    edge into another memory's node that is not minted). Nodes minted earlier
+    are not re-checked. dryRun returns the full report without minting. Any
+    writer of the memory. memoryRef accepts the ID or URN. A real run holds
+    every write to the memory off while it checks and stamps, and refuses
+    SPEC_CORPUS_BUSY (retryable) if a write is already in flight. Encrypted
+    memories are refused (SPEC_CORPUS_ENCRYPTED_UNSUPPORTED). Minting protects
+    nothing by itself: minted-spec permanence (#1468) is switched off for now.
     """
+    mintMemoryNodes(memoryRef: ID!, dryRun: Boolean): SpecCorpusMintReport!
+    "#1448, generalized by #1591 — the same operation as mintMemoryNodes, kept under its original name."
     mintSpecCorpus(memoryRef: ID!, dryRun: Boolean): SpecCorpusMintReport!
 
     """
@@ -7913,7 +7941,7 @@ export const typeDefs = `#graphql
     """
     searchReplaceInNodes(input: SearchReplaceInNodesInput!): SearchReplaceResult!
 
-    "Governed bulk replacement inside one draft spec corpus, with exact preview binding."
+    "Governed bulk replacement inside one spec corpus, with exact preview binding. Every target must be unminted (#1591); SEARCH_REPLACE_NOT_DRAFT names minted ones."
     searchReplaceInSpecNodes(input: SpecSearchReplaceInput!): SearchReplaceResult!
 
     """
@@ -7981,7 +8009,7 @@ export const typeDefs = `#graphql
     SESSION_EXPIRED on an encrypted memory without its session key.
     """
     approveNode(nodeRef: ID!, revision: Int): NodeApprovalReceipt!
-    "#1591 — approve the current revision of every live node of a memory (ID or fully-qualified URN) that isn't approved yet, in one transaction. Placeholders are skipped and reported."
+    "#1591 — approve the current revision of every live, unminted node of a memory (ID or fully-qualified URN) that isn't approved yet, in one transaction. Placeholders are skipped and reported."
     approveMemoryNodes(memoryRef: String!): ApproveMemoryNodesResult!
 
     """
@@ -8433,10 +8461,9 @@ export const typeDefs = `#graphql
       """#621 — per-node revision-history cap (default 10, minimum 1)."""
       maxRevCount: Int
       """
-      #1447/#1448 — create this memory as a DRAFT spec corpus, whose spec
-      citations stay changeable until the corpus is minted. This is the only
-      way to get a draft corpus: an existing memory can never be switched into
-      draft. Omitted or false creates an ordinary (minted) memory.
+      #1447/#1448 — accepted for compatibility and ignored since #1591: minting
+      is per node, and every new node starts unminted, with draft rights, in
+      any memory.
       """
       draftCorpus: Boolean
     ): Memory!
