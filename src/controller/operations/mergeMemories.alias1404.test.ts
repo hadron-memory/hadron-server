@@ -24,8 +24,14 @@ const ctx = (userId = adminId): Context => ({ db, userId, roles: userId === admi
 const mcpAuth = (userId = adminId): AuthContext => ({
   userId, roles: userId === adminId ? ['ADMIN'] : [], clientId: `user:${userId}`,
 });
+// #1591: aliases record a node's PUBLISHED address, which only a minted node
+// has. In production every pre-#1591 node was backfilled as minted; these
+// fixtures are minted the same way. Unminted moves: specCorpus.test.ts.
 const makeNode = (memoryId: string, loc: string) => db.node.create({
-  data: { id: generateId(), memoryId, loc, name: loc, content: `body of ${loc}` },
+  data: {
+    id: generateId(), memoryId, loc, name: loc, content: `body of ${loc}`,
+    mintedAt: new Date(), mintedByInfo: 'test',
+  },
 });
 const aliasesFor = (nodeId: string) => db.urnAlias.findMany({
   where: { entityType: 'NODE', entityId: nodeId },
