@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createServer } from 'node:net';
+import { once } from 'node:events';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 const script = fileURLToPath(new URL('./stack.sh', import.meta.url));
@@ -47,3 +49,40 @@ esac
     assert(!result.stderr.includes('unexpected-Docker'));
   });
 }
+
+
+test('symlinked checkout records actual forwarder argv and down stops it', async t => {
+  const root = mkdtempSync(join(tmpdir(), 'e2e-symlink-test-'));
+  let pid;
+  t.after(() => {
+    if (pid) { try { process.kill(pid, 'SIGTERM'); } catch {} }
+    rmSync(root, { recursive: true, force: true });
+  });
+  const checkout = join(root, 'checkout');
+  symlinkSync(fileURLToPath(new URL('../../', import.meta.url)), checkout);
+  const probe = createServer().listen(0, '127.0.0.1'); await once(probe, 'listening');
+  const port = String(probe.address().port);
+  await new Promise(resolve => probe.close(resolve));
+  const dir = join(root, 'hadron-e2e', 'hadron-e2e-symlink'); mkdirSync(dir, { recursive: true });
+  for (const [key, value] of Object.entries({ backend: 'incus', 'api-port': port, 'portal-port': port === '18500' ? '18501' : '18500', 'proxy-address': '192.0.2.1' })) {
+    writeFileSync(join(dir, key), `${value}\n`);
+  }
+  const launch = spawnSync('node', [join(checkout, 'scripts/e2e/start-forwarder.mjs'), dir, port, '192.0.2.1'], { encoding: 'utf8' });
+  assert.equal(launch.status, 0, launch.stderr);
+  pid = Number(readFileSync(join(dir, 'proxy.pid'), 'utf8'));
+  const args = readFileSync(`/proc/${pid}/cmdline`, 'utf8').split('\0');
+  assert.equal(readFileSync(join(dir, 'proxy-script'), 'utf8').trim(), args[1]);
+  assert.notEqual(args[1], join(checkout, 'scripts/e2e/host-proxy.mjs'));
+  const bin = join(root, 'bin'); mkdirSync(bin);
+  writeFileSync(join(bin, 'incus'), '#!/bin/sh\ncase "$1" in list|config) echo hadron-e2e-symlink ;; delete) exit 0 ;; *) exit 98 ;; esac\n', { mode: 0o700 });
+  const down = spawnSync('bash', [join(checkout, 'scripts/e2e/stack.sh'), 'down', 'symlink'], {
+    encoding: 'utf8', env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, XDG_STATE_HOME: root, E2E_BACKEND: 'incus' },
+  });
+  assert.equal(down.status, 0, down.stderr);
+  assert(!existsSync(dir));
+  for (let attempt = 0; attempt < 40; attempt++) {
+    if (!existsSync(`/proc/${pid}/stat`) || readFileSync(`/proc/${pid}/stat`, 'utf8').includes(') Z ')) return;
+    await new Promise(resolve => setTimeout(resolve, 25));
+  }
+  assert.fail('down left its symlink-launched forwarder running');
+});
