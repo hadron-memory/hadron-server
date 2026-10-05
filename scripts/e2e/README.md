@@ -49,7 +49,8 @@ No CI wiring or production snapshots are used.
 
 ## Fixture inventory
 
-All users have platform **READER**. Org administrators are not platform admins,
+All users have platform **READER**, except the org-less **platform-admin**,
+which has platform **ADMIN**. Org administrators are not platform admins,
 so tenant journeys exercise normal membership access. Emails are
 `HANDLE@e2e.test` (synthetic); there are no passwords or real identities.
 
@@ -65,6 +66,13 @@ so tenant journeys exercise normal membership access. Emails are
 | shared | READER | READER |
 | outsider | — | — |
 | visitor | — | — |
+| multi-app | CONTRIBUTOR | CONTRIBUTOR |
+| fresh-user | — | — |
+| platform-admin | — | — |
+| google-user | — | — |
+| apple-user | — | — |
+| email-code-user | — | — |
+| personal-owner | — | — |
 <!-- /fixture-users -->
 
 In **each org**:
@@ -81,11 +89,32 @@ In **each org**:
   hashes and revision fingerprints. Its `spec.rule` role has a locked
   ADMIN-writer rule, so member-authored edits are protected.
 
+Additional principal shapes:
+
+| Fixture key | Identity / initial state | App membership |
+| --- | --- | --- |
+| multi-app | EMAIL, CONTRIBUTOR in both orgs | Both `e2e-alpha:team` and `e2e-beta:team` |
+| fresh-user | Created through the real email verify + handoff routes; `isNew=true`, no org or memory | None |
+| platform-admin | Platform ADMIN; no fixture-org membership or owned memory | None |
+| google-user | GOOGLE identity from a locally signed token, verified and provisioned by the real Google helpers | None |
+| apple-user | APPLE identity from a locally signed token, verified and provisioned by the real Apple helpers | None |
+| email-code-user | EMAIL identity; signs in through the actual REVIEW_DEMO code-entry form during seeding | None |
+| personal-owner | EMAIL; only free-standing personal and private memories | None |
+| e2e-alpha:team / e2e-beta:team | App-key-only; no User identity | The credential's own App |
+
+`check` verifies all 16 user identities, platform roles, exact org/App membership
+sets and memory record sets, both pure App credentials, and MCP switching for
+multi-app. `/fixtures/principals.json` records generated handles/IDs and which
+sign-in simulation ran; it contains no token. The **fresh-user** handle is
+allocated by the real signup path, so use its email or the metadata when finding
+it in the portal.
+
 `outsider` and `visitor` each own a separate free-standing private memory
 with a welcome node. The API check verifies their own memory and empty org
 membership lists. Every user has one `hdr_user_*` credential; each team App
-has one `hdr_app_*` credential. IDs and fixture content are deterministic;
-credentials are freshly random on every new stack.
+has one `hdr_app_*` credential. Existing fixture IDs and content are deterministic; the three signup paths
+allocate their own user IDs (and fresh-user handle).
+Credentials are freshly random on every new stack.
 
 `up` prints raw credentials **once at the end** after health and inventory
 checks. Only hashes are stored in DB, with raw values in a stack-scoped
@@ -94,6 +123,30 @@ the raw credentials. Capture the final output privately if needed; `down`
 removes the credential volume. Signing and encryption keys are also randomly generated inside each fresh
 app launch, so a JWT from one stack does not authenticate to another. These
 fixtures belong only in this local environment.
+
+## Sign-in simulation limits
+
+Seeding runs a temporary loopback server using the normal routes, then closes
+it before the stack server starts. Test mode disables background sweeps in this
+short-lived route server; the real stack server still runs in development. No mail or IdP request leaves the stack.
+For **fresh-user**, only email delivery is simulated by inserting a short-lived,
+browser-bound verification token; the real email verify route creates the user
+and the real handoff route proves `isNew=true` and the empty initial state.
+Later dev-login sessions use the existing-user handoff and report `isNew=false`.
+
+Google/Apple use a locally generated signing key injected through the existing
+verifiers' test seam, followed by the normal find/link/create helpers. This
+covers signature/issuer/audience checks and provisioning of synthetic provider
+subjects. It does **not** exercise real provider JWKS, consent, code exchange,
+provider callback/state transport, Apple relay mail, or actual Google/Apple
+accounts. The public Google/Apple routes remain unconfigured in this stack.
+
+Main currently has **no general delivered email-code sign-in**: ordinary email
+uses a magic link. The code-entry fixture exercises the existing one-account
+`REVIEW_DEMO` path with its CSRF form and signed cookie. Its random code is local
+to the temporary seed process; the review bypass is disabled in the running
+stack. This fixture is not evidence of a production email-OTP ceremony or a
+fresh-auth/step-up guarantee.
 
 ## CLI and MCP
 

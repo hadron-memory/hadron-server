@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash, randomBytes } from 'node:crypto';
-import { writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { PrismaClient } from '../../src/generated/prisma/index.js';
 import { computeApprovalHash } from '../../src/lib/approvalHash.js';
 import { ensureCurrentNodeRevisionInTransaction } from '../../src/lib/nodeRevisionSnapshot.js';
@@ -8,6 +8,7 @@ import { ensureCurrentNodeRevisionInTransaction } from '../../src/lib/nodeRevisi
 // Separate from the narrative dev seed: every principal has global READER,
 // so org-role journeys exercise tenant gates rather than platform ADMIN.
 import { users, orgs, checkDocumentInventory } from './catalog.js';
+import { provisionSignIns, disconnectSignInDb } from './provision-signins.js';
 const classes = ['knowledge', 'group', 'personal', 'private', 'app', 'system'] as const;
 const id = (name: string) => createHash('sha256').update(`hadron-e2e:${name}`).digest('hex').slice(0, 32);
 const db = new PrismaClient();
@@ -28,14 +29,22 @@ async function seed() {
   assert.equal(url.pathname, '/e2e');
   assert.equal(await db.user.count(), 0, 'Fresh DB required; use scoped down, then up');
   for (const [handle, fixture] of Object.entries(users)) {
-    const userId = id(handle);
-    await db.user.create({ data: { id: userId, handle, name: `${handle} (synthetic)`,
-      email: `${handle}@e2e.test`, identityProvider: 'EMAIL', roles: ['READER'] } });
-    const { raw, ...hash } = key('hdr_user_');
-    await db.userApiKey.create({ data: { id: id(`${handle}:key`), userId,
-      ...hash, oauthScopes: [], label: 'Disposable E2E', issuedVia: 'portal', createdBy: userId } });
-    credentials[handle] = raw;
+    if (fixture.signup) continue;
+    await db.user.create({ data: { id: id(handle), handle, name: `${handle} (synthetic)`,
+      email: `${handle}@e2e.test`, identityProvider: fixture.provider ?? 'EMAIL', roles: fixture.roles ?? ['READER'] } });
   }
+  const signIns = await provisionSignIns(db);
+  const principals: Record<string, { id: string; handle: string; provider: string | null; signIn: { path: string; isNew?: boolean } }> = {};
+  for (const [handle, fixture] of Object.entries(users)) {
+    const user = await db.user.findUniqueOrThrow({ where: { email: `${handle}@e2e.test` } });
+    const { raw, ...hash } = key('hdr_user_');
+    await db.userApiKey.create({ data: { id: id(`${handle}:key`), userId: user.id,
+      ...hash, oauthScopes: [], label: 'Disposable E2E', issuedVia: 'portal', createdBy: user.id } });
+    credentials[handle] = raw;
+    principals[handle] = { id: user.id, handle: user.handle, provider: user.identityProvider,
+      signIn: signIns[handle] ?? { path: 'seeded-existing-user' } };
+  }
+  writeFileSync('/fixtures/principals.json', JSON.stringify(principals, null, 2) + '\n', { mode: 0o600 });
   for (const org of orgs) {
     const organizationId = id(org);
     const owner = id(org === 'e2e-alpha' ? 'alpha-admin' : 'beta-admin');
@@ -44,7 +53,7 @@ async function seed() {
       for (const membership of fixture.memberships) {
         const [root, role] = membership.split(':');
         if (root === org) await db.orgMember.create({ data: {
-          id: id(`${org}:${handle}`), organizationId, userId: id(handle),
+          id: id(`${org}:${handle}`), organizationId, userId: principals[handle].id,
           role: role as 'OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER' } });
       }
     }
@@ -54,7 +63,11 @@ async function seed() {
     const { raw, ...hash } = key('hdr_app_');
     await db.appKey.create({ data: { id: id(`${org}:app-key`), appId, ...hash, label: 'Disposable E2E' } });
     credentials[`${org}:team`] = raw;
-    await db.appMember.create({ data: { appId, userId: owner, role: 'admin' } });
+    for (const [handle, fixture] of Object.entries(users)) {
+      if (fixture.apps?.includes(`${org}:team`)) {
+        await db.appMember.create({ data: { appId, userId: principals[handle].id, role: principals[handle].id === owner ? 'admin' : 'member' } });
+      }
+    }
     const memoryIds: Record<string, string> = {};
     for (const cls of classes) {
       const memoryId = id(`${org}:${cls}`);
@@ -107,12 +120,14 @@ async function seed() {
       await db.$transaction(tx => ensureCurrentNodeRevisionInTransaction(tx, n.id, { expectedMemoryId: specsId }));
     }
   }
-  // User-owned free-standing memory for each org-less principal.
-  for (const handle of ['outsider', 'visitor']) {
-    const memoryId = id(`${handle}:private`);
-    await db.memory.create({ data: { id: memoryId, ownerUserId: id(handle), userId: id(handle),
-      urn: `${handle}:private`, name: `${handle} private`, class: 'private', tags: ['e2e'] } });
-    await node(memoryId, 'welcome');
+  // Org-less strict-owner fixtures, including both free-standing classes.
+  for (const handle of ['outsider', 'visitor', 'personal-owner']) {
+    for (const cls of handle === 'personal-owner' ? ['personal', 'private'] as const : ['private'] as const) {
+      const memoryId = id(`${handle}:${cls}`);
+      await db.memory.create({ data: { id: memoryId, ownerUserId: id(handle), userId: id(handle),
+        urn: `${handle}:${cls}`, name: `${handle} ${cls}`, class: cls, tags: ['e2e'] } });
+      await node(memoryId, 'welcome');
+    }
   }
   await check();
   writeFileSync('/fixtures/credentials.json', JSON.stringify(credentials, null, 2) + '\n', { mode: 0o600 });
@@ -123,10 +138,21 @@ async function check() {
   assert.equal(await db.user.count(), Object.keys(users).length);
   assert.equal(await db.orgMember.count(), Object.values(users).reduce((count, u) => count + u.memberships.length, 0));
   checkDocumentInventory();
+  const principals = JSON.parse(readFileSync('/fixtures/principals.json', 'utf8'));
+  assert.equal(principals['fresh-user'].signIn.isNew, true);
+  assert.equal(principals['email-code-user'].signIn.path, 'review-demo-code');
+  for (const handle of ['google-user', 'apple-user']) assert.equal(principals[handle].signIn.path, `${handle.split('-')[0]}-local-token`);
   for (const [handle, fixture] of Object.entries(users)) {
-    const user = await db.user.findUniqueOrThrow({ where: { id: id(handle) } });
-    assert.deepEqual(user.roles, ['READER']);
+    const user = await db.user.findUniqueOrThrow({ where: { email: `${handle}@e2e.test` } });
+    assert.deepEqual(user.roles, fixture.roles ?? ['READER']);
+    assert.equal(user.identityProvider, fixture.provider ?? 'EMAIL');
+    if (fixture.provider === 'GOOGLE') assert.equal(user.googleId, 'synthetic-google-subject');
+    if (fixture.provider === 'APPLE') assert.equal(user.appleId, 'synthetic-apple-subject');
+    const appRows = await db.appMember.findMany({ where: { userId: user.id }, include: { app: true } });
+    assert.deepEqual(appRows.map(r => r.app.urn).sort(), [...fixture.apps ?? []].sort());
     assert.equal(user.email, `${handle}@e2e.test`);
+    assert.equal(user.id, principals[handle].id);
+    assert.equal(user.handle, principals[handle].handle);
     const rows = await db.orgMember.findMany({ where: { userId: user.id } });
     assert.deepEqual(rows.map(r => `${orgs.find(o => id(o) === r.organizationId)}:${r.role}`).sort(), [...fixture.memberships].sort());
     assert.equal(await db.userApiKey.count({ where: { userId: user.id, revokedAt: null } }), 1);
@@ -151,6 +177,16 @@ async function check() {
     }
     assert.equal(await db.nodeRoleRule.count({ where: { configId: id(`${org}:config`), writers: 'ADMIN', locked: true } }), 1);
   }
+  for (const cls of ['personal', 'private']) {
+    const memory = await db.memory.findUniqueOrThrow({ where: { id: id(`personal-owner:${cls}`) } });
+    assert.equal(memory.class, cls);
+    assert.equal(memory.userId, id('personal-owner'));
+    assert.equal(memory.ownerUserId, id('personal-owner'));
+    assert.equal(memory.organizationId, null);
+    assert.equal(memory.appId, null);
+  }
+  const fresh = await db.user.findUniqueOrThrow({ where: { email: 'fresh-user@e2e.test' } });
+  assert.equal(await db.memory.count({ where: { OR: [{ userId: fresh.id }, { ownerUserId: fresh.id }, { createdBy: fresh.id }] } }), 0);
   const indexes = await db.$queryRaw<Array<{ name: string }>>`SELECT indexname AS name FROM pg_indexes WHERE indexname = 'node_embeddings_embedding_hnsw'`;
   assert.equal(indexes.length, 1);
   const columns = await db.$queryRaw<Array<{ name: string }>>`SELECT column_name AS name FROM information_schema.columns WHERE table_name = 'nodes' AND column_name = 'tsv' AND is_generated = 'ALWAYS'`;
@@ -160,4 +196,4 @@ async function check() {
   console.log('Fixture inventory and post-push objects PASS');
 }
 try { await (process.argv.includes('--check') ? check() : seed()); }
-finally { await db.$disconnect(); }
+finally { await db.$disconnect(); await disconnectSignInDb(); }
