@@ -1868,6 +1868,29 @@ describe('#1050 — worker name holding', () => {
       expect(await binding).toMatchObject({ extensions: { code: 'WORKER_TAKEN' } });
     });
 
+    it('#1625 residual P2: a hold taken by someone else during the lock wait refuses even a FORCED bind', async () => {
+      const w = await heldBy(contrib.id);
+      let unblock!: () => void;
+      const gate = new Promise<void>((r) => { unblock = r; });
+      let locked!: () => void;
+      const lockedNow = new Promise<void>((r) => { locked = r; });
+      const blocker = db.$transaction(async (tx) => {
+        // NO KEY UPDATE, so only the bind's own Worker lock parks it (see above).
+        await tx.$queryRaw`SELECT id FROM workers WHERE id = ${w.id} FOR NO KEY UPDATE`;
+        locked();
+        await gate;
+        // A release and a re-claim by another person, committed while the bind waits.
+        await tx.worker.update({ where: { id: w.id }, data: { heldByUserId: appMember.id, heldAt: new Date() } });
+      }, { timeout: 20_000 });
+      await lockedNow;
+      const binding = bind(contrib.id, w.id, true).catch((e: unknown) => e);
+      await waitForLockWaiters(db, 1, 3_000);
+      unblock();
+      await blocker;
+      expect(await binding).toMatchObject({ extensions: { code: 'WORKER_HELD' } });
+      expect(await db.session.count({ where: { workerId: w.id, userId: contrib.id, endedAt: null } })).toBe(0);
+    });
+
     it('#1625 P2-2: two concurrent forced binds by the holder leave exactly ONE open session', async () => {
       const w = await heldBy(contrib.id);
       await Promise.all([bind(contrib.id, w.id, true), bind(contrib.id, w.id, true)]);

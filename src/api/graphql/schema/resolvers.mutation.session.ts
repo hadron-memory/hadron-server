@@ -960,7 +960,34 @@ export const sessionMutations = {
         // after it, so two binds, or a bind and a resume, of one worker
         // serialize instead of each deciding on a stale view.
         if (workerId) {
-          await tx.$queryRaw`SELECT id FROM workers WHERE id = ${workerId} FOR UPDATE`;
+          const [locked] = await tx.$queryRaw<Array<{ name: string; held_by_user_id: string | null; retired_at: Date | null }>>`
+            SELECT name, held_by_user_id, retired_at FROM workers WHERE id = ${workerId} FOR UPDATE`;
+          // #1625 review (Baloo, residual P2): the HOLD and retirement are
+          // re-validated under the lock for EVERY bind, force included. The
+          // checks far above read a snapshot; a release, a claim by someone
+          // else, or a retirement can land during the lock wait, and a bind
+          // must not proceed on the name as it was.
+          if (!locked || locked.retired_at) {
+            throw new GraphQLError(
+              'This worker is retired — its name stays reserved, but it takes no new sessions.',
+              { extensions: { code: 'WORKER_RETIRED', workerId } },
+            );
+          }
+          if (locked.held_by_user_id && locked.held_by_user_id !== ctx.userId) {
+            const holder = await tx.user.findUnique({
+              where: { id: locked.held_by_user_id },
+              select: { handle: true, githubUsername: true },
+            });
+            const who = holder?.handle ?? holder?.githubUsername ?? locked.held_by_user_id;
+            throw new GraphQLError(
+              `The name "${locked.name}" was taken by ${who} while this bind waited. ` +
+                'This cannot be forced — cast your own worker instead.',
+              { extensions: { code: 'WORKER_HELD', workerId, heldBy: locked.held_by_user_id, heldByName: who } },
+            );
+          }
+          // Released during the wait: an unheld name is claimed by this bind,
+          // through the same compare-and-set path as a never-held one.
+          if (!locked.held_by_user_id) claimWorkerId = workerId;
           if (!input.force && assertWorkerNotTaken) {
             await assertWorkerNotTaken(tx as unknown as Context['db']);
           }
