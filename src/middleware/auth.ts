@@ -212,23 +212,41 @@ async function bindSession(
   ctx: AuthContext,
   sessionId: string,
 ): Promise<void> {
-  const isPureAppKey = !!ctx.appId && !ctx.userId;
-  const isUserPrincipal = !!ctx.userId && !ctx.impersonation;
-  if (!isPureAppKey && !isUserPrincipal) return;
+  const bound = await validateSessionBinding(db, ctx, sessionId);
+  if (!bound) return;
+  ctx.sessionId = bound.sessionId;
+  // #1610: the Worker / Agent behind this request's writes comes from the
+  // binding just validated — the one thing a client cannot assert.
+  publishActor(bound.actor);
+}
+
+/**
+ * The ONE ownership check behind every session binding (#934): the header
+ * above, and the MCP connection binding `hadron_start_session` sets (DAC,
+ * #1610 follow-on), which re-validates it on every request. An active session
+ * (not ended, not past a hard expiry) of the caller's own: an App key's own
+ * App's session, or a user's own session, never under impersonation. Returns
+ * null for anything else.
+ */
+export async function validateSessionBinding(
+  db: PrismaClient,
+  principal: AuthContext,
+  sessionId: string,
+): Promise<{ sessionId: string; actor: { workerId: string | null; agentId: string | null } } | null> {
+  const isPureAppKey = !!principal.appId && !principal.userId;
+  const isUserPrincipal = !!principal.userId && !principal.impersonation;
+  if (!isPureAppKey && !isUserPrincipal) return null;
   const session = await db.session.findUnique({
     where: { id: sessionId },
     select: { id: true, appId: true, userId: true, expiresAt: true, endedAt: true, workerId: true, agentId: true },
   });
-  if (!session || session.endedAt) return;
-  if (session.expiresAt && session.expiresAt <= new Date()) return;
+  if (!session || session.endedAt) return null;
+  if (session.expiresAt && session.expiresAt <= new Date()) return null;
   const owned = isPureAppKey
-    ? session.appId === ctx.appId
-    : session.userId === ctx.userId;
-  if (!owned) return;
-  ctx.sessionId = session.id;
-  // #1610: the Worker / Agent behind this request's writes comes from the
-  // binding just validated — the one thing a client cannot assert.
-  publishActor({ workerId: session.workerId, agentId: session.agentId });
+    ? session.appId === principal.appId
+    : session.userId === principal.userId;
+  if (!owned) return null;
+  return { sessionId: session.id, actor: { workerId: session.workerId, agentId: session.agentId } };
 }
 
 async function resolveAppKey(
