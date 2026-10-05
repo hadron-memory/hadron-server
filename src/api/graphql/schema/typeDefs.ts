@@ -8297,8 +8297,8 @@ export const typeDefs = `#graphql
     Consolidate a duplicate account into a surviving user. Source-only
     identities and relationships move; duplicate role-bearing relationships
     preserve the strongest live entitlement. The source is soft-deleted.
-    Platform admin, or an org admin/owner when both users are live members
-    of an organization they administer. The resulting merge is global.
+    Platform admin only. The resulting merge is global; organization
+    administration does not authorize account consolidation.
     """
     mergeUsers(input: MergeUsersInput!): User!
 

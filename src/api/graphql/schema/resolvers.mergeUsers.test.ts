@@ -100,10 +100,10 @@ describe('Mutation.mergeUsers — identity and guards', () => {
     expect(intact.email).toBe('source@example.test');
   });
 
-  it('rejects a caller without platform or shared-org admin authority and a same-user merge', async () => {
+  it('rejects a caller without platform admin authority and a same-user merge', async () => {
     await expect(
       merge(source.id, target.id, { db, userId: target.id, roles: ['READER'] }),
-    ).rejects.toThrow('Forbidden');
+    ).rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
 
     await expect(merge(target.id, 'hrn:user:merge-target')).rejects.toMatchObject({
       extensions: { code: 'MERGE_SOURCE_EQUALS_TARGET', userId: target.id },
@@ -111,7 +111,7 @@ describe('Mutation.mergeUsers — identity and guards', () => {
   });
 
   it.each(['ADMIN', 'OWNER'] as const)(
-    'allows a live org %s to globally merge two live members of that org',
+    'refuses a live org %s merging two live members without platform authority (#1642)',
     async (role) => {
       const orgAdmin = await db.user.create({
         data: { handle: `merge-org-${role.toLowerCase()}`, roles: ['READER'] },
@@ -131,23 +131,21 @@ describe('Mutation.mergeUsers — identity and guards', () => {
         ],
       });
 
-      const out = await merge(source.id, target.id, {
+      await expect(merge(source.id, target.id, {
         db,
         userId: orgAdmin.id,
         roles: ['READER'],
-      });
-
-      expect(out.id).toBe(target.id);
+      })).rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
       await expect(
         db.user.findUniqueOrThrow({ where: { id: source.id } }),
       ).resolves.toMatchObject({
-        deletedAt: expect.any(Date),
-        deletedBy: orgAdmin.id,
+        deletedAt: null,
+        deletedBy: null,
       });
     },
   );
 
-  it('does NOT let an org-admin merge escalate the target with the source platform roles', async () => {
+  it('refuses an org-admin merge without changing either account (#1642)', async () => {
     // source carries platform roles: ['ADMIN'] (beforeEach); target: ['READER'].
     const orgAdmin = await db.user.create({
       data: { handle: 'merge-org-noescalate', roles: ['READER'] },
@@ -163,16 +161,23 @@ describe('Mutation.mergeUsers — identity and guards', () => {
       ],
     });
 
-    const out = await merge(source.id, target.id, { db, userId: orgAdmin.id, roles: ['READER'] });
-    // The target keeps its own roles — the source's platform ADMIN is dropped
-    // with the tombstone, not smuggled onto the target.
-    expect(out.roles).toEqual(['READER']);
+    await expect(merge(source.id, target.id, { db, userId: orgAdmin.id, roles: ['READER'] }))
+      .rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
+    expect(await db.user.findUniqueOrThrow({ where: { id: target.id } })).toMatchObject({ roles: ['READER'] });
+    expect(await db.user.findUniqueOrThrow({ where: { id: source.id } })).toMatchObject({ deletedAt: null, roles: ['ADMIN'] });
   });
 
   it('lets a platform admin carry the source global roles onto the target', async () => {
     // Platform-admin path (adminCtx): union preserves the source's ADMIN.
     const out = await merge(source.id, target.id);
     expect(new Set(out.roles)).toEqual(new Set(['READER', 'ADMIN']));
+  });
+
+  it('refuses unauthenticated and ordinary-member callers before resolving account refs (#1642)', async () => {
+    for (const ctx of [{ db, roles: [] }, { db, userId: target.id, roles: ['READER'] }] as Context[]) {
+      await expect(merge('hrn:user:no-such-source', 'hrn:user:no-such-target', ctx))
+        .rejects.toMatchObject({ message: 'Forbidden', extensions: { code: 'FORBIDDEN' } });
+    }
   });
 
   it('rejects a shared-org member below ADMIN and an admin when the users do not share that org', async () => {
@@ -195,7 +200,7 @@ describe('Mutation.mergeUsers — identity and guards', () => {
     });
     const ctx: Context = { db, userId: caller.id, roles: ['READER'] };
 
-    await expect(merge(source.id, target.id, ctx)).rejects.toThrow('Forbidden');
+    await expect(merge(source.id, target.id, ctx)).rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
 
     await db.orgMember.update({
       where: { organizationId_userId: { organizationId: sharedOrg.id, userId: caller.id } },
