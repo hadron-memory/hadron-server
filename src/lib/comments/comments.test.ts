@@ -10,7 +10,7 @@ const read = (rel: string) => readFileSync(fileURLToPath(new URL(rel, import.met
 const fixture = JSON.parse(read('./comment.fixture.json'));
 
 describe('comment.fixture.json (contract §7)', () => {
-  it.each(fixture.authorKeys.map((r: { name: string }) => [r.name, r]))('author key: %s', async (_, row: any) => {
+  it.each(fixture.authorKeys as any[])('author key: $name', async (row: any) => {
     const { workerId, agentId, userId, appId } = row.principal;
     const key = await runAsActor({ workerId, agentId }, () => authorKeyOf({ userId, appId }));
     expect(key).toBe(row.authorKey);
