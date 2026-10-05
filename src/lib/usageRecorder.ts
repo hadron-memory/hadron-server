@@ -45,6 +45,7 @@
  * even with no query it returns whole node projections, so it records.
  */
 
+import { usageEventCountsAsActivity } from './sessionActivity.js';
 import { generateId } from './id.js';
 import type { Prisma, PrismaClient } from '../generated/prisma/index.js';
 
@@ -168,13 +169,56 @@ export function recordNodeUsage(
       sessionId: actor.sessionId,
     }));
 
-    for (let i = 0; i < rows.length; i += INSERT_CHUNK) {
-      void db.usageEvent
-        .createMany({ data: rows.slice(i, i + INSERT_CHUNK) })
-        .catch(() => {});
-    }
+    // #1653 / DY-2: the rows count as ACTIVITY only if the bound session is
+    // live and owned by this principal right now. Decided once per call, off
+    // the request path; any failure records them as not counting (safe).
+    void (async () => {
+      const counts = await attributedRequestActivity(db, principal, actor.sessionId);
+      for (let i = 0; i < rows.length; i += INSERT_CHUNK) {
+        await db.usageEvent
+          .createMany({ data: rows.slice(i, i + INSERT_CHUNK).map((r) => ({ ...r, countsAsActivity: counts })) })
+          .catch(() => {});
+      }
+    })().catch(() => {});
   } catch {
     // Deliberately silent: see above. Metering a read must never break it.
+  }
+}
+
+/**
+ * Does a request attributed to `sessionId` count as ACTIVITY? (#1653, DY-1,
+ * DY-2.) Yes when the session is live and owned by this principal
+ * (`usageEventCountsAsActivity`).
+ *
+ * For a PURE App key there is one more case. An App key cannot author team
+ * chat or mark a cursor, so its attributed request is the only act it has;
+ * under DY-1 that act RESUMES the key's own lapsed session, through the same
+ * locked verdict every resume passes (`reviveOwnLapsedSession`: the
+ * person-less session of the key's App, an unheld worker, nobody else live,
+ * not dormant). A user's attributed request never resumes: a user resumes by
+ * posting, reading or marking read (DA).
+ *
+ * Never throws; a failure reads as "does not count".
+ */
+export async function attributedRequestActivity(
+  db: unknown,
+  principal: UsagePrincipal,
+  sessionId: string | null | undefined,
+): Promise<boolean> {
+  if (!sessionId) return false;
+  const client = db as Partial<Pick<PrismaClient, 'session' | 'usageEvent' | '$transaction'>>;
+  if (!client.session || !client.usageEvent) return false;
+  try {
+    if (await usageEventCountsAsActivity(client as never, principal, sessionId)) return true;
+    if (principal.userId || principal.impersonation || !principal.appId || !client.$transaction) return false;
+    // Lazy import: teamAttention sits above this module in the graph.
+    const { reviveOwnLapsedSession } = await import('./teamAttention.js');
+    return await reviveOwnLapsedSession(
+      { db: client, appId: principal.appId, roles: [] } as never,
+      sessionId,
+    );
+  } catch {
+    return false;
   }
 }
 

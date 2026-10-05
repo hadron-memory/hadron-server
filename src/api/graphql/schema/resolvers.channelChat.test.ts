@@ -395,6 +395,19 @@ describe('#1540 — authoring through a live session keeps it live', () => {
       await expect(post(session.id, 'past my deadline')).rejects.toMatchObject({ extensions: { code: 'SESSION_NOT_LIVE' } });
     });
 
+    it('DY-5: a post through a DORMANT session is refused SESSION_NOT_LIVE with reason DORMANT', async () => {
+      await hold();
+      const t0 = new Date();
+      const session = await bindAt(t0);
+      const before = await heartbeat(session.id);
+      vi.useFakeTimers({ toFake: ['Date'] });
+      vi.setSystemTime(new Date(t0.getTime() + 91 * 24 * H));
+      await expect(post(session.id, 'back after a season')).rejects.toMatchObject({
+        extensions: { code: 'SESSION_NOT_LIVE', reason: 'DORMANT' },
+      });
+      expect(await heartbeat(session.id)).toBe(before);
+    });
+
     it('#1625 P2-1: a post refused INSIDE the append transaction resumes nothing', async () => {
       await hold();
       const session = await lapsedSession();

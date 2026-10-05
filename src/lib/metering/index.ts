@@ -15,6 +15,7 @@
  * their callers (GraphQL mutations) want real errors.
  */
 
+import { usageEventCountsAsActivity } from '../sessionActivity.js';
 import { Prisma } from '../../generated/prisma/index.js';
 import type { AiModelPrice, PrismaClient, UsageEvent } from '../../generated/prisma/index.js';
 import type { AiConfigOwnerType } from '../aiConfig.js';
@@ -214,6 +215,10 @@ export async function recordLlmUsage(
         nodeId: params.nodeId ?? null,
         memoryId: params.memoryId ?? null,
         sessionId: params.sessionId ?? null,
+        // #1653 / DY-2: counts toward liveness only for a live, owned session.
+        countsAsActivity: await usageEventCountsAsActivity(
+          db as never, { userId: params.userId ?? null, appId: params.appId ?? null }, params.sessionId,
+        ),
         appId: params.appId ?? null,
         userId: params.userId ?? null,
         organizationId: params.organizationId ?? null,
