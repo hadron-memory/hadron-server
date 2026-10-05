@@ -1259,7 +1259,12 @@ export const sessionMutations = {
         ? await resolveReadableNodeByLoc(ctx, event.nodeLoc)
         : null;
 
-      await ctx.db.usageEvent.create({
+      // #1660 review (local P2-2): the insert IS this act, so an App-key resume
+      // it earns commits in the SAME transaction (rolled back if the insert
+      // fails), and the row is stamped at the instant activity was judged
+      // (local P2-1).
+      const at = new Date();
+      await ctx.db.$transaction(async (tx) => tx.usageEvent.create({
         data: {
           type: event.type,
           nodeLoc: event.nodeLoc,
@@ -1281,12 +1286,13 @@ export const sessionMutations = {
           // as activity only for a live session this caller owns. Before this,
           // any reader could keep someone else's session live, or revive it,
           // by recording usage against its id.
-          countsAsActivity: await attributedRequestActivity(ctx.db, ctx, event.sessionId),
+          countsAsActivity: await attributedRequestActivity(ctx.db, ctx, event.sessionId, { at, tx }),
+          createdAt: at,
           model: event.model,
           tokensIn: event.tokensIn,
           tokensOut: event.tokensOut,
         },
-      });
+      }));
       return true;
     },
 
@@ -2372,10 +2378,12 @@ export const sessionMutations = {
 
         // Record usage event (fire-and-forget). #1653 / DY-2: it counts as
         // activity only for a live session the caller owns.
-        void attributedRequestActivity(ctx.db, ctx, ctx.sessionId).then((countsAsActivity) => ctx.db.usageEvent
+        const runAt = new Date();
+        void attributedRequestActivity(ctx.db, ctx, ctx.sessionId, { at: runAt }).then((countsAsActivity) => ctx.db.usageEvent
           .create({
             data: {
               id: generateId(),
+              createdAt: runAt,
               type: 'action-run',
               nodeLoc: loc,
               nodeId: node.id,

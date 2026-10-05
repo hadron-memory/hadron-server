@@ -173,10 +173,12 @@ export function recordNodeUsage(
     // live and owned by this principal right now. Decided once per call, off
     // the request path; any failure records them as not counting (safe).
     void (async () => {
-      const counts = await attributedRequestActivity(db, principal, actor.sessionId);
+      // One instant for the decision and every row's timestamp (local P2-1).
+      const at = new Date();
+      const counts = await attributedRequestActivity(db, principal, actor.sessionId, { at });
       for (let i = 0; i < rows.length; i += INSERT_CHUNK) {
         await db.usageEvent
-          .createMany({ data: rows.slice(i, i + INSERT_CHUNK).map((r) => ({ ...r, countsAsActivity: counts })) })
+          .createMany({ data: rows.slice(i, i + INSERT_CHUNK).map((r) => ({ ...r, countsAsActivity: counts, createdAt: at })) })
           .catch(() => {});
       }
     })().catch(() => {});
@@ -204,20 +206,39 @@ export async function attributedRequestActivity(
   db: unknown,
   principal: UsagePrincipal,
   sessionId: string | null | undefined,
+  opts: {
+    /**
+     * The instant liveness is judged at, which the caller MUST also write as
+     * the event's `createdAt` (#1660 review, local P2-1). A check and a later
+     * insert are separate operations, and a session can lapse between them;
+     * stamping the event at the checked instant makes "counted" mean "live at
+     * the moment it was counted", whenever the row lands.
+     */
+    at?: Date;
+    /**
+     * The caller's transaction, when the event insert IS the act (#1660
+     * review, local P2-2): an App-key resume then commits with the insert or
+     * not at all, instead of in a transaction of its own.
+     */
+    tx?: unknown;
+  } = {},
 ): Promise<boolean> {
   if (!sessionId) return false;
-  const client = db as Partial<Pick<PrismaClient, 'session' | 'usageEvent' | '$transaction'>>;
+  const client = (opts.tx ?? db) as Partial<Pick<PrismaClient, 'session' | 'usageEvent' | '$transaction'>>;
   if (!client.session || !client.usageEvent) return false;
   try {
-    if (await usageEventCountsAsActivity(client as never, principal, sessionId)) return true;
-    if (principal.userId || principal.impersonation || !principal.appId || !client.$transaction) return false;
+    if (await usageEventCountsAsActivity(client as never, principal, sessionId, opts.at)) return true;
+    if (principal.userId || principal.impersonation || !principal.appId) return false;
     // Lazy import: teamAttention sits above this module in the graph.
-    const { reviveOwnLapsedSession } = await import('./teamAttention.js');
-    return await reviveOwnLapsedSession(
-      { db: client, appId: principal.appId, roles: [] } as never,
-      sessionId,
-    );
-  } catch {
+    const { reviveOwnLapsedSession, resumeOwnLapsedSessionInTx } = await import('./teamAttention.js');
+    const ctxLike = { db: client, appId: principal.appId, roles: [] } as never;
+    if (opts.tx) return await resumeOwnLapsedSessionInTx(ctxLike, opts.tx as never, sessionId);
+    if (!client.$transaction) return false;
+    return await reviveOwnLapsedSession(ctxLike, sessionId);
+  } catch (err) {
+    // Inside the caller's transaction a failure must abort it: swallowing it
+    // here would let the insert commit on an aborted transaction's behalf.
+    if (opts.tx) throw err;
     return false;
   }
 }

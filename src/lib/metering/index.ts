@@ -15,7 +15,7 @@
  * their callers (GraphQL mutations) want real errors.
  */
 
-import { usageEventCountsAsActivity } from '../sessionActivity.js';
+import { attributedRequestActivity } from '../usageRecorder.js';
 import { Prisma } from '../../generated/prisma/index.js';
 import type { AiModelPrice, PrismaClient, UsageEvent } from '../../generated/prisma/index.js';
 import type { AiConfigOwnerType } from '../aiConfig.js';
@@ -207,6 +207,9 @@ export async function recordLlmUsage(
     const cost = price
       ? computeCostMicroCents(price, params.tokensIn, params.tokensOut)
       : null;
+    // #1660 review (local P2-1): the event is stamped at the instant its
+    // activity was judged, so it cannot count for a session that lapsed after.
+    const at = new Date();
     const event = await db.usageEvent.create({
       data: {
         id: generateId(),
@@ -216,9 +219,13 @@ export async function recordLlmUsage(
         memoryId: params.memoryId ?? null,
         sessionId: params.sessionId ?? null,
         // #1653 / DY-2: counts toward liveness only for a live, owned session.
-        countsAsActivity: await usageEventCountsAsActivity(
-          db as never, { userId: params.userId ?? null, appId: params.appId ?? null }, params.sessionId,
+        // The same door as every attributed request (#1660 review, Cloe P3):
+        // counts for a live owned session, and a pure App key's own lapsed
+        // worker session resumes through the locked verdict (DY-1).
+        countsAsActivity: await attributedRequestActivity(
+          db, { userId: params.userId ?? null, appId: params.appId ?? null }, params.sessionId, { at },
         ),
+        createdAt: at,
         appId: params.appId ?? null,
         userId: params.userId ?? null,
         organizationId: params.organizationId ?? null,

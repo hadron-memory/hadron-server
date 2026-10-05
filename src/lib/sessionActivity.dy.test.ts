@@ -126,6 +126,54 @@ describe('DY-2 (#1653): a usage event on a lapsed session is attribution, never 
   });
 });
 
+describe('#1660 review (local P2s): counting is atomic with what it counts', () => {
+  it('P2-1: an event is stamped at the instant it was judged live, even if the insert lands after the deadline', async () => {
+    // Live for one more second; the insert is delayed 1.5 s past that.
+    const s = await db.session.create({
+      data: { id: generateId(), type: 'DEVELOPER', userId: holder.id, appId: app.id, workerId: worker.id,
+        startedAt: new Date(Date.now() - 2 * D), updatedAt: new Date(Date.now() - 24 * H + 1000) },
+    });
+    const deadline = Date.now() + 1000;
+    const slow = new Proxy(db, {
+      get(target, prop, receiver) {
+        if (prop === 'usageEvent') {
+          return new Proxy(target.usageEvent, {
+            get(ue, p2, r2) {
+              if (p2 === 'createMany') {
+                return async (args: unknown) => {
+                  await new Promise((r) => setTimeout(r, 1500));
+                  return (ue.createMany as (a: unknown) => Promise<unknown>)(args);
+                };
+              }
+              const v = Reflect.get(ue, p2, r2);
+              return typeof v === 'function' ? v.bind(ue) : v;
+            },
+          });
+        }
+        const v = Reflect.get(target, prop, receiver);
+        return typeof v === 'function' ? v.bind(target) : v;
+      },
+    });
+    recordNodeUsage(slow as never, 'read', await aNode(), { userId: holder.id, sessionId: s.id });
+    const [ev] = await eventsFor(s.id);
+    expect(ev.countsAsActivity).toBe(true);
+    expect(ev.createdAt.getTime()).toBeLessThanOrEqual(deadline);
+  });
+
+  it('P2-2: a resume earned inside the caller\'s transaction rolls back if that transaction fails', async () => {
+    const s = await session({ idleMs: 30 * H, userId: null });
+    await expect(db.$transaction(async (tx) => {
+      expect(await attributedRequestActivity(db, { appId: app.id }, s.id, { tx })).toBe(true);
+      throw new Error('the insert that would have recorded the act failed');
+    })).rejects.toThrow('the insert');
+    expect(await live(s.id)).toBe(false);
+    // Today recordUsage, the one caller that passes its transaction, refuses a
+    // pure App key outright (it needs READER), so this is defence in depth.
+    await expect(M.recordUsage({}, { event: { type: 'read', sessionId: s.id } }, appKeyCtx(app.id)))
+      .rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
+  });
+});
+
 describe('DY-1: a pure App key resumes its OWN App\'s lapsed session by an attributed request', () => {
   it('resumes a person-less session of the key\'s App on an unheld worker', async () => {
     const s = await session({ idleMs: 30 * H, userId: null });
