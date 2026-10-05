@@ -81,8 +81,9 @@ import type { SessionType } from '../../../generated/prisma/index.js';
 import { hasBoundAppSession, strictSessionMemoryFilter } from '../../../lib/auth/sessionPrivacy.js';
 
 // Request-local only: a session list computes the event memory set once.
-const sessionEventMemoryReads = new WeakMap<Context, Promise<string[]>>();
-function sessionEventMemoryIds(ctx: Context): Promise<string[]> {
+type SessionEventMemorySet = { ids: string[]; delegatedMemoryId: string | null };
+const sessionEventMemoryReads = new WeakMap<Context, Promise<SessionEventMemorySet>>();
+function sessionEventMemoryIds(ctx: Context, parentSessionId: string): Promise<string[]> {
   let read = sessionEventMemoryReads.get(ctx);
   if (!read) {
     read = (async () => {
@@ -90,7 +91,7 @@ function sessionEventMemoryIds(ctx: Context): Promise<string[]> {
       const bound = hasBoundAppSession(ctx)
         ? await ctx.db.session.findFirst({
           where: { id: ctx.sessionId!, appId: ctx.appId! },
-          select: { memoryId: true },
+          select: { memoryId: true, memory: { select: { class: true } } },
         })
         : null;
       const memories = await ctx.db.memory.findMany({
@@ -100,11 +101,18 @@ function sessionEventMemoryIds(ctx: Context): Promise<string[]> {
         ] },
         select: { id: true },
       });
-      return memories.map((m) => m.id);
+      return {
+        ids: memories.map((m) => m.id),
+        delegatedMemoryId: bound?.memory?.class === 'personal' || bound?.memory?.class === 'private'
+          ? bound.memoryId : null,
+      };
     })();
     sessionEventMemoryReads.set(ctx, read);
   }
-  return read;
+  // The delegated strict-memory exception belongs only to this conversation.
+  // Other readable parents in the same request retain their ordinary set.
+  return read.then(({ ids, delegatedMemoryId }) => parentSessionId === ctx.sessionId || !delegatedMemoryId
+    ? ids : ids.filter((id) => id !== delegatedMemoryId));
 }
 
 /**
@@ -1858,7 +1866,7 @@ export const typeResolvers = {
         select: { id: true },
       });
       if (!session) return [];
-      const memoryIds = await sessionEventMemoryIds(ctx);
+      const memoryIds = await sessionEventMemoryIds(ctx, s.id);
       return ctx.db.usageEvent.findMany({
         where: { sessionId: s.id, OR: [{ memoryId: null }, { memoryId: { in: memoryIds } }] },
         orderBy: { createdAt: 'desc' },

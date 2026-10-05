@@ -167,12 +167,13 @@ describe('#1645 session privacy', () => {
       where: { id: privateSession },
       data: { agentId: agent.id },
     });
-    const query = `{session(id:"${privateSession}"){events{nodeLoc}}}`;
+    const query = `{session(id:"${privateSession}"){events{nodeLoc}} other:session(id:"${workerSession}"){events{nodeLoc}}}`;
     const out = await execute(
       query,
       context(undefined, [], { appId: app, sessionId: privateSession }),
     );
     expect(out.session.events).toEqual([{ nodeLoc: 'owner-private' }]);
+    expect(out.other.events).toEqual([{ nodeLoc: 'unbound-event' }]);
     await db.agentSubscription.update({
       where: { userId_agentId: { userId: owner, agentId: agent.id } },
       data: { revokedAt: new Date() },
