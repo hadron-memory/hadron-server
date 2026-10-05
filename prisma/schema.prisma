@@ -1298,6 +1298,10 @@ model Node {
   pendingEdges  PendingEdge[]
   usageEvents   UsageEvent[]
   revisions     NodeRevision[]
+  /// #1606 — present iff `nodeType = 'comment'` (deferred DB trigger).
+  commentMeta   CommentMeta?    @relation("CommentMetaNode")
+  /// #1606 — the comments (top-level and replies) whose target is this node.
+  commentsOn    CommentMeta[]   @relation("CommentMetaTarget")
   contentValidationReports NodeContentValidationReport[]
   /// Spec 049 Phase 4: the Channel whose chat root this node is, if any.
   channel       Channel?        @relation("ChannelRoot")
@@ -1450,6 +1454,20 @@ model Edge {
   updatedBy   String?   @map("updated_by")
   deletedAt   DateTime? @map("deleted_at")
   deletedBy   String?   @map("deleted_by")
+  /// #1606 (`cor:dmo:110:01`) — set only by the comment path: the edge is a
+  /// comment's anchor (comment → target) or reply (reply → thread root).
+  /// NULL for every ordinary edge. A governed edge is immutable (DB trigger
+  /// `edges_governed_immutable`) and no generic edge write may create, alter
+  /// or delete one (`cor:dmo:110:04`).
+  governedKind       EdgeGovernedKind? @map("governed_kind")
+  /// The target revision a top-level comment was written against. Set iff
+  /// `governedKind = COMMENT_ANCHOR` (CHECK `chk_edges_governed_anchor`).
+  anchorRevNo        Int?              @map("anchor_rev_no")
+  /// `computeApprovalHash` of the target's title/abstract/content AT
+  /// `anchorRevNo` (64 lowercase hex), whether or not that revision was ever
+  /// approved, so the anchored text stays checkable after the revision
+  /// snapshot is pruned (`cor:dmo:110:01`).
+  anchorApprovalHash String?           @map("anchor_approval_hash")
 
   memory Memory @relation(fields: [memoryId], references: [id], onDelete: Cascade)
   source Node   @relation("SourceNode", fields: [sourceId], references: [id], onDelete: Cascade)
@@ -1463,6 +1481,66 @@ model Edge {
   // joins). Same memory-scoped, loc-ordered seek as nodes_memory_id_loc_idx.
   @@index([memoryId, loc])
   @@map("edges")
+}
+
+/// #1606 — the reserved, governed edge kinds (`cor:dmo:110:01`).
+enum EdgeGovernedKind {
+  COMMENT_ANCHOR
+  COMMENT_REPLY
+}
+
+/// #1606 — a comment thread's state (`cor:dmo:110:05`); top-level only.
+enum CommentThreadState {
+  OPEN
+  RESOLVED
+}
+
+/// #1606 — the comment-specific state of a `nodeType = 'comment'` node, 1:1.
+/// The body is the node's `content`; the quote and moderation reasons live in
+/// the node's `data`, so an encrypted memory encrypts them with the body. The
+/// columns here are what a constraint or an index must see in plaintext.
+///
+/// Invariants (prisma/post-push.sql + migration `20261005200000_comment_nodes`):
+/// meta ⇔ comment type; comment, target and thread root share one memory of a
+/// commentable class; a target is never a comment; `targetNodeId`,
+/// `threadRootId` and `authorKey` are immutable and equal the governed edges'
+/// endpoints; at most one open, live top-level thread per (target, author)
+/// (`comment_meta_one_open_thread`, a partial unique index Prisma can't model).
+model CommentMeta {
+  nodeId             String              @id @map("node_id")
+  /// The commented node. Immutable. `ON DELETE NO ACTION`: hard-deleting a
+  /// commented target fails unless its threads go in the same statement.
+  targetNodeId       String              @map("target_node_id")
+  /// NULL for a top-level comment; else the thread's top-level comment.
+  threadRootId       String?             @map("thread_root_id")
+  /// OPEN | RESOLVED for a top-level comment; NULL for a reply (CHECK).
+  threadState        CommentThreadState? @map("thread_state")
+  /// The author (`cor:dmo:110:03`): `w:<workerId>`, `ua:<userId>:<agentId>`,
+  /// `u:<userId>` or `app:<appId>`. Immutable.
+  authorKey          String              @map("author_key")
+  retractedAt        DateTime?           @map("retracted_at")
+  /// Actor key (the `authorKey` grammar) of whoever retracted, hid, resolved
+  /// or deleted.
+  retractedBy        String?             @map("retracted_by")
+  hiddenAt           DateTime?           @map("hidden_at")
+  hiddenBy           String?             @map("hidden_by")
+  resolvedAt         DateTime?           @map("resolved_at")
+  resolvedBy         String?             @map("resolved_by")
+  /// Mirrors the comment node's soft delete (a thread delete, or the target's
+  /// soft delete), so the one-open-thread index can exclude it.
+  threadDeletedAt    DateTime?           @map("thread_deleted_at")
+  threadDeletedBy    String?             @map("thread_deleted_by")
+  /// `ADMIN` (deleteCommentThread) or `TARGET` (the target was soft-deleted;
+  /// restoring the target restores exactly these).
+  threadDeletedCause String?             @map("thread_deleted_cause")
+  createdAt          DateTime            @default(now()) @map("created_at")
+
+  node   Node @relation("CommentMetaNode", fields: [nodeId], references: [id], onDelete: Cascade)
+  target Node @relation("CommentMetaTarget", fields: [targetNodeId], references: [id], onDelete: NoAction)
+
+  @@index([targetNodeId])
+  @@index([threadRootId])
+  @@map("comment_meta")
 }
 
 /// An edge whose target Node has not been synced yet; stored without
