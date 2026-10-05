@@ -1,3 +1,4 @@
+import { runAsSystem } from '../../lib/requestActor.js';
 import { createDecipheriv } from 'crypto';
 import { COMMENT_NODE_TYPE } from '../../lib/comments/index.js';
 import { hardDeleteThreadsOfTargets } from '../../lib/comments/lifecycle.js';
@@ -279,7 +280,7 @@ export async function updateNodeFromGitSync(
  * Sync a memory from GitHub: clone/pull the repo, load nodes from filesystem,
  * and upsert them into the database.
  */
-export const syncGraphFromGithub = async (
+const syncGraphFromGithubAsSystem = async (
   graph: MemoryWithOrg,
   edgeEndpointPreflightAttempt = 0,
 ): Promise<{
@@ -1609,3 +1610,11 @@ function extractOwnerRepo(gitUrl: string): string {
 
   return gitUrl;
 }
+
+/**
+ * #1610: Git sync writes the repository's content, not the requester's, and
+ * its revisions name the system editor `system:github-sync`. So it runs as
+ * the system even inside a worker's request: node and revision then agree.
+ */
+export const syncGraphFromGithub: typeof syncGraphFromGithubAsSystem = (...args) =>
+  runAsSystem(() => syncGraphFromGithubAsSystem(...args));

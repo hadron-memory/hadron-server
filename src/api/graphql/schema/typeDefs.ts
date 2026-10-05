@@ -1313,7 +1313,7 @@ export const typeDefs = `#graphql
     createdByWorker: ActorRef
     "#1610 — the Agent behind this node's creation: a worker's role agent, an agent session, or a headless App run. Null when no agent was behind it."
     createdByAgent: ActorRef
-    "#1610 — the Worker behind the last authored edit. A later edit with no worker behind it clears it, so it always describes the same edit as updatedAt."
+    "#1610 — the Worker behind the last authored edit. A later authored edit with no worker behind it clears it, so it always describes the last authored edit (not the updatedAt clock, which operational writes also advance)."
     updatedByWorker: ActorRef
     "#1610 — the Agent behind the last authored edit; cleared like updatedByWorker."
     updatedByAgent: ActorRef

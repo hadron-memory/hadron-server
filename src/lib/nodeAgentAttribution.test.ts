@@ -9,6 +9,8 @@ import { clearNodeAuthorship } from './nodeAuthorship.js';
 import { mintUserApiKey, resolveAuthContext } from '../middleware/auth.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import { createTestableMcpServer } from '../mcp/server.js';
+import { createNode as scaffoldNode } from '../controller/operations/createNode.js';
+import { assertNoNestedNodeWrite } from '../integrations/db/client.js';
 
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -178,5 +180,69 @@ describe('revision and MCP reads (#1610)', () => {
     ]);
     await makeNode('m:2');
     expect(await lines('m:2')).toEqual([]);
+  });
+});
+
+describe('#1658 review cycle', () => {
+  it('fails closed for a slim parent without its memory, or whose row was deleted', async () => {
+    const n = await runAsActor(W(), () => makeNode('s:1'));
+    const ctx = as();
+    expect(await resolvers.Node.createdByWorker({ id: n.id }, {}, ctx)).toBeNull();
+    await db.node.update({ where: { id: n.id }, data: { deletedAt: new Date() } });
+    expect(await resolvers.Node.createdByWorker({ id: n.id, memoryId: n.memoryId }, {}, as())).toBeNull();
+  });
+
+  it('memory scaffolding runs as the system, even inside a worker request', async () => {
+    const scaffold = await runAsActor(W(), () => scaffoldNode({ memoryId: memory.id, loc: 'scaffold', name: 'scaffold' }));
+    expect(await attribution(scaffold.id)).toEqual({
+      createdByWorkerId: null, createdByAgentId: null, updatedByWorkerId: null, updatedByAgentId: null,
+    });
+  });
+
+  it('stamps through every Node write method', async () => {
+    await runAsActor(W(), async () => {
+      await db.node.createMany({ data: [{ id: generateId(), memoryId: memory.id, loc: 'cm:1', name: 'cm' }] });
+      await db.node.createManyAndReturn({ data: [{ id: generateId(), memoryId: memory.id, loc: 'cm:2', name: 'cm' }] });
+      await db.node.upsert({
+        where: { loc_memoryId: { loc: 'up:1', memoryId: memory.id } },
+        create: { id: generateId(), memoryId: memory.id, loc: 'up:1', name: 'up' }, update: {},
+      });
+    });
+    for (const loc of ['cm:1', 'cm:2', 'up:1']) {
+      const row = await db.node.findFirstOrThrow({ where: { memoryId: memory.id, loc } });
+      expect(await attribution(row.id), loc).toMatchObject({ createdByWorkerId: worker.id, createdByAgentId: agent.id });
+    }
+    await runAsActor(A(), async () => {
+      await db.node.upsert({
+        where: { loc_memoryId: { loc: 'up:1', memoryId: memory.id } },
+        create: { id: generateId(), memoryId: memory.id, loc: 'up:1', name: 'up' }, update: { content: 'edited' },
+      });
+      await db.node.updateManyAndReturn({ where: { memoryId: memory.id, loc: 'cm:1' }, data: { content: 'edited' } });
+    });
+    for (const loc of ['up:1', 'cm:1']) {
+      const row = await db.node.findFirstOrThrow({ where: { memoryId: memory.id, loc } });
+      expect(await attribution(row.id), loc).toMatchObject({ updatedByWorkerId: null, updatedByAgentId: agent.id });
+    }
+  });
+
+  it('keeps concurrent requests apart: each write records its own actor', async () => {
+    const other = await db.worker.create({ data: { id: generateId(), appId: (await db.worker.findUniqueOrThrow({ where: { id: worker.id } })).appId, agentId: agent.id, name: 'Iris', slug: 'iris' } });
+    const [a, b] = await Promise.all([
+      runAsActor(W(), async () => { await new Promise((r) => setTimeout(r, 20)); return makeNode('c:1'); }),
+      runAsActor({ workerId: other.id, agentId: agent.id }, () => makeNode('c:2')),
+    ]);
+    expect((await attribution(a.id)).createdByWorkerId).toBe(worker.id);
+    expect((await attribution(b.id)).createdByWorkerId).toBe(other.id);
+  });
+
+  it('refuses a nested Node write through another model, which the Node hooks would never see', async () => {
+    expect(() => assertNoNestedNodeWrite('Memory', { nodes: { create: [{ loc: 'x', name: 'x' }] } })).toThrow(/Nested Node write through Memory\.nodes/);
+    expect(() => assertNoNestedNodeWrite('Edge', { target: { connectOrCreate: {} } })).toThrow(/Edge\.target/);
+    expect(() => assertNoNestedNodeWrite('Edge', { target: { connect: { id: 'n1' } } })).not.toThrow();
+    expect(() => assertNoNestedNodeWrite('Organization', { nodes: { create: {} } })).not.toThrow();
+    // And it is wired into the client: a real nested create is refused before it reaches the DB.
+    await expect(db.memory.update({
+      where: { id: memory.id }, data: { nodes: { create: [{ id: generateId(), loc: 'nested', name: 'nested' }] } },
+    })).rejects.toThrow(/Nested Node write through Memory\.nodes/);
   });
 });

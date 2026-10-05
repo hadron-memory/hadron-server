@@ -53,3 +53,13 @@ export function publishActor(actor: RequestActor): void {
 export function runAsActor<T>(actor: RequestActor, fn: () => T | PromiseLike<T>): Promise<T> {
   return requestActorStorage.run({ ...actor }, async () => await fn());
 }
+
+/**
+ * Run `fn` as the system: no Worker or Agent behind its writes, whatever
+ * request triggered it. For writes of server-sourced content whose revision
+ * editor is a system principal (Git sync, memory scaffolding), so the node and
+ * its revision attribute the same edit to the same nobody (#1658 review).
+ */
+export function runAsSystem<T>(fn: () => T | PromiseLike<T>): Promise<T> {
+  return runAsActor({ workerId: null, agentId: null }, fn);
+}
