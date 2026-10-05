@@ -104,6 +104,7 @@ export const resolvers = {
   Node: { ...typeResolvers.Node, ...nodeApprovalFieldResolvers.Node, ...nodeAttributionFieldResolvers.Node, ...commentFieldResolvers.Node },
   Comment: commentFieldResolvers.Comment,
   UnresolvedFeedback: commentFieldResolvers.UnresolvedFeedback,
+  GraphNode: commentFieldResolvers.GraphNode,
   NodeRevision: { ...typeResolvers.NodeRevision, ...nodeAttributionFieldResolvers.NodeRevision },
   NodeApproval: nodeApprovalFieldResolvers.NodeApproval,
   NodeMintStatus: nodeApprovalFieldResolvers.NodeMintStatus,

@@ -826,6 +826,10 @@ export const commentFieldResolvers = {
   UnresolvedFeedback: {
     urn: (r: { loc: string; memoryId: string }, _: unknown, ctx: Context) => resolveNodeUrnField(r, ctx),
   },
+  /** The slim list node (memoryNodes) carries the same cue; the list already passed the memory read gate. */
+  GraphNode: {
+    openThreads: async (n: { id: string }, _: unknown, ctx: Context) => (await loadSummary(ctx, n.id)).openThreads,
+  },
   Node: {
     /** The trust cue (`cor:dmo:110:07`), batched per request. */
     commentSummary: async (n: { id: string }, _: unknown, ctx: Context) => {

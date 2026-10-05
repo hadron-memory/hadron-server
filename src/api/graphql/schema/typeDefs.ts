@@ -280,6 +280,8 @@ export const typeDefs = `#graphql
   "Slim node projection for the graph view (issue #466) — only what a node-link graph draws."
   type GraphNode {
     id: ID!
+    "#1606 — how many open discussion threads this node has: the node-list trust cue (hrn:node:hadronmemory.com:specs:cor:dmo:110:07). Batched per request."
+    openThreads: Int!
     loc: String!
     "Non-null — mirrors Node.name (the DB column is NOT NULL)."
     name: String!
@@ -1317,7 +1319,7 @@ export const typeDefs = `#graphql
     updatedByWorker: ActorRef
     "#1610 — the Agent behind the last authored edit; cleared like updatedByWorker."
     updatedByAgent: ActorRef
-    "#1606 — open and resolved discussion on this node (cor:dmo:110:07). Batched per request."
+    "#1606 — open and resolved discussion on this node (hrn:node:hadronmemory.com:specs:cor:dmo:110:07). Batched per request."
     commentSummary: CommentSummary!
     memoryId: String!
     """
@@ -1869,7 +1871,7 @@ export const typeDefs = `#graphql
     alreadyApprovedCount: Int!
     "Locs of reserved placeholders, which have no spec to approve yet."
     skippedPlaceholders: [String!]!
-    "#1607 — unminted nodes of this memory with open discussion: a warning, never a blocker (cor:dmo:110:07). Ordered by loc."
+    "#1607 — unminted nodes of this memory with open discussion: a warning, never a blocker (hrn:node:hadronmemory.com:specs:cor:dmo:110:07). Ordered by loc."
     unresolvedFeedback: [UnresolvedFeedback!]!
   }
 
@@ -1881,13 +1883,13 @@ export const typeDefs = `#graphql
     urn: String
   }
 
-  "#1606 — a comment thread's state (cor:dmo:110:05). Top-level comments only."
+  "#1606 — a comment thread's state (hrn:node:hadronmemory.com:specs:cor:dmo:110:05). Top-level comments only."
   enum CommentThreadState {
     OPEN
     RESOLVED
   }
 
-  "#1606 — who a comment is from (cor:dmo:110:03)."
+  "#1606 — who a comment is from (hrn:node:hadronmemory.com:specs:cor:dmo:110:03)."
   enum CommentAuthorKind {
     "A named worker wrote it; the user who bound the session is provenance only."
     WORKER
@@ -1933,7 +1935,7 @@ export const typeDefs = `#graphql
   }
 
   """
-  #1606 — feedback about a node (cor:dmo:110). A comment is a node of type
+  #1606 — feedback about a node (hrn:node:hadronmemory.com:specs:cor:dmo:110). A comment is a node of type
   \`comment\` in its target's memory, readable by exactly who can read that
   memory. It is never part of its target's content, never approved or minted,
   and never authoritative.
@@ -1951,7 +1953,7 @@ export const typeDefs = `#graphql
     anchorRevision: Int!
     "The approval hash of the target's title/abstract/content at anchorRevision: 64 lowercase hex."
     anchorApprovalHash: String!
-    "anchorRevision equals the target's current revision. When false, show the comment as about an older revision (cor:dmo:110:01)."
+    "anchorRevision equals the target's current revision. When false, show the comment as about an older revision (hrn:node:hadronmemory.com:specs:cor:dmo:110:01)."
     anchorIsCurrent: Boolean!
     "Null when retracted or hidden."
     quote: String
@@ -1989,17 +1991,17 @@ export const typeDefs = `#graphql
     total: Int!
   }
 
-  "#1606 — the trust cue (cor:dmo:110:07). Counts live threads; zeros on a memory that cannot hold comments."
+  "#1606 — the trust cue (hrn:node:hadronmemory.com:specs:cor:dmo:110:07). Counts live threads; zeros on a memory that cannot hold comments."
   type CommentSummary {
     openThreads: Int!
     resolvedThreads: Int!
     "Every live comment, top-level and replies, retracted and hidden stubs included."
     comments: Int!
-    "The caller's own open, live top-level thread on this node, if any: one per author (cor:dmo:110:05)."
+    "The caller's own open, live top-level thread on this node, if any: one per author (hrn:node:hadronmemory.com:specs:cor:dmo:110:05)."
     viewerOpenThreadId: ID
   }
 
-  "#1607 — a node with open feedback, reported as a WARNING by mint and approval reports, never a blocker (cor:dmo:110:07)."
+  "#1607 — a node with open feedback, reported as a WARNING by mint and approval reports, never a blocker (hrn:node:hadronmemory.com:specs:cor:dmo:110:07)."
   type UnresolvedFeedback {
     nodeId: ID!
     urn: String!
@@ -6199,7 +6201,7 @@ export const typeDefs = `#graphql
     mintedCount: Int!
     "#1591 — the locs this call minted, or would mint on a dry run, ordered by loc."
     mintLocs: [String!]!
-    "#1607 — nodes in mintLocs with open discussion: a WARNING, never a blocker (cor:dmo:110:07). Ordered by loc."
+    "#1607 — nodes in mintLocs with open discussion: a WARNING, never a blocker (hrn:node:hadronmemory.com:specs:cor:dmo:110:07). Ordered by loc."
     unresolvedFeedback: [UnresolvedFeedback!]!
   }
 
@@ -8187,7 +8189,7 @@ export const typeDefs = `#graphql
     approveMemoryNodes(memoryRef: String!): ApproveMemoryNodesResult!
 
     """
-    #1606 — start a thread on a node (cor:dmo:110). Needs write access to the
+    #1606 — start a thread on a node (hrn:node:hadronmemory.com:specs:cor:dmo:110). Needs write access to the
     target's memory. anchorRevision defaults to the target's current revision;
     an older one anchors there while its text is still retained. The anchor
     hash is computed by the server. Typed refusals: COMMENT_TARGET_NOT_FOUND,
@@ -8201,7 +8203,7 @@ export const typeDefs = `#graphql
     replyToComment(commentRef: ID!, body: String!): Comment!
     "#1606 — the author edits a comment's body and/or quote. COMMENT_NOT_AUTHOR otherwise."
     editComment(commentRef: ID!, body: String, quote: String, expectedRevision: Int!): Comment!
-    "#1606 — the author retracts a comment, leaving a stub (cor:dmo:110:05)."
+    "#1606 — the author retracts a comment, leaving a stub (hrn:node:hadronmemory.com:specs:cor:dmo:110:05)."
     retractComment(commentRef: ID!, expectedRevision: Int!): Comment!
     "#1606 — resolve a thread: its author or any writer of the memory. commentRef is the top-level comment; returns it."
     resolveCommentThread(commentRef: ID!, expectedRevision: Int!): Comment!

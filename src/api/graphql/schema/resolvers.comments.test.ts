@@ -295,6 +295,9 @@ describe('reads', () => {
     expect(sa).toEqual({ openThreads: 1, resolvedThreads: 1, comments: 3, viewerOpenThreadId: open.id });
     expect(sb).toEqual({ openThreads: 0, resolvedThreads: 0, comments: 0, viewerOpenThreadId: null });
     expect((await nodeSummary(a, {}, as(admin.id))).viewerOpenThreadId).toBeNull();
+    // The slim list node carries the same cue (portal#1014 Slice B).
+    const graphNode = (resolvers as unknown as { GraphNode: { openThreads: (n: unknown, x: unknown, c: Context) => Promise<number> } }).GraphNode;
+    expect(await Promise.all([graphNode.openThreads(a, {}, ctx), graphNode.openThreads(b, {}, ctx)])).toEqual([1, 0]);
   });
 });
 
