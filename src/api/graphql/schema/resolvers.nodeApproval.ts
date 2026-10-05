@@ -291,8 +291,71 @@ function mintStatusOf(row: Required<Omit<MintParent, 'id'>> | null) {
   };
 }
 
-type ApprovalParent = { id: string; revSeq: number } & Partial<Pick<NodeApprovalRow,
+type ApprovalParent = { id: string; revSeq: number; memoryId?: string } & Partial<Pick<NodeApprovalRow,
   'approvedRevNo' | 'approvedBy' | 'approvedByInfo' | 'approvedAt' | 'approvalHash'>>;
+
+const APPROVAL_SELECT = {
+  approvedRevNo: true, approvedBy: true, approvedByInfo: true, approvedAt: true, approvalHash: true,
+} as const;
+
+type StatusColumns = 'approval' | 'mint';
+type ColumnRow = Record<string, unknown> & { id: string; memoryId: string };
+type ColumnBatch = { pending: Map<string, Array<(row: ColumnRow | null) => void>>; failures: Array<(e: unknown) => void> };
+const columnBatches = new WeakMap<Context, Map<StatusColumns, ColumnBatch>>();
+
+/**
+ * #1596 — the approval/mint columns of a node whose GraphQL parent was
+ * selected without them. Every miss of one KIND (approval or mint) in one
+ * tick of a request shares ONE `findMany`: a page asking for both statuses
+ * costs one fallback query per kind, not one per node. A later tick opens a
+ * new batch, never joining a flushed one. This bounds only the column
+ * fallback: an approved node's `approvalStatus` still runs the per-node
+ * `Node.revision` reconcile.
+ *
+ * Pinned to the parent's memory when the parent carries it: a node moved to
+ * another memory after the page was gated reads as having no record rather
+ * than disclosing the new home's columns (the post-gate re-read rule,
+ * `findings:post-gate-reread-pinned-to-gated-memory-and-live-row`). Soft-deleted
+ * rows are deliberately NOT excluded: a trash read still shows its status,
+ * exactly as the per-node `findUnique` this replaces did.
+ */
+function loadStatusColumns(ctx: Context, kind: StatusColumns, id: string, memoryId: string | undefined): Promise<ColumnRow | null> {
+  let byKind = columnBatches.get(ctx);
+  if (!byKind) {
+    byKind = new Map();
+    columnBatches.set(ctx, byKind);
+  }
+  let batch = byKind.get(kind);
+  if (!batch) {
+    const fresh: ColumnBatch = { pending: new Map(), failures: [] };
+    batch = fresh;
+    byKind.set(kind, fresh);
+    setImmediate(() => {
+      byKind!.delete(kind);
+      void flushStatusColumns(ctx, kind, fresh);
+    });
+  }
+  const target = batch;
+  return new Promise<ColumnRow | null>((resolve, reject) => {
+    const waiters = target.pending.get(id) ?? [];
+    waiters.push(resolve);
+    target.pending.set(id, waiters);
+    target.failures.push(reject);
+  }).then((row) => (row && memoryId !== undefined && row.memoryId !== memoryId ? null : row));
+}
+
+async function flushStatusColumns(ctx: Context, kind: StatusColumns, batch: ColumnBatch): Promise<void> {
+  try {
+    const rows = await ctx.db.node.findMany({
+      where: { id: { in: [...batch.pending.keys()] } },
+      select: { id: true, memoryId: true, ...(kind === 'approval' ? APPROVAL_SELECT : MINT_SELECT) },
+    });
+    const byId = new Map(rows.map((r) => [r.id, r as ColumnRow]));
+    for (const [id, waiters] of batch.pending) for (const resolve of waiters) resolve(byId.get(id) ?? null);
+  } catch (error) {
+    for (const reject of batch.failures) reject(error);
+  }
+}
 
 export const nodeApprovalFieldResolvers = {
   Node: {
@@ -300,23 +363,26 @@ export const nodeApprovalFieldResolvers = {
      * #1591 — whether the node's current revision is approved. Compared with
      * the RECONCILED revision (`Node.revision`), so a node changed outside a
      * revisioned writer never reads as approved.
+     *
+     * #1596: a node with no approval is NOT_APPROVED at every revision, so the
+     * reconcile (a locking transaction per node) runs only when there is an
+     * approval to compare. That keeps a list page of mostly unapproved nodes
+     * from paying one transaction per row.
      */
     approvalStatus: async (n: ApprovalParent, args: unknown, ctx: Context) => {
-      const revision = await (typeResolvers.Node.revision as (p: unknown, a: unknown, c: Context) => Promise<number>)(n, args, ctx);
       const row = 'approvedRevNo' in n && n.approvedRevNo !== undefined
         ? n
-        : await ctx.db.node.findUnique({
-          where: { id: n.id },
-          select: { approvedRevNo: true, approvedBy: true, approvedByInfo: true, approvedAt: true, approvalHash: true },
-        });
+        : await loadStatusColumns(ctx, 'approval', n.id, n.memoryId);
       const approval = row ? approvalRecordOf(row as Parameters<typeof approvalRecordOf>[0]) : null;
-      return { state: approvalStateOf(approval?.revision ?? null, revision), approval };
+      if (approval?.revision == null) return { state: approvalStateOf(null, n.revSeq), approval };
+      const revision = await (typeResolvers.Node.revision as (p: unknown, a: unknown, c: Context) => Promise<number>)(n, args, ctx);
+      return { state: approvalStateOf(approval.revision, revision), approval };
     },
     /** #1591 — whether the node is minted, and the record of it. */
-    mintStatus: async (n: MintParent, _: unknown, ctx: Context) => {
+    mintStatus: async (n: MintParent & { memoryId?: string }, _: unknown, ctx: Context) => {
       const row = n.mintedAt !== undefined
         ? n
-        : await ctx.db.node.findUnique({ where: { id: n.id }, select: MINT_SELECT });
+        : await loadStatusColumns(ctx, 'mint', n.id, n.memoryId);
       return mintStatusOf(row as Required<Omit<MintParent, 'id'>> | null);
     },
   },
