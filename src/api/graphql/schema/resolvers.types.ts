@@ -75,7 +75,7 @@ import { memoryRowToRef, agentRowToRef } from './publicRefs.js';
 import { WORKLOG_LOC } from './resolvers.teamWork.js';
 import { corpusMintStateOf } from '../../../lib/specCorpus.js';
 import { LIVE_ORG_MEMBERSHIP } from '../../../lib/auth/liveOrgMembership.js';
-import { isSessionLive, loadLastEventBySession } from '../../../lib/sessionActivity.js';
+import { isSessionLive, loadLastEventBySession, sessionLapsesAt } from '../../../lib/sessionActivity.js';
 import type { SessionType } from '../../../generated/prisma/index.js';
 
 /**
@@ -676,6 +676,72 @@ async function flushValidationBatch(
   }
 }
 
+
+/** The Session parent shape the liveness fields read; partial on a narrow select. */
+type SessionLivenessParent = {
+  id: string;
+  type?: SessionType;
+  startedAt?: Date;
+  updatedAt?: Date | null;
+  autoExpiredAt?: Date | null;
+  endedAt?: Date | null;
+  deletedAt?: Date | null;
+};
+
+/**
+ * #1623 review (local reviewer, two P2s): the fallback point read, memoized per
+ * request and session id. Without it a narrow parent selecting both `isLive`
+ * and `lapsesAt` read the row twice, and the two reads could straddle an
+ * `endSession`, answering `{ isLive: true, lapsesAt: null }`. Sharing one read
+ * per request makes both fields describe ONE snapshot. Every Session resolver
+ * on main returns full rows today, so this path is defensive.
+ */
+const livenessRowReads = new WeakMap<object, Map<string, Promise<unknown>>>();
+function readLivenessRowOnce(ctx: Context, id: string) {
+  let perRequest = livenessRowReads.get(ctx);
+  if (!perRequest) {
+    perRequest = new Map();
+    livenessRowReads.set(ctx, perRequest);
+  }
+  let read = perRequest.get(id);
+  if (!read) {
+    read = ctx.db.session.findUnique({
+      where: { id },
+      select: { id: true, type: true, startedAt: true, updatedAt: true, autoExpiredAt: true, endedAt: true, deletedAt: true },
+    });
+    perRequest.set(id, read);
+  }
+  return read as Promise<{
+    id: string; type: SessionType; startedAt: Date; updatedAt: Date | null;
+    autoExpiredAt: Date | null; endedAt: Date | null; deletedAt: Date | null;
+  } | null>;
+}
+
+/**
+ * The liveness inputs for one Session row, or null when it can be live under
+ * no reading: ended, or soft-deleted (Codex-worker P2 on #1547 — the bind gate
+ * and Worker.hasLiveSession both exclude a deleted row, and the per-session
+ * fields must agree with them). Uses the parent's columns when the parent
+ * carried them, and one memoized point read per request otherwise.
+ */
+async function sessionLivenessRow(
+  ctx: Context,
+  s: SessionLivenessParent,
+): Promise<{ id: string; type: SessionType; startedAt: Date; updatedAt: Date | null; autoExpiredAt: Date | null; endedAt: Date | null } | null> {
+  const row = s.type && s.startedAt && s.deletedAt !== undefined
+    ? s
+    : await readLivenessRowOnce(ctx, s.id);
+  if (!row || !row.type || !row.startedAt) return null;
+  if (row.endedAt || row.deletedAt) return null;
+  return {
+    id: row.id,
+    type: row.type,
+    startedAt: row.startedAt,
+    updatedAt: row.updatedAt ?? null,
+    autoExpiredAt: row.autoExpiredAt ?? null,
+    endedAt: row.endedAt ?? null,
+  };
+}
 
 /**
  * hadron-cli#791 — the latest attributed usage event for a session, batched
@@ -1765,32 +1831,21 @@ export const typeResolvers = {
      * from columns that are readable on it. The last-event lookup is batched
      * per request, so a session list costs one grouped query, not one per row.
      */
-    isLive: async (
-      s: {
-        id: string;
-        type?: SessionType;
-        startedAt?: Date;
-        updatedAt?: Date | null;
-        autoExpiredAt?: Date | null;
-        endedAt?: Date | null;
-        deletedAt?: Date | null;
-      },
-      _: unknown,
-      ctx: Context,
-    ) => {
-      const row = s.type && s.startedAt && s.deletedAt !== undefined
-        ? s
-        : await ctx.db.session.findUnique({
-            where: { id: s.id },
-            select: { id: true, type: true, startedAt: true, updatedAt: true, autoExpiredAt: true, endedAt: true, deletedAt: true },
-          });
-      if (!row || !row.type || !row.startedAt) return false;
-      // A soft-deleted session drives nothing (Codex-worker P2 on #1547): the
-      // bind gate and Worker.hasLiveSession both exclude it, and isLive must
-      // agree with them even where a Session read can still return the row.
-      if (row.endedAt || row.deletedAt) return false;
+    isLive: async (s: SessionLivenessParent, _: unknown, ctx: Context) => {
+      const row = await sessionLivenessRow(ctx, s);
+      if (!row) return false;
       const lastEventAt = await lastEventAtBatched(ctx, row.id);
-      return isSessionLive(row as Parameters<typeof isSessionLive>[0], lastEventAt, new Date());
+      return isSessionLive(row, lastEventAt, new Date());
+    },
+    /**
+     * #1617: the deadline beside `isLive` — when this session lapses unless
+     * driven first. `sessionLapsesAt` is the computation `isSessionLive` is
+     * defined by, so the two fields cannot disagree about the same row.
+     */
+    lapsesAt: async (s: SessionLivenessParent, _: unknown, ctx: Context) => {
+      const row = await sessionLivenessRow(ctx, s);
+      if (!row) return null;
+      return sessionLapsesAt(row, await lastEventAtBatched(ctx, row.id));
     },
     /**
      * #980: the bound Worker, nested — prefers the eager row SESSION_INCLUDE
