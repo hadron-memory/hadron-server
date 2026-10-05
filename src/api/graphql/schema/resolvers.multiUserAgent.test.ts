@@ -4,6 +4,10 @@ import { cleanDb } from '../../../test/helpers.js';
 import { getPrimaryAgentId } from '../../../lib/appAgent.js';
 import { resolvers, type Context } from './resolvers.js';
 import { generateId } from '../../../lib/id.js';
+import { randomBytes } from 'node:crypto';
+import { hashAppKey, resolveAuthContext } from '../../../middleware/auth.js';
+import { attributedRequestActivity } from '../../../lib/usageRecorder.js';
+import { runSessionReaper } from '../../../jobs/reapSessions.js';
 import { cleanupAnonymousMemories } from '../../../jobs/cleanupAnonymousMemories.js';
 
 // Prevent git writes
@@ -292,10 +296,12 @@ describe('createAppUser', () => {
 
 describe('startAgentSession', () => {
   it('DY-3: stamps the App ceiling by default; an App with agentSessionsExpire=false stamps none unless asked', async () => {
+    const ceilingMs = (await db.app.findUniqueOrThrow({ where: { id: app.id } })).sessionTimeoutSeconds * 1000;
     const before = Date.now();
     const dflt = await resolvers.Mutation.startAgentSession({}, { agentId: agent.id }, appCtx(app.id));
     expect(dflt.expiresAt).not.toBeNull();
-    expect(new Date(dflt.expiresAt).getTime()).toBeGreaterThanOrEqual(before + 900 * 1000);
+    expect(new Date(dflt.expiresAt).getTime()).toBeGreaterThanOrEqual(before + ceilingMs);
+    expect(new Date(dflt.expiresAt).getTime()).toBeLessThanOrEqual(Date.now() + ceilingMs);
 
     const updated = await resolvers.Mutation.updateApp({}, { ref: app.id, agentSessionsExpire: false }, adminCtx());
     expect(updated.agentSessionsExpire).toBe(false);
@@ -305,7 +311,35 @@ describe('startAgentSession', () => {
     const asked = await resolvers.Mutation.startAgentSession(
       {}, { agentId: agent.id, sessionTimeoutSeconds: 99_999 }, appCtx(app.id),
     );
-    expect(new Date(asked.expiresAt).getTime()).toBeLessThanOrEqual(Date.now() + 900 * 1000);
+    expect(new Date(asked.expiresAt).getTime()).toBeLessThanOrEqual(Date.now() + ceilingMs);
+  });
+
+  it('DY-3 end to end (#1661 review, local P1): a no-expiry session BINDS through a real App key, counts its drives, reads live and survives the reaper', async () => {
+    await resolvers.Mutation.updateApp({}, { ref: app.id, agentSessionsExpire: false }, adminCtx());
+    const s = await resolvers.Mutation.startAgentSession({}, { agentId: agent.id }, appCtx(app.id));
+    expect(s.expiresAt).toBeNull();
+
+    // Through the real auth path, header and all.
+    const raw = `hdr_app_${randomBytes(32).toString('hex')}`;
+    await db.appKey.create({ data: { id: generateId(), appId: app.id, keyHash: hashAppKey(raw), keyPreview: raw.slice(-6) } });
+    const auth = await resolveAuthContext(
+      { headers: { authorization: `Bearer ${raw}`, 'x-hadron-session': s.id } } as never, db,
+    );
+    expect(auth.appId).toBe(app.id);
+    expect(auth.sessionId).toBe(s.id);
+
+    // A drive through it counts (live, owned by bindSession's rule).
+    expect(await attributedRequestActivity(db, auth, s.id)).toBe(true);
+
+    // GraphQL reads of the row are null-safe and report it live.
+    const ctxFromAuth = { db, ...auth, roles: [] } as unknown as Context;
+    const row = await resolvers.Query.session({}, { id: s.id }, ctxFromAuth);
+    expect(row?.expiresAt).toBeNull();
+    expect(await (resolvers as any).Session.isLive(row, {}, ctxFromAuth)).toBe(true);
+
+    // The hard-expiry sweep leaves it alone: there is no promise to enforce.
+    await runSessionReaper(db as never);
+    expect((await db.session.findUniqueOrThrow({ where: { id: s.id } })).endedAt).toBeNull();
   });
 
   it('refuses an uninstalled App key before provisioning anonymous memory (#1001)', async () => {
