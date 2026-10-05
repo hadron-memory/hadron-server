@@ -10332,8 +10332,8 @@ export const typeDefs = `#graphql
     Convert a plaintext PRIVATE memory to encrypted (spec 041, caller-held
     keys). Exactly one of dataKey (base64, 32 bytes) / passphrase (scrypt-
     derived; salt + params stored on the memory, the key itself never).
-    Owner or org-App-key. All node content/abstract/data is re-written as
-    ciphertext in one transaction. One-way without the key: the server
+    Strict owner only; App keys and admin roles grant no override. Live and
+    historical node fields are converted in bounded locked passes. One-way without the key: the server
     cannot recover the content.
 
     Accepts the entity's ID or URN.
