@@ -59,15 +59,18 @@ const principals = () => [
 describe('#1643 shared strict-owner parity', () => {
   it('matches personal/private record and write gates across owner, admin, member, App-key and impersonated principals', async () => {
     for (const memoryClass of ['personal', 'private'] as const) {
-      const memory = await db.memory.create({ data: {
-        id: generateId(), organizationId: orgId, userId: ownerId, class: memoryClass,
-        urn: `run-identity:${memoryClass}`, name: memoryClass,
-      } });
-      for (const [label, principal, allowed] of principals()) {
-        expect(isStrictOwner(principal, memory.userId), label).toBe(allowed);
-        expect(await canReadMemoryRecord(principal, memory), `${memoryClass}: ${label}`).toBe(allowed);
-        if (allowed) await expect(requireMemoryWriteAccess(principal, memory.id)).resolves.toBeUndefined();
-        else await expect(requireMemoryWriteAccess(principal, memory.id)).rejects.toBeDefined();
+      for (const tenant of ['org', 'other-user'] as const) {
+        const memory = await db.memory.create({ data: {
+          id: generateId(), organizationId: tenant === 'org' ? orgId : null,
+          ownerUserId: tenant === 'other-user' ? adminId : null, userId: ownerId, class: memoryClass,
+          urn: `run-identity:${tenant}-${memoryClass}`, name: memoryClass,
+        } });
+        for (const [label, principal, allowed] of principals()) {
+          expect(isStrictOwner(principal, memory.userId), label).toBe(allowed);
+          expect(await canReadMemoryRecord(principal, memory), `${memoryClass}: ${label}`).toBe(allowed);
+          if (allowed) await expect(requireMemoryWriteAccess(principal, memory.id)).resolves.toBeUndefined();
+          else await expect(requireMemoryWriteAccess(principal, memory.id)).rejects.toBeDefined();
+        }
       }
     }
   });
