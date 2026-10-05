@@ -26,6 +26,35 @@ const vector = (name: string): SignatureVector => fixture.cases.find((c) => c.na
 
 /** S0 #1629: verify the independently generated artifact, not a runtime signing API. */
 describe('published plaintext signature v1 fixture (cor:dmo:130:01)', () => {
+  it('pins the complete published vector set and every input and expected byte', () => {
+    expect(fixture.cases.map((c) => c.name)).toEqual([
+      'spec-retention-example', 'all-null', 'empty-strings-differ-from-null',
+      'plain-ascii', 'crlf-normalized', 'lone-cr-normalized', 'lf-equals-crlf-twin',
+      'multibyte-utf8', 'no-unicode-normalization-nfd', 'field-boundary-injection',
+      'whitespace-preserved', 'same-content-different-node',
+    ]);
+    // Independent Python hashlib pin of compact UTF-8 JSON; excludes file formatting.
+    expect(createHash('sha256').update(JSON.stringify(fixture.cases)).digest('hex'))
+      .toBe('f8c99a64157dab69ec01c3fb34bbbfbb3e01720988366f11314e7759eb562fa6');
+  });
+
+  it('checks lone-CR equivalence and preserves decomposed Unicode', () => {
+    const cr = vector('lone-cr-normalized');
+    expect(computeApprovalHash({ ...cr.input.fields, content: 'one\ntwo\n' }))
+      .toBe(cr.approvalHash);
+    const nfd = vector('no-unicode-normalization-nfd');
+    expect(computeApprovalHash({ ...nfd.input.fields, title: 'Grüße' }))
+      .not.toBe(nfd.approvalHash);
+  });
+
+  it('binds the node-id prefix as well as its suffix', () => {
+    const example = vector('spec-retention-example');
+    const prefixChanged = example.payloadUtf8.replace(
+      example.input.nodeId, '11a10408afb6716c80d6944e8845467b',
+    );
+    expect(createHash('sha256').update(prefixChanged).digest('hex')).not.toBe(example.challengeHex);
+  });
+
   it('names its version and plaintext-only boundary', () => {
     expect(fixture).toMatchObject({
       version: 'hadron-signature-v1',
