@@ -1741,7 +1741,7 @@ export async function createServer(): Promise<Express> {
   });
 
   app.delete('/mcp', async (req, res) => {
-    await handleMcpDelete(req, res);
+    await requestActorStorage.run(emptyActor(), () => handleMcpDelete(req, res));
   });
 
   // OAuth dynamic client registration is not supported. MCP/LLM SDKs that

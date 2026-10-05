@@ -62,7 +62,10 @@ type AttributionColumn =
 
 /**
  * The parent's own column, or — for a parent selected without it — one read
- * of the live row pinned to the parent's memory (the post-gate re-read rule).
+ * of the LIVE row pinned to the memory the parent was gated in (the post-gate
+ * re-read rule, `findings:post-gate-reread-pinned-to-gated-memory-and-live-row`).
+ * A slim parent that doesn't carry its memory fails closed: no attribution
+ * rather than an unpinned read (#1658 review).
  */
 async function nodeColumn(
   n: { id: string; memoryId?: string } & Partial<Record<AttributionColumn, string | null>>,
@@ -70,8 +73,9 @@ async function nodeColumn(
   ctx: Context,
 ): Promise<string | null> {
   if (n[column] !== undefined) return n[column] ?? null;
+  if (!n.memoryId) return null;
   const row = await ctx.db.node.findFirst({
-    where: { id: n.id, ...(n.memoryId ? { memoryId: n.memoryId } : {}) },
+    where: { id: n.id, memoryId: n.memoryId, deletedAt: null },
     select: { [column]: true } as Record<AttributionColumn, true>,
   });
   return (row as Record<string, string | null> | null)?.[column] ?? null;

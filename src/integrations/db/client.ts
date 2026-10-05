@@ -41,7 +41,8 @@ type NodeData = Record<string, unknown>;
  *     columns at their null default.
  *   - An update that touches an authored field (ATTRIBUTED_NODE_FIELDS)
  *     records its editor, and CLEARS a previous one when no actor is behind
- *     it, so `updatedBy*` always describes the same edit as `updatedAt`.
+ *     it, so `updatedBy*` always describes the LAST AUTHORED edit. (Not the
+ *     `updatedAt` clock, which operational writes also advance.)
  *     Operational writes (embedding markers, approval/mint columns, the
  *     reconcile) touch no authored field and stamp nothing.
  */
@@ -56,6 +57,41 @@ function stampNodeUpdate(data: NodeData): void {
   const actor = currentActor();
   if (!('updatedByWorkerId' in data)) data.updatedByWorkerId = actor.workerId;
   if (!('updatedByAgentId' in data)) data.updatedByAgentId = actor.agentId;
+}
+
+/**
+ * #1610: Node writes nested inside another model's write (e.g.
+ * `memory.create({ data: { nodes: { create: … } } })`) never reach the Node
+ * hooks above, so they would carry no attribution. None exist (inventoried
+ * for #1658); this keeps it that way by refusing loudly, rather than
+ * attributing silently wrong. The relation fields typed `Node` in
+ * schema.prisma, by model.
+ */
+const NODE_RELATIONS: Record<string, readonly string[]> = {
+  Memory: ['nodes'],
+  Edge: ['source', 'target'],
+  PendingEdge: ['source'],
+  NodeEmbedding: ['node'],
+  NodeRevision: ['node'],
+  NodeContentValidationReport: ['node'],
+  Channel: ['chatRoot'],
+  UsageEvent: ['node'],
+  NodeRoleRule: ['authorTask', 'validationTask', 'descriptionNode'],
+  MemoryConfigTemplateRule: ['authorTask', 'validationTask', 'descriptionNode'],
+};
+const NESTED_WRITES = ['create', 'createMany', 'connectOrCreate', 'update', 'updateMany', 'upsert'];
+
+export function assertNoNestedNodeWrite(model: string, data: unknown): void {
+  const relations = NODE_RELATIONS[model];
+  if (!relations || !data || typeof data !== 'object') return;
+  for (const relation of relations) {
+    const nested = (data as Record<string, unknown>)[relation];
+    if (nested && typeof nested === 'object' && NESTED_WRITES.some((op) => op in nested)) {
+      throw new Error(
+        `Nested Node write through ${model}.${relation} is not allowed: it bypasses node attribution (#1610). Write the Node directly.`,
+      );
+    }
+  }
 }
 
 const eachData = (data: unknown, stamp: (d: NodeData) => void): void => {
@@ -82,6 +118,11 @@ export const db = basePrisma.$extends({
         // #1610: stamped alongside the id default, so a Node create has one
         // hook rather than two whose order would matter.
         if (model === 'Node') stampNodeCreate(args.data as NodeData);
+        assertNoNestedNodeWrite(model, args.data);
+        return query(args);
+      },
+      async update({ model, args, query }) {
+        assertNoNestedNodeWrite(model, args.data);
         return query(args);
       },
       async upsert({ model, args, query }) {
@@ -95,6 +136,8 @@ export const db = basePrisma.$extends({
           stampNodeCreate(args.create as NodeData);
           stampNodeUpdate(args.update as NodeData);
         }
+        assertNoNestedNodeWrite(model, args.create);
+        assertNoNestedNodeWrite(model, args.update);
         return query(args);
       },
     },
