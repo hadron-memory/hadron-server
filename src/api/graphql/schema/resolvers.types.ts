@@ -50,6 +50,7 @@ import {
   loadEdgeEndpointNode,
   isMemoryReadableCached,
   canReadMemoryRecord,
+  filterReadableMemoryRecords,
   loadMemoryUrn,
   loadAppUrn,
   loadApp,
@@ -1824,8 +1825,7 @@ export const typeResolvers = {
         include: ORG_INCLUDE.memories.include,
         orderBy: ORG_INCLUDE.memories.orderBy,
       });
-      const readable = await Promise.all(rows.map(row => canReadMemoryRecord(ctx, row)));
-      return rows.filter((_, index) => readable[index]);
+      return filterReadableMemoryRecords(ctx, rows);
     },
     hasGithubAppPrivateKey: (o: { githubAppPrivateKeyEncrypted?: string | null }) => !!o.githubAppPrivateKeyEncrypted,
     apps: async (org: { id: string; apps?: unknown[] }, _: unknown, ctx: Context) => {

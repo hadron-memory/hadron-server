@@ -1,11 +1,11 @@
 /** #1626: every listed record must pass cor:acl:010:01's point-read gate. */
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { buildSchema, defaultFieldResolver, graphql } from 'graphql';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { resolvers, type Context } from './resolvers.js';
 import { typeDefs } from './typeDefs.js';
-import { canReadMemoryRecord } from './resolvers.helpers.js';
+import { canReadMemoryRecord, filterReadableMemoryRecords } from './resolvers.helpers.js';
 
 const schema = buildSchema(typeDefs);
 let orgId: string;
@@ -68,6 +68,11 @@ beforeEach(async () => {
 describe('#1626 record/list parity', () => {
   it.each(['reader', 'contributor', 'appMember', 'holder', 'admin', 'groupMember', 'platformAdmin'])('%s receives only readable records, with positive controls', async name => {
     const ctx: Context = { db, userId: users[name], roles: name === 'platformAdmin' ? ['ADMIN'] : ['READER'] };
+    const candidates = Object.values(rows);
+    const pointVerdicts = await Promise.all(candidates.map(row => canReadMemoryRecord(ctx, row)));
+    expect((await filterReadableMemoryRecords(ctx, candidates)).map(row => row.id)).toEqual(
+      candidates.filter((_, index) => pointVerdicts[index]).map(row => row.id),
+    );
     const result = await query(`{
       memories(limit: 100) { total items { id } }
       organization(ref: "${orgId}") { memories { id } }
@@ -92,6 +97,14 @@ describe('#1626 record/list parity', () => {
       // platform admin; org fields may use the point-read admin bypass.
       expect(list.some(row => row.id === rows.group.id)).toBe(name === 'groupMember' || (index > 0 && name === 'platformAdmin'));
     }
+    const expectedOrgIds = [rows.knowledge.id, ...(['groupMember', 'platformAdmin'].includes(name) ? [rows.group.id] : [])].sort();
+    for (const list of lists.slice(1)) {
+      // Org pages intentionally exclude all App-internal and strict-owner
+      // rows through ORG_INCLUDE, even for an entitled manager/owner.
+      expect(list.map(row => row.id).sort()).toEqual(expectedOrgIds);
+    }
+    const fallback = await resolvers.Organization.memories({ id: orgId }, {}, ctx);
+    expect(fallback.map(row => row.id).sort()).toEqual(expectedOrgIds);
     // Record visibility of app-scoped knowledge intentionally differs from
     // node reach; this fix must preserve that established record contract.
     expect(ids).toContain(rows.appKnowledge.id);
@@ -120,5 +133,71 @@ describe('#1626 record/list parity', () => {
     const manager: Context = { db, userId: users.admin, appId, roles: ['READER'] };
     const allowed = await query('{ memories { items { id } } }', manager);
     expect(allowed.memories.items.map((row: { id: string }) => row.id)).toContain(rows.worker.id);
+  });
+
+  it('DS bounds platform-admin lists across two orgs while external AppMembers discover their own App', async () => {
+    const otherOrg = await db.organization.create({ data: { name: 'Other org', urn: 'list-other.test' } });
+    const otherApp = await db.app.create({ data: { name: 'Other app', urn: 'list-other.test:app', organizationId: otherOrg.id } });
+    const agent = await db.agent.create({ data: { name: 'Other agent', urn: 'list-other.test:agent', organizationId: otherOrg.id } });
+    await db.appAgent.create({ data: { appId: otherApp.id, agentId: agent.id } });
+    const team = await db.memory.create({ data: { name: 'Other team', urn: 'list-other.test:team', organizationId: otherOrg.id, appId: otherApp.id, class: 'app', sharedMemoryOfAgentId: agent.id } });
+    const worker = await db.memory.create({ data: { name: 'Other worker', urn: 'list-other.test:worker', organizationId: otherOrg.id, appId: otherApp.id, class: 'app' } });
+    await db.worker.create({ data: { appId: otherApp.id, agentId: agent.id, name: 'Other worker', slug: 'other', memoryId: worker.id } });
+    const external = await db.user.create({ data: { handle: 'list-external', roles: ['READER'] } });
+    await db.appMember.create({ data: { appId: otherApp.id, userId: external.id, role: 'reader' } });
+    const nonMemberAdmin = await db.user.create({ data: { handle: 'list-non-member-admin', roles: ['ADMIN'] } });
+    const memberAdminCtx: Context = { db, userId: users.platformAdmin, roles: ['ADMIN'] };
+    const nonMemberCtx: Context = { db, userId: nonMemberAdmin.id, roles: ['ADMIN'] };
+    for (const ctx of [memberAdminCtx, nonMemberCtx]) {
+      const result = await query('{ memories { items { id } } }', ctx);
+      const ids = result.memories.items.map((row: { id: string }) => row.id);
+      expect(ids).not.toContain(team.id);
+      expect(ids).not.toContain(worker.id);
+      expect(ids.includes(rows.team.id)).toBe(ctx === memberAdminCtx);
+      expect(ids.includes(rows.worker.id)).toBe(ctx === memberAdminCtx);
+      // DS does not narrow direct reads. DT still excludes others' personal
+      // and private rows before the admin bypass (existing shared gate).
+      expect(await canReadMemoryRecord(ctx, team)).toBe(true);
+      expect(await canReadMemoryRecord(ctx, worker)).toBe(true);
+      expect(await canReadMemoryRecord(ctx, rows.personal)).toBe(false);
+      expect(await canReadMemoryRecord(ctx, rows.private)).toBe(false);
+    }
+    const externalCtx: Context = { db, userId: external.id, roles: ['READER'] };
+    const result = await query('{ memories { total items { id } } }', externalCtx);
+    expect(result.memories).toEqual({ total: 1, items: [{ id: team.id }] });
+    // An API-invalid app subscription is not a list grant, even when the
+    // recipient is a member of its subscribing org.
+    await db.memorySubscription.create({ data: { memoryId: worker.id, organizationId: orgId, role: 'READER' } });
+    const subscribed = await query('{ memories { items { id } } }', { db, userId: users.reader, roles: ['READER'] });
+    expect(subscribed.memories.items.map((row: { id: string }) => row.id)).not.toContain(worker.id);
+    // The new AppMember scope cannot widen an explicitly selected org.
+    const scoped = await query(`{ memories(orgId: "${orgId}") { total items { id } } }`, externalCtx);
+    expect(scoped.memories).toEqual({ total: 0, items: [] });
+  });
+
+  it('org record filtering batches membership and access-set reads rather than doing one point read per row', async () => {
+    for (let index = 0; index < 5; index++) {
+      await db.memory.create({ data: { name: `group-${index}`, urn: `list-parity.test:group-${index}`, organizationId: orgId, class: 'group', visibility: 'GROUP' } });
+      await db.memory.create({ data: { name: `knowledge-${index}`, urn: `list-parity.test:knowledge-${index}`, organizationId: orgId, class: 'knowledge', visibility: 'ORGANIZATION' } });
+    }
+    const memberPoint = vi.spyOn(db.orgMember, 'findFirst');
+    const memoryPoint = vi.spyOn(db.memory, 'findUnique');
+    try {
+      const result = await resolvers.Organization.memories({ id: orgId }, {}, { db, userId: users.reader, roles: ['READER'] });
+      expect(result).toHaveLength(6);
+      expect(memberPoint).not.toHaveBeenCalled();
+      expect(memoryPoint).not.toHaveBeenCalled();
+    } finally {
+      memberPoint.mockRestore();
+      memoryPoint.mockRestore();
+    }
+  });
+
+  it('a completed list batch cannot authorize a later list after membership revocation', async () => {
+    const ctx: Context = { db, userId: users.groupMember, roles: ['READER'] };
+    expect((await resolvers.Organization.memories({ id: orgId }, {}, ctx)).map(row => row.id).sort()).toEqual([rows.knowledge.id, rows.group.id].sort());
+    await db.memoryMember.delete({ where: { memoryId_userId: { memoryId: rows.group.id, userId: users.groupMember } } });
+    await db.orgMember.updateMany({ where: { organizationId: orgId, userId: users.groupMember }, data: { deletedAt: new Date() } });
+    expect(await resolvers.Organization.memories({ id: orgId }, {}, ctx)).toEqual([]);
   });
 });

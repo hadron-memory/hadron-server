@@ -565,6 +565,12 @@ export const memoryQueries = {
         // include concealed records. Preserve the helper's unrestricted-set
         // sentinel if supplied; current admin sets retain strict-owner limits.
         const accessibleIds = await getAccessibleMemoryIds(ctx);
+        // DS (Holger, 2026-10-05): the default listing is a membership slice,
+        // including for platform admins whose direct-record reach is wider.
+        // External AppMembers still discover their own App's readable rows.
+        const memberApps = ctx.impersonation ? [] : await ctx.db.appMember.findMany({
+          where: { userId: ctx.userId }, select: { appId: true },
+        });
         return page({
           deletedAt: null,
           ...(f.visibility ? { visibility: f.visibility as any } : {}),
@@ -572,7 +578,15 @@ export const memoryQueries = {
           AND: [classFilter],
           OR: [
             { organizationId: { in: orgIds }, class: { notIn: ['personal', 'private', 'group', 'app'] as any } },
-            { class: 'app' as any, ...(accessibleIds === null ? {} : { id: { in: accessibleIds } }), ...(groupOrgBound ? { organizationId: groupOrgBound } : {}) },
+            {
+              class: 'app' as any,
+              ...(accessibleIds === null ? {} : { id: { in: accessibleIds } }),
+              OR: [
+                { organizationId: { in: orgIds } },
+                { appId: { in: memberApps.map(row => row.appId) } },
+              ],
+              ...(groupOrgBound ? { organizationId: groupOrgBound } : {}),
+            },
             // #1208 / cor:acl:010:01 — group records list only through
             // MemoryMember (reader/writer/owner), mirroring the shared read
             // gate exactly: NOT nested under orgIds for ordinary calls (a
