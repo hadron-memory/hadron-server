@@ -302,6 +302,21 @@ describe('Orca attention router — fresh counts at send time (#1616)', () => {
     expect(adopted(c)).toBeNull();
   });
 
+  // Charles's QA probe (receipt on the PR), pinned per Xan's ruling #6495: the
+  // fake ignores --timeout-ms, so without this a full busy-wait at the recheck
+  // — the exact behavior Atilla's second P2 killed — survives the whole suite.
+  it('waits busyWaitMs at the gate, but only a short bounded timeout at the recheck', () => {
+    const c = { ...cfg(['w-eli', 'Eli']), busyWaitMs: 90_000 };
+    fake.terminal('eli');
+    fake.attention.workers = [worker('w-eli', 'Eli')];
+    expect(poll(c)).toMatchObject({ nudged: ['Eli'] });
+    const waits = fake.calls.filter((a) => a.slice(1, 3).join(' ') === 'terminal wait');
+    const ms = (a: string[]) => Number(a[a.indexOf('--timeout-ms') + 1]);
+    expect(waits).toHaveLength(2);
+    expect(ms(waits[0])).toBe(90_000);
+    expect(ms(waits[1])).toBeLessThanOrEqual(1_000);
+  });
+
   it('adoption carries a nudge whose frontier postdates the token: no duplicate nudge next poll (blind-review P2, first head)', () => {
     const c = cfg(['w-eli', 'Eli'], ['w-baloo', 'Baloo']);
     fake.terminal('eli');
