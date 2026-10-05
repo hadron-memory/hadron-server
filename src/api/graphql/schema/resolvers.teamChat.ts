@@ -1244,14 +1244,18 @@ export const teamChatQueries = {
   /**
    * #939 — read the team chat: the `appRef → App.defaultChannel` convenience
    * over `channelMessages` (spec 049 Phase 8). See `readChannelRoot`.
+   * #1628: advanceReadState=false defers acknowledgement to the caller without
+   * suppressing the owned-session heartbeat or read usage attribution.
    */
   teamChatMessages: async (
     _: unknown,
     {
       appRef,
+      advanceReadState,
       ...args
     }: {
       appRef: string;
+      advanceReadState?: boolean | null;
       sinceSeq?: number | null;
       beforeSeq?: number | null;
       mentionsRef?: string | null;
@@ -1291,6 +1295,7 @@ export const teamChatQueries = {
         await maybeAdvanceOwnChannelRead(ctx, {
           channelId: pilotChannel.id,
           capturedHead: pilotChannel.lastSeq,
+          advanceReadState,
           ...args,
           page,
         });
