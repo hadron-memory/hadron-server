@@ -6447,11 +6447,13 @@ export const typeDefs = `#graphql
     The scope is authorization-derived (\`sessionScopeFilter\`): a platform
     ADMIN/OWNER sees sessions in its audience, an App key sees its own App's, and an
     ordinary user sees those of Apps in any org they belong to **plus** every
-    session attributed to them (the self branch is identity-scoped, so it does
+    session of their user-owned Apps and every session attributed to them
+    (these identity-scoped branches do
     not apply through impersonation). So a client must not present these as "my
     activity" — many rows may be attributed to other users or Apps.
     Sessions bound to personal/private memories additionally require that
-    memory's strict owner, with no admin or impersonation override.
+    memory's strict owner, with no admin or impersonation override. A pure App
+    key may also read only the session it is itself bound to.
 
     Unfiltered, this is also the GENERAL row of every \`type\`, worker-bound or
     not (#1034), so it is equally not a list of worker sessions.

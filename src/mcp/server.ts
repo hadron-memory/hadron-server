@@ -8484,8 +8484,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       // leak a session count the caller may not read: whatever scopes the
       // rows scopes the total, by construction rather than by re-statement.
       const where = {
-        ...scope,
-        AND: [boundSessionPrivacyFilter(auth)],
+        AND: [scope, boundSessionPrivacyFilter(auth)],
         deletedAt: null,
         // "Open" is `endedAt IS NULL` — the ONE active predicate the platform
         // uses everywhere (#930: the reaper stamps endedAt AND autoExpiredAt

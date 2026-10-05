@@ -78,7 +78,34 @@ import { corpusMintStateOf } from '../../../lib/specCorpus.js';
 import { LIVE_ORG_MEMBERSHIP } from '../../../lib/auth/liveOrgMembership.js';
 import { isSessionLive, loadLastEventBySession, sessionLapsesAt } from '../../../lib/sessionActivity.js';
 import type { SessionType } from '../../../generated/prisma/index.js';
-import { strictSessionMemoryFilter } from '../../../lib/auth/sessionPrivacy.js';
+import { hasBoundAppSession, strictSessionMemoryFilter } from '../../../lib/auth/sessionPrivacy.js';
+
+// Request-local only: a session list computes the event memory set once.
+const sessionEventMemoryReads = new WeakMap<Context, Promise<string[]>>();
+function sessionEventMemoryIds(ctx: Context): Promise<string[]> {
+  let read = sessionEventMemoryReads.get(ctx);
+  if (!read) {
+    read = (async () => {
+      const accessible = await getAccessibleMemoryIds(ctx);
+      const bound = hasBoundAppSession(ctx)
+        ? await ctx.db.session.findFirst({
+          where: { id: ctx.sessionId!, appId: ctx.appId! },
+          select: { memoryId: true },
+        })
+        : null;
+      const memories = await ctx.db.memory.findMany({
+        where: { AND: [
+          { OR: [strictSessionMemoryFilter(ctx), ...(bound?.memoryId ? [{ id: bound.memoryId }] : [])] },
+          ...(accessible === null ? [] : [{ id: { in: accessible } }]),
+        ] },
+        select: { id: true },
+      });
+      return memories.map((m) => m.id);
+    })();
+    sessionEventMemoryReads.set(ctx, read);
+  }
+  return read;
+}
 
 /**
  * #757 — a Prisma `where` fragment selecting the Agents this caller may read,
@@ -1831,15 +1858,9 @@ export const typeResolvers = {
         select: { id: true },
       });
       if (!session) return [];
-      const accessible = await getAccessibleMemoryIds(ctx);
-      const memories = await ctx.db.memory.findMany({
-        where: {
-          AND: [strictSessionMemoryFilter(ctx), ...(accessible === null ? [] : [{ id: { in: accessible } }])],
-        },
-        select: { id: true },
-      });
+      const memoryIds = await sessionEventMemoryIds(ctx);
       return ctx.db.usageEvent.findMany({
-        where: { sessionId: s.id, OR: [{ memoryId: null }, { memoryId: { in: memories.map((m) => m.id) } }] },
+        where: { sessionId: s.id, OR: [{ memoryId: null }, { memoryId: { in: memoryIds } }] },
         orderBy: { createdAt: 'desc' },
         take: 50,
       });
