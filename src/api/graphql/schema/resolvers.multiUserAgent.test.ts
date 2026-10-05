@@ -291,6 +291,23 @@ describe('createAppUser', () => {
 // ---------------------------------------------------------------------------
 
 describe('startAgentSession', () => {
+  it('DY-3: stamps the App ceiling by default; an App with agentSessionsExpire=false stamps none unless asked', async () => {
+    const before = Date.now();
+    const dflt = await resolvers.Mutation.startAgentSession({}, { agentId: agent.id }, appCtx(app.id));
+    expect(dflt.expiresAt).not.toBeNull();
+    expect(new Date(dflt.expiresAt).getTime()).toBeGreaterThanOrEqual(before + 900 * 1000);
+
+    const updated = await resolvers.Mutation.updateApp({}, { ref: app.id, agentSessionsExpire: false }, adminCtx());
+    expect(updated.agentSessionsExpire).toBe(false);
+    const open = await resolvers.Mutation.startAgentSession({}, { agentId: agent.id }, appCtx(app.id));
+    expect(open.expiresAt).toBeNull();
+    // A caller that asks for an expiry still gets one, capped by the App ceiling.
+    const asked = await resolvers.Mutation.startAgentSession(
+      {}, { agentId: agent.id, sessionTimeoutSeconds: 99_999 }, appCtx(app.id),
+    );
+    expect(new Date(asked.expiresAt).getTime()).toBeLessThanOrEqual(Date.now() + 900 * 1000);
+  });
+
   it('refuses an uninstalled App key before provisioning anonymous memory (#1001)', async () => {
     await db.app.update({ where: { id: app.id }, data: { uninstalledAt: new Date() } });
     const memoryCount = await db.memory.count();

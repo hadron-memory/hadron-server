@@ -1498,12 +1498,17 @@ export const sessionMutations = {
           }
         }
 
-        // Clamp session timeout to the app's configured maximum (ceiling)
-        const ttl = Math.min(
-          sessionTimeoutSeconds ?? app.sessionTimeoutSeconds,
-          app.sessionTimeoutSeconds,
-        );
-        const expiresAt = new Date(Date.now() + ttl * 1000);
+        // Clamp session timeout to the app's configured maximum (ceiling).
+        // Ruling DY-3: an App with `agentSessionsExpire: false` stamps NO hard
+        // expiry unless the call asks for one; a requested timeout is still
+        // capped by the App ceiling. Inactivity never ends a session (#1114),
+        // and DY-5's dormancy threshold still guards a forgotten one.
+        const expiresAt = !app.agentSessionsExpire && sessionTimeoutSeconds == null
+          ? null
+          : new Date(Date.now() + Math.min(
+              sessionTimeoutSeconds ?? app.sessionTimeoutSeconds,
+              app.sessionTimeoutSeconds,
+            ) * 1000);
 
         const session = await tx.session.create({
           data: {
