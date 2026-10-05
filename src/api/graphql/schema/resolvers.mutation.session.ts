@@ -930,7 +930,11 @@ export const sessionMutations = {
         }
       }
 
-      return ctx.db.$transaction(async (tx) => {
+      // #1617 C: sessions this bind ended as superseded. Their cached keys
+      // are evicted only after the transaction commits, as endSessionFirstWins
+      // does for an explicit end.
+      let supersededIds: string[] = [];
+      const bound = await ctx.db.$transaction(async (tx) => {
         // #1001: appId may have come only from an App key or an MCP active-App
         // selection, so neither the appRef nor Worker branches necessarily
         // checked lifecycle. Recheck the settled App in the transaction before
@@ -1033,7 +1037,27 @@ export const sessionMutations = {
             }
           }
         }
-        return tx.session.create({
+        // #1617 C (Holger, 2026-10-05, team chat #6568): binding a worker ENDS
+        // the same person's other open sessions on it, the lapsed ones and the
+        // one a `force` displaces. Before this a rebind left the old row open
+        // forever (#1114 stopped anything else closing it), so every quiet
+        // night added one more open-but-not-live session per worker. Ending
+        // here is not an inference from silence: the rebind is the act, and
+        // the same person is on both sides of it. Only the caller's OWN rows
+        // on THIS worker: another person's session and an App-key session are
+        // never touched. They end without a handoff, marked superseded in
+        // `summary`, and the new session chains to the newest of them.
+        const supersedes = workerId && ctx.userId && !ctx.impersonation
+          ? await tx.session.findMany({
+              where: {
+                workerId, userId: ctx.userId, endedAt: null, deletedAt: null,
+                ...(input.id ? { id: { not: input.id } } : {}),
+              },
+              orderBy: { startedAt: 'desc' as const },
+              select: { id: true },
+            })
+          : [];
+        const created = await tx.session.create({
         data: {
           id: input.id,
           type: (input.type as any) ?? 'DEVELOPER',
@@ -1055,7 +1079,7 @@ export const sessionMutations = {
           language: input.language,
           llmModel: input.llmModel,
           parentSessionId: input.parentSessionId,
-          prevSessionId: input.prevSessionId ?? derivedPrevSessionId,
+          prevSessionId: input.prevSessionId ?? supersedes[0]?.id ?? derivedPrevSessionId,
           // #928 coding-session provenance.
           transcriptPath: input.transcriptPath,
           host: input.host,
@@ -1063,7 +1087,24 @@ export const sessionMutations = {
         },
         include: SESSION_INCLUDE,
         });
+        if (supersedes.length > 0) {
+          const ids = supersedes.map((r) => r.id).filter((id) => id !== created.id);
+          const endedAt = new Date();
+          // A driver-written summary is kept; an empty one records why it ended.
+          await tx.session.updateMany({
+            where: { id: { in: ids }, endedAt: null, summary: null },
+            data: { summary: `superseded by session ${created.id}` },
+          });
+          await tx.session.updateMany({
+            where: { id: { in: ids }, endedAt: null },
+            data: { endedAt },
+          });
+          supersededIds = ids;
+        }
+        return created;
       });
+      for (const id of supersededIds) sessionKeyCache.evict(id);
+      return bound;
     },
 
     // #931: set a live session's mutable provenance fields mid-session — a PR

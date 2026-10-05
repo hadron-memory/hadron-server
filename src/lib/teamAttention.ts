@@ -281,6 +281,124 @@ export async function teamAttentionAvailable(ctx: Context, appId: string): Promi
   return !!app && (await isAppParticipant(ctx, app));
 }
 
+/**
+ * #1617 B (Holger, 2026-10-05, team chat #6568): may this caller resume THIS
+ * lapsed session by an attributed act, and if so, resume it.
+ *
+ * A session that went quiet past its idle window used to be dead to its own
+ * driver: the next post refused SESSION_NOT_LIVE, the only remedy was a rebind
+ * under a new id, and the router had already stopped waking the worker. The
+ * hazard #1542/#1543 refused revival for, another driver having bound the
+ * worker meanwhile, is closed here by four conditions, all checked against
+ * CURRENT state:
+ *
+ *  (i)   the session is open, not deleted, and not past a hard `expiresAt`
+ *        (a promise made at start is never extended);
+ *  (ii)  the caller is the session's own user (no admin, impersonation or
+ *        App-key revival) and may still drive the worker's App;
+ *  (iii) the caller HOLDS the worker's name (cor:agt:020:09), so nobody else
+ *        could have bound it;
+ *  (iv)  no other session on that worker is live.
+ *
+ * (iv) runs under a row lock on the Worker, so two concurrent revivals of
+ * different sessions on one worker serialize: the second sees the first as
+ * live and refuses. Returns true when the session was resumed. A refusal is
+ * `false`, never a throw; the caller keeps its own SESSION_NOT_LIVE answer.
+ */
+export async function reviveOwnLapsedSession(ctx: Context, sessionId: string): Promise<boolean> {
+  if (!ctx.userId || ctx.impersonation) return false;
+  const now = new Date();
+  const session = await ctx.db.session.findFirst({
+    where: {
+      id: sessionId,
+      userId: ctx.userId,
+      endedAt: null,
+      deletedAt: null,
+      workerId: { not: null },
+      OR: [{ expiresAt: null }, { expiresAt: { gt: now } }],
+      worker: { retiredAt: null, heldByUserId: ctx.userId },
+    },
+    select: { id: true, workerId: true, worker: { select: { appId: true } } },
+  });
+  if (!session?.workerId || !session.worker) return false;
+  if (!(await mayStillDriveWorkerApp(ctx, session.worker.appId))) return false;
+  const workerId = session.workerId;
+  try {
+    return await ctx.db.$transaction(async (tx) => {
+      // Re-check the hold under the lock: a release or a takeover between the
+      // read above and here must refuse, not revive.
+      const locked = await tx.$queryRaw<Array<{ held_by_user_id: string | null; retired_at: Date | null }>>`
+        SELECT held_by_user_id, retired_at FROM workers WHERE id = ${workerId} FOR UPDATE`;
+      if (locked[0]?.held_by_user_id !== ctx.userId || locked[0]?.retired_at) return false;
+      const lockedNow = new Date();
+      const others = await tx.session.findMany({
+        where: {
+          workerId, id: { not: sessionId }, endedAt: null, deletedAt: null,
+          ...recentlyTouchedFilter(lockedNow),
+        },
+        select: { id: true, type: true, startedAt: true, updatedAt: true, autoExpiredAt: true, endedAt: true },
+        take: OPEN_SESSION_SCAN_CAP,
+      });
+      const events = await loadLastEventBySession(tx as never, others.map((o) => o.id));
+      if (others.some((o) => isSessionLive(o, events.get(o.id), lockedNow))) return false;
+      const touched = await tx.session.updateMany({
+        where: { id: sessionId, userId: ctx.userId!, endedAt: null, deletedAt: null },
+        data: { updatedAt: lockedNow },
+      });
+      return touched.count === 1;
+    });
+  } catch (err) {
+    // Bookkeeping must not fail the caller's read or post with a raw DB
+    // error; a failed revival is a refusal, and the caller says so.
+    console.warn('[reviveOwnLapsedSession] revival failed:', err);
+    return false;
+  }
+}
+
+/**
+ * #1617 B: the Workers this user could RESUME in this App, meaning a lapsed own
+ * session that {@link reviveOwnLapsedSession} would revive on the worker's next
+ * attributed act. Monitor-mode routing includes them, so a worker left quiet
+ * past its idle window is still woken by a mention. Observing never revives
+ * anything: the worker's own read or post does that.
+ *
+ * Mirrors the revival conditions without the lock; a race that changes the
+ * answer costs at most one nudge the worker's own act then refuses.
+ */
+export async function resumableOwnWorkerIds(
+  db: Context['db'],
+  args: { userId: string; appId: string; workerId?: string; now: Date },
+): Promise<Set<string>> {
+  const rows = await db.session.findMany({
+    where: {
+      userId: args.userId,
+      workerId: args.workerId ?? { not: null },
+      endedAt: null,
+      deletedAt: null,
+      OR: [{ expiresAt: null }, { expiresAt: { gt: args.now } }],
+      worker: { appId: args.appId, retiredAt: null, heldByUserId: args.userId },
+    },
+    orderBy: [{ updatedAt: { sort: 'desc' as const, nulls: 'last' as const } }, { startedAt: 'desc' as const }],
+    select: { workerId: true },
+    take: OPEN_SESSION_SCAN_CAP,
+  });
+  const candidates = [...new Set(rows.map((r) => r.workerId!).filter(Boolean))];
+  if (candidates.length === 0) return new Set();
+  // (iv): a worker with ANY live session is not resumed. If that session is
+  // the caller's own, the worker is already a live target.
+  const live = await db.session.findMany({
+    where: {
+      workerId: { in: candidates }, endedAt: null, deletedAt: null,
+      ...recentlyTouchedFilter(args.now),
+    },
+    select: { id: true, workerId: true, type: true, startedAt: true, updatedAt: true, autoExpiredAt: true, endedAt: true },
+    take: OPEN_SESSION_SCAN_CAP,
+  });
+  const events = await loadLastEventBySession(db as never, live.map((l) => l.id));
+  const busy = new Set(live.filter((l) => isSessionLive(l, events.get(l.id), args.now)).map((l) => l.workerId!));
+  return new Set(candidates.filter((w) => !busy.has(w)));
+}
+
 async function liveOwnWorkers(ctx: Context, app: AppRow): Promise<LiveWorker[]> {
   const now = new Date();
   const rows = await ctx.db.session.findMany({
@@ -319,6 +437,25 @@ async function liveOwnWorkers(ctx: Context, app: AppRow): Promise<LiveWorker[]> 
       urn = null;
     }
     byId.set(row.worker.id, { id: row.worker.id, name: row.worker.name, urn });
+  }
+  // #1617 B: a worker whose own session merely LAPSED is still routed — its
+  // next read or post resumes it — so a quiet night does not make it unwakeable.
+  const resumable = [...(await resumableOwnWorkerIds(ctx.db, { userId: ctx.userId!, appId: app.id, now }))]
+    .filter((id) => !byId.has(id));
+  if (resumable.length > 0) {
+    const resumed = await ctx.db.worker.findMany({
+      where: { id: { in: resumable } },
+      select: { id: true, name: true, slug: true },
+    });
+    for (const w of resumed) {
+      let urn: string | null = null;
+      try {
+        urn = composeWorkerUrn(normalizeUrnForLookup(app.urn), w.slug);
+      } catch {
+        urn = null;
+      }
+      byId.set(w.id, { id: w.id, name: w.name, urn });
+    }
   }
   const workers = [...byId.values()].sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
   if (workers.length > MAX_WORKERS) fail(`More than ${MAX_WORKERS} live Workers match.`, 'TEAM_ATTENTION_SCOPE_TOO_LARGE');
@@ -1248,10 +1385,15 @@ async function ownLiveSessionWorker(
   });
   if (!app || !(await isAppParticipant(ctx, app))) return null;
   const events = await loadLastEventBySession(ctx.db as never, [session.id]);
-  if (!isSessionLive(session, events.get(session.id), new Date())) return null;
-  // #1540 — a read or mark-read through the session is its driver driving it.
-  // Owned, eligible and live are all established above, so keep it alive.
-  await touchLiveSession(ctx.db, session.id);
+  if (isSessionLive(session, events.get(session.id), new Date())) {
+    // #1540 — a read or mark-read through the session is its driver driving it.
+    // Owned, eligible and live are all established above, so keep it alive.
+    await touchLiveSession(ctx.db, session.id);
+  } else if (!(await reviveOwnLapsedSession(ctx, session.id))) {
+    // #1617 B — a LAPSED session is resumed by its holder-driver's own read or
+    // mark-read; anything the revival conditions refuse stays not-live.
+    return null;
+  }
   return { workerId: session.workerId, appId: session.appId };
 }
 

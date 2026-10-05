@@ -67,6 +67,7 @@ import { escapePrismaLikePattern } from '../../../lib/literalLocPrefix.js';
 import { nodeUrnRoundTrips, safeNodeUrnV2 } from '../../../lib/urnEmit.js';
 import {
   maybeAdvanceOwnChannelRead,
+  reviveOwnLapsedSession,
   mayStillDriveWorkerApp,
 } from '../../../lib/teamAttention.js';
 
@@ -460,15 +461,10 @@ async function resolveSessionAuthor(
   // predicate the bind refuses WORKER_TAKEN on and the roster reports.
   const now = new Date();
   const events = await loadLastEventBySession(ctx.db as never, [session.id]);
-  if (!isSessionLive(session, events.get(session.id), now)) {
-    throw new GraphQLError(
-      `Session "${sessionRef}" is not live — nothing has driven it inside its idle window, so its worker cannot author through it. ` +
-        'A lapsed session is not revived by posting through it; start a new session for this worker ' +
-        '(CLI: `hadron team session start --as <worker>`; MCP: `hadron_start_session`). While a session is live, ' +
-        'posting, reading and marking read through it keep it live.',
-      { extensions: { code: 'SESSION_NOT_LIVE' } },
-    );
-  }
+  // #1617 B (Holger, 2026-10-05): a LAPSED session is not refused yet. Its own
+  // driver may resume it by this post, which is decided at the END, once every
+  // other gate has passed, so a post refused for another reason revives nothing.
+  const lapsed = !isSessionLive(session, events.get(session.id), now);
   if (!session.workerId) {
     throw new GraphQLError(
       `Session "${sessionRef}" is not bound to a worker — omit sessionRef to post as yourself.`,
@@ -550,7 +546,23 @@ async function resolveSessionAuthor(
   // could otherwise keep alive a session whose driver has since lost the
   // worker's own App. The post itself is authorized as before; only the
   // keep-alive is withheld.
-  if (await mayStillDriveWorkerApp(ctx, worker.appId)) await touchLiveSession(ctx.db, session.id);
+  if (lapsed) {
+    // #1617 B — the post resumes the session only under the revival
+    // conditions (`reviveOwnLapsedSession`: own session, current App
+    // eligibility, the caller holds the name, nobody else driving it).
+    if (!(await reviveOwnLapsedSession(ctx, session.id))) {
+      throw new GraphQLError(
+        `Session "${sessionRef}" is not live — nothing has driven it inside its idle window, and it cannot be resumed here. ` +
+          'Only the person holding the worker\'s name can resume their own lapsed session, by posting, reading or marking read ' +
+          'through it, and only while no other session on that worker is live. Otherwise start a new session for this worker ' +
+          '(CLI: `hadron team session start --as <worker>`; MCP: `hadron_start_session`). While a session is live, ' +
+          'posting, reading and marking read through it keep it live.',
+        { extensions: { code: 'SESSION_NOT_LIVE' } },
+      );
+    }
+  } else if (await mayStillDriveWorkerApp(ctx, worker.appId)) {
+    await touchLiveSession(ctx.db, session.id);
+  }
   return { workerId: worker.id, name: worker.name, sessionId: session.id, workerAppId: worker.appId, crossApp };
 }
 

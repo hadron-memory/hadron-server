@@ -957,6 +957,22 @@ describe('#1540 — a mark-read through a live session keeps it live', () => {
       .resolves.toMatchObject({ lastSeenSeq: 1 });
   });
 
+  it('#1617 B: the name-holder\'s mark-read RESUMES a lapsed session, and the poll still routes the worker', async () => {
+    await db.worker.update({ where: { id: worker.id }, data: { heldByUserId: user.id, heldAt: new Date() } });
+    const t0 = (await db.session.findUniqueOrThrow({ where: { id: sessionId } })).startedAt;
+    await post('@dara while you were away', { mentions: ['dara'] });
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date(t0.getTime() + 30 * H));
+    // Lapsed, but resumable: the attention poll still lists the worker, and
+    // polling it resumes nothing.
+    expect((await pollPaged(userCtx(), app.id)).workers.map((w: { worker: string }) => w.worker)).toEqual([worker.id]);
+    expect((await db.session.findUniqueOrThrow({ where: { id: sessionId } })).updatedAt!.getTime()).toBeLessThan(Date.now() - 24 * H);
+    // The worker's own mark-read is the act that resumes it.
+    await expect(M.markOwnTeamChatRead({}, { appRef: app.urn, sessionRef: sessionId, channelRef: channel.id, seq: 1 }, userCtx()))
+      .resolves.toMatchObject({ lastSeenSeq: 1 });
+    expect((await db.session.findUniqueOrThrow({ where: { id: sessionId } })).updatedAt!.getTime()).toBe(Date.now());
+  });
+
   it('control: a session nobody drove for a whole window still cannot mark read', async () => {
     const t0 = (await db.session.findUniqueOrThrow({ where: { id: sessionId } })).startedAt;
     await post('one');

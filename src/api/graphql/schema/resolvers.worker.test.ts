@@ -1440,11 +1440,11 @@ describe('hadron-cli#487 — Worker.hasLiveSession / lastActiveAt', () => {
     // rather than reading the most recent — which may be the ended one.
     const w = await cast({ agentRef: roleAgent.id, name: 'Iris' });
     const open = await bindAs(appMember.id, w.id);
-    const forced = await M.startSession(
-      {},
-      { input: { id: generateId(), workerRef: w.id, appRef: app.id, force: true } },
-      ctx(appMember.id),
-    );
+    // #1617 C: a forced rebind now ends the holder's superseded row, so the
+    // coexisting newer session is seeded directly (pre-#1617 data shape).
+    const forced = await db.session.create({
+      data: { id: generateId(), userId: appMember.id, appId: app.id, workerId: w.id, type: 'DEVELOPER', startedAt: new Date() },
+    });
     await M.endSession({}, { id: forced.id }, ctx(appMember.id));
 
     expect(await db.session.count({ where: { workerId: w.id, endedAt: null } })).toBe(1);
@@ -1783,11 +1783,55 @@ describe('#1050 — worker name holding', () => {
     const second = await bind(contrib.id, w.id);
     expect(second.workerId).toBe(w.id);
 
-    // And the old session was NOT ended to make room — binding describes
-    // liveness, it does not mutate the record to express it.
+    // #1617 C (Holger, 2026-10-05): the same person's rebind now ENDS the old
+    // row as superseded, so open-but-not-live rows stop piling up. It is an
+    // act, not an inference from silence, so it is never marked auto-expired,
+    // and the new session chains to it.
     const prior = await db.session.findUniqueOrThrow({ where: { id: first.id } });
-    expect(prior.endedAt).toBeNull();
+    expect(prior.endedAt).not.toBeNull();
     expect(prior.autoExpiredAt).toBeNull();
+    expect(prior.summary).toBe(`superseded by session ${second.id}`);
+    expect(second.prevSessionId).toBe(first.id);
+  });
+
+  describe('#1617 C — a bind ends the same person\'s superseded sessions (Holger, 2026-10-05)', () => {
+    it('a forced rebind ends the LIVE own session it displaces', async () => {
+      const w = await heldBy(contrib.id);
+      const first = await bind(contrib.id, w.id);
+      const second = await M.startSession(
+        {},
+        { input: { id: generateId(), workerRef: w.id, appRef: app.id, force: true } },
+        ctx(contrib.id),
+      );
+      const prior = await db.session.findUniqueOrThrow({ where: { id: first.id } });
+      expect(prior.endedAt).not.toBeNull();
+      expect(prior.summary).toBe(`superseded by session ${second.id}`);
+      expect(await db.session.count({ where: { workerId: w.id, endedAt: null } })).toBe(1);
+    });
+
+    it('never touches another person\'s or an App key\'s open session on that worker', async () => {
+      const w = await heldBy(contrib.id);
+      const old = new Date(Date.now() - 72 * 60 * 60 * 1000);
+      const others = await Promise.all([
+        db.session.create({ data: { id: generateId(), userId: appMember.id, appId: app.id, workerId: w.id, type: 'DEVELOPER', startedAt: old, updatedAt: old } }),
+        db.session.create({ data: { id: generateId(), userId: null, appId: app.id, workerId: w.id, type: 'DEVELOPER', startedAt: old, updatedAt: old } }),
+      ]);
+      await bind(contrib.id, w.id);
+      for (const o of others) {
+        expect((await db.session.findUniqueOrThrow({ where: { id: o.id } })).endedAt).toBeNull();
+      }
+    });
+
+    it('keeps a summary the driver already wrote', async () => {
+      const w = await heldBy(contrib.id);
+      const first = await bind(contrib.id, w.id);
+      const old = new Date(Date.now() - 72 * 60 * 60 * 1000);
+      await db.session.update({ where: { id: first.id }, data: { startedAt: old, updatedAt: old, summary: 'mid #1617' } });
+      await bind(contrib.id, w.id);
+      const prior = await db.session.findUniqueOrThrow({ where: { id: first.id } });
+      expect(prior.endedAt).not.toBeNull();
+      expect(prior.summary).toBe('mid #1617');
+    });
   });
 
   it('a session driven a moment ago still refuses, so the gate did not just go away', async () => {

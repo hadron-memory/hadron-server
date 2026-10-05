@@ -346,6 +346,63 @@ describe('#1540 — authoring through a live session keeps it live', () => {
     // A refused post does not revive it either.
     await expect(post(session.id, 'still too late')).rejects.toMatchObject({ extensions: { code: 'SESSION_NOT_LIVE' } });
   });
+
+  describe('#1617 B — the name-holder resumes their own lapsed session (Holger, 2026-10-05)', () => {
+    const hold = () => db.worker.update({ where: { id: workerA.id }, data: { heldByUserId: admin.id, heldAt: new Date() } });
+    const lapsedSession = async () => {
+      const t0 = new Date();
+      const session = await bindAt(t0);
+      vi.useFakeTimers({ toFake: ['Date'] });
+      vi.setSystemTime(new Date(t0.getTime() + 30 * H));
+      return session;
+    };
+    const heartbeat = async (id: string) =>
+      (await db.session.findUniqueOrThrow({ where: { id } })).updatedAt!.getTime();
+
+    it('a post through it resumes it under the SAME id, and it reads live again', async () => {
+      await hold();
+      const session = await lapsedSession();
+      await expect(post(session.id, 'back after a quiet night')).resolves.toBeTruthy();
+      expect(await heartbeat(session.id)).toBe(Date.now());
+      await expect(post(session.id, 'and again')).resolves.toBeTruthy();
+    });
+
+    it('a read through it resumes it too', async () => {
+      await hold();
+      const session = await lapsedSession();
+      await Q.channelMessages({}, { channelRef: release.id, sinceSeq: 0 }, { ...ctx(admin.id), sessionId: session.id });
+      expect(await heartbeat(session.id)).toBe(Date.now());
+    });
+
+    it('is refused when the caller does not hold the name', async () => {
+      const session = await lapsedSession();
+      await expect(post(session.id, 'not mine to resume')).rejects.toMatchObject({ extensions: { code: 'SESSION_NOT_LIVE' } });
+      expect(await heartbeat(session.id)).toBeLessThan(Date.now() - 24 * H);
+    });
+
+    it('is refused while ANOTHER session on that worker is live', async () => {
+      await hold();
+      const session = await lapsedSession();
+      await bindAt(new Date()); // a second, live stint on the same worker
+      await expect(post(session.id, 'two at once')).rejects.toMatchObject({ extensions: { code: 'SESSION_NOT_LIVE' } });
+    });
+
+    it('never extends a hard expiry promised at session start', async () => {
+      await hold();
+      const session = await lapsedSession();
+      await db.session.update({ where: { id: session.id }, data: { expiresAt: new Date(Date.now() - 1000) } });
+      await expect(post(session.id, 'past my deadline')).rejects.toMatchObject({ extensions: { code: 'SESSION_NOT_LIVE' } });
+    });
+
+    it('a post refused for another reason resumes nothing', async () => {
+      await hold();
+      const session = await lapsedSession();
+      const before = await heartbeat(session.id);
+      await db.worker.update({ where: { id: workerA.id }, data: { retiredAt: new Date() } });
+      await expect(post(session.id, 'retired')).rejects.toMatchObject({ extensions: { code: 'WORKER_RETIRED' } });
+      expect(await heartbeat(session.id)).toBe(before);
+    });
+  });
 });
 
 describe('#1171 — the Channel address on the chat surface', () => {
