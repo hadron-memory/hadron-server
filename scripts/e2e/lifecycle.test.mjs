@@ -51,7 +51,7 @@ esac
 }
 
 
-test('symlinked checkout records actual forwarder argv and down stops it', async t => {
+test('symlinked checkout records actual forwarder argv and down stops it', { skip: process.platform !== 'linux' }, async t => {
   const root = mkdtempSync(join(tmpdir(), 'e2e-symlink-test-'));
   let pid;
   t.after(() => {
@@ -85,4 +85,34 @@ test('symlinked checkout records actual forwarder argv and down stops it', async
     await new Promise(resolve => setTimeout(resolve, 25));
   }
   assert.fail('down left its symlink-launched forwarder running');
+});
+
+test('failed ownership write terminates its detached forwarder', async t => {
+  const root = mkdtempSync(join(tmpdir(), 'e2e-state-failure-'));
+  const captured = join(root, 'child.pid');
+  t.after(() => {
+    if (existsSync(captured)) { try { process.kill(Number(readFileSync(captured, 'utf8')), 'SIGTERM'); } catch {} }
+    rmSync(root, { recursive: true, force: true });
+  });
+  const probe = createServer().listen(0, '127.0.0.1'); await once(probe, 'listening');
+  const port = String(probe.address().port);
+  await new Promise(resolve => probe.close(resolve));
+  const state = join(root, 'state'); mkdirSync(state);
+  // EISDIR is deterministic even for a privileged test runner.
+  mkdirSync(join(state, 'proxy.pid'));
+  const bin = join(root, 'bin'); mkdirSync(bin);
+  // Capture only this test's child so even a kill-removed mutant is cleaned up.
+  writeFileSync(join(bin, 'node'), `#!/bin/sh\necho $$ > '${captured}'\nexec '${process.execPath}' "$@"\n`, { mode: 0o700 });
+  const result = spawnSync(process.execPath, [fileURLToPath(new URL('./start-forwarder.mjs', import.meta.url)), state, port, '192.0.2.1'], {
+    encoding: 'utf8', timeout: 2000, env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
+  });
+  assert.equal(result.status, 1, result.stderr);
+  assert.match(result.stderr, /EISDIR/);
+  const { connect } = await import('node:net');
+  const listening = await new Promise(resolve => {
+    const socket = connect(Number(port), '127.0.0.1');
+    socket.once('connect', () => { socket.destroy(); resolve(true); });
+    socket.once('error', () => resolve(false));
+  });
+  assert.equal(listening, false, 'failed persistence left an untracked listener');
 });

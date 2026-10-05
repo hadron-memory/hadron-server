@@ -14,7 +14,8 @@ uses `pre-push.sql` → Prisma schema push → `post-push.sql`, seeds it and wai
 for server health. The seed verifies the HNSW index, generated `nodes.tsv`
 and ownership/class CHECK constraints. It refuses a populated DB. To reset,
 use `down` then `up`; restarting an initialized stack refuses explicitly before
-Prisma or signing-key generation.
+Prisma or signing-key generation. The guard checks the public schema used by
+this stack's fixed database URL and SQL; alternate Prisma schemas are unsupported.
 Failed startup leaves the named stack available for `logs` and `down`.
 
 Give **every concurrent stack a different name, API port and portal port**.
@@ -22,6 +23,8 @@ For example, `chip 18401 18501` runs alongside `charles 18400 18500`.
 Compose project names, DB/graph/credential volumes and networks are scoped to
 `hadron-e2e-NAME`. `down` destroys only that stack, including its volumes and locally built image.
 There are no fixed container names, host DB connections or broad process kills.
+Stacks launched before the recorded-path fix retain their old cached path; the
+fix applies to new launches and does not migrate legacy lifecycle state.
 
 On orca1 the script automatically uses the restricted Incus `qa-docker`
 image and Docker Compose inside a disposable instance. It copies tracked (including staged)
