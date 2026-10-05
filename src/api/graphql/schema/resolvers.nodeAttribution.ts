@@ -20,7 +20,7 @@ type ActorKind = 'worker' | 'agent';
 const actorCaches = new WeakMap<Context, Map<string, Promise<ActorRef | null>>>();
 
 /** One lookup per actor per request: a list page names few distinct actors. */
-function loadActor(ctx: Context, kind: ActorKind, id: string): Promise<ActorRef | null> {
+export function loadActorRef(ctx: Context, kind: ActorKind, id: string): Promise<ActorRef | null> {
   let cache = actorCaches.get(ctx);
   if (!cache) {
     cache = new Map();
@@ -80,13 +80,13 @@ async function nodeColumn(
 const nodeActor = (column: AttributionColumn, kind: ActorKind) =>
   async (n: { id: string; memoryId?: string }, _: unknown, ctx: Context) => {
     const id = await nodeColumn(n, column, ctx);
-    return id ? loadActor(ctx, kind, id) : null;
+    return id ? loadActorRef(ctx, kind, id) : null;
   };
 
 const revisionActor = (column: 'editedByWorkerId' | 'editedByAgentId', kind: ActorKind) =>
   (r: Partial<Record<'editedByWorkerId' | 'editedByAgentId', string | null>>, _: unknown, ctx: Context) => {
     const id = r[column];
-    return id ? loadActor(ctx, kind, id) : null;
+    return id ? loadActorRef(ctx, kind, id) : null;
   };
 
 export const nodeAttributionFieldResolvers = {

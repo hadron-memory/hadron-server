@@ -25,6 +25,8 @@ const MODELS_WITHOUT_ID = new Set<string>([
   'OAuthClient',
   'WebFetchPollBinding',
   'PendingLoginState',
+  // #1606 — keyed by its node (1:1 with a comment node).
+  'CommentMeta',
 ]);
 
 const basePrisma = new PrismaClient();
