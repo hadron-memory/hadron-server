@@ -67,7 +67,7 @@ import { escapePrismaLikePattern } from '../../../lib/literalLocPrefix.js';
 import { nodeUrnRoundTrips, safeNodeUrnV2 } from '../../../lib/urnEmit.js';
 import {
   maybeAdvanceOwnChannelRead,
-  mayResumeOwnLapsedSession,
+  lapsedResumeVerdict,
   resumeOwnLapsedSessionInTx,
   mayStillDriveWorkerApp,
 } from '../../../lib/teamAttention.js';
@@ -551,15 +551,29 @@ async function resolveSessionAuthor(
     // #1617 B — this only decides that the post MAY resume the session; the
     // resume itself happens inside the append transaction (#1625 review,
     // Baloo P2-1), so a post refused anywhere after this point resumes nothing.
-    if (!(await mayResumeOwnLapsedSession(ctx, session.id))) throw sessionNotLiveError(sessionRef);
+    const verdict = await lapsedResumeVerdict(ctx, session.id);
+    if (verdict !== 'OK') throw sessionNotLiveError(sessionRef, verdict === 'DORMANT');
   } else if (await mayStillDriveWorkerApp(ctx, worker.appId)) {
     await touchLiveSession(ctx.db, session.id);
   }
   return { workerId: worker.id, name: worker.name, sessionId: session.id, workerAppId: worker.appId, crossApp, resume: lapsed };
 }
 
-/** SESSION_NOT_LIVE for a post through a session that is lapsed and may not be resumed (#1617 B). */
-function sessionNotLiveError(sessionRef: string): GraphQLError {
+/**
+ * SESSION_NOT_LIVE for a post through a session that is lapsed and may not be
+ * resumed (#1617 B). A DORMANT one (DY-5) keeps the same code, so clients that
+ * already rebind on SESSION_NOT_LIVE keep working, and says why in
+ * `extensions.reason`: only an explicit rebind by its holder brings it back.
+ */
+function sessionNotLiveError(sessionRef: string, dormant = false): GraphQLError {
+  if (dormant) {
+    return new GraphQLError(
+      `Session "${sessionRef}" is DORMANT — nothing has driven it for longer than its App's dormancy threshold, ` +
+        'so no agent act resumes it. Its holder must start a new session for this worker ' +
+        '(CLI: `hadron team session start --as <worker>`; MCP: `hadron_start_session`), which ends this one as superseded.',
+      { extensions: { code: 'SESSION_NOT_LIVE', reason: 'DORMANT' } },
+    );
+  }
   return new GraphQLError(
     `Session "${sessionRef}" is not live — nothing has driven it inside its idle window, and it cannot be resumed here. ` +
       'Only the person holding the worker\'s name can resume their own lapsed session, by posting, reading or marking read ' +

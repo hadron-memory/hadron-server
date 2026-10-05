@@ -66,6 +66,20 @@ function ttlMs(): number {
   return Math.max(...SESSION_TYPES_FOR_TTL.map((t) => idleWindowMsFor(t)));
 }
 
+/**
+ * Ruling DY-4: the re-unlock hint a locked-memory error carries. The key cache
+ * TTL stays a separate security setting, so after a quiet stretch a memory
+ * that WAS unlocked reads as locked again with no lock call having happened.
+ * Saying so turns a puzzling failure into a one-step remedy.
+ */
+export function sessionKeyReleasedHint(): string {
+  const hours = Math.round((ttlMs() / 3_600_000) * 10) / 10;
+  return (
+    `If this memory was unlocked earlier, its key was released after ${hours}h unused ` +
+    '(the key-cache TTL, a security setting); unlock it again with hadron_unlock_memory.'
+  );
+}
+
 export class SessionKeyCache {
   private byMemory = new Map<string, MemoryKeyEntry>();
   // One session may hold keys for SEVERAL memories (spec 041: a request

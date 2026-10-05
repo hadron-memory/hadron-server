@@ -12,6 +12,7 @@
  * ordinary transcript read is byte-for-byte the old read-only act.
  */
 
+import { sessionKeyReleasedHint } from './sessionKeyCache.js';
 import { createHmac } from 'node:crypto';
 import { GraphQLError } from 'graphql';
 import { Prisma, type PrismaClient } from '../generated/prisma/index.js';
@@ -40,6 +41,8 @@ import {
   OPEN_SESSION_SCAN_CAP,
   recentlyTouchedFilter,
   touchLiveSession,
+  isSessionDormant,
+  DEFAULT_SESSION_DORMANCY_DAYS,
 } from './sessionActivity.js';
 
 // #1496: aligned with MAX_TARGETS/OPEN_SESSION_SCAN_CAP as the single scope
@@ -283,32 +286,57 @@ export async function teamAttentionAvailable(ctx: Context, appId: string): Promi
 
 /** The deciding columns a resume re-reads; one shape for the pre-check and the locked pass. */
 const RESUME_SESSION_SELECT = {
-  id: true, userId: true, workerId: true, endedAt: true, deletedAt: true, expiresAt: true,
-  worker: { select: { appId: true, heldByUserId: true, retiredAt: true } },
+  id: true, userId: true, appId: true, workerId: true, endedAt: true, deletedAt: true, expiresAt: true,
+  type: true, startedAt: true, updatedAt: true, autoExpiredAt: true,
+  worker: { select: { appId: true, heldByUserId: true, retiredAt: true, app: { select: { sessionDormancyDays: true } } } },
 } as const;
 
+/** What a lapsed-session resume would do: resume, refuse as DORMANT (DY-5), or refuse. */
+export type ResumeVerdict = 'OK' | 'DORMANT' | 'REFUSED';
+
+/** The principals that may resume at all: an ordinary user, or a pure App key (DY-1). */
+function resumingPrincipal(ctx: Context): 'user' | 'appKey' | null {
+  if (ctx.impersonation) return null;
+  if (ctx.userId) return 'user';
+  if (ctx.appId) return 'appKey';
+  return null;
+}
+
 /**
- * #1617 B (rulings DA and DI, 2026-10-05): conditions (i)–(iv) evaluated
- * against one database view (`db` is the client or the caller's transaction),
- * for a session that is NOT live:
+ * Lapsed-session resume (rulings DA, DI, DY-1, DY-5), evaluated against one
+ * database view (`db` is the client or the caller's transaction) for a
+ * session that is NOT live:
  *
  *  (i)   open, not deleted, not past a hard `expiresAt` (a promise made at
  *        start is never extended);
- *  (ii)  the caller is the session's own user (no admin, impersonation or
- *        App-key resume) and may still drive the worker's App NOW;
- *  (iii) the caller HOLDS the worker's name (cor:agt:020:09);
+ *  (ii)  the session is the caller's OWN, by the `bindSession` rule: a user's
+ *        own session (no admin or impersonation resume), or, for a pure App
+ *        key (DY-1), a person-less session of that key's App on a worker of
+ *        that App. The caller must still be able to drive the worker's App NOW;
+ *  (iii) the name: a user must HOLD it (cor:agt:020:09); an App key resumes
+ *        only an UNHELD worker, since a held name is a person's;
  *  (iv)  no other session on that worker is live. A scan that hits the cap
- *        refuses rather than decide on a truncated set (#1625 review, P3).
+ *        refuses rather than decide on a truncated set (#1625 review, P3);
+ *  (v)   DY-5: the session is not DORMANT, meaning idle for less than its
+ *        App's `sessionDormancyDays`. Past that, no agent act resumes it;
+ *        only its human holder's explicit rebind brings the worker back.
  */
-async function resumeConditionsHold(ctx: Context, db: Context['db'], sessionId: string, now: Date): Promise<boolean> {
-  if (!ctx.userId || ctx.impersonation) return false;
+async function resumeVerdict(ctx: Context, db: Context['db'], sessionId: string, now: Date): Promise<ResumeVerdict> {
+  const principal = resumingPrincipal(ctx);
+  if (!principal) return 'REFUSED';
   const s = await db.session.findUnique({ where: { id: sessionId }, select: RESUME_SESSION_SELECT });
   if (
-    !s || s.userId !== ctx.userId || s.endedAt || s.deletedAt || !s.workerId || !s.worker ||
+    !s || s.endedAt || s.deletedAt || !s.workerId || !s.worker ||
     (s.expiresAt && s.expiresAt.getTime() <= now.getTime()) ||
-    s.worker.retiredAt || s.worker.heldByUserId !== ctx.userId
-  ) return false;
-  if (!(await mayStillDriveWorkerApp({ ...ctx, db } as Context, s.worker.appId))) return false;
+    s.worker.retiredAt
+  ) return 'REFUSED';
+  const owns = principal === 'user'
+    ? s.userId === ctx.userId && s.worker.heldByUserId === ctx.userId
+    : s.userId === null && s.appId === ctx.appId && s.worker.appId === ctx.appId && s.worker.heldByUserId === null;
+  if (!owns) return 'REFUSED';
+  if (!(await mayStillDriveWorkerApp({ ...ctx, db } as Context, s.worker.appId))) return 'REFUSED';
+  const ownEvent = (await loadLastEventBySession(db as never, [s.id])).get(s.id);
+  if (isSessionDormant(s, ownEvent, s.worker.app?.sessionDormancyDays ?? DEFAULT_SESSION_DORMANCY_DAYS, now)) return 'DORMANT';
   const others = await db.session.findMany({
     where: {
       workerId: s.workerId, id: { not: sessionId }, endedAt: null, deletedAt: null,
@@ -318,9 +346,19 @@ async function resumeConditionsHold(ctx: Context, db: Context['db'], sessionId: 
     select: { id: true, type: true, startedAt: true, updatedAt: true, autoExpiredAt: true, endedAt: true },
     take: OPEN_SESSION_SCAN_CAP + 1,
   });
-  if (others.length > OPEN_SESSION_SCAN_CAP) return false;
+  if (others.length > OPEN_SESSION_SCAN_CAP) return 'REFUSED';
   const events = await loadLastEventBySession(db as never, others.map((o) => o.id));
-  return !others.some((o) => isSessionLive(o, events.get(o.id), now));
+  return others.some((o) => isSessionLive(o, events.get(o.id), now)) ? 'REFUSED' : 'OK';
+}
+
+/**
+ * Lock-free: what WOULD this caller's next act do to this lapsed session?
+ * Lets a gate refuse early (and say DORMANT when it is), and lets routing
+ * decide. It writes nothing and guarantees nothing: the act itself resumes
+ * through {@link resumeOwnLapsedSessionInTx}, which re-decides under the lock.
+ */
+export async function lapsedResumeVerdict(ctx: Context, sessionId: string): Promise<ResumeVerdict> {
+  return resumeVerdict(ctx, ctx.db, sessionId, new Date());
 }
 
 /**
@@ -331,7 +369,7 @@ async function resumeConditionsHold(ctx: Context, db: Context['db'], sessionId: 
  * which re-decides under the lock.
  */
 export async function mayResumeOwnLapsedSession(ctx: Context, sessionId: string): Promise<boolean> {
-  return resumeConditionsHold(ctx, ctx.db, sessionId, new Date());
+  return (await lapsedResumeVerdict(ctx, sessionId)) === 'OK';
 }
 
 /**
@@ -355,7 +393,7 @@ export async function resumeOwnLapsedSessionInTx(
   tx: Prisma.TransactionClient,
   sessionId: string,
 ): Promise<boolean> {
-  if (!ctx.userId || ctx.impersonation) return false;
+  if (!resumingPrincipal(ctx)) return false;
   const pre = await tx.session.findUnique({
     where: { id: sessionId },
     select: { workerId: true, worker: { select: { appId: true } } },
@@ -367,10 +405,12 @@ export async function resumeOwnLapsedSessionInTx(
   await tx.$queryRaw`SELECT id FROM workers WHERE id = ${pre.workerId} FOR UPDATE`;
   const now = new Date();
   const db = tx as unknown as Context['db'];
-  if (!(await resumeConditionsHold(ctx, db, sessionId, now))) return false;
+  if ((await resumeVerdict(ctx, db, sessionId, now)) !== 'OK') return false;
   const touched = await tx.session.updateMany({
     where: {
-      id: sessionId, userId: ctx.userId, workerId: pre.workerId, endedAt: null, deletedAt: null,
+      id: sessionId, workerId: pre.workerId, endedAt: null, deletedAt: null,
+      // The same ownership the verdict checked, re-guarded on the write.
+      ...(ctx.userId ? { userId: ctx.userId } : { userId: null, appId: ctx.appId }),
       OR: [{ expiresAt: null }, { expiresAt: { gt: now } }],
     },
     data: { updatedAt: now },
@@ -412,10 +452,23 @@ export async function resumableOwnWorkerIds(
       worker: { appId: args.appId, retiredAt: null, heldByUserId: args.userId },
     },
     orderBy: [{ updatedAt: { sort: 'desc' as const, nulls: 'last' as const } }, { startedAt: 'desc' as const }],
-    select: { workerId: true },
+    select: {
+      id: true, workerId: true, startedAt: true, updatedAt: true, autoExpiredAt: true, endedAt: true,
+      worker: { select: { app: { select: { sessionDormancyDays: true } } } },
+    },
     take: OPEN_SESSION_SCAN_CAP,
   });
-  const candidates = [...new Set(rows.map((r) => r.workerId!).filter(Boolean))];
+  // DY-5: a DORMANT session is past what any agent act may resume, so it does
+  // not keep its worker routed either. Only a rebind brings that worker back.
+  const ownEvents = await loadLastEventBySession(db as never, rows.map((r) => r.id));
+  const candidates = [...new Set(
+    rows
+      .filter((r) => !isSessionDormant(
+        r, ownEvents.get(r.id), r.worker?.app?.sessionDormancyDays ?? DEFAULT_SESSION_DORMANCY_DAYS, args.now,
+      ))
+      .map((r) => r.workerId!)
+      .filter(Boolean),
+  )];
   if (candidates.length === 0) return new Set();
   // (iv): a worker with ANY live session is not resumed. If that session is
   // the caller's own, the worker is already a live target.
@@ -545,7 +598,7 @@ function decryptRoutingEnvelope(candidate: EncryptedCandidateRow): Record<string
       : {};
   } catch (error) {
     if (error instanceof Error && error.message.startsWith('SESSION_EXPIRED')) {
-      fail(`SESSION_EXPIRED: memory ${candidate.memory_id} is encrypted but no active session key is available.`, 'SESSION_EXPIRED', { memoryId: candidate.memory_id });
+      fail(`SESSION_EXPIRED: memory ${candidate.memory_id} is encrypted but no active session key is available. ${sessionKeyReleasedHint()}`, 'SESSION_EXPIRED', { memoryId: candidate.memory_id });
     }
     throw error;
   }
@@ -1511,7 +1564,18 @@ export async function markOwnTeamChatRead(
 ): Promise<{ workerId: string; channelId: string; lastSeenSeq: number }> {
   const app = await resolvePilotApp(ctx, args.appRef);
   const session = await ownLiveSessionWorker(ctx, args.sessionRef, app.id);
-  if (!session) fail('That session is not one of your live Worker sessions in this App.', 'SESSION_NOT_LIVE');
+  if (!session) {
+    // DY-5: say so when the reason is dormancy, keeping the code clients rebind on.
+    if ((await lapsedResumeVerdict(ctx, args.sessionRef.trim())) === 'DORMANT') {
+      fail(
+        'That session is DORMANT: idle past its App\'s dormancy threshold, so no agent act resumes it. ' +
+          'Its holder must start a new session for this worker.',
+        'SESSION_NOT_LIVE',
+        { reason: 'DORMANT' },
+      );
+    }
+    fail('That session is not one of your live Worker sessions in this App.', 'SESSION_NOT_LIVE');
+  }
   const { workerId } = session;
   // The caller names the Channel. The MCP tool resolves an OMITTED channel to
   // the one its convenience read serves (locateTeamChatChannel), which need
