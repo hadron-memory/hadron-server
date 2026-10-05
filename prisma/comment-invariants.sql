@@ -41,7 +41,7 @@ LANGUAGE plpgsql AS $$
 DECLARE
   n RECORD; m RECORD; t RECORD; r RECORD; mem_class TEXT; edge_count INT; want_kind "EdgeGovernedKind"; want_target TEXT;
 BEGIN
-  SELECT id, node_type, memory_id INTO n FROM nodes WHERE id = p_node_id;
+  SELECT id, node_type, memory_id, deleted_at INTO n FROM nodes WHERE id = p_node_id;
   SELECT * INTO m FROM comment_meta WHERE node_id = p_node_id;
   IF n.id IS NULL THEN
     RETURN; -- deleted (its meta cascades with it)
@@ -62,8 +62,11 @@ BEGIN
   IF t.memory_id IS DISTINCT FROM n.memory_id THEN
     RAISE EXCEPTION 'COMMENT_INVARIANT: comment % is not in its target''s memory', p_node_id USING ERRCODE = 'check_violation';
   END IF;
+  -- Only a LIVE comment needs a commentable memory: a deleted thread is gone
+  -- from every check (cor:dmo:110:05) but keeps its history, so it may follow
+  -- its target into a private or system memory (cor:dmo:110:02).
   SELECT class INTO mem_class FROM memories WHERE id = n.memory_id;
-  IF mem_class IS NULL OR mem_class NOT IN ('app', 'knowledge', 'personal', 'group') THEN
+  IF n.deleted_at IS NULL AND (mem_class IS NULL OR mem_class NOT IN ('app', 'knowledge', 'personal', 'group')) THEN
     RAISE EXCEPTION 'COMMENT_INVARIANT: comment % is in a % memory, which is not commentable', p_node_id, mem_class USING ERRCODE = 'check_violation';
   END IF;
   IF m.thread_root_id IS NOT NULL THEN
@@ -115,7 +118,7 @@ CREATE CONSTRAINT TRIGGER nodes_comment_insert AFTER INSERT ON "nodes"
   WHEN (NEW.node_type = 'comment')
   EXECUTE FUNCTION hadron_comment_node_changed();
 DROP TRIGGER IF EXISTS nodes_comment_update ON "nodes";
-CREATE CONSTRAINT TRIGGER nodes_comment_update AFTER UPDATE OF node_type, memory_id ON "nodes"
+CREATE CONSTRAINT TRIGGER nodes_comment_update AFTER UPDATE OF node_type, memory_id, deleted_at ON "nodes"
   DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
   WHEN (NEW.node_type = 'comment' OR OLD.node_type = 'comment' OR OLD.memory_id IS DISTINCT FROM NEW.memory_id)
   EXECUTE FUNCTION hadron_comment_node_changed();

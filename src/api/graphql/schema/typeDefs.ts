@@ -1918,7 +1918,7 @@ export const typeDefs = `#graphql
     worker: CommentActorRef
     "USER and USER_AGENT."
     user: CommentActorRef
-    "USER_AGENT; also WORKER, when the worker's agent is recorded."
+    "USER_AGENT only."
     agent: CommentActorRef
     "APP."
     app: CommentActorRef
@@ -1980,8 +1980,9 @@ export const typeDefs = `#graphql
 
   type CommentThread {
     root: Comment!
-    "Oldest first."
+    "Oldest first; at most the first 200."
     replies: [Comment!]!
+    "Every live reply, including any beyond the returned 200."
     replyCount: Int!
   }
 

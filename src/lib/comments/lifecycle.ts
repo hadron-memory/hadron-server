@@ -25,6 +25,10 @@ export async function deleteThreadsInTx(
   opts: { actorKey: string | null; deletedBy: string | null; cause: 'ADMIN' | 'TARGET'; at?: Date },
 ): Promise<number> {
   if (rootIds.length === 0) return 0;
+  // Lock the roots first (#1663 review P3): replyToComment inserts a reply
+  // only while holding its root's row lock, so no reply can commit between
+  // the member read below and the delete, and survive under a deleted root.
+  await tx.$queryRaw`SELECT id FROM nodes WHERE id = ANY(${rootIds}::text[]) ORDER BY id FOR UPDATE`;
   const members = await tx.commentMeta.findMany({
     where: { OR: [{ nodeId: { in: rootIds } }, { threadRootId: { in: rootIds } }], node: { deletedAt: null } },
     select: { nodeId: true },

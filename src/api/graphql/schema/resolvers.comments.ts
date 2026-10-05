@@ -25,6 +25,7 @@ import {
   isAuthorizationDenial,
   isMemoryHiddenForWrite,
   isMemoryReadableCached,
+  isMemoryReadableFresh,
   requireMemoryManageAccess,
   requireMemoryWriteAccess,
 } from './resolvers.helpers.js';
@@ -263,6 +264,9 @@ async function resolveReadableNode(ctx: Context, ref: string, missing: () => Gra
   return node;
 }
 
+/** Replies returned per thread by commentThreads; replyCount is always the full count. */
+export const REPLIES_PER_THREAD = 200;
+
 const targetMissing = () => commentError('COMMENT_TARGET_NOT_FOUND', 'Node not found');
 const commentMissing = () => commentError('COMMENT_NOT_FOUND', 'Comment not found');
 
@@ -328,8 +332,16 @@ async function openThreadConflict(db: Context['db'], targetNodeId: string, autho
   );
 }
 
+/**
+ * A violation of the one-open-thread index specifically (#1663 review P3: not
+ * any P2002). Prisma names a raw partial index by its name or its columns,
+ * depending on the path, so both are accepted.
+ */
 function isOpenThreadUniqueViolation(error: unknown): boolean {
-  if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') return true;
+  if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+    const target = JSON.stringify(error.meta ?? {});
+    return target.includes('comment_meta_one_open_thread') || (target.includes('target_node_id') && target.includes('author_key'));
+  }
   return error instanceof Error && /comment_meta_one_open_thread/.test(error.message);
 }
 
@@ -339,6 +351,7 @@ function isOpenThreadUniqueViolation(error: unknown): boolean {
  */
 async function anchorFields(
   tx: Tx,
+  txCtx: Context,
   target: { id: string; memoryId: string; revSeq: number; name: string; abstract: string | null; content: string | null },
   revision: number,
   key: EncryptionKey | null,
@@ -363,6 +376,10 @@ async function anchorFields(
   if (!snapshot) throw unavailable();
   const sourceId = snapshot.memoryId ?? target.memoryId;
   if (sourceId === target.memoryId) return approvalFieldsOf(snapshot, key);
+  // #1663 review (Atilla P2-3) — a snapshot captured in ANOTHER memory (before
+  // a move) is anchored only when the caller may read that memory too, the
+  // same per-snapshot gate as nodeRevisions. A cached key is not a grant.
+  if (!(await isMemoryReadableFresh(txCtx, sourceId, tx))) throw unavailable();
   const source = await tx.memory.findUnique({ where: { id: sourceId }, select: { isEncrypted: true } });
   if (!source?.isEncrypted) return approvalFieldsOf(snapshot, null);
   const foreignKey = sessionKeyCache.getByMemoryId(sourceId);
@@ -459,7 +476,7 @@ async function reviseComment(
   key: EncryptionKey | null,
   op: CommentOp,
   actorKey: string,
-  patch: { content?: string; data?: Partial<CommentNodeData> },
+  patch: { content?: string | null; data?: Partial<CommentNodeData> },
   extra: Prisma.NodeUpdateInput = {},
 ): Promise<void> {
   const { content: priorContent, data: priorData } = decryptComment(row, key);
@@ -492,7 +509,7 @@ async function changeComment(
   gate: Gate,
   op: CommentOp,
   apply: (row: LockedComment, actorKey: string) => {
-    patch: { content?: string; data?: Partial<CommentNodeData> };
+    patch: { content?: string | null; data?: Partial<CommentNodeData> };
     meta: Prisma.CommentMetaUpdateInput;
     targetRow?: 'root';
   },
@@ -518,6 +535,16 @@ async function changeComment(
   }
   return viewOf(ctx, node.id, key);
 }
+
+/**
+ * #1663 review (Atilla/Dan/local P2) — retracting or hiding BLANKS the live
+ * row's body and quote, so no generic read surface (node(ref:), lists, search,
+ * MCP, export) can serve the text a stub conceals. The text survives only in
+ * the comment's revision history (cor:dmo:110:05 "its history is kept"),
+ * whose reads are gated to memory admins once the comment is a stub
+ * ({@link isConcealedCommentHistory}).
+ */
+const STUB_PATCH = { content: null, data: { quote: null } } as const;
 
 function refuseStub(meta: NonNullable<LockedComment['commentMeta']>): void {
   if (meta.hiddenAt) throw commentError('COMMENT_HIDDEN', 'This comment is hidden.');
@@ -559,7 +586,7 @@ export const commentMutations = {
           throw commentError('COMMENT_TARGET_IS_COMMENT', 'A comment cannot be the target of a comment; use replyToComment.');
         }
         const revision = args.anchorRevision ?? row.revSeq;
-        const hash = computeApprovalHash(await anchorFields(tx, row, revision, key));
+        const hash = computeApprovalHash(await anchorFields(tx, txCtx, row, revision, key));
         const open = await tx.commentMeta.findFirst({
           where: {
             targetNodeId: row.id, authorKey, threadRootId: null, threadState: 'OPEN',
@@ -628,7 +655,7 @@ export const commentMutations = {
     changeComment(ctx, args.commentRef, 'write', 'retract', (row, actorKey) => {
       requireAuthor(row.commentMeta!, actorKey);
       refuseStub(row.commentMeta!);
-      return { patch: {}, meta: { retractedAt: new Date(), retractedBy: actorKey } };
+      return { patch: STUB_PATCH, meta: { retractedAt: new Date(), retractedBy: actorKey } };
     }, args.expectedRevision),
 
   /** Resolve a thread: its author or any writer of the memory. */
@@ -656,7 +683,7 @@ export const commentMutations = {
     const reason = validateReason(args.reason);
     return changeComment(ctx, args.commentRef, 'moderate', 'hide', (row, actorKey) => {
       if (row.commentMeta!.hiddenAt) throw commentError('COMMENT_HIDDEN', 'This comment is already hidden.');
-      return { patch: { data: { hiddenReason: reason } }, meta: { hiddenAt: new Date(), hiddenBy: actorKey } };
+      return { patch: { content: null, data: { quote: null, hiddenReason: reason } }, meta: { hiddenAt: new Date(), hiddenBy: actorKey } };
     }, args.expectedRevision);
   },
 
@@ -677,6 +704,29 @@ export const commentMutations = {
     return true;
   },
 };
+
+/**
+ * #1663 review — whether `nodeId` is a retracted or hidden comment whose
+ * revision history the caller may not read. A stub's live row is blank; its
+ * earlier text lives only in revisions, kept for audit (cor:dmo:110:05), so
+ * once a comment is a stub its history is for memory admins alone. Every
+ * revision read surface (nodeRevisions, nodeRevision, a noderev URN) asks this.
+ */
+export async function isConcealedCommentHistory(ctx: Context, nodeId: string): Promise<boolean> {
+  const row = await ctx.db.node.findUnique({
+    where: { id: nodeId },
+    select: { nodeType: true, memoryId: true, commentMeta: { select: { retractedAt: true, hiddenAt: true } } },
+  });
+  if (row?.nodeType !== COMMENT_NODE_TYPE || !row.commentMeta) return false;
+  if (!row.commentMeta.retractedAt && !row.commentMeta.hiddenAt) return false;
+  try {
+    await mayModerate(ctx, row.memoryId);
+    return false;
+  } catch (error) {
+    if (error instanceof GraphQLError && error.extensions.code === 'COMMENT_ADMIN_REQUIRED') return true;
+    throw error;
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Reads
@@ -707,18 +757,28 @@ export const commentQueries = {
     if (roots.length === 0) return { items: [], total };
     const key = await keyForMemory(ctx.db, target.memoryId);
     const rootIds = roots.map((r) => r.nodeId);
-    const replies = await ctx.db.commentMeta.findMany({
+    // The first REPLIES_PER_THREAD replies of each thread, oldest first, in one
+    // query (#1663 review P3: bounded); replyCount stays exact.
+    const replies = await ctx.db.$queryRaw<Array<{ node_id: string; thread_root_id: string }>>`
+      SELECT node_id, thread_root_id FROM (
+        SELECT cm.node_id, cm.thread_root_id,
+          row_number() OVER (PARTITION BY cm.thread_root_id ORDER BY cm.created_at, cm.node_id) AS n
+        FROM comment_meta cm JOIN nodes nd ON nd.id = cm.node_id
+        WHERE cm.thread_root_id = ANY(${rootIds}::text[]) AND nd.deleted_at IS NULL
+      ) ranked WHERE n <= ${REPLIES_PER_THREAD} ORDER BY thread_root_id, n`;
+    const counts = await ctx.db.commentMeta.groupBy({
+      by: ['threadRootId'],
       where: { threadRootId: { in: rootIds }, node: { deletedAt: null } },
-      orderBy: [{ createdAt: 'asc' }, { nodeId: 'asc' }],
-      select: { nodeId: true, threadRootId: true },
+      _count: { _all: true },
     });
-    const views = await loadCommentViews(ctx.db, [...rootIds, ...replies.map((r) => r.nodeId)], key);
+    const countOf = new Map(counts.map((c) => [c.threadRootId, c._count._all]));
+    const views = await loadCommentViews(ctx.db, [...rootIds, ...replies.map((r) => r.node_id)], key);
     const viewOfId = new Map(views.map((v) => [v.id, v]));
     const items = rootIds.flatMap((rootId) => {
       const root = viewOfId.get(rootId);
       if (!root) return [];
-      const threadReplies = replies.filter((r) => r.threadRootId === rootId).map((r) => viewOfId.get(r.nodeId)).filter((v): v is CommentView => v != null);
-      return [{ root, replies: threadReplies, replyCount: threadReplies.length }];
+      const threadReplies = replies.filter((r) => r.thread_root_id === rootId).map((r) => viewOfId.get(r.node_id)).filter((v): v is CommentView => v != null);
+      return [{ root, replies: threadReplies, replyCount: countOf.get(rootId) ?? 0 }];
     });
     return { items, total };
   },

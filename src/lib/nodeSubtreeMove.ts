@@ -435,13 +435,21 @@ export async function moveNodeSubtree(
   // cannot hold comments.
   if (subtree.some((n) => n.nodeType === COMMENT_NODE_TYPE)) throw commentGovernedError('move', 'edits');
   const carriedComments = crossMemory
-    ? await tx.commentMeta.findMany({ where: { targetNodeId: { in: [...movedIds] } }, select: { nodeId: true, targetNodeId: true } })
+    ? await tx.commentMeta.findMany({
+      where: { targetNodeId: { in: [...movedIds] } },
+      select: { nodeId: true, targetNodeId: true, node: { select: { deletedAt: true } } },
+    })
     : [];
-  if (carriedComments.length > 0) {
+  // Every thread moves (history follows its target), but only LIVE comments
+  // need a commentable destination: a deleted thread is gone from every check
+  // (cor:dmo:110:05), which is what lets an admin's thread delete clear a node
+  // for a move into a private or system memory (110:02). #1663 review P2.
+  const liveCarried = carriedComments.filter((c) => c.node.deletedAt == null);
+  if (liveCarried.length > 0) {
     const dest = await tx.memory.findUniqueOrThrow({ where: { id: destMemoryId }, select: { class: true } });
     if (!COMMENTABLE_CLASSES.has(dest.class)) {
       const perTarget = new Map<string, number>();
-      for (const c of carriedComments) perTarget.set(c.targetNodeId, (perTarget.get(c.targetNodeId) ?? 0) + 1);
+      for (const c of liveCarried) perTarget.set(c.targetNodeId, (perTarget.get(c.targetNodeId) ?? 0) + 1);
       throw commentError(
         'COMMENT_MOVE_UNCOMMENTABLE',
         `Cannot move ${describeMoved(source.loc, subtree.length)} into a ${dest.class} memory: it has comment threads. An admin of the memory deletes them first.`,

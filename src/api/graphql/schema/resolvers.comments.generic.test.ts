@@ -9,6 +9,10 @@ import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
 import { createTestableMcpServer } from '../../../mcp/server.js';
+import { computeApprovalHash } from '../../../lib/approvalHash.js';
+import { isCiphertext, parseDataKey } from '../../../lib/crypto.js';
+import { sessionKeyCache } from '../../../lib/sessionKeyCache.js';
+import { encryptNodeFieldsWithKey } from '../../../lib/nodeCrypto.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -161,5 +165,123 @@ describe('a target\'s lifecycle carries its threads (cor:dmo:110:02/05)', () => 
       .toMatchObject(governed);
     expect((await errorOf(M.mergeNodes(null, { input: { source: a.id, target: b.id, include: ['EDGES'], deleteSource: true } }, as()))).extensions)
       .toMatchObject(governed);
+  });
+});
+
+describe('#1663 review cycle', () => {
+  const reader = async () => {
+    const u = await db.user.create({ data: { githubId: 160699, githubUsername: 'gen-reader', roles: [] } });
+    await db.orgMember.create({ data: { organizationId: orgId, userId: u.id, role: 'READER' } });
+    return u;
+  };
+
+  it('retract/hide blank the live row: generic node reads serve no text, and a stub\'s history is for admins only', async () => {
+    const r = await reader();
+    const target = await node('st:1');
+    const c = await comment(target.id, 'secret words');
+    await M.editComment(null, { commentRef: c.id, body: 'secret words v2', quote: 'q', expectedRevision: 1 }, as());
+    await M.hideComment(null, { commentRef: c.id, reason: 'abuse', expectedRevision: 2 }, as());
+    const raw = await db.node.findUniqueOrThrow({ where: { id: c.id } });
+    expect(raw.content).toBeNull();
+    expect((raw.data as { quote: string | null }).quote).toBeNull();
+    const generic = await Q.node(null, { ref: c.id }, as(r.id));
+    expect(generic?.content ?? null).toBeNull();
+    // The history keeps the text, for memory admins.
+    expect(await Q.nodeRevisions(null, { nodeRef: c.id }, { ...as(r.id), roles: ['READER'] })).toEqual([]);
+    const adminHistory = await Q.nodeRevisions(null, { nodeRef: c.id }, { ...as(), roles: ['ADMIN'] });
+    expect(adminHistory.map((h: { content: string | null }) => h.content)).toContain('secret words v2');
+    const revId = (await db.nodeRevision.findFirstOrThrow({ where: { nodeId: c.id } })).id;
+    expect(await Q.nodeRevision(null, { revisionId: revId }, { ...as(r.id), roles: ['READER'] })).toBeNull();
+    expect(await Q.nodeRevision(null, { revisionId: revId }, { ...as(), roles: ['ADMIN'] })).not.toBeNull();
+  });
+
+  it('hiding a thread frees its author\'s open-thread allowance', async () => {
+    const target = await node('st:2');
+    const c = await comment(target.id);
+    await M.hideComment(null, { commentRef: c.id, reason: 'abuse', expectedRevision: 1 }, as());
+    await comment(target.id, 'a new thread');
+  });
+
+  it('an admin thread delete clears a node for a move into a private memory; deleted threads follow their target', async () => {
+    const target = await node('st:3');
+    const c = await comment(target.id);
+    const priv = await resolvers.Mutation.createMemory(null, { orgId, name: 'priv-dest', memoryClass: 'private' }, as());
+    expect((await errorOf(M.moveNode(null, { sourceRef: target.id, targetUrn: nodeUrn(priv, 'st:3') }, as()))).extensions)
+      .toMatchObject({ code: 'COMMENT_MOVE_UNCOMMENTABLE' });
+    await M.deleteCommentThread(null, { commentRef: c.id, reason: 'clearing for the move' }, as());
+    await M.moveNode(null, { sourceRef: target.id, targetUrn: nodeUrn(priv, 'st:3') }, as());
+    // The deleted thread's history moved with it (same memory, kept for audit).
+    expect((await db.node.findUniqueOrThrow({ where: { id: c.id } })).memoryId).toBe(priv.id);
+  });
+
+  it('an old-revision anchor in another memory needs read access to that memory (Atilla P2-3)', async () => {
+    const writer = await db.user.create({ data: { githubId: 160698, githubUsername: 'gen-writer', roles: [] } });
+    await db.orgMember.create({ data: { organizationId: orgId, userId: writer.id, role: 'CONTRIBUTOR' } });
+    const priv = await resolvers.Mutation.createMemory(null, { orgId, name: 'priv-src', memoryClass: 'private' }, as());
+    const target = await node('an:1', priv.id);
+    await M.updateNode(null, { input: { id: target.id, content: 'second' } }, as());
+    await M.moveNode(null, { sourceRef: target.id, targetUrn: nodeUrn(memory, 'an:1') }, as());
+    expect((await errorOf(M.createComment(null, { targetRef: target.id, body: 'x', anchorRevision: 1 }, as(writer.id)))).extensions)
+      .toMatchObject({ code: 'COMMENT_ANCHOR_REVISION_UNAVAILABLE' });
+    // The owner of the old memory may anchor there.
+    const ok = await M.createComment(null, { targetRef: target.id, body: 'x', anchorRevision: 1 }, as());
+    expect(ok.anchorRevision).toBe(1);
+  });
+});
+
+describe('#1663 review — encrypted memories (local P2-2)', () => {
+  const dataKey = Buffer.alloc(32, 9).toString('base64');
+
+  it('encrypts body, quote and reasons at rest, reads them back with the key, and refuses SESSION_EXPIRED without it', async () => {
+    // An org memory is encrypted by its org App, not a user (encryptMemory);
+    // the state is set up directly, with the target's content encrypted.
+    const enc = await resolvers.Mutation.createMemory(null, { orgId, name: 'enc-comments' }, as());
+    const key = parseDataKey(dataKey);
+    await db.memory.update({ where: { id: enc.id }, data: { isEncrypted: true, vectorIndexEnabled: false } });
+    const target = await db.node.create({
+      data: { id: generateId(), memoryId: enc.id, loc: 'e:1', name: 'Title e:1', ...encryptNodeFieldsWithKey({ content: 'Body e:1' }, key) },
+    });
+    sessionKeyCache.set('comment-test', enc.id, key);
+    try {
+      const c = await M.createComment(null, { targetRef: target.id, body: 'private feedback', quote: 'quoted' }, as());
+      expect(c).toMatchObject({ body: 'private feedback', quote: 'quoted' });
+      // The anchor hashes PLAINTEXT, never ciphertext.
+      expect(c.anchorApprovalHash).toBe(computeApprovalHash({ title: 'Title e:1', abstract: null, content: 'Body e:1' }));
+      const stored = await db.node.findUniqueOrThrow({ where: { id: c.id } });
+      expect(isCiphertext(stored.content)).toBe(true);
+      expect(JSON.stringify(stored.data)).not.toContain('quoted');
+      const edited = await M.editComment(null, { commentRef: c.id, body: 'edited', expectedRevision: 1 }, as());
+      expect(edited.body).toBe('edited');
+      const page = await Q.commentThreads(null, { targetRef: target.id }, as());
+      expect(page.items[0].root).toMatchObject({ body: 'edited', quote: 'quoted' });
+      sessionKeyCache.clear();
+      expect((await errorOf(M.createComment(null, { targetRef: target.id, body: 'x' }, as()))).extensions).toMatchObject({ code: 'SESSION_EXPIRED' });
+      expect((await errorOf(Q.commentThreads(null, { targetRef: target.id }, as()))).extensions).toMatchObject({ code: 'SESSION_EXPIRED' });
+    } finally {
+      sessionKeyCache.clear();
+    }
+  });
+
+  it('an old-revision snapshot in another, now-encrypted memory hashes its plaintext with that memory\'s key, else UNAVAILABLE', async () => {
+    const src = await resolvers.Mutation.createMemory(null, { orgId, name: 'enc-src' }, as());
+    const target = await node('e:2', src.id);
+    await M.updateNode(null, { input: { id: target.id, content: 'second' } }, as());
+    await M.moveNode(null, { sourceRef: target.id, targetUrn: nodeUrn(memory, 'e:2') }, as());
+    // Encrypt the source memory's retained snapshot, as encryptMemory would.
+    const key = parseDataKey(dataKey);
+    await db.memory.update({ where: { id: src.id }, data: { isEncrypted: true, vectorIndexEnabled: false } });
+    const snap = await db.nodeRevision.findFirstOrThrow({ where: { nodeId: target.id, revNo: 1 } });
+    expect(snap.memoryId).toBe(src.id);
+    await db.nodeRevision.update({ where: { id: snap.id }, data: encryptNodeFieldsWithKey({ content: snap.content }, key) });
+    sessionKeyCache.clear();
+    expect((await errorOf(M.createComment(null, { targetRef: target.id, body: 'x', anchorRevision: 1 }, as()))).extensions)
+      .toMatchObject({ code: 'COMMENT_ANCHOR_REVISION_UNAVAILABLE' });
+    sessionKeyCache.set('comment-test-src', src.id, key);
+    try {
+      const c = await M.createComment(null, { targetRef: target.id, body: 'x', anchorRevision: 1 }, as());
+      expect(c.anchorApprovalHash).toBe(computeApprovalHash({ title: 'Title e:2', abstract: null, content: 'Body e:2' }));
+    } finally {
+      sessionKeyCache.clear();
+    }
   });
 });

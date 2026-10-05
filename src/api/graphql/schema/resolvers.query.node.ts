@@ -1,4 +1,5 @@
 // nodeQueries — extracted from resolvers.ts Query (split step 3). No behavior change.
+import { isConcealedCommentHistory } from './resolvers.comments.js';
 import { COMMENT_NODE_TYPE } from '../../../lib/comments/index.js';
 import {
   renderNodeExport,
@@ -599,6 +600,7 @@ export const nodeQueries = {
             select: { memoryId: true, nodeId: true },
           });
           if (!rev) return null;
+          if (await isConcealedCommentHistory(ctx, rev.nodeId)) return null; // #1663
           let memoryId = rev.memoryId;
           if (!memoryId) {
             const node = await ctx.db.node.findUnique({
@@ -2020,6 +2022,8 @@ export const nodeQueries = {
       // No read on the current memory ⇒ [] (no existence disclosure, matching
       // memoryUsageSummary).
       if (!canRead(node.memoryId)) return [];
+      // #1663 — a retracted/hidden comment's history is for memory admins.
+      if (await isConcealedCommentHistory(ctx, nodeId)) return [];
 
       const revisions = await ctx.db.nodeRevision.findMany({
         where: { nodeId },
@@ -2058,6 +2062,7 @@ export const nodeQueries = {
       const canRead = (memId: string) => accessible === null || accessible.includes(memId);
       if (!canRead(node.memoryId)) return null;
       if (!canRead(revision.memoryId ?? node.memoryId)) return null;
+      if (await isConcealedCommentHistory(ctx, revision.nodeId)) return null; // #1663
       return (await decryptReadableRevisions(ctx.db, [revision], node.memoryId))[0]!;
     },
 
