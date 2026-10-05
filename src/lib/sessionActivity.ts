@@ -241,9 +241,32 @@ export function isSessionLive(
   lastEventAt: Date | null | undefined,
   now: Date,
 ): boolean {
-  if (session.endedAt) return false;
-  const cutoff = now.getTime() - idleWindowMsFor(session.type);
-  return sessionActivityAt(session, lastEventAt).getTime() >= cutoff;
+  const lapsesAt = sessionLapsesAt(session, lastEventAt);
+  return lapsesAt !== null && lapsesAt.getTime() >= now.getTime();
+}
+
+/**
+ * The instant an open session stops reading live unless something drives it
+ * first (#1617): its activity instant plus its type's idle window. Null for an
+ * ended session, which is not live whatever the clock says.
+ *
+ * {@link isSessionLive} is defined in terms of this, so the deadline a reader
+ * is SHOWN (`Session.lapsesAt`, `hadron_whoami`) and the predicate the post and
+ * bind gates ENFORCE are one computation (`cor:agt:020:11`). A value in the
+ * past means the session has already lapsed.
+ */
+export function sessionLapsesAt(
+  session: {
+    type: SessionType;
+    startedAt: Date;
+    updatedAt?: Date | null;
+    autoExpiredAt?: Date | null;
+    endedAt?: Date | null;
+  },
+  lastEventAt: Date | null | undefined,
+): Date | null {
+  if (session.endedAt) return null;
+  return new Date(sessionActivityAt(session, lastEventAt).getTime() + idleWindowMsFor(session.type));
 }
 
 /**

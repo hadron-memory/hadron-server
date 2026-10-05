@@ -148,6 +148,7 @@ import {
   isSessionLive,
   loadLastEventBySession,
   recentlyTouchedFilter,
+  sessionLapsesAt,
   OPEN_SESSION_SCAN_CAP,
 } from '../lib/sessionActivity.js';
 import {
@@ -260,6 +261,33 @@ import { Prisma, type PrismaClient, type SessionType, type NodeContentValidation
 
 function textResult(text: string) {
   return { content: [{ type: 'text' as const, text }] };
+}
+
+/** A duration as "Nd Nh", "Nh Nm" or "Nm", for a human reading a deadline. */
+function formatDuration(ms: number): string {
+  const minutes = Math.max(0, Math.floor(ms / 60_000));
+  const days = Math.floor(minutes / 1440);
+  const hours = Math.floor((minutes % 1440) / 60);
+  const mins = minutes % 60;
+  if (days > 0) return `${days}d ${hours}h`;
+  if (hours > 0) return `${hours}h ${mins}m`;
+  return `${mins}m`;
+}
+
+/**
+ * #1617 — one open session's liveness, as `hadron_whoami` prints it: live with
+ * the instant it lapses, or lapsed since when. `lapsesAt` comes from
+ * `sessionLapsesAt`, the computation the post and bind gates enforce.
+ */
+function renderSessionLiveness(lapsesAt: Date | null, now: Date): string {
+  if (!lapsesAt) return 'liveness: not live';
+  const delta = lapsesAt.getTime() - now.getTime();
+  return delta >= 0
+    ? `liveness: LIVE — lapses at ${lapsesAt.toISOString()} (in ${formatDuration(delta)}) unless driven first; ` +
+        'any attributed read, post or mark-read through it renews it'
+    : `liveness: LAPSED at ${lapsesAt.toISOString()} (${formatDuration(-delta)} ago) — nothing drove it inside its ` +
+        'idle window, so it can no longer author in team chat. It is still OPEN: end it with a handoff, and start ' +
+        'a new session for this worker to keep working';
 }
 
 /** One operator can monitor this many live Workers in one poll. */
@@ -8478,6 +8506,9 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
             select: {
               id: true, startedAt: true, endedAt: true, type: true, plan: true,
               appId: true, workerId: true,
+              // #1617: the liveness inputs, so each open row can say whether it
+              // is live and when it lapses — before a post is refused, not after.
+              updatedAt: true, autoExpiredAt: true,
             },
           });
           const count = await tx.session.count({ where });
@@ -8525,6 +8556,15 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         }
       }
 
+      // #1617 — liveness was invisible until a post was refused. Same
+      // derivation as the post and bind gates (`sessionLapsesAt`, which
+      // `isSessionLive` is defined by), so what this shows is what they enforce.
+      const nowForLiveness = new Date();
+      const lastEventForLiveness = await loadLastEventBySession(
+        db as never,
+        sessions.filter((s) => !s.endedAt).map((s) => s.id),
+      );
+
       const lines = sessions.map((s) => {
         const worker = s.workerId ? workerRows.get(s.workerId) : null;
         const app = s.appId ? appRows.get(s.appId) : null;
@@ -8550,6 +8590,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
             : '    working as: nobody — this session is NOT bound to a worker, so anything it posts is attributed to you, not a teammate.\n') +
           (app ? `    app: ${app.name}\n` : '') +
           `    started: ${s.startedAt.toISOString()}${s.type ? ` · ${s.type}` : ''}` +
+          (s.endedAt ? '' : `\n    ${renderSessionLiveness(sessionLapsesAt(s, lastEventForLiveness.get(s.id)), nowForLiveness)}`) +
           (s.plan ? `\n    plan: ${s.plan}` : '') +
           (s.workerId && registerBlocks.has(s.workerId)
             ? `\n${registerBlocks.get(s.workerId)!.split('\n').map((l) => `    ${l}`).join('\n')}`

@@ -1580,6 +1580,14 @@ export const typeDefs = `#graphql
     still be ended with a handoff. False for an ended or deleted session.
     """
     isLive: Boolean!
+    """
+    #1617: when this session stops reading live unless something drives it
+    first: its last activity plus its type's idle window. A past instant means
+    it has already LAPSED. Any attributed read, post or mark-read through a
+    live session renews it. Derived from the same computation as isLive, so
+    the two always agree. Null for an ended or deleted session.
+    """
+    lapsesAt: DateTime
     events: [UsageEvent!]!
   }
 
