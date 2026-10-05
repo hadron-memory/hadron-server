@@ -61,7 +61,7 @@ export function nudgeText(a: AttentionItem): string {
   return (
     `Hadron team attention: ${a.unread} relevant unread (${a.unreadMentions} mention${a.unreadMentions === 1 ? '' : 's'}${where ? `; ${where}` : ''}). ` +
     'Read team chat unfiltered with your own live session; if nothing needs action, ' +
-    'mark read and finish silently — no chat post. (Orca attention router; counts as of send.)'
+    "mark read and finish silently — no chat post or 'read/no-action' comment. (Orca attention router; counts as of send.)"
   );
 }
 
@@ -809,8 +809,15 @@ export function pollOnce(cfg: Config, run: Runner = runCommand, log: (line: stri
         continue;
       }
       // The recompute above is a network round trip (or several) that reopened
-      // the typing window the empty-prompt gate just closed (#5473 class):
-      // prove the prompt is STILL empty before typing into it.
+      // BOTH windows the gates had closed: the agent may have gone busy (#1490
+      // steering hazard — a busy agent renders an EMPTY prompt box, so the
+      // screen alone cannot catch it) or a human may have started typing
+      // (#5473). Re-prove both, as close to the send as possible. The wait can
+      // re-age the fresh counts; the named seqs keep the nudge true anyway.
+      if (!isIdle(cfg, handle, cfg.busyWaitMs, run)) {
+        outcome.held[entry.name] = `busy again after the recompute (waited ${Math.round(cfg.busyWaitMs / 1000)}s)`;
+        continue;
+      }
       const [stillEmpty, whyNow] = promptIsEmpty(cfg, handle, detail, run);
       if (!stillEmpty) {
         outcome.held[entry.name] = `prompt not empty on recheck (${whyNow})`;
@@ -838,7 +845,19 @@ export function pollOnce(cfg: Config, run: Runner = runCommand, log: (line: stri
       if (fresh.length) log(`orca-attention-router: ${fresh.map(([n, r]) => `${n}: ${r}`).join('; ')}`);
     } else {
       mustOwn();
+      // Adoption clears the ledger, but a nudge may have carried a frontier
+      // BEYOND the adopted token's horizon: the fresh scan reads LATER than
+      // the main one, so its mention can postdate the token — the next poll
+      // lists that mention again and nudges a second time (blind reviews of
+      // the first head, Atilla P2 / Diego P3-1). Carry records the token
+      // cannot cover; `alreadyNudged` then answers them from the new base.
+      const carried: Record<string, NudgeRecord> = {};
+      for (const [w, record] of Object.entries(ledger.nudged)) {
+        const horizon = attention.items.find((i) => i.worker === w && i.channel === cfg.channel)?.lastRelevantSeq ?? null;
+        if (horizon === null || record.relevantSeq > horizon) carried[w] = record;
+      }
       state.adopt(attention.token);
+      if (Object.keys(carried).length) state.saveLedger({ base: state.base(), nudged: carried, reported: {} });
       outcome.adopted = true;
     }
     return outcome;

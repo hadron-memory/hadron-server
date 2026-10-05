@@ -43,6 +43,9 @@ class FakeCLIs {
   freshServed = 0;
   terminals: Array<Record<string, unknown>> = [];
   busy = new Set<string>();
+  /** Busy on a handle's SECOND wait — the post-recompute idle recheck. */
+  busyRecheck = new Set<string>();
+  waits = new Map<string, number>();
   reject = new Set<string>();
   /** The rendered screen per handle; set by terminal() to an idle prompt for its agent. */
   screens = new Map<string, { tail?: unknown; draft?: string; source?: string; ok?: boolean }>();
@@ -119,10 +122,13 @@ class FakeCLIs {
     if (verb === 'terminal list') return out({ ok: true, result: { terminals: this.terminals } });
     const handle = argv[argv.indexOf('--terminal') + 1];
     if (verb === 'terminal wait') {
+      const n = (this.waits.get(handle) ?? 0) + 1;
+      this.waits.set(handle, n);
+      const busyNow = n === 1 ? this.busy.has(handle) : this.busy.has(handle) || this.busyRecheck.has(handle);
       // Only a SATISFIED wait precedes a fresh scan; a busy worker is held
       // before any recompute, and its failed wait must not flip the phase.
-      if (!this.busy.has(handle)) this.sawWait = true;
-      return this.busy.has(handle)
+      if (!busyNow) this.sawWait = true;
+      return busyNow
         ? out({ ok: false, error: { code: 'timeout', message: 'timeout' } })
         : out({ ok: true, result: { wait: { satisfied: true } } });
     }
@@ -178,6 +184,7 @@ describe('Orca attention router — the happy path', () => {
     expect(fake.sent[0][1]).toContain('unread #100–#120');
     expect(fake.sent[0][1]).toContain('latest mention #110');
     expect(fake.sent[0][1]).toContain('as of send');
+    expect(fake.sent[0][1]).toContain("no chat post or 'read/no-action' comment");
     const verbs = fake.calls.map((a) => a.slice(1, 3).join(' '));
     expect(verbs.indexOf('terminal wait')).toBeLessThan(verbs.indexOf('terminal read'));
     expect(verbs.indexOf('terminal read')).toBeLessThan(verbs.indexOf('terminal send'));
@@ -281,6 +288,38 @@ describe('Orca attention router — fresh counts at send time (#1616)', () => {
     expect(fake.sent).toEqual([]);
     expect(adopted(c)).toBeNull();
     expect(logs.join('\n')).not.toContain('Holger typing here'); // the reason never quotes the text
+  });
+
+  it('re-proves IDLE after the recompute: a busy agent renders an empty prompt box, so the screen alone cannot catch it', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli');
+    fake.attention.workers = [worker('w-eli', 'Eli', { mentions: 1, unread: 2, relevant: 110 })];
+    fake.busyRecheck.add('term_eli'); // the agent went busy during the fresh scan
+    const out = poll(c);
+    expect(out.nudged).toEqual([]);
+    expect(out.held.Eli).toContain('busy again after the recompute');
+    expect(fake.sent).toEqual([]);
+    expect(adopted(c)).toBeNull();
+  });
+
+  it('adoption carries a nudge whose frontier postdates the token: no duplicate nudge next poll (blind-review P2, first head)', () => {
+    const c = cfg(['w-eli', 'Eli'], ['w-baloo', 'Baloo']);
+    fake.terminal('eli');
+    fake.terminal('baloo');
+    // Main scan sees Eli's mention at 110; the fresh scan, reading later, sees 125.
+    fake.attention.workers = [worker('w-eli', 'Eli', { relevant: 110 }), worker('w-baloo', 'Baloo')];
+    fake.fresh = [worker('w-eli', 'Eli', { relevant: 125 }), worker('w-baloo', 'Baloo', { relevant: 115 })];
+    const first = poll(c);
+    expect(first).toMatchObject({ nudged: ['Eli', 'Baloo'], adopted: true });
+    expect(fake.sent[0][1]).toContain('latest mention #125');
+    // The server lists Eli again next poll: 125 postdates the adopted token's
+    // horizon. Baloo's 115 equals its horizon, so its record is NOT carried.
+    fake.attention.workers = [worker('w-eli', 'Eli', { relevant: 125 })];
+    fake.fresh = null;
+    const second = poll(c);
+    expect(second.covered).toEqual(['Eli']);
+    expect(second.nudged).toEqual([]);
+    expect(fake.sent).toHaveLength(2); // no re-send: Eli answered from the carried record
   });
 });
 
