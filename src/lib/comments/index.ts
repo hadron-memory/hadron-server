@@ -179,3 +179,8 @@ export function assertNotCommentWrite(
   if (was && !willBe && nextType != null) throw commentGovernedError(op, 'removes');
   if (was) throw commentGovernedError(op, 'edits');
 }
+
+/** Whether `error` is the comment-path {@link commentGovernedError} refusal. */
+export function isCommentGovernedError(error: unknown): boolean {
+  return error instanceof GraphQLError && error.extensions.code === 'ROLE_GOVERNED' && error.extensions.kind === 'comment';
+}

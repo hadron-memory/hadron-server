@@ -1,4 +1,5 @@
 // nodeQueries — extracted from resolvers.ts Query (split step 3). No behavior change.
+import { COMMENT_NODE_TYPE } from '../../../lib/comments/index.js';
 import {
   renderNodeExport,
   type NodeExportFormat,
@@ -1078,6 +1079,8 @@ export const nodeQueries = {
           : {}),
         ...approvalStatePrismaWhere(f.approvalState, ctx.db),
         ...(f.minted != null ? { mintedAt: f.minted ? { not: null } : null } : {}),
+        // #1607 (cor:dmo:110:06) — approval and mint status sets never contain comments.
+        ...(f.approvalState != null || f.minted != null ? { AND: [{ nodeType: { not: COMMENT_NODE_TYPE } }] } : {}),
       };
       const nodeInclude = {
         memory: true,
@@ -2269,6 +2272,8 @@ export const nodeQueries = {
             : {}),
           ...approvalStatePrismaWhere(f.approvalState, ctx.db),
           ...(f.minted != null ? { mintedAt: f.minted ? { not: null } : null } : {}),
+          // #1607 (cor:dmo:110:06) — approval and mint status sets never contain comments.
+          ...(f.approvalState != null || f.minted != null ? { AND: [{ nodeType: { not: COMMENT_NODE_TYPE } }] } : {}),
         },
         orderBy: { loc: 'asc' },
         take: limit ?? 500,

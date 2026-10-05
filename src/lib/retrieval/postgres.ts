@@ -57,6 +57,8 @@ function filterClause(f: NodeSqlFilter | undefined, bind: (v: unknown) => string
   const approval = approvalStateSql(flt.approvalState); // #1591
   if (approval) parts.push(approval);
   if (flt.minted != null) parts.push(flt.minted ? 'minted_at IS NOT NULL' : 'minted_at IS NULL'); // #1591
+  // #1607 (cor:dmo:110:06) — approval and mint status sets never contain comments.
+  if (approval || flt.minted != null) parts.push("node_type <> 'comment'");
   return parts.length ? ' AND ' + parts.join(' AND ') : '';
 }
 

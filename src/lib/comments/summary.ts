@@ -42,6 +42,9 @@ export async function viewerOpenThreads(db: Db, targetIds: string[], authorKey: 
   return new Map(rows.map((r) => [r.target_node_id, r.node_id]));
 }
 
+/** One `UnresolvedFeedback` row; `urn` is resolved by the GraphQL field resolver from loc + memory. */
+export type UnresolvedFeedbackRow = { nodeId: string; loc: string; memoryId: string; openThreads: number };
+
 /**
  * #1607 — the `unresolvedFeedback` warning rows for the given nodes: those
  * with at least one open thread, ordered by loc. A warning, never a blocker.

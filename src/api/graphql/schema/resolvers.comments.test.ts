@@ -55,7 +55,7 @@ beforeEach(async () => {
     { organizationId: org.id, userId: writer.id, role: 'CONTRIBUTOR' },
     { organizationId: org.id, userId: reader.id, role: 'READER' },
   ] });
-  memory = await resolvers.Mutation.createMemory(null, { orgId: org.id, name: 'comments' }, as());
+  memory = await resolvers.Mutation.createMemory(null, { orgId: org.id, name: 'discussion' }, as());
 });
 
 describe('createComment (cor:dmo:110:01–05)', () => {
@@ -338,5 +338,44 @@ describe('database invariants (cor:dmo:110:01/04)', () => {
     await expect(db.node.delete({ where: { id: target.id } })).rejects.toThrow();
     await db.memory.delete({ where: { id: memory.id } });
     expect(await db.commentMeta.count()).toBe(0);
+  });
+});
+
+describe('#1607 — approval and mint leave comments out (cor:dmo:110:06/07, 120:06)', () => {
+  it('approveNode refuses a comment; approve-all skips it and warns about open feedback', async () => {
+    const target = await node('m:1');
+    const c = await comment(target.id);
+    expect(await codeOf(resolvers.Mutation.approveNode(null, { nodeRef: c.id }, as()))).toBe('COMMENT_NOT_APPROVABLE');
+    const result = await resolvers.Mutation.approveMemoryNodes(null, { memoryRef: memory.id }, as());
+    // The memory root (loc `discussion`) and the target; never the comment.
+    expect(result.approved.map((r: { loc: string }) => r.loc)).toEqual(['discussion', 'm:1']);
+    expect(result.unresolvedFeedback).toEqual([{ nodeId: target.id, loc: 'm:1', memoryId: memory.id, openThreads: 1 }]);
+    expect(await C.anchorIsCurrent(c, {}, as())).toBe(true);
+    const fb = (resolvers as unknown as { UnresolvedFeedback: { urn: (r: unknown, a: unknown, ctx: Context) => Promise<string> } }).UnresolvedFeedback;
+    expect(await fb.urn(result.unresolvedFeedback[0], {}, as())).toMatch(/m:1$/);
+  });
+
+  it('a mint dry run neither counts nor blocks on comments, warns on open feedback, and the mint leaves them unstamped', async () => {
+    const target = await node('m:2');
+    const c = await comment(target.id);
+    await resolvers.Mutation.approveMemoryNodes(null, { memoryRef: memory.id }, as());
+    const dry = await M.mintMemoryNodes(null, { memoryRef: memory.id, dryRun: true }, as());
+    expect(dry.blockers).toEqual([]);
+    expect(dry.mintLocs).toEqual(['discussion', 'm:2']);
+    expect(dry.unresolvedFeedback).toEqual([{ nodeId: target.id, loc: 'm:2', memoryId: memory.id, openThreads: 1 }]);
+    const minted = await M.mintMemoryNodes(null, { memoryRef: memory.id }, as());
+    expect(minted.mintedCount).toBe(2);
+    expect((await db.node.findUniqueOrThrow({ where: { id: c.id } })).mintedAt).toBeNull();
+    // A comment posted after the mint never blocks the next one.
+    await comment(target.id, 'later', admin.id);
+    const again = await M.mintMemoryNodes(null, { memoryRef: memory.id, dryRun: true }, as());
+    expect(again).toMatchObject({ blockers: [], mintLocs: [] });
+  });
+
+  it('verifyMemoryNodes does not report comments', async () => {
+    const target = await node('m:3');
+    await comment(target.id);
+    const report = await resolvers.Query.verifyMemoryNodes(null, { memoryRef: memory.id }, as());
+    expect(report.checked).toBe(2); // the root and the target
   });
 });

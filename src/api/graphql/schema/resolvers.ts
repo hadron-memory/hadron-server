@@ -103,6 +103,7 @@ export const resolvers = {
   // Worker / Agent attribution with it.
   Node: { ...typeResolvers.Node, ...nodeApprovalFieldResolvers.Node, ...nodeAttributionFieldResolvers.Node, ...commentFieldResolvers.Node },
   Comment: commentFieldResolvers.Comment,
+  UnresolvedFeedback: commentFieldResolvers.UnresolvedFeedback,
   NodeRevision: { ...typeResolvers.NodeRevision, ...nodeAttributionFieldResolvers.NodeRevision },
   NodeApproval: nodeApprovalFieldResolvers.NodeApproval,
   NodeMintStatus: nodeApprovalFieldResolvers.NodeMintStatus,

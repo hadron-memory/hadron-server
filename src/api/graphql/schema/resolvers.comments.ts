@@ -58,6 +58,7 @@ import {
   type CommentOp,
 } from '../../../lib/comments/index.js';
 import { openThreadCounts, viewerOpenThreads } from '../../../lib/comments/summary.js';
+import { deleteThreadsInTx } from '../../../lib/comments/lifecycle.js';
 
 type Tx = Prisma.TransactionClient;
 
@@ -677,32 +678,6 @@ export const commentMutations = {
   },
 };
 
-/**
- * Soft-delete live comment threads (root + replies) in the caller's
- * transaction. `rootIds` are top-level comment ids. Used by the admin thread
- * delete and by a target's soft delete (`cause: 'TARGET'`).
- */
-export async function deleteThreadsInTx(
-  tx: Tx,
-  rootIds: string[],
-  opts: { actorKey: string | null; deletedBy: string | null; cause: 'ADMIN' | 'TARGET'; at?: Date },
-): Promise<number> {
-  if (rootIds.length === 0) return 0;
-  const members = await tx.commentMeta.findMany({
-    where: { OR: [{ nodeId: { in: rootIds } }, { threadRootId: { in: rootIds } }], node: { deletedAt: null } },
-    select: { nodeId: true },
-  });
-  const ids = members.map((m) => m.nodeId);
-  if (ids.length === 0) return 0;
-  const at = opts.at ?? new Date();
-  await tx.node.updateMany({ where: { id: { in: ids } }, data: { deletedAt: at, deletedBy: opts.deletedBy } });
-  await tx.commentMeta.updateMany({
-    where: { nodeId: { in: ids } },
-    data: { threadDeletedAt: at, threadDeletedBy: opts.actorKey ?? opts.deletedBy, threadDeletedCause: opts.cause },
-  });
-  return ids.length;
-}
-
 // ---------------------------------------------------------------------------
 // Reads
 
@@ -846,6 +821,10 @@ export const commentFieldResolvers = {
       if (ctx.impersonation || !(await canWriteCached(ctx, c.memoryId))) return null;
       return loadCommentActor(ctx, 'user', c.createdBy);
     },
+  },
+  /** #1607 — the warning row's node URN, from its loc + memory (the same string as Node.urn). */
+  UnresolvedFeedback: {
+    urn: (r: { loc: string; memoryId: string }, _: unknown, ctx: Context) => resolveNodeUrnField(r, ctx),
   },
   Node: {
     /** The trust cue (`cor:dmo:110:07`), batched per request. */
