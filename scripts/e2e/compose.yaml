@@ -1,0 +1,46 @@
+services:
+  db:
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_USER: e2e
+      POSTGRES_PASSWORD: e2e
+      POSTGRES_DB: e2e
+    volumes:
+      - db:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U e2e -d e2e']
+      interval: 2s
+      timeout: 5s
+      retries: 30
+  app:
+    build:
+      context: ../..
+      dockerfile: scripts/e2e/Dockerfile
+    environment:
+      DATABASE_URL: postgresql://e2e:e2e@db:5432/e2e
+      NODE_ENV: development
+      PORT: '4000'
+      BASE_URL: http://localhost:${E2E_PORT:?set E2E_PORT}
+      FRONTEND_URL: http://localhost:${E2E_PORTAL_PORT:?set E2E_PORTAL_PORT}
+      DEV_LOGIN_ENABLED: 'true'
+      E2E_SEED: 'true'
+      DISABLE_RUN_WORKER: 'true'
+      DISABLE_SCHEDULER: 'true'
+      GRAPHS_PATH: /var/lib/hadron/graphs
+    ports:
+      - '${E2E_BIND:-127.0.0.1}:${E2E_PORT}:4100'
+    volumes:
+      - graphs:/var/lib/hadron/graphs
+      - credentials:/fixtures
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: [CMD, node, -e, "fetch('http://127.0.0.1:4000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 3s
+      timeout: 5s
+      retries: 60
+volumes:
+  db:
+  graphs:
+  credentials:
