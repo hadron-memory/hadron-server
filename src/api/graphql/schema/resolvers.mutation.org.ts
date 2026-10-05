@@ -57,37 +57,6 @@ function rethrowRootNameTaken(err: unknown): never {
   throw err;
 }
 
-async function requireMergeUsersAccess(
-  ctx: Context,
-  sourceUserId: string,
-  targetUserId: string,
-): Promise<void> {
-  if (isPlatformAdmin(ctx)) return;
-  if (!ctx.userId) throw new Error('Forbidden');
-
-  // An org admin may perform the global account merge only when both users are
-  // live members of at least one org the caller administers. Single query: an
-  // org (not deleted) where source, target, and an ADMIN/OWNER caller are all
-  // live members. `deletedAt: null` on every membership so a revoked membership
-  // never authorizes (findings:revoked-membership-auth-gates).
-  const administeredSharedOrg = await ctx.db.organization.findFirst({
-    where: {
-      deletedAt: null,
-      members: { some: { userId: sourceUserId, deletedAt: null } },
-      AND: [
-        { members: { some: { userId: targetUserId, deletedAt: null } } },
-        {
-          members: {
-            some: { userId: ctx.userId, role: { in: ['ADMIN', 'OWNER'] }, deletedAt: null },
-          },
-        },
-      ],
-    },
-    select: { id: true },
-  });
-  if (!administeredSharedOrg) throw new Error('Forbidden');
-}
-
 export const orgMutations = {
     updateMyProfile: async (
       _: unknown,
@@ -185,24 +154,13 @@ export const orgMutations = {
       { input }: { input: { source: string; target: string } },
       ctx: Context,
     ) => {
-      const platformAdmin = isPlatformAdmin(ctx);
-      if (!platformAdmin && !ctx.userId) throw new Error('Forbidden');
-
-      let sourceUserId: string;
-      let targetUserId: string;
-      try {
-        [{ id: sourceUserId }, { id: targetUserId }] = await Promise.all([
-          resolveUserRef(ctx.db, input.source),
-          resolveUserRef(ctx.db, input.target),
-        ]);
-      } catch (error) {
-        // Non-platform callers must not use resolver error differences to
-        // enumerate user refs outside organizations they administer.
-        if (!platformAdmin) throw new Error('Forbidden');
-        throw error;
-      }
-
-      await requireMergeUsersAccess(ctx, sourceUserId, targetUserId);
+      // #1642 / DU-1: containment until source-user consent is designed.
+      // Gate before resolving either account so denied callers learn no refs.
+      requireRole(ctx, 'ADMIN');
+      const [{ id: sourceUserId }, { id: targetUserId }] = await Promise.all([
+        resolveUserRef(ctx.db, input.source),
+        resolveUserRef(ctx.db, input.target),
+      ]);
       if (sourceUserId === targetUserId) {
         throw new GraphQLError('mergeUsers: source and target are the same user.', {
           extensions: { code: 'MERGE_SOURCE_EQUALS_TARGET', userId: sourceUserId },
@@ -212,9 +170,7 @@ export const orgMutations = {
         sourceUserId,
         targetUserId,
         actorUserId: ctx.userId ?? null,
-        // Only a platform admin may carry the source's global roles onto the
-        // target; an org-authorized merge must not escalate platform privilege.
-        mergeGlobalRoles: platformAdmin,
+        mergeGlobalRoles: true,
       });
     },
 
