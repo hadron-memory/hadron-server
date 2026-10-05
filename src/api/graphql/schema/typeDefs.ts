@@ -1309,6 +1309,14 @@ export const typeDefs = `#graphql
     approvalStatus: NodeApprovalStatus!
     "#1591 — whether this node is minted, and the record of it."
     mintStatus: NodeMintStatus!
+    "#1610 — the Worker that created this node, when it was written in a worker session. The user is createdBy. Null for a write with no worker behind it, and for nodes written before #1610."
+    createdByWorker: ActorRef
+    "#1610 — the Agent behind this node's creation: a worker's role agent, an agent session, or a headless App run. Null when no agent was behind it."
+    createdByAgent: ActorRef
+    "#1610 — the Worker behind the last authored edit. A later edit with no worker behind it clears it, so it always describes the same edit as updatedAt."
+    updatedByWorker: ActorRef
+    "#1610 — the Agent behind the last authored edit; cleared like updatedByWorker."
+    updatedByAgent: ActorRef
     memoryId: String!
     """
     The PLATFORM-kind axis (info / task / prompt / record / …). Load-bearing for
@@ -1861,8 +1869,20 @@ export const typeDefs = `#graphql
     skippedPlaceholders: [String!]!
   }
 
+  "#1610 — public identity of a Worker or Agent that wrote a node: never the full object, whose own read gate this does not pass."
+  type ActorRef {
+    id: ID!
+    name: String!
+    "The canonical hrn:worker:/hrn:agent: URN. Null when it cannot be composed."
+    urn: String
+  }
+
   type NodeRevision {
     id: ID!
+    "#1610 — the Worker behind the edit this snapshot records, beside editedBy (the user)."
+    editedByWorker: ActorRef
+    "#1610 — the Agent behind the edit this snapshot records."
+    editedByAgent: ActorRef
     "#1326 — attribution of the content captured before the next edit."
     authorship: NodeAuthorship
     "#1326 — advisory validation at this historical revision."

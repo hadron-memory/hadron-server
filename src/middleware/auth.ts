@@ -5,6 +5,7 @@ import { lockAuthorityAnchors } from '../lib/auth/authorityAnchors.js';
 import { verifyJwt } from '../auth/jwt.js';
 import { canImpersonate, type ImpersonationContext } from '../lib/auth/impersonation.js';
 import { LIVE_ORG_MEMBERSHIP } from '../lib/auth/liveOrgMembership.js';
+import { publishActor } from '../lib/requestActor.js';
 
 export interface AuthContext {
   clientId?: string;       // "github:<username>" / "email:<addr>" — only set for OAuth/JWT users
@@ -216,14 +217,18 @@ async function bindSession(
   if (!isPureAppKey && !isUserPrincipal) return;
   const session = await db.session.findUnique({
     where: { id: sessionId },
-    select: { id: true, appId: true, userId: true, expiresAt: true, endedAt: true },
+    select: { id: true, appId: true, userId: true, expiresAt: true, endedAt: true, workerId: true, agentId: true },
   });
   if (!session || session.endedAt) return;
   if (session.expiresAt && session.expiresAt <= new Date()) return;
   const owned = isPureAppKey
     ? session.appId === ctx.appId
     : session.userId === ctx.userId;
-  if (owned) ctx.sessionId = session.id;
+  if (!owned) return;
+  ctx.sessionId = session.id;
+  // #1610: the Worker / Agent behind this request's writes comes from the
+  // binding just validated — the one thing a client cannot assert.
+  publishActor({ workerId: session.workerId, agentId: session.agentId });
 }
 
 async function resolveAppKey(

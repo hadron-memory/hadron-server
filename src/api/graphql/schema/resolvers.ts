@@ -59,6 +59,7 @@ import { teamWorkMutations, teamWorkQueries } from './resolvers.teamWork.js';
 import { memoryConfigMutations, memoryConfigQueries, memoryConfigFieldResolvers } from './resolvers.memoryConfig.js';
 import { memoryConfigApplyMutations } from './resolvers.memoryConfigApply.js';
 import { nodeApprovalFieldResolvers, nodeApprovalMutations, nodeApprovalQueries } from './resolvers.nodeApproval.js';
+import { nodeAttributionFieldResolvers } from './resolvers.nodeAttribution.js';
 import {
   specCorpusMintMutations,
   specCorpusMutations,
@@ -97,8 +98,10 @@ export const resolvers = {
   Agent: { ...typeResolvers.Agent, ...registerFieldResolvers.Agent },
   // Same for Memory: the config field joins the existing type block (#1325).
   Memory: { ...typeResolvers.Memory, ...memoryConfigFieldResolvers.Memory },
-  // #1591: approval status joins the existing Node block.
-  Node: { ...typeResolvers.Node, ...nodeApprovalFieldResolvers.Node },
+  // #1591: approval status joins the existing Node block; #1610 the
+  // Worker / Agent attribution with it.
+  Node: { ...typeResolvers.Node, ...nodeApprovalFieldResolvers.Node, ...nodeAttributionFieldResolvers.Node },
+  NodeRevision: { ...typeResolvers.NodeRevision, ...nodeAttributionFieldResolvers.NodeRevision },
   NodeApproval: nodeApprovalFieldResolvers.NodeApproval,
   NodeMintStatus: nodeApprovalFieldResolvers.NodeMintStatus,
   MemoryConfig: memoryConfigFieldResolvers.MemoryConfig,

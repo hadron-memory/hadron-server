@@ -1280,6 +1280,17 @@ model Node {
   updatedBy          String?   @map("updated_by")
   deletedAt          DateTime? @map("deleted_at")
   deletedBy          String?   @map("deleted_by")
+  /// #1610 — the Worker / Agent behind the write, beside the user in
+  /// createdBy / updatedBy. Server-derived from the request's validated
+  /// session binding or App run (src/lib/requestActor.ts), never
+  /// client-supplied; stamped centrally on creates and authored-field
+  /// updates (src/integrations/db/client.ts). The updatedBy* pair describes
+  /// the LAST authored edit, so an edit with no agent behind it clears it.
+  /// No FK, like the audit stamps (cor:dmo:010:01).
+  createdByWorkerId  String?   @map("created_by_worker_id")
+  createdByAgentId   String?   @map("created_by_agent_id")
+  updatedByWorkerId  String?   @map("updated_by_worker_id")
+  updatedByAgentId   String?   @map("updated_by_agent_id")
 
   memory        Memory          @relation(fields: [memoryId], references: [id], onDelete: Cascade)
   outgoingEdges Edge[]          @relation("SourceNode")
@@ -2340,6 +2351,11 @@ model NodeRevision {
   /// / "user:<id>" (AuthContext.clientId) and "app:<App.id>" (App-key
   /// principals).
   editedByInfo       String?  @map("edited_by_info")
+  /// #1610 — the Worker / Agent behind the edit this snapshot records,
+  /// beside editedBy (the user). Set from the snapshot editor (editorFromAuth),
+  /// so the lazy reconcile, which builds its own editor, records none.
+  editedByWorkerId   String?  @map("edited_by_worker_id")
+  editedByAgentId    String?  @map("edited_by_agent_id")
   /// #620: user-settable label for this revision (updateNodeRevision
   /// mutation; REV_LABEL_MAX_LEN cap). Also captures the #88 `reason`
   /// arg at snapshot time — the edit rationale that previously squatted

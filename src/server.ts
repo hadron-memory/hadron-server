@@ -83,6 +83,7 @@ import {
   REQUEST_KEYS_HEADER,
 } from './lib/memoryUnlock.js';
 import { requestKeyStorage } from './lib/requestKeys.js';
+import { emptyActor, requestActorStorage } from './lib/requestActor.js';
 import { isEmbeddingConfigured } from './lib/embedding/index.js';
 import { getBusClient } from './lib/bus/index.js';
 import { startAppRunBusListener, startAppRunSweepLoop } from './jobs/appRuns.js';
@@ -1160,6 +1161,9 @@ export async function createServer(): Promise<Express> {
     // invisible to concurrent requests and vanish with the request's async
     // context — aborted responses included (PR-514 review, Codex P1 ×2).
     (_req, _res, next) => requestKeyStorage.run(new Map(), next),
+    // #1610: the Worker / Agent behind this request's writes, filled by
+    // resolveAuthContext from the validated session binding.
+    (_req, _res, next) => requestActorStorage.run(emptyActor(), next),
     expressMiddleware(apollo, {
       context: async ({ req }) => {
         const auth = await resolveAuthContext(req, db);
@@ -1727,12 +1731,13 @@ export async function createServer(): Promise<Express> {
   // MCP endpoint (Streamable HTTP transport)
   // ---------------------------------------------------------------------------
 
+  // #1610: each MCP request gets its own actor holder (see requestActor.ts).
   app.post('/mcp', async (req, res) => {
-    await handleMcpRequest(req, res);
+    await requestActorStorage.run(emptyActor(), () => handleMcpRequest(req, res));
   });
 
   app.get('/mcp', async (req, res) => {
-    await handleMcpRequest(req, res);
+    await requestActorStorage.run(emptyActor(), () => handleMcpRequest(req, res));
   });
 
   app.delete('/mcp', async (req, res) => {
