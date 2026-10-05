@@ -17,6 +17,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { waitForLockWaiters } from '../../../test/lockWait.js';
 import { GraphQLError } from 'graphql';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
@@ -1440,11 +1441,11 @@ describe('hadron-cli#487 — Worker.hasLiveSession / lastActiveAt', () => {
     // rather than reading the most recent — which may be the ended one.
     const w = await cast({ agentRef: roleAgent.id, name: 'Iris' });
     const open = await bindAs(appMember.id, w.id);
-    const forced = await M.startSession(
-      {},
-      { input: { id: generateId(), workerRef: w.id, appRef: app.id, force: true } },
-      ctx(appMember.id),
-    );
+    // #1617 C: a forced rebind now ends the holder's superseded row, so the
+    // coexisting newer session is seeded directly (pre-#1617 data shape).
+    const forced = await db.session.create({
+      data: { id: generateId(), userId: appMember.id, appId: app.id, workerId: w.id, type: 'DEVELOPER', startedAt: new Date() },
+    });
     await M.endSession({}, { id: forced.id }, ctx(appMember.id));
 
     expect(await db.session.count({ where: { workerId: w.id, endedAt: null } })).toBe(1);
@@ -1783,11 +1784,145 @@ describe('#1050 — worker name holding', () => {
     const second = await bind(contrib.id, w.id);
     expect(second.workerId).toBe(w.id);
 
-    // And the old session was NOT ended to make room — binding describes
-    // liveness, it does not mutate the record to express it.
+    // #1617 C (Holger, 2026-10-05): the same person's rebind now ENDS the old
+    // row as superseded, so open-but-not-live rows stop piling up. It is an
+    // act, not an inference from silence, so it is never marked auto-expired,
+    // and the new session chains to it.
     const prior = await db.session.findUniqueOrThrow({ where: { id: first.id } });
-    expect(prior.endedAt).toBeNull();
+    expect(prior.endedAt).not.toBeNull();
     expect(prior.autoExpiredAt).toBeNull();
+    expect(prior.summary).toBe(`superseded by session ${second.id}`);
+    expect(second.prevSessionId).toBe(first.id);
+  });
+
+  describe('#1617 C — a bind ends the same person\'s superseded sessions (Holger, 2026-10-05)', () => {
+    it('a forced rebind ends the LIVE own session it displaces', async () => {
+      const w = await heldBy(contrib.id);
+      const first = await bind(contrib.id, w.id);
+      const second = await M.startSession(
+        {},
+        { input: { id: generateId(), workerRef: w.id, appRef: app.id, force: true } },
+        ctx(contrib.id),
+      );
+      const prior = await db.session.findUniqueOrThrow({ where: { id: first.id } });
+      expect(prior.endedAt).not.toBeNull();
+      expect(prior.summary).toBe(`superseded by session ${second.id}`);
+      expect(await db.session.count({ where: { workerId: w.id, endedAt: null } })).toBe(1);
+    });
+
+    it('never touches another person\'s or an App key\'s open session on that worker', async () => {
+      const w = await heldBy(contrib.id);
+      const old = new Date(Date.now() - 72 * 60 * 60 * 1000);
+      const others = await Promise.all([
+        db.session.create({ data: { id: generateId(), userId: appMember.id, appId: app.id, workerId: w.id, type: 'DEVELOPER', startedAt: old, updatedAt: old } }),
+        db.session.create({ data: { id: generateId(), userId: null, appId: app.id, workerId: w.id, type: 'DEVELOPER', startedAt: old, updatedAt: old } }),
+      ]);
+      await bind(contrib.id, w.id);
+      for (const o of others) {
+        expect((await db.session.findUniqueOrThrow({ where: { id: o.id } })).endedAt).toBeNull();
+      }
+    });
+
+    it('#1625 P2-2: a bind of a name the caller ALREADY holds still waits on the Worker lock', async () => {
+      const w = await heldBy(contrib.id);
+      let unblock!: () => void;
+      const gate = new Promise<void>((r) => { unblock = r; });
+      let locked!: () => void;
+      const lockedNow = new Promise<void>((r) => { locked = r; });
+      const blocker = db.$transaction(async (tx) => {
+        // NO KEY UPDATE: it conflicts with the bind's FOR UPDATE but NOT with the
+        // KEY SHARE the session insert's foreign key takes, so only the bind's
+        // own Worker lock can park it here.
+        await tx.$queryRaw`SELECT id FROM workers WHERE id = ${w.id} FOR NO KEY UPDATE`;
+        locked();
+        await gate;
+      }, { timeout: 20_000 });
+      await lockedNow;
+      const binding = bind(contrib.id, w.id);
+      await waitForLockWaiters(db, 1, 3_000); // the bind is parked on the Worker lock
+      unblock();
+      await blocker;
+      expect((await binding).workerId).toBe(w.id);
+    });
+
+    it('#1625 P2-2: WORKER_TAKEN is re-decided under the lock, after a session went live during the wait', async () => {
+      const w = await heldBy(contrib.id);
+      let unblock!: () => void;
+      const gate = new Promise<void>((r) => { unblock = r; });
+      let locked!: () => void;
+      const lockedNow = new Promise<void>((r) => { locked = r; });
+      const blocker = db.$transaction(async (tx) => {
+        await tx.$queryRaw`SELECT id FROM workers WHERE id = ${w.id} FOR UPDATE`;
+        locked();
+        await gate;
+        // A concurrent bind's row, committed while ours waits.
+        await tx.session.create({
+          data: { id: generateId(), userId: contrib.id, appId: app.id, workerId: w.id, type: 'DEVELOPER', startedAt: new Date() },
+        });
+      }, { timeout: 20_000 });
+      await lockedNow;
+      const binding = bind(contrib.id, w.id).catch((e: unknown) => e);
+      await waitForLockWaiters(db, 1, 3_000);
+      unblock();
+      await blocker;
+      expect(await binding).toMatchObject({ extensions: { code: 'WORKER_TAKEN' } });
+    });
+
+    it('#1625 residual P2: a hold taken by someone else during the lock wait refuses even a FORCED bind', async () => {
+      const w = await heldBy(contrib.id);
+      let unblock!: () => void;
+      const gate = new Promise<void>((r) => { unblock = r; });
+      let locked!: () => void;
+      const lockedNow = new Promise<void>((r) => { locked = r; });
+      const blocker = db.$transaction(async (tx) => {
+        // NO KEY UPDATE, so only the bind's own Worker lock parks it (see above).
+        await tx.$queryRaw`SELECT id FROM workers WHERE id = ${w.id} FOR NO KEY UPDATE`;
+        locked();
+        await gate;
+        // A release and a re-claim by another person, committed while the bind waits.
+        await tx.worker.update({ where: { id: w.id }, data: { heldByUserId: appMember.id, heldAt: new Date() } });
+      }, { timeout: 20_000 });
+      await lockedNow;
+      const binding = bind(contrib.id, w.id, true).catch((e: unknown) => e);
+      await waitForLockWaiters(db, 1, 3_000);
+      unblock();
+      await blocker;
+      expect(await binding).toMatchObject({ extensions: { code: 'WORKER_HELD' } });
+      expect(await db.session.count({ where: { workerId: w.id, userId: contrib.id, endedAt: null } })).toBe(0);
+    });
+
+    it('#1625 P2-2: two concurrent forced binds by the holder leave exactly ONE open session', async () => {
+      const w = await heldBy(contrib.id);
+      await Promise.all([bind(contrib.id, w.id, true), bind(contrib.id, w.id, true)]);
+      expect(await db.session.count({ where: { workerId: w.id, endedAt: null } })).toBe(1);
+    });
+
+    it('chains the new session to the NEWEST superseded row', async () => {
+      const w = await heldBy(contrib.id);
+      const old = new Date(Date.now() - 72 * 60 * 60 * 1000);
+      const older = await db.session.create({
+        data: { id: generateId(), userId: contrib.id, appId: app.id, workerId: w.id, type: 'DEVELOPER', startedAt: new Date(old.getTime() - 60_000), updatedAt: old },
+      });
+      const newer = await db.session.create({
+        data: { id: generateId(), userId: contrib.id, appId: app.id, workerId: w.id, type: 'DEVELOPER', startedAt: old, updatedAt: old },
+      });
+      const next = await bind(contrib.id, w.id);
+      expect(next.prevSessionId).toBe(newer.id);
+      for (const id of [older.id, newer.id]) {
+        expect((await db.session.findUniqueOrThrow({ where: { id } })).summary).toBe(`superseded by session ${next.id}`);
+      }
+    });
+
+    it('keeps a summary the driver already wrote', async () => {
+      const w = await heldBy(contrib.id);
+      const first = await bind(contrib.id, w.id);
+      const old = new Date(Date.now() - 72 * 60 * 60 * 1000);
+      await db.session.update({ where: { id: first.id }, data: { startedAt: old, updatedAt: old, summary: 'mid #1617' } });
+      await bind(contrib.id, w.id);
+      const prior = await db.session.findUniqueOrThrow({ where: { id: first.id } });
+      expect(prior.endedAt).not.toBeNull();
+      expect(prior.summary).toBe('mid #1617');
+    });
   });
 
   it('a session driven a moment ago still refuses, so the gate did not just go away', async () => {
