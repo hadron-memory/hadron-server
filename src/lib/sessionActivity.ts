@@ -429,9 +429,14 @@ export async function usageEventCountsAsActivity(
     } | null;
     if (!s || s.deletedAt || s.endedAt) return false;
     if (s.expiresAt && s.expiresAt.getTime() <= now.getTime()) return false;
+    // EXACTLY `bindSession`'s ownership rule (#1660 review, Baloo P2-1): a
+    // pure App key owns every session of its App, including a
+    // startAgentSession chatbot session that carries its end user's id, so an
+    // App driving such a session keeps it live. Only DY-1's RESUME narrows to
+    // person-less worker sessions; counting a drive does not.
     const owned = principal.userId
       ? !principal.impersonation && s.userId === principal.userId
-      : !!principal.appId && s.userId === null && s.appId === principal.appId;
+      : !!principal.appId && s.appId === principal.appId;
     if (!owned) return false;
     const lastEvent = (await loadLastEventBySession(db, [sessionId])).get(sessionId);
     return isSessionLive(s, lastEvent, now);
@@ -462,5 +467,16 @@ export function isSessionDormant(
   now: Date,
 ): boolean {
   const days = Number.isFinite(dormancyDays) && dormancyDays > 0 ? dormancyDays : DEFAULT_SESSION_DORMANCY_DAYS;
-  return sessionActivityAt(session, lastEventAt).getTime() < now.getTime() - days * 24 * 60 * 60 * 1000;
+  // Never shorter than the widest idle window (#1660 review, Baloo P2-2).
+  // Dormancy is only consulted for a session that is NOT live, so a
+  // threshold below the window would leave a session idle past dormancy
+  // still reading live, and acting, with no check at all. Flooring it at the
+  // window makes every dormant session also a lapsed one.
+  const thresholdMs = Math.max(days * 24 * 60 * 60 * 1000, widestIdleWindowMs());
+  return sessionActivityAt(session, lastEventAt).getTime() < now.getTime() - thresholdMs;
+}
+
+/** The widest configured idle window across every session type. */
+export function widestIdleWindowMs(): number {
+  return Math.max(...SESSION_TYPES.map((t) => idleWindowMsFor(t)));
 }

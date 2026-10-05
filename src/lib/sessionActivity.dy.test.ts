@@ -15,7 +15,7 @@ import { cleanDb } from '../test/helpers.js';
 import { generateId } from './id.js';
 import type { Context } from '../api/graphql/schema/resolvers.helpers.js';
 import { resolvers } from '../api/graphql/schema/resolvers.js';
-import { isSessionLive, loadLastEventBySession, usageEventCountsAsActivity } from './sessionActivity.js';
+import { isSessionDormant, isSessionLive, loadLastEventBySession, usageEventCountsAsActivity } from './sessionActivity.js';
 import { attributedRequestActivity, recordNodeUsage } from './usageRecorder.js';
 import { lapsedResumeVerdict, resumableOwnWorkerIds } from './teamAttention.js';
 import { sessionKeyReleasedHint } from './sessionKeyCache.js';
@@ -96,7 +96,9 @@ describe('DY-2 (#1653): a usage event on a lapsed session is attribution, never 
     // A pure App key: only its own App's person-less sessions.
     expect(await usageEventCountsAsActivity(db as never, { appId: app.id }, appKeyLive.id)).toBe(true);
     expect(await usageEventCountsAsActivity(db as never, { appId: otherApp.id }, appKeyLive.id)).toBe(false);
-    expect(await usageEventCountsAsActivity(db as never, { appId: app.id }, liveOwn.id)).toBe(false);
+    // bindSession's rule exactly: an App key owns every session of its App,
+    // a user-bound (startAgentSession) one included (#1660 review, Baloo P2-1).
+    expect(await usageEventCountsAsActivity(db as never, { appId: app.id }, liveOwn.id)).toBe(true);
   });
 
   it('the #1653 repro: an attributed read on a lapsed session leaves it lapsed', async () => {
@@ -168,6 +170,23 @@ describe('DY-5: a DORMANT session is past every agent act', () => {
     await db.session.update({ where: { id: recent.id }, data: { endedAt: new Date() } });
     const old = await session({ idleMs: 91 * D, userId: holder.id });
     expect(await lapsedResumeVerdict(userCtx(holder.id), old.id)).toBe('DORMANT');
+  });
+
+  it('the threshold is never shorter than the idle window, so a dormant session is always lapsed (#1660 review, Baloo P2-2)', async () => {
+    process.env.SESSION_IDLE_WINDOW_DEVELOPER_MS = String(20 * D);
+    try {
+      await db.worker.update({ where: { id: worker.id }, data: { heldByUserId: holder.id, heldAt: new Date() } });
+      await db.app.update({ where: { id: app.id }, data: { sessionDormancyDays: 7 } });
+      // Idle 10 days: past the 7-day setting, but still inside the 20-day window.
+      const s = await session({ idleMs: 10 * D, userId: holder.id });
+      expect(await live(s.id)).toBe(true);
+      const row = await db.session.findUniqueOrThrow({ where: { id: s.id } });
+      expect(isSessionDormant(row, null, 7, new Date())).toBe(false);
+      // Past the window too: lapsed AND dormant.
+      expect(isSessionDormant(row, null, 7, new Date(Date.now() + 11 * D))).toBe(true);
+    } finally {
+      delete process.env.SESSION_IDLE_WINDOW_DEVELOPER_MS;
+    }
   });
 
   it('the threshold is per App', async () => {
