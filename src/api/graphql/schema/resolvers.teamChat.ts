@@ -67,7 +67,8 @@ import { escapePrismaLikePattern } from '../../../lib/literalLocPrefix.js';
 import { nodeUrnRoundTrips, safeNodeUrnV2 } from '../../../lib/urnEmit.js';
 import {
   maybeAdvanceOwnChannelRead,
-  reviveOwnLapsedSession,
+  mayResumeOwnLapsedSession,
+  resumeOwnLapsedSessionInTx,
   mayStillDriveWorkerApp,
 } from '../../../lib/teamAttention.js';
 
@@ -426,7 +427,7 @@ async function resolveSessionAuthor(
   app: AppRow | null,
   hostMemoryId: string,
   sessionRef: string,
-): Promise<{ workerId: string; name: string; sessionId: string; workerAppId: string; crossApp: boolean }> {
+): Promise<{ workerId: string; name: string; sessionId: string; workerAppId: string; crossApp: boolean; resume: boolean }> {
   const session = await ctx.db.session.findUnique({
     where: { id: sessionRef },
     select: { id: true, appId: true, userId: true, workerId: true, endedAt: true, type: true, startedAt: true, updatedAt: true, autoExpiredAt: true },
@@ -547,23 +548,26 @@ async function resolveSessionAuthor(
   // worker's own App. The post itself is authorized as before; only the
   // keep-alive is withheld.
   if (lapsed) {
-    // #1617 B — the post resumes the session only under the revival
-    // conditions (`reviveOwnLapsedSession`: own session, current App
-    // eligibility, the caller holds the name, nobody else driving it).
-    if (!(await reviveOwnLapsedSession(ctx, session.id))) {
-      throw new GraphQLError(
-        `Session "${sessionRef}" is not live — nothing has driven it inside its idle window, and it cannot be resumed here. ` +
-          'Only the person holding the worker\'s name can resume their own lapsed session, by posting, reading or marking read ' +
-          'through it, and only while no other session on that worker is live. Otherwise start a new session for this worker ' +
-          '(CLI: `hadron team session start --as <worker>`; MCP: `hadron_start_session`). While a session is live, ' +
-          'posting, reading and marking read through it keep it live.',
-        { extensions: { code: 'SESSION_NOT_LIVE' } },
-      );
-    }
+    // #1617 B — this only decides that the post MAY resume the session; the
+    // resume itself happens inside the append transaction (#1625 review,
+    // Baloo P2-1), so a post refused anywhere after this point resumes nothing.
+    if (!(await mayResumeOwnLapsedSession(ctx, session.id))) throw sessionNotLiveError(sessionRef);
   } else if (await mayStillDriveWorkerApp(ctx, worker.appId)) {
     await touchLiveSession(ctx.db, session.id);
   }
-  return { workerId: worker.id, name: worker.name, sessionId: session.id, workerAppId: worker.appId, crossApp };
+  return { workerId: worker.id, name: worker.name, sessionId: session.id, workerAppId: worker.appId, crossApp, resume: lapsed };
+}
+
+/** SESSION_NOT_LIVE for a post through a session that is lapsed and may not be resumed (#1617 B). */
+function sessionNotLiveError(sessionRef: string): GraphQLError {
+  return new GraphQLError(
+    `Session "${sessionRef}" is not live — nothing has driven it inside its idle window, and it cannot be resumed here. ` +
+      'Only the person holding the worker\'s name can resume their own lapsed session, by posting, reading or marking read ' +
+      'through it, and only while no other session on that worker is live. Otherwise start a new session for this worker ' +
+      '(CLI: `hadron team session start --as <worker>`; MCP: `hadron_start_session`). While a session is live, ' +
+      'posting, reading and marking read through it keep it live.',
+    { extensions: { code: 'SESSION_NOT_LIVE' } },
+  );
 }
 
 /**
@@ -887,8 +891,11 @@ async function postToChannelRoot(
   const { body, replyToSeq, sessionRef } = args;
   let envelope: Record<string, unknown>;
   let authorLabel: string;
+  // #1617 B: the lapsed session this post resumes, inside its append transaction.
+  let resumeSessionId: string | null = null;
   if (sessionRef) {
     const author = await resolveSessionAuthor(ctx, app, root.memoryId, sessionRef);
+    if (author.resume) resumeSessionId = author.sessionId;
     authorLabel = author.name;
     envelope = {
       authorWorkerId: author.workerId,
@@ -940,6 +947,12 @@ async function postToChannelRoot(
       live.incarnation !== incarnation.value
     ) {
       throw channelNotFound(root.loc);
+    }
+    // #1617 B — resume the author's lapsed session in THIS transaction, so it
+    // commits with the message or not at all (#1625 review, Baloo P2-1). Every
+    // condition is re-decided under the App and Worker locks.
+    if (resumeSessionId && !(await resumeOwnLapsedSessionInTx(ctx, tx, resumeSessionId))) {
+      throw sessionNotLiveError(sessionRef!);
     }
     // replyToSeq is validated INSIDE the allocating transaction, under the
     // chat lock, so the target can't be soft-deleted out from under us and

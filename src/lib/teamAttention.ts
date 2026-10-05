@@ -281,78 +281,106 @@ export async function teamAttentionAvailable(ctx: Context, appId: string): Promi
   return !!app && (await isAppParticipant(ctx, app));
 }
 
+/** The deciding columns a resume re-reads; one shape for the pre-check and the locked pass. */
+const RESUME_SESSION_SELECT = {
+  id: true, userId: true, workerId: true, endedAt: true, deletedAt: true, expiresAt: true,
+  worker: { select: { appId: true, heldByUserId: true, retiredAt: true } },
+} as const;
+
 /**
- * #1617 B (Holger, 2026-10-05, team chat #6568): may this caller resume THIS
- * lapsed session by an attributed act, and if so, resume it.
+ * #1617 B (rulings DA and DI, 2026-10-05): conditions (i)–(iv) evaluated
+ * against one database view (`db` is the client or the caller's transaction),
+ * for a session that is NOT live:
  *
- * A session that went quiet past its idle window used to be dead to its own
- * driver: the next post refused SESSION_NOT_LIVE, the only remedy was a rebind
- * under a new id, and the router had already stopped waking the worker. The
- * hazard #1542/#1543 refused revival for, another driver having bound the
- * worker meanwhile, is closed here by four conditions, all checked against
- * CURRENT state:
- *
- *  (i)   the session is open, not deleted, and not past a hard `expiresAt`
- *        (a promise made at start is never extended);
+ *  (i)   open, not deleted, not past a hard `expiresAt` (a promise made at
+ *        start is never extended);
  *  (ii)  the caller is the session's own user (no admin, impersonation or
- *        App-key revival) and may still drive the worker's App;
- *  (iii) the caller HOLDS the worker's name (cor:agt:020:09), so nobody else
- *        could have bound it;
- *  (iv)  no other session on that worker is live.
- *
- * (iv) runs under a row lock on the Worker, so two concurrent revivals of
- * different sessions on one worker serialize: the second sees the first as
- * live and refuses. Returns true when the session was resumed. A refusal is
- * `false`, never a throw; the caller keeps its own SESSION_NOT_LIVE answer.
+ *        App-key resume) and may still drive the worker's App NOW;
+ *  (iii) the caller HOLDS the worker's name (cor:agt:020:09);
+ *  (iv)  no other session on that worker is live. A scan that hits the cap
+ *        refuses rather than decide on a truncated set (#1625 review, P3).
  */
-export async function reviveOwnLapsedSession(ctx: Context, sessionId: string): Promise<boolean> {
+async function resumeConditionsHold(ctx: Context, db: Context['db'], sessionId: string, now: Date): Promise<boolean> {
   if (!ctx.userId || ctx.impersonation) return false;
-  const now = new Date();
-  const session = await ctx.db.session.findFirst({
+  const s = await db.session.findUnique({ where: { id: sessionId }, select: RESUME_SESSION_SELECT });
+  if (
+    !s || s.userId !== ctx.userId || s.endedAt || s.deletedAt || !s.workerId || !s.worker ||
+    (s.expiresAt && s.expiresAt.getTime() <= now.getTime()) ||
+    s.worker.retiredAt || s.worker.heldByUserId !== ctx.userId
+  ) return false;
+  if (!(await mayStillDriveWorkerApp({ ...ctx, db } as Context, s.worker.appId))) return false;
+  const others = await db.session.findMany({
     where: {
-      id: sessionId,
-      userId: ctx.userId,
-      endedAt: null,
-      deletedAt: null,
-      workerId: { not: null },
-      OR: [{ expiresAt: null }, { expiresAt: { gt: now } }],
-      worker: { retiredAt: null, heldByUserId: ctx.userId },
+      workerId: s.workerId, id: { not: sessionId }, endedAt: null, deletedAt: null,
+      ...recentlyTouchedFilter(now),
     },
-    select: { id: true, workerId: true, worker: { select: { appId: true } } },
+    orderBy: [{ updatedAt: { sort: 'desc', nulls: 'last' } }, { startedAt: 'desc' }],
+    select: { id: true, type: true, startedAt: true, updatedAt: true, autoExpiredAt: true, endedAt: true },
+    take: OPEN_SESSION_SCAN_CAP + 1,
   });
-  if (!session?.workerId || !session.worker) return false;
-  if (!(await mayStillDriveWorkerApp(ctx, session.worker.appId))) return false;
-  const workerId = session.workerId;
-  try {
-    return await ctx.db.$transaction(async (tx) => {
-      // Re-check the hold under the lock: a release or a takeover between the
-      // read above and here must refuse, not revive.
-      const locked = await tx.$queryRaw<Array<{ held_by_user_id: string | null; retired_at: Date | null }>>`
-        SELECT held_by_user_id, retired_at FROM workers WHERE id = ${workerId} FOR UPDATE`;
-      if (locked[0]?.held_by_user_id !== ctx.userId || locked[0]?.retired_at) return false;
-      const lockedNow = new Date();
-      const others = await tx.session.findMany({
-        where: {
-          workerId, id: { not: sessionId }, endedAt: null, deletedAt: null,
-          ...recentlyTouchedFilter(lockedNow),
-        },
-        select: { id: true, type: true, startedAt: true, updatedAt: true, autoExpiredAt: true, endedAt: true },
-        take: OPEN_SESSION_SCAN_CAP,
-      });
-      const events = await loadLastEventBySession(tx as never, others.map((o) => o.id));
-      if (others.some((o) => isSessionLive(o, events.get(o.id), lockedNow))) return false;
-      const touched = await tx.session.updateMany({
-        where: { id: sessionId, userId: ctx.userId!, endedAt: null, deletedAt: null },
-        data: { updatedAt: lockedNow },
-      });
-      return touched.count === 1;
-    });
-  } catch (err) {
-    // Bookkeeping must not fail the caller's read or post with a raw DB
-    // error; a failed revival is a refusal, and the caller says so.
-    console.warn('[reviveOwnLapsedSession] revival failed:', err);
-    return false;
-  }
+  if (others.length > OPEN_SESSION_SCAN_CAP) return false;
+  const events = await loadLastEventBySession(db as never, others.map((o) => o.id));
+  return !others.some((o) => isSessionLive(o, events.get(o.id), now));
+}
+
+/**
+ * #1617 B: a lock-free answer to "WOULD this caller's next act resume this
+ * lapsed session?". It lets a gate refuse early with SESSION_NOT_LIVE, and lets
+ * monitor routing include the worker. It writes nothing and guarantees
+ * nothing: the act itself must resume through {@link resumeOwnLapsedSessionInTx},
+ * which re-decides under the lock.
+ */
+export async function mayResumeOwnLapsedSession(ctx: Context, sessionId: string): Promise<boolean> {
+  return resumeConditionsHold(ctx, ctx.db, sessionId, new Date());
+}
+
+/**
+ * #1617 B: resume a lapsed session INSIDE the transaction of the act that
+ * resumes it (#1625 review, Baloo P2-1), so an act refused anywhere later in
+ * that transaction rolls the resume back with it. A post resumes in its append
+ * transaction and a mark-read in its cursor write, never ahead of them.
+ *
+ * Fenced by the lifecycle locks a bind takes, in the same order (Baloo P2-2,
+ * P2-3): the App `FOR SHARE` (an uninstall or delete waits, or is seen), then
+ * the Worker `FOR UPDATE`, which every worker bind also takes, so a bind and a
+ * resume of the same worker serialize. Every condition is re-read AFTER the
+ * locks, and the write is guarded on the same columns, including the hard
+ * expiry, so nothing decided before the lock wait is trusted.
+ *
+ * Returns false when a condition refuses. A database error propagates: it is
+ * a failure of the act, not a business refusal (#1625 review, local P3).
+ */
+export async function resumeOwnLapsedSessionInTx(
+  ctx: Context,
+  tx: Prisma.TransactionClient,
+  sessionId: string,
+): Promise<boolean> {
+  if (!ctx.userId || ctx.impersonation) return false;
+  const pre = await tx.session.findUnique({
+    where: { id: sessionId },
+    select: { workerId: true, worker: { select: { appId: true } } },
+  });
+  if (!pre?.workerId || !pre.worker) return false;
+  const [app] = await tx.$queryRaw<Array<{ deleted_at: Date | null; uninstalled_at: Date | null }>>`
+    SELECT deleted_at, uninstalled_at FROM apps WHERE id = ${pre.worker.appId} FOR SHARE`;
+  if (!app || app.deleted_at || app.uninstalled_at) return false;
+  await tx.$queryRaw`SELECT id FROM workers WHERE id = ${pre.workerId} FOR UPDATE`;
+  const now = new Date();
+  const db = tx as unknown as Context['db'];
+  if (!(await resumeConditionsHold(ctx, db, sessionId, now))) return false;
+  const touched = await tx.session.updateMany({
+    where: {
+      id: sessionId, userId: ctx.userId, workerId: pre.workerId, endedAt: null, deletedAt: null,
+      OR: [{ expiresAt: null }, { expiresAt: { gt: now } }],
+    },
+    data: { updatedAt: now },
+  });
+  return touched.count === 1;
+}
+
+/** #1617 B: resume in a transaction of its own, for an act (a served read) that has no write to join. */
+export async function reviveOwnLapsedSession(ctx: Context, sessionId: string): Promise<boolean> {
+  return ctx.db.$transaction((tx) => resumeOwnLapsedSessionInTx(ctx, tx, sessionId));
 }
 
 /**
@@ -366,9 +394,14 @@ export async function reviveOwnLapsedSession(ctx: Context, sessionId: string): P
  * answer costs at most one nudge the worker's own act then refuses.
  */
 export async function resumableOwnWorkerIds(
-  db: Context['db'],
+  ctx: Context,
   args: { userId: string; appId: string; workerId?: string; now: Date },
 ): Promise<Set<string>> {
+  const db = ctx.db;
+  // (ii)'s eligibility leg (#1625 review, local P3): every candidate is a
+  // worker of `appId`, so one participation check covers them all. A driver
+  // who lost the App is not routed, just as their act would not resume.
+  if (!(await mayStillDriveWorkerApp(ctx, args.appId))) return new Set();
   const rows = await db.session.findMany({
     where: {
       userId: args.userId,
@@ -440,7 +473,7 @@ async function liveOwnWorkers(ctx: Context, app: AppRow): Promise<LiveWorker[]> 
   }
   // #1617 B: a worker whose own session merely LAPSED is still routed — its
   // next read or post resumes it — so a quiet night does not make it unwakeable.
-  const resumable = [...(await resumableOwnWorkerIds(ctx.db, { userId: ctx.userId!, appId: app.id, now }))]
+  const resumable = [...(await resumableOwnWorkerIds(ctx, { userId: ctx.userId!, appId: app.id, now }))]
     .filter((id) => !byId.has(id));
   if (resumable.length > 0) {
     const resumed = await ctx.db.worker.findMany({
@@ -1347,7 +1380,7 @@ async function ownLiveSessionWorker(
   ctx: Context,
   sessionRef: string,
   expectedAppId?: string,
-): Promise<{ workerId: string; appId: string } | null> {
+): Promise<{ workerId: string; appId: string; sessionId: string; lapsed: boolean } | null> {
   if (!ctx.userId || ctx.impersonation) return null;
   const session = await ctx.db.session.findFirst({
     where: {
@@ -1389,12 +1422,13 @@ async function ownLiveSessionWorker(
     // #1540 — a read or mark-read through the session is its driver driving it.
     // Owned, eligible and live are all established above, so keep it alive.
     await touchLiveSession(ctx.db, session.id);
-  } else if (!(await reviveOwnLapsedSession(ctx, session.id))) {
-    // #1617 B — a LAPSED session is resumed by its holder-driver's own read or
-    // mark-read; anything the revival conditions refuse stays not-live.
-    return null;
+    return { workerId: session.workerId, appId: session.appId, sessionId: session.id, lapsed: false };
   }
-  return { workerId: session.workerId, appId: session.appId };
+  // #1617 B — a LAPSED session may be resumed by its holder-driver's act. This
+  // only decides that it MAY; the caller resumes it as part of the act itself
+  // (#1625 review, Baloo P2-1), so a refused act resumes nothing.
+  if (!(await mayResumeOwnLapsedSession(ctx, session.id))) return null;
+  return { workerId: session.workerId, appId: session.appId, sessionId: session.id, lapsed: true };
 }
 
 /**
@@ -1425,6 +1459,9 @@ export async function maybeAdvanceOwnChannelRead(
   // reads only newest pages, mention filters or backward windows stays live.
   const session = await ownLiveSessionWorker(ctx, sessionRef);
   if (!session) return null;
+  // #1617 B — the page has been served, so the read (the act) succeeded:
+  // resume now. A refusal under the lock leaves the cursor where it was.
+  if (session.lapsed && !(await reviveOwnLapsedSession(ctx, session.sessionId))) return null;
   if (args.mentionsRef || args.beforeSeq != null || (args.offset ?? 0) !== 0 || (args.limit ?? 1) <= 0) return null;
   // #1536: no cursor and no offset now selects the newest page. Even when
   // total says it is complete, count and fetch are separate queries: a post
@@ -1485,6 +1522,15 @@ export async function markOwnTeamChatRead(
   if (args.seq > row.channel.lastSeq) {
     fail(`seq ${args.seq} is beyond the Channel watermark (${row.channel.lastSeq}).`, 'SEQ_BEYOND_WATERMARK', { lastSeq: row.channel.lastSeq });
   }
-  const lastSeenSeq = await advanceReadState(ctx.db, { workerId }, row.channel.id, args.seq);
+  // #1617 B — a lapsed session resumes in the SAME transaction as the cursor
+  // write (#1625 review, Baloo P2-1): both commit, or neither does.
+  const lastSeenSeq = session.lapsed
+    ? await ctx.db.$transaction(async (tx) => {
+        if (!(await resumeOwnLapsedSessionInTx(ctx, tx, session.sessionId))) {
+          fail('That session is not one of your live Worker sessions in this App.', 'SESSION_NOT_LIVE');
+        }
+        return advanceReadState(tx as never, { workerId }, row.channel.id, args.seq);
+      })
+    : await advanceReadState(ctx.db, { workerId }, row.channel.id, args.seq);
   return { workerId, channelId: row.channel.id, lastSeenSeq };
 }

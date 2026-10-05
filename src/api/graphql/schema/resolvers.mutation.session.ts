@@ -514,6 +514,9 @@ export const sessionMutations = {
       // #1050 — set when this bind should claim an unheld name; executed inside
       // the session-creating transaction so the two commit together.
       let claimWorkerId: string | undefined;
+      // #1625 review (Baloo P2-2): set when this bind names a worker, and
+      // re-run inside the transaction under the Worker lock.
+      let assertWorkerNotTaken: ((db: Context['db']) => Promise<void>) | null = null;
       const workerRef = input.workerRef?.trim();
       if (workerRef) {
         // #991: a Worker id OR an hrn:worker:<root>:<app-slug>:<worker-slug>
@@ -746,13 +749,18 @@ export const sessionMutations = {
         // design: there is no lease (liveness stays derivable from active
         // sessions), so two concurrent starts can both pass — the contract
         // is informed consent, not mutual exclusion.
-        if (!input.force) {
+        // #1625 review (Baloo P2-2): the WORKER_TAKEN decision runs here for the
+        // early, rich refusal AND again inside the bind transaction under the
+        // Worker lock, so it is decided on state no concurrent bind or resume
+        // can change before the insert commits.
+        const takenWorker = worker;
+        assertWorkerNotTaken = async (db: Context['db']) => {
           // ALL active sessions, not the newest-created (PR #983 review,
           // Copilot): force allows several to coexist, and the most recent
           // ACTIVITY can be on an older one — the takeover prompt must name
           // whoever actually drove the worker last.
           const nowForLiveness = new Date();
-          const openSessions = await ctx.db.session.findMany({
+          const openSessions = await db.session.findMany({
             // #1120 review (Codex P2): BOUNDED. Nothing closes abandoned
             // sessions any more, so open rows accumulate per worker and an
             // unbounded scan — plus every id in an `IN (...)` — grows with the
@@ -760,7 +768,7 @@ export const sessionMutations = {
             // live under ANY type's window; the cap is only a backstop behind
             // it, because a cap alone could drop the live row itself.
             where: {
-              workerId: worker.id, endedAt: null, deletedAt: null,
+              workerId: takenWorker.id, endedAt: null, deletedAt: null,
               ...recentlyTouchedFilter(nowForLiveness),
             },
             // ORDERED BY HEARTBEAT, not by bind time (#1120 review, Codex P2).
@@ -807,7 +815,7 @@ export const sessionMutations = {
           // derivations that must agree are pinned by a differential test
           // rather than by hoping.
           const lastEventForLiveness = await loadLastEventBySession(
-            ctx.db as never,
+            db as never,
             openSessions.map((s) => s.id),
           );
           const activeSessions = openSessions.filter((s) =>
@@ -825,14 +833,14 @@ export const sessionMutations = {
             // takeover prompt and the roster start disagreeing about the same
             // worker in the same second.
             const lastEventBySession = await loadLastEventBySession(
-              ctx.db as never,
+              db as never,
               activeSessions.map((s) => s.id),
             );
             const best = mostRecentlyActive(activeSessions, lastEventBySession);
             const active = best?.session ?? activeSessions[0];
             const lastSeenAt = best?.at ?? active.startedAt;
             const driver = active.userId
-              ? await ctx.db.user.findUnique({
+              ? await db.user.findUnique({
                   where: { id: active.userId },
                   select: { handle: true, githubUsername: true },
                 })
@@ -876,7 +884,7 @@ export const sessionMutations = {
               {
                 extensions: {
                   code: 'WORKER_TAKEN',
-                  workerId: worker.id,
+                  workerId: takenWorker.id,
                   sessionId: active.id,
                   lastDriver,
                   lastSeenAt: lastSeenAt.toISOString(),
@@ -884,7 +892,8 @@ export const sessionMutations = {
               },
             );
           }
-        }
+                };
+        if (!input.force) await assertWorkerNotTaken(ctx.db);
         // Session.agentId keeps recording the ROLE-agent behind the casting
         // (cor:agt:020:03); an agentRef naming a DIFFERENT agent is a client
         // bug, refused rather than silently overridden.
@@ -942,6 +951,19 @@ export const sessionMutations = {
         // have replaced a stale selection above; only the final App matters.
         if (appId) {
           await lockSessionAppActive(tx, appId);
+        }
+        // #1625 review (Baloo P2-2, P2-3): EVERY worker bind takes the Worker
+        // row lock, the same lock a lapsed-session resume takes (after the App
+        // lock, in the same order), including a bind of a name the caller
+        // already holds. Everything this bind decides about the worker's
+        // sessions — WORKER_TAKEN and the superseded set — is re-read below,
+        // after it, so two binds, or a bind and a resume, of one worker
+        // serialize instead of each deciding on a stale view.
+        if (workerId) {
+          await tx.$queryRaw`SELECT id FROM workers WHERE id = ${workerId} FOR UPDATE`;
+          if (!input.force && assertWorkerNotTaken) {
+            await assertWorkerNotTaken(tx as unknown as Context['db']);
+          }
         }
         // Everything about the hold is settled INSIDE this transaction, so the
         // decision and the session insert commit together. The row read far

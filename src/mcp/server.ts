@@ -8896,7 +8896,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       // its next read or post resumes it (`reviveOwnLapsedSession`) — so a
       // quiet stretch past the idle window does not make it unwakeable.
       // Observing resumes nothing; the worker's own act does.
-      for (const id of await resumableOwnWorkerIds(db, {
+      for (const id of await resumableOwnWorkerIds(ctx, {
         userId: auth.userId!,
         appId: app.id,
         workerId: requestedWorker?.id,

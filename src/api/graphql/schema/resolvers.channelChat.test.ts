@@ -19,6 +19,7 @@ import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
 import { ensureChannelWithRoot } from '../../../lib/channels.js';
+import { waitForLockWaiters } from '../../../test/lockWait.js';
 
 const Q = resolvers.Query as any;
 const M = resolvers.Mutation as any;
@@ -392,6 +393,70 @@ describe('#1540 — authoring through a live session keeps it live', () => {
       const session = await lapsedSession();
       await db.session.update({ where: { id: session.id }, data: { expiresAt: new Date(Date.now() - 1000) } });
       await expect(post(session.id, 'past my deadline')).rejects.toMatchObject({ extensions: { code: 'SESSION_NOT_LIVE' } });
+    });
+
+    it('#1625 P2-1: a post refused INSIDE the append transaction resumes nothing', async () => {
+      await hold();
+      const session = await lapsedSession();
+      const before = await heartbeat(session.id);
+      await expect(
+        M.createChannelMessage({}, { channelRef: release.id, body: 'reply to nothing', sessionRef: session.id, replyToSeq: 9999 }, ctx(admin.id)),
+      ).rejects.toMatchObject({ extensions: { code: 'TEAM_CHAT_REPLY_NOT_FOUND' } });
+      expect(await heartbeat(session.id)).toBe(before);
+    });
+
+    it('#1625 P2-3: a hard expiry that passes during the Worker lock wait refuses the resume', async () => {
+      await hold();
+      const session = await lapsedSession();
+      const before = await heartbeat(session.id);
+      let unblock!: () => void;
+      const gate = new Promise<void>((r) => { unblock = r; });
+      let locked!: () => void;
+      const lockedNow = new Promise<void>((r) => { locked = r; });
+      const blocker = db.$transaction(async (tx) => {
+        await tx.$queryRaw`SELECT id FROM workers WHERE id = ${workerA.id} FOR UPDATE`;
+        locked();
+        await gate;
+        // Raw SQL, so the test's own write does not bump `updatedAt` (Prisma's @updatedAt).
+        await tx.$executeRaw`UPDATE sessions SET expires_at = now() WHERE id = ${session.id}`;
+      }, { timeout: 20_000 });
+      await lockedNow;
+      const attempt = post(session.id, 'racing my own deadline').catch((e: unknown) => e);
+      await waitForLockWaiters(db, 1); // the resume is parked on the Worker lock, pre-check already passed
+      unblock();
+      await blocker;
+      expect(await attempt).toMatchObject({ extensions: { code: 'SESSION_NOT_LIVE' } });
+      expect(await heartbeat(session.id)).toBe(before);
+    });
+
+    it('#1625 P2-3: losing the hold during the lock wait refuses the resume', async () => {
+      await hold();
+      const session = await lapsedSession();
+      let unblock!: () => void;
+      const gate = new Promise<void>((r) => { unblock = r; });
+      let locked!: () => void;
+      const lockedNow = new Promise<void>((r) => { locked = r; });
+      const blocker = db.$transaction(async (tx) => {
+        await tx.$queryRaw`SELECT id FROM workers WHERE id = ${workerA.id} FOR UPDATE`;
+        locked();
+        await gate;
+        await tx.worker.update({ where: { id: workerA.id }, data: { heldByUserId: null, heldAt: null } });
+      }, { timeout: 20_000 });
+      await lockedNow;
+      const attempt = post(session.id, 'released under me').catch((e: unknown) => e);
+      await waitForLockWaiters(db, 1);
+      unblock();
+      await blocker;
+      expect(await attempt).toMatchObject({ extensions: { code: 'SESSION_NOT_LIVE' } });
+    });
+
+    it('a platform admin driving SOMEONE ELSE\'s lapsed session cannot resume it (ownership leg of (ii))', async () => {
+      await hold();
+      const session = await lapsedSession();
+      const platformAdmin = { db, userId: stranger.id, roles: ['ADMIN'] } as Context;
+      const attempt = M.createChannelMessage({}, { channelRef: release.id, body: 'not my stint', sessionRef: session.id }, platformAdmin);
+      await expect(attempt).rejects.toBeTruthy();
+      expect(await heartbeat(session.id)).toBeLessThan(Date.now() - 24 * H);
     });
 
     it('a post refused for another reason resumes nothing', async () => {
