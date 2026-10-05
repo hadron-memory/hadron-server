@@ -146,6 +146,12 @@ describe('DY-1: a pure App key resumes its OWN App\'s lapsed session by an attri
     expect(await live(s.id)).toBe(false);
   });
 
+  it('a USER with that App selected (hybrid principal) never resumes the App\'s App-key session (#1660 review, Rook P3-1)', async () => {
+    const s = await session({ idleMs: 30 * H, userId: null });
+    expect(await attributedRequestActivity(db, { userId: holder.id, appId: app.id }, s.id)).toBe(false);
+    expect(await live(s.id)).toBe(false);
+  });
+
   it('a USER\'s attributed request never resumes (users resume by post, read or mark-read)', async () => {
     await db.worker.update({ where: { id: worker.id }, data: { heldByUserId: holder.id, heldAt: new Date() } });
     const s = await session({ idleMs: 30 * H, userId: holder.id });
