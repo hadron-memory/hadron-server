@@ -8,6 +8,7 @@ import { currentActor, emptyActor, requestActorStorage, runAsActor } from './req
 import { clearNodeAuthorship } from './nodeAuthorship.js';
 import { mintUserApiKey, resolveAuthContext } from '../middleware/auth.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
+import { createTestableMcpServer } from '../mcp/server.js';
 
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -15,7 +16,7 @@ vi.mock('../integrations/github/writeNodeToGit.js', () => ({
 
 let user: { id: string };
 let other: { id: string };
-let memory: { id: string };
+let memory: { id: string; urn: string };
 let agent: { id: string };
 let worker: { id: string };
 let session: { id: string };
@@ -151,5 +152,31 @@ describe('GraphQL reads resolve public identity only (#1610)', () => {
     const slim = { id: row.id, memoryId: generateId() };
     expect(await resolvers.Node.createdByWorker(slim, {}, ctx)).toBeNull();
     expect(await resolvers.Node.createdByWorker({ id: row.id, memoryId: row.memoryId }, {}, ctx)).toMatchObject({ id: worker.id });
+  });
+});
+
+describe('revision and MCP reads (#1610)', () => {
+  it('NodeRevision names the worker behind the edit it records', async () => {
+    const n = await makeNode('rv:1');
+    await runAsActor(W(), () => resolvers.Mutation.updateNode(null, { input: { id: n.id, content: 'changed' } }, as()));
+    const rev = await db.nodeRevision.findFirstOrThrow({ where: { nodeId: n.id }, orderBy: { revNo: 'desc' } });
+    expect(await resolvers.NodeRevision.editedByWorker(rev, {}, as())).toMatchObject({ id: worker.id, name: 'Dara' });
+    expect(await resolvers.NodeRevision.editedByAgent(rev, {}, as())).toMatchObject({ id: agent.id });
+  });
+
+  it('hadron_get_node prints who created and last edited the node, and nothing when no actor was behind it', async () => {
+    const lines = async (loc: string) => {
+      const mcp = createTestableMcpServer({ userId: user.id, roles: [], clientId: `user:${user.id}` });
+      const text = await mcp.callToolText('hadron_get_node', { urn: `hrn:node:${memory.urn}:${loc}` });
+      return text.split('\n').filter((line) => line.startsWith('Created by:') || line.startsWith('Last edited by:'));
+    };
+    const n = await runAsActor(W(), () => makeNode('m:1'));
+    await runAsActor(A(), () => db.node.update({ where: { id: n.id }, data: { content: 'agent edit' } }));
+    expect(await lines('m:1')).toEqual([
+      'Created by: worker Dara (hrn:worker:attr.example:team:dara)',
+      expect.stringMatching(/^Last edited by: agent server-engineer \(hrn:agent:attr\.example:server-engineer\)$/),
+    ]);
+    await makeNode('m:2');
+    expect(await lines('m:2')).toEqual([]);
   });
 });
