@@ -1501,8 +1501,9 @@ export const sessionMutations = {
         // Clamp session timeout to the app's configured maximum (ceiling).
         // Ruling DY-3: an App with `agentSessionsExpire: false` stamps NO hard
         // expiry unless the call asks for one; a requested timeout is still
-        // capped by the App ceiling. Inactivity never ends a session (#1114),
-        // and DY-5's dormancy threshold still guards a forgotten one.
+        // capped by the App ceiling. Inactivity never ends a session (#1114);
+        // a forgotten one is bounded by DY-5 instead: past the App's
+        // `sessionDormancyDays` it no longer binds (`bindSession`).
         const expiresAt = !app.agentSessionsExpire && sessionTimeoutSeconds == null
           ? null
           : new Date(Date.now() + Math.min(
