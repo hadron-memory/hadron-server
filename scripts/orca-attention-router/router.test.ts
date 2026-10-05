@@ -306,14 +306,17 @@ describe('Orca attention router — fresh counts at send time (#1616)', () => {
     const c = cfg(['w-eli', 'Eli'], ['w-baloo', 'Baloo']);
     fake.terminal('eli');
     fake.terminal('baloo');
-    // Main scan sees Eli's mention at 110; the fresh scan, reading later, sees 125.
-    fake.attention.workers = [worker('w-eli', 'Eli', { relevant: 110 }), worker('w-baloo', 'Baloo')];
+    // Main scan: Eli's mention at 110, Baloo's at 115. Fresh scan, reading
+    // later: Eli's has moved to 125; Baloo's is unchanged.
+    fake.attention.workers = [worker('w-eli', 'Eli', { relevant: 110 }), worker('w-baloo', 'Baloo', { relevant: 115 })];
     fake.fresh = [worker('w-eli', 'Eli', { relevant: 125 }), worker('w-baloo', 'Baloo', { relevant: 115 })];
     const first = poll(c);
     expect(first).toMatchObject({ nudged: ['Eli', 'Baloo'], adopted: true });
     expect(fake.sent[0][1]).toContain('latest mention #125');
-    // The server lists Eli again next poll: 125 postdates the adopted token's
-    // horizon. Baloo's 115 equals its horizon, so its record is NOT carried.
+    // Only Eli's record outlives the adopted token (125 above its 110
+    // horizon); Baloo's 115 equals its horizon, so the token covers it.
+    expect(Object.keys(new State(c.stateDir).ledger().nudged)).toEqual(['w-eli']);
+    // The server lists Eli again next poll: 125 postdates the token's horizon.
     fake.attention.workers = [worker('w-eli', 'Eli', { relevant: 125 })];
     fake.fresh = null;
     const second = poll(c);

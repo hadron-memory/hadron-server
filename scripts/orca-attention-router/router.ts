@@ -67,6 +67,15 @@ export function nudgeText(a: AttentionItem): string {
 
 const AGENT_IDENTITIES = new Set(['claude', 'codex']);
 
+/**
+ * The idle RECHECK after the recompute is fail-closed: prove idle NOW, or
+ * hold. A full busyWait there could outlast a turn in which the worker read
+ * its own chat, and the send would then deliver counts that very wait had
+ * re-aged (Atilla's delta review of 46a12ac1). An idle TUI answers in ~0.1 s,
+ * so half a second proves it without ever waiting for business to clear.
+ */
+const RECHECK_IDLE_TIMEOUT_MS = 500;
+
 export interface RunResult {
   code: number;
   stdout: string;
@@ -812,10 +821,11 @@ export function pollOnce(cfg: Config, run: Runner = runCommand, log: (line: stri
       // BOTH windows the gates had closed: the agent may have gone busy (#1490
       // steering hazard — a busy agent renders an EMPTY prompt box, so the
       // screen alone cannot catch it) or a human may have started typing
-      // (#5473). Re-prove both, as close to the send as possible. The wait can
-      // re-age the fresh counts; the named seqs keep the nudge true anyway.
-      if (!isIdle(cfg, handle, cfg.busyWaitMs, run)) {
-        outcome.held[entry.name] = `busy again after the recompute (waited ${Math.round(cfg.busyWaitMs / 1000)}s)`;
+      // (#5473). Re-prove both, as close to the send as possible — the idle
+      // recheck FAIL-CLOSED (see RECHECK_IDLE_TIMEOUT_MS): busy here holds,
+      // and the next poll recomputes everything.
+      if (!isIdle(cfg, handle, RECHECK_IDLE_TIMEOUT_MS, run)) {
+        outcome.held[entry.name] = 'busy again after the recompute (fail-closed, not waited)';
         continue;
       }
       const [stillEmpty, whyNow] = promptIsEmpty(cfg, handle, detail, run);
