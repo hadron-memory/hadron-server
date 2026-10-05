@@ -39,6 +39,7 @@ import { ROLE_ORDER } from '../../../lib/auth/orgRole.js';
 import { sessionScopedMemoryIds } from '../../../lib/auth/sessionScopedMemoryIds.js';
 import { getMemberOrgIds } from '../../../lib/auth/memberOrgIds.js';
 import { foreignIdentityScopedMemoryFilter } from '../../../lib/auth/memoryOwnership.js';
+import { isStrictOwner } from '../../../lib/auth/strictOwner.js';
 import {
   formatCanonicalUrn,
   type CanonicalUrnType,
@@ -1095,7 +1096,7 @@ export async function canReadMemoryRecord(
     // TARGET owns them — the shared-org scope excludes all identity-scoped
     // resources (the target-as-owner check below would otherwise admit them).
     if (ctx.impersonation) return false;
-    if (ctx.userId && memory.userId === ctx.userId) return true;
+    if (isStrictOwner(ctx, memory.userId)) return true;
     // No `as never`: the cast is what let a caller omit the fields this reads.
     if (ctx.userId && (await granteeShareAccess(ctx.db, ctx.userId, memory))) return true;
     return false;
@@ -2334,7 +2335,7 @@ export async function requireMemoryWriteAccess(ctx: Context, memoryId: string): 
   // #778 `writer` MemoryShare grantee on a personal memory (private is never
   // shareable, so this only widens personal).
   if (memory.class === 'personal' || memory.class === 'private') {
-    if (memory.userId === ctx.userId) return;
+    if (isStrictOwner(ctx, memory.userId)) return;
     if (await granteeShareAccess(ctx.db, ctx.userId, memory, { requireWrite: true })) return;
     throw memoryWriteForbidden();
   }

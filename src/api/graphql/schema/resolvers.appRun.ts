@@ -30,6 +30,7 @@ import { isId } from '../../../lib/entityRef/shape.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { type Context, requireOrgRole, requireOwnerOrOrgRole, isPlatformAdmin } from './resolvers.helpers.js';
 import { withAuthorizedTx } from './authorizedTx.js';
+import { isStrictOwner } from '../../../lib/auth/strictOwner.js';
 
 /** Orderable columns on the appRuns list (#833). Mirrors the SDL enum. */
 export type AppRunSortField = 'createdAt' | 'startedAt' | 'finishedAt' | 'status';
@@ -174,6 +175,28 @@ function resolveRunAsSelf(ctx: Context, runAsSelf: boolean | null | undefined): 
     });
   }
   return ctx.userId;
+}
+
+/**
+ * A persisted on-behalf-of identity belongs to its user, not to the trigger's
+ * administrators (cor:agt:010:01; #1643). Run this on the locked current row;
+ * neither clearing nor replacing its identity permits another actor to edit it.
+ */
+function requireStoredRunOwner(ctx: Context, userId: string | null): void {
+  if (ctx.impersonation || (userId !== null && !isStrictOwner(ctx, userId))) {
+    throw new GraphQLError('Only the stored run-as user may change this trigger.', {
+      extensions: { code: 'FORBIDDEN' },
+    });
+  }
+}
+
+/** Require a current App relationship for an identity retained or newly selected by an edit. */
+async function requireRunIdentityRelationship(ctx: Context, appId: string, userId: string | null): Promise<void> {
+  if (userId && !(await hasAppRelationship(ctx.db, appId, userId))) {
+    throw new GraphQLError('The on-behalf-of user has no live relationship with this App.', {
+      extensions: { code: 'RELATIONSHIP_MISSING' },
+    });
+  }
 }
 
 /**
@@ -473,73 +496,95 @@ export const appRunMutations = {
     });
   },
 
-  /** Partial update (org-ADMIN); a cron/timezone change recomputes nextRunAt. */
+  /** Org-ADMIN update, additionally strict-owner-gated when a run-as identity is stored (#1643). */
   updateAgentSchedule: async (
     _: unknown,
     { id, input }: { id: string; input: Partial<CreateAgentScheduleInput> },
     ctx: Context,
   ) => {
-    const existing = await ctx.db.agentSchedule.findFirst({
+    const observed = await ctx.db.agentSchedule.findFirst({
       where: { id, deletedAt: null },
     });
-    if (!existing) throw new GraphQLError('Schedule not found.', { extensions: { code: 'NOT_FOUND' } });
-    await requireOrgRole(ctx, existing.organizationId, 'ADMIN');
-    const timezone = input.timezone?.trim() || existing.timezone;
-    // Mode transitions (#510): providing cron switches to recurring (clears
-    // runAt); providing runAt switches to one-shot (clears cron). Both in
-    // one call is ambiguous. A timezone-only change recomputes only for
-    // recurring schedules — a one-shot's runAt is an absolute instant.
-    if (input.cron != null && input.runAt != null) {
-      throw new GraphQLError('Provide at most one of cron (recurring) or runAt (one-shot).', {
-        extensions: { code: 'BAD_USER_INPUT' },
-      });
-    }
-    let modeFields: { cron?: string | null; runAt?: Date | null; nextRunAt?: Date } = {};
-    if (input.cron != null) {
-      modeFields = { cron: input.cron, runAt: null, nextRunAt: validatedCronNext(input.cron, timezone) };
-    } else if (input.runAt != null) {
-      const at = validatedRunAt(input.runAt);
-      modeFields = { cron: null, runAt: at, nextRunAt: at };
-    } else if (input.timezone != null && existing.cron != null) {
-      modeFields = { nextRunAt: validatedCronNext(existing.cron, timezone) };
-    }
-    if (input.entryNodeUrn != null) assertFullyQualifiedUrn(input.entryNodeUrn, 'node');
-    // agentRef semantics on update: undefined/'' = no change (''≡absent),
-    // null = clear the agent, string = set (validated as installed).
-    const agentId =
-      input.agentRef !== undefined && input.agentRef !== ''
-        ? await resolveInstalledAgent(ctx, existing.appId, input.agentRef)
-        : undefined;
-    if (input.policy != null && parsePolicyLink(input.policy) == null) {
-      throw new GraphQLError('policy must be { allow: string[] }.', {
-        extensions: { code: 'BAD_USER_INPUT' },
-      });
-    }
-    // Spec 049: a ref sets the scope, an empty string clears it (⇒ `app`),
-    // omitted leaves it — the agentRef convention above.
-    const scopeId =
-      input.scopeRef === undefined || input.scopeRef === null
-        ? undefined
-        : input.scopeRef.trim() === ''
-          ? null
-          : await resolveScopeForTrigger(ctx, existing.appId, input.scopeRef);
-    return ctx.db.agentSchedule.update({
-      where: { id },
-      data: {
-        ...(input.name != null ? { name: input.name } : {}),
-        ...modeFields,
-        ...(input.timezone != null ? { timezone } : {}),
-        ...(input.entryNodeUrn != null ? { entryNodeUrn: input.entryNodeUrn } : {}),
-        ...(input.eventData !== undefined ? { eventData: input.eventData as never } : {}),
-        ...(input.policy !== undefined ? { policy: input.policy as never } : {}),
-        ...(input.aiConfigName !== undefined ? { aiConfigName: input.aiConfigName } : {}),
-        ...(input.enabled != null ? { enabled: input.enabled } : {}),
-        ...(input.runAsSelf != null ? { userId: resolveRunAsSelf(ctx, input.runAsSelf) } : {}),
-        ...(agentId !== undefined ? { agentId } : {}),
-        ...(scopeId !== undefined ? { scopeId } : {}),
-        updatedBy: ctx.userId ?? ctx.clientId ?? null,
+    if (!observed) throw new GraphQLError('Schedule not found.', { extensions: { code: 'NOT_FOUND' } });
+    await requireOrgRole(ctx, observed.organizationId, 'ADMIN');
+    requireStoredRunOwner(ctx, observed.userId);
+    let existing = observed;
+    return withAuthorizedTx(
+      ctx,
+      [{ kind: 'org', id: observed.organizationId }, { kind: 'app', id: observed.appId }],
+      async (txCtx) => {
+        const current = await txCtx.db.agentSchedule.findFirst({ where: { id, deletedAt: null } });
+        if (!current || current.appId !== observed.appId || current.organizationId !== observed.organizationId) {
+          throw new GraphQLError('Schedule not found.', { extensions: { code: 'NOT_FOUND' } });
+        }
+        await requireOrgRole(txCtx, current.organizationId, 'ADMIN');
+        requireStoredRunOwner(txCtx, current.userId);
+        const userId = input.runAsSelf != null ? resolveRunAsSelf(txCtx, input.runAsSelf) : current.userId;
+        await requireRunIdentityRelationship(txCtx, current.appId, userId);
+        existing = current;
       },
-    });
+      async (tx, txCtx) => {
+        const timezone = input.timezone?.trim() || existing.timezone;
+        // Mode transitions (#510): providing cron switches to recurring (clears
+        // runAt); providing runAt switches to one-shot (clears cron). Both in
+        // one call is ambiguous. A timezone-only change recomputes only for
+        // recurring schedules — a one-shot's runAt is an absolute instant.
+        if (input.cron != null && input.runAt != null) {
+          throw new GraphQLError('Provide at most one of cron (recurring) or runAt (one-shot).', {
+            extensions: { code: 'BAD_USER_INPUT' },
+          });
+        }
+        let modeFields: { cron?: string | null; runAt?: Date | null; nextRunAt?: Date } = {};
+        if (input.cron != null) {
+          modeFields = { cron: input.cron, runAt: null, nextRunAt: validatedCronNext(input.cron, timezone) };
+        } else if (input.runAt != null) {
+          const at = validatedRunAt(input.runAt);
+          modeFields = { cron: null, runAt: at, nextRunAt: at };
+        } else if (input.timezone != null && existing.cron != null) {
+          modeFields = { nextRunAt: validatedCronNext(existing.cron, timezone) };
+        }
+        if (input.entryNodeUrn != null) assertFullyQualifiedUrn(input.entryNodeUrn, 'node');
+        // agentRef semantics on update: undefined/'' = no change (''≡absent),
+        // null = clear the agent, string = set (validated as installed).
+        const agentId =
+          input.agentRef !== undefined && input.agentRef !== ''
+            ? await resolveInstalledAgent(txCtx, existing.appId, input.agentRef)
+            : undefined;
+        if (input.policy != null && parsePolicyLink(input.policy) == null) {
+          throw new GraphQLError('policy must be { allow: string[] }.', {
+            extensions: { code: 'BAD_USER_INPUT' },
+          });
+        }
+        // Spec 049: a ref sets the scope, an empty string clears it (⇒ `app`),
+        // omitted leaves it — the agentRef convention above.
+        const scopeId =
+          input.scopeRef === undefined || input.scopeRef === null
+            ? undefined
+            : input.scopeRef.trim() === ''
+              ? null
+              : await resolveScopeForTrigger(txCtx, existing.appId, input.scopeRef);
+        return tx.agentSchedule.update({
+          where: { id },
+          data: {
+            ...(input.name != null ? { name: input.name } : {}),
+            ...modeFields,
+            ...(input.timezone != null ? { timezone } : {}),
+            ...(input.entryNodeUrn != null ? { entryNodeUrn: input.entryNodeUrn } : {}),
+            ...(input.eventData !== undefined ? { eventData: input.eventData as never } : {}),
+            ...(input.policy !== undefined ? { policy: input.policy as never } : {}),
+            ...(input.aiConfigName !== undefined ? { aiConfigName: input.aiConfigName } : {}),
+            ...(input.enabled != null ? { enabled: input.enabled } : {}),
+            ...(input.runAsSelf != null ? { userId: resolveRunAsSelf(txCtx, input.runAsSelf) } : {}),
+            ...(agentId !== undefined ? { agentId } : {}),
+            ...(scopeId !== undefined ? { scopeId } : {}),
+            updatedBy: txCtx.userId ?? txCtx.clientId ?? null,
+          },
+        });
+      },
+      { afterLock: async (tx) => {
+        await tx.$queryRaw`SELECT id FROM agent_schedules WHERE id = ${id} FOR UPDATE`;
+      } },
+    );
   },
 
   /** Soft-delete + disable (org-ADMIN). */
@@ -668,20 +713,23 @@ export const appRunMutations = {
     return { webhook, path: `/hooks/${webhook.secret}/${webhook.name}`, token };
   },
 
-  /** New secret + new platform token; the old URL/token die immediately. */
+  /** Rotate credentials; a stored run-as identity additionally requires its strict owner (#1643). */
   rotateAgentWebhook: async (_: unknown, { id }: { id: string }, ctx: Context) => {
     const existing = await ctx.db.agentWebhook.findFirst({ where: { id, deletedAt: null } });
     if (!existing) throw new GraphQLError('Webhook not found.', { extensions: { code: 'NOT_FOUND' } });
     await requireOrgRole(ctx, existing.organizationId, 'ADMIN');
+    requireStoredRunOwner(ctx, existing.userId);
     const webhook = await withAuthorizedTx(
       ctx,
       [{ kind: 'org', id: existing.organizationId }, { kind: 'app', id: existing.appId }],
       async (txCtx) => {
         await requireOrgRole(txCtx, existing.organizationId, 'ADMIN');
         const current = await txCtx.db.agentWebhook.findFirst({ where: { id, deletedAt: null } });
-        if (!current || current.appId !== existing.appId) {
+        if (!current || current.appId !== existing.appId || current.organizationId !== existing.organizationId) {
           throw new GraphQLError('Webhook not found.', { extensions: { code: 'NOT_FOUND' } });
         }
+        requireStoredRunOwner(txCtx, current.userId);
+        await requireRunIdentityRelationship(txCtx, current.appId, current.userId);
       },
       (tx) => tx.agentWebhook.update({
         where: { id },
