@@ -98,6 +98,13 @@ that drift is what the deprecated `hadron_dev` row above warns about).
 > the prompt. Both objects are rebuilt by post-push.sql moments later, and
 > neither holds row data — `tsv` is derived from other columns.
 
+## Disposable E2E stacks
+
+For isolated QA on a fresh seeded DB, see [`scripts/e2e/README.md`](scripts/e2e/README.md).
+`./scripts/e2e/stack.sh up <worker> <api-port> <portal-port>` creates a private
+stack; `down <worker>` tears down only that stack. It never uses the canonical
+dev DB or `hadron_test`. Use distinct names and ports for concurrent stacks.
+
 ## Common commands
 
 ```bash

@@ -1442,6 +1442,8 @@ export async function maybeAdvanceOwnChannelRead(
     channelId: string;
     capturedHead: number;
     sessionRef?: string | null;
+    /** Only false defers acknowledgement; session ownership and heartbeat still run. */
+    advanceReadState?: boolean | null;
     sinceSeq?: number | null;
     beforeSeq?: number | null;
     mentionsRef?: string | null;
@@ -1461,7 +1463,12 @@ export async function maybeAdvanceOwnChannelRead(
   if (!session) return null;
   // #1617 B — the page has been served, so the read (the act) succeeded:
   // resume now. A refusal under the lock leaves the cursor where it was.
+  // Placed BEFORE the #1628 opt-out: a read that declines the cursor advance
+  // is still driving the session, so it still resumes it.
   if (session.lapsed && !(await reviveOwnLapsedSession(ctx, session.sessionId))) return null;
+  // #1628: attribution is activity even when the caller will acknowledge only
+  // after validating and delivering the page. Never skip the heartbeat above.
+  if (args.advanceReadState === false) return null;
   if (args.mentionsRef || args.beforeSeq != null || (args.offset ?? 0) !== 0 || (args.limit ?? 1) <= 0) return null;
   // #1536: no cursor and no offset now selects the newest page. Even when
   // total says it is complete, count and fetch are separate queries: a post

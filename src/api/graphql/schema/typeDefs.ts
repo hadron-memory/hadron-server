@@ -7256,6 +7256,13 @@ export const typeDefs = `#graphql
     """
     teamChatMessages(
       appRef: ID!
+      """
+      Only false suppresses automatic read-cursor advancement. Session
+      attribution, read usage and the eligible owned-session heartbeat remain.
+      Omitted, null and true preserve normal contiguous-page acknowledgement;
+      callers opting out acknowledge explicitly after successful delivery.
+      """
+      advanceReadState: Boolean = true
       sinceSeq: Int
       beforeSeq: Int
       mentionsRef: ID
