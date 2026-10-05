@@ -1,6 +1,8 @@
 /** #1353 — loss-safe compact attention, worker-owned reads and switchover. */
 
 import { createHmac } from 'node:crypto';
+import { buildSchema, parse, validate } from 'graphql';
+import { typeDefs } from '../api/graphql/schema/typeDefs.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
@@ -177,6 +179,42 @@ afterEach(() => {
 });
 
 describe('worker-owned ordinary reads', () => {
+  it('#1628 exposes the opt-out only on the GraphQL team-chat read, defaulting true', () => {
+    const schema = buildSchema(typeDefs);
+    const field = schema.getQueryType()!.getFields().teamChatMessages;
+    expect(field.args.find((arg) => arg.name === 'advanceReadState')?.defaultValue).toBe(true);
+    expect(validate(schema, parse('{ teamChatMessages(appRef: "x", advanceReadState: false) { total } }'))).toEqual([]);
+    expect(validate(schema, parse('{ channelMessages(channelRef: "x", advanceReadState: false) { total } }')))
+      .toHaveLength(1);
+    // Older-server refusal is a validation error naming exactly the new field/argument.
+    const oldSchema = buildSchema(typeDefs.replace('advanceReadState: Boolean = true', ''));
+    expect(validate(oldSchema, parse('{ teamChatMessages(appRef: "x", advanceReadState: false) { total } }'))[0].message)
+      .toBe('Unknown argument "advanceReadState" on field "Query.teamChatMessages".');
+  });
+
+  it('#1628 defers acknowledgement while preserving returned messages and attributed usage', async () => {
+    await post('deferred read');
+    const ctx = userCtx({ sessionId });
+    const page = await Q.teamChatMessages({}, { appRef: app.id, sinceSeq: 0, advanceReadState: false }, ctx);
+    expect(page.items.map((m: { seq: number }) => m.seq)).toEqual([1]);
+    expect(await db.channelReadState.findFirst({ where: { workerId: worker.id, channelId: channel.id } })).toBeNull();
+    await vi.waitFor(async () => {
+      const reads = await db.usageEvent.findMany({ where: { type: 'read', memoryId: memory.id } });
+      expect(reads).toHaveLength(1);
+      expect(reads[0]).toMatchObject({ sessionId, userId: user.id, nodeId: page.items[0].nodeId });
+    });
+    await M.markOwnTeamChatRead({}, { appRef: app.id, channelRef: channel.id, sessionRef: sessionId, seq: 1 }, userCtx());
+    expect(await db.channelReadState.findFirst({ where: { workerId: worker.id, channelId: channel.id } }))
+      .toMatchObject({ lastSeenSeq: 1 });
+  });
+
+  it.each([undefined, null, true])('#1628 preserves automatic acknowledgement for %s', async (advanceReadState) => {
+    await post('normal read');
+    await Q.teamChatMessages({}, { appRef: app.id, sinceSeq: 0, advanceReadState }, userCtx({ sessionId }));
+    expect(await db.channelReadState.findFirst({ where: { workerId: worker.id, channelId: channel.id } }))
+      .toMatchObject({ lastSeenSeq: 1 });
+  });
+
   it('does not mark a partial newest page as a contiguous read', async () => {
     for (let i = 1; i <= 5; i++) await post(`message ${i}`);
     const ctx = userCtx({ sessionId });
@@ -930,6 +968,21 @@ describe('MCP parity and discovery gate', () => {
 describe('#1540 — a mark-read through a live session keeps it live', () => {
   const H = 60 * 60 * 1000;
   afterEach(() => vi.useRealTimers());
+
+  it.each([false, true])('#1628 an empty read keeps an eligible session live with advancement %s', async (advanceReadState) => {
+    const t0 = (await db.session.findUniqueOrThrow({ where: { id: sessionId } })).startedAt;
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date(t0.getTime() + 20 * H));
+    const page = await Q.teamChatMessages({}, { appRef: app.id, sinceSeq: 0, advanceReadState }, userCtx({ sessionId }));
+    expect(page.items).toEqual([]);
+    expect((await db.session.findUniqueOrThrow({ where: { id: sessionId } })).updatedAt!.getTime())
+      .toBe(t0.getTime() + 20 * H);
+    expect(await db.channelReadState.findFirst({ where: { workerId: worker.id, channelId: channel.id } })).toBeNull();
+    await post('later message');
+    vi.setSystemTime(new Date(t0.getTime() + 30 * H));
+    await expect(M.markOwnTeamChatRead({}, { appRef: app.id, channelRef: channel.id, sessionRef: sessionId, seq: 1 }, userCtx()))
+      .resolves.toMatchObject({ lastSeenSeq: 1 });
+  });
 
   it('marking read inside the window keeps the session live past startedAt + window', async () => {
     const t0 = (await db.session.findUniqueOrThrow({ where: { id: sessionId } })).startedAt;
