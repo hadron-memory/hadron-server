@@ -426,3 +426,114 @@ describe('approve authorizes before checking the session key (@copilot, PR #1592
     }
   });
 });
+
+describe('status reads on a list page (#1596)', () => {
+  const APPROVAL_COLUMNS = ['approvedRevNo', 'approvedBy', 'approvedByInfo', 'approvedAt', 'approvalHash'];
+  const MINT_COLUMNS = ['mintedAt', 'mintedBy', 'mintedByInfo', 'mintedRevNo', 'mintedHash'];
+  /** A parent selected the way a slim list projection would: everything but `columns`. */
+  const slimParent = async (id: string, columns: string[]) => {
+    const row: Record<string, unknown> = { ...(await db.node.findUniqueOrThrow({ where: { id } })) };
+    for (const c of columns) delete row[c];
+    return row as Awaited<ReturnType<typeof db.node.findUniqueOrThrow>>;
+  };
+  const selects = (spy: { mock: { calls: unknown[][] } }, column: string) =>
+    spy.mock.calls.filter(([a]) => Object.keys((a as { select?: object })?.select ?? {}).includes(column)).length;
+
+  it('loads the approval columns of a whole page in one query, not one per node', async () => {
+    const nodes = await Promise.all(['l:1', 'l:2', 'l:3', 'l:4', 'l:5'].map((loc) => node(loc)));
+    await approve(nodes[0].id);
+    await approve(nodes[3].id);
+    const parents = await Promise.all(nodes.map((n) => slimParent(n.id, APPROVAL_COLUMNS)));
+    const findMany = vi.spyOn(db.node, 'findMany');
+    const findUnique = vi.spyOn(db.node, 'findUnique');
+    try {
+      const ctx = as();
+      const states = await Promise.all(parents.map((p) => resolvers.Node.approvalStatus(p, {}, ctx)));
+      expect(states.map((s) => s.state)).toEqual(['APPROVED', 'NOT_APPROVED', 'NOT_APPROVED', 'APPROVED', 'NOT_APPROVED']);
+      expect(states[3].approval?.revision).toBe(1);
+      expect(selects(findMany, 'approvedRevNo')).toBe(1);
+      expect(selects(findUnique, 'approvedRevNo')).toBe(0);
+    } finally {
+      findMany.mockRestore();
+      findUnique.mockRestore();
+    }
+  });
+
+  it('skips the revision reconcile for a node with no approval, and still runs it for an approved one', async () => {
+    const unapproved = await node('r:1');
+    const approved = await node('r:2');
+    await approve(approved.id);
+    const reconciles = vi.spyOn(db, '$transaction');
+    try {
+      expect((await statusOf(unapproved.id)).state).toBe('NOT_APPROVED');
+      expect(reconciles).not.toHaveBeenCalled();
+      expect((await statusOf(approved.id)).state).toBe('APPROVED');
+      expect(reconciles).toHaveBeenCalled();
+    } finally {
+      reconciles.mockRestore();
+    }
+  });
+
+  it('still reads SUPERSEDED for an approved node changed outside the revision system', async () => {
+    const n = await node('r:1');
+    await approve(n.id);
+    // A raw writer: the stored row moves on without a revision.
+    await db.node.update({ where: { id: n.id }, data: { content: 'raw write' } });
+    const parent = await slimParent(n.id, APPROVAL_COLUMNS);
+    expect((await resolvers.Node.approvalStatus(parent, {}, as())).state).toBe('SUPERSEDED');
+  });
+
+  it('loads the mint columns of a whole page in one query', async () => {
+    const nodes = await Promise.all(['m:1', 'm:2', 'm:3'].map((loc) => node(loc)));
+    await db.node.update({
+      where: { id: nodes[1].id },
+      data: { mintedAt: new Date(), mintedBy: admin.id, mintedRevNo: 1, mintedHash: 'h' },
+    });
+    const parents = await Promise.all(nodes.map((n) => slimParent(n.id, MINT_COLUMNS)));
+    const findMany = vi.spyOn(db.node, 'findMany');
+    const findUnique = vi.spyOn(db.node, 'findUnique');
+    try {
+      const ctx = as();
+      const statuses = await Promise.all(parents.map((p) => resolvers.Node.mintStatus(p, {}, ctx)));
+      expect(statuses.map((s) => s.minted)).toEqual([false, true, false]);
+      expect(statuses[1]).toMatchObject({ revision: 1, hash: 'h' });
+      expect(selects(findMany, 'mintedAt')).toBe(1);
+      expect(selects(findUnique, 'mintedAt')).toBe(0);
+    } finally {
+      findMany.mockRestore();
+      findUnique.mockRestore();
+    }
+  });
+
+  it('pins the fallback to the parent memory: a node moved after the page was read discloses no record', async () => {
+    const n = await node('p:1');
+    await approve(n.id);
+    await db.node.update({
+      where: { id: n.id },
+      data: { mintedAt: new Date(), mintedBy: admin.id, mintedRevNo: 1, mintedHash: 'h' },
+    });
+    const approvalParent = await slimParent(n.id, APPROVAL_COLUMNS);
+    const mintParent = await slimParent(n.id, MINT_COLUMNS);
+    const elsewhere = await db.memory.create({
+      data: { id: generateId(), urn: 'approve.example:elsewhere', name: 'elsewhere', class: 'private', userId: outsider.id, ownerUserId: outsider.id },
+    });
+    await db.node.update({ where: { id: n.id }, data: { memoryId: elsewhere.id } });
+    const ctx = as();
+    const status = await resolvers.Node.approvalStatus(approvalParent, {}, ctx);
+    expect(status).toEqual({ state: 'NOT_APPROVED', approval: null });
+    expect((await resolvers.Node.mintStatus(mintParent, {}, ctx)).minted).toBe(false);
+  });
+
+  it('rejects every waiter of a batch when its query fails, rather than hanging', async () => {
+    const nodes = await Promise.all(['f:1', 'f:2'].map((loc) => node(loc)));
+    const parents = await Promise.all(nodes.map((n) => slimParent(n.id, MINT_COLUMNS)));
+    const findMany = vi.spyOn(db.node, 'findMany').mockRejectedValueOnce(new Error('db down'));
+    try {
+      const ctx = as();
+      const outcomes = await Promise.allSettled(parents.map((p) => resolvers.Node.mintStatus(p, {}, ctx)));
+      expect(outcomes.map((o) => o.status)).toEqual(['rejected', 'rejected']);
+    } finally {
+      findMany.mockRestore();
+    }
+  });
+});
