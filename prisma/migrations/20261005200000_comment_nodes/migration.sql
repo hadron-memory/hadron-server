@@ -41,7 +41,7 @@ CREATE INDEX "comment_meta_target_node_id_idx" ON "comment_meta"("target_node_id
 CREATE INDEX "comment_meta_thread_root_id_idx" ON "comment_meta"("thread_root_id");
 
 ALTER TABLE "comment_meta" ADD CONSTRAINT "comment_meta_node_id_fkey" FOREIGN KEY ("node_id") REFERENCES "nodes"("id") ON DELETE CASCADE ON UPDATE CASCADE;
-ALTER TABLE "comment_meta" ADD CONSTRAINT "comment_meta_target_node_id_fkey" FOREIGN KEY ("target_node_id") REFERENCES "nodes"("id") ON DELETE NO ACTION ON UPDATE CASCADE;
+ALTER TABLE "comment_meta" ADD CONSTRAINT "comment_meta_target_node_id_fkey" FOREIGN KEY ("target_node_id") REFERENCES "nodes"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- ---- BEGIN prisma/comment-invariants.sql (verbatim) ----
 -- #1606 / #1607 — comment-node invariants (`cor:dmo:110`). The ONE source of

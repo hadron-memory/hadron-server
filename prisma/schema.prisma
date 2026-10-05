@@ -1508,8 +1508,11 @@ enum CommentThreadState {
 /// (`comment_meta_one_open_thread`, a partial unique index Prisma can't model).
 model CommentMeta {
   nodeId             String              @id @map("node_id")
-  /// The commented node. Immutable. `ON DELETE NO ACTION`: hard-deleting a
-  /// commented target fails unless its threads go in the same statement.
+  /// The commented node. Immutable. `ON DELETE CASCADE` only so a whole-memory
+  /// delete never depends on cascade order: hard-deleting a commented target
+  /// on its own is still refused, by the governed-edge trigger (its anchor
+  /// edge cannot go while the comment exists) and, at commit, by the
+  /// comment-without-meta check.
   targetNodeId       String              @map("target_node_id")
   /// NULL for a top-level comment; else the thread's top-level comment.
   threadRootId       String?             @map("thread_root_id")
@@ -1536,7 +1539,7 @@ model CommentMeta {
   createdAt          DateTime            @default(now()) @map("created_at")
 
   node   Node @relation("CommentMetaNode", fields: [nodeId], references: [id], onDelete: Cascade)
-  target Node @relation("CommentMetaTarget", fields: [targetNodeId], references: [id], onDelete: NoAction)
+  target Node @relation("CommentMetaTarget", fields: [targetNodeId], references: [id], onDelete: Cascade)
 
   @@index([targetNodeId])
   @@index([threadRootId])

@@ -7,9 +7,8 @@
  *     `TARGET`, and restoring the target restores exactly those (never a
  *     thread an admin deleted);
  *   - a hard delete of a target (or a git-sync prune) hard-deletes its
- *     threads first. A path that forgets is refused by the database: the
- *     meta row's target FK is `ON DELETE NO ACTION`, and governed edges
- *     refuse a delete while their comment exists.
+ *     threads first. A path that forgets is refused by the database:
+ *     governed edges refuse a delete while their comment exists.
  */
 import type { Prisma } from '../../generated/prisma/index.js';
 import { COMMENT_NODE_TYPE } from './index.js';
