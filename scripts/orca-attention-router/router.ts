@@ -24,6 +24,10 @@
  *  - The token is adopted only when every roster worker with new attention
  *    was nudged. A busy or unreachable worker HOLDS it, and a ledger keyed on
  *    the adopted token keeps the retry from re-nudging the others.
+ *  - The counts a nudge carries are recomputed immediately before the send,
+ *    tokenless, so they are true when delivered — a count computed at poll
+ *    time is stale by however long the busy-wait lasted, and a worker that
+ *    read its chat in that window is not told about nothing (#1616).
  *
  * Usage (see README.md):
  *   pnpm tsx scripts/orca-attention-router/router.ts poll   [--config PATH]
@@ -43,14 +47,20 @@ import { fileURLToPath } from 'node:url';
 
 export const DEFAULT_CONFIG = join(homedir(), '.config', 'hadron-orca-attention-router', 'config.json');
 
-/** The one line a worker receives: counts only, never a message body, sequence or token. */
-export function nudgeText(unread: number, mentions: number): string {
+/**
+ * The one line a worker receives: fresh counts with the seq range they cover —
+ * never a message body, and never a token. The seqs let the recipient check
+ * the nudge against its own read cursor, so it stays true when delivered (#1616).
+ */
+export function nudgeText(a: AttentionItem): string {
+  const span = a.firstUnreadSeq === null ? '' : ` — unread #${a.firstUnreadSeq}–#${a.lastSeq}`;
+  const latest = a.lastRelevantSeq === null ? '' : `, latest mention at #${a.lastRelevantSeq}`;
   return (
-    `Hadron team attention: team has ${unread} relevant unread (${mentions} mentions) for you. ` +
+    `Hadron team attention: team has ${a.unread} relevant unread (${a.unreadMentions} mention${a.unreadMentions === 1 ? '' : 's'}) for you${span}${latest}. ` +
     'Read team chat unfiltered with your own live Hadron session. If nothing needs your action, ' +
     'acknowledge your own read cursor and finish silently: do not post a team-chat reply or a ' +
     "user-facing 'read/no action' comment. Report only an actionable result or blocker. " +
-    '(Nudged by the Orca attention router.)'
+    '(Nudged by the Orca attention router; counts as of delivery.)'
   );
 }
 
@@ -436,6 +446,22 @@ export function pollAttention(cfg: Config, token: string | null, run: Runner): {
 }
 
 /**
+ * The worker's CURRENT attention, recomputed immediately before a send (#1616):
+ * the poll's numbers are as old as the busy-wait was long, and a worker that
+ * read its chat in that window must not be nudged about what it already read.
+ *
+ * Tokenless, so each row is relative to the worker's OWN read cursor — the
+ * attention a fresh reader would see, not the router's incremental view.
+ * Read-only; the adoptable token this scan returns is DISCARDED: adoption
+ * belongs to the poll's own scan and is decided only after every nudge was
+ * delivered or held.
+ */
+export function freshAttention(cfg: Config, workerId: string, run: Runner): AttentionItem | null {
+  const scan = pollAttention(cfg, null, run);
+  return scan.items.find((i) => i.worker === workerId && i.channel === cfg.channel) ?? null;
+}
+
+/**
  * Whether the worker's EFFECTIVE registration on the Channel is its own,
  * mention-only row.
  *
@@ -703,6 +729,8 @@ export function alreadyNudged(record: NudgeRecord | undefined, item: AttentionIt
 
 export interface Outcome {
   nudged: string[];
+  /** Workers whose chat they read themselves while the nudge waited (#1616). */
+  dropped: string[];
   covered: string[];
   held: Record<string, string>;
   adopted: boolean;
@@ -711,6 +739,7 @@ export interface Outcome {
 /** One short summary line; never a token or a message body. */
 export function describeOutcome(o: Outcome): string {
   const parts = [`nudged: ${o.nudged.join(', ') || 'none'}`];
+  if (o.dropped.length) parts.push(`dropped (read while waiting): ${o.dropped.join(', ')}`);
   if (o.covered.length) parts.push(`already nudged: ${o.covered.join(', ')}`);
   const held = Object.entries(o.held);
   if (held.length) parts.push(`held: ${held.map(([n, r]) => `${n} (${r})`).join('; ')}`);
@@ -735,7 +764,7 @@ export function pollOnce(cfg: Config, run: Runner = runCommand, log: (line: stri
       if (item && item.lastRelevantSeq !== null && item.unreadMentions > 0) targets.push([entry, item]);
     }
 
-    const outcome: Outcome = { nudged: [], covered: [], held: {}, adopted: false };
+    const outcome: Outcome = { nudged: [], dropped: [], covered: [], held: {}, adopted: false };
     const terminals = targets.length ? listTerminals(cfg, run) : [];
     for (const [entry, seen] of targets) {
       if (!hasMentionOnlyRow(cfg, entry.worker, run)) {
@@ -764,12 +793,26 @@ export function pollOnce(cfg: Config, run: Runner = runCommand, log: (line: stri
         continue;
       }
       mustOwn();
-      const [ok, how] = sendNudge(cfg, handle, nudgeText(seen.unread, seen.unreadMentions), run);
+      // Recomputed after every gate, as close to the send as possible: the
+      // poll's numbers are as old as the busy-wait was long, and a worker that
+      // read its chat in that window must not be nudged about nothing (#1616).
+      const now = freshAttention(cfg, entry.worker, run);
+      if (!now || now.unreadMentions <= 0 || now.lastRelevantSeq === null) {
+        // The worker read the mentions itself while this nudge waited. Record
+        // the frontier as covered so a held token doesn't re-run the gates for
+        // it every poll; a NEW mention has a higher seq and is never mistaken
+        // for covered (same argument as `alreadyNudged`).
+        ledger.nudged[entry.worker] = { relevantSeq: seen.lastRelevantSeq!, at: Date.now(), stages: 'dropped: read while waiting' };
+        state.saveLedger(ledger);
+        outcome.dropped.push(entry.name);
+        continue;
+      }
+      const [ok, how] = sendNudge(cfg, handle, nudgeText(now), run);
       if (!ok) {
         outcome.held[entry.name] = how;
         continue;
       }
-      ledger.nudged[entry.worker] = { relevantSeq: seen.lastRelevantSeq!, at: Date.now(), stages: how };
+      ledger.nudged[entry.worker] = { relevantSeq: now.lastRelevantSeq!, at: Date.now(), stages: how };
       // Persisted at once: a crash or a later failure in this poll must not
       // cause the same nudge to be sent again (@codex P2, #1490).
       state.saveLedger(ledger);
