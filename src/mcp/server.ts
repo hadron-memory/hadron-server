@@ -283,7 +283,7 @@ function renderSessionLiveness(lapsesAt: Date | null, now: Date): string {
   if (!lapsesAt) return 'liveness: not live';
   const delta = lapsesAt.getTime() - now.getTime();
   return delta >= 0
-    ? `liveness: LIVE — lapses at ${lapsesAt.toISOString()} (in ${formatDuration(delta)}) unless driven first; ` +
+    ? `liveness: LIVE until ${lapsesAt.toISOString()} (${formatDuration(delta)} left) unless driven first; ` +
         'any attributed read, post or mark-read through it renews it'
     : `liveness: LAPSED at ${lapsesAt.toISOString()} (${formatDuration(-delta)} ago) — nothing drove it inside its ` +
         'idle window, so it can no longer author in team chat. It is still OPEN: end it with a handoff, and start ' +

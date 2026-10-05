@@ -1581,11 +1581,13 @@ export const typeDefs = `#graphql
     """
     isLive: Boolean!
     """
-    #1617: when this session stops reading live unless something drives it
-    first: its last activity plus its type's idle window. A past instant means
-    it has already LAPSED. Any attributed read, post or mark-read through a
-    live session renews it. Derived from the same computation as isLive, so
-    the two always agree. Null for an ended or deleted session.
+    #1617: the LAST instant this session still reads live unless something
+    drives it first: its last activity plus its type's idle window. The
+    predicate is inclusive, so the session is live AT this instant and lapsed
+    after it; an instant in the past means it has already LAPSED. Any
+    attributed read, post or mark-read through a live session renews it.
+    Derived from the same computation as isLive, so the two always agree.
+    Null for an ended or deleted session.
     """
     lapsesAt: DateTime
     events: [UsageEvent!]!

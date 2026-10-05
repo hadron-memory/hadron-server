@@ -246,9 +246,11 @@ export function isSessionLive(
 }
 
 /**
- * The instant an open session stops reading live unless something drives it
- * first (#1617): its activity instant plus its type's idle window. Null for an
- * ended session, which is not live whatever the clock says.
+ * The LAST instant an open session still reads live unless something drives
+ * it first (#1617): its activity instant plus its type's idle window. The
+ * predicate is inclusive, so the session is live at this instant and lapsed
+ * after it. Null for an ended session, which is not live whatever the clock
+ * says.
  *
  * {@link isSessionLive} is defined in terms of this, so the deadline a reader
  * is SHOWN (`Session.lapsesAt`, `hadron_whoami`) and the predicate the post and

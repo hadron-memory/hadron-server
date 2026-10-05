@@ -1596,6 +1596,12 @@ describe('hadron-cli#487 — Worker.hasLiveSession / lastActiveAt', () => {
       // that lives outside the session row.
       Udo: { startedAt: t(-5000), updatedAt: t(-4000), endedAt: null, autoExpiredAt: null,
              eventAt: t(-1) },
+      // #1623 review (Bob, P3): one row just INSIDE and one just OUTSIDE the
+      // 24h window. Without them no fixture sat in the band where a window
+      // fork between the SQL roster and the TS predicate would disagree, so a
+      // +1h fork on either side passed this test.
+      Ada: { startedAt: t(-1500), updatedAt: t(-1430), endedAt: null, autoExpiredAt: null },
+      Bo: { startedAt: t(-1500), updatedAt: t(-1450), endedAt: null, autoExpiredAt: null },
     };
 
     const workers: Record<string, { id: string; appId: string }> = {};
@@ -1639,6 +1645,9 @@ describe('hadron-cli#487 — Worker.hasLiveSession / lastActiveAt', () => {
         `${name}: SQL ${actual.toISOString()} vs TS ${expected.toISOString()}`,
       ).toBeLessThan(1000);
     }
+    // The window-band pair must actually straddle the window, or it pins nothing.
+    expect(await W.hasLiveSession(workers.Ada, {}, ctx(admin.id))).toBe(true);
+    expect(await W.hasLiveSession(workers.Bo, {}, ctx(admin.id))).toBe(false);
   });
 
   it('one worker going live does not make its sibling live', async () => {

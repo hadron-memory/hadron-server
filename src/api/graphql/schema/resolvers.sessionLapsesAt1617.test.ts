@@ -77,6 +77,33 @@ describe('#1617 — Session.lapsesAt', () => {
     expect(res.body.singleResult.data).toEqual({ session: { id: deleted.id, isLive: false, lapsesAt: null } });
   });
 
+  it('a narrow { id } parent reads its row ONCE for both fields, so they share one snapshot (#1623 review)', async () => {
+    const live = await session({ startedAt: new Date(Date.now() - 1 * H) });
+    const S = (resolvers as unknown as { Session: Record<string, (p: unknown, a: unknown, c: Context) => Promise<unknown>> }).Session;
+    const c = ctx();
+    const findUnique = vi.spyOn(db.session, 'findUnique');
+    try {
+      const [isLive, lapsesAt] = await Promise.all([
+        S.isLive({ id: live.id }, {}, c),
+        S.lapsesAt({ id: live.id }, {}, c),
+      ]);
+      expect(findUnique).toHaveBeenCalledTimes(1);
+      expect(isLive).toBe(true);
+      expect((lapsesAt as Date).getTime()).toBe(live.updatedAt!.getTime() + DEFAULT_SESSION_IDLE_WINDOW_MS);
+
+      // The session ends between the two field reads: the memoized snapshot
+      // keeps the pair consistent instead of answering { true, null }.
+      const c2 = ctx();
+      const first = await S.isLive({ id: live.id }, {}, c2);
+      await db.session.update({ where: { id: live.id }, data: { endedAt: new Date() } });
+      const second = await S.lapsesAt({ id: live.id }, {}, c2);
+      expect(first).toBe(true);
+      expect(second).not.toBeNull();
+    } finally {
+      findUnique.mockRestore();
+    }
+  });
+
   it('isLive and lapsesAt over a list still cost ONE grouped usage-event query', async () => {
     for (let i = 0; i < 6; i++) await session({ startedAt: new Date(Date.now() - i * H) });
     const groupBy = vi.spyOn(db.usageEvent, 'groupBy');

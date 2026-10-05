@@ -55,7 +55,7 @@ describe('#1617 — hadron_whoami liveness', () => {
     const out = await createTestableMcpServer(auth()).callToolText('hadron_whoami', {});
 
     const liveBlock = block(out, live.id);
-    expect(liveBlock).toMatch(/liveness: LIVE — lapses at \S+ \(in 21h \d+m\)/);
+    expect(liveBlock).toMatch(/liveness: LIVE until \S+ \(21h \d+m left\)/);
     expect(liveBlock).toContain('any attributed read, post or mark-read through it renews it');
 
     const lapsedBlock = block(out, lapsed.id);

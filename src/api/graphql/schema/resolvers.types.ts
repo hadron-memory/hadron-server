@@ -689,11 +689,40 @@ type SessionLivenessParent = {
 };
 
 /**
+ * #1623 review (local reviewer, two P2s): the fallback point read, memoized per
+ * request and session id. Without it a narrow parent selecting both `isLive`
+ * and `lapsesAt` read the row twice, and the two reads could straddle an
+ * `endSession`, answering `{ isLive: true, lapsesAt: null }`. Sharing one read
+ * per request makes both fields describe ONE snapshot. Every Session resolver
+ * on main returns full rows today, so this path is defensive.
+ */
+const livenessRowReads = new WeakMap<object, Map<string, Promise<unknown>>>();
+function readLivenessRowOnce(ctx: Context, id: string) {
+  let perRequest = livenessRowReads.get(ctx);
+  if (!perRequest) {
+    perRequest = new Map();
+    livenessRowReads.set(ctx, perRequest);
+  }
+  let read = perRequest.get(id);
+  if (!read) {
+    read = ctx.db.session.findUnique({
+      where: { id },
+      select: { id: true, type: true, startedAt: true, updatedAt: true, autoExpiredAt: true, endedAt: true, deletedAt: true },
+    });
+    perRequest.set(id, read);
+  }
+  return read as Promise<{
+    id: string; type: SessionType; startedAt: Date; updatedAt: Date | null;
+    autoExpiredAt: Date | null; endedAt: Date | null; deletedAt: Date | null;
+  } | null>;
+}
+
+/**
  * The liveness inputs for one Session row, or null when it can be live under
  * no reading: ended, or soft-deleted (Codex-worker P2 on #1547 — the bind gate
  * and Worker.hasLiveSession both exclude a deleted row, and the per-session
  * fields must agree with them). Uses the parent's columns when the parent
- * carried them, and a point read otherwise.
+ * carried them, and one memoized point read per request otherwise.
  */
 async function sessionLivenessRow(
   ctx: Context,
@@ -701,10 +730,7 @@ async function sessionLivenessRow(
 ): Promise<{ id: string; type: SessionType; startedAt: Date; updatedAt: Date | null; autoExpiredAt: Date | null; endedAt: Date | null } | null> {
   const row = s.type && s.startedAt && s.deletedAt !== undefined
     ? s
-    : await ctx.db.session.findUnique({
-        where: { id: s.id },
-        select: { id: true, type: true, startedAt: true, updatedAt: true, autoExpiredAt: true, endedAt: true, deletedAt: true },
-      });
+    : await readLivenessRowOnce(ctx, s.id);
   if (!row || !row.type || !row.startedAt) return null;
   if (row.endedAt || row.deletedAt) return null;
   return {
