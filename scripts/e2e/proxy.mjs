@@ -1,12 +1,5 @@
-// Container-private loopback hop preserves the existing dev-login peer gate.
-// Only the disposable compose file publishes this port, on host loopback.
-import http from 'node:http';
-http.createServer((req, res) => {
-  const upstream = http.request({ hostname: '127.0.0.1', port: 4000,
-    method: req.method, path: req.url, headers: req.headers }, reply => {
-    res.writeHead(reply.statusCode, reply.headers);
-    reply.pipe(res);
-  });
-  upstream.on('error', () => { res.writeHead(503); res.end('Starting'); });
-  req.pipe(upstream);
-}).listen(4100, '0.0.0.0');
+import { createForwarder } from './forwarder.mjs';
+// Disposable fixture convenience: this hop makes requests loopback-local to
+// dev-login. In Incus it also admits peers on the private QA bridge. Never
+// use this proxy in a deployed environment or with real user data.
+createForwarder('127.0.0.1', 4000).listen(4100, '0.0.0.0');

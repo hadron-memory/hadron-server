@@ -7,12 +7,7 @@ import { ensureCurrentNodeRevisionInTransaction } from '../../src/lib/nodeRevisi
 
 // Separate from the narrative dev seed: every principal has global READER,
 // so org-role journeys exercise tenant gates rather than platform ADMIN.
-export const users = {
-  'alpha-admin': ['e2e-alpha:ADMIN'], 'alpha-member': ['e2e-alpha:CONTRIBUTOR'],
-  'beta-admin': ['e2e-beta:ADMIN'], 'beta-member': ['e2e-beta:CONTRIBUTOR'],
-  shared: ['e2e-alpha:READER', 'e2e-beta:READER'], outsider: [], visitor: [],
-};
-const orgs = ['e2e-alpha', 'e2e-beta'];
+import { users, orgs, checkDocumentInventory } from './catalog.js';
 const classes = ['knowledge', 'group', 'personal', 'private', 'app', 'system'] as const;
 const id = (name: string) => createHash('sha256').update(`hadron-e2e:${name}`).digest('hex').slice(0, 32);
 const db = new PrismaClient();
@@ -32,7 +27,7 @@ async function seed() {
   assert.equal(url.hostname, 'db');
   assert.equal(url.pathname, '/e2e');
   assert.equal(await db.user.count(), 0, 'Fresh DB required; use scoped down, then up');
-  for (const [handle, memberships] of Object.entries(users)) {
+  for (const [handle, fixture] of Object.entries(users)) {
     const userId = id(handle);
     await db.user.create({ data: { id: userId, handle, name: `${handle} (synthetic)`,
       email: `${handle}@e2e.test`, identityProvider: 'EMAIL', roles: ['READER'] } });
@@ -40,19 +35,17 @@ async function seed() {
     await db.userApiKey.create({ data: { id: id(`${handle}:key`), userId,
       ...hash, oauthScopes: [], label: 'Disposable E2E', issuedVia: 'portal', createdBy: userId } });
     credentials[handle] = raw;
-    // Memberships are added after the organizations exist.
-    assert(Array.isArray(memberships));
   }
   for (const org of orgs) {
     const organizationId = id(org);
     const owner = id(org === 'e2e-alpha' ? 'alpha-admin' : 'beta-admin');
     await db.organization.create({ data: { id: organizationId, urn: org, name: org } });
-    for (const [handle, memberships] of Object.entries(users)) {
-      for (const membership of memberships) {
+    for (const [handle, fixture] of Object.entries(users)) {
+      for (const membership of fixture.memberships) {
         const [root, role] = membership.split(':');
         if (root === org) await db.orgMember.create({ data: {
           id: id(`${org}:${handle}`), organizationId, userId: id(handle),
-          role: role as 'ADMIN' | 'CONTRIBUTOR' | 'READER' } });
+          role: role as 'OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER' } });
       }
     }
     const appId = id(`${org}:team`);
@@ -127,17 +120,19 @@ async function seed() {
 }
 async function check() {
   assert.equal(await db.organization.count(), 2);
-  assert.equal(await db.user.count(), 7);
-  assert.equal(await db.orgMember.count(), 6);
-  for (const [handle, memberships] of Object.entries(users)) {
+  assert.equal(await db.user.count(), Object.keys(users).length);
+  assert.equal(await db.orgMember.count(), Object.values(users).reduce((count, u) => count + u.memberships.length, 0));
+  checkDocumentInventory();
+  for (const [handle, fixture] of Object.entries(users)) {
     const user = await db.user.findUniqueOrThrow({ where: { id: id(handle) } });
     assert.deepEqual(user.roles, ['READER']);
     assert.equal(user.email, `${handle}@e2e.test`);
     const rows = await db.orgMember.findMany({ where: { userId: user.id } });
-    assert.deepEqual(rows.map(r => `${orgs.find(o => id(o) === r.organizationId)}:${r.role}`).sort(), [...memberships].sort());
+    assert.deepEqual(rows.map(r => `${orgs.find(o => id(o) === r.organizationId)}:${r.role}`).sort(), [...fixture.memberships].sort());
     assert.equal(await db.userApiKey.count({ where: { userId: user.id, revokedAt: null } }), 1);
   }
   for (const org of orgs) {
+    assert.equal(await db.orgMember.count({ where: { organizationId: id(org), role: 'OWNER' } }), 1);
     for (const cls of classes) {
       const memory = await db.memory.findUniqueOrThrow({ where: { id: id(`${org}:${cls}`) } });
       assert.equal(memory.class, cls);

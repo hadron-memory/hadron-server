@@ -19,20 +19,21 @@ Failed startup leaves the named stack available for `logs` and `down`.
 Give **every concurrent stack a different name, API port and portal port**.
 For example, `chip 18401 18501` runs alongside `charles 18400 18500`.
 Compose project names, DB/graph/credential volumes and networks are scoped to
-`hadron-e2e-NAME`. `down` destroys only that stack, including its volumes.
+`hadron-e2e-NAME`. `down` destroys only that stack, including its volumes and locally built image.
 There are no fixed container names, host DB connections or broad process kills.
 
 On orca1 the script automatically uses the restricted Incus `qa-docker`
-image and Docker Compose inside a disposable instance. It copies tracked
+image and Docker Compose inside a disposable instance. It copies tracked (including staged)
 server/schema/dependency files and this E2E directory, excluding local secrets,
 Git metadata and host dependencies. A per-stack Node HTTP forwarder binds host
 `127.0.0.1`, forwarding to the instance's bridge IP. The project forbids Incus
-proxy devices; the script does not change those permissions. Its PID is stored
-under `$XDG_RUNTIME_DIR/hadron-e2e-UID` (or `/tmp`), and teardown checks its
-command before stopping it. Requirements: `incus`, `qa-docker`, Node, Git,
-Bash and tar. On a host with Docker, Compose v2 is used directly.
+proxy devices; the script does not change those permissions. Backend, ports and forwarder ownership are stored under
+`${XDG_STATE_HOME:-$HOME/.local/state}/hadron-e2e/hadron-e2e-NAME`. Teardown
+uses that recorded backend even if another backend becomes available, checks
+the forwarder command before stopping it, and also works on stopped instances.
+Requirements: `incus`, `qa-docker`, Node, Git, Bash, curl and tar. On a host with Docker, Compose v2 is used directly.
 Set `E2E_BACKEND=incus` or `E2E_BACKEND=docker` to choose explicitly and keep
-that choice consistent for teardown. Docker publication binds host loopback;
+that choice consistent for teardown; auto teardown uses the recorded choice. Docker publication binds host loopback;
 the Incus publication binds the disposable instance's interfaces, reachable
 only through the private QA bridge and the host-loopback forwarder.
 
@@ -47,15 +48,19 @@ All users have platform **READER**. Org administrators are not platform admins,
 so tenant journeys exercise normal membership access. Emails are
 `HANDLE@e2e.test` (synthetic); there are no passwords or real identities.
 
+<!-- fixture-users -->
 | Handle | e2e-alpha | e2e-beta |
 | --- | --- | --- |
+| alpha-owner | OWNER | — |
 | alpha-admin | ADMIN | — |
 | alpha-member | CONTRIBUTOR | — |
+| beta-owner | — | OWNER |
 | beta-admin | — | ADMIN |
 | beta-member | — | CONTRIBUTOR |
 | shared | READER | READER |
 | outsider | — | — |
 | visitor | — | — |
+<!-- /fixture-users -->
 
 In **each org**:
 
@@ -120,18 +125,23 @@ http://localhost:18400/auth/dev/login?email=shared@e2e.test
 http://localhost:18400/auth/dev/login?email=outsider@e2e.test
 ```
 
-Use a separate browser profile, or log out between identities. The existing
-flag/non-production/loopback gates are unchanged; a container-private loopback
-proxy makes published-port requests local to the dev-login handler. Do not
-publish the stack on a public interface. `check` tests the handoff redemption, authenticated API identities and MCP
+Use a separate browser profile, or log out between identities. The fixture proxy makes published-port requests local to the dev-login handler.
+Consequently, every peer that can reach the disposable Incus QA bridge can use
+these synthetic logins; loopback publication does not isolate that private bridge.
+Use this stack only for disposable synthetic data, never on a public interface.
+The server and internal proxy are supervised together; published health and login
+are verified before credentials are printed and again by `check`. `check` tests the handoff redemption, authenticated API identities and MCP
 initialize/tools discovery for a user and an App key; independent QA must also exercise the
 rendered portal and concurrent stacks before calling the issue done.
 
 ## Adding fixtures
 
-Edit `seed.ts` and this inventory together. Preserve synthetic `.test` emails,
+The shared `catalog.ts` drives seed users, memberships and exact API access
+expectations; `checkDocumentInventory()` checks this README table against it.
+Edit the catalog, `seed.ts` and this inventory together. Preserve synthetic `.test` emails,
 READER platform roles and the memory CHECK invariants. Update `check()` for
-the expected DB shape and `verify.mjs` for observable API/login behavior.
-Run `down`/`up`/`check` on a fresh stack. Keep epic-specific fixtures (passkeys,
+the expected DB shape and the catalog's golden memory sets for observable access.
+Run `down`/`up`/`check` on a fresh stack. Lifecycle/forwarder regressions run with
+`node --test scripts/e2e/forwarder.test.mjs scripts/e2e/lifecycle.test.mjs`. Keep epic-specific fixtures (passkeys,
 virtual authenticators, comments) in their later slices; do not change the
 canonical dev seed or shared `hadron_test` database for an E2E fixture.

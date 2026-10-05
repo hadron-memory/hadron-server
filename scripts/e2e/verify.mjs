@@ -1,12 +1,8 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-const base = process.env.E2E_VERIFY_URL || 'http://127.0.0.1:4000';
+const base = process.env.E2E_VERIFY_URL || 'http://127.0.0.1:4100';
 const keys = JSON.parse(readFileSync('/fixtures/credentials.json', 'utf8'));
-const membership = {
-  'alpha-admin': ['e2e-alpha'], 'alpha-member': ['e2e-alpha'],
-  'beta-admin': ['e2e-beta'], 'beta-member': ['e2e-beta'],
-  shared: ['e2e-alpha', 'e2e-beta'], outsider: [], visitor: [],
-};
+const { users } = await import('./catalog.ts');
 async function graphql(token, query) {
   const res = await fetch(`${base}/graphql`, { method: 'POST',
     headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
@@ -16,15 +12,13 @@ async function graphql(token, query) {
   assert.equal(body.errors, undefined, JSON.stringify(body.errors));
   return body.data;
 }
-for (const [handle, expected] of Object.entries(membership)) {
+for (const [handle, fixture] of Object.entries(users)) {
+  const expected = fixture.memberships.map(m => m.split(':')[0]).sort();
   const data = await graphql(keys[handle], '{ me { handle } organizations(filter: {memberOnly: true}) { items { urn } } memories { items { urn } } }');
   assert.equal(data.me.handle, handle);
   assert.deepEqual(data.organizations.items.map(o => o.urn.replace(/^hrn:org:/, '')).sort(), expected);
-  const memories = data.memories.items.map(m => m.urn);
-  for (const root of expected) assert(memories.some(urn => urn.includes(`${root}:knowledge`)), `${handle} lacks ${root} knowledge`);
-  if (!expected.length) {
-    assert.deepEqual(memories.map(urn => urn.replace(/^hrn:mem:/, '')), [`${handle}:private`]);
-  }
+  const memories = data.memories.items.map(m => m.urn.replace(/^hrn:mem:/, '')).sort();
+  assert.deepEqual(memories, [...fixture.memories].sort(), `${handle}: unexpected or missing readable memories`);
   // Exercise the same handoff used by a local portal callback, with no IdP/mail.
   const login = await fetch(`${base}/auth/dev/login?email=${handle}@e2e.test`, { redirect: 'manual' });
   assert.equal(login.status, 302, `${handle} dev-login`);
