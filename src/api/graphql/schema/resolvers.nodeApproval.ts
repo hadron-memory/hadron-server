@@ -305,8 +305,12 @@ const columnBatches = new WeakMap<Context, Map<StatusColumns, ColumnBatch>>();
 
 /**
  * #1596 — the approval/mint columns of a node whose GraphQL parent was
- * selected without them. Every miss in one tick of a request shares ONE
- * `findMany`, so a list page costs one query rather than one per node.
+ * selected without them. Every miss of one KIND (approval or mint) in one
+ * tick of a request shares ONE `findMany`: a page asking for both statuses
+ * costs one fallback query per kind, not one per node. A later tick opens a
+ * new batch, never joining a flushed one. This bounds only the column
+ * fallback: an approved node's `approvalStatus` still runs the per-node
+ * `Node.revision` reconcile.
  *
  * Pinned to the parent's memory when the parent carries it: a node moved to
  * another memory after the page was gated reads as having no record rather

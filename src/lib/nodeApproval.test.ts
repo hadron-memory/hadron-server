@@ -524,6 +524,45 @@ describe('status reads on a list page (#1596)', () => {
     expect((await resolvers.Node.mintStatus(mintParent, {}, ctx)).minted).toBe(false);
   });
 
+  it('opens a new batch in a later tick instead of joining a flushed one', async () => {
+    const n = await node('t:1');
+    const parent = await slimParent(n.id, APPROVAL_COLUMNS);
+    const findMany = vi.spyOn(db.node, 'findMany');
+    // A joiner of an already-flushed batch would never settle: fail fast instead.
+    const settled = <T>(p: Promise<T>) => Promise.race([
+      p, new Promise<never>((_, reject) => setTimeout(() => reject(new Error('batch never settled')), 2000)),
+    ]);
+    try {
+      const ctx = as();
+      expect((await settled(resolvers.Node.approvalStatus(parent, {}, ctx))).state).toBe('NOT_APPROVED');
+      await approve(n.id);
+      // Same request, later tick: a fresh query sees the approval made meanwhile.
+      expect((await settled(resolvers.Node.approvalStatus(parent, {}, ctx))).state).toBe('APPROVED');
+      expect(selects(findMany, 'approvedRevNo')).toBe(2);
+    } finally {
+      findMany.mockRestore();
+    }
+  });
+
+  it('applies each waiter its own memory pin when two parents share an id in one batch', async () => {
+    const n = await node('d:1');
+    await approve(n.id);
+    const parent = await slimParent(n.id, APPROVAL_COLUMNS);
+    const findMany = vi.spyOn(db.node, 'findMany');
+    try {
+      const ctx = as();
+      const [own, foreign] = await Promise.all([
+        resolvers.Node.approvalStatus(parent, {}, ctx),
+        resolvers.Node.approvalStatus({ ...parent, memoryId: generateId() }, {}, ctx),
+      ]);
+      expect(own.state).toBe('APPROVED');
+      expect(foreign).toEqual({ state: 'NOT_APPROVED', approval: null });
+      expect(selects(findMany, 'approvedRevNo')).toBe(1);
+    } finally {
+      findMany.mockRestore();
+    }
+  });
+
   it('rejects every waiter of a batch when its query fails, rather than hanging', async () => {
     const nodes = await Promise.all(['f:1', 'f:2'].map((loc) => node(loc)));
     const parents = await Promise.all(nodes.map((n) => slimParent(n.id, MINT_COLUMNS)));
