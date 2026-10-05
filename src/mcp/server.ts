@@ -8249,7 +8249,10 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         // session with someone behind it; plain sessions attribute nothing.
         {
           const sid = getSessionId();
+          // A plain session REPLACES an earlier binding: later writes are
+          // the user's own again, not the previous worker's (#1665 review).
           if (sid && (session.workerId || session.agentId)) workerSessionByMcpSession.set(sid, session.id);
+          else if (sid) workerSessionByMcpSession.delete(sid);
         }
 
         // #990: when a worker is bound, ALWAYS return its resolved boot
@@ -10441,9 +10444,14 @@ const activeAppByMcpSession = new Map<
  */
 const workerSessionByMcpSession = new Map<string, string>();
 
-/** Publish the connection's bound session as this request's actor (DAC). */
-async function publishConnectionActor(mcpSessionId: string, presented: AuthContext): Promise<void> {
-  if (presented.sessionId) return; // the request's own header binding already spoke
+/**
+ * Publish the connection's bound session as this request's actor (DAC). A
+ * request that NAMES a session in X-Hadron-Session has spoken for itself even
+ * when that header failed validation: it then writes as nobody, never as the
+ * connection's worker (#1665 review).
+ */
+async function publishConnectionActor(mcpSessionId: string, presented: AuthContext, headerPresented: boolean): Promise<void> {
+  if (headerPresented || presented.sessionId) return;
   const bound = workerSessionByMcpSession.get(mcpSessionId);
   if (!bound) return;
   const valid = await validateSessionBinding(db, presented, bound);
@@ -10624,7 +10632,7 @@ export async function handleMcpRequest(req: Request, res: Response): Promise<voi
       // Credential resolution re-reads the live user after the liveness check
       // above. A demotion between those reads must win before tool dispatch.
       active.auth.roles = presented.roles ?? [];
-      await publishConnectionActor(sessionId, presented);
+      await publishConnectionActor(sessionId, presented, req.headers['x-hadron-session'] !== undefined);
       await active.transport.handleRequest(req, res, req.body);
     } finally {
       releaseRequest();

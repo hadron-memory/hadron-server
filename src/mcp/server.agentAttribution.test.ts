@@ -168,6 +168,25 @@ describe('DAC: hadron_start_session binds the MCP connection (#1610 follow-on)',
     expect(await attributionAt('dac:header', appMemory.id)).toEqual({ createdByWorkerId: dara.id, createdByAgentId: agent.id });
   });
 
+  it('a request naming an invalid session writes as nobody, never as the connection worker (#1665 review)', async () => {
+    const call = await mcpConnection();
+    await call('hadron_start_session', { description: 'dac', workerRef: 'hrn:worker:attrhttp.example:team:iris', force: true });
+    await call('hadron_create_node', { urn: `hrn:node:${appMemory.urn}:dac:unknown`, name: 'unknown' }, generateId());
+    await db.session.update({ where: { id: sessionId }, data: { endedAt: new Date() } });
+    await call('hadron_create_node', { urn: `hrn:node:${appMemory.urn}:dac:ended`, name: 'ended' }, sessionId);
+    for (const loc of ['dac:unknown', 'dac:ended']) {
+      expect(await attributionAt(loc, appMemory.id), loc).toEqual({ createdByWorkerId: null, createdByAgentId: null });
+    }
+  });
+
+  it('a plain session replaces an earlier worker binding on the connection (#1665 review)', async () => {
+    const call = await mcpConnection();
+    await call('hadron_start_session', { description: 'dac', workerRef: 'hrn:worker:attrhttp.example:team:iris', force: true });
+    await call('hadron_start_session', { description: 'plain' });
+    await call('hadron_create_node', { urn: `hrn:node:${appMemory.urn}:dac:plain`, name: 'plain' });
+    expect(await attributionAt('dac:plain', appMemory.id)).toEqual({ createdByWorkerId: null, createdByAgentId: null });
+  });
+
   it('binds only its own connection: a second connection of the same user stays unattributed', async () => {
     const first = await mcpConnection();
     await first('hadron_start_session', { description: 'dac', workerRef: 'hrn:worker:attrhttp.example:team:iris', force: true });
