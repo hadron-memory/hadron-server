@@ -51,16 +51,17 @@ export const DEFAULT_CONFIG = join(homedir(), '.config', 'hadron-orca-attention-
  * The one line a worker receives: fresh counts with the seq range they cover —
  * never a message body, and never a token. The seqs let the recipient check
  * the nudge against its own read cursor, so it stays true when delivered (#1616).
+ * Kept SHORT: it is typed into a working terminal (Holger, 2026-10-05).
  */
 export function nudgeText(a: AttentionItem): string {
-  const span = a.firstUnreadSeq === null ? '' : ` — unread #${a.firstUnreadSeq}–#${a.lastSeq}`;
-  const latest = a.lastRelevantSeq === null ? '' : `, latest mention at #${a.lastRelevantSeq}`;
+  const where = [
+    a.firstUnreadSeq === null ? '' : `unread #${a.firstUnreadSeq}–#${a.lastSeq}`,
+    a.lastRelevantSeq === null ? '' : `latest mention #${a.lastRelevantSeq}`,
+  ].filter(Boolean).join(', ');
   return (
-    `Hadron team attention: team has ${a.unread} relevant unread (${a.unreadMentions} mention${a.unreadMentions === 1 ? '' : 's'}) for you${span}${latest}. ` +
-    'Read team chat unfiltered with your own live Hadron session. If nothing needs your action, ' +
-    'acknowledge your own read cursor and finish silently: do not post a team-chat reply or a ' +
-    "user-facing 'read/no action' comment. Report only an actionable result or blocker. " +
-    '(Nudged by the Orca attention router; counts as of delivery.)'
+    `Hadron team attention: ${a.unread} relevant unread (${a.unreadMentions} mention${a.unreadMentions === 1 ? '' : 's'}${where ? `; ${where}` : ''}). ` +
+    'Read team chat unfiltered with your own live session; if nothing needs action, ' +
+    'mark read and finish silently — no chat post. (Orca attention router; counts as of send.)'
   );
 }
 
@@ -807,6 +808,15 @@ export function pollOnce(cfg: Config, run: Runner = runCommand, log: (line: stri
         outcome.dropped.push(entry.name);
         continue;
       }
+      // The recompute above is a network round trip (or several) that reopened
+      // the typing window the empty-prompt gate just closed (#5473 class):
+      // prove the prompt is STILL empty before typing into it.
+      const [stillEmpty, whyNow] = promptIsEmpty(cfg, handle, detail, run);
+      if (!stillEmpty) {
+        outcome.held[entry.name] = `prompt not empty on recheck (${whyNow})`;
+        continue;
+      }
+      mustOwn();
       const [ok, how] = sendNudge(cfg, handle, nudgeText(now), run);
       if (!ok) {
         outcome.held[entry.name] = how;

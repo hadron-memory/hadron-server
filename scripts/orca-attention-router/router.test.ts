@@ -46,6 +46,9 @@ class FakeCLIs {
   reject = new Set<string>();
   /** The rendered screen per handle; set by terminal() to an idle prompt for its agent. */
   screens = new Map<string, { tail?: unknown; draft?: string; source?: string; ok?: boolean }>();
+  /** Served to a handle's SECOND screen read — the post-recompute recheck (#5473 window). */
+  recheckScreens = new Map<string, { tail?: unknown; draft?: string; source?: string; ok?: boolean }>();
+  reads = new Map<string, number>();
   sent: Array<[string, string]> = [];
   /** Workers with a mention-only row; `null` = every worker queried has one. */
   mentionOnly: Set<string> | null = null;
@@ -124,7 +127,9 @@ class FakeCLIs {
         : out({ ok: true, result: { wait: { satisfied: true } } });
     }
     if (verb === 'terminal read') {
-      const sc = this.screens.get(handle);
+      const n = (this.reads.get(handle) ?? 0) + 1;
+      this.reads.set(handle, n);
+      const sc = (n === 2 ? this.recheckScreens.get(handle) : undefined) ?? this.screens.get(handle);
       if (!sc || sc.ok === false) return out({ ok: false, error: { code: 'terminal_handle_stale' } }, 1);
       return out({ ok: true, result: { terminal: { handle, source: sc.source ?? 'screen', tail: sc.tail, ...(sc.draft !== undefined ? { draft: sc.draft } : {}) } } });
     }
@@ -169,10 +174,10 @@ describe('Orca attention router — the happy path', () => {
     expect(adopted(c)).toBe(TOKEN_1);
     expect(fake.sent).toHaveLength(1);
     expect(fake.sent[0][0]).toBe('term_eli');
-    expect(fake.sent[0][1]).toContain('5 relevant unread (2 mentions)');
+    expect(fake.sent[0][1]).toContain('5 relevant unread (2 mentions');
     expect(fake.sent[0][1]).toContain('unread #100–#120');
-    expect(fake.sent[0][1]).toContain('latest mention at #110');
-    expect(fake.sent[0][1]).toContain('as of delivery');
+    expect(fake.sent[0][1]).toContain('latest mention #110');
+    expect(fake.sent[0][1]).toContain('as of send');
     const verbs = fake.calls.map((a) => a.slice(1, 3).join(' '));
     expect(verbs.indexOf('terminal wait')).toBeLessThan(verbs.indexOf('terminal read'));
     expect(verbs.indexOf('terminal read')).toBeLessThan(verbs.indexOf('terminal send'));
@@ -246,9 +251,9 @@ describe('Orca attention router — fresh counts at send time (#1616)', () => {
     const out = poll(c);
     expect(out).toMatchObject({ nudged: ['Eli'] });
     expect(out.held.Baloo).toBeTruthy();
-    expect(fake.sent[0][1]).toContain('9 relevant unread (3 mentions)');
+    expect(fake.sent[0][1]).toContain('9 relevant unread (3 mentions');
     expect(fake.sent[0][1]).toContain('unread #100–#121');
-    expect(fake.sent[0][1]).toContain('latest mention at #118');
+    expect(fake.sent[0][1]).toContain('latest mention #118');
     expect(fake.sent[0][1]).not.toContain('5 relevant unread');
     expect(new State(c.stateDir).ledger().nudged['w-eli'].relevantSeq).toBe(118);
     expect(adopted(c)).toBeNull(); // held, and the fresh scan's own token is never adopted
@@ -262,6 +267,20 @@ describe('Orca attention router — fresh counts at send time (#1616)', () => {
     expect(() => poll(c)).toThrow(RouterError);
     expect(fake.sent).toEqual([]);
     expect(adopted(c)).toBeNull();
+  });
+
+  it('re-proves the prompt empty after the recompute: typing during the scan holds, not sends', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli');
+    fake.attention.workers = [worker('w-eli', 'Eli', { mentions: 1, unread: 2, relevant: 110 })];
+    // The recompute's round trip reopened the #5473 window; a human started typing in it.
+    fake.recheckScreens.set('term_eli', { tail: CLAUDE_IDLE, draft: 'Holger typing here' });
+    const out = poll(c);
+    expect(out.nudged).toEqual([]);
+    expect(out.held.Eli).toContain('prompt not empty on recheck');
+    expect(fake.sent).toEqual([]);
+    expect(adopted(c)).toBeNull();
+    expect(logs.join('\n')).not.toContain('Holger typing here'); // the reason never quotes the text
   });
 });
 
