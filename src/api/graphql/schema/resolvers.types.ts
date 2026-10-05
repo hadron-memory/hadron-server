@@ -67,6 +67,7 @@ import {
   assetUrn,
   resolveAppTeamSpaceMemoryIds,
   getAccessibleMemoryIds,
+  sessionScopeFilter,
   STORED_NODE_CONTENT,
 } from './resolvers.helpers.js';
 import { getMemberOrgIds } from '../../../lib/auth/memberOrgIds.js';
@@ -77,6 +78,7 @@ import { corpusMintStateOf } from '../../../lib/specCorpus.js';
 import { LIVE_ORG_MEMBERSHIP } from '../../../lib/auth/liveOrgMembership.js';
 import { isSessionLive, loadLastEventBySession, sessionLapsesAt } from '../../../lib/sessionActivity.js';
 import type { SessionType } from '../../../generated/prisma/index.js';
+import { strictSessionMemoryFilter } from '../../../lib/auth/sessionPrivacy.js';
 
 /**
  * #757 — a Prisma `where` fragment selecting the Agents this caller may read,
@@ -1822,6 +1824,26 @@ export const typeResolvers = {
     },
   },
   Session: {
+    /** #1645: nested events inherit current session and memory read boundaries. */
+    events: async (s: { id: string }, _: unknown, ctx: Context) => {
+      const session = await ctx.db.session.findFirst({
+        where: { AND: [{ id: s.id }, await sessionScopeFilter(ctx)] },
+        select: { id: true },
+      });
+      if (!session) return [];
+      const accessible = await getAccessibleMemoryIds(ctx);
+      const memories = await ctx.db.memory.findMany({
+        where: {
+          AND: [strictSessionMemoryFilter(ctx), ...(accessible === null ? [] : [{ id: { in: accessible } }])],
+        },
+        select: { id: true },
+      });
+      return ctx.db.usageEvent.findMany({
+        where: { sessionId: s.id, OR: [{ memoryId: null }, { memoryId: { in: memories.map((m) => m.id) } }] },
+        orderBy: { createdAt: 'desc' },
+        take: 50,
+      });
+    },
     outcomeMeta: (session: { outcomeMeta: unknown }) => deserializeJson(session.outcomeMeta),
     /**
      * hadron-cli#791: the exact per-session form of the shared liveness

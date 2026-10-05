@@ -1,3 +1,4 @@
+import { boundSessionPrivacyFilter } from '../lib/auth/sessionPrivacy.js';
 import { createHmac, randomUUID } from 'crypto';
 // Spec 049 S4 — the protected-loc gate on hadron_update_node (no lock on that path).
 import { assertLocWritable, LocProtectedError } from '../lib/protectedLoc.js';
@@ -8484,6 +8485,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       // rows scopes the total, by construction rather than by re-statement.
       const where = {
         ...scope,
+        AND: [boundSessionPrivacyFilter(auth)],
         deletedAt: null,
         // "Open" is `endedAt IS NULL` — the ONE active predicate the platform
         // uses everywhere (#930: the reaper stamps endedAt AND autoExpiredAt
