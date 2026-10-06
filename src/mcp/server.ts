@@ -1,7 +1,7 @@
 import { boundSessionPrivacyFilter } from '../lib/auth/sessionPrivacy.js';
 import { createHmac, randomUUID } from 'crypto';
 // Spec 049 S4 — the protected-loc gate on hadron_update_node (no lock on that path).
-import { assertNotCommentWrite, commentGovernedError, isCommentGovernedError } from '../lib/comments/index.js';
+import { COMMENT_NODE_TYPE, assertNotCommentWrite, commentGovernedError, isCommentGovernedError } from '../lib/comments/index.js';
 import { commentIdsAmong, hardDeleteThreadsOfTargets, softDeleteThreadsOfTargets } from '../lib/comments/lifecycle.js';
 import { assertLocWritable, LocProtectedError } from '../lib/protectedLoc.js';
 import {
@@ -55,6 +55,8 @@ import {
 } from '../lib/urnEmit.js';
 import { portalUrlForUrn } from '../lib/portalUrl.js';
 import { userUrn } from '../lib/userHandle.js';
+import { registerCommentTools } from './commentTools.js';
+import { openThreadCounts, type CommentCounts } from '../lib/comments/summary.js';
 import { nodeContentValidationState } from '../lib/nodeContentValidation.js';
 import { findLiveUrnAliasTargets, dedupeById } from '../lib/urnAlias.js';
 import { validateParentRel, InvalidParentRelError } from '../lib/parentRel.js';
@@ -1574,6 +1576,8 @@ async function renderNodeReadProjection(
       reports: ReadonlyMap<string, ReadValidationReport>;
       taskRefs: ReadonlyMap<string, string | null>;
       humanNames: ReadonlyMap<string, string>;
+      /** #1609 — comment counts per node, one grouped query for the batch. */
+      feedback: ReadonlyMap<string, CommentCounts>;
     };
     memoryUrnOf?: (memoryId: string) => Promise<string>;
   } = {},
@@ -1702,6 +1706,23 @@ async function renderNodeReadProjection(
     }
   }
 
+  // #1609: the unresolved-feedback cue (cor:dmo:110:07), so an agent reading a
+  // node knows a discussion exists beside it without being told to look. The
+  // counts are metadata (no comment text), and only live comments count — the
+  // same predicate as Node.commentSummary. Omitted when there are none. A
+  // comment read through the generic node tools says what it is instead.
+  let feedbackLine = '';
+  if (node.nodeType === COMMENT_NODE_TYPE) {
+    feedbackLine = 'Feedback: this node is a comment — reader feedback on another node, not authoritative content (read it with hadron_get_comment)';
+  } else {
+    const counts = opts.batch ? opts.batch.feedback.get(node.id) : (await openThreadCounts(db, [node.id])).get(node.id);
+    if (counts && counts.comments > 0) {
+      feedbackLine = `Feedback: ${counts.openThreads} open thread${counts.openThreads === 1 ? '' : 's'}, `
+        + `${counts.resolvedThreads} resolved, ${counts.comments} comment${counts.comments === 1 ? '' : 's'} — `
+        + 'reader feedback beside this node, not part of its content (read with hadron_list_comments)';
+    }
+  }
+
   // #1610: the Worker (else the Agent) behind the node's creation and its
   // last authored edit. Omitted when none was; the user is not repeated here.
   const createdByLine = await actorMetaLine(db, 'Created by', node.createdByWorkerId, node.createdByAgentId, opts.batch);
@@ -1721,6 +1742,7 @@ async function renderNodeReadProjection(
     validationLine,
     approvalLine,
     mintLine,
+    feedbackLine,
     createdByLine,
     updatedByLine,
     node.description ? `> ${node.description}` : '',
@@ -3026,6 +3048,9 @@ export function createMcpServerInstance(
     const o = await db.organization.findUnique({ where: { id: orgId }, select: { urn: true, name: true } });
     return o ? `**${safeEmitEntityUrnV2('org', o.urn)}** (${o.name})` : orgId;
   }
+
+  // ── #1609 — comment nodes (cor:dmo:110): thin over the GraphQL comment resolvers ──
+  registerCommentTools(server, { db, auth });
 
   // ── Spec 049 Phase 2 — scopes: list / create / update / delete / explain ──────
   //
@@ -4703,11 +4728,12 @@ export function createMcpServerInstance(
       // render, and gate each distinct task memory before exposing its URN.
       const reports = await batchValidationReports(visible);
       const memoryUrnOf = memoizedMemoryUrnLookup();
-      const [taskRefs, humanNames] = await Promise.all([
+      const [taskRefs, humanNames, feedback] = await Promise.all([
         batchReadableTaskRefs(visible, reports, auth, memoryUrnOf),
         batchHumanNames(visible),
+        openThreadCounts(db, visible.map((n) => n.id)),
       ]);
-      const batchProvenance = { reports, taskRefs, humanNames };
+      const batchProvenance = { reports, taskRefs, humanNames, feedback };
       for (const n of visible) {
         if (truncated) {
           omitted.push(await nodeUrn(n.loc, n.memoryId, memoryUrnOf));
