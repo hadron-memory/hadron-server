@@ -1891,6 +1891,10 @@ export const typeDefs = `#graphql
     alreadyApprovedCount: Int!
     "Locs of reserved placeholders, which have no spec to approve yet."
     skippedPlaceholders: [String!]!
+    "#1641 — decisions and decision logs in this memory, which bulk approval never approves: a decision is approved individually by one of its deciders."
+    skippedDecisionCount: Int!
+    "#1641 — the first 50 of those, by loc."
+    skippedDecisions: [String!]!
     "#1607 — unminted nodes of this memory with open discussion: a warning, never a blocker (hrn:node:hadronmemory.com:specs:cor:dmo:110:07). Ordered by loc."
     unresolvedFeedback: [UnresolvedFeedback!]!
   }
@@ -1901,6 +1905,304 @@ export const typeDefs = `#graphql
     name: String!
     "The canonical hrn:worker:/hrn:agent: URN. Null when it cannot be composed."
     urn: String
+  }
+
+  "#1641 — a decision's derived state (hrn:node:hadronmemory.com:hadron-server:design:decision-nodes §6.3). Computed by the one evaluation on every read, never stored. Precedence: TAMPERED, UNVERIFIABLE, WITHDRAWN, SUPERSEDED, STALE, DECIDED, ANSWERED_UNCONFIRMED, OPEN."
+  enum DecisionState {
+    "Not every part is answered."
+    OPEN
+    "Every part is answered; the tier's evidence (a decider's approval, or later a signature) is missing at the current revision."
+    ANSWERED_UNCONFIRMED
+    "Answered, and the tier's evidence by a decider is intact at the current revision. The only state a ruling may be relied on in."
+    DECIDED
+    "Evidence exists, but for an earlier revision: the decision changed after it was approved."
+    STALE
+    "The rendered content, the structured payload and the approval hash disagree: changed outside the decision operations."
+    TAMPERED
+    "Written by a codec or renderer this server does not know, so it cannot be verified (fail closed)."
+    UNVERIFIABLE
+    WITHDRAWN
+    SUPERSEDED
+  }
+
+  "#1641 — the assurance a decision's answer needs. APPROVED: a decider's approval. SIGNED: a decider's passkey signature (#1614; not available yet, so a SIGNED decision stays ANSWERED_UNCONFIRMED)."
+  enum DecisionTier {
+    APPROVED
+    SIGNED
+  }
+
+  enum DecisionUrgency {
+    NORMAL
+    URGENT
+  }
+
+  "#1641 — list order. PORTAL_DEFAULT: urgent first, then open before answered, then newest ask. CODE: code order."
+  enum DecisionSort {
+    PORTAL_DEFAULT
+    CODE
+  }
+
+  "#1641 — where an answer was given, as the answering caller states it (a claim)."
+  enum DecisionAnswerVia {
+    PORTAL
+    CLI
+    MCP
+    CHAT_RECORDED
+    IMPORT
+  }
+
+  "#1641 — a reference: exactly one of an external ref (hadron-server#1640, team:6783), a node id or URN, or a spec citation."
+  type DecisionRef {
+    ref: String
+    node: String
+    spec: String
+  }
+
+  input DecisionRefInput {
+    ref: String
+    node: String
+    spec: String
+  }
+
+  "#1641 — an authenticated actor: taken from the principal, never supplied by a client. Public projections only (#552)."
+  type DecisionActor {
+    userId: ID
+    workerId: ID
+    appId: ID
+    user: CommentActorRef
+    worker: CommentActorRef
+    app: CommentActorRef
+  }
+
+  type DecisionOption {
+    "The option id an answer names."
+    key: String!
+    label: String!
+    meaning: String
+    cost: String
+  }
+
+  type DecisionRecommendation {
+    key: String!
+    "Who recorded the recommendation (authenticated)."
+    by: DecisionActor!
+    reason: String
+    "A relayed recommendation's original author, as a claim."
+    attributedTo: String
+  }
+
+  type DecisionAnswer {
+    "The chosen option; null for a free-text answer."
+    key: String
+    text: String
+    freeform: Boolean!
+    "The decider whose credential recorded it."
+    byUserId: ID!
+    at: DateTime!
+    via: DecisionAnswerVia!
+    "Where the answer was given (a claim)."
+    source: DecisionRef
+    reason: String
+    "An imported answer's recorded speaker (a claim, never rendered as the authenticated answerer)."
+    claimedBy: String
+    recordedByUserId: ID
+  }
+
+  type DecisionPart {
+    "Permanent within the decision; amendments add parts, never renumber."
+    n: Int!
+    "The citation of this part, e.g. DU-1."
+    citation: String!
+    question: String!
+    options: [DecisionOption!]!
+    "Null when the asker deliberately gave none (see noRecommendationReason). Never pre-selected."
+    recommendation: DecisionRecommendation
+    noRecommendationReason: String
+    answer: DecisionAnswer
+    "Earlier answers to this part, oldest first: a re-answer appends, never replaces quietly."
+    answerHistory: [DecisionAnswer!]!
+  }
+
+  type DecisionApprovalEvidence {
+    byUserId: ID
+    by: CommentActorRef
+    "The revision approved."
+    revision: Int!
+    approvedAt: DateTime!
+    "INTACT, TAMPERED, SUPERSEDED or NOT_APPROVED: the approval hash checked against the live text."
+    integrity: String!
+    "Whether the approver is one of the decision's deciders (only then does it count)."
+    byDecider: Boolean!
+  }
+
+  type DecisionEvidence {
+    "The latest approval on record, whoever gave it."
+    approval: DecisionApprovalEvidence
+  }
+
+  type DecisionWithdrawal {
+    by: DecisionActor!
+    at: DateTime!
+    reason: String!
+  }
+
+  """
+  #1641 — a human decision: a governed node (role decision) under a decision log, written only by the
+  decision operations. Its content is rendered from this structured payload, so an approval covers
+  exactly what was asked and answered. Plan: hrn:node:hadronmemory.com:hadron-server:design:decision-nodes.
+  """
+  type Decision {
+    id: ID!
+    urn: String!
+    "The decision's own page, where its card renders. Copy it; never build it."
+    portalUrl: String
+    "Permanent: DA, DB, … issued in sequence by its log, never reused."
+    code: String!
+    n: Int!
+    logId: ID
+    title: String!
+    urgency: DecisionUrgency!
+    tier: DecisionTier!
+    authorizes: Boolean!
+    "Migrated history that is never usable as an authorization."
+    archival: Boolean!
+    "DERIVED on every read. Rely on a ruling only while it is DECIDED."
+    state: DecisionState!
+    context: String
+    parts: [DecisionPart!]!
+    "What is waiting on this decision."
+    blocks: [DecisionRef!]!
+    sources: [DecisionRef!]!
+    "Spec citations the ruling must reach."
+    followUps: [DecisionRef!]!
+    deciderIds: [ID!]!
+    deciders: [CommentActorRef!]!
+    viewerIsDecider: Boolean!
+    askedBy: DecisionActor!
+    askedAt: DateTime
+    "When the last part was answered; null while any part is open."
+    answeredAt: DateTime
+    withdrawn: DecisionWithdrawal
+    evidence: DecisionEvidence!
+    "The node's current revision: the expectedRevision of the next change."
+    revSeq: Int!
+    node: Node
+  }
+
+  type DecisionPage {
+    items: [Decision!]!
+    "Matching decisions before paging."
+    total: Int!
+  }
+
+  type DecisionPurge {
+    code: String!
+    byUserId: ID!
+    by: CommentActorRef
+    at: DateTime!
+    reason: String!
+    "sha256 of the purged decision's rendered content."
+    contentHash: String!
+  }
+
+  "#1641 — a decision log's settings (never a decision, never approved)."
+  type DecisionLog {
+    id: ID!
+    urn: String!
+    portalUrl: String
+    loc: String!
+    name: String!
+    "Codes are this prefix plus letters: D → DA, DB, …"
+    prefix: String!
+    "How many codes have been issued (withdrawn and purged ones included)."
+    lastCode: Int!
+    defaultDeciderIds: [ID!]!
+    eligibleDeciderIds: [ID!]!
+    "Who decides a decision asked without naming deciders."
+    defaultDeciders: [CommentActorRef!]!
+    "Who else a decision may name as a decider. A decision's deciders are narrowed from these, never widened."
+    eligibleDeciders: [CommentActorRef!]!
+    purges: [DecisionPurge!]!
+    revSeq: Int!
+  }
+
+  "#1641 — verifyDecision: the one evaluation's findings."
+  type DecisionVerification {
+    state: DecisionState!
+    "NO_BLOCK, BLOCK_INVALID, UNKNOWN_CODEC, UNKNOWN_RENDERER, RENDER_MISMATCH, DATA_MISMATCH, APPROVAL_HASH_MISMATCH."
+    findings: [String!]!
+    codec: String
+    renderer: String
+    revision: Int!
+    approvedRevision: Int
+    approvalIntegrity: String!
+    approvalByDecider: Boolean!
+  }
+
+  input DecisionOptionInput {
+    key: String!
+    label: String!
+    meaning: String
+    cost: String
+  }
+
+  input DecisionRecommendationInput {
+    key: String!
+    reason: String
+    "Relaying someone else's recommendation: who (recorded as a claim)."
+    attributedTo: String
+  }
+
+  input DecisionNoRecommendationInput {
+    reason: String!
+  }
+
+  "#1641 — one part of a decision. Give options or yesno, and a recommendation or noRecommendation."
+  input DecisionPartInput {
+    question: String!
+    options: [DecisionOptionInput!]
+    yesno: Boolean
+    recommendation: DecisionRecommendationInput
+    noRecommendation: DecisionNoRecommendationInput
+  }
+
+  input AskDecisionInput {
+    title: String!
+    urgency: DecisionUrgency
+    "Default APPROVED; SIGNED when authorizes is true (APPROVED is then refused: DECISION_TIER_TOO_LOW)."
+    tier: DecisionTier
+    authorizes: Boolean
+    "The authorization a grant decision carries (authorizes: true only)."
+    grant: JSON
+    "Narrows the log's default deciders; never widens past its eligible set."
+    deciders: [ID!]
+    context: String
+    blocks: [DecisionRefInput!]
+    sources: [DecisionRefInput!]
+    followUps: [DecisionRefInput!]
+    parts: [DecisionPartInput!]!
+  }
+
+  "#1641 — a change to an existing part (by its permanent number). Omitted fields are unchanged; answers never change here."
+  input DecisionPartPatchInput {
+    n: Int!
+    question: String
+    options: [DecisionOptionInput!]
+    yesno: Boolean
+    recommendation: DecisionRecommendationInput
+    noRecommendation: DecisionNoRecommendationInput
+  }
+
+  input AmendDecisionInput {
+    title: String
+    urgency: DecisionUrgency
+    tier: DecisionTier
+    context: String
+    blocks: [DecisionRefInput!]
+    sources: [DecisionRefInput!]
+    followUps: [DecisionRefInput!]
+    parts: [DecisionPartPatchInput!]
+    addParts: [DecisionPartInput!]
   }
 
   "#1606 — a comment thread's state (hrn:node:hadronmemory.com:specs:cor:dmo:110:05). Top-level comments only."
@@ -6636,6 +6938,29 @@ export const typeDefs = `#graphql
     "#1606 — one comment by ID or URN; null when missing or unreadable."
     comment(ref: ID!): Comment
 
+    "#1641 — a decision log's settings by ID or URN; null when missing or unreadable."
+    decisionLog(ref: ID!): DecisionLog
+    "#1641 — one decision by ref (ID or URN), or by code (DU, or a citation DU-1) within logRef. Null when missing or unreadable."
+    decision(ref: ID, code: String, logRef: ID): Decision
+    """
+    #1641 — the decisions of one log (logRef), or with awaitingMe the OPEN decisions the caller
+    decides across every memory they can read. State is derived for every candidate BEFORE the
+    filters, sort and paging; a list above 5000 candidates refuses (DECISION_LOG_TOO_LARGE_FOR_FILTER).
+    """
+    decisions(
+      logRef: ID
+      awaitingMe: Boolean
+      state: [DecisionState!]
+      tier: DecisionTier
+      urgency: [DecisionUrgency!]
+      authorizes: Boolean
+      sort: DecisionSort = PORTAL_DEFAULT
+      limit: Int = 50
+      offset: Int = 0
+    ): DecisionPage!
+    "#1641 — re-render a decision from its payload and check it against its content, data and approval: the findings behind its state."
+    verifyDecision(ref: ID!): DecisionVerification!
+
     """
     A single node-revision snapshot by its id (#617 Display).
 
@@ -8368,6 +8693,32 @@ export const typeDefs = `#graphql
     hideComment(commentRef: ID!, reason: String!, expectedRevision: Int!): Comment!
     "#1606 — a memory admin deletes a whole thread (soft: gone from every read, limit and check; history kept). commentRef may be any comment of it."
     deleteCommentThread(commentRef: ID!, reason: String!): Boolean!
+
+    """
+    #1641 — create a decision log at loc in a memory: needs management rights on the memory. Refused
+    in an encrypted memory (DECISION_LOG_ENCRYPTED), a git-mirrored one (DECISION_LOG_MIRRORED), at an
+    occupied loc (DECISION_LOG_EXISTS), or inside a decision's subtree. Deciders are user ids, each able
+    to read the memory (DECISION_DECIDER_NOT_ELIGIBLE).
+    """
+    createDecisionLog(memoryRef: ID!, loc: String!, name: String, prefix: String, defaultDeciders: [ID!]!, eligibleDeciders: [ID!]): DecisionLog!
+    "#1641 — replace a log's default (and, when given, other eligible) deciders, as an audited revision of the log. Existing decisions keep theirs. Needs management rights."
+    setDecisionLogDeciders(logRef: ID!, defaultDeciders: [ID!]!, eligibleDeciders: [ID!], expectedRevision: Int!, reason: String!): DecisionLog!
+    """
+    #1641 — ask a decision in a log: the server issues the next code (DA, DB, …) and renders the
+    content. Any writer of the log's memory, agents included. Refusals: DECISION_INVALID (with JSON
+    pointers), DECISION_RECOMMENDATION_MISSING, DECISION_TIER_TOO_LOW, DECISION_DECIDER_NOT_ELIGIBLE.
+    """
+    askDecision(logRef: ID!, input: AskDecisionInput!): Decision!
+    """
+    #1641 — amend a decision. Before any answer, any writer; after one, a decider only. Urgency is a
+    decider's to change; lowering the tier is a decider's, before an answer, never when it authorizes.
+    Refusals: NODE_WRITE_CONFLICT, DECISION_PART_RENUMBER, DECISION_ANSWER_IMMUTABLE, DECISION_NOT_DECIDER.
+    """
+    amendDecision(ref: ID!, input: AmendDecisionInput!, expectedRevision: Int!, reason: String!): Decision!
+    "#1641 — withdraw a decision (terminal; the code stays consumed): the asker or a decider, a decider once answered. DECIDED ones are superseded instead (DECISION_ANSWERED_DECIDED)."
+    withdrawDecision(ref: ID!, reason: String!, expectedRevision: Int!): Decision!
+    "#1641 — a platform admin hard-deletes a decision that was never answered, recorded on its log (DECISION_ANSWERED otherwise). The code stays consumed."
+    purgeUnansweredDecision(ref: ID!, reason: String!): Boolean!
 
     """
     Delete ALL NodeRevision rows for a node, returning the count deleted (#617).

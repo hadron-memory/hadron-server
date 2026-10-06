@@ -63,6 +63,7 @@ import { memoryConfigApplyMutations } from './resolvers.memoryConfigApply.js';
 import { nodeApprovalFieldResolvers, nodeApprovalMutations, nodeApprovalQueries } from './resolvers.nodeApproval.js';
 import { nodeAttributionFieldResolvers } from './resolvers.nodeAttribution.js';
 import { commentFieldResolvers, commentMutations, commentQueries } from './resolvers.comments.js';
+import { decisionFieldResolvers, decisionMutations, decisionQueries } from './resolvers.decisions.js';
 import {
   specCorpusMintMutations,
   specCorpusMutations,
@@ -106,6 +107,8 @@ export const resolvers = {
   // Worker / Agent attribution with it.
   Node: { ...typeResolvers.Node, ...nodeApprovalFieldResolvers.Node, ...nodeAttributionFieldResolvers.Node, ...commentFieldResolvers.Node },
   Comment: commentFieldResolvers.Comment,
+  Decision: decisionFieldResolvers.Decision,
+  DecisionLog: decisionFieldResolvers.DecisionLog,
   UnresolvedFeedback: commentFieldResolvers.UnresolvedFeedback,
   GraphNode: commentFieldResolvers.GraphNode,
   NodeRevision: { ...typeResolvers.NodeRevision, ...nodeAttributionFieldResolvers.NodeRevision },
@@ -120,6 +123,7 @@ export const resolvers = {
     ...specCorpusQueries,
     ...nodeApprovalQueries,
     ...commentQueries,
+    ...decisionQueries,
     ...skillQueries,
     ...objectQueries,
     ...edgeQueries,
@@ -184,6 +188,7 @@ export const resolvers = {
     ...specCorpusMintMutations,
     ...nodeApprovalMutations,
     ...commentMutations,
+    ...decisionMutations,
     ...scopeMutations,
     ...channelMutations,
     ...registerMutations,

@@ -4,6 +4,7 @@ import { createHmac, randomUUID } from 'crypto';
 import { COMMENT_NODE_TYPE, assertNotCommentWrite, commentGovernedError, isCommentGovernedError } from '../lib/comments/index.js';
 import { commentHitInfo, commentHitLabel } from '../lib/comments/hitLabel.js';
 import { commentIdsAmong, hardDeleteThreadsOfTargets, softDeleteThreadsOfTargets } from '../lib/comments/lifecycle.js';
+import { decisionContainedError, decisionFamilyAmong, isDecisionFamilyRole, refuseDecisionFamily } from '../lib/decisions/index.js';
 import { assertLocWritable, LocProtectedError } from '../lib/protectedLoc.js';
 import {
   assertGovernedWrite,
@@ -5496,7 +5497,7 @@ export function createMcpServerInstance(
       nodeType: z.string().optional().describe('Node classification (free-form; canonical values: abstract, chat, data, info (default), prompt, record, reference, system). Running is gated by isRunnable, independent of nodeType.'),
       objectType: z.string().optional().describe('#725 — collection this node belongs to (the domain-object discriminator, e.g. "competitor" / "insight"), orthogonal to nodeType. On a memory with a property schema, it MUST name a declared collection and the node\'s properties are validated against it; free-form on an unschema\'d memory. Omit for an ordinary node.'),
       isRunnable: z.boolean().optional().describe('#1201 — REFUSED on this tool if true: a write producing a runnable node must go through hadron_create_task, because authoring something the platform will EXECUTE is not the same act as writing prose. Accepted only as false/omitted (the default). Independent of nodeType — a runnable node may carry any nodeType.'),
-      role: z.string().optional().describe('#1201/#1322 — what this node is FOR (open string). NOT nodeType (the platform-kind axis) and NOT objectType (the collection discriminator); role does not affect default ranking, though hadron_find_nodes can filter by its dotted family. Most values are inert, but the GOVERNED families — "review" / "review.*" and "spec" / "spec.*" — are refused on this tool. Use hadron_create_review for a review; a spec is authored with the `hadron spec` CLI, its only authoring surface. The same applies to isRunnable — this tool cannot create a runnable node; use hadron_create_task.'),
+      role: z.string().optional().describe('#1201/#1322 — what this node is FOR (open string). NOT nodeType (the platform-kind axis) and NOT objectType (the collection discriminator); role does not affect default ranking, though hadron_find_nodes can filter by its dotted family. Most values are inert, but the GOVERNED families — "review" / "review.*", "spec" / "spec.*" and "decision" / "decision.*" — are refused on this tool. Use hadron_create_review for a review; a spec is authored with the `hadron spec` CLI, its only authoring surface; a decision is asked with the GraphQL askDecision operation (#1641). The same applies to isRunnable — this tool cannot create a runnable node; use hadron_create_task.'),
       description: z.string().optional().describe('Short description'),
       abstract: z.string().optional().describe('Paragraph-length summary (max 2000 chars). Opt-in on hadron_get_node via the contentScope parameter. (hadron_find_nodes preview surfacing of abstract ships in spec 031 US2 — not yet live.) Empty + whitespace-only values normalize to null. Spec 031.'),
       content: z.string().optional().describe('Markdown content'),
@@ -6065,7 +6066,7 @@ export function createMcpServerInstance(
       nodeType: z.string().optional().describe('Node classification (free-form; canonical values: abstract, chat, data, info (default), prompt, record, reference, system). Changing nodeType does NOT change isRunnable or properties (e.g. claudeSkill) — a retyped runnable node stays runnable until you clear isRunnable yourself. Running is gated by isRunnable, not nodeType.'),
       objectType: z.string().optional().describe('#725 — collection this node belongs to (e.g. "competitor" / "insight"), orthogonal to nodeType. On a schema-governed memory it must name a declared collection and the resulting properties are validated against it. Omit to preserve.'),
       isRunnable: z.boolean().optional().describe('#1201 — REFUSED on this tool: making a node runnable, and RETIRING a runnable one, both go through hadron_update_task. Editing a node that is already runnable is refused here too, whatever this field says, because the result is still a runnable node. Omit to preserve. Independent of nodeType — retyping the node never changes this flag.'),
-      role: z.string().nullable().optional().describe('#1201/#1322 — what this node is FOR (open string). NOT nodeType and NOT objectType. Omit to preserve; null to clear. GOVERNED families ("review" / "review.*", "spec" / "spec.*") are refused here — use hadron_update_review, or the `hadron spec` CLI for a spec — and so is EDITING a node that already carries one — the gate reads the resulting state, not the change — because a governed node must not be rewritable through the generic surface.'),
+      role: z.string().nullable().optional().describe('#1201/#1322 — what this node is FOR (open string). NOT nodeType and NOT objectType. Omit to preserve; null to clear. GOVERNED families ("review" / "review.*", "spec" / "spec.*", "decision" / "decision.*") are refused here — use hadron_update_review, the `hadron spec` CLI for a spec, or the decision operations (amendDecision, …) for a decision — and so is EDITING a node that already carries one — the gate reads the resulting state, not the change — because a governed node must not be rewritable through the generic surface.'),
       description: z.string().optional().describe('New short description'),
       abstract: z.string().nullable().optional().describe('New paragraph-length summary (max 2000 chars). Pass `null` to clear; omit to preserve. Empty + whitespace-only normalize to null. Surfaced on hadron_get_node via contentScope; hadron_find_nodes preview surfacing ships in spec 031 US2. STALENESS: the abstract is fingerprinted against the content AS OF THIS CALL, so passing `abstract` and `content` TOGETHER keeps them in sync and needs no ordering. If you instead change `content` in a LATER call, this abstract is marked `abstract-stale` on read until you re-save it (re-sending the identical text is enough) or assert `abstractStillAccurate`. It also arms for an abstract that was NEVER fingerprinted — one saved against an empty node, where a body arrived later (#1128). Read the ABSENCE of the marker narrowly: it means "checked against this exact content" ONLY on a read that could have shown it — `contentScope` of `abstract` or `all`, on a memory that is unencrypted or unlocked. Under the default `content` scope, or on a locked memory, no marker is emitted either way and its absence says nothing at all. Spec 031/032.'),
       content: z.string().nullable().optional().describe('New markdown content. Pass `null` to clear; omit to preserve. Spec 032 widened the schema from string-only to allow null per the consistent partial-update convention; clearing content interacts with abstractOriginHash maintenance (FR-006/FR-007). Changing content WITHOUT also passing `abstract` arms the `abstract-stale` marker on this node — that is intended (the abstract was written against the old content and may no longer describe it). Pass both together, or assert `abstractStillAccurate` if you have re-read the abstract and it survives the edit.'),
@@ -7140,6 +7141,7 @@ Refuses if the node has descendants under its URN prefix unless \`recursive: tru
         | { refused: 'access' }
         | { refused: 'mintedSpec'; message: string }
         | { refused: 'comment'; message: string }
+        | { refused: 'decision'; message: string }
         | { ok: true; descendantCount: number };
 
       // #449 — source memories whose pending-edge count a hard delete changed.
@@ -7209,6 +7211,11 @@ Refuses if the node has descendants under its URN prefix unless \`recursive: tru
         // path's thread delete; a target takes its threads with it.
         if ((await commentIdsAmong(tx, affectedIds)).length > 0) {
           return { refused: 'comment', message: commentGovernedError('delete', 'removes').message };
+        }
+        // #1641 §3.2 — a decision is withdrawn, never deleted.
+        const decisions = await decisionFamilyAmong(tx, affectedIds);
+        if (decisions.length > 0) {
+          return { refused: 'decision', message: decisionContainedError('Deleting this node', decisions.map((d) => d.loc)).message };
         }
         if (hard) await hardDeleteThreadsOfTargets(tx, affectedIds);
         else await softDeleteThreadsOfTargets(tx, affectedIds, { deletedBy: auth.userId ?? auth.clientId ?? null, at: new Date() });
@@ -7281,6 +7288,9 @@ Refuses if the node has descendants under its URN prefix unless \`recursive: tru
         }
         if (result.refused === 'comment') {
           return textResult(`[role_governed] ${result.message}`);
+        }
+        if (result.refused === 'decision') {
+          return textResult(`[decision_contained] ${result.message}`);
         }
         if (result.refused === 'descendants') {
           const mode = hard ? 'hard delete' : 'soft delete';
@@ -7491,6 +7501,9 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
               }
               await ensureCurrentNodeRevisionInTransaction(tx, existing.id, { expectedMemoryId: fromMemory.id });
               const locked = await tx.node.findUniqueOrThrow({ where: { id: existing.id } });
+              // #1641 — a decision's name is its rendered `<code>: <title>`,
+              // which its approval covers; only the decision doors change it.
+              if (isDecisionFamilyRole(locked.role)) throw decisionContainedError('Renaming this node', [locked.loc]);
               await createNodeRevision(tx, {
                 id: generateId(),
                 ...buildNodeRevisionSnapshot(locked, editorFromAuth(auth), {
@@ -7574,6 +7587,8 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
             // whole transaction back.
             if (existingTarget) {
               await assertNoMintedSpecRemoval(tx, toMemory.id, [existingTarget.id], 'overwrite');
+              // #1641 §3.2 — evicting a decision would delete it.
+              await refuseDecisionFamily(tx, [existingTarget.id], 'Overwriting this node');
             }
           }
 

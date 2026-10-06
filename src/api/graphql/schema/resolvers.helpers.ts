@@ -100,7 +100,7 @@ export interface Context {
    * its caller sent, so it answers; a refusal that cannot be replayed on MCP
    * names no MCP door (@codex, PR #1305).
    */
-  governedCanReplay?: (kind: 'task' | 'review' | 'spec') => boolean;
+  governedCanReplay?: (kind: 'task' | 'review' | 'spec' | 'decision') => boolean;
   clientId?: string;       // "github:<username>" / "email:<addr>" — only set for OAuth/JWT users
   userId?: string;         // User.id — only set for OAuth/JWT users
   appId?: string;          // App.id — set when caller authenticated via an App Key

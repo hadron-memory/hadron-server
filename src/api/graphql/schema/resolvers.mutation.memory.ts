@@ -100,6 +100,7 @@ import { withAuthorizedMemoryTx } from './authorizedTx.js';
 // Spec 049 §8.5 — the memory-level lock Channel creation shares with deleteMemory.
 import { lockMemoryForChannelChange } from '../../../lib/channels.js';
 import { assertNoMintedCorpusRemoval, reclaimTombstonedMemory } from '../../../lib/mintedSpecPermanence.js';
+import { decisionError, memoryHoldsDecisionLog } from '../../../lib/decisions/index.js';
 import { type InputJsonValue } from '../../../generated/prisma/runtime/library.js';
 import { validateMemorySchema, MemorySchemaError } from '../../../lib/memorySchema.js';
 import { validateMemorySource, GitSourceError } from '../../../lib/gitSource.js';
@@ -1009,6 +1010,13 @@ export const memoryMutations = {
           throw new GraphQLError('Use transferMemoryOwnership to change a memory owner.', {
             extensions: { code: 'USE_TRANSFER_MEMORY_OWNERSHIP' },
           });
+        }
+        // #1641 §3.2 — no git mirror on a memory holding a decision log: a
+        // mirror could forge decisions. Under this row's FOR UPDATE, which
+        // createDecisionLog's FOR SHARE anchor waits on (and vice versa), so a
+        // concurrent attach and log creation cannot both succeed.
+        if (source != null && (await memoryHoldsDecisionLog(tx, id))) {
+          throw decisionError('DECISION_LOG_MIRRORED', 'This memory holds a decision log, so it cannot be git-mirrored.', { memoryId: id });
         }
         if (newUrn !== undefined) {
           await recordUrnRename(tx, {
@@ -2424,6 +2432,12 @@ export const memoryMutations = {
             throw new GraphQLError("Only class='private' memories support encryption (D-2026-07-06-B).", {
               extensions: { code: 'BAD_USER_INPUT', memoryClass: current.class },
             });
+          }
+          // #1641 §5.4 (Q5) — reciprocal to createDecisionLog's refusal: a
+          // decision is verified by re-rendering its plaintext, so a memory
+          // holding a log is never encrypted. Under this row's FOR UPDATE.
+          if (await memoryHoldsDecisionLog(tx, resolvedMemoryId)) {
+            throw decisionError('DECISION_LOG_ENCRYPTED', 'This memory holds a decision log, so it cannot be encrypted.', { memoryId: resolvedMemoryId });
           }
           if (current.vectorIndexEnabled && !current.vectorIndexEncryptedAckAt) {
             throw new GraphQLError(
