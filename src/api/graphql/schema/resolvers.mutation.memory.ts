@@ -2131,7 +2131,7 @@ export const memoryMutations = {
       // provisioning scope. Registered holdings require their owner's authority.
       await concealUnreadableDenial(ctx, resolvedMemoryId, memoryId, async () => {
         if (memory.organizationId !== app.organizationId || !memory.userMemoryOfAgentId ||
-            memory.deletedAt || memory.userId !== null || memory.class !== 'app' ||
+            memory.deletedAt || memory.anonymousExpiresAt === null || memory.userId !== null || memory.class !== 'app' ||
             memory.appId !== ctx.appId || memory.isEncrypted || ctx.impersonation) {
           throw new GraphQLError("Only this App's plaintext anonymous memory may be linked.", {
             extensions: { code: 'FORBIDDEN' },
@@ -2206,7 +2206,7 @@ export const memoryMutations = {
         await ctx.db.$transaction(async (tx) => {
           await tx.$queryRaw`SELECT id FROM memories WHERE id = ${resolvedMemoryId} FOR UPDATE`;
           const current = await tx.memory.findUniqueOrThrow({ where: { id: resolvedMemoryId } });
-          if (current.deletedAt || current.userId !== null || current.class !== 'app' ||
+          if (current.deletedAt || current.anonymousExpiresAt === null || current.userId !== null || current.class !== 'app' ||
               current.appId !== ctx.appId || current.organizationId !== app.organizationId) {
             throw new GraphQLError('Anonymous memory changed during promotion; retry.', {
               extensions: { code: 'MEMORY_WRITE_CONFLICT', memoryId: resolvedMemoryId },
@@ -2249,6 +2249,7 @@ export const memoryMutations = {
               keyVerifier: null,
               urn: memory.urn,
               userId: null,
+              anonymousExpiresAt: { not: null },
               appId: ctx.appId,
               organizationId: app.organizationId,
               class: 'app',
@@ -2294,7 +2295,7 @@ export const memoryMutations = {
       return ctx.db.$transaction(async (tx) => {
         await tx.$queryRaw`SELECT id FROM memories WHERE id = ${resolvedMemoryId} FOR UPDATE`;
         const current = await tx.memory.findUniqueOrThrow({ where: { id: resolvedMemoryId } });
-        if (current.deletedAt || current.userId !== null || current.class !== 'app' ||
+        if (current.deletedAt || current.anonymousExpiresAt === null || current.userId !== null || current.class !== 'app' ||
             current.appId !== ctx.appId || current.organizationId !== app.organizationId ||
             current.isEncrypted || current.keyVerifier !== null || current.urn !== memory.urn) {
           throw new GraphQLError('Anonymous memory changed during promotion; retry.', {
@@ -2309,6 +2310,7 @@ export const memoryMutations = {
           where: {
             id: resolvedMemoryId, urn: memory.urn, userId: null, class: 'app',
             appId: ctx.appId, organizationId: app.organizationId, deletedAt: null,
+            anonymousExpiresAt: { not: null },
             isEncrypted: false, keyVerifier: null,
           },
           data: { urn: newUrn, createdBy: user.id, anonymousExpiresAt: null, updatedBy: ctx.appId },

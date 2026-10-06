@@ -134,7 +134,7 @@ describe('#1644 encryption authority', () => {
 
   it.each([undefined, dataKey])('anonymous promotion stays within its own App (key=%s)', async promotionKey => {
     const agent = await db.agent.create({ data: { name: 'Anonymous agent', urn: 'enc-owner.test:anon-agent', organizationId: orgId } });
-    const anon = await db.memory.create({ data: { name: 'Anonymous', urn: 'enc-owner.test:anon', organizationId: orgId, appId, userMemoryOfAgentId: agent.id, class: 'app' } });
+    const anon = await db.memory.create({ data: { name: 'Anonymous', urn: 'enc-owner.test:anon', organizationId: orgId, appId, userMemoryOfAgentId: agent.id, anonymousExpiresAt: new Date(Date.now() + 86400000), class: 'app' } });
     const before = await db.memory.findUniqueOrThrow({ where: { id: anon.id } });
     const usersBefore = await db.user.count();
     await expect(resolvers.Mutation.linkMemoryToUser({}, { memoryId: anon.id, externalUserId: 'sibling-user', dataKey: promotionKey }, { db, appId: otherAppId, roles: [] }))
@@ -169,16 +169,16 @@ describe('#1644 encryption authority', () => {
     expect(after.revisions).toEqual(before.revisions);
   });
 
-  it.each([undefined, dataKey])('promotion rechecks App scope under its transaction lock (key=%s)', async promotionKey => {
+  it.each([[undefined, 'app'], [dataKey, 'app'], [undefined, 'expiry'], [dataKey, 'expiry']] as const)('promotion rechecks anonymous scope under its transaction lock (key=%s, change=%s)', async (promotionKey, change) => {
     const agent = await db.agent.create({ data: { name: 'Race agent', urn: 'enc-owner.test:race-agent', organizationId: orgId } });
-    const anon = await db.memory.create({ data: { name: 'Race anonymous', urn: 'enc-owner.test:race', organizationId: orgId, appId, userMemoryOfAgentId: agent.id, class: 'app' } });
+    const anon = await db.memory.create({ data: { name: 'Race anonymous', urn: 'enc-owner.test:race', organizationId: orgId, appId, userMemoryOfAgentId: agent.id, anonymousExpiresAt: new Date(Date.now() + 86400000), class: 'app' } });
     const original = db.memory.findUniqueOrThrow.bind(db.memory);
     let changed = false;
     const read = vi.spyOn(db.memory, 'findUniqueOrThrow').mockImplementation((async (args: any) => {
       const row = await original(args);
       if (!changed && args.where.id === anon.id) {
         changed = true;
-        await db.memory.update({ where: { id: anon.id }, data: { appId: otherAppId } });
+        await db.memory.update({ where: { id: anon.id }, data: change === 'app' ? { appId: otherAppId } : { anonymousExpiresAt: null } });
       }
       return row;
     }) as typeof db.memory.findUniqueOrThrow);
@@ -187,7 +187,9 @@ describe('#1644 encryption authority', () => {
         .rejects.toMatchObject({ extensions: { code: 'MEMORY_WRITE_CONFLICT' } });
     } finally { read.mockRestore(); }
     expect(await db.memory.findUniqueOrThrow({ where: { id: anon.id } })).toMatchObject({
-      urn: anon.urn, appId: otherAppId, userId: null, isEncrypted: false, keyVerifier: null,
+      urn: anon.urn, appId: change === 'app' ? otherAppId : appId,
+      anonymousExpiresAt: change === 'expiry' ? null : anon.anonymousExpiresAt,
+      userId: null, isEncrypted: false, keyVerifier: null,
     });
   });
 
@@ -200,7 +202,7 @@ describe('#1644 encryption authority', () => {
 
   it('a committed promotion requires owner-authenticated recovery after interrupted completion', async () => {
     const agent = await db.agent.create({ data: { name: 'Recovery agent', urn: 'enc-owner.test:recovery-agent', organizationId: orgId } });
-    await db.memory.update({ where: { id: memoryId }, data: { class: 'app', userId: null, appId, userMemoryOfAgentId: agent.id } });
+    await db.memory.update({ where: { id: memoryId }, data: { class: 'app', userId: null, appId, userMemoryOfAgentId: agent.id, anonymousExpiresAt: new Date(Date.now() + 86400000) } });
     const completion = vi.spyOn(memoryMutations, 'encryptMemory').mockRejectedValueOnce(new Error('ENCRYPTION_INCOMPLETE'));
     try {
       await expect(resolvers.Mutation.linkMemoryToUser({}, { memoryId, externalUserId: 'recovery-owner', dataKey }, { db, appId, roles: [] }))
@@ -215,6 +217,23 @@ describe('#1644 encryption authority', () => {
     await resolvers.Mutation.encryptMemory({}, { memoryId, dataKey }, ownerCtx({ userId: claimed.memory.userId! }));
     const recovered = await snapshot();
     for (const revision of recovered.revisions) expect(isAuthenticatedStringEnvelope(revision.content, parseDataKey(dataKey))).toBe(true);
+  });
+
+  it('a plaintext-linked holding cannot be linked again to another external user', async () => {
+    const agent = await db.agent.create({ data: { name: 'Link once agent', urn: 'enc-owner.test:link-once', organizationId: orgId } });
+    await db.memory.update({ where: { id: memoryId }, data: {
+      class: 'app', userId: null, appId, userMemoryOfAgentId: agent.id,
+      anonymousExpiresAt: new Date(Date.now() + 86400000),
+    } });
+    const linked = await resolvers.Mutation.linkMemoryToUser({}, { memoryId, externalUserId: 'first-owner' }, { db, appId, roles: [] });
+    const firstUser = await db.user.findFirstOrThrow({ where: { externalAppId: appId, externalId: 'first-owner' } });
+    expect(linked).toMatchObject({ createdBy: firstUser.id, anonymousExpiresAt: null, class: 'app', userId: null });
+    const before = await snapshot();
+    const usersBefore = await db.user.count();
+    await expect(resolvers.Mutation.linkMemoryToUser({}, { memoryId, externalUserId: 'second-owner' }, { db, appId, roles: [] }))
+      .rejects.toMatchObject({ code: 'MEMORY_NOT_FOUND' });
+    expect(await snapshot()).toEqual(before);
+    expect(await db.user.count()).toBe(usersBefore);
   });
 
 });
