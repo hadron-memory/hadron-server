@@ -65,7 +65,7 @@ async function seed(n: number) {
       name: `Retention doc ${i}`, abstract: 'retention policy', content: 'retention policy text',
     })),
   });
-  const target = await db.node.findFirstOrThrow({ where: { loc: 'doc:0000' } });
+  const target = await db.node.findFirstOrThrow({ where: { memoryId: memory.id, loc: 'doc:0000' } });
   const root = await M.createComment(null, { targetRef: target.id, body: 'retention feedback one' }, as());
   const r1 = await M.replyToComment(null, { commentRef: root.id, body: 'retention feedback two' }, as());
   const r2 = await M.replyToComment(null, { commentRef: root.id, body: 'retention feedback three' }, as());
