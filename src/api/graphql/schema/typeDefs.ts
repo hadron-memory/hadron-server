@@ -7645,7 +7645,8 @@ export const typeDefs = `#graphql
     """
     Dry-run castWorker (#964): run the cast's exact resolution — same
     arguments, same typed refusals (WORKER_AGENT_NOT_FOUND / _AMBIGUOUS /
-    _NOT_INSTALLED, WORKER_NAME_REQUIRED, WORKER_NAME_TAKEN, APP_UNINSTALLED),
+    _NOT_INSTALLED, WORKER_NAME_REQUIRED, WORKER_NAME_TAKEN,
+    WORKER_NAME_CONFUSABLE, APP_UNINSTALLED),
     same MINT gate — up to but not
     including the writes, and return what would be created. A Query, not a
     dryRun flag: casting a name is the one irreversible act in the team
@@ -9910,6 +9911,10 @@ export const typeDefs = `#graphql
     identifier nobody picked. The workers_app_name_uniq constraint IS the
     arbiter. Names are unique per App, case-insensitively, FOREVER (two Apps
     may each have an Iris; retirement and uninstall never free a name).
+    #1677: NFKC-normalized Unicode 16 UTS #39 skeletons (original-case and
+    caseless) must also be distinct within the App, including retired workers. A collision refuses
+    WORKER_NAME_CONFUSABLE and names the existing worker; the chosen display
+    spelling is preserved. Existing workers are not renamed or invalidated.
 
     A worker-scoped working memory is provisioned in the App's container
     (Worker.memoryId; best-effort — a failed provision leaves it null for
@@ -9919,7 +9924,7 @@ export const typeDefs = `#graphql
     AppMember of the App whose role is not 'reader', or the owner of a
     user-owned App. Pure App-key principals are denied.
 
-    Error codes (extensions.code): WORKER_NAME_TAKEN,
+    Error codes (extensions.code): WORKER_NAME_TAKEN, WORKER_NAME_CONFUSABLE,
     WORKER_NAME_REQUIRED, WORKER_AGENT_NOT_INSTALLED,
     WORKER_AGENT_NOT_FOUND, WORKER_AGENT_AMBIGUOUS, APP_UNINSTALLED.
 
