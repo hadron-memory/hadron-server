@@ -18,6 +18,7 @@
  *
  * The target is never written (`110:06`): no path here updates its row.
  */
+import { enqueueNodeEmbedding } from '../../../services/embedding/enqueue.js';
 import { GraphQLError } from 'graphql';
 import { Prisma } from '../../../generated/prisma/index.js';
 import type { Context } from './resolvers.helpers.js';
@@ -493,6 +494,22 @@ async function reviseComment(
   });
 }
 
+/**
+ * #1608 — (re-)index a comment's text for search after a write: comment text
+ * is searchable feedback (cor:dmo:110:08), and the CONTENT default keeps it
+ * out of ordinary results. A stub's blanked body leaves nothing to index. The
+ * plaintext comes from the view, so an encrypted memory embeds plaintext.
+ * A no-op unless the memory has a vector index.
+ */
+function indexed(ctx: Context, view: CommentView): CommentView {
+  void enqueueNodeEmbedding(ctx.db, {
+    nodeId: view.id,
+    memoryId: view.memoryId,
+    plaintext: { content: view.body, abstract: null },
+  }).catch((error) => console.error('[comments] embedding enqueue failed:', error));
+  return view;
+}
+
 async function viewOf(ctx: Context, id: string, key: EncryptionKey | null): Promise<CommentView> {
   const [view] = await loadCommentViews(ctx.db, [id], key);
   if (!view) throw commentMissing();
@@ -533,7 +550,7 @@ async function changeComment(
     }
     throw error;
   }
-  return viewOf(ctx, node.id, key);
+  return indexed(ctx, await viewOf(ctx, node.id, key));
 }
 
 /**
@@ -608,7 +625,7 @@ export const commentMutations = {
       if (isOpenThreadUniqueViolation(error)) throw await openThreadConflict(ctx.db, target.id, authorKey);
       throw error;
     }
-    return viewOf(ctx, id, key);
+    return indexed(ctx, await viewOf(ctx, id, key));
   },
 
   /**
@@ -629,7 +646,7 @@ export const commentMutations = {
         threadRootId: root.id, authorKey, body, quote: null, key, anchor: null,
       });
     });
-    return viewOf(ctx, id, key);
+    return indexed(ctx, await viewOf(ctx, id, key));
   },
 
   /** The author edits the body and/or quote (`cor:dmo:110:05`). */
@@ -891,6 +908,17 @@ export const commentFieldResolvers = {
     openThreads: async (n: { id: string }, _: unknown, ctx: Context) => (await loadSummary(ctx, n.id)).openThreads,
   },
   Node: {
+    /**
+     * #1608 — a comment hit as its Comment view. The Node itself already passed
+     * its memory's read gate, and a comment shares its target's memory.
+     */
+    asComment: async (n: { id: string; nodeType?: string; memoryId?: string }, _: unknown, ctx: Context): Promise<CommentView | null> => {
+      if (n.nodeType !== undefined && n.nodeType !== COMMENT_NODE_TYPE) return null;
+      const row = await ctx.db.node.findUnique({ where: { id: n.id }, select: { nodeType: true, memoryId: true } });
+      if (row?.nodeType !== COMMENT_NODE_TYPE) return null;
+      const [view] = await loadCommentViews(ctx.db, [n.id], await keyForMemory(ctx.db, row.memoryId));
+      return view ?? null;
+    },
     /** The trust cue (`cor:dmo:110:07`), batched per request. */
     commentSummary: async (n: { id: string }, _: unknown, ctx: Context) => {
       const [counts, viewerOpen] = await Promise.all([

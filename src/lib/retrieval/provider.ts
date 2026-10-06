@@ -6,6 +6,7 @@
  * FTS (ts_rank_cd) and pgvector, which another backend would reimplement,
  * possibly at lower fidelity.
  */
+import type { ContentScope } from '../comments/scope.js';
 import type { NodeApprovalState } from '../nodeApproval.js';
 import type { PrismaClient } from '../../generated/prisma/index.js';
 import type { VectorHit, ChunkHit } from '../../services/embedding/vectors.js';
@@ -55,6 +56,11 @@ export interface NodeSqlFilter {
   approvalState?: NodeApprovalState | null;
   /** #1591 — minted (true) or unminted (false) nodes only. */
   minted?: boolean | null;
+  /**
+   * #1608 — content, comments or both (cor:dmo:110:08). Callers pass the
+   * EFFECTIVE scope ({@link effectiveContentScope}); absent means CONTENT.
+   */
+  contentScope?: ContentScope | null;
 }
 
 /** Ordering for the no-query browse (relevance is meaningless without a query). */
@@ -131,6 +137,13 @@ export interface VectorSearchOpts {
    * not exhausted.
    */
   onWindow?: (w: { exhausted: boolean }) => void;
+  /**
+   * #1608 — a COMMENTS-scoped search is answered EXACTLY over comment vectors
+   * (no ANN window), so it finds every matching comment (cor:dmo:110:08).
+   * CONTENT and ALL keep the index-backed search; the caller's node filter
+   * drops comments from a CONTENT result.
+   */
+  contentScope?: ContentScope | null;
 }
 
 export interface NodeRetrievalProvider {

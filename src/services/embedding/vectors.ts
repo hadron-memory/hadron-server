@@ -283,6 +283,11 @@ export interface VectorHit {
  * Node-level vector search (D-R5/FR-022 default granularity). The ANN scan is
  * the index-using inner query (HNSW serves `ORDER BY <=> LIMIT`); we over-fetch
  * candidates, then dedupe to nodes (best vector per node) and drop soft-deleted.
+ *
+ * #1608 — `commentsOnly` ranks comment vectors EXACTLY instead (a filtered
+ * scan, no ANN window), so a comments-only search returns every matching
+ * comment however many content vectors outrank it (cor:dmo:110:08). Comments
+ * are a small set beside a memory's content, which keeps the scan cheap.
  */
 export async function vectorSearchNodes(
   db: PrismaClient,
@@ -293,6 +298,8 @@ export async function vectorSearchNodes(
     candidateFactor?: number;
     /** #1345 — told whether the raw ANN window was exhausted (see below). */
     onWindow?: (w: { exhausted: boolean }) => void;
+    /** #1608 — search comment vectors only, exactly (see {@link exactCommentVectorHits}). */
+    commentsOnly?: boolean;
   },
 ): Promise<VectorHit[]> {
   if (opts.memoryIds.length === 0) {
@@ -301,6 +308,19 @@ export async function vectorSearchNodes(
   }
   const qvec = toVectorLiteral(opts.queryEmbedding);
   const k = opts.limit;
+  if (opts.commentsOnly) {
+    const rows = await db.$queryRaw<{ node_id: string; distance: number }[]>`
+      SELECT ne.node_id, MIN(ne.embedding <=> ${qvec}::vector) AS distance
+      FROM node_embeddings ne
+      JOIN nodes n ON n.id = ne.node_id AND n.deleted_at IS NULL AND n.node_type = 'comment'
+      WHERE ne.memory_id IN (${Prisma.join(opts.memoryIds)})
+      GROUP BY ne.node_id
+      ORDER BY distance ASC
+      LIMIT ${k}`;
+    // Exact: the whole comment set was ranked, so nothing deeper exists.
+    opts.onWindow?.({ exhausted: true });
+    return rows.map((r) => ({ nodeId: r.node_id, score: 1 - Number(r.distance) }));
+  }
   const candidateK = Math.max(k, k * (opts.candidateFactor ?? 10));
   // `ann_rows` is the RAW candidate count, before the node dedup (a window full
   // of one node's chunks dedupes to one hit, #1345 review). Exhaustion compares
@@ -369,6 +389,8 @@ export async function vectorSearchChunks(
     candidateFactor?: number;
     /** #1345 — told whether the chunk window was exhausted (fewer rows than it asked for). */
     onWindow?: (w: { exhausted: boolean }) => void;
+    /** #1608 — rank comment chunks only, exactly (no ANN window). */
+    commentsOnly?: boolean;
   },
 ): Promise<ChunkHit[]> {
   if (opts.memoryIds.length === 0) {
@@ -377,6 +399,21 @@ export async function vectorSearchChunks(
   }
   const qvec = toVectorLiteral(opts.queryEmbedding);
   const k = opts.limit;
+  if (opts.commentsOnly) {
+    const rows = await db.$queryRaw<{ node_id: string; chunk_index: number; char_start: number; char_end: number; chunk_text: string; distance: number }[]>`
+      SELECT ne.node_id, ne.chunk_index, ne.char_start, ne.char_end, ne.chunk_text,
+             ne.embedding <=> ${qvec}::vector AS distance
+      FROM node_embeddings ne
+      JOIN nodes n ON n.id = ne.node_id AND n.deleted_at IS NULL AND n.node_type = 'comment'
+      WHERE ne.memory_id IN (${Prisma.join(opts.memoryIds)}) AND ne.kind = 'chunk'
+      ORDER BY distance ASC
+      LIMIT ${k}`;
+    opts.onWindow?.({ exhausted: true });
+    return rows.map((r) => ({
+      nodeId: r.node_id, chunkIndex: Number(r.chunk_index), charStart: Number(r.char_start),
+      charEnd: Number(r.char_end), chunkText: r.chunk_text, score: 1 - Number(r.distance),
+    }));
+  }
   // Over-fetch to absorb soft-deleted-node losses + reach the top-k
   // chunks even when same-node chunks cluster near the top.
   const candidateK = Math.max(k, k * (opts.candidateFactor ?? 10));
