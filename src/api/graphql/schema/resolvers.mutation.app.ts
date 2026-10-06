@@ -707,6 +707,7 @@ export const appMutations = {
         identifyUserMethod,
         sessionTimeoutSeconds,
         sessionDormancyDays,
+        agentSessionsExpire,
         anonymousTtlDays,
         policy,
       }: {
@@ -728,6 +729,7 @@ export const appMutations = {
         identifyUserMethod?: 'USER_ID' | 'SECRET';
         sessionTimeoutSeconds?: number;
         sessionDormancyDays?: number | null;
+        agentSessionsExpire?: boolean | null;
         anonymousTtlDays?: number;
         // #510: app-layer action-policy link (cor:acl:040:02).
         // Explicit null clears; omitted preserves.
@@ -908,6 +910,7 @@ export const appMutations = {
           ...(identifyUserMethod !== undefined ? { identifyUserMethod } : {}),
           ...(sessionTimeoutSeconds !== undefined ? { sessionTimeoutSeconds } : {}),
           ...(sessionDormancyDays != null ? { sessionDormancyDays } : {}),
+          ...(agentSessionsExpire != null ? { agentSessionsExpire } : {}),
           ...(anonymousTtlDays !== undefined ? { anonymousTtlDays } : {}),
           ...(policy !== undefined ? { policy: policy as never } : {}),
           updatedBy: ctx.userId ?? null,
