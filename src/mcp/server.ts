@@ -191,7 +191,7 @@ import { locateTeamChatChannel } from '../api/graphql/schema/resolvers.teamChat.
 // #1005: the SHARED App-participation predicate (#943) — reused here so
 // reconnect recovery admits exactly whom startSession admitted, rather than a
 // narrower member-row copy that would drift from it.
-import { isAppParticipant, getAccessibleMemoryIds as gqlAccessibleMemoryIds } from '../api/graphql/schema/resolvers.helpers.js';
+import { isAppParticipant, getAccessibleMemoryIds as gqlAccessibleMemoryIds, safeCanonicalUrn } from '../api/graphql/schema/resolvers.helpers.js';
 import { composeWorkerPrompt, loadAppWorkerActivity } from '../api/graphql/schema/resolvers.worker.js';
 import { splitNodeUrnTolerant, nodeFragmentRefusal } from '../lib/splitNodeUrnTolerant.js';
 import { safeEqual } from '../lib/constantTime.js';
@@ -1366,6 +1366,11 @@ async function isMemoryHiddenFrom(
 type ReadProjectionNode = {
   id: string;
   revSeq: number;
+  // #1610 agent attribution.
+  createdByWorkerId: string | null;
+  createdByAgentId: string | null;
+  updatedByWorkerId: string | null;
+  updatedByAgentId: string | null;
   authorshipKind: 'TASK' | 'HUMAN' | null;
   authoredByTask: string | null;
   authoredByRevision: number | null;
@@ -1514,6 +1519,46 @@ async function batchHumanNames(nodes: readonly ReadProjectionNode[]): Promise<Ma
   return new Map(users.filter((user) => !!user.handle).map((user) => [user.id, user.handle!]));
 }
 
+// #1610: one name/URN lookup per actor per batch read.
+const actorLabelCaches = new WeakMap<object, Map<string, Promise<string | null>>>();
+
+/** The Worker (else Agent) behind a write, as `name (urn)`; '' when none. */
+async function actorMetaLine(
+  client: typeof db,
+  label: string,
+  workerId: string | null,
+  agentId: string | null,
+  batch?: object,
+): Promise<string> {
+  const kind = workerId ? 'worker' : agentId ? 'agent' : null;
+  const id = workerId ?? agentId;
+  if (!kind || !id) return '';
+  const lookup = async (): Promise<string | null> => {
+    if (kind === 'worker') {
+      const w = await client.worker.findUnique({
+        where: { id }, select: { name: true, slug: true, app: { select: { urn: true } } },
+      });
+      if (!w) return null;
+      let urn: string | null = null;
+      try { urn = composeWorkerUrn(normalizeUrnForLookup(w.app.urn), w.slug); } catch { urn = null; }
+      return urn ? `${w.name} (${urn})` : w.name;
+    }
+    const a = await client.agent.findUnique({ where: { id }, select: { name: true, urn: true } });
+    return a ? `${a.name} (${safeCanonicalUrn('agent', a.urn)})` : null;
+  };
+  let pending: Promise<string | null>;
+  if (batch) {
+    let cache = actorLabelCaches.get(batch);
+    if (!cache) { cache = new Map(); actorLabelCaches.set(batch, cache); }
+    pending = cache.get(`${kind}:${id}`) ?? lookup();
+    cache.set(`${kind}:${id}`, pending);
+  } else {
+    pending = lookup();
+  }
+  const name = await pending;
+  return name ? `${label}: ${kind} ${name}` : '';
+}
+
 async function renderNodeReadProjection(
   node: ReadProjectionNode,
   scope: 'content' | 'abstract' | 'all',
@@ -1652,6 +1697,11 @@ async function renderNodeReadProjection(
     }
   }
 
+  // #1610: the Worker (else the Agent) behind the node's creation and its
+  // last authored edit. Omitted when none was; the user is not repeated here.
+  const createdByLine = await actorMetaLine(db, 'Created by', node.createdByWorkerId, node.createdByAgentId, opts.batch);
+  const updatedByLine = await actorMetaLine(db, 'Last edited by', node.updatedByWorkerId, node.updatedByAgentId, opts.batch);
+
   // #186: surface nodeType so callers can tell `parent` from `info`.
   const meta = [
     `**${node.name}**`,
@@ -1666,6 +1716,8 @@ async function renderNodeReadProjection(
     validationLine,
     approvalLine,
     mintLine,
+    createdByLine,
+    updatedByLine,
     node.description ? `> ${node.description}` : '',
     `Type: ${node.nodeType}`,
     // #1201 (@codex P2, PR #1203). Without these a governed node reads as an

@@ -18,6 +18,7 @@
  * user cannot touch personal/private memories, by construction.
  */
 
+import { runAsActor } from '../lib/requestActor.js';
 import type { PrismaClient, AppRun } from '../generated/prisma/index.js';
 import { generateId } from '../lib/id.js';
 import { getBusClient } from '../lib/bus/index.js';
@@ -674,7 +675,14 @@ export async function executeAppRun(
   runId: string,
   deps: RunExecutionDeps,
 ): Promise<RunOutcome> {
-  const outcome = await executeAppRunInner(db, runId, deps);
+  // #1610: a headless run writes as its App's agent, so every node it
+  // creates or edits records that agent beside the run's user. A run that
+  // names no agent writes as nobody (both null).
+  const agent = await db.appRun.findUnique({ where: { id: runId }, select: { agentId: true } });
+  const outcome = await runAsActor(
+    { workerId: null, agentId: agent?.agentId ?? null },
+    () => executeAppRunInner(db, runId, deps),
+  );
   if (outcome === 'completed' || outcome === 'failed') {
     // Terminal → fire the after-hook (webhook callbacks etc.). Best-effort:
     // a hook failure must never resurrect or re-fail the run.

@@ -785,3 +785,25 @@ describe('setQuotaLimit + ensureQuotaRowsForScope (#510)', () => {
     expect(row.used).toBe(1);
   });
 });
+
+describe('a headless run writes as its agent (#1610)', () => {
+  it('executes inside an actor scope carrying AppRun.agentId, and as nobody without one', async () => {
+    const { currentActor } = await import('../lib/requestActor.js');
+    const agent = await db.agent.create({ data: { id: generateId(), urn: 'run-org::run-agent', name: 'run-agent', organizationId: orgId } });
+    await db.appAgent.create({ data: { appId, agentId: agent.id } });
+    const seen: Array<{ workerId: string | null; agentId: string | null }> = [];
+    const capture = deps({
+      llm: vi.fn(async () => {
+        seen.push({ ...currentActor() });
+        return { text: 'done', tokensIn: 1, tokensOut: 1, provider: 'anthropic', model: 'test' };
+      }),
+    });
+    const withAgent = await mint({ agentId: agent.id });
+    expect(await executeAppRun(db, withAgent.id, capture)).toBe('completed');
+    const without = await mint();
+    expect(await executeAppRun(db, without.id, capture)).toBe('completed');
+    expect(seen).toEqual([{ workerId: null, agentId: agent.id }, { workerId: null, agentId: null }]);
+    // Outside the run nothing leaks.
+    expect(currentActor()).toEqual({ workerId: null, agentId: null });
+  });
+});
