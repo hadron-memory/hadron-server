@@ -189,6 +189,16 @@ export const typeDefs = `#graphql
     contains: JSON
   }
 
+  "#1608 — which kinds of node a search or list returns (hrn:node:hadronmemory.com:specs:cor:dmo:110:08)."
+  enum NodeContentScope {
+    "Content only, never comments. The default."
+    CONTENT
+    "Comments only, never content: feedback, not verified fact about its target."
+    COMMENTS
+    "Content and comments; every comment hit is still a comment (see Node.asComment)."
+    ALL
+  }
+
   """
   Structured, unscored, AND-combined filter context for findNodes (cor:api:090:02).
   """
@@ -197,7 +207,15 @@ export const typeDefs = `#graphql
     memoryIds: [ID!]
     "Restrict by memory class. SYSTEM is excluded by default; passing this (or naming a system memory in memoryIds) overrides that."
     memoryClasses: [MemoryClass!]
+    "An explicit 'comment' with no contentScope searches comments (as COMMENTS)."
     nodeType: String
+    """
+    #1608 — content, comments or both (hrn:node:hadronmemory.com:specs:cor:dmo:110:08).
+    Default CONTENT. Applied by the server before ranking, pagination and
+    limits in every mode (keyword, regex, vector, hybrid and filter-only), so a
+    COMMENTS search finds every matching comment the caller may read.
+    """
+    contentScope: NodeContentScope
     "#725 — collection facet: only nodes whose objectType equals this (e.g. \\"competitor\\")."
     objectType: String
     tags: [String!]
@@ -1321,6 +1339,8 @@ export const typeDefs = `#graphql
     updatedByAgent: ActorRef
     "#1606 — open and resolved discussion on this node (hrn:node:hadronmemory.com:specs:cor:dmo:110:07). Batched per request."
     commentSummary: CommentSummary!
+    "#1608 — this node AS a comment (author, target, anchor revision, thread) when its nodeType is 'comment'; null for content. Lets a search hit render as feedback, never as content of its target (hrn:node:hadronmemory.com:specs:cor:dmo:110:08)."
+    asComment: Comment
     memoryId: String!
     """
     The PLATFORM-kind axis (info / task / prompt / record / …). Load-bearing for

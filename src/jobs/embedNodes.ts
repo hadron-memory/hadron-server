@@ -10,6 +10,7 @@
  * Mirrors the `cleanupAnonymousMemories` job shape.
  */
 
+import { COMMENT_NODE_TYPE } from '../lib/comments/index.js';
 import type { PrismaClient } from '../generated/prisma/index.js';
 import type { EmbeddingClient } from '../lib/embedding/index.js';
 import {
@@ -84,8 +85,11 @@ export async function embedNode(
       loc: true,
       abstract: true,
       content: true,
+      nodeType: true,
       deletedAt: true,
       embeddingPendingAt: true,
+      // #1608 — a comment's stub state (hidden/retracted ⇒ never indexed).
+      commentMeta: { select: { hiddenAt: true, retractedAt: true } },
       embeddingAttempts: true,
       memory: {
         select: {
@@ -107,6 +111,17 @@ export async function embedNode(
   const memory = node.memory;
   const capturedPendingAt = node.embeddingPendingAt;
 
+  // #1608 (cor:dmo:110:08) — a comment's searchable text is its BODY, whatever
+  // the memory's embeddingSource: a comment has no abstract, so the default
+  // abstract-only index would otherwise never hold it (#1674 review, Jane
+  // P2-1). A hidden or retracted comment is never indexed; its vectors go.
+  const isComment = node.nodeType === COMMENT_NODE_TYPE;
+  if (isComment && (node.commentMeta?.hiddenAt || node.commentMeta?.retractedAt)) {
+    await deleteNodeVectors(db, nodeId);
+    await clearMarkers(db, nodeId, capturedPendingAt);
+    return 'skipped';
+  }
+
   // Index disabled: drop any stale vectors and clear the marker.
   if (!memory.vectorIndexEnabled) {
     await deleteNodeVectors(db, nodeId);
@@ -127,8 +142,9 @@ export async function embedNode(
 
   try {
     if (wantAbstract) {
-      const abstractText =
-        plaintext?.abstract !== undefined ? plaintext.abstract : node.abstract;
+      const abstractText = isComment
+        ? (plaintext?.content !== undefined ? plaintext.content : node.content)
+        : plaintext?.abstract !== undefined ? plaintext.abstract : node.abstract;
 
       if (memory.isEncrypted && abstractText != null && isCiphertext(abstractText)) {
         // Sweep on a GraphQL-encrypted node: no plaintext, no session key (#206).
