@@ -128,10 +128,11 @@ export async function cleanDb(db: PrismaClient): Promise<void> {
   // which is exactly what #1069 saw in CI.
   //
   // The initial drain now orders known operation-usage writes before cleanup
-  // (#1189). Keeping the wipe last also covers other event writers: an insert
-  // either lands before the parents go and is deleted here, or lands after and
-  // is REJECTED by its own foreign key (and swallowed by the recorder's
-  // `.catch()`). Safe in this position because every UsageEvent FK is nullable
+  // (#1189), including both fire-and-forget action-run writers. Keeping the
+  // wipe last clears SetNull remnants of completed writes. It is NOT a barrier
+  // for an untracked writer overlapping parent deletion: new asynchronous
+  // usage producers must use trackUsageWrite and finish before this boundary.
+  // Safe in this position because every UsageEvent FK is nullable
   // and `SetNull` — node, session, app, user, organization — and `memoryId` is a
   // denormalized column with no FK at all (#796).
   await db.usageEvent.deleteMany();

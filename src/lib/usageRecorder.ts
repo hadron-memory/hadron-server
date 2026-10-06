@@ -122,7 +122,7 @@ export function usageActorFrom(principal: UsagePrincipal): UsageActor {
  */
 const INSERT_CHUNK = 500;
 
-// Recording remains off the request path, but fixture/shutdown boundaries can
+// Recording remains off the request path, but fixture/file boundaries can
 // wait for its complete lifetime, including activity checks and every chunk.
 const pendingUsageWrites = new WeakMap<object, Set<Promise<void>>>();
 
@@ -131,20 +131,36 @@ const pendingUsageWrites = new WeakMap<object, Set<Promise<void>>>();
  * Call only at a quiescent boundary; this does not stop future producers.
  * Failures retain the recorder's swallow-and-continue contract.
  */
-export async function drainNodeUsage(db: object): Promise<void> {
+export async function drainNodeUsage(db: object, opts: { timeoutMs?: number } = {}): Promise<void> {
+  const timeoutMs = opts.timeoutMs ?? 5_000;
+  const deadline = Date.now() + timeoutMs;
   while (true) {
     const pending = pendingUsageWrites.get(db);
     if (!pending?.size) return;
-    await Promise.all([...pending]);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        Promise.all([...pending]),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error(
+            `Timed out draining asynchronous usage-event writes after ${timeoutMs}ms (${pending.size} pending). Fixture deletion has not started.`,
+          )), Math.max(0, deadline - Date.now()));
+        }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
   }
 }
 
-function trackUsageWrite(db: object, write: Promise<void>): void {
+/** Track any fire-and-forget usage writer, swallowing failure off the request path. */
+export function trackUsageWrite(db: object, write: PromiseLike<unknown>): void {
+  const settled = Promise.resolve(write).then(() => {}, () => {});
   let pending = pendingUsageWrites.get(db);
   if (!pending) pendingUsageWrites.set(db, (pending = new Set()));
-  pending.add(write);
-  void write.then(() => {
-    pending.delete(write);
+  pending.add(settled);
+  void settled.then(() => {
+    pending.delete(settled);
     if (pending.size === 0) pendingUsageWrites.delete(db);
   });
 }

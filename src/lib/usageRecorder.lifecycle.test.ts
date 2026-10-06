@@ -1,8 +1,8 @@
 /** #1189: fixture deletion must not overlap the recorder's batched FK writes. */
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { PrismaClient } from '../generated/prisma/index.js';
 import { cleanDb } from '../test/helpers.js';
-import { drainNodeUsage, recordNodeUsage } from './usageRecorder.js';
+import { drainNodeUsage, recordNodeUsage, trackUsageWrite } from './usageRecorder.js';
 
 function deferred() {
   let resolve!: () => void;
@@ -100,11 +100,30 @@ describe('operation usage lifecycle', () => {
     await cleanDb(client(async () => {}));
     expect(drained).toBe(false);
     first.resolve();
-    await Promise.resolve();
+    await new Promise<void>((resolve) => setImmediate(resolve));
     expect(drained).toBe(false);
     second.resolve();
     await draining;
     expect(drained).toBe(true);
+  });
+
+  it('names a hung usage writer and leaves fixture deletion to wait rather than proceeding', async () => {
+    vi.useFakeTimers();
+    const held = deferred();
+    const db = {};
+    try {
+      trackUsageWrite(db, held.promise);
+      const timed = expect(drainNodeUsage(db, { timeoutMs: 25 })).rejects.toThrow(
+        'Timed out draining asynchronous usage-event writes after 25ms (1 pending)',
+      );
+      await vi.advanceTimersByTimeAsync(25);
+      await timed;
+      held.resolve();
+      await drainNodeUsage(db);
+    } finally {
+      held.resolve();
+      vi.useRealTimers();
+    }
   });
 
   it('settles rejected inserts and still attempts later chunks before cleanup', async () => {
