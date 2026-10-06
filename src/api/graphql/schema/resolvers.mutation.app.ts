@@ -1,3 +1,4 @@
+import { detachAppOwnerMemories } from '../../../controller/operations/detachAppOwnerMemories.js';
 // appMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
 import {
   createHash,
@@ -437,6 +438,7 @@ export const appMutations = {
           // #1468 — the delete cascades the App's memories: refused while one
           // is a stamped corpus still holding a spec.
           await ctx.db.$transaction(async (tx) => {
+            await detachAppOwnerMemories(tx, [existing.id]);
             const doomed = await tx.memory.findMany({ where: { appId: existing.id }, select: { id: true } });
             await assertNoMintedCorpusCascade(tx, doomed.map((m) => m.id), 'reclaim the App URN over');
             await tx.app.delete({ where: { id: existing.id } });
@@ -637,6 +639,7 @@ export const appMutations = {
               await assertNoWorkers(ctx.db, depCollision.id, depUrn, 'reclaim');
               // #1468 — same cascade rule as the parent App branch.
               await ctx.db.$transaction(async (tx) => {
+                await detachAppOwnerMemories(tx, [depCollision.id]);
                 const doomed = await tx.memory.findMany({ where: { appId: depCollision.id }, select: { id: true } });
                 await assertNoMintedCorpusCascade(tx, doomed.map((m) => m.id), 'reclaim the App URN over');
                 await tx.app.delete({ where: { id: depCollision.id } });
