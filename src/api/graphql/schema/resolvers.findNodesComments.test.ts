@@ -106,8 +106,15 @@ describe('findNodes content scope (cor:dmo:110:08)', () => {
     const { comments } = await seed(30);
     for (const node of await db.node.findMany({ where: { memoryId: memory.id, deletedAt: null } })) {
       await db.node.update({ where: { id: node.id }, data: { embeddingPendingAt: new Date() } });
-      expect(await embedNode(db, node.id, node.nodeType === 'comment' ? { content: node.content } : { abstract: node.abstract })).toBe('embedded');
+      // 'skipped' is fine: the comment write's own background drain may win
+      // the latest-wins guard with the same text. The end state is asserted below.
+      expect(['embedded', 'skipped']).toContain(await embedNode(db, node.id, node.nodeType === 'comment' ? { content: node.content } : { abstract: node.abstract }));
     }
+    await vi.waitFor(async () => {
+      // The seeded docs and comments (the memory root has no text to embed).
+      const unembedded = await db.node.count({ where: { memoryId: memory.id, deletedAt: null, OR: [{ nodeType: 'comment' }, { loc: { startsWith: 'doc:' } }], embeddings: { none: {} } } });
+      expect(unembedded).toBe(0);
+    });
     // limit 2 ⇒ a 20-row ANN window, all content (it outranks every comment).
     const byDefault = await findNodes({ query: 'retention', mode: 'vector', filter: { memoryIds: [memory.id] }, limit: 2 });
     expect(types(byDefault)).toEqual(['info']);
@@ -138,13 +145,19 @@ describe('findNodes content scope (cor:dmo:110:08)', () => {
 });
 
 describe('agent and other surfaces', () => {
-  it('hadron_find_nodes: content by default; COMMENTS labels each hit as feedback about its target', async () => {
+  it('hadron_find_nodes: content by default; nodeKind COMMENTS labels each hit as feedback about its target', async () => {
     await seed(3);
     const mcp = createTestableMcpServer({ userId: admin.id, roles: ['ADMIN'], clientId: `user:${admin.id}` });
     const urn = memory.urn.startsWith('hrn:') ? memory.urn : `hrn:mem:${memory.urn}`;
     const plain = await mcp.callToolText('hadron_find_nodes', { query: 'feedback', memoryUrn: urn });
     expect(plain).not.toMatch(/COMMENT:/);
-    const out = await mcp.callToolText('hadron_find_nodes', { query: 'feedback', memoryUrn: urn, contentScope: 'COMMENTS' });
+    // #1678 — the old name is gone with no alias. The break mode is STRIP (pinned,
+    // #1679 review): the tool's zod schema drops the unknown key, so an old-name
+    // call is exactly the default CONTENT search, never an error and never comments.
+    const oldName = await mcp.callToolText('hadron_find_nodes', { query: 'feedback', memoryUrn: urn, contentScope: 'COMMENTS' });
+    expect(oldName).toBe(plain);
+    expect(oldName).not.toMatch(/COMMENT:/);
+    const out = await mcp.callToolText('hadron_find_nodes', { query: 'feedback', memoryUrn: urn, nodeKind: 'COMMENTS' });
     expect(out.match(/COMMENT: feedback by user @search-admin about \S+doc:0000, written against the current revision 1\. It is not content of that node and not verified fact\./g)).toHaveLength(3);
   });
 
@@ -171,6 +184,11 @@ describe('#1674 review cycle (Jane)', () => {
       await db.node.update({ where: { id: n.id }, data: { embeddingPendingAt: new Date() } });
       await embedNode(db, n.id);
     }
+    // A background drain from a comment write may hold the latest-wins stamp;
+    // wait for the end state rather than for this loop's own writes.
+    await vi.waitFor(async () => {
+      expect(await db.node.count({ where: { memoryId: memory.id, deletedAt: null, OR: [{ nodeType: 'comment' }, { loc: { startsWith: 'doc:' } }], embeddings: { none: {} } } })).toBe(0);
+    });
   };
   const ids = (res: any) => res.hits.map((h: any) => h.node.id).sort();
 
