@@ -1,4 +1,5 @@
 import { createHash, randomBytes } from 'crypto';
+import { DEFAULT_SESSION_DORMANCY_DAYS, isSessionDormant, loadLastEventBySession } from '../lib/sessionActivity.js';
 import type { Request } from 'express';
 import type { Prisma, PrismaClient, UserApiKey } from '../generated/prisma/index.js';
 import { lockAuthorityAnchors } from '../lib/auth/authorityAnchors.js';
@@ -217,17 +218,36 @@ async function bindSession(
   if (!isPureAppKey && !isUserPrincipal) return;
   const session = await db.session.findUnique({
     where: { id: sessionId },
-    select: { id: true, appId: true, userId: true, expiresAt: true, endedAt: true, workerId: true, agentId: true },
+    select: {
+      id: true, appId: true, userId: true, expiresAt: true, endedAt: true, workerId: true, agentId: true,
+      startedAt: true, updatedAt: true, autoExpiredAt: true,
+      app: { select: { sessionDormancyDays: true } },
+    },
   });
   if (!session || session.endedAt) return;
-  if (session.expiresAt && session.expiresAt <= new Date()) return;
+  const now = new Date();
+  if (session.expiresAt && session.expiresAt <= now) return;
   const owned = isPureAppKey
     ? session.appId === ctx.appId
     : session.userId === ctx.userId;
   if (!owned) return;
+  // Ruling DY-5, completed for sessions with NO hard expiry (#1661 review,
+  // Rook P2-1): a session nobody has driven for longer than its App's
+  // dormancy threshold no longer binds. Without this, an App with
+  // `agentSessionsExpire: false` left a chatbot session, and its session-
+  // scoped reach into an end user's personal memory, bindable by any key of
+  // that App forever: Holger's "5 year old session, forgotten by everyone,
+  // starts acting unexpectedly". A session WITH a hard expiry is already
+  // bounded by it. Only an explicit new session brings a dormant one back.
+  if (!session.expiresAt) {
+    const lastEvent = (await loadLastEventBySession(db as never, [session.id])).get(session.id);
+    const days = session.app?.sessionDormancyDays ?? DEFAULT_SESSION_DORMANCY_DAYS;
+    if (isSessionDormant(session, lastEvent, days, now)) return;
+  }
   ctx.sessionId = session.id;
   // #1610: the Worker / Agent behind this request's writes comes from the
-  // binding just validated — the one thing a client cannot assert.
+  // binding just validated — the one thing a client cannot assert. A dormant
+  // session (above) neither binds nor attributes.
   publishActor({ workerId: session.workerId, agentId: session.agentId });
 }
 

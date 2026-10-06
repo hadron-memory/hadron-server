@@ -2932,6 +2932,12 @@ model App {
   /// security half of Holger's session-lifetime principle: a long-forgotten
   /// session must not start acting again on its own.
   sessionDormancyDays   Int                  @default(90) @map("session_dormancy_days")
+  /// Ruling DY-3: whether `startAgentSession` stamps a hard `expiresAt` by
+  /// default. False = this App's agent sessions have NO hard expiry unless the
+  /// call asks for one (a caller-supplied `sessionTimeoutSeconds`, still capped
+  /// by the App ceiling). A forgotten one is still bounded: past the App's
+  /// `sessionDormancyDays` it no longer binds (`bindSession`, DY-5).
+  agentSessionsExpire   Boolean              @default(true) @map("agent_sessions_expire")
   anonymousTtlDays      Int                  @default(7) @map("anonymous_ttl_days")
   /// **Deprecated** — superseded by `surfaces`. Scheduled for removal
   /// in a follow-up cleanup spec (per 008 R-4); kept in place to
