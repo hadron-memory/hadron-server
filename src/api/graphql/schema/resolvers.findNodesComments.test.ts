@@ -151,8 +151,11 @@ describe('agent and other surfaces', () => {
     const urn = memory.urn.startsWith('hrn:') ? memory.urn : `hrn:mem:${memory.urn}`;
     const plain = await mcp.callToolText('hadron_find_nodes', { query: 'feedback', memoryUrn: urn });
     expect(plain).not.toMatch(/COMMENT:/);
-    // #1678 — the old name is gone with no alias: it can't select comments.
-    const oldName = await mcp.callToolText('hadron_find_nodes', { query: 'feedback', memoryUrn: urn, contentScope: 'COMMENTS' }).catch((e: Error) => e.message);
+    // #1678 — the old name is gone with no alias. The break mode is STRIP (pinned,
+    // #1679 review): the tool's zod schema drops the unknown key, so an old-name
+    // call is exactly the default CONTENT search, never an error and never comments.
+    const oldName = await mcp.callToolText('hadron_find_nodes', { query: 'feedback', memoryUrn: urn, contentScope: 'COMMENTS' });
+    expect(oldName).toBe(plain);
     expect(oldName).not.toMatch(/COMMENT:/);
     const out = await mcp.callToolText('hadron_find_nodes', { query: 'feedback', memoryUrn: urn, nodeKind: 'COMMENTS' });
     expect(out.match(/COMMENT: feedback by user @search-admin about \S+doc:0000, written against the current revision 1\. It is not content of that node and not verified fact\./g)).toHaveLength(3);
