@@ -6,6 +6,7 @@ import { stringify } from 'yaml';
 import { createHash, randomBytes } from 'crypto';
 import { APP_KEY_PREFIX } from '../middleware/auth.js';
 import type { PrismaClient } from '../generated/prisma/index.js';
+import { drainNodeUsage } from '../lib/usageRecorder.js';
 
 /** Build a deterministic test App key with the canonical `hdr_app_` prefix. */
 export function buildAppKey(suffix?: string): string {
@@ -22,6 +23,10 @@ export function buildAppKey(suffix?: string): string {
  * Call in beforeEach for DB tests.
  */
 export async function cleanDb(db: PrismaClient): Promise<void> {
+  // #1189: a late batched usage INSERT takes FK locks on these parents and
+  // can deadlock with their DELETE/SetNull cascades. Finish all recorder chunks
+  // before deleting any fixture; deleting usage rows last alone is not enough.
+  await drainNodeUsage(db);
   // Pending first-party login states (FK-free; keyed on the OAuth state).
   await db.pendingLoginState.deleteMany();
   // #1079 — the URN alias map. Deliberately FK-FREE: it must outlive the row it
@@ -122,10 +127,12 @@ export async function cleanDb(db: PrismaClient): Promise<void> {
   // `nodeId`. The next test then opened with stale `[null, null]` read events,
   // which is exactly what #1069 saw in CI.
   //
-  // Clearing last closes it structurally rather than narrowing it: a late insert
-  // either lands before the parents go and is deleted here, or lands after and
-  // is REJECTED by its own foreign key (and swallowed by the recorder's
-  // `.catch()`). Safe in this position because every UsageEvent FK is nullable
+  // The initial drain now orders known operation-usage writes before cleanup
+  // (#1189), including both fire-and-forget action-run writers. Keeping the
+  // wipe last clears SetNull remnants of completed writes. It is NOT a barrier
+  // for an untracked writer overlapping parent deletion: new asynchronous
+  // usage producers must use trackUsageWrite and finish before this boundary.
+  // Safe in this position because every UsageEvent FK is nullable
   // and `SetNull` — node, session, app, user, organization — and `memoryId` is a
   // denormalized column with no FK at all (#796).
   await db.usageEvent.deleteMany();

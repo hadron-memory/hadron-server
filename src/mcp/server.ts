@@ -23,6 +23,7 @@ import {
   recordNodeRead,
   recordNodeUsage,
   recordNodeWrite,
+  trackUsageWrite,
   toUsageNodeRefs,
 } from '../lib/usageRecorder.js';
 import {
@@ -7634,7 +7635,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       includeTarget: (target) => canRead(target.memoryId),
       onTargetInlined: (target) => inlined.push(target),
     });
-    db.usageEvent
+    trackUsageWrite(db, db.usageEvent
       .create({
         data: {
           id: generateId(),
@@ -7650,7 +7651,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           actionArgs: (args ?? undefined) as Record<string, string> | undefined,
         },
       })
-      .catch(() => {});
+      .catch(() => {}));
     // #1061 — the `action-run` event above meters an INVOCATION; it is not a
     // read, and no read/write chart counts it. But the bundle also hands back
     // the run node's content AND every dependency node inlined into it, so
