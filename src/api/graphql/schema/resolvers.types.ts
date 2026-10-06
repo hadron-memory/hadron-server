@@ -50,6 +50,7 @@ import {
   loadEdgeEndpointNode,
   isMemoryReadableCached,
   canReadMemoryRecord,
+  filterReadableMemoryRecords,
   loadMemoryUrn,
   loadAppUrn,
   loadApp,
@@ -60,6 +61,7 @@ import {
   safeCanonicalUrn,
   AGENT_INCLUDE,
   APP_INCLUDE,
+  ORG_INCLUDE,
   readPrimaryAgentIdFromEager,
   readPrimaryAgentRecordFromEager,
   readAllAgentRecordsFromEager,
@@ -1867,6 +1869,19 @@ export const typeResolvers = {
     },
   },
   Organization: {
+    /** Every org-list record uses the point-read gate (cor:acl:010:01, #1626). */
+    memories: async (
+      org: { id: string; memories?: Prisma.MemoryGetPayload<{ include: typeof ORG_INCLUDE.memories.include }>[] },
+      _: unknown,
+      ctx: Context,
+    ) => {
+      const rows = org.memories ?? await ctx.db.memory.findMany({
+        where: { organizationId: org.id, ...ORG_INCLUDE.memories.where },
+        include: ORG_INCLUDE.memories.include,
+        orderBy: ORG_INCLUDE.memories.orderBy,
+      });
+      return filterReadableMemoryRecords(ctx, rows);
+    },
     hasGithubAppPrivateKey: (o: { githubAppPrivateKeyEncrypted?: string | null }) => !!o.githubAppPrivateKeyEncrypted,
     apps: async (org: { id: string; apps?: unknown[] }, _: unknown, ctx: Context) => {
       // An Organization may be nested under a readable Memory even when its

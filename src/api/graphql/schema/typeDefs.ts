@@ -2208,6 +2208,13 @@ export const typeDefs = `#graphql
     createUserPermission: CreateUserPermission!
     identifyUserMethod: IdentifyUserMethod!
     sessionTimeoutSeconds: Int!
+    """
+    Ruling DY-5: days without activity after which a lapsed worker session of
+    this App is DORMANT. No agent act (post, read, mark-read) resumes a dormant
+    session; only an explicit rebind by its human holder brings the worker
+    back, and the router stops routing it. Default 90.
+    """
+    sessionDormancyDays: Int!
     anonymousTtlDays: Int!
     """
     023-app-shape US1: Agents installed in this App, via the AppAgent
@@ -9677,6 +9684,8 @@ export const typeDefs = `#graphql
       createUserPermission: CreateUserPermission
       identifyUserMethod: IdentifyUserMethod
       sessionTimeoutSeconds: Int
+      "Ruling DY-5: the dormancy threshold in days (a positive integer). See App.sessionDormancyDays."
+      sessionDormancyDays: Int
       anonymousTtlDays: Int
     ): App!
 

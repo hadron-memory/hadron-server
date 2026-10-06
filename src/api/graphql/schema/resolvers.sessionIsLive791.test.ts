@@ -46,7 +46,7 @@ describe('hadron-cli#791 — Session.isLive', () => {
     const lapsed = await session({ startedAt: new Date(now - 30 * H), updatedAt: new Date(now - 30 * H) });
     const ended = await session({ startedAt: new Date(now - 1 * H), endedAt: new Date(now - 0.5 * H) });
     const byEvent = await session({ startedAt: new Date(now - 30 * H), updatedAt: new Date(now - 30 * H) });
-    await db.usageEvent.create({ data: { id: generateId(), type: 'mcp.tool', sessionId: byEvent.id, createdAt: new Date(now - 1 * H) } as never });
+    await db.usageEvent.create({ data: { countsAsActivity: true, id: generateId(), type: 'mcp.tool', sessionId: byEvent.id, createdAt: new Date(now - 1 * H) } as never });
 
     expect(await liveness()).toEqual({
       [live.id]: true,

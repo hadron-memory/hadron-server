@@ -646,7 +646,7 @@ describe('SessionInput.workerRef (#974) — binding the named identity', () => {
     // The OLDER session heartbeats after the takeover — a usage event lands
     // on it, making contrib the most recent driver despite admin's newer row.
     await db.usageEvent.create({
-      data: {
+      data: { countsAsActivity: true,
         id: generateId(),
         type: 'tool_call',
         sessionId: first.id,

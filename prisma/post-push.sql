@@ -185,6 +185,13 @@ ALTER TABLE apps
 ALTER TABLE apps
   ADD CONSTRAINT chk_app_owner_xor
   CHECK ((organization_id IS NULL) <> (owner_user_id IS NULL));
+-- Ruling DY-5: a dormancy threshold is a positive number of days. Synced with
+-- the 20261005010000 migration + src/test/globalSetup.ts.
+ALTER TABLE apps
+  DROP CONSTRAINT IF EXISTS chk_app_session_dormancy_days_positive;
+ALTER TABLE apps
+  ADD CONSTRAINT chk_app_session_dormancy_days_positive
+  CHECK (session_dormancy_days > 0);
 ALTER TABLE agents
   DROP CONSTRAINT IF EXISTS chk_agent_owner_xor;
 ALTER TABLE agents

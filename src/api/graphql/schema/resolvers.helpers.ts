@@ -39,6 +39,7 @@ import { ROLE_ORDER } from '../../../lib/auth/orgRole.js';
 import { sessionScopedMemoryIds } from '../../../lib/auth/sessionScopedMemoryIds.js';
 import { getMemberOrgIds } from '../../../lib/auth/memberOrgIds.js';
 import { foreignIdentityScopedMemoryFilter } from '../../../lib/auth/memoryOwnership.js';
+import { isStrictOwner } from '../../../lib/auth/strictOwner.js';
 import {
   formatCanonicalUrn,
   type CanonicalUrnType,
@@ -1023,6 +1024,22 @@ export function nodeNotFoundError(ref: string): GraphQLError {
   });
 }
 
+/** Per-list read snapshots; never shared with mutations or another request. */
+type MemoryRecordReadBatch = {
+  memberOrgIds?: Promise<string[]>;
+  accessibleIds?: Promise<string[] | null>;
+};
+
+/** Gate a record list without repeating membership and access-set queries per row. */
+export async function filterReadableMemoryRecords<T extends Parameters<typeof canReadMemoryRecord>[1]>(
+  ctx: Context,
+  rows: T[],
+): Promise<T[]> {
+  const batch: MemoryRecordReadBatch = {};
+  const readable = await Promise.all(rows.map(row => canReadMemoryRecord(ctx, row, batch)));
+  return rows.filter((_, index) => readable[index]);
+}
+
 /**
  * The RECORD-level memory read gate — "may this caller open this memory's
  * record (its scalars: name, description, data)?", as distinct from
@@ -1089,13 +1106,19 @@ export async function canReadMemoryRecord(
     appId: string | null;
     userMemoryOfAgentId: string | null;
   },
+  batch?: MemoryRecordReadBatch,
 ): Promise<boolean> {
+  // A full set and an indexed point read use the same shared predicate. Only
+  // list filtering opts into a shared snapshot; point reads stay fresh.
+  const accessible = () => batch
+    ? (batch.accessibleIds ??= getAccessibleMemoryIds(ctx))
+    : getAccessibleMemoryIds(ctx, memory.id);
   if (memory.class === 'personal' || memory.class === 'private') {
     // Impersonation: personal-class records are invisible even though the
     // TARGET owns them — the shared-org scope excludes all identity-scoped
     // resources (the target-as-owner check below would otherwise admit them).
     if (ctx.impersonation) return false;
-    if (ctx.userId && memory.userId === ctx.userId) return true;
+    if (isStrictOwner(ctx, memory.userId)) return true;
     // No `as never`: the cast is what let a caller omit the fields this reads.
     if (ctx.userId && (await granteeShareAccess(ctx.db, ctx.userId, memory))) return true;
     return false;
@@ -1108,11 +1131,11 @@ export async function canReadMemoryRecord(
     // A user-owned App's Worker row is also visible to its current holder.
     // The shared content gate checks the casting and excludes team/session rows.
     if (memory.class !== 'app') return false;
-    const ids = await getAccessibleMemoryIds(ctx, memory.id);
+    const ids = await accessible();
     return ids !== null && ids.includes(memory.id);
   }
   if (ctx.appId && ctx.sessionId && !ctx.userId) {
-    const ids = await getAccessibleMemoryIds(ctx, memory.id);
+    const ids = await accessible();
     return ids === null || ids.includes(memory.id);
   }
   if (ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER')) return true;
@@ -1120,7 +1143,7 @@ export async function canReadMemoryRecord(
   // record fast paths below are wider: an org READER or AppMember could open
   // a Worker/session memory record even when their nodes were concealed.
   if (memory.class === 'app') {
-    const ids = await getAccessibleMemoryIds(ctx, memory.id);
+    const ids = await accessible();
     return ids === null || ids.includes(memory.id);
   }
   // findFirst (not findUnique) so a REVOKED (soft-deleted) membership no longer
@@ -1136,7 +1159,9 @@ export async function canReadMemoryRecord(
     memory.organizationId &&
     memory.class !== 'group' &&
     (!ctx.impersonation || ctx.impersonation.orgId === memory.organizationId)
-      ? await ctx.db.orgMember.findFirst({
+      ? batch
+        ? (await (batch.memberOrgIds ??= getMemberOrgIds(ctx.db, ctx.userId, ctx.impersonation?.orgId))).includes(memory.organizationId)
+        : await ctx.db.orgMember.findFirst({
           where: { organizationId: memory.organizationId, userId: ctx.userId, ...LIVE_ORG_MEMBERSHIP },
         })
       : null;
@@ -1158,7 +1183,7 @@ export async function canReadMemoryRecord(
     if (appMember) return true;
   }
   // Scope the shared gate to THIS memory so it stays an indexed point-read.
-  const accessibleIds = await getAccessibleMemoryIds(ctx, memory.id);
+  const accessibleIds = await accessible();
   return accessibleIds === null || accessibleIds.includes(memory.id);
 }
 
@@ -2334,7 +2359,7 @@ export async function requireMemoryWriteAccess(ctx: Context, memoryId: string): 
   // #778 `writer` MemoryShare grantee on a personal memory (private is never
   // shareable, so this only widens personal).
   if (memory.class === 'personal' || memory.class === 'private') {
-    if (memory.userId === ctx.userId) return;
+    if (isStrictOwner(ctx, memory.userId)) return;
     if (await granteeShareAccess(ctx.db, ctx.userId, memory, { requireWrite: true })) return;
     throw memoryWriteForbidden();
   }

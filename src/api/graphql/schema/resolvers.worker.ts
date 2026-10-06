@@ -1653,7 +1653,8 @@ async function queryWorkerActivity(
     LEFT JOIN LATERAL (
       SELECT max(e.created_at) AS max_created
       FROM usage_events e
-      WHERE e.session_id = s.id
+      -- #1653 / DY-2: only events written while the session was live count.
+      WHERE e.session_id = s.id AND e.counts_as_activity
     ) ue ON true
     WHERE ${scope} AND s.deleted_at IS NULL
     GROUP BY s.worker_id

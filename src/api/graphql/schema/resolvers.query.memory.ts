@@ -17,6 +17,7 @@ import {
   clampListTake,
   granteeShareAccess,
   canReadMemoryRecord,
+  getAccessibleMemoryIds,
   resolveOrgScope,
   resolveReadableMemoryId,
   resolveNodeReadableMemoryRef,
@@ -521,13 +522,10 @@ export const memoryQueries = {
             if (item.memory.appId != null && item.memory.appId !== ctx.appId) continue;
             if (item.memory.userMemoryOfAgentId != null) continue;
             if (foreignUserOwned(item.memory.ownerUserId)) continue;
-            // A pure App key has no user principal for strict-owner records.
-            // If this is a user-bound App context, use the record gate for the
-            // rare personal/private or spec-047 owner-owned row.
-            if (item.memory.ownerUserId != null ||
-                item.memory.class === 'personal' || item.memory.class === 'private') {
-              if (!ctx.userId || !(await canReadMemoryRecord(ctx, item.memory))) continue;
-            }
+            // #1626: an agent attachment is not a record-read grant. In
+            // particular, app-class worker rows keep their holder/manager
+            // audience even if an agent carries one as a memory item.
+            if (!(await canReadMemoryRecord(ctx, item.memory))) continue;
             memoryMap.set(item.memory.id, item.memory);
           }
         }
@@ -561,13 +559,34 @@ export const memoryQueries = {
         // Ordinary unscoped calls stay unbounded: cross-org MemoryMember
         // reach, mirroring the shared read gate's restrictToOrgId posture.
         const groupOrgBound = scope.scopedOrgId ?? ctx.impersonation?.orgId ?? null;
+        // #1626 / cor:acl:010:01: app-class records use the shared content
+        // audience (participants for team rows, holders/managers for worker
+        // rows). Resolve that set before paging so totals and offsets cannot
+        // include concealed records. Preserve the helper's unrestricted-set
+        // sentinel if supplied; current admin sets retain strict-owner limits.
+        const accessibleIds = await getAccessibleMemoryIds(ctx);
+        // DS (Holger, 2026-10-05): the default listing is a membership slice,
+        // including for platform admins whose direct-record reach is wider.
+        // External AppMembers still discover their own App's readable rows.
+        const memberApps = ctx.impersonation ? [] : await ctx.db.appMember.findMany({
+          where: { userId: ctx.userId }, select: { appId: true },
+        });
         return page({
           deletedAt: null,
           ...(f.visibility ? { visibility: f.visibility as any } : {}),
           userMemoryOfAgentId: null,
           AND: [classFilter],
           OR: [
-            { organizationId: { in: orgIds }, class: { notIn: ['personal', 'private', 'group'] as any } },
+            { organizationId: { in: orgIds }, class: { notIn: ['personal', 'private', 'group', 'app'] as any } },
+            {
+              class: 'app' as any,
+              ...(accessibleIds === null ? {} : { id: { in: accessibleIds } }),
+              OR: [
+                { organizationId: { in: orgIds } },
+                { appId: { in: memberApps.map(row => row.appId) } },
+              ],
+              ...(groupOrgBound ? { organizationId: groupOrgBound } : {}),
+            },
             // #1208 / cor:acl:010:01 — group records list only through
             // MemoryMember (reader/writer/owner), mirroring the shared read
             // gate exactly: NOT nested under orgIds for ordinary calls (a
@@ -580,7 +599,7 @@ export const memoryQueries = {
             // GROUP excluded (#3781): a group-subscription row is API-invalid
             // state (createMemorySubscription admits PUBLIC only; group
             // visibility is CHECK-forced to GROUP) — never a listing grant.
-            { class: { notIn: ['personal', 'private', 'group'] as any }, subscriptions: { some: { organizationId: { in: orgIds } } } },
+            { class: { notIn: ['personal', 'private', 'group', 'app'] as any }, subscriptions: { some: { organizationId: { in: orgIds } } } },
             // Admin impersonation: the identity-scoped clauses are dropped —
             // the shared-org session never lists the target's personal/private
             // or user-owned memories (matches getAccessibleMemoryIds).

@@ -1320,7 +1320,7 @@ describe('hadron-cli#487 — Worker.hasLiveSession / lastActiveAt', () => {
       });
       if (over.eventAt) {
         await db.usageEvent.create({
-          data: { id: generateId(), sessionId: id, type: 'read', createdAt: over.eventAt },
+          data: { countsAsActivity: true, id: generateId(), sessionId: id, type: 'read', createdAt: over.eventAt },
         });
       }
       return id;
@@ -1534,7 +1534,7 @@ describe('hadron-cli#487 — Worker.hasLiveSession / lastActiveAt', () => {
     const endedAt = new Date(Date.now() + 60_000);
     await db.session.update({ where: { id: s.id }, data: { endedAt } });
     await db.usageEvent.create({
-      data: {
+      data: { countsAsActivity: true,
         id: generateId(), sessionId: s.id, type: 'read',
         createdAt: new Date(endedAt.getTime() + 86_400_000),
       },
@@ -1550,7 +1550,7 @@ describe('hadron-cli#487 — Worker.hasLiveSession / lastActiveAt', () => {
     const s = await bindAs(appMember.id, w.id);
     const eventAt = new Date(Date.now() + 120_000);
     await db.usageEvent.create({
-      data: { id: generateId(), sessionId: s.id, type: 'read', createdAt: eventAt },
+      data: { countsAsActivity: true, id: generateId(), sessionId: s.id, type: 'read', createdAt: eventAt },
     });
 
     expect((await W.lastActiveAt(w, {}, ctx(admin.id)))?.getTime()).toBe(eventAt.getTime());
@@ -1574,7 +1574,7 @@ describe('hadron-cli#487 — Worker.hasLiveSession / lastActiveAt', () => {
     const t = (offsetMinutes: number) => new Date(Date.now() + offsetMinutes * 60_000);
     const shapes: Record<string, {
       startedAt: Date; updatedAt: Date | null; endedAt: Date | null;
-      autoExpiredAt: Date | null; eventAt?: Date;
+      autoExpiredAt: Date | null; eventAt?: Date; eventCounts?: boolean;
     }> = {
       Iris: { startedAt: t(-500), updatedAt: t(-400), endedAt: null, autoExpiredAt: null },
       Jonas: { startedAt: t(-300), updatedAt: t(-200), endedAt: t(-200), autoExpiredAt: null },
@@ -1603,6 +1603,10 @@ describe('hadron-cli#487 — Worker.hasLiveSession / lastActiveAt', () => {
       // +1h fork on either side passed this test.
       Ada: { startedAt: t(-1500), updatedAt: t(-1430), endedAt: null, autoExpiredAt: null },
       Bo: { startedAt: t(-1500), updatedAt: t(-1450), endedAt: null, autoExpiredAt: null },
+      // #1653 / DY-2: a RECENT event written while the session was lapsed is
+      // attribution, not activity. Both derivations must still read it lapsed.
+      Ida: { startedAt: t(-5000), updatedAt: t(-4000), endedAt: null, autoExpiredAt: null,
+             eventAt: t(-1), eventCounts: false },
     };
 
     const workers: Record<string, { id: string; appId: string }> = {};
@@ -1612,13 +1616,13 @@ describe('hadron-cli#487 — Worker.hasLiveSession / lastActiveAt', () => {
       workers[name] = w;
       const id = generateId();
       sessionIds.push(id);
-      const { eventAt, ...row } = shape;
+      const { eventAt, eventCounts = true, ...row } = shape;
       await db.session.create({
         data: { id, workerId: w.id, appId: app.id, userId: appMember.id, ...row },
       });
       if (eventAt) {
         await db.usageEvent.create({
-          data: { id: generateId(), sessionId: id, type: 'read', createdAt: eventAt },
+          data: { countsAsActivity: eventCounts, id: generateId(), sessionId: id, type: 'read', createdAt: eventAt },
         });
       }
     }
@@ -1649,6 +1653,7 @@ describe('hadron-cli#487 — Worker.hasLiveSession / lastActiveAt', () => {
     // The window-band pair must actually straddle the window, or it pins nothing.
     expect(await W.hasLiveSession(workers.Ada, {}, ctx(admin.id))).toBe(true);
     expect(await W.hasLiveSession(workers.Bo, {}, ctx(admin.id))).toBe(false);
+    expect(await W.hasLiveSession(workers.Ida, {}, ctx(admin.id))).toBe(false);
   });
 
   it('one worker going live does not make its sibling live', async () => {
@@ -1943,7 +1948,7 @@ describe('#1050 — worker name holding', () => {
       where: { id: first.id }, data: { startedAt: old, updatedAt: old },
     });
     await db.usageEvent.create({
-      data: { id: generateId(), sessionId: first.id, type: 'read', createdAt: new Date() },
+      data: { countsAsActivity: true, id: generateId(), sessionId: first.id, type: 'read', createdAt: new Date() },
     });
     await expectCode(bind(contrib.id, w.id), 'WORKER_TAKEN');
   });

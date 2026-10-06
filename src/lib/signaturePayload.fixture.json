@@ -1,0 +1,201 @@
+{
+  "description": "S0 #1629 plaintext signing conformance vectors for cor:dmo:130:01. Generated independently with Python hashlib. Fields are plaintext inputs to the existing approval v1 codec. canonical is base64 of the exact UTF-8 payload bytes; challengeHex and challengeBase64url encode the raw SHA-256 digest of those bytes. Every line including the last ends with LF. No runtime ceremony, key derivation, approval requirement or encrypted-memory support is implemented here. DM keyed v2 requires a separate decided codec and fixture; never use these vectors for encrypted memories.",
+  "version": "hadron-signature-v1",
+  "approvalVersion": "hadron-approval-v1",
+  "memoryMode": "plaintext",
+  "challengeAlgorithm": "SHA-256",
+  "cases": [
+    {
+      "name": "spec-retention-example",
+      "input": {
+        "nodeId": "01a10408afb6716c80d6944e8845467b",
+        "fields": {
+          "title": "Retention",
+          "abstract": null,
+          "content": "Keep 90 days.\r\n"
+        }
+      },
+      "approvalHash": "82af07de06359450e375ee9f1e3639f5f124d2e2d9ed176001ff108175ce1246",
+      "payloadUtf8": "hadron-signature-v1\nnode 01a10408afb6716c80d6944e8845467b\napproval-hash 82af07de06359450e375ee9f1e3639f5f124d2e2d9ed176001ff108175ce1246\n",
+      "canonical": "aGFkcm9uLXNpZ25hdHVyZS12MQpub2RlIDAxYTEwNDA4YWZiNjcxNmM4MGQ2OTQ0ZTg4NDU0NjdiCmFwcHJvdmFsLWhhc2ggODJhZjA3ZGUwNjM1OTQ1MGUzNzVlZTlmMWUzNjM5ZjVmMTI0ZDJlMmQ5ZWQxNzYwMDFmZjEwODE3NWNlMTI0Ngo=",
+      "challengeHex": "fc853d4b671d459dad9d811d4ad3d1850a5edda1d6d21976bcc5d45d13f8abca",
+      "challengeBase64url": "_IU9S2cdRZ2tnYEdStPRhQpe3aHW0hl2vMXUXRP4q8o"
+    },
+    {
+      "name": "all-null",
+      "input": {
+        "nodeId": "01a10408afb6716c80d6944e8845467b",
+        "fields": {
+          "title": null,
+          "abstract": null,
+          "content": null
+        }
+      },
+      "approvalHash": "bfba40eda4e7198d8added693b2b51572babb3f83af64590bb5ebbf37aeaf14c",
+      "payloadUtf8": "hadron-signature-v1\nnode 01a10408afb6716c80d6944e8845467b\napproval-hash bfba40eda4e7198d8added693b2b51572babb3f83af64590bb5ebbf37aeaf14c\n",
+      "canonical": "aGFkcm9uLXNpZ25hdHVyZS12MQpub2RlIDAxYTEwNDA4YWZiNjcxNmM4MGQ2OTQ0ZTg4NDU0NjdiCmFwcHJvdmFsLWhhc2ggYmZiYTQwZWRhNGU3MTk4ZDhhZGRlZDY5M2IyYjUxNTcyYmFiYjNmODNhZjY0NTkwYmI1ZWJiZjM3YWVhZjE0Ywo=",
+      "challengeHex": "9bf5876f60d26817fa9a02d30efbb57a4bc04ddb525fc2cc71afc9a110b7d3b4",
+      "challengeBase64url": "m_WHb2DSaBf6mgLTDvu1ekvATdtSX8LMca_JoRC307Q"
+    },
+    {
+      "name": "empty-strings-differ-from-null",
+      "input": {
+        "nodeId": "01a10408afb6716c80d6944e8845467b",
+        "fields": {
+          "title": "",
+          "abstract": "",
+          "content": ""
+        }
+      },
+      "approvalHash": "bbddf126ca88d6f60b60dfaf78d4d1953876856bd2b9a18c209ef2042503ee6b",
+      "payloadUtf8": "hadron-signature-v1\nnode 01a10408afb6716c80d6944e8845467b\napproval-hash bbddf126ca88d6f60b60dfaf78d4d1953876856bd2b9a18c209ef2042503ee6b\n",
+      "canonical": "aGFkcm9uLXNpZ25hdHVyZS12MQpub2RlIDAxYTEwNDA4YWZiNjcxNmM4MGQ2OTQ0ZTg4NDU0NjdiCmFwcHJvdmFsLWhhc2ggYmJkZGYxMjZjYTg4ZDZmNjBiNjBkZmFmNzhkNGQxOTUzODc2ODU2YmQyYjlhMThjMjA5ZWYyMDQyNTAzZWU2Ygo=",
+      "challengeHex": "b0d094bca488c0e521d21316e437e27fd239650d37f3604a79dc23e17d54cb5a",
+      "challengeBase64url": "sNCUvKSIwOUh0hMW5Dfif9I5ZQ0382BKedwj4X1Uy1o"
+    },
+    {
+      "name": "plain-ascii",
+      "input": {
+        "nodeId": "01a10408afb6716c80d6944e8845467b",
+        "fields": {
+          "title": "Approvals",
+          "abstract": "Who may approve.",
+          "content": "Any writer may approve.\n"
+        }
+      },
+      "approvalHash": "14362639449d8a8f810ee4ccef5d61731b9f1e572332d2587e5f7aee84db6815",
+      "payloadUtf8": "hadron-signature-v1\nnode 01a10408afb6716c80d6944e8845467b\napproval-hash 14362639449d8a8f810ee4ccef5d61731b9f1e572332d2587e5f7aee84db6815\n",
+      "canonical": "aGFkcm9uLXNpZ25hdHVyZS12MQpub2RlIDAxYTEwNDA4YWZiNjcxNmM4MGQ2OTQ0ZTg4NDU0NjdiCmFwcHJvdmFsLWhhc2ggMTQzNjI2Mzk0NDlkOGE4ZjgxMGVlNGNjZWY1ZDYxNzMxYjlmMWU1NzIzMzJkMjU4N2U1ZjdhZWU4NGRiNjgxNQo=",
+      "challengeHex": "0d923edc08f32adb90991a4979687f0decce6260b771d356aa5cecf529eee5a1",
+      "challengeBase64url": "DZI-3AjzKtuQmRpJeWh_DezOYmC3cdNWqlzs9Snu5aE"
+    },
+    {
+      "name": "crlf-normalized",
+      "input": {
+        "nodeId": "01a10408afb6716c80d6944e8845467b",
+        "fields": {
+          "title": "Line endings",
+          "abstract": "a\r\nb",
+          "content": "one\r\ntwo\r\n"
+        }
+      },
+      "approvalHash": "1ac9bd36a1542902bd0c85ae32b45f368f1e682cae1cdfbbecb9d6d421f48dc1",
+      "payloadUtf8": "hadron-signature-v1\nnode 01a10408afb6716c80d6944e8845467b\napproval-hash 1ac9bd36a1542902bd0c85ae32b45f368f1e682cae1cdfbbecb9d6d421f48dc1\n",
+      "canonical": "aGFkcm9uLXNpZ25hdHVyZS12MQpub2RlIDAxYTEwNDA4YWZiNjcxNmM4MGQ2OTQ0ZTg4NDU0NjdiCmFwcHJvdmFsLWhhc2ggMWFjOWJkMzZhMTU0MjkwMmJkMGM4NWFlMzJiNDVmMzY4ZjFlNjgyY2FlMWNkZmJiZWNiOWQ2ZDQyMWY0OGRjMQo=",
+      "challengeHex": "b65a44e65131ca57b715539115601ef2411de4c89817299ebaf76393d312b161",
+      "challengeBase64url": "tlpE5lExyle3FVORFWAe8kEd5MiYFymeuvdjk9MSsWE"
+    },
+    {
+      "name": "lone-cr-normalized",
+      "input": {
+        "nodeId": "01a10408afb6716c80d6944e8845467b",
+        "fields": {
+          "title": "Old Mac",
+          "abstract": null,
+          "content": "one\rtwo\r"
+        }
+      },
+      "approvalHash": "c790d36c3ef135da16339ab274645336a062112fdab6f471bfa2e1a12ed89f95",
+      "payloadUtf8": "hadron-signature-v1\nnode 01a10408afb6716c80d6944e8845467b\napproval-hash c790d36c3ef135da16339ab274645336a062112fdab6f471bfa2e1a12ed89f95\n",
+      "canonical": "aGFkcm9uLXNpZ25hdHVyZS12MQpub2RlIDAxYTEwNDA4YWZiNjcxNmM4MGQ2OTQ0ZTg4NDU0NjdiCmFwcHJvdmFsLWhhc2ggYzc5MGQzNmMzZWYxMzVkYTE2MzM5YWIyNzQ2NDUzMzZhMDYyMTEyZmRhYjZmNDcxYmZhMmUxYTEyZWQ4OWY5NQo=",
+      "challengeHex": "88ca72a2760faaee5cbd3f39bd523f30b4e4f69b7ceaa36b755fed5015de1f71",
+      "challengeBase64url": "iMpyonYPqu5cvT85vVI_MLTk9pt86qNrdV_tUBXeH3E"
+    },
+    {
+      "name": "lf-equals-crlf-twin",
+      "input": {
+        "nodeId": "01a10408afb6716c80d6944e8845467b",
+        "fields": {
+          "title": "Line endings",
+          "abstract": "a\nb",
+          "content": "one\ntwo\n"
+        }
+      },
+      "approvalHash": "1ac9bd36a1542902bd0c85ae32b45f368f1e682cae1cdfbbecb9d6d421f48dc1",
+      "payloadUtf8": "hadron-signature-v1\nnode 01a10408afb6716c80d6944e8845467b\napproval-hash 1ac9bd36a1542902bd0c85ae32b45f368f1e682cae1cdfbbecb9d6d421f48dc1\n",
+      "canonical": "aGFkcm9uLXNpZ25hdHVyZS12MQpub2RlIDAxYTEwNDA4YWZiNjcxNmM4MGQ2OTQ0ZTg4NDU0NjdiCmFwcHJvdmFsLWhhc2ggMWFjOWJkMzZhMTU0MjkwMmJkMGM4NWFlMzJiNDVmMzY4ZjFlNjgyY2FlMWNkZmJiZWNiOWQ2ZDQyMWY0OGRjMQo=",
+      "challengeHex": "b65a44e65131ca57b715539115601ef2411de4c89817299ebaf76393d312b161",
+      "challengeBase64url": "tlpE5lExyle3FVORFWAe8kEd5MiYFymeuvdjk9MSsWE"
+    },
+    {
+      "name": "multibyte-utf8",
+      "input": {
+        "nodeId": "01a10408afb6716c80d6944e8845467b",
+        "fields": {
+          "title": "Grüße 👋",
+          "abstract": "naïve café",
+          "content": "日本語のテキスト\n— em dash"
+        }
+      },
+      "approvalHash": "702af08212e4da3e13608bed857fb18faedf970c31e1af2d64b547b3ef8fd850",
+      "payloadUtf8": "hadron-signature-v1\nnode 01a10408afb6716c80d6944e8845467b\napproval-hash 702af08212e4da3e13608bed857fb18faedf970c31e1af2d64b547b3ef8fd850\n",
+      "canonical": "aGFkcm9uLXNpZ25hdHVyZS12MQpub2RlIDAxYTEwNDA4YWZiNjcxNmM4MGQ2OTQ0ZTg4NDU0NjdiCmFwcHJvdmFsLWhhc2ggNzAyYWYwODIxMmU0ZGEzZTEzNjA4YmVkODU3ZmIxOGZhZWRmOTcwYzMxZTFhZjJkNjRiNTQ3YjNlZjhmZDg1MAo=",
+      "challengeHex": "8345f637086e098f92b258eb87b54a626a43702b1482e539498f7611cf7b143e",
+      "challengeBase64url": "g0X2NwhuCY-Ssljrh7VKYmpDcCsUguU5SY92Ec97FD4"
+    },
+    {
+      "name": "no-unicode-normalization-nfd",
+      "input": {
+        "nodeId": "01a10408afb6716c80d6944e8845467b",
+        "fields": {
+          "title": "Grüße",
+          "abstract": null,
+          "content": null
+        }
+      },
+      "approvalHash": "fc83eaf46e0828523ae9f655a9f31bcc0867fdeb1ed9bec9e912581721c697e2",
+      "payloadUtf8": "hadron-signature-v1\nnode 01a10408afb6716c80d6944e8845467b\napproval-hash fc83eaf46e0828523ae9f655a9f31bcc0867fdeb1ed9bec9e912581721c697e2\n",
+      "canonical": "aGFkcm9uLXNpZ25hdHVyZS12MQpub2RlIDAxYTEwNDA4YWZiNjcxNmM4MGQ2OTQ0ZTg4NDU0NjdiCmFwcHJvdmFsLWhhc2ggZmM4M2VhZjQ2ZTA4Mjg1MjNhZTlmNjU1YTlmMzFiY2MwODY3ZmRlYjFlZDliZWM5ZTkxMjU4MTcyMWM2OTdlMgo=",
+      "challengeHex": "66e588e6f9ce489909ff020323cc3a15a87c1e8bf489c38fa549f462c1ca938d",
+      "challengeBase64url": "ZuWI5vnOSJkJ_wIDI8w6Fah8Hov0icOPpUn0YsHKk40"
+    },
+    {
+      "name": "field-boundary-injection",
+      "input": {
+        "nodeId": "01a10408afb6716c80d6944e8845467b",
+        "fields": {
+          "title": "x\nabstract 0\n",
+          "abstract": null,
+          "content": "content null\n"
+        }
+      },
+      "approvalHash": "99929520f08892cd2c5ebaf1b611229aaf99834ee116fe3ecc0fedc9c0b01ebb",
+      "payloadUtf8": "hadron-signature-v1\nnode 01a10408afb6716c80d6944e8845467b\napproval-hash 99929520f08892cd2c5ebaf1b611229aaf99834ee116fe3ecc0fedc9c0b01ebb\n",
+      "canonical": "aGFkcm9uLXNpZ25hdHVyZS12MQpub2RlIDAxYTEwNDA4YWZiNjcxNmM4MGQ2OTQ0ZTg4NDU0NjdiCmFwcHJvdmFsLWhhc2ggOTk5Mjk1MjBmMDg4OTJjZDJjNWViYWYxYjYxMTIyOWFhZjk5ODM0ZWUxMTZmZTNlY2MwZmVkYzljMGIwMWViYgo=",
+      "challengeHex": "2b4018bae91c6a520c1c86e8cb10a28f3117206cdfca46763b53e482c72032bf",
+      "challengeBase64url": "K0AYuukcalIMHIboyxCijzEXIGzfykZ2O1PkgscgMr8"
+    },
+    {
+      "name": "whitespace-preserved",
+      "input": {
+        "nodeId": "01a10408afb6716c80d6944e8845467b",
+        "fields": {
+          "title": "  padded  ",
+          "abstract": "\t",
+          "content": "\n\n"
+        }
+      },
+      "approvalHash": "ed3385e3a483b65654778f75f18c1662ea3fe4c5dda49cf479992eca1a1ed655",
+      "payloadUtf8": "hadron-signature-v1\nnode 01a10408afb6716c80d6944e8845467b\napproval-hash ed3385e3a483b65654778f75f18c1662ea3fe4c5dda49cf479992eca1a1ed655\n",
+      "canonical": "aGFkcm9uLXNpZ25hdHVyZS12MQpub2RlIDAxYTEwNDA4YWZiNjcxNmM4MGQ2OTQ0ZTg4NDU0NjdiCmFwcHJvdmFsLWhhc2ggZWQzMzg1ZTNhNDgzYjY1NjU0Nzc4Zjc1ZjE4YzE2NjJlYTNmZTRjNWRkYTQ5Y2Y0Nzk5OTJlY2ExYTFlZDY1NQo=",
+      "challengeHex": "27e9aebe8247b6afbf117510eaea02e34cc2db1970704392b9177bddbcd7e8f1",
+      "challengeBase64url": "J-muvoJHtq-_EXUQ6uoC40zC2xlwcEOSuRd73bzX6PE"
+    },
+    {
+      "name": "same-content-different-node",
+      "input": {
+        "nodeId": "01a10408afb6716c80d6944e8845467c",
+        "fields": {
+          "title": "Retention",
+          "abstract": null,
+          "content": "Keep 90 days.\r\n"
+        }
+      },
+      "approvalHash": "82af07de06359450e375ee9f1e3639f5f124d2e2d9ed176001ff108175ce1246",
+      "payloadUtf8": "hadron-signature-v1\nnode 01a10408afb6716c80d6944e8845467c\napproval-hash 82af07de06359450e375ee9f1e3639f5f124d2e2d9ed176001ff108175ce1246\n",
+      "canonical": "aGFkcm9uLXNpZ25hdHVyZS12MQpub2RlIDAxYTEwNDA4YWZiNjcxNmM4MGQ2OTQ0ZTg4NDU0NjdjCmFwcHJvdmFsLWhhc2ggODJhZjA3ZGUwNjM1OTQ1MGUzNzVlZTlmMWUzNjM5ZjVmMTI0ZDJlMmQ5ZWQxNzYwMDFmZjEwODE3NWNlMTI0Ngo=",
+      "challengeHex": "3995232084898eb83201d82d875c7461426a434060f80812939b056bf0eb014b",
+      "challengeBase64url": "OZUjIISJjrgyAdgth1x0YUJqQ0Bg-AgSk5sFa_DrAUs"
+    }
+  ]
+}
