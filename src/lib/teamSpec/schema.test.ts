@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { graphql, buildSchema } from 'graphql';
 import { parseTeamSpec } from './parse.js';
 import { canonicalizeTeamJson } from './canonicalize.js';
@@ -68,6 +68,21 @@ describe('team schema S1', () => {
     expect(errors(() => parseTeamSpec(JSON.stringify({ ...spec(), extra: true }))).issues).toEqual([
       expect.objectContaining({ code: 'unrecognized_keys', pointer: '' }),
     ]);
+  });
+  it('scans long scalar sequences from the original input without suffix copies', () => {
+    // Syntactically valid JSON, then refused for its extra root field. The
+    // scanner must finish without copying the full remaining input per token.
+    const text = JSON.stringify({ ...spec(), extra: Array.from({ length: 5000 }, (_, i) => i) });
+    const original = String.prototype.slice;
+    let suffixCopies = 0;
+    const spy = vi.spyOn(String.prototype, 'slice').mockImplementation(function (this: string, start?: number, end?: number) {
+      if (String(this) === text && start !== 0 && end === undefined) suffixCopies++;
+      return original.call(this, start, end);
+    });
+    try {
+      expect(errors(() => parseTeamSpec(text)).code).toBe('TEAM_SPEC_INVALID');
+      expect(suffixCopies).toBe(0);
+    } finally { spy.mockRestore(); }
   });
   it('reports worker collisions and unknown roles together with pointers', () => {
     const value = spec(); value.spec.workers.push({ name: ' milo ', role: 'missing' });

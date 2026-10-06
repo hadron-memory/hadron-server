@@ -61,6 +61,13 @@ export function publishedTeamSpecSchema(apiVersion: string, form: TeamSpecForm =
   if (apiVersion !== TEAM_API_VERSION) unsupportedVersion(apiVersion);
   return z.toJSONSchema(teamSpecSchema(form), { target: 'draft-2020-12' });
 }
+const schemaTexts = new Map<TeamSpecForm, string>();
+/** Immutable serialized discovery documents; build once per form. */
+export function publishedTeamSpecSchemaText(apiVersion: string, form: TeamSpecForm = 'SERVER'): string {
+  if (apiVersion !== TEAM_API_VERSION) unsupportedVersion(apiVersion);
+  if (!schemaTexts.has(form)) schemaTexts.set(form, JSON.stringify(publishedTeamSpecSchema(apiVersion, form)));
+  return schemaTexts.get(form)!;
+}
 
 /** Validation keeps text and absent/null values intact; sources resolve in S2. */
 export function validateTeamSpec(input: unknown, form: TeamSpecForm = 'SERVER'): TeamSpec {

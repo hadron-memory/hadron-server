@@ -1,5 +1,5 @@
 import type { Express } from 'express';
-import { publishedTeamSpecSchema, TEAM_API_VERSION } from '../lib/teamSpec/schema.js';
+import { publishedTeamSpecSchemaText, TEAM_API_VERSION } from '../lib/teamSpec/schema.js';
 
 /** Public format discovery: schema only, no tenant state. */
 export function mountTeamSpecSchemaRoutes(app: Express): void {
@@ -8,6 +8,6 @@ export function mountTeamSpecSchemaRoutes(app: Express): void {
       res.status(404).json({ code: 'TEAM_SPEC_VERSION_UNSUPPORTED', accepted: ['v1alpha1.json'] });
       return;
     }
-    res.json(publishedTeamSpecSchema(TEAM_API_VERSION));
+    res.type('application/schema+json').send(publishedTeamSpecSchemaText(TEAM_API_VERSION));
   });
 }

@@ -5,6 +5,9 @@ import { canonicalizeTeamJson } from './canonicalize.js';
 /** JSON.parse discards duplicate keys. Scan syntax first, before it can do so. */
 export function parseTeamSpec(text: string, form: TeamSpecForm = 'SERVER') {
   let at = 0;
+  // Sticky matching scans the original input at the cursor. Slicing the
+  // remaining text for every scalar token makes long arrays quadratic.
+  const scalarToken = /(?:true|false|null|-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?)/y;
   const fail = (message: string, path: (string | number)[], code = 'INVALID_JSON'): never => {
     const prefix = text.slice(0, at);
     const line = prefix.split('\n').length;
@@ -52,7 +55,8 @@ export function parseTeamSpec(text: string, form: TeamSpecForm = 'SERVER') {
       }
     }
     if (text[at] === '"') { string(path); return; }
-    const token = /^(?:true|false|null|-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?)/.exec(text.slice(at));
+    scalarToken.lastIndex = at;
+    const token = scalarToken.exec(text);
     if (!token) fail('Expected JSON value', path);
     at += token![0].length;
   };
