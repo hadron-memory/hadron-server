@@ -1,4 +1,5 @@
 import { createHash, randomBytes } from 'crypto';
+import { DEFAULT_SESSION_DORMANCY_DAYS, isSessionDormant, loadLastEventBySession } from '../lib/sessionActivity.js';
 import type { Request } from 'express';
 import type { Prisma, PrismaClient, UserApiKey } from '../generated/prisma/index.js';
 import { lockAuthorityAnchors } from '../lib/auth/authorityAnchors.js';
@@ -224,9 +225,9 @@ async function bindSession(
  * The ONE ownership check behind every session binding (#934): the header
  * above, and the MCP connection binding `hadron_start_session` sets (DAC,
  * #1610 follow-on), which re-validates it on every request. An active session
- * (not ended, not past a hard expiry) of the caller's own: an App key's own
- * App's session, or a user's own session, never under impersonation. Returns
- * null for anything else.
+ * (not ended, not past a hard expiry, not DORMANT) of the caller's own: an App
+ * key's own App's session, or a user's own session, never under
+ * impersonation. Returns null for anything else.
  */
 export async function validateSessionBinding(
   db: PrismaClient,
@@ -238,14 +239,35 @@ export async function validateSessionBinding(
   if (!isPureAppKey && !isUserPrincipal) return null;
   const session = await db.session.findUnique({
     where: { id: sessionId },
-    select: { id: true, appId: true, userId: true, expiresAt: true, endedAt: true, workerId: true, agentId: true },
+    select: {
+      id: true, appId: true, userId: true, expiresAt: true, endedAt: true, workerId: true, agentId: true,
+      startedAt: true, updatedAt: true, autoExpiredAt: true,
+      app: { select: { sessionDormancyDays: true } },
+    },
   });
   if (!session || session.endedAt) return null;
-  if (session.expiresAt && session.expiresAt <= new Date()) return null;
+  const now = new Date();
+  if (session.expiresAt && session.expiresAt <= now) return null;
   const owned = isPureAppKey
     ? session.appId === principal.appId
     : session.userId === principal.userId;
   if (!owned) return null;
+  // Ruling DY-5, completed for sessions with NO hard expiry (#1661 review,
+  // Rook P2-1): a session nobody has driven for longer than its App's
+  // dormancy threshold no longer binds. Without this, an App with
+  // `agentSessionsExpire: false` left a chatbot session, and its session-
+  // scoped reach into an end user's personal memory, bindable by any key of
+  // that App forever: Holger's "5 year old session, forgotten by everyone,
+  // starts acting unexpectedly". A session WITH a hard expiry is already
+  // bounded by it. Only an explicit new session brings a dormant one back.
+  // Here, in the ONE check, so it guards BOTH doors: the X-Hadron-Session
+  // header and the MCP connection binding (#1665): a dormant session neither
+  // binds nor attributes writes.
+  if (!session.expiresAt) {
+    const lastEvent = (await loadLastEventBySession(db as never, [session.id])).get(session.id);
+    const days = session.app?.sessionDormancyDays ?? DEFAULT_SESSION_DORMANCY_DAYS;
+    if (isSessionDormant(session, lastEvent, days, now)) return null;
+  }
   return { sessionId: session.id, actor: { workerId: session.workerId, agentId: session.agentId } };
 }
 

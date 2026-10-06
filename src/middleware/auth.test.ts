@@ -201,6 +201,22 @@ describe('resolveAuthContext', () => {
       expect(ctx.sessionId).toBe('sess-1');
     });
 
+    it('#1661 review (Rook P2-1, DY-5): a NO-expiry session binds while recent and stops binding once dormant', async () => {
+      const { appId, rawKey } = await createAppWithKey();
+      await db.app.update({ where: { id: appId }, data: { sessionDormancyDays: 30 } });
+      const at = (days: number) => new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+      await db.session.create({ data: { id: 'sess-recent', appId, type: 'CHATBOT', startedAt: at(10), updatedAt: at(10) } });
+      await db.session.create({ data: { id: 'sess-forgotten', appId, type: 'CHATBOT', startedAt: at(400), updatedAt: at(400) } });
+      // A hard expiry, not dormancy, bounds a session that has one.
+      await db.session.create({ data: { id: 'sess-bounded', appId, type: 'CHATBOT', startedAt: at(400), updatedAt: at(400), expiresAt: new Date(Date.now() + 60000) } });
+      const bind = async (id: string) => (await resolveAuthContext(
+        { headers: { authorization: `Bearer ${rawKey}`, 'x-hadron-session': id } } as unknown as Request, db,
+      )).sessionId;
+      expect(await bind('sess-recent')).toBe('sess-recent');
+      expect(await bind('sess-forgotten')).toBeUndefined();
+      expect(await bind('sess-bounded')).toBe('sess-bounded');
+    });
+
     it('ignores expired sessions', async () => {
       const { appId, rawKey } = await createAppWithKey();
       await db.agent.create({

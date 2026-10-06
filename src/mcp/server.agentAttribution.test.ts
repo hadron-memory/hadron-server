@@ -187,6 +187,16 @@ describe('DAC: hadron_start_session binds the MCP connection (#1610 follow-on)',
     expect(await attributionAt('dac:plain', appMemory.id)).toEqual({ createdByWorkerId: null, createdByAgentId: null });
   });
 
+  it('a bound session that goes dormant stops attributing on the connection (DY-5, #1665)', async () => {
+    const call = await mcpConnection();
+    const started = await call('hadron_start_session', { description: 'dac', workerRef: 'hrn:worker:attrhttp.example:team:iris', force: true });
+    const bound = /Session started: ([0-9a-f]{32})/.exec(started)![1];
+    await db.$executeRaw`UPDATE sessions SET started_at = now() - interval '400 days', updated_at = now() - interval '400 days' WHERE id = ${bound}`;
+    await db.usageEvent.deleteMany({ where: { sessionId: bound } });
+    await call('hadron_create_node', { urn: `hrn:node:${appMemory.urn}:dac:dormant`, name: 'dormant' });
+    expect(await attributionAt('dac:dormant', appMemory.id)).toEqual({ createdByWorkerId: null, createdByAgentId: null });
+  });
+
   it('binds only its own connection: a second connection of the same user stays unattributed', async () => {
     const first = await mcpConnection();
     await first('hadron_start_session', { description: 'dac', workerRef: 'hrn:worker:attrhttp.example:team:iris', force: true });

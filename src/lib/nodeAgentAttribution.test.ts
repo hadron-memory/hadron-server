@@ -138,6 +138,19 @@ describe('the actor comes only from a validated session binding (#1610)', () => 
   });
 });
 
+describe('a dormant session neither binds nor attributes (DY-5, #1665 both doors)', () => {
+  it('header door: a no-expiry session idle past its App threshold publishes nobody', async () => {
+    const { rawKey } = await mintUserApiKey(db, { userId: user.id, label: null, createdBy: user.id, issuedVia: 'test' });
+    await db.$executeRaw`UPDATE sessions SET started_at = now() - interval '400 days', updated_at = now() - interval '400 days' WHERE id = ${session.id}`;
+    const seen = await requestActorStorage.run(emptyActor(), async () => {
+      const ctx = await resolveAuthContext({ headers: { authorization: `Bearer ${rawKey}`, 'x-hadron-session': session.id } } as unknown as Request, db);
+      expect(ctx.sessionId).toBeUndefined();
+      return { ...currentActor() };
+    });
+    expect(seen).toEqual(NOBODY);
+  });
+});
+
 describe('GraphQL reads resolve public identity only (#1610)', () => {
   it('names the worker and agent with canonical URNs, and null when unset', async () => {
     const n = await runAsActor(W(), () => makeNode('g:1'));
