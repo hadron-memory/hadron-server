@@ -84,6 +84,57 @@ describe('#1643 shared strict-owner parity', () => {
 });
 
 describe('#1643 schedule edits', () => {
+  it('allows only an admin stop-only edit, even after the stored user loses the App relationship', async () => {
+    const row = await schedule();
+    await db.appMember.deleteMany({ where: { appId, userId: ownerId } });
+    const stopped = await M.updateAgentSchedule({}, { id: row.id, input: { enabled: false } }, ctx(adminId));
+    expect(stopped).toEqual({ ...row, enabled: false, updatedBy: adminId, updatedAt: stopped.updatedAt });
+    for (const input of [{ enabled: true }, { enabled: false, name: 'mixed' }, { enabled: false, runAsSelf: null }]) {
+      await expect(M.updateAgentSchedule({}, { id: row.id, input }, ctx(adminId)))
+        .rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
+    }
+    for (const actor of [ctx(memberId), principals()[6][1]]) {
+      await expect(M.updateAgentSchedule({}, { id: row.id, input: { enabled: false } }, actor))
+        .rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
+    }
+  });
+
+  it('refuses App-key runAsSelf on a no-user row', async () => {
+    const row = await schedule(null);
+    await expect(M.updateAgentSchedule({}, { id: row.id, input: { runAsSelf: true } }, { db, appId, roles: [] }))
+      .rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
+    expect(await db.agentSchedule.findUnique({ where: { id: row.id } })).toEqual(row);
+  });
+
+  it('refuses a soft-deleted owner on both stored-identity surfaces', async () => {
+    const row = await schedule(); const hook = await webhook();
+    await db.user.update({ where: { id: ownerId }, data: { deletedAt: new Date() } });
+    await expect(M.updateAgentSchedule({}, { id: row.id, input: { name: 'deleted' } }, ctx(ownerId))).rejects.toBeDefined();
+    await expect(M.rotateAgentWebhook({}, { id: hook.id }, ctx(ownerId))).rejects.toBeDefined();
+    expect(await db.agentSchedule.findUnique({ where: { id: row.id } })).toEqual(row);
+    expect(await db.agentWebhook.findUnique({ where: { id: hook.id } })).toEqual(hook);
+  });
+
+  it('rechecks org-role revocation after a trigger lock wait', async () => {
+    const row = await schedule();
+    let release!: () => void; let locked!: () => void;
+    const gate = new Promise<void>(r => { release = r; });
+    const ready = new Promise<void>(r => { locked = r; });
+    const holder = db.$transaction(async tx => {
+      await tx.$queryRaw`SELECT id FROM agent_schedules WHERE id = ${row.id} FOR UPDATE`;
+      locked(); await gate;
+      await tx.orgMember.update({ where: { organizationId_userId: { organizationId: orgId, userId: ownerId } }, data: { deletedAt: new Date() } });
+    }, { timeout: 20000 });
+    await ready;
+    const edit = M.updateAgentSchedule({}, { id: row.id, input: { name: 'revoked' } }, ctx(ownerId))
+      .then(value => ({ value, error: null }), error => ({ value: null, error }));
+    try {
+      await waitForLockWaitersOfType(db, 'transactionid'); release(); await holder;
+      expect((await edit).error).toBeDefined();
+      expect(await db.agentSchedule.findUnique({ where: { id: row.id } })).toEqual(row);
+    } finally { release(); await Promise.allSettled([holder, edit]); }
+  });
+
   it('refuses non-owner admin edits for omitted, null, cleared and replaced run-as identity, leaving the entire row unchanged', async () => {
     const row = await schedule();
     for (const actor of [ctx(adminId), ctx(platformId, ['ADMIN'])]) {

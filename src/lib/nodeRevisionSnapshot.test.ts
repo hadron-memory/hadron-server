@@ -46,6 +46,9 @@ describe('editorFromAuth (#620)', () => {
     expect(editorFromAuth({ userId: 'u1', clientId: 'github:someone' })).toEqual({
       userId: 'u1',
       info: null,
+      // #1610: outside a request no Worker / Agent is behind the edit.
+      workerId: null,
+      agentId: null,
     });
   });
 
@@ -53,15 +56,17 @@ describe('editorFromAuth (#620)', () => {
     expect(editorFromAuth({ clientId: 'github:someone' })).toEqual({
       userId: null,
       info: 'github:someone',
+      workerId: null,
+      agentId: null,
     });
   });
 
   it('captures an App-key principal as app:<id>', () => {
-    expect(editorFromAuth({ appId: 'app-1' })).toEqual({ userId: null, info: 'app:app-1' });
+    expect(editorFromAuth({ appId: 'app-1' })).toEqual({ userId: null, info: 'app:app-1', workerId: null, agentId: null });
   });
 
   it('captures nothing for an anonymous context', () => {
-    expect(editorFromAuth({})).toEqual({ userId: null, info: null });
+    expect(editorFromAuth({})).toEqual({ userId: null, info: null, workerId: null, agentId: null });
   });
 });
 

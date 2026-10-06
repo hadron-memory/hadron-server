@@ -765,6 +765,24 @@ describe('syncGraphFromGithub', () => {
     expect(history[1]!.description).toBe('v1');
   });
 
+  it('runs as the system inside a worker request: node and revision both name no worker or agent (#1658 review)', async () => {
+    const { runAsActor } = await import('../../lib/requestActor.js');
+    const actor = { workerId: 'w-requester', agentId: 'a-requester' };
+    const nodeId = 'aaaa000000000000000000000000001658';
+    const dir = join(mockSources, 'test-org', 'test/repo', 'nodeAttr');
+    mkdirSync(dir, { recursive: true });
+    writeNodeFiles(dir, { id: nodeId, name: 'nodeAttr', description: 'v1' });
+    expect((await runAsActor(actor, () => syncGraphFromGithub(makeGraph()))).error).toBeUndefined();
+    writeNodeFiles(dir, { id: nodeId, name: 'nodeAttr', description: 'v2' });
+    expect((await runAsActor(actor, () => syncGraphFromGithub(makeGraph()))).error).toBeUndefined();
+    expect(await db.node.findUniqueOrThrow({
+      where: { id: nodeId },
+      select: { createdByWorkerId: true, createdByAgentId: true, updatedByWorkerId: true, updatedByAgentId: true },
+    })).toEqual({ createdByWorkerId: null, createdByAgentId: null, updatedByWorkerId: null, updatedByAgentId: null });
+    const revision = await db.nodeRevision.findFirstOrThrow({ where: { nodeId }, orderBy: { revNo: 'desc' } });
+    expect(revision).toMatchObject({ editedByInfo: 'system:github-sync', editedByWorkerId: null, editedByAgentId: null });
+  });
+
   it('refuses to apply a sync update to a row that has left the synced memory (#1339 review)', async () => {
     // @copilot: the row lock must re-validate ownership — a concurrent
     // cross-memory move between the preflight lookup and the lock would

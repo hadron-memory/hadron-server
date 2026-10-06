@@ -4,8 +4,8 @@ import { readFileSync } from 'node:fs';
 export const orgs = ['e2e-alpha', 'e2e-beta'];
 // Golden access expectations: system is excluded from the ordinary memory list;
 // group requires MemoryMember, and strict-owner memories belong to the admin.
-// Ordinary lists include non-strict org memory records; node-content gates
-// can be narrower. These are record-list expectations, not node grants.
+// App team records require participation; worker records require management
+// or holding that worker. These are record-list expectations, not node grants.
 const sharedMemories = (org: string) => ['knowledge', 'specs'].map(slug => `${org}:${slug}`);
 const managedMemories = (org: string) => [
   ...sharedMemories(org), ...['group', 'app', 'coordinator-working', 'qa-engineer-working'].map(slug => `${org}:${slug}`),
@@ -13,11 +13,11 @@ const managedMemories = (org: string) => [
 export const users: Record<string, { memberships: string[]; memories: string[] }> = {
   'alpha-owner': { memberships: ['e2e-alpha:OWNER'], memories: managedMemories('e2e-alpha').filter(m => !m.endsWith(':group')) },
   'alpha-admin': { memberships: ['e2e-alpha:ADMIN'], memories: [...managedMemories('e2e-alpha'), 'e2e-alpha:personal', 'e2e-alpha:private'] },
-  'alpha-member': { memberships: ['e2e-alpha:CONTRIBUTOR'], memories: managedMemories('e2e-alpha').filter(m => !m.endsWith(':group')) },
+  'alpha-member': { memberships: ['e2e-alpha:CONTRIBUTOR'], memories: [...sharedMemories('e2e-alpha'), 'e2e-alpha:app'] },
   'beta-owner': { memberships: ['e2e-beta:OWNER'], memories: managedMemories('e2e-beta').filter(m => !m.endsWith(':group')) },
   'beta-admin': { memberships: ['e2e-beta:ADMIN'], memories: [...managedMemories('e2e-beta'), 'e2e-beta:personal', 'e2e-beta:private'] },
-  'beta-member': { memberships: ['e2e-beta:CONTRIBUTOR'], memories: managedMemories('e2e-beta').filter(m => !m.endsWith(':group')) },
-  shared: { memberships: ['e2e-alpha:READER', 'e2e-beta:READER'], memories: orgs.flatMap(org => managedMemories(org).filter(m => !m.endsWith(':group'))) },
+  'beta-member': { memberships: ['e2e-beta:CONTRIBUTOR'], memories: [...sharedMemories('e2e-beta'), 'e2e-beta:app'] },
+  shared: { memberships: ['e2e-alpha:READER', 'e2e-beta:READER'], memories: orgs.flatMap(sharedMemories) },
   outsider: { memberships: [], memories: ['outsider:private'] },
   visitor: { memberships: [], memories: ['visitor:private'] },
 };

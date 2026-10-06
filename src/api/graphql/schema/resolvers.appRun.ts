@@ -496,7 +496,7 @@ export const appRunMutations = {
     });
   },
 
-  /** Org-ADMIN update, additionally strict-owner-gated when a run-as identity is stored (#1643). */
+  /** Org-ADMIN update; stored run-as authority requires its owner except for an exact stop-only edit (#1643). */
   updateAgentSchedule: async (
     _: unknown,
     { id, input }: { id: string; input: Partial<CreateAgentScheduleInput> },
@@ -507,7 +507,9 @@ export const appRunMutations = {
     });
     if (!observed) throw new GraphQLError('Schedule not found.', { extensions: { code: 'NOT_FOUND' } });
     await requireOrgRole(ctx, observed.organizationId, 'ADMIN');
-    requireStoredRunOwner(ctx, observed.userId);
+    // The adjudicated stop-only exception cannot carry any authority-changing field.
+    const disableOnly = input.enabled === false && Object.keys(input).every(key => key === 'enabled');
+    if (!disableOnly || ctx.impersonation) requireStoredRunOwner(ctx, observed.userId);
     let existing = observed;
     return withAuthorizedTx(
       ctx,
@@ -518,9 +520,9 @@ export const appRunMutations = {
           throw new GraphQLError('Schedule not found.', { extensions: { code: 'NOT_FOUND' } });
         }
         await requireOrgRole(txCtx, current.organizationId, 'ADMIN');
-        requireStoredRunOwner(txCtx, current.userId);
+        if (!disableOnly || txCtx.impersonation) requireStoredRunOwner(txCtx, current.userId);
         const userId = input.runAsSelf != null ? resolveRunAsSelf(txCtx, input.runAsSelf) : current.userId;
-        await requireRunIdentityRelationship(txCtx, current.appId, userId);
+        if (!disableOnly) await requireRunIdentityRelationship(txCtx, current.appId, userId);
         existing = current;
       },
       async (tx, txCtx) => {

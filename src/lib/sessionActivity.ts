@@ -88,7 +88,10 @@ export async function loadLastEventBySession(
   if (sessionIds.length === 0) return new Map();
   const rows = await db.usageEvent.groupBy({
     by: ['sessionId'],
-    where: { sessionId: { in: sessionIds } },
+    // #1653 / DY-2: only events written while the session was live and owned
+    // count. An event attributed to a lapsed session is attribution, never a
+    // drive, so it cannot revive the session behind DA's back.
+    where: { sessionId: { in: sessionIds }, countsAsActivity: true },
     _max: { createdAt: true },
   });
   return new Map(
@@ -378,8 +381,102 @@ export function recentlyTouchedFilter(now: Date) {
       OR: [
         { startedAt: { gte: cutoffs[type] } },
         { updatedAt: { gte: cutoffs[type] } },
-        { events: { some: { createdAt: { gte: cutoffs[type] } } } },
+        { events: { some: { createdAt: { gte: cutoffs[type] }, countsAsActivity: true } } },
       ],
     })),
   };
+}
+
+// ---------------------------------------------------------------------------
+// Activity on the write side (#1653, ruling DY-2) and dormancy (ruling DY-5)
+// ---------------------------------------------------------------------------
+
+/**
+ * Should a usage event attributed to `sessionId` by this principal count as
+ * ACTIVITY (`UsageEvent.countsAsActivity`)? Only when the principal OWNS the
+ * session, by the same rule `bindSession` applies (a pure App key: the
+ * session's App; a user: their own session, never under impersonation), and
+ * the session is LIVE right now.
+ *
+ * A lapsed session therefore keeps its attribution but is never revived by a
+ * request that merely carries its id: resuming is the DA door, with its hold,
+ * eligibility and dormancy checks, and nothing else. Ownership closes the
+ * `recordUsage` path, which takes a client-supplied session id.
+ *
+ * Errors read as "does not count", the safe direction: a missed heartbeat at
+ * worst makes a live session look lapsed, which DA then resumes.
+ */
+export async function usageEventCountsAsActivity(
+  db: {
+    session: { findUnique: (args: { where: { id: string }; select: Record<string, true> }) => Promise<unknown> };
+    usageEvent: { groupBy: (args: unknown) => Promise<{ sessionId: string | null; _max: { createdAt: Date | null } }[]> };
+  },
+  principal: { userId?: string | null; appId?: string | null; impersonation?: unknown },
+  sessionId: string | null | undefined,
+  now: Date = new Date(),
+): Promise<boolean> {
+  if (!sessionId) return false;
+  try {
+    const s = (await db.session.findUnique({
+      where: { id: sessionId },
+      select: {
+        userId: true, appId: true, type: true, startedAt: true, updatedAt: true,
+        autoExpiredAt: true, endedAt: true, deletedAt: true, expiresAt: true,
+      },
+    })) as {
+      userId: string | null; appId: string | null; type: SessionType; startedAt: Date; updatedAt: Date | null;
+      autoExpiredAt: Date | null; endedAt: Date | null; deletedAt: Date | null; expiresAt: Date | null;
+    } | null;
+    if (!s || s.deletedAt || s.endedAt) return false;
+    if (s.expiresAt && s.expiresAt.getTime() <= now.getTime()) return false;
+    // EXACTLY `bindSession`'s ownership rule (#1660 review, Baloo P2-1): a
+    // pure App key owns every session of its App, including a
+    // startAgentSession chatbot session that carries its end user's id, so an
+    // App driving such a session keeps it live. Only DY-1's RESUME narrows to
+    // person-less worker sessions; counting a drive does not.
+    const owned = principal.userId
+      ? !principal.impersonation && s.userId === principal.userId
+      : !!principal.appId && s.appId === principal.appId;
+    if (!owned) return false;
+    const lastEvent = (await loadLastEventBySession(db, [sessionId])).get(sessionId);
+    return isSessionLive(s, lastEvent, now);
+  } catch {
+    return false;
+  }
+}
+
+/** Ruling DY-5: the dormancy threshold an App gets when it sets none. */
+export const DEFAULT_SESSION_DORMANCY_DAYS = 90;
+
+/**
+ * Ruling DY-5: is this session DORMANT, meaning no activity for longer than
+ * its App's `sessionDormancyDays`? A dormant session is past what any agent
+ * act may resume; only its human holder's explicit rebind brings the worker
+ * back. This is the security half of Holger's session-lifetime principle: a
+ * session everyone has forgotten must not start acting again on its own.
+ */
+export function isSessionDormant(
+  session: {
+    startedAt: Date;
+    updatedAt?: Date | null;
+    autoExpiredAt?: Date | null;
+    endedAt?: Date | null;
+  },
+  lastEventAt: Date | null | undefined,
+  dormancyDays: number,
+  now: Date,
+): boolean {
+  const days = Number.isFinite(dormancyDays) && dormancyDays > 0 ? dormancyDays : DEFAULT_SESSION_DORMANCY_DAYS;
+  // Never shorter than the widest idle window (#1660 review, Baloo P2-2).
+  // Dormancy is only consulted for a session that is NOT live, so a
+  // threshold below the window would leave a session idle past dormancy
+  // still reading live, and acting, with no check at all. Flooring it at the
+  // window makes every dormant session also a lapsed one.
+  const thresholdMs = Math.max(days * 24 * 60 * 60 * 1000, widestIdleWindowMs());
+  return sessionActivityAt(session, lastEventAt).getTime() < now.getTime() - thresholdMs;
+}
+
+/** The widest configured idle window across every session type. */
+export function widestIdleWindowMs(): number {
+  return Math.max(...SESSION_TYPES.map((t) => idleWindowMsFor(t)));
 }

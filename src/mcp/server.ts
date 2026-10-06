@@ -1,6 +1,8 @@
 import { boundSessionPrivacyFilter } from '../lib/auth/sessionPrivacy.js';
 import { createHmac, randomUUID } from 'crypto';
 // Spec 049 S4 — the protected-loc gate on hadron_update_node (no lock on that path).
+import { assertNotCommentWrite, commentGovernedError, isCommentGovernedError } from '../lib/comments/index.js';
+import { commentIdsAmong, hardDeleteThreadsOfTargets, softDeleteThreadsOfTargets } from '../lib/comments/lifecycle.js';
 import { assertLocWritable, LocProtectedError } from '../lib/protectedLoc.js';
 import {
   assertGovernedWrite,
@@ -192,7 +194,7 @@ import { locateTeamChatChannel } from '../api/graphql/schema/resolvers.teamChat.
 // #1005: the SHARED App-participation predicate (#943) — reused here so
 // reconnect recovery admits exactly whom startSession admitted, rather than a
 // narrower member-row copy that would drift from it.
-import { isAppParticipant, getAccessibleMemoryIds as gqlAccessibleMemoryIds } from '../api/graphql/schema/resolvers.helpers.js';
+import { isAppParticipant, getAccessibleMemoryIds as gqlAccessibleMemoryIds, safeCanonicalUrn } from '../api/graphql/schema/resolvers.helpers.js';
 import { composeWorkerPrompt, loadAppWorkerActivity } from '../api/graphql/schema/resolvers.worker.js';
 import { splitNodeUrnTolerant, nodeFragmentRefusal } from '../lib/splitNodeUrnTolerant.js';
 import { safeEqual } from '../lib/constantTime.js';
@@ -251,6 +253,7 @@ import { attendeeMentionTokens } from '../lib/channelReadState.js';
 import {
   markOwnTeamChatRead,
   maybeAdvanceOwnChannelRead,
+  resumableOwnWorkerIds,
   teamAttentionAvailable,
 } from '../lib/teamAttention.js';
 import { resolveOrgRef } from '../lib/entityRef/orgRef.js';
@@ -287,8 +290,9 @@ function renderSessionLiveness(lapsesAt: Date | null, now: Date): string {
     ? `liveness: LIVE until ${lapsesAt.toISOString()} (${formatDuration(delta)} left) unless driven first; ` +
         'any attributed read, post or mark-read through it renews it'
     : `liveness: LAPSED at ${lapsesAt.toISOString()} (${formatDuration(-delta)} ago) — nothing drove it inside its ` +
-        'idle window, so it can no longer author in team chat. It is still OPEN: end it with a handoff, and start ' +
-        'a new session for this worker to keep working';
+        'idle window. It is still OPEN. If you hold this worker\'s name and no other session on it is live, your next ' +
+        'team-chat post, read or mark-read through it RESUMES it (#1617); otherwise start a new session for this ' +
+        'worker, which ends this one as superseded';
 }
 
 /** One operator can monitor this many live Workers in one poll. */
@@ -1365,6 +1369,11 @@ async function isMemoryHiddenFrom(
 type ReadProjectionNode = {
   id: string;
   revSeq: number;
+  // #1610 agent attribution.
+  createdByWorkerId: string | null;
+  createdByAgentId: string | null;
+  updatedByWorkerId: string | null;
+  updatedByAgentId: string | null;
   authorshipKind: 'TASK' | 'HUMAN' | null;
   authoredByTask: string | null;
   authoredByRevision: number | null;
@@ -1513,6 +1522,46 @@ async function batchHumanNames(nodes: readonly ReadProjectionNode[]): Promise<Ma
   return new Map(users.filter((user) => !!user.handle).map((user) => [user.id, user.handle!]));
 }
 
+// #1610: one name/URN lookup per actor per batch read.
+const actorLabelCaches = new WeakMap<object, Map<string, Promise<string | null>>>();
+
+/** The Worker (else Agent) behind a write, as `name (urn)`; '' when none. */
+async function actorMetaLine(
+  client: typeof db,
+  label: string,
+  workerId: string | null,
+  agentId: string | null,
+  batch?: object,
+): Promise<string> {
+  const kind = workerId ? 'worker' : agentId ? 'agent' : null;
+  const id = workerId ?? agentId;
+  if (!kind || !id) return '';
+  const lookup = async (): Promise<string | null> => {
+    if (kind === 'worker') {
+      const w = await client.worker.findUnique({
+        where: { id }, select: { name: true, slug: true, app: { select: { urn: true } } },
+      });
+      if (!w) return null;
+      let urn: string | null = null;
+      try { urn = composeWorkerUrn(normalizeUrnForLookup(w.app.urn), w.slug); } catch { urn = null; }
+      return urn ? `${w.name} (${urn})` : w.name;
+    }
+    const a = await client.agent.findUnique({ where: { id }, select: { name: true, urn: true } });
+    return a ? `${a.name} (${safeCanonicalUrn('agent', a.urn)})` : null;
+  };
+  let pending: Promise<string | null>;
+  if (batch) {
+    let cache = actorLabelCaches.get(batch);
+    if (!cache) { cache = new Map(); actorLabelCaches.set(batch, cache); }
+    pending = cache.get(`${kind}:${id}`) ?? lookup();
+    cache.set(`${kind}:${id}`, pending);
+  } else {
+    pending = lookup();
+  }
+  const name = await pending;
+  return name ? `${label}: ${kind} ${name}` : '';
+}
+
 async function renderNodeReadProjection(
   node: ReadProjectionNode,
   scope: 'content' | 'abstract' | 'all',
@@ -1651,6 +1700,11 @@ async function renderNodeReadProjection(
     }
   }
 
+  // #1610: the Worker (else the Agent) behind the node's creation and its
+  // last authored edit. Omitted when none was; the user is not repeated here.
+  const createdByLine = await actorMetaLine(db, 'Created by', node.createdByWorkerId, node.createdByAgentId, opts.batch);
+  const updatedByLine = await actorMetaLine(db, 'Last edited by', node.updatedByWorkerId, node.updatedByAgentId, opts.batch);
+
   // #186: surface nodeType so callers can tell `parent` from `info`.
   const meta = [
     `**${node.name}**`,
@@ -1665,6 +1719,8 @@ async function renderNodeReadProjection(
     validationLine,
     approvalLine,
     mintLine,
+    createdByLine,
+    updatedByLine,
     node.description ? `> ${node.description}` : '',
     `Type: ${node.nodeType}`,
     // #1201 (@codex P2, PR #1203). Without these a governed node reads as an
@@ -3484,9 +3540,11 @@ export function createMcpServerInstance(
       // next thing to drift.
       const parentGovernedProbe = await db.node.findUnique({
         where: { loc_memoryId: { loc, memoryId } },
-        select: { role: true, isRunnable: true },
+        select: { role: true, isRunnable: true, nodeType: true },
       });
       try {
+        // #1606 (cor:dmo:110:04) — a comment is never rewritten as a section.
+        assertNotCommentWrite(parentGovernedProbe?.nodeType, undefined, 'update');
         assertGovernedWrite(
           parentGovernedProbe,
           mergedGovernedState(parentGovernedProbe, {}),
@@ -3495,7 +3553,7 @@ export function createMcpServerInstance(
           // door performs.
         );
       } catch (e) {
-        if (e instanceof RoleGovernedError) return textResult(`[role_governed] ${e.message}`);
+        if (e instanceof RoleGovernedError || isCommentGovernedError(e)) return textResult(`[role_governed] ${(e as Error).message}`);
         throw e;
       }
 
@@ -5272,9 +5330,11 @@ export function createMcpServerInstance(
       // the lock. What this closes is the ordinary, unraced case.
       const governedProbe = await db.node.findUnique({
         where: { loc_memoryId: { loc, memoryId } },
-        select: { role: true, isRunnable: true, deletedAt: true },
+        select: { role: true, isRunnable: true, deletedAt: true, nodeType: true },
       });
       try {
+        // #1606 (cor:dmo:110:04) — no generic create makes or resurrects a comment.
+        assertNotCommentWrite(governedProbe?.nodeType, nodeType, 'create');
         assertGovernedWrite(
           governedProbe,
           mergedGovernedState(governedProbe, { role, isRunnable }),
@@ -5298,7 +5358,7 @@ export function createMcpServerInstance(
               },
         );
       } catch (e) {
-        if (e instanceof RoleGovernedError) return textResult(`[role_governed] ${e.message}`);
+        if (e instanceof RoleGovernedError || isCommentGovernedError(e)) return textResult(`[role_governed] ${(e as Error).message}`);
         throw e;
       }
 
@@ -5832,6 +5892,8 @@ export function createMcpServerInstance(
       // than an afterthought. Never passes an ownsKind — there is no MCP door,
       // by design.
       try {
+        // #1606 (cor:dmo:110:04) — no generic update edits, makes or unmakes a comment.
+        assertNotCommentWrite(existing?.nodeType, nodeType, 'update');
         assertGovernedWrite(
           existing,
           mergedGovernedState(existing, { role, isRunnable }),
@@ -5849,7 +5911,7 @@ export function createMcpServerInstance(
             : {},
         );
       } catch (e) {
-        if (e instanceof RoleGovernedError) return textResult(`[role_governed] ${e.message}`);
+        if (e instanceof RoleGovernedError || isCommentGovernedError(e)) return textResult(`[role_governed] ${(e as Error).message}`);
         throw e;
       }
 
@@ -6839,6 +6901,7 @@ Refuses if the node has descendants under its URN prefix unless \`recursive: tru
         | { refused: 'changed' }
         | { refused: 'access' }
         | { refused: 'mintedSpec'; message: string }
+        | { refused: 'comment'; message: string }
         | { ok: true; descendantCount: number };
 
       // #449 — source memories whose pending-edge count a hard delete changed.
@@ -6904,6 +6967,13 @@ Refuses if the node has descendants under its URN prefix unless \`recursive: tru
           }
           throw e;
         }
+        // #1606 (cor:dmo:110:04/05) — a comment is removed only by the comment
+        // path's thread delete; a target takes its threads with it.
+        if ((await commentIdsAmong(tx, affectedIds)).length > 0) {
+          return { refused: 'comment', message: commentGovernedError('delete', 'removes').message };
+        }
+        if (hard) await hardDeleteThreadsOfTargets(tx, affectedIds);
+        else await softDeleteThreadsOfTargets(tx, affectedIds, { deletedBy: auth.userId ?? auth.clientId ?? null, at: new Date() });
 
         if (hard) {
 
@@ -6970,6 +7040,9 @@ Refuses if the node has descendants under its URN prefix unless \`recursive: tru
         }
         if (result.refused === 'mintedSpec') {
           return textResult(`[spec_minted_permanent] ${result.message}`);
+        }
+        if (result.refused === 'comment') {
+          return textResult(`[role_governed] ${result.message}`);
         }
         if (result.refused === 'descendants') {
           const mode = hard ? 'hard delete' : 'soft delete';
@@ -8068,7 +8141,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
 
   server.tool(
     'hadron_start_session',
-    'Start a session — and when workerRef is passed, a WORKER SESSION: the binding that makes work attributable to that named teammate. Two different things are called a session: the WORKER SESSION is this binding, held server-side; your CHAT SESSION is the conversation you are in — the Claude Desktop window, the Claude Code session, the IDE chat. ENDING YOUR CHAT SESSION DOES NOT END A WORKER SESSION (#1034): closing, archiving or losing the conversation leaves this binding open until hadron_end_session. Since #1114 the reaper no longer ends a session for inactivity — silence is not evidence of abandonment. What DOES change while it sits idle is how it is DESCRIBED: liveness is derived from recent driving, so a session that remains untouched past its idle window reads as not-live and stops blocking a bind, WITHOUT being ended and with its handoff still unwritten rather than lost. That changes no HOLD: a human-held name stays held until explicit release, so only its holder can bind it again. All subsequent tool calls can reference this session ID for attribution. Starting a session PINS its App as this session\'s active App, so no hadron_set_active_app is needed afterwards; if the MCP connection is later re-established (which happens transparently), pass the session id back to the team tools to restore that App context. Pass workerRef — the worker\'s NAME ("Iris", resolved within the active App), its id, or its URN (hrn:worker:<root>:<app-slug>:<slug>) — to work AS that named casting, which is required for worker-attributed team chat posts and worklog records. An id or URN workerRef names its own App, so it needs no App selected first; a bare NAME does, since a name is unique only within an App. On success the worker\'s resolved BOOT BRIEFING comes back with the session: adopt it for the rest of this stint, and never cache or copy it — it is rendered live from the role agent\'s prompt template, so a copy goes stale silently. Binding a worker someone is actively DRIVING refuses WORKER_TAKEN (#1114: an OPEN session is not necessarily a live one — a session whose most recent activity is outside its idle window is not being driven, so that session does not refuse) with who last drove it and when (informed takeover, cor:agt:020:03) — note an open worker session does not by itself mean someone is at the keyboard, since it outlives the chat session that started it; retry with force: true ONLY after surfacing that to the user and getting an explicit override.',
+    'Start a session — and when workerRef is passed, a WORKER SESSION: the binding that makes work attributable to that named teammate. Two different things are called a session: the WORKER SESSION is this binding, held server-side; your CHAT SESSION is the conversation you are in — the Claude Desktop window, the Claude Code session, the IDE chat. ENDING YOUR CHAT SESSION DOES NOT END A WORKER SESSION (#1034): closing, archiving or losing the conversation leaves this binding open until hadron_end_session. Since #1114 the reaper no longer ends a session for inactivity — silence is not evidence of abandonment. What DOES change while it sits idle is how it is DESCRIBED: liveness is derived from recent driving, so a session that remains untouched past its idle window reads as not-live and stops blocking a bind, WITHOUT being ended and with its handoff still unwritten rather than lost. That changes no HOLD: a human-held name stays held until explicit release, so only its holder can bind it again. All subsequent tool calls can reference this session ID for attribution. Starting a session PINS its App as this session\'s active App, so no hadron_set_active_app is needed afterwards; if the MCP connection is later re-established (which happens transparently), pass the session id back to the team tools to restore that App context. Pass workerRef — the worker\'s NAME ("Iris", resolved within the active App), its id, or its URN (hrn:worker:<root>:<app-slug>:<slug>) — to work AS that named casting, which is required for worker-attributed team chat posts and worklog records. An id or URN workerRef names its own App, so it needs no App selected first; a bare NAME does, since a name is unique only within an App. On success the worker\'s resolved BOOT BRIEFING comes back with the session: adopt it for the rest of this stint, and never cache or copy it — it is rendered live from the role agent\'s prompt template, so a copy goes stale silently. Binding a worker someone is actively DRIVING refuses WORKER_TAKEN (#1114: an OPEN session is not necessarily a live one — a session whose most recent activity is outside its idle window is not being driven, so that session does not refuse) with who last drove it and when (informed takeover, cor:agt:020:03) — note an open worker session does not by itself mean someone is at the keyboard, since it outlives the chat session that started it; retry with force: true ONLY after surfacing that to the user and getting an explicit override. Binding a worker ENDS your own other open sessions on that same worker (#1617), the lapsed ones and any a force displaces: they are marked "superseded by session <new id>" and end WITHOUT a handoff, so write the handoff with hadron_end_session first if one is owed. Do not bind a second session to recover from a context compaction; recover the existing one with hadron_whoami. A LAPSED session of yours does not need a rebind at all: if you hold the name and nobody else is driving the worker, your next team-chat post, read or mark-read through it resumes it.',
     {
       description: z.string().describe("What this session is about"),
       type: z.string().optional().describe('Session type: DEVELOPER, CHATBOT, AUTOMATION, EDGE'),
@@ -8891,6 +8964,18 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           .filter((s) => s.workerId && isSessionLive(s, lastEvents.get(s.id), now))
           .map((s) => s.workerId as string),
       )];
+      // #1617 B: a worker whose own session merely LAPSED is still monitored —
+      // its next read or post resumes it (`reviveOwnLapsedSession`) — so a
+      // quiet stretch past the idle window does not make it unwakeable.
+      // Observing resumes nothing; the worker's own act does.
+      for (const id of await resumableOwnWorkerIds(ctx, {
+        userId: auth.userId!,
+        appId: app.id,
+        workerId: requestedWorker?.id,
+        now,
+      })) {
+        if (!liveWorkerIds.includes(id)) liveWorkerIds.push(id);
+      }
       const liveWorkerSet = new Set(liveWorkerIds);
       if (!requestedWorker && liveWorkerIds.length > TEAM_CHAT_MONITOR_MAX_TARGETS) {
         return textResult(

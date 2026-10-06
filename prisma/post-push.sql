@@ -185,6 +185,13 @@ ALTER TABLE apps
 ALTER TABLE apps
   ADD CONSTRAINT chk_app_owner_xor
   CHECK ((organization_id IS NULL) <> (owner_user_id IS NULL));
+-- Ruling DY-5: a dormancy threshold is a positive number of days. Synced with
+-- the 20261005010000 migration + src/test/globalSetup.ts.
+ALTER TABLE apps
+  DROP CONSTRAINT IF EXISTS chk_app_session_dormancy_days_positive;
+ALTER TABLE apps
+  ADD CONSTRAINT chk_app_session_dormancy_days_positive
+  CHECK (session_dormancy_days > 0);
 ALTER TABLE agents
   DROP CONSTRAINT IF EXISTS chk_agent_owner_xor;
 ALTER TABLE agents
@@ -611,3 +618,7 @@ CREATE INDEX IF NOT EXISTS "nodes_memory_id_loc_c_idx" ON "nodes" ("memory_id", 
 CREATE INDEX IF NOT EXISTS "nodes_msg_channel_seq_loc_c_idx"
   ON "nodes" ("message_channel_id", "seq", "loc" COLLATE "C")
   WHERE "node_type" = 'chat-message' AND "deleted_at" IS NULL AND "seq" IS NOT NULL;
+
+-- #1606 / #1607 — comment-node invariants. One source, shared verbatim with
+-- migration 20261005200000_comment_nodes (pinned by src/lib/comments/invariantsSql.test.ts).
+\ir comment-invariants.sql

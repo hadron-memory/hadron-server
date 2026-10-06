@@ -60,7 +60,7 @@ describe('#1617 — hadron_whoami liveness', () => {
 
     const lapsedBlock = block(out, lapsed.id);
     expect(lapsedBlock).toMatch(/liveness: LAPSED at \S+ \(12h \d+m ago\)/);
-    expect(lapsedBlock).toContain('can no longer author in team chat');
+    expect(lapsedBlock).toContain("RESUMES it");
   });
 
   it('an ended session carries no liveness line', async () => {

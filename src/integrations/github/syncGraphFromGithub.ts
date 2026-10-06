@@ -1,4 +1,7 @@
+import { runAsSystem } from '../../lib/requestActor.js';
 import { createDecipheriv } from 'crypto';
+import { COMMENT_NODE_TYPE } from '../../lib/comments/index.js';
+import { hardDeleteThreadsOfTargets } from '../../lib/comments/lifecycle.js';
 import { GraphQLError } from 'graphql';
 import { assertPlaceholderKeepsSpecRole, placeholderFillPatch } from '../../lib/specCorpus.js';
 import { governedSignalsFromMirror } from '../../lib/governedSignals.js';
@@ -277,7 +280,7 @@ export async function updateNodeFromGitSync(
  * Sync a memory from GitHub: clone/pull the repo, load nodes from filesystem,
  * and upsert them into the database.
  */
-export const syncGraphFromGithub = async (
+const syncGraphFromGithubAsSystem = async (
   graph: MemoryWithOrg,
   edgeEndpointPreflightAttempt = 0,
 ): Promise<{
@@ -908,6 +911,14 @@ export const syncGraphFromGithub = async (
           return true;
         };
         const refusesRole = async (prior: Node | null): Promise<boolean> => {
+          // #1606 (cor:dmo:110:04) — git sync never writes a comment: a file
+          // that lands on a comment's loc is skipped and the comment kept.
+          if (prior?.nodeType === COMMENT_NODE_TYPE) {
+            console.warn(`[syncGraphFromGithub] "${graphName}": skipped ${loc} — it is a comment, written only through the comment path`);
+            protectedRowIds.add(prior.id);
+            refusedRoleLocs.add(loc);
+            return true;
+          }
           const signals = governedSignalsFromMirror(node);
           if (signals.role == null) return false;
           // #1411 review (@codex P2): judge the role the write will APPLY. An
@@ -1236,6 +1247,8 @@ export const syncGraphFromGithub = async (
           // #449 — PendingEdges aimed at the pruned rows: targetId is not a
           // foreign key, so the row cascade never reaches them.
           pendingSourceMemories = await deletePendingEdgesTargetingNodes(tx, pruned.map((n) => n.id));
+          // #1606 — a pruned (hard-deleted) target takes its comment threads.
+          await hardDeleteThreadsOfTargets(tx, pruned.map((n) => n.id));
           await tx.node.deleteMany({ where: cleanupWhere });
         }
       }
@@ -1597,3 +1610,11 @@ function extractOwnerRepo(gitUrl: string): string {
 
   return gitUrl;
 }
+
+/**
+ * #1610: Git sync writes the repository's content, not the requester's, and
+ * its revisions name the system editor `system:github-sync`. So it runs as
+ * the system even inside a worker's request: node and revision then agree.
+ */
+export const syncGraphFromGithub: typeof syncGraphFromGithubAsSystem = (...args) =>
+  runAsSystem(() => syncGraphFromGithubAsSystem(...args));
