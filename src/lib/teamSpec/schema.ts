@@ -26,7 +26,6 @@ export function teamSpecSchema(form: TeamSpecForm = 'SERVER') {
     title: z.string().optional(),
     visibility: z.enum(['PUBLIC', 'ORGANIZATION', 'PERSONAL']).optional(),
     registerDefaults: z.strictObject({ mentionOnly: z.boolean().optional() }).optional(),
-    sharedAgent: z.literal('refuse').optional(),
     resolved: resolved.optional(),
   };
   const role = z.union([

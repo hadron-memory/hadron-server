@@ -31,7 +31,7 @@ describe('team schema S1', () => {
     }
   });
   it('refuses shared-agent opt-ins, fork and removal fields under AM', () => {
-    for (const patch of [{ sharedAgent: 'update' }, { sharedAgent: 'fork' }, { installed: false }, { state: 'retired' }]) {
+    for (const patch of [{ sharedAgent: 'refuse' }, { sharedAgent: 'update' }, { sharedAgent: 'fork' }, { installed: false }, { state: 'retired' }]) {
       const value = spec();
       Object.assign(value.spec.roles.engineer, patch);
       expect(errors(() => validateTeamSpec(value)).code).toBe('TEAM_SPEC_INVALID');
@@ -40,12 +40,34 @@ describe('team schema S1', () => {
   it('publishes separate file-capable client and server schemas', () => {
     const value = spec();
     (value.spec.roles.engineer.prompt.parts as unknown[]) = [{ file: 'roles/engineer.md' }];
-    expect(errors(() => validateTeamSpec(value)).code).toBe('TEAM_SPEC_INVALID');
+    expect(errors(() => parseTeamSpec(JSON.stringify(value))).code).toBe('TEAM_SPEC_INVALID');
     expect(validateTeamSpec(value, 'CLIENT_INPUT')).toEqual(value);
     const server = JSON.stringify(publishedTeamSpecSchema(TEAM_API_VERSION));
     const client = JSON.stringify(publishedTeamSpecSchema(TEAM_API_VERSION, 'CLIENT_INPUT'));
     expect(server).not.toContain('"file"'); expect(client).toContain('"file"');
     expect(JSON.parse(server).$schema).toBe('https://json-schema.org/draft/2020-12/schema');
+  });
+  it('pins the nesting boundary and value refusal codes separately from shape errors', () => {
+    // The envelope itself has shallower nesting; annotation text may contain
+    // JSON-looking text without contributing to JSON nesting.
+    const tooDeep = '['.repeat(101) + '0' + ']'.repeat(101);
+    expect(errors(() => parseTeamSpec(tooDeep)).issues).toEqual([
+      expect.objectContaining({ code: 'INVALID_JSON', message: 'JSON nesting is too deep' }),
+    ]);
+    const atBoundary = '['.repeat(100) + '0' + ']'.repeat(100);
+    expect(errors(() => parseTeamSpec(atBoundary)).issues).not.toEqual([
+      expect.objectContaining({ message: 'JSON nesting is too deep' }),
+    ]);
+    for (const input of ['{"x":1e400}', '{"x":"\\ud800"}']) {
+      expect(errors(() => parseTeamSpec(input)).issues).toEqual([
+        expect.objectContaining({ code: 'INVALID_JSON_VALUE' }),
+      ]);
+    }
+  });
+  it('refuses unknown root fields instead of stripping them', () => {
+    expect(errors(() => parseTeamSpec(JSON.stringify({ ...spec(), extra: true }))).issues).toEqual([
+      expect.objectContaining({ code: 'unrecognized_keys', pointer: '' }),
+    ]);
   });
   it('reports worker collisions and unknown roles together with pointers', () => {
     const value = spec(); value.spec.workers.push({ name: ' milo ', role: 'missing' });
@@ -115,7 +137,7 @@ describe('team schema S1', () => {
       expect(await response.json()).toEqual(publishedTeamSpecSchema(TEAM_API_VERSION));
       const missing = await fetch(`http://127.0.0.1:${address.port}/schemas/team/future.json`);
       expect(missing.status).toBe(404);
-      expect(await missing.json()).toMatchObject({ code: 'TEAM_SPEC_VERSION_UNSUPPORTED' });
+      expect(await missing.json()).toMatchObject({ code: 'TEAM_SPEC_VERSION_UNSUPPORTED', accepted: ['v1alpha1.json'] });
     } finally { await new Promise<void>((resolve, reject) => server.close((err) => err ? reject(err) : resolve())); }
   });
 });
