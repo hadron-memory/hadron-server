@@ -1,3 +1,4 @@
+import { boundSessionPrivacyFilter } from '../lib/auth/sessionPrivacy.js';
 import { createHmac, randomUUID } from 'crypto';
 // Spec 049 S4 — the protected-loc gate on hadron_update_node (no lock on that path).
 import { assertNotCommentWrite, commentGovernedError, isCommentGovernedError } from '../lib/comments/index.js';
@@ -8556,7 +8557,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       // leak a session count the caller may not read: whatever scopes the
       // rows scopes the total, by construction rather than by re-statement.
       const where = {
-        ...scope,
+        AND: [scope, boundSessionPrivacyFilter(auth)],
         deletedAt: null,
         // "Open" is `endedAt IS NULL` — the ONE active predicate the platform
         // uses everywhere (#930: the reaper stamps endedAt AND autoExpiredAt

@@ -69,6 +69,7 @@ import {
   assetUrn,
   resolveAppTeamSpaceMemoryIds,
   getAccessibleMemoryIds,
+  sessionScopeFilter,
   STORED_NODE_CONTENT,
 } from './resolvers.helpers.js';
 import { getMemberOrgIds } from '../../../lib/auth/memberOrgIds.js';
@@ -79,6 +80,42 @@ import { corpusMintStateOf } from '../../../lib/specCorpus.js';
 import { LIVE_ORG_MEMBERSHIP } from '../../../lib/auth/liveOrgMembership.js';
 import { isSessionLive, loadLastEventBySession, sessionLapsesAt } from '../../../lib/sessionActivity.js';
 import type { SessionType } from '../../../generated/prisma/index.js';
+import { hasBoundAppSession, strictSessionMemoryFilter } from '../../../lib/auth/sessionPrivacy.js';
+
+// Request-local only: a session list computes the event memory set once.
+type SessionEventMemorySet = { ids: string[]; delegatedMemoryId: string | null };
+const sessionEventMemoryReads = new WeakMap<Context, Promise<SessionEventMemorySet>>();
+function sessionEventMemoryIds(ctx: Context, parentSessionId: string): Promise<string[]> {
+  let read = sessionEventMemoryReads.get(ctx);
+  if (!read) {
+    read = (async () => {
+      const accessible = await getAccessibleMemoryIds(ctx);
+      const bound = hasBoundAppSession(ctx)
+        ? await ctx.db.session.findFirst({
+          where: { id: ctx.sessionId!, appId: ctx.appId! },
+          select: { memoryId: true, memory: { select: { class: true } } },
+        })
+        : null;
+      const memories = await ctx.db.memory.findMany({
+        where: { AND: [
+          { OR: [strictSessionMemoryFilter(ctx), ...(bound?.memoryId ? [{ id: bound.memoryId }] : [])] },
+          ...(accessible === null ? [] : [{ id: { in: accessible } }]),
+        ] },
+        select: { id: true },
+      });
+      return {
+        ids: memories.map((m) => m.id),
+        delegatedMemoryId: bound?.memory?.class === 'personal' || bound?.memory?.class === 'private'
+          ? bound.memoryId : null,
+      };
+    })();
+    sessionEventMemoryReads.set(ctx, read);
+  }
+  // The delegated strict-memory exception belongs only to this conversation.
+  // Other readable parents in the same request retain their ordinary set.
+  return read.then(({ ids, delegatedMemoryId }) => parentSessionId === ctx.sessionId || !delegatedMemoryId
+    ? ids : ids.filter((id) => id !== delegatedMemoryId));
+}
 
 /**
  * #757 — a Prisma `where` fragment selecting the Agents this caller may read,
@@ -1824,6 +1861,20 @@ export const typeResolvers = {
     },
   },
   Session: {
+    /** #1645: nested events inherit current session and memory read boundaries. */
+    events: async (s: { id: string }, _: unknown, ctx: Context) => {
+      const session = await ctx.db.session.findFirst({
+        where: { AND: [{ id: s.id }, await sessionScopeFilter(ctx)] },
+        select: { id: true },
+      });
+      if (!session) return [];
+      const memoryIds = await sessionEventMemoryIds(ctx, s.id);
+      return ctx.db.usageEvent.findMany({
+        where: { sessionId: s.id, OR: [{ memoryId: null }, { memoryId: { in: memoryIds } }] },
+        orderBy: { createdAt: 'desc' },
+        take: 50,
+      });
+    },
     outcomeMeta: (session: { outcomeMeta: unknown }) => deserializeJson(session.outcomeMeta),
     /**
      * hadron-cli#791: the exact per-session form of the shared liveness
