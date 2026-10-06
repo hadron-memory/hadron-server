@@ -122,6 +122,33 @@ export function usageActorFrom(principal: UsagePrincipal): UsageActor {
  */
 const INSERT_CHUNK = 500;
 
+// Recording remains off the request path, but fixture/shutdown boundaries can
+// wait for its complete lifetime, including activity checks and every chunk.
+const pendingUsageWrites = new WeakMap<object, Set<Promise<void>>>();
+
+/**
+ * Wait for this client's outstanding operation-usage writes (#1189).
+ * Call only at a quiescent boundary; this does not stop future producers.
+ * Failures retain the recorder's swallow-and-continue contract.
+ */
+export async function drainNodeUsage(db: object): Promise<void> {
+  while (true) {
+    const pending = pendingUsageWrites.get(db);
+    if (!pending?.size) return;
+    await Promise.all([...pending]);
+  }
+}
+
+function trackUsageWrite(db: object, write: Promise<void>): void {
+  let pending = pendingUsageWrites.get(db);
+  if (!pending) pendingUsageWrites.set(db, (pending = new Set()));
+  pending.add(write);
+  void write.then(() => {
+    pending.delete(write);
+    if (pending.size === 0) pendingUsageWrites.delete(db);
+  });
+}
+
 /**
  * Record one `read`/`write` event per node. Fire-and-forget: returns
  * immediately, never throws, never rejects.
@@ -172,7 +199,7 @@ export function recordNodeUsage(
     // #1653 / DY-2: the rows count as ACTIVITY only if the bound session is
     // live and owned by this principal right now. Decided once per call, off
     // the request path; any failure records them as not counting (safe).
-    void (async () => {
+    const write = (async () => {
       // One instant for the decision and every row's timestamp (local P2-1).
       const at = new Date();
       const counts = await attributedRequestActivity(db, principal, actor.sessionId, { at });
@@ -182,6 +209,7 @@ export function recordNodeUsage(
           .catch(() => {});
       }
     })().catch(() => {});
+    trackUsageWrite(db, write);
   } catch {
     // Deliberately silent: see above. Metering a read must never break it.
   }
