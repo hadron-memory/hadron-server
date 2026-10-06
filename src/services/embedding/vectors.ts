@@ -274,6 +274,15 @@ async function withEfSearch<T>(db: PrismaClient, candidateK: number, query: (tx:
   });
 }
 
+/**
+ * #1608 — a hidden or retracted comment is never a vector hit, whatever the
+ * index still holds: concealment must not wait for the asynchronous vector
+ * cleanup (#1674 review, Jane P2-4). Correlated on `n` (the nodes row); a
+ * non-comment has no meta row and passes.
+ */
+const NOT_A_STUB = Prisma.sql`AND NOT EXISTS (SELECT 1 FROM comment_meta cm_stub
+      WHERE cm_stub.node_id = n.id AND (cm_stub.hidden_at IS NOT NULL OR cm_stub.retracted_at IS NOT NULL))`;
+
 export interface VectorHit {
   nodeId: string;
   score: number; // cosine similarity in [0,1]-ish (1 - distance)
@@ -298,8 +307,8 @@ export async function vectorSearchNodes(
     candidateFactor?: number;
     /** #1345 — told whether the raw ANN window was exhausted (see below). */
     onWindow?: (w: { exhausted: boolean }) => void;
-    /** #1608 — search comment vectors only, exactly (see {@link exactCommentVectorHits}). */
-    commentsOnly?: boolean;
+    /** #1608 — content, comments or both (see the doc above). Absent = ALL (no restriction). */
+    scope?: 'CONTENT' | 'COMMENTS' | 'ALL';
   },
 ): Promise<VectorHit[]> {
   if (opts.memoryIds.length === 0) {
@@ -308,19 +317,25 @@ export async function vectorSearchNodes(
   }
   const qvec = toVectorLiteral(opts.queryEmbedding);
   const k = opts.limit;
-  if (opts.commentsOnly) {
+  if (opts.scope === 'COMMENTS') {
     const rows = await db.$queryRaw<{ node_id: string; distance: number }[]>`
       SELECT ne.node_id, MIN(ne.embedding <=> ${qvec}::vector) AS distance
       FROM node_embeddings ne
       JOIN nodes n ON n.id = ne.node_id AND n.deleted_at IS NULL AND n.node_type = 'comment'
-      WHERE ne.memory_id IN (${Prisma.join(opts.memoryIds)})
+      WHERE ne.memory_id IN (${Prisma.join(opts.memoryIds)}) ${NOT_A_STUB}
       GROUP BY ne.node_id
       ORDER BY distance ASC
       LIMIT ${k}`;
-    // Exact: the whole comment set was ranked, so nothing deeper exists.
-    opts.onWindow?.({ exhausted: true });
+    // Exact ranking, but a LIMITed prefix: exhausted only when it came back
+    // short (#1674 review, Jane P2-3). A caller post-filtering the page widens
+    // k and re-asks.
+    opts.onWindow?.({ exhausted: rows.length < k });
     return rows.map((r) => ({ nodeId: r.node_id, score: 1 - Number(r.distance) }));
   }
+  // CONTENT excludes comments INSIDE the ANN candidate scan, before its cap
+  // (#1674 review, Jane P2-2): a comment vector can never take a candidate
+  // slot from eligible content. ALL ranks everything except stub comments.
+  const scopeSql = opts.scope === 'CONTENT' ? Prisma.sql`AND n.node_type <> 'comment'` : Prisma.empty;
   const candidateK = Math.max(k, k * (opts.candidateFactor ?? 10));
   // `ann_rows` is the RAW candidate count, before the node dedup (a window full
   // of one node's chunks dedupes to one hit, #1345 review). Exhaustion compares
@@ -329,7 +344,8 @@ export async function vectorSearchNodes(
     WITH ann AS (
       SELECT ne.node_id, ne.embedding <=> ${qvec}::vector AS distance
       FROM node_embeddings ne
-      WHERE ne.memory_id IN (${Prisma.join(opts.memoryIds)})
+      JOIN nodes n ON n.id = ne.node_id ${scopeSql}
+      WHERE ne.memory_id IN (${Prisma.join(opts.memoryIds)}) ${NOT_A_STUB}
       ORDER BY ne.embedding <=> ${qvec}::vector
       LIMIT ${candidateK}
     )
@@ -349,7 +365,8 @@ export async function vectorSearchNodes(
     if (!truncated && (rows.length === 0 || windowRows < candidateK)) {
       const [c] = await db.$queryRaw<{ n: number }[]>`
         SELECT count(*)::int AS n FROM node_embeddings ne
-        WHERE ne.memory_id IN (${Prisma.join(opts.memoryIds)})`;
+        JOIN nodes n ON n.id = ne.node_id ${scopeSql}
+        WHERE ne.memory_id IN (${Prisma.join(opts.memoryIds)}) ${NOT_A_STUB}`;
       const eligibleRows = Number(c?.n ?? 0);
       exhausted = rows.length === 0 ? eligibleRows === 0 : vectorWindowExhausted({ windowRows, eligibleRows, truncated });
     }
@@ -389,8 +406,8 @@ export async function vectorSearchChunks(
     candidateFactor?: number;
     /** #1345 — told whether the chunk window was exhausted (fewer rows than it asked for). */
     onWindow?: (w: { exhausted: boolean }) => void;
-    /** #1608 — rank comment chunks only, exactly (no ANN window). */
-    commentsOnly?: boolean;
+    /** #1608 — content, comments or both; COMMENTS ranks exactly. Absent = ALL. */
+    scope?: 'CONTENT' | 'COMMENTS' | 'ALL';
   },
 ): Promise<ChunkHit[]> {
   if (opts.memoryIds.length === 0) {
@@ -399,16 +416,16 @@ export async function vectorSearchChunks(
   }
   const qvec = toVectorLiteral(opts.queryEmbedding);
   const k = opts.limit;
-  if (opts.commentsOnly) {
+  if (opts.scope === 'COMMENTS') {
     const rows = await db.$queryRaw<{ node_id: string; chunk_index: number; char_start: number; char_end: number; chunk_text: string; distance: number }[]>`
       SELECT ne.node_id, ne.chunk_index, ne.char_start, ne.char_end, ne.chunk_text,
              ne.embedding <=> ${qvec}::vector AS distance
       FROM node_embeddings ne
       JOIN nodes n ON n.id = ne.node_id AND n.deleted_at IS NULL AND n.node_type = 'comment'
-      WHERE ne.memory_id IN (${Prisma.join(opts.memoryIds)}) AND ne.kind = 'chunk'
+      WHERE ne.memory_id IN (${Prisma.join(opts.memoryIds)}) AND ne.kind = 'chunk' ${NOT_A_STUB}
       ORDER BY distance ASC
       LIMIT ${k}`;
-    opts.onWindow?.({ exhausted: true });
+    opts.onWindow?.({ exhausted: rows.length < k });
     return rows.map((r) => ({
       nodeId: r.node_id, chunkIndex: Number(r.chunk_index), charStart: Number(r.char_start),
       charEnd: Number(r.char_end), chunkText: r.chunk_text, score: 1 - Number(r.distance),
@@ -417,6 +434,7 @@ export async function vectorSearchChunks(
   // Over-fetch to absorb soft-deleted-node losses + reach the top-k
   // chunks even when same-node chunks cluster near the top.
   const candidateK = Math.max(k, k * (opts.candidateFactor ?? 10));
+  const chunkScopeSql = opts.scope === 'CONTENT' ? Prisma.sql`AND n.node_type <> 'comment'` : Prisma.empty;
   const rows = await withEfSearch(db, candidateK, (tx) => tx.$queryRaw<
     {
       node_id: string;
@@ -430,8 +448,8 @@ export async function vectorSearchChunks(
     SELECT ne.node_id, ne.chunk_index, ne.char_start, ne.char_end, ne.chunk_text,
            ne.embedding <=> ${qvec}::vector AS distance
     FROM node_embeddings ne
-    JOIN nodes n ON n.id = ne.node_id AND n.deleted_at IS NULL
-    WHERE ne.memory_id IN (${Prisma.join(opts.memoryIds)}) AND ne.kind = 'chunk'
+    JOIN nodes n ON n.id = ne.node_id AND n.deleted_at IS NULL ${chunkScopeSql}
+    WHERE ne.memory_id IN (${Prisma.join(opts.memoryIds)}) AND ne.kind = 'chunk' ${NOT_A_STUB}
     ORDER BY ne.embedding <=> ${qvec}::vector
     LIMIT ${candidateK}
   `);
@@ -443,8 +461,8 @@ export async function vectorSearchChunks(
     if (!truncated && rows.length < candidateK) {
       const [c] = await db.$queryRaw<{ n: number }[]>`
         SELECT count(*)::int AS n FROM node_embeddings ne
-        JOIN nodes n ON n.id = ne.node_id AND n.deleted_at IS NULL
-        WHERE ne.memory_id IN (${Prisma.join(opts.memoryIds)}) AND ne.kind = 'chunk'`;
+        JOIN nodes n ON n.id = ne.node_id AND n.deleted_at IS NULL ${chunkScopeSql}
+        WHERE ne.memory_id IN (${Prisma.join(opts.memoryIds)}) AND ne.kind = 'chunk' ${NOT_A_STUB}`;
       exhausted = vectorWindowExhausted({ windowRows: rows.length, eligibleRows: Number(c?.n ?? 0), truncated });
     }
     opts.onWindow({ exhausted });

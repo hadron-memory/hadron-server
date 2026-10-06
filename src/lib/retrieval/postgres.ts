@@ -243,7 +243,7 @@ export const postgresRetrievalProvider: NodeRetrievalProvider = {
       queryEmbedding: opts.queryEmbedding,
       limit: opts.limit,
       onWindow: opts.onWindow,
-      commentsOnly: opts.contentScope === 'COMMENTS',
+      scope: opts.contentScope ?? 'CONTENT', // #1608: content by default for every caller
     });
   },
 
@@ -253,7 +253,7 @@ export const postgresRetrievalProvider: NodeRetrievalProvider = {
       queryEmbedding: opts.queryEmbedding,
       limit: opts.limit,
       onWindow: opts.onWindow,
-      commentsOnly: opts.contentScope === 'COMMENTS',
+      scope: opts.contentScope ?? 'CONTENT', // #1608: content by default for every caller
     });
   },
 };

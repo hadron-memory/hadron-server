@@ -542,6 +542,10 @@ async function changeComment(
       const change = apply(row, authorKey);
       await reviseComment(tx, txCtx, row, key, op, authorKey, change.patch);
       await tx.commentMeta.update({ where: { nodeId: row.id }, data: change.meta });
+      // #1608 — a stub's vectors (they hold its old text, including passage
+      // chunk_text) go in the same transaction that conceals it, never by
+      // eventual cleanup (#1674 review, Jane P2-4).
+      if (op === 'retract' || op === 'hide') await tx.nodeEmbedding.deleteMany({ where: { nodeId: row.id } });
     });
   } catch (error) {
     if (metaForConflict && isOpenThreadUniqueViolation(error)) {

@@ -162,3 +162,79 @@ describe('agent and other surfaces', () => {
     expect(search).not.toContain('comments:'); // …but never a comment
   });
 });
+
+describe('#1674 review cycle (Jane)', () => {
+  const vecFor = (map: (t: string) => number[]): EmbeddingClient => ({ ...stubClient, async embed(texts: string[]) { return texts.map(map); } });
+  const sweep = async () => {
+    // The sweep path: embed every pending node from its STORED row, no plaintext.
+    for (const n of await db.node.findMany({ where: { memoryId: memory.id, deletedAt: null } })) {
+      await db.node.update({ where: { id: n.id }, data: { embeddingPendingAt: new Date() } });
+      await embedNode(db, n.id);
+    }
+  };
+  const ids = (res: any) => res.hits.map((h: any) => h.node.id).sort();
+
+  it('P2-1: a comment made through the mutation is indexed by its body, in abstract and contentChunks memories', async () => {
+    for (const embeddingSource of ['abstract', 'contentChunks'] as const) {
+      await cleanDb(db);
+      const org = await db.organization.create({ data: { id: generateId(), name: 'S Org', urn: 'search.example' } });
+      admin = await db.user.create({ data: { githubId: 160802, githubUsername: 'search-admin2', handle: 'search-admin2', roles: [] } });
+      await db.orgMember.create({ data: { organizationId: org.id, userId: admin.id, role: 'ADMIN' } });
+      memory = await resolvers.Mutation.createMemory(null, { orgId: org.id, name: `idx-${embeddingSource}` }, as());
+      await db.memory.update({ where: { id: memory.id }, data: { vectorIndexEnabled: true, embeddingSource } });
+      const { comments } = await seed(2);
+      await sweep();
+      expect(await db.nodeEmbedding.count({ where: { nodeId: comments[0] } })).toBeGreaterThan(0);
+      const res = await findNodes({ query: 'retention', mode: 'vector', filter: { memoryIds: [memory.id], contentScope: 'COMMENTS' }, limit: 5 });
+      expect(ids(res)).toEqual([...comments].sort());
+    }
+  });
+
+  it('P2-2: comment vectors that outrank all content never take the CONTENT window', async () => {
+    await db.memory.update({ where: { id: memory.id }, data: { vectorIndexEnabled: true } });
+    // Now COMMENTS embed exactly onto the query and content only partly.
+    setEmbeddingClientForTests(vecFor((t) => (t.includes('feedback') || t === 'retention' ? oneHot(1) : near())));
+    const { target } = await seed(3);
+    for (let i = 0; i < 25; i++) await M.replyToComment(null, { commentRef: (await db.commentMeta.findFirstOrThrow({ where: { threadRootId: null } })).nodeId, body: `retention feedback ${i}` }, as());
+    void target;
+    await sweep();
+    // limit 2 ⇒ a 20-candidate window; 28 comment vectors outrank every content vector.
+    const res = await findNodes({ query: 'retention', mode: 'vector', filter: { memoryIds: [memory.id] }, limit: 2 });
+    expect(res.hits).toHaveLength(2);
+    expect(types(res)).toEqual(['info']);
+  });
+
+  it('P2-3: a COMMENTS vector search under a selective filter widens past its first exact prefix', async () => {
+    await db.memory.update({ where: { id: memory.id }, data: { vectorIndexEnabled: true } });
+    setEmbeddingClientForTests(vecFor((t) => (t.includes('top') || t === 'retention' ? oneHot(1) : near())));
+    const { target } = await seed(1);
+    const other = await db.user.create({ data: { githubId: 160803, githubUsername: 'search-other', roles: [] } });
+    await db.orgMember.create({ data: { organizationId: (await db.memory.findUniqueOrThrow({ where: { id: memory.id } })).organizationId!, userId: other.id, role: 'CONTRIBUTOR' } });
+    const rootId = (await db.commentMeta.findFirstOrThrow({ where: { threadRootId: null } })).nodeId;
+    for (let i = 0; i < 15; i++) await M.replyToComment(null, { commentRef: rootId, body: `retention top ${i}` }, as());
+    const deep = await M.replyToComment(null, { commentRef: rootId, body: 'retention low-ranked' }, { db, userId: other.id, roles: [] });
+    void target;
+    await sweep();
+    const res = await findNodes({ query: 'retention', mode: 'vector', filter: { memoryIds: [memory.id], contentScope: 'COMMENTS', createdBy: other.id }, limit: 1 });
+    expect(ids(res)).toEqual([deep.id]);
+  });
+
+  it('P2-4: a hidden or retracted comment is never a vector hit or passage, even while its vectors linger', async () => {
+    await db.memory.update({ where: { id: memory.id }, data: { vectorIndexEnabled: true, embeddingSource: 'contentChunks' } });
+    const { comments } = await seed(1);
+    await sweep();
+    // Simulate pending cleanup: conceal at the meta level only, leaving vectors.
+    await db.commentMeta.update({ where: { nodeId: comments[1] }, data: { hiddenAt: new Date(), hiddenBy: `u:${admin.id}` } });
+    expect(await db.nodeEmbedding.count({ where: { nodeId: comments[1] } })).toBeGreaterThan(0);
+    for (const granularity of ['node', 'chunk']) {
+      for (const contentScope of ['COMMENTS', 'ALL']) {
+        const res = await findNodes({ query: 'retention', mode: 'vector', granularity, filter: { memoryIds: [memory.id], contentScope }, limit: 10 });
+        const seen = [...(res.hits ?? []).map((h: any) => h.node.id), ...(res.passages ?? []).map((p: any) => p.parentNodeId)];
+        expect(seen).not.toContain(comments[1]);
+      }
+    }
+    // Through the mutation, the vectors go in the same transaction.
+    await M.retractComment(null, { commentRef: comments[2], expectedRevision: 1 }, as());
+    expect(await db.nodeEmbedding.count({ where: { nodeId: comments[2] } })).toBe(0);
+  });
+});
