@@ -4989,7 +4989,7 @@ export function createMcpServerInstance(
       // soft-deleted — the synthesize-parent pass below operates on the
       // filtered set.)
       // #1608 (cor:dmo:110:08) — the content tree: comments are feedback beside
-      // it, found with hadron_find_nodes contentScope COMMENTS.
+      // it, found with hadron_find_nodes nodeKind COMMENTS (GraphQL contentScope).
       const where: Record<string, unknown> = { deletedAt: null, nodeType: { not: COMMENT_NODE_TYPE } };
       if (prefix) where.loc = { startsWith: prefix + ':' };
       if (memoryId) where.memoryId = memoryId;
