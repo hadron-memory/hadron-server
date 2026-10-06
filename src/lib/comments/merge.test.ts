@@ -119,15 +119,11 @@ describe('#1682 review cycle', () => {
     const a = await node(src.id, 'race-a');
     const b = await node(src.id, 'race-b');
     const c = await M.createComment(null, { targetRef: a.id, body: 'posted after the pre-check' }, as());
-    // Deterministic stand-in for the interleaving: the pre-lock count saw no
-    // thread (as if the comment committed right after it).
-    const spy = vi.spyOn(db.commentMeta, 'count').mockResolvedValueOnce(0);
-    try {
-      expect((await errorOf(M.mergeNodes(null, { input: { source: a.id, target: b.id, include: ['CONTENT'], deleteSource: true } }, as()))).extensions)
-        .toMatchObject({ code: 'COMMENT_MERGE_FOLDS_THREADS' });
-    } finally {
-      spy.mockRestore();
-    }
+    // The refusal now exists ONLY under the source lock (the pre-lock count
+    // that raced, and disclosed before authorization, is gone): removing the
+    // in-lock check fails this.
+    expect((await errorOf(M.mergeNodes(null, { input: { source: a.id, target: b.id, include: ['CONTENT'], deleteSource: true } }, as()))).extensions)
+      .toMatchObject({ code: 'COMMENT_MERGE_FOLDS_THREADS', nodes: [{ nodeId: a.id, loc: 'race-a', comments: 1 }] });
     // Nothing was destroyed.
     expect(await db.node.findUnique({ where: { id: c.id } })).not.toBeNull();
     expect(await db.node.findUnique({ where: { id: a.id } })).not.toBeNull();
@@ -141,7 +137,9 @@ describe('#1682 review cycle', () => {
     // Stand-in for "posted after the preflight": skip the preflight's view.
     const spy = vi.spyOn(db, '$queryRaw').mockResolvedValueOnce([] as never);
     try {
-      expect((await errorOf(merge())).extensions).toMatchObject({ code: 'COMMENT_MOVE_UNCOMMENTABLE', class: 'private' });
+      expect((await errorOf(merge())).extensions).toMatchObject({
+        code: 'COMMENT_MOVE_UNCOMMENTABLE', class: 'private', nodes: [{ nodeId: a.id, loc: 'late', comments: 1 }],
+      });
     } finally {
       spy.mockRestore();
     }

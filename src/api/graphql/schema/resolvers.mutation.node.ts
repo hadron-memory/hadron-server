@@ -3669,19 +3669,10 @@ export const nodeMutations = {
       if (source.nodeType === COMMENT_NODE_TYPE || target.nodeType === COMMENT_NODE_TYPE) {
         throw commentGovernedError('merge', 'edits');
       }
-      // #1664 — moving the source's edges is safe (governed edges never re-home,
-      // below), but DELETING a source that has live threads would destroy their
-      // anchor, which can't move to the target (cor:dmo:110:01).
-      if (deleteSource) {
-        const live = await ctx.db.commentMeta.count({ where: { targetNodeId: source.id, node: { deletedAt: null } } });
-        if (live > 0) {
-          throw commentError(
-            'COMMENT_MERGE_FOLDS_THREADS',
-            `Cannot merge with deleteSource: the source node has ${live} live comment(s), anchored to it, and a comment's anchor can't move to another node. An admin of its memory deletes the threads first, or merge without deleteSource.`,
-            { nodes: [{ nodeId: source.id, loc: source.loc, comments: live }] },
-          );
-        }
-      }
+      // #1664 — moving the source's edges is safe (governed edges never re-home);
+      // DELETING a source with live threads refuses, but only under the source
+      // lock, after every gate (#1682 review: a pre-lock check raced, and ran
+      // before the source memory's authorization, disclosing its loc).
       // Same-memory merge (the common case): write access to the target's
       // memory already covers the source. Only run a separate source check
       // when the nodes live in different memories.

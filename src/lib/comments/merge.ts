@@ -82,14 +82,14 @@ export async function carryThreadsInTx(tx: Prisma.TransactionClient, targetIds: 
   // The destination re-check, per batch (#1682 review, Baloo P3-2): a thread
   // posted after the preflight still refuses with the typed code, never a raw
   // invariant failure at commit.
-  const live = await tx.node.count({ where: { id: { in: ids }, deletedAt: null } });
-  if (live > 0) {
+  const live = await liveThreadsByTarget(tx, targetIds);
+  if (live.length > 0) {
     const dest = await tx.memory.findUniqueOrThrow({ where: { id: toMemoryId }, select: { class: true } });
     if (!COMMENTABLE_CLASSES.has(dest.class)) {
       throw commentError(
         'COMMENT_MOVE_UNCOMMENTABLE',
-        `Cannot carry ${live} live comment(s) into a ${dest.class} memory. An admin of the source memory deletes them first.`,
-        { class: dest.class, nodes: [] },
+        `Cannot carry live comments into a ${dest.class} memory. An admin of the source memory deletes them first.`,
+        { class: dest.class, nodes: live },
       );
     }
   }
@@ -104,15 +104,30 @@ export async function carryThreadsInTx(tx: Prisma.TransactionClient, targetIds: 
  */
 export async function refuseLiveThreadsOnFold(tx: Prisma.TransactionClient, foldedIds: string[]): Promise<void> {
   if (foldedIds.length === 0) return;
-  const live = await tx.commentMeta.findFirst({
-    where: { targetNodeId: { in: foldedIds }, node: { deletedAt: null } },
-    select: { target: { select: { loc: true } } },
-  });
-  if (live) {
+  const live = await liveThreadsByTarget(tx, foldedIds);
+  if (live.length > 0) {
     throw commentError(
       'COMMENT_MERGE_FOLDS_THREADS',
-      `Cannot fold "${live.target.loc}": a comment thread was posted on it during the merge. Delete the thread, then resume the merge.`,
-      { nodes: [{ loc: live.target.loc }] },
+      `Cannot remove ${live.map((n) => `"${n.loc}"`).join(', ')}: live comment threads are anchored there, and an anchor can't move to another node (cor:dmo:110:01). An admin deletes the threads first.`,
+      { nodes: live },
     );
   }
+}
+
+/** The live comment count per target among `targetIds`, in the one payload shape every refusal uses. */
+async function liveThreadsByTarget(
+  tx: Prisma.TransactionClient,
+  targetIds: string[],
+): Promise<Array<{ nodeId: string; loc: string; comments: number }>> {
+  const rows = await tx.commentMeta.groupBy({
+    by: ['targetNodeId'],
+    where: { targetNodeId: { in: targetIds }, node: { deletedAt: null } },
+    _count: { _all: true },
+  });
+  if (rows.length === 0) return [];
+  const locs = new Map((await tx.node.findMany({ where: { id: { in: rows.map((r) => r.targetNodeId) } }, select: { id: true, loc: true } }))
+    .map((n) => [n.id, n.loc]));
+  return rows
+    .map((r) => ({ nodeId: r.targetNodeId, loc: locs.get(r.targetNodeId) ?? '', comments: r._count._all }))
+    .sort((a, b) => (a.loc < b.loc ? -1 : a.loc > b.loc ? 1 : 0));
 }
