@@ -2,6 +2,7 @@ import { boundSessionPrivacyFilter } from '../lib/auth/sessionPrivacy.js';
 import { createHmac, randomUUID } from 'crypto';
 // Spec 049 S4 — the protected-loc gate on hadron_update_node (no lock on that path).
 import { COMMENT_NODE_TYPE, assertNotCommentWrite, commentGovernedError, isCommentGovernedError } from '../lib/comments/index.js';
+import { commentHitInfo, commentHitLabel } from '../lib/comments/hitLabel.js';
 import { commentIdsAmong, hardDeleteThreadsOfTargets, softDeleteThreadsOfTargets } from '../lib/comments/lifecycle.js';
 import { assertLocWritable, LocProtectedError } from '../lib/protectedLoc.js';
 import {
@@ -3709,6 +3710,7 @@ export function createMcpServerInstance(
       isRunnable: z.boolean().optional().describe('Filter by runnable status (applies in every mode). true = only task nodes (Node.isRunnable=true) — the canonical "tasks I can run" predicate hadron_run_task gates on. false = only nodes explicitly marked non-runnable (most nodes leave it NULL, so false does NOT include them). Omit to ignore runnable status. Spec cor:api:060.'),
       role: z.string().optional().describe('Filter by Node.role family in every mode. Segment-boundary prefix semantics: "spec" matches "spec" and dotted descendants such as "spec.rule", but never "special" or "specification" (#1322). Node.role remains an open string; this is a query filter, not role validation.'),
       objectType: z.string().optional().describe('#725 — collection facet: only nodes whose objectType equals this (the domain-object discriminator, e.g. "competitor" / "insight"). Orthogonal to nodeType. Composes with query/mode + where.'),
+      contentScope: z.enum(['CONTENT', 'COMMENTS', 'ALL']).optional().describe('#1608 — CONTENT (default): content nodes only. COMMENTS: comment nodes only (feedback about other nodes), found exhaustively in every mode before ranking and limits. ALL: both. A comment hit is labelled COMMENT and is never content of, or verified fact about, its target.'),
       scope: z.string().optional().describe('Spec 049: search under a named scope — a scope id, a scope NAME (resolved in the active App\'s context), "app" (the active App\'s attached memories), or "global" (your active organization\'s view). Omitted with no memory selector: the ladder applies (active scope › active App › active organization), and the result says which. An explicit memoryUrn / memoryUrns / allMemories outranks the ambient scope but still intersects with one named here.'),
       brief: z.boolean().optional().describe('Return index info only: name, description, edges'),
       limit: z.number().optional().describe('Max results (default 10 for a query; 50 for survey mode "*"/""). Raise it if the top hits do not cover what you need.'),
@@ -3717,7 +3719,7 @@ export function createMcpServerInstance(
       granularity: z.enum(['node', 'chunk']).optional().describe('node (default): one entry per matching node, ranked by best-chunk similarity for content-chunk indexes. chunk: return matching passages (span text + character offsets + chunk index + parent node URN), useful for RAG context-stuffing. **chunk requires mode:vector** — hybrid + chunk is out of v1 (the design call for how RRF fuses with passage-level results was deferred). Spec 033 US2 FR-022.'),
       where: z.record(z.string(), z.unknown()).optional().describe('Structured predicate over a node\'s `properties`/`data` JSONB (#719) — filters, then the chosen mode ranks the survivors (composes with keyword/vector/hybrid/regex and survey/browse). A node is EITHER a branch (exactly one of `and`/`or`/`not`) OR a leaf: a `path` (array of JSON keys, e.g. ["sourceKind"]) plus exactly ONE operator — eq | ne | in | lt | lte | gt | gte | between | exists | contains. `field`: "properties" (default) | "data". `as`: "text" (default) | "number" | "datetime" | "boolean" — number/datetime route through DB guards so unparseable values drop the row (never an error); `contains` is jsonb @> containment. Bounded: depth ≤ 4, ≤ 32 leaves, path ≤ 8. Example: {"and":[{"path":["sourceKind"],"eq":"substack"},{"path":["extractedAt"],"as":"datetime","gte":"2026-07-04T00:00:00Z"}]}'),
     },
-    async ({ query, mode, parentRel, memoryUrn, memoryUrns, allMemories, isRunnable, role, objectType, brief, limit, minScore, expand, granularity, where, scope }) => {
+    async ({ query, mode, parentRel, memoryUrn, memoryUrns, allMemories, isRunnable, role, objectType, contentScope, brief, limit, minScore, expand, granularity, where, scope }) => {
       try {
         validateParentRel(parentRel);
       } catch (e) {
@@ -3957,6 +3959,7 @@ export function createMcpServerInstance(
               memoryIds: filterMemoryIds,
               isRunnable: isRunnable ?? undefined,
               role: role ?? undefined,
+              contentScope: contentScope ?? undefined,
               objectType: objectType ?? undefined,
               locPrefix: filterLocPrefix,
               // #719 — structured JSONB predicate; findNodes validates it and
@@ -3995,6 +3998,7 @@ export function createMcpServerInstance(
           select: { id: true, name: true, loc: true, memoryId: true },
         });
         const parentById = new Map(parentNodes.map((n) => [n.id, n]));
+        const passageComments = await commentHitInfo(db, parentIds); // #1608
         const lines: string[] = [];
         for (const p of passages) {
           const parent = parentById.get(p.parentNodeId);
@@ -4005,7 +4009,11 @@ export function createMcpServerInstance(
           const scoreStr = p.score != null ? `  (score ${p.score.toFixed(3)})` : '';
           const header = `- **${urn}** [chunk ${p.chunkIndex} @ chars ${p.charStart}-${p.charEnd}] — ${name}${scoreStr}`;
           const bodyLines = p.text.split(/\r?\n/).map((l) => `  ${l}`);
-          lines.push([header, ...bodyLines].join('\n'));
+          const asComment = passageComments.get(p.parentNodeId);
+          const label = asComment
+            ? [commentHitLabel(asComment, (await nodeUrnResult(asComment.targetLoc, asComment.targetMemoryId, memoryUrnOf)).urn)]
+            : [];
+          lines.push([header, ...label, ...bodyLines].join('\n'));
         }
         return textResult(`${scopePrefix}Found ${lines.length} passage(s):\n\n${lines.join('\n')}`);
       }
@@ -4070,11 +4078,16 @@ export function createMcpServerInstance(
       // Reduce, not Math.max(...scores): `limit` is caller-controlled, so a huge
       // page would spread too many args into Math.max and throw RangeError.
       const topScore = scores.length ? scores.reduce((m, s) => (s > m ? s : m), -Infinity) : null;
+      // #1608 — what each comment hit is about, so its line says it is feedback.
+      const commentInfo = await commentHitInfo(db, (result.hits ?? [])
+        .filter((h: { node: { nodeType?: string } }) => h.node.nodeType === COMMENT_NODE_TYPE)
+        .map((h: { node: { id: string } }) => h.node.id));
       const renderHit = async (hit: {
         node: {
           id: string;
           loc: string;
           memoryId: string;
+          nodeType?: string;
           name: string;
           description: string | null;
           abstract: string | null;
@@ -4103,6 +4116,11 @@ export function createMcpServerInstance(
             ? `- **${urn}** (id: ${n.id}) — ${n.name}  (score ${score.toFixed(3)}${relStr})`
             : `- **${urn}** (id: ${n.id}) — ${n.name}`,
         ];
+        const asComment = commentInfo.get(n.id);
+        if (asComment) {
+          const target = await nodeUrnResult(asComment.targetLoc, asComment.targetMemoryId, memoryUrnOf);
+          parts.push(commentHitLabel(asComment, target.urn));
+        }
         // Spec 033 FR-023 — `Source: abstract-stale` on a ranked hit whose stored
         // abstract no longer matches the current (plaintext) content. Unscored
         // expand-neighbours are skipped (they weren't matched via an abstract).
@@ -4996,7 +5014,9 @@ export function createMcpServerInstance(
       // means a parent ceases to be "implicit" once its only child is
       // soft-deleted — the synthesize-parent pass below operates on the
       // filtered set.)
-      const where: Record<string, unknown> = { deletedAt: null };
+      // #1608 (cor:dmo:110:08) — the content tree: comments are feedback beside
+      // it, found with hadron_find_nodes contentScope COMMENTS.
+      const where: Record<string, unknown> = { deletedAt: null, nodeType: { not: COMMENT_NODE_TYPE } };
       if (prefix) where.loc = { startsWith: prefix + ':' };
       if (memoryId) where.memoryId = memoryId;
       else if (memoryIds) where.memoryId = { in: memoryIds };

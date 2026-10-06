@@ -53,6 +53,7 @@ import { orgMutations } from './resolvers.mutation.org.js';
 import { agentMutations } from './resolvers.mutation.agent.js';
 import { workerMutations, workerQueries, workerFieldResolvers } from './resolvers.worker.js';
 import { teamRoleMutations, teamRoleQueries } from './resolvers.teamRole.js';
+import { teamSpecQueries } from './resolvers.teamSpec.js';
 import { teamChatMutations, teamChatQueries } from './resolvers.teamChat.js';
 import { teamAttentionMutations, teamAttentionQueries } from './resolvers.teamAttention.js';
 import { teamWorkMutations, teamWorkQueries } from './resolvers.teamWork.js';
@@ -137,6 +138,7 @@ export const resolvers = {
     ...readStateQueries,
     ...workerQueries,
     ...teamRoleQueries,
+    ...teamSpecQueries,
     ...sessionQueries,
     ...slackQueries,
     ...mcpQueries,
