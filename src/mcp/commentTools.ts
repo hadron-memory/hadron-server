@@ -27,6 +27,8 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import { commentFieldResolvers, type CommentView } from '../api/graphql/schema/resolvers.comments.js';
 import { userUrn } from '../lib/userHandle.js';
+import { UrnNotQualifiedError } from '../lib/urn.js';
+import { AmbiguousLegacyUrnError } from '../lib/entityRef/errors.js';
 import type { AuthContext } from '../middleware/auth.js';
 import type { PrismaClient } from '../generated/prisma/index.js';
 
@@ -60,7 +62,10 @@ function textResult(text: string) {
 /**
  * A resolver refusal as `[<code>] <message>`, plus its extensions (threadId,
  * currentRevision, class, field/max) as `key: value` so an agent can act on
- * them. Anything that is not a refusal is a server fault and is rethrown.
+ * them. A string prints as is; any other value prints as JSON, so a future
+ * extension that carries an object or list stays readable rather than
+ * collapsing to `[object Object]`. Anything that is not a refusal is a
+ * server fault and is rethrown.
  */
 export function commentErrorText(e: unknown) {
   if (e instanceof GraphQLError) {
@@ -70,6 +75,11 @@ export function commentErrorText(e: unknown) {
   }
   if (e instanceof Error && (e.message === 'Forbidden' || e.message === 'Unauthenticated')) {
     return textResult(`[${e.message.toLowerCase()}] ${e.message}.`);
+  }
+  // A ref that can't be resolved as written is the caller's input, not a
+  // server fault (the scope tools' convention).
+  if (e instanceof UrnNotQualifiedError || e instanceof AmbiguousLegacyUrnError) {
+    return textResult(`[bad_user_input] ${e.message}`);
   }
   throw e;
 }
@@ -171,14 +181,20 @@ export function registerCommentTools(server: McpServer, deps: { db: PrismaClient
     {
       targetRef: z.string().describe('The node whose discussion to read: its URN or id.'),
       state: z.array(z.enum(['OPEN', 'RESOLVED'])).optional().describe('Only threads in these states. Default: all.'),
-      limit: z.number().int().optional().describe('Threads per page (default 50, cap 200). Each thread returns up to 200 replies.'),
-      offset: z.number().int().optional().describe('Page offset.'),
+      limit: z.number().int().nonnegative().optional().describe('Threads per page (default 50, cap 200). Each thread returns up to 200 replies.'),
+      offset: z.number().int().nonnegative().optional().describe('Page offset.'),
     },
     async ({ targetRef, state, limit, offset }) => {
       const ctx = ctxOf();
       try {
         const page = await Q.commentThreads({}, { targetRef, state, limit, offset }, ctx);
         if (page.total === 0) return textResult(`No comment threads${state?.length ? ` in state ${state.join('/')}` : ''} on ${targetRef}.\n\n${COMMENT_FRAMING}`);
+        // #1676 review P2 (Atilla, Dan): a nonzero total with an empty page
+        // (limit 0, or an offset past the end) is a valid answer, and the
+        // target can't be read off a root that isn't there.
+        if (page.items.length === 0) {
+          return textResult(`No threads on this page: offset ${offset ?? 0} of ${page.total} thread${page.total === 1 ? '' : 's'} on ${targetRef}.\n\n${COMMENT_FRAMING}`);
+        }
         const target = page.items[0].root.target;
         const targetUrn = await (C.target(page.items[0].root, {}, ctx) as Promise<{ urn: string }>).then((t) => t.urn);
         const blocks = await Promise.all(page.items.map(async ({ root, replies, replyCount }) => {

@@ -209,6 +209,58 @@ describe('comment tools: parity with the GraphQL gate (no drift)', () => {
       tool: 'hadron_create_comment', args: () => ({ targetRef: target.id, body: '   ' }),
     },
     {
+      name: 'a private memory is not commentable', userId: () => writer.id, expected: 'COMMENT_MEMORY_NOT_COMMENTABLE',
+      setup: async () => {
+        const priv = await db.memory.create({ data: {
+          id: generateId(), organizationId: org.id, urn: 'cmtmcp.example:writer-private', name: 'p', class: 'private', userId: writer.id,
+        } });
+        return { node: (await db.node.create({ data: { id: generateId(), memoryId: priv.id, loc: 'note', name: 'Note', content: 'n' } })).id };
+      },
+      gql: (s, ctx) => M.createComment(null, { targetRef: s.node, body: 'x' }, ctx),
+      tool: 'hadron_create_comment', args: (s) => ({ targetRef: s.node, body: 'x' }),
+    },
+    {
+      name: 'an anchor past the current revision is invalid', userId: () => writer.id, expected: 'COMMENT_ANCHOR_REVISION_INVALID',
+      gql: (_, ctx) => M.createComment(null, { targetRef: target.id, body: 'x', anchorRevision: 5 }, ctx),
+      tool: 'hadron_create_comment', args: () => ({ targetRef: target.id, body: 'x', anchorRevision: 5 }),
+    },
+    {
+      name: 'a retracted thread takes no reply', userId: () => other.id, expected: 'COMMENT_RETRACTED',
+      setup: async () => {
+        const { root } = await writerThread();
+        await M.retractComment(null, { commentRef: root, expectedRevision: 1 }, gqlCtx(writer.id));
+        return { root };
+      },
+      gql: (s, ctx) => M.replyToComment(null, { commentRef: s.root, body: 'r' }, ctx),
+      tool: 'hadron_reply_to_comment', args: (s) => ({ commentRef: s.root, body: 'r' }),
+    },
+    {
+      name: 'a hidden comment cannot be edited', userId: () => writer.id, expected: 'COMMENT_HIDDEN',
+      setup: async () => {
+        const { root } = await writerThread();
+        await M.hideComment(null, { commentRef: root, reason: 'abuse', expectedRevision: 1 }, gqlCtx(admin.id));
+        return { root };
+      },
+      gql: (s, ctx) => M.editComment(null, { commentRef: s.root, body: 'b', expectedRevision: 2 }, ctx),
+      tool: 'hadron_edit_comment', args: (s) => ({ commentRef: s.root, body: 'b', expectedRevision: 2 }),
+    },
+    {
+      name: 'an open thread cannot be reopened', userId: () => writer.id, expected: 'COMMENT_THREAD_STATE', setup: writerThread,
+      gql: (s, ctx) => M.reopenCommentThread(null, { commentRef: s.root, expectedRevision: 1 }, ctx),
+      tool: 'hadron_reopen_comment_thread', args: (s) => ({ commentRef: s.root, expectedRevision: 1 }),
+    },
+    {
+      name: 'a missing comment is not found', userId: () => writer.id, expected: 'COMMENT_NOT_FOUND',
+      setup: async () => ({ missing: generateId() }),
+      gql: (s, ctx) => M.replyToComment(null, { commentRef: s.missing, body: 'r' }, ctx),
+      tool: 'hadron_reply_to_comment', args: (s) => ({ commentRef: s.missing, body: 'r' }),
+    },
+    {
+      name: 'a non-comment is not a comment', userId: () => writer.id, expected: 'COMMENT_NOT_FOUND',
+      gql: (_, ctx) => M.retractComment(null, { commentRef: target.id, expectedRevision: 1 }, ctx),
+      tool: 'hadron_retract_comment', args: () => ({ commentRef: target.id, expectedRevision: 1 }),
+    },
+    {
       name: 'impersonation never writes a comment', userId: () => writer.id, expected: 'COMMENT_IMPERSONATION_REFUSED',
       extra: () => {
         const impersonation = { sessionId: generateId(), actorUserId: admin.id, orgId: org.id, expiresAt: new Date(Date.now() + 3_600_000) };
@@ -235,6 +287,40 @@ describe('comment tools: parity with the GraphQL gate (no drift)', () => {
     const asWriter = mcp(writer.id);
     expect(await asWriter.callToolText('hadron_create_comment', { targetRef: target.id, body: 'again' })).toContain(`threadId: ${root}`);
     expect(await asWriter.callToolText('hadron_edit_comment', { commentRef: root, body: 'b', expectedRevision: 9 })).toContain('currentRevision: 1');
+  });
+
+  it('an empty page under a nonzero total answers cleanly (limit 0, offset past the end; #1676 review P2)', async () => {
+    await writerThread();
+    const asReader = mcp(reader.id);
+    for (const args of [{ limit: 0 }, { offset: 5 }]) {
+      const viaGraphql = await Q.commentThreads(null, { targetRef: target.id, ...args }, gqlCtx(reader.id));
+      expect(viaGraphql).toMatchObject({ items: [], total: 1 });
+      const text = await asReader.callToolText('hadron_list_comments', { targetRef: target.id, ...args });
+      expect(text, JSON.stringify(args)).toContain(`No threads on this page: offset ${args.offset ?? 0} of 1 thread on ${target.id}.`);
+      expect(text).toContain(COMMENT_FRAMING);
+    }
+  });
+
+  it('a hidden comment reads as a stub through every tool; an unreadable target shows no Feedback line', async () => {
+    const { root } = await writerThread();
+    await M.hideComment(null, { commentRef: root, reason: 'abuse', expectedRevision: 1 }, gqlCtx(admin.id));
+    const asReader = mcp(reader.id);
+    for (const text of [
+      await asReader.callToolText('hadron_list_comments', { targetRef: target.id }),
+      await asReader.callToolText('hadron_get_comment', { commentRef: root }),
+    ]) {
+      expect(text).toContain('[hidden by a memory admin');
+      expect(text).not.toContain('mine');
+      expect(text).not.toContain('abuse');
+    }
+    const outsiderRead = await mcp(outsider.id).callToolText('hadron_get_node', { urn: targetUrn() });
+    expect(outsiderRead).not.toContain('Feedback:');
+    expect(outsiderRead).not.toContain(target.id);
+  });
+
+  it('a malformed ref is the caller\'s input: a [bad_user_input] envelope, not an internal error', async () => {
+    const text = await mcp(writer.id).callToolText('hadron_reply_to_comment', { commentRef: 'not-a-ref', body: 'r' });
+    expect(text).toMatch(/^\[bad_user_input\] /);
   });
 
   it('a comment the caller cannot read is not found, never described', async () => {
