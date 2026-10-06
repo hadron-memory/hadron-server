@@ -113,3 +113,38 @@ describe('mergeNodes and threads', () => {
       .toMatchObject({ code: 'COMMENT_MERGE_FOLDS_THREADS', nodes: [{ nodeId: a.id, loc: 'na', comments: 1 }] });
   });
 });
+
+describe('#1682 review cycle', () => {
+  it('Baloo P2: mergeNodes deleteSource re-checks live threads UNDER the source lock', async () => {
+    const a = await node(src.id, 'race-a');
+    const b = await node(src.id, 'race-b');
+    const c = await M.createComment(null, { targetRef: a.id, body: 'posted after the pre-check' }, as());
+    // Deterministic stand-in for the interleaving: the pre-lock count saw no
+    // thread (as if the comment committed right after it).
+    const spy = vi.spyOn(db.commentMeta, 'count').mockResolvedValueOnce(0);
+    try {
+      expect((await errorOf(M.mergeNodes(null, { input: { source: a.id, target: b.id, include: ['CONTENT'], deleteSource: true } }, as()))).extensions)
+        .toMatchObject({ code: 'COMMENT_MERGE_FOLDS_THREADS' });
+    } finally {
+      spy.mockRestore();
+    }
+    // Nothing was destroyed.
+    expect(await db.node.findUnique({ where: { id: c.id } })).not.toBeNull();
+    expect(await db.node.findUnique({ where: { id: a.id } })).not.toBeNull();
+  });
+
+  it('Baloo P3-2: a live thread that appears after the preflight still refuses with the typed code', async () => {
+    const a = await node(src.id, 'late');
+    const priv = await resolvers.Mutation.createMemory(null, { orgId, name: 'merge-priv2', memoryClass: 'private' }, as());
+    dst = priv;
+    await M.createComment(null, { targetRef: a.id, body: 'x' }, as());
+    // Stand-in for "posted after the preflight": skip the preflight's view.
+    const spy = vi.spyOn(db, '$queryRaw').mockResolvedValueOnce([] as never);
+    try {
+      expect((await errorOf(merge())).extensions).toMatchObject({ code: 'COMMENT_MOVE_UNCOMMENTABLE', class: 'private' });
+    } finally {
+      spy.mockRestore();
+    }
+    expect((await db.node.findUniqueOrThrow({ where: { id: a.id } })).memoryId).toBe(src.id);
+  });
+});

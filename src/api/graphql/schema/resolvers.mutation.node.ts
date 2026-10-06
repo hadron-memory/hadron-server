@@ -1,6 +1,7 @@
 // nodeMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
 import { COMMENT_NODE_TYPE, assertNotCommentWrite, commentError, commentGovernedError } from '../../../lib/comments/index.js';
 import { commentIdsAmong, hardDeleteThreadsOfTargets, restoreThreadsOfTargets, softDeleteThreadsOfTargets } from '../../../lib/comments/lifecycle.js';
+import { refuseLiveThreadsOnFold } from '../../../lib/comments/merge.js';
 import { generateId } from '../../../lib/id.js';
 // Spec 049 S4 — the protected-loc gate on the in-place update paths and the bulk skip.
 import {
@@ -3899,6 +3900,12 @@ export const nodeMutations = {
             extensions: { code: 'NODE_WRITE_CONFLICT' },
           });
         }
+        // #1682 review (Baloo P2) — the AUTHORITATIVE live-thread refusal, under
+        // the source lock and before any write. The pre-lock count above is only
+        // a fast answer: posting a comment never changes its target's revision
+        // (cor:dmo:110:06), so revisionStateMatches can't see one that landed in
+        // between, and the delete below would destroy it.
+        if (deleteSource) await refuseLiveThreadsOnFold(tx, [source.id]);
         await createNodeRevision(
           tx,
           buildNodeRevisionSnapshot(target, editorFromAuth(ctx), {
