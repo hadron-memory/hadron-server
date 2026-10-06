@@ -2062,6 +2062,12 @@ export const typeDefs = `#graphql
     back, and the router stops routing it. Default 90.
     """
     sessionDormancyDays: Int!
+    """
+    Ruling DY-3: whether startAgentSession stamps a hard expiry by default.
+    False means this App's agent sessions have no hard expiry unless the call
+    passes sessionTimeoutSeconds (still capped by the App's ceiling).
+    """
+    agentSessionsExpire: Boolean!
     anonymousTtlDays: Int!
     """
     023-app-shape US1: Agents installed in this App, via the AppAgent
@@ -9500,6 +9506,8 @@ export const typeDefs = `#graphql
       sessionTimeoutSeconds: Int
       "Ruling DY-5: the dormancy threshold in days (a positive integer). See App.sessionDormancyDays."
       sessionDormancyDays: Int
+      "Ruling DY-3: see App.agentSessionsExpire."
+      agentSessionsExpire: Boolean
       anonymousTtlDays: Int
     ): App!
 
