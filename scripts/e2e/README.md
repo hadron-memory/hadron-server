@@ -13,7 +13,9 @@ scripts/e2e/stack.sh down charles
 uses `pre-push.sql` → Prisma schema push → `post-push.sql`, seeds it and waits
 for server health. The seed verifies the HNSW index, generated `nodes.tsv`
 and ownership/class CHECK constraints. It refuses a populated DB. To reset,
-use `down` then `up`; do not restart the initializer on an established DB.
+use `down` then `up`; restarting an initialized stack refuses explicitly before
+Prisma or signing-key generation. The guard checks the public schema used by
+this stack's fixed database URL and SQL; alternate Prisma schemas are unsupported.
 Failed startup leaves the named stack available for `logs` and `down`.
 
 Give **every concurrent stack a different name, API port and portal port**.
@@ -21,6 +23,8 @@ For example, `chip 18401 18501` runs alongside `charles 18400 18500`.
 Compose project names, DB/graph/credential volumes and networks are scoped to
 `hadron-e2e-NAME`. `down` destroys only that stack, including its volumes and locally built image.
 There are no fixed container names, host DB connections or broad process kills.
+Stacks launched before the recorded-path fix retain their old cached path; the
+fix applies to new launches and does not migrate legacy lifecycle state.
 
 On orca1 the script automatically uses the restricted Incus `qa-docker`
 image and Docker Compose inside a disposable instance. It copies tracked (including staged)
@@ -30,7 +34,8 @@ Git metadata and host dependencies. A per-stack Node HTTP forwarder binds host
 proxy devices; the script does not change those permissions. Backend, ports and forwarder ownership are stored under
 `${XDG_STATE_HOME:-$HOME/.local/state}/hadron-e2e/hadron-e2e-NAME`. Teardown
 uses that recorded backend even if another backend becomes available, checks
-the forwarder command before stopping it, and also works on stopped instances.
+the actual spawned forwarder command before stopping it (including symlinked
+checkouts), and also works on stopped instances.
 Requirements: `incus`, `qa-docker`, Node, Git, Bash, curl and tar. On a host with Docker, Compose v2 is used directly.
 Set `E2E_BACKEND=incus` or `E2E_BACKEND=docker` to choose explicitly and keep
 that choice consistent for teardown; auto teardown uses the recorded choice. Docker publication binds host loopback;
@@ -142,6 +147,6 @@ Edit the catalog, `seed.ts` and this inventory together. Preserve synthetic `.te
 READER platform roles and the memory CHECK invariants. Update `check()` for
 the expected DB shape and the catalog's golden memory sets for observable access.
 Run `down`/`up`/`check` on a fresh stack. Lifecycle/forwarder regressions run with
-`node --test scripts/e2e/forwarder.test.mjs scripts/e2e/lifecycle.test.mjs`. Keep epic-specific fixtures (passkeys,
+`node --test scripts/e2e/*.test.mjs`. Keep epic-specific fixtures (passkeys,
 virtual authenticators, comments) in their later slices; do not change the
 canonical dev seed or shared `hadron_test` database for an E2E fixture.
