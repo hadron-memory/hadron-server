@@ -15,6 +15,8 @@ import { NodeNotFoundError } from '../../../lib/entityRef/errors.js';
 import { sessionKeyCache } from '../../../lib/sessionKeyCache.js';
 import type { EncryptionKey } from '../../../lib/crypto.js';
 import { editorFromAuth } from '../../../lib/nodeRevisionSnapshot.js';
+import { COMMENT_NODE_TYPE } from '../../../lib/comments/index.js';
+import { unresolvedFeedbackOf } from '../../../lib/comments/summary.js';
 import {
   approvalFieldsOf,
   approvalRecordOf,
@@ -154,8 +156,10 @@ export const nodeApprovalQueries = {
     const { id: memoryId } = await resolveMemoryRef(ctx.db, memoryRef);
     if (!(await isMemoryReadableCached(ctx, memoryId))) throw new MemoryNotFoundError(memoryRef);
     const key = await keyForMemory(ctx, memoryId);
+    // #1607 — comments are never approved, so they are outside the tamper
+    // check entirely (cor:dmo:110:06), not reported as NOT_APPROVED.
     const nodes = await ctx.db.node.findMany({
-      where: { memoryId, deletedAt: null },
+      where: { memoryId, deletedAt: null, nodeType: { not: COMMENT_NODE_TYPE } },
       orderBy: { loc: 'asc' },
       select: NODE_APPROVAL_ROW_SELECT,
     });
@@ -228,6 +232,7 @@ export const nodeApprovalMutations = {
         // later edits are approved one at a time.
         const ids = await tx.$queryRaw<Array<{ id: string }>>`
           SELECT id FROM nodes WHERE memory_id = ${memoryId} AND deleted_at IS NULL AND minted_at IS NULL
+            AND node_type <> ${COMMENT_NODE_TYPE}
           ORDER BY id FOR UPDATE`;
         const approved: NodeApprovalRow[] = [];
         const skippedPlaceholders: string[] = [];
@@ -250,7 +255,11 @@ export const nodeApprovalMutations = {
             }
           }
         }
-        return { approved, skippedPlaceholders, alreadyApprovedCount };
+        // #1607 (cor:dmo:110:07) — open discussion on the nodes in bulk scope,
+        // as a warning. Read under the same lock as the approvals it annotates.
+        const scoped = await tx.node.findMany({ where: { id: { in: ids.map((r) => r.id) } }, select: { id: true, loc: true } });
+        const unresolvedFeedback = (await unresolvedFeedbackOf(tx, scoped)).map((f) => ({ ...f, memoryId }));
+        return { approved, skippedPlaceholders, alreadyApprovedCount, unresolvedFeedback };
       },
       { timeout: 120_000 },
     );
@@ -260,6 +269,7 @@ export const nodeApprovalMutations = {
       approved: await Promise.all([...outcome.approved].sort(byLoc).map((n) => receiptOf(ctx, n))),
       alreadyApprovedCount: outcome.alreadyApprovedCount,
       skippedPlaceholders: outcome.skippedPlaceholders.sort(),
+      unresolvedFeedback: outcome.unresolvedFeedback,
     };
   },
 };

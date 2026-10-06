@@ -59,6 +59,9 @@ export async function cleanDb(db: PrismaClient): Promise<void> {
   await db.agentWebhook.deleteMany();
   await db.quotaCounter.deleteMany();
   await db.actionTicket.deleteMany();
+  // #1606 — comment nodes first: their governed edges refuse a delete while
+  // the comment exists (prisma/comment-invariants.sql), and go with it.
+  await db.node.deleteMany({ where: { nodeType: 'comment' } });
   await db.edge.deleteMany();
   await db.pendingEdge.deleteMany();
   await db.session.deleteMany();

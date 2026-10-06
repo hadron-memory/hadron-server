@@ -1,5 +1,7 @@
 import { createHmac, randomUUID } from 'crypto';
 // Spec 049 S4 — the protected-loc gate on hadron_update_node (no lock on that path).
+import { assertNotCommentWrite, commentGovernedError, isCommentGovernedError } from '../lib/comments/index.js';
+import { commentIdsAmong, hardDeleteThreadsOfTargets, softDeleteThreadsOfTargets } from '../lib/comments/lifecycle.js';
 import { assertLocWritable, LocProtectedError } from '../lib/protectedLoc.js';
 import {
   assertGovernedWrite,
@@ -3539,9 +3541,11 @@ export function createMcpServerInstance(
       // next thing to drift.
       const parentGovernedProbe = await db.node.findUnique({
         where: { loc_memoryId: { loc, memoryId } },
-        select: { role: true, isRunnable: true },
+        select: { role: true, isRunnable: true, nodeType: true },
       });
       try {
+        // #1606 (cor:dmo:110:04) — a comment is never rewritten as a section.
+        assertNotCommentWrite(parentGovernedProbe?.nodeType, undefined, 'update');
         assertGovernedWrite(
           parentGovernedProbe,
           mergedGovernedState(parentGovernedProbe, {}),
@@ -3550,7 +3554,7 @@ export function createMcpServerInstance(
           // door performs.
         );
       } catch (e) {
-        if (e instanceof RoleGovernedError) return textResult(`[role_governed] ${e.message}`);
+        if (e instanceof RoleGovernedError || isCommentGovernedError(e)) return textResult(`[role_governed] ${(e as Error).message}`);
         throw e;
       }
 
@@ -5327,9 +5331,11 @@ export function createMcpServerInstance(
       // the lock. What this closes is the ordinary, unraced case.
       const governedProbe = await db.node.findUnique({
         where: { loc_memoryId: { loc, memoryId } },
-        select: { role: true, isRunnable: true, deletedAt: true },
+        select: { role: true, isRunnable: true, deletedAt: true, nodeType: true },
       });
       try {
+        // #1606 (cor:dmo:110:04) — no generic create makes or resurrects a comment.
+        assertNotCommentWrite(governedProbe?.nodeType, nodeType, 'create');
         assertGovernedWrite(
           governedProbe,
           mergedGovernedState(governedProbe, { role, isRunnable }),
@@ -5353,7 +5359,7 @@ export function createMcpServerInstance(
               },
         );
       } catch (e) {
-        if (e instanceof RoleGovernedError) return textResult(`[role_governed] ${e.message}`);
+        if (e instanceof RoleGovernedError || isCommentGovernedError(e)) return textResult(`[role_governed] ${(e as Error).message}`);
         throw e;
       }
 
@@ -5887,6 +5893,8 @@ export function createMcpServerInstance(
       // than an afterthought. Never passes an ownsKind — there is no MCP door,
       // by design.
       try {
+        // #1606 (cor:dmo:110:04) — no generic update edits, makes or unmakes a comment.
+        assertNotCommentWrite(existing?.nodeType, nodeType, 'update');
         assertGovernedWrite(
           existing,
           mergedGovernedState(existing, { role, isRunnable }),
@@ -5904,7 +5912,7 @@ export function createMcpServerInstance(
             : {},
         );
       } catch (e) {
-        if (e instanceof RoleGovernedError) return textResult(`[role_governed] ${e.message}`);
+        if (e instanceof RoleGovernedError || isCommentGovernedError(e)) return textResult(`[role_governed] ${(e as Error).message}`);
         throw e;
       }
 
@@ -6894,6 +6902,7 @@ Refuses if the node has descendants under its URN prefix unless \`recursive: tru
         | { refused: 'changed' }
         | { refused: 'access' }
         | { refused: 'mintedSpec'; message: string }
+        | { refused: 'comment'; message: string }
         | { ok: true; descendantCount: number };
 
       // #449 — source memories whose pending-edge count a hard delete changed.
@@ -6959,6 +6968,13 @@ Refuses if the node has descendants under its URN prefix unless \`recursive: tru
           }
           throw e;
         }
+        // #1606 (cor:dmo:110:04/05) — a comment is removed only by the comment
+        // path's thread delete; a target takes its threads with it.
+        if ((await commentIdsAmong(tx, affectedIds)).length > 0) {
+          return { refused: 'comment', message: commentGovernedError('delete', 'removes').message };
+        }
+        if (hard) await hardDeleteThreadsOfTargets(tx, affectedIds);
+        else await softDeleteThreadsOfTargets(tx, affectedIds, { deletedBy: auth.userId ?? auth.clientId ?? null, at: new Date() });
 
         if (hard) {
 
@@ -7025,6 +7041,9 @@ Refuses if the node has descendants under its URN prefix unless \`recursive: tru
         }
         if (result.refused === 'mintedSpec') {
           return textResult(`[spec_minted_permanent] ${result.message}`);
+        }
+        if (result.refused === 'comment') {
+          return textResult(`[role_governed] ${result.message}`);
         }
         if (result.refused === 'descendants') {
           const mode = hard ? 'hard delete' : 'soft delete';

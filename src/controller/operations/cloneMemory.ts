@@ -1,4 +1,5 @@
 import type { PrismaClient } from '../../generated/prisma/index.js';
+import { COMMENT_NODE_TYPE } from '../../lib/comments/index.js';
 import { Prisma } from '../../generated/prisma/index.js';
 import { generateId } from '../../lib/id.js';
 import { ensureCurrentNodeRevisionInTransaction, jsonOrDbNull } from '../../lib/nodeRevisionSnapshot.js';
@@ -188,8 +189,12 @@ export async function cloneMemoryGraph(
       });
 
       // ── Nodes ──────────────────────────────────────────────────────────
+      // #1606 — comments are discussion about the source's nodes, not content:
+      // a clone starts without them (and a generic copy could not produce one,
+      // cor:dmo:110:04). Their governed edges drop with them below, since an
+      // edge is copied only from a cloned source.
       const selectedNodes = await tx.node.findMany({
-        where: { memoryId: source.id, deletedAt: null },
+        where: { memoryId: source.id, deletedAt: null, nodeType: { not: COMMENT_NODE_TYPE } },
       });
       // A raw writer may have changed a stamped source without advancing its
       // revision. Reconcile and refetch stamped rows before the destination
