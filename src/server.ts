@@ -1,4 +1,5 @@
 import crypto from 'crypto';
+import { mountTeamSpecSchemaRoutes } from './api/teamSpecSchema.js';
 import * as Sentry from '@sentry/node';
 import { ApolloServer, type ApolloServerPlugin, type BaseContext } from '@apollo/server';
 import { expressMiddleware } from '@apollo/server/express4';
@@ -207,6 +208,7 @@ export async function createServer(): Promise<Express> {
       credentials: true,
     }),
   );
+  mountTeamSpecSchemaRoutes(app);
   // Default express.json cap is 100kb, which rejects large payloads such as
   // full-page HTML clips from the Web Clipper with 413. Raise it for
   // /graphql only — every other JSON endpoint (auth, webhooks, usage, ...)
