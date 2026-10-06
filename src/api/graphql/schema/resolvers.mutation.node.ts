@@ -1,6 +1,7 @@
 // nodeMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
-import { COMMENT_NODE_TYPE, assertNotCommentWrite, commentGovernedError } from '../../../lib/comments/index.js';
+import { COMMENT_NODE_TYPE, assertNotCommentWrite, commentError, commentGovernedError } from '../../../lib/comments/index.js';
 import { commentIdsAmong, hardDeleteThreadsOfTargets, restoreThreadsOfTargets, softDeleteThreadsOfTargets } from '../../../lib/comments/lifecycle.js';
+import { refuseLiveThreadsOnFold } from '../../../lib/comments/merge.js';
 import { generateId } from '../../../lib/id.js';
 // Spec 049 S4 — the protected-loc gate on the in-place update paths and the bulk skip.
 import {
@@ -3668,10 +3669,10 @@ export const nodeMutations = {
       if (source.nodeType === COMMENT_NODE_TYPE || target.nodeType === COMMENT_NODE_TYPE) {
         throw commentGovernedError('merge', 'edits');
       }
-      if ((deleteSource || fields.has('EDGES')) && (await ctx.db.commentMeta.count({ where: { targetNodeId: source.id, node: { deletedAt: null } } })) > 0) {
-        const err = commentGovernedError('merge', 'edits');
-        throw new GraphQLError(`${err.message} The source node has comment threads, which are anchored to it; an admin of its memory deletes them first.`, { extensions: err.extensions });
-      }
+      // #1664 — moving the source's edges is safe (governed edges never re-home);
+      // DELETING a source with live threads refuses, but only under the source
+      // lock, after every gate (#1682 review: a pre-lock check raced, and ran
+      // before the source memory's authorization, disclosing its loc).
       // Same-memory merge (the common case): write access to the target's
       // memory already covers the source. Only run a separate source check
       // when the nodes live in different memories.
@@ -3890,6 +3891,12 @@ export const nodeMutations = {
             extensions: { code: 'NODE_WRITE_CONFLICT' },
           });
         }
+        // #1682 review (Baloo P2) — the AUTHORITATIVE live-thread refusal, under
+        // the source lock and before any write. The pre-lock count above is only
+        // a fast answer: posting a comment never changes its target's revision
+        // (cor:dmo:110:06), so revisionStateMatches can't see one that landed in
+        // between, and the delete below would destroy it.
+        if (deleteSource) await refuseLiveThreadsOnFold(tx, [source.id]);
         await createNodeRevision(
           tx,
           buildNodeRevisionSnapshot(target, editorFromAuth(ctx), {

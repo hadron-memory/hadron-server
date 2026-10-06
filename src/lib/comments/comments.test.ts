@@ -30,7 +30,7 @@ describe('comment.fixture.json (contract §7)', () => {
       COMMENT_ANCHOR_REVISION_INVALID: true, COMMENT_ANCHOR_REVISION_UNAVAILABLE: true, COMMENT_NOT_AUTHOR: true,
       COMMENT_RETRACTED: true, COMMENT_HIDDEN: true, COMMENT_NOT_TOP_LEVEL: true, COMMENT_THREAD_STATE: true,
       COMMENT_ADMIN_REQUIRED: true, COMMENT_IMPERSONATION_REFUSED: true, COMMENT_BODY_INVALID: true,
-      COMMENT_MOVE_UNCOMMENTABLE: true, COMMENT_NOT_APPROVABLE: true,
+      COMMENT_MOVE_UNCOMMENTABLE: true, COMMENT_MERGE_FOLDS_THREADS: true, COMMENT_NOT_APPROVABLE: true,
     };
     const published = new Set(fixture.errors.map((e: { code: string }) => e.code));
     for (const code of Object.keys(codes)) expect(published).toContain(code);
