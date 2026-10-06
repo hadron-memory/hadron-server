@@ -280,6 +280,8 @@ export const typeDefs = `#graphql
   "Slim node projection for the graph view (issue #466) — only what a node-link graph draws."
   type GraphNode {
     id: ID!
+    "#1606 — how many open discussion threads this node has: the node-list trust cue (hrn:node:hadronmemory.com:specs:cor:dmo:110:07). Batched per request."
+    openThreads: Int!
     loc: String!
     "Non-null — mirrors Node.name (the DB column is NOT NULL)."
     name: String!
@@ -1317,6 +1319,8 @@ export const typeDefs = `#graphql
     updatedByWorker: ActorRef
     "#1610 — the Agent behind the last authored edit; cleared like updatedByWorker."
     updatedByAgent: ActorRef
+    "#1606 — open and resolved discussion on this node (hrn:node:hadronmemory.com:specs:cor:dmo:110:07). Batched per request."
+    commentSummary: CommentSummary!
     memoryId: String!
     """
     The PLATFORM-kind axis (info / task / prompt / record / …). Load-bearing for
@@ -1867,6 +1871,8 @@ export const typeDefs = `#graphql
     alreadyApprovedCount: Int!
     "Locs of reserved placeholders, which have no spec to approve yet."
     skippedPlaceholders: [String!]!
+    "#1607 — unminted nodes of this memory with open discussion: a warning, never a blocker (hrn:node:hadronmemory.com:specs:cor:dmo:110:07). Ordered by loc."
+    unresolvedFeedback: [UnresolvedFeedback!]!
   }
 
   "#1610 — public identity of a Worker or Agent that wrote a node: never the full object, whose own read gate this does not pass."
@@ -1875,6 +1881,133 @@ export const typeDefs = `#graphql
     name: String!
     "The canonical hrn:worker:/hrn:agent: URN. Null when it cannot be composed."
     urn: String
+  }
+
+  "#1606 — a comment thread's state (hrn:node:hadronmemory.com:specs:cor:dmo:110:05). Top-level comments only."
+  enum CommentThreadState {
+    OPEN
+    RESOLVED
+  }
+
+  "#1606 — who a comment is from (hrn:node:hadronmemory.com:specs:cor:dmo:110:03)."
+  enum CommentAuthorKind {
+    "A named worker wrote it; the user who bound the session is provenance only."
+    WORKER
+    "A user wrote it directly."
+    USER
+    "An unnamed agent wrote it on a user's behalf (a token or a run)."
+    USER_AGENT
+    "An App key with no user."
+    APP
+  }
+
+  "#1606 — a public projection of a comment's author, resolver or provenance user. Never the full User/Worker/Agent/App object (#552)."
+  type CommentActorRef {
+    id: ID!
+    name: String
+    "Users only."
+    handle: String
+    "Workers, agents and Apps: the canonical URN, when it can be composed."
+    urn: String
+  }
+
+  "#1606 — a comment's author. Exactly the refs its kind names are set."
+  type CommentAuthor {
+    kind: CommentAuthorKind!
+    "WORKER."
+    worker: CommentActorRef
+    "USER and USER_AGENT."
+    user: CommentActorRef
+    "USER_AGENT only."
+    agent: CommentActorRef
+    "APP."
+    app: CommentActorRef
+  }
+
+  "#1606 — the node a comment concerns. Same memory as the comment, so the same read gate."
+  type CommentTargetRef {
+    id: ID!
+    urn: String!
+    name: String!
+    nodeType: String!
+    "The target's current revision (Node.revision)."
+    revSeq: Int!
+  }
+
+  """
+  #1606 — feedback about a node (hrn:node:hadronmemory.com:specs:cor:dmo:110). A comment is a node of type
+  \`comment\` in its target's memory, readable by exactly who can read that
+  memory. It is never part of its target's content, never approved or minted,
+  and never authoritative.
+  """
+  type Comment {
+    id: ID!
+    urn: String!
+    "The portal page of the comment node; null when FRONTEND_URL is unset."
+    portalUrl: String
+    target: CommentTargetRef!
+    "Null for a top-level comment; else the thread's top-level comment."
+    threadRootId: ID
+    isTopLevel: Boolean!
+    "The target revision the thread was written against (replies inherit their thread's)."
+    anchorRevision: Int!
+    "The approval hash of the target's title/abstract/content at anchorRevision: 64 lowercase hex."
+    anchorApprovalHash: String!
+    "anchorRevision equals the target's current revision. When false, show the comment as about an older revision (hrn:node:hadronmemory.com:specs:cor:dmo:110:01)."
+    anchorIsCurrent: Boolean!
+    "Null when retracted or hidden."
+    quote: String
+    "Null when retracted or hidden: the stub shows the state, not the text."
+    body: String
+    "Top-level only; null for a reply."
+    state: CommentThreadState
+    retracted: Boolean!
+    retractedAt: DateTime
+    hidden: Boolean!
+    hiddenAt: DateTime
+    resolvedAt: DateTime
+    resolvedBy: CommentActorRef
+    author: CommentAuthor!
+    "Whether the caller is this comment's author (the edit/retract right). Computed with the same author key the server enforces."
+    viewerIsAuthor: Boolean!
+    "Worker comments only: the user who bound the worker session, shown as provenance, never as author. Null for other comments, and for callers who cannot write the memory."
+    provenanceUser: CommentActorRef
+    createdAt: DateTime!
+    updatedAt: DateTime
+    "The comment's own revision. Pass it as expectedRevision to edit, retract, resolve, reopen or hide."
+    revSeq: Int!
+  }
+
+  type CommentThread {
+    root: Comment!
+    "Oldest first; at most the first 200."
+    replies: [Comment!]!
+    "Every live reply, including any beyond the returned 200."
+    replyCount: Int!
+  }
+
+  type CommentThreadPage {
+    "Newest thread first."
+    items: [CommentThread!]!
+    total: Int!
+  }
+
+  "#1606 — the trust cue (hrn:node:hadronmemory.com:specs:cor:dmo:110:07). Counts live threads; zeros on a memory that cannot hold comments."
+  type CommentSummary {
+    openThreads: Int!
+    resolvedThreads: Int!
+    "Every live comment, top-level and replies, retracted and hidden stubs included."
+    comments: Int!
+    "The caller's own open, live top-level thread on this node, if any: one per author (hrn:node:hadronmemory.com:specs:cor:dmo:110:05)."
+    viewerOpenThreadId: ID
+  }
+
+  "#1607 — a node with open feedback, reported as a WARNING by mint and approval reports, never a blocker (hrn:node:hadronmemory.com:specs:cor:dmo:110:07)."
+  type UnresolvedFeedback {
+    nodeId: ID!
+    urn: String!
+    loc: String!
+    openThreads: Int!
   }
 
   type NodeRevision {
@@ -6076,6 +6209,8 @@ export const typeDefs = `#graphql
     mintedCount: Int!
     "#1591 — the locs this call minted, or would mint on a dry run, ordered by loc."
     mintLocs: [String!]!
+    "#1607 — nodes in mintLocs with open discussion: a WARNING, never a blocker (hrn:node:hadronmemory.com:specs:cor:dmo:110:07). Ordered by loc."
+    unresolvedFeedback: [UnresolvedFeedback!]!
   }
 
   type Query {
@@ -6413,6 +6548,11 @@ export const typeDefs = `#graphql
     verifyNode(nodeRef: ID!): NodeIntegrityCheck!
     "#1591 — the tamper check over every live node of a memory (ID or fully-qualified URN)."
     verifyMemoryNodes(memoryRef: String!): MemoryIntegrityReport!
+
+    "#1606 — the discussion on a node (ID or URN), newest thread first. Read-gated on the node's memory; an unreadable or missing node is COMMENT_TARGET_NOT_FOUND."
+    commentThreads(targetRef: ID!, state: [CommentThreadState!], limit: Int = 50, offset: Int = 0): CommentThreadPage!
+    "#1606 — one comment by ID or URN; null when missing or unreadable."
+    comment(ref: ID!): Comment
 
     """
     A single node-revision snapshot by its id (#617 Display).
@@ -8055,6 +8195,32 @@ export const typeDefs = `#graphql
     approveNode(nodeRef: ID!, revision: Int): NodeApprovalReceipt!
     "#1591 — approve the current revision of every live, unminted node of a memory (ID or fully-qualified URN) that isn't approved yet, in one transaction. Placeholders are skipped and reported."
     approveMemoryNodes(memoryRef: String!): ApproveMemoryNodesResult!
+
+    """
+    #1606 — start a thread on a node (hrn:node:hadronmemory.com:specs:cor:dmo:110). Needs write access to the
+    target's memory. anchorRevision defaults to the target's current revision;
+    an older one anchors there while its text is still retained. The anchor
+    hash is computed by the server. Typed refusals: COMMENT_TARGET_NOT_FOUND,
+    COMMENT_FORBIDDEN, COMMENT_TARGET_IS_COMMENT, COMMENT_MEMORY_NOT_COMMENTABLE,
+    COMMENT_OPEN_THREAD_EXISTS, COMMENT_ANCHOR_REVISION_INVALID,
+    COMMENT_ANCHOR_REVISION_UNAVAILABLE, COMMENT_BODY_INVALID,
+    COMMENT_IMPERSONATION_REFUSED.
+    """
+    createComment(targetRef: ID!, body: String!, quote: String, anchorRevision: Int): Comment!
+    "#1606 — reply in a thread; commentRef may be any comment of it. Allowed on a resolved thread, which stays resolved (Holger, DAB)."
+    replyToComment(commentRef: ID!, body: String!): Comment!
+    "#1606 — the author edits a comment's body and/or quote. COMMENT_NOT_AUTHOR otherwise."
+    editComment(commentRef: ID!, body: String, quote: String, expectedRevision: Int!): Comment!
+    "#1606 — the author retracts a comment, leaving a stub (hrn:node:hadronmemory.com:specs:cor:dmo:110:05)."
+    retractComment(commentRef: ID!, expectedRevision: Int!): Comment!
+    "#1606 — resolve a thread: its author or any writer of the memory. commentRef is the top-level comment; returns it."
+    resolveCommentThread(commentRef: ID!, expectedRevision: Int!): Comment!
+    "#1606 — reopen a resolved thread: its author or any writer of the memory."
+    reopenCommentThread(commentRef: ID!, expectedRevision: Int!): Comment!
+    "#1606 — a memory admin hides an abusive comment, leaving a stub."
+    hideComment(commentRef: ID!, reason: String!, expectedRevision: Int!): Comment!
+    "#1606 — a memory admin deletes a whole thread (soft: gone from every read, limit and check; history kept). commentRef may be any comment of it."
+    deleteCommentThread(commentRef: ID!, reason: String!): Boolean!
 
     """
     Delete ALL NodeRevision rows for a node, returning the count deleted (#617).

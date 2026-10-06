@@ -1,0 +1,243 @@
+{
+  "description": "hadron-server #1606 comment-node conformance fixture (contract hrn:node:hadronmemory.com:hadron-server:design:comment-nodes-contract §7). authorKeys: the author key and CommentAuthor.kind derived from each principal shape; anchorHash: the anchor approval hash of a target revision (approval hash v1 over title/abstract/content, see approvalHash.fixture.json); errors: every typed refusal code with its extension keys; thread: a resolved thread with a retracted reply, as commentThreads returns it.",
+  "version": "comment-v1",
+  "authorKeys": [
+    {
+      "name": "worker-session",
+      "principal": {
+        "userId": "u1",
+        "appId": null,
+        "workerId": "w1",
+        "agentId": "a1"
+      },
+      "authorKey": "w:w1",
+      "kind": "WORKER"
+    },
+    {
+      "name": "user-with-unnamed-agent",
+      "principal": {
+        "userId": "u1",
+        "appId": null,
+        "workerId": null,
+        "agentId": "a1"
+      },
+      "authorKey": "ua:u1:a1",
+      "kind": "USER_AGENT"
+    },
+    {
+      "name": "user",
+      "principal": {
+        "userId": "u1",
+        "appId": null,
+        "workerId": null,
+        "agentId": null
+      },
+      "authorKey": "u:u1",
+      "kind": "USER"
+    },
+    {
+      "name": "app-key",
+      "principal": {
+        "userId": null,
+        "appId": "app1",
+        "workerId": null,
+        "agentId": null
+      },
+      "authorKey": "app:app1",
+      "kind": "APP"
+    },
+    {
+      "name": "app-key-agent-session",
+      "principal": {
+        "userId": null,
+        "appId": "app1",
+        "workerId": null,
+        "agentId": "a1"
+      },
+      "authorKey": "app:app1",
+      "kind": "APP"
+    },
+    {
+      "name": "anonymous",
+      "principal": {
+        "userId": null,
+        "appId": null,
+        "workerId": null,
+        "agentId": null
+      },
+      "authorKey": null,
+      "kind": null,
+      "refusal": "COMMENT_FORBIDDEN"
+    }
+  ],
+  "anchorHash": {
+    "input": {
+      "title": "Retention policy",
+      "abstract": "How long we keep data.",
+      "content": "Logs are kept for 30 days.\n"
+    },
+    "anchorApprovalHash": "2cfdece4f02c957856054c1affe0ec9c856e5549945e735523df27bd155c99ac"
+  },
+  "errors": [
+    {
+      "code": "COMMENT_TARGET_NOT_FOUND",
+      "extensions": []
+    },
+    {
+      "code": "COMMENT_NOT_FOUND",
+      "extensions": []
+    },
+    {
+      "code": "COMMENT_FORBIDDEN",
+      "extensions": []
+    },
+    {
+      "code": "COMMENT_TARGET_IS_COMMENT",
+      "extensions": []
+    },
+    {
+      "code": "COMMENT_MEMORY_NOT_COMMENTABLE",
+      "extensions": [
+        "class"
+      ]
+    },
+    {
+      "code": "COMMENT_OPEN_THREAD_EXISTS",
+      "extensions": [
+        "threadId"
+      ]
+    },
+    {
+      "code": "COMMENT_ANCHOR_REVISION_INVALID",
+      "extensions": [
+        "currentRevision"
+      ]
+    },
+    {
+      "code": "COMMENT_ANCHOR_REVISION_UNAVAILABLE",
+      "extensions": [
+        "currentRevision"
+      ]
+    },
+    {
+      "code": "COMMENT_NOT_AUTHOR",
+      "extensions": []
+    },
+    {
+      "code": "COMMENT_RETRACTED",
+      "extensions": []
+    },
+    {
+      "code": "COMMENT_HIDDEN",
+      "extensions": []
+    },
+    {
+      "code": "COMMENT_NOT_TOP_LEVEL",
+      "extensions": [
+        "threadRootId"
+      ]
+    },
+    {
+      "code": "COMMENT_THREAD_STATE",
+      "extensions": [
+        "state"
+      ]
+    },
+    {
+      "code": "COMMENT_ADMIN_REQUIRED",
+      "extensions": []
+    },
+    {
+      "code": "COMMENT_IMPERSONATION_REFUSED",
+      "extensions": []
+    },
+    {
+      "code": "COMMENT_BODY_INVALID",
+      "extensions": [
+        "field",
+        "max"
+      ]
+    },
+    {
+      "code": "COMMENT_MOVE_UNCOMMENTABLE",
+      "extensions": [
+        "class",
+        "nodes"
+      ]
+    },
+    {
+      "code": "COMMENT_NOT_APPROVABLE",
+      "extensions": []
+    },
+    {
+      "code": "NODE_WRITE_CONFLICT",
+      "extensions": [
+        "currentRevision"
+      ]
+    },
+    {
+      "code": "ROLE_GOVERNED",
+      "extensions": [
+        "kind",
+        "strength",
+        "door",
+        "mcpDoor",
+        "op",
+        "refusal"
+      ],
+      "kind": "comment"
+    }
+  ],
+  "thread": {
+    "root": {
+      "isTopLevel": true,
+      "threadRootId": null,
+      "anchorRevision": 4,
+      "anchorIsCurrent": false,
+      "state": "RESOLVED",
+      "body": "Is 30 days still right after the audit?",
+      "quote": "kept for 30 days",
+      "retracted": false,
+      "hidden": false,
+      "author": {
+        "kind": "WORKER",
+        "worker": {
+          "name": "Dara"
+        },
+        "user": null,
+        "agent": null,
+        "app": null
+      },
+      "resolvedBy": {
+        "name": "Holger"
+      },
+      "revSeq": 2
+    },
+    "replies": [
+      {
+        "isTopLevel": false,
+        "state": null,
+        "anchorRevision": 4,
+        "body": null,
+        "quote": null,
+        "retracted": true,
+        "hidden": false,
+        "author": {
+          "kind": "USER"
+        }
+      },
+      {
+        "isTopLevel": false,
+        "state": null,
+        "anchorRevision": 4,
+        "body": "Yes; resolved in revision 6.",
+        "retracted": false,
+        "hidden": false,
+        "author": {
+          "kind": "USER_AGENT"
+        }
+      }
+    ],
+    "replyCount": 2
+  }
+}
