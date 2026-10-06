@@ -51,7 +51,7 @@ describe('#1617 — Session.lapsesAt', () => {
     const ended = await session({ startedAt: new Date(now - 1 * H), endedAt: new Date(now - 0.5 * H) });
     const byEvent = await session({ startedAt: new Date(now - 30 * H), updatedAt: new Date(now - 30 * H) });
     const eventAt = new Date(now - 1 * H);
-    await db.usageEvent.create({ data: { id: generateId(), type: 'mcp.tool', sessionId: byEvent.id, createdAt: eventAt } as never });
+    await db.usageEvent.create({ data: { countsAsActivity: true, id: generateId(), type: 'mcp.tool', sessionId: byEvent.id, createdAt: eventAt } as never });
 
     const out = await rows();
     expect(out[live.id].lapsesAt).toBe(new Date(live.updatedAt!.getTime() + DEFAULT_SESSION_IDLE_WINDOW_MS).toISOString());

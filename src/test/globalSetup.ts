@@ -257,6 +257,14 @@ async function applyTemplateConstraints(client: Client) {
       CHECK (("organization_id" IS NULL) <> ("owner_user_id" IS NULL));
   `);
 
+  // Ruling DY-5: a dormancy threshold is a positive number of days. Synced
+  // with prisma/post-push.sql + the 20261005010000 migration.
+  await client.query(`
+    ALTER TABLE "apps" DROP CONSTRAINT IF EXISTS "chk_app_session_dormancy_days_positive";
+    ALTER TABLE "apps" ADD CONSTRAINT "chk_app_session_dormancy_days_positive"
+      CHECK ("session_dormancy_days" > 0);
+  `);
+
   await client.query(`
     ALTER TABLE "ai_service_configs" DROP CONSTRAINT IF EXISTS "chk_ai_service_config_owner";
     ALTER TABLE "ai_service_configs"

@@ -35,7 +35,7 @@ import { resolveWorkerRef as resolveWorkerRefId } from '../../../lib/entityRef/w
 import { isId } from '../../../lib/entityRef/shape.js';
 import { resolveWorkerIdByNameGated, provisionWorkerMemory } from './resolvers.worker.js';
 import { writeNodeCore } from './resolvers.mutation.node.js';
-import { recordNodeUsage, toUsageNodeRefs } from '../../../lib/usageRecorder.js';
+import { attributedRequestActivity, recordNodeUsage, toUsageNodeRefs } from '../../../lib/usageRecorder.js';
 import {
   HANDOFFS_PARENT_LOC,
   HANDOFF_SESSION_KEY,
@@ -1259,7 +1259,12 @@ export const sessionMutations = {
         ? await resolveReadableNodeByLoc(ctx, event.nodeLoc)
         : null;
 
-      await ctx.db.usageEvent.create({
+      // #1660 review (local P2-2): the insert IS this act, so an App-key resume
+      // it earns commits in the SAME transaction (rolled back if the insert
+      // fails), and the row is stamped at the instant activity was judged
+      // (local P2-1).
+      const at = new Date();
+      await ctx.db.$transaction(async (tx) => tx.usageEvent.create({
         data: {
           type: event.type,
           nodeLoc: event.nodeLoc,
@@ -1277,11 +1282,17 @@ export const sessionMutations = {
           userId: ctx.userId ?? null,
           createdBy: ctx.userId ?? ctx.clientId ?? null,
           sessionId: event.sessionId,
+          // #1653 / DY-2: the session id here is CLIENT-SUPPLIED, so it counts
+          // as activity only for a live session this caller owns. Before this,
+          // any reader could keep someone else's session live, or revive it,
+          // by recording usage against its id.
+          countsAsActivity: await attributedRequestActivity(ctx.db, ctx, event.sessionId, { at, tx }),
+          createdAt: at,
           model: event.model,
           tokensIn: event.tokensIn,
           tokensOut: event.tokensOut,
         },
-      });
+      }));
       return true;
     },
 
@@ -2365,11 +2376,14 @@ export const sessionMutations = {
         // (PR #1062 review — Codex).
         recordNodeUsage(ctx.db, 'read', toUsageNodeRefs([node, ...inlined]), ctx);
 
-        // Record usage event (fire-and-forget).
-        ctx.db.usageEvent
+        // Record usage event (fire-and-forget). #1653 / DY-2: it counts as
+        // activity only for a live session the caller owns.
+        const runAt = new Date();
+        void attributedRequestActivity(ctx.db, ctx, ctx.sessionId, { at: runAt }).then((countsAsActivity) => ctx.db.usageEvent
           .create({
             data: {
               id: generateId(),
+              createdAt: runAt,
               type: 'action-run',
               nodeLoc: loc,
               nodeId: node.id,
@@ -2382,10 +2396,11 @@ export const sessionMutations = {
               userId: ctx.userId ?? null,
               createdBy: ctx.userId ?? null,
               sessionId: ctx.sessionId ?? null,
+              countsAsActivity,
               actionArgs: stringArgs,
             },
           })
-          .catch(() => {});
+          .catch(() => {}));
 
         return assembled;
       };

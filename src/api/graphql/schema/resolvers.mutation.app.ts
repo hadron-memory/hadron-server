@@ -706,6 +706,7 @@ export const appMutations = {
         createUserPermission,
         identifyUserMethod,
         sessionTimeoutSeconds,
+        sessionDormancyDays,
         anonymousTtlDays,
         policy,
       }: {
@@ -726,6 +727,7 @@ export const appMutations = {
         createUserPermission?: 'DENY' | 'EXPLICIT' | 'IMPLICIT';
         identifyUserMethod?: 'USER_ID' | 'SECRET';
         sessionTimeoutSeconds?: number;
+        sessionDormancyDays?: number | null;
         anonymousTtlDays?: number;
         // #510: app-layer action-policy link (cor:acl:040:02).
         // Explicit null clears; omitted preserves.
@@ -741,6 +743,13 @@ export const appMutations = {
       // shape before storing; explicit null clears (= no restriction).
       if (policy !== undefined && policy !== null && parsePolicyLink(policy) == null) {
         throw new GraphQLError('policy must be { allow: string[] } or null.', {
+          extensions: { code: 'BAD_USER_INPUT' },
+        });
+      }
+      // Ruling DY-5: a dormancy threshold is a positive whole number of days.
+      // Loud rather than clamped: a 0 would make every lapsed session dormant.
+      if (sessionDormancyDays != null && (!Number.isInteger(sessionDormancyDays) || sessionDormancyDays < 1)) {
+        throw new GraphQLError('sessionDormancyDays must be a positive whole number of days.', {
           extensions: { code: 'BAD_USER_INPUT' },
         });
       }
@@ -898,6 +907,7 @@ export const appMutations = {
           ...(createUserPermission !== undefined ? { createUserPermission } : {}),
           ...(identifyUserMethod !== undefined ? { identifyUserMethod } : {}),
           ...(sessionTimeoutSeconds !== undefined ? { sessionTimeoutSeconds } : {}),
+          ...(sessionDormancyDays != null ? { sessionDormancyDays } : {}),
           ...(anonymousTtlDays !== undefined ? { anonymousTtlDays } : {}),
           ...(policy !== undefined ? { policy: policy as never } : {}),
           updatedBy: ctx.userId ?? null,

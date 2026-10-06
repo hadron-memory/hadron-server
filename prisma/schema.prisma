@@ -1675,6 +1675,14 @@ model UsageEvent {
   /// AiModelPrice row effective at event time. NULL = no price known (or the
   /// event carries no tokens). Never recomputed — prices change (FR-003).
   costMicroCents BigInt?   @map("cost_micro_cents")
+  /// #1653 / ruling DY-2: whether this event counts as ACTIVITY for its
+  /// session's liveness. True only when the session was live AND owned by the
+  /// recording principal at write time (`usageEventCountsAsActivity`), so a
+  /// request attributed to a LAPSED session keeps its attribution but never
+  /// revives it — resuming is the DA door alone. Defaults to false so a writer
+  /// that forgets the check fails safe; rows before the column are backfilled
+  /// true by the migration, so liveness was unchanged at deploy.
+  countsAsActivity Boolean @default(false) @map("counts_as_activity")
   createdAt      DateTime  @default(now()) @map("created_at")
   createdBy      String?   @map("created_by")
   updatedAt      DateTime? @updatedAt @map("updated_at")
@@ -2918,6 +2926,12 @@ model App {
   createUserPermission  CreateUserPermission @default(EXPLICIT) @map("create_user_permission")
   identifyUserMethod    IdentifyUserMethod   @default(USER_ID) @map("identify_user_method")
   sessionTimeoutSeconds Int                  @default(900) @map("session_timeout_seconds")
+  /// Ruling DY-5: days of no activity after which a lapsed worker session of
+  /// this App is DORMANT. No agent act resumes a dormant session (DA/DY-1);
+  /// only an explicit rebind by its human holder brings the worker back. The
+  /// security half of Holger's session-lifetime principle: a long-forgotten
+  /// session must not start acting again on its own.
+  sessionDormancyDays   Int                  @default(90) @map("session_dormancy_days")
   anonymousTtlDays      Int                  @default(7) @map("anonymous_ttl_days")
   /// **Deprecated** — superseded by `surfaces`. Scheduled for removal
   /// in a follow-up cleanup spec (per 008 R-4); kept in place to
