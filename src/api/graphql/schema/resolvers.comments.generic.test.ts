@@ -157,14 +157,15 @@ describe('a target\'s lifecycle carries its threads (cor:dmo:110:02/05)', () => 
       .toMatchObject(governed);
   });
 
-  it('mergeNodes refuses a comment, and a source with live threads', async () => {
+  it('mergeNodes refuses a comment, and deleting a source with live threads', async () => {
     const a = await node('mg:a');
     const b = await node('mg:b');
     const c = await comment(a.id);
     expect((await errorOf(M.mergeNodes(null, { input: { source: c.id, target: b.id, include: ['CONTENT'] } }, as()))).extensions)
       .toMatchObject(governed);
+    // #1664 — a commented source can't be deleted by a merge (its anchor can't move).
     expect((await errorOf(M.mergeNodes(null, { input: { source: a.id, target: b.id, include: ['EDGES'], deleteSource: true } }, as()))).extensions)
-      .toMatchObject(governed);
+      .toMatchObject({ code: 'COMMENT_MERGE_FOLDS_THREADS' });
   });
 });
 

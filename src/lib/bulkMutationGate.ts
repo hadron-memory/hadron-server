@@ -166,9 +166,11 @@ export async function assertMemoryBulkMutable(
   db: ChannelReader & Pick<Prisma.TransactionClient, 'node'>,
   memoryId: string,
   op: string,
+  /** #1664 — `carry`: the caller moves threads with their targets itself (mergeMemories). */
+  opts: { comments?: 'refuse' | 'carry' } = {},
 ): Promise<void> {
   await assertNoProtectedReach(db, memoryId, 'all', op);
-  await assertNoCommentRows(db, { memoryId }, op);
+  if ((opts.comments ?? 'refuse') === 'refuse') await assertNoCommentRows(db, { memoryId }, op);
   const governed = await db.node.findFirst({
     where: {
       memoryId,

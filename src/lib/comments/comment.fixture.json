@@ -1,5 +1,5 @@
 {
-  "description": "hadron-server #1606 comment-node conformance fixture (contract hrn:node:hadronmemory.com:hadron-server:design:comment-nodes-contract §7). authorKeys: the author key and CommentAuthor.kind derived from each principal shape; anchorHash: the anchor approval hash of a target revision (approval hash v1 over title/abstract/content, see approvalHash.fixture.json); errors: every typed refusal code with its extension keys; thread: a resolved thread with a retracted reply, as commentThreads returns it.",
+  "description": "hadron-server #1606 comment-node conformance fixture (contract hrn:node:hadronmemory.com:hadron-server:design:comment-nodes-contract \u00a77). authorKeys: the author key and CommentAuthor.kind derived from each principal shape; anchorHash: the anchor approval hash of a target revision (approval hash v1 over title/abstract/content, see approvalHash.fixture.json); errors: every typed refusal code with its extension keys; thread: a resolved thread with a retracted reply, as commentThreads returns it.",
   "version": "comment-v1",
   "authorKeys": [
     {
@@ -162,6 +162,12 @@
       "code": "COMMENT_MOVE_UNCOMMENTABLE",
       "extensions": [
         "class",
+        "nodes"
+      ]
+    },
+    {
+      "code": "COMMENT_MERGE_FOLDS_THREADS",
+      "extensions": [
         "nodes"
       ]
     },

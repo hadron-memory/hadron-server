@@ -1,5 +1,5 @@
 // nodeMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
-import { COMMENT_NODE_TYPE, assertNotCommentWrite, commentGovernedError } from '../../../lib/comments/index.js';
+import { COMMENT_NODE_TYPE, assertNotCommentWrite, commentError, commentGovernedError } from '../../../lib/comments/index.js';
 import { commentIdsAmong, hardDeleteThreadsOfTargets, restoreThreadsOfTargets, softDeleteThreadsOfTargets } from '../../../lib/comments/lifecycle.js';
 import { generateId } from '../../../lib/id.js';
 // Spec 049 S4 — the protected-loc gate on the in-place update paths and the bulk skip.
@@ -3668,9 +3668,18 @@ export const nodeMutations = {
       if (source.nodeType === COMMENT_NODE_TYPE || target.nodeType === COMMENT_NODE_TYPE) {
         throw commentGovernedError('merge', 'edits');
       }
-      if ((deleteSource || fields.has('EDGES')) && (await ctx.db.commentMeta.count({ where: { targetNodeId: source.id, node: { deletedAt: null } } })) > 0) {
-        const err = commentGovernedError('merge', 'edits');
-        throw new GraphQLError(`${err.message} The source node has comment threads, which are anchored to it; an admin of its memory deletes them first.`, { extensions: err.extensions });
+      // #1664 — moving the source's edges is safe (governed edges never re-home,
+      // below), but DELETING a source that has live threads would destroy their
+      // anchor, which can't move to the target (cor:dmo:110:01).
+      if (deleteSource) {
+        const live = await ctx.db.commentMeta.count({ where: { targetNodeId: source.id, node: { deletedAt: null } } });
+        if (live > 0) {
+          throw commentError(
+            'COMMENT_MERGE_FOLDS_THREADS',
+            `Cannot merge with deleteSource: the source node has ${live} live comment(s), anchored to it, and a comment's anchor can't move to another node. An admin of its memory deletes the threads first, or merge without deleteSource.`,
+            { nodes: [{ nodeId: source.id, loc: source.loc, comments: live }] },
+          );
+        }
       }
       // Same-memory merge (the common case): write access to the target's
       // memory already covers the source. Only run a separate source check

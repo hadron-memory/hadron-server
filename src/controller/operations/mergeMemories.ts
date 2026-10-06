@@ -1,4 +1,7 @@
 import type { Prisma, PrismaClient } from '../../generated/prisma/index.js';
+import { COMMENT_NODE_TYPE } from '../../lib/comments/index.js';
+import { hardDeleteThreadsOfTargets } from '../../lib/comments/lifecycle.js';
+import { carryThreadsInTx, preflightMergeComments, refuseLiveThreadsOnFold } from '../../lib/comments/merge.js';
 import { assertBatchMutable, assertMemoryBulkMutable, assertNoProtectedReach } from '../../lib/bulkMutationGate.js';
 import {
   assertNoMintedCorpusRemoval,
@@ -224,8 +227,12 @@ export async function mergeMemoryGraph(
   // It stays because refusing a doomed merge before it relocates anything is
   // worth one query per endpoint, and because the refusal is far more useful
   // up front than eight pages in.
-  await assertMemoryBulkMutable(db, sourceMemoryId, 'merge');
-  await assertMemoryBulkMutable(db, targetMemoryId, 'merge into');
+  // #1664 (cor:dmo:110:02) — threads are CARRIED with their targets (below),
+  // so live comments no longer refuse; what can't be carried refuses here,
+  // before the first batch commits.
+  await assertMemoryBulkMutable(db, sourceMemoryId, 'merge', { comments: 'carry' });
+  await assertMemoryBulkMutable(db, targetMemoryId, 'merge into', { comments: 'carry' });
+  await preflightMergeComments(db, sourceMemoryId, targetMemoryId);
   // #1468 — every source node leaves the source memory (relocated, or folded
   // and deleted) and the source memory is then deleted: a mint-stamped source
   // corpus holding a spec cannot be merged away. Fail fast here; each batch
@@ -249,7 +256,9 @@ export async function mergeMemoryGraph(
   let relocatedCount = 0;
   for (let cursor: string | undefined; ; ) {
     const page = await db.node.findMany({
-      where: { memoryId: sourceMemoryId, deletedAt: null, ...(cursor ? { id: { gt: cursor } } : {}) },
+      // #1664 — comments never relocate on their own: each moves in its
+      // target's transaction (carryThreadsInTx).
+      where: { memoryId: sourceMemoryId, deletedAt: null, nodeType: { not: COMMENT_NODE_TYPE }, ...(cursor ? { id: { gt: cursor } } : {}) },
       select: { id: true, loc: true },
       orderBy: { id: 'asc' },
       take: classifyPage,
@@ -397,6 +406,8 @@ export async function mergeMemoryGraph(
               },
             });
           }
+          // #1664 — the batch's threads move in the same transaction as their targets.
+          await carryThreadsInTx(tx, relocationIds, targetMemoryId);
           return rows.length;
         }, BATCH_TX_OPTS);
         relocatedCount += moved;
@@ -560,7 +571,9 @@ export async function mergeMemoryGraph(
       // intact for its later pass.
       if (withEdges && foldedIds.length > 0) {
         const incident = await tx.edge.findMany({
-          where: { OR: [{ sourceId: { in: foldedIds } }, { targetId: { in: foldedIds } }] },
+          // #1664 — a comment's governed edge never re-homes: it goes with its
+          // (deleted) thread when the folded node is removed below.
+          where: { OR: [{ sourceId: { in: foldedIds } }, { targetId: { in: foldedIds } }], governedKind: null },
         });
         const incidentIds = new Set(incident.map((e) => e.id));
 
@@ -650,6 +663,10 @@ export async function mergeMemoryGraph(
       // targetId is not a foreign key, so the row cascade never reaches them.
       let pendingSourceMemories: string[] = [];
       if (foldedIds.length > 0) {
+        // #1664 — a live thread posted after the preflight refuses the fold;
+        // deleted threads go with the folded node (their anchor can't move).
+        await refuseLiveThreadsOnFold(tx, foldedIds);
+        await hardDeleteThreadsOfTargets(tx, foldedIds);
         pendingSourceMemories = await deletePendingEdgesTargetingNodes(tx, foldedIds);
         await tx.node.deleteMany({ where: { id: { in: foldedIds }, memoryId: sourceMemoryId } });
       }
@@ -674,7 +691,9 @@ export async function mergeMemoryGraph(
   // batch's moves are visible. Colliding edges drop; the rest move.
   for (;;) {
     const edges = await db.edge.findMany({
-      where: { memoryId: sourceMemoryId },
+      // #1664 — governed comment edges moved with their threads; one still
+      // here belongs to a thread that stays (its target did), so it stays too.
+      where: { memoryId: sourceMemoryId, governedKind: null },
       select: { id: true, loc: true },
       orderBy: { id: 'asc' },
       take: batchSize,
