@@ -1,6 +1,8 @@
 /** #1655 / DAE, DAG, DAI: shared compiled-automation format foundation.
  * This module does not grant execution authority; publish/load callers must
  * also verify the live environment and the version's approval/signature.
+ * Validation never rewrites signed bytes: the compiler normalizes text to LF,
+ * then publish/load hash the validated object.
  */
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
@@ -15,6 +17,11 @@ export const SPEC_LIMITS = Object.freeze({
 export type AutomationLimits = { -readonly [K in keyof typeof SPEC_LIMITS]: number };
 export function readAutomationLimits(env: Record<string, string | undefined>): AutomationLimits {
   const limits: AutomationLimits = { ...SPEC_LIMITS };
+  for (const name of Object.keys(env)) {
+    if (name.startsWith('AUTOMATION_MAX_') && !Object.hasOwn(SPEC_LIMITS, name.slice('AUTOMATION_MAX_'.length))) {
+      throw new Error(`Unknown automation limit ${name}.`);
+    }
+  }
   for (const key of Object.keys(limits) as (keyof AutomationLimits)[]) {
     const name = `AUTOMATION_MAX_${key}`;
     const raw = env[name];
@@ -85,7 +92,7 @@ export function automationVersionHash(value: unknown): string {
 }
 const localKey = z.string().regex(/^[a-z][a-z0-9-]{0,63}$/);
 const nonempty = z.string().min(1);
-const text = z.string().nullable().transform(v => v?.replace(/\r\n?/g, '\n') ?? null);
+const text = z.string().nullable();
 const urn = z.string().refine(v => { try { assertFullyQualifiedUrn(v, 'node'); return true; } catch { return false; } });
 const extraction = z.strictObject({ field: nonempty, description: z.string().optional(), shape: z.string().optional() });
 const flow = z.strictObject({
@@ -114,17 +121,29 @@ export type CompiledAutomation = z.output<typeof schema>;
 
 /** Tool resolution is supplied by the publishing/loading caller's live registry.
  * No tool is considered valid solely because its name appears in the object.
+ * Optional caller limits can only tighten the live deployment limits.
  */
 export function validateCompiledAutomation(input: unknown, options: {
-  appId: string; limits: AutomationLimits; resolvesTool: (name: string) => boolean; resolvesCredential: (ref: string) => boolean;
+  appId: string; limits?: AutomationLimits; resolvesTool: (name: string) => boolean; resolvesCredential: (ref: string) => boolean;
 }): CompiledAutomation {
   // Refuse non-JSON values before Zod could strip or invoke an accessor.
-  canonicalizeAutomationJson(input);
+  const limits = { ...readAutomationLimits(process.env) };
+  if (options.limits) {
+    for (const key of Object.keys(limits) as (keyof AutomationLimits)[]) {
+      const value = options.limits[key];
+      if (!Number.isSafeInteger(value) || value <= 0) fail('$', 'INVALID_LIMIT');
+      limits[key] = Math.min(value, limits[key]);
+    }
+  }
+  const canonical = canonicalizeAutomationJson(input);
+  if (Buffer.byteLength(canonical, 'utf8') > limits.OBJECT_BYTES) {
+    fail('$', 'LIMIT_EXCEEDED:AUTOMATION_MAX_OBJECT_BYTES');
+  }
   const parsed = schema.safeParse(input);
   if (!parsed.success) return fail(parsed.error.issues[0].path.join('.'), 'SCHEMA');
   const obj = parsed.data;
   const cap = (size: number, key: keyof AutomationLimits, path: string) => {
-    if (size > options.limits[key]) fail(path, `LIMIT_EXCEEDED:AUTOMATION_MAX_${key}`);
+    if (size > limits[key]) fail(path, `LIMIT_EXCEEDED:AUTOMATION_MAX_${key}`);
   };
   if (obj.app !== options.appId) fail('app', 'APP_MISMATCH');
   cap(Object.keys(obj.nodes).length, 'NODES', 'nodes'); cap(obj.edges.length, 'EDGES', 'edges');
@@ -136,6 +155,9 @@ export function validateCompiledAutomation(input: unknown, options: {
   }
   for (const [key, node] of Object.entries(obj.nodes)) {
     const path = `nodes.${key}`;
+    for (const field of ['title', 'abstract', 'content'] as const) {
+      if (node[field]?.includes('\r')) fail(`${path}.${field}`, 'NOT_NORMALIZED');
+    }
     cap(Buffer.byteLength(node.content ?? '', 'utf8'), 'CONTENT_BYTES', `${path}.content`);
     cap(node.flow.tools?.length ?? 0, 'TOOLS_PER_NODE', `${path}.flow.tools`);
     if (node.flow.tools !== undefined && node.flow.extractionSpec !== undefined) fail(`${path}.flow`, 'TOOLS_AND_EXTRACTION');

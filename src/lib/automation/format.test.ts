@@ -1,4 +1,5 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi, afterEach } from 'vitest';
+afterEach(() => vi.unstubAllEnvs());
 import conformance from './format.fixture.json';
 import { automationVersionHash, canonicalizeAutomationJson as jcs, readAutomationLimits, SPEC_LIMITS, validateCompiledAutomation } from './format.js';
 const fixture = () => ({
@@ -54,9 +55,26 @@ describe('lower-only deployment limits', () => {
   });
 });
 describe('strict compiled format', () => {
-  it('accepts the minimal object and LF-normalizes signed text only', () => {
-    const f = fixture(); f.nodes.entry.content = 'a\r\nb\rc';
-    expect(validate(f).nodes.entry.content).toBe('a\nb\nc');
+  it('preserves the signed object and refuses unnormalized text in every signed field', () => {
+    const f = fixture(); f.nodes.entry.content = 'a\nb\nc';
+    const hash = automationVersionHash(f);
+    expect(validate(f)).toEqual(f);
+    expect(automationVersionHash(validate(f))).toBe(hash);
+    for (const field of ['title', 'abstract', 'content'] as const) for (const text of ['a\r\nb', 'a\rb']) {
+      const value = fixture(); value.nodes.entry[field] = text as never;
+      expect(() => validate(value)).toThrow('NOT_NORMALIZED');
+    }
+  });
+  it('checks size before schema parsing and binds deployment limits even with explicit spec ceilings', () => {
+    vi.stubEnv('AUTOMATION_MAX_OBJECT_BYTES', '1');
+    expect(() => validate({ unknown: 'too big' })).toThrow('LIMIT_EXCEEDED:AUTOMATION_MAX_OBJECT_BYTES');
+    expect(() => validate(fixture())).toThrow('LIMIT_EXCEEDED:AUTOMATION_MAX_OBJECT_BYTES');
+    expect(() => validateCompiledAutomation(fixture(), { ...options, limits: undefined })).toThrow('LIMIT_EXCEEDED:AUTOMATION_MAX_OBJECT_BYTES');
+  });
+  it('refuses rounded provenance revisions and typoed override names', () => {
+    const f = fixture(); f.nodes.entry.source.revision = Number.MAX_SAFE_INTEGER + 1;
+    expect(() => validate(f)).toThrow('SCHEMA');
+    expect(() => readAutomationLimits({ AUTOMATION_MAX_NODE: '1' })).toThrow('Unknown automation limit');
   });
   it('refuses unknown keys at every fixed object seam', () => {
     for (const path of [[], ['nodes','entry'], ['nodes','entry','source'], ['nodes','entry','flow'], ['environment'], ['environment','ai'], ['environment','policy'], ['environment','budgets']]) {
