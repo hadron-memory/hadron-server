@@ -9,7 +9,11 @@
  * carve-outs (Query.memory blocker #676, Query.agents, effectiveAccess).
  */
 
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterAll, vi } from 'vitest';
+import { ApolloServer } from '@apollo/server';
+import { Prisma } from '../../../generated/prisma/index.js';
+import { formatGraphQLError } from '../formatError.js';
+import { typeDefs } from './typeDefs.js';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
@@ -218,4 +222,67 @@ describe('user-owned agent — read/list/audit surfaces are owner-only', () => {
       ),
     ).rejects.toThrow('Resource not found');
   });
+});
+
+
+// DAR / #1687: this caller has NO organization or OrgMember rows. Exercise
+// Apollo field rendering, not just createAgent's already-atomic core.
+const personalAgentApi = new ApolloServer<Context>({ typeDefs, resolvers });
+afterAll(async () => { await personalAgentApi.stop(); });
+it('lets an org-less user create, view and use a personal agent through GraphQL', async () => {
+  const contextValue = ctx({ userId: ownerId, roles: ['READER'] });
+  expect(await db.orgMember.count({ where: { userId: ownerId } })).toBe(0);
+  const execute = async (query: string, variables: Record<string, unknown> = {}) => {
+    const response = await personalAgentApi.executeOperation({ query, variables }, { contextValue });
+    expect(response.body.kind).toBe('single');
+    if (response.body.kind !== 'single') throw new Error('Unexpected incremental response');
+    expect(response.body.singleResult.errors).toBeUndefined();
+    return response.body.singleResult.data as Record<string, any>;
+  };
+  const created = (await execute(`mutation {
+    createAgent(name: "Orgless helper") { id urn organizationId systemMemoryId appCount orgGrants { organization { id } } }
+  }`)).createAgent;
+  expect(created).toMatchObject({ organizationId: null, appCount: 0, orgGrants: [] });
+  const viewed = (await execute(`query($ref: ID!) {
+    agent(ref: $ref) { id appCount orgGrants { organization { id } } systemMemoryId }
+  }`, { ref: created.id })).agent;
+  expect(viewed).toMatchObject({ id: created.id, appCount: 0, orgGrants: [], systemMemoryId: created.systemMemoryId });
+  const task = await db.node.create({ data: {
+    id: generateId(), memoryId: created.systemMemoryId, loc: 'tasks:hello', name: 'Hello', nodeType: 'task',
+    content: 'Help {{person}} with this personal task.', data: {}, createdBy: ownerId,
+  } });
+  const used = await execute('mutation($ref: String!) { runTask(nodeRef: $ref, args: { person: "Rashmi fixture" }) }', { ref: task.id });
+  expect(used.runTask).toContain('Help Rashmi fixture with this personal task.');
+  expect(await db.agent.count({ where: { id: created.id } })).toBe(1);
+  expect(await db.memory.count({ where: { id: created.systemMemoryId, ownerUserId: ownerId } })).toBe(1);
+});
+
+it('returns empty organization-derived fields for org-less agents even to a platform admin', async () => {
+  const agent = await resolvers.Mutation.createAgent({}, { name: 'No org counters' }, ctx({ userId: ownerId, roles: ['READER'] }));
+  for (const principal of [ctx({ userId: ownerId, roles: ['READER'] }), ctx({ userId: otherId, roles: ['ADMIN'] })]) {
+    await expect(resolvers.Agent.appCount(agent, {}, principal)).resolves.toBe(0);
+    await expect(resolvers.Agent.orgGrants(agent, {}, principal)).resolves.toEqual([]);
+  }
+});
+
+
+it('conceals a response-rendering Prisma fault without rolling back the committed personal agent', async () => {
+  const faultApi = new ApolloServer<Context>({
+    typeDefs, formatError: formatGraphQLError,
+    resolvers: { ...resolvers, Agent: { ...resolvers.Agent, appCount: () => {
+      throw new Prisma.PrismaClientValidationError('orgMember.findFirst({ userId: "private-id", organizationId: null })', { clientVersion: 'test' });
+    } } },
+  });
+  try {
+    const response = await faultApi.executeOperation({ query: 'mutation { createAgent(name: "Committed response") { id appCount } }' },
+      { contextValue: ctx({ userId: ownerId, roles: ['READER'] }) });
+    expect(response.body.kind).toBe('single');
+    if (response.body.kind !== 'single') throw new Error('Unexpected incremental response');
+    expect(response.body.singleResult.errors).toHaveLength(1);
+    expect(response.body.singleResult.errors![0]).toMatchObject({ message: 'Unable to complete this request. Please try again.', extensions: { code: 'INTERNAL_SERVER_ERROR' } });
+    expect(JSON.stringify(response.body.singleResult)).not.toMatch(/private-id|orgMember|stacktrace/);
+    const committed = await db.agent.findUniqueOrThrow({ where: { urn: 'owner-one:committed-response' } });
+    expect(committed.ownerUserId).toBe(ownerId);
+    expect(await db.memory.findUnique({ where: { id: committed.systemMemoryId! } })).toMatchObject({ ownerUserId: ownerId, class: 'system' });
+  } finally { await faultApi.stop(); }
 });

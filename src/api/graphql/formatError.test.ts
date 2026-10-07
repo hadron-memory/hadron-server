@@ -9,6 +9,7 @@
  * src/test/integration/918-asset-error-codes.test.ts.
  */
 import { describe, it, expect } from 'vitest';
+import { Prisma } from '../../generated/prisma/index.js';
 import { GraphQLError, type GraphQLFormattedError } from 'graphql';
 import { formatGraphQLError, isExpectedClientError } from './formatError.js';
 import { UrnNotQualifiedError, UrnParseError } from '../../lib/urn.js';
@@ -211,5 +212,24 @@ describe('EntityNotFoundError → its own code on the wire (#1174)', () => {
     for (const [, err] of FAMILY) expect(isExpectedClientError(err)).toBe(true);
     // And a genuine fault is still reported.
     expect(isExpectedClientError(new Error('boom'))).toBe(false);
+  });
+});
+
+
+describe('#1688 Prisma failures never expose query internals', () => {
+  it.each([
+    new Prisma.PrismaClientValidationError('orgMember.findFirst({userId:"private-id",organizationId:null})', { clientVersion: 'test' }),
+    new Prisma.PrismaClientKnownRequestError('Secret query arguments', { clientVersion: 'test', code: 'P2003' }),
+    new Prisma.PrismaClientUnknownRequestError('Secret database details', { clientVersion: 'test' }),
+    new Prisma.PrismaClientInitializationError('Database credentials', 'test'),
+    new Prisma.PrismaClientRustPanicError('Driver stack internals', 'test'),
+  ])('sanitizes $name while retaining internal reporting', original => {
+    const { formatted, error } = wrap(original);
+    const result = formatGraphQLError({ ...formatted, extensions: { code: 'INTERNAL_SERVER_ERROR', stacktrace: ['Secret stack'], detail: 'query internals' }, path: ['createAgent', 'appCount'] }, error);
+    expect(result.message).toBe('Unable to complete this request. Please try again.');
+    expect(result.extensions).toEqual({ code: 'INTERNAL_SERVER_ERROR' });
+    expect(result.path).toEqual(['createAgent', 'appCount']);
+    expect(error.originalError).toBe(original);
+    expect(isExpectedClientError(original)).toBe(false);
   });
 });
