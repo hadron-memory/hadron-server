@@ -465,6 +465,8 @@ export const memoryMutations = {
             extensions: {
               ...e.extensionFields(),
               loc: (e as NodeAbstractTooLongError & { loc?: string }).loc,
+              // #1686 — present when earlier batches had already committed.
+              ...((e as { partialMerge?: unknown }).partialMerge ? { partialMerge: (e as { partialMerge?: unknown }).partialMerge } : {}),
             },
           });
         }

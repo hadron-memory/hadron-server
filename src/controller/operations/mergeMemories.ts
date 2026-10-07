@@ -153,9 +153,91 @@ export function mergeTargetLocTombstonedError(targetMemoryId: string, locs: stri
   );
 }
 
+/**
+ * #1686 — what a refused merge had ALREADY applied. The merge commits in
+ * batches by design (each batch a consistent prefix, the whole resumable), so
+ * a refusal raised by a later batch under its locks — a thread posted on a
+ * folding node (#1682), a governed kind or a Channel appearing in reach, the
+ * raw unique violation of #1684 — lands after earlier batches committed.
+ * The caller is told so, with counts, rather than left to discover a silent
+ * half-move. Absent when the refusal came before any batch committed.
+ */
+export interface PartialMergeReport {
+  applied: true;
+  relocated: number;
+  folded: number;
+  edgesMoved: number;
+  edgesDropped: number;
+  /** Live source nodes still to merge; null when the recount itself failed. */
+  remainingSourceNodes: number | null;
+  /** The source memory is never deleted by a refused merge. */
+  sourceIntact: true;
+  remedy: string;
+}
+
+const PARTIAL_MERGE_REMEDY =
+  'Part of the merge was already applied. Resolve the blocker and re-run the same merge: it resumes from what remains.';
+
+/**
+ * Attach the partial-state report to a merge failure. A typed refusal keeps
+ * its code and gains `extensions.partialMerge`; an untyped error (no code a
+ * client can branch on) becomes `MERGE_PARTIALLY_APPLIED`, carrying the
+ * original's Prisma code when it has one. A NodeAbstractTooLongError keeps
+ * its class (the resolver types it) and carries the report on the instance.
+ */
+function withPartialMerge(error: unknown, report: PartialMergeReport): unknown {
+  const sentence = ` The merge was partially applied (${report.relocated} relocated, ${report.folded} folded${report.remainingSourceNodes != null ? `, ${report.remainingSourceNodes} source node(s) remaining` : ''}); the source memory is intact. Resolve the blocker and re-run the same merge to finish it.`;
+  if (error instanceof GraphQLError) {
+    return new GraphQLError(error.message + sentence, {
+      extensions: { ...error.extensions, partialMerge: report },
+      originalError: error.originalError ?? error,
+    });
+  }
+  if (error instanceof NodeAbstractTooLongError) {
+    (error as NodeAbstractTooLongError & { partialMerge?: PartialMergeReport }).partialMerge = report;
+    return error;
+  }
+  const prismaCode = (error as { code?: unknown })?.code;
+  return new GraphQLError(`mergeMemories stopped part-way: ${(error as Error)?.message ?? String(error)}.` + sentence, {
+    extensions: {
+      code: 'MERGE_PARTIALLY_APPLIED',
+      ...(typeof prismaCode === 'string' ? { causeCode: prismaCode } : {}),
+      partialMerge: report,
+    },
+    originalError: error instanceof Error ? error : undefined,
+  });
+}
+
 export async function mergeMemoryGraph(
   db: PrismaClient,
   args: MergeMemoryArgs,
+): Promise<MergeMemoryResult> {
+  const progress: MergeMemoryResult = { relocatedCount: 0, foldedCount: 0, edgesMovedCount: 0, edgesDroppedCount: 0 };
+  try {
+    return await runMerge(db, args, progress);
+  } catch (error) {
+    const committed = progress.relocatedCount + progress.foldedCount + progress.edgesMovedCount + progress.edgesDroppedCount;
+    if (committed === 0) throw error;
+    const remainingSourceNodes = await db.node
+      .count({ where: { memoryId: args.sourceMemoryId, deletedAt: null, nodeType: { not: COMMENT_NODE_TYPE } } })
+      .catch(() => null);
+    throw withPartialMerge(error, {
+      applied: true,
+      relocated: progress.relocatedCount,
+      folded: progress.foldedCount,
+      edgesMoved: progress.edgesMovedCount,
+      edgesDropped: progress.edgesDroppedCount,
+      remainingSourceNodes,
+      sourceIntact: true,
+      remedy: PARTIAL_MERGE_REMEDY,
+    });
+  }
+}
+
+async function runMerge(
+  db: PrismaClient,
+  args: MergeMemoryArgs,
+  progress: MergeMemoryResult,
 ): Promise<MergeMemoryResult> {
   const { sourceMemoryId, targetMemoryId, fields, deleteSourceMem, editor } = args;
   const actorId = editor.userId ?? editor.info ?? null;
@@ -334,7 +416,6 @@ export async function mergeMemoryGraph(
   // by an offset/`take`-only loop.
   const survivor = new Map<string, string>(); // colliding src id → target counterpart id
   const collidingSrcIds: string[] = [];
-  let relocatedCount = 0;
   for (let cursor: string | undefined; ; ) {
     const page = await db.node.findMany({
       // #1664 — comments never relocate on their own: each moves in its
@@ -506,7 +587,7 @@ export async function mergeMemoryGraph(
           });
           return rows.length;
         }, BATCH_TX_OPTS);
-        relocatedCount += moved;
+        progress.relocatedCount += moved;
       }
     }
     if (page.length < classifyPage) break;
@@ -518,9 +599,6 @@ export async function mergeMemoryGraph(
   // abstract hash, repoint its incident edges (when EDGES is selected), then
   // delete the emptied source row. Repointing happens BEFORE the delete so an
   // edge transferred onto the counterpart doesn't cascade away with the row.
-  let foldedCount = 0;
-  let edgesMovedCount = 0;
-  let edgesDroppedCount = 0;
 
   for (let i = 0; i < collidingSrcIds.length; i += batchSize) {
     const batchIds = collidingSrcIds.slice(i, i + batchSize);
@@ -769,12 +847,12 @@ export async function mergeMemoryGraph(
       return { folded: foldedIds.length, moved, dropped, pendingSourceMemories };
     }, BATCH_TX_OPTS);
 
-    foldedCount += batch.folded;
+    progress.foldedCount += batch.folded;
     await reconcilePendingEdgeCounts(db, batch.pendingSourceMemories).catch((err) =>
       console.warn('[mergeMemories] pending-edge count reconcile failed (the periodic repair will fix it):', err),
     );
-    edgesMovedCount += batch.moved;
-    edgesDroppedCount += batch.dropped;
+    progress.edgesMovedCount += batch.moved;
+    progress.edgesDroppedCount += batch.dropped;
   }
 
   // === Phase 3: relocate the surviving source-memory edges into the target. ===
@@ -812,8 +890,8 @@ export async function mergeMemoryGraph(
         await tx.edge.updateMany({ where: { id: { in: move } }, data: { memoryId: targetMemoryId } });
       }
     }, BATCH_TX_OPTS);
-    edgesMovedCount += move.length;
-    edgesDroppedCount += drop.length;
+    progress.edgesMovedCount += move.length;
+    progress.edgesDroppedCount += drop.length;
     if (edges.length < batchSize) break;
   }
 
@@ -844,5 +922,5 @@ export async function mergeMemoryGraph(
     });
   }
 
-  return { relocatedCount, foldedCount, edgesMovedCount, edgesDroppedCount };
+  return progress;
 }
