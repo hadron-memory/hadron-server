@@ -13,7 +13,10 @@
  *
  *  - A prompt typed into a BUSY Codex agent steers its turn, and it silently
  *    drops the rest of its task. So a nudge is sent only after
- *    `orca terminal wait --for tui-idle` proves the terminal idle.
+ *    `orca terminal wait --for tui-idle` proves the terminal idle — except
+ *    that an UNTRACKED terminal (Orca lost its output stream; happens
+ *    fleet-wide on a serve restart) can never satisfy the wait, so its
+ *    timeout reads as unknown and the idle-prompt screen shape decides.
  *  - `tui-idle` also reports idle while a HUMAN is typing, so a nudge got
  *    appended to Holger's half-typed text and submitted it (#5473). So the
  *    screen read must also prove the prompt empty (`promptIsEmpty`). Orca's
@@ -516,6 +519,8 @@ interface Terminal {
   agentIdentity?: string | null;
   connected?: boolean;
   writable?: boolean;
+  /** Epoch ms of the last OUTPUT Orca saw; null when tracking is lost. */
+  lastOutputAt?: number | null;
 }
 
 /** Orca's live terminals. */
@@ -540,6 +545,33 @@ export function isIdle(cfg: Config, handle: string, timeoutMs: number, run: Runn
   } catch {
     return false;
   }
+}
+
+/**
+ * [verdict, why]: whether the terminal may be typed into, with THREE outcomes
+ * where tui-idle alone gave two (#7398 incident class).
+ *
+ * A tui-idle timeout means "busy" only when Orca is TRACKING the terminal's
+ * output (lastOutputAt set). Orca loses tracking fleet-wide on a serve restart
+ * and degrades it in smaller sets mid-life (observed 2026-10-07: 28/40 null
+ * from ~03:10Z with the serve continuously up); an untracked terminal can
+ * NEVER satisfy tui-idle, so reading the timeout as "busy" pins every idle
+ * untracked worker forever — exactly the workers awaiting nudges. For an
+ * untracked terminal the timeout is UNKNOWN, and the rendered screen is the
+ * fallback proof: the idle-prompt shape (bare box + the agent's empty-input
+ * marker, no draft) is the same live evidence the empty-prompt gate trusts.
+ */
+export function provesIdle(
+  cfg: Config, handle: string, agent: string, lastOutputAt: number | null | undefined,
+  timeoutMs: number, run: Runner,
+): [boolean, string] {
+  if (isIdle(cfg, handle, timeoutMs, run)) return [true, ''];
+  if (lastOutputAt === null || lastOutputAt === undefined) {
+    const [empty, why] = promptIsEmpty(cfg, handle, agent, run);
+    if (empty) return [true, why || 'untracked terminal, screen proves the idle prompt'];
+    return [false, `unknown idle state — no output tracking, screen shows ${why}`];
+  }
+  return [false, `busy for ${Math.round(timeoutMs / 1000)}s`];
 }
 
 /**
@@ -818,8 +850,10 @@ export function pollOnce(cfg: Config, run: Runner = runCommand, log: (line: stri
         outcome.held[entry.name] = detail;
         continue;
       }
-      if (!isIdle(cfg, handle, cfg.busyWaitMs, run)) {
-        outcome.held[entry.name] = `busy for ${Math.round(cfg.busyWaitMs / 1000)}s`;
+      const tracked = new Map(terminals.map((t) => [t.handle, t.lastOutputAt]));
+      const [gate, gateWhy] = provesIdle(cfg, handle, detail, tracked.get(handle), cfg.busyWaitMs, run);
+      if (!gate) {
+        outcome.held[entry.name] = gateWhy;
         continue;
       }
       // Checked AFTER idle, as close to the send as possible: idle says the
@@ -862,9 +896,11 @@ export function pollOnce(cfg: Config, run: Runner = runCommand, log: (line: stri
       // screen alone cannot catch it) or a human may have started typing
       // (#5473). Re-prove both, as close to the send as possible — the idle
       // recheck FAIL-CLOSED (see RECHECK_IDLE_TIMEOUT_MS): busy here holds,
-      // and the next poll recomputes everything.
-      if (!isIdle(cfg, handle, RECHECK_IDLE_TIMEOUT_MS, run)) {
-        outcome.held[entry.name] = 'busy again after the recompute (fail-closed, not waited)';
+      // and the next poll recomputes everything. An UNTRACKED terminal gets
+      // the screen fallback again (it can never satisfy tui-idle).
+      const [recheckIdle, recheckWhy] = provesIdle(cfg, handle, detail, tracked.get(handle), RECHECK_IDLE_TIMEOUT_MS, run);
+      if (!recheckIdle) {
+        outcome.held[entry.name] = `busy again after the recompute (${recheckWhy.includes('unknown') ? recheckWhy : 'fail-closed, not waited'})`;
         continue;
       }
       const [stillEmpty, whyNow] = promptIsEmpty(cfg, handle, detail, run);

@@ -45,6 +45,8 @@ class FakeCLIs {
   busy = new Set<string>();
   /** Busy on a handle's SECOND wait — the post-recompute idle recheck. */
   busyRecheck = new Set<string>();
+  /** Terminals with NO output tracking — tui-idle can never satisfy (#7398). */
+  untracked = new Set<string>();
   waits = new Map<string, number>();
   reject = new Set<string>();
   /** The rendered screen per handle; set by terminal() to an idle prompt for its agent. */
@@ -73,11 +75,15 @@ class FakeCLIs {
 
   constructor(readonly root: string) {}
 
-  terminal(name: string, agent: string | null = 'claude', handle?: string) {
+  terminal(name: string, agent: string | null = 'claude', handle?: string, tracked = true) {
     const wt = join(this.root, 'workspaces', name);
     mkdirSync(wt, { recursive: true });
     const h = handle ?? `term_${name}`;
-    this.terminals.push({ handle: h, worktreePath: wt, agentIdentity: agent, connected: true, writable: true });
+    this.terminals.push({
+      handle: h, worktreePath: wt, agentIdentity: agent, connected: true, writable: true,
+      lastOutputAt: tracked ? Date.now() : null,
+    });
+    if (!tracked) this.untracked.add(h);
     this.screens.set(h, { tail: agent === 'codex' ? CODEX_IDLE : CLAUDE_IDLE });
   }
 
@@ -125,12 +131,13 @@ class FakeCLIs {
       const n = (this.waits.get(handle) ?? 0) + 1;
       this.waits.set(handle, n);
       const busyNow = n === 1 ? this.busy.has(handle) : this.busy.has(handle) || this.busyRecheck.has(handle);
+      const satisfiable = !busyNow && !this.untracked.has(handle);
       // Only a SATISFIED wait precedes a fresh scan; a busy worker is held
       // before any recompute, and its failed wait must not flip the phase.
-      if (!busyNow) this.sawWait = true;
-      return busyNow
-        ? out({ ok: false, error: { code: 'timeout', message: 'timeout' } })
-        : out({ ok: true, result: { wait: { satisfied: true } } });
+      if (satisfiable) this.sawWait = true;
+      return satisfiable
+        ? out({ ok: true, result: { wait: { satisfied: true } } })
+        : out({ ok: false, error: { code: 'timeout', message: 'timeout' } });
     }
     if (verb === 'terminal read') {
       const n = (this.reads.get(handle) ?? 0) + 1;
@@ -215,6 +222,52 @@ describe('Orca attention router — the happy path', () => {
     fake.attention.workers = [worker('w-ada', 'Ada'), worker('w-eli', 'Eli', { mentions: 0 })];
     expect(poll(c).adopted).toBe(true);
     expect(fake.sent).toEqual([]);
+  });
+});
+
+describe('Orca attention router — untracked terminals: unknown is not busy (#7398)', () => {
+  it('an UNTRACKED terminal times out tui-idle forever, but a screen that proves the idle prompt still delivers', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli', 'claude', undefined, false); // lastOutputAt null — tracking lost
+    fake.attention.workers = [worker('w-eli', 'Eli', { mentions: 1, unread: 2, relevant: 110 })];
+    const out = poll(c);
+    expect(out).toMatchObject({ nudged: ['Eli'], adopted: true });
+    expect(fake.sent).toHaveLength(1);
+  });
+
+  it('an untracked terminal whose screen shows activity holds as unknown, not busy', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli', 'claude', undefined, false);
+    fake.attention.workers = [worker('w-eli', 'Eli')];
+    fake.screens.set('term_eli', { tail: withPrompt(CLAUDE_IDLE, '❯', 'mid-turn output') }); // no idle-prompt shape
+    const out = poll(c);
+    expect(out.nudged).toEqual([]);
+    expect(out.held.Eli).toContain('unknown idle state');
+    expect(out.held.Eli).not.toContain('busy for');
+    expect(fake.sent).toEqual([]);
+  });
+
+  it('a TRACKED terminal that times out still holds as busy — the fallback never widens that', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli'); // tracked
+    fake.busy.add('term_eli');
+    fake.attention.workers = [worker('w-eli', 'Eli')];
+    const out = poll(c);
+    expect(out.held.Eli).toContain('busy for');
+    expect(fake.sent).toEqual([]);
+  });
+
+  it('the post-recompute recheck also falls back to the screen for untracked terminals', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli', 'claude', undefined, false);
+    fake.attention.workers = [worker('w-eli', 'Eli')];
+    // Gate passes via the screen fallback; the recompute re-runs; the fail-closed
+    // recheck (500ms) also times out for the untracked terminal — the screen
+    // still proves the idle prompt, so the send proceeds.
+    const out = poll(c);
+    expect(out).toMatchObject({ nudged: ['Eli'], adopted: true });
+    const waits = fake.calls.filter((a) => a.slice(1, 3).join(' ') === 'terminal wait');
+    expect(waits.length).toBeGreaterThanOrEqual(2); // gate + recheck both attempted
   });
 });
 
