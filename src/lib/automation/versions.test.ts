@@ -135,3 +135,30 @@ it('rechecks revocation after the version-row lock wait before appending approva
     expect(stored.approvedAt).toBeNull(); expect(stored.revokedBy).toBe(adminId);
   } finally { release(); await Promise.allSettled([holder, confirmation]); }
 });
+
+
+it('refuses a changed App owner scope after its anchor-row lock wait', async () => {
+  const destination = await db.organization.create({ data: { id: generateId(), urn: 'automation-destination', name: 'Destination' } });
+  await db.orgMember.create({ data: { organizationId: destination.id, userId: ownerId, role: 'ADMIN' } });
+  let release!: () => void; let locked!: () => void;
+  const gate = new Promise<void>(r => { release = r; }); const ready = new Promise<void>(r => { locked = r; });
+  const holder = db.$transaction(async tx => {
+    await tx.app.update({ where: { id: appId }, data: { organizationId: destination.id } }); locked(); await gate;
+  }, { timeout: 20000 });
+  await ready;
+  const publication = publishAs().then(value => ({ value, error: null }), error => ({ value: null, error }));
+  try {
+    await waitForLockWaitersOfType(db, 'transactionid'); release(); await holder;
+    expect((await publication).error).toMatchObject({ extensions: { code: 'FORBIDDEN' } });
+    expect(await db.automationVersion.count()).toBe(0);
+  } finally { release(); await Promise.allSettled([holder, publication]); }
+});
+
+
+it('refuses captured run identities as approval credentials', async () => {
+  const v = await publishAs('PERSON', readerId);
+  const run = { ...context(readerId), appId, clientId: 'run:synthetic-run' };
+  await expect(approve(run, v.id, v.versionHash, live)).rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
+  expect((await db.automationVersion.findUniqueOrThrow({ where: { id: v.id } })).approvedAt).toBeNull();
+  await expect(approve({ ...context(readerId), appId, clientId: `user:${readerId}` }, v.id, v.versionHash, live)).resolves.toMatchObject({ approvedBy: readerId });
+});

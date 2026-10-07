@@ -7,6 +7,7 @@ import type { App, AutomationVersion } from '../../generated/prisma/index.js';
 import { generateId } from '../id.js';
 import { hasAppRelationship } from '../auth/appRelationship.js';
 import { isStrictOwner } from '../auth/strictOwner.js';
+import { isRunPrincipal } from '../auth/runPrincipal.js';
 import { withAuthorizedTx } from '../../api/graphql/schema/authorizedTx.js';
 import { requireOwnerOrOrgRole, type Context } from '../../api/graphql/schema/resolvers.helpers.js';
 import { automationVersionHash, canonicalizeAutomationJson, validateCompiledAutomation, type CompiledAutomation } from './format.js';
@@ -19,13 +20,18 @@ export interface AutomationValidationContext {
 export type AutomationValidationResolver = (ctx: Context, app: App, input: unknown) => Promise<AutomationValidationContext>;
 const refuse = (code: string, message: string): never => { throw new GraphQLError(message, { extensions: { code } }); };
 function requireHuman(ctx: Context): string {
-  if (!ctx.userId || ctx.impersonation) return refuse('FORBIDDEN', 'An authenticated non-impersonated user is required.');
+  if (!ctx.userId || ctx.impersonation || isRunPrincipal(ctx)) return refuse('FORBIDDEN', 'An authenticated non-impersonated user is required.');
   return ctx.userId;
 }
 async function loadApp(ctx: Context, appId: string): Promise<App> {
   const app = await ctx.db.app.findFirst({ where: { id: appId, deletedAt: null, uninstalledAt: null } });
   if (!app) return refuse('NOT_FOUND', 'App not found.');
   return app;
+}
+function requireSameOwnership(current: App, observed: App): void {
+  if (current.organizationId !== observed.organizationId || current.ownerUserId !== observed.ownerUserId) {
+    refuse('FORBIDDEN', 'App ownership changed; reload and retry.');
+  }
 }
 function anchorsFor(app: App) {
   return [
@@ -74,6 +80,7 @@ export async function publishAutomationVersion(ctx: Context, input: {
     ...anchorsFor(observed), ...(runAsUserId ? [{ kind: 'user' as const, id: runAsUserId }] : []),
   ], async txCtx => {
     app = await loadApp(txCtx, observed.id);
+    requireSameOwnership(app, observed);
     await requireOwnerOrOrgRole(txCtx, app, 'ADMIN');
     if (runAsUserId && !(await hasAppRelationship(txCtx.db, app.id, runAsUserId))) {
       refuse('RELATIONSHIP_MISSING', 'The run-as user has no live App relationship.');
@@ -115,6 +122,7 @@ export async function approveAutomationVersion(ctx: Context, id: string, expecte
     current = (await txCtx.db.automationVersion.findUnique({ where: { id } }))!;
     if (!current) refuse('NOT_FOUND', 'Automation version not found.');
     app = await loadApp(txCtx, current.appId);
+    requireSameOwnership(app, observed.app);
     if (current.tier === 'PERSON') {
       if (!isStrictOwner(txCtx, current.runAsUserId)) refuse('FORBIDDEN', 'Only the run-as user may approve this version.');
       if (!(await hasAppRelationship(txCtx.db, current.appId, actor))) refuse('RELATIONSHIP_MISSING', 'The run-as user has no live App relationship.');
@@ -139,6 +147,7 @@ export async function revokeAutomationVersion(ctx: Context, id: string): Promise
     current = (await txCtx.db.automationVersion.findUnique({ where: { id } }))!;
     if (!current) refuse('NOT_FOUND', 'Automation version not found.');
     const app = await loadApp(txCtx, current.appId);
+    requireSameOwnership(app, observed.app);
     if (!isStrictOwner(txCtx, current.runAsUserId)) await requireOwnerOrOrgRole(txCtx, app, 'ADMIN');
   }, async tx => {
     if (!current.revokedAt) current = await tx.automationVersion.update({ where: { id }, data: { revokedAt: new Date(), revokedBy: actor } });
