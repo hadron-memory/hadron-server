@@ -2196,8 +2196,8 @@ export const typeResolvers = {
     },
     // Adoption count — the agent's owning-org view only (a bare number, but
     // still "who uses this"); non-members get 0.
-    appCount: async (a: { id: string; organizationId: string }, _: unknown, ctx: Context) => {
-      if (!(await isOrgMemberOrAdmin(ctx, a.organizationId))) return 0;
+    appCount: async (a: { id: string; organizationId: string | null }, _: unknown, ctx: Context) => {
+      if (a.organizationId === null || !(await isOrgMemberOrAdmin(ctx, a.organizationId))) return 0;
       return ctx.db.app.count({
         where: { appAgents: { some: { agentId: a.id } }, deletedAt: null },
       });
@@ -2224,8 +2224,8 @@ export const typeResolvers = {
     },
     // The agent's customer list (which orgs were granted it) — owning-org view
     // only; non-members get [].
-    orgGrants: async (a: { id: string; organizationId: string }, _: unknown, ctx: Context) => {
-      if (!(await isOrgMemberOrAdmin(ctx, a.organizationId))) return [];
+    orgGrants: async (a: { id: string; organizationId: string | null }, _: unknown, ctx: Context) => {
+      if (a.organizationId === null || !(await isOrgMemberOrAdmin(ctx, a.organizationId))) return [];
       return ctx.db.agentOrgGrant.findMany({
         where: { agentId: a.id },
         orderBy: { createdAt: 'asc' },
