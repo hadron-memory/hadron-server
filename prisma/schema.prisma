@@ -3117,6 +3117,7 @@ model App {
   usageEvents      UsageEvent[]
   pendingSetups    PendingSetup[]
   aiServiceConfigs AiServiceConfig[]
+  automationVersions AutomationVersion[]
   connectionGrants ConnectionGrant[] @relation("AppConnectionGrants")
   slackConnections SlackConnection[]
 
@@ -4786,4 +4787,36 @@ model MemoryConfigTemplateRule {
   @@index([validationTaskId])
   @@index([descriptionNodeId])
   @@map("memory_config_template_rules")
+}
+
+
+/// #1655 DAE/DAG: immutable compiled code; approval is the temporary DZ-3
+/// bridge until passkey signatures ship. Identity strings preserve audit history.
+enum AutomationTier {
+  PERSON
+  APP
+}
+
+model AutomationVersion {
+  id                String @id @default(cuid())
+  appId             String @map("app_id")
+  app               App @relation(fields: [appId], references: [id], onDelete: Cascade)
+  number            Int
+  entrySourceNodeId String @map("entry_source_node_id")
+  compiledJson      String @map("compiled_json")
+  versionHash       String @map("version_hash")
+  sourceManifest    Json @map("source_manifest")
+  tier              AutomationTier
+  runAsUserId       String? @map("run_as_user_id")
+  publishedBy       String @map("published_by")
+  publishedAt       DateTime @default(now()) @map("published_at")
+  approvalHash      String? @map("approval_hash")
+  approvedBy        String? @map("approved_by")
+  approvedAt        DateTime? @map("approved_at")
+  revokedBy         String? @map("revoked_by")
+  revokedAt         DateTime? @map("revoked_at")
+
+  @@unique([appId, entrySourceNodeId, number])
+  @@index([appId])
+  @@map("automation_versions")
 }
