@@ -5,9 +5,17 @@ import { mergeUsers, AUDIT_USER_COLUMNS } from './mergeUsers.js';
 
 type AuditColumn = { table_name: string; column_name: string };
 
-// Spec 048 retired auto-personal organizations, so even organizations.created_by
-// is an ordinary actor stamp. There are currently no intentional exemptions.
-const EXEMPT_AUDIT_COLUMNS = new Set<string>();
+// Ordinary audit stamps follow the surviving identity (spec 048). Compiled
+// automation identities are sealed consent/provenance snapshots instead:
+// rewriting them would violate the immutable evidence and silently change its
+// historical actor. Source Users are soft-deleted, so these remain resolvable
+// history; execution must fail closed for a merged-away run-as/signer.
+// The behavioral user-merge test in automation/versions.test.ts pins this.
+const EXEMPT_AUDIT_COLUMNS = new Set([
+  'automation_versions.published_by',
+  'automation_versions.approved_by',
+  'automation_versions.revoked_by',
+]);
 
 function coveredPairs(registry: Readonly<Record<string, readonly string[]>>): Set<string> {
   return new Set(Object.entries(registry).flatMap(([table, columns]) => columns.map((column) => `${table}.${column}`)));
@@ -27,7 +35,8 @@ describe('mergeUsers audit actor registry', () => {
     const columns = await db.$queryRaw<AuditColumn[]>`
       SELECT table_name, column_name FROM information_schema.columns
       WHERE table_schema = 'public'
-        AND column_name IN ('created_by', 'updated_by', 'deleted_by', 'revoked_by')
+        AND (column_name IN ('created_by', 'updated_by', 'deleted_by', 'revoked_by')
+          OR (table_name = 'automation_versions' AND column_name IN ('published_by', 'approved_by')))
     `;
     const schemaPairs = new Set(columns.map(({ table_name, column_name }) => `${table_name}.${column_name}`));
     const covered = coveredPairs(AUDIT_USER_COLUMNS);

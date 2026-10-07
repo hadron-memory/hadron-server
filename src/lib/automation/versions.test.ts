@@ -2,6 +2,8 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../../test/helpers.js';
+import { mergeUsers } from '../../controller/operations/mergeUsers.js';
+import { hasAppRelationship } from '../auth/appRelationship.js';
 import { generateId } from '../id.js';
 import { waitForLockWaitersOfType } from '../../test/lockWait.js';
 import type { Context } from '../../api/graphql/schema/resolvers.helpers.js';
@@ -161,4 +163,36 @@ it('refuses captured run identities as approval credentials', async () => {
   await expect(approve(run, v.id, v.versionHash, live)).rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
   expect((await db.automationVersion.findUniqueOrThrow({ where: { id: v.id } })).approvedAt).toBeNull();
   await expect(approve({ ...context(readerId), appId, clientId: `user:${readerId}` }, v.id, v.versionHash, live)).resolves.toMatchObject({ approvedBy: readerId });
+});
+
+
+it('keeps sealed identity evidence intact across a real user merge without blocking that merge', async () => {
+  const pending = await publishAs('PERSON', ownerId);
+  const confirmed = await publishAs('PERSON', ownerId);
+  await approve(context(ownerId), confirmed.id, confirmed.versionHash, live);
+  const revoked = await publishAs('PERSON', ownerId);
+  await approve(context(ownerId), revoked.id, revoked.versionHash, live);
+  await revoke(context(ownerId), revoked.id);
+  const snapshots = await db.automationVersion.findMany({ where: { appId }, orderBy: { number: 'asc' } });
+  expect(snapshots[2]).toMatchObject({ runAsUserId: ownerId, publishedBy: ownerId, approvedBy: ownerId, revokedBy: ownerId });
+  await mergeUsers(db, { sourceUserId: ownerId, targetUserId: adminId, actorUserId: readerId });
+  expect(await db.automationVersion.findMany({ where: { appId }, orderBy: { number: 'asc' } })).toEqual(snapshots);
+  expect(await db.user.findUnique({ where: { id: ownerId } })).toMatchObject({ deletedAt: expect.any(Date) });
+  expect(await db.user.findUnique({ where: { id: adminId } })).toMatchObject({ deletedAt: null });
+  expect(await hasAppRelationship(db, appId, ownerId)).toBe(false);
+  await expect(approve(context(adminId), pending.id, pending.versionHash, live)).rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
+  await expect(approve(context(ownerId), pending.id, pending.versionHash, live)).rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
+});
+
+
+it('behaviorally enforces consent-shape CHECK clauses independently of the SQL copy pin', async () => {
+  const v = await publishAs();
+  for (const data of [
+    { approvedBy: ownerId },
+    { approvedBy: ownerId, approvedAt: new Date(), approvalHash: '0'.repeat(64) },
+    { revokedBy: ownerId },
+  ]) {
+    await expect(db.automationVersion.update({ where: { id: v.id }, data })).rejects.toThrow();
+    expect(await db.automationVersion.findUnique({ where: { id: v.id } })).toEqual(v);
+  }
 });
