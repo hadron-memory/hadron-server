@@ -314,16 +314,33 @@ describe('#1701: several workers bound on one MCP connection', () => {
     expect(await db.node.findFirst({ where: { memoryId: appMemory.id, loc: 'dac:plain-ended' } })).toBeNull();
   });
 
-  it('one chat session that ends Iris BEFORE binding Dara was never shared: unnamed writes go to Dara', async () => {
+  it('a second worker bound AFTER the first ended still makes the connection shared (PR #1702 review, Codex P1)', async () => {
+    // Chat A binds Iris and ends it; chat B binds Dara. To the server that is
+    // indistinguishable from ONE chat session switching workers, so an unnamed
+    // write must be refused either way, never credited to Dara.
     const app = await db.worker.findUniqueOrThrow({ where: { id: worker.id }, select: { appId: true } });
     const dara = await db.worker.create({ data: { id: generateId(), appId: app.appId, agentId: agent.id, name: 'Dara', slug: 'dara' } });
     const call = await mcpConnection();
-    const iris = /Session started: ([0-9a-f]{32})/.exec(await call('hadron_start_session', { description: 'stint 1', workerRef: 'hrn:worker:attrhttp.example:team:iris', force: true }))![1];
+    const iris = /Session started: ([0-9a-f]{32})/.exec(await call('hadron_start_session', { description: 'chat A', workerRef: 'hrn:worker:attrhttp.example:team:iris', force: true }))![1];
     await call('hadron_end_session', { id: iris });
-    const daraReceipt = await call('hadron_start_session', { description: 'stint 2', workerRef: 'hrn:worker:attrhttp.example:team:dara' });
-    expect(daraReceipt).not.toContain('SHARED CONNECTION');
-    await call('hadron_create_node', { urn: `hrn:node:${appMemory.urn}:seq:dara`, name: 'dara' });
+    const daraReceipt = await call('hadron_start_session', { description: 'chat B', workerRef: 'hrn:worker:attrhttp.example:team:dara' });
+    const daraSession = /Session started: ([0-9a-f]{32})/.exec(daraReceipt)![1];
+    expect(daraReceipt).toContain('SHARED CONNECTION');
+    const refused = await call('hadron_create_node', { urn: `hrn:node:${appMemory.urn}:seq:unsaid`, name: 'unsaid' }, undefined, { allowError: true });
+    expect(refused).toContain('[session_ambiguous]');
+    expect(await nodeAt('seq:unsaid')).toBeNull();
+    await call('hadron_create_node', { urn: `hrn:node:${appMemory.urn}:seq:dara`, name: 'dara', session: daraSession });
     expect(await attributionAt('seq:dara', appMemory.id)).toEqual({ createdByWorkerId: dara.id, createdByAgentId: agent.id });
+  });
+
+  it('re-binding the SAME worker (a rotation) never marks the connection shared', async () => {
+    const call = await mcpConnection();
+    const first = /Session started: ([0-9a-f]{32})/.exec(await call('hadron_start_session', { description: 'stint 1', workerRef: 'hrn:worker:attrhttp.example:team:iris', force: true }))![1];
+    await call('hadron_end_session', { id: first });
+    const again = await call('hadron_start_session', { description: 'stint 2', workerRef: 'hrn:worker:attrhttp.example:team:iris' });
+    expect(again).not.toContain('SHARED CONNECTION');
+    await call('hadron_create_node', { urn: `hrn:node:${appMemory.urn}:rot:iris`, name: 'iris' });
+    expect(await attributionAt('rot:iris', appMemory.id)).toEqual({ createdByWorkerId: worker.id, createdByAgentId: agent.id });
   });
 
   it('on a connection bound to ONE worker, a named session still overrides the binding', async () => {
