@@ -46,19 +46,63 @@ beforeEach(async () => {
 });
 
 describe('#1686 — a mid-merge refusal reports the partial state', () => {
-  it('an untyped mid-flight error (#1684 tombstone collision) becomes MERGE_PARTIALLY_APPLIED; re-running finishes the merge', async () => {
+  // #1684 now refuses a tombstone that is present at the start before any batch
+  // commits, so a collision has to APPEAR mid-merge to reach this path: the
+  // target row is planted just before the batch that would move 'collide'.
+  const plantBeforeLastBatch = (extra: Record<string, unknown>) => {
+    const transaction = db.$transaction.bind(db);
+    let planted = false;
+    return vi.spyOn(db, '$transaction').mockImplementation((async (...args: unknown[]) => {
+      if (!planted && (await live(src.id)) === 1) {
+        planted = true;
+        await node(dst.id, generateId(), 'collide', extra);
+      }
+      return (transaction as (...a: unknown[]) => unknown)(...args);
+    }) as never);
+  };
+
+  it('an untyped mid-flight error (a target loc appearing mid-merge) becomes MERGE_PARTIALLY_APPLIED; re-running finishes the merge', async () => {
     await node(src.id, '00000000000000000000000000000001', 'a');
     await node(src.id, '00000000000000000000000000000002', 'b');
     await node(src.id, 'ffffffffffffffffffffffffffffff09', 'collide');
-    await node(dst.id, generateId(), 'collide', { deletedAt: new Date() }); // #1684's shape
     const before = await live(src.id); // the three, plus the memory's own root node
-    const e = await errorOf(merge());
+    const spy = plantBeforeLastBatch({});
+    let e: GraphQLError;
+    try {
+      e = await errorOf(merge());
+    } finally {
+      spy.mockRestore();
+    }
     expect(e.extensions).toMatchObject({
       code: 'MERGE_PARTIALLY_APPLIED',
-      causeCode: 'P2002',
       partialMerge: { applied: true, relocated: before - 1, folded: 0, remainingSourceNodes: 1, sourceIntact: true },
     });
+    expect(e.extensions.causeCode).toBeUndefined(); // a plain Error has no Prisma code to carry
+    expect(e.message).toContain('appeared during classification');
     expect(e.message).toContain('partially applied');
+    expect(await live(src.id)).toBe(1);
+
+    // The planted target is live, so the re-run folds into it.
+    await merge();
+    expect(await live(src.id)).toBe(0);
+  });
+
+  it('a tombstone appearing mid-merge keeps #1684\'s code and gains the report; re-running after the hard delete finishes', async () => {
+    await node(src.id, '00000000000000000000000000000001', 'a');
+    await node(src.id, 'ffffffffffffffffffffffffffffff09', 'collide');
+    const before = await live(src.id);
+    const spy = plantBeforeLastBatch({ deletedAt: new Date() });
+    let e: GraphQLError;
+    try {
+      e = await errorOf(merge());
+    } finally {
+      spy.mockRestore();
+    }
+    expect(e.extensions).toMatchObject({
+      code: 'MERGE_TARGET_LOC_TOMBSTONED',
+      locs: ['collide'],
+      partialMerge: { applied: true, relocated: before - 1, folded: 0, remainingSourceNodes: 1, sourceIntact: true },
+    });
     expect(await live(src.id)).toBe(1);
 
     await db.node.deleteMany({ where: { memoryId: dst.id, loc: 'collide' } });

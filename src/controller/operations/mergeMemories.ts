@@ -157,8 +157,9 @@ export function mergeTargetLocTombstonedError(targetMemoryId: string, locs: stri
  * #1686 — what a refused merge had ALREADY applied. The merge commits in
  * batches by design (each batch a consistent prefix, the whole resumable), so
  * a refusal raised by a later batch under its locks — a thread posted on a
- * folding node (#1682), a governed kind or a Channel appearing in reach, the
- * raw unique violation of #1684 — lands after earlier batches committed.
+ * folding node (#1682), a governed kind or a Channel appearing in reach, a
+ * tombstone or a live row appearing at a target loc (#1684) — lands after
+ * earlier batches committed.
  * The caller is told so, with counts, rather than left to discover a silent
  * half-move. Absent when the refusal came before any batch committed.
  */
