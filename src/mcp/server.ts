@@ -1973,6 +1973,16 @@ export function createMcpServerInstance(
   ]);
   /** Tools whose own required argument names the caller's session under another name. */
   const SESSION_ARGUMENT: Record<string, string> = { hadron_end_session: 'id' };
+  /**
+   * #1697 — tools with an explicit "write as the HUMAN" argument. `true`
+   * there (with no session named) answers the ambiguity question itself: the
+   * caller chose nobody, so the call proceeds with the actor cleared rather
+   * than refused SESSION_AMBIGUOUS on a shared connection. It picks no
+   * worker and changes no credential or session scope (`auth` is untouched).
+   * A session named alongside it is settled as usual, and the tool refuses
+   * the conflict.
+   */
+  const EXPLICIT_HUMAN_ARGUMENT: Record<string, string> = { hadron_channel_post: 'asMe' };
   const SESSION_PARAM_DESCRIPTION =
     'Your worker session id (from hadron_start_session or hadron_whoami). Attributes this write to that ' +
     'session\'s worker. Optional on a connection bound to one worker; REQUIRED when the connection carries ' +
@@ -2057,6 +2067,12 @@ export function createMcpServerInstance(
       args[cbIndex] = (input: unknown, extra: unknown) =>
         runInChildActorScope(async () => {
           const named = (input as Record<string, unknown> | undefined)?.[argumentName];
+          const humanArgument = EXPLICIT_HUMAN_ARGUMENT[name];
+          const asHuman = humanArgument !== undefined && (input as Record<string, unknown> | undefined)?.[humanArgument] === true;
+          if (asHuman && !(typeof named === 'string' && named.length > 0)) {
+            publishActor({ workerId: null, agentId: null });
+            return await callback(input, extra);
+          }
           const refusal = await settleCallerSession(name, named, toolOwnsArgument);
           if (refusal) return refusal;
           return await callback(input, extra);

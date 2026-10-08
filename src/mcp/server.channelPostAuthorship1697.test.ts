@@ -32,6 +32,7 @@ let token: string;
 let channelId: string;
 let headerSessionId: string;
 const WORKER_REF = 'hrn:worker:authorship1697.example:team:iris';
+const DARA_REF = 'hrn:worker:authorship1697.example:team:dara';
 
 beforeAll(async () => {
   server = createHttpServer(await createServer());
@@ -56,6 +57,7 @@ beforeEach(async () => {
   await ensureChannelWithRoot(db, { memoryId: shared.id, loc: 'chats:team', name: 'team', createdBy: user.id, asDefaultOfAppId: app.id });
   channelId = (await ensureChannelWithRoot(db, { memoryId: shared.id, loc: 'chats:ops', name: 'ops', createdBy: user.id })).channel.id;
   const worker = await db.worker.create({ data: { id: generateId(), appId: app.id, agentId: agent.id, name: 'Iris', slug: 'iris' } });
+  await db.worker.create({ data: { id: generateId(), appId: app.id, agentId: agent.id, name: 'Dara', slug: 'dara' } });
   headerSessionId = generateId();
   await db.session.create({
     data: { id: headerSessionId, appId: app.id, userId: user.id, workerId: worker.id, agentId: agent.id, type: 'DEVELOPER', startedAt: new Date() },
@@ -122,6 +124,10 @@ describe('#1697 hadron_channel_post: authorship is explicit', () => {
     const call = await connection();
     await call('hadron_start_session', { description: '1697', workerRef: WORKER_REF, force: true });
     expect(await call('hadron_channel_post', { channel: channelId, body: 'me', asMe: true })).toContain('as chan-human');
+    // The node stamp agrees with the envelope: the bound worker is not
+    // credited for a post its human chose to make as themself.
+    const msg = await db.node.findFirstOrThrow({ where: { content: 'me', nodeType: { not: 'chat' } }, select: { createdByWorkerId: true, createdByAgentId: true } });
+    expect(msg).toEqual({ createdByWorkerId: null, createdByAgentId: null });
   });
 
   it('once the bound session ends, an unnamed post is refused again rather than falling back to the human', async () => {
@@ -138,5 +144,55 @@ describe('#1697 hadron_channel_post: authorship is explicit', () => {
     const text = await call('hadron_channel_post', { channel: channelId, body: 'both', session: headerSessionId, asMe: true });
     expect(text).toContain('[bad_user_input]');
     expect(await lastSeq()).toBe(0);
+  });
+
+  describe('on a SHARED connection (#1711 review, Diego P2)', () => {
+    /** One connection carrying two chat sessions' worker bindings, Iris then Dara. */
+    async function shared() {
+      const call = await connection();
+      const iris = /Session started: ([0-9a-f]{32})/.exec(await call('hadron_start_session', { description: 'chat A', workerRef: WORKER_REF, force: true }))![1];
+      const dara = /Session started: ([0-9a-f]{32})/.exec(await call('hadron_start_session', { description: 'chat B', workerRef: DARA_REF }))![1];
+      return { call, iris, dara };
+    }
+    const authorsOfLatest = async () => {
+      const msg = await db.node.findFirstOrThrow({
+        where: { memoryId: (await db.channel.findUniqueOrThrow({ where: { id: channelId } })).memoryId, nodeType: { not: 'chat' } },
+        orderBy: { createdAt: 'desc' },
+        select: { data: true, content: true, createdByWorkerId: true, createdByAgentId: true },
+      });
+      return msg;
+    };
+
+    it('asMe: true posts as the human without choosing either worker, and settles nothing for later calls', async () => {
+      const { call } = await shared();
+      const text = await call('hadron_channel_post', { channel: channelId, body: 'me, on a shared host', asMe: true });
+      expect(text).not.toContain('"isError":true');
+      expect(text).toContain('as chan-human');
+      expect(text).not.toMatch(/as (Iris|Dara)/);
+      // No worker behind the write: neither the envelope nor the node stamp names one.
+      const msg = await authorsOfLatest();
+      expect(JSON.stringify(msg.data)).toContain('authorUserId');
+      expect(msg.content).toBe('me, on a shared host');
+      expect(JSON.stringify(msg.data)).not.toContain('authorWorkerId');
+      expect({ createdByWorkerId: msg.createdByWorkerId, createdByAgentId: msg.createdByAgentId }).toEqual({ createdByWorkerId: null, createdByAgentId: null });
+      // No scope change: the connection is exactly as ambiguous as before.
+      expect(await call('hadron_channel_post', { channel: channelId, body: 'unsaid' })).toContain('[session_ambiguous]');
+      expect(await call('hadron_create_node', { urn: 'hrn:node:authorship1697.example:team-shared:unsaid', name: 'unsaid' }))
+        .toContain('[session_ambiguous]');
+    });
+
+    it('naming a session still posts as that worker on the shared connection', async () => {
+      const { call, dara } = await shared();
+      expect(await call('hadron_channel_post', { channel: channelId, body: 'b', session: dara })).toContain('as Dara');
+    });
+
+    it('sticky shared status: after one binding ends, an unnamed post is still refused (never derived), and asMe: true still posts as the human', async () => {
+      const { call, dara } = await shared();
+      await call('hadron_end_session', { id: dara });
+      expect(await call('hadron_channel_post', { channel: channelId, body: 'unsaid' })).toContain('[session_ambiguous]');
+      const text = await call('hadron_channel_post', { channel: channelId, body: 'me', asMe: true });
+      expect(text).toContain('as chan-human');
+      expect(text).not.toContain('as Iris');
+    });
   });
 });
