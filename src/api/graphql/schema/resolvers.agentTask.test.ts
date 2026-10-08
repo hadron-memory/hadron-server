@@ -663,11 +663,11 @@ describe('integrity', () => {
 // ── #1713 review round (Rook §10, Diego cross-provider) ───────────────────
 
 describe('#1713 review: strict App manager (Rook P1-1)', () => {
-  it('a stranger who self-joins through joinApp (owner-role AppMember) may create their own tasks, but not reassign, cancel, or name owners', async () => {
+  it('an owner-role AppMember outside the org may create their own tasks, but not reassign, cancel, or name owners', async () => {
+    // #1714 closed self-join, so a stranger can no longer make themselves an
+    // owner-role member; the row stands for one a manager promoted.
     await db.appAgent.create({ data: { appId: app.id, agentId: teamAgent.id } });
-    await M.joinApp({}, { appId: app.id }, ctx(outsider.id));
-    const joined = await db.appMember.findUniqueOrThrow({ where: { appId_userId: { appId: app.id, userId: outsider.id } } });
-    expect(joined.role).toBe('owner'); // memberRoles[0] of the schema-default policy
+    await db.appMember.create({ data: { appId: app.id, userId: outsider.id, role: 'owner' } });
     const own = await create(ctx(outsider.id), {});
     expect(own.ownerUserId).toBe(outsider.id);
     const theirs = await anneTask({ start: true });

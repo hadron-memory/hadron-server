@@ -34,7 +34,7 @@ import {
 } from '../../../controller/operations/ensureAppMember.js';
 import {
   joinApp,
-  NoMemberRolesError,
+  SelfJoinNotAllowedError,
   AppUninstalledError,
 } from '../../../controller/operations/joinApp.js';
 import { AppNotFoundError } from '../../../lib/entityRef/errors.js';
@@ -1238,7 +1238,7 @@ export const appMutations = {
           e instanceof InvalidRoleError ||
           e instanceof MaxMembersExceededError ||
           e instanceof OrphanAppError ||
-          e instanceof NoMemberRolesError ||
+          e instanceof SelfJoinNotAllowedError ||
           e instanceof AppNotFoundError ||
           e instanceof AppUninstalledError
         ) {
