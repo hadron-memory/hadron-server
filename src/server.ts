@@ -1,5 +1,6 @@
 import crypto from 'crypto';
 import { mountTeamSpecSchemaRoutes } from './api/teamSpecSchema.js';
+import { readTeamRecordKeys } from './lib/teamSpec/record.js';
 import * as Sentry from '@sentry/node';
 import { ApolloServer, type ApolloServerPlugin, type BaseContext } from '@apollo/server';
 import { expressMiddleware } from '@apollo/server/express4';
@@ -160,6 +161,9 @@ const sentryApolloPlugin: ApolloServerPlugin<BaseContext> = {
 };
 
 export async function createServer(): Promise<Express> {
+  // AM Q13: absent leaves team record operations unavailable; an invalid
+  // configured keyring refuses boot without echoing secret values.
+  readTeamRecordKeys();
   const app = express();
 
   // Trust-proxy for spec 025-oauth-for-mcp (FR-006). Express must know
