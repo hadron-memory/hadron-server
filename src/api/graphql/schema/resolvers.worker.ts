@@ -5,7 +5,8 @@
 // supersedes `createTeamPersona`'s minting semantics: it no longer mints an
 // Agent at all — it casts an EXISTING installed agent under a name, allocating
 // that name against the `workers_app_name_uniq` constraint (the allocation
-// primitive — no lease, no lock; cor:agt:020:02).
+// primitive; cor:agt:020:02). #1677 adds a serialized Unicode confusable
+// check at casting; it creates no lease and preserves existing identities.
 //
 // Cast lists stay ergonomics, never gates (cor:agt:020:01): role definitions
 // and name registers remain CONTENT in the Team Agent's system memory
@@ -13,6 +14,7 @@
 // the caller names no explicit worker name. Casting with an explicit name
 // needs no Team Agent at all.
 import { GraphQLError } from 'graphql';
+import { assertWorkerNameNotConfusable, lockWorkerNames } from '../../../lib/workerName.js';
 import { Prisma } from '../../../generated/prisma/index.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
@@ -153,6 +155,18 @@ export async function requireWorkerReadAccess(ctx: Context, app: AppRow): Promis
   }
   if (await isAppParticipant(ctx, app)) return;
   throw forbidden();
+}
+
+/** #1705 — does any agent task name this worker as its owner or assignee? */
+async function workerHasAgentTasks(
+  db: Pick<Context['db'], 'agentTask'>,
+  workerId: string,
+): Promise<boolean> {
+  const row = await db.agentTask.findFirst({
+    where: { OR: [{ ownerWorkerId: workerId }, { assigneeWorkerId: workerId }] },
+    select: { id: true },
+  });
+  return row !== null;
 }
 
 /**
@@ -347,7 +361,7 @@ async function resolveWorkerRefRow(ctx: Context, workerRef: string): Promise<Wor
  * constraint.
  */
 export async function takenWorkersByName(
-  db: Context['db'],
+  db: Pick<Context['db'], '$queryRaw'>,
   appId: string,
   names: string[],
 ): Promise<Map<string, string>> {
@@ -812,26 +826,39 @@ export const workerMutations = {
       candidate: string,
     ): Promise<{ id: string; name: string; slug: string } | typeof NAME_TAKEN> => {
       for (let attempt = 0; attempt < SLUG_RACE_RETRY_LIMIT; attempt++) {
-        const slug = await nextFreeWorkerSlug(ctx.db, appId, candidate);
         try {
-          return await ctx.db.worker.create({
-            data: {
-              appId,
-              agentId: agent.id,
-              name: candidate,
-              slug,
-              role: workerRole,
-              promptOverride: override,
-              createdBy: ctx.userId ?? null,
-              // #1050 — casting does NOT hold. A name is held by the person
-              // who WORKS as it, and the canonical setup flow is a coordinator
-              // casting a roster that other people then bind: making the
-              // caster the holder would block every one of them on a release
-              // they should never have needed. So a cast worker is born UNHELD
-              // and the first bind claims it.
-            },
-            select: { id: true, name: true, slug: true },
-          });
+          return await ctx.db.$transaction(async (tx) => {
+            await lockWorkerNames(tx, appId);
+            const freshApp = await tx.app.findUniqueOrThrow({ where: { id: appId } });
+            if (freshApp.deletedAt) throw forbidden();
+            await requireWorkerStaffAccess({ ...ctx, db: tx as unknown as Context['db'] }, freshApp);
+            if (freshApp.uninstalledAt) {
+              throw new GraphQLError('Cannot cast a worker in an uninstalled App.', { extensions: { code: 'APP_UNINSTALLED', appId } });
+            }
+            // Preserve PostgreSQL lower(name)'s existing typed refusal before
+            // applying the additional DAP naming-equivalence check.
+            if ((await takenWorkersByName(tx, appId, [candidate])).has(candidate)) return NAME_TAKEN;
+            await assertWorkerNameNotConfusable(tx, appId, candidate);
+            const slug = await nextFreeWorkerSlug(tx, appId, candidate);
+            return tx.worker.create({
+              data: {
+                appId,
+                agentId: agent.id,
+                name: candidate,
+                slug,
+                role: workerRole,
+                promptOverride: override,
+                createdBy: ctx.userId ?? null,
+                // #1050 — casting does NOT hold. A name is held by the person
+                // who WORKS as it, and the canonical setup flow is a coordinator
+                // casting a roster that other people then bind: making the
+                // caster the holder would block every one of them on a release
+                // they should never have needed. So a cast worker is born UNHELD
+                // and the first bind claims it.
+              },
+              select: { id: true, name: true, slug: true },
+            });
+          }, { timeout: 30_000 });
         } catch (e) {
           // Order matters: a slug race is private and retried; a name
           // collision is the caller-visible allocation signal.
@@ -1295,6 +1322,14 @@ export const workerMutations = {
         { extensions: { code: 'WORKER_IN_USE', workerId: worker.id } },
       );
     }
+    // #1705 — owning or holding an agent task is doing something, too (and
+    // the task's worker reference must not dangle).
+    if (await workerHasAgentTasks(ctx.db, worker.id)) {
+      throw new GraphQLError(
+        'This worker owns or is assigned agent tasks. Retire it instead.',
+        { extensions: { code: 'WORKER_IN_USE', workerId: worker.id } },
+      );
+    }
     if (worker.memoryId) {
       const [nodes, assets] = await Promise.all([
         ctx.db.node.count({ where: { memoryId: worker.memoryId } }),
@@ -1317,6 +1352,12 @@ export const workerMutations = {
         if (inTxSessions > 0) {
           throw new GraphQLError(
             'This worker has driven sessions — its name is bound to that history forever. Retire it instead.',
+            { extensions: { code: 'WORKER_IN_USE', workerId: worker.id } },
+          );
+        }
+        if (await workerHasAgentTasks(tx, worker.id)) {
+          throw new GraphQLError(
+            'This worker owns or is assigned agent tasks. Retire it instead.',
             { extensions: { code: 'WORKER_IN_USE', workerId: worker.id } },
           );
         }
@@ -1546,6 +1587,7 @@ export const workerQueries = {
       if (taken.has(requestedName)) {
         throw nameTaken(requestedName, appId);
       }
+      await assertWorkerNameNotConfusable(ctx.db, appId, requestedName);
       name = requestedName;
     } else {
       // #1050: same refusal as castWorker, and deliberately the SAME code —

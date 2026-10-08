@@ -40,6 +40,7 @@ import { sessionScopedMemoryIds } from '../../../lib/auth/sessionScopedMemoryIds
 import { getMemberOrgIds } from '../../../lib/auth/memberOrgIds.js';
 import { foreignIdentityScopedMemoryFilter } from '../../../lib/auth/memoryOwnership.js';
 import { isStrictOwner } from '../../../lib/auth/strictOwner.js';
+import { boundSessionPrivacyFilter } from '../../../lib/auth/sessionPrivacy.js';
 import {
   formatCanonicalUrn,
   type CanonicalUrnType,
@@ -104,6 +105,8 @@ export interface Context {
   userId?: string;         // User.id — only set for OAuth/JWT users
   appId?: string;          // App.id — set when caller authenticated via an App Key
   sessionId?: string;      // Session.id — set when operating inside an active session
+  /** #1705 — a named X-Hadron-Session failed validation (see AuthContext.sessionBindingRefused). */
+  sessionBindingRefused?: boolean;
   roles?: ('OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER')[];
   organizationId?: string; // set when the Client is scoped to an organization
   apiKeyId?: string;       // UserApiKey.id — set when a user authenticated via an hdr_user_ key (#562)
@@ -2178,6 +2181,11 @@ export function requireSessionWriteAccess(
 
 /** Prisma `where` clause that restricts sessions to the caller's scope. */
 export async function sessionScopeFilter(ctx: Context): Promise<Record<string, unknown>> {
+  return { AND: [await sessionAudienceFilter(ctx), boundSessionPrivacyFilter(ctx)] };
+}
+
+/** Existing session audience, intersected with bound-memory privacy by sessionScopeFilter. */
+async function sessionAudienceFilter(ctx: Context): Promise<Record<string, unknown>> {
   if (ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER')) return {};
   // App Key path — sessions belonging to the authenticated App.
   if (ctx.appId) return { appId: ctx.appId };
@@ -2199,9 +2207,15 @@ export async function sessionScopeFilter(ctx: Context): Promise<Record<string, u
     });
     const orgIds = memberships.map((m: { organizationId: string }) => m.organizationId);
     const clauses: Record<string, unknown>[] = [];
-    if (orgIds.length > 0) {
+    if (orgIds.length > 0 || !ctx.impersonation) {
       const apps = await ctx.db.app.findMany({
-        where: { organizationId: { in: orgIds }, deletedAt: null },
+        where: {
+          deletedAt: null,
+          OR: [
+            ...(orgIds.length ? [{ organizationId: { in: orgIds } }] : []),
+            ...(!ctx.impersonation ? [{ ownerUserId: ctx.userId }] : []),
+          ],
+        },
         select: { id: true },
       });
       if (apps.length > 0) clauses.push({ appId: { in: apps.map((a) => a.id) } });

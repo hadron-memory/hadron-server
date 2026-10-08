@@ -1,0 +1,68 @@
+/**
+ * #1701 — the caller-session gate covers the whole tool manifest.
+ *
+ * The gate is fail-closed: every tool is gated, and so offers `session`, unless
+ * it is listed as writing nothing on the caller's behalf. This pins that list
+ * from both sides, so adding a tool, or moving one onto the list, is a visible
+ * decision in review rather than a silent hole in attribution.
+ */
+import { describe, expect, it } from 'vitest';
+import { createTestableMcpServer } from './server.js';
+
+/** Mirror of ACTOR_NEUTRAL_TOOLS in createMcpServerInstance — keep in step on purpose. */
+const ACTOR_NEUTRAL = new Set([
+  'hadron_search', 'hadron_list_memories', 'hadron_server_info', 'hadron_list_apps', 'hadron_list_scopes',
+  'hadron_scope_explain', 'hadron_list_channels', 'hadron_register_list', 'hadron_find_nodes', 'hadron_get_node',
+  'hadron_get_nodes', 'hadron_get_next_node', 'hadron_list_nodes', 'hadron_get_object', 'hadron_find_objects',
+  'hadron_get_run', 'hadron_whoami', 'hadron_channel_read', 'hadron_team_chat_read', 'hadron_team_attention',
+  'hadron_team_attention_page', 'hadron_list_workers', 'hadron_get_worker', 'hadron_team_work_items',
+  'hadron_list_comments', 'hadron_get_comment', 'hadron_team_chat_mark_read',
+  'hadron_task_get', 'hadron_task_list', 'hadron_team_events',
+  'hadron_set_active_memory', 'hadron_set_active_app', 'hadron_set_active_org', 'hadron_set_active_scope',
+  'hadron_unlock_memory', 'hadron_lock_memory',
+  'hadron_start_session',
+]);
+
+/** Neutral tools that define their own `session` parameter (it is not the gate's). */
+const NEUTRAL_WITH_OWN_SESSION = new Set([
+  'hadron_channel_read', 'hadron_team_chat_read', 'hadron_list_workers', 'hadron_get_worker',
+  'hadron_team_work_items', 'hadron_team_chat_mark_read',
+  'hadron_task_get', 'hadron_task_list', 'hadron_team_events',
+]);
+
+const hasParam = (server: ReturnType<typeof createTestableMcpServer>, tool: string, param: string): boolean => {
+  try {
+    server.toolParamSchema(tool, param);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+describe('#1701 caller-session gate: manifest coverage', () => {
+  const server = createTestableMcpServer({ userId: 'gate-coverage', roles: [] });
+
+  it('every tool that can write offers a way to name the caller\'s session', () => {
+    const missing = server
+      .toolNames()
+      .filter((t) => !ACTOR_NEUTRAL.has(t))
+      .filter((t) => !hasParam(server, t, t === 'hadron_end_session' ? 'id' : 'session'));
+    expect(missing).toEqual([]);
+  });
+
+  it('the neutral list is exactly what the gate skips: none of them gains a session parameter', () => {
+    const injected = [...ACTOR_NEUTRAL]
+      .filter((t) => !NEUTRAL_WITH_OWN_SESSION.has(t))
+      .filter((t) => hasParam(server, t, 'session'));
+    expect(injected).toEqual([]);
+  });
+
+  it('the neutral list names only registered tools (a rename cannot leave a stale exemption)', () => {
+    const registered = new Set(server.toolNames());
+    expect([...ACTOR_NEUTRAL].filter((t) => !registered.has(t))).toEqual([]);
+  });
+
+  it('the injected parameter tells the caller when it is required', () => {
+    expect(server.toolParamDescription('hadron_create_node', 'session')).toMatch(/SESSION_AMBIGUOUS/);
+  });
+});

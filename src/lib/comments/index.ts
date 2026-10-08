@@ -83,6 +83,7 @@ export type CommentRefusalCode =
   | 'COMMENT_IMPERSONATION_REFUSED'
   | 'COMMENT_BODY_INVALID'
   | 'COMMENT_MOVE_UNCOMMENTABLE'
+  | 'COMMENT_MERGE_FOLDS_THREADS'
   | 'COMMENT_NOT_APPROVABLE';
 
 /** A typed comment refusal: `extensions.code` plus the code's documented extensions. */

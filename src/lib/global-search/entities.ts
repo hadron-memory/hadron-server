@@ -18,6 +18,7 @@
  * Spec: cor:api:050:02
  */
 
+import { COMMENT_NODE_TYPE } from '../comments/index.js';
 import { searchContains, searchStartsWith } from '../../integrations/db/provider.js';
 import type { PrismaClient, Prisma } from '../../generated/prisma/index.js';
 import {
@@ -311,7 +312,9 @@ async function searchNodes(ctx: AdapterCtx): Promise<GlobalSearchHit[]> {
 
   const rows = await ctx.db.node.findMany({
     where: {
-      AND: [nodeScopeWhere(principal), { deletedAt: null }, { OR: preds }],
+      // #1608 (cor:dmo:110:08) — global search is content only; comments are
+      // searched by asking for them (findNodes contentScope COMMENTS/ALL).
+      AND: [nodeScopeWhere(principal), { deletedAt: null }, { nodeType: { not: COMMENT_NODE_TYPE } }, { OR: preds }],
     } as Prisma.NodeWhereInput,
     select: nodeSelect,
     take: ctx.cap,

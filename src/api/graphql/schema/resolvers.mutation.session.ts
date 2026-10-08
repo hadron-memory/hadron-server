@@ -35,7 +35,7 @@ import { resolveWorkerRef as resolveWorkerRefId } from '../../../lib/entityRef/w
 import { isId } from '../../../lib/entityRef/shape.js';
 import { resolveWorkerIdByNameGated, provisionWorkerMemory } from './resolvers.worker.js';
 import { writeNodeCore } from './resolvers.mutation.node.js';
-import { attributedRequestActivity, recordNodeUsage, toUsageNodeRefs } from '../../../lib/usageRecorder.js';
+import { attributedRequestActivity, recordNodeUsage, toUsageNodeRefs, trackUsageWrite } from '../../../lib/usageRecorder.js';
 import {
   HANDOFFS_PARENT_LOC,
   HANDOFF_SESSION_KEY,
@@ -1498,12 +1498,18 @@ export const sessionMutations = {
           }
         }
 
-        // Clamp session timeout to the app's configured maximum (ceiling)
-        const ttl = Math.min(
-          sessionTimeoutSeconds ?? app.sessionTimeoutSeconds,
-          app.sessionTimeoutSeconds,
-        );
-        const expiresAt = new Date(Date.now() + ttl * 1000);
+        // Clamp session timeout to the app's configured maximum (ceiling).
+        // Ruling DY-3: an App with `agentSessionsExpire: false` stamps NO hard
+        // expiry unless the call asks for one; a requested timeout is still
+        // capped by the App ceiling. Inactivity never ends a session (#1114);
+        // a forgotten one is bounded by DY-5 instead: past the App's
+        // `sessionDormancyDays` it no longer binds (`bindSession`).
+        const expiresAt = !app.agentSessionsExpire && sessionTimeoutSeconds == null
+          ? null
+          : new Date(Date.now() + Math.min(
+              sessionTimeoutSeconds ?? app.sessionTimeoutSeconds,
+              app.sessionTimeoutSeconds,
+            ) * 1000);
 
         const session = await tx.session.create({
           data: {
@@ -2379,7 +2385,7 @@ export const sessionMutations = {
         // Record usage event (fire-and-forget). #1653 / DY-2: it counts as
         // activity only for a live session the caller owns.
         const runAt = new Date();
-        void attributedRequestActivity(ctx.db, ctx, ctx.sessionId, { at: runAt }).then((countsAsActivity) => ctx.db.usageEvent
+        trackUsageWrite(ctx.db, attributedRequestActivity(ctx.db, ctx, ctx.sessionId, { at: runAt }).then((countsAsActivity) => ctx.db.usageEvent
           .create({
             data: {
               id: generateId(),
@@ -2400,7 +2406,7 @@ export const sessionMutations = {
               actionArgs: stringArgs,
             },
           })
-          .catch(() => {}));
+          .catch(() => {})));
 
         return assembled;
       };

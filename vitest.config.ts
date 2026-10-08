@@ -17,7 +17,7 @@ export default defineConfig({
     // concurrently at vitest's default fork concurrency (~cores-2).
     // HADRON_TEST_PARALLEL=0 restores the old single-DB serial behavior.
     fileParallelism: PARALLEL_DBS,
-    setupFiles: ['./src/test/perWorkerDb.ts'],
+    setupFiles: ['./src/test/perWorkerDb.ts', './src/test/drainUsage.ts'],
     // CHECK constraints declared in migrations don't survive `prisma db push`
     // (which is what tests use to set up a fresh schema). Apply them once
     // here, before any test file runs. Per spec 005-agent-subscription FR-014.

@@ -70,6 +70,8 @@ export const AUDIT_USER_COLUMNS: Readonly<Record<string, readonly string[]>> = {
   urn_aliases: ['created_by'],
   users: ['created_by', 'updated_by', 'deleted_by'],
   workers: ['created_by', 'updated_by'],
+  // #1705 — agent tasks. `assigned_by` is the assignment's audit actor.
+  agent_tasks: ['created_by', 'updated_by', 'assigned_by'],
 };
 
 /**
@@ -477,6 +479,14 @@ async function runMergeTxn(
       // else would carry it). The revision-row copy is rewritten above.
       ['nodes', 'approved_by'],
       ['nodes', 'minted_by'],
+      // #1705: a task's owner and assignee are authorization identities
+      // (cor:agt:050:08/:09), so they follow the merged person.
+      // agent_team_events' actor / acknowledger ids are deliberately NOT
+      // here: the stream is append-only (a trigger refuses the UPDATE), and
+      // an event is a sealed record of who acted at the time — the
+      // automation_versions precedent (#1696).
+      ['agent_tasks', 'owner_user_id'],
+      ['agent_tasks', 'assignee_user_id'],
     ];
     for (const [table, column] of directReferences) {
       await runWithIds(`UPDATE "${table}" SET "${column}" = $1 WHERE "${column}" = $2`);

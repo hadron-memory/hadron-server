@@ -16,6 +16,7 @@ import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
 import { assembleRunNodePrompt } from '../../../lib/runNodeRender.js';
 import { compileTemplate } from '../../../lib/template.js';
+import { drainNodeUsage } from '../../../lib/usageRecorder.js';
 
 /**
  * Wait for the fire-and-forget usage recorder to write a read event for each of
@@ -99,6 +100,42 @@ beforeEach(async () => {
       name: 'documents', loc: 'actions:review:documents:reference:playbook',
     },
   });
+});
+
+it('#1189 drains the MCP action-run writer before cleanDb deletes its FK parents', async () => {
+  const { createTestableMcpServer } = await import('../../../mcp/server.js');
+  let enter!: () => void, release!: () => void;
+  const entered = new Promise<void>((resolve) => { enter = resolve; });
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  const pass = db.usageEvent.create.bind(db.usageEvent);
+  const slow = vi.spyOn(db.usageEvent, 'create').mockImplementation((async (args: Parameters<typeof pass>[0]) => {
+    if (args.data.type === 'action-run') { enter(); await held; }
+    return pass(args);
+  }) as unknown as typeof db.usageEvent.create);
+  let cleanup: Promise<void> | undefined;
+  let done = false;
+  const firstDelete = vi.spyOn(db.pendingLoginState, 'deleteMany');
+  try {
+    const server = createTestableMcpServer({ userId: member.id, roles: ['READER'], clientId: `user:${member.id}` });
+    await server.callToolText('hadron_run_action', { urn: `hrn:node:${mem.urn}:${action.loc}`, args: { subject: 'cleanup boundary' } });
+    await entered;
+    await waitForReads([action.id, dep.id]);
+    cleanup = cleanDb(db).then(() => { done = true; });
+    // Let ordinary recorder work settle; the held action-run must still block cleanup.
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(firstDelete).not.toHaveBeenCalled();
+    expect(done).toBe(false);
+    expect(await db.node.findUnique({ where: { id: action.id } })).not.toBeNull();
+    release();
+    await cleanup;
+    expect(await db.usageEvent.count()).toBe(0);
+  } finally {
+    release();
+    await cleanup;
+    await drainNodeUsage(db);
+    slow.mockRestore();
+    firstDelete.mockRestore();
+  }
 });
 
 const render = (nodeRef: string, args?: Record<string, unknown>, c: Context = ctx(member.id)) =>

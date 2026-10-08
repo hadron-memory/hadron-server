@@ -408,6 +408,9 @@ model User {
   /// #1050 — worker names this person HOLDS. Held until released, never freed
   /// by a session ending; one human may hold many.
   heldWorkers                   Worker[]                   @relation("WorkerHolder")
+  /// #1705 — agent tasks this person owns / is assigned.
+  ownedAgentTasks               AgentTask[]                @relation("AgentTaskOwnerUser")
+  assignedAgentTasks            AgentTask[]                @relation("AgentTaskAssigneeUser")
   mcpSessionStates              McpSessionState[]
   ownedMemories                 Memory[]                   @relation("UserMemoriesOwned")
   // spec 047 (Phase 2b): entities this user is the TENANT owner of (user-owned
@@ -3013,6 +3016,12 @@ model App {
   /// security half of Holger's session-lifetime principle: a long-forgotten
   /// session must not start acting again on its own.
   sessionDormancyDays   Int                  @default(90) @map("session_dormancy_days")
+  /// Ruling DY-3: whether `startAgentSession` stamps a hard `expiresAt` by
+  /// default. False = this App's agent sessions have NO hard expiry unless the
+  /// call asks for one (a caller-supplied `sessionTimeoutSeconds`, still capped
+  /// by the App ceiling). A forgotten one is still bounded: past the App's
+  /// `sessionDormancyDays` it no longer binds (`bindSession`, DY-5).
+  agentSessionsExpire   Boolean              @default(true) @map("agent_sessions_expire")
   anonymousTtlDays      Int                  @default(7) @map("anonymous_ttl_days")
   /// **Deprecated** — superseded by `surfaces`. Scheduled for removal
   /// in a follow-up cleanup spec (per 008 R-4); kept in place to
@@ -3090,6 +3099,9 @@ model App {
   /// Agent is installed here; a Worker is who, by name, does attributable
   /// work.
   workers          Worker[]
+  /// #1705 — the App's agent tasks and their append-only event stream.
+  agentTasks       AgentTask[]
+  agentTeamEvents  AgentTeamEvent[]
   mcpSessionStates McpSessionState[]
   scopes           Scope[]
   registerEntries  RegisterEntry[] @relation("RegisterOwnerApp")
@@ -3111,6 +3123,7 @@ model App {
   usageEvents      UsageEvent[]
   pendingSetups    PendingSetup[]
   aiServiceConfigs AiServiceConfig[]
+  automationVersions AutomationVersion[]
   connectionGrants ConnectionGrant[] @relation("AppConnectionGrants")
   slackConnections SlackConnection[]
 
@@ -3550,6 +3563,9 @@ model Worker {
   /// Spec 049 Phase 5 — register rows naming this Worker as the attendee.
   registerAttendeeOf RegisterEntry[] @relation("RegisterAttendeeWorker")
   readStates         ChannelReadState[] @relation("ReadStateWorker")
+  /// #1705 — agent tasks this worker owns / is assigned.
+  ownedAgentTasks    AgentTask[] @relation("AgentTaskOwnerWorker")
+  assignedAgentTasks AgentTask[] @relation("AgentTaskAssigneeWorker")
 
   /// The URN atom's uniqueness. Unfiltered on retirement, like
   /// `workers_app_name_uniq`: a retired worker's URN must keep resolving.
@@ -4780,4 +4796,153 @@ model MemoryConfigTemplateRule {
   @@index([validationTaskId])
   @@index([descriptionNodeId])
   @@map("memory_config_template_rules")
+}
+
+
+/// #1655 DAE/DAG: immutable compiled code; approval is the temporary DZ-3
+/// bridge until passkey signatures ship. Identity strings preserve audit history.
+enum AutomationTier {
+  PERSON
+  APP
+}
+
+model AutomationVersion {
+  id                String @id @default(cuid())
+  appId             String @map("app_id")
+  app               App @relation(fields: [appId], references: [id], onDelete: Cascade)
+  number            Int
+  entrySourceNodeId String @map("entry_source_node_id")
+  compiledJson      String @map("compiled_json")
+  versionHash       String @map("version_hash")
+  sourceManifest    Json @map("source_manifest")
+  tier              AutomationTier
+  runAsUserId       String? @map("run_as_user_id")
+  publishedBy       String @map("published_by")
+  publishedAt       DateTime @default(now()) @map("published_at")
+  approvalHash      String? @map("approval_hash")
+  approvedBy        String? @map("approved_by")
+  approvedAt        DateTime? @map("approved_at")
+  revokedBy         String? @map("revoked_by")
+  revokedAt         DateTime? @map("revoked_at")
+
+  @@unique([appId, entrySourceNodeId, number])
+  @@index([appId])
+  @@map("automation_versions")
+}
+
+/// #1705 (Task Management T1) — one piece of work a team App has assigned, or
+/// wants assigned (cor:agt:050:01). The platform records who holds it, since
+/// when, and how it ended; it never reads what the work is.
+///
+/// Shape (CHECK `chk_agent_tasks_shape`, prisma/agent-task-invariants.sql):
+/// exactly one owner and at most one assignee, each a Worker OR a User; the
+/// status vocabulary; per-status timestamps; a result only on a finished task.
+/// `queued` (cor:agt:050:03) and `waitingOnChildren` (cor:agt:050:04) are
+/// DERIVED at read time, never stored.
+///
+/// Worker / User references are NO ACTION, not RESTRICT: an App hard delete
+/// cascades its workers and its tasks in one statement, and NO ACTION checks at
+/// the END of that statement, after both are gone. A worker with tasks is
+/// otherwise in use (`deleteWorker` refuses WORKER_IN_USE).
+model AgentTask {
+  id                   String    @id @default(cuid())
+  appId                String    @map("app_id")
+  /// What is asked, in the team's own words. Never read by the platform.
+  title                String
+  description          String?
+  /// Opaque origin reference (an issue URL, a node URN). Not interpreted.
+  source               String?
+  /// Null for a root task. Always in the same App (cor:agt:050:01).
+  parentTaskId         String?   @map("parent_task_id")
+  ownerWorkerId        String?   @map("owner_worker_id")
+  ownerUserId          String?   @map("owner_user_id")
+  /// Both null ⇒ queued while pending (cor:agt:050:03).
+  assigneeWorkerId     String?   @map("assignee_worker_id")
+  assigneeUserId       String?   @map("assignee_user_id")
+  /// For the matcher (T3): `{ role?, familyIn?, familyNotIn?, excludeWorkerIds? }`.
+  requirements         Json?
+  /// 'pending' | 'started' | 'finished' | 'cancelled' (cor:agt:050:02).
+  status               String    @default("pending")
+  startBy              DateTime? @map("start_by")
+  startedAt            DateTime? @map("started_at")
+  finishedAt           DateTime? @map("finished_at")
+  cancelledAt          DateTime? @map("cancelled_at")
+  /// The result (cor:agt:050:01) — set only on finish.
+  resultOutcome        String?   @map("result_outcome")
+  resultSummary        String?   @map("result_summary")
+  resultEvidence       String?   @map("result_evidence")
+  tags                 String[]  @default([])
+  /// Set by whoever assigns; T6 acts on it (cor:agt:050:10). Stored only in T1.
+  closeSessionWhenDone Boolean   @default(true) @map("close_session_when_done")
+  /// The latest assignment, by hand or by the matcher, in the #1610 actor shape.
+  assignedAt           DateTime? @map("assigned_at")
+  assignedBy           String?   @map("assigned_by")
+  assignedByWorkerId   String?   @map("assigned_by_worker_id")
+  assignedByAgentId    String?   @map("assigned_by_agent_id")
+  createdAt            DateTime  @default(now()) @map("created_at")
+  createdBy            String?   @map("created_by")
+  createdByWorkerId    String?   @map("created_by_worker_id")
+  createdByAgentId     String?   @map("created_by_agent_id")
+  updatedAt            DateTime? @updatedAt @map("updated_at")
+  updatedBy            String?   @map("updated_by")
+  updatedByWorkerId    String?   @map("updated_by_worker_id")
+  updatedByAgentId     String?   @map("updated_by_agent_id")
+
+  app            App              @relation(fields: [appId], references: [id], onDelete: Cascade)
+  parent         AgentTask?       @relation("AgentTaskParent", fields: [parentTaskId], references: [id], onDelete: NoAction)
+  children       AgentTask[]      @relation("AgentTaskParent")
+  ownerWorker    Worker?          @relation("AgentTaskOwnerWorker", fields: [ownerWorkerId], references: [id], onDelete: NoAction)
+  ownerUser      User?            @relation("AgentTaskOwnerUser", fields: [ownerUserId], references: [id], onDelete: NoAction)
+  assigneeWorker Worker?          @relation("AgentTaskAssigneeWorker", fields: [assigneeWorkerId], references: [id], onDelete: NoAction)
+  assigneeUser   User?            @relation("AgentTaskAssigneeUser", fields: [assigneeUserId], references: [id], onDelete: NoAction)
+  events         AgentTeamEvent[]
+
+  @@index([appId, status])
+  @@index([parentTaskId])
+  @@index([ownerWorkerId])
+  @@index([ownerUserId])
+  @@index([assigneeWorkerId])
+  @@index([assigneeUserId])
+  @@map("agent_tasks")
+}
+
+/// #1705 — one append-only record of something that happened in a team App's
+/// task work (cor:agt:050:11). Never changed or removed: the trigger in
+/// prisma/agent-task-invariants.sql refuses every UPDATE except the one-time
+/// acknowledgement of an alarm, refuses an INSERT that arrives acknowledged,
+/// and refuses a DELETE unless the App itself is gone (the cascade).
+///
+/// `payload` carries counts, outcomes, reasons and ids only — never message or
+/// description text (cor:agt:050:11, Proposed); src/lib/agentTasks/events.ts
+/// is its only writer. Actor and subject ids carry no FK on purpose: they are a
+/// sealed record of who acted, and an FK action would have to UPDATE the row.
+model AgentTeamEvent {
+  id                      String    @id @default(cuid())
+  appId                   String    @map("app_id")
+  /// e.g. `task.created`, `task.assigned` (cor:agt:050:11).
+  type                    String
+  taskId                  String?   @map("task_id")
+  /// Who acted, in the #1610 shape: the human credential, plus the Worker /
+  /// Agent bound to the request's session.
+  actorUserId             String?   @map("actor_user_id")
+  actorWorkerId           String?   @map("actor_worker_id")
+  actorAgentId            String?   @map("actor_agent_id")
+  /// The worker the event concerns, if any (e.g. the new assignee).
+  subjectWorkerId         String?   @map("subject_worker_id")
+  /// null for an ordinary event, 'alarm' for an alarm.
+  severity                String?
+  /// Alarms only: the owner chain when raised, nearest first.
+  chain                   Json?
+  acknowledgedByUserId    String?   @map("acknowledged_by_user_id")
+  acknowledgedByWorkerId  String?   @map("acknowledged_by_worker_id")
+  acknowledgedAt          DateTime? @map("acknowledged_at")
+  payload                 Json      @default("{}")
+  createdAt               DateTime  @default(now()) @map("created_at")
+
+  app  App        @relation(fields: [appId], references: [id], onDelete: Cascade)
+  task AgentTask? @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  @@index([appId, createdAt])
+  @@index([taskId])
+  @@map("agent_team_events")
 }

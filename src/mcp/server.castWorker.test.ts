@@ -86,6 +86,14 @@ function hybridAuth(userId: string): AuthContext {
 }
 
 describe('hadron_cast_worker (#974)', () => {
+  it('returns the confusable refusal code and original name without casting', async () => {
+    const srv = createTestableMcpServer(hybridAuth(admin.id));
+    await srv.callToolText('hadron_cast_worker', { agent: roleAgent.id, name: 'Alice' });
+    const out = await srv.callToolText('hadron_cast_worker', { agent: roleAgent.id, name: 'Ａlice' });
+    expect(out).toContain('[WORKER_NAME_CONFUSABLE]');
+    expect(out).toContain('"Alice"');
+    expect(await db.worker.count({ where: { appId: app.id } })).toBe(1);
+  });
   it('casts with an explicit name — worker name, id, and boot briefing in the output', async () => {
     const srv = createTestableMcpServer(hybridAuth(admin.id));
     const out = await srv.callToolText('hadron_cast_worker', {
