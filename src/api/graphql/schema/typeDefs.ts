@@ -8999,7 +8999,8 @@ export const typeDefs = `#graphql
     Platform admin only. The resulting merge is global; organization
     administration does not authorize account consolidation.
 
-    Refused with MERGE_USER_IN_DECISIONS (extension decisionLocs) while either
+    Refused with MERGE_USER_IN_DECISIONS (extension decisionCount; never the
+    decisions' locs, which the caller may not be able to read) while either
     account is named in a decision or a decision log, whose stored user ids
     cannot follow a merge yet (#1715).
     """

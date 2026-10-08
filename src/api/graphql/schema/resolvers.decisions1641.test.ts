@@ -548,16 +548,31 @@ describe("Diego's P2 on #1690 — mergeUsers refuses accounts named in decisions
     // holger is named only by the log's default deciders.
     for (const [source, target] of [[holger.id, outsider.id], [outsider.id, holger.id]]) {
       const e = await errorOf(merge(source, target));
-      expect(e.extensions).toMatchObject({ code: 'MERGE_USER_IN_DECISIONS', decisionLocs: ['decisions'] });
+      expect(e.extensions).toMatchObject({ code: 'MERGE_USER_IN_DECISIONS', decisionCount: 1 });
       expect(e.message).toContain('#1715');
     }
     // writer is named only by a decision they asked.
     await ask(log.row.id);
     expect((await errorOf(merge(writer.id, outsider.id))).extensions).toMatchObject({
-      code: 'MERGE_USER_IN_DECISIONS', decisionLocs: ['decisions:DA'],
+      code: 'MERGE_USER_IN_DECISIONS', decisionCount: 1,
     });
     const rows = await db.user.findMany({ where: { id: { in: [holger.id, writer.id, outsider.id] } } });
     expect(rows.every((u) => u.deletedAt === null)).toBe(true);
+  });
+
+  it("never discloses a decision the merging admin cannot read: a count only, no loc (Diego's P2, round 4)", async () => {
+    const personal = await resolvers.Mutation.createMemory(null, { orgId, name: 'pa', memoryClass: 'personal' }, as(holger.id));
+    const log = await M.createDecisionLog(null, { memoryRef: personal.id, loc: 'secret-plans', defaultDeciders: [holger.id] }, as(holger.id));
+    const d = await ask(log.row.id, simple({ title: 'Quietly acquire the competitor?' }), holger.id);
+    const caller = as(platformAdmin.id, { roles: ['ADMIN'] });
+    expect(await Q.decision(null, { ref: d.row.id }, caller)).toBeNull();
+    const e = await errorOf(merge(holger.id, outsider.id));
+    expect(e.extensions).toEqual({ code: 'MERGE_USER_IN_DECISIONS', decisionCount: 2 });
+    const shown = JSON.stringify({ message: e.message, extensions: e.extensions });
+    for (const secret of ['secret-plans', D.code(d, {}, as(holger.id)), 'competitor', personal.id, log.row.id, d.row.id]) {
+      expect(shown).not.toContain(secret);
+    }
+    expect(e.message).toContain('2 decision records');
   });
 
   it('still merges two accounts that no decision names', async () => {

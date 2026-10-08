@@ -256,17 +256,17 @@ async function refuseUsersNamedInDecisions(tx: Prisma.TransactionClient, sourceU
     if (isSerializationFailure(e)) throw new MergeRaceError('a decision log changed while the merge waited for it', { cause: e });
     throw e;
   }
-  const named = await tx.$queryRaw<Array<{ loc: string }>>`
-    SELECT loc FROM nodes
+  // A count only, never the locs: the merging admin need not be able to read
+  // a private decision, and its loc is not theirs to learn (Diego's P2 on #1690).
+  const [{ count }] = await tx.$queryRaw<Array<{ count: number }>>`
+    SELECT count(*)::int AS count FROM nodes
     WHERE (role = ${DECISION_ROLE} OR role LIKE ${`${DECISION_ROLE}.%`})
-      AND (strpos(data::text, ${JSON.stringify(sourceUserId)}) > 0 OR strpos(data::text, ${JSON.stringify(targetUserId)}) > 0)
-    ORDER BY loc
-    LIMIT 20`;
-  if (named.length > 0) {
+      AND (strpos(data::text, ${JSON.stringify(sourceUserId)}) > 0 OR strpos(data::text, ${JSON.stringify(targetUserId)}) > 0)`;
+  if (count > 0) {
     throw new GraphQLError(
-      'mergeUsers is refused while either account is named in a decision or a decision log: ' +
-        'their stored ids cannot follow a merge yet (hadron-server#1715).',
-      { extensions: { code: 'MERGE_USER_IN_DECISIONS', decisionLocs: named.map((r) => r.loc) } },
+      `mergeUsers is refused: these accounts are named in ${count} decision record${count === 1 ? '' : 's'} (decisions or decision logs), ` +
+        'whose stored ids cannot follow a merge yet (hadron-server#1715).',
+      { extensions: { code: 'MERGE_USER_IN_DECISIONS', decisionCount: count } },
     );
   }
 }
