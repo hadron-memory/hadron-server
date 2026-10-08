@@ -639,10 +639,17 @@ export const decisionMutations = {
         { ownsKind: 'decision', governedContext: 'node-write', transaction: { tx, pooledDb: ctx.db, afterCommit: (e) => effects.push(e) } },
       );
       // The counter, as chat roots keep theirs: a sanctioned direct write that
-      // asks for a fingerprint refresh, so it is not reconciled as drift.
+      // asks for a fingerprint refresh, so it is not reconciled as drift. The
+      // rendered content carries the issued count, so it is re-rendered in the
+      // same write (Diego's P3 on #1690): no revision, and never stale.
+      const counted: DecisionLogData = { ...logData, lastCode: n };
       await tx.node.update({
         where: { id: logRow.id },
-        data: { data: { ...logData, lastCode: n } as unknown as Prisma.InputJsonValue, revisionContentHash: revisionStateHashRefreshMarker() },
+        data: {
+          data: counted as unknown as Prisma.InputJsonValue,
+          content: renderDecisionLog(logRow.name, counted),
+          revisionContentHash: revisionStateHashRefreshMarker(),
+        },
       });
       return (node as { id: string }).id;
     }, { timeout: 60_000 });

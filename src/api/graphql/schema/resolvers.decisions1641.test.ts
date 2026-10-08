@@ -10,8 +10,8 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { runAsActor } from '../../../lib/requestActor.js';
-import { decisionDataSchema, type DecisionData } from '../../../lib/decisions/codec.js';
-import { decisionName, renderDecision, renderDecisionAbstract } from '../../../lib/decisions/render.js';
+import { decisionDataSchema, decisionLogDataSchema, type DecisionData } from '../../../lib/decisions/codec.js';
+import { decisionName, renderDecision, renderDecisionAbstract, renderDecisionLog } from '../../../lib/decisions/render.js';
 import { resolvers, type Context } from './resolvers.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
@@ -521,5 +521,18 @@ describe('Rook §10 on #1690 — the counter write never absorbs drift on the lo
     expect(revs).toHaveLength(1);
     // The drift is on the record as a revision of its own, not folded silently into the counter write.
     expect(revs[0].data).toMatchObject({ defaultDeciders: [holger.id, admin.id], lastCode: 0 });
+  });
+});
+
+describe("Diego's P3 on #1690 — the rendered log stays current after an ask", () => {
+  it('the content re-renders from the counted data in the counter write, with no revision', async () => {
+    const log = await createLog({ name: 'Team decisions' });
+    await ask(log.row.id);
+    await ask(log.row.id);
+    const row = await rowOf(log.row.id);
+    expect(row.data).toMatchObject({ lastCode: 2 });
+    expect(row.content).toContain('2 issued so far');
+    expect(row.content).toBe(renderDecisionLog(row.name, decisionLogDataSchema.parse(row.data)));
+    expect(await db.nodeRevision.count({ where: { nodeId: log.row.id } })).toBe(0);
   });
 });
