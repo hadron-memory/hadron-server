@@ -12,6 +12,7 @@ import { generateId } from '../../../lib/id.js';
 import { runAsActor } from '../../../lib/requestActor.js';
 import { decisionDataSchema, decisionLogDataSchema, type DecisionData } from '../../../lib/decisions/codec.js';
 import { decisionName, renderDecision, renderDecisionAbstract, renderDecisionLog } from '../../../lib/decisions/render.js';
+import { mergeUsers } from '../../../controller/operations/mergeUsers.js';
 import { resolvers, type Context } from './resolvers.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
@@ -534,5 +535,70 @@ describe("Diego's P3 on #1690 — the rendered log stays current after an ask", 
     expect(row.content).toContain('2 issued so far');
     expect(row.content).toBe(renderDecisionLog(row.name, decisionLogDataSchema.parse(row.data)));
     expect(await db.nodeRevision.count({ where: { nodeId: log.row.id } })).toBe(0);
+  });
+});
+
+describe("Diego's P2 on #1690 — mergeUsers refuses accounts named in decisions (option C, #1715)", () => {
+  const merge = (source: string, target: string) =>
+    M.mergeUsers(null, { input: { source, target } }, as(platformAdmin.id, { roles: ['ADMIN'] }));
+  const fresh = (n: number) => db.user.create({ data: { githubId: 164200 + n, githubUsername: `dn-merge-${n}`, roles: [] } });
+
+  it('refuses a merge in either direction while an account is named in a log or a decision, and changes nothing', async () => {
+    const log = await createLog();
+    // holger is named only by the log's default deciders.
+    for (const [source, target] of [[holger.id, outsider.id], [outsider.id, holger.id]]) {
+      const e = await errorOf(merge(source, target));
+      expect(e.extensions).toMatchObject({ code: 'MERGE_USER_IN_DECISIONS', decisionLocs: ['decisions'] });
+      expect(e.message).toContain('#1715');
+    }
+    // writer is named only by a decision they asked.
+    await ask(log.row.id);
+    expect((await errorOf(merge(writer.id, outsider.id))).extensions).toMatchObject({
+      code: 'MERGE_USER_IN_DECISIONS', decisionLocs: ['decisions:DA'],
+    });
+    const rows = await db.user.findMany({ where: { id: { in: [holger.id, writer.id, outsider.id] } } });
+    expect(rows.every((u) => u.deletedAt === null)).toBe(true);
+  });
+
+  it('still merges two accounts that no decision names', async () => {
+    await ask((await createLog()).row.id);
+    const [a, b] = [await fresh(1), await fresh(2)];
+    await merge(a.id, b.id);
+    expect((await db.user.findUniqueOrThrow({ where: { id: a.id } })).deletedAt).not.toBeNull();
+  });
+
+  it('a decider change in flight on the log is seen: the merge waits for it, then refuses', async () => {
+    const log = await createLog();
+    const [a, b] = [await fresh(3), await fresh(4)];
+    let release!: () => void;
+    const held = new Promise<void>((r) => { release = r; });
+    let locked!: () => void;
+    const lockTaken = new Promise<void>((r) => { locked = r; });
+    // Stands in for setDecisionLogDeciders: the log row FOR NO KEY UPDATE, then
+    // a write naming `a`, committed only after the merge has started.
+    const writerTx = db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM nodes WHERE id = ${log.row.id} FOR NO KEY UPDATE`;
+      const row = await tx.node.findUniqueOrThrow({ where: { id: log.row.id } });
+      await tx.node.update({ where: { id: log.row.id }, data: { data: { ...(row.data as object), defaultDeciders: [holger.id, a.id] } as never } });
+      locked();
+      await held;
+    }, { timeout: 20_000 });
+    await lockTaken;
+    const merging = mergeUsers(db, { sourceUserId: a.id, targetUserId: b.id, actorUserId: platformAdmin.id }).then(
+      () => 'NO_ERROR',
+      (e) => (e instanceof GraphQLError ? String(e.extensions.code) : (e as Error).message),
+    );
+    for (let i = 0; ; i++) {
+      const [{ n }] = await db.$queryRaw<Array<{ n: bigint }>>`
+        SELECT count(*) AS n FROM pg_stat_activity
+        WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE '%FOR SHARE%'`;
+      if (n > 0n) break;
+      if (i > 200) throw new Error('the merge never waited on the log lock');
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    release();
+    await writerTx;
+    expect(await merging).toBe('MERGE_USER_IN_DECISIONS');
+    expect((await db.user.findUniqueOrThrow({ where: { id: a.id } })).deletedAt).toBeNull();
   });
 });
