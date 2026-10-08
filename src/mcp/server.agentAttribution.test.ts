@@ -124,7 +124,7 @@ async function mcpConnection() {
   expect(init.status).toBe(200);
   const sid = init.headers.get('mcp-session-id')!;
   let id = 10;
-  return async (name: string, args: Record<string, unknown>, hadronSessionHeader?: string, opts: { allowError?: boolean } = {}): Promise<string> => {
+  const call = async (name: string, args: Record<string, unknown>, hadronSessionHeader?: string, opts: { allowError?: boolean } = {}): Promise<string> => {
     const res = await fetch(`${baseUrl}/mcp`, {
       method: 'POST',
       headers: { ...mcpHeaders, 'mcp-session-id': sid, ...(hadronSessionHeader ? { 'x-hadron-session': hadronSessionHeader } : {}) },
@@ -135,6 +135,17 @@ async function mcpConnection() {
     if (!opts.allowError) expect(text, text).not.toContain('"isError":true');
     return text;
   };
+  /** Several tool calls in ONE POST — a JSON-RPC batch, which the SDK dispatches concurrently (#1702 review). */
+  const batch = async (calls: Array<{ name: string; args: Record<string, unknown> }>): Promise<string> => {
+    const res = await fetch(`${baseUrl}/mcp`, {
+      method: 'POST',
+      headers: { ...mcpHeaders, 'mcp-session-id': sid },
+      body: JSON.stringify(calls.map((c) => ({ jsonrpc: '2.0', id: id++, method: 'tools/call', params: { name: c.name, arguments: c.args } }))),
+    });
+    expect(res.status).toBe(200);
+    return res.text();
+  };
+  return Object.assign(call, { batch });
 }
 
 // `force: true`: the fixture already holds a live session on Iris (the header
@@ -282,6 +293,42 @@ describe('#1701: several workers bound on one MCP connection', () => {
     await call('hadron_create_node', { urn: `hrn:node:${appMemory.urn}:one:unnamed`, name: 'unnamed' });
     expect(await attributionAt('one:named', appMemory.id)).toEqual({ createdByWorkerId: dara.id, createdByAgentId: agent.id });
     expect(await attributionAt('one:unnamed', appMemory.id)).toEqual({ createdByWorkerId: worker.id, createdByAgentId: agent.id });
+  });
+
+  it('calls batched into one POST each keep their own actor (PR #1702 review, Codex P1)', async () => {
+    const { call, dara, irisSession, daraSession } = await sharedConnection();
+    // Several rounds: the SDK runs a batch's calls concurrently, and a shared
+    // actor holder only misattributes when their DB awaits interleave.
+    for (let round = 0; round < 5; round++) {
+      await call.batch([
+        { name: 'hadron_create_node', args: { urn: `hrn:node:${appMemory.urn}:batch:${round}:a`, name: 'a', session: irisSession } },
+        { name: 'hadron_create_node', args: { urn: `hrn:node:${appMemory.urn}:batch:${round}:b`, name: 'b', session: daraSession } },
+        // Unnamed, on an ambiguous connection: a named sibling must not clear the ambiguity for it.
+        { name: 'hadron_create_node', args: { urn: `hrn:node:${appMemory.urn}:batch:${round}:unsaid`, name: 'unsaid' } },
+      ]);
+    }
+    for (let round = 0; round < 5; round++) {
+      expect(await attributionAt(`batch:${round}:a`, appMemory.id), `round ${round} a`).toEqual({ createdByWorkerId: worker.id, createdByAgentId: agent.id });
+      expect(await attributionAt(`batch:${round}:b`, appMemory.id), `round ${round} b`).toEqual({ createdByWorkerId: dara.id, createdByAgentId: agent.id });
+      expect(await nodeAt(`batch:${round}:unsaid`), `round ${round} unsaid`).toBeNull();
+    }
+  });
+
+  it('no number of live bindings evicts the first one (PR #1702 review, Codex P2)', async () => {
+    // Superseded binds cannot fill the list (each bind request prunes ended
+    // sessions first; the binding's own test above relies on that), so the
+    // eviction a cap could cause needs MANY LIVE bindings: here, 35 workers
+    // bound on one connection after Iris. Iris must still be a candidate.
+    const { call } = await sharedConnection();
+    const app = await db.worker.findUniqueOrThrow({ where: { id: worker.id }, select: { appId: true } });
+    for (let i = 0; i < 35; i++) {
+      await db.worker.create({ data: { id: generateId(), appId: app.appId, agentId: agent.id, name: `Extra${i}`, slug: `extra${i}` } });
+      await call('hadron_start_session', { description: `chat ${i}`, workerRef: `hrn:worker:attrhttp.example:team:extra${i}` });
+    }
+    const refused = await call('hadron_create_node', { urn: `hrn:node:${appMemory.urn}:evict:unsaid`, name: 'unsaid' }, undefined, { allowError: true });
+    expect(refused).toContain('[session_ambiguous]');
+    expect(refused).toContain('Iris (session');
+    expect(await nodeAt('evict:unsaid')).toBeNull();
   });
 
   it('reads stay open on an ambiguous connection', async () => {

@@ -87,6 +87,21 @@ export function runAsActor<T>(actor: RequestActor, fn: () => T | PromiseLike<T>)
 }
 
 /**
+ * #1701 — run `fn` in a holder of its OWN, seeded from the current one, so
+ * what `fn` publishes stays inside it. One MCP POST can carry a JSON-RPC batch
+ * whose tool calls the SDK dispatches concurrently under the request's single
+ * holder; a call naming its session must not re-stamp a sibling's write, nor
+ * clear the ambiguity a sibling is about to be refused on. Awaited inside the
+ * scope for the same reason as {@link runAsActor}.
+ */
+export function runInChildActorScope<T>(fn: () => T | PromiseLike<T>): Promise<T> {
+  const parent = currentActor();
+  const child: RequestActor = { workerId: parent.workerId, agentId: parent.agentId };
+  if (parent.ambiguousSessionIds) child.ambiguousSessionIds = [...parent.ambiguousSessionIds];
+  return requestActorStorage.run(child, async () => await fn());
+}
+
+/**
  * Run `fn` as the system: no Worker or Agent behind its writes, whatever
  * request triggered it. For writes of server-sourced content whose revision
  * editor is a system principal (Git sync, memory scaffolding), so the node and

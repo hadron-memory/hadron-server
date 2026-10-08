@@ -45,7 +45,7 @@ import {
   UrnNotQualifiedError,
 } from '../lib/urn.js';
 import { composeWorkerUrn } from '../lib/entityRef/workerRef.js';
-import { currentActorAmbiguity, publishActor, publishAmbiguousActor } from '../lib/requestActor.js';
+import { currentActorAmbiguity, publishActor, publishAmbiguousActor, runInChildActorScope } from '../lib/requestActor.js';
 import {
   emitEntityUrnV2,
   emitNodeUrnV2,
@@ -2045,12 +2045,18 @@ export function createMcpServerInstance(
       if (!toolOwnsArgument) {
         args[shapeIndex] = { ...shape, session: z.string().optional().describe(SESSION_PARAM_DESCRIPTION) };
       }
-      args[cbIndex] = async (input: unknown, extra: unknown) => {
-        const named = (input as Record<string, unknown> | undefined)?.[argumentName];
-        const refusal = await settleCallerSession(name, named, toolOwnsArgument);
-        if (refusal) return refusal;
-        return callback(input, extra);
-      };
+      // Each call settles its actor in a scope of its OWN (PR #1702 review,
+      // Codex P1): the SDK dispatches a JSON-RPC batch's calls concurrently
+      // under the POST's one holder, so publishing into that holder let one
+      // call's named session stamp a sibling's write, or clear the ambiguity
+      // an unnamed sibling was about to be refused on.
+      args[cbIndex] = (input: unknown, extra: unknown) =>
+        runInChildActorScope(async () => {
+          const named = (input as Record<string, unknown> | undefined)?.[argumentName];
+          const refusal = await settleCallerSession(name, named, toolOwnsArgument);
+          if (refusal) return refusal;
+          return await callback(input, extra);
+        });
       return registerTool(...args);
     };
   }
@@ -10690,17 +10696,22 @@ const activeAppByMcpSession = new Map<
 const workerSessionsByMcpSession = new Map<string, string[]>();
 
 /**
- * The most bindings one connection remembers. A cap, not a policy: binding a
- * worker supersedes the caller's other sessions on it (#1617), so live lists
- * stay short; this only bounds a pathological client.
+ * Record a worker/agent session bound on this connection (#1701: appended,
+ * never replacing).
+ *
+ * UNCAPPED on purpose (PR #1702 review, Codex P2): a cap that dropped the
+ * oldest entry could drop a LIVE binding — bind A, then supersede B's session
+ * 32 times — and hand A's chat session's writes to B, the very failure this
+ * list exists to prevent. The list stays short without one: each bind runs
+ * liveConnectionBindings for its receipt, and every header-less request runs
+ * it before dispatch, and both prune the entries that no longer validate. So
+ * the list holds the connection's live bindings plus at most the one being
+ * added. A superseded session is ended, so it validates no longer.
  */
-const MAX_CONNECTION_BINDINGS = 32;
-
-/** Record a worker/agent session bound on this connection (#1701: appended, never replacing). */
 function rememberConnectionBinding(mcpSessionId: string, hadronSessionId: string): void {
   const list = (workerSessionsByMcpSession.get(mcpSessionId) ?? []).filter((id) => id !== hadronSessionId);
   list.push(hadronSessionId);
-  workerSessionsByMcpSession.set(mcpSessionId, list.slice(-MAX_CONNECTION_BINDINGS));
+  workerSessionsByMcpSession.set(mcpSessionId, list);
 }
 
 /**
