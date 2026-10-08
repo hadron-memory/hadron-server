@@ -19,6 +19,7 @@ import { runAsActor } from '../../../lib/requestActor.js';
 import { resolvers, type Context } from './resolvers.js';
 import { isAppParticipant } from './resolvers.helpers.js';
 import { mergeUsers } from '../../../controller/operations/mergeUsers.js';
+import { lockAuthorityAnchors } from '../../../lib/auth/authorityAnchors.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -148,12 +149,14 @@ describe('createAgentTask — root tasks: any App participant (cor:agt:050:06)',
   });
 
   it('S2: a person who is not a participant is refused, and nothing is created', async () => {
-    await expectCode(create(ctx(outsider.id), {}), 'FORBIDDEN');
+    // Concealed exactly like an absent App (#1713 review, Rook P3-1).
+    await expectCode(create(ctx(outsider.id), {}), 'APP_NOT_FOUND');
+    await expectCode(create(ctx(outsider.id), { appRef: generateId() }), 'APP_NOT_FOUND');
     expect(await db.agentTask.count()).toBe(0);
   });
 
   it('a pure App key is refused (cor:agt:050:21 open; #1705 interim)', async () => {
-    await expectCode(create(ctx(undefined, { appId: app.id }), {}), 'FORBIDDEN');
+    await expectCode(create(ctx(undefined, { appId: app.id }), {}), 'APP_NOT_FOUND');
   });
 
   it('a worker acting through its session creates one and owns it (workers are participants, #7489)', async () => {
@@ -164,17 +167,19 @@ describe('createAgentTask — root tasks: any App participant (cor:agt:050:06)',
     expect(t.createdBy).toBe(member.id);
   });
 
-  it('a host-launched worker (App key, no human) acts as itself', async () => {
-    const t = await asWorker(anne, () => create(ctx(undefined, { appId: app.id }), {}));
-    expect(t.ownerWorkerId).toBe(anne.id);
+  it('INTERIM (050:21 unruled, Rook P2-1): an App key cannot act as a worker, even through a session of its App', async () => {
+    await expectCode(asWorker(anne, () => create(ctx(undefined, { appId: app.id }), {})), 'APP_NOT_FOUND');
+    const t = await create(ctx(member.id), {});
+    expect(await asWorker(anne, () => Q.agentTask({}, { id: t.id }, ctx(undefined, { appId: app.id })))).toBeNull();
+    expect(await db.agentTask.count()).toBe(1);
   });
 
   it("a worker of another App is refused — even when its driver participates here", async () => {
-    await expectCode(asWorker(zed, () => create(ctx(admin.id), {})), 'FORBIDDEN');
+    await expectCode(asWorker(zed, () => create(ctx(admin.id), {})), 'APP_NOT_FOUND');
   });
 
   it('a retired worker is refused', async () => {
-    await expectCode(asWorker(retired, () => create(ctx(member.id), {})), 'FORBIDDEN');
+    await expectCode(asWorker(retired, () => create(ctx(member.id), {})), 'APP_NOT_FOUND');
   });
 
   it('a request naming a session that did not validate is refused, not run as its driver', async () => {
@@ -197,11 +202,19 @@ describe('createAgentTask — root tasks: any App participant (cor:agt:050:06)',
     await expectCode(create(ctx(member.id), { owner: { user: outsider.id } }), 'TASK_NOT_OWNER');
   });
 
-  it('whoever manages the App may name another owner (org ADMIN; owner-role AppMember)', async () => {
+  it('whoever manages the App (strict cor:acl:010:01: org ADMIN/OWNER) may name another owner', async () => {
     const a = await create(ctx(admin.id), { owner: { worker: 'Liam' } });
     expect(a.ownerWorkerId).toBe(liam.id);
-    const b = await create(ctx(appOwnerMember.id), { owner: { user: member.id } });
-    expect(b.ownerUserId).toBe(member.id);
+  });
+
+  it('an owner-role AppMember, or a platform admin, does NOT manage the App (Rook P1-1)', async () => {
+    await expectCode(create(ctx(appOwnerMember.id), { owner: { user: member.id } }), 'TASK_NOT_OWNER');
+    const platformAdmin = await user(`pa2-${Date.now()}`, 51);
+    await db.orgMember.create({ data: { id: generateId(), organizationId: org.id, userId: platformAdmin.id, role: 'CONTRIBUTOR' } });
+    await expectCode(
+      create(ctx(platformAdmin.id, { roles: ['ADMIN'] }), { owner: { user: member.id } }),
+      'TASK_NOT_OWNER',
+    );
   });
 
   it('a manager naming an owner outside the App is refused TASK_OWNER_INVALID', async () => {
@@ -529,8 +542,8 @@ describe('reads — the App\'s participants, workers included (cor:agt:050:21)',
     expect(await Q.agentTask({}, { id: t.id }, ctx(undefined, { appId: app.id }))).toBeNull();
     expect(await asWorker(zed, () => Q.agentTask({}, { id: t.id }, ctx(member.id)))).toBeNull();
     expect(await Q.agentTaskTree({}, { root: t.id }, ctx(outsider.id))).toBeNull();
-    await expectCode(Q.agentTasks({}, { appRef: app.id }, ctx(outsider.id)), 'FORBIDDEN');
-    await expectCode(Q.agentTeamEvents({}, { appRef: app.id }, ctx(outsider.id)), 'FORBIDDEN');
+    await expectCode(Q.agentTasks({}, { appRef: app.id }, ctx(outsider.id)), 'APP_NOT_FOUND');
+    await expectCode(Q.agentTeamEvents({}, { appRef: app.id }, ctx(outsider.id)), 'APP_NOT_FOUND');
   });
 
   it('a soft-deleted App\'s tasks read as missing', async () => {
@@ -551,8 +564,10 @@ describe('reads — the App\'s participants, workers included (cor:agt:050:21)',
       const participates = await isAppParticipant(c, { id: app.id, organizationId: org.id, ownerUserId: null });
       expect({ user: c.userId, readable }).toEqual({ user: c.userId, readable: participates });
     }
-    // The worker arm: this App's live, unretired workers — and nobody else's.
-    expect(await asWorker(anne, () => Q.agentTask({}, { id: t.id }, ctx(outsider.id)))).not.toBeNull();
+    // The worker arm: this App's live, unretired workers, driven by a credential
+    // that may STILL drive them (Rook P1-2) — and nobody else's.
+    expect(await asWorker(anne, () => Q.agentTask({}, { id: t.id }, ctx(member.id)))).not.toBeNull();
+    expect(await asWorker(anne, () => Q.agentTask({}, { id: t.id }, ctx(outsider.id)))).toBeNull();
     expect(await asWorker(retired, () => Q.agentTask({}, { id: t.id }, ctx(member.id)))).toBeNull();
     expect(await asWorker(zed, () => Q.agentTask({}, { id: t.id }, ctx(member.id)))).toBeNull();
   });
@@ -642,5 +657,193 @@ describe('integrity', () => {
     expect(after.assignedBy).toBe(survivor.id);
     const ev = await events(t.id);
     expect(ev.every((e) => e.actorUserId === member.id)).toBe(true);
+  });
+});
+
+// ── #1713 review round (Rook §10, Diego cross-provider) ───────────────────
+
+describe('#1713 review: strict App manager (Rook P1-1)', () => {
+  it('a stranger who self-joins through joinApp (owner-role AppMember) may create their own tasks, but not reassign, cancel, or name owners', async () => {
+    await db.appAgent.create({ data: { appId: app.id, agentId: teamAgent.id } });
+    await M.joinApp({}, { appId: app.id }, ctx(outsider.id));
+    const joined = await db.appMember.findUniqueOrThrow({ where: { appId_userId: { appId: app.id, userId: outsider.id } } });
+    expect(joined.role).toBe('owner'); // memberRoles[0] of the schema-default policy
+    const own = await create(ctx(outsider.id), {});
+    expect(own.ownerUserId).toBe(outsider.id);
+    const theirs = await anneTask({ start: true });
+    await expectCode(M.reassignAgentTask({}, { taskId: theirs.id, assignee: { worker: 'Liam' } }, ctx(outsider.id)), 'TASK_NOT_OWNER');
+    await expectCode(M.cancelAgentTask({}, { taskId: theirs.id }, ctx(outsider.id)), 'TASK_NOT_OWNER');
+    const queued = await create(ctx(member.id), {});
+    await expectCode(M.assignAgentTask({}, { taskId: queued.id, assignee: { worker: 'Liam' } }, ctx(outsider.id)), 'TASK_NOT_OWNER');
+    await expectCode(create(ctx(outsider.id), { owner: { user: member.id } }), 'TASK_NOT_OWNER');
+    expect((await db.agentTask.findUniqueOrThrow({ where: { id: theirs.id } })).assigneeWorkerId).toBe(anne.id);
+  });
+});
+
+describe('#1713 review: a worker session stops authorizing when its driver stops participating (Rook P1-2)', () => {
+  it('bind, remove the AppMember: the worker reads null and its writes are TASK_NOT_FOUND', async () => {
+    const t = await anneTask();
+    expect(await asWorker(anne, () => Q.agentTask({}, { id: t.id }, ctx(member.id)))).not.toBeNull();
+    await db.appMember.delete({ where: { appId_userId: { appId: app.id, userId: member.id } } });
+    expect(await asWorker(anne, () => Q.agentTask({}, { id: t.id }, ctx(member.id)))).toBeNull();
+    await expectCode(asWorker(anne, () => M.startAgentTask({}, { taskId: t.id }, ctx(member.id))), 'TASK_NOT_FOUND');
+    await expectCode(asWorker(anne, () => Q.agentTasks({}, { appRef: app.id }, ctx(member.id))), 'APP_NOT_FOUND');
+    expect((await db.agentTask.findUniqueOrThrow({ where: { id: t.id } })).status).toBe('pending');
+  });
+
+  it('a revoked org membership stops it too', async () => {
+    const t = await anneTask();
+    await db.orgMember.updateMany({ where: { organizationId: org.id, userId: contrib.id }, data: { deletedAt: new Date() } });
+    expect(await asWorker(anne, () => Q.agentTask({}, { id: t.id }, ctx(contrib.id)))).toBeNull();
+  });
+});
+
+/** Resolve once another backend of THIS database is waiting on a lock — the request reached its wait. */
+async function untilSomeoneWaits(): Promise<void> {
+  const deadline = Date.now() + 10_000;
+  for (;;) {
+    const [{ n }] = await db.$queryRaw<{ n: number }[]>`
+      SELECT count(*)::int AS n FROM pg_stat_activity
+      WHERE datname = current_database() AND wait_event_type = 'Lock' AND pid <> pg_backend_pid()`;
+    if (n > 0) return;
+    if (Date.now() > deadline) throw new Error('no backend ever waited on a lock');
+    await new Promise((r) => setTimeout(r, 20));
+  }
+}
+
+/**
+ * A revoker that has DONE its write (locks held, uncommitted) and commits only
+ * when `release` is called — so a request can be parked at its wait first.
+ */
+function revoker(work: (tx: any) => Promise<void>) {
+  let release!: () => void;
+  const gate = new Promise<void>((r) => { release = r; });
+  let ready!: () => void;
+  const holding = new Promise<void>((r) => { ready = r; });
+  const done = db.$transaction(async (tx) => {
+    await work(tx);
+    ready();
+    await gate;
+  }, { timeout: 30_000 });
+  return { holding, release, done };
+}
+
+describe('#1713 review: writes re-gate inside their transaction (Diego P2-A)', () => {
+  it('a membership revocation that commits while the write waits: no task change, no event', async () => {
+    const t = await create(ctx(reader.id), {});
+    const eventsBefore = await db.agentTeamEvent.count();
+    // removeAppMember's protocol: the App + removed-user anchors EXCLUSIVELY, then the delete.
+    const r = revoker(async (tx) => {
+      await lockAuthorityAnchors(tx, [{ kind: 'app', id: app.id }, { kind: 'user', id: reader.id }, { kind: 'org', id: org.id }], 'exclusive');
+      await tx.appMember.delete({ where: { appId_userId: { appId: app.id, userId: reader.id } } });
+    });
+    await r.holding;
+    const write = M.cancelAgentTask({}, { taskId: t.id }, ctx(reader.id)).then(
+      () => 'NO_ERROR', (e: GraphQLError) => String(e.extensions?.code));
+    await untilSomeoneWaits();
+    r.release();
+    await r.done;
+    expect(await write).toBe('TASK_NOT_FOUND');
+    expect((await db.agentTask.findUniqueOrThrow({ where: { id: t.id } })).status).toBe('pending');
+    expect(await db.agentTeamEvent.count()).toBe(eventsBefore);
+  });
+
+  it('an uninstall that commits while the write waits: APP_UNINSTALLED, no task change, no event', async () => {
+    const t = await anneTask();
+    const eventsBefore = await db.agentTeamEvent.count();
+    const r = revoker(async (tx) => {
+      await tx.$executeRaw`UPDATE apps SET uninstalled_at = now() WHERE id = ${app.id}`;
+    });
+    await r.holding;
+    const write = asWorker(anne, () => M.startAgentTask({}, { taskId: t.id }, ctx(member.id))).then(
+      () => 'NO_ERROR', (e: GraphQLError) => String(e.extensions?.code));
+    await untilSomeoneWaits();
+    r.release();
+    await r.done;
+    expect(await write).toBe('APP_UNINSTALLED');
+    expect((await db.agentTask.findUniqueOrThrow({ where: { id: t.id } })).status).toBe('pending');
+    expect(await db.agentTeamEvent.count()).toBe(eventsBefore);
+  });
+
+  it('a worker retired while its write waits: refused, no task change, no event', async () => {
+    const t = await anneTask({ start: true });
+    const eventsBefore = await db.agentTeamEvent.count();
+    const r = revoker(async (tx) => {
+      await tx.$executeRaw`UPDATE workers SET retired_at = now() WHERE id = ${anne.id}`;
+    });
+    await r.holding;
+    const write = asWorker(anne, () =>
+      M.finishAgentTask({}, { taskId: t.id, result: { outcome: 'succeeded' } }, ctx(member.id))).then(
+      () => 'NO_ERROR', (e: GraphQLError) => String(e.extensions?.code));
+    await untilSomeoneWaits();
+    r.release();
+    await r.done;
+    expect(await write).toBe('TASK_NOT_FOUND');
+    expect((await db.agentTask.findUniqueOrThrow({ where: { id: t.id } })).status).toBe('started');
+    expect(await db.agentTeamEvent.count()).toBe(eventsBefore);
+  });
+
+  it('a self-service leaveApp (no anchor) that commits while the write waits: refused, no event', async () => {
+    const t = await create(ctx(reader.id), {});
+    const eventsBefore = await db.agentTeamEvent.count();
+    // controller/operations/leaveApp.ts: a bare deleteMany, no authority anchor.
+    const r = revoker(async (tx) => {
+      await tx.appMember.deleteMany({ where: { appId: app.id, userId: reader.id } });
+    });
+    await r.holding;
+    const write = M.cancelAgentTask({}, { taskId: t.id }, ctx(reader.id)).then(
+      () => 'NO_ERROR', (e: GraphQLError) => String(e.extensions?.code));
+    await untilSomeoneWaits();
+    r.release();
+    await r.done;
+    expect(await write).toBe('TASK_NOT_FOUND');
+    expect((await db.agentTask.findUniqueOrThrow({ where: { id: t.id } })).status).toBe('pending');
+    expect(await db.agentTeamEvent.count()).toBe(eventsBefore);
+  });
+
+  it('a root create racing a revocation commits nothing either', async () => {
+    const r = revoker(async (tx) => {
+      await lockAuthorityAnchors(tx, [{ kind: 'app', id: app.id }, { kind: 'user', id: reader.id }, { kind: 'org', id: org.id }], 'exclusive');
+      await tx.appMember.delete({ where: { appId_userId: { appId: app.id, userId: reader.id } } });
+    });
+    await r.holding;
+    const write = create(ctx(reader.id), {}).then(() => 'NO_ERROR', (e: GraphQLError) => String(e.extensions?.code));
+    await untilSomeoneWaits();
+    r.release();
+    await r.done;
+    expect(await write).toBe('APP_NOT_FOUND');
+    expect(await db.agentTask.count()).toBe(0);
+    expect(await db.agentTeamEvent.count()).toBe(0);
+  });
+});
+
+describe('#1713 review: event continuation keeps ties (Diego P2-B)', () => {
+  it('pages one event at a time through a group sharing one timestamp, skipping and repeating nothing', async () => {
+    const t = await create(ctx(member.id), { assignee: { worker: 'Anne' } }); // created + assigned
+    const at = new Date('2026-10-08T12:00:00.000Z');
+    // Three more rows at ONE instant: the shape a single transaction writes.
+    for (const type of ['task.started', 'task.progress', 'task.progress']) {
+      await db.agentTeamEvent.create({ data: { appId: app.id, taskId: t.id, type, createdAt: at } });
+    }
+    const all = await Q.agentTeamEvents({}, { appRef: app.id, limit: 200 }, ctx(member.id));
+    expect(all).toHaveLength(5);
+    const seen: string[] = [];
+    let after: string | undefined;
+    for (;;) {
+      const page = await Q.agentTeamEvents({}, { appRef: app.id, limit: 1, ...(after ? { after } : {}) }, ctx(member.id));
+      if (!page.length) break;
+      seen.push(page[0].id);
+      after = page[0].id;
+    }
+    expect(seen).toEqual(all.map((e: any) => e.id));
+    // The page boundary inside the same-transaction created + assigned pair.
+    const first = await Q.agentTeamEvents({}, { appRef: app.id, limit: 1 }, ctx(member.id));
+    expect(first.map((e: any) => e.type)).toEqual(['task.created']);
+    const next = await Q.agentTeamEvents({}, { appRef: app.id, limit: 1, after: first[0].id }, ctx(member.id));
+    expect(next.map((e: any) => e.type)).toEqual(['task.assigned']);
+  });
+
+  it('a cursor that is not an event of this App is refused', async () => {
+    await expectCode(Q.agentTeamEvents({}, { appRef: app.id, after: generateId() }, ctx(member.id)), 'BAD_USER_INPUT');
   });
 });

@@ -65,8 +65,8 @@ import { ensureDefaultChannelForApp } from '../../../lib/channels.js';
 import { recordUrnRename } from '../../../lib/urnAlias.js';
 import { assertNoMintedCorpusCascade } from '../../../lib/mintedSpecPermanence.js';
 import { requireEndpointFor, requireKeyFor } from '../../../lib/aiEndpoint.js';
+import { LIVE_ORG_MEMBERSHIP } from '../../../lib/auth/liveOrgMembership.js';
 import { withAuthorizedTx } from './authorizedTx.js';
-import { callerManagesAppMembers } from '../../../lib/auth/appManagement.js';
 
 /**
  * #974 / cor:agt:020:02: a soft-deleted App keeps reserving its workers'
@@ -88,6 +88,44 @@ async function assertNoWorkers(
       { extensions: { code: 'WORKER_NAMES_RESERVED', appId, workers } },
     );
   }
+}
+
+/**
+ * Can the caller manage this App's members by ROLE alone — independent of any
+ * target user? Platform ADMIN/OWNER for an ORG-owned App, the user-owner of a
+ * user-owned App, an org ADMIN/OWNER of the App's org, or an owner-role
+ * AppMember. spec 047 (blocker 3): the platform-admin bypass applies ONLY to an
+ * org-owned App (a user-owned App is strictly owner-only). Shared by
+ * ensureAppMember + removeAppMember so the role gate is evaluated BEFORE the
+ * target user is resolved — a non-authorized caller can't turn user-ref
+ * resolution into an existence oracle (#816 review).
+ */
+async function callerManagesAppMembers(
+  ctx: Context,
+  app: { ownerUserId: string | null; organizationId: string | null },
+  resolvedAppId: string,
+): Promise<boolean> {
+  const isPlatformAdmin = ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER');
+  if (isPlatformAdmin && app.ownerUserId === null) return true;
+  const isAppOwnerUser = app.ownerUserId !== null && !!ctx.userId && ctx.userId === app.ownerUserId;
+  if (isAppOwnerUser) return true;
+  if (app.organizationId) {
+    const orgMember = await ctx.db.orgMember.findFirst({
+      where: {
+        organizationId: app.organizationId,
+        userId: ctx.userId ?? '',
+        ...LIVE_ORG_MEMBERSHIP,
+        role: { in: ['ADMIN', 'OWNER'] },
+      },
+    });
+    if (orgMember) return true;
+  }
+  const ownerMember = ctx.userId
+    ? await ctx.db.appMember.findUnique({
+        where: { appId_userId: { appId: resolvedAppId, userId: ctx.userId } },
+      })
+    : null;
+  return ownerMember?.role === 'owner';
 }
 
 /**

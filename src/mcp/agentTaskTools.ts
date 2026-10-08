@@ -108,7 +108,7 @@ async function renderEvent(e: EventRow, ctx: Context): Promise<string> {
   const actor = (await E.actor(e as never, {}, ctx)) as Party;
   const subject = (await E.subjectWorker(e as never, {}, ctx)) as Party;
   const payload = e.payload && Object.keys(e.payload).length ? ` ${JSON.stringify(e.payload)}` : '';
-  return `- ${e.createdAt.toISOString()} ${e.type}${e.severity ? ' [ALARM]' : ''}` +
+  return `- ${e.createdAt.toISOString()} ${e.type}${e.severity ? ' [ALARM]' : ''} (id: ${e.id})` +
     `${e.taskId ? ` task ${e.taskId}` : ''} by ${partyLabel(actor)}` +
     `${subject ? ` → ${partyLabel(subject)}` : ''}${payload}`;
 }
@@ -119,7 +119,7 @@ const SESSION_WRITE = z.string().optional().describe(
     'without it is refused, never inferred (#1697/#1701).',
 );
 const SESSION_READ = z.string().optional().describe(
-  'Optional session id: read as that session\'s worker (a worker on an App key needs it to be a participant).',
+  'Optional session id: read as that session\'s worker. An App key cannot act as a worker (until cor:agt:050:21 is ruled).',
 );
 const party = z.object({
   worker: z.string().optional().describe('A worker of the App: its id, URN or name.'),
@@ -313,10 +313,11 @@ export function registerAgentTaskTools(server: McpServer, deps: { db: PrismaClie
 
   server.tool(
     'hadron_team_events',
-    'Read a team App\'s event stream (cor:agt:050:11), oldest first, strictly after since when given. Events carry ids, counts and outcome words, never message text.',
+    'Read a team App\'s event stream (cor:agt:050:11), oldest first. To read the next page, pass after: the id of the last event you read (events sharing a timestamp are never skipped). Events carry ids, counts and outcome words, never message text.',
     {
       appRef: z.string().describe('The team App (id or URN).'),
-      since: z.string().optional().describe('ISO date-time; only events after it.'),
+      since: z.string().optional().describe('ISO date-time; only events after it. A coarse filter, not a continuation: use after to page.'),
+      after: z.string().optional().describe('The id of the last event you read; the page continues strictly after it.'),
       types: z.array(z.string()).optional().describe('e.g. task.assigned, task.finished.'),
       alarmsOnly: z.boolean().optional(),
       taskId: z.string().optional(),
@@ -327,7 +328,10 @@ export function registerAgentTaskTools(server: McpServer, deps: { db: PrismaClie
       read(session, async (ctx) => {
         const rows = await Q.agentTeamEvents({}, args, ctx);
         if (!rows.length) return textResult('No events match.');
-        return textResult((await Promise.all(rows.map((e) => renderEvent(e, ctx)))).join('\n'));
+        const lines = await Promise.all(rows.map((e) => renderEvent(e, ctx)));
+        const pageSize = args.limit ?? 50;
+        if (rows.length >= pageSize) lines.push(`\nMore may follow: pass after: "${rows[rows.length - 1].id}".`);
+        return textResult(lines.join('\n'));
       }),
   );
 }

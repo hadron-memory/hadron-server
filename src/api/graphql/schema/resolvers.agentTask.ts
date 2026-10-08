@@ -10,14 +10,36 @@
 //     (#1610 `currentActor()` — filled from the X-Hadron-Session header on
 //     GraphQL, or from the MCP tool's `session` argument). Workers are App
 //     participants through their session (Holger, team chat #7489): only a
-//     participant can cast a worker or drive its session, so the gate checks
-//     that the bound worker belongs to THIS App and is not retired, and does
-//     not re-check a human driver (host-launched workers, T6, have none).
+//     participant can cast a worker or drive its session. That holds at bind
+//     time, so the gate makes it hold on EVERY call: the worker belongs to
+//     THIS App and is not retired, AND the credential may still drive it —
+//     the shared `mayStillDriveWorkerApp` (#1540): current participation in a
+//     live App (#1713 review, Rook P1-2: a session's userId is historical, so
+//     a removed member's open worker session must stop authorizing).
 //   - a PERSON otherwise: the credential's user, who must pass the shared
 //     App-participation predicate (`isAppParticipant`, cor:acl:010:01).
-// A pure App key with no worker binding is neither, and is refused (050:21's
-// open question; #1705 interim). A request that NAMED a session that did not
+// A pure App key is refused, with or without a worker binding. INTERIM until
+// Holger rules cor:agt:050:21 (#1713 review, Rook P2-1): an App key validates
+// ANY open session of its App, including one a person started on their
+// worker, so admitting it would let any key holder act as any worker whose
+// session id it has seen. A request that NAMED a session that did not
 // validate is refused rather than silently acting as its human driver.
+//
+// EVERY WRITE RE-GATES INSIDE ITS TRANSACTION (#1713 review, Diego P2-A):
+// `inTaskWriteTx` runs under `withAuthorizedTx`, taking SHARED authority
+// anchors on the App (+ its org, or its owner) and the caller — the anchors
+// removeAppMember / removeOrgMember / updateOrgMember / deleteApp take
+// EXCLUSIVELY — plus FOR SHARE on the caller's AppMember row (self-service
+// leaveApp deletes it unanchored) and the bound worker's row (retireWorker
+// updates it). It then re-runs the actor gate and the App-lifecycle checks on
+// the TRANSACTION client, and manager / party checks use that client too. A
+// revocation or uninstall that commits first is seen; one that comes later
+// waits for this write.
+//
+// FOR T6 (Rook P3-4): a task write grants no platform authority, so an
+// assignment is only a record. Launch-on-assign changes that, because a launch
+// is an effect with real authority. The launch path must re-gate at launch time
+// (participation, holder, App live), not trust the assignment it was queued from.
 //
 // AUTHORIZATION (cor:agt:050:06–:09, plan §10, rulings on epic #1704):
 //   create root     any App participant (050:06)
@@ -26,15 +48,23 @@
 //   reassign        the task's owner (ruled, D-2026-10-07-004), or an App manager (Proposed)
 //   start/progress/finish   the assignee only (050:08, Proposed)
 //   read            the App's participants, workers included (050:21, Proposed)
-// "Whoever manages the App" is `callerManagesAppMembers` (epic #1704 ruling 2).
-// INTERIM (flagged to Ada, team chat #7508): the App-manager arm counts only
-// for a PERSON acting as themselves — a worker acting through its session does
-// not inherit its driver's management rights, or every worker its holder
-// drives would carry the "coordinator grant" 050:09 leaves open.
+// "Whoever manages the App" is the STRICT cor:acl:010:01 predicate
+// (`managesAppStrict`: a user-owned App's owner, or the org's live ADMINs and
+// OWNERs) — Holger #7495 as 050:09 r2 cites it, confirmed by Ada on the #1713
+// review round. NOT `callerManagesAppMembers`: its owner-role-AppMember arm is
+// self-grantable through joinApp (Rook, #1713 P1-1).
+// INTERIM (team chat #7508): the App-manager arm counts only for a PERSON
+// acting as themselves; a worker acting through its session does not inherit
+// its driver's management rights. This is attribution hygiene, NOT a privilege
+// boundary (Rook P3-3): the same credential can act as the person by sending
+// no worker session. It keeps a worker's own acts from being recorded as
+// management acts until 050:09's "coordinator grant" is ruled.
 //
 // CONCEALMENT: a task the caller cannot read — including one in another App,
 // or a parent named across Apps — reads as TASK_NOT_FOUND (mutations) or null
 // (queries), never Forbidden: no existence oracle over task ids (#1577 posture).
+// An App the caller does not participate in reads exactly like an absent one:
+// APP_NOT_FOUND (#1713 review, Rook P3-1; the resolvePilotApp posture).
 
 import { GraphQLError } from 'graphql';
 import { Prisma } from '../../../generated/prisma/index.js';
@@ -44,7 +74,10 @@ import { AppNotFoundError, WorkerNotFoundError } from '../../../lib/entityRef/er
 import { isId } from '../../../lib/entityRef/shape.js';
 import { composeWorkerUrn, resolveWorkerRef as resolveWorkerRefId } from '../../../lib/entityRef/workerRef.js';
 import { resolveWorkerIdByName } from './resolvers.worker.js';
-import { callerManagesAppMembers } from '../../../lib/auth/appManagement.js';
+import { managesAppStrict } from '../../../lib/auth/appManagement.js';
+import type { AuthorityAnchor } from '../../../lib/auth/authorityAnchors.js';
+import { mayStillDriveWorkerApp } from '../../../lib/teamAttention.js';
+import { withAuthorizedTx } from './authorizedTx.js';
 import { currentActor } from '../../../lib/requestActor.js';
 import {
   appendTaskEvent,
@@ -112,12 +145,17 @@ export async function resolveTaskActor(ctx: Context, app: TaskApp): Promise<Task
   if (app.deletedAt) return null;
   const bound = currentActor();
   if (bound.workerId) {
+    // INTERIM until cor:agt:050:21 is ruled (Rook P2-1): no App key acts as a
+    // worker, even through a validated session of its own App.
+    if (!ctx.userId) return null;
     const worker = await ctx.db.worker.findUnique({
       where: { id: bound.workerId },
       select: { appId: true, retiredAt: true },
     });
     if (!worker || worker.appId !== app.id || worker.retiredAt) return null;
-    return { kind: 'worker', workerId: bound.workerId, agentId: bound.agentId, userId: ctx.userId ?? null };
+    // The credential must STILL be able to drive this App's workers (Rook P1-2).
+    if (!(await mayStillDriveWorkerApp(ctx, app.id))) return null;
+    return { kind: 'worker', workerId: bound.workerId, agentId: bound.agentId, userId: ctx.userId };
   }
   if (!ctx.userId) return null;
   if (!(await isAppParticipant(ctx, app))) return null;
@@ -141,19 +179,24 @@ async function loadApp(ctx: Context, appId: string): Promise<TaskApp | null> {
   return ctx.db.app.findUnique({ where: { id: appId }, select: APP_SELECT });
 }
 
-/** Resolve an App ref the caller participates in, or refuse. */
+const appNotFound = (appRef: string): GraphQLError => taskError('APP_NOT_FOUND', 'App not found.', { appRef });
+
+/**
+ * Resolve an App ref the caller participates in. An App that does not exist
+ * and one the caller may not read answer the SAME refusal (Rook P3-1).
+ */
 async function resolveParticipatedApp(ctx: Context, appRef: string): Promise<{ app: TaskApp; actor: TaskActor }> {
   let appId: string;
   try {
     ({ id: appId } = await resolveAppRef(ctx.db, appRef));
   } catch (e) {
-    if (e instanceof AppNotFoundError) throw taskError('NOT_FOUND', 'App not found.', { appRef });
+    if (e instanceof AppNotFoundError) throw appNotFound(appRef);
     throw e;
   }
   const app = await loadApp(ctx, appId);
-  if (!app) throw taskError('NOT_FOUND', 'App not found.', { appRef });
+  if (!app) throw appNotFound(appRef);
   const actor = await resolveTaskActor(ctx, app);
-  if (!actor) throw forbidden();
+  if (!actor) throw appNotFound(appRef);
   return { app, actor };
 }
 
@@ -182,12 +225,20 @@ const isAssignee = (actor: TaskActor, t: TaskRow): boolean =>
   actorIs(actor, t.assigneeWorkerId, t.assigneeUserId);
 
 /**
- * Whoever manages the App (epic #1704 ruling 2 → `callerManagesAppMembers`).
- * INTERIM: a person acting as themselves only — see the file header.
+ * Whoever manages the App — strict cor:acl:010:01 (`managesAppStrict`).
+ * INTERIM: a person acting as themselves only — see the file header. Called
+ * with the transaction context, so it reads committed state under the write's
+ * anchors.
  */
 async function actorManagesApp(ctx: Context, app: TaskApp, actor: TaskActor): Promise<boolean> {
   if (actor.kind !== 'user' || ctx.impersonation) return false;
-  return callerManagesAppMembers(ctx, app, app.id);
+  return managesAppStrict(ctx, app);
+}
+
+function sameActor(a: TaskActor, b: TaskActor): boolean {
+  return a.kind === b.kind && (a.kind === 'worker'
+    ? a.workerId === (b as { workerId: string }).workerId
+    : a.userId === b.userId);
 }
 
 function actorParty(actor: TaskActor): TaskParty {
@@ -234,6 +285,7 @@ async function resolveParty(
   if (!row) throw invalid(user as string);
   // The target's participation, judged on the target alone (no caller roles).
   const participates = await isAppParticipant({ db: ctx.db, userId: row.id } as Context, app);
+  // (ctx.db is the write's transaction client when called from a mutation.)
   if (!participates) throw invalid(user as string);
   return { userId: row.id };
 }
@@ -375,25 +427,84 @@ async function lockTask(tx: Prisma.TransactionClient, taskId: string): Promise<T
   return tx.agentTask.findUnique({ where: { id: taskId } });
 }
 
+/** The in-transaction gate refused: concealed by the caller as its own not-found. */
+class TaskGateRefused extends Error {}
+
+/**
+ * Run a task write under the authority it depends on (#1713 review, Diego
+ * P2-A). Takes the App's authority anchors SHARED (the revokers take them
+ * EXCLUSIVELY), locks the caller's AppMember row and the bound worker's row
+ * FOR SHARE, then re-runs the actor gate and the lifecycle checks on the
+ * transaction client: the actor must be the same one the request resolved
+ * before the wait. A refusal discovered here is `refused()` — the caller's
+ * concealment — except an uninstall that won the race, which says so.
+ */
+async function inTaskWriteTx<T>(
+  ctx: Context,
+  app: TaskApp,
+  actor: TaskActor,
+  refused: () => GraphQLError,
+  write: (tx: Prisma.TransactionClient, txCtx: Context, app: TaskApp) => Promise<T>,
+): Promise<T> {
+  const anchors: AuthorityAnchor[] = [
+    { kind: 'app', id: app.id },
+    ...(app.organizationId ? [{ kind: 'org' as const, id: app.organizationId }] : []),
+    ...(app.ownerUserId ? [{ kind: 'user' as const, id: app.ownerUserId }] : []),
+  ];
+  const workerId = currentActor().workerId;
+  let fresh: TaskApp | null = null;
+  try {
+    return await withAuthorizedTx(
+      ctx,
+      anchors,
+      async (txCtx) => {
+        fresh = await txCtx.db.app.findUnique({ where: { id: app.id }, select: APP_SELECT });
+        if (!fresh) throw new TaskGateRefused();
+        const again = await resolveTaskActor(txCtx, fresh);
+        if (!again || !sameActor(again, actor)) throw new TaskGateRefused();
+        requireWritable(txCtx, fresh);
+      },
+      (tx, txCtx) => write(tx, txCtx, fresh as TaskApp),
+      {
+        afterLock: async (tx) => {
+          if (ctx.userId) {
+            await tx.$queryRaw`SELECT 1 FROM app_members WHERE app_id = ${app.id} AND user_id = ${ctx.userId} FOR SHARE`;
+          }
+          if (workerId) await tx.$queryRaw`SELECT 1 FROM workers WHERE id = ${workerId} FOR SHARE`;
+        },
+      },
+    );
+  } catch (e) {
+    const denied = e instanceof TaskGateRefused || (e instanceof Error && e.message === 'Forbidden');
+    if (!denied) throw e;
+    const now = await ctx.db.app.findUnique({ where: { id: app.id }, select: { deletedAt: true, uninstalledAt: true } });
+    if (now && !now.deletedAt && now.uninstalledAt) {
+      throw taskError('APP_UNINSTALLED', 'This App is uninstalled; its tasks are read-only.');
+    }
+    throw refused();
+  }
+}
+
 /**
  * The shared shape of every mutation on an existing task: resolve the actor
- * OUTSIDE the transaction (it reads the App's participation), then lock the
- * row, re-read it, and run `act` on the locked state — so the authorization
- * and state checks inside `act` see exactly the row they change.
+ * (concealing an unreadable task), then — inside `inTaskWriteTx` — re-gate,
+ * lock the task row, re-read it, and run `act` on the locked state with the
+ * TRANSACTION context, so the authorization and state checks inside `act` see
+ * exactly the row and the authority they depend on.
  */
 async function mutateTask(
   ctx: Context,
   taskId: string,
-  act: (tx: Prisma.TransactionClient, task: TaskRow, actor: TaskActor, app: TaskApp) => Promise<void>,
+  act: (tx: Prisma.TransactionClient, task: TaskRow, actor: TaskActor, app: TaskApp, txCtx: Context) => Promise<void>,
 ): Promise<TaskRow> {
   const readable = await loadReadableTask(ctx, taskId);
   if (!readable) throw notFound(taskId);
   const { app, actor } = readable;
   requireWritable(ctx, app);
-  await ctx.db.$transaction(async (tx) => {
+  await inTaskWriteTx(ctx, app, actor, () => notFound(taskId), async (tx, txCtx, freshApp) => {
     const task = await lockTask(tx, taskId);
-    if (!task) throw notFound(taskId);
-    await act(tx, task, actor, app);
+    if (!task || task.appId !== freshApp.id) throw notFound(taskId);
+    await act(tx, task, actor, freshApp, txCtx);
   });
   return ctx.db.agentTask.findUniqueOrThrow({ where: { id: taskId } });
 }
@@ -471,17 +582,17 @@ export const agentTaskMutations = {
      * task, under the parent's row lock — so a caller who may not create here
      * learns nothing from which of them would be refused.
      */
-    const resolveParties = async () => {
-      const requirements = await normalizeRequirements(ctx, app, input.requirements);
+    const resolveParties = async (txCtx: Context, app: TaskApp) => {
+      const requirements = await normalizeRequirements(txCtx, app, input.requirements);
       let owner: TaskParty = actorParty(actor);
       if (input.owner) {
         // Only an App manager may name another owner, so for anyone else every
         // outcome but "that is you" is the same refusal: a non-manager learns
         // nothing about which refs are valid parties (no participation oracle).
-        const manages = !parentId && (await actorManagesApp(ctx, app, actor));
+        const manages = !parentId && (await actorManagesApp(txCtx, app, actor));
         let named: TaskParty | null = null;
         try {
-          named = await resolveParty(ctx, app, input.owner, 'TASK_OWNER_INVALID');
+          named = await resolveParty(txCtx, app, input.owner, 'TASK_OWNER_INVALID');
         } catch (e) {
           if (manages || !(e instanceof GraphQLError && e.extensions?.code === 'TASK_OWNER_INVALID')) throw e;
         }
@@ -495,11 +606,12 @@ export const agentTaskMutations = {
           owner = named;
         }
       }
-      const assignee = input.assignee ? await resolveParty(ctx, app, input.assignee, 'TASK_ASSIGNEE_INVALID') : null;
+      const assignee = input.assignee ? await resolveParty(txCtx, app, input.assignee, 'TASK_ASSIGNEE_INVALID') : null;
       return { requirements, owner, assignee };
     };
 
-    const id = await ctx.db.$transaction(async (tx) => {
+    const refused = parentId ? () => notFound(parentId) : () => appNotFound(input.appRef as string);
+    const id = await inTaskWriteTx(ctx, app, actor, refused, async (tx, txCtx, app) => {
       if (parentId) {
         // Lock the parent so its assignee and status can't move under us,
         // then authorize against the locked row — the one assignee check.
@@ -510,7 +622,7 @@ export const agentTaskMutations = {
         }
         refuseEnded(parent);
       }
-      const { requirements, owner, assignee } = await resolveParties();
+      const { requirements, owner, assignee } = await resolveParties(txCtx, app);
       const created = await tx.agentTask.create({
         data: {
           appId: app.id,
@@ -550,15 +662,15 @@ export const agentTaskMutations = {
     ctx: Context,
   ) => {
     let party: TaskParty | null = null;
-    return mutateTask(ctx, taskId, async (tx, task, actor, app) => {
-      if (!isOwner(actor, task) && !(await actorManagesApp(ctx, app, actor))) {
+    return mutateTask(ctx, taskId, async (tx, task, actor, app, txCtx) => {
+      if (!isOwner(actor, task) && !(await actorManagesApp(txCtx, app, actor))) {
         throw taskError('TASK_NOT_OWNER', "Only the task's owner, or whoever manages the App, assigns it.", { taskId });
       }
       refuseEnded(task);
       if (assigneeOf(task)) {
         throw taskError('TASK_INVALID_TRANSITION', 'This task already has an assignee; reassign it instead.', { taskId });
       }
-      party ??= await resolveParty(ctx, app, assignee, 'TASK_ASSIGNEE_INVALID');
+      party ??= await resolveParty(txCtx, app, assignee, 'TASK_ASSIGNEE_INVALID');
       const close = closeSessionWhenDone ?? task.closeSessionWhenDone;
       await tx.agentTask.update({
         where: { id: task.id },
@@ -582,8 +694,8 @@ export const agentTaskMutations = {
     ctx: Context,
   ) => {
     let party: TaskParty | null = null;
-    return mutateTask(ctx, taskId, async (tx, task, actor, app) => {
-      if (!isOwner(actor, task) && !(await actorManagesApp(ctx, app, actor))) {
+    return mutateTask(ctx, taskId, async (tx, task, actor, app, txCtx) => {
+      if (!isOwner(actor, task) && !(await actorManagesApp(txCtx, app, actor))) {
         throw taskError('TASK_NOT_OWNER', "Only the task's owner, or whoever manages the App, reassigns it.", { taskId });
       }
       refuseEnded(task);
@@ -591,7 +703,7 @@ export const agentTaskMutations = {
       if (!from) {
         throw taskError('TASK_INVALID_TRANSITION', 'This task has no assignee yet; assign it instead.', { taskId });
       }
-      party ??= await resolveParty(ctx, app, assignee, 'TASK_ASSIGNEE_INVALID');
+      party ??= await resolveParty(txCtx, app, assignee, 'TASK_ASSIGNEE_INVALID');
       if (sameParty(from, party)) {
         throw taskError('TASK_INVALID_TRANSITION', 'The task is already assigned there.', { taskId });
       }
@@ -612,7 +724,7 @@ export const agentTaskMutations = {
    * 050:02's inferred start is an open question (#1705 interim).
    */
   startAgentTask: async (_: unknown, { taskId }: { taskId: string }, ctx: Context) =>
-    mutateTask(ctx, taskId, async (tx, task, actor, app) => {
+    mutateTask(ctx, taskId, async (tx, task, actor, app, txCtx) => {
       if (!isAssignee(actor, task)) {
         throw taskError('TASK_NOT_ASSIGNEE', "Only the task's assignee starts it.", { taskId });
       }
@@ -629,7 +741,7 @@ export const agentTaskMutations = {
 
   /** Record progress on a started task: the assignee only (cor:agt:050:08). Carries no text (050:11). */
   recordAgentTaskProgress: async (_: unknown, { taskId }: { taskId: string }, ctx: Context) =>
-    mutateTask(ctx, taskId, async (tx, task, actor, app) => {
+    mutateTask(ctx, taskId, async (tx, task, actor, app, txCtx) => {
       if (!isAssignee(actor, task)) {
         throw taskError('TASK_NOT_ASSIGNEE', "Only the task's assignee records progress on it.", { taskId });
       }
@@ -657,7 +769,7 @@ export const agentTaskMutations = {
     }
     const summary = optionalText(result?.summary, TASK_SUMMARY_MAX, 'summary');
     const evidence = optionalText(result?.evidence, TASK_EVIDENCE_MAX, 'evidence');
-    return mutateTask(ctx, taskId, async (tx, task, actor, app) => {
+    return mutateTask(ctx, taskId, async (tx, task, actor, app, txCtx) => {
       if (!isAssignee(actor, task)) {
         throw taskError('TASK_NOT_ASSIGNEE', "Only the task's assignee finishes it and sets its result.", { taskId });
       }
@@ -681,8 +793,8 @@ export const agentTaskMutations = {
 
   /** Cancel a pending or started task: its owner, or whoever manages the App (cor:agt:050:09, Proposed). */
   cancelAgentTask: async (_: unknown, { taskId }: { taskId: string }, ctx: Context) =>
-    mutateTask(ctx, taskId, async (tx, task, actor, app) => {
-      if (!isOwner(actor, task) && !(await actorManagesApp(ctx, app, actor))) {
+    mutateTask(ctx, taskId, async (tx, task, actor, app, txCtx) => {
+      if (!isOwner(actor, task) && !(await actorManagesApp(txCtx, app, actor))) {
         throw taskError('TASK_NOT_OWNER', "Only the task's owner, or whoever manages the App, cancels it.", { taskId });
       }
       refuseEnded(task);
@@ -782,17 +894,42 @@ export const agentTaskQueries = {
       (depth.get(a.id)! - depth.get(b.id)!) || a.createdAt.getTime() - b.createdAt.getTime() || a.id.localeCompare(b.id));
   },
 
-  /** An App's team event stream, oldest first from `since` (cor:agt:050:11, :21). */
+  /**
+   * An App's team event stream (cor:agt:050:11, :21), in (createdAt, id)
+   * order. Continue a page with `after`: the id of the last event read. The
+   * cursor is the PAIR, so rows sharing a timestamp — the task.created and
+   * task.assigned one transaction writes, or a capped page cutting a larger
+   * equal-time group — are never skipped (#1713 review, Diego P2-B). `since`
+   * stays a coarse time filter, not a continuation.
+   */
   agentTeamEvents: async (
     _: unknown,
-    args: { appRef: string; since?: unknown; types?: string[] | null; alarmsOnly?: boolean | null; taskId?: string | null; limit?: number | null },
+    args: { appRef: string; since?: unknown; after?: string | null; types?: string[] | null; alarmsOnly?: boolean | null; taskId?: string | null; limit?: number | null },
     ctx: Context,
   ) => {
     const { app } = await resolveParticipatedApp(ctx, args.appRef);
     const since = args.since == null ? null : parseStartBy(args.since);
+    let afterWhere: Prisma.AgentTeamEventWhereInput = {};
+    if (args.after) {
+      // Scoped to this App: another App's event id is just an unknown cursor.
+      const cursor = isId(args.after)
+        ? await ctx.db.agentTeamEvent.findFirst({
+            where: { id: args.after, appId: app.id },
+            select: { id: true, createdAt: true },
+          })
+        : null;
+      if (!cursor) throw badInput('after is not an event of this App. Pass the id of the last event you read.');
+      afterWhere = {
+        OR: [
+          { createdAt: { gt: cursor.createdAt } },
+          { createdAt: cursor.createdAt, id: { gt: cursor.id } },
+        ],
+      };
+    }
     return ctx.db.agentTeamEvent.findMany({
       where: {
         appId: app.id,
+        ...afterWhere,
         ...(since ? { createdAt: { gt: since } } : {}),
         ...(args.types?.length ? { type: { in: args.types } } : {}),
         ...(args.alarmsOnly ? { severity: 'alarm' } : {}),

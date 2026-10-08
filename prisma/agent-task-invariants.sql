@@ -48,6 +48,15 @@ ALTER TABLE agent_team_events ADD CONSTRAINT chk_agent_team_events_shape CHECK (
 -- An INSERT may not arrive already acknowledged, and a DELETE is refused unless
 -- the App row is already gone, which is the only way one happens: the
 -- ON DELETE CASCADE of an App hard delete (URN reclaim, account deletion).
+--
+-- Limits, recorded on purpose (#1713 review, Rook P3-2):
+--   - TRUNCATE fires no row trigger. It is the TEST-ONLY cleanup path
+--     (src/test/helpers.ts cleanDb); no application code truncates this table.
+--   - The table owner can disable the trigger; this guards the application,
+--     not a DB superuser.
+--   - It cannot check WHO acknowledges or WHEN. The acknowledging mutation
+--     (T2, #1706) must check chain membership against the LOCKED alarm row and
+--     stamp acknowledged_at with the server's now(), never a client value.
 CREATE OR REPLACE FUNCTION hadron_append_only_agent_team_event() RETURNS trigger
 LANGUAGE plpgsql AS $$
 BEGIN

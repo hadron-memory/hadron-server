@@ -135,17 +135,17 @@ describe('agent-task tools: reads', () => {
     const id = idOf(text(await s.callTool('hadron_task_create', { appRef: app.id, title: 'Visible', session: plain.id })));
     expect(text(await s.callTool('hadron_task_list', { appRef: app.id }))).toMatch(/Visible/);
     const out = mcp(authOf(outsider.id));
-    expect(code(text(await out.callTool('hadron_task_list', { appRef: app.id })))).toBe('FORBIDDEN');
+    expect(code(text(await out.callTool('hadron_task_list', { appRef: app.id })))).toBe('APP_NOT_FOUND');
     expect(code(text(await out.callTool('hadron_task_get', { taskId: id })))).toBe('TASK_NOT_FOUND');
   });
 
-  it('a worker on an App key reads through its session; the bare App key does not', async () => {
+  it('INTERIM (050:21 unruled): an App key reads nothing, bare or through a worker session of its App', async () => {
     const plain = await session({ userId: member.id });
     const id = idOf(text(await mcp(authOf(member.id)).callTool('hadron_task_create', { appRef: app.id, title: 'x', session: plain.id })));
     const keyAuth = { appId: app.id } as AuthContext;
     const hostSession = await session({ appId: app.id, workerId: anne.id });
     const s = mcp(keyAuth);
     expect(code(text(await s.callTool('hadron_task_get', { taskId: id })))).toBe('TASK_NOT_FOUND');
-    expect(text(await s.callTool('hadron_task_get', { taskId: id, session: hostSession.id }))).toMatch(/\(id: /);
+    expect(code(text(await s.callTool('hadron_task_get', { taskId: id, session: hostSession.id })))).toBe('TASK_NOT_FOUND');
   });
 });

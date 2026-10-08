@@ -1,14 +1,19 @@
 /**
- * "Whoever manages the App" — ONE definition, shared by App member management
- * (`ensureAppMember` / `removeAppMember`) and agent tasks (#1705, cor:agt:050:09).
+ * "Whoever manages the App" for agent tasks (#1705, cor:agt:050:09), in the
+ * STRICT cor:acl:010:01 reading: the owner of a user-owned App, or a live
+ * ADMIN / OWNER of an org-owned App's (live) org. Holger, team chat #7495, as
+ * cor:agt:050:09 r2 cites it; Ada confirmed this reading on the #1713 review
+ * round (Holger may still override).
  *
- * Holger's ruling, recorded on epic hadron-server#1704 (team chat #7489 and in
- * conversation with Anne, 2026-10-08): "owner + admins", implemented by this
- * existing helper so member management and tasks cannot drift. It is broader
- * than cor:acl:010:01's wording (it also counts platform admins on org-owned
- * Apps and `owner`-role AppMembers); aligning the spec text is Vera's.
- *
- * Moved here from resolvers.mutation.app.ts unchanged; T2/T3/T6 reuse it.
+ * Deliberately NOT `callerManagesAppMembers` (resolvers.mutation.app.ts),
+ * whose two extra arms are wrong for tasks (Rook, #1713 §10 review, P1-1):
+ *   - an `owner`-role AppMember: self-grantable wherever an App's Agent lists
+ *     `owner` first in `memberRoles`, because `joinApp` is open self-service
+ *     and hands the joiner `memberRoles[0]` — so any stranger who knows the
+ *     App's id could manage every task in it;
+ *   - platform ADMIN/OWNER on every org App: platform staff managing a
+ *     customer team's work, cross-tenant.
+ * Nothing a caller can grant themselves reaches this predicate.
  */
 
 import type { PrismaClient } from '../../generated/prisma/index.js';
@@ -16,45 +21,33 @@ import { LIVE_ORG_MEMBERSHIP } from './liveOrgMembership.js';
 
 /** The caller fields this predicate reads — a structural slice of the GraphQL Context. */
 export type AppManagerCaller = {
-  db: Pick<PrismaClient, 'orgMember' | 'appMember'>;
+  db: Pick<PrismaClient, 'orgMember'>;
   userId?: string;
-  roles?: readonly string[];
+  impersonation?: unknown;
 };
 
 /**
- * Can the caller manage this App's members by ROLE alone — independent of any
- * target user? Platform ADMIN/OWNER for an ORG-owned App, the user-owner of a
- * user-owned App, an org ADMIN/OWNER of the App's org, or an owner-role
- * AppMember. spec 047 (blocker 3): the platform-admin bypass applies ONLY to an
- * org-owned App (a user-owned App is strictly owner-only). Shared by
- * ensureAppMember + removeAppMember so the role gate is evaluated BEFORE the
- * target user is resolved — a non-authorized caller can't turn user-ref
- * resolution into an existence oracle (#816 review).
+ * Does the caller manage this App, strictly (cor:acl:010:01)? Identity-scoped,
+ * so never under impersonation; a principal with no user (an App key) never
+ * does. Pass a transaction client in `ctx.db` to evaluate under the caller's
+ * transaction (#1713 review, Diego P2-A).
  */
-export async function callerManagesAppMembers(
+export async function managesAppStrict(
   ctx: AppManagerCaller,
-  app: { ownerUserId: string | null; organizationId: string | null },
-  resolvedAppId: string,
+  app: { organizationId: string | null; ownerUserId: string | null },
 ): Promise<boolean> {
-  const isPlatformAdmin = ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER');
-  if (isPlatformAdmin && app.ownerUserId === null) return true;
-  const isAppOwnerUser = app.ownerUserId !== null && !!ctx.userId && ctx.userId === app.ownerUserId;
-  if (isAppOwnerUser) return true;
-  if (app.organizationId) {
-    const orgMember = await ctx.db.orgMember.findFirst({
-      where: {
-        organizationId: app.organizationId,
-        userId: ctx.userId ?? '',
-        ...LIVE_ORG_MEMBERSHIP,
-        role: { in: ['ADMIN', 'OWNER'] },
-      },
-    });
-    if (orgMember) return true;
-  }
-  const ownerMember = ctx.userId
-    ? await ctx.db.appMember.findUnique({
-        where: { appId_userId: { appId: resolvedAppId, userId: ctx.userId } },
-      })
-    : null;
-  return ownerMember?.role === 'owner';
+  if (!ctx.userId || ctx.impersonation) return false;
+  // Branch on the ownership CLASS first (findings:org-xor-owner-null-comparison-bypass).
+  if (app.ownerUserId !== null) return ctx.userId === app.ownerUserId;
+  if (app.organizationId === null) return false;
+  const admin = await ctx.db.orgMember.findFirst({
+    where: {
+      organizationId: app.organizationId,
+      userId: ctx.userId,
+      ...LIVE_ORG_MEMBERSHIP,
+      role: { in: ['ADMIN', 'OWNER'] },
+    },
+    select: { userId: true },
+  });
+  return admin !== null;
 }

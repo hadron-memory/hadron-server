@@ -6255,6 +6255,8 @@ export const typeDefs = `#graphql
     owner / assignee name a party of the App (a ref naming nobody matches
     nothing). queued: pending with no assignee. limit defaults to 50 (cap 200).
     Readers: the App's participants (cor:agt:050:21); a pure App key is refused.
+    An App you do not participate in answers APP_NOT_FOUND, exactly like an
+    absent one.
     """
     agentTasks(
       appRef: ID!
@@ -6276,12 +6278,17 @@ export const typeDefs = `#graphql
     agentTaskTree(root: ID!): [AgentTask!]
 
     """
-    #1705 — a team App's event stream (cor:agt:050:11), oldest first, strictly
-    after since when given. limit defaults to 50 (cap 200).
+    #1705 — a team App's event stream (cor:agt:050:11), in (createdAt, id)
+    order. To read the next page pass after: the id of the last event you
+    read; the cursor is the (createdAt, id) pair, so events sharing a
+    timestamp are never skipped. since is a coarse time filter (strictly
+    after), not a continuation. limit defaults to 50 (cap 200).
     """
     agentTeamEvents(
       appRef: ID!
       since: DateTime
+      "The id of the last event read: the page continues strictly after it. An id that is not an event of this App is refused BAD_USER_INPUT."
+      after: ID
       types: [String!]
       alarmsOnly: Boolean
       taskId: ID
@@ -7903,7 +7910,11 @@ export const typeDefs = `#graphql
     another App), TASK_NOT_ASSIGNEE, TASK_ENDED, TASK_CHILD_OWNER_MISMATCH,
     TASK_NOT_OWNER (another owner named by someone who does not manage the
     App), TASK_OWNER_INVALID, TASK_ASSIGNEE_INVALID, SESSION_NOT_BOUND,
-    APP_UNINSTALLED, FORBIDDEN, BAD_USER_INPUT.
+    APP_NOT_FOUND (an App that does not exist or that you do not participate
+    in, alike), APP_UNINSTALLED, FORBIDDEN (impersonation), BAD_USER_INPUT.
+    "Whoever manages the App" is strict (cor:acl:010:01): a user-owned App's
+    owner, or the org's ADMINs and OWNERs. Every write re-checks the caller's
+    participation and the App's state inside its transaction.
     """
     createAgentTask(input: CreateAgentTaskInput!): AgentTask!
 
