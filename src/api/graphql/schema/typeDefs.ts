@@ -8429,6 +8429,18 @@ export const typeDefs = `#graphql
     one that appears mid-merge refuses the batch it hits, and batches already
     committed stay committed (re-running completes the merge). Hard-delete the
     tombstone, or recreate a node there so it folds, then re-run.
+
+    The merge commits in batches, and is resumable. A refusal raised after
+    some batches committed (#1686) says so: it carries
+    extensions.partialMerge { applied, relocated, folded, edgesMoved,
+    edgesDropped, remainingSourceNodes, sourceIntact, remedy } and keeps its
+    own code, or is MERGE_PARTIALLY_APPLIED (with causeCode) when the cause
+    was untyped. The source memory is never deleted by a refused merge;
+    resolve the blocker and re-run the same merge to finish it. A failure
+    after the merge completed (re-indexing or reading back the target)
+    carries partialMerge too, with remainingSourceNodes 0 and sourceIntact
+    false when deleteSourceMem had removed the source. A refusal with no
+    partialMerge applied nothing.
     """
     mergeMemories(input: MergeMemoriesInput!): Memory!
 
