@@ -48,7 +48,7 @@ async function fixture(personalApp = false, userTenant = false, encryptedPrivate
 
 async function assertPreserved(f: Awaited<ReturnType<typeof fixture>>) {
   for (const { memory, node, revision, asset } of f.memories) {
-    expect(await db.memory.findUniqueOrThrow({ where: { id: memory.id } })).toEqual({ ...memory, appId: null, updatedAt: expect.any(Date) });
+    expect(await db.memory.findUniqueOrThrow({ where: { id: memory.id } })).toEqual({ ...memory, appId: null, userMemoryOfAgentId: null, updatedAt: expect.any(Date) });
     expect(await db.node.findUniqueOrThrow({ where: { id: node.id } })).toEqual(node);
     expect(await db.nodeRevision.findUniqueOrThrow({ where: { id: revision.id } })).toEqual(revision);
     expect(await db.asset.findUniqueOrThrow({ where: { id: asset.id } })).toEqual(asset);
