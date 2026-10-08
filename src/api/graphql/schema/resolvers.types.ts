@@ -2194,10 +2194,17 @@ export const typeResolvers = {
       const apps = await ctx.db.app.findMany({ where, orderBy: { createdAt: 'asc' } });
       return filterReadableAppRows(ctx, apps);
     },
-    // Adoption count — the agent's owning-org view only (a bare number, but
-    // still "who uses this"); non-members get 0.
-    appCount: async (a: { id: string; organizationId: string | null }, _: unknown, ctx: Context) => {
-      if (a.organizationId === null || !(await isOrgMemberOrAdmin(ctx, a.organizationId))) return 0;
+    // Adoption count — the agent's owning-TENANT view only (a bare number, but
+    // still "who uses this"); everyone else gets 0. The owning tenant of an
+    // org agent is its org's members; of a user-owned agent (spec 047), its
+    // owner (#1693: they saw 0 for their own agent installed in their own
+    // Apps). Not under impersonation, and not a platform admin for an org-less
+    // agent (#1692: nothing org-derived to show).
+    appCount: async (a: { id: string; organizationId: string | null; ownerUserId?: string | null }, _: unknown, ctx: Context) => {
+      const owningTenant = a.organizationId === null
+        ? !ctx.impersonation && !!ctx.userId && a.ownerUserId === ctx.userId
+        : await isOrgMemberOrAdmin(ctx, a.organizationId);
+      if (!owningTenant) return 0;
       return ctx.db.app.count({
         where: { appAgents: { some: { agentId: a.id } }, deletedAt: null },
       });

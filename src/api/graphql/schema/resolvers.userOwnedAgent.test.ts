@@ -286,3 +286,32 @@ it('conceals a response-rendering Prisma fault without rolling back the committe
     expect(await db.memory.findUnique({ where: { id: committed.systemMemoryId! } })).toMatchObject({ ownerUserId: ownerId, class: 'system' });
   } finally { await faultApi.stop(); }
 });
+
+// #1693 — a user-owned agent's owning tenant is its owner: they see its real
+// adoption count, as an org agent's members do. Nobody else gains it.
+it('shows the owner the adoption count of their own org-less agent, and nobody else', async () => {
+  const agent = await resolvers.Mutation.createAgent({}, { name: 'Adopted helper' }, ctx({ userId: ownerId, roles: ['READER'] }));
+  const personalApp = (urn: string, deletedAt: Date | null = null) =>
+    db.app.create({ data: { id: generateId(), name: urn, urn: `owner-one:${urn}`, ownerUserId: ownerId, deletedAt } });
+  for (const app of [await personalApp('one'), await personalApp('two'), await personalApp('gone', new Date())]) {
+    await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
+  }
+
+  // Two live installs; the deleted App does not count.
+  await expect(resolvers.Agent.appCount(agent, {}, ctx({ userId: ownerId, roles: ['READER'] }))).resolves.toBe(2);
+  // Through real GraphQL field rendering too (the agent page's path).
+  const response = await personalAgentApi.executeOperation(
+    { query: 'query($ref: ID!) { agent(ref: $ref) { appCount } }', variables: { ref: agent.id } },
+    { contextValue: ctx({ userId: ownerId, roles: ['READER'] }) },
+  );
+  expect(response.body.kind === 'single' && response.body.singleResult).toMatchObject({ data: { agent: { appCount: 2 } } });
+
+  for (const principal of [
+    ctx({ userId: otherId, roles: ['READER'] }), // another user
+    ctx({ userId: otherId, roles: ['ADMIN'] }), // a platform admin: #1692's null-org rule stands
+    { ...ctx({ userId: ownerId, roles: ['READER'] }), impersonation: { orgId: generateId(), adminUserId: otherId } } as unknown as Context,
+    ctx({ roles: [] }), // no user
+  ]) {
+    await expect(resolvers.Agent.appCount(agent, {}, principal)).resolves.toBe(0);
+  }
+});
