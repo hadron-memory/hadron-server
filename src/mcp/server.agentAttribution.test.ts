@@ -282,12 +282,48 @@ describe('#1701: several workers bound on one MCP connection', () => {
     expect(await nodeAt('shared:bogus')).toBeNull();
   });
 
-  it('ending one of the bindings makes the connection unambiguous again', async () => {
-    const { call, dara, irisSession } = await sharedConnection();
+  it('ending one binding does NOT make a shared connection unambiguous (PR #1702 review, Codex P1)', async () => {
+    // Ending a Hadron session does not end the chat session that drove it:
+    // chat A may still be calling after it ends Iris, so with only Dara live
+    // an unnamed write could be A's. It must be refused, not given to Dara.
+    const { call, dara, irisSession, daraSession } = await sharedConnection();
     // end_session needs no `session`: its own `id` says who is ending.
     await call('hadron_end_session', { id: irisSession, handoff: 'chat A done' });
-    await call('hadron_create_node', { urn: `hrn:node:${appMemory.urn}:shared:after-end`, name: 'after-end' });
-    expect(await attributionAt('shared:after-end', appMemory.id)).toEqual({ createdByWorkerId: dara.id, createdByAgentId: agent.id });
+    const refused = await call('hadron_create_node', { urn: `hrn:node:${appMemory.urn}:shared:after-end`, name: 'after-end' }, undefined, { allowError: true });
+    expect(refused).toContain('[session_ambiguous]');
+    expect(await nodeAt('shared:after-end')).toBeNull();
+    await call('hadron_create_node', { urn: `hrn:node:${appMemory.urn}:shared:dara-named`, name: 'dara-named', session: daraSession });
+    expect(await attributionAt('shared:dara-named', appMemory.id)).toEqual({ createdByWorkerId: dara.id, createdByAgentId: agent.id });
+  });
+
+  it('a shared connection whose worker sessions have ALL ended writes as nobody, not refused', async () => {
+    const { call, irisSession, daraSession } = await sharedConnection();
+    await call('hadron_end_session', { id: irisSession });
+    await call('hadron_end_session', { id: daraSession });
+    await call('hadron_create_node', { urn: `hrn:node:${appMemory.urn}:shared:all-ended`, name: 'all-ended' });
+    expect(await attributionAt('shared:all-ended', appMemory.id)).toEqual({ createdByWorkerId: null, createdByAgentId: null });
+  });
+
+  it('a plain session that ends leaves the connection ambiguous, not credited to the worker (PR #1702 review, Codex P1)', async () => {
+    const call = await mcpConnection();
+    await call('hadron_start_session', { description: 'dac', workerRef: 'hrn:worker:attrhttp.example:team:iris', force: true });
+    const plain = /Session started: ([0-9a-f]{32})/.exec(await call('hadron_start_session', { description: 'plain' }))![1];
+    await call('hadron_end_session', { id: plain });
+    const refused = await call('hadron_create_node', { urn: `hrn:node:${appMemory.urn}:dac:plain-ended`, name: 'plain-ended' }, undefined, { allowError: true });
+    expect(refused).toContain('[session_ambiguous]');
+    expect(await db.node.findFirst({ where: { memoryId: appMemory.id, loc: 'dac:plain-ended' } })).toBeNull();
+  });
+
+  it('one chat session that ends Iris BEFORE binding Dara was never shared: unnamed writes go to Dara', async () => {
+    const app = await db.worker.findUniqueOrThrow({ where: { id: worker.id }, select: { appId: true } });
+    const dara = await db.worker.create({ data: { id: generateId(), appId: app.appId, agentId: agent.id, name: 'Dara', slug: 'dara' } });
+    const call = await mcpConnection();
+    const iris = /Session started: ([0-9a-f]{32})/.exec(await call('hadron_start_session', { description: 'stint 1', workerRef: 'hrn:worker:attrhttp.example:team:iris', force: true }))![1];
+    await call('hadron_end_session', { id: iris });
+    const daraReceipt = await call('hadron_start_session', { description: 'stint 2', workerRef: 'hrn:worker:attrhttp.example:team:dara' });
+    expect(daraReceipt).not.toContain('SHARED CONNECTION');
+    await call('hadron_create_node', { urn: `hrn:node:${appMemory.urn}:seq:dara`, name: 'dara' });
+    expect(await attributionAt('seq:dara', appMemory.id)).toEqual({ createdByWorkerId: dara.id, createdByAgentId: agent.id });
   });
 
   it('on a connection bound to ONE worker, a named session still overrides the binding', async () => {

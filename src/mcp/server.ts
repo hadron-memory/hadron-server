@@ -1925,10 +1925,13 @@ export function createMcpServerInstance(
   const sharedConnectionWarning = async (mcpSessionId: string, startedId: string): Promise<string> => {
     try {
       const live = await liveConnectionBindings(mcpSessionId, auth);
-      if (distinctActorCount(live) < 2) return '';
+      if (!connectionIsAmbiguous(mcpSessionId, live)) return '';
       const others = live.filter((b) => b.sessionId !== startedId).map((b) => b.sessionId);
+      const already = others.length
+        ? `was already bound to ${await describeBoundSessions(others)}`
+        : 'has carried other callers whose sessions have since ended';
       return (
-        `\n\n⚠ SHARED CONNECTION: this MCP connection was already bound to ${await describeBoundSessions(others)}. ` +
+        `\n\n⚠ SHARED CONNECTION: this MCP connection ${already}. ` +
         'Your host is carrying more than one chat session over it, so it can no longer tell which of them sends ' +
         `a request. Pass session: "${startedId}" on EVERY write (node, edge, comment, task and object tools, ` +
         'team chat, worklog). A write without it is refused SESSION_AMBIGUOUS rather than credited to the wrong ' +
@@ -2016,9 +2019,10 @@ export function createMcpServerInstance(
       content: [{
         type: 'text' as const,
         text:
-          `[session_ambiguous] ${toolName}: this MCP connection carries live worker sessions for ` +
-          `${await describeBoundSessions(ambiguous)}. Your host is sharing one connection between several ` +
-          'chat sessions, so the server cannot tell which of them sent this call, and will not guess. Nothing ' +
+          `[session_ambiguous] ${toolName}: this MCP connection carries live sessions for ` +
+          `${await describeBoundSessions(ambiguous)}, and has carried more than one caller (a chat session ` +
+          'whose own session has ended may still be calling). Your host is sharing one connection between ' +
+          'several chat sessions, so the server cannot tell which of them sent this call, and will not guess. Nothing ' +
           'was written. Pass session: "<your session id>" (hadron_whoami lists yours; it is the id ' +
           'hadron_start_session returned to YOU), or end the sessions that are no longer in use (#1701).',
       }],
@@ -10700,6 +10704,22 @@ const activeAppByMcpSession = new Map<
 const workerSessionsByMcpSession = new Map<string, string[]>();
 
 /**
+ * Connections KNOWN to be shared: ones on which two different actors were
+ * once live at the same moment (PR #1702 review, Codex P1). Sticky until the
+ * transport goes away.
+ *
+ * Ending a Hadron session does not end the chat session that drove it, so a
+ * shared connection's live-binding list shrinking proves nothing about who is
+ * still calling: chat A ends Iris, the list holds only Dara, and A's next
+ * unnamed write would be credited to Dara. On a connection in this set, a
+ * caller whose session has ended is one more possible caller, its actor
+ * nobody. An unnamed write is therefore still refused while any worker or
+ * agent binding is live. A connection that was never seen shared, such as one
+ * chat session ending Iris BEFORE binding Dara, keeps attributing normally.
+ */
+const sharedMcpConnections = new Set<string>();
+
+/**
  * Record a session bound on this connection (#1701: appended, never
  * replacing). A plain session is recorded too: its actor is nobody, and it
  * counts as one more candidate when the connection's bindings are compared.
@@ -10737,7 +10757,24 @@ async function liveConnectionBindings(
   }
   if (live.length) workerSessionsByMcpSession.set(mcpSessionId, live.map((b) => b.sessionId));
   else workerSessionsByMcpSession.delete(mcpSessionId);
+  if (distinctActorCount(live) > 1) sharedMcpConnections.add(mcpSessionId);
   return live;
+}
+
+/**
+ * Is the next unnamed write on this connection ambiguous? It is when its live
+ * bindings name more than one actor, or when the connection is known shared
+ * and any live binding names a worker or agent, since "a caller whose session
+ * ended" (nobody) is then a candidate too. Never ambiguous with no live
+ * binding: every candidate is nobody.
+ */
+function connectionIsAmbiguous(
+  mcpSessionId: string,
+  live: Array<{ actor: { workerId: string | null; agentId: string | null } }>,
+): boolean {
+  if (!live.length) return false;
+  if (distinctActorCount(live) > 1) return true;
+  return sharedMcpConnections.has(mcpSessionId) && live.some((b) => b.actor.workerId || b.actor.agentId);
 }
 
 /** The distinct Worker / Agent identities among a set of bindings. */
@@ -10761,7 +10798,7 @@ async function publishConnectionActor(mcpSessionId: string, presented: AuthConte
   if (headerPresented || presented.sessionId) return;
   const live = await liveConnectionBindings(mcpSessionId, presented);
   if (!live.length) return;
-  if (distinctActorCount(live) > 1) {
+  if (connectionIsAmbiguous(mcpSessionId, live)) {
     publishAmbiguousActor(live.map((b) => b.sessionId));
     return;
   }
@@ -10856,6 +10893,7 @@ function unregisterMcpTransport(
   transports.delete(sessionId);
   activeAppByMcpSession.delete(sessionId);
   workerSessionsByMcpSession.delete(sessionId);
+  sharedMcpConnections.delete(sessionId);
   sessionKeyCache.evict(`mcp:${sessionId}`);
   return true;
 }
