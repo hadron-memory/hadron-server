@@ -47,6 +47,7 @@ import { isTeamChatLoc } from './teamChatLoc.js';
 import { participantAppIds } from './auth/appParticipation.js';
 import { ancestorLocs } from './nodeSubtreeLock.js';
 import { teamSpaceAudienceFilter } from './auth/teamSpace.js';
+import { NOT_DECISION_FAMILY_WHERE } from './decisions/index.js';
 
 /** The fields of a GraphQL `Context` / MCP `AuthContext` this needs. */
 export interface ChatLocPrincipal {
@@ -150,6 +151,15 @@ export async function chatLocFilter(
   // value.
   base.channel = null;
   base.memory = { channels: { none: { loc: { in: [...ancestorLocs(chatId), chatId] } } } };
+  // #1641 (Rook's §10 P1 on #1690) — the same reasoning keyed on the node's
+  // ROLE: a decision or a decision log is not a chat. Every operation below
+  // writes the picked node outside writeNodeCore (no memory write gate, no
+  // governed-kind check), so reaching one let an App participant who may only
+  // read tamper a decision into TAMPERED, make a log unparseable by adding
+  // `messageCount` to its strict data, or let its author soft-delete it.
+  // Excluded here, like the Channel clauses, so the MCP twins and any chat
+  // operation added later inherit the refusal.
+  base.AND = [NOT_DECISION_FAMILY_WHERE];
 
   // Platform ADMIN/OWNER skip entitlement narrowing — EXCEPT into the
   // strict-owner classes, where `cor:acl:010:02` gives them no bypass at all
@@ -180,7 +190,7 @@ export async function chatLocFilter(
     ],
   };
   const isAdmin = !!principal.roles?.some((r) => r === 'ADMIN' || r === 'OWNER');
-  if (isAdmin) return { ...base, AND: [strictOwnerOk] };
+  if (isAdmin) return { ...base, AND: [NOT_DECISION_FAMILY_WHERE, strictOwnerOk] };
 
   const userId = principal.userId;
   // No user identity (e.g. a bare App-key caller) — entitlement can only come

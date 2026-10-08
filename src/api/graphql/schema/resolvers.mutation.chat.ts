@@ -54,6 +54,7 @@ import {
   loadPublishedSnapshot,
 } from './resolvers.helpers.js';
 import { assertNoMintedSpecRemoval } from '../../../lib/mintedSpecPermanence.js';
+import { refuseDecisionFamily } from '../../../lib/decisions/index.js';
 import { LIVE_ORG_MEMBERSHIP } from '../../../lib/auth/liveOrgMembership.js';
 
 /**
@@ -1647,6 +1648,10 @@ export const chatMutations = {
           select: { id: true },
         })).map((n) => n.id);
         await assertNoMintedSpecRemoval(tx, chatNode.memoryId, scope, 'delete the chat holding');
+        // #1641 — a chat root is never a decision or a log (chatLocFilter), but
+        // the subtree it takes may hold a log beneath it; withdrawn, never
+        // deleted.
+        await refuseDecisionFamily(tx, scope, 'deleteChat');
         await tx.node.updateMany({
           where: { id: { in: scope }, deletedAt: null },
           data: { deletedAt: new Date(), deletedBy: ctx.userId },

@@ -153,10 +153,14 @@ function isDecider(ctx: Context, d: Pick<DecisionData, 'deciders'>): boolean {
   return !ctx.impersonation && !!ctx.userId && d.deciders.includes(ctx.userId);
 }
 
-/** Whether the caller asked the decision: the same worker, the same user, or the same bare App key. */
+/**
+ * Whether the caller asked the decision: the same worker, the same user, or the same bare App key.
+ * The worker arm needs a person behind the request (Rook's P3-3 on #1690, the #1713 interim): a
+ * pure App key may bind any session of its App, so its worker id alone proves nothing.
+ */
 function isAsker(ctx: Context, d: Pick<DecisionData, 'askedBy'>): boolean {
   const actor = actorOf(ctx);
-  if (d.askedBy.workerId && d.askedBy.workerId === actor.workerId) return true;
+  if (ctx.userId && d.askedBy.workerId && d.askedBy.workerId === actor.workerId) return true;
   if (d.askedBy.userId && d.askedBy.userId === ctx.userId) return true;
   return !d.askedBy.userId && !ctx.userId && !!d.askedBy.appId && d.askedBy.appId === ctx.appId;
 }
@@ -275,8 +279,11 @@ async function lockLog(tx: Tx, logId: string, memoryId: string, ref: string, exp
   await tx.$queryRaw`SELECT id FROM nodes WHERE id = ${logId} FOR NO KEY UPDATE`;
   const seen = await tx.node.findUnique({ where: { id: logId }, select: LOG_ROW_SELECT });
   if (!seen || seen.deletedAt || seen.memoryId !== memoryId || seen.role !== DECISION_LOG_ROLE) throw logMissing(ref);
-  if (expectedRevision === undefined) return { row: seen, data: parseLogData(seen) };
-  requireRevision(seen, expectedRevision);
+  if (expectedRevision !== undefined) requireRevision(seen, expectedRevision);
+  // Every path, not only the OCC one (Rook's P3-2 on #1690): the counter write
+  // that follows asks for a fingerprint refresh, which would otherwise absorb
+  // any earlier unrevisioned change to the log, defaultDeciders included,
+  // with no revision recording it (Q6).
   await ensureCurrentNodeRevisionInTransaction(tx, logId, { expectedMemoryId: memoryId });
   const row = await tx.node.findUniqueOrThrow({ where: { id: logId }, select: LOG_ROW_SELECT });
   return { row, data: parseLogData(row) };
@@ -476,7 +483,18 @@ export const decisionMutations = {
       // Under the memory's FOR SHARE anchor, which a mirror attach and an
       // encryption (each FOR UPDATE on this row) wait on, so neither can land
       // between this read and the commit (§3.2, §5.4).
-      const memory = await tx.memory.findUniqueOrThrow({ where: { id: memoryId }, select: { isEncrypted: true, source: true } });
+      const memory = await tx.memory.findUniqueOrThrow({
+        where: { id: memoryId },
+        select: { isEncrypted: true, source: true, class: true, userId: true, userMemoryOfAgentId: true },
+      });
+      // Rook's §10 P2 on #1690: an agent's definition memory is not a
+      // decision home (§3.4 uses personal and App memories), and
+      // restoreRevision rewrites a system memory wholesale: it would
+      // resurrect a withdrawn decision as OPEN and erase later ones.
+      if (memory.class === 'system') throw decisionError('DECISION_LOG_SYSTEM_MEMORY', 'A decision log cannot live in a system memory (an agent\'s definition, which a snapshot restore rewrites).', { memoryId });
+      // Rook's P3-1: an anonymous per-user memory is encrypted wholesale on
+      // its promotion (linkMemoryToUser), a path outside the §5.4 pairing.
+      if (memory.userMemoryOfAgentId && !memory.userId) throw decisionError('DECISION_LOG_ANONYMOUS_MEMORY', 'A decision log cannot live in an anonymous memory (its promotion may encrypt every node).', { memoryId });
       if (memory.isEncrypted) throw decisionError('DECISION_LOG_ENCRYPTED', 'A decision log cannot live in an encrypted memory (a decision is verified by re-rendering its plaintext).', { memoryId });
       if (memory.source) throw decisionError('DECISION_LOG_MIRRORED', 'A decision log cannot live in a git-mirrored memory (a mirror could forge decisions).', { memoryId });
       await lockEdgeEndpointMemories(tx, [memoryId]);

@@ -8696,7 +8696,8 @@ export const typeDefs = `#graphql
 
     """
     #1641 — create a decision log at loc in a memory: needs management rights on the memory. Refused
-    in an encrypted memory (DECISION_LOG_ENCRYPTED), a git-mirrored one (DECISION_LOG_MIRRORED), at an
+    in an encrypted memory (DECISION_LOG_ENCRYPTED), a git-mirrored one (DECISION_LOG_MIRRORED), a
+    system memory (DECISION_LOG_SYSTEM_MEMORY), an anonymous one (DECISION_LOG_ANONYMOUS_MEMORY), at an
     occupied loc (DECISION_LOG_EXISTS), or inside a decision's subtree. Deciders are user ids, each able
     to read the memory (DECISION_DECIDER_NOT_ELIGIBLE).
     """

@@ -433,3 +433,93 @@ describe('a personal assistant outside any team (§3.4, r4 use case)', () => {
     expect(await Q.decision(null, { ref: d.row.id }, as(admin.id))).toBeNull();
   });
 });
+
+describe('Rook §10 on #1690 — the chat-by-loc operations never reach the decision family', () => {
+  /** Everything a refused write must leave as it was. */
+  const snapshot = async (decisionId: string, logId: string) => {
+    const [d, l, view] = await Promise.all([rowOf(decisionId), rowOf(logId), Q.decision(null, { ref: decisionId }, as(holger.id))]);
+    return {
+      decision: { revSeq: d.revSeq, data: d.data, content: d.content, deletedAt: d.deletedAt },
+      log: { revSeq: l.revSeq, data: l.data, content: l.content, deletedAt: l.deletedAt },
+      state: D.state(view, {}, as()),
+      children: await db.node.count({ where: { memoryId: memory.id, loc: { startsWith: 'team:' } } }),
+    };
+  };
+  const setUp = async () => {
+    // An ordinary ancestor the writer authored, a log under it, a decision the writer asked.
+    await db.node.create({ data: { id: generateId(), memoryId: memory.id, loc: 'team', name: 'Team', createdBy: writer.id } });
+    const log = await createLog({ loc: 'team:decisions' });
+    const d = await ask(log.row.id);
+    return { log, d, before: await snapshot(d.row.id, log.row.id) };
+  };
+
+  it('send, retitle and delete are refused on a decision (its asker) and a log (its creator, the memory owner, a platform admin)', async () => {
+    const { log, d, before } = await setUp();
+    expect(before.state).toBe('OPEN');
+    const attempts: Array<[string, string]> = [
+      ['team:decisions:DA', writer.id],
+      ['team:decisions', admin.id],
+      ['team:decisions', platformAdmin.id],
+    ];
+    for (const [chatId, userId] of attempts) {
+      const c = as(userId, { roles: userId === platformAdmin.id ? ['ADMIN'] : ['READER'] });
+      expect({ chatId, userId, op: 'send', r: await codeOf(M.sendChatMessage(null, { chatId, userMessage: 'hi' }, c)) })
+        .toEqual({ chatId, userId, op: 'send', r: `Chat "${chatId}" not found` });
+      expect({ chatId, userId, op: 'title', r: await codeOf(M.updateChatTitle(null, { chatId, title: 'x' }, c)) })
+        .toMatchObject({ chatId, userId, op: 'title', r: expect.stringMatching(/not found/) });
+      expect({ chatId, userId, op: 'delete', r: await codeOf(M.deleteChat(null, { chatId }, c)) })
+        .toEqual({ chatId, userId, op: 'delete', r: `Chat "${chatId}" not found` });
+    }
+    expect(await snapshot(d.row.id, log.row.id)).toEqual(before);
+  });
+
+  it('deleting an ordinary ancestor that holds a log is refused; retitling it touches only the ancestor', async () => {
+    const { log, d, before } = await setUp();
+    const c = as(writer.id, { roles: ['READER'] });
+    expect(await codeOf(M.deleteChat(null, { chatId: 'team' }, c))).toBe('DECISION_CONTAINED');
+    expect(await M.updateChatTitle(null, { chatId: 'team', title: 'Renamed' }, c)).toBe(true);
+    expect(await snapshot(d.row.id, log.row.id)).toEqual(before);
+    expect((await db.node.findFirstOrThrow({ where: { memoryId: memory.id, loc: 'team' } })).deletedAt).toBeNull();
+  });
+});
+
+describe('Rook §10 on #1690 — where a decision log may not live', () => {
+  it('refuses a system memory (P2: a snapshot restore rewrites it) and an anonymous memory (P3-1: its promotion encrypts it)', async () => {
+    await db.memory.update({ where: { id: memory.id }, data: { class: 'system' as never, visibility: null } });
+    expect(await codeOf(createLog())).toBe('DECISION_LOG_SYSTEM_MEMORY');
+    const app = await db.app.create({ data: { id: generateId(), organizationId: orgId, name: 'Anon', urn: `${orgId.toLowerCase()}:anon` } });
+    const agent = await M.createAgent(null, { orgId, name: 'Anon Agent' }, as(admin.id, { roles: ['READER'] }));
+    await db.memory.update({ where: { id: memory.id }, data: { class: 'app' as never, appId: app.id, userMemoryOfAgentId: agent.id, userId: null } });
+    expect(await codeOf(createLog())).toBe('DECISION_LOG_ANONYMOUS_MEMORY');
+    expect(await db.node.count({ where: { memoryId: memory.id, role: 'decision.log' } })).toBe(0);
+  });
+});
+
+describe('Rook §10 on #1690 — the asker worker arm needs a person (P3-3)', () => {
+  it('an App key bound to the asking worker\'s session is not the asker', async () => {
+    const app = await db.app.create({ data: { id: generateId(), organizationId: orgId, name: 'Team', urn: `${orgId.toLowerCase()}:team` } });
+    const log = await createLog();
+    const d = await runAsActor({ workerId: 'worker-ada', agentId: null }, () => ask(log.row.id));
+    // An admin-role App key, so the memory write gate passes and the asker check is what decides.
+    const key = { db, appId: app.id, roles: ['ADMIN'] } as Context;
+    const r = await runAsActor({ workerId: 'worker-ada', agentId: null }, () =>
+      codeOf(M.withdrawDecision(null, { ref: d.row.id, reason: 'mine?', expectedRevision: 1 }, key)));
+    expect(r).toBe('DECISION_NOT_ASKER');
+    expect(D.state(await Q.decision(null, { ref: d.row.id }, as()), {}, as())).toBe('OPEN');
+  });
+});
+
+describe('Rook §10 on #1690 — the counter write never absorbs drift on the log (P3-2)', () => {
+  it('an unrevisioned change to the log is recorded as its own revision before askDecision bumps the counter', async () => {
+    const log = await createLog();
+    const row = await rowOf(log.row.id);
+    // Drift: a direct write with no revision and no fingerprint refresh.
+    await db.node.update({ where: { id: log.row.id }, data: { data: { ...(row.data as object), defaultDeciders: [holger.id, admin.id] } as never } });
+    expect(await db.nodeRevision.count({ where: { nodeId: log.row.id } })).toBe(0);
+    await ask(log.row.id);
+    const revs = await db.nodeRevision.findMany({ where: { nodeId: log.row.id } });
+    expect(revs).toHaveLength(1);
+    // The drift is on the record as a revision of its own, not folded silently into the counter write.
+    expect(revs[0].data).toMatchObject({ defaultDeciders: [holger.id, admin.id], lastCode: 0 });
+  });
+});
