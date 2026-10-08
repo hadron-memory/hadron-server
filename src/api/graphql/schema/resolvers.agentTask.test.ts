@@ -820,13 +820,24 @@ describe('#1713 review: writes re-gate inside their transaction (Diego P2-A)', (
 describe('#1713 review: event continuation keeps ties (Diego P2-B)', () => {
   it('pages one event at a time through a group sharing one timestamp, skipping and repeating nothing', async () => {
     const t = await create(ctx(member.id), { assignee: { worker: 'Anne' } }); // created + assigned
-    const at = new Date('2026-10-08T12:00:00.000Z');
-    // Three more rows at ONE instant: the shape a single transaction writes.
+    // 1. The page boundary inside the same-transaction created + assigned pair,
+    //    tested BEFORE anything else is in the stream. No assumption about which
+    //    of the two sorts first: an equal createdAt falls back to id order.
+    const first = await Q.agentTeamEvents({}, { appRef: app.id, limit: 1 }, ctx(member.id));
+    const next = await Q.agentTeamEvents({}, { appRef: app.id, limit: 1, after: first[0].id }, ctx(member.id));
+    expect(next).toHaveLength(1);
+    expect([first[0].type, next[0].type].sort()).toEqual(['task.assigned', 'task.created']);
+    expect(await Q.agentTeamEvents({}, { appRef: app.id, limit: 1, after: next[0].id }, ctx(member.id))).toEqual([]);
+    // 2. Three more rows at ONE instant, derived from the pair (strictly later),
+    //    so the order holds on any date the suite runs.
+    const pair = await db.agentTeamEvent.findMany({ where: { taskId: t.id }, select: { createdAt: true } });
+    const at = new Date(Math.max(...pair.map((e) => e.createdAt.getTime())) + 1_000);
     for (const type of ['task.started', 'task.progress', 'task.progress']) {
       await db.agentTeamEvent.create({ data: { appId: app.id, taskId: t.id, type, createdAt: at } });
     }
     const all = await Q.agentTeamEvents({}, { appRef: app.id, limit: 200 }, ctx(member.id));
     expect(all).toHaveLength(5);
+    expect(all.slice(2).every((e: any) => e.createdAt.getTime() === at.getTime())).toBe(true);
     const seen: string[] = [];
     let after: string | undefined;
     for (;;) {
@@ -836,11 +847,6 @@ describe('#1713 review: event continuation keeps ties (Diego P2-B)', () => {
       after = page[0].id;
     }
     expect(seen).toEqual(all.map((e: any) => e.id));
-    // The page boundary inside the same-transaction created + assigned pair.
-    const first = await Q.agentTeamEvents({}, { appRef: app.id, limit: 1 }, ctx(member.id));
-    expect(first.map((e: any) => e.type)).toEqual(['task.created']);
-    const next = await Q.agentTeamEvents({}, { appRef: app.id, limit: 1, after: first[0].id }, ctx(member.id));
-    expect(next.map((e: any) => e.type)).toEqual(['task.assigned']);
   });
 
   it('a cursor that is not an event of this App is refused', async () => {
