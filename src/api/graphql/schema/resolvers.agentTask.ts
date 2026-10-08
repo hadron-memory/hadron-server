@@ -450,11 +450,6 @@ export const agentTaskMutations = {
         }
         if (namedAppId !== app.id) throw notFound(parentId);
       }
-      // Authorize before validating anything else, so a caller who may not
-      // create here learns nothing from which of its inputs would be refused.
-      if (!isAssignee(actor, readable.task)) {
-        throw taskError('TASK_NOT_ASSIGNEE', "Only the parent task's assignee creates its child tasks.", { taskId: parentId });
-      }
     } else {
       if (!input.appRef) throw badInput('Name the App for a root task (or a parentTaskId for a child task).');
       ({ app, actor } = await resolveParticipatedApp(ctx, input.appRef));
@@ -466,38 +461,48 @@ export const agentTaskMutations = {
     const source = optionalText(input.source, TASK_SOURCE_MAX, 'source');
     const tags = normalizeTags(input.tags);
     const startBy = parseStartBy(input.startBy);
-    const requirements = await normalizeRequirements(ctx, app, input.requirements);
-
-    let owner: TaskParty = actorParty(actor);
-    if (input.owner) {
-      // Only an App manager may name another owner, so for anyone else every
-      // outcome but "that is you" is the same refusal: a non-manager learns
-      // nothing about which refs are valid parties (no participation oracle).
-      const manages = !parentId && (await actorManagesApp(ctx, app, actor));
-      let named: TaskParty | null = null;
-      try {
-        named = await resolveParty(ctx, app, input.owner, 'TASK_OWNER_INVALID');
-      } catch (e) {
-        if (manages || !(e instanceof GraphQLError && e.extensions?.code === 'TASK_OWNER_INVALID')) throw e;
-      }
-      if (!named || !sameParty(named, owner)) {
-        if (parentId) {
-          throw taskError('TASK_CHILD_OWNER_MISMATCH', "A child task is owned by the parent's assignee who creates it; it cannot name another owner.");
-        }
-        if (!manages || !named) {
-          throw taskError('TASK_NOT_OWNER', 'Only whoever manages the App may create a task owned by someone else.');
-        }
-        owner = named;
-      }
-    }
-    const assignee = input.assignee ? await resolveParty(ctx, app, input.assignee, 'TASK_ASSIGNEE_INVALID') : null;
     const closeSessionWhenDone = input.closeSessionWhenDone ?? true;
     const now = new Date();
     const evActor = eventActor(ctx.userId);
 
+    /**
+     * The inputs that name OTHER entities (owner, assignee, excluded
+     * workers). Resolved only after the caller is authorized — for a child
+     * task, under the parent's row lock — so a caller who may not create here
+     * learns nothing from which of them would be refused.
+     */
+    const resolveParties = async () => {
+      const requirements = await normalizeRequirements(ctx, app, input.requirements);
+      let owner: TaskParty = actorParty(actor);
+      if (input.owner) {
+        // Only an App manager may name another owner, so for anyone else every
+        // outcome but "that is you" is the same refusal: a non-manager learns
+        // nothing about which refs are valid parties (no participation oracle).
+        const manages = !parentId && (await actorManagesApp(ctx, app, actor));
+        let named: TaskParty | null = null;
+        try {
+          named = await resolveParty(ctx, app, input.owner, 'TASK_OWNER_INVALID');
+        } catch (e) {
+          if (manages || !(e instanceof GraphQLError && e.extensions?.code === 'TASK_OWNER_INVALID')) throw e;
+        }
+        if (!named || !sameParty(named, owner)) {
+          if (parentId) {
+            throw taskError('TASK_CHILD_OWNER_MISMATCH', "A child task is owned by the parent's assignee who creates it; it cannot name another owner.");
+          }
+          if (!manages || !named) {
+            throw taskError('TASK_NOT_OWNER', 'Only whoever manages the App may create a task owned by someone else.');
+          }
+          owner = named;
+        }
+      }
+      const assignee = input.assignee ? await resolveParty(ctx, app, input.assignee, 'TASK_ASSIGNEE_INVALID') : null;
+      return { requirements, owner, assignee };
+    };
+
     const id = await ctx.db.$transaction(async (tx) => {
       if (parentId) {
-        // Lock the parent so its assignee and status can't move under us.
+        // Lock the parent so its assignee and status can't move under us,
+        // then authorize against the locked row — the one assignee check.
         const parent = await lockTask(tx, parentId);
         if (!parent || parent.appId !== app.id) throw notFound(parentId);
         if (!isAssignee(actor, parent)) {
@@ -505,6 +510,7 @@ export const agentTaskMutations = {
         }
         refuseEnded(parent);
       }
+      const { requirements, owner, assignee } = await resolveParties();
       const created = await tx.agentTask.create({
         data: {
           appId: app.id,
