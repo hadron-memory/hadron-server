@@ -8307,10 +8307,14 @@ export const typeDefs = `#graphql
     selects which fields); source nodes with no counterpart move over with
     their loc unchanged. Edges follow. The source memory ends up empty;
     'deleteSourceMem: true' then deletes it. v1 rejects encrypted source or
-    target memories and system/app classes. A source loc the target holds
-    with a SOFT-DELETED node refuses with MERGE_TARGET_LOC_TOMBSTONED (naming
-    the locs) before anything moves: the tombstone still owns the address.
-    Hard-delete it, or recreate a node there so it folds, then re-run.
+    target memories and system/app classes. An address the merge would move
+    a node or a carried comment into, but which the target holds with a
+    SOFT-DELETED node, refuses MERGE_TARGET_LOC_TOMBSTONED (the tombstone
+    still owns the address; up to 25 locs named, with the full count). A
+    tombstone present when the merge starts refuses before any batch commits;
+    one that appears mid-merge refuses the batch it hits, and batches already
+    committed stay committed (re-running completes the merge). Hard-delete the
+    tombstone, or recreate a node there so it folds, then re-run.
     """
     mergeMemories(input: MergeMemoriesInput!): Memory!
 

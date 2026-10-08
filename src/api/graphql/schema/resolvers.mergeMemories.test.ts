@@ -625,6 +625,36 @@ describe('mergeMemories — tombstone-held target loc (#1684)', () => {
     });
   });
 
+  it('a tombstone that appears after an EARLIER batch committed refuses its own batch; the committed one stays (resumable, not atomic)', async () => {
+    // Ids that page first, one per page and batch.
+    const first = await db.node.create({ data: { id: `${'0'.repeat(31)}1`, memoryId: srcMem.id, loc: 'first', name: 'first' } });
+    const second = await db.node.create({ data: { id: `${'0'.repeat(31)}2`, memoryId: srcMem.id, loc: 'second', name: 'second' } });
+    const real = db.memory.findUnique.bind(db.memory);
+    let planted = false;
+    const spy = vi.spyOn(db.memory, 'findUnique').mockImplementation((async (args: { select?: { schema?: boolean } }) => {
+      // Plant at `second` once `first`'s batch has committed.
+      if (!planted && args?.select?.schema && (await db.node.findUniqueOrThrow({ where: { id: first.id } })).memoryId === tgtMem.id) {
+        planted = true;
+        await makeNode(tgtMem.id, 'second', { deletedAt: new Date() });
+      }
+      return real(args as never);
+    }) as never);
+    try {
+      const err = await caught(
+        mergeMemoryGraph(db, {
+          sourceMemoryId: srcMem.id, targetMemoryId: tgtMem.id, fields: new Set(['CONTENT']),
+          deleteSourceMem: false, editor: { userId: admin.id }, batchSize: 1, classifyPageSize: 1,
+        }),
+      );
+      expect(planted).toBe(true);
+      expect(err.extensions).toMatchObject({ code: 'MERGE_TARGET_LOC_TOMBSTONED', loc: 'second' });
+    } finally {
+      spy.mockRestore();
+    }
+    expect((await db.node.findUniqueOrThrow({ where: { id: first.id } })).memoryId).toBe(tgtMem.id);
+    expect((await db.node.findUniqueOrThrow({ where: { id: second.id } })).memoryId).toBe(srcMem.id);
+  });
+
   it('a tombstone that appears after classification is refused by the relocate batch, not a raw P2002', async () => {
     const n = await makeNode(srcMem.id, 'late', { content: 'source' });
     // The relocate page re-reads the target schema between classification and

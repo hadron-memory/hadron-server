@@ -264,30 +264,55 @@ export async function mergeMemoryGraph(
   // and the final disposition re-check under their own locks.
   await preflightNoMintedCorpusRemoval(db, sourceMemoryId, 'merge out of its corpus', { includeTombstones: false });
 
-  // #1684 — a target TOMBSTONE at a source loc. Classification below matches
-  // live rows only (a tombstone is no fold counterpart), but the unique index
-  // is total, so such a node can neither fold nor relocate. Refuse before
-  // anything commits, naming every such loc so one fix-up pass suffices. The
-  // scan includes comment nodes on purpose: carryThreadsInTx moves them with
-  // their locs unchanged, so a tombstone there fails the same way. Like
-  // the preflights above this is fail-fast: the relocate batch rechecks under
-  // its loc locks, which is what holds against a delete racing the merge.
+  // #1684 — a target TOMBSTONE at an address this merge would move into.
+  // Classification below matches live rows only (a tombstone is no fold
+  // counterpart), but the unique index is total, so a node at such a loc can
+  // neither fold nor relocate. Refuse before the first batch commits, naming
+  // the locs (the first TOMBSTONED_LOCS_REPORTED of them, with the full count).
+  //
+  // The candidates are exactly what Phase 1 MOVES, read in its own page shape:
+  // a live non-comment node with no live target counterpart, plus EVERY thread
+  // (live or deleted) anchored to one, since carryThreadsInTx carries deleted
+  // comments too, locs unchanged (#1710 review, Diego P2). Not every source
+  // tombstone: an ordinary deleted node never moves, and the deleted threads
+  // of a FOLDING node are destroyed with it rather than carried.
+  //
+  // Fail-fast only, like the preflights above. Under each relocate batch's
+  // locks, the batch rechecks its own rows and its carried threads; a
+  // tombstone that appears after this scan refuses there, but batches that
+  // committed before it stay committed (the merge is resumable, not atomic).
   {
     const tombstoned: string[] = [];
     let count = 0;
     for (let cursor: string | undefined; ; ) {
       const page = await db.node.findMany({
-        where: { memoryId: sourceMemoryId, deletedAt: null, ...(cursor ? { id: { gt: cursor } } : {}) },
+        where: { memoryId: sourceMemoryId, deletedAt: null, nodeType: { not: COMMENT_NODE_TYPE }, ...(cursor ? { id: { gt: cursor } } : {}) },
         select: { id: true, loc: true },
         orderBy: { id: 'asc' },
         take: classifyPage,
       });
       if (page.length === 0) break;
       cursor = page[page.length - 1].id;
-      const held = await db.node.findMany({
-        where: { memoryId: targetMemoryId, deletedAt: { not: null }, loc: { in: page.map((n) => n.loc) } },
-        select: { loc: true },
-      });
+      const folds = new Set(
+        (await db.node.findMany({
+          where: { memoryId: targetMemoryId, deletedAt: null, loc: { in: page.map((n) => n.loc) } },
+          select: { loc: true },
+        })).map((t) => t.loc),
+      );
+      const moving = page.filter((n) => !folds.has(n.loc));
+      const carried = moving.length
+        ? await db.node.findMany({
+            where: { commentMeta: { targetNodeId: { in: moving.map((n) => n.id) } } },
+            select: { loc: true },
+          })
+        : [];
+      const candidates = [...moving.map((n) => n.loc), ...carried.map((c) => c.loc)];
+      const held = candidates.length
+        ? await db.node.findMany({
+            where: { memoryId: targetMemoryId, deletedAt: { not: null }, loc: { in: candidates } },
+            select: { loc: true },
+          })
+        : [];
       count += held.length;
       for (const { loc } of held) if (tombstoned.length < TOMBSTONED_LOCS_REPORTED) tombstoned.push(loc);
       if (page.length < classifyPage) break;
@@ -464,7 +489,21 @@ export async function mergeMemoryGraph(
             });
           }
           // #1664 — the batch's threads move in the same transaction as their targets.
-          await carryThreadsInTx(tx, relocationIds, targetMemoryId);
+          // #1684 — its final member set, read under the carry's locks, is
+          // rechecked against the target's TOTAL occupancy before it moves.
+          await carryThreadsInTx(tx, relocationIds, targetMemoryId, async (threadIds) => {
+            const threadLocs = (await tx.node.findMany({ where: { id: { in: threadIds } }, select: { loc: true } }))
+              .map((c) => c.loc);
+            const occupied = await tx.node.findMany({
+              where: { memoryId: targetMemoryId, loc: { in: threadLocs } },
+              select: { loc: true, deletedAt: true },
+            });
+            const tombstones = occupied.filter((row) => row.deletedAt != null).map((row) => row.loc);
+            if (tombstones.length > 0) throw mergeTargetLocTombstonedError(targetMemoryId, tombstones);
+            if (occupied.length > 0) {
+              throw new Error(`merge target loc ${occupied[0].loc} is occupied by a node; a comment cannot move there; retry the merge`);
+            }
+          });
           return rows.length;
         }, BATCH_TX_OPTS);
         relocatedCount += moved;

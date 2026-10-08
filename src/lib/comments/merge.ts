@@ -61,8 +61,17 @@ export async function preflightMergeComments(db: Db, sourceMemoryId: string, tar
  * Move every thread (live or deleted) whose target is among `targetIds` into
  * `toMemoryId`, with its governed edges, inside the caller's transaction (the
  * one that moved the targets). Returns how many comment nodes moved.
+ *
+ * `beforeMove` sees the FINAL member set (every comment node id, read after
+ * the locks below make it final) just before anything moves, so a caller can
+ * refuse on what is actually carried (#1684: the destination's loc occupancy).
  */
-export async function carryThreadsInTx(tx: Prisma.TransactionClient, targetIds: string[], toMemoryId: string): Promise<number> {
+export async function carryThreadsInTx(
+  tx: Prisma.TransactionClient,
+  targetIds: string[],
+  toMemoryId: string,
+  beforeMove?: (commentIds: string[]) => Promise<void>,
+): Promise<number> {
   if (targetIds.length === 0) return 0;
   const members = () => tx.commentMeta.findMany({ where: { targetNodeId: { in: targetIds } }, select: { nodeId: true } })
     .then((rows) => rows.map((m) => m.nodeId).sort());
@@ -93,6 +102,7 @@ export async function carryThreadsInTx(tx: Prisma.TransactionClient, targetIds: 
       );
     }
   }
+  if (beforeMove) await beforeMove(ids);
   await tx.node.updateMany({ where: { id: { in: ids }, nodeType: COMMENT_NODE_TYPE }, data: { memoryId: toMemoryId } });
   await tx.edge.updateMany({ where: { sourceId: { in: ids }, governedKind: { not: null } }, data: { memoryId: toMemoryId } });
   return ids.length;
