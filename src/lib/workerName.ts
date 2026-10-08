@@ -23,8 +23,17 @@ function caseFold(name: string): string {
 
 // Keep the original-case skeleton as well as the caseless one: folding first
 // alone loses real uppercase confusables (Greek Μ → Latin M, but μ ≠ m).
-// The third key folds the skeleton's prototype, so a lookalike of ANY case
-// variant collides: `Μira` → `Mira` → `mira` meets a stored lowercase `mira`.
+// The third key folds the skeleton's prototype, so a cross-script lookalike of
+// a case variant collides: `Μira` → `Mira` → `mira` meets a stored `mira`.
+//
+// Confusable scope (Holger's ruling on #1685): names collide when their
+// skeletons match as spelled, case-folded, or folded after mapping. A pair
+// that only collides after RE-CASING one side into a lookalike (`ai` stored
+// vs `Al`, since `AI` → `Al`; `ivy` vs `lvy`) is deliberately accepted.
+// Closing it would make i ≡ l in every name and refuse common pairs such as
+// Ali/All, Nil/Nii and Bill/Biii. A capital I already spelled is still
+// caught (`Iris` blocks `lris`, `AI` blocks `Al`). Casters are trusted App staff and names
+// are permanent, so false refusals cost more than this residual spoofing gap.
 export function workerNameComparisonKeys(name: string): readonly string[] {
   const skeleton = workerNameSkeleton(name);
   return [...new Set([skeleton, workerNameSkeleton(caseFold(name)), workerNameSkeleton(caseFold(skeleton))])];

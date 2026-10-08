@@ -24,6 +24,18 @@ describe('worker name equivalence (#1677)', () => {
     expect(findConfusableWorker(latin, [{ name: lookalike }])).toEqual({ name: lookalike });
   });
 
+  it('documented scope: table and cross-script lookalikes are refused, re-cased I/l pairs are accepted', () => {
+    for (const [stored, candidate] of [['mira', 'Μira'], ['Milo', 'rnilo'], ['OTTO', '0TTO'], ['AI', 'Al'], ['Iris', 'lris']]) {
+      expect(findConfusableWorker(candidate, [{ name: stored }])).toEqual({ name: stored });
+      expect(findConfusableWorker(stored, [{ name: candidate }])).toEqual({ name: candidate });
+    }
+    // Policy (#1685): colliding only via a re-cased variant (`ai` → `AI` → `Al`) is not a collision.
+    for (const [stored, candidate] of [['ai', 'Al'], ['ivy', 'lvy'], ['Ali', 'All'], ['Nil', 'Nii'], ['Bill', 'Biii']]) {
+      expect(findConfusableWorker(candidate, [{ name: stored }])).toBeUndefined();
+      expect(findConfusableWorker(stored, [{ name: candidate }])).toBeUndefined();
+    }
+  });
+
   it('preserves accent differences and does not apply locale-specific Turkic folding', () => {
     expect(workerNameSkeleton('José')).not.toBe(workerNameSkeleton('Jose'));
     expect(workerNameSkeleton('İris')).not.toBe(workerNameSkeleton('Iris'));
