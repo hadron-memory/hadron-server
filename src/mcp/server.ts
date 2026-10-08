@@ -45,7 +45,7 @@ import {
   UrnNotQualifiedError,
 } from '../lib/urn.js';
 import { composeWorkerUrn } from '../lib/entityRef/workerRef.js';
-import { publishActor } from '../lib/requestActor.js';
+import { currentActorAmbiguity, publishActor, publishAmbiguousActor } from '../lib/requestActor.js';
 import {
   emitEntityUrnV2,
   emitNodeUrnV2,
@@ -1897,6 +1897,163 @@ export function createMcpServerInstance(
     { name: 'hadron', version: HADRON_SERVER_VERSION },
     { capabilities: { tools: {} } },
   );
+
+  /**
+   * "Worker Name (session <id>)" for each session, in order — for refusals and
+   * receipts that must let the caller recognise which binding is theirs.
+   */
+  const describeBoundSessions = async (sessionIds: readonly string[]): Promise<string> => {
+    const rows = await db.session.findMany({
+      where: { id: { in: [...sessionIds] } },
+      select: { id: true, worker: { select: { name: true } }, agent: { select: { name: true } } },
+    });
+    const byId = new Map(rows.map((r) => [r.id, r]));
+    return sessionIds
+      .map((id) => {
+        const r = byId.get(id);
+        const who = r?.worker?.name ?? (r?.agent?.name ? `agent ${r.agent.name}` : 'unknown');
+        return `${who} (session ${id})`;
+      })
+      .join(', ');
+  };
+
+  /**
+   * #1701 — the start-session receipt's warning when this bind left the
+   * connection bound to MORE than one actor. Best-effort: it runs after the
+   * session committed, so a failure costs the note, never the session id.
+   */
+  const sharedConnectionWarning = async (mcpSessionId: string, startedId: string): Promise<string> => {
+    try {
+      const live = await liveConnectionBindings(mcpSessionId, auth);
+      if (distinctActorCount(live) < 2) return '';
+      const others = live.filter((b) => b.sessionId !== startedId).map((b) => b.sessionId);
+      return (
+        `\n\n⚠ SHARED CONNECTION: this MCP connection was already bound to ${await describeBoundSessions(others)}. ` +
+        'Your host is carrying more than one chat session over it, so it can no longer tell which of them sends ' +
+        `a request. Pass session: "${startedId}" on EVERY write (node, edge, comment, task and object tools, ` +
+        'team chat, worklog). A write without it is refused SESSION_AMBIGUOUS rather than credited to the wrong ' +
+        'worker (#1701). Reads need nothing.'
+      );
+    } catch {
+      return '';
+    }
+  };
+
+  // ── #1701: the caller-session gate on every writing tool ─────────────────
+  //
+  // The connection binding (DAC) credits writes to the worker a connection is
+  // bound to. A host that multiplexes several chat sessions over ONE
+  // connection breaks that silently: every chat session's writes went to
+  // whichever worker bound last. So every tool that can write takes an
+  // optional `session` — the caller saying who it is, validated by the same
+  // shared gate as the X-Hadron-Session header — and, on a connection bound
+  // to more than one actor, a writing call that does not say is REFUSED
+  // instead of guessed at.
+  //
+  // FAIL-CLOSED by construction: a tool is gated unless it is listed below as
+  // one that writes nothing on the caller's behalf. A new tool therefore gets
+  // the gate without anyone remembering to add it; forgetting the other way
+  // only costs an ambiguous caller one `session` argument.
+  const ACTOR_NEUTRAL_TOOLS = new Set([
+    // Reads and searches.
+    'hadron_search', 'hadron_list_memories', 'hadron_server_info', 'hadron_list_apps', 'hadron_list_scopes',
+    'hadron_scope_explain', 'hadron_list_channels', 'hadron_register_list', 'hadron_find_nodes', 'hadron_get_node',
+    'hadron_get_nodes', 'hadron_get_next_node', 'hadron_list_nodes', 'hadron_get_object', 'hadron_find_objects',
+    'hadron_get_run', 'hadron_whoami', 'hadron_channel_read', 'hadron_team_chat_read', 'hadron_team_attention',
+    'hadron_team_attention_page', 'hadron_list_workers', 'hadron_get_worker', 'hadron_team_work_items',
+    'hadron_list_comments', 'hadron_get_comment', 'hadron_team_chat_mark_read',
+    // Per-connection selections and key handling: nothing authored.
+    'hadron_set_active_memory', 'hadron_set_active_app', 'hadron_set_active_org', 'hadron_set_active_scope',
+    'hadron_unlock_memory', 'hadron_lock_memory',
+    // Binding itself: it is how a caller SAYS who it is.
+    'hadron_start_session',
+  ]);
+  /** Tools whose own required argument names the caller's session under another name. */
+  const SESSION_ARGUMENT: Record<string, string> = { hadron_end_session: 'id' };
+  const SESSION_PARAM_DESCRIPTION =
+    'Your worker session id (from hadron_start_session or hadron_whoami). Attributes this write to that ' +
+    'session\'s worker. Optional on a connection bound to one worker; REQUIRED when the connection carries ' +
+    'more than one worker\'s session (several chat sessions on one host), where a write without it is ' +
+    'refused SESSION_AMBIGUOUS (#1701).';
+
+  /**
+   * Settle the actor for one tool call (#1701). A named session that validates
+   * becomes the actor; a named session that does not is refused when the
+   * argument is the gate's own, and left to the tool when the tool defines it
+   * (its handler already refuses an unusable session) — either way the call
+   * never writes as the connection's worker. With no session named, an
+   * ambiguous connection refuses. Returns a refusal, or null to proceed.
+   */
+  const settleCallerSession = async (
+    toolName: string,
+    named: unknown,
+    toolOwnsArgument: boolean,
+  ): Promise<{ isError: true; content: Array<{ type: 'text'; text: string }> } | null> => {
+    if (typeof named === 'string' && named.length > 0) {
+      const valid = await validateSessionBinding(db, auth, named);
+      if (valid) {
+        publishActor(valid.actor);
+        return null;
+      }
+      publishActor({ workerId: null, agentId: null });
+      if (toolOwnsArgument) return null;
+      return {
+        isError: true as const,
+        content: [{
+          type: 'text' as const,
+          text:
+            `[session_not_bound] ${toolName}: session "${named}" is not one of your open sessions that can ` +
+            'attribute a write (it may have ended, gone dormant, or belong to someone else). Nothing was ' +
+            'written. Check hadron_whoami for your open sessions, or omit session to write as yourself on a ' +
+            'connection that is not shared.',
+        }],
+      };
+    }
+    const ambiguous = currentActorAmbiguity();
+    if (!ambiguous) return null;
+    return {
+      isError: true as const,
+      content: [{
+        type: 'text' as const,
+        text:
+          `[session_ambiguous] ${toolName}: this MCP connection carries live worker sessions for ` +
+          `${await describeBoundSessions(ambiguous)}. Your host is sharing one connection between several ` +
+          'chat sessions, so the server cannot tell which of them sent this call, and will not guess. Nothing ' +
+          'was written. Pass session: "<your session id>" (hadron_whoami lists yours; it is the id ' +
+          'hadron_start_session returned to YOU), or end the sessions that are no longer in use (#1701).',
+      }],
+    };
+  };
+
+  {
+    type ToolCallback = (args: unknown, extra: unknown) => unknown;
+    const registerTool = server.tool.bind(server) as (...args: unknown[]) => unknown;
+    (server as unknown as { tool: (...args: unknown[]) => unknown }).tool = (...args: unknown[]) => {
+      const name = args[0] as string;
+      if (ACTOR_NEUTRAL_TOOLS.has(name)) return registerTool(...args);
+      const cbIndex = args.length - 1;
+      const callback = args[cbIndex] as ToolCallback;
+      // The parameter shape is the first plain object after the name (a
+      // description string may precede it; annotations may follow it).
+      const shapeIndex = args.findIndex((a, i) => i > 0 && i < cbIndex && typeof a === 'object' && a !== null);
+      if (shapeIndex < 0) {
+        throw new Error(`#1701: tool ${name} is gated as a writer but declares no parameter shape to carry session`);
+      }
+      const argumentName = SESSION_ARGUMENT[name] ?? 'session';
+      const shape = args[shapeIndex] as Record<string, unknown>;
+      const toolOwnsArgument = argumentName in shape;
+      if (!toolOwnsArgument) {
+        args[shapeIndex] = { ...shape, session: z.string().optional().describe(SESSION_PARAM_DESCRIPTION) };
+      }
+      args[cbIndex] = async (input: unknown, extra: unknown) => {
+        const named = (input as Record<string, unknown> | undefined)?.[argumentName];
+        const refusal = await settleCallerSession(name, named, toolOwnsArgument);
+        if (refusal) return refusal;
+        return callback(input, extra);
+      };
+      return registerTool(...args);
+    };
+  }
 
   // Per-session state — this server instance is built once per MCP session
   // (see the createMcpServerInstance call sites), so this closure variable is
@@ -8190,7 +8347,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
 
   server.tool(
     'hadron_start_session',
-    'Start a session — and when workerRef is passed, a WORKER SESSION: the binding that makes work attributable to that named teammate. Two different things are called a session: the WORKER SESSION is this binding, held server-side; your CHAT SESSION is the conversation you are in — the Claude Desktop window, the Claude Code session, the IDE chat. ENDING YOUR CHAT SESSION DOES NOT END A WORKER SESSION (#1034): closing, archiving or losing the conversation leaves this binding open until hadron_end_session. Since #1114 the reaper no longer ends a session for inactivity — silence is not evidence of abandonment. What DOES change while it sits idle is how it is DESCRIBED: liveness is derived from recent driving, so a session that remains untouched past its idle window reads as not-live and stops blocking a bind, WITHOUT being ended and with its handoff still unwritten rather than lost. That changes no HOLD: a human-held name stays held until explicit release, so only its holder can bind it again. All subsequent tool calls can reference this session ID for attribution. A worker or agent session also BINDS THIS MCP CONNECTION (DAC): every later node write on it records that Worker / Agent as its author beside you (Node.createdByWorker / updatedByWorker), checked afresh on each call, so ending the session stops it at once; a reconnect starts unbound until you start or name a session again. Starting a session PINS its App as this session\'s active App, so no hadron_set_active_app is needed afterwards; if the MCP connection is later re-established (which happens transparently), pass the session id back to the team tools to restore that App context. Pass workerRef — the worker\'s NAME ("Iris", resolved within the active App), its id, or its URN (hrn:worker:<root>:<app-slug>:<slug>) — to work AS that named casting, which is required for worker-attributed team chat posts and worklog records. An id or URN workerRef names its own App, so it needs no App selected first; a bare NAME does, since a name is unique only within an App. On success the worker\'s resolved BOOT BRIEFING comes back with the session: adopt it for the rest of this stint, and never cache or copy it — it is rendered live from the role agent\'s prompt template, so a copy goes stale silently. Binding a worker someone is actively DRIVING refuses WORKER_TAKEN (#1114: an OPEN session is not necessarily a live one — a session whose most recent activity is outside its idle window is not being driven, so that session does not refuse) with who last drove it and when (informed takeover, cor:agt:020:03) — note an open worker session does not by itself mean someone is at the keyboard, since it outlives the chat session that started it; retry with force: true ONLY after surfacing that to the user and getting an explicit override. Binding a worker ENDS your own other open sessions on that same worker (#1617), the lapsed ones and any a force displaces: they are marked "superseded by session <new id>" and end WITHOUT a handoff, so write the handoff with hadron_end_session first if one is owed. Do not bind a second session to recover from a context compaction; recover the existing one with hadron_whoami. A LAPSED session of yours does not need a rebind at all: if you hold the name and nobody else is driving the worker, your next team-chat post, read or mark-read through it resumes it.',
+    'Start a session — and when workerRef is passed, a WORKER SESSION: the binding that makes work attributable to that named teammate. Two different things are called a session: the WORKER SESSION is this binding, held server-side; your CHAT SESSION is the conversation you are in — the Claude Desktop window, the Claude Code session, the IDE chat. ENDING YOUR CHAT SESSION DOES NOT END A WORKER SESSION (#1034): closing, archiving or losing the conversation leaves this binding open until hadron_end_session. Since #1114 the reaper no longer ends a session for inactivity — silence is not evidence of abandonment. What DOES change while it sits idle is how it is DESCRIBED: liveness is derived from recent driving, so a session that remains untouched past its idle window reads as not-live and stops blocking a bind, WITHOUT being ended and with its handoff still unwritten rather than lost. That changes no HOLD: a human-held name stays held until explicit release, so only its holder can bind it again. All subsequent tool calls can reference this session ID for attribution. A worker or agent session also BINDS THIS MCP CONNECTION (DAC): every later node write on it records that Worker / Agent as its author beside you (Node.createdByWorker / updatedByWorker), checked afresh on each call, so ending the session stops it at once; a reconnect starts unbound until you start or name a session again. A host may carry SEVERAL chat sessions over one connection (#1701): binding a second worker there does not displace the first, and while the connection is bound to more than one worker the server cannot tell which chat session is calling, so every writing tool takes an optional `session` argument — pass the id this call returned on each write, or the write is refused SESSION_AMBIGUOUS rather than credited to the wrong worker. The receipt warns you when this bind made the connection shared. Starting a session PINS its App as this session\'s active App, so no hadron_set_active_app is needed afterwards; if the MCP connection is later re-established (which happens transparently), pass the session id back to the team tools to restore that App context. Pass workerRef — the worker\'s NAME ("Iris", resolved within the active App), its id, or its URN (hrn:worker:<root>:<app-slug>:<slug>) — to work AS that named casting, which is required for worker-attributed team chat posts and worklog records. An id or URN workerRef names its own App, so it needs no App selected first; a bare NAME does, since a name is unique only within an App. On success the worker\'s resolved BOOT BRIEFING comes back with the session: adopt it for the rest of this stint, and never cache or copy it — it is rendered live from the role agent\'s prompt template, so a copy goes stale silently. Binding a worker someone is actively DRIVING refuses WORKER_TAKEN (#1114: an OPEN session is not necessarily a live one — a session whose most recent activity is outside its idle window is not being driven, so that session does not refuse) with who last drove it and when (informed takeover, cor:agt:020:03) — note an open worker session does not by itself mean someone is at the keyboard, since it outlives the chat session that started it; retry with force: true ONLY after surfacing that to the user and getting an explicit override. Binding a worker ENDS your own other open sessions on that same worker (#1617), the lapsed ones and any a force displaces: they are marked "superseded by session <new id>" and end WITHOUT a handoff, so write the handoff with hadron_end_session first if one is owed. Do not bind a second session to recover from a context compaction; recover the existing one with hadron_whoami. A LAPSED session of yours does not need a rebind at all: if you hold the name and nobody else is driving the worker, your next team-chat post, read or mark-read through it resumes it.',
     {
       description: z.string().describe("What this session is about"),
       type: z.string().optional().describe('Session type: DEVELOPER, CHATBOT, AUTOMATION, EDGE'),
@@ -8314,12 +8471,25 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         // DAC: bind this MCP connection to the new session, so every later
         // write on it is attributed to its Worker / Agent (#1610). Only a
         // session with someone behind it; plain sessions attribute nothing.
+        //
+        // #1701: the binding is APPENDED to the connection's list, never
+        // swapped in for the previous one — a host may be multiplexing
+        // several chat sessions over this one connection, and the previous
+        // binder may be another of them, still at work. When that leaves the
+        // connection bound to more than one actor, the receipt says so, since
+        // it is the one moment the caller is certain to read.
+        let sharedConnectionNote = '';
         {
           const sid = getSessionId();
-          // A plain session REPLACES an earlier binding: later writes are
-          // the user's own again, not the previous worker's (#1665 review).
-          if (sid && (session.workerId || session.agentId)) workerSessionByMcpSession.set(sid, session.id);
-          else if (sid) workerSessionByMcpSession.delete(sid);
+          if (sid && (session.workerId || session.agentId)) {
+            rememberConnectionBinding(sid, session.id);
+            sharedConnectionNote = await sharedConnectionWarning(sid, session.id);
+          } else if (sid) {
+            // A plain session REPLACES the connection's bindings: later
+            // writes are the user's own again, not a previous worker's
+            // (#1665 review).
+            workerSessionsByMcpSession.delete(sid);
+          }
         }
 
         // #990: when a worker is bound, ALWAYS return its resolved boot
@@ -8394,7 +8564,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
               '\n\n(The boot briefing could not be rendered just now — the session IS started and bound. Retry with hadron_get_node on the role agent, or start again after ending this session; do NOT retry hadron_start_session, which would refuse WORKER_TAKEN.)';
           }
         }
-        return textResult(`Session started: ${session.id}\n> ${description}${workerLine}`);
+        return textResult(`Session started: ${session.id}\n> ${description}${sharedConnectionNote}${workerLine}`);
       } catch (e) {
         return textResult(`Error: ${e instanceof Error ? e.message : 'session start failed'}`);
       }
@@ -10501,32 +10671,85 @@ const activeAppByMcpSession = new Map<
 >();
 
 /**
- * DAC (Holger, 2026-10-05; #1610 follow-on): the Hadron session
- * `hadron_start_session` bound on this MCP connection. Later requests on the
- * connection write as that session's Worker / Agent, re-validated every time
- * through the same ownership check as the X-Hadron-Session header, so a
- * session that has since ended or changed hands stops attributing at once.
- * An explicit header on a request wins. Per transport, like the active App:
- * a reconnect starts unbound until the client starts or names a session again.
+ * DAC (Holger, 2026-10-05; #1610 follow-on): the Hadron sessions
+ * `hadron_start_session` bound on this MCP connection, oldest first. Later
+ * requests on the connection write as the bound Worker / Agent, re-validated
+ * every time through the same ownership check as the X-Hadron-Session header,
+ * so a session that has since ended or changed hands stops attributing at
+ * once. An explicit header, or a tool call's own `session` argument, wins. Per
+ * transport, like the active App: a reconnect starts unbound until the client
+ * starts or names a session again.
+ *
+ * A LIST, not one id (#1701): a desktop host can carry several chat sessions
+ * over ONE MCP connection, each binding its own worker. Keeping only the last
+ * bind credited every chat session's writes to whoever bound last (Gil's node
+ * read "Created by: worker Cody"). With every binding kept, a connection whose
+ * live bindings name more than one actor is AMBIGUOUS, and a write that does
+ * not say which caller it is gets refused rather than guessed at.
  */
-const workerSessionByMcpSession = new Map<string, string>();
+const workerSessionsByMcpSession = new Map<string, string[]>();
 
 /**
- * Publish the connection's bound session as this request's actor (DAC). A
- * request that NAMES a session in X-Hadron-Session has spoken for itself even
- * when that header failed validation: it then writes as nobody, never as the
+ * The most bindings one connection remembers. A cap, not a policy: binding a
+ * worker supersedes the caller's other sessions on it (#1617), so live lists
+ * stay short; this only bounds a pathological client.
+ */
+const MAX_CONNECTION_BINDINGS = 32;
+
+/** Record a worker/agent session bound on this connection (#1701: appended, never replacing). */
+function rememberConnectionBinding(mcpSessionId: string, hadronSessionId: string): void {
+  const list = (workerSessionsByMcpSession.get(mcpSessionId) ?? []).filter((id) => id !== hadronSessionId);
+  list.push(hadronSessionId);
+  workerSessionsByMcpSession.set(mcpSessionId, list.slice(-MAX_CONNECTION_BINDINGS));
+}
+
+/**
+ * The connection's bindings that still validate, oldest first, pruning the
+ * rest from the map. One validation per remembered session, each through the
+ * shared {@link validateSessionBinding} gate.
+ */
+async function liveConnectionBindings(
+  mcpSessionId: string,
+  principal: AuthContext,
+): Promise<Array<{ sessionId: string; actor: { workerId: string | null; agentId: string | null } }>> {
+  const remembered = workerSessionsByMcpSession.get(mcpSessionId);
+  if (!remembered?.length) return [];
+  const live = [];
+  for (const id of remembered) {
+    const valid = await validateSessionBinding(db, principal, id);
+    if (valid) live.push(valid);
+  }
+  if (live.length) workerSessionsByMcpSession.set(mcpSessionId, live.map((b) => b.sessionId));
+  else workerSessionsByMcpSession.delete(mcpSessionId);
+  return live;
+}
+
+/** The distinct Worker / Agent identities among a set of bindings. */
+function distinctActorCount(bindings: Array<{ actor: { workerId: string | null; agentId: string | null } }>): number {
+  return new Set(bindings.map((b) => `${b.actor.workerId ?? ''}/${b.actor.agentId ?? ''}`)).size;
+}
+
+/**
+ * Publish the connection's bound actor for this request (DAC). A request that
+ * NAMES a session in X-Hadron-Session has spoken for itself even when that
+ * header failed validation: it then writes as nobody, never as the
  * connection's worker (#1665 review).
+ *
+ * #1701: when the live bindings name more than one actor, nothing here can
+ * tell which chat session sent the request, so it publishes an AMBIGUOUS
+ * actor (nobody, with the candidates) and the per-tool gate in
+ * createMcpServerInstance decides: a call naming its `session` proceeds as
+ * that session, a writing call without one is refused SESSION_AMBIGUOUS.
  */
 async function publishConnectionActor(mcpSessionId: string, presented: AuthContext, headerPresented: boolean): Promise<void> {
   if (headerPresented || presented.sessionId) return;
-  const bound = workerSessionByMcpSession.get(mcpSessionId);
-  if (!bound) return;
-  const valid = await validateSessionBinding(db, presented, bound);
-  if (!valid) {
-    workerSessionByMcpSession.delete(mcpSessionId);
+  const live = await liveConnectionBindings(mcpSessionId, presented);
+  if (!live.length) return;
+  if (distinctActorCount(live) > 1) {
+    publishAmbiguousActor(live.map((b) => b.sessionId));
     return;
   }
-  publishActor(valid.actor);
+  publishActor(live[live.length - 1].actor);
 }
 
 function respondMcpSessionNotFound(res: Response): void {
@@ -10616,7 +10839,7 @@ function unregisterMcpTransport(
   if (registered && registered.transport !== transport) return false;
   transports.delete(sessionId);
   activeAppByMcpSession.delete(sessionId);
-  workerSessionByMcpSession.delete(sessionId);
+  workerSessionsByMcpSession.delete(sessionId);
   sessionKeyCache.evict(`mcp:${sessionId}`);
   return true;
 }

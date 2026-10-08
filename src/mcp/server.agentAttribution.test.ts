@@ -124,7 +124,7 @@ async function mcpConnection() {
   expect(init.status).toBe(200);
   const sid = init.headers.get('mcp-session-id')!;
   let id = 10;
-  return async (name: string, args: Record<string, unknown>, hadronSessionHeader?: string): Promise<string> => {
+  return async (name: string, args: Record<string, unknown>, hadronSessionHeader?: string, opts: { allowError?: boolean } = {}): Promise<string> => {
     const res = await fetch(`${baseUrl}/mcp`, {
       method: 'POST',
       headers: { ...mcpHeaders, 'mcp-session-id': sid, ...(hadronSessionHeader ? { 'x-hadron-session': hadronSessionHeader } : {}) },
@@ -132,7 +132,7 @@ async function mcpConnection() {
     });
     expect(res.status).toBe(200);
     const text = await res.text();
-    expect(text, text).not.toContain('"isError":true');
+    if (!opts.allowError) expect(text, text).not.toContain('"isError":true');
     return text;
   };
 }
@@ -203,5 +203,90 @@ describe('DAC: hadron_start_session binds the MCP connection (#1610 follow-on)',
     const second = await mcpConnection();
     await second('hadron_create_node', { urn: `hrn:node:${appMemory.urn}:dac:other`, name: 'other' });
     expect(await attributionAt('dac:other', appMemory.id)).toEqual({ createdByWorkerId: null, createdByAgentId: null });
+  });
+});
+
+/**
+ * #1701 — a host that carries several chat sessions over ONE MCP connection
+ * (the Claude desktop shape that credited Gil's node to Cody). The server
+ * cannot see chat sessions, so the connection must never guess between the
+ * workers bound on it.
+ */
+describe('#1701: several workers bound on one MCP connection', () => {
+  const sessionIdOf = (receipt: string) => /Session started: ([0-9a-f]{32})/.exec(receipt)![1];
+  const nodeAt = (loc: string) => db.node.findFirst({ where: { memoryId: appMemory.id, loc } });
+
+  /** One connection with Iris bound (chat session A), then Dara (chat session B). */
+  async function sharedConnection() {
+    const app = await db.worker.findUniqueOrThrow({ where: { id: worker.id }, select: { appId: true } });
+    const dara = await db.worker.create({ data: { id: generateId(), appId: app.appId, agentId: agent.id, name: 'Dara', slug: 'dara' } });
+    const call = await mcpConnection();
+    const irisReceipt = await call('hadron_start_session', { description: 'chat A', workerRef: 'hrn:worker:attrhttp.example:team:iris', force: true });
+    const daraReceipt = await call('hadron_start_session', { description: 'chat B', workerRef: 'hrn:worker:attrhttp.example:team:dara' });
+    return { call, dara, irisSession: sessionIdOf(irisReceipt), daraSession: sessionIdOf(daraReceipt), irisReceipt, daraReceipt };
+  }
+
+  it('the second bind does not take over the first chat session\'s writes; a write without session is refused, not guessed', async () => {
+    const { call, daraReceipt } = await sharedConnection();
+    // The receipt is the one place the caller is certain to look.
+    expect(daraReceipt).toContain('SHARED CONNECTION');
+    expect(daraReceipt).toContain('Iris (session');
+
+    // The issue's repro: chat A writes after chat B bound. Before #1701 this
+    // was silently credited to Dara, the last binder.
+    const refused = await call('hadron_create_node', { urn: `hrn:node:${appMemory.urn}:shared:unsaid`, name: 'unsaid' }, undefined, { allowError: true });
+    expect(refused).toContain('"isError":true');
+    expect(refused).toContain('[session_ambiguous]');
+    expect(refused).toContain('Iris (session');
+    expect(refused).toContain('Dara (session');
+    expect(await nodeAt('shared:unsaid')).toBeNull();
+  });
+
+  it('a write naming its session is attributed to that session\'s worker, whichever bound last', async () => {
+    const { call, dara, irisSession, daraSession } = await sharedConnection();
+    await call('hadron_create_node', { urn: `hrn:node:${appMemory.urn}:shared:a`, name: 'a', session: irisSession });
+    await call('hadron_create_node', { urn: `hrn:node:${appMemory.urn}:shared:b`, name: 'b', session: daraSession });
+    expect(await attributionAt('shared:a', appMemory.id)).toEqual({ createdByWorkerId: worker.id, createdByAgentId: agent.id });
+    expect(await attributionAt('shared:b', appMemory.id)).toEqual({ createdByWorkerId: dara.id, createdByAgentId: agent.id });
+
+    // Updates carry it too: updatedBy follows the session named on the update.
+    await call('hadron_update_node', { urn: `hrn:node:${appMemory.urn}:shared:a`, description: 'by Dara', session: daraSession });
+    const a = await db.node.findFirstOrThrow({ where: { memoryId: appMemory.id, loc: 'shared:a' }, select: { createdByWorkerId: true, updatedByWorkerId: true } });
+    expect(a).toEqual({ createdByWorkerId: worker.id, updatedByWorkerId: dara.id });
+  });
+
+  it('a named session that cannot attribute is refused, and nothing is written', async () => {
+    const { call } = await sharedConnection();
+    const refused = await call('hadron_create_node', { urn: `hrn:node:${appMemory.urn}:shared:bogus`, name: 'bogus', session: generateId() }, undefined, { allowError: true });
+    expect(refused).toContain('[session_not_bound]');
+    expect(await nodeAt('shared:bogus')).toBeNull();
+  });
+
+  it('ending one of the bindings makes the connection unambiguous again', async () => {
+    const { call, dara, irisSession } = await sharedConnection();
+    // end_session needs no `session`: its own `id` says who is ending.
+    await call('hadron_end_session', { id: irisSession, handoff: 'chat A done' });
+    await call('hadron_create_node', { urn: `hrn:node:${appMemory.urn}:shared:after-end`, name: 'after-end' });
+    expect(await attributionAt('shared:after-end', appMemory.id)).toEqual({ createdByWorkerId: dara.id, createdByAgentId: agent.id });
+  });
+
+  it('on a connection bound to ONE worker, a named session still overrides the binding', async () => {
+    const call = await mcpConnection();
+    await call('hadron_start_session', { description: 'one', workerRef: 'hrn:worker:attrhttp.example:team:iris', force: true });
+    const app = await db.worker.findUniqueOrThrow({ where: { id: worker.id }, select: { appId: true } });
+    const dara = await db.worker.create({ data: { id: generateId(), appId: app.appId, agentId: agent.id, name: 'Dara', slug: 'dara' } });
+    const user = await db.session.findUniqueOrThrow({ where: { id: sessionId }, select: { userId: true } });
+    const daraSession = generateId();
+    await db.session.create({ data: { id: daraSession, appId: app.appId, userId: user.userId, workerId: dara.id, agentId: agent.id, type: 'DEVELOPER', startedAt: new Date() } });
+    await call('hadron_create_node', { urn: `hrn:node:${appMemory.urn}:one:named`, name: 'named', session: daraSession });
+    await call('hadron_create_node', { urn: `hrn:node:${appMemory.urn}:one:unnamed`, name: 'unnamed' });
+    expect(await attributionAt('one:named', appMemory.id)).toEqual({ createdByWorkerId: dara.id, createdByAgentId: agent.id });
+    expect(await attributionAt('one:unnamed', appMemory.id)).toEqual({ createdByWorkerId: worker.id, createdByAgentId: agent.id });
+  });
+
+  it('reads stay open on an ambiguous connection', async () => {
+    const { call } = await sharedConnection();
+    const text = await call('hadron_whoami', {});
+    expect(text).toContain('Iris');
   });
 });

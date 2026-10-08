@@ -18,7 +18,18 @@
 
 import { AsyncLocalStorage } from 'async_hooks';
 
-export type RequestActor = { workerId: string | null; agentId: string | null };
+export type RequestActor = {
+  workerId: string | null;
+  agentId: string | null;
+  /**
+   * #1701 — set when the request's MCP connection carries live bindings for
+   * MORE THAN ONE Worker / Agent and nothing in the request said which one is
+   * calling: the Hadron session ids of those bindings. The actor is then
+   * nobody (both ids null), and the MCP write gate refuses rather than guess.
+   * Absent everywhere else.
+   */
+  ambiguousSessionIds?: readonly string[];
+};
 
 export const requestActorStorage = new AsyncLocalStorage<RequestActor>();
 
@@ -43,6 +54,27 @@ export function publishActor(actor: RequestActor): void {
   if (!holder) return;
   holder.workerId = actor.workerId;
   holder.agentId = actor.agentId;
+  // A named actor answers the question an ambiguity asked (#1701).
+  delete holder.ambiguousSessionIds;
+}
+
+/**
+ * #1701 — record that the request's connection is bound to several actors and
+ * the request named none: its writes attribute to nobody, and the MCP write
+ * gate reads {@link currentActorAmbiguity} to refuse instead. A no-op outside
+ * a holder.
+ */
+export function publishAmbiguousActor(sessionIds: readonly string[]): void {
+  const holder = requestActorStorage.getStore();
+  if (!holder) return;
+  holder.workerId = null;
+  holder.agentId = null;
+  holder.ambiguousSessionIds = [...sessionIds];
+}
+
+/** #1701 — the candidate session ids when the current actor is ambiguous, else null. */
+export function currentActorAmbiguity(): readonly string[] | null {
+  return requestActorStorage.getStore()?.ambiguousSessionIds ?? null;
 }
 
 /**
