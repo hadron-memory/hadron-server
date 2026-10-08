@@ -128,6 +128,31 @@ export interface MergeMemoryResult {
 /** NodeAbstractTooLongError carrying the offending loc (for the GraphQL extension). */
 type AbstractTooLongAtLoc = NodeAbstractTooLongError & { loc?: string };
 
+/** Tombstoned locs named in a {@link mergeTargetLocTombstonedError}; the full count rides alongside. */
+const TOMBSTONED_LOCS_REPORTED = 25;
+
+/**
+ * #1684 — the typed refusal for a source node whose loc the TARGET holds with a
+ * soft-deleted node. The `(loc, memory_id)` unique index is total, so the
+ * tombstone still owns the address: a relocate would fail with a raw P2002, and
+ * folding into a deleted node would silently resurrect it. Neither is the
+ * merge's call to make, so it refuses and names the locs; hard-deleting the
+ * tombstone frees the address, and resurrecting it (a create at that loc)
+ * turns the address into an ordinary fold. Matches `moveNodeSubtree`, which
+ * already counts a tombstone as an occupant.
+ */
+export function mergeTargetLocTombstonedError(targetMemoryId: string, locs: string[], count = locs.length): GraphQLError {
+  const named = [...locs].sort().slice(0, TOMBSTONED_LOCS_REPORTED);
+  return new GraphQLError(
+    `mergeMemories cannot place ${count === 1 ? `loc "${named[0]}"` : `${count} locs (${named.map((l) => `"${l}"`).join(', ')}${count > named.length ? ', …' : ''})`} in the target memory: ` +
+      `a soft-deleted node still holds ${count === 1 ? 'that address' : 'those addresses'}. ` +
+      'Hard-delete the tombstone, or recreate a node at that loc so it folds, then re-run the merge.',
+    {
+      extensions: { code: 'MERGE_TARGET_LOC_TOMBSTONED', memoryId: targetMemoryId, loc: named[0], locs: named, count },
+    },
+  );
+}
+
 export async function mergeMemoryGraph(
   db: PrismaClient,
   args: MergeMemoryArgs,
@@ -239,6 +264,62 @@ export async function mergeMemoryGraph(
   // and the final disposition re-check under their own locks.
   await preflightNoMintedCorpusRemoval(db, sourceMemoryId, 'merge out of its corpus', { includeTombstones: false });
 
+  // #1684 — a target TOMBSTONE at an address this merge would move into.
+  // Classification below matches live rows only (a tombstone is no fold
+  // counterpart), but the unique index is total, so a node at such a loc can
+  // neither fold nor relocate. Refuse before the first batch commits, naming
+  // the locs (the first TOMBSTONED_LOCS_REPORTED of them, with the full count).
+  //
+  // The candidates are exactly what Phase 1 MOVES, read in its own page shape:
+  // a live non-comment node with no live target counterpart, plus EVERY thread
+  // (live or deleted) anchored to one, since carryThreadsInTx carries deleted
+  // comments too, locs unchanged (#1710 review, Diego P2). Not every source
+  // tombstone: an ordinary deleted node never moves, and the deleted threads
+  // of a FOLDING node are destroyed with it rather than carried.
+  //
+  // Fail-fast only, like the preflights above. Under each relocate batch's
+  // locks, the batch rechecks its own rows and its carried threads; a
+  // tombstone that appears after this scan refuses there, but batches that
+  // committed before it stay committed (the merge is resumable, not atomic).
+  {
+    const tombstoned: string[] = [];
+    let count = 0;
+    for (let cursor: string | undefined; ; ) {
+      const page = await db.node.findMany({
+        where: { memoryId: sourceMemoryId, deletedAt: null, nodeType: { not: COMMENT_NODE_TYPE }, ...(cursor ? { id: { gt: cursor } } : {}) },
+        select: { id: true, loc: true },
+        orderBy: { id: 'asc' },
+        take: classifyPage,
+      });
+      if (page.length === 0) break;
+      cursor = page[page.length - 1].id;
+      const folds = new Set(
+        (await db.node.findMany({
+          where: { memoryId: targetMemoryId, deletedAt: null, loc: { in: page.map((n) => n.loc) } },
+          select: { loc: true },
+        })).map((t) => t.loc),
+      );
+      const moving = page.filter((n) => !folds.has(n.loc));
+      const carried = moving.length
+        ? await db.node.findMany({
+            where: { commentMeta: { targetNodeId: { in: moving.map((n) => n.id) } } },
+            select: { loc: true },
+          })
+        : [];
+      const candidates = [...moving.map((n) => n.loc), ...carried.map((c) => c.loc)];
+      const held = candidates.length
+        ? await db.node.findMany({
+            where: { memoryId: targetMemoryId, deletedAt: { not: null }, loc: { in: candidates } },
+            select: { loc: true },
+          })
+        : [];
+      count += held.length;
+      for (const { loc } of held) if (tombstoned.length < TOMBSTONED_LOCS_REPORTED) tombstoned.push(loc);
+      if (page.length < classifyPage) break;
+    }
+    if (count > 0) throw mergeTargetLocTombstonedError(targetMemoryId, tombstoned, count);
+  }
+
   // === Phase 1: classify + relocate, in one keyset-paged scan. ===
   // Page the live source node addresses by id and match each page against the
   // target by loc. A source node whose
@@ -338,16 +419,17 @@ export async function mergeMemoryGraph(
               throw new Error(`merge source node ${row.id} moved during classification; retry the merge`);
             }
           }
-          const lateCollision = await tx.node.findFirst({
-            where: {
-              memoryId: targetMemoryId,
-              deletedAt: null,
-              loc: { in: rows.map((row) => row.loc) },
-            },
-            select: { loc: true },
+          // Total occupancy, like the unique index (#1684): a live row that
+          // appeared is a retryable race; a tombstone is the typed refusal (a
+          // live target soft-deleted after the preflight lands here).
+          const lateCollisions = await tx.node.findMany({
+            where: { memoryId: targetMemoryId, loc: { in: rows.map((row) => row.loc) } },
+            select: { loc: true, deletedAt: true },
           });
-          if (lateCollision) {
-            throw new Error(`merge target loc ${lateCollision.loc} appeared during classification; retry the merge`);
+          const lateTombstones = lateCollisions.filter((row) => row.deletedAt != null).map((row) => row.loc);
+          if (lateTombstones.length > 0) throw mergeTargetLocTombstonedError(targetMemoryId, lateTombstones);
+          if (lateCollisions.length > 0) {
+            throw new Error(`merge target loc ${lateCollisions[0].loc} appeared during classification; retry the merge`);
           }
           // Reentrant memory locks; fresh governed/protected facts for the rows
           // now serialized by their source + destination address locks.
@@ -407,7 +489,21 @@ export async function mergeMemoryGraph(
             });
           }
           // #1664 — the batch's threads move in the same transaction as their targets.
-          await carryThreadsInTx(tx, relocationIds, targetMemoryId);
+          // #1684 — its final member set, read under the carry's locks, is
+          // rechecked against the target's TOTAL occupancy before it moves.
+          await carryThreadsInTx(tx, relocationIds, targetMemoryId, async (threadIds) => {
+            const threadLocs = (await tx.node.findMany({ where: { id: { in: threadIds } }, select: { loc: true } }))
+              .map((c) => c.loc);
+            const occupied = await tx.node.findMany({
+              where: { memoryId: targetMemoryId, loc: { in: threadLocs } },
+              select: { loc: true, deletedAt: true },
+            });
+            const tombstones = occupied.filter((row) => row.deletedAt != null).map((row) => row.loc);
+            if (tombstones.length > 0) throw mergeTargetLocTombstonedError(targetMemoryId, tombstones);
+            if (occupied.length > 0) {
+              throw new Error(`merge target loc ${occupied[0].loc} is occupied by a node; a comment cannot move there; retry the merge`);
+            }
+          });
           return rows.length;
         }, BATCH_TX_OPTS);
         relocatedCount += moved;
