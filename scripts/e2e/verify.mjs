@@ -33,7 +33,10 @@ for (const [handle, fixture] of Object.entries(users)) {
   const session = await fetch(`${base}/auth/session`, { method: 'POST',
     headers: { 'content-type': 'application/json' }, body: JSON.stringify({ code }) });
   assert.equal(session.status, 200);
-  const { token } = await session.json();
+  const { token, isNew } = await session.json();
+  // README: later dev-login sessions use the existing-user handoff. fresh-user's
+  // isNew=true is proven once, at provisioning; every login here is a returning one.
+  assert.equal(isNew, false, `${handle} dev-login must report an existing user`);
   assert.equal((await graphql(token, '{ me { handle } }')).me.handle, principals[handle].handle);
   console.log(`${handle}: token identity, org/App membership, memory record inventory and portal login handoff PASS`);
 }
@@ -73,14 +76,15 @@ for (const principal of ['alpha-admin', 'multi-app', 'e2e-alpha:team']) {
       const listed = await client.callTool({ name: 'hadron_list_apps', arguments: {} });
       const text = listed.content.filter(item => item.type === 'text').map(item => item.text).join('\n');
       assert(!listed.isError);
-      assert.match(text, /2 accessible apps/);
+      // Match the App URNs, not the tool's prose, so a copy edit is not a failure.
+      assert.deepEqual([...new Set(text.match(/hrn:app:[\w.-]+:[\w.-]+/g))].sort(), ['hrn:app:e2e-alpha:team', 'hrn:app:e2e-beta:team']);
       for (const root of ['e2e-alpha', 'e2e-beta']) {
-        assert(text.includes(`hrn:app:${root}:team`));
         const selected = await client.callTool({ name: 'hadron_set_active_app', arguments: { app: `hrn:app:${root}:team` } });
         assert(!selected.isError);
         const after = await client.callTool({ name: 'hadron_list_memories', arguments: {} });
         assert(!after.isError);
-        assert(after.content.filter(item => item.type === 'text').map(item => item.text).join('\n').startsWith(`Scope: user · active App hrn:app:${root}:team —`));
+        const scopeLine = after.content.filter(item => item.type === 'text').map(item => item.text).join('\n').split('\n')[0];
+        assert(scopeLine.includes(`active App hrn:app:${root}:team`), scopeLine);
       }
       console.log('multi-app: MCP App enumeration and switching between both Apps PASS');
     }

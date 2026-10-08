@@ -5,8 +5,9 @@ import { PrismaClient } from '../../src/generated/prisma/index.js';
 import { computeApprovalHash } from '../../src/lib/approvalHash.js';
 import { ensureCurrentNodeRevisionInTransaction } from '../../src/lib/nodeRevisionSnapshot.js';
 
-// Separate from the narrative dev seed: every principal has global READER,
-// so org-role journeys exercise tenant gates rather than platform ADMIN.
+// Separate from the narrative dev seed: every principal has global READER
+// except the org-less platform-admin fixture, so org-role journeys exercise
+// tenant gates rather than platform ADMIN.
 import { users, orgs, checkDocumentInventory } from './catalog.js';
 import { provisionSignIns, disconnectSignInDb } from './provision-signins.js';
 const classes = ['knowledge', 'group', 'personal', 'private', 'app', 'system'] as const;

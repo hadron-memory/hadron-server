@@ -132,7 +132,11 @@ short-lived route server; the real stack server still runs in development. No ma
 For **fresh-user**, only email delivery is simulated by inserting a short-lived,
 browser-bound verification token; the real email verify route creates the user
 and the real handoff route proves `isNew=true` and the empty initial state.
-Later dev-login sessions use the existing-user handoff and report `isNew=false`.
+Later dev-login sessions use the existing-user handoff and report `isNew=false`,
+which `check` asserts for every user. fresh-user is therefore not fresh after
+seeding: a portal first-run journey needs a new signup, not this account.
+Seeding the code-entry form also creates a synthetic OAuth client,
+`e2e-review` (redirect `http://localhost:4000/e2e-callback`).
 
 Google/Apple use a locally generated signing key injected through the existing
 verifiers' test seam, followed by the normal find/link/create helpers. This
