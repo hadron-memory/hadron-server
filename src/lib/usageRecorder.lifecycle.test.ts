@@ -28,6 +28,12 @@ function client(
     {
       get(target, name) {
         if (name === 'usageEvent') return target.usageEvent;
+        // #1705: cleanDb truncates the append-only agent-task tables raw.
+        if (name === '$executeRawUnsafe') {
+          return async (sql: string) => {
+            deleted.push(sql);
+          };
+        }
         return {
           deleteMany: async () => {
             deleted.push(String(name));
