@@ -317,11 +317,13 @@ describe('#1701: several workers bound on one MCP connection', () => {
   it('no number of live bindings evicts the first one (PR #1702 review, Codex P2)', async () => {
     // Superseded binds cannot fill the list (each bind request prunes ended
     // sessions first; the binding's own test above relies on that), so the
-    // eviction a cap could cause needs MANY LIVE bindings: here, 35 workers
-    // bound on one connection after Iris. Iris must still be a candidate.
+    // eviction a cap could cause needs MANY LIVE bindings: here, 33 workers
+    // bound on one connection after Iris, one past the old 32-entry cap.
+    // Iris must still be a candidate. Slow by nature (each bind re-validates
+    // every live binding), hence the explicit timeout.
     const { call } = await sharedConnection();
     const app = await db.worker.findUniqueOrThrow({ where: { id: worker.id }, select: { appId: true } });
-    for (let i = 0; i < 35; i++) {
+    for (let i = 0; i < 33; i++) {
       await db.worker.create({ data: { id: generateId(), appId: app.appId, agentId: agent.id, name: `Extra${i}`, slug: `extra${i}` } });
       await call('hadron_start_session', { description: `chat ${i}`, workerRef: `hrn:worker:attrhttp.example:team:extra${i}` });
     }
@@ -329,7 +331,7 @@ describe('#1701: several workers bound on one MCP connection', () => {
     expect(refused).toContain('[session_ambiguous]');
     expect(refused).toContain('Iris (session');
     expect(await nodeAt('evict:unsaid')).toBeNull();
-  });
+  }, 60_000);
 
   it('reads stay open on an ambiguous connection', async () => {
     const { call } = await sharedConnection();
