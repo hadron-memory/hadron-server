@@ -9424,18 +9424,63 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     }
   };
 
+  /**
+   * #1697 — the worker session this request already speaks for, if any: the
+   * validated X-Hadron-Session header, else the connection's one live binding
+   * (DAC, #1610). Null when neither names a Worker. An ambiguous connection
+   * never reaches here unnamed: the #1701 gate refuses it first.
+   */
+  const boundWorkerSession = async (): Promise<string | null> => {
+    if (auth.sessionId) {
+      const valid = await validateSessionBinding(db, auth, auth.sessionId);
+      return valid?.actor.workerId ? valid.sessionId : null;
+    }
+    const mcpSessionId = getSessionId();
+    if (!mcpSessionId) return null;
+    const live = await liveConnectionBindings(mcpSessionId, auth);
+    if (!live.length || connectionIsAmbiguous(mcpSessionId, live)) return null;
+    const bound = live[live.length - 1];
+    return bound.actor.workerId ? bound.sessionId : null;
+  };
+
   server.tool(
     'hadron_channel_post',
-    'Post a message into a Channel by id or ADDRESS — the chat-root URN hadron_list_channels prints (spec 049 — Channels are the durable, server-ordered streams hadron_list_channels shows; every App\'s default `team` Channel is what hadron_team_chat_post writes). Same contract as hadron_team_chat_post: mentions extracted server-side, replyToSeq wires a reply, session posts AS that session\'s Worker. Item J: a Worker of ANOTHER App authors here only when you (its driver) may write the Channel\'s host memory — the post is then marked cross-App. A Channel you may not read is [channel_not_found].',
+    'Post a message into a Channel by id or ADDRESS — the chat-root URN hadron_list_channels prints (spec 049 — Channels are the durable, server-ordered streams hadron_list_channels shows; every App\'s default `team` Channel is what hadron_team_chat_post writes). Same contract as hadron_team_chat_post: mentions extracted server-side, replyToSeq wires a reply, session posts AS that session\'s Worker. AUTHORSHIP IS EXPLICIT (#1697, parity with the CLI\'s `channel post --session | --as-me`): with no session, a connection bound to one worker session (hadron_start_session) posts as that Worker; otherwise pass asMe: true to post as yourself, or the post is refused [authorship_required] — never silently recorded under your name. Item J: a Worker of ANOTHER App authors here only when you (its driver) may write the Channel\'s host memory — the post is then marked cross-App. A Channel you may not read is [channel_not_found].',
     {
       channel: z.string().describe('The Channel — its id, or its address (the chat root node URN hadron_list_channels prints). Copy one of those; a ref naming nothing reads as a Channel you may not see.'),
       body: z.string().describe('The message text (max 65536 characters). Mention teammates as @worker-name or @handle.'),
       replyToSeq: z.number().int().optional().describe('seq of the message this replies to.'),
-      session: z.string().optional().describe('A session id — the message is authored by that session\'s bound Worker. Omit to post as yourself — except on a SHARED connection (several of your sessions bound on it, e.g. several chat sessions on one host), where an omitted session is refused SESSION_AMBIGUOUS (#1701): pass the id of the session you are, a plain one to post as yourself.'),
+      session: z.string().optional().describe('A session id — the message is authored by that session\'s bound Worker. Omit it on a connection bound to ONE worker session to post as that Worker; on a SHARED connection (several of your sessions bound on it, e.g. several chat sessions on one host) an omitted session is refused SESSION_AMBIGUOUS (#1701). Not combinable with asMe.'),
+      asMe: z.boolean().optional().describe('true posts as YOU, the human, even on a connection bound to a worker (#1697). Required to post as yourself when no worker session is bound or named; without it such a post is refused [authorship_required]. Not combinable with session.'),
     },
-    async ({ channel, body, replyToSeq, session }) => {
+    async ({ channel, body, replyToSeq, session, asMe }) => {
       await heartbeatSession(session);
-      return postToChannel(channel, body, replyToSeq ?? null, session ?? null);
+      // #1697 — never default to the human. The server treats sessionRef as
+      // optional, so an omitted one used to record the caller as the author
+      // with no error: wrong provenance that reads as success (cor:agt:020:03).
+      if (session && asMe) {
+        return {
+          isError: true as const,
+          content: [{ type: 'text' as const, text: '[bad_user_input] hadron_channel_post: pass session OR asMe, not both — one says a Worker authors, the other that you do. Nothing was posted.' }],
+        };
+      }
+      let author = session ?? null;
+      if (!author && !asMe) {
+        author = await boundWorkerSession();
+        if (!author) {
+          return {
+            isError: true as const,
+            content: [{
+              type: 'text' as const,
+              text:
+                '[authorship_required] hadron_channel_post: no worker session is named or bound on this connection, ' +
+                'so this post would be recorded under YOUR name. Nothing was posted. Pass session: "<your worker ' +
+                'session id>" (hadron_whoami lists yours) to post as that Worker, or asMe: true to post as yourself (#1697).',
+            }],
+          };
+        }
+      }
+      return postToChannel(channel, body, replyToSeq ?? null, author);
     },
   );
 
