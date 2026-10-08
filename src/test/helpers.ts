@@ -70,6 +70,11 @@ export async function cleanDb(db: PrismaClient): Promise<void> {
   await db.edge.deleteMany();
   await db.pendingEdge.deleteMany();
   await db.session.deleteMany();
+  // #1705 — agent tasks reference workers and users (NO ACTION), so they go
+  // before both. TRUNCATE, not deleteMany: the team event stream's trigger
+  // refuses a row DELETE while its App exists (append-only), and TRUNCATE
+  // fires no row triggers.
+  await db.$executeRawUnsafe('TRUNCATE agent_team_events, agent_tasks');
   // #974 Workers before agents: workers_agent_id_fkey is RESTRICT.
   await db.worker.deleteMany();
   await db.node.deleteMany();

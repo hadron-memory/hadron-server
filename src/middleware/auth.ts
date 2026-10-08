@@ -13,6 +13,15 @@ export interface AuthContext {
   userId?: string;         // User.id — only set for OAuth/JWT users
   appId?: string;          // App.id — set when caller authenticated via an App Key
   sessionId?: string;      // Session.id — set when operating inside an active session
+  /**
+   * #1705 — the request NAMED a session (X-Hadron-Session) that did not
+   * validate, so `sessionId` is unset and the request proceeds unbound (the
+   * pre-existing silent-drop behaviour, unchanged). A surface whose actor is
+   * the session's worker reads this to refuse rather than act as the bare
+   * credential: a worker whose session ended must not silently become its
+   * human driver (agent tasks, cor:agt:050:08).
+   */
+  sessionBindingRefused?: boolean;
   // Current User-row roles for ordinary user principals. HTTP auth resolves
   // them per request; an existing MCP transport refreshes them before every
   // request because its AuthContext otherwise outlives the credential check.
@@ -214,7 +223,10 @@ async function bindSession(
   sessionId: string,
 ): Promise<void> {
   const bound = await validateSessionBinding(db, ctx, sessionId);
-  if (!bound) return;
+  if (!bound) {
+    ctx.sessionBindingRefused = true;
+    return;
+  }
   ctx.sessionId = bound.sessionId;
   // #1610: the Worker / Agent behind this request's writes comes from the
   // binding just validated — the one thing a client cannot assert.

@@ -105,6 +105,8 @@ export interface Context {
   userId?: string;         // User.id — only set for OAuth/JWT users
   appId?: string;          // App.id — set when caller authenticated via an App Key
   sessionId?: string;      // Session.id — set when operating inside an active session
+  /** #1705 — a named X-Hadron-Session failed validation (see AuthContext.sessionBindingRefused). */
+  sessionBindingRefused?: boolean;
   roles?: ('OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER')[];
   organizationId?: string; // set when the Client is scoped to an organization
   apiKeyId?: string;       // UserApiKey.id — set when a user authenticated via an hdr_user_ key (#562)

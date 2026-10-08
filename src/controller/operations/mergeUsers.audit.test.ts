@@ -15,6 +15,11 @@ const EXEMPT_AUDIT_COLUMNS = new Set([
   'automation_versions.published_by',
   'automation_versions.approved_by',
   'automation_versions.revoked_by',
+  // #1705 — the agent team event stream is append-only (a trigger refuses the
+  // UPDATE a retarget would need): who acted, and who acknowledged an alarm,
+  // is a sealed record of the time. Pinned in agentTasks/agentTasks.test.ts.
+  'agent_team_events.actor_user_id',
+  'agent_team_events.acknowledged_by_user_id',
 ]);
 
 function coveredPairs(registry: Readonly<Record<string, readonly string[]>>): Set<string> {
@@ -36,7 +41,9 @@ describe('mergeUsers audit actor registry', () => {
       SELECT table_name, column_name FROM information_schema.columns
       WHERE table_schema = 'public'
         AND (column_name IN ('created_by', 'updated_by', 'deleted_by', 'revoked_by')
-          OR (table_name = 'automation_versions' AND column_name IN ('published_by', 'approved_by')))
+          OR (table_name = 'automation_versions' AND column_name IN ('published_by', 'approved_by'))
+          OR (table_name = 'agent_tasks' AND column_name = 'assigned_by')
+          OR (table_name = 'agent_team_events' AND column_name IN ('actor_user_id', 'acknowledged_by_user_id')))
     `;
     const schemaPairs = new Set(columns.map(({ table_name, column_name }) => `${table_name}.${column_name}`));
     const covered = coveredPairs(AUDIT_USER_COLUMNS);

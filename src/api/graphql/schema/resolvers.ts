@@ -57,6 +57,7 @@ import { teamSpecQueries } from './resolvers.teamSpec.js';
 import { teamChatMutations, teamChatQueries } from './resolvers.teamChat.js';
 import { teamAttentionMutations, teamAttentionQueries } from './resolvers.teamAttention.js';
 import { teamWorkMutations, teamWorkQueries } from './resolvers.teamWork.js';
+import { agentTaskMutations, agentTaskQueries, agentTaskFieldResolvers } from './resolvers.agentTask.js';
 import { memoryConfigMutations, memoryConfigQueries, memoryConfigFieldResolvers } from './resolvers.memoryConfig.js';
 import { memoryConfigApplyMutations } from './resolvers.memoryConfigApply.js';
 import { nodeApprovalFieldResolvers, nodeApprovalMutations, nodeApprovalQueries } from './resolvers.nodeApproval.js';
@@ -91,6 +92,7 @@ export const resolvers = {
   ...typeResolvers,
   ...impersonationTypeResolvers,
   ...workerFieldResolvers,
+  ...agentTaskFieldResolvers,
   ...scopeFieldResolvers,
   ...channelFieldResolvers,
   ...registerFieldResolvers,
@@ -130,6 +132,7 @@ export const resolvers = {
     ...teamChatQueries,
     ...teamAttentionQueries,
     ...teamWorkQueries,
+    ...agentTaskQueries,
     ...memoryConfigQueries,
     ...memoryConfigTemplateQueries,
     ...scopeQueries,
@@ -172,6 +175,7 @@ export const resolvers = {
     ...teamChatMutations,
     ...teamAttentionMutations,
     ...teamWorkMutations,
+    ...agentTaskMutations,
     ...memoryConfigMutations,
     ...memoryConfigTemplateMutations,
     ...memoryConfigApplyMutations,
