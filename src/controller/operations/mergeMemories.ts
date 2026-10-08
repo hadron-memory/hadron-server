@@ -31,6 +31,7 @@ import { acquireLockSet } from '../../lib/nodeSubtreeLock.js';
 import { recordUrnRename } from '../../lib/urnAlias.js';
 import { safeNodeUrnV2 } from '../../lib/urnEmit.js';
 import { placeholderFillPatch } from '../../lib/specCorpus.js';
+import { isPrismaClientError, REDACTED_DB_ERROR_MESSAGE } from '../../lib/prismaErrors.js';
 import { deletePendingEdgesTargetingNodes, reconcilePendingEdgeCounts } from '../../lib/pendingEdgePromotion.js';
 
 /**
@@ -171,13 +172,29 @@ export interface PartialMergeReport {
   edgesDropped: number;
   /** Live source nodes still to merge; null when the recount itself failed. */
   remainingSourceNodes: number | null;
-  /** The source memory is never deleted by a refused merge. */
-  sourceIntact: true;
+  /**
+   * Whether the source memory still exists. A refused merge never deletes it;
+   * only a failure AFTER a completed merge (the resolver's post-commit steps)
+   * can report false, when `deleteSourceMem` had already removed it.
+   */
+  sourceIntact: boolean;
   remedy: string;
 }
 
+/**
+ * #1691 — the remedy when the merge itself completed and a step after it (the
+ * resolver re-indexing the target, or reading it back) failed. Re-running the
+ * merge is not the answer once the source was deleted.
+ */
+export const MERGE_POST_COMMIT_REMEDY =
+  'The merge itself completed. Re-read the target memory; if it indexes vectors, re-index it, since its merged nodes may not have been queued for embedding.';
+
 const PARTIAL_MERGE_REMEDY =
   'Part of the merge was already applied. Resolve the blocker and re-run the same merge: it resumes from what remains.';
+
+function partialSentence(report: PartialMergeReport): string {
+  return ` The merge was partially applied (${report.relocated} relocated, ${report.folded} folded${report.remainingSourceNodes != null ? `, ${report.remainingSourceNodes} source node(s) remaining` : ''}); the source memory is intact. Resolve the blocker and re-run the same merge to finish it.`;
+}
 
 /**
  * Attach the partial-state report to a merge failure. A typed refusal keeps
@@ -186,8 +203,7 @@ const PARTIAL_MERGE_REMEDY =
  * original's Prisma code when it has one. A NodeAbstractTooLongError keeps
  * its class (the resolver types it) and carries the report on the instance.
  */
-function withPartialMerge(error: unknown, report: PartialMergeReport): unknown {
-  const sentence = ` The merge was partially applied (${report.relocated} relocated, ${report.folded} folded${report.remainingSourceNodes != null ? `, ${report.remainingSourceNodes} source node(s) remaining` : ''}); the source memory is intact. Resolve the blocker and re-run the same merge to finish it.`;
+export function withPartialMerge(error: unknown, report: PartialMergeReport, sentence = partialSentence(report)): unknown {
   if (error instanceof GraphQLError) {
     return new GraphQLError(error.message + sentence, {
       extensions: { ...error.extensions, partialMerge: report },
@@ -199,7 +215,12 @@ function withPartialMerge(error: unknown, report: PartialMergeReport): unknown {
     return error;
   }
   const prismaCode = (error as { code?: unknown })?.code;
-  return new GraphQLError(`mergeMemories stopped part-way: ${(error as Error)?.message ?? String(error)}.` + sentence, {
+  // #1691: a Prisma message carries query arguments and schema internals. The
+  // formatter redacts a Prisma error only one wrapper deep, and this wrapper
+  // puts the message in an error of its own, so redact it here; the original
+  // stays on `originalError` for server reporting.
+  const cause = isPrismaClientError(error) ? REDACTED_DB_ERROR_MESSAGE : `${(error as Error)?.message ?? String(error)}.`;
+  return new GraphQLError(`mergeMemories stopped part-way: ${cause}` + sentence, {
     extensions: {
       code: 'MERGE_PARTIALLY_APPLIED',
       ...(typeof prismaCode === 'string' ? { causeCode: prismaCode } : {}),

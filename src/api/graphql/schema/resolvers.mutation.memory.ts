@@ -32,7 +32,12 @@ import {
 } from '../../../controller/operations/createMemoryShare.js';
 import { cloneMemoryGraph } from '../../../controller/operations/cloneMemory.js';
 import { extractParentNodeGraph } from '../../../controller/operations/extractParentNode.js';
-import { mergeMemoryGraph } from '../../../controller/operations/mergeMemories.js';
+import {
+  MERGE_POST_COMMIT_REMEDY,
+  mergeMemoryGraph,
+  withPartialMerge,
+  type MergeMemoryResult,
+} from '../../../controller/operations/mergeMemories.js';
 import {
   updateMemoryShareRole,
   MemoryShareNotFoundError,
@@ -450,8 +455,9 @@ export const memoryMutations = {
       // ordering of these writes as tunable (cor:api:080).
       // Spec: cor:api:080:01 (collide vs relocate), cor:api:080:02 (source
       // disposition + constraints).
+      let merged: MergeMemoryResult;
       try {
-        await mergeMemoryGraph(ctx.db, {
+        merged = await mergeMemoryGraph(ctx.db, {
           sourceMemoryId: sourceMem.id,
           targetMemoryId: targetMem.id,
           fields,
@@ -476,14 +482,32 @@ export const memoryMutations = {
       // Re-embed: the target gained/changed nodes. If it indexes vectors,
       // re-stamp every node pending so the sweep embeds the relocated + merged
       // content (mirrors cloneMemory's backfill). No-op otherwise.
-      if (targetMem.vectorIndexEnabled) {
-        await backfillMemoryEmbeddings(ctx.db, targetMem.id);
-      }
+      //
+      // #1691: the merge has fully committed by now, so a failure here must
+      // not read as "applied nothing" (the SDL's promise for a refusal without
+      // partialMerge). It reports the completed counts and the source's real
+      // disposition, through the same redacting wrapper as a mid-merge failure.
+      try {
+        if (targetMem.vectorIndexEnabled) {
+          await backfillMemoryEmbeddings(ctx.db, targetMem.id);
+        }
 
-      return ctx.db.memory.findUniqueOrThrow({
-        where: { id: targetMem.id },
-        include: MEMORY_INCLUDE,
-      });
+        return await ctx.db.memory.findUniqueOrThrow({
+          where: { id: targetMem.id },
+          include: MEMORY_INCLUDE,
+        });
+      } catch (e) {
+        throw withPartialMerge(e, {
+          applied: true,
+          relocated: merged.relocatedCount,
+          folded: merged.foldedCount,
+          edgesMoved: merged.edgesMovedCount,
+          edgesDropped: merged.edgesDroppedCount,
+          remainingSourceNodes: 0,
+          sourceIntact: !deleteSourceMem,
+          remedy: MERGE_POST_COMMIT_REMEDY,
+        }, ` The merge itself completed (${merged.relocatedCount} relocated, ${merged.foldedCount} folded)${deleteSourceMem ? ' and the source memory was deleted' : ''}; a step after it failed. ${MERGE_POST_COMMIT_REMEDY}`);
+      }
     },
 
     createMemory: async (

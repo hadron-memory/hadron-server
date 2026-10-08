@@ -10,6 +10,10 @@ import { cleanDb } from '../../test/helpers.js';
 import { generateId } from '../../lib/id.js';
 import { mergeMemoryGraph } from './mergeMemories.js';
 import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
+import { ApolloServer } from '@apollo/server';
+import { typeDefs } from '../../api/graphql/schema/typeDefs.js';
+import { formatGraphQLError } from '../../api/graphql/formatError.js';
+import { Prisma } from '../../generated/prisma/index.js';
 
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -152,4 +156,94 @@ describe('#1686 — a mid-merge refusal reports the partial state', () => {
     expect((e as GraphQLError).extensions?.partialMerge).toBeUndefined();
     expect(await live(src.id)).toBe(before);
   });
+});
+
+// #1691 review (Diego, P2 ×2).
+describe('#1691 — the partial-state contract holds through the resolver and the wire', () => {
+  // A Prisma message carries query arguments and schema internals; nothing of it may reach a client.
+  const SECRET = 'Invalid `prisma.node.updateMany()` invocation: column "secret_internal_column"';
+  const prismaFault = () => new Prisma.PrismaClientKnownRequestError(SECRET, { code: 'P2010', clientVersion: 'test' });
+  const api = new ApolloServer<Context>({ typeDefs, resolvers, formatError: formatGraphQLError });
+  const runMerge = async (deleteSourceMem: boolean) => {
+    const response = await api.executeOperation(
+      {
+        query: 'mutation($i: MergeMemoriesInput!) { mergeMemories(input: $i) { id } }',
+        variables: { i: { source: src.id, target: dst.id, deleteSourceMem } },
+      },
+      { contextValue: as() },
+    );
+    if (response.body.kind !== 'single') throw new Error('expected a single response');
+    const errors = response.body.singleResult.errors ?? [];
+    expect(errors).toHaveLength(1);
+    return errors[0];
+  };
+
+  it('a mid-merge Prisma failure is redacted on the wire and keeps its partial report', async () => {
+    await node(src.id, '00000000000000000000000000000001', 'a');
+    await node(src.id, 'ffffffffffffffffffffffffffffff09', 'collide');
+    await node(dst.id, generateId(), 'collide');
+    const before = await live(src.id);
+    // Everything but 'collide' relocates in the first batch (default sizes);
+    // 'collide' folds into the target's row in a later one. Fail that one.
+    const transaction = db.$transaction.bind(db);
+    const spy = vi.spyOn(db, '$transaction').mockImplementation((async (...args: unknown[]) => {
+      if ((await live(src.id)) === 1) throw prismaFault();
+      return (transaction as (...a: unknown[]) => unknown)(...args);
+    }) as never);
+    let error;
+    try {
+      error = await runMerge(false);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(JSON.stringify(error)).not.toContain('secret_internal_column');
+    expect(JSON.stringify(error)).not.toContain('prisma.node');
+    expect(error.message).toContain('partially applied');
+    expect(error.extensions).toMatchObject({
+      code: 'MERGE_PARTIALLY_APPLIED',
+      causeCode: 'P2010',
+      partialMerge: { applied: true, relocated: before - 1, folded: 0, remainingSourceNodes: 1, sourceIntact: true },
+    });
+    expect(await live(src.id)).toBe(1);
+  });
+
+  // Fail the resolver's re-index of the target, which runs after the whole merge committed.
+  const failBackfill = () => {
+    const updateMany = db.node.updateMany.bind(db.node);
+    return vi.spyOn(db.node, 'updateMany').mockImplementation(((args: { where?: { memoryId?: string }; data?: Record<string, unknown> }) => {
+      if (args.where?.memoryId === dst.id && args.data && 'embeddingPendingAt' in args.data) throw prismaFault();
+      return updateMany(args as never);
+    }) as never);
+  };
+
+  for (const deleteSourceMem of [false, true]) {
+    it(`a failure after the merge committed reports the completed merge (deleteSourceMem: ${deleteSourceMem})`, async () => {
+      expect((await db.memory.findUniqueOrThrow({ where: { id: dst.id } })).vectorIndexEnabled).toBe(true);
+      await node(src.id, '00000000000000000000000000000001', 'a');
+      await node(src.id, 'ffffffffffffffffffffffffffffff09', 'collide');
+      await node(dst.id, generateId(), 'collide');
+      const before = await live(src.id);
+      const spy = failBackfill();
+      let error;
+      try {
+        error = await runMerge(deleteSourceMem);
+      } finally {
+        spy.mockRestore();
+      }
+      expect(JSON.stringify(error)).not.toContain('secret_internal_column');
+      expect(error.message).toContain('The merge itself completed');
+      expect(error.extensions).toMatchObject({
+        code: 'MERGE_PARTIALLY_APPLIED',
+        partialMerge: {
+          applied: true, relocated: before - 1, folded: 1, remainingSourceNodes: 0,
+          sourceIntact: !deleteSourceMem,
+          remedy: expect.stringContaining('re-index'),
+        },
+      });
+      // The report is true: everything moved, and the source went only when asked.
+      expect(await live(src.id)).toBe(0);
+      const source = await db.memory.findUniqueOrThrow({ where: { id: src.id } });
+      expect(source.deletedAt !== null).toBe(deleteSourceMem);
+    });
+  }
 });
