@@ -625,3 +625,8 @@ CREATE INDEX IF NOT EXISTS "nodes_msg_channel_seq_loc_c_idx"
 
 -- #1655: compiled automation versions.
 \ir automation-invariants.sql
+
+-- #1705: agent task shape + the append-only team event stream. One source,
+-- shared verbatim with migration 20261008010000_agent_tasks (pinned by
+-- src/lib/agentTasks/invariants.test.ts).
+\ir agent-task-invariants.sql

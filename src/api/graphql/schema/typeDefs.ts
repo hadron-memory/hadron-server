@@ -6242,6 +6242,58 @@ export const typeDefs = `#graphql
   enum TeamSpecForm { SERVER CLIENT_INPUT }
 
   type Query {
+
+    """
+    #1705 — one agent task, or null when it does not exist or the caller may
+    not read it (no existence oracle). Readers: the App's participants, workers
+    acting through their sessions included (cor:agt:050:21).
+    """
+    agentTask(id: ID!): AgentTask
+
+    """
+    #1705 — a team App's agent tasks, newest first. Filters combine with AND;
+    owner / assignee name a party of the App (a ref naming nobody matches
+    nothing). queued: pending with no assignee. limit defaults to 50 (cap 200).
+    Readers: the App's participants (cor:agt:050:21); a pure App key is refused.
+    An App you do not participate in answers APP_NOT_FOUND, exactly like an
+    absent one.
+    """
+    agentTasks(
+      appRef: ID!
+      status: [AgentTaskStatus!]
+      owner: AgentTaskPartyInput
+      assignee: AgentTaskPartyInput
+      tag: String
+      parentTaskId: ID
+      rootsOnly: Boolean
+      queued: Boolean
+      limit: Int
+      offset: Int
+    ): [AgentTask!]!
+
+    """
+    #1705 — a task and every task below it, the root first, then by depth and
+    creation. Null when the root is missing or unreadable. Bounded at 1000 rows.
+    """
+    agentTaskTree(root: ID!): [AgentTask!]
+
+    """
+    #1705 — a team App's event stream (cor:agt:050:11), in (createdAt, id)
+    order. To read the next page pass after: the id of the last event you
+    read; the cursor is the (createdAt, id) pair, so events sharing a
+    timestamp are never skipped. since is a coarse time filter (strictly
+    after), not a continuation. limit defaults to 50 (cap 200).
+    """
+    agentTeamEvents(
+      appRef: ID!
+      since: DateTime
+      "The id of the last event read: the page continues strictly after it. An id that is not an event of this App is refused BAD_USER_INPUT."
+      after: ID
+      types: [String!]
+      alarmsOnly: Boolean
+      taskId: ID
+      limit: Int
+    ): [AgentTeamEvent!]!
     "Declarative team JSON Schema (2020-12). apiVersion is the full identifier hadron.dev/team/v1alpha1; HTTP discovery uses /schemas/team/v1alpha1.json. CLIENT_INPUT additionally permits file parts for clients to inline; the server accepts SERVER only."
     teamSpecSchema(apiVersion: String!, form: TeamSpecForm = SERVER): String!
     """
@@ -7849,6 +7901,67 @@ export const typeDefs = `#graphql
   }
 
   type Mutation {
+
+    """
+    #1705 — create an agent task (cor:agt:050:06 root, :07 child). Writes
+    task.created, and task.assigned when an assignee is named. A worker acts
+    through its session (X-Hadron-Session); a person acts as themselves.
+    Typed refusals: TASK_NOT_FOUND (a parent the caller cannot read, or in
+    another App), TASK_NOT_ASSIGNEE, TASK_ENDED, TASK_CHILD_OWNER_MISMATCH,
+    TASK_NOT_OWNER (another owner named by someone who does not manage the
+    App), TASK_OWNER_INVALID, TASK_ASSIGNEE_INVALID, SESSION_NOT_BOUND,
+    APP_NOT_FOUND (an App that does not exist or that you do not participate
+    in, alike), APP_UNINSTALLED, FORBIDDEN (impersonation), BAD_USER_INPUT.
+    "Whoever manages the App" is strict (cor:acl:010:01): a user-owned App's
+    owner, or the org's ADMINs and OWNERs. Every write re-checks the caller's
+    participation and the App's state inside its transaction.
+    """
+    createAgentTask(input: CreateAgentTaskInput!): AgentTask!
+
+    """
+    #1705 — assign a queued task (pending, no assignee): the task's owner or
+    whoever manages the App (cor:agt:050:09). closeSessionWhenDone, when
+    given, replaces the task's value. Refusals: TASK_NOT_FOUND, TASK_NOT_OWNER,
+    TASK_ENDED, TASK_INVALID_TRANSITION (already assigned: use
+    reassignAgentTask), TASK_ASSIGNEE_INVALID, SESSION_NOT_BOUND, APP_UNINSTALLED.
+    """
+    assignAgentTask(taskId: ID!, assignee: AgentTaskPartyInput!, closeSessionWhenDone: Boolean): AgentTask!
+
+    """
+    #1705 — move a task to another assignee: the task's owner, or whoever
+    manages the App (cor:agt:050:09). A started task stays started; the former
+    assignee can no longer move it. Refusals: TASK_NOT_FOUND, TASK_NOT_OWNER,
+    TASK_ENDED, TASK_INVALID_TRANSITION (no assignee yet, or the same one),
+    TASK_ASSIGNEE_INVALID, SESSION_NOT_BOUND, APP_UNINSTALLED.
+    """
+    reassignAgentTask(taskId: ID!, assignee: AgentTaskPartyInput!, closeSessionWhenDone: Boolean): AgentTask!
+
+    """
+    #1705 — start a pending task: its assignee only (cor:agt:050:08).
+    Refusals: TASK_NOT_FOUND, TASK_NOT_ASSIGNEE, TASK_ENDED,
+    TASK_INVALID_TRANSITION, SESSION_NOT_BOUND, APP_UNINSTALLED.
+    """
+    startAgentTask(taskId: ID!): AgentTask!
+
+    """
+    #1705 — record progress on a started task: its assignee only
+    (cor:agt:050:08). Carries no text. Refusals as startAgentTask.
+    """
+    recordAgentTaskProgress(taskId: ID!): AgentTask!
+
+    """
+    #1705 — finish a started task with its result: its assignee only
+    (cor:agt:050:08). A pending task is refused: start it first. Refusals as
+    startAgentTask, plus BAD_USER_INPUT for an outcome that is not one word.
+    """
+    finishAgentTask(taskId: ID!, result: AgentTaskResultInput!): AgentTask!
+
+    """
+    #1705 — cancel a pending or started task: its owner, or whoever manages
+    the App (cor:agt:050:09). Refusals: TASK_NOT_FOUND, TASK_NOT_OWNER,
+    TASK_ENDED, SESSION_NOT_BOUND, APP_UNINSTALLED.
+    """
+    cancelAgentTask(taskId: ID!): AgentTask!
     """
     Start impersonating another member of orgRef (admin support/diagnostics).
     Caller must be a live ADMIN/OWNER of the org (platform ADMIN/OWNER is
@@ -10634,5 +10747,177 @@ export const typeDefs = `#graphql
     locked: Boolean!
     lockedBy: String
     expiresAt: DateTime
+  }
+
+  # ── #1705 Agent tasks (Task Management T1, epic #1704; cor:agt:050) ──────
+
+  "An agent task's status (cor:agt:050:02). FINISHED and CANCELLED are the end states."
+  enum AgentTaskStatus {
+    PENDING
+    STARTED
+    FINISHED
+    CANCELLED
+  }
+
+  "Whether a task party is a team Worker or a person."
+  enum AgentTaskPartyKind {
+    WORKER
+    USER
+  }
+
+  """
+  A task's owner, assignee or audit actor, as a sanitized projection: the
+  Worker's name and URN, or the person's handle. Never the User object, so a
+  task never exposes another person's account fields.
+  """
+  type AgentTaskParty {
+    kind: AgentTaskPartyKind!
+    id: ID!
+    "The Worker's name, or the person's handle."
+    name: String
+    "The Worker's URN; null for a person."
+    urn: String
+  }
+
+  """
+  Names exactly one task party: a worker of the task's App (its id, URN or
+  name), or a person who participates in the App (their user id or handle).
+  """
+  input AgentTaskPartyInput {
+    worker: String
+    user: String
+  }
+
+  "What the platform's matcher must respect when it chooses an assignee (plan design:agent-tasks section 3.1; consumed by T3)."
+  type AgentTaskRequirements {
+    role: String
+    familyIn: [String!]
+    familyNotIn: [String!]
+    excludeWorkerIds: [ID!]
+  }
+
+  input AgentTaskRequirementsInput {
+    role: String
+    "Model families the assignee must run as. Give this or familyNotIn, not both."
+    familyIn: [String!]
+    familyNotIn: [String!]
+    "Workers of this App (id, URN or name) the matcher must not pick."
+    excludeWorkers: [String!]
+  }
+
+  "A finished task's result (cor:agt:050:01)."
+  type AgentTaskResult {
+    "One word: succeeded, failed, or a word the team chooses."
+    outcome: String!
+    summary: String
+    "A URL or a node URN."
+    evidence: String
+  }
+
+  input AgentTaskResultInput {
+    "One word (letters, digits, underscore, hyphen or dot; up to 64 characters), e.g. succeeded or failed. It is copied into the event stream, which never holds free text."
+    outcome: String!
+    summary: String
+    evidence: String
+  }
+
+  """
+  One piece of work a team App has assigned, or wants assigned
+  (cor:agt:050:01). The platform records who holds it, since when and how it
+  ended; it never reads what the work is. Readable by the App's participants,
+  workers acting through their sessions included (cor:agt:050:21).
+  """
+  type AgentTask {
+    id: ID!
+    appId: ID!
+    title: String!
+    description: String
+    "Opaque origin reference (an issue URL, a node URN). Not interpreted."
+    source: String
+    "Null for a root task."
+    parentTaskId: ID
+    owner: AgentTaskParty!
+    "Null while the task is queued."
+    assignee: AgentTaskParty
+    requirements: AgentTaskRequirements
+    status: AgentTaskStatus!
+    "Derived (cor:agt:050:03): pending with no assignee. Never stored."
+    queued: Boolean!
+    "Derived (cor:agt:050:04): started with at least one pending or started child task. Never stored."
+    waitingOnChildren: Boolean!
+    startBy: DateTime
+    startedAt: DateTime
+    finishedAt: DateTime
+    cancelledAt: DateTime
+    "Set only on a finished task."
+    result: AgentTaskResult
+    tags: [String!]!
+    """
+    Whether finishing asks the assignee to end its worker session
+    (cor:agt:050:10). Set by whoever assigns; stored only in this release,
+    carried out by the host-operations slice.
+    """
+    closeSessionWhenDone: Boolean!
+    assignedAt: DateTime
+    assignedBy: AgentTaskParty
+    createdAt: DateTime!
+    createdBy: AgentTaskParty
+    updatedAt: DateTime
+  }
+
+  """
+  One append-only record of something that happened in a team App's task work
+  (cor:agt:050:11). Never changed or removed; an alarm's acknowledgement is the
+  one thing added later. payload carries ids, counts and outcome words only,
+  never message or description text.
+  """
+  type AgentTeamEvent {
+    id: ID!
+    appId: ID!
+    "e.g. task.created, task.assigned, task.reassigned, task.started, task.progress, task.finished, task.cancelled."
+    type: String!
+    taskId: ID
+    "Who acted: the Worker when the request was bound to a worker session, else the person."
+    actor: AgentTaskParty
+    "The worker the event concerns, e.g. a new assignee."
+    subjectWorker: AgentTaskParty
+    "ALARM for an alarm; null for an ordinary event."
+    severity: AgentTeamEventSeverity
+    "Alarms only: the owner chain when the alarm was raised, nearest first."
+    chain: JSON
+    acknowledgedBy: AgentTaskParty
+    acknowledgedAt: DateTime
+    payload: JSON!
+    createdAt: DateTime!
+  }
+
+  enum AgentTeamEventSeverity {
+    ALARM
+  }
+
+  """
+  createAgentTask input. A ROOT task names appRef; any App participant may
+  create one (cor:agt:050:06). A CHILD task names parentTaskId; only the
+  parent's assignee may create one, and it owns it (cor:agt:050:07).
+  """
+  input CreateAgentTaskInput {
+    "The team App (id or URN). Required for a root task; for a child task it is taken from the parent and, if given, must match."
+    appRef: ID
+    parentTaskId: ID
+    title: String!
+    description: String
+    source: String
+    """
+    Defaults to the creator. Naming someone else is accepted only from whoever
+    manages the App, and never for a child task (TASK_CHILD_OWNER_MISMATCH).
+    """
+    owner: AgentTaskPartyInput
+    "Omit to leave the task queued."
+    assignee: AgentTaskPartyInput
+    requirements: AgentTaskRequirementsInput
+    startBy: DateTime
+    tags: [String!]
+    "Defaults to true (cor:agt:050:10)."
+    closeSessionWhenDone: Boolean
   }
 `;

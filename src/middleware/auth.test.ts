@@ -199,6 +199,7 @@ describe('resolveAuthContext', () => {
       const ctx = await resolveAuthContext(req, db);
       expect(ctx.appId).toBe(appId);
       expect(ctx.sessionId).toBe('sess-1');
+      expect(ctx.sessionBindingRefused).toBeUndefined();
     });
 
     it('#1661 review (Rook P2-1, DY-5): a NO-expiry session binds while recent and stops binding once dormant', async () => {
@@ -245,6 +246,10 @@ describe('resolveAuthContext', () => {
       const ctx = await resolveAuthContext(req, db);
       expect(ctx.appId).toBe(appId);
       expect(ctx.sessionId).toBeUndefined();
+      // #1705: the request still proceeds, but it is marked as having named a
+      // session it cannot use, so agent-task writes refuse instead of acting
+      // as the bare credential.
+      expect(ctx.sessionBindingRefused).toBe(true);
     });
 
     it('refuses to bind a session belonging to another app', async () => {
@@ -281,6 +286,7 @@ describe('resolveAuthContext', () => {
       } as unknown as Request;
       const ctx = await resolveAuthContext(req, db);
       expect(ctx.sessionId).toBeUndefined();
+      expect(ctx.sessionBindingRefused).toBe(true);
     });
 
     /**

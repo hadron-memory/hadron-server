@@ -155,6 +155,18 @@ export async function requireWorkerReadAccess(ctx: Context, app: AppRow): Promis
   throw forbidden();
 }
 
+/** #1705 — does any agent task name this worker as its owner or assignee? */
+async function workerHasAgentTasks(
+  db: Pick<Context['db'], 'agentTask'>,
+  workerId: string,
+): Promise<boolean> {
+  const row = await db.agentTask.findFirst({
+    where: { OR: [{ ownerWorkerId: workerId }, { assigneeWorkerId: workerId }] },
+    select: { id: true },
+  });
+  return row !== null;
+}
+
 /**
  * Batch form of the worker-read audience, as a `where` over workers. Ordinary
  * user principals delegate to the shared App-participation predicate
@@ -1295,6 +1307,14 @@ export const workerMutations = {
         { extensions: { code: 'WORKER_IN_USE', workerId: worker.id } },
       );
     }
+    // #1705 — owning or holding an agent task is doing something, too (and
+    // the task's worker reference must not dangle).
+    if (await workerHasAgentTasks(ctx.db, worker.id)) {
+      throw new GraphQLError(
+        'This worker owns or is assigned agent tasks. Retire it instead.',
+        { extensions: { code: 'WORKER_IN_USE', workerId: worker.id } },
+      );
+    }
     if (worker.memoryId) {
       const [nodes, assets] = await Promise.all([
         ctx.db.node.count({ where: { memoryId: worker.memoryId } }),
@@ -1317,6 +1337,12 @@ export const workerMutations = {
         if (inTxSessions > 0) {
           throw new GraphQLError(
             'This worker has driven sessions — its name is bound to that history forever. Retire it instead.',
+            { extensions: { code: 'WORKER_IN_USE', workerId: worker.id } },
+          );
+        }
+        if (await workerHasAgentTasks(tx, worker.id)) {
+          throw new GraphQLError(
+            'This worker owns or is assigned agent tasks. Retire it instead.',
             { extensions: { code: 'WORKER_IN_USE', workerId: worker.id } },
           );
         }
