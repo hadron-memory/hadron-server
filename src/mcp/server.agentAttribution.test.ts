@@ -190,11 +190,20 @@ describe('DAC: hadron_start_session binds the MCP connection (#1610 follow-on)',
     }
   });
 
-  it('a plain session replaces an earlier worker binding on the connection (#1665 review)', async () => {
+  it('a plain session stops an earlier worker\'s credit by making the connection ambiguous (#1665 review, superseded by #1702 QA)', async () => {
+    // #1665 wanted a plain start to end the previous worker's credit. It used
+    // to do that by wiping the binding; on a shared connection that silently
+    // stripped OTHER chat sessions' workers too (Cody's P2 on #1702). Now the
+    // plain session joins the bindings as "no worker", so an unnamed write is
+    // refused, and naming the plain session writes as the user alone.
     const call = await mcpConnection();
     await call('hadron_start_session', { description: 'dac', workerRef: 'hrn:worker:attrhttp.example:team:iris', force: true });
-    await call('hadron_start_session', { description: 'plain' });
-    await call('hadron_create_node', { urn: `hrn:node:${appMemory.urn}:dac:plain`, name: 'plain' });
+    const plain = /Session started: ([0-9a-f]{32})/.exec(await call('hadron_start_session', { description: 'plain' }))![1];
+    const refused = await call('hadron_create_node', { urn: `hrn:node:${appMemory.urn}:dac:plain-unsaid`, name: 'unsaid' }, undefined, { allowError: true });
+    expect(refused).toContain('[session_ambiguous]');
+    expect(refused).toContain('no worker (plain session)');
+    expect(await db.node.findFirst({ where: { memoryId: appMemory.id, loc: 'dac:plain-unsaid' } })).toBeNull();
+    await call('hadron_create_node', { urn: `hrn:node:${appMemory.urn}:dac:plain`, name: 'plain', session: plain });
     expect(await attributionAt('dac:plain', appMemory.id)).toEqual({ createdByWorkerId: null, createdByAgentId: null });
   });
 
@@ -332,6 +341,26 @@ describe('#1701: several workers bound on one MCP connection', () => {
     expect(refused).toContain('Iris (session');
     expect(await nodeAt('evict:unsaid')).toBeNull();
   }, 60_000);
+
+  it('a plain start from a third chat session does not strip the others\' workers (#1702 QA, Cody P2)', async () => {
+    const { call, dara, irisSession, daraSession } = await sharedConnection();
+    const plainReceipt = await call('hadron_start_session', { description: 'chat C, no worker' });
+    expect(plainReceipt).toContain('SHARED CONNECTION');
+    const refused = await call('hadron_create_node', { urn: `hrn:node:${appMemory.urn}:plain3:unsaid`, name: 'unsaid' }, undefined, { allowError: true });
+    expect(refused).toContain('[session_ambiguous]');
+    expect(await nodeAt('plain3:unsaid')).toBeNull();
+    // Chat sessions A and B still write as their own workers.
+    await call('hadron_create_node', { urn: `hrn:node:${appMemory.urn}:plain3:a`, name: 'a', session: irisSession });
+    await call('hadron_create_node', { urn: `hrn:node:${appMemory.urn}:plain3:b`, name: 'b', session: daraSession });
+    expect(await attributionAt('plain3:a', appMemory.id)).toEqual({ createdByWorkerId: worker.id, createdByAgentId: agent.id });
+    expect(await attributionAt('plain3:b', appMemory.id)).toEqual({ createdByWorkerId: dara.id, createdByAgentId: agent.id });
+  });
+
+  it('team chat without session is refused on a shared connection, not posted as the human (#1702 QA note)', async () => {
+    const { call } = await sharedConnection();
+    const refused = await call('hadron_team_chat_post', { body: 'who am I?' }, undefined, { allowError: true });
+    expect(refused).toContain('[session_ambiguous]');
+  });
 
   it('reads stay open on an ambiguous connection', async () => {
     const { call } = await sharedConnection();
