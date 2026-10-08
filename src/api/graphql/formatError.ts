@@ -23,7 +23,7 @@
  * so a new entry cannot be half-registered.
  */
 import type { GraphQLFormattedError } from 'graphql';
-import { Prisma } from '../../generated/prisma/index.js';
+import { isPrismaClientError, REDACTED_DB_ERROR_MESSAGE } from '../../lib/prismaErrors.js';
 import { UrnNotQualifiedError, UrnParseError } from '../../lib/urn.js';
 import { AmbiguousLegacyUrnError } from '../../lib/entityRef/errors.js';
 import { EntityNotFoundError } from '../../lib/entityRef/entityNotFound.js';
@@ -174,13 +174,9 @@ export function formatGraphQLError(
   // #1688: Prisma messages contain query arguments and schema internals.
   // Keep the original exception for server reporting; expose only the stable
   // failure code. Domain errors above retain their expected client messages.
-  if (original instanceof Prisma.PrismaClientValidationError ||
-      original instanceof Prisma.PrismaClientKnownRequestError ||
-      original instanceof Prisma.PrismaClientUnknownRequestError ||
-      original instanceof Prisma.PrismaClientInitializationError ||
-      original instanceof Prisma.PrismaClientRustPanicError) {
+  if (isPrismaClientError(original)) {
     return {
-      message: 'Unable to complete this request. Please try again.',
+      message: REDACTED_DB_ERROR_MESSAGE,
       locations: formattedError.locations,
       path: formattedError.path,
       extensions: { code: 'INTERNAL_SERVER_ERROR' },

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
 export const orgs = ['e2e-alpha', 'e2e-beta'];
+export { workerNames } from '../../src/test/e2eWorkerNames.js';
 // Golden access expectations: system is excluded from the ordinary memory list;
 // group requires MemoryMember, and strict-owner memories belong to the admin.
 // App team records require participation; worker records require management
