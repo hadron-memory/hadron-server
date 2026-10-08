@@ -242,6 +242,18 @@ describe('castWorker — confusable naming (#1677)', () => {
     await expectCode(cast({ agentRef: roleAgent.id, name: 'ＡLICE' }), 'WORKER_NAME_TAKEN');
   });
 
+  it.each([
+    ['mira', 'Μira'], // stored lowercase Latin, Greek capital Mu candidate
+    ['Μira', 'mira'], // the reverse insertion order
+  ])('refuses %s then %s across case variants of the reserved name', async (first, second) => {
+    const existing = await cast({ agentRef: roleAgent.id, name: first });
+    for (const operation of [M.castWorker, Q.castWorkerPreview]) {
+      await expect(operation({}, { appRef: app.id, agentRef: roleAgent.id, name: second }, ctx(admin.id)))
+        .rejects.toMatchObject({ extensions: { code: 'WORKER_NAME_CONFUSABLE', collidingName: first, workerId: existing.id } });
+    }
+    expect(await db.worker.count({ where: { appId: app.id } })).toBe(1);
+  });
+
   it('allows the same skeleton in different Apps', async () => {
     await cast({ agentRef: roleAgent.id, name: 'Alice' });
     const other = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'Other', urn: `${org.urn}:other` } });

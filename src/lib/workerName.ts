@@ -17,12 +17,17 @@ export function workerNameSkeleton(name: string): string {
     .join('').normalize('NFD');
 }
 
+function caseFold(name: string): string {
+  return Array.from(name.trim().normalize('NFKC'), (c) => CASE_FOLD.get(c.codePointAt(0)!) ?? c).join('');
+}
+
 // Keep the original-case skeleton as well as the caseless one: folding first
 // alone loses real uppercase confusables (Greek Μ → Latin M, but μ ≠ m).
+// The third key folds the skeleton's prototype, so a lookalike of ANY case
+// variant collides: `Μira` → `Mira` → `mira` meets a stored lowercase `mira`.
 export function workerNameComparisonKeys(name: string): readonly string[] {
-  const folded = Array.from(name.trim().normalize('NFKC'), (c) => CASE_FOLD.get(c.codePointAt(0)!) ?? c)
-    .join('');
-  return [...new Set([workerNameSkeleton(name), workerNameSkeleton(folded)])];
+  const skeleton = workerNameSkeleton(name);
+  return [...new Set([skeleton, workerNameSkeleton(caseFold(name)), workerNameSkeleton(caseFold(skeleton))])];
 }
 
 export function findConfusableWorker<T extends { name: string }>(name: string, workers: readonly T[]): T | undefined {

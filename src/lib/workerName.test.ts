@@ -16,6 +16,14 @@ describe('worker name equivalence (#1677)', () => {
     expect(findConfusableWorker(candidate, [{ name: original }])).toEqual({ name: original });
   });
 
+  it.each([
+    ['mira', 'Μira'], // lowercase Latin vs Greek capital Mu
+    ['oscar', 'Оscar'], // lowercase Latin vs Cyrillic capital O
+  ])('equates lowercase %s with uppercase lookalike %s in both orders', (latin, lookalike) => {
+    expect(findConfusableWorker(lookalike, [{ name: latin }])).toEqual({ name: latin });
+    expect(findConfusableWorker(latin, [{ name: lookalike }])).toEqual({ name: lookalike });
+  });
+
   it('preserves accent differences and does not apply locale-specific Turkic folding', () => {
     expect(workerNameSkeleton('José')).not.toBe(workerNameSkeleton('Jose'));
     expect(workerNameSkeleton('İris')).not.toBe(workerNameSkeleton('Iris'));
