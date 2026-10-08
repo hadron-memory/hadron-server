@@ -7,7 +7,7 @@ import { ensureCurrentNodeRevisionInTransaction } from '../../src/lib/nodeRevisi
 
 // Separate from the narrative dev seed: every principal has global READER,
 // so org-role journeys exercise tenant gates rather than platform ADMIN.
-import { users, orgs, checkDocumentInventory } from './catalog.js';
+import { users, orgs, workerNames, checkDocumentInventory } from './catalog.js';
 const classes = ['knowledge', 'group', 'personal', 'private', 'app', 'system'] as const;
 const id = (name: string) => createHash('sha256').update(`hadron-e2e:${name}`).digest('hex').slice(0, 32);
 const db = new PrismaClient();
@@ -69,7 +69,7 @@ async function seed() {
       if (cls === 'group') await db.memoryMember.create({ data: {
         memoryId, userId: owner, role: 'owner' } });
     }
-    for (const role of ['coordinator', 'qa-engineer']) {
+    for (const role of ['coordinator', 'qa-engineer'] as const) {
       const agentId = id(`${org}:${role}`);
       await db.agent.create({ data: { id: agentId, organizationId,
         urn: `${org}:${role}`, name: role, personaRole: role,
@@ -82,7 +82,7 @@ async function seed() {
       await db.memory.create({ data: { id: workerMemoryId, organizationId, appId,
         urn: `${org}:${role}-working`, name: `${role} working`, class: 'app', tags: ['e2e'] } });
       await db.worker.create({ data: { id: id(`${org}:${role}:worker`), appId, agentId,
-        name: role === 'coordinator' ? 'Test Coordinator' : 'Test Reviewer',
+        name: workerNames[role],
         slug: role === 'coordinator' ? 'test-coordinator' : 'test-reviewer', role, memoryId: workerMemoryId } });
     }
     const root = await node(memoryIds.app, 'chats:team', { nodeType: 'chat', data: { lastSeq: 0 } });
