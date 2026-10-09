@@ -5,6 +5,7 @@ import {
   appendChatMessage,
   updateChatRootData,
   withChatRootLock,
+  type ChatTxRunner,
 } from '../../../lib/chatRoot.js';
 import { mintMemoryUrnV2 } from '../../../lib/mintMemoryUrnV2.js';
 import { ensureAgentSubscription } from '../../../controller/operations/ensureAgentSubscription.js';
@@ -29,7 +30,7 @@ import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { AgentNotFoundError, UserNotFoundError } from '../../../lib/entityRef/errors.js';
 import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
 import { appKeyMayActFor, appKeySessionMatchesAgent, canChatWithAgent, chatAuthorityAnchors, chatCarrierApps } from './agentChatAccess.js';
-import { withAuthorizedTx } from './authorizedTx.js';
+import { withAuthorizedMemoryTx, withAuthorizedTx } from './authorizedTx.js';
 import { activeAppInstallLicenseIdsForAgent, isAgentInstalledAndLicensed } from '../../../lib/appAgent.js';
 import { GraphQLError } from 'graphql';
 import { type InputJsonValue } from '../../../generated/prisma/runtime/library.js';
@@ -71,6 +72,24 @@ const MODEL_HISTORY_LIMIT = 50;
 
 /** A carrier App appeared after the anchors were chosen (#1585, Chip); retry with fresh anchors. */
 class ChatAuthorityScopeChanged extends Error {}
+
+/**
+ * #1717 (Diego on #1725): the transaction every chat-by-loc write runs in. The
+ * pre-transaction `requireMemoryWriteAccess` only fails fast; a membership
+ * revoked while the write waited for its lock would still have been admitted.
+ * So the gate runs again on the transaction, after the authority anchors a
+ * revoker holds exclusively (the memory, its owners, the caller, and the App
+ * an app-class memory belongs to) and before any chat lock or write.
+ */
+async function chatWriteTx(ctx: Context, memoryId: string): Promise<ChatTxRunner> {
+  const memory = await ctx.db.memory.findUnique({ where: { id: memoryId }, select: { appId: true } });
+  const anchors = memory?.appId ? [{ kind: 'app' as const, id: memory.appId }] : [];
+  return (fn) => withAuthorizedMemoryTx(
+    ctx, memoryId, anchors,
+    (txCtx) => requireMemoryWriteAccess(txCtx, memoryId),
+    (tx) => fn(tx),
+  );
+}
 
 export const chatMutations = {
     startChat: async (
@@ -694,6 +713,7 @@ export const chatMutations = {
       // lookup's author and memory-creator arms only narrow candidates; they
       // outlive membership, so they must never be the grant.
       await requireMemoryWriteAccess(ctx, chatNode.memoryId);
+      const inTx = await chatWriteTx(ctx, chatNode.memoryId);
 
       // Decrypt the chat node's metadata (it holds conversationName, stageName,
       // messageCount in `data`) if the memory is encrypted.
@@ -804,6 +824,7 @@ export const chatMutations = {
             },
           });
         },
+        { inTx },
       );
       // A chat turn IS a node write on the chat's memory.
       recordNodeUsage(ctx.db, 'write', userMsgRef ? [userMsgRef] : [], ctx);
@@ -942,7 +963,7 @@ export const chatMutations = {
                 trigger: { type: 'FALLBACK_REROUTE', content: userMessage.slice(0, 100) },
               });
               return next;
-            });
+            }, { inTx });
           }
         }
       }
@@ -1142,6 +1163,7 @@ export const chatMutations = {
       // lookup's author and memory-creator arms only narrow candidates; they
       // outlive membership, so they must never be the grant.
       await requireMemoryWriteAccess(ctx, chatNode.memoryId);
+      const inTx = await chatWriteTx(ctx, chatNode.memoryId);
 
       const memEncInfo = await getMemoryEncryptionInfo(ctx.db, chatNode.memoryId);
       if (memEncInfo.isEncrypted) decryptNodeFields(chatNode, memEncInfo);
@@ -1224,6 +1246,7 @@ export const chatMutations = {
             },
           });
         },
+        { inTx },
       );
       // #1061 — the assistant turn is a node write too. Note the deliberate
       // divergence from `createdBy`, which is left NULL just above because the
@@ -1234,8 +1257,10 @@ export const chatMutations = {
       chatData = allocatedChatData;
 
       // Save extracted data to memory's default data node
-      if (data && Object.keys(data).length > 0) {
-        const dataNode = await ctx.db.node.findFirst({
+      // #1717: under the same anchored gate as the turn itself; the write is
+      // recorded once it has committed (#1061).
+      if (data && Object.keys(data).length > 0) recordNodeWrite(ctx.db, await inTx(async (tx) => {
+        const dataNode = await tx.node.findFirst({
           where: { loc: 'data', memoryId: chatNode.memoryId, deletedAt: null },
         });
         if (dataNode) {
@@ -1243,21 +1268,17 @@ export const chatMutations = {
           const existingData = (dataNode.data as Record<string, unknown>) ?? {};
           const merged = { ...existingData, ...data };
           const encData = encryptNodeFields({ content: null, data: merged }, memEncInfo);
-          await ctx.db.node.update({
+          await tx.node.update({
             where: { id: dataNode.id },
             data: { data: (encData.data ?? null) as InputJsonValue },
           });
           // #1061 — folding extracted data into the memory's `data` node
           // rewrites a real node, so it is its own write.
-          recordNodeWrite(
-            ctx.db,
-            { id: dataNode.id, loc: dataNode.loc, memoryId: dataNode.memoryId },
-            ctx,
-          );
+          return { id: dataNode.id, loc: dataNode.loc, memoryId: dataNode.memoryId };
         } else {
           const encNew = encryptNodeFields({ content: null, data }, memEncInfo);
           const dataNodeId = generateId();
-          await ctx.db.node.create({
+          await tx.node.create({
             data: {
               id: dataNodeId, memoryId: chatNode.memoryId,
               loc: 'data', name: 'data', nodeType: 'info',
@@ -1265,13 +1286,9 @@ export const chatMutations = {
             },
           });
           // #1061 — first extraction into this memory mints the `data` node.
-          recordNodeWrite(
-            ctx.db,
-            { id: dataNodeId, loc: 'data', memoryId: chatNode.memoryId },
-            ctx,
-          );
+          return { id: dataNodeId, loc: 'data', memoryId: chatNode.memoryId };
         }
-      }
+      }), ctx);
 
       // Handle stage transition + edge evaluation
       let stageTransitioned = false;
@@ -1484,7 +1501,7 @@ export const chatMutations = {
         const next = { ...fresh, lastMessageAt: new Date().toISOString() };
         for (const edit of chatRootEdits) edit(next);
         return next;
-      });
+      }, { inTx });
 
       return {
         displayMessage: message,
@@ -1523,6 +1540,7 @@ export const chatMutations = {
       // lookup's author and memory-creator arms only narrow candidates; they
       // outlive membership, so they must never be the grant.
       await requireMemoryWriteAccess(ctx, chatNode.memoryId);
+      const inTx = await chatWriteTx(ctx, chatNode.memoryId);
 
       const memEncInfo = await getMemoryEncryptionInfo(ctx.db, chatNode.memoryId);
       const chatRef = { id: chatNode.id, memoryId: chatNode.memoryId, loc: chatNode.loc };
@@ -1551,7 +1569,7 @@ export const chatMutations = {
         });
         // No chat-root write: the summary is not a message.
         return { value: undefined };
-      });
+      }, { inTx });
       // A summary is not a message, but it IS a node — so it is a write.
       recordNodeUsage(ctx.db, 'write', summaryRef ? [summaryRef] : [], ctx);
 
@@ -1585,6 +1603,7 @@ export const chatMutations = {
       // lookup's author and memory-creator arms only narrow candidates; they
       // outlive membership, so they must never be the grant.
       await requireMemoryWriteAccess(ctx, chatNode.memoryId);
+      const inTx = await chatWriteTx(ctx, chatNode.memoryId);
       // Spec 017 — write-ownership is author-only regardless of scope
       // (per design-discussion D7). A non-author AppMember of a shared
       // chat can read it but not rename it.
@@ -1617,6 +1636,7 @@ export const chatMutations = {
         { id: chatNode.id, memoryId: chatNode.memoryId, loc: chatNode.loc },
         memEncInfo,
         (fresh) => ({ ...fresh, title: title.trim() }),
+        { inTx },
       );
       return true;
     },
@@ -1642,6 +1662,7 @@ export const chatMutations = {
       // lookup's author and memory-creator arms only narrow candidates; they
       // outlive membership, so they must never be the grant.
       await requireMemoryWriteAccess(ctx, chatNode.memoryId);
+      const inTx = await chatWriteTx(ctx, chatNode.memoryId);
       // Spec 017 — author-only deletion (D7). Legacy fallback to
       // memory owner for pre-feature chats that lack chat-root createdBy.
       const isAdmin = !!(ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER'));
@@ -1667,7 +1688,7 @@ export const chatMutations = {
       // `startsWith` is an unescaped LIKE; the batch gate then refuses any
       // comment, governed or protected row in scope.
       const messages = `${chatNode.loc}:messages`;
-      await ctx.db.$transaction(async (tx) => {
+      await inTx(async (tx) => {
         const rows = (await tx.node.findMany({
           where: {
             memoryId: chatNode.memoryId,

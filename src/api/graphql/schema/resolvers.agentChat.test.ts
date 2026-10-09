@@ -4,6 +4,8 @@ import { cleanDb, chatNodeByLoc, chatNodeByLocOrThrow } from '../../../test/help
 import { resolvers, type Context } from './resolvers.js';
 import { generateId } from '../../../lib/id.js';
 import { withChatRootLock } from '../../../lib/chatRoot.js';
+import { lockAuthorityAnchors } from '../../../lib/auth/authorityAnchors.js';
+import { waitForLockWaitersOfType } from '../../../test/lockWait.js';
 
 // Prevent git writes
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
@@ -1781,6 +1783,40 @@ describe('#1717 — chat-by-loc writes', () => {
     expect(await snapshot(root.id)).toEqual(before);
     expect(await db.node.count({ where: { memoryId: root.memoryId, loc: { startsWith: `${chatId}:` }, deletedAt: { not: null } } })).toBe(0);
   });
+
+  // Diego on #1725: the gate must hold at the write, not before it. The
+  // revoker here does what removeAppMember does — takes the App and the
+  // member's authority anchors exclusively, then removes the membership — and
+  // the write arrives while it is still open. The write's own pre-check reads
+  // the uncommitted state and passes; only a re-check after the anchor wait
+  // sees the revocation.
+  it.each(['sendChatMessage', 'processChatResponse', 'saveChatSummary', 'updateChatTitle', 'deleteChat'] as const)(
+    '%s is refused when the membership is revoked while it waits for its lock',
+    async (op) => {
+      await member(adminUser.id);
+      await member(otherUser.id);
+      const { chatId, root } = await sharedChat(otherUser.id);
+      await resolvers.Mutation.sendChatMessage({}, { chatId, userMessage: 'hello' }, userCtx(otherUser.id));
+      const app = await db.app.findFirstOrThrow({ where: { urn: appUrn() } });
+      const before = await snapshot(root.id);
+      const messagesBefore = await db.node.count({ where: { memoryId: root.memoryId, loc: { startsWith: `${chatId}:messages:` } } });
+
+      let outcome: unknown;
+      await db.$transaction(async (tx) => {
+        await lockAuthorityAnchors(tx, [{ kind: 'app', id: app.id }, { kind: 'user', id: otherUser.id }], 'exclusive');
+        await tx.appMember.delete({ where: { appId_userId: { appId: app.id, userId: otherUser.id } } });
+        await tx.orgMember.updateMany({ where: { organizationId: orgA.id, userId: otherUser.id }, data: { deletedAt: new Date() } });
+        outcome = writes(chatId, otherUser.id)[op]().then(() => 'written', (e: unknown) => e);
+        await waitForLockWaitersOfType(db, 'advisory', 1, 3_000);
+      }, { timeout: 20_000 });
+
+      expect(await outcome).toBeInstanceOf(Error);
+      expect(await snapshot(root.id)).toEqual(before);
+      expect(await db.node.count({ where: { memoryId: root.memoryId, loc: { startsWith: `${chatId}:messages:` } } }))
+        .toBe(messagesBefore);
+      expect(await db.node.count({ where: { memoryId: root.memoryId, deletedAt: { not: null } } })).toBe(0);
+    },
+  );
 
   it('deleteChat removes only the chat and its messages, not other rows under its loc', async () => {
     await member(adminUser.id);
