@@ -1751,6 +1751,20 @@ describe('#1717 — chat-by-loc writes', () => {
     })).toBe(0);
   });
 
+  it("refuses every write against a comment on the chat, leaving it unchanged", async () => {
+    await member(adminUser.id);
+    await member(otherUser.id);
+    const { root } = await sharedChat(adminUser.id);
+    const made = await (resolvers.Mutation as any).createComment(null, { targetRef: root.id, body: 'feedback' }, userCtx(otherUser.id));
+    const c = await db.node.findUniqueOrThrow({ where: { id: made.id } });
+    expect(c.nodeType).toBe('comment');
+    const before = await snapshot(c.id);
+    for (const [op, run] of Object.entries(writes(c.loc, otherUser.id))) {
+      await expect(run(), op).rejects.toThrow(/not found/i);
+    }
+    expect(await snapshot(c.id)).toEqual(before);
+  });
+
   it('a former member keeps no write power over the chat they authored', async () => {
     await member(adminUser.id);
     await member(otherUser.id);
