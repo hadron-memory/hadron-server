@@ -1,5 +1,6 @@
 import { detachAppOwnerMemories } from '../../../controller/operations/detachAppOwnerMemories.js';
 // appMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
+import { managesAppStrict } from '../../../lib/auth/appManagement.js';
 import {
   createHash,
   randomBytes,
@@ -97,7 +98,7 @@ async function assertNoWorkers(
  * user-owned App, an org ADMIN/OWNER of the App's org, or an owner-role
  * AppMember. spec 047 (blocker 3): the platform-admin bypass applies ONLY to an
  * org-owned App (a user-owned App is strictly owner-only). Shared by
- * ensureAppMember + removeAppMember so the role gate is evaluated BEFORE the
+ * removeAppMember (ensureAppMember uses the strict managesAppStrict, #1718) so the role gate is evaluated BEFORE the
  * target user is resolved — a non-authorized caller can't turn user-ref
  * resolution into an existence oracle (#816 review).
  */
@@ -1041,10 +1042,12 @@ export const appMutations = {
       const resolvedAppId = await resolveAppRefArg(ctx.db, { ref: appRef, id: appId });
       const app = await ctx.db.app.findUniqueOrThrow({ where: { id: resolvedAppId } });
 
-      // Authorization: ADMIN/OWNER of the App's owning org, the user-owner of a
-      // user-owned App, or an existing owner-role AppMember (spec 047 — see
-      // callerManagesAppMembers). Self-service joins are not allowed in v1.
-      if (!(await callerManagesAppMembers(ctx, app, resolvedAppId))) {
+      // Authorization: the STRICT cor:acl:010:01 manager — a live ADMIN/OWNER
+      // of the App's owning org, or the user-owner of a user-owned App
+      // (Holger's ruling on #1718, Rook P3-1). Not callerManagesAppMembers: an
+      // owner-role AppMember (self-grantable before #1714) and a platform
+      // admin no longer add members or promote anyone to owner.
+      if (!(await managesAppStrict(ctx, app))) {
         throw new Error('Forbidden: only org admins or App owners can manage members');
       }
 
@@ -1065,7 +1068,7 @@ export const appMutations = {
             if (current.organizationId !== app.organizationId || current.ownerUserId !== app.ownerUserId) {
               throw new Error('App ownership changed; retry member management');
             }
-            if (!(await callerManagesAppMembers(txCtx, current, resolvedAppId))) {
+            if (!(await managesAppStrict(txCtx, current))) {
               throw new Error('Forbidden: only org admins or App owners can manage members');
             }
           },

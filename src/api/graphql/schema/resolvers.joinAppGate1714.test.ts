@@ -142,3 +142,39 @@ describe('#1714: an opted-in App admits self-join at its declared role, and only
     expect(promoted.role).toBe('owner');
   });
 });
+
+// Holger's ruling on #1718 (strict, Rook P3-1): ensureAppMember gates on the
+// strict cor:acl:010:01 manager. An owner-role AppMember (the shape a stranger
+// could self-grant before #1714) and a platform admin no longer qualify.
+describe('#1718: only the strict App manager adds members or promotes to owner', () => {
+  beforeEach(async () => {
+    await setPolicy({ maxMembers: 'unlimited', memberRoles: ['owner', 'member'], selfJoinRole: 'member' });
+    await M.joinApp(null, { appId: app.id }, ctxFor(stranger.id));
+  });
+
+  it('an owner-role AppMember is refused: no promotion and no new member', async () => {
+    const legacyOwner = await mkUser();
+    await db.appMember.create({ data: { appId: app.id, userId: legacyOwner.id, role: 'owner' } });
+    const newcomer = await mkUser();
+    await expect(M.ensureAppMember(null, { appRef: app.id, userRef: stranger.id, role: 'owner' }, ctxFor(legacyOwner.id)))
+      .rejects.toThrow(/Forbidden/);
+    await expect(M.ensureAppMember(null, { appRef: app.id, userRef: newcomer.id, role: 'member' }, ctxFor(legacyOwner.id)))
+      .rejects.toThrow(/Forbidden/);
+    expect((await member(stranger.id))?.role).toBe('member');
+    expect(await member(newcomer.id)).toBeNull();
+  });
+
+  it('a platform admin who is not an org manager is refused', async () => {
+    const platformAdmin = await mkUser(['ADMIN']);
+    await expect(M.ensureAppMember(null, { appRef: app.id, userRef: stranger.id, role: 'owner' }, ctxFor(platformAdmin.id, ['ADMIN'])))
+      .rejects.toThrow(/Forbidden/);
+    expect((await member(stranger.id))?.role).toBe('member');
+  });
+
+  it('an org OWNER manager succeeds', async () => {
+    const orgOwner = await mkUser();
+    await db.orgMember.create({ data: { organizationId: org.id, userId: orgOwner.id, role: 'OWNER' } });
+    const promoted = await M.ensureAppMember(null, { appRef: app.id, userRef: stranger.id, role: 'owner' }, ctxFor(orgOwner.id));
+    expect(promoted.role).toBe('owner');
+  });
+});
