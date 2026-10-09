@@ -12,6 +12,8 @@
 
 import type { Prisma } from '../../generated/prisma/index.js';
 import { currentActor } from '../requestActor.js';
+import { generateId } from '../id.js';
+import { toNaiveUtc } from '../sessionActivity.js';
 
 /** The task event types T1 writes (cor:agt:050:11; `task.reassigned` is Proposed there). */
 export const TASK_EVENT_TYPES = [
@@ -98,3 +100,127 @@ export async function appendTaskEvent(
     },
   });
 }
+
+// ── #1706: alarms and availability ─────────────────────────────────────────
+
+/**
+ * The alarm types the stall evaluator writes (cor:agt:050:14–:17), one per
+ * rule. `assignment.unassignable` is cor:agt:050:17's alarm; T3 writes the
+ * ordinary `assignment.queued` / `.matched` events.
+ */
+export const ALARM_EVENT_TYPES = [
+  'stall.not-started',
+  'stall.no-progress',
+  'stall.owner-unreactive',
+  'assignment.unassignable',
+] as const;
+export type AlarmEventType = (typeof ALARM_EVENT_TYPES)[number];
+
+/** The owner chain an alarm is raised with, nearest first (cor:agt:050:18). */
+export type AlarmChain = TaskParty[];
+
+/** What an alarm carries: its rule's window, and the ids that locate the stall. Never text. */
+export type AlarmPayload = {
+  windowMinutes: number;
+  /** The assignee the stall concerns (not-started, no-progress, owner-unreactive). */
+  assignee?: TaskParty | null;
+  /** owner-unreactive: the finished child task whose finish began the episode. */
+  childTaskId?: string;
+};
+
+/**
+ * Append one stall alarm, once per episode (cor:agt:050:13). The episode's key
+ * is (task, type, episodeStart) under the unique index
+ * agent_team_events_episode_uniq, so a second insert of the same episode —
+ * a re-run, or a concurrent evaluator pass on another instance — does
+ * nothing: `ON CONFLICT DO NOTHING`, never a read-then-write. A concurrent
+ * insert of the same key waits for the first to commit and then conflicts.
+ *
+ * Returns the new event's id, or null when the episode already has its alarm.
+ * `createdAt` is the evaluator pass's clock; `episodeStart` is the instant of
+ * the move that began the condition, so every pass computes the same key.
+ */
+export async function appendAlarmEvent(
+  tx: Prisma.TransactionClient,
+  args: {
+    appId: string;
+    taskId: string;
+    type: AlarmEventType;
+    episodeStart: Date;
+    chain: AlarmChain;
+    subjectWorkerId: string | null;
+    payload: AlarmPayload;
+    createdAt: Date;
+  },
+): Promise<string | null> {
+  const payload: Prisma.InputJsonObject = {
+    windowMinutes: args.payload.windowMinutes,
+    ...(args.payload.assignee ? { assignee: partyJson(args.payload.assignee) } : {}),
+    ...(args.payload.childTaskId ? { childTaskId: args.payload.childTaskId } : {}),
+  };
+  const chain = args.chain.map(partyJson);
+  // Naive-UTC literals: these columns are timestamp WITHOUT time zone
+  // (findings:prisma-naive-timestamp-raw-sql).
+  const rows = await tx.$queryRaw<{ id: string }[]>`
+    INSERT INTO agent_team_events
+      (id, app_id, type, task_id, subject_worker_id, severity, chain, payload, created_at, episode_start)
+    VALUES (
+      ${generateId()}, ${args.appId}, ${args.type}, ${args.taskId}, ${args.subjectWorkerId}, 'alarm',
+      ${JSON.stringify(chain)}::jsonb, ${JSON.stringify(payload)}::jsonb,
+      ${toNaiveUtc(args.createdAt)}::timestamp, ${toNaiveUtc(args.episodeStart)}::timestamp
+    )
+    ON CONFLICT (task_id, type, episode_start) DO NOTHING
+    RETURNING id`;
+  return rows[0]?.id ?? null;
+}
+
+/** cor:agt:060:02 / :03 — who set an availability record (cor:agt:060:08 setter classes). */
+export type AvailabilitySetter = 'worker' | 'holder' | 'app-manager' | 'stall-rule' | 'host';
+export type AvailabilityReason = 'stalled' | 'out-of-tokens' | 'host-down' | 'other';
+
+/** `availability.changed`: a worker's or a model family's record changed. Words and ids only. */
+export type AvailabilityEvent =
+  | {
+      kind: 'worker';
+      workerId: string;
+      state: 'available' | 'unavailable';
+      reason: AvailabilityReason | null;
+      until: Date | null;
+      setBy: AvailabilitySetter;
+      /** The alarm that made the worker unavailable (cor:agt:060:07). */
+      alarmEventId?: string;
+    }
+  | {
+      kind: 'family';
+      family: string;
+      state: 'available' | 'unavailable';
+      reason: AvailabilityReason | null;
+      until: Date | null;
+    };
+
+/** Append one `availability.changed` event in the caller's transaction. */
+export async function appendAvailabilityEvent(
+  tx: Prisma.TransactionClient,
+  args: { appId: string; actor: EventActor; event: AvailabilityEvent; createdAt?: Date },
+): Promise<void> {
+  const e = args.event;
+  const common = { state: e.state, reason: e.reason, until: e.until ? e.until.toISOString() : null };
+  const payload: Prisma.InputJsonObject = e.kind === 'worker'
+    ? { ...common, setBy: e.setBy, ...(e.alarmEventId ? { alarmEventId: e.alarmEventId } : {}) }
+    : { ...common, family: e.family };
+  await tx.agentTeamEvent.create({
+    data: {
+      appId: args.appId,
+      type: 'availability.changed',
+      actorUserId: args.actor.userId,
+      actorWorkerId: args.actor.workerId,
+      actorAgentId: args.actor.agentId,
+      subjectWorkerId: e.kind === 'worker' ? e.workerId : null,
+      payload,
+      ...(args.createdAt ? { createdAt: args.createdAt } : {}),
+    },
+  });
+}
+
+/** The actor of a platform-made change (the stall evaluator): nobody. */
+export const PLATFORM_ACTOR: EventActor = { userId: null, workerId: null, agentId: null };

@@ -1710,7 +1710,7 @@ async function queryWorkerActivity(
 }
 
 /** One aggregate query for the bounded #1344 page, never one per App/worker. */
-async function loadWorkersActivity(
+export async function loadWorkersActivity(
   ctx: Context,
   workerIds: string[],
   now = new Date(),
