@@ -48,6 +48,28 @@ import { participantAppIds } from './auth/appParticipation.js';
 import { ancestorLocs } from './nodeSubtreeLock.js';
 import { teamSpaceAudienceFilter } from './auth/teamSpace.js';
 import { NOT_DECISION_FAMILY_WHERE } from './decisions/index.js';
+import { governedRoleWhereClauses } from './governedRole.js';
+
+/**
+ * #1717 — the shape of a chat root's address: a direct child of `chats`, as
+ * `startChat` mints it (`chats:<ts>-<id>-<conversation>`). The loc is the only
+ * selector these operations have, and it used to be accepted verbatim, so a
+ * chat write could address ANY node the caller could name — a review, a spec,
+ * another user's note, or a real chat's own `:messages` container.
+ */
+const CHAT_ROOT_LOC = /^chats:[^:]+$/;
+
+/**
+ * #1717 — defence in depth for a node that sits at a chat-shaped address but
+ * is something else: a comment, a governed kind or a runnable task is never a
+ * chat. Written as positive `OR`s because a negated equality drops NULL rows
+ * in SQL, and `role` / `isRunnable` are nullable.
+ */
+const IS_PLAIN_NODE: Prisma.NodeWhereInput[] = [
+  { NOT: { nodeType: 'comment' } },
+  { OR: [{ role: null }, { NOT: { OR: governedRoleWhereClauses() } }] },
+  { OR: [{ isRunnable: null }, { isRunnable: false }] },
+];
 
 /** The fields of a GraphQL `Context` / MCP `AuthContext` this needs. */
 export interface ChatLocPrincipal {
@@ -119,6 +141,9 @@ export async function chatLocFilter(
   // one still able to. The team chat's own operations are unaffected — they
   // never come through here.
   if (isTeamChatLoc(chatId)) return matchesNothing(base);
+  // #1717: a chat is selected by what it is, not by any loc the caller names.
+  if (!CHAT_ROOT_LOC.test(chatId)) return matchesNothing(base);
+  base.AND = [...IS_PLAIN_NODE];
   // #1196 — the loc-shaped half of that rule stopped being sufficient. A
   // Channel used to be `chats:team` in an app-class memory, so its LOC
   // identified it; since spec 049 Phase 4 a Channel may be created at any
@@ -158,8 +183,9 @@ export async function chatLocFilter(
   // read tamper a decision into TAMPERED, make a log unparseable by adding
   // `messageCount` to its strict data, or let its author soft-delete it.
   // Excluded here, like the Channel clauses, so the MCP twins and any chat
-  // operation added later inherit the refusal.
-  base.AND = [NOT_DECISION_FAMILY_WHERE];
+  // operation added later inherit the refusal. APPENDED to #1717's plain-node
+  // clauses above, never assigned over them: both must hold.
+  base.AND = [...IS_PLAIN_NODE, NOT_DECISION_FAMILY_WHERE];
 
   // Platform ADMIN/OWNER skip entitlement narrowing — EXCEPT into the
   // strict-owner classes, where `cor:acl:010:02` gives them no bypass at all
@@ -190,7 +216,7 @@ export async function chatLocFilter(
     ],
   };
   const isAdmin = !!principal.roles?.some((r) => r === 'ADMIN' || r === 'OWNER');
-  if (isAdmin) return { ...base, AND: [NOT_DECISION_FAMILY_WHERE, strictOwnerOk] };
+  if (isAdmin) return { ...base, AND: [...IS_PLAIN_NODE, NOT_DECISION_FAMILY_WHERE, strictOwnerOk] };
 
   const userId = principal.userId;
   // No user identity (e.g. a bare App-key caller) — entitlement can only come

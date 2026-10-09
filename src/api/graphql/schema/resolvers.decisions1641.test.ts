@@ -436,31 +436,36 @@ describe('a personal assistant outside any team (§3.4, r4 use case)', () => {
 });
 
 describe('Rook §10 on #1690 — the chat-by-loc operations never reach the decision family', () => {
-  /** Everything a refused write must leave as it was. */
-  const snapshot = async (decisionId: string, logId: string) => {
+  /**
+   * Everything a refused write must leave as it was. Since #1717 (#1725) a chat
+   * operation reaches only a `chats:<id>` root, and deleteChat takes only the
+   * root and its `:messages` subtree, so the fixtures sit at those shapes: a
+   * log elsewhere would be refused for its address alone and test nothing.
+   */
+  const snapshot = async (decisionId: string, logId: string, under: string) => {
     const [d, l, view] = await Promise.all([rowOf(decisionId), rowOf(logId), Q.decision(null, { ref: decisionId }, as(holger.id))]);
     return {
       decision: { revSeq: d.revSeq, data: d.data, content: d.content, deletedAt: d.deletedAt },
       log: { revSeq: l.revSeq, data: l.data, content: l.content, deletedAt: l.deletedAt },
       state: D.state(view, {}, as()),
-      children: await db.node.count({ where: { memoryId: memory.id, loc: { startsWith: 'team:' } } }),
+      children: await db.node.count({ where: { memoryId: memory.id, loc: { startsWith: `${under}:` } } }),
     };
   };
-  const setUp = async () => {
-    // An ordinary ancestor the writer authored, a log under it, a decision the writer asked.
-    await db.node.create({ data: { id: generateId(), memoryId: memory.id, loc: 'team', name: 'Team', createdBy: writer.id } });
-    const log = await createLog({ loc: 'team:decisions' });
+  /** A log at `logLoc` and a decision the writer asked in it. */
+  const setUp = async (logLoc: string, under: string) => {
+    const log = await createLog({ loc: logLoc });
     const d = await ask(log.row.id);
-    return { log, d, before: await snapshot(d.row.id, log.row.id) };
+    return { log, d, before: await snapshot(d.row.id, log.row.id, under) };
   };
 
-  it('send, retitle and delete are refused on a decision (its asker) and a log (its creator, the memory owner, a platform admin)', async () => {
-    const { log, d, before } = await setUp();
+  it('send, retitle and delete are refused on a log at a chat-root address (its creator, the memory owner, a platform admin)', async () => {
+    const { log, d, before } = await setUp('chats:decisions', 'chats');
     expect(before.state).toBe('OPEN');
+    expect(log.row.loc).toBe('chats:decisions');
     const attempts: Array<[string, string]> = [
-      ['team:decisions:DA', writer.id],
-      ['team:decisions', admin.id],
-      ['team:decisions', platformAdmin.id],
+      ['chats:decisions', writer.id],
+      ['chats:decisions', admin.id],
+      ['chats:decisions', platformAdmin.id],
     ];
     for (const [chatId, userId] of attempts) {
       const c = as(userId, { roles: userId === platformAdmin.id ? ['ADMIN'] : ['READER'] });
@@ -471,16 +476,18 @@ describe('Rook §10 on #1690 — the chat-by-loc operations never reach the deci
       expect({ chatId, userId, op: 'delete', r: await codeOf(M.deleteChat(null, { chatId }, c)) })
         .toEqual({ chatId, userId, op: 'delete', r: `Chat "${chatId}" not found` });
     }
-    expect(await snapshot(d.row.id, log.row.id)).toEqual(before);
+    expect(await snapshot(d.row.id, log.row.id, 'chats')).toEqual(before);
   });
 
-  it('deleting an ordinary ancestor that holds a log is refused; retitling it touches only the ancestor', async () => {
-    const { log, d, before } = await setUp();
+  it('deleting a chat whose transcript holds a log is refused; retitling it touches only the chat', async () => {
+    // An ordinary chat root the writer authored, with a log under its `:messages`.
+    await db.node.create({ data: { id: generateId(), memoryId: memory.id, loc: 'chats:planning', name: 'Planning', createdBy: writer.id } });
+    const { log, d, before } = await setUp('chats:planning:messages:decisions', 'chats:planning');
     const c = as(writer.id, { roles: ['READER'] });
-    expect(await codeOf(M.deleteChat(null, { chatId: 'team' }, c))).toBe('DECISION_CONTAINED');
-    expect(await M.updateChatTitle(null, { chatId: 'team', title: 'Renamed' }, c)).toBe(true);
-    expect(await snapshot(d.row.id, log.row.id)).toEqual(before);
-    expect((await db.node.findFirstOrThrow({ where: { memoryId: memory.id, loc: 'team' } })).deletedAt).toBeNull();
+    expect(await codeOf(M.deleteChat(null, { chatId: 'chats:planning' }, c))).toBe('DECISION_CONTAINED');
+    expect(await M.updateChatTitle(null, { chatId: 'chats:planning', title: 'Renamed' }, c)).toBe(true);
+    expect(await snapshot(d.row.id, log.row.id, 'chats:planning')).toEqual(before);
+    expect((await db.node.findFirstOrThrow({ where: { memoryId: memory.id, loc: 'chats:planning' } })).deletedAt).toBeNull();
   });
 });
 
