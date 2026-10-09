@@ -127,6 +127,39 @@ describe('createDecisionLog (§3.3, §6.1)', () => {
   });
 });
 
+describe("the log gate is the strict cor:acl:010:01 manager (Holger's ruling on #1690, Rook's P3-4)", () => {
+  const asPlatform = () => as(platformAdmin.id, { roles: ['ADMIN'] });
+  const logCount = () => db.node.count({ where: { memoryId: memory.id, role: 'decision.log' } });
+
+  it('a platform admin who manages no org is refused creating a log, and nothing is written', async () => {
+    expect(await codeOf(M.createDecisionLog(null, { memoryRef: memory.id, loc: 'decisions', defaultDeciders: [holger.id] }, asPlatform())))
+      .toBe('DECISION_FORBIDDEN');
+    expect(await logCount()).toBe(0);
+  });
+
+  it('a platform admin who manages no org is refused replacing deciders, and the log is unchanged', async () => {
+    const log = await createLog();
+    const before = await rowOf(log.row.id);
+    expect(await codeOf(M.setDecisionLogDeciders(null,
+      { logRef: log.row.id, defaultDeciders: [admin.id], expectedRevision: 1, reason: 'r' }, asPlatform())))
+      .toBe('DECISION_FORBIDDEN');
+    const after = await rowOf(log.row.id);
+    expect({ revSeq: after.revSeq, data: after.data }).toEqual({ revSeq: before.revSeq, data: before.data });
+  });
+
+  it("the org's OWNER is a manager on both; a platform admin is one only through an org role", async () => {
+    await db.orgMember.create({ data: { organizationId: orgId, userId: outsider.id, role: 'OWNER' } });
+    const log = await M.createDecisionLog(null, { memoryRef: memory.id, loc: 'decisions', defaultDeciders: [holger.id] }, as(outsider.id));
+    const byOwner = await M.setDecisionLogDeciders(null,
+      { logRef: log.row.id, defaultDeciders: [admin.id], expectedRevision: 1, reason: 'owner' }, as(outsider.id));
+    expect(L.defaultDeciderIds(byOwner, {}, as())).toEqual([admin.id]);
+    await db.orgMember.create({ data: { organizationId: orgId, userId: platformAdmin.id, role: 'ADMIN' } });
+    const byOrgAdmin = await M.setDecisionLogDeciders(null,
+      { logRef: log.row.id, defaultDeciders: [holger.id], expectedRevision: 2, reason: 'org admin' }, asPlatform());
+    expect(L.defaultDeciderIds(byOrgAdmin, {}, as())).toEqual([holger.id]);
+  });
+});
+
 describe('askDecision (§4, §5, §7)', () => {
   it('a writer asks; the server issues DA, renders the content, and the state is OPEN and verifiable', async () => {
     const log = await createLog();
