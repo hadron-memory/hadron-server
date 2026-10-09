@@ -6294,6 +6294,19 @@ export const typeDefs = `#graphql
       taskId: ID
       limit: Int
     ): [AgentTeamEvent!]!
+
+    """
+    #1706 — an App's effective stall windows (cor:agt:050:14–:17). Readers:
+    the App's task audience (cor:agt:050:21).
+    """
+    agentTaskStallSchedule(appRef: ID!): AgentTaskStallSchedule!
+
+    """
+    #1706 — every worker and model-family availability record in an App
+    (cor:agt:060:02 / :03), each with whether it is in effect now. Readers: the
+    App's task audience (interim until cor:agt:060:02's read question is ruled).
+    """
+    teamAvailability(appRef: ID!): TeamAvailability!
     "Declarative team JSON Schema (2020-12). apiVersion is the full identifier hadron.dev/team/v1alpha1; HTTP discovery uses /schemas/team/v1alpha1.json. CLIENT_INPUT additionally permits file parts for clients to inline; the server accepts SERVER only."
     teamSpecSchema(apiVersion: String!, form: TeamSpecForm = SERVER): String!
     """
@@ -7963,6 +7976,40 @@ export const typeDefs = `#graphql
     TASK_ENDED, SESSION_NOT_BOUND, APP_UNINSTALLED.
     """
     cancelAgentTask(taskId: ID!): AgentTask!
+
+    """
+    #1706 — acknowledge an alarm (cor:agt:050:20): it stops waking higher
+    owners; the stall episode goes on until the task moves. Any owner in the
+    alarm's chain, and nobody else (Proposed); the time is the server's.
+    Refusals: ALARM_NOT_FOUND (also for an App you do not participate in),
+    NOT_AN_ALARM, ALARM_NOT_IN_CHAIN, ALARM_ALREADY_ACKNOWLEDGED (the first
+    stands), SESSION_NOT_BOUND, APP_UNINSTALLED.
+    """
+    acknowledgeAlarm(eventId: ID!): AgentTeamEvent!
+
+    """
+    #1706 — set a worker's availability for work (cor:agt:060:08): the worker
+    itself, acting through its session, and only to UNAVAILABLE; the person
+    holding its name; or whoever manages the App. Writes availability.changed.
+    Refusals: WORKER_NOT_FOUND, AVAILABILITY_NOT_PERMITTED, WORKER_RETIRED,
+    BAD_USER_INPUT, SESSION_NOT_BOUND, APP_UNINSTALLED.
+    """
+    setWorkerAvailability(input: SetWorkerAvailabilityInput!): WorkerAvailability!
+
+    """
+    #1706 — set a model family's availability for work in an App
+    (cor:agt:060:09): whoever manages the App only. Writes availability.changed.
+    Refusals: APP_NOT_FOUND, AVAILABILITY_NOT_PERMITTED, BAD_USER_INPUT,
+    SESSION_NOT_BOUND, APP_UNINSTALLED.
+    """
+    setModelFamilyAvailability(input: SetModelFamilyAvailabilityInput!): ModelFamilyAvailability!
+
+    """
+    #1706 — set an App's stall windows: whoever manages the App. Refusals:
+    APP_NOT_FOUND, APP_MANAGER_REQUIRED, BAD_USER_INPUT, SESSION_NOT_BOUND,
+    APP_UNINSTALLED.
+    """
+    setAgentTaskStallSchedule(appRef: ID!, input: AgentTaskStallScheduleInput!): AgentTaskStallSchedule!
     """
     Start impersonating another member of orgRef (admin support/diagnostics).
     Caller must be a live ADMIN/OWNER of the org (platform ADMIN/OWNER is
@@ -8659,6 +8706,11 @@ export const typeDefs = `#graphql
     preserve the strongest live entitlement. The source is soft-deleted.
     Platform admin only. The resulting merge is global; organization
     administration does not authorize account consolidation.
+    Refused with MERGE_USER_IN_OPEN_ALARMS (extension alarmCount; never the
+    alarms, tasks or Apps, which the caller may not be able to read) while
+    either account is named in the owner chain of an unacknowledged agent-task
+    alarm, whose sealed chain cannot follow a merge yet (#1715). Acknowledge
+    the alarms, then merge.
     """
     mergeUsers(input: MergeUsersInput!): User!
 
@@ -10891,7 +10943,7 @@ export const typeDefs = `#graphql
   type AgentTeamEvent {
     id: ID!
     appId: ID!
-    "e.g. task.created, task.assigned, task.reassigned, task.started, task.progress, task.finished, task.cancelled."
+    "e.g. task.created, task.assigned, task.reassigned, task.started, task.progress, task.finished, task.cancelled; the alarms stall.not-started, stall.no-progress, stall.owner-unreactive, assignment.unassignable; availability.changed."
     type: String!
     taskId: ID
     "Who acted: the Worker when the request was bound to a worker session, else the person."
@@ -10906,10 +10958,150 @@ export const typeDefs = `#graphql
     acknowledgedAt: DateTime
     payload: JSON!
     createdAt: DateTime!
+    """
+    #1706 — stall alarms only: when the stall episode began (cor:agt:050:13),
+    the instant of the move that began the condition. One alarm per task,
+    rule and episodeStart.
+    """
+    episodeStart: DateTime
+    "#1706 — alarms only: who the alarm wakes and when, nearest owner first (cor:agt:050:19). Null for an ordinary event."
+    wakes: [AgentTeamAlarmSchedule!]
   }
 
   enum AgentTeamEventSeverity {
     ALARM
+  }
+
+  """
+  #1706 — one owner in an alarm's chain, and when the alarm wakes them
+  (cor:agt:050:19). The nearest owner is woken when the alarm is raised; owner
+  i falls due i windows later, and is woken only while the alarm is
+  unacknowledged (cor:agt:050:20). This is the platform's record that the owner
+  is due a wake-up; delivering it is the heartbeat slice's.
+  """
+  type AgentTeamAlarmSchedule {
+    "The owner's position in the chain, 0 for the nearest."
+    chainIndex: Int!
+    owner: AgentTaskParty
+    dueAt: DateTime!
+    "Null until woken; stays null on an alarm acknowledged before it fell due."
+    wokenAt: DateTime
+  }
+
+  enum AvailabilityState {
+    AVAILABLE
+    UNAVAILABLE
+  }
+
+  "Why a worker or a model family is unavailable for work (cor:agt:060:02; held was dropped, team chat #7449)."
+  enum AvailabilityReason {
+    STALLED
+    OUT_OF_TOKENS
+    HOST_DOWN
+    OTHER
+  }
+
+  "Who set a worker's availability (cor:agt:060:08)."
+  enum AvailabilitySetter {
+    "The worker itself; only ever to unavailable."
+    WORKER
+    "The person holding the worker's name."
+    HOLDER
+    "Whoever manages the App."
+    APP_MANAGER
+    "The stall rule (cor:agt:060:07): an alarm marked it, or its next activity cleared it."
+    STALL_RULE
+    "A host that registered the worker (the host-operations slice)."
+    HOST
+  }
+
+  """
+  #1706 — one worker's availability for work (cor:agt:060:02). A worker with
+  no record is available.
+  """
+  type WorkerAvailability {
+    worker: AgentTaskParty!
+    state: AvailabilityState!
+    "Set exactly when unavailable."
+    reason: AvailabilityReason
+    "When an unavailable record lapses. A passed until reads as available (interim, until ruled)."
+    until: DateTime
+    setAt: DateTime!
+    setBy: AvailabilitySetter!
+    "Who acted, when a worker or a person set it; null when the stall rule did."
+    setByParty: AgentTaskParty
+    """
+    Whether this record makes the worker unavailable right now: unavailable,
+    not lapsed, and (for STALLED) the worker has not acted since it was set
+    (cor:agt:060:07).
+    """
+    inEffect: Boolean!
+  }
+
+  "#1706 — one model family's availability for work in one App (cor:agt:060:03). A family with no record is available."
+  type ModelFamilyAvailability {
+    appId: ID!
+    "The model family, e.g. claude or codex (cor:agt:060:04)."
+    family: String!
+    state: AvailabilityState!
+    reason: AvailabilityReason
+    until: DateTime
+    setAt: DateTime!
+    setBy: AgentTaskParty
+    "Unavailable and not lapsed."
+    inEffect: Boolean!
+  }
+
+  "#1706 — every availability record in one App."
+  type TeamAvailability {
+    workers: [WorkerAvailability!]!
+    families: [ModelFamilyAvailability!]!
+  }
+
+  """
+  #1706 — an App's effective stall windows, in minutes (cor:agt:050:14–:17).
+  Tunables, not contract: the platform defaults are 15, 60, 20 and 30.
+  """
+  type AgentTaskStallSchedule {
+    appId: ID!
+    "Not started (cor:agt:050:14): counted from the assignment when the task has no later start-by time."
+    notStartedMinutes: Int!
+    "No progress (cor:agt:050:15). Also the escalation step for that alarm."
+    noProgressMinutes: Int!
+    "Owner didn't react to a finished child task (cor:agt:050:16)."
+    ownerReactionMinutes: Int!
+    "Couldn't be assigned (cor:agt:050:17)."
+    assignmentMinutes: Int!
+    "When the App last changed them; null while every window is the default."
+    updatedAt: DateTime
+  }
+
+  "An omitted field keeps its value; null returns it to the platform default. Each is 1 to 10080 minutes."
+  input AgentTaskStallScheduleInput {
+    notStartedMinutes: Int
+    noProgressMinutes: Int
+    ownerReactionMinutes: Int
+    assignmentMinutes: Int
+  }
+
+  input SetWorkerAvailabilityInput {
+    "The worker: its id or URN, or its name together with appRef."
+    worker: String!
+    appRef: ID
+    state: AvailabilityState!
+    "Required when UNAVAILABLE; refused when AVAILABLE."
+    reason: AvailabilityReason
+    "Optional, UNAVAILABLE only, in the future."
+    until: DateTime
+  }
+
+  input SetModelFamilyAvailabilityInput {
+    appRef: ID!
+    "A lowercase token, e.g. claude or codex."
+    family: String!
+    state: AvailabilityState!
+    reason: AvailabilityReason
+    until: DateTime
   }
 
   """

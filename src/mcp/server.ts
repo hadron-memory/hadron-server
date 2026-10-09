@@ -1968,6 +1968,8 @@ export function createMcpServerInstance(
     'hadron_list_comments', 'hadron_get_comment', 'hadron_team_chat_mark_read',
     // #1705 — agent-task reads (each takes its own optional session).
     'hadron_task_get', 'hadron_task_list', 'hadron_team_events',
+    // #1706 — availability read (its own optional session).
+    'hadron_team_availability',
     // Per-connection selections and key handling: nothing authored.
     'hadron_set_active_memory', 'hadron_set_active_app', 'hadron_set_active_org', 'hadron_set_active_scope',
     'hadron_unlock_memory', 'hadron_lock_memory',

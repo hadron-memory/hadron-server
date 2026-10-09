@@ -630,3 +630,8 @@ CREATE INDEX IF NOT EXISTS "nodes_msg_channel_seq_loc_c_idx"
 -- shared verbatim with migration 20261008010000_agent_tasks (pinned by
 -- src/lib/agentTasks/invariants.test.ts).
 \ir agent-task-invariants.sql
+
+-- #1706: stall alarms (one per episode), alarm wakes, availability for work and
+-- per-App stall windows. One source, shared verbatim with migration
+-- 20261009010000_agent_task_stalls (pinned by src/lib/agentTasks/invariants.test.ts).
+\ir agent-task-stall-invariants.sql

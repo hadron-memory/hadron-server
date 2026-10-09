@@ -168,3 +168,88 @@ async function workerRow(): Promise<string> {
   });
   return w.id;
 }
+
+// ── #1706: prisma/agent-task-stall-invariants.sql ─────────────────────────
+
+describe('agent-task-stall-invariants.sql (#1706)', () => {
+  it('the T2 migration carries a byte-identical copy of the invariants file', () => {
+    const source = readFileSync(new URL('../../../prisma/agent-task-stall-invariants.sql', import.meta.url), 'utf8');
+    const migration = readFileSync(
+      new URL('../../../prisma/migrations/20261009010000_agent_task_stalls/migration.sql', import.meta.url),
+      'utf8',
+    );
+    expect(migration.endsWith(source)).toBe(true);
+  });
+
+  const alarm = (taskId: string, data: Record<string, unknown> = {}) =>
+    event({ taskId, type: 'stall.not-started', severity: 'alarm', chain: [{ userId: owner.id }], episodeStart: new Date('2026-10-09T10:00:00Z'), ...data });
+
+  it('cor:agt:050:13: one alarm per (task, rule, episode start), enforced by the unique key', async () => {
+    const t = await task();
+    await alarm(t.id);
+    await expect(alarm(t.id)).rejects.toThrow(/Unique constraint/);
+    // Another rule, or another episode, of the same task is a different key.
+    await expect(alarm(t.id, { type: 'stall.no-progress' })).resolves.toBeTruthy();
+    await expect(alarm(t.id, { episodeStart: new Date('2026-10-09T11:00:00Z') })).resolves.toBeTruthy();
+    // Ordinary events carry no key, and never collide (NULLs are distinct).
+    await event({ taskId: t.id });
+    await event({ taskId: t.id });
+  });
+
+  it('only an alarm on a task, with its chain, carries an episode key', async () => {
+    const t = await task();
+    const ep = new Date('2026-10-09T10:00:00Z');
+    await expectCheckViolation(event({ taskId: t.id, episodeStart: ep }), /chk_agent_team_events_episode/);
+    await expectCheckViolation(event({ severity: 'alarm', chain: [], episodeStart: ep }), /chk_agent_team_events_episode/);
+    await expectCheckViolation(event({ taskId: t.id, severity: 'alarm', episodeStart: ep }), /chk_agent_team_events_episode/);
+  });
+
+  it('the episode key is sealed like the rest of the event (append-only)', async () => {
+    const t = await task();
+    const a = await alarm(t.id);
+    await expect(db.agentTeamEvent.update({ where: { id: a.id }, data: { episodeStart: new Date() } }))
+      .rejects.toThrow(/append-only/);
+  });
+
+  it('agent_team_alarm_schedule: a chain index, woken no earlier than due; goes with its alarm on an App delete', async () => {
+    const t = await task();
+    const a = await alarm(t.id);
+    const due = new Date('2026-10-09T10:15:00Z');
+    await expectCheckViolation(db.agentTeamAlarmSchedule.create({ data: { eventId: a.id, chainIndex: -1, dueAt: due } }), /chk_agent_team_alarm_schedule_shape/);
+    await expectCheckViolation(
+      db.agentTeamAlarmSchedule.create({ data: { eventId: a.id, chainIndex: 0, dueAt: due, wokenAt: new Date('2026-10-09T10:14:00Z') } }),
+      /chk_agent_team_alarm_schedule_shape/,
+    );
+    await db.agentTeamAlarmSchedule.create({ data: { eventId: a.id, chainIndex: 0, dueAt: due, wokenAt: due } });
+    await db.app.delete({ where: { id: app.id } });
+    expect(await db.agentTeamAlarmSchedule.count()).toBe(0);
+  });
+
+  it('worker_availability (cor:agt:060:02): a reason exactly when unavailable, from the closed set; no `held`', async () => {
+    const w = await workerRow();
+    const row = (data: Record<string, unknown>) =>
+      db.workerAvailability.create({ data: { workerId: w, state: 'unavailable', reason: 'other', setAt: new Date(), setBy: 'holder', ...data } });
+    await expectCheckViolation(row({ reason: null }), /chk_worker_availability_shape/);
+    await expectCheckViolation(row({ reason: 'held' }), /chk_worker_availability_shape/);
+    await expectCheckViolation(row({ state: 'available' }), /chk_worker_availability_shape/);
+    await expectCheckViolation(row({ state: 'available', reason: null, until: new Date() }), /chk_worker_availability_shape/);
+    await expectCheckViolation(row({ state: 'away' }), /chk_worker_availability_shape/);
+    await expectCheckViolation(row({ setBy: 'coordinator' }), /chk_worker_availability_shape/);
+    await expect(row({ reason: 'stalled', setBy: 'stall-rule' })).resolves.toBeTruthy();
+  });
+
+  it('model_family_availability (cor:agt:060:03): a lowercase family token and the same state shape', async () => {
+    const row = (data: Record<string, unknown>) =>
+      db.modelFamilyAvailability.create({ data: { appId: app.id, family: 'claude', state: 'unavailable', reason: 'other', setAt: new Date(), ...data } });
+    await expectCheckViolation(row({ family: 'Claude' }), /chk_model_family_availability_shape/);
+    await expectCheckViolation(row({ reason: null }), /chk_model_family_availability_shape/);
+    await expect(row({})).resolves.toBeTruthy();
+  });
+
+  it('agent_task_stall_schedule: 1 to 10080 minutes, or NULL for the default', async () => {
+    const row = (data: Record<string, unknown>) => db.agentTaskStallSchedule.create({ data: { appId: app.id, ...data } });
+    await expectCheckViolation(row({ notStartedMinutes: 0 }), /chk_agent_task_stall_schedule_range/);
+    await expectCheckViolation(row({ assignmentMinutes: 10_081 }), /chk_agent_task_stall_schedule_range/);
+    await expect(row({ noProgressMinutes: 90 })).resolves.toBeTruthy();
+  });
+});

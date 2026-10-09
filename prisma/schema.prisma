@@ -3102,6 +3102,9 @@ model App {
   /// #1705 — the App's agent tasks and their append-only event stream.
   agentTasks       AgentTask[]
   agentTeamEvents  AgentTeamEvent[]
+  /// #1706 — model-family availability (cor:agt:060:03) and the stall schedule.
+  modelFamilyAvailability ModelFamilyAvailability[]
+  agentTaskStallSchedule  AgentTaskStallSchedule?
   mcpSessionStates McpSessionState[]
   scopes           Scope[]
   registerEntries  RegisterEntry[] @relation("RegisterOwnerApp")
@@ -3566,6 +3569,8 @@ model Worker {
   /// #1705 — agent tasks this worker owns / is assigned.
   ownedAgentTasks    AgentTask[] @relation("AgentTaskOwnerWorker")
   assignedAgentTasks AgentTask[] @relation("AgentTaskAssigneeWorker")
+  /// #1706 — availability for work (cor:agt:060:02).
+  availability       WorkerAvailability?
 
   /// The URN atom's uniqueness. Unfiltered on retirement, like
   /// `workers_app_name_uniq`: a retired worker's URN must keep resolving.
@@ -4938,11 +4943,110 @@ model AgentTeamEvent {
   acknowledgedAt          DateTime? @map("acknowledged_at")
   payload                 Json      @default("{}")
   createdAt               DateTime  @default(now()) @map("created_at")
+  /// #1706 — stall alarms only: when the stall episode began (cor:agt:050:13),
+  /// the instant of the move that began the condition, never the evaluator's
+  /// clock. With `taskId` and `type` (the rule) it is the episode's key, and
+  /// the unique index below is what makes "exactly one alarm per episode"
+  /// hold across concurrent evaluator passes: a second insert of the same
+  /// episode is ON CONFLICT DO NOTHING, not a read-then-write. NULL on every
+  /// other event, and NULLs are distinct, so ordinary events never collide.
+  episodeStart            DateTime? @map("episode_start")
 
-  app  App        @relation(fields: [appId], references: [id], onDelete: Cascade)
-  task AgentTask? @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  app   App         @relation(fields: [appId], references: [id], onDelete: Cascade)
+  task  AgentTask?  @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  wakes AgentTeamAlarmSchedule[]
 
+  @@unique([taskId, type, episodeStart], map: "agent_team_events_episode_uniq")
   @@index([appId, createdAt])
   @@index([taskId])
   @@map("agent_team_events")
+}
+
+/// #1706 — who an alarm wakes, and when (cor:agt:050:19). One row per owner in
+/// the alarm's `chain`, by its index there: the nearest owner (index 0) is
+/// woken when the alarm is raised, and owner i is due `i` windows later. The
+/// stall evaluator stamps `wokenAt` once a row is due and its alarm is still
+/// unacknowledged; acknowledging stops every later row (cor:agt:050:20).
+///
+/// A side table because the alarm event is append-only. "Woken" here is the
+/// platform's record that the owner is now due a wake-up; DELIVERING it is the
+/// heartbeat slice's (T5). A person in the chain is recorded as woken the same
+/// way, and the timer runs on past them.
+model AgentTeamAlarmSchedule {
+  eventId    String    @map("event_id")
+  chainIndex Int       @map("chain_index")
+  dueAt      DateTime  @map("due_at")
+  wokenAt    DateTime? @map("woken_at")
+
+  event AgentTeamEvent @relation(fields: [eventId], references: [id], onDelete: Cascade)
+
+  @@id([eventId, chainIndex])
+  @@index([wokenAt, dueAt])
+  @@map("agent_team_alarm_schedule")
+}
+
+/// #1706 — one worker's availability for work (cor:agt:060:02). At most one
+/// row per worker, and a worker with none is available (Proposed). The row is
+/// kept when the worker becomes available again, for history; an `until` that
+/// has passed reads as available (#1706 interim, 060:02 open question).
+///
+/// `setBy` names the setter class of cor:agt:060:08: `worker` (itself, only to
+/// unavailable), `holder`, `app-manager`, `stall-rule` (060:07) or `host` (T6).
+/// The actor ids follow the #1610 shape. Shape: chk_worker_availability_shape
+/// (prisma/agent-task-stall-invariants.sql).
+model WorkerAvailability {
+  workerId      String    @id @map("worker_id")
+  /// 'available' | 'unavailable'.
+  state         String
+  /// Unavailable only: 'stalled' | 'out-of-tokens' | 'host-down' | 'other'.
+  reason        String?
+  until         DateTime?
+  setAt         DateTime  @map("set_at")
+  setBy         String    @map("set_by")
+  setByUserId   String?   @map("set_by_user_id")
+  setByWorkerId String?   @map("set_by_worker_id")
+  setByAgentId  String?   @map("set_by_agent_id")
+
+  worker Worker @relation(fields: [workerId], references: [id], onDelete: Cascade)
+
+  @@map("worker_availability")
+}
+
+/// #1706 — one model family's availability for work in one App
+/// (cor:agt:060:03): at most one row per App and family; with none, the family
+/// is available. Set only by whoever manages the App (cor:agt:060:09).
+model ModelFamilyAvailability {
+  appId         String    @map("app_id")
+  /// The model family, e.g. `claude`, `codex`, `glm` (cor:agt:060:04).
+  family        String
+  state         String
+  reason        String?
+  until         DateTime?
+  setAt         DateTime  @map("set_at")
+  setByUserId   String?   @map("set_by_user_id")
+  setByWorkerId String?   @map("set_by_worker_id")
+  setByAgentId  String?   @map("set_by_agent_id")
+
+  app App @relation(fields: [appId], references: [id], onDelete: Cascade)
+
+  @@id([appId, family])
+  @@map("model_family_availability")
+}
+
+/// #1706 — an App's stall windows, in minutes (cor:agt:050:14–:17 "What Can
+/// Change"). A NULL column, or no row, means the platform default
+/// (src/lib/agentTasks/stall.ts STALL_WINDOW_DEFAULTS). Tunables, not
+/// contract; set by whoever manages the App.
+model AgentTaskStallSchedule {
+  appId                String   @id @map("app_id")
+  notStartedMinutes    Int?     @map("not_started_minutes")
+  noProgressMinutes    Int?     @map("no_progress_minutes")
+  ownerReactionMinutes Int?     @map("owner_reaction_minutes")
+  assignmentMinutes    Int?     @map("assignment_minutes")
+  updatedAt            DateTime @updatedAt @map("updated_at")
+  updatedBy            String?  @map("updated_by")
+
+  app App @relation(fields: [appId], references: [id], onDelete: Cascade)
+
+  @@map("agent_task_stall_schedule")
 }

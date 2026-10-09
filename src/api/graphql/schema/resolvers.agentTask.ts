@@ -111,7 +111,7 @@ const OPEN: TaskStatus[] = ['pending', 'started'];
 
 // ── Errors ────────────────────────────────────────────────────────────────
 
-function taskError(code: string, message: string, ext: Record<string, unknown> = {}): GraphQLError {
+export function taskError(code: string, message: string, ext: Record<string, unknown> = {}): GraphQLError {
   return new GraphQLError(message, { extensions: { code, ...ext } });
 }
 const notFound = (taskId: string): GraphQLError =>
@@ -126,7 +126,7 @@ const APP_SELECT = {
   id: true, name: true, urn: true, organizationId: true, ownerUserId: true,
   uninstalledAt: true, deletedAt: true,
 } as const;
-type TaskApp = Prisma.AppGetPayload<{ select: typeof APP_SELECT }>;
+export type TaskApp = Prisma.AppGetPayload<{ select: typeof APP_SELECT }>;
 type TaskRow = Prisma.AgentTaskGetPayload<Record<string, never>>;
 
 /** Who is acting on a task: a worker through its session, or a person as themselves. */
@@ -163,7 +163,7 @@ export async function resolveTaskActor(ctx: Context, app: TaskApp): Promise<Task
 }
 
 /** The write-side preconditions every task mutation shares, after the actor resolved. */
-function requireWritable(ctx: Context, app: TaskApp): void {
+export function requireWritable(ctx: Context, app: TaskApp): void {
   if (ctx.impersonation) throw forbidden('Impersonation sessions are read-only.');
   if (ctx.sessionBindingRefused) {
     throw taskError(
@@ -175,7 +175,7 @@ function requireWritable(ctx: Context, app: TaskApp): void {
   if (app.uninstalledAt) throw taskError('APP_UNINSTALLED', 'This App is uninstalled; its tasks are read-only.');
 }
 
-async function loadApp(ctx: Context, appId: string): Promise<TaskApp | null> {
+export async function loadApp(ctx: Context, appId: string): Promise<TaskApp | null> {
   return ctx.db.app.findUnique({ where: { id: appId }, select: APP_SELECT });
 }
 
@@ -185,7 +185,7 @@ const appNotFound = (appRef: string): GraphQLError => taskError('APP_NOT_FOUND',
  * Resolve an App ref the caller participates in. An App that does not exist
  * and one the caller may not read answer the SAME refusal (Rook P3-1).
  */
-async function resolveParticipatedApp(ctx: Context, appRef: string): Promise<{ app: TaskApp; actor: TaskActor }> {
+export async function resolveParticipatedApp(ctx: Context, appRef: string): Promise<{ app: TaskApp; actor: TaskActor }> {
   let appId: string;
   try {
     ({ id: appId } = await resolveAppRef(ctx.db, appRef));
@@ -230,7 +230,7 @@ const isAssignee = (actor: TaskActor, t: TaskRow): boolean =>
  * with the transaction context, so it reads committed state under the write's
  * anchors.
  */
-async function actorManagesApp(ctx: Context, app: TaskApp, actor: TaskActor): Promise<boolean> {
+export async function actorManagesApp(ctx: Context, app: TaskApp, actor: TaskActor): Promise<boolean> {
   if (actor.kind !== 'user' || ctx.impersonation) return false;
   return managesAppStrict(ctx, app);
 }
@@ -241,7 +241,7 @@ function sameActor(a: TaskActor, b: TaskActor): boolean {
     : a.userId === b.userId);
 }
 
-function actorParty(actor: TaskActor): TaskParty {
+export function actorParty(actor: TaskActor): TaskParty {
   return actor.kind === 'worker' ? { workerId: actor.workerId } : { userId: actor.userId };
 }
 
@@ -291,7 +291,7 @@ async function resolveParty(
 }
 
 /** A worker ref within an App: its id, its URN, or its name. Null when it names nothing. */
-async function resolveTaskWorkerId(ctx: Context, appId: string, ref: string): Promise<string | null> {
+export async function resolveTaskWorkerId(ctx: Context, appId: string, ref: string): Promise<string | null> {
   if (isId(ref) || ref.startsWith('hrn:')) {
     try {
       return (await resolveWorkerRefId(ctx.db, ref)).id;
@@ -439,7 +439,7 @@ class TaskGateRefused extends Error {}
  * before the wait. A refusal discovered here is `refused()` — the caller's
  * concealment — except an uninstall that won the race, which says so.
  */
-async function inTaskWriteTx<T>(
+export async function inTaskWriteTx<T>(
   ctx: Context,
   app: TaskApp,
   actor: TaskActor,
@@ -943,10 +943,10 @@ export const agentTaskQueries = {
 
 // ── Field resolvers ───────────────────────────────────────────────────────
 
-type PartyView = { kind: 'WORKER' | 'USER'; id: string; name: string | null; urn: string | null };
+export type PartyView = { kind: 'WORKER' | 'USER'; id: string; name: string | null; urn: string | null };
 
 /** A sanitized party projection — never the User object (#552: no other tenant's identity fields). */
-async function partyView(ctx: Context, workerId: string | null, userId: string | null): Promise<PartyView | null> {
+export async function partyView(ctx: Context, workerId: string | null, userId: string | null): Promise<PartyView | null> {
   if (workerId) {
     const w = await ctx.db.worker.findUnique({
       where: { id: workerId },
