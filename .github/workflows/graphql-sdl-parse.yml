@@ -58,6 +58,7 @@ on:
       - 'scripts/check-*.mjs'
       - 'scripts/check-*.test.ts'
       - 'scripts/sdl-hash-descriptions-allowed.txt'
+      - 'scripts/sdl-spec-citations-baseline.txt'
       - '.github/workflows/graphql-sdl-parse.yml'
       - 'package.json'
       - 'pnpm-lock.yaml'
@@ -68,6 +69,7 @@ on:
       - 'scripts/check-*.mjs'
       - 'scripts/check-*.test.ts'
       - 'scripts/sdl-hash-descriptions-allowed.txt'
+      - 'scripts/sdl-spec-citations-baseline.txt'
       - '.github/workflows/graphql-sdl-parse.yml'
       - 'package.json'
       - 'pnpm-lock.yaml'
@@ -108,3 +110,8 @@ jobs:
       # source, exactly like documentation (#1232).
       - name: No `#` comments above undocumented symbols (#1232)
         run: pnpm check:sdl-hash-docs
+
+      # SDL descriptions are copied verbatim into hadron-portal's schema
+      # snapshot, whose gate fails a newly added bare spec citation (#1722).
+      - name: No new bare spec citations in the SDL (#1722)
+        run: pnpm check:sdl-spec-citations
