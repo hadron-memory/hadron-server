@@ -47,6 +47,7 @@ import {
   type Context,
   type SnapshotNode,
   requireRole,
+  requireMemoryWriteAccess,
   memoryAccessFilter,
   buildRespondToolSchema,
   pushGoal,
@@ -54,6 +55,7 @@ import {
   loadPublishedSnapshot,
 } from './resolvers.helpers.js';
 import { assertNoMintedSpecRemoval } from '../../../lib/mintedSpecPermanence.js';
+import { assertBatchMutable } from '../../../lib/bulkMutationGate.js';
 import { LIVE_ORG_MEMBERSHIP } from '../../../lib/auth/liveOrgMembership.js';
 
 /**
@@ -687,6 +689,11 @@ export const chatMutations = {
         chatId,
       );
       if (!chatNode) throw new Error(`Chat "${chatId}" not found`);
+      // #1717: a chat has no ACL of its own (cor:acl:030:01) — writing it is
+      // writing its host memory, so it takes CURRENT write access there. The
+      // lookup's author and memory-creator arms only narrow candidates; they
+      // outlive membership, so they must never be the grant.
+      await requireMemoryWriteAccess(ctx, chatNode.memoryId);
 
       // Decrypt the chat node's metadata (it holds conversationName, stageName,
       // messageCount in `data`) if the memory is encrypted.
@@ -1130,6 +1137,11 @@ export const chatMutations = {
         chatId,
       );
       if (!chatNode) throw new Error(`Chat "${chatId}" not found`);
+      // #1717: a chat has no ACL of its own (cor:acl:030:01) — writing it is
+      // writing its host memory, so it takes CURRENT write access there. The
+      // lookup's author and memory-creator arms only narrow candidates; they
+      // outlive membership, so they must never be the grant.
+      await requireMemoryWriteAccess(ctx, chatNode.memoryId);
 
       const memEncInfo = await getMemoryEncryptionInfo(ctx.db, chatNode.memoryId);
       if (memEncInfo.isEncrypted) decryptNodeFields(chatNode, memEncInfo);
@@ -1506,6 +1518,11 @@ export const chatMutations = {
         chatId,
       );
       if (!chatNode) throw new Error(`Chat "${chatId}" not found`);
+      // #1717: a chat has no ACL of its own (cor:acl:030:01) — writing it is
+      // writing its host memory, so it takes CURRENT write access there. The
+      // lookup's author and memory-creator arms only narrow candidates; they
+      // outlive membership, so they must never be the grant.
+      await requireMemoryWriteAccess(ctx, chatNode.memoryId);
 
       const memEncInfo = await getMemoryEncryptionInfo(ctx.db, chatNode.memoryId);
       const chatRef = { id: chatNode.id, memoryId: chatNode.memoryId, loc: chatNode.loc };
@@ -1563,6 +1580,11 @@ export const chatMutations = {
         chatId,
       );
       if (!chatNode) throw new Error(`Chat "${chatId}" not found`);
+      // #1717: a chat has no ACL of its own (cor:acl:030:01) — writing it is
+      // writing its host memory, so it takes CURRENT write access there. The
+      // lookup's author and memory-creator arms only narrow candidates; they
+      // outlive membership, so they must never be the grant.
+      await requireMemoryWriteAccess(ctx, chatNode.memoryId);
       // Spec 017 — write-ownership is author-only regardless of scope
       // (per design-discussion D7). A non-author AppMember of a shared
       // chat can read it but not rename it.
@@ -1615,6 +1637,11 @@ export const chatMutations = {
         chatId,
       );
       if (!chatNode) throw new Error(`Chat "${chatId}" not found`);
+      // #1717: a chat has no ACL of its own (cor:acl:030:01) — writing it is
+      // writing its host memory, so it takes CURRENT write access there. The
+      // lookup's author and memory-creator arms only narrow candidates; they
+      // outlive membership, so they must never be the grant.
+      await requireMemoryWriteAccess(ctx, chatNode.memoryId);
       // Spec 017 — author-only deletion (D7). Legacy fallback to
       // memory owner for pre-feature chats that lack chat-root createdBy.
       const isAdmin = !!(ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER'));
@@ -1630,22 +1657,31 @@ export const chatMutations = {
           throw new Error('Forbidden');
         }
       }
-      // Soft-delete the chat node and all its message children by loc prefix.
+      // Soft-delete the chat node and its messages.
       // #1468 (Codex on #1475) — a legacy chat is an ordinary writable node,
       // so it can carry the spec marker in a minted corpus: the rows are
       // locked and checked before the tombstone, and only those are written.
+      // #1717 — bounded to the chat itself: the root and its `:messages`
+      // subtree, never every row under the root's loc (that took other
+      // users' nodes with it). The prefix is re-checked in JS because a Prisma
+      // `startsWith` is an unescaped LIKE; the batch gate then refuses any
+      // comment, governed or protected row in scope.
+      const messages = `${chatNode.loc}:messages`;
       await ctx.db.$transaction(async (tx) => {
-        const scope = (await tx.node.findMany({
+        const rows = (await tx.node.findMany({
           where: {
             memoryId: chatNode.memoryId,
             deletedAt: null,
             OR: [
               { id: chatNode.id },
-              { loc: { startsWith: `${chatId}:` } },
+              { loc: messages },
+              { loc: { startsWith: `${messages}:` } },
             ],
           },
-          select: { id: true },
-        })).map((n) => n.id);
+          select: { id: true, loc: true, role: true, isRunnable: true },
+        })).filter((n) => n.id === chatNode.id || n.loc === messages || n.loc.startsWith(`${messages}:`));
+        const scope = rows.map((n) => n.id);
+        await assertBatchMutable(tx, [chatNode.memoryId], rows, 'delete the chat holding');
         await assertNoMintedSpecRemoval(tx, chatNode.memoryId, scope, 'delete the chat holding');
         await tx.node.updateMany({
           where: { id: { in: scope }, deletedAt: null },
