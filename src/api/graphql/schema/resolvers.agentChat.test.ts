@@ -1818,6 +1818,46 @@ describe('#1717 — chat-by-loc writes', () => {
     },
   );
 
+  // Diego on #1725 (delta at 40e62306): rename and delete keep an extra
+  // author-or-admin condition beyond write access. A platform admin who is
+  // also an ordinary participant, but not the author, loses the admin role
+  // while the write waits — the participant grant alone must not carry it.
+  it.each(['updateChatTitle', 'deleteChat'] as const)(
+    '%s is refused when the admin role is revoked while it waits for its lock',
+    async (op) => {
+      await member(adminUser.id);
+      await member(otherUser.id);
+      const { chatId, root } = await sharedChat(otherUser.id);
+      const before = await snapshot(root.id);
+      const asAdmin = userCtx(adminUser.id, { roles: ['ADMIN'] });
+      const run = op === 'updateChatTitle'
+        ? () => resolvers.Mutation.updateChatTitle({}, { chatId, title: 'renamed' }, asAdmin)
+        : () => resolvers.Mutation.deleteChat({}, { chatId }, asAdmin);
+
+      let outcome: unknown;
+      await db.$transaction(async (tx) => {
+        await lockAuthorityAnchors(tx, [{ kind: 'user', id: adminUser.id }], 'exclusive');
+        await tx.user.update({ where: { id: adminUser.id }, data: { roles: ['READER'] } });
+        outcome = run().then(() => 'written', (e: unknown) => e);
+        await waitForLockWaitersOfType(db, 'advisory', 1, 3_000);
+      }, { timeout: 20_000 });
+
+      expect(await outcome).toBeInstanceOf(Error);
+      expect(await snapshot(root.id)).toEqual(before);
+      expect(await db.node.count({ where: { memoryId: root.memoryId, deletedAt: { not: null } } })).toBe(0);
+    },
+  );
+
+  it('CONTROL: a current platform admin who is not the author still renames and deletes', async () => {
+    await member(adminUser.id);
+    await member(otherUser.id);
+    const { chatId, root } = await sharedChat(otherUser.id);
+    const asAdmin = userCtx(adminUser.id, { roles: ['ADMIN'] });
+    await resolvers.Mutation.updateChatTitle({}, { chatId, title: 'by admin' }, asAdmin);
+    expect(((await db.node.findUniqueOrThrow({ where: { id: root.id } })).data as Record<string, unknown>).title).toBe('by admin');
+    await expect(resolvers.Mutation.deleteChat({}, { chatId }, asAdmin)).resolves.toBe(true);
+  });
+
   it('deleteChat removes only the chat and its messages, not other rows under its loc', async () => {
     await member(adminUser.id);
     await member(otherUser.id);
