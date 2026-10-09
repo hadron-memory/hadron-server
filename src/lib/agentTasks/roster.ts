@@ -22,8 +22,9 @@
  *   WORKING               the assignee of a started task
  *   ASSIGNED_NOT_STARTED  the assignee of a pending task
  *   AVAILABLE             free for work (060:05) — including an unbound worker
- *                         a live host can launch, which the matcher leaves
- *                         alone until T6
+ *                         a live host can launch, and a bound one whose
+ *                         session is quiet, both of which the matcher leaves
+ *                         alone until T6 (`liveSession` tells them apart)
  *   NO_FAMILY             bound, but its session reported no model family, so
  *                         it can't be matched until one is given (060:04)
  *   NOT_LAUNCHABLE        unbound, and no live host registers it
@@ -48,8 +49,11 @@ export type RosterEntry = {
   slug: string;
   role: string | null;
   state: RosterState;
+  /** Has an open session, live or quiet (the binding). */
   bound: boolean;
-  /** The binding's family (its live session's); null when unbound or none was reported. */
+  /** Has a live session (cor:agt:020:11); the matcher assigns only to these until T6. */
+  liveSession: boolean;
+  /** The binding's family (its newest open session's); null when unbound or none was reported. */
   family: string | null;
   launchableFamilies: string[];
   /** The families it is free for work as now; empty when not free. */
@@ -128,7 +132,9 @@ export async function loadTeamRoster(db: Db, appId: string, now: Date): Promise<
   const started = inputs.filter((i) => i.task.status === 'started');
   const children = started.length
     ? await db.agentTask.findMany({
-        where: { parentTaskId: { in: started.map((i) => i.task.id) }, status: { in: OPEN_STATUSES } },
+        // appId too (#1723 review, Rook P3-4): same-App parents are enforced
+        // only at create, so the read stays inside the App on its own.
+        where: { appId, parentTaskId: { in: started.map((i) => i.task.id) }, status: { in: OPEN_STATUSES } },
         select: { id: true, parentTaskId: true, createdAt: true },
         orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
       })
@@ -166,7 +172,8 @@ export async function loadTeamRoster(db: Db, appId: string, now: Date): Promise<
           bound: w.bound,
         }),
         bound: w.bound,
-        family: w.liveFamily,
+        liveSession: w.live,
+        family: w.bindingFamily,
         launchableFamilies: w.launchableFamilies,
         freeFamilies: w.freeFamilies,
         free: w.free,

@@ -91,7 +91,9 @@ function refusal(e: unknown) {
 export function renderRosterEntry(r: RosterRow): string {
   const facts = [
     r.role ? `role ${r.role}` : null,
-    r.bound ? `bound${r.family ? ` as ${r.family}` : ', no model family reported'}` : 'unbound',
+    r.bound
+      ? `bound${r.family ? ` as ${r.family}` : ', no model family reported'}${r.liveSession ? '' : ' (session quiet)'}`
+      : 'unbound',
     r.launchableFamilies.length ? `launchable as ${r.launchableFamilies.join('/')}` : null,
     r.free ? `free for work as ${r.freeFamilies.join('/')}` : null,
     r.unavailable ? `unavailable: ${r.unavailable.reason ?? 'unknown'}${r.unavailable.until ? ` until ${r.unavailable.until.toISOString()}` : ''}` : null,

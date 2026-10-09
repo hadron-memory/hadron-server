@@ -1589,9 +1589,9 @@ export const typeDefs = `#graphql
     "#928: the tool driving the session ('claude-code', 'codex', ...)."
     tool: String
     """
-    #1707 — the model family this session runs as (cor:agt:060:04): given at
+    #1707 — the model family this session runs as (hrn:node:hadronmemory.com:specs:cor:agt:060:04): given at
     start, or derived from llmModel then tool; null when it could not be
-    classified. A bound worker's family is its live session's. A matching
+    classified. A bound worker's family is its newest open session's. A matching
     input only, never an authorization input: it is self-declared.
     """
     family: String
@@ -3962,10 +3962,12 @@ export const typeDefs = `#graphql
     """
     hasLiveSession: Boolean
     """
-    #1707 — the model family of this worker's binding (cor:agt:060:04): its
-    live session's family, so it is cleared when the worker is unbound. Null
-    when unbound, when the live session reported none, or on the same read
-    gate as hasLiveSession. A matching input, never an authorization input.
+    #1707 — the model family of this worker's binding (hrn:node:hadronmemory.com:specs:cor:agt:060:04):
+    its newest open session's family. It follows the binding, not activity: a
+    quiet session keeps it, and it is cleared when the session ends or replaced
+    by a newer bind. Null when unbound, when the binding reported none, or on
+    the same read gate as hasLiveSession. A matching input, never an
+    authorization input.
     """
     family: String
     """
@@ -5562,7 +5564,7 @@ export const typeDefs = `#graphql
     host: String
     tool: String
     """
-    #1707 / cor:agt:060:04: the model family this session runs as, e.g.
+    #1707 / hrn:node:hadronmemory.com:specs:cor:agt:060:04: the model family this session runs as, e.g.
     claude, codex or glm (a lowercase token). Omitted: derived from llmModel
     first, then tool — tool alone never classifies claude-code, since GLM runs
     inside it too — and a session nothing classifies gets no family, so its
@@ -6334,8 +6336,8 @@ export const typeDefs = `#graphql
     """
     #1707 — every worker's derived state in an App (plan design:agent-tasks
     §7.4), computed server-side so the CLI and portal render one answer. Plan-
-    derived, not a spec (cor:agt:050 leaves the roster out of scope). Readers:
-    the App's task audience (cor:agt:050:21). Retired workers are left out.
+    derived, not a spec (hrn:node:hadronmemory.com:specs:cor:agt:050 leaves the roster out of scope). Readers:
+    the App's task audience (hrn:node:hadronmemory.com:specs:cor:agt:050:21). Retired workers are left out.
     """
     teamRoster(appRef: ID!): TeamRoster!
     "Declarative team JSON Schema (2020-12). apiVersion is the full identifier hadron.dev/team/v1alpha1; HTTP discovery uses /schemas/team/v1alpha1.json. CLIENT_INPUT additionally permits file parts for clients to inline; the server accepts SERVER only."
@@ -10974,7 +10976,7 @@ export const typeDefs = `#graphql
   type AgentTeamEvent {
     id: ID!
     appId: ID!
-    "e.g. task.created, task.assigned, task.reassigned, task.started, task.progress, task.finished, task.cancelled; the alarms stall.not-started, stall.no-progress, stall.owner-unreactive, assignment.unassignable; availability.changed; assignment.queued, assignment.matched (the platform's assignment, cor:agt:060:06); host.registered, host.lost."
+    "e.g. task.created, task.assigned, task.reassigned, task.started, task.progress, task.finished, task.cancelled; the alarms stall.not-started, stall.no-progress, stall.owner-unreactive, assignment.unassignable; availability.changed; assignment.queued, assignment.matched (the platform's assignment, hrn:node:hadronmemory.com:specs:cor:agt:060:06); host.registered, host.lost."
     type: String!
     taskId: ID
     "Who acted: the Worker when the request was bound to a worker session, else the person."
@@ -11089,19 +11091,19 @@ export const typeDefs = `#graphql
   several at once; it is shown in the first that holds, in this order.
   """
   enum TeamRosterState {
-    "Woken on an unacknowledged alarm (cor:agt:050:19), or a child of a task it is the assignee of finished after it last moved (cor:agt:050:16)."
+    "Woken on an unacknowledged alarm (hrn:node:hadronmemory.com:specs:cor:agt:050:19), or a child of a task it is the assignee of finished after it last moved (hrn:node:hadronmemory.com:specs:cor:agt:050:16)."
     YOUR_MOVE
-    "Its own availability record, or every model family it can run as, says unavailable now (cor:agt:060:01); a stall mark included (cor:agt:060:07)."
+    "Its own availability record, or every model family it can run as, says unavailable now (hrn:node:hadronmemory.com:specs:cor:agt:060:01); a stall mark included (hrn:node:hadronmemory.com:specs:cor:agt:060:07)."
     UNAVAILABLE
-    "The assignee of a started task with open children (cor:agt:050:04)."
+    "The assignee of a started task with open children (hrn:node:hadronmemory.com:specs:cor:agt:050:04)."
     WAITING
     "The assignee of a started task."
     WORKING
     "The assignee of a pending task."
     ASSIGNED_NOT_STARTED
-    "Free for work (cor:agt:060:05), including an unbound worker a live host can launch, which the matcher leaves alone until the host-operations slice."
+    "Free for work (hrn:node:hadronmemory.com:specs:cor:agt:060:05), including an unbound worker a live host can launch and a bound worker whose session is quiet, which the matcher leaves alone until the host-operations slice (see liveSession)."
     AVAILABLE
-    "Bound, but its session reported no model family, so it can't be matched until one is given (cor:agt:060:04)."
+    "Bound, but its session reported no model family, so it can't be matched until one is given (hrn:node:hadronmemory.com:specs:cor:agt:060:04)."
     NO_FAMILY
     "Unbound, and no live host registration lists it."
     NOT_LAUNCHABLE
@@ -11112,20 +11114,22 @@ export const typeDefs = `#graphql
     worker: AgentTaskParty!
     role: String
     state: TeamRosterState!
-    "Has a live session (cor:agt:020:11)."
+    "Bound: has an open session, live or quiet. Going quiet never unbinds; ending the session does."
     bound: Boolean!
-    "The binding's model family: its live session's (cor:agt:060:04). Null when unbound or none was reported."
+    "Has a live session (hrn:node:hadronmemory.com:specs:cor:agt:020:11). Until the host-operations slice, the matcher assigns only to a worker with one."
+    liveSession: Boolean!
+    "The binding's model family: its newest open session's (hrn:node:hadronmemory.com:specs:cor:agt:060:04), kept while the session is quiet. Null when unbound or none was reported."
     family: String
-    "Families a live host registration can launch it as (cor:agt:070:01)."
+    "Families a live host registration can launch it as (hrn:node:hadronmemory.com:specs:cor:agt:070:01)."
     launchableFamilies: [String!]!
-    "Free for work (cor:agt:060:05)."
+    "Free for work (hrn:node:hadronmemory.com:specs:cor:agt:060:05)."
     freeForWork: Boolean!
     "The families it is free for work as now; empty when not free."
     freeFamilies: [String!]!
     "Set when its own availability record makes it unavailable now."
     unavailableReason: AvailabilityReason
     unavailableUntil: DateTime
-    "Families it could run as that are unavailable in the App now (cor:agt:060:03)."
+    "Families it could run as that are unavailable in the App now (hrn:node:hadronmemory.com:specs:cor:agt:060:03)."
     unavailableFamilies: [String!]!
     "Started tasks it is the assignee of."
     startedTasks: [ID!]!
@@ -11140,7 +11144,7 @@ export const typeDefs = `#graphql
     "YOUR_MOVE: a finished child it hasn't reacted to."
     unreactedChildTask: ID
     lastActiveAt: DateTime
-    "When it was last assigned a task; the matcher picks the least recent (cor:agt:060:06)."
+    "When it was last assigned a task; the matcher picks the least recent (hrn:node:hadronmemory.com:specs:cor:agt:060:06)."
     lastAssignedAt: DateTime
   }
 

@@ -9,13 +9,15 @@
  * FREE FOR WORK (060:05): in the App and not retired; the assignee of no
  * pending or started task; available for work (060:01: neither its own record
  * nor its family's says unavailable, so a stalled worker is out); and has a
- * model family — its live session's when bound, else one a live host
- * registration can launch it as (060:04). A worker kept bound after a finished
+ * model family — its binding's (newest open session's, quiet or not) when
+ * bound, else one a live host registration can launch it as (060:04). A worker kept bound after a finished
  * task (`closeSessionWhenDone: false`) is free and keeps its family.
  *
- * UNTIL T6 SHIPS, ONLY BOUND WORKERS ARE MATCHED (`MATCH_UNBOUND_LAUNCHABLE`):
- * a launchable-but-unbound worker has no way to start yet, so matching it
- * would only park the task. The roster still reports such a worker as free.
+ * UNTIL T6 SHIPS, ONLY WORKERS WITH A LIVE SESSION ARE MATCHED (`matchable`,
+ * `MATCH_UNBOUND_LAUNCHABLE`): an unbound or quiet worker has no way to be
+ * reached yet, so matching it would only park the task. That restriction is
+ * the matcher's; the family still follows the binding (#1723 review, Diego
+ * P2-2). The roster still reports such a worker as free.
  * T6 also adds "no outstanding `worker.end` host operation" to free for work.
  *
  * INTERIM until Holger rules (060:06 open questions, #1707): a never-assigned
@@ -122,10 +124,12 @@ export type WorkerWorkState = {
   name: string;
   slug: string;
   role: string | null;
-  /** Bound: has a live session (cor:agt:020:11). */
+  /** Bound: has an OPEN session — live or quiet (cor:agt:060:04 follows the binding). */
   bound: boolean;
-  /** The live session's family; null when unbound or it reported none. */
-  liveFamily: string | null;
+  /** Has a LIVE session (cor:agt:020:11): what matching requires until T6. */
+  live: boolean;
+  /** The binding's family (its newest open session's); null when unbound or it reported none. */
+  bindingFamily: string | null;
   lastActiveAt: Date | null;
   /** Families a live host registration can launch it as. */
   launchableFamilies: string[];
@@ -141,10 +145,24 @@ export type WorkerWorkState = {
   lastAssignedAt: Date | null;
 };
 
-/** cor:agt:060:04 — what a worker can run as now. */
-export function familiesOf(w: { bound: boolean; liveFamily: string | null; launchableFamilies: string[] }): string[] {
-  if (w.bound) return w.liveFamily ? [w.liveFamily] : [];
+/**
+ * cor:agt:060:04 — what a worker can run as now: its binding's family while
+ * bound — a quiet binding included, so a host family never replaces it — and
+ * otherwise any family a live host can launch it as.
+ */
+export function familiesOf(w: { bound: boolean; bindingFamily: string | null; launchableFamilies: string[] }): string[] {
+  if (w.bound) return w.bindingFamily ? [w.bindingFamily] : [];
   return w.launchableFamilies;
+}
+
+/**
+ * May the matcher assign to this worker at all? Until T6, only a worker with a
+ * LIVE session (#1707: an unbound or quiet worker has no way to be reached, so
+ * a match would only park the task). After T6, also an unbound worker a host
+ * can start. This is the matcher's restriction, kept apart from free for work.
+ */
+export function matchable(w: { bound: boolean; live: boolean }): boolean {
+  return w.live || (MATCH_UNBOUND_LAUNCHABLE && !w.bound);
 }
 
 /** cor:agt:060:05 over one worker's inputs. Pure. */
@@ -194,12 +212,13 @@ export async function loadWorkerWorkStates(db: Db, appId: string, now: Date): Pr
   const openBy = new Map(open.map((o) => [o.assigneeWorkerId as string, o._count._all]));
   const partial = workers.map((w) => {
     const a = activity.get(w.id);
-    const bound = a?.hasLiveSession ?? false;
-    const liveFamily = bound ? a?.liveFamily ?? null : null;
+    const bound = a?.bound ?? false;
+    const live = a?.hasLiveSession ?? false;
+    const bindingFamily = bound ? a?.bindingFamily ?? null : null;
     const launchableFamilies = launchable.get(w.id) ?? [];
     return {
-      ...w, bound, liveFamily, launchableFamilies, lastActiveAt: a?.lastActiveAt ?? null,
-      families: familiesOf({ bound, liveFamily, launchableFamilies }),
+      ...w, bound, live, bindingFamily, launchableFamilies, lastActiveAt: a?.lastActiveAt ?? null,
+      families: familiesOf({ bound, bindingFamily, launchableFamilies }),
     };
   });
   const avail = await loadAvailabilityByFamily(db, partial.map((w) => ({ id: w.id, appId, families: w.families })), now);
@@ -228,10 +247,10 @@ async function stillFreeAs(tx: Prisma.TransactionClient, appId: string, workerId
   });
   if (openTaskCount > 0) return false;
   const activity = (await loadWorkersActivity({ db: tx } as unknown as Context, [workerId], now)).get(workerId);
-  const bound = activity?.hasLiveSession ?? false;
+  const bound = activity?.bound ?? false;
+  if (!matchable({ bound, live: activity?.hasLiveSession ?? false })) return false;
   const launchable = bound ? [] : (await loadLaunchableFamilies(tx, { workerIds: [workerId] }, now)).get(workerId) ?? [];
-  if (!bound && !MATCH_UNBOUND_LAUNCHABLE) return false;
-  const families = familiesOf({ bound, liveFamily: activity?.liveFamily ?? null, launchableFamilies: launchable });
+  const families = familiesOf({ bound, bindingFamily: activity?.bindingFamily ?? null, launchableFamilies: launchable });
   if (!families.includes(family)) return false;
   const availability = (await loadAvailabilityByFamily(tx, [{ id: workerId, appId, families: [family] }], now)).get(workerId) as WorkerAvailabilityView;
   return freeFamiliesOf({ retired: false, openTaskCount, families: [family], availability }).length > 0;
@@ -286,33 +305,48 @@ export type MatchResult = { taskId: string; workerId: string; family: string };
 /**
  * Match one App's queued tasks, oldest first, each to the least recently
  * assigned eligible worker free for work. Returns what it assigned.
+ *
+ * The WHOLE queue, a page at a time in stable (createdAt, id) order (#1723
+ * review, Diego P2-1): a first page of tasks nobody free can take must not
+ * hide a later task someone can. It stops early only when every candidate is
+ * spent, and the spent set carries across pages.
  */
 async function matchApp(db: PrismaClient, appId: string, now: Date, hooks: MatcherHooks): Promise<MatchResult[]> {
-  const queued = await db.agentTask.findMany({
-    where: { appId, status: 'pending', assigneeWorkerId: null, assigneeUserId: null },
-    select: { id: true, appId: true, requirements: true, closeSessionWhenDone: true },
-    orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
-    take: QUEUE_PAGE,
-  });
-  if (queued.length === 0) return [];
-  const candidates = (await loadWorkerWorkStates(db, appId, now))
-    .filter((w) => w.free && (w.bound || MATCH_UNBOUND_LAUNCHABLE))
-    .sort(compareRank);
   const out: MatchResult[] = [];
+  let candidates: WorkerWorkState[] | null = null;
   const spent = new Set<string>();
-  for (const task of queued) {
-    if (spent.size === candidates.length) break;
-    const req = parseRequirements(task.requirements);
-    for (const w of candidates) {
-      if (spent.has(w.id)) continue;
-      const family = eligibleFamily(req, w);
-      if (!family) continue;
-      const outcome = await tryAssign(db, task, w.id, family, now, hooks);
-      // Assigned, or no longer free: either way this worker is spent for this run.
-      if (outcome !== 'task-gone') spent.add(w.id);
-      if (outcome === 'assigned') out.push({ taskId: task.id, workerId: w.id, family });
-      if (outcome !== 'worker-not-free') break;
+  let after: { createdAt: Date; id: string } | null = null;
+  for (;;) {
+    const page: (QueuedTask & { createdAt: Date })[] = await db.agentTask.findMany({
+      where: {
+        appId, status: 'pending', assigneeWorkerId: null, assigneeUserId: null,
+        ...(after
+          ? { OR: [{ createdAt: { gt: after.createdAt } }, { createdAt: after.createdAt, id: { gt: after.id } }] }
+          : {}),
+      },
+      select: { id: true, appId: true, requirements: true, closeSessionWhenDone: true, createdAt: true },
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+      take: QUEUE_PAGE,
+    });
+    if (page.length === 0) break;
+    const last = page[page.length - 1];
+    after = { createdAt: last.createdAt, id: last.id };
+    candidates ??= (await loadWorkerWorkStates(db, appId, now)).filter((w) => w.free && matchable(w)).sort(compareRank);
+    for (const task of page) {
+      if (spent.size === candidates.length) return out;
+      const req = parseRequirements(task.requirements);
+      for (const w of candidates) {
+        if (spent.has(w.id)) continue;
+        const family = eligibleFamily(req, w);
+        if (!family) continue;
+        const outcome = await tryAssign(db, task, w.id, family, now, hooks);
+        // Assigned, or no longer free: either way this worker is spent for this run.
+        if (outcome !== 'task-gone') spent.add(w.id);
+        if (outcome === 'assigned') out.push({ taskId: task.id, workerId: w.id, family });
+        if (outcome !== 'worker-not-free') break;
+      }
     }
+    if (page.length < QUEUE_PAGE) break;
   }
   return out;
 }

@@ -21,7 +21,7 @@ import { generateId } from '../id.js';
 import { runAsActor } from '../requestActor.js';
 import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
 import { taskMatcherTick } from '../../jobs/taskMatcher.js';
-import { __matcherTesting, compareRank, eligibleFamily, matchQueuedTasks, parseRequirements } from './matcher.js';
+import { __matcherTesting, compareRank, eligibleFamily, loadWorkerWorkStates, matchQueuedTasks, parseRequirements } from './matcher.js';
 import { registerHost } from './hosts.js';
 
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({
@@ -195,6 +195,82 @@ describe('cor:agt:060:06 — a queued task goes to the matching worker free for 
     await taskMatcherTick(db, at('11:01'));
     expect(await assigneeOf(t.id)).toBe(liam.id);
   });
+
+  it('the matcher\'s own assignments count toward "least recently" (assignment.matched)', async () => {
+    await bind(baloo, 'codex', at('11:00'));
+    await bind(liam, 'codex', at('11:00'));
+    await lastAssigned(liam, '10:00');
+    const first = await queued('11:00', { role: 'reviewer' });
+    await taskMatcherTick(db, at('11:01'));
+    expect(await assigneeOf(first.id)).toBe(baloo.id); // never assigned before
+    // Baloo finishes, and both are free again: Baloo was assigned at 11:01, Liam at 10:00.
+    await db.agentTask.update({
+      where: { id: first.id },
+      data: { status: 'finished', startedAt: at('11:02'), finishedAt: at('11:03'), resultOutcome: 'succeeded' },
+    });
+    const second = await queued('11:04', { role: 'reviewer' });
+    await taskMatcherTick(db, at('11:05'));
+    expect(await assigneeOf(second.id)).toBe(liam.id);
+  });
+
+  it('the WHOLE queue is matched: 500 older tasks nobody can take do not starve a later one (#1723 review, Diego P2-1)', async () => {
+    await bind(baloo, 'codex', at('11:00'));
+    await db.agentTask.createMany({
+      data: Array.from({ length: 500 }, (_, i) => ({
+        appId: app.id, title: `Unmatchable ${i}`, ownerUserId: mia.id,
+        createdAt: new Date(at('09:00').getTime() + i), requirements: { role: 'nobody' },
+      })),
+    });
+    const last = await queued('10:00', { role: 'reviewer' });
+    expect(await taskMatcherTick(db, at('11:01'))).toEqual({ lost: 0, matched: 1 });
+    expect(await assigneeOf(last.id)).toBe(baloo.id);
+  });
+});
+
+describe('the family follows the BINDING, not activity (#1723 review, Diego P2-2; cor:agt:060:04)', () => {
+  const WorkerField = (resolvers as any).Worker;
+  const familyOf = (w: { id: string }): Promise<string | null> =>
+    WorkerField.family({ id: w.id, appId: app.id }, {}, ctx(mia.id), { operation: { operation: 'mutation' } });
+
+  it('a quiet, still-open binding keeps its family — and a live host family does not replace it', async () => {
+    // Bound as codex at 10:00, quiet ever since; a host can launch Baloo as glm.
+    await bind(baloo, 'codex', new Date(Date.now() - 25 * 3_600_000));
+    await registerHost(db, { appId: app.id, hostId: 'orca1', label: 'orca1', pollIntervalSeconds: 60, workers: [{ workerId: baloo.id, family: 'glm' }] });
+    expect(await familyOf(baloo)).toBe('codex');
+    const [state] = (await loadWorkerWorkStates(db, app.id, new Date())).filter((w) => w.id === baloo.id);
+    expect(state).toMatchObject({ bound: true, live: false, bindingFamily: 'codex', launchableFamilies: ['glm'], families: ['codex'], freeFamilies: ['codex'] });
+    // Quiet is not matchable until T6, so a glm-only task stays queued, and so does a codex one.
+    const glmOnly = await queued('09:00', { familyIn: ['glm'] });
+    const codexOk = await queued('09:01', { familyIn: ['codex'] });
+    await matchQueuedTasks(db, new Date(), { appId: app.id });
+    expect(await assigneeOf(glmOnly.id)).toBeNull();
+    expect(await assigneeOf(codexOk.id)).toBeNull();
+  });
+
+  it('an actual end clears it; only then does a host family apply', async () => {
+    const s = await bind(baloo, 'codex', new Date(Date.now() - 25 * 3_600_000));
+    await registerHost(db, { appId: app.id, hostId: 'orca1', label: 'orca1', pollIntervalSeconds: 60, workers: [{ workerId: baloo.id, family: 'glm' }] });
+    await db.session.update({ where: { id: s.id }, data: { endedAt: new Date() } });
+    expect(await familyOf(baloo)).toBeNull();
+    const [state] = (await loadWorkerWorkStates(db, app.id, new Date())).filter((w) => w.id === baloo.id);
+    expect(state).toMatchObject({ bound: false, bindingFamily: null, families: ['glm'] });
+  });
+
+  it('a newer bind replaces it, live or not', async () => {
+    await bind(baloo, 'codex', new Date(Date.now() - 26 * 3_600_000));
+    await bind(baloo, 'glm', new Date(Date.now() - 25 * 3_600_000));
+    expect(await familyOf(baloo)).toBe('glm');
+  });
+
+  it('a quiet binding that is driven again is matched as its family', async () => {
+    const s = await bind(baloo, 'codex', new Date(Date.now() - 25 * 3_600_000));
+    const t = await queued('09:00', { role: 'reviewer' });
+    await matchQueuedTasks(db, new Date(), { appId: app.id });
+    expect(await assigneeOf(t.id)).toBeNull();
+    await db.session.update({ where: { id: s.id }, data: { updatedAt: new Date() } });
+    await matchQueuedTasks(db, new Date(), { appId: app.id });
+    expect(await assigneeOf(t.id)).toBe(baloo.id);
+  });
 });
 
 // ── cor:agt:060:05 — free for work, one disqualifier at a time ────────────
@@ -294,7 +370,7 @@ describe('cor:agt:060:05 — free for work: each disqualifier on its own', () =>
       .toBe(false);
   });
 
-  it('the newest live session is the binding: its family wins, even when it reported none', async () => {
+  it('the newest open session is the binding: its family wins, even when it reported none', async () => {
     expect(await matchesBaloo(async () => {
       await bind(baloo, 'codex', at('10:00'));
       await bind(baloo, null, at('10:30'));

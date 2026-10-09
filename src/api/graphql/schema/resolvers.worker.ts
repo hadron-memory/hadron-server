@@ -1550,7 +1550,8 @@ export const workerQueries = {
         __heldWorkerActivity: activity.get(row.id) ?? {
           hasLiveSession: false,
           lastActiveAt: null,
-          liveFamily: null,
+          bound: false,
+          bindingFamily: null,
         },
       })),
     };
@@ -1620,12 +1621,22 @@ export const workerQueries = {
 };
 
 /**
- * Per-worker driving state: is a session open, and when was it last driven.
- * `liveFamily` (#1707, cor:agt:060:04) is the model family of the most
- * recently driven LIVE session — the binding's — and null when the worker has
- * no live session, or its live session reported none.
+ * Per-worker driving state: is a session live, and when was it last driven.
+ *
+ * #1707 (cor:agt:060:04) adds the BINDING, which is not the same fact as
+ * liveness: a worker is `bound` while it has an OPEN session (not ended), and
+ * `bindingFamily` is the model family of the newest open session — the latest
+ * bind — or null when that session reported none. Going quiet never unbinds
+ * (#1114; cor:agt:020:03 separates inactivity from ending a stint), so a
+ * lapsed but open session keeps its family; only an end, or a newer bind,
+ * clears or replaces it (#1723 review, Diego P2-2).
  */
-export type WorkerActivity = { hasLiveSession: boolean; lastActiveAt: Date | null; liveFamily: string | null };
+export type WorkerActivity = {
+  hasLiveSession: boolean;
+  lastActiveAt: Date | null;
+  bound: boolean;
+  bindingFamily: string | null;
+};
 
 /**
  * Database-side activity fold shared by one-App rosters and the cross-App
@@ -1681,15 +1692,16 @@ async function queryWorkerActivity(
                          WHEN 'EDGE'       THEN ${toNaiveUtc(cut.EDGE)}::timestamp
                        END))`;
   const rows = await ctx.db.$queryRaw<
-    { workerId: string; live: boolean; lastActiveAt: Date | null; liveFamily: string | null }[]
+    { workerId: string; live: boolean; lastActiveAt: Date | null; bound: boolean; bindingFamily: string | null }[]
   >`
     SELECT s.worker_id AS "workerId",
            bool_or(${sessionLive}) AS "live",
-           -- #1707: the binding's family is the most recently driven LIVE
-           -- session's, null included (a newer session that reported none
-           -- is the binding, and does not inherit an older one's).
-           (array_agg(s.family ORDER BY ${activityAt} DESC, s.started_at DESC, s.id DESC)
-              FILTER (WHERE ${sessionLive}))[1] AS "liveFamily",
+           -- #1707: the BINDING is any open session, live or quiet; its family
+           -- is the newest open session's (the latest bind), null included —
+           -- a newer bind that reported none does not inherit an older one's.
+           bool_or(s.ended_at IS NULL) AS "bound",
+           (array_agg(s.family ORDER BY s.started_at DESC, s.id DESC)
+              FILTER (WHERE s.ended_at IS NULL))[1] AS "bindingFamily",
            max(LEAST(GREATEST(
              s.started_at,
              -- The reaper advances updated_at while setting auto_expired_at.
@@ -1716,7 +1728,12 @@ async function queryWorkerActivity(
   return new Map<string, WorkerActivity>(
     rows.map((row) => [
       row.workerId,
-      { hasLiveSession: row.live, lastActiveAt: row.lastActiveAt, liveFamily: row.liveFamily ?? null },
+      {
+        hasLiveSession: row.live,
+        lastActiveAt: row.lastActiveAt,
+        bound: row.bound,
+        bindingFamily: row.bindingFamily ?? null,
+      },
     ]),
   );
 }
@@ -2218,9 +2235,10 @@ export const workerFieldResolvers = {
     },
     /**
      * #1707 (cor:agt:060:04) — the model family of this worker's binding: its
-     * live session's family. Null when unbound, when the live session reported
-     * none, or when the caller may not see the worker's working state (the
-     * same gate as hasLiveSession). A matching input, never authorization.
+     * newest open session's family, kept while the session is quiet and
+     * cleared when it ends. Null when unbound, when the binding reported none,
+     * or when the caller may not see the worker's working state (the same gate
+     * as hasLiveSession). A matching input, never authorization.
      */
     family: async (
       worker: { id: string; appId: string; __heldWorkerActivity?: WorkerActivity },
@@ -2229,11 +2247,11 @@ export const workerFieldResolvers = {
       info?: { operation?: { operation?: string } },
     ): Promise<string | null> => {
       if (!(await maySeeWorkerInternals(ctx, worker.appId))) return null;
-      if (worker.__heldWorkerActivity) return worker.__heldWorkerActivity.liveFamily;
+      if (worker.__heldWorkerActivity) return worker.__heldWorkerActivity.bindingFamily;
       const activity = await loadAppWorkerActivity(ctx, worker.appId, {
         memoize: info?.operation?.operation === 'query',
       });
-      return activity.get(worker.id)?.liveFamily ?? null;
+      return activity.get(worker.id)?.bindingFamily ?? null;
     },
     /**
      * hadron-cli#487 — when this worker was last DRIVEN, across every session

@@ -87,6 +87,11 @@ describe('teamRoster — each state on its own (plan §7.4)', () => {
     expect(await entry('Kit')).toMatchObject({ state: 'AVAILABLE', bound: true, family: 'codex', free: true, freeFamilies: ['codex'] });
   });
 
+  it('AVAILABLE with a QUIET binding: bound, family kept, liveSession false (#1723 review, Diego P2-2)', async () => {
+    await bind('Kit', 'codex', 25 * 60);
+    expect(await entry('Kit')).toMatchObject({ state: 'AVAILABLE', bound: true, liveSession: false, family: 'codex' });
+  });
+
   it('AVAILABLE: unbound, but a live host can launch it (free for work, cor:agt:060:04 / :05)', async () => {
     await registerHost(db, { appId: app.id, hostId: 'orca1', label: 'orca1', pollIntervalSeconds: 60, workers: [{ workerId: w.Kit.id, family: 'glm' }] });
     expect(await entry('Kit')).toMatchObject({ state: 'AVAILABLE', bound: false, family: null, launchableFamilies: ['glm'], freeFamilies: ['glm'] });
