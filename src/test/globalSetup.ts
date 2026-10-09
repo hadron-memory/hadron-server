@@ -106,6 +106,8 @@ async function applyTemplateConstraints(client: Client) {
   await client.query(readFileSync(new URL('../../prisma/agent-task-invariants.sql', import.meta.url), 'utf8'));
   // #1706 — stall alarm episodes, alarm wakes, availability, stall windows.
   await client.query(readFileSync(new URL('../../prisma/agent-task-stall-invariants.sql', import.meta.url), 'utf8'));
+  // #1707 — session model family, host registrations.
+  await client.query(readFileSync(new URL('../../prisma/agent-task-matching-invariants.sql', import.meta.url), 'utf8'));
 
   // #1326 — nullable attribution is either unknown, a task at an exact
   // revision, or an authenticated human. A CHECK with a bare OR of enum

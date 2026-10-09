@@ -85,6 +85,7 @@ import {
   TASK_EVENT_TYPES,
   type TaskParty,
 } from '../../../lib/agentTasks/events.js';
+import { matchAfterChange } from '../../../lib/agentTasks/matcher.js';
 
 // ── Limits ────────────────────────────────────────────────────────────────
 
@@ -611,7 +612,7 @@ export const agentTaskMutations = {
     };
 
     const refused = parentId ? () => notFound(parentId) : () => appNotFound(input.appRef as string);
-    const id = await inTaskWriteTx(ctx, app, actor, refused, async (tx, txCtx, app) => {
+    const made = await inTaskWriteTx(ctx, app, actor, refused, async (tx, txCtx, app) => {
       if (parentId) {
         // Lock the parent so its assignee and status can't move under us,
         // then authorize against the locked row — the one assignee check.
@@ -645,10 +646,16 @@ export const agentTaskMutations = {
           appId: app.id, taskId: created.id, actor: evActor,
           event: { type: 'task.assigned', assignee, closeSessionWhenDone },
         });
+      } else {
+        // #1707: the task enters the queue (cor:agt:050:03, :11).
+        await appendTaskEvent(tx, { appId: app.id, taskId: created.id, actor: evActor, event: { type: 'assignment.queued' } });
       }
-      return created.id;
+      return { id: created.id, queued: assignee === null };
     });
-    return ctx.db.agentTask.findUniqueOrThrow({ where: { id } });
+    // #1707 (cor:agt:060:06): a queued task is matched now, after its create
+    // committed; the returned task shows the assignee when one was free.
+    if (made.queued) await matchAfterChange(ctx.db, app.id);
+    return ctx.db.agentTask.findUniqueOrThrow({ where: { id: made.id } });
   },
 
   /**
@@ -769,7 +776,7 @@ export const agentTaskMutations = {
     }
     const summary = optionalText(result?.summary, TASK_SUMMARY_MAX, 'summary');
     const evidence = optionalText(result?.evidence, TASK_EVIDENCE_MAX, 'evidence');
-    return mutateTask(ctx, taskId, async (tx, task, actor, app, txCtx) => {
+    const finished = await mutateTask(ctx, taskId, async (tx, task, actor, app, txCtx) => {
       if (!isAssignee(actor, task)) {
         throw taskError('TASK_NOT_ASSIGNEE', "Only the task's assignee finishes it and sets its result.", { taskId });
       }
@@ -789,11 +796,14 @@ export const agentTaskMutations = {
         appId: app.id, taskId: task.id, actor: eventActor(ctx.userId), event: { type: 'task.finished', outcome },
       });
     });
+    // #1707: a worker may have freed up (cor:agt:060:06).
+    await matchAfterChange(ctx.db, finished.appId);
+    return finished;
   },
 
   /** Cancel a pending or started task: its owner, or whoever manages the App (cor:agt:050:09, Proposed). */
-  cancelAgentTask: async (_: unknown, { taskId }: { taskId: string }, ctx: Context) =>
-    mutateTask(ctx, taskId, async (tx, task, actor, app, txCtx) => {
+  cancelAgentTask: async (_: unknown, { taskId }: { taskId: string }, ctx: Context) => {
+    const cancelled = await mutateTask(ctx, taskId, async (tx, task, actor, app, txCtx) => {
       if (!isOwner(actor, task) && !(await actorManagesApp(txCtx, app, actor))) {
         throw taskError('TASK_NOT_OWNER', "Only the task's owner, or whoever manages the App, cancels it.", { taskId });
       }
@@ -807,7 +817,11 @@ export const agentTaskMutations = {
         appId: app.id, taskId: task.id, actor: eventActor(ctx.userId),
         event: { type: 'task.cancelled', fromStatus: task.status as 'pending' | 'started', openChildCount },
       });
-    }),
+    });
+    // #1707: a worker may have freed up (cor:agt:060:06).
+    await matchAfterChange(ctx.db, cancelled.appId);
+    return cancelled;
+  },
 };
 
 // ── Queries ───────────────────────────────────────────────────────────────

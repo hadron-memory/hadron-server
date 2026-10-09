@@ -1970,6 +1970,8 @@ export function createMcpServerInstance(
     'hadron_task_get', 'hadron_task_list', 'hadron_team_events',
     // #1706 — availability read (its own optional session).
     'hadron_team_availability',
+    // #1707 — the team roster read (its own optional session).
+    'hadron_team_roster',
     // Per-connection selections and key handling: nothing authored.
     'hadron_set_active_memory', 'hadron_set_active_app', 'hadron_set_active_org', 'hadron_set_active_scope',
     'hadron_unlock_memory', 'hadron_lock_memory',
@@ -8391,12 +8393,13 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       customerId: z.string().optional().describe('Customer ID for chatbot sessions'),
       language: z.string().optional().describe('Programming language'),
       llmModel: z.string().optional().describe('LLM model being used'),
+      family: z.string().optional().describe('The model family this session runs as (cor:agt:060:04), e.g. claude, codex or glm. Omit to derive it from llmModel; a session nothing classifies gets no family, and its worker is not matched to queued tasks until one is given. A matching input only, never authorization.'),
       parentSessionId: z.string().optional().describe('Parent session ID'),
       prevSessionId: z.string().optional().describe('Previous session ID'),
       workerRef: z.string().optional().describe('The Worker (named casting) this session works as. Three forms resolve: the worker\'s NAME ("Iris" — unique within the App, case-insensitive, and what a human will say), its URN (hrn:worker:<root>:<app-slug>:<slug>), or its bare id. Prefer the name for a human-driven pickup; the URN when addressing a worker across App context. Must belong to this App; stamps the session\'s agentId from the casting and returns the worker\'s boot briefing.'),
       force: z.boolean().optional().describe('Take over a WORKER_TAKEN worker — one someone drove RECENTLY (#1114: a merely-open session no longer refuses, so if you are seeing this refusal the session is live rather than just unclosed). That open session may be someone else\'s live work, or your own left behind by a chat session that ended without ending it (ending a chat session never ends a worker session); the server cannot tell which, so neither should you assume. Use only on the user\'s explicit override, after showing who last drove it.'),
     },
-    async ({ description, type, repo, branch, prNumber, customerId, language, llmModel, parentSessionId, prevSessionId, workerRef, force }) => {
+    async ({ description, type, repo, branch, prNumber, customerId, language, llmModel, family, parentSessionId, prevSessionId, workerRef, force }) => {
       // Spec 026 / D-2026-05-21-003 strict tool: session-start needs App
       // context to attribute the session. Errors with typed [no_active_app]
       // envelope for multi-App OAuth callers without selection.
@@ -8456,6 +8459,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
               customerId: customerId ?? undefined,
               language: language ?? undefined,
               llmModel: llmModel ?? undefined,
+              family: family ?? undefined,
               parentSessionId: parentSessionId ?? undefined,
               prevSessionId: prevSessionId ?? undefined,
               workerRef: workerRef ?? undefined,

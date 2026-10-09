@@ -1636,6 +1636,11 @@ model Session {
   host            String?
   /// #928: the tool driving the session ("claude-code", "codex", ...).
   tool            String?
+  /// #1707 — the model family this session runs as (cor:agt:060:04): given
+  /// at session start, or derived from `llmModel` then `tool`; null when it
+  /// could not be classified. A worker's family is its live bound session's.
+  /// A matching input only, never an authorization input: it is self-declared.
+  family          String?
   /// Total prompt tokens across the session.
   inputTokens     Int?        @map("input_tokens")
   /// Total completion tokens across the session.
@@ -3105,6 +3110,8 @@ model App {
   /// #1706 — model-family availability (cor:agt:060:03) and the stall schedule.
   modelFamilyAvailability ModelFamilyAvailability[]
   agentTaskStallSchedule  AgentTaskStallSchedule?
+  /// #1707 — hosts that registered which workers they can launch (cor:agt:070:01).
+  hostRegistrations       HostRegistration[]
   mcpSessionStates McpSessionState[]
   scopes           Scope[]
   registerEntries  RegisterEntry[] @relation("RegisterOwnerApp")
@@ -3571,6 +3578,7 @@ model Worker {
   assignedAgentTasks AgentTask[] @relation("AgentTaskAssigneeWorker")
   /// #1706 — availability for work (cor:agt:060:02).
   availability       WorkerAvailability?
+  launchableVia      HostRegistrationWorker[]
 
   /// The URN atom's uniqueness. Unfiltered on retirement, like
   /// `workers_app_name_uniq`: a retired worker's URN must keep resolving.
@@ -4959,6 +4967,9 @@ model AgentTeamEvent {
   @@unique([taskId, type, episodeStart], map: "agent_team_events_episode_uniq")
   @@index([appId, createdAt])
   @@index([taskId])
+  /// #1707 — "assigned least recently" (cor:agt:060:06) reads a worker's
+  /// latest assignment event.
+  @@index([subjectWorkerId, createdAt])
   @@map("agent_team_events")
 }
 
@@ -5049,4 +5060,50 @@ model AgentTaskStallSchedule {
   app App @relation(fields: [appId], references: [id], onDelete: Cascade)
 
   @@map("agent_task_stall_schedule")
+}
+
+/// #1707 — a host's statement of which team App it serves and which workers it
+/// can launch, each with the model family it would run as (cor:agt:070:01).
+/// Identified within its App by `hostId` (Proposed); `label` is for display.
+///
+/// The host's identity comes from its key, never from a request: the public
+/// `registerHost` path ships with the host-operations slice's `host:operate`
+/// key (T6). Until then only the internal writer
+/// (src/lib/agentTasks/hosts.ts) writes here.
+///
+/// A registration not refreshed within LAPSE_POLLS poll intervals has lapsed
+/// (plan default 3, cor:agt:070:01 open question): its workers stop counting as
+/// launchable through it, and the sweep writes `host.lost` once, stamping
+/// `lostAt`. A refresh clears `lostAt`.
+model HostRegistration {
+  id                  String    @id @default(cuid())
+  appId               String    @map("app_id")
+  hostId              String    @map("host_id")
+  label               String
+  pollIntervalSeconds Int       @map("poll_interval_seconds")
+  registeredAt        DateTime  @default(now()) @map("registered_at")
+  refreshedAt         DateTime  @map("refreshed_at")
+  lostAt              DateTime? @map("lost_at")
+
+  app     App                      @relation(fields: [appId], references: [id], onDelete: Cascade)
+  workers HostRegistrationWorker[]
+
+  @@unique([appId, hostId], map: "host_registrations_app_host_uniq")
+  @@map("host_registrations")
+}
+
+/// #1707 — one worker a registered host can launch, and the model family it
+/// would run as (cor:agt:070:01). A worker may be launchable through several
+/// hosts (Proposed).
+model HostRegistrationWorker {
+  registrationId String @map("registration_id")
+  workerId       String @map("worker_id")
+  family         String
+
+  registration HostRegistration @relation(fields: [registrationId], references: [id], onDelete: Cascade)
+  worker       Worker           @relation(fields: [workerId], references: [id], onDelete: Cascade)
+
+  @@id([registrationId, workerId])
+  @@index([workerId])
+  @@map("host_registration_workers")
 }

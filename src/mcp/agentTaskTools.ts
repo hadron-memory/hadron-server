@@ -2,7 +2,8 @@
  * #1705 — agent tasks on the MCP surface (cor:agt:050): create, assign,
  * reassign, start, record progress, finish and cancel a task, read one or a
  * list, and read the App's team event stream. #1706 adds acknowledging an
- * alarm and availability for work (cor:agt:050:20, cor:agt:060).
+ * alarm and availability for work (cor:agt:050:20, cor:agt:060). #1707 adds
+ * the team roster (plan design:agent-tasks §7.4).
  *
  * Every tool is a thin call into the SAME resolvers GraphQL serves
  * (`resolvers.agentTask.ts`): the actor, the participation gate, the
@@ -48,7 +49,9 @@ const MA = resolvers.Mutation as unknown as {
 };
 const QA = resolvers.Query as unknown as {
   teamAvailability: Resolver<{ appRef: string }, { workers: AvailabilityRow[]; families: AvailabilityRow[] }>;
+  teamRoster: Resolver<{ appRef: string }, { appId: string; asOf: Date; workers: RosterRow[] }>;
 };
+type RosterRow = import('../lib/agentTasks/roster.js').RosterEntry & { appUrn: string };
 const T = agentTaskFieldResolvers.AgentTask;
 const E = agentTaskFieldResolvers.AgentTeamEvent;
 const WA = agentTaskAlarmFieldResolvers.WorkerAvailability;
@@ -65,6 +68,8 @@ export const AGENT_TASK_WRITE_TOOLS = [
 /** The read tools: actor-neutral, so they are listed in ACTOR_NEUTRAL_TOOLS. */
 export const AGENT_TASK_READ_TOOLS = [
   'hadron_task_get', 'hadron_task_list', 'hadron_team_events', 'hadron_team_availability',
+  // #1707
+  'hadron_team_roster',
 ] as const;
 
 function textResult(text: string, isError = false) {
@@ -80,6 +85,25 @@ function refusal(e: unknown) {
   }
   if (e instanceof UrnNotQualifiedError) return textResult(`[bad_user_input] ${e.message}`, true);
   throw e;
+}
+
+/** One roster line (plan §7.4): the state, then the facts behind it. Ids and words only. */
+export function renderRosterEntry(r: RosterRow): string {
+  const facts = [
+    r.role ? `role ${r.role}` : null,
+    r.bound ? `bound${r.family ? ` as ${r.family}` : ', no model family reported'}` : 'unbound',
+    r.launchableFamilies.length ? `launchable as ${r.launchableFamilies.join('/')}` : null,
+    r.free ? `free for work as ${r.freeFamilies.join('/')}` : null,
+    r.unavailable ? `unavailable: ${r.unavailable.reason ?? 'unknown'}${r.unavailable.until ? ` until ${r.unavailable.until.toISOString()}` : ''}` : null,
+    r.unavailableFamilies.length ? `family unavailable: ${r.unavailableFamilies.join('/')}` : null,
+    r.startedTaskIds.length ? `started ${r.startedTaskIds.join(', ')}` : null,
+    r.pendingTaskIds.length ? `pending ${r.pendingTaskIds.join(', ')}` : null,
+    r.waitingOnTaskIds.length ? `waiting on ${r.waitingOnTaskIds.join(', ')} since ${r.waitingSince?.toISOString()}` : null,
+    r.alarmEventIds.length ? `woken on alarm ${r.alarmEventIds.join(', ')}` : null,
+    r.unreactedChildTaskId ? `child ${r.unreactedChildTaskId} finished` : null,
+    r.lastAssignedAt ? `last assigned ${r.lastAssignedAt.toISOString()}` : 'never assigned',
+  ].filter(Boolean);
+  return `${r.name} — ${r.state}: ${facts.join('; ')}`;
 }
 
 function partyLabel(p: Party): string {
@@ -470,6 +494,21 @@ export function registerAgentTaskTools(server: McpServer, deps: { db: PrismaClie
           ...(await Promise.all(families.map((r) => renderAvailability(r, 'family', ctx)))),
         ];
         return textResult(lines.join('\n'));
+      }),
+  );
+
+  server.tool(
+    'hadron_team_roster',
+    'Read a team App\'s roster (plan design:agent-tasks §7.4): each worker that is not retired, with one derived state ' +
+      '(YOUR_MOVE, UNAVAILABLE, WAITING, WORKING, ASSIGNED_NOT_STARTED, AVAILABLE, NO_FAMILY, NOT_LAUNCHABLE) and the ' +
+      'facts behind it: model family, free for work, availability, its tasks and alarms. Plan-derived, not a spec. ' +
+      'Readers: the App\'s participants.',
+    { appRef: z.string().describe('The team App (id or URN).'), session: SESSION_READ },
+    async ({ session, appRef }) =>
+      read(session, async (ctx) => {
+        const { workers, asOf } = await QA.teamRoster({}, { appRef }, ctx);
+        if (!workers.length) return textResult('This App has no workers that are not retired.');
+        return textResult([`Roster as of ${asOf.toISOString()}:`, ...workers.map(renderRosterEntry)].join('\n'));
       }),
   );
 }

@@ -16,8 +16,9 @@
  *     writes the change down (`clearStalledMarks`), so the event stream says
  *     when the worker came back.
  *
- * A worker's model family is T3's (`Worker.family`, set at session start).
- * Until then the caller passes the family it knows, or null.
+ * A worker's model family is its live session's, or one a live host can launch
+ * it as (#1707, src/lib/agentTasks/family.ts); callers pass the family or
+ * families they know.
  */
 
 import type { Prisma, PrismaClient } from '../../generated/prisma/index.js';
@@ -67,38 +68,61 @@ export function isAvailableForWork(
 /**
  * Available for work, for several workers of possibly several Apps, in three
  * queries. `family` is the worker's current model family, or null when it has
- * none (T3 supplies it).
+ * none.
  */
 export async function loadAvailableForWork(
   db: PrismaClient | Prisma.TransactionClient,
   workers: { id: string; appId: string; family: string | null }[],
   now = new Date(),
 ): Promise<Map<string, boolean>> {
+  const by = await loadAvailabilityByFamily(
+    db, workers.map((w) => ({ id: w.id, appId: w.appId, families: w.family ? [w.family] : [] })), now,
+  );
+  return new Map(workers.map((w) => {
+    const a = by.get(w.id) as WorkerAvailabilityView;
+    return [w.id, !a.ownInEffect && (w.family ? a.familyAvailable.get(w.family) === true : true)];
+  }));
+}
+
+/** One worker's availability inputs, resolved: its own record, and each family it could run as. */
+export type WorkerAvailabilityView = {
+  /** The worker's own record (cor:agt:060:02), when it makes the worker unavailable now. */
+  ownInEffect: boolean;
+  own: AvailabilityRecord;
+  /** Per family: whether the App's record for it (cor:agt:060:03) leaves it available now. */
+  familyAvailable: Map<string, boolean>;
+};
+
+/**
+ * #1707 — availability for work per (worker, family): an unbound worker may be
+ * launchable as several families (cor:agt:060:04, :05), and a family's own
+ * availability decides which of them count. The same three queries and the
+ * same `recordInEffect` as `loadAvailableForWork`; cor:agt:060:01 is
+ * `!ownInEffect && familyAvailable.get(family)`.
+ */
+export async function loadAvailabilityByFamily(
+  db: PrismaClient | Prisma.TransactionClient,
+  workers: { id: string; appId: string; families: string[] }[],
+  now = new Date(),
+): Promise<Map<string, WorkerAvailabilityView>> {
   if (workers.length === 0) return new Map();
   const ids = workers.map((w) => w.id);
+  const pairs = workers.flatMap((w) => w.families.map((family) => ({ appId: w.appId, family })));
   const [own, activity, families] = await Promise.all([
     db.workerAvailability.findMany({ where: { workerId: { in: ids } } }),
     loadWorkersActivity({ db } as unknown as Context, ids, now),
-    workers.some((w) => w.family)
-      ? db.modelFamilyAvailability.findMany({
-          where: {
-            OR: workers
-              .filter((w) => w.family)
-              .map((w) => ({ appId: w.appId, family: w.family as string })),
-          },
-        })
-      : Promise.resolve([]),
+    pairs.length ? db.modelFamilyAvailability.findMany({ where: { OR: pairs } }) : Promise.resolve([]),
   ]);
   const ownBy = new Map(own.map((r) => [r.workerId, r]));
   const familyBy = new Map(families.map((r) => [`${r.appId}\u0000${r.family}`, r]));
-  return new Map(workers.map((w) => [
-    w.id,
-    isAvailableForWork({
-      worker: ownBy.get(w.id) ?? null,
-      family: w.family ? familyBy.get(`${w.appId}\u0000${w.family}`) ?? null : null,
-      lastActivityAt: activity.get(w.id)?.lastActiveAt ?? null,
-    }, now),
-  ]));
+  return new Map(workers.map((w) => {
+    const record = ownBy.get(w.id) ?? null;
+    return [w.id, {
+      own: record,
+      ownInEffect: !isAvailableForWork({ worker: record, family: null, lastActivityAt: activity.get(w.id)?.lastActiveAt ?? null }, now),
+      familyAvailable: new Map(w.families.map((f) => [f, !recordInEffect(familyBy.get(`${w.appId}\u0000${f}`) ?? null, now)])),
+    }];
+  }));
 }
 
 /**

@@ -1550,6 +1550,7 @@ export const workerQueries = {
         __heldWorkerActivity: activity.get(row.id) ?? {
           hasLiveSession: false,
           lastActiveAt: null,
+          liveFamily: null,
         },
       })),
     };
@@ -1618,8 +1619,13 @@ export const workerQueries = {
   },
 };
 
-/** Per-worker driving state: is a session open, and when was it last driven. */
-export type WorkerActivity = { hasLiveSession: boolean; lastActiveAt: Date | null };
+/**
+ * Per-worker driving state: is a session open, and when was it last driven.
+ * `liveFamily` (#1707, cor:agt:060:04) is the model family of the most
+ * recently driven LIVE session — the binding's — and null when the worker has
+ * no live session, or its live session reported none.
+ */
+export type WorkerActivity = { hasLiveSession: boolean; lastActiveAt: Date | null; liveFamily: string | null };
 
 /**
  * Database-side activity fold shared by one-App rosters and the cross-App
@@ -1658,26 +1664,32 @@ async function queryWorkerActivity(
   // the column using the session timezone and is only accidentally correct on
   // a UTC server (findings:prisma-naive-timestamp-raw-sql).
   const cut = idleCutoffs(now);
-  const rows = await ctx.db.$queryRaw<
-    { workerId: string; live: boolean; lastActiveAt: Date | null }[]
-  >`
-    SELECT s.worker_id AS "workerId",
-           -- LIVE IS DERIVED, not stored. An open row proves only that nobody
-           -- closed it, so activity must also fall inside the type's idle
-           -- window (cor:agt:020:11 — reader and binder share one predicate).
-           bool_or(
-             s.ended_at IS NULL
-             AND GREATEST(
+  const activityAt = Prisma.sql`GREATEST(
                    s.started_at,
                    CASE WHEN s.auto_expired_at IS NULL THEN s.updated_at END,
                    ue.max_created
-                 ) >= (CASE s.type::text
+                 )`;
+  // LIVE IS DERIVED, not stored. An open row proves only that nobody closed
+  // it, so activity must also fall inside the type's idle window
+  // (cor:agt:020:11 — reader and binder share one predicate).
+  const sessionLive = Prisma.sql`(
+             s.ended_at IS NULL
+             AND ${activityAt} >= (CASE s.type::text
                          WHEN 'DEVELOPER'  THEN ${toNaiveUtc(cut.DEVELOPER)}::timestamp
                          WHEN 'CHATBOT'    THEN ${toNaiveUtc(cut.CHATBOT)}::timestamp
                          WHEN 'AUTOMATION' THEN ${toNaiveUtc(cut.AUTOMATION)}::timestamp
                          WHEN 'EDGE'       THEN ${toNaiveUtc(cut.EDGE)}::timestamp
-                       END)
-           ) AS "live",
+                       END))`;
+  const rows = await ctx.db.$queryRaw<
+    { workerId: string; live: boolean; lastActiveAt: Date | null; liveFamily: string | null }[]
+  >`
+    SELECT s.worker_id AS "workerId",
+           bool_or(${sessionLive}) AS "live",
+           -- #1707: the binding's family is the most recently driven LIVE
+           -- session's, null included (a newer session that reported none
+           -- is the binding, and does not inherit an older one's).
+           (array_agg(s.family ORDER BY ${activityAt} DESC, s.started_at DESC, s.id DESC)
+              FILTER (WHERE ${sessionLive}))[1] AS "liveFamily",
            max(LEAST(GREATEST(
              s.started_at,
              -- The reaper advances updated_at while setting auto_expired_at.
@@ -1704,7 +1716,7 @@ async function queryWorkerActivity(
   return new Map<string, WorkerActivity>(
     rows.map((row) => [
       row.workerId,
-      { hasLiveSession: row.live, lastActiveAt: row.lastActiveAt },
+      { hasLiveSession: row.live, lastActiveAt: row.lastActiveAt, liveFamily: row.liveFamily ?? null },
     ]),
   );
 }
@@ -2203,6 +2215,25 @@ export const workerFieldResolvers = {
         memoize: info?.operation?.operation === 'query',
       });
       return activity.get(worker.id)?.hasLiveSession ?? false;
+    },
+    /**
+     * #1707 (cor:agt:060:04) — the model family of this worker's binding: its
+     * live session's family. Null when unbound, when the live session reported
+     * none, or when the caller may not see the worker's working state (the
+     * same gate as hasLiveSession). A matching input, never authorization.
+     */
+    family: async (
+      worker: { id: string; appId: string; __heldWorkerActivity?: WorkerActivity },
+      _: unknown,
+      ctx: Context,
+      info?: { operation?: { operation?: string } },
+    ): Promise<string | null> => {
+      if (!(await maySeeWorkerInternals(ctx, worker.appId))) return null;
+      if (worker.__heldWorkerActivity) return worker.__heldWorkerActivity.liveFamily;
+      const activity = await loadAppWorkerActivity(ctx, worker.appId, {
+        memoize: info?.operation?.operation === 'query',
+      });
+      return activity.get(worker.id)?.liveFamily ?? null;
     },
     /**
      * hadron-cli#487 — when this worker was last DRIVEN, across every session

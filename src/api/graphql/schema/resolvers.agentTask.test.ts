@@ -134,7 +134,8 @@ describe('createAgentTask — root tasks: any App participant (cor:agt:050:06)',
     expect(t.status).toBe('pending');
     expect(t.closeSessionWhenDone).toBe(true);
     const ev = await events(t.id);
-    expect(ev.map((e) => e.type)).toEqual(['task.created']);
+    // #1707: a task created with no assignee enters the queue.
+    expect(ev.map((e) => e.type)).toEqual(['task.created', 'assignment.queued']);
     expect(ev[0].actorUserId).toBe(member.id);
   });
 
@@ -333,7 +334,7 @@ describe('assign / reassign / cancel — the owner, or whoever manages the App (
     const out = await M.assignAgentTask({}, { taskId: t.id, assignee: { worker: 'Liam' } }, ctx(member.id));
     expect(out.assigneeWorkerId).toBe(liam.id);
     expect(out.status).toBe('pending');
-    expect((await events(t.id)).map((e) => e.type)).toEqual(['task.created', 'task.assigned']);
+    expect((await events(t.id)).map((e) => e.type)).toEqual(['task.created', 'assignment.queued', 'task.assigned']);
   });
 
   it('a participant who is not the owner may not assign; an App manager may', async () => {

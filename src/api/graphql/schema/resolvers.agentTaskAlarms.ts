@@ -57,6 +57,7 @@ import {
 } from '../../../lib/agentTasks/events.js';
 import { FAMILY_PATTERN, recordInEffect } from '../../../lib/agentTasks/availability.js';
 import { effectiveWindows, STALL_WINDOW_DEFAULTS, type StallWindows } from '../../../lib/agentTasks/stall.js';
+import { matchAfterChange } from '../../../lib/agentTasks/matcher.js';
 
 // ── Errors and parsing ────────────────────────────────────────────────────
 
@@ -241,6 +242,8 @@ export const agentTaskAlarmMutations = {
         event: { kind: 'worker', workerId, state: value.state, reason: value.reason, until: value.until, setBy },
       });
     });
+    // #1707: availability changed, so a queued task may now match (cor:agt:060:06).
+    await matchAfterChange(ctx.db, app.id);
     return ctx.db.workerAvailability.findUniqueOrThrow({ where: { workerId } });
   },
 
@@ -275,6 +278,8 @@ export const agentTaskAlarmMutations = {
         event: { kind: 'family', family, state: value.state, reason: value.reason, until: value.until },
       });
     });
+    // #1707: availability changed, so a queued task may now match (cor:agt:060:06).
+    await matchAfterChange(ctx.db, app.id);
     return ctx.db.modelFamilyAvailability.findUniqueOrThrow({ where: { appId_family: { appId: app.id, family } } });
   },
 
