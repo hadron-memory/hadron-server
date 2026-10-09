@@ -78,7 +78,7 @@ beforeEach(async () => {
 const setWorker = (c: Context, input: Record<string, unknown>) =>
   M.setWorkerAvailability({}, { input: { worker: liam.id, state: 'UNAVAILABLE', reason: 'OUT_OF_TOKENS', ...input } }, c);
 const setFamily = (c: Context, input: Record<string, unknown>) =>
-  M.setFamilyAvailability({}, { input: { appRef: app.id, family: 'claude', state: 'UNAVAILABLE', reason: 'OTHER', ...input } }, c);
+  M.setModelFamilyAvailability({}, { input: { appRef: app.id, family: 'claude', state: 'UNAVAILABLE', reason: 'OTHER', ...input } }, c);
 
 describe('cor:agt:060:08 — who may set a worker\'s availability', () => {
   it('the worker itself, through its session, may mark itself unavailable — and never available', async () => {
@@ -168,14 +168,14 @@ describe('cor:agt:060:09 — who may set a model family\'s availability', () => 
     await expectCode(setFamily(ctx(holder.id), {}), 'AVAILABILITY_NOT_PERMITTED');
     await expectCode(setFamily(ctx(member.id), {}), 'AVAILABILITY_NOT_PERMITTED');
     await expectCode(setFamily(ctx(outsider.id), {}), 'APP_NOT_FOUND');
-    expect(await db.familyAvailability.count()).toBe(0);
+    expect(await db.modelFamilyAvailability.count()).toBe(0);
   });
 
   it('a family is a lowercase token; one record per App and family', async () => {
     await expectCode(setFamily(ctx(admin.id), { family: 'has space' }), 'BAD_USER_INPUT');
     await setFamily(ctx(admin.id), { family: 'Claude' });
     await setFamily(ctx(admin.id), { family: 'claude', state: 'AVAILABLE', reason: null });
-    expect(await db.familyAvailability.findMany()).toEqual([expect.objectContaining({ family: 'claude', state: 'available' })]);
+    expect(await db.modelFamilyAvailability.findMany()).toEqual([expect.objectContaining({ family: 'claude', state: 'available' })]);
   });
 });
 
@@ -223,21 +223,21 @@ describe('reading availability and stall windows (the App\'s task audience)', ()
     expect(await F.WorkerAvailability.inEffect(r.workers[0], {}, ctx(member.id))).toBe(true);
     expect(F.WorkerAvailability.reason(r.workers[0])).toBe('OUT_OF_TOKENS');
     expect(F.WorkerAvailability.setBy(r.workers[0])).toBe('APP_MANAGER');
-    expect(await F.FamilyAvailability.inEffect(r.families[0])).toBe(false);
+    expect(await F.ModelFamilyAvailability.inEffect(r.families[0])).toBe(false);
     await expectCode(Q.teamAvailability({}, { appRef: app.id }, ctx(outsider.id)), 'APP_NOT_FOUND');
   });
 
   it('stall windows: defaults, a manager\'s override, an omitted field kept, a member refused', async () => {
-    expect(await Q.agentTaskStallWindows({}, { appRef: app.id }, ctx(member.id))).toMatchObject({
+    expect(await Q.agentTaskStallSchedule({}, { appRef: app.id }, ctx(member.id))).toMatchObject({
       notStartedMinutes: 15, noProgressMinutes: 60, ownerReactionMinutes: 20, assignmentMinutes: 30, updatedAt: null,
     });
-    await M.setAgentTaskStallWindows({}, { appRef: app.id, input: { noProgressMinutes: 90 } }, ctx(admin.id));
-    const after = await M.setAgentTaskStallWindows({}, { appRef: app.id, input: { assignmentMinutes: 45 } }, ctx(admin.id));
+    await M.setAgentTaskStallSchedule({}, { appRef: app.id, input: { noProgressMinutes: 90 } }, ctx(admin.id));
+    const after = await M.setAgentTaskStallSchedule({}, { appRef: app.id, input: { assignmentMinutes: 45 } }, ctx(admin.id));
     expect(after).toMatchObject({ noProgressMinutes: 90, assignmentMinutes: 45, notStartedMinutes: 15 });
-    await expectCode(M.setAgentTaskStallWindows({}, { appRef: app.id, input: { noProgressMinutes: 5 } }, ctx(member.id)), 'APP_MANAGER_REQUIRED');
-    await expectCode(M.setAgentTaskStallWindows({}, { appRef: app.id, input: { noProgressMinutes: 0 } }, ctx(admin.id)), 'BAD_USER_INPUT');
-    await expectCode(M.setAgentTaskStallWindows({}, { appRef: app.id, input: { noProgressMinutes: 10_081 } }, ctx(admin.id)), 'BAD_USER_INPUT');
-    await expectCode(Q.agentTaskStallWindows({}, { appRef: app.id }, ctx(outsider.id)), 'APP_NOT_FOUND');
+    await expectCode(M.setAgentTaskStallSchedule({}, { appRef: app.id, input: { noProgressMinutes: 5 } }, ctx(member.id)), 'APP_MANAGER_REQUIRED');
+    await expectCode(M.setAgentTaskStallSchedule({}, { appRef: app.id, input: { noProgressMinutes: 0 } }, ctx(admin.id)), 'BAD_USER_INPUT');
+    await expectCode(M.setAgentTaskStallSchedule({}, { appRef: app.id, input: { noProgressMinutes: 10_081 } }, ctx(admin.id)), 'BAD_USER_INPUT');
+    await expectCode(Q.agentTaskStallSchedule({}, { appRef: app.id }, ctx(outsider.id)), 'APP_NOT_FOUND');
   });
 
   it('an uninstalled App\'s availability and windows are read-only', async () => {

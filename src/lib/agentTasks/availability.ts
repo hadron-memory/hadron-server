@@ -3,7 +3,7 @@
  *
  * A worker is available for work unless its own record (`worker_availability`,
  * cor:agt:060:02) or its model family's record in the App
- * (`family_availability`, cor:agt:060:03) says unavailable. That predicate is
+ * (`model_family_availability`, cor:agt:060:03) says unavailable. That predicate is
  * `isAvailableForWork`, the ONE derivation T3's matcher and T4's roster share;
  * a second copy would drift (the cor:agt:020:11 lesson).
  *
@@ -28,7 +28,7 @@ import { appendAvailabilityEvent, PLATFORM_ACTOR, type AvailabilityReason } from
 
 export const AVAILABILITY_REASONS: readonly AvailabilityReason[] = ['stalled', 'out-of-tokens', 'host-down', 'other'];
 
-/** A model family is a lowercase token (cor:agt:060:04), as chk_family_availability_shape pins it. */
+/** A model family is a lowercase token (cor:agt:060:04), as chk_model_family_availability_shape pins it. */
 export const FAMILY_PATTERN = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 
 /** The fields of an availability record the predicate reads. */
@@ -80,7 +80,7 @@ export async function loadAvailableForWork(
     db.workerAvailability.findMany({ where: { workerId: { in: ids } } }),
     loadWorkersActivity({ db } as unknown as Context, ids, now),
     workers.some((w) => w.family)
-      ? db.familyAvailability.findMany({
+      ? db.modelFamilyAvailability.findMany({
           where: {
             OR: workers
               .filter((w) => w.family)

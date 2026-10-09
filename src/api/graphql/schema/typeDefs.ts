@@ -6299,7 +6299,7 @@ export const typeDefs = `#graphql
     #1706 — an App's effective stall windows (cor:agt:050:14–:17). Readers:
     the App's task audience (cor:agt:050:21).
     """
-    agentTaskStallWindows(appRef: ID!): AgentTaskStallWindows!
+    agentTaskStallSchedule(appRef: ID!): AgentTaskStallSchedule!
 
     """
     #1706 — every worker and model-family availability record in an App
@@ -8002,14 +8002,14 @@ export const typeDefs = `#graphql
     Refusals: APP_NOT_FOUND, AVAILABILITY_NOT_PERMITTED, BAD_USER_INPUT,
     SESSION_NOT_BOUND, APP_UNINSTALLED.
     """
-    setFamilyAvailability(input: SetFamilyAvailabilityInput!): FamilyAvailability!
+    setModelFamilyAvailability(input: SetModelFamilyAvailabilityInput!): ModelFamilyAvailability!
 
     """
     #1706 — set an App's stall windows: whoever manages the App. Refusals:
     APP_NOT_FOUND, APP_MANAGER_REQUIRED, BAD_USER_INPUT, SESSION_NOT_BOUND,
     APP_UNINSTALLED.
     """
-    setAgentTaskStallWindows(appRef: ID!, input: AgentTaskStallWindowsInput!): AgentTaskStallWindows!
+    setAgentTaskStallSchedule(appRef: ID!, input: AgentTaskStallScheduleInput!): AgentTaskStallSchedule!
     """
     Start impersonating another member of orgRef (admin support/diagnostics).
     Caller must be a live ADMIN/OWNER of the org (platform ADMIN/OWNER is
@@ -10965,7 +10965,7 @@ export const typeDefs = `#graphql
     """
     episodeStart: DateTime
     "#1706 — alarms only: who the alarm wakes and when, nearest owner first (cor:agt:050:19). Null for an ordinary event."
-    wakes: [AlarmWake!]
+    wakes: [AgentTeamAlarmSchedule!]
   }
 
   enum AgentTeamEventSeverity {
@@ -10979,7 +10979,7 @@ export const typeDefs = `#graphql
   unacknowledged (cor:agt:050:20). This is the platform's record that the owner
   is due a wake-up; delivering it is the heartbeat slice's.
   """
-  type AlarmWake {
+  type AgentTeamAlarmSchedule {
     "The owner's position in the chain, 0 for the nearest."
     chainIndex: Int!
     owner: AgentTaskParty
@@ -11039,7 +11039,7 @@ export const typeDefs = `#graphql
   }
 
   "#1706 — one model family's availability for work in one App (cor:agt:060:03). A family with no record is available."
-  type FamilyAvailability {
+  type ModelFamilyAvailability {
     appId: ID!
     "The model family, e.g. claude or codex (cor:agt:060:04)."
     family: String!
@@ -11055,14 +11055,14 @@ export const typeDefs = `#graphql
   "#1706 — every availability record in one App."
   type TeamAvailability {
     workers: [WorkerAvailability!]!
-    families: [FamilyAvailability!]!
+    families: [ModelFamilyAvailability!]!
   }
 
   """
   #1706 — an App's effective stall windows, in minutes (cor:agt:050:14–:17).
   Tunables, not contract: the platform defaults are 15, 60, 20 and 30.
   """
-  type AgentTaskStallWindows {
+  type AgentTaskStallSchedule {
     appId: ID!
     "Not started (cor:agt:050:14): counted from the assignment when the task has no later start-by time."
     notStartedMinutes: Int!
@@ -11077,7 +11077,7 @@ export const typeDefs = `#graphql
   }
 
   "An omitted field keeps its value; null returns it to the platform default. Each is 1 to 10080 minutes."
-  input AgentTaskStallWindowsInput {
+  input AgentTaskStallScheduleInput {
     notStartedMinutes: Int
     noProgressMinutes: Int
     ownerReactionMinutes: Int
@@ -11095,7 +11095,7 @@ export const typeDefs = `#graphql
     until: DateTime
   }
 
-  input SetFamilyAvailabilityInput {
+  input SetModelFamilyAvailabilityInput {
     appRef: ID!
     "A lowercase token, e.g. claude or codex."
     family: String!

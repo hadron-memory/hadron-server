@@ -1,6 +1,6 @@
 /**
  * #1706 — alarms and availability on the MCP surface: hadron_alarm_ack,
- * hadron_worker_availability_set, hadron_family_availability_set and
+ * hadron_worker_availability_set, hadron_model_family_availability_set and
  * hadron_team_availability. The rules are pinned in
  * src/lib/agentTasks/stall.test.ts and resolvers.agentTaskAlarms.test.ts; this
  * covers the SURFACE: writes require `session`, a worker session acts as the
@@ -115,11 +115,11 @@ describe('availability tools', () => {
     expect(text(await s.callTool('hadron_worker_availability_set', {
       worker: 'Anne', appRef: app.id, state: 'UNAVAILABLE', reason: 'HOST_DOWN', session: plain.id,
     }))).toMatch(/by holder \(user @/);
-    expect(code(text(await s.callTool('hadron_family_availability_set', {
+    expect(code(text(await s.callTool('hadron_model_family_availability_set', {
       appRef: app.id, family: 'claude', state: 'UNAVAILABLE', reason: 'OTHER', session: plain.id,
     })))).toBe('AVAILABILITY_NOT_PERMITTED');
     const adminPlain = await session({ userId: admin.id });
-    expect(text(await mcp(authOf(admin.id)).callTool('hadron_family_availability_set', {
+    expect(text(await mcp(authOf(admin.id)).callTool('hadron_model_family_availability_set', {
       appRef: app.id, family: 'claude', state: 'UNAVAILABLE', reason: 'OTHER', session: adminPlain.id,
     }))).toMatch(/family claude: unavailable \(other\) · in effect/);
     const read = text(await s.callTool('hadron_team_availability', { appRef: app.id }));

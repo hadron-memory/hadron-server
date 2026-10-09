@@ -107,7 +107,7 @@ export function effectiveWindows(row: Partial<Record<keyof StallWindows, number 
 
 async function loadWindows(db: Db, appIds: string[]): Promise<Map<string, StallWindows>> {
   const rows = appIds.length
-    ? await db.appTaskStallWindows.findMany({ where: { appId: { in: appIds } } })
+    ? await db.agentTaskStallSchedule.findMany({ where: { appId: { in: appIds } } })
     : [];
   const byApp = new Map(rows.map((r) => [r.appId, r]));
   return new Map(appIds.map((id) => [id, effectiveWindows(byApp.get(id))]));
@@ -367,7 +367,7 @@ export async function raiseStallAlarm(
 
     // cor:agt:050:19 — the nearest owner is woken now; owner i falls due i
     // windows later (Proposed), unless the alarm is acknowledged first.
-    await tx.alarmWake.createMany({
+    await tx.agentTeamAlarmSchedule.createMany({
       data: chain.map((_, i) => ({
         eventId,
         chainIndex: i,
@@ -457,7 +457,7 @@ export async function wakeDueOwners(db: PrismaClient, now = new Date()): Promise
   return db.$transaction(async (tx) => {
     const due = await tx.$queryRaw<{ eventId: string; chainIndex: number }[]>`
       SELECT w.event_id AS "eventId", w.chain_index AS "chainIndex"
-      FROM alarm_wakes w
+      FROM agent_team_alarm_schedule w
       JOIN agent_team_events e ON e.id = w.event_id
       WHERE w.woken_at IS NULL
         AND w.due_at <= ${toNaiveUtc(now)}::timestamp
@@ -468,7 +468,7 @@ export async function wakeDueOwners(db: PrismaClient, now = new Date()): Promise
       FOR SHARE OF e`;
     let woken = 0;
     for (const d of due) {
-      const n = await tx.alarmWake.updateMany({
+      const n = await tx.agentTeamAlarmSchedule.updateMany({
         where: { eventId: d.eventId, chainIndex: d.chainIndex, wokenAt: null },
         data: { wokenAt: now },
       });

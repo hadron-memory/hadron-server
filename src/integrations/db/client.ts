@@ -28,10 +28,10 @@ const MODELS_WITHOUT_ID = new Set<string>([
   // #1606 — keyed by its node (1:1 with a comment node).
   'CommentMeta',
   // #1706 — keyed by their owner (event + chain index, worker, App + family, App).
-  'AlarmWake',
+  'AgentTeamAlarmSchedule',
   'WorkerAvailability',
-  'FamilyAvailability',
-  'AppTaskStallWindows',
+  'ModelFamilyAvailability',
+  'AgentTaskStallSchedule',
 ]);
 
 const basePrisma = new PrismaClient();

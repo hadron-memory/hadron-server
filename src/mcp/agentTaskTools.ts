@@ -44,7 +44,7 @@ const M = resolvers.Mutation as unknown as Record<string, Resolver<Record<string
 const MA = resolvers.Mutation as unknown as {
   acknowledgeAlarm: Resolver<{ eventId: string }, EventRow>;
   setWorkerAvailability: Resolver<{ input: Record<string, unknown> }, AvailabilityRow>;
-  setFamilyAvailability: Resolver<{ input: Record<string, unknown> }, AvailabilityRow>;
+  setModelFamilyAvailability: Resolver<{ input: Record<string, unknown> }, AvailabilityRow>;
 };
 const QA = resolvers.Query as unknown as {
   teamAvailability: Resolver<{ appRef: string }, { workers: AvailabilityRow[]; families: AvailabilityRow[] }>;
@@ -52,7 +52,7 @@ const QA = resolvers.Query as unknown as {
 const T = agentTaskFieldResolvers.AgentTask;
 const E = agentTaskFieldResolvers.AgentTeamEvent;
 const WA = agentTaskAlarmFieldResolvers.WorkerAvailability;
-const FA = agentTaskAlarmFieldResolvers.FamilyAvailability;
+const FA = agentTaskAlarmFieldResolvers.ModelFamilyAvailability;
 type AvailabilityRow = Record<string, any>;
 
 /** The write tools, for the caller-session gate's bookkeeping and tests. */
@@ -60,7 +60,7 @@ export const AGENT_TASK_WRITE_TOOLS = [
   'hadron_task_create', 'hadron_task_assign', 'hadron_task_reassign', 'hadron_task_start',
   'hadron_task_progress', 'hadron_task_finish', 'hadron_task_cancel',
   // #1706
-  'hadron_alarm_ack', 'hadron_worker_availability_set', 'hadron_family_availability_set',
+  'hadron_alarm_ack', 'hadron_worker_availability_set', 'hadron_model_family_availability_set',
 ] as const;
 /** The read tools: actor-neutral, so they are listed in ACTOR_NEUTRAL_TOOLS. */
 export const AGENT_TASK_READ_TOOLS = [
@@ -132,7 +132,7 @@ export async function renderEvent(e: EventRow, ctx: Context): Promise<string> {
   // #1706 — an alarm: its episode, who it has woken, and its acknowledgement.
   const wakes = (await agentTaskAlarmFieldResolvers.AgentTeamEvent.wakes(e as never, {}, ctx)) ?? [];
   const chain = await Promise.all(wakes.map(async (w) => {
-    const owner = (await agentTaskAlarmFieldResolvers.AlarmWake.owner(w as never, {}, ctx)) as Party;
+    const owner = (await agentTaskAlarmFieldResolvers.AgentTeamAlarmSchedule.owner(w as never, {}, ctx)) as Party;
     return `${partyLabel(owner)} (${w.wokenAt ? `woken ${w.wokenAt.toISOString()}` : `due ${w.dueAt.toISOString()}`})`;
   }));
   const ack = e.acknowledgedAt
@@ -442,7 +442,7 @@ export function registerAgentTaskTools(server: McpServer, deps: { db: PrismaClie
   );
 
   server.tool(
-    'hadron_family_availability_set',
+    'hadron_model_family_availability_set',
     'Set a model family\'s availability for work in a team App (cor:agt:060:09), e.g. pause every claude worker: ' +
       'whoever manages the App only.',
     {
@@ -452,8 +452,8 @@ export function registerAgentTaskTools(server: McpServer, deps: { db: PrismaClie
       session: SESSION_WRITE,
     },
     async ({ session, ...input }) =>
-      writeOther('hadron_family_availability_set', session, async (ctx) =>
-        `Set.\n\n${await renderAvailability(await MA.setFamilyAvailability({}, { input }, ctx), 'family', ctx)}`),
+      writeOther('hadron_model_family_availability_set', session, async (ctx) =>
+        `Set.\n\n${await renderAvailability(await MA.setModelFamilyAvailability({}, { input }, ctx), 'family', ctx)}`),
   );
 
   server.tool(

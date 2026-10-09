@@ -211,18 +211,18 @@ describe('agent-task-stall-invariants.sql (#1706)', () => {
       .rejects.toThrow(/append-only/);
   });
 
-  it('alarm_wakes: a chain index, woken no earlier than due; goes with its alarm on an App delete', async () => {
+  it('agent_team_alarm_schedule: a chain index, woken no earlier than due; goes with its alarm on an App delete', async () => {
     const t = await task();
     const a = await alarm(t.id);
     const due = new Date('2026-10-09T10:15:00Z');
-    await expectCheckViolation(db.alarmWake.create({ data: { eventId: a.id, chainIndex: -1, dueAt: due } }), /chk_alarm_wakes_shape/);
+    await expectCheckViolation(db.agentTeamAlarmSchedule.create({ data: { eventId: a.id, chainIndex: -1, dueAt: due } }), /chk_agent_team_alarm_schedule_shape/);
     await expectCheckViolation(
-      db.alarmWake.create({ data: { eventId: a.id, chainIndex: 0, dueAt: due, wokenAt: new Date('2026-10-09T10:14:00Z') } }),
-      /chk_alarm_wakes_shape/,
+      db.agentTeamAlarmSchedule.create({ data: { eventId: a.id, chainIndex: 0, dueAt: due, wokenAt: new Date('2026-10-09T10:14:00Z') } }),
+      /chk_agent_team_alarm_schedule_shape/,
     );
-    await db.alarmWake.create({ data: { eventId: a.id, chainIndex: 0, dueAt: due, wokenAt: due } });
+    await db.agentTeamAlarmSchedule.create({ data: { eventId: a.id, chainIndex: 0, dueAt: due, wokenAt: due } });
     await db.app.delete({ where: { id: app.id } });
-    expect(await db.alarmWake.count()).toBe(0);
+    expect(await db.agentTeamAlarmSchedule.count()).toBe(0);
   });
 
   it('worker_availability (cor:agt:060:02): a reason exactly when unavailable, from the closed set; no `held`', async () => {
@@ -238,18 +238,18 @@ describe('agent-task-stall-invariants.sql (#1706)', () => {
     await expect(row({ reason: 'stalled', setBy: 'stall-rule' })).resolves.toBeTruthy();
   });
 
-  it('family_availability (cor:agt:060:03): a lowercase family token and the same state shape', async () => {
+  it('model_family_availability (cor:agt:060:03): a lowercase family token and the same state shape', async () => {
     const row = (data: Record<string, unknown>) =>
-      db.familyAvailability.create({ data: { appId: app.id, family: 'claude', state: 'unavailable', reason: 'other', setAt: new Date(), ...data } });
-    await expectCheckViolation(row({ family: 'Claude' }), /chk_family_availability_shape/);
-    await expectCheckViolation(row({ reason: null }), /chk_family_availability_shape/);
+      db.modelFamilyAvailability.create({ data: { appId: app.id, family: 'claude', state: 'unavailable', reason: 'other', setAt: new Date(), ...data } });
+    await expectCheckViolation(row({ family: 'Claude' }), /chk_model_family_availability_shape/);
+    await expectCheckViolation(row({ reason: null }), /chk_model_family_availability_shape/);
     await expect(row({})).resolves.toBeTruthy();
   });
 
-  it('app_task_stall_windows: 1 to 10080 minutes, or NULL for the default', async () => {
-    const row = (data: Record<string, unknown>) => db.appTaskStallWindows.create({ data: { appId: app.id, ...data } });
-    await expectCheckViolation(row({ notStartedMinutes: 0 }), /chk_app_task_stall_windows_range/);
-    await expectCheckViolation(row({ assignmentMinutes: 10_081 }), /chk_app_task_stall_windows_range/);
+  it('agent_task_stall_schedule: 1 to 10080 minutes, or NULL for the default', async () => {
+    const row = (data: Record<string, unknown>) => db.agentTaskStallSchedule.create({ data: { appId: app.id, ...data } });
+    await expectCheckViolation(row({ notStartedMinutes: 0 }), /chk_agent_task_stall_schedule_range/);
+    await expectCheckViolation(row({ assignmentMinutes: 10_081 }), /chk_agent_task_stall_schedule_range/);
     await expect(row({ noProgressMinutes: 90 })).resolves.toBeTruthy();
   });
 });

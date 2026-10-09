@@ -74,7 +74,7 @@ export const AUDIT_USER_COLUMNS: Readonly<Record<string, readonly string[]>> = {
   // #1705 — agent tasks. `assigned_by` is the assignment's audit actor.
   agent_tasks: ['created_by', 'updated_by', 'assigned_by'],
   // #1706 — who last changed an App's stall windows.
-  app_task_stall_windows: ['updated_by'],
+  agent_task_stall_schedule: ['updated_by'],
 };
 
 /**
@@ -539,7 +539,7 @@ async function runMergeTxn(
       // append-only stream). An alarm's `chain` is sealed JSON on the stream,
       // like the actor ids above, and is not rewritten.
       ['worker_availability', 'set_by_user_id'],
-      ['family_availability', 'set_by_user_id'],
+      ['model_family_availability', 'set_by_user_id'],
     ];
     for (const [table, column] of directReferences) {
       await runWithIds(`UPDATE "${table}" SET "${column}" = $1 WHERE "${column}" = $2`);

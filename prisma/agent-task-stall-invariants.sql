@@ -15,8 +15,8 @@ ALTER TABLE agent_team_events ADD CONSTRAINT chk_agent_team_events_episode CHECK
 
 -- cor:agt:050:19 — a wake is one owner of the alarm's chain; it is woken no
 -- earlier than it falls due.
-ALTER TABLE alarm_wakes DROP CONSTRAINT IF EXISTS chk_alarm_wakes_shape;
-ALTER TABLE alarm_wakes ADD CONSTRAINT chk_alarm_wakes_shape CHECK (
+ALTER TABLE agent_team_alarm_schedule DROP CONSTRAINT IF EXISTS chk_agent_team_alarm_schedule_shape;
+ALTER TABLE agent_team_alarm_schedule ADD CONSTRAINT chk_agent_team_alarm_schedule_shape CHECK (
   chain_index >= 0 AND (woken_at IS NULL OR woken_at >= due_at)
 );
 
@@ -35,8 +35,8 @@ ALTER TABLE worker_availability ADD CONSTRAINT chk_worker_availability_shape CHE
 
 -- cor:agt:060:03 — the same state / reason shape per App and model family; a
 -- family is a lowercase token (cor:agt:060:04).
-ALTER TABLE family_availability DROP CONSTRAINT IF EXISTS chk_family_availability_shape;
-ALTER TABLE family_availability ADD CONSTRAINT chk_family_availability_shape CHECK (
+ALTER TABLE model_family_availability DROP CONSTRAINT IF EXISTS chk_model_family_availability_shape;
+ALTER TABLE model_family_availability ADD CONSTRAINT chk_model_family_availability_shape CHECK (
   family ~ '^[a-z0-9][a-z0-9._-]{0,63}$' AND
   CASE state
     WHEN 'available' THEN reason IS NULL AND until IS NULL
@@ -47,8 +47,8 @@ ALTER TABLE family_availability ADD CONSTRAINT chk_family_availability_shape CHE
 
 -- cor:agt:050:14–:17 "What Can Change" — a window is a positive number of
 -- minutes, at most a week; NULL means the platform default.
-ALTER TABLE app_task_stall_windows DROP CONSTRAINT IF EXISTS chk_app_task_stall_windows_range;
-ALTER TABLE app_task_stall_windows ADD CONSTRAINT chk_app_task_stall_windows_range CHECK (
+ALTER TABLE agent_task_stall_schedule DROP CONSTRAINT IF EXISTS chk_agent_task_stall_schedule_range;
+ALTER TABLE agent_task_stall_schedule ADD CONSTRAINT chk_agent_task_stall_schedule_range CHECK (
   (not_started_minutes IS NULL OR not_started_minutes BETWEEN 1 AND 10080) AND
   (no_progress_minutes IS NULL OR no_progress_minutes BETWEEN 1 AND 10080) AND
   (owner_reaction_minutes IS NULL OR owner_reaction_minutes BETWEEN 1 AND 10080) AND

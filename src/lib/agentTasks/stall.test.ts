@@ -125,7 +125,7 @@ const alarms = (type?: string) =>
     where: { severity: 'alarm', ...(type ? { type } : {}) },
     orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
   });
-const wakes = (eventId: string) => db.alarmWake.findMany({ where: { eventId }, orderBy: { chainIndex: 'asc' } });
+const wakes = (eventId: string) => db.agentTeamAlarmSchedule.findMany({ where: { eventId }, orderBy: { chainIndex: 'asc' } });
 
 // ── cor:agt:050:14 — not started ──────────────────────────────────────────
 
@@ -390,7 +390,7 @@ describe('cor:agt:050:13 — exactly one alarm per stall episode', () => {
     const results = await Promise.all([evaluateStalls(db, at('10:15')), evaluateStalls(db, at('10:15'))]);
     expect(results[0].length + results[1].length).toBe(5);
     expect(await alarms()).toHaveLength(5);
-    expect(await db.alarmWake.count()).toBe(5);
+    expect(await db.agentTeamAlarmSchedule.count()).toBe(5);
     expect(await db.agentTeamEvent.count({ where: { type: 'availability.changed' } })).toBe(1);
   });
 
@@ -648,11 +648,11 @@ describe('cor:agt:060:07 — a stall makes the assignee unavailable until it act
 
 describe('per-App stall windows and scope', () => {
   it('an App\'s own window replaces the default; null returns it to the default', async () => {
-    await M.setAgentTaskStallWindows({}, { appRef: app.id, input: { notStartedMinutes: 5 } }, ctx(admin.id));
+    await M.setAgentTaskStallSchedule({}, { appRef: app.id, input: { notStartedMinutes: 5 } }, ctx(admin.id));
     await assignedToAnne('10:00');
     await tick('10:05');
     expect(await alarms()).toEqual([expect.objectContaining({ type: 'stall.not-started', payload: expect.objectContaining({ windowMinutes: 5 }) })]);
-    const back = await M.setAgentTaskStallWindows({}, { appRef: app.id, input: { notStartedMinutes: null } }, ctx(admin.id));
+    const back = await M.setAgentTaskStallSchedule({}, { appRef: app.id, input: { notStartedMinutes: null } }, ctx(admin.id));
     expect(back).toMatchObject({ notStartedMinutes: 15, noProgressMinutes: 60, ownerReactionMinutes: 20, assignmentMinutes: 30 });
   });
 
@@ -664,7 +664,7 @@ describe('per-App stall windows and scope', () => {
   });
 
   it('the escalation step is the alarm\'s own window', async () => {
-    await M.setAgentTaskStallWindows({}, { appRef: app.id, input: { assignmentMinutes: 10 } }, ctx(admin.id));
+    await M.setAgentTaskStallSchedule({}, { appRef: app.id, input: { assignmentMinutes: 10 } }, ctx(admin.id));
     const root = await task({ ownerWorkerId: ada.id, assigneeWorkerId: anne.id, assignedAt: at('09:00'), status: 'started', startedAt: at('09:01') });
     await drive(anne, '10:10');
     await task({ parentTaskId: root.id, ownerWorkerId: anne.id, createdAt: at('10:00') });
@@ -806,7 +806,7 @@ describe('Rook P3-4 on #1720 — the chain never leaves the task\'s App', () => 
 describe('PINNED until T5 (Rook P3-1 on #1720): escalation continues after the task moves', () => {
   it('an unacknowledged alarm keeps waking up the chain after the task starts, and in an uninstalled App', async () => {
     // As 050:19 / :20 read today, only an acknowledgement stops escalation. A wake only stamps
-    // alarm_wakes.woken_at; nothing is delivered in T2. T5 (delivery) must re-check, before
+    // agent_team_alarm_schedule.woken_at; nothing is delivered in T2. T5 (delivery) must re-check, before
     // delivering, that the episode is current, the task open, the App installed, and the party's
     // CURRENT access (isAppParticipant / mayStillDriveWorkerApp). Change this test deliberately.
     const root = await assignedToAnne('09:00', { status: 'started', startedAt: at('09:05') });

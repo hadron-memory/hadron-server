@@ -15,8 +15,8 @@
 //                           person holding its name; whoever manages the App
 //                           (060:08, Proposed). The stall rule sets it from the
 //                           evaluator; the host arm is T6 (#1709).
-//   set family availability   whoever manages the App (060:09, Proposed)
-//   set stall windows      whoever manages the App (#1706)
+//   set model-family availability  whoever manages the App (060:09, Proposed)
+//   set the stall schedule  whoever manages the App (#1706)
 //   read all of the above  the App's task audience (050:21, Proposed; #1706
 //                           interim for 060:02 / :03's open read question)
 // "Whoever manages the App" stays T1's INTERIM reading: a person acting as
@@ -117,7 +117,7 @@ function inChain(actor: TaskActor, chain: unknown): boolean {
 // ── Rows ──────────────────────────────────────────────────────────────────
 
 type WorkerAvailabilityRow = Prisma.WorkerAvailabilityGetPayload<Record<string, never>> & { __inEffect?: boolean };
-type FamilyAvailabilityRow = Prisma.FamilyAvailabilityGetPayload<Record<string, never>> & { __inEffect?: boolean };
+type ModelFamilyAvailabilityRow = Prisma.ModelFamilyAvailabilityGetPayload<Record<string, never>> & { __inEffect?: boolean };
 
 /** Resolve the worker an availability write names, within an App the caller participates in — or WORKER_NOT_FOUND. */
 async function resolveAvailabilityWorker(
@@ -245,7 +245,7 @@ export const agentTaskAlarmMutations = {
   },
 
   /** cor:agt:060:09 — set a model family's availability in an App: whoever manages the App only. */
-  setFamilyAvailability: async (
+  setModelFamilyAvailability: async (
     _: unknown,
     { input }: { input: AvailabilityInput & { appRef: string; family: string } },
     ctx: Context,
@@ -264,7 +264,7 @@ export const agentTaskAlarmMutations = {
         throw notPermitted("Only whoever manages the App sets a model family's availability.");
       }
       const data = { ...value, setAt: now, ...setByColumns(ctx) };
-      await tx.familyAvailability.upsert({
+      await tx.modelFamilyAvailability.upsert({
         where: { appId_family: { appId: freshApp.id, family } },
         create: { appId: freshApp.id, family, ...data },
         update: data,
@@ -275,7 +275,7 @@ export const agentTaskAlarmMutations = {
         event: { kind: 'family', family, state: value.state, reason: value.reason, until: value.until },
       });
     });
-    return ctx.db.familyAvailability.findUniqueOrThrow({ where: { appId_family: { appId: app.id, family } } });
+    return ctx.db.modelFamilyAvailability.findUniqueOrThrow({ where: { appId_family: { appId: app.id, family } } });
   },
 
   /**
@@ -283,7 +283,7 @@ export const agentTaskAlarmMutations = {
    * Change"): whoever manages the App. An omitted field keeps its value; null
    * returns it to the platform default.
    */
-  setAgentTaskStallWindows: async (
+  setAgentTaskStallSchedule: async (
     _: unknown,
     { appRef, input }: { appRef: string; input: Partial<Record<keyof StallWindows, number | null>> },
     ctx: Context,
@@ -304,7 +304,7 @@ export const agentTaskAlarmMutations = {
       if (!(await actorManagesApp(txCtx, freshApp, actor))) {
         throw taskError('APP_MANAGER_REQUIRED', "Only whoever manages the App sets its stall windows.");
       }
-      await tx.appTaskStallWindows.upsert({
+      await tx.agentTaskStallSchedule.upsert({
         where: { appId: freshApp.id },
         create: { appId: freshApp.id, ...data, updatedBy: ctx.userId ?? null },
         update: { ...data, updatedBy: ctx.userId ?? null },
@@ -315,7 +315,7 @@ export const agentTaskAlarmMutations = {
 };
 
 async function stallWindowsView(ctx: Context, appId: string) {
-  const row = await ctx.db.appTaskStallWindows.findUnique({ where: { appId } });
+  const row = await ctx.db.agentTaskStallSchedule.findUnique({ where: { appId } });
   return { appId, ...effectiveWindows(row), updatedAt: row?.updatedAt ?? null };
 }
 
@@ -323,7 +323,7 @@ async function stallWindowsView(ctx: Context, appId: string) {
 
 export const agentTaskAlarmQueries = {
   /** An App's effective stall windows, for its task audience (cor:agt:050:21). */
-  agentTaskStallWindows: async (_: unknown, { appRef }: { appRef: string }, ctx: Context) => {
+  agentTaskStallSchedule: async (_: unknown, { appRef }: { appRef: string }, ctx: Context) => {
     const { app } = await resolveParticipatedApp(ctx, appRef);
     return stallWindowsView(ctx, app.id);
   },
@@ -338,7 +338,7 @@ export const agentTaskAlarmQueries = {
     const now = new Date();
     const [workers, families] = await Promise.all([
       ctx.db.workerAvailability.findMany({ where: { worker: { appId: app.id } }, orderBy: { workerId: 'asc' } }),
-      ctx.db.familyAvailability.findMany({ where: { appId: app.id }, orderBy: { family: 'asc' } }),
+      ctx.db.modelFamilyAvailability.findMany({ where: { appId: app.id }, orderBy: { family: 'asc' } }),
     ]);
     const activity = await loadWorkersActivity(ctx, workers.map((w) => w.workerId), now);
     return {
@@ -359,12 +359,12 @@ export const agentTaskAlarmFieldResolvers = {
     /** cor:agt:050:19 — who this alarm wakes and when; null for an ordinary event. */
     wakes: async (e: { id: string; severity: string | null; chain: unknown }, _: unknown, ctx: Context) => {
       if (e.severity !== 'alarm') return null;
-      const rows = await ctx.db.alarmWake.findMany({ where: { eventId: e.id }, orderBy: { chainIndex: 'asc' } });
+      const rows = await ctx.db.agentTeamAlarmSchedule.findMany({ where: { eventId: e.id }, orderBy: { chainIndex: 'asc' } });
       const chain = Array.isArray(e.chain) ? (e.chain as { workerId?: string; userId?: string }[]) : [];
       return rows.map((w) => ({ ...w, __party: chain[w.chainIndex] ?? null }));
     },
   },
-  AlarmWake: {
+  AgentTeamAlarmSchedule: {
     owner: (w: { __party: { workerId?: string; userId?: string } | null }, _: unknown, ctx: Context) =>
       w.__party ? partyView(ctx, w.__party.workerId ?? null, w.__party.workerId ? null : w.__party.userId ?? null) : null,
   },
@@ -382,11 +382,11 @@ export const agentTaskAlarmFieldResolvers = {
       return recordInEffect(r, now, activity.get(r.workerId)?.lastActiveAt ?? null);
     },
   },
-  FamilyAvailability: {
-    state: (r: FamilyAvailabilityRow) => toGqlWord(r.state),
-    reason: (r: FamilyAvailabilityRow) => (r.reason ? toGqlWord(r.reason) : null),
-    setBy: (r: FamilyAvailabilityRow, _: unknown, ctx: Context) =>
+  ModelFamilyAvailability: {
+    state: (r: ModelFamilyAvailabilityRow) => toGqlWord(r.state),
+    reason: (r: ModelFamilyAvailabilityRow) => (r.reason ? toGqlWord(r.reason) : null),
+    setBy: (r: ModelFamilyAvailabilityRow, _: unknown, ctx: Context) =>
       partyView(ctx, r.setByWorkerId, r.setByWorkerId ? null : r.setByUserId),
-    inEffect: (r: FamilyAvailabilityRow) => r.__inEffect ?? recordInEffect(r, new Date()),
+    inEffect: (r: ModelFamilyAvailabilityRow) => r.__inEffect ?? recordInEffect(r, new Date()),
   },
 };
