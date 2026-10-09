@@ -3700,6 +3700,9 @@ export interface SessionInput {
   transcriptPath?: string;
   host?: string;
   tool?: string;
+  // #1707 / cor:agt:060:04: the model family this session runs as. Omitted:
+  // derived from llmModel, then tool (src/lib/agentTasks/family.ts).
+  family?: string | null;
   // #928 / cor:api:140: the role-Agent driving this session (PK or URN).
   agentRef?: string;
   // #943 / cor:api:140: the App this session is a unit of work for (PK or URN),

@@ -85,6 +85,7 @@ import {
   TASK_EVENT_TYPES,
   type TaskParty,
 } from '../../../lib/agentTasks/events.js';
+import { matchAfterChange } from '../../../lib/agentTasks/matcher.js';
 
 // ── Limits ────────────────────────────────────────────────────────────────
 
@@ -111,7 +112,7 @@ const OPEN: TaskStatus[] = ['pending', 'started'];
 
 // ── Errors ────────────────────────────────────────────────────────────────
 
-function taskError(code: string, message: string, ext: Record<string, unknown> = {}): GraphQLError {
+export function taskError(code: string, message: string, ext: Record<string, unknown> = {}): GraphQLError {
   return new GraphQLError(message, { extensions: { code, ...ext } });
 }
 const notFound = (taskId: string): GraphQLError =>
@@ -126,7 +127,7 @@ const APP_SELECT = {
   id: true, name: true, urn: true, organizationId: true, ownerUserId: true,
   uninstalledAt: true, deletedAt: true,
 } as const;
-type TaskApp = Prisma.AppGetPayload<{ select: typeof APP_SELECT }>;
+export type TaskApp = Prisma.AppGetPayload<{ select: typeof APP_SELECT }>;
 type TaskRow = Prisma.AgentTaskGetPayload<Record<string, never>>;
 
 /** Who is acting on a task: a worker through its session, or a person as themselves. */
@@ -163,7 +164,7 @@ export async function resolveTaskActor(ctx: Context, app: TaskApp): Promise<Task
 }
 
 /** The write-side preconditions every task mutation shares, after the actor resolved. */
-function requireWritable(ctx: Context, app: TaskApp): void {
+export function requireWritable(ctx: Context, app: TaskApp): void {
   if (ctx.impersonation) throw forbidden('Impersonation sessions are read-only.');
   if (ctx.sessionBindingRefused) {
     throw taskError(
@@ -175,7 +176,7 @@ function requireWritable(ctx: Context, app: TaskApp): void {
   if (app.uninstalledAt) throw taskError('APP_UNINSTALLED', 'This App is uninstalled; its tasks are read-only.');
 }
 
-async function loadApp(ctx: Context, appId: string): Promise<TaskApp | null> {
+export async function loadApp(ctx: Context, appId: string): Promise<TaskApp | null> {
   return ctx.db.app.findUnique({ where: { id: appId }, select: APP_SELECT });
 }
 
@@ -185,7 +186,7 @@ const appNotFound = (appRef: string): GraphQLError => taskError('APP_NOT_FOUND',
  * Resolve an App ref the caller participates in. An App that does not exist
  * and one the caller may not read answer the SAME refusal (Rook P3-1).
  */
-async function resolveParticipatedApp(ctx: Context, appRef: string): Promise<{ app: TaskApp; actor: TaskActor }> {
+export async function resolveParticipatedApp(ctx: Context, appRef: string): Promise<{ app: TaskApp; actor: TaskActor }> {
   let appId: string;
   try {
     ({ id: appId } = await resolveAppRef(ctx.db, appRef));
@@ -230,7 +231,7 @@ const isAssignee = (actor: TaskActor, t: TaskRow): boolean =>
  * with the transaction context, so it reads committed state under the write's
  * anchors.
  */
-async function actorManagesApp(ctx: Context, app: TaskApp, actor: TaskActor): Promise<boolean> {
+export async function actorManagesApp(ctx: Context, app: TaskApp, actor: TaskActor): Promise<boolean> {
   if (actor.kind !== 'user' || ctx.impersonation) return false;
   return managesAppStrict(ctx, app);
 }
@@ -241,7 +242,7 @@ function sameActor(a: TaskActor, b: TaskActor): boolean {
     : a.userId === b.userId);
 }
 
-function actorParty(actor: TaskActor): TaskParty {
+export function actorParty(actor: TaskActor): TaskParty {
   return actor.kind === 'worker' ? { workerId: actor.workerId } : { userId: actor.userId };
 }
 
@@ -291,7 +292,7 @@ async function resolveParty(
 }
 
 /** A worker ref within an App: its id, its URN, or its name. Null when it names nothing. */
-async function resolveTaskWorkerId(ctx: Context, appId: string, ref: string): Promise<string | null> {
+export async function resolveTaskWorkerId(ctx: Context, appId: string, ref: string): Promise<string | null> {
   if (isId(ref) || ref.startsWith('hrn:')) {
     try {
       return (await resolveWorkerRefId(ctx.db, ref)).id;
@@ -439,7 +440,7 @@ class TaskGateRefused extends Error {}
  * before the wait. A refusal discovered here is `refused()` — the caller's
  * concealment — except an uninstall that won the race, which says so.
  */
-async function inTaskWriteTx<T>(
+export async function inTaskWriteTx<T>(
   ctx: Context,
   app: TaskApp,
   actor: TaskActor,
@@ -611,7 +612,7 @@ export const agentTaskMutations = {
     };
 
     const refused = parentId ? () => notFound(parentId) : () => appNotFound(input.appRef as string);
-    const id = await inTaskWriteTx(ctx, app, actor, refused, async (tx, txCtx, app) => {
+    const made = await inTaskWriteTx(ctx, app, actor, refused, async (tx, txCtx, app) => {
       if (parentId) {
         // Lock the parent so its assignee and status can't move under us,
         // then authorize against the locked row — the one assignee check.
@@ -645,10 +646,16 @@ export const agentTaskMutations = {
           appId: app.id, taskId: created.id, actor: evActor,
           event: { type: 'task.assigned', assignee, closeSessionWhenDone },
         });
+      } else {
+        // #1707: the task enters the queue (cor:agt:050:03, :11).
+        await appendTaskEvent(tx, { appId: app.id, taskId: created.id, actor: evActor, event: { type: 'assignment.queued' } });
       }
-      return created.id;
+      return { id: created.id, queued: assignee === null };
     });
-    return ctx.db.agentTask.findUniqueOrThrow({ where: { id } });
+    // #1707 (cor:agt:060:06): a queued task is matched now, after its create
+    // committed; the returned task shows the assignee when one was free.
+    if (made.queued) await matchAfterChange(ctx.db, app.id);
+    return ctx.db.agentTask.findUniqueOrThrow({ where: { id: made.id } });
   },
 
   /**
@@ -769,7 +776,7 @@ export const agentTaskMutations = {
     }
     const summary = optionalText(result?.summary, TASK_SUMMARY_MAX, 'summary');
     const evidence = optionalText(result?.evidence, TASK_EVIDENCE_MAX, 'evidence');
-    return mutateTask(ctx, taskId, async (tx, task, actor, app, txCtx) => {
+    const finished = await mutateTask(ctx, taskId, async (tx, task, actor, app, txCtx) => {
       if (!isAssignee(actor, task)) {
         throw taskError('TASK_NOT_ASSIGNEE', "Only the task's assignee finishes it and sets its result.", { taskId });
       }
@@ -789,11 +796,14 @@ export const agentTaskMutations = {
         appId: app.id, taskId: task.id, actor: eventActor(ctx.userId), event: { type: 'task.finished', outcome },
       });
     });
+    // #1707: a worker may have freed up (cor:agt:060:06).
+    await matchAfterChange(ctx.db, finished.appId);
+    return finished;
   },
 
   /** Cancel a pending or started task: its owner, or whoever manages the App (cor:agt:050:09, Proposed). */
-  cancelAgentTask: async (_: unknown, { taskId }: { taskId: string }, ctx: Context) =>
-    mutateTask(ctx, taskId, async (tx, task, actor, app, txCtx) => {
+  cancelAgentTask: async (_: unknown, { taskId }: { taskId: string }, ctx: Context) => {
+    const cancelled = await mutateTask(ctx, taskId, async (tx, task, actor, app, txCtx) => {
       if (!isOwner(actor, task) && !(await actorManagesApp(txCtx, app, actor))) {
         throw taskError('TASK_NOT_OWNER', "Only the task's owner, or whoever manages the App, cancels it.", { taskId });
       }
@@ -807,7 +817,11 @@ export const agentTaskMutations = {
         appId: app.id, taskId: task.id, actor: eventActor(ctx.userId),
         event: { type: 'task.cancelled', fromStatus: task.status as 'pending' | 'started', openChildCount },
       });
-    }),
+    });
+    // #1707: a worker may have freed up (cor:agt:060:06).
+    await matchAfterChange(ctx.db, cancelled.appId);
+    return cancelled;
+  },
 };
 
 // ── Queries ───────────────────────────────────────────────────────────────
@@ -943,10 +957,10 @@ export const agentTaskQueries = {
 
 // ── Field resolvers ───────────────────────────────────────────────────────
 
-type PartyView = { kind: 'WORKER' | 'USER'; id: string; name: string | null; urn: string | null };
+export type PartyView = { kind: 'WORKER' | 'USER'; id: string; name: string | null; urn: string | null };
 
 /** A sanitized party projection — never the User object (#552: no other tenant's identity fields). */
-async function partyView(ctx: Context, workerId: string | null, userId: string | null): Promise<PartyView | null> {
+export async function partyView(ctx: Context, workerId: string | null, userId: string | null): Promise<PartyView | null> {
   if (workerId) {
     const w = await ctx.db.worker.findUnique({
       where: { id: workerId },

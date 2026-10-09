@@ -25,6 +25,7 @@ import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
 import { deleteUserAccount } from '../../../controller/operations/deleteUser.js';
 import { sessionActivityAt, loadLastEventBySession, isSessionLive } from '../../../lib/sessionActivity.js';
+import { lockWorkerNames } from '../../../lib/workerName.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -225,6 +226,69 @@ describe('castWorker — happy path', () => {
     expect(a.agentId).toBe(roleAgent.id);
     expect(b.agentId).toBe(roleAgent.id);
     expect(await db.worker.count({ where: { appId: app.id, agentId: roleAgent.id } })).toBe(2);
+  });
+});
+
+describe('castWorker — confusable naming (#1677)', () => {
+  it('preserves display spelling and refuses a confusable with the historical name', async () => {
+    const existing = await cast({ agentRef: roleAgent.id, name: 'Ａlice' });
+    expect(existing.name).toBe('Ａlice');
+    await db.worker.update({ where: { id: existing.id }, data: { retiredAt: new Date() } });
+    for (const operation of [M.castWorker, Q.castWorkerPreview]) {
+      await expect(operation({}, { appRef: app.id, agentRef: roleAgent.id, name: 'Alice' }, ctx(admin.id)))
+        .rejects.toMatchObject({ extensions: { code: 'WORKER_NAME_CONFUSABLE', collidingName: 'Ａlice', workerId: existing.id } });
+    }
+    expect(await db.worker.count({ where: { appId: app.id } })).toBe(1);
+    await expectCode(cast({ agentRef: roleAgent.id, name: 'ＡLICE' }), 'WORKER_NAME_TAKEN');
+  });
+
+  it.each([
+    ['mira', 'Μira'], // stored lowercase Latin, Greek capital Mu candidate
+    ['Μira', 'mira'], // the reverse insertion order
+  ])('refuses %s then %s across case variants of the reserved name', async (first, second) => {
+    const existing = await cast({ agentRef: roleAgent.id, name: first });
+    for (const operation of [M.castWorker, Q.castWorkerPreview]) {
+      await expect(operation({}, { appRef: app.id, agentRef: roleAgent.id, name: second }, ctx(admin.id)))
+        .rejects.toMatchObject({ extensions: { code: 'WORKER_NAME_CONFUSABLE', collidingName: first, workerId: existing.id } });
+    }
+    expect(await db.worker.count({ where: { appId: app.id } })).toBe(1);
+  });
+
+  it('allows the same skeleton in different Apps', async () => {
+    await cast({ agentRef: roleAgent.id, name: 'Alice' });
+    const other = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'Other', urn: `${org.urn}:other` } });
+    await db.appAgent.create({ data: { appId: other.id, agentId: roleAgent.id } });
+    const worker = await M.castWorker({}, { appRef: other.id, agentRef: roleAgent.id, name: 'Ａlice' }, ctx(admin.id));
+    expect(worker.name).toBe('Ａlice');
+  });
+
+  it('does not reveal collision details before staffing authorization', async () => {
+    await cast({ agentRef: roleAgent.id, name: 'Alice' });
+    for (const operation of [M.castWorker, Q.castWorkerPreview]) {
+      await expect(operation({}, { appRef: app.id, agentRef: roleAgent.id, name: 'Ａlice' }, ctx(outsider.id)))
+        .rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
+    }
+  });
+
+  it('serializes concurrent distinct spellings before checking and insertion', async () => {
+    let release!: () => void;
+    let acquired!: () => void;
+    const held = new Promise<void>((resolve) => { acquired = resolve; });
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const holder = db.$transaction(async (tx) => { await lockWorkerNames(tx, app.id); acquired(); await gate; }, { timeout: 20_000 });
+    await held;
+    const results = Promise.allSettled([
+      cast({ agentRef: roleAgent.id, name: 'Alice' }),
+      cast({ agentRef: roleAgent.id, name: 'Ａlice' }),
+    ]);
+    try { await waitForLockWaiters(db, 2); } finally { release(); }
+    await holder;
+    const settled = await results;
+    expect(settled.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
+    expect(settled.find((result) => result.status === 'rejected')).toMatchObject({
+      reason: { extensions: { code: 'WORKER_NAME_CONFUSABLE' } },
+    });
+    expect(await db.worker.count({ where: { appId: app.id } })).toBe(1);
   });
 });
 
