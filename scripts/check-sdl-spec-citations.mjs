@@ -18,28 +18,44 @@
  * the whole URN-ish token it sits in, which must start `hrn:node:` (or the
  * legacy `urn:node:`).
  *
- * ## The baseline (a ratchet)
+ * ## Two checks
  *
- * 128 bare citations predate this gate, and their cleanup is tracked by
- * hadron-portal #781 — the portal only flags ADDED lines, so they cost it
- * nothing until someone edits them. `scripts/sdl-spec-citations-baseline.txt`
- * records how many bare occurrences of each citation existed. A count above its
- * baseline fails, and so does any citation with no baseline entry. Qualifying
- * an old one never fails; lower its count in the baseline when you do (the gate
- * says which), so the ratchet tightens.
+ * 1. ADDED LINES (the portal's own rule). Every line of typeDefs.ts that this
+ *    change adds or edits, relative to the merge base with the base ref
+ *    (`origin/main` by default; CI passes the PR's base, or the commit main
+ *    was at), must carry no bare citation. This is what the portal gate sees
+ *    after a snapshot refresh: an edited description line is an added line
+ *    there, even when it keeps a citation it already had, and so is a legacy
+ *    citation moved to a new field. A total per citation cannot see either
+ *    (Diego's P2 on #1724), so the added-line check is the gate; the baseline
+ *    below never excuses an added line.
  *
- * Counting per citation rather than keying on line numbers keeps the baseline
- * stable under edits elsewhere in the 11k-line file.
+ * 2. THE BASELINE (a ratchet on the untouched rest). 128 bare citations
+ *    predate this gate; their cleanup is tracked by hadron-portal #781, and
+ *    the portal only flags added lines, so they cost it nothing until someone
+ *    edits them. `scripts/sdl-spec-citations-baseline.txt` records how many
+ *    bare occurrences of each citation existed. A whole-file count above its
+ *    baseline fails, and so does a citation with no entry, so the inventory
+ *    cannot grow even if a base is ever misresolved. Qualifying an old one
+ *    never fails; lower its count when you do (the gate says which). A
+ *    malformed baseline FAILS rather than exempting anything: every entry is
+ *    `<whole citation> <non-negative integer>`, once.
  *
- * Run: pnpm check:sdl-spec-citations   (CI runs this exact command)
+ * A base that does not resolve is a failure, never a pass: an empty diff is
+ * wrong in the passing direction (the portal workflow's note on the same).
+ *
+ * Run: pnpm check:sdl-spec-citations [base-ref]   (CI passes the base ref)
  */
 
+import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, join } from 'node:path';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const TYPEDEFS = join(HERE, '../src/api/graphql/schema/typeDefs.ts');
+const REPO = join(HERE, '..');
+const TYPEDEFS_PATH = 'src/api/graphql/schema/typeDefs.ts';
+const TYPEDEFS = join(REPO, TYPEDEFS_PATH);
 const BASELINE = join(HERE, 'sdl-spec-citations-baseline.txt');
 
 /** hadron-portal scripts/check-bare-loc-citations.mjs `SPEC_CITATION`, verbatim. */
@@ -77,16 +93,54 @@ export function findBareCitations(source) {
   return out;
 }
 
-/** Baseline entries: `<citation> <count>`; `#` comments and blanks ignored. */
+const WHOLE_CITATION = new RegExp(String.raw`^${SPEC_CITATION}$`);
+
+/**
+ * Baseline entries: `<citation> <count>`, one per citation; `#` comments and
+ * blanks ignored. Anything else THROWS: a count that is missing, not a plain
+ * non-negative integer (`NaN`, `Infinity`, `-1`, `1.5`, `1e3`), a key that is
+ * not a whole citation, extra fields, or a duplicate key. Each would otherwise
+ * exempt occurrences nobody chose to exempt (Diego's P3 on #1724).
+ */
 export function parseBaseline(raw) {
   const out = new Map();
-  for (const line of raw.split('\n')) {
+  const problems = [];
+  for (const [i, line] of raw.split('\n').entries()) {
     const t = line.trim();
     if (!t || t.startsWith('#')) continue;
-    const [citation, count] = t.split(/\s+/);
-    out.set(citation, Number(count));
+    const fields = t.split(/\s+/);
+    const [citation, count] = fields;
+    if (fields.length !== 2) problems.push(`line ${i + 1}: expected "<citation> <count>", got "${t}"`);
+    else if (!WHOLE_CITATION.test(citation)) problems.push(`line ${i + 1}: "${citation}" is not a spec citation`);
+    else if (!/^\d+$/.test(count)) problems.push(`line ${i + 1}: count "${count}" is not a non-negative integer`);
+    else if (out.has(citation)) problems.push(`line ${i + 1}: ${citation} is listed twice`);
+    else out.set(citation, Number(count));
+  }
+  if (problems.length) throw new Error(`malformed baseline:\n  ${problems.join('\n  ')}`);
+  return out;
+}
+
+/**
+ * The new-file line numbers a `git diff --unified=0` of ONE file adds (an
+ * edited line is a removal plus an addition). The `+++` header is read only
+ * before the first hunk, so a content line that itself starts with `++` is
+ * still counted.
+ */
+export function addedLines(diff) {
+  const out = new Set();
+  let next = null;
+  for (const raw of diff.split('\n')) {
+    const hunk = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(raw);
+    if (hunk) { next = Number(hunk[1]); continue; }
+    if (next === null || !raw.startsWith('+')) continue;
+    out.add(next++);
   }
   return out;
+}
+
+/** The bare citations on lines the change added. */
+export function onAddedLines(found, added) {
+  return found.filter((f) => added.has(f.line));
 }
 
 /** Compare found bare citations with the baseline: what exceeds it, and what it could be lowered to. */
@@ -102,13 +156,43 @@ export function compareWithBaseline(found, baseline) {
   return { over, lowerable };
 }
 
+function git(...args) {
+  return execFileSync('git', args, { cwd: REPO, encoding: 'utf8', maxBuffer: 256 * 1024 * 1024 });
+}
+
 function main() {
+  const base = process.argv[2] || 'origin/main';
+  let diff;
+  try {
+    const mergeBase = git('merge-base', base, 'HEAD').trim();
+    // Against the working tree, so an uncommitted edit is checked locally too.
+    diff = git('diff', '--unified=0', '--no-color', '--no-ext-diff', mergeBase, '--', TYPEDEFS_PATH);
+  } catch (e) {
+    console.error(`::error::check-sdl-spec-citations: cannot diff against base "${base}" (${e.message.split('\n')[0]}). Fetch it, or pass a base ref.`);
+    process.exit(2);
+  }
+  let baseline;
+  try {
+    baseline = parseBaseline(readFileSync(BASELINE, 'utf8'));
+  } catch (e) {
+    console.error(`::error file=scripts/sdl-spec-citations-baseline.txt::${e.message}`);
+    process.exit(1);
+  }
+
   const found = findBareCitations(readFileSync(TYPEDEFS, 'utf8'));
-  const { over, lowerable } = compareWithBaseline(found, parseBaseline(readFileSync(BASELINE, 'utf8')));
+  const added = onAddedLines(found, addedLines(diff));
+  const { over, lowerable } = compareWithBaseline(found, baseline);
+  for (const a of added) {
+    console.error(
+      `::error file=${TYPEDEFS_PATH},line=${a.line}::bare spec citation ${a.citation} on a line this change adds or edits. ` +
+        `Cite it as hrn:node:hadronmemory.com:specs:${a.citation}: the portal's schema-snapshot gate fails a bare one on an added line, ` +
+        'even one it had before the edit.',
+    );
+  }
   for (const o of over) {
     console.error(
       `::error::typeDefs.ts:${o.lines.join(',')}: bare spec citation ${o.citation} (${o.count} bare, baseline ${o.allowed}). ` +
-        `Cite it as hrn:node:hadronmemory.com:specs:${o.citation} — the portal's schema-snapshot gate fails a bare one.`,
+        `Cite it as hrn:node:hadronmemory.com:specs:${o.citation}.`,
     );
   }
   if (lowerable.length) {
@@ -117,11 +201,11 @@ function main() {
         lowerable.map((l) => `${l.citation} ${l.allowed}→${l.count}`).join(', '),
     );
   }
-  if (over.length) {
-    console.error(`\n✗ ${over.length} citation(s) above the baseline. New SDL citations must be fully qualified.`);
+  if (added.length || over.length) {
+    console.error(`\n✗ ${added.length} bare citation(s) on added lines, ${over.length} citation(s) above the baseline. SDL citations must be fully qualified.`);
     process.exit(1);
   }
-  console.log(`✓ No new bare spec citations in the SDL (${found.length} pre-existing bare, within the baseline).`);
+  console.log(`✓ No bare spec citations on lines added since ${base}; ${found.length} pre-existing bare, within the baseline.`);
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) main();

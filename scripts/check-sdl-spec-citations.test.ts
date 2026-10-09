@@ -1,12 +1,15 @@
 /**
  * Tests for the #1722 SDL spec-citation gate. Synthetic strings, so a schema
  * edit never turns one red; what they pin is the classifier (the portal gate's
- * own) and the ratchet.
+ * own), the added-line check against real `git diff` output, and the ratchet.
  */
 
 import { describe, it, expect } from 'vitest';
-import { readFileSync } from 'node:fs';
-import { compareWithBaseline, findBareCitations, parseBaseline } from './check-sdl-spec-citations.mjs';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { addedLines, compareWithBaseline, findBareCitations, onAddedLines, parseBaseline } from './check-sdl-spec-citations.mjs';
 
 describe('#1722 — findBareCitations', () => {
   it('finds a bare citation, at any depth, and its line', () => {
@@ -62,5 +65,108 @@ describe('#1722 — the baseline ratchet', () => {
     const found = findBareCitations(readFileSync(new URL('../src/api/graphql/schema/typeDefs.ts', import.meta.url), 'utf8'));
     const base = parseBaseline(readFileSync(new URL('./sdl-spec-citations-baseline.txt', import.meta.url), 'utf8'));
     expect(compareWithBaseline(found, base).over).toEqual([]);
+  });
+});
+
+describe('#1724 — a malformed baseline fails instead of exempting', () => {
+  it.each([
+    ['a missing count', 'cor:agt:020:03'],
+    ['a word for a count', 'cor:agt:020:03 typo'],
+    ['Infinity', 'cor:agt:020:03 Infinity'],
+    ['a negative count', 'cor:agt:020:03 -1'],
+    ['a fraction', 'cor:agt:020:03 1.5'],
+    ['an exponent', 'cor:agt:020:03 1e3'],
+    ['an extra field', 'cor:agt:020:03 2 3'],
+    ['a key that is not a citation', 'cor:agents:020 2'],
+    ['a duplicate key', 'cor:agt:020:03 2\ncor:agt:020:03 1'],
+  ])('%s', (_, raw) => {
+    expect(() => parseBaseline(raw)).toThrow(/malformed baseline/);
+  });
+
+  it('reports every problem, with its line', () => {
+    expect(() => parseBaseline('# c\ncor:agt:020:03 x\ncor:acl:040:02 NaN')).toThrow(/line 2: .*\n.*line 3: /);
+  });
+});
+
+describe('#1724 — addedLines reads a --unified=0 diff', () => {
+  it('counts added and edited lines in new-file numbering, not removals', () => {
+    const diff = [
+      'diff --git a/f b/f', '--- a/f', '+++ b/f',
+      '@@ -3 +3 @@', '-old', '+new',
+      '@@ -10,2 +9,0 @@', '-gone', '-gone',
+      '@@ -20,0 +18,2 @@', '+a', '++ starts with a plus',
+    ].join('\n');
+    expect([...addedLines(diff)]).toEqual([3, 18, 19]);
+  });
+
+  it('an empty diff adds nothing', () => {
+    expect(addedLines('').size).toBe(0);
+  });
+});
+
+/**
+ * Diego's counterexamples on #1724, through real `git diff` output: the
+ * baseline totals pass all three, the portal fails all three, and so must this.
+ */
+describe('#1724 — the added-line check, against git', () => {
+  const LEGACY = ['  """', '  Old prose (cor:agt:020:03).', '  """', '  a: Int', '  """', '  Other (cor:agt:020:03).', '  """', '  b: Int', ''].join('\n');
+  const baseline = parseBaseline('cor:agt:020:03 2');
+
+  function check(after: string) {
+    const dir = mkdtempSync(join(tmpdir(), 'sdl-cite-'));
+    try {
+      const g = (...args: string[]) => execFileSync('git', args, { cwd: dir, encoding: 'utf8' });
+      g('init', '-q');
+      writeFileSync(join(dir, 'f'), LEGACY);
+      g('add', 'f');
+      g('-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-qm', 'base');
+      writeFileSync(join(dir, 'f'), after);
+      const found = findBareCitations(after);
+      return {
+        added: onAddedLines(found, addedLines(g('diff', '--unified=0', '--no-color', 'HEAD', '--', 'f'))),
+        over: compareWithBaseline(found, baseline).over,
+      };
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  it('untouched legacy citations pass, and so does an edit elsewhere', () => {
+    expect(check(LEGACY.replace('a: Int', 'a: String'))).toEqual({ added: [], over: [] });
+  });
+
+  it('a prose edit that keeps its citation fails, though the total is unchanged', () => {
+    const r = check(LEGACY.replace('Old prose', 'Edited prose'));
+    expect(r.over).toEqual([]);
+    expect(r.added).toEqual([{ line: 2, citation: 'cor:agt:020:03' }]);
+  });
+
+  it('qualifying one old occurrence and adding a new bare one fails, though the total is unchanged', () => {
+    const r = check(
+      LEGACY.replace('Other (cor:agt:020:03)', 'Other (hrn:node:hadronmemory.com:specs:cor:agt:020:03)') +
+        ['  """', '  New (cor:agt:020:03).', '  """', '  c: Int', ''].join('\n'),
+    );
+    expect(r.over).toEqual([]);
+    expect(r.added).toEqual([{ line: 10, citation: 'cor:agt:020:03' }]);
+  });
+
+  it('moving a legacy citation to a new field fails, though the total is unchanged', () => {
+    const r = check(
+      LEGACY.replace('  Other (cor:agt:020:03).', '  Other.') + ['  """', '  Moved (cor:agt:020:03).', '  """', '  c: Int', ''].join('\n'),
+    );
+    expect(r.over).toEqual([]);
+    expect(r.added).toEqual([{ line: 10, citation: 'cor:agt:020:03' }]);
+  });
+
+  it('qualifying an added line passes', () => {
+    expect(check(LEGACY.replace('Old prose (cor:agt:020:03)', 'Edited (hrn:node:hadronmemory.com:specs:cor:agt:020:03)')).added).toEqual([]);
+  });
+});
+
+describe('#1724 — the command fails closed', () => {
+  it('a base that does not resolve exits 2, never 0', () => {
+    const r = spawnSync('node', [new URL('./check-sdl-spec-citations.mjs', import.meta.url).pathname, 'no-such-ref-1724'], { encoding: 'utf8' });
+    expect(r.status).toBe(2);
+    expect(r.stderr).toMatch(/cannot diff against base "no-such-ref-1724"/);
   });
 });
