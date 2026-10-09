@@ -164,35 +164,47 @@ export async function markStalled(
  * record in between, wins cleanly. Returns how many it cleared.
  */
 export async function clearStalledMarks(db: PrismaClient, now: Date): Promise<number> {
-  const stalled = await db.workerAvailability.findMany({
-    where: { state: 'unavailable', reason: 'stalled' },
-    select: { workerId: true, setAt: true, worker: { select: { appId: true } } },
-    take: 500,
-  });
-  if (stalled.length === 0) return 0;
-  const activity = await loadWorkersActivity({ db } as unknown as Context, stalled.map((r) => r.workerId), now);
   let cleared = 0;
-  for (const r of stalled) {
-    const at = activity.get(r.workerId)?.lastActiveAt;
-    if (!at || at.getTime() <= r.setAt.getTime()) continue;
-    const done = await db.$transaction(async (tx) => {
-      const n = await tx.workerAvailability.updateMany({
-        where: { workerId: r.workerId, state: 'unavailable', reason: 'stalled', setAt: r.setAt },
-        data: {
-          state: 'available', reason: null, until: null, setAt: now, setBy: 'stall-rule',
-          setByUserId: null, setByWorkerId: null, setByAgentId: null,
-        },
-      });
-      if (n.count === 0) return false;
-      await appendAvailabilityEvent(tx, {
-        appId: r.worker.appId,
-        actor: PLATFORM_ACTOR,
-        event: { kind: 'worker', workerId: r.workerId, state: 'available', reason: null, until: null, setBy: 'stall-rule' },
-        createdAt: now,
-      });
-      return true;
+  // Page through EVERY stalled record by a stable cursor (#1720 review, Diego
+  // P3): a first page of workers who stay idle must not hide a later worker
+  // who has acted again.
+  let after: string | null = null;
+  for (;;) {
+    const stalled: { workerId: string; setAt: Date; worker: { appId: string } }[] = await db.workerAvailability.findMany({
+      where: { state: 'unavailable', reason: 'stalled', ...(after ? { workerId: { gt: after } } : {}) },
+      select: { workerId: true, setAt: true, worker: { select: { appId: true } } },
+      orderBy: { workerId: 'asc' },
+      take: CLEAR_PAGE,
     });
-    if (done) cleared += 1;
+    if (stalled.length === 0) break;
+    after = stalled[stalled.length - 1].workerId;
+    const activity = await loadWorkersActivity({ db } as unknown as Context, stalled.map((r) => r.workerId), now);
+    for (const r of stalled) {
+      const at = activity.get(r.workerId)?.lastActiveAt;
+      if (!at || at.getTime() <= r.setAt.getTime()) continue;
+      const done = await db.$transaction(async (tx) => {
+        const n = await tx.workerAvailability.updateMany({
+          where: { workerId: r.workerId, state: 'unavailable', reason: 'stalled', setAt: r.setAt },
+          data: {
+            state: 'available', reason: null, until: null, setAt: now, setBy: 'stall-rule',
+            setByUserId: null, setByWorkerId: null, setByAgentId: null,
+          },
+        });
+        if (n.count === 0) return false;
+        await appendAvailabilityEvent(tx, {
+          appId: r.worker.appId,
+          actor: PLATFORM_ACTOR,
+          event: { kind: 'worker', workerId: r.workerId, state: 'available', reason: null, until: null, setBy: 'stall-rule' },
+          createdAt: now,
+        });
+        return true;
+      });
+      if (done) cleared += 1;
+    }
+    if (stalled.length < CLEAR_PAGE) break;
   }
   return cleared;
 }
+
+/** Stalled records per page of `clearStalledMarks`. */
+const CLEAR_PAGE = 500;

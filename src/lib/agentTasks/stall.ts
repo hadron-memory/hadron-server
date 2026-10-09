@@ -51,7 +51,7 @@
  * alarm's own window (050:19, Proposed).
  */
 
-import type { Prisma, PrismaClient } from '../../generated/prisma/index.js';
+import { Prisma, type PrismaClient } from '../../generated/prisma/index.js';
 import { type Context } from '../../api/graphql/schema/resolvers.helpers.js';
 import { loadWorkersActivity } from '../../api/graphql/schema/resolvers.worker.js';
 import { toNaiveUtc } from '../sessionActivity.js';
@@ -278,12 +278,15 @@ export function stallCandidates(inputs: StallInputs, windows: StallWindows, now:
 export async function ownerChain(db: Db, taskId: string): Promise<AlarmChain> {
   const rows = await db.$queryRaw<{ ownerWorkerId: string | null; ownerUserId: string | null }[]>`
     WITH RECURSIVE up AS (
-      SELECT id, parent_task_id, owner_worker_id, owner_user_id, 0 AS depth
+      SELECT id, app_id, parent_task_id, owner_worker_id, owner_user_id, 0 AS depth
       FROM agent_tasks WHERE id = ${taskId}
       UNION ALL
-      SELECT t.id, t.parent_task_id, t.owner_worker_id, t.owner_user_id, up.depth + 1
+      SELECT t.id, t.app_id, t.parent_task_id, t.owner_worker_id, t.owner_user_id, up.depth + 1
       FROM agent_tasks t JOIN up ON t.id = up.parent_task_id
-      WHERE up.depth < 64
+      -- Same App only (#1720 review, Rook P3-4): T1 refuses a cross-App
+      -- parent at create; this keeps another tenant's owners out of a chain
+      -- even if a later move ever relinked one.
+      WHERE up.depth < 64 AND t.app_id = up.app_id
     )
     SELECT owner_worker_id AS "ownerWorkerId", owner_user_id AS "ownerUserId" FROM up ORDER BY depth`;
   const chain: AlarmChain = [];
@@ -312,8 +315,27 @@ const MARKS_ASSIGNEE: ReadonlySet<StallRule> = new Set(['not-started', 'no-progr
  * inserts the alarm (`ON CONFLICT DO NOTHING` on the episode key), its wake
  * rows, and — for not-started / no-progress on a worker — the stall mark.
  * Returns the alarm's id, or null when there was nothing (more) to raise.
+ *
+ * SERIALIZABLE (#1720 review, Diego P2). The chain names person owners by user
+ * id, sealed, and `mergeUsers` refuses to merge an account named in an open
+ * alarm (`refuseUsersInOpenAlarmChains`). A raise reads the chain's owner rows
+ * that a merge rewrites, and the merge's guard reads the events this raise
+ * inserts. Both transactions are SERIALIZABLE, so a raise racing a merge is a
+ * read-write cycle that Postgres aborts on one side, and never a committed
+ * alarm naming a just-merged account. A raise that loses throws a
+ * serialization failure. `evaluateStalls` skips it, and the next pass raises
+ * against the merged owner. So does a raise that collides with a concurrent
+ * pass's insert of the same episode.
+ *
+ * `hooks.afterChain` is a TEST seam: it runs between reading the chain and
+ * inserting the alarm, so a test can interleave a merge there.
  */
-export async function raiseStallAlarm(db: PrismaClient, candidate: StallCandidate, now: Date): Promise<string | null> {
+export async function raiseStallAlarm(
+  db: PrismaClient,
+  candidate: StallCandidate,
+  now: Date,
+  hooks: { afterChain?: () => Promise<void> } = {},
+): Promise<string | null> {
   return db.$transaction(async (tx) => {
     await tx.$queryRaw`SELECT id FROM agent_tasks WHERE id = ${candidate.taskId} FOR SHARE`;
     const [inputs] = await loadStallInputs(tx, { id: candidate.taskId }, now);
@@ -325,6 +347,7 @@ export async function raiseStallAlarm(db: PrismaClient, candidate: StallCandidat
     if (!again) return null;
 
     const chain = await ownerChain(tx, again.taskId);
+    await hooks.afterChain?.();
     const subjectWorkerId = again.assignee?.workerId ?? null;
     const eventId = await appendAlarmEvent(tx, {
       appId: again.appId,
@@ -358,7 +381,18 @@ export async function raiseStallAlarm(db: PrismaClient, candidate: StallCandidat
       await markStalled(tx, { workerId: subjectWorkerId, appId: again.appId, alarmEventId: eventId, now });
     }
     return eventId;
-  });
+  }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+}
+
+/**
+ * A serialization failure: Prisma reports P2034 for the transaction, or
+ * P2010 with SQLSTATE 40001 when a raw statement hits it.
+ */
+export function isSerializationFailure(e: unknown): boolean {
+  if (!(e instanceof Prisma.PrismaClientKnownRequestError)) return false;
+  if (e.code === 'P2034') return true;
+  const meta = e.meta as { code?: unknown } | undefined;
+  return e.code === 'P2010' && meta?.code === '40001';
 }
 
 /** Tasks per evaluation page: the inputs are loaded per page, not per task. */
@@ -394,6 +428,9 @@ export async function evaluateStalls(db: PrismaClient, now = new Date()): Promis
           const id = await raiseStallAlarm(db, c, now);
           if (id) raised.push(id);
         } catch (err) {
+          // Lost a serialization race (a concurrent pass raised the same
+          // episode, a merge rewrote an owner, a T1 move): the next pass re-evaluates.
+          if (isSerializationFailure(err)) continue;
           // One task's failure never stops the pass; the next pass retries it.
           console.error(`[task-stall] raising ${c.rule} on task ${c.taskId} failed:`, err);
         }

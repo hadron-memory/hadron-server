@@ -22,7 +22,8 @@ import { generateId } from '../id.js';
 import { runAsActor } from '../requestActor.js';
 import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
 import { taskStallTick } from '../../jobs/taskStallEvaluator.js';
-import { evaluateStalls, wakeDueOwners } from './stall.js';
+import { evaluateStalls, isSerializationFailure, raiseStallAlarm, stallCandidates, STALL_WINDOW_DEFAULTS, wakeDueOwners } from './stall.js';
+import { mergeUsers } from '../../controller/operations/mergeUsers.js';
 import { loadAvailableForWork } from './availability.js';
 
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({
@@ -671,5 +672,151 @@ describe('per-App stall windows and scope', () => {
     const [a] = await alarms('assignment.unassignable');
     expect((await wakes(a.id)).map((w) => w.dueAt)).toEqual([at('10:10'), at('10:20')]);
     expect((await taskStallTick(db, new Date(at('10:20').getTime() - MINUTE))).woken).toBe(0);
+  });
+});
+
+// ── #1720 review round ────────────────────────────────────────────────────
+
+describe('Diego P2 on #1720 — an account merge never strands an alarm\'s acknowledgement (option C, #1715)', () => {
+  let tUser: { id: string };
+  beforeEach(async () => {
+    tUser = await db.user.create({ data: { githubId: 900_000 + Math.floor(Math.random() * 99_999), githubUsername: `st-t-${generateId()}`, roles: ['READER'] } });
+    await db.appMember.create({ data: { appId: app.id, userId: tUser.id, role: 'member' } });
+  });
+
+  /** A person-owned task (owner mia), assigned to Anne and not started: one unacknowledged alarm naming mia. */
+  async function miaAlarm() {
+    const t = await task({ ownerUserId: mia.id, assigneeWorkerId: anne.id, assignedAt: at('10:00'), createdAt: at('10:00') });
+    await tick('10:15');
+    const [a] = await alarms();
+    expect(a.chain).toEqual([{ userId: mia.id }]);
+    return { t, a };
+  }
+
+  it('refuses the merge in either direction while an account is named in an open alarm, disclosing a count only', async () => {
+    const { t } = await miaAlarm();
+    for (const [sourceUserId, targetUserId] of [[mia.id, tUser.id], [tUser.id, mia.id]]) {
+      try {
+        await mergeUsers(db, { sourceUserId, targetUserId, actorUserId: admin.id });
+        expect.fail('expected MERGE_USER_IN_OPEN_ALARMS');
+      } catch (e) {
+        expect(e).toBeInstanceOf(GraphQLError);
+        expect((e as GraphQLError).extensions).toEqual({ code: 'MERGE_USER_IN_OPEN_ALARMS', alarmCount: 1 });
+        expect((e as GraphQLError).message).not.toContain(t.id);
+        expect((e as GraphQLError).message).not.toContain(app.id);
+      }
+    }
+    expect((await db.user.findUniqueOrThrow({ where: { id: mia.id } })).deletedAt).toBeNull();
+    expect((await db.agentTask.findUniqueOrThrow({ where: { id: t.id } })).ownerUserId).toBe(mia.id);
+  });
+
+  it('once the owner acknowledges, the merge proceeds; the survivor owns the task and acknowledges its next alarm; others stay refused', async () => {
+    const { t, a } = await miaAlarm();
+    await M.acknowledgeAlarm({}, { eventId: a.id }, ctx(mia.id));
+    await mergeUsers(db, { sourceUserId: mia.id, targetUserId: tUser.id, actorUserId: admin.id });
+    expect((await db.agentTask.findUniqueOrThrow({ where: { id: t.id } })).ownerUserId).toBe(tUser.id);
+    // A new episode (a reassignment) raises an alarm whose chain names the survivor.
+    await db.agentTask.update({ where: { id: t.id }, data: { assigneeWorkerId: liam.id, assignedAt: at('11:00') } });
+    await tick('11:15');
+    const next = (await alarms())[1];
+    expect(next.chain).toEqual([{ userId: tUser.id }]);
+    await expectCode(M.acknowledgeAlarm({}, { eventId: next.id }, ctx(admin.id)), 'ALARM_NOT_IN_CHAIN');
+    await expect(M.acknowledgeAlarm({}, { eventId: next.id }, ctx(tUser.id))).resolves.toMatchObject({ acknowledgedByUserId: tUser.id });
+  });
+
+  it('an acknowledged alarm does not block a merge, and an unrelated account merges freely', async () => {
+    await miaAlarm();
+    const other = await db.user.create({ data: { githubId: 990_000 + Math.floor(Math.random() * 9_999), githubUsername: `st-o-${generateId()}`, roles: ['READER'] } });
+    await expect(mergeUsers(db, { sourceUserId: other.id, targetUserId: tUser.id, actorUserId: admin.id })).resolves.toBeTruthy();
+  });
+
+  it('race: a merge that commits while an alarm is being raised aborts the raise; the next pass names the survivor', async () => {
+    // Ada-like person owner mia owns the root; Anne owns Rook's review under it.
+    const root = await task({ ownerUserId: mia.id, assigneeWorkerId: anne.id, assignedAt: at('09:00'), status: 'started', startedAt: at('09:05') });
+    await drive(anne, '10:15');
+    await task({ parentTaskId: root.id, ownerWorkerId: anne.id, assigneeWorkerId: rook.id, assignedAt: at('10:00') });
+    const review = await db.agentTask.findFirstOrThrow({ where: { parentTaskId: root.id } });
+    const candidate = stallCandidates({
+      task: review, openChildCount: 0, lastChildEndedAt: null, finishedChildren: [], lastProgressAt: null, assigneeActivityAt: null,
+    }, STALL_WINDOW_DEFAULTS, at('10:15')).find((c) => c.rule === 'not-started')!;
+    let raised: unknown;
+    try {
+      raised = await raiseStallAlarm(db, candidate, at('10:15'), {
+        // The chain [Anne, mia] has been read; the merge commits now.
+        afterChain: async () => { await mergeUsers(db, { sourceUserId: mia.id, targetUserId: tUser.id, actorUserId: admin.id }); },
+      });
+    } catch (e) {
+      raised = e;
+    }
+    expect(isSerializationFailure(raised)).toBe(true);
+    expect(await alarms()).toEqual([]);
+    expect((await db.user.findUniqueOrThrow({ where: { id: mia.id } })).deletedAt).not.toBeNull();
+    await tick('10:16');
+    const [a] = await alarms('stall.not-started');
+    expect(a.chain).toEqual([{ workerId: anne.id }, { userId: tUser.id }]);
+  });
+});
+
+describe('Diego P3 on #1720 — clearing stall marks pages through every record', () => {
+  it('a worker who acted again is cleared even when 500 idle stalled workers sort before it', async () => {
+    const ids = Array.from({ length: 501 }, () => generateId()).sort();
+    await db.worker.createMany({
+      data: ids.map((id, i) => ({ id, appId: app.id, agentId, name: `Idle ${i}`, slug: `idle-${i}` })),
+    });
+    await db.workerAvailability.createMany({
+      data: ids.map((workerId) => ({ workerId, state: 'unavailable', reason: 'stalled', setAt: at('10:00'), setBy: 'stall-rule' })),
+    });
+    const last = { id: ids[500] };
+    await drive(last, '10:30');
+    expect((await tick('10:31')).cleared).toBe(1);
+    expect(await db.workerAvailability.findUniqueOrThrow({ where: { workerId: last.id } })).toMatchObject({ state: 'available' });
+    expect(await db.workerAvailability.count({ where: { state: 'unavailable' } })).toBe(500);
+  });
+});
+
+describe('Rook P3-5 on #1720 — a revoked owner cannot acknowledge', () => {
+  it('a person owner removed from the App, and a worker whose driver was removed, are refused; the alarm is unchanged', async () => {
+    await task({ ownerUserId: mia.id, assigneeWorkerId: anne.id, assignedAt: at('10:00'), createdAt: at('10:00') });
+    const root = await task({ ownerWorkerId: ada.id, assigneeWorkerId: anne.id, assignedAt: at('09:00'), status: 'started', startedAt: at('09:05') });
+    await drive(anne, '10:15');
+    await task({ parentTaskId: root.id, ownerWorkerId: anne.id, assigneeWorkerId: rook.id, assignedAt: at('10:00') });
+    await tick('10:15');
+    const personAlarm = (await alarms()).find((a) => (a.chain as { userId?: string }[])[0].userId === mia.id)!;
+    const workerAlarm = (await alarms()).find((a) => (a.chain as { workerId?: string }[])[0].workerId === anne.id)!;
+    await db.appMember.delete({ where: { appId_userId: { appId: app.id, userId: mia.id } } });
+    await expectCode(M.acknowledgeAlarm({}, { eventId: personAlarm.id }, ctx(mia.id)), 'ALARM_NOT_FOUND');
+    // mia drove Anne; with her membership gone, Anne's session no longer authorizes.
+    await expectCode(asWorker(anne, () => M.acknowledgeAlarm({}, { eventId: workerAlarm.id }, ctx(mia.id))), 'ALARM_NOT_FOUND');
+    for (const a of [personAlarm, workerAlarm]) {
+      expect(await db.agentTeamEvent.findUniqueOrThrow({ where: { id: a.id } })).toMatchObject({ acknowledgedAt: null });
+    }
+  });
+});
+
+describe('Rook P3-4 on #1720 — the chain never leaves the task\'s App', () => {
+  it('a parent in another App (impossible through T1, forced here) contributes no owner', async () => {
+    const elsewhere = await db.app.create({ data: { organizationId: (await db.app.findUniqueOrThrow({ where: { id: app.id } })).organizationId, name: 'Else', urn: `else-${generateId().toLowerCase()}:team` }, select: { id: true } });
+    const foreign = await db.agentTask.create({ data: { appId: elsewhere.id, title: 'F', ownerUserId: outsider.id }, select: { id: true } });
+    await task({ parentTaskId: foreign.id, ownerWorkerId: anne.id, assigneeWorkerId: rook.id, assignedAt: at('10:00') });
+    await tick('10:15');
+    expect((await alarms('stall.not-started'))[0].chain).toEqual([{ workerId: anne.id }]);
+  });
+});
+
+describe('PINNED until T5 (Rook P3-1 on #1720): escalation continues after the task moves', () => {
+  it('an unacknowledged alarm keeps waking up the chain after the task starts, and in an uninstalled App', async () => {
+    // As 050:19 / :20 read today, only an acknowledgement stops escalation. A wake only stamps
+    // alarm_wakes.woken_at; nothing is delivered in T2. T5 (delivery) must re-check, before
+    // delivering, that the episode is current, the task open, the App installed, and the party's
+    // CURRENT access (isAppParticipant / mayStillDriveWorkerApp). Change this test deliberately.
+    const root = await assignedToAnne('09:00', { status: 'started', startedAt: at('09:05') });
+    await drive(anne, '10:15');
+    const review = await task({ parentTaskId: root.id, ownerWorkerId: anne.id, assigneeWorkerId: rook.id, assignedAt: at('10:00') });
+    await tick('10:15');
+    const [a] = await alarms('stall.not-started');
+    await db.agentTask.update({ where: { id: review.id }, data: { status: 'started', startedAt: at('10:20') } });
+    await db.app.update({ where: { id: app.id }, data: { uninstalledAt: at('10:21') } });
+    await tick('10:30');
+    expect((await wakes(a.id))[1].wokenAt).toEqual(at('10:30'));
   });
 });

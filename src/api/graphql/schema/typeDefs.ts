@@ -8706,6 +8706,11 @@ export const typeDefs = `#graphql
     preserve the strongest live entitlement. The source is soft-deleted.
     Platform admin only. The resulting merge is global; organization
     administration does not authorize account consolidation.
+    Refused with MERGE_USER_IN_OPEN_ALARMS (extension alarmCount; never the
+    alarms, tasks or Apps, which the caller may not be able to read) while
+    either account is named in the owner chain of an unacknowledged agent-task
+    alarm, whose sealed chain cannot follow a merge yet (#1715). Acknowledge
+    the alarms, then merge.
     """
     mergeUsers(input: MergeUsersInput!): User!
 
