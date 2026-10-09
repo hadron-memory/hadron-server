@@ -27,6 +27,22 @@ export const TASK_EVENT_TYPES = [
 ] as const;
 export type TaskEventType = (typeof TASK_EVENT_TYPES)[number];
 
+/**
+ * #1707 — the assignment events the matcher's slice writes (cor:agt:050:11):
+ * `assignment.queued` when a task enters the queue (created with no
+ * assignee), `assignment.matched` when the platform assigns it
+ * (cor:agt:060:06). The matched event IS the assignment's record: the matcher
+ * writes no `task.assigned` beside it. `assignment.unassignable` is the
+ * stall evaluator's alarm (ALARM_EVENT_TYPES).
+ */
+export const ASSIGNMENT_EVENT_TYPES = ['assignment.queued', 'assignment.matched'] as const;
+
+/**
+ * The events that mark a worker as assigned, for "assigned least recently"
+ * (cor:agt:060:06): each carries the new assignee as its subject worker.
+ */
+export const ASSIGNED_EVENT_TYPES = ['task.assigned', 'task.reassigned', 'assignment.matched'] as const;
+
 /** A party to a task: exactly one of a Worker or a User. */
 export type TaskParty = { workerId: string; userId?: never } | { userId: string; workerId?: never };
 
@@ -41,7 +57,9 @@ export type TaskEventPayload =
   | { type: 'task.started' }
   | { type: 'task.progress' }
   | { type: 'task.finished'; outcome: string }
-  | { type: 'task.cancelled'; fromStatus: 'pending' | 'started'; openChildCount: number };
+  | { type: 'task.cancelled'; fromStatus: 'pending' | 'started'; openChildCount: number }
+  | { type: 'assignment.queued' }
+  | { type: 'assignment.matched'; assignee: { workerId: string }; family: string; closeSessionWhenDone: boolean };
 
 /** The event actor for the current request: `userId` from the credential, Worker / Agent from #1610. */
 export function eventActor(userId: string | null | undefined): EventActor {
@@ -69,6 +87,10 @@ function payloadJson(e: TaskEventPayload): Prisma.InputJsonObject {
       return { outcome: e.outcome };
     case 'task.cancelled':
       return { fromStatus: e.fromStatus, openChildCount: e.openChildCount };
+    case 'assignment.queued':
+      return {};
+    case 'assignment.matched':
+      return { assignee: partyJson(e.assignee), family: e.family, closeSessionWhenDone: e.closeSessionWhenDone };
   }
 }
 
@@ -76,6 +98,7 @@ function payloadJson(e: TaskEventPayload): Prisma.InputJsonObject {
 function subjectWorkerId(e: TaskEventPayload): string | null {
   if (e.type === 'task.assigned') return e.assignee.workerId ?? null;
   if (e.type === 'task.reassigned') return e.to.workerId ?? null;
+  if (e.type === 'assignment.matched') return e.assignee.workerId;
   return null;
 }
 
@@ -85,7 +108,7 @@ function subjectWorkerId(e: TaskEventPayload): string | null {
  */
 export async function appendTaskEvent(
   tx: Prisma.TransactionClient,
-  args: { appId: string; taskId: string; actor: EventActor; event: TaskEventPayload },
+  args: { appId: string; taskId: string; actor: EventActor; event: TaskEventPayload; createdAt?: Date },
 ): Promise<void> {
   await tx.agentTeamEvent.create({
     data: {
@@ -97,6 +120,7 @@ export async function appendTaskEvent(
       actorAgentId: args.actor.agentId,
       subjectWorkerId: subjectWorkerId(args.event),
       payload: payloadJson(args.event),
+      ...(args.createdAt ? { createdAt: args.createdAt } : {}),
     },
   });
 }
@@ -224,3 +248,30 @@ export async function appendAvailabilityEvent(
 
 /** The actor of a platform-made change (the stall evaluator): nobody. */
 export const PLATFORM_ACTOR: EventActor = { userId: null, workerId: null, agentId: null };
+
+// ── #1707: host registrations ──────────────────────────────────────────────
+
+/** The host events (cor:agt:050:11, Proposed: "host registered, host lost"). */
+export const HOST_EVENT_TYPES = ['host.registered', 'host.lost'] as const;
+export type HostEventType = (typeof HOST_EVENT_TYPES)[number];
+
+/**
+ * Append a host event. Carries the registration's id, the host's token id and
+ * a count — never the label, which is free text (cor:agt:050:11).
+ */
+export async function appendHostEvent(
+  tx: Prisma.TransactionClient,
+  args: { appId: string; type: HostEventType; registrationId: string; hostId: string; workerCount: number; createdAt: Date },
+): Promise<void> {
+  await tx.agentTeamEvent.create({
+    data: {
+      appId: args.appId,
+      type: args.type,
+      actorUserId: null,
+      actorWorkerId: null,
+      actorAgentId: null,
+      payload: { registrationId: args.registrationId, hostId: args.hostId, workerCount: args.workerCount },
+      createdAt: args.createdAt,
+    },
+  });
+}

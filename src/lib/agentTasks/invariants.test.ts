@@ -253,3 +253,60 @@ describe('agent-task-stall-invariants.sql (#1706)', () => {
     await expect(row({ noProgressMinutes: 90 })).resolves.toBeTruthy();
   });
 });
+
+// ── #1707: prisma/agent-task-matching-invariants.sql ──────────────────────
+
+describe('agent-task-matching-invariants.sql (#1707)', () => {
+  it('the T3 migration carries a byte-identical copy of the invariants file', () => {
+    const source = readFileSync(new URL('../../../prisma/agent-task-matching-invariants.sql', import.meta.url), 'utf8');
+    const migration = readFileSync(
+      new URL('../../../prisma/migrations/20261010010000_agent_task_matching/migration.sql', import.meta.url),
+      'utf8',
+    );
+    expect(migration.endsWith(source)).toBe(true);
+  });
+
+  it('sessions.family (cor:agt:060:04): a lowercase family token, or NULL', async () => {
+    await expectCheckViolation(db.session.create({ data: { id: generateId(), family: 'Claude' } }), /chk_sessions_family/);
+    await expect(db.session.create({ data: { id: generateId(), family: 'glm' } })).resolves.toBeTruthy();
+    await expect(db.session.create({ data: { id: generateId() } })).resolves.toBeTruthy();
+  });
+
+  const registration = (data: Record<string, unknown> = {}) =>
+    db.hostRegistration.create({
+      data: { appId: app.id, hostId: 'orca1', label: 'orca1', pollIntervalSeconds: 60, refreshedAt: new Date(), ...data },
+    });
+
+  it('host_registrations (cor:agt:070:01): a host token, a 1–128 character label, a 1–86400 s poll interval', async () => {
+    await expectCheckViolation(registration({ hostId: 'has space' }), /chk_host_registrations_shape/);
+    await expectCheckViolation(registration({ label: '' }), /chk_host_registrations_shape/);
+    await expectCheckViolation(registration({ pollIntervalSeconds: 0 }), /chk_host_registrations_shape/);
+    await expectCheckViolation(registration({ pollIntervalSeconds: 86_401 }), /chk_host_registrations_shape/);
+    await expect(registration()).resolves.toBeTruthy();
+    await expect(registration()).rejects.toThrow(/Unique constraint/);
+  });
+
+  it('host_registration_workers: a family token, and only a worker of the registration\'s own App', async () => {
+    const agent = await db.agent.create({ data: { id: generateId(), name: 'A', urn: `inv-agent-${generateId().toLowerCase()}`, ownerUserId: owner.id } });
+    const other = await db.app.create({
+      data: { id: generateId(), name: 'Other', urn: `inv-${generateId().toLowerCase()}:team`, ownerUserId: owner.id },
+    });
+    const mine = await db.worker.create({ data: { appId: app.id, agentId: agent.id, name: 'Kit', slug: 'kit' } });
+    const theirs = await db.worker.create({ data: { appId: other.id, agentId: agent.id, name: 'Zed', slug: 'zed' } });
+    const r = await registration();
+    await expectCheckViolation(
+      db.hostRegistrationWorker.create({ data: { registrationId: r.id, workerId: mine.id, family: 'Codex' } }),
+      /chk_host_registration_workers_family/,
+    );
+    await expectCheckViolation(
+      db.hostRegistrationWorker.create({ data: { registrationId: r.id, workerId: theirs.id, family: 'codex' } }),
+      /chk_host_registration_workers_same_app|not in the registration's App/,
+    );
+    await expect(db.hostRegistrationWorker.create({ data: { registrationId: r.id, workerId: mine.id, family: 'codex' } })).resolves.toBeTruthy();
+    // Moving a row to another App's worker is refused the same way.
+    await expectCheckViolation(
+      db.hostRegistrationWorker.update({ where: { registrationId_workerId: { registrationId: r.id, workerId: mine.id } }, data: { workerId: theirs.id } }),
+      /chk_host_registration_workers_same_app|not in the registration's App/,
+    );
+  });
+});

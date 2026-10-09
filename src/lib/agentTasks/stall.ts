@@ -142,7 +142,7 @@ export type StallInputs = {
  * Load the rules' inputs for the open tasks of live, installed Apps matching
  * `where`. One query per kind of input, not per task.
  */
-async function loadStallInputs(db: Db, where: Prisma.AgentTaskWhereInput, now: Date): Promise<StallInputs[]> {
+export async function loadStallInputs(db: Db, where: Prisma.AgentTaskWhereInput, now: Date): Promise<StallInputs[]> {
   const tasks = await db.agentTask.findMany({
     where: { AND: [where, { status: { in: OPEN_STATUSES }, app: { deletedAt: null, uninstalledAt: null } }] },
     select: TASK_SELECT,
@@ -256,16 +256,25 @@ export function stallCandidates(inputs: StallInputs, windows: StallWindows, now:
 
   // cor:agt:050:16 r2 — a child finished and the child's owner, this task's
   // assignee, has not moved since. The alarm is about THIS (the parent) task.
-  if (assignee && inputs.finishedChildren.length) {
-    const moved = latest(task.assignedAt, task.startedAt, inputs.lastProgressAt, inputs.assigneeActivityAt);
-    const first = inputs.finishedChildren.find((c) => !moved || c.finishedAt.getTime() > moved.getTime());
-    if (first) {
-      add('owner-unreactive', first.finishedAt, plus(first.finishedAt, windows.ownerReactionMinutes), {
-        childTaskId: first.id,
-      });
-    }
+  const first = assignee ? unreactedChild(inputs) : null;
+  if (first) {
+    add('owner-unreactive', first.finishedAt, plus(first.finishedAt, windows.ownerReactionMinutes), {
+      childTaskId: first.id,
+    });
   }
   return out;
+}
+
+/**
+ * cor:agt:050:16 r2 — the earliest finished child of this task that finished
+ * after its assignee last moved, or null. The owner-unreactive episode starts
+ * there; the roster (#1707) reads the same answer as "your move".
+ */
+export function unreactedChild(inputs: StallInputs): { id: string; finishedAt: Date } | null {
+  const { task } = inputs;
+  if (!inputs.finishedChildren.length) return null;
+  const moved = latest(task.assignedAt, task.startedAt, inputs.lastProgressAt, inputs.assigneeActivityAt);
+  return inputs.finishedChildren.find((c) => !moved || c.finishedAt.getTime() > moved.getTime()) ?? null;
 }
 
 // ── The owner chain ───────────────────────────────────────────────────────

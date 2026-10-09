@@ -32,6 +32,8 @@ const MODELS_WITHOUT_ID = new Set<string>([
   'WorkerAvailability',
   'ModelFamilyAvailability',
   'AgentTaskStallSchedule',
+  // #1707 — keyed by its registration and worker.
+  'HostRegistrationWorker',
 ]);
 
 const basePrisma = new PrismaClient();

@@ -92,6 +92,7 @@ import { startAppRunBusListener, startAppRunSweepLoop } from './jobs/appRuns.js'
 import { makeProdRunDeps } from './jobs/appRunDeps.js';
 import { startSchedulerLoop } from './jobs/scheduler.js';
 import { startTaskStallEvaluatorLoop } from './jobs/taskStallEvaluator.js';
+import { startTaskMatcherLoop } from './jobs/taskMatcher.js';
 import { mountWebhookRoutes } from './api/webhooks.js';
 import { mountPublicAssetRoutes } from './api/assetPublic.js';
 import { mountEmailEventRoutes } from './api/emailEvents.js';
@@ -1826,6 +1827,13 @@ export async function createServer(): Promise<Express> {
   // no claim race across instances.
   if (process.env.NODE_ENV !== 'test' && process.env.DISABLE_TASK_STALL_EVALUATOR !== 'true') {
     startTaskStallEvaluatorLoop(db);
+  }
+
+  // #1707 — the matcher's sweep: records lapsed host registrations and assigns
+  // queued tasks to workers free for work. Each assignment is a guarded update
+  // under a per-worker lock, so overlapping runs never double-assign.
+  if (process.env.NODE_ENV !== 'test' && process.env.DISABLE_TASK_MATCHER !== 'true') {
+    startTaskMatcherLoop(db);
   }
 
   // PendingEdge rows retargeted to stable node ids are durable retry work.

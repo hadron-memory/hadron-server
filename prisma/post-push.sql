@@ -635,3 +635,8 @@ CREATE INDEX IF NOT EXISTS "nodes_msg_channel_seq_loc_c_idx"
 -- per-App stall windows. One source, shared verbatim with migration
 -- 20261009010000_agent_task_stalls (pinned by src/lib/agentTasks/invariants.test.ts).
 \ir agent-task-stall-invariants.sql
+
+-- #1707: a session's model family and host registrations. One source, shared
+-- verbatim with migration 20261010010000_agent_task_matching (pinned by
+-- src/lib/agentTasks/invariants.test.ts).
+\ir agent-task-matching-invariants.sql

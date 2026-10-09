@@ -84,6 +84,7 @@ import {
 import { assertNoMintedSpecRemoval, assertNoMintedSpecUnmark } from '../../../lib/mintedSpecPermanence.js';
 import { preserveHeartbeatIfLapsed } from '../../../lib/sessionActivity.js';
 import { withAuthorizedTx } from './authorizedTx.js';
+import { deriveFamily, normalizeFamily } from '../../../lib/agentTasks/family.js';
 
 /**
  * Strip explicit GraphQL nulls from a CalendarEventTimeInput so the tool's
@@ -517,6 +518,22 @@ export const sessionMutations = {
       // #1625 review (Baloo P2-2): set when this bind names a worker, and
       // re-run inside the transaction under the Worker lock.
       let assertWorkerNotTaken: ((db: Context['db']) => Promise<void>) | null = null;
+      // #1707 (cor:agt:060:04): the session's model family — given, or derived
+      // from the model, then the tool. Refused before anything is written when
+      // given in a shape no family has; a matching input, never authorization.
+      let family: string | null = null;
+      if (input.family != null && input.family.trim() !== '') {
+        family = normalizeFamily(input.family);
+        if (!family) {
+          throw new GraphQLError(
+            'family is a model family token: lowercase letters, digits, ".", "_" or "-", up to 64 characters (e.g. claude, codex, glm).',
+            { extensions: { code: 'BAD_USER_INPUT' } },
+          );
+        }
+      } else {
+        family = deriveFamily({ llmModel: input.llmModel, tool: input.tool });
+      }
+
       const workerRef = input.workerRef?.trim();
       if (workerRef) {
         // #991: a Worker id OR an hrn:worker:<root>:<app-slug>:<worker-slug>
@@ -1133,6 +1150,7 @@ export const sessionMutations = {
           transcriptPath: input.transcriptPath,
           host: input.host,
           tool: input.tool,
+          family,
         },
         include: SESSION_INCLUDE,
         });
