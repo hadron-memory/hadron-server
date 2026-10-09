@@ -119,8 +119,10 @@ describe('comment tools: a thread through MCP', () => {
     expect(listed).toContain('Yes, see the spec.');
     expect(await asWriter.callToolText('hadron_list_comments', { targetRef: targetUrn(), state: ['OPEN'] })).toContain('No comment threads in state OPEN');
 
-    await asWriter.callToolText('hadron_reopen_comment_thread', { commentRef: rootId, expectedRevision: 3 });
-    const retracted = await asWriter.callToolText('hadron_retract_comment', { commentRef: rootId, expectedRevision: 4 });
+    // #1721: resolve and reopen change only the thread state, not the revision.
+    await asWriter.callToolText('hadron_reopen_comment_thread', { commentRef: rootId, expectedRevision: 2 });
+    // It has a reply, so deleting it leaves a stub.
+    const retracted = await asWriter.callToolText('hadron_retract_comment', { commentRef: rootId, expectedRevision: 2 });
     expect(retracted).toContain('[retracted by its author');
     expect(retracted).not.toContain('Is this still right?');
 
@@ -228,6 +230,8 @@ describe('comment tools: parity with the GraphQL gate (no drift)', () => {
       name: 'a retracted thread takes no reply', userId: () => other.id, expected: 'COMMENT_RETRACTED',
       setup: async () => {
         const { root } = await writerThread();
+        // #1721: only a comment with replies leaves a stub to refuse.
+        await M.replyToComment(null, { commentRef: root, body: 'keeps the stub' }, gqlCtx(other.id));
         await M.retractComment(null, { commentRef: root, expectedRevision: 1 }, gqlCtx(writer.id));
         return { root };
       },

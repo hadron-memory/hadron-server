@@ -38,8 +38,8 @@ import { NodeNotFoundError } from '../../../lib/entityRef/errors.js';
 import { sessionKeyCache } from '../../../lib/sessionKeyCache.js';
 import type { EncryptionKey } from '../../../lib/crypto.js';
 import { decryptNodeFieldsWithKey, encryptNodeFieldsWithKey } from '../../../lib/nodeCrypto.js';
-import { buildNodeRevisionSnapshot, createNodeRevision, editorFromAuth } from '../../../lib/nodeRevisionSnapshot.js';
 import { approvalFieldsOf } from '../../../lib/nodeApproval.js';
+import { revisionStateHashRefreshMarker } from '../../../lib/nodeRevisionSnapshot.js';
 import { computeApprovalHash } from '../../../lib/approvalHash.js';
 import { portalUrlForUrn } from '../../../lib/portalUrl.js';
 import { safeCanonicalUrn } from './resolvers.helpers.js';
@@ -97,6 +97,9 @@ export type CommentView = {
   createdBy: string | null;
   createdAt: Date;
   updatedAt: Date | null;
+  /** #1721 — the last body/quote edit (cor:dmo:110:12); null when never edited. */
+  editedAt: Date | null;
+  editedByKey: string | null;
   revSeq: number;
   target: { id: string; loc: string; memoryId: string; name: string; nodeType: string; revSeq: number };
 };
@@ -148,7 +151,12 @@ async function loadCommentViews(db: Context['db'] | Tx, ids: string[], key: Encr
     const target = targetOf.get(meta.targetNodeId);
     if (!anchor || !target) continue; // the DB invariants make this unreachable
     const { content, data } = decryptComment(row, key);
-    const stub = meta.retractedAt != null || meta.hiddenAt != null;
+    // A deleted comment is only ever loaded to answer the call that deleted
+    // it (#1721); like a stub, it serves no text.
+    const stub = meta.retractedAt != null || meta.hiddenAt != null || row.deletedAt != null;
+    // A comment edited before #1721 has no lastEdit; its lastAction still
+    // names the edit when nothing has written the row since.
+    const edit = data.lastEdit ?? (data.lastAction?.op === 'edit' ? data.lastAction : undefined);
     byId.set(row.id, {
       id: row.id,
       memoryId: row.memoryId,
@@ -170,6 +178,8 @@ async function loadCommentViews(db: Context['db'] | Tx, ids: string[], key: Encr
       createdBy: row.createdBy,
       createdAt: row.createdAt,
       updatedAt: row.updatedAt,
+      editedAt: edit ? new Date(edit.at) : null,
+      editedByKey: edit?.by ?? null,
       revSeq: row.revSeq,
       target,
     });
@@ -298,14 +308,20 @@ function commentTx<T>(ctx: Context, memoryId: string, gate: Gate, write: (tx: Tx
 // ---------------------------------------------------------------------------
 // Writes
 
-/** The node data of a comment revision: its quote and reasons plus the operation that wrote it. */
+/**
+ * The node data after a comment-path write: its quote and reasons, the
+ * operation that wrote it, and (#1721) the last edit, which only an edit moves.
+ */
 function nextData(prior: Partial<CommentNodeData>, op: CommentOp, actorKey: string, patch: Partial<CommentNodeData> = {}): CommentNodeData {
+  const at = new Date().toISOString();
+  const lastEdit = op === 'edit' ? { by: actorKey, at } : prior.lastEdit;
   return {
     quote: prior.quote ?? null,
     ...(prior.hiddenReason ? { hiddenReason: prior.hiddenReason } : {}),
     ...(prior.deleteReason ? { deleteReason: prior.deleteReason } : {}),
+    ...(lastEdit ? { lastEdit } : {}),
     ...patch,
-    lastAction: { op, by: actorKey, at: new Date().toISOString() },
+    lastAction: { op, by: actorKey, at },
   };
 }
 
@@ -466,9 +482,10 @@ function requireRevision(row: { revSeq: number }, expectedRevision: number): voi
 }
 
 /**
- * Record one comment-path change as a revision of the comment (`cor:dmo:110:05`):
- * snapshot the pre-change row, advance its revision, and write the new
- * content/data. Attribution (`editedBy*`, `updatedBy*`) comes from the request.
+ * Write one comment-path change to the comment row. #1721: a comment keeps no
+ * revision history (cor:dmo:110:12), so the change overwrites the row; revSeq
+ * still advances, because it is what `expectedRevision` is checked against.
+ * Attribution (`updatedBy`) comes from the request.
  */
 async function reviseComment(
   tx: Tx,
@@ -480,17 +497,20 @@ async function reviseComment(
   patch: { content?: string | null; data?: Partial<CommentNodeData> },
   extra: Prisma.NodeUpdateInput = {},
 ): Promise<void> {
-  const { content: priorContent, data: priorData } = decryptComment(row, key);
-  const changes = ['data', ...(patch.content !== undefined && patch.content !== priorContent ? ['content'] : [])];
-  const { commentMeta: _meta, ...snapshotRow } = row;
-  await createNodeRevision(tx, buildNodeRevisionSnapshot(snapshotRow, editorFromAuth(ctx), { revLabel: op, changes }));
+  const { data: priorData } = decryptComment(row, key);
   const fields = encrypted({
     ...(patch.content !== undefined ? { content: patch.content } : {}),
     data: nextData(priorData, op, actorKey, patch.data) as unknown,
   }, key);
   await tx.node.update({
     where: { id: row.id },
-    data: { ...fields, data: fields.data as Prisma.InputJsonValue, updatedBy: actorCreatedBy(ctx), ...extra },
+    data: {
+      ...fields, data: fields.data as Prisma.InputJsonValue, updatedBy: actorCreatedBy(ctx),
+      // This IS the sanctioned writer of a comment: refresh the fingerprint, or
+      // the #1323 drift reconcile would read the change as out-of-band and
+      // snapshot it as a revision on the next read.
+      revSeq: { increment: 1 }, revisionContentHash: revisionStateHashRefreshMarker(), ...extra,
+    },
   });
 }
 
@@ -525,27 +545,33 @@ async function changeComment(
   ref: string,
   gate: Gate,
   op: CommentOp,
-  apply: (row: LockedComment, actorKey: string) => {
-    patch: { content?: string | null; data?: Partial<CommentNodeData> };
-    meta: Prisma.CommentMetaUpdateInput;
-    targetRow?: 'root';
-  },
+  apply: (row: LockedComment, actorKey: string, tx: Tx) => CommentChange | Promise<CommentChange>,
   expectedRevision: number,
 ): Promise<CommentView> {
   const { authorKey, node, key } = await prepareWrite(ctx, ref, 'comment', gate);
   let metaForConflict: { targetNodeId: string; authorKey: string } | null = null;
+  let vanished = false;
   try {
     await commentTx(ctx, node.memoryId, gate, async (tx, txCtx) => {
       const row = await lockComment(tx, node.id, node.memoryId);
       metaForConflict = { targetNodeId: row.commentMeta!.targetNodeId, authorKey: row.commentMeta!.authorKey };
       requireRevision(row, expectedRevision);
-      const change = apply(row, authorKey);
-      await reviseComment(tx, txCtx, row, key, op, authorKey, change.patch);
-      await tx.commentMeta.update({ where: { nodeId: row.id }, data: change.meta });
+      const change = await apply(row, authorKey, tx);
       // #1608 — a stub's vectors (they hold its old text, including passage
       // chunk_text) go in the same transaction that conceals it, never by
-      // eventual cleanup (#1674 review, Jane P2-4).
+      // eventual cleanup (#1674 review, Jane P2-4). A deleted comment's too.
       if (op === 'retract' || op === 'hide') await tx.nodeEmbedding.deleteMany({ where: { nodeId: row.id } });
+      if (change.vanish) {
+        vanished = true;
+        await tx.commentMeta.update({ where: { nodeId: row.id }, data: change.meta });
+        await vanishComment(tx, txCtx, row, authorKey);
+        return;
+      }
+      // #1721 (Marco, #7693): resolve and reopen change only the thread state.
+      // They never write the comment row, so its updatedAt and updatedBy move
+      // only when the comment itself changes.
+      if (op !== 'resolve' && op !== 'reopen') await reviseComment(tx, txCtx, row, key, op, authorKey, change.patch);
+      await tx.commentMeta.update({ where: { nodeId: row.id }, data: change.meta });
     });
   } catch (error) {
     if (metaForConflict && isOpenThreadUniqueViolation(error)) {
@@ -554,7 +580,40 @@ async function changeComment(
     }
     throw error;
   }
-  return indexed(ctx, await viewOf(ctx, node.id, key));
+  const view = await viewOf(ctx, node.id, key);
+  // Resolve and reopen change no text, so there is nothing to re-index.
+  return vanished || op === 'resolve' || op === 'reopen' ? view : indexed(ctx, view);
+}
+
+type CommentChange = {
+  patch: { content?: string | null; data?: Partial<CommentNodeData> };
+  meta: Prisma.CommentMetaUpdateInput;
+  /** #1721 — delete the comment outright (soft), leaving no stub. */
+  vanish?: boolean;
+};
+
+/** Live (not deleted) replies under a top-level comment. */
+function liveReplyCount(tx: Tx, rootId: string): Promise<number> {
+  return tx.commentMeta.count({ where: { threadRootId: rootId, node: { deletedAt: null } } });
+}
+
+/**
+ * #1721 — delete a comment that leaves no stub (cor:dmo:110:05): soft-delete it,
+ * so it is gone from every read, limit and check. When it was the last live
+ * reply under a stub, the stub goes too ("a stub disappears once its last
+ * reply is deleted", Holger, team chat #7636).
+ */
+async function vanishComment(tx: Tx, txCtx: Context, row: LockedComment, actorKey: string): Promise<void> {
+  const deletion = { actorKey, deletedBy: actorCreatedBy(txCtx), cause: 'ADMIN' as const };
+  await deleteThreadsInTx(tx, [row.id], deletion);
+  const rootId = row.commentMeta!.threadRootId;
+  if (!rootId) return;
+  await tx.$queryRaw`SELECT id FROM nodes WHERE id = ${rootId} FOR UPDATE`;
+  const root = await tx.node.findUnique({ where: { id: rootId }, include: { commentMeta: true } });
+  const stub = root?.commentMeta && (root.commentMeta.retractedAt != null || root.commentMeta.hiddenAt != null);
+  if (root && !root.deletedAt && stub && (await liveReplyCount(tx, rootId)) === 0) {
+    await deleteThreadsInTx(tx, [rootId], deletion);
+  }
 }
 
 /**
@@ -671,11 +730,17 @@ export const commentMutations = {
     }, args.expectedRevision);
   },
 
-  /** The author retracts a comment, leaving a stub; its history is kept. */
+  /**
+   * The author deletes their comment (cor:dmo:110:05, #1721). A top-level
+   * comment with live replies stays as a "deleted" stub, so the replies keep
+   * their context; any other comment is soft-deleted and no longer shown.
+   */
   retractComment: async (_: unknown, args: { commentRef: string; expectedRevision: number }, ctx: Context) =>
-    changeComment(ctx, args.commentRef, 'write', 'retract', (row, actorKey) => {
+    changeComment(ctx, args.commentRef, 'write', 'retract', async (row, actorKey, tx) => {
       requireAuthor(row.commentMeta!, actorKey);
       refuseStub(row.commentMeta!);
+      const hasReplies = row.commentMeta!.threadRootId == null && (await liveReplyCount(tx, row.id)) > 0;
+      if (!hasReplies) return { patch: {}, meta: { retractedAt: new Date(), retractedBy: actorKey }, vanish: true };
       return { patch: STUB_PATCH, meta: { retractedAt: new Date(), retractedBy: actorKey } };
     }, args.expectedRevision),
 
@@ -876,6 +941,7 @@ export const commentFieldResolvers = {
     }),
     anchorIsCurrent: (c: CommentView) => c.anchorRevision === c.target.revSeq,
     resolvedBy: (c: CommentView, _: unknown, ctx: Context) => actorOfKey(ctx, c.resolvedByKey),
+    editedBy: (c: CommentView, _: unknown, ctx: Context) => actorOfKey(ctx, c.editedByKey),
     author: async (c: CommentView, _: unknown, ctx: Context) => {
       const parsed = parseAuthorKey(c.authorKey);
       switch (parsed.kind) {

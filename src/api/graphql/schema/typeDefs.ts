@@ -2000,8 +2000,13 @@ export const typeDefs = `#graphql
     "Worker comments only: the user who bound the worker session, shown as provenance, never as author. Null for other comments, and for callers who cannot write the memory."
     provenanceUser: CommentActorRef
     createdAt: DateTime!
+    "When the comment row last changed: an edit, a delete that leaves a stub, or a moderation write. Resolve and reopen never change it. To show a comment as edited, use editedAt."
     updatedAt: DateTime
-    "The comment's own revision. Pass it as expectedRevision to edit, retract, resolve, reopen or hide."
+    "When the body or quote was last edited; null when it never was. Only an edit sets it (hrn:node:hadronmemory.com:specs:cor:dmo:110:12)."
+    editedAt: DateTime
+    "Who last edited the body or quote; null when it never was."
+    editedBy: CommentActorRef
+    "The comment's write counter. Pass it as expectedRevision to edit, retract, resolve, reopen or hide. A comment keeps no revision history, so there are no earlier revisions to read."
     revSeq: Int!
   }
 

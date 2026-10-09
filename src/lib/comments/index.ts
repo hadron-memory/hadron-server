@@ -128,15 +128,20 @@ export function validateReason(reason: string): string {
 
 /**
  * What a comment node keeps in `Node.data` (encrypted with the body on an
- * encrypted memory). `lastAction` names the comment-path operation that wrote
- * this revision, so the comment's revision history reads as its audit trail
- * (`cor:dmo:110:05`).
+ * encrypted memory). `lastAction` names the comment-path operation that last
+ * wrote the row. A comment keeps no revision history (#1721, cor:dmo:110:12).
  */
 export type CommentNodeData = {
   quote: string | null;
   hiddenReason?: string | null;
   deleteReason?: string | null;
   lastAction: { op: CommentOp; by: string; at: string };
+  /**
+   * #1721 — who last edited the body or quote, and when (cor:dmo:110:12).
+   * Set by an edit only; resolve, reopen and delete leave it alone, so it is
+   * the comment's "edited" record. Absent on a comment never edited.
+   */
+  lastEdit?: { by: string; at: string };
 };
 
 export type CommentOp = 'create' | 'reply' | 'edit' | 'retract' | 'resolve' | 'reopen' | 'hide' | 'delete-thread';

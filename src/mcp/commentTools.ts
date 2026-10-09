@@ -294,7 +294,7 @@ export function registerCommentTools(server: McpServer, deps: { db: PrismaClient
 
   server.tool(
     'hadron_retract_comment',
-    'Retract your own comment (cor:dmo:110:05): it stays as a stub showing it was retracted, its text is no longer served, and a retracted thread no longer counts as your open thread. Only its author may.',
+    'Delete your own comment (cor:dmo:110:05). A top-level comment with replies stays as a stub showing it was deleted, so the replies keep their context; any other comment is no longer shown at all. Its text is no longer served either way, and it no longer counts as your open comment. Only its author may.',
     { commentRef, expectedRevision },
     async ({ commentRef: ref, expectedRevision: rev }) => {
       const ctx = ctxOf();
