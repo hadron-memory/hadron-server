@@ -88,8 +88,8 @@ export async function embedNode(
       nodeType: true,
       deletedAt: true,
       embeddingPendingAt: true,
-      // #1608 — a comment's stub state (hidden/retracted ⇒ never indexed).
-      commentMeta: { select: { hiddenAt: true, retractedAt: true } },
+      // #1608 — a comment's stub state (a deleted-with-replies stub is never indexed).
+      commentMeta: { select: { retractedAt: true } },
       embeddingAttempts: true,
       memory: {
         select: {
@@ -114,9 +114,9 @@ export async function embedNode(
   // #1608 (cor:dmo:110:08) — a comment's searchable text is its BODY, whatever
   // the memory's embeddingSource: a comment has no abstract, so the default
   // abstract-only index would otherwise never hold it (#1674 review, Jane
-  // P2-1). A hidden or retracted comment is never indexed; its vectors go.
+  // P2-1). A stub (#1721: deleted, kept for its replies) is never indexed; its vectors go.
   const isComment = node.nodeType === COMMENT_NODE_TYPE;
-  if (isComment && (node.commentMeta?.hiddenAt || node.commentMeta?.retractedAt)) {
+  if (isComment && node.commentMeta?.retractedAt) {
     await deleteNodeVectors(db, nodeId);
     await clearMarkers(db, nodeId, capturedPendingAt);
     return 'skipped';
