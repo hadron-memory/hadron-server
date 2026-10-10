@@ -3026,7 +3026,10 @@ export const nodeMutations = {
               });
             }
           }
-        });
+        // #1619 — a hard delete cascades every node's edges, revisions and
+        // derived rows; a few dozen nodes outlast Prisma's 5 s default and
+        // the transaction expired partway ("Transaction already closed").
+        }, { timeout: 120_000 });
       } catch (e) {
         if (e instanceof GraphQLError) throw e; // typed NODE_HAS_DESCENDANTS
         // Prisma P2025 = record not found — wrap so a missing node surfaces a
