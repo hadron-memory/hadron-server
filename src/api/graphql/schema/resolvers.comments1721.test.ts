@@ -91,7 +91,7 @@ describe('#1721 change 1 — a comment keeps no revisions (cor:dmo:110:12)', () 
     rev = (await M.resolveCommentThread(null, { commentRef: c.id, expectedRevision: rev }, as(admin.id))).revSeq;
     rev = (await M.reopenCommentThread(null, { commentRef: c.id, expectedRevision: rev }, as(admin.id))).revSeq;
     await M.replyToComment(null, { commentRef: c.id, body: 'reply' }, as(admin.id));
-    await M.retractComment(null, { commentRef: c.id, expectedRevision: rev }, as(writer.id));
+    await M.deleteComment(null, { commentRef: c.id, expectedRevision: rev }, as(writer.id));
     expect(await db.nodeRevision.count({ where: { nodeId: c.id } })).toBe(0);
   });
 });
@@ -130,9 +130,9 @@ describe('#1721 change 3 — a deleted comment leaves a stub only while it has r
   it('S5: a comment deleted without replies is no longer shown, and frees the open-comment allowance', async () => {
     const target = await node('d:1');
     const c = await comment(target.id);
-    const deleted = await M.retractComment(null, { commentRef: c.id, expectedRevision: c.revSeq }, as(writer.id));
+    const deleted = await M.deleteComment(null, { commentRef: c.id, expectedRevision: c.revSeq }, as(writer.id));
     // The answer to the delete itself carries no text either.
-    expect(deleted).toMatchObject({ retracted: true, body: null, quote: null });
+    expect(deleted).toMatchObject({ deleted: true, body: null, quote: null });
     expect(await Q.comment(null, { ref: c.id }, as())).toBeNull();
     expect((await threadsOf(target.id)).total).toBe(0);
     expect((await live(c.id)).deletedAt).not.toBeNull();
@@ -144,10 +144,10 @@ describe('#1721 change 3 — a deleted comment leaves a stub only while it has r
     const target = await node('d:2');
     const c = await comment(target.id, 'secret text', writer.id, { quote: 'q' });
     await M.replyToComment(null, { commentRef: c.id, body: 'r1' }, as(admin.id));
-    await M.retractComment(null, { commentRef: c.id, expectedRevision: c.revSeq }, as(writer.id));
+    await M.deleteComment(null, { commentRef: c.id, expectedRevision: c.revSeq }, as(writer.id));
     const { items, total } = await threadsOf(target.id);
     expect(total).toBe(1);
-    expect(items[0].root).toMatchObject({ id: c.id, retracted: true, body: null, quote: null });
+    expect(items[0].root).toMatchObject({ id: c.id, deleted: true, body: null, quote: null });
     expect(items[0].replies.map((r: any) => r.body)).toEqual(['r1']);
     const row = await live(c.id);
     expect(row.content).toBeNull();
@@ -159,7 +159,7 @@ describe('#1721 change 3 — a deleted comment leaves a stub only while it has r
     const c = await comment(target.id);
     const r1 = await M.replyToComment(null, { commentRef: c.id, body: 'r1' }, as(admin.id));
     const r2 = await M.replyToComment(null, { commentRef: c.id, body: 'r2' }, as(admin.id));
-    await M.retractComment(null, { commentRef: r1.id, expectedRevision: r1.revSeq }, as(admin.id));
+    await M.deleteComment(null, { commentRef: r1.id, expectedRevision: r1.revSeq }, as(admin.id));
     const { items } = await threadsOf(target.id);
     expect(items[0].replies.map((r: any) => r.id)).toEqual([r2.id]);
     expect(items[0].replyCount).toBe(1);
@@ -171,10 +171,10 @@ describe('#1721 change 3 — a deleted comment leaves a stub only while it has r
     const c = await comment(target.id);
     const r1 = await M.replyToComment(null, { commentRef: c.id, body: 'r1' }, as(admin.id));
     const r2 = await M.replyToComment(null, { commentRef: c.id, body: 'r2' }, as(admin.id));
-    await M.retractComment(null, { commentRef: c.id, expectedRevision: c.revSeq }, as(writer.id));
-    await M.retractComment(null, { commentRef: r1.id, expectedRevision: r1.revSeq }, as(admin.id));
+    await M.deleteComment(null, { commentRef: c.id, expectedRevision: c.revSeq }, as(writer.id));
+    await M.deleteComment(null, { commentRef: r1.id, expectedRevision: r1.revSeq }, as(admin.id));
     expect((await threadsOf(target.id)).total).toBe(1);
-    await M.retractComment(null, { commentRef: r2.id, expectedRevision: r2.revSeq }, as(admin.id));
+    await M.deleteComment(null, { commentRef: r2.id, expectedRevision: r2.revSeq }, as(admin.id));
     expect((await threadsOf(target.id)).total).toBe(0);
     expect((await live(c.id)).deletedAt).not.toBeNull();
   });
@@ -183,10 +183,10 @@ describe('#1721 change 3 — a deleted comment leaves a stub only while it has r
     const target = await node('d:5');
     const c = await comment(target.id);
     const r1 = await M.replyToComment(null, { commentRef: c.id, body: 'r1' }, as(admin.id));
-    await M.retractComment(null, { commentRef: r1.id, expectedRevision: r1.revSeq }, as(admin.id));
+    await M.deleteComment(null, { commentRef: r1.id, expectedRevision: r1.revSeq }, as(admin.id));
     const { items, total } = await threadsOf(target.id);
     expect(total).toBe(1);
-    expect(items[0].root).toMatchObject({ id: c.id, retracted: false, body: 'Looks off' });
+    expect(items[0].root).toMatchObject({ id: c.id, deleted: false, body: 'Looks off' });
   });
 });
 
@@ -205,5 +205,75 @@ describe('#1721 change 4 — who manages a memory for deleting others\' comments
     const target = await node('m:2');
     const c = await comment(target.id, 'x', admin.id);
     expect(await codeOf(M.deleteCommentThread(null, { commentRef: c.id, reason: 'no' }, as(writer.id)))).toBe('COMMENT_ADMIN_REQUIRED');
+  });
+});
+
+// Holger's rulings on Q1–Q3 (hadron-server#1721, 2026-10-10): one deleteComment
+// for the author or a manager, hideComment and retractComment removed, the
+// hidden state dropped, and an accurate deletion cause.
+describe('#1721 rulings Q2/Q3 — one deleteComment, no hide or retract, an accurate cause', () => {
+  const metaOf = (id: string) => db.commentMeta.findUniqueOrThrow({ where: { nodeId: id } });
+
+  it("a memory manager deletes someone else's comment; the cause records MANAGER, and the author's own delete AUTHOR", async () => {
+    const target = await node('q:1');
+    const byWriter = await comment(target.id);
+    const deleted = await M.deleteComment(null, { commentRef: byWriter.id, expectedRevision: byWriter.revSeq }, as(admin.id));
+    expect(deleted).toMatchObject({ deleted: true, body: null });
+    expect(await C.deletedBy(deleted, {}, as())).toMatchObject({ id: admin.id });
+    expect(await metaOf(byWriter.id)).toMatchObject({ threadDeletedCause: 'MANAGER', threadDeletedBy: `u:${admin.id}` });
+    const own = await comment(target.id, 'mine again');
+    await M.deleteComment(null, { commentRef: own.id, expectedRevision: own.revSeq }, as(writer.id));
+    expect(await metaOf(own.id)).toMatchObject({ threadDeletedCause: 'AUTHOR', threadDeletedBy: `u:${writer.id}` });
+  });
+
+  it("a stub's removal with its last reply records whoever deleted the stub, not the reply's deleter", async () => {
+    const target = await node('q:2');
+    const c = await comment(target.id);
+    const r = await M.replyToComment(null, { commentRef: c.id, body: 'r' }, as(writer.id));
+    await M.deleteComment(null, { commentRef: c.id, expectedRevision: c.revSeq }, as(admin.id));
+    expect((await metaOf(c.id)).threadDeletedCause).toBeNull();
+    await M.deleteComment(null, { commentRef: r.id, expectedRevision: r.revSeq }, as(writer.id));
+    expect(await metaOf(r.id)).toMatchObject({ threadDeletedCause: 'AUTHOR', threadDeletedBy: `u:${writer.id}` });
+    expect(await metaOf(c.id)).toMatchObject({ threadDeletedCause: 'MANAGER', threadDeletedBy: `u:${admin.id}` });
+  });
+
+  it('a platform admin with no org role may delete any comment in an org memory', async () => {
+    const target = await node('q:3');
+    const c = await comment(target.id);
+    const platformAdmin = await db.user.create({ data: { githubId: 172102, githubUsername: 'cm-platform2', roles: ['ADMIN'] } });
+    const ctx = { db, userId: platformAdmin.id, roles: ['ADMIN'] } as Context;
+    await M.deleteComment(null, { commentRef: c.id, expectedRevision: c.revSeq }, ctx);
+    expect(await metaOf(c.id)).toMatchObject({ threadDeletedCause: 'MANAGER' });
+  });
+
+  it("a platform admin cannot reach a comment in someone's personal memory", async () => {
+    const personal = await resolvers.Mutation.createMemory(null, { name: 'mine', memoryClass: 'personal' }, as(writer.id));
+    const target = await db.node.create({ data: { id: generateId(), memoryId: personal.id, loc: 'p:1', name: 'P', content: 'x' } });
+    const c = await comment(target.id);
+    const platformAdmin = await db.user.create({ data: { githubId: 172103, githubUsername: 'cm-platform3', roles: ['ADMIN'] } });
+    const ctx = { db, userId: platformAdmin.id, roles: ['ADMIN'] } as Context;
+    expect(await codeOf(M.deleteComment(null, { commentRef: c.id, expectedRevision: c.revSeq }, ctx))).toBe('COMMENT_NOT_FOUND');
+    expect((await live(c.id)).deletedAt).toBeNull();
+  });
+
+  it('hideComment and retractComment are gone from the API, and the hidden columns from the schema', async () => {
+    const { typeDefs } = await import('./typeDefs.js');
+    const sdl = String(typeDefs);
+    for (const gone of ['hideComment(', 'retractComment(', 'hiddenAt:', 'retracted: Boolean']) expect(sdl).not.toContain(gone);
+    expect(sdl).toContain('deleteComment(commentRef: ID!, expectedRevision: Int!): Comment!');
+    expect(M.hideComment).toBeUndefined();
+    expect(M.retractComment).toBeUndefined();
+    const columns = await db.$queryRaw<Array<{ column_name: string }>>`
+      SELECT column_name FROM information_schema.columns WHERE table_name = 'comment_meta' AND column_name LIKE 'hidden%'`;
+    expect(columns).toEqual([]);
+  });
+
+  it('the database accepts the new causes and refuses any other', async () => {
+    const target = await node('q:4');
+    const c = await comment(target.id);
+    const set = (cause: string) => db.$executeRaw`
+      UPDATE comment_meta SET thread_deleted_at = now(), thread_deleted_cause = ${cause} WHERE node_id = ${c.id}`;
+    for (const cause of ['ADMIN', 'AUTHOR', 'MANAGER', 'TARGET']) await expect(set(cause)).resolves.toBe(1);
+    await expect(set('HIDDEN')).rejects.toThrow(/chk_comment_meta_state_top_level/);
   });
 });

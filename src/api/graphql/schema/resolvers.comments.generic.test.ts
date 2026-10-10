@@ -182,7 +182,7 @@ describe('#1663 review cycle', () => {
     return u;
   };
 
-  it('retract/hide blank the live row: generic node reads serve no text, and a stub\'s legacy history is for admins only', async () => {
+  it('a delete that leaves a stub blanks the live row: generic node reads serve no text, and a stub\'s legacy history is for managers only', async () => {
     const r = await reader();
     const target = await node('st:1');
     const c = await comment(target.id, 'secret words');
@@ -190,7 +190,8 @@ describe('#1663 review cycle', () => {
     // revision written before #1721, which the concealment gate still guards.
     await legacyRevision(c.id);
     await M.editComment(null, { commentRef: c.id, body: 'secret words v2', quote: 'q', expectedRevision: 2 }, as());
-    await M.hideComment(null, { commentRef: c.id, reason: 'abuse', expectedRevision: 3 }, as());
+    await M.replyToComment(null, { commentRef: c.id, body: 'keeps the stub' }, as());
+    await M.deleteComment(null, { commentRef: c.id, expectedRevision: 3 }, as());
     const raw = await db.node.findUniqueOrThrow({ where: { id: c.id } });
     expect(raw.content).toBeNull();
     expect((raw.data as { quote: string | null }).quote).toBeNull();
@@ -206,10 +207,11 @@ describe('#1663 review cycle', () => {
     expect(await Q.nodeRevision(null, { revisionId: revId }, { ...as(), roles: ['ADMIN'] })).not.toBeNull();
   });
 
-  it('hiding a thread frees its author\'s open-thread allowance', async () => {
+  it('deleting a thread frees its author\'s open-thread allowance, stub or not', async () => {
     const target = await node('st:2');
     const c = await comment(target.id);
-    await M.hideComment(null, { commentRef: c.id, reason: 'abuse', expectedRevision: 1 }, as());
+    await M.replyToComment(null, { commentRef: c.id, body: 'r' }, as());
+    await M.deleteComment(null, { commentRef: c.id, expectedRevision: 1 }, as());
     await comment(target.id, 'a new thread');
   });
 

@@ -11,8 +11,9 @@
  * every case first with a typed code.
  *
  * Gates: reads use the target memory's READ gate (`110:02`); create, reply,
- * edit, retract, resolve and reopen need WRITE access (`110:03`), and edit /
- * retract also the author; hide and thread delete need memory ADMIN. Every
+ * edit, resolve and reopen need WRITE access (`110:03`), and edit also the
+ * author; deleteComment needs the author (with WRITE) or a memory manager,
+ * and thread delete a memory manager (#1721). Every
  * gate is re-run under the memory's authority lock (`withAuthorizedMemoryTx`),
  * so a concurrent ownership transfer cannot slip a stale grant through.
  *
@@ -87,10 +88,10 @@ export type CommentView = {
   quote: string | null;
   body: string | null;
   state: 'OPEN' | 'RESOLVED' | null;
-  retracted: boolean;
-  retractedAt: Date | null;
-  hidden: boolean;
-  hiddenAt: Date | null;
+  /** #1721 — deleted; a view of a live comment is deleted only as a stub kept for its replies. */
+  deleted: boolean;
+  deletedAt: Date | null;
+  deletedByKey: string | null;
   resolvedAt: Date | null;
   resolvedByKey: string | null;
   authorKey: string;
@@ -153,7 +154,7 @@ async function loadCommentViews(db: Context['db'] | Tx, ids: string[], key: Encr
     const { content, data } = decryptComment(row, key);
     // A deleted comment is only ever loaded to answer the call that deleted
     // it (#1721); like a stub, it serves no text.
-    const stub = meta.retractedAt != null || meta.hiddenAt != null || row.deletedAt != null;
+    const stub = meta.retractedAt != null || row.deletedAt != null;
     // A comment edited before #1721 has no lastEdit; its lastAction still
     // names the edit when nothing has written the row since.
     const edit = data.lastEdit ?? (data.lastAction?.op === 'edit' ? data.lastAction : undefined);
@@ -168,10 +169,9 @@ async function loadCommentViews(db: Context['db'] | Tx, ids: string[], key: Encr
       quote: stub ? null : data.quote ?? null,
       body: stub ? null : content,
       state: meta.threadState,
-      retracted: meta.retractedAt != null,
-      retractedAt: meta.retractedAt,
-      hidden: meta.hiddenAt != null,
-      hiddenAt: meta.hiddenAt,
+      deleted: stub,
+      deletedAt: meta.retractedAt ?? row.deletedAt,
+      deletedByKey: meta.retractedBy ?? meta.threadDeletedBy,
       resolvedAt: meta.resolvedAt,
       resolvedByKey: meta.resolvedBy,
       authorKey: meta.authorKey,
@@ -212,7 +212,13 @@ async function mayComment(ctx: Context, memoryId: string): Promise<void> {
   }
 }
 
-/** The moderation gate: memory admin (`cor:dmo:110:05`). */
+/**
+ * The moderation gate (`cor:dmo:110:05`, :11): who may delete others'
+ * comments. The memory's manager: its owner user; otherwise owner/admins of
+ * the owning org, and a platform admin (#1721, Holger: "they can delete
+ * any/all comments"). A platform admin never reaches a personal memory's
+ * comments: the read gate conceals them first.
+ */
 async function mayModerate(ctx: Context, memoryId: string): Promise<void> {
   const memory = await ctx.db.memory.findUniqueOrThrow({
     where: { id: memoryId },
@@ -222,14 +228,34 @@ async function mayModerate(ctx: Context, memoryId: string): Promise<void> {
     await requireMemoryManageAccess(ctx, memory, 'ADMIN');
   } catch (error) {
     if (isAuthorizationDenial(error)) {
-      throw commentError('COMMENT_ADMIN_REQUIRED', 'Hiding a comment or deleting a thread needs memory admin.');
+      throw commentError('COMMENT_ADMIN_REQUIRED', "Deleting someone else's comment, or a thread, needs a memory manager.");
     }
     throw error;
   }
 }
 
-type Gate = 'write' | 'moderate';
-const gateOf = (gate: Gate) => (gate === 'write' ? mayComment : mayModerate);
+/** Whether the caller may delete others' comments in the memory (no throw). */
+async function isModerator(ctx: Context, memoryId: string): Promise<boolean> {
+  try {
+    await mayModerate(ctx, memoryId);
+    return true;
+  } catch (error) {
+    if (error instanceof GraphQLError && error.extensions.code === 'COMMENT_ADMIN_REQUIRED') return false;
+    throw error;
+  }
+}
+
+/**
+ * #1721 — the deleteComment gate: a memory manager, or a writer (who must
+ * then be the author; checked on the locked row).
+ */
+async function mayDelete(ctx: Context, memoryId: string): Promise<void> {
+  if (await isModerator(ctx, memoryId)) return;
+  await mayComment(ctx, memoryId);
+}
+
+type Gate = 'write' | 'moderate' | 'delete';
+const gateOf = (gate: Gate) => (gate === 'write' ? mayComment : gate === 'moderate' ? mayModerate : mayDelete);
 
 /** True when the caller may write the memory (no throw); memoized per request. */
 const writerCache = new WeakMap<Context, Map<string, Promise<boolean>>>();
@@ -317,7 +343,6 @@ function nextData(prior: Partial<CommentNodeData>, op: CommentOp, actorKey: stri
   const lastEdit = op === 'edit' ? { by: actorKey, at } : prior.lastEdit;
   return {
     quote: prior.quote ?? null,
-    ...(prior.hiddenReason ? { hiddenReason: prior.hiddenReason } : {}),
     ...(prior.deleteReason ? { deleteReason: prior.deleteReason } : {}),
     ...(lastEdit ? { lastEdit } : {}),
     ...patch,
@@ -338,13 +363,13 @@ async function openThreadConflict(db: Context['db'], targetNodeId: string, autho
   const open = await db.commentMeta.findFirst({
     where: {
       targetNodeId, authorKey, threadRootId: null, threadState: 'OPEN',
-      retractedAt: null, hiddenAt: null, threadDeletedAt: null,
+      retractedAt: null, threadDeletedAt: null,
     },
     select: { nodeId: true },
   });
   return commentError(
     'COMMENT_OPEN_THREAD_EXISTS',
-    'You already have an open thread on this node: reply there, or resolve or retract it first.',
+    'You already have an open thread on this node: reply there, or resolve or delete it first.',
     { threadId: open?.nodeId ?? null },
   );
 }
@@ -545,7 +570,7 @@ async function changeComment(
   ref: string,
   gate: Gate,
   op: CommentOp,
-  apply: (row: LockedComment, actorKey: string, tx: Tx) => CommentChange | Promise<CommentChange>,
+  apply: (row: LockedComment, actorKey: string, tx: Tx, txCtx: Context) => CommentChange | Promise<CommentChange>,
   expectedRevision: number,
 ): Promise<CommentView> {
   const { authorKey, node, key } = await prepareWrite(ctx, ref, 'comment', gate);
@@ -556,15 +581,15 @@ async function changeComment(
       const row = await lockComment(tx, node.id, node.memoryId);
       metaForConflict = { targetNodeId: row.commentMeta!.targetNodeId, authorKey: row.commentMeta!.authorKey };
       requireRevision(row, expectedRevision);
-      const change = await apply(row, authorKey, tx);
+      const change = await apply(row, authorKey, tx, txCtx);
       // #1608 — a stub's vectors (they hold its old text, including passage
       // chunk_text) go in the same transaction that conceals it, never by
       // eventual cleanup (#1674 review, Jane P2-4). A deleted comment's too.
-      if (op === 'retract' || op === 'hide') await tx.nodeEmbedding.deleteMany({ where: { nodeId: row.id } });
+      if (op === 'delete') await tx.nodeEmbedding.deleteMany({ where: { nodeId: row.id } });
       if (change.vanish) {
         vanished = true;
         await tx.commentMeta.update({ where: { nodeId: row.id }, data: change.meta });
-        await vanishComment(tx, txCtx, row, authorKey);
+        await vanishComment(tx, txCtx, row, authorKey, change.vanish);
         return;
       }
       // #1721 (Marco, #7693): resolve and reopen change only the thread state.
@@ -588,8 +613,8 @@ async function changeComment(
 type CommentChange = {
   patch: { content?: string | null; data?: Partial<CommentNodeData> };
   meta: Prisma.CommentMetaUpdateInput;
-  /** #1721 — delete the comment outright (soft), leaving no stub. */
-  vanish?: boolean;
+  /** #1721 — delete the comment outright (soft), leaving no stub, for this cause. */
+  vanish?: 'AUTHOR' | 'MANAGER';
 };
 
 /** Live (not deleted) replies under a top-level comment. */
@@ -603,32 +628,31 @@ function liveReplyCount(tx: Tx, rootId: string): Promise<number> {
  * reply under a stub, the stub goes too ("a stub disappears once its last
  * reply is deleted", Holger, team chat #7636).
  */
-async function vanishComment(tx: Tx, txCtx: Context, row: LockedComment, actorKey: string): Promise<void> {
-  const deletion = { actorKey, deletedBy: actorCreatedBy(txCtx), cause: 'ADMIN' as const };
-  await deleteThreadsInTx(tx, [row.id], deletion);
+async function vanishComment(tx: Tx, txCtx: Context, row: LockedComment, actorKey: string, cause: 'AUTHOR' | 'MANAGER'): Promise<void> {
+  const deletedBy = actorCreatedBy(txCtx);
+  await deleteThreadsInTx(tx, [row.id], { actorKey, deletedBy, cause });
   const rootId = row.commentMeta!.threadRootId;
   if (!rootId) return;
   await tx.$queryRaw`SELECT id FROM nodes WHERE id = ${rootId} FOR UPDATE`;
   const root = await tx.node.findUnique({ where: { id: rootId }, include: { commentMeta: true } });
-  const stub = root?.commentMeta && (root.commentMeta.retractedAt != null || root.commentMeta.hiddenAt != null);
-  if (root && !root.deletedAt && stub && (await liveReplyCount(tx, rootId)) === 0) {
-    await deleteThreadsInTx(tx, [rootId], deletion);
+  const meta = root?.commentMeta;
+  if (root && !root.deletedAt && meta?.retractedAt != null && (await liveReplyCount(tx, rootId)) === 0) {
+    // The stub's deletion was already decided, by whoever deleted it; record that.
+    const stubCause = meta.retractedBy === meta.authorKey ? 'AUTHOR' : 'MANAGER';
+    await deleteThreadsInTx(tx, [rootId], { actorKey: meta.retractedBy, deletedBy, cause: stubCause });
   }
 }
 
 /**
- * #1663 review (Atilla/Dan/local P2) — retracting or hiding BLANKS the live
- * row's body and quote, so no generic read surface (node(ref:), lists, search,
- * MCP, export) can serve the text a stub conceals. The text survives only in
- * the comment's revision history (cor:dmo:110:05 "its history is kept"),
- * whose reads are gated to memory admins once the comment is a stub
- * ({@link isConcealedCommentHistory}).
+ * #1663 review (Atilla/Dan/local P2) — a stub's live row is BLANKED (body and
+ * quote), so no generic read surface (node(ref:), lists, search, MCP, export)
+ * can serve the text. #1721: a comment keeps no revision history, so the text
+ * is gone.
  */
 const STUB_PATCH = { content: null, data: { quote: null } } as const;
 
 function refuseStub(meta: NonNullable<LockedComment['commentMeta']>): void {
-  if (meta.hiddenAt) throw commentError('COMMENT_HIDDEN', 'This comment is hidden.');
-  if (meta.retractedAt) throw commentError('COMMENT_RETRACTED', 'This comment is retracted.');
+  if (meta.retractedAt) throw commentError('COMMENT_DELETED', 'This comment is deleted.');
 }
 
 function requireTopLevel(meta: NonNullable<LockedComment['commentMeta']>): void {
@@ -670,13 +694,13 @@ export const commentMutations = {
         const open = await tx.commentMeta.findFirst({
           where: {
             targetNodeId: row.id, authorKey, threadRootId: null, threadState: 'OPEN',
-            retractedAt: null, hiddenAt: null, threadDeletedAt: null,
+            retractedAt: null, threadDeletedAt: null,
           },
           select: { nodeId: true },
         });
         if (open) {
           throw commentError('COMMENT_OPEN_THREAD_EXISTS',
-            'You already have an open thread on this node: reply there, or resolve or retract it first.',
+            'You already have an open thread on this node: reply there, or resolve or delete it first.',
             { threadId: open.nodeId });
         }
         return insertComment(tx, txCtx, {
@@ -731,17 +755,23 @@ export const commentMutations = {
   },
 
   /**
-   * The author deletes their comment (cor:dmo:110:05, #1721). A top-level
-   * comment with live replies stays as a "deleted" stub, so the replies keep
-   * their context; any other comment is soft-deleted and no longer shown.
+   * Delete one comment (cor:dmo:110:05, #1721): its author, or anyone who may
+   * delete others' comments. A top-level comment with live replies stays as a
+   * "deleted" stub, so the replies keep their context; any other comment is
+   * soft-deleted and no longer shown. The stub goes with its last reply.
    */
-  retractComment: async (_: unknown, args: { commentRef: string; expectedRevision: number }, ctx: Context) =>
-    changeComment(ctx, args.commentRef, 'write', 'retract', async (row, actorKey, tx) => {
-      requireAuthor(row.commentMeta!, actorKey);
-      refuseStub(row.commentMeta!);
-      const hasReplies = row.commentMeta!.threadRootId == null && (await liveReplyCount(tx, row.id)) > 0;
-      if (!hasReplies) return { patch: {}, meta: { retractedAt: new Date(), retractedBy: actorKey }, vanish: true };
-      return { patch: STUB_PATCH, meta: { retractedAt: new Date(), retractedBy: actorKey } };
+  deleteComment: async (_: unknown, args: { commentRef: string; expectedRevision: number }, ctx: Context) =>
+    changeComment(ctx, args.commentRef, 'delete', 'delete', async (row, actorKey, tx, txCtx) => {
+      const meta = row.commentMeta!;
+      const cause = meta.authorKey === actorKey ? 'AUTHOR' : 'MANAGER';
+      if (cause === 'MANAGER' && !(await isModerator(txCtx, row.memoryId))) {
+        throw commentError('COMMENT_NOT_AUTHOR', "Only the comment's author or a memory manager may delete it.");
+      }
+      refuseStub(meta);
+      const deleted = { retractedAt: new Date(), retractedBy: actorKey };
+      const hasReplies = meta.threadRootId == null && (await liveReplyCount(tx, row.id)) > 0;
+      if (!hasReplies) return { patch: {}, meta: deleted, vanish: cause };
+      return { patch: STUB_PATCH, meta: deleted };
     }, args.expectedRevision),
 
   /** Resolve a thread: its author or any writer of the memory. */
@@ -764,15 +794,6 @@ export const commentMutations = {
       return { patch: {}, meta: { threadState: 'OPEN', resolvedAt: null, resolvedBy: null } };
     }, args.expectedRevision),
 
-  /** A memory admin hides an abusive comment, leaving a stub. */
-  hideComment: async (_: unknown, args: { commentRef: string; reason: string; expectedRevision: number }, ctx: Context) => {
-    const reason = validateReason(args.reason);
-    return changeComment(ctx, args.commentRef, 'moderate', 'hide', (row, actorKey) => {
-      if (row.commentMeta!.hiddenAt) throw commentError('COMMENT_HIDDEN', 'This comment is already hidden.');
-      return { patch: { content: null, data: { quote: null, hiddenReason: reason } }, meta: { hiddenAt: new Date(), hiddenBy: actorKey } };
-    }, args.expectedRevision);
-  },
-
   /**
    * A memory admin deletes a whole thread (soft): the root and every reply
    * leave every read, limit and check; their history is kept for audit.
@@ -792,19 +813,18 @@ export const commentMutations = {
 };
 
 /**
- * #1663 review — whether `nodeId` is a retracted or hidden comment whose
- * revision history the caller may not read. A stub's live row is blank; its
- * earlier text lives only in revisions, kept for audit (cor:dmo:110:05), so
- * once a comment is a stub its history is for memory admins alone. Every
- * revision read surface (nodeRevisions, nodeRevision, a noderev URN) asks this.
+ * #1663 review — whether `nodeId` is a stub whose revision history the caller
+ * may not read: memory managers alone. Every revision read surface
+ * (nodeRevisions, nodeRevision, a noderev URN) asks this. #1721: comments
+ * write no revisions any more, so this guards only revisions written before.
  */
 export async function isConcealedCommentHistory(ctx: Context, nodeId: string): Promise<boolean> {
   const row = await ctx.db.node.findUnique({
     where: { id: nodeId },
-    select: { nodeType: true, memoryId: true, commentMeta: { select: { retractedAt: true, hiddenAt: true } } },
+    select: { nodeType: true, memoryId: true, commentMeta: { select: { retractedAt: true } } },
   });
   if (row?.nodeType !== COMMENT_NODE_TYPE || !row.commentMeta) return false;
-  if (!row.commentMeta.retractedAt && !row.commentMeta.hiddenAt) return false;
+  if (!row.commentMeta.retractedAt) return false;
   try {
     await mayModerate(ctx, row.memoryId);
     return false;
@@ -942,6 +962,7 @@ export const commentFieldResolvers = {
     anchorIsCurrent: (c: CommentView) => c.anchorRevision === c.target.revSeq,
     resolvedBy: (c: CommentView, _: unknown, ctx: Context) => actorOfKey(ctx, c.resolvedByKey),
     editedBy: (c: CommentView, _: unknown, ctx: Context) => actorOfKey(ctx, c.editedByKey),
+    deletedBy: (c: CommentView, _: unknown, ctx: Context) => actorOfKey(ctx, c.deletedByKey),
     author: async (c: CommentView, _: unknown, ctx: Context) => {
       const parsed = parseAuthorKey(c.authorKey);
       switch (parsed.kind) {

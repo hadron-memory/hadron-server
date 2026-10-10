@@ -5,7 +5,7 @@
  * gone from every read and check, `cor:dmo:110:05`).
  *
  * An OPEN thread is a live top-level comment in state OPEN that is neither
- * retracted nor hidden: the same predicate as the one-open-thread index.
+ * a deleted-with-replies stub: the same predicate as the one-open-thread index.
  */
 import type { Prisma, PrismaClient } from '../../generated/prisma/index.js';
 
@@ -19,7 +19,7 @@ export async function openThreadCounts(db: Db, targetIds: string[]): Promise<Map
   const rows = await db.$queryRaw<Array<{ target_node_id: string; open: bigint; resolved: bigint; comments: bigint }>>`
     SELECT cm.target_node_id,
       count(*) FILTER (WHERE cm.thread_root_id IS NULL AND cm.thread_state = 'OPEN'
-                       AND cm.retracted_at IS NULL AND cm.hidden_at IS NULL) AS open,
+                       AND cm.retracted_at IS NULL) AS open,
       count(*) FILTER (WHERE cm.thread_root_id IS NULL AND cm.thread_state = 'RESOLVED') AS resolved,
       count(*) AS comments
     FROM comment_meta cm JOIN nodes n ON n.id = cm.node_id
@@ -38,7 +38,7 @@ export async function viewerOpenThreads(db: Db, targetIds: string[], authorKey: 
     FROM comment_meta cm JOIN nodes n ON n.id = cm.node_id
     WHERE cm.target_node_id = ANY(${targetIds}) AND cm.author_key = ${authorKey}
       AND cm.thread_root_id IS NULL AND cm.thread_state = 'OPEN'
-      AND cm.retracted_at IS NULL AND cm.hidden_at IS NULL AND n.deleted_at IS NULL`;
+      AND cm.retracted_at IS NULL AND n.deleted_at IS NULL`;
   return new Map(rows.map((r) => [r.target_node_id, r.node_id]));
 }
 

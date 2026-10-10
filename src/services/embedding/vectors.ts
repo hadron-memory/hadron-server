@@ -275,13 +275,13 @@ async function withEfSearch<T>(db: PrismaClient, candidateK: number, query: (tx:
 }
 
 /**
- * #1608 — a hidden or retracted comment is never a vector hit, whatever the
+ * #1608 — a comment stub (#1721: deleted, kept for its replies) is never a vector hit, whatever the
  * index still holds: concealment must not wait for the asynchronous vector
  * cleanup (#1674 review, Jane P2-4). Correlated on `n` (the nodes row); a
  * non-comment has no meta row and passes.
  */
 const NOT_A_STUB = Prisma.sql`AND NOT EXISTS (SELECT 1 FROM comment_meta cm_stub
-      WHERE cm_stub.node_id = n.id AND (cm_stub.hidden_at IS NOT NULL OR cm_stub.retracted_at IS NOT NULL))`;
+      WHERE cm_stub.node_id = n.id AND cm_stub.retracted_at IS NOT NULL)`;
 
 export interface VectorHit {
   nodeId: string;

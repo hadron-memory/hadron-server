@@ -28,7 +28,7 @@ describe('comment.fixture.json (contract §7)', () => {
       COMMENT_TARGET_NOT_FOUND: true, COMMENT_NOT_FOUND: true, COMMENT_FORBIDDEN: true,
       COMMENT_TARGET_IS_COMMENT: true, COMMENT_MEMORY_NOT_COMMENTABLE: true, COMMENT_OPEN_THREAD_EXISTS: true,
       COMMENT_ANCHOR_REVISION_INVALID: true, COMMENT_ANCHOR_REVISION_UNAVAILABLE: true, COMMENT_NOT_AUTHOR: true,
-      COMMENT_RETRACTED: true, COMMENT_HIDDEN: true, COMMENT_NOT_TOP_LEVEL: true, COMMENT_THREAD_STATE: true,
+      COMMENT_DELETED: true, COMMENT_NOT_TOP_LEVEL: true, COMMENT_THREAD_STATE: true,
       COMMENT_ADMIN_REQUIRED: true, COMMENT_IMPERSONATION_REFUSED: true, COMMENT_BODY_INVALID: true,
       COMMENT_MOVE_UNCOMMENTABLE: true, COMMENT_MERGE_FOLDS_THREADS: true, COMMENT_NOT_APPROVABLE: true,
     };
@@ -58,7 +58,9 @@ describe('prisma/comment-invariants.sql', () => {
   it('is copied verbatim into the migration (prod does not run post-push.sql)', () => {
     const invariants = read('../../../prisma/comment-invariants.sql');
     const dir = fileURLToPath(new URL('../../../prisma/migrations/', import.meta.url));
-    const migration = readdirSync(dir).find((d) => d.endsWith('_comment_nodes'))!;
+    // The newest comment migration carries the current text (#1721).
+    const migration = readdirSync(dir).filter((d) => /_comment_(nodes|rulings)$/.test(d)).sort().at(-1)!;
+    expect(migration).toMatch(/_comment_rulings$/);
     expect(read(`../../../prisma/migrations/${migration}/migration.sql`)).toContain(invariants);
     expect(read('../../../prisma/post-push.sql')).toContain('\\ir comment-invariants.sql');
   });

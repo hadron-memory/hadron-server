@@ -74,7 +74,7 @@ beforeEach(async () => {
 });
 
 describe('comment tools: a thread through MCP', () => {
-  it('create → list → reply → edit → resolve → reopen → retract, with the feedback cue on node reads', async () => {
+  it('create → list → reply → edit → resolve → reopen → delete, with the feedback cue on node reads', async () => {
     const asWriter = mcp(writer.id);
     const asOther = mcp(other.id);
 
@@ -122,13 +122,13 @@ describe('comment tools: a thread through MCP', () => {
     // #1721: resolve and reopen change only the thread state, not the revision.
     await asWriter.callToolText('hadron_reopen_comment_thread', { commentRef: rootId, expectedRevision: 2 });
     // It has a reply, so deleting it leaves a stub.
-    const retracted = await asWriter.callToolText('hadron_retract_comment', { commentRef: rootId, expectedRevision: 2 });
-    expect(retracted).toContain('[retracted by its author');
-    expect(retracted).not.toContain('Is this still right?');
+    const deleted = await asWriter.callToolText('hadron_delete_comment', { commentRef: rootId, expectedRevision: 2 });
+    expect(deleted).toContain('[deleted');
+    expect(deleted).not.toContain('Is this still right?');
 
     const got = await asOther.callToolText('hadron_get_comment', { commentRef: `hrn:node:${memory.urn}:comments:${rootId}` });
     expect(got).toContain(`Comment on ${targetUrn()} (The rule).`);
-    expect(got).toContain('[retracted by its author');
+    expect(got).toContain('[deleted');
   });
 
   it('describes every tool as feedback, and names the DAC worker binding on create', async () => {
@@ -182,9 +182,9 @@ describe('comment tools: parity with the GraphQL gate (no drift)', () => {
       tool: 'hadron_edit_comment', args: (s) => ({ commentRef: s.root, body: 'hijack', expectedRevision: 1 }),
     },
     {
-      name: 'only the author retracts', userId: () => other.id, expected: 'COMMENT_NOT_AUTHOR', setup: writerThread,
-      gql: (s, ctx) => M.retractComment(null, { commentRef: s.root, expectedRevision: 1 }, ctx),
-      tool: 'hadron_retract_comment', args: (s) => ({ commentRef: s.root, expectedRevision: 1 }),
+      name: 'a writer who is neither author nor manager cannot delete', userId: () => other.id, expected: 'COMMENT_NOT_AUTHOR', setup: writerThread,
+      gql: (s, ctx) => M.deleteComment(null, { commentRef: s.root, expectedRevision: 1 }, ctx),
+      tool: 'hadron_delete_comment', args: (s) => ({ commentRef: s.root, expectedRevision: 1 }),
     },
     {
       name: 'a stale revision conflicts', userId: () => writer.id, expected: 'NODE_WRITE_CONFLICT', setup: writerThread,
@@ -227,22 +227,23 @@ describe('comment tools: parity with the GraphQL gate (no drift)', () => {
       tool: 'hadron_create_comment', args: () => ({ targetRef: target.id, body: 'x', anchorRevision: 5 }),
     },
     {
-      name: 'a retracted thread takes no reply', userId: () => other.id, expected: 'COMMENT_RETRACTED',
+      name: 'a deleted stub takes no reply', userId: () => other.id, expected: 'COMMENT_DELETED',
       setup: async () => {
         const { root } = await writerThread();
         // #1721: only a comment with replies leaves a stub to refuse.
         await M.replyToComment(null, { commentRef: root, body: 'keeps the stub' }, gqlCtx(other.id));
-        await M.retractComment(null, { commentRef: root, expectedRevision: 1 }, gqlCtx(writer.id));
+        await M.deleteComment(null, { commentRef: root, expectedRevision: 1 }, gqlCtx(writer.id));
         return { root };
       },
       gql: (s, ctx) => M.replyToComment(null, { commentRef: s.root, body: 'r' }, ctx),
       tool: 'hadron_reply_to_comment', args: (s) => ({ commentRef: s.root, body: 'r' }),
     },
     {
-      name: 'a hidden comment cannot be edited', userId: () => writer.id, expected: 'COMMENT_HIDDEN',
+      name: "a stub a manager left cannot be edited by its author", userId: () => writer.id, expected: 'COMMENT_DELETED',
       setup: async () => {
         const { root } = await writerThread();
-        await M.hideComment(null, { commentRef: root, reason: 'abuse', expectedRevision: 1 }, gqlCtx(admin.id));
+        await M.replyToComment(null, { commentRef: root, body: 'keeps the stub' }, gqlCtx(other.id));
+        await M.deleteComment(null, { commentRef: root, expectedRevision: 1 }, gqlCtx(admin.id));
         return { root };
       },
       gql: (s, ctx) => M.editComment(null, { commentRef: s.root, body: 'b', expectedRevision: 2 }, ctx),
@@ -261,8 +262,8 @@ describe('comment tools: parity with the GraphQL gate (no drift)', () => {
     },
     {
       name: 'a non-comment is not a comment', userId: () => writer.id, expected: 'COMMENT_NOT_FOUND',
-      gql: (_, ctx) => M.retractComment(null, { commentRef: target.id, expectedRevision: 1 }, ctx),
-      tool: 'hadron_retract_comment', args: () => ({ commentRef: target.id, expectedRevision: 1 }),
+      gql: (_, ctx) => M.deleteComment(null, { commentRef: target.id, expectedRevision: 1 }, ctx),
+      tool: 'hadron_delete_comment', args: () => ({ commentRef: target.id, expectedRevision: 1 }),
     },
     {
       name: 'impersonation never writes a comment', userId: () => writer.id, expected: 'COMMENT_IMPERSONATION_REFUSED',
@@ -305,17 +306,17 @@ describe('comment tools: parity with the GraphQL gate (no drift)', () => {
     }
   });
 
-  it('a hidden comment reads as a stub through every tool; an unreadable target shows no Feedback line', async () => {
+  it("a stub a manager left reads as a stub through every tool; an unreadable target shows no Feedback line", async () => {
     const { root } = await writerThread();
-    await M.hideComment(null, { commentRef: root, reason: 'abuse', expectedRevision: 1 }, gqlCtx(admin.id));
+    await M.replyToComment(null, { commentRef: root, body: 'keeps the stub' }, gqlCtx(other.id));
+    await M.deleteComment(null, { commentRef: root, expectedRevision: 1 }, gqlCtx(admin.id));
     const asReader = mcp(reader.id);
     for (const text of [
       await asReader.callToolText('hadron_list_comments', { targetRef: target.id }),
       await asReader.callToolText('hadron_get_comment', { commentRef: root }),
     ]) {
-      expect(text).toContain('[hidden by a memory admin');
+      expect(text).toContain('[deleted');
       expect(text).not.toContain('mine');
-      expect(text).not.toContain('abuse');
     }
     const outsiderRead = await mcp(outsider.id).callToolText('hadron_get_node', { urn: targetUrn() });
     expect(outsiderRead).not.toContain('Feedback:');

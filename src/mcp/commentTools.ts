@@ -1,6 +1,6 @@
 /**
  * #1609 — comment nodes on the MCP surface (`cor:dmo:110`): read a node's
- * discussion, post, reply, edit or retract your own comment, and resolve or
+ * discussion, post, reply, edit or delete your own comment, and resolve or
  * reopen a thread.
  *
  * Every tool is a thin call into the SAME resolvers GraphQL serves
@@ -15,9 +15,11 @@
  * header or, since #1665 (DAC), the connection a worker bound with
  * `hadron_start_session`.
  *
- * Moderation (`hideComment`, `deleteCommentThread`) is deliberately not
- * exposed here: it is a memory-admin act, and the issue scopes the agent
- * surface to contributing feedback.
+ * Moderation (deleting someone else's comment, `deleteCommentThread`) is
+ * deliberately not exposed here: it is a memory manager's act, and the issue
+ * scopes the agent surface to contributing feedback. `hadron_delete_comment`
+ * is the same deleteComment resolver, so a manager calling it on another's
+ * comment is admitted by that resolver's gate, not refused here.
  *
  * Contract of record: `hrn:node:hadronmemory.com:hadron-server:design:comment-nodes-contract`.
  */
@@ -45,7 +47,7 @@ const M = resolvers.Mutation as unknown as {
   createComment: Resolver<{ targetRef: string; body: string; quote?: string | null; anchorRevision?: number | null }, CommentView>;
   replyToComment: Resolver<{ commentRef: string; body: string }, CommentView>;
   editComment: Resolver<{ commentRef: string; body?: string | null; quote?: string | null; expectedRevision: number }, CommentView>;
-  retractComment: Resolver<{ commentRef: string; expectedRevision: number }, CommentView>;
+  deleteComment: Resolver<{ commentRef: string; expectedRevision: number }, CommentView>;
   resolveCommentThread: Resolver<{ commentRef: string; expectedRevision: number }, CommentView>;
   reopenCommentThread: Resolver<{ commentRef: string; expectedRevision: number }, CommentView>;
 };
@@ -129,8 +131,7 @@ export async function renderComment(c: CommentView, ctx: Context, indent = ''): 
   } else {
     lines.push(`  reply in thread ${c.threadRootId}`);
   }
-  if (c.retracted) lines.push(`  [retracted by its author${c.retractedAt ? ` at ${c.retractedAt.toISOString()}` : ''}]`);
-  else if (c.hidden) lines.push(`  [hidden by a memory admin${c.hiddenAt ? ` at ${c.hiddenAt.toISOString()}` : ''}]`);
+  if (c.deleted) lines.push(`  [deleted${c.deletedAt ? ` at ${c.deletedAt.toISOString()}` : ''}]`);
   else {
     if (c.quote) lines.push(...c.quote.split('\n').map((l) => `  > ${l}`));
     if (c.body) lines.push(...c.body.split('\n').map((l) => `  ${l}`));
@@ -293,13 +294,13 @@ export function registerCommentTools(server: McpServer, deps: { db: PrismaClient
   );
 
   server.tool(
-    'hadron_retract_comment',
-    'Delete your own comment (cor:dmo:110:05). A top-level comment with replies stays as a stub showing it was deleted, so the replies keep their context; any other comment is no longer shown at all. Its text is no longer served either way, and it no longer counts as your open comment. Only its author may.',
+    'hadron_delete_comment',
+    'Delete your own comment (cor:dmo:110:05). A top-level comment with replies stays as a stub showing it was deleted, so the replies keep their context; any other comment is no longer shown at all, and a stub goes with its last reply. Its text is no longer served either way, and it no longer counts as your open comment. Its author may; so may a memory manager.',
     { commentRef, expectedRevision },
     async ({ commentRef: ref, expectedRevision: rev }) => {
       const ctx = ctxOf();
       try {
-        return textResult(await receipt('Retracted', await M.retractComment({}, { commentRef: ref, expectedRevision: rev }, ctx), ctx));
+        return textResult(await receipt('Deleted', await M.deleteComment({}, { commentRef: ref, expectedRevision: rev }, ctx), ctx));
       } catch (e) {
         return commentErrorText(e);
       }
