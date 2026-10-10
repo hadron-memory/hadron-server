@@ -128,10 +128,13 @@ for (const orgless of [false, true]) {
     const llm = vi.fn(async () => ({ text: 'output', tokensIn: 1, tokensOut: 1, provider: 'test', model: 'test' }));
     const writeOutput = vi.fn(async () => null);
     const deps = { ...makeProdRunDeps(db), resolveConfig: vi.fn(async () => ({ config: {} }) as never), llm, writeOutput };
+    // Exercise assembly directly too: after R5b lands the synthetic legacy
+    // activation is refused by consent before it reaches the assembly seam.
+    await expect(deps.assemble(run, run.entryNodeUrn, {})).rejects.toThrow('not readable');
     expect(await executeAppRun(db, run.id, deps)).toBe('failed');
     expect(llm).not.toHaveBeenCalled();
     expect(writeOutput).not.toHaveBeenCalled();
-    expect((await db.appRun.findUniqueOrThrow({ where: { id: run.id } })).failure).toMatchObject({ code: 'ASSEMBLY_FAILED', message: expect.stringMatching(/not readable/) });
+    expect((await db.appRun.findUniqueOrThrow({ where: { id: run.id } })).failure).toMatchObject({ code: expect.stringMatching(/^(ASSEMBLY_FAILED|AUTOMATION_UNADOPTED)$/) });
     expect(await db.node.findUniqueOrThrow({ where: { id: f.node.id } })).toEqual(f.node);
   });
 }
