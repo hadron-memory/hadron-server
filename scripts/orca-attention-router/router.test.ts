@@ -276,12 +276,74 @@ describe('Orca attention router — fresh counts at send time (#1616)', () => {
     expect(adopted(c)).toBeNull();
   });
 
+  it('a STALE draft does not pin a Claude worker: a screen that proves the composer empty refutes it (#6736)', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli');
+    fake.attention.workers = [worker('w-eli', 'Eli', { mentions: 1, unread: 2, relevant: 110 })];
+    // Orca's draft carries text no client shows; the rendered box is bare and
+    // the agents hint is up — Claude draws typed text on the ❯ line, so this
+    // draft cannot be pending input.
+    fake.screens.set('term_eli', { tail: CLAUDE_IDLE, draft: 'mark #1625 ready, do not wait' });
+    const out = poll(c);
+    expect(out).toMatchObject({ nudged: ['Eli'], adopted: true });
+    expect(fake.sent).toHaveLength(1);
+    expect(logs.join('\n')).toContain('Eli: stale Orca draft discarded');
+    expect(logs.join('\n')).not.toContain('mark #1625'); // the draft's text is never logged
+  });
+
+  it('the stale-discard note logs once per token, and a draft that matches the box still pins (Claude)', () => {
+    const c = cfg(['w-eli', 'Eli'], ['w-baloo', 'Baloo']);
+    fake.terminal('eli');
+    fake.terminal('baloo');
+    fake.attention.workers = [worker('w-eli', 'Eli', { relevant: 110 }), worker('w-baloo', 'Baloo', { relevant: 115 })];
+    fake.screens.set('term_eli', { tail: CLAUDE_IDLE, draft: 'anything stale' });
+    // Baloo's box RENDERS text — the draft is corroborated, not refuted.
+    fake.screens.set('term_baloo', { tail: withPrompt(CLAUDE_IDLE, '❯', 'typed words'), draft: 'typed words' });
+    const first = poll(c);
+    expect(first).toMatchObject({ nudged: ['Eli'] });
+    expect(first.held.Baloo).toContain('text in the composer draft');
+    expect(logs.filter((l) => l.includes('stale Orca draft discarded'))).toHaveLength(1);
+    fake.attention.workers = [worker('w-baloo', 'Baloo', { relevant: 120 })];
+    poll(c);
+    expect(logs.filter((l) => l.includes('stale Orca draft discarded'))).toHaveLength(1); // once per token
+  });
+
+  it('a Codex draft stays authoritative: its composer renders empty while text is pending', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli', 'codex');
+    fake.attention.workers = [worker('w-eli', 'Eli', { mentions: 1, unread: 2, relevant: 110 })];
+    fake.screens.set('term_eli', { tail: CODEX_IDLE, draft: 'pending codex text' });
+    const out = poll(c);
+    expect(out.nudged).toEqual([]);
+    expect(out.held.Eli).toContain('text in the composer draft');
+    expect(fake.sent).toEqual([]);
+  });
+
+  it('logs a long hold: pinned 30+ minutes with mentions pending says so, at most every 30 minutes (#6736)', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli');
+    fake.busy.add('term_eli');
+    fake.attention.workers = [worker('w-eli', 'Eli')];
+    poll(c); // held: busy
+    const st = new State(c.stateDir);
+    const ledger = st.ledger();
+    ledger.heldSince['w-eli'] = Date.now() - 41 * 60_000; // backdate the hold
+    st.saveLedger(ledger);
+    logs.length = 0;
+    poll(c);
+    expect(logs.join('\n')).toMatch(/Eli held 4[01] min with mentions pending \(busy/);
+    logs.length = 0;
+    poll(c); // within 30 min of the last long-hold line: silent
+    expect(logs.join('\n')).not.toMatch(/held \d+ min/);
+  });
+
   it('re-proves the prompt empty after the recompute: typing during the scan holds, not sends', () => {
     const c = cfg(['w-eli', 'Eli']);
     fake.terminal('eli');
     fake.attention.workers = [worker('w-eli', 'Eli', { mentions: 1, unread: 2, relevant: 110 })];
-    // The recompute's round trip reopened the #5473 window; a human started typing in it.
-    fake.recheckScreens.set('term_eli', { tail: CLAUDE_IDLE, draft: 'Holger typing here' });
+    // The recompute's round trip reopened the #5473 window; a human started
+    // typing in it — and Claude RENDERS the text, so the draft is corroborated.
+    fake.recheckScreens.set('term_eli', { tail: withPrompt(CLAUDE_IDLE, '❯', 'Holger typing here'), draft: 'Holger typing here' });
     const out = poll(c);
     expect(out.nudged).toEqual([]);
     expect(out.held.Eli).toContain('prompt not empty on recheck');
@@ -776,13 +838,13 @@ describe('Orca attention router — a human typing: never appended to; hold the 
 
   it('holds on a composer draft, a non-screen read, or an unreadable terminal', () => {
     const c = cfg(['w-eli', 'Eli']);
-    fake.terminal('eli');
+    fake.terminal('eli', 'codex'); // a Codex draft is authoritative: its composer renders empty
     fake.attention.workers = [worker('w-eli', 'Eli')];
     for (const [screen, why] of [
-      [{ tail: CLAUDE_IDLE, draft: 'typed in Orca' }, 'text in the composer draft'],
+      [{ tail: CODEX_IDLE, draft: 'typed in Orca' }, 'text in the composer draft'],
       // Whitespace is typing too (Gene, #1555): the gate promises nobody is typing.
-      [{ tail: CLAUDE_IDLE, draft: '   ' }, 'text in the composer draft'],
-      [{ tail: CLAUDE_IDLE, source: 'screen-unavailable' }, 'screen unreadable'],
+      [{ tail: CODEX_IDLE, draft: '   ' }, 'text in the composer draft'],
+      [{ tail: CODEX_IDLE, source: 'screen-unavailable' }, 'screen unreadable'],
       [{ ok: false }, 'screen unreadable'],
     ] as const) {
       fake.screens.set('term_eli', screen);
@@ -790,5 +852,15 @@ describe('Orca attention router — a human typing: never appended to; hold the 
       expect(out.held).toEqual({ Eli: `prompt not empty (${why})` });
       expect(fake.sent).toEqual([]);
     }
+  });
+
+  it('a Claude draft still holds when the box RENDERS the text — the draft is corroborated, not stale', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli');
+    fake.attention.workers = [worker('w-eli', 'Eli')];
+    fake.screens.set('term_eli', { tail: withPrompt(CLAUDE_IDLE, '❯', 'typed words'), draft: 'typed words' });
+    const out = poll(c);
+    expect(out.held).toEqual({ Eli: 'prompt not empty (text in the composer draft)' });
+    expect(fake.sent).toEqual([]);
   });
 });

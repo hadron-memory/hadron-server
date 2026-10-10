@@ -35,6 +35,8 @@ const MODELS_WITHOUT_ID = new Set<string>([
   'AgentTaskStallSchedule',
   // #1707 — keyed by its registration and worker.
   'HostRegistrationWorker',
+  // #1715 — keyed by the merged-away account.
+  'UserMerge',
 ]);
 
 const basePrisma = new PrismaClient();

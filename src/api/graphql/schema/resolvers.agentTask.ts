@@ -48,17 +48,18 @@
 //   reassign        the task's owner (ruled, D-2026-10-07-004), or an App manager (Proposed)
 //   start/progress/finish   the assignee only (050:08, Proposed)
 //   read            the App's participants, workers included (050:21, Proposed)
-// "Whoever manages the App" is the STRICT cor:acl:010:01 predicate
-// (`managesAppStrict`: a user-owned App's owner, or the org's live ADMINs and
-// OWNERs) — Holger #7495 as 050:09 r2 cites it, confirmed by Ada on the #1713
-// review round. NOT `callerManagesAppMembers`: its owner-role-AppMember arm is
-// self-grantable through joinApp (Rook, #1713 P1-1).
+// "Whoever manages the App" is cor:acl:010:01 as Holger ruled it on
+// 2026-10-10 (team chat #7790, #1731; `managesApp`): the App's user-owner,
+// owner-role AppMembers, org ADMIN/OWNER and platform admins. It replaced the
+// strict reading of #1713 (Rook P1-1), whose self-grant risk #1714 closed:
+// `joinApp` never hands out `owner`.
 // INTERIM (team chat #7508): the App-manager arm counts only for a PERSON
 // acting as themselves; a worker acting through its session does not inherit
 // its driver's management rights. This is attribution hygiene, NOT a privilege
 // boundary (Rook P3-3): the same credential can act as the person by sending
 // no worker session. It keeps a worker's own acts from being recorded as
-// management acts until 050:09's "coordinator grant" is ruled.
+// management acts. A worker's own authority over others' tasks is 050:09's
+// `reportsTo` arm (Holger #7804; built with #1726), not its driver's role.
 //
 // CONCEALMENT: a task the caller cannot read — including one in another App,
 // or a parent named across Apps — reads as TASK_NOT_FOUND (mutations) or null
@@ -74,7 +75,7 @@ import { AppNotFoundError, WorkerNotFoundError } from '../../../lib/entityRef/er
 import { isId } from '../../../lib/entityRef/shape.js';
 import { composeWorkerUrn, resolveWorkerRef as resolveWorkerRefId } from '../../../lib/entityRef/workerRef.js';
 import { resolveWorkerIdByName } from './resolvers.worker.js';
-import { managesAppStrict } from '../../../lib/auth/appManagement.js';
+import { managesApp } from '../../../lib/auth/appManagement.js';
 import type { AuthorityAnchor } from '../../../lib/auth/authorityAnchors.js';
 import { mayStillDriveWorkerApp } from '../../../lib/teamAttention.js';
 import { withAuthorizedTx } from './authorizedTx.js';
@@ -226,14 +227,14 @@ const isAssignee = (actor: TaskActor, t: TaskRow): boolean =>
   actorIs(actor, t.assigneeWorkerId, t.assigneeUserId);
 
 /**
- * Whoever manages the App — strict cor:acl:010:01 (`managesAppStrict`).
- * INTERIM: a person acting as themselves only — see the file header. Called
- * with the transaction context, so it reads committed state under the write's
- * anchors.
+ * Whoever manages the App — cor:acl:010:01 as Holger ruled it on 2026-10-10
+ * (`managesApp`, #1731). INTERIM: a person acting as themselves only — see the
+ * file header. Called with the transaction context, so it reads committed
+ * state under the write's anchors, with platform roles re-read from the user row.
  */
 export async function actorManagesApp(ctx: Context, app: TaskApp, actor: TaskActor): Promise<boolean> {
   if (actor.kind !== 'user' || ctx.impersonation) return false;
-  return managesAppStrict(ctx, app);
+  return managesApp(ctx, app);
 }
 
 function sameActor(a: TaskActor, b: TaskActor): boolean {
