@@ -120,7 +120,8 @@ describe('DY-2 (#1653): a usage event on a lapsed session is attribution, never 
   it('recordUsage with SOMEONE ELSE\'S session id never keeps it live', async () => {
     const lapsed = await session({ idleMs: 30 * H, userId: holder.id });
     await M.recordUsage({}, { event: { type: 'read', sessionId: lapsed.id } }, userCtx(other.id));
-    const [ev] = await eventsFor(lapsed.id);
+    const ev = await db.usageEvent.findFirstOrThrow({ where: { userId: other.id } });
+    expect(ev.sessionId).toBeNull();
     expect(ev.countsAsActivity).toBe(false);
     expect(await live(lapsed.id)).toBe(false);
   });

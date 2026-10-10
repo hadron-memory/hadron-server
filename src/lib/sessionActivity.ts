@@ -1,3 +1,4 @@
+import { ownsSession } from './sessionOwnership.js';
 /**
  * When a session was last DRIVEN — the platform's one derivation of it
  * (`cor:agt:020:03`).
@@ -434,10 +435,7 @@ export async function usageEventCountsAsActivity(
     // startAgentSession chatbot session that carries its end user's id, so an
     // App driving such a session keeps it live. Only DY-1's RESUME narrows to
     // person-less worker sessions; counting a drive does not.
-    const owned = principal.userId
-      ? !principal.impersonation && s.userId === principal.userId
-      : !!principal.appId && s.appId === principal.appId;
-    if (!owned) return false;
+    if (!ownsSession(principal, s)) return false;
     const lastEvent = (await loadLastEventBySession(db, [sessionId])).get(sessionId);
     return isSessionLive(s, lastEvent, now);
   } catch {

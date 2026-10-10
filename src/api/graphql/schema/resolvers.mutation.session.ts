@@ -1,4 +1,5 @@
 // sessionMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
+import { ownsSession } from '../../../lib/sessionOwnership.js';
 import { generateId } from '../../../lib/id.js';
 import {
   buildNodeRevisionSnapshot,
@@ -1283,35 +1284,49 @@ export const sessionMutations = {
       // fails), and the row is stamped at the instant activity was judged
       // (local P2-1).
       const at = new Date();
-      await ctx.db.$transaction(async (tx) => tx.usageEvent.create({
-        data: {
-          type: event.type,
-          nodeLoc: event.nodeLoc,
-          nodeId: node?.id,
-          // #796: derived from the same row `nodeId` comes from — now a row the
-          // caller demonstrably can read, so the memory attribution is theirs
-          // to make. Keeping it derived leaves UsageEventInput unchanged.
-          memoryId: node?.memoryId,
-          actionArgs: serializeJson(event.actionArgs) as InputJsonValue | undefined,
-          appId: ctx.appId,
-          // Attribution from auth (spec 046 FR-001), as the MCP recorders do.
-          // This path only ever set the audit `createdBy` string, so a signed-in
-          // user's reads/writes recorded here were invisible to any query
-          // filtering on `userId` — including #796's own-activity scope.
-          userId: ctx.userId ?? null,
-          createdBy: ctx.userId ?? ctx.clientId ?? null,
-          sessionId: event.sessionId,
-          // #1653 / DY-2: the session id here is CLIENT-SUPPLIED, so it counts
-          // as activity only for a live session this caller owns. Before this,
-          // any reader could keep someone else's session live, or revive it,
-          // by recording usage against its id.
-          countsAsActivity: await attributedRequestActivity(ctx.db, ctx, event.sessionId, { at, tx }),
-          createdAt: at,
-          model: event.model,
-          tokensIn: event.tokensIn,
-          tokensOut: event.tokensOut,
-        },
-      }));
+      await ctx.db.$transaction(async (tx) => {
+        // #1662: denied, missing and deleted refs all record without a session.
+        // Hold the row through the insert so deletion/account reassignment
+        // cannot invalidate ownership between the check and attribution.
+        let sessionId: string | null = null;
+        if (event.sessionId) {
+          await tx.$queryRaw`SELECT id FROM sessions WHERE id = ${event.sessionId} FOR SHARE`;
+          const session = await tx.session.findUnique({
+            where: { id: event.sessionId },
+            select: { userId: true, appId: true, deletedAt: true },
+          });
+          if (session && !session.deletedAt && ownsSession(ctx, session)) sessionId = event.sessionId;
+        }
+        return tx.usageEvent.create({
+          data: {
+            type: event.type,
+            nodeLoc: event.nodeLoc,
+            nodeId: node?.id,
+            // #796: derived from the same row `nodeId` comes from — now a row the
+            // caller demonstrably can read, so the memory attribution is theirs
+            // to make. Keeping it derived leaves UsageEventInput unchanged.
+            memoryId: node?.memoryId,
+            actionArgs: serializeJson(event.actionArgs) as InputJsonValue | undefined,
+            appId: ctx.appId,
+            // Attribution from auth (spec 046 FR-001), as the MCP recorders do.
+            // This path only ever set the audit `createdBy` string, so a signed-in
+            // user's reads/writes recorded here were invisible to any query
+            // filtering on `userId` — including #796's own-activity scope.
+            userId: ctx.userId ?? null,
+            createdBy: ctx.userId ?? ctx.clientId ?? null,
+            sessionId,
+            // #1653 / DY-2: the session id here is CLIENT-SUPPLIED, so it counts
+            // as activity only for a live session this caller owns. Before this,
+            // any reader could keep someone else's session live, or revive it,
+            // by recording usage against its id.
+            countsAsActivity: await attributedRequestActivity(ctx.db, ctx, sessionId, { at, tx }),
+            createdAt: at,
+            model: event.model,
+            tokensIn: event.tokensIn,
+            tokensOut: event.tokensOut,
+          },
+        });
+      });
       return true;
     },
 
