@@ -8284,9 +8284,11 @@ export const typeDefs = `#graphql
     App), TASK_OWNER_INVALID, TASK_ASSIGNEE_INVALID, SESSION_NOT_BOUND,
     APP_NOT_FOUND (an App that does not exist or that you do not participate
     in, alike), APP_UNINSTALLED, FORBIDDEN (impersonation), BAD_USER_INPUT.
-    "Whoever manages the App" is strict (hrn:node:hadronmemory.com:specs:cor:acl:010:01): a user-owned App's
-    owner, or the org's ADMINs and OWNERs. Every write re-checks the caller's
-    participation and the App's state inside its transaction.
+    "Whoever manages the App" (hrn:node:hadronmemory.com:specs:cor:acl:010:01, as ruled 2026-10-10, #1731): a
+    user-owned App's owner, any owner-role member of the App, the org's ADMINs
+    and OWNERs, and platform admins (for an org-owned App). Every write
+    re-checks the caller's participation and the App's state inside its
+    transaction.
     """
     createAgentTask(input: CreateAgentTaskInput!): AgentTask!
 
