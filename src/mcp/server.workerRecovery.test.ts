@@ -277,7 +277,7 @@ describe('#1015 — hadron_get_worker re-fetches the boot briefing', () => {
     // Live ONLY through a usage event — the heartbeat input the ordering
     // cannot see, so nothing keeps this row inside a shared prefix.
     await db.usageEvent.create({
-      data: { id: generateId(), sessionId: mine, type: 'read', createdAt: new Date() },
+      data: { countsAsActivity: true, id: generateId(), sessionId: mine, type: 'read', createdAt: new Date() },
     });
     // More live sessions than OPEN_SESSION_SCAN_CAP, all newer by updatedAt.
     const now = new Date();

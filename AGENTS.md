@@ -146,6 +146,7 @@ pnpm admin:mint-token --email you@example.com
 | Variable | Used by | Default | Notes |
 |---|---|---|---|
 | `DATABASE_URL` | Prisma client | (none, required) | Per-DB connection string. `.env` sets the dev value; `vitest.config.ts` overrides for tests. |
+| `TEAM_RECORD_KEYRING` | #1615 — team-record codec | unset (record operations unavailable) | JSON with `current` key id and a `keys` map of ids to 64 lowercase hex chars (32 random bytes). Invalid configured values refuse boot without printing the input. Register privately in Doppler dev/prd under AM Q13. Rotate by adding a new key and changing `current`, retain old verification keys while teams re-apply/reseal, then remove old entries. Unknown old key ids yield `TEAM_RECORD_UNVERIFIABLE`; never use an unkeyed fallback. |
 | `JWT_SECRET` | `src/auth/jwt.ts` | (none, required for signing) | HS256 secret. Per-host; `.env`-managed. |
 | `JWT_EXPIRY` | `src/auth/jwt.ts` | `7d` | jose-style duration string; the GitHub-OAuth callback's Option-C `hadron_token` cookie derives `maxAge` from the issued JWT's `exp` claim (so they expire together). |
 | `PORT` | `src/index.ts` | `4000` | Dev server listen port. |

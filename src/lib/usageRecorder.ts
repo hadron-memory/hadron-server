@@ -45,6 +45,7 @@
  * even with no query it returns whole node projections, so it records.
  */
 
+import { usageEventCountsAsActivity } from './sessionActivity.js';
 import { generateId } from './id.js';
 import type { Prisma, PrismaClient } from '../generated/prisma/index.js';
 
@@ -121,6 +122,49 @@ export function usageActorFrom(principal: UsagePrincipal): UsageActor {
  */
 const INSERT_CHUNK = 500;
 
+// Recording remains off the request path, but fixture/file boundaries can
+// wait for its complete lifetime, including activity checks and every chunk.
+const pendingUsageWrites = new WeakMap<object, Set<Promise<void>>>();
+
+/**
+ * Wait for this client's outstanding operation-usage writes (#1189).
+ * Call only at a quiescent boundary; this does not stop future producers.
+ * Failures retain the recorder's swallow-and-continue contract.
+ */
+export async function drainNodeUsage(db: object, opts: { timeoutMs?: number } = {}): Promise<void> {
+  const timeoutMs = opts.timeoutMs ?? 5_000;
+  const deadline = Date.now() + timeoutMs;
+  while (true) {
+    const pending = pendingUsageWrites.get(db);
+    if (!pending?.size) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        Promise.all([...pending]),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error(
+            `Timed out draining asynchronous usage-event writes after ${timeoutMs}ms (${pending.size} pending). Fixture deletion has not started.`,
+          )), Math.max(0, deadline - Date.now()));
+        }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+}
+
+/** Track any fire-and-forget usage writer, swallowing failure off the request path. */
+export function trackUsageWrite(db: object, write: PromiseLike<unknown>): void {
+  const settled = Promise.resolve(write).then(() => {}, () => {});
+  let pending = pendingUsageWrites.get(db);
+  if (!pending) pendingUsageWrites.set(db, (pending = new Set()));
+  pending.add(settled);
+  void settled.then(() => {
+    pending.delete(settled);
+    if (pending.size === 0) pendingUsageWrites.delete(db);
+  });
+}
+
 /**
  * Record one `read`/`write` event per node. Fire-and-forget: returns
  * immediately, never throws, never rejects.
@@ -168,13 +212,78 @@ export function recordNodeUsage(
       sessionId: actor.sessionId,
     }));
 
-    for (let i = 0; i < rows.length; i += INSERT_CHUNK) {
-      void db.usageEvent
-        .createMany({ data: rows.slice(i, i + INSERT_CHUNK) })
-        .catch(() => {});
-    }
+    // #1653 / DY-2: the rows count as ACTIVITY only if the bound session is
+    // live and owned by this principal right now. Decided once per call, off
+    // the request path; any failure records them as not counting (safe).
+    const write = (async () => {
+      // One instant for the decision and every row's timestamp (local P2-1).
+      const at = new Date();
+      const counts = await attributedRequestActivity(db, principal, actor.sessionId, { at });
+      for (let i = 0; i < rows.length; i += INSERT_CHUNK) {
+        await db.usageEvent
+          .createMany({ data: rows.slice(i, i + INSERT_CHUNK).map((r) => ({ ...r, countsAsActivity: counts, createdAt: at })) })
+          .catch(() => {});
+      }
+    })().catch(() => {});
+    trackUsageWrite(db, write);
   } catch {
     // Deliberately silent: see above. Metering a read must never break it.
+  }
+}
+
+/**
+ * Does a request attributed to `sessionId` count as ACTIVITY? (#1653, DY-1,
+ * DY-2.) Yes when the session is live and owned by this principal
+ * (`usageEventCountsAsActivity`).
+ *
+ * For a PURE App key there is one more case. An App key cannot author team
+ * chat or mark a cursor, so its attributed request is the only act it has;
+ * under DY-1 that act RESUMES the key's own lapsed session, through the same
+ * locked verdict every resume passes (`reviveOwnLapsedSession`: the
+ * person-less session of the key's App, an unheld worker, nobody else live,
+ * not dormant). A user's attributed request never resumes: a user resumes by
+ * posting, reading or marking read (DA).
+ *
+ * Never throws; a failure reads as "does not count".
+ */
+export async function attributedRequestActivity(
+  db: unknown,
+  principal: UsagePrincipal,
+  sessionId: string | null | undefined,
+  opts: {
+    /**
+     * The instant liveness is judged at, which the caller MUST also write as
+     * the event's `createdAt` (#1660 review, local P2-1). A check and a later
+     * insert are separate operations, and a session can lapse between them;
+     * stamping the event at the checked instant makes "counted" mean "live at
+     * the moment it was counted", whenever the row lands.
+     */
+    at?: Date;
+    /**
+     * The caller's transaction, when the event insert IS the act (#1660
+     * review, local P2-2): an App-key resume then commits with the insert or
+     * not at all, instead of in a transaction of its own.
+     */
+    tx?: unknown;
+  } = {},
+): Promise<boolean> {
+  if (!sessionId) return false;
+  const client = (opts.tx ?? db) as Partial<Pick<PrismaClient, 'session' | 'usageEvent' | '$transaction'>>;
+  if (!client.session || !client.usageEvent) return false;
+  try {
+    if (await usageEventCountsAsActivity(client as never, principal, sessionId, opts.at)) return true;
+    if (principal.userId || principal.impersonation || !principal.appId) return false;
+    // Lazy import: teamAttention sits above this module in the graph.
+    const { reviveOwnLapsedSession, resumeOwnLapsedSessionInTx } = await import('./teamAttention.js');
+    const ctxLike = { db: client, appId: principal.appId, roles: [] } as never;
+    if (opts.tx) return await resumeOwnLapsedSessionInTx(ctxLike, opts.tx as never, sessionId);
+    if (!client.$transaction) return false;
+    return await reviveOwnLapsedSession(ctxLike, sessionId);
+  } catch (err) {
+    // Inside the caller's transaction a failure must abort it: swallowing it
+    // here would let the insert commit on an aborted transaction's behalf.
+    if (opts.tx) throw err;
+    return false;
   }
 }
 

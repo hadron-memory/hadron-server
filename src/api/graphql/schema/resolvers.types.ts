@@ -50,6 +50,7 @@ import {
   loadEdgeEndpointNode,
   isMemoryReadableCached,
   canReadMemoryRecord,
+  filterReadableMemoryRecords,
   loadMemoryUrn,
   loadAppUrn,
   loadApp,
@@ -60,6 +61,7 @@ import {
   safeCanonicalUrn,
   AGENT_INCLUDE,
   APP_INCLUDE,
+  ORG_INCLUDE,
   readPrimaryAgentIdFromEager,
   readPrimaryAgentRecordFromEager,
   readAllAgentRecordsFromEager,
@@ -67,6 +69,7 @@ import {
   assetUrn,
   resolveAppTeamSpaceMemoryIds,
   getAccessibleMemoryIds,
+  sessionScopeFilter,
   STORED_NODE_CONTENT,
 } from './resolvers.helpers.js';
 import { getMemberOrgIds } from '../../../lib/auth/memberOrgIds.js';
@@ -75,8 +78,44 @@ import { memoryRowToRef, agentRowToRef } from './publicRefs.js';
 import { WORKLOG_LOC } from './resolvers.teamWork.js';
 import { corpusMintStateOf } from '../../../lib/specCorpus.js';
 import { LIVE_ORG_MEMBERSHIP } from '../../../lib/auth/liveOrgMembership.js';
-import { isSessionLive, loadLastEventBySession } from '../../../lib/sessionActivity.js';
+import { isSessionLive, loadLastEventBySession, sessionLapsesAt } from '../../../lib/sessionActivity.js';
 import type { SessionType } from '../../../generated/prisma/index.js';
+import { hasBoundAppSession, strictSessionMemoryFilter } from '../../../lib/auth/sessionPrivacy.js';
+
+// Request-local only: a session list computes the event memory set once.
+type SessionEventMemorySet = { ids: string[]; delegatedMemoryId: string | null };
+const sessionEventMemoryReads = new WeakMap<Context, Promise<SessionEventMemorySet>>();
+function sessionEventMemoryIds(ctx: Context, parentSessionId: string): Promise<string[]> {
+  let read = sessionEventMemoryReads.get(ctx);
+  if (!read) {
+    read = (async () => {
+      const accessible = await getAccessibleMemoryIds(ctx);
+      const bound = hasBoundAppSession(ctx)
+        ? await ctx.db.session.findFirst({
+          where: { id: ctx.sessionId!, appId: ctx.appId! },
+          select: { memoryId: true, memory: { select: { class: true } } },
+        })
+        : null;
+      const memories = await ctx.db.memory.findMany({
+        where: { AND: [
+          { OR: [strictSessionMemoryFilter(ctx), ...(bound?.memoryId ? [{ id: bound.memoryId }] : [])] },
+          ...(accessible === null ? [] : [{ id: { in: accessible } }]),
+        ] },
+        select: { id: true },
+      });
+      return {
+        ids: memories.map((m) => m.id),
+        delegatedMemoryId: bound?.memory?.class === 'personal' || bound?.memory?.class === 'private'
+          ? bound.memoryId : null,
+      };
+    })();
+    sessionEventMemoryReads.set(ctx, read);
+  }
+  // The delegated strict-memory exception belongs only to this conversation.
+  // Other readable parents in the same request retain their ordinary set.
+  return read.then(({ ids, delegatedMemoryId }) => parentSessionId === ctx.sessionId || !delegatedMemoryId
+    ? ids : ids.filter((id) => id !== delegatedMemoryId));
+}
 
 /**
  * #757 — a Prisma `where` fragment selecting the Agents this caller may read,
@@ -676,6 +715,72 @@ async function flushValidationBatch(
   }
 }
 
+
+/** The Session parent shape the liveness fields read; partial on a narrow select. */
+type SessionLivenessParent = {
+  id: string;
+  type?: SessionType;
+  startedAt?: Date;
+  updatedAt?: Date | null;
+  autoExpiredAt?: Date | null;
+  endedAt?: Date | null;
+  deletedAt?: Date | null;
+};
+
+/**
+ * #1623 review (local reviewer, two P2s): the fallback point read, memoized per
+ * request and session id. Without it a narrow parent selecting both `isLive`
+ * and `lapsesAt` read the row twice, and the two reads could straddle an
+ * `endSession`, answering `{ isLive: true, lapsesAt: null }`. Sharing one read
+ * per request makes both fields describe ONE snapshot. Every Session resolver
+ * on main returns full rows today, so this path is defensive.
+ */
+const livenessRowReads = new WeakMap<object, Map<string, Promise<unknown>>>();
+function readLivenessRowOnce(ctx: Context, id: string) {
+  let perRequest = livenessRowReads.get(ctx);
+  if (!perRequest) {
+    perRequest = new Map();
+    livenessRowReads.set(ctx, perRequest);
+  }
+  let read = perRequest.get(id);
+  if (!read) {
+    read = ctx.db.session.findUnique({
+      where: { id },
+      select: { id: true, type: true, startedAt: true, updatedAt: true, autoExpiredAt: true, endedAt: true, deletedAt: true },
+    });
+    perRequest.set(id, read);
+  }
+  return read as Promise<{
+    id: string; type: SessionType; startedAt: Date; updatedAt: Date | null;
+    autoExpiredAt: Date | null; endedAt: Date | null; deletedAt: Date | null;
+  } | null>;
+}
+
+/**
+ * The liveness inputs for one Session row, or null when it can be live under
+ * no reading: ended, or soft-deleted (Codex-worker P2 on #1547 — the bind gate
+ * and Worker.hasLiveSession both exclude a deleted row, and the per-session
+ * fields must agree with them). Uses the parent's columns when the parent
+ * carried them, and one memoized point read per request otherwise.
+ */
+async function sessionLivenessRow(
+  ctx: Context,
+  s: SessionLivenessParent,
+): Promise<{ id: string; type: SessionType; startedAt: Date; updatedAt: Date | null; autoExpiredAt: Date | null; endedAt: Date | null } | null> {
+  const row = s.type && s.startedAt && s.deletedAt !== undefined
+    ? s
+    : await readLivenessRowOnce(ctx, s.id);
+  if (!row || !row.type || !row.startedAt) return null;
+  if (row.endedAt || row.deletedAt) return null;
+  return {
+    id: row.id,
+    type: row.type,
+    startedAt: row.startedAt,
+    updatedAt: row.updatedAt ?? null,
+    autoExpiredAt: row.autoExpiredAt ?? null,
+    endedAt: row.endedAt ?? null,
+  };
+}
 
 /**
  * hadron-cli#791 — the latest attributed usage event for a session, batched
@@ -1756,6 +1861,20 @@ export const typeResolvers = {
     },
   },
   Session: {
+    /** #1645: nested events inherit current session and memory read boundaries. */
+    events: async (s: { id: string }, _: unknown, ctx: Context) => {
+      const session = await ctx.db.session.findFirst({
+        where: { AND: [{ id: s.id }, await sessionScopeFilter(ctx)] },
+        select: { id: true },
+      });
+      if (!session) return [];
+      const memoryIds = await sessionEventMemoryIds(ctx, s.id);
+      return ctx.db.usageEvent.findMany({
+        where: { sessionId: s.id, OR: [{ memoryId: null }, { memoryId: { in: memoryIds } }] },
+        orderBy: { createdAt: 'desc' },
+        take: 50,
+      });
+    },
     outcomeMeta: (session: { outcomeMeta: unknown }) => deserializeJson(session.outcomeMeta),
     /**
      * hadron-cli#791: the exact per-session form of the shared liveness
@@ -1765,32 +1884,21 @@ export const typeResolvers = {
      * from columns that are readable on it. The last-event lookup is batched
      * per request, so a session list costs one grouped query, not one per row.
      */
-    isLive: async (
-      s: {
-        id: string;
-        type?: SessionType;
-        startedAt?: Date;
-        updatedAt?: Date | null;
-        autoExpiredAt?: Date | null;
-        endedAt?: Date | null;
-        deletedAt?: Date | null;
-      },
-      _: unknown,
-      ctx: Context,
-    ) => {
-      const row = s.type && s.startedAt && s.deletedAt !== undefined
-        ? s
-        : await ctx.db.session.findUnique({
-            where: { id: s.id },
-            select: { id: true, type: true, startedAt: true, updatedAt: true, autoExpiredAt: true, endedAt: true, deletedAt: true },
-          });
-      if (!row || !row.type || !row.startedAt) return false;
-      // A soft-deleted session drives nothing (Codex-worker P2 on #1547): the
-      // bind gate and Worker.hasLiveSession both exclude it, and isLive must
-      // agree with them even where a Session read can still return the row.
-      if (row.endedAt || row.deletedAt) return false;
+    isLive: async (s: SessionLivenessParent, _: unknown, ctx: Context) => {
+      const row = await sessionLivenessRow(ctx, s);
+      if (!row) return false;
       const lastEventAt = await lastEventAtBatched(ctx, row.id);
-      return isSessionLive(row as Parameters<typeof isSessionLive>[0], lastEventAt, new Date());
+      return isSessionLive(row, lastEventAt, new Date());
+    },
+    /**
+     * #1617: the deadline beside `isLive` — when this session lapses unless
+     * driven first. `sessionLapsesAt` is the computation `isSessionLive` is
+     * defined by, so the two fields cannot disagree about the same row.
+     */
+    lapsesAt: async (s: SessionLivenessParent, _: unknown, ctx: Context) => {
+      const row = await sessionLivenessRow(ctx, s);
+      if (!row) return null;
+      return sessionLapsesAt(row, await lastEventAtBatched(ctx, row.id));
     },
     /**
      * #980: the bound Worker, nested — prefers the eager row SESSION_INCLUDE
@@ -1812,6 +1920,19 @@ export const typeResolvers = {
     },
   },
   Organization: {
+    /** Every org-list record uses the point-read gate (cor:acl:010:01, #1626). */
+    memories: async (
+      org: { id: string; memories?: Prisma.MemoryGetPayload<{ include: typeof ORG_INCLUDE.memories.include }>[] },
+      _: unknown,
+      ctx: Context,
+    ) => {
+      const rows = org.memories ?? await ctx.db.memory.findMany({
+        where: { organizationId: org.id, ...ORG_INCLUDE.memories.where },
+        include: ORG_INCLUDE.memories.include,
+        orderBy: ORG_INCLUDE.memories.orderBy,
+      });
+      return filterReadableMemoryRecords(ctx, rows);
+    },
     hasGithubAppPrivateKey: (o: { githubAppPrivateKeyEncrypted?: string | null }) => !!o.githubAppPrivateKeyEncrypted,
     apps: async (org: { id: string; apps?: unknown[] }, _: unknown, ctx: Context) => {
       // An Organization may be nested under a readable Memory even when its
@@ -2073,10 +2194,17 @@ export const typeResolvers = {
       const apps = await ctx.db.app.findMany({ where, orderBy: { createdAt: 'asc' } });
       return filterReadableAppRows(ctx, apps);
     },
-    // Adoption count — the agent's owning-org view only (a bare number, but
-    // still "who uses this"); non-members get 0.
-    appCount: async (a: { id: string; organizationId: string }, _: unknown, ctx: Context) => {
-      if (!(await isOrgMemberOrAdmin(ctx, a.organizationId))) return 0;
+    // Adoption count — the agent's owning-TENANT view only (a bare number, but
+    // still "who uses this"); everyone else gets 0. The owning tenant of an
+    // org agent is its org's members; of a user-owned agent (spec 047), its
+    // owner (#1693: they saw 0 for their own agent installed in their own
+    // Apps). Not under impersonation, and not a platform admin for an org-less
+    // agent (#1692: nothing org-derived to show).
+    appCount: async (a: { id: string; organizationId: string | null; ownerUserId?: string | null }, _: unknown, ctx: Context) => {
+      const owningTenant = a.organizationId === null
+        ? !ctx.impersonation && !!ctx.userId && a.ownerUserId === ctx.userId
+        : await isOrgMemberOrAdmin(ctx, a.organizationId);
+      if (!owningTenant) return 0;
       return ctx.db.app.count({
         where: { appAgents: { some: { agentId: a.id } }, deletedAt: null },
       });
@@ -2103,8 +2231,8 @@ export const typeResolvers = {
     },
     // The agent's customer list (which orgs were granted it) — owning-org view
     // only; non-members get [].
-    orgGrants: async (a: { id: string; organizationId: string }, _: unknown, ctx: Context) => {
-      if (!(await isOrgMemberOrAdmin(ctx, a.organizationId))) return [];
+    orgGrants: async (a: { id: string; organizationId: string | null }, _: unknown, ctx: Context) => {
+      if (a.organizationId === null || !(await isOrgMemberOrAdmin(ctx, a.organizationId))) return [];
       return ctx.db.agentOrgGrant.findMany({
         where: { agentId: a.id },
         orderBy: { createdAt: 'asc' },

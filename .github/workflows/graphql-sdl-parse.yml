@@ -58,6 +58,7 @@ on:
       - 'scripts/check-*.mjs'
       - 'scripts/check-*.test.ts'
       - 'scripts/sdl-hash-descriptions-allowed.txt'
+      - 'scripts/sdl-spec-citations-baseline.txt'
       - '.github/workflows/graphql-sdl-parse.yml'
       - 'package.json'
       - 'pnpm-lock.yaml'
@@ -68,6 +69,7 @@ on:
       - 'scripts/check-*.mjs'
       - 'scripts/check-*.test.ts'
       - 'scripts/sdl-hash-descriptions-allowed.txt'
+      - 'scripts/sdl-spec-citations-baseline.txt'
       - '.github/workflows/graphql-sdl-parse.yml'
       - 'package.json'
       - 'pnpm-lock.yaml'
@@ -80,7 +82,10 @@ jobs:
       # nothing here connects to a DB. Dummy value; mirrors tsc.yml.
       DATABASE_URL: postgresql://postgres:postgres@localhost:5432/dummy
     steps:
+      # Full history: the #1722 citation gate diffs against a base (#1724).
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       # No `version:` — read from package.json `packageManager` field.
       - uses: pnpm/action-setup@v4
@@ -108,3 +113,28 @@ jobs:
       # source, exactly like documentation (#1232).
       - name: No `#` comments above undocumented symbols (#1232)
         run: pnpm check:sdl-hash-docs
+
+      # SDL descriptions are copied verbatim into hadron-portal's schema
+      # snapshot, whose gate fails a newly added bare spec citation (#1722).
+      # The base differs by event, and a wrong one is SILENT: on a push to
+      # main `base_ref` is empty, and `origin/main` would be HEAD itself, an
+      # empty diff that passes. Mirrors hadron-portal's no-bare-loc-citations.
+      - name: Resolve the base commit for the citation gate
+        id: base
+        run: |
+          set -euo pipefail
+          if [ -n "${{ github.base_ref }}" ]; then
+            git fetch --no-tags origin "${{ github.base_ref }}"
+            echo "ref=origin/${{ github.base_ref }}" >> "$GITHUB_OUTPUT"
+          else
+            BEFORE="${{ github.event.before }}"
+            # All zeros: a new branch or no prior commit. Check the last
+            # commit rather than pass on an empty diff.
+            if [ -z "$BEFORE" ] || [ "$BEFORE" = "0000000000000000000000000000000000000000" ]; then
+              BEFORE="$(git rev-parse HEAD~1)"
+            fi
+            echo "ref=$BEFORE" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: No new bare spec citations in the SDL (#1722)
+        run: pnpm check:sdl-spec-citations "${{ steps.base.outputs.ref }}"

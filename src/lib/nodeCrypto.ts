@@ -9,7 +9,7 @@ import {
   stripCiphertextPrefix,
   type EncryptionKey,
 } from './crypto.js';
-import { sessionKeyCache } from './sessionKeyCache.js';
+import { sessionKeyCache, sessionKeyReleasedHint } from './sessionKeyCache.js';
 
 /**
  * Fields on a Node that are encrypted at rest when the memory is encrypted.
@@ -50,7 +50,7 @@ export function encryptNodeFields<T extends Partial<EncryptedNodeFields>>(
   if (!memory.isEncrypted) return payload;
   const key = sessionKeyCache.getByMemoryId(memory.id);
   if (!key) {
-    throw new Error('SESSION_EXPIRED: no active session key for this memory');
+    throw new Error(`SESSION_EXPIRED: no active session key for this memory. ${sessionKeyReleasedHint()}`);
   }
   return applyEncryption(payload, key);
 }
@@ -128,7 +128,7 @@ export function decryptNodeFields<T extends Partial<EncryptedNodeFields>>(
   if (!memory.isEncrypted) return node;
   const key = sessionKeyCache.getByMemoryId(memory.id);
   if (!key) {
-    throw new Error('SESSION_EXPIRED: no active session key for this memory');
+    throw new Error(`SESSION_EXPIRED: no active session key for this memory. ${sessionKeyReleasedHint()}`);
   }
   return applyDecryption(node, key);
 }

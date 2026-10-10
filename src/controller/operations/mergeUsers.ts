@@ -1,4 +1,5 @@
 import { randomBytes } from 'crypto';
+import { GraphQLError } from 'graphql';
 import { Prisma, type PrismaClient, type User } from '../../generated/prisma/index.js';
 import { mergeOwnerNamespacedUrns } from '../../lib/mergeOwnerNamespacedUrns.js';
 
@@ -70,6 +71,10 @@ export const AUDIT_USER_COLUMNS: Readonly<Record<string, readonly string[]>> = {
   urn_aliases: ['created_by'],
   users: ['created_by', 'updated_by', 'deleted_by'],
   workers: ['created_by', 'updated_by'],
+  // #1705 — agent tasks. `assigned_by` is the assignment's audit actor.
+  agent_tasks: ['created_by', 'updated_by', 'assigned_by'],
+  // #1706 — who last changed an App's stall windows.
+  agent_task_stall_schedule: ['updated_by'],
 };
 
 /**
@@ -219,6 +224,51 @@ export async function mergeUsers(
   }
 }
 
+/**
+ * #1706 (Diego's P2 on #1720): refuse a merge while either account is named in
+ * the owner chain of an UNACKNOWLEDGED agent-task alarm.
+ *
+ * An alarm's `chain` is sealed when it is raised. The event is append-only
+ * (prisma/agent-task-invariants.sql), so a merge cannot rewrite it. Yet the
+ * chain is authorization state: `acknowledgeAlarm` admits only a party named
+ * in it. Merging S into T would leave T unable to acknowledge an alarm only S
+ * could, and S could no longer sign in, so nobody could stop its escalation.
+ * Merge-aware identity (#1715, `user_merges`) so far covers decisions only, so
+ * such a merge is still refused; `acknowledgeAlarm` could follow the chain the
+ * same way (src/lib/userMerges.ts `identitiesOf`). An ACKNOWLEDGED alarm strands
+ * nothing, because the acknowledgement is its one remaining act, so it does
+ * not block.
+ *
+ * The refusal carries a COUNT only. The merging admin may not be able to read
+ * the Apps those alarms belong to, so no task, App or event id is disclosed.
+ *
+ * RACE. The stall evaluator raises an alarm in a SERIALIZABLE transaction
+ * (src/lib/agentTasks/stall.ts `raiseStallAlarm`) that reads the owner rows of
+ * the chain. This guard reads `agent_team_events`, and the merge later writes
+ * those owner rows. An alarm raised concurrently with a merge therefore forms
+ * a read-write cycle that Postgres aborts on one side. A raise that loses
+ * retries on the evaluator's next pass, and sees the merged owner. A merge
+ * that loses retries (P2034) and meets the new alarm here.
+ */
+async function refuseUsersInOpenAlarmChains(
+  tx: Prisma.TransactionClient,
+  sourceUserId: string,
+  targetUserId: string,
+): Promise<void> {
+  const [{ count }] = await tx.$queryRaw<Array<{ count: number }>>`
+    SELECT count(*)::int AS count FROM agent_team_events
+    WHERE severity = 'alarm' AND acknowledged_at IS NULL
+      AND (chain @> ${JSON.stringify([{ userId: sourceUserId }])}::jsonb
+        OR chain @> ${JSON.stringify([{ userId: targetUserId }])}::jsonb)`;
+  if (count > 0) {
+    throw new GraphQLError(
+      `mergeUsers is refused: these accounts own ${count} unacknowledged agent-task alarm${count === 1 ? '' : 's'}, ` +
+        'whose owner chains cannot follow a merge yet. Acknowledge them first, then merge.',
+      { extensions: { code: 'MERGE_USER_IN_OPEN_ALARMS', alarmCount: count } },
+    );
+  }
+}
+
 /** The single SERIALIZABLE merge transaction {@link mergeUsers} retries. */
 async function runMergeTxn(
   db: PrismaClient,
@@ -236,6 +286,7 @@ async function runMergeTxn(
     ]);
     if (!source || source.deletedAt) throw new Error('Source user not found');
     if (!target || target.deletedAt) throw new Error('Target user not found');
+    await refuseUsersInOpenAlarmChains(tx, sourceUserId, targetUserId);
 
     const adoptGithubIdentity = target.githubId == null && target.githubUsername == null;
     const adoptExternalIdentity = target.externalAppId == null && target.externalId == null;
@@ -477,6 +528,19 @@ async function runMergeTxn(
       // else would carry it). The revision-row copy is rewritten above.
       ['nodes', 'approved_by'],
       ['nodes', 'minted_by'],
+      // #1705: a task's owner and assignee are authorization identities
+      // (cor:agt:050:08/:09), so they follow the merged person.
+      // agent_team_events' actor / acknowledger ids are deliberately NOT
+      // here: the stream is append-only (a trigger refuses the UPDATE), and
+      // an event is a sealed record of who acted at the time — the
+      // automation_versions precedent (#1696).
+      ['agent_tasks', 'owner_user_id'],
+      ['agent_tasks', 'assignee_user_id'],
+      // #1706: who last set an availability record (mutable rows, not the
+      // append-only stream). An alarm's `chain` is sealed JSON on the stream,
+      // like the actor ids above, and is not rewritten.
+      ['worker_availability', 'set_by_user_id'],
+      ['model_family_availability', 'set_by_user_id'],
     ];
     for (const [table, column] of directReferences) {
       await runWithIds(`UPDATE "${table}" SET "${column}" = $1 WHERE "${column}" = $2`);
@@ -497,6 +561,12 @@ async function runMergeTxn(
       where: { id: sourceUserId },
       data: { deletedAt: new Date(), deletedBy: actor, updatedBy: actor },
     });
+    // #1715: the merge itself, for the records a merge may not rewrite. A
+    // decision's asker and deciders and a log's deciders sit inside its
+    // authenticated payload, so they keep the source's id, and readers follow
+    // it here to the target (src/lib/userMerges.ts). Keyed on the source, so a
+    // second merge of the same account can't record a second target.
+    await tx.userMerge.create({ data: { sourceUserId, targetUserId, mergedBy: actor } });
 
     return tx.user.findUniqueOrThrow({ where: { id: targetUserId } });
   }, {

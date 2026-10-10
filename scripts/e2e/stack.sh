@@ -79,7 +79,6 @@ case "$action" in
       address=$(incus exec "$project" -- ip -4 -o addr show dev eth0 | awk '{split($4,a,"/"); print a[1]}')
       [[ -n "$address" ]] || { echo 'No QA bridge address' >&2; exit 1; }
       printf '%s\n' "$address" > "$state_dir/proxy-address"
-      printf '%s\n' "$ROOT/scripts/e2e/host-proxy.mjs" > "$state_dir/proxy-script"
       # Detach from the invoking terminal/process group, including agent hosts
       # that reap a completed command's remaining children.
       node "$ROOT/scripts/e2e/start-forwarder.mjs" "$state_dir" "$E2E_PORT" "$address"

@@ -60,6 +60,26 @@ beforeEach(async () => {
 });
 
 describe('#1133 — hadron_whoami truncation disclosure', () => {
+  it('#1645 filters strict-bound App sessions before paging and counting, with only its own binding exempt', async () => {
+    const org = await db.organization.create({ data: { id: generateId(), urn: 'whoami-privacy', name: 'Privacy' } });
+    const app = await db.app.create({ data: { id: generateId(), organizationId: org.id, urn: 'whoami-privacy:app', name: 'App' } });
+    const foreignApp = await db.app.create({ data: { id: generateId(), organizationId: org.id, urn: 'whoami-privacy:foreign', name: 'Foreign' } });
+    const memory = await db.memory.create({ data: { id: generateId(), organizationId: org.id, userId: user.id, class: 'private', urn: 'whoami-privacy:private', name: 'Private' } });
+    const unbound = await db.session.create({ data: { id: generateId(), appId: app.id, startedAt: new Date(Date.now() - 5000) } });
+    const strict = await db.session.create({ data: { id: generateId(), appId: app.id, memoryId: memory.id } });
+    const sibling = await db.session.create({ data: { id: generateId(), appId: app.id, memoryId: memory.id } });
+    const foreign = await db.session.create({ data: { id: generateId(), appId: foreignApp.id } });
+    const appAuth: AuthContext = { appId: app.id, roles: [], clientId: 'app:privacy' };
+    const out = await createTestableMcpServer(appAuth).callToolText('hadron_whoami', { limit: 1 });
+    expect(out).toContain('1 session(s):');
+    expect(out).toContain(unbound.id);
+    for (const id of [strict.id, sibling.id, foreign.id]) expect(out).not.toContain(id);
+    const bound = await createTestableMcpServer({ ...appAuth, sessionId: strict.id }).callToolText('hadron_whoami', { limit: 1 });
+    expect(bound).toContain('newest 1 of 2');
+    expect(bound).toContain(strict.id);
+    expect(bound).not.toContain(sibling.id);
+    expect(bound).not.toContain(foreign.id);
+  });
   it('no sessions keeps the existing empty answers', async () => {
     const out = await createTestableMcpServer(auth()).callToolText('hadron_whoami', {});
     expect(out).toContain('You have no open sessions');

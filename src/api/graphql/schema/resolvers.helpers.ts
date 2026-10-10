@@ -1,3 +1,4 @@
+import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
 // Helpers extracted from resolvers.ts (Step 1 of the resolver split).
 // Pure mechanical move: shared auth/include/AI-config/chat/asset helpers used
 // by the GraphQL resolver map. No behavior change. The `Context` interface
@@ -20,6 +21,7 @@ import {
 } from '../../../lib/aiConfig.js';
 import { effectiveApiStyle, effectiveEndpoint } from '../../../lib/aiEndpoint.js';
 import {
+  canReadMemory,
   canWriteToMemory,
   EXPLICIT_REF,
   filterReadableMemoryIds,
@@ -39,6 +41,8 @@ import { ROLE_ORDER } from '../../../lib/auth/orgRole.js';
 import { sessionScopedMemoryIds } from '../../../lib/auth/sessionScopedMemoryIds.js';
 import { getMemberOrgIds } from '../../../lib/auth/memberOrgIds.js';
 import { foreignIdentityScopedMemoryFilter } from '../../../lib/auth/memoryOwnership.js';
+import { isStrictOwner } from '../../../lib/auth/strictOwner.js';
+import { boundSessionPrivacyFilter } from '../../../lib/auth/sessionPrivacy.js';
 import {
   formatCanonicalUrn,
   type CanonicalUrnType,
@@ -98,11 +102,13 @@ export interface Context {
    * its caller sent, so it answers; a refusal that cannot be replayed on MCP
    * names no MCP door (@codex, PR #1305).
    */
-  governedCanReplay?: (kind: 'task' | 'review' | 'spec') => boolean;
+  governedCanReplay?: (kind: 'task' | 'review' | 'spec' | 'decision') => boolean;
   clientId?: string;       // "github:<username>" / "email:<addr>" — only set for OAuth/JWT users
   userId?: string;         // User.id — only set for OAuth/JWT users
   appId?: string;          // App.id — set when caller authenticated via an App Key
   sessionId?: string;      // Session.id — set when operating inside an active session
+  /** #1705 — a named X-Hadron-Session failed validation (see AuthContext.sessionBindingRefused). */
+  sessionBindingRefused?: boolean;
   roles?: ('OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER')[];
   organizationId?: string; // set when the Client is scoped to an organization
   apiKeyId?: string;       // UserApiKey.id — set when a user authenticated via an hdr_user_ key (#562)
@@ -145,6 +151,9 @@ export interface Context {
   // Request-scoped memo for AppRun.app (#831) — same rationale as appUrnCache,
   // for the full row rather than just the urn (lazily created; see loadApp).
   appRowCache?: Map<string, Promise<AppRow | null>>;
+  // #1715 — the caller's merge-aware identities (their id plus every account
+  // merged into them; src/lib/userMerges.ts), memoized per request.
+  mergedIdentityCache?: Promise<Set<string>>;
   // Spec 049 Phase 3b — AppRun.scope memo, keyed on the serialized snapshot
   // (lazily created in the field resolver): a run page repeats one trigger's
   // snapshot across its rows.
@@ -1023,6 +1032,22 @@ export function nodeNotFoundError(ref: string): GraphQLError {
   });
 }
 
+/** Per-list read snapshots; never shared with mutations or another request. */
+type MemoryRecordReadBatch = {
+  memberOrgIds?: Promise<string[]>;
+  accessibleIds?: Promise<string[] | null>;
+};
+
+/** Gate a record list without repeating membership and access-set queries per row. */
+export async function filterReadableMemoryRecords<T extends Parameters<typeof canReadMemoryRecord>[1]>(
+  ctx: Context,
+  rows: T[],
+): Promise<T[]> {
+  const batch: MemoryRecordReadBatch = {};
+  const readable = await Promise.all(rows.map(row => canReadMemoryRecord(ctx, row, batch)));
+  return rows.filter((_, index) => readable[index]);
+}
+
 /**
  * The RECORD-level memory read gate — "may this caller open this memory's
  * record (its scalars: name, description, data)?", as distinct from
@@ -1089,13 +1114,20 @@ export async function canReadMemoryRecord(
     appId: string | null;
     userMemoryOfAgentId: string | null;
   },
+  batch?: MemoryRecordReadBatch,
 ): Promise<boolean> {
+  // A full set and an indexed point read use the same shared predicate. Only
+  // list filtering opts into a shared snapshot; point reads stay fresh.
+  const accessible = () => batch
+    ? (batch.accessibleIds ??= getAccessibleMemoryIds(ctx))
+    : getAccessibleMemoryIds(ctx, memory.id);
   if (memory.class === 'personal' || memory.class === 'private') {
     // Impersonation: personal-class records are invisible even though the
     // TARGET owns them — the shared-org scope excludes all identity-scoped
     // resources (the target-as-owner check below would otherwise admit them).
     if (ctx.impersonation) return false;
-    if (ctx.userId && memory.userId === ctx.userId) return true;
+    if (memory.class === 'private' && isRunPrincipal(ctx) && !await canReadMemory(ctx.db, ctx, memory.id)) return false;
+    if (isStrictOwner(ctx, memory.userId)) return true;
     // No `as never`: the cast is what let a caller omit the fields this reads.
     if (ctx.userId && (await granteeShareAccess(ctx.db, ctx.userId, memory))) return true;
     return false;
@@ -1108,11 +1140,11 @@ export async function canReadMemoryRecord(
     // A user-owned App's Worker row is also visible to its current holder.
     // The shared content gate checks the casting and excludes team/session rows.
     if (memory.class !== 'app') return false;
-    const ids = await getAccessibleMemoryIds(ctx, memory.id);
+    const ids = await accessible();
     return ids !== null && ids.includes(memory.id);
   }
   if (ctx.appId && ctx.sessionId && !ctx.userId) {
-    const ids = await getAccessibleMemoryIds(ctx, memory.id);
+    const ids = await accessible();
     return ids === null || ids.includes(memory.id);
   }
   if (ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER')) return true;
@@ -1120,7 +1152,7 @@ export async function canReadMemoryRecord(
   // record fast paths below are wider: an org READER or AppMember could open
   // a Worker/session memory record even when their nodes were concealed.
   if (memory.class === 'app') {
-    const ids = await getAccessibleMemoryIds(ctx, memory.id);
+    const ids = await accessible();
     return ids === null || ids.includes(memory.id);
   }
   // findFirst (not findUnique) so a REVOKED (soft-deleted) membership no longer
@@ -1136,7 +1168,9 @@ export async function canReadMemoryRecord(
     memory.organizationId &&
     memory.class !== 'group' &&
     (!ctx.impersonation || ctx.impersonation.orgId === memory.organizationId)
-      ? await ctx.db.orgMember.findFirst({
+      ? batch
+        ? (await (batch.memberOrgIds ??= getMemberOrgIds(ctx.db, ctx.userId, ctx.impersonation?.orgId))).includes(memory.organizationId)
+        : await ctx.db.orgMember.findFirst({
           where: { organizationId: memory.organizationId, userId: ctx.userId, ...LIVE_ORG_MEMBERSHIP },
         })
       : null;
@@ -1158,7 +1192,7 @@ export async function canReadMemoryRecord(
     if (appMember) return true;
   }
   // Scope the shared gate to THIS memory so it stays an indexed point-read.
-  const accessibleIds = await getAccessibleMemoryIds(ctx, memory.id);
+  const accessibleIds = await accessible();
   return accessibleIds === null || accessibleIds.includes(memory.id);
 }
 
@@ -2108,6 +2142,11 @@ export async function getAccessibleMemoryIds(
     if (!options?.excludeAppDerived && !(onlyMemoryId && accessibleIds.has(onlyMemoryId))) {
       for (const id of await appDerivedMemoryIds(ctx, onlyMemoryId)) accessibleIds.add(id);
     }
+    if (isRunPrincipal(ctx)) {
+      const privateCandidates = await ctx.db.memory.findMany({ where: { id: { in: [...accessibleIds] }, class: 'private' }, select: { id: true } });
+      const readable = await filterReadableMemoryIds(ctx.db, ctx, privateCandidates.map(m => m.id));
+      for (const m of privateCandidates) if (!readable.has(m.id)) accessibleIds.delete(m.id);
+    }
     return [...accessibleIds];
   }
 
@@ -2153,6 +2192,11 @@ export function requireSessionWriteAccess(
 
 /** Prisma `where` clause that restricts sessions to the caller's scope. */
 export async function sessionScopeFilter(ctx: Context): Promise<Record<string, unknown>> {
+  return { AND: [await sessionAudienceFilter(ctx), boundSessionPrivacyFilter(ctx)] };
+}
+
+/** Existing session audience, intersected with bound-memory privacy by sessionScopeFilter. */
+async function sessionAudienceFilter(ctx: Context): Promise<Record<string, unknown>> {
   if (ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER')) return {};
   // App Key path — sessions belonging to the authenticated App.
   if (ctx.appId) return { appId: ctx.appId };
@@ -2174,9 +2218,15 @@ export async function sessionScopeFilter(ctx: Context): Promise<Record<string, u
     });
     const orgIds = memberships.map((m: { organizationId: string }) => m.organizationId);
     const clauses: Record<string, unknown>[] = [];
-    if (orgIds.length > 0) {
+    if (orgIds.length > 0 || !ctx.impersonation) {
       const apps = await ctx.db.app.findMany({
-        where: { organizationId: { in: orgIds }, deletedAt: null },
+        where: {
+          deletedAt: null,
+          OR: [
+            ...(orgIds.length ? [{ organizationId: { in: orgIds } }] : []),
+            ...(!ctx.impersonation ? [{ ownerUserId: ctx.userId }] : []),
+          ],
+        },
         select: { id: true },
       });
       if (apps.length > 0) clauses.push({ appId: { in: apps.map((a) => a.id) } });
@@ -2334,7 +2384,8 @@ export async function requireMemoryWriteAccess(ctx: Context, memoryId: string): 
   // #778 `writer` MemoryShare grantee on a personal memory (private is never
   // shareable, so this only widens personal).
   if (memory.class === 'personal' || memory.class === 'private') {
-    if (memory.userId === ctx.userId) return;
+    if (memory.class === 'private' && isRunPrincipal(ctx) && !await canWriteToMemory(ctx.db, ctx, memory.id)) throw memoryWriteForbidden();
+    if (isStrictOwner(ctx, memory.userId)) return;
     if (await granteeShareAccess(ctx.db, ctx.userId, memory, { requireWrite: true })) return;
     throw memoryWriteForbidden();
   }
@@ -3661,6 +3712,9 @@ export interface SessionInput {
   transcriptPath?: string;
   host?: string;
   tool?: string;
+  // #1707 / cor:agt:060:04: the model family this session runs as. Omitted:
+  // derived from llmModel, then tool (src/lib/agentTasks/family.ts).
+  family?: string | null;
   // #928 / cor:api:140: the role-Agent driving this session (PK or URN).
   agentRef?: string;
   // #943 / cor:api:140: the App this session is a unit of work for (PK or URN),

@@ -1,4 +1,6 @@
 import type { Prisma, PrismaClient } from '../generated/prisma/index.js';
+import { COMMENT_NODE_TYPE } from './comments/index.js';
+import { DECISION_LOG_ROLE, isDecisionFamilyRole } from './decisions/index.js';
 import { computeApprovalHash, type ApprovalHashFields } from './approvalHash.js';
 import type { EncryptionKey } from './crypto.js';
 import { decryptNodeFieldsWithKey } from './nodeCrypto.js';
@@ -102,7 +104,13 @@ export function approvalFieldsOf(
 /** Why an approval was refused. The resolver maps each to its GraphQL code. */
 export class NodeApprovalRefusal extends Error {
   constructor(
-    readonly code: 'NODE_NOT_FOUND' | 'NODE_IS_PLACEHOLDER' | 'REVISION_MISMATCH',
+    readonly code:
+      | 'NODE_NOT_FOUND'
+      | 'NODE_IS_PLACEHOLDER'
+      | 'REVISION_MISMATCH'
+      | 'COMMENT_NOT_APPROVABLE'
+      | 'DECISION_NOT_APPROVABLE'
+      | 'DECISION_LOG_NOT_APPROVABLE',
     message: string,
     readonly details: Record<string, unknown> = {},
   ) {
@@ -142,10 +150,25 @@ export async function approveNodeInTransaction(
   // stamped on its tombstone (Atilla/Chip, PR #1592).
   const locked = await tx.node.findFirst({
     where: { id: nodeId, memoryId: opts.memoryId, deletedAt: null },
-    select: { ...NODE_APPROVAL_ROW_SELECT, updatedAt: true },
+    select: { ...NODE_APPROVAL_ROW_SELECT, updatedAt: true, nodeType: true, role: true },
   });
   if (!locked) throw new NodeApprovalRefusal('NODE_NOT_FOUND', 'Node not found');
-  const { updatedAt, ...node } = locked;
+  const { updatedAt, nodeType, role, ...node } = locked;
+  // #1641 §6.1a — a log holds settings, not a decision, and is never approved
+  // (Baloo P3-4). A decision is approved only by one of its deciders, through
+  // the per-node predicate that lands with answering (slice S2); until then no
+  // path approves one, so a memory writer cannot pre-stamp a decision.
+  if (role === DECISION_LOG_ROLE) {
+    throw new NodeApprovalRefusal('DECISION_LOG_NOT_APPROVABLE', 'A decision log holds settings, not a decision; it is never approved.');
+  }
+  if (isDecisionFamilyRole(role)) {
+    throw new NodeApprovalRefusal('DECISION_NOT_APPROVABLE', 'A decision is approved only by one of its deciders, which is not available yet.');
+  }
+  // #1607 (cor:dmo:110:06) — a comment is never approved. Refused before the
+  // revision check, so the answer does not depend on which revision was named.
+  if (nodeType === COMMENT_NODE_TYPE) {
+    throw new NodeApprovalRefusal('COMMENT_NOT_APPROVABLE', 'A comment is feedback, never approved or minted.');
+  }
   if (opts.expectedRevision != null && opts.expectedRevision !== node.revSeq) {
     throw new NodeApprovalRefusal(
       'REVISION_MISMATCH',
