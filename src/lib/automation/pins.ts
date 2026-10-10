@@ -72,6 +72,7 @@ export async function captureAutomationPin(db: PrismaClient, appId: string, user
       }
     }
   }
+  if (Object.keys(edges).length > 1000) throw new AutomationPinError('AUTOMATION_CHANGED', 'Automation graph exceeds 1000 edges');
   const value = { format: 'hadron-automation-pin-v1' as const, appId, userId, entry, entryId, nodes, edges, missing: [...missing].sort() };
   const result = { ...value, hash: hash(value) };
   if (Buffer.byteLength(JSON.stringify(result)) > 256 * 1024) throw new AutomationPinError('AUTOMATION_CHANGED', 'Automation pin exceeds 256 KiB');

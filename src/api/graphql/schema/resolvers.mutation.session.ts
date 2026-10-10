@@ -2355,7 +2355,7 @@ export const sessionMutations = {
 
         const node = await ctx.db.node.findUnique({
           where: { loc_memoryId: { loc, memoryId: memory.id } },
-          include: { outgoingEdges: { include: { target: true } } },
+          include: { outgoingEdges: { where: { deletedAt: null, target: { deletedAt: null } }, include: { target: true } } },
         });
         if (!node) {
           throw new GraphQLError(`Node "${targetNodeUrn}" not found.`, {

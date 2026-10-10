@@ -161,3 +161,24 @@ it.each(['App', 'user'] as const)('a deleted %s cannot re-adopt a trigger', asyn
   else await db.user.update({ where: { id: f.user.id }, data: { deletedAt: new Date() } });
   await expect(automationPinMutations.reAdoptAutomation({}, { ...input, expectedHash: pin.hash }, f.ctx)).rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
 });
+
+it('a tombstoned dependency edge cannot inline an unpinned target after re-adoption', async () => {
+  const f = await fixture();
+  await db.edge.updateMany({ where: { sourceId: f.next.id, targetId: f.dependency.id }, data: { deletedAt: new Date() } });
+  await adopt(f);
+  await db.node.update({ where: { id: f.dependency.id }, data: { content: 'UNPINNED TOMBSTONE PAYLOAD' } });
+  const run = await f.run();
+  expect(await executeAppRun(db, run.id, f.deps)).toBe('completed');
+  expect(f.llm).toHaveBeenCalledTimes(2);
+  for (const call of f.llm.mock.calls) expect(JSON.stringify(call)).not.toContain('UNPINNED TOMBSTONE PAYLOAD');
+});
+
+it('the graph edge bound also applies when the last node has only tombstoned edges', async () => {
+  const f = await fixture();
+  await db.edge.updateMany({ where: { sourceId: f.entry.id }, data: { deletedAt: new Date() } });
+  await db.edge.createMany({ data: Array.from({ length: 1001 }, (_, index) => ({
+    memoryId: f.memory.id, sourceId: f.entry.id, targetId: f.next.id,
+    name: 'documents', loc: `entry:history-${index}:next`, deletedAt: new Date(),
+  })) });
+  await expect(automationPinQueries.previewAutomation({}, { triggerKind: 'SCHEDULE', triggerRef: f.schedule.id }, f.ctx)).rejects.toThrow('1000 edges');
+});
