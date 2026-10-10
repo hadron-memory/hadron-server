@@ -43,6 +43,7 @@ import {
 import { resolveNodeRefForCaller } from './resolvers.nodeRefAccess.js';
 import { resolveNodeUrnField } from './resolvers.types.js';
 import { withAuthorizedMemoryTx } from './authorizedTx.js';
+import { identitiesOf, mergeLinksFrom, survivorsOf } from '../../../lib/userMerges.js';
 import { writeNodeCore } from './resolvers.mutation.node.js';
 import { loadCommentActor, type CommentActorRef } from './resolvers.comments.js';
 import { NodeNotFoundError } from '../../../lib/entityRef/errors.js';
@@ -149,9 +150,26 @@ function refuseImpersonation(ctx: Context): void {
   }
 }
 
+/**
+ * #1715 — every stored id that now means the caller: their own, plus every
+ * account merged into theirs (`user_merges`, transitively). Stored ids are
+ * never rewritten by a merge, so each "is the caller named here?" gate asks it
+ * of this set. Read on `ctx.db`, which is the transaction's client for a gate
+ * re-checked inside one; memoized per request (a txCtx drops the memo).
+ */
+function callerIdentities(ctx: Context): Promise<Set<string>> {
+  if (!ctx.userId) return Promise.resolve(new Set());
+  return (ctx.mergedIdentityCache ??= identitiesOf(ctx.db, ctx.userId));
+}
+
+/** #1715 — the account each id now is, for a NEW write that names users (stored records are never rewritten). */
+const survivors = (db: Tx | Context['db'], ids: readonly string[]) => survivorsOf(db, ids);
+
 /** §6.1 — the caller is one of the decision's deciders: a user principal, never an App key or impersonation. */
-function isDecider(ctx: Context, d: Pick<DecisionData, 'deciders'>): boolean {
-  return !ctx.impersonation && !!ctx.userId && d.deciders.includes(ctx.userId);
+async function isDecider(ctx: Context, d: Pick<DecisionData, 'deciders'>): Promise<boolean> {
+  if (ctx.impersonation || !ctx.userId) return false;
+  const ids = await callerIdentities(ctx);
+  return d.deciders.some((id) => ids.has(id));
 }
 
 /**
@@ -159,10 +177,10 @@ function isDecider(ctx: Context, d: Pick<DecisionData, 'deciders'>): boolean {
  * The worker arm needs a person behind the request (Rook's P3-3 on #1690, the #1713 interim): a
  * pure App key may bind any session of its App, so its worker id alone proves nothing.
  */
-function isAsker(ctx: Context, d: Pick<DecisionData, 'askedBy'>): boolean {
+async function isAsker(ctx: Context, d: Pick<DecisionData, 'askedBy'>): Promise<boolean> {
   const actor = actorOf(ctx);
   if (ctx.userId && d.askedBy.workerId && d.askedBy.workerId === actor.workerId) return true;
-  if (d.askedBy.userId && d.askedBy.userId === ctx.userId) return true;
+  if (d.askedBy.userId && ctx.userId && (await callerIdentities(ctx)).has(d.askedBy.userId)) return true;
   return !d.askedBy.userId && !ctx.userId && !!d.askedBy.appId && d.askedBy.appId === ctx.appId;
 }
 
@@ -386,9 +404,16 @@ function requireRevision(row: { revSeq: number }, expectedRevision: number): voi
 async function evaluateRows(db: Pick<Tx, 'nodeRevision'>, rows: DecisionRow[]): Promise<DecisionView[]> {
   // Decision logs never live in encrypted memories (§5.4), so every field is plaintext.
   const snapshots = await loadApprovedSnapshots(db as Tx, rows);
+  // #1715: each approver's merge-aware identities, once per distinct approver.
+  const approvers = [...new Set(rows.map((r) => r.approvedBy).filter((id): id is string => id != null))];
+  const identities = new Map(await Promise.all(approvers.map(async (id) => [id, await identitiesOf(db as Tx, id)] as const)));
   return rows.map((row) => {
     const snap = snapshots.get(row.id);
-    const evaluation = evaluateDecision(row as DecisionNodeRow, snap ? { title: snap.name, abstract: snap.abstract, content: snap.content } : null);
+    const evaluation = evaluateDecision(
+      row as DecisionNodeRow,
+      snap ? { title: snap.name, abstract: snap.abstract, content: snap.content } : null,
+      row.approvedBy ? identities.get(row.approvedBy) : undefined,
+    );
     const cached = evaluation.decision ? null : decisionDataSchema.safeParse(row.data);
     return { row, evaluation, shown: evaluation.decision ?? (cached?.success ? cached.data : null) };
   });
@@ -556,11 +581,14 @@ export const decisionMutations = {
         where: { memoryId, loc: { in: ancestors }, ...DECISION_FAMILY_WHERE }, select: { loc: true },
       });
       if (container) throw decisionContainedError('Creating a decision log here', [container.loc]);
-      await assertDecidersEligible(tx, memoryId, [...defaults, ...eligible]);
+      // #1715: name who each decider is now, never a merged-away account.
+      const nowDefaults = await survivors(tx, defaults);
+      const nowEligible = (await survivors(tx, eligible)).filter((u) => !nowDefaults.includes(u));
+      await assertDecidersEligible(tx, memoryId, [...nowDefaults, ...nowEligible]);
 
       const data: DecisionLogData = decisionLogDataSchema.parse({
         codec: DECISION_LOG_CODEC, kind: 'decision.log', prefix, lastCode: 0,
-        defaultDeciders: defaults, eligibleDeciders: eligible, purges: [],
+        defaultDeciders: nowDefaults, eligibleDeciders: nowEligible, purges: [],
         lastAction: { op: 'create', by: actorOf(ctx), at: new Date().toISOString(), reason: null },
       });
       const node = await writeNodeCore(
@@ -600,11 +628,15 @@ export const decisionMutations = {
     const view = await withAuthorizedMemoryTx(ctx, log.memoryId, [], (txCtx) => requireLogManage(txCtx, log.memoryId), async (tx, txCtx) => {
       const { row, data: prior } = await lockLog(tx, log.id, log.memoryId, args.logRef, args.expectedRevision);
       const keepEligible = args.eligibleDeciders == null ? prior.eligibleDeciders : args.eligibleDeciders;
-      const eligible = uniqueIds(keepEligible.filter((u) => !defaults.includes(u)), '/eligibleDeciders');
-      await assertDecidersEligible(tx, log.memoryId, [...defaults, ...eligible]);
+      const listed = uniqueIds(keepEligible.filter((u) => !defaults.includes(u)), '/eligibleDeciders');
+      // #1715: a new revision names who each decider is now (a kept set may
+      // still name a merged-away account).
+      const nowDefaults = await survivors(tx, defaults);
+      const eligible = (await survivors(tx, listed)).filter((u) => !nowDefaults.includes(u));
+      await assertDecidersEligible(tx, log.memoryId, [...nowDefaults, ...eligible]);
       const data: DecisionLogData = decisionLogDataSchema.parse({
         ...prior,
-        defaultDeciders: defaults,
+        defaultDeciders: nowDefaults,
         eligibleDeciders: eligible,
         lastAction: { op: 'set-deciders', by: actorOf(ctx), at: new Date().toISOString(), reason },
       });
@@ -645,8 +677,10 @@ export const decisionMutations = {
     const effects: Array<() => void> = [];
     const id = await withAuthorizedMemoryTx(ctx, log.memoryId, [], (txCtx) => requireDecisionWrite(txCtx, log.memoryId), async (tx, txCtx) => {
       const { row: logRow, data: logData } = await lockLog(tx, log.id, log.memoryId, args.logRef);
-      const eligibleSet = new Set([...logData.defaultDeciders, ...logData.eligibleDeciders]);
-      const deciders = input.deciders ? uniqueIds(input.deciders, '/deciders') : logData.defaultDeciders;
+      // #1715: the log's sets may name merged-away accounts; compare, and
+      // store, who each one is now. The log's own record is not rewritten.
+      const eligibleSet = new Set(await survivors(tx, [...logData.defaultDeciders, ...logData.eligibleDeciders]));
+      const deciders = await survivors(tx, input.deciders ? uniqueIds(input.deciders, '/deciders') : logData.defaultDeciders);
       const outside = deciders.filter((u) => !eligibleSet.has(u));
       if (outside.length > 0) {
         throw decisionError('DECISION_DECIDER_NOT_ELIGIBLE', `Deciders can be narrowed from the log's set, never widened: ${outside.join(', ')} ${outside.length === 1 ? 'is' : 'are'} not eligible in this log.`, { userIds: outside });
@@ -726,7 +760,7 @@ export const decisionMutations = {
       const row = await lockDecision(tx, target.id, target.memoryId, args.ref, args.expectedRevision);
       const [view] = await evaluateRows(tx, [row]);
       const current = requireWritable(view);
-      const decider = isDecider(txCtx, current);
+      const decider = await isDecider(txCtx, current);
       const answered = everAnswered(current);
       if (answered && !decider) {
         throw decisionError('DECISION_NOT_DECIDER', `${current.code} has an answer, so only one of its deciders may amend it.`, { decisionCode: current.code });
@@ -821,8 +855,8 @@ export const decisionMutations = {
       if (view.evaluation.state === 'DECIDED') {
         throw decisionError('DECISION_ANSWERED_DECIDED', `${current.code} is DECIDED; a decided decision is superseded, not withdrawn.`, { decisionCode: current.code });
       }
-      const decider = isDecider(txCtx, current);
-      if (everAnswered(current) ? !decider : !(decider || isAsker(txCtx, current))) {
+      const decider = await isDecider(txCtx, current);
+      if (everAnswered(current) ? !decider : !(decider || (await isAsker(txCtx, current)))) {
         throw decisionError(
           everAnswered(current) ? 'DECISION_NOT_DECIDER' : 'DECISION_NOT_ASKER',
           everAnswered(current)
@@ -1001,10 +1035,12 @@ export const decisionQueries = {
     if (args.awaitingMe) {
       if (!ctx.userId || ctx.impersonation) return { items: [], total: 0 };
       const accessible = await getAccessibleMemoryIds(ctx);
+      // #1715: a decision names the caller by any id merged into theirs.
+      const me = [...(await callerIdentities(ctx))];
       where = {
         role: DECISION_ROLE, deletedAt: null,
         ...(accessible === null ? {} : { memoryId: { in: accessible } }),
-        properties: { path: ['deciders'], array_contains: [ctx.userId] },
+        OR: me.map((id) => ({ properties: { path: ['deciders'], array_contains: [id] } })),
       };
       if (args.logRef) {
         const log = await loadLogView(ctx, args.logRef);
@@ -1025,7 +1061,8 @@ export const decisionQueries = {
     const rows = await ctx.db.node.findMany({ where, select: DECISION_ROW_SELECT });
     let views = await evaluateRows(ctx.db as unknown as Tx, rows);
     if (args.awaitingMe) {
-      views = views.filter((v) => v.evaluation.state === 'OPEN' && !!v.evaluation.decision?.deciders.includes(ctx.userId!));
+      const me = await callerIdentities(ctx);
+      views = views.filter((v) => v.evaluation.state === 'OPEN' && !!v.evaluation.decision?.deciders.some((id) => me.has(id)));
     }
     const tier = toTier(args.tier);
     const urgencies = args.urgency?.map(toUrgency);
@@ -1079,6 +1116,33 @@ async function actorOut(ctx: Context, a: DecisionActor) {
   };
 }
 
+/** Every user id a stored payload names: its actors' `userId`s, answer marks, and decider lists. */
+function userIdsNamedIn(value: unknown, out = new Set<string>()): Set<string> {
+  if (Array.isArray(value)) for (const v of value) userIdsNamedIn(v, out);
+  else if (value && typeof value === 'object') {
+    for (const [key, v] of Object.entries(value)) {
+      if (typeof v === 'string' && (key === 'userId' || key === 'by' || key === 'recordedBy')) out.add(v);
+      else if (Array.isArray(v) && /deciders$/i.test(key)) for (const id of v) if (typeof id === 'string') out.add(id);
+      else userIdsNamedIn(v, out);
+    }
+  }
+  return out;
+}
+
+/**
+ * #1715 — the account merges a stored payload's user ids follow: the record
+ * keeps the merged-away id, and the merge says who it is now. Each link of
+ * each chain, oldest first.
+ */
+async function identityMergesOf(ctx: Context, payload: unknown) {
+  const links = await mergeLinksFrom(ctx.db, [...userIdsNamedIn(payload)]);
+  return Promise.all(links.map(async (l) => ({
+    fromUserId: l.sourceUserId, from: await loadCommentActor(ctx, 'user', l.sourceUserId),
+    toUserId: l.targetUserId, to: await loadCommentActor(ctx, 'user', l.targetUserId),
+    mergedAt: l.mergedAt,
+  })));
+}
+
 const users = (ctx: Context, ids: readonly string[]) =>
   Promise.all(ids.map((id) => loadCommentActor(ctx, 'user', id))).then((refs) => refs.filter((r): r is CommentActorRef => r != null));
 
@@ -1110,7 +1174,8 @@ export const decisionFieldResolvers = {
     followUps: (v: DecisionView) => (v.shown?.followUps ?? []).map(refOut),
     deciderIds: (v: DecisionView) => v.shown?.deciders ?? [],
     deciders: (v: DecisionView, _: unknown, ctx: Context) => users(ctx, v.shown?.deciders ?? []),
-    viewerIsDecider: (v: DecisionView, _: unknown, ctx: Context) => !!v.shown && isDecider(ctx, v.shown),
+    viewerIsDecider: async (v: DecisionView, _: unknown, ctx: Context) => !!v.shown && (await isDecider(ctx, v.shown)),
+    identityMerges: (v: DecisionView, _: unknown, ctx: Context) => identityMergesOf(ctx, v.shown),
     askedBy: (v: DecisionView, _: unknown, ctx: Context) => actorOut(ctx, v.shown?.askedBy ?? { userId: null, workerId: null, appId: null }),
     askedAt: (v: DecisionView) => v.shown?.askedAt ?? null,
     answeredAt: (v: DecisionView) => {
@@ -1152,6 +1217,7 @@ export const decisionFieldResolvers = {
     eligibleDeciderIds: (v: DecisionLogView) => v.data.eligibleDeciders,
     defaultDeciders: (v: DecisionLogView, _: unknown, ctx: Context) => users(ctx, v.data.defaultDeciders),
     eligibleDeciders: (v: DecisionLogView, _: unknown, ctx: Context) => users(ctx, v.data.eligibleDeciders),
+    identityMerges: (v: DecisionLogView, _: unknown, ctx: Context) => identityMergesOf(ctx, v.data),
     purges: (v: DecisionLogView, _: unknown, ctx: Context) => Promise.all(v.data.purges.map(async (p) => ({
       ...p, byUserId: p.by, by: await loadCommentActor(ctx, 'user', p.by),
     }))),

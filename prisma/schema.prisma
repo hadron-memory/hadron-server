@@ -449,8 +449,37 @@ model User {
   @@unique([externalAppId, externalId])
   /// #1325 — MemoryConfig templates this user owns (user-owned owner branch).
   memoryConfigTemplates MemoryConfigTemplate[] @relation("MemoryConfigTemplateOwnerUser")
+  /// #1715 — this account's merge into another, if it was merged away.
+  mergedInto            UserMerge?             @relation("UserMergeSource")
+  /// #1715 — accounts merged into this one.
+  mergedFrom            UserMerge[]            @relation("UserMergeTarget")
 
   @@map("users")
+}
+
+/// #1715 — one account merge (`mergeUsers`): the source account was merged
+/// into the target, which survives. Written in the merge transaction and never
+/// changed, so it is keyed on the source: an account is merged away at most
+/// once (it is soft-deleted, so it can never be a merge's target later, which
+/// also keeps the chains acyclic).
+///
+/// Records that store user ids inside authenticated data (decision and
+/// decision-log payloads, #1641) are never rewritten by a merge. Readers
+/// follow a stored id through these rows, transitively, to the account that
+/// survives (src/lib/userMerges.ts). So `targetUserId` is deliberately NOT
+/// retargeted by a later merge of the target: the chain is what resolves it.
+model UserMerge {
+  sourceUserId String   @id @map("source_user_id")
+  targetUserId String   @map("target_user_id")
+  mergedAt     DateTime @default(now()) @map("merged_at")
+  /// The acting user, or null (an operator script). Recorded as of the merge.
+  mergedBy     String?  @map("merged_by")
+
+  source User @relation("UserMergeSource", fields: [sourceUserId], references: [id], onDelete: Cascade)
+  target User @relation("UserMergeTarget", fields: [targetUserId], references: [id], onDelete: Cascade)
+
+  @@index([targetUserId])
+  @@map("user_merges")
 }
 
 /// The kinds of widget that can be placed on a user's /app/dashboard grid
@@ -1524,20 +1553,21 @@ model CommentMeta {
   /// The author (`cor:dmo:110:03`): `w:<workerId>`, `ua:<userId>:<agentId>`,
   /// `u:<userId>` or `app:<appId>`. Immutable.
   authorKey          String              @map("author_key")
+  /// #1721 — set when deleteComment leaves a stub (a top-level comment with
+  /// live replies; its text is blanked). A comment deleted without replies is
+  /// soft-deleted instead, and these record who deleted it.
   retractedAt        DateTime?           @map("retracted_at")
-  /// Actor key (the `authorKey` grammar) of whoever retracted, hid, resolved
-  /// or deleted.
+  /// Actor key (the `authorKey` grammar) of whoever deleted the comment.
   retractedBy        String?             @map("retracted_by")
-  hiddenAt           DateTime?           @map("hidden_at")
-  hiddenBy           String?             @map("hidden_by")
   resolvedAt         DateTime?           @map("resolved_at")
   resolvedBy         String?             @map("resolved_by")
   /// Mirrors the comment node's soft delete (a thread delete, or the target's
   /// soft delete), so the one-open-thread index can exclude it.
   threadDeletedAt    DateTime?           @map("thread_deleted_at")
   threadDeletedBy    String?             @map("thread_deleted_by")
-  /// `ADMIN` (deleteCommentThread) or `TARGET` (the target was soft-deleted;
-  /// restoring the target restores exactly these).
+  /// `ADMIN` (deleteCommentThread), `AUTHOR` or `MANAGER` (#1721 deleteComment,
+  /// by its author or by a memory manager), or `TARGET` (the target was
+  /// soft-deleted; restoring the target restores exactly these).
   threadDeletedCause String?             @map("thread_deleted_cause")
   createdAt          DateTime            @default(now()) @map("created_at")
 

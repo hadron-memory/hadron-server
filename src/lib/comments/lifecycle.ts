@@ -16,13 +16,21 @@ import { COMMENT_NODE_TYPE } from './index.js';
 type Tx = Prisma.TransactionClient;
 
 /**
+ * Why a comment was soft-deleted (`comment_meta.thread_deleted_cause`):
+ * `ADMIN` deleteCommentThread; #1721 deleteComment by its `AUTHOR` or by a
+ * `MANAGER` of the memory; `TARGET` the target was soft-deleted (only these
+ * are restored with it).
+ */
+export type CommentDeletionCause = 'ADMIN' | 'AUTHOR' | 'MANAGER' | 'TARGET';
+
+/**
  * Soft-delete live comment threads (root + replies) in the caller's
  * transaction. `rootIds` are top-level comment ids.
  */
 export async function deleteThreadsInTx(
   tx: Tx,
   rootIds: string[],
-  opts: { actorKey: string | null; deletedBy: string | null; cause: 'ADMIN' | 'TARGET'; at?: Date },
+  opts: { actorKey: string | null; deletedBy: string | null; cause: CommentDeletionCause; at?: Date },
 ): Promise<number> {
   if (rootIds.length === 0) return 0;
   // Lock the roots first (#1663 review P3): replyToComment inserts a reply

@@ -75,8 +75,7 @@ export type CommentRefusalCode =
   | 'COMMENT_ANCHOR_REVISION_INVALID'
   | 'COMMENT_ANCHOR_REVISION_UNAVAILABLE'
   | 'COMMENT_NOT_AUTHOR'
-  | 'COMMENT_RETRACTED'
-  | 'COMMENT_HIDDEN'
+  | 'COMMENT_DELETED'
   | 'COMMENT_NOT_TOP_LEVEL'
   | 'COMMENT_THREAD_STATE'
   | 'COMMENT_ADMIN_REQUIRED'
@@ -118,7 +117,7 @@ export function validateQuote(quote: string | null | undefined): string | null {
   return quote;
 }
 
-/** Validate a moderation reason (hide, thread delete): required, bounded. */
+/** Validate a moderation reason (thread delete): required, bounded. */
 export function validateReason(reason: string): string {
   if (reason.trim().length === 0 || reason.length > COMMENT_REASON_MAX) {
     throw commentError('COMMENT_BODY_INVALID', `A reason is required, at most ${COMMENT_REASON_MAX} characters.`, { field: 'reason', max: COMMENT_REASON_MAX });
@@ -128,18 +127,22 @@ export function validateReason(reason: string): string {
 
 /**
  * What a comment node keeps in `Node.data` (encrypted with the body on an
- * encrypted memory). `lastAction` names the comment-path operation that wrote
- * this revision, so the comment's revision history reads as its audit trail
- * (`cor:dmo:110:05`).
+ * encrypted memory). `lastAction` names the comment-path operation that last
+ * wrote the row. A comment keeps no revision history (#1721, cor:dmo:110:12).
  */
 export type CommentNodeData = {
   quote: string | null;
-  hiddenReason?: string | null;
   deleteReason?: string | null;
   lastAction: { op: CommentOp; by: string; at: string };
+  /**
+   * #1721 — who last edited the body or quote, and when (cor:dmo:110:12).
+   * Set by an edit only; resolve, reopen and delete leave it alone, so it is
+   * the comment's "edited" record. Absent on a comment never edited.
+   */
+  lastEdit?: { by: string; at: string };
 };
 
-export type CommentOp = 'create' | 'reply' | 'edit' | 'retract' | 'resolve' | 'reopen' | 'hide' | 'delete-thread';
+export type CommentOp = 'create' | 'reply' | 'edit' | 'delete' | 'resolve' | 'reopen' | 'delete-thread';
 
 /** Read the comment fields out of a (decrypted) `Node.data`, tolerating absence. */
 export function commentDataOf(data: unknown): Partial<CommentNodeData> {
@@ -159,7 +162,7 @@ export function commentGovernedError(
 ): GraphQLError {
   const what = refusal === 'produces' ? 'create a comment' : refusal === 'removes' ? 'turn a comment into another node' : 'change a comment';
   return new GraphQLError(
-    `ROLE_GOVERNED: a generic ${op} cannot ${what}. Comments are written only through the comment operations (createComment, replyToComment, editComment, retractComment, resolveCommentThread, reopenCommentThread, hideComment, deleteCommentThread).`,
+    `ROLE_GOVERNED: a generic ${op} cannot ${what}. Comments are written only through the comment operations (createComment, replyToComment, editComment, deleteComment, resolveCommentThread, reopenCommentThread, deleteCommentThread).`,
     { extensions: { code: 'ROLE_GOVERNED', kind: 'comment', strength: 'integrity', door: 'createComment', mcpDoor: null, op, refusal } },
   );
 }
