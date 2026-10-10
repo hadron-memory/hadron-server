@@ -68,7 +68,11 @@ describe('agent-task tools: who acts', () => {
     expect(code(t)).toBe('SESSION_REQUIRED');
     expect(await db.agentTask.count()).toBe(0);
     for (const tool of AGENT_TASK_WRITE_TOOLS.filter((n) => n !== 'hadron_task_create')) {
-      const r = text(await s.callTool(tool, { taskId: generateId(), assignee: { worker: 'Anne' }, outcome: 'succeeded' }));
+      const r = text(await s.callTool(tool, {
+        taskId: generateId(), assignee: { worker: 'Anne' }, outcome: 'succeeded',
+        // #1706's write tools
+        eventId: generateId(), worker: anne.id, appRef: app.id, family: 'claude', state: 'UNAVAILABLE', reason: 'OTHER',
+      }));
       expect({ tool, code: code(r) }).toEqual({ tool, code: 'SESSION_REQUIRED' });
     }
   });

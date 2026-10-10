@@ -4,6 +4,8 @@ import { cleanDb, chatNodeByLoc, chatNodeByLocOrThrow } from '../../../test/help
 import { resolvers, type Context } from './resolvers.js';
 import { generateId } from '../../../lib/id.js';
 import { withChatRootLock } from '../../../lib/chatRoot.js';
+import { lockAuthorityAnchors } from '../../../lib/auth/authorityAnchors.js';
+import { waitForLockWaitersOfType } from '../../../test/lockWait.js';
 
 // Prevent git writes
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
@@ -1688,5 +1690,196 @@ describe('spec 017 — chat scope (US1 private path)', () => {
       userCtx(adminUser.id),
     );
     expect(result).toBeDefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #1717 — the chat-by-loc writes reach only chats, and only for current writers
+//
+// The six chat-by-loc operations used to select ANY node at the caller's loc,
+// and the five writes authorized on identity arms (author, memory creator) that
+// survive losing access. A chat has no ACL of its own (cor:acl:030:01): writing
+// one is writing its host memory, so a write needs current write access there.
+// ---------------------------------------------------------------------------
+
+describe('#1717 — chat-by-loc writes', () => {
+  const appUrn = () => `${orgA.urn}:research-app`;
+  async function member(userId: string): Promise<void> {
+    const app = await db.app.findFirstOrThrow({ where: { urn: appUrn() } });
+    await db.appMember.create({ data: { appId: app.id, userId, role: 'member' } });
+  }
+  /** A shared chat started by `author`, and its app-class host memory. */
+  async function sharedChat(authorId: string) {
+    const start = await resolvers.Mutation.startChat({}, { agentId: agent.id, scope: 'shared' }, userCtx(authorId));
+    const root = await chatNodeByLocOrThrow(db, start.chatId);
+    return { chatId: start.chatId, root, memoryId: root.memoryId };
+  }
+  const snapshot = async (id: string) => {
+    const n = await db.node.findUniqueOrThrow({ where: { id } });
+    return { data: n.data, deletedAt: n.deletedAt, content: n.content };
+  };
+  // Every chat-by-loc write, addressed at `chatId` as `userId`.
+  const writes = (chatId: string, userId: string) => ({
+    sendChatMessage: () => resolvers.Mutation.sendChatMessage({}, { chatId, userMessage: 'x' }, userCtx(userId)),
+    processChatResponse: () => resolvers.Mutation.processChatResponse(
+      {}, { chatId, toolResponse: { message: 'x', data: null, next_stage: null } }, userCtx(userId)),
+    saveChatSummary: () => resolvers.Mutation.saveChatSummary({}, { chatId, summary: 'x' }, userCtx(userId)),
+    updateChatTitle: () => resolvers.Mutation.updateChatTitle({}, { chatId, title: 'renamed' }, userCtx(userId)),
+    deleteChat: () => resolvers.Mutation.deleteChat({}, { chatId }, userCtx(userId)),
+  });
+
+  it.each([
+    ['an ordinary node the caller authored', 'notes:plan', {}],
+    ['a governed review at a chat-shaped loc', 'chats:202610091200-deadbeef-review', { role: 'review' }],
+    ["a chat's own :messages container", null, {}],
+  ])('refuses every write against %s, leaving it unchanged', async (_label, loc, extra) => {
+    await member(adminUser.id);
+    await member(otherUser.id);
+    const { chatId, memoryId } = await sharedChat(adminUser.id);
+    const target = loc === null
+      ? await db.node.findFirstOrThrow({ where: { memoryId, loc: `${chatId}:messages` } })
+      : await db.node.create({ data: {
+          id: generateId(), memoryId, loc, name: 'target', nodeType: 'record',
+          data: { k: 1 }, createdBy: otherUser.id, ...extra,
+        } });
+    const before = await snapshot(target.id);
+    for (const [op, run] of Object.entries(writes(target.loc, otherUser.id))) {
+      await expect(run(), op).rejects.toThrow(/not found/i);
+    }
+    expect(await snapshot(target.id)).toEqual(before);
+    // No children planted beneath it (a container's own messages excepted).
+    expect(await db.node.count({
+      where: { memoryId, loc: { startsWith: `${target.loc}:messages` }, createdBy: otherUser.id },
+    })).toBe(0);
+  });
+
+  it("refuses every write against a comment on the chat, leaving it unchanged", async () => {
+    await member(adminUser.id);
+    await member(otherUser.id);
+    const { root } = await sharedChat(adminUser.id);
+    const made = await (resolvers.Mutation as any).createComment(null, { targetRef: root.id, body: 'feedback' }, userCtx(otherUser.id));
+    const c = await db.node.findUniqueOrThrow({ where: { id: made.id } });
+    expect(c.nodeType).toBe('comment');
+    const before = await snapshot(c.id);
+    for (const [op, run] of Object.entries(writes(c.loc, otherUser.id))) {
+      await expect(run(), op).rejects.toThrow(/not found/i);
+    }
+    expect(await snapshot(c.id)).toEqual(before);
+  });
+
+  it('a former member keeps no write power over the chat they authored', async () => {
+    await member(adminUser.id);
+    await member(otherUser.id);
+    const { chatId, root } = await sharedChat(otherUser.id);
+    await resolvers.Mutation.sendChatMessage({}, { chatId, userMessage: 'hello' }, userCtx(otherUser.id));
+    // Offboarded: out of the App and out of the org.
+    const app = await db.app.findFirstOrThrow({ where: { urn: appUrn() } });
+    await db.appMember.delete({ where: { appId_userId: { appId: app.id, userId: otherUser.id } } });
+    await db.orgMember.updateMany({ where: { organizationId: orgA.id, userId: otherUser.id }, data: { deletedAt: new Date() } });
+    const before = await snapshot(root.id);
+    for (const [op, run] of Object.entries(writes(chatId, otherUser.id))) {
+      await expect(run(), op).rejects.toThrow();
+    }
+    expect(await snapshot(root.id)).toEqual(before);
+    expect(await db.node.count({ where: { memoryId: root.memoryId, loc: { startsWith: `${chatId}:` }, deletedAt: { not: null } } })).toBe(0);
+  });
+
+  // Diego on #1725: the gate must hold at the write, not before it. The
+  // revoker here does what removeAppMember does — takes the App and the
+  // member's authority anchors exclusively, then removes the membership — and
+  // the write arrives while it is still open. The write's own pre-check reads
+  // the uncommitted state and passes; only a re-check after the anchor wait
+  // sees the revocation.
+  it.each(['sendChatMessage', 'processChatResponse', 'saveChatSummary', 'updateChatTitle', 'deleteChat'] as const)(
+    '%s is refused when the membership is revoked while it waits for its lock',
+    async (op) => {
+      await member(adminUser.id);
+      await member(otherUser.id);
+      const { chatId, root } = await sharedChat(otherUser.id);
+      await resolvers.Mutation.sendChatMessage({}, { chatId, userMessage: 'hello' }, userCtx(otherUser.id));
+      const app = await db.app.findFirstOrThrow({ where: { urn: appUrn() } });
+      const before = await snapshot(root.id);
+      const messagesBefore = await db.node.count({ where: { memoryId: root.memoryId, loc: { startsWith: `${chatId}:messages:` } } });
+
+      let outcome: unknown;
+      await db.$transaction(async (tx) => {
+        await lockAuthorityAnchors(tx, [{ kind: 'app', id: app.id }, { kind: 'user', id: otherUser.id }], 'exclusive');
+        await tx.appMember.delete({ where: { appId_userId: { appId: app.id, userId: otherUser.id } } });
+        await tx.orgMember.updateMany({ where: { organizationId: orgA.id, userId: otherUser.id }, data: { deletedAt: new Date() } });
+        outcome = writes(chatId, otherUser.id)[op]().then(() => 'written', (e: unknown) => e);
+        await waitForLockWaitersOfType(db, 'advisory', 1, 3_000);
+      }, { timeout: 20_000 });
+
+      expect(await outcome).toBeInstanceOf(Error);
+      expect(await snapshot(root.id)).toEqual(before);
+      expect(await db.node.count({ where: { memoryId: root.memoryId, loc: { startsWith: `${chatId}:messages:` } } }))
+        .toBe(messagesBefore);
+      expect(await db.node.count({ where: { memoryId: root.memoryId, deletedAt: { not: null } } })).toBe(0);
+    },
+  );
+
+  // Diego on #1725 (delta at 40e62306): rename and delete keep an extra
+  // author-or-admin condition beyond write access. A platform admin who is
+  // also an ordinary participant, but not the author, loses the admin role
+  // while the write waits — the participant grant alone must not carry it.
+  it.each(['updateChatTitle', 'deleteChat'] as const)(
+    '%s is refused when the admin role is revoked while it waits for its lock',
+    async (op) => {
+      await member(adminUser.id);
+      await member(otherUser.id);
+      const { chatId, root } = await sharedChat(otherUser.id);
+      const before = await snapshot(root.id);
+      const asAdmin = userCtx(adminUser.id, { roles: ['ADMIN'] });
+      const run = op === 'updateChatTitle'
+        ? () => resolvers.Mutation.updateChatTitle({}, { chatId, title: 'renamed' }, asAdmin)
+        : () => resolvers.Mutation.deleteChat({}, { chatId }, asAdmin);
+
+      let outcome: unknown;
+      await db.$transaction(async (tx) => {
+        await lockAuthorityAnchors(tx, [{ kind: 'user', id: adminUser.id }], 'exclusive');
+        await tx.user.update({ where: { id: adminUser.id }, data: { roles: ['READER'] } });
+        outcome = run().then(() => 'written', (e: unknown) => e);
+        await waitForLockWaitersOfType(db, 'advisory', 1, 3_000);
+      }, { timeout: 20_000 });
+
+      expect(await outcome).toBeInstanceOf(Error);
+      expect(await snapshot(root.id)).toEqual(before);
+      expect(await db.node.count({ where: { memoryId: root.memoryId, deletedAt: { not: null } } })).toBe(0);
+    },
+  );
+
+  it('CONTROL: a current platform admin who is not the author still renames and deletes', async () => {
+    await member(adminUser.id);
+    await member(otherUser.id);
+    const { chatId, root } = await sharedChat(otherUser.id);
+    const asAdmin = userCtx(adminUser.id, { roles: ['ADMIN'] });
+    await resolvers.Mutation.updateChatTitle({}, { chatId, title: 'by admin' }, asAdmin);
+    expect(((await db.node.findUniqueOrThrow({ where: { id: root.id } })).data as Record<string, unknown>).title).toBe('by admin');
+    await expect(resolvers.Mutation.deleteChat({}, { chatId }, asAdmin)).resolves.toBe(true);
+  });
+
+  it('deleteChat removes only the chat and its messages, not other rows under its loc', async () => {
+    await member(adminUser.id);
+    await member(otherUser.id);
+    const { chatId, root, memoryId } = await sharedChat(adminUser.id);
+    await resolvers.Mutation.sendChatMessage({}, { chatId, userMessage: 'hello' }, userCtx(adminUser.id));
+    const foreign = await db.node.create({ data: {
+      id: generateId(), memoryId, loc: `${chatId}:notes`, name: 'notes', nodeType: 'record', createdBy: otherUser.id,
+    } });
+    await resolvers.Mutation.deleteChat({}, { chatId }, userCtx(adminUser.id));
+    expect((await db.node.findUniqueOrThrow({ where: { id: root.id } })).deletedAt).not.toBeNull();
+    expect(await db.node.count({ where: { memoryId, loc: { startsWith: `${chatId}:messages` }, deletedAt: null } })).toBe(0);
+    expect((await db.node.findUniqueOrThrow({ where: { id: foreign.id } })).deletedAt).toBeNull();
+  });
+
+  it('CONTROL: a current member still posts to, and the author still renames and deletes, a shared chat', async () => {
+    await member(adminUser.id);
+    await member(otherUser.id);
+    const { chatId, root } = await sharedChat(otherUser.id);
+    await resolvers.Mutation.sendChatMessage({}, { chatId, userMessage: 'from admin' }, userCtx(adminUser.id));
+    await resolvers.Mutation.saveChatSummary({}, { chatId, summary: 's' }, userCtx(otherUser.id));
+    await resolvers.Mutation.updateChatTitle({}, { chatId, title: 'mine' }, userCtx(otherUser.id));
+    expect(((await db.node.findUniqueOrThrow({ where: { id: root.id } })).data as Record<string, unknown>).title).toBe('mine');
+    await expect(resolvers.Mutation.deleteChat({}, { chatId }, userCtx(otherUser.id))).resolves.toBe(true);
   });
 });

@@ -58,6 +58,12 @@ import { teamChatMutations, teamChatQueries } from './resolvers.teamChat.js';
 import { teamAttentionMutations, teamAttentionQueries } from './resolvers.teamAttention.js';
 import { teamWorkMutations, teamWorkQueries } from './resolvers.teamWork.js';
 import { agentTaskMutations, agentTaskQueries, agentTaskFieldResolvers } from './resolvers.agentTask.js';
+import {
+  agentTaskAlarmMutations,
+  agentTaskAlarmQueries,
+  agentTaskAlarmFieldResolvers,
+} from './resolvers.agentTaskAlarms.js';
+import { agentTaskMatchingQueries, agentTaskMatchingFieldResolvers } from './resolvers.agentTaskMatching.js';
 import { memoryConfigMutations, memoryConfigQueries, memoryConfigFieldResolvers } from './resolvers.memoryConfig.js';
 import { memoryConfigApplyMutations } from './resolvers.memoryConfigApply.js';
 import { nodeApprovalFieldResolvers, nodeApprovalMutations, nodeApprovalQueries } from './resolvers.nodeApproval.js';
@@ -93,6 +99,11 @@ export const resolvers = {
   ...impersonationTypeResolvers,
   ...workerFieldResolvers,
   ...agentTaskFieldResolvers,
+  // #1706 — alarm wakes and availability. AgentTeamEvent already has a block
+  // in agentTaskFieldResolvers; the wakes field joins it rather than replacing it.
+  ...agentTaskAlarmFieldResolvers,
+  ...agentTaskMatchingFieldResolvers,
+  AgentTeamEvent: { ...agentTaskFieldResolvers.AgentTeamEvent, ...agentTaskAlarmFieldResolvers.AgentTeamEvent },
   ...scopeFieldResolvers,
   ...channelFieldResolvers,
   ...registerFieldResolvers,
@@ -133,6 +144,8 @@ export const resolvers = {
     ...teamAttentionQueries,
     ...teamWorkQueries,
     ...agentTaskQueries,
+    ...agentTaskAlarmQueries,
+    ...agentTaskMatchingQueries,
     ...memoryConfigQueries,
     ...memoryConfigTemplateQueries,
     ...scopeQueries,
@@ -176,6 +189,7 @@ export const resolvers = {
     ...teamAttentionMutations,
     ...teamWorkMutations,
     ...agentTaskMutations,
+    ...agentTaskAlarmMutations,
     ...memoryConfigMutations,
     ...memoryConfigTemplateMutations,
     ...memoryConfigApplyMutations,

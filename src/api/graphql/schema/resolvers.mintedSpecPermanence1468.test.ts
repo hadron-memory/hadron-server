@@ -525,16 +525,18 @@ describe('#1468 — address reclaims that erase a deleted minted corpus (Codex P
 });
 
 describe('#1468 — chat and Channel deletions (Codex P1)', () => {
+  // #1717: deleteChat's scope is the root and its `:messages` subtree, so the
+  // spec sits there; a row elsewhere under the root is no longer the chat's.
   it('deleteChat refuses a legacy chat whose subtree holds a minted spec, deleting nothing', async () => {
     await node(minted.id, 'chats:legacy');
-    await node(minted.id, 'chats:legacy:m1', { tags: ['spec'] });
+    await node(minted.id, 'chats:legacy:messages:m1', { tags: ['spec'] });
     await expect(resolvers.Mutation.deleteChat({}, { chatId: 'chats:legacy' }, ctx())).rejects.toSatisfy(refusedPermanent);
-    expect(await liveIds(minted.id)).toEqual(['chats:legacy', 'chats:legacy:m1']);
+    expect(await liveIds(minted.id)).toEqual(['chats:legacy', 'chats:legacy:messages:m1']);
   });
 
   it('control: deleteChat still deletes a legacy chat in a draft corpus', async () => {
     await node(draft.id, 'chats:legacy');
-    await node(draft.id, 'chats:legacy:m1', { tags: ['spec'] });
+    await node(draft.id, 'chats:legacy:messages:m1', { tags: ['spec'] });
     expect(await resolvers.Mutation.deleteChat({}, { chatId: 'chats:legacy' }, ctx())).toBe(true);
     expect(await liveIds(draft.id)).toEqual([]);
   });

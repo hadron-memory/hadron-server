@@ -1,7 +1,9 @@
 /**
  * #1705 — agent tasks on the MCP surface (cor:agt:050): create, assign,
  * reassign, start, record progress, finish and cancel a task, read one or a
- * list, and read the App's team event stream.
+ * list, and read the App's team event stream. #1706 adds acknowledging an
+ * alarm and availability for work (cor:agt:050:20, cor:agt:060). #1707 adds
+ * the team roster (plan design:agent-tasks §7.4).
  *
  * Every tool is a thin call into the SAME resolvers GraphQL serves
  * (`resolvers.agentTask.ts`): the actor, the participation gate, the
@@ -22,6 +24,7 @@ import { GraphQLError } from 'graphql';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import { agentTaskFieldResolvers } from '../api/graphql/schema/resolvers.agentTask.js';
+import { agentTaskAlarmFieldResolvers } from '../api/graphql/schema/resolvers.agentTaskAlarms.js';
 import { type AuthContext, validateSessionBinding } from '../middleware/auth.js';
 import { runAsActor } from '../lib/requestActor.js';
 import { UrnNotQualifiedError } from '../lib/urn.js';
@@ -39,16 +42,35 @@ const Q = resolvers.Query as unknown as {
   agentTeamEvents: Resolver<Record<string, unknown>, EventRow[]>;
 };
 const M = resolvers.Mutation as unknown as Record<string, Resolver<Record<string, unknown>, TaskRow>>;
+const MA = resolvers.Mutation as unknown as {
+  acknowledgeAlarm: Resolver<{ eventId: string }, EventRow>;
+  setWorkerAvailability: Resolver<{ input: Record<string, unknown> }, AvailabilityRow>;
+  setModelFamilyAvailability: Resolver<{ input: Record<string, unknown> }, AvailabilityRow>;
+};
+const QA = resolvers.Query as unknown as {
+  teamAvailability: Resolver<{ appRef: string }, { workers: AvailabilityRow[]; families: AvailabilityRow[] }>;
+  teamRoster: Resolver<{ appRef: string }, { appId: string; asOf: Date; workers: RosterRow[] }>;
+};
+type RosterRow = import('../lib/agentTasks/roster.js').RosterEntry & { appUrn: string };
 const T = agentTaskFieldResolvers.AgentTask;
 const E = agentTaskFieldResolvers.AgentTeamEvent;
+const WA = agentTaskAlarmFieldResolvers.WorkerAvailability;
+const FA = agentTaskAlarmFieldResolvers.ModelFamilyAvailability;
+type AvailabilityRow = Record<string, any>;
 
 /** The write tools, for the caller-session gate's bookkeeping and tests. */
 export const AGENT_TASK_WRITE_TOOLS = [
   'hadron_task_create', 'hadron_task_assign', 'hadron_task_reassign', 'hadron_task_start',
   'hadron_task_progress', 'hadron_task_finish', 'hadron_task_cancel',
+  // #1706
+  'hadron_alarm_ack', 'hadron_worker_availability_set', 'hadron_model_family_availability_set',
 ] as const;
 /** The read tools: actor-neutral, so they are listed in ACTOR_NEUTRAL_TOOLS. */
-export const AGENT_TASK_READ_TOOLS = ['hadron_task_get', 'hadron_task_list', 'hadron_team_events'] as const;
+export const AGENT_TASK_READ_TOOLS = [
+  'hadron_task_get', 'hadron_task_list', 'hadron_team_events', 'hadron_team_availability',
+  // #1707
+  'hadron_team_roster',
+] as const;
 
 function textResult(text: string, isError = false) {
   return { ...(isError ? { isError: true as const } : {}), content: [{ type: 'text' as const, text }] };
@@ -63,6 +85,27 @@ function refusal(e: unknown) {
   }
   if (e instanceof UrnNotQualifiedError) return textResult(`[bad_user_input] ${e.message}`, true);
   throw e;
+}
+
+/** One roster line (plan §7.4): the state, then the facts behind it. Ids and words only. */
+export function renderRosterEntry(r: RosterRow): string {
+  const facts = [
+    r.role ? `role ${r.role}` : null,
+    r.bound
+      ? `bound${r.family ? ` as ${r.family}` : ', no model family reported'}${r.liveSession ? '' : ' (session quiet)'}`
+      : 'unbound',
+    r.launchableFamilies.length ? `launchable as ${r.launchableFamilies.join('/')}` : null,
+    r.free ? `free for work as ${r.freeFamilies.join('/')}` : null,
+    r.unavailable ? `unavailable: ${r.unavailable.reason ?? 'unknown'}${r.unavailable.until ? ` until ${r.unavailable.until.toISOString()}` : ''}` : null,
+    r.unavailableFamilies.length ? `family unavailable: ${r.unavailableFamilies.join('/')}` : null,
+    r.startedTaskIds.length ? `started ${r.startedTaskIds.join(', ')}` : null,
+    r.pendingTaskIds.length ? `pending ${r.pendingTaskIds.join(', ')}` : null,
+    r.waitingOnTaskIds.length ? `waiting on ${r.waitingOnTaskIds.join(', ')} since ${r.waitingSince?.toISOString()}` : null,
+    r.alarmEventIds.length ? `woken on alarm ${r.alarmEventIds.join(', ')}` : null,
+    r.unreactedChildTaskId ? `child ${r.unreactedChildTaskId} finished` : null,
+    r.lastAssignedAt ? `last assigned ${r.lastAssignedAt.toISOString()}` : 'never assigned',
+  ].filter(Boolean);
+  return `${r.name} — ${r.state}: ${facts.join('; ')}`;
 }
 
 function partyLabel(p: Party): string {
@@ -104,13 +147,41 @@ export async function renderTask(t: TaskRow, ctx: Context): Promise<string> {
   return lines.join('\n');
 }
 
-async function renderEvent(e: EventRow, ctx: Context): Promise<string> {
+export async function renderEvent(e: EventRow, ctx: Context): Promise<string> {
   const actor = (await E.actor(e as never, {}, ctx)) as Party;
   const subject = (await E.subjectWorker(e as never, {}, ctx)) as Party;
   const payload = e.payload && Object.keys(e.payload).length ? ` ${JSON.stringify(e.payload)}` : '';
-  return `- ${e.createdAt.toISOString()} ${e.type}${e.severity ? ' [ALARM]' : ''} (id: ${e.id})` +
-    `${e.taskId ? ` task ${e.taskId}` : ''} by ${partyLabel(actor)}` +
+  const line = `- ${e.createdAt.toISOString()} ${e.type}${e.severity ? ' [ALARM]' : ''} (id: ${e.id})` +
+    `${e.taskId ? ` task ${e.taskId}` : ''}${e.severity ? '' : ` by ${partyLabel(actor)}`}` +
     `${subject ? ` → ${partyLabel(subject)}` : ''}${payload}`;
+  if (!e.severity) return line;
+  // #1706 — an alarm: its episode, who it has woken, and its acknowledgement.
+  const wakes = (await agentTaskAlarmFieldResolvers.AgentTeamEvent.wakes(e as never, {}, ctx)) ?? [];
+  const chain = await Promise.all(wakes.map(async (w) => {
+    const owner = (await agentTaskAlarmFieldResolvers.AgentTeamAlarmSchedule.owner(w as never, {}, ctx)) as Party;
+    return `${partyLabel(owner)} (${w.wokenAt ? `woken ${w.wokenAt.toISOString()}` : `due ${w.dueAt.toISOString()}`})`;
+  }));
+  const ack = e.acknowledgedAt
+    ? `acknowledged ${e.acknowledgedAt.toISOString()} by ${partyLabel((await E.acknowledgedBy(e as never, {}, ctx)) as Party)}`
+    : 'not acknowledged';
+  return [
+    line,
+    `  episode since ${e.episodeStart ? e.episodeStart.toISOString() : '?'} · ${ack}`,
+    `  chain: ${chain.join(' → ') || 'nobody'}`,
+  ].join('\n');
+}
+
+async function renderAvailability(r: AvailabilityRow, kind: 'worker' | 'family', ctx: Context): Promise<string> {
+  const F = (kind === 'worker' ? WA : FA) as Record<string, (r: never, a: unknown, c: Context) => unknown>;
+  const who = kind === 'worker'
+    ? partyLabel((await F.worker(r as never, {}, ctx)) as Party)
+    : `family ${r.family}`;
+  const setBy = kind === 'worker'
+    ? `${String(F.setBy(r as never, {}, ctx)).toLowerCase()}${r.setByWorkerId || r.setByUserId ? ` (${partyLabel((await F.setByParty(r as never, {}, ctx)) as Party)})` : ''}`
+    : partyLabel((await F.setBy(r as never, {}, ctx)) as Party);
+  const inEffect = await F.inEffect(r as never, {}, ctx);
+  return `- ${who}: ${r.state}${r.reason ? ` (${r.reason})` : ''}${r.until ? ` until ${r.until.toISOString()}` : ''}` +
+    ` · ${inEffect ? 'in effect' : 'not in effect'} · set ${r.setAt.toISOString()} by ${setBy}`;
 }
 
 const SESSION_WRITE = z.string().optional().describe(
@@ -169,6 +240,30 @@ export function registerAgentTaskTools(server: McpServer, deps: { db: PrismaClie
     try {
       const t = await call(ctx);
       return textResult(`${verb}.\n\n${await renderTask(t, ctx)}`);
+    } catch (e) {
+      return refusal(e);
+    }
+  }
+
+  /** Run a non-task WRITE (#1706): the same session rules as `write`, rendering its own result. */
+  async function writeOther(tool: string, session: string | undefined, call: (ctx: Context) => Promise<string>) {
+    if (!session) {
+      return textResult(
+        `[session_required] ${tool}: pass session. A worker passes its worker session; a person passes a plain ` +
+          'session (hadron_start_session with no worker) to act as themselves. Nothing was written.',
+        true,
+      );
+    }
+    if (!(await validateSessionBinding(db, auth, session))) {
+      return textResult(
+        `[session_not_bound] ${tool}: session "${session}" is not one of your open sessions (it may have ended, gone ` +
+          'dormant, or belong to someone else). Nothing was written. hadron_whoami lists yours.',
+        true,
+      );
+    }
+    const ctx = ctxOf();
+    try {
+      return textResult(await call(ctx));
     } catch (e) {
       return refusal(e);
     }
@@ -332,6 +427,90 @@ export function registerAgentTaskTools(server: McpServer, deps: { db: PrismaClie
         const pageSize = args.limit ?? 50;
         if (rows.length >= pageSize) lines.push(`\nMore may follow: pass after: "${rows[rows.length - 1].id}".`);
         return textResult(lines.join('\n'));
+      }),
+  );
+
+  // ── #1706: alarms and availability ────────────────────────────────────
+
+  server.tool(
+    'hadron_alarm_ack',
+    'Acknowledge a stall alarm (cor:agt:050:20): it stops waking owners further up the chain. It does not resolve the ' +
+      'stall: the task moves only when it is reassigned, cancelled, or its assignee acts. Any owner in the alarm\'s ' +
+      'chain may acknowledge it, and nobody else; a second acknowledgement is refused. Find alarms with ' +
+      'hadron_team_events (alarmsOnly: true).',
+    { eventId: z.string().describe('The alarm event id.'), session: SESSION_WRITE },
+    async ({ session, eventId }) =>
+      writeOther('hadron_alarm_ack', session, async (ctx) =>
+        `Acknowledged.\n\n${await renderEvent(await MA.acknowledgeAlarm({}, { eventId }, ctx), ctx)}`),
+  );
+
+  const availabilityFields = {
+    state: z.enum(['AVAILABLE', 'UNAVAILABLE']),
+    reason: z.enum(['STALLED', 'OUT_OF_TOKENS', 'HOST_DOWN', 'OTHER']).optional()
+      .describe('Required when UNAVAILABLE; refused when AVAILABLE.'),
+    until: z.string().optional().describe('ISO date-time when an UNAVAILABLE record lapses; in the future.'),
+  };
+
+  server.tool(
+    'hadron_worker_availability_set',
+    'Set a worker\'s availability for work (cor:agt:060:08). A worker, through its own session, may mark ITSELF ' +
+      'unavailable (never available); the person holding the worker\'s name, or whoever manages the App, may set ' +
+      'either. A worker is never chosen for new work while unavailable.',
+    {
+      worker: z.string().describe('The worker: id or URN, or its name with appRef.'),
+      appRef: z.string().optional().describe('The team App (id or URN); needed when worker is a name.'),
+      ...availabilityFields,
+      session: SESSION_WRITE,
+    },
+    async ({ session, ...input }) =>
+      writeOther('hadron_worker_availability_set', session, async (ctx) =>
+        `Set.\n\n${await renderAvailability(await MA.setWorkerAvailability({}, { input }, ctx), 'worker', ctx)}`),
+  );
+
+  server.tool(
+    'hadron_model_family_availability_set',
+    'Set a model family\'s availability for work in a team App (cor:agt:060:09), e.g. pause every claude worker: ' +
+      'whoever manages the App only.',
+    {
+      appRef: z.string().describe('The team App (id or URN).'),
+      family: z.string().describe('The model family, a lowercase token, e.g. claude or codex.'),
+      ...availabilityFields,
+      session: SESSION_WRITE,
+    },
+    async ({ session, ...input }) =>
+      writeOther('hadron_model_family_availability_set', session, async (ctx) =>
+        `Set.\n\n${await renderAvailability(await MA.setModelFamilyAvailability({}, { input }, ctx), 'family', ctx)}`),
+  );
+
+  server.tool(
+    'hadron_team_availability',
+    'Read a team App\'s availability records (cor:agt:060:02 / :03): each worker or model family marked, and whether ' +
+      'the mark is in effect now. A worker or family with no record is available. Readers: the App\'s participants.',
+    { appRef: z.string().describe('The team App (id or URN).'), session: SESSION_READ },
+    async ({ session, appRef }) =>
+      read(session, async (ctx) => {
+        const { workers, families } = await QA.teamAvailability({}, { appRef }, ctx);
+        if (!workers.length && !families.length) return textResult('No availability records: every worker and model family is available.');
+        const lines = [
+          ...(await Promise.all(workers.map((r) => renderAvailability(r, 'worker', ctx)))),
+          ...(await Promise.all(families.map((r) => renderAvailability(r, 'family', ctx)))),
+        ];
+        return textResult(lines.join('\n'));
+      }),
+  );
+
+  server.tool(
+    'hadron_team_roster',
+    'Read a team App\'s roster (plan design:agent-tasks §7.4): each worker that is not retired, with one derived state ' +
+      '(YOUR_MOVE, UNAVAILABLE, WAITING, WORKING, ASSIGNED_NOT_STARTED, AVAILABLE, NO_FAMILY, NOT_LAUNCHABLE) and the ' +
+      'facts behind it: model family, free for work, availability, its tasks and alarms. Plan-derived, not a spec. ' +
+      'Readers: the App\'s participants.',
+    { appRef: z.string().describe('The team App (id or URN).'), session: SESSION_READ },
+    async ({ session, appRef }) =>
+      read(session, async (ctx) => {
+        const { workers, asOf } = await QA.teamRoster({}, { appRef }, ctx);
+        if (!workers.length) return textResult('This App has no workers that are not retired.');
+        return textResult([`Roster as of ${asOf.toISOString()}:`, ...workers.map(renderRosterEntry)].join('\n'));
       }),
   );
 }
