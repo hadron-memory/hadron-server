@@ -76,6 +76,7 @@ import { isId } from '../../../lib/entityRef/shape.js';
 import { composeWorkerUrn, resolveWorkerRef as resolveWorkerRefId } from '../../../lib/entityRef/workerRef.js';
 import { resolveWorkerIdByName } from './resolvers.worker.js';
 import { managesAppStrict } from '../../../lib/auth/appManagement.js';
+import { lockAppReportsTo } from '../../../lib/workerReportsTo.js';
 import type { AuthorityAnchor } from '../../../lib/auth/authorityAnchors.js';
 import { mayStillDriveWorkerApp } from '../../../lib/teamAttention.js';
 import { withAuthorizedTx } from './authorizedTx.js';
@@ -243,19 +244,20 @@ export async function actorManagesApp(ctx: Context, app: TaskApp, actor: TaskAct
  * or up the `reportsTo` chain. There is no separate coordinator grant, and a
  * team with no `reportsTo` lines has no worker coordinators.
  *
- * Walked on the transaction client, each link's worker row FOR SHARE: a
- * `reportsTo` change (src/lib/workerReportsTo.ts, FOR UPDATE on the worker it
- * changes) either committed first and is seen here, or waits for this write.
- * The walk stops at the first worker that reports to nobody; a retired worker
- * reports to nobody (retirement clears it), so a chain never runs through one.
+ * Walked on the transaction client under the App's reportsTo graph lock, which
+ * `inTaskWriteTx` takes SHARED before any row: a `reportsTo` change (or a
+ * retirement, which clears one) either committed first and is seen here, or
+ * waits for this write. The walk locks no rows of its own, so it adds no
+ * worker-row order to conflict with the writer's (#1737 review, Diego P2-3).
+ * It stops at the first worker that reports to nobody; a retired worker
+ * reports to nobody, so a chain never runs through one.
  */
 async function actorCoordinatesOwner(tx: Prisma.TransactionClient, actor: TaskActor, task: TaskRow): Promise<boolean> {
   if (actor.kind !== 'worker' || !task.ownerWorkerId) return false;
   let current = task.ownerWorkerId;
   for (let hops = 0; hops < 1000; hops++) {
-    const rows = await tx.$queryRaw<Array<{ next: string | null }>>`
-      SELECT reports_to_worker_id AS next FROM workers WHERE id = ${current} FOR SHARE`;
-    const next = rows[0]?.next ?? null;
+    const row = await tx.worker.findUnique({ where: { id: current }, select: { reportsToWorkerId: true } });
+    const next = row?.reportsToWorkerId ?? null;
     if (!next) return false;
     if (next === actor.workerId) return true;
     current = next;
@@ -500,6 +502,11 @@ export async function inTaskWriteTx<T>(
       (tx, txCtx) => write(tx, txCtx, fresh as TaskApp),
       {
         afterLock: async (tx) => {
+          // #1726: the reportsTo graph, SHARED, before any membership or worker
+          // row (src/lib/workerReportsTo.ts, the lock protocol). The chain arm
+          // of cor:agt:050:09 then reads a graph no writer can change before
+          // this commits.
+          await lockAppReportsTo(tx, app.id, 'shared');
           if (ctx.userId) {
             await tx.$queryRaw`SELECT 1 FROM app_members WHERE app_id = ${app.id} AND user_id = ${ctx.userId} FOR SHARE`;
           }

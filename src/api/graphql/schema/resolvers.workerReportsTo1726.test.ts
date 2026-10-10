@@ -251,3 +251,157 @@ describe('reportsTo at startSession (a spawn brief in one step)', () => {
     expect(await reportsToOf(liam)).toBe(ada.id);
   });
 });
+
+describe('#1737 review — anchored authority and one lock protocol (Rook P2-1, Diego P2-1..P2-3)', () => {
+  /** Resolves once some transaction waits on an advisory lock (the graph lock) it can't have. */
+  async function untilAdvisoryWaiter(): Promise<void> {
+    for (let i = 0; i < 400; i++) {
+      const [{ n }] = await db.$queryRaw<Array<{ n: bigint }>>`SELECT count(*) AS n FROM pg_locks WHERE locktype = 'advisory' AND NOT granted`;
+      if (n > 0n) return;
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    throw new Error('nothing ever waited on the reportsTo graph lock');
+  }
+  /** Is this worker's row free to lock right now (no other transaction holds it)? */
+  const rowFree = (id: string) => db.$transaction(async (t) => {
+    await t.$queryRaw`SELECT id FROM workers WHERE id = ${id} FOR UPDATE NOWAIT`;
+  }).then(() => true, () => false);
+  /** Hold `appId`'s graph lock in a transaction until `release()`; `during` runs inside it first. */
+  function holdGraph(appId: string, during: (tx: any) => Promise<void> = async () => {}) {
+    let release!: () => void;
+    const held = new Promise<void>((r) => { release = r; });
+    let ready!: () => void;
+    const isReady = new Promise<void>((r) => { ready = r; });
+    const done = db.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${'worker-reports-to:' + appId}))`;
+      await during(tx);
+      ready();
+      await held;
+    }, { timeout: 30_000 });
+    return { isReady, release: () => { release(); return done; } };
+  }
+
+  it('a support session (impersonation) is refused, and nothing is written', async () => {
+    const support = ctx(admin.id, { impersonation: { orgId: org.id } as Context['impersonation'] });
+    expect(await codeOf(set(support, dan.id, ada.id))).toBe('FORBIDDEN');
+    expect(await reportsToOf(dan)).toBeNull();
+    expect(await events(dan)).toHaveLength(0);
+  });
+
+  it('a platform role only the token still carries grants nothing (roles are re-read in the transaction)', async () => {
+    const former = await user(10);
+    await db.orgMember.create({ data: { id: generateId(), organizationId: org.id, userId: former.id, role: 'CONTRIBUTOR' } });
+    expect(await codeOf(set(ctx(former.id, { roles: ['ADMIN'] }), dan.id, ada.id))).toBe('WORKER_REPORTS_TO_FORBIDDEN');
+    // The same role on the user row does manage.
+    await db.user.update({ where: { id: former.id }, data: { roles: ['ADMIN'] } });
+    await set(ctx(former.id, { roles: ['ADMIN'] }), dan.id, ada.id);
+    expect(await reportsToOf(dan)).toBe(ada.id);
+  });
+
+  it('at bind too, a platform role only the token carries cannot move a claimed worker', async () => {
+    await set(ctx(admin.id), dan.id, ada.id);
+    const former = await user(11);
+    await db.orgMember.create({ data: { id: generateId(), organizationId: org.id, userId: former.id, role: 'CONTRIBUTOR' } });
+    const bind = (c: Context) => M.startSession({}, { input: { id: generateId(), workerRef: dan.id, force: true, reportsTo: marco.id } }, c);
+    expect(await codeOf(bind(ctx(former.id, { roles: ['ADMIN'] })))).toBe('WORKER_REPORTS_TO_HELD');
+    expect(await reportsToOf(dan)).toBe(ada.id);
+  });
+
+  it("an owner-role manager's membership is held through the write: a demotion waits for it", async () => {
+    // Pause the setter after its authority holds: a barrier holds Dan's row.
+    let release!: () => void;
+    const held = new Promise<void>((r) => { release = r; });
+    let locked!: () => void;
+    const isLocked = new Promise<void>((r) => { locked = r; });
+    const barrier = db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM workers WHERE id = ${dan.id} FOR UPDATE`;
+      locked();
+      await held;
+    }, { timeout: 30_000 });
+    await isLocked;
+    const setting = set(ctx(appOwnerMember.id), dan.id, ada.id);
+    let demoted = false;
+    let demotion: Promise<void> = Promise.resolve();
+    let demotedWhileWriting = true;
+    try {
+      // The setter now holds the graph lock and the owner's app_members row, and
+      // its writer waits on Dan's row. Wait for THAT statement specifically: an
+      // unrelated waiter (the event-driven matcher, say) must not release us early.
+      for (let i = 0; ; i++) {
+        const [{ n }] = await db.$queryRaw<Array<{ n: bigint }>>`
+          SELECT count(*) AS n FROM pg_stat_activity
+          WHERE datname = current_database() AND wait_event_type = 'Lock'
+            AND query LIKE '%reports_to_worker_id FROM workers%FOR UPDATE%'`;
+        if (n > 0n) break;
+        if (i > 400) throw new Error("the setter's writer never waited on Dan's row");
+        await new Promise((r) => setTimeout(r, 25));
+      }
+      demotion = db.appMember.update({
+        where: { appId_userId: { appId: app.id, userId: appOwnerMember.id } }, data: { role: 'member' },
+      }).then(() => { demoted = true; });
+      await new Promise((r) => setTimeout(r, 400));
+      demotedWhileWriting = demoted;
+    } finally {
+      release();
+      await barrier;
+    }
+    expect(demotedWhileWriting).toBe(false);
+    await setting;
+    await demotion;
+    // The write was authorized by the role it held throughout; the demotion is ordered after it.
+    expect(await reportsToOf(dan)).toBe(ada.id);
+    expect(await codeOf(set(ctx(appOwnerMember.id), dan.id, null))).toBe('WORKER_REPORTS_TO_FORBIDDEN');
+  });
+
+  it('retirement takes the graph lock before the worker row (no setter/retire deadlock)', async () => {
+    const graph = holdGraph(app.id);
+    await graph.isReady;
+    const retiring = M.retireWorker({}, { workerRef: ada.id }, ctx(admin.id));
+    let freeWhileWaiting = false;
+    try {
+      await untilAdvisoryWaiter();
+      freeWhileWaiting = await rowFree(ada.id);
+    } finally {
+      await graph.release();
+    }
+    expect(freeWhileWaiting).toBe(true);
+    await retiring;
+  });
+
+  it('a bind that sets reportsTo takes the graph lock before the worker row (no setter/bind deadlock)', async () => {
+    const graph = holdGraph(app.id);
+    await graph.isReady;
+    const binding = M.startSession({}, { input: { id: generateId(), workerRef: dan.id, reportsTo: ada.id } }, ctx(member.id));
+    let freeWhileWaiting = false;
+    try {
+      await untilAdvisoryWaiter();
+      freeWhileWaiting = await rowFree(dan.id);
+    } finally {
+      await graph.release();
+    }
+    expect(freeWhileWaiting).toBe(true);
+    await binding;
+    expect(await reportsToOf(dan)).toBe(ada.id);
+  });
+
+  it("a coordinating task write waits on the graph before any worker row, and sees a chain cleared meanwhile", async () => {
+    await set(ctx(admin.id), dan.id, ada.id);
+    const t = await asWorker(dan, () => M.createAgentTask({}, { input: { appRef: app.id, title: 'Fix it', assignee: { worker: liam.id } } }, ctx(member.id)));
+    // A writer clears Dan → Ada, uncommitted, while Ada's reassign is in flight.
+    const graph = holdGraph(app.id, (tx) => writeReportsTo(tx, {
+      workerId: dan.id, to: null, actor: { userId: admin.id, workerId: null, agentId: null }, setBy: 'app-manager',
+    }).then(() => undefined));
+    await graph.isReady;
+    const reassigning = codeOf(asWorker(ada, () => M.reassignAgentTask({}, { taskId: t.id, assignee: { worker: marco.id } }, ctx(member.id))));
+    let adaFree = false;
+    try {
+      await untilAdvisoryWaiter();
+      adaFree = await rowFree(ada.id);
+    } finally {
+      await graph.release();
+    }
+    expect(adaFree).toBe(true);
+    expect(await reassigning).toBe('TASK_NOT_OWNER');
+    expect((await db.agentTask.findUniqueOrThrow({ where: { id: t.id } })).assigneeWorkerId).toBe(liam.id);
+  });
+});

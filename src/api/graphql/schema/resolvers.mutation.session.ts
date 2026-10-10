@@ -35,7 +35,7 @@ import { emitNodeUrnV2 } from '../../../lib/urnEmit.js';
 import { resolveWorkerRef as resolveWorkerRefId } from '../../../lib/entityRef/workerRef.js';
 import { isId } from '../../../lib/entityRef/shape.js';
 import { resolveWorkerIdByNameGated, provisionWorkerMemory } from './resolvers.worker.js';
-import { writeReportsTo } from '../../../lib/workerReportsTo.js';
+import { lockAppReportsTo, writeReportsTo } from '../../../lib/workerReportsTo.js';
 import { eventActor } from '../../../lib/agentTasks/events.js';
 import { callerManagesAppMembers } from './resolvers.mutation.app.js';
 import { writeNodeCore } from './resolvers.mutation.node.js';
@@ -989,6 +989,22 @@ export const sessionMutations = {
         if (appId) {
           await lockSessionAppActive(tx, appId);
         }
+        // #1726: a bind that sets reportsTo is a reportsTo WRITER. It takes the
+        // App's graph lock, then holds the caller's own authority rows (users,
+        // app_members, org_members) FOR SHARE, all BEFORE the worker row below
+        // (the lock protocol, src/lib/workerReportsTo.ts; #1737 review, Diego
+        // P2-2, Rook P2-1). A demotion or role removal then commits first and is
+        // seen, or waits for this bind.
+        if (reportsToId && appId) {
+          await lockAppReportsTo(tx, appId);
+          if (ctx.userId) {
+            await tx.$queryRaw`SELECT 1 FROM users WHERE id = ${ctx.userId} FOR SHARE`;
+            await tx.$queryRaw`SELECT 1 FROM app_members WHERE app_id = ${appId} AND user_id = ${ctx.userId} FOR SHARE`;
+            await tx.$queryRaw`
+              SELECT 1 FROM org_members m JOIN apps a ON a.organization_id = m.organization_id
+              WHERE a.id = ${appId} AND m.user_id = ${ctx.userId} FOR SHARE OF m`;
+          }
+        }
         // #1625 review (Baloo P2-2, P2-3): EVERY worker bind takes the Worker
         // row lock, the same lock a lapsed-session resume takes (after the App
         // lock, in the same order), including a bind of a name the caller
@@ -1189,7 +1205,11 @@ export const sessionMutations = {
               }
               if (from === null) return 'bind';
               const bindApp = await tx.app.findUniqueOrThrow({ where: { id: bindAppId }, select: { ownerUserId: true, organizationId: true } });
-              if (await callerManagesAppMembers({ ...ctx, db: tx as unknown as Context['db'] }, bindApp, bindAppId)) return 'app-manager';
+              // Platform roles as the user row holds them now (held FOR SHARE
+              // above), never the request's: a stale token grants nothing.
+              const me = await tx.user.findUnique({ where: { id: ctx.userId }, select: { roles: true, deletedAt: true } });
+              const roles = me && !me.deletedAt ? (me.roles as Context['roles']) : [];
+              if (await callerManagesAppMembers({ ...ctx, roles, db: tx as unknown as Context['db'] }, bindApp, bindAppId)) return 'app-manager';
               throw new GraphQLError(
                 'This worker already reports to another worker. Its current one hands it over (setWorkerReportsTo), or whoever manages the App changes it.',
                 { extensions: { code: 'WORKER_REPORTS_TO_HELD', workerId, reportsTo: from } },

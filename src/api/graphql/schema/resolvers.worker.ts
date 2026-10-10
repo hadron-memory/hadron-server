@@ -50,9 +50,12 @@ import { idleCutoffs, toNaiveUtc } from '../../../lib/sessionActivity.js';
 import { userUrn } from '../../../lib/userHandle.js';
 import { canSeeUserPersonalFields } from '../../../lib/auth/userVisibility.js';
 import { participantAppWhere } from '../../../lib/auth/appParticipation.js';
-import { writeReportsTo } from '../../../lib/workerReportsTo.js';
+import { lockAppReportsTo, writeReportsTo } from '../../../lib/workerReportsTo.js';
 import { currentActor } from '../../../lib/requestActor.js';
 import { callerManagesAppMembers } from './resolvers.mutation.app.js';
+import { withAuthorizedTx } from './authorizedTx.js';
+import { resolveTaskActor, type TaskApp } from './resolvers.agentTask.js';
+import type { AuthorityAnchor } from '../../../lib/auth/authorityAnchors.js';
 import { eventActor } from '../../../lib/agentTasks/events.js';
 import {
   type Context,
@@ -940,6 +943,9 @@ export const workerMutations = {
     const app = await ctx.db.app.findUniqueOrThrow({ where: { id: worker.appId } });
     await requireWorkerStaffAccess(ctx, app);
     await ctx.db.$transaction(async (tx) => {
+      // #1726: the reportsTo graph lock BEFORE the worker row (the lock
+      // protocol in src/lib/workerReportsTo.ts; #1737 review, Diego P2-2).
+      await lockAppReportsTo(tx, worker.appId);
       const retired = await tx.worker.updateMany({
         where: { id: worker.id, retiredAt: null },
         data: { retiredAt: new Date(), retiredBy: ctx.userId ?? null },
@@ -977,25 +983,68 @@ export const workerMutations = {
     { workerRef, reportsTo }: { workerRef: string; reportsTo?: string | null },
     ctx: Context,
   ) => {
+    // Identity-scoped: a support session never changes the team's structure
+    // (#1737 review, Diego P2-1; the read-only plugin refuses it too).
+    if (ctx.impersonation) {
+      throw new GraphQLError('Impersonation sessions are read-only.', { extensions: { code: 'FORBIDDEN' } });
+    }
     const worker = await resolveWorkerRefRow(ctx, workerRef);
     const app = await ctx.db.app.findUniqueOrThrow({ where: { id: worker.appId } });
     await requireWorkerReadAccess(ctx, app);
     const to = reportsTo ? (await resolveWorkerRefRow(ctx, reportsTo)).id : null;
-    const actingWorkerId = ctx.userId && !ctx.impersonation ? currentActor().workerId : null;
-    await ctx.db.$transaction(async (tx) => {
-      await writeReportsTo(tx, {
-        workerId: worker.id, appId: worker.appId, to, actor: eventActor(ctx.userId), setBy: 'app-manager',
-        authorize: async (from) => {
-          if (actingWorkerId && from !== null && actingWorkerId === from) return 'current';
-          if (actingWorkerId && from === null && to === actingWorkerId) return 'claimant';
-          if (await callerManagesAppMembers({ ...ctx, db: tx as unknown as Context['db'] }, app, app.id)) return 'app-manager';
-          throw new GraphQLError(
-            'Only the worker this one reports to, a worker claiming an unclaimed one for itself, or whoever manages the App may change who it reports to.',
-            { extensions: { code: 'WORKER_REPORTS_TO_FORBIDDEN', workerId: worker.id } },
-          );
+    const forbidden = () => new GraphQLError(
+      'Only the worker this one reports to, a worker claiming an unclaimed one for itself, or whoever manages the App may change who it reports to.',
+      { extensions: { code: 'WORKER_REPORTS_TO_FORBIDDEN', workerId: worker.id } },
+    );
+    // #1737 review (Rook P2-1, Diego P2-1): the authority is decided under the
+    // App's anchors, on the transaction context (platform roles re-read from
+    // the user row, a deleted or uninstalled App refused), with the caller's
+    // App membership held FOR SHARE, so a demotion, an org-role change or an
+    // uninstall either committed first and is seen, or waits for this write.
+    // Lock order per src/lib/workerReportsTo.ts: anchors, the graph, then rows.
+    const anchors: AuthorityAnchor[] = [
+      { kind: 'app', id: app.id },
+      ...(app.organizationId ? [{ kind: 'org' as const, id: app.organizationId }] : []),
+      ...(app.ownerUserId ? [{ kind: 'user' as const, id: app.ownerUserId }] : []),
+    ];
+    try {
+      await withAuthorizedTx(
+        ctx,
+        anchors,
+        async () => {},
+        async (tx, txCtx) => {
+          const fresh = await tx.app.findUniqueOrThrow({ where: { id: app.id } });
+          await writeReportsTo(tx, {
+            workerId: worker.id, appId: worker.appId, to, actor: eventActor(ctx.userId), setBy: 'app-manager',
+            authorize: async (from) => {
+              // The worker arms: the request's bound worker, re-resolved here
+              // (a person behind it, not retired, still able to drive this App).
+              const actor = await resolveTaskActor(txCtx, fresh as unknown as TaskApp);
+              const acting = actor?.kind === 'worker' ? actor.workerId : null;
+              if (acting && from !== null && acting === from) return 'current';
+              if (acting && from === null && to === acting) return 'claimant';
+              if (await callerManagesAppMembers(txCtx, fresh, fresh.id)) return 'app-manager';
+              throw forbidden();
+            },
+          });
         },
-      });
-    });
+        {
+          afterLock: async (tx) => {
+            await lockAppReportsTo(tx, app.id);
+            if (ctx.userId) {
+              await tx.$queryRaw`SELECT 1 FROM app_members WHERE app_id = ${app.id} AND user_id = ${ctx.userId} FOR SHARE`;
+            }
+          },
+        },
+      );
+    } catch (e) {
+      if (!(e instanceof Error && e.message === 'Forbidden')) throw e;
+      const now = await ctx.db.app.findUnique({ where: { id: app.id }, select: { deletedAt: true, uninstalledAt: true } });
+      if (now && !now.deletedAt && now.uninstalledAt) {
+        throw new GraphQLError('This App is uninstalled; its team structure is read-only.', { extensions: { code: 'APP_UNINSTALLED' } });
+      }
+      throw forbidden();
+    }
     return ctx.db.worker.findUniqueOrThrow({ where: { id: worker.id } });
   },
 

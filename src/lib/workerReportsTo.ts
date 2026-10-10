@@ -12,11 +12,26 @@
  * (the row holds only the current one). Authority (who may make the change) is
  * the caller's: this module decides only whether the change is well-formed.
  *
- * CONCURRENCY. Two changes in one App could each pass the cycle check and
- * together close a loop (A → B while B → A). Every write therefore takes one
- * advisory lock per App first, so the checks and writes in an App run one at a
- * time. The worker rows are then locked FOR UPDATE, which also orders a write
- * against `retireWorker`.
+ * CONCURRENCY: ONE LOCK PROTOCOL for every path that writes the graph or
+ * decides authority from it (#1737 review: Diego P2-2, P2-3; Rook P2-1).
+ *
+ *   1. authority anchors (`withAuthorizedTx`), when the path takes them;
+ *   2. the App's reportsTo GRAPH lock ({@link lockAppReportsTo}): EXCLUSIVE
+ *      for a writer (a set, a bind's `reportsTo`, a retirement), SHARED for a
+ *      reader whose authority depends on the graph (every task write,
+ *      `inTaskWriteTx`);
+ *   3. membership rows (`app_members`, `org_members`, `users`) FOR SHARE;
+ *   4. worker rows.
+ *
+ * The graph lock comes BEFORE any worker row on every path. A path that locked
+ * a worker first and then waited on the graph lock would deadlock with a
+ * writer holding the graph lock and waiting on that worker. Holding it shared,
+ * a reader sees a graph no writer can change before it commits, so the chain
+ * walk needs no row locks of its own.
+ *
+ * The exclusive lock also serializes the writes themselves: two changes on
+ * disjoint rows could each pass the cycle check and together close a loop
+ * (Marco → Dan and Liam → Ada while Ada → Marco and Dan → Liam exist).
  */
 
 import { GraphQLError } from 'graphql';
@@ -33,9 +48,15 @@ function refusal(code: string, message: string, extensions: Record<string, unkno
   return new GraphQLError(message, { extensions: { ...extensions, code } });
 }
 
-/** Serialize every reportsTo change in one App (see the module header). */
-export async function lockAppReportsTo(tx: Tx, appId: string): Promise<void> {
-  await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${'worker-reports-to:' + appId}))`;
+/**
+ * The App's reportsTo graph lock (see the module header): `exclusive` for a
+ * writer, `shared` for a reader deciding authority from the graph. Re-entrant
+ * within a transaction; never upgrade (take `exclusive` first if you will write).
+ */
+export async function lockAppReportsTo(tx: Tx, appId: string, mode: 'exclusive' | 'shared' = 'exclusive'): Promise<void> {
+  const key = 'worker-reports-to:' + appId;
+  if (mode === 'shared') await tx.$executeRaw`SELECT pg_advisory_xact_lock_shared(hashtext(${key}))`;
+  else await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${key}))`;
 }
 
 /**
