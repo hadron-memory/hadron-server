@@ -6271,7 +6271,7 @@ export const typeDefs = `#graphql
     """
     #1705 — one agent task, or null when it does not exist or the caller may
     not read it (no existence oracle). Readers: the App's participants, workers
-    acting through their sessions included (cor:agt:050:21).
+    acting through their sessions included (hrn:node:hadronmemory.com:specs:cor:agt:050:21).
     """
     agentTask(id: ID!): AgentTask
 
@@ -6279,7 +6279,7 @@ export const typeDefs = `#graphql
     #1705 — a team App's agent tasks, newest first. Filters combine with AND;
     owner / assignee name a party of the App (a ref naming nobody matches
     nothing). queued: pending with no assignee. limit defaults to 50 (cap 200).
-    Readers: the App's participants (cor:agt:050:21); a pure App key is refused.
+    Readers: the App's participants (hrn:node:hadronmemory.com:specs:cor:agt:050:21); a pure App key is refused.
     An App you do not participate in answers APP_NOT_FOUND, exactly like an
     absent one.
     """
@@ -6303,7 +6303,7 @@ export const typeDefs = `#graphql
     agentTaskTree(root: ID!): [AgentTask!]
 
     """
-    #1705 — a team App's event stream (cor:agt:050:11), in (createdAt, id)
+    #1705 — a team App's event stream (hrn:node:hadronmemory.com:specs:cor:agt:050:11), in (createdAt, id)
     order. To read the next page pass after: the id of the last event you
     read; the cursor is the (createdAt, id) pair, so events sharing a
     timestamp are never skipped. since is a coarse time filter (strictly
@@ -6321,15 +6321,15 @@ export const typeDefs = `#graphql
     ): [AgentTeamEvent!]!
 
     """
-    #1706 — an App's effective stall windows (cor:agt:050:14–:17). Readers:
-    the App's task audience (cor:agt:050:21).
+    #1706 — an App's effective stall windows (hrn:node:hadronmemory.com:specs:cor:agt:050:14–:17). Readers:
+    the App's task audience (hrn:node:hadronmemory.com:specs:cor:agt:050:21).
     """
     agentTaskStallSchedule(appRef: ID!): AgentTaskStallSchedule!
 
     """
     #1706 — every worker and model-family availability record in an App
-    (cor:agt:060:02 / :03), each with whether it is in effect now. Readers: the
-    App's task audience (interim until cor:agt:060:02's read question is ruled).
+    (hrn:node:hadronmemory.com:specs:cor:agt:060:02 / :03), each with whether it is in effect now. Readers: the
+    App's task audience (interim until hrn:node:hadronmemory.com:specs:cor:agt:060:02's read question is ruled).
     """
     teamAvailability(appRef: ID!): TeamAvailability!
 
@@ -7950,7 +7950,7 @@ export const typeDefs = `#graphql
   type Mutation {
 
     """
-    #1705 — create an agent task (cor:agt:050:06 root, :07 child). Writes
+    #1705 — create an agent task (hrn:node:hadronmemory.com:specs:cor:agt:050:06 root, :07 child). Writes
     task.created, and task.assigned when an assignee is named. A worker acts
     through its session (X-Hadron-Session); a person acts as themselves.
     Typed refusals: TASK_NOT_FOUND (a parent the caller cannot read, or in
@@ -7959,7 +7959,7 @@ export const typeDefs = `#graphql
     App), TASK_OWNER_INVALID, TASK_ASSIGNEE_INVALID, SESSION_NOT_BOUND,
     APP_NOT_FOUND (an App that does not exist or that you do not participate
     in, alike), APP_UNINSTALLED, FORBIDDEN (impersonation), BAD_USER_INPUT.
-    "Whoever manages the App" is strict (cor:acl:010:01): a user-owned App's
+    "Whoever manages the App" is strict (hrn:node:hadronmemory.com:specs:cor:acl:010:01): a user-owned App's
     owner, or the org's ADMINs and OWNERs. Every write re-checks the caller's
     participation and the App's state inside its transaction.
     """
@@ -7967,7 +7967,7 @@ export const typeDefs = `#graphql
 
     """
     #1705 — assign a queued task (pending, no assignee): the task's owner or
-    whoever manages the App (cor:agt:050:09). closeSessionWhenDone, when
+    whoever manages the App (hrn:node:hadronmemory.com:specs:cor:agt:050:09). closeSessionWhenDone, when
     given, replaces the task's value. Refusals: TASK_NOT_FOUND, TASK_NOT_OWNER,
     TASK_ENDED, TASK_INVALID_TRANSITION (already assigned: use
     reassignAgentTask), TASK_ASSIGNEE_INVALID, SESSION_NOT_BOUND, APP_UNINSTALLED.
@@ -7976,7 +7976,7 @@ export const typeDefs = `#graphql
 
     """
     #1705 — move a task to another assignee: the task's owner, or whoever
-    manages the App (cor:agt:050:09). A started task stays started; the former
+    manages the App (hrn:node:hadronmemory.com:specs:cor:agt:050:09). A started task stays started; the former
     assignee can no longer move it. Refusals: TASK_NOT_FOUND, TASK_NOT_OWNER,
     TASK_ENDED, TASK_INVALID_TRANSITION (no assignee yet, or the same one),
     TASK_ASSIGNEE_INVALID, SESSION_NOT_BOUND, APP_UNINSTALLED.
@@ -7984,7 +7984,7 @@ export const typeDefs = `#graphql
     reassignAgentTask(taskId: ID!, assignee: AgentTaskPartyInput!, closeSessionWhenDone: Boolean): AgentTask!
 
     """
-    #1705 — start a pending task: its assignee only (cor:agt:050:08).
+    #1705 — start a pending task: its assignee only (hrn:node:hadronmemory.com:specs:cor:agt:050:08).
     Refusals: TASK_NOT_FOUND, TASK_NOT_ASSIGNEE, TASK_ENDED,
     TASK_INVALID_TRANSITION, SESSION_NOT_BOUND, APP_UNINSTALLED.
     """
@@ -7992,26 +7992,26 @@ export const typeDefs = `#graphql
 
     """
     #1705 — record progress on a started task: its assignee only
-    (cor:agt:050:08). Carries no text. Refusals as startAgentTask.
+    (hrn:node:hadronmemory.com:specs:cor:agt:050:08). Carries no text. Refusals as startAgentTask.
     """
     recordAgentTaskProgress(taskId: ID!): AgentTask!
 
     """
     #1705 — finish a started task with its result: its assignee only
-    (cor:agt:050:08). A pending task is refused: start it first. Refusals as
+    (hrn:node:hadronmemory.com:specs:cor:agt:050:08). A pending task is refused: start it first. Refusals as
     startAgentTask, plus BAD_USER_INPUT for an outcome that is not one word.
     """
     finishAgentTask(taskId: ID!, result: AgentTaskResultInput!): AgentTask!
 
     """
     #1705 — cancel a pending or started task: its owner, or whoever manages
-    the App (cor:agt:050:09). Refusals: TASK_NOT_FOUND, TASK_NOT_OWNER,
+    the App (hrn:node:hadronmemory.com:specs:cor:agt:050:09). Refusals: TASK_NOT_FOUND, TASK_NOT_OWNER,
     TASK_ENDED, SESSION_NOT_BOUND, APP_UNINSTALLED.
     """
     cancelAgentTask(taskId: ID!): AgentTask!
 
     """
-    #1706 — acknowledge an alarm (cor:agt:050:20): it stops waking higher
+    #1706 — acknowledge an alarm (hrn:node:hadronmemory.com:specs:cor:agt:050:20): it stops waking higher
     owners; the stall episode goes on until the task moves. Any owner in the
     alarm's chain, and nobody else (Proposed); the time is the server's.
     Refusals: ALARM_NOT_FOUND (also for an App you do not participate in),
@@ -8021,7 +8021,7 @@ export const typeDefs = `#graphql
     acknowledgeAlarm(eventId: ID!): AgentTeamEvent!
 
     """
-    #1706 — set a worker's availability for work (cor:agt:060:08): the worker
+    #1706 — set a worker's availability for work (hrn:node:hadronmemory.com:specs:cor:agt:060:08): the worker
     itself, acting through its session, and only to UNAVAILABLE; the person
     holding its name; or whoever manages the App. Writes availability.changed.
     Refusals: WORKER_NOT_FOUND, AVAILABILITY_NOT_PERMITTED, WORKER_RETIRED,
@@ -8031,7 +8031,7 @@ export const typeDefs = `#graphql
 
     """
     #1706 — set a model family's availability for work in an App
-    (cor:agt:060:09): whoever manages the App only. Writes availability.changed.
+    (hrn:node:hadronmemory.com:specs:cor:agt:060:09): whoever manages the App only. Writes availability.changed.
     Refusals: APP_NOT_FOUND, AVAILABILITY_NOT_PERMITTED, BAD_USER_INPUT,
     SESSION_NOT_BOUND, APP_UNINSTALLED.
     """
@@ -10851,9 +10851,9 @@ export const typeDefs = `#graphql
     expiresAt: DateTime
   }
 
-  # ── #1705 Agent tasks (Task Management T1, epic #1704; cor:agt:050) ──────
+  # ── #1705 Agent tasks (Task Management T1, epic #1704; hrn:node:hadronmemory.com:specs:cor:agt:050) ──────
 
-  "An agent task's status (cor:agt:050:02). FINISHED and CANCELLED are the end states."
+  "An agent task's status (hrn:node:hadronmemory.com:specs:cor:agt:050:02). FINISHED and CANCELLED are the end states."
   enum AgentTaskStatus {
     PENDING
     STARTED
@@ -10907,7 +10907,7 @@ export const typeDefs = `#graphql
     excludeWorkers: [String!]
   }
 
-  "A finished task's result (cor:agt:050:01)."
+  "A finished task's result (hrn:node:hadronmemory.com:specs:cor:agt:050:01)."
   type AgentTaskResult {
     "One word: succeeded, failed, or a word the team chooses."
     outcome: String!
@@ -10925,9 +10925,9 @@ export const typeDefs = `#graphql
 
   """
   One piece of work a team App has assigned, or wants assigned
-  (cor:agt:050:01). The platform records who holds it, since when and how it
+  (hrn:node:hadronmemory.com:specs:cor:agt:050:01). The platform records who holds it, since when and how it
   ended; it never reads what the work is. Readable by the App's participants,
-  workers acting through their sessions included (cor:agt:050:21).
+  workers acting through their sessions included (hrn:node:hadronmemory.com:specs:cor:agt:050:21).
   """
   type AgentTask {
     id: ID!
@@ -10943,9 +10943,9 @@ export const typeDefs = `#graphql
     assignee: AgentTaskParty
     requirements: AgentTaskRequirements
     status: AgentTaskStatus!
-    "Derived (cor:agt:050:03): pending with no assignee. Never stored."
+    "Derived (hrn:node:hadronmemory.com:specs:cor:agt:050:03): pending with no assignee. Never stored."
     queued: Boolean!
-    "Derived (cor:agt:050:04): started with at least one pending or started child task. Never stored."
+    "Derived (hrn:node:hadronmemory.com:specs:cor:agt:050:04): started with at least one pending or started child task. Never stored."
     waitingOnChildren: Boolean!
     startBy: DateTime
     startedAt: DateTime
@@ -10956,7 +10956,7 @@ export const typeDefs = `#graphql
     tags: [String!]!
     """
     Whether finishing asks the assignee to end its worker session
-    (cor:agt:050:10). Set by whoever assigns; stored only in this release,
+    (hrn:node:hadronmemory.com:specs:cor:agt:050:10). Set by whoever assigns; stored only in this release,
     carried out by the host-operations slice.
     """
     closeSessionWhenDone: Boolean!
@@ -10969,7 +10969,7 @@ export const typeDefs = `#graphql
 
   """
   One append-only record of something that happened in a team App's task work
-  (cor:agt:050:11). Never changed or removed; an alarm's acknowledgement is the
+  (hrn:node:hadronmemory.com:specs:cor:agt:050:11). Never changed or removed; an alarm's acknowledgement is the
   one thing added later. payload carries ids, counts and outcome words only,
   never message or description text.
   """
@@ -10992,12 +10992,12 @@ export const typeDefs = `#graphql
     payload: JSON!
     createdAt: DateTime!
     """
-    #1706 — stall alarms only: when the stall episode began (cor:agt:050:13),
+    #1706 — stall alarms only: when the stall episode began (hrn:node:hadronmemory.com:specs:cor:agt:050:13),
     the instant of the move that began the condition. One alarm per task,
     rule and episodeStart.
     """
     episodeStart: DateTime
-    "#1706 — alarms only: who the alarm wakes and when, nearest owner first (cor:agt:050:19). Null for an ordinary event."
+    "#1706 — alarms only: who the alarm wakes and when, nearest owner first (hrn:node:hadronmemory.com:specs:cor:agt:050:19). Null for an ordinary event."
     wakes: [AgentTeamAlarmSchedule!]
   }
 
@@ -11007,9 +11007,9 @@ export const typeDefs = `#graphql
 
   """
   #1706 — one owner in an alarm's chain, and when the alarm wakes them
-  (cor:agt:050:19). The nearest owner is woken when the alarm is raised; owner
+  (hrn:node:hadronmemory.com:specs:cor:agt:050:19). The nearest owner is woken when the alarm is raised; owner
   i falls due i windows later, and is woken only while the alarm is
-  unacknowledged (cor:agt:050:20). This is the platform's record that the owner
+  unacknowledged (hrn:node:hadronmemory.com:specs:cor:agt:050:20). This is the platform's record that the owner
   is due a wake-up; delivering it is the heartbeat slice's.
   """
   type AgentTeamAlarmSchedule {
@@ -11026,7 +11026,7 @@ export const typeDefs = `#graphql
     UNAVAILABLE
   }
 
-  "Why a worker or a model family is unavailable for work (cor:agt:060:02; held was dropped, team chat #7449)."
+  "Why a worker or a model family is unavailable for work (hrn:node:hadronmemory.com:specs:cor:agt:060:02; held was dropped, team chat #7449)."
   enum AvailabilityReason {
     STALLED
     OUT_OF_TOKENS
@@ -11034,7 +11034,7 @@ export const typeDefs = `#graphql
     OTHER
   }
 
-  "Who set a worker's availability (cor:agt:060:08)."
+  "Who set a worker's availability (hrn:node:hadronmemory.com:specs:cor:agt:060:08)."
   enum AvailabilitySetter {
     "The worker itself; only ever to unavailable."
     WORKER
@@ -11042,14 +11042,14 @@ export const typeDefs = `#graphql
     HOLDER
     "Whoever manages the App."
     APP_MANAGER
-    "The stall rule (cor:agt:060:07): an alarm marked it, or its next activity cleared it."
+    "The stall rule (hrn:node:hadronmemory.com:specs:cor:agt:060:07): an alarm marked it, or its next activity cleared it."
     STALL_RULE
     "A host that registered the worker (the host-operations slice)."
     HOST
   }
 
   """
-  #1706 — one worker's availability for work (cor:agt:060:02). A worker with
+  #1706 — one worker's availability for work (hrn:node:hadronmemory.com:specs:cor:agt:060:02). A worker with
   no record is available.
   """
   type WorkerAvailability {
@@ -11066,15 +11066,15 @@ export const typeDefs = `#graphql
     """
     Whether this record makes the worker unavailable right now: unavailable,
     not lapsed, and (for STALLED) the worker has not acted since it was set
-    (cor:agt:060:07).
+    (hrn:node:hadronmemory.com:specs:cor:agt:060:07).
     """
     inEffect: Boolean!
   }
 
-  "#1706 — one model family's availability for work in one App (cor:agt:060:03). A family with no record is available."
+  "#1706 — one model family's availability for work in one App (hrn:node:hadronmemory.com:specs:cor:agt:060:03). A family with no record is available."
   type ModelFamilyAvailability {
     appId: ID!
-    "The model family, e.g. claude or codex (cor:agt:060:04)."
+    "The model family, e.g. claude or codex (hrn:node:hadronmemory.com:specs:cor:agt:060:04)."
     family: String!
     state: AvailabilityState!
     reason: AvailabilityReason
@@ -11162,18 +11162,18 @@ export const typeDefs = `#graphql
   }
 
   """
-  #1706 — an App's effective stall windows, in minutes (cor:agt:050:14–:17).
+  #1706 — an App's effective stall windows, in minutes (hrn:node:hadronmemory.com:specs:cor:agt:050:14–:17).
   Tunables, not contract: the platform defaults are 15, 60, 20 and 30.
   """
   type AgentTaskStallSchedule {
     appId: ID!
-    "Not started (cor:agt:050:14): counted from the assignment when the task has no later start-by time."
+    "Not started (hrn:node:hadronmemory.com:specs:cor:agt:050:14): counted from the assignment when the task has no later start-by time."
     notStartedMinutes: Int!
-    "No progress (cor:agt:050:15). Also the escalation step for that alarm."
+    "No progress (hrn:node:hadronmemory.com:specs:cor:agt:050:15). Also the escalation step for that alarm."
     noProgressMinutes: Int!
-    "Owner didn't react to a finished child task (cor:agt:050:16)."
+    "Owner didn't react to a finished child task (hrn:node:hadronmemory.com:specs:cor:agt:050:16)."
     ownerReactionMinutes: Int!
-    "Couldn't be assigned (cor:agt:050:17)."
+    "Couldn't be assigned (hrn:node:hadronmemory.com:specs:cor:agt:050:17)."
     assignmentMinutes: Int!
     "When the App last changed them; null while every window is the default."
     updatedAt: DateTime
@@ -11209,8 +11209,8 @@ export const typeDefs = `#graphql
 
   """
   createAgentTask input. A ROOT task names appRef; any App participant may
-  create one (cor:agt:050:06). A CHILD task names parentTaskId; only the
-  parent's assignee may create one, and it owns it (cor:agt:050:07).
+  create one (hrn:node:hadronmemory.com:specs:cor:agt:050:06). A CHILD task names parentTaskId; only the
+  parent's assignee may create one, and it owns it (hrn:node:hadronmemory.com:specs:cor:agt:050:07).
   """
   input CreateAgentTaskInput {
     "The team App (id or URN). Required for a root task; for a child task it is taken from the parent and, if given, must match."
@@ -11229,7 +11229,7 @@ export const typeDefs = `#graphql
     requirements: AgentTaskRequirementsInput
     startBy: DateTime
     tags: [String!]
-    "Defaults to true (cor:agt:050:10)."
+    "Defaults to true (hrn:node:hadronmemory.com:specs:cor:agt:050:10)."
     closeSessionWhenDone: Boolean
   }
 `;
