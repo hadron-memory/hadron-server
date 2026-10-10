@@ -10451,21 +10451,23 @@ export const typeDefs = `#graphql
     so this works for B2C / consumer / therapy use cases where the
     end-user is not in the App's operator org.
 
-    Role defaults to the first value in the Agent's
-    installationPolicy.memberRoles (the conventional "guest" or "owner"
-    slot). Idempotent — if the user is already an AppMember of the App,
-    the existing row is returned.
+    #1714: self-join is closed by default. It is open only when the App's
+    primary Agent declares installation_policy.selfJoinRole, which must be
+    one of its memberRoles and is never "owner"; the joiner gets that role.
+    Promotion to owner or any privileged role is ensureAppMember, by an App
+    manager. Idempotent — if the user is already an AppMember of the App,
+    the existing row is returned, before the gate is consulted.
 
     Error codes (GraphQLError extensions.code, Error.name style):
       - UNAUTHENTICATED — no logged-in user in context.
       - AppNotFoundError — the App does not exist or is soft-deleted.
       - AppUninstalledError — the App is in the spec-021 soft-uninstall
         lifecycle phase.
-      - OrphanAppError — the App has no installed Agents (so there's
-        no Agent.installationPolicy to consult).
-      - NoMemberRolesError — the primary Agent's
-        installation_policy.memberRoles is empty, so joinApp can't
-        pick a default role.
+      - SelfJoinNotAllowedError — the App's Agent has not opted into
+        self-service joining (including an App with no installed Agent).
+        Checked before capacity, so it reveals nothing about maxMembers.
+      - OrphanAppError — the App lost its installed Agents while the
+        join was in flight.
       - MaxMembersExceededError — the Agent's maxMembers limit is hit.
       - InvalidRoleError — the picked default role isn't accepted by
         the Agent's policy (rare; would indicate a policy update
