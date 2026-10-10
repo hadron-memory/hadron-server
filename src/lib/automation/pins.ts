@@ -3,6 +3,7 @@
 import { createHash } from 'node:crypto';
 import type { PrismaClient, AppRun } from '../../generated/prisma/index.js';
 import { canonicalizeAutomationJson } from './format.js';
+import { runAuthContext } from '../auth/runPrincipal.js';
 import { canReadMemory } from '../../mcp/access-control.js';
 import type { AuthContext } from '../../middleware/auth.js';
 import { NodeNotFoundError } from '../entityRef/errors.js';
@@ -17,7 +18,7 @@ export class AutomationPinError extends Error {
 export interface AutomationPin {
   format: 'hadron-automation-pin-v1'; appId: string; userId: string | null;
   entry: string; entryId: string; hash: string;
-  nodes: Record<string, { urn: string; hash: string; state: Record<string, unknown> }>;
+  nodes: Record<string, { urn: string; hash: string }>;
   edges: Record<string, string>; missing: string[];
 }
 const hash = (value: unknown) => createHash('sha256').update(canonicalizeAutomationJson(value)).digest('hex');
@@ -25,10 +26,19 @@ const json = (value: unknown) => JSON.parse(JSON.stringify(value));
 
 /** Load the complete graph, including every routing/dependency edge and
  * Mustache default-data, dot-reference and partial node. Bounds fail loudly. */
+export interface AutomationPreview extends AutomationPin {
+  nodes: Record<string, { urn: string; hash: string; state: Record<string, unknown> }>;
+}
+/** Persist only consent identities and digests. Preview bytes never leave the response. */
+export function storedAutomationPin(preview: AutomationPin): AutomationPin {
+  const { hash: _, nodes, ...base } = preview;
+  const value = { ...base, nodes: Object.fromEntries(Object.entries(nodes).map(([id, node]) => [id, { urn: node.urn, hash: node.hash }])) };
+  return { ...value, hash: hash(value) };
+}
 export async function captureAutomationPin(db: PrismaClient, appId: string, userId: string | null,
-  entry: string, organizationId: string, principal?: AuthContext): Promise<AutomationPin> {
+  entry: string, organizationId: string, principal: AuthContext): Promise<AutomationPreview> {
   const { id: entryId } = await resolveNodeRef(db, entry);
-  const nodes: AutomationPin['nodes'] = {}; const edges: AutomationPin['edges'] = {};
+  const nodes: AutomationPreview['nodes'] = {}; const edges: AutomationPin['edges'] = {};
   const missing = new Set<string>(); const pending = [entryId];
   while (pending.length) {
     const id = pending.pop()!;
@@ -36,25 +46,28 @@ export async function captureAutomationPin(db: PrismaClient, appId: string, user
     if (Object.keys(nodes).length >= 200 || Object.keys(edges).length > 1000) {
       throw new AutomationPinError('AUTOMATION_CHANGED', 'Automation graph exceeds 200 nodes or 1000 edges');
     }
-    if (principal) {
+    {
       const anchor = await db.node.findUnique({ where: { id }, select: { memoryId: true } });
       if (!anchor || !await canReadMemory(db, principal, anchor.memoryId)) {
-        throw new AutomationPinError('AUTOMATION_CHANGED', `Automation dependency ${id} is not readable by the run principal`);
+        throw new AutomationPinError('AUTOMATION_CHANGED', 'Automation dependency is not readable by its principal');
       }
     }
     const node = await db.node.findUnique({ where: { id }, select: {
       id: true, memoryId: true, loc: true, name: true, content: true, description: true, abstract: true,
       data: true, properties: true, tags: true, seq: true, nodeType: true, role: true,
-      objectType: true, isRunnable: true, revSeq: true, deletedAt: true,
+      objectType: true, isRunnable: true, revSeq: true, updatedAt: true, deletedAt: true,
       memory: { select: { urn: true, organizationId: true, class: true, userId: true,
         ownerUserId: true, appId: true, isEncrypted: true, deletedAt: true } },
       outgoingEdges: { orderBy: { id: 'asc' } },
     } });
-    if (!node || node.deletedAt || node.memory.deletedAt || node.memory.isEncrypted || node.memory.organizationId !== organizationId) {
-      throw new AutomationPinError('AUTOMATION_CHANGED', `Automation node ${id} is missing, encrypted or outside its organization`);
+    if (!node || node.deletedAt || node.memory.deletedAt || node.memory.isEncrypted || (id === entryId && node.memory.organizationId !== organizationId)) {
+      throw new AutomationPinError('AUTOMATION_CHANGED', 'Automation graph contains a missing, encrypted or out-of-scope node');
     }
+    // Static dependencies may be in another org or org-less if the shared
+    // read gate admits them. Flow hops retain resolveFlowMemory tenant bounds.
     const { outgoingEdges, ...state } = node;
-    nodes[id] = { urn: emitNodeUrnV2(node.memory.urn, node.loc), hash: hash(json(state)), state: json(state) };
+    const { updatedAt: _, ...authored } = state;
+    nodes[id] = { urn: emitNodeUrnV2(node.memory.urn, node.loc), hash: hash(json(authored)), state: json(state) };
     // Include tombstones in the edge fingerprint: add/delete/revive must not
     // erase evidence of a post-adoption graph edit.
     for (const edge of outgoingEdges) {
@@ -74,7 +87,7 @@ export async function captureAutomationPin(db: PrismaClient, appId: string, user
   }
   if (Object.keys(edges).length > 1000) throw new AutomationPinError('AUTOMATION_CHANGED', 'Automation graph exceeds 1000 edges');
   const value = { format: 'hadron-automation-pin-v1' as const, appId, userId, entry, entryId, nodes, edges, missing: [...missing].sort() };
-  const result = { ...value, hash: hash(value) };
+  const result = { ...value, hash: storedAutomationPin({ ...value, hash: '' }).hash };
   if (Buffer.byteLength(JSON.stringify(result)) > 256 * 1024) throw new AutomationPinError('AUTOMATION_CHANGED', 'Automation pin exceeds 256 KiB');
   return result;
 }
@@ -82,10 +95,19 @@ export async function captureAutomationPin(db: PrismaClient, appId: string, user
 /** Keep D20's observable failed AppRun for unresolved setup, while never
  * turning a missing graph into execution consent or swallowing infrastructure errors. */
 export async function captureSetupConsent(...args: Parameters<typeof captureAutomationPin>): Promise<unknown> {
-  try { return await captureAutomationPin(...args); }
+  try {
+    const preview = await captureAutomationPin(...args);
+    const [db, appId, userId, , organizationId] = args;
+    // Consent needs both the creator's reach and the actual execution principal's reach.
+    const principal = runAuthContext({ id: 'setup', appId, userId, organizationId });
+    for (const node of Object.values(preview.nodes)) {
+      if (!await canReadMemory(db, principal, String(node.state.memoryId))) throw new AutomationPinError('AUTOMATION_UNADOPTED', 'Automation dependency is not readable by its run principal');
+    }
+    return storedAutomationPin(preview);
+  }
   catch (e) {
     if (e instanceof NodeNotFoundError || e instanceof AutomationPinError) {
-      return { format: 'hadron-automation-unadopted-v1', message: (e as Error).message };
+      return { format: 'hadron-automation-unadopted-v1', message: 'Setup graph is missing, unreadable, encrypted or exceeds the consent bounds' };
     }
     throw e;
   }
@@ -97,6 +119,7 @@ export function parseAutomationPin(raw: unknown): AutomationPin {
   const p = raw as AutomationPin | null;
   if (!p || p.format !== 'hadron-automation-pin-v1' || !p.hash || !p.entry || !p.entryId ||
       !p.nodes || !p.edges || !Array.isArray(p.missing)) throw new AutomationPinError('AUTOMATION_UNADOPTED', 'Automation has no valid setup pin');
+  if (Object.values(p.nodes).some(node => !node || typeof node.urn !== 'string' || typeof node.hash !== 'string' || Object.keys(node).some(key => !['urn', 'hash'].includes(key)))) throw new AutomationPinError('AUTOMATION_UNADOPTED', 'Automation pin contains unsupported node data');
   const { hash: digest, ...state } = p;
   if (hash(state) !== digest) throw new AutomationPinError('AUTOMATION_CHANGED', 'Stored automation pin is corrupt');
   return p;
@@ -104,21 +127,22 @@ export function parseAutomationPin(raw: unknown): AutomationPin {
 
 /** Validate the entire setup before any hop executes, and before each effect.
  * A resumed run retains its original consent even if its trigger re-adopts. */
-export async function verifyAutomationPin(db: PrismaClient, run: AppRun, nodeUrn = run.entryNodeUrn): Promise<void> {
+export async function verifyAutomationPin(db: PrismaClient, run: AppRun, nodeUrn = run.entryNodeUrn): Promise<AutomationPreview> {
   const pin = parseAutomationPin(run.automationPin);
   if (pin.appId !== run.appId || pin.userId !== run.userId ||
       (['SCHEDULE', 'WEBHOOK', 'MANUAL'].includes(run.triggerKind) && pin.entry !== run.entryNodeUrn)) throw new AutomationPinError('AUTOMATION_CHANGED', 'Automation identity changed');
-  let current: AutomationPin;
-  try { current = await captureAutomationPin(db, run.appId, run.userId, pin.entry, run.organizationId, { appId: run.appId, userId: run.userId ?? undefined, clientId: `run:${run.id}`, organizationId: run.organizationId }); }
-  catch (e) { throw new AutomationPinError('AUTOMATION_CHANGED', `Automation graph cannot be loaded: ${(e as Error).message}`); }
+  let current: AutomationPreview;
+  try { current = await captureAutomationPin(db, run.appId, run.userId, pin.entry, run.organizationId, runAuthContext(run)); }
+  catch (e) { if (!(e instanceof AutomationPinError || e instanceof NodeNotFoundError)) throw e; throw new AutomationPinError('AUTOMATION_CHANGED', 'Automation graph is no longer available or readable'); }
   if (current.hash !== pin.hash) {
     const changedNodes = [...new Set([...Object.keys(pin.nodes), ...Object.keys(current.nodes)])]
       .filter(id => pin.nodes[id]?.hash !== current.nodes[id]?.hash).map(id => pin.nodes[id]?.urn ?? current.nodes[id]?.urn);
     const changedEdges = [...new Set([...Object.keys(pin.edges), ...Object.keys(current.edges)])].filter(id => pin.edges[id] !== current.edges[id]);
-    throw new AutomationPinError('AUTOMATION_CHANGED', `Automation changed: nodes [${changedNodes.join(', ')}], edges [${changedEdges.join(', ')}], template dependencies ${current.missing.join(', ')}`);
+    throw new AutomationPinError('AUTOMATION_CHANGED', `Automation changed: ${changedNodes.length} node(s), ${changedEdges.length} edge(s), or template dependencies changed`);
   }
   const { id } = await resolveNodeRef(db, nodeUrn);
-  if (!Object.hasOwn(pin.nodes, id)) throw new AutomationPinError('AUTOMATION_CHANGED', `Child or routed flow ${nodeUrn} is outside the adopted graph`);
+  if (!Object.hasOwn(pin.nodes, id)) throw new AutomationPinError('AUTOMATION_CHANGED', 'Child or routed flow is outside the adopted graph');
+  return current;
 }
 
 /** Poll events use their origin trigger's CURRENT consent, never the routing
@@ -136,4 +160,31 @@ export async function currentOriginPin(db: PrismaClient, runId: string): Promise
     id = run.parentRunId;
   }
   throw new AutomationPinError('AUTOMATION_UNADOPTED', 'Origin trigger is missing');
+}
+
+/** A hop's transient proof. Read only revision/authority metadata before effects:
+ * no content, template rendering, dependency recursion, or per-node queries.
+ * Edges are small and hashed because writes need not bump the source revision. */
+export async function checkAutomationRevisions(db: PrismaClient, run: AppRun, proof: AutomationPreview): Promise<void> {
+  const rows = await db.node.findMany({ where: { id: { in: Object.keys(proof.nodes) } }, select: {
+    id: true, memoryId: true, loc: true, revSeq: true, updatedAt: true, deletedAt: true,
+    memory: { select: { urn: true, organizationId: true, class: true, userId: true, ownerUserId: true, appId: true, isEncrypted: true, deletedAt: true } },
+    outgoingEdges: { orderBy: { id: 'asc' } },
+  } });
+  const metadata = (state: Record<string, unknown>) => ({ id: state.id, memoryId: state.memoryId, loc: state.loc,
+    revSeq: state.revSeq, updatedAt: state.updatedAt, deletedAt: state.deletedAt, memory: state.memory });
+  const changed = new AutomationPinError('AUTOMATION_CHANGED', 'Automation revision, dependency edges or read authority changed during the hop');
+  if (rows.length !== Object.keys(proof.nodes).length) throw changed;
+  const edges: Record<string, string> = {};
+  for (const row of rows) {
+    if (hash(json(metadata(row))) !== hash(metadata(proof.nodes[row.id].state))) throw changed;
+    for (const edge of row.outgoingEdges) edges[edge.id] = hash(json(edge));
+  }
+  if (hash(edges) !== hash(proof.edges)) throw changed;
+  const principal = runAuthContext(run);
+  for (const memoryId of new Set(rows.map(row => row.memoryId))) if (!await canReadMemory(db, principal, memoryId)) throw changed;
+  if (proof.missing.length) {
+    const OR = proof.missing.map(ref => { const boundary = ref.indexOf(':'); return { memoryId: ref.slice(0, boundary), loc: ref.slice(boundary + 1), deletedAt: null }; });
+    if (await db.node.findFirst({ where: { OR }, select: { id: true } })) throw changed;
+  }
 }

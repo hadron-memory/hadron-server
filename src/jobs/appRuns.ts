@@ -373,6 +373,8 @@ export async function consumeActionTicket(
 // ── Mint (plan §4 steps 1–2: launch gate + activation) ──────────────────────
 
 export interface MintAppRunArgs {
+  /** Internal interactive caller; never accepted from trigger/event data. */
+  consentPrincipal?: import('../middleware/auth.js').AuthContext;
   organizationId: string;
   appId: string;
   agentId?: string | null;
@@ -552,7 +554,7 @@ export async function mintAppRun(db: PrismaClient, args: MintAppRunArgs): Promis
   // inherit the parent's artifact; poll events use the origin trigger's pin.
   let automationPin: unknown = null;
   if (args.triggerKind === 'MANUAL') {
-    automationPin = await captureSetupConsent(db, args.appId, args.userId ?? null, args.entryNodeUrn, args.organizationId);
+    automationPin = await captureSetupConsent(db, args.appId, args.userId ?? null, args.entryNodeUrn, args.organizationId, args.consentPrincipal ?? { appId: args.appId, userId: args.userId ?? undefined, organizationId: args.organizationId });
   } else if (args.triggerKind === 'SCHEDULE') {
     automationPin = (await db.agentSchedule.findFirst({ where: { id: args.triggerId ?? '', appId: args.appId, deletedAt: null } }))?.automationPin;
   } else if (args.triggerKind === 'WEBHOOK') {
@@ -628,6 +630,8 @@ export interface RunNodeSpec {
 export interface RunExecutionDeps {
   /** Required consent gate, before each hop and effect. Mock explicitly in kernel-only tests. */
   verifyAutomation: (run: AppRun, nodeUrn: string) => Promise<void>;
+  checkAutomationEffect?: (run: AppRun) => Promise<void>;
+  releaseAutomationProof?: (run: AppRun) => void;
   /** Instructions for ONE flow node, templated against the merged view. */
   assemble: (run: AppRun, nodeUrn: string, view: Record<string, unknown>) => Promise<string>;
   /** Flow-relevant slice of a node's `data` (extraction spec, output flag). */
@@ -752,6 +756,7 @@ async function executeAppRunInner(
     return res.count === 1 ? 'failed' : 'skipped';
   };
 
+  const checkConsent = () => deps.checkAutomationEffect ? deps.checkAutomationEffect(run) : deps.verifyAutomation(run, run.curNodeUrn ?? run.entryNodeUrn);
   try {
     await deps.verifyAutomation(run, run.curNodeUrn ?? run.entryNodeUrn);
     // Per-ATTEMPT wall clock (D-MN-5): recomputed at each claim.
@@ -789,7 +794,7 @@ async function executeAppRunInner(
       if (hop >= MAX_RUN_HOPS) {
         return fail('MAX_HOPS_EXCEEDED', `Flow exceeded ${MAX_RUN_HOPS} hops at "${cur}" (cycle?).`);
       }
-      await deps.verifyAutomation(run, cur);
+      if (hop > 0) await deps.verifyAutomation(run, cur);
       const hopStartedAt = Date.now();
       if (Date.now() >= deadline) {
         await db.appRun.updateMany({
@@ -828,7 +833,7 @@ async function executeAppRunInner(
         // Entry lookup/assembly failures are OBSERVABLE failed runs (D20/D15).
         return fail('ASSEMBLY_FAILED', String((err as Error)?.message ?? err));
       }
-      await deps.verifyAutomation(run, cur);
+      await checkConsent();
       // Spec 049 Phase 7 (D-2026-09-13-009, plan §4.4): the attention section —
       // the run's register snapshot ∩ live Channel watermarks ∩ the attendee's
       // read-state, CPU-computed, no message content. Empty for a run with no
@@ -862,7 +867,7 @@ async function executeAppRunInner(
             spec.tools,
             {
               onToolCall: async (action, cost) => {
-                await deps.verifyAutomation(run, cur);
+                await checkConsent();
                 return checkActivation(db, runId, action, cost > 0 ? { actionCost: cost } : {});
               },
               log: (message) => hopLogs.push(message),
@@ -924,6 +929,7 @@ async function executeAppRunInner(
           return fail('ACTIVATION_DENIED', err.message); // gate said no, mid-hop
         }
         if (err instanceof ToolExecutionError) {
+          if (err.cause instanceof AutomationPinError) return fail(err.cause.code, err.cause.message);
           return fail('TOOL_FAILED', err.message); // handler threw (D21)
         }
         if (err instanceof LlmInvocationError && err.transient && Date.now() < deadline) {
@@ -990,7 +996,7 @@ async function executeAppRunInner(
 
       if (extracted) envelope = { ...envelope, ...extracted };
 
-      await deps.verifyAutomation(run, cur);
+      await checkConsent();
       // Route BEFORE writing: the last node keeps today's default
       // run-record write; interior nodes write only when they declare
       // data.output (plan §4 — no run-record spam per hop).
@@ -1005,7 +1011,7 @@ async function executeAppRunInner(
         throw err;
       }
 
-      await deps.verifyAutomation(run, cur);
+      await checkConsent();
       let writtenRef: string | null = null;
       if (spec.hasOutput || next === null) {
         // Output write — its own activation re-check (memory.write) + action budget.
@@ -1075,7 +1081,7 @@ async function executeAppRunInner(
   } catch (err) {
     // Unexpected infra error: record, don't crash the listener.
     return fail(err instanceof AutomationPinError ? err.code : 'INTERNAL', String((err as Error)?.message ?? err));
-  }
+  } finally { deps.releaseAutomationProof?.(run); }
 }
 
 /**

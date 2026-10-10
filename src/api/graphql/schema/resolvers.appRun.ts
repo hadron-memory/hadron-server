@@ -354,6 +354,7 @@ export async function mintManualRun(
       appId: app.id,
       userId: resolveRunAsSelf(ctx, input.runAsSelf),
       triggerKind: 'MANUAL',
+      consentPrincipal: ctx,
       entryNodeUrn: input.entryNodeUrn,
       eventData: {
         ...(input.eventData ?? {}),
@@ -440,7 +441,7 @@ export const appRunMutations = {
     // Spec 049 Phase 3b: the trigger's scope — readable by the caller and owned
     // by this App's context; snapshotted onto each run at mint.
     const scopeId = input.scopeRef?.trim() ? await resolveScopeForTrigger(ctx, app.id, input.scopeRef) : null;
-    const automationPin = await captureSetupConsent(ctx.db, app.id, resolveRunAsSelf(ctx, input.runAsSelf), input.entryNodeUrn, app.organizationId);
+    const automationPin = await captureSetupConsent(ctx.db, app.id, resolveRunAsSelf(ctx, input.runAsSelf), input.entryNodeUrn, app.organizationId, ctx);
     return ctx.db.agentSchedule.create({
       data: {
         id: generateId(),
@@ -544,6 +545,9 @@ export const appRunMutations = {
             ...modeFields,
             ...(input.timezone != null ? { timezone } : {}),
             ...(input.entryNodeUrn != null ? { entryNodeUrn: input.entryNodeUrn } : {}),
+            ...(input.entryNodeUrn != null || input.runAsSelf != null ? { automationPin: await captureSetupConsent(tx as never, existing.appId,
+              input.runAsSelf != null ? resolveRunAsSelf(txCtx, input.runAsSelf) : existing.userId,
+              input.entryNodeUrn ?? existing.entryNodeUrn, existing.organizationId, txCtx) as never } : {}),
             ...(input.eventData !== undefined ? { eventData: input.eventData as never } : {}),
             ...(input.policy !== undefined ? { policy: input.policy as never } : {}),
             ...(input.aiConfigName !== undefined ? { aiConfigName: input.aiConfigName } : {}),
@@ -671,7 +675,7 @@ export const appRunMutations = {
         name: input.name,
         secret: generateWebhookSecret(),
         argsSchema: (input.argsSchema ?? undefined) as never,
-        automationPin: await captureSetupConsent(tx as never, app.id, resolveRunAsSelf(ctx, input.runAsSelf), input.entryNodeUrn, app.organizationId) as never,
+        automationPin: await captureSetupConsent(tx as never, app.id, resolveRunAsSelf(ctx, input.runAsSelf), input.entryNodeUrn, app.organizationId, ctx) as never,
         entryNodeUrn: input.entryNodeUrn,
         eventData: (input.eventData ?? undefined) as never,
         policy: (input.policy ?? undefined) as never,

@@ -1,7 +1,7 @@
 /** #1719 R5b: one owner-controlled preview/re-adopt door for every trigger. */
 import { GraphQLError } from 'graphql';
-import { captureAutomationPin } from '../../../lib/automation/pins.js';
-import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
+import { captureAutomationPin, storedAutomationPin } from '../../../lib/automation/pins.js';
+import { runAuthContext, isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
 import { isStrictOwner } from '../../../lib/auth/strictOwner.js';
 import { hasAppRelationship } from '../../../lib/auth/appRelationship.js';
 import { canReadMemory } from '../../../mcp/access-control.js';
@@ -32,7 +32,7 @@ async function load(ctx: Context, input: AutomationTriggerRef) {
   return row;
 }
 async function preview(ctx: Context, row: Awaited<ReturnType<typeof load>>) {
-  const pin = await captureAutomationPin(ctx.db, row.appId, row.userId, row.entryNodeUrn, row.organizationId);
+  const pin = await captureAutomationPin(ctx.db, row.appId, row.userId, row.entryNodeUrn, row.organizationId, ctx);
   const memories = new Set(Object.values(pin.nodes).map(n => String(n.state.memoryId)));
   for (const id of memories) if (!await canReadMemory(ctx.db, ctx, id)) throw denied();
   return pin;
@@ -53,10 +53,11 @@ export const automationPinMutations = {
       async (tx, txCtx) => {
         const pin = await preview(txCtx, row);
         if (pin.hash !== input.expectedHash) throw new GraphQLError('Automation changed since preview; preview and re-adopt again.', { extensions: { code: 'AUTOMATION_CHANGED' } });
-        const data = { automationPin: pin as never, updatedBy: ctx.userId };
+        for (const node of Object.values(pin.nodes)) if (!await canReadMemory(txCtx.db, runAuthContext({ ...row, id: 'setup' }), String(node.state.memoryId))) throw denied();
+        const data = { automationPin: storedAutomationPin(pin) as never, updatedBy: ctx.userId };
         if (input.triggerKind === 'SCHEDULE') await tx.agentSchedule.update({ where: { id: row.id }, data });
         else if (input.triggerKind === 'WEBHOOK') await tx.agentWebhook.update({ where: { id: row.id }, data });
-        else await tx.manualAutomationPin.upsert({ where: { runId: row.id }, create: { runId: row.id, pin: pin as never, adoptedBy: ctx.userId }, update: { pin: pin as never, adoptedAt: new Date(), adoptedBy: ctx.userId } });
+        else await tx.manualAutomationPin.upsert({ where: { runId: row.id }, create: { runId: row.id, pin: storedAutomationPin(pin) as never, adoptedBy: ctx.userId }, update: { pin: storedAutomationPin(pin) as never, adoptedAt: new Date(), adoptedBy: ctx.userId } });
         return true;
       }, { afterLock: async tx => {
         if (input.triggerKind === 'SCHEDULE') await tx.$queryRaw`SELECT id FROM agent_schedules WHERE id = ${observed.id} FOR UPDATE`;
