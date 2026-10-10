@@ -50,6 +50,10 @@ import { idleCutoffs, toNaiveUtc } from '../../../lib/sessionActivity.js';
 import { userUrn } from '../../../lib/userHandle.js';
 import { canSeeUserPersonalFields } from '../../../lib/auth/userVisibility.js';
 import { participantAppWhere } from '../../../lib/auth/appParticipation.js';
+import { writeReportsTo } from '../../../lib/workerReportsTo.js';
+import { currentActor } from '../../../lib/requestActor.js';
+import { callerManagesAppMembers } from './resolvers.mutation.app.js';
+import { eventActor } from '../../../lib/agentTasks/events.js';
 import {
   type Context,
   requireOrgRole,
@@ -935,9 +939,62 @@ export const workerMutations = {
     const worker = await resolveWorkerRefRow(ctx, workerRef);
     const app = await ctx.db.app.findUniqueOrThrow({ where: { id: worker.appId } });
     await requireWorkerStaffAccess(ctx, app);
-    await ctx.db.worker.updateMany({
-      where: { id: worker.id, retiredAt: null },
-      data: { retiredAt: new Date(), retiredBy: ctx.userId ?? null },
+    await ctx.db.$transaction(async (tx) => {
+      const retired = await tx.worker.updateMany({
+        where: { id: worker.id, retiredAt: null },
+        data: { retiredAt: new Date(), retiredBy: ctx.userId ?? null },
+      });
+      // #1726: a retired worker reports to nobody. Workers that report TO it
+      // keep their value; the roster flags them (`reportsToRetired`) rather
+      // than the platform silently clearing a structure someone set.
+      if (retired.count > 0) {
+        await writeReportsTo(tx, { workerId: worker.id, appId: worker.appId, to: null, actor: eventActor(ctx.userId), setBy: 'retirement' });
+      }
+    });
+    return ctx.db.worker.findUniqueOrThrow({ where: { id: worker.id } });
+  },
+
+  /**
+   * setWorkerReportsTo — #1726: set, hand over or clear who a worker reports
+   * to (`reportsTo: null` clears). Well-formedness is the writer's
+   * (src/lib/workerReportsTo.ts: same App, not itself, not retired, no cycle);
+   * authority is decided here, on the value as it stands under the writer's
+   * lock:
+   *
+   * - whoever manages the App (#7790: its user-owner, owner-role members, org
+   *   ADMIN/OWNER, platform admins) may make any change;
+   * - the worker it reports to now may hand it over or clear it: doing so is
+   *   that worker's agreement;
+   * - a worker may claim one that reports to nobody, for itself.
+   *
+   * "A worker" is the caller's bound session's worker, in the same App, with a
+   * person behind the request (the #1713 interim: a bare App key may bind any
+   * session of its App, so its worker id alone proves nothing). Refused with
+   * WORKER_REPORTS_TO_FORBIDDEN otherwise.
+   */
+  setWorkerReportsTo: async (
+    _: unknown,
+    { workerRef, reportsTo }: { workerRef: string; reportsTo?: string | null },
+    ctx: Context,
+  ) => {
+    const worker = await resolveWorkerRefRow(ctx, workerRef);
+    const app = await ctx.db.app.findUniqueOrThrow({ where: { id: worker.appId } });
+    await requireWorkerReadAccess(ctx, app);
+    const to = reportsTo ? (await resolveWorkerRefRow(ctx, reportsTo)).id : null;
+    const actingWorkerId = ctx.userId && !ctx.impersonation ? currentActor().workerId : null;
+    await ctx.db.$transaction(async (tx) => {
+      await writeReportsTo(tx, {
+        workerId: worker.id, appId: worker.appId, to, actor: eventActor(ctx.userId), setBy: 'app-manager',
+        authorize: async (from) => {
+          if (actingWorkerId && from !== null && actingWorkerId === from) return 'current';
+          if (actingWorkerId && from === null && to === actingWorkerId) return 'claimant';
+          if (await callerManagesAppMembers({ ...ctx, db: tx as unknown as Context['db'] }, app, app.id)) return 'app-manager';
+          throw new GraphQLError(
+            'Only the worker this one reports to, a worker claiming an unclaimed one for itself, or whoever manages the App may change who it reports to.',
+            { extensions: { code: 'WORKER_REPORTS_TO_FORBIDDEN', workerId: worker.id } },
+          );
+        },
+      });
     });
     return ctx.db.worker.findUniqueOrThrow({ where: { id: worker.id } });
   },
@@ -2199,6 +2256,39 @@ export const workerFieldResolvers = {
       worker.heldByUserId && (await maySeeWorkerInternals(ctx, worker.appId))
         ? worker.heldAt
         : null,
+    /**
+     * #1726 — who this worker reports to. Staffing, like the hold: behind the
+     * worker read gate and masked on deny (see heldByUserId), since
+     * Session.worker reaches this type through a wider audience.
+     */
+    reportsToWorkerId: async (
+      worker: { appId: string; reportsToWorkerId?: string | null },
+      _: unknown,
+      ctx: Context,
+    ) => ((await maySeeWorkerInternals(ctx, worker.appId)) ? (worker.reportsToWorkerId ?? null) : null),
+    /** #1726 — the Worker this one reports to (same App, so the same gate), masked as reportsToWorkerId. */
+    reportsTo: async (
+      worker: { appId: string; reportsToWorkerId?: string | null },
+      _: unknown,
+      ctx: Context,
+    ) => {
+      if (!worker.reportsToWorkerId || !(await maySeeWorkerInternals(ctx, worker.appId))) return null;
+      return ctx.db.worker.findUnique({ where: { id: worker.reportsToWorkerId } });
+    },
+    /**
+     * #1726 — the worker reports to a RETIRED worker. Retirement clears the
+     * retired worker's own reportsTo but leaves the workers reporting to it
+     * alone, so a stale claim is flagged here instead of cleared silently.
+     */
+    reportsToRetired: async (
+      worker: { appId: string; reportsToWorkerId?: string | null },
+      _: unknown,
+      ctx: Context,
+    ) => {
+      if (!worker.reportsToWorkerId || !(await maySeeWorkerInternals(ctx, worker.appId))) return false;
+      const to = await ctx.db.worker.findUnique({ where: { id: worker.reportsToWorkerId }, select: { retiredAt: true } });
+      return !!to?.retiredAt;
+    },
     /** Working-state field — worker read gate, masked to null (see maySeeWorkerInternals). */
     memoryId: async (
       worker: { appId: string; memoryId: string | null },

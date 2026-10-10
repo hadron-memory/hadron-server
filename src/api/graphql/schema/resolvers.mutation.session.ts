@@ -35,6 +35,9 @@ import { emitNodeUrnV2 } from '../../../lib/urnEmit.js';
 import { resolveWorkerRef as resolveWorkerRefId } from '../../../lib/entityRef/workerRef.js';
 import { isId } from '../../../lib/entityRef/shape.js';
 import { resolveWorkerIdByNameGated, provisionWorkerMemory } from './resolvers.worker.js';
+import { writeReportsTo } from '../../../lib/workerReportsTo.js';
+import { eventActor } from '../../../lib/agentTasks/events.js';
+import { callerManagesAppMembers } from './resolvers.mutation.app.js';
 import { writeNodeCore } from './resolvers.mutation.node.js';
 import { attributedRequestActivity, recordNodeUsage, toUsageNodeRefs, trackUsageWrite } from '../../../lib/usageRecorder.js';
 import {
@@ -957,6 +960,22 @@ export const sessionMutations = {
         }
       }
 
+      // #1726: `reportsTo` at bind names a worker of the session's App (id,
+      // URN or name). Resolved here; written in the bind's transaction below.
+      const reportsToRef = input.reportsTo?.trim();
+      let reportsToId: string | null = null;
+      if (reportsToRef) {
+        if (!workerId || !appId) {
+          throw new GraphQLError('reportsTo needs a worker bind (workerRef).', { extensions: { code: 'BAD_USER_INPUT' } });
+        }
+        reportsToId = isId(reportsToRef) || hasSchemePrefix(reportsToRef)
+          ? (await resolveWorkerRefId(ctx.db, reportsToRef).catch(() => null))?.id ?? null
+          : await resolveWorkerIdByNameGated(ctx, appId, reportsToRef);
+        if (!reportsToId) {
+          throw new GraphQLError(`Worker not found: ${reportsToRef}`, { extensions: { code: 'WORKER_NOT_FOUND', workerRef: reportsToRef } });
+        }
+      }
+
       // #1617 C: sessions this bind ended as superseded. Their cached keys
       // are evicted only after the transaction commits, as endSessionFirstWins
       // does for an explicit end.
@@ -1155,6 +1174,29 @@ export const sessionMutations = {
         },
         include: SESSION_INCLUDE,
         });
+        // #1726: set who the worker reports to, in one step with the bind (a
+        // spawn brief). Only onto a worker that reports to nobody, or to the
+        // same worker (nothing to do): naming a different one would move a
+        // claimed worker, which takes whoever manages the App
+        // (WORKER_REPORTS_TO_HELD otherwise). A person must be behind the bind.
+        if (reportsToId && workerId && appId) {
+          const bindAppId = appId;
+          await writeReportsTo(tx, {
+            workerId, appId: bindAppId, to: reportsToId, actor: eventActor(ctx.userId), setBy: 'bind',
+            authorize: async (from) => {
+              if (!ctx.userId || ctx.impersonation) {
+                throw new GraphQLError('reportsTo at bind needs a person behind the request.', { extensions: { code: 'WORKER_REPORTS_TO_FORBIDDEN', workerId } });
+              }
+              if (from === null) return 'bind';
+              const bindApp = await tx.app.findUniqueOrThrow({ where: { id: bindAppId }, select: { ownerUserId: true, organizationId: true } });
+              if (await callerManagesAppMembers({ ...ctx, db: tx as unknown as Context['db'] }, bindApp, bindAppId)) return 'app-manager';
+              throw new GraphQLError(
+                'This worker already reports to another worker. Its current one hands it over (setWorkerReportsTo), or whoever manages the App changes it.',
+                { extensions: { code: 'WORKER_REPORTS_TO_HELD', workerId, reportsTo: from } },
+              );
+            },
+          });
+        }
         if (supersedes.length > 0) {
           const ids = supersedes.map((r) => r.id).filter((id) => id !== created.id);
           const endedAt = new Date();

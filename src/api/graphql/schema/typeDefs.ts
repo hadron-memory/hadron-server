@@ -4233,6 +4233,18 @@ export const typeDefs = `#graphql
     """
     heldAt: DateTime
     """
+    #1726 — the one Worker this worker reports to: a non-retired Worker of the
+    same App, never itself, never a cycle. Null reports to nobody. A property of
+    the casting, not of a session, so binding or ending a session leaves it
+    alone. Changed with setWorkerReportsTo (or reportsTo at startSession); every
+    change is a \`worker.reports-to\` team event. Masked on deny, like heldByUserId.
+    """
+    reportsToWorkerId: ID
+    "#1726 — the Worker named by reportsToWorkerId; masked likewise."
+    reportsTo: Worker
+    "#1726 — true when this worker reports to a worker that has since retired (a stale claim nothing clears automatically)."
+    reportsToRetired: Boolean!
+    """
     hadron-cli#487 — whether anyone is DRIVING this name right now.
 
     Not availability: availability is the HOLD above (\`cor:agt:020:09\`), and an
@@ -5918,6 +5930,15 @@ export const typeDefs = `#graphql
     proceed only on explicit override, never silently).
     """
     workerRef: String
+    """
+    #1726 — the worker this bind's worker reports to: an id, URN or name of a
+    worker in the session's App. Sets it in the same step as the bind (a spawn
+    brief), only when the worker reports to nobody or already to this one;
+    naming a different worker is refused (WORKER_REPORTS_TO_HELD) unless the
+    caller manages the App, and refuses the bind with it. Omitted leaves the
+    value unchanged. Needs workerRef and a person behind the request.
+    """
+    reportsTo: String
     """
     #940: take over a worker whose binding would otherwise refuse WORKER_TAKEN.
     Only meaningful with workerRef. Clients must surface the WORKER_TAKEN
@@ -10420,10 +10441,23 @@ export const typeDefs = `#graphql
     and refuses new session bindings; the row and its name reservation
     survive. Idempotent — retiring an already-retired worker returns it
     unchanged. Same authorization as castWorker. workerRef is the worker's id
-    or its URN (#991).
+    or its URN (#991). Retiring clears the worker's own reportsTo (#1726);
+    workers that report to it keep theirs and read reportsToRetired.
     """
     retireWorker(workerRef: ID!): Worker!
 
+    """
+    #1726 — set, hand over or clear (reportsTo: null) who a worker reports to:
+    a non-retired worker of the same App, never itself, never a cycle
+    (WORKER_REPORTS_TO_SELF / _OTHER_APP / _RETIRED / _CYCLE; WORKER_RETIRED
+    for a retired worker). Allowed for whoever manages the App, for the worker
+    it reports to now (handing over or clearing is its agreement), and for a
+    worker claiming one that reports to nobody, for itself
+    (WORKER_REPORTS_TO_FORBIDDEN otherwise). A worker acts through its bound
+    session, with a person behind the request. Each change is a
+    \`worker.reports-to\` team event; setting the current value changes nothing.
+    """
+    setWorkerReportsTo(workerRef: ID!, reportsTo: ID): Worker!
     """
     #1050 — release a HELD name, so somebody else can hold it.
 
@@ -11507,6 +11541,10 @@ export const typeDefs = `#graphql
     lastActiveAt: DateTime
     "When it was last assigned a task; the matcher picks the least recent (hrn:node:hadronmemory.com:specs:cor:agt:060:06)."
     lastAssignedAt: DateTime
+    "#1726 — the worker it reports to; group by this for the team's structure. Read it with lastActiveAt: nothing clears a claim automatically."
+    reportsTo: AgentTaskParty
+    "#1726 — it reports to a worker that has since retired (retirement leaves the claim; the roster flags it)."
+    reportsToRetired: Boolean!
   }
 
   "#1707 — the team roster of one App."

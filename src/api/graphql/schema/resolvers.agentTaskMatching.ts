@@ -39,5 +39,9 @@ export const agentTaskMatchingFieldResolvers = {
     waitingOn: (r: RosterRow) => r.waitingOnTaskIds,
     alarms: (r: RosterRow) => r.alarmEventIds,
     unreactedChildTask: (r: RosterRow) => r.unreactedChildTaskId,
+    reportsTo: (r: RosterRow) => (r.reportsTo
+      ? { kind: 'WORKER', id: r.reportsTo.workerId, name: r.reportsTo.name, urn: composeWorkerUrn(r.appUrn, r.reportsTo.slug) }
+      : null),
+    reportsToRetired: (r: RosterRow) => r.reportsTo?.retired ?? false,
   },
 };
