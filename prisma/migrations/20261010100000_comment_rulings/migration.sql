@@ -7,6 +7,15 @@
 -- names it; the invariants below re-create it without that column and widen
 -- the deletion-cause CHECK.
 
+-- A hidden comment (dev or self-hosted data) becomes a deleted stub, so its
+-- blanked text and any older revisions stay concealed (#1727 review, Rook
+-- P3-1): concealment keys on retracted_at from here on.
+-- Run the deferred comment-invariant checks now, so the ALTER below has no
+-- pending trigger events in this transaction.
+SET CONSTRAINTS ALL IMMEDIATE;
+UPDATE "comment_meta" SET "retracted_at" = "hidden_at", "retracted_by" = "hidden_by"
+WHERE "hidden_at" IS NOT NULL AND "retracted_at" IS NULL;
+
 ALTER TABLE "comment_meta" DROP COLUMN "hidden_at",
 DROP COLUMN "hidden_by";
 
