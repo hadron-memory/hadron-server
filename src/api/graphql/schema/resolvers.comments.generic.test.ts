@@ -13,6 +13,7 @@ import { computeApprovalHash } from '../../../lib/approvalHash.js';
 import { isCiphertext, parseDataKey } from '../../../lib/crypto.js';
 import { sessionKeyCache } from '../../../lib/sessionKeyCache.js';
 import { encryptNodeFieldsWithKey } from '../../../lib/nodeCrypto.js';
+import { buildNodeRevisionSnapshot, createNodeRevision, editorFromAuth } from '../../../lib/nodeRevisionSnapshot.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -23,6 +24,11 @@ let orgId: string;
 let memory: { id: string; urn: string };
 
 const as = (userId = admin.id): Context => ({ db, userId, roles: [] });
+/** A comment revision as the comment path wrote them before #1721 (it writes none now). */
+const legacyRevision = async (id: string) => {
+  const row = await db.node.findUniqueOrThrow({ where: { id } });
+  await createNodeRevision(db, buildNodeRevisionSnapshot(row, editorFromAuth({ userId: admin.id }), { revLabel: 'edit', changes: ['content'] }));
+};
 const M = resolvers.Mutation as unknown as Record<string, (p: unknown, a: unknown, c: Context) => Promise<any>>;
 const Q = resolvers.Query as unknown as Record<string, (p: unknown, a: unknown, c: Context) => Promise<any>>;
 const nodeUrn = (m: { urn: string }, loc: string) => `hrn:node:${m.urn}:${loc}`;
@@ -69,10 +75,10 @@ describe('generic node writes refuse comments (cor:dmo:110:04)', () => {
     expect(await mcp.callToolText('hadron_delete_node', { urn: nodeUrn(memory, c.loc) })).toMatch(/\[role_governed\]/);
   });
 
-  it('restoreNodeRevision cannot restore a comment\'s history', async () => {
+  it('restoreNodeRevision cannot restore a comment\'s (pre-#1721) history', async () => {
     const target = await node('g:5');
     const c = await comment(target.id, 'v1');
-    await M.editComment(null, { commentRef: c.id, body: 'v2', expectedRevision: 1 }, as());
+    await legacyRevision(c.id);
     const rev = await db.nodeRevision.findFirstOrThrow({ where: { nodeId: c.id } });
     expect((await errorOf(M.restoreNodeRevision(null, { revisionId: rev.id }, as()))).extensions).toMatchObject(governed);
   });
@@ -176,30 +182,36 @@ describe('#1663 review cycle', () => {
     return u;
   };
 
-  it('retract/hide blank the live row: generic node reads serve no text, and a stub\'s history is for admins only', async () => {
+  it('a delete that leaves a stub blanks the live row: generic node reads serve no text, and a stub\'s legacy history is for managers only', async () => {
     const r = await reader();
     const target = await node('st:1');
     const c = await comment(target.id, 'secret words');
-    await M.editComment(null, { commentRef: c.id, body: 'secret words v2', quote: 'q', expectedRevision: 1 }, as());
-    await M.hideComment(null, { commentRef: c.id, reason: 'abuse', expectedRevision: 2 }, as());
+    // #1721: an edit keeps no history; the snapshot below stands for a
+    // revision written before #1721, which the concealment gate still guards.
+    await legacyRevision(c.id);
+    await M.editComment(null, { commentRef: c.id, body: 'secret words v2', quote: 'q', expectedRevision: 2 }, as());
+    await M.replyToComment(null, { commentRef: c.id, body: 'keeps the stub' }, as());
+    await M.deleteComment(null, { commentRef: c.id, expectedRevision: 3 }, as());
     const raw = await db.node.findUniqueOrThrow({ where: { id: c.id } });
     expect(raw.content).toBeNull();
     expect((raw.data as { quote: string | null }).quote).toBeNull();
+    expect(JSON.stringify(raw.data)).not.toContain('secret words v2');
     const generic = await Q.node(null, { ref: c.id }, as(r.id));
     expect(generic?.content ?? null).toBeNull();
-    // The history keeps the text, for memory admins.
+    expect(await db.nodeRevision.count({ where: { nodeId: c.id } })).toBe(1);
     expect(await Q.nodeRevisions(null, { nodeRef: c.id }, { ...as(r.id), roles: ['READER'] })).toEqual([]);
     const adminHistory = await Q.nodeRevisions(null, { nodeRef: c.id }, { ...as(), roles: ['ADMIN'] });
-    expect(adminHistory.map((h: { content: string | null }) => h.content)).toContain('secret words v2');
+    expect(adminHistory.map((h: { content: string | null }) => h.content)).toEqual(['secret words']);
     const revId = (await db.nodeRevision.findFirstOrThrow({ where: { nodeId: c.id } })).id;
     expect(await Q.nodeRevision(null, { revisionId: revId }, { ...as(r.id), roles: ['READER'] })).toBeNull();
     expect(await Q.nodeRevision(null, { revisionId: revId }, { ...as(), roles: ['ADMIN'] })).not.toBeNull();
   });
 
-  it('hiding a thread frees its author\'s open-thread allowance', async () => {
+  it('deleting a thread frees its author\'s open-thread allowance, stub or not', async () => {
     const target = await node('st:2');
     const c = await comment(target.id);
-    await M.hideComment(null, { commentRef: c.id, reason: 'abuse', expectedRevision: 1 }, as());
+    await M.replyToComment(null, { commentRef: c.id, body: 'r' }, as());
+    await M.deleteComment(null, { commentRef: c.id, expectedRevision: 1 }, as());
     await comment(target.id, 'a new thread');
   });
 

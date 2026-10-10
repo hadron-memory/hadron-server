@@ -13,7 +13,8 @@ export type CommentHitInfo = {
   anchorRevision: number;
   threadRootId: string | null;
   author: string;
-  stub: 'retracted' | 'hidden' | null;
+  /** #1721 — a deleted comment kept as a stub because it has live replies. */
+  stub: 'deleted' | null;
 };
 
 /** Per comment id among `ids`, the facts its hit label needs (one batch). */
@@ -22,7 +23,7 @@ export async function commentHitInfo(db: Pick<PrismaClient, 'commentMeta' | 'edg
   const metas = await db.commentMeta.findMany({
     where: { nodeId: { in: ids }, node: { nodeType: COMMENT_NODE_TYPE } },
     select: {
-      nodeId: true, threadRootId: true, authorKey: true, retractedAt: true, hiddenAt: true,
+      nodeId: true, threadRootId: true, authorKey: true, retractedAt: true,
       target: { select: { loc: true, memoryId: true, revSeq: true } },
     },
   });
@@ -39,7 +40,7 @@ export async function commentHitInfo(db: Pick<PrismaClient, 'commentMeta' | 'edg
     anchorRevision: anchorOf.get(m.threadRootId ?? m.nodeId) ?? 0,
     threadRootId: m.threadRootId,
     author: describeAuthor(m.authorKey, names),
-    stub: m.hiddenAt ? 'hidden' : m.retractedAt ? 'retracted' : null,
+    stub: m.retractedAt ? 'deleted' : null,
   }]));
 }
 

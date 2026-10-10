@@ -1524,20 +1524,21 @@ model CommentMeta {
   /// The author (`cor:dmo:110:03`): `w:<workerId>`, `ua:<userId>:<agentId>`,
   /// `u:<userId>` or `app:<appId>`. Immutable.
   authorKey          String              @map("author_key")
+  /// #1721 — set when deleteComment leaves a stub (a top-level comment with
+  /// live replies; its text is blanked). A comment deleted without replies is
+  /// soft-deleted instead, and these record who deleted it.
   retractedAt        DateTime?           @map("retracted_at")
-  /// Actor key (the `authorKey` grammar) of whoever retracted, hid, resolved
-  /// or deleted.
+  /// Actor key (the `authorKey` grammar) of whoever deleted the comment.
   retractedBy        String?             @map("retracted_by")
-  hiddenAt           DateTime?           @map("hidden_at")
-  hiddenBy           String?             @map("hidden_by")
   resolvedAt         DateTime?           @map("resolved_at")
   resolvedBy         String?             @map("resolved_by")
   /// Mirrors the comment node's soft delete (a thread delete, or the target's
   /// soft delete), so the one-open-thread index can exclude it.
   threadDeletedAt    DateTime?           @map("thread_deleted_at")
   threadDeletedBy    String?             @map("thread_deleted_by")
-  /// `ADMIN` (deleteCommentThread) or `TARGET` (the target was soft-deleted;
-  /// restoring the target restores exactly these).
+  /// `ADMIN` (deleteCommentThread), `AUTHOR` or `MANAGER` (#1721 deleteComment,
+  /// by its author or by a memory manager), or `TARGET` (the target was
+  /// soft-deleted; restoring the target restores exactly these).
   threadDeletedCause String?             @map("thread_deleted_cause")
   createdAt          DateTime            @default(now()) @map("created_at")
 
