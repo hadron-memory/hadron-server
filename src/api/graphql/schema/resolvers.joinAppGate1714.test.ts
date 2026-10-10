@@ -143,38 +143,57 @@ describe('#1714: an opted-in App admits self-join at its declared role, and only
   });
 });
 
-// Holger's ruling on #1718 (strict, Rook P3-1): ensureAppMember gates on the
-// strict cor:acl:010:01 manager. An owner-role AppMember (the shape a stranger
-// could self-grant before #1714) and a platform admin no longer qualify.
-describe('#1718: only the strict App manager adds members or promotes to owner', () => {
+// Holger's ruling on #1718 (team chat #7790, replacing the strict ruling): an
+// owner-role AppMember has the same rights as the App's user-owner, and a
+// platform admin may manage an org App. Admitting owner-role members is safe
+// only while self-join can never produce one (Rook #7794).
+describe('#1718: who manages members (callerManagesAppMembers)', () => {
   beforeEach(async () => {
     await setPolicy({ maxMembers: 'unlimited', memberRoles: ['owner', 'member'], selfJoinRole: 'member' });
     await M.joinApp(null, { appId: app.id }, ctxFor(stranger.id));
   });
 
-  it('an owner-role AppMember is refused: no promotion and no new member', async () => {
-    const legacyOwner = await mkUser();
-    await db.appMember.create({ data: { appId: app.id, userId: legacyOwner.id, role: 'owner' } });
+  it('an owner-role AppMember CAN promote to owner and add a new member', async () => {
+    const coOwner = await mkUser();
+    await db.appMember.create({ data: { appId: app.id, userId: coOwner.id, role: 'owner' } });
     const newcomer = await mkUser();
-    await expect(M.ensureAppMember(null, { appRef: app.id, userRef: stranger.id, role: 'owner' }, ctxFor(legacyOwner.id)))
+    const promoted = await M.ensureAppMember(null, { appRef: app.id, userRef: stranger.id, role: 'owner' }, ctxFor(coOwner.id));
+    expect(promoted.role).toBe('owner');
+    const added = await M.ensureAppMember(null, { appRef: app.id, userRef: newcomer.id, role: 'member' }, ctxFor(coOwner.id));
+    expect(added.role).toBe('member');
+    expect((await member(newcomer.id))?.role).toBe('member');
+  });
+
+  it('a platform admin who is not an org member CAN promote to owner on an org App', async () => {
+    const platformAdmin = await mkUser(['ADMIN']);
+    const promoted = await M.ensureAppMember(null, { appRef: app.id, userRef: stranger.id, role: 'owner' }, ctxFor(platformAdmin.id, ['ADMIN']));
+    expect(promoted.role).toBe('owner');
+  });
+
+  it('a member-role AppMember is refused', async () => {
+    const newcomer = await mkUser();
+    await expect(M.ensureAppMember(null, { appRef: app.id, userRef: newcomer.id, role: 'member' }, ctxFor(stranger.id)))
       .rejects.toThrow(/Forbidden/);
-    await expect(M.ensureAppMember(null, { appRef: app.id, userRef: newcomer.id, role: 'member' }, ctxFor(legacyOwner.id)))
-      .rejects.toThrow(/Forbidden/);
-    expect((await member(stranger.id))?.role).toBe('member');
     expect(await member(newcomer.id)).toBeNull();
   });
 
-  it('a platform admin who is not an org manager is refused', async () => {
-    const platformAdmin = await mkUser(['ADMIN']);
-    await expect(M.ensureAppMember(null, { appRef: app.id, userRef: stranger.id, role: 'owner' }, ctxFor(platformAdmin.id, ['ADMIN'])))
-      .rejects.toThrow(/Forbidden/);
-    expect((await member(stranger.id))?.role).toBe('member');
-  });
-
-  it('an org OWNER manager succeeds', async () => {
-    const orgOwner = await mkUser();
-    await db.orgMember.create({ data: { organizationId: org.id, userId: orgOwner.id, role: 'OWNER' } });
-    const promoted = await M.ensureAppMember(null, { appRef: app.id, userRef: stranger.id, role: 'owner' }, ctxFor(orgOwner.id));
-    expect(promoted.role).toBe('owner');
+  // The invariant the ruling rests on: no self-join path yields an owner row,
+  // so no stranger becomes a member manager by joining.
+  it('self-join never grants owner, so a self-joiner never manages members', async () => {
+    for (const policy of [
+      { maxMembers: 'unlimited', memberRoles: ['owner'] },
+      { maxMembers: 'unlimited', memberRoles: ['owner', 'member'], selfJoinRole: 'owner' },
+      { maxMembers: 'unlimited', memberRoles: ['owner', 'member'] },
+    ]) {
+      await setPolicy(policy);
+      const joiner = await mkUser();
+      await M.joinApp(null, { appId: app.id }, ctxFor(joiner.id)).catch(() => undefined);
+      expect((await member(joiner.id))?.role ?? null).not.toBe('owner');
+      const victim = await mkUser();
+      await expect(M.ensureAppMember(null, { appRef: app.id, userRef: victim.id, role: 'owner' }, ctxFor(joiner.id)))
+        .rejects.toThrow(/Forbidden/);
+      expect(await member(victim.id)).toBeNull();
+    }
+    expect(await db.appMember.count({ where: { appId: app.id, role: 'owner' } })).toBe(0);
   });
 });
