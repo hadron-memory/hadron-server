@@ -54,10 +54,19 @@ describe('#1733: an org may take an undotted root', () => {
     await expect(create('acme.test')).resolves.toMatchObject({ urn: 'acme.test' });
   });
 
-  it('an org can rename between undotted and dotted roots, through the normal rename', async () => {
+  it('an org can rename between undotted and dotted roots: children follow, and old URNs still resolve', async () => {
     const org = await create('minicoders');
+    const memory = await M.createMemory({}, { orgId: org.id, name: 'notes' }, ctx());
+    const slug = memory.urn.slice('minicoders:'.length);
     await expect(rename(org.id, 'minicoders.org')).resolves.toMatchObject({ urn: 'minicoders.org' });
+    expect((await db.memory.findUniqueOrThrow({ where: { id: memory.id } })).urn).toBe(`minicoders.org:${slug}`);
     await expect(rename(org.id, 'minicoders-den')).resolves.toMatchObject({ urn: 'minicoders-den' });
+    expect((await db.memory.findUniqueOrThrow({ where: { id: memory.id } })).urn).toBe(`minicoders-den:${slug}`);
+    // The #1079 rename map: both earlier org roots, and the memory's first URN.
+    for (const old of ['hrn:org:minicoders', 'hrn:org:minicoders.org']) {
+      expect(await resolveOrgRef(db, old)).toEqual({ id: org.id });
+    }
+    expect((await resolvers.Query.memory({}, { ref: `hrn:mem:minicoders:${slug}` }, ctx()))?.id).toBe(memory.id);
   });
 
   it('an undotted root resolves to its org by lookup: the org ref, and memories under it', async () => {
@@ -80,11 +89,11 @@ describe('#1733: the shared pool and the bare-root rules still hold', () => {
     expect((await db.user.findUniqueOrThrow({ where: { id: other.id } })).handle).toBe('other');
   });
 
-  it('two orgs cannot share an undotted root, in any case', async () => {
+  it('two orgs cannot share an undotted root; a mixed-case spelling is refused before the pool', async () => {
     await create('minicoders');
     const other = await db.user.create({ data: { id: generateId(), handle: 'other2', roles: ['READER'] } });
     expect(await reasonOf(create('minicoders', other.id))).toMatch(/taken|ROOT_NAME_TAKEN/i);
-    expect(await reasonOf(create('MiniCoders', other.id))).not.toBe('NO_ERROR');
+    expect(await reasonOf(create('MiniCoders', other.id))).toBe('slug-not-lowercase');
   });
 
   it.each([
