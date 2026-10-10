@@ -546,7 +546,7 @@ export const appRunMutations = {
             ...modeFields,
             ...(input.timezone != null ? { timezone } : {}),
             ...(input.entryNodeUrn != null ? { entryNodeUrn: input.entryNodeUrn } : {}),
-            ...(input.entryNodeUrn != null || input.runAsSelf != null ? { automationPin: await captureSetupConsent(tx as never, existing.appId,
+            ...(input.entryNodeUrn != null || input.runAsSelf != null || input.aiConfigName !== undefined || agentId !== undefined ? { automationPin: await captureSetupConsent(tx as never, existing.appId,
               input.runAsSelf != null ? resolveRunAsSelf(txCtx, input.runAsSelf) : existing.userId,
               input.entryNodeUrn ?? existing.entryNodeUrn, existing.organizationId, txCtx, configSelection({ ...existing, ...input, agentId: agentId === undefined ? existing.agentId : agentId })) as never } : {}),
             ...(input.eventData !== undefined ? { eventData: input.eventData as never } : {}),
