@@ -576,9 +576,10 @@ export function provesIdle(
     // · ↓ 15.6k tokens)' above an empty Claude box, '• Working (6s • esc to
     // interrupt)' above the Codex placeholder). The fallback requires positive
     // quiet: no running-turn indicator above the prompt (@codex P2, #1700).
-    const running = term ? runningTurnAbovePrompt(term.tail as string[], agent) : null;
-    if (running !== null) return [false, 'unknown idle state — no output tracking, a running turn is drawn above the prompt'];
-    return [true, 'untracked terminal, screen proves the idle prompt and no running turn'];
+    const proof = term ? idleProofAbovePrompt(term.tail as string[], agent) : (['unknown', 'screen unreadable'] as const);
+    if (proof[0] === 'busy') return [false, 'unknown idle state — no output tracking, a running turn is drawn above the prompt'];
+    if (proof[0] === 'unknown') return [false, `unknown idle state — no output tracking, ${proof[1]}`];
+    return [true, 'untracked terminal, screen proves idle (empty prompt, positive idle chrome)'];
   }
   return [false, `busy for ${Math.round(timeoutMs / 1000)}s`];
 }
@@ -678,47 +679,59 @@ export function readScreen(cfg: Config, handle: string, run: Runner): Record<str
 const spinnerTimer = (s: string): boolean => /[（(]\d/.test(s) && /\d\s*[mh]?\s*\d*s/.test(s) && !/done/i.test(s) && !/worked for/i.test(s);
 
 /**
- * The running-turn indicator drawn above the prompt while the agent works, or
- * null when the window is quiet. The untracked-idle fallback's POSITIVE
- * liveness proof (@codex P2, #1700): composer emptiness alone cannot separate
- * an idle agent from a working one, because BOTH render an empty prompt box
- * mid-turn. What separates them is the line above the prompt:
- *  - Claude busy (live, 2026-10-09/10): '✽ Bunning… (5m 55s · ↓ 15.6k
- *    tokens)', '✶ Misting… (11s · thinking)', '(ctrl+b to run in
- *    background)' — elapsed timer IN PARENTHESES. Claude done: '✻ Sautéed
- *    for 1m 12s · done 3:52 PM' — no parentheses, carries 'done'.
- *  - Codex busy: '• Working (6s • esc to interrupt)'. Codex done: 'Worked
- *    for 1m 24s • 5:32 PM'.
- * Both agents PIN the running-turn line directly above the prompt chrome
- * while the turn runs (it does not scroll out from under the read, which
- * returns the bottom of the buffer), so a bounded window above the prompt box
- * is sufficient. An unrecognized window reads as QUIET, not busy: this
- * classifier only rejects screens that positively show work, keeping the
- * #7398 deadlock fix effective for freshly launched terminals that have no
- * done-marker yet.
+ * Lines that POSITIVELY prove the agent is not working - a completed turn, or
+ * the chrome a freshly launched (never-worked) terminal draws. Live evidence
+ * 2026-10-10, one per family:
+ *  - Claude/GLM fresh: the 'Claude Code v2.1.296' / 'glm-5.3' welcome banner;
+ *    post-trust: 'Share Claude Code ... /passes'.
+ *  - Claude done: the '✻ … for 1m 12s · done 3:52 PM' completed-turn line,
+ *    '⏺ Done.', the '※ recap:' block, '/clear to save N tokens'.
+ *  - Codex fresh: the 'OpenAI Codex (v...)' banner and its 'Update
+ *    available!' box. Codex done: 'Worked for '.
  */
-export function runningTurnAbovePrompt(lines: string[], agent: string): string | null {
+const IDLE_MARKERS: readonly RegExp[] = [
+  /· done/, /^⏺ Done/, /^Done\./,
+  /\/clear to save/, /recap:/, /Share Claude Code/,
+  /Claude Code v\d/, /glm-[\d.]/,
+  /OpenAI Codex \(v/, /Update available!/, /Worked for /,
+];
+
+/**
+ * [verdict, detail] on the window directly above the prompt chrome: 'busy'
+ * (a running-turn line is drawn), 'idle' (a positive idle/completed/
+ * fresh-launch marker, or a blank window), or 'unknown' (text recognized as
+ * NEITHER - it must hold, not nudge: a busy presentation we failed to
+ * enumerate looks exactly like this, @codex P2 #1700 round 2). The window is
+ * bounded because both agents PIN their running-turn line directly above the
+ * prompt while a turn runs; blank is safe because a working agent always
+ * draws something there.
+ */
+export function idleProofAbovePrompt(lines: string[], agent: string): ['busy' | 'idle' | 'unknown', string] {
   let at: number; // the first line of the prompt chrome
   if (agent === 'claude') {
     const rules = lines.flatMap((l, i) => (/^─{3,}[\s ]*$/.test(l) ? [i] : []));
-    if (rules.length < 2) return null;
+    if (rules.length < 2) return ['unknown', 'no prompt box'];
     at = rules[rules.length - 2];
   } else if (agent === 'codex') {
     let p = -1;
     for (let i = lines.length - 1; i >= 0; i--) {
-      if (lines[i].startsWith('›')) { p = i; break; }
+      if (lines[i].startsWith('\u203a')) { p = i; break; }
     }
-    if (p < 0) return null;
+    if (p < 0) return ['unknown', 'no prompt line'];
     at = p;
   } else {
-    return null;
+    return ['unknown', `unknown agent ${agent}`];
   }
   const window = lines.slice(Math.max(0, at - 8), at).map(squash).filter((l) => l !== '');
+  if (window.length === 0) return ['idle', 'blank'];
   for (const l of window) {
-    if (l.includes('to interrupt') || l.includes('run in background') || l.includes('Working (') || /^calling [a-z]/i.test(l)) return l;
-    if (spinnerTimer(l)) return l;
+    if (l.includes('to interrupt') || l.includes('run in background') || l.includes('Working (') || /^calling [a-z]/i.test(l)) return ['busy', l];
+    if (spinnerTimer(l)) return ['busy', l];
   }
-  return null;
+  for (const l of window) {
+    if (IDLE_MARKERS.some((re) => re.test(l))) return ['idle', 'completed or fresh-launch chrome'];
+  }
+  return ['unknown', 'unrecognized chrome above the prompt'];
 }
 
 /**

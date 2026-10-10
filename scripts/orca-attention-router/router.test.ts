@@ -20,6 +20,12 @@ const CODEX_IDLE = ['  Worked for 33s • 16:32', '› Ask Codex to do anything'
  * prompt is the only separator (@codex P2, #1700; live screens 2026-10-09/10). */
 const CLAUDE_BUSY_EMPTY = ['  ⎿ Tip: Use /btw to ask a quick side question', '  (ctrl+b to run in background)', '✽ Bunning… (5m 55s · ↓ 15.6k tokens)', RULE, '❯ ', RULE, CLAUDE_HINT];
 const CODEX_BUSY_EMPTY = ['  • Working (6s • esc to interrupt)', '› Ask Codex to do anything', '  GPT-6-Sol high · ~/orca/workspaces/hadron-server/andi · Start worker session as Andi', '  ? for shortcuts'];
+/** Fresh launches (never worked): captured live 2026-10-10 — GLM worker Cody,
+ * Codex worker Dara. Positive idle chrome, no done-marker exists yet (#1700 P2 r2). */
+const CLAUDE_FRESH = [' ▐▛███▛█   Claude Code v2.1.296', '▝▜██████▀  glm-5.3 · API Usage Billing', ' ▝▝   ▝▝   ~/orca/workspaces/hadron-server/cody', RULE, '❯ ', RULE, CLAUDE_HINT];
+const CODEX_FRESH = ['│ ✨ Update available! 0.162.0 -> 0.162.1         │', '  >_ OpenAI Codex (v0.162.0)', '     ~/orca/workspaces/hadron-server/dara', '  permissions: YOLO mode', '› Ask Codex to do anything', '  GPT-6.1-Sol default · ~/orca/workspaces/hadron-server/dara', '  ? for shortcuts'];
+/** Empty prompt, no busy marker, and nothing positively idle either — must HOLD. */
+const CLAUDE_UNKNOWN_QUIET = ['  some status output nobody classified', '  another unrecognized line', RULE, '❯ ', RULE, CLAUDE_HINT];
 const withPrompt = (screen: string[], marker: string, text: string) => {
   const i = screen.map((l) => l.trimStart().startsWith(marker)).lastIndexOf(true);
   return [...screen.slice(0, i), `${marker} ${text}`, ...screen.slice(i + 1)];
@@ -166,7 +172,7 @@ class FakeCLIs {
       // gate read plays the role a satisfied wait plays for tracked terminals.
       if (n === 1 && this.untracked.has(handle)) {
         const tailJson = JSON.stringify(sc.tail);
-        if (tailJson === JSON.stringify(CLAUDE_IDLE) || tailJson === JSON.stringify(CODEX_IDLE)) this.sawWait = true;
+        if ([CLAUDE_IDLE, CODEX_IDLE, CLAUDE_FRESH, CODEX_FRESH].some((f) => JSON.stringify(f) === tailJson)) this.sawWait = true;
       }
       return out({ ok: true, result: { terminal: { handle, source: sc.source ?? 'screen', tail: sc.tail, ...(sc.draft !== undefined ? { draft: sc.draft } : {}) } } });
     }
@@ -342,6 +348,37 @@ describe('Orca attention router — untracked terminals: unknown is not busy (#7
     expect(out.nudged).toEqual([]);
     expect(out.held.Eli).toContain('busy again after the recompute (busy for');
     expect(out.held.Eli).not.toContain('unknown');
+    expect(fake.sent).toEqual([]);
+  });
+
+  it('a FRESH Claude/GLM launch (welcome banner, no done-marker) is positively idle and delivers (#1700 P2 r2)', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli', 'claude', undefined, false);
+    fake.attention.workers = [worker('w-eli', 'Eli')];
+    fake.screens.set('term_eli', { tail: CLAUDE_FRESH }); // captured live (Cody, 2026-10-10)
+    const out = poll(c);
+    expect(out).toMatchObject({ nudged: ['Eli'], adopted: true });
+    expect(fake.freshServed).toBe(1);
+  });
+
+  it('a FRESH Codex launch (version banner above the placeholder) is positively idle and delivers (#1700 P2 r2)', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli', 'codex', undefined, false);
+    fake.attention.workers = [worker('w-eli', 'Eli')];
+    fake.screens.set('term_eli', { tail: CODEX_FRESH }); // captured live (Dara, 2026-10-10)
+    const out = poll(c);
+    expect(out).toMatchObject({ nudged: ['Eli'], adopted: true });
+  });
+
+  it('an untracked screen with NEITHER a busy marker NOR a positive idle marker HOLDS as unknown (#1700 P2 r2)', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli', 'claude', undefined, false);
+    fake.attention.workers = [worker('w-eli', 'Eli')];
+    fake.screens.set('term_eli', { tail: CLAUDE_UNKNOWN_QUIET }); // empty prompt, quiet, unclassified chrome
+    const out = poll(c);
+    expect(out.nudged).toEqual([]);
+    expect(out.held.Eli).toContain('unknown idle state');
+    expect(out.held.Eli).toContain('unrecognized chrome');
     expect(fake.sent).toEqual([]);
   });
 });
