@@ -16,7 +16,7 @@ import type { Prisma } from '../../generated/prisma/index.js';
  * live URN (e.g. a rename that predated this cascade, or a direct DB edit), a
  * prefix-matched rewrite keyed on the *current* org URN would skip that row
  * forever, and every subsequent rename would widen the gap. FK-scoping heals
- * such rows instead of stranding them. `validateOrgSlug` guarantees an org URN
+ * such rows instead of stranding them. `validateOrgRoot` guarantees an org URN
  * never contains a colon, so the first colon is an unambiguous org→slug
  * boundary; keeping everything from that colon onward preserves the `::` vs
  * legacy `:` form verbatim.
