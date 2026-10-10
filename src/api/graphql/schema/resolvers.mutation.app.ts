@@ -34,7 +34,7 @@ import {
 } from '../../../controller/operations/ensureAppMember.js';
 import {
   joinApp,
-  NoMemberRolesError,
+  SelfJoinNotAllowedError,
   AppUninstalledError,
 } from '../../../controller/operations/joinApp.js';
 import { AppNotFoundError } from '../../../lib/entityRef/errors.js';
@@ -1043,7 +1043,10 @@ export const appMutations = {
 
       // Authorization: ADMIN/OWNER of the App's owning org, the user-owner of a
       // user-owned App, or an existing owner-role AppMember (spec 047 — see
-      // callerManagesAppMembers). Self-service joins are not allowed in v1.
+      // callerManagesAppMembers). Holger's ruling on #1718 (team chat #7790,
+      // replacing the strict one): an owner-role AppMember has the user-owner's
+      // rights, and platform admins manage org Apps. That is safe only because
+      // joinApp never self-grants `owner` (#1714).
       if (!(await callerManagesAppMembers(ctx, app, resolvedAppId))) {
         throw new Error('Forbidden: only org admins or App owners can manage members');
       }
@@ -1238,7 +1241,7 @@ export const appMutations = {
           e instanceof InvalidRoleError ||
           e instanceof MaxMembersExceededError ||
           e instanceof OrphanAppError ||
-          e instanceof NoMemberRolesError ||
+          e instanceof SelfJoinNotAllowedError ||
           e instanceof AppNotFoundError ||
           e instanceof AppUninstalledError
         ) {

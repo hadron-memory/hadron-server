@@ -11,7 +11,8 @@ import {
 import { authoredContentChanged, clearNodeAuthorship } from '../../../lib/nodeAuthorship.js';
 import { lockAncestorsForCreate, lockAncestorsForCreateMany } from '../../../lib/nodeSubtreeLock.js';
 import { mintMemoryUrnV2 } from '../../../lib/mintMemoryUrnV2.js';
-import { canReadMemory } from '../../../mcp/access-control.js';
+import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
+import { canReadMemory, filterReadableMemoryIds } from '../../../mcp/access-control.js';
 import { isAgentInstalled } from '../../../lib/appAgent.js';
 import {
   parseDataKey,
@@ -2310,6 +2311,7 @@ export const sessionMutations = {
         sessionId: ctx.sessionId,
         roles: ctx.roles,
         organizationId: ctx.organizationId,
+        impersonation: ctx.impersonation,
       };
 
       const loadAndRender = async (targetNodeUrn: string) => {
@@ -2361,6 +2363,17 @@ export const sessionMutations = {
           });
         }
 
+        // #1719/#1730: reference edges are reads of their target memory.
+        // A run fails loudly rather than executing a silently shortened flow;
+        // interactive render omits unreadable targets as the preview does.
+        const readableTargets = await filterReadableMemoryIds(ctx.db, auth,
+          node.outgoingEdges.flatMap(e => e.target ? [e.target.memoryId] : []));
+        if (isRunPrincipal(auth) && node.outgoingEdges.some(e => e.target &&
+            !isRoutingName(routingNameOf(e, loc)) && !readableTargets.has(e.target.memoryId))) {
+          throw new GraphQLError('Referenced dependency is not readable by the run principal; the run was refused.', { extensions: { code: 'FORBIDDEN' } });
+        }
+        node.outgoingEdges = node.outgoingEdges.filter(e => e.target && readableTargets.has(e.target.memoryId));
+
         // Decrypt the node and its outgoing edge targets if the memory is encrypted.
         // An edge whose target was deleted can surface a null `target`; filter
         // those out so decryptNodesBatch never dereferences null.
@@ -2389,6 +2402,7 @@ export const sessionMutations = {
               (await ctx.db.memory.findUniqueOrThrow({ where: { id: memoryId }, select: { urn: true } })).urn,
             compileTemplate: (content, data, memoryId) =>
               compileTemplate(content, data, memoryId, ctx.db, {}),
+            includeTarget: target => !!target && readableTargets.has(target.memoryId),
             onTargetInlined: (target) => inlined.push(target),
           },
         );

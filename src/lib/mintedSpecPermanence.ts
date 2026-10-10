@@ -52,6 +52,7 @@
 import { GraphQLError } from 'graphql';
 import type { Prisma } from '../generated/prisma/index.js';
 import { hasSpecMarker } from './specMint.js';
+import { decisionContainedError, memoryHoldsDecisions } from './decisions/index.js';
 
 /**
  * #1591 — the permanence policy: is minted-spec permanence enforced at all?
@@ -351,6 +352,12 @@ export async function assertNoMintedCorpusRemoval(
   op: string,
   opts: { includeTombstones: boolean; remedy?: string },
 ): Promise<void> {
+  // #1641 §3.2 / Q17 — a memory holding a decision or a decision log is never
+  // removed, directly or by a parent's cascade, in v1. Ahead of the spec
+  // checks' early returns, which are about specs only. Every caller holds the
+  // memory row FOR UPDATE, which excludes a concurrent node insert (FK KEY
+  // SHARE), so no log can appear after this scan.
+  if (await memoryHoldsDecisions(tx, memoryId)) throw decisionContainedError(`Removing this memory (${op})`);
   if (!isMintedSpecPermanenceEnforced()) return;
   const [memory] = await tx.$queryRaw<Array<{ corpus_minted_at: Date | null }>>`
     SELECT corpus_minted_at FROM memories WHERE id = ${memoryId} FOR SHARE`;

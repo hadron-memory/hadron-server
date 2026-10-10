@@ -1753,6 +1753,35 @@ describe('#1717 — chat-by-loc writes', () => {
     })).toBe(0);
   });
 
+  // The platform-admin branch of chatLocFilter builds its own AND list, so it
+  // must repeat the plain-node clauses; #1690's merge assigned that list too,
+  // and a clean Git merge can keep only one side's (hand-merged on #1690).
+  it.each([
+    ['a governed review', { role: 'review' }],
+    ['a runnable node', { isRunnable: true }],
+  ])('a platform admin is refused every write against %s at a chat-shaped loc, leaving it unchanged', async (_label, extra) => {
+    await member(adminUser.id);
+    const { memoryId } = await sharedChat(adminUser.id);
+    const target = await db.node.create({ data: {
+      id: generateId(), memoryId, loc: 'chats:202610091300-cafef00d-x', name: 'target', nodeType: 'record',
+      data: { k: 1 }, createdBy: adminUser.id, ...extra,
+    } });
+    const before = await snapshot(target.id);
+    const admin = userCtx(adminUser.id, { roles: ['ADMIN'] });
+    const ops = {
+      sendChatMessage: () => resolvers.Mutation.sendChatMessage({}, { chatId: target.loc, userMessage: 'x' }, admin),
+      processChatResponse: () => resolvers.Mutation.processChatResponse(
+        {}, { chatId: target.loc, toolResponse: { message: 'x', data: null, next_stage: null } }, admin),
+      saveChatSummary: () => resolvers.Mutation.saveChatSummary({}, { chatId: target.loc, summary: 'x' }, admin),
+      updateChatTitle: () => resolvers.Mutation.updateChatTitle({}, { chatId: target.loc, title: 'renamed' }, admin),
+      deleteChat: () => resolvers.Mutation.deleteChat({}, { chatId: target.loc }, admin),
+    };
+    for (const [op, run] of Object.entries(ops)) {
+      await expect(run(), op).rejects.toThrow(/not found/i);
+    }
+    expect(await snapshot(target.id)).toEqual(before);
+  });
+
   it("refuses every write against a comment on the chat, leaving it unchanged", async () => {
     await member(adminUser.id);
     await member(otherUser.id);

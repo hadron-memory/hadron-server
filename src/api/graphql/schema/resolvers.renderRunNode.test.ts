@@ -366,6 +366,7 @@ describe('renderRunNode predicts what runTask EXECUTES (#818)', () => {
       {
         memoryUrnOf: async (memoryId: string) =>
           (await db.memory.findUniqueOrThrow({ where: { id: memoryId }, select: { urn: true } })).urn,
+        includeTarget: () => true, // this comparison fixture has same-memory targets only
         compileTemplate: (content: string, data: Record<string, string> | null, memoryId: string) =>
           compileTemplate(content, data, memoryId, db, {}),
       },

@@ -148,7 +148,7 @@ export async function assembleRunNodePrompt(
       memoryId: string,
     ) => Promise<string>;
     /** Include a referenced target? Lets a caller drop unreadable/deleted ones. */
-    includeTarget?: (target: RenderableRunNode['outgoingEdges'][number]['target']) => boolean;
+    includeTarget: (target: RenderableRunNode['outgoingEdges'][number]['target']) => boolean | Promise<boolean>;
     /**
      * #1061 — called once per target actually INLINED. Routing edges and
      * empty-content targets are skipped below, so a caller that recorded usage
@@ -168,7 +168,7 @@ export async function assembleRunNodePrompt(
     if (isRoutingName(routingNameOf(edge as never, node.loc))) continue;
     const target = edge.target;
     if (!target?.content) continue;
-    if (deps.includeTarget && !deps.includeTarget(target)) continue;
+    if (!(await deps.includeTarget(target))) continue;
     const targetUrn = emitNodeUrnV2(await deps.memoryUrnOf(target.memoryId), target.loc);
     topicSections.push(`## Node: ${target.name} (${targetUrn})\n\n${target.content}`);
     deps.onTargetInlined?.(target);

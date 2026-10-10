@@ -94,8 +94,12 @@ beforeEach(async () => {
 });
 
 describe('the register — small, closed, and unequal on purpose', () => {
-  it('governs exactly three kinds, two by role and one by capability', () => {
-    expect(GOVERNED_KINDS.map((k) => k.kind).sort()).toEqual(['review', 'spec', 'task']);
+  it('governs exactly four kinds, three by role and one by capability', () => {
+    expect(GOVERNED_KINDS.map((k) => k.kind).sort()).toEqual(['decision', 'review', 'spec', 'task']);
+    // #1641 — decisions are written only by their own operations: no
+    // generic-shaped door is generated, and no refusal names a replay route.
+    expect(GOVERNED_KINDS.filter((k) => k.operationsOnly).map((k) => k.kind)).toEqual(['decision']);
+    expect(GOVERNED_KINDS.find((k) => k.kind === 'decision')!.strength).toBe('authority');
     // The task entry keys on the CAPABILITY, not on a label. If this ever flips
     // to `role: 'task'` the security case is gone — a label can be omitted for
     // free, and omitting it would then buy a runnable node nobody gated.

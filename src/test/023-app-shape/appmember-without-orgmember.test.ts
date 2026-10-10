@@ -17,6 +17,10 @@
  *   5. joinApp respects installation_policy.maxMembers via the
  *      reused ensureAppMember helper.
  *
+ * #1714: self-join is opt-in, so the fixture Agent declares
+ * `selfJoinRole: 'client'`; the closed-by-default cases live in
+ * resolvers.joinAppGate1714.test.ts.
+ *
  * The audit of org-scoped resolvers (myOrganizations / Organization.members
  * / org-scoped Memories) for org-external AppMember leak is a focused
  * follow-up — flagged in the spec as FR-010 / T032 but not part of
@@ -86,6 +90,8 @@ async function setupFixture(): Promise<Fixture> {
       installationPolicy: {
         maxMembers: 'unlimited',
         memberRoles: ['client', 'therapist'],
+        // #1714: self-join is opt-in; the B2C App admits joiners as clients.
+        selfJoinRole: 'client',
       },
     },
   });
@@ -137,7 +143,7 @@ describe('US2: AppMember without OrgMember', () => {
     );
     expect(payload.appMember.appId).toBe(fx.therapyAppId);
     expect(payload.appMember.userId).toBe(fx.daisyUserId);
-    // Default role is the first value in installation_policy.memberRoles.
+    // #1714: the joiner gets installation_policy.selfJoinRole.
     expect(payload.appMember.role).toBe('client');
 
     const row = await db.appMember.findUnique({
@@ -208,6 +214,7 @@ describe('US2: AppMember without OrgMember', () => {
         installationPolicy: {
           maxMembers: 1,
           memberRoles: ['client'],
+          selfJoinRole: 'client',
         },
       },
     });
@@ -389,11 +396,11 @@ describe('US2: AppMember without OrgMember', () => {
     expect((caught as GraphQLError).extensions?.code).toBe('UNAUTHENTICATED');
   });
 
-  it('joinApp surfaces NoMemberRolesError when the policy has no roles', async () => {
+  it('joinApp refuses with SelfJoinNotAllowedError when the policy has no roles (#1714)', async () => {
     await db.agent.update({
       where: { id: fx.knowYourselfAgentId },
       data: {
-        installationPolicy: { maxMembers: 'unlimited', memberRoles: [] },
+        installationPolicy: { maxMembers: 'unlimited', memberRoles: [], selfJoinRole: 'client' },
       },
     });
     let caught: unknown;
@@ -407,7 +414,7 @@ describe('US2: AppMember without OrgMember', () => {
       caught = err;
     }
     expect(caught).toBeInstanceOf(GraphQLError);
-    expect((caught as GraphQLError).extensions?.code).toBe('NoMemberRolesError');
+    expect((caught as GraphQLError).extensions?.code).toBe('SelfJoinNotAllowedError');
   });
 
   it('joinApp throws AppNotFoundError when a stale AppMember row exists for a soft-deleted App', async () => {

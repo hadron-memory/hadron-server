@@ -1,6 +1,7 @@
 // nodeMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
 import { COMMENT_NODE_TYPE, assertNotCommentWrite, commentError, commentGovernedError } from '../../../lib/comments/index.js';
 import { commentIdsAmong, hardDeleteThreadsOfTargets, restoreThreadsOfTargets, softDeleteThreadsOfTargets } from '../../../lib/comments/lifecycle.js';
+import { decisionContainedError, isDecisionFamilyRole, refuseDecisionFamily, refuseUnderDecisionLog } from '../../../lib/decisions/index.js';
 import { refuseLiveThreadsOnFold } from '../../../lib/comments/merge.js';
 import { generateId } from '../../../lib/id.js';
 // Spec 049 S4 — the protected-loc gate on the in-place update paths and the bulk skip.
@@ -509,6 +510,11 @@ export async function writeNodeCore(
       // it). Every caller of the core — createNode/updateNode, the kind doors,
       // updateNodeData/Properties, importNode, cloneNode — passes through here.
       assertNotCommentWrite(existing?.nodeType, input.nodeType, mode === 'update' ? 'update' : 'create');
+      // #1641 — a log's child locs are its decision codes: only the decision
+      // doors write there, so a squatter can never block a code.
+      if (!existing && opts?.ownsKind !== 'decision') {
+        await refuseUnderDecisionLog(ctx.db, input.memoryId, input.loc, 'Creating this node');
+      }
       assertGovernedWrite(
         existing,
         mergedGovernedState(existing, { role: input.role, isRunnable: input.isRunnable }),
@@ -2159,8 +2165,10 @@ export const nodeMutations = {
     // hadron_update_review, …) that delegate here; specs have none, by design.
     // That no mutation is an MCP tool is pinned per door by a test that
     // iterates this same register.
+    // #1641: an operations-only kind (decision) gets NO generic-shaped door
+    // here; its own operations live in resolvers.decisions.ts.
     ...Object.fromEntries(
-      GOVERNED_KINDS.flatMap((entry) => [
+      GOVERNED_KINDS.filter((entry) => !entry.operationsOnly).flatMap((entry) => [
         [
           entry.doors.create,
           async (_: unknown, { input }: { input: CreateNodeInput }, ctx: Context) =>
@@ -2989,6 +2997,9 @@ export const nodeMutations = {
           // #1606 (cor:dmo:110:04/05) — a comment is removed only by the comment
           // path's thread delete; a target takes its threads with it.
           if ((await commentIdsAmong(tx, affectedIds)).length > 0) throw commentGovernedError('delete', 'removes');
+          // #1641 §3.2 — a decision is withdrawn, never deleted, and deleting a
+          // log or an ancestor of one would erase decision history.
+          await refuseDecisionFamily(tx, affectedIds, 'Deleting this node');
           if (hard) await hardDeleteThreadsOfTargets(tx, affectedIds);
           else await softDeleteThreadsOfTargets(tx, affectedIds, { deletedBy, at: now });
 
@@ -3897,6 +3908,10 @@ export const nodeMutations = {
         // (cor:dmo:110:06), so revisionStateMatches can't see one that landed in
         // between, and the delete below would destroy it.
         if (deleteSource) await refuseLiveThreadsOnFold(tx, [source.id]);
+        // #1641 §3.2 — a decision is never merged, as source or target: its
+        // content is rendered from its payload, and a fold would rewrite it.
+        const mergedDecisions = [lockedSource, lockedTarget].filter((n) => isDecisionFamilyRole(n.role));
+        if (mergedDecisions.length > 0) throw decisionContainedError('Merging these nodes', mergedDecisions.map((n) => n.loc));
         await createNodeRevision(
           tx,
           buildNodeRevisionSnapshot(target, editorFromAuth(ctx), {
@@ -4445,6 +4460,9 @@ export const nodeMutations = {
       }
       const node = await ctx.db.node.findUniqueOrThrow({ where: { id: revision.nodeId } });
       await requireMemoryWriteAccess(ctx, node.memoryId);
+      // #1641 §3.2 — a decision's history is its audit trail. Unlocked: no
+      // write ever turns an existing node into a decision or back.
+      if (isDecisionFamilyRole(node.role)) throw decisionContainedError("Deleting a decision's revision", [node.loc]);
       // No protected-loc gate: a revision row is history, not the address.
       await ctx.db.nodeRevision.delete({ where: { id: revisionId } });
       return true;
@@ -4517,9 +4535,11 @@ export const nodeMutations = {
       }
       const node = await ctx.db.node.findUniqueOrThrow({
         where: { id: nodeId },
-        select: { memoryId: true },
+        select: { memoryId: true, role: true, loc: true },
       });
       await requireMemoryWriteAccess(ctx, node.memoryId);
+      // #1641 §3.2 — a decision's history is its audit trail (as deleteNodeRevision).
+      if (isDecisionFamilyRole(node.role)) throw decisionContainedError("Clearing a decision's history", [node.loc]);
       const { count } = await ctx.db.nodeRevision.deleteMany({ where: { nodeId } });
       return count;
     },
