@@ -2084,7 +2084,10 @@ export const typeDefs = `#graphql
     followUps: [DecisionRef!]!
     deciderIds: [ID!]!
     deciders: [CommentActorRef!]!
+    "True when the caller is a decider, including through an account merged into theirs (#1715)."
     viewerIsDecider: Boolean!
+    "Account merges the stored user ids follow: the record keeps the merged-away id (#1715)."
+    identityMerges: [DecisionIdentityMerge!]!
     askedBy: DecisionActor!
     askedAt: DateTime
     "When the last part was answered; null while any part is open."
@@ -2130,7 +2133,23 @@ export const typeDefs = `#graphql
     "Who else a decision may name as a decider. A decision's deciders are narrowed from these, never widened."
     eligibleDeciders: [CommentActorRef!]!
     purges: [DecisionPurge!]!
+    "Account merges the stored user ids follow: the record keeps the merged-away id (#1715)."
+    identityMerges: [DecisionIdentityMerge!]!
     revSeq: Int!
+  }
+
+  """
+  #1715 — an account merge that a user id stored in a decision or a log follows.
+  Stored ids are never rewritten by mergeUsers, because they are part of the
+  authenticated record: the record still names fromUserId, and that account now
+  acts as toUserId. A chain of merges is listed link by link, oldest first.
+  """
+  type DecisionIdentityMerge {
+    fromUserId: ID!
+    from: CommentActorRef
+    toUserId: ID!
+    to: CommentActorRef
+    mergedAt: DateTime!
   }
 
   "#1641 — verifyDecision: the one evaluation's findings."
@@ -9101,15 +9120,14 @@ export const typeDefs = `#graphql
     Platform admin only. The resulting merge is global; organization
     administration does not authorize account consolidation.
 
-    Refused with MERGE_USER_IN_DECISIONS (extension decisionCount; never the
-    decisions' locs, which the caller may not be able to read) while either
-    account is named in a decision or a decision log, whose stored user ids
-    cannot follow a merge yet (#1715).
+    Records the merge (#1715). User ids stored inside decisions and decision
+    logs are never rewritten, since they are authenticated; readers follow
+    them to the surviving account, so it is the asker or decider they name.
 
     Refused with MERGE_USER_IN_OPEN_ALARMS (extension alarmCount; never the
     alarms, tasks or Apps, which the caller may not be able to read) while
     either account is named in the owner chain of an unacknowledged agent-task
-    alarm, whose sealed chain cannot follow a merge yet (#1715). Acknowledge
+    alarm, whose sealed chain cannot follow a merge yet. Acknowledge
     the alarms, then merge.
     """
     mergeUsers(input: MergeUsersInput!): User!
