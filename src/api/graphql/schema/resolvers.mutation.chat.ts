@@ -56,6 +56,7 @@ import {
   loadPublishedSnapshot,
 } from './resolvers.helpers.js';
 import { assertNoMintedSpecRemoval } from '../../../lib/mintedSpecPermanence.js';
+import { refuseDecisionFamily } from '../../../lib/decisions/index.js';
 import { assertBatchMutable } from '../../../lib/bulkMutationGate.js';
 import { LIVE_ORG_MEMBERSHIP } from '../../../lib/auth/liveOrgMembership.js';
 
@@ -1707,6 +1708,11 @@ export const chatMutations = {
           select: { id: true, loc: true, role: true, isRunnable: true },
         })).filter((n) => n.id === chatNode.id || n.loc === messages || n.loc.startsWith(`${messages}:`));
         const scope = rows.map((n) => n.id);
+        // #1641 — a chat root is never a decision or a log (chatLocFilter), but
+        // the subtree it takes may hold a log beneath it; withdrawn, never
+        // deleted. Checked before the general governed-kind gate below, which
+        // also refuses it, so the caller gets the specific reason.
+        await refuseDecisionFamily(tx, scope, 'deleteChat');
         await assertBatchMutable(tx, [chatNode.memoryId], rows, 'delete the chat holding');
         await assertNoMintedSpecRemoval(tx, chatNode.memoryId, scope, 'delete the chat holding');
         await tx.node.updateMany({

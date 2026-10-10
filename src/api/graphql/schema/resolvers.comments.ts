@@ -823,12 +823,12 @@ export const commentQueries = {
 // ---------------------------------------------------------------------------
 // Field resolvers
 
-type CommentActorRef = { id: string; name: string | null; handle: string | null; urn: string | null };
+export type CommentActorRef = { id: string; name: string | null; handle: string | null; urn: string | null };
 
 const actorRefCaches = new WeakMap<Context, Map<string, Promise<CommentActorRef | null>>>();
 
 /** A public projection of one user / worker / agent / App, memoized per request. Never the full object (#552). */
-function loadCommentActor(ctx: Context, kind: 'user' | 'worker' | 'agent' | 'app', id: string): Promise<CommentActorRef | null> {
+export function loadCommentActor(ctx: Context, kind: 'user' | 'worker' | 'agent' | 'app', id: string): Promise<CommentActorRef | null> {
   let cache = actorRefCaches.get(ctx);
   if (!cache) actorRefCaches.set(ctx, (cache = new Map()));
   const cacheKey = `${kind}:${id}`;

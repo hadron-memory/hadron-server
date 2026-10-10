@@ -1,6 +1,7 @@
 import { runAsSystem } from '../../lib/requestActor.js';
 import { createDecipheriv } from 'crypto';
 import { COMMENT_NODE_TYPE } from '../../lib/comments/index.js';
+import { isDecisionFamilyRole } from '../../lib/decisions/index.js';
 import { hardDeleteThreadsOfTargets } from '../../lib/comments/lifecycle.js';
 import { GraphQLError } from 'graphql';
 import { assertPlaceholderKeepsSpecRole, placeholderFillPatch } from '../../lib/specCorpus.js';
@@ -920,6 +921,15 @@ const syncGraphFromGithubAsSystem = async (
             return true;
           }
           const signals = governedSignalsFromMirror(node);
+          // #1641 §3.2 — no mirror ever writes a decision or a decision log:
+          // anyone with push access could otherwise forge one. A file that
+          // declares the role, or lands on a decision's loc, is skipped.
+          if (isDecisionFamilyRole(signals.role) || isDecisionFamilyRole(prior?.role)) {
+            console.warn(`[syncGraphFromGithub] "${graphName}": skipped ${loc} — decisions are written only through the decision operations`);
+            if (prior) protectedRowIds.add(prior.id);
+            refusedRoleLocs.add(loc);
+            return true;
+          }
           if (signals.role == null) return false;
           // #1411 review (@codex P2): judge the role the write will APPLY. An
           // unwritten placeholder keeps role 'spec' whatever its blank mirror
