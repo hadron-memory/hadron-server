@@ -148,22 +148,16 @@ describe.each(['reclaim', 'account deletion'] as const)('a holding detached by %
     }
   });
 
-  it('PINNED current behaviour: a run or user-bound session of a second App acting FOR THE OWNER passes', async () => {
-    // Not an admission specific to detached rows: every free-standing memory
-    // (spec 034) admits any principal carrying its owner's userId, before any
-    // App-isolation check. Whether runs and bound sessions should be admitted
-    // is Rook's general follow-up.
-    // TODO(#1673): cite the follow-up's internal node URN once Rook captures it.
-    // If that rule changes, change this test deliberately.
+  it('keeps user-bound sessions admitted; runs reach personal but never private (#1719 R5a)', async () => {
     const f = await detached(path);
     for (const m of f.holdings) {
       for (const appId of f.appsOfJuno) {
         const run: AuthContext = { appId, userId: f.owner.id, clientId: `run:${generateId()}`, roles: [] };
         const session: AuthContext = user(f.owner.id, { appId, sessionId: await f.sessionOf(appId, f.owner.id) });
-        for (const auth of [run, session]) {
-          expect(await canReadMemory(db, auth, m.id)).toBe(true);
-          expect(await canWriteToMemory(db, auth, m.id)).toBe(true);
-        }
+        expect(await canReadMemory(db, run, m.id)).toBe(m.class === 'personal');
+        expect(await canWriteToMemory(db, run, m.id)).toBe(m.class === 'personal');
+        expect(await canReadMemory(db, session, m.id)).toBe(true);
+        expect(await canWriteToMemory(db, session, m.id)).toBe(true);
       }
     }
   });
