@@ -34,7 +34,7 @@ import {
 import { emitNodeUrnV2 } from '../../../lib/urnEmit.js';
 import { resolveWorkerRef as resolveWorkerRefId } from '../../../lib/entityRef/workerRef.js';
 import { isId } from '../../../lib/entityRef/shape.js';
-import { resolveWorkerIdByNameGated, provisionWorkerMemory } from './resolvers.worker.js';
+import { resolveWorkerIdByNameGated, provisionWorkerMemory, resolveReportsToTarget } from './resolvers.worker.js';
 import { lockAppReportsTo, writeReportsTo } from '../../../lib/workerReportsTo.js';
 import { eventActor } from '../../../lib/agentTasks/events.js';
 import { callerManagesAppMembers } from './resolvers.mutation.app.js';
@@ -968,12 +968,8 @@ export const sessionMutations = {
         if (!workerId || !appId) {
           throw new GraphQLError('reportsTo needs a worker bind (workerRef).', { extensions: { code: 'BAD_USER_INPUT' } });
         }
-        reportsToId = isId(reportsToRef) || hasSchemePrefix(reportsToRef)
-          ? (await resolveWorkerRefId(ctx.db, reportsToRef).catch(() => null))?.id ?? null
-          : await resolveWorkerIdByNameGated(ctx, appId, reportsToRef);
-        if (!reportsToId) {
-          throw new GraphQLError(`Worker not found: ${reportsToRef}`, { extensions: { code: 'WORKER_NOT_FOUND', workerRef: reportsToRef } });
-        }
+        // Within the session's App only: another App's worker reads as missing (#1737 QA, Chip's P2).
+        reportsToId = await resolveReportsToTarget(ctx, appId, reportsToRef);
       }
 
       // #1617 C: sessions this bind ended as superseded. Their cached keys

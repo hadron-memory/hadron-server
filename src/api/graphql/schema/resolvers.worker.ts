@@ -466,6 +466,32 @@ export async function resolveWorkerIdByNameGated(
   return resolveWorkerIdByName(ctx.db, appId, name);
 }
 
+/**
+ * #1726 — resolve a `reportsTo` target WITHIN the subject worker's App: its
+ * id, URN or name. A worker of any other App answers exactly like a missing
+ * one, WORKER_NOT_FOUND with no id, so the setter and the bind are never an
+ * existence oracle across tenants (#1737 QA, Chip's P2). The caller has
+ * already passed the App's worker read gate, which lists every worker here.
+ */
+export async function resolveReportsToTarget(ctx: Context, appId: string, ref: string): Promise<string> {
+  const trimmed = ref.trim();
+  let id: string | null = null;
+  if (isId(trimmed) || hasSchemePrefix(trimmed)) {
+    try {
+      const resolved = (await resolveWorkerRefId(ctx.db, trimmed)).id;
+      const row = await ctx.db.worker.findUnique({ where: { id: resolved }, select: { appId: true } });
+      id = row?.appId === appId ? resolved : null;
+    } catch {
+      // A malformed URN, an unresolvable App and an absent worker collapse to
+      // one refusal, as resolveWorkerRefRow does.
+    }
+  } else {
+    id = await resolveWorkerIdByNameGated(ctx, appId, trimmed);
+  }
+  if (!id) throw new GraphQLError(`Worker not found in this App: "${trimmed}"`, { extensions: { code: 'WORKER_NOT_FOUND' } });
+  return id;
+}
+
 /** True when the refusal is the per-App name unique (`workers_app_name_uniq`). */
 function isNameTaken(e: unknown): boolean {
   return (
@@ -991,7 +1017,7 @@ export const workerMutations = {
     const worker = await resolveWorkerRefRow(ctx, workerRef);
     const app = await ctx.db.app.findUniqueOrThrow({ where: { id: worker.appId } });
     await requireWorkerReadAccess(ctx, app);
-    const to = reportsTo ? (await resolveWorkerRefRow(ctx, reportsTo)).id : null;
+    const to = reportsTo ? await resolveReportsToTarget(ctx, worker.appId, reportsTo) : null;
     const forbidden = () => new GraphQLError(
       'Only the worker this one reports to, a worker claiming an unclaimed one for itself, or whoever manages the App may change who it reports to.',
       { extensions: { code: 'WORKER_REPORTS_TO_FORBIDDEN', workerId: worker.id } },

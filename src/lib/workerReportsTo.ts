@@ -131,12 +131,19 @@ export async function writeReportsTo(
     throw refusal('WORKER_RETIRED', 'A retired worker reports to nobody.', { workerId: worker.id });
   }
 
+  // Authority BEFORE the target's checks, so a target refusal (another App,
+  // retired, a cycle) only ever answers a caller allowed to make the change
+  // (#1737 QA, Chip's P2). A no-op still returns first: the current value is
+  // readable by everyone who can reach this.
+  let setBy = args.setBy;
+  if (from !== args.to && args.authorize) setBy = await args.authorize(from);
+
   if (args.to !== null) {
     if (args.to === args.workerId) throw refusal('WORKER_REPORTS_TO_SELF', 'A worker cannot report to itself.');
     const target = rows.find((r) => r.id === args.to);
     if (!target) throw refusal('WORKER_NOT_FOUND', `Worker not found: "${args.to}"`);
     if (target.app_id !== appId) {
-      throw refusal('WORKER_REPORTS_TO_OTHER_APP', 'A worker reports to a worker of its own App.', { reportsTo: args.to });
+      throw refusal('WORKER_REPORTS_TO_OTHER_APP', 'A worker reports to a worker of its own App.');
     }
     if (target.retired_at) {
       throw refusal('WORKER_REPORTS_TO_RETIRED', 'A worker cannot report to a retired worker.', { reportsTo: args.to });
@@ -148,7 +155,6 @@ export async function writeReportsTo(
   }
 
   if (from === args.to) return { workerId: args.workerId, appId, from, to: args.to, changed: false };
-  const setBy = args.authorize ? await args.authorize(from) : args.setBy;
   await tx.worker.update({ where: { id: args.workerId }, data: { reportsToWorkerId: args.to } });
   await appendReportsToEvent(tx, { appId, actor: args.actor, workerId: args.workerId, from, to: args.to, setBy });
   return { workerId: args.workerId, appId, from, to: args.to, changed: true };

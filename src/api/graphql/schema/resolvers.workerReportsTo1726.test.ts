@@ -98,7 +98,8 @@ describe('the value: same App, not itself, not retired, no cycle', () => {
 
   it('refuses itself, another App, a retired worker and a cycle, and writes nothing', async () => {
     expect(await codeOf(set(ctx(admin.id), dan.id, dan.id))).toBe('WORKER_REPORTS_TO_SELF');
-    expect(await codeOf(set(ctx(admin.id), dan.id, zed.id))).toBe('WORKER_REPORTS_TO_OTHER_APP');
+    // Another App's worker is resolved only within this App, so it reads as missing (Chip's P2 on #1737).
+    expect(await codeOf(set(ctx(admin.id), dan.id, zed.id))).toBe('WORKER_NOT_FOUND');
     expect(await codeOf(set(ctx(admin.id), dan.id, old.id))).toBe('WORKER_REPORTS_TO_RETIRED');
     await set(ctx(admin.id), liam.id, dan.id);
     await set(ctx(admin.id), dan.id, ada.id);
@@ -403,5 +404,33 @@ describe('#1737 review — anchored authority and one lock protocol (Rook P2-1, 
     expect(adaFree).toBe(true);
     expect(await reassigning).toBe('TASK_NOT_OWNER');
     expect((await db.agentTask.findUniqueOrThrow({ where: { id: t.id } })).assigneeWorkerId).toBe(liam.id);
+  });
+});
+
+describe("#1737 QA (Chip's P2) — no cross-tenant existence oracle", () => {
+  const extensionsOf = async (p: Promise<unknown>) => {
+    try { await p; return null; } catch (e) { return (e as GraphQLError).extensions; }
+  };
+
+  it("another App's worker and a missing one answer alike, with no id, on set and at bind", async () => {
+    const zedUrn = `hrn:worker:${org.urn}:other:zed`;
+    const missingUrn = `hrn:worker:${org.urn}:team:nobody`;
+    for (const ref of [zed.id, zedUrn, generateId(), missingUrn]) {
+      const ext = await extensionsOf(set(ctx(member.id), dan.id, ref));
+      expect(ext).toEqual({ code: 'WORKER_NOT_FOUND' });
+      const atBind = await extensionsOf(M.startSession({}, { input: { id: generateId(), workerRef: dan.id, force: true, reportsTo: ref } }, ctx(member.id)));
+      expect(atBind).toEqual({ code: 'WORKER_NOT_FOUND' });
+    }
+    expect(await reportsToOf(dan)).toBeNull();
+  });
+
+  it("a caller without authority is refused before any target check: a retired or looping target says nothing", async () => {
+    await set(ctx(admin.id), ada.id, dan.id);
+    // member drives no worker and manages nothing: refused, whatever the target.
+    expect(await codeOf(set(ctx(member.id), dan.id, old.id))).toBe('WORKER_REPORTS_TO_FORBIDDEN');
+    expect(await codeOf(set(ctx(member.id), dan.id, ada.id))).toBe('WORKER_REPORTS_TO_FORBIDDEN');
+    // The same targets refuse on their merits for a manager.
+    expect(await codeOf(set(ctx(admin.id), dan.id, old.id))).toBe('WORKER_REPORTS_TO_RETIRED');
+    expect(await codeOf(set(ctx(admin.id), dan.id, ada.id))).toBe('WORKER_REPORTS_TO_CYCLE');
   });
 });
