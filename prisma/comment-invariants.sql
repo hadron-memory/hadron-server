@@ -1,7 +1,9 @@
 -- #1606 / #1607 — comment-node invariants (`cor:dmo:110`). The ONE source of
 -- this SQL: included verbatim by prisma/post-push.sql (dev DB, test template,
--- CI) and copied into migration 20261005200000_comment_nodes (prod, which
--- does not run post-push.sql). Keep the two identical. Idempotent.
+-- CI) and copied into the newest comment migration (prod, which does not run
+-- post-push.sql): 20261005200000_comment_nodes, then #1721's
+-- 20261010100000_comment_rulings. Change it only together with a new
+-- migration that carries the new text. Idempotent.
 --
 -- The application path refuses every case first with a typed error; these are
 -- the backstop that makes a path bug fail loudly instead of corrupting.
@@ -26,13 +28,13 @@ ALTER TABLE "comment_meta" ADD CONSTRAINT "chk_comment_meta_state_top_level" CHE
   ("thread_root_id" IS NULL) = ("thread_state" IS NOT NULL)
   AND "author_key" ~ '^(w:[^:]+|ua:[^:]+:[^:]+|u:[^:]+|app:[^:]+)$'
   AND ("thread_deleted_at" IS NULL) = ("thread_deleted_cause" IS NULL)
-  AND ("thread_deleted_cause" IS NULL OR "thread_deleted_cause" IN ('ADMIN', 'TARGET')));
+  AND ("thread_deleted_cause" IS NULL OR "thread_deleted_cause" IN ('ADMIN', 'AUTHOR', 'MANAGER', 'TARGET')));
 
 -- One open, live top-level thread per (target, author) (cor:dmo:110:05).
 CREATE UNIQUE INDEX IF NOT EXISTS "comment_meta_one_open_thread"
   ON "comment_meta" ("target_node_id", "author_key")
   WHERE "thread_root_id" IS NULL AND "thread_state" = 'OPEN'
-    AND "retracted_at" IS NULL AND "hidden_at" IS NULL AND "thread_deleted_at" IS NULL;
+    AND "retracted_at" IS NULL AND "thread_deleted_at" IS NULL;
 
 -- The whole-shape check of one comment node, run at COMMIT (deferred), so the
 -- comment path may insert the node, its meta and its edge in any order.

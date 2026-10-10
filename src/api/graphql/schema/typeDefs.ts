@@ -2284,26 +2284,32 @@ export const typeDefs = `#graphql
     anchorApprovalHash: String!
     "anchorRevision equals the target's current revision. When false, show the comment as about an older revision (hrn:node:hadronmemory.com:specs:cor:dmo:110:01)."
     anchorIsCurrent: Boolean!
-    "Null when retracted or hidden."
+    "Null when deleted."
     quote: String
-    "Null when retracted or hidden: the stub shows the state, not the text."
+    "Null when deleted: the stub shows the state, not the text."
     body: String
     "Top-level only; null for a reply."
     state: CommentThreadState
-    retracted: Boolean!
-    retractedAt: DateTime
-    hidden: Boolean!
-    hiddenAt: DateTime
+    "#1721 — deleted with deleteComment. A deleted comment is shown only as a stub with no text, kept while it has live replies (hrn:node:hadronmemory.com:specs:cor:dmo:110:05)."
+    deleted: Boolean!
+    deletedAt: DateTime
+    "Who deleted it: its author, or a memory manager."
+    deletedBy: CommentActorRef
     resolvedAt: DateTime
     resolvedBy: CommentActorRef
     author: CommentAuthor!
-    "Whether the caller is this comment's author (the edit/retract right). Computed with the same author key the server enforces."
+    "Whether the caller is this comment's author (the edit and delete right). Computed with the same author key the server enforces."
     viewerIsAuthor: Boolean!
     "Worker comments only: the user who bound the worker session, shown as provenance, never as author. Null for other comments, and for callers who cannot write the memory."
     provenanceUser: CommentActorRef
     createdAt: DateTime!
+    "When the comment row last changed: an edit, or a delete that leaves a stub. Resolve and reopen never change it. To show a comment as edited, use editedAt."
     updatedAt: DateTime
-    "The comment's own revision. Pass it as expectedRevision to edit, retract, resolve, reopen or hide."
+    "When the body or quote was last edited; null when it never was. Only an edit sets it (hrn:node:hadronmemory.com:specs:cor:dmo:110:12)."
+    editedAt: DateTime
+    "Who last edited the body or quote; null when it never was."
+    editedBy: CommentActorRef
+    "The comment's write counter. Pass it as expectedRevision to edit, delete, resolve or reopen. A comment keeps no revision history, so there are no earlier revisions to read."
     revSeq: Int!
   }
 
@@ -2325,7 +2331,7 @@ export const typeDefs = `#graphql
   type CommentSummary {
     openThreads: Int!
     resolvedThreads: Int!
-    "Every live comment, top-level and replies, retracted and hidden stubs included."
+    "Every live comment, top-level and replies, deleted stubs included."
     comments: Int!
     "The caller's own open, live top-level thread on this node, if any: one per author (hrn:node:hadronmemory.com:specs:cor:dmo:110:05)."
     viewerOpenThreadId: ID
@@ -8785,15 +8791,15 @@ export const typeDefs = `#graphql
     replyToComment(commentRef: ID!, body: String!): Comment!
     "#1606 — the author edits a comment's body and/or quote. COMMENT_NOT_AUTHOR otherwise."
     editComment(commentRef: ID!, body: String, quote: String, expectedRevision: Int!): Comment!
-    "#1606 — the author retracts a comment, leaving a stub (hrn:node:hadronmemory.com:specs:cor:dmo:110:05)."
-    retractComment(commentRef: ID!, expectedRevision: Int!): Comment!
+    """
+    #1721 — delete one comment: its author (with write access), or anyone who may delete others' comments (the memory's manager, or a platform admin outside personal and private memories). A top-level comment with live replies stays as a deleted stub with no text; any other comment is soft-deleted and gone from every read, and a stub goes with its last live reply (hrn:node:hadronmemory.com:specs:cor:dmo:110:05). Returns the comment as deleted. COMMENT_NOT_AUTHOR for a writer who is not the author; COMMENT_DELETED for a stub.
+    """
+    deleteComment(commentRef: ID!, expectedRevision: Int!): Comment!
     "#1606 — resolve a thread: its author or any writer of the memory. commentRef is the top-level comment; returns it."
     resolveCommentThread(commentRef: ID!, expectedRevision: Int!): Comment!
     "#1606 — reopen a resolved thread: its author or any writer of the memory."
     reopenCommentThread(commentRef: ID!, expectedRevision: Int!): Comment!
-    "#1606 — a memory admin hides an abusive comment, leaving a stub."
-    hideComment(commentRef: ID!, reason: String!, expectedRevision: Int!): Comment!
-    "#1606 — a memory admin deletes a whole thread (soft: gone from every read, limit and check; history kept). commentRef may be any comment of it."
+    "#1606 — a memory admin deletes a whole thread (soft: gone from every read, limit and check; the rows stay for audit, with no revision history, #1721). commentRef may be any comment of it."
     deleteCommentThread(commentRef: ID!, reason: String!): Boolean!
 
     """
