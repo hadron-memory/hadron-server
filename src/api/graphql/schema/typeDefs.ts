@@ -8776,17 +8776,15 @@ export const typeDefs = `#graphql
     deleteCommentThread(commentRef: ID!, reason: String!): Boolean!
 
     """
-    #1641 — create a decision log at loc in a memory. Only the memory's manager, strictly
-    (hrn:node:hadronmemory.com:specs:cor:acl:010:01): the owner of a personal, private or user-owned
-    memory, or a live ADMIN or OWNER of the memory's org. A platform admin is not one by that role alone
-    (DECISION_FORBIDDEN). Refused
+    #1641 — create a decision log at loc in a memory: needs management rights on the memory, or the
+    owner role in the App the memory belongs to (Holger's ruling, team chat #7790). Refused
     in an encrypted memory (DECISION_LOG_ENCRYPTED), a git-mirrored one (DECISION_LOG_MIRRORED), a
     system memory (DECISION_LOG_SYSTEM_MEMORY), an anonymous one (DECISION_LOG_ANONYMOUS_MEMORY), at an
     occupied loc (DECISION_LOG_EXISTS), or inside a decision's subtree. Deciders are user ids, each able
     to read the memory (DECISION_DECIDER_NOT_ELIGIBLE).
     """
     createDecisionLog(memoryRef: ID!, loc: String!, name: String, prefix: String, defaultDeciders: [ID!]!, eligibleDeciders: [ID!]): DecisionLog!
-    "#1641 — replace a log's default (and, when given, other eligible) deciders, as an audited revision of the log. Existing decisions keep theirs. Only the memory's strict manager, as for createDecisionLog (DECISION_FORBIDDEN)."
+    "#1641 — replace a log's default (and, when given, other eligible) deciders, as an audited revision of the log. Existing decisions keep theirs. Needs management rights on the memory, or the owner role in its App."
     setDecisionLogDeciders(logRef: ID!, defaultDeciders: [ID!]!, eligibleDeciders: [ID!], expectedRevision: Int!, reason: String!): DecisionLog!
     """
     #1641 — ask a decision in a log: the server issues the next code (DA, DB, …) and renders the

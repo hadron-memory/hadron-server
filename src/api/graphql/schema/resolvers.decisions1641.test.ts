@@ -127,36 +127,56 @@ describe('createDecisionLog (§3.3, §6.1)', () => {
   });
 });
 
-describe("the log gate is the strict cor:acl:010:01 manager (Holger's ruling on #1690, Rook's P3-4)", () => {
+describe("the log gate admits whoever manages the App (Holger's ruling, team chat #7790)", () => {
   const asPlatform = () => as(platformAdmin.id, { roles: ['ADMIN'] });
   const logCount = () => db.node.count({ where: { memoryId: memory.id, role: 'decision.log' } });
 
-  it('a platform admin who manages no org is refused creating a log, and nothing is written', async () => {
-    expect(await codeOf(M.createDecisionLog(null, { memoryRef: memory.id, loc: 'decisions', defaultDeciders: [holger.id] }, asPlatform())))
-      .toBe('DECISION_FORBIDDEN');
+  /** Make the memory a fresh App's own (an app-class memory its participants read), with `reader` (an org READER) as an AppMember at `role`. */
+  async function appWithReaderAs(role: string): Promise<{ id: string }> {
+    const app = await db.app.create({ data: { id: generateId(), organizationId: orgId, name: 'Team', urn: 'decision.example:team' } });
+    await db.memory.update({ where: { id: memory.id }, data: { appId: app.id, class: 'app', visibility: null } });
+    await db.appMember.create({ data: { appId: app.id, userId: reader.id, role } });
+    return app;
+  }
+
+  it('a platform admin who belongs to no org creates a log and replaces its deciders', async () => {
+    const log = await M.createDecisionLog(null, { memoryRef: memory.id, loc: 'decisions', defaultDeciders: [holger.id] }, asPlatform());
+    const next = await M.setDecisionLogDeciders(null,
+      { logRef: log.row.id, defaultDeciders: [admin.id], expectedRevision: 1, reason: 'platform' }, asPlatform());
+    expect(L.defaultDeciderIds(next, {}, as())).toEqual([admin.id]);
+  });
+
+  it("an owner-role member of the memory's App creates a log and replaces its deciders", async () => {
+    expect(await codeOf(createLog({}, reader.id))).toBe('DECISION_FORBIDDEN');
+    await appWithReaderAs('owner');
+    // An app-class memory is read through the App, so the App's owner is the decider here.
+    const log = await createLog({ defaultDeciders: [reader.id] }, reader.id);
+    await M.setDecisionLogDeciders(null,
+      { logRef: log.row.id, defaultDeciders: [reader.id], expectedRevision: 1, reason: 'app owner' }, as(reader.id));
+    expect((await rowOf(log.row.id)).revSeq).toBe(2);
+  });
+
+  it("any other App role is refused, a deleted App's memory is concealed, and nothing is written", async () => {
+    const app = await appWithReaderAs('member');
+    expect(await codeOf(createLog({ defaultDeciders: [reader.id] }, reader.id))).toBe('DECISION_FORBIDDEN');
+    await db.appMember.update({ where: { appId_userId: { appId: app.id, userId: reader.id } }, data: { role: 'owner' } });
+    await db.app.update({ where: { id: app.id }, data: { deletedAt: new Date() } });
+    // A deleted App's memory is no longer readable through it, so it is concealed.
+    expect(await codeOf(createLog({ defaultDeciders: [reader.id] }, reader.id))).toMatch(/^MEMORY_NOT_FOUND/);
     expect(await logCount()).toBe(0);
   });
 
-  it('a platform admin who manages no org is refused replacing deciders, and the log is unchanged', async () => {
-    const log = await createLog();
+  it("the owner role in another App does not reach this memory's log", async () => {
+    await appWithReaderAs('member');
+    const log = await createLog({ defaultDeciders: [reader.id] });
+    const other = await db.app.create({ data: { id: generateId(), organizationId: orgId, name: 'Other', urn: 'decision.example:other' } });
+    await db.appMember.create({ data: { appId: other.id, userId: reader.id, role: 'owner' } });
     const before = await rowOf(log.row.id);
     expect(await codeOf(M.setDecisionLogDeciders(null,
-      { logRef: log.row.id, defaultDeciders: [admin.id], expectedRevision: 1, reason: 'r' }, asPlatform())))
+      { logRef: log.row.id, defaultDeciders: [reader.id], expectedRevision: 1, reason: 'r' }, as(reader.id))))
       .toBe('DECISION_FORBIDDEN');
     const after = await rowOf(log.row.id);
     expect({ revSeq: after.revSeq, data: after.data }).toEqual({ revSeq: before.revSeq, data: before.data });
-  });
-
-  it("the org's OWNER is a manager on both; a platform admin is one only through an org role", async () => {
-    await db.orgMember.create({ data: { organizationId: orgId, userId: outsider.id, role: 'OWNER' } });
-    const log = await M.createDecisionLog(null, { memoryRef: memory.id, loc: 'decisions', defaultDeciders: [holger.id] }, as(outsider.id));
-    const byOwner = await M.setDecisionLogDeciders(null,
-      { logRef: log.row.id, defaultDeciders: [admin.id], expectedRevision: 1, reason: 'owner' }, as(outsider.id));
-    expect(L.defaultDeciderIds(byOwner, {}, as())).toEqual([admin.id]);
-    await db.orgMember.create({ data: { organizationId: orgId, userId: platformAdmin.id, role: 'ADMIN' } });
-    const byOrgAdmin = await M.setDecisionLogDeciders(null,
-      { logRef: log.row.id, defaultDeciders: [holger.id], expectedRevision: 2, reason: 'org admin' }, asPlatform());
-    expect(L.defaultDeciderIds(byOrgAdmin, {}, as())).toEqual([holger.id]);
   });
 });
 

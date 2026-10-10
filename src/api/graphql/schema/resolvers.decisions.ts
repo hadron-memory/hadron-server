@@ -15,8 +15,8 @@
  * (#1614 S2b), so an authorizing decision can be asked but never DECIDED yet
  * (Q11).
  *
- * Gates (§6.1): a log is created and its deciders changed by the memory's
- * STRICT cor:acl:010:01 manager (Holger's ruling on #1690, Rook's P3-4);
+ * Gates (§6.1): a log is created and its deciders changed by memory MANAGE
+ * or an owner-role member of the memory's App (Holger, team chat #7790);
  * a decision is asked and amended (before an answer) by memory WRITERS,
  * agents included; after an answer only a decider amends; withdrawal is the
  * asker's or a decider's; purge is a platform admin's, of a never-answered
@@ -37,10 +37,9 @@ import {
   isMemoryReadableCached,
   isMemoryReadableFresh,
   isPlatformAdmin,
+  requireMemoryManageAccess,
   requireMemoryWriteAccess,
 } from './resolvers.helpers.js';
-import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
-import { managesAppStrict } from '../../../lib/auth/appManagement.js';
 import { resolveNodeRefForCaller } from './resolvers.nodeRefAccess.js';
 import { resolveNodeUrnField } from './resolvers.types.js';
 import { withAuthorizedMemoryTx } from './authorizedTx.js';
@@ -191,28 +190,39 @@ async function requireDecisionWrite(ctx: Context, memoryId: string): Promise<voi
   }
 }
 
+/** Is the caller an `owner`-role member of the (live) App this memory belongs to? */
+async function isOwnerRoleAppMember(
+  ctx: Context,
+  memory: { class: string; appId: string | null },
+): Promise<boolean> {
+  if (memory.class === 'personal' || memory.class === 'private') return false;
+  if (!memory.appId || !ctx.userId || ctx.impersonation) return false;
+  const member = await ctx.db.appMember.findFirst({
+    where: { appId: memory.appId, userId: ctx.userId, role: 'owner', app: { deletedAt: null } },
+    select: { userId: true },
+  });
+  return member !== null;
+}
+
 /**
- * The log gate, typed (§6.1), in the STRICT cor:acl:010:01 reading that T1
- * uses for tasks (`managesAppStrict`; Holger's ruling on #1690, Rook's P3-4):
- * a personal or private memory's owner; a user-owned memory's owner; or a live
- * ADMIN / OWNER of an org-owned memory's org. Unlike memory MANAGE
- * (`requireMemoryManageAccess`), a platform admin who manages none of these is
- * refused: platform staff do not set who decides in a customer's memory.
- * Identity-scoped, so never under impersonation. With `concealRef`, a caller
- * who cannot even open the memory's record is answered as if it did not exist
- * (#1316) — decided on the raw denial, before it is typed.
+ * The log gate, typed (§6.1): memory MANAGE, which admits platform admins, or
+ * an `owner`-role member of the App the memory belongs to. The second arm is
+ * Holger's ruling replacing the strict one (team chat #7790, Ada #7821): an
+ * owner-role AppMember has the same rights as `App.ownerUserId`, so whoever
+ * manages the App sets who decides in its memories (cor:acl:010:01).
+ * Identity-scoped, so never under impersonation, and never for a personal or
+ * private memory (cor:acl:010:02). With `concealRef`, a caller who cannot even
+ * open the memory's record is answered as if it did not exist (#1316) —
+ * decided on the raw denial, before it is typed.
  */
 async function requireLogManage(ctx: Context, memoryId: string, concealRef?: string): Promise<void> {
   const memory = await ctx.db.memory.findUniqueOrThrow({
     where: { id: memoryId },
-    select: { class: true, userId: true, organizationId: true, ownerUserId: true },
+    select: { class: true, userId: true, organizationId: true, ownerUserId: true, appId: true },
   });
   const gate = async () => {
-    if (memory.class === 'personal' || memory.class === 'private') {
-      if (!ctx.impersonation && ctx.userId && memory.userId === ctx.userId) return;
-      throw authorizationDenied();
-    }
-    if (!(await managesAppStrict(ctx, memory))) throw authorizationDenied();
+    if (await isOwnerRoleAppMember(ctx, memory)) return;
+    await requireMemoryManageAccess(ctx, memory);
   };
   try {
     if (concealRef === undefined) await gate();
@@ -466,7 +476,7 @@ type AskArgs = { logRef: string; input: Record<string, unknown> };
 
 export const decisionMutations = {
   /**
-   * §3.3, §7 — create a decision log: the strict memory manager (`requireLogManage`); refused in an encrypted
+   * §3.3, §7 — create a decision log: memory MANAGE or an App owner (`requireLogManage`); refused in an encrypted
    * (Q5) or git-mirrored memory, at a loc that holds anything, or inside a
    * decision's or log's subtree.
    */
