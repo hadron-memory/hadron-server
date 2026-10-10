@@ -74,6 +74,8 @@ export type RosterEntry = {
   unreactedChildTaskId: string | null;
   lastActiveAt: Date | null;
   lastAssignedAt: Date | null;
+  /** #1726 — the worker it reports to (shown beside lastActiveAt, so a stale claim is easy to spot). */
+  reportsTo: { workerId: string; name: string; slug: string; retired: boolean } | null;
 };
 
 /** The primary state from a worker's facts. Pure; see the file header for the order. */
@@ -125,10 +127,17 @@ function ownUnavailable(w: WorkerWorkState): { reason: string | null; until: Dat
 export async function loadTeamRoster(db: Db, appId: string, now: Date): Promise<RosterEntry[]> {
   const states = await loadWorkerWorkStates(db, appId, now);
   if (states.length === 0) return [];
-  const [inputs, woken] = await Promise.all([
+  const [inputs, woken, structure] = await Promise.all([
     loadStallInputs(db, { appId, assigneeWorkerId: { not: null } }, now),
     loadWokenAlarms(db, appId),
+    // #1726: every worker of the App, retired too, so a claim on a retired one resolves.
+    db.worker.findMany({ where: { appId }, select: { id: true, name: true, slug: true, retiredAt: true, reportsToWorkerId: true } }),
   ]);
+  const byId = new Map(structure.map((w) => [w.id, w]));
+  const reportsToOf = (workerId: string): RosterEntry['reportsTo'] => {
+    const to = byId.get(byId.get(workerId)?.reportsToWorkerId ?? '');
+    return to ? { workerId: to.id, name: to.name, slug: to.slug, retired: to.retiredAt !== null } : null;
+  };
   const started = inputs.filter((i) => i.task.status === 'started');
   const children = started.length
     ? await db.agentTask.findMany({
@@ -187,6 +196,7 @@ export async function loadTeamRoster(db: Db, appId: string, now: Date): Promise<
         unreactedChildTaskId: unreacted?.id ?? null,
         lastActiveAt: w.lastActiveAt,
         lastAssignedAt: w.lastAssignedAt,
+        reportsTo: reportsToOf(w.id),
       };
     })
     .sort((a, b) => {

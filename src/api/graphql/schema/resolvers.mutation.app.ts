@@ -101,7 +101,7 @@ async function assertNoWorkers(
  * target user is resolved — a non-authorized caller can't turn user-ref
  * resolution into an existence oracle (#816 review).
  */
-async function callerManagesAppMembers(
+export async function callerManagesAppMembers(
   ctx: Context,
   app: { ownerUserId: string | null; organizationId: string | null },
   resolvedAppId: string,

@@ -3733,6 +3733,9 @@ export interface SessionInput {
   // Gated for all three: the worker must belong to the session's App; a retired
   // worker refuses; a taken worker refuses WORKER_TAKEN unless force (#940).
   workerRef?: string;
+  // #1726: the worker this bind's worker reports to (id, URN or name in the
+  // session's App). Sets it only when unset; omitted leaves it unchanged.
+  reportsTo?: string | null;
   // #940: explicit informed-takeover override for a WORKER_TAKEN refusal.
   force?: boolean;
   // The session's stated intent (Session.plan) — MCP's hadron_start_session

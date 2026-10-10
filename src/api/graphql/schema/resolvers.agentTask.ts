@@ -46,6 +46,7 @@
 //   create child    the parent's assignee, who owns the child (050:07)
 //   assign/cancel   the task's owner, or whoever manages the App (050:09, Proposed)
 //   reassign        the task's owner (ruled, D-2026-10-07-004), or an App manager (Proposed)
+//   all three, also a worker the task's owner reports to, up the chain (#1726, #7804)
 //   start/progress/finish   the assignee only (050:08, Proposed)
 //   read            the App's participants, workers included (050:21, Proposed)
 // "Whoever manages the App" is cor:acl:010:01 as Holger ruled it on
@@ -76,6 +77,7 @@ import { isId } from '../../../lib/entityRef/shape.js';
 import { composeWorkerUrn, resolveWorkerRef as resolveWorkerRefId } from '../../../lib/entityRef/workerRef.js';
 import { resolveWorkerIdByName } from './resolvers.worker.js';
 import { managesApp } from '../../../lib/auth/appManagement.js';
+import { lockAppReportsTo } from '../../../lib/workerReportsTo.js';
 import type { AuthorityAnchor } from '../../../lib/auth/authorityAnchors.js';
 import { mayStillDriveWorkerApp } from '../../../lib/teamAttention.js';
 import { withAuthorizedTx } from './authorizedTx.js';
@@ -235,6 +237,38 @@ const isAssignee = (actor: TaskActor, t: TaskRow): boolean =>
 export async function actorManagesApp(ctx: Context, app: TaskApp, actor: TaskActor): Promise<boolean> {
   if (actor.kind !== 'user' || ctx.impersonation) return false;
   return managesApp(ctx, app);
+}
+
+/**
+ * #1726 / cor:agt:050:09 (Holger, team chat #7804): a worker may assign,
+ * reassign and cancel the tasks owned by workers that report to it, directly
+ * or up the `reportsTo` chain. There is no separate coordinator grant, and a
+ * team with no `reportsTo` lines has no worker coordinators.
+ *
+ * Walked on the transaction client under the App's reportsTo graph lock, which
+ * `inTaskWriteTx` takes SHARED before any row: a `reportsTo` change (or a
+ * retirement, which clears one) either committed first and is seen here, or
+ * waits for this write. The walk locks no rows of its own, so it adds no
+ * worker-row order to conflict with the writer's (#1737 review, Diego P2-3).
+ * It stops at the first worker that reports to nobody; a retired worker
+ * reports to nobody, so a chain never runs through one.
+ */
+async function actorCoordinatesOwner(tx: Prisma.TransactionClient, actor: TaskActor, task: TaskRow): Promise<boolean> {
+  if (actor.kind !== 'worker' || !task.ownerWorkerId) return false;
+  let current = task.ownerWorkerId;
+  for (let hops = 0; hops < 1000; hops++) {
+    const row = await tx.worker.findUnique({ where: { id: current }, select: { reportsToWorkerId: true } });
+    const next = row?.reportsToWorkerId ?? null;
+    if (!next) return false;
+    if (next === actor.workerId) return true;
+    current = next;
+  }
+  return false;
+}
+
+/** The task's owner, whoever manages the App, or (#1726) a worker the owner reports to. */
+async function mayDirectTask(tx: Prisma.TransactionClient, txCtx: Context, app: TaskApp, actor: TaskActor, task: TaskRow): Promise<boolean> {
+  return isOwner(actor, task) || (await actorManagesApp(txCtx, app, actor)) || (await actorCoordinatesOwner(tx, actor, task));
 }
 
 function sameActor(a: TaskActor, b: TaskActor): boolean {
@@ -469,6 +503,11 @@ export async function inTaskWriteTx<T>(
       (tx, txCtx) => write(tx, txCtx, fresh as TaskApp),
       {
         afterLock: async (tx) => {
+          // #1726: the reportsTo graph, SHARED, before any membership or worker
+          // row (src/lib/workerReportsTo.ts, the lock protocol). The chain arm
+          // of cor:agt:050:09 then reads a graph no writer can change before
+          // this commits.
+          await lockAppReportsTo(tx, app.id, 'shared');
           if (ctx.userId) {
             await tx.$queryRaw`SELECT 1 FROM app_members WHERE app_id = ${app.id} AND user_id = ${ctx.userId} FOR SHARE`;
           }
@@ -671,8 +710,8 @@ export const agentTaskMutations = {
   ) => {
     let party: TaskParty | null = null;
     return mutateTask(ctx, taskId, async (tx, task, actor, app, txCtx) => {
-      if (!isOwner(actor, task) && !(await actorManagesApp(txCtx, app, actor))) {
-        throw taskError('TASK_NOT_OWNER', "Only the task's owner, or whoever manages the App, assigns it.", { taskId });
+      if (!(await mayDirectTask(tx, txCtx, app, actor, task))) {
+        throw taskError('TASK_NOT_OWNER', "Only the task's owner, a worker the owner reports to, or whoever manages the App, assigns it.", { taskId });
       }
       refuseEnded(task);
       if (assigneeOf(task)) {
@@ -703,8 +742,8 @@ export const agentTaskMutations = {
   ) => {
     let party: TaskParty | null = null;
     return mutateTask(ctx, taskId, async (tx, task, actor, app, txCtx) => {
-      if (!isOwner(actor, task) && !(await actorManagesApp(txCtx, app, actor))) {
-        throw taskError('TASK_NOT_OWNER', "Only the task's owner, or whoever manages the App, reassigns it.", { taskId });
+      if (!(await mayDirectTask(tx, txCtx, app, actor, task))) {
+        throw taskError('TASK_NOT_OWNER', "Only the task's owner, a worker the owner reports to, or whoever manages the App, reassigns it.", { taskId });
       }
       refuseEnded(task);
       const from = assigneeOf(task);
@@ -805,8 +844,8 @@ export const agentTaskMutations = {
   /** Cancel a pending or started task: its owner, or whoever manages the App (cor:agt:050:09, Proposed). */
   cancelAgentTask: async (_: unknown, { taskId }: { taskId: string }, ctx: Context) => {
     const cancelled = await mutateTask(ctx, taskId, async (tx, task, actor, app, txCtx) => {
-      if (!isOwner(actor, task) && !(await actorManagesApp(txCtx, app, actor))) {
-        throw taskError('TASK_NOT_OWNER', "Only the task's owner, or whoever manages the App, cancels it.", { taskId });
+      if (!(await mayDirectTask(tx, txCtx, app, actor, task))) {
+        throw taskError('TASK_NOT_OWNER', "Only the task's owner, a worker the owner reports to, or whoever manages the App, cancels it.", { taskId });
       }
       refuseEnded(task);
       const openChildCount = await tx.agentTask.count({ where: { parentTaskId: task.id, status: { in: OPEN } } });

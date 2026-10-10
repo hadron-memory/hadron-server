@@ -3592,8 +3592,19 @@ model Worker {
   /// retirement at post time) and refuses new session bindings.
   retiredAt      DateTime? @map("retired_at")
   retiredBy      String?   @map("retired_by")
+  /// #1726 — the one Worker this worker reports to (Holger, 2026-10-09): a
+  /// non-retired Worker of the same App, never itself, and never a cycle. Null
+  /// reports to nobody (the top of a team, or an unclaimed worker). A property
+  /// of the casting, not of a session: binding, rotating or ending a session
+  /// leaves it alone. Written only by `src/lib/workers/reportsTo.ts`, which
+  /// also appends the `worker.reports-to` event that keeps its history.
+  reportsToWorkerId String? @map("reports_to_worker_id")
 
   app      App       @relation(fields: [appId], references: [id], onDelete: Cascade)
+  /// SetNull: a worker row is never hard-deleted in normal operation, but an
+  /// App cascade must not fail on the self-reference.
+  reportsTo Worker?  @relation("WorkerReportsTo", fields: [reportsToWorkerId], references: [id], onDelete: SetNull)
+  reports   Worker[] @relation("WorkerReportsTo")
   agent    Agent     @relation(fields: [agentId], references: [id], onDelete: Restrict)
   memory   Memory?   @relation("WorkerMemory", fields: [memoryId], references: [id], onDelete: SetNull)
   /// SetNull, not Cascade: a deleted user's held names must be RELEASED, never
@@ -3617,6 +3628,7 @@ model Worker {
   @@index([agentId])
   /// #1050 — "what does this person hold", across Apps.
   @@index([heldByUserId])
+  @@index([reportsToWorkerId])
   @@map("workers")
 }
 
