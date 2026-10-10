@@ -52,7 +52,7 @@ import { canSeeUserPersonalFields } from '../../../lib/auth/userVisibility.js';
 import { participantAppWhere } from '../../../lib/auth/appParticipation.js';
 import { lockAppReportsTo, writeReportsTo } from '../../../lib/workerReportsTo.js';
 import { currentActor } from '../../../lib/requestActor.js';
-import { callerManagesAppMembers } from './resolvers.mutation.app.js';
+import { managesApp } from '../../../lib/auth/appManagement.js';
 import { withAuthorizedTx } from './authorizedTx.js';
 import { resolveTaskActor, type TaskApp } from './resolvers.agentTask.js';
 import type { AuthorityAnchor } from '../../../lib/auth/authorityAnchors.js';
@@ -1067,7 +1067,7 @@ export const workerMutations = {
                 if (acting && to === acting && targetHolder !== null && targetHolder === holderOf(acting)) return 'claimant';
                 if (ctx.userId && targetHolder === ctx.userId) return 'holder';
               }
-              if (await callerManagesAppMembers(txCtx, fresh, fresh.id)) return 'app-manager';
+              if (await managesApp(txCtx, fresh)) return 'app-manager';
               throw forbidden();
             },
           });

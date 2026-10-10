@@ -37,7 +37,7 @@ import { isId } from '../../../lib/entityRef/shape.js';
 import { resolveWorkerIdByNameGated, provisionWorkerMemory, resolveReportsToTarget } from './resolvers.worker.js';
 import { lockAppReportsTo, writeReportsTo } from '../../../lib/workerReportsTo.js';
 import { eventActor } from '../../../lib/agentTasks/events.js';
-import { callerManagesAppMembers } from './resolvers.mutation.app.js';
+import { managesApp } from '../../../lib/auth/appManagement.js';
 import { writeNodeCore } from './resolvers.mutation.node.js';
 import { attributedRequestActivity, recordNodeUsage, toUsageNodeRefs, trackUsageWrite } from '../../../lib/usageRecorder.js';
 import {
@@ -1200,12 +1200,12 @@ export const sessionMutations = {
                 throw new GraphQLError('reportsTo at bind needs a person behind the request.', { extensions: { code: 'WORKER_REPORTS_TO_FORBIDDEN', workerId } });
               }
               if (from === null) return 'bind';
-              const bindApp = await tx.app.findUniqueOrThrow({ where: { id: bindAppId }, select: { ownerUserId: true, organizationId: true } });
+              const bindApp = await tx.app.findUniqueOrThrow({ where: { id: bindAppId }, select: { id: true, ownerUserId: true, organizationId: true } });
               // Platform roles as the user row holds them now (held FOR SHARE
               // above), never the request's: a stale token grants nothing.
               const me = await tx.user.findUnique({ where: { id: ctx.userId }, select: { roles: true, deletedAt: true } });
               const roles = me && !me.deletedAt ? (me.roles as Context['roles']) : [];
-              if (await callerManagesAppMembers({ ...ctx, roles, db: tx as unknown as Context['db'] }, bindApp, bindAppId)) return 'app-manager';
+              if (await managesApp({ ...ctx, roles, db: tx }, bindApp)) return 'app-manager';
               throw new GraphQLError(
                 'This worker already reports to another worker. Its current one hands it over (setWorkerReportsTo), or whoever manages the App changes it.',
                 { extensions: { code: 'WORKER_REPORTS_TO_HELD', workerId, reportsTo: from } },
