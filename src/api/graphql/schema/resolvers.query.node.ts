@@ -2038,7 +2038,7 @@ export const nodeQueries = {
       // No read on the current memory ⇒ [] (no existence disclosure, matching
       // memoryUsageSummary).
       if (!canRead(node.memoryId)) return [];
-      // #1663 — a retracted/hidden comment's history is for memory admins.
+      // #1663 — a comment stub's history is for memory managers.
       if (await isConcealedCommentHistory(ctx, nodeId)) return [];
 
       const revisions = await ctx.db.nodeRevision.findMany({
