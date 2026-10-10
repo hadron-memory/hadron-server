@@ -190,7 +190,7 @@ async function requireDecisionWrite(ctx: Context, memoryId: string): Promise<voi
   }
 }
 
-/** Is the caller an `owner`-role member of the (live) App this memory belongs to? */
+/** Is the caller an `owner`-role member of the live, installed App this memory belongs to? */
 async function isOwnerRoleAppMember(
   ctx: Context,
   memory: { class: string; appId: string | null },
@@ -198,10 +198,31 @@ async function isOwnerRoleAppMember(
   if (memory.class === 'personal' || memory.class === 'private') return false;
   if (!memory.appId || !ctx.userId || ctx.impersonation) return false;
   const member = await ctx.db.appMember.findFirst({
-    where: { appId: memory.appId, userId: ctx.userId, role: 'owner', app: { deletedAt: null } },
+    where: { appId: memory.appId, userId: ctx.userId, role: 'owner', app: { deletedAt: null, uninstalledAt: null } },
     select: { userId: true },
   });
   return member !== null;
+}
+
+/**
+ * The log transactions' `afterLock`: hold the caller's membership row in the
+ * memory's App, and the App row, FOR SHARE before the in-transaction gate
+ * re-check (#1690 review: Rook P3-1, Chip's QA P2). Without it an owner-role
+ * member demoted (`ensureAppMember`) or an App uninstalled while this write
+ * waits on its locks commits first, and the log is written under authority
+ * already revoked. Same shape as the task gate's (`inTaskWriteTx`). A caller
+ * with no such row locks nothing, and the gate decides on its other arms.
+ */
+function holdAppOwnerRow(ctx: Context, memoryId: string) {
+  return async (tx: Tx): Promise<void> => {
+    if (!ctx.userId) return;
+    await tx.$queryRaw`
+      SELECT 1 FROM app_members m
+      JOIN memories mem ON mem.app_id = m.app_id
+      JOIN apps a ON a.id = m.app_id
+      WHERE mem.id = ${memoryId} AND m.user_id = ${ctx.userId}
+      FOR SHARE OF m, a`;
+  };
 }
 
 /**
@@ -555,7 +576,7 @@ export const decisionMutations = {
       );
       const row = await tx.node.findUniqueOrThrow({ where: { id: (node as { id: string }).id }, select: LOG_ROW_SELECT });
       return { row, data };
-    }, { timeout: 60_000 });
+    }, { timeout: 60_000, afterLock: holdAppOwnerRow(ctx, memoryId) });
     for (const effect of effects) effect();
     return view;
   },
@@ -597,7 +618,7 @@ export const decisionMutations = {
         },
       );
       return { row: await tx.node.findUniqueOrThrow({ where: { id: row.id }, select: LOG_ROW_SELECT }), data };
-    }, { timeout: 60_000 });
+    }, { timeout: 60_000, afterLock: holdAppOwnerRow(ctx, log.memoryId) });
     for (const effect of effects) effect();
     return view;
   },

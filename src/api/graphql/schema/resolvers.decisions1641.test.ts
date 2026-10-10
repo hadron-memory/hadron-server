@@ -156,11 +156,14 @@ describe("the log gate admits whoever manages the App (Holger's ruling, team cha
     expect((await rowOf(log.row.id)).revSeq).toBe(2);
   });
 
-  it("any other App role is refused, a deleted App's memory is concealed, and nothing is written", async () => {
+  it("any other App role is refused, an uninstalled or deleted App's memory is concealed, and nothing is written", async () => {
     const app = await appWithReaderAs('member');
     expect(await codeOf(createLog({ defaultDeciders: [reader.id] }, reader.id))).toBe('DECISION_FORBIDDEN');
     await db.appMember.update({ where: { appId_userId: { appId: app.id, userId: reader.id } }, data: { role: 'owner' } });
-    await db.app.update({ where: { id: app.id }, data: { deletedAt: new Date() } });
+    await db.app.update({ where: { id: app.id }, data: { uninstalledAt: new Date() } });
+    // Refused by the arm and concealed; without its uninstalled filter the call reaches the decider check.
+    expect(await codeOf(createLog({ defaultDeciders: [reader.id] }, reader.id))).toMatch(/^MEMORY_NOT_FOUND/);
+    await db.app.update({ where: { id: app.id }, data: { uninstalledAt: null, deletedAt: new Date() } });
     // A deleted App's memory is no longer readable through it, so it is concealed.
     expect(await codeOf(createLog({ defaultDeciders: [reader.id] }, reader.id))).toMatch(/^MEMORY_NOT_FOUND/);
     expect(await logCount()).toBe(0);
@@ -177,6 +180,77 @@ describe("the log gate admits whoever manages the App (Holger's ruling, team cha
       .toBe('DECISION_FORBIDDEN');
     const after = await rowOf(log.row.id);
     expect({ revSeq: after.revSeq, data: after.data }).toEqual({ revSeq: before.revSeq, data: before.data });
+  });
+});
+
+describe('the App owner arm under concurrent revocation (#1690 review: Rook P3-1, Chip R7)', () => {
+  /** Resolves once some transaction waits on an advisory lock it can't have. */
+  async function untilAdvisoryWaiter(): Promise<void> {
+    for (let i = 0; i < 200; i++) {
+      const [{ n }] = await db.$queryRaw<Array<{ n: bigint }>>`SELECT count(*) AS n FROM pg_locks WHERE locktype = 'advisory' AND NOT granted`;
+      if (n > 0n) return;
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    throw new Error('no transaction ever waited on the path lock');
+  }
+
+  it("a demotion can't commit between the in-transaction gate and the log write: it waits for the write", async () => {
+    const app = await db.app.create({ data: { id: generateId(), organizationId: orgId, name: 'Team', urn: 'decision.example:team' } });
+    await db.memory.update({ where: { id: memory.id }, data: { appId: app.id, class: 'app', visibility: null } });
+    await db.appMember.create({ data: { appId: app.id, userId: reader.id, role: 'owner' } });
+
+    // Hold the log's path lock, so the create passes its gate and then waits.
+    let release!: () => void;
+    const held = new Promise<void>((r) => { release = r; });
+    let locked!: () => void;
+    const isLocked = new Promise<void>((r) => { locked = r; });
+    const holder = db.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${memory.id}), hashtext(${'decisions'}))`;
+      locked();
+      await held;
+    }, { timeout: 30_000 });
+    await isLocked;
+
+    const create = createLog({ defaultDeciders: [reader.id] }, reader.id);
+    let demoted = false;
+    let demotion: Promise<void> = Promise.resolve();
+    let demotedWhileHeld = false;
+    try {
+      await untilAdvisoryWaiter();
+      demotion = db.appMember.update({
+        where: { appId_userId: { appId: app.id, userId: reader.id } }, data: { role: 'member' },
+      }).then(() => { demoted = true; });
+      await new Promise((r) => setTimeout(r, 400));
+    } finally {
+      // Record before releasing: the caller's membership row is held, so the demotion is still waiting.
+      demotedWhileHeld = demoted;
+      release();
+      await holder;
+    }
+    expect(demotedWhileHeld).toBe(false);
+    const log = await create;
+    await demotion;
+    // The write was authorized by the role it held throughout; the demotion is ordered after it.
+    expect((await rowOf(log.row.id)).role).toBe('decision.log');
+    expect(await codeOf(M.setDecisionLogDeciders(null,
+      { logRef: log.row.id, defaultDeciders: [reader.id], expectedRevision: 1, reason: 'after demotion' }, as(reader.id))))
+      .toBe('DECISION_FORBIDDEN');
+  });
+
+  it("the owner role in the App doesn't reach another user's App-scoped personal memory, even one shared with them", async () => {
+    const agent = await db.agent.create({ data: { id: generateId(), organizationId: orgId, name: 'agent', urn: 'decision.example:agent', visibility: 'ORGANIZATION' } });
+    const app = await db.app.create({ data: { id: generateId(), organizationId: orgId, name: 'Team', urn: 'decision.example:team' } });
+    await db.appMember.create({ data: { appId: app.id, userId: reader.id, role: 'owner' } });
+    const personal = await db.memory.create({ data: {
+      id: generateId(), name: 'holger-personal', urn: 'decision.example:holger-personal', class: 'personal',
+      userId: holger.id, organizationId: orgId, appId: app.id, userMemoryOfAgentId: agent.id,
+    } });
+    await db.memoryShare.create({ data: { memoryId: personal.id, granteeId: reader.id, grantorId: holger.id, role: 'writer' } });
+    // Refused by the class guard and concealed; without the guard this create would succeed.
+    expect(await codeOf(M.createDecisionLog(null,
+      { memoryRef: personal.id, loc: 'decisions', defaultDeciders: [holger.id] }, as(reader.id))))
+      .toMatch(/^MEMORY_NOT_FOUND/);
+    expect(await db.node.count({ where: { memoryId: personal.id, role: 'decision.log' } })).toBe(0);
   });
 });
 
