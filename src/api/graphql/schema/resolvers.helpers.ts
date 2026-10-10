@@ -1,3 +1,4 @@
+import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
 // Helpers extracted from resolvers.ts (Step 1 of the resolver split).
 // Pure mechanical move: shared auth/include/AI-config/chat/asset helpers used
 // by the GraphQL resolver map. No behavior change. The `Context` interface
@@ -20,6 +21,7 @@ import {
 } from '../../../lib/aiConfig.js';
 import { effectiveApiStyle, effectiveEndpoint } from '../../../lib/aiEndpoint.js';
 import {
+  canReadMemory,
   canWriteToMemory,
   EXPLICIT_REF,
   filterReadableMemoryIds,
@@ -100,7 +102,7 @@ export interface Context {
    * its caller sent, so it answers; a refusal that cannot be replayed on MCP
    * names no MCP door (@codex, PR #1305).
    */
-  governedCanReplay?: (kind: 'task' | 'review' | 'spec') => boolean;
+  governedCanReplay?: (kind: 'task' | 'review' | 'spec' | 'decision') => boolean;
   clientId?: string;       // "github:<username>" / "email:<addr>" — only set for OAuth/JWT users
   userId?: string;         // User.id — only set for OAuth/JWT users
   appId?: string;          // App.id — set when caller authenticated via an App Key
@@ -1121,6 +1123,7 @@ export async function canReadMemoryRecord(
     // TARGET owns them — the shared-org scope excludes all identity-scoped
     // resources (the target-as-owner check below would otherwise admit them).
     if (ctx.impersonation) return false;
+    if (memory.class === 'private' && isRunPrincipal(ctx) && !await canReadMemory(ctx.db, ctx, memory.id)) return false;
     if (isStrictOwner(ctx, memory.userId)) return true;
     // No `as never`: the cast is what let a caller omit the fields this reads.
     if (ctx.userId && (await granteeShareAccess(ctx.db, ctx.userId, memory))) return true;
@@ -2136,6 +2139,11 @@ export async function getAccessibleMemoryIds(
     if (!options?.excludeAppDerived && !(onlyMemoryId && accessibleIds.has(onlyMemoryId))) {
       for (const id of await appDerivedMemoryIds(ctx, onlyMemoryId)) accessibleIds.add(id);
     }
+    if (isRunPrincipal(ctx)) {
+      const privateCandidates = await ctx.db.memory.findMany({ where: { id: { in: [...accessibleIds] }, class: 'private' }, select: { id: true } });
+      const readable = await filterReadableMemoryIds(ctx.db, ctx, privateCandidates.map(m => m.id));
+      for (const m of privateCandidates) if (!readable.has(m.id)) accessibleIds.delete(m.id);
+    }
     return [...accessibleIds];
   }
 
@@ -2373,6 +2381,7 @@ export async function requireMemoryWriteAccess(ctx: Context, memoryId: string): 
   // #778 `writer` MemoryShare grantee on a personal memory (private is never
   // shareable, so this only widens personal).
   if (memory.class === 'personal' || memory.class === 'private') {
+    if (memory.class === 'private' && isRunPrincipal(ctx) && !await canWriteToMemory(ctx.db, ctx, memory.id)) throw memoryWriteForbidden();
     if (isStrictOwner(ctx, memory.userId)) return;
     if (await granteeShareAccess(ctx.db, ctx.userId, memory, { requireWrite: true })) return;
     throw memoryWriteForbidden();

@@ -1,55 +1,44 @@
 /**
- * joinApp — spec 023-app-shape US2 (T027).
+ * joinApp — spec 023-app-shape US2 (T027), gated by #1714.
  *
- * Self-service AppMember create for the currently-logged-in user.
- * Crucially, NO OrgMember check is performed (FR-009) — this is the
- * affordance that unlocks B2C / therapy / consumer deployments where
- * end-users use an App without joining the operator's org.
+ * Self-service AppMember create for the currently-logged-in user. NO
+ * OrgMember check is performed (FR-009) — this is the affordance that
+ * unlocks B2C / therapy / consumer deployments where end-users use an App
+ * without joining the operator's org.
  *
- * The role defaults to the first value in the Agent's
- * installation_policy.memberRoles (the conventional "guest"/"owner"
- * slot). maxMembers + orphan-App enforcement is delegated to the
- * existing `ensureAppMember` helper.
+ * #1714 (Holger's ruling, option D): self-join is CLOSED by default. It is
+ * open only when the App's primary Agent opts in by declaring
+ * `installation_policy.selfJoinRole` — a role that is one of its
+ * `memberRoles` and is never `owner`. Before this, joinApp granted
+ * `memberRoles[0]`, which the schema default makes `owner`, so any
+ * authenticated user who knew an App's URN could make themselves an App
+ * member manager. Promotion to owner or any privileged role stays with the
+ * App's managers (the GraphQL `ensureAppMember`), never with self-service.
+ *
+ * Order: lifecycle errors, then the idempotent re-join (unchanged), then the
+ * gate — BEFORE maxMembers / orphan handling, so a refused caller learns
+ * nothing about the App's capacity or installation.
  *
  * Idempotent — if the user already has an AppMember row, the existing
  * row is returned with no role change.
- *
- * **OPEN POLICY QUESTION (deferred to a separate design discussion):**
- * spec 023 FR-012 puts the invite/accept ceremony out of scope, but
- * the spec's MVP guidance also says an *admin-only* API is sufficient.
- * This implementation goes further: v1 joinApp is open self-service —
- * any authenticated user who knows the App's ID/URN can join. URNs
- * are predictable (e.g., `org-therapist:therapy-app`), so the
- * practical authorization gate is "guess the slug."
- *
- * This was flagged in the US2 PR review (concern 1) as a policy
- * deviation that warrants its own design discussion + amendment. It
- * is intentionally left open in v1 because Hadron is invite-only at
- * the platform level (no anonymous signups), bounding the exposure.
- * The follow-up work — to either codify the open-self-service
- * semantics in the spec or gate joinApp behind an invitation flow —
- * is tracked in hadron-concept STUBBED-app-member-invite-flow and
- * the PR thread on hadron-server#132.
- *
- * TODO(023-us2-followup): land a design discussion + spec amendment
- * that settles whether joinApp stays open, gains an invitation gate,
- * or becomes admin-only.
  */
 
 import type { Prisma, PrismaClient } from '../../generated/prisma/index.js';
-import {
-  ensureAppMember,
-  OrphanAppError,
-} from './ensureAppMember.js';
+import { ensureAppMember } from './ensureAppMember.js';
 import { AppNotFoundError } from '../../lib/entityRef/errors.js';
 
-export class NoMemberRolesError extends Error {
+/**
+ * #1714: the App's Agent has not opted into self-service joining (no valid
+ * `installation_policy.selfJoinRole`). Deliberately says nothing about why,
+ * so a stranger cannot probe an App's policy, capacity or installation.
+ */
+export class SelfJoinNotAllowedError extends Error {
   constructor(appId: string) {
     super(
-      `App ${appId}'s Agent declares no memberRoles in installationPolicy; ` +
-        `joinApp cannot pick a default. Fix the Agent's installation_policy.memberRoles.`,
+      `App ${appId} does not allow self-service joining. ` +
+        `Ask an App owner or org admin to add you.`,
     );
-    this.name = 'NoMemberRolesError';
+    this.name = 'SelfJoinNotAllowedError';
   }
 }
 
@@ -68,8 +57,12 @@ export class AppUninstalledError extends Error {
 }
 
 type InstallationPolicyShape = {
-  memberRoles?: string[];
+  memberRoles?: unknown;
+  selfJoinRole?: unknown;
 };
+
+/** Self-join can never mint an App member manager, whatever the policy says. */
+const NEVER_SELF_GRANTED = 'owner';
 
 export async function joinApp(
   db: PrismaClient | Prisma.TransactionClient,
@@ -105,43 +98,31 @@ export async function joinApp(
     };
   }
 
-  // Pick the default role from the primary installed Agent's policy.
-  // `ensureAppMember` will validate; we just need to choose one of the
-  // permitted roles to call it with.
-  //
-  // Note: this calls `getPrimaryAgentId` indirectly via ensureAppMember
-  // (which throws OrphanAppError if there are no installed Agents).
-  // For the default-role pick we need the Agent's policy directly, so
-  // we look it up here. If there's no primary Agent, ensureAppMember
-  // will surface OrphanAppError below.
-  const defaultRole = await pickDefaultRole(db, args.appId);
+  // #1714 gate: runs before ensureAppMember, so capacity and orphan errors
+  // are reachable only by a caller the App admits.
+  const selfJoinRole = await resolveSelfJoinRole(db, args.appId);
 
-  await ensureAppMember(db, args.appId, args.userId, defaultRole, {
+  await ensureAppMember(db, args.appId, args.userId, selfJoinRole, {
     actorId: args.userId,
   });
 
-  return { appId: args.appId, userId: args.userId, role: defaultRole };
+  return { appId: args.appId, userId: args.userId, role: selfJoinRole };
 }
 
-async function pickDefaultRole(db: PrismaClient | Prisma.TransactionClient, appId: string): Promise<string> {
-  // The Agent's installation_policy.memberRoles is the source of truth.
-  // We look up the primary installed Agent's policy here, but defer
-  // the "no installed Agent" error to ensureAppMember (it throws
-  // OrphanAppError, which the caller already expects).
+async function resolveSelfJoinRole(db: PrismaClient | Prisma.TransactionClient, appId: string): Promise<string> {
+  // The primary installed Agent's policy, the same Agent ensureAppMember
+  // validates against (getPrimaryAgentId: oldest AppAgent). No installed
+  // Agent means nothing opted in: refuse rather than reveal the orphan state.
   const appAgent = await db.appAgent.findFirst({
     where: { appId },
     orderBy: { createdAt: 'asc' },
     select: { agent: { select: { installationPolicy: true } } },
   });
-  if (!appAgent) {
-    // Surface the same error ensureAppMember would, so the caller
-    // doesn't have to handle two distinct shapes.
-    throw new OrphanAppError(appId);
+  const policy = (appAgent?.agent?.installationPolicy ?? {}) as InstallationPolicyShape;
+  const role = policy.selfJoinRole;
+  const memberRoles = Array.isArray(policy.memberRoles) ? policy.memberRoles : [];
+  if (typeof role !== 'string' || role === NEVER_SELF_GRANTED || !memberRoles.includes(role)) {
+    throw new SelfJoinNotAllowedError(appId);
   }
-  const policy = (appAgent.agent?.installationPolicy ?? {}) as InstallationPolicyShape;
-  const roles = policy.memberRoles ?? [];
-  if (roles.length === 0) {
-    throw new NoMemberRolesError(appId);
-  }
-  return roles[0];
+  return role;
 }

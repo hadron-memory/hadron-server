@@ -2,6 +2,7 @@ import { randomBytes } from 'crypto';
 import { GraphQLError } from 'graphql';
 import { Prisma, type PrismaClient, type User } from '../../generated/prisma/index.js';
 import { mergeOwnerNamespacedUrns } from '../../lib/mergeOwnerNamespacedUrns.js';
+import { DECISION_LOG_ROLE, DECISION_ROLE } from '../../lib/decisions/index.js';
 
 /**
  * Tables whose audit actor columns carry User.id values in normal writes.
@@ -104,6 +105,12 @@ function isUniqueViolation(e: unknown): boolean {
   if (!(e instanceof Prisma.PrismaClientKnownRequestError)) return false;
   if (e.code === 'P2002') return true;
   return e.code === 'P2010' && ((e.meta as { code?: string } | undefined)?.code === '23505' || /23505/.test(e.message));
+}
+
+/** A raw statement's serialization failure (Prisma wraps it as P2010 / SQLSTATE 40001). */
+function isSerializationFailure(e: unknown): boolean {
+  return e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2010' &&
+    ((e.meta as { code?: string } | undefined)?.code === '40001' || /40001/.test(e.message));
 }
 
 /** The template-name grammar's length cap (`validateAiConfigName`). */
@@ -225,6 +232,48 @@ export async function mergeUsers(
 }
 
 /**
+ * #1641 interim (Holger's ruling on #1690, option C): refuse the merge while
+ * either account is named in a decision or a decision log. Their payloads
+ * hold user ids in authenticated data (asker, deciders, a log's default and
+ * eligible deciders, audit marks) that may not be rewritten, and nothing
+ * records where a merged-away id went, so the asker and decider gates would
+ * strand the decision. Merge-aware identity, which lifts this, is #1715.
+ *
+ * Every live log is locked FOR SHARE first. An ask, a decider change or a
+ * purge holds its log FOR NO KEY UPDATE, so one in flight either commits
+ * while this waits (the SERIALIZABLE snapshot is then stale, and the merge
+ * re-runs and sees it) or waits for the merge and then finds the source
+ * deleted. Two writes take no existing log lock and can still name the
+ * source inside the merge window: an amend (only a recommendation's author,
+ * which no gate reads) and a brand-new log (whose deleted default decider
+ * each ask then refuses as ineligible until the deciders are changed). Matching
+ * is on the JSON text of the payload: an id is a quoted string there, and a
+ * quote inside free text is escaped, so it can only over-refuse.
+ */
+async function refuseUsersNamedInDecisions(tx: Prisma.TransactionClient, sourceUserId: string, targetUserId: string): Promise<void> {
+  try {
+    await tx.$queryRaw`SELECT id FROM nodes WHERE role = ${DECISION_LOG_ROLE} AND deleted_at IS NULL ORDER BY id FOR SHARE`;
+  } catch (e) {
+    // A raw statement reports the stale snapshot as P2010/40001, not P2034.
+    if (isSerializationFailure(e)) throw new MergeRaceError('a decision log changed while the merge waited for it', { cause: e });
+    throw e;
+  }
+  // A count only, never the locs: the merging admin need not be able to read
+  // a private decision, and its loc is not theirs to learn (Diego's P2 on #1690).
+  const [{ count }] = await tx.$queryRaw<Array<{ count: number }>>`
+    SELECT count(*)::int AS count FROM nodes
+    WHERE (role = ${DECISION_ROLE} OR role LIKE ${`${DECISION_ROLE}.%`})
+      AND (strpos(data::text, ${JSON.stringify(sourceUserId)}) > 0 OR strpos(data::text, ${JSON.stringify(targetUserId)}) > 0)`;
+  if (count > 0) {
+    throw new GraphQLError(
+      `mergeUsers is refused: these accounts are named in ${count} decision record${count === 1 ? '' : 's'} (decisions or decision logs), ` +
+        'whose stored ids cannot follow a merge yet (hadron-server#1715).',
+      { extensions: { code: 'MERGE_USER_IN_DECISIONS', decisionCount: count } },
+    );
+  }
+}
+
+/**
  * #1706 (Diego's P2 on #1720): refuse a merge while either account is named in
  * the owner chain of an UNACKNOWLEDGED agent-task alarm.
  *
@@ -285,6 +334,7 @@ async function runMergeTxn(
     ]);
     if (!source || source.deletedAt) throw new Error('Source user not found');
     if (!target || target.deletedAt) throw new Error('Target user not found');
+    await refuseUsersNamedInDecisions(tx, sourceUserId, targetUserId);
     await refuseUsersInOpenAlarmChains(tx, sourceUserId, targetUserId);
 
     const adoptGithubIdentity = target.githubId == null && target.githubUsername == null;
