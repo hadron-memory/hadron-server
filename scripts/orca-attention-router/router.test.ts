@@ -35,11 +35,23 @@ function worker(id: string, name: string, o: { mentions?: number; unread?: numbe
 class FakeCLIs {
   attention: { token: string; workers: unknown[] } = { token: TOKEN_1, workers: [] };
   attentionOk = true;
+  /** Rows served to the tokenless fresh re-read before each send (#1616); null = same as the poll. */
+  fresh: unknown[] | null = null;
+  freshOk = true;
+  /** The token a fresh scan offers; the router must never adopt it. */
+  freshToken = 'tok-fresh-NEVER-ADOPT';
+  freshServed = 0;
   terminals: Array<Record<string, unknown>> = [];
   busy = new Set<string>();
+  /** Busy on a handle's SECOND wait — the post-recompute idle recheck. */
+  busyRecheck = new Set<string>();
+  waits = new Map<string, number>();
   reject = new Set<string>();
   /** The rendered screen per handle; set by terminal() to an idle prompt for its agent. */
   screens = new Map<string, { tail?: unknown; draft?: string; source?: string; ok?: boolean }>();
+  /** Served to a handle's SECOND screen read — the post-recompute recheck (#5473 window). */
+  recheckScreens = new Map<string, { tail?: unknown; draft?: string; source?: string; ok?: boolean }>();
+  reads = new Map<string, number>();
   sent: Array<[string, string]> = [];
   /** Workers with a mention-only row; `null` = every worker queried has one. */
   mentionOnly: Set<string> | null = null;
@@ -50,6 +62,14 @@ class FakeCLIs {
   /** Override the winning register row a worker resolves to. */
   registerRow: ((worker: string) => unknown) | null = null;
   calls: string[][] = [];
+  /**
+   * Poll-phase tracking, to tell the MAIN scan from the fresh re-read (#1616):
+   * both are bare (no `s=`, no `p=`) whenever the previous poll failed to
+   * adopt. A fresh scan only ever happens AFTER that target's idle gate, and
+   * every target starts with its register check — so "a wait since the last
+   * register" identifies it exactly.
+   */
+  sawWait = false;
 
   constructor(readonly root: string) {}
 
@@ -66,9 +86,20 @@ class FakeCLIs {
     const out = (d: unknown, code = 0): RunResult => ({ code, stdout: JSON.stringify(d), stderr: '' });
     const verb = argv.slice(1, 3).join(' ');
     if (argv[1] === 'api' && argv[2].includes('teamAttentionPage')) {
+      const pageArg = argv.find((a) => a.startsWith('p='));
+      const bare = !pageArg && !argv.some((a) => a.startsWith('s='));
+      // The tokenless re-read just before a send (#1616): bare, and this
+      // target's idle gate has run since its register check.
+      if (bare && this.sawWait) {
+        this.freshServed++;
+        if (!this.freshOk) return out({ errors: [{ message: 'fresh scan down' }] }, 1);
+        return out({ data: { teamAttentionPage: {
+          scanComplete: true, nextPage: null, adoptableSince: this.freshToken,
+          items: this.fresh ?? this.attention.workers,
+        } } });
+      }
       if (!this.attentionOk) return out({ errors: [{ message: 'boom' }] }, 1);
       // Serve `pages` pages; the items all ride the last one; only it carries the token.
-      const pageArg = argv.find((a) => a.startsWith('p='));
       const n = pageArg ? Number(pageArg.slice(2)) : 1;
       const last = n >= this.pages;
       return out({ data: { teamAttentionPage: {
@@ -78,6 +109,7 @@ class FakeCLIs {
       } } });
     }
     if (argv[1] === 'api') {
+      this.sawWait = false; // a new target begins; its fresh scan (if any) follows its idle gate
       if (this.registerFails.size && this.registerFails.has(argv[argv.indexOf('-F') + 1].replace(/^w=/, ''))) {
         return out({ errors: [{ message: 'register down' }] }, 1);
       }
@@ -90,12 +122,20 @@ class FakeCLIs {
     if (verb === 'terminal list') return out({ ok: true, result: { terminals: this.terminals } });
     const handle = argv[argv.indexOf('--terminal') + 1];
     if (verb === 'terminal wait') {
-      return this.busy.has(handle)
+      const n = (this.waits.get(handle) ?? 0) + 1;
+      this.waits.set(handle, n);
+      const busyNow = n === 1 ? this.busy.has(handle) : this.busy.has(handle) || this.busyRecheck.has(handle);
+      // Only a SATISFIED wait precedes a fresh scan; a busy worker is held
+      // before any recompute, and its failed wait must not flip the phase.
+      if (!busyNow) this.sawWait = true;
+      return busyNow
         ? out({ ok: false, error: { code: 'timeout', message: 'timeout' } })
         : out({ ok: true, result: { wait: { satisfied: true } } });
     }
     if (verb === 'terminal read') {
-      const sc = this.screens.get(handle);
+      const n = (this.reads.get(handle) ?? 0) + 1;
+      this.reads.set(handle, n);
+      const sc = (n === 2 ? this.recheckScreens.get(handle) : undefined) ?? this.screens.get(handle);
       if (!sc || sc.ok === false) return out({ ok: false, error: { code: 'terminal_handle_stale' } }, 1);
       return out({ ok: true, result: { terminal: { handle, source: sc.source ?? 'screen', tail: sc.tail, ...(sc.draft !== undefined ? { draft: sc.draft } : {}) } } });
     }
@@ -140,7 +180,11 @@ describe('Orca attention router — the happy path', () => {
     expect(adopted(c)).toBe(TOKEN_1);
     expect(fake.sent).toHaveLength(1);
     expect(fake.sent[0][0]).toBe('term_eli');
-    expect(fake.sent[0][1]).toContain('5 relevant unread (2 mentions)');
+    expect(fake.sent[0][1]).toContain('5 relevant unread (2 mentions');
+    expect(fake.sent[0][1]).toContain('unread #100–#120');
+    expect(fake.sent[0][1]).toContain('latest mention #110');
+    expect(fake.sent[0][1]).toContain('as of send');
+    expect(fake.sent[0][1]).toContain("no chat post or 'read/no-action' comment");
     const verbs = fake.calls.map((a) => a.slice(1, 3).join(' '));
     expect(verbs.indexOf('terminal wait')).toBeLessThan(verbs.indexOf('terminal read'));
     expect(verbs.indexOf('terminal read')).toBeLessThan(verbs.indexOf('terminal send'));
@@ -148,12 +192,21 @@ describe('Orca attention router — the happy path', () => {
 
   it('passes the adopted token back on the next poll', () => {
     const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli');
+    fake.attention.workers = [worker('w-eli', 'Eli')];
     poll(c);
     fake.attention.token = TOKEN_2;
+    fake.attention.workers = []; // nothing relevant since the adopted token
     poll(c);
     const polls = fake.calls.filter((a) => a[1] === 'api' && a[2].includes('teamAttentionPage'));
+    // First main scan bare (no token yet); the second main scan passes the adopted
+    // token back; the fresh re-read before each send (#1616) is always tokenless.
     expect(polls[0].some((a) => a.startsWith('s='))).toBe(false);
-    expect(polls[1]).toContain(`s=${TOKEN_1}`);
+    const withSince = polls.filter((a) => a.some((x) => x.startsWith('s=')));
+    expect(withSince).toHaveLength(1);
+    expect(withSince[0]).toContain(`s=${TOKEN_1}`);
+    expect(fake.freshServed).toBe(1); // poll 1's single nudge
+    expect(polls.every((a) => !a.includes(fake.freshToken))).toBe(true);
   });
 
   it('leaves workers off the roster, and roster workers without a mention, alone', () => {
@@ -162,6 +215,129 @@ describe('Orca attention router — the happy path', () => {
     fake.attention.workers = [worker('w-ada', 'Ada'), worker('w-eli', 'Eli', { mentions: 0 })];
     expect(poll(c).adopted).toBe(true);
     expect(fake.sent).toEqual([]);
+  });
+});
+
+describe('Orca attention router — fresh counts at send time (#1616)', () => {
+  it('drops the nudge when the worker read its chat while the nudge waited out the gates', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli');
+    fake.attention.workers = [worker('w-eli', 'Eli', { mentions: 2, unread: 5, relevant: 110 })];
+    fake.fresh = [worker('w-eli', 'Eli', { mentions: 0, unread: 0, relevant: null })];
+    const out = poll(c);
+    expect(out).toMatchObject({ nudged: [], dropped: ['Eli'], adopted: true });
+    expect(fake.sent).toEqual([]);
+    expect(describeOutcome(out)).toContain('dropped (read while waiting): Eli');
+  });
+
+  it('a dropped frontier is recorded covered, so a held token does not re-run the gates for it', () => {
+    const c = cfg(['w-eli', 'Eli'], ['w-baloo', 'Baloo']);
+    fake.terminal('eli');
+    fake.terminal('baloo');
+    fake.busy.add('term_baloo');
+    fake.attention.workers = [worker('w-eli', 'Eli', { relevant: 110 }), worker('w-baloo', 'Baloo')];
+    fake.fresh = [worker('w-baloo', 'Baloo')]; // Eli read its chat; Baloo still has its mention
+    const first = poll(c);
+    expect(first).toMatchObject({ dropped: ['Eli'] });
+    expect(first.held.Baloo).toBeTruthy();
+    expect(new State(c.stateDir).ledger().nudged['w-eli'].relevantSeq).toBe(110);
+    fake.fresh = null; // from here the fresh scan mirrors the poll rows
+    const second = poll(c);
+    expect(second.covered).toContain('Eli'); // answered by the ledger, not the gates
+    expect(second.nudged).toEqual([]);       // Baloo is still busy
+    expect(fake.freshServed).toBe(1);        // Eli's drop consumed the only fresh scan so far
+  });
+
+  it('sends FRESH counts and records the fresh mention frontier, never the stale poll numbers', () => {
+    const c = cfg(['w-eli', 'Eli'], ['w-baloo', 'Baloo']);
+    fake.terminal('eli');
+    fake.terminal('baloo');
+    fake.busy.add('term_baloo'); // hold the token so the ledger's base (and its rows) survive to be read
+    fake.attention.workers = [worker('w-eli', 'Eli', { mentions: 2, unread: 5, relevant: 110, head: 120 }), worker('w-baloo', 'Baloo')];
+    fake.fresh = [worker('w-eli', 'Eli', { mentions: 3, unread: 9, relevant: 118, head: 121 })];
+    const out = poll(c);
+    expect(out).toMatchObject({ nudged: ['Eli'] });
+    expect(out.held.Baloo).toBeTruthy();
+    expect(fake.sent[0][1]).toContain('9 relevant unread (3 mentions');
+    expect(fake.sent[0][1]).toContain('unread #100–#121');
+    expect(fake.sent[0][1]).toContain('latest mention #118');
+    expect(fake.sent[0][1]).not.toContain('5 relevant unread');
+    expect(new State(c.stateDir).ledger().nudged['w-eli'].relevantSeq).toBe(118);
+    expect(adopted(c)).toBeNull(); // held, and the fresh scan's own token is never adopted
+  });
+
+  it('a failed fresh scan fails the poll without sending; the token is unchanged', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli');
+    fake.attention.workers = [worker('w-eli', 'Eli')];
+    fake.freshOk = false;
+    expect(() => poll(c)).toThrow(RouterError);
+    expect(fake.sent).toEqual([]);
+    expect(adopted(c)).toBeNull();
+  });
+
+  it('re-proves the prompt empty after the recompute: typing during the scan holds, not sends', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli');
+    fake.attention.workers = [worker('w-eli', 'Eli', { mentions: 1, unread: 2, relevant: 110 })];
+    // The recompute's round trip reopened the #5473 window; a human started typing in it.
+    fake.recheckScreens.set('term_eli', { tail: CLAUDE_IDLE, draft: 'Holger typing here' });
+    const out = poll(c);
+    expect(out.nudged).toEqual([]);
+    expect(out.held.Eli).toContain('prompt not empty on recheck');
+    expect(fake.sent).toEqual([]);
+    expect(adopted(c)).toBeNull();
+    expect(logs.join('\n')).not.toContain('Holger typing here'); // the reason never quotes the text
+  });
+
+  it('re-proves IDLE after the recompute: a busy agent renders an empty prompt box, so the screen alone cannot catch it', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli');
+    fake.attention.workers = [worker('w-eli', 'Eli', { mentions: 1, unread: 2, relevant: 110 })];
+    fake.busyRecheck.add('term_eli'); // the agent went busy during the fresh scan
+    const out = poll(c);
+    expect(out.nudged).toEqual([]);
+    expect(out.held.Eli).toContain('busy again after the recompute');
+    expect(fake.sent).toEqual([]);
+    expect(adopted(c)).toBeNull();
+  });
+
+  // Charles's QA probe (receipt on the PR), pinned per Xan's ruling #6495: the
+  // fake ignores --timeout-ms, so without this a full busy-wait at the recheck
+  // — the exact behavior Atilla's second P2 killed — survives the whole suite.
+  it('waits busyWaitMs at the gate, but only a short bounded timeout at the recheck', () => {
+    const c = { ...cfg(['w-eli', 'Eli']), busyWaitMs: 90_000 };
+    fake.terminal('eli');
+    fake.attention.workers = [worker('w-eli', 'Eli')];
+    expect(poll(c)).toMatchObject({ nudged: ['Eli'] });
+    const waits = fake.calls.filter((a) => a.slice(1, 3).join(' ') === 'terminal wait');
+    const ms = (a: string[]) => Number(a[a.indexOf('--timeout-ms') + 1]);
+    expect(waits).toHaveLength(2);
+    expect(ms(waits[0])).toBe(90_000);
+    expect(ms(waits[1])).toBeLessThanOrEqual(1_000);
+  });
+
+  it('adoption carries a nudge whose frontier postdates the token: no duplicate nudge next poll (blind-review P2, first head)', () => {
+    const c = cfg(['w-eli', 'Eli'], ['w-baloo', 'Baloo']);
+    fake.terminal('eli');
+    fake.terminal('baloo');
+    // Main scan: Eli's mention at 110, Baloo's at 115. Fresh scan, reading
+    // later: Eli's has moved to 125; Baloo's is unchanged.
+    fake.attention.workers = [worker('w-eli', 'Eli', { relevant: 110 }), worker('w-baloo', 'Baloo', { relevant: 115 })];
+    fake.fresh = [worker('w-eli', 'Eli', { relevant: 125 }), worker('w-baloo', 'Baloo', { relevant: 115 })];
+    const first = poll(c);
+    expect(first).toMatchObject({ nudged: ['Eli', 'Baloo'], adopted: true });
+    expect(fake.sent[0][1]).toContain('latest mention #125');
+    // Only Eli's record outlives the adopted token (125 above its 110
+    // horizon); Baloo's 115 equals its horizon, so the token covers it.
+    expect(Object.keys(new State(c.stateDir).ledger().nudged)).toEqual(['w-eli']);
+    // The server lists Eli again next poll: 125 postdates the token's horizon.
+    fake.attention.workers = [worker('w-eli', 'Eli', { relevant: 125 })];
+    fake.fresh = null;
+    const second = poll(c);
+    expect(second.covered).toEqual(['Eli']);
+    expect(second.nudged).toEqual([]);
+    expect(fake.sent).toHaveLength(2); // no re-send: Eli answered from the carried record
   });
 });
 
@@ -232,7 +408,9 @@ describe('Orca attention router — busy: never typed into; hold the token', () 
     fake.pages = 3;
     fake.attention.workers = [worker('w-eli', 'Eli')];
     expect(poll(c)).toMatchObject({ nudged: ['Eli'], adopted: true });
-    expect(fake.calls.filter((a) => a[1] === 'api' && a[2].includes('teamAttentionPage'))).toHaveLength(3);
+    // 3 main-scan pages + the single-page fresh re-read before the send (#1616).
+    expect(fake.calls.filter((a) => a[1] === 'api' && a[2].includes('teamAttentionPage'))).toHaveLength(4);
+    expect(fake.freshServed).toBe(1);
     expect(adopted(c)).toBe(TOKEN_1);
   });
 

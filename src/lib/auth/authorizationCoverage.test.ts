@@ -22,6 +22,7 @@ const DIRECT = [
   ['resolvers.mutation.app.ts', 'createUserApiKey'],
   ['resolvers.appRun.ts', 'createAgentWebhook'],
   ['resolvers.appRun.ts', 'rotateAgentWebhook'],
+  ['resolvers.appRun.ts', 'updateAgentSchedule'], // #1643: persisted run-as identity edits are authority writes.
   ['resolvers.mutation.memory.ts', 'addMemoryToAgent'],
   ['resolvers.mutation.memory.ts', 'updateAgentMemoryRole'],
   ['resolvers.mutation.memory.ts', 'createMemorySubscription'],

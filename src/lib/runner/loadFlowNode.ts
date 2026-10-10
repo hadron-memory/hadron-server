@@ -11,6 +11,8 @@
  *    (spec 041 D-2026-07-06-B — the run has no session key).
  */
 
+import { canReadMemory } from '../../mcp/access-control.js';
+import type { AuthContext } from '../../middleware/auth.js';
 import type { PrismaClient } from '../../generated/prisma/index.js';
 import { splitNodeUrn, normalizeUrnForLookup, legacyMemoryUrnToCanonical } from '../urn.js';
 
@@ -38,9 +40,10 @@ export async function resolveFlowMemory(
   return memory;
 }
 
-export async function loadFlowNode(db: PrismaClient, nodeUrn: string, organizationId: string) {
+export async function loadFlowNode(db: PrismaClient, nodeUrn: string, organizationId: string, principal: AuthContext) {
   const { memoryUrn, loc } = splitNodeUrn(nodeUrn);
   const memory = await resolveFlowMemory(db, memoryUrn, organizationId, nodeUrn);
+  if (!await canReadMemory(db, principal, memory.id)) throw new Error(`Flow memory not readable under the run principal.`);
   const node = await db.node.findUnique({
     where: { loc_memoryId: { loc, memoryId: memory.id } },
     select: { id: true, name: true, data: true, content: true, deletedAt: true },

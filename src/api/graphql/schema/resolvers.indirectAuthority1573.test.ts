@@ -61,7 +61,7 @@ beforeEach(async () => {
   await db.orgMember.create({ data: { organizationId: org.id, userId: admin.id, role: 'ADMIN' } });
   agent = await db.agent.create({ data: {
     id: generateId(), organizationId: org.id, urn: `${org.urn}:agent`, name: 'agent',
-    installationPolicy: { maxMembers: 1, memberRoles: ['member'] } as never,
+    installationPolicy: { maxMembers: 1, memberRoles: ['member'], selfJoinRole: 'member' } as never, // #1714: opted in
   } });
   app = await db.app.create({ data: {
     id: generateId(), organizationId: org.id, urn: `${org.urn}:app`, name: 'app',
@@ -96,7 +96,7 @@ describe('#1573: membership capacity is serialized across both doors', () => {
   });
 
   it('CONTROL: an unlimited App takes no capacity lock and admits both', async () => {
-    await db.agent.update({ where: { id: agent.id }, data: { installationPolicy: { maxMembers: 'unlimited', memberRoles: ['member'] } as never } });
+    await db.agent.update({ where: { id: agent.id }, data: { installationPolicy: { maxMembers: 'unlimited', memberRoles: ['member'], selfJoinRole: 'member' } as never } });
     const a = await mkUser(4);
     const b = await mkUser(5);
     await M.joinApp(null, { appId: app.id }, ctxFor(a.id));

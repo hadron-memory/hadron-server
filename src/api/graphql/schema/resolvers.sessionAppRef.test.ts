@@ -637,11 +637,16 @@ describe('SessionInput.workerRef (#974) — binding the named identity', () => {
     // for the HOLDER — a different driver is refused WORKER_HELD before the
     // liveness check runs. So the coexisting sessions are contrib's own.
     const first = await startSession(ctx(contrib.id), { workerRef: worker.id });
-    await startSession(ctx(contrib.id), { workerRef: worker.id, force: true });
+    // #1617 C: a forced rebind now ENDS the holder's own superseded session, so
+    // coexisting open rows exist only from before that rule (or seeded data).
+    // Seed the newer row directly; the ordering invariant still has to hold.
+    await db.session.create({
+      data: { id: generateId(), userId: contrib.id, appId: app.id, workerId: worker.id, type: 'DEVELOPER', startedAt: new Date() },
+    });
     // The OLDER session heartbeats after the takeover — a usage event lands
     // on it, making contrib the most recent driver despite admin's newer row.
     await db.usageEvent.create({
-      data: {
+      data: { countsAsActivity: true,
         id: generateId(),
         type: 'tool_call',
         sessionId: first.id,

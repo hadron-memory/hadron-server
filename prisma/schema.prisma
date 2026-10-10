@@ -408,6 +408,9 @@ model User {
   /// #1050 — worker names this person HOLDS. Held until released, never freed
   /// by a session ending; one human may hold many.
   heldWorkers                   Worker[]                   @relation("WorkerHolder")
+  /// #1705 — agent tasks this person owns / is assigned.
+  ownedAgentTasks               AgentTask[]                @relation("AgentTaskOwnerUser")
+  assignedAgentTasks            AgentTask[]                @relation("AgentTaskAssigneeUser")
   mcpSessionStates              McpSessionState[]
   ownedMemories                 Memory[]                   @relation("UserMemoriesOwned")
   // spec 047 (Phase 2b): entities this user is the TENANT owner of (user-owned
@@ -446,8 +449,37 @@ model User {
   @@unique([externalAppId, externalId])
   /// #1325 — MemoryConfig templates this user owns (user-owned owner branch).
   memoryConfigTemplates MemoryConfigTemplate[] @relation("MemoryConfigTemplateOwnerUser")
+  /// #1715 — this account's merge into another, if it was merged away.
+  mergedInto            UserMerge?             @relation("UserMergeSource")
+  /// #1715 — accounts merged into this one.
+  mergedFrom            UserMerge[]            @relation("UserMergeTarget")
 
   @@map("users")
+}
+
+/// #1715 — one account merge (`mergeUsers`): the source account was merged
+/// into the target, which survives. Written in the merge transaction and never
+/// changed, so it is keyed on the source: an account is merged away at most
+/// once (it is soft-deleted, so it can never be a merge's target later, which
+/// also keeps the chains acyclic).
+///
+/// Records that store user ids inside authenticated data (decision and
+/// decision-log payloads, #1641) are never rewritten by a merge. Readers
+/// follow a stored id through these rows, transitively, to the account that
+/// survives (src/lib/userMerges.ts). So `targetUserId` is deliberately NOT
+/// retargeted by a later merge of the target: the chain is what resolves it.
+model UserMerge {
+  sourceUserId String   @id @map("source_user_id")
+  targetUserId String   @map("target_user_id")
+  mergedAt     DateTime @default(now()) @map("merged_at")
+  /// The acting user, or null (an operator script). Recorded as of the merge.
+  mergedBy     String?  @map("merged_by")
+
+  source User @relation("UserMergeSource", fields: [sourceUserId], references: [id], onDelete: Cascade)
+  target User @relation("UserMergeTarget", fields: [targetUserId], references: [id], onDelete: Cascade)
+
+  @@index([targetUserId])
+  @@map("user_merges")
 }
 
 /// The kinds of widget that can be placed on a user's /app/dashboard grid
@@ -1280,6 +1312,17 @@ model Node {
   updatedBy          String?   @map("updated_by")
   deletedAt          DateTime? @map("deleted_at")
   deletedBy          String?   @map("deleted_by")
+  /// #1610 — the Worker / Agent behind the write, beside the user in
+  /// createdBy / updatedBy. Server-derived from the request's validated
+  /// session binding or App run (src/lib/requestActor.ts), never
+  /// client-supplied; stamped centrally on creates and authored-field
+  /// updates (src/integrations/db/client.ts). The updatedBy* pair describes
+  /// the LAST authored edit, so an edit with no agent behind it clears it.
+  /// No FK, like the audit stamps (cor:dmo:010:01).
+  createdByWorkerId  String?   @map("created_by_worker_id")
+  createdByAgentId   String?   @map("created_by_agent_id")
+  updatedByWorkerId  String?   @map("updated_by_worker_id")
+  updatedByAgentId   String?   @map("updated_by_agent_id")
 
   memory        Memory          @relation(fields: [memoryId], references: [id], onDelete: Cascade)
   outgoingEdges Edge[]          @relation("SourceNode")
@@ -1287,6 +1330,10 @@ model Node {
   pendingEdges  PendingEdge[]
   usageEvents   UsageEvent[]
   revisions     NodeRevision[]
+  /// #1606 — present iff `nodeType = 'comment'` (deferred DB trigger).
+  commentMeta   CommentMeta?    @relation("CommentMetaNode")
+  /// #1606 — the comments (top-level and replies) whose target is this node.
+  commentsOn    CommentMeta[]   @relation("CommentMetaTarget")
   contentValidationReports NodeContentValidationReport[]
   /// Spec 049 Phase 4: the Channel whose chat root this node is, if any.
   channel       Channel?        @relation("ChannelRoot")
@@ -1439,6 +1486,20 @@ model Edge {
   updatedBy   String?   @map("updated_by")
   deletedAt   DateTime? @map("deleted_at")
   deletedBy   String?   @map("deleted_by")
+  /// #1606 (`cor:dmo:110:01`) — set only by the comment path: the edge is a
+  /// comment's anchor (comment → target) or reply (reply → thread root).
+  /// NULL for every ordinary edge. A governed edge is immutable (DB trigger
+  /// `edges_governed_immutable`) and no generic edge write may create, alter
+  /// or delete one (`cor:dmo:110:04`).
+  governedKind       EdgeGovernedKind? @map("governed_kind")
+  /// The target revision a top-level comment was written against. Set iff
+  /// `governedKind = COMMENT_ANCHOR` (CHECK `chk_edges_governed_anchor`).
+  anchorRevNo        Int?              @map("anchor_rev_no")
+  /// `computeApprovalHash` of the target's title/abstract/content AT
+  /// `anchorRevNo` (64 lowercase hex), whether or not that revision was ever
+  /// approved, so the anchored text stays checkable after the revision
+  /// snapshot is pruned (`cor:dmo:110:01`).
+  anchorApprovalHash String?           @map("anchor_approval_hash")
 
   memory Memory @relation(fields: [memoryId], references: [id], onDelete: Cascade)
   source Node   @relation("SourceNode", fields: [sourceId], references: [id], onDelete: Cascade)
@@ -1452,6 +1513,70 @@ model Edge {
   // joins). Same memory-scoped, loc-ordered seek as nodes_memory_id_loc_idx.
   @@index([memoryId, loc])
   @@map("edges")
+}
+
+/// #1606 — the reserved, governed edge kinds (`cor:dmo:110:01`).
+enum EdgeGovernedKind {
+  COMMENT_ANCHOR
+  COMMENT_REPLY
+}
+
+/// #1606 — a comment thread's state (`cor:dmo:110:05`); top-level only.
+enum CommentThreadState {
+  OPEN
+  RESOLVED
+}
+
+/// #1606 — the comment-specific state of a `nodeType = 'comment'` node, 1:1.
+/// The body is the node's `content`; the quote and moderation reasons live in
+/// the node's `data`, so an encrypted memory encrypts them with the body. The
+/// columns here are what a constraint or an index must see in plaintext.
+///
+/// Invariants (prisma/post-push.sql + migration `20261005200000_comment_nodes`):
+/// meta ⇔ comment type; comment, target and thread root share one memory of a
+/// commentable class; a target is never a comment; `targetNodeId`,
+/// `threadRootId` and `authorKey` are immutable and equal the governed edges'
+/// endpoints; at most one open, live top-level thread per (target, author)
+/// (`comment_meta_one_open_thread`, a partial unique index Prisma can't model).
+model CommentMeta {
+  nodeId             String              @id @map("node_id")
+  /// The commented node. Immutable. `ON DELETE CASCADE` only so a whole-memory
+  /// delete never depends on cascade order: hard-deleting a commented target
+  /// on its own is still refused, by the governed-edge trigger (its anchor
+  /// edge cannot go while the comment exists) and, at commit, by the
+  /// comment-without-meta check.
+  targetNodeId       String              @map("target_node_id")
+  /// NULL for a top-level comment; else the thread's top-level comment.
+  threadRootId       String?             @map("thread_root_id")
+  /// OPEN | RESOLVED for a top-level comment; NULL for a reply (CHECK).
+  threadState        CommentThreadState? @map("thread_state")
+  /// The author (`cor:dmo:110:03`): `w:<workerId>`, `ua:<userId>:<agentId>`,
+  /// `u:<userId>` or `app:<appId>`. Immutable.
+  authorKey          String              @map("author_key")
+  /// #1721 — set when deleteComment leaves a stub (a top-level comment with
+  /// live replies; its text is blanked). A comment deleted without replies is
+  /// soft-deleted instead, and these record who deleted it.
+  retractedAt        DateTime?           @map("retracted_at")
+  /// Actor key (the `authorKey` grammar) of whoever deleted the comment.
+  retractedBy        String?             @map("retracted_by")
+  resolvedAt         DateTime?           @map("resolved_at")
+  resolvedBy         String?             @map("resolved_by")
+  /// Mirrors the comment node's soft delete (a thread delete, or the target's
+  /// soft delete), so the one-open-thread index can exclude it.
+  threadDeletedAt    DateTime?           @map("thread_deleted_at")
+  threadDeletedBy    String?             @map("thread_deleted_by")
+  /// `ADMIN` (deleteCommentThread), `AUTHOR` or `MANAGER` (#1721 deleteComment,
+  /// by its author or by a memory manager), or `TARGET` (the target was
+  /// soft-deleted; restoring the target restores exactly these).
+  threadDeletedCause String?             @map("thread_deleted_cause")
+  createdAt          DateTime            @default(now()) @map("created_at")
+
+  node   Node @relation("CommentMetaNode", fields: [nodeId], references: [id], onDelete: Cascade)
+  target Node @relation("CommentMetaTarget", fields: [targetNodeId], references: [id], onDelete: Cascade)
+
+  @@index([targetNodeId])
+  @@index([threadRootId])
+  @@map("comment_meta")
 }
 
 /// An edge whose target Node has not been synced yet; stored without
@@ -1541,6 +1666,11 @@ model Session {
   host            String?
   /// #928: the tool driving the session ("claude-code", "codex", ...).
   tool            String?
+  /// #1707 — the model family this session runs as (cor:agt:060:04): given
+  /// at session start, or derived from `llmModel` then `tool`; null when it
+  /// could not be classified. A worker's family is its live bound session's.
+  /// A matching input only, never an authorization input: it is self-declared.
+  family          String?
   /// Total prompt tokens across the session.
   inputTokens     Int?        @map("input_tokens")
   /// Total completion tokens across the session.
@@ -1664,6 +1794,14 @@ model UsageEvent {
   /// AiModelPrice row effective at event time. NULL = no price known (or the
   /// event carries no tokens). Never recomputed — prices change (FR-003).
   costMicroCents BigInt?   @map("cost_micro_cents")
+  /// #1653 / ruling DY-2: whether this event counts as ACTIVITY for its
+  /// session's liveness. True only when the session was live AND owned by the
+  /// recording principal at write time (`usageEventCountsAsActivity`), so a
+  /// request attributed to a LAPSED session keeps its attribution but never
+  /// revives it — resuming is the DA door alone. Defaults to false so a writer
+  /// that forgets the check fails safe; rows before the column are backfilled
+  /// true by the migration, so liveness was unchanged at deploy.
+  countsAsActivity Boolean @default(false) @map("counts_as_activity")
   createdAt      DateTime  @default(now()) @map("created_at")
   createdBy      String?   @map("created_by")
   updatedAt      DateTime? @updatedAt @map("updated_at")
@@ -2340,6 +2478,11 @@ model NodeRevision {
   /// / "user:<id>" (AuthContext.clientId) and "app:<App.id>" (App-key
   /// principals).
   editedByInfo       String?  @map("edited_by_info")
+  /// #1610 — the Worker / Agent behind the edit this snapshot records,
+  /// beside editedBy (the user). Set from the snapshot editor (editorFromAuth),
+  /// so the lazy reconcile, which builds its own editor, records none.
+  editedByWorkerId   String?  @map("edited_by_worker_id")
+  editedByAgentId    String?  @map("edited_by_agent_id")
   /// #620: user-settable label for this revision (updateNodeRevision
   /// mutation; REV_LABEL_MAX_LEN cap). Also captures the #88 `reason`
   /// arg at snapshot time — the edit rationale that previously squatted
@@ -2902,6 +3045,18 @@ model App {
   createUserPermission  CreateUserPermission @default(EXPLICIT) @map("create_user_permission")
   identifyUserMethod    IdentifyUserMethod   @default(USER_ID) @map("identify_user_method")
   sessionTimeoutSeconds Int                  @default(900) @map("session_timeout_seconds")
+  /// Ruling DY-5: days of no activity after which a lapsed worker session of
+  /// this App is DORMANT. No agent act resumes a dormant session (DA/DY-1);
+  /// only an explicit rebind by its human holder brings the worker back. The
+  /// security half of Holger's session-lifetime principle: a long-forgotten
+  /// session must not start acting again on its own.
+  sessionDormancyDays   Int                  @default(90) @map("session_dormancy_days")
+  /// Ruling DY-3: whether `startAgentSession` stamps a hard `expiresAt` by
+  /// default. False = this App's agent sessions have NO hard expiry unless the
+  /// call asks for one (a caller-supplied `sessionTimeoutSeconds`, still capped
+  /// by the App ceiling). A forgotten one is still bounded: past the App's
+  /// `sessionDormancyDays` it no longer binds (`bindSession`, DY-5).
+  agentSessionsExpire   Boolean              @default(true) @map("agent_sessions_expire")
   anonymousTtlDays      Int                  @default(7) @map("anonymous_ttl_days")
   /// **Deprecated** — superseded by `surfaces`. Scheduled for removal
   /// in a follow-up cleanup spec (per 008 R-4); kept in place to
@@ -2979,6 +3134,14 @@ model App {
   /// Agent is installed here; a Worker is who, by name, does attributable
   /// work.
   workers          Worker[]
+  /// #1705 — the App's agent tasks and their append-only event stream.
+  agentTasks       AgentTask[]
+  agentTeamEvents  AgentTeamEvent[]
+  /// #1706 — model-family availability (cor:agt:060:03) and the stall schedule.
+  modelFamilyAvailability ModelFamilyAvailability[]
+  agentTaskStallSchedule  AgentTaskStallSchedule?
+  /// #1707 — hosts that registered which workers they can launch (cor:agt:070:01).
+  hostRegistrations       HostRegistration[]
   mcpSessionStates McpSessionState[]
   scopes           Scope[]
   registerEntries  RegisterEntry[] @relation("RegisterOwnerApp")
@@ -3000,6 +3163,7 @@ model App {
   usageEvents      UsageEvent[]
   pendingSetups    PendingSetup[]
   aiServiceConfigs AiServiceConfig[]
+  automationVersions AutomationVersion[]
   connectionGrants ConnectionGrant[] @relation("AppConnectionGrants")
   slackConnections SlackConnection[]
 
@@ -3439,6 +3603,12 @@ model Worker {
   /// Spec 049 Phase 5 — register rows naming this Worker as the attendee.
   registerAttendeeOf RegisterEntry[] @relation("RegisterAttendeeWorker")
   readStates         ChannelReadState[] @relation("ReadStateWorker")
+  /// #1705 — agent tasks this worker owns / is assigned.
+  ownedAgentTasks    AgentTask[] @relation("AgentTaskOwnerWorker")
+  assignedAgentTasks AgentTask[] @relation("AgentTaskAssigneeWorker")
+  /// #1706 — availability for work (cor:agt:060:02).
+  availability       WorkerAvailability?
+  launchableVia      HostRegistrationWorker[]
 
   /// The URN atom's uniqueness. Unfiltered on retirement, like
   /// `workers_app_name_uniq`: a retired worker's URN must keep resolving.
@@ -4669,4 +4839,301 @@ model MemoryConfigTemplateRule {
   @@index([validationTaskId])
   @@index([descriptionNodeId])
   @@map("memory_config_template_rules")
+}
+
+
+/// #1655 DAE/DAG: immutable compiled code; approval is the temporary DZ-3
+/// bridge until passkey signatures ship. Identity strings preserve audit history.
+enum AutomationTier {
+  PERSON
+  APP
+}
+
+model AutomationVersion {
+  id                String @id @default(cuid())
+  appId             String @map("app_id")
+  app               App @relation(fields: [appId], references: [id], onDelete: Cascade)
+  number            Int
+  entrySourceNodeId String @map("entry_source_node_id")
+  compiledJson      String @map("compiled_json")
+  versionHash       String @map("version_hash")
+  sourceManifest    Json @map("source_manifest")
+  tier              AutomationTier
+  runAsUserId       String? @map("run_as_user_id")
+  publishedBy       String @map("published_by")
+  publishedAt       DateTime @default(now()) @map("published_at")
+  approvalHash      String? @map("approval_hash")
+  approvedBy        String? @map("approved_by")
+  approvedAt        DateTime? @map("approved_at")
+  revokedBy         String? @map("revoked_by")
+  revokedAt         DateTime? @map("revoked_at")
+
+  @@unique([appId, entrySourceNodeId, number])
+  @@index([appId])
+  @@map("automation_versions")
+}
+
+/// #1705 (Task Management T1) — one piece of work a team App has assigned, or
+/// wants assigned (cor:agt:050:01). The platform records who holds it, since
+/// when, and how it ended; it never reads what the work is.
+///
+/// Shape (CHECK `chk_agent_tasks_shape`, prisma/agent-task-invariants.sql):
+/// exactly one owner and at most one assignee, each a Worker OR a User; the
+/// status vocabulary; per-status timestamps; a result only on a finished task.
+/// `queued` (cor:agt:050:03) and `waitingOnChildren` (cor:agt:050:04) are
+/// DERIVED at read time, never stored.
+///
+/// Worker / User references are NO ACTION, not RESTRICT: an App hard delete
+/// cascades its workers and its tasks in one statement, and NO ACTION checks at
+/// the END of that statement, after both are gone. A worker with tasks is
+/// otherwise in use (`deleteWorker` refuses WORKER_IN_USE).
+model AgentTask {
+  id                   String    @id @default(cuid())
+  appId                String    @map("app_id")
+  /// What is asked, in the team's own words. Never read by the platform.
+  title                String
+  description          String?
+  /// Opaque origin reference (an issue URL, a node URN). Not interpreted.
+  source               String?
+  /// Null for a root task. Always in the same App (cor:agt:050:01).
+  parentTaskId         String?   @map("parent_task_id")
+  ownerWorkerId        String?   @map("owner_worker_id")
+  ownerUserId          String?   @map("owner_user_id")
+  /// Both null ⇒ queued while pending (cor:agt:050:03).
+  assigneeWorkerId     String?   @map("assignee_worker_id")
+  assigneeUserId       String?   @map("assignee_user_id")
+  /// For the matcher (T3): `{ role?, familyIn?, familyNotIn?, excludeWorkerIds? }`.
+  requirements         Json?
+  /// 'pending' | 'started' | 'finished' | 'cancelled' (cor:agt:050:02).
+  status               String    @default("pending")
+  startBy              DateTime? @map("start_by")
+  startedAt            DateTime? @map("started_at")
+  finishedAt           DateTime? @map("finished_at")
+  cancelledAt          DateTime? @map("cancelled_at")
+  /// The result (cor:agt:050:01) — set only on finish.
+  resultOutcome        String?   @map("result_outcome")
+  resultSummary        String?   @map("result_summary")
+  resultEvidence       String?   @map("result_evidence")
+  tags                 String[]  @default([])
+  /// Set by whoever assigns; T6 acts on it (cor:agt:050:10). Stored only in T1.
+  closeSessionWhenDone Boolean   @default(true) @map("close_session_when_done")
+  /// The latest assignment, by hand or by the matcher, in the #1610 actor shape.
+  assignedAt           DateTime? @map("assigned_at")
+  assignedBy           String?   @map("assigned_by")
+  assignedByWorkerId   String?   @map("assigned_by_worker_id")
+  assignedByAgentId    String?   @map("assigned_by_agent_id")
+  createdAt            DateTime  @default(now()) @map("created_at")
+  createdBy            String?   @map("created_by")
+  createdByWorkerId    String?   @map("created_by_worker_id")
+  createdByAgentId     String?   @map("created_by_agent_id")
+  updatedAt            DateTime? @updatedAt @map("updated_at")
+  updatedBy            String?   @map("updated_by")
+  updatedByWorkerId    String?   @map("updated_by_worker_id")
+  updatedByAgentId     String?   @map("updated_by_agent_id")
+
+  app            App              @relation(fields: [appId], references: [id], onDelete: Cascade)
+  parent         AgentTask?       @relation("AgentTaskParent", fields: [parentTaskId], references: [id], onDelete: NoAction)
+  children       AgentTask[]      @relation("AgentTaskParent")
+  ownerWorker    Worker?          @relation("AgentTaskOwnerWorker", fields: [ownerWorkerId], references: [id], onDelete: NoAction)
+  ownerUser      User?            @relation("AgentTaskOwnerUser", fields: [ownerUserId], references: [id], onDelete: NoAction)
+  assigneeWorker Worker?          @relation("AgentTaskAssigneeWorker", fields: [assigneeWorkerId], references: [id], onDelete: NoAction)
+  assigneeUser   User?            @relation("AgentTaskAssigneeUser", fields: [assigneeUserId], references: [id], onDelete: NoAction)
+  events         AgentTeamEvent[]
+
+  @@index([appId, status])
+  @@index([parentTaskId])
+  @@index([ownerWorkerId])
+  @@index([ownerUserId])
+  @@index([assigneeWorkerId])
+  @@index([assigneeUserId])
+  @@map("agent_tasks")
+}
+
+/// #1705 — one append-only record of something that happened in a team App's
+/// task work (cor:agt:050:11). Never changed or removed: the trigger in
+/// prisma/agent-task-invariants.sql refuses every UPDATE except the one-time
+/// acknowledgement of an alarm, refuses an INSERT that arrives acknowledged,
+/// and refuses a DELETE unless the App itself is gone (the cascade).
+///
+/// `payload` carries counts, outcomes, reasons and ids only — never message or
+/// description text (cor:agt:050:11, Proposed); src/lib/agentTasks/events.ts
+/// is its only writer. Actor and subject ids carry no FK on purpose: they are a
+/// sealed record of who acted, and an FK action would have to UPDATE the row.
+model AgentTeamEvent {
+  id                      String    @id @default(cuid())
+  appId                   String    @map("app_id")
+  /// e.g. `task.created`, `task.assigned` (cor:agt:050:11).
+  type                    String
+  taskId                  String?   @map("task_id")
+  /// Who acted, in the #1610 shape: the human credential, plus the Worker /
+  /// Agent bound to the request's session.
+  actorUserId             String?   @map("actor_user_id")
+  actorWorkerId           String?   @map("actor_worker_id")
+  actorAgentId            String?   @map("actor_agent_id")
+  /// The worker the event concerns, if any (e.g. the new assignee).
+  subjectWorkerId         String?   @map("subject_worker_id")
+  /// null for an ordinary event, 'alarm' for an alarm.
+  severity                String?
+  /// Alarms only: the owner chain when raised, nearest first.
+  chain                   Json?
+  acknowledgedByUserId    String?   @map("acknowledged_by_user_id")
+  acknowledgedByWorkerId  String?   @map("acknowledged_by_worker_id")
+  acknowledgedAt          DateTime? @map("acknowledged_at")
+  payload                 Json      @default("{}")
+  createdAt               DateTime  @default(now()) @map("created_at")
+  /// #1706 — stall alarms only: when the stall episode began (cor:agt:050:13),
+  /// the instant of the move that began the condition, never the evaluator's
+  /// clock. With `taskId` and `type` (the rule) it is the episode's key, and
+  /// the unique index below is what makes "exactly one alarm per episode"
+  /// hold across concurrent evaluator passes: a second insert of the same
+  /// episode is ON CONFLICT DO NOTHING, not a read-then-write. NULL on every
+  /// other event, and NULLs are distinct, so ordinary events never collide.
+  episodeStart            DateTime? @map("episode_start")
+
+  app   App         @relation(fields: [appId], references: [id], onDelete: Cascade)
+  task  AgentTask?  @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  wakes AgentTeamAlarmSchedule[]
+
+  @@unique([taskId, type, episodeStart], map: "agent_team_events_episode_uniq")
+  @@index([appId, createdAt])
+  @@index([taskId])
+  /// #1707 — "assigned least recently" (cor:agt:060:06) reads a worker's
+  /// latest assignment event.
+  @@index([subjectWorkerId, createdAt])
+  @@map("agent_team_events")
+}
+
+/// #1706 — who an alarm wakes, and when (cor:agt:050:19). One row per owner in
+/// the alarm's `chain`, by its index there: the nearest owner (index 0) is
+/// woken when the alarm is raised, and owner i is due `i` windows later. The
+/// stall evaluator stamps `wokenAt` once a row is due and its alarm is still
+/// unacknowledged; acknowledging stops every later row (cor:agt:050:20).
+///
+/// A side table because the alarm event is append-only. "Woken" here is the
+/// platform's record that the owner is now due a wake-up; DELIVERING it is the
+/// heartbeat slice's (T5). A person in the chain is recorded as woken the same
+/// way, and the timer runs on past them.
+model AgentTeamAlarmSchedule {
+  eventId    String    @map("event_id")
+  chainIndex Int       @map("chain_index")
+  dueAt      DateTime  @map("due_at")
+  wokenAt    DateTime? @map("woken_at")
+
+  event AgentTeamEvent @relation(fields: [eventId], references: [id], onDelete: Cascade)
+
+  @@id([eventId, chainIndex])
+  @@index([wokenAt, dueAt])
+  @@map("agent_team_alarm_schedule")
+}
+
+/// #1706 — one worker's availability for work (cor:agt:060:02). At most one
+/// row per worker, and a worker with none is available (Proposed). The row is
+/// kept when the worker becomes available again, for history; an `until` that
+/// has passed reads as available (#1706 interim, 060:02 open question).
+///
+/// `setBy` names the setter class of cor:agt:060:08: `worker` (itself, only to
+/// unavailable), `holder`, `app-manager`, `stall-rule` (060:07) or `host` (T6).
+/// The actor ids follow the #1610 shape. Shape: chk_worker_availability_shape
+/// (prisma/agent-task-stall-invariants.sql).
+model WorkerAvailability {
+  workerId      String    @id @map("worker_id")
+  /// 'available' | 'unavailable'.
+  state         String
+  /// Unavailable only: 'stalled' | 'out-of-tokens' | 'host-down' | 'other'.
+  reason        String?
+  until         DateTime?
+  setAt         DateTime  @map("set_at")
+  setBy         String    @map("set_by")
+  setByUserId   String?   @map("set_by_user_id")
+  setByWorkerId String?   @map("set_by_worker_id")
+  setByAgentId  String?   @map("set_by_agent_id")
+
+  worker Worker @relation(fields: [workerId], references: [id], onDelete: Cascade)
+
+  @@map("worker_availability")
+}
+
+/// #1706 — one model family's availability for work in one App
+/// (cor:agt:060:03): at most one row per App and family; with none, the family
+/// is available. Set only by whoever manages the App (cor:agt:060:09).
+model ModelFamilyAvailability {
+  appId         String    @map("app_id")
+  /// The model family, e.g. `claude`, `codex`, `glm` (cor:agt:060:04).
+  family        String
+  state         String
+  reason        String?
+  until         DateTime?
+  setAt         DateTime  @map("set_at")
+  setByUserId   String?   @map("set_by_user_id")
+  setByWorkerId String?   @map("set_by_worker_id")
+  setByAgentId  String?   @map("set_by_agent_id")
+
+  app App @relation(fields: [appId], references: [id], onDelete: Cascade)
+
+  @@id([appId, family])
+  @@map("model_family_availability")
+}
+
+/// #1706 — an App's stall windows, in minutes (cor:agt:050:14–:17 "What Can
+/// Change"). A NULL column, or no row, means the platform default
+/// (src/lib/agentTasks/stall.ts STALL_WINDOW_DEFAULTS). Tunables, not
+/// contract; set by whoever manages the App.
+model AgentTaskStallSchedule {
+  appId                String   @id @map("app_id")
+  notStartedMinutes    Int?     @map("not_started_minutes")
+  noProgressMinutes    Int?     @map("no_progress_minutes")
+  ownerReactionMinutes Int?     @map("owner_reaction_minutes")
+  assignmentMinutes    Int?     @map("assignment_minutes")
+  updatedAt            DateTime @updatedAt @map("updated_at")
+  updatedBy            String?  @map("updated_by")
+
+  app App @relation(fields: [appId], references: [id], onDelete: Cascade)
+
+  @@map("agent_task_stall_schedule")
+}
+
+/// #1707 — a host's statement of which team App it serves and which workers it
+/// can launch, each with the model family it would run as (cor:agt:070:01).
+/// Identified within its App by `hostId` (Proposed); `label` is for display.
+///
+/// The host's identity comes from its key, never from a request: the public
+/// `registerHost` path ships with the host-operations slice's `host:operate`
+/// key (T6). Until then only the internal writer
+/// (src/lib/agentTasks/hosts.ts) writes here.
+///
+/// A registration not refreshed within LAPSE_POLLS poll intervals has lapsed
+/// (plan default 3, cor:agt:070:01 open question): its workers stop counting as
+/// launchable through it, and the sweep writes `host.lost` once, stamping
+/// `lostAt`. A refresh clears `lostAt`.
+model HostRegistration {
+  id                  String    @id @default(cuid())
+  appId               String    @map("app_id")
+  hostId              String    @map("host_id")
+  label               String
+  pollIntervalSeconds Int       @map("poll_interval_seconds")
+  registeredAt        DateTime  @default(now()) @map("registered_at")
+  refreshedAt         DateTime  @map("refreshed_at")
+  lostAt              DateTime? @map("lost_at")
+
+  app     App                      @relation(fields: [appId], references: [id], onDelete: Cascade)
+  workers HostRegistrationWorker[]
+
+  @@unique([appId, hostId], map: "host_registrations_app_host_uniq")
+  @@map("host_registrations")
+}
+
+/// #1707 — one worker a registered host can launch, and the model family it
+/// would run as (cor:agt:070:01). A worker may be launchable through several
+/// hosts (Proposed).
+model HostRegistrationWorker {
+  registrationId String @map("registration_id")
+  workerId       String @map("worker_id")
+  family         String
+
+  registration HostRegistration @relation(fields: [registrationId], references: [id], onDelete: Cascade)
+  worker       Worker           @relation(fields: [workerId], references: [id], onDelete: Cascade)
+
+  @@id([registrationId, workerId])
+  @@index([workerId])
+  @@map("host_registration_workers")
 }

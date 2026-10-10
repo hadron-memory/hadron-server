@@ -93,7 +93,17 @@ export interface ChatRootOutcome<T> {
  */
 export interface ChatRootOpts {
   asChannel?: boolean;
+  /**
+   * The transaction to run in, when the caller must open it itself — a chat
+   * write that re-checks its gate under authority anchors (#1717) opens the
+   * transaction there and takes the chat lock inside it. Defaults to a plain
+   * `db.$transaction`.
+   */
+  inTx?: ChatTxRunner;
 }
+
+/** Runs `fn` in one transaction; see {@link ChatRootOpts.inTx}. */
+export type ChatTxRunner = <R>(fn: (tx: Prisma.TransactionClient) => Promise<R>) => Promise<R>;
 
 export async function withChatRootLock<T>(
   db: PrismaClient,
@@ -105,7 +115,8 @@ export async function withChatRootLock<T>(
   }) => Promise<ChatRootOutcome<T>>,
   opts?: ChatRootOpts,
 ): Promise<T> {
-  return db.$transaction(async (tx) => {
+  const inTx: ChatTxRunner = opts?.inTx ?? ((fn) => db.$transaction(fn));
+  return inTx(async (tx) => {
     // The Channel's own operation passes the protected-loc gate that every
     // generic writer is refused by (spec 049 S4); a chat that is not a Channel
     // passes either way.

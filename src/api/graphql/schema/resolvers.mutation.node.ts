@@ -1,4 +1,8 @@
 // nodeMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
+import { COMMENT_NODE_TYPE, assertNotCommentWrite, commentError, commentGovernedError } from '../../../lib/comments/index.js';
+import { commentIdsAmong, hardDeleteThreadsOfTargets, restoreThreadsOfTargets, softDeleteThreadsOfTargets } from '../../../lib/comments/lifecycle.js';
+import { decisionContainedError, isDecisionFamilyRole, refuseDecisionFamily, refuseUnderDecisionLog } from '../../../lib/decisions/index.js';
+import { refuseLiveThreadsOnFold } from '../../../lib/comments/merge.js';
 import { generateId } from '../../../lib/id.js';
 // Spec 049 S4 — the protected-loc gate on the in-place update paths and the bulk skip.
 import {
@@ -144,6 +148,15 @@ import {
 import { type ToolDriveFile } from '../../../lib/emailClient.js';
 import { searchReplaceInSpecNodes } from './resolvers.searchReplaceSpec.js';
 import { deletePendingEdgesTargetingNodes, reconcilePendingEdgeCounts } from '../../../lib/pendingEdgePromotion.js';
+
+/**
+ * #1606 (cor:dmo:110:01/04) — no generic edge write alters or removes a
+ * comment's anchor or reply edge. Read on the transaction, after the gate.
+ */
+async function refuseGovernedEdge(tx: Pick<Prisma.TransactionClient, 'edge'>, edgeId: string): Promise<void> {
+  const edge = await tx.edge.findUnique({ where: { id: edgeId }, select: { governedKind: true } });
+  if (edge?.governedKind) throw commentGovernedError('edge', 'edits');
+}
 
 // ── Shared node-write core (spec 039 Phase 0 D1) ────────────────────────────
 //
@@ -491,6 +504,16 @@ export async function writeNodeCore(
         throw new GraphQLError(collision.message, {
           extensions: { code: collision.name, loc: collision.loc, memoryId: collision.memoryId },
         });
+      }
+      // #1606 (cor:dmo:110:04) — no generic write creates, converts or edits a
+      // comment, a tombstoned one included (a create at its loc would resurrect
+      // it). Every caller of the core — createNode/updateNode, the kind doors,
+      // updateNodeData/Properties, importNode, cloneNode — passes through here.
+      assertNotCommentWrite(existing?.nodeType, input.nodeType, mode === 'update' ? 'update' : 'create');
+      // #1641 — a log's child locs are its decision codes: only the decision
+      // doors write there, so a squatter can never block a code.
+      if (!existing && opts?.ownsKind !== 'decision') {
+        await refuseUnderDecisionLog(ctx.db, input.memoryId, input.loc, 'Creating this node');
       }
       assertGovernedWrite(
         existing,
@@ -1022,6 +1045,8 @@ export async function writeNodeCore(
         // has since become governed. Address and liveness were already
         // re-checked here; governance is the third thing that can change under
         // the same window, and it is the one with teeth.
+        // #1606 — the comment gate, re-checked under the lock with the row it guards.
+        assertNotCommentWrite(current.nodeType, input.nodeType, 'update');
         assertGovernedWrite(
           current,
           mergedGovernedState(current, { role: input.role, isRunnable: input.isRunnable }),
@@ -1480,6 +1505,9 @@ export async function writeNodeCore(
                   : {}),
               } as Prisma.NodeUncheckedUpdateInput,
             });
+            // #1606 — restoring a target restores the threads its soft delete
+            // took (cause TARGET), never ones an admin deleted.
+            if (reviving) await restoreThreadsOfTargets(tx, [upserted.id]);
             return replaceInlineEdges(tx, upserted);
           });
         }
@@ -2137,8 +2165,10 @@ export const nodeMutations = {
     // hadron_update_review, …) that delegate here; specs have none, by design.
     // That no mutation is an MCP tool is pinned per door by a test that
     // iterates this same register.
+    // #1641: an operations-only kind (decision) gets NO generic-shaped door
+    // here; its own operations live in resolvers.decisions.ts.
     ...Object.fromEntries(
-      GOVERNED_KINDS.flatMap((entry) => [
+      GOVERNED_KINDS.filter((entry) => !entry.operationsOnly).flatMap((entry) => [
         [
           entry.doors.create,
           async (_: unknown, { input }: { input: CreateNodeInput }, ctx: Context) =>
@@ -2446,7 +2476,8 @@ export const nodeMutations = {
       const skipCounts = { governed: 0, protectedAddress: 0 };
       const scannedNodes: NodeRow[] = [];
       for (const row of nodeById.values()) {
-        if (governedKindsOf({ role: row.role, isRunnable: row.isRunnable }).length > 0) {
+        // #1606 — a comment is governed too (cor:dmo:110:04): skipped, reported as governed.
+        if (governedKindsOf({ role: row.role, isRunnable: row.isRunnable }).length > 0 || row.nodeType === COMMENT_NODE_TYPE) {
           skipCounts.governed += 1;
           continue;
         }
@@ -2963,6 +2994,14 @@ export const nodeMutations = {
               })).map((n) => n.id)
             : [resolvedId];
           await assertNoMintedSpecRemoval(tx, memoryId, affectedIds, hard ? 'hard-delete' : 'delete');
+          // #1606 (cor:dmo:110:04/05) — a comment is removed only by the comment
+          // path's thread delete; a target takes its threads with it.
+          if ((await commentIdsAmong(tx, affectedIds)).length > 0) throw commentGovernedError('delete', 'removes');
+          // #1641 §3.2 — a decision is withdrawn, never deleted, and deleting a
+          // log or an ancestor of one would erase decision history.
+          await refuseDecisionFamily(tx, affectedIds, 'Deleting this node');
+          if (hard) await hardDeleteThreadsOfTargets(tx, affectedIds);
+          else await softDeleteThreadsOfTargets(tx, affectedIds, { deletedBy, at: now });
 
           if (hard) {
             // A hard delete cascades Edge rows on BOTH endpoints via FK. If an
@@ -3334,6 +3373,7 @@ export const nodeMutations = {
             extensions: { code: 'EDGE_NOT_FOUND', ref: edgeRef },
           });
         }
+        await refuseGovernedEdge(tx, resolvedEdgeId);
         return tx.edge.update({
           where: { id: resolvedEdgeId },
           data: {
@@ -3415,6 +3455,7 @@ export const nodeMutations = {
           });
         }
         await requireMemoryWriteAccess(txCtx, edgeMem.memoryId);
+        await refuseGovernedEdge(tx, resolvedEdgeId);
         await tx.edge.delete({ where: { id: resolvedEdgeId } });
       });
       // #1061 — attributed to the source node, as createEdge is.
@@ -3635,6 +3676,17 @@ export const nodeMutations = {
       // genuine miss so it can't be used as a cross-memory existence oracle
       // (mirrors createEdge's target-denial posture).
       await requireMemoryWriteAccess(ctx, target.memoryId);
+      // #1606 (cor:dmo:110:01/04) — a comment never merges, and a merge that
+      // moves the source's incoming edges or deletes it would retarget or
+      // strand the threads anchored to the source's identity. The comment path
+      // has no merge; an admin deletes the source's threads first.
+      if (source.nodeType === COMMENT_NODE_TYPE || target.nodeType === COMMENT_NODE_TYPE) {
+        throw commentGovernedError('merge', 'edits');
+      }
+      // #1664 — moving the source's edges is safe (governed edges never re-home);
+      // DELETING a source with live threads refuses, but only under the source
+      // lock, after every gate (#1682 review: a pre-lock check raced, and ran
+      // before the source memory's authorization, disclosing its loc).
       // Same-memory merge (the common case): write access to the target's
       // memory already covers the source. Only run a separate source check
       // when the nodes live in different memories.
@@ -3853,6 +3905,16 @@ export const nodeMutations = {
             extensions: { code: 'NODE_WRITE_CONFLICT' },
           });
         }
+        // #1682 review (Baloo P2) — the AUTHORITATIVE live-thread refusal, under
+        // the source lock and before any write. The pre-lock count above is only
+        // a fast answer: posting a comment never changes its target's revision
+        // (cor:dmo:110:06), so revisionStateMatches can't see one that landed in
+        // between, and the delete below would destroy it.
+        if (deleteSource) await refuseLiveThreadsOnFold(tx, [source.id]);
+        // #1641 §3.2 — a decision is never merged, as source or target: its
+        // content is rendered from its payload, and a fold would rewrite it.
+        const mergedDecisions = [lockedSource, lockedTarget].filter((n) => isDecisionFamilyRole(n.role));
+        if (mergedDecisions.length > 0) throw decisionContainedError('Merging these nodes', mergedDecisions.map((n) => n.loc));
         await createNodeRevision(
           tx,
           buildNodeRevisionSnapshot(target, editorFromAuth(ctx), {
@@ -3890,7 +3952,9 @@ export const nodeMutations = {
           // holds, which is then dropped rather than duplicated (#568 Q2).
           // Self-loops (source↔target collapsing onto B) are dropped too.
           const srcEdges = await tx.edge.findMany({
-            where: { OR: [{ sourceId: source.id }, { targetId: source.id }] },
+            // #1606 — a comment's governed edge never re-homes (deleted threads
+            // only reach here; live ones refused above). It goes with its thread.
+            where: { OR: [{ sourceId: source.id }, { targetId: source.id }], governedKind: null },
             include: { source: { select: { loc: true } }, target: { select: { loc: true } } },
           });
           const movingIds = new Set(srcEdges.map((e) => e.id));
@@ -3986,6 +4050,7 @@ export const nodeMutations = {
           // any the caller chose not to transfer cascade away with the row.
           // #449 — so do the PendingEdges aimed at the source: its id is gone.
           pendingSourceMemories = await deletePendingEdgesTargetingNodes(tx, [source.id]);
+          await hardDeleteThreadsOfTargets(tx, [source.id]); // #1606 — deleted threads go with it
           await tx.node.delete({ where: { id: source.id } });
         }
       });
@@ -4178,6 +4243,9 @@ export const nodeMutations = {
       // governed node is currently not restorable at all — the same
       // no-door-for-this-operation shape as deletes, tracked with them in
       // #1204 rather than answered here.
+      // #1606 — a comment's history is not restorable through the generic
+      // surface, and no revision may turn a node into one (cor:dmo:110:04).
+      assertNotCommentWrite(node.nodeType, (restoreFields as { nodeType?: string | null }).nodeType, 'restore');
       assertGovernedWrite(
         node,
         mergedGovernedState(node, {
@@ -4268,6 +4336,7 @@ export const nodeMutations = {
         // Repeat every state-dependent gate against the authoritative row.
         // The preflight checks above are useful fast refusals, but they cannot
         // protect a restore that waited behind a concurrent writer.
+        assertNotCommentWrite(current.nodeType, (restoreFields as { nodeType?: string | null }).nodeType, 'restore');
         assertGovernedWrite(
           current,
           mergedGovernedState(current, {
@@ -4394,6 +4463,9 @@ export const nodeMutations = {
       }
       const node = await ctx.db.node.findUniqueOrThrow({ where: { id: revision.nodeId } });
       await requireMemoryWriteAccess(ctx, node.memoryId);
+      // #1641 §3.2 — a decision's history is its audit trail. Unlocked: no
+      // write ever turns an existing node into a decision or back.
+      if (isDecisionFamilyRole(node.role)) throw decisionContainedError("Deleting a decision's revision", [node.loc]);
       // No protected-loc gate: a revision row is history, not the address.
       await ctx.db.nodeRevision.delete({ where: { id: revisionId } });
       return true;
@@ -4466,9 +4538,11 @@ export const nodeMutations = {
       }
       const node = await ctx.db.node.findUniqueOrThrow({
         where: { id: nodeId },
-        select: { memoryId: true },
+        select: { memoryId: true, role: true, loc: true },
       });
       await requireMemoryWriteAccess(ctx, node.memoryId);
+      // #1641 §3.2 — a decision's history is its audit trail (as deleteNodeRevision).
+      if (isDecisionFamilyRole(node.role)) throw decisionContainedError("Clearing a decision's history", [node.loc]);
       const { count } = await ctx.db.nodeRevision.deleteMany({ where: { nodeId } });
       return count;
     },

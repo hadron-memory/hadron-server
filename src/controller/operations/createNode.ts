@@ -1,4 +1,5 @@
 import type { Node } from '../../index.d.js';
+import { runAsSystem } from '../../lib/requestActor.js';
 import { GRAPHS_PATH } from '../../config.js';
 import { generateId } from '../../lib/id.js';
 import { db } from '../../integrations/db/client.js';
@@ -22,7 +23,7 @@ import {
 /**
  * Create a new node: save to filesystem and upsert into the database.
  */
-export const createNode = async (
+const createNodeAsSystem = async (
   node: Partial<Node> & { memoryId: string },
 ): Promise<Node> => {
   if (!node.loc || !node.name || !node.memoryId) {
@@ -118,3 +119,10 @@ export const createNode = async (
 
   return saved as unknown as Node;
 };
+
+/**
+ * #1610: server scaffolding (a new memory's root node); its revision editor is
+ * `controller:createNode`, so the node write runs as the system too.
+ */
+export const createNode: typeof createNodeAsSystem = (...args) =>
+  runAsSystem(() => createNodeAsSystem(...args));

@@ -11,6 +11,7 @@
  */
 
 import { Client } from 'pg';
+import { readFileSync } from 'node:fs';
 import {
   PARALLEL_DBS,
   baseTestDbUrl,
@@ -100,6 +101,13 @@ async function provision(admin: Client) {
 
 /** The CHECK constraints `prisma db push` cannot express. Source of truth: prisma/post-push.sql. */
 async function applyTemplateConstraints(client: Client) {
+  await client.query(readFileSync(new URL('../../prisma/automation-invariants.sql', import.meta.url), 'utf8'));
+  // #1705 — agent task shape + append-only team events.
+  await client.query(readFileSync(new URL('../../prisma/agent-task-invariants.sql', import.meta.url), 'utf8'));
+  // #1706 — stall alarm episodes, alarm wakes, availability, stall windows.
+  await client.query(readFileSync(new URL('../../prisma/agent-task-stall-invariants.sql', import.meta.url), 'utf8'));
+  // #1707 — session model family, host registrations.
+  await client.query(readFileSync(new URL('../../prisma/agent-task-matching-invariants.sql', import.meta.url), 'utf8'));
 
   // #1326 — nullable attribution is either unknown, a task at an exact
   // revision, or an authenticated human. A CHECK with a bare OR of enum
@@ -255,6 +263,14 @@ async function applyTemplateConstraints(client: Client) {
     ALTER TABLE "memories" DROP CONSTRAINT IF EXISTS "chk_memory_owner_xor";
     ALTER TABLE "memories" ADD CONSTRAINT "chk_memory_owner_xor"
       CHECK (("organization_id" IS NULL) <> ("owner_user_id" IS NULL));
+  `);
+
+  // Ruling DY-5: a dormancy threshold is a positive number of days. Synced
+  // with prisma/post-push.sql + the 20261005010000 migration.
+  await client.query(`
+    ALTER TABLE "apps" DROP CONSTRAINT IF EXISTS "chk_app_session_dormancy_days_positive";
+    ALTER TABLE "apps" ADD CONSTRAINT "chk_app_session_dormancy_days_positive"
+      CHECK ("session_dormancy_days" > 0);
   `);
 
   await client.query(`

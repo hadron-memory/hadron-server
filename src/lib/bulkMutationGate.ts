@@ -34,6 +34,7 @@
  * refuses a cross-memory move of a chat root, for the same reason.
  */
 
+import { COMMENT_NODE_TYPE, commentGovernedError } from './comments/index.js';
 import { GraphQLError } from 'graphql';
 import type { Prisma } from '../generated/prisma/index.js';
 import { lockMemoryForChannelChange } from './channels.js';
@@ -165,8 +166,11 @@ export async function assertMemoryBulkMutable(
   db: ChannelReader & Pick<Prisma.TransactionClient, 'node'>,
   memoryId: string,
   op: string,
+  /** #1664 — `carry`: the caller moves threads with their targets itself (mergeMemories). */
+  opts: { comments?: 'refuse' | 'carry' } = {},
 ): Promise<void> {
   await assertNoProtectedReach(db, memoryId, 'all', op);
+  if ((opts.comments ?? 'refuse') === 'refuse') await assertNoCommentRows(db, { memoryId }, op);
   const governed = await db.node.findFirst({
     where: {
       memoryId,
@@ -246,6 +250,7 @@ export async function assertBatchMutable(
   for (const memoryId of new Set(memoryIds)) {
     await assertNoProtectedReach(tx, memoryId, locs, op);
   }
+  await assertNoCommentRows(tx, { memoryId: { in: [...new Set(memoryIds)] }, loc: { in: locs } }, op);
 
   // The GOVERNED half re-reads under the MEMORY lock, and deliberately does
   // NOT take a key per row (@copilot rounds 2 and 3, which pull in opposite
@@ -322,4 +327,26 @@ export async function assertBatchMutable(
   });
   assertNoGovernedRows(fresh, 'update');
   return undefined;
+}
+
+/**
+ * #1606 (cor:dmo:110:04) — a bulk merge or extract never copies, moves or
+ * rewrites a comment: comments are written only by the comment path, and a
+ * generic copy would produce a comment without its anchor. Only LIVE comments
+ * refuse, so the admin thread delete is the way through (cor:dmo:110:02); a
+ * deleted thread left behind is checked by the database invariants. Naming the
+ * first offender's loc follows the #1099 rule above.
+ */
+async function assertNoCommentRows(
+  db: Pick<Prisma.TransactionClient, 'node'>,
+  where: Prisma.NodeWhereInput,
+  op: string,
+): Promise<void> {
+  const comment = await db.node.findFirst({ where: { ...where, nodeType: COMMENT_NODE_TYPE, deletedAt: null }, select: { loc: true } });
+  if (comment) {
+    const err = commentGovernedError('merge', 'edits');
+    throw new GraphQLError(`${err.message} A ${op} cannot carry comment threads yet; an admin of the memory deletes them first (at "${comment.loc}").`, {
+      extensions: { ...err.extensions, loc: comment.loc },
+    });
+  }
 }

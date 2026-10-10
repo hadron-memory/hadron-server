@@ -1,3 +1,4 @@
+import { detachAppOwnerMemories } from '../../../controller/operations/detachAppOwnerMemories.js';
 // appMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
 import {
   createHash,
@@ -33,7 +34,7 @@ import {
 } from '../../../controller/operations/ensureAppMember.js';
 import {
   joinApp,
-  NoMemberRolesError,
+  SelfJoinNotAllowedError,
   AppUninstalledError,
 } from '../../../controller/operations/joinApp.js';
 import { AppNotFoundError } from '../../../lib/entityRef/errors.js';
@@ -437,6 +438,7 @@ export const appMutations = {
           // #1468 — the delete cascades the App's memories: refused while one
           // is a stamped corpus still holding a spec.
           await ctx.db.$transaction(async (tx) => {
+            await detachAppOwnerMemories(tx, [existing.id]);
             const doomed = await tx.memory.findMany({ where: { appId: existing.id }, select: { id: true } });
             await assertNoMintedCorpusCascade(tx, doomed.map((m) => m.id), 'reclaim the App URN over');
             await tx.app.delete({ where: { id: existing.id } });
@@ -637,6 +639,7 @@ export const appMutations = {
               await assertNoWorkers(ctx.db, depCollision.id, depUrn, 'reclaim');
               // #1468 — same cascade rule as the parent App branch.
               await ctx.db.$transaction(async (tx) => {
+                await detachAppOwnerMemories(tx, [depCollision.id]);
                 const doomed = await tx.memory.findMany({ where: { appId: depCollision.id }, select: { id: true } });
                 await assertNoMintedCorpusCascade(tx, doomed.map((m) => m.id), 'reclaim the App URN over');
                 await tx.app.delete({ where: { id: depCollision.id } });
@@ -706,6 +709,8 @@ export const appMutations = {
         createUserPermission,
         identifyUserMethod,
         sessionTimeoutSeconds,
+        sessionDormancyDays,
+        agentSessionsExpire,
         anonymousTtlDays,
         policy,
       }: {
@@ -726,6 +731,8 @@ export const appMutations = {
         createUserPermission?: 'DENY' | 'EXPLICIT' | 'IMPLICIT';
         identifyUserMethod?: 'USER_ID' | 'SECRET';
         sessionTimeoutSeconds?: number;
+        sessionDormancyDays?: number | null;
+        agentSessionsExpire?: boolean | null;
         anonymousTtlDays?: number;
         // #510: app-layer action-policy link (cor:acl:040:02).
         // Explicit null clears; omitted preserves.
@@ -741,6 +748,13 @@ export const appMutations = {
       // shape before storing; explicit null clears (= no restriction).
       if (policy !== undefined && policy !== null && parsePolicyLink(policy) == null) {
         throw new GraphQLError('policy must be { allow: string[] } or null.', {
+          extensions: { code: 'BAD_USER_INPUT' },
+        });
+      }
+      // Ruling DY-5: a dormancy threshold is a positive whole number of days.
+      // Loud rather than clamped: a 0 would make every lapsed session dormant.
+      if (sessionDormancyDays != null && (!Number.isInteger(sessionDormancyDays) || sessionDormancyDays < 1)) {
+        throw new GraphQLError('sessionDormancyDays must be a positive whole number of days.', {
           extensions: { code: 'BAD_USER_INPUT' },
         });
       }
@@ -898,6 +912,8 @@ export const appMutations = {
           ...(createUserPermission !== undefined ? { createUserPermission } : {}),
           ...(identifyUserMethod !== undefined ? { identifyUserMethod } : {}),
           ...(sessionTimeoutSeconds !== undefined ? { sessionTimeoutSeconds } : {}),
+          ...(sessionDormancyDays != null ? { sessionDormancyDays } : {}),
+          ...(agentSessionsExpire != null ? { agentSessionsExpire } : {}),
           ...(anonymousTtlDays !== undefined ? { anonymousTtlDays } : {}),
           ...(policy !== undefined ? { policy: policy as never } : {}),
           updatedBy: ctx.userId ?? null,
@@ -1027,7 +1043,10 @@ export const appMutations = {
 
       // Authorization: ADMIN/OWNER of the App's owning org, the user-owner of a
       // user-owned App, or an existing owner-role AppMember (spec 047 — see
-      // callerManagesAppMembers). Self-service joins are not allowed in v1.
+      // callerManagesAppMembers). Holger's ruling on #1718 (team chat #7790,
+      // replacing the strict one): an owner-role AppMember has the user-owner's
+      // rights, and platform admins manage org Apps. That is safe only because
+      // joinApp never self-grants `owner` (#1714).
       if (!(await callerManagesAppMembers(ctx, app, resolvedAppId))) {
         throw new Error('Forbidden: only org admins or App owners can manage members');
       }
@@ -1222,7 +1241,7 @@ export const appMutations = {
           e instanceof InvalidRoleError ||
           e instanceof MaxMembersExceededError ||
           e instanceof OrphanAppError ||
-          e instanceof NoMemberRolesError ||
+          e instanceof SelfJoinNotAllowedError ||
           e instanceof AppNotFoundError ||
           e instanceof AppUninstalledError
         ) {

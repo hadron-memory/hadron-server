@@ -1,3 +1,4 @@
+import { detachAppOwnerMemories } from './detachAppOwnerMemories.js';
 import { randomBytes } from 'crypto';
 import { Prisma, type PrismaClient } from '../../generated/prisma/index.js';
 import { deleteToolConnection } from '../../lib/emailClient.js';
@@ -201,9 +202,13 @@ async function runDeletionTxn(
       // before any write in this transaction. The set is every memory the
       // cascades below erase, the same set as the asset-key pass further down
       // (keep them in step): the user's personal/private and user-owned
-      // memories, and the app-scoped memories of the user's own Apps.
+      // memories, and the app-scoped memories of the user's own Apps,
+      // excluding foreign personal/private holdings retained by DX-C.
+      const foreignStrictOwner: Prisma.MemoryWhereInput = {
+        class: { in: ['personal', 'private'] }, userId: { not: targetUserId },
+      };
       const erasedMemories = await tx.memory.findMany({
-        where: { OR: [{ app: { ownerUserId: targetUserId } }, { userId: targetUserId }, { ownerUserId: targetUserId }] },
+        where: { OR: [{ app: { ownerUserId: targetUserId } }, { userId: targetUserId }, { ownerUserId: targetUserId }], NOT: foreignStrictOwner },
         select: { id: true },
       });
       await assertNoMintedCorpusCascade(
@@ -280,14 +285,19 @@ async function runDeletionTxn(
       // takes every app-scoped memory and its assets with it. Collecting
       // after that point missed them entirely (PR #888 review, Codex P1).
       //
-      // Both doomed sets, in one pass:
+      // Both doomed sets, excluding foreign strict-owner holdings:
       //   - app-scoped   — Memory.appId in the target's owned Apps
       //   - user-owned   — Memory.userId (personal/private, spec 034) or
       //                    Memory.ownerUserId (tenant memories, spec 047)
       // The keys are purged from the object store after this transaction
       // commits (see deleteUserAccount).
+      // DX-C: deleting an account never erases another user's strict-owner
+      // holdings through its owned Apps. Detach before asset-key collection.
+      const ownedApps = await tx.app.findMany({ where: { ownerUserId: targetUserId }, select: { id: true } });
+      await detachAppOwnerMemories(tx, ownedApps.map(app => app.id), targetUserId);
       const doomedMemories = await tx.memory.findMany({
         where: {
+          NOT: foreignStrictOwner,
           OR: [
             { app: { ownerUserId: targetUserId } },
             { userId: targetUserId },
@@ -306,7 +316,8 @@ async function runDeletionTxn(
       await tx.agentImport.deleteMany({
         where: { importedAgent: { ownerUserId: targetUserId } },
       });
-      // User-owned Apps: the App cascade removes app-scoped memories, keys,
+      // User-owned Apps: after foreign strict-owner holdings detach, the
+      // App cascade removes the remaining app-scoped memories, keys,
       // members, installs, runs, schedules, webhooks, pending setups — and
       // their Worker castings (Worker.appId cascades).
       await tx.app.deleteMany({ where: { ownerUserId: targetUserId } });
@@ -330,7 +341,7 @@ async function runDeletionTxn(
       // shares and members of these memories. Their asset keys were
       // collected at the top of this section, before any cascade fired.
       await tx.memory.deleteMany({
-        where: { OR: [{ userId: targetUserId }, { ownerUserId: targetUserId }] },
+        where: { OR: [{ userId: targetUserId }, { ownerUserId: targetUserId }], NOT: foreignStrictOwner },
       });
 
       // ── 3. Credentials + linked accounts ────────────────────────────

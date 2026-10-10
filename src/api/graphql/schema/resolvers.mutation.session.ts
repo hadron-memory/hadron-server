@@ -11,7 +11,8 @@ import {
 import { authoredContentChanged, clearNodeAuthorship } from '../../../lib/nodeAuthorship.js';
 import { lockAncestorsForCreate, lockAncestorsForCreateMany } from '../../../lib/nodeSubtreeLock.js';
 import { mintMemoryUrnV2 } from '../../../lib/mintMemoryUrnV2.js';
-import { canReadMemory } from '../../../mcp/access-control.js';
+import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
+import { canReadMemory, filterReadableMemoryIds } from '../../../mcp/access-control.js';
 import { isAgentInstalled } from '../../../lib/appAgent.js';
 import {
   parseDataKey,
@@ -35,7 +36,7 @@ import { resolveWorkerRef as resolveWorkerRefId } from '../../../lib/entityRef/w
 import { isId } from '../../../lib/entityRef/shape.js';
 import { resolveWorkerIdByNameGated, provisionWorkerMemory } from './resolvers.worker.js';
 import { writeNodeCore } from './resolvers.mutation.node.js';
-import { recordNodeUsage, toUsageNodeRefs } from '../../../lib/usageRecorder.js';
+import { attributedRequestActivity, recordNodeUsage, toUsageNodeRefs, trackUsageWrite } from '../../../lib/usageRecorder.js';
 import {
   HANDOFFS_PARENT_LOC,
   HANDOFF_SESSION_KEY,
@@ -84,6 +85,7 @@ import {
 import { assertNoMintedSpecRemoval, assertNoMintedSpecUnmark } from '../../../lib/mintedSpecPermanence.js';
 import { preserveHeartbeatIfLapsed } from '../../../lib/sessionActivity.js';
 import { withAuthorizedTx } from './authorizedTx.js';
+import { deriveFamily, normalizeFamily } from '../../../lib/agentTasks/family.js';
 
 /**
  * Strip explicit GraphQL nulls from a CalendarEventTimeInput so the tool's
@@ -514,6 +516,25 @@ export const sessionMutations = {
       // #1050 — set when this bind should claim an unheld name; executed inside
       // the session-creating transaction so the two commit together.
       let claimWorkerId: string | undefined;
+      // #1625 review (Baloo P2-2): set when this bind names a worker, and
+      // re-run inside the transaction under the Worker lock.
+      let assertWorkerNotTaken: ((db: Context['db']) => Promise<void>) | null = null;
+      // #1707 (cor:agt:060:04): the session's model family — given, or derived
+      // from the model, then the tool. Refused before anything is written when
+      // given in a shape no family has; a matching input, never authorization.
+      let family: string | null = null;
+      if (input.family != null && input.family.trim() !== '') {
+        family = normalizeFamily(input.family);
+        if (!family) {
+          throw new GraphQLError(
+            'family is a model family token: lowercase letters, digits, ".", "_" or "-", up to 64 characters (e.g. claude, codex, glm).',
+            { extensions: { code: 'BAD_USER_INPUT' } },
+          );
+        }
+      } else {
+        family = deriveFamily({ llmModel: input.llmModel, tool: input.tool });
+      }
+
       const workerRef = input.workerRef?.trim();
       if (workerRef) {
         // #991: a Worker id OR an hrn:worker:<root>:<app-slug>:<worker-slug>
@@ -746,13 +767,18 @@ export const sessionMutations = {
         // design: there is no lease (liveness stays derivable from active
         // sessions), so two concurrent starts can both pass — the contract
         // is informed consent, not mutual exclusion.
-        if (!input.force) {
+        // #1625 review (Baloo P2-2): the WORKER_TAKEN decision runs here for the
+        // early, rich refusal AND again inside the bind transaction under the
+        // Worker lock, so it is decided on state no concurrent bind or resume
+        // can change before the insert commits.
+        const takenWorker = worker;
+        assertWorkerNotTaken = async (db: Context['db']) => {
           // ALL active sessions, not the newest-created (PR #983 review,
           // Copilot): force allows several to coexist, and the most recent
           // ACTIVITY can be on an older one — the takeover prompt must name
           // whoever actually drove the worker last.
           const nowForLiveness = new Date();
-          const openSessions = await ctx.db.session.findMany({
+          const openSessions = await db.session.findMany({
             // #1120 review (Codex P2): BOUNDED. Nothing closes abandoned
             // sessions any more, so open rows accumulate per worker and an
             // unbounded scan — plus every id in an `IN (...)` — grows with the
@@ -760,7 +786,7 @@ export const sessionMutations = {
             // live under ANY type's window; the cap is only a backstop behind
             // it, because a cap alone could drop the live row itself.
             where: {
-              workerId: worker.id, endedAt: null, deletedAt: null,
+              workerId: takenWorker.id, endedAt: null, deletedAt: null,
               ...recentlyTouchedFilter(nowForLiveness),
             },
             // ORDERED BY HEARTBEAT, not by bind time (#1120 review, Codex P2).
@@ -807,7 +833,7 @@ export const sessionMutations = {
           // derivations that must agree are pinned by a differential test
           // rather than by hoping.
           const lastEventForLiveness = await loadLastEventBySession(
-            ctx.db as never,
+            db as never,
             openSessions.map((s) => s.id),
           );
           const activeSessions = openSessions.filter((s) =>
@@ -825,14 +851,14 @@ export const sessionMutations = {
             // takeover prompt and the roster start disagreeing about the same
             // worker in the same second.
             const lastEventBySession = await loadLastEventBySession(
-              ctx.db as never,
+              db as never,
               activeSessions.map((s) => s.id),
             );
             const best = mostRecentlyActive(activeSessions, lastEventBySession);
             const active = best?.session ?? activeSessions[0];
             const lastSeenAt = best?.at ?? active.startedAt;
             const driver = active.userId
-              ? await ctx.db.user.findUnique({
+              ? await db.user.findUnique({
                   where: { id: active.userId },
                   select: { handle: true, githubUsername: true },
                 })
@@ -876,7 +902,7 @@ export const sessionMutations = {
               {
                 extensions: {
                   code: 'WORKER_TAKEN',
-                  workerId: worker.id,
+                  workerId: takenWorker.id,
                   sessionId: active.id,
                   lastDriver,
                   lastSeenAt: lastSeenAt.toISOString(),
@@ -884,7 +910,8 @@ export const sessionMutations = {
               },
             );
           }
-        }
+                };
+        if (!input.force) await assertWorkerNotTaken(ctx.db);
         // Session.agentId keeps recording the ROLE-agent behind the casting
         // (cor:agt:020:03); an agentRef naming a DIFFERENT agent is a client
         // bug, refused rather than silently overridden.
@@ -930,7 +957,11 @@ export const sessionMutations = {
         }
       }
 
-      return ctx.db.$transaction(async (tx) => {
+      // #1617 C: sessions this bind ended as superseded. Their cached keys
+      // are evicted only after the transaction commits, as endSessionFirstWins
+      // does for an explicit end.
+      let supersededIds: string[] = [];
+      const bound = await ctx.db.$transaction(async (tx) => {
         // #1001: appId may have come only from an App key or an MCP active-App
         // selection, so neither the appRef nor Worker branches necessarily
         // checked lifecycle. Recheck the settled App in the transaction before
@@ -938,6 +969,46 @@ export const sessionMutations = {
         // have replaced a stale selection above; only the final App matters.
         if (appId) {
           await lockSessionAppActive(tx, appId);
+        }
+        // #1625 review (Baloo P2-2, P2-3): EVERY worker bind takes the Worker
+        // row lock, the same lock a lapsed-session resume takes (after the App
+        // lock, in the same order), including a bind of a name the caller
+        // already holds. Everything this bind decides about the worker's
+        // sessions — WORKER_TAKEN and the superseded set — is re-read below,
+        // after it, so two binds, or a bind and a resume, of one worker
+        // serialize instead of each deciding on a stale view.
+        if (workerId) {
+          const [locked] = await tx.$queryRaw<Array<{ name: string; held_by_user_id: string | null; retired_at: Date | null }>>`
+            SELECT name, held_by_user_id, retired_at FROM workers WHERE id = ${workerId} FOR UPDATE`;
+          // #1625 review (Baloo, residual P2): the HOLD and retirement are
+          // re-validated under the lock for EVERY bind, force included. The
+          // checks far above read a snapshot; a release, a claim by someone
+          // else, or a retirement can land during the lock wait, and a bind
+          // must not proceed on the name as it was.
+          if (!locked || locked.retired_at) {
+            throw new GraphQLError(
+              'This worker is retired — its name stays reserved, but it takes no new sessions.',
+              { extensions: { code: 'WORKER_RETIRED', workerId } },
+            );
+          }
+          if (locked.held_by_user_id && locked.held_by_user_id !== ctx.userId) {
+            const holder = await tx.user.findUnique({
+              where: { id: locked.held_by_user_id },
+              select: { handle: true, githubUsername: true },
+            });
+            const who = holder?.handle ?? holder?.githubUsername ?? locked.held_by_user_id;
+            throw new GraphQLError(
+              `The name "${locked.name}" was taken by ${who} while this bind waited. ` +
+                'This cannot be forced — cast your own worker instead.',
+              { extensions: { code: 'WORKER_HELD', workerId, heldBy: locked.held_by_user_id, heldByName: who } },
+            );
+          }
+          // Released during the wait: an unheld name is claimed by this bind,
+          // through the same compare-and-set path as a never-held one.
+          if (!locked.held_by_user_id) claimWorkerId = workerId;
+          if (!input.force && assertWorkerNotTaken) {
+            await assertWorkerNotTaken(tx as unknown as Context['db']);
+          }
         }
         // Everything about the hold is settled INSIDE this transaction, so the
         // decision and the session insert commit together. The row read far
@@ -1033,7 +1104,27 @@ export const sessionMutations = {
             }
           }
         }
-        return tx.session.create({
+        // #1617 C (Holger, 2026-10-05, team chat #6568): binding a worker ENDS
+        // the same person's other open sessions on it, the lapsed ones and the
+        // one a `force` displaces. Before this a rebind left the old row open
+        // forever (#1114 stopped anything else closing it), so every quiet
+        // night added one more open-but-not-live session per worker. Ending
+        // here is not an inference from silence: the rebind is the act, and
+        // the same person is on both sides of it. Only the caller's OWN rows
+        // on THIS worker: another person's session and an App-key session are
+        // never touched. They end without a handoff, marked superseded in
+        // `summary`, and the new session chains to the newest of them.
+        const supersedes = workerId && ctx.userId && !ctx.impersonation
+          ? await tx.session.findMany({
+              where: {
+                workerId, userId: ctx.userId, endedAt: null, deletedAt: null,
+                ...(input.id ? { id: { not: input.id } } : {}),
+              },
+              orderBy: { startedAt: 'desc' as const },
+              select: { id: true },
+            })
+          : [];
+        const created = await tx.session.create({
         data: {
           id: input.id,
           type: (input.type as any) ?? 'DEVELOPER',
@@ -1055,15 +1146,33 @@ export const sessionMutations = {
           language: input.language,
           llmModel: input.llmModel,
           parentSessionId: input.parentSessionId,
-          prevSessionId: input.prevSessionId ?? derivedPrevSessionId,
+          prevSessionId: input.prevSessionId ?? supersedes[0]?.id ?? derivedPrevSessionId,
           // #928 coding-session provenance.
           transcriptPath: input.transcriptPath,
           host: input.host,
           tool: input.tool,
+          family,
         },
         include: SESSION_INCLUDE,
         });
+        if (supersedes.length > 0) {
+          const ids = supersedes.map((r) => r.id).filter((id) => id !== created.id);
+          const endedAt = new Date();
+          // A driver-written summary is kept; an empty one records why it ended.
+          await tx.session.updateMany({
+            where: { id: { in: ids }, endedAt: null, summary: null },
+            data: { summary: `superseded by session ${created.id}` },
+          });
+          await tx.session.updateMany({
+            where: { id: { in: ids }, endedAt: null },
+            data: { endedAt },
+          });
+          supersededIds = ids;
+        }
+        return created;
       });
+      for (const id of supersededIds) sessionKeyCache.evict(id);
+      return bound;
     },
 
     // #931: set a live session's mutable provenance fields mid-session — a PR
@@ -1169,7 +1278,12 @@ export const sessionMutations = {
         ? await resolveReadableNodeByLoc(ctx, event.nodeLoc)
         : null;
 
-      await ctx.db.usageEvent.create({
+      // #1660 review (local P2-2): the insert IS this act, so an App-key resume
+      // it earns commits in the SAME transaction (rolled back if the insert
+      // fails), and the row is stamped at the instant activity was judged
+      // (local P2-1).
+      const at = new Date();
+      await ctx.db.$transaction(async (tx) => tx.usageEvent.create({
         data: {
           type: event.type,
           nodeLoc: event.nodeLoc,
@@ -1187,11 +1301,17 @@ export const sessionMutations = {
           userId: ctx.userId ?? null,
           createdBy: ctx.userId ?? ctx.clientId ?? null,
           sessionId: event.sessionId,
+          // #1653 / DY-2: the session id here is CLIENT-SUPPLIED, so it counts
+          // as activity only for a live session this caller owns. Before this,
+          // any reader could keep someone else's session live, or revive it,
+          // by recording usage against its id.
+          countsAsActivity: await attributedRequestActivity(ctx.db, ctx, event.sessionId, { at, tx }),
+          createdAt: at,
           model: event.model,
           tokensIn: event.tokensIn,
           tokensOut: event.tokensOut,
         },
-      });
+      }));
       return true;
     },
 
@@ -1397,12 +1517,18 @@ export const sessionMutations = {
           }
         }
 
-        // Clamp session timeout to the app's configured maximum (ceiling)
-        const ttl = Math.min(
-          sessionTimeoutSeconds ?? app.sessionTimeoutSeconds,
-          app.sessionTimeoutSeconds,
-        );
-        const expiresAt = new Date(Date.now() + ttl * 1000);
+        // Clamp session timeout to the app's configured maximum (ceiling).
+        // Ruling DY-3: an App with `agentSessionsExpire: false` stamps NO hard
+        // expiry unless the call asks for one; a requested timeout is still
+        // capped by the App ceiling. Inactivity never ends a session (#1114);
+        // a forgotten one is bounded by DY-5 instead: past the App's
+        // `sessionDormancyDays` it no longer binds (`bindSession`).
+        const expiresAt = !app.agentSessionsExpire && sessionTimeoutSeconds == null
+          ? null
+          : new Date(Date.now() + Math.min(
+              sessionTimeoutSeconds ?? app.sessionTimeoutSeconds,
+              app.sessionTimeoutSeconds,
+            ) * 1000);
 
         const session = await tx.session.create({
           data: {
@@ -2185,6 +2311,7 @@ export const sessionMutations = {
         sessionId: ctx.sessionId,
         roles: ctx.roles,
         organizationId: ctx.organizationId,
+        impersonation: ctx.impersonation,
       };
 
       const loadAndRender = async (targetNodeUrn: string) => {
@@ -2236,6 +2363,17 @@ export const sessionMutations = {
           });
         }
 
+        // #1719/#1730: reference edges are reads of their target memory.
+        // A run fails loudly rather than executing a silently shortened flow;
+        // interactive render omits unreadable targets as the preview does.
+        const readableTargets = await filterReadableMemoryIds(ctx.db, auth,
+          node.outgoingEdges.flatMap(e => e.target ? [e.target.memoryId] : []));
+        if (isRunPrincipal(auth) && node.outgoingEdges.some(e => e.target &&
+            !isRoutingName(routingNameOf(e, loc)) && !readableTargets.has(e.target.memoryId))) {
+          throw new GraphQLError('Referenced dependency is not readable by the run principal; the run was refused.', { extensions: { code: 'FORBIDDEN' } });
+        }
+        node.outgoingEdges = node.outgoingEdges.filter(e => e.target && readableTargets.has(e.target.memoryId));
+
         // Decrypt the node and its outgoing edge targets if the memory is encrypted.
         // An edge whose target was deleted can surface a null `target`; filter
         // those out so decryptNodesBatch never dereferences null.
@@ -2264,6 +2402,7 @@ export const sessionMutations = {
               (await ctx.db.memory.findUniqueOrThrow({ where: { id: memoryId }, select: { urn: true } })).urn,
             compileTemplate: (content, data, memoryId) =>
               compileTemplate(content, data, memoryId, ctx.db, {}),
+            includeTarget: target => !!target && readableTargets.has(target.memoryId),
             onTargetInlined: (target) => inlined.push(target),
           },
         );
@@ -2275,11 +2414,14 @@ export const sessionMutations = {
         // (PR #1062 review — Codex).
         recordNodeUsage(ctx.db, 'read', toUsageNodeRefs([node, ...inlined]), ctx);
 
-        // Record usage event (fire-and-forget).
-        ctx.db.usageEvent
+        // Record usage event (fire-and-forget). #1653 / DY-2: it counts as
+        // activity only for a live session the caller owns.
+        const runAt = new Date();
+        trackUsageWrite(ctx.db, attributedRequestActivity(ctx.db, ctx, ctx.sessionId, { at: runAt }).then((countsAsActivity) => ctx.db.usageEvent
           .create({
             data: {
               id: generateId(),
+              createdAt: runAt,
               type: 'action-run',
               nodeLoc: loc,
               nodeId: node.id,
@@ -2292,10 +2434,11 @@ export const sessionMutations = {
               userId: ctx.userId ?? null,
               createdBy: ctx.userId ?? null,
               sessionId: ctx.sessionId ?? null,
+              countsAsActivity,
               actionArgs: stringArgs,
             },
           })
-          .catch(() => {});
+          .catch(() => {})));
 
         return assembled;
       };

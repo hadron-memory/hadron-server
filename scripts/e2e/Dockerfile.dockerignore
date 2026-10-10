@@ -1,0 +1,19 @@
+# Keep the build context limited to the files needed by this image.
+**
+!package.json
+!pnpm-lock.yaml
+!pnpm-workspace.yaml
+!prisma.config.ts
+!tsconfig.json
+!prisma/
+!prisma/**
+!src/
+!src/**
+!scripts/
+!scripts/e2e/
+!scripts/e2e/**
+src/generated/
+**/node_modules/
+**/.env*
+**/*.db
+**/*.db-journal

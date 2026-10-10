@@ -7,6 +7,7 @@
  * tsquery expression (tsquery.ts). Vector search delegates to the existing
  * pgvector helpers.
  */
+import { contentScopeSql, effectiveContentScope } from '../comments/scope.js';
 import { approvalStateSql } from '../nodeApproval.js';
 import type {
   NodeRetrievalProvider,
@@ -57,6 +58,11 @@ function filterClause(f: NodeSqlFilter | undefined, bind: (v: unknown) => string
   const approval = approvalStateSql(flt.approvalState); // #1591
   if (approval) parts.push(approval);
   if (flt.minted != null) parts.push(flt.minted ? 'minted_at IS NOT NULL' : 'minted_at IS NULL'); // #1591
+  // #1607 (cor:dmo:110:06) — approval and mint status sets never contain comments.
+  if (approval || flt.minted != null) parts.push("node_type <> 'comment'");
+  // #1608 (cor:dmo:110:08) — content, comments or both; CONTENT by default.
+  const scope = contentScopeSql(effectiveContentScope(flt));
+  if (scope) parts.push(scope);
   return parts.length ? ' AND ' + parts.join(' AND ') : '';
 }
 
@@ -237,6 +243,7 @@ export const postgresRetrievalProvider: NodeRetrievalProvider = {
       queryEmbedding: opts.queryEmbedding,
       limit: opts.limit,
       onWindow: opts.onWindow,
+      scope: opts.contentScope ?? 'CONTENT', // #1608: content by default for every caller
     });
   },
 
@@ -246,6 +253,7 @@ export const postgresRetrievalProvider: NodeRetrievalProvider = {
       queryEmbedding: opts.queryEmbedding,
       limit: opts.limit,
       onWindow: opts.onWindow,
+      scope: opts.contentScope ?? 'CONTENT', // #1608: content by default for every caller
     });
   },
 };

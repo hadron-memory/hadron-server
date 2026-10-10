@@ -23,6 +23,7 @@
  * so a new entry cannot be half-registered.
  */
 import type { GraphQLFormattedError } from 'graphql';
+import { isPrismaClientError, REDACTED_DB_ERROR_MESSAGE } from '../../lib/prismaErrors.js';
 import { UrnNotQualifiedError, UrnParseError } from '../../lib/urn.js';
 import { AmbiguousLegacyUrnError } from '../../lib/entityRef/errors.js';
 import { EntityNotFoundError } from '../../lib/entityRef/entityNotFound.js';
@@ -168,6 +169,17 @@ export function formatGraphQLError(
       // The domain message, not Apollo's decoration of it.
       message: (original as Error).message,
       extensions: { ...formattedError.extensions, ...m.extensionsFor(original) },
+    };
+  }
+  // #1688: Prisma messages contain query arguments and schema internals.
+  // Keep the original exception for server reporting; expose only the stable
+  // failure code. Domain errors above retain their expected client messages.
+  if (isPrismaClientError(original)) {
+    return {
+      message: REDACTED_DB_ERROR_MESSAGE,
+      locations: formattedError.locations,
+      path: formattedError.path,
+      extensions: { code: 'INTERNAL_SERVER_ERROR' },
     };
   }
   return formattedError;
