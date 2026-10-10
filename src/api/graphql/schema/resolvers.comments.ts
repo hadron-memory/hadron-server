@@ -487,6 +487,21 @@ async function insertComment(
 
 type LockedComment = Prisma.NodeGetPayload<{ include: { commentMeta: true } }>;
 
+/**
+ * Lock a comment for a write that may touch its thread, thread root FIRST
+ * (#1727 review, Diego P2). A thread delete locks the root and then writes
+ * every reply, so a path that held a reply and then waited for its root
+ * could deadlock against it. `threadRootId` is immutable (comment-invariants
+ * trigger), so reading it before the lock is safe.
+ */
+async function lockInThread(tx: Tx, id: string, memoryId: string): Promise<{ addressed: LockedComment; root: LockedComment }> {
+  const meta = await tx.commentMeta.findUnique({ where: { nodeId: id }, select: { threadRootId: true } });
+  const rootId = meta?.threadRootId ?? null;
+  const root = rootId ? await lockComment(tx, rootId, memoryId) : null;
+  const addressed = await lockComment(tx, id, memoryId);
+  return { addressed, root: root ?? addressed };
+}
+
 /** Lock a live comment row and read it (with its meta) on the transaction. */
 async function lockComment(tx: Tx, id: string, memoryId: string): Promise<LockedComment> {
   await tx.$queryRaw`SELECT id FROM nodes WHERE id = ${id} FOR UPDATE`;
@@ -563,7 +578,7 @@ async function viewOf(ctx: Context, id: string, key: EncryptionKey | null): Prom
 
 /**
  * Shared body of the single-comment state operations: resolve, lock, check
- * the revision and the op's own preconditions, write one revision.
+ * the revision and the op's own preconditions, write the change.
  */
 async function changeComment(
   ctx: Context,
@@ -578,7 +593,7 @@ async function changeComment(
   let vanished = false;
   try {
     await commentTx(ctx, node.memoryId, gate, async (tx, txCtx) => {
-      const row = await lockComment(tx, node.id, node.memoryId);
+      const { addressed: row } = await lockInThread(tx, node.id, node.memoryId);
       metaForConflict = { targetNodeId: row.commentMeta!.targetNodeId, authorKey: row.commentMeta!.authorKey };
       requireRevision(row, expectedRevision);
       const change = await apply(row, authorKey, tx, txCtx);
@@ -723,9 +738,7 @@ export const commentMutations = {
     const body = validateBody(args.body);
     const { authorKey, node, key } = await prepareWrite(ctx, args.commentRef, 'comment', 'write');
     const id = await commentTx(ctx, node.memoryId, 'write', async (tx, txCtx) => {
-      const addressed = await lockComment(tx, node.id, node.memoryId);
-      const rootId = addressed.commentMeta!.threadRootId ?? addressed.id;
-      const root = rootId === addressed.id ? addressed : await lockComment(tx, rootId, node.memoryId);
+      const { root } = await lockInThread(tx, node.id, node.memoryId);
       refuseStub(root.commentMeta!);
       const target = await tx.node.findUniqueOrThrow({ where: { id: root.commentMeta!.targetNodeId }, select: { name: true } });
       return insertComment(tx, txCtx, {
@@ -796,15 +809,14 @@ export const commentMutations = {
 
   /**
    * A memory admin deletes a whole thread (soft): the root and every reply
-   * leave every read, limit and check; their history is kept for audit.
+   * leave every read, limit and check. The rows stay (soft-deleted) for
+   * audit; a comment keeps no revision history (#1721).
    */
   deleteCommentThread: async (_: unknown, args: { commentRef: string; reason: string }, ctx: Context): Promise<boolean> => {
     const reason = validateReason(args.reason);
     const { authorKey, node, key } = await prepareWrite(ctx, args.commentRef, 'comment', 'moderate');
     await commentTx(ctx, node.memoryId, 'moderate', async (tx, txCtx) => {
-      const addressed = await lockComment(tx, node.id, node.memoryId);
-      const rootId = addressed.commentMeta!.threadRootId ?? addressed.id;
-      const root = rootId === addressed.id ? addressed : await lockComment(tx, rootId, node.memoryId);
+      const { root } = await lockInThread(tx, node.id, node.memoryId);
       await reviseComment(tx, txCtx, root, key, 'delete-thread', authorKey, { data: { deleteReason: reason } });
       await deleteThreadsInTx(tx, [root.id], { actorKey: authorKey, deletedBy: actorCreatedBy(txCtx), cause: 'ADMIN' });
     });

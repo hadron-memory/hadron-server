@@ -11,6 +11,7 @@ import { generateId } from '../../../lib/id.js';
 import { computeApprovalHash } from '../../../lib/approvalHash.js';
 import { runAsActor } from '../../../lib/requestActor.js';
 import { resolvers, type Context } from './resolvers.js';
+import { waitForLockWaitersOfType } from '../../../test/lockWait.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -275,5 +276,68 @@ describe('#1721 rulings Q2/Q3 — one deleteComment, no hide or retract, an accu
       UPDATE comment_meta SET thread_deleted_at = now(), thread_deleted_cause = ${cause} WHERE node_id = ${c.id}`;
     for (const cause of ['ADMIN', 'AUTHOR', 'MANAGER', 'TARGET']) await expect(set(cause)).resolves.toBe(1);
     await expect(set('HIDDEN')).rejects.toThrow(/chk_comment_meta_state_top_level/);
+  });
+});
+
+// #1727 review (Diego P2): every write that touches a thread locks its root
+// first, the order deleteCommentThread uses, so the two cannot deadlock.
+describe('#1721 — comment writes lock the thread root before a reply', () => {
+  async function thread() {
+    const target = await node(`l:${generateId()}`);
+    const root = await comment(target.id);
+    const r1 = await M.replyToComment(null, { commentRef: root.id, body: 'r1' }, as(writer.id));
+    const r2 = await M.replyToComment(null, { commentRef: root.id, body: 'r2' }, as(writer.id));
+    return { target, root, r1, r2 };
+  }
+
+  it.each([
+    ['deleteComment', (t: any) => M.deleteComment(null, { commentRef: t.r1.id, expectedRevision: t.r1.revSeq }, as(writer.id))],
+    ['replyToComment through a reply', (t: any) => M.replyToComment(null, { commentRef: t.r1.id, body: 'r3' }, as(writer.id))],
+    ['deleteCommentThread through a reply', (t: any) => M.deleteCommentThread(null, { commentRef: t.r1.id, reason: 'x' }, as(admin.id))],
+  ])('%s waits on the root before it holds the reply', async (_name, write) => {
+    const t = await thread();
+    let release!: () => void;
+    const held = new Promise<void>((r) => { release = r; });
+    let replyFree: boolean | null = null;
+    const holder = db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM nodes WHERE id = ${t.root.id} FOR UPDATE`;
+      await held;
+      try {
+        await tx.$queryRaw`SELECT id FROM nodes WHERE id = ${t.r1.id} FOR UPDATE NOWAIT`;
+        replyFree = true;
+      } catch {
+        replyFree = false;
+      }
+    }, { timeout: 20_000 });
+    const pending = write(t);
+    await waitForLockWaitersOfType(db, 'transactionid', 1);
+    release();
+    await holder;
+    await pending;
+    // Child-then-root would already hold the reply while waiting for the root.
+    expect(replyFree).toBe(true);
+  });
+
+  it('a reply delete and a thread delete running together both settle, with no deadlock', async () => {
+    for (let i = 0; i < 5; i += 1) {
+      const t = await thread();
+      const results = await Promise.allSettled([
+        M.deleteComment(null, { commentRef: t.r1.id, expectedRevision: t.r1.revSeq }, as(writer.id)),
+        M.deleteCommentThread(null, { commentRef: t.root.id, reason: 'x' }, as(admin.id)),
+      ]);
+      for (const r of results) if (r.status === 'rejected') expect(String((r.reason as Error).message)).not.toMatch(/deadlock/i);
+      expect((await threadsOf(t.target.id)).total).toBe(0);
+    }
+  });
+
+  it("deleting a stub's last two replies together removes the stub", async () => {
+    const t = await thread();
+    await M.deleteComment(null, { commentRef: t.root.id, expectedRevision: t.root.revSeq }, as(writer.id));
+    await Promise.all([
+      M.deleteComment(null, { commentRef: t.r1.id, expectedRevision: t.r1.revSeq }, as(writer.id)),
+      M.deleteComment(null, { commentRef: t.r2.id, expectedRevision: t.r2.revSeq }, as(writer.id)),
+    ]);
+    expect((await threadsOf(t.target.id)).total).toBe(0);
+    expect((await live(t.root.id)).deletedAt).not.toBeNull();
   });
 });

@@ -8453,7 +8453,7 @@ export const typeDefs = `#graphql
     resolveCommentThread(commentRef: ID!, expectedRevision: Int!): Comment!
     "#1606 — reopen a resolved thread: its author or any writer of the memory."
     reopenCommentThread(commentRef: ID!, expectedRevision: Int!): Comment!
-    "#1606 — a memory admin deletes a whole thread (soft: gone from every read, limit and check; history kept). commentRef may be any comment of it."
+    "#1606 — a memory admin deletes a whole thread (soft: gone from every read, limit and check; the rows stay for audit, with no revision history, #1721). commentRef may be any comment of it."
     deleteCommentThread(commentRef: ID!, reason: String!): Boolean!
 
     """
