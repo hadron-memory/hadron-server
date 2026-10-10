@@ -37,6 +37,7 @@ const ITEM_CALLBACK = 'spawn-org::spawnmem::flow:item-done';
 
 function deps(overrides: Partial<RunExecutionDeps> = {}): RunExecutionDeps {
   return {
+    verifyAutomation: vi.fn(async () => undefined),
     assemble: vi.fn(async () => '# Step'),
     loadNodeSpec: vi.fn(async () => ({ extractionSpec: null, hasOutput: false, tools: null })),
     resolveConfig: vi.fn(async () => ({ config: { provider: 'anthropic', model: 'test' } }) as never),

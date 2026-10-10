@@ -1,3 +1,4 @@
+import { verifyAutomationPin } from '../lib/automation/pins.js';
 /**
  * Production RunExecutionDeps (spec 040 plan §6 + plan-multi-node §4) — the
  * seams between the run kernel and the platform:
@@ -64,6 +65,7 @@ interface OutputSpec {
 
 export function makeProdRunDeps(db: PrismaClient): RunExecutionDeps {
   return {
+    verifyAutomation: (run, nodeUrn) => verifyAutomationPin(db, run, nodeUrn),
     assemble: async (run, nodeUrn, view) => {
       return resolvers.Mutation.runTask(
         {},
