@@ -381,6 +381,31 @@ describe('Orca attention router — untracked terminals: unknown is not busy (#7
     expect(out.held.Eli).toContain('unrecognized chrome');
     expect(fake.sent).toEqual([]);
   });
+
+  it('a MINIMAL screen (prompt box only, nothing above) is MISSING liveness evidence and holds (#1700 P2 r3)', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli', 'claude', undefined, false);
+    fake.attention.workers = [worker('w-eli', 'Eli')];
+    fake.screens.set('term_eli', { tail: [RULE, '❯ ', RULE, CLAUDE_HINT] }); // Diego's truncated-tail counterexample
+    const out = poll(c);
+    expect(out.nudged).toEqual([]);
+    expect(out.held.Eli).toContain('unknown idle state');
+    expect(out.held.Eli).toContain('no positive liveness evidence');
+    expect(fake.sent).toEqual([]);
+  });
+
+  it('a HISTORICAL done-marker does not rescue a newer unrecognized status — holds as unknown (#1700 P2 r3)', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli', 'claude', undefined, false);
+    fake.attention.workers = [worker('w-eli', 'Eli')];
+    // Diego's counterexample: old completion text above an unexplained current status line.
+    fake.screens.set('term_eli', { tail: ['⏺ Done.', 'an unrecognized current status', RULE, '❯ ', RULE, CLAUDE_HINT] });
+    const out = poll(c);
+    expect(out.nudged).toEqual([]);
+    expect(out.held.Eli).toContain('unknown idle state');
+    expect(out.held.Eli).toContain('unrecognized chrome');
+    expect(fake.sent).toEqual([]);
+  });
 });
 
 describe('Orca attention router — fresh counts at send time (#1616)', () => {

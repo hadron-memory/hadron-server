@@ -690,11 +690,22 @@ const spinnerTimer = (s: string): boolean => /[（(]\d/.test(s) && /\d\s*[mh]?\s
  *    available!' box. Codex done: 'Worked for '.
  */
 const IDLE_MARKERS: readonly RegExp[] = [
-  /· done/, /^⏺ Done/, /^Done\./,
+  /· done/, /^⏺ Done/, /^Done\./, /^✻ \w+ for \d+[ms]/,
   /\/clear to save/, /recap:/, /Share Claude Code/,
   /Claude Code v\d/, /glm-[\d.]/,
   /OpenAI Codex \(v/, /Update available!/, /Worked for /,
+  /Update installed/,
 ];
+
+/**
+ * Chrome that may surround a strong marker without explaining it away: a
+ * historical submitted-prompt echo (Claude renders past prompts with a
+ * leading `❯`), and the banner layout lines around a launch logo (box-art
+ * glyphs plus the worktree path) or Codex's `permissions:`/path lines.
+ * Weak evidence on its own — it never substitutes for a strong marker.
+ */
+const isWeakChrome = (s: string): boolean =>
+  /^❯ /.test(s) || /^[▐▛█▝▜▀│╭╮╰╯ ]*[~❯]/.test(s) || /^permissions: /.test(s);
 
 /**
  * [verdict, detail] on the window directly above the prompt chrome: 'busy'
@@ -723,15 +734,22 @@ export function idleProofAbovePrompt(lines: string[], agent: string): ['busy' | 
     return ['unknown', `unknown agent ${agent}`];
   }
   const window = lines.slice(Math.max(0, at - 8), at).map(squash).filter((l) => l !== '');
-  if (window.length === 0) return ['idle', 'blank'];
   for (const l of window) {
     if (l.includes('to interrupt') || l.includes('run in background') || l.includes('Working (') || /^calling [a-z]/i.test(l)) return ['busy', l];
     if (spinnerTimer(l)) return ['busy', l];
   }
+  // The window is proof only when recognized AS A WHOLE (@codex P2 #1700 r3):
+  // every line must be idle chrome (strong or weak), and at least one line
+  // must be a STRONG marker. A reassuring line deeper in the window cannot
+  // rescue an unexplained newer status, and an absent window is missing
+  // evidence, not quiet — both hold as unknown.
+  let strong = false;
   for (const l of window) {
-    if (IDLE_MARKERS.some((re) => re.test(l))) return ['idle', 'completed or fresh-launch chrome'];
+    if (IDLE_MARKERS.some((re) => re.test(l))) { strong = true; continue; }
+    if (!isWeakChrome(l)) return ['unknown', `unrecognized chrome above the prompt`];
   }
-  return ['unknown', 'unrecognized chrome above the prompt'];
+  if (!strong) return ['unknown', 'no positive liveness evidence above the prompt'];
+  return ['idle', 'completed or fresh-launch chrome'];
 }
 
 /**
