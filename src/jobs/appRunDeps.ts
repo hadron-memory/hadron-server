@@ -1,4 +1,4 @@
-import { verifyAutomationPin, checkAutomationRevisions, type AutomationPreview } from '../lib/automation/pins.js';
+import { verifyAutomationPin, checkAutomationRevisions, assertPinnedAiIdentity, type AutomationPreview } from '../lib/automation/pins.js';
 /**
  * Production RunExecutionDeps (spec 040 plan §6 + plan-multi-node §4) — the
  * seams between the run kernel and the platform:
@@ -160,11 +160,13 @@ export function makeProdRunDeps(db: PrismaClient): RunExecutionDeps {
         run.eventData && typeof run.eventData === 'object'
           ? ((run.eventData as Record<string, unknown>).__aiConfigName as string | undefined)
           : undefined;
-      return resolveAiConfigWithFallback(db, override ?? null, {
+      const resolved = await resolveAiConfigWithFallback(db, override ?? null, {
         appId: run.appId,
         agentId: run.agentId ?? undefined,
         organizationId: run.organizationId,
       });
+      assertPinnedAiIdentity(run, resolved.config);
+      return resolved;
     },
 
     llm: (resolved, req) => generateText(resolved, req),

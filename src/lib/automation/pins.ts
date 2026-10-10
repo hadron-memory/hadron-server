@@ -1,5 +1,7 @@
 /** #1719 R5b interim consent artifact. Replace this mechanism with signed
  * compiled automation; never remove the exact-automation execution gate. */
+import { isRoutingName, routingNameOf } from '../runner/selectNextEdge.js';
+import { executionIdentities, configSelection, aiIdentity, mcpIdentity, haIdentity, type ExecutionSelection, type ExecutionIdentities } from './identities.js';
 import { createHash } from 'node:crypto';
 import type { PrismaClient, AppRun } from '../../generated/prisma/index.js';
 import { canonicalizeAutomationJson } from './format.js';
@@ -16,16 +18,16 @@ export class AutomationPinError extends Error {
   }
 }
 export interface AutomationPin {
-  format: 'hadron-automation-pin-v1'; appId: string; userId: string | null;
+  format: 'hadron-automation-pin-v2'; appId: string; userId: string | null;
   entry: string; entryId: string; hash: string;
   nodes: Record<string, { urn: string; hash: string }>;
-  edges: Record<string, string>; missing: string[];
+  edges: Record<string, string>; resources: ExecutionIdentities;
 }
 const hash = (value: unknown) => createHash('sha256').update(canonicalizeAutomationJson(value)).digest('hex');
 const json = (value: unknown) => JSON.parse(JSON.stringify(value));
 
-/** Load the complete graph, including every routing/dependency edge and
- * Mustache default-data, dot-reference and partial node. Bounds fail loudly. */
+/** Capture flow definitions and their routing closure. Documents, template
+ * inputs and output destinations remain mutable, read-gated data (#7894). */
 export interface AutomationPreview extends AutomationPin {
   nodes: Record<string, { urn: string; hash: string; state: Record<string, unknown> }>;
 }
@@ -36,21 +38,19 @@ export function storedAutomationPin(preview: AutomationPin): AutomationPin {
   return { ...value, hash: hash(value) };
 }
 export async function captureAutomationPin(db: PrismaClient, appId: string, userId: string | null,
-  entry: string, organizationId: string, principal: AuthContext): Promise<AutomationPreview> {
+  entry: string, organizationId: string, principal: AuthContext, selection: ExecutionSelection = {}): Promise<AutomationPreview> {
   const { id: entryId } = await resolveNodeRef(db, entry);
   const nodes: AutomationPreview['nodes'] = {}; const edges: AutomationPin['edges'] = {};
-  const missing = new Set<string>(); const pending = [entryId];
+  const pending = [entryId];
   while (pending.length) {
     const id = pending.pop()!;
     if (Object.hasOwn(nodes, id)) continue;
     if (Object.keys(nodes).length >= 200 || Object.keys(edges).length > 1000) {
       throw new AutomationPinError('AUTOMATION_CHANGED', 'Automation graph exceeds 200 nodes or 1000 edges');
     }
-    {
-      const anchor = await db.node.findUnique({ where: { id }, select: { memoryId: true } });
-      if (!anchor || !await canReadMemory(db, principal, anchor.memoryId)) {
-        throw new AutomationPinError('AUTOMATION_CHANGED', 'Automation dependency is not readable by its principal');
-      }
+    const anchor = await db.node.findUnique({ where: { id }, select: { memoryId: true } });
+    if (!anchor || !await canReadMemory(db, principal, anchor.memoryId)) {
+      throw new AutomationPinError('AUTOMATION_CHANGED', 'Automation definition is not readable by its principal');
     }
     const node = await db.node.findUnique({ where: { id }, select: {
       id: true, memoryId: true, loc: true, name: true, content: true, description: true, abstract: true,
@@ -60,11 +60,11 @@ export async function captureAutomationPin(db: PrismaClient, appId: string, user
         ownerUserId: true, appId: true, isEncrypted: true, deletedAt: true } },
       outgoingEdges: { orderBy: { id: 'asc' } },
     } });
-    if (!node || node.deletedAt || node.memory.deletedAt || node.memory.isEncrypted || (id === entryId && node.memory.organizationId !== organizationId)) {
+    if (!node || node.deletedAt || node.memory.deletedAt || node.memory.isEncrypted || node.memory.organizationId !== organizationId) {
       throw new AutomationPinError('AUTOMATION_CHANGED', 'Automation graph contains a missing, encrypted or out-of-scope node');
     }
-    // Static dependencies may be in another org or org-less if the shared
-    // read gate admits them. Flow hops retain resolveFlowMemory tenant bounds.
+    // Only routing targets become definitions; reference documents and
+    // template inputs are mutable data, authorized at their read boundary.
     const { outgoingEdges, ...state } = node;
     const { updatedAt: _, ...authored } = state;
     nodes[id] = { urn: emitNodeUrnV2(node.memory.urn, node.loc), hash: hash(json(authored)), state: json(state) };
@@ -72,21 +72,13 @@ export async function captureAutomationPin(db: PrismaClient, appId: string, user
     // erase evidence of a post-adoption graph edit.
     for (const edge of outgoingEdges) {
       edges[edge.id] = hash(json(edge));
-      if (!edge.deletedAt) pending.push(edge.targetId);
-    }
-    if (node.content?.includes('{{')) {
-      const locs = new Set(['data']);
-      for (const match of node.content.matchAll(/\{\{[#^/]?([a-zA-Z0-9_-]+)\./g)) locs.add(match[1]);
-      for (const match of node.content.matchAll(/\{\{>\s*([^}]+)\s*\}\}/g)) locs.add(match[1].trim());
-      for (const loc of locs) {
-        const dependency = await db.node.findFirst({ where: { memoryId: node.memoryId, loc, deletedAt: null }, select: { id: true } });
-        if (dependency) pending.push(dependency.id);
-        else missing.add(`${node.memoryId}:${loc}`);
-      }
+      if (!edge.deletedAt && isRoutingName(routingNameOf(edge, node.loc))) pending.push(edge.targetId);
     }
   }
   if (Object.keys(edges).length > 1000) throw new AutomationPinError('AUTOMATION_CHANGED', 'Automation graph exceeds 1000 edges');
-  const value = { format: 'hadron-automation-pin-v1' as const, appId, userId, entry, entryId, nodes, edges, missing: [...missing].sort() };
+  const tools = Object.values(nodes).flatMap(node => { const data = node.state.data as { tools?: unknown } | null; return Array.isArray(data?.tools) ? data.tools.filter((name): name is string => typeof name === 'string') : []; });
+  const resources = await executionIdentities(db, appId, organizationId, tools, selection);
+  const value = { resources, format: 'hadron-automation-pin-v2' as const, appId, userId, entry, entryId, nodes, edges };
   const result = { ...value, hash: storedAutomationPin({ ...value, hash: '' }).hash };
   if (Buffer.byteLength(JSON.stringify(result)) > 256 * 1024) throw new AutomationPinError('AUTOMATION_CHANGED', 'Automation pin exceeds 256 KiB');
   return result;
@@ -101,7 +93,7 @@ export async function captureSetupConsent(...args: Parameters<typeof captureAuto
     // Consent needs both the creator's reach and the actual execution principal's reach.
     const principal = runAuthContext({ id: 'setup', appId, userId, organizationId });
     for (const node of Object.values(preview.nodes)) {
-      if (!await canReadMemory(db, principal, String(node.state.memoryId))) throw new AutomationPinError('AUTOMATION_UNADOPTED', 'Automation dependency is not readable by its run principal');
+      if (!await canReadMemory(db, principal, String(node.state.memoryId))) throw new AutomationPinError('AUTOMATION_UNADOPTED', 'Automation definition is not readable by its run principal');
     }
     return storedAutomationPin(preview);
   }
@@ -117,8 +109,8 @@ export async function captureSetupConsent(...args: Parameters<typeof captureAuto
 export function parseAutomationPin(raw: unknown): AutomationPin {
   if ((raw as { format?: string })?.format === 'hadron-automation-unadopted-v1') throw new AutomationPinError('AUTOMATION_UNADOPTED', `Setup could not be adopted: ${(raw as { message: string }).message}`);
   const p = raw as AutomationPin | null;
-  if (!p || p.format !== 'hadron-automation-pin-v1' || !p.hash || !p.entry || !p.entryId ||
-      !p.nodes || !p.edges || !Array.isArray(p.missing)) throw new AutomationPinError('AUTOMATION_UNADOPTED', 'Automation has no valid setup pin');
+  if (!p || p.format !== 'hadron-automation-pin-v2' || !p.hash || !p.entry || !p.entryId ||
+      !p.nodes || !p.edges || !p.resources || !p.resources.mcp || !p.resources.ha || !Array.isArray(p.resources.tools)) throw new AutomationPinError('AUTOMATION_UNADOPTED', 'Automation has no valid setup pin');
   if (Object.values(p.nodes).some(node => !node || typeof node.urn !== 'string' || typeof node.hash !== 'string' || Object.keys(node).some(key => !['urn', 'hash'].includes(key)))) throw new AutomationPinError('AUTOMATION_UNADOPTED', 'Automation pin contains unsupported node data');
   const { hash: digest, ...state } = p;
   if (hash(state) !== digest) throw new AutomationPinError('AUTOMATION_CHANGED', 'Stored automation pin is corrupt');
@@ -132,13 +124,17 @@ export async function verifyAutomationPin(db: PrismaClient, run: AppRun, nodeUrn
   if (pin.appId !== run.appId || pin.userId !== run.userId ||
       (['SCHEDULE', 'WEBHOOK', 'MANUAL'].includes(run.triggerKind) && pin.entry !== run.entryNodeUrn)) throw new AutomationPinError('AUTOMATION_CHANGED', 'Automation identity changed');
   let current: AutomationPreview;
-  try { current = await captureAutomationPin(db, run.appId, run.userId, pin.entry, run.organizationId, runAuthContext(run)); }
+  try { current = await captureAutomationPin(db, run.appId, run.userId, pin.entry, run.organizationId, runAuthContext(run), configSelection(run)); }
   catch (e) { if (!(e instanceof AutomationPinError || e instanceof NodeNotFoundError)) throw e; throw new AutomationPinError('AUTOMATION_CHANGED', 'Automation graph is no longer available or readable'); }
   if (current.hash !== pin.hash) {
     const changedNodes = [...new Set([...Object.keys(pin.nodes), ...Object.keys(current.nodes)])]
       .filter(id => pin.nodes[id]?.hash !== current.nodes[id]?.hash).map(id => pin.nodes[id]?.urn ?? current.nodes[id]?.urn);
     const changedEdges = [...new Set([...Object.keys(pin.edges), ...Object.keys(current.edges)])].filter(id => pin.edges[id] !== current.edges[id]);
-    throw new AutomationPinError('AUTOMATION_CHANGED', `Automation changed: ${changedNodes.length} node(s), ${changedEdges.length} edge(s), or template dependencies changed`);
+    const identities = [];
+    if (hash(pin.resources.ai) !== hash(current.resources.ai)) identities.push('AI configuration');
+    if (hash(pin.resources.mcp) !== hash(current.resources.mcp)) identities.push('MCP registration');
+    if (hash(pin.resources.ha) !== hash(current.resources.ha)) identities.push('Home Assistant registration');
+    throw new AutomationPinError('AUTOMATION_CHANGED', `Automation changed: ${changedNodes.length} node(s), ${changedEdges.length} edge(s)${identities.length ? ', ' + identities.join(', ') + ' identity' : ''}`);
   }
   const { id } = await resolveNodeRef(db, nodeUrn);
   if (!Object.hasOwn(pin.nodes, id)) throw new AutomationPinError('AUTOMATION_CHANGED', 'Child or routed flow is outside the adopted graph');
@@ -163,7 +159,7 @@ export async function currentOriginPin(db: PrismaClient, runId: string): Promise
 }
 
 /** A hop's transient proof. Read only revision/authority metadata before effects:
- * no content, template rendering, dependency recursion, or per-node queries.
+ * no content, template rendering, routing recursion, or per-node queries.
  * Edges are small and hashed because writes need not bump the source revision. */
 export async function checkAutomationRevisions(db: PrismaClient, run: AppRun, proof: AutomationPreview): Promise<void> {
   const rows = await db.node.findMany({ where: { id: { in: Object.keys(proof.nodes) } }, select: {
@@ -183,8 +179,18 @@ export async function checkAutomationRevisions(db: PrismaClient, run: AppRun, pr
   if (hash(edges) !== hash(proof.edges)) throw changed;
   const principal = runAuthContext(run);
   for (const memoryId of new Set(rows.map(row => row.memoryId))) if (!await canReadMemory(db, principal, memoryId)) throw changed;
-  if (proof.missing.length) {
-    const OR = proof.missing.map(ref => { const boundary = ref.indexOf(':'); return { memoryId: ref.slice(0, boundary), loc: ref.slice(boundary + 1), deletedAt: null }; });
-    if (await db.node.findFirst({ where: { OR }, select: { id: true } })) throw changed;
-  }
+  const resources = await executionIdentities(db, run.appId, run.organizationId, proof.resources.tools, configSelection(run));
+  if (hash(resources) !== hash(proof.resources)) throw new AutomationPinError('AUTOMATION_CHANGED', 'AI configuration or external tool registration changed during the hop');
+
+}
+
+/** Verify the exact row about to be used, not just a previous registry read. */
+export function assertPinnedAiIdentity(run: AppRun, config: Parameters<typeof aiIdentity>[0]): void {
+  if (hash(aiIdentity(config)) !== hash(parseAutomationPin(run.automationPin).resources.ai)) throw new AutomationPinError('AUTOMATION_CHANGED', 'Resolved AI configuration identity changed');
+}
+export function assertPinnedToolIdentity(run: AppRun, kind: 'mcp' | 'ha', slug: string,
+  row: Parameters<typeof mcpIdentity>[0] | Parameters<typeof haIdentity>[0]): void {
+  const expected = parseAutomationPin(run.automationPin).resources[kind][slug];
+  const actual = kind === 'mcp' ? mcpIdentity(row as Parameters<typeof mcpIdentity>[0]) : haIdentity(row as Parameters<typeof haIdentity>[0]);
+  if (!expected || hash(actual) !== hash(expected)) throw new AutomationPinError('AUTOMATION_CHANGED', 'Loaded external tool registration identity changed');
 }

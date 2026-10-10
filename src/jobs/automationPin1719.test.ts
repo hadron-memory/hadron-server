@@ -5,7 +5,9 @@ import { cleanDb } from '../test/helpers.js';
 import { generateId } from '../lib/id.js';
 import { automationPinQueries, automationPinMutations } from '../api/graphql/schema/resolvers.automationPin.js';
 import { appRunMutations } from '../api/graphql/schema/resolvers.appRun.js';
-import { mintAppRun, executeAppRun } from './appRuns.js';
+import { mintAppRun, executeAppRun, type RunExecutionDeps } from './appRuns.js';
+import { materializeMcpRunTools } from '../lib/runner/tools/mcpTools.js';
+import { materializeHaRunTools } from '../lib/runner/tools/haTools.js';
 import { ToolExecutionError } from '../lib/llm/index.js';
 import { storedAutomationPin } from '../lib/automation/pins.js';
 import { makeProdRunDeps } from './appRunDeps.js';
@@ -29,11 +31,11 @@ async function fixture() {
   const run = () => mintAppRun(db, { appId: app.id, organizationId: org.id, userId: user.id, triggerKind: 'SCHEDULE', triggerId: schedule.id, entryNodeUrn: schedule.entryNodeUrn });
   const llm = vi.fn(async () => ({ text: 'ok', tokensIn: 1, tokensOut: 1, provider: 'test', model: 'test' }));
   const writeOutput = vi.fn(async () => null);
-  const deps = { ...makeProdRunDeps(db), resolveConfig: vi.fn(async () => ({ config: {} }) as never), llm, writeOutput };
+  const deps: RunExecutionDeps = { ...makeProdRunDeps(db), resolveConfig: vi.fn(async () => ({ config: {} }) as never), llm, writeOutput };
   return { user, org, app, memory, entry, next, dependency, edge, ctx, schedule, run, deps, llm, writeOutput };
 }
 describe('R5b setup consent', () => {
-  it.each(['entry', 'next', 'dependency'] as const)('fails before executing after %s content is altered', async key => {
+  it.each(['entry', 'next'] as const)('fails before executing after %s content is altered', async key => {
     const f = await fixture();
     await db.node.update({ where: { id: f[key].id }, data: { content: 'unapproved' } });
     const run = await f.run();
@@ -74,7 +76,7 @@ it('executes an unchanged adopted graph', async () => {
 });
 it('re-adoption applies to future runs and poll events, never changing an already minted run', async () => {
   const f = await fixture(); const origin = await f.run();
-  await db.node.update({ where: { id: f.dependency.id }, data: { content: 'new reviewed dependency' } });
+  await db.node.update({ where: { id: f.next.id }, data: { content: 'new reviewed instructions' } });
   const pin = await adopt(f);
   expect(await executeAppRun(db, origin.id, f.deps)).toBe('failed');
   const next = await f.run();
@@ -129,13 +131,9 @@ it.each(['WEBHOOK', 'MANUAL'] as const)('generic re-adoption also binds %s trigg
     expect((await db.manualAutomationPin.findUniqueOrThrow({ where: { runId: row.id } })).pin).toEqual(reAdopted);
   }
 });
-it.each(['delete-node', 'add-edge', 'delete-edge', 'template-data', 'partial', 'revision'] as const)('detects %s drift before any step', async alteration => {
+it.each(['delete-node', 'add-edge', 'delete-edge', 'revision'] as const)('detects %s drift before any step', async alteration => {
   const f = await fixture();
-  if (alteration === 'template-data' || alteration === 'partial') {
-    await db.node.update({ where: { id: f.entry.id }, data: { content: alteration === 'partial' ? '{{> partial}}' : '{{field}}' } });
-    await adopt(f);
-    await db.node.create({ data: { memoryId: f.memory.id, loc: alteration === 'partial' ? 'partial' : 'data', name: 'New dependency', content: 'new partial', data: { field: 'injected' } } });
-  } else if (alteration === 'delete-node') await db.node.update({ where: { id: f.dependency.id }, data: { deletedAt: new Date() } });
+  if (alteration === 'delete-node') await db.node.update({ where: { id: f.next.id }, data: { deletedAt: new Date() } });
   else if (alteration === 'delete-edge') await db.edge.update({ where: { id: f.edge.id }, data: { deletedAt: new Date() } });
   else if (alteration === 'revision') await db.node.update({ where: { id: f.entry.id }, data: { revSeq: { increment: 1 } } });
   else await db.edge.create({ data: { memoryId: f.memory.id, sourceId: f.entry.id, targetId: f.dependency.id, name: 'documents', loc: 'entry:documents:doc' } });
@@ -204,7 +202,7 @@ it('setup and re-adoption persist no authored bytes on triggers, manual consent 
   const f = await fixture();
   const preview = await automationPinQueries.previewAutomation({}, { triggerKind: 'SCHEDULE', triggerRef: f.schedule.id }, f.ctx);
   await adopt(f);
-  expect(JSON.stringify(preview)).toContain('approved doc');
+  expect(JSON.stringify(preview)).toContain('approved next');
   const manual = await mintAppRun(db, { appId: f.app.id, organizationId: f.org.id, userId: f.user.id, triggerKind: 'MANUAL', entryNodeUrn: f.schedule.entryNodeUrn });
   const run = await f.run();
   const schedule = await db.agentSchedule.findUniqueOrThrow({ where: { id: f.schedule.id } });
@@ -214,11 +212,11 @@ it('setup and re-adoption persist no authored bytes on triggers, manual consent 
     expect(Object.values((pin as any).nodes).every((node: any) => Object.keys(node).sort().join() === 'hash,urn')).toBe(true);
   }
 });
-it('setup refuses a dependency the creator cannot read before copying any bytes', async () => {
+it('setup refuses a routed definition the creator cannot read before copying any bytes', async () => {
   const f = await fixture();
   const other = await db.user.create({ data: { handle: 'hidden-owner' } });
   const memory = await db.memory.create({ data: { name: 'Hidden', urn: 'hidden-owner:secret', class: 'personal', userId: other.id, ownerUserId: other.id } });
-  await db.node.update({ where: { id: f.dependency.id }, data: { memoryId: memory.id, content: 'SECRET-NOT-COPIED' } });
+  await db.node.update({ where: { id: f.next.id }, data: { memoryId: memory.id, content: 'SECRET-NOT-COPIED' } });
   const row = await appRunMutations.createAgentSchedule({}, { input: { appRef: f.app.id, name: 'Unreadable', cron: '* * * * *', entryNodeUrn: f.schedule.entryNodeUrn, runAsSelf: true } }, f.ctx);
   expect(row.automationPin).toMatchObject({ format: 'hadron-automation-unadopted-v1' });
   expect(JSON.stringify(row.automationPin)).not.toContain('SECRET-NOT-COPIED');
@@ -226,13 +224,13 @@ it('setup refuses a dependency the creator cannot read before copying any bytes'
 });
 it('drift messages expose counts rather than dependency locs or IDs to run readers', async () => {
   const f = await fixture();
-  await db.node.update({ where: { id: f.dependency.id }, data: { content: 'changed' } });
+  await db.node.update({ where: { id: f.next.id }, data: { content: 'changed' } });
   const run = await f.run();
   await executeAppRun(db, run.id, f.deps);
   const row = await db.appRun.findUniqueOrThrow({ where: { id: run.id } });
   const message = JSON.stringify(row.failure);
-  expect(message).not.toContain('pin.test:flow:doc');
-  expect(message).not.toContain(f.dependency.id);
+  expect(message).not.toContain('pin.test:flow:next');
+  expect(message).not.toContain(f.next.id);
   expect(message).toContain('1 node');
 });
 it.each(['entry', 'runAsSelf'] as const)('an authorized owner %s edit re-captures consent in its transaction', async field => {
@@ -252,7 +250,7 @@ it('tool-loop wrapping preserves AUTOMATION_CHANGED and refuses the effect', asy
   const run = await f.run();
   const effect = vi.fn();
   f.deps.llmTools = async (_run, _resolved, _request, _tools, opts) => {
-    await db.node.update({ where: { id: f.dependency.id }, data: { content: 'tool-time edit' } });
+    await db.node.update({ where: { id: f.next.id }, data: { content: 'tool-time edit' } });
     try { await opts.onToolCall('tool.hadron_log', 0); }
     catch (cause) { throw new ToolExecutionError('hadron_log', 'gate failed', { cause }); }
     effect();
@@ -271,19 +269,185 @@ it('walks the whole graph once per hop and uses revision proofs before effects',
   expect(full).toHaveBeenCalledTimes(2);
   expect(cheap.mock.calls.length).toBeGreaterThan(2);
 });
-it.each(['edge', 'memory', 'missing-template'] as const)('cheap effect checks detect %s drift after assembly', async kind => {
+it.each(['edge', 'memory'] as const)('cheap effect checks detect %s drift after assembly', async kind => {
   const f = await fixture();
-  if (kind === 'missing-template') { await db.node.update({ where: { id: f.entry.id }, data: { content: '{{> later}}' } }); await adopt(f); }
   const run = await f.run(); const assemble = f.deps.assemble;
   f.deps.assemble = async (...args) => {
     const text = await assemble(...args);
     if (kind === 'edge') await db.edge.update({ where: { id: f.edge.id }, data: { name: 'documents' } });
     else if (kind === 'memory') await db.memory.update({ where: { id: f.memory.id }, data: { isEncrypted: true } });
-    else await db.node.create({ data: { memoryId: f.memory.id, loc: 'later', name: 'New partial', content: 'injected' } });
     return text;
   };
   expect(await executeAppRun(db, run.id, f.deps)).toBe('failed');
   expect(f.llm).not.toHaveBeenCalled();
   expect(f.writeOutput).not.toHaveBeenCalled();
   expect((await db.appRun.findUniqueOrThrow({ where: { id: run.id } })).failure).toMatchObject({ code: 'AUTOMATION_CHANGED' });
+});
+
+it('document contents, self-written logs and template data are mutable data outside consent', async () => {
+  const f = await fixture();
+  const original = (await db.agentSchedule.findUniqueOrThrow({ where: { id: f.schedule.id } })).automationPin;
+  await db.node.update({ where: { id: f.dependency.id }, data: { content: 'run-written log data', revSeq: { increment: 1 } } });
+  const run = await f.run();
+  expect(await executeAppRun(db, run.id, f.deps)).toBe('completed');
+  expect(JSON.stringify(f.llm.mock.calls)).toContain('run-written log data');
+  expect((original as any).nodes).not.toHaveProperty(f.dependency.id);
+});
+it.each(['provider', 'endpoint', 'model', 'replacement'] as const)('AI %s identity drift fails before execution; adoption rebinds it', async change => {
+  const f = await fixture();
+  const config = await db.aiServiceConfig.create({ data: { appId: f.app.id, name: 'default', provider: 'openai', model: 'before', endpoint: 'https://before.example/v1' } });
+  await adopt(f);
+  if (change === 'replacement') {
+    await db.aiServiceConfig.delete({ where: { id: config.id } });
+    await db.aiServiceConfig.create({ data: { appId: f.app.id, name: 'default', provider: 'openai', model: 'before', endpoint: 'https://before.example/v1' } });
+  } else await db.aiServiceConfig.update({ where: { id: config.id }, data: { [change]: change === 'endpoint' ? 'https://after.example/v1' : 'after' } });
+  const run = await f.run();
+  expect(await executeAppRun(db, run.id, f.deps)).toBe('failed');
+  expect(f.llm).not.toHaveBeenCalled();
+  expect((await db.appRun.findUniqueOrThrow({ where: { id: run.id } })).failure).toMatchObject({ code: 'AUTOMATION_CHANGED' });
+  await adopt(f);
+  expect(await executeAppRun(db, (await f.run()).id, f.deps)).toBe('completed');
+});
+it.each(['mcp', 'ha'] as const)('%s URL and allowed-operation identity drift refuses execution', async kind => {
+  const f = await fixture();
+  const name = kind === 'mcp' ? 'mcp__pin__echo' : 'ha__pin__list_states';
+  const registry = kind === 'mcp'
+    ? await db.mcpServer.create({ data: { organizationId: f.org.id, slug: 'pin', name: 'Pin', url: 'https://before.example/mcp', toolAllowlist: ['echo'] } })
+    : await db.homeAssistantInstance.create({ data: { organizationId: f.org.id, slug: 'pin', name: 'Pin', url: 'https://before.example/ha', tokenEncrypted: 'TOKEN-NOT-PINNED', opAllowlist: ['list_states'] } });
+  await db.node.update({ where: { id: f.entry.id }, data: { data: { tools: [name] } } });
+  await adopt(f);
+  if (kind === 'mcp') await db.mcpServer.update({ where: { id: registry.id }, data: { url: 'https://after.example/mcp' } });
+  else await db.homeAssistantInstance.update({ where: { id: registry.id }, data: { opAllowlist: ['call_service'] } });
+  const run = await f.run();
+  expect(await executeAppRun(db, run.id, f.deps)).toBe('failed');
+  expect(f.llm).not.toHaveBeenCalled();
+  expect((await db.appRun.findUniqueOrThrow({ where: { id: run.id } })).failure).toMatchObject({ code: 'AUTOMATION_CHANGED' });
+});
+
+it.each(['template-data', 'partial'] as const)('%s creation and edits stay mutable data', async kind => {
+  const f = await fixture();
+  await db.node.update({ where: { id: f.entry.id }, data: { content: kind === 'partial' ? '{{> partial}}' : '{{field}}' } });
+  await adopt(f);
+  const node = await db.node.create({ data: { memoryId: f.memory.id, loc: kind === 'partial' ? 'partial' : 'data', name: 'Data', content: 'first partial', data: { field: 'first field' } } });
+  expect(await executeAppRun(db, (await f.run()).id, f.deps)).toBe('completed');
+  await db.node.update({ where: { id: node.id }, data: { content: 'second partial', data: { field: 'second field' } } });
+  expect(await executeAppRun(db, (await f.run()).id, f.deps)).toBe('completed');
+  expect(JSON.stringify(f.llm.mock.calls)).toContain(kind === 'partial' ? 'second partial' : 'second field');
+});
+it('real output writes to a document in the prompt do not invalidate later unattended runs', async () => {
+  const f = await fixture();
+  await db.memory.update({ where: { id: f.memory.id }, data: { class: 'app', appId: f.app.id } });
+  await db.node.update({ where: { id: f.entry.id }, data: { data: { output: { writeTo: 'hrn:node:pin.test:flow:doc', mode: 'append' } } } });
+  await adopt(f);
+  f.deps.writeOutput = makeProdRunDeps(db).writeOutput;
+  expect(await executeAppRun(db, (await f.run()).id, f.deps)).toBe('completed');
+  expect(await executeAppRun(db, (await f.run()).id, f.deps)).toBe('completed');
+  expect((await db.node.findUniqueOrThrow({ where: { id: f.dependency.id } })).content).toContain('ok');
+});
+
+it('checks the actual resolved AI identity even if the registry changes back before the next gate', async () => {
+  const f = await fixture();
+  const config = await db.aiServiceConfig.create({ data: { appId: f.app.id, name: 'default', provider: 'openai', model: 'before', endpoint: 'https://before.example/v1' } });
+  await adopt(f);
+  const resolve = makeProdRunDeps(db).resolveConfig;
+  f.deps.resolveConfig = async run => {
+    await db.aiServiceConfig.update({ where: { id: config.id }, data: { endpoint: 'https://rogue.example/v1' } });
+    try { return await resolve(run); }
+    finally { await db.aiServiceConfig.update({ where: { id: config.id }, data: { endpoint: config.endpoint } }); }
+  };
+  const run = await f.run();
+  expect(await executeAppRun(db, run.id, f.deps)).toBe('failed');
+  expect(f.llm).not.toHaveBeenCalled();
+  expect((await db.appRun.findUniqueOrThrow({ where: { id: run.id } })).failure).toMatchObject({ code: 'AUTOMATION_CHANGED' });
+});
+it.each(['mcp', 'ha'] as const)('checks the loaded %s identity before materializing or contacting its endpoint', async kind => {
+  const f = await fixture();
+  const name = kind === 'mcp' ? 'mcp__pin__echo' : 'ha__pin__list_states';
+  const row = kind === 'mcp'
+    ? await db.mcpServer.create({ data: { organizationId: f.org.id, slug: 'pin', name: 'Pin', url: 'https://before.example/mcp', toolAllowlist: ['echo'] } })
+    : await db.homeAssistantInstance.create({ data: { organizationId: f.org.id, slug: 'pin', name: 'Pin', url: 'https://before.example/ha', tokenEncrypted: 'NEVER-DECRYPT-ME', opAllowlist: ['list_states'] } });
+  await db.node.update({ where: { id: f.entry.id }, data: { data: { tools: [name] } } });
+  await adopt(f); const run = await f.run();
+  if (kind === 'mcp') await db.mcpServer.update({ where: { id: row.id }, data: { url: 'https://rogue.example/mcp' } });
+  else await db.homeAssistantInstance.update({ where: { id: row.id }, data: { url: 'https://rogue.example/ha' } });
+  await expect(kind === 'mcp' ? materializeMcpRunTools(db, run, [name]) : materializeHaRunTools(db, run, [name])).rejects.toMatchObject({ code: 'AUTOMATION_CHANGED' });
+});
+
+it('credential rotations neither drift consent nor put secrets in the pin or preview', async () => {
+  const f = await fixture();
+  const ai = await db.aiServiceConfig.create({ data: { appId: f.app.id, name: 'default', provider: 'openai', model: 'stable', apiKeyEncrypted: 'AI-SECRET-ORIGINAL' } });
+  const mcp = await db.mcpServer.create({ data: { organizationId: f.org.id, slug: 'pin', name: 'Pin', url: 'https://stable.example/mcp', headersEncrypted: 'MCP-SECRET-ORIGINAL', toolAllowlist: ['echo'] } });
+  const ha = await db.homeAssistantInstance.create({ data: { organizationId: f.org.id, slug: 'pin', name: 'Pin', url: 'https://stable.example/ha', tokenEncrypted: 'HA-SECRET-ORIGINAL', opAllowlist: ['list_states'] } });
+  await db.node.update({ where: { id: f.entry.id }, data: { data: { tools: ['mcp__pin__echo', 'ha__pin__list_states'] } } });
+  const pin = await adopt(f);
+  for (const value of [pin, await automationPinQueries.previewAutomation({}, { triggerKind: 'SCHEDULE', triggerRef: f.schedule.id }, f.ctx)]) expect(JSON.stringify(value)).not.toContain('SECRET-ORIGINAL');
+  await db.aiServiceConfig.update({ where: { id: ai.id }, data: { apiKeyEncrypted: 'AI-SECRET-ROTATED' } });
+  await db.mcpServer.update({ where: { id: mcp.id }, data: { headersEncrypted: 'MCP-SECRET-ROTATED' } });
+  await db.homeAssistantInstance.update({ where: { id: ha.id }, data: { tokenEncrypted: 'HA-SECRET-ROTATED' } });
+  f.deps.llmTools = async (_run, _config, _request, _tools, opts) => {
+    expect(await opts.onToolCall('tool.mcp__pin__echo', 1)).toBe(true);
+    return { text: 'ok', tokensIn: 1, tokensOut: 1, provider: 'test', model: 'test', toolCalls: [] };
+  };
+  const after = await automationPinQueries.previewAutomation({}, { triggerKind: 'SCHEDULE', triggerRef: f.schedule.id }, f.ctx);
+  expect(after.hash).toBe(pin.hash);
+  expect(JSON.stringify(after)).not.toContain('SECRET-ROTATED');
+  expect(await executeAppRun(db, (await f.run()).id, f.deps)).toBe('completed');
+});
+it.each(['mcp', 'ha'] as const)('each %s registration binds both its URL and its allowed operations', async kind => {
+  const f = await fixture();
+  const name = kind === 'mcp' ? 'mcp__pin__echo' : 'ha__pin__list_states';
+  const row = kind === 'mcp'
+    ? await db.mcpServer.create({ data: { organizationId: f.org.id, slug: 'pin', name: 'Pin', url: 'https://before.example/mcp', toolAllowlist: ['echo'] } })
+    : await db.homeAssistantInstance.create({ data: { organizationId: f.org.id, slug: 'pin', name: 'Pin', url: 'https://before.example/ha', tokenEncrypted: 'NO-PIN-SECRET', opAllowlist: ['list_states'] } });
+  await db.node.update({ where: { id: f.entry.id }, data: { data: { tools: [name] } } });
+  await adopt(f);
+  if (kind === 'mcp') await db.mcpServer.update({ where: { id: row.id }, data: { toolAllowlist: ['another'] } });
+  else await db.homeAssistantInstance.update({ where: { id: row.id }, data: { url: 'https://after.example/ha' } });
+  const run = await f.run();
+  expect(await executeAppRun(db, run.id, f.deps)).toBe('failed');
+  expect((await db.appRun.findUniqueOrThrow({ where: { id: run.id } })).failure).toMatchObject({ code: 'AUTOMATION_CHANGED' });
+  expect(f.llm).not.toHaveBeenCalled();
+});
+it('a declared named AI config is pinned at setup and payload overrides cannot switch it', async () => {
+  const f = await fixture();
+  await db.aiServiceConfig.create({ data: { appId: f.app.id, name: 'default', provider: 'openai', model: 'default' } });
+  const custom = await db.aiServiceConfig.create({ data: { appId: f.app.id, name: 'custom', provider: 'openai', model: 'custom' } });
+  const schedule = await appRunMutations.createAgentSchedule({}, { input: { appRef: f.app.id, name: 'named', cron: '* * * * *', entryNodeUrn: f.schedule.entryNodeUrn, aiConfigName: 'custom', runAsSelf: true } }, f.ctx);
+  expect((schedule.automationPin as any).resources.ai.id).toBe(custom.id);
+  const input = { appId: f.app.id, organizationId: f.org.id, userId: f.user.id, triggerKind: 'SCHEDULE' as const, triggerId: schedule.id, entryNodeUrn: schedule.entryNodeUrn };
+  expect(await executeAppRun(db, (await mintAppRun(db, { ...input, eventData: { __aiConfigName: 'custom' } })).id, f.deps)).toBe('completed');
+  const swapped = await mintAppRun(db, { ...input, eventData: { __aiConfigName: 'default' } });
+  expect(await executeAppRun(db, swapped.id, f.deps)).toBe('failed');
+});
+
+it('registration drift while materializing a tool retains AUTOMATION_CHANGED in the run', async () => {
+  const f = await fixture();
+  const row = await db.mcpServer.create({ data: { organizationId: f.org.id, slug: 'pin', name: 'Pin', url: 'https://before.example/mcp', toolAllowlist: ['echo'] } });
+  await db.node.update({ where: { id: f.entry.id }, data: { data: { tools: ['mcp__pin__echo'] } } });
+  await adopt(f);
+  f.deps.llmTools = async (run, _config, _request, names) => {
+    await db.mcpServer.update({ where: { id: row.id }, data: { url: 'https://rogue.example/mcp' } });
+    await materializeMcpRunTools(db, run, names);
+    throw new Error('unreachable');
+  };
+  const run = await f.run();
+  expect(await executeAppRun(db, run.id, f.deps)).toBe('failed');
+  expect((await db.appRun.findUniqueOrThrow({ where: { id: run.id } })).failure).toMatchObject({ code: 'AUTOMATION_CHANGED' });
+});
+
+it('private reference data is never copied into consent and its runtime read stays R5a-refused', async () => {
+  const f = await fixture();
+  const memory = await db.memory.create({ data: { name: 'Private data', urn: 'pin-owner:private', class: 'private', userId: f.user.id, ownerUserId: f.user.id } });
+  await db.node.update({ where: { id: f.dependency.id }, data: { memoryId: memory.id, content: 'PRIVATE-DATA-NEVER-COPIED' } });
+  await db.edge.create({ data: { memoryId: f.memory.id, sourceId: f.entry.id, targetId: f.dependency.id, name: 'documents', loc: 'entry:documents:private' } });
+  const pin = await adopt(f);
+  expect(pin.nodes).not.toHaveProperty(f.dependency.id);
+  expect(JSON.stringify(pin)).not.toContain('PRIVATE-DATA-NEVER-COPIED');
+  const preview = await automationPinQueries.previewAutomation({}, { triggerKind: 'SCHEDULE', triggerRef: f.schedule.id }, f.ctx);
+  expect(JSON.stringify(preview)).not.toContain('PRIVATE-DATA-NEVER-COPIED');
+  const run = await f.run();
+  expect(await executeAppRun(db, run.id, f.deps)).toBe('failed');
+  expect(f.llm).not.toHaveBeenCalled();
+  expect(f.writeOutput).not.toHaveBeenCalled();
+  expect((await db.appRun.findUniqueOrThrow({ where: { id: run.id } })).failure).toMatchObject({ code: 'ASSEMBLY_FAILED' });
 });

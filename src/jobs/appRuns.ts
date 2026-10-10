@@ -1,3 +1,4 @@
+import { configSelection } from '../lib/automation/identities.js';
 import { captureSetupConsent, currentOriginPin, AutomationPinError } from '../lib/automation/pins.js';
 /**
  * Headless agent runs — mint, execute, listen, sweep (spec 040, plan §4–§6).
@@ -554,7 +555,7 @@ export async function mintAppRun(db: PrismaClient, args: MintAppRunArgs): Promis
   // inherit the parent's artifact; poll events use the origin trigger's pin.
   let automationPin: unknown = null;
   if (args.triggerKind === 'MANUAL') {
-    automationPin = await captureSetupConsent(db, args.appId, args.userId ?? null, args.entryNodeUrn, args.organizationId, args.consentPrincipal ?? { appId: args.appId, userId: args.userId ?? undefined, organizationId: args.organizationId });
+    automationPin = await captureSetupConsent(db, args.appId, args.userId ?? null, args.entryNodeUrn, args.organizationId, args.consentPrincipal ?? { appId: args.appId, userId: args.userId ?? undefined, organizationId: args.organizationId }, configSelection(args));
   } else if (args.triggerKind === 'SCHEDULE') {
     automationPin = (await db.agentSchedule.findFirst({ where: { id: args.triggerId ?? '', appId: args.appId, deletedAt: null } }))?.automationPin;
   } else if (args.triggerKind === 'WEBHOOK') {
@@ -823,6 +824,8 @@ async function executeAppRunInner(
       } catch (err) {
         // A mid-flow node that can't be loaded is the D20 entry-missing
         // analog: an OBSERVABLE failed run, position preserved on the row.
+        if (err instanceof AutomationPinError) return fail(err.code, err.message);
+        await checkConsent();
         return fail('NODE_LOAD_FAILED', String((err as Error)?.message ?? err));
       }
 
@@ -922,6 +925,7 @@ async function executeAppRunInner(
         // rather than inventing a number; closing it needs the tool loop to
         // surface partial usage on the error.
         // Tool-loop terminal errors (plan-tools D-TL-6) — never retried:
+        if (err instanceof AutomationPinError) return fail(err.code, err.message);
         if (err instanceof AuthorFailError) {
           return fail('AUTHOR_FAIL', err.message); // the author's deliberate abort
         }

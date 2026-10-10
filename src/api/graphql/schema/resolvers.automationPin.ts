@@ -1,4 +1,5 @@
 /** #1719 R5b: one owner-controlled preview/re-adopt door for every trigger. */
+import { configSelection } from '../../../lib/automation/identities.js';
 import { GraphQLError } from 'graphql';
 import { captureAutomationPin, storedAutomationPin } from '../../../lib/automation/pins.js';
 import { runAuthContext, isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
@@ -32,7 +33,7 @@ async function load(ctx: Context, input: AutomationTriggerRef) {
   return row;
 }
 async function preview(ctx: Context, row: Awaited<ReturnType<typeof load>>) {
-  const pin = await captureAutomationPin(ctx.db, row.appId, row.userId, row.entryNodeUrn, row.organizationId, ctx);
+  const pin = await captureAutomationPin(ctx.db, row.appId, row.userId, row.entryNodeUrn, row.organizationId, ctx, configSelection(row));
   const memories = new Set(Object.values(pin.nodes).map(n => String(n.state.memoryId)));
   for (const id of memories) if (!await canReadMemory(ctx.db, ctx, id)) throw denied();
   return pin;
