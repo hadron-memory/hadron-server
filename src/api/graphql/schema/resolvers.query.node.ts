@@ -330,6 +330,8 @@ export const nodeQueries = {
             loadMemoryUrn(ctx, memoryId).then((u: string | null) => u ?? memoryId),
           compileTemplate: (content: string, data: Record<string, string> | null, memoryId: string) =>
             compileTemplate(content, data, memoryId, ctx.db, {}),
+          // visibleEdges was already filtered through this caller's read gate.
+          includeTarget: target => !!target,
           onTargetInlined: (target) => inlined.push(target),
         },
       );

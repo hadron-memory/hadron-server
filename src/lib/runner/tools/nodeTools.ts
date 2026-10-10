@@ -151,7 +151,7 @@ export const hadronUpdateNode: RunToolDef = {
   cost: 1,
   execute: async (ctx, args) => {
     const urn = String(args.urn ?? '');
-    const { memory, loc, node } = await loadFlowNode(ctx.db, urn, ctx.run.organizationId);
+    const { memory, loc, node } = await loadFlowNode(ctx.db, urn, ctx.run.organizationId, principalAuth(ctx));
     const fields = pickWriteFields(args);
     if (fields.data !== undefined) {
       // The model controls this input — validate before spreading (PR-545
