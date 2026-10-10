@@ -146,6 +146,16 @@ describe('evaluateDecision (§5.5 precedence, §6.3)', () => {
     expect(evaluateDecision(rowOf(answered, { revSeq: 2, approvedRevNo: 1 }), null).state).toBe('STALE');
   });
 
+  it('#1715: an approval by the account a decider was merged into is a decider\'s; by anyone else it is not', () => {
+    const answered = decision({ parts: [{ ...decision().parts[0], answer }], status: 'answered' });
+    const decider = answered.deciders[0];
+    // The merge rewrote approvedBy to the survivor; the stored deciders still name the merged-away id.
+    const approvedBySurvivor = rowOf(answered, { approvedRevNo: 1, approvedBy: 'survivor' });
+    expect(evaluateDecision(approvedBySurvivor, null).state).toBe('ANSWERED_UNCONFIRMED');
+    expect(evaluateDecision(approvedBySurvivor, null, new Set(['survivor', decider])).state).toBe('DECIDED');
+    expect(evaluateDecision(approvedBySurvivor, null, new Set(['survivor', 'someone-else'])).state).toBe('ANSWERED_UNCONFIRMED');
+  });
+
   it('the signed tier has no evidence yet (#1614 S2b): an approval never makes it DECIDED (Q11)', () => {
     const signed = decision({ tier: 'signed', authorizes: true, parts: [{ ...decision().parts[0], answer }], status: 'answered' });
     expect(evaluateDecision(rowOf(signed, { approvedRevNo: 1 }), null).state).toBe('ANSWERED_UNCONFIRMED');

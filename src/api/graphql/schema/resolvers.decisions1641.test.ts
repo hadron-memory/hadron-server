@@ -12,7 +12,7 @@ import { generateId } from '../../../lib/id.js';
 import { runAsActor } from '../../../lib/requestActor.js';
 import { decisionDataSchema, decisionLogDataSchema, type DecisionData } from '../../../lib/decisions/codec.js';
 import { decisionName, renderDecision, renderDecisionAbstract, renderDecisionLog } from '../../../lib/decisions/render.js';
-import { mergeUsers } from '../../../controller/operations/mergeUsers.js';
+import { computeApprovalHash } from '../../../lib/approvalHash.js';
 import { resolvers, type Context } from './resolvers.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
@@ -451,8 +451,8 @@ describe('reads (§8.1)', () => {
 
     expect((await Q.decisions(null, { awaitingMe: true }, as(holger.id))).items.map((v: any) => v.row.loc)).toEqual(['decisions:DB']);
     expect((await Q.decisions(null, { awaitingMe: true }, as(writer.id))).total).toBe(0);
-    expect(D.viewerIsDecider(b, {}, as(holger.id))).toBe(true);
-    expect(D.viewerIsDecider(b, {}, as(writer.id))).toBe(false);
+    expect(await D.viewerIsDecider(b, {}, as(holger.id))).toBe(true);
+    expect(await D.viewerIsDecider(b, {}, as(writer.id))).toBe(false);
     expect(await D.portalUrl(b, {}, as())).toBeNull(); // FRONTEND_URL is pinned empty in tests
   });
 });
@@ -672,82 +672,117 @@ describe("Diego's P3 on #1690 — the rendered log stays current after an ask", 
   });
 });
 
-describe("Diego's P2 on #1690 — mergeUsers refuses accounts named in decisions (option C, #1715)", () => {
+describe('#1715 — merge-aware identity: stored ids follow mergeUsers, and no record is rewritten', () => {
   const merge = (source: string, target: string) =>
     M.mergeUsers(null, { input: { source, target } }, as(platformAdmin.id, { roles: ['ADMIN'] }));
   const fresh = (n: number) => db.user.create({ data: { githubId: 164200 + n, githubUsername: `dn-merge-${n}`, roles: [] } });
+  const stored = async (id: string) => {
+    const r = await rowOf(id);
+    return { data: r.data, content: r.content, name: r.name, abstract: r.abstract, revSeq: r.revSeq };
+  };
 
-  it('refuses a merge in either direction while an account is named in a log or a decision, and changes nothing', async () => {
+  it('merges accounts named in a log and a decision, records the merge, and leaves both records byte-for-byte', async () => {
     const log = await createLog();
-    // holger is named only by the log's default deciders.
-    for (const [source, target] of [[holger.id, outsider.id], [outsider.id, holger.id]]) {
-      const e = await errorOf(merge(source, target));
-      expect(e.extensions).toMatchObject({ code: 'MERGE_USER_IN_DECISIONS', decisionCount: 1 });
-      expect(e.message).toContain('#1715');
-    }
-    // writer is named only by a decision they asked.
-    await ask(log.row.id);
-    expect((await errorOf(merge(writer.id, outsider.id))).extensions).toMatchObject({
-      code: 'MERGE_USER_IN_DECISIONS', decisionCount: 1,
-    });
-    const rows = await db.user.findMany({ where: { id: { in: [holger.id, writer.id, outsider.id] } } });
-    expect(rows.every((u) => u.deletedAt === null)).toBe(true);
+    const d = await ask(log.row.id);
+    const [logBefore, dBefore] = [await stored(log.row.id), await stored(d.row.id)];
+    const survivor = await fresh(1);
+    await merge(holger.id, survivor.id);
+    expect(await db.userMerge.findUniqueOrThrow({ where: { sourceUserId: holger.id } }))
+      .toMatchObject({ targetUserId: survivor.id, mergedBy: platformAdmin.id });
+    expect(await stored(log.row.id)).toEqual(logBefore);
+    expect(await stored(d.row.id)).toEqual(dBefore);
+    const v = await Q.verifyDecision(null, { ref: d.row.id }, as(admin.id));
+    expect({ state: v.state, findings: v.findings }).toEqual({ state: 'OPEN', findings: [] });
   });
 
-  it("never discloses a decision the merging admin cannot read: a count only, no loc (Diego's P2, round 4)", async () => {
-    const personal = await resolvers.Mutation.createMemory(null, { orgId, name: 'pa', memoryClass: 'personal' }, as(holger.id));
-    const log = await M.createDecisionLog(null, { memoryRef: personal.id, loc: 'secret-plans', defaultDeciders: [holger.id] }, as(holger.id));
-    const d = await ask(log.row.id, simple({ title: 'Quietly acquire the competitor?' }), holger.id);
-    const caller = as(platformAdmin.id, { roles: ['ADMIN'] });
-    expect(await Q.decision(null, { ref: d.row.id }, caller)).toBeNull();
-    const e = await errorOf(merge(holger.id, outsider.id));
-    expect(e.extensions).toEqual({ code: 'MERGE_USER_IN_DECISIONS', decisionCount: 2 });
-    const shown = JSON.stringify({ message: e.message, extensions: e.extensions });
-    for (const secret of ['secret-plans', D.code(d, {}, as(holger.id)), 'competitor', personal.id, log.row.id, d.row.id]) {
-      expect(shown).not.toContain(secret);
-    }
-    expect(e.message).toContain('2 decision records');
+  it("the survivor is the decider: viewerIsDecider, awaitingMe, and a decider's withdrawal after an answer", async () => {
+    const d = await ask((await createLog()).row.id);
+    await answerAsS2(d.row.id, 'yes', holger.id);
+    const survivor = await fresh(2);
+    expect(await codeOf(M.withdrawDecision(null, { ref: d.row.id, reason: 'r', expectedRevision: 1 }, as(survivor.id)))).toMatch(/^DECISION_NOT_FOUND|^DECISION_NOT_DECIDER/);
+    await merge(holger.id, survivor.id);
+    const view = await Q.decision(null, { ref: d.row.id }, as(survivor.id));
+    expect(await D.viewerIsDecider(view, {}, as(survivor.id))).toBe(true);
+    expect(await codeOf(M.withdrawDecision(null, { ref: d.row.id, reason: 'merged', expectedRevision: 1 }, as(survivor.id)))).toBe('NO_ERROR');
   });
 
-  it('still merges two accounts that no decision names', async () => {
-    await ask((await createLog()).row.id);
-    const [a, b] = [await fresh(1), await fresh(2)];
-    await merge(a.id, b.id);
-    expect((await db.user.findUniqueOrThrow({ where: { id: a.id } })).deletedAt).not.toBeNull();
+  it("an approval the merge moved to the survivor is still a decider's: the decision stays DECIDED", async () => {
+    const d = await ask((await createLog()).row.id);
+    await answerAsS2(d.row.id, 'yes', holger.id);
+    // Stands in for the approval door (decisions are approvable from S2): holger approved revision 1.
+    const r = await rowOf(d.row.id);
+    await db.node.update({ where: { id: d.row.id }, data: {
+      approvedBy: holger.id, approvedRevNo: r.revSeq, approvedAt: new Date(),
+      approvalHash: computeApprovalHash({ title: r.name, abstract: r.abstract, content: r.content }),
+    } });
+    expect(D.state(await Q.decision(null, { ref: d.row.id }, as(admin.id)), {}, as())).toBe('DECIDED');
+    await merge(holger.id, (await fresh(10)).id);
+    expect(D.state(await Q.decision(null, { ref: d.row.id }, as(admin.id)), {}, as())).toBe('DECIDED');
   });
 
-  it('a decider change in flight on the log is seen: the merge waits for it, then refuses', async () => {
+  it('awaitingMe lists an open decision whose stored decider was merged into the caller', async () => {
+    const d = await ask((await createLog()).row.id);
+    const survivor = await fresh(3);
+    await merge(holger.id, survivor.id);
+    expect((await Q.decisions(null, { awaitingMe: true }, as(survivor.id))).items.map((v: any) => v.row.id)).toEqual([d.row.id]);
+  });
+
+  it('the survivor is the asker, and a chain of merges is followed to its end', async () => {
+    const d = await ask((await createLog()).row.id);
+    const [mid, end] = [await fresh(4), await fresh(5)];
+    await merge(writer.id, mid.id);
+    await merge(mid.id, end.id);
+    expect(await codeOf(M.withdrawDecision(null, { ref: d.row.id, reason: 'mine', expectedRevision: 1 }, as(end.id)))).toBe('NO_ERROR');
+  });
+
+  it("nobody else gains anything: another user is still not the asker or a decider", async () => {
+    const d = await ask((await createLog()).row.id);
+    await merge(holger.id, (await fresh(6)).id);
+    expect(await codeOf(M.withdrawDecision(null, { ref: d.row.id, reason: 'r', expectedRevision: 1 }, as(admin.id)))).toBe('DECISION_NOT_ASKER');
+    expect((await Q.decisions(null, { awaitingMe: true }, as(admin.id))).total).toBe(0);
+  });
+
+  it("a new ask on a log naming a merged-away decider stores the survivor; the log's own record is untouched", async () => {
     const log = await createLog();
-    const [a, b] = [await fresh(3), await fresh(4)];
-    let release!: () => void;
-    const held = new Promise<void>((r) => { release = r; });
-    let locked!: () => void;
-    const lockTaken = new Promise<void>((r) => { locked = r; });
-    // Stands in for setDecisionLogDeciders: the log row FOR NO KEY UPDATE, then
-    // a write naming `a`, committed only after the merge has started.
-    const writerTx = db.$transaction(async (tx) => {
-      await tx.$queryRaw`SELECT id FROM nodes WHERE id = ${log.row.id} FOR NO KEY UPDATE`;
-      const row = await tx.node.findUniqueOrThrow({ where: { id: log.row.id } });
-      await tx.node.update({ where: { id: log.row.id }, data: { data: { ...(row.data as object), defaultDeciders: [holger.id, a.id] } as never } });
-      locked();
-      await held;
-    }, { timeout: 20_000 });
-    await lockTaken;
-    const merging = mergeUsers(db, { sourceUserId: a.id, targetUserId: b.id, actorUserId: platformAdmin.id }).then(
-      () => 'NO_ERROR',
-      (e) => (e instanceof GraphQLError ? String(e.extensions.code) : (e as Error).message),
-    );
-    for (let i = 0; ; i++) {
-      const [{ n }] = await db.$queryRaw<Array<{ n: bigint }>>`
-        SELECT count(*) AS n FROM pg_stat_activity
-        WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE '%FOR SHARE%'`;
-      if (n > 0n) break;
-      if (i > 200) throw new Error('the merge never waited on the log lock');
-      await new Promise((r) => setTimeout(r, 25));
-    }
-    release();
-    await writerTx;
-    expect(await merging).toBe('MERGE_USER_IN_DECISIONS');
-    expect((await db.user.findUniqueOrThrow({ where: { id: a.id } })).deletedAt).toBeNull();
+    const survivor = await fresh(7);
+    await merge(holger.id, survivor.id);
+    const before = await stored(log.row.id);
+    const byDefault = await ask(log.row.id);
+    expect(D.deciderIds(byDefault, {}, as())).toEqual([survivor.id]);
+    // Naming the survivor narrows from the log's set, which names them by their old id.
+    const named = await ask(log.row.id, simple({ deciders: [survivor.id] }));
+    expect(D.deciderIds(named, {}, as())).toEqual([survivor.id]);
+    const after = await stored(log.row.id);
+    expect((after.data as { defaultDeciders: string[] }).defaultDeciders).toEqual([holger.id]);
+    expect(after.revSeq).toBe(before.revSeq);
+  });
+
+  it('a decision and a log show the merges their stored ids follow', async () => {
+    const log = await createLog();
+    const d = await ask(log.row.id);
+    const survivor = await fresh(8);
+    await merge(holger.id, survivor.id);
+    const view = await Q.decision(null, { ref: d.row.id }, as(survivor.id));
+    const shown = await D.identityMerges(view, {}, as(survivor.id));
+    expect(shown).toEqual([expect.objectContaining({ fromUserId: holger.id, toUserId: survivor.id })]);
+    expect(shown[0].to).toMatchObject({ id: survivor.id });
+    const logView = await Q.decisionLog(null, { ref: log.row.id }, as(survivor.id));
+    expect(await L.identityMerges(logView, {}, as(survivor.id))).toEqual([expect.objectContaining({ fromUserId: holger.id, toUserId: survivor.id })]);
+    // A decision naming no merged account shows none.
+    const other = await M.createDecisionLog(null, { memoryRef: memory.id, loc: 'other', defaultDeciders: [admin.id] }, as());
+    const untouched = await ask(other.row.id);
+    expect(await D.identityMerges(untouched, {}, as(admin.id))).toEqual([]);
+  });
+
+  it('a decider change keeping a set that names a merged-away account, and a new log naming one, store the survivor', async () => {
+    const log = await createLog({ eligibleDeciders: [writer.id] });
+    const survivor = await fresh(9);
+    await merge(writer.id, survivor.id);
+    const next = await M.setDecisionLogDeciders(null,
+      { logRef: log.row.id, defaultDeciders: [admin.id], expectedRevision: 1, reason: 'kept' }, as());
+    expect(L.eligibleDeciderIds(next, {}, as())).toEqual([survivor.id]);
+    // A new log naming the merged-away account names its survivor.
+    const fresh2 = await M.createDecisionLog(null, { memoryRef: memory.id, loc: 'later', defaultDeciders: [writer.id] }, as());
+    expect(L.defaultDeciderIds(fresh2, {}, as())).toEqual([survivor.id]);
   });
 });

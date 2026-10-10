@@ -151,6 +151,9 @@ export interface Context {
   // Request-scoped memo for AppRun.app (#831) — same rationale as appUrnCache,
   // for the full row rather than just the urn (lazily created; see loadApp).
   appRowCache?: Map<string, Promise<AppRow | null>>;
+  // #1715 — the caller's merge-aware identities (their id plus every account
+  // merged into them; src/lib/userMerges.ts), memoized per request.
+  mergedIdentityCache?: Promise<Set<string>>;
   // Spec 049 Phase 3b — AppRun.scope memo, keyed on the serialized snapshot
   // (lazily created in the field resolver): a run page repeats one trigger's
   // snapshot across its rows.
