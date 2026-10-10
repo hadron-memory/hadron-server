@@ -87,6 +87,10 @@ export async function captureAutomationPin(db: PrismaClient, appId: string, user
         if (!edge.deletedAt && isRoutingName(routingNameOf(edge, node.loc))) pending.push({ id: edge.targetId, flow: true });
       }
     }
+    // Deliberately bind nested declarations too. compileTemplate loads its
+    // partial dictionary from the root template, so a nested-only reference
+    // may not render today; changing it still requires re-adoption because
+    // the declared instruction definition changed (R5b-3=A).
     for (const loc of templatePartialLocs(node.content ?? '')) {
       const urn = emitNodeUrnV2(node.memory.urn, loc);
       if (partialRefs.has(urn)) continue;
