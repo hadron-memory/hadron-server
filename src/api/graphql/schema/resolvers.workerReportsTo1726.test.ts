@@ -136,8 +136,13 @@ describe('the value: same App, not itself, not retired, no cycle', () => {
   });
 });
 
-describe('who may change it (#1726; Dan #7909, as recommended)', () => {
+describe('who may change it (#1726; Dan #7909, as recommended; claims narrowed by Ada #7981)', () => {
+  const hold = (by: { id: string }, ...ws: Array<{ id: string }>) =>
+    db.worker.updateMany({ where: { id: { in: ws.map((w) => w.id) } }, data: { heldByUserId: by.id, heldAt: new Date() } });
+
   it('the worker it reports to hands it over or clears it; a worker claims an unclaimed one for itself', async () => {
+    // One person (member) holds Ada, Marco and Dan, so Ada may claim Dan.
+    await hold(member, ada, marco, dan);
     // Ada claims Dan, who reports to nobody.
     await asWorker(ada, () => set(ctx(member.id), dan.id, ada.id));
     // Marco can't take Dan from Ada.
@@ -155,6 +160,27 @@ describe('who may change it (#1726; Dan #7909, as recommended)', () => {
     expect(await codeOf(asWorker(dan, () => set(ctx(member.id), dan.id, ada.id)))).toBe('WORKER_REPORTS_TO_FORBIDDEN');
     expect(await codeOf(set(ctx(member.id), dan.id, ada.id))).toBe('WORKER_REPORTS_TO_FORBIDDEN');
     expect(await reportsToOf(dan)).toBeNull();
+  });
+
+  it('INTERIM (Ada #7981): a worker claims only a worker the same person holds; otherwise the target\'s holder places it', async () => {
+    const other = await user(12);
+    await db.appMember.create({ data: { appId: app.id, userId: other.id, role: 'member' } });
+    // Both unheld (a worker whose name was released keeps its live session): "nobody holds
+    // both" is not "one person holds both".
+    expect(await codeOf(asWorker(ada, () => set(ctx(member.id), dan.id, ada.id)))).toBe('WORKER_REPORTS_TO_FORBIDDEN');
+    await hold(member, ada);
+    // Dan is unheld: Ada can't claim him.
+    expect(await codeOf(asWorker(ada, () => set(ctx(member.id), dan.id, ada.id)))).toBe('WORKER_REPORTS_TO_FORBIDDEN');
+    // Dan held by someone else: still not Ada's to claim.
+    await hold(other, dan);
+    expect(await codeOf(asWorker(ada, () => set(ctx(member.id), dan.id, ada.id)))).toBe('WORKER_REPORTS_TO_FORBIDDEN');
+    expect(await reportsToOf(dan)).toBeNull();
+    // Dan's holder places him under Ada, as a person or through any session.
+    await set(ctx(other.id), dan.id, ada.id);
+    expect(await reportsToOf(dan)).toBe(ada.id);
+    expect((await events(dan)).at(-1)?.payload).toEqual({ from: null, to: ada.id, setBy: 'holder' });
+    // The holder can't then move him: an existing claim is the current worker's, or a manager's.
+    expect(await codeOf(set(ctx(other.id), dan.id, marco.id))).toBe('WORKER_REPORTS_TO_FORBIDDEN');
   });
 
   it('a worker id with no person behind it proves nothing: a bare App key is refused', async () => {

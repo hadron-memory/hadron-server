@@ -10456,10 +10456,11 @@ export const typeDefs = `#graphql
     #1726 — set, hand over or clear (reportsTo: null) who a worker reports to:
     a non-retired worker of the same App, never itself, never a cycle
     (WORKER_REPORTS_TO_SELF / _OTHER_APP / _RETIRED / _CYCLE; WORKER_RETIRED
-    for a retired worker). Allowed for whoever manages the App, for the worker
-    it reports to now (handing over or clearing is its agreement), and for a
-    worker claiming one that reports to nobody, for itself
-    (WORKER_REPORTS_TO_FORBIDDEN otherwise). A worker acts through its bound
+    for a retired worker). Allowed for whoever manages the App, and for the
+    worker it reports to now (handing over or clearing is its agreement). A
+    worker that reports to nobody may also be claimed by a worker for itself
+    when one person holds both, or placed under any worker by its own holder
+    (interim, pending a ruling). WORKER_REPORTS_TO_FORBIDDEN otherwise. A worker acts through its bound
     session, with a person behind the request. Each change is a
     \`worker.reports-to\` team event; setting the current value changes nothing.
     """

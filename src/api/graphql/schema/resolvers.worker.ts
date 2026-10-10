@@ -997,7 +997,10 @@ export const workerMutations = {
    *   ADMIN/OWNER, platform admins) may make any change;
    * - the worker it reports to now may hand it over or clear it: doing so is
    *   that worker's agreement;
-   * - a worker may claim one that reports to nobody, for itself.
+   * - a worker that reports to nobody may be claimed by a worker for itself
+   *   only when one person holds both, or placed under any worker by its own
+   *   holder (INTERIM, Ada #7981, pending Holger's ruling on Rook's
+   *   claim-scope question; #7931 had allowed any worker to claim).
    *
    * "A worker" is the caller's bound session's worker, in the same App, with a
    * person behind the request (the #1713 interim: a bare App key may bind any
@@ -1048,7 +1051,22 @@ export const workerMutations = {
               const actor = await resolveTaskActor(txCtx, fresh as unknown as TaskApp);
               const acting = actor?.kind === 'worker' ? actor.workerId : null;
               if (acting && from !== null && acting === from) return 'current';
-              if (acting && from === null && to === acting) return 'claimant';
+              if (from === null && to !== null) {
+                // A claim on a worker that reports to nobody. INTERIM rule (Ada
+                // #7981, narrowing #7931 until Holger rules on Rook's claim-scope
+                // question): a worker claims it only when ONE person holds both;
+                // otherwise the claim is the target's holder's to make (or a
+                // manager's). The writer holds both rows FOR UPDATE by now, so
+                // neither hold can change under this decision.
+                const holds = await tx.worker.findMany({
+                  where: { id: { in: [worker.id, ...(acting ? [acting] : [])] } },
+                  select: { id: true, heldByUserId: true },
+                });
+                const holderOf = (id: string) => holds.find((h) => h.id === id)?.heldByUserId ?? null;
+                const targetHolder = holderOf(worker.id);
+                if (acting && to === acting && targetHolder !== null && targetHolder === holderOf(acting)) return 'claimant';
+                if (ctx.userId && targetHolder === ctx.userId) return 'holder';
+              }
               if (await callerManagesAppMembers(txCtx, fresh, fresh.id)) return 'app-manager';
               throw forbidden();
             },

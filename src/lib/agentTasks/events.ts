@@ -280,10 +280,10 @@ export async function appendHostEvent(
 
 /**
  * Who changed a worker's `reportsTo` (#1726), as a word: the worker it
- * reported to, a worker claiming it, whoever manages the App, the worker's own
+ * reported to, a worker claiming it, its holder, whoever manages the App, the worker's own
  * bind (`startSession`), or the platform clearing it on retirement.
  */
-export type ReportsToSetter = 'current' | 'claimant' | 'app-manager' | 'bind' | 'retirement';
+export type ReportsToSetter = 'current' | 'claimant' | 'holder' | 'app-manager' | 'bind' | 'retirement';
 
 /**
  * Append one `worker.reports-to` event: a set, handover or clear. The Worker
