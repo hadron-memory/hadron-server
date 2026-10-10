@@ -240,6 +240,17 @@ describe('reading availability and stall windows (the App\'s task audience)', ()
     await expectCode(Q.agentTaskStallSchedule({}, { appRef: app.id }, ctx(outsider.id)), 'APP_NOT_FOUND');
   });
 
+  it('#1731 (#7790): an owner-role AppMember sets the stall windows; demoted to member, it is refused', async () => {
+    await db.appMember.upsert({
+      where: { appId_userId: { appId: app.id, userId: member.id } },
+      create: { appId: app.id, userId: member.id, role: 'owner' }, update: { role: 'owner' },
+    });
+    expect(await M.setAgentTaskStallSchedule({}, { appRef: app.id, input: { noProgressMinutes: 75 } }, ctx(member.id)))
+      .toMatchObject({ noProgressMinutes: 75 });
+    await db.appMember.update({ where: { appId_userId: { appId: app.id, userId: member.id } }, data: { role: 'member' } });
+    await expectCode(M.setAgentTaskStallSchedule({}, { appRef: app.id, input: { noProgressMinutes: 5 } }, ctx(member.id)), 'APP_MANAGER_REQUIRED');
+  });
+
   it('an uninstalled App\'s availability and windows are read-only', async () => {
     await db.app.update({ where: { id: app.id }, data: { uninstalledAt: new Date() } });
     await expectCode(setWorker(ctx(admin.id), {}), 'APP_UNINSTALLED');

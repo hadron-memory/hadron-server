@@ -203,19 +203,39 @@ describe('createAgentTask — root tasks: any App participant (cor:agt:050:06)',
     await expectCode(create(ctx(member.id), { owner: { user: outsider.id } }), 'TASK_NOT_OWNER');
   });
 
-  it('whoever manages the App (strict cor:acl:010:01: org ADMIN/OWNER) may name another owner', async () => {
+  it('whoever manages the App (cor:acl:010:01: org ADMIN/OWNER) may name another owner', async () => {
     const a = await create(ctx(admin.id), { owner: { worker: 'Liam' } });
     expect(a.ownerWorkerId).toBe(liam.id);
   });
 
-  it('an owner-role AppMember, or a platform admin, does NOT manage the App (Rook P1-1)', async () => {
-    await expectCode(create(ctx(appOwnerMember.id), { owner: { user: member.id } }), 'TASK_NOT_OWNER');
+  it("#1731 (Holger, #7790): an owner-role AppMember and a platform admin manage the App; an org CONTRIBUTOR doesn't", async () => {
+    const byOwnerRole = await create(ctx(appOwnerMember.id), { owner: { user: member.id } });
+    expect(byOwnerRole.ownerUserId).toBe(member.id);
+    // The transaction re-reads platform roles from the user row, so the grant must be real.
     const platformAdmin = await user(`pa2-${Date.now()}`, 51);
-    await db.orgMember.create({ data: { id: generateId(), organizationId: org.id, userId: platformAdmin.id, role: 'CONTRIBUTOR' } });
-    await expectCode(
-      create(ctx(platformAdmin.id, { roles: ['ADMIN'] }), { owner: { user: member.id } }),
-      'TASK_NOT_OWNER',
-    );
+    await db.user.update({ where: { id: platformAdmin.id }, data: { roles: ['ADMIN'] } });
+    const byPlatform = await create(ctx(platformAdmin.id, { roles: ['ADMIN'] }), { owner: { user: member.id } });
+    expect(byPlatform.ownerUserId).toBe(member.id);
+    await expectCode(create(ctx(contrib.id), { owner: { user: member.id } }), 'TASK_NOT_OWNER');
+  });
+
+  it('#1731: a platform role the user row no longer carries manages nothing (a stale token)', async () => {
+    const formerAdmin = await user(`pa3-${Date.now()}`, 52);
+    await db.orgMember.create({ data: { id: generateId(), organizationId: org.id, userId: formerAdmin.id, role: 'CONTRIBUTOR' } });
+    await expectCode(create(ctx(formerAdmin.id, { roles: ['ADMIN'] }), { owner: { user: member.id } }), 'TASK_NOT_OWNER');
+  });
+
+  it('#1731: a self-joined member is never an owner, so never a manager (#1714)', async () => {
+    await db.agent.update({ where: { id: teamAgent.id }, data: { installationPolicy: { maxMembers: 'unlimited', memberRoles: ['owner', 'member'], selfJoinRole: 'member' } as never } });
+    await db.appAgent.create({ data: { appId: app.id, agentId: teamAgent.id } });
+    await M.joinApp({}, { appId: app.id }, ctx(outsider.id));
+    expect((await db.appMember.findUniqueOrThrow({ where: { appId_userId: { appId: app.id, userId: outsider.id } } })).role).toBe('member');
+    await expectCode(create(ctx(outsider.id), { owner: { user: member.id } }), 'TASK_NOT_OWNER');
+  });
+
+  it('#1731: an owner-role AppMember of ANOTHER App manages nothing here', async () => {
+    await db.appMember.create({ data: { appId: otherApp.id, userId: contrib.id, role: 'owner' } });
+    await expectCode(create(ctx(contrib.id), { owner: { user: member.id } }), 'TASK_NOT_OWNER');
   });
 
   it('a manager naming an owner outside the App is refused TASK_OWNER_INVALID', async () => {
@@ -663,21 +683,25 @@ describe('integrity', () => {
 
 // ── #1713 review round (Rook §10, Diego cross-provider) ───────────────────
 
-describe('#1713 review: strict App manager (Rook P1-1)', () => {
-  it('an owner-role AppMember outside the org may create their own tasks, but not reassign, cancel, or name owners', async () => {
-    // #1714 closed self-join, so a stranger can no longer make themselves an
-    // owner-role member; the row stands for one a manager promoted.
+describe('#1731: the strict App manager of #1713 (Rook P1-1) is replaced by #7790', () => {
+  it('an owner-role AppMember outside the org manages the App: reassigns, cancels, assigns and names owners', async () => {
+    // #1714 closed self-join, so the row stands for one a manager granted.
     await db.appAgent.create({ data: { appId: app.id, agentId: teamAgent.id } });
     await db.appMember.create({ data: { appId: app.id, userId: outsider.id, role: 'owner' } });
-    const own = await create(ctx(outsider.id), {});
-    expect(own.ownerUserId).toBe(outsider.id);
     const theirs = await anneTask({ start: true });
-    await expectCode(M.reassignAgentTask({}, { taskId: theirs.id, assignee: { worker: 'Liam' } }, ctx(outsider.id)), 'TASK_NOT_OWNER');
-    await expectCode(M.cancelAgentTask({}, { taskId: theirs.id }, ctx(outsider.id)), 'TASK_NOT_OWNER');
+    await M.reassignAgentTask({}, { taskId: theirs.id, assignee: { worker: 'Liam' } }, ctx(outsider.id));
+    expect((await db.agentTask.findUniqueOrThrow({ where: { id: theirs.id } })).assigneeWorkerId).toBe(liam.id);
+    await M.cancelAgentTask({}, { taskId: theirs.id }, ctx(outsider.id));
     const queued = await create(ctx(member.id), {});
-    await expectCode(M.assignAgentTask({}, { taskId: queued.id, assignee: { worker: 'Liam' } }, ctx(outsider.id)), 'TASK_NOT_OWNER');
-    await expectCode(create(ctx(outsider.id), { owner: { user: member.id } }), 'TASK_NOT_OWNER');
-    expect((await db.agentTask.findUniqueOrThrow({ where: { id: theirs.id } })).assigneeWorkerId).toBe(anne.id);
+    await M.assignAgentTask({}, { taskId: queued.id, assignee: { worker: 'Liam' } }, ctx(outsider.id));
+    expect((await create(ctx(outsider.id), { owner: { user: member.id } })).ownerUserId).toBe(member.id);
+  });
+
+  it('demoted from owner, the same member manages nothing again', async () => {
+    await db.appMember.create({ data: { appId: app.id, userId: outsider.id, role: 'owner' } });
+    await db.appMember.update({ where: { appId_userId: { appId: app.id, userId: outsider.id } }, data: { role: 'member' } });
+    const theirs = await anneTask();
+    await expectCode(M.cancelAgentTask({}, { taskId: theirs.id }, ctx(outsider.id)), 'TASK_NOT_OWNER');
   });
 });
 

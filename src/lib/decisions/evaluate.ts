@@ -60,10 +60,17 @@ export type DecisionNodeRow = NodeApprovalRow & { data: unknown };
  * Evaluate one decision. Pure: the caller supplies the node row (plaintext;
  * decision logs never live in encrypted memories, §5.4) and the retained
  * snapshot of its approved revision, if any.
+ *
+ * `approverIdentities` (#1715): every id that now means the approver, their
+ * own plus every account merged into it (src/lib/userMerges.ts). A merge
+ * rewrites `approvedBy` to the surviving account but never the decision's
+ * stored deciders, so the approval is a decider's when any of these is named.
+ * Omitted, the approver is only `approvedBy` itself.
  */
 export function evaluateDecision(
   node: DecisionNodeRow,
   approvedSnapshot: ApprovalHashFields | null,
+  approverIdentities?: ReadonlySet<string>,
 ): DecisionEvaluation {
   const findings: DecisionIntegrityFinding[] = [];
   const live: ApprovalHashFields = { title: node.name, abstract: node.abstract, content: node.content };
@@ -116,7 +123,8 @@ export function evaluateDecision(
   }
 
   const tampered = findings.some((f) => f !== 'UNKNOWN_CODEC' && f !== 'UNKNOWN_RENDERER');
-  const byDecider = decision != null && node.approvedBy != null && decision.deciders.includes(node.approvedBy);
+  const approver = node.approvedBy == null ? null : (approverIdentities ?? new Set([node.approvedBy]));
+  const byDecider = decision != null && approver != null && decision.deciders.some((id) => approver.has(id));
   const allAnswered = decision != null && decision.parts.every((p) => p.answer != null);
   const approval = { integrity: integrity.state, byDecider, revision: node.approvedRevNo };
   const result = (state: DecisionState): DecisionEvaluation => ({ state, decision, findings, approval, allAnswered });
