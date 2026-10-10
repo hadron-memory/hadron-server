@@ -567,9 +567,18 @@ export function provesIdle(
 ): [boolean, string] {
   if (isIdle(cfg, handle, timeoutMs, run)) return [true, ''];
   if (lastOutputAt === null || lastOutputAt === undefined) {
-    const [empty, why] = promptIsEmpty(cfg, handle, agent, run);
-    if (empty) return [true, why || 'untracked terminal, screen proves the idle prompt'];
-    return [false, `unknown idle state — no output tracking, screen shows ${why}`];
+    const term = readScreen(cfg, handle, run);
+    const [empty, why] = promptIsEmptyFromTerm(term, agent);
+    if (!empty) return [false, `unknown idle state — no output tracking, screen shows ${why}`];
+    // An empty composer proves nobody has TYPED; it does not prove the agent
+    // is not WORKING — both agents render an empty prompt box mid-turn (the
+    // #1490 steering hazard; live evidence 2026-10-09/10: '✽ Bunning… (5m 55s
+    // · ↓ 15.6k tokens)' above an empty Claude box, '• Working (6s • esc to
+    // interrupt)' above the Codex placeholder). The fallback requires positive
+    // quiet: no running-turn indicator above the prompt (@codex P2, #1700).
+    const running = term ? runningTurnAbovePrompt(term.tail as string[], agent) : null;
+    if (running !== null) return [false, 'unknown idle state — no output tracking, a running turn is drawn above the prompt'];
+    return [true, 'untracked terminal, screen proves the idle prompt and no running turn'];
   }
   return [false, `busy for ${Math.round(timeoutMs / 1000)}s`];
 }
@@ -652,6 +661,67 @@ export function promptLineIsEmpty(lines: string[], agent: string): boolean {
 }
 
 /**
+ * The terminal's rendered screen, or undefined when unreadable. A full-frame
+ * `--screen` read (the default stream read returns repaint fragments, useless
+ * for shape checks).
+ */
+export function readScreen(cfg: Config, handle: string, run: Runner): Record<string, any> | undefined {
+  try {
+    const data = JSON.parse(run([cfg.orcaCli, 'terminal', 'read', '--terminal', handle, '--screen', '--json']).stdout);
+    return data.ok ? data.result?.terminal : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** True when the line carries a parenthesized elapsed timer (a running spinner). */
+const spinnerTimer = (s: string): boolean => /[（(]\d/.test(s) && /\d\s*[mh]?\s*\d*s/.test(s) && !/done/i.test(s) && !/worked for/i.test(s);
+
+/**
+ * The running-turn indicator drawn above the prompt while the agent works, or
+ * null when the window is quiet. The untracked-idle fallback's POSITIVE
+ * liveness proof (@codex P2, #1700): composer emptiness alone cannot separate
+ * an idle agent from a working one, because BOTH render an empty prompt box
+ * mid-turn. What separates them is the line above the prompt:
+ *  - Claude busy (live, 2026-10-09/10): '✽ Bunning… (5m 55s · ↓ 15.6k
+ *    tokens)', '✶ Misting… (11s · thinking)', '(ctrl+b to run in
+ *    background)' — elapsed timer IN PARENTHESES. Claude done: '✻ Sautéed
+ *    for 1m 12s · done 3:52 PM' — no parentheses, carries 'done'.
+ *  - Codex busy: '• Working (6s • esc to interrupt)'. Codex done: 'Worked
+ *    for 1m 24s • 5:32 PM'.
+ * Both agents PIN the running-turn line directly above the prompt chrome
+ * while the turn runs (it does not scroll out from under the read, which
+ * returns the bottom of the buffer), so a bounded window above the prompt box
+ * is sufficient. An unrecognized window reads as QUIET, not busy: this
+ * classifier only rejects screens that positively show work, keeping the
+ * #7398 deadlock fix effective for freshly launched terminals that have no
+ * done-marker yet.
+ */
+export function runningTurnAbovePrompt(lines: string[], agent: string): string | null {
+  let at: number; // the first line of the prompt chrome
+  if (agent === 'claude') {
+    const rules = lines.flatMap((l, i) => (/^─{3,}[\s ]*$/.test(l) ? [i] : []));
+    if (rules.length < 2) return null;
+    at = rules[rules.length - 2];
+  } else if (agent === 'codex') {
+    let p = -1;
+    for (let i = lines.length - 1; i >= 0; i--) {
+      if (lines[i].startsWith('›')) { p = i; break; }
+    }
+    if (p < 0) return null;
+    at = p;
+  } else {
+    return null;
+  }
+  const window = lines.slice(Math.max(0, at - 8), at).map(squash).filter((l) => l !== '');
+  for (const l of window) {
+    if (l.includes('to interrupt') || l.includes('run in background') || l.includes('Working (') || /^calling [a-z]/i.test(l)) return l;
+    if (spinnerTimer(l)) return l;
+  }
+  return null;
+}
+
+/**
  * [empty, detail]: whether the terminal's rendered prompt is empty right now.
  *
  * Two signals, and each agent needs a different one (live probe, 2026-10-01,
@@ -664,13 +734,11 @@ export function promptLineIsEmpty(lines: string[], agent: string): boolean {
  * here). Never logs the text.
  */
 export function promptIsEmpty(cfg: Config, handle: string, agent: string, run: Runner): [boolean, string] {
-  let terminal: Record<string, any> | undefined;
-  try {
-    const data = JSON.parse(run([cfg.orcaCli, 'terminal', 'read', '--terminal', handle, '--screen', '--json']).stdout);
-    terminal = data.ok ? data.result?.terminal : undefined;
-  } catch {
-    terminal = undefined;
-  }
+  return promptIsEmptyFromTerm(readScreen(cfg, handle, run), agent);
+}
+
+/** promptIsEmpty over an already-read screen (the untracked gate reads once). */
+export function promptIsEmptyFromTerm(terminal: Record<string, any> | undefined, agent: string): [boolean, string] {
   if (!terminal || terminal.source !== 'screen' || !Array.isArray(terminal.tail)) return [false, 'screen unreadable'];
   // A draft pins the nudge only when the agent's own rendering cannot refute
   // it. Claude Code draws typed-but-unsent text on its `❯` line (#1555), so a
@@ -897,10 +965,19 @@ export function pollOnce(cfg: Config, run: Runner = runCommand, log: (line: stri
       // (#5473). Re-prove both, as close to the send as possible — the idle
       // recheck FAIL-CLOSED (see RECHECK_IDLE_TIMEOUT_MS): busy here holds,
       // and the next poll recomputes everything. An UNTRACKED terminal gets
-      // the screen fallback again (it can never satisfy tui-idle).
-      const [recheckIdle, recheckWhy] = provesIdle(cfg, handle, detail, tracked.get(handle), RECHECK_IDLE_TIMEOUT_MS, run);
+      // the screen fallback again (it can never satisfy tui-idle) — but on
+      // RELOADED tracking (@codex P2, #1700): the gate's snapshot is as old
+      // as the busy-wait was long, and a terminal that produced output since
+      // (healing its tracking) must get the ordinary failed-wait hold back,
+      // not the untracked fallback. A vanished terminal falls to the fallback,
+      // which re-resolves its screen and holds unless it positively proves idle.
+      const recheckTracked = listTerminals(cfg, run).find((t) => t.handle === handle)?.lastOutputAt;
+      const [recheckIdle, recheckWhy] = provesIdle(cfg, handle, detail, recheckTracked, RECHECK_IDLE_TIMEOUT_MS, run);
       if (!recheckIdle) {
-        outcome.held[entry.name] = `busy again after the recompute (${recheckWhy.includes('unknown') ? recheckWhy : 'fail-closed, not waited'})`;
+        // The raw reason distinguishes the two holds: 'busy for Ns' (tracked
+        // again — the ordinary failed-wait hold, #1700) vs 'unknown idle
+        // state — …' (still untracked, screen shows work or text).
+        outcome.held[entry.name] = `busy again after the recompute (${recheckWhy})`;
         continue;
       }
       const [stillEmpty, whyNow] = promptIsEmpty(cfg, handle, detail, run);

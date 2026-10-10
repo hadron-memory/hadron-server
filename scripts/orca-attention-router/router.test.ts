@@ -16,6 +16,10 @@ const RULE = '─'.repeat(60);
 const CLAUDE_HINT = '  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents';
 const CLAUDE_IDLE = ['⏺ Done.', '❯ an earlier submitted turn', '✻ Cogitated for 1m 3s', RULE, '❯\u00a0', RULE, CLAUDE_HINT];
 const CODEX_IDLE = ['  Worked for 33s • 16:32', '› Ask Codex to do anything', '  GPT-6-Sol high · ~/orca/workspaces/hadron-server/andi · Start worker session as Andi', '  ? for shortcuts'];
+/** A WORKING agent renders an EMPTY composer — the running-turn line above the
+ * prompt is the only separator (@codex P2, #1700; live screens 2026-10-09/10). */
+const CLAUDE_BUSY_EMPTY = ['  ⎿ Tip: Use /btw to ask a quick side question', '  (ctrl+b to run in background)', '✽ Bunning… (5m 55s · ↓ 15.6k tokens)', RULE, '❯ ', RULE, CLAUDE_HINT];
+const CODEX_BUSY_EMPTY = ['  • Working (6s • esc to interrupt)', '› Ask Codex to do anything', '  GPT-6-Sol high · ~/orca/workspaces/hadron-server/andi · Start worker session as Andi', '  ? for shortcuts'];
 const withPrompt = (screen: string[], marker: string, text: string) => {
   const i = screen.map((l) => l.trimStart().startsWith(marker)).lastIndexOf(true);
   return [...screen.slice(0, i), `${marker} ${text}`, ...screen.slice(i + 1)];
@@ -47,6 +51,9 @@ class FakeCLIs {
   busyRecheck = new Set<string>();
   /** Terminals with NO output tracking — tui-idle can never satisfy (#7398). */
   untracked = new Set<string>();
+  /** Handles served as TRACKED on every `terminal list` AFTER the first — tracking healed between the gate and the recheck (@codex P2, #1700). */
+  healTracking = new Set<string>();
+  listCalls = 0;
   waits = new Map<string, number>();
   reject = new Set<string>();
   /** The rendered screen per handle; set by terminal() to an idle prompt for its agent. */
@@ -125,7 +132,13 @@ class FakeCLIs {
       const row = this.registerRow?.(w) ?? { namedBy: 'WORKER', channel: { id: CHANNEL }, entry: { mentionOnly: ids.has(w) } };
       return out({ data: { attendeeRegister: [row] } });
     }
-    if (verb === 'terminal list') return out({ ok: true, result: { terminals: this.terminals } });
+    if (verb === 'terminal list') {
+      this.listCalls++;
+      const terminals = this.listCalls > 1 && this.healTracking.size
+        ? this.terminals.map((t) => (this.healTracking.has(t.handle as string) ? { ...t, lastOutputAt: Date.now() } : t))
+        : this.terminals;
+      return out({ ok: true, result: { terminals } });
+    }
     const handle = argv[argv.indexOf('--terminal') + 1];
     if (verb === 'terminal wait') {
       const n = (this.waits.get(handle) ?? 0) + 1;
@@ -142,8 +155,19 @@ class FakeCLIs {
     if (verb === 'terminal read') {
       const n = (this.reads.get(handle) ?? 0) + 1;
       this.reads.set(handle, n);
-      const sc = (n === 2 ? this.recheckScreens.get(handle) : undefined) ?? this.screens.get(handle);
+      // The recheck screen serves at read 2 for TRACKED terminals (gate:
+      // promptIsEmpty only) but at read 3+ for UNTRACKED ones — the #1700
+      // gate's screen fallback reads first, shifting every later read by one.
+      const rcIdx = this.untracked.has(handle) ? 3 : 2;
+      const sc = (n >= rcIdx ? this.recheckScreens.get(handle) : undefined) ?? this.screens.get(handle);
       if (!sc || sc.ok === false) return out({ ok: false, error: { code: 'terminal_handle_stale' } }, 1);
+      // The untracked gate's screen fallback is this target's idle gate for
+      // phase purposes (#7398 / #1700 P3): an idle untracked screen on the
+      // gate read plays the role a satisfied wait plays for tracked terminals.
+      if (n === 1 && this.untracked.has(handle)) {
+        const tailJson = JSON.stringify(sc.tail);
+        if (tailJson === JSON.stringify(CLAUDE_IDLE) || tailJson === JSON.stringify(CODEX_IDLE)) this.sawWait = true;
+      }
       return out({ ok: true, result: { terminal: { handle, source: sc.source ?? 'screen', tail: sc.tail, ...(sc.draft !== undefined ? { draft: sc.draft } : {}) } } });
     }
     if (verb === 'terminal send') {
@@ -268,6 +292,57 @@ describe('Orca attention router — untracked terminals: unknown is not busy (#7
     expect(out).toMatchObject({ nudged: ['Eli'], adopted: true });
     const waits = fake.calls.filter((a) => a.slice(1, 3).join(' ') === 'terminal wait');
     expect(waits.length).toBeGreaterThanOrEqual(2); // gate + recheck both attempted
+    expect(fake.freshServed).toBe(1); // the fallback path really exercised the fresh re-read (#1700 P3)
+  });
+
+  it('an untracked BUSY Claude with an EMPTY composer holds as unknown — no mid-turn nudge (#1700 P2)', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli', 'claude', undefined, false);
+    fake.attention.workers = [worker('w-eli', 'Eli')];
+    fake.screens.set('term_eli', { tail: CLAUDE_BUSY_EMPTY }); // empty box + hint; spinner above
+    const out = poll(c);
+    expect(out.nudged).toEqual([]);
+    expect(out.held.Eli).toContain('running turn');
+    expect(out.held.Eli).not.toContain('busy for');
+    expect(fake.sent).toEqual([]);
+    expect(fake.freshServed).toBe(0); // held at the gate: no fresh scan ran
+  });
+
+  it('same for Codex: the Working line above the placeholder holds the nudge (#1700 P2)', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli', 'codex', undefined, false);
+    fake.attention.workers = [worker('w-eli', 'Eli')];
+    fake.screens.set('term_eli', { tail: CODEX_BUSY_EMPTY });
+    const out = poll(c);
+    expect(out.nudged).toEqual([]);
+    expect(out.held.Eli).toContain('running turn');
+    expect(fake.sent).toEqual([]);
+  });
+
+  it('busy only after the fresh scan: the gate passed, the recheck screen shows a running turn (#1700 P2)', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli', 'claude', undefined, false);
+    fake.attention.workers = [worker('w-eli', 'Eli')];
+    fake.recheckScreens.set('term_eli', { tail: CLAUDE_BUSY_EMPTY }); // it went busy during the recompute
+    const out = poll(c);
+    expect(out.nudged).toEqual([]);
+    expect(out.held.Eli).toContain('busy again after the recompute');
+    expect(out.held.Eli).toContain('running turn');
+    expect(fake.sent).toEqual([]);
+    expect(fake.freshServed).toBe(1);
+  });
+
+  it('tracking healed before the recheck restores the ORDINARY failed-wait hold (#1700 P2)', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli', 'claude', undefined, false);
+    fake.attention.workers = [worker('w-eli', 'Eli')];
+    fake.healTracking.add('term_eli'); // produced output after the gate: the recheck's list shows it tracked
+    fake.busyRecheck.add('term_eli');  // and its recheck wait times out
+    const out = poll(c);
+    expect(out.nudged).toEqual([]);
+    expect(out.held.Eli).toContain('busy again after the recompute (busy for');
+    expect(out.held.Eli).not.toContain('unknown');
+    expect(fake.sent).toEqual([]);
   });
 });
 
