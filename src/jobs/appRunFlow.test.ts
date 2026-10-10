@@ -264,7 +264,7 @@ describe('3-node flow through production deps (§10)', () => {
     expect(appended.content).toContain('---'); // append separator
   });
 
-  it('a flow routed into an ENCRYPTED memory fails at that hop (PR-532 Codex P2)', async () => {
+  it('an encrypted node anywhere in the setup graph prevents execution (#1719 R5b)', async () => {
     // The launch gate only checks the entry — the guard must also fire on
     // routed hops, where the run has no session key.
     const vault = await db.memory.create({
@@ -294,9 +294,9 @@ describe('3-node flow through production deps (§10)', () => {
     const { deps } = flowDeps(0.4); // low confidence → defer → (routed) vault
     expect(await executeAppRun(db, run.id, deps)).toBe('failed');
     const after = await db.appRun.findUniqueOrThrow({ where: { id: run.id } });
-    expect((after.failure as { code?: string }).code).toBe('NODE_LOAD_FAILED');
-    expect((after.failure as { message?: string }).message).toContain('encrypted');
-    expect(after.curNodeUrn).toBe(`hrn:node:${ORG_URN}:vault:flow:secret`); // position preserved for audit
+    expect((after.failure as { code?: string }).code).toBe('AUTOMATION_UNADOPTED');
+    expect((after.failure as { message?: string }).message).toContain('re-adopt');
+    expect(after.curNodeUrn).toBeNull(); // refused before even the first hop
   });
 
   it('an extractionSpec writing into __-plumbing fields fails the run loudly (PR-532 Copilot)', async () => {

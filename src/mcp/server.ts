@@ -1,3 +1,4 @@
+import { registerAutomationPinTools } from './automationPinTools.js';
 import { boundSessionPrivacyFilter } from '../lib/auth/sessionPrivacy.js';
 import { createHmac, randomUUID } from 'crypto';
 // Spec 049 S4 — the protected-loc gate on hadron_update_node (no lock on that path).
@@ -3247,6 +3248,7 @@ export function createMcpServerInstance(
 
   // ── #1705 — agent tasks (cor:agt:050): thin over the GraphQL agent-task resolvers ──
   registerAgentTaskTools(server, { db, auth });
+  registerAutomationPinTools(server, { db, auth });
 
   // ── Spec 049 Phase 2 — scopes: list / create / update / delete / explain ──────
   //

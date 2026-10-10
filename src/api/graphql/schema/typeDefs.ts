@@ -6614,7 +6614,11 @@ export const typeDefs = `#graphql
 
   enum TeamSpecForm { SERVER CLIENT_INPUT }
 
+  enum AutomationTriggerKind { SCHEDULE WEBHOOK MANUAL }
+
   type Query {
+    "#1719: review exact automation graph bytes and digest. triggerRef is the trigger row ID; MANUAL uses the origin AppRun ID. Only its run-as user or the manager of an App-only trigger may preview."
+    previewAutomation(triggerKind: AutomationTriggerKind!, triggerRef: String!): JSON!
 
     """
     #1705 — one agent task, or null when it does not exist or the caller may
@@ -8319,6 +8323,8 @@ export const typeDefs = `#graphql
   }
 
   type Mutation {
+    "#1719: rebind a trigger to its reviewed graph. expectedHash must match previewAutomation; edits since preview refuse adoption."
+    reAdoptAutomation(triggerKind: AutomationTriggerKind!, triggerRef: String!, expectedHash: String!): Boolean!
 
     """
     #1705 — create an agent task (hrn:node:hadronmemory.com:specs:cor:agt:050:06 root, :07 child). Writes

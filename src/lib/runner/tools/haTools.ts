@@ -1,3 +1,4 @@
+import { assertPinnedToolIdentity } from '../../automation/pins.js';
 /**
  * Dynamic run tools backed by REGISTERED HOME ASSISTANT INSTANCES (the
  * hadrontool-home-assistant tool). The static registry in index.ts covers
@@ -105,6 +106,7 @@ export async function materializeHaRunTools(
     if (!instance) {
       throw new Error(`Home Assistant instance "${slug}" is not registered (or disabled) for this organization.`);
     }
+    assertPinnedToolIdentity(run, 'ha', slug, instance);
     const def = haOpDef(op);
     if (!def) throw new Error(`Unknown Home Assistant op "${op}" in "${name}".`);
     if (!haOpAllowed(instance, op)) {
