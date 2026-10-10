@@ -30,7 +30,6 @@ import {
   runOwnedEmailOperation,
 } from './resolvers.helpers.js';
 import { resolveWorkerRef } from '../../../lib/entityRef/workerRef.js';
-import { LIVE_ORG_MEMBERSHIP } from '../../../lib/auth/liveOrgMembership.js';
 
 export const sessionQueries = {
     sessions: async (
@@ -38,8 +37,7 @@ export const sessionQueries = {
       { type, repo, customerId, workerRef, limit, offset }: { type?: string; repo?: string; customerId?: string; workerRef?: string; limit?: number; offset?: number },
       ctx: Context,
     ) => {
-      // ADMIN/OWNER see all; App-keyed callers see their own sessions;
-      // users see sessions for any App in an org they belong to.
+      // Ordinary session audience intersected with bound-memory strict ownership.
       const scopeFilter = await sessionScopeFilter(ctx);
       // #974 / cor:agt:020:03: the "taken right now" / "last driven by" reads —
       // a worker's sessions, newest first, inside the caller's ordinary session
@@ -83,37 +81,11 @@ export const sessionQueries = {
     },
 
     session: async (_: unknown, { id }: { id: string }, ctx: Context) => {
-      const session = await ctx.db.session.findUnique({ where: { id }, include: SESSION_INCLUDE });
-      if (!session) return null;
-      // ADMIN/OWNER can see any session
-      if (ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER')) return session;
-      // App-keyed caller can see sessions belonging to their App
-      if (ctx.appId && session.appId === ctx.appId) return session;
-      // #929 review P1: a session attributed to the caller themself is
-      // readable by its creator regardless of App association — the CLI
-      // coding case, where appId is null. Identity-scoped, so not via
-      // impersonation (#876 class); mirrors sessionScopeFilter's self branch.
-      if (ctx.userId && session.userId === ctx.userId && !ctx.impersonation) return session;
-      // User can see sessions from Apps in any org they belong to
-      if (ctx.userId && session.appId) {
-        const app = await ctx.db.app.findUnique({
-          where: { id: session.appId },
-          select: { organizationId: true, ownerUserId: true },
-        });
-        if (app?.ownerUserId) {
-          // User-owned App: the owner themself can see its sessions.
-          // #876 class sweep: identity-scoped, so not via impersonation —
-          // sessionScopeFilter (the LIST path) was narrowed already; this
-          // single-read path has its own inline predicate.
-          if (app.ownerUserId === ctx.userId && !ctx.impersonation) return session;
-        } else if (app?.organizationId) {
-          const member = await ctx.db.orgMember.findFirst({
-            where: { organizationId: app.organizationId, userId: ctx.userId, ...LIVE_ORG_MEMBERSHIP },
-          });
-          if (member) return session;
-        }
-      }
-      return null;
+      // One predicate for point/list reads; denied and missing are both null.
+      return ctx.db.session.findFirst({
+        where: { AND: [{ id }, await sessionScopeFilter(ctx)] },
+        include: SESSION_INCLUDE,
+      });
     },
 
     usageEvents: async (

@@ -1,4 +1,6 @@
 import crypto from 'crypto';
+import { mountTeamSpecSchemaRoutes } from './api/teamSpecSchema.js';
+import { readTeamRecordKeys } from './lib/teamSpec/record.js';
 import * as Sentry from '@sentry/node';
 import { ApolloServer, type ApolloServerPlugin, type BaseContext } from '@apollo/server';
 import { expressMiddleware } from '@apollo/server/express4';
@@ -83,11 +85,14 @@ import {
   REQUEST_KEYS_HEADER,
 } from './lib/memoryUnlock.js';
 import { requestKeyStorage } from './lib/requestKeys.js';
+import { emptyActor, requestActorStorage } from './lib/requestActor.js';
 import { isEmbeddingConfigured } from './lib/embedding/index.js';
 import { getBusClient } from './lib/bus/index.js';
 import { startAppRunBusListener, startAppRunSweepLoop } from './jobs/appRuns.js';
 import { makeProdRunDeps } from './jobs/appRunDeps.js';
 import { startSchedulerLoop } from './jobs/scheduler.js';
+import { startTaskStallEvaluatorLoop } from './jobs/taskStallEvaluator.js';
+import { startTaskMatcherLoop } from './jobs/taskMatcher.js';
 import { mountWebhookRoutes } from './api/webhooks.js';
 import { mountPublicAssetRoutes } from './api/assetPublic.js';
 import { mountEmailEventRoutes } from './api/emailEvents.js';
@@ -158,6 +163,9 @@ const sentryApolloPlugin: ApolloServerPlugin<BaseContext> = {
 };
 
 export async function createServer(): Promise<Express> {
+  // AM Q13: absent leaves team record operations unavailable; an invalid
+  // configured keyring refuses boot without echoing secret values.
+  readTeamRecordKeys();
   const app = express();
 
   // Trust-proxy for spec 025-oauth-for-mcp (FR-006). Express must know
@@ -206,6 +214,7 @@ export async function createServer(): Promise<Express> {
       credentials: true,
     }),
   );
+  mountTeamSpecSchemaRoutes(app);
   // Default express.json cap is 100kb, which rejects large payloads such as
   // full-page HTML clips from the Web Clipper with 413. Raise it for
   // /graphql only — every other JSON endpoint (auth, webhooks, usage, ...)
@@ -1160,6 +1169,9 @@ export async function createServer(): Promise<Express> {
     // invisible to concurrent requests and vanish with the request's async
     // context — aborted responses included (PR-514 review, Codex P1 ×2).
     (_req, _res, next) => requestKeyStorage.run(new Map(), next),
+    // #1610: the Worker / Agent behind this request's writes, filled by
+    // resolveAuthContext from the validated session binding.
+    (_req, _res, next) => requestActorStorage.run(emptyActor(), next),
     expressMiddleware(apollo, {
       context: async ({ req }) => {
         const auth = await resolveAuthContext(req, db);
@@ -1727,16 +1739,17 @@ export async function createServer(): Promise<Express> {
   // MCP endpoint (Streamable HTTP transport)
   // ---------------------------------------------------------------------------
 
+  // #1610: each MCP request gets its own actor holder (see requestActor.ts).
   app.post('/mcp', async (req, res) => {
-    await handleMcpRequest(req, res);
+    await requestActorStorage.run(emptyActor(), () => handleMcpRequest(req, res));
   });
 
   app.get('/mcp', async (req, res) => {
-    await handleMcpRequest(req, res);
+    await requestActorStorage.run(emptyActor(), () => handleMcpRequest(req, res));
   });
 
   app.delete('/mcp', async (req, res) => {
-    await handleMcpDelete(req, res);
+    await requestActorStorage.run(emptyActor(), () => handleMcpDelete(req, res));
   });
 
   // OAuth dynamic client registration is not supported. MCP/LLM SDKs that
@@ -1807,6 +1820,20 @@ export async function createServer(): Promise<Express> {
   // nothing else.
   if (process.env.NODE_ENV !== 'test' && process.env.DISABLE_SESSION_REAPER !== 'true') {
     startSessionReaperLoop(db);
+  }
+
+  // #1706 — agent-task stall evaluator: the four stall rules, owner-chain
+  // escalation, and clearing stall marks. Idempotent per episode, so it needs
+  // no claim race across instances.
+  if (process.env.NODE_ENV !== 'test' && process.env.DISABLE_TASK_STALL_EVALUATOR !== 'true') {
+    startTaskStallEvaluatorLoop(db);
+  }
+
+  // #1707 — the matcher's sweep: records lapsed host registrations and assigns
+  // queued tasks to workers free for work. Each assignment is a guarded update
+  // under a per-worker lock, so overlapping runs never double-assign.
+  if (process.env.NODE_ENV !== 'test' && process.env.DISABLE_TASK_MATCHER !== 'true') {
+    startTaskMatcherLoop(db);
   }
 
   // PendingEdge rows retargeted to stable node ids are durable retry work.

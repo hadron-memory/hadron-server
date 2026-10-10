@@ -53,12 +53,23 @@ import { orgMutations } from './resolvers.mutation.org.js';
 import { agentMutations } from './resolvers.mutation.agent.js';
 import { workerMutations, workerQueries, workerFieldResolvers } from './resolvers.worker.js';
 import { teamRoleMutations, teamRoleQueries } from './resolvers.teamRole.js';
+import { teamSpecQueries } from './resolvers.teamSpec.js';
 import { teamChatMutations, teamChatQueries } from './resolvers.teamChat.js';
 import { teamAttentionMutations, teamAttentionQueries } from './resolvers.teamAttention.js';
 import { teamWorkMutations, teamWorkQueries } from './resolvers.teamWork.js';
+import { agentTaskMutations, agentTaskQueries, agentTaskFieldResolvers } from './resolvers.agentTask.js';
+import {
+  agentTaskAlarmMutations,
+  agentTaskAlarmQueries,
+  agentTaskAlarmFieldResolvers,
+} from './resolvers.agentTaskAlarms.js';
+import { agentTaskMatchingQueries, agentTaskMatchingFieldResolvers } from './resolvers.agentTaskMatching.js';
 import { memoryConfigMutations, memoryConfigQueries, memoryConfigFieldResolvers } from './resolvers.memoryConfig.js';
 import { memoryConfigApplyMutations } from './resolvers.memoryConfigApply.js';
 import { nodeApprovalFieldResolvers, nodeApprovalMutations, nodeApprovalQueries } from './resolvers.nodeApproval.js';
+import { nodeAttributionFieldResolvers } from './resolvers.nodeAttribution.js';
+import { commentFieldResolvers, commentMutations, commentQueries } from './resolvers.comments.js';
+import { decisionFieldResolvers, decisionMutations, decisionQueries } from './resolvers.decisions.js';
 import {
   specCorpusMintMutations,
   specCorpusMutations,
@@ -88,6 +99,12 @@ export const resolvers = {
   ...typeResolvers,
   ...impersonationTypeResolvers,
   ...workerFieldResolvers,
+  ...agentTaskFieldResolvers,
+  // #1706 — alarm wakes and availability. AgentTeamEvent already has a block
+  // in agentTaskFieldResolvers; the wakes field joins it rather than replacing it.
+  ...agentTaskAlarmFieldResolvers,
+  ...agentTaskMatchingFieldResolvers,
+  AgentTeamEvent: { ...agentTaskFieldResolvers.AgentTeamEvent, ...agentTaskAlarmFieldResolvers.AgentTeamEvent },
   ...scopeFieldResolvers,
   ...channelFieldResolvers,
   ...registerFieldResolvers,
@@ -97,8 +114,15 @@ export const resolvers = {
   Agent: { ...typeResolvers.Agent, ...registerFieldResolvers.Agent },
   // Same for Memory: the config field joins the existing type block (#1325).
   Memory: { ...typeResolvers.Memory, ...memoryConfigFieldResolvers.Memory },
-  // #1591: approval status joins the existing Node block.
-  Node: { ...typeResolvers.Node, ...nodeApprovalFieldResolvers.Node },
+  // #1591: approval status joins the existing Node block; #1610 the
+  // Worker / Agent attribution with it.
+  Node: { ...typeResolvers.Node, ...nodeApprovalFieldResolvers.Node, ...nodeAttributionFieldResolvers.Node, ...commentFieldResolvers.Node },
+  Comment: commentFieldResolvers.Comment,
+  Decision: decisionFieldResolvers.Decision,
+  DecisionLog: decisionFieldResolvers.DecisionLog,
+  UnresolvedFeedback: commentFieldResolvers.UnresolvedFeedback,
+  GraphNode: commentFieldResolvers.GraphNode,
+  NodeRevision: { ...typeResolvers.NodeRevision, ...nodeAttributionFieldResolvers.NodeRevision },
   NodeApproval: nodeApprovalFieldResolvers.NodeApproval,
   NodeMintStatus: nodeApprovalFieldResolvers.NodeMintStatus,
   MemoryConfig: memoryConfigFieldResolvers.MemoryConfig,
@@ -109,6 +133,8 @@ export const resolvers = {
     ...nodeQueries,
     ...specCorpusQueries,
     ...nodeApprovalQueries,
+    ...commentQueries,
+    ...decisionQueries,
     ...skillQueries,
     ...objectQueries,
     ...edgeQueries,
@@ -121,6 +147,9 @@ export const resolvers = {
     ...teamChatQueries,
     ...teamAttentionQueries,
     ...teamWorkQueries,
+    ...agentTaskQueries,
+    ...agentTaskAlarmQueries,
+    ...agentTaskMatchingQueries,
     ...memoryConfigQueries,
     ...memoryConfigTemplateQueries,
     ...scopeQueries,
@@ -129,6 +158,7 @@ export const resolvers = {
     ...readStateQueries,
     ...workerQueries,
     ...teamRoleQueries,
+    ...teamSpecQueries,
     ...sessionQueries,
     ...slackQueries,
     ...mcpQueries,
@@ -162,6 +192,8 @@ export const resolvers = {
     ...teamChatMutations,
     ...teamAttentionMutations,
     ...teamWorkMutations,
+    ...agentTaskMutations,
+    ...agentTaskAlarmMutations,
     ...memoryConfigMutations,
     ...memoryConfigTemplateMutations,
     ...memoryConfigApplyMutations,
@@ -169,6 +201,8 @@ export const resolvers = {
     ...specCorpusRenumberMutations,
     ...specCorpusMintMutations,
     ...nodeApprovalMutations,
+    ...commentMutations,
+    ...decisionMutations,
     ...scopeMutations,
     ...channelMutations,
     ...registerMutations,

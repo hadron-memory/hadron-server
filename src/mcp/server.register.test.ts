@@ -303,10 +303,27 @@ describe('team-chat monitor (#1265)', () => {
     await db.session.update({ where: { id: sessionId }, data: { startedAt: staleAt, updatedAt: staleAt } });
     await db.usageEvent.deleteMany({ where: { sessionId } });
 
+    // #1617 B: the caller holds Iris and nobody else drives her, so her lapsed
+    // session is RESUMABLE and stays monitored — a quiet night must not make a
+    // worker unwakeable. Observing still resumes nothing.
+    expect(await asAdmin.callToolText('hadron_team_chat_read', { monitor: true, session: sessionId })).toContain(
+      '1 live Worker monitored',
+    );
+    expect((await db.session.findUniqueOrThrow({ where: { id: sessionId }, select: { updatedAt: true } })).updatedAt?.getTime()).toBe(staleAt.getTime());
+  });
+
+  it('#1617 B: a stale session on a worker the caller does NOT hold is not monitored', async () => {
+    const asAdmin = server(admin.id);
+    const started = await asAdmin.callToolText('hadron_start_session', { description: 'stale stint', workerRef: 'Iris' });
+    const sessionId = started.match(/Session started: (\S+)/)![1];
+    const staleAt = new Date(Date.now() - idleWindowMsFor('DEVELOPER') - 60_000);
+    await db.session.update({ where: { id: sessionId }, data: { startedAt: staleAt, updatedAt: staleAt } });
+    await db.usageEvent.deleteMany({ where: { sessionId } });
+    await db.worker.update({ where: { id: worker.id }, data: { heldByUserId: null, heldAt: null } });
+
     expect(await asAdmin.callToolText('hadron_team_chat_read', { monitor: true, session: sessionId })).toContain(
       'No live Worker sessions of yours',
     );
-    expect((await db.session.findUniqueOrThrow({ where: { id: sessionId }, select: { updatedAt: true } })).updatedAt?.getTime()).toBe(staleAt.getTime());
   });
 
   it('does not attribute monitor transcript reads to the transport-bound Worker session', async () => {

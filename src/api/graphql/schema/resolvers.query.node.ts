@@ -1,4 +1,7 @@
 // nodeQueries — extracted from resolvers.ts Query (split step 3). No behavior change.
+import { contentScopeWhere, effectiveContentScope, type ContentScope } from '../../../lib/comments/scope.js';
+import { isConcealedCommentHistory } from './resolvers.comments.js';
+import { COMMENT_NODE_TYPE } from '../../../lib/comments/index.js';
 import {
   renderNodeExport,
   type NodeExportFormat,
@@ -96,6 +99,8 @@ export interface FindNodesArgs {
     memoryIds?: string[] | null;
     memoryClasses?: string[] | null;
     nodeType?: string | null;
+    /** #1608 — CONTENT (default) | COMMENTS | ALL (cor:dmo:110:08). */
+    contentScope?: ContentScope | null;
     objectType?: string | null;
     tags?: string[] | null;
     isRunnable?: boolean | null;
@@ -325,6 +330,8 @@ export const nodeQueries = {
             loadMemoryUrn(ctx, memoryId).then((u: string | null) => u ?? memoryId),
           compileTemplate: (content: string, data: Record<string, string> | null, memoryId: string) =>
             compileTemplate(content, data, memoryId, ctx.db, {}),
+          // visibleEdges was already filtered through this caller's read gate.
+          includeTarget: target => !!target,
           onTargetInlined: (target) => inlined.push(target),
         },
       );
@@ -598,6 +605,7 @@ export const nodeQueries = {
             select: { memoryId: true, nodeId: true },
           });
           if (!rev) return null;
+          if (await isConcealedCommentHistory(ctx, rev.nodeId)) return null; // #1663
           let memoryId = rev.memoryId;
           if (!memoryId) {
             const node = await ctx.db.node.findUnique({
@@ -1052,6 +1060,8 @@ export const nodeQueries = {
       // Structured node-attribute filters (cor:api:090:02), AND-combined. Applied
       // to BOTH the no-query list path and the ranked-query path (via re-fetch),
       // so query results respect them exactly like the list does.
+      const contentScope = effectiveContentScope(f);
+      const scopeWhere = contentScopeWhere(contentScope);
       const structuredWhere: Record<string, unknown> = {
         ...(f.includeDeleted ? {} : { deletedAt: null }),
         // Explicit nodeType wins; otherwise exclude system-type nodes (orthogonal
@@ -1078,6 +1088,13 @@ export const nodeQueries = {
           : {}),
         ...approvalStatePrismaWhere(f.approvalState, ctx.db),
         ...(f.minted != null ? { mintedAt: f.minted ? { not: null } : null } : {}),
+        // #1607 (cor:dmo:110:06) — approval and mint status sets never contain
+        // comments; #1608 (cor:dmo:110:08) — content, comments or both, CONTENT
+        // by default. Both ride AND so neither clobbers the nodeType key above.
+        AND: [
+          ...(f.approvalState != null || f.minted != null ? [{ nodeType: { not: COMMENT_NODE_TYPE } }] : []),
+          ...(scopeWhere ? [scopeWhere] : []),
+        ],
       };
       const nodeInclude = {
         memory: true,
@@ -1103,6 +1120,7 @@ export const nodeQueries = {
         where: f.where ?? null,
         approvalState: f.approvalState ?? null,
         minted: f.minted ?? null,
+        contentScope,
       };
 
       // #1061 — one `read` per node this query hands back, across every branch
@@ -1305,8 +1323,11 @@ export const nodeQueries = {
             // never out of scope: re-assert it here, like every other hydration
             // in findNodes (#1345 review) — expandWithNeighbors scoped them in a
             // separate query.
+            // #1608 — neighbours stay in the content scope too: a comment's
+            // governed edge must not pull it into a content search, or its
+            // target into a comments-only one (cor:dmo:110:08).
             const nRows = await ctx.db.node.findMany({
-              where: { id: { in: neighbourIds }, memoryId: { in: scopeIds }, deletedAt: null },
+              where: { id: { in: neighbourIds }, memoryId: { in: scopeIds }, deletedAt: null, ...(scopeWhere ? { AND: [scopeWhere] } : {}) },
               include: nodeInclude,
             });
             await decryptNodesBatch(ctx.db, nRows);
@@ -1365,7 +1386,7 @@ export const nodeQueries = {
             ctx.db, pageRows.map((n) => n.id), expandDepth, { memoryIds: scopeIds },
           )).filter((id) => !shown.has(id));
           if (neighbourIds.length > 0) {
-            const nRows = await ctx.db.node.findMany({ where: { id: { in: neighbourIds }, memoryId: { in: scopeIds }, deletedAt: null }, include: nodeInclude });
+            const nRows = await ctx.db.node.findMany({ where: { id: { in: neighbourIds }, memoryId: { in: scopeIds }, deletedAt: null, ...(scopeWhere ? { AND: [scopeWhere] } : {}) }, include: nodeInclude }); // #1608
             await decryptNodesBatch(ctx.db, nRows);
             const nById = new Map(nRows.map((n) => [n.id, n]));
             for (const id of neighbourIds) { const n = nById.get(id); if (n) hits.push({ node: n, score: null, vector: null }); }
@@ -1541,7 +1562,7 @@ export const nodeQueries = {
         // review, Codex): filter before paging so a floor drops sub-threshold
         // chunks rather than silently returning them.
         const rawChunks = await widenVectorWindow((limit, onWindow) =>
-          provider.vectorSearchChunks({ db: ctx.db, queryEmbedding: qvec, memoryIds: indexedIds, limit, onWindow }),
+          provider.vectorSearchChunks({ db: ctx.db, queryEmbedding: qvec, memoryIds: indexedIds, limit, onWindow, contentScope }),
         );
         const scoredChunks = scoreFloor == null ? rawChunks : rawChunks.filter((c) => c.score >= scoreFloor);
         const candidateParentIds = [...new Set(scoredChunks.map((c) => c.nodeId))];
@@ -1609,7 +1630,7 @@ export const nodeQueries = {
       }
 
       const vecHits = await widenVectorWindow((limit, onWindow) =>
-        provider.vectorSearch({ db: ctx.db, queryEmbedding: qvec, memoryIds: indexedIds, limit, onWindow }),
+        provider.vectorSearch({ db: ctx.db, queryEmbedding: qvec, memoryIds: indexedIds, limit, onWindow, contentScope }),
       );
 
       if (effectiveMode === 'vector') {
@@ -2017,6 +2038,8 @@ export const nodeQueries = {
       // No read on the current memory ⇒ [] (no existence disclosure, matching
       // memoryUsageSummary).
       if (!canRead(node.memoryId)) return [];
+      // #1663 — a comment stub's history is for memory managers.
+      if (await isConcealedCommentHistory(ctx, nodeId)) return [];
 
       const revisions = await ctx.db.nodeRevision.findMany({
         where: { nodeId },
@@ -2055,6 +2078,7 @@ export const nodeQueries = {
       const canRead = (memId: string) => accessible === null || accessible.includes(memId);
       if (!canRead(node.memoryId)) return null;
       if (!canRead(revision.memoryId ?? node.memoryId)) return null;
+      if (await isConcealedCommentHistory(ctx, revision.nodeId)) return null; // #1663
       return (await decryptReadableRevisions(ctx.db, [revision], node.memoryId))[0]!;
     },
 
@@ -2269,6 +2293,13 @@ export const nodeQueries = {
             : {}),
           ...approvalStatePrismaWhere(f.approvalState, ctx.db),
           ...(f.minted != null ? { mintedAt: f.minted ? { not: null } : null } : {}),
+          // #1607 (cor:dmo:110:06) — approval and mint status sets never contain comments.
+          // #1607 + #1608 — no comments in status sets; content, comments or
+          // both by contentScope (CONTENT by default, cor:dmo:110:08).
+          AND: [
+            ...(f.approvalState != null || f.minted != null ? [{ nodeType: { not: COMMENT_NODE_TYPE } }] : []),
+            ...((sw) => (sw ? [sw] : []))(contentScopeWhere(effectiveContentScope(f))),
+          ],
         },
         orderBy: { loc: 'asc' },
         take: limit ?? 500,

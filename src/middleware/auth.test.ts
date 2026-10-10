@@ -199,6 +199,23 @@ describe('resolveAuthContext', () => {
       const ctx = await resolveAuthContext(req, db);
       expect(ctx.appId).toBe(appId);
       expect(ctx.sessionId).toBe('sess-1');
+      expect(ctx.sessionBindingRefused).toBeUndefined();
+    });
+
+    it('#1661 review (Rook P2-1, DY-5): a NO-expiry session binds while recent and stops binding once dormant', async () => {
+      const { appId, rawKey } = await createAppWithKey();
+      await db.app.update({ where: { id: appId }, data: { sessionDormancyDays: 30 } });
+      const at = (days: number) => new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+      await db.session.create({ data: { id: 'sess-recent', appId, type: 'CHATBOT', startedAt: at(10), updatedAt: at(10) } });
+      await db.session.create({ data: { id: 'sess-forgotten', appId, type: 'CHATBOT', startedAt: at(400), updatedAt: at(400) } });
+      // A hard expiry, not dormancy, bounds a session that has one.
+      await db.session.create({ data: { id: 'sess-bounded', appId, type: 'CHATBOT', startedAt: at(400), updatedAt: at(400), expiresAt: new Date(Date.now() + 60000) } });
+      const bind = async (id: string) => (await resolveAuthContext(
+        { headers: { authorization: `Bearer ${rawKey}`, 'x-hadron-session': id } } as unknown as Request, db,
+      )).sessionId;
+      expect(await bind('sess-recent')).toBe('sess-recent');
+      expect(await bind('sess-forgotten')).toBeUndefined();
+      expect(await bind('sess-bounded')).toBe('sess-bounded');
     });
 
     it('ignores expired sessions', async () => {
@@ -229,6 +246,10 @@ describe('resolveAuthContext', () => {
       const ctx = await resolveAuthContext(req, db);
       expect(ctx.appId).toBe(appId);
       expect(ctx.sessionId).toBeUndefined();
+      // #1705: the request still proceeds, but it is marked as having named a
+      // session it cannot use, so agent-task writes refuse instead of acting
+      // as the bare credential.
+      expect(ctx.sessionBindingRefused).toBe(true);
     });
 
     it('refuses to bind a session belonging to another app', async () => {
@@ -265,6 +286,7 @@ describe('resolveAuthContext', () => {
       } as unknown as Request;
       const ctx = await resolveAuthContext(req, db);
       expect(ctx.sessionId).toBeUndefined();
+      expect(ctx.sessionBindingRefused).toBe(true);
     });
 
     /**

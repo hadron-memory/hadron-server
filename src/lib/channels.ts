@@ -37,6 +37,7 @@
  * its own (#1194 is this change's draft ancestor).
  */
 
+import { sessionKeyReleasedHint } from './sessionKeyCache.js';
 import { GraphQLError } from 'graphql';
 import type { Prisma, PrismaClient } from '../generated/prisma/index.js';
 import type { InputJsonValue } from '../generated/prisma/runtime/library.js';
@@ -72,7 +73,7 @@ function translateSessionExpired<T>(memoryId: string, fn: () => T): T {
   } catch (e) {
     if (e instanceof Error && e.message.startsWith('SESSION_EXPIRED')) {
       throw new GraphQLError(
-        `SESSION_EXPIRED: memory ${memoryId} is encrypted but no active session key is available.`,
+        `SESSION_EXPIRED: memory ${memoryId} is encrypted but no active session key is available. ${sessionKeyReleasedHint()}`,
         { extensions: { code: 'SESSION_EXPIRED', memoryId } },
       );
     }

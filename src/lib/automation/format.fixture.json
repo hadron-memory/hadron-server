@@ -1,0 +1,46 @@
+{
+  "description": "Compiled automation v1 conformance vector. Canonical UTF-8 JSON is RFC 8785; SHA-256 includes hadron-automation-v1 and LF. Provenance is hashed.",
+  "cases": [
+    {
+      "name": "minimal-version",
+      "value": {
+        "app": "app-id",
+        "edges": [],
+        "entry": "entry",
+        "environment": {
+          "ai": {
+            "configId": "config-id",
+            "endpoint": null,
+            "model": "model",
+            "provider": "anthropic",
+            "tier": 1
+          },
+          "budgets": {
+            "actions": 5,
+            "timeoutMs": 1000,
+            "tokens": 100
+          },
+          "policy": {
+            "allow": []
+          },
+          "tools": []
+        },
+        "format": "hadron-automation-v1",
+        "nodes": {
+          "entry": {
+            "abstract": null,
+            "content": "hello",
+            "flow": {},
+            "source": {
+              "nodeId": "source-id",
+              "revision": 12
+            },
+            "title": "Title"
+          }
+        }
+      },
+      "canonical": "{\"app\":\"app-id\",\"edges\":[],\"entry\":\"entry\",\"environment\":{\"ai\":{\"configId\":\"config-id\",\"endpoint\":null,\"model\":\"model\",\"provider\":\"anthropic\",\"tier\":1},\"budgets\":{\"actions\":5,\"timeoutMs\":1000,\"tokens\":100},\"policy\":{\"allow\":[]},\"tools\":[]},\"format\":\"hadron-automation-v1\",\"nodes\":{\"entry\":{\"abstract\":null,\"content\":\"hello\",\"flow\":{},\"source\":{\"nodeId\":\"source-id\",\"revision\":12},\"title\":\"Title\"}}}",
+      "hash": "d2e6bf3098a418d83d55f05ea95440d67fbdd7dd5101522d4ae896210512fd01"
+    }
+  ]
+}

@@ -11,6 +11,7 @@ import { describe, it, expect, afterEach } from 'vitest';
 import {
   isSessionLive,
   idleWindowMsFor,
+  sessionLapsesAt,
   recentlyTouchedFilter,
   OPEN_SESSION_SCAN_CAP,
   DEFAULT_SESSION_IDLE_WINDOW_MS,
@@ -169,5 +170,26 @@ describe('every open-session scan pairs the filter with the cap (#1120 review)',
         ).toContain('recentlyTouchedFilter');
       }
     }
+  });
+});
+
+describe('#1617 — sessionLapsesAt, the deadline isSessionLive is defined by', () => {
+  const open = (at: { startedAt: Date; updatedAt?: Date | null }) => ({ type: 'DEVELOPER' as const, ...at });
+
+  it('is the activity instant plus the type window, and null once ended', () => {
+    expect(sessionLapsesAt(open({ startedAt: ago(30 * HOUR), updatedAt: ago(2 * HOUR) }), null))
+      .toEqual(new Date(ago(2 * HOUR).getTime() + DEFAULT_SESSION_IDLE_WINDOW_MS));
+    process.env.SESSION_IDLE_WINDOW_DEVELOPER_MS = String(3 * HOUR);
+    expect(sessionLapsesAt(open({ startedAt: ago(5 * HOUR) }), ago(1 * HOUR)))
+      .toEqual(new Date(ago(1 * HOUR).getTime() + 3 * HOUR));
+    expect(sessionLapsesAt({ ...open({ startedAt: ago(1 * HOUR) }), endedAt: ago(0.5 * HOUR) }, null)).toBeNull();
+  });
+
+  it('agrees with isSessionLive on both sides of the boundary', () => {
+    const s = open({ startedAt: ago(48 * HOUR), updatedAt: ago(DEFAULT_SESSION_IDLE_WINDOW_MS) });
+    const lapsesAt = sessionLapsesAt(s, null)!;
+    expect(lapsesAt).toEqual(NOW);
+    expect(isSessionLive(s, null, NOW)).toBe(true); // the boundary instant is still live
+    expect(isSessionLive(s, null, new Date(NOW.getTime() + 1))).toBe(false);
   });
 });

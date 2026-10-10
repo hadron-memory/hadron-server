@@ -53,6 +53,8 @@
  * shape. `source` MUST be the full live node row (all revisioned fields loaded).
  */
 
+import { COMMENT_NODE_TYPE, COMMENTABLE_CLASSES, commentError, commentGovernedError } from './comments/index.js';
+import { decisionContainedError, isDecisionFamilyRole, refuseUnderDecisionLog } from './decisions/index.js';
 import { deriveEdgeLoc } from './edgeLoc.js';
 import { lockAncestorsForCreate, lockNodeForDelete } from './nodeSubtreeLock.js';
 import type { Prisma } from '../generated/prisma/index.js';
@@ -428,6 +430,40 @@ export async function moveNodeSubtree(
     if (minted.length > 0) throw new SubtreeMoveMintedError(srcMemoryId, minted);
   }
 
+  // #1606 — a comment never moves on its own (cor:dmo:110:04): it follows its
+  // target. A commented target crossing memories carries its threads in this
+  // same transaction (cor:dmo:110:02), and is refused when the destination
+  // cannot hold comments.
+  if (subtree.some((n) => n.nodeType === COMMENT_NODE_TYPE)) throw commentGovernedError('move', 'edits');
+  // #1641 §3.2 — a decision's loc IS its code, so neither a decision nor a log
+  // (nor an ancestor of one) moves; and nothing moves into a log's code space.
+  const decisionsMoved = subtree.filter((n) => isDecisionFamilyRole(n.role));
+  if (decisionsMoved.length > 0) throw decisionContainedError('Moving this node', decisionsMoved.map((n) => n.loc));
+  await refuseUnderDecisionLog(tx, destMemoryId, destLoc, 'Moving this node');
+  const carriedComments = crossMemory
+    ? await tx.commentMeta.findMany({
+      where: { targetNodeId: { in: [...movedIds] } },
+      select: { nodeId: true, targetNodeId: true, node: { select: { deletedAt: true } } },
+    })
+    : [];
+  // Every thread moves (history follows its target), but only LIVE comments
+  // need a commentable destination: a deleted thread is gone from every check
+  // (cor:dmo:110:05), which is what lets an admin's thread delete clear a node
+  // for a move into a private or system memory (110:02). #1663 review P2.
+  const liveCarried = carriedComments.filter((c) => c.node.deletedAt == null);
+  if (liveCarried.length > 0) {
+    const dest = await tx.memory.findUniqueOrThrow({ where: { id: destMemoryId }, select: { class: true } });
+    if (!COMMENTABLE_CLASSES.has(dest.class)) {
+      const perTarget = new Map<string, number>();
+      for (const c of liveCarried) perTarget.set(c.targetNodeId, (perTarget.get(c.targetNodeId) ?? 0) + 1);
+      throw commentError(
+        'COMMENT_MOVE_UNCOMMENTABLE',
+        `Cannot move ${describeMoved(source.loc, subtree.length)} into a ${dest.class} memory: it has comment threads. An admin of the memory deletes them first.`,
+        { class: dest.class, nodes: subtree.filter((n) => perTarget.has(n.id)).map((n) => ({ nodeId: n.id, loc: n.loc, comments: perTarget.get(n.id)! })) },
+      );
+    }
+  }
+
   // Cross-memory pre-checks — crossing a memory boundary must respect the
   // DESTINATION's encryption + schema (the write-path invariants), so validate
   // BEFORE any write (a throw rolls the whole tx back). destMem also carries
@@ -595,6 +631,13 @@ export async function moveNodeSubtree(
         revisionContentHash: revisionStateHashRefreshMarker(),
       },
     });
+  }
+
+  if (carriedComments.length > 0) {
+    // The threads follow (their locs are id-derived, so they cannot collide).
+    const ids = carriedComments.map((c) => c.nodeId);
+    await tx.node.updateMany({ where: { id: { in: ids } }, data: { memoryId: destMemoryId } });
+    await tx.edge.updateMany({ where: { sourceId: { in: ids }, governedKind: { not: null } }, data: { memoryId: destMemoryId } });
   }
 
   if (!crossMemory) {

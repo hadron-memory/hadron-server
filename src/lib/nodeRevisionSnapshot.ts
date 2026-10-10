@@ -17,10 +17,12 @@
  * captured as `revLabel` — it previously squatted in `editedBy`.
  */
 
+import { currentActor } from './requestActor.js';
 import { Prisma, type NodeAuthorshipKind } from '../generated/prisma/index.js';
 import type { PrismaClient } from '../generated/prisma/index.js';
 import { generateId } from './id.js';
 import { clearNodeAuthorship } from './nodeAuthorship.js';
+import { isDecisionFamilyRole } from './decisions/index.js';
 
 /**
  * The curated subset of Node fields every snapshot captures. On encrypted
@@ -62,6 +64,10 @@ export interface SnapshotEditor {
   userId?: string | null;
   /** Fallback principal info when no user → NodeRevision.editedByInfo. */
   info?: string | null;
+  /** #1610 — the Worker behind the edit → NodeRevision.editedByWorkerId. */
+  workerId?: string | null;
+  /** #1610 — the Agent behind the edit → NodeRevision.editedByAgentId. */
+  agentId?: string | null;
 }
 
 /**
@@ -76,11 +82,16 @@ export function editorFromAuth(auth: {
   clientId?: string | null;
   appId?: string | null;
 }): SnapshotEditor {
+  // #1610: the Worker / Agent come from the request's validated binding
+  // (requestActor.ts), never from `auth` fields a caller could shape.
+  const actor = currentActor();
   return {
     userId: auth.userId ?? null,
     info: auth.userId
       ? null
       : auth.clientId ?? (auth.appId ? `app:${auth.appId}` : null),
+    workerId: actor.workerId,
+    agentId: actor.agentId,
   };
 }
 
@@ -138,6 +149,8 @@ export function buildNodeRevisionSnapshot(
     authoredAt: node.authoredAt,
     editedBy: editor.userId ?? null,
     editedByInfo: editor.userId ? null : editor.info ?? null,
+    editedByWorkerId: editor.workerId ?? null,
+    editedByAgentId: editor.agentId ?? null,
     revLabel: opts?.revLabel != null ? opts.revLabel.slice(0, REV_LABEL_MAX_LEN) : null,
     changes: opts?.changes ?? [],
     createdBy: editor.userId ?? editor.info ?? null,
@@ -328,6 +341,13 @@ export async function createNodeRevision(
   // to scope to, so we skip pruning for it.
   const memoryId = data.memoryId;
   if (!memoryId) return;
+  // #1641 §3.2 — a decision's history is its audit trail, and its approvals
+  // and signatures are revision-keyed: never pruned. The snapshot carries the
+  // role at capture; a decision's role never changes.
+  const role = data.role !== undefined
+    ? data.role
+    : (await db.node.findUnique({ where: { id: data.nodeId }, select: { role: true } }))?.role;
+  if (isDecisionFamilyRole(role)) return;
 
   const max =
     (
@@ -413,6 +433,16 @@ export const TRACKED_NODE_FIELDS = [
   'authoredByHuman',
   'authoredAt',
 ] as const satisfies readonly (keyof SnapshotSourceNode)[];
+
+/**
+ * #1610 — the node fields whose write makes an AUTHORED edit, which stamps
+ * `updatedByWorkerId` / `updatedByAgentId` (src/integrations/db/client.ts).
+ * TRACKED_NODE_FIELDS minus the authorship stamps: the lazy reconcile clears
+ * those on a READ, and a reader must never become the node's editor.
+ */
+export const ATTRIBUTED_NODE_FIELDS: ReadonlySet<string> = new Set(
+  TRACKED_NODE_FIELDS.filter((field) => field !== 'authorshipKind' && !field.startsWith('authored')),
+);
 
 /**
  * Key-order-insensitive JSON encoding: Postgres JSONB does not preserve

@@ -558,3 +558,123 @@ describe('mergeMemories — abstract-cap refusal (#1117)', () => {
     expect(err.extensions?.currentLength).toBeUndefined();
   });
 });
+
+// ───── #1684 — a target tombstone at a source loc ─────
+
+describe('mergeMemories — tombstone-held target loc (#1684)', () => {
+  async function caught(p: Promise<unknown>): Promise<GraphQLError> {
+    let err: unknown;
+    try {
+      await p;
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(GraphQLError);
+    return err as GraphQLError;
+  }
+
+  it('refuses with MERGE_TARGET_LOC_TOMBSTONED naming the loc, before anything relocates', async () => {
+    const tomb = await makeNode(tgtMem.id, 'held', { content: 'deleted target', deletedAt: new Date() });
+    const colliding = await makeNode(srcMem.id, 'held', { content: 'source' });
+    const bystander = await makeNode(srcMem.id, 'free', { content: 'would relocate' });
+
+    const err = await caught(merge({ source: srcMem.id, target: tgtMem.id }));
+    expect(err.extensions).toMatchObject({
+      code: 'MERGE_TARGET_LOC_TOMBSTONED', memoryId: tgtMem.id, loc: 'held', locs: ['held'], count: 1,
+    });
+    expect(err.message).toContain('loc "held"');
+    expect(err.message).not.toMatch(/Unique constraint/);
+
+    // Refused up front: no batch committed, the tombstone is untouched.
+    expect((await db.node.findUniqueOrThrow({ where: { id: colliding.id } })).memoryId).toBe(srcMem.id);
+    expect((await db.node.findUniqueOrThrow({ where: { id: bystander.id } })).memoryId).toBe(srcMem.id);
+    expect(await db.node.findUniqueOrThrow({ where: { id: tomb.id } })).toMatchObject({
+      memoryId: tgtMem.id, content: 'deleted target',
+    });
+    expect((await db.node.findUniqueOrThrow({ where: { id: tomb.id } })).deletedAt).not.toBeNull();
+  });
+
+  it('names every tombstoned loc across classification pages', async () => {
+    for (const loc of ['t1', 't2', 't3']) {
+      await makeNode(tgtMem.id, loc, { deletedAt: new Date() });
+      await makeNode(srcMem.id, loc);
+    }
+    await makeNode(srcMem.id, 'free');
+    const err = await caught(
+      mergeMemoryGraph(db, {
+        sourceMemoryId: srcMem.id,
+        targetMemoryId: tgtMem.id,
+        fields: new Set(['CONTENT']),
+        deleteSourceMem: false,
+        editor: { userId: admin.id },
+        classifyPageSize: 1,
+      }),
+    );
+    expect(err.extensions).toMatchObject({ code: 'MERGE_TARGET_LOC_TOMBSTONED', locs: ['t1', 't2', 't3'], count: 3 });
+    expect(await db.node.count({ where: { memoryId: srcMem.id, deletedAt: null } })).toBe(5); // root + 4
+  });
+
+  it('a hard-deleted target node frees the address: the merge relocates', async () => {
+    const gone = await makeNode(tgtMem.id, 'held');
+    await db.node.delete({ where: { id: gone.id } });
+    const n = await makeNode(srcMem.id, 'held', { content: 'source' });
+
+    await merge({ source: srcMem.id, target: tgtMem.id });
+    expect(await db.node.findUniqueOrThrow({ where: { id: n.id } })).toMatchObject({
+      memoryId: tgtMem.id, loc: 'held',
+    });
+  });
+
+  it('a tombstone that appears after an EARLIER batch committed refuses its own batch; the committed one stays (resumable, not atomic)', async () => {
+    // Ids that page first, one per page and batch.
+    const first = await db.node.create({ data: { id: `${'0'.repeat(31)}1`, memoryId: srcMem.id, loc: 'first', name: 'first' } });
+    const second = await db.node.create({ data: { id: `${'0'.repeat(31)}2`, memoryId: srcMem.id, loc: 'second', name: 'second' } });
+    const real = db.memory.findUnique.bind(db.memory);
+    let planted = false;
+    const spy = vi.spyOn(db.memory, 'findUnique').mockImplementation((async (args: { select?: { schema?: boolean } }) => {
+      // Plant at `second` once `first`'s batch has committed.
+      if (!planted && args?.select?.schema && (await db.node.findUniqueOrThrow({ where: { id: first.id } })).memoryId === tgtMem.id) {
+        planted = true;
+        await makeNode(tgtMem.id, 'second', { deletedAt: new Date() });
+      }
+      return real(args as never);
+    }) as never);
+    try {
+      const err = await caught(
+        mergeMemoryGraph(db, {
+          sourceMemoryId: srcMem.id, targetMemoryId: tgtMem.id, fields: new Set(['CONTENT']),
+          deleteSourceMem: false, editor: { userId: admin.id }, batchSize: 1, classifyPageSize: 1,
+        }),
+      );
+      expect(planted).toBe(true);
+      expect(err.extensions).toMatchObject({ code: 'MERGE_TARGET_LOC_TOMBSTONED', loc: 'second' });
+    } finally {
+      spy.mockRestore();
+    }
+    expect((await db.node.findUniqueOrThrow({ where: { id: first.id } })).memoryId).toBe(tgtMem.id);
+    expect((await db.node.findUniqueOrThrow({ where: { id: second.id } })).memoryId).toBe(srcMem.id);
+  });
+
+  it('a tombstone that appears after classification is refused by the relocate batch, not a raw P2002', async () => {
+    const n = await makeNode(srcMem.id, 'late', { content: 'source' });
+    // The relocate page re-reads the target schema between classification and
+    // its transaction; plant the tombstone there, after the preflight passed.
+    const real = db.memory.findUnique.bind(db.memory);
+    let planted = false;
+    const spy = vi.spyOn(db.memory, 'findUnique').mockImplementation((async (args: { select?: { schema?: boolean } }) => {
+      if (!planted && args?.select?.schema) {
+        planted = true;
+        await makeNode(tgtMem.id, 'late', { deletedAt: new Date() });
+      }
+      return real(args as never);
+    }) as never);
+    try {
+      const err = await caught(merge({ source: srcMem.id, target: tgtMem.id }));
+      expect(planted).toBe(true);
+      expect(err.extensions).toMatchObject({ code: 'MERGE_TARGET_LOC_TOMBSTONED', loc: 'late' });
+    } finally {
+      spy.mockRestore();
+    }
+    expect((await db.node.findUniqueOrThrow({ where: { id: n.id } })).memoryId).toBe(srcMem.id);
+  });
+});

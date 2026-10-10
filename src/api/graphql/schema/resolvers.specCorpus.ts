@@ -30,6 +30,9 @@ import { pendingEdgeStableTargetId } from '../../../lib/pendingEdgePromotion.js'
 import { MemoryNotFoundError } from '../../../lib/asset/gate.js';
 import { editorFromAuth, ensureCurrentNodeRevisionInTransaction } from '../../../lib/nodeRevisionSnapshot.js';
 import { mayMintNodes } from './resolvers.nodeApproval.js';
+import { COMMENT_NODE_TYPE } from '../../../lib/comments/index.js';
+import { NOT_DECISION_FAMILY_WHERE } from '../../../lib/decisions/index.js';
+import { unresolvedFeedbackOf, type UnresolvedFeedbackRow } from '../../../lib/comments/summary.js';
 import { computeApprovalHash } from '../../../lib/approvalHash.js';
 import { SubtreeMoveMintedError } from '../../../lib/nodeSubtreeMove.js';
 import { InvalidLocError, validateLoc } from '../../../lib/validateLoc.js';
@@ -1120,6 +1123,8 @@ type MintReport = {
   mintedCount: number;
   /** #1591 — the locs this call minted, or would mint on a dry run, by loc. */
   mintLocs: string[];
+  /** #1607 — nodes in scope with open discussion: a warning, never a blocker (cor:dmo:110:07). */
+  unresolvedFeedback: UnresolvedFeedbackRow[];
 };
 
 /** How many blockers a refusal carries in its error extensions (the dry run has them all). */
@@ -1207,8 +1212,12 @@ async function mintMemoryNodes(
     await concealUnreadableDenial(txCtx, id, memoryRef, () => mayMintNodes(txCtx, id));
     // Re-reads encryption under the lock just taken.
     const corpus = await loadScannableCorpus(txCtx, id);
+    // #1607 (cor:dmo:110:06, 120:06) — comments are outside minting entirely:
+    // not in scope, not linted, never a blocker, never stamped. #1641 — nor
+    // decisions and their logs: a decision's evidence is its deciders'
+    // approval or signature, never a corpus mint.
     const nodes = await tx.node.findMany({
-      where: { memoryId: id, deletedAt: null },
+      where: { memoryId: id, deletedAt: null, nodeType: { not: COMMENT_NODE_TYPE }, AND: [NOT_DECISION_FAMILY_WHERE] },
       orderBy: { loc: 'asc' },
       select: {
         id: true, loc: true, nodeType: true, tags: true, role: true, isPlaceholder: true, revSeq: true,
@@ -1323,6 +1332,7 @@ async function mintMemoryNodes(
       memoryId: id, dryRun, minted: false, blockers,
       staleAbstracts, staleAbstractsBlock: STALE_ABSTRACT_BLOCKS_MINT, openQuestions,
       mintedCount: 0, mintLocs,
+      unresolvedFeedback: (await unresolvedFeedbackOf(tx, inScope)).map((f) => ({ ...f, memoryId: id })),
     };
     if (dryRun) return report;
     if (blockers.length > 0) {

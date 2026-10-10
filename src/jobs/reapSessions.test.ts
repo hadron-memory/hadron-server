@@ -55,7 +55,7 @@ async function seedSession(over: {
 /** Attribute a usage event to a session at a given instant. */
 async function seedUsage(sessionId: string, createdAt: Date) {
   return db.usageEvent.create({
-    data: { id: generateId(), type: 'write', sessionId, createdAt },
+    data: { countsAsActivity: true, id: generateId(), type: 'write', sessionId, createdAt },
   });
 }
 

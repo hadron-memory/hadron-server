@@ -765,6 +765,24 @@ describe('syncGraphFromGithub', () => {
     expect(history[1]!.description).toBe('v1');
   });
 
+  it('runs as the system inside a worker request: node and revision both name no worker or agent (#1658 review)', async () => {
+    const { runAsActor } = await import('../../lib/requestActor.js');
+    const actor = { workerId: 'w-requester', agentId: 'a-requester' };
+    const nodeId = 'aaaa000000000000000000000000001658';
+    const dir = join(mockSources, 'test-org', 'test/repo', 'nodeAttr');
+    mkdirSync(dir, { recursive: true });
+    writeNodeFiles(dir, { id: nodeId, name: 'nodeAttr', description: 'v1' });
+    expect((await runAsActor(actor, () => syncGraphFromGithub(makeGraph()))).error).toBeUndefined();
+    writeNodeFiles(dir, { id: nodeId, name: 'nodeAttr', description: 'v2' });
+    expect((await runAsActor(actor, () => syncGraphFromGithub(makeGraph()))).error).toBeUndefined();
+    expect(await db.node.findUniqueOrThrow({
+      where: { id: nodeId },
+      select: { createdByWorkerId: true, createdByAgentId: true, updatedByWorkerId: true, updatedByAgentId: true },
+    })).toEqual({ createdByWorkerId: null, createdByAgentId: null, updatedByWorkerId: null, updatedByAgentId: null });
+    const revision = await db.nodeRevision.findFirstOrThrow({ where: { nodeId }, orderBy: { revNo: 'desc' } });
+    expect(revision).toMatchObject({ editedByInfo: 'system:github-sync', editedByWorkerId: null, editedByAgentId: null });
+  });
+
   it('refuses to apply a sync update to a row that has left the synced memory (#1339 review)', async () => {
     // @copilot: the row lock must re-validate ownership — a concurrent
     // cross-memory move between the preflight lookup and the lock would
@@ -2600,6 +2618,34 @@ describe('#1330 — strict sub-roles through git sync', () => {
     await sync();
     const edges = await db.edge.findMany({ where: { deletedAt: null }, select: { targetId: true } });
     expect(edges).toEqual([{ targetId: lateId }]);
+  });
+});
+
+describe('#1641 — git sync never writes a decision', () => {
+  const repoRoot = () => join(mockSources, 'test-org', 'test/repo');
+  const frontmatter = (loc: string, meta: Parameters<typeof writeFrontmatterNode>[1], body = 'Body.') =>
+    writeFrontmatterNode(join(repoRoot(), `${loc}.md`), meta, body);
+  const stored = (loc: string) =>
+    db.node.findFirst({ where: { loc, memoryId: dbGraphId }, select: { id: true, role: true, content: true } });
+
+  it('a file declaring a decision or decision-log role is skipped; the rest of the memory syncs', async () => {
+    frontmatter('forged', { name: 'DA: forged', role: 'decision' });
+    frontmatter('log', { name: 'Decisions', role: 'decision.log' });
+    frontmatter('plain', { name: 'Plain' });
+    const result = await syncGraphFromGithub(makeGraph());
+    expect(result.error).toBeUndefined();
+    expect(await stored('forged')).toBeNull();
+    expect(await stored('log')).toBeNull();
+    expect(await stored('plain')).not.toBeNull();
+  });
+
+  it('a file landing on a decision row leaves the row exactly as it was, and the cleanup keeps it', async () => {
+    const id = generateId();
+    await db.node.create({ data: { id, memoryId: dbGraphId, loc: 'd', name: 'DA: x', content: 'kept', role: 'decision', ownerRepo: 'test/repo' } });
+    frontmatter('d', { id, name: 'DA: x' }, 'overwritten');
+    const result = await syncGraphFromGithub(makeGraph());
+    expect(result.error).toBeUndefined();
+    expect(await stored('d')).toEqual({ id, role: 'decision', content: 'kept' });
   });
 });
 

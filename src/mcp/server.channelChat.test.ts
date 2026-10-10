@@ -50,7 +50,7 @@ function server(userId: string) {
 describe('Channel-addressed chat tools', () => {
   it('post → read on a Channel by id, and the team-chat tools route through `channel`', async () => {
     const s = server(admin.id);
-    const posted = await s.callToolText('hadron_channel_post', { channel: release.id, body: 'cut the release @nobody' });
+    const posted = await s.callToolText('hadron_channel_post', { channel: release.id, body: 'cut the release @nobody', asMe: true });
     expect(posted).toContain('Posted message #1 in Channel release (chats:release)');
     expect(posted).toContain('mentions: @nobody');
     const viaTeam = await s.callToolText('hadron_team_chat_post', { body: 'second', channel: release.id, replyToSeq: 1 });
@@ -67,7 +67,7 @@ describe('Channel-addressed chat tools', () => {
   it('a Channel the caller may not read is [channel_not_found]; a bad ref too', async () => {
     const s = server(member.id);
     expect(await s.callToolText('hadron_channel_read', { channel: release.id })).toMatch(/^\[channel_not_found\]/);
-    expect(await s.callToolText('hadron_channel_post', { channel: release.id, body: 'x' })).toMatch(/^\[channel_not_found\]/);
+    expect(await s.callToolText('hadron_channel_post', { channel: release.id, body: 'x', asMe: true })).toMatch(/^\[channel_not_found\]/);
     expect(await server(admin.id).callToolText('hadron_channel_read', { channel: 'nope' })).toMatch(/^\[channel_not_found\]/);
   });
 
@@ -108,7 +108,7 @@ describe('#1171 — the address on the MCP channel tools', () => {
     // …and the tools take back exactly what was printed. The receipt naming
     // the Channel is the part that regresses silently: the display lookup used
     // to be by id, so an address-addressed post would have echoed the ref.
-    expect(await s.callToolText('hadron_channel_post', { channel: address, body: 'by address' })).toContain(
+    expect(await s.callToolText('hadron_channel_post', { channel: address, body: 'by address', asMe: true })).toContain(
       'Posted message #1 in Channel release (chats:release)',
     );
     expect(await s.callToolText('hadron_channel_read', { channel: address })).toContain('1 message(s) total');
