@@ -867,7 +867,10 @@ export async function canWriteToMemory(
   if (!memory) return false;
 
   if (memory.class === 'personal' || memory.class === 'private') {
-    if (auth.userId !== memory.userId) return false;
+    if (auth.userId !== memory.userId || auth.impersonation) return false;
+    // #1719 R5a: private is categorically unavailable to every AppRun,
+    // including detached/free-standing holdings. No input or grant overrides it.
+    if (memory.class === 'private' && isRunPrincipal(auth)) return false;
 
     // 034-memory-class-access: a FREE-STANDING personal/private memory
     // (app_id AND agent both NULL — user-owned, created outside any App) is
@@ -1002,7 +1005,10 @@ async function canReadMemoryRow(
   opts: MemoryReadRowOptions = {},
 ): Promise<boolean> {
   if (memory.class === 'personal' || memory.class === 'private') {
-    if (auth.userId !== memory.userId) return false;
+    if (auth.userId !== memory.userId || auth.impersonation) return false;
+    // #1719 R5a: private is categorically unavailable to every AppRun,
+    // including detached/free-standing holdings. No input or grant overrides it.
+    if (memory.class === 'private' && isRunPrincipal(auth)) return false;
 
     // 034-memory-class-access: a FREE-STANDING personal/private memory
     // (app_id AND agent both NULL — user-owned, created outside any App) is

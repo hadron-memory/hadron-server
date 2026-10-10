@@ -73,7 +73,7 @@ export function makeProdRunDeps(db: PrismaClient): RunExecutionDeps {
     },
 
     loadNodeSpec: async (run, nodeUrn): Promise<RunNodeSpec> => {
-      const { node } = await loadFlowNode(db, nodeUrn, run.organizationId);
+      const { node } = await loadFlowNode(db, nodeUrn, run.organizationId, runContext(db, run));
       const data =
         node.data && typeof node.data === 'object' && !Array.isArray(node.data)
           ? (node.data as Record<string, unknown>)
@@ -144,7 +144,7 @@ export function makeProdRunDeps(db: PrismaClient): RunExecutionDeps {
     },
 
     selectNext: async (run, nodeUrn, view) => {
-      const { memory, loc, node } = await loadFlowNode(db, nodeUrn, run.organizationId);
+      const { memory, loc, node } = await loadFlowNode(db, nodeUrn, run.organizationId, runContext(db, run));
       return selectNextEdge(db, {
         sourceNode: { id: node.id, memoryId: memory.id, loc, urn: nodeUrn },
         view,
@@ -189,7 +189,7 @@ export function makeProdRunDeps(db: PrismaClient): RunExecutionDeps {
     onTerminal: (run) => dispatchRunCallback(db, run),
 
     writeOutput: async (run, nodeUrn, text) => {
-      const { memory, loc, node } = await loadFlowNode(db, nodeUrn, run.organizationId);
+      const { memory, loc, node } = await loadFlowNode(db, nodeUrn, run.organizationId, runContext(db, run));
       const spec: OutputSpec =
         node.data && typeof node.data === 'object' && !Array.isArray(node.data)
           ? ((node.data as Record<string, unknown>).output as OutputSpec) ?? {}
