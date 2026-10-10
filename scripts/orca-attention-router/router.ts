@@ -16,7 +16,11 @@
  *    `orca terminal wait --for tui-idle` proves the terminal idle.
  *  - `tui-idle` also reports idle while a HUMAN is typing, so a nudge got
  *    appended to Holger's half-typed text and submitted it (#5473). So the
- *    screen read must also prove the prompt empty (`promptIsEmpty`).
+ *    screen read must also prove the prompt empty (`promptIsEmpty`). Orca's
+ *    `draft` state can go STALE — carrying text no client shows (#6736,
+ *    twice on 2026-10-05, pinning workers for hours) — so for Claude, where
+ *    typed text provably renders on the `❯` line, a screen that proves the
+ *    composer empty REFUTES the draft; Codex's draft stays authoritative.
  *  - Tab titles are not identity (agents retitle their own tabs), and a
  *    worktree's name does not prove which worker drives it. So each roster
  *    entry names its worktree; the terminal is the ONE agent terminal there,
@@ -155,6 +159,12 @@ interface Ledger {
   base: string;
   nudged: Record<string, NudgeRecord>;
   reported: Record<string, string>;
+  /** Stale-draft discard notes already logged under this token (worker -> note). */
+  draftNotes?: Record<string, string>;
+  /** Epoch ms a worker's current hold began (cleared on delivery), for long-hold visibility. */
+  heldSince?: Record<string, number>;
+  /** Epoch ms the last long-hold line was logged per worker (re-log at most every 30 min). */
+  heldLoggedAt?: Record<string, number>;
 }
 
 /**
@@ -200,8 +210,15 @@ export class State {
     } catch {
       ledger = {};
     }
-    if (ledger.base !== base) return { base, nudged: {}, reported: {} };
-    return { base, nudged: ledger.nudged ?? {}, reported: ledger.reported ?? {} };
+    if (ledger.base !== base) return { base, nudged: {}, reported: {}, draftNotes: {}, heldSince: {}, heldLoggedAt: {} };
+    return {
+      base,
+      nudged: ledger.nudged ?? {},
+      reported: ledger.reported ?? {},
+      draftNotes: ledger.draftNotes ?? {},
+      heldSince: ledger.heldSince ?? {},
+      heldLoggedAt: ledger.heldLoggedAt ?? {},
+    };
   }
 
   saveLedger(ledger: Ledger): void {
@@ -623,9 +640,19 @@ export function promptIsEmpty(cfg: Config, handle: string, agent: string, run: R
     terminal = undefined;
   }
   if (!terminal || terminal.source !== 'screen' || !Array.isArray(terminal.tail)) return [false, 'screen unreadable'];
-  // ANY draft holds, whitespace included: this gate promises "nobody is
-  // typing", not "nothing meaningful typed" (Gene, #1555).
-  if (terminal.draft !== undefined && terminal.draft !== null && terminal.draft !== '') return [false, 'text in the composer draft'];
+  // A draft pins the nudge only when the agent's own rendering cannot refute
+  // it. Claude Code draws typed-but-unsent text on its `❯` line (#1555), so a
+  // screen that proves the composer empty — bare `❯` box plus the
+  // `· ← for agents` hint (#5756) — REFUTES the draft: Orca's draft state was
+  // observed twice on 2026-10-05 carrying text no client showed, pinning
+  // workers for hours. Codex renders its composer empty while text is pending
+  // (the draft is the ONLY signal there), so its draft stays authoritative.
+  const draft = terminal.draft;
+  if (draft !== undefined && draft !== null && draft !== '') {
+    if (agent !== 'claude') return [false, 'text in the composer draft'];
+    if (!promptLineIsEmpty(terminal.tail as string[], agent)) return [false, 'text in the composer draft'];
+    return [true, 'stale draft (screen proves the composer empty)'];
+  }
   return promptLineIsEmpty(terminal.tail as string[], agent) ? [true, ''] : [false, 'text in the prompt'];
 }
 
@@ -802,6 +829,16 @@ export function pollOnce(cfg: Config, run: Runner = runCommand, log: (line: stri
         outcome.held[entry.name] = `prompt not empty (${why})`;
         continue;
       }
+      if (why) {
+        // The gate passed by DISCARDING a screen-refuted draft. Visible once
+        // per token per worker; the draft's text is never logged.
+        const note = 'stale Orca draft discarded (screen proves the composer empty)';
+        if ((ledger.draftNotes ?? {})[entry.worker] !== note) {
+          ledger.draftNotes[entry.worker] = note;
+          state.saveLedger(ledger);
+          log(`orca-attention-router: ${entry.name}: ${note}`);
+        }
+      }
       mustOwn();
       // Recomputed after every gate, as close to the send as possible: the
       // poll's numbers are as old as the busy-wait was long, and a worker that
@@ -813,6 +850,8 @@ export function pollOnce(cfg: Config, run: Runner = runCommand, log: (line: stri
         // it every poll; a NEW mention has a higher seq and is never mistaken
         // for covered (same argument as `alreadyNudged`).
         ledger.nudged[entry.worker] = { relevantSeq: seen.lastRelevantSeq!, at: Date.now(), stages: 'dropped: read while waiting' };
+        delete (ledger.heldSince ?? {})[entry.worker];
+        delete (ledger.heldLoggedAt ?? {})[entry.worker];
         state.saveLedger(ledger);
         outcome.dropped.push(entry.name);
         continue;
@@ -840,6 +879,8 @@ export function pollOnce(cfg: Config, run: Runner = runCommand, log: (line: stri
         continue;
       }
       ledger.nudged[entry.worker] = { relevantSeq: now.lastRelevantSeq!, at: Date.now(), stages: how };
+      delete (ledger.heldSince ?? {})[entry.worker];
+      delete (ledger.heldLoggedAt ?? {})[entry.worker];
       // Persisted at once: a crash or a later failure in this poll must not
       // cause the same nudge to be sent again (@codex P2, #1490).
       state.saveLedger(ledger);
@@ -851,8 +892,23 @@ export function pollOnce(cfg: Config, run: Runner = runCommand, log: (line: stri
       // Report each held worker's reason once per token, not every poll.
       const fresh = held.filter(([n, r]) => ledger.reported[n] !== r);
       Object.assign(ledger.reported, outcome.held);
+      // Long-hold visibility (#6736): a worker pinned with mentions pending for
+      // 30+ minutes says so in the log, at most once every 30 minutes.
+      const longHolds: string[] = [];
+      for (const [n] of held) {
+        const w = cfg.roster.find((e) => e.name === n)?.worker ?? n;
+        const since = (ledger.heldSince ?? {})[w] ?? Date.now();
+        ledger.heldSince[w] = since;
+        const minutes = Math.floor((Date.now() - since) / 60_000);
+        const last = (ledger.heldLoggedAt ?? {})[w] ?? 0;
+        if (minutes >= 30 && Date.now() - last >= 30 * 60_000) {
+          ledger.heldLoggedAt[w] = Date.now();
+          longHolds.push(`${n} held ${minutes} min with mentions pending (${outcome.held[n]})`);
+        }
+      }
       state.saveLedger(ledger);
       if (fresh.length) log(`orca-attention-router: ${fresh.map(([n, r]) => `${n}: ${r}`).join('; ')}`);
+      if (longHolds.length) log(`orca-attention-router: ${longHolds.join('; ')}`);
     } else {
       mustOwn();
       // Adoption clears the ledger, but a nudge may have carried a frontier
