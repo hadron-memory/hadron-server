@@ -153,6 +153,7 @@ it('checks drift again after assembly, before the LLM sees the changed instructi
   expect(await executeAppRun(db, run.id, f.deps)).toBe('failed');
   expect(f.llm).not.toHaveBeenCalled();
   expect(f.writeOutput).not.toHaveBeenCalled();
+  expect((await db.appRun.findUniqueOrThrow({ where: { id: run.id } })).failure).toMatchObject({ code: 'AUTOMATION_CHANGED' });
 });
 
 
@@ -277,11 +278,12 @@ it.each(['edge', 'memory', 'missing-template'] as const)('cheap effect checks de
   f.deps.assemble = async (...args) => {
     const text = await assemble(...args);
     if (kind === 'edge') await db.edge.update({ where: { id: f.edge.id }, data: { name: 'documents' } });
-    else if (kind === 'memory') await db.memory.update({ where: { id: f.memory.id }, data: { visibility: 'PRIVATE', isEncrypted: true } });
+    else if (kind === 'memory') await db.memory.update({ where: { id: f.memory.id }, data: { isEncrypted: true } });
     else await db.node.create({ data: { memoryId: f.memory.id, loc: 'later', name: 'New partial', content: 'injected' } });
     return text;
   };
   expect(await executeAppRun(db, run.id, f.deps)).toBe('failed');
   expect(f.llm).not.toHaveBeenCalled();
   expect(f.writeOutput).not.toHaveBeenCalled();
+  expect((await db.appRun.findUniqueOrThrow({ where: { id: run.id } })).failure).toMatchObject({ code: 'AUTOMATION_CHANGED' });
 });
