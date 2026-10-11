@@ -28,6 +28,7 @@ const MEMORY_URN = 'shared1769.example:team-shared';
 const IRIS_REF = 'hrn:worker:shared1769.example:team:iris';
 const DARA_REF = 'hrn:worker:shared1769.example:team:dara';
 let workers: { iris: string; dara: string };
+let memoryId: string;
 
 beforeAll(async () => {
   server = createHttpServer(await createServer());
@@ -45,10 +46,10 @@ beforeEach(async () => {
   const app = await db.app.create({ data: { id: generateId(), name: 'Team', urn: 'shared1769.example:team', organizationId: org.id } });
   await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
   await db.appMember.create({ data: { appId: app.id, userId: user.id, role: 'owner' } });
-  await db.memory.create({ data: {
+  memoryId = (await db.memory.create({ data: {
     id: generateId(), urn: MEMORY_URN, name: 'team-shared', class: 'app',
     appId: app.id, organizationId: org.id, sharedMemoryOfAgentId: agent.id,
-  } });
+  } })).id;
   const iris = await db.worker.create({ data: { id: generateId(), appId: app.id, agentId: agent.id, name: 'Iris', slug: 'iris' } });
   const dara = await db.worker.create({ data: { id: generateId(), appId: app.id, agentId: agent.id, name: 'Dara', slug: 'dara' } });
   workers = { iris: iris.id, dara: dara.id };
@@ -83,7 +84,7 @@ async function shared() {
 }
 
 const urn = (loc: string) => `hrn:node:${MEMORY_URN}:${loc}`;
-const nodes = (loc: string) => db.node.findMany({ where: { loc } });
+const nodes = (loc: string) => db.node.findMany({ where: { memoryId, loc } });
 
 describe.each([
   ['hadron_create_review', 'review'],
