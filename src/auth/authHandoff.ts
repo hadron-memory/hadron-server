@@ -25,6 +25,7 @@
 
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { db } from '../integrations/db/client.js';
+import type { HadronJwtPayload } from './jwt.js';
 
 /** Handoff codes are consumed within one redirect hop; a short TTL bounds the
  *  replay window without risking a legitimate slow round-trip. */
@@ -43,6 +44,7 @@ function hashesEqual(a: string, b: string): boolean {
 }
 
 export interface IssueLoginCodeArgs {
+  login?: HadronJwtPayload['login'];
   userId: string;
   /** Portal-local path to land on after the cookie is seated. */
   redirect: string;
@@ -74,6 +76,7 @@ export async function issueLoginCode(args: IssueLoginCodeArgs): Promise<string> 
     data: {
       codeHash: sha256(rawCode),
       kind: 'login',
+      loginEvidence: args.login,
       userId: args.userId,
       redirect: args.redirect,
       isNew: args.isNew,
@@ -85,6 +88,7 @@ export async function issueLoginCode(args: IssueLoginCodeArgs): Promise<string> 
 }
 
 export interface RedeemedLogin {
+  login?: HadronJwtPayload['login'];
   userId: string;
   redirect: string;
   isNew: boolean;
@@ -122,7 +126,8 @@ export async function redeemLoginCode(
     }
   }
 
-  return { userId: row.userId, redirect: row.redirect ?? '/', isNew: row.isNew };
+  return { userId: row.userId, redirect: row.redirect ?? '/', isNew: row.isNew,
+    login: row.loginEvidence as HadronJwtPayload['login'] ?? undefined };
 }
 
 export interface IssueExchangeStartArgs {

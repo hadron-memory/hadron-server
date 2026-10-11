@@ -88,6 +88,7 @@ import { LIVE_ORG_MEMBERSHIP } from '../../../lib/auth/liveOrgMembership.js';
 export const STORED_NODE_CONTENT: unique symbol = Symbol('storedNodeContent');
 
 export interface Context {
+  login?: import('../../../auth/jwt.js').HadronJwtPayload['login'];
   db: PrismaClient;
   /**
    * #1301 — set by an MCP handler that DELEGATES to a GraphQL resolver (e.g.

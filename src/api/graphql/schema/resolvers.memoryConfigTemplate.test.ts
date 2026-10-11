@@ -1,3 +1,4 @@
+import { mergeUsers } from '../../../test/mergeConsent.js';
 /**
  * #1325 part (c) — the MemoryConfigTemplate API, through the executable schema
  * with the production error formatter, so the codes asserted here are the wire
@@ -16,7 +17,7 @@ import { typeDefs } from './typeDefs.js';
 import { resolvers, type Context } from './resolvers.js';
 import { formatGraphQLError } from '../formatError.js';
 import { deleteUserAccount } from '../../../controller/operations/deleteUser.js';
-import { collisionFreeTemplateName, mergeUsers } from '../../../controller/operations/mergeUsers.js';
+import { collisionFreeTemplateName } from '../../../controller/operations/mergeUsers.js';
 import { validateAiConfigName } from '../../../lib/aiConfig.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
@@ -376,7 +377,7 @@ describe('an admin demoted while a write waits on its locks is refused (#1360 re
 describe('an account merge transfers user-owned templates (#1325 part c, collision ruling 2026-09-26)', () => {
   const mkUserTpl = async (userId: string, name: string, rules: unknown[] = []) =>
     (await create(as(userId), 'USER', null, { name, rules })).data!.createMemoryConfigTemplate.template;
-  const merge = () => mergeUsers(db, { sourceUserId: userA, targetUserId: userB, actorUserId: userB });
+  const merge = () => mergeUsers(db, { sourceUserId: userA, targetUserId: userB, actorUserId: platformAdmin });
 
   it('moves every source template to the survivor; a colliding live name is renamed, ids and rules kept, the survivor\'s name untouched', async () => {
     const targetBase = await mkUserTpl(userB, 'base');
