@@ -489,7 +489,8 @@ export async function computeDueWakes(args: {
       for (const i of issued) {
         // An outstanding wake is only this reader's to see if every channel of it is one they may read (R1/B3). For a
         // reader who cannot, it does not exist: they get their own view of what is due, outside that reservation (it
-        // is not refreshed and no slot is charged; the holder's router still owes the outstanding one).
+        // is not refreshed and no slot is charged, so only an exempt wake reaches them; the holder's router still owes the
+        // outstanding one).
         let stored = live.get(i.workerId);
         // A channel recreated since the wake was issued restarted its seqs: the stored wake can no longer be
         // acknowledged (WAKE_PROOF_STALE), so it is void, not outstanding. Dropped here, or re-issuing it would wedge
@@ -503,7 +504,11 @@ export async function computeDueWakes(args: {
         const readable = new Set((countedOf.get(i.workerId) ?? []).map((c) => c.channelId));
         const have = stored && stored.wake.channels.every((c) => readable.has(c.channelId)) ? stored : undefined;
         if (stored && !have) {
-          passes(i);
+          // Another wake for the worker is outstanding, and a reservation holds one wake per worker. A second
+          // non-exempt wake here would be a delivery no slot paid for (and, with room, a second inside one floor),
+          // so it waits for the first to be acknowledged or to lapse; it is not "withheld" by the budget, so no
+          // notice is raised. An exempt wake never takes a slot and still passes (Diego, #1751 cycle 4).
+          if (i.exempt) passes(i);
           continue;
         }
         if (have) {

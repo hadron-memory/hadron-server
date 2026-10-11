@@ -271,6 +271,11 @@ describe('who may read due wakes, and R1/B3', () => {
     expect(JSON.stringify(theirs)).not.toContain(secret.id);
     // ...and with a readable channel too, the manager sees only that one.
     await say(channel, 'team news', mention('liam'));
+    // While the holder's private wake is outstanding the manager is handed no second one (cycle 4); once it is
+    // acknowledged and the floor has passed, the manager sees only the readable channel.
+    expect((await due(ctx(manager.id))).wakes).toEqual([]);
+    await M.acknowledgeWakes({}, { proofs: mine.wakes.map((w: any) => w.proof) }, ctx(holderA.id));
+    await db.workerDeliveryChannel.updateMany({ data: { deliveredAt: new Date(Date.now() - 3600_000) } });
     const both = await due(ctx(manager.id));
     expect(both.wakes[0].channels.map((c: any) => c.channel.id)).toEqual([channel.id]);
     expect(both.wakes[0].unread).toBe(1);
@@ -916,6 +921,36 @@ describe('cycle 3 — one outstanding wake per worker (Diego P2-1)', () => {
     await M.acknowledgeWakes({}, { proofs: [p1.proof] }, ctx(holderA.id));
     await db.workerDeliveryChannel.updateMany({ data: { deliveredAt: new Date(Date.now() - 3600_000) } });
     expect((await due(ctx(holderA.id))).wakes[0].channels[0]).toMatchObject({ fromSeq: 2, throughSeq: 2 });
+  });
+});
+
+describe('cycle 4 — a reader who cannot see the outstanding wake is not handed a second one (Diego #8597)', () => {
+  async function holderPrivateWake() {
+    const personal = await db.memory.create({ data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:liam-personal4`, name: 'p', class: 'personal', userId: holderA.id } });
+    const secret = await mkChannel(personal.id, 'chats:private', holderA.id);
+    await db.registerEntry.create({ data: { id: generateId(), appId: app.id, channelId: secret.id, attendeeWorkerId: liam.id, role: 'BOTH' } });
+    await say(secret, 'private news', mention('liam'));
+    expect((await due(ctx(holderA.id))).wakes).toHaveLength(1);
+    expect(await db.appWakeReservation.count()).toBe(1);
+  }
+
+  it('budget 1: the manager gets no second, uncharged wake for a worker whose private wake is outstanding', async () => {
+    await db.app.update({ where: { id: app.id }, data: { wakeDailyBudget: 1 } });
+    await holderPrivateWake();
+    await say(channel, 'team news', mention('liam'));
+    const theirs = await due(ctx(manager.id));
+    expect(theirs.wakes).toEqual([]);
+    expect(JSON.stringify(theirs)).not.toContain('private news');
+    // The holder's one outstanding wake is still the only delivery against the allowance.
+    expect(await db.appWakeReservation.count()).toBe(1);
+  });
+
+  it('a manager\'s own (exempt) mention still reaches them', async () => {
+    await holderPrivateWake();
+    await say(channel, 'from a manager', { ...mention('liam'), managerPost: true });
+    const theirs = await due(ctx(manager.id));
+    expect(theirs.wakes).toHaveLength(1);
+    expect(theirs.wakes[0].channels.map((c: any) => c.channel.id)).toEqual([channel.id]);
   });
 });
 
