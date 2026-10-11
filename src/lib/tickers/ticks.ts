@@ -3,6 +3,12 @@
 // is not a tick), is skipped inside the ticker's quiet hours, and a disabled or
 // deleted ticker has none. The CURRENT tick at t is the latest firing tick at or
 // before t, so a router that asks late sees one tick, never a backlog.
+//
+// EDGE (Diego's P3, pinned here rather than changed): quiet hours decide which
+// ticks FIRE, not whether a tick already fired and unacknowledged is still owed.
+// So unread that arrives DURING quiet hours can make the last tick before them
+// due, at the next time a router asks. cor:agt:080:06 defines it this way; a
+// 'quiet now' guard would be a spec change, not a bug fix.
 
 import { inQuietHours, type QuietHours } from './quietHours.js';
 

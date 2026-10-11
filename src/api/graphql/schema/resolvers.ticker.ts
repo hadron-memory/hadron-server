@@ -67,6 +67,7 @@ import {
   type AppGrantName,
 } from '../../../lib/tickers/bounds.js';
 import { decideSubscribe, mayChangeWakeSettings, mayEditTicker, type PolicyActor } from '../../../lib/tickers/policy.js';
+import { defaultWakeBudget } from '../../../lib/tickers/dueWakes.js';
 import { validateQuietHours } from '../../../lib/tickers/quietHours.js';
 import { currentTick, nextTickAfter, tickTime } from '../../../lib/tickers/ticks.js';
 import { isWorkerDormant } from '../../../lib/sessionActivity.js';
@@ -576,13 +577,10 @@ async function settingsOut(db: Context['db'], appId: string) {
   let budget = s.wakeDailyBudget;
   const derived = budget === null;
   if (derived) {
-    // cor:agt:080:05: subscribed workers x (86,400 / self-subscribe cadence) x 2.
-    const subscribed = await db.tickerSubscription.findMany({
-      where: { endedAt: null, ticker: { appId, deletedAt: null } },
-      select: { workerId: true },
-      distinct: ['workerId'],
-    });
-    budget = Math.floor(subscribed.length * (86_400 / s.tickerSelfSubscribeCadenceSeconds) * 2);
+    // cor:agt:080:05 (Decided, Q11): the roster (workers not retired) x (86,400 / self-subscribe cadence) x 2.
+    // The same number the wake enforcement uses (src/lib/tickers/dueWakes.ts), so the settings never disagree with it.
+    const roster = await db.worker.count({ where: { appId, retiredAt: null } });
+    budget = defaultWakeBudget(roster, s.tickerSelfSubscribeCadenceSeconds);
   }
   return {
     minCadenceSeconds: s.tickerMinCadenceSeconds,

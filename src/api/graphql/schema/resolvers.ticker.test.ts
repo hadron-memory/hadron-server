@@ -297,7 +297,7 @@ describe('tickers — edit and delete', () => {
 describe('App ticker settings', () => {
   it('defaults, and only whoever manages the App may change them', async () => {
     expect(await Q.appTickerSettings({}, { appRef: app.id }, ctx(member.id))).toMatchObject({
-      minCadenceSeconds: 120, selfSubscribeCadenceSeconds: 600, liveCap: 20, dailyWakeBudget: 0, dailyWakeBudgetDerived: true,
+      minCadenceSeconds: 120, selfSubscribeCadenceSeconds: 600, liveCap: 20, dailyWakeBudget: 864, dailyWakeBudgetDerived: true,
     });
     await expectCode(setSettings(ctx(member.id), { liveCap: 5 }), 'FORBIDDEN');
     await expectCode(asWorker(anne, () => setSettings(ctx(coordHolder.id), { liveCap: 5 })), 'FORBIDDEN');
@@ -330,14 +330,11 @@ describe('App ticker settings', () => {
     await expect(setSettings(ctx(admin.id), { minCadenceSeconds: 60 })).resolves.toMatchObject({ minCadenceSeconds: 60 });
   });
 
-  it('derives the daily budget from the subscribed roster unless one is set', async () => {
-    const t = await createTicker(ctx(member.id));
-    await subscribe(ctx(admin.id), t, liam);
-    await subscribe(ctx(admin.id), t, rook);
-    // 2 workers x (86400 / 600) x 2
-    expect(await Q.appTickerSettings({}, { appRef: app.id }, ctx(member.id))).toMatchObject({ dailyWakeBudget: 576, dailyWakeBudgetDerived: true });
+  it('derives the daily budget from the roster (workers not retired) unless one is set', async () => {
+    // anne, liam, rook are the roster ('Old' is retired): 3 workers x (86400 / 600) x 2, subscribed or not
+    expect(await Q.appTickerSettings({}, { appRef: app.id }, ctx(member.id))).toMatchObject({ dailyWakeBudget: 864, dailyWakeBudgetDerived: true });
     expect(await setSettings(ctx(admin.id), { wakeDailyBudget: 10 })).toMatchObject({ dailyWakeBudget: 10, dailyWakeBudgetDerived: false });
-    expect(await setSettings(ctx(admin.id), { clearWakeDailyBudget: true })).toMatchObject({ dailyWakeBudget: 576, dailyWakeBudgetDerived: true });
+    expect(await setSettings(ctx(admin.id), { clearWakeDailyBudget: true })).toMatchObject({ dailyWakeBudget: 864, dailyWakeBudgetDerived: true });
   });
 });
 

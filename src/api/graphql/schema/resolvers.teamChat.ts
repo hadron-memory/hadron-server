@@ -932,8 +932,6 @@ async function postToChannelRoot(
   const mentions = extractMentions(body);
   if (mentions.length > 0) {
     envelope.mentions = mentions;
-    // #1748 (N3): who may wake everyone is decided NOW and stamped; nothing re-decides it later.
-    Object.assign(envelope, await wakeStampsFor(ctx, app, typeof envelope.authorWorkerId === 'string' ? envelope.authorWorkerId : null, mentions));
   }
   if (replyToSeq != null) envelope.replyToSeq = replyToSeq;
 
@@ -943,9 +941,6 @@ async function postToChannelRoot(
   // follow the commit, or a transient failure reports an error for a message
   // that was written, and the client's retry posts it twice.
   const memBareUrn = await hostMemoryUrn(ctx, root.memoryId);
-  const msgFields = translateSessionExpired(memEncInfo, () =>
-    encryptNodeFields({ content: body, data: envelope }, memEncInfo),
-  );
 
   const messageId = generateId();
   const createdBy = ctx.userId ?? null;
@@ -967,6 +962,14 @@ async function postToChannelRoot(
     ) {
       throw channelNotFound(root.loc);
     }
+    // #1748 (N3): who may wake everyone is decided NOW, here, on live authority held through the commit, and
+    // stamped; nothing re-decides it later. The envelope is sealed after the stamps are in it.
+    if (mentions.length > 0) {
+      Object.assign(envelope, await wakeStampsFor(ctx, tx, app, typeof envelope.authorWorkerId === 'string' ? envelope.authorWorkerId : null, mentions));
+    }
+    const msgFields = translateSessionExpired(memEncInfo, () =>
+      encryptNodeFields({ content: body, data: envelope }, memEncInfo),
+    );
     // #1617 B — resume the author's lapsed session in THIS transaction, so it
     // commits with the message or not at all (#1625 review, Baloo P2-1). Every
     // condition is re-decided under the App and Worker locks.

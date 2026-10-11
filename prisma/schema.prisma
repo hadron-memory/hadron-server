@@ -3152,6 +3152,7 @@ model App {
   tickers          Ticker[]
   appGrants        AppGrant[]
   wakeDays         AppWakeDay[]
+  wakeReservations AppWakeReservation[]
   agentTeamEvents  AgentTeamEvent[]
   /// #1706 — model-family availability (cor:agt:060:03) and the stall schedule.
   modelFamilyAvailability ModelFamilyAvailability[]
@@ -3640,6 +3641,7 @@ model Worker {
   wakeSettings        WorkerWakeSettings?
   deliveryChannels    WorkerDeliveryChannel[]
   deliveryTicks       WorkerDeliveryTick[]
+  wakeReservation     AppWakeReservation?
   appGrants           AppGrant[]
   launchableVia      HostRegistrationWorker[]
 
@@ -5339,6 +5341,24 @@ model AppWakeDay {
 
   @@id([appId, day])
   @@map("app_wake_days")
+}
+
+/// #1748 cycle 1 — an outstanding budget reservation: `dueWakes` issued a
+/// non-exempt wake proof for this worker and has not yet seen it acknowledged.
+/// Counted against the day's budget for as long as the proof could still be
+/// acknowledged (15 minutes), so concurrent readers cannot hand out more than
+/// the budget (cor:agt:080:15). One row per worker; refreshed by a re-read,
+/// removed by the acknowledgement.
+model AppWakeReservation {
+  workerId   String   @id @map("worker_id")
+  appId      String   @map("app_id")
+  reservedAt DateTime @map("reserved_at")
+
+  app    App    @relation(fields: [appId], references: [id], onDelete: Cascade)
+  worker Worker @relation(fields: [workerId], references: [id], onDelete: Cascade)
+
+  @@index([appId, reservedAt])
+  @@map("app_wake_reservations")
 }
 
 /// #1747 — a narrow, named App grant held by a WORKER (cor:agt:080:24). One

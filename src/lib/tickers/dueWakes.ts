@@ -16,10 +16,11 @@ import { Prisma } from '../../generated/prisma/index.js';
 import type { Context } from '../../api/graphql/schema/resolvers.helpers.js';
 import { getAccessibleMemoryIds, isAppParticipant } from '../../api/graphql/schema/resolvers.helpers.js';
 import { loadWorkersActivity } from '../../api/graphql/schema/resolvers.worker.js';
+import { recordInEffect } from '../agentTasks/availability.js';
 import { collectRegisterRows } from '../resolveRegister.js';
 import { decryptNodeFields } from '../nodeCrypto.js';
-import { mentionTokenOf } from '../mentionToken.js';
-import { isWorkerDormant } from '../sessionActivity.js';
+import { BROADCAST_MENTION_TOKENS, mentionTokenOf } from '../mentionToken.js';
+import { isWorkerDormant, toNaiveUtc } from '../sessionActivity.js';
 import {
   relevantMentionCount,
   workerWake,
@@ -28,10 +29,16 @@ import {
   type SubscriptionInput,
   type WorkerWake,
 } from './wakeRule.js';
-import { signWakeProof, type WakeRequester } from './wakeProof.js';
+import { signWakeProof, WAKE_PROOF_MAX_AGE_MS, type WakeRequester } from './wakeProof.js';
 
-/** Messages read per channel per request. A backlog past this is read in the next request, after an acknowledgement. */
+/**
+ * Messages read per channel per page, and the most one request reads from one channel. Scanning goes on past a
+ * full page for as long as some worker still has nothing relevant in what was read (cor:agt:080:08), so a backlog
+ * of messages that are not for a worker (its own posts, chatter in a mention-only channel) cannot hide the
+ * message that is — see `scanChannel`. The ceiling bounds the work, not the correctness of the common case.
+ */
 export const WAKE_SCAN_ROWS_PER_CHANNEL = 5_000;
+export const WAKE_SCAN_MAX_ROWS_PER_CHANNEL = 50_000;
 export const DUE_WAKES_PAGE_DEFAULT = 100;
 export const DUE_WAKES_PAGE_MAX = 200;
 
@@ -128,6 +135,7 @@ async function loadMessages(
   channel: { id: string; memoryId: string; encrypted: boolean },
   lo: number,
   head: number,
+  limit: number,
 ): Promise<RoutedMessage[]> {
   if (head <= lo) return [];
   if (!channel.encrypted) {
@@ -144,7 +152,7 @@ async function loadMessages(
         AND n.seq > ${lo}
         AND n.seq <= ${head}
       ORDER BY n.seq
-      LIMIT ${WAKE_SCAN_ROWS_PER_CHANNEL}
+      LIMIT ${limit}
     `);
     return rows.map((r) => ({
       seq: r.seq,
@@ -163,7 +171,7 @@ async function loadMessages(
       AND n.seq > ${lo}
       AND n.seq <= ${head}
     ORDER BY n.seq
-    LIMIT ${WAKE_SCAN_ROWS_PER_CHANNEL}
+    LIMIT ${limit}
   `);
   const out: RoutedMessage[] = [];
   for (const r of rows) {
@@ -181,6 +189,43 @@ async function loadMessages(
   return out;
 }
 
+/** Someone a channel's messages are read for: their floor, whether only mentions count, and the tokens that reach them. */
+type Watcher = { floor: number; mentionOnly: boolean; workerId: string; tokens: string[] };
+
+/** Does `m` possibly matter to this watcher? (A superset of the rule's relevance, never a subset.) */
+function mattersTo(m: RoutedMessage, w: Watcher): boolean {
+  if (m.authorWorkerId === w.workerId) return false;
+  if (m.mentions.some((t) => w.tokens.includes(t) || (BROADCAST_MENTION_TOKENS as readonly string[]).includes(t))) return true;
+  return !w.mentionOnly;
+}
+
+/**
+ * Read a channel from `lo`, a page at a time, for as long as some watcher has nothing that matters to them in
+ * what was read and the channel has more. Without this, a mention-only worker whose floor sits under 5,000
+ * unrelated messages would never see the mention at row 5,001: the slice had no reason to wake them, so nothing
+ * acknowledged, so the slice never moved (Diego P2-5). The next page starts at the lowest floor still unmet.
+ */
+async function scanChannel(
+  db: Context['db'],
+  channel: { id: string; memoryId: string; encrypted: boolean },
+  lo: number,
+  head: number,
+  watchers: Watcher[],
+  scan: { pageRows: number; maxRows: number },
+): Promise<RoutedMessage[]> {
+  const out: RoutedMessage[] = [];
+  let cursor = lo;
+  for (;;) {
+    const page = await loadMessages(db, channel, cursor, head, scan.pageRows);
+    out.push(...page);
+    if (page.length < scan.pageRows || out.length >= scan.maxRows) return out;
+    const lastSeq = page[page.length - 1]!.seq;
+    const unmet = watchers.filter((w) => !out.some((m) => m.seq > w.floor && mattersTo(m, w)));
+    if (unmet.length === 0) return out;
+    cursor = Math.max(lastSeq, Math.min(...unmet.map((w) => w.floor)));
+  }
+}
+
 export async function computeDueWakes(args: {
   ctx: Context;
   app: AppLike;
@@ -190,6 +235,8 @@ export async function computeDueWakes(args: {
   first?: number | null;
   after?: string | null;
   now?: Date;
+  /** Page size and per-channel ceiling of the message scan (tests lower them). */
+  scan?: { pageRows: number; maxRows: number };
 }): Promise<DueWakesResult> {
   const { ctx, app, reader, requester } = args;
   const now = args.now ?? new Date();
@@ -271,10 +318,25 @@ export async function computeDueWakes(args: {
       if (c.head > lo) floorOf.set(c.channelId, Math.min(floorOf.get(c.channelId) ?? Infinity, lo));
     }
   }
+  const watchersOf = new Map<string, Watcher[]>();
+  for (const w of workers) {
+    const own = mentionTokenOf(w.name);
+    for (const c of countedOf.get(w.id) ?? []) {
+      if (c.head <= Math.max(c.seen, c.delivered)) continue;
+      watchersOf.set(c.channelId, [
+        ...(watchersOf.get(c.channelId) ?? []),
+        { floor: Math.max(c.seen, c.delivered), mentionOnly: c.mentionOnly, workerId: w.id, tokens: own ? [own] : [] },
+      ]);
+    }
+  }
+  const scan = args.scan ?? { pageRows: WAKE_SCAN_ROWS_PER_CHANNEL, maxRows: WAKE_SCAN_MAX_ROWS_PER_CHANNEL };
   const messagesOf = new Map<string, RoutedMessage[]>();
   await Promise.all([...floorOf].map(async ([channelId, lo]) => {
     const ch = channelOf.get(channelId)!;
-    messagesOf.set(channelId, await loadMessages(db, { id: ch.id, memoryId: ch.memoryId, encrypted: ch.memory.isEncrypted }, lo, ch.lastSeq));
+    messagesOf.set(
+      channelId,
+      await scanChannel(db, { id: ch.id, memoryId: ch.memoryId, encrypted: ch.memory.isEncrypted }, lo, ch.lastSeq, watchersOf.get(channelId) ?? [], scan),
+    );
   }));
 
   const floorMs = settings.tickerMinCadenceSeconds * 1000;
@@ -349,29 +411,55 @@ export async function computeDueWakes(args: {
     issued.push({
       workerId: w.id,
       wake,
-      availability: a ? { state: a.state, reason: a.reason, until: a.until, setAt: a.setAt } : null,
+      availability: a && recordInEffect(a, now, activity.get(w.id)?.lastActiveAt ?? null) ? { state: a.state, reason: a.reason, until: a.until, setAt: a.setAt } : null,
       proof,
       exempt: wake.exempt,
     });
   }
 
-  // cor:agt:080:15 — the daily budget. Exempt wakes always pass; a withheld wake stays due.
+  // cor:agt:080:15 — the daily budget. Exempt wakes always pass; a withheld wake stays due. A wake that passes
+  // RESERVES its slot until it is acknowledged or its proof expires, under one lock per App, so readers running
+  // at the same time cannot hand out more than the budget (Diego P2-4).
   const day = utcDay(now);
-  const used = (await db.appWakeDay.findUnique({ where: { appId_day: { appId: app.id, day } } }))?.wakes ?? 0;
   const budget = settings.wakeDailyBudget ?? defaultWakeBudget(
     await db.worker.count({ where: { appId: app.id, retiredAt: null } }),
     settings.tickerSelfSubscribeCadenceSeconds,
   );
-  let remaining = Math.max(0, budget - used);
   let withheld = 0;
   const wakes: DueWakeOut[] = [];
-  for (const i of issued) {
-    if (!i.exempt) {
-      if (remaining <= 0) { withheld++; continue; }
-      remaining--;
-    }
-    const { exempt: _exempt, ...out } = i;
-    wakes.push(out);
+  const passes = (i: (typeof issued)[number]) => { const { exempt: _e, ...out } = i; wakes.push(out); };
+  if (!issued.some((i) => !i.exempt)) {
+    issued.forEach(passes);
+  } else {
+    await db.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${'wakebudget:' + app.id}, 0))`;
+      const used = (await tx.appWakeDay.findUnique({ where: { appId_day: { appId: app.id, day } } }))?.wakes ?? 0;
+      const cutoff = toNaiveUtc(new Date(now.getTime() - WAKE_PROOF_MAX_AGE_MS));
+      const live = new Set(
+        (await tx.$queryRaw<Array<{ worker_id: string }>>(Prisma.sql`
+          SELECT worker_id FROM app_wake_reservations WHERE app_id = ${app.id} AND reserved_at > ${cutoff}::timestamp`)).map((r) => r.worker_id),
+      );
+      let consumed = used + live.size;
+      const reserve: string[] = [];
+      wakes.length = 0;
+      withheld = 0;
+      for (const i of issued) {
+        if (!i.exempt) {
+          if (!live.has(i.workerId)) {
+            if (consumed >= budget) { withheld++; continue; }
+            consumed++;
+          }
+          reserve.push(i.workerId);
+        }
+        passes(i);
+      }
+      const nowNaive = toNaiveUtc(now);
+      for (const workerId of reserve) {
+        await tx.$executeRaw(Prisma.sql`
+          INSERT INTO app_wake_reservations (worker_id, app_id, reserved_at) VALUES (${workerId}, ${app.id}, ${nowNaive}::timestamp)
+          ON CONFLICT (worker_id) DO UPDATE SET reserved_at = EXCLUDED.reserved_at, app_id = EXCLUDED.app_id`);
+      }
+    });
   }
   return {
     status: withheld > 0 ? 'WAKE_BUDGET_EXHAUSTED' : 'OK',

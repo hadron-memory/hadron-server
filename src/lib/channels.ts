@@ -39,7 +39,7 @@
 
 import { sessionKeyReleasedHint } from './sessionKeyCache.js';
 import { GraphQLError } from 'graphql';
-import type { Prisma, PrismaClient } from '../generated/prisma/index.js';
+import { Prisma, type PrismaClient } from '../generated/prisma/index.js';
 import type { InputJsonValue } from '../generated/prisma/runtime/library.js';
 import { generateId } from './id.js';
 import { escapePrismaLikePattern } from './literalLocPrefix.js';
@@ -170,6 +170,14 @@ export async function ensureChannelRow(
     // LIKE '…%', where an unescaped `_`/`%` in the Channel loc matches foreign
     // rows (`chats_team` would claim `chatsXteam:messages:*`).
     const prefix = `${args.loc}:messages:`;
+    // Wake stamps are written only by the server when a message is posted into a Channel (#1748, N3). A row that
+    // pre-dates the Channel was written some other way, so whatever stamps it carries were never decided by that
+    // rule: they are cleared as the row is adopted, not trusted (Rook, #1751 P3-1).
+    await db.$executeRaw(Prisma.sql`
+      UPDATE nodes SET data = data - 'broadcastWakes' - 'managerPost'
+      WHERE memory_id = ${args.memoryId} AND starts_with(loc, ${prefix}) AND node_type = 'chat-message'
+        AND deleted_at IS NULL AND message_channel_id IS NULL
+        AND jsonb_typeof(data) = 'object' AND (data ? 'broadcastWakes' OR data ? 'managerPost')`);
     await db.node.updateMany({
       where: {
         memoryId: args.memoryId,

@@ -3,7 +3,8 @@
 // The router delivers a nudge, then hands back the wake proof. In ONE
 // transaction this raises deliveredThroughSeq (monotonic: GREATEST), records
 // each ticker's tick, records who acknowledged, and counts the wake against the
-// App's daily budget unless the proof says it was exempt. It NEVER touches
+// App's daily budget unless the proof says it was exempt (releasing the
+// reservation dueWakes made for it). A repeat changes nothing. It NEVER touches
 // ChannelReadState: delivery and reading are different facts.
 //
 // Refusals: an unknown version, a forged signature or an attention token →
@@ -31,8 +32,13 @@ export async function acknowledgeWakes(args: {
   ctx: Context;
   requester: WakeRequester;
   proofs: string[];
-  /** Re-checks, per proof, that the requester may still read this worker's wakes (holder or manager). */
-  mayReadWorker: (proof: WakeProof) => Promise<boolean>;
+  /**
+   * Decides, per proof and INSIDE the acknowledgement's transaction (after the
+   * worker's wake lock), that the requester may still read this worker's wakes.
+   * It must hold what it reads (the holder's row, the caller's memberships), so a
+   * release or demotion cannot commit between the check and the write.
+   */
+  mayReadWorker: (proof: WakeProof, tx: Prisma.TransactionClient) => Promise<boolean>;
   now?: Date;
 }): Promise<AcknowledgeResult> {
   const { ctx, requester } = args;
@@ -47,7 +53,6 @@ export async function acknowledgeWakes(args: {
     if (now.getTime() - p.issuedAt > WAKE_PROOF_MAX_AGE_MS || p.issuedAt > now.getTime() + 60_000) {
       refuse('WAKE_PROOF_STALE', 'This wake proof is too old. Ask for the due wakes again.');
     }
-    if (!(await args.mayReadWorker(p))) refuse('WAKE_PROOF_REQUESTER_MISMATCH', 'This wake proof was issued to someone else.');
   }
 
   // Naive-UTC literals: Prisma binds a JS Date as timestamptz but these columns are timestamp WITHOUT time zone
@@ -66,6 +71,7 @@ export async function acknowledgeWakes(args: {
     // A stable order, so two acknowledgements of overlapping workers cannot deadlock on the per-worker locks.
     for (const p of [...proofs].sort((a, b) => a.workerId.localeCompare(b.workerId))) {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${'wake:' + p.workerId}, 0))`;
+      if (!(await args.mayReadWorker(p, tx))) refuse('WAKE_PROOF_REQUESTER_MISMATCH', 'This wake proof was issued to someone else.');
       const worker = await tx.worker.findUnique({ where: { id: p.workerId }, select: { appId: true, retiredAt: true } });
       if (!worker || worker.appId !== p.appId || worker.retiredAt) refuse('WAKE_PROOF_STALE', 'The worker of this wake is gone.');
 
@@ -94,11 +100,20 @@ export async function acknowledgeWakes(args: {
             delivered_through_seq = CASE WHEN worker_delivery_channels.channel_incarnation = EXCLUDED.channel_incarnation
                                          THEN GREATEST(worker_delivery_channels.delivered_through_seq, EXCLUDED.delivered_through_seq)
                                          ELSE EXCLUDED.delivered_through_seq END,
-            channel_incarnation = EXCLUDED.channel_incarnation,
-            delivered_at = EXCLUDED.delivered_at,
-            acked_by_user_id = EXCLUDED.acked_by_user_id,
-            acked_by_worker_id = EXCLUDED.acked_by_worker_id,
-            acked_by_app_key_id = EXCLUDED.acked_by_app_key_id`;
+            -- A repeat of what is already delivered changes NOTHING, neither the ceiling's clock nor who delivered it (Diego P2-3).
+            delivered_at = CASE WHEN worker_delivery_channels.channel_incarnation <> EXCLUDED.channel_incarnation
+                                  OR EXCLUDED.delivered_through_seq > worker_delivery_channels.delivered_through_seq
+                                THEN EXCLUDED.delivered_at ELSE worker_delivery_channels.delivered_at END,
+            acked_by_user_id = CASE WHEN worker_delivery_channels.channel_incarnation <> EXCLUDED.channel_incarnation
+                                      OR EXCLUDED.delivered_through_seq > worker_delivery_channels.delivered_through_seq
+                                    THEN EXCLUDED.acked_by_user_id ELSE worker_delivery_channels.acked_by_user_id END,
+            acked_by_worker_id = CASE WHEN worker_delivery_channels.channel_incarnation <> EXCLUDED.channel_incarnation
+                                        OR EXCLUDED.delivered_through_seq > worker_delivery_channels.delivered_through_seq
+                                      THEN EXCLUDED.acked_by_worker_id ELSE worker_delivery_channels.acked_by_worker_id END,
+            acked_by_app_key_id = CASE WHEN worker_delivery_channels.channel_incarnation <> EXCLUDED.channel_incarnation
+                                         OR EXCLUDED.delivered_through_seq > worker_delivery_channels.delivered_through_seq
+                                       THEN EXCLUDED.acked_by_app_key_id ELSE worker_delivery_channels.acked_by_app_key_id END,
+            channel_incarnation = EXCLUDED.channel_incarnation`;
       }
       for (const t of p.ticks) {
         const row = await tx.workerDeliveryTick.findUnique({ where: { workerId_tickerId: { workerId: p.workerId, tickerId: t.tickerId } } });
@@ -112,11 +127,13 @@ export async function acknowledgeWakes(args: {
                   ${ackedBy.ackedByUserId}, ${ackedBy.ackedByWorkerId}, ${ackedBy.ackedByAppKeyId})
           ON CONFLICT (worker_id, ticker_id) DO UPDATE SET
             last_acked_tick = GREATEST(worker_delivery_ticks.last_acked_tick, EXCLUDED.last_acked_tick),
-            acked_at = EXCLUDED.acked_at,
-            acked_by_user_id = EXCLUDED.acked_by_user_id,
-            acked_by_worker_id = EXCLUDED.acked_by_worker_id,
-            acked_by_app_key_id = EXCLUDED.acked_by_app_key_id`;
+            acked_at = CASE WHEN EXCLUDED.last_acked_tick > worker_delivery_ticks.last_acked_tick THEN EXCLUDED.acked_at ELSE worker_delivery_ticks.acked_at END,
+            acked_by_user_id = CASE WHEN EXCLUDED.last_acked_tick > worker_delivery_ticks.last_acked_tick THEN EXCLUDED.acked_by_user_id ELSE worker_delivery_ticks.acked_by_user_id END,
+            acked_by_worker_id = CASE WHEN EXCLUDED.last_acked_tick > worker_delivery_ticks.last_acked_tick THEN EXCLUDED.acked_by_worker_id ELSE worker_delivery_ticks.acked_by_worker_id END,
+            acked_by_app_key_id = CASE WHEN EXCLUDED.last_acked_tick > worker_delivery_ticks.last_acked_tick THEN EXCLUDED.acked_by_app_key_id ELSE worker_delivery_ticks.acked_by_app_key_id END`;
       }
+      // The reservation this wake held (dueWakes) is spent or void either way.
+      await tx.$executeRaw`DELETE FROM app_wake_reservations WHERE worker_id = ${p.workerId}`;
       // Counted against the day's budget only when it moved something: a repeat acknowledgement is not another wake.
       if (!advanced) { unchanged++; continue; }
       acknowledged++;

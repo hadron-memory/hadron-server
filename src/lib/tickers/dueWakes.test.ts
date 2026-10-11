@@ -34,6 +34,7 @@ async function code(p: Promise<unknown>): Promise<string | undefined> {
   return undefined;
 }
 const DAY = 86_400_000;
+const stampsOf = (c: Context, ...rest: [any, string | null, string[]]) => db.$transaction((tx) => wakeStampsFor(c, tx, ...rest));
 
 let org: { id: string; urn: string };
 let manager: { id: string };
@@ -404,25 +405,25 @@ describe('post-time stamps (N3)', () => {
     db.appGrant.create({ data: { id: generateId(), appId: app.id, granteeWorkerId: workerId, name: 'ticker.subscribe-workers', grantedBy: manager.id, revokedAt } });
 
   it('a manager posting as themselves stamps both; a plain member stamps nothing', async () => {
-    expect(await wakeStampsFor(ctx(manager.id), appLike(), null, ['all'])).toEqual({ managerPost: true, broadcastWakes: true });
-    expect(await wakeStampsFor(ctx(manager.id), appLike(), null, ['liam'])).toEqual({ managerPost: true });
-    expect(await wakeStampsFor(ctx(holderA.id), appLike(), null, ['all'])).toEqual({});
-    expect(await wakeStampsFor(ctx(manager.id), appLike(), null, [])).toEqual({});
+    expect(await stampsOf(ctx(manager.id), appLike(), null, ['all'])).toEqual({ managerPost: true, broadcastWakes: true });
+    expect(await stampsOf(ctx(manager.id), appLike(), null, ['liam'])).toEqual({ managerPost: true });
+    expect(await stampsOf(ctx(holderA.id), appLike(), null, ['all'])).toEqual({});
+    expect(await stampsOf(ctx(manager.id), appLike(), null, [])).toEqual({});
   });
 
   it('a manager posting THROUGH a worker session is the worker\'s post: no manager stamp', async () => {
-    expect(await wakeStampsFor(ctx(manager.id), appLike(), liam.id, ['all'])).toEqual({});
+    expect(await stampsOf(ctx(manager.id), appLike(), liam.id, ['all'])).toEqual({});
   });
 
   it('the grant worker with a person behind the session broadcasts; revoked, an App key, or impersonated does not', async () => {
     await grant(liam.id);
-    expect(await wakeStampsFor(ctx(holderA.id), appLike(), liam.id, ['all'])).toEqual({ broadcastWakes: true });
-    expect(await wakeStampsFor(ctx(holderA.id), appLike(), liam.id, ['rook'])).toEqual({}); // not a broadcast, grant is no exemption
-    expect(await wakeStampsFor(ctx(undefined, { appId: app.id } as Partial<Context>), appLike(), liam.id, ['all'])).toEqual({});
-    expect(await wakeStampsFor(ctx(holderA.id, { impersonation: { adminUserId: 'x' } } as any), appLike(), liam.id, ['all'])).toEqual({});
-    expect(await wakeStampsFor(ctx(holderB.id), appLike(), rook.id, ['all'])).toEqual({}); // no grant
+    expect(await stampsOf(ctx(holderA.id), appLike(), liam.id, ['all'])).toEqual({ broadcastWakes: true });
+    expect(await stampsOf(ctx(holderA.id), appLike(), liam.id, ['rook'])).toEqual({}); // not a broadcast, grant is no exemption
+    expect(await stampsOf(ctx(undefined, { appId: app.id } as Partial<Context>), appLike(), liam.id, ['all'])).toEqual({});
+    expect(await stampsOf(ctx(holderA.id, { impersonation: { adminUserId: 'x' } } as any), appLike(), liam.id, ['all'])).toEqual({});
+    expect(await stampsOf(ctx(holderB.id), appLike(), rook.id, ['all'])).toEqual({}); // no grant
     await db.appGrant.updateMany({ data: { revokedAt: new Date() } });
-    expect(await wakeStampsFor(ctx(holderA.id), appLike(), liam.id, ['all'])).toEqual({});
+    expect(await stampsOf(ctx(holderA.id), appLike(), liam.id, ['all'])).toEqual({});
   });
 
   it('end to end: a stamped broadcast posted while the author qualified still wakes at once after the grant is revoked', async () => {
@@ -488,4 +489,248 @@ describe('load', () => {
     console.info(`dueWakes 200 workers x 3 channels: ${Math.round(elapsed)} ms`);
     expect(elapsed).toBeLessThan(1000);
   }, 60_000);
+});
+
+// ── Cycle 1: the reviews of 4c232239 / 19ac4719 (Diego, Rook §10) ──────────────
+
+describe('cycle 1 — whose authority reads and acknowledges wakes', () => {
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  const asWorker = <T>(w: { id: string }, fn: () => Promise<T>) => runAsActor({ workerId: w.id, agentId: agent.id }, fn);
+
+  it('a stale platform-ADMIN claim on an old credential is not a manager (Diego P2-1)', async () => {
+    await say(channel, 'hi', mention('liam', 'rook'));
+    // holderA's user row has no ADMIN role; the credential still says so.
+    const stale = ctx(holderA.id, { roles: ['ADMIN'] });
+    expect(ids(await due(stale))).toEqual([liam.id]); // only what they hold
+    expect(ids(await due(ctx(manager.id)))).toEqual([liam.id, rook.id].sort());
+  });
+
+  it('a worker session cannot read its holder\'s other workers\' wakes, nor acknowledge them (Rook P2)', async () => {
+    const sibling = await mkWorker('Nova', { heldByUserId: holderA.id, heldAt: new Date() });
+    await say(channel, 'hi', mention('liam', 'nova'));
+    const proofs = (await due(ctx(holderA.id))).wakes.map((w: any) => w.proof);
+    expect(proofs).toHaveLength(2);
+    expect(await code(asWorker(liam, () => due(ctx(holderA.id))))).toBe('APP_NOT_FOUND');
+    expect(await code(asWorker(liam, () => M.acknowledgeWakes({}, { proofs }, ctx(holderA.id))))).toBe('WAKE_ACK_FORBIDDEN');
+    expect(await db.workerDeliveryChannel.count({ where: { workerId: { in: [liam.id, sibling.id] } } })).toBe(0);
+    // The person, as themselves, still can.
+    expect(await M.acknowledgeWakes({}, { proofs }, ctx(holderA.id))).toEqual({ acknowledged: 2, unchanged: 0 });
+  });
+
+  it('acknowledgement authority is held through the write: a release in flight is waited for, then refused (Diego P2-2)', async () => {
+    await say(channel, 'one', mention('liam'));
+    const w = (await due(ctx(holderA.id))).wakes[0];
+    let open!: () => void;
+    const gate = new Promise<void>((r) => { open = r; });
+    let ready!: () => void;
+    const locked = new Promise<void>((r) => { ready = r; });
+    const releasing = db.$transaction(async (tx) => {
+      await tx.worker.update({ where: { id: liam.id }, data: { heldByUserId: null, heldAt: null } });
+      ready();
+      await gate;
+    });
+    await locked;
+    let settled = false;
+    const ack = M.acknowledgeWakes({}, { proofs: [w.proof] }, ctx(holderA.id)).then(
+      (v: unknown) => { settled = true; return { ok: v }; },
+      (e: unknown) => { settled = true; return { err: e }; },
+    );
+    let waited: boolean;
+    try {
+      await sleep(500);
+      waited = !settled;
+    } finally {
+      open();
+    }
+    await releasing;
+    expect(waited).toBe(true);
+    const out: any = await ack;
+    expect(out.err?.extensions?.code).toBe('WAKE_PROOF_REQUESTER_MISMATCH');
+    expect(await db.workerDeliveryChannel.count({ where: { workerId: liam.id } })).toBe(0);
+  });
+
+  it('a demoted manager\'s proof is refused at acknowledgement (live roles)', async () => {
+    await say(channel, 'one', mention('liam'));
+    const page = await due(ctx(manager.id));
+    // The credential claims ADMIN only through the org membership; remove it before the ack.
+    await db.orgMember.deleteMany({ where: { userId: manager.id } });
+    expect(await code(M.acknowledgeWakes({}, { proofs: [page.wakes[0].proof] }, ctx(manager.id)))).toBe('WAKE_PROOF_REQUESTER_MISMATCH');
+  });
+});
+
+describe('cycle 1 — a repeat acknowledgement changes nothing (Diego P2-3)', () => {
+  it('keeps the delivery time and who delivered, so the ceiling does not move', async () => {
+    const t = await mkTicker();
+    await subscribe(t.id, liam.id);
+    await say(channel, 'one', mention('liam'));
+    const first = (await due(ctx(holderA.id))).wakes[0];
+    await M.acknowledgeWakes({}, { proofs: [first.proof] }, ctx(holderA.id));
+    const old = new Date(Date.now() - 3600_000);
+    await db.workerDeliveryChannel.updateMany({ where: { workerId: liam.id }, data: { deliveredAt: old, ackedByUserId: manager.id } });
+    await db.workerDeliveryTick.updateMany({ where: { workerId: liam.id }, data: { ackedAt: old, ackedByUserId: manager.id } });
+    expect(await M.acknowledgeWakes({}, { proofs: [first.proof] }, ctx(holderA.id))).toEqual({ acknowledged: 0, unchanged: 1 });
+    const ch = await db.workerDeliveryChannel.findFirstOrThrow({ where: { workerId: liam.id } });
+    const tk = await db.workerDeliveryTick.findFirstOrThrow({ where: { workerId: liam.id } });
+    expect([ch.deliveredAt.getTime(), ch.ackedByUserId]).toEqual([old.getTime(), manager.id]);
+    expect([tk.ackedAt.getTime(), tk.ackedByUserId]).toEqual([old.getTime(), manager.id]);
+    // A newer mention is therefore not held back by the replay: the window ended an hour ago.
+    await say(channel, 'two', mention('liam'));
+    expect(ids(await due(ctx(holderA.id)))).toEqual([liam.id]);
+  });
+});
+
+describe('cycle 1 — the daily budget bounds what is handed out (Diego P2-4)', () => {
+  beforeEach(() => db.app.update({ where: { id: app.id }, data: { wakeDailyBudget: 1 } }));
+
+  it('reads that run before any acknowledgement cannot hand out more than the budget', async () => {
+    await say(channel, 'for liam', mention('liam'));
+    await say(channel, 'for rook', mention('rook'));
+    const [a, b] = await Promise.all([due(ctx(holderA.id)), due(ctx(holderB.id))]);
+    expect(a.wakes.length + b.wakes.length).toBe(1);
+    expect(a.withheld + b.withheld).toBe(1);
+    // The winner re-reading keeps its one slot (a re-read is not another wake); the loser is still withheld.
+    const winner = a.wakes.length ? ctx(holderA.id) : ctx(holderB.id);
+    const loser = a.wakes.length ? ctx(holderB.id) : ctx(holderA.id);
+    expect((await due(winner)).wakes).toHaveLength(1);
+    expect((await due(loser)).wakes).toHaveLength(0);
+    // Acknowledging spends the slot for good.
+    await M.acknowledgeWakes({}, { proofs: (await due(winner)).wakes.map((w: any) => w.proof) }, winner);
+    expect((await db.appWakeDay.findFirstOrThrow({ where: { appId: app.id } })).wakes).toBe(1);
+    expect(await db.appWakeReservation.count()).toBe(0);
+    expect((await due(loser)).wakes).toHaveLength(0);
+  });
+
+  it('an unacknowledged reservation frees its slot when its proof can no longer be acknowledged', async () => {
+    await say(channel, 'for liam', mention('liam'));
+    await say(channel, 'for rook', mention('rook'));
+    const args = (userId: string) => ({ ctx: ctx(userId), app: { id: app.id, organizationId: org.id, ownerUserId: null }, reader: { manager: true, userId }, requester: { userId } });
+    const first = await computeDueWakes({ ...args(manager.id), workerIds: [liam.id] });
+    expect(first.wakes).toHaveLength(1);
+    expect((await computeDueWakes({ ...args(manager.id), workerIds: [rook.id] })).wakes).toHaveLength(0);
+    const later = await computeDueWakes({ ...args(manager.id), workerIds: [rook.id], now: new Date(Date.now() + 16 * 60_000) });
+    expect(later.wakes).toHaveLength(1);
+  });
+
+  it('a manager\'s mention is exempt: it neither takes a slot nor waits for one', async () => {
+    await say(channel, 'for liam', mention('liam'));
+    await say(channel, 'for rook, by a manager', { ...mention('rook'), managerPost: true });
+    const page = await due(ctx(manager.id));
+    expect(page.wakes).toHaveLength(2);
+    expect(page.withheld).toBe(0);
+    expect(await db.appWakeReservation.count()).toBe(1); // only Liam's
+  });
+});
+
+describe('cycle 1 — a backlog of irrelevant messages cannot hide the relevant one (Diego P2-5)', () => {
+  const scan = { pageRows: 5, maxRows: 200 };
+  const run = (userId: string, extra: Record<string, unknown> = {}) =>
+    computeDueWakes({ ctx: ctx(userId), app: { id: app.id, organizationId: org.id, ownerUserId: null }, reader: { manager: true, userId }, requester: { userId }, scan, ...extra });
+
+  it('a mention-only worker with 12 chatter messages ahead of its mention is woken', async () => {
+    const mo = await mkWorker('Mo', { heldByUserId: holderA.id, heldAt: new Date() });
+    await db.registerEntry.updateMany({ where: { attendeeWorkerId: mo.id }, data: { mentionOnly: true } });
+    for (let i = 0; i < 12; i++) await say(channel, `chatter ${i}`);
+    await say(channel, 'for mo', mention('mo'));
+    const page = await run(manager.id, { workerIds: [mo.id] });
+    expect(page.wakes.map((w) => w.workerId)).toEqual([mo.id]);
+    expect(page.wakes[0]!.wake.channels[0]).toMatchObject({ throughSeq: 13, latestMentionSeq: 13 });
+  });
+
+  it('a worker\'s own 12 posts ahead of one from someone else do not hide it', async () => {
+    for (let i = 0; i < 12; i++) await say(channel, `mine ${i}`, { authorWorkerId: liam.id });
+    await say(channel, 'from rook', { authorWorkerId: rook.id, mentions: ['liam'] });
+    const page = await run(manager.id, { workerIds: [liam.id] });
+    expect(page.wakes.map((w) => w.workerId)).toEqual([liam.id]);
+  });
+
+  it('mixed baselines: a stuck worker at the start does not starve one whose own floor is far on', async () => {
+    const mo = await mkWorker('Mo', { heldByUserId: holderA.id, heldAt: new Date() });
+    await db.registerEntry.updateMany({ where: { attendeeWorkerId: mo.id }, data: { mentionOnly: true } });
+    for (let i = 0; i < 14; i++) await say(channel, `chatter ${i}`);
+    await say(channel, 'for both', mention('mo', 'liam'));
+    await db.channelReadState.create({ data: { id: generateId(), workerId: liam.id, appId: app.id, channelId: channel.id, lastSeenSeq: 14 } });
+    const page = await run(manager.id, { workerIds: [mo.id, liam.id] });
+    expect(page.wakes.map((w) => w.workerId).sort()).toEqual([mo.id, liam.id].sort());
+  });
+});
+
+describe('cycle 1 — post-time stamps are decided on live authority, in the append (Diego P2-6; Rook P3-1, P3-2)', () => {
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  const appLike = () => ({ id: app.id, organizationId: org.id, ownerUserId: null });
+  const grant = (workerId: string) =>
+    db.appGrant.create({ data: { id: generateId(), appId: app.id, granteeWorkerId: workerId, name: 'ticker.subscribe-workers', grantedBy: manager.id } });
+
+  it('a stale ADMIN claim stamps nothing', async () => {
+    expect(await stampsOf(ctx(holderA.id, { roles: ['ADMIN'] }), appLike(), null, ['all'])).toEqual({});
+    expect(await stampsOf(ctx(manager.id), appLike(), null, ['all'])).toEqual({ managerPost: true, broadcastWakes: true });
+  });
+
+  it('a grant revoked while the post waits is not honoured; the barrier is the revoking transaction', async () => {
+    const g = await grant(liam.id);
+    let open!: () => void;
+    const gate = new Promise<void>((r) => { open = r; });
+    let ready!: () => void;
+    const locked = new Promise<void>((r) => { ready = r; });
+    const revoking = db.$transaction(async (tx) => {
+      await tx.appGrant.update({ where: { id: g.id }, data: { revokedAt: new Date() } });
+      ready();
+      await gate;
+    });
+    await locked;
+    let settled = false;
+    const stamped = stampsOf(ctx(holderA.id), appLike(), liam.id, ['all']).then((v) => { settled = true; return v; });
+    let waited: boolean;
+    try {
+      await sleep(500);
+      waited = !settled;
+    } finally {
+      open();
+    }
+    await revoking;
+    expect(waited).toBe(true);
+    expect(await stamped).toEqual({});
+  });
+
+  it('the grant is spent on a holder\'s behalf: an unheld grantee, or another person\'s worker, does not broadcast', async () => {
+    await grant(liam.id);
+    expect(await stampsOf(ctx(holderA.id), appLike(), liam.id, ['all'])).toEqual({ broadcastWakes: true });
+    expect(await stampsOf(ctx(holderB.id), appLike(), liam.id, ['all'])).toEqual({}); // not the holder of Liam
+    await db.worker.update({ where: { id: liam.id }, data: { heldByUserId: null, heldAt: null } });
+    expect(await stampsOf(ctx(holderA.id), appLike(), liam.id, ['all'])).toEqual({});
+  });
+
+  it('a stamp on a row that pre-dates its Channel is cleared at adoption', async () => {
+    const early = 'chats:early';
+    for (const [n, data] of [[1, { mentions: ['all'], broadcastWakes: true, managerPost: true }], [2, { mentions: ['liam'] }]] as const) {
+      await db.node.create({ data: { id: generateId(), memoryId: memory.id, loc: `${early}:messages:${n}`, name: String(n), nodeType: 'chat-message', seq: n, content: 'x', data } });
+    }
+    await mkChannel(memory.id, early, manager.id);
+    const rows = await db.node.findMany({ where: { memoryId: memory.id, loc: { startsWith: `${early}:messages:` } }, orderBy: { seq: 'asc' } });
+    expect(rows.map((r) => r.data)).toEqual([{ mentions: ['all'] }, { mentions: ['liam'] }]);
+    expect(rows.every((r) => r.messageChannelId !== null)).toBe(true);
+  });
+});
+
+describe('cycle 1 — smaller dispositions (Diego, Rook)', () => {
+  it('a budget notice whose post failed is tried again, not lost for the day', async () => {
+    await db.app.update({ where: { id: app.id }, data: { wakeDailyBudget: 0 } });
+    await say(channel, 'for liam', mention('liam'));
+    post.mockRejectedValueOnce(new Error('chat down'));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    await due(ctx(manager.id));
+    warn.mockRestore();
+    await due(ctx(manager.id));
+    expect(post).toHaveBeenCalledTimes(2);
+    await due(ctx(manager.id));
+    expect(post).toHaveBeenCalledTimes(2); // posted this time: once a day again
+  });
+
+  it('an availability mark that has lapsed is not reported as in effect', async () => {
+    await db.workerAvailability.create({ data: { workerId: liam.id, state: 'unavailable', reason: 'out-of-tokens', until: new Date(Date.now() - 1000), setAt: new Date(Date.now() - 3600_000), setBy: 'worker' } });
+    await db.workerAvailability.create({ data: { workerId: rook.id, state: 'unavailable', reason: 'other', until: new Date(Date.now() + 3600_000), setAt: new Date(), setBy: 'worker' } });
+    await say(channel, 'hi', mention('liam', 'rook'));
+    const page = await due(ctx(manager.id));
+    expect(page.wakes.find((w: any) => w.worker.id === liam.id).availability).toBeNull();
+    expect(page.wakes.find((w: any) => w.worker.id === rook.id).availability).toMatchObject({ state: 'unavailable' });
+  });
 });
