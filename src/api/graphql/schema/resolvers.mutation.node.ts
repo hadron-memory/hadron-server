@@ -91,6 +91,7 @@ import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { resolveNodeRefForCaller } from './resolvers.nodeRefAccess.js';
 import { resolveEdgeRef } from '../../../lib/entityRef/edgeRef.js';
 import { GraphQLError } from 'graphql';
+import { mapDeadlockToWriteConflict } from '../../../lib/memoryLockConflict.js';
 import { convertHtmlToMarkdown, convertPdfToMarkdown } from '../../../lib/pdfClient.js';
 import { type InputJsonValue } from '../../../generated/prisma/runtime/library.js';
 import { Prisma } from '../../../generated/prisma/index.js';
@@ -858,7 +859,9 @@ export async function writeNodeCore(
         incomingEdges: { include: { source: true } },
       };
       const inWriteTransaction = <T>(work: (tx: Prisma.TransactionClient) => Promise<T>): Promise<T> =>
-        opts?.transaction ? work(opts.transaction.tx) : ctx.db.$transaction(work);
+        opts?.transaction
+          ? work(opts.transaction.tx)
+          : mapDeadlockToWriteConflict(input.memoryId, () => ctx.db.$transaction(work));
 
       // encryptMemory and ownership transfer both change what this writer may
       // commit. Hold a shared memory-row lock through the write, then recheck
@@ -1116,6 +1119,9 @@ export async function writeNodeCore(
             });
             const candidate = await assertTargetStillWritable(tx);
             if (!candidate) return { conflict: false, node: null };
+            // #1753 — memory row BEFORE the node row, the order promotion's
+            // memory FOR UPDATE already uses, so the two cannot cycle.
+            await tx.$queryRaw`SELECT id FROM memories WHERE id = ${input.memoryId} FOR SHARE`;
             await tx.$queryRaw`SELECT "id" FROM "nodes" WHERE "id" = ${candidate.id} FOR UPDATE`;
             await assertMemoryWriteStateStable(tx);
             let current = await assertTargetStillWritable(tx);
@@ -2644,7 +2650,7 @@ export const nodeMutations = {
       if (dryRun) return buildResult();
 
       // ── Write pass: revision snapshot + node update, all-or-nothing ──
-      await ctx.db.$transaction(async (tx) => {
+      await mapDeadlockToWriteConflict(plans[0]?.raw.memoryId ?? '', () => ctx.db.$transaction(async (tx) => {
         // A Channel can claim an ancestor after selection but before this
         // transaction. Take its per-memory key BEFORE any node row lock (the
         // Channel/create and delete paths use the same order), then classify
@@ -2684,11 +2690,10 @@ export const nodeMutations = {
         // whose tracked state changed since then refuses the whole batch
         // (all-or-nothing, as below) instead of overwriting the newer write.
         const planMemory = new Map(plans.map((p) => [p.raw.id, p.raw.memoryId]));
-        for (const id of [...planMemory.keys()].sort()) {
-          await tx.$queryRaw`SELECT id FROM nodes WHERE id = ${id} FOR UPDATE`;
-        }
-        // Hold the memory state through this batch after the node locks: a
-        // pre-flip plan must not write plaintext after encryptMemory flips it.
+        // #1753 — memory rows BEFORE node rows (promotion's order). Holding the
+        // memory state through the batch still stops a pre-flip plan writing
+        // plaintext after encryptMemory flips it: the flip needs the memory
+        // UPDATE lock, which this SHARE excludes until commit.
         const plannedEncryption = new Map(plans.map((plan) => [plan.raw.memoryId, plan.isEncrypted]));
         for (const memoryId of [...plannedEncryption.keys()].sort()) {
           await tx.$queryRaw`SELECT id FROM memories WHERE id = ${memoryId} FOR SHARE`;
@@ -2700,6 +2705,9 @@ export const nodeMutations = {
               extensions: { code: 'NODE_WRITE_CONFLICT', memoryId },
             });
           }
+        }
+        for (const id of [...planMemory.keys()].sort()) {
+          await tx.$queryRaw`SELECT id FROM nodes WHERE id = ${id} FOR UPDATE`;
         }
         // #1468 — a tag replace must not strip the spec marker off a minted
         // spec; one refusal refuses the whole batch, like every check here.
@@ -2769,7 +2777,7 @@ export const nodeMutations = {
           Object.assign(data, clearNodeAuthorship());
           await tx.node.update({ where: { id: raw.id }, data });
         }
-      });
+      }));
 
       // ── Post-commit side effects (best-effort, mirror upsertNode) ──
       // #1061 — one `write` event per node the bulk edit actually rewrote. The
@@ -3845,7 +3853,7 @@ export const nodeMutations = {
       // ── Atomic write: revision snapshot → target update → edge re-point →
       //    source delete ──────────────────────────────────────────────────
       let pendingSourceMemories: string[] = []; // #449
-      await ctx.db.$transaction(async (tx) => {
+      await mapDeadlockToWriteConflict(target.memoryId, () => ctx.db.$transaction(async (tx) => {
         // #1187 — DECLARE the complete key set first, in the one global order.
         // A merge takes two keys and used to take them target-then-source,
         // which inverted against move's destination-then-source; sorting only
@@ -3866,11 +3874,9 @@ export const nodeMutations = {
         if (takesSource) {
           await lockNodeForDelete(tx, source.memoryId, source.loc);
         }
-        for (const id of [source.id, target.id].sort()) {
-          await tx.$queryRaw`SELECT id FROM nodes WHERE id = ${id} FOR UPDATE`;
-        }
         // A merge plans encrypted fields before this transaction. Keep both
         // memory flags stable through the write or refuse the stale plan.
+        // #1753 — memory rows BEFORE node rows (promotion's order).
         for (const memoryId of [...new Set([source.memoryId, target.memoryId])].sort()) {
           await tx.$queryRaw`SELECT id FROM memories WHERE id = ${memoryId} FOR SHARE`;
           const memory = await tx.memory.findUniqueOrThrow({
@@ -3882,6 +3888,9 @@ export const nodeMutations = {
               extensions: { code: 'NODE_WRITE_CONFLICT', memoryId },
             });
           }
+        }
+        for (const id of [source.id, target.id].sort()) {
+          await tx.$queryRaw`SELECT id FROM nodes WHERE id = ${id} FOR UPDATE`;
         }
         // #1468 — `deleteSource` hard-deletes the source, so a minted spec
         // may not be the source (supersede it instead). Same node-then-memory
@@ -4059,7 +4068,7 @@ export const nodeMutations = {
           await hardDeleteThreadsOfTargets(tx, [source.id]); // #1606 — deleted threads go with it
           await tx.node.delete({ where: { id: source.id } });
         }
-      });
+      }));
       await reconcilePendingEdgeCounts(ctx.db, pendingSourceMemories).catch((err) =>
         console.warn('[mergeNodes] pending-edge count reconcile failed (the periodic repair will fix it):', err),
       );
