@@ -7277,7 +7277,9 @@ Refuses if the node has descendants under its URN prefix unless \`recursive: tru
         }
 
         return { ok: true, descendantCount };
-      }, { timeout: 120_000 }); // #1619 — the 5 s default expires on a large cascade
+      // #1619 — the 5 s default expires on a large cascade. Same accepted pool/lock
+      // trade-off as GraphQL deleteNode (see the comment there).
+      }, { timeout: 120_000 });
       await reconcilePendingEdgeCounts(db, pendingSourceMemories).catch((err) =>
         console.warn('[hadron_delete_node] pending-edge count reconcile failed (the periodic repair will fix it):', err),
       );
