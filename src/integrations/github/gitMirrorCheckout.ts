@@ -209,6 +209,18 @@ export async function withMirrorCheckout(
 
       // 5. Let the caller reshape the working tree.
       try {
+        // Git preparation can wait on the remote. An encryption flip during
+        // that wait must also stop a previously-plaintext keyless snapshot.
+        if (opts.nodeWriteKeyAvailable === false) {
+          const current = await db.memory.findUnique({
+            where: { id: resolvedMemoryId }, select: { isEncrypted: true },
+          });
+          if (!current || current.isEncrypted) {
+            console.warn(`[git-mirror] Deferring node write for memory ${resolvedMemoryId}: no request/session key at dispatch`);
+            await restoreRemote(localPath, memory.source);
+            return 'skipped';
+          }
+        }
         const shouldCommit = await mutate({ localPath, branch });
         if (shouldCommit === false) {
           await restoreRemote(localPath, memory.source);

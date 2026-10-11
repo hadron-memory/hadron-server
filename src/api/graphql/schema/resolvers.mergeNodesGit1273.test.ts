@@ -162,6 +162,24 @@ describe('#1273 encrypted node Git mirror', () => {
     expect(warning).not.toHaveBeenCalledWith(expect.stringMatching(/Deferring.*no.*key/i));
   });
 
+  it('rechecks encryption after Git preparation before writing the node file', async () => {
+    await db.memory.update({ where: { id: memoryId }, data: { isEncrypted: false } });
+    await db.node.update({ where: { id: targetId }, data: { ...fields, tags: ['pending-write'] } });
+    let flipped = false;
+    vi.mocked(execGit).mockImplementation(async args => {
+      if (args[0] === 'fetch') {
+        flipped = true;
+        await db.memory.update({ where: { id: memoryId }, data: { isEncrypted: true } });
+      }
+      return { stdout: args[0] === 'status' ? ' M target.md\n' : '', stderr: '' };
+    });
+    await mirror.writeNodeToGit(await payload(), '', null, memoryId);
+    expect(flipped).toBe(true);
+    expect(readFileSync(join(localPath, 'target.md'))).toEqual(originalFile);
+    expect(vi.mocked(execGit).mock.calls.some(([args]) => ['add', 'commit', 'push'].includes(args[0]))).toBe(false);
+    expect(warning).toHaveBeenCalledWith(expect.stringMatching(/Deferring.*no.*key/i));
+  });
+
   it('does not use key possession to bypass the merge owner gate', async () => {
     const other = await db.user.create({ data: { handle: 'mirror-outsider', roles: ['READER'] } });
     await requestKeyStorage.run(new Map([[memoryId, key]]), async () => {
