@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../../test/helpers.js';
-import { mergeUsers } from '../../controller/operations/mergeUsers.js';
+import { mergeUsers } from '../../test/mergeConsent.js';
 import { hasAppRelationship } from '../auth/appRelationship.js';
 import { generateId } from '../id.js';
 import { waitForLockWaitersOfType } from '../../test/lockWait.js';

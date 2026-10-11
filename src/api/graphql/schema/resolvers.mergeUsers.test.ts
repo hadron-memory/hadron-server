@@ -8,7 +8,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
-import { mergeUsers } from '../../../controller/operations/mergeUsers.js';
+import { mergeUsers, approvedMergeProof } from '../../../test/mergeConsent.js';
 import { orgMutations } from './resolvers.mutation.org.js';
 import type { Context } from './resolvers.helpers.js';
 
@@ -20,10 +20,11 @@ function adminCtx(): Context {
   return { db, userId: admin.id, roles: ['ADMIN'] };
 }
 
-function merge(sourceRef: string, targetRef: string, ctx = adminCtx()) {
+async function merge(sourceRef: string, targetRef: string, ctx = adminCtx()) {
+  const consentProof = await approvedMergeProof(db, source.id, target.id);
   return orgMutations.mergeUsers(
     {},
-    { input: { source: sourceRef, target: targetRef } },
+    { input: { source: sourceRef, target: targetRef, consentProof } },
     ctx,
   );
 }

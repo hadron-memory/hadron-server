@@ -474,12 +474,34 @@ model UserMerge {
   mergedAt     DateTime @default(now()) @map("merged_at")
   /// The acting user, or null (an operator script). Recorded as of the merge.
   mergedBy     String?  @map("merged_by")
+  /// #1642: sealed dual-login consent evidence; absent only on historical merges.
+  consentHash String? @unique @map("consent_hash")
+  consentReceipt Json? @map("consent_receipt")
 
   source User @relation("UserMergeSource", fields: [sourceUserId], references: [id], onDelete: Cascade)
   target User @relation("UserMergeTarget", fields: [targetUserId], references: [id], onDelete: Cascade)
 
   @@index([targetUserId])
   @@map("user_merges")
+}
+
+/// #1642: a single-use approval for one ordered, full-account consolidation.
+/// User ids are sealed snapshots, deliberately not retargeted on later merges.
+model UserMergeConsent {
+  id String @id @default(cuid())
+  proofHash String @unique @map("proof_hash")
+  sourceUserId String @map("source_user_id")
+  targetUserId String @map("target_user_id")
+  requestedBy String @map("requested_by")
+  scope String @default("FULL_CONSOLIDATION")
+  createdAt DateTime @default(now()) @map("created_at")
+  expiresAt DateTime @map("expires_at")
+  sourceLoginAt DateTime? @map("source_login_at")
+  sourceLoginMethod String? @map("source_login_method")
+  targetLoginAt DateTime? @map("target_login_at")
+  targetLoginMethod String? @map("target_login_method")
+  consumedAt DateTime? @map("consumed_at")
+  @@map("user_merge_consents")
 }
 
 /// The kinds of widget that can be placed on a user's /app/dashboard grid
@@ -3931,6 +3953,8 @@ model AuthHandoffCode {
   redirect        String?
   /// login only — whether the user was just provisioned (drives /app/setup).
   isNew           Boolean   @default(false) @map("is_new")
+  /// Verified login evidence survives handoff; redemption must never refresh it.
+  loginEvidence Json? @map("login_evidence")
   /// exchange_start only — the org the Exchange connection is being attached to.
   orgId           String?   @map("org_id")
   /// login+GitHub only — SHA-256 of the portal-set browser nonce; the redeemer

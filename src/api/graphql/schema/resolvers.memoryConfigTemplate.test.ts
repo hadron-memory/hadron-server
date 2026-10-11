@@ -1,3 +1,4 @@
+import { mergeUsers } from '../../../test/mergeConsent.js';
 /**
  * #1325 part (c) — the MemoryConfigTemplate API, through the executable schema
  * with the production error formatter, so the codes asserted here are the wire
@@ -16,7 +17,7 @@ import { typeDefs } from './typeDefs.js';
 import { resolvers, type Context } from './resolvers.js';
 import { formatGraphQLError } from '../formatError.js';
 import { deleteUserAccount } from '../../../controller/operations/deleteUser.js';
-import { collisionFreeTemplateName, mergeUsers } from '../../../controller/operations/mergeUsers.js';
+import { collisionFreeTemplateName } from '../../../controller/operations/mergeUsers.js';
 import { validateAiConfigName } from '../../../lib/aiConfig.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));

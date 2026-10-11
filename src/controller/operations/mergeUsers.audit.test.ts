@@ -1,7 +1,8 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../../test/helpers.js';
-import { mergeUsers, AUDIT_USER_COLUMNS } from './mergeUsers.js';
+import { mergeUsers } from '../../test/mergeConsent.js';
+import { AUDIT_USER_COLUMNS } from './mergeUsers.js';
 
 type AuditColumn = { table_name: string; column_name: string };
 

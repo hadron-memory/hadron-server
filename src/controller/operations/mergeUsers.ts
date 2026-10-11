@@ -1,5 +1,6 @@
 import { randomBytes } from 'crypto';
 import { GraphQLError } from 'graphql';
+import { consumeUserMergeConsent } from '../../lib/userMergeConsent.js';
 import { Prisma, type PrismaClient, type User } from '../../generated/prisma/index.js';
 import { mergeOwnerNamespacedUrns } from '../../lib/mergeOwnerNamespacedUrns.js';
 
@@ -176,6 +177,7 @@ async function mergeUserOwnedTemplates(
 }
 
 export interface MergeUsersArgs {
+  consentProof?: string;
   sourceUserId: string;
   targetUserId: string;
   actorUserId?: string | null;
@@ -202,7 +204,7 @@ export interface MergeUsersArgs {
  */
 export async function mergeUsers(
   db: PrismaClient,
-  { sourceUserId, targetUserId, actorUserId, mergeGlobalRoles = false }: MergeUsersArgs,
+  { sourceUserId, targetUserId, actorUserId, mergeGlobalRoles = false, consentProof }: MergeUsersArgs,
 ): Promise<User> {
   // Defense-in-depth: the sole production caller (the mergeUsers resolver)
   // already rejects source === target with MERGE_SOURCE_EQUALS_TARGET, but this
@@ -214,7 +216,7 @@ export async function mergeUsers(
   }
   for (let attempt = 1; ; attempt++) {
     try {
-      return await runMergeTxn(db, { sourceUserId, targetUserId, actorUserId, mergeGlobalRoles });
+      return await runMergeTxn(db, { sourceUserId, targetUserId, actorUserId, mergeGlobalRoles, consentProof });
     } catch (e) {
       const retryable =
         e instanceof MergeRaceError ||
@@ -272,20 +274,26 @@ async function refuseUsersInOpenAlarmChains(
 /** The single SERIALIZABLE merge transaction {@link mergeUsers} retries. */
 async function runMergeTxn(
   db: PrismaClient,
-  { sourceUserId, targetUserId, actorUserId, mergeGlobalRoles = false }: MergeUsersArgs,
+  { sourceUserId, targetUserId, actorUserId, mergeGlobalRoles = false, consentProof }: MergeUsersArgs,
 ): Promise<User> {
   return db.$transaction(async (tx) => {
     // Serialize two merges involving either account. Ref resolution happens
     // in the GraphQL layer, but the rows are rechecked after the lock so a
     // concurrent soft-delete cannot be merged through. Parameterized template
     // (not $queryRawUnsafe) so the ids are bound, never interpolated.
-    await tx.$queryRaw`SELECT id FROM users WHERE id IN (${sourceUserId}, ${targetUserId}) ORDER BY id FOR UPDATE`;
+    await tx.$queryRaw`SELECT id FROM users WHERE id IN (${sourceUserId}, ${targetUserId}, ${actorUserId ?? ''}) ORDER BY id FOR UPDATE`;
     const [source, target] = await Promise.all([
       tx.user.findUnique({ where: { id: sourceUserId } }),
       tx.user.findUnique({ where: { id: targetUserId } }),
     ]);
     if (!source || source.deletedAt) throw new Error('Source user not found');
     if (!target || target.deletedAt) throw new Error('Target user not found');
+    if (mergeGlobalRoles) {
+      const actorRow = actorUserId ? await tx.user.findUnique({ where: { id: actorUserId } }) : null;
+      if (!actorRow || actorRow.deletedAt || !actorRow.roles.some(r => r === 'ADMIN' || r === 'OWNER'))
+        throw new GraphQLError('Forbidden', { extensions: { code: 'FORBIDDEN' } });
+    }
+    const consent = await consumeUserMergeConsent(tx, consentProof, sourceUserId, targetUserId);
     await refuseUsersInOpenAlarmChains(tx, sourceUserId, targetUserId);
 
     const adoptGithubIdentity = target.githubId == null && target.githubUsername == null;
@@ -566,7 +574,7 @@ async function runMergeTxn(
     // authenticated payload, so they keep the source's id, and readers follow
     // it here to the target (src/lib/userMerges.ts). Keyed on the source, so a
     // second merge of the same account can't record a second target.
-    await tx.userMerge.create({ data: { sourceUserId, targetUserId, mergedBy: actor } });
+    await tx.userMerge.create({ data: { sourceUserId, targetUserId, mergedBy: actor, ...consent } });
 
     return tx.user.findUniqueOrThrow({ where: { id: targetUserId } });
   }, {

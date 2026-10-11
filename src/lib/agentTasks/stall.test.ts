@@ -23,7 +23,7 @@ import { runAsActor } from '../requestActor.js';
 import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
 import { taskStallTick } from '../../jobs/taskStallEvaluator.js';
 import { evaluateStalls, isSerializationFailure, raiseStallAlarm, stallCandidates, STALL_WINDOW_DEFAULTS, wakeDueOwners } from './stall.js';
-import { mergeUsers } from '../../controller/operations/mergeUsers.js';
+import { mergeUsers } from '../../test/mergeConsent.js';
 import { loadAvailableForWork } from './availability.js';
 
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({

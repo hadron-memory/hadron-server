@@ -1,3 +1,4 @@
+import { approvedMergeProof } from '../../../test/mergeConsent.js';
 /**
  * #1641 S1 — decision nodes: the log and decision doors, the reads, and the
  * §3.2 gap closures on every generic path. Plan of record:
@@ -673,8 +674,8 @@ describe("Diego's P3 on #1690 — the rendered log stays current after an ask", 
 });
 
 describe('#1715 — merge-aware identity: stored ids follow mergeUsers, and no record is rewritten', () => {
-  const merge = (source: string, target: string) =>
-    M.mergeUsers(null, { input: { source, target } }, as(platformAdmin.id, { roles: ['ADMIN'] }));
+  const merge = async (source: string, target: string) =>
+    M.mergeUsers(null, { input: { source, target, consentProof: await approvedMergeProof(db, source, target) } }, as(platformAdmin.id, { roles: ['ADMIN'] }));
   const fresh = (n: number) => db.user.create({ data: { githubId: 164200 + n, githubUsername: `dn-merge-${n}`, roles: [] } });
   const stored = async (id: string) => {
     const r = await rowOf(id);

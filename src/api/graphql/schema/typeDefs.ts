@@ -5878,7 +5878,14 @@ export const typeDefs = `#graphql
     deleteSourceMem: Boolean = false
   }
 
+  type UserMergeConsentRequest {
+    proof: String!
+    expiresAt: DateTime!
+  }
+
   input MergeUsersInput {
+    "Single-use dual-login proof from beginMergeUsersConsent, approved by both accounts. Required at execution; absent refuses MERGE_CONSENT_REQUIRED."
+    consentProof: String
     "Source user — ID, bare handle, or fully-qualified user URN. Folded into 'target' and soft-deleted."
     source: String!
     "Target user — ID, bare handle, or fully-qualified user URN. The surviving user; target wins non-combinable conflicts while roles preserve the strongest live entitlement."
@@ -9145,7 +9152,11 @@ export const typeDefs = `#graphql
     identities and relationships move; duplicate role-bearing relationships
     preserve the strongest live entitlement. The source is soft-deleted.
     Platform admin only. The resulting merge is global; organization
-    administration does not authorize account consolidation.
+    administration does not authorize account consolidation. Both accounts must
+    approve the exact ordered pair after fresh login, within 15 minutes.
+    The proof is single-use, consumed atomically before transfers, and recorded
+    with the merge. Invalid or missing proof refuses MERGE_CONSENT_REQUIRED.
+    There is no administrator substitute or recovery path.
 
     Records the merge (#1715). User ids stored inside decisions and decision
     logs are never rewritten, since they are authenticated; readers follow
@@ -9158,6 +9169,11 @@ export const typeDefs = `#graphql
     the alarms, then merge.
     """
     mergeUsers(input: MergeUsersInput!): User!
+
+    "Platform admin begins an exact ordered-pair, full-consolidation consent, valid for 15 minutes. Returns its opaque proof once."
+    beginMergeUsersConsent(source: String!, target: String!): UserMergeConsentRequest!
+    "Each account approves with its own JWT from a verified login AFTER consent creation. API keys, impersonation and bound worker sessions cannot approve. No admin substitute."
+    approveMergeUsersConsent(proof: String!): Boolean!
 
     """
     Delete a user account (self-serve account deletion, Apple 5.1.1(v) /

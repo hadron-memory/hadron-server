@@ -484,6 +484,7 @@ export async function createServer(): Promise<Express> {
 
       // Issue JWT
       const jwt = await signJwt({
+        login: { at: Date.now(), method: 'github' },
         sub: user.id,
         githubUsername: user.githubUsername ?? undefined,
         roles: user.roles as ('OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER')[],
@@ -533,6 +534,7 @@ export async function createServer(): Promise<Express> {
       // itself. redirect + isNew ride in the code record, not the URL. The
       // GitHub-flow clientState binds the finishing browser (session fixation).
       const handoffCode = await issueLoginCode({
+        login: { at: Date.now(), method: 'github' },
         userId: user.id,
         redirect: pending.redirect,
         isNew,
@@ -633,6 +635,7 @@ export async function createServer(): Promise<Express> {
 
       // Same claim shape POST /auth/session rebuilds from the user row.
       const jwt = await signJwt({
+        login: { at: Date.now(), method: 'google' },
         sub: user.id,
         roles: user.roles as ('OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER')[],
         ...(user.email ? { email: user.email } : {}),
@@ -656,6 +659,7 @@ export async function createServer(): Promise<Express> {
 
       // #477 Sink 1: single-use handoff code; the JWT never rides a URL.
       const handoffCode = await issueLoginCode({
+        login: { at: Date.now(), method: 'google' },
         userId: user.id,
         redirect: pending.redirect,
         isNew,
@@ -776,6 +780,7 @@ export async function createServer(): Promise<Express> {
 
       // Same claim shape POST /auth/session rebuilds from the user row.
       const jwt = await signJwt({
+        login: { at: Date.now(), method: 'apple' },
         sub: user.id,
         roles: user.roles as ('OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER')[],
         ...(user.email ? { email: user.email } : {}),
@@ -799,6 +804,7 @@ export async function createServer(): Promise<Express> {
 
       // #477 Sink 1: single-use handoff code; the JWT never rides a URL.
       const handoffCode = await issueLoginCode({
+        login: { at: Date.now(), method: 'apple' },
         userId: user.id,
         redirect: pending.redirect,
         isNew,
@@ -968,6 +974,7 @@ export async function createServer(): Promise<Express> {
       // rationale). Option-C honors return_to regardless of isNew.
       if (isOptionC) {
         const jwt = await signJwt({
+          login: { at: Date.now(), method: 'email' },
           sub: user.id,
           roles: user.roles as ('OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER')[],
           ...(user.email ? { email: user.email } : {}),
@@ -1001,6 +1008,7 @@ export async function createServer(): Promise<Express> {
       // redirect (PR #770 review, Copilot). Falls back to `/` when not local.
       const dest = redirectParam && isServerLocalPath(redirectParam) ? redirectParam : '/';
       const code = await issueLoginCode({
+        login: { at: Date.now(), method: 'email' },
         userId: user.id,
         redirect: dest,
         isNew,
@@ -1054,6 +1062,7 @@ export async function createServer(): Promise<Express> {
     // Rebuild the same claim set the GitHub/email flows used to mint, from the
     // authoritative user row (roles may have changed since the code was issued).
     const jwt = await signJwt({
+      login: redeemed.login,
       sub: user.id,
       roles: user.roles as ('OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER')[],
       ...(user.githubUsername ? { githubUsername: user.githubUsername } : {}),

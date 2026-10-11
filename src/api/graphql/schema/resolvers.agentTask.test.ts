@@ -18,7 +18,7 @@ import { generateId } from '../../../lib/id.js';
 import { runAsActor } from '../../../lib/requestActor.js';
 import { resolvers, type Context } from './resolvers.js';
 import { isAppParticipant } from './resolvers.helpers.js';
-import { mergeUsers } from '../../../controller/operations/mergeUsers.js';
+import { mergeUsers } from '../../../test/mergeConsent.js';
 import { lockAuthorityAnchors } from '../../../lib/auth/authorityAnchors.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
