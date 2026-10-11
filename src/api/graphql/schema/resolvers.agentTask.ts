@@ -481,6 +481,8 @@ export async function inTaskWriteTx<T>(
   actor: TaskActor,
   refused: () => GraphQLError,
   write: (tx: Prisma.TransactionClient, txCtx: Context, app: TaskApp) => Promise<T>,
+  /** `exclusive` for a writer that UPDATEs the anchored App row itself: it cannot upgrade a shared hold without deadlocking its peers. */
+  options: { lockMode?: 'shared' | 'exclusive' } = {},
 ): Promise<T> {
   const anchors: AuthorityAnchor[] = [
     { kind: 'app', id: app.id },
@@ -502,6 +504,7 @@ export async function inTaskWriteTx<T>(
       },
       (tx, txCtx) => write(tx, txCtx, fresh as TaskApp),
       {
+        lockMode: options.lockMode,
         afterLock: async (tx) => {
           // #1726: the reportsTo graph, SHARED, before any membership or worker
           // row (src/lib/workerReportsTo.ts, the lock protocol). The chain arm
