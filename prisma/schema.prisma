@@ -5353,6 +5353,9 @@ model AppWakeReservation {
   workerId   String   @id @map("worker_id")
   appId      String   @map("app_id")
   reservedAt DateTime @map("reserved_at")
+  /// Which wake it was reserved for (the proof's channels, seqs and ticks, hashed): an acknowledgement spends only the
+  /// reservation of the wake it delivers, so an old proof replayed cannot cancel a newer wake's allowance.
+  wakeKey    String   @map("wake_key")
 
   app    App    @relation(fields: [appId], references: [id], onDelete: Cascade)
   worker Worker @relation(fields: [workerId], references: [id], onDelete: Cascade)

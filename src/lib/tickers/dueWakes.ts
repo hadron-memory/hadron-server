@@ -29,7 +29,7 @@ import {
   type SubscriptionInput,
   type WorkerWake,
 } from './wakeRule.js';
-import { signWakeProof, WAKE_PROOF_MAX_AGE_MS, type WakeRequester } from './wakeProof.js';
+import { signWakeProof, wakeIdentity, WAKE_PROOF_MAX_AGE_MS, type WakeRequester } from './wakeProof.js';
 
 /**
  * Messages read per channel per page, and the most one request reads from one channel. Scanning goes on past a
@@ -136,9 +136,16 @@ async function loadMessages(
   lo: number,
   head: number,
   limit: number,
+  /** Only the rows that could matter to someone still unmet (plaintext channels; an encrypted row can't be judged in SQL). */
+  only?: { tokens: string[]; nonOwnOf: string | 'any' | null },
 ): Promise<RoutedMessage[]> {
   if (head <= lo) return [];
   if (!channel.encrypted) {
+    const mentioned = Prisma.sql`jsonb_exists_any(n.data->'mentions', ${only?.tokens ?? []}::text[])`;
+    const others = only?.nonOwnOf == null ? Prisma.sql`FALSE`
+      : only.nonOwnOf === 'any' ? Prisma.sql`TRUE`
+      : Prisma.sql`(n.data->>'authorWorkerId') IS DISTINCT FROM ${only.nonOwnOf}`;
+    const wanted = only ? Prisma.sql`AND (${mentioned} OR ${others})` : Prisma.empty;
     const rows = await db.$queryRaw<Array<{ seq: number; author: string | null; mentions: unknown; bw: boolean | null; mp: boolean | null }>>(Prisma.sql`
       SELECT n.seq::int AS seq,
              n.data->>'authorWorkerId' AS author,
@@ -151,6 +158,7 @@ async function loadMessages(
         AND n.deleted_at IS NULL
         AND n.seq > ${lo}
         AND n.seq <= ${head}
+        ${wanted}
       ORDER BY n.seq
       LIMIT ${limit}
     `);
@@ -189,21 +197,30 @@ async function loadMessages(
   return out;
 }
 
-/** Someone a channel's messages are read for: their floor, whether only mentions count, and the tokens that reach them. */
-type Watcher = { floor: number; mentionOnly: boolean; workerId: string; tokens: string[] };
+/**
+ * Someone a channel's messages are read for. `mentionsMatter`: a mention (for them, or a broadcast) can wake them
+ * (immediate mentions on, or any enabled ticker). `allMatters`: any message that is not their own can (an ALL ticker
+ * covering the channel, on a register entry that is not mention-only). A worker for whom neither holds is not watched.
+ */
+type Watcher = { floor: number; workerId: string; tokens: string[]; mentionsMatter: boolean; allMatters: boolean };
+
+const BROADCAST = BROADCAST_MENTION_TOKENS as readonly string[];
 
 /** Does `m` possibly matter to this watcher? (A superset of the rule's relevance, never a subset.) */
 function mattersTo(m: RoutedMessage, w: Watcher): boolean {
   if (m.authorWorkerId === w.workerId) return false;
-  if (m.mentions.some((t) => w.tokens.includes(t) || (BROADCAST_MENTION_TOKENS as readonly string[]).includes(t))) return true;
-  return !w.mentionOnly;
+  if (w.mentionsMatter && m.mentions.some((t) => w.tokens.includes(t) || BROADCAST.includes(t))) return true;
+  return w.allMatters;
 }
 
 /**
- * Read a channel from `lo`, a page at a time, for as long as some watcher has nothing that matters to them in
- * what was read and the channel has more. Without this, a mention-only worker whose floor sits under 5,000
- * unrelated messages would never see the mention at row 5,001: the slice had no reason to wake them, so nothing
- * acknowledged, so the slice never moved (Diego P2-5). The next page starts at the lowest floor still unmet.
+ * Read a channel from `lo`, a page at a time. The first page is everything; while it comes back full and some watcher
+ * has nothing that matters to them in what was read, the next pages are fetched in SQL for exactly the rows that could
+ * matter to the watchers still unmet (a mention of them or a broadcast; or a message that is not their own), starting
+ * at the lowest unmet floor. So a backlog of unrelated chatter can neither hide the message that matters (Diego P2-5)
+ * nor, because the filter is applied in the database and not by counting rows read, push the threshold out to a larger
+ * number: the scan ends when every watcher is met or the channel has no more candidates. `maxRows` bounds the rows
+ * RETURNED (each a candidate for someone); an encrypted channel cannot be filtered in SQL and is bounded by it as rows read.
  */
 async function scanChannel(
   db: Context['db'],
@@ -215,14 +232,19 @@ async function scanChannel(
 ): Promise<RoutedMessage[]> {
   const out: RoutedMessage[] = [];
   let cursor = lo;
+  let only: Parameters<typeof loadMessages>[5];
   for (;;) {
-    const page = await loadMessages(db, channel, cursor, head, scan.pageRows);
+    const page = await loadMessages(db, channel, cursor, head, scan.pageRows, only);
     out.push(...page);
     if (page.length < scan.pageRows || out.length >= scan.maxRows) return out;
-    const lastSeq = page[page.length - 1]!.seq;
     const unmet = watchers.filter((w) => !out.some((m) => m.seq > w.floor && mattersTo(m, w)));
     if (unmet.length === 0) return out;
-    cursor = Math.max(lastSeq, Math.min(...unmet.map((w) => w.floor)));
+    cursor = Math.max(page[page.length - 1]!.seq, Math.min(...unmet.map((w) => w.floor)));
+    const allUnmet = unmet.filter((w) => w.allMatters);
+    only = {
+      tokens: [...new Set([...BROADCAST, ...unmet.filter((w) => w.mentionsMatter).flatMap((w) => w.tokens)])],
+      nonOwnOf: allUnmet.length === 0 ? null : allUnmet.length === 1 || new Set(allUnmet.map((w) => w.workerId)).size === 1 ? allUnmet[0]!.workerId : 'any',
+    };
   }
 }
 
@@ -321,11 +343,17 @@ export async function computeDueWakes(args: {
   const watchersOf = new Map<string, Watcher[]>();
   for (const w of workers) {
     const own = mentionTokenOf(w.name);
+    const subsHere = subsOf.get(w.id) ?? [];
+    const mentionsImmediate = (settingsOf.get(w.id)?.mentions ?? 'IMMEDIATE') === 'IMMEDIATE';
     for (const c of countedOf.get(w.id) ?? []) {
       if (c.head <= Math.max(c.seen, c.delivered)) continue;
+      const covers = (s: (typeof subsHere)[number]) => s.ticker.channelIds.length === 0 || s.ticker.channelIds.includes(c.channelId);
+      const mentionsMatter = mentionsImmediate || subsHere.some(covers);
+      const allMatters = !c.mentionOnly && subsHere.some((s) => s.ticker.relevance !== 'MENTIONS' && covers(s));
+      if (!mentionsMatter && !allMatters) continue;
       watchersOf.set(c.channelId, [
         ...(watchersOf.get(c.channelId) ?? []),
-        { floor: Math.max(c.seen, c.delivered), mentionOnly: c.mentionOnly, workerId: w.id, tokens: own ? [own] : [] },
+        { floor: Math.max(c.seen, c.delivered), workerId: w.id, tokens: own ? [own] : [], mentionsMatter, allMatters },
       ]);
     }
   }
@@ -440,7 +468,7 @@ export async function computeDueWakes(args: {
           SELECT worker_id FROM app_wake_reservations WHERE app_id = ${app.id} AND reserved_at > ${cutoff}::timestamp`)).map((r) => r.worker_id),
       );
       let consumed = used + live.size;
-      const reserve: string[] = [];
+      const reserve: Array<{ workerId: string; key: string }> = [];
       wakes.length = 0;
       withheld = 0;
       for (const i of issued) {
@@ -449,15 +477,15 @@ export async function computeDueWakes(args: {
             if (consumed >= budget) { withheld++; continue; }
             consumed++;
           }
-          reserve.push(i.workerId);
+          reserve.push({ workerId: i.workerId, key: wakeIdentity({ channels: i.wake.channels.map((c) => ({ channelId: c.channelId, incarnation: c.incarnation, through: c.throughSeq })), ticks: i.wake.reasons.flatMap((r) => (r.kind === 'TICK' ? [{ tickerId: r.tickerId, k: r.k }] : [])) }) });
         }
         passes(i);
       }
       const nowNaive = toNaiveUtc(now);
-      for (const workerId of reserve) {
+      for (const { workerId, key } of reserve) {
         await tx.$executeRaw(Prisma.sql`
-          INSERT INTO app_wake_reservations (worker_id, app_id, reserved_at) VALUES (${workerId}, ${app.id}, ${nowNaive}::timestamp)
-          ON CONFLICT (worker_id) DO UPDATE SET reserved_at = EXCLUDED.reserved_at, app_id = EXCLUDED.app_id`);
+          INSERT INTO app_wake_reservations (worker_id, app_id, reserved_at, wake_key) VALUES (${workerId}, ${app.id}, ${nowNaive}::timestamp, ${key})
+          ON CONFLICT (worker_id) DO UPDATE SET reserved_at = EXCLUDED.reserved_at, app_id = EXCLUDED.app_id, wake_key = EXCLUDED.wake_key`);
       }
     });
   }

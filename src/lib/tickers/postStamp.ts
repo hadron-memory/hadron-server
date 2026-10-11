@@ -23,6 +23,7 @@ import { mayStillDriveWorkerApp } from '../teamAttention.js';
 import { BROADCAST_MENTION_TOKENS } from '../mentionToken.js';
 import { GRANT_SUBSCRIBE_WORKERS } from './bounds.js';
 import { liveCaller } from './liveCaller.js';
+import { lockAuthorityAnchors } from '../auth/authorityAnchors.js';
 
 /**
  * Decided INSIDE the append transaction (Diego P2-6): a stamp is permanent and
@@ -41,6 +42,23 @@ export async function wakeStampsFor(
 ): Promise<{ managerPost?: true; broadcastWakes?: true }> {
   if (!app || mentions.length === 0) return {};
   const broadcast = mentions.some((t) => (BROADCAST_MENTION_TOKENS as readonly string[]).includes(t));
+  // The authority anchors first (the established protocol: anchors before row locks), then the App as it stands NOW:
+  // the object the caller passed was read before the append, and an ownership change, uninstall or transfer may
+  // have landed since. Revokers of that authority take the same anchors exclusively.
+  await lockAuthorityAnchors(tx, [{ kind: 'app', id: app.id }], 'shared');
+  const now = await tx.app.findUnique({ where: { id: app.id }, select: { id: true, organizationId: true, ownerUserId: true, deletedAt: true, uninstalledAt: true } });
+  if (!now || now.deletedAt || now.uninstalledAt) return {};
+  await lockAuthorityAnchors(
+    tx,
+    [
+      { kind: 'app', id: now.id },
+      ...(now.organizationId ? [{ kind: 'org' as const, id: now.organizationId }] : []),
+      ...(now.ownerUserId ? [{ kind: 'user' as const, id: now.ownerUserId }] : []),
+      ...(ctx.userId ? [{ kind: 'user' as const, id: ctx.userId }] : []),
+    ],
+    'shared',
+  );
+  app = now;
   if (ctx.userId && !ctx.impersonation) {
     // Held before the roles and memberships are read, so a change to them orders against this post.
     await tx.$queryRaw`SELECT 1 FROM users WHERE id = ${ctx.userId} FOR SHARE`;
@@ -60,8 +78,10 @@ export async function wakeStampsFor(
       FOR SHARE`;
     if (grants.length > 0) {
       // Spent on a holder's behalf: the grantee must be live and held by the person behind the post (as on subscribe).
-      const w = await tx.worker.findUnique({ where: { id: authorWorkerId }, select: { retiredAt: true, heldByUserId: true } });
-      granted = !!w && !w.retiredAt && w.heldByUserId === live.userId;
+      // Read FOR SHARE: a release or retirement orders against this post (Rook, #1751 cycle 1 P3).
+      const w = await tx.$queryRaw<Array<{ retired_at: Date | null; held_by_user_id: string | null }>>`
+        SELECT retired_at, held_by_user_id FROM workers WHERE id = ${authorWorkerId} FOR SHARE`;
+      granted = w.length === 1 && !w[0]!.retired_at && w[0]!.held_by_user_id === live.userId;
     }
   }
   return {

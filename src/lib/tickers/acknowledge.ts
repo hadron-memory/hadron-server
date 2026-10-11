@@ -17,8 +17,10 @@ import { GraphQLError } from 'graphql';
 import { Prisma } from '../../generated/prisma/index.js';
 import type { Context } from '../../api/graphql/schema/resolvers.helpers.js';
 import { currentActor } from '../requestActor.js';
+import { withAuthorizedTx } from '../../api/graphql/schema/authorizedTx.js';
+import type { AuthorityAnchor } from '../auth/authorityAnchors.js';
 import { toNaiveUtc } from '../sessionActivity.js';
-import { sameRequester, verifyWakeProof, WAKE_PROOF_MAX_AGE_MS, type WakeProof, type WakeRequester } from './wakeProof.js';
+import { sameRequester, verifyWakeProof, wakeIdentity, WAKE_PROOF_MAX_AGE_MS, type WakeProof, type WakeRequester } from './wakeProof.js';
 
 export const ACK_MAX_PROOFS = 200;
 
@@ -35,10 +37,12 @@ export async function acknowledgeWakes(args: {
   /**
    * Decides, per proof and INSIDE the acknowledgement's transaction (after the
    * worker's wake lock), that the requester may still read this worker's wakes.
-   * It must hold what it reads (the holder's row, the caller's memberships), so a
-   * release or demotion cannot commit between the check and the write.
+   * `txCtx` carries the caller's platform roles re-read under the authority anchors,
+   * and the App, its org and its owner are anchored for the whole transaction, so a
+   * demotion, an uninstall or an ownership change either commits first or waits.
+   * It must hold the rows it reads (the holder's row, the caller's memberships).
    */
-  mayReadWorker: (proof: WakeProof, tx: Prisma.TransactionClient) => Promise<boolean>;
+  mayReadWorker: (proof: WakeProof, tx: Prisma.TransactionClient, txCtx: Context) => Promise<boolean>;
   now?: Date;
 }): Promise<AcknowledgeResult> {
   const { ctx, requester } = args;
@@ -65,13 +69,34 @@ export async function acknowledgeWakes(args: {
     ackedByAppKeyId: 'appKeyId' in requester ? requester.appKeyId : null,
   };
 
-  return ctx.db.$transaction(async (tx) => {
+  // The authority the acknowledgement rests on, anchored BEFORE any row or advisory lock (Diego cycle 2, P2-1): every
+  // App in the batch, its org and its owner. Revokers of that authority take the same anchors exclusively.
+  const appIds = [...new Set(proofs.map((p) => p.appId))].sort();
+  const apps = await ctx.db.app.findMany({ where: { id: { in: appIds } }, select: { id: true, organizationId: true, ownerUserId: true } });
+  const anchors: AuthorityAnchor[] = apps.flatMap((a) => [
+    { kind: 'app' as const, id: a.id },
+    ...(a.organizationId ? [{ kind: 'org' as const, id: a.organizationId }] : []),
+    ...(a.ownerUserId ? [{ kind: 'user' as const, id: a.ownerUserId }] : []),
+  ]);
+
+  try {
+    return await withAuthorizedTx(ctx, anchors, async () => undefined, (tx, txCtx) => writeAcks(tx, txCtx));
+  } catch (e) {
+    // An App uninstalled or deleted, or a user gone, under the anchors: nobody may acknowledge for it.
+    if (e instanceof Error && e.message === 'Forbidden') refuse('WAKE_PROOF_REQUESTER_MISMATCH', 'This wake proof was issued to someone else.');
+    throw e;
+  }
+
+  async function writeAcks(tx: Prisma.TransactionClient, txCtx: Context): Promise<AcknowledgeResult> {
     let acknowledged = 0;
     let unchanged = 0;
-    // A stable order, so two acknowledgements of overlapping workers cannot deadlock on the per-worker locks.
+    // One order for every lock below, across every caller: the Apps' budget locks (the same lock `dueWakes` issues
+    // under, so a reservation becomes a spent wake atomically with respect to issuance), then the per-worker wake
+    // locks by worker id. Two acknowledgements, or an acknowledgement and an issue, can then never wait in a cycle.
+    for (const appId of appIds) await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${'wakebudget:' + appId}, 0))`;
     for (const p of [...proofs].sort((a, b) => a.workerId.localeCompare(b.workerId))) {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${'wake:' + p.workerId}, 0))`;
-      if (!(await args.mayReadWorker(p, tx))) refuse('WAKE_PROOF_REQUESTER_MISMATCH', 'This wake proof was issued to someone else.');
+      if (!(await args.mayReadWorker(p, tx, txCtx))) refuse('WAKE_PROOF_REQUESTER_MISMATCH', 'This wake proof was issued to someone else.');
       const worker = await tx.worker.findUnique({ where: { id: p.workerId }, select: { appId: true, retiredAt: true } });
       if (!worker || worker.appId !== p.appId || worker.retiredAt) refuse('WAKE_PROOF_STALE', 'The worker of this wake is gone.');
 
@@ -132,8 +157,10 @@ export async function acknowledgeWakes(args: {
             acked_by_worker_id = CASE WHEN EXCLUDED.last_acked_tick > worker_delivery_ticks.last_acked_tick THEN EXCLUDED.acked_by_worker_id ELSE worker_delivery_ticks.acked_by_worker_id END,
             acked_by_app_key_id = CASE WHEN EXCLUDED.last_acked_tick > worker_delivery_ticks.last_acked_tick THEN EXCLUDED.acked_by_app_key_id ELSE worker_delivery_ticks.acked_by_app_key_id END`;
       }
-      // The reservation this wake held (dueWakes) is spent or void either way.
-      await tx.$executeRaw`DELETE FROM app_wake_reservations WHERE worker_id = ${p.workerId}`;
+      // Only the reservation of THIS wake is spent or void: the one carrying this proof's wake key. A re-read of an
+      // unchanged wake shares the key, so it is freed whichever proof is acknowledged; a replay of an old, unchanged
+      // proof matches nothing newer, so it can never cancel the allowance of a wake issued after it (Diego cycle 2, P2-3).
+      await tx.$executeRaw(Prisma.sql`DELETE FROM app_wake_reservations WHERE worker_id = ${p.workerId} AND wake_key = ${wakeIdentity(p)}`);
       // Counted against the day's budget only when it moved something: a repeat acknowledgement is not another wake.
       if (!advanced) { unchanged++; continue; }
       acknowledged++;
@@ -145,5 +172,5 @@ export async function acknowledgeWakes(args: {
       }
     }
     return { acknowledged, unchanged };
-  });
+  }
 }

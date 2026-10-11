@@ -118,11 +118,10 @@ export async function acknowledgeWakesFor(requestCtx: Context, a: { proofs: stri
     ctx: requestCtx,
     requester: { userId },
     proofs: a.proofs,
-    // Decided INSIDE the acknowledgement's transaction, on live roles, with the holder's row and the caller's
-    // memberships held, so a release or a demotion that commits first is seen and one that comes later waits.
-    mayReadWorker: async (p: WakeProof, tx: Prisma.TransactionClient) => {
-      const txCtx = await liveCaller(requestCtx, tx);
-      if (!txCtx) return false;
+    // Decided INSIDE the acknowledgement's transaction, on `txCtx` (platform roles re-read under the authority anchors
+    // of every App in the batch), with the holder's row and the caller's memberships held, so a release, a demotion,
+    // an uninstall or an ownership change that commits first is seen and one that comes later waits.
+    mayReadWorker: async (p: WakeProof, tx: Prisma.TransactionClient, txCtx: Context) => {
       const app = await loadApp(txCtx, p.appId);
       if (!app || app.deletedAt || app.uninstalledAt) return false;
       await tx.$queryRaw`SELECT 1 FROM app_members WHERE app_id = ${app.id} AND user_id = ${userId} FOR SHARE`;

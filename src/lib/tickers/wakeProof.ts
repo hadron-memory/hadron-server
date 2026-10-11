@@ -8,7 +8,7 @@
 // minutes) and the channel incarnation are checked by the acknowledger, which
 // has the database.
 
-import { createHmac } from 'node:crypto';
+import { createHash, createHmac } from 'node:crypto';
 import { GraphQLError } from 'graphql';
 import { attentionTokenSecret } from '../teamAttention.js';
 import { safeEqual } from '../constantTime.js';
@@ -79,4 +79,17 @@ export function sameRequester(proof: WakeProof, who: WakeRequester): boolean {
   if ('userId' in r && 'userId' in who) return r.userId === who.userId;
   if ('appKeyId' in r && 'appKeyId' in who) return r.appKeyId === who.appKeyId;
   return false;
+}
+
+/**
+ * Which wake a proof is for: its channels (id, incarnation, delivered-through seq) and ticks (ticker, tick), hashed.
+ * Two reads of an unchanged wake share a key; a wake with newer messages or a later tick has another. A budget
+ * reservation carries it, so an acknowledgement spends exactly the reservation of the wake it delivers.
+ */
+export function wakeIdentity(p: Pick<WakeProof, 'channels' | 'ticks'>): string {
+  const canon = JSON.stringify([
+    [...p.channels].map((c) => [c.channelId, c.incarnation, c.through]).sort(),
+    [...p.ticks].map((t) => [t.tickerId, t.k]).sort(),
+  ]);
+  return createHash('sha256').update(canon).digest('hex').slice(0, 32);
 }

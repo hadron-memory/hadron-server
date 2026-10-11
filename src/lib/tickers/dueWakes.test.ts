@@ -734,3 +734,151 @@ describe('cycle 1 — smaller dispositions (Diego, Rook)', () => {
     expect(page.wakes.find((w: any) => w.worker.id === rook.id).availability).toMatchObject({ state: 'unavailable' });
   });
 });
+
+// ── Cycle 2: Diego's delta on fe5f5c97 ─────────────────────────────────────────
+
+/** A transaction that does `work`, then stays open until released: the "revoker in flight" of a barrier test. */
+function holdOpen(work: (tx: Parameters<Parameters<typeof db.$transaction>[0]>[0]) => Promise<void>) {
+  let release!: () => void;
+  const gate = new Promise<void>((r) => { release = r; });
+  let ready!: () => void;
+  const locked = new Promise<void>((r) => { ready = r; });
+  const done = db.$transaction(async (tx) => { await work(tx); ready(); await gate; });
+  return { locked, release, done };
+}
+/** Whether `p` is still pending after `ms`, always releasing the barrier. */
+async function stillWaiting(p: Promise<unknown>, h: { release: () => void }, ms = 500): Promise<boolean> {
+  let settled = false;
+  p.then(() => { settled = true; }, () => { settled = true; });
+  try {
+    await new Promise((r) => setTimeout(r, ms));
+    return !settled;
+  } finally {
+    h.release();
+  }
+}
+
+describe('cycle 2 — the authority anchors (Diego P2-1)', () => {
+  const appLike = () => ({ id: app.id, organizationId: org.id, ownerUserId: null });
+
+  it('a demotion that is in flight when an acknowledgement starts is waited for, then the proof is refused', async () => {
+    await say(channel, 'one', mention('liam'));
+    const w = (await due(ctx(manager.id))).wakes[0];
+    const h = holdOpen(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('authorization:org'), hashtext(${org.id}))`;
+      await tx.orgMember.deleteMany({ where: { userId: manager.id } });
+    });
+    await h.locked;
+    const ack = M.acknowledgeWakes({}, { proofs: [w.proof] }, ctx(manager.id));
+    const settledEarly = ack.then(() => 'ok', (e: any) => e.extensions?.code);
+    expect(await stillWaiting(settledEarly, h)).toBe(true);
+    await h.done;
+    expect(await settledEarly).toBe('WAKE_PROOF_REQUESTER_MISMATCH');
+    expect(await db.workerDeliveryChannel.count({ where: { workerId: liam.id } })).toBe(0);
+  });
+
+  it('an App uninstalled while an acknowledgement starts is waited for, then refused', async () => {
+    await say(channel, 'one', mention('liam'));
+    const w = (await due(ctx(holderA.id))).wakes[0];
+    const h = holdOpen(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('authorization:app'), hashtext(${app.id}))`;
+      await tx.app.update({ where: { id: app.id }, data: { uninstalledAt: new Date() } });
+    });
+    await h.locked;
+    const settled = M.acknowledgeWakes({}, { proofs: [w.proof] }, ctx(holderA.id)).then(() => 'ok', (e: any) => e.extensions?.code);
+    expect(await stillWaiting(settled, h)).toBe(true);
+    await h.done;
+    expect(await settled).toBe('WAKE_PROOF_REQUESTER_MISMATCH');
+  });
+
+  it('a post made while the App is being uninstalled waits, then stamps nothing', async () => {
+    const h = holdOpen(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('authorization:app'), hashtext(${app.id}))`;
+      await tx.app.update({ where: { id: app.id }, data: { uninstalledAt: new Date() } });
+    });
+    await h.locked;
+    const stamped = stampsOf(ctx(manager.id), appLike(), null, ['all']);
+    expect(await stillWaiting(stamped, h)).toBe(true);
+    await h.done;
+    expect(await stamped).toEqual({});
+  });
+});
+
+describe('cycle 2 — issue and acknowledge share the budget lock (Diego P2-2)', () => {
+  it('an acknowledgement waits for an issuer holding the App\'s budget lock, and the last slot is not handed out twice', async () => {
+    await db.app.update({ where: { id: app.id }, data: { wakeDailyBudget: 1 } });
+    await say(channel, 'for liam', mention('liam'));
+    await say(channel, 'for rook', mention('rook'));
+    const a = (await due(ctx(holderA.id))).wakes[0];
+    const h = holdOpen(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${'wakebudget:' + app.id}, 0))`;
+    });
+    await h.locked;
+    const ack = M.acknowledgeWakes({}, { proofs: [a.proof] }, ctx(holderA.id));
+    expect(await stillWaiting(ack, h)).toBe(true);
+    await ack;
+    // A is spent: the single slot is gone and B stays withheld, whichever order the reads came in.
+    expect((await due(ctx(holderB.id))).wakes).toHaveLength(0);
+    expect((await db.appWakeDay.findFirstOrThrow({ where: { appId: app.id } })).wakes).toBe(1);
+  });
+});
+
+describe('cycle 2 — an old, unchanged proof cannot cancel a newer reservation (Diego P2-3)', () => {
+  it('replaying the first proof after a second wake was issued leaves the second\'s allowance', async () => {
+    await db.app.update({ where: { id: app.id }, data: { wakeDailyBudget: 2 } });
+    await say(channel, 'one', mention('liam'));
+    const p1 = (await due(ctx(holderA.id))).wakes[0];
+    await M.acknowledgeWakes({}, { proofs: [p1.proof] }, ctx(holderA.id));
+    await db.workerDeliveryChannel.updateMany({ data: { deliveredAt: new Date(Date.now() - 3600_000) } });
+    await say(channel, 'two', mention('liam'));
+    const p2 = (await due(ctx(holderA.id))).wakes[0];
+    expect(p2.proof).not.toBe(p1.proof);
+    const before = await db.appWakeReservation.findMany();
+    expect(before).toHaveLength(1);
+    // Rook wants the last slot (used 1 + Liam's reservation = 2): withheld.
+    await say(channel, 'for rook', mention('rook'));
+    expect((await due(ctx(holderB.id))).wakes).toHaveLength(0);
+    // The old proof, replayed, is unchanged and must not free Liam's second reservation.
+    expect(await M.acknowledgeWakes({}, { proofs: [p1.proof] }, ctx(holderA.id))).toEqual({ acknowledged: 0, unchanged: 1 });
+    expect(await db.appWakeReservation.findMany()).toEqual(before);
+    expect((await due(ctx(holderB.id))).wakes).toHaveLength(0);
+    // Acknowledging the second spends it for good.
+    expect(await M.acknowledgeWakes({}, { proofs: [p2.proof] }, ctx(holderA.id))).toEqual({ acknowledged: 1, unchanged: 0 });
+    expect(await db.appWakeReservation.count()).toBe(0);
+  });
+});
+
+describe('cycle 2 — the scan cannot strand a MENTIONS ticker, nor stop at a row ceiling (Diego P2-4)', () => {
+  const run = (userId: string, scan: { pageRows: number; maxRows: number }, extra: Record<string, unknown> = {}) =>
+    computeDueWakes({ ctx: ctx(userId), app: { id: app.id, organizationId: org.id, ownerUserId: null }, reader: { manager: true, userId }, requester: { userId }, scan, ...extra });
+
+  it('mentions OFF, a MENTIONS ticker, an ordinary register entry: chatter ahead of the mention does not hide it', async () => {
+    const mo = await mkWorker('Mo', { heldByUserId: holderA.id, heldAt: new Date() });
+    await db.workerWakeSettings.create({ data: { workerId: mo.id, mentions: 'OFF' } });
+    const t = await mkTicker({ relevance: 'MENTIONS' });
+    await subscribe(t.id, mo.id);
+    for (let i = 0; i < 12; i++) await say(channel, `chatter ${i}`);
+    await say(channel, 'for mo', mention('mo'));
+    const page = await run(manager.id, { pageRows: 5, maxRows: 200 }, { workerIds: [mo.id] });
+    expect(page.wakes.map((w) => w.workerId)).toEqual([mo.id]);
+    expect(page.wakes[0]!.wake.reasons.map((r) => r.kind)).toEqual(['TICK']);
+  });
+
+  it('past the row ceiling with nothing relevant in the prefix, the mention is still found', async () => {
+    const mo = await mkWorker('Mo', { heldByUserId: holderA.id, heldAt: new Date() });
+    await db.registerEntry.updateMany({ where: { attendeeWorkerId: mo.id }, data: { mentionOnly: true } });
+    for (let i = 0; i < 30; i++) await say(channel, `chatter ${i}`);
+    await say(channel, 'for mo', mention('mo'));
+    const page = await run(manager.id, { pageRows: 5, maxRows: 8 }, { workerIds: [mo.id] });
+    expect(page.wakes.map((w) => w.workerId)).toEqual([mo.id]);
+  });
+
+  it('past the row ceiling, a worker\'s own posts ahead of one from someone else do not hide it either', async () => {
+    const t = await mkTicker();
+    await subscribe(t.id, liam.id);
+    for (let i = 0; i < 30; i++) await say(channel, `mine ${i}`, { authorWorkerId: liam.id });
+    await say(channel, 'from rook', { authorWorkerId: rook.id });
+    const page = await run(manager.id, { pageRows: 5, maxRows: 8 }, { workerIds: [liam.id] });
+    expect(page.wakes.map((w) => w.workerId)).toEqual([liam.id]);
+  });
+});
