@@ -3065,7 +3065,16 @@ export const nodeMutations = {
               });
             }
           }
-        });
+        // #1619 — a hard delete cascades every node's edges, revisions and
+        // derived rows; a few dozen nodes outlast Prisma's 5 s default and
+        // the transaction expired partway ("Transaction already closed").
+        // Trade-off, accepted: the 5 s default also capped how long one slow
+        // delete pins a pool connection and its row/advisory locks. At 120 s
+        // a few concurrent huge deletes could starve the pool (others fail
+        // fast at maxWait). Large recursive deletes are rare, operator-driven
+        // calls, so we take that over failing every legitimate one; chunking
+        // or a concurrency cap is the follow-up if it ever bites.
+        }, { timeout: 120_000 });
       } catch (e) {
         if (e instanceof GraphQLError) throw e; // typed NODE_HAS_DESCENDANTS
         // Prisma P2025 = record not found — wrap so a missing node surfaces a
