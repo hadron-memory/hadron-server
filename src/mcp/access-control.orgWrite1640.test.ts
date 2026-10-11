@@ -9,6 +9,8 @@
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { createTestableMcpServer } from './server.js';
+import { canWriteToMemory, getMemoryAccess } from './access-control.js';
+import { runAuthContext } from '../lib/auth/runPrincipal.js';
 import { requireMemoryWriteAccess } from '../api/graphql/schema/resolvers.helpers.js';
 import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
@@ -88,5 +90,53 @@ describe.each([[false], [true]])('#1640 both surfaces agree (active App: %s)', (
     const server = createTestableMcpServer({ userId: users.contrib, roles: ['READER'], ...(withApp ? { appId } : {}) });
     const text = await server.callToolText('hadron_list_memories', {});
     expect(text).toMatch(new RegExp(`${mem.km.urn}[^\\n]*read-write`));
+  });
+});
+
+describe('#1640 the arm stays closed to everything it must not admit', () => {
+  const auth = (who: string) => ({ userId: users[who], roles: ['READER'] }) as never;
+
+  it('a revoked CONTRIBUTOR does not write org knowledge', async () => {
+    await user('revoked', 'CONTRIBUTOR');
+    await db.orgMember.updateMany({ where: { userId: users.revoked }, data: { deletedAt: new Date() } });
+    expect(await canWriteToMemory(db, auth('revoked'), mem.km.id)).toBe(false);
+  });
+
+  it('a CONTRIBUTOR of a soft-deleted org does not write its knowledge', async () => {
+    const dead = await db.organization.create({ data: { id: generateId(), name: 'dead', urn: 'dead1640.example', deletedAt: new Date() } });
+    const deadKm = await db.memory.create({
+      data: { id: generateId(), urn: 'dead1640.example:km', name: 'km', class: 'knowledge', organizationId: dead.id, visibility: 'ORGANIZATION' },
+    });
+    await user('deadmember', 'CONTRIBUTOR', dead);
+    expect(await canWriteToMemory(db, auth('deadmember'), deadKm.id)).toBe(false);
+  });
+
+  it('an AppRun acting for a CONTRIBUTOR does not write org knowledge', async () => {
+    const run = runAuthContext({ id: generateId(), appId, userId: users.contrib, organizationId: org.id });
+    expect(await canWriteToMemory(db, run, mem.km.id)).toBe(false);
+    expect((await getMemoryAccess(db, run)).get(mem.km.id)).not.toBe('READ_WRITE');
+  });
+
+  it('an impersonation session does not write org knowledge', async () => {
+    const impersonated = { userId: users.contrib, roles: ['READER'], impersonation: { orgId: org.id } } as never;
+    expect(await canWriteToMemory(db, impersonated, mem.km.id)).toBe(false);
+  });
+
+  it("another user's per-user knowledge holding is not writable by an org CONTRIBUTOR", async () => {
+    const agent = await db.agent.create({ data: { id: generateId(), urn: 'w1640.example:holder', name: 'holder', organizationId: org.id } });
+    const holding = await db.memory.create({
+      data: { id: generateId(), urn: 'w1640.example:holding', name: 'holding', class: 'knowledge', organizationId: org.id,
+        visibility: 'ORGANIZATION', userMemoryOfAgentId: agent.id },
+    });
+    expect(await canWriteToMemory(db, auth('contrib'), holding.id)).toBe(false);
+  });
+
+  it('a group MemoryMember reader does not write the group, and an owner does', async () => {
+    await user('greader', 'CONTRIBUTOR');
+    await db.memoryMember.create({ data: { memoryId: mem.grp.id, userId: users.greader, role: 'reader' } });
+    expect(await canWriteToMemory(db, auth('greader'), mem.grp.id)).toBe(false);
+    await user('gowner', 'READER');
+    await db.memoryMember.create({ data: { memoryId: mem.grp.id, userId: users.gowner, role: 'owner' } });
+    expect(await canWriteToMemory(db, auth('gowner'), mem.grp.id)).toBe(true);
   });
 });
