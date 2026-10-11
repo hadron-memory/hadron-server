@@ -3893,8 +3893,9 @@ export const nodeMutations = {
           await tx.$queryRaw`SELECT id FROM nodes WHERE id = ${id} FOR UPDATE`;
         }
         // #1468 — `deleteSource` hard-deletes the source, so a minted spec
-        // may not be the source (supersede it instead). Same node-then-memory
-        // order as the locks just taken, which the guard re-enters.
+        // may not be the source (supersede it instead). Runs after the memory
+        // locks and then the node locks just taken (memory, then node, #1753),
+        // which the guard re-enters.
         if (deleteSource) {
           await assertNoMintedSpecRemoval(tx, source.memoryId, [source.id], 'merge-and-delete');
         }

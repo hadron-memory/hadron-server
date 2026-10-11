@@ -145,3 +145,22 @@ describe('#1753 — a deadlock victim reaches the caller as MEMORY_WRITE_CONFLIC
     }
   }, 20_000);
 });
+
+describe('#1753 — every wrapped writer pins the deadlock mapping', () => {
+  // A forced victim: the transaction itself fails as Postgres reports a
+  // deadlock victim. Deleting `mapDeadlockToWriteConflict` at a site lets the
+  // raw error through and turns that site's case red.
+  it.each(writers)('%s reports a deadlock victim as MEMORY_WRITE_CONFLICT', async (_name, run) => {
+    const victim = new Prisma.PrismaClientKnownRequestError('deadlock detected', {
+      code: 'P2010', clientVersion: 'x', meta: { code: '40P01' },
+    });
+    const spy = vi.spyOn(db, '$transaction').mockRejectedValue(victim);
+    try {
+      await expect(run()).rejects.toMatchObject({
+        extensions: { code: 'MEMORY_WRITE_CONFLICT', memoryId },
+      });
+    } finally {
+      spy.mockRestore();
+    }
+  });
+});
