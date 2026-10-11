@@ -18,7 +18,7 @@ import { generateId } from './id.js';
 import { ensureChannelWithRoot } from './channels.js';
 import { sessionKeyCache } from './sessionKeyCache.js';
 import type { Context } from '../api/graphql/schema/resolvers.js';
-import { teamAttentionPage } from './teamAttention.js';
+import { aggregatePlaintextWindow, teamAttentionPage } from './teamAttention.js';
 
 vi.mock('./bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
@@ -135,6 +135,15 @@ describe('#1779 — scan cost is independent of backlog depth', () => {
     expect(elapsed).toBeLessThan(15_000);
     // Only relevance since the watermark is emitted: every target gains the one new message.
     expect(next.items.length).toBeGreaterThan(0);
+    // Counts stay exact on the headline production scenario: a dormant cursor still reports its
+    // whole backlog (now including the new message), a near-head one just its tail.
+    const byWorker = new Map(next.items.map((i) => [i.worker, i]));
+    expect(byWorker.get(workerIds[0])).toMatchObject({
+      unread: HEAD + 1 - 2, firstUnreadSeq: 3, lastSeq: HEAD + 1,
+    });
+    expect(byWorker.get(workerIds[STALE + 1])).toMatchObject({
+      unread: HEAD + 1 - NEAR_HEAD, firstUnreadSeq: NEAR_HEAD + 1, lastSeq: HEAD + 1,
+    });
   }, 120_000);
 });
 
@@ -289,4 +298,12 @@ describe('#1779 — the per-request plaintext ceiling', () => {
       expect(items.find((i) => i.worker === workerIds[10] && i.channel === id)).toMatchObject({ unread: 450 });
     }
   }, 120_000);
+});
+
+describe('#1779 — an empty target list is a no-op, not a malformed query', () => {
+  it('aggregatePlaintextWindow with no targets returns an empty result without touching SQL VALUES', async () => {
+    await expect(aggregatePlaintextWindow(db, channel.id, 0, 100, [])).resolves.toEqual({
+      perTarget: [], cursor: null, frontierLoc: null,
+    });
+  });
 });

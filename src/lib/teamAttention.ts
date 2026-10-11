@@ -697,13 +697,15 @@ type PlaintextWindowResult = {
  * aggregates leave SQL, never a message body, and a target is counted against
  * its own register's cursor and head alone.
  */
-async function aggregatePlaintextWindow(
+export async function aggregatePlaintextWindow(
   db: Context['db'],
   channelId: string,
   lo: number,
   hi: number,
   targets: PlaintextTarget[],
 ): Promise<PlaintextWindowResult> {
+  // A VALUES list needs a row: with no targets there is nothing to count.
+  if (targets.length === 0) return { perTarget: [], cursor: null, frontierLoc: null };
   const values = Prisma.join(
     targets.map((t) => Prisma.sql`(${t.index}::int, ${t.seen}::int, ${t.head}::int, ${t.workerId}::text, ${t.mentionOnly}::boolean, ${t.tokens}::text[])`),
   );
@@ -827,6 +829,7 @@ async function pagedScanStep(
       const plainRequest = plainWindow * PLAINTEXT_REQUEST_WINDOWS;
       if (plainSpent >= plainRequest) continue; // ceiling reached; resume next page
       const list = targetsOfChannel.get(k) ?? [];
+      if (list.length === 0) { state.cDone[k] = true; continue; } // no target to count for
       const lo = state.cCursorSeq[k] === -1 ? state.cMin[k] : Math.max(state.cCursorSeq[k], state.cMin[k]);
       const hi = Math.min(state.cMax[k], lo + Math.min(plainWindow, plainRequest - plainSpent));
       if (hi > lo) {
