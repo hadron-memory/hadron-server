@@ -985,8 +985,10 @@ describe('family 11 — review #3105', () => {
 });
 
 describe('family 10 — Codex #1428 findings', () => {
-  it('plaintext channels page under the scan budget instead of one aggregate (P1)', async () => {
-    // A plaintext memory + channel + register for the same worker.
+  it('plaintext channels aggregate in bounded windows that scale with the scan budget (P1, #1779)', async () => {
+    // A plaintext memory + channel + register for the same worker. #1779 counts
+    // plaintext in SQL rather than row by row, so the bound the P1 asked for is a
+    // seq WINDOW per request (200 seqs per scanLimit unit), not a row-by-row page.
     const plainMemory = await db.memory.create({
       data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:plain`, name: 'plain', class: 'knowledge', visibility: 'ORGANIZATION' },
     });
@@ -994,19 +996,32 @@ describe('family 10 — Codex #1428 findings', () => {
     await db.registerEntry.create({
       data: { id: generateId(), appId: app.id, channelId: madePlain.channel.id, attendeeWorkerId: worker.id, role: 'BOTH' },
     });
-    for (let i = 0; i < 7; i++) {
-      await appendChatMessage(db, { id: madePlain.rootId, memoryId: plainMemory.id, loc: 'chats:plain' }, { id: plainMemory.id, isEncrypted: false },
-        async ({ tx, seq, msgNum }) => tx.node.create({
-          data: { id: generateId(), memoryId: plainMemory.id, loc: `chats:plain:messages:${msgNum}`, name: msgNum, nodeType: 'chat-message', seq, messageChannelId: madePlain.channel.id, content: `plain ${i}`, data: { mentions: i === 6 ? ['dara'] : [] } },
-        }), { asChannel: true });
-    }
-    // Budget 2: the plaintext span must PAGE (no one-shot aggregate), and the
-    // encrypted channel also present must not be starved.
-    const p1 = await teamAttentionPage(userCtx(), app.id, { scanLimit: 2 });
+    const total = 1_000;
+    await db.node.createMany({
+      data: Array.from({ length: total }, (_v, i) => ({
+        id: generateId(), memoryId: plainMemory.id, loc: `chats:plain:messages:${i + 1}`, name: String(i + 1),
+        nodeType: 'chat-message', seq: i + 1, messageChannelId: madePlain.channel.id, content: `plain ${i}`,
+        data: { mentions: i === total - 1 ? ['dara'] : [] },
+      })),
+    });
+    await db.channel.update({ where: { id: madePlain.channel.id }, data: { lastSeq: total } });
+    // scanLimit 1 -> a 200-seq window and 400 per request: 1,000 rows MUST take
+    // several pages (no one-shot aggregate), and the counts stay exact.
+    const p1 = await teamAttentionPage(userCtx(), app.id, { scanLimit: 1 });
     expect(p1.scanComplete).toBe(false);
-    const drained = await drainPages({}, { scanLimit: 2 });
-    const plain = drained.items.filter((i) => i.channel === madePlain.channel.id && i.worker === worker.id);
-    expect(plain[0]).toMatchObject({ unread: 7, unreadMentions: 1 });
+    let pages = 1;
+    const seen: Array<{ channel: string; worker: string; unread: number; unreadMentions: number }> = [...p1.items];
+    let next = p1.nextPage;
+    for (let guard = 0; next && guard < 100; guard++) {
+      const r = await teamAttentionPage(userCtx(), app.id, { page: next, scanLimit: 1 });
+      pages++;
+      seen.push(...r.items);
+      next = r.scanComplete ? null : r.nextPage;
+    }
+    expect(pages).toBeGreaterThanOrEqual(3);
+    expect(pages).toBeLessThanOrEqual(10);
+    const plain = seen.filter((i) => i.channel === madePlain.channel.id && i.worker === worker.id);
+    expect(plain[0]).toMatchObject({ unread: total, unreadMentions: 1 });
   });
 
   it('fractional pagination budgets are refused loudly at the door (P2)', async () => {

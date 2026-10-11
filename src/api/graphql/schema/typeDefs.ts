@@ -7775,7 +7775,9 @@ export const typeDefs = `#graphql
     """
     #1384 paged (v2) attention poll — the bounded successor to teamAttention
     (v1 answers UPGRADE_REQUIRED). Each call decrypts at most scanLimit rows
-    and emits at most limit Worker/Channel pairs; continue with page while
+    (encrypted Channels), counts plaintext Channels with bounded SQL
+    aggregates (#1779: a window of 200 seqs per scanLimit unit per Channel
+    visit, 400 per call), and emits at most limit Worker/Channel pairs; continue with page while
     nextPage is present. The final page alone carries adoptableSince — adopt
     it only after EVERY listed nudge was accepted; on any partial failure
     retain the prior watermark and restart the scan (duplicates, never loss).
