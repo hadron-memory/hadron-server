@@ -52,6 +52,7 @@ const appKeyCtx = (): Context => ({ db, appId: app.id, roles: [] }) as unknown a
 
 function deps(llm = vi.fn(async () => ({ text: 'ok', tokensIn: 10, tokensOut: 5, provider: 'anthropic', model: 'test' }))): RunExecutionDeps & { llm: typeof llm } {
   return {
+    verifyAutomation: vi.fn(async () => undefined),
     assemble: vi.fn(async () => '# Step'),
     loadNodeSpec: vi.fn(async () => ({ extractionSpec: null, hasOutput: false, tools: null })),
     resolveConfig: vi.fn(async () => ({ config: { provider: 'anthropic', model: 'test' } }) as never),

@@ -104,6 +104,9 @@ export function renderRosterEntry(r: RosterRow): string {
     r.alarmEventIds.length ? `woken on alarm ${r.alarmEventIds.join(', ')}` : null,
     r.unreactedChildTaskId ? `child ${r.unreactedChildTaskId} finished` : null,
     r.lastAssignedAt ? `last assigned ${r.lastAssignedAt.toISOString()}` : 'never assigned',
+    // #1726: beside last activity, so a stale claim is easy to spot.
+    r.reportsTo ? `reports to ${r.reportsTo.name}${r.reportsTo.retired ? ' (retired)' : ''}` : null,
+    r.lastActiveAt ? `last active ${r.lastActiveAt.toISOString()}` : null,
   ].filter(Boolean);
   return `${r.name} — ${r.state}: ${facts.join('; ')}`;
 }

@@ -1,3 +1,4 @@
+import { assertPinnedToolIdentity } from '../../automation/pins.js';
 /**
  * Dynamic run tools backed by REGISTERED EXTERNAL MCP SERVERS (the
  * hadrontool-mcp conduit). The static registry in index.ts covers built-in
@@ -128,6 +129,7 @@ export async function materializeMcpRunTools(
       // loadNodeSpec validated registration, but a row can be deleted or
       // disabled between validation and this hop — same loud failure.
       if (!server) throw new Error(`MCP server "${slug}" is not registered (or disabled) for this organization.`);
+      assertPinnedToolIdentity(run, 'mcp', slug, server);
       const tools = await listMcpTools({ url: server.url, headers: decryptMcpHeaders(server) });
       upstreamBySlug.set(slug, new Map(tools.map((t) => [t.name, t])));
     }),

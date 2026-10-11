@@ -3592,8 +3592,19 @@ model Worker {
   /// retirement at post time) and refuses new session bindings.
   retiredAt      DateTime? @map("retired_at")
   retiredBy      String?   @map("retired_by")
+  /// #1726 — the one Worker this worker reports to (Holger, 2026-10-09): a
+  /// non-retired Worker of the same App, never itself, and never a cycle. Null
+  /// reports to nobody (the top of a team, or an unclaimed worker). A property
+  /// of the casting, not of a session: binding, rotating or ending a session
+  /// leaves it alone. Written only by `src/lib/workers/reportsTo.ts`, which
+  /// also appends the `worker.reports-to` event that keeps its history.
+  reportsToWorkerId String? @map("reports_to_worker_id")
 
   app      App       @relation(fields: [appId], references: [id], onDelete: Cascade)
+  /// SetNull: a worker row is never hard-deleted in normal operation, but an
+  /// App cascade must not fail on the self-reference.
+  reportsTo Worker?  @relation("WorkerReportsTo", fields: [reportsToWorkerId], references: [id], onDelete: SetNull)
+  reports   Worker[] @relation("WorkerReportsTo")
   agent    Agent     @relation(fields: [agentId], references: [id], onDelete: Restrict)
   memory   Memory?   @relation("WorkerMemory", fields: [memoryId], references: [id], onDelete: SetNull)
   /// SetNull, not Cascade: a deleted user's held names must be RELEASED, never
@@ -3617,6 +3628,7 @@ model Worker {
   @@index([agentId])
   /// #1050 — "what does this person hold", across Apps.
   @@index([heldByUserId])
+  @@index([reportsToWorkerId])
   @@map("workers")
 }
 
@@ -4006,6 +4018,9 @@ model AppRun {
   userId               String?           @map("user_id")
   triggerKind          AppRunTriggerKind @map("trigger_kind")
   triggerId            String?           @map("trigger_id")
+  /// #1719 R5b: owner-adopted complete graph; NULL fails closed at execution.
+  automationPin Json? @map("automation_pin")
+  manualAutomationPin ManualAutomationPin?
   entryNodeUrn         String            @map("entry_node_urn")
   eventData            Json?             @map("event_data")
   /// Run envelope (D-2026-05-09-013): the mutable bag of fields extracted
@@ -4113,6 +4128,8 @@ model AgentSchedule {
   /// scheduler claim flips `enabled` to false instead of advancing
   /// `nextRunAt`. Misfire policy unchanged (overdue runs once).
   runAt          DateTime? @map("run_at")
+  /// #1719 R5b: owner-adopted complete graph; NULL fails closed at execution.
+  automationPin Json? @map("automation_pin")
   entryNodeUrn   String    @map("entry_node_urn")
   eventData      Json?     @map("event_data")
   /// Trigger-layer allow-list (chain link; plan §4).
@@ -4280,6 +4297,8 @@ model AgentWebhook {
   secret         String    @unique
   /// JSON Schema for POST args (stored in v1; Ajv enforcement is follow-on).
   argsSchema     Json?     @map("args_schema")
+  /// #1719 R5b: owner-adopted complete graph; NULL fails closed at execution.
+  automationPin Json? @map("automation_pin")
   entryNodeUrn   String    @map("entry_node_urn")
   eventData      Json?     @map("event_data")
   policy         Json?
@@ -5136,4 +5155,15 @@ model HostRegistrationWorker {
   @@id([registrationId, workerId])
   @@index([workerId])
   @@map("host_registration_workers")
+}
+
+
+/// #1719: mutable manual-trigger consent kept apart from the immutable run snapshot.
+model ManualAutomationPin {
+  runId String @id @map("run_id")
+  pin Json
+  adoptedAt DateTime @default(now()) @map("adopted_at")
+  adoptedBy String? @map("adopted_by")
+  run AppRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+  @@map("manual_automation_pins")
 }

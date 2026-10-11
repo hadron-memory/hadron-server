@@ -275,3 +275,34 @@ export async function appendHostEvent(
     },
   });
 }
+
+// ── #1726: who a worker reports to ─────────────────────────────────────────
+
+/**
+ * Who changed a worker's `reportsTo` (#1726), as a word: the worker it
+ * reported to, a worker claiming it, its holder, whoever manages the App, the worker's own
+ * bind (`startSession`), or the platform clearing it on retirement.
+ */
+export type ReportsToSetter = 'current' | 'claimant' | 'holder' | 'app-manager' | 'bind' | 'retirement';
+
+/**
+ * Append one `worker.reports-to` event: a set, handover or clear. The Worker
+ * row holds only the current value; these events are its history. Ids and a
+ * setter word only.
+ */
+export async function appendReportsToEvent(
+  tx: Prisma.TransactionClient,
+  args: { appId: string; actor: EventActor; workerId: string; from: string | null; to: string | null; setBy: ReportsToSetter },
+): Promise<void> {
+  await tx.agentTeamEvent.create({
+    data: {
+      appId: args.appId,
+      type: 'worker.reports-to',
+      actorUserId: args.actor.userId,
+      actorWorkerId: args.actor.workerId,
+      actorAgentId: args.actor.agentId,
+      subjectWorkerId: args.workerId,
+      payload: { from: args.from, to: args.to, setBy: args.setBy },
+    },
+  });
+}

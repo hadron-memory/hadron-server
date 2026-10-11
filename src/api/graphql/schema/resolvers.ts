@@ -1,3 +1,4 @@
+import { automationPinQueries, automationPinMutations } from './resolvers.automationPin.js';
 // GraphQL resolver map — thin assembler.
 //
 // The implementation was split out of this file (originally ~11k lines) into
@@ -167,6 +168,7 @@ export const resolvers = {
     ...secretQueries,
     ...dashboardQueries,
     ...appRunQueries,
+    ...automationPinQueries,
     ...connectionGrantQueries,
     ...principalGrantQueries,
     ...meteringQueries,
@@ -177,6 +179,7 @@ export const resolvers = {
     ...objectMutations,
     ...dashboardMutations,
     ...appRunMutations,
+    ...automationPinMutations,
     ...meteringMutations,
     ...connectionGrantMutations,
     ...principalGrantMutations,

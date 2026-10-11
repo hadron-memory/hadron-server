@@ -1,3 +1,4 @@
+import { registerAutomationPinTools } from './automationPinTools.js';
 import { boundSessionPrivacyFilter } from '../lib/auth/sessionPrivacy.js';
 import { createHmac, randomUUID } from 'crypto';
 // Spec 049 S4 — the protected-loc gate on hadron_update_node (no lock on that path).
@@ -3247,6 +3248,7 @@ export function createMcpServerInstance(
 
   // ── #1705 — agent tasks (cor:agt:050): thin over the GraphQL agent-task resolvers ──
   registerAgentTaskTools(server, { db, auth });
+  registerAutomationPinTools(server, { db, auth });
 
   // ── Spec 049 Phase 2 — scopes: list / create / update / delete / explain ──────
   //
@@ -8412,9 +8414,10 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       parentSessionId: z.string().optional().describe('Parent session ID'),
       prevSessionId: z.string().optional().describe('Previous session ID'),
       workerRef: z.string().optional().describe('The Worker (named casting) this session works as. Three forms resolve: the worker\'s NAME ("Iris" — unique within the App, case-insensitive, and what a human will say), its URN (hrn:worker:<root>:<app-slug>:<slug>), or its bare id. Prefer the name for a human-driven pickup; the URN when addressing a worker across App context. Must belong to this App; stamps the session\'s agentId from the casting and returns the worker\'s boot briefing.'),
+      reportsTo: z.string().optional().describe('#1726 — the worker this worker reports to (its name in this App, URN or id), set in the same step as the bind, as a spawn brief would. Sets it only when the worker reports to nobody, or already to that worker; naming a different one refuses the bind (WORKER_REPORTS_TO_HELD) unless you manage the App. Omit to leave it unchanged.'),
       force: z.boolean().optional().describe('Take over a WORKER_TAKEN worker — one someone drove RECENTLY (#1114: a merely-open session no longer refuses, so if you are seeing this refusal the session is live rather than just unclosed). That open session may be someone else\'s live work, or your own left behind by a chat session that ended without ending it (ending a chat session never ends a worker session); the server cannot tell which, so neither should you assume. Use only on the user\'s explicit override, after showing who last drove it.'),
     },
-    async ({ description, type, repo, branch, prNumber, customerId, language, llmModel, family, parentSessionId, prevSessionId, workerRef, force }) => {
+    async ({ description, type, repo, branch, prNumber, customerId, language, llmModel, family, parentSessionId, prevSessionId, workerRef, reportsTo, force }) => {
       // Spec 026 / D-2026-05-21-003 strict tool: session-start needs App
       // context to attribute the session. Errors with typed [no_active_app]
       // envelope for multi-App OAuth callers without selection.
@@ -8478,6 +8481,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
               parentSessionId: parentSessionId ?? undefined,
               prevSessionId: prevSessionId ?? undefined,
               workerRef: workerRef ?? undefined,
+              reportsTo: reportsTo ?? undefined,
               force: force ?? undefined,
             },
           },
@@ -10422,6 +10426,53 @@ function ageOf(at: Date, now: Date = new Date()): string {
     },
   );
 
+
+  // ── hadron_set_worker_reports_to ───────────────────────────────────────────
+
+  server.tool(
+    'hadron_set_worker_reports_to',
+    "#1726 — set, hand over or clear who a worker reports to: one other, non-retired worker of the same App (never itself, never a cycle). It belongs to the casting, not to a session, so it outlasts session rotation and a dormant team; every change is a `worker.reports-to` team event. Who may change it: whoever manages the App; the worker it reports to now (handing it over or clearing it is its agreement); for a worker that reports to nobody, also a worker claiming it for itself when one person holds both, or its own holder (interim rule, pending a ruling). A worker acts through its bound session, so pass `session`. Informational: nothing is refused on the strength of it except the task authority cor:agt:050:09 gives a worker over the tasks of workers that report to it.",
+    {
+      workerRef: z.string().describe('The worker whose value changes: its NAME (within the App), URN or id.'),
+      reportsTo: z.string().nullable().describe('The worker it reports to (name, URN or id), or null to clear.'),
+      app: z.string().optional().describe('The team App (URN or id). Only needed for the NAME forms; omit to use the session\'s App.'),
+    },
+    async ({ workerRef, reportsTo, app }) => {
+      const trimmed = workerRef.trim();
+      if (trimmed === '') return textResult('Pass workerRef — a worker name, URN, or id.');
+      const target = typeof reportsTo === 'string' ? reportsTo.trim() : null;
+      const needsApp = [trimmed, target].some((r) => r && !(isId(r) || hasSchemePrefix(r)));
+      let appRef = app;
+      if (needsApp && !appRef) {
+        const appScopeError = requireAppScope();
+        if (appScopeError) return appScopeError;
+        appRef = auth.appId ?? undefined;
+      }
+      const ctx: Context = {
+        db,
+        clientId: auth.clientId ?? undefined,
+        userId: auth.userId ?? undefined,
+        appId: auth.appId ?? undefined,
+        sessionId: auth.sessionId ?? undefined,
+        roles: auth.roles as Context['roles'],
+        organizationId: auth.organizationId ?? undefined,
+      };
+      try {
+        const resolveRef = async (ref: string) => {
+          const w = await resolvers.Query.worker({}, { ref, appRef: isId(ref) || hasSchemePrefix(ref) ? null : appRef }, ctx);
+          if (!w) throw new Error(`Worker not found: ${ref}`);
+          return w.id as string;
+        };
+        const workerId = await resolveRef(trimmed);
+        const toId = target ? await resolveRef(target) : null;
+        const worker = await resolvers.Mutation.setWorkerReportsTo({}, { workerRef: workerId, reportsTo: toId }, ctx);
+        const to = worker.reportsToWorkerId ? await db.worker.findUnique({ where: { id: worker.reportsToWorkerId }, select: { name: true } }) : null;
+        return textResult(to ? `**${worker.name}** now reports to **${to.name}**.` : `**${worker.name}** now reports to nobody.`);
+      } catch (e) {
+        return textResult(`Error: ${e instanceof Error ? e.message : 'changing who the worker reports to failed'}`);
+      }
+    },
+  );
   // ── hadron_record_work / hadron_team_work_items ───────────────────────────────
 
   server.tool(

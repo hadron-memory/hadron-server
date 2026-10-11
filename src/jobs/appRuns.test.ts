@@ -43,6 +43,7 @@ let userId: string;
 
 function deps(overrides: Partial<RunExecutionDeps> = {}): RunExecutionDeps {
   return {
+    verifyAutomation: vi.fn(async () => undefined),
     assemble: vi.fn(async () => '# Task\n\nDo the thing.'),
     // Default: a plain node — no extraction, no output spec (the terminal
     // default-write still fires), no outgoing routing edge = 1-hop flow.
