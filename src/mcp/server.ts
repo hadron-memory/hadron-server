@@ -61,6 +61,7 @@ import { portalUrlForUrn } from '../lib/portalUrl.js';
 import { userUrn } from '../lib/userHandle.js';
 import { registerCommentTools } from './commentTools.js';
 import { registerAgentTaskTools } from './agentTaskTools.js';
+import { registerTickerTools } from './tickerTools.js';
 import { openThreadCounts, type CommentCounts } from '../lib/comments/summary.js';
 import { nodeContentValidationState } from '../lib/nodeContentValidation.js';
 import { findLiveUrnAliasTargets, dedupeById } from '../lib/urnAlias.js';
@@ -1974,6 +1975,8 @@ export function createMcpServerInstance(
     'hadron_team_availability',
     // #1707 — the team roster read (its own optional session).
     'hadron_team_roster',
+    // #1747 — ticker reads (each takes its own optional session; wake settings enforces the write rule itself).
+    'hadron_ticker_list', 'hadron_worker_wake_settings',
     // Per-connection selections and key handling: nothing authored.
     'hadron_set_active_memory', 'hadron_set_active_app', 'hadron_set_active_org', 'hadron_set_active_scope',
     'hadron_unlock_memory', 'hadron_lock_memory',
@@ -3248,6 +3251,7 @@ export function createMcpServerInstance(
 
   // ── #1705 — agent tasks (cor:agt:050): thin over the GraphQL agent-task resolvers ──
   registerAgentTaskTools(server, { db, auth });
+  registerTickerTools(server, { db, auth });
   registerAutomationPinTools(server, { db, auth });
 
   // ── Spec 049 Phase 2 — scopes: list / create / update / delete / explain ──────
