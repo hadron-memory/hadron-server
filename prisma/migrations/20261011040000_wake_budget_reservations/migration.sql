@@ -5,6 +5,7 @@ CREATE TABLE "app_wake_reservations" (
     "app_id" TEXT NOT NULL,
     "reserved_at" TIMESTAMP(3) NOT NULL,
     "wake_key" TEXT NOT NULL,
+    "wake" JSONB NOT NULL,
 
     CONSTRAINT "app_wake_reservations_pkey" PRIMARY KEY ("worker_id")
 );

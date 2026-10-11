@@ -59,6 +59,11 @@ export type DueWakesResult = {
   budgetNotice: { appId: string; day: Date; withheld: number } | null;
 };
 
+const identityOf = (wake: WorkerWake) => ({
+  channels: wake.channels.map((c) => ({ channelId: c.channelId, incarnation: c.incarnation, through: c.throughSeq })),
+  ticks: wake.reasons.flatMap((r) => (r.kind === 'TICK' ? [{ tickerId: r.tickerId, k: r.k }] : [])),
+});
+
 const utcDay = (d: Date): Date => new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
 
 /** The default daily wake budget: roster × (86,400 ÷ default self-subscribe cadence) × 2 (Q11). */
@@ -137,15 +142,11 @@ async function loadMessages(
   head: number,
   limit: number,
   /** Only the rows that could matter to someone still unmet (plaintext channels; an encrypted row can't be judged in SQL). */
-  only?: { tokens: string[]; nonOwnOf: string | 'any' | null },
+  only?: Watcher[],
 ): Promise<RoutedMessage[]> {
   if (head <= lo) return [];
   if (!channel.encrypted) {
-    const mentioned = Prisma.sql`jsonb_exists_any(n.data->'mentions', ${only?.tokens ?? []}::text[])`;
-    const others = only?.nonOwnOf == null ? Prisma.sql`FALSE`
-      : only.nonOwnOf === 'any' ? Prisma.sql`TRUE`
-      : Prisma.sql`(n.data->>'authorWorkerId') IS DISTINCT FROM ${only.nonOwnOf}`;
-    const wanted = only ? Prisma.sql`AND (${mentioned} OR ${others})` : Prisma.empty;
+    const wanted = only && only.length > 0 ? Prisma.sql`AND (${candidatesFor(only)})` : Prisma.empty;
     const rows = await db.$queryRaw<Array<{ seq: number; author: string | null; mentions: unknown; bw: boolean | null; mp: boolean | null }>>(Prisma.sql`
       SELECT n.seq::int AS seq,
              n.data->>'authorWorkerId' AS author,
@@ -198,19 +199,38 @@ async function loadMessages(
 }
 
 /**
- * Someone a channel's messages are read for. `mentionsMatter`: a mention (for them, or a broadcast) can wake them
- * (immediate mentions on, or any enabled ticker). `allMatters`: any message that is not their own can (an ALL ticker
- * covering the channel, on a register entry that is not mention-only). A worker for whom neither holds is not watched.
+ * Someone a channel's messages are read for, with exactly the ways a message can wake them (src/lib/tickers/wakeRule.ts):
+ *   immediate  — a direct mention wakes at once, and so does a broadcast the server stamped `broadcastWakes`;
+ *   subCovers  — an enabled ticker covers the channel, so any mention (direct or broadcast) counts at the next tick;
+ *   subAll     — and an ALL ticker covers it on an entry that is not mention-only, so any message not their own counts.
+ * A worker for whom none holds is not watched.
  */
-type Watcher = { floor: number; workerId: string; tokens: string[]; mentionsMatter: boolean; allMatters: boolean };
+type Watcher = { floor: number; workerId: string; tokens: string[]; immediate: boolean; subCovers: boolean; subAll: boolean };
 
 const BROADCAST = BROADCAST_MENTION_TOKENS as readonly string[];
 
-/** Does `m` possibly matter to this watcher? (A superset of the rule's relevance, never a subset.) */
+/** Could `m` become (part of) a wake for this watcher? The scan's stopping rule: it must be a real path to one, not a superset. */
 function mattersTo(m: RoutedMessage, w: Watcher): boolean {
   if (m.authorWorkerId === w.workerId) return false;
-  if (w.mentionsMatter && m.mentions.some((t) => w.tokens.includes(t) || BROADCAST.includes(t))) return true;
-  return w.allMatters;
+  const direct = m.mentions.some((t) => w.tokens.includes(t));
+  const broadcast = !direct && m.mentions.some((t) => BROADCAST.includes(t));
+  if (w.immediate && (direct || (broadcast && m.broadcastWakes))) return true;
+  if (w.subCovers && (direct || broadcast)) return true;
+  return w.subAll;
+}
+
+/** The SQL twin of {@link mattersTo}, for the rows still worth fetching: one OR-ed term per unmet watcher. */
+function candidatesFor(unmet: Watcher[]): Prisma.Sql {
+  const terms = unmet.map((w) => {
+    const notOwn = Prisma.sql`(n.data->>'authorWorkerId') IS DISTINCT FROM ${w.workerId}`;
+    const parts: Prisma.Sql[] = [];
+    if (w.immediate || w.subCovers) parts.push(Prisma.sql`jsonb_exists_any(n.data->'mentions', ${w.tokens}::text[])`);
+    if (w.subCovers) parts.push(Prisma.sql`jsonb_exists_any(n.data->'mentions', ${[...BROADCAST]}::text[])`);
+    if (w.immediate) parts.push(Prisma.sql`(jsonb_exists_any(n.data->'mentions', ${[...BROADCAST]}::text[]) AND (n.data->>'broadcastWakes') = 'true')`);
+    if (w.subAll) parts.push(Prisma.sql`TRUE`);
+    return Prisma.sql`(${notOwn} AND (${Prisma.join(parts, ' OR ')}))`;
+  });
+  return Prisma.join(terms, ' OR ');
 }
 
 /**
@@ -240,11 +260,7 @@ async function scanChannel(
     const unmet = watchers.filter((w) => !out.some((m) => m.seq > w.floor && mattersTo(m, w)));
     if (unmet.length === 0) return out;
     cursor = Math.max(page[page.length - 1]!.seq, Math.min(...unmet.map((w) => w.floor)));
-    const allUnmet = unmet.filter((w) => w.allMatters);
-    only = {
-      tokens: [...new Set([...BROADCAST, ...unmet.filter((w) => w.mentionsMatter).flatMap((w) => w.tokens)])],
-      nonOwnOf: allUnmet.length === 0 ? null : allUnmet.length === 1 || new Set(allUnmet.map((w) => w.workerId)).size === 1 ? allUnmet[0]!.workerId : 'any',
-    };
+    only = unmet;
   }
 }
 
@@ -348,12 +364,12 @@ export async function computeDueWakes(args: {
     for (const c of countedOf.get(w.id) ?? []) {
       if (c.head <= Math.max(c.seen, c.delivered)) continue;
       const covers = (s: (typeof subsHere)[number]) => s.ticker.channelIds.length === 0 || s.ticker.channelIds.includes(c.channelId);
-      const mentionsMatter = mentionsImmediate || subsHere.some(covers);
-      const allMatters = !c.mentionOnly && subsHere.some((s) => s.ticker.relevance !== 'MENTIONS' && covers(s));
-      if (!mentionsMatter && !allMatters) continue;
+      const subCovers = subsHere.some(covers);
+      const subAll = !c.mentionOnly && subsHere.some((s) => s.ticker.relevance !== 'MENTIONS' && covers(s));
+      if (!mentionsImmediate && !subCovers) continue;
       watchersOf.set(c.channelId, [
         ...(watchersOf.get(c.channelId) ?? []),
-        { floor: Math.max(c.seen, c.delivered), workerId: w.id, tokens: own ? [own] : [], mentionsMatter, allMatters },
+        { floor: Math.max(c.seen, c.delivered), workerId: w.id, tokens: own ? [own] : [], immediate: mentionsImmediate, subCovers, subAll },
       ]);
     }
   }
@@ -368,6 +384,18 @@ export async function computeDueWakes(args: {
   }));
 
   const floorMs = settings.tickerMinCadenceSeconds * 1000;
+  const signFor = (workerId: string, wake: WorkerWake): string =>
+    signWakeProof({
+      v: 1,
+      kind: 'wake-proof',
+      appId: app.id,
+      workerId,
+      requester,
+      channels: wake.channels.map((c) => ({ channelId: c.channelId, incarnation: c.incarnation, through: c.throughSeq })),
+      ticks: wake.reasons.flatMap((r) => (r.kind === 'TICK' ? [{ tickerId: r.tickerId, k: r.k }] : [])),
+      exempt: wake.exempt,
+      issuedAt: now.getTime(),
+    });
   const issued: Array<DueWakeOut & { exempt: boolean }> = [];
   const dormant: Array<{ workerId: string; mentions: number }> = [];
 
@@ -425,17 +453,7 @@ export async function computeDueWakes(args: {
     if (last > 0 && now.getTime() - last < floorMs) continue;
 
     const a = availabilityOf.get(w.id);
-    const proof = signWakeProof({
-      v: 1,
-      kind: 'wake-proof',
-      appId: app.id,
-      workerId: w.id,
-      requester,
-      channels: wake.channels.map((c) => ({ channelId: c.channelId, incarnation: c.incarnation, through: c.throughSeq })),
-      ticks: wake.reasons.flatMap((r) => (r.kind === 'TICK' ? [{ tickerId: r.tickerId, k: r.k }] : [])),
-      exempt: wake.exempt,
-      issuedAt: now.getTime(),
-    });
+    const proof = signFor(w.id, wake);
     issued.push({
       workerId: w.id,
       wake,
@@ -456,36 +474,57 @@ export async function computeDueWakes(args: {
   let withheld = 0;
   const wakes: DueWakeOut[] = [];
   const passes = (i: (typeof issued)[number]) => { const { exempt: _e, ...out } = i; wakes.push(out); };
-  if (!issued.some((i) => !i.exempt)) {
-    issued.forEach(passes);
-  } else {
+  if (issued.length > 0) {
     await db.$transaction(async (tx) => {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${'wakebudget:' + app.id}, 0))`;
       const used = (await tx.appWakeDay.findUnique({ where: { appId_day: { appId: app.id, day } } }))?.wakes ?? 0;
       const cutoff = toNaiveUtc(new Date(now.getTime() - WAKE_PROOF_MAX_AGE_MS));
-      const live = new Set(
-        (await tx.$queryRaw<Array<{ worker_id: string }>>(Prisma.sql`
-          SELECT worker_id FROM app_wake_reservations WHERE app_id = ${app.id} AND reserved_at > ${cutoff}::timestamp`)).map((r) => r.worker_id),
-      );
+      const rows = await tx.$queryRaw<Array<{ worker_id: string; wake_key: string; wake: WorkerWake }>>(Prisma.sql`
+        SELECT worker_id, wake_key, wake FROM app_wake_reservations WHERE app_id = ${app.id} AND reserved_at > ${cutoff}::timestamp`);
+      const live = new Map(rows.map((r) => [r.worker_id, r]));
       let consumed = used + live.size;
-      const reserve: Array<{ workerId: string; key: string }> = [];
+      const reserve: Array<{ workerId: string; key: string; wake: WorkerWake }> = [];
       wakes.length = 0;
       withheld = 0;
       for (const i of issued) {
-        if (!i.exempt) {
-          if (!live.has(i.workerId)) {
-            if (consumed >= budget) { withheld++; continue; }
-            consumed++;
+        // An outstanding wake is only this reader's to see if every channel of it is one they may read (R1/B3). For a
+        // reader who cannot, it does not exist: they get their own view of what is due, outside that reservation (it
+        // is not refreshed and no slot is charged; the holder's router still owes the outstanding one).
+        const stored = live.get(i.workerId);
+        const readable = new Set((countedOf.get(i.workerId) ?? []).map((c) => c.channelId));
+        const have = stored && stored.wake.channels.every((c) => readable.has(c.channelId)) ? stored : undefined;
+        if (stored && !have) {
+          passes(i);
+          continue;
+        }
+        if (have) {
+          // A wake for this worker is already outstanding. It is handed out AGAIN, exactly, until it is acknowledged
+          // or its proof lapses: a second, different wake would be a second delivery against one allowance (and
+          // inside one floor), which no acknowledgement-side refusal can undo once the nudge is sent (Diego cycle 3,
+          // P2-1). What arrived since stays due, and is the next wake after this one is consumed.
+          if (have.wake_key !== wakeIdentity(identityOf(i.wake))) {
+            i.wake = have.wake;
+            i.exempt = have.wake.exempt;
+            i.proof = signFor(i.workerId, have.wake);
           }
-          reserve.push({ workerId: i.workerId, key: wakeIdentity({ channels: i.wake.channels.map((c) => ({ channelId: c.channelId, incarnation: c.incarnation, through: c.throughSeq })), ticks: i.wake.reasons.flatMap((r) => (r.kind === 'TICK' ? [{ tickerId: r.tickerId, k: r.k }] : [])) }) });
+          reserve.push({ workerId: i.workerId, key: have.wake_key, wake: have.wake });
+          passes(i);
+          continue;
+        }
+        if (!i.exempt) {
+          if (consumed >= budget) { withheld++; continue; }
+          consumed++;
+          reserve.push({ workerId: i.workerId, key: wakeIdentity(identityOf(i.wake)), wake: i.wake });
         }
         passes(i);
       }
       const nowNaive = toNaiveUtc(now);
-      for (const { workerId, key } of reserve) {
+      for (const { workerId, key, wake } of reserve) {
         await tx.$executeRaw(Prisma.sql`
-          INSERT INTO app_wake_reservations (worker_id, app_id, reserved_at, wake_key) VALUES (${workerId}, ${app.id}, ${nowNaive}::timestamp, ${key})
-          ON CONFLICT (worker_id) DO UPDATE SET reserved_at = EXCLUDED.reserved_at, app_id = EXCLUDED.app_id, wake_key = EXCLUDED.wake_key`);
+          INSERT INTO app_wake_reservations (worker_id, app_id, reserved_at, wake_key, wake)
+          VALUES (${workerId}, ${app.id}, ${nowNaive}::timestamp, ${key}, ${JSON.stringify(wake)}::jsonb)
+          ON CONFLICT (worker_id) DO UPDATE SET reserved_at = EXCLUDED.reserved_at, app_id = EXCLUDED.app_id,
+            wake_key = EXCLUDED.wake_key, wake = EXCLUDED.wake`);
       }
     });
   }

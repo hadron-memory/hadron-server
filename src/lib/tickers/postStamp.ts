@@ -33,21 +33,26 @@ import { lockAuthorityAnchors } from '../auth/authorityAnchors.js';
  * behind this post. A message committed while authorized keeps its stamp after a
  * later revocation, as before.
  */
-export async function wakeStampsFor(
+export type StampAuthority = { app: { id: string; organizationId: string | null; ownerUserId: string | null }; live: Context };
+
+/**
+ * PHASE 1, before anything that takes a Worker row lock in the append (a lapsed session's resume takes it FOR UPDATE):
+ * the authority anchors, the App re-read under them, and the caller's user, membership and live roles. Nothing here
+ * touches a Worker row, so the order is anchors → caller rows → [resume: App, Worker] → phase 2 (Worker, grant), the
+ * direction every revoker takes (Diego cycle 3, P2-3). Null when the App is gone, uninstalled or the caller deleted.
+ */
+export async function lockStampAuthority(
   ctx: Context,
   tx: Prisma.TransactionClient,
   app: { id: string; organizationId: string | null; ownerUserId: string | null } | null,
-  authorWorkerId: string | null,
-  mentions: string[],
-): Promise<{ managerPost?: true; broadcastWakes?: true }> {
-  if (!app || mentions.length === 0) return {};
-  const broadcast = mentions.some((t) => (BROADCAST_MENTION_TOKENS as readonly string[]).includes(t));
+): Promise<StampAuthority | null> {
+  if (!app) return null;
   // The authority anchors first (the established protocol: anchors before row locks), then the App as it stands NOW:
   // the object the caller passed was read before the append, and an ownership change, uninstall or transfer may
   // have landed since. Revokers of that authority take the same anchors exclusively.
   await lockAuthorityAnchors(tx, [{ kind: 'app', id: app.id }], 'shared');
   const now = await tx.app.findUnique({ where: { id: app.id }, select: { id: true, organizationId: true, ownerUserId: true, deletedAt: true, uninstalledAt: true } });
-  if (!now || now.deletedAt || now.uninstalledAt) return {};
+  if (!now || now.deletedAt || now.uninstalledAt) return null;
   await lockAuthorityAnchors(
     tx,
     [
@@ -58,31 +63,45 @@ export async function wakeStampsFor(
     ],
     'shared',
   );
-  app = now;
   if (ctx.userId && !ctx.impersonation) {
     // Held before the roles and memberships are read, so a change to them orders against this post.
     await tx.$queryRaw`SELECT 1 FROM users WHERE id = ${ctx.userId} FOR SHARE`;
-    await tx.$queryRaw`SELECT 1 FROM app_members WHERE app_id = ${app.id} AND user_id = ${ctx.userId} FOR SHARE`;
-    if (app.organizationId) {
-      await tx.$queryRaw`SELECT 1 FROM org_members WHERE organization_id = ${app.organizationId} AND user_id = ${ctx.userId} FOR SHARE`;
+    await tx.$queryRaw`SELECT 1 FROM app_members WHERE app_id = ${now.id} AND user_id = ${ctx.userId} FOR SHARE`;
+    if (now.organizationId) {
+      await tx.$queryRaw`SELECT 1 FROM org_members WHERE organization_id = ${now.organizationId} AND user_id = ${ctx.userId} FOR SHARE`;
     }
   }
   const live = await liveCaller(ctx, tx);
-  if (!live) return {};
-  const manager = !authorWorkerId && (await managesApp(live, app));
+  return live ? { app: now, live } : null;
+}
+
+/** PHASE 2 (and, with no `held`, both phases): the stamps, on the authority phase 1 holds. */
+export async function wakeStampsFor(
+  ctx: Context,
+  tx: Prisma.TransactionClient,
+  app: { id: string; organizationId: string | null; ownerUserId: string | null } | null,
+  authorWorkerId: string | null,
+  mentions: string[],
+  held?: { authority: StampAuthority | null },
+): Promise<{ managerPost?: true; broadcastWakes?: true }> {
+  if (!app || mentions.length === 0) return {};
+  const broadcast = mentions.some((t) => (BROADCAST_MENTION_TOKENS as readonly string[]).includes(t));
+  const authority = held ? held.authority : await lockStampAuthority(ctx, tx, app);
+  if (!authority) return {};
+  const { live } = authority;
+  const manager = !authorWorkerId && (await managesApp(live, authority.app));
   let granted = false;
-  if (broadcast && !manager && authorWorkerId && live.userId && !live.impersonation && (await mayStillDriveWorkerApp(live, app.id))) {
+  if (broadcast && !manager && authorWorkerId && live.userId && !live.impersonation && (await mayStillDriveWorkerApp(live, authority.app.id))) {
+    // The Worker row first, then the grant (the order revocation and release take): FOR SHARE, so a release or
+    // retirement orders against this post. When the post resumed a lapsed session it already holds the row FOR UPDATE.
+    const w = await tx.$queryRaw<Array<{ retired_at: Date | null; held_by_user_id: string | null }>>`
+      SELECT retired_at, held_by_user_id FROM workers WHERE id = ${authorWorkerId} FOR SHARE`;
     const grants = await tx.$queryRaw<Array<{ id: string }>>`
       SELECT id FROM app_grants
-      WHERE app_id = ${app.id} AND grantee_worker_id = ${authorWorkerId} AND name = ${GRANT_SUBSCRIBE_WORKERS} AND revoked_at IS NULL
+      WHERE app_id = ${authority.app.id} AND grantee_worker_id = ${authorWorkerId} AND name = ${GRANT_SUBSCRIBE_WORKERS} AND revoked_at IS NULL
       FOR SHARE`;
-    if (grants.length > 0) {
-      // Spent on a holder's behalf: the grantee must be live and held by the person behind the post (as on subscribe).
-      // Read FOR SHARE: a release or retirement orders against this post (Rook, #1751 cycle 1 P3).
-      const w = await tx.$queryRaw<Array<{ retired_at: Date | null; held_by_user_id: string | null }>>`
-        SELECT retired_at, held_by_user_id FROM workers WHERE id = ${authorWorkerId} FOR SHARE`;
-      granted = w.length === 1 && !w[0]!.retired_at && w[0]!.held_by_user_id === live.userId;
-    }
+    // Spent on a holder's behalf: the grantee must be live and held by the person behind the post (as on subscribe).
+    granted = grants.length > 0 && w.length === 1 && !w[0]!.retired_at && w[0]!.held_by_user_id === live.userId;
   }
   return {
     ...(manager ? { managerPost: true as const } : {}),

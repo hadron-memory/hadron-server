@@ -126,6 +126,7 @@ describe('never due: retired, paused, dormant', () => {
     expect(ids(await due(ctx(manager.id)))).toEqual([liam.id]);
 
     await db.workerWakeSettings.update({ where: { workerId: liam.id }, data: { mentions: 'OFF' } });
+    await db.appWakeReservation.deleteMany(); // the mention wake issued above was delivered or lapsed
     expect(ids(await due(ctx(manager.id)))).toEqual([]);
     const t = await mkTicker();
     await subscribe(t.id, liam.id);
@@ -880,5 +881,94 @@ describe('cycle 2 — the scan cannot strand a MENTIONS ticker, nor stop at a ro
     await say(channel, 'from rook', { authorWorkerId: rook.id });
     const page = await run(manager.id, { pageRows: 5, maxRows: 8 }, { workerIds: [liam.id] });
     expect(page.wakes.map((w) => w.workerId)).toEqual([liam.id]);
+  });
+});
+
+// ── Cycle 3: Diego's delta on 18eef56a ─────────────────────────────────────────
+
+describe('cycle 3 — one outstanding wake per worker (Diego P2-1)', () => {
+  it('a second issue before the first is acknowledged hands out the SAME wake, so one allowance buys one delivery', async () => {
+    await db.app.update({ where: { id: app.id }, data: { wakeDailyBudget: 1 } });
+    await say(channel, 'one', mention('liam'));
+    const p1 = (await due(ctx(holderA.id))).wakes[0];
+    expect(p1.channels[0]).toMatchObject({ fromSeq: 1, throughSeq: 1 });
+    await say(channel, 'two', mention('liam'));
+    const p2 = (await due(ctx(holderA.id))).wakes[0];
+    // Not a wake through 2: the outstanding one, again.
+    expect(p2.channels[0]).toMatchObject({ fromSeq: 1, throughSeq: 1 });
+    expect(await db.appWakeReservation.count()).toBe(1);
+    // Delivering and acknowledging both proofs spends the one slot once.
+    expect(await M.acknowledgeWakes({}, { proofs: [p1.proof] }, ctx(holderA.id))).toEqual({ acknowledged: 1, unchanged: 0 });
+    expect(await M.acknowledgeWakes({}, { proofs: [p2.proof] }, ctx(holderA.id))).toEqual({ acknowledged: 0, unchanged: 1 });
+    expect((await db.appWakeDay.findFirstOrThrow({ where: { appId: app.id } })).wakes).toBe(1);
+    // What arrived since is still owed, but the budget is spent and the floor holds: it waits, withheld.
+    await db.workerDeliveryChannel.updateMany({ data: { deliveredAt: new Date(Date.now() - 3600_000) } });
+    const next = await due(ctx(holderA.id));
+    expect(next.wakes).toEqual([]);
+    expect(next.withheld).toBe(1);
+  });
+
+  it('with room in the budget the next wake follows the first, never alongside it', async () => {
+    await say(channel, 'one', mention('liam'));
+    const p1 = (await due(ctx(holderA.id))).wakes[0];
+    await say(channel, 'two', mention('liam'));
+    expect((await due(ctx(holderA.id))).wakes[0].channels[0].throughSeq).toBe(1);
+    await M.acknowledgeWakes({}, { proofs: [p1.proof] }, ctx(holderA.id));
+    await db.workerDeliveryChannel.updateMany({ data: { deliveredAt: new Date(Date.now() - 3600_000) } });
+    expect((await due(ctx(holderA.id))).wakes[0].channels[0]).toMatchObject({ fromSeq: 2, throughSeq: 2 });
+  });
+});
+
+describe('cycle 3 — a candidate must be able to wake, not merely mention (Diego P2-2)', () => {
+  const scan = { pageRows: 5, maxRows: 200 };
+  const run = (userId: string, extra: Record<string, unknown> = {}, sc = scan) =>
+    computeDueWakes({ ctx: ctx(userId), app: { id: app.id, organizationId: org.id, ownerUserId: null }, reader: { manager: true, userId }, requester: { userId }, scan: sc, ...extra });
+
+  it('unstamped broadcasts ahead of a direct mention do not hide it (no subscription, immediate mentions)', async () => {
+    for (let i = 0; i < 12; i++) await say(channel, `everyone ${i}`, mention('all'));
+    await say(channel, 'for liam', mention('liam'));
+    const page = await run(manager.id, { workerIds: [liam.id] });
+    expect(page.wakes.map((w) => w.workerId)).toEqual([liam.id]);
+    expect(page.wakes[0]!.wake.channels[0]).toMatchObject({ latestMentionSeq: 13 });
+  });
+
+  it('a worker\'s own mentions ahead of a real one do not fill the ceiling', async () => {
+    for (let i = 0; i < 30; i++) await say(channel, `me ${i}`, { authorWorkerId: liam.id, mentions: ['liam'] });
+    await say(channel, 'for liam', { authorWorkerId: rook.id, mentions: ['liam'] });
+    const page = await run(manager.id, { workerIds: [liam.id] }, { pageRows: 5, maxRows: 8 });
+    expect(page.wakes.map((w) => w.workerId)).toEqual([liam.id]);
+  });
+
+  it('a stamped broadcast is a candidate for an immediate worker; an unstamped one only for a ticker subscriber', async () => {
+    for (let i = 0; i < 12; i++) await say(channel, `chatter ${i}`);
+    await say(channel, 'everyone', { ...mention('all'), broadcastWakes: true });
+    const page = await run(manager.id, { workerIds: [liam.id] });
+    expect(page.wakes.map((w) => w.workerId)).toEqual([liam.id]);
+  });
+});
+
+describe('cycle 3 — the stamp holds the Worker row in one mode (Diego P2-3)', () => {
+  it('two broadcast posts from one lapsed granted-worker session into two channels both land', async () => {
+    post.mockRestore();
+    await db.appGrant.create({ data: { id: generateId(), appId: app.id, granteeWorkerId: liam.id, name: 'ticker.subscribe-workers', grantedBy: manager.id } });
+    // A second memory: posts into one memory serialize on its path lock, so only different memories can interleave.
+    const agent2 = await db.agent.create({ data: { id: generateId(), organizationId: org.id, name: 'Team2', urn: `${org.urn}:team2`, visibility: 'ORGANIZATION' } });
+    await db.appAgent.create({ data: { appId: app.id, agentId: agent2.id } });
+    const memory2 = await db.memory.create({ data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:team-shared-2`, name: 'shared2', class: 'app', appId: app.id, sharedMemoryOfAgentId: agent2.id } });
+    const other = await mkChannel(memory2.id, 'chats:other', manager.id);
+    const session = await db.session.create({ data: { id: generateId(), appId: app.id, userId: holderA.id, workerId: liam.id, agentId: agent.id, type: 'DEVELOPER', startedAt: new Date(Date.now() - 3 * DAY), updatedAt: new Date(Date.now() - 3 * DAY) } });
+    // The schedule that deadlocks a SHARE-then-UPDATE order: while a third party holds the Worker row SHARED, both posts
+    // get as far as they can; when it lets go, a post that already holds SHARE and wants UPDATE waits on the other's SHARE.
+    const h = holdOpen(async (tx) => { await tx.$queryRaw`SELECT 1 FROM workers WHERE id = ${liam.id} FOR SHARE`; });
+    await h.locked;
+    const posts = runAsActor({ workerId: liam.id, agentId: agent.id }, () => Promise.allSettled([channel, other].map((c) =>
+      teamChatMutations.createChannelMessage({}, { channelRef: c.id, body: 'standup @all', replyToSeq: null, sessionRef: session.id }, ctx(holderA.id)))));
+    await stillWaiting(posts, h);
+    const results = await posts;
+    expect(results.map((r) => (r.status === 'rejected' ? String((r as PromiseRejectedResult).reason) : 'ok'))).toEqual(['ok', 'ok']);
+    await h.done;
+    // The session really was lapsed and resumed by the posts (otherwise this would not reach the Worker UPDATE).
+    expect((await db.session.findUniqueOrThrow({ where: { id: session!.id } })).updatedAt?.getTime() ?? 0).toBeGreaterThan(Date.now() - 60_000);
+    expect(await db.node.count({ where: { messageChannelId: { in: [channel.id, other.id] }, nodeType: 'chat-message' } })).toBe(2);
   });
 });

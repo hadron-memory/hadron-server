@@ -5356,6 +5356,8 @@ model AppWakeReservation {
   /// Which wake it was reserved for (the proof's channels, seqs and ticks, hashed): an acknowledgement spends only the
   /// reservation of the wake it delivers, so an old proof replayed cannot cancel a newer wake's allowance.
   wakeKey    String   @map("wake_key")
+  /// The wake itself, so an outstanding one is handed out again, exactly, until it is consumed or lapses.
+  wake       Json     @map("wake")
 
   app    App    @relation(fields: [appId], references: [id], onDelete: Cascade)
   worker Worker @relation(fields: [workerId], references: [id], onDelete: Cascade)
