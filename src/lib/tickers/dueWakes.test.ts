@@ -919,6 +919,23 @@ describe('cycle 3 — one outstanding wake per worker (Diego P2-1)', () => {
   });
 });
 
+describe('cycle 3 — a recreated channel does not wedge an outstanding wake (Rook)', () => {
+  it('the stored wake of a channel whose incarnation moved is dropped, and a fresh one can be acknowledged', async () => {
+    await say(channel, 'one', mention('liam'));
+    const p1 = (await due(ctx(holderA.id))).wakes[0];
+    expect(await db.appWakeReservation.count()).toBe(1);
+    // The channel is recreated: its seqs restart and its incarnation moves.
+    await db.channel.update({ where: { id: channel.id }, data: { incarnation: { increment: 1 }, lastSeq: 0 } });
+    await db.node.deleteMany({ where: { messageChannelId: channel.id } });
+    await say(channel, 'fresh start', mention('liam'));
+    expect(await code(M.acknowledgeWakes({}, { proofs: [p1.proof] }, ctx(holderA.id)))).toBe('WAKE_PROOF_STALE');
+    const p2 = (await due(ctx(holderA.id))).wakes[0];
+    expect(p2.channels[0].channel.id).toBe(channel.id);
+    expect(await M.acknowledgeWakes({}, { proofs: [p2.proof] }, ctx(holderA.id))).toEqual({ acknowledged: 1, unchanged: 0 });
+    expect(await db.appWakeReservation.count()).toBe(0);
+  });
+});
+
 describe('cycle 3 — a candidate must be able to wake, not merely mention (Diego P2-2)', () => {
   const scan = { pageRows: 5, maxRows: 200 };
   const run = (userId: string, extra: Record<string, unknown> = {}, sc = scan) =>

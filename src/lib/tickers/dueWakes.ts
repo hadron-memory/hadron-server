@@ -490,7 +490,16 @@ export async function computeDueWakes(args: {
         // An outstanding wake is only this reader's to see if every channel of it is one they may read (R1/B3). For a
         // reader who cannot, it does not exist: they get their own view of what is due, outside that reservation (it
         // is not refreshed and no slot is charged; the holder's router still owes the outstanding one).
-        const stored = live.get(i.workerId);
+        let stored = live.get(i.workerId);
+        // A channel recreated since the wake was issued restarted its seqs: the stored wake can no longer be
+        // acknowledged (WAKE_PROOF_STALE), so it is void, not outstanding. Dropped here, or re-issuing it would wedge
+        // the worker for as long as a router polls (Rook, #1751 cycle 3).
+        if (stored && !stored.wake.channels.every((c) => channelOf.get(c.channelId)?.incarnation === c.incarnation)) {
+          await tx.$executeRaw`DELETE FROM app_wake_reservations WHERE worker_id = ${i.workerId}`;
+          live.delete(i.workerId);
+          consumed--;
+          stored = undefined;
+        }
         const readable = new Set((countedOf.get(i.workerId) ?? []).map((c) => c.channelId));
         const have = stored && stored.wake.channels.every((c) => readable.has(c.channelId)) ? stored : undefined;
         if (stored && !have) {
