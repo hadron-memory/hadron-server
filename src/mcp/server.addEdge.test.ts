@@ -212,7 +212,7 @@ describe('addEdge — happy path', () => {
       expect(await canWriteToMemory(db, auth, owned.id)).toBe(false);
       release();
       await holder;
-      await expect(adding).resolves.toEqual({ error: expect.stringMatching(/^Write access denied for source memory\./) });
+      await expect(adding).resolves.toEqual({ error: 'Write access denied for source memory. Your org role is READER; writing org memories needs CONTRIBUTOR or above.' });
       expect(await db.edge.count({ where: { sourceId: from.id } })).toBe(0);
     } finally {
       release();

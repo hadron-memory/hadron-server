@@ -1252,6 +1252,8 @@ export async function getAccessibleMemoryIds(
  * text, so it never says anything about a memory the caller cannot see. The
  * text names the missing grant, never another principal or another tenant's App.
  */
+const ROLE_ORDER_FOR_WRITE: Record<string, number> = { READER: 0, CONTRIBUTOR: 1, ADMIN: 2, OWNER: 3 };
+
 export async function explainWriteRefusal(
   db: PrismaClient,
   auth: AuthContext,
@@ -1260,19 +1262,28 @@ export async function explainWriteRefusal(
   if (!(await canReadMemory(db, auth, memoryId, EXPLICIT_REF))) return '';
   const memory = await db.memory.findUnique({
     where: { id: memoryId },
-    select: { class: true, appId: true, organizationId: true, ownerUserId: true, userId: true },
+    select: { class: true, appId: true, organizationId: true, ownerUserId: true },
   });
   if (!memory) return '';
+  // The refusal that brought us here may have been STATE, not capability (a
+  // lock or a transfer in flight). A caller who can write now is owed no cause.
+  if (await canWriteToMemory(db, auth, memoryId, EXPLICIT_REF)) return '';
 
   if (auth.impersonation) return ' An impersonation session is a read-only support view.';
   if (isRunPrincipal(auth)) return ' An App run writes only within its own App\'s scope.';
   if (auth.appId && auth.sessionId && !auth.userId) {
     return ' A session-bound App key writes only its own session memory.';
   }
-  if (memory.class === 'personal' || memory.class === 'private' || memory.ownerUserId !== null) {
-    return ' Only the memory\'s owner can write it.';
-  }
+  // Strict-owner and user-owned memories name no cause: their audience is the
+  // owner alone, and the owner's own gates (App isolation, subscription) are not
+  // something to describe to a reader.
+  if (memory.class === 'personal' || memory.class === 'private' || memory.ownerUserId !== null) return '';
   if (memory.appId !== null) {
+    // A participant who is refused holds the read grant only; saying "join the
+    // App" would send them to something they already have.
+    if (auth.userId && (await participantAppIds(db, auth, { includeMemberships: true })).includes(memory.appId)) {
+      return ' You participate in this memory\'s App but hold only a read grant on it; writing needs a write grant (a read-write item role or the App\'s write access).';
+    }
     return ' This memory belongs to an App: writing it needs participation in that App (hadron_list_apps, then hadron_set_active_app).';
   }
   if (memory.class === 'group') {
@@ -1283,7 +1294,7 @@ export async function explainWriteRefusal(
       where: { organizationId: memory.organizationId, userId: auth.userId, ...LIVE_ORG_MEMBERSHIP },
       select: { role: true },
     });
-    if (member) return ` Your org role is ${member.role}; writing org memories needs CONTRIBUTOR or above.`;
+    if (member && (ROLE_ORDER_FOR_WRITE[member.role] ?? -1) < ROLE_ORDER_FOR_WRITE.CONTRIBUTOR) return ` Your org role is ${member.role}; writing org memories needs CONTRIBUTOR or above.`;
   }
   return '';
 }

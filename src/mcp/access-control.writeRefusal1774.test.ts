@@ -9,7 +9,7 @@
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { createTestableMcpServer } from './server.js';
-import { explainWriteRefusal } from './access-control.js';
+import { canReadMemory, canWriteToMemory, explainWriteRefusal } from './access-control.js';
 import { runAuthContext } from '../lib/auth/runPrincipal.js';
 import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
@@ -58,13 +58,14 @@ const auth = (who: string) => ({ userId: users[who], roles: ['READER'] }) as nev
 const why = (a: never, key: string) => explainWriteRefusal(db, a, mem[key].id);
 
 describe('#1774 explainWriteRefusal names the cause for a caller who can read', () => {
-  it('app-scoped memory: says it belongs to an App and what to do', async () => {
+  it('app-scoped memory, caller already in the App with a read grant: says the missing piece is a write grant', async () => {
     // A reader-only participant: the App's agent carries the memory with role "read".
     const agent = await db.agent.create({ data: { id: generateId(), urn: 'w1774.example:eng', name: 'eng', organizationId: org.id } });
     await db.appAgent.create({ data: { appId, agentId: agent.id } });
     await db.agentMemoryItem.create({ data: { agentId: agent.id, memoryId: mem.scoped.id, role: 'read' } });
     await db.appMember.create({ data: { appId, userId: users.reader, role: 'member' } });
-    expect(await why(auth('reader'), 'scoped')).toMatch(/belongs to an App/i);
+    expect(await why(auth('reader'), 'scoped')).toMatch(/participate in this memory's App but hold only a read grant[^.]*write grant/);
+    expect(await why(auth('reader'), 'scoped')).not.toMatch(/needs participation/);
   });
 
   it('group memory: names the MemoryMember writer/owner grant', async () => {
@@ -114,5 +115,81 @@ describe('#1774 the MCP door appends the cause to the established sentence', () 
 
   it('a foreign-org caller still gets Memory not found, nothing more', async () => {
     expect(await create('outsider', 'km')).toMatch(/Memory not found/);
+  });
+});
+
+describe('#1774 bound App key', () => {
+  it("a session-bound App key reading its agent's system memory is told it writes only session memory", async () => {
+    const agent = await db.agent.create({ data: { id: generateId(), urn: 'w1774.example:bound', name: 'bound', organizationId: org.id } });
+    const sys = await db.memory.create({
+      data: { id: generateId(), urn: 'w1774.example:bound-system', name: 'sys', class: 'system', visibility: null, organizationId: org.id },
+    });
+    await db.agent.update({ where: { id: agent.id }, data: { systemMemoryId: sys.id } });
+    await db.appAgent.create({ data: { appId, agentId: agent.id } });
+    const session = await db.session.create({
+      data: { id: generateId(), appId, agentId: agent.id, userId: users.contrib, type: 'DEVELOPER', startedAt: new Date() },
+    });
+    const key = { appId, sessionId: session.id, roles: [] } as never;
+    expect(await canReadMemory(db, key, sys.id)).toBe(true);
+    expect(await canWriteToMemory(db, key, sys.id)).toBe(false);
+    expect(await explainWriteRefusal(db, key, sys.id)).toMatch(/session-bound App key/);
+  });
+});
+
+describe('#1774 a state-based refusal is not given a capability cause', () => {
+  it('a caller who can write the memory is told nothing, whatever refused them a moment ago', async () => {
+    expect(await why(auth('contrib'), 'km')).toBe('');
+    await user('gwriter', 'READER');
+    await db.memoryMember.create({ data: { memoryId: mem.grp.id, userId: users.gwriter, role: 'writer' } });
+    expect(await why(auth('gwriter'), 'grp')).toBe('');
+  });
+});
+
+describe('#1774 revoked membership', () => {
+  it('a revoked reader can no longer read the memory, so is told nothing, not their old role', async () => {
+    await db.orgMember.updateMany({ where: { userId: users.reader }, data: { deletedAt: new Date() } });
+    expect(await why(auth('reader'), 'km')).toBe('');
+  });
+});
+
+describe('#1774 every refusal site appends the cause', () => {
+  let other: { id: string };
+  beforeEach(async () => {
+    other = await db.organization.create({ data: { id: generateId(), name: 'r2', urn: 'r21774.example' } });
+    await db.orgMember.create({ data: { organizationId: other.id, userId: users.contrib, role: 'READER' } });
+    mem.km2 = await db.memory.create({
+      data: { id: generateId(), urn: 'r21774.example:km', name: 'km', class: 'knowledge', organizationId: other.id, visibility: 'ORGANIZATION' },
+    });
+  });
+
+  const as = (who: string) => createTestableMcpServer({ userId: users[who], roles: ['READER'] });
+  const node = (key: string, loc: string) => `hrn:node:${mem[key].urn}:${loc}`;
+  const seed = async (key: string, loc: string) =>
+    db.node.create({ data: { id: generateId(), memoryId: mem[key].id, loc, name: loc } });
+
+  // [site, tool, build args as a caller who can read but not write mem.km (or km2 for the target)]
+  it.each([
+    ['create_parent_node', 'hadron_create_parent_node', 'this memory'],
+    ['create_node', 'hadron_create_node', 'this memory'],
+    ['update_node', 'hadron_update_node', 'this memory'],
+    ['move_node source', 'hadron_move_node', 'source memory'],
+    ['move_node target', 'hadron_move_node', 'target memory'],
+    ['create_edge', 'hadron_create_edge', 'source memory'],
+  ] as const)('%s', async (site, tool, noun) => {
+    await seed('km', 'a');
+    await seed('km', 'b');
+    await seed('km2', 'c');
+    let who = 'reader';
+    let args: Record<string, unknown>;
+    switch (site) {
+      case 'create_parent_node': case 'create_node': args = { urn: node('km', 'fresh'), name: 'x' }; break;
+      case 'update_node': args = { urn: node('km', 'a'), content: 'x' }; break;
+      case 'move_node source': args = { urn: node('km', 'a'), targetUrn: node('km', 'moved') }; break;
+      case 'move_node target': who = 'contrib'; args = { urn: node('km', 'a'), targetUrn: node('km2', 'moved') }; break;
+      default: args = { sourceUrn: node('km', 'a'), targetUrn: node('km', 'b'), name: 'rel' };
+    }
+    const text = await as(who).callToolText(tool, args);
+    expect(text).toContain(`Write access denied for ${noun}.`);
+    expect(text).toMatch(/Your org role is READER; writing org memories needs CONTRIBUTOR or above\./);
   });
 });
