@@ -123,8 +123,10 @@ export function registerTickerTools(server: McpServer, deps: { db: PrismaClient;
     userId: auth.userId ?? undefined,
     appId: auth.appId ?? undefined,
     appKeyId: auth.appKeyId ?? undefined,
-    sessionId: auth.sessionId ?? undefined,
-    sessionBindingRefused: auth.sessionBindingRefused,
+    // An App key's session state is the current request's (the transport refreshes it per request); anyone else's is
+    // the connection's, as before.
+    sessionId: (auth.requestSession ? auth.requestSession.sessionId : auth.sessionId) ?? undefined,
+    sessionBindingRefused: auth.requestSession ? auth.requestSession.refused : auth.sessionBindingRefused,
     roles: auth.roles as Context['roles'],
     organizationId: auth.organizationId ?? undefined,
     impersonation: auth.impersonation,

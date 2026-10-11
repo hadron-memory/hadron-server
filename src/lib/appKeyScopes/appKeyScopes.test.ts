@@ -194,8 +194,29 @@ describe('the invariants file', () => {
   it('the migration carries a byte-identical copy and post-push includes it', () => {
     const source = readFileSync(new URL('../../../prisma/app-key-scope-invariants.sql', import.meta.url), 'utf8');
     const migration = readFileSync(new URL('../../../prisma/migrations/20261011190000_app_key_scopes/migration.sql', import.meta.url), 'utf8');
-    expect(migration.endsWith(source)).toBe(true);
+    // Exactly the file, set off from the generated DDL above it by one blank line: nothing else may sit between.
+    expect(migration.endsWith(`\n${source}`)).toBe(true);
     expect(readFileSync(new URL('../../../prisma/post-push.sql', import.meta.url), 'utf8')).toContain('\\ir app-key-scope-invariants.sql');
+  });
+
+  it('the migration APPLIES: every statement runs, on a database that has only what it builds on (Rook, Chip, Riana #1781)', async () => {
+    const sql = readFileSync(new URL('../../../prisma/migrations/20261011190000_app_key_scopes/migration.sql', import.meta.url), 'utf8');
+    // A containment check passed over two stray lines of shell output that no database accepts; running the file is the proof.
+    const statements = sql
+      .split('\n').filter((l) => !l.trim().startsWith('--')).join('\n')
+      .split(/;\s*(?:\n|$)/).map((x) => x.trim()).filter(Boolean);
+    const ranOk = await db.$transaction(async (tx) => {
+      await tx.$executeRawUnsafe('CREATE SCHEMA mig_check_1749');
+      await tx.$executeRawUnsafe('SET LOCAL search_path TO mig_check_1749');
+      await tx.$executeRawUnsafe('CREATE TABLE app_keys (id TEXT PRIMARY KEY)');
+      for (const st of statements) await tx.$executeRawUnsafe(st);
+      const made = await tx.$queryRawUnsafe<Array<{ n: string }>>(
+        "SELECT table_name AS n FROM information_schema.tables WHERE table_schema = 'mig_check_1749' ORDER BY 1");
+      // Roll back so the scratch schema never outlives the test.
+      throw Object.assign(new Error('rollback'), { made: made.map((r) => r.n) });
+    }).catch((e) => e);
+    expect(ranOk.message).toBe('rollback');
+    expect(ranOk.made).toEqual(['app_key_scopes', 'app_key_wake_reads', 'app_keys']);
   });
 
   it('a key holds a scope at most once while it is live, and only from the closed list', async () => {
@@ -372,6 +393,88 @@ describe('N4 — the scope is read from the database at every call', () => {
     await h.done;
     expect(await settled).toBe('APP_KEY_SCOPE_REQUIRED');
     expect(await db.workerDeliveryChannel.count()).toBe(0);
+  });
+});
+
+describe('the budget notice with a key-only reader (Chip #1781)', () => {
+  beforeEach(async () => {
+    await grant(key);
+    const rook = await db.worker.create({ data: { id: generateId(), appId: app.id, agentId: agent.id, name: 'Rook', slug: 'rook', heldByUserId: member.id, heldAt: new Date() }, select: { id: true } });
+    await db.registerEntry.create({ data: { id: generateId(), appId: app.id, channelId: channel.id, attendeeWorkerId: rook.id, role: 'BOTH' } });
+    await db.app.update({ where: { id: app.id }, data: { wakeDailyBudget: 1 } });
+    await say(channel, 'both', mention('liam', 'rook'));
+  });
+
+  it('a key neither posts nor claims the notice, however often it reads; it still sees the budget status', async () => {
+    for (let i = 0; i < 3; i++) {
+      const page = await due(keyCtx(key, app.id));
+      expect(page.status).toBe('WAKE_BUDGET_EXHAUSTED');
+      expect(page.withheld).toBe(1);
+    }
+    expect(post).not.toHaveBeenCalled();
+    expect(await db.appWakeDay.count({ where: { noticePostedAt: { not: null } } })).toBe(0);
+  });
+
+  it('the next person to read posts it, once for the day', async () => {
+    await due(keyCtx(key, app.id));
+    await due(userCtx(manager.id));
+    await due(userCtx(manager.id));
+    expect(post).toHaveBeenCalledTimes(1);
+    expect(await db.appWakeDay.count({ where: { noticePostedAt: { not: null } } })).toBe(1);
+  });
+});
+
+describe('N4 on every result path — a call that issues nothing is decided under the anchor too (Diego, Riana, Rook #1781)', () => {
+  const revokerInFlight = () => holdOpen(async (tx) => {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('authorization:app'), hashtext(${app.id}))`;
+    await tx.appKeyScope.updateMany({ where: { appKeyId: key.id }, data: { revokedAt: new Date(), revokedByUserId: manager.id } });
+  });
+  /** The read that starts behind a revoker in flight: it must wait, then be refused, and leave no trace. */
+  async function behindRevoker(args: Record<string, unknown> = {}) {
+    const h = revokerInFlight();
+    await h.locked;
+    const settled = due(keyCtx(key, app.id), args).then((p: any) => ({ ok: p }), (e: any) => ({ code: e.extensions?.code }));
+    expect(await stillWaiting(settled, h)).toBe(true);
+    await h.done;
+    const out = await settled;
+    expect(out).toEqual({ code: 'APP_KEY_SCOPE_REQUIRED' });
+    expect(await db.appKeyWakeRead.count()).toBe(0);
+    expect(await db.appWakeReservation.count()).toBe(0);
+    expect(await db.workerDeliveryChannel.count()).toBe(0);
+  }
+  beforeEach(async () => { await grant(key); });
+
+  it('a dormant-only page (worker names and mention counts) is not returned through a revocation in flight', async () => {
+    await db.session.create({ data: { id: generateId(), appId: app.id, userId: holder.id, workerId: liam.id, agentId: agent.id, type: 'DEVELOPER', startedAt: new Date(Date.now() - 100 * 86_400_000), updatedAt: new Date(Date.now() - 100 * 86_400_000), endedAt: new Date(Date.now() - 100 * 86_400_000) } });
+    await say(channel, 'hi', mention('liam'));
+    // Sanity: unrevoked, it IS the dormant metadata a key may see.
+    const seen = await due(keyCtx(key, app.id));
+    expect(seen.wakes).toEqual([]);
+    expect(seen.dormant).toHaveLength(1);
+    await db.appKeyWakeRead.deleteMany();
+    await behindRevoker();
+  });
+
+  it('a page with workers and nothing due is not returned through a revocation in flight', async () => {
+    await behindRevoker();
+  });
+
+  it('an empty page (no worker matches) is not returned through a revocation in flight', async () => {
+    await behindRevoker({ workerRefs: [generateId()] });
+  });
+
+  it('a revocation that commits after the entry check and before the answer is returned still refuses it', async () => {
+    await say(channel, 'for liam', mention('liam'));
+    const revoke = () => db.appKeyScope.updateMany({ where: { appKeyId: key.id }, data: { revokedAt: new Date(), revokedByUserId: manager.id } });
+    // Revoke while the call is between its entry check and its end: from inside the scan's first query.
+    const real = db.channelReadState.findMany.bind(db.channelReadState);
+    const spy = vi.spyOn(db.channelReadState, 'findMany').mockImplementationOnce(((a: any) => revoke().then(() => real(a))) as any);
+    try {
+      expect(await code(due(keyCtx(key, app.id)))).toBe('APP_KEY_SCOPE_REQUIRED');
+    } finally {
+      spy.mockRestore();
+    }
+    expect(await db.appKeyWakeRead.count()).toBe(0);
   });
 });
 

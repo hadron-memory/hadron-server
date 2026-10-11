@@ -1,7 +1,5 @@
 -- #1749 (Tickers S3): App key scopes and the App-key wake-read audit. Additive only.
 
-Already up to date
-Already up to date
 -- CreateTable
 CREATE TABLE "app_key_scopes" (
     "id" TEXT NOT NULL,
@@ -33,7 +31,7 @@ ALTER TABLE "app_key_wake_reads" ADD CONSTRAINT "app_key_wake_reads_app_key_id_f
 
 -- #1749 (Tickers S3): the database facts Prisma's schema language cannot model for App key scopes.
 -- Source of truth for these objects; the migration carries a byte-identical copy
--- (pinned by src/lib/appKeyScopes/invariants.test.ts) and post-push.sql includes this file.
+-- (pinned by src/lib/appKeyScopes/appKeyScopes.test.ts) and post-push.sql includes this file.
 
 -- cor:aut:010:03 — a key holds a scope at most once. A revoked row stays as the record of who gave it and who took it
 -- back; only a live one counts.

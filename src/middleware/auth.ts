@@ -32,6 +32,11 @@ export interface AuthContext {
    * human driver (agent tasks, cor:agt:050:08).
    */
   sessionBindingRefused?: boolean;
+  /**
+   * An MCP transport keeps the context it opened with. For an App key, the session state of the CURRENT request
+   * (refreshed by the transport before each dispatch): the wake tools read this, not `sessionId` above (#1749, N5).
+   */
+  requestSession?: { sessionId?: string; refused: boolean };
   // Current User-row roles for ordinary user principals. HTTP auth resolves
   // them per request; an existing MCP transport refreshes them before every
   // request because its AuthContext otherwise outlives the credential check.

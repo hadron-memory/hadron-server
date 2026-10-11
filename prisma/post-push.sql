@@ -647,5 +647,5 @@ CREATE INDEX IF NOT EXISTS "nodes_msg_channel_seq_loc_c_idx"
 \ir ticker-invariants.sql
 
 -- #1749: App key scopes (cor:aut:010:03). One source, shared verbatim with migration
--- 20261011190000_app_key_scopes (pinned by src/lib/appKeyScopes/invariants.test.ts).
+-- 20261011190000_app_key_scopes (pinned by src/lib/appKeyScopes/appKeyScopes.test.ts).
 \ir app-key-scope-invariants.sql

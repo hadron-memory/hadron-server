@@ -43,6 +43,15 @@ const appAnchors = (app: TaskApp): AuthorityAnchor[] => [
   ...(app.ownerUserId ? [{ kind: 'user' as const, id: app.ownerUserId }] : []),
 ];
 
+/** The last gate of an App key's read: scope held now, under the shared anchor; records the read in the same transaction. */
+async function decideKeyAnswer(ctx: Context, app: TaskApp, key: { appKeyId: string; appId: string }, workerCount: number): Promise<void> {
+  await ctx.db.$transaction(async (tx) => {
+    await lockAuthorityAnchors(tx, appAnchors(app), 'shared');
+    await requireKeyScope(tx, key, 'attention:deliver');
+    await tx.appKeyWakeRead.create({ data: { id: generateId(), appKeyId: key.appKeyId, appId: app.id, workerCount } });
+  });
+}
+
 /**
  * An App key at a wake surface (#1749, cor:aut:010:04). In this order, so that what a key learns never depends on
  * something it does not hold: its own App only (a foreign App is "not found"), the scope read from the database now,
@@ -98,13 +107,17 @@ export async function dueWakesFor(
     ctx, app, reader, requester: key ? { appKeyId: key.appKeyId } : { userId: reader.userId! },
     workerIds: only, first: a.first, after: a.after, authorize,
   });
-  if (result.budgetNotice) await postBudgetNotice(ctx, app, result.budgetNotice);
+  // The budget notice is a team-chat post, which a key cannot make (an App key is read-only in chat), so a key reader
+  // neither posts nor claims it: the claim stays for the next person's read, and the page itself carries the status and
+  // the count of the wakes withheld for the router to act on (Chip, #1781).
+  if (result.budgetNotice && !key) await postBudgetNotice(ctx, app, result.budgetNotice);
 
   const workerIds = [...new Set([...result.wakes.map((w) => w.workerId), ...result.dormant.map((d) => d.workerId)])];
-  // One row per App-key read: which key, how many workers it was shown, when (cor:agt:080:23).
-  if (key) {
-    await ctx.db.appKeyWakeRead.create({ data: { id: generateId(), appKeyId: key.appKeyId, appId: app.id, workerCount: workerIds.length } });
-  }
+  // An App key's answer is decided under the App's authority anchor on EVERY path, not only when a wake is issued:
+  // dormant-only, nothing-due and empty pages carry worker names, mention counts and cursors too (N4, Diego, Riana).
+  // The same transaction writes the audit row (key, App, workers shown, time), so a read is recorded exactly when it
+  // is allowed to be returned (cor:agt:080:23).
+  if (key) await decideKeyAnswer(ctx, app, key, workerIds.length);
   const workers = new Map((await ctx.db.worker.findMany({ where: { id: { in: workerIds } } })).map((w) => [w.id, w]));
   const channelIds = [...new Set(result.wakes.flatMap((w) => w.wake.channels.map((c) => c.channelId)))];
   const channels = new Map((await ctx.db.channel.findMany({ where: { id: { in: channelIds } } })).map((c) => [c.id, c]));

@@ -10997,6 +10997,9 @@ function respondMcpSessionNotFound(res: Response): void {
 /** A transport session belongs to the principal that authenticated its initialize request. */
 function sameMcpPrincipal(bound: AuthContext, presented: AuthContext): boolean {
   if (bound.userId) return presented.userId === bound.userId && !presented.impersonation;
+  // An App key's scopes distinguish keys of one App (#1749): a transport belongs to the EXACT key that opened it, so a
+  // returning request signed with another key of the same App can borrow neither its scope, its proof identity nor its audit.
+  if (bound.appKeyId) return presented.appKeyId === bound.appKeyId && !presented.userId;
   if (bound.appId) return presented.appId === bound.appId && !presented.userId;
   return !!bound.clientId && presented.clientId === bound.clientId;
 }
@@ -11158,6 +11161,11 @@ export async function handleMcpRequest(req: Request, res: Response): Promise<voi
       // Credential resolution re-reads the live user after the liveness check
       // above. A demotion between those reads must win before tool dispatch.
       active.auth.roles = presented.roles ?? [];
+      // An App key carries no session of its own across requests: THIS request's header (valid, or named and refused)
+      // is what the wake tools' session-bound refusal reads, not the one the transport opened with (#1749, N5).
+      if (active.auth.appKeyId) {
+        active.auth.requestSession = { sessionId: presented.sessionId, refused: presented.sessionBindingRefused === true };
+      }
       await publishConnectionActor(sessionId, presented, req.headers['x-hadron-session'] !== undefined);
       await active.transport.handleRequest(req, res, req.body);
     } finally {

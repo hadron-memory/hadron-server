@@ -1,6 +1,6 @@
 -- #1749 (Tickers S3): the database facts Prisma's schema language cannot model for App key scopes.
 -- Source of truth for these objects; the migration carries a byte-identical copy
--- (pinned by src/lib/appKeyScopes/invariants.test.ts) and post-push.sql includes this file.
+-- (pinned by src/lib/appKeyScopes/appKeyScopes.test.ts) and post-push.sql includes this file.
 
 -- cor:aut:010:03 — a key holds a scope at most once. A revoked row stays as the record of who gave it and who took it
 -- back; only a live one counts.
