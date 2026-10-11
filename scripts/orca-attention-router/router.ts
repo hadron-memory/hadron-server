@@ -690,7 +690,7 @@ const spinnerTimer = (s: string): boolean => /[（(]\d/.test(s) && /\d\s*[mh]?\s
  *    available!' box. Codex done: 'Worked for '.
  */
 const IDLE_MARKERS: readonly RegExp[] = [
-  /· done/, /^⏺ Done/, /^Done\./, /^✻ \w+ for \d+[ms]/,
+  /· done/, /^⏺ Done/, /^Done\./, /^✻ \w+ for \d+[ms]/, /^✻ Compacted while idle/,
   /\/clear to save/, /recap:/, /Share Claude Code/,
   /Claude Code v\d/, /glm-[\d.]/,
   /OpenAI Codex \(v/, /Update available!/, /Worked for /,
@@ -709,13 +709,15 @@ const isWeakChrome = (s: string): boolean =>
 
 /**
  * [verdict, detail] on the window directly above the prompt chrome: 'busy'
- * (a running-turn line is drawn), 'idle' (a positive idle/completed/
- * fresh-launch marker, or a blank window), or 'unknown' (text recognized as
- * NEITHER - it must hold, not nudge: a busy presentation we failed to
- * enumerate looks exactly like this, @codex P2 #1700 round 2). The window is
- * bounded because both agents PIN their running-turn line directly above the
- * prompt while a turn runs; blank is safe because a working agent always
- * draws something there.
+ * (a running-turn line is drawn), 'idle' (the NEWEST non-weak line is a
+ * positive idle/completed/fresh-launch marker — everything older is then
+ * history), or 'unknown' (the newest line is unrecognized, the window holds
+ * only weak chrome with no strong marker, or there is no window at all:
+ * missing evidence, not quiet — all hold rather than nudge, because a busy
+ * presentation we failed to enumerate looks exactly like this; @codex P2
+ * #1700 r2/r3, production calibration #1746). The window is bounded because
+ * both agents PIN their running-turn line directly above the prompt while a
+ * turn runs.
  */
 export function idleProofAbovePrompt(lines: string[], agent: string): ['busy' | 'idle' | 'unknown', string] {
   let at: number; // the first line of the prompt chrome
@@ -738,18 +740,21 @@ export function idleProofAbovePrompt(lines: string[], agent: string): ['busy' | 
     if (l.includes('to interrupt') || l.includes('run in background') || l.includes('Working (') || /^calling [a-z]/i.test(l)) return ['busy', l];
     if (spinnerTimer(l)) return ['busy', l];
   }
-  // The window is proof only when recognized AS A WHOLE (@codex P2 #1700 r3):
-  // every line must be idle chrome (strong or weak), and at least one line
-  // must be a STRONG marker. A reassuring line deeper in the window cannot
-  // rescue an unexplained newer status, and an absent window is missing
-  // evidence, not quiet — both hold as unknown.
-  let strong = false;
-  for (const l of window) {
-    if (IDLE_MARKERS.some((re) => re.test(l))) { strong = true; continue; }
-    if (!isWeakChrome(l)) return ['unknown', `unrecognized chrome above the prompt`];
-  }
-  if (!strong) return ['unknown', 'no positive liveness evidence above the prompt'];
-  return ['idle', 'completed or fresh-launch chrome'];
+  // Judge the NEWEST content positionally (production calibration, 2026-10-11:
+  // Yuri's first-night report — real idle terminals carry ordinary assistant
+  // output text above the done-marker, which a whole-window rule fail-closes
+  // to unknown and the router delivers ~nothing after a restart). The newest
+  // non-weak line decides: a STRONG marker there means everything older is
+  // history (safe); weak chrome may TRAIL a strong marker (banner tail lines)
+  // without hiding it. An unrecognized newest line still holds — @codex P2
+  // #1700 r3's counterexample stands: a busy presentation that drifted format
+  // looks exactly like that, and old completion text must not rescue it. An
+  // absent or weak-only window is missing evidence, not quiet.
+  let i = window.length - 1;
+  while (i >= 0 && isWeakChrome(window[i])) i--;
+  if (i < 0) return ['unknown', 'no positive liveness evidence above the prompt'];
+  if (IDLE_MARKERS.some((re) => re.test(window[i]))) return ['idle', 'completed or fresh-launch chrome'];
+  return ['unknown', 'unrecognized chrome above the prompt'];
 }
 
 /**
