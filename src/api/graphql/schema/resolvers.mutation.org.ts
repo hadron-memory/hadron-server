@@ -157,8 +157,8 @@ export const orgMutations = {
       return beginUserMergeConsent(ctx.db, s.id, t.id, ctx.userId);
     },
 
-    approveMergeUsersConsent: async (_: unknown, { proof }: { proof: string }, ctx: Context) =>
-      approveUserMergeConsent(ctx, proof),
+    approveMergeUsersConsent: async (_: unknown, { proof, source, target }: { proof: string; source: string; target: string }, ctx: Context) =>
+      approveUserMergeConsent(ctx, proof, source, target),
 
     mergeUsers: async (
       _: unknown,

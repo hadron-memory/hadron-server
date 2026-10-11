@@ -21,7 +21,7 @@ function adminCtx(): Context {
 }
 
 async function merge(sourceRef: string, targetRef: string, ctx = adminCtx()) {
-  const consentProof = await approvedMergeProof(db, source.id, target.id);
+  const consentProof = await approvedMergeProof(db, source.id, target.id, admin.id);
   return orgMutations.mergeUsers(
     {},
     { input: { source: sourceRef, target: targetRef, consentProof } },

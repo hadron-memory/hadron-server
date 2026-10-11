@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { orgMutations } from './resolvers.mutation.org.js';
@@ -38,16 +38,16 @@ async function fixture() {
 
 it('requires both fresh logins and consumes the proof with a sealed merge receipt', async () => {
   const f = await fixture();
-  await approveUserMergeConsent(f.context(f.source.id), f.proof);
+  await approveUserMergeConsent(f.context(f.source.id), f.proof, f.source.id, f.target.id);
   await expect(f.execute()).rejects.toMatchObject({ extensions: { code: 'MERGE_CONSENT_REQUIRED' } });
   expect((await db.userMergeConsent.findUniqueOrThrow({ where: f.key })).consumedAt).toBeNull();
-  await approveUserMergeConsent(f.context(f.target.id), f.proof);
+  await approveUserMergeConsent(f.context(f.target.id), f.proof, f.source.id, f.target.id);
   await f.execute();
   const receipt = await db.userMerge.findUniqueOrThrow({ where: { sourceUserId: f.source.id } });
   expect(receipt.consentHash).toBe(f.key.proofHash);
   expect(receipt.consentReceipt).toMatchObject({ sourceUserId: f.source.id, targetUserId: f.target.id, scope: 'FULL_CONSOLIDATION', sourceLoginMethod: 'email', targetLoginMethod: 'email' });
   expect((await db.userMergeConsent.findUniqueOrThrow({ where: f.key })).consumedAt).not.toBeNull();
-  await expect(approveUserMergeConsent(f.context(f.target.id), f.proof)).rejects.toMatchObject({ extensions: { code: 'MERGE_CONSENT_REQUIRED' } });
+  await expect(approveUserMergeConsent(f.context(f.target.id), f.proof, f.source.id, f.target.id)).rejects.toMatchObject({ extensions: { code: 'MERGE_CONSENT_REQUIRED' } });
 });
 
 it('rejects old sessions, outsiders, API keys, Apps and impersonation as approvals', async () => {
@@ -59,27 +59,28 @@ it('rejects old sessions, outsiders, API keys, Apps and impersonation as approva
     { ...base, userId: f.admin.id },
     { ...base, apiKeyId: 'key' },
     { ...base, appId: 'app' },
+    { ...base, sessionId: 'session' },
     { ...base, impersonation: { adminUserId: f.admin.id, reason: 'test' } },
-  ]) await expect(approveUserMergeConsent(ctx as Context, f.proof)).rejects.toMatchObject({ extensions: { code: 'MERGE_CONSENT_REQUIRED' } });
+  ]) await expect(approveUserMergeConsent(ctx as Context, f.proof, f.source.id, f.target.id)).rejects.toMatchObject({ extensions: { code: 'MERGE_CONSENT_REQUIRED' } });
   expect((await db.userMergeConsent.findUniqueOrThrow({ where: f.key })).sourceLoginAt).toBeNull();
 });
 
 it('rejects expiry and exact ordered-pair substitution without transferring data', async () => {
   const f = await fixture();
-  await approveUserMergeConsent(f.context(f.source.id), f.proof);
-  await approveUserMergeConsent(f.context(f.target.id), f.proof);
+  await approveUserMergeConsent(f.context(f.source.id), f.proof, f.source.id, f.target.id);
+  await approveUserMergeConsent(f.context(f.target.id), f.proof, f.source.id, f.target.id);
   await expect(mergeUsers(db, { sourceUserId: f.target.id, targetUserId: f.source.id, actorUserId: f.admin.id, mergeGlobalRoles: true, consentProof: f.proof })).rejects.toMatchObject({ extensions: { code: 'MERGE_CONSENT_REQUIRED' } });
   await db.userMergeConsent.update({ where: f.key, data: { expiresAt: new Date(0) } });
   await expect(f.execute()).rejects.toMatchObject({ extensions: { code: 'MERGE_CONSENT_REQUIRED' } });
-  await expect(approveUserMergeConsent(f.context(f.source.id), f.proof)).rejects.toMatchObject({ extensions: { code: 'MERGE_CONSENT_REQUIRED' } });
+  await expect(approveUserMergeConsent(f.context(f.source.id), f.proof, f.source.id, f.target.id)).rejects.toMatchObject({ extensions: { code: 'MERGE_CONSENT_REQUIRED' } });
   expect(await db.userMerge.count()).toBe(0);
   expect((await db.user.findUniqueOrThrow({ where: { id: f.source.id } })).deletedAt).toBeNull();
 });
 
 it('rechecks the executing admin role under locks', async () => {
   const f = await fixture();
-  await approveUserMergeConsent(f.context(f.source.id), f.proof);
-  await approveUserMergeConsent(f.context(f.target.id), f.proof);
+  await approveUserMergeConsent(f.context(f.source.id), f.proof, f.source.id, f.target.id);
+  await approveUserMergeConsent(f.context(f.target.id), f.proof, f.source.id, f.target.id);
   await db.user.update({ where: { id: f.admin.id }, data: { roles: ['READER'] } });
   await expect(f.execute()).rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
   expect((await db.userMergeConsent.findUniqueOrThrow({ where: f.key })).consumedAt).toBeNull();
@@ -87,8 +88,8 @@ it('rechecks the executing admin role under locks', async () => {
 
 it('admits one concurrent execution and refuses reuse', async () => {
   const f = await fixture();
-  await approveUserMergeConsent(f.context(f.source.id), f.proof);
-  await approveUserMergeConsent(f.context(f.target.id), f.proof);
+  await approveUserMergeConsent(f.context(f.source.id), f.proof, f.source.id, f.target.id);
+  await approveUserMergeConsent(f.context(f.target.id), f.proof, f.source.id, f.target.id);
   const results = await Promise.allSettled([f.execute(), f.execute()]);
   expect(results.filter(r => r.status === 'fulfilled')).toHaveLength(1);
   expect(results.filter(r => r.status === 'rejected')).toHaveLength(1);
@@ -98,11 +99,50 @@ it('admits one concurrent execution and refuses reuse', async () => {
 
 it('rolls back proof consumption and all transfers if the final receipt fails', async () => {
   const f = await fixture();
-  await approveUserMergeConsent(f.context(f.source.id), f.proof);
-  await approveUserMergeConsent(f.context(f.target.id), f.proof);
+  await approveUserMergeConsent(f.context(f.source.id), f.proof, f.source.id, f.target.id);
+  await approveUserMergeConsent(f.context(f.target.id), f.proof, f.source.id, f.target.id);
   // Force a unique violation at the final receipt INSERT, after the transfers.
   await db.userMerge.create({ data: { sourceUserId: f.source.id, targetUserId: f.target.id, mergedBy: f.admin.id } });
   await expect(f.execute()).rejects.toThrow();
   expect((await db.userMergeConsent.findUniqueOrThrow({ where: f.key })).consumedAt).toBeNull();
   expect((await db.user.findUniqueOrThrow({ where: { id: f.source.id } })).deletedAt).toBeNull();
+});
+
+it('approval names the ordered pair and refuses swapped or foreign refs without writing', async () => {
+  const f = await fixture();
+  const approve = (source: string, target: string) => orgMutations.approveMergeUsersConsent({},
+    { proof: f.proof, source, target }, f.context(f.source.id));
+  for (const [source, target] of [[f.target.id, f.source.id], [f.source.id, f.admin.id], [f.source.id, 'missing-user']]) {
+    await expect(approve(source, target)).rejects.toMatchObject({ extensions: { code: 'MERGE_CONSENT_REQUIRED' } });
+    expect((await db.userMergeConsent.findUniqueOrThrow({ where: f.key })).sourceLoginAt).toBeNull();
+  }
+  await expect(approve('hrn:user:source', 'target')).resolves.toBe(true);
+});
+
+it('another platform admin cannot execute the requester’s approved proof', async () => {
+  const f = await fixture();
+  const other = await db.user.create({ data: { handle: 'other-admin', roles: ['ADMIN'] } });
+  await approveUserMergeConsent(f.context(f.source.id), f.proof, f.source.id, f.target.id);
+  await approveUserMergeConsent(f.context(f.target.id), f.proof, f.source.id, f.target.id);
+  await expect(mergeUsers(db, { sourceUserId: f.source.id, targetUserId: f.target.id, actorUserId: other.id,
+    mergeGlobalRoles: true, consentProof: f.proof })).rejects.toMatchObject({ extensions: { code: 'MERGE_CONSENT_REQUIRED' } });
+  expect((await db.userMergeConsent.findUniqueOrThrow({ where: f.key })).consumedAt).toBeNull();
+  expect((await db.user.findUniqueOrThrow({ where: { id: f.source.id } })).deletedAt).toBeNull();
+  await expect(f.execute()).resolves.toMatchObject({ id: f.target.id });
+});
+
+
+it('fresh login remains usable with app clock skew in either direction', async () => {
+  const { verifiedLoginEvidence } = await import('../../../auth/loginEvidence.js');
+  const f = await fixture();
+  const wallTime = Date.now();
+  for (const offset of [-3_600_000, 3_600_000]) {
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(wallTime + offset);
+    try {
+      const login = await verifiedLoginEvidence(db, 'google');
+      expect(Math.abs(login.at - wallTime)).toBeLessThan(30_000);
+      const ctx = { ...f.context(f.source.id), login };
+      await expect(approveUserMergeConsent(ctx, f.proof, f.source.id, f.target.id)).resolves.toBe(true);
+    } finally { clock.mockRestore(); }
+  }
 });

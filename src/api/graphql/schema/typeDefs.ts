@@ -9172,8 +9172,8 @@ export const typeDefs = `#graphql
 
     "Platform admin begins an exact ordered-pair, full-consolidation consent, valid for 15 minutes. Returns its opaque proof once."
     beginMergeUsersConsent(source: String!, target: String!): UserMergeConsentRequest!
-    "Each account approves with its own JWT from a verified login AFTER consent creation. API keys, impersonation and bound worker sessions cannot approve. No admin substitute."
-    approveMergeUsersConsent(proof: String!): Boolean!
+    "Each account approves with its own JWT from a verified login AFTER consent creation. API keys, Apps, impersonation and any session-bound caller cannot approve. Source and target name the exact ordered pair. No admin substitute."
+    approveMergeUsersConsent(proof: String!, source: String!, target: String!): Boolean!
 
     """
     Delete a user account (self-serve account deletion, Apple 5.1.1(v) /

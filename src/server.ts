@@ -1,3 +1,4 @@
+import { verifiedLoginEvidence } from './auth/loginEvidence.js';
 import crypto from 'crypto';
 import { mountTeamSpecSchemaRoutes } from './api/teamSpecSchema.js';
 import { readTeamRecordKeys } from './lib/teamSpec/record.js';
@@ -483,8 +484,9 @@ export async function createServer(): Promise<Express> {
       const isNew = user.createdAt.getTime() >= startedAt;
 
       // Issue JWT
+      const login = await verifiedLoginEvidence(db, 'github');
       const jwt = await signJwt({
-        login: { at: Date.now(), method: 'github' },
+        login,
         sub: user.id,
         githubUsername: user.githubUsername ?? undefined,
         roles: user.roles as ('OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER')[],
@@ -534,7 +536,7 @@ export async function createServer(): Promise<Express> {
       // itself. redirect + isNew ride in the code record, not the URL. The
       // GitHub-flow clientState binds the finishing browser (session fixation).
       const handoffCode = await issueLoginCode({
-        login: { at: Date.now(), method: 'github' },
+        login,
         userId: user.id,
         redirect: pending.redirect,
         isNew,
@@ -634,8 +636,9 @@ export async function createServer(): Promise<Express> {
       const isNew = user.createdAt.getTime() >= startedAt;
 
       // Same claim shape POST /auth/session rebuilds from the user row.
+      const login = await verifiedLoginEvidence(db, 'google');
       const jwt = await signJwt({
-        login: { at: Date.now(), method: 'google' },
+        login,
         sub: user.id,
         roles: user.roles as ('OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER')[],
         ...(user.email ? { email: user.email } : {}),
@@ -659,7 +662,7 @@ export async function createServer(): Promise<Express> {
 
       // #477 Sink 1: single-use handoff code; the JWT never rides a URL.
       const handoffCode = await issueLoginCode({
-        login: { at: Date.now(), method: 'google' },
+        login,
         userId: user.id,
         redirect: pending.redirect,
         isNew,
@@ -779,8 +782,9 @@ export async function createServer(): Promise<Express> {
       const isNew = user.createdAt.getTime() >= startedAt;
 
       // Same claim shape POST /auth/session rebuilds from the user row.
+      const login = await verifiedLoginEvidence(db, 'apple');
       const jwt = await signJwt({
-        login: { at: Date.now(), method: 'apple' },
+        login,
         sub: user.id,
         roles: user.roles as ('OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER')[],
         ...(user.email ? { email: user.email } : {}),
@@ -804,7 +808,7 @@ export async function createServer(): Promise<Express> {
 
       // #477 Sink 1: single-use handoff code; the JWT never rides a URL.
       const handoffCode = await issueLoginCode({
-        login: { at: Date.now(), method: 'apple' },
+        login,
         userId: user.id,
         redirect: pending.redirect,
         isNew,
@@ -972,9 +976,10 @@ export async function createServer(): Promise<Express> {
       // standard code+PKCE dance. Cookie maxAge derived from the JWT exp so
       // both expire together (see the GitHub callback for the full
       // rationale). Option-C honors return_to regardless of isNew.
+      const login = await verifiedLoginEvidence(db, 'email');
       if (isOptionC) {
         const jwt = await signJwt({
-          login: { at: Date.now(), method: 'email' },
+          login,
           sub: user.id,
           roles: user.roles as ('OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER')[],
           ...(user.email ? { email: user.email } : {}),
@@ -1008,7 +1013,7 @@ export async function createServer(): Promise<Express> {
       // redirect (PR #770 review, Copilot). Falls back to `/` when not local.
       const dest = redirectParam && isServerLocalPath(redirectParam) ? redirectParam : '/';
       const code = await issueLoginCode({
-        login: { at: Date.now(), method: 'email' },
+        login,
         userId: user.id,
         redirect: dest,
         isNew,

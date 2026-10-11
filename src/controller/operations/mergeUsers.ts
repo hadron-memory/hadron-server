@@ -293,7 +293,7 @@ async function runMergeTxn(
       if (!actorRow || actorRow.deletedAt || !actorRow.roles.some(r => r === 'ADMIN' || r === 'OWNER'))
         throw new GraphQLError('Forbidden', { extensions: { code: 'FORBIDDEN' } });
     }
-    const consent = await consumeUserMergeConsent(tx, consentProof, sourceUserId, targetUserId);
+    const consent = await consumeUserMergeConsent(tx, consentProof, sourceUserId, targetUserId, actorUserId);
     await refuseUsersInOpenAlarmChains(tx, sourceUserId, targetUserId);
 
     const adoptGithubIdentity = target.githubId == null && target.githubUsername == null;
