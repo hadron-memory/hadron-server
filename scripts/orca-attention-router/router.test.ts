@@ -432,6 +432,18 @@ describe('Orca attention router — untracked terminals: unknown is not busy (#7
     expect(out).toMatchObject({ nudged: ['Eli'], adopted: true });
   });
 
+  it('prose containing the word compacted is NOT the banner - holds as unknown (#1746 P2)', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli', 'claude', undefined, false);
+    fake.attention.workers = [worker('w-eli', 'Eli')];
+    // Diego's counterexample: an output-text line mentioning compaction is not the banner.
+    fake.screens.set('term_eli', { tail: ['  the router compacted several workers overnight', RULE, '❯ ', RULE, CLAUDE_HINT] });
+    const out = poll(c);
+    expect(out.nudged).toEqual([]);
+    expect(out.held.Eli).toContain('unrecognized chrome');
+    expect(fake.sent).toEqual([]);
+  });
+
   it('a Compacted-while-idle banner is positive idle chrome (#8165)', () => {
     const c = cfg(['w-eli', 'Eli']);
     fake.terminal('eli', 'claude', undefined, false);

@@ -690,7 +690,7 @@ const spinnerTimer = (s: string): boolean => /[（(]\d/.test(s) && /\d\s*[mh]?\s
  *    available!' box. Codex done: 'Worked for '.
  */
 const IDLE_MARKERS: readonly RegExp[] = [
-  /· done/, /^⏺ Done/, /^Done\./, /^✻ \w+ for \d+[ms]/, /compacted/i,
+  /· done/, /^⏺ Done/, /^Done\./, /^✻ \w+ for \d+[ms]/, /^✻ Compacted while idle/,
   /\/clear to save/, /recap:/, /Share Claude Code/,
   /Claude Code v\d/, /glm-[\d.]/,
   /OpenAI Codex \(v/, /Update available!/, /Worked for /,
@@ -709,13 +709,15 @@ const isWeakChrome = (s: string): boolean =>
 
 /**
  * [verdict, detail] on the window directly above the prompt chrome: 'busy'
- * (a running-turn line is drawn), 'idle' (a positive idle/completed/
- * fresh-launch marker, or a blank window), or 'unknown' (text recognized as
- * NEITHER - it must hold, not nudge: a busy presentation we failed to
- * enumerate looks exactly like this, @codex P2 #1700 round 2). The window is
- * bounded because both agents PIN their running-turn line directly above the
- * prompt while a turn runs; blank is safe because a working agent always
- * draws something there.
+ * (a running-turn line is drawn), 'idle' (the NEWEST non-weak line is a
+ * positive idle/completed/fresh-launch marker — everything older is then
+ * history), or 'unknown' (the newest line is unrecognized, the window holds
+ * only weak chrome with no strong marker, or there is no window at all:
+ * missing evidence, not quiet — all hold rather than nudge, because a busy
+ * presentation we failed to enumerate looks exactly like this; @codex P2
+ * #1700 r2/r3, production calibration #1746). The window is bounded because
+ * both agents PIN their running-turn line directly above the prompt while a
+ * turn runs.
  */
 export function idleProofAbovePrompt(lines: string[], agent: string): ['busy' | 'idle' | 'unknown', string] {
   let at: number; // the first line of the prompt chrome
