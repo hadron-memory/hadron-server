@@ -50,6 +50,13 @@ import { idleCutoffs, toNaiveUtc } from '../../../lib/sessionActivity.js';
 import { userUrn } from '../../../lib/userHandle.js';
 import { canSeeUserPersonalFields } from '../../../lib/auth/userVisibility.js';
 import { participantAppWhere } from '../../../lib/auth/appParticipation.js';
+import { lockAppReportsTo, writeReportsTo } from '../../../lib/workerReportsTo.js';
+import { currentActor } from '../../../lib/requestActor.js';
+import { managesApp } from '../../../lib/auth/appManagement.js';
+import { withAuthorizedTx } from './authorizedTx.js';
+import { resolveTaskActor, type TaskApp } from './resolvers.agentTask.js';
+import type { AuthorityAnchor } from '../../../lib/auth/authorityAnchors.js';
+import { eventActor } from '../../../lib/agentTasks/events.js';
 import {
   type Context,
   requireOrgRole,
@@ -457,6 +464,32 @@ export async function resolveWorkerIdByNameGated(
     return null;
   }
   return resolveWorkerIdByName(ctx.db, appId, name);
+}
+
+/**
+ * #1726 — resolve a `reportsTo` target WITHIN the subject worker's App: its
+ * id, URN or name. A worker of any other App answers exactly like a missing
+ * one, WORKER_NOT_FOUND with no id, so the setter and the bind are never an
+ * existence oracle across tenants (#1737 QA, Chip's P2). The caller has
+ * already passed the App's worker read gate, which lists every worker here.
+ */
+export async function resolveReportsToTarget(ctx: Context, appId: string, ref: string): Promise<string> {
+  const trimmed = ref.trim();
+  let id: string | null = null;
+  if (isId(trimmed) || hasSchemePrefix(trimmed)) {
+    try {
+      const resolved = (await resolveWorkerRefId(ctx.db, trimmed)).id;
+      const row = await ctx.db.worker.findUnique({ where: { id: resolved }, select: { appId: true } });
+      id = row?.appId === appId ? resolved : null;
+    } catch {
+      // A malformed URN, an unresolvable App and an absent worker collapse to
+      // one refusal, as resolveWorkerRefRow does.
+    }
+  } else {
+    id = await resolveWorkerIdByNameGated(ctx, appId, trimmed);
+  }
+  if (!id) throw new GraphQLError(`Worker not found in this App: "${trimmed}"`, { extensions: { code: 'WORKER_NOT_FOUND' } });
+  return id;
 }
 
 /** True when the refusal is the per-App name unique (`workers_app_name_uniq`). */
@@ -935,10 +968,127 @@ export const workerMutations = {
     const worker = await resolveWorkerRefRow(ctx, workerRef);
     const app = await ctx.db.app.findUniqueOrThrow({ where: { id: worker.appId } });
     await requireWorkerStaffAccess(ctx, app);
-    await ctx.db.worker.updateMany({
-      where: { id: worker.id, retiredAt: null },
-      data: { retiredAt: new Date(), retiredBy: ctx.userId ?? null },
+    await ctx.db.$transaction(async (tx) => {
+      // #1726: the reportsTo graph lock BEFORE the worker row (the lock
+      // protocol in src/lib/workerReportsTo.ts; #1737 review, Diego P2-2).
+      await lockAppReportsTo(tx, worker.appId);
+      const retired = await tx.worker.updateMany({
+        where: { id: worker.id, retiredAt: null },
+        data: { retiredAt: new Date(), retiredBy: ctx.userId ?? null },
+      });
+      // #1726: a retired worker reports to nobody. Workers that report TO it
+      // keep their value; the roster flags them (`reportsToRetired`) rather
+      // than the platform silently clearing a structure someone set.
+      if (retired.count > 0) {
+        await writeReportsTo(tx, { workerId: worker.id, appId: worker.appId, to: null, actor: eventActor(ctx.userId), setBy: 'retirement' });
+      }
     });
+    return ctx.db.worker.findUniqueOrThrow({ where: { id: worker.id } });
+  },
+
+  /**
+   * setWorkerReportsTo — #1726: set, hand over or clear who a worker reports
+   * to (`reportsTo: null` clears). Well-formedness is the writer's
+   * (src/lib/workerReportsTo.ts: same App, not itself, not retired, no cycle);
+   * authority is decided here, on the value as it stands under the writer's
+   * lock:
+   *
+   * - whoever manages the App (#7790: its user-owner, owner-role members, org
+   *   ADMIN/OWNER, platform admins) may make any change;
+   * - the worker it reports to now may hand it over or clear it: doing so is
+   *   that worker's agreement;
+   * - a worker that reports to nobody may be claimed by a worker for itself
+   *   only when one person holds both, or placed under any worker by its own
+   *   holder (INTERIM, Ada #7981, pending Holger's ruling on Rook's
+   *   claim-scope question; #7931 had allowed any worker to claim).
+   *
+   * "A worker" is the caller's bound session's worker, in the same App, with a
+   * person behind the request (the #1713 interim: a bare App key may bind any
+   * session of its App, so its worker id alone proves nothing). Refused with
+   * WORKER_REPORTS_TO_FORBIDDEN otherwise.
+   */
+  setWorkerReportsTo: async (
+    _: unknown,
+    { workerRef, reportsTo }: { workerRef: string; reportsTo?: string | null },
+    ctx: Context,
+  ) => {
+    // Identity-scoped: a support session never changes the team's structure
+    // (#1737 review, Diego P2-1; the read-only plugin refuses it too).
+    if (ctx.impersonation) {
+      throw new GraphQLError('Impersonation sessions are read-only.', { extensions: { code: 'FORBIDDEN' } });
+    }
+    const worker = await resolveWorkerRefRow(ctx, workerRef);
+    const app = await ctx.db.app.findUniqueOrThrow({ where: { id: worker.appId } });
+    await requireWorkerReadAccess(ctx, app);
+    const to = reportsTo ? await resolveReportsToTarget(ctx, worker.appId, reportsTo) : null;
+    const forbidden = () => new GraphQLError(
+      'Only the worker this one reports to, a worker claiming an unclaimed one for itself, or whoever manages the App may change who it reports to.',
+      { extensions: { code: 'WORKER_REPORTS_TO_FORBIDDEN', workerId: worker.id } },
+    );
+    // #1737 review (Rook P2-1, Diego P2-1): the authority is decided under the
+    // App's anchors, on the transaction context (platform roles re-read from
+    // the user row, a deleted or uninstalled App refused), with the caller's
+    // App membership held FOR SHARE, so a demotion, an org-role change or an
+    // uninstall either committed first and is seen, or waits for this write.
+    // Lock order per src/lib/workerReportsTo.ts: anchors, the graph, then rows.
+    const anchors: AuthorityAnchor[] = [
+      { kind: 'app', id: app.id },
+      ...(app.organizationId ? [{ kind: 'org' as const, id: app.organizationId }] : []),
+      ...(app.ownerUserId ? [{ kind: 'user' as const, id: app.ownerUserId }] : []),
+    ];
+    try {
+      await withAuthorizedTx(
+        ctx,
+        anchors,
+        async () => {},
+        async (tx, txCtx) => {
+          const fresh = await tx.app.findUniqueOrThrow({ where: { id: app.id } });
+          await writeReportsTo(tx, {
+            workerId: worker.id, appId: worker.appId, to, actor: eventActor(ctx.userId), setBy: 'app-manager',
+            authorize: async (from) => {
+              // The worker arms: the request's bound worker, re-resolved here
+              // (a person behind it, not retired, still able to drive this App).
+              const actor = await resolveTaskActor(txCtx, fresh as unknown as TaskApp);
+              const acting = actor?.kind === 'worker' ? actor.workerId : null;
+              if (acting && from !== null && acting === from) return 'current';
+              if (from === null && to !== null) {
+                // A claim on a worker that reports to nobody. INTERIM rule (Ada
+                // #7981, narrowing #7931 until Holger rules on Rook's claim-scope
+                // question): a worker claims it only when ONE person holds both;
+                // otherwise the claim is the target's holder's to make (or a
+                // manager's). The writer holds both rows FOR UPDATE by now, so
+                // neither hold can change under this decision.
+                const holds = await tx.worker.findMany({
+                  where: { id: { in: [worker.id, ...(acting ? [acting] : [])] } },
+                  select: { id: true, heldByUserId: true },
+                });
+                const holderOf = (id: string) => holds.find((h) => h.id === id)?.heldByUserId ?? null;
+                const targetHolder = holderOf(worker.id);
+                if (acting && to === acting && targetHolder !== null && targetHolder === holderOf(acting)) return 'claimant';
+                if (ctx.userId && targetHolder === ctx.userId) return 'holder';
+              }
+              if (await managesApp(txCtx, fresh)) return 'app-manager';
+              throw forbidden();
+            },
+          });
+        },
+        {
+          afterLock: async (tx) => {
+            await lockAppReportsTo(tx, app.id);
+            if (ctx.userId) {
+              await tx.$queryRaw`SELECT 1 FROM app_members WHERE app_id = ${app.id} AND user_id = ${ctx.userId} FOR SHARE`;
+            }
+          },
+        },
+      );
+    } catch (e) {
+      if (!(e instanceof Error && e.message === 'Forbidden')) throw e;
+      const now = await ctx.db.app.findUnique({ where: { id: app.id }, select: { deletedAt: true, uninstalledAt: true } });
+      if (now && !now.deletedAt && now.uninstalledAt) {
+        throw new GraphQLError('This App is uninstalled; its team structure is read-only.', { extensions: { code: 'APP_UNINSTALLED' } });
+      }
+      throw forbidden();
+    }
     return ctx.db.worker.findUniqueOrThrow({ where: { id: worker.id } });
   },
 
@@ -2199,6 +2349,39 @@ export const workerFieldResolvers = {
       worker.heldByUserId && (await maySeeWorkerInternals(ctx, worker.appId))
         ? worker.heldAt
         : null,
+    /**
+     * #1726 — who this worker reports to. Staffing, like the hold: behind the
+     * worker read gate and masked on deny (see heldByUserId), since
+     * Session.worker reaches this type through a wider audience.
+     */
+    reportsToWorkerId: async (
+      worker: { appId: string; reportsToWorkerId?: string | null },
+      _: unknown,
+      ctx: Context,
+    ) => ((await maySeeWorkerInternals(ctx, worker.appId)) ? (worker.reportsToWorkerId ?? null) : null),
+    /** #1726 — the Worker this one reports to (same App, so the same gate), masked as reportsToWorkerId. */
+    reportsTo: async (
+      worker: { appId: string; reportsToWorkerId?: string | null },
+      _: unknown,
+      ctx: Context,
+    ) => {
+      if (!worker.reportsToWorkerId || !(await maySeeWorkerInternals(ctx, worker.appId))) return null;
+      return ctx.db.worker.findUnique({ where: { id: worker.reportsToWorkerId } });
+    },
+    /**
+     * #1726 — the worker reports to a RETIRED worker. Retirement clears the
+     * retired worker's own reportsTo but leaves the workers reporting to it
+     * alone, so a stale claim is flagged here instead of cleared silently.
+     */
+    reportsToRetired: async (
+      worker: { appId: string; reportsToWorkerId?: string | null },
+      _: unknown,
+      ctx: Context,
+    ) => {
+      if (!worker.reportsToWorkerId || !(await maySeeWorkerInternals(ctx, worker.appId))) return false;
+      const to = await ctx.db.worker.findUnique({ where: { id: worker.reportsToWorkerId }, select: { retiredAt: true } });
+      return !!to?.retiredAt;
+    },
     /** Working-state field — worker read gate, masked to null (see maySeeWorkerInternals). */
     memoryId: async (
       worker: { appId: string; memoryId: string | null },

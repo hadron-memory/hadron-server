@@ -18,7 +18,7 @@ import {
   SoleOrgOwnerError,
 } from '../../../controller/operations/deleteUser.js';
 import { softDeleteOrganizationCore } from '../../../controller/operations/softDeleteOrganization.js';
-import { validateOrgSlug } from '../../../lib/urn.js';
+import { validateOrgRoot } from '../../../lib/org/orgRoot.js';
 import { retryOnSerializationFailure } from '../../../lib/serializableRetry.js';
 import {
   mintPrincipal,
@@ -244,8 +244,8 @@ export const orgMutations = {
       requireRole(ctx, 'READER');
       // #376: store only a bare org slug — a scheme-prefixed / colon-bearing
       // value would later cascade a corrupt `<orgUrn>:` prefix into children.
-      // #692: a new org root must be a dotted domain (validateOrgSlug enforces).
-      validateOrgSlug(urn);
+      // #1733: a bare, legal org root, dotted or not (validateOrgRoot).
+      validateOrgRoot(urn);
       // #692: mint the org's principal (cross-kind pool uniqueness) and create
       // the org + owner in ONE transaction, so a name can never be half-claimed.
       const org = await ctx.db
@@ -302,7 +302,7 @@ export const orgMutations = {
       // `String` GraphQL arg permits) so malformed input is rejected loudly
       // rather than silently dropped by the `if (!urn)` no-change fast-path;
       // only an omitted / explicit-null urn skips validation.
-      if (urn != null) validateOrgSlug(urn);
+      if (urn != null) validateOrgRoot(urn);
 
       const data = {
         ...(name ? { name } : {}),

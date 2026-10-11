@@ -1,3 +1,5 @@
+import { configSelection } from '../lib/automation/identities.js';
+import { captureSetupConsent, currentOriginPin, AutomationPinError } from '../lib/automation/pins.js';
 /**
  * Headless agent runs — mint, execute, listen, sweep (spec 040, plan §4–§6).
  *
@@ -372,6 +374,8 @@ export async function consumeActionTicket(
 // ── Mint (plan §4 steps 1–2: launch gate + activation) ──────────────────────
 
 export interface MintAppRunArgs {
+  /** Internal interactive caller; never accepted from trigger/event data. */
+  consentPrincipal?: import('../middleware/auth.js').AuthContext;
   organizationId: string;
   appId: string;
   agentId?: string | null;
@@ -547,6 +551,21 @@ export async function mintAppRun(db: PrismaClient, args: MintAppRunArgs): Promis
   // only — the watermarks are read live by the attention section (Phase 7).
   const registerSnapshot = args.agentId ? await snapshotRegisterForRun(db, args.agentId, args.appId) : null;
 
+  // Consent comes from setup, never the webhook/event payload. Child runs
+  // inherit the parent's artifact; poll events use the origin trigger's pin.
+  let automationPin: unknown = null;
+  if (args.triggerKind === 'MANUAL') {
+    automationPin = await captureSetupConsent(db, args.appId, args.userId ?? null, args.entryNodeUrn, args.organizationId, args.consentPrincipal ?? { appId: args.appId, userId: args.userId ?? undefined, organizationId: args.organizationId }, configSelection(args));
+  } else if (args.triggerKind === 'SCHEDULE') {
+    automationPin = (await db.agentSchedule.findFirst({ where: { id: args.triggerId ?? '', appId: args.appId, deletedAt: null } }))?.automationPin;
+  } else if (args.triggerKind === 'WEBHOOK') {
+    automationPin = (await db.agentWebhook.findFirst({ where: { id: args.triggerId ?? '', appId: args.appId, deletedAt: null } }))?.automationPin;
+  } else if (args.parentRunId) {
+    automationPin = args.triggerKind === 'INTEGRATION'
+      ? await currentOriginPin(db, args.parentRunId)
+      : (await db.appRun.findUnique({ where: { id: args.parentRunId } }))?.automationPin;
+  }
+
   const run = await db.appRun.create({
     data: {
       id: generateId(),
@@ -558,6 +577,7 @@ export async function mintAppRun(db: PrismaClient, args: MintAppRunArgs): Promis
       triggerId: args.triggerId ?? null,
       parentRunId: args.parentRunId ?? null,
       entryNodeUrn: args.entryNodeUrn,
+      automationPin: (automationPin ?? undefined) as never,
       eventData: (args.eventData ?? undefined) as never,
       // Chain snapshot: `{chain: [...]}` since #510. checkActivation also
       // accepts the pre-#510 single-link shape for runs minted before the
@@ -575,6 +595,9 @@ export async function mintAppRun(db: PrismaClient, args: MintAppRunArgs): Promis
       createdBy: args.createdBy ?? null,
     },
   });
+  if (args.triggerKind === 'MANUAL' && automationPin) {
+    await db.manualAutomationPin.create({ data: { runId: run.id, pin: automationPin as never, adoptedBy: args.userId ?? args.createdBy ?? null } });
+  }
   if (args.publish !== false) await publishRunRequested(db, run.id);
   return run;
 }
@@ -606,6 +629,10 @@ export interface RunNodeSpec {
 
 /** Injected in tests; production uses the real resolvers + LLM. */
 export interface RunExecutionDeps {
+  /** Required consent gate, before each hop and effect. Mock explicitly in kernel-only tests. */
+  verifyAutomation: (run: AppRun, nodeUrn: string) => Promise<void>;
+  checkAutomationEffect?: (run: AppRun) => Promise<void>;
+  releaseAutomationProof?: (run: AppRun) => void;
   /** Instructions for ONE flow node, templated against the merged view. */
   assemble: (run: AppRun, nodeUrn: string, view: Record<string, unknown>) => Promise<string>;
   /** Flow-relevant slice of a node's `data` (extraction spec, output flag). */
@@ -730,7 +757,9 @@ async function executeAppRunInner(
     return res.count === 1 ? 'failed' : 'skipped';
   };
 
+  const checkConsent = () => deps.checkAutomationEffect ? deps.checkAutomationEffect(run) : deps.verifyAutomation(run, run.curNodeUrn ?? run.entryNodeUrn);
   try {
+    await deps.verifyAutomation(run, run.curNodeUrn ?? run.entryNodeUrn);
     // Per-ATTEMPT wall clock (D-MN-5): recomputed at each claim.
     const deadline = Date.now() + (run.timeoutMs ?? DEFAULT_RUN_TIMEOUT_MS);
 
@@ -766,6 +795,7 @@ async function executeAppRunInner(
       if (hop >= MAX_RUN_HOPS) {
         return fail('MAX_HOPS_EXCEEDED', `Flow exceeded ${MAX_RUN_HOPS} hops at "${cur}" (cycle?).`);
       }
+      if (hop > 0) await deps.verifyAutomation(run, cur);
       const hopStartedAt = Date.now();
       if (Date.now() >= deadline) {
         await db.appRun.updateMany({
@@ -794,6 +824,8 @@ async function executeAppRunInner(
       } catch (err) {
         // A mid-flow node that can't be loaded is the D20 entry-missing
         // analog: an OBSERVABLE failed run, position preserved on the row.
+        if (err instanceof AutomationPinError) return fail(err.code, err.message);
+        await checkConsent();
         return fail('NODE_LOAD_FAILED', String((err as Error)?.message ?? err));
       }
 
@@ -804,6 +836,7 @@ async function executeAppRunInner(
         // Entry lookup/assembly failures are OBSERVABLE failed runs (D20/D15).
         return fail('ASSEMBLY_FAILED', String((err as Error)?.message ?? err));
       }
+      await checkConsent();
       // Spec 049 Phase 7 (D-2026-09-13-009, plan §4.4): the attention section —
       // the run's register snapshot ∩ live Channel watermarks ∩ the attendee's
       // read-state, CPU-computed, no message content. Empty for a run with no
@@ -836,8 +869,10 @@ async function executeAppRunInner(
             },
             spec.tools,
             {
-              onToolCall: (action, cost) =>
-                checkActivation(db, runId, action, cost > 0 ? { actionCost: cost } : {}),
+              onToolCall: async (action, cost) => {
+                await checkConsent();
+                return checkActivation(db, runId, action, cost > 0 ? { actionCost: cost } : {});
+              },
               log: (message) => hopLogs.push(message),
             },
           );
@@ -890,6 +925,7 @@ async function executeAppRunInner(
         // rather than inventing a number; closing it needs the tool loop to
         // surface partial usage on the error.
         // Tool-loop terminal errors (plan-tools D-TL-6) — never retried:
+        if (err instanceof AutomationPinError) return fail(err.code, err.message);
         if (err instanceof AuthorFailError) {
           return fail('AUTHOR_FAIL', err.message); // the author's deliberate abort
         }
@@ -897,6 +933,7 @@ async function executeAppRunInner(
           return fail('ACTIVATION_DENIED', err.message); // gate said no, mid-hop
         }
         if (err instanceof ToolExecutionError) {
+          if (err.cause instanceof AutomationPinError) return fail(err.cause.code, err.cause.message);
           return fail('TOOL_FAILED', err.message); // handler threw (D21)
         }
         if (err instanceof LlmInvocationError && err.transient && Date.now() < deadline) {
@@ -963,6 +1000,7 @@ async function executeAppRunInner(
 
       if (extracted) envelope = { ...envelope, ...extracted };
 
+      await checkConsent();
       // Route BEFORE writing: the last node keeps today's default
       // run-record write; interior nodes write only when they declare
       // data.output (plan §4 — no run-record spam per hop).
@@ -977,6 +1015,7 @@ async function executeAppRunInner(
         throw err;
       }
 
+      await checkConsent();
       let writtenRef: string | null = null;
       if (spec.hasOutput || next === null) {
         // Output write — its own activation re-check (memory.write) + action budget.
@@ -1045,8 +1084,8 @@ async function executeAppRunInner(
     }
   } catch (err) {
     // Unexpected infra error: record, don't crash the listener.
-    return fail('INTERNAL', String((err as Error)?.message ?? err));
-  }
+    return fail(err instanceof AutomationPinError ? err.code : 'INTERNAL', String((err as Error)?.message ?? err));
+  } finally { deps.releaseAutomationProof?.(run); }
 }
 
 /**

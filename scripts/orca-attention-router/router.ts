@@ -13,10 +13,17 @@
  *
  *  - A prompt typed into a BUSY Codex agent steers its turn, and it silently
  *    drops the rest of its task. So a nudge is sent only after
- *    `orca terminal wait --for tui-idle` proves the terminal idle.
+ *    `orca terminal wait --for tui-idle` proves the terminal idle — except
+ *    that an UNTRACKED terminal (Orca lost its output stream; happens
+ *    fleet-wide on a serve restart) can never satisfy the wait, so its
+ *    timeout reads as unknown and the idle-prompt screen shape decides.
  *  - `tui-idle` also reports idle while a HUMAN is typing, so a nudge got
  *    appended to Holger's half-typed text and submitted it (#5473). So the
- *    screen read must also prove the prompt empty (`promptIsEmpty`).
+ *    screen read must also prove the prompt empty (`promptIsEmpty`). Orca's
+ *    `draft` state can go STALE — carrying text no client shows (#6736,
+ *    twice on 2026-10-05, pinning workers for hours) — so for Claude, where
+ *    typed text provably renders on the `❯` line, a screen that proves the
+ *    composer empty REFUTES the draft; Codex's draft stays authoritative.
  *  - Tab titles are not identity (agents retitle their own tabs), and a
  *    worktree's name does not prove which worker drives it. So each roster
  *    entry names its worktree; the terminal is the ONE agent terminal there,
@@ -155,6 +162,12 @@ interface Ledger {
   base: string;
   nudged: Record<string, NudgeRecord>;
   reported: Record<string, string>;
+  /** Stale-draft discard notes already logged under this token (worker -> note). */
+  draftNotes?: Record<string, string>;
+  /** Epoch ms a worker's current hold began (cleared on delivery), for long-hold visibility. */
+  heldSince?: Record<string, number>;
+  /** Epoch ms the last long-hold line was logged per worker (re-log at most every 30 min). */
+  heldLoggedAt?: Record<string, number>;
 }
 
 /**
@@ -200,8 +213,15 @@ export class State {
     } catch {
       ledger = {};
     }
-    if (ledger.base !== base) return { base, nudged: {}, reported: {} };
-    return { base, nudged: ledger.nudged ?? {}, reported: ledger.reported ?? {} };
+    if (ledger.base !== base) return { base, nudged: {}, reported: {}, draftNotes: {}, heldSince: {}, heldLoggedAt: {} };
+    return {
+      base,
+      nudged: ledger.nudged ?? {},
+      reported: ledger.reported ?? {},
+      draftNotes: ledger.draftNotes ?? {},
+      heldSince: ledger.heldSince ?? {},
+      heldLoggedAt: ledger.heldLoggedAt ?? {},
+    };
   }
 
   saveLedger(ledger: Ledger): void {
@@ -499,6 +519,8 @@ interface Terminal {
   agentIdentity?: string | null;
   connected?: boolean;
   writable?: boolean;
+  /** Epoch ms of the last OUTPUT Orca saw; null when tracking is lost. */
+  lastOutputAt?: number | null;
 }
 
 /** Orca's live terminals. */
@@ -523,6 +545,43 @@ export function isIdle(cfg: Config, handle: string, timeoutMs: number, run: Runn
   } catch {
     return false;
   }
+}
+
+/**
+ * [verdict, why]: whether the terminal may be typed into, with THREE outcomes
+ * where tui-idle alone gave two (#7398 incident class).
+ *
+ * A tui-idle timeout means "busy" only when Orca is TRACKING the terminal's
+ * output (lastOutputAt set). Orca loses tracking fleet-wide on a serve restart
+ * and degrades it in smaller sets mid-life (observed 2026-10-07: 28/40 null
+ * from ~03:10Z with the serve continuously up); an untracked terminal can
+ * NEVER satisfy tui-idle, so reading the timeout as "busy" pins every idle
+ * untracked worker forever — exactly the workers awaiting nudges. For an
+ * untracked terminal the timeout is UNKNOWN, and the rendered screen is the
+ * fallback proof: the idle-prompt shape (bare box + the agent's empty-input
+ * marker, no draft) is the same live evidence the empty-prompt gate trusts.
+ */
+export function provesIdle(
+  cfg: Config, handle: string, agent: string, lastOutputAt: number | null | undefined,
+  timeoutMs: number, run: Runner,
+): [boolean, string] {
+  if (isIdle(cfg, handle, timeoutMs, run)) return [true, ''];
+  if (lastOutputAt === null || lastOutputAt === undefined) {
+    const term = readScreen(cfg, handle, run);
+    const [empty, why] = promptIsEmptyFromTerm(term, agent);
+    if (!empty) return [false, `unknown idle state — no output tracking, screen shows ${why}`];
+    // An empty composer proves nobody has TYPED; it does not prove the agent
+    // is not WORKING — both agents render an empty prompt box mid-turn (the
+    // #1490 steering hazard; live evidence 2026-10-09/10: '✽ Bunning… (5m 55s
+    // · ↓ 15.6k tokens)' above an empty Claude box, '• Working (6s • esc to
+    // interrupt)' above the Codex placeholder). The fallback requires positive
+    // quiet: no running-turn indicator above the prompt (@codex P2, #1700).
+    const proof = term ? idleProofAbovePrompt(term.tail as string[], agent) : (['unknown', 'screen unreadable'] as const);
+    if (proof[0] === 'busy') return [false, 'unknown idle state — no output tracking, a running turn is drawn above the prompt'];
+    if (proof[0] === 'unknown') return [false, `unknown idle state — no output tracking, ${proof[1]}`];
+    return [true, 'untracked terminal, screen proves idle (empty prompt, positive idle chrome)'];
+  }
+  return [false, `busy for ${Math.round(timeoutMs / 1000)}s`];
 }
 
 /**
@@ -603,6 +662,97 @@ export function promptLineIsEmpty(lines: string[], agent: string): boolean {
 }
 
 /**
+ * The terminal's rendered screen, or undefined when unreadable. A full-frame
+ * `--screen` read (the default stream read returns repaint fragments, useless
+ * for shape checks).
+ */
+export function readScreen(cfg: Config, handle: string, run: Runner): Record<string, any> | undefined {
+  try {
+    const data = JSON.parse(run([cfg.orcaCli, 'terminal', 'read', '--terminal', handle, '--screen', '--json']).stdout);
+    return data.ok ? data.result?.terminal : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** True when the line carries a parenthesized elapsed timer (a running spinner). */
+const spinnerTimer = (s: string): boolean => /[（(]\d/.test(s) && /\d\s*[mh]?\s*\d*s/.test(s) && !/done/i.test(s) && !/worked for/i.test(s);
+
+/**
+ * Lines that POSITIVELY prove the agent is not working - a completed turn, or
+ * the chrome a freshly launched (never-worked) terminal draws. Live evidence
+ * 2026-10-10, one per family:
+ *  - Claude/GLM fresh: the 'Claude Code v2.1.296' / 'glm-5.3' welcome banner;
+ *    post-trust: 'Share Claude Code ... /passes'.
+ *  - Claude done: the '✻ … for 1m 12s · done 3:52 PM' completed-turn line,
+ *    '⏺ Done.', the '※ recap:' block, '/clear to save N tokens'.
+ *  - Codex fresh: the 'OpenAI Codex (v...)' banner and its 'Update
+ *    available!' box. Codex done: 'Worked for '.
+ */
+const IDLE_MARKERS: readonly RegExp[] = [
+  /· done/, /^⏺ Done/, /^Done\./, /^✻ \w+ for \d+[ms]/,
+  /\/clear to save/, /recap:/, /Share Claude Code/,
+  /Claude Code v\d/, /glm-[\d.]/,
+  /OpenAI Codex \(v/, /Update available!/, /Worked for /,
+  /Update installed/,
+];
+
+/**
+ * Chrome that may surround a strong marker without explaining it away: a
+ * historical submitted-prompt echo (Claude renders past prompts with a
+ * leading `❯`), and the banner layout lines around a launch logo (box-art
+ * glyphs plus the worktree path) or Codex's `permissions:`/path lines.
+ * Weak evidence on its own — it never substitutes for a strong marker.
+ */
+const isWeakChrome = (s: string): boolean =>
+  /^❯ /.test(s) || /^[▐▛█▝▜▀│╭╮╰╯ ]*[~❯]/.test(s) || /^permissions: /.test(s);
+
+/**
+ * [verdict, detail] on the window directly above the prompt chrome: 'busy'
+ * (a running-turn line is drawn), 'idle' (a positive idle/completed/
+ * fresh-launch marker, or a blank window), or 'unknown' (text recognized as
+ * NEITHER - it must hold, not nudge: a busy presentation we failed to
+ * enumerate looks exactly like this, @codex P2 #1700 round 2). The window is
+ * bounded because both agents PIN their running-turn line directly above the
+ * prompt while a turn runs; blank is safe because a working agent always
+ * draws something there.
+ */
+export function idleProofAbovePrompt(lines: string[], agent: string): ['busy' | 'idle' | 'unknown', string] {
+  let at: number; // the first line of the prompt chrome
+  if (agent === 'claude') {
+    const rules = lines.flatMap((l, i) => (/^─{3,}[\s ]*$/.test(l) ? [i] : []));
+    if (rules.length < 2) return ['unknown', 'no prompt box'];
+    at = rules[rules.length - 2];
+  } else if (agent === 'codex') {
+    let p = -1;
+    for (let i = lines.length - 1; i >= 0; i--) {
+      if (lines[i].startsWith('\u203a')) { p = i; break; }
+    }
+    if (p < 0) return ['unknown', 'no prompt line'];
+    at = p;
+  } else {
+    return ['unknown', `unknown agent ${agent}`];
+  }
+  const window = lines.slice(Math.max(0, at - 8), at).map(squash).filter((l) => l !== '');
+  for (const l of window) {
+    if (l.includes('to interrupt') || l.includes('run in background') || l.includes('Working (') || /^calling [a-z]/i.test(l)) return ['busy', l];
+    if (spinnerTimer(l)) return ['busy', l];
+  }
+  // The window is proof only when recognized AS A WHOLE (@codex P2 #1700 r3):
+  // every line must be idle chrome (strong or weak), and at least one line
+  // must be a STRONG marker. A reassuring line deeper in the window cannot
+  // rescue an unexplained newer status, and an absent window is missing
+  // evidence, not quiet — both hold as unknown.
+  let strong = false;
+  for (const l of window) {
+    if (IDLE_MARKERS.some((re) => re.test(l))) { strong = true; continue; }
+    if (!isWeakChrome(l)) return ['unknown', `unrecognized chrome above the prompt`];
+  }
+  if (!strong) return ['unknown', 'no positive liveness evidence above the prompt'];
+  return ['idle', 'completed or fresh-launch chrome'];
+}
+
+/**
  * [empty, detail]: whether the terminal's rendered prompt is empty right now.
  *
  * Two signals, and each agent needs a different one (live probe, 2026-10-01,
@@ -615,17 +765,25 @@ export function promptLineIsEmpty(lines: string[], agent: string): boolean {
  * here). Never logs the text.
  */
 export function promptIsEmpty(cfg: Config, handle: string, agent: string, run: Runner): [boolean, string] {
-  let terminal: Record<string, any> | undefined;
-  try {
-    const data = JSON.parse(run([cfg.orcaCli, 'terminal', 'read', '--terminal', handle, '--screen', '--json']).stdout);
-    terminal = data.ok ? data.result?.terminal : undefined;
-  } catch {
-    terminal = undefined;
-  }
+  return promptIsEmptyFromTerm(readScreen(cfg, handle, run), agent);
+}
+
+/** promptIsEmpty over an already-read screen (the untracked gate reads once). */
+export function promptIsEmptyFromTerm(terminal: Record<string, any> | undefined, agent: string): [boolean, string] {
   if (!terminal || terminal.source !== 'screen' || !Array.isArray(terminal.tail)) return [false, 'screen unreadable'];
-  // ANY draft holds, whitespace included: this gate promises "nobody is
-  // typing", not "nothing meaningful typed" (Gene, #1555).
-  if (terminal.draft !== undefined && terminal.draft !== null && terminal.draft !== '') return [false, 'text in the composer draft'];
+  // A draft pins the nudge only when the agent's own rendering cannot refute
+  // it. Claude Code draws typed-but-unsent text on its `❯` line (#1555), so a
+  // screen that proves the composer empty — bare `❯` box plus the
+  // `· ← for agents` hint (#5756) — REFUTES the draft: Orca's draft state was
+  // observed twice on 2026-10-05 carrying text no client showed, pinning
+  // workers for hours. Codex renders its composer empty while text is pending
+  // (the draft is the ONLY signal there), so its draft stays authoritative.
+  const draft = terminal.draft;
+  if (draft !== undefined && draft !== null && draft !== '') {
+    if (agent !== 'claude') return [false, 'text in the composer draft'];
+    if (!promptLineIsEmpty(terminal.tail as string[], agent)) return [false, 'text in the composer draft'];
+    return [true, 'stale draft (screen proves the composer empty)'];
+  }
   return promptLineIsEmpty(terminal.tail as string[], agent) ? [true, ''] : [false, 'text in the prompt'];
 }
 
@@ -791,8 +949,10 @@ export function pollOnce(cfg: Config, run: Runner = runCommand, log: (line: stri
         outcome.held[entry.name] = detail;
         continue;
       }
-      if (!isIdle(cfg, handle, cfg.busyWaitMs, run)) {
-        outcome.held[entry.name] = `busy for ${Math.round(cfg.busyWaitMs / 1000)}s`;
+      const tracked = new Map(terminals.map((t) => [t.handle, t.lastOutputAt]));
+      const [gate, gateWhy] = provesIdle(cfg, handle, detail, tracked.get(handle), cfg.busyWaitMs, run);
+      if (!gate) {
+        outcome.held[entry.name] = gateWhy;
         continue;
       }
       // Checked AFTER idle, as close to the send as possible: idle says the
@@ -801,6 +961,16 @@ export function pollOnce(cfg: Config, run: Runner = runCommand, log: (line: stri
       if (!empty) {
         outcome.held[entry.name] = `prompt not empty (${why})`;
         continue;
+      }
+      if (why) {
+        // The gate passed by DISCARDING a screen-refuted draft. Visible once
+        // per token per worker; the draft's text is never logged.
+        const note = 'stale Orca draft discarded (screen proves the composer empty)';
+        if ((ledger.draftNotes ?? {})[entry.worker] !== note) {
+          ledger.draftNotes[entry.worker] = note;
+          state.saveLedger(ledger);
+          log(`orca-attention-router: ${entry.name}: ${note}`);
+        }
       }
       mustOwn();
       // Recomputed after every gate, as close to the send as possible: the
@@ -813,6 +983,8 @@ export function pollOnce(cfg: Config, run: Runner = runCommand, log: (line: stri
         // it every poll; a NEW mention has a higher seq and is never mistaken
         // for covered (same argument as `alreadyNudged`).
         ledger.nudged[entry.worker] = { relevantSeq: seen.lastRelevantSeq!, at: Date.now(), stages: 'dropped: read while waiting' };
+        delete (ledger.heldSince ?? {})[entry.worker];
+        delete (ledger.heldLoggedAt ?? {})[entry.worker];
         state.saveLedger(ledger);
         outcome.dropped.push(entry.name);
         continue;
@@ -823,9 +995,20 @@ export function pollOnce(cfg: Config, run: Runner = runCommand, log: (line: stri
       // screen alone cannot catch it) or a human may have started typing
       // (#5473). Re-prove both, as close to the send as possible — the idle
       // recheck FAIL-CLOSED (see RECHECK_IDLE_TIMEOUT_MS): busy here holds,
-      // and the next poll recomputes everything.
-      if (!isIdle(cfg, handle, RECHECK_IDLE_TIMEOUT_MS, run)) {
-        outcome.held[entry.name] = 'busy again after the recompute (fail-closed, not waited)';
+      // and the next poll recomputes everything. An UNTRACKED terminal gets
+      // the screen fallback again (it can never satisfy tui-idle) — but on
+      // RELOADED tracking (@codex P2, #1700): the gate's snapshot is as old
+      // as the busy-wait was long, and a terminal that produced output since
+      // (healing its tracking) must get the ordinary failed-wait hold back,
+      // not the untracked fallback. A vanished terminal falls to the fallback,
+      // which re-resolves its screen and holds unless it positively proves idle.
+      const recheckTracked = listTerminals(cfg, run).find((t) => t.handle === handle)?.lastOutputAt;
+      const [recheckIdle, recheckWhy] = provesIdle(cfg, handle, detail, recheckTracked, RECHECK_IDLE_TIMEOUT_MS, run);
+      if (!recheckIdle) {
+        // The raw reason distinguishes the two holds: 'busy for Ns' (tracked
+        // again — the ordinary failed-wait hold, #1700) vs 'unknown idle
+        // state — …' (still untracked, screen shows work or text).
+        outcome.held[entry.name] = `busy again after the recompute (${recheckWhy})`;
         continue;
       }
       const [stillEmpty, whyNow] = promptIsEmpty(cfg, handle, detail, run);
@@ -840,6 +1023,8 @@ export function pollOnce(cfg: Config, run: Runner = runCommand, log: (line: stri
         continue;
       }
       ledger.nudged[entry.worker] = { relevantSeq: now.lastRelevantSeq!, at: Date.now(), stages: how };
+      delete (ledger.heldSince ?? {})[entry.worker];
+      delete (ledger.heldLoggedAt ?? {})[entry.worker];
       // Persisted at once: a crash or a later failure in this poll must not
       // cause the same nudge to be sent again (@codex P2, #1490).
       state.saveLedger(ledger);
@@ -851,8 +1036,23 @@ export function pollOnce(cfg: Config, run: Runner = runCommand, log: (line: stri
       // Report each held worker's reason once per token, not every poll.
       const fresh = held.filter(([n, r]) => ledger.reported[n] !== r);
       Object.assign(ledger.reported, outcome.held);
+      // Long-hold visibility (#6736): a worker pinned with mentions pending for
+      // 30+ minutes says so in the log, at most once every 30 minutes.
+      const longHolds: string[] = [];
+      for (const [n] of held) {
+        const w = cfg.roster.find((e) => e.name === n)?.worker ?? n;
+        const since = (ledger.heldSince ?? {})[w] ?? Date.now();
+        ledger.heldSince[w] = since;
+        const minutes = Math.floor((Date.now() - since) / 60_000);
+        const last = (ledger.heldLoggedAt ?? {})[w] ?? 0;
+        if (minutes >= 30 && Date.now() - last >= 30 * 60_000) {
+          ledger.heldLoggedAt[w] = Date.now();
+          longHolds.push(`${n} held ${minutes} min with mentions pending (${outcome.held[n]})`);
+        }
+      }
       state.saveLedger(ledger);
       if (fresh.length) log(`orca-attention-router: ${fresh.map(([n, r]) => `${n}: ${r}`).join('; ')}`);
+      if (longHolds.length) log(`orca-attention-router: ${longHolds.join('; ')}`);
     } else {
       mustOwn();
       // Adoption clears the ledger, but a nudge may have carried a frontier

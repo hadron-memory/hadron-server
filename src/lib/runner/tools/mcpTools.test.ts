@@ -1,3 +1,6 @@
+// Unit-only materialization fixtures mock the consent seam; real pin tests
+// exercise this guard against persisted adoption and the loaded registry row.
+vi.mock('../../automation/pins.js', () => ({ assertPinnedToolIdentity: vi.fn() }));
 /**
  * Dynamic MCP run tools (hadrontool-mcp conduit) — what this file pins:
  *   - unknownMcpToolNames: grammar, registration, enabled, allowlist, and

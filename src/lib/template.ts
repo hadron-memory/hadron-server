@@ -3,6 +3,11 @@ import type { PrismaClient } from '../generated/prisma/index.js';
 import { decryptNodeFields } from './nodeCrypto.js';
 import { sessionKeyCache } from './sessionKeyCache.js';
 
+/** Shared literal partial grammar for rendering and automation consent. */
+export function templatePartialLocs(content: string): string[] {
+  return [...new Set([...content.matchAll(/\{\{>\s*([^}]+)\s*\}\}/g)].map(match => match[1].trim()))];
+}
+
 /**
  * Compile a Mustache template against node data.
  *
@@ -94,11 +99,7 @@ export async function compileTemplate(
 
   // 4. Resolve partials ({{> node-loc}})
   const partials: Record<string, string> = {};
-  const partialPattern = /\{\{>\s*([^}]+)\s*\}\}/g;
-  const partialRefs = new Set<string>();
-  while ((match = partialPattern.exec(content)) !== null) {
-    partialRefs.add(match[1].trim());
-  }
+  const partialRefs = templatePartialLocs(content);
 
   for (const partialLoc of partialRefs) {
     const partialNode = await db.node.findFirst({

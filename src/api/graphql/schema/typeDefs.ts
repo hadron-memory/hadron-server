@@ -4258,6 +4258,18 @@ export const typeDefs = `#graphql
     """
     heldAt: DateTime
     """
+    #1726 — the one Worker this worker reports to: a non-retired Worker of the
+    same App, never itself, never a cycle. Null reports to nobody. A property of
+    the casting, not of a session, so binding or ending a session leaves it
+    alone. Changed with setWorkerReportsTo (or reportsTo at startSession); every
+    change is a \`worker.reports-to\` team event. Masked on deny, like heldByUserId.
+    """
+    reportsToWorkerId: ID
+    "#1726 — the Worker named by reportsToWorkerId; masked likewise."
+    reportsTo: Worker
+    "#1726 — true when this worker reports to a worker that has since retired (a stale claim nothing clears automatically)."
+    reportsToRetired: Boolean!
+    """
     hadron-cli#487 — whether anyone is DRIVING this name right now.
 
     Not availability: availability is the HOLD above (\`cor:agt:020:09\`), and an
@@ -5944,6 +5956,15 @@ export const typeDefs = `#graphql
     """
     workerRef: String
     """
+    #1726 — the worker this bind's worker reports to: an id, URN or name of a
+    worker in the session's App. Sets it in the same step as the bind (a spawn
+    brief), only when the worker reports to nobody or already to this one;
+    naming a different worker is refused (WORKER_REPORTS_TO_HELD) unless the
+    caller manages the App, and refuses the bind with it. Omitted leaves the
+    value unchanged. Needs workerRef and a person behind the request.
+    """
+    reportsTo: String
+    """
     #940: take over a worker whose binding would otherwise refuse WORKER_TAKEN.
     Only meaningful with workerRef. Clients must surface the WORKER_TAKEN
     payload (who last drove it, when) before retrying with force - that IS the
@@ -6593,7 +6614,11 @@ export const typeDefs = `#graphql
 
   enum TeamSpecForm { SERVER CLIENT_INPUT }
 
+  enum AutomationTriggerKind { SCHEDULE WEBHOOK MANUAL }
+
   type Query {
+    "#1719: review exact automation graph bytes and digest. triggerRef is the trigger row ID; MANUAL uses the origin AppRun ID. Only its run-as user or the manager of an App-only trigger may preview."
+    previewAutomation(triggerKind: AutomationTriggerKind!, triggerRef: String!): JSON!
 
     """
     #1705 — one agent task, or null when it does not exist or the caller may
@@ -8298,6 +8323,8 @@ export const typeDefs = `#graphql
   }
 
   type Mutation {
+    "#1719: rebind a trigger to its reviewed graph. expectedHash must match previewAutomation; edits since preview refuse adoption."
+    reAdoptAutomation(triggerKind: AutomationTriggerKind!, triggerRef: String!, expectedHash: String!): Boolean!
 
     """
     #1705 — create an agent task (hrn:node:hadronmemory.com:specs:cor:agt:050:06 root, :07 child). Writes
@@ -8309,9 +8336,11 @@ export const typeDefs = `#graphql
     App), TASK_OWNER_INVALID, TASK_ASSIGNEE_INVALID, SESSION_NOT_BOUND,
     APP_NOT_FOUND (an App that does not exist or that you do not participate
     in, alike), APP_UNINSTALLED, FORBIDDEN (impersonation), BAD_USER_INPUT.
-    "Whoever manages the App" is strict (hrn:node:hadronmemory.com:specs:cor:acl:010:01): a user-owned App's
-    owner, or the org's ADMINs and OWNERs. Every write re-checks the caller's
-    participation and the App's state inside its transaction.
+    "Whoever manages the App" (hrn:node:hadronmemory.com:specs:cor:acl:010:01, as ruled 2026-10-10, #1731): a
+    user-owned App's owner, any owner-role member of the App, the org's ADMINs
+    and OWNERs, and platform admins (for an org-owned App). Every write
+    re-checks the caller's participation and the App's state inside its
+    transaction.
     """
     createAgentTask(input: CreateAgentTaskInput!): AgentTask!
 
@@ -10448,10 +10477,24 @@ export const typeDefs = `#graphql
     and refuses new session bindings; the row and its name reservation
     survive. Idempotent — retiring an already-retired worker returns it
     unchanged. Same authorization as castWorker. workerRef is the worker's id
-    or its URN (#991).
+    or its URN (#991). Retiring clears the worker's own reportsTo (#1726);
+    workers that report to it keep theirs and read reportsToRetired.
     """
     retireWorker(workerRef: ID!): Worker!
 
+    """
+    #1726 — set, hand over or clear (reportsTo: null) who a worker reports to:
+    a non-retired worker of the same App, never itself, never a cycle
+    (WORKER_REPORTS_TO_SELF / _OTHER_APP / _RETIRED / _CYCLE; WORKER_RETIRED
+    for a retired worker). Allowed for whoever manages the App, and for the
+    worker it reports to now (handing over or clearing is its agreement). A
+    worker that reports to nobody may also be claimed by a worker for itself
+    when one person holds both, or placed under any worker by its own holder
+    (interim, pending a ruling). WORKER_REPORTS_TO_FORBIDDEN otherwise. A worker acts through its bound
+    session, with a person behind the request. Each change is a
+    \`worker.reports-to\` team event; setting the current value changes nothing.
+    """
+    setWorkerReportsTo(workerRef: ID!, reportsTo: ID): Worker!
     """
     #1050 — release a HELD name, so somebody else can hold it.
 
@@ -11535,6 +11578,10 @@ export const typeDefs = `#graphql
     lastActiveAt: DateTime
     "When it was last assigned a task; the matcher picks the least recent (hrn:node:hadronmemory.com:specs:cor:agt:060:06)."
     lastAssignedAt: DateTime
+    "#1726 — the worker it reports to; group by this for the team's structure. Read it with lastActiveAt: nothing clears a claim automatically."
+    reportsTo: AgentTaskParty
+    "#1726 — it reports to a worker that has since retired (retirement leaves the claim; the roster flags it)."
+    reportsToRetired: Boolean!
   }
 
   "#1707 — the team roster of one App."

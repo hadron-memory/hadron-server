@@ -14,6 +14,7 @@ import { ATTRIBUTED_NODE_FIELDS } from '../../lib/nodeRevisionSnapshot.js';
 // durable-login-state: PendingLoginState (the OAuth `state` is the PK).
 const MODELS_WITHOUT_ID = new Set<string>([
   'AgentSubscription',
+  'ManualAutomationPin',
   'AppMember',
   'AgentImport',
   'AgentOrgGrant',
