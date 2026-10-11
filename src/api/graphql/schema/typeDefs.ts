@@ -9151,8 +9151,9 @@ export const typeDefs = `#graphql
     Consolidate a duplicate account into a surviving user. Source-only
     identities and relationships move; duplicate role-bearing relationships
     preserve the strongest live entitlement. The source is soft-deleted.
-    Platform admin only. The resulting merge is global; organization
-    administration does not authorize account consolidation. Both accounts must
+    Platform admin with an unbound user JWT only; API keys, Apps, impersonation
+    and session-bound callers refuse FORBIDDEN. The resulting merge is global;
+    organization administration does not authorize account consolidation. Both accounts must
     approve the exact ordered pair after fresh login, within 15 minutes.
     The proof is single-use, consumed atomically before transfers, and recorded
     with the merge. Invalid or missing proof refuses MERGE_CONSENT_REQUIRED.
@@ -9170,9 +9171,9 @@ export const typeDefs = `#graphql
     """
     mergeUsers(input: MergeUsersInput!): User!
 
-    "Platform admin begins an exact ordered-pair, full-consolidation consent, valid for 15 minutes. Returns its opaque proof once."
+    "A platform admin using an unbound user JWT begins an exact ordered-pair, full-consolidation consent, valid for 15 minutes; API keys, Apps, impersonation and session-bound callers refuse FORBIDDEN. Returns its opaque proof once."
     beginMergeUsersConsent(source: String!, target: String!): UserMergeConsentRequest!
-    "Each account approves with its own JWT from a verified login AFTER consent creation. API keys, Apps, impersonation and any session-bound caller cannot approve. Source and target name the exact ordered pair. No admin substitute."
+    "Each account approves with its own JWT from a verified login at or after consent creation (millisecond resolution). API keys, Apps, impersonation and any session-bound caller cannot approve. Source and target name the exact ordered pair. No admin substitute."
     approveMergeUsersConsent(proof: String!, source: String!, target: String!): Boolean!
 
     """

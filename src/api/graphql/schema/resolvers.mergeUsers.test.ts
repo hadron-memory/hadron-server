@@ -10,6 +10,7 @@ import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { mergeUsers, approvedMergeProof } from '../../../test/mergeConsent.js';
 import { orgMutations } from './resolvers.mutation.org.js';
+import { resolveUserRef } from '../../../lib/entityRef/userRef.js';
 import type { Context } from './resolvers.helpers.js';
 
 let admin: { id: string };
@@ -21,7 +22,13 @@ function adminCtx(): Context {
 }
 
 async function merge(sourceRef: string, targetRef: string, ctx = adminCtx()) {
-  const consentProof = await approvedMergeProof(db, source.id, target.id, admin.id);
+  // Invalid refs still reach the production gate (which may refuse before
+  // resolving them); valid refs mint consent for the actual requested pair.
+  let consentProof = 'invalid-ref-proof';
+  try {
+    const [s, t] = await Promise.all([resolveUserRef(db, sourceRef), resolveUserRef(db, targetRef)]);
+    consentProof = await approvedMergeProof(db, s.id, t.id, admin.id);
+  } catch { /* The resolver owns the caller-facing refusal. */ }
   return orgMutations.mergeUsers(
     {},
     { input: { source: sourceRef, target: targetRef, consentProof } },

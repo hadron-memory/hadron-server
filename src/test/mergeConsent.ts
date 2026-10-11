@@ -14,8 +14,8 @@ export async function approvedMergeProof(db: PrismaClient, sourceUserId: string,
   return proof;
 }
 
-/** Preserve each old test's actor/role semantics while supplying the new prerequisite. */
+/** Supply an admin executor when old bookkeeping tests omit an actor, plus the consent prerequisite. */
 export async function mergeUsers(db: PrismaClient, args: MergeUsersArgs) {
-  const actorUserId = args.actorUserId ?? args.targetUserId;
+  const actorUserId = args.actorUserId ?? (await db.user.create({ data: { roles: ['ADMIN'] } })).id;
   return consolidate(db, { ...args, actorUserId, consentProof: args.consentProof ?? await approvedMergeProof(db, args.sourceUserId, args.targetUserId, actorUserId) });
 }

@@ -18,7 +18,7 @@ export async function beginUserMergeConsent(db: PrismaClient, sourceUserId: stri
     await tx.$queryRaw`SELECT id FROM users WHERE id IN (${sourceUserId}, ${targetUserId}, ${requestedBy}) ORDER BY id FOR SHARE`;
     const [source, target, actor] = await Promise.all([sourceUserId, targetUserId, requestedBy].map(id => tx.user.findUnique({ where: { id } })));
     if (!source || source.deletedAt || !target || target.deletedAt || !actor || actor.deletedAt ||
-      !actor.roles.some(r => r === 'ADMIN' || r === 'OWNER')) throw denied();
+      !actor.roles.some(r => r === 'ADMIN' || r === 'OWNER')) throw denied(); // Conceal invalid/deleted requester or parties with one refusal.
     const [{ now }] = await tx.$queryRaw<{ now: Date }[]>`SELECT (clock_timestamp() AT TIME ZONE 'UTC') AS now`;
     const expiresAt = new Date(now.getTime() + MERGE_CONSENT_TTL_MS);
     await tx.userMergeConsent.create({ data: { proofHash: digest(proof), sourceUserId, targetUserId, requestedBy,

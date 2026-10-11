@@ -377,7 +377,7 @@ describe('an admin demoted while a write waits on its locks is refused (#1360 re
 describe('an account merge transfers user-owned templates (#1325 part c, collision ruling 2026-09-26)', () => {
   const mkUserTpl = async (userId: string, name: string, rules: unknown[] = []) =>
     (await create(as(userId), 'USER', null, { name, rules })).data!.createMemoryConfigTemplate.template;
-  const merge = () => mergeUsers(db, { sourceUserId: userA, targetUserId: userB, actorUserId: userB });
+  const merge = () => mergeUsers(db, { sourceUserId: userA, targetUserId: userB, actorUserId: platformAdmin });
 
   it('moves every source template to the survivor; a colliding live name is renamed, ids and rules kept, the survivor\'s name untouched', async () => {
     const targetBase = await mkUserTpl(userB, 'base');

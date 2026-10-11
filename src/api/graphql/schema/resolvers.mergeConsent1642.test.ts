@@ -146,3 +146,66 @@ it('fresh login remains usable with app clock skew in either direction', async (
     } finally { clock.mockRestore(); }
   }
 });
+
+it('an admin API key cannot begin consent', async () => {
+  const f = await fixture();
+  const ctx = { db, userId: f.admin.id, roles: ['ADMIN' as const], apiKeyId: 'admin-user-key' };
+  await expect(orgMutations.beginMergeUsersConsent({}, { source: f.source.id, target: f.target.id }, ctx))
+    .rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
+  expect(await db.userMergeConsent.count()).toBe(1);
+});
+
+it('an admin API key cannot execute a dual-approved merge', async () => {
+  const f = await fixture();
+  const ctx = { db, userId: f.admin.id, roles: ['ADMIN' as const], apiKeyId: 'admin-user-key' };
+  await approveUserMergeConsent(f.context(f.source.id), f.proof, f.source.id, f.target.id);
+  await approveUserMergeConsent(f.context(f.target.id), f.proof, f.source.id, f.target.id);
+  await expect(orgMutations.mergeUsers({}, { input: { source: f.source.id, target: f.target.id, consentProof: f.proof } }, ctx))
+    .rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
+  expect((await db.userMergeConsent.findUniqueOrThrow({ where: f.key })).consumedAt).toBeNull();
+  expect(await db.userMerge.count()).toBe(0);
+});
+
+it.each([false, true])('a requester demoted after begin cannot execute under lock (mergeGlobalRoles=%s)', async (mergeGlobalRoles) => {
+  const f = await fixture();
+  await approveUserMergeConsent(f.context(f.source.id), f.proof, f.source.id, f.target.id);
+  await approveUserMergeConsent(f.context(f.target.id), f.proof, f.source.id, f.target.id);
+  await db.user.update({ where: { id: f.admin.id }, data: { roles: ['READER'] } });
+  await expect(mergeUsers(db, { sourceUserId: f.source.id, targetUserId: f.target.id,
+    actorUserId: f.admin.id, mergeGlobalRoles, consentProof: f.proof })).rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
+  expect((await db.userMergeConsent.findUniqueOrThrow({ where: f.key })).consumedAt).toBeNull();
+  expect((await db.user.findUniqueOrThrow({ where: { id: f.source.id } })).deletedAt).toBeNull();
+  expect(await db.userMerge.count()).toBe(0);
+});
+
+it('refuses future login evidence and keeps the first approval sealed', async () => {
+  const f = await fixture();
+  const ctx = f.context(f.source.id);
+  await expect(approveUserMergeConsent({ ...ctx, login: { at: Date.now() + 3_600_000, method: 'email' } },
+    f.proof, f.source.id, f.target.id)).rejects.toMatchObject({ extensions: { code: 'MERGE_CONSENT_REQUIRED' } });
+  await approveUserMergeConsent(ctx, f.proof, f.source.id, f.target.id);
+  const first = await db.userMergeConsent.findUniqueOrThrow({ where: f.key });
+  await approveUserMergeConsent({ ...ctx, login: { at: ctx.login!.at, method: 'google' } }, f.proof, f.source.id, f.target.id);
+  const second = await db.userMergeConsent.findUniqueOrThrow({ where: f.key });
+  expect(second.sourceLoginAt).toEqual(first.sourceLoginAt);
+  expect(second.sourceLoginMethod).toBe('email');
+});
+
+it('refuses an altered scope at both approval and consumption', async () => {
+  const f = await fixture();
+  await approveUserMergeConsent(f.context(f.source.id), f.proof, f.source.id, f.target.id);
+  await approveUserMergeConsent(f.context(f.target.id), f.proof, f.source.id, f.target.id);
+  await db.userMergeConsent.update({ where: f.key, data: { scope: 'PARTIAL' } });
+  await expect(approveUserMergeConsent(f.context(f.source.id), f.proof, f.source.id, f.target.id))
+    .rejects.toMatchObject({ extensions: { code: 'MERGE_CONSENT_REQUIRED' } });
+  await expect(f.execute()).rejects.toMatchObject({ extensions: { code: 'MERGE_CONSENT_REQUIRED' } });
+  expect((await db.userMergeConsent.findUniqueOrThrow({ where: f.key })).consumedAt).toBeNull();
+});
+
+it('a deleted party cannot receive a new approval', async () => {
+  const f = await fixture();
+  await db.user.update({ where: { id: f.target.id }, data: { deletedAt: new Date() } });
+  await expect(approveUserMergeConsent(f.context(f.source.id), f.proof, f.source.id, f.target.id))
+    .rejects.toMatchObject({ extensions: { code: 'MERGE_CONSENT_REQUIRED' } });
+  expect((await db.userMergeConsent.findUniqueOrThrow({ where: f.key })).sourceLoginAt).toBeNull();
+});

@@ -152,7 +152,7 @@ export const orgMutations = {
 
     beginMergeUsersConsent: async (_: unknown, { source, target }: { source: string; target: string }, ctx: Context) => {
       requireRole(ctx, 'ADMIN');
-      if (!ctx.userId || ctx.impersonation || ctx.appId) throw new GraphQLError('Forbidden', { extensions: { code: 'FORBIDDEN' } });
+      if (!ctx.userId || ctx.apiKeyId || ctx.sessionId || ctx.impersonation || ctx.appId) throw new GraphQLError('Forbidden', { extensions: { code: 'FORBIDDEN' } });
       const [s, t] = await Promise.all([resolveUserRef(ctx.db, source), resolveUserRef(ctx.db, target)]);
       return beginUserMergeConsent(ctx.db, s.id, t.id, ctx.userId);
     },
@@ -169,7 +169,7 @@ export const orgMutations = {
       // Gate before resolving either account so denied callers learn no refs.
       requireRole(ctx, 'ADMIN');
       if (!input.consentProof) throw new GraphQLError('Both accounts must consent before merging.', { extensions: { code: 'MERGE_CONSENT_REQUIRED' } });
-      if (!ctx.userId || ctx.impersonation || ctx.appId) throw new GraphQLError('Forbidden', { extensions: { code: 'FORBIDDEN' } });
+      if (!ctx.userId || ctx.apiKeyId || ctx.sessionId || ctx.impersonation || ctx.appId) throw new GraphQLError('Forbidden', { extensions: { code: 'FORBIDDEN' } });
       const [{ id: sourceUserId }, { id: targetUserId }] = await Promise.all([
         resolveUserRef(ctx.db, input.source),
         resolveUserRef(ctx.db, input.target),

@@ -288,11 +288,10 @@ async function runMergeTxn(
     ]);
     if (!source || source.deletedAt) throw new Error('Source user not found');
     if (!target || target.deletedAt) throw new Error('Target user not found');
-    if (mergeGlobalRoles) {
-      const actorRow = actorUserId ? await tx.user.findUnique({ where: { id: actorUserId } }) : null;
-      if (!actorRow || actorRow.deletedAt || !actorRow.roles.some(r => r === 'ADMIN' || r === 'OWNER'))
-        throw new GraphQLError('Forbidden', { extensions: { code: 'FORBIDDEN' } });
-    }
+    // Execution authority is independent of whether global roles transfer.
+    const actorRow = actorUserId ? await tx.user.findUnique({ where: { id: actorUserId } }) : null;
+    if (!actorRow || actorRow.deletedAt || !actorRow.roles.some(r => r === 'ADMIN' || r === 'OWNER'))
+      throw new GraphQLError('Forbidden', { extensions: { code: 'FORBIDDEN' } });
     const consent = await consumeUserMergeConsent(tx, consentProof, sourceUserId, targetUserId, actorUserId);
     await refuseUsersInOpenAlarmChains(tx, sourceUserId, targetUserId);
 

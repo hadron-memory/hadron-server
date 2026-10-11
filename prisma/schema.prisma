@@ -472,7 +472,7 @@ model UserMerge {
   sourceUserId String   @id @map("source_user_id")
   targetUserId String   @map("target_user_id")
   mergedAt     DateTime @default(now()) @map("merged_at")
-  /// The acting user, or null (an operator script). Recorded as of the merge.
+  /// The acting admin at the merge. Null only on historical merge records.
   mergedBy     String?  @map("merged_by")
   /// #1642: sealed dual-login consent evidence; absent only on historical merges.
   consentHash String? @unique @map("consent_hash")

@@ -67,7 +67,7 @@ describe('mergeUsers audit actor registry', () => {
     const [source, target, actor] = await Promise.all([
       db.user.create({ data: { handle: 'audit-merge-source' } }),
       db.user.create({ data: { handle: 'audit-merge-target' } }),
-      db.user.create({ data: { handle: 'audit-merge-actor' } }),
+      db.user.create({ data: { handle: 'audit-merge-actor', roles: ['ADMIN'] } }),
     ]);
     await db.user.update({ where: { id: source.id }, data: { createdBy: source.id } });
     const stampedUser = await db.user.create({
