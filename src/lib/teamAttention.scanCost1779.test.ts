@@ -202,3 +202,91 @@ describe('#1779 — the SQL aggregate counts exactly what the row walk counted',
     }
   }, 120_000);
 });
+
+async function resetTeamChannel(rows: number, mentions: string[] = []) {
+  await db.node.deleteMany({ where: { messageChannelId: channel.id } });
+  await db.channelReadState.deleteMany({ where: { channelId: channel.id } });
+  await db.node.createMany({
+    data: Array.from({ length: rows }, (_v, i) => ({
+      id: generateId(), memoryId: channel.memoryId, loc: `${channel.loc}:messages:${i + 1}`, name: String(i + 1),
+      nodeType: 'chat-message', seq: i + 1, messageChannelId: channel.id, content: 'x', data: { mentions },
+    })),
+  });
+  await db.channel.update({ where: { id: channel.id }, data: { lastSeq: rows } });
+}
+
+async function drain(scanLimit?: number) {
+  const items: Array<{ worker: string; channel: string; unread: number; unreadMentions: number }> = [];
+  let page: string | null = null;
+  let pages = 0;
+  for (let guard = 0; guard < 400; guard++) {
+    const r: Awaited<ReturnType<typeof teamAttentionPage>> = await teamAttentionPage(ctx(), app.id, { page, scanLimit });
+    pages++;
+    items.push(...r.items);
+    if (r.scanComplete) break;
+    page = r.nextPage;
+  }
+  return { items, pages };
+}
+
+describe('#1779 §10 — the aggregate is scoped to its own Channel', () => {
+  it('another org\'s Channel with rows in the same seq range never moves a target\'s counts', async () => {
+    await resetTeamChannel(100); // no mentions
+    // A different org's Channel, rows at the SAME seqs, every one broadcast-mentioning.
+    const otherOrg = await db.organization.create({ data: { id: generateId(), name: 'foreign', urn: `foreign-${Date.now()}.com` } });
+    const otherMemory = await db.memory.create({
+      data: { id: generateId(), organizationId: otherOrg.id, urn: `${otherOrg.urn}:chat`, name: 'chat', class: 'knowledge' },
+    });
+    const foreign = await ensureChannelWithRoot(db, {
+      memoryId: otherMemory.id, loc: 'chats:other', name: 'other', createdBy: user.id,
+    });
+    await db.node.createMany({
+      data: Array.from({ length: 100 }, (_v, i) => ({
+        id: generateId(), memoryId: otherMemory.id, loc: `chats:other:messages:${i + 1}`, name: String(i + 1),
+        nodeType: 'chat-message', seq: i + 1, messageChannelId: foreign.channel.id, content: 'secret',
+        data: { mentions: ['all'] },
+      })),
+    });
+    await db.channel.update({ where: { id: foreign.channel.id }, data: { lastSeq: 100 } });
+
+    const { items } = await drain();
+    const mine = items.filter((i) => i.worker === workerIds[10] && i.channel === channel.id);
+    expect(mine).toHaveLength(1);
+    // Exactly this Channel's 100 rows and none of the foreign 100 mentions.
+    expect(mine[0]).toMatchObject({ unread: 100, unreadMentions: 0 });
+    expect(items.some((i) => i.channel === foreign.channel.id)).toBe(false);
+  }, 120_000);
+});
+
+describe('#1779 — the per-request plaintext ceiling', () => {
+  it('stops a request after two windows across Channels (it does not ride the visit cap)', async () => {
+    // Three plaintext Channels of 450 rows, one registered worker. scanLimit 1 means a 200-seq
+    // window and a 400-seq request ceiling. Each Channel costs 450 seqs (200 + 200 + 50), 1,350 in
+    // all, so the ceiling makes it ceil(1350 / 400) = 4 pages. Without the ceiling the visit cap
+    // alone (2 x channels = 6 windows) would finish in 2 pages.
+    await resetTeamChannel(0);
+    await db.registerEntry.deleteMany({ where: { channelId: channel.id } });
+    const chans = [];
+    for (const name of ['a', 'b', 'c']) {
+      const made = await ensureChannelWithRoot(db, {
+        memoryId: channel.memoryId, loc: `chats:${name}`, name, createdBy: user.id,
+      });
+      await db.registerEntry.create({
+        data: { id: generateId(), appId: app.id, channelId: made.channel.id, attendeeWorkerId: workerIds[10], role: 'BOTH' },
+      });
+      await db.node.createMany({
+        data: Array.from({ length: 450 }, (_v, i) => ({
+          id: generateId(), memoryId: channel.memoryId, loc: `chats:${name}:messages:${i + 1}`, name: String(i + 1),
+          nodeType: 'chat-message', seq: i + 1, messageChannelId: made.channel.id, content: 'x', data: { mentions: [] },
+        })),
+      });
+      await db.channel.update({ where: { id: made.channel.id }, data: { lastSeq: 450 } });
+      chans.push(made.channel.id);
+    }
+    const { items, pages } = await drain(1);
+    expect(pages).toBe(4);
+    for (const id of chans) {
+      expect(items.find((i) => i.worker === workerIds[10] && i.channel === id)).toMatchObject({ unread: 450 });
+    }
+  }, 120_000);
+});
