@@ -735,6 +735,13 @@ describe('cycle 1 — a cadence or relevance edit re-runs the subscribe rule (R3
     await expectCode(M.updateTicker({}, { ref: t.id, input: { relevance: 'ALL' } }, ctx(member.id)), 'TICKER_CADENCE_NEEDS_CONSENT');
     await expect(M.updateTicker({}, { ref: t.id, input: { relevance: 'ALL' } }, ctx(appOwner.id))).resolves.toMatchObject({ relevance: 'ALL' });
   });
+
+  it('the subscribe-workers grant does not pay for a speed-up (it is announced nowhere)', async () => {
+    await grant(ctx(admin.id), anne);
+    const t = await asWorker(anne, () => createTicker(ctx(coordHolder.id), { name: 'Annes', cadenceSeconds: 600 }));
+    await subscribe(ctx(liamHolder.id), t, liam);
+    await expectCode(asWorker(anne, () => M.updateTicker({}, { ref: t.id, input: { cadenceSeconds: 120 } }, ctx(coordHolder.id))), 'TICKER_CADENCE_NEEDS_CONSENT');
+  });
 });
 
 describe('cycle 1 — concurrency (the local seat, Diego)', () => {
@@ -809,10 +816,15 @@ describe('cycle 1 — concurrency (the local seat, Diego)', () => {
       (v: unknown) => { settled = true; return { ok: v }; },
       (e: unknown) => { settled = true; return { err: e }; },
     );
-    await sleep(500);
-    expect(settled).toBe(false); // the edit waits for the release instead of using a revoked authority
-    releaseGate();
+    let waited: boolean;
+    try {
+      await sleep(500);
+      waited = !settled; // the edit waits for the release instead of using a revoked authority
+    } finally {
+      releaseGate(); // always, so a failure cannot strand the barrier
+    }
     await releasing;
+    expect(waited).toBe(true);
     const out = await edit;
     expect('err' in out && (out.err as GraphQLError).extensions?.code).toBe('FORBIDDEN');
   });
@@ -828,6 +840,19 @@ describe('cycle 1 — an unheld worker cannot subscribe itself (Diego P2-3)', ()
     // A manager still can, and the worker may still leave.
     await subscribe(ctx(admin.id), slow, liam);
     await expect(asWorker(liam, () => unsubscribe(ctx(liamHolder.id), slow, liam))).resolves.toBeTruthy();
+  });
+});
+
+describe('cycle 1 — a grant is spent on a holder\'s behalf (Rook, #1751 P3-2)', () => {
+  it('a released grantee\'s session cannot use the grant', async () => {
+    await grant(ctx(admin.id), anne);
+    const t = await createTicker(ctx(member.id), { name: 'Fast', cadenceSeconds: 120 });
+    await M.releaseWorker({}, { workerRef: anne.id }, ctx(coordHolder.id));
+    await expectCode(asWorker(anne, () => subscribe(ctx(coordHolder.id), t, liam)), 'SUBSCRIBE_FORBIDDEN');
+    // Held by someone else, the person behind the session must be that holder.
+    await db.worker.update({ where: { id: anne.id }, data: { heldByUserId: member.id, heldAt: new Date() } });
+    await expectCode(asWorker(anne, () => subscribe(ctx(coordHolder.id), t, liam)), 'SUBSCRIBE_FORBIDDEN');
+    await expect(asWorker(anne, () => subscribe(ctx(member.id), t, liam))).resolves.toBeTruthy();
   });
 });
 

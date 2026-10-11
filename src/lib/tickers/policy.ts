@@ -31,6 +31,8 @@ export function decideSubscribe(i: {
   selfSubscribeCadenceSeconds: number;
   /** The actor is a worker holding a live grant, read FOR SHARE in this transaction. */
   hasGrant: boolean;
+  /** The acting worker's holder, when the actor is a worker (its row, read in the same transaction). */
+  actorHeldByUserId?: string | null;
 }): SubscribeDecision {
   const { actor, target } = i;
   if (i.manages) return { allow: true, authority: 'manager' };
@@ -51,7 +53,9 @@ export function decideSubscribe(i: {
   }
   // N2: a person must be behind the call; a bare App key never reaches here
   // (the actor gate refuses it), and a worker actor with no person is refused.
-  if (actor.kind === 'worker' && actor.userId !== null && i.hasGrant) {
+  // The person behind the session must also be the grantee's holder: a released
+  // worker's session outlives its hold, and a grant is spent on a holder's behalf.
+  if (actor.kind === 'worker' && actor.userId !== null && i.hasGrant && i.actorHeldByUserId === actor.userId) {
     return { allow: true, authority: 'grant' };
   }
   return { allow: false, code: 'SUBSCRIBE_FORBIDDEN' };

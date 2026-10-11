@@ -521,7 +521,9 @@ async function requireSubscribersCovered(
   });
   if (!subs.length) return;
   const manages = await actorManagesApp(txCtx, app, actor);
-  const hasGrant = (await liveGrantFor(tx, app.id, actor)) !== null;
+  // The grant does not count here (Rook, #1750 delta): it is for subscribing OTHER
+  // workers, announced to their holders; a speed-up it paid for would not be.
+  const hasGrant = false;
   const refused: string[] = [];
   for (const { workerId } of subs) {
     const w = await lockWorker(tx, workerId);
@@ -601,7 +603,7 @@ type SubscribeOutcome = {
   changed: boolean;
   ticker: TickerRow;
   worker: { id: string; name: string; heldByUserId: string | null };
-  grantee: { id: string; name: string } | null;
+  grantee: { id: string; name: string; heldByUserId: string | null } | null;
 };
 
 async function changeSubscription(
@@ -624,7 +626,7 @@ async function changeSubscription(
     const grantId = await liveGrantFor(tx, fresh.id, actor);
     const grantee =
       grantId && actor.kind === 'worker'
-        ? await tx.worker.findUnique({ where: { id: actor.workerId }, select: { id: true, name: true } })
+        ? await tx.worker.findUnique({ where: { id: actor.workerId }, select: { id: true, name: true, heldByUserId: true } })
         : null;
     const decision = decideSubscribe({
       actor: toPolicyActor(actor), manages, op,
@@ -632,6 +634,7 @@ async function changeSubscription(
       tickerCadenceSeconds: t.cadenceSeconds,
       selfSubscribeCadenceSeconds: settings.tickerSelfSubscribeCadenceSeconds,
       hasGrant: grantId !== null,
+      actorHeldByUserId: grantee?.heldByUserId ?? null,
     });
     if (!decision.allow) {
       if (decision.code === 'SUBSCRIBE_CADENCE_NEEDS_HOLDER') {
