@@ -1,3 +1,4 @@
+import { ownsSession } from '../lib/sessionOwnership.js';
 import { createHash, randomBytes } from 'crypto';
 import { DEFAULT_SESSION_DORMANCY_DAYS, isSessionDormant, loadLastEventBySession } from '../lib/sessionActivity.js';
 import type { Request } from 'express';
@@ -260,10 +261,7 @@ export async function validateSessionBinding(
   if (!session || session.endedAt) return null;
   const now = new Date();
   if (session.expiresAt && session.expiresAt <= now) return null;
-  const owned = isPureAppKey
-    ? session.appId === principal.appId
-    : session.userId === principal.userId;
-  if (!owned) return null;
+  if (!ownsSession(principal, session)) return null;
   // Ruling DY-5, completed for sessions with NO hard expiry (#1661 review,
   // Rook P2-1): a session nobody has driven for longer than its App's
   // dormancy threshold no longer binds. Without this, an App with

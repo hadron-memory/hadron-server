@@ -9125,7 +9125,11 @@ export const typeDefs = `#graphql
     endSession(id: ID!, summary: String, handoff: String, inputTokens: Int, outputTokens: Int, turnCount: Int, errorCount: Int): Session!
 
     """
-    Record a usage event
+    Record a usage event. A supplied session is attributed only when owned
+    by the caller (no admin or impersonation bypass). Missing, deleted or
+    unowned session references are recorded without session attribution.
+    Owned ended, expired or idle sessions accept late attribution without
+    counting it as activity. The existing READER role gate still applies.
     """
     recordUsage(event: UsageEventInput!): Boolean!
 

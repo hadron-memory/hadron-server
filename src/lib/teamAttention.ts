@@ -393,12 +393,18 @@ export async function resumeOwnLapsedSessionInTx(
   tx: Prisma.TransactionClient,
   sessionId: string,
 ): Promise<boolean> {
-  if (!resumingPrincipal(ctx)) return false;
+  const principal = resumingPrincipal(ctx);
+  if (!principal) return false;
   const pre = await tx.session.findUnique({
     where: { id: sessionId },
-    select: { workerId: true, worker: { select: { appId: true } } },
+    select: { userId: true, appId: true, workerId: true, worker: { select: { appId: true } } },
   });
   if (!pre?.workerId || !pre.worker) return false;
+  // Refuse foreign refs before taking another tenant's lifecycle locks
+  // (#1741, Rook P3). This is only an early rejection: resumeVerdict and the
+  // guarded update still re-check ownership after the App/Worker lock wait.
+  if (principal === 'user' ? pre.userId !== ctx.userId
+    : pre.userId !== null || pre.appId !== ctx.appId || pre.worker.appId !== ctx.appId) return false;
   const [app] = await tx.$queryRaw<Array<{ deleted_at: Date | null; uninstalled_at: Date | null }>>`
     SELECT deleted_at, uninstalled_at FROM apps WHERE id = ${pre.worker.appId} FOR SHARE`;
   if (!app || app.deleted_at || app.uninstalled_at) return false;
