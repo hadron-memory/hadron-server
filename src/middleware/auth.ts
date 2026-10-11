@@ -15,6 +15,13 @@ export interface AuthContext {
   clientId?: string;       // "github:<username>" / "email:<addr>" — only set for OAuth/JWT users
   userId?: string;         // User.id — only set for OAuth/JWT users
   appId?: string;          // App.id — set when caller authenticated via an App Key
+  /**
+   * AppKey.id — set ONLY when the caller authenticated with an `hdr_app_` key (#1749). `appId` alone cannot say which:
+   * a person's active-App selection sets it too. The wake proof binds this, and the audit names it. A scope the key
+   * holds is never copied here: it is read from the database at every surface it gates, so a revocation holds over a
+   * transport that keeps this context open.
+   */
+  appKeyId?: string;
   sessionId?: string;      // Session.id — set when operating inside an active session
   /**
    * #1705 — the request NAMED a session (X-Hadron-Session) that did not
@@ -307,6 +314,7 @@ async function resolveAppKey(
   // `bindSession` — #934 unified it across principal shapes.
   return {
     appId: appKey.app.id,
+    appKeyId: appKey.id,
     // A user-owned App (spec 047) has no organizationId — undefined
     // matches the field's existing "unscoped" convention.
     organizationId: appKey.app.organizationId ?? undefined,

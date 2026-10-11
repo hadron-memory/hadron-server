@@ -1,11 +1,12 @@
 // Due wakes and acknowledgement — #1748 (Tickers S2, epic #1659; plan hrn:node:hadronmemory.com:hadron-server:design:named-heartbeats §6.1).
 //
-// WHO MAY READ (cor:agt:080:22, this slice): the worker's holder, and whoever
-// manages the App. A bare App key is concealed as "App not found" until S3 adds
-// the attention:deliver scope and its session-binding refusal. Under
+// WHO MAY READ (cor:agt:080:22): the worker's holder, whoever manages the App,
+// and (#1749, S3) an App key holding the attention:deliver scope. Under
 // impersonation nobody holds or manages anything. A holder reads the workers
-// they hold; a manager reads every worker of the App. Which channels a wake
-// shows is the two-reader gate in src/lib/tickers/dueWakes.ts.
+// they hold; a manager reads every worker of the App; a scoped key reads the
+// workers of its own App, through the App-derived reach alone (never a personal
+// memory), and is refused while bound to a session. Which channels a wake shows
+// is the two-reader gate in src/lib/tickers/dueWakes.ts.
 //
 // ACKNOWLEDGING (cor:agt:080:17): only the requester named in the proof; the
 // reading right is re-checked at acknowledgement.
@@ -15,13 +16,17 @@ import { Prisma } from '../../../generated/prisma/index.js';
 import type { Context } from './resolvers.helpers.js';
 import { actorManagesApp, loadApp, resolveParticipatedApp, resolveTaskActor, taskError, type TaskApp } from './resolvers.agentTask.js';
 import { currentActor } from '../../../lib/requestActor.js';
+import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { resolveWorkerRef } from '../../../lib/entityRef/workerRef.js';
 import { computeDueWakes } from '../../../lib/tickers/dueWakes.js';
 import { acknowledgeWakes } from '../../../lib/tickers/acknowledge.js';
 import type { WakeProof } from '../../../lib/tickers/wakeProof.js';
 import { liveCaller } from '../../../lib/tickers/liveCaller.js';
+import { appKeyCaller, refuseSessionBound, requireKeyScope } from '../../../lib/appKeyScopes/scopes.js';
+import { lockAuthorityAnchors, type AuthorityAnchor } from '../../../lib/auth/authorityAnchors.js';
+import { generateId } from '../../../lib/id.js';
 
-type Reader = { manager: boolean; userId: string };
+type Reader = { manager: boolean; userId: string | null };
 
 async function readerFor(ctx: Context, app: TaskApp, actor: Awaited<ReturnType<typeof resolveParticipatedApp>>['actor']): Promise<Reader> {
   // Concealed like any App the caller cannot reach: no oracle, and no key or impersonated session reads wakes here.
@@ -31,14 +36,58 @@ async function readerFor(ctx: Context, app: TaskApp, actor: Awaited<ReturnType<t
   return { manager: await actorManagesApp(ctx, app, actor), userId: ctx.userId };
 }
 
+/** The anchors every authority-revoking writer of an App takes exclusively (a scope, a key, the App itself). */
+const appAnchors = (app: TaskApp): AuthorityAnchor[] => [
+  { kind: 'app', id: app.id },
+  ...(app.organizationId ? [{ kind: 'org' as const, id: app.organizationId }] : []),
+  ...(app.ownerUserId ? [{ kind: 'user' as const, id: app.ownerUserId }] : []),
+];
+
+/**
+ * An App key at a wake surface (#1749, cor:aut:010:04). In this order, so that what a key learns never depends on
+ * something it does not hold: its own App only (a foreign App is "not found"), the scope read from the database now,
+ * then the session refusal. Returns the App and the check to run again inside the issuing transaction, where the
+ * App's authority anchor is held shared: the revoker of the scope, the key or the App takes it exclusively.
+ */
+async function keyEntry(ctx: Context, key: { appKeyId: string; appId: string }, appRef: string) {
+  let app: TaskApp | null = null;
+  try {
+    const { id } = await resolveAppRef(ctx.db, appRef);
+    app = id === key.appId ? await loadApp(ctx, id) : null;
+  } catch {
+    app = null;
+  }
+  if (!app || app.deletedAt || app.uninstalledAt) throw taskError('APP_NOT_FOUND', 'App not found.');
+  await requireKeyScope(ctx.db, key, 'attention:deliver');
+  refuseSessionBound(ctx);
+  const held = app;
+  return {
+    app: held,
+    authorize: async (tx: Prisma.TransactionClient) => {
+      await lockAuthorityAnchors(tx, appAnchors(held), 'shared');
+      await requireKeyScope(tx, key, 'attention:deliver');
+    },
+  };
+}
+
 export async function dueWakesFor(
   requestCtx: Context,
   a: { appRef: string; workerRefs?: string[] | null; first?: number | null; after?: string | null },
 ) {
+  const key = appKeyCaller(requestCtx);
   // Live platform roles: a manager arm taken from an old credential would widen the worker set (Diego P2-1).
   const ctx = (await liveCaller(requestCtx)) ?? (() => { throw taskError('APP_NOT_FOUND', 'App not found.'); })();
-  const { app, actor } = await resolveParticipatedApp(ctx, a.appRef);
-  const reader = await readerFor(ctx, app, actor);
+  let app: TaskApp;
+  let reader: Reader;
+  let authorize: ((tx: Prisma.TransactionClient) => Promise<void>) | undefined;
+  if (key) {
+    ({ app, authorize } = await keyEntry(ctx, key, a.appRef));
+    reader = { manager: true, userId: null };
+  } else {
+    const resolved = await resolveParticipatedApp(ctx, a.appRef);
+    app = resolved.app;
+    reader = await readerFor(ctx, app, resolved.actor);
+  }
   let only: string[] | null = null;
   if (a.workerRefs && a.workerRefs.length > 0) {
     // A ref that does not resolve, or names a worker the caller may not read, is simply absent: no existence oracle.
@@ -46,11 +95,16 @@ export async function dueWakesFor(
     only = resolved.filter((id): id is string => id !== null);
   }
   const result = await computeDueWakes({
-    ctx, app, reader, requester: { userId: reader.userId }, workerIds: only, first: a.first, after: a.after,
+    ctx, app, reader, requester: key ? { appKeyId: key.appKeyId } : { userId: reader.userId! },
+    workerIds: only, first: a.first, after: a.after, authorize,
   });
   if (result.budgetNotice) await postBudgetNotice(ctx, app, result.budgetNotice);
 
   const workerIds = [...new Set([...result.wakes.map((w) => w.workerId), ...result.dormant.map((d) => d.workerId)])];
+  // One row per App-key read: which key, how many workers it was shown, when (cor:agt:080:23).
+  if (key) {
+    await ctx.db.appKeyWakeRead.create({ data: { id: generateId(), appKeyId: key.appKeyId, appId: app.id, workerCount: workerIds.length } });
+  }
   const workers = new Map((await ctx.db.worker.findMany({ where: { id: { in: workerIds } } })).map((w) => [w.id, w]));
   const channelIds = [...new Set(result.wakes.flatMap((w) => w.wake.channels.map((c) => c.channelId)))];
   const channels = new Map((await ctx.db.channel.findMany({ where: { id: { in: channelIds } } })).map((c) => [c.id, c]));
@@ -108,6 +162,8 @@ async function postBudgetNotice(ctx: Context, app: TaskApp, n: { appId: string; 
 }
 
 export async function acknowledgeWakesFor(requestCtx: Context, a: { proofs: string[] }) {
+  const key = appKeyCaller(requestCtx);
+  if (key) return acknowledgeAsKey(requestCtx, key, a.proofs);
   if (!requestCtx.userId || requestCtx.impersonation) throw new GraphQLError('Not authorized.', { extensions: { code: 'UNAUTHENTICATED' } });
   const userId = requestCtx.userId;
   // A worker's session may not acknowledge: that would let it silence the workers its holder holds (cor:agt:080:17).
@@ -131,6 +187,26 @@ export async function acknowledgeWakesFor(requestCtx: Context, a: { proofs: stri
       const rows = await tx.$queryRaw<Array<{ held_by_user_id: string | null }>>`SELECT held_by_user_id FROM workers WHERE id = ${p.workerId} FOR SHARE`;
       if (await actorManagesApp(txCtx, app, actor)) return true;
       return rows[0]?.held_by_user_id === userId;
+    },
+  });
+}
+
+/**
+ * An App key acknowledging (#1749). The same order as the read: scope from the database, then the session refusal,
+ * and in the transaction, with the App's anchor held, the scope again, the proof's App being the key's own, and the
+ * worker being one of it. The proof names the key; another key of the App, or a person, is the wrong requester.
+ */
+async function acknowledgeAsKey(requestCtx: Context, key: { appKeyId: string; appId: string }, proofs: string[]) {
+  await requireKeyScope(requestCtx.db, key, 'attention:deliver');
+  refuseSessionBound(requestCtx);
+  return acknowledgeWakes({
+    ctx: requestCtx,
+    requester: { appKeyId: key.appKeyId },
+    proofs,
+    mayReadWorker: async (p: WakeProof, tx: Prisma.TransactionClient) => {
+      if (p.appId !== key.appId) return false;
+      await requireKeyScope(tx, key, 'attention:deliver');
+      return true;
     },
   });
 }

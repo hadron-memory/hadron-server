@@ -61,6 +61,7 @@ import { teamWorkMutations, teamWorkQueries } from './resolvers.teamWork.js';
 import { agentTaskMutations, agentTaskQueries, agentTaskFieldResolvers } from './resolvers.agentTask.js';
 import { tickerMutations, tickerQueries, tickerFieldResolvers } from './resolvers.ticker.js';
 import { wakeMutations, wakeQueries } from './resolvers.wake.js';
+import { appKeyScopeMutations, appKeyScopeFieldResolvers } from './resolvers.appKeyScope.js';
 import {
   agentTaskAlarmMutations,
   agentTaskAlarmQueries,
@@ -104,6 +105,7 @@ export const resolvers = {
   ...workerFieldResolvers,
   ...agentTaskFieldResolvers,
   ...tickerFieldResolvers,
+  ...appKeyScopeFieldResolvers,
   // #1706 — alarm wakes and availability. AgentTeamEvent already has a block
   // in agentTaskFieldResolvers; the wakes field joins it rather than replacing it.
   ...agentTaskAlarmFieldResolvers,
@@ -203,6 +205,7 @@ export const resolvers = {
     ...agentTaskMutations,
     ...tickerMutations,
     ...wakeMutations,
+    ...appKeyScopeMutations,
     ...agentTaskAlarmMutations,
     ...memoryConfigMutations,
     ...memoryConfigTemplateMutations,

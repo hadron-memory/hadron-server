@@ -107,6 +107,7 @@ export interface Context {
   clientId?: string;       // "github:<username>" / "email:<addr>" — only set for OAuth/JWT users
   userId?: string;         // User.id — only set for OAuth/JWT users
   appId?: string;          // App.id — set when caller authenticated via an App Key
+  appKeyId?: string;       // AppKey.id — set only when authenticated with an hdr_app_ key (#1749)
   sessionId?: string;      // Session.id — set when operating inside an active session
   /** #1705 — a named X-Hadron-Session failed validation (see AuthContext.sessionBindingRefused). */
   sessionBindingRefused?: boolean;

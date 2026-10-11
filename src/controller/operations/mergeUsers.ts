@@ -80,6 +80,7 @@ export const AUDIT_USER_COLUMNS: Readonly<Record<string, readonly string[]>> = {
   ticker_subscriptions: ['created_by', 'ended_by', 'via_grant_person_id', 'ended_via_grant_person_id'],
   worker_wake_settings: ['updated_by'],
   app_grants: ['granted_by', 'revoked_by'],
+  app_key_scopes: ['granted_by_user_id', 'revoked_by_user_id'],
   // #1706 — who last changed an App's stall windows.
   agent_task_stall_schedule: ['updated_by'],
 };
