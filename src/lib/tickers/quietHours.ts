@@ -84,3 +84,34 @@ export function validateQuietHours(input: unknown): { ok: true; value: QuietHour
   }
   return { ok: true, value: { timezone, windows: norm } };
 }
+
+const ISO_DAY: Record<string, number> = { Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6, Sun: 7 };
+const formatters = new Map<string, Intl.DateTimeFormat>();
+
+/** The local minute of the ISO week (Monday 00:00 = 0) at `at` in `timezone`. DST-correct: the zone's own clock decides. */
+function weekMinuteIn(timezone: string, at: Date): number {
+  let f = formatters.get(timezone);
+  if (!f) {
+    f = new Intl.DateTimeFormat('en-US', { timeZone: timezone, weekday: 'short', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
+    formatters.set(timezone, f);
+  }
+  let day = 1;
+  let hour = 0;
+  let minute = 0;
+  for (const part of f.formatToParts(at)) {
+    if (part.type === 'weekday') day = ISO_DAY[part.value] ?? 1;
+    else if (part.type === 'hour') hour = Number(part.value);
+    else if (part.type === 'minute') minute = Number(part.value);
+  }
+  return (day - 1) * 1440 + hour * 60 + minute;
+}
+
+/** Is `at` inside the quiet hours (cor:agt:080:06)? A window includes its start and excludes its end. */
+export function inQuietHours(quiet: QuietHours | null | undefined, at: Date): boolean {
+  if (!quiet) return false;
+  const minute = weekMinuteIn(quiet.timezone, at);
+  for (const w of quiet.windows) {
+    for (const [a, b] of ranges(w)) if (minute >= a && minute < b) return true;
+  }
+  return false;
+}

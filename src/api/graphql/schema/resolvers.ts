@@ -60,6 +60,7 @@ import { teamAttentionMutations, teamAttentionQueries } from './resolvers.teamAt
 import { teamWorkMutations, teamWorkQueries } from './resolvers.teamWork.js';
 import { agentTaskMutations, agentTaskQueries, agentTaskFieldResolvers } from './resolvers.agentTask.js';
 import { tickerMutations, tickerQueries, tickerFieldResolvers } from './resolvers.ticker.js';
+import { wakeMutations, wakeQueries } from './resolvers.wake.js';
 import {
   agentTaskAlarmMutations,
   agentTaskAlarmQueries,
@@ -152,6 +153,7 @@ export const resolvers = {
     ...teamWorkQueries,
     ...agentTaskQueries,
     ...tickerQueries,
+    ...wakeQueries,
     ...agentTaskAlarmQueries,
     ...agentTaskMatchingQueries,
     ...memoryConfigQueries,
@@ -200,6 +202,7 @@ export const resolvers = {
     ...teamWorkMutations,
     ...agentTaskMutations,
     ...tickerMutations,
+    ...wakeMutations,
     ...agentTaskAlarmMutations,
     ...memoryConfigMutations,
     ...memoryConfigTemplateMutations,

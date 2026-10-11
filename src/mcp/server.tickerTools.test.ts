@@ -152,6 +152,11 @@ describe('ticker tools: who acts', () => {
     // Its own settings are its to change, and the person's plain session still reaches both.
     expect(text(await sh.callTool('hadron_worker_wake_settings', { workerRef: liam.id, mentions: 'OFF', session: asLiam.id }))).toMatch(/^Updated\./);
     expect(text(await sh.callTool('hadron_worker_wake_settings', { workerRef: anne.id, mentions: 'OFF', session: asHolder.id }))).toMatch(/^Updated\./);
+    // Waking is the person's: a worker's session neither reads wakes (concealed) nor acknowledges them, even its holder's other workers'.
+    expect(code(text(await sh.callTool('hadron_due_wakes', { appRef: app.id, session: asLiam.id })))).toBe('APP_NOT_FOUND');
+    expect(code(text(await sh.callTool('hadron_ack_wakes', { proofs: ['x'], session: asLiam.id })))).toBe('WAKE_ACK_FORBIDDEN');
+    expect(code(text(await sh.callTool('hadron_ack_wakes', { proofs: ['x'], session: asHolder.id })))).toBe('WAKE_PROOF_INVALID');
+    expect(code(text(await sh.callTool('hadron_ack_wakes', { proofs: ['x'] })))).toBe('SESSION_REQUIRED');
   });
 
   it('tells the caller when a grant use could not be announced', async () => {
@@ -166,5 +171,14 @@ describe('ticker tools: who acts', () => {
     warn.mockRestore();
     expect(failed).toMatch(/^Unsubscribed\./);
     expect(failed).toMatch(/FAILED to post/);
+  });
+  it('due wakes: readable without a session by a holder or manager, concealed from outsiders; acknowledging is a write', async () => {
+    const outsider = await db.user.create({ data: { githubId: 181009, githubUsername: 'tk-out', handle: 'tk-out', roles: [] } });
+    const sh = mcp(authOf(holder.id));
+    expect(text(await sh.callTool('hadron_due_wakes', { appRef: app.id }))).toBe('Nothing is due.');
+    expect(code(text(await mcp(authOf(outsider.id)).callTool('hadron_due_wakes', { appRef: app.id })))).toBe('APP_NOT_FOUND');
+    expect(code(text(await sh.callTool('hadron_ack_wakes', { proofs: ['x'] })))).toBe('SESSION_REQUIRED');
+    const plain = await session({ userId: holder.id });
+    expect(code(text(await sh.callTool('hadron_ack_wakes', { proofs: ['x'], session: plain.id })))).toBe('WAKE_PROOF_INVALID');
   });
 });

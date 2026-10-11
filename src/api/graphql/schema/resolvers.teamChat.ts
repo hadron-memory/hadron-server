@@ -35,6 +35,7 @@ import type { Prisma } from '../../../generated/prisma/index.js';
 import type { InputJsonValue } from '../../../generated/prisma/runtime/library.js';
 import { generateId } from '../../../lib/id.js';
 import { appendChatMessage } from '../../../lib/chatRoot.js';
+import { lockStampAuthority, wakeStampsFor } from '../../../lib/tickers/postStamp.js';
 import { deriveEdgeLoc, sanitizeLocAtom } from '../../../lib/edgeLoc.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { resolveChannelRefId } from '../../../lib/entityRef/channelRef.js';
@@ -929,7 +930,9 @@ async function postToChannelRoot(
   }
 
   const mentions = extractMentions(body);
-  if (mentions.length > 0) envelope.mentions = mentions;
+  if (mentions.length > 0) {
+    envelope.mentions = mentions;
+  }
   if (replyToSeq != null) envelope.replyToSeq = replyToSeq;
 
   const messagesLoc = `${root.loc}:messages`;
@@ -938,9 +941,6 @@ async function postToChannelRoot(
   // follow the commit, or a transient failure reports an error for a message
   // that was written, and the client's retry posts it twice.
   const memBareUrn = await hostMemoryUrn(ctx, root.memoryId);
-  const msgFields = translateSessionExpired(memEncInfo, () =>
-    encryptNodeFields({ content: body, data: envelope }, memEncInfo),
-  );
 
   const messageId = generateId();
   const createdBy = ctx.userId ?? null;
@@ -962,12 +962,23 @@ async function postToChannelRoot(
     ) {
       throw channelNotFound(root.loc);
     }
+    // #1748 (N3): who may wake everyone is decided NOW, here, on live authority held through the commit, and
+    // stamped; nothing re-decides it later. The authority is taken BEFORE the resume below (which locks the Worker
+    // row FOR UPDATE) and the stamps after it, so the Worker row is never taken SHARE then upgraded (Diego, cycle 3).
+    const stampAuthority = mentions.length > 0 ? { authority: await lockStampAuthority(ctx, tx, app) } : null;
     // #1617 B — resume the author's lapsed session in THIS transaction, so it
     // commits with the message or not at all (#1625 review, Baloo P2-1). Every
     // condition is re-decided under the App and Worker locks.
     if (resumeSessionId && !(await resumeOwnLapsedSessionInTx(ctx, tx, resumeSessionId))) {
       throw sessionNotLiveError(sessionRef!);
     }
+    if (stampAuthority) {
+      Object.assign(envelope, await wakeStampsFor(ctx, tx, app, typeof envelope.authorWorkerId === 'string' ? envelope.authorWorkerId : null, mentions, stampAuthority));
+    }
+    // The envelope is sealed after the stamps are in it.
+    const msgFields = translateSessionExpired(memEncInfo, () =>
+      encryptNodeFields({ content: body, data: envelope }, memEncInfo),
+    );
     // replyToSeq is validated INSIDE the allocating transaction, under the
     // chat lock, so the target can't be soft-deleted out from under us and
     // a reply can never cite its own (still-uncommitted) seq.

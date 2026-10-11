@@ -40,7 +40,7 @@ const MODELS_WITHOUT_ID = new Set<string>([
   // #1747 — keyed by their worker (and channel / ticker).
   'WorkerWakeSettings',
   'WorkerDeliveryChannel',
-  'WorkerDeliveryTick',
+  'WorkerDeliveryTick', 'AppWakeDay', 'AppWakeReservation',
 ]);
 
 const basePrisma = new PrismaClient();
