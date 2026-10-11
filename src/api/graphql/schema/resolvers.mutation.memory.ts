@@ -2161,11 +2161,12 @@ export const memoryMutations = {
       const { id: resolvedMemoryId } = await resolveMemoryRef(ctx.db, memoryId);
       const app = await ctx.db.app.findUniqueOrThrow({ where: { id: ctx.appId } });
       const memory = await ctx.db.memory.findUniqueOrThrow({ where: { id: resolvedMemoryId } });
+      const [{ now: promotionNow }] = await ctx.db.$queryRaw<Array<{ now: Date }>>`SELECT clock_timestamp() AS now`;
       // #1644: both promotion paths belong to this App's live anonymous
       // provisioning scope. Registered holdings require their owner's authority.
       await concealUnreadableDenial(ctx, resolvedMemoryId, memoryId, async () => {
         if (memory.organizationId !== app.organizationId || !memory.userMemoryOfAgentId ||
-            memory.deletedAt || memory.anonymousExpiresAt === null || memory.userId !== null || memory.class !== 'app' ||
+            memory.deletedAt || memory.anonymousExpiresAt === null || memory.anonymousExpiresAt <= promotionNow || memory.userId !== null || memory.class !== 'app' ||
             memory.appId !== ctx.appId || memory.isEncrypted || ctx.impersonation) {
           throw new GraphQLError("Only this App's plaintext anonymous memory may be linked.", {
             extensions: { code: 'FORBIDDEN' },
@@ -2240,8 +2241,10 @@ export const memoryMutations = {
         await ctx.db.$transaction(async (tx) => {
           await tx.$queryRaw`SELECT id FROM memories WHERE id = ${resolvedMemoryId} FOR UPDATE`;
           const current = await tx.memory.findUniqueOrThrow({ where: { id: resolvedMemoryId } });
-          if (current.deletedAt || current.anonymousExpiresAt === null || current.userId !== null || current.class !== 'app' ||
-              current.appId !== ctx.appId || current.organizationId !== app.organizationId) {
+          const [{ now }] = await tx.$queryRaw<Array<{ now: Date }>>`SELECT clock_timestamp() AS now`;
+          if (current.deletedAt || current.anonymousExpiresAt === null || current.anonymousExpiresAt <= now || !current.userMemoryOfAgentId || current.userId !== null || current.class !== 'app' ||
+              current.appId !== ctx.appId || current.organizationId !== app.organizationId ||
+              current.isEncrypted || current.keyVerifier !== null || current.urn !== memory.urn) {
             throw new GraphQLError('Anonymous memory changed during promotion; retry.', {
               extensions: { code: 'MEMORY_WRITE_CONFLICT', memoryId: resolvedMemoryId },
             });
@@ -2276,35 +2279,21 @@ export const memoryMutations = {
           // supplied a different key. Claim the flag and verifier together;
           // if another writer won after our pre-transaction scan, roll back
           // every stale Node rewrite and alias in this transaction.
-          const claimed = await tx.memory.updateMany({
-            where: {
-              id: resolvedMemoryId,
-              isEncrypted: false,
-              keyVerifier: null,
-              urn: memory.urn,
-              userId: null,
-              anonymousExpiresAt: { not: null },
-              appId: ctx.appId,
-              organizationId: app.organizationId,
-              class: 'app',
-              deletedAt: null,
-            },
-            data: {
-              urn: newUrn,
-              createdBy: user.id,
-              anonymousExpiresAt: null,
-              isEncrypted: true,
-              keyVerifier: makeKeyVerifier(key),
-              // 041 (#516): encrypted ⇒ class='private'; set the owner so the
-              // bidirectional chk_personal_visibility_user (private ⇔ userId)
-              // holds. userMemoryOfAgentId + appId are already set on the anon
-              // row, satisfying chk_memory_personal_agent_id / _class_app_id.
-              class: 'private',
-              userId: user.id,
-              updatedBy: ctx.appId,
-            },
-          });
-          if (claimed.count !== 1) {
+          // Evaluate expiry in the claim statement, not against an application
+          // clock or the transaction's start time (a lock wait can outlive it).
+          const claimed = await tx.$executeRaw`
+            UPDATE memories SET urn = ${newUrn}, created_by = ${user.id},
+              anonymous_expires_at = NULL, is_encrypted = true,
+              key_verifier = ${makeKeyVerifier(key)}, class = 'private', user_id = ${user.id},
+              updated_by = ${ctx.appId}, updated_at = clock_timestamp()
+            WHERE id = ${resolvedMemoryId} AND is_encrypted = false AND key_verifier IS NULL
+              AND urn = ${memory.urn} AND user_id IS NULL
+              AND anonymous_expires_at > clock_timestamp()
+              AND user_memory_of_agent_id IS NOT NULL
+              AND app_id = ${ctx.appId} AND organization_id = ${app.organizationId}
+              AND class = 'app' AND deleted_at IS NULL
+          `;
+          if (claimed !== 1) {
             throw new GraphQLError('Anonymous memory changed during promotion; retry.', {
               extensions: { code: 'MEMORY_WRITE_CONFLICT', memoryId: resolvedMemoryId },
             });
@@ -2312,14 +2301,11 @@ export const memoryMutations = {
         });
         // Promotion's live-node rewrite does not cover tombstones or prior
         // snapshots. Reuse the bounded completion pass under the verifier we
-        // just installed. After the claim commits, interrupted completion requires
-        // the registered owner to call encryptMemory with this same key; the
-        // App cannot retry promotion against a registered private holding.
+        // just installed. The owning App can recover an interrupted pass by
+        // proving possession of this existing key; it cannot repeat promotion
+        // or choose a replacement verifier (Holger's #1644 completion ruling).
         await memoryMutations.encryptMemory(
-          // The locked anonymous claim above established this owner. Finish
-          // only as that newly provisioned owner; the ordinary owner gate is
-          // rechecked under every conversion lock, so a later transfer stops it.
-          {}, { memoryId: resolvedMemoryId, dataKey }, { ...ctx, userId: user.id },
+          {}, { memoryId: resolvedMemoryId, dataKey }, ctx,
         );
         return ctx.db.memory.findUniqueOrThrow({ where: { id: resolvedMemoryId } });
       }
@@ -2329,7 +2315,8 @@ export const memoryMutations = {
       return ctx.db.$transaction(async (tx) => {
         await tx.$queryRaw`SELECT id FROM memories WHERE id = ${resolvedMemoryId} FOR UPDATE`;
         const current = await tx.memory.findUniqueOrThrow({ where: { id: resolvedMemoryId } });
-        if (current.deletedAt || current.anonymousExpiresAt === null || current.userId !== null || current.class !== 'app' ||
+        const [{ now }] = await tx.$queryRaw<Array<{ now: Date }>>`SELECT clock_timestamp() AS now`;
+        if (current.deletedAt || current.anonymousExpiresAt === null || current.anonymousExpiresAt <= now || !current.userMemoryOfAgentId || current.userId !== null || current.class !== 'app' ||
             current.appId !== ctx.appId || current.organizationId !== app.organizationId ||
             current.isEncrypted || current.keyVerifier !== null || current.urn !== memory.urn) {
           throw new GraphQLError('Anonymous memory changed during promotion; retry.', {
@@ -2340,16 +2327,15 @@ export const memoryMutations = {
           entityType: 'MEMORY', entityId: resolvedMemoryId,
           oldUrn: memory.urn, newUrn, createdBy: user.id,
         });
-        const claimed = await tx.memory.updateMany({
-          where: {
-            id: resolvedMemoryId, urn: memory.urn, userId: null, class: 'app',
-            appId: ctx.appId, organizationId: app.organizationId, deletedAt: null,
-            anonymousExpiresAt: { not: null },
-            isEncrypted: false, keyVerifier: null,
-          },
-          data: { urn: newUrn, createdBy: user.id, anonymousExpiresAt: null, updatedBy: ctx.appId },
-        });
-        if (claimed.count !== 1) {
+        const claimed = await tx.$executeRaw`
+          UPDATE memories SET urn = ${newUrn}, created_by = ${user.id},
+            anonymous_expires_at = NULL, updated_by = ${ctx.appId}, updated_at = clock_timestamp()
+          WHERE id = ${resolvedMemoryId} AND urn = ${memory.urn} AND user_id IS NULL
+            AND class = 'app' AND app_id = ${ctx.appId} AND organization_id = ${app.organizationId}
+            AND deleted_at IS NULL AND anonymous_expires_at > clock_timestamp()
+            AND user_memory_of_agent_id IS NOT NULL AND is_encrypted = false AND key_verifier IS NULL
+        `;
+        if (claimed !== 1) {
           throw new GraphQLError('Anonymous memory changed during promotion; retry.', {
             extensions: { code: 'MEMORY_WRITE_CONFLICT', memoryId: resolvedMemoryId },
           });
@@ -2375,11 +2361,14 @@ export const memoryMutations = {
       // 007-entity-id-or-urn: memoryId may be ID, bare URN, or prefixed URN.
       const { id: resolvedMemoryId } = await resolveMemoryRef(ctx.db, memoryId);
       const memory = await ctx.db.memory.findUniqueOrThrow({ where: { id: resolvedMemoryId } });
-      // #1644 / DT / cor:acl:010:02: encryption requires the strict owner.
-      // App selection, org membership and administrative roles add no grant.
-      // #1381: a caller who cannot open this memory gets resolveMemoryRef's miss.
+      // #1644: first encryption requires the strict owner. Holger's ruling
+      // also permits completion by the owning App's actual key principal,
+      // under the existing verifier, without fabricating an owner identity.
+      const appCompletionOnly = ctx.userId == null && !ctx.impersonation && !!ctx.appId &&
+        memory.appId === ctx.appId && memory.class === 'private' &&
+        memory.userId !== null && memory.isEncrypted && !!dataKey && !passphrase;
       await concealUnreadableDenial(ctx, resolvedMemoryId, memoryId, async () => {
-        if (!isStrictOwner(ctx, memory.userId)) {
+        if (!isStrictOwner(ctx, memory.userId) && !appCompletionOnly) {
           throw new GraphQLError('Only the memory owner may encrypt it.', {
             extensions: { code: 'FORBIDDEN' },
           });
@@ -2514,7 +2503,9 @@ export const memoryMutations = {
         await tx.$queryRaw`SELECT id FROM memories WHERE id = ${resolvedMemoryId} FOR SHARE`;
         const current = await tx.memory.findUnique({ where: { id: resolvedMemoryId } });
         await concealUnreadableDenial({ ...ctx, db: tx } as Context, resolvedMemoryId, memoryId, async () => {
-          if (!current || current.deletedAt || !isStrictOwner(ctx, current.userId)) {
+          if (!current || current.deletedAt || (!isStrictOwner(ctx, current.userId) &&
+              !(appCompletionOnly && current.appId === ctx.appId && current.userId === memory.userId &&
+                current.class === 'private' && current.isEncrypted))) {
             throw new GraphQLError('Only the memory owner may encrypt it.', { extensions: { code: 'FORBIDDEN' } });
           }
         });

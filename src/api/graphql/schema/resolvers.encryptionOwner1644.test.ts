@@ -90,7 +90,7 @@ describe('#1644 encryption authority', () => {
     expect(await snapshot()).toEqual(beforeCompletion);
   });
 
-  it('an App key cannot complete registered encrypted history, even with the correct key', async () => {
+  it('an App key cannot complete a free-standing encrypted holding even with the correct key', async () => {
     await resolvers.Mutation.encryptMemory({}, { memoryId, dataKey }, ownerCtx());
     const before = await snapshot();
     await expect(resolvers.Mutation.encryptMemory({}, { memoryId, dataKey }, { db, appId, roles: [] }))
@@ -142,9 +142,10 @@ describe('#1644 encryption authority', () => {
     expect(await db.memory.findUniqueOrThrow({ where: { id: anon.id } })).toEqual(before);
     expect(await db.user.count()).toBe(usersBefore);
   });
-  it.each(['owner', 'key'])('conversion refuses a changed %s before writing enumerated nodes', async change => {
+  it.each(['owner', 'key', 'App'])('conversion refuses a changed %s before writing enumerated nodes', async change => {
     await db.memory.update({ where: { id: memoryId }, data: {
       isEncrypted: true, keyVerifier: makeKeyVerifier(parseDataKey(dataKey)),
+      ...(change === 'App' ? { appId, userMemoryOfAgentId: (await db.agent.create({ data: { name: 'Fence agent', urn: 'enc-owner.test:fence-agent', organizationId: orgId } })).id } : {}),
     } });
     const before = await snapshot();
     const original = db.node.findMany.bind(db.node);
@@ -154,22 +155,23 @@ describe('#1644 encryption authority', () => {
       if (!changed && args.where.memoryId === memoryId) {
         changed = true;
         await db.memory.update({ where: { id: memoryId }, data: change === 'owner'
-          ? { userId: otherId } : { keyVerifier: makeKeyVerifier(generateDataKey()) } });
+          ? { userId: otherId } : change === 'App' ? { appId: otherAppId } : { keyVerifier: makeKeyVerifier(generateDataKey()) } });
       }
       return rows;
     }) as typeof db.node.findMany);
     try {
-      await expect(resolvers.Mutation.encryptMemory({}, { memoryId, dataKey }, ownerCtx())).rejects.toThrow();
+      await expect(resolvers.Mutation.encryptMemory({}, { memoryId, dataKey }, change === 'App' ? { db, appId, roles: [] } : ownerCtx())).rejects.toThrow();
     } finally { scan.mockRestore(); }
     expect(changed).toBe(true);
     const after = await snapshot();
     if (change === 'owner') expect(after.memory.userId).toBe(otherId);
+    else if (change === 'App') expect(after.memory.appId).toBe(otherAppId);
     else expect(after.memory.keyVerifier).not.toBe(before.memory.keyVerifier);
     expect(after.node).toEqual(before.node);
     expect(after.revisions).toEqual(before.revisions);
   });
 
-  it.each([[undefined, 'app'], [dataKey, 'app'], [undefined, 'expiry'], [dataKey, 'expiry']] as const)('promotion rechecks anonymous scope under its transaction lock (key=%s, change=%s)', async (promotionKey, change) => {
+  it.each([[undefined, 'app'], [dataKey, 'app'], [undefined, 'expiry'], [dataKey, 'expiry'], [undefined, 'cleared'], [dataKey, 'cleared']] as const)('promotion rechecks anonymous scope under its transaction lock (key=%s, change=%s)', async (promotionKey, change) => {
     const agent = await db.agent.create({ data: { name: 'Race agent', urn: 'enc-owner.test:race-agent', organizationId: orgId } });
     const anon = await db.memory.create({ data: { name: 'Race anonymous', urn: 'enc-owner.test:race', organizationId: orgId, appId, userMemoryOfAgentId: agent.id, anonymousExpiresAt: new Date(Date.now() + 86400000), class: 'app' } });
     const original = db.memory.findUniqueOrThrow.bind(db.memory);
@@ -178,7 +180,7 @@ describe('#1644 encryption authority', () => {
       const row = await original(args);
       if (!changed && args.where.id === anon.id) {
         changed = true;
-        await db.memory.update({ where: { id: anon.id }, data: change === 'app' ? { appId: otherAppId } : { anonymousExpiresAt: null } });
+        await db.memory.update({ where: { id: anon.id }, data: change === 'app' ? { appId: otherAppId } : { anonymousExpiresAt: change === 'cleared' ? null : new Date(0) } });
       }
       return row;
     }) as typeof db.memory.findUniqueOrThrow);
@@ -188,9 +190,134 @@ describe('#1644 encryption authority', () => {
     } finally { read.mockRestore(); }
     expect(await db.memory.findUniqueOrThrow({ where: { id: anon.id } })).toMatchObject({
       urn: anon.urn, appId: change === 'app' ? otherAppId : appId,
-      anonymousExpiresAt: change === 'expiry' ? null : anon.anonymousExpiresAt,
+      anonymousExpiresAt: change === 'expiry' ? new Date(0) : change === 'cleared' ? null : anon.anonymousExpiresAt,
       userId: null, isEncrypted: false, keyVerifier: null,
     });
+  });
+
+  it.each([[undefined, 'impersonation'], [dataKey, 'impersonation'], [undefined, 'deleted'], [dataKey, 'deleted']] as const)('anonymous promotion refuses %s / %s', async (promotionKey, denial) => {
+    const agent = await db.agent.create({ data: { name: 'Denied agent', urn: 'enc-owner.test:denied-agent', organizationId: orgId } });
+    await db.memory.update({ where: { id: memoryId }, data: {
+      class: 'app', userId: null, appId, userMemoryOfAgentId: agent.id,
+      anonymousExpiresAt: new Date(Date.now() + 86400000),
+      deletedAt: denial === 'deleted' ? new Date() : null,
+    } });
+    const before = await snapshot();
+    const usersBefore = await db.user.count();
+    const ctx: Context = { db, appId, roles: [], ...(denial === 'impersonation'
+      ? { impersonation: { orgId, actorUserId: otherId } as Context['impersonation'] } : {}) };
+    await expect(resolvers.Mutation.linkMemoryToUser({}, { memoryId, externalUserId: 'denied-user', dataKey: promotionKey }, ctx)).rejects.toThrow();
+    expect(await snapshot()).toEqual(before);
+    expect(await db.user.count()).toBe(usersBefore);
+  });
+
+  it.each([undefined, dataKey])('expired anonymous promotion is refused before provisioning (key=%s)', async promotionKey => {
+    const agent = await db.agent.create({ data: { name: 'Expired agent', urn: 'enc-owner.test:expired-agent', organizationId: orgId } });
+    await db.memory.update({ where: { id: memoryId }, data: {
+      class: 'app', userId: null, appId, userMemoryOfAgentId: agent.id,
+      anonymousExpiresAt: new Date(0),
+    } });
+    const before = await snapshot();
+    const usersBefore = await db.user.count();
+    await expect(resolvers.Mutation.linkMemoryToUser({}, { memoryId, externalUserId: 'expired-user', dataKey: promotionKey }, { db, appId, roles: [] })).rejects.toThrow();
+    expect(await snapshot()).toEqual(before);
+    expect(await db.user.count()).toBe(usersBefore);
+  });
+
+  it.each([undefined, dataKey])('expiry crossed after locked validation rolls back the final claim (key=%s)', async promotionKey => {
+    const agent = await db.agent.create({ data: { name: 'Claim agent', urn: 'enc-owner.test:claim-agent', organizationId: orgId } });
+    await db.memory.update({ where: { id: memoryId }, data: {
+      class: 'app', userId: null, appId, userMemoryOfAgentId: agent.id,
+      anonymousExpiresAt: new Date(Date.now() + 86400000),
+    } });
+    const before = await snapshot();
+    const aliasesBefore = await db.urnAlias.count();
+    const usersBefore = await db.user.count();
+    const transaction = db.$transaction.bind(db) as any;
+    let crossed = false;
+    const intercept = vi.spyOn(db, '$transaction').mockImplementation((async (input: any, options: any) => {
+      if (typeof input !== 'function') return transaction(input, options);
+      return transaction(async (tx: any) => input(new Proxy(tx, {
+        get(target, property) {
+          if (property !== '$executeRaw') return Reflect.get(target, property);
+          return async (strings: TemplateStringsArray, ...values: unknown[]) => {
+            if (strings.join('').includes('UPDATE memories SET urn')) {
+              crossed = true;
+              // The entry and locked checks have already passed. Move expiry
+              // into the past immediately before executing the real claim SQL.
+              await target.memory.update({ where: { id: memoryId }, data: { anonymousExpiresAt: new Date(0) } });
+            }
+            return target.$executeRaw(strings, ...values);
+          };
+        },
+      })), options);
+    }) as typeof db.$transaction);
+    try {
+      await expect(resolvers.Mutation.linkMemoryToUser({}, { memoryId, externalUserId: 'late-expiry-user', dataKey: promotionKey }, { db, appId, roles: [] }))
+        .rejects.toMatchObject({ extensions: { code: 'MEMORY_WRITE_CONFLICT' } });
+    } finally { intercept.mockRestore(); }
+    expect(crossed).toBe(true);
+    expect(await snapshot()).toEqual(before);
+    expect(await db.urnAlias.count()).toBe(aliasesBefore);
+    // Existing provisioning occurs outside the claim transaction. A late
+    // refusal preserves memory/alias/history but retains the external user.
+    expect(await db.user.count()).toBe(usersBefore + 1);
+  });
+
+  it.each(['owning App', 'wrong key', 'sibling App', 'impersonation', 'user selecting App', 'plaintext', 'no verifier', 'passphrase'])('App completion authority: %s', async kind => {
+    const agent = await db.agent.create({ data: { name: 'Completion agent', urn: 'enc-owner.test:completion-agent', organizationId: orgId } });
+    await db.memory.update({ where: { id: memoryId }, data: {
+      appId, userMemoryOfAgentId: agent.id,
+      isEncrypted: kind !== 'plaintext',
+      keyVerifier: kind === 'plaintext' || kind === 'no verifier' ? null : makeKeyVerifier(parseDataKey(dataKey)),
+    } });
+    const before = await snapshot();
+    const ctx: Context = { db, appId: kind === 'sibling App' ? otherAppId : appId, roles: [],
+      ...(kind === 'user selecting App' ? { userId: otherId } : {}),
+      ...(kind === 'impersonation' ? { impersonation: { orgId, actorUserId: otherId } as Context['impersonation'] } : {}),
+    };
+    const call = resolvers.Mutation.encryptMemory({}, kind === 'passphrase' ? { memoryId, passphrase: 'app-key-must-use-existing-data-key' } : { memoryId, dataKey: kind === 'wrong key' ? generateDataKey().raw.toString('base64') : dataKey }, ctx);
+    if (kind === 'owning App') {
+      await call;
+      const after = await snapshot();
+      expect(after.memory.keyVerifier).toBe(before.memory.keyVerifier);
+      expect(after.memory.userId).toBe(ownerId);
+      expect(isAuthenticatedStringEnvelope(after.node.content, parseDataKey(dataKey))).toBe(true);
+      for (const revision of after.revisions) expect(isAuthenticatedStringEnvelope(revision.content, parseDataKey(dataKey))).toBe(true);
+    } else {
+      await expect(call).rejects.toThrow();
+      expect(await snapshot()).toEqual(before);
+    }
+  });
+
+  it.each([false, true])('legacy personal rows retain the existing class refusal (encrypted=%s)', async encrypted => {
+    await db.memory.update({ where: { id: memoryId }, data: {
+      class: 'personal', isEncrypted: encrypted,
+      keyVerifier: encrypted ? makeKeyVerifier(parseDataKey(dataKey)) : null,
+    } });
+    const before = await snapshot();
+    await expect(resolvers.Mutation.encryptMemory({}, { memoryId, dataKey }, ownerCtx()))
+      .rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
+    expect(await snapshot()).toEqual(before);
+  });
+
+  it.each([undefined, null, ''])('a missing or empty user identity never owns an ownerless memory (%s)', async userId => {
+    await db.memory.update({ where: { id: memoryId }, data: { class: 'knowledge', userId: null } });
+    const before = await snapshot();
+    await expect(resolvers.Mutation.encryptMemory({}, { memoryId, dataKey }, { db, userId, roles: [] } as Context))
+      .rejects.toThrow();
+    expect(await snapshot()).toEqual(before);
+  });
+
+  it.each([undefined, dataKey])('ambiguous legacy holdings without App scope or expiry fail closed (key=%s)', async promotionKey => {
+    const agent = await db.agent.create({ data: { name: 'Legacy agent', urn: 'enc-owner.test:legacy-agent', organizationId: orgId } });
+    await db.memory.update({ where: { id: memoryId }, data: { class: 'knowledge', userId: null, appId: null, userMemoryOfAgentId: agent.id, anonymousExpiresAt: null } });
+    const before = await snapshot();
+    const usersBefore = await db.user.count();
+    await expect(resolvers.Mutation.linkMemoryToUser({}, { memoryId, externalUserId: 'legacy-user', dataKey: promotionKey }, { db, appId, roles: [] }))
+      .rejects.toThrow();
+    expect(await snapshot()).toEqual(before);
+    expect(await db.user.count()).toBe(usersBefore);
   });
 
   it('an ownerless anonymous memory never grants public encryption to an App key', async () => {
@@ -200,7 +327,7 @@ describe('#1644 encryption authority', () => {
     expect(await db.memory.findUniqueOrThrow({ where: { id: anon.id } })).toEqual(anon);
   });
 
-  it('a committed promotion requires owner-authenticated recovery after interrupted completion', async () => {
+  it('the owning App recovers committed promotion with its existing key after interrupted completion', async () => {
     const agent = await db.agent.create({ data: { name: 'Recovery agent', urn: 'enc-owner.test:recovery-agent', organizationId: orgId } });
     await db.memory.update({ where: { id: memoryId }, data: { class: 'app', userId: null, appId, userMemoryOfAgentId: agent.id, anonymousExpiresAt: new Date(Date.now() + 86400000) } });
     const completion = vi.spyOn(memoryMutations, 'encryptMemory').mockRejectedValueOnce(new Error('ENCRYPTION_INCOMPLETE'));
@@ -214,7 +341,7 @@ describe('#1644 encryption authority', () => {
     await expect(resolvers.Mutation.linkMemoryToUser({}, { memoryId, externalUserId: 'recovery-owner', dataKey }, { db, appId, roles: [] }))
       .rejects.toMatchObject({ code: 'MEMORY_NOT_FOUND' });
     expect(await snapshot()).toEqual(claimed);
-    await resolvers.Mutation.encryptMemory({}, { memoryId, dataKey }, ownerCtx({ userId: claimed.memory.userId! }));
+    await resolvers.Mutation.encryptMemory({}, { memoryId, dataKey }, { db, appId, roles: [] });
     const recovered = await snapshot();
     for (const revision of recovered.revisions) expect(isAuthenticatedStringEnvelope(revision.content, parseDataKey(dataKey))).toBe(true);
   });
