@@ -11,7 +11,8 @@
  * column) must be dropped, not written.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { createTestableMcpServer } from './server.js';
+import { z } from 'zod';
+import { createMcpServerInstance, createTestableMcpServer } from './server.js';
 import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
 import { generateId } from '../lib/id.js';
@@ -21,6 +22,7 @@ vi.mock('../integrations/github/writeNodeToGit.js', () => ({
 }));
 
 let mcp: ReturnType<typeof createTestableMcpServer>;
+let userId: string;
 let memoryUrn: string;
 let memoryId: string;
 let worker: { id: string };
@@ -45,6 +47,7 @@ beforeEach(async () => {
   await db.session.create({
     data: { id: sessionId, appId: app.id, userId: user.id, workerId: worker.id, agentId: agent.id, type: 'DEVELOPER', startedAt: new Date() },
   });
+  userId = user.id;
   mcp = createTestableMcpServer({ userId: user.id, roles: ['ADMIN'] });
 });
 
@@ -97,5 +100,54 @@ describe('#1769 governed doors admit only the fields they advertise', () => {
       urn: urn(loc), name: 'Kept', description: 'd', content: 'c', role: 'review.security', session: sessionId,
     });
     expect(await row(loc)).toMatchObject({ name: 'Kept', description: 'd', content: 'c', role: 'review.security' });
+  });
+});
+
+describe('#1769 forged columns through the UPDATE doors (writeNodeCore update path)', () => {
+  it.each([
+    ['hadron_update_review', 'hadron_create_review', 'review'],
+    ['hadron_update_task', 'hadron_create_task', 'task'],
+  ])('%s drops keys that are not in the tool shape', async (update, create, kind) => {
+    const loc = `door:forged:${kind}`;
+    await mcp.callToolText(create, { urn: urn(loc), name: loc, session: sessionId });
+    const before = await row(loc);
+    const text = await mcp.callToolText(update, {
+      urn: urn(loc), content: 'edited', session: sessionId,
+      revSeq: 99, approvalHash: 'forged', mintedHash: 'forged', createdBy: 'forged', createdByWorkerId: 'forged', notAColumn: 'x',
+    });
+    expect(text).toMatch(/updated/);
+    const after = await row(loc);
+    expect(after.content).toBe('edited');
+    expect(after.revSeq).not.toBe(99);
+    expect(after.approvalHash).toBeNull();
+    expect(after.mintedHash).toBeNull();
+    expect(after.createdBy).toBe(before.createdBy);
+    expect(after.createdByWorkerId).toBe(before.createdByWorkerId);
+  });
+});
+
+describe('#1769 the caller-session gate itself (probe tool, not a governed door)', () => {
+  const probe = async (shape: Record<string, z.ZodTypeAny>, args: Record<string, unknown>) => {
+    const instance = createMcpServerInstance({ userId, roles: ['ADMIN'] }, () => undefined, null, {});
+    let seen: Record<string, unknown> | undefined;
+    (instance as unknown as { tool: (...a: unknown[]) => unknown }).tool('hadron_probe_1769', shape, async (input: Record<string, unknown>) => {
+      seen = input;
+      return { content: [{ type: 'text' as const, text: 'ok' }] };
+    });
+    const tools = (instance as unknown as {
+      _registeredTools: Record<string, { handler: (a: unknown, e: unknown) => Promise<unknown> }>;
+    })._registeredTools;
+    await tools['hadron_probe_1769'].handler(args, {});
+    return seen;
+  };
+
+  it('strips the argument it injected once the actor is settled, and keeps everything else', async () => {
+    const seen = await probe({ x: z.string().optional() }, { x: 'kept', session: sessionId });
+    expect(seen).toEqual({ x: 'kept' });
+  });
+
+  it('leaves alone a tool that declares `session` itself', async () => {
+    const seen = await probe({ x: z.string().optional(), session: z.string().optional() }, { x: 'kept', session: sessionId });
+    expect(seen).toEqual({ x: 'kept', session: sessionId });
   });
 });
