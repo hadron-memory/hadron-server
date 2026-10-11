@@ -981,6 +981,16 @@ export const workerMutations = {
       // than the platform silently clearing a structure someone set.
       if (retired.count > 0) {
         await writeReportsTo(tx, { workerId: worker.id, appId: worker.appId, to: null, actor: eventActor(ctx.userId), setBy: 'retirement' });
+        // #1747 / cor:agt:080:02: a retired worker's ticker subscriptions end
+        // with it, reason WORKER_RETIRED (history kept, never deleted).
+        const actor = currentActor();
+        await tx.tickerSubscription.updateMany({
+          where: { workerId: worker.id, endedAt: null },
+          data: {
+            endedAt: new Date(), endedReason: 'WORKER_RETIRED',
+            endedBy: ctx.userId ?? null, endedByWorkerId: actor.workerId, endedByAgentId: actor.agentId,
+          },
+        });
       }
     });
     return ctx.db.worker.findUniqueOrThrow({ where: { id: worker.id } });

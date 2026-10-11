@@ -6634,6 +6634,18 @@ export const typeDefs = `#graphql
     """
     agentTask(id: ID!): AgentTask
 
+    "#1747 — the live tickers of an App the caller participates in. An App the caller cannot reach reads as APP_NOT_FOUND (hrn:node:hadronmemory.com:specs:cor:agt:080:18)."
+    tickers(appRef: String!): [Ticker!]!
+
+    "#1747 — one ticker by id or hrn:ticker: URN; null when it does not exist or the caller may not reach it."
+    ticker(ref: String!): Ticker
+
+    "#1747 — an App's ticker settings: the cadence floor, the default self-subscription cadence, the live-ticker cap and the daily wake budget (hrn:node:hadronmemory.com:specs:cor:agt:080:05)."
+    appTickerSettings(appRef: String!): AppTickerSettings!
+
+    "#1747 — one worker's wake settings (defaults when it has none), readable by the App's participants (hrn:node:hadronmemory.com:specs:cor:agt:080:03)."
+    workerWakeSettings(workerRef: String!): WorkerWakeSettings!
+
     """
     #1705 — a team App's agent tasks, newest first. Filters combine with AND;
     owner / assignee name a party of the App (a ref naming nobody matches
@@ -8350,6 +8362,50 @@ export const typeDefs = `#graphql
     transaction.
     """
     createAgentTask(input: CreateAgentTaskInput!): AgentTask!
+
+    """
+    #1747 — create a ticker in an App (hrn:node:hadronmemory.com:specs:cor:agt:080:01, :18). Any App participant, or a
+    session bound to a worker of the App, up to the App live-ticker cap. The owner is the
+    caller, never an argument. Refusals: TICKER_NAME_TAKEN, TICKER_CADENCE_OUT_OF_RANGE,
+    TICKER_LIMIT_REACHED, TICKER_QUIET_HOURS_INVALID, APP_NOT_FOUND, APP_UNINSTALLED.
+    """
+    createTicker(appRef: String!, input: TickerInput!): Ticker!
+
+    "#1747 — change a ticker. Its owner, the holder of its owning worker, or whoever manages the App. The slug never changes."
+    updateTicker(ref: String!, input: TickerPatch!): Ticker!
+
+    "#1747 — delete a ticker. Its live subscriptions end with reason TICKER_DELETED; its name may be reused, its slug never."
+    deleteTicker(ref: String!): Boolean!
+
+    """
+    #1747 — change an App ticker settings (hrn:node:hadronmemory.com:specs:cor:agt:080:05, :19). Whoever manages the App only.
+    Refusals: TICKER_SETTINGS_OUT_OF_RANGE, TICKER_SETTINGS_CONFLICT (a floor above a live ticker cadence).
+    """
+    setAppTickerSettings(appRef: String!, input: AppTickerSettingsInput!): AppTickerSettings!
+
+    """
+    #1747 — subscribe a worker to a ticker (hrn:node:hadronmemory.com:specs:cor:agt:080:20, :25). Its holder and whoever manages
+    the App, to any ticker; the worker itself only at or slower than the App self-subscription cadence
+    (SUBSCRIBE_CADENCE_NEEDS_HOLDER); a worker holding the may-subscribe-workers grant, with a person
+    behind the call, for OTHER workers only. Idempotent for a live subscription. A grant use is announced
+    to the team chat, best-effort: announcement says POSTED or FAILED, and the subscription stands either way.
+    """
+    subscribeWorker(tickerRef: String!, workerRef: String!): SubscribeResult!
+
+    "#1747 — end a worker subscription. The same callers as subscribeWorker, and the worker itself, always."
+    unsubscribeWorker(tickerRef: String!, workerRef: String!): SubscribeResult!
+
+    """
+    #1747 — change a worker wake settings (hrn:node:hadronmemory.com:specs:cor:agt:080:03, :21): the worker itself, its holder, or whoever manages
+    the App, in either direction. Never the may-subscribe-workers grant.
+    """
+    setWorkerWakeSettings(workerRef: String!, input: WorkerWakeSettingsInput!): WorkerWakeSettings!
+
+    "#1747 — give a worker a named App grant (hrn:node:hadronmemory.com:specs:cor:agt:080:24). Whoever manages the App only. Idempotent."
+    grantApp(appRef: String!, workerRef: String!, name: AppGrantName!): AppGrant!
+
+    "#1747 — revoke a grant. Whoever manages the App only. Takes effect at the grantee next call."
+    revokeAppGrant(appRef: String!, workerRef: String!, name: AppGrantName!): AppGrant!
 
     """
     #1705 — assign a queued task (pending, no assignee): the task's owner or
@@ -11374,6 +11430,161 @@ export const typeDefs = `#graphql
     outcome: String!
     summary: String
     evidence: String
+  }
+
+  "#1747 — how a ticker relevance narrows what can make a subscriber due (hrn:node:hadronmemory.com:specs:cor:agt:080:01)."
+  enum TickerRelevance {
+    ALL
+    MENTIONS
+  }
+
+  "#1747 — whether a mention wakes a worker at once. There is no ON_TICK mode."
+  enum MentionWake {
+    IMMEDIATE
+    OFF
+  }
+
+  "#1747 — the closed list of named App grants."
+  enum AppGrantName {
+    "Subscribe and unsubscribe OTHER workers of the App, at any cadence."
+    TICKER_SUBSCRIBE_WORKERS
+  }
+
+  "#1747 — whether the team-chat post for a grant use went out."
+  enum GrantAnnouncement {
+    POSTED
+    FAILED
+  }
+
+  "#1747 — why a subscription ended. Never dormancy."
+  enum TickerSubscriptionEndReason {
+    UNSUBSCRIBED
+    WORKER_RETIRED
+    TICKER_DELETED
+  }
+
+  """
+  #1747 — a named wake schedule owned by one team App (hrn:node:hadronmemory.com:specs:cor:agt:080:01). Its URN is hrn:ticker:ROOT:APP-SLUG:SLUG,
+  computed from the App and the permanent slug. Ticks are computed, not stored; nothing reads a ticker until due wakes ship.
+  """
+  type Ticker {
+    id: ID!
+    "The canonical URN. Null when it cannot be composed."
+    urn: String
+    name: String!
+    "Permanent: a re-created name gets a new slug (engineering-2)."
+    slug: String!
+    app: App!
+    cadenceSeconds: Int!
+    anchorAt: DateTime!
+    "A timezone and weekly windows; null when none."
+    quietHours: JSON
+    "The channels named, limited to those the reader can read. Empty means every channel the subscriber watches."
+    channels: [Channel!]!
+    relevance: TickerRelevance!
+    enabled: Boolean!
+    owner: ActorRef
+    "Live subscriptions."
+    subscribers(first: Int, after: String): TickerSubscriptionPage!
+    createdAt: DateTime!
+    updatedAt: DateTime
+  }
+
+  type TickerSubscriptionPage {
+    items: [TickerSubscription!]!
+    hasNextPage: Boolean!
+    endCursor: String
+  }
+
+  "#1747 — a worker subscription to one ticker (hrn:node:hadronmemory.com:specs:cor:agt:080:02)."
+  type TickerSubscription {
+    id: ID!
+    ticker: Ticker!
+    worker: Worker!
+    "Who subscribed the worker."
+    createdBy: ActorRef
+    "True when made through the may-subscribe-workers grant."
+    viaGrant: Boolean!
+    createdAt: DateTime!
+    endedAt: DateTime
+    endedReason: TickerSubscriptionEndReason
+  }
+
+  type SubscribeResult {
+    subscription: TickerSubscription!
+    "Set only when the call used the grant: whether the team-chat post went out."
+    announcement: GrantAnnouncement
+  }
+
+  "#1747 — a worker wake settings (hrn:node:hadronmemory.com:specs:cor:agt:080:03)."
+  type WorkerWakeSettings {
+    worker: Worker!
+    mentions: MentionWake!
+    "A pause belongs to the worker, not to a session."
+    pausedUntil: DateTime
+    "Live subscriptions."
+    subscriptions: [TickerSubscription!]!
+    "The fastest live subscription on an enabled ticker; null when none."
+    effectiveCadenceSeconds: Int
+  }
+
+  "#1747 — an App ticker settings (hrn:node:hadronmemory.com:specs:cor:agt:080:05)."
+  type AppTickerSettings {
+    minCadenceSeconds: Int!
+    selfSubscribeCadenceSeconds: Int!
+    liveCap: Int!
+    dailyWakeBudget: Int!
+    "True when the budget is derived from the roster rather than set."
+    dailyWakeBudgetDerived: Boolean!
+  }
+
+  "#1747 — a narrow, named permission held by one worker (hrn:node:hadronmemory.com:specs:cor:agt:080:24)."
+  type AppGrant {
+    id: ID!
+    app: App!
+    worker: Worker!
+    name: AppGrantName!
+    grantedAt: DateTime!
+    revokedAt: DateTime
+  }
+
+  input TickerInput {
+    name: String!
+    cadenceSeconds: Int!
+    "Tick counting starts here. Defaults to now."
+    anchorAt: DateTime
+    quietHours: JSON
+    channelIds: [ID!]
+    relevance: TickerRelevance
+    enabled: Boolean
+  }
+
+  "Absent fields are unchanged. Use clearQuietHours / clearChannels to remove those."
+  input TickerPatch {
+    name: String
+    cadenceSeconds: Int
+    anchorAt: DateTime
+    quietHours: JSON
+    clearQuietHours: Boolean
+    channelIds: [ID!]
+    clearChannels: Boolean
+    relevance: TickerRelevance
+    enabled: Boolean
+  }
+
+  input AppTickerSettingsInput {
+    minCadenceSeconds: Int
+    selfSubscribeCadenceSeconds: Int
+    liveCap: Int
+    wakeDailyBudget: Int
+    "Return to the derived budget."
+    clearWakeDailyBudget: Boolean
+  }
+
+  input WorkerWakeSettingsInput {
+    mentions: MentionWake
+    pausedUntil: DateTime
+    clearPause: Boolean
   }
 
   """

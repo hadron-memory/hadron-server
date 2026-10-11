@@ -37,6 +37,10 @@ const MODELS_WITHOUT_ID = new Set<string>([
   'HostRegistrationWorker',
   // #1715 — keyed by the merged-away account.
   'UserMerge',
+  // #1747 — keyed by their worker (and channel / ticker).
+  'WorkerWakeSettings',
+  'WorkerDeliveryChannel',
+  'WorkerDeliveryTick',
 ]);
 
 const basePrisma = new PrismaClient();
