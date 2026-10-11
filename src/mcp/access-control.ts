@@ -32,6 +32,7 @@ import { participantAppIds } from '../lib/auth/appParticipation.js';
 import { activeAgentInstallLicenseIds, isAgentInstalled, isGrantedAgentMemoryRole } from '../lib/appAgent.js';
 import { isAppSelectableBy, resolveUserApps } from '../auth/user-app-resolution.js';
 import { getOrgReadableMemoryIds } from '../lib/auth/orgReadableMemory.js';
+import { getOrgWritableMemoryIds } from '../lib/auth/orgWritableMemory.js';
 import { sessionScopedMemoryIds } from '../lib/auth/sessionScopedMemoryIds.js';
 import { LIVE_ORG_MEMBERSHIP } from '../lib/auth/liveOrgMembership.js';
 import { isRunPrincipal } from '../lib/auth/runPrincipal.js';
@@ -701,6 +702,14 @@ export async function getMemoryAccess(
     for (const memoryId of await getOrgReadableMemoryIds(db, auth.userId)) {
       // Don't downgrade a READ_WRITE already granted via the App path.
       if (!access.has(memoryId)) access.set(memoryId, 'READ_ONLY');
+    }
+    // #1640 (DR = A): the org-member write arm GraphQL already honors. An App
+    // selection never removes it. Not for an AppRun or an impersonation, which
+    // act for their own App / are a read-only support view.
+    if (!isRunPrincipal(auth) && !auth.impersonation) {
+      for (const memoryId of await getOrgWritableMemoryIds(db, auth.userId)) {
+        access.set(memoryId, 'READ_WRITE');
+      }
     }
   }
 

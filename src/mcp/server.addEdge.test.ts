@@ -202,6 +202,12 @@ describe('addEdge — happy path', () => {
       await resolvers.Mutation.transferMemoryOwnership(null, {
         memoryRef: owned.id, orgRef: destination.id, targetClass: 'knowledge',
       }, { db, userId: owner.id, roles: ['READER'] });
+      // The transfer needed ADMIN in the destination, and an org CONTRIBUTOR+
+      // may write org knowledge on both surfaces (#1640). Drop the former
+      // owner to READER so only the lapsed ownership could still admit a write.
+      await db.orgMember.updateMany({
+        where: { organizationId: destination.id, userId: owner.id }, data: { role: 'READER' },
+      });
       expect(await canReadMemory(db, auth, owned.id)).toBe(true);
       expect(await canWriteToMemory(db, auth, owned.id)).toBe(false);
       release();
