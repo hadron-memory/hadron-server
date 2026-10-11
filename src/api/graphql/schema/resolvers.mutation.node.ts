@@ -4084,7 +4084,8 @@ export const nodeMutations = {
       // Announce the write (git mirror rides the event — so a later
       // repo-wins sync can't revert the merge). Encrypted memories keep the
       // direct mirror below, using whatever plaintext this request could
-      // decrypt (keyless merges mirrored ciphertext before the pivot too).
+      // decrypt. The shared checkout defers a keyless encrypted export
+      // without touching the existing mirror (#1273).
       void publishNodeWritten({
         nodeId: finalNode.id,
         memoryId: target.memoryId,

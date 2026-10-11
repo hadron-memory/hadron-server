@@ -3,6 +3,7 @@ import { dirname } from 'path';
 import { stringify } from 'yaml';
 import { withMirrorCheckout } from './gitMirrorCheckout.js';
 import { db } from '../db/client.js';
+import { sessionKeyCache } from '../../lib/sessionKeyCache.js';
 import {
   buildEdgeFrontmatter,
   buildNodeFrontmatter,
@@ -206,9 +207,13 @@ export async function writeNodeToGit(
   memoryId?: string,
   refresh?: () => Promise<NodeForGit | null>,
 ): Promise<void> {
+  // Capture key availability while the producing request is active. A key
+  // acquired by a later request must not authorize this queued snapshot.
+  const nodeWriteKeyAvailable = memoryId != null && sessionKeyCache.hasMemory(memoryId);
   await withMirrorCheckout(
     {
       memoryId,
+      nodeWriteKeyAvailable,
       ownerRepo,
       clientId,
       commitSubject: `Update node ${node.loc}`,
