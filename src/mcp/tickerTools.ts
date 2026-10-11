@@ -73,10 +73,12 @@ function refusal(e: unknown) {
 const iso = (d: Date | null | undefined) => (d ? d.toISOString() : null);
 
 async function renderTicker(t: Row, ctx: Context): Promise<string> {
-  const [urn, owner, subs] = await Promise.all([
+  // Only channels the reader can read: the list is not a grant (the GraphQL field filters the same way).
+  const [urn, owner, subs, readable] = await Promise.all([
     FT.urn(t as never, {}, ctx),
     FT.owner(t as never, {}, ctx),
     FT.subscribers(t as never, { first: 200 }, ctx),
+    FT.channels(t as never, {}, ctx),
   ]);
   const names: string[] = [];
   for (const s of subs.items) {
@@ -86,7 +88,7 @@ async function renderTicker(t: Row, ctx: Context): Promise<string> {
   const quiet = t.quietHours ? `quiet hours ${t.quietHours.timezone} (${t.quietHours.windows.length} window${t.quietHours.windows.length === 1 ? '' : 's'})` : null;
   return [
     `- ${t.name} · ${urn ?? t.id} · every ${t.cadenceSeconds}s · ${t.enabled ? 'enabled' : 'disabled'} · relevance ${t.relevance}`,
-    `  anchor ${iso(t.anchorAt)}${quiet ? ` · ${quiet}` : ''}${t.channelIds.length ? ` · ${t.channelIds.length} channel(s)` : ''}`,
+    `  anchor ${iso(t.anchorAt)}${quiet ? ` · ${quiet}` : ''}${readable.length ? ` · ${readable.length} channel(s)` : ''}`,
     `  owner ${owner ? owner.name : 'unknown'} · subscribers: ${names.length ? names.join(', ') : 'none'}${subs.hasNextPage ? ' (more)' : ''}`,
   ].join('\n');
 }
@@ -132,7 +134,8 @@ export function registerTickerTools(server: McpServer, deps: { db: PrismaClient;
         true,
       );
     }
-    if (!(await validateSessionBinding(db, auth, session))) {
+    const valid = await validateSessionBinding(db, auth, session);
+    if (!valid) {
       return textResult(
         `[session_not_bound] ${tool}: session "${session}" is not one of your open sessions (it may have ended, gone ` +
           'dormant, or belong to someone else). Nothing was written. hadron_whoami lists yours.',
@@ -141,7 +144,11 @@ export function registerTickerTools(server: McpServer, deps: { db: PrismaClient;
     }
     const ctx = ctxOf();
     try {
-      return textResult(await call(ctx));
+      // As the named session's actor, like `read` below: a tool that is actor-neutral
+      // (hadron_worker_wake_settings, hadron_ack_wakes) is not wrapped by the server's
+      // caller-session gate, and would otherwise act as the connection's ambient
+      // worker, or as the person with their holder and manager authority.
+      return textResult(await runAsActor(valid.actor, () => call(ctx)));
     } catch (e) {
       return refusal(e);
     }

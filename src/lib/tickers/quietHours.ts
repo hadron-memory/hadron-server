@@ -13,13 +13,21 @@ export type QuietHours = { timezone: string; windows: QuietWindow[] };
 const HHMM = /^([01]\d|2[0-3]):([0-5]\d)$/;
 const WEEK = 7 * 1440;
 
-let zones: Set<string> | null = null;
-function knownZones(): Set<string> {
-  if (!zones) {
-    const list = (Intl as unknown as { supportedValuesOf?: (k: string) => string[] }).supportedValuesOf?.('timeZone') ?? [];
-    zones = new Set([...list, 'UTC']);
+/**
+ * A time zone the consumer (Intl, which evaluates quiet hours) accepts. Asking the
+ * consumer rather than a list admits every valid IANA name and alias (`US/Pacific`)
+ * and nothing the evaluator would choke on. Numeric offsets (`+01:00`), which newer
+ * runtimes also accept, are not zone names and are refused: a ticker's day boundary
+ * should follow a place's rules, including DST.
+ */
+function knownZone(zone: string): boolean {
+  if (!/^[A-Za-z][A-Za-z0-9_+-]*(\/[A-Za-z][A-Za-z0-9_+-]*)*$/.test(zone)) return false;
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: zone });
+    return true;
+  } catch {
+    return false;
   }
-  return zones;
 }
 
 function minutes(hhmm: string): number {
@@ -54,7 +62,7 @@ export function validateQuietHours(input: unknown): { ok: true; value: QuietHour
   const bad = (reason: string) => ({ ok: false as const, reason });
   if (typeof input !== 'object' || input === null || Array.isArray(input)) return bad('quietHours must be an object.');
   const { timezone, windows } = input as { timezone?: unknown; windows?: unknown };
-  if (typeof timezone !== 'string' || !knownZones().has(timezone)) return bad('timezone is not an IANA time zone.');
+  if (typeof timezone !== 'string' || !knownZone(timezone)) return bad('timezone is not an IANA time zone.');
   if (!Array.isArray(windows) || windows.length === 0) return bad('windows must be a non-empty list.');
   if (windows.length > QUIET_HOURS_MAX_WINDOWS) return bad(`At most ${QUIET_HOURS_MAX_WINDOWS} windows.`);
   const norm: QuietWindow[] = [];

@@ -109,9 +109,10 @@ async function writeInApp<T>(
   actor: TaskActor,
   refused: () => GraphQLError,
   write: (tx: Prisma.TransactionClient, txCtx: Context, fresh: TaskApp, actor: TaskActor) => Promise<T>,
+  options: { lockMode?: 'shared' | 'exclusive' } = {},
 ): Promise<T> {
   requireWritable(ctx, app);
-  return inTaskWriteTx(ctx, app, actor, refused, (tx, txCtx, fresh) => write(tx, txCtx, fresh, actor));
+  return inTaskWriteTx(ctx, app, actor, refused, (tx, txCtx, fresh) => write(tx, txCtx, fresh, actor), options);
 }
 
 // ── Validation ────────────────────────────────────────────────────────────
@@ -241,7 +242,23 @@ async function lockWorker(tx: Prisma.TransactionClient, id: string) {
   return tx.worker.findUnique({ where: { id } });
 }
 
-/** Serialize ticker creation per App, so the live cap and the slug mint cannot race. */
+/** The actor's live may-subscribe-workers grant, read FOR SHARE so a revocation orders against the write (N2). */
+async function liveGrantFor(tx: Prisma.TransactionClient, appId: string, actor: TaskActor): Promise<string | null> {
+  if (actor.kind !== 'worker') return null;
+  const rows = await tx.$queryRaw<Array<{ id: string }>>`
+    SELECT id FROM app_grants
+    WHERE app_id = ${appId} AND grantee_worker_id = ${actor.workerId}
+      AND name = ${GRANT_SUBSCRIBE_WORKERS} AND revoked_at IS NULL
+    FOR SHARE`;
+  return rows[0]?.id ?? null;
+}
+
+/**
+ * Serialize ticker creation, renames, cadence edits and settings changes per App,
+ * so the live cap, the slug mint, the live-name rule and the cadence floor cannot
+ * race. Taken BEFORE the ticker row everywhere (create and settings hold no ticker
+ * row; subscribe takes the ticker row and never this), so there is no cycle.
+ */
 async function lockAppTickers(tx: Prisma.TransactionClient, appId: string): Promise<void> {
   await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`tickers:${appId}`}, 0))`;
 }
@@ -357,15 +374,24 @@ const crudMutations = {
     const relevance = input.relevance == null ? undefined : checkRelevance(input.relevance);
     const anchorAt = input.anchorAt == null ? undefined : parseDate(input.anchorAt, 'anchorAt');
     return writeInApp(ctx, app, actor, () => tickerNotFound(ref), async (tx, txCtx, fresh) => {
+      // The App-wide lock first: a rename races a create or another rename for the
+      // live name, and a cadence edit races a floor change.
+      await lockAppTickers(tx, fresh.id);
       const t = await lockTicker(tx, seen.id);
       if (!t || t.deletedAt) throw tickerNotFound(ref);
       await requireMayEdit(tx, txCtx, fresh, actor, t, ref);
+      const settings = await tx.app.findUniqueOrThrow({ where: { id: fresh.id }, select: SETTINGS_SELECT });
       let cadence: number | undefined;
-      if (input.cadenceSeconds != null) {
-        const settings = await tx.app.findUniqueOrThrow({ where: { id: fresh.id }, select: SETTINGS_SELECT });
-        cadence = checkCadence(input.cadenceSeconds, settings);
-      }
+      if (input.cadenceSeconds != null) cadence = checkCadence(input.cadenceSeconds, settings);
       if (name !== undefined && name.toLowerCase() !== t.name.toLowerCase()) await assertNameFree(tx, fresh.id, name, t.id);
+      // A faster cadence, or a wider relevance, spends more tokens for every live
+      // subscriber. Each must be one the editor could subscribe at the new terms
+      // (cor:agt:080:20, R3); otherwise the edit is a way round the subscribe rule.
+      const faster = cadence !== undefined && cadence < t.cadenceSeconds;
+      const wider = relevance === 'ALL' && t.relevance !== 'ALL';
+      if (faster || wider) {
+        await requireSubscribersCovered(tx, txCtx, fresh, actor, t, cadence ?? t.cadenceSeconds, settings);
+      }
       return tx.ticker.update({
         where: { id: t.id },
         data: {
@@ -468,10 +494,56 @@ const crudMutations = {
           tickerLiveCap: cap, wakeDailyBudget: budget,
         },
       });
-    });
+    }, { lockMode: 'exclusive' });
     return settingsOut(ctx.db, app.id);
   },
 };
+
+/**
+ * Every live subscriber must be one the editor could subscribe at `cadence`
+ * (cor:agt:080:20 re-run, R3). The ticker row is already locked, so no subscribe
+ * can add one meanwhile; worker rows are taken SHARED in id order, after the ticker
+ * row, as `changeSubscription` does.
+ */
+async function requireSubscribersCovered(
+  tx: Prisma.TransactionClient,
+  txCtx: Context,
+  app: TaskApp,
+  actor: TaskActor,
+  ticker: TickerRow,
+  cadence: number,
+  settings: TickerSettings,
+): Promise<void> {
+  const subs = await tx.tickerSubscription.findMany({
+    where: { tickerId: ticker.id, endedAt: null },
+    select: { workerId: true },
+    orderBy: { workerId: 'asc' },
+  });
+  if (!subs.length) return;
+  const manages = await actorManagesApp(txCtx, app, actor);
+  const hasGrant = (await liveGrantFor(tx, app.id, actor)) !== null;
+  const refused: string[] = [];
+  for (const { workerId } of subs) {
+    const w = await lockWorker(tx, workerId);
+    if (!w) continue;
+    const d = decideSubscribe({
+      actor: toPolicyActor(actor), manages, op: 'subscribe',
+      target: { id: w.id, heldByUserId: w.heldByUserId },
+      tickerCadenceSeconds: cadence,
+      selfSubscribeCadenceSeconds: settings.tickerSelfSubscribeCadenceSeconds,
+      hasGrant,
+    });
+    if (!d.allow) refused.push(w.name);
+  }
+  if (refused.length) {
+    throw taskError(
+      'TICKER_CADENCE_NEEDS_CONSENT',
+      `That change makes this ticker cost more for ${refused.join(', ')}, and you could not subscribe ${refused.length === 1 ? 'that worker' : 'those workers'} to it at the new terms. ` +
+        'Ask whoever holds them, or whoever manages the App, to make the change or to unsubscribe them first.',
+      { workers: refused },
+    );
+  }
+}
 
 /** The edit gate for a ticker, decided on the locked row inside the transaction. */
 async function requireMayEdit(
@@ -483,9 +555,10 @@ async function requireMayEdit(
   ref: string,
 ): Promise<void> {
   const manages = await actorManagesApp(txCtx, app, actor);
-  const holder = ticker.ownerWorkerId
-    ? (await tx.worker.findUnique({ where: { id: ticker.ownerWorkerId }, select: { heldByUserId: true } }))?.heldByUserId ?? null
-    : null;
+  // The owning worker's hold is read under a row lock: a release in flight either
+  // commits first (and this edit is refused) or waits behind this write, so the
+  // transaction never commits on holder authority already revoked.
+  const holder = ticker.ownerWorkerId ? (await lockWorker(tx, ticker.ownerWorkerId))?.heldByUserId ?? null : null;
   if (!mayEditTicker({ actor: toPolicyActor(actor), manages, ticker, ownerWorkerHolderUserId: holder })) {
     // A participant who may SEE the ticker (080:18) is told why; the ref was already reachable.
     throw taskError('FORBIDDEN', 'Only the ticker\'s owner, its owning worker\'s holder, or whoever manages the App can change it.', { ref });
@@ -548,17 +621,11 @@ async function changeSubscription(
     const manages = await actorManagesApp(txCtx, fresh, actor);
     // N2: the grant row is read FOR SHARE here, inside the write, so a revocation
     // that commits first is seen and one that comes later waits for this write.
-    let grantId: string | null = null;
-    let grantee: { id: string; name: string } | null = null;
-    if (actor.kind === 'worker') {
-      const rows = await tx.$queryRaw<Array<{ id: string }>>`
-        SELECT id FROM app_grants
-        WHERE app_id = ${fresh.id} AND grantee_worker_id = ${actor.workerId}
-          AND name = ${GRANT_SUBSCRIBE_WORKERS} AND revoked_at IS NULL
-        FOR SHARE`;
-      grantId = rows[0]?.id ?? null;
-      if (grantId) grantee = await tx.worker.findUnique({ where: { id: actor.workerId }, select: { id: true, name: true } });
-    }
+    const grantId = await liveGrantFor(tx, fresh.id, actor);
+    const grantee =
+      grantId && actor.kind === 'worker'
+        ? await tx.worker.findUnique({ where: { id: actor.workerId }, select: { id: true, name: true } })
+        : null;
     const decision = decideSubscribe({
       actor: toPolicyActor(actor), manages, op,
       target: { id: w.id, heldByUserId: w.heldByUserId },
@@ -619,8 +686,14 @@ async function changeSubscription(
   return { subscription: outcome.subscription, announcement };
 }
 
-/** Escape what would render as markup in a team-chat line and keep it on one line. */
-const plainly = (s: string): string => s.replace(/[\r\n]+/g, ' ').replace(/([\\`*_{}[\]()#+!|<>~@])/g, '\\$1').trim();
+/**
+ * Escape what would render as markup in a team-chat line and keep it on one line.
+ * An `@` is REPLACED (with the full-width sign), not backslash-escaped: the mention
+ * extractor does not interpret Markdown escapes, so `\@all` is still a mention.
+ * Only the deliberate target mention in `announceGrantUse` may carry a real `@`.
+ */
+const plainly = (s: string): string =>
+  s.replace(/[\r\n]+/g, ' ').replace(/@/g, '\uFF20').replace(/([\\`*_{}[\]()#+!|<>~])/g, '\\$1').trim();
 
 async function announceGrantUse(
   ctx: Context,
@@ -723,6 +796,10 @@ async function changeGrant(
     }
     const w = await lockWorker(tx, target.id);
     if (!w || w.appId !== fresh.id) throw workerNotFound(a.workerRef);
+    // With no live row there is nothing for FOR UPDATE to lock, so two first grants
+    // would both insert and one would get the unique index's error. Serialize on the
+    // natural key instead; the second caller then finds the first's row.
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`grant:${fresh.id}:${w.id}:${name}`}, 0))`;
     const rows = await tx.$queryRaw<Array<{ id: string }>>`
       SELECT id FROM app_grants
       WHERE app_id = ${fresh.id} AND grantee_worker_id = ${w.id} AND name = ${name} AND revoked_at IS NULL

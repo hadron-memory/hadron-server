@@ -17,6 +17,8 @@ import { generateId } from '../../../lib/id.js';
 import { runAsActor } from '../../../lib/requestActor.js';
 import { resolvers, type Context } from './resolvers.js';
 import { teamChatMutations } from './resolvers.teamChat.js';
+import { extractMentions } from '../../../lib/teamChatMentions.js';
+import { resolveTickerRef } from '../../../lib/tickers/tickerRef.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -157,7 +159,10 @@ describe('tickers — create, read, URN, slug', () => {
     expect(again.slug).toBe('engineering-2');
     const third = await createTicker(ctx(member.id), { name: 'Engineering!' });
     expect(third.slug).toBe('engineering-3');
-    // The deleted ticker still resolves by URN (history) but is no longer listed.
+    // The deleted ticker is no longer listed or readable by the public query, but its
+    // permanent slug still resolves as an identity (history).
+    expect(await Q.ticker({}, { ref: first.id }, ctx(member.id))).toBeNull();
+    expect((await resolveTickerRef(db, `hrn:ticker:${org.urn}:team:engineering`)).id).toBe(first.id);
     expect((await Q.tickers({}, { appRef: app.id }, ctx(member.id))).map((t: any) => t.id).sort()).toEqual([again.id, third.id].sort());
   });
 
@@ -368,7 +373,9 @@ describe('subscribe / unsubscribe — the §5 matrix', () => {
     await expect(subscribe(ctx(liamHolder.id), fast, liam)).resolves.toBeTruthy();
     // A manager lowers the self-subscription cadence to 300 and the worker's own 300 s subscription succeeds.
     const mid = await createTicker(ctx(member.id), { name: 'Mid', cadenceSeconds: 300 });
-    await expectCode(asWorker(rook, () => subscribe(ctx(admin.id), mid, rook)), 'SUBSCRIBE_CADENCE_NEEDS_HOLDER');
+    await expectCode(asWorker(liam, () => subscribe(own, mid, liam)), 'SUBSCRIBE_CADENCE_NEEDS_HOLDER');
+    // An unheld worker has no holder behind its spend, so the self arm is closed to it altogether.
+    await expectCode(asWorker(rook, () => subscribe(ctx(admin.id), mid, rook)), 'SUBSCRIBE_FORBIDDEN');
     await setSettings(ctx(admin.id), { selfSubscribeCadenceSeconds: 300 });
     await expect(asWorker(liam, () => subscribe(own, mid, liam))).resolves.toBeTruthy();
   });
@@ -687,5 +694,163 @@ describe('over the wire (SDL and resolvers agree)', () => {
     const deleted = await run(`mutation($t: String!) { deleteTicker(ref: $t) }`, { t: t.id }, member.id);
     expect(deleted.errors).toBeUndefined();
     expect((deleted.data as any).deleteTicker).toBe(true);
+  });
+});
+
+// ── Cycle 1: the reviews of 0ba6ede5 (Rook §10, Diego, the local seat) ────────
+
+describe('cycle 1 — a cadence or relevance edit re-runs the subscribe rule (R3)', () => {
+  it('a worker cannot speed up a ticker it subscribed itself to', async () => {
+    const own = ctx(liamHolder.id);
+    const t = await asWorker(liam, () => createTicker(own, { name: 'Mine', cadenceSeconds: 600 }));
+    await asWorker(liam, () => subscribe(own, t, liam));
+    await expectCode(asWorker(liam, () => M.updateTicker({}, { ref: t.id, input: { cadenceSeconds: 120 } }, own)), 'TICKER_CADENCE_NEEDS_CONSENT');
+    expect((await db.ticker.findUniqueOrThrow({ where: { id: t.id } })).cadenceSeconds).toBe(600);
+  });
+
+  it('an owner cannot speed up a ticker past another worker\'s holder, and the refusal names the worker', async () => {
+    const t = await createTicker(ctx(member.id), { name: 'Shared', cadenceSeconds: 600 });
+    await subscribe(ctx(liamHolder.id), t, liam);
+    try {
+      await M.updateTicker({}, { ref: t.id, input: { cadenceSeconds: 120 } }, ctx(member.id));
+      expect.fail('expected a refusal');
+    } catch (e) {
+      expect((e as GraphQLError).extensions?.code).toBe('TICKER_CADENCE_NEEDS_CONSENT');
+      expect((e as GraphQLError).message).toContain('Liam');
+    }
+    // A manager passes, as on subscribe; a slow-down is always fine.
+    await expect(M.updateTicker({}, { ref: t.id, input: { cadenceSeconds: 120 } }, ctx(appOwner.id))).resolves.toMatchObject({ cadenceSeconds: 120 });
+    await expect(M.updateTicker({}, { ref: t.id, input: { cadenceSeconds: 900 } }, ctx(member.id))).resolves.toMatchObject({ cadenceSeconds: 900 });
+  });
+
+  it('an owner who holds every subscriber may speed it up', async () => {
+    const t = await createTicker(ctx(coordHolder.id), { name: 'Mine', cadenceSeconds: 600 });
+    await subscribe(ctx(coordHolder.id), t, anne);
+    await expect(M.updateTicker({}, { ref: t.id, input: { cadenceSeconds: 120 } }, ctx(coordHolder.id))).resolves.toMatchObject({ cadenceSeconds: 120 });
+  });
+
+  it('raising relevance to ALL also needs the subscribers\' consent (it raises spend)', async () => {
+    const t = await createTicker(ctx(member.id), { name: 'Quiet', cadenceSeconds: 600, relevance: 'MENTIONS' });
+    await subscribe(ctx(liamHolder.id), t, liam);
+    await expectCode(M.updateTicker({}, { ref: t.id, input: { relevance: 'ALL' } }, ctx(member.id)), 'TICKER_CADENCE_NEEDS_CONSENT');
+    await expect(M.updateTicker({}, { ref: t.id, input: { relevance: 'ALL' } }, ctx(appOwner.id))).resolves.toMatchObject({ relevance: 'ALL' });
+  });
+});
+
+describe('cycle 1 — concurrency (the local seat, Diego)', () => {
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+  it('settings writers, and settings against create, never deadlock', async () => {
+    for (let i = 0; i < 3; i++) {
+      const r = await Promise.allSettled([
+        setSettings(ctx(admin.id), { liveCap: 20 + i }),
+        setSettings(ctx(appOwner.id), { liveCap: 30 + i }),
+        createTicker(ctx(member.id), { name: `Race ${i}` }),
+      ]);
+      expect(r.map((x) => (x.status === 'rejected' ? String((x as PromiseRejectedResult).reason) : 'ok'))).toEqual(['ok', 'ok', 'ok']);
+    }
+  });
+
+  it('a cadence edit cannot slip under a floor raised at the same time', async () => {
+    const t = await createTicker(ctx(member.id), { name: 'Edge', cadenceSeconds: 200 });
+    const [edit, floor] = await Promise.allSettled([
+      M.updateTicker({}, { ref: t.id, input: { cadenceSeconds: 130 } }, ctx(member.id)),
+      setSettings(ctx(admin.id), { minCadenceSeconds: 180 }),
+    ]);
+    const now = await db.ticker.findUniqueOrThrow({ where: { id: t.id } });
+    const settings = await db.app.findUniqueOrThrow({ where: { id: app.id }, select: { tickerMinCadenceSeconds: true } });
+    expect(now.cadenceSeconds).toBeGreaterThanOrEqual(settings.tickerMinCadenceSeconds);
+    expect([edit.status, floor.status]).toContain('fulfilled');
+  });
+
+  it('two renames to one name, and a rename against a create, end in TICKER_NAME_TAKEN, never a raw database error', async () => {
+    const a = await createTicker(ctx(member.id), { name: 'Alpha' });
+    const b = await createTicker(ctx(member.id), { name: 'Beta' });
+    const renames = await Promise.allSettled([
+      M.updateTicker({}, { ref: a.id, input: { name: 'Gamma' } }, ctx(member.id)),
+      M.updateTicker({}, { ref: b.id, input: { name: 'Gamma' } }, ctx(member.id)),
+    ]);
+    expect(renames.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
+    const lost = renames.find((r) => r.status === 'rejected') as PromiseRejectedResult;
+    expect((lost.reason as GraphQLError).extensions?.code).toBe('TICKER_NAME_TAKEN');
+
+    const mixed = await Promise.allSettled([
+      M.updateTicker({}, { ref: a.id, input: { name: 'Delta' } }, ctx(member.id)),
+      createTicker(ctx(member.id), { name: 'Delta' }),
+    ]);
+    expect(mixed.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
+    const lost2 = mixed.find((r) => r.status === 'rejected') as PromiseRejectedResult;
+    expect((lost2.reason as GraphQLError).extensions?.code).toBe('TICKER_NAME_TAKEN');
+  });
+
+  it('concurrent first grants are idempotent: every caller gets the one live grant', async () => {
+    const calls = await Promise.allSettled([1, 2, 3, 4].map((i) => grant(ctx(i % 2 ? admin.id : appOwner.id), liam)));
+    expect(calls.map((c) => c.status)).toEqual(['fulfilled', 'fulfilled', 'fulfilled', 'fulfilled']);
+    const ids = new Set(calls.map((c) => (c as PromiseFulfilledResult<{ id: string }>).value.id));
+    expect(ids.size).toBe(1);
+    expect(await db.appGrant.count({ where: { granteeWorkerId: liam.id, revokedAt: null } })).toBe(1);
+  });
+
+  it('holder authority over a worker-owned ticker is held through the write: a release in flight is waited for', async () => {
+    const lw = await asWorker(liam, () => createTicker(ctx(liamHolder.id), { name: 'Liams' }));
+    let releaseGate!: () => void;
+    const gate = new Promise<void>((r) => { releaseGate = r; });
+    let lockedUp!: () => void;
+    const locked = new Promise<void>((r) => { lockedUp = r; });
+    // A release that has updated the worker row but not yet committed.
+    const releasing = db.$transaction(async (tx) => {
+      await tx.worker.update({ where: { id: liam.id }, data: { heldByUserId: null, heldAt: null } });
+      lockedUp();
+      await gate;
+    });
+    await locked;
+    let settled = false;
+    const edit = M.updateTicker({}, { ref: lw.id, input: { enabled: false } }, ctx(liamHolder.id)).then(
+      (v: unknown) => { settled = true; return { ok: v }; },
+      (e: unknown) => { settled = true; return { err: e }; },
+    );
+    await sleep(500);
+    expect(settled).toBe(false); // the edit waits for the release instead of using a revoked authority
+    releaseGate();
+    await releasing;
+    const out = await edit;
+    expect('err' in out && (out.err as GraphQLError).extensions?.code).toBe('FORBIDDEN');
+  });
+});
+
+describe('cycle 1 — an unheld worker cannot subscribe itself (Diego P2-3)', () => {
+  it('a worker that was released keeps its session but not the self arm', async () => {
+    const slow = await createTicker(ctx(member.id), { name: 'Slow', cadenceSeconds: 600 });
+    await M.releaseWorker({}, { workerRef: liam.id }, ctx(liamHolder.id));
+    expect((await db.worker.findUniqueOrThrow({ where: { id: liam.id } })).heldByUserId).toBeNull();
+    await expectCode(asWorker(liam, () => subscribe(ctx(liamHolder.id), slow, liam)), 'SUBSCRIBE_FORBIDDEN');
+    expect(await liveSubs(slow.id)).toHaveLength(0);
+    // A manager still can, and the worker may still leave.
+    await subscribe(ctx(admin.id), slow, liam);
+    await expect(asWorker(liam, () => unsubscribe(ctx(liamHolder.id), slow, liam))).resolves.toBeTruthy();
+  });
+});
+
+describe('cycle 1 — the grant announcement mentions only the holder (Rook P2-3, Diego P2-6)', () => {
+  it('a ticker or worker name carrying mention tokens injects nothing', async () => {
+    await grant(ctx(admin.id), anne);
+    const t = await createTicker(ctx(member.id), { name: 'standup @all @dan \\@rook', cadenceSeconds: 120 });
+    await asWorker(anne, () => subscribe(ctx(coordHolder.id), t, liam));
+    const held = post.mock.calls.at(-1)![1] as { body: string };
+    expect(extractMentions(held.body)).toEqual(['liam']);
+    await asWorker(anne, () => subscribe(ctx(coordHolder.id), t, rook));
+    const unheld = post.mock.calls.at(-1)![1] as { body: string };
+    expect(extractMentions(unheld.body)).toEqual([]);
+  });
+});
+
+describe('cycle 1 — time zones are validated by the consumer (local P2-4)', () => {
+  it('accepts valid IANA aliases and refuses offsets and invented zones', async () => {
+    const windows = [{ days: [1], from: '22:00', to: '23:00' }];
+    await expect(createTicker(ctx(member.id), { name: 'Alias', quietHours: { timezone: 'US/Pacific', windows } })).resolves.toBeTruthy();
+    await expect(createTicker(ctx(member.id), { name: 'Utc', quietHours: { timezone: 'Etc/UTC', windows } })).resolves.toBeTruthy();
+    for (const timezone of ['Mars/Base', '+01:00', '', 'UTC+1']) {
+      await expectCode(createTicker(ctx(member.id), { name: `Z ${timezone}`, quietHours: { timezone, windows } }), 'TICKER_QUIET_HOURS_INVALID');
+    }
   });
 });

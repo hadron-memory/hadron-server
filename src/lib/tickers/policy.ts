@@ -41,9 +41,12 @@ export function decideSubscribe(i: {
     // R3: a worker spends its own tokens only at or below the self-subscription
     // cadence. It may always unsubscribe itself. The grant never reaches the
     // grantee itself (N1), so it cannot be used to beat this limit.
-    if (i.op === 'unsubscribe' || i.tickerCadenceSeconds >= i.selfSubscribeCadenceSeconds) {
-      return { allow: true, authority: 'self' };
-    }
+    if (i.op === 'unsubscribe') return { allow: true, authority: 'self' };
+    // An unheld worker is subscribed only by a manager or the grant (cor:agt:080:20).
+    // Its session can outlive its hold (release does not end the session), so
+    // "I am the worker" is not enough: a holder must stand behind the spend.
+    if (target.heldByUserId === null) return { allow: false, code: 'SUBSCRIBE_FORBIDDEN' };
+    if (i.tickerCadenceSeconds >= i.selfSubscribeCadenceSeconds) return { allow: true, authority: 'self' };
     return { allow: false, code: 'SUBSCRIBE_CADENCE_NEEDS_HOLDER' };
   }
   // N2: a person must be behind the call; a bare App key never reaches here

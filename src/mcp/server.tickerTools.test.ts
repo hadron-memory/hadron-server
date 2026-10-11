@@ -142,6 +142,18 @@ describe('ticker tools: who acts', () => {
     expect(text(await s.callTool('hadron_ticker_list', { appRef: app.id }))).toBe('No live tickers.');
   });
 
+  it('a write acts as the NAMED session: a worker session cannot use its driver\'s holder rights on another worker', async () => {
+    const sh = mcp(authOf(holder.id));
+    const asLiam = await session({ userId: holder.id, appId: app.id, workerId: liam.id });
+    const asHolder = await session({ userId: holder.id });
+    // Anne and Liam are both held by `holder`. Liam's session is Liam, not the person behind it.
+    expect(code(text(await sh.callTool('hadron_worker_wake_settings', { workerRef: anne.id, mentions: 'OFF', session: asLiam.id })))).toBe('WAKE_SETTINGS_FORBIDDEN');
+    expect(await db.workerWakeSettings.count()).toBe(0);
+    // Its own settings are its to change, and the person's plain session still reaches both.
+    expect(text(await sh.callTool('hadron_worker_wake_settings', { workerRef: liam.id, mentions: 'OFF', session: asLiam.id }))).toMatch(/^Updated\./);
+    expect(text(await sh.callTool('hadron_worker_wake_settings', { workerRef: anne.id, mentions: 'OFF', session: asHolder.id }))).toMatch(/^Updated\./);
+  });
+
   it('tells the caller when a grant use could not be announced', async () => {
     const t = await db.ticker.create({ data: { appId: app.id, name: 'Slow', slug: 'slow', cadenceSeconds: 600, ownerUserId: member.id } });
     await M.grantApp({}, { appRef: app.id, workerRef: anne.id, name: 'TICKER_SUBSCRIBE_WORKERS' }, { db, userId: admin.id, roles: ['READER'] });

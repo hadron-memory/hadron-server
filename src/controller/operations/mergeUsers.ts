@@ -74,11 +74,11 @@ export const AUDIT_USER_COLUMNS: Readonly<Record<string, readonly string[]>> = {
   // #1705 — agent tasks. `assigned_by` is the assignment's audit actor.
   agent_tasks: ['created_by', 'updated_by', 'assigned_by'],
   // #1747 — tickers: who made, changed and deleted one; who subscribed a worker; who
-  // changed wake settings; who revoked a grant.
+  // changed wake settings; who gave and who revoked a grant, and the person behind each grant use.
   tickers: ['created_by', 'updated_by', 'deleted_by'],
-  ticker_subscriptions: ['created_by'],
+  ticker_subscriptions: ['created_by', 'ended_by', 'via_grant_person_id', 'ended_via_grant_person_id'],
   worker_wake_settings: ['updated_by'],
-  app_grants: ['revoked_by'],
+  app_grants: ['granted_by', 'revoked_by'],
   // #1706 — who last changed an App's stall windows.
   agent_task_stall_schedule: ['updated_by'],
 };
