@@ -139,3 +139,11 @@ describe('exchange-start nonces', () => {
     expect(await redeemExchangeStartNonce(login)).toBeNull();
   });
 });
+
+it('preserves the verified login time through handoff instead of refreshing it', async () => {
+  const login = { at: Date.now() - 30_000, method: 'github' as const };
+  const code = await issueLoginCode({ userId, redirect: '/', isNew: false, login });
+  expect((await redeemLoginCode(code))?.login).toEqual(login);
+  const ordinary = await issueLoginCode({ userId, redirect: '/', isNew: false });
+  expect((await redeemLoginCode(ordinary))?.login).toBeUndefined();
+});

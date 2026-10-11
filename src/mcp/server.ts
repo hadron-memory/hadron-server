@@ -2087,6 +2087,14 @@ export function createMcpServerInstance(
           }
           const refusal = await settleCallerSession(name, named, toolOwnsArgument);
           if (refusal) return refusal;
+          // #1769: the gate's own argument is spent once the actor is settled.
+          // A tool that spreads its args into a write (the governed doors) would
+          // otherwise carry it into the node row. Only when the gate added it:
+          // a tool that declares the argument itself still receives it.
+          if (!toolOwnsArgument && input && typeof input === 'object') {
+            const { [argumentName]: _settled, ...rest } = input as Record<string, unknown>;
+            return await callback(rest, extra);
+          }
           return await callback(input, extra);
         });
       return registerTool(...args);
@@ -6551,11 +6559,20 @@ export function createMcpServerInstance(
   async function callGovernedDoor(
     kind: 'task' | 'review',
     mode: 'create' | 'update',
+    shape: Record<string, unknown>,
     args: Record<string, unknown>,
   ): Promise<{ content: { type: 'text'; text: string }[] }> {
     const entry = GOVERNED_KINDS.find((e) => e.kind === kind)!;
     const doorName = entry.doors[mode];
-    const { urn: rawUrn, ...fields } = args as { urn: string } & Record<string, unknown>;
+    const { urn: rawUrn, ...rest } = args as { urn: string } & Record<string, unknown>;
+    // #1769: these doors hand `fields` to the resolver directly, so GraphQL's
+    // input type never filters them. Admit only what this tool advertises, so
+    // a stray key (the settlement `session`, or one that happens to match a
+    // real node column) is dropped instead of written or crashing the upsert.
+    const fields: Record<string, unknown> = {};
+    for (const key of Object.keys(shape)) {
+      if (key !== 'urn' && key !== 'session' && key in rest) fields[key] = rest[key];
+    }
     let memoryUrn: string;
     let loc: string;
     let fragment: string | undefined;
@@ -6636,7 +6653,7 @@ export function createMcpServerInstance(
     'hadron_create_task',
     'Create a RUNNABLE node — a task `hadron_run_task` can execute. This is the only way to author one: `hadron_create_node` refuses a write that would produce a runnable node, because authoring something the platform will EXECUTE is not the same act as writing prose. The runnable flag is set by this tool, so you do not pass it. Use it when you are deliberately writing a procedure for an agent to run; for ordinary notes, docs or findings use hadron_create_node.',
     governedDoorArgs,
-    async (args) => callGovernedDoor('task', 'create', args),
+    async (args) => callGovernedDoor('task', 'create', governedDoorArgs, args),
   );
 
   /**
@@ -6683,21 +6700,21 @@ export function createMcpServerInstance(
     'hadron_update_task',
     'Edit an existing RUNNABLE node. Needed because `hadron_update_node` refuses ANY edit whose result is still a runnable node — including one that changes only prose — so that a procedure the platform executes cannot be rewritten through the generic surface. Omitted fields are preserved. Pass isRunnable: false to RETIRE the task.',
     taskUpdateArgs,
-    async (args) => callGovernedDoor('task', 'update', args),
+    async (args) => callGovernedDoor('task', 'update', taskUpdateArgs, args),
   );
 
   server.tool(
     'hadron_create_review',
     'Create a REVIEW node — a check on work performed. Reviews are not coding-specific: any work can be reviewed, and a review may be a SAFETY check, which is why removing or rewriting one is treated as an attack and why `hadron_create_node` refuses to author one. The review role is set by this tool: "review" by default, or pass a dotted review sub-role such as "review.security". Reach for this when recording what must be verified about a piece of work, not when writing up the work itself.',
     reviewCreateArgs,
-    async (args) => callGovernedDoor('review', 'create', args),
+    async (args) => callGovernedDoor('review', 'create', reviewCreateArgs, args),
   );
 
   server.tool(
     'hadron_update_review',
     'Edit an existing REVIEW node. Needed because `hadron_update_node` refuses any edit whose result is still a review node — a safety check must not be rewritable through the generic surface. Omitted fields are preserved. Pass role: null to RETIRE the node from the review kind.',
     reviewUpdateArgs,
-    async (args) => callGovernedDoor('review', 'update', args),
+    async (args) => callGovernedDoor('review', 'update', reviewUpdateArgs, args),
   );
 
   // ── hadron_update_node_data ───────────────────────────────────────────

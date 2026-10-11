@@ -622,7 +622,7 @@ describe('linkMemoryToUser', () => {
         { memoryId: foreignMem.id, externalUserId: 'mm-42' },
         appCtx(app.id),
       ),
-    ).rejects.toThrow(/organization/);
+    ).rejects.toMatchObject({ code: 'MEMORY_NOT_FOUND' });
   });
 
   // 007-entity-id-or-urn: linkMemoryToUser accepts memoryId as ID or URN.

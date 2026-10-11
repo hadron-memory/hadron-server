@@ -1,6 +1,8 @@
 import { SignJWT, jwtVerify, type JWTPayload } from 'jose';
 
 export interface HadronJwtPayload extends JWTPayload {
+  /// Only verified first-party login callbacks set this; token issuance alone is not re-authentication.
+  login?: { at: number; method: 'github' | 'google' | 'apple' | 'email' };
   sub: string;            // User.id (cuid)
   roles: ('OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER')[];
   githubUsername?: string; // GitHub username (GitHub users)
