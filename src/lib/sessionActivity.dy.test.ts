@@ -277,3 +277,56 @@ describe('DY-4: a locked encrypted memory says how to get its key back', () => {
     expect(sessionKeyReleasedHint()).toMatch(/released after [\d.]+h unused .* hadron_unlock_memory/);
   });
 });
+
+
+describe('#1741: recordUsage follows App → Worker → Session lifecycle lock order', () => {
+  // Ordinary App keys still fail READER. Supplying that role here reaches
+  // the internal App-resume branch without widening the HTTP auth contract.
+  const recorderCtx = () => ({ ...appKeyCtx(app.id), roles: ['READER'] }) as Context;
+
+  it('does not hold the Session while waiting for the resume Worker lock', async () => {
+    const s = await session({ idleMs: 30 * H, userId: null });
+    let release!: () => void;
+    let locked!: () => void;
+    const ready = new Promise<void>((r) => { locked = r; });
+    const gate = new Promise<void>((r) => { release = r; });
+    const binder = db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM workers WHERE id = ${worker.id} FOR UPDATE`;
+      locked();
+      await gate;
+    }, { timeout: 10000 });
+    await ready;
+    const recording = M.recordUsage({}, { event: { type: 'read', sessionId: s.id } }, recorderCtx());
+    try {
+      let waiting = false;
+      for (let i = 0; i < 100; i++) {
+        const rows = await db.$queryRaw<{ waiting: boolean }[]>`
+          SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE datname = current_database()
+            AND wait_event_type = 'Lock' AND query LIKE '%FROM workers%FOR UPDATE%') AS waiting`;
+        if (rows[0].waiting) { waiting = true; break; }
+        await new Promise((r) => setTimeout(r, 10));
+      }
+      expect(waiting).toBe(true);
+      // A bind holding Worker must be free to update its Sessions next.
+      await db.$transaction(async (tx) => {
+        await tx.$queryRaw`SELECT id FROM sessions WHERE id = ${s.id} FOR UPDATE NOWAIT`;
+      });
+    } finally {
+      release();
+      await binder;
+      await recording;
+    }
+    expect(await live(s.id)).toBe(true);
+    expect(await db.usageEvent.findFirstOrThrow({ where: { sessionId: s.id } }))
+      .toMatchObject({ countsAsActivity: true });
+  });
+
+  it('concurrent own-App recorders resume without a Session lock upgrade', async () => {
+    const s = await session({ idleMs: 30 * H, userId: null });
+    const results = await Promise.all(Array.from({ length: 4 }, () =>
+      M.recordUsage({}, { event: { type: 'read', sessionId: s.id } }, recorderCtx())));
+    expect(results).toEqual([true, true, true, true]);
+    expect(await db.usageEvent.count({ where: { sessionId: s.id, countsAsActivity: true } })).toBe(4);
+    expect(await live(s.id)).toBe(true);
+  });
+});

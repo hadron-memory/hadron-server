@@ -30,6 +30,7 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb, createDbAppWithKey } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
+import { validateSessionBinding } from '../../../middleware/auth.js';
 
 const SHARED_LOC = 'shared-loc';
 
@@ -329,6 +330,26 @@ describe('recordUsage — session attribution ownership', () => {
 
   it('omitting the session still records usage without session attribution', async () => {
     expect(await recordSession(undefined, asMember())).toMatchObject({ sessionId: null, countsAsActivity: false });
+  });
+
+  it('binding rejects impersonation for user and malformed pure-App shapes', async () => {
+    const s = await makeSession();
+    const impersonation = { sessionId: generateId(), actorUserId: userOther.id,
+      orgId: orgA.id, expiresAt: new Date(Date.now() + 60000) };
+    expect(await validateSessionBinding(db, { userId: userMember.id }, s.id))
+      .toMatchObject({ sessionId: s.id });
+    expect(await validateSessionBinding(db, { userId: userMember.id, impersonation }, s.id)).toBeNull();
+    // This shape cannot be emitted by auth, but the shared helper hardens it.
+    expect(await validateSessionBinding(db, { appId: appKeyApp.id, impersonation }, s.id)).toBeNull();
+  });
+
+  it('binding keeps pure App-key ownership including end-user sessions', async () => {
+    for (const userId of [userMember.id, null]) {
+      const s = await makeSession({ userId });
+      expect(await validateSessionBinding(db, { appId: appKeyApp.id }, s.id))
+        .toMatchObject({ sessionId: s.id });
+      expect(await validateSessionBinding(db, { appId: generateId() }, s.id)).toBeNull();
+    }
   });
 
   it('does not widen the existing App-key READER gate', async () => {

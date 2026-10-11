@@ -65,6 +65,7 @@ import {
   loadLastEventBySession,
   mostRecentlyActive,
   isSessionLive,
+  usageEventCountsAsActivity,
   recentlyTouchedFilter,
   OPEN_SESSION_SCAN_CAP,
 } from '../../../lib/sessionActivity.js';
@@ -1283,8 +1284,14 @@ export const sessionMutations = {
       // it earns commits in the SAME transaction (rolled back if the insert
       // fails), and the row is stamped at the instant activity was judged
       // (local P2-1).
-      const at = new Date();
       await ctx.db.$transaction(async (tx) => {
+        // The App-key resume must run BEFORE any Session share lock: it takes
+        // App SHARE → Worker UPDATE → Session UPDATE, like bind. Taking
+        // Session SHARE first inverts that order and concurrent resumes also
+        // deadlock while upgrading their share locks (#1741, Bob P2).
+        if (event.sessionId && !ctx.userId && ctx.appId && !ctx.impersonation) {
+          await attributedRequestActivity(ctx.db, ctx, event.sessionId, { tx });
+        }
         // #1662: denied, missing and deleted refs all record without a session.
         // Hold the row through the insert so deletion/account reassignment
         // cannot invalidate ownership between the check and attribution.
@@ -1297,6 +1304,10 @@ export const sessionMutations = {
           });
           if (session && !session.deletedAt && ownsSession(ctx, session)) sessionId = event.sessionId;
         }
+        // Re-judge activity under the ownership row hold without attempting
+        // another resume (which could acquire a Worker after the Session).
+        const at = new Date();
+        const countsAsActivity = await usageEventCountsAsActivity(tx as never, ctx, sessionId, at);
         return tx.usageEvent.create({
           data: {
             type: event.type,
@@ -1319,7 +1330,7 @@ export const sessionMutations = {
             // as activity only for a live session this caller owns. Before this,
             // any reader could keep someone else's session live, or revive it,
             // by recording usage against its id.
-            countsAsActivity: await attributedRequestActivity(ctx.db, ctx, sessionId, { at, tx }),
+            countsAsActivity,
             createdAt: at,
             model: event.model,
             tokensIn: event.tokensIn,
