@@ -3,7 +3,8 @@ import { dirname } from 'path';
 import { stringify } from 'yaml';
 import { withMirrorCheckout } from './gitMirrorCheckout.js';
 import { db } from '../db/client.js';
-import { sessionKeyCache } from '../../lib/sessionKeyCache.js';
+import { getRequestKey } from '../../lib/requestKeys.js';
+import { isCiphertext } from '../../lib/crypto.js';
 import {
   buildEdgeFrontmatter,
   buildNodeFrontmatter,
@@ -98,6 +99,14 @@ async function isCurrentEncryptedSnapshot(node: NodeForGit, memoryId: string): P
     edgeSignature(current.outgoingEdges) === edgeSignature(node.outgoingEdges);
 }
 
+/** Reserved at-rest envelopes never belong in a plaintext Git payload. */
+export function nodePayloadHasCiphertext(node: Pick<NodeForGit, 'content' | 'abstract' | 'data'>): boolean {
+  if (isCiphertext(node.content) || isCiphertext(node.abstract)) return true;
+  const data = node.data;
+  return data != null && typeof data === 'object' && !Array.isArray(data) &&
+    Object.keys(data).length === 1 && typeof (data as { __enc?: unknown }).__enc === 'string';
+}
+
 /**
  * Reshape a checkout's working tree so `node`'s file reflects the DB row.
  *
@@ -105,9 +114,16 @@ async function isCurrentEncryptedSnapshot(node: NodeForGit, memoryId: string): P
  * inline; no README, no edge sidecar) via the shared `nodeFrontmatter` builders,
  * and clears the legacy paths the node may still occupy from the old export
  * format. Pure filesystem work — no git, no commit — so a caller that reshapes
- * SEVERAL nodes (the move mirror) can batch them into one commit.
+ * SEVERAL nodes (the move mirror) can batch them into one commit. Returns
+ * false for a ciphertext-shaped payload without touching the filesystem.
  */
-export function writeNodeFile(localPath: string, node: NodeForGit): void {
+export function writeNodeFile(localPath: string, node: NodeForGit): boolean {
+  // #1273: inspect the actual payload, independently of raced memory flags
+  // or key probes. Refuse before writes OR legacy-path cleanup.
+  if (nodePayloadHasCiphertext(node)) {
+    console.warn(`[git-mirror] Deferring node write for node ${node.id}: ciphertext payload`);
+    return false;
+  }
   // A node — leaf or parent — is one self-contained `<...loc>.md` (children
   // live in the sibling `<seg>/` folder); edges are inline in the frontmatter
   // `nodes:` array, no sidecar.
@@ -156,6 +172,7 @@ export function writeNodeFile(localPath: string, node: NodeForGit): void {
     rmSync(legacy.readme, { force: true });
     rmSync(legacy.sidecar, { recursive: true, force: true });
   }
+  return true;
 }
 
 /**
@@ -208,8 +225,8 @@ export async function writeNodeToGit(
   refresh?: () => Promise<NodeForGit | null>,
 ): Promise<void> {
   // Capture key availability while the producing request is active. A key
-  // acquired by a later request must not authorize this queued snapshot.
-  const nodeWriteKeyAvailable = memoryId != null && sessionKeyCache.hasMemory(memoryId);
+  // cached by another session (earlier OR later) is not this request's grant.
+  const nodeWriteKeyAvailable = memoryId != null && getRequestKey(memoryId) != null;
   await withMirrorCheckout(
     {
       memoryId,
@@ -235,7 +252,7 @@ export async function writeNodeToGit(
         console.warn(`[git-mirror] Skipping stale encrypted snapshot for node ${latest.id}`);
         return false;
       }
-      writeNodeFile(localPath, latest);
+      return writeNodeFile(localPath, latest);
     },
   );
 }

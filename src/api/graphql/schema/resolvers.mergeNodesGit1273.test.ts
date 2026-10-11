@@ -103,6 +103,39 @@ describe('#1273 encrypted node Git mirror', () => {
     }
   });
 
+  it('defers a keyless request even when another session has warmed the memory cache', async () => {
+    sessionKeyCache.set('another-session', memoryId, key);
+    expect(sessionKeyCache.hasMemory(memoryId)).toBe(true);
+    const before = await db.node.findUniqueOrThrow({ where: { id: targetId } });
+    await mergeTags();
+    await Promise.all(jobs);
+    expect(readFileSync(join(localPath, 'target.md'))).toEqual(originalFile);
+    expect(execGit).not.toHaveBeenCalled();
+    expect(warning).toHaveBeenCalledWith(expect.stringMatching(/Deferring.*no.*key/i));
+    const after = await db.node.findUniqueOrThrow({ where: { id: targetId } });
+    expect(after.content).toBe(before.content);
+    expect(after.abstract).toBe(before.abstract);
+    expect(after.data).toEqual(before.data);
+  });
+
+  it.each(['content', 'abstract', 'data'] as const)('defers a stored %s envelope even if the live memory flag became plaintext', async field => {
+    const raw = await db.node.findUniqueOrThrow({ where: { id: targetId } });
+    const snapshot = { ...await payload(), [field]: raw[field] };
+    await db.memory.update({ where: { id: memoryId }, data: { isEncrypted: false } });
+    await mirror.writeNodeToGit(snapshot, '', null, memoryId);
+    expect(readFileSync(join(localPath, 'target.md'))).toEqual(originalFile);
+    expect(vi.mocked(execGit).mock.calls.some(([args]) => ['add', 'commit', 'push'].includes(args[0]))).toBe(false);
+    expect(warning).toHaveBeenCalledWith(expect.stringMatching(/Deferring.*ciphertext/i));
+  });
+
+  it('does not write a ciphertext payload even when this request carries a key', async () => {
+    const raw = await db.node.findUniqueOrThrow({ where: { id: targetId }, include: { outgoingEdges: { include: { target: true } } } });
+    await requestKeyStorage.run(new Map([[memoryId, key]]), () => mirror.writeNodeToGit({ ...raw, mirrorRevSeq: raw.revSeq }, '', null, memoryId));
+    expect(readFileSync(join(localPath, 'target.md'))).toEqual(originalFile);
+    expect(vi.mocked(execGit).mock.calls.some(([args]) => ['add', 'commit', 'push'].includes(args[0]))).toBe(false);
+    expect(warning).toHaveBeenCalledWith(expect.stringMatching(/Deferring.*ciphertext/i));
+  });
+
   it('writes plaintext when the authorized request carries the key, without changing encryption at rest', async () => {
     const result = await requestKeyStorage.run(new Map([[memoryId, key]]), mergeTags);
     await Promise.all(jobs);
@@ -175,9 +208,24 @@ describe('#1273 encrypted node Git mirror', () => {
     });
     await mirror.writeNodeToGit(await payload(), '', null, memoryId);
     expect(flipped).toBe(true);
+    expect(warning).toHaveBeenCalledWith(expect.stringMatching(/memory changed during preparation/));
+    expect(execGit).toHaveBeenCalledWith(['remote', 'set-url', 'origin', 'https://github.com/andi1273/fixture'], { cwd: localPath });
     expect(readFileSync(join(localPath, 'target.md'))).toEqual(originalFile);
     expect(vi.mocked(execGit).mock.calls.some(([args]) => ['add', 'commit', 'push'].includes(args[0]))).toBe(false);
     expect(warning).toHaveBeenCalledWith(expect.stringMatching(/Deferring.*no.*key/i));
+  });
+
+  it('restores the remote when the memory disappears during preparation', async () => {
+    await db.memory.update({ where: { id: memoryId }, data: { isEncrypted: false } });
+    vi.mocked(execGit).mockImplementation(async args => {
+      if (args[0] === 'fetch') await db.memory.delete({ where: { id: memoryId } });
+      return { stdout: '', stderr: '' };
+    });
+    await mirror.writeNodeToGit(await payload(), '', null, memoryId);
+    expect(readFileSync(join(localPath, 'target.md'))).toEqual(originalFile);
+    expect(execGit).toHaveBeenCalledWith(['remote', 'set-url', 'origin', 'https://github.com/andi1273/fixture'], { cwd: localPath });
+    expect(vi.mocked(execGit).mock.calls.some(([args]) => ['add', 'commit', 'push'].includes(args[0]))).toBe(false);
+    expect(warning).toHaveBeenCalledWith(expect.stringMatching(/memory changed during preparation/));
   });
 
   it('does not use key possession to bypass the merge owner gate', async () => {

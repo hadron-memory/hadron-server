@@ -60,7 +60,7 @@ export async function withMirrorCheckout(
     memoryId?: string;
     ownerRepo?: string;
     clientId?: string | null;
-    /** Node-file writes capture this in the producing request. Path-only
+    /** Node-file writes capture request-scoped key presence at dispatch. Path-only
      * removals omit it: deleting a stale file needs no decryption key. */
     nodeWriteKeyAvailable?: boolean;
     /** Commit subject line; `[hadron-server]` is appended as the body. */
@@ -139,7 +139,7 @@ export async function withMirrorCheckout(
       // mutation, and record the deferral. The next keyed write can mirror
       // the latest state; this fire-and-forget path has no durable retry queue.
       if (memory.isEncrypted && opts.nodeWriteKeyAvailable === false) {
-        console.warn(`[git-mirror] Deferring node write for memory ${memory.id}: no request/session key at dispatch`);
+        console.warn(`[git-mirror] Deferring node write for memory ${memory.id}: no request-carried key at dispatch`);
         return 'skipped';
       }
       try {
@@ -216,7 +216,7 @@ export async function withMirrorCheckout(
             where: { id: resolvedMemoryId }, select: { isEncrypted: true },
           });
           if (!current || current.isEncrypted) {
-            console.warn(`[git-mirror] Deferring node write for memory ${resolvedMemoryId}: no request/session key at dispatch`);
+            console.warn(`[git-mirror] Deferring node write for memory ${resolvedMemoryId}: memory changed during preparation, no request-carried key at dispatch`);
             await restoreRemote(localPath, memory.source);
             return 'skipped';
           }

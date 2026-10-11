@@ -22,8 +22,9 @@ vi.mock('./gitMirrorCheckout.js', () => ({
     return 'mirrored';
   }),
 }));
-vi.mock('./writeNodeToGit.js', () => ({
-  writeNodeFile: vi.fn(),
+vi.mock('./writeNodeToGit.js', async importOriginal => ({
+  ...await importOriginal<typeof import('./writeNodeToGit.js')>(),
+  writeNodeFile: vi.fn(() => true),
   removeNodeFile: vi.fn(),
   writeNodeToGit: vi.fn(async () => {}),
 }));
@@ -291,5 +292,21 @@ describe('mirrorNodeMoveToGit — same memory', () => {
     // `a:b` is removed as an old loc and re-written as the grandchild's new one.
     expect(removed()).toContainEqual([`/repo/${mem.id}`, 'a:b']);
     expect(written()).toContainEqual([`/repo/${mem.id}`, 'a:b']);
+  });
+});
+
+
+describe('move mirror ciphertext batch belt (#1273)', () => {
+  it('leaves old paths intact before refusing a ciphertext batch', async () => {
+    const memory = await makeMemory('cipher-batch', { source: REPO });
+    const node = await makeNode(memory.id, 'new');
+    await db.node.update({ where: { id: node.id }, data: { content: 'enc:v1:stored-ciphertext' } });
+    await mirrorNodeMoveToGit(db, {
+      srcMemoryId: memory.id, destMemoryId: memory.id,
+      moved: [{ id: node.id, previousLoc: 'old' }],
+    });
+    expect(withMirrorCheckout).toHaveBeenCalledOnce();
+    expect(written()).toEqual([]);
+    expect(removed()).toEqual([]);
   });
 });
