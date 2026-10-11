@@ -118,6 +118,23 @@ describe('#1273 encrypted node Git mirror', () => {
     expect(after.data).toEqual(before.data);
   });
 
+  it('decrypts a session-cache-only merge response but defers its encrypted mirror', async () => {
+    // MCP unlock / agent-session keys permit response decryption, but are not
+    // request-carried export authority (Eden cycle-1 ruling, cor:sec:040:05).
+    sessionKeyCache.set('requesting-session', memoryId, key);
+    expect(requestKeyStorage.getStore()).toBeUndefined();
+    const result = await mergeTags();
+    await Promise.all(jobs);
+    expect(result.content).toBe(fields.content);
+    expect(result.abstract).toBe(fields.abstract);
+    expect(result.data).toEqual(fields.data);
+    expect(result.tags).toEqual(['target-tag', 'source-tag']);
+    expect(readFileSync(join(localPath, 'target.md'))).toEqual(originalFile);
+    expect(execGit).not.toHaveBeenCalled();
+    expect(warning).toHaveBeenCalledWith(expect.stringMatching(/Deferring.*no request-carried key/i));
+    expect((await db.node.findUniqueOrThrow({ where: { id: targetId } })).content).toMatch(/^enc:v1:/);
+  });
+
   it.each(['content', 'abstract', 'data'] as const)('defers a stored %s envelope even if the live memory flag became plaintext', async field => {
     const raw = await db.node.findUniqueOrThrow({ where: { id: targetId } });
     const snapshot = { ...await payload(), [field]: raw[field] };
