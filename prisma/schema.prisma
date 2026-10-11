@@ -3151,6 +3151,7 @@ model App {
   /// #1747 — tickers (cor:agt:080) and the grants held by this App's workers.
   tickers          Ticker[]
   appGrants        AppGrant[]
+  wakeDays         AppWakeDay[]
   agentTeamEvents  AgentTeamEvent[]
   /// #1706 — model-family availability (cor:agt:060:03) and the stall schedule.
   modelFamilyAvailability ModelFamilyAvailability[]
@@ -5294,6 +5295,11 @@ model WorkerDeliveryChannel {
   channelIncarnation  Int      @default(0) @map("channel_incarnation")
   deliveredThroughSeq Int      @map("delivered_through_seq")
   deliveredAt         DateTime @map("delivered_at")
+  /// Who acknowledged the newest wake (cor:agt:080:16): a person, a worker's
+  /// session behind them, or a bare App key (S3).
+  ackedByUserId       String?  @map("acked_by_user_id")
+  ackedByWorkerId     String?  @map("acked_by_worker_id")
+  ackedByAppKeyId     String?  @map("acked_by_app_key_id")
 
   worker Worker @relation(fields: [workerId], references: [id], onDelete: Cascade)
 
@@ -5308,12 +5314,31 @@ model WorkerDeliveryTick {
   tickerId      String   @map("ticker_id")
   lastAckedTick Int      @map("last_acked_tick")
   ackedAt       DateTime @map("acked_at")
+  ackedByUserId   String? @map("acked_by_user_id")
+  ackedByWorkerId String? @map("acked_by_worker_id")
+  ackedByAppKeyId String? @map("acked_by_app_key_id")
 
   worker Worker @relation(fields: [workerId], references: [id], onDelete: Cascade)
   ticker Ticker @relation(fields: [tickerId], references: [id], onDelete: Cascade)
 
   @@id([workerId, tickerId])
   @@map("worker_delivery_ticks")
+}
+
+/// #1748 — wakes acknowledged per App per UTC day (cor:agt:080:15). `wakes` is
+/// the budget counter (exempt wakes are not counted); `noticePostedAt` is the
+/// once-a-day "budget spent" notice claim. Written only by `acknowledgeWakes`
+/// and the notice claim.
+model AppWakeDay {
+  appId          String    @map("app_id")
+  day            DateTime  @map("day") @db.Date
+  wakes          Int       @default(0)
+  noticePostedAt DateTime? @map("notice_posted_at")
+
+  app App @relation(fields: [appId], references: [id], onDelete: Cascade)
+
+  @@id([appId, day])
+  @@map("app_wake_days")
 }
 
 /// #1747 — a narrow, named App grant held by a WORKER (cor:agt:080:24). One

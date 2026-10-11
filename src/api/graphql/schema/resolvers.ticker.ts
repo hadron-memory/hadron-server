@@ -28,9 +28,8 @@
 // CONCEALMENT: a ticker or App the caller cannot reach reads as TICKER_NOT_FOUND
 // / APP_NOT_FOUND, never Forbidden — no existence oracle over ids.
 //
-// NOT IN S1 (named so nobody looks for them): Ticker.nextTickAt/lastTickAt and
-// WorkerWakeSettings.dormant (tick and dormancy semantics are S2's, and S2
-// decides quiet hours and the dormancy rule once, in one place); the owner
+// S2 (#1748) adds Ticker.nextTickAt/lastTickAt and WorkerWakeSettings.dormant
+// (tick and dormancy are decided once, in src/lib/tickers). NOT BUILT: the owner
 // succession of cor:agt:080:18 (Proposed).
 
 import { GraphQLError } from 'graphql';
@@ -69,6 +68,9 @@ import {
 } from '../../../lib/tickers/bounds.js';
 import { decideSubscribe, mayChangeWakeSettings, mayEditTicker, type PolicyActor } from '../../../lib/tickers/policy.js';
 import { validateQuietHours } from '../../../lib/tickers/quietHours.js';
+import { currentTick, nextTickAfter, tickTime } from '../../../lib/tickers/ticks.js';
+import { isWorkerDormant } from '../../../lib/sessionActivity.js';
+import { loadWorkersActivity } from './resolvers.worker.js';
 import { nextFreeTickerSlug } from '../../../lib/tickers/tickerSlug.js';
 import { TickerNotFoundError, composeTickerUrn, resolveTickerRef } from '../../../lib/tickers/tickerRef.js';
 
@@ -853,6 +855,11 @@ export const tickerFieldResolvers = {
     },
     app: (t: TickerRow, _: unknown, ctx: Context) => ctx.db.app.findUnique({ where: { id: t.appId } }),
     quietHours: (t: TickerRow) => t.quietHours ?? null,
+    nextTickAt: (t: TickerRow) => nextTickAfter(t, new Date()),
+    lastTickAt: (t: TickerRow) => {
+      const k = currentTick(t, new Date());
+      return k === null ? null : tickTime(t, k);
+    },
     channels: async (t: TickerRow, _: unknown, ctx: Context) => {
       if (!t.channelIds.length) return [];
       // The list is not a grant: show only the channels the reader can read.
@@ -895,6 +902,13 @@ export const tickerFieldResolvers = {
         where: { deletedAt: null, enabled: true, subscriptions: { some: { workerId: w.workerId, endedAt: null } } },
       });
       return fastest._min.cadenceSeconds ?? null;
+    },
+    dormant: async (w: { workerId: string }, _: unknown, ctx: Context) => {
+      const worker = await ctx.db.worker.findUnique({ where: { id: w.workerId }, select: { app: { select: { sessionDormancyDays: true } } } });
+      if (!worker) return false;
+      const now = new Date();
+      const activity = await loadWorkersActivity(ctx, [w.workerId], now);
+      return isWorkerDormant(activity.get(w.workerId)?.lastActiveAt, worker.app.sessionDormancyDays, now);
     },
   },
 

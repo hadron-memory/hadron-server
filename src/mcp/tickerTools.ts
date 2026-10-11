@@ -31,6 +31,7 @@ const Q = resolvers.Query as unknown as {
   tickers: Resolver<{ appRef: string }, Row[]>;
   ticker: Resolver<{ ref: string }, Row | null>;
   workerWakeSettings: Resolver<{ workerRef: string }, Row>;
+  dueWakes: Resolver<{ appRef: string; workerRefs?: string[]; first?: number; after?: string }, Row>;
 };
 const M = resolvers.Mutation as unknown as {
   createTicker: Resolver<{ appRef: string; input: Row }, Row>;
@@ -39,6 +40,7 @@ const M = resolvers.Mutation as unknown as {
   subscribeWorker: Resolver<{ tickerRef: string; workerRef: string }, { subscription: Row; announcement: string | null }>;
   unsubscribeWorker: Resolver<{ tickerRef: string; workerRef: string }, { subscription: Row; announcement: string | null }>;
   setWorkerWakeSettings: Resolver<{ workerRef: string; input: Row }, Row>;
+  acknowledgeWakes: Resolver<{ proofs: string[] }, { acknowledged: number; unchanged: number }>;
 };
 const FT = tickerFieldResolvers.Ticker;
 const FW = tickerFieldResolvers.WorkerWakeSettings;
@@ -46,14 +48,14 @@ const FW = tickerFieldResolvers.WorkerWakeSettings;
 /** The write tools, for the caller-session gate's bookkeeping and tests. */
 export const TICKER_WRITE_TOOLS = [
   'hadron_ticker_create', 'hadron_ticker_update', 'hadron_ticker_delete',
-  'hadron_ticker_subscribe', 'hadron_ticker_unsubscribe',
+  'hadron_ticker_subscribe', 'hadron_ticker_unsubscribe', 'hadron_ack_wakes',
 ] as const;
 /**
  * Actor-neutral tools (listed in ACTOR_NEUTRAL_TOOLS): each takes its own
  * optional `session`. `hadron_worker_wake_settings` is a read until it is given
  * something to set, and then enforces the write rule itself.
  */
-export const TICKER_READ_TOOLS = ['hadron_ticker_list', 'hadron_worker_wake_settings'] as const;
+export const TICKER_READ_TOOLS = ['hadron_ticker_list', 'hadron_worker_wake_settings', 'hadron_due_wakes'] as const;
 
 function textResult(text: string, isError = false) {
   return { ...(isError ? { isError: true as const } : {}), content: [{ type: 'text' as const, text }] };
@@ -307,5 +309,57 @@ export function registerTickerTools(server: McpServer, deps: { db: PrismaClient;
       return write('hadron_worker_wake_settings', session, async (ctx) =>
         render(ctx, await M.setWorkerWakeSettings({}, { workerRef: w, input }, ctx), 'Updated'));
     },
+  );
+  server.tool(
+    'hadron_due_wakes',
+    'Which workers are due a wake right now (cor:agt:080:08-:12), for a router. Counts and message ranges only, never ' +
+      'bodies, authors or mention text. Each wake merges every reason (a mention, or a ticker\'s tick) with one seq range per ' +
+      'channel and a PROOF: deliver the nudge, then pass the proof to hadron_ack_wakes. Reading wakes never moves anyone\'s ' +
+      'read position. Allowed for a worker\'s holder (their workers) and whoever manages the App (all). Never due: a retired, ' +
+      'paused or dormant worker; an unavailable, unheld or session-less worker IS still due. `dormant` lists dormant workers ' +
+      'with mentions waiting. A channel you cannot read is left out entirely.',
+    {
+      appRef: z.string().describe('The team App (id or URN).'),
+      workerRefs: z.array(z.string()).optional().describe('Only these workers. Omit for every worker you may read.'),
+      first: z.number().int().optional().describe('Workers per page (default 100, max 200).'),
+      after: z.string().optional().describe('The previous page\'s endCursor.'),
+      session: SESSION_READ,
+    },
+    async ({ session, appRef, ...rest }) =>
+      read(session, async (ctx) => {
+        const page = await Q.dueWakes({}, { appRef, ...rest }, ctx);
+        const lines: string[] = [];
+        for (const w of page.wakes) {
+          const why = (w.reasons as Row[]).map((r) => (r.kind === 'TICK' ? `tick ${r.ticker?.name ?? ''}` : 'mention')).join(' + ');
+          const ch = (w.channels as Row[]).map((c) => `${c.channel.name} ${c.fromSeq}-${c.throughSeq}`).join(', ');
+          lines.push(
+            `- ${w.worker.name}: ${why} · ${w.unread} unread (${w.unreadMentions} mention${w.unreadMentions === 1 ? '' : 's'}) · ${ch}` +
+              `${w.availability ? ` · ${w.availability.state}${w.availability.reason ? ` (${w.availability.reason})` : ''}` : ''}\n  proof: ${w.proof}`,
+          );
+        }
+        const dormant = (page.dormant as Row[]).map((d) => `${d.worker.name} (${d.mentions})`);
+        return [
+          page.wakes.length ? `${page.wakes.length} due:\n${lines.join('\n')}` : 'Nothing is due.',
+          page.status === 'WAKE_BUDGET_EXHAUSTED'
+            ? `WAKE_BUDGET_EXHAUSTED: ${page.withheld} more wake(s) are due but held back by the App's daily budget; they stay due.`
+            : null,
+          dormant.length ? `Dormant, with mentions waiting: ${dormant.join(', ')}` : null,
+          page.pageInfo.hasNextPage ? `More workers: after = ${page.pageInfo.endCursor}` : null,
+        ].filter(Boolean).join('\n');
+      }),
+  );
+
+  server.tool(
+    'hadron_ack_wakes',
+    'Record that wakes were delivered (cor:agt:080:16, :17). Pass the proofs hadron_due_wakes gave you, after delivering the ' +
+      'nudges. Raises each channel\'s delivered-through and records each tick; NEVER moves a read position. Only the requester ' +
+      'named in a proof may acknowledge it, within 15 minutes; a stale, foreign or unknown-version proof is refused and ' +
+      'nothing is written. A wake you do not acknowledge stays due.',
+    { proofs: z.array(z.string()).describe('Wake proofs from hadron_due_wakes.'), session: SESSION_WRITE },
+    async ({ session, proofs }) =>
+      write('hadron_ack_wakes', session, async (ctx) => {
+        const r = await M.acknowledgeWakes({}, { proofs }, ctx);
+        return `Acknowledged ${r.acknowledged}${r.unchanged ? ` (${r.unchanged} already delivered)` : ''}.`;
+      }),
   );
 }

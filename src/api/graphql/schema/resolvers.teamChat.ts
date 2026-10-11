@@ -35,6 +35,7 @@ import type { Prisma } from '../../../generated/prisma/index.js';
 import type { InputJsonValue } from '../../../generated/prisma/runtime/library.js';
 import { generateId } from '../../../lib/id.js';
 import { appendChatMessage } from '../../../lib/chatRoot.js';
+import { wakeStampsFor } from '../../../lib/tickers/postStamp.js';
 import { deriveEdgeLoc, sanitizeLocAtom } from '../../../lib/edgeLoc.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { resolveChannelRefId } from '../../../lib/entityRef/channelRef.js';
@@ -929,7 +930,11 @@ async function postToChannelRoot(
   }
 
   const mentions = extractMentions(body);
-  if (mentions.length > 0) envelope.mentions = mentions;
+  if (mentions.length > 0) {
+    envelope.mentions = mentions;
+    // #1748 (N3): who may wake everyone is decided NOW and stamped; nothing re-decides it later.
+    Object.assign(envelope, await wakeStampsFor(ctx, app, typeof envelope.authorWorkerId === 'string' ? envelope.authorWorkerId : null, mentions));
+  }
   if (replyToSeq != null) envelope.replyToSeq = replyToSeq;
 
   const messagesLoc = `${root.loc}:messages`;

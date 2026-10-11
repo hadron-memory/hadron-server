@@ -6638,6 +6638,8 @@ export const typeDefs = `#graphql
 
     "#1747 — one worker's wake settings (defaults when it has none), readable by the App's participants (hrn:node:hadronmemory.com:specs:cor:agt:080:03)."
     workerWakeSettings(workerRef: String!): WorkerWakeSettings!
+    "#1748 — the wakes due now (hrn:node:hadronmemory.com:specs:cor:agt:080:08). Counts and seq ranges only; reads nothing it does not return."
+    dueWakes(appRef: String!, workerRefs: [String!], first: Int, after: String): DueWakePage!
 
     """
     #1705 — a team App's agent tasks, newest first. Filters combine with AND;
@@ -8393,6 +8395,8 @@ export const typeDefs = `#graphql
     the App, in either direction. Never the may-subscribe-workers grant.
     """
     setWorkerWakeSettings(workerRef: String!, input: WorkerWakeSettingsInput!): WorkerWakeSettings!
+    "#1748 — record that wakes were delivered (hrn:node:hadronmemory.com:specs:cor:agt:080:16). Never moves a read position."
+    acknowledgeWakes(proofs: [String!]!): AcknowledgeWakesResult!
 
     "#1747 — give a worker a named App grant (hrn:node:hadronmemory.com:specs:cor:agt:080:24). Whoever manages the App only. Idempotent."
     grantApp(appRef: String!, workerRef: String!, name: AppGrantName!): AppGrant!
@@ -11425,6 +11429,77 @@ export const typeDefs = `#graphql
     TICKER_SUBSCRIBE_WORKERS
   }
 
+  enum DueWakeStatus {
+    OK
+    "The App's daily wake budget is spent; the withheld wakes stay due (hrn:node:hadronmemory.com:specs:cor:agt:080:15)."
+    WAKE_BUDGET_EXHAUSTED
+  }
+
+  enum WakeKind {
+    MENTION
+    TICK
+  }
+
+  "#1748 — one page of due wakes. Counts and ranges only (hrn:node:hadronmemory.com:specs:cor:agt:080:23)."
+  type DueWakePage {
+    status: DueWakeStatus!
+    "Wakes held back by the daily budget; each stays due."
+    withheld: Int!
+    wakes: [DueWake!]!
+    "Dormant workers with relevant mentions, and how many: withheld, never dropped silently."
+    dormant: [DormantWithheld!]!
+    pageInfo: DueWakePageInfo!
+  }
+
+  type DueWakePageInfo {
+    hasNextPage: Boolean!
+    endCursor: String
+  }
+
+  "One merged wake: every reason, one seq range per channel. A wake never moves a read position."
+  type DueWake {
+    worker: Worker!
+    reasons: [WakeReason!]!
+    channels: [DueChannel!]!
+    unread: Int!
+    unreadMentions: Int!
+    "Carried, never an exclusion (hrn:node:hadronmemory.com:specs:cor:agt:060:02)."
+    availability: DueWakeAvailability
+    "Hand this back to acknowledgeWakes after delivering. Bound to the requester; good for 15 minutes."
+    proof: String!
+  }
+
+  type DueWakeAvailability {
+    state: String!
+    reason: String
+    until: DateTime
+    setAt: DateTime!
+  }
+
+  type DueChannel {
+    channel: Channel!
+    fromSeq: Int!
+    throughSeq: Int!
+    latestMentionSeq: Int
+  }
+
+  type DormantWithheld {
+    worker: Worker!
+    mentions: Int!
+  }
+
+  type WakeReason {
+    kind: WakeKind!
+    ticker: Ticker
+  }
+
+  type AcknowledgeWakesResult {
+    "Wakes that moved the delivery record."
+    acknowledged: Int!
+    "Repeats: already delivered, counted nowhere twice."
+    unchanged: Int!
+  }
+
   "#1747 — whether the team-chat post for a grant use went out."
   enum GrantAnnouncement {
     POSTED
@@ -11459,6 +11534,10 @@ export const typeDefs = `#graphql
     relevance: TickerRelevance!
     enabled: Boolean!
     owner: ActorRef
+    "The next moment this ticker ticks, quiet hours skipped; null when disabled."
+    nextTickAt: DateTime
+    "The moment of the current tick; null when none has fired or it cannot tick."
+    lastTickAt: DateTime
     "Live subscriptions."
     subscribers(first: Int, after: String): TickerSubscriptionPage!
     createdAt: DateTime!
@@ -11501,6 +11580,8 @@ export const typeDefs = `#graphql
     subscriptions: [TickerSubscription!]!
     "The fastest live subscription on an enabled ticker; null when none."
     effectiveCadenceSeconds: Int
+    "None of the worker's sessions has had activity within the App's dormancy period (hrn:node:hadronmemory.com:specs:cor:agt:080:07). A dormant worker is never woken."
+    dormant: Boolean!
   }
 
   "#1747 — an App ticker settings (hrn:node:hadronmemory.com:specs:cor:agt:080:05)."
