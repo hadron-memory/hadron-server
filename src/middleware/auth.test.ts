@@ -629,3 +629,12 @@ describe('resolveAuthContext', () => {
   });
 
 });
+
+it('passes only a signed callback login claim through JWT authentication', async () => {
+  const user = await db.user.create({ data: { handle: 'fresh-login', roles: ['READER'] } });
+  const login = { at: Date.now() - 10_000, method: 'google' };
+  const token = await makeJwt({ sub: user.id, login });
+  expect((await resolveAuthContext(makeReq(`Bearer ${token}`), db)).login).toEqual(login);
+  const ordinary = await makeJwt({ sub: user.id });
+  expect((await resolveAuthContext(makeReq(`Bearer ${ordinary}`), db)).login).toBeUndefined();
+});

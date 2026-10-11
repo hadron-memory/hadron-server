@@ -1,7 +1,8 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../../test/helpers.js';
-import { mergeUsers, AUDIT_USER_COLUMNS } from './mergeUsers.js';
+import { mergeUsers } from '../../test/mergeConsent.js';
+import { AUDIT_USER_COLUMNS } from './mergeUsers.js';
 
 type AuditColumn = { table_name: string; column_name: string };
 
@@ -66,7 +67,7 @@ describe('mergeUsers audit actor registry', () => {
     const [source, target, actor] = await Promise.all([
       db.user.create({ data: { handle: 'audit-merge-source' } }),
       db.user.create({ data: { handle: 'audit-merge-target' } }),
-      db.user.create({ data: { handle: 'audit-merge-actor' } }),
+      db.user.create({ data: { handle: 'audit-merge-actor', roles: ['ADMIN'] } }),
     ]);
     await db.user.update({ where: { id: source.id }, data: { createdBy: source.id } });
     const stampedUser = await db.user.create({

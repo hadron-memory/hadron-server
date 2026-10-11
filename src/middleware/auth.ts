@@ -5,11 +5,13 @@ import type { Request } from 'express';
 import type { Prisma, PrismaClient, UserApiKey } from '../generated/prisma/index.js';
 import { lockAuthorityAnchors } from '../lib/auth/authorityAnchors.js';
 import { verifyJwt } from '../auth/jwt.js';
+import type { HadronJwtPayload } from '../auth/jwt.js';
 import { canImpersonate, type ImpersonationContext } from '../lib/auth/impersonation.js';
 import { LIVE_ORG_MEMBERSHIP } from '../lib/auth/liveOrgMembership.js';
 import { publishActor } from '../lib/requestActor.js';
 
 export interface AuthContext {
+  login?: HadronJwtPayload['login'];
   clientId?: string;       // "github:<username>" / "email:<addr>" — only set for OAuth/JWT users
   userId?: string;         // User.id — only set for OAuth/JWT users
   appId?: string;          // App.id — set when caller authenticated via an App Key
@@ -529,6 +531,7 @@ async function resolveJwt(token: string, db: PrismaClient): Promise<AuthContext>
     return {
       clientId,
       userId: payload.sub,
+      login: payload.login,
       roles: validatedUserRoles(user.roles),
     };
   } catch {
