@@ -152,6 +152,9 @@ describe('ticker tools: who acts', () => {
     // Its own settings are its to change, and the person's plain session still reaches both.
     expect(text(await sh.callTool('hadron_worker_wake_settings', { workerRef: liam.id, mentions: 'OFF', session: asLiam.id }))).toMatch(/^Updated\./);
     expect(text(await sh.callTool('hadron_worker_wake_settings', { workerRef: anne.id, mentions: 'OFF', session: asHolder.id }))).toMatch(/^Updated\./);
+    // hadron_ack_wakes is actor-neutral too: it runs as the named session and reaches the proof check.
+    expect(code(text(await sh.callTool('hadron_ack_wakes', { proofs: ['x'], session: asLiam.id })))).toBe('WAKE_PROOF_INVALID');
+    expect(code(text(await sh.callTool('hadron_ack_wakes', { proofs: ['x'] })))).toBe('SESSION_REQUIRED');
   });
 
   it('tells the caller when a grant use could not be announced', async () => {
