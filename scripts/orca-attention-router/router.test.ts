@@ -26,6 +26,13 @@ const CLAUDE_FRESH = [' ▐▛███▛█   Claude Code v2.1.296', '▝▜�
 const CODEX_FRESH = ['│ ✨ Update available! 0.162.0 -> 0.162.1         │', '  >_ OpenAI Codex (v0.162.0)', '     ~/orca/workspaces/hadron-server/dara', '  permissions: YOLO mode', '› Ask Codex to do anything', '  GPT-6.1-Sol default · ~/orca/workspaces/hadron-server/dara', '  ? for shortcuts'];
 /** Empty prompt, no busy marker, and nothing positively idle either — must HOLD. */
 const CLAUDE_UNKNOWN_QUIET = ['  some status output nobody classified', '  another unrecognized line', RULE, '❯ ', RULE, CLAUDE_HINT];
+
+/** REAL idle screens captured live 2026-10-11 (Yuri's first-night production report,
+ * #8165): ordinary assistant output text above the done-marker - the shape the
+ * synthetic fixtures lacked, which the whole-window rule fail-closed to unknown. */
+const CLAUDE_IDLE_REAL_XAN = ["  Queued for my gate: Bindi's remaining attach-steps, Dan's 12-follow-up batch,", '  Session open.', '✻ Brewed for 2m 36s · done 3:20 AM', RULE, '❯ ', RULE, CLAUDE_HINT];
+const CLAUDE_IDLE_REAL_LIAM = ['  both types.', "  file\". I've marked team chat read through #8177, the worktree is clean, and I'm standing by.", '✻ Cooked for 9m 42s · done 3:26 AM', '  ✔ Update installed · Restart to update', RULE, '❯ ', RULE, CLAUDE_HINT];
+const CLAUDE_IDLE_COMPACTED = ['✻ Compacted while idle', RULE, '❯ ', RULE, CLAUDE_HINT];
 const withPrompt = (screen: string[], marker: string, text: string) => {
   const i = screen.map((l) => l.trimStart().startsWith(marker)).lastIndexOf(true);
   return [...screen.slice(0, i), `${marker} ${text}`, ...screen.slice(i + 1)];
@@ -405,6 +412,33 @@ describe('Orca attention router — untracked terminals: unknown is not busy (#7
     expect(out.held.Eli).toContain('unknown idle state');
     expect(out.held.Eli).toContain('unrecognized chrome');
     expect(fake.sent).toEqual([]);
+  });
+
+  it('a REAL idle screen — ordinary output text above the done-marker — DELIVERS (production calibration, #8165)', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli', 'claude', undefined, false);
+    fake.attention.workers = [worker('w-eli', 'Eli')];
+    fake.screens.set('term_eli', { tail: CLAUDE_IDLE_REAL_XAN }); // captured live (Xan, 2026-10-11)
+    const out = poll(c);
+    expect(out).toMatchObject({ nudged: ['Eli'], adopted: true });
+  });
+
+  it('a REAL idle screen with an update banner after the done-marker DELIVERS (#8165)', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli', 'claude', undefined, false);
+    fake.attention.workers = [worker('w-eli', 'Eli')];
+    fake.screens.set('term_eli', { tail: CLAUDE_IDLE_REAL_LIAM }); // captured live (Liam, 2026-10-11)
+    const out = poll(c);
+    expect(out).toMatchObject({ nudged: ['Eli'], adopted: true });
+  });
+
+  it('a Compacted-while-idle banner is positive idle chrome (#8165)', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli', 'claude', undefined, false);
+    fake.attention.workers = [worker('w-eli', 'Eli')];
+    fake.screens.set('term_eli', { tail: CLAUDE_IDLE_COMPACTED });
+    const out = poll(c);
+    expect(out).toMatchObject({ nudged: ['Eli'], adopted: true });
   });
 });
 
