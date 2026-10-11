@@ -36,7 +36,7 @@
 import type { PrismaClient } from '../../generated/prisma/index.js';
 import { deserializeTags } from '../db/provider.js';
 import { withMirrorCheckout } from './gitMirrorCheckout.js';
-import { removeNodeFile, writeNodeFile, type NodeForGit } from './writeNodeToGit.js';
+import { removeNodeFile, writeNodeFile, nodePayloadHasCiphertext, type NodeForGit } from './writeNodeToGit.js';
 
 /** One relocated node: its stable id and the loc it occupied before the move. */
 export interface MovedNodeRef {
@@ -126,6 +126,9 @@ async function mirrorMove(
     await withMirrorCheckout(
       {
         memoryId: destMemoryId,
+        // Background move rendering carries no request key. Source-path
+        // deletion below deliberately omits this flag because it writes no bytes.
+        nodeWriteKeyAvailable: false,
         clientId,
         commitSubject: crossMemory
           ? `Move in ${label} from ${srcMem?.urn ?? 'another memory'}`
@@ -145,6 +148,12 @@ async function mirrorMove(
           include: { outgoingEdges: { include: { target: true } } },
         });
         const live = rows.filter((r) => r.memoryId === destMemoryId);
+        // The flag can change while rows load. Apply the shared payload belt
+        // to the whole batch before removing ANY old paths (#1273).
+        if (live.some(nodePayloadHasCiphertext)) {
+          console.warn(`[git-mirror] Deferring move into memory ${destMemoryId}: ciphertext payload`);
+          return false;
+        }
         // Same-memory: the old paths live in THIS repo, so remove them in the
         // same commit.
         //
