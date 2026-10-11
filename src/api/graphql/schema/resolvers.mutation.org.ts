@@ -13,6 +13,7 @@ import {
 import { propagateOrgUrnRename } from '../../../lib/org/propagateOrgUrnRename.js';
 import { renameOwnerNamespacedUrns } from '../../../lib/ownerUrnRename.js';
 import { mergeUsers } from '../../../controller/operations/mergeUsers.js';
+import { beginUserMergeConsent, approveUserMergeConsent } from '../../../lib/userMergeConsent.js';
 import {
   deleteUserAccount,
   SoleOrgOwnerError,
@@ -149,14 +150,26 @@ export const orgMutations = {
       );
     },
 
+    beginMergeUsersConsent: async (_: unknown, { source, target }: { source: string; target: string }, ctx: Context) => {
+      requireRole(ctx, 'ADMIN');
+      if (!ctx.userId || ctx.apiKeyId || ctx.sessionId || ctx.impersonation || ctx.appId) throw new GraphQLError('Forbidden', { extensions: { code: 'FORBIDDEN' } });
+      const [s, t] = await Promise.all([resolveUserRef(ctx.db, source), resolveUserRef(ctx.db, target)]);
+      return beginUserMergeConsent(ctx.db, s.id, t.id, ctx.userId);
+    },
+
+    approveMergeUsersConsent: async (_: unknown, { proof, source, target }: { proof: string; source: string; target: string }, ctx: Context) =>
+      approveUserMergeConsent(ctx, proof, source, target),
+
     mergeUsers: async (
       _: unknown,
-      { input }: { input: { source: string; target: string } },
+      { input }: { input: { source: string; target: string; consentProof?: string } },
       ctx: Context,
     ) => {
-      // #1642 / DU-1: containment until source-user consent is designed.
+      // #1642: platform administration plus both accounts' fresh-login consent.
       // Gate before resolving either account so denied callers learn no refs.
       requireRole(ctx, 'ADMIN');
+      if (!input.consentProof) throw new GraphQLError('Both accounts must consent before merging.', { extensions: { code: 'MERGE_CONSENT_REQUIRED' } });
+      if (!ctx.userId || ctx.apiKeyId || ctx.sessionId || ctx.impersonation || ctx.appId) throw new GraphQLError('Forbidden', { extensions: { code: 'FORBIDDEN' } });
       const [{ id: sourceUserId }, { id: targetUserId }] = await Promise.all([
         resolveUserRef(ctx.db, input.source),
         resolveUserRef(ctx.db, input.target),
@@ -171,6 +184,7 @@ export const orgMutations = {
         targetUserId,
         actorUserId: ctx.userId ?? null,
         mergeGlobalRoles: true,
+        consentProof: input.consentProof,
       });
     },
 

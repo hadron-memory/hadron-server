@@ -205,3 +205,17 @@ describe('GET /auth/microsoft', () => {
     expect(res.status).toBe(400);
   });
 });
+
+it('#1642 seats the original login evidence into the HTTP session JWT', async () => {
+  const login = { at: Date.now() - 30_000, method: 'github' as const };
+  const code = await issueLoginCode({ userId, redirect: '/', isNew: false, login });
+  const response = await postJson('/auth/session', { code });
+  expect(response.status).toBe(200);
+  const { token } = await response.json() as { token: string };
+  const { verifyJwt } = await import('../../auth/jwt.js');
+  expect((await verifyJwt(token)).login).toEqual(login);
+  const plain = await issueLoginCode({ userId, redirect: '/', isNew: false });
+  const plainResponse = await postJson('/auth/session', { code: plain });
+  const plainBody = await plainResponse.json() as { token: string };
+  expect((await verifyJwt(plainBody.token)).login).toBeUndefined();
+});

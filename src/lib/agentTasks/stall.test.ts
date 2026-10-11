@@ -23,7 +23,7 @@ import { runAsActor } from '../requestActor.js';
 import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
 import { taskStallTick } from '../../jobs/taskStallEvaluator.js';
 import { evaluateStalls, isSerializationFailure, raiseStallAlarm, stallCandidates, STALL_WINDOW_DEFAULTS, wakeDueOwners } from './stall.js';
-import { mergeUsers } from '../../controller/operations/mergeUsers.js';
+import { mergeUsers } from '../../test/mergeConsent.js';
 import { loadAvailableForWork } from './availability.js';
 
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({
@@ -680,6 +680,8 @@ describe('per-App stall windows and scope', () => {
 describe('Diego P2 on #1720 — an account merge never strands an alarm\'s acknowledgement (option C, #1715)', () => {
   let tUser: { id: string };
   beforeEach(async () => {
+    // Merge execution now requires a live platform admin, independently of role transfer.
+    await db.user.update({ where: { id: admin.id }, data: { roles: ['ADMIN'] } });
     tUser = await db.user.create({ data: { githubId: 900_000 + Math.floor(Math.random() * 99_999), githubUsername: `st-t-${generateId()}`, roles: ['READER'] } });
     await db.appMember.create({ data: { appId: app.id, userId: tUser.id, role: 'member' } });
   });

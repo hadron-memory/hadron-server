@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../../test/helpers.js';
-import { mergeUsers } from '../../controller/operations/mergeUsers.js';
+import { mergeUsers } from '../../test/mergeConsent.js';
 import { hasAppRelationship } from '../auth/appRelationship.js';
 import { generateId } from '../id.js';
 import { waitForLockWaitersOfType } from '../../test/lockWait.js';
@@ -175,7 +175,8 @@ it('keeps sealed identity evidence intact across a real user merge without block
   await revoke(context(ownerId), revoked.id);
   const snapshots = await db.automationVersion.findMany({ where: { appId }, orderBy: { number: 'asc' } });
   expect(snapshots[2]).toMatchObject({ runAsUserId: ownerId, publishedBy: ownerId, approvedBy: ownerId, revokedBy: ownerId });
-  await mergeUsers(db, { sourceUserId: ownerId, targetUserId: adminId, actorUserId: readerId });
+  const executor = await db.user.create({ data: { roles: ['ADMIN'] } });
+  await mergeUsers(db, { sourceUserId: ownerId, targetUserId: adminId, actorUserId: executor.id });
   expect(await db.automationVersion.findMany({ where: { appId }, orderBy: { number: 'asc' } })).toEqual(snapshots);
   expect(await db.user.findUnique({ where: { id: ownerId } })).toMatchObject({ deletedAt: expect.any(Date) });
   expect(await db.user.findUnique({ where: { id: adminId } })).toMatchObject({ deletedAt: null });

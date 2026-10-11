@@ -5878,7 +5878,14 @@ export const typeDefs = `#graphql
     deleteSourceMem: Boolean = false
   }
 
+  type UserMergeConsentRequest {
+    proof: String!
+    expiresAt: DateTime!
+  }
+
   input MergeUsersInput {
+    "Single-use dual-login proof from beginMergeUsersConsent, approved by both accounts. Required at execution; absent refuses MERGE_CONSENT_REQUIRED."
+    consentProof: String
     "Source user — ID, bare handle, or fully-qualified user URN. Folded into 'target' and soft-deleted."
     source: String!
     "Target user — ID, bare handle, or fully-qualified user URN. The surviving user; target wins non-combinable conflicts while roles preserve the strongest live entitlement."
@@ -9185,7 +9192,11 @@ export const typeDefs = `#graphql
     endSession(id: ID!, summary: String, handoff: String, inputTokens: Int, outputTokens: Int, turnCount: Int, errorCount: Int): Session!
 
     """
-    Record a usage event
+    Record a usage event. A supplied session is attributed only when owned
+    by the caller (no admin or impersonation bypass). Missing, deleted or
+    unowned session references are recorded without session attribution.
+    Owned ended, expired or idle sessions accept late attribution without
+    counting it as activity. The existing READER role gate still applies.
     """
     recordUsage(event: UsageEventInput!): Boolean!
 
@@ -9204,8 +9215,13 @@ export const typeDefs = `#graphql
     Consolidate a duplicate account into a surviving user. Source-only
     identities and relationships move; duplicate role-bearing relationships
     preserve the strongest live entitlement. The source is soft-deleted.
-    Platform admin only. The resulting merge is global; organization
-    administration does not authorize account consolidation.
+    Platform admin with an unbound user JWT only; API keys, Apps, impersonation
+    and session-bound callers refuse FORBIDDEN. The resulting merge is global;
+    organization administration does not authorize account consolidation. Both accounts must
+    approve the exact ordered pair after fresh login, within 15 minutes.
+    The proof is single-use, consumed atomically before transfers, and recorded
+    with the merge. Invalid or missing proof refuses MERGE_CONSENT_REQUIRED.
+    There is no administrator substitute or recovery path.
 
     Records the merge (#1715). User ids stored inside decisions and decision
     logs are never rewritten, since they are authenticated; readers follow
@@ -9218,6 +9234,11 @@ export const typeDefs = `#graphql
     the alarms, then merge.
     """
     mergeUsers(input: MergeUsersInput!): User!
+
+    "A platform admin using an unbound user JWT begins an exact ordered-pair, full-consolidation consent, valid for 15 minutes; API keys, Apps, impersonation and session-bound callers refuse FORBIDDEN. Returns its opaque proof once."
+    beginMergeUsersConsent(source: String!, target: String!): UserMergeConsentRequest!
+    "Each account approves with its own JWT from a verified login at or after consent creation (millisecond resolution). API keys, Apps, impersonation and any session-bound caller cannot approve. Source and target name the exact ordered pair. No admin substitute."
+    approveMergeUsersConsent(proof: String!, source: String!, target: String!): Boolean!
 
     """
     Delete a user account (self-serve account deletion, Apple 5.1.1(v) /
@@ -11261,9 +11282,11 @@ export const typeDefs = `#graphql
     endAgentSession(sessionId: ID!): Boolean!
 
     """
-    Link an anonymous memory to a real user (converts session memory
-    ownership). Providing dataKey encrypts the memory in place atomically
-    with the link.
+    Link this App's live plaintext anonymous memory to a real user.
+    Providing dataKey claims private ownership and encrypts the enumerated live
+    nodes with the link; remaining fields and history complete in bounded passes. After a committed claim,
+    interrupted completion allows the strict owner or owning App key to call
+    encryptMemory with the existing key. A registered holding cannot be linked again.
 
     Accepts the entity's ID or URN.
     """
@@ -11273,9 +11296,11 @@ export const typeDefs = `#graphql
     Convert a plaintext PRIVATE memory to encrypted (spec 041, caller-held
     keys). Exactly one of dataKey (base64, 32 bytes) / passphrase (scrypt-
     derived; salt + params stored on the memory, the key itself never).
-    Owner or org-App-key. All node content/abstract/data is re-written as
-    ciphertext in one transaction. One-way without the key: the server
-    cannot recover the content.
+    First encryption requires the strict owner. The owning App key may only
+    complete already-encrypted private memory using its existing dataKey and
+    matching verifier; impersonation and sibling Apps grant no authority. Live and
+    historical node fields are converted in bounded locked passes. One-way
+    without the key: the server cannot recover the content.
 
     Accepts the entity's ID or URN.
     """

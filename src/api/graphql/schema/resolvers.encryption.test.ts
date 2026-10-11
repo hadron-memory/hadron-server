@@ -568,7 +568,7 @@ describe('encryptMemory', () => {
     const encrypted = await resolvers.Mutation.encryptMemory(
       {},
       { memoryId: session.memoryId!, dataKey: key },
-      appCtx(plaintextApp.id),
+      sessionCtx,
     );
     expect(encrypted.isEncrypted).toBe(true);
 
@@ -592,7 +592,7 @@ describe('encryptMemory', () => {
     const completed = await resolvers.Mutation.encryptMemory(
       {},
       { memoryId: session.memoryId!, dataKey: key },
-      appCtx(secretApp.id),
+      await sessionOwnerCtx(secretApp.id, session.id),
     );
     expect(completed.keyVerifier).toMatch(/^enc:v1:/);
   });
@@ -605,7 +605,7 @@ describe('encryptMemory', () => {
     );
     await db.memory.update({ where: { id: session.memoryId! }, data: { keyVerifier: null } });
     await expect(resolvers.Mutation.encryptMemory(
-      {}, { memoryId: session.memoryId!, dataKey: key }, appCtx(secretApp.id),
+      {}, { memoryId: session.memoryId!, dataKey: key }, await sessionOwnerCtx(secretApp.id, session.id),
     )).rejects.toMatchObject({ extensions: { code: 'BAD_UNLOCK_INPUT' } });
   });
 
@@ -654,7 +654,7 @@ describe('encryptMemory', () => {
     });
 
     await expect(resolvers.Mutation.encryptMemory(
-      {}, { memoryId: first.memoryId!, dataKey: wrongKey }, appCtx(secretApp.id),
+      {}, { memoryId: first.memoryId!, dataKey: wrongKey }, await sessionOwnerCtx(secretApp.id, first.id, false),
     )).rejects.toMatchObject({ extensions: { code: 'BAD_UNLOCK_INPUT', memoryId: first.memoryId } });
     expect((await db.memory.findUniqueOrThrow({ where: { id: first.memoryId! } })).keyVerifier).toBeNull();
     expect((await db.node.findUniqueOrThrow({ where: { id: original.id } })).content).toBe(beforeOriginal.content);
@@ -691,13 +691,13 @@ describe('encryptMemory', () => {
     const encrypted = await resolvers.Mutation.encryptMemory(
       {},
       { memoryId: memoryRow.urn, dataKey: key },
-      appCtx(plaintextApp.id),
+      sessionCtx,
     );
     expect(encrypted.isEncrypted).toBe(true);
     expect(encrypted.id).toBe(session.memoryId);
   });
 
-  it('rejects encrypting a class=personal memory even via an App key (#516 grandfather retired)', async () => {
+  it('rejects an owner encrypting a class=personal memory (#516 grandfather retired)', async () => {
     // A plaintext USER_ID memory is class='personal'. Pre-#516 an App key could
     // grandfather-encrypt it; now 'private' is the only encryptable class.
     const session = await resolvers.Mutation.startAgentSession(
@@ -713,7 +713,7 @@ describe('encryptMemory', () => {
       resolvers.Mutation.encryptMemory(
         {},
         { memoryId: session.memoryId!, dataKey: key },
-        appCtx(plaintextApp.id),
+        await sessionOwnerCtx(plaintextApp.id, session.id),
       ),
     ).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
   });
