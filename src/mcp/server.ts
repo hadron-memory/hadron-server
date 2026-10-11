@@ -137,6 +137,7 @@ import {
   canReadMemory,
   canWriteToMemory,
   EXPLICIT_REF,
+  explainWriteRefusal,
   filterReadableMemoryIds,
   getAccessibleMemoryIds,
   getMemoryAccess,
@@ -801,7 +802,7 @@ export async function addEdge(args: {
   }
 
   if (!(await canWriteToMemory(db, auth, sourceNode.memoryId, EXPLICIT_REF))) {
-    return { error: 'Write access denied for source memory.' };
+    return { error: `Write access denied for source memory.${await explainWriteRefusal(db, auth, sourceNode.memoryId)}` };
   }
 
   let targetNodeId: string;
@@ -855,7 +856,7 @@ export async function addEdge(args: {
       return `Source node not found: "${rawSource}".`;
     }
     if (!(await canWriteToMemory(tx as typeof db, auth, sourceNode.memoryId, EXPLICIT_REF))) {
-      return 'Write access denied for source memory.';
+      return `Write access denied for source memory.${await explainWriteRefusal(tx as typeof db, auth, sourceNode.memoryId)}`;
     }
     if (!(await canReadMemory(tx as typeof db, auth, target.memoryId, EXPLICIT_REF))) {
       return `Edge target not found: "${rawTarget}"`;
@@ -3750,7 +3751,7 @@ export function createMcpServerInstance(
       }
 
       if (!(await canWriteToMemory(db, auth, memoryId, EXPLICIT_REF))) {
-        return textResult('Write access denied for this memory.');
+        return textResult(`Write access denied for this memory.${await explainWriteRefusal(db, auth, memoryId)}`);
       }
 
       const parentMemoryState = await db.memory.findUniqueOrThrow({
@@ -5562,7 +5563,7 @@ export function createMcpServerInstance(
       }
 
       if (!(await canWriteToMemory(db, auth, memoryId, EXPLICIT_REF))) {
-        return textResult('Write access denied for this memory.');
+        return textResult(`Write access denied for this memory.${await explainWriteRefusal(db, auth, memoryId)}`);
       }
 
       // #1201 — the GOVERNED-KIND gate, on the state this create would PRODUCE.
@@ -6127,7 +6128,7 @@ export function createMcpServerInstance(
       // a membership oracle (Gemini review). Gate on the resolved memory.id
       // first — matches hadron_create_node's auth-first ordering.
       if (!(await canWriteToMemory(db, auth, memory.id, EXPLICIT_REF))) {
-        return textResult('Write access denied for this memory.');
+        return textResult(`Write access denied for this memory.${await explainWriteRefusal(db, auth, memory.id)}`);
       }
       // Spec 049 S4: an in-place update takes no lock, so the gate is explicit.
       try {
@@ -7428,10 +7429,10 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       if (!existing) return textResult(`Node "${rawFrom}" not found.`);
 
       if (!(await canWriteToMemory(db, auth, fromMemory.id, EXPLICIT_REF))) {
-        return textResult('Write access denied for source memory.');
+        return textResult(`Write access denied for source memory.${await explainWriteRefusal(db, auth, fromMemory.id)}`);
       }
       if (toMemory.id !== fromMemory.id && !(await canWriteToMemory(db, auth, toMemory.id, EXPLICIT_REF))) {
-        return textResult('Write access denied for target memory.');
+        return textResult(`Write access denied for target memory.${await explainWriteRefusal(db, auth, toMemory.id)}`);
       }
 
       const isSameSlot = toLoc === fromLoc && toMemory.id === fromMemory.id;

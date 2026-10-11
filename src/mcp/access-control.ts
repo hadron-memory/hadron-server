@@ -1242,3 +1242,48 @@ export async function getAccessibleMemoryIds(
   const access = await getMemoryAccess(db, auth);
   return [...access.keys()];
 }
+
+/**
+ * Why a write the caller may not make was refused (#1774, #1640 DR = A item 2).
+ *
+ * Returns a sentence to append to the established "Write access denied"
+ * message, or '' when there is nothing safe to add. A cause is named ONLY for a
+ * caller who can read the memory: for anyone else the refusal stays the bare
+ * text, so it never says anything about a memory the caller cannot see. The
+ * text names the missing grant, never another principal or another tenant's App.
+ */
+export async function explainWriteRefusal(
+  db: PrismaClient,
+  auth: AuthContext,
+  memoryId: string,
+): Promise<string> {
+  if (!(await canReadMemory(db, auth, memoryId, EXPLICIT_REF))) return '';
+  const memory = await db.memory.findUnique({
+    where: { id: memoryId },
+    select: { class: true, appId: true, organizationId: true, ownerUserId: true, userId: true },
+  });
+  if (!memory) return '';
+
+  if (auth.impersonation) return ' An impersonation session is a read-only support view.';
+  if (isRunPrincipal(auth)) return ' An App run writes only within its own App\'s scope.';
+  if (auth.appId && auth.sessionId && !auth.userId) {
+    return ' A session-bound App key writes only its own session memory.';
+  }
+  if (memory.class === 'personal' || memory.class === 'private' || memory.ownerUserId !== null) {
+    return ' Only the memory\'s owner can write it.';
+  }
+  if (memory.appId !== null) {
+    return ' This memory belongs to an App: writing it needs participation in that App (hadron_list_apps, then hadron_set_active_app).';
+  }
+  if (memory.class === 'group') {
+    return ' Writing a group memory needs a MemoryMember writer or owner grant on it.';
+  }
+  if (memory.organizationId && auth.userId) {
+    const member = await db.orgMember.findFirst({
+      where: { organizationId: memory.organizationId, userId: auth.userId, ...LIVE_ORG_MEMBERSHIP },
+      select: { role: true },
+    });
+    if (member) return ` Your org role is ${member.role}; writing org memories needs CONTRIBUTOR or above.`;
+  }
+  return '';
+}
