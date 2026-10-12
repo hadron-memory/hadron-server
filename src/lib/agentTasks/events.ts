@@ -24,6 +24,9 @@ export const TASK_EVENT_TYPES = [
   'task.progress',
   'task.finished',
   'task.cancelled',
+  // #1754 — the backlog moves (cor:agt:050:02).
+  'task.parked',
+  'task.ready',
 ] as const;
 export type TaskEventType = (typeof TASK_EVENT_TYPES)[number];
 
@@ -57,7 +60,9 @@ export type TaskEventPayload =
   | { type: 'task.started' }
   | { type: 'task.progress' }
   | { type: 'task.finished'; outcome: string }
-  | { type: 'task.cancelled'; fromStatus: 'pending' | 'started'; openChildCount: number }
+  | { type: 'task.cancelled'; fromStatus: 'backlog' | 'pending' | 'started'; openChildCount: number }
+  | { type: 'task.parked' }
+  | { type: 'task.ready' }
   | { type: 'assignment.queued' }
   | { type: 'assignment.matched'; assignee: { workerId: string }; family: string; closeSessionWhenDone: boolean };
 
@@ -87,6 +92,8 @@ function payloadJson(e: TaskEventPayload): Prisma.InputJsonObject {
       return { outcome: e.outcome };
     case 'task.cancelled':
       return { fromStatus: e.fromStatus, openChildCount: e.openChildCount };
+    case 'task.parked':
+    case 'task.ready':
     case 'assignment.queued':
       return {};
     case 'assignment.matched':

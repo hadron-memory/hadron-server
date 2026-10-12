@@ -822,3 +822,12 @@ describe('PINNED until T5 (Rook P3-1 on #1720): escalation continues after the t
     expect((await wakes(a.id))[1].wokenAt).toEqual(at('10:30'));
   });
 });
+
+describe('#1754 — a backlog task raises no alarms and is never waited on (cor:agt:050:02)', () => {
+  it('past every window, unassigned and unmatched: the tick writes nothing', async () => {
+    await task({ status: 'backlog', ownerWorkerId: ada.id, createdAt: at('08:00'), startBy: at('08:30') });
+    await tick('12:00');
+    expect(await alarms()).toEqual([]);
+    expect(await db.agentTeamAlarmSchedule.count()).toBe(0);
+  });
+});

@@ -549,3 +549,19 @@ describe('concurrent runs never double-assign a task or a worker', () => {
     expect(await db.agentTeamEvent.count({ where: { type: 'assignment.matched' } })).toBe(1);
   });
 });
+
+// ── #1754 — a backlog task is never matched (cor:agt:050:02) ──────────────
+
+describe('#1754 — a backlog task is never matched (cor:agt:050:02)', () => {
+  it('a free, matching worker and a backlog task: the tick assigns nothing and writes no event', async () => {
+    await bind(baloo, 'codex', at('11:00'));
+    const t = await db.agentTask.create({
+      data: { appId: app.id, title: 'Parked', ownerUserId: mia.id, status: 'backlog', createdAt: at('11:00') },
+      select: { id: true },
+    });
+    expect(await taskMatcherTick(db, at('11:01'))).toEqual({ lost: 0, matched: 0 });
+    expect(await db.agentTask.findUniqueOrThrow({ where: { id: t.id } }))
+      .toMatchObject({ status: 'backlog', assigneeWorkerId: null, assigneeUserId: null });
+    expect(await db.agentTeamEvent.findMany({ where: { taskId: t.id } })).toEqual([]);
+  });
+});

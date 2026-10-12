@@ -62,6 +62,8 @@ type AvailabilityRow = Record<string, any>;
 export const AGENT_TASK_WRITE_TOOLS = [
   'hadron_task_create', 'hadron_task_assign', 'hadron_task_reassign', 'hadron_task_start',
   'hadron_task_progress', 'hadron_task_finish', 'hadron_task_cancel',
+  // #1754 — the backlog moves (cor:agt:050:02)
+  'hadron_task_park', 'hadron_task_make_ready',
   // #1706
   'hadron_alarm_ack', 'hadron_worker_availability_set', 'hadron_model_family_availability_set',
 ] as const;
@@ -289,7 +291,7 @@ export function registerAgentTaskTools(server: McpServer, deps: { db: PrismaClie
     'hadron_task_create',
     'Create an agent task in a team App (cor:agt:050). A ROOT task names appRef; any App participant may create one, ' +
       'and owns it unless an App manager names another owner. A CHILD task names parentTaskId; only the parent\'s ' +
-      'assignee may create one, and owns it. Omit assignee to leave it queued.',
+      'assignee may create one, and owns it. Omit assignee to leave it queued; pass status BACKLOG to park it instead.',
     {
       appRef: z.string().optional().describe('The team App (id or URN). Required for a root task.'),
       parentTaskId: z.string().optional().describe('The parent task, for a child task.'),
@@ -307,6 +309,9 @@ export function registerAgentTaskTools(server: McpServer, deps: { db: PrismaClie
       startBy: z.string().optional().describe('ISO date-time by which it should have started.'),
       tags: z.array(z.string()).optional(),
       closeSessionWhenDone: z.boolean().optional().describe('Default true (cor:agt:050:10).'),
+      status: z.enum(['PENDING', 'BACKLOG']).optional().describe(
+        '#1754 (cor:agt:050:02): PENDING (default) or BACKLOG — parked, unassigned, never queued. A BACKLOG task takes no assignee.',
+      ),
       session: SESSION_WRITE,
     },
     async ({ session, ...input }) =>
@@ -315,7 +320,7 @@ export function registerAgentTaskTools(server: McpServer, deps: { db: PrismaClie
 
   server.tool(
     'hadron_task_assign',
-    'Assign a queued task (pending, no assignee): the task\'s owner, or whoever manages the App (cor:agt:050:09). A task that already has an assignee is moved with hadron_task_reassign.',
+    'Assign a queued task (pending, no assignee): the task\'s owner, or whoever manages the App (cor:agt:050:09). Assigning a BACKLOG task moves it to pending. A task that already has an assignee is moved with hadron_task_reassign.',
     { taskId, assignee: party, closeSessionWhenDone: z.boolean().optional(), session: SESSION_WRITE },
     async ({ session, ...args }) =>
       write('hadron_task_assign', session, 'Assigned', (ctx) => M.assignAgentTask({}, args, ctx)),
@@ -362,10 +367,30 @@ export function registerAgentTaskTools(server: McpServer, deps: { db: PrismaClie
 
   server.tool(
     'hadron_task_cancel',
-    'Cancel a pending or started task: its owner, or whoever manages the App (cor:agt:050:09).',
+    'Cancel a pending, started or backlog task: its owner, or whoever manages the App (cor:agt:050:09).',
     { taskId, session: SESSION_WRITE },
     async ({ session, taskId: id }) =>
       write('hadron_task_cancel', session, 'Cancelled', (ctx) => M.cancelAgentTask({}, { taskId: id }, ctx)),
+  );
+
+  // ── #1754: the backlog moves (cor:agt:050:02) ─────────────────────────
+
+  server.tool(
+    'hadron_task_park',
+    'Park a queued task (pending, no assignee) in the backlog (cor:agt:050:02): unassigned, never matched, never waited on, ' +
+      'no alarms. Whoever may assign a task may park it (cor:agt:050:09).',
+    { taskId, session: SESSION_WRITE },
+    async ({ session, taskId: id }) =>
+      write('hadron_task_park', session, 'Parked', (ctx) => M.parkAgentTask({}, { taskId: id }, ctx)),
+  );
+
+  server.tool(
+    'hadron_task_make_ready',
+    'Make a backlog task ready to be worked (cor:agt:050:02): it becomes pending and enters the queue. Whoever may assign ' +
+      'a task may make it ready (cor:agt:050:09).',
+    { taskId, session: SESSION_WRITE },
+    async ({ session, taskId: id }) =>
+      write('hadron_task_make_ready', session, 'Ready', (ctx) => M.makeAgentTaskReady({}, { taskId: id }, ctx)),
   );
 
   server.tool(
@@ -390,7 +415,7 @@ export function registerAgentTaskTools(server: McpServer, deps: { db: PrismaClie
     'List a team App\'s agent tasks, newest first. Filters combine with AND. Readers: the App\'s participants (cor:agt:050:21).',
     {
       appRef: z.string().describe('The team App (id or URN).'),
-      status: z.array(z.enum(['PENDING', 'STARTED', 'FINISHED', 'CANCELLED'])).optional(),
+      status: z.array(z.enum(['BACKLOG', 'PENDING', 'STARTED', 'FINISHED', 'CANCELLED'])).optional(),
       owner: party.optional(),
       assignee: party.optional(),
       tag: z.string().optional(),
