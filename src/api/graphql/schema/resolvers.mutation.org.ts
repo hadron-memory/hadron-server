@@ -90,11 +90,18 @@ export const orgMutations = {
           // concurrent updateMyProfile can't let us read a stale handle and then
           // skip / mis-target the propagation (gemini review, #686 — mirrors the
           // org-rename lock). A plain SELECT would not serialize the two writers.
-          const locked = await tx.$queryRaw<{ handle: string | null; principal_id: string | null }[]>`
-            SELECT handle, principal_id FROM users WHERE id = ${userId} FOR UPDATE
+          const locked = await tx.$queryRaw<{ handle: string | null; principal_id: string | null; email: string | null }[]>`
+            SELECT handle, principal_id, email FROM users WHERE id = ${userId} FOR UPDATE
           `;
           if (locked.length === 0) throw new Error('Unauthenticated');
           const current = locked[0];
+          // Identity addresses require proof of control. Profile edits cannot
+          // establish or replace one; an unchanged form field is a no-op.
+          if (email !== undefined && email !== current.email) {
+            throw new GraphQLError('Email changes require verification and cannot be made through profile updates.', {
+              extensions: { code: 'BAD_USER_INPUT' },
+            });
+          }
           // `normalizeHandleOrNull` on the stored handle is a defensive no-op
           // (already normalized) that also yields the null oldHandle the
           // propagation uses to skip the entry_node_urn rewrites.
@@ -113,7 +120,6 @@ export const orgMutations = {
             data: {
               ...(name !== undefined ? { name } : {}),
               ...handleData,
-              ...(email !== undefined ? { email } : {}),
               ...principalData,
             },
           });
