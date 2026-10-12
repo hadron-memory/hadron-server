@@ -20,6 +20,7 @@ import { resolvers, type Context } from './resolvers.js';
 import { isAppParticipant } from './resolvers.helpers.js';
 import { mergeUsers } from '../../../test/mergeConsent.js';
 import { lockAuthorityAnchors } from '../../../lib/auth/authorityAnchors.js';
+import { ownerChain } from '../../../lib/agentTasks/stall.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -198,17 +199,40 @@ describe('createAgentTask — root tasks: any App participant (cor:agt:050:06)',
     expect(t.ownerUserId).toBe(member.id);
   });
 
-  it('a non-manager naming another owner is refused TASK_NOT_OWNER, valid ref or not (no oracle)', async () => {
-    await expectCode(create(ctx(member.id), { owner: { worker: 'Liam' } }), 'TASK_NOT_OWNER');
-    await expectCode(create(ctx(member.id), { owner: { user: outsider.id } }), 'TASK_NOT_OWNER');
+  it('#1757 (cor:agt:050:01, ruling #8183): a plain participant names another participating owner at create', async () => {
+    const byMember = await create(ctx(member.id), { owner: { worker: 'Liam' } });
+    expect(byMember.ownerWorkerId).toBe(liam.id);
+    expect(byMember.ownerUserId).toBeNull();
+    const byContrib = await create(ctx(contrib.id), { owner: { user: reader.id } });
+    expect(byContrib.ownerUserId).toBe(reader.id);
   });
 
-  it('whoever manages the App (cor:acl:010:01: org ADMIN/OWNER) may name another owner', async () => {
-    const a = await create(ctx(admin.id), { owner: { worker: 'Liam' } });
-    expect(a.ownerWorkerId).toBe(liam.id);
+  it('#1757: a worker creating a root task names its owner too (workers participate via their session)', async () => {
+    const t = await asWorker(anne, () => create(ctx(member.id), { owner: { worker: 'Liam' } }));
+    expect(t.ownerWorkerId).toBe(liam.id);
+    expect(t.createdByWorkerId).toBe(anne.id);
   });
 
-  it("#1731 (Holger, #7790): an owner-role AppMember and a platform admin manage the App; an org CONTRIBUTOR doesn't", async () => {
+  it('#1757: the named owner appears in the task.created event and the alarm chain (B4)', async () => {
+    const t = await create(ctx(member.id), { owner: { worker: 'Liam' } });
+    const ev = await events(t.id);
+    expect(ev[0].type).toBe('task.created');
+    const payload = ev[0].payload as { owner: { workerId: string }; hasAssignee: boolean };
+    expect(payload.owner).toEqual({ workerId: liam.id });
+    expect(payload.hasAssignee).toBe(false);
+    expect(await ownerChain(db, t.id)).toEqual([{ workerId: liam.id }]);
+  });
+
+  it("naming a non-participant, another App's worker, a retired worker or nobody at all answers TASK_OWNER_INVALID — the same refusal", async () => {
+    await expectCode(create(ctx(member.id), { owner: { worker: zed.id } }), 'TASK_OWNER_INVALID');
+    await expectCode(create(ctx(member.id), { owner: { user: outsider.id } }), 'TASK_OWNER_INVALID');
+    await expectCode(create(ctx(member.id), { owner: { worker: retired.id } }), 'TASK_OWNER_INVALID');
+    await expectCode(create(ctx(member.id), { owner: { worker: generateId() } }), 'TASK_OWNER_INVALID');
+  });
+
+  it('participant shapes that also manage the App name owners like any other participant', async () => {
+    const byAdmin = await create(ctx(admin.id), { owner: { worker: 'Liam' } });
+    expect(byAdmin.ownerWorkerId).toBe(liam.id);
     const byOwnerRole = await create(ctx(appOwnerMember.id), { owner: { user: member.id } });
     expect(byOwnerRole.ownerUserId).toBe(member.id);
     // The transaction re-reads platform roles from the user row, so the grant must be real.
@@ -216,38 +240,22 @@ describe('createAgentTask — root tasks: any App participant (cor:agt:050:06)',
     await db.user.update({ where: { id: platformAdmin.id }, data: { roles: ['ADMIN'] } });
     const byPlatform = await create(ctx(platformAdmin.id, { roles: ['ADMIN'] }), { owner: { user: member.id } });
     expect(byPlatform.ownerUserId).toBe(member.id);
-    await expectCode(create(ctx(contrib.id), { owner: { user: member.id } }), 'TASK_NOT_OWNER');
   });
 
-  it('#1731: a platform role the user row no longer carries manages nothing (a stale token)', async () => {
+  it('#1731: a platform role the user row no longer carries does not make a non-participant one (a stale token)', async () => {
     const formerAdmin = await user(`pa3-${Date.now()}`, 52);
-    await db.orgMember.create({ data: { id: generateId(), organizationId: org.id, userId: formerAdmin.id, role: 'CONTRIBUTOR' } });
-    await expectCode(create(ctx(formerAdmin.id, { roles: ['ADMIN'] }), { owner: { user: member.id } }), 'TASK_NOT_OWNER');
+    await expectCode(create(ctx(formerAdmin.id, { roles: ['ADMIN'] }), {}), 'APP_NOT_FOUND');
+    await expectCode(create(ctx(formerAdmin.id, { roles: ['ADMIN'] }), { owner: { user: member.id } }), 'APP_NOT_FOUND');
+    expect(await db.agentTask.count()).toBe(0);
   });
 
-  it('#1731: a self-joined member is never an owner, so never a manager (#1714)', async () => {
+  it('#1714/#1731: a self-joined plain member is a participant and names an owner; the row is not the owner role', async () => {
     await db.agent.update({ where: { id: teamAgent.id }, data: { installationPolicy: { maxMembers: 'unlimited', memberRoles: ['owner', 'member'], selfJoinRole: 'member' } as never } });
     await db.appAgent.create({ data: { appId: app.id, agentId: teamAgent.id } });
     await M.joinApp({}, { appId: app.id }, ctx(outsider.id));
     expect((await db.appMember.findUniqueOrThrow({ where: { appId_userId: { appId: app.id, userId: outsider.id } } })).role).toBe('member');
-    await expectCode(create(ctx(outsider.id), { owner: { user: member.id } }), 'TASK_NOT_OWNER');
-  });
-
-  it('#1731: an owner-role AppMember of ANOTHER App manages nothing here', async () => {
-    await db.appMember.create({ data: { appId: otherApp.id, userId: contrib.id, role: 'owner' } });
-    await expectCode(create(ctx(contrib.id), { owner: { user: member.id } }), 'TASK_NOT_OWNER');
-  });
-
-  it('a manager naming an owner outside the App is refused TASK_OWNER_INVALID', async () => {
-    await expectCode(create(ctx(admin.id), { owner: { worker: zed.id } }), 'TASK_OWNER_INVALID');
-    await expectCode(create(ctx(admin.id), { owner: { user: outsider.id } }), 'TASK_OWNER_INVALID');
-  });
-
-  it("INTERIM: a worker does not inherit its driver's App-manager rights", async () => {
-    await expectCode(
-      asWorker(anne, () => create(ctx(admin.id), { owner: { worker: liam.id } })),
-      'TASK_NOT_OWNER',
-    );
+    const t = await create(ctx(outsider.id), { owner: { user: member.id } });
+    expect(t.ownerUserId).toBe(member.id);
   });
 
   it('creating with an assignee writes task.created then task.assigned, and stamps the assignment', async () => {
@@ -317,6 +325,16 @@ describe('createAgentTask — child tasks: the parent\'s assignee, who owns them
         {}, { input: { parentTaskId: parent.id, title: 'x', owner: { worker: 'Rook' } } }, ctx(member.id))),
       'TASK_CHILD_OWNER_MISMATCH',
     );
+    // #1757: the refusal is the same for an invalid ref — no oracle over which
+    // parties exist, and naming yourself stays fine (you are the owner).
+    await expectCode(
+      asWorker(anne, () => M.createAgentTask(
+        {}, { input: { parentTaskId: parent.id, title: 'x', owner: { user: outsider.id } } }, ctx(member.id))),
+      'TASK_CHILD_OWNER_MISMATCH',
+    );
+    const self = await asWorker(anne, () =>
+      M.createAgentTask({}, { input: { parentTaskId: parent.id, title: 'x', owner: { worker: anne.id } } }, ctx(member.id)));
+    expect(self.ownerWorkerId).toBe(anne.id);
   });
 
   it('no child under an ended parent (TASK_ENDED, #1705 interim)', async () => {

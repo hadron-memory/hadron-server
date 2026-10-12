@@ -8362,17 +8362,15 @@ export const typeDefs = `#graphql
     #1705 — create an agent task (hrn:node:hadronmemory.com:specs:cor:agt:050:06 root, :07 child). Writes
     task.created, and task.assigned when an assignee is named. A worker acts
     through its session (X-Hadron-Session); a person acts as themselves.
+    A root task's creator may name its owner at creation — any participating
+    worker or person (#1757, hrn:node:hadronmemory.com:specs:cor:agt:050:01, ruled 2026-10-11).
     Typed refusals: TASK_NOT_FOUND (a parent the caller cannot read, or in
     another App), TASK_NOT_ASSIGNEE, TASK_ENDED, TASK_CHILD_OWNER_MISMATCH,
-    TASK_NOT_OWNER (another owner named by someone who does not manage the
-    App), TASK_OWNER_INVALID, TASK_ASSIGNEE_INVALID, SESSION_NOT_BOUND,
+    TASK_OWNER_INVALID, TASK_ASSIGNEE_INVALID, SESSION_NOT_BOUND,
     APP_NOT_FOUND (an App that does not exist or that you do not participate
     in, alike), APP_UNINSTALLED, FORBIDDEN (impersonation), BAD_USER_INPUT.
-    "Whoever manages the App" (hrn:node:hadronmemory.com:specs:cor:acl:010:01, as ruled 2026-10-10, #1731): a
-    user-owned App's owner, any owner-role member of the App, the org's ADMINs
-    and OWNERs, and platform admins (for an org-owned App). Every write
-    re-checks the caller's participation and the App's state inside its
-    transaction.
+    Every write re-checks the caller's participation and the App's state
+    inside its transaction.
     """
     createAgentTask(input: CreateAgentTaskInput!): AgentTask!
 
@@ -11988,8 +11986,10 @@ export const typeDefs = `#graphql
     description: String
     source: String
     """
-    Defaults to the creator. Naming someone else is accepted only from whoever
-    manages the App, and never for a child task (TASK_CHILD_OWNER_MISMATCH).
+    Defaults to the creator. A root task's creator may name any other
+    participating worker or person as owner (#1757, hrn:node:hadronmemory.com:specs:cor:agt:050:01);
+    a ref outside the App's participants is TASK_OWNER_INVALID. Never for a
+    child task, whose owner is its parent's assignee (TASK_CHILD_OWNER_MISMATCH).
     """
     owner: AgentTaskPartyInput
     "Omit to leave the task queued."
