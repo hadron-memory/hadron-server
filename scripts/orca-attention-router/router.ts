@@ -73,7 +73,7 @@ export function nudgeText(a: AttentionItem): string {
   const from =
     a.firstUnreadSeq === null
       ? ''
-      : ` START AT #${a.firstUnreadSeq} (your read mark) with \`hadron team chat read --since ${Math.max(0, a.firstUnreadSeq - 1)} --all\` — NOT the newest page;`;
+      : ` START AT #${a.firstUnreadSeq} (your first unread message) with \`hadron team chat read --since ${Math.max(0, a.firstUnreadSeq - 1)} --all\` — NOT the newest page;`;
   return (
     `Hadron team attention: ${a.unread} relevant unread (${a.unreadMentions} mention${a.unreadMentions === 1 ? '' : 's'}${where ? `; ${where}` : ''}).` +
     `${from} ` +
