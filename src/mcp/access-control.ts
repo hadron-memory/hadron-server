@@ -28,7 +28,7 @@
 import type { AgentSubscription, Memory, PrismaClient } from '../generated/prisma/index.js';
 import type { AuthContext } from '../middleware/auth.js';
 import { isActiveAgentSubscription } from '../lib/agentSubscription.js';
-import { participantAppIds } from '../lib/auth/appParticipation.js';
+import { isUserOwnedTeamSpaceMember, participantAppIds, userOwnedTeamSpaceIdsForMember } from '../lib/auth/appParticipation.js';
 import { activeAgentInstallLicenseIds, isAgentInstalled, isGrantedAgentMemoryRole } from '../lib/appAgent.js';
 import { isAppSelectableBy, resolveUserApps } from '../auth/user-app-resolution.js';
 import { getOrgReadableMemoryIds } from '../lib/auth/orgReadableMemory.js';
@@ -99,7 +99,7 @@ export function foldAgentIntoAccessMap(agent: AgentLike): Map<string, string> {
 export async function getAppMemoryAccess(
   db: PrismaClient,
   appId: string,
-  opts: { includeTeamSpace?: boolean; callerUserId?: string | null; allAgents?: boolean } = {},
+  opts: { includeTeamSpace?: boolean; callerUserId?: string | null; allAgents?: boolean; memberAdmitted?: boolean } = {},
 ): Promise<Map<string, string>> {
   const app = await db.app.findUnique({
     where: { id: appId },
@@ -178,6 +178,7 @@ export async function getAppMemoryAccess(
       db,
       app,
       opts.callerUserId ?? null,
+      opts.memberAdmitted ?? false,
     )) {
       if (!access.has(memoryId)) access.set(memoryId, level);
     }
@@ -265,6 +266,8 @@ async function getAppTeamSpaceAccess(
   // loading the App's installed agents, which only the agent-derived half needs.
   app: Pick<AppAccessRow, 'id' | 'ownerUserId'>,
   callerUserId: string | null,
+  /** The caller may be admitted as an AppMember of a user-owned App (#1764): false under impersonation. */
+  memberAdmitted = false,
 ): Promise<Map<string, string>> {
   const rows = await db.memory.findMany({
     // #1031: deliberately NOT `appTeamSpaceFilter`. That predicate answers
@@ -289,9 +292,14 @@ async function getAppTeamSpaceAccess(
       workerOf: { none: {} },
       userMemoryOfAgentId: null,
     },
-    select: { id: true, ownerUserId: true },
+    select: { id: true, ownerUserId: true, class: true, appId: true, userMemoryOfAgentId: true },
   });
 
+  // The members' team-space rows, decided by the one shared rule (so liveness, owner match and shape cannot drift
+  // between this fold and the point gates) and once for the whole App, not per row.
+  const memberTeamSpace = memberAdmitted && callerUserId
+    ? await userOwnedTeamSpaceIdsForMember(db, { userId: callerUserId }, rows)
+    : new Set<string>();
   const access = new Map<string, string>();
   for (const row of rows) {
     // spec 047: a USER-owned App's team space is minted with the owner on it
@@ -311,7 +319,10 @@ async function getAppTeamSpaceAccess(
     //      acts for the App itself, whose owner exclusion 1 already matched.
     if (row.ownerUserId != null) {
       if (row.ownerUserId !== app.ownerUserId) continue;
-      if (callerUserId != null && callerUserId !== row.ownerUserId) continue;
+      // #1764 (Holger "A"): the App's participants are its owner AND its members, so a member of this user-owned
+      // App receives the owner's TEAM-SPACE row — and no other user-owned row (this loop selects the App's app-class
+      // rows with no Worker or session shape, owned by the App's owner, which is exactly the team space).
+      if (callerUserId != null && callerUserId !== row.ownerUserId && !memberTeamSpace.has(row.id)) continue;
     }
     access.set(row.id, 'READ_ONLY');
   }
@@ -435,12 +446,13 @@ export async function getPrincipalAppMemoryAccess(
       map: await getAppMemoryAccess(db, principal.appId, {
         includeTeamSpace: !sessionIsolated,
         callerUserId: principal.userId ?? null,
+        memberAdmitted: !principal.impersonation,
       }),
     });
   } else if (principal.userId) {
     const apps = await resolveUserApps(principal.userId, db);
     const maps = await Promise.all(
-      apps.map((app) => getAppMemoryAccess(db, app.id, { callerUserId: principal.userId })),
+      apps.map((app) => getAppMemoryAccess(db, app.id, { callerUserId: principal.userId, memberAdmitted: !principal.impersonation })),
     );
     apps.forEach((app, i) => folds.push({ appId: app.id, map: maps[i] }));
   }
@@ -457,7 +469,7 @@ export async function getPrincipalAppMemoryAccess(
     )),
   );
 
-  const admitted = await admissibleFoldRows(db, principal.userId ?? null, folds);
+  const admitted = await admissibleFoldRows(db, principal.userId ?? null, folds, !principal.impersonation);
 
   const access = new Map<string, string>();
   for (const { appId, map } of folds) {
@@ -540,7 +552,7 @@ async function participantTeamSpaceFolds(
   if (ids.length === 0) return [];
 
   const apps = await db.app.findMany({ where: { id: { in: ids } }, select: { id: true, ownerUserId: true } });
-  const maps = await Promise.all(apps.map((app) => getAppTeamSpaceAccess(db, app, userId)));
+  const maps = await Promise.all(apps.map((app) => getAppTeamSpaceAccess(db, app, userId, !principal.impersonation)));
   return apps.map((app, i) => ({ appId: app.id, map: maps[i] }));
 }
 
@@ -586,6 +598,8 @@ async function admissibleFoldRows(
   db: PrismaClient,
   callerUserId: string | null,
   folds: Array<{ appId: string; map: Map<string, string> }>,
+  /** The caller may be admitted as an AppMember of a user-owned App's team space (#1764): false under impersonation. */
+  memberAdmitted = false,
 ): Promise<Map<string, Set<string>>> {
   const ids = [...new Set(folds.flatMap(({ map }) => [...map.keys()]))];
   const admitted = new Map<string, Set<string>>();
@@ -598,6 +612,10 @@ async function admissibleFoldRows(
       workerOf: { select: { id: true } },
     },
   });
+  // The members' team-space rows: the one shared rule (appParticipation.ts), empty under impersonation.
+  const memberTeamSpaceIds = memberAdmitted && callerUserId
+    ? await userOwnedTeamSpaceIdsForMember(db, { userId: callerUserId }, rows)
+    : new Set<string>();
   for (const row of rows) {
     if (row.userMemoryOfAgentId != null) continue;
     // An AgentMemoryItem is not a Worker-memory grant to the whole App.
@@ -606,8 +624,13 @@ async function admissibleFoldRows(
     // Rule 3 — a fold is never authority for a strict-owner class.
     if (row.class === 'personal' || row.class === 'private') continue;
     // Rule 2 — strict ownership admits the owner alone, nobody else, and no
-    // credential-only principal.
-    if (row.ownerUserId != null && row.ownerUserId !== callerUserId) continue;
+    // credential-only principal. ONE exception (#1764, Holger "A"): the TEAM SPACE of a user-owned App, which
+    // admits that App's members too. It is the owner's app-class row of the App the fold is for, with no Worker
+    // or session shape; every other user-owned row (the owner's knowledge memory an agent carries, the agent's
+    // system memory) stays the owner's alone.
+    if (row.ownerUserId != null && row.ownerUserId !== callerUserId) {
+      if (!(memberAdmitted && callerUserId && memberTeamSpaceIds.has(row.id))) continue;
+    }
     // Rule 1 — an app-scoped row is contributed only by ITS App.
     admitted.set(
       row.id,
@@ -673,11 +696,20 @@ export async function getMemoryAccess(
         where: {
           appId: { in: participantIds }, class: 'app', deletedAt: null,
           workerOf: { none: {} }, userMemoryOfAgentId: null,
-          OR: [{ ownerUserId: null }, { ownerUserId: auth.userId }],
+          // Any owner here: the App owner's row is a user-owned App's team space, which a participant of that App (its
+          // owner or, #1764, a member) writes; any other owner's row is not in this App's audience and is dropped below.
         },
-        select: { id: true },
+        select: { id: true, appId: true, ownerUserId: true },
       });
-      for (const row of writable) access.set(row.id, 'READ_WRITE');
+      // The App owner's row is a user-owned App's team space; a member reaches it by the one shared rule. Rows of an
+      // org-owned App (ownerless) and the caller's own rows are as before; any other owner's row is dropped.
+      const memberRows = await userOwnedTeamSpaceIdsForMember(db, auth, writable.map((r) => ({
+        id: r.id, class: 'app', appId: r.appId, ownerUserId: r.ownerUserId, userMemoryOfAgentId: null,
+      })));
+      for (const row of writable) {
+        if (row.ownerUserId !== null && row.ownerUserId !== auth.userId && !memberRows.has(row.id)) continue;
+        access.set(row.id, 'READ_WRITE');
+      }
     }
     for (const id of await getWorkerMemoryAccess(db, auth)) access.set(id, 'READ_WRITE');
   }
@@ -946,6 +978,8 @@ export async function canWriteToMemory(
   // gate checks the live casting, row shape, and matching App tenant owner.
   if (memory.ownerUserId !== null) {
     if (auth.userId === memory.ownerUserId) return true;
+    // #1764: and the team space of a user-owned App admits that App's members.
+    if (await isUserOwnedTeamSpaceMember(db, auth, { id: memoryId, ...memory }, { hold: true })) return true;
     return memory.class === 'app' &&
       (await getWorkerMemoryAccess(db, auth)).includes(memoryId);
   }
@@ -1066,6 +1100,8 @@ async function canReadMemoryRow(
   // current holder of a live Worker's working memory.
   if (memory.ownerUserId !== null) {
     if (auth.userId === memory.ownerUserId) return true;
+    // #1764: and the team space of a user-owned App admits that App's members.
+    if (await isUserOwnedTeamSpaceMember(db, auth, memory)) return true;
     return memory.class === 'app' &&
       (opts.workerMemoryIds ?? new Set(await getWorkerMemoryAccess(db, auth))).has(memory.id);
   }

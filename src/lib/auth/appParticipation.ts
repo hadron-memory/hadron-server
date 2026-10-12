@@ -100,20 +100,16 @@ export async function participantAppWhere(
   });
   // Identity-scoped, so never via impersonation.
   if (!principal.impersonation) arms.push({ ownerUserId: userId });
-  // `ownerUserId: null` is load-bearing, not tidiness (@copilot round 4).
-  // `isAppParticipant` returns IMMEDIATELY for a user-owned App and admits only
-  // its owner — spec 047, `cor:acl:010:01`: "a user-owned App admits its owner
-  // and nobody else". Without this clause the membership arm admitted any
-  // AppMember of one, so the set and the predicate disagreed on exactly the
-  // shape they most need to agree on. `chatLocFilter` requests this arm and
-  // `sendChatMessage` uses that filter as its write entitlement, so the
-  // disagreement was reachable: a non-owner who joins a user-owned App could
-  // append to its chat. A user-owned App is reachable here ONLY through the
-  // owner arm above.
-  if (opts.includeMemberships) arms.push({
-    members: { some: { userId } }, ownerUserId: null,
-    organization: { is: { deletedAt: null } },
-  });
+  // An AppMember of an org-owned App participates only while its org lives (a deleted org's Apps are not reachable).
+  // A USER-owned App's members participate too (#1764, Holger "A", cor:acl:010:01): the App has no org to be deleted, and
+  // an impersonated principal never reaches it (the organizationId bound applied once below excludes every org-less
+  // App). This arm and `isAppParticipant` must agree on exactly this shape: `chatLocFilter` requests this arm and
+  // `sendChatMessage` uses that filter as its write entitlement, so a disagreement is a reachable write (the earlier
+  // revision of this comment records the same arm failing the other way, @copilot round 4).
+  if (opts.includeMemberships) {
+    arms.push({ members: { some: { userId } }, ownerUserId: null, organization: { is: { deletedAt: null } } });
+    if (!principal.impersonation) arms.push({ members: { some: { userId } }, ownerUserId: { not: null } });
+  }
   if (arms.length === 0) return null;
 
   return {
@@ -129,4 +125,85 @@ export async function participantAppWhere(
     ...(principal.impersonation ? { organizationId: principal.impersonation.orgId } : {}),
     OR: arms,
   };
+}
+
+/** The columns the user-owned team-space rule reads off a memory row. */
+export type TeamSpaceCandidate = {
+  id: string;
+  class: string;
+  appId: string | null;
+  ownerUserId: string | null;
+  userMemoryOfAgentId: string | null;
+};
+
+/**
+ * Which of these memory rows are the TEAM SPACE of a live USER-owned App whose participant `userId` is, as a MEMBER
+ * rather than its owner? (#1764, Holger "A", cor:acl:010:01.) The one exception to a user-owned memory being owner-only
+ * (spec 047): the App owner's own app-class row (not a Worker's working memory, not a session's) is the App's team
+ * space, and a team space's audience is the App's participants. Every other user-owned memory, and every user-owned
+ * agent (its system memory included, which is class `system`), stays the owner's alone.
+ *
+ * THE one definition: every enforcement site that admits a member to a user-owned team space (the MCP access map, the
+ * strict-owner fold, the participant write upgrade, the point gates, the access audit) asks this, so the App-liveness,
+ * owner-match, shape and membership clauses cannot drift between copies (the failure mode `teamSpace.ts` records for
+ * #1207). Identity-scoped, so empty under impersonation (`userId` is the TARGET there). The owner's own path is not
+ * here: the owner is not "a member of" their App for this purpose.
+ */
+export async function userOwnedTeamSpaceIdsForMember(
+  db: Pick<PrismaClient, 'app' | 'appMember' | 'worker' | '$queryRaw'>,
+  principal: { userId?: string | null; impersonation?: unknown },
+  rows: readonly TeamSpaceCandidate[],
+  /**
+   * For a WRITE decided inside the writer's transaction: re-read the member and the App with `FOR SHARE` and keep
+   * them locked to commit, deciding on that locked read. A membership removal (or an uninstall) then either committed
+   * before the write is authorized, so the write is refused, or waits for the write's commit (Riana P2, #1786) — the
+   * same hold `inTaskWriteTx` keeps for task writes. Outside a transaction the lock ends with the statement, which is
+   * harmless: the decision is still made on that read.
+   */
+  opts: { hold?: boolean } = {},
+): Promise<Set<string>> {
+  const out = new Set<string>();
+  const userId = principal.userId;
+  if (!userId || principal.impersonation) return out;
+  const candidates = rows.filter((r) => r.class === 'app' && r.appId !== null && r.ownerUserId !== null &&
+    r.ownerUserId !== userId && r.userMemoryOfAgentId === null);
+  if (candidates.length === 0) return out;
+  const apps = await db.app.findMany({
+    where: { id: { in: [...new Set(candidates.map((r) => r.appId!))] }, deletedAt: null, uninstalledAt: null, ownerUserId: { not: null } },
+    select: { id: true, ownerUserId: true },
+  });
+  if (apps.length === 0) return out;
+  const ownerOf = new Map(apps.map((a) => [a.id, a.ownerUserId]));
+  const memberOf = new Set((await db.appMember.findMany({
+    where: { userId, appId: { in: apps.map((a) => a.id) } }, select: { appId: true },
+  })).map((m) => m.appId));
+  const shaped = candidates.filter((r) => memberOf.has(r.appId!) && ownerOf.get(r.appId!) === r.ownerUserId);
+  if (shaped.length === 0) return out;
+  if (opts.hold) {
+    const appIds = [...new Set(shaped.map((r) => r.appId!))].sort();
+    const held = await db.$queryRaw<Array<{ app_id: string }>>`
+      SELECT m.app_id FROM app_members m JOIN apps a ON a.id = m.app_id
+      WHERE m.user_id = ${userId} AND m.app_id = ANY(${appIds}::text[])
+        AND a.deleted_at IS NULL AND a.uninstalled_at IS NULL
+      ORDER BY m.app_id
+      FOR SHARE OF a, m`;
+    const stillMember = new Set(held.map((h) => h.app_id));
+    for (let i = shaped.length - 1; i >= 0; i--) if (!stillMember.has(shaped[i]!.appId!)) shaped.splice(i, 1);
+    if (shaped.length === 0) return out;
+  }
+  const working = new Set((await db.worker.findMany({
+    where: { memoryId: { in: shaped.map((r) => r.id) } }, select: { memoryId: true },
+  })).map((w) => w.memoryId));
+  for (const r of shaped) if (!working.has(r.id)) out.add(r.id);
+  return out;
+}
+
+/** {@link userOwnedTeamSpaceIdsForMember} for one row — the point gates' form. */
+export async function isUserOwnedTeamSpaceMember(
+  db: Pick<PrismaClient, 'app' | 'appMember' | 'worker' | '$queryRaw'>,
+  principal: { userId?: string | null; impersonation?: unknown },
+  memory: TeamSpaceCandidate,
+  opts: { hold?: boolean } = {},
+): Promise<boolean> {
+  return (await userOwnedTeamSpaceIdsForMember(db, principal, [memory], opts)).has(memory.id);
 }
