@@ -653,9 +653,15 @@ export function promptLineIsEmpty(lines: string[], agent: string): boolean {
     // typed spaces as nothing. The status line's empty-input hint is the
     // proof — `· ← for agents` shows exactly while the composer is empty, in
     // every permission mode (live probe, 2026-10-01), since ← only switches
-    // agents when there is no text for it to move through.
-    const status = lines.slice(close + 1).find((l) => squash(l) !== '');
-    return status !== undefined && squash(status).endsWith(CLAUDE_EMPTY_HINT);
+    // agents when there is no text for it to move through. And the status
+    // line is the terminal's LAST content: Claude draws nothing below its
+    // composer footer, so unexplained trailing content — a shell prompt after
+    // `cat`ing a captured idle screen — fails here even though the box and
+    // hint above it look perfect. The FIRST nonblank line below the closing
+    // rule proved nothing about what sits at the terminal bottom (blind
+    // review P2, #1823).
+    const below = lines.slice(close + 1).map(squash).filter((l) => l !== '');
+    return below.length === 1 && below[0].endsWith(CLAUDE_EMPTY_HINT);
   }
   if (agent !== 'codex') return false;
   let at = -1;
@@ -804,6 +810,62 @@ export function promptIsEmptyFromTerm(terminal: Record<string, any> | undefined,
   return promptLineIsEmpty(terminal.tail as string[], agent) ? [true, ''] : [false, 'text in the prompt'];
 }
 
+/**
+ * Banner/completion markers anchor to the START of a line, optionally behind
+ * banner chrome (box-art glyphs, spaces, Codex's `>_` launcher glyph, the
+ * composer `›`) — never after arbitrary content. `orca$ echo "Worked for 33s"`
+ * is ordinary output mentioning a marker, not Codex completion chrome (blind
+ * review P2, #1823).
+ */
+const BANNER_CHROME = '[│╭╮╰╯─▐▛█▝▜▀ >_› ]*';
+
+/**
+ * The agent family a rendered screen POSITIVELY shows, or null — the
+ * identity-flap fallback's evidence. Orca's per-terminal tracking degrades
+ * mid-life: `lastOutputAt` goes null (the #7398 gate's premise) and, in the
+ * same degradation family, `agentIdentity` reads null on a terminal that is
+ * running its agent right now (observed 2026-10-12: Hugo's terminal was held
+ * "no live agent terminal" ~6.5h while the agent worked, while the same CLI,
+ * env and cwd read agentIdentity 'claude' stable in 40 consecutive polls —
+ * the flap is in Orca's tracking, not in the terminal). The screen is the
+ * surviving positive evidence.
+ *
+ * Markers are the agents' OWN chrome: banner/completion lines anchored to
+ * banner-chrome line starts, strong glyphs (`✻`, `⏺`, `permissions:`) at
+ * column 0, the composer box Claude's pair of `───` rules, and Codex's `›`
+ * composer only WITH content after the glyph — a bare `›` is a shell-theme
+ * prompt as easily as a composer. Typed text is indented onto continuation
+ * lines (promptLineIsEmpty's convention), so a plain shell draws none of
+ * these: `orca$ echo "Claude Code v2.1.296"` never classifies. A glyph a
+ * shell theme could draw (a bare `❯`, a bare `›`, a single rule) is
+ * deliberately NOT family evidence.
+ * A screen carrying BOTH families' markers (an agent displaying
+ * the other family's chrome in its output) reads null: hold, never guess.
+ * A wrong family is caught one gate later anyway — promptLineIsEmpty and
+ * idleProofAbovePrompt prove their shapes per family and hold anything
+ * unrecognized — so this classifier needs recall on real agent screens more
+ * than it needs perfection.
+ */
+export function screenAgentFamily(terminal: Record<string, any> | undefined): string | null {
+  if (!terminal || terminal.source !== 'screen' || !Array.isArray(terminal.tail)) return null;
+  const lines = terminal.tail as string[];
+  const rules = lines.filter((l) => /^─{3,}[\s ]*$/.test(l)).length;
+  let claude = rules >= 2; // the composer box promptLineIsEmpty itself keys on
+  let codex = false;
+  const claudeBanner = new RegExp(`^${BANNER_CHROME}(Claude Code v\\d|glm-[\\d.]|/clear to save|※ recap:)`);
+  const codexBanner = new RegExp(`^${BANNER_CHROME}(OpenAI Codex \\(v|Worked for |Ask Codex to do anything)`);
+  for (const l of lines) {
+    if (/^✻ /.test(l) || /^⏺ /.test(l) || claudeBanner.test(l)) claude = true;
+    // A BARE `›` is a shell-theme glyph as easily as Codex's composer: only
+    // `›` with content after it — the idle placeholder, a submitted echo, a
+    // menu line — is family evidence (blind review P2, #1823).
+    if ((l.startsWith('›') && squash(l.slice(1)) !== '') || /^permissions: /.test(l) || codexBanner.test(l)) codex = true;
+  }
+  if (claude && !codex) return 'claude';
+  if (codex && !claude) return 'codex';
+  return null;
+}
+
 /** The first `requestId` anywhere in a receipt: Orca reports it for a durable retry. */
 function findRequestId(node: unknown): string | null {
   if (Array.isArray(node)) {
@@ -882,18 +944,38 @@ export function boundWorker(worktree: string): string | null {
   }
 }
 
-/** [handle, detail]: the ONE agent terminal in this worker's worktree, or why not. */
-export function resolveTerminal(entry: RosterEntry, terminals: Terminal[]): [string | null, string] {
+/**
+ * [handle, agent-or-reason, via]: the ONE agent terminal in this worker's
+ * worktree, or why not. The identity path is unchanged: the terminal whose
+ * `agentIdentity` is claude/codex. When identity resolves NOTHING and cfg/run
+ * are given, the identity-flap fallback tries the screen: Orca's
+ * agentIdentity tracking degrades mid-life (see screenAgentFamily), so ONE
+ * remaining connected terminal in the worktree whose screen positively shows
+ * an agent family still resolves — with via='screen' so the caller can log
+ * it. The fallback never runs when identity resolves; an ambiguous screen
+ * count, an unclassifiable screen, or a plain shell holds exactly as before.
+ */
+export function resolveTerminal(
+  entry: RosterEntry, terminals: Terminal[], cfg?: Config, run?: Runner,
+): [string | null, string, 'identity' | 'screen' | 'none'] {
   const worktree = real(entry.worktree);
   const bound = boundWorker(worktree);
-  if (bound && bound !== entry.worker) return [null, `worktree is bound to another worker (${bound})`];
-  const agents = terminals.filter(
-    (t) => t.worktreePath && real(t.worktreePath) === worktree && AGENT_IDENTITIES.has(t.agentIdentity ?? '')
-      && t.connected !== false && t.writable !== false,
+  if (bound && bound !== entry.worker) return [null, `worktree is bound to another worker (${bound})`, 'none'];
+  const inWorktree = terminals.filter(
+    (t) => t.worktreePath && real(t.worktreePath) === worktree && t.connected !== false && t.writable !== false,
   );
-  if (agents.length === 0) return [null, 'no live agent terminal in its worktree'];
-  if (agents.length > 1) return [null, `${agents.length} agent terminals in its worktree (ambiguous)`];
-  return [agents[0].handle, agents[0].agentIdentity ?? ''];
+  const agents = inWorktree.filter((t) => AGENT_IDENTITIES.has(t.agentIdentity ?? ''));
+  if (agents.length > 1) return [null, `${agents.length} agent terminals in its worktree (ambiguous)`, 'none'];
+  if (agents.length === 1) return [agents[0].handle, agents[0].agentIdentity ?? '', 'identity'];
+  if (cfg && run) {
+    const verified: Array<{ handle: string; family: string }> = [];
+    for (const t of inWorktree) {
+      const family = screenAgentFamily(readScreen(cfg, t.handle, run));
+      if (family) verified.push({ handle: t.handle, family });
+    }
+    if (verified.length === 1) return [verified[0].handle, verified[0].family, 'screen'];
+  }
+  return [null, 'no live agent terminal in its worktree', 'none'];
 }
 
 /**
@@ -961,7 +1043,14 @@ export function pollOnce(cfg: Config, run: Runner = runCommand, log: (line: stri
         outcome.covered.push(entry.name);
         continue;
       }
-      const [handle, detail] = resolveTerminal(entry, terminals);
+      const [handle, detail, via] = resolveTerminal(entry, terminals, cfg, run);
+      if (via === 'screen') {
+        // Not a held reason (those are deduped per token): a resolution note,
+        // logged each time it carries a nudge attempt. These lines are also
+        // the flap-incidence record for the upstream Orca report — grep
+        // 'resolved by screen' in loop.log.
+        log(`orca-attention-router: ${entry.name}: terminal resolved by screen (Orca agentIdentity tracking lost)`);
+      }
       if (!handle) {
         outcome.held[entry.name] = detail;
         continue;

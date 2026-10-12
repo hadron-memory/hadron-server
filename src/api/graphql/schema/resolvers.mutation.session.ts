@@ -15,7 +15,7 @@ import { mintMemoryUrnV2 } from '../../../lib/mintMemoryUrnV2.js';
 import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
 import { canReadMemory, filterReadableMemoryIds } from '../../../mcp/access-control.js';
 import { isAgentInstalled } from '../../../lib/appAgent.js';
-import { hasRequestOperationKey, resolveRequestOperationKey } from '../../../lib/requestOperationKey.js';
+import { hasRequestOperationKey, getRequestOperationKey } from '../../../lib/requestOperationKey.js';
 import { sessionKeyCache } from '../../../lib/sessionKeyCache.js';
 import { makeKeyVerifier, verifyDataKey } from '../../../lib/memoryUnlock.js';
 import { decryptNodesBatch } from '../../../lib/nodeCrypto.js';
@@ -1411,11 +1411,10 @@ export const sessionMutations = {
 
     startAgentSession: async (
       _: unknown,
-      { agentId, externalUserId, sessionTimeoutSeconds, dataKey }: {
+      { agentId, externalUserId, sessionTimeoutSeconds }: {
         agentId: string;
         externalUserId?: string;
         sessionTimeoutSeconds?: number;
-        dataKey?: string;
       },
       ctx: Context,
     ) => {
@@ -1447,15 +1446,15 @@ export const sessionMutations = {
         }
 
         // SECRET mode requires a supplied key; USER_ID mode rejects it.
-        if (app.identifyUserMethod === 'SECRET' && !(hasSuppliedKey || dataKey)) {
+        if (app.identifyUserMethod === 'SECRET' && !hasSuppliedKey) {
           throw new GraphQLError('A supplied operation key is required in SECRET mode.', { extensions: { code: 'BAD_UNLOCK_INPUT' } });
         }
-        if (app.identifyUserMethod === 'USER_ID' && (hasSuppliedKey || dataKey)) {
+        if (app.identifyUserMethod === 'USER_ID' && hasSuppliedKey) {
           throw new GraphQLError('An operation key is only accepted in SECRET mode.', { extensions: { code: 'BAD_UNLOCK_INPUT' } });
         }
 
-        // #1796: matching dual supply only, before any provisioning writes.
-        const parsedKey = resolveRequestOperationKey(dataKey);
+        // #1796: consume request-only supply before any provisioning writes.
+        const parsedKey = getRequestOperationKey();
 
         // Resolve user (optional — null means anonymous session)
         let userId: string | null = null;
