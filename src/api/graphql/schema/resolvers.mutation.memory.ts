@@ -63,7 +63,7 @@ import {
   type MemoryVisibility,
 } from '../../../generated/prisma/index.js';
 import { parseDataKey } from '../../../lib/crypto.js';
-import { resolveRequestOperationKey } from '../../../lib/requestOperationKey.js';
+import { getRequestOperationKey } from '../../../lib/requestOperationKey.js';
 import { isStrictOwner } from '../../../lib/auth/strictOwner.js';
 import {
   generateKdfSalt,
@@ -2154,7 +2154,7 @@ export const memoryMutations = {
 
     linkMemoryToUser: async (
       _: unknown,
-      { memoryId, externalUserId, dataKey }: { memoryId: string; externalUserId: string; dataKey?: string },
+      { memoryId, externalUserId }: { memoryId: string; externalUserId: string },
       ctx: Context,
     ) => {
       if (!ctx.appId) throw new Error('Forbidden: App Key required');
@@ -2175,8 +2175,8 @@ export const memoryMutations = {
         }
       });
 
-      // #1796: dual supply must agree before any provisioning writes.
-      const suppliedKey = resolveRequestOperationKey(dataKey);
+      // #1796: consume request-only supply before any provisioning writes.
+      const suppliedKey = getRequestOperationKey();
 
       // Resolve or create user
       let user = await ctx.db.user.findFirst({
