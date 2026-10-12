@@ -124,16 +124,19 @@ beforeAll(async () => {
       ownerUserId: owner.id,
     },
   });
-  // A system memory whose RECORD an org member may open but whose NODES the
-  // shared node-content gate excludes (the #1319 record-vs-node shape).
+  // A creator-owned knowledge holding retains the record-vs-node shape.
+  // System records no longer admit ordinary org readers (#1807).
+  const holdingAgent = await db.agent.create({ data: { organizationId: org.id, urn: org.urn + ':holding-agent', name: 'Holding fixture' } });
   const recordOnly = await db.memory.create({
     data: {
       id: generateId(),
       organizationId: org.id,
-      urn: `${org.urn}:record-only-system`,
+      urn: `${org.urn}:record-only-holding`,
       name: 'record-readable, nodes-unreadable',
-      class: 'system',
-      visibility: null,
+      class: 'knowledge',
+      visibility: 'ORGANIZATION',
+      userMemoryOfAgentId: holdingAgent.id,
+      createdBy: owner.id,
       acceptsUploads: false,
     },
   });
@@ -205,7 +208,7 @@ const MUTATION_SURFACES = SURFACES.slice(4);
 /**
  * Principal × target pairs that MUST be indistinguishable from a missing
  * memory. The outsider can open nothing in the org; for the NODE-data reads the
- * reader's record-only system memory is also concealed (they may open the
+ * reader's record-only knowledge holding is also concealed (they may open the
  * record, but these surfaces return node data, gated on node content).
  */
 const OUTSIDER_CASES: Array<[string, 'urn' | 'id']> = [

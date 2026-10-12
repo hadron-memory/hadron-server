@@ -85,7 +85,7 @@ export async function getOrgReadableMemoryIds(
               // every org member (codex review on #660).
               { organizationId: { in: orgIds }, class: 'knowledge' as any, appId: null, userMemoryOfAgentId: null },
               // Cross-org subscriptions never reach owner-only personal/private,
-              // and never GROUP (#3781): createMemorySubscription only admits
+              // and never GROUP or SYSTEM (#1807): createMemorySubscription only admits
               // PUBLIC memories while group visibility is CHECK-forced to
               // GROUP, so a group-subscription row is API-invalid legacy state,
               // not a grant cor:acl:010:01's exclusive MemoryMember audience
@@ -93,7 +93,7 @@ export async function getOrgReadableMemoryIds(
               // REVOKED (soft-deleted) subscription stops granting read.
               // `appId: null` — app-scoped memories are App-internal, never
               // cross-org-subscription-readable.
-              { class: { notIn: ['personal', 'private', 'group'] as any }, appId: null, userMemoryOfAgentId: null, subscriptions: { some: { organizationId: { in: orgIds }, deletedAt: null } } },
+              { class: { notIn: ['personal', 'private', 'group', 'system'] as any }, appId: null, userMemoryOfAgentId: null, subscriptions: { some: { organizationId: { in: orgIds }, deletedAt: null } } },
             ]
           : []),
         // #1208 / cor:acl:010:01 — group memories are readable ONLY through
@@ -131,7 +131,7 @@ export async function getOrgReadableMemoryIds(
         // The per-memory point reads have their own ownerUserId early-returns;
         // this is the list/search side (getAccessibleMemoryIds + MCP
         // getMemoryAccess both build on it).
-        { visibility: 'PUBLIC' as any, class: { notIn: ['personal', 'private'] as any }, appId: null, userMemoryOfAgentId: null, ownerUserId: null },
+        { visibility: 'PUBLIC' as any, class: { notIn: ['personal', 'private', 'system'] as any }, appId: null, userMemoryOfAgentId: null, ownerUserId: null },
       ],
     },
     select: { id: true },

@@ -182,7 +182,9 @@ describe('#1795 public GraphQL boundary', () => {
       });
       expect(response.status).toBe(200);
       const body = await response.json() as { errors?: Array<{ extensions?: { code?: string } }>; data?: Record<string, unknown> };
-      expect(body.errors?.[0]?.extensions?.code).toBe('FORBIDDEN');
+      // #1807: an uninstalled contributor cannot open the system record;
+      // conceal it rather than distinguishing its write refusal.
+      expect(body.errors?.[0]?.extensions?.code).toBe(key === 'definition' ? 'MEMORY_NOT_FOUND' : 'FORBIDDEN');
       expect(body.data?.[field]).toBeFalsy();
     expect(await db.node.count({ where: { memoryId, loc: 'new' } })).toBe(0);
     expect(await db.node.findUniqueOrThrow({ where: { loc_memoryId: { memoryId, loc: 'existing' } } })).toMatchObject({ name: 'Original', content: 'Original' });
