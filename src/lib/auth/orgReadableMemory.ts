@@ -127,7 +127,7 @@ export async function getOrgReadableMemoryIds(
         // The per-memory point reads have their own ownerUserId early-returns;
         // this is the list/search side (getAccessibleMemoryIds + MCP
         // getMemoryAccess both build on it).
-        { visibility: 'PUBLIC' as any, class: { notIn: ['personal', 'private'] as any }, appId: null, userMemoryOfAgentId: null, ownerUserId: null },
+        { visibility: 'PUBLIC' as any, class: { notIn: ['personal', 'private', 'system'] as any }, appId: null, userMemoryOfAgentId: null, ownerUserId: null },
       ],
     },
     select: { id: true },

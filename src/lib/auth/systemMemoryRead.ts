@@ -1,9 +1,10 @@
 /** #1807: standing user read grants for a live Agent system memory.
  * Reuse the licensed App fold; subscriptions and public flags grant nothing.
  * The manager arm preserves the existing Agent ownership gate.
+ * Caps report existing writes; callers use presence for record admission.
  */
 import type { PrismaClient } from '../../generated/prisma/index.js';
-import { READ, type GrantWithCaps } from '@hadron-memory/access-control';
+import { FULL, READ, WRITE, type GrantWithCaps } from '@hadron-memory/access-control';
 import { resolveUserApps } from '../../auth/user-app-resolution.js';
 import { getAppMemoryAccess } from '../../mcp/access-control.js';
 import { getManagedSystemMemoryIds } from './managedSystemMemory.js';
@@ -31,7 +32,7 @@ export async function systemMemoryReadGrants(
   const managed = (await getManagedSystemMemoryIds(db, principal.userId, memoryId, principal.impersonation?.orgId)).includes(memoryId);
   if (agent.ownerUserId !== null) {
     if (managed && !principal.impersonation) {
-      grants.push({ source: 'MEMORY_PRINCIPAL', role: 'owner', via: null, caps: READ });
+      grants.push({ source: 'MEMORY_PRINCIPAL', role: 'owner', via: null, caps: FULL });
     }
     return grants;
   }
@@ -39,7 +40,7 @@ export async function systemMemoryReadGrants(
   const org = await db.organization.findFirst({ where: { id: agent.organizationId, deletedAt: null }, select: { urn: true } });
   if (!org) return [];
   if (!principal.impersonation && (principal.roles?.includes('ADMIN') || principal.roles?.includes('OWNER'))) {
-    grants.push({ source: 'PLATFORM_ROLE', role: principal.roles.includes('OWNER') ? 'OWNER' : 'ADMIN', via: null, caps: READ });
+    grants.push({ source: 'PLATFORM_ROLE', role: principal.roles.includes('OWNER') ? 'OWNER' : 'ADMIN', via: null, caps: WRITE });
   }
   if (managed) {
     // Attribution only: authority was decided by the shared manager helper.
@@ -47,11 +48,11 @@ export async function systemMemoryReadGrants(
       where: { organizationId: agent.organizationId, userId: principal.userId, ...LIVE_ORG_MEMBERSHIP },
       select: { role: true },
     });
-    if (member) grants.push({ source: 'ORG_ROLE', role: member.role, via: org.urn, caps: READ });
+    if (member) grants.push({ source: 'ORG_ROLE', role: member.role, via: org.urn, caps: WRITE });
   }
-  if (principal.impersonation) return grants;
   for (const app of await resolveUserApps(principal.userId, db)) {
     // This is the same licensed, lifecycle-checked fold used by the read gates.
+    if (principal.impersonation && app.organizationId !== principal.impersonation.orgId) continue;
     if (!(await getAppMemoryAccess(db, app.id, { callerUserId: principal.userId, includeTeamSpace: false })).has(memoryId)) continue;
     const [row, member] = await Promise.all([
       db.app.findUnique({ where: { id: app.id }, select: { urn: true } }),
