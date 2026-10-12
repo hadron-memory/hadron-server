@@ -514,6 +514,23 @@ describe('nudgeText read anchor (#1805 P2s, #1811 large-gap branch)', () => {
     expect(t).toContain('actually delivered');
     expect(t).not.toContain('--before 9903');
   });
+  it('MORE than one page of mentions incl. the OLDEST: the walk runs BACKWARD via prevBefore — beforeSeq selects the newest page under the bound (#1827 cycle-1 P2)', () => {
+    // Anne's trace + Colin's live control (#9687/#9689): beforeSeq forces
+    // NEWEST-page selection, so a forward nextSince walk with 201 unread
+    // mentions returns 2..201, an empty next page, and a mark that
+    // acknowledges the unseen oldest #1. The instruction must walk BACKWARD
+    // (prevBefore, decreasing beforeSeq) down to the fixed since floor —
+    // Colin's control returned all 201 that way, excluding the H+1 arrival.
+    const t = nudgeText(worker('w-eli', 'Eli', { mentions: 201, unread: 9841, first: 61, relevant: 9750, head: 9901 }));
+    expect(t).toContain('prevBefore');
+    expect(t).toContain('BACKWARD');
+    expect(t).not.toContain('nextSince'); // the forward cursor is what lost the oldest mention
+    expect(t).toContain('--mentions-me --since 60 --before 9902 --limit 200');
+    expect(t).toContain('sinceSeq=60');
+    expect(t).toContain('beforeSeq=9902');
+    expect(t).toContain('never above #9901'); // the H+1 arrival stays outside sample and mark
+    expect(t).not.toContain('--before 9903');
+  });
   it('the boundary is deterministic: span 399 and exactly 400 keep the unfiltered anchor, 401 switches (#1811)', () => {
     for (const head of [499, 500]) {
       const t = nudgeText(worker('w-eli', 'Eli', { first: 100, head }));
