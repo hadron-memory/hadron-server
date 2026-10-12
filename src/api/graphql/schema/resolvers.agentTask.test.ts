@@ -618,7 +618,7 @@ describe('backlog — parked, unassigned (#1754, cor:agt:050:02)', () => {
     const t = await asWorker(anne, () => create(ctx(member.id), { owner: { user: member.handle } }));
     expect(t.ownerUserId).toBe(member.id);
     expect(t.createdByWorkerId).toBe(anne.id);
-    expect(await ownerChain(db, t.id)).toEqual([{ userId: member.id }]);
+    expect((await ownerChain(db, t.id))[0]).toEqual({ userId: member.id }); // then the App's managers, one entry each (#1761)
   });
 });
 
