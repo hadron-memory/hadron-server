@@ -740,6 +740,7 @@ describe('Diego P2 on #1720 — an account merge never strands an alarm\'s ackno
     const review = await db.agentTask.findFirstOrThrow({ where: { parentTaskId: root.id } });
     const candidate = stallCandidates({
       task: review, openChildCount: 0, lastChildEndedAt: null, finishedChildren: [], lastProgressAt: null, assigneeActivityAt: null,
+      queuedAt: null,
     }, STALL_WINDOW_DEFAULTS, at('10:15')).find((c) => c.rule === 'not-started')!;
     let raised: unknown;
     try {
@@ -820,5 +821,72 @@ describe('PINNED until T5 (Rook P3-1 on #1720): escalation continues after the t
     await db.app.update({ where: { id: app.id }, data: { uninstalledAt: at('10:21') } });
     await tick('10:30');
     expect((await wakes(a.id))[1].wokenAt).toEqual(at('10:30'));
+  });
+});
+
+describe('#1754 — backlog and the stall rules (cor:agt:050:02, :17)', () => {
+  /** What a create-with-no-assignee or a make-ready writes: the queue-entry event. */
+  const queuedEvent = (taskId: string, t: string) =>
+    db.agentTeamEvent.create({ data: { appId: app.id, taskId, type: 'assignment.queued', createdAt: at(t) } });
+
+  it('a born-backlog task, past every window, unassigned and unmatched: the tick writes nothing', async () => {
+    await task({ status: 'backlog', ownerWorkerId: ada.id, createdAt: at('08:00'), startBy: at('08:30') });
+    await tick('12:00');
+    expect(await alarms()).toEqual([]);
+    expect(await db.agentTeamAlarmSchedule.count()).toBe(0);
+  });
+
+  it('a task parked FROM THE QUEUE (a real queue stint behind it) raises nothing while parked', async () => {
+    const t = await task({ ownerWorkerId: ada.id, createdAt: at('08:00') });
+    await queuedEvent(t.id, '08:00');
+    await db.agentTask.update({ where: { id: t.id }, data: { status: 'backlog' } });
+    await tick('12:00');
+    expect(await alarms()).toEqual([]);
+  });
+
+  it('a stint made ready from an AGED backlog raises on its own clock, not on creation (#1790 Emerson P2)', async () => {
+    const t = await task({ status: 'backlog', ownerWorkerId: ada.id, createdAt: at('06:00') });
+    // Made ready at 11:00 — what makeAgentTaskReady leaves: pending, with a fresh queue entry.
+    await queuedEvent(t.id, '11:00');
+    await db.agentTask.update({ where: { id: t.id }, data: { status: 'pending' } });
+    await tick('11:01');
+    expect(await alarms('assignment.unassignable')).toEqual([]);
+    await tick('11:31');
+    const [a] = await alarms('assignment.unassignable');
+    expect(a).toMatchObject({ taskId: t.id, episodeStart: at('11:00') });
+  });
+
+  it('a second queue stint is a NEW episode, not silenced by the first stint’s alarm', async () => {
+    const t = await task({ ownerWorkerId: ada.id, createdAt: at('08:00') });
+    await queuedEvent(t.id, '08:00');
+    await tick('08:31');
+    expect(await alarms('assignment.unassignable')).toHaveLength(1);
+    await db.agentTask.update({ where: { id: t.id }, data: { status: 'backlog' } }); // parked
+    await queuedEvent(t.id, '10:00'); // made ready again: a new queue entry
+    await db.agentTask.update({ where: { id: t.id }, data: { status: 'pending' } });
+    await tick('10:31');
+    expect(await alarms('assignment.unassignable')).toHaveLength(2);
+  });
+
+  it('parking an alarmed task raises nothing NEW and leaves the wake schedule to fire (#1790 Xylon P2-3)', async () => {
+    // The episode's currency at delivery is T5's re-check (pinned: escalation
+    // continues after the task moves) — parking deliberately changes nothing
+    // about an open episode or its schedule rows, only stops NEW alarms.
+    const root = await task({
+      ownerWorkerId: liam.id, status: 'started', startedAt: at('07:00'),
+      assigneeWorkerId: anne.id, assignedAt: at('07:00'), createdAt: at('07:00'),
+    });
+    await drive(anne, '08:20'); // the root is quiet but inside its no-progress window
+    const child = await task({ parentTaskId: root.id, ownerWorkerId: ada.id, createdAt: at('08:00') });
+    await queuedEvent(child.id, '08:00');
+    await tick('08:31');
+    const [a] = await alarms('assignment.unassignable');
+    expect(a).toBeTruthy();
+    expect(await wakes(a.id)).toHaveLength(2); // ada (child owner), then liam (root owner)
+    await db.agentTask.update({ where: { id: child.id }, data: { status: 'backlog' } });
+    // Row 1 fell due at 09:01; the 09:10 pass wakes it, and raises nothing new.
+    expect(await tick('09:10')).toEqual({ raised: 0, woken: 1, cleared: 0 });
+    expect(await alarms('assignment.unassignable')).toHaveLength(1);
+    expect((await wakes(a.id))[1].wokenAt).toEqual(at('09:10'));
   });
 });
