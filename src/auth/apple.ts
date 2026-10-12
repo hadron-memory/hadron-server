@@ -22,6 +22,7 @@ import {
 import { db } from '../integrations/db/client.js';
 import { generateUniqueHandle, isHandleTaken } from '../lib/userHandle.js';
 import { ensureUserPrincipal, RootNameTakenError } from '../lib/principal/mintPrincipal.js';
+import { flagProviderEmailMismatch } from './providerEmailMismatch.js';
 
 /** Identity claims extracted from a verified Apple ID token. */
 export interface AppleIdentity {
@@ -202,6 +203,7 @@ export function parseAppleUserField(raw: unknown): string | null {
 export async function resolveAppleUser(identity: AppleIdentity, name: string | null) {
   const bySub = await db.user.findUnique({ where: { appleId: identity.sub } });
   if (bySub) {
+    flagProviderEmailMismatch('apple', bySub, identity);
     return db.user.update({
       where: { id: bySub.id },
       data: { name: bySub.name ?? name },
