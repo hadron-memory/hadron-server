@@ -7,7 +7,7 @@ import { parse, Kind } from 'graphql';
 import { createServer } from '../../../server.js';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
-import { hashAppKey } from '../../../middleware/auth.js';
+import { hashAppKey, mintUserApiKey } from '../../../middleware/auth.js';
 import { parseDataKey } from '../../../lib/crypto.js';
 import { verifyDataKey } from '../../../lib/memoryUnlock.js';
 import { decryptNodeFieldsWithKey } from '../../../lib/nodeCrypto.js';
@@ -51,7 +51,7 @@ async function request(query: string, variables: Record<string, unknown>, suppli
     ...(supplied !== undefined ? { [header]: supplied } : {}),
   }, body: JSON.stringify({ query, variables }) });
   return { status: response.status, body: await response.json() as {
-    data?: Record<string, any>; errors?: Array<{ message: string; extensions?: { code?: string } }>
+    data?: Record<string, any>; errors?: Array<{ message: string; path?: Array<string | number>; extensions?: { code?: string } }>
   } };
 }
 const startQuery = 'mutation($agent: ID!, $user: String) { startAgentSession(agentId: $agent, externalUserId: $user) { id memoryId } }';
@@ -234,6 +234,92 @@ describe('#1796 real HTTP header operations', () => {
       const memory = await db.memory.findUniqueOrThrow({ where: { id: memoryId } });
       expect(verifyDataKey(memory.keyVerifier!, parseDataKey(key))).toBe(true);
     }
+  });
+
+  it.each(['session', 'promotion', 'mixed'])('a second header-key consumption refuses before its writes in a two-field %s document', async mode => {
+    let firstMemory: string | undefined;
+    let secondMemory: string | undefined;
+    let secondBefore: unknown;
+    let nodeId: string | undefined;
+    if (mode !== 'session') {
+      await db.app.update({ where: { id: appId }, data: { identifyUserMethod: 'USER_ID' } });
+      const first = await request(startQuery, { agent: agentId });
+      const second = await request(startQuery, { agent: agentId });
+      expect(first.body.errors).toBeUndefined();
+      expect(second.body.errors).toBeUndefined();
+      firstMemory = first.body.data?.startAgentSession.memoryId;
+      secondMemory = second.body.data?.startAgentSession.memoryId;
+      secondBefore = await db.memory.findUniqueOrThrow({ where: { id: secondMemory } });
+      nodeId = (await db.node.create({ data: { memoryId: secondMemory!, loc: 'untouched', name: 'Untouched', content: 'Still plaintext' } })).id;
+      if (mode === 'mixed') await db.app.update({ where: { id: appId }, data: { identifyUserMethod: 'SECRET' } });
+    }
+    const sessionsBefore = await db.session.count();
+    const firstField = mode === 'promotion'
+      ? 'first: linkMemoryToUser(memoryId: $firstMemory, externalUserId: "single-first") { id }'
+      : 'first: startAgentSession(agentId: $agent, externalUserId: "single-first") { id }';
+    const secondField = mode === 'session'
+      ? 'second: startAgentSession(agentId: $agent, externalUserId: "single-second", dataKey: $key) { id }'
+      : 'second: linkMemoryToUser(memoryId: $secondMemory, externalUserId: "single-second", dataKey: $key) { id }';
+    const declarations = mode === 'session' ? '$agent: ID!, $key: String'
+      : mode === 'promotion' ? '$firstMemory: ID!, $secondMemory: ID!, $key: String'
+      : '$agent: ID!, $secondMemory: ID!, $key: String';
+    const result = await request('mutation(' + declarations + ') { ' + firstField + ' ' + secondField + ' }',
+      { agent: agentId, firstMemory, secondMemory, key }, key);
+    expect(result.body.errors?.[0]).toMatchObject({ path: ['second'], extensions: { code: 'BAD_UNLOCK_INPUT' } });
+    // GraphQL commits fields serially: the authorized first operation stands;
+    // the second creates no user/session and leaves its target untouched.
+    expect(await db.user.count({ where: { externalId: 'single-first' } })).toBe(1);
+    expect(await db.user.count({ where: { externalId: 'single-second' } })).toBe(0);
+    expect(await db.session.count()).toBe(sessionsBefore + (mode === 'promotion' ? 0 : 1));
+    if (secondMemory) {
+      expect(await db.memory.findUniqueOrThrow({ where: { id: secondMemory } })).toEqual(secondBefore);
+      expect(await db.node.findUniqueOrThrow({ where: { id: nodeId } })).toMatchObject({ content: 'Still plaintext' });
+      expect(sessionKeyCache.getByMemoryId(secondMemory)).toBeNull();
+    }
+    if (mode === 'promotion') expect(await db.memory.findUniqueOrThrow({ where: { id: firstMemory } })).toMatchObject({ isEncrypted: true });
+  });
+
+  it('legacy-only fields still carry independent keys without a request header', async () => {
+    const query = 'mutation($agent: ID!, $a: String!, $b: String!) { first: startAgentSession(agentId: $agent, externalUserId: "legacy-first", dataKey: $a) { memoryId } second: startAgentSession(agentId: $agent, externalUserId: "legacy-second", dataKey: $b) { memoryId } }';
+    const result = await request(query, { agent: agentId, a: key, b: wrongKey });
+    expect(result.body.errors).toBeUndefined();
+    for (const [field, supplied] of [['first', key], ['second', wrongKey]] as const) {
+      const memory = await db.memory.findUniqueOrThrow({ where: { id: result.body.data?.[field].memoryId } });
+      expect(verifyDataKey(memory.keyVerifier!, parseDataKey(supplied))).toBe(true);
+    }
+  });
+
+  it('a non-consuming field does not claim the staged header key', async () => {
+    const result = await request('mutation($agent: ID!) { unused: __typename next: startAgentSession(agentId: $agent, externalUserId: "after-unused") { id } }', { agent: agentId }, key);
+    expect(result.body.errors).toBeUndefined();
+    expect(result.body.data?.next.id).toEqual(expect.any(String));
+  });
+
+  it('empty legacy dataKey means absent alone and refuses beside a header', async () => {
+    const sessionQuery = 'mutation($id: ID!) { startAgentSession(agentId: $id, externalUserId: "empty-session", dataKey: "") { id } }';
+    const refused = await request(sessionQuery, { id: agentId }, key);
+    expect(refused.body.errors?.[0]?.extensions?.code).toBe('BAD_UNLOCK_INPUT');
+    expect(await db.user.count({ where: { externalId: 'empty-session' } })).toBe(0);
+    await db.app.update({ where: { id: appId }, data: { identifyUserMethod: 'USER_ID' } });
+    const anonymous = await request(startQuery, { agent: agentId });
+    const memoryId = anonymous.body.data?.startAgentSession.memoryId;
+    const before = await db.memory.findUniqueOrThrow({ where: { id: memoryId } });
+    const query = 'mutation($id: ID!) { linkMemoryToUser(memoryId: $id, externalUserId: "empty-promotion", dataKey: "") { isEncrypted } }';
+    const refusedPromotion = await request(query, { id: memoryId }, key);
+    expect(refusedPromotion.body.errors?.[0]?.extensions?.code).toBe('BAD_UNLOCK_INPUT');
+    expect(await db.memory.findUniqueOrThrow({ where: { id: memoryId } })).toEqual(before);
+    expect(await db.user.count({ where: { externalId: 'empty-promotion' } })).toBe(0);
+    const plaintext = await request(query, { id: memoryId });
+    expect(plaintext.body.errors).toBeUndefined();
+    expect(plaintext.body.data?.linkMemoryToUser.isEncrypted).toBe(false);
+  });
+
+  it('a signed-in non-App user sending the header is refused even on a query', async () => {
+    const user = await db.user.create({ data: { handle: 'header-only-user', roles: ['READER'] } });
+    const { rawKey } = await mintUserApiKey(db, { userId: user.id, label: null, createdBy: user.id, issuedVia: 'test' });
+    const result = await request('query { __typename }', {}, key, rawKey);
+    expect(result.body.errors?.[0]?.extensions?.code).toBe('FORBIDDEN');
+    expect(JSON.stringify(result.body)).not.toContain(key);
   });
 
 });

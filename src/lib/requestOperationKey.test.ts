@@ -35,4 +35,16 @@ describe('operation key transport', () => {
       expect(() => resolveRequestOperationKey(legacy)).toThrow(expect.objectContaining({ extensions: { code: 'BAD_UNLOCK_INPUT' } }));
     });
   });
+  it('rejects noncanonical padding bits even when they decode to the same 32-byte key', () => {
+    const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+    const alias = key.slice(0, -2) + alphabet[alphabet.indexOf(key.at(-2)!) + 1] + '=';
+    expect(Buffer.from(alias, 'base64')).toEqual(Buffer.from(key, 'base64'));
+    requestOperationKeyStorage.run({}, () => {
+      expect(() => stageRequestOperationKey(alias, { appId: 'app' })).toThrow(expect.objectContaining({ extensions: { code: 'BAD_UNLOCK_INPUT' } }));
+      expect(getRequestOperationKey()).toBeNull();
+      stageRequestOperationKey(key, { appId: 'app' });
+      expect(getRequestOperationKey()?.raw).toEqual(Buffer.alloc(32, 71));
+    });
+  });
+
 });

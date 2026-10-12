@@ -11301,7 +11301,8 @@ export const typeDefs = `#graphql
     The key is verified for an existing encrypted memory and held only
     after the new session commits; USER_ID mode rejects key supply.
     The deprecated dataKey argument remains during caller migration;
-    dual supply must carry the same key.
+    dual supply must carry the same key. Only one key-consuming operation
+    may use the header in a request; a second attempt is BAD_UNLOCK_INPUT.
     """
     startAgentSession(
       agentId: ID!
@@ -11316,7 +11317,9 @@ export const typeDefs = `#graphql
     Providing x-hadron-operation-key in the request header claims private
     ownership and encrypts live nodes; remaining fields and history complete
     in bounded passes. The deprecated dataKey argument remains during caller
-    migration; dual supply must carry the same key. After a committed claim,
+    migration; dual supply must carry the same key. Only one key-consuming
+    operation may use the header per request; a second is BAD_UNLOCK_INPUT.
+    After a committed claim,
     interrupted completion allows the strict owner or owning App key to call
     encryptMemory with the existing key. A registered holding cannot be linked again.
 

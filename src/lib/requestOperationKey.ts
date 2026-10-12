@@ -9,10 +9,26 @@ import { GraphQLError } from 'graphql';
 import { parseDataKey, type EncryptionKey } from './crypto.js';
 
 export const OPERATION_KEY_HEADER = 'x-hadron-operation-key';
-export const requestOperationKeyStorage = new AsyncLocalStorage<{ key?: EncryptionKey }>();
+export const requestOperationKeyStorage = new AsyncLocalStorage<{ key?: EncryptionKey; consumed?: boolean }>();
 
+/** Presence checks do not consume; they are only for the session mode gate. */
+export function hasRequestOperationKey(): boolean {
+  return requestOperationKeyStorage.getStore()?.key !== undefined;
+}
+
+/** Claim the staged key once, before an operation can perform any writes. */
 export function getRequestOperationKey(): EncryptionKey | null {
-  return requestOperationKeyStorage.getStore()?.key ?? null;
+  const store = requestOperationKeyStorage.getStore();
+  if (!store?.key) return null;
+  if (store.consumed) {
+    throw new GraphQLError('An operation key may be consumed only once per request.', {
+      extensions: { code: 'BAD_UNLOCK_INPUT' },
+    });
+  }
+  // Claim even a failed attempt: retaining the staged key and its consumed
+  // flag prevents a later field from falling back to its legacy argument.
+  store.consumed = true;
+  return store.key;
 }
 
 /** Authenticate before parsing; never put this secret in Context or a global cache. */

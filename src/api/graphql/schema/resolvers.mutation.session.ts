@@ -15,7 +15,7 @@ import { mintMemoryUrnV2 } from '../../../lib/mintMemoryUrnV2.js';
 import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
 import { canReadMemory, filterReadableMemoryIds } from '../../../mcp/access-control.js';
 import { isAgentInstalled } from '../../../lib/appAgent.js';
-import { getRequestOperationKey, resolveRequestOperationKey } from '../../../lib/requestOperationKey.js';
+import { hasRequestOperationKey, resolveRequestOperationKey } from '../../../lib/requestOperationKey.js';
 import { sessionKeyCache } from '../../../lib/sessionKeyCache.js';
 import { makeKeyVerifier, verifyDataKey } from '../../../lib/memoryUnlock.js';
 import { decryptNodesBatch } from '../../../lib/nodeCrypto.js';
@@ -1421,7 +1421,7 @@ export const sessionMutations = {
     ) => {
       const appId = ctx.appId;
       if (!appId) throw new Error('Forbidden: App Key required');
-      const suppliedKey = getRequestOperationKey();
+      const hasSuppliedKey = hasRequestOperationKey();
       // Lock the App before provisioning any dependent row. The lock and all
       // writes commit together, so uninstall cannot pass the check mid-flight.
       const { session, memoryId, parsedKey } = await ctx.db.$transaction(async (tx) => {
@@ -1447,10 +1447,10 @@ export const sessionMutations = {
         }
 
         // SECRET mode requires a supplied key; USER_ID mode rejects it.
-        if (app.identifyUserMethod === 'SECRET' && !(suppliedKey || dataKey)) {
+        if (app.identifyUserMethod === 'SECRET' && !(hasSuppliedKey || dataKey)) {
           throw new GraphQLError('A supplied operation key is required in SECRET mode.', { extensions: { code: 'BAD_UNLOCK_INPUT' } });
         }
-        if (app.identifyUserMethod === 'USER_ID' && (suppliedKey || dataKey)) {
+        if (app.identifyUserMethod === 'USER_ID' && (hasSuppliedKey || dataKey)) {
           throw new GraphQLError('An operation key is only accepted in SECRET mode.', { extensions: { code: 'BAD_UNLOCK_INPUT' } });
         }
 
