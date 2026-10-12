@@ -7,6 +7,7 @@ import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { mintUserApiKey } from '../../../middleware/auth.js';
 import { requireMemoryWriteAccess } from './resolvers.helpers.js';
+import { canWriteToMemory } from '../../../mcp/access-control.js';
 import { resolvers, type Context } from './resolvers.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn() }));
@@ -58,6 +59,23 @@ beforeEach(async () => {
 });
 
 describe('#1795 shared authorization', () => {
+  it('GraphQL and MCP agree on ordinary org and group writer grants', async () => {
+    const agrees = async (who: string, key: string, expected: boolean) => {
+      const graphql = await requireMemoryWriteAccess(ctx(who), memories[key]).then(() => true, (error) => {
+        expect(error.extensions?.code).toBe('FORBIDDEN');
+        return false;
+      });
+      const mcp = await canWriteToMemory(db, { userId: users[who], roles: ['READER'] }, memories[key]);
+      expect({ graphql, mcp }).toEqual({ graphql: expected, mcp: expected });
+    };
+    await agrees('contributor', 'ordinary', true);
+    await agrees('reader', 'ordinary', false);
+    await agrees('contributor', 'group', false);
+    await db.memoryMember.create({ data: { memoryId: memories.group, userId: users.reader, role: 'writer' } });
+    await agrees('reader', 'group', true);
+    await db.orgMember.update({ where: { organizationId_userId: { organizationId: orgId, userId: users.contributor } }, data: { deletedAt: new Date() } });
+    await agrees('contributor', 'ordinary', false);
+  });
   it.each(['definition', 'holding'])('org contributor cannot write %s', async (key) => {
     await expect(requireMemoryWriteAccess(ctx('contributor'), memories[key])).rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
   });
@@ -124,6 +142,20 @@ describe('#1795 shared authorization', () => {
 });
 
 describe('#1795 public GraphQL boundary', () => {
+  it('a narrowed contributor read conceals another creator holding while its creator still reads', async () => {
+    const node = await db.node.findUniqueOrThrow({ where: { loc_memoryId: { memoryId: memories.holding, loc: 'existing' } } });
+    for (const who of ['contributor', 'owner']) {
+      const { rawKey } = await mintUserApiKey(db, { userId: users[who], label: null, createdBy: users[who], issuedVia: 'test' });
+      const response = await fetch(`${baseUrl}/graphql`, {
+        method: 'POST', headers: { authorization: `Bearer ${rawKey}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ query: 'query($ref: ID!) { node(ref: $ref) { id content } }', variables: { ref: node.id } }),
+      });
+      const body = await response.json() as { errors?: unknown; data?: { node: { id: string; content: string } | null } };
+      expect(response.status).toBe(200);
+      expect(body.errors).toBeUndefined();
+      expect(body.data?.node).toEqual(who === 'owner' ? { id: node.id, content: 'Original' } : null);
+    }
+  });
   it('the admitted creator path works over the real HTTP boundary', async () => {
     await db.orgMember.update({ where: { organizationId_userId: { organizationId: orgId, userId: users.owner } }, data: { role: 'READER' } });
     const { rawKey } = await mintUserApiKey(db, { userId: users.owner, label: null, createdBy: users.owner, issuedVia: 'test' });
