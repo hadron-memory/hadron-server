@@ -12,6 +12,7 @@ import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../id.js';
 import { runContext } from '../../../jobs/appRunDeps.js';
 import { hadronTaskCreate, resolveRunTools } from './index.js';
+import { lockAuthorityAnchors } from '../../auth/authorityAnchors.js';
 import type { AppRun } from '../../../generated/prisma/index.js';
 import type { RunToolContext } from './types.js';
 
@@ -140,5 +141,115 @@ describe('hadron_task_create (#1756)', () => {
     expect(await code(hadronTaskCreate.execute(toolCtx(run), { title: 'x', assignee: { user: outsider.id } }))).toBe('TASK_ASSIGNEE_INVALID');
     await hadronTaskCreate.execute(toolCtx(run), { title: 'x', createdByRunId: 'forged', createdBy: outsider.id } as any);
     expect((await tasks())[0]).toMatchObject({ createdByRunId: run.id, createdBy: null });
+  });
+});
+
+// ── The commit-time guarantees under real interleaving (Xylon P2, #1815 cycle 1) ──────────────
+
+/** Open a transaction, run `body` in it, and keep it open until `release()`. */
+async function holding(body: (tx: Parameters<Parameters<typeof db.$transaction>[0]>[0]) => Promise<void>) {
+  let release!: () => void;
+  const gate = new Promise<void>((r) => { release = r; });
+  let ready!: () => void;
+  const started = new Promise<void>((r) => { ready = r; });
+  const done = db.$transaction(async (tx) => { await body(tx); ready(); await gate; }, { timeout: 30_000 });
+  await started;
+  return { release, done };
+}
+/** True while `p` has not settled after `ms`: the creator is blocked behind the held lock. */
+async function stillPending(p: Promise<unknown>, ms = 400): Promise<boolean> {
+  let settled = false;
+  p.then(() => { settled = true; }, () => { settled = true; });
+  await new Promise((r) => setTimeout(r, ms));
+  return !settled;
+}
+
+describe('commit-time guarantees under interleaving', () => {
+  it('a run that finishes while its create is waiting creates nothing', async () => {
+    const run = await mintRun({ userId: person.id });
+    const finishing = await holding(async (tx) => { await tx.appRun.update({ where: { id: run.id }, data: { status: 'COMPLETED' } }); });
+    const creating = hadronTaskCreate.execute(toolCtx(run), { title: 'late' });
+    const outcome = creating.then(() => 'created', (e) => (e instanceof GraphQLError ? String(e.extensions?.code) : `other:${(e as Error).message}`));
+    expect(await stillPending(creating.catch(() => undefined))).toBe(true);
+    finishing.release();
+    await finishing.done;
+    expect(await outcome).toBe('APP_NOT_FOUND');
+    expect(await tasks()).toHaveLength(0);
+    expect(await db.agentTeamEvent.count()).toBe(0);
+  });
+
+  it('an App uninstalled while a create is waiting takes no task', async () => {
+    const run = await mintRun({ userId: person.id });
+    const uninstalling = await holding(async (tx) => {
+      await lockAuthorityAnchors(tx, [{ kind: 'app', id: appId }, { kind: 'org', id: orgId }], 'exclusive');
+      await tx.app.update({ where: { id: appId }, data: { uninstalledAt: new Date() } });
+    });
+    const creating = hadronTaskCreate.execute(toolCtx(run), { title: 'late' });
+    const outcome = creating.then(() => 'created', (e) => (e instanceof GraphQLError ? String(e.extensions?.code) : `other:${(e as Error).message}`));
+    expect(await stillPending(creating.catch(() => undefined))).toBe(true);
+    uninstalling.release();
+    await uninstalling.done;
+    expect(await outcome).toBe('APP_UNINSTALLED');
+    expect(await tasks()).toHaveLength(0);
+  });
+
+  it('an App deleted while a create is waiting takes no task', async () => {
+    const run = await mintRun({ userId: person.id });
+    const deleting = await holding(async (tx) => {
+      await lockAuthorityAnchors(tx, [{ kind: 'app', id: appId }, { kind: 'org', id: orgId }], 'exclusive');
+      await tx.app.update({ where: { id: appId }, data: { deletedAt: new Date() } });
+    });
+    const creating = hadronTaskCreate.execute(toolCtx(run), { title: 'late' });
+    const outcome = creating.then(() => 'created', (e) => (e instanceof GraphQLError ? String(e.extensions?.code) : `other:${(e as Error).message}`));
+    expect(await stillPending(creating.catch(() => undefined))).toBe(true);
+    deleting.release();
+    await deleting.done;
+    expect(await outcome).toBe('APP_NOT_FOUND');
+    expect(await tasks()).toHaveLength(0);
+  });
+
+  it('the person a run acts for leaving the org while a create waits: the owner default is refused', async () => {
+    const run = await mintRun({ userId: person.id });
+    const leaving = await holding(async (tx) => {
+      await lockAuthorityAnchors(tx, [{ kind: 'org', id: orgId }], 'exclusive');
+      await tx.orgMember.updateMany({ where: { organizationId: orgId, userId: person.id }, data: { deletedAt: new Date() } });
+    });
+    const creating = hadronTaskCreate.execute(toolCtx(run), { title: 'late' });
+    const outcome = creating.then(() => 'created', (e) => (e instanceof GraphQLError ? String(e.extensions?.code) : `other:${(e as Error).message}`));
+    expect(await stillPending(creating.catch(() => undefined))).toBe(true);
+    leaving.release();
+    await leaving.done;
+    expect(await outcome).toBe('TASK_OWNER_INVALID');
+    expect(await tasks()).toHaveLength(0);
+  });
+
+  it('concurrent creates by one run, and by two runs, all land, each attributed to its own run', async () => {
+    const a = await mintRun({ userId: person.id });
+    const b = await mintRun({ userId: person.id });
+    const made = await Promise.all([
+      hadronTaskCreate.execute(toolCtx(a), { title: 'a1' }),
+      hadronTaskCreate.execute(toolCtx(a), { title: 'a2' }),
+      hadronTaskCreate.execute(toolCtx(b), { title: 'b1' }),
+      hadronTaskCreate.execute(toolCtx(b), { title: 'b2' }),
+    ]) as Array<{ id: string }>;
+    expect(new Set(made.map((m) => m.id)).size).toBe(4);
+    const rows = await tasks();
+    expect(rows.map((r) => `${r.title}:${r.createdByRunId === a.id ? 'a' : r.createdByRunId === b.id ? 'b' : '?'}`).sort()).toEqual(['a1:a', 'a2:a', 'b1:b', 'b2:b']);
+    for (const r of rows) {
+      const ev = await db.agentTeamEvent.findMany({ where: { taskId: r.id } });
+      expect(ev.map((e) => e.type).sort()).toEqual(['assignment.queued', 'task.created']);
+      expect(ev.every((e) => e.actorRunId === r.createdByRunId)).toBe(true);
+    }
+  });
+
+  it('a create racing the run\'s own completion is all-or-nothing: no task without a RUNNING run at commit', async () => {
+    const run = await mintRun({ userId: person.id });
+    const results = await Promise.allSettled([
+      hadronTaskCreate.execute(toolCtx(run), { title: 'racing' }),
+      db.appRun.update({ where: { id: run.id }, data: { status: 'COMPLETED' } }),
+    ]);
+    const created = (await tasks()).length;
+    expect(created).toBe(results[0]!.status === 'fulfilled' ? 1 : 0);
+    if (results[0]!.status === 'rejected') expect(String((results[0].reason as GraphQLError).extensions?.code)).toBe('APP_NOT_FOUND');
   });
 });

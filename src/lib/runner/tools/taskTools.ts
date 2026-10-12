@@ -1,9 +1,10 @@
 /**
  * hadron_task_create — a headless run creates a root agent task in its OWN App
  * (#1756, cor:agt:050:06; Holger, team chat #7799). The run is recorded as the
- * creator. Roots only. The run's App is the only App it can reach: it is read
- * from the run row, never from the arguments, and an `appRef` that names any
- * other App is refused like a missing one.
+ * creator. Roots only. The run's App is the only App it can reach: it is the
+ * App of the run the kernel hands in (never an argument), and the stored run row
+ * is re-read under the write's locks and must name that same App and still be
+ * RUNNING. An `appRef` that names any other App is refused like a missing one.
  */
 
 import { createRootTaskForRun } from '../../../api/graphql/schema/resolvers.agentTask.js';
