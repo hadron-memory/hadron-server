@@ -11903,7 +11903,7 @@ export const typeDefs = `#graphql
   several at once; it is shown in the first that holds, in this order.
   """
   enum TeamRosterState {
-    "Woken on an unacknowledged alarm (hrn:node:hadronmemory.com:specs:cor:agt:050:19), or a child of a task it is the assignee of finished after it last moved (hrn:node:hadronmemory.com:specs:cor:agt:050:16)."
+    "Woken on an unacknowledged alarm (hrn:node:hadronmemory.com:specs:cor:agt:050:19), or a child of a task it is the assignee of finished or was cancelled after it last moved (hrn:node:hadronmemory.com:specs:cor:agt:050:16)."
     YOUR_MOVE
     "Its own availability record, or every model family it can run as, says unavailable now (hrn:node:hadronmemory.com:specs:cor:agt:060:01); a stall mark included (hrn:node:hadronmemory.com:specs:cor:agt:060:07)."
     UNAVAILABLE
@@ -11953,7 +11953,7 @@ export const typeDefs = `#graphql
     waitingSince: DateTime
     "YOUR_MOVE: unacknowledged alarms it has been woken on."
     alarms: [ID!]!
-    "YOUR_MOVE: a finished child it hasn't reacted to."
+    "YOUR_MOVE: a finished or cancelled child it hasn't reacted to."
     unreactedChildTask: ID
     lastActiveAt: DateTime
     "When it was last assigned a task; the matcher picks the least recent (hrn:node:hadronmemory.com:specs:cor:agt:060:06)."
@@ -11987,7 +11987,7 @@ export const typeDefs = `#graphql
     notStartedMinutes: Int!
     "No progress (hrn:node:hadronmemory.com:specs:cor:agt:050:15). Also the escalation step for that alarm."
     noProgressMinutes: Int!
-    "Owner didn't react to a finished child task (hrn:node:hadronmemory.com:specs:cor:agt:050:16)."
+    "Owner didn't react to a finished or cancelled child task (hrn:node:hadronmemory.com:specs:cor:agt:050:16)."
     ownerReactionMinutes: Int!
     "Couldn't be assigned (hrn:node:hadronmemory.com:specs:cor:agt:050:17)."
     assignmentMinutes: Int!
