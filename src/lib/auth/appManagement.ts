@@ -70,3 +70,46 @@ export async function managesApp(
   });
   return owner?.role === 'owner';
 }
+
+/**
+ * The people who manage this App, as a LIST, nearest first (#1761, cor:agt:050:25;
+ * cor:dmo:050:12). The same arms as {@link managesApp}, so a root task's alarm
+ * chain and the acknowledgement gate cannot drift apart:
+ *
+ *   1. the App's user-owner;
+ *   2. every `owner`-role AppMember, by user id;
+ *   3. for an org-owned App, every live ADMIN / OWNER of its org, by user id.
+ *
+ * Deliberately NOT the platform-admin arm: `managesApp` admits a platform ADMIN
+ * as a caller, but enumerating every platform admin into every App's alarm
+ * chain would wake people who have no part in the App. Deleted users are left
+ * out; each person appears once, at their nearest position. Pass a transaction
+ * client to read under the caller's transaction.
+ */
+export async function appManagerUserIds(
+  db: Pick<PrismaClient, 'orgMember' | 'appMember'>,
+  app: { id: string; organizationId: string | null; ownerUserId: string | null },
+): Promise<string[]> {
+  const out: string[] = [];
+  if (app.ownerUserId) out.push(app.ownerUserId);
+  const owners = await db.appMember.findMany({
+    where: { appId: app.id, role: 'owner', user: { deletedAt: null } },
+    select: { userId: true },
+    orderBy: { userId: 'asc' },
+  });
+  out.push(...owners.map((o) => o.userId));
+  if (app.ownerUserId === null && app.organizationId !== null) {
+    const admins = await db.orgMember.findMany({
+      where: {
+        organizationId: app.organizationId,
+        ...LIVE_ORG_MEMBERSHIP,
+        role: { in: ['ADMIN', 'OWNER'] },
+        user: { deletedAt: null },
+      },
+      select: { userId: true },
+      orderBy: { userId: 'asc' },
+    });
+    out.push(...admins.map((a) => a.userId));
+  }
+  return [...new Set(out)];
+}
