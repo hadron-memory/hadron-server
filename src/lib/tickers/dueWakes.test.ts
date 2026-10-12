@@ -384,10 +384,13 @@ describe('R2 — amplification limits', () => {
     expect(page.wakes).toHaveLength(2); // the exempt one + one against the budget
     expect(page.wakes.map((w: any) => w.worker.id)).toContain(third.id);
     expect(page.withheld).toBe(1);
-    expect(post).toHaveBeenCalledTimes(1);
-    expect((post.mock.calls[0]![1] as any).body).toMatch(/daily wake budget is spent/);
+    // #1791: the platform posts it, as a system author (not through the reader's own chat post).
+    const sysNotices = async () => (await db.node.findMany({ where: { messageChannelId: channel.id, nodeType: 'chat-message' } }))
+      .filter((n) => (n.data as any)?.authorSystem === true);
+    expect(post).not.toHaveBeenCalled();
+    expect((await sysNotices()).map((n) => n.content)).toEqual([expect.stringMatching(/daily wake budget is spent/)]);
     await due(ctx(manager.id));
-    expect(post).toHaveBeenCalledTimes(1); // once a day
+    expect(await sysNotices()).toHaveLength(1); // once a day
     // Acknowledging counts against the day; exempt wakes do not count.
     await M.acknowledgeWakes({}, { proofs: page.wakes.map((w: any) => w.proof) }, ctx(manager.id));
     expect((await db.appWakeDay.findFirstOrThrow({ where: { appId: app.id } })).wakes).toBe(1);
@@ -721,14 +724,16 @@ describe('cycle 1 — smaller dispositions (Diego, Rook)', () => {
   it('a budget notice whose post failed is tried again, not lost for the day', async () => {
     await db.app.update({ where: { id: app.id }, data: { wakeDailyBudget: 0 } });
     await say(channel, 'for liam', mention('liam'));
-    post.mockRejectedValueOnce(new Error('chat down'));
+    const teamChat = await import('../../api/graphql/schema/resolvers.teamChat.js');
+    const spy = vi.spyOn(teamChat, 'postSystemNotice').mockRejectedValueOnce(new Error('chat down'));
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     await due(ctx(manager.id));
     warn.mockRestore();
     await due(ctx(manager.id));
-    expect(post).toHaveBeenCalledTimes(2);
+    expect(spy).toHaveBeenCalledTimes(2);
     await due(ctx(manager.id));
-    expect(post).toHaveBeenCalledTimes(2); // posted this time: once a day again
+    expect(spy).toHaveBeenCalledTimes(2); // posted this time: once a day again
+    spy.mockRestore();
   });
 
   it('an availability mark that has lapsed is not reported as in effect', async () => {
