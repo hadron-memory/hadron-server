@@ -100,20 +100,16 @@ export async function participantAppWhere(
   });
   // Identity-scoped, so never via impersonation.
   if (!principal.impersonation) arms.push({ ownerUserId: userId });
-  // `ownerUserId: null` is load-bearing, not tidiness (@copilot round 4).
-  // `isAppParticipant` returns IMMEDIATELY for a user-owned App and admits only
-  // its owner — spec 047, `cor:acl:010:01`: "a user-owned App admits its owner
-  // and nobody else". Without this clause the membership arm admitted any
-  // AppMember of one, so the set and the predicate disagreed on exactly the
-  // shape they most need to agree on. `chatLocFilter` requests this arm and
-  // `sendChatMessage` uses that filter as its write entitlement, so the
-  // disagreement was reachable: a non-owner who joins a user-owned App could
-  // append to its chat. A user-owned App is reachable here ONLY through the
-  // owner arm above.
-  if (opts.includeMemberships) arms.push({
-    members: { some: { userId } }, ownerUserId: null,
-    organization: { is: { deletedAt: null } },
-  });
+  // An AppMember of an org-owned App participates only while its org lives (a deleted org's Apps are not reachable).
+  // A USER-owned App's members participate too (#1764, Holger "A", cor:acl:010:01): the App has no org to be deleted, and
+  // an impersonated principal never reaches it (the organizationId bound applied once below excludes every org-less
+  // App). This arm and `isAppParticipant` must agree on exactly this shape: `chatLocFilter` requests this arm and
+  // `sendChatMessage` uses that filter as its write entitlement, so a disagreement is a reachable write (the earlier
+  // revision of this comment records the same arm failing the other way, @copilot round 4).
+  if (opts.includeMemberships) {
+    arms.push({ members: { some: { userId } }, ownerUserId: null, organization: { is: { deletedAt: null } } });
+    if (!principal.impersonation) arms.push({ members: { some: { userId } }, ownerUserId: { not: null } });
+  }
   if (arms.length === 0) return null;
 
   return {
@@ -129,4 +125,34 @@ export async function participantAppWhere(
     ...(principal.impersonation ? { organizationId: principal.impersonation.orgId } : {}),
     OR: arms,
   };
+}
+
+/**
+ * Is `memory` the TEAM SPACE of a live USER-owned App whose participant `userId` is — an AppMember of it, not its owner?
+ * (#1764, Holger "A", cor:acl:010:01.) The one exception to a user-owned memory being owner-only (spec 047): the App
+ * owner's own app-class row (not a Worker's working memory, not a session's) is the App's team space, and a team space's
+ * audience is the App's participants. Every other user-owned memory, and every user-owned agent, stays the owner's alone.
+ *
+ * Identity-scoped, so false under impersonation (`userId` is the TARGET there). The caller still has to be the owner
+ * for the owner's path; this is the member's.
+ */
+export async function isUserOwnedTeamSpaceMember(
+  db: Pick<PrismaClient, 'app' | 'appMember' | 'worker'>,
+  principal: { userId?: string | null; impersonation?: unknown },
+  memory: { id: string; class: string; appId: string | null; ownerUserId: string | null; userMemoryOfAgentId: string | null },
+): Promise<boolean> {
+  if (!principal.userId || principal.impersonation) return false;
+  if (memory.class !== 'app' || memory.appId === null || memory.ownerUserId === null || memory.userMemoryOfAgentId !== null) return false;
+  if (memory.ownerUserId === principal.userId) return false; // the owner's own path, not a member's
+  const app = await db.app.findFirst({
+    where: { id: memory.appId, deletedAt: null, uninstalledAt: null, ownerUserId: memory.ownerUserId },
+    select: { id: true },
+  });
+  if (!app) return false;
+  if (await db.worker.findFirst({ where: { memoryId: memory.id }, select: { id: true } })) return false;
+  const member = await db.appMember.findUnique({
+    where: { appId_userId: { appId: memory.appId, userId: principal.userId } },
+    select: { userId: true },
+  });
+  return member !== null;
 }
