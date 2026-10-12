@@ -145,7 +145,7 @@ describe('isolation: a key never reaches another App\'s rows (#1785 cycle 1)', (
   it('a tree never includes a descendant that belongs to another App', async () => {
     const root = await mk(appX.id, 'root');
     const row = await db.agentTask.findUniqueOrThrow({ where: { id: root.id } });
-    const foreign = await db.agentTask.create({ data: { ...row, id: generateId(), appId: appY.id, parentTaskId: root.id, title: 'foreign child' } });
+    const foreign = await db.agentTask.create({ data: { ...row, id: generateId(), appId: appY.id, parentTaskId: root.id, title: "foreign child" } as any });
     const tree = await Q.agentTaskTree({}, { root: root.id }, keyCtx());
     expect(tree.map((t: { id: string }) => t.id)).toEqual([root.id]);
     expect(await Q.agentTask({}, { id: foreign.id }, keyCtx())).toBeNull();
