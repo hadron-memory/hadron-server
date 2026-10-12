@@ -1,3 +1,4 @@
+import { systemMemoryReadGrants } from '../../../lib/auth/systemMemoryRead.js';
 import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
 // Helpers extracted from resolvers.ts (Step 1 of the resolver split).
 // Pure mechanical move: shared auth/include/AI-config/chat/asset helpers used
@@ -1057,21 +1058,23 @@ export async function filterReadableMemoryRecords<T extends Parameters<typeof ca
  * `isMemoryReadableCached` above, which answers "may they read its NODES?".
  *
  * The two are deliberately different (see that function's note): the record
- * gate keeps an org-member fast-path for system/knowledge memory RECORDS which
+ * gate keeps an org-member fast-path for ordinary knowledge memory RECORDS which
  * `getOrgReadableMemoryIds` excludes from the node-content set. App-class
- * records now use their shape-aware content audience.
+ * records use their shape-aware content audience; system records use the
+ * installed/licensed Agent or manager audience (#1807).
  * Using the node gate for a record-level question silently drops memories the
  * caller can open directly via `Query.memory` — the #759 review finding
  * (Codex P1 / Copilot on PR #846).
  *
  * Extracted from `Query.memory` so the two callers cannot drift (AGENTS.md:
  * "reuse the shared access gate; a bespoke per-resolver gate drifts"). Order is
- * load-bearing and preserved exactly:
+ * load-bearing:
  *   1. personal/private → strict owner, or a MemoryShare grantee (#778).
- *   2. spec 047 user-owned → owner, or a Worker row's current holder under
+ *   2. system → shared Agent/App read grants, or the scoped content gate.
+ *   3. spec 047 user-owned → owner, or a Worker row's current holder under
  *      cor:acl:010:01, BEFORE the platform-admin path (#676).
- *   3. app class → the shared node gate (team, Worker, session audiences).
- *   4. other non-strict classes → platform ADMIN/OWNER, a live org membership,
+ *   4. app class → the shared node gate (team, Worker, session audiences).
+ *   5. other non-strict classes → platform ADMIN/OWNER, a live org membership,
  *      or whatever the shared node gate already admits (PUBLIC, subscription).
  */
 export async function canReadMemoryRecord(
@@ -1135,6 +1138,15 @@ export async function canReadMemoryRecord(
     if (ctx.userId && (await granteeShareAccess(ctx.db, ctx.userId, memory))) return true;
     return false;
   }
+  // System records follow the installed/licensed Agent or manager audience,
+  // never the record-only org-member shortcut (#1807).
+  if (memory.class === 'system') {
+    if (ctx.sessionId || ctx.impersonation || isRunPrincipal(ctx) || !ctx.userId) {
+      const ids = await accessible();
+      return ids === null || ids.includes(memory.id);
+    }
+    return (await systemMemoryReadGrants(ctx.db, ctx, memory.id)).length > 0;
+  }
   if (memory.ownerUserId != null) {
     // Impersonation: user-owned (spec 047) records are identity-scoped —
     // invisible for the same reason as personal/private above.
@@ -1169,7 +1181,7 @@ export async function canReadMemoryRecord(
   const member =
     ctx.userId &&
     memory.organizationId &&
-    memory.class !== 'group' &&
+    memory.class !== 'group' && memory.class !== 'system' &&
     (!ctx.impersonation || ctx.impersonation.orgId === memory.organizationId)
       ? batch
         ? (await (batch.memberOrgIds ??= getMemberOrgIds(ctx.db, ctx.userId, ctx.impersonation?.orgId))).includes(memory.organizationId)

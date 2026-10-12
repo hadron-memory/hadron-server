@@ -119,17 +119,20 @@ beforeAll(async () => {
     data: { memoryId: sharedMemory.id, granteeId: grantee.id, grantorId: owner.id, role: 'writer' },
   });
 
-  // An org member may open this system Memory RECORD, but the shared
-  // node-content gate deliberately excludes its nodes. This pins the distinct
-  // gate update-by-id needs when classifying an ordinary write denial.
+  // A creator-owned knowledge holding has a readable record but excludes
+  // this reader from its nodes. System records no longer have that audience
+  // split (#1807); retain the independent node-gate regression.
+  const holdingAgent = await db.agent.create({ data: { organizationId: org.id, urn: org.urn + ':holding-agent', name: 'Holding fixture' } });
   const recordOnlyMemory = await db.memory.create({
     data: {
       id: generateId(),
       organizationId: org.id,
-      urn: `${org.urn}:record-only-system`,
-      name: 'record-readable, nodes-unreadable system memory',
-      class: 'system',
-      visibility: null,
+      urn: `${org.urn}:record-only-holding`,
+      name: 'record-readable, nodes-unreadable holding',
+      class: 'knowledge',
+      visibility: 'ORGANIZATION',
+      userMemoryOfAgentId: holdingAgent.id,
+      createdBy: owner.id,
       acceptsUploads: false,
     },
   });
