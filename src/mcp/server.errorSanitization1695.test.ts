@@ -11,6 +11,7 @@ import { generateId } from '../lib/id.js';
 import { createTestableMcpServer } from './server.js';
 import { resolvers } from '../api/graphql/schema/resolvers.js';
 import * as locValidation from '../lib/validateLoc.js';
+import * as urnValidation from '../lib/urn.js';
 
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn() }));
 
@@ -85,6 +86,33 @@ describe('#1695 MCP raw-fallback sites', () => {
     assertSanitized(await mcp.callTool(tool, { urn, name: 'Test' }));
   });
 
+  it('the governed door guards its URN-parse catch', async () => {
+    vi.spyOn(urnValidation, 'assertFullyQualifiedUrn').mockImplementationOnce(() => { throw failure(); });
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+    assertSanitized(await mcp.callTool('hadron_create_task', { urn, name: 'Test' }));
+    expect(log).toHaveBeenCalledWith('[mcp] tool_database_error', expect.objectContaining({ site: 'hadron_create_task:parseUrn' }));
+  });
+
+  it('the governed door guards its validateLoc catch', async () => {
+    vi.spyOn(locValidation, 'validateLoc').mockImplementationOnce(() => { throw failure(); });
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+    assertSanitized(await mcp.callTool('hadron_create_task', { urn, name: 'Test' }));
+    expect(log).toHaveBeenCalledWith('[mcp] tool_database_error', expect.objectContaining({ site: 'hadron_create_task:validateLoc' }));
+  });
+
+  it('redacts a wrapper that retained only the Prisma message', async () => {
+    vi.spyOn(mutations, 'createTaskNode').mockRejectedValueOnce(new GraphQLError(privateDetail));
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    assertSanitized(await mcp.callTool('hadron_create_task', { urn, name: 'Test' }));
+  });
+
+  it('actor-neutral reads also get the registration boundary', async () => {
+    vi.spyOn(db.memory, 'findMany').mockRejectedValueOnce(failure());
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+    assertSanitized(await mcp.callTool('hadron_list_memories', {}));
+    expect(log).toHaveBeenCalledWith('[mcp] tool_database_error', expect.objectContaining({ site: 'hadron_list_memories:handler' }));
+  });
+
   it('a GraphQL wrapper and its code cannot launder Prisma details', async () => {
     vi.spyOn(mutations, 'createTaskNode').mockRejectedValueOnce(new GraphQLError(privateDetail, {
       originalError: failure(), extensions: { code: 'BAD_USER_INPUT', debug: privateDetail },
@@ -126,5 +154,51 @@ describe('#1695 MCP raw-fallback sites', () => {
     expect(log).toHaveBeenCalledWith('[mcp] tool_database_error', expect.objectContaining({ error: expect.any(Prisma.PrismaClientValidationError) }));
     expect(await db.node.count({ where: { memoryId, loc: 'test' } })).toBe(0);
     await fetch(`${baseUrl}/mcp`, { method: 'DELETE', headers: { ...headers, 'mcp-session-id': sid } });
+  });
+});
+
+describe('#1788 five main write doors over real HTTP', () => {
+  it.each([
+    ['hadron_create_node', { urn: `hrn:node:${memoryUrn}:new`, name: 'New' }],
+    ['hadron_create_parent_node', { urn: `hrn:node:${memoryUrn}:new`, name: 'New' }],
+    ['hadron_update_node', { urn, name: 'Changed' }],
+    ['hadron_delete_node', { urn }],
+    ['hadron_move_node', { urn, targetUrn: `hrn:node:${memoryUrn}:moved` }],
+  ])('%s redacts a database-trigger failure at the actual write', async (tool, args) => {
+    await db.node.create({ data: { id: generateId(), memoryId, loc: 'test', name: 'Original' } });
+    const { rawKey } = await mintUserApiKey(db, { userId, label: null, createdBy: userId, issuedVia: 'test' });
+    const headers = { authorization: `Bearer ${rawKey}`, 'content-type': 'application/json', accept: 'application/json, text/event-stream' };
+    const init = await fetch(`${baseUrl}/mcp`, {
+      method: 'POST', headers,
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 'five-doors-1788', version: '1' } } }),
+    });
+    expect(init.status).toBe(200);
+    await init.text();
+    const sid = init.headers.get('mcp-session-id')!;
+    // This is the independent QA fault schedule: no resolver/Prisma mocks.
+    await db.$executeRawUnsafe(`CREATE FUNCTION fail_node_write_1788() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'LEAKMARK secret table nodes private-detail-1788'; END $$`);
+    await db.$executeRawUnsafe('CREATE TRIGGER fail_node_write_1788 BEFORE INSERT OR UPDATE OR DELETE ON nodes FOR EACH ROW EXECUTE FUNCTION fail_node_write_1788()');
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const response = await fetch(`${baseUrl}/mcp`, {
+        method: 'POST', headers: { ...headers, 'mcp-session-id': sid },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: tool, arguments: args } }),
+      });
+      expect(response.status).toBe(200);
+      const wire = await response.text();
+      const data = wire.split('\n').find((line) => line.startsWith('data: '));
+      const result = JSON.parse(data ? data.slice(6) : wire).result;
+      assertSanitized(result);
+      expect(JSON.stringify(result)).not.toMatch(/LEAKMARK|private-detail|ConnectorError|PostgresError|P0001/);
+      expect(log).toHaveBeenCalledWith('[mcp] tool_database_error', expect.objectContaining({
+        error: expect.any(Prisma.PrismaClientUnknownRequestError),
+        site: `${tool}:handler`,
+      }));
+      expect(await db.node.findMany({ where: { memoryId }, select: { loc: true, name: true, deletedAt: true } })).toEqual([{ loc: 'test', name: 'Original', deletedAt: null }]);
+    } finally {
+      await db.$executeRawUnsafe('DROP TRIGGER fail_node_write_1788 ON nodes');
+      await db.$executeRawUnsafe('DROP FUNCTION fail_node_write_1788()');
+      await fetch(`${baseUrl}/mcp`, { method: 'DELETE', headers: { ...headers, 'mcp-session-id': sid } });
+    }
   });
 });
