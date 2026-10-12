@@ -130,6 +130,24 @@ export function nudgeText(a: AttentionItem): string {
   );
 }
 
+/**
+ * #1826 — the one line a FLAGGED worker receives from the liveness rule. Its
+ * own literal, never `nudgeText`'s mention shape: the wake is not about
+ * mentions at all (zero pending mentions is the normal case — that is the
+ * point), so it makes NO unread/mention count claim. It names the two
+ * positions it is true for — the worker's cursor and the head, both read
+ * fresh immediately before the send — and anchors an unfiltered catch-up
+ * from the watermark, mentions or not.
+ */
+export function livenessNudgeText(cursor: number, head: number): string {
+  return 'Hadron team liveness check: the team chat has moved past your read watermark '
+    + `(your cursor #${cursor} < head #${head}) — catch up, then mark read. `
+    + `Read team chat unfiltered with your own live session — CLI: \`hadron team chat read --since ${cursor} --limit 200\` then follow nextSince; MCP: \`hadron_team_chat_read\` with your session and \`sinceSeq=${cursor}\` then the returned cursor. `
+    + 'Then mark read through your OWN session. '
+    + 'If nothing needs action, mark read and finish silently — no chat post. '
+    + '(Orca attention router; liveness nudge; cursor and head as of send.)';
+}
+
 const AGENT_IDENTITIES = new Set(['claude', 'codex']);
 
 /**
@@ -163,6 +181,17 @@ export interface RosterEntry {
   name: string;
   /** The Orca worktree this worker is driven in. */
   worktree: string;
+  /**
+   * #1826 — this worker holds a watch (coordinator / lifecycle-manager) that a
+   * passive wait can strand: a finished turn with unread NON-mention chat
+   * generates no mention, so nothing wakes it. Flagged workers get the
+   * liveness rule: after `coordinatorWatchMinutes` of continuous idle with the
+   * chat past their read watermark, they are nudged to catch up — mentions or
+   * not. Booleans, validated at load; absent means an ordinary mention-only
+   * worker the liveness pass never touches.
+   */
+  coordinator?: boolean;
+  lifecycle?: boolean;
 }
 
 export interface Config {
@@ -175,6 +204,12 @@ export interface Config {
   roster: RosterEntry[];
   busyWaitMs: number;
   submitWaitS: number;
+  /**
+   * #1826 — minutes of continuous idle a flagged worker must accumulate before
+   * the liveness nudge may fire (strictly greater; never at exactly N).
+   * Positive finite number, validated at load; default 20.
+   */
+  coordinatorWatchMinutes: number;
 }
 
 const expandHome = (p: string) => (p === '~' || p.startsWith('~/') ? join(homedir(), p.slice(1)) : p);
@@ -187,6 +222,13 @@ export function loadConfig(path: string): Config {
     for (const key of ['worker', 'name', 'worktree'] as const) {
       if (!entry[key]) throw new RouterError(`roster entry ${JSON.stringify(entry)} lacks "${key}"`);
     }
+    // #1826 — the watch flags are booleans or absent; anything else is a config
+    // error the operator must see, not a truthy string silently counting.
+    for (const flag of ['coordinator', 'lifecycle'] as const) {
+      if (entry[flag] !== undefined && typeof entry[flag] !== 'boolean') {
+        throw new RouterError(`roster entry ${JSON.stringify(entry)}: "${flag}" must be a boolean`);
+      }
+    }
   }
   if (new Set(roster.map((e) => e.worker)).size !== roster.length) throw new RouterError('roster names a worker twice');
   // Two workers on one worktree would resolve to the same terminal: one
@@ -195,6 +237,12 @@ export function loadConfig(path: string): Config {
   if (new Set(worktrees).size !== worktrees.length) throw new RouterError('roster assigns one worktree to two workers');
   if (typeof raw.app !== 'string' || typeof raw.stateDir !== 'string' || typeof raw.channel !== 'string') {
     throw new RouterError('config needs "app", "channel" and "stateDir"');
+  }
+  // An explicit null is a PRESENT invalid value, not an absent one — only a
+  // missing key takes the default (invalid values fail loudly, #1826).
+  const watchMinutes = Number(raw.coordinatorWatchMinutes === undefined ? 20 : raw.coordinatorWatchMinutes);
+  if (!Number.isFinite(watchMinutes) || watchMinutes <= 0) {
+    throw new RouterError(`coordinatorWatchMinutes must be a positive finite number (got ${JSON.stringify(raw.coordinatorWatchMinutes)})`);
   }
   return {
     app: raw.app,
@@ -205,6 +253,7 @@ export function loadConfig(path: string): Config {
     roster,
     busyWaitMs: Number(raw.busyWaitMs ?? 60_000),
     submitWaitS: Number(raw.submitWaitS ?? 15),
+    coordinatorWatchMinutes: watchMinutes,
   };
 }
 
@@ -229,20 +278,42 @@ interface Ledger {
 }
 
 /**
+ * #1826 — the liveness clock, per flagged worker. Deliberately a SEPARATE
+ * durable file from the ledger: `State.adopt` deletes the ledger (a new token
+ * starts fresh mention bookkeeping), but an idle episode must survive token
+ * adoption and router restarts untouched — the watch outlives any one token.
+ * A record with no `idleSince` holds only `coveredFrontier` (the backlog a
+ * delivered liveness nudge already covered); the clock restarts on the next
+ * idle observation.
+ */
+export interface LivenessRecord {
+  /** Epoch ms the continuous idle episode began; absent while reset. */
+  idleSince?: number;
+  /** The terminal handle the clock is measured on; a change is a replaced terminal ⇒ reset. */
+  handle?: string;
+  /** The channel head at the last DELIVERED liveness nudge; re-eligibility needs head > this. */
+  coveredFrontier?: number;
+}
+
+/**
  * The adopted token plus the delivery ledger, private to this router.
  *
  * The ledger is keyed on a hash of the adopted token: it records which
  * workers were already nudged for the attention reported since that token,
  * so a poll that has to hold the token does not nudge them again. Adopting a
- * new token starts a fresh ledger.
+ * new token starts a fresh ledger — and never touches liveness.json.
  */
 export class State {
   readonly tokenPath: string;
   readonly ledgerPath: string;
+  readonly livenessPath: string;
+  readonly notesPath: string;
 
   constructor(readonly dir: string) {
     this.tokenPath = join(dir, 'adopted.token');
     this.ledgerPath = join(dir, 'ledger.json');
+    this.livenessPath = join(dir, 'liveness.json');
+    this.notesPath = join(dir, 'liveness-notes.json');
   }
 
   /** Create the private state directory (0700). */
@@ -286,7 +357,36 @@ export class State {
     atomicWrite(this.ledgerPath, JSON.stringify(ledger, null, 1));
   }
 
-  /** Adopt a token and clear the ledger: only after every delivery succeeded. */
+  /** The liveness clocks (#1826); an unreadable file starts empty. Keyed by worker id. */
+  liveness(): Record<string, LivenessRecord> {
+    try {
+      return JSON.parse(readFileSync(this.livenessPath, 'utf8')) as Record<string, LivenessRecord>;
+    } catch {
+      return {};
+    }
+  }
+
+  saveLiveness(workers: Record<string, LivenessRecord>): void {
+    atomicWrite(this.livenessPath, JSON.stringify(workers, null, 1));
+  }
+
+  /** #1826 — each worker's last LOGGED fail-closed reason, so a persistently
+   * unreadable liveness source is logged once per reason, not once per poll.
+   * Deliberately its own file: the ledger's `reported` map is token-scoped
+   * (cleared on adopt) and a source outage outlives tokens. */
+  livenessNotes(): Record<string, string> {
+    try {
+      return JSON.parse(readFileSync(this.notesPath, 'utf8')) as Record<string, string>;
+    } catch {
+      return {};
+    }
+  }
+
+  saveLivenessNotes(notes: Record<string, string>): void {
+    atomicWrite(this.notesPath, JSON.stringify(notes, null, 1));
+  }
+
+  /** Adopt a token and clear the ledger: only after every delivery succeeded. Never touches liveness.json. */
   adopt(token: string): void {
     atomicWrite(this.tokenPath, token);
     rmSync(this.ledgerPath, { force: true });
@@ -569,6 +669,48 @@ export function hasMentionOnlyRow(cfg: Config, workerId: string, run: Runner): b
   if (!Array.isArray(rows)) throw new RouterError(`register query failed: ${JSON.stringify(data.errors ?? data.error ?? null).slice(0, 300)}`);
   const winning = rows.find((r) => r.channel?.id === cfg.channel);
   return Boolean(winning && winning.namedBy === 'WORKER' && winning.entry?.mentionOnly);
+}
+
+/** parse(), but null instead of a throw — the fail-closed liveness reads report, they don't fail the poll. */
+function parseOrNull(res: RunResult): Record<string, any> | null {
+  try {
+    return JSON.parse(res.stdout) as Record<string, any>;
+  } catch {
+    return null;
+  }
+}
+
+const CURSOR_QUERY = 'query($w: ID!, $a: ID, $c: ID!) { channelReadState(attendeeRef: $w, appRef: $a, channelRef: $c) '
+  + '{ lastSeenSeq } }';
+
+/**
+ * #1826 — the worker's read cursor on the team Channel, via the EXISTING
+ * authorized read-state surface. The attention API cannot serve the liveness
+ * rule: it COUNTS non-self unread for mention-only registrations but poll
+ * emission SUPPRESSES zero-relevant rows, so a flagged worker with unread
+ * non-mention chat and zero mentions is invisible to every scan (#1826
+ * delta 1). `channelReadState` answers per attendee; lastSeenSeq 0 is a real
+ * cursor (never checkpointed), null means unknown/unreadable. Returns null on
+ * ANY unknown or error — fail-closed: absence of evidence is not a verdict,
+ * so the caller logs once and skips the candidate this poll. Reading read
+ * state confers no access (cor:dmo:090:06) — this is reuse, not new law.
+ */
+export function readCursor(cfg: Config, workerId: string, run: Runner): number | null {
+  const data = parseOrNull(run([cfg.hadronCli, 'api', CURSOR_QUERY, '-F', `w=${workerId}`, '-F', `a=${cfg.app}`, '-F', `c=${cfg.channel}`]));
+  const lastSeen = data?.data?.channelReadState?.lastSeenSeq;
+  return Number.isInteger(lastSeen) ? (lastSeen as number) : null;
+}
+
+const HEAD_QUERY = 'query($c: ID!) { channel(ref: $c) { lastSeq } }';
+
+/**
+ * #1826 — the team Channel's watermark (`channel(ref:){lastSeq}`), or null on
+ * any unknown or error. Same fail-closed contract as `readCursor`.
+ */
+export function channelHead(cfg: Config, run: Runner): number | null {
+  const data = parseOrNull(run([cfg.hadronCli, 'api', HEAD_QUERY, '-F', `c=${cfg.channel}`]));
+  const last = data?.data?.channel?.lastSeq;
+  return Number.isInteger(last) ? (last as number) : null;
 }
 
 interface Terminal {
@@ -1047,6 +1189,10 @@ export interface Outcome {
   covered: string[];
   held: Record<string, string>;
   adopted: boolean;
+  /** Flagged workers the liveness rule woke this poll (#1826). */
+  liveness: string[];
+  /** Flagged workers that caught up while a liveness nudge waited out its gates (#1826). */
+  livenessDropped: string[];
 }
 
 /** One short summary line; never a token or a message body. */
@@ -1054,14 +1200,20 @@ export function describeOutcome(o: Outcome): string {
   const parts = [`nudged: ${o.nudged.join(', ') || 'none'}`];
   if (o.dropped.length) parts.push(`dropped (read while waiting): ${o.dropped.join(', ')}`);
   if (o.covered.length) parts.push(`already nudged: ${o.covered.join(', ')}`);
+  if (o.liveness.length) parts.push(`liveness nudged: ${o.liveness.join(', ')}`);
+  if (o.livenessDropped.length) parts.push(`liveness dropped (read while waiting): ${o.livenessDropped.join(', ')}`);
   const held = Object.entries(o.held);
   if (held.length) parts.push(`held: ${held.map(([n, r]) => `${n} (${r})`).join('; ')}`);
   parts.push(o.adopted ? 'token adopted' : 'token held');
   return parts.join(' | ');
 }
 
-/** Poll attention, nudge each idle roster worker with new mentions, adopt only if all were. */
-export function pollOnce(cfg: Config, run: Runner = runCommand, log: (line: string) => void = console.log): Outcome {
+/**
+ * Poll attention, nudge each idle roster worker with new mentions, adopt only
+ * if all were — then run the #1826 liveness pass over the flagged roster.
+ * `nowMs` is the clock, injectable so the strict >N boundary is testable.
+ */
+export function pollOnce(cfg: Config, run: Runner = runCommand, log: (line: string) => void = console.log, nowMs: () => number = Date.now): Outcome {
   const state = new State(cfg.stateDir);
   state.ensure();
   return withLock(cfg.stateDir, (stillOwner) => {
@@ -1076,9 +1228,10 @@ export function pollOnce(cfg: Config, run: Runner = runCommand, log: (line: stri
       // Something relevant (for a mention-only row: a mention) since the token.
       if (item && item.lastRelevantSeq !== null && item.unreadMentions > 0) targets.push([entry, item]);
     }
+    const flagged = cfg.roster.filter((e) => e.coordinator === true || e.lifecycle === true);
 
-    const outcome: Outcome = { nudged: [], dropped: [], covered: [], held: {}, adopted: false };
-    const terminals = targets.length ? listTerminals(cfg, run) : [];
+    const outcome: Outcome = { nudged: [], dropped: [], covered: [], held: {}, adopted: false, liveness: [], livenessDropped: [] };
+    const terminals = targets.length || flagged.length ? listTerminals(cfg, run) : [];
     for (const [entry, seen] of targets) {
       if (!hasMentionOnlyRow(cfg, entry.worker, run)) {
         // A configuration error, not a delivery: never nudge on every message.
@@ -1134,7 +1287,7 @@ export function pollOnce(cfg: Config, run: Runner = runCommand, log: (line: stri
         // the frontier as covered so a held token doesn't re-run the gates for
         // it every poll; a NEW mention has a higher seq and is never mistaken
         // for covered (same argument as `alreadyNudged`).
-        ledger.nudged[entry.worker] = { relevantSeq: seen.lastRelevantSeq!, at: Date.now(), stages: 'dropped: read while waiting' };
+        ledger.nudged[entry.worker] = { relevantSeq: seen.lastRelevantSeq!, at: nowMs(), stages: 'dropped: read while waiting' };
         delete (ledger.heldSince ?? {})[entry.worker];
         delete (ledger.heldLoggedAt ?? {})[entry.worker];
         state.saveLedger(ledger);
@@ -1174,13 +1327,193 @@ export function pollOnce(cfg: Config, run: Runner = runCommand, log: (line: stri
         outcome.held[entry.name] = how;
         continue;
       }
-      ledger.nudged[entry.worker] = { relevantSeq: now.lastRelevantSeq!, at: Date.now(), stages: how };
+      ledger.nudged[entry.worker] = { relevantSeq: now.lastRelevantSeq!, at: nowMs(), stages: how };
       delete (ledger.heldSince ?? {})[entry.worker];
       delete (ledger.heldLoggedAt ?? {})[entry.worker];
       // Persisted at once: a crash or a later failure in this poll must not
       // cause the same nudge to be sent again (@codex P2, #1490).
       state.saveLedger(ledger);
       outcome.nudged.push(entry.name);
+    }
+
+    // ── #1826 — the liveness pass ────────────────────────────────────────
+    // A flagged worker's watch must survive everything around it: token
+    // adoption (State.adopt never touches liveness.json), held polls, other
+    // workers' failures. Two layers, deliberately:
+    //  - a CHEAP per-poll probe (short idle wait + prompt-empty proof) whose
+    //    only job is the durable clock — any non-idle evidence resets it;
+    //  - the FULL guard chain — fresh resolution, the busyWaitMs idle gate,
+    //    the empty-prompt gate, a fresh head>cursor recompute, the
+    //    fail-closed recheck — only once the clock is OWED a send: strictly
+    //    more than coordinatorWatchMinutes of continuous idle, with the chat
+    //    past the cursor AND past the last delivered frontier. A hold from
+    //    the chain lands in outcome.held and holds the token exactly like a
+    //    held mention nudge.
+    if (flagged.length || existsSync(state.livenessPath)) {
+      const liveness = state.liveness();
+      // A removed flag resets the watch: records for workers no longer
+      // flagged are pruned so a re-flagged worker starts a fresh episode.
+      let mutated = false;
+      for (const w of Object.keys(liveness)) {
+        if (!flagged.some((e) => e.worker === w)) {
+          delete liveness[w];
+          mutated = true;
+        }
+      }
+      if (mutated) state.saveLiveness(liveness);
+      if (flagged.length) {
+        // The mention pass touched some flagged workers: a delivered nudge
+        // COLLAPSES the liveness send (one send per wake window, the idle
+        // clock restarting at it); a held or dropped one observed the
+        // terminal or the worker reading — interrupted idle, clock reset.
+        const touched = new Set(
+          [...outcome.nudged, ...Object.keys(outcome.held), ...outcome.dropped]
+            .map((n) => cfg.roster.find((e) => e.name === n)?.worker)
+            .filter((w): w is string => Boolean(w)),
+        );
+        const notes = state.livenessNotes();
+        const note = (worker: string, name: string, reason: string): void => {
+          if (notes[worker] === reason) return;
+          notes[worker] = reason;
+          state.saveLivenessNotes(notes);
+          log(`orca-attention-router: ${name}: liveness: ${reason}`);
+        };
+        const head = channelHead(cfg, run); // one query per poll; fail-closed per worker below
+        for (const entry of flagged) {
+          let rec: LivenessRecord = liveness[entry.worker] ?? {};
+          const save = (): void => {
+            liveness[entry.worker] = rec;
+            state.saveLiveness(liveness);
+          };
+          const resetClock = (): void => {
+            if (rec.idleSince !== undefined || rec.handle !== undefined) {
+              delete rec.idleSince;
+              delete rec.handle;
+              save();
+            }
+          };
+          if (touched.has(entry.worker)) {
+            if (outcome.nudged.includes(entry.name)) {
+              // The mention nudge's own gates proved the terminal idle just
+              // now: the liveness episode restarts at that send.
+              rec = { ...rec, idleSince: nowMs() };
+              save();
+            } else {
+              resetClock();
+            }
+            continue;
+          }
+          // 1) The cheap probe. `provesIdle` returns a non-empty reason ONLY
+          // on its untracked screen-fallback success — which proves the
+          // prompt empty too — so the extra prompt check runs exactly where
+          // tui-idle alone was the evidence (a human typing reads idle,
+          // #5473; the watch must not accumulate through a half-typed
+          // prompt).
+          const [handle, detail] = resolveTerminal(entry, terminals, cfg, run);
+          if (!handle) {
+            resetClock(); // unresolvable/ambiguous — no episode can be measured
+            continue;
+          }
+          const tracked = terminals.find((t) => t.handle === handle)?.lastOutputAt;
+          const [idle, via] = provesIdle(cfg, handle, detail, tracked, RECHECK_IDLE_TIMEOUT_MS, run);
+          let continuous = idle;
+          if (idle && via === '') {
+            const [empty] = promptIsEmpty(cfg, handle, detail, run);
+            continuous = empty;
+          }
+          if (!continuous) {
+            resetClock(); // busy, draft, unreadable — interrupted idle
+            continue;
+          }
+          if (rec.handle !== handle || typeof rec.idleSince !== 'number') {
+            rec = { ...rec, idleSince: nowMs(), handle }; // first sighting, or a REPLACED terminal
+            save();
+          }
+          // 2) The liveness source, fail-closed on BOTH sides: unknown/null/
+          //    error is no candidate this poll — logged once per reason, the
+          //    clock kept aging — never a reset and never a thrown poll.
+          if (head === null) {
+            note(entry.worker, entry.name, 'source unreadable: team channel head');
+            continue;
+          }
+          const cursor = readCursor(cfg, entry.worker, run);
+          if (cursor === null) {
+            note(entry.worker, entry.name, 'source unreadable: worker read state');
+            continue;
+          }
+          if (head <= cursor) {
+            resetClock(); // observed current: the worker read the chat
+            continue;
+          }
+          // 3) Owed a send? Strictly more than N minutes of continuous idle,
+          //    chat past the cursor and past the delivered frontier.
+          const owed = typeof rec.idleSince === 'number'
+            && nowMs() - rec.idleSince > cfg.coordinatorWatchMinutes * 60_000
+            && (typeof rec.coveredFrontier !== 'number' || head > rec.coveredFrontier);
+          if (!owed) continue;
+          // 4) The full guard chain, same gates and order as a mention nudge.
+          const fresh = listTerminals(cfg, run);
+          const [sendHandle, sendDetail] = resolveTerminal(entry, fresh, cfg, run);
+          if (!sendHandle) {
+            outcome.held[entry.name] = `liveness: ${sendDetail}`;
+            resetClock();
+            continue;
+          }
+          const sendTracked = fresh.find((t) => t.handle === sendHandle)?.lastOutputAt;
+          const [gate, gateWhy] = provesIdle(cfg, sendHandle, sendDetail, sendTracked, cfg.busyWaitMs, run);
+          if (!gate) {
+            outcome.held[entry.name] = `liveness: ${gateWhy}`;
+            resetClock();
+            continue;
+          }
+          const [empty, emptyWhy] = promptIsEmpty(cfg, sendHandle, sendDetail, run);
+          if (!empty) {
+            outcome.held[entry.name] = `liveness: prompt not empty (${emptyWhy})`;
+            resetClock();
+            continue;
+          }
+          mustOwn();
+          // The recompute immediately before the send (#1616's analog): both
+          // positions re-read; a failure fails the poll rather than send a
+          // stale claim, and a worker that caught up in the gate window is
+          // dropped, never nudged about what it already read.
+          const nowCursor = readCursor(cfg, entry.worker, run);
+          const nowHead = channelHead(cfg, run);
+          if (nowCursor === null || nowHead === null) {
+            throw new RouterError('liveness recompute failed: read state or channel head unreadable (token unchanged)');
+          }
+          if (nowHead <= nowCursor) {
+            resetClock();
+            outcome.livenessDropped.push(entry.name);
+            continue;
+          }
+          const recheckTracked = listTerminals(cfg, run).find((t) => t.handle === sendHandle)?.lastOutputAt;
+          const [idleAgain, againWhy] = provesIdle(cfg, sendHandle, sendDetail, recheckTracked, RECHECK_IDLE_TIMEOUT_MS, run);
+          if (!idleAgain) {
+            outcome.held[entry.name] = `liveness: busy again after the recompute (${againWhy})`;
+            resetClock();
+            continue;
+          }
+          const [stillEmpty, stillWhy] = promptIsEmpty(cfg, sendHandle, sendDetail, run);
+          if (!stillEmpty) {
+            outcome.held[entry.name] = `liveness: prompt not empty on recheck (${stillWhy})`;
+            resetClock();
+            continue;
+          }
+          mustOwn();
+          const [ok, how] = sendNudge(cfg, sendHandle, livenessNudgeText(nowCursor, nowHead), run);
+          if (!ok) {
+            outcome.held[entry.name] = `liveness: ${how}`;
+            continue; // a failed send holds the token; the clock stands — retried next poll
+          }
+          // Persisted at once (the mention-nudge discipline): a crash after
+          // the send must not resend it. The clock restarts AT the send and
+          // the frontier covers everything through the head it named.
+          rec = { idleSince: nowMs(), handle: sendHandle, coveredFrontier: nowHead };
+          save();
+          outcome.liveness.push(entry.name);
+        }
+      }
     }
 
     const held = Object.entries(outcome.held);
@@ -1193,12 +1526,12 @@ export function pollOnce(cfg: Config, run: Runner = runCommand, log: (line: stri
       const longHolds: string[] = [];
       for (const [n] of held) {
         const w = cfg.roster.find((e) => e.name === n)?.worker ?? n;
-        const since = (ledger.heldSince ?? {})[w] ?? Date.now();
+        const since = (ledger.heldSince ?? {})[w] ?? nowMs();
         ledger.heldSince[w] = since;
-        const minutes = Math.floor((Date.now() - since) / 60_000);
+        const minutes = Math.floor((nowMs() - since) / 60_000);
         const last = (ledger.heldLoggedAt ?? {})[w] ?? 0;
-        if (minutes >= 30 && Date.now() - last >= 30 * 60_000) {
-          ledger.heldLoggedAt[w] = Date.now();
+        if (minutes >= 30 && nowMs() - last >= 30 * 60_000) {
+          ledger.heldLoggedAt[w] = nowMs();
           longHolds.push(`${n} held ${minutes} min with mentions pending (${outcome.held[n]})`);
         }
       }
@@ -1231,6 +1564,8 @@ export function status(cfg: Config): Record<string, unknown> {
   const state = new State(cfg.stateDir);
   const present = existsSync(cfg.stateDir);
   const ledger = present ? state.ledger() : { nudged: {}, reported: {} };
+  const liveness = present ? state.liveness() : {};
+  const flagged = cfg.roster.filter((e) => e.coordinator === true || e.lifecycle === true);
   return {
     stateDir: cfg.stateDir,
     tokenAdopted: present && state.token() !== null,
@@ -1238,6 +1573,14 @@ export function status(cfg: Config): Record<string, unknown> {
     held: ledger.reported,
     locked: existsSync(join(cfg.stateDir, '.writer-lock')),
     roster: cfg.roster.map((e) => e.name),
+    // #1826 — the live watch state, per flagged roster worker.
+    liveness: Object.fromEntries(flagged.map((e) => {
+      const r = liveness[e.worker];
+      return [e.name, r ? {
+        idleMinutes: typeof r.idleSince === 'number' ? Math.round((Date.now() - r.idleSince) / 60_000) : null,
+        coveredFrontier: typeof r.coveredFrontier === 'number' ? r.coveredFrontier : null,
+      } : null];
+    })),
   };
 }
 

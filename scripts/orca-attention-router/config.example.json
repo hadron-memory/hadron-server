@@ -6,11 +6,13 @@
   "stateDir": "~/Library/Application Support/hadron-orca-attention-router",
   "busyWaitMs": 60000,
   "submitWaitS": 15,
+  "coordinatorWatchMinutes": 20,
   "roster": [
     {
       "worker": "01a009180fe872c3bf9914738a9da361",
       "name": "Ada",
-      "worktree": "/Users/holger/orca/workspaces/hadron-server/ada"
+      "worktree": "/Users/holger/orca/workspaces/hadron-server/ada",
+      "coordinator": true
     },
     {
       "worker": "01a0d91d62727f5885f0f54834081b94",
