@@ -1,11 +1,12 @@
 import type { GraphQLError } from 'graphql';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
 import { canReadMemory } from '../../../mcp/access-control.js';
 import { getManagedSystemMemoryIds } from '../../../lib/auth/managedSystemMemory.js';
+import { getOrgReadableMemoryIds } from '../../../lib/auth/orgReadableMemory.js';
 
 const Q = resolvers.Query;
 const M = resolvers.Mutation;
@@ -31,6 +32,54 @@ beforeEach(async () => {
 });
 
 describe('#1808 ruled system task audience', () => {
+  const userOwned = async () => {
+    const memory = await db.memory.create({ data: { id: generateId(), urn: 'task1808-owner:system', name: 'Owned definition', class: 'system', ownerUserId: users.owner } });
+    await db.agent.create({ data: { id: generateId(), urn: 'task1808-owner:agent', name: 'Owned Agent', ownerUserId: users.owner, systemMemoryId: memory.id } });
+    return memory.id;
+  };
+
+  it('the helper admits a user-owned Agent only to its matching owner, with null org tenants', async () => {
+    const ownedId = await userOwned();
+    expect(await getManagedSystemMemoryIds(db, users.owner, ownedId)).toEqual([ownedId]);
+    expect(await getManagedSystemMemoryIds(db, users.foreign, ownedId)).toEqual([]);
+    await db.memory.update({ where: { id: ownedId }, data: { ownerUserId: users.foreign } });
+    expect(await getManagedSystemMemoryIds(db, users.owner, ownedId)).toEqual([]);
+  });
+
+  it('the helper excludes user-owned Agents from an impersonation org view', async () => {
+    const ownedId = await userOwned();
+    expect(await getManagedSystemMemoryIds(db, users.owner, ownedId, orgId)).toEqual([]);
+    // The same support view retains the accepted, in-org managed definition.
+    expect(await getManagedSystemMemoryIds(db, users.owner, memoryId, orgId)).toEqual([memoryId]);
+  });
+
+  it.each(['org-to-user', 'user-to-org'])('the helper refuses %s tenant-null mismatches', async (direction) => {
+    const ownedId = await userOwned();
+    if (direction === 'org-to-user') {
+      await db.agent.update({ where: { id: agentId }, data: { systemMemoryId: ownedId } });
+      expect(await getManagedSystemMemoryIds(db, users.admin, ownedId)).toEqual([]);
+    } else {
+      await db.agent.updateMany({ where: { ownerUserId: users.owner }, data: { systemMemoryId: memoryId } });
+      expect(await getManagedSystemMemoryIds(db, users.owner, memoryId)).toEqual([memoryId]);
+      // Remove the independent org-management grant to isolate the bad pointer.
+      await db.orgMember.delete({ where: { organizationId_userId: { organizationId: orgId, userId: users.owner } } });
+      expect(await getManagedSystemMemoryIds(db, users.owner, memoryId)).toEqual([]);
+    }
+  });
+
+  it('the helper refuses a live non-system row behind a system-memory pointer', async () => {
+    await db.memory.update({ where: { id: memoryId }, data: { class: 'knowledge', visibility: 'ORGANIZATION' } });
+    expect(await getManagedSystemMemoryIds(db, users.admin, memoryId)).toEqual([]);
+  });
+
+  it('a manager-query rejection propagates instead of returning a partial readable set', async () => {
+    await db.memory.create({ data: { id: generateId(), urn: 'task1808.example:ordinary', name: 'Ordinary', class: 'knowledge', visibility: 'ORGANIZATION', organizationId: orgId } });
+    const failure = new Error('synthetic manager query failure');
+    const mock = vi.spyOn(db.agent, 'findMany').mockRejectedValueOnce(failure);
+    try {
+      await expect(getOrgReadableMemoryIds(db, users.admin)).rejects.toBe(failure);
+    } finally { mock.mockRestore(); }
+  });
   it('the shared manager arm is scoped and fails closed without a user', async () => {
     expect(await getManagedSystemMemoryIds(db, '')).toEqual([]);
     expect(await getManagedSystemMemoryIds(db, users.admin, memoryId)).toEqual([memoryId]);
@@ -63,6 +112,7 @@ describe('#1808 ruled system task audience', () => {
   it.each(['contributor', 'reader', 'foreign'])('%s sees the same empty search for denied and missing ids', async (who) => {
     expect((await search(context(who))).hits).toEqual([]);
     expect((await search(context(who), [generateId()])).hits).toEqual([]);
+    expect(await canReadMemory(db, { userId: users[who], roles: ['READER'] }, memoryId)).toBe(false);
   });
 
   it('scope memoryRefs conceal a denied system memory exactly like a missing memory', async () => {
