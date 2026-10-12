@@ -146,7 +146,7 @@ describe('AppRun relations are gated on their OWN entity, not the run (#831/#552
     expect((await R.agent(await row(), {}, ctx(stranger.id)))?.id).toBe(agentA.id);
   });
 
-  it('a USER-OWNED App is owner-only, even for a platform admin', async () => {
+  it('a USER-OWNED App admits its owner and a platform admin, but not ordinary outsiders', async () => {
     const ownerUser = await db.user.create({
       data: { id: generateId(), githubId: 48104, githubUsername: 'ar-owner', handle: 'arowner' },
     });
@@ -162,7 +162,7 @@ describe('AppRun relations are gated on their OWN entity, not the run (#831/#552
     const pr = await db.appRun.findUniqueOrThrow({ where: { id: personalRun.id } });
     expect((await R.app(pr, {}, ctx(ownerUser.id)))?.id).toBe(personalApp.id);
     expect(await R.app(pr, {}, ctx(member.id))).toBeNull();
-    expect(await R.app(pr, {}, ctx(admin.id, ['ADMIN']))).toBeNull();
+    expect((await R.app(pr, {}, ctx(admin.id, ['ADMIN'])))?.id).toBe(personalApp.id);
   });
 });
 

@@ -74,14 +74,14 @@ export async function publishAutomationVersion(ctx: Context, input: {
   if (!['APP', 'PERSON'].includes(input.tier) || (input.tier === 'APP' && input.runAsUserId != null) || !runAsUserId && input.tier === 'PERSON') {
     return refuse('AUTOMATION_TIER_MISMATCH', 'Automation tier and run-as identity do not match.');
   }
-  await requireOwnerOrOrgRole(ctx, observed, 'ADMIN');
+  await requireOwnerOrOrgRole(ctx, observed, 'ADMIN', 'app');
   let app = observed;
   return withAuthorizedTx(ctx, [
     ...anchorsFor(observed), ...(runAsUserId ? [{ kind: 'user' as const, id: runAsUserId }] : []),
   ], async txCtx => {
     app = await loadApp(txCtx, observed.id);
     requireSameOwnership(app, observed);
-    await requireOwnerOrOrgRole(txCtx, app, 'ADMIN');
+    await requireOwnerOrOrgRole(txCtx, app, 'ADMIN', 'app');
     if (runAsUserId && !(await hasAppRelationship(txCtx.db, app.id, runAsUserId))) {
       refuse('RELATIONSHIP_MISSING', 'The run-as user has no live App relationship.');
     }
@@ -126,7 +126,7 @@ export async function approveAutomationVersion(ctx: Context, id: string, expecte
     if (current.tier === 'PERSON') {
       if (!isStrictOwner(txCtx, current.runAsUserId)) refuse('FORBIDDEN', 'Only the run-as user may approve this version.');
       if (!(await hasAppRelationship(txCtx.db, current.appId, actor))) refuse('RELATIONSHIP_MISSING', 'The run-as user has no live App relationship.');
-    } else { await requireOwnerOrOrgRole(txCtx, app, 'ADMIN'); }
+    } else { await requireOwnerOrOrgRole(txCtx, app, 'ADMIN', 'app'); }
     if (current.revokedAt) refuse('AUTOMATION_VERSION_REVOKED', 'Automation version is revoked.');
     if (expectedHash !== current.versionHash) refuse('AUTOMATION_HASH_MISMATCH', 'The approval hash does not match the version.');
   }, async (tx, txCtx) => {
@@ -148,7 +148,7 @@ export async function revokeAutomationVersion(ctx: Context, id: string): Promise
     if (!current) refuse('NOT_FOUND', 'Automation version not found.');
     const app = await loadApp(txCtx, current.appId);
     requireSameOwnership(app, observed.app);
-    if (!isStrictOwner(txCtx, current.runAsUserId)) await requireOwnerOrOrgRole(txCtx, app, 'ADMIN');
+    if (!isStrictOwner(txCtx, current.runAsUserId)) await requireOwnerOrOrgRole(txCtx, app, 'ADMIN', 'app');
   }, async tx => {
     if (!current.revokedAt) current = await tx.automationVersion.update({ where: { id }, data: { revokedAt: new Date(), revokedBy: actor } });
     return { id: current.id, revokedAt: current.revokedAt!, revokedBy: current.revokedBy! };

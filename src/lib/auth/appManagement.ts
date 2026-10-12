@@ -7,7 +7,7 @@
  *   - any `owner`-role AppMember, with the same rights as `App.ownerUserId`
  *     ("a company may have turn-over and needs to maintain multiple owners");
  *   - a live ADMIN / OWNER of an org-owned App's org;
- *   - a platform ADMIN / OWNER, for an org-owned App.
+ *   - a platform ADMIN / OWNER, including a user-owned App (#1734).
  *
  * This replaces the strict reading (#1713, Rook's P1-1) that excluded the last
  * two arms. Its first reason is gone: `joinApp` never hands out `owner` since
@@ -18,15 +18,15 @@
  *
  * Kept from the strict predicate: it is identity-scoped, so never under
  * impersonation, and a principal with no user (an App key) never manages. The
- * platform arm stops at a USER-owned App, which stays strictly its owner's
- * (spec 047), matching `callerManagesAppMembers` on #1718; whether #7790 reaches
- * a user-owned App is an open question for Holger there and here alike.
+ * platform arm uses the shared #1734 predicate; it does not grant an App key
+ * or an impersonated user management authority.
  *
  * `ctx.roles` is read as given. The task writes pass the transaction context,
  * whose platform roles `withAuthorizedTx` re-reads from the user row, so a
  * stale token's role grants nothing.
  */
 
+import { canBypassUserOwnership } from './platformAdminBypass.js';
 import type { PrismaClient } from '../../generated/prisma/index.js';
 import { LIVE_ORG_MEMBERSHIP } from './liveOrgMembership.js';
 
@@ -49,10 +49,10 @@ export async function managesApp(
   app: { id: string; organizationId: string | null; ownerUserId: string | null },
 ): Promise<boolean> {
   if (!ctx.userId || ctx.impersonation) return false;
+  if (canBypassUserOwnership(ctx, 'app')) return true;
   // Branch on the ownership CLASS first (findings:org-xor-owner-null-comparison-bypass).
   if (app.ownerUserId !== null && ctx.userId === app.ownerUserId) return true;
   if (app.ownerUserId === null && app.organizationId !== null) {
-    if (ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER')) return true;
     const admin = await ctx.db.orgMember.findFirst({
       where: {
         organizationId: app.organizationId,

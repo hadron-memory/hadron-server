@@ -31,7 +31,7 @@ let userOwnedMemoryId: string;
 beforeEach(async () => {
   await cleanDb(db);
   const admin = await db.user.create({ data: { id: generateId(), name: 'admin', roles: ['ADMIN'] } });
-  const owner = await db.user.create({ data: { id: generateId(), name: 'owner' } });
+  const owner = await db.user.create({ data: { id: generateId(), name: 'owner', handle: 'list-owner1734' } });
   adminId = admin.id;
   ownerId = owner.id;
 
@@ -41,7 +41,7 @@ beforeEach(async () => {
       id: generateId(),
       class: 'knowledge',
       name: 'uo-secret-mem',
-      urn: `@${ownerId}:uo-secret-${generateId()}`,
+      urn: `${owner.handle}:uo-secret-${generateId()}`,
       ownerUserId: ownerId,
     },
   });
@@ -51,22 +51,22 @@ beforeEach(async () => {
 });
 
 describe('#676 — hadron_list_nodes user-owned leak (ADMIN + bare parentRel)', () => {
-  it('does NOT list another user’s user-owned child nodes for a platform ADMIN', async () => {
+  it('lists another user’s non-strict child nodes for a platform ADMIN (#1734)', async () => {
     const adminAuth: AuthContext = { userId: adminId, roles: ['ADMIN'] };
     const srv = createTestableMcpServer(adminAuth);
     // Bare parentRel 'uosecret' resolves to the loc without pinning a memoryId
     // (the loc only exists in the user-owned memory), so the browse query is
     // otherwise unscoped for an ADMIN.
     const text = await srv.callToolText('hadron_list_nodes', { parentRel: 'uosecret' });
-    expect(text).not.toContain('TOP-SECRET-CHILD');
+    expect(text).toContain('TOP-SECRET-CHILD');
   });
 
-  it('the direct memoryUrn path is also denied (parity control)', async () => {
+  it('the direct memoryUrn path is also admitted (parity control)', async () => {
     const adminAuth: AuthContext = { userId: adminId, roles: ['ADMIN'] };
     const srv = createTestableMcpServer(adminAuth);
     const mem = await db.memory.findUniqueOrThrow({ where: { id: userOwnedMemoryId }, select: { urn: true } });
-    const text = await srv.callToolText('hadron_list_nodes', { memoryUrn: mem.urn });
-    expect(text).not.toContain('TOP-SECRET-CHILD');
+    const text = await srv.callToolText('hadron_list_nodes', { memoryUrn: mem.urn, parentRel: 'uosecret' });
+    expect(text).toContain('TOP-SECRET-CHILD');
   });
 
   it('lists a personal child for an ADMIN who is its strict owner despite a different tenant owner (#1217)', async () => {

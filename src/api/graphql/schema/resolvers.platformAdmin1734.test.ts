@@ -4,11 +4,14 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { managesApp } from '../../../lib/auth/appManagement.js';
+import { participantAppIds } from '../../../lib/auth/appParticipation.js';
 import { computeEffectiveAccess } from '../../../lib/auth/effectiveAccess.js';
+import { globalSearch } from '../../../lib/global-search/index.js';
 import { canReadMemory, canWriteToMemory } from '../../../mcp/access-control.js';
 import { resolvers, type Context } from './resolvers.js';
-import { getAccessibleMemoryIds, isAppParticipant, requireMemoryManageAccess, requireMemoryWriteAccess } from './resolvers.helpers.js';
+import { getAccessibleMemoryIds, isAppParticipant, requireMemoryManageAccess, requireMemoryWriteAccess, requireOwnerOrOrgRole, isOwnerOrOrgMember } from './resolvers.helpers.js';
 import { callerManagesAppMembers } from './resolvers.mutation.app.js';
+import { composeWorkerPrompt } from './resolvers.worker.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 let owner: string;
@@ -24,10 +27,11 @@ beforeEach(async () => {
   app = await db.app.create({ data: { id: generateId(), name: 'Owner App', urn: 'owner1734:app', ownerUserId: owner } });
 });
 
-async function memory(cls: 'knowledge' | 'personal' | 'private') {
+async function memory(cls: 'knowledge' | 'group' | 'app' | 'system' | 'personal' | 'private') {
   return db.memory.create({ data: {
     id: generateId(), name: cls, urn: `owner1734:${cls}`, class: cls, ownerUserId: owner,
-    ...(cls === 'knowledge' ? {} : { userId: owner }),
+    ...(['personal', 'private'].includes(cls) ? { userId: owner } : {}),
+    ...(cls === 'app' ? { appId: app.id } : {}),
   } });
 }
 
@@ -49,6 +53,34 @@ describe('#1734 shared App management and read surfaces', () => {
     const access = await computeEffectiveAccess(db, { id: admin, roles: ['ADMIN'] }, { kind: 'app', app });
     expect(access).toMatchObject({ canRead: true, canWrite: true, canManage: true, canDelete: true });
   });
+  it('platform admins discover foreign user-owned Apps on the unscoped list', async () => {
+    const page = await resolvers.Query.apps(null, {}, as(admin, ['ADMIN']));
+    expect(page.items.map(row => row.id)).toContain(app.id);
+  });
+  it('the participation set matches the point gate for platform admins and impersonation', async () => {
+    const ctx = as(admin, ['ADMIN']);
+    expect(await isAppParticipant(ctx, app)).toBe(true);
+    expect(await participantAppIds(db, ctx, { includeMemberships: true })).toContain(app.id);
+    const impersonated = { ...ctx, impersonation: { orgId: generateId() } } as Context;
+    expect(await isAppParticipant(impersonated, app)).toBe(false);
+    expect(await participantAppIds(db, impersonated, { includeMemberships: true })).not.toContain(app.id);
+  });
+  it('platform admin App-key management survives the transaction role recheck', async () => {
+    const ctx = as(admin, ['ADMIN']);
+    const created = await M.createAppKey(null, { appRef: app.id, label: 'admin-managed' }, ctx);
+    expect(created.key.appId).toBe(app.id);
+    const keys = await resolvers.Query.appKeys(null, { appRef: app.id }, ctx);
+    expect(keys.map(key => key.id)).toContain(created.key.id);
+    await M.revokeAppKey(null, { id: created.key.id }, ctx);
+    expect((await db.appKey.findUniqueOrThrow({ where: { id: created.key.id } })).revokedAt).not.toBeNull();
+  });
+  it('a platform admin staffs a user-owned App with a readable public Agent', async () => {
+    const org = await db.organization.create({ data: { id: generateId(), name: 'Publisher', urn: 'publisher1734.com' } });
+    const agent = await db.agent.create({ data: { id: generateId(), organizationId: org.id, name: 'Published', urn: 'publisher1734.com:agent', visibility: 'PUBLIC' } });
+    await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
+    const worker = await M.castWorker(null, { appRef: app.id, agentRef: agent.id, name: 'Admin staff' }, as(admin, ['ADMIN']));
+    expect(worker.appId).toBe(app.id);
+  });
   it('impersonation gains neither App-management nor App-read authority', async () => {
     const ctx = { ...as(admin, ['ADMIN']), impersonation: { orgId: generateId() } } as Context;
     expect(await managesApp(ctx, app)).toBe(false);
@@ -59,6 +91,26 @@ describe('#1734 shared App management and read surfaces', () => {
 });
 
 describe('#1734 non-strict memory management, reads and writes', () => {
+  it.each(['group', 'app', 'system'] as const)('platform authority also reaches user-owned %s rows', async cls => {
+    const mem = await memory(cls);
+    const ctx = as(admin, ['ADMIN']);
+    await expect(requireMemoryManageAccess(ctx, mem)).resolves.toBeUndefined();
+    await expect(requireMemoryWriteAccess(ctx, mem.id)).resolves.toBeUndefined();
+    expect(await canReadMemory(db, ctx, mem.id)).toBe(true);
+    expect(await canWriteToMemory(db, ctx, mem.id)).toBe(true);
+    expect(await getAccessibleMemoryIds(ctx, mem.id)).toContain(mem.id);
+  });
+  it('global search discovers non-strict user-owned memories and nodes but conceals private nodes', async () => {
+    const mem = await memory('knowledge');
+    const hidden = await memory('private');
+    const node = await db.node.create({ data: { id: generateId(), memoryId: mem.id, loc: 'topic', name: 'needle1734' } });
+    const privateNode = await db.node.create({ data: { id: generateId(), memoryId: hidden.id, loc: 'topic', name: 'needle1734' } });
+    const result = await globalSearch(db, { query: 'needle1734', entityTypes: ['node'] }, {
+      viewerUserId: admin, isPlatformAdmin: true, accessibleMemoryIds: null, orgIds: null, viewerOrgIds: [],
+    });
+    expect(result.hits.map(hit => hit.id)).toContain(node.id);
+    expect(result.hits.map(hit => hit.id)).not.toContain(privateNode.id);
+  });
   it('effectiveAccess reports full platform access to a user-owned non-strict memory', async () => {
     const mem = await memory('knowledge');
     const access = await computeEffectiveAccess(db, { id: admin, roles: ['ADMIN'] }, {
@@ -74,6 +126,7 @@ describe('#1734 non-strict memory management, reads and writes', () => {
     expect(await canReadMemory(db, ctx, mem.id)).toBe(true);
     expect(await canWriteToMemory(db, ctx, mem.id)).toBe(true);
     expect(await getAccessibleMemoryIds(ctx, mem.id)).toContain(mem.id);
+    await expect(resolvers.Query.memory(null, { ref: mem.id }, ctx)).resolves.toMatchObject({ id: mem.id });
     await expect(requireMemoryWriteAccess({ ...ctx, appId: app.id }, mem.id)).resolves.toBeUndefined();
   });
   it('a platform admin can comment and manage another author’s comment in a user-owned knowledge memory', async () => {
@@ -94,9 +147,88 @@ describe('#1734 non-strict memory management, reads and writes', () => {
       expect(await canWriteToMemory(db, ctx, mem.id)).toBe(false);
     }
   });
+  it.each(['knowledge', 'group', 'app'] as const)('impersonating the owner does not admit a user-owned %s memory', async cls => {
+    const mem = await memory(cls);
+    const ctx = { ...as(owner), impersonation: { orgId: generateId() } } as Context;
+    await expect(requireMemoryManageAccess(ctx, mem)).rejects.toThrow('Forbidden');
+    await expect(requireMemoryWriteAccess(ctx, mem.id)).rejects.toThrow();
+    expect(await canReadMemory(db, ctx, mem.id)).toBe(false);
+    expect(await canWriteToMemory(db, ctx, mem.id)).toBe(false);
+  });
+  it('a run principal cannot turn inherited platform roles into this user-owned bypass', async () => {
+    const mem = await memory('knowledge');
+    const ctx = { ...as(admin, ['ADMIN']), clientId: 'run:1734' };
+    await expect(requireMemoryManageAccess(ctx, mem)).rejects.toThrow('Forbidden');
+    await expect(requireMemoryWriteAccess(ctx, mem.id)).rejects.toThrow();
+    expect(await canReadMemory(db, ctx, mem.id)).toBe(false);
+    expect(await canWriteToMemory(db, ctx, mem.id)).toBe(false);
+  });
 });
 
 describe('#1734 categorical exceptions', () => {
+  it.each([undefined, 'personal', 'private', 'unknown'])('the tenant helper cannot bypass memory privacy for class %s', async cls => {
+    const entity = { organizationId: generateId(), ownerUserId: null, class: cls };
+    const ctx = as(admin, ['ADMIN']);
+    await expect(requireOwnerOrOrgRole(ctx, entity, 'ADMIN', 'memory')).rejects.toThrow('Forbidden');
+    expect(await isOwnerOrOrgMember(ctx, entity, 'memory')).toBe(false);
+  });
+  it.each(['reader', 'writer'] as const)('a valid personal %s share retains its own capabilities without an admin management bypass', async role => {
+    const mem = await memory('personal');
+    await db.memoryShare.create({ data: { memoryId: mem.id, granteeId: admin, grantorId: owner, role } });
+    const node = await db.node.create({ data: { id: generateId(), memoryId: mem.id, loc: 'topic', name: 'Shared topic' } });
+    const ctx = as(admin, ['ADMIN']);
+    expect(await resolvers.Query.memory(null, { ref: mem.id }, ctx)).toMatchObject({ id: mem.id });
+    expect(await getAccessibleMemoryIds(ctx, mem.id)).toContain(mem.id);
+    await expect(requireMemoryManageAccess(ctx, mem)).rejects.toThrow('Forbidden');
+    if (role === 'writer') {
+      await expect(requireMemoryWriteAccess(ctx, mem.id)).resolves.toBeUndefined();
+      await expect(M.createComment(null, { targetRef: node.id, body: 'shared writer' }, ctx)).resolves.toMatchObject({ body: 'shared writer' });
+      const ownerComment = await M.createComment(null, { targetRef: node.id, body: 'owner comment' }, as(owner));
+      await expect(M.deleteComment(null, { commentRef: ownerComment.id, expectedRevision: 1 }, ctx)).rejects.toThrow();
+    } else {
+      await expect(requireMemoryWriteAccess(ctx, mem.id)).rejects.toThrow();
+      await expect(M.createComment(null, { targetRef: node.id, body: 'denied' }, ctx)).rejects.toThrow();
+    }
+  });
+  it('a user-owned Agent system memory stays owner-only across record/content/write/manage/discovery/search/report (#8898)', async () => {
+    const mem = await db.memory.create({ data: { id: generateId(), name: 'Agent definition', urn: 'owner1734:system', class: 'system', ownerUserId: owner } });
+    await db.agent.create({ data: { id: generateId(), name: 'Owned agent', urn: 'owner1734:definition', ownerUserId: owner, systemMemoryId: mem.id } });
+    const node = await db.node.create({ data: { id: generateId(), memoryId: mem.id, loc: 'prompt', name: 'protected1734' } });
+    const ctx = as(admin, ['ADMIN']);
+    await expect(requireMemoryManageAccess(ctx, mem)).rejects.toThrow('Forbidden');
+    await expect(requireMemoryWriteAccess(ctx, mem.id)).rejects.toThrow();
+    await expect(requireMemoryWriteAccess({ ...ctx, appId: app.id }, mem.id)).rejects.toThrow();
+    expect(await canReadMemory(db, ctx, mem.id)).toBe(false);
+    expect(await canWriteToMemory(db, ctx, mem.id)).toBe(false);
+    expect(await getAccessibleMemoryIds(ctx, mem.id)).not.toContain(mem.id);
+    expect(await resolvers.Query.memory(null, { ref: mem.id }, ctx)).toBeNull();
+    const result = await globalSearch(db, { query: 'protected1734', entityTypes: ['node'] }, {
+      viewerUserId: admin, isPlatformAdmin: true, accessibleMemoryIds: null, orgIds: null, viewerOrgIds: [],
+    });
+    expect(result.hits.map(hit => hit.id)).not.toContain(node.id);
+    const access = await computeEffectiveAccess(db, { id: admin, roles: ['ADMIN'] }, { kind: 'memory', memory: { ...mem, workerOf: [] } });
+    expect(access).toMatchObject({ canRead: false, canWrite: false, canManage: false });
+    expect(await canReadMemory(db, as(owner), mem.id)).toBe(true);
+    expect(await canWriteToMemory(db, as(owner), mem.id)).toBe(true);
+  });
+  it('user-owned Agents stay owner-only at the shared gates, read/write resolvers and access report (#8878)', async () => {
+    const agent = await db.agent.create({ data: { id: generateId(), name: 'Owner Agent', urn: 'owner1734:agent', visibility: 'PERSONAL', ownerUserId: owner } });
+    const ctx = as(admin, ['ADMIN']);
+    await expect(requireOwnerOrOrgRole(ctx, agent, 'ADMIN', 'agent')).rejects.toThrow('Forbidden');
+    expect(await isOwnerOrOrgMember(ctx, agent, 'agent')).toBe(false);
+    await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
+    expect(await resolvers.App.agent(app, {}, ctx)).toBeNull();
+    expect(await resolvers.App.agents(app, {}, ctx)).toEqual([]);
+    await db.agent.update({ where: { id: agent.id }, data: { systemPrompt: 'protected definition {{name}}' } });
+    const worker = await db.worker.create({ data: { id: generateId(), appId: app.id, agentId: agent.id, name: 'Owner worker', slug: 'owner-worker' } });
+    expect((await composeWorkerPrompt(ctx, worker)).text).toBeNull();
+    await expect(resolvers.Query.castWorkerPreview(null, { appRef: app.id, agentRef: agent.id, name: 'Denied preview' }, ctx)).rejects.toThrow('Forbidden');
+    await expect(resolvers.Query.agent(null, { ref: agent.id }, ctx)).rejects.toThrow('Forbidden');
+    await expect(M.updateAgent(null, { ref: agent.id, name: 'denied' }, ctx)).rejects.toThrow('Forbidden');
+    const access = await computeEffectiveAccess(db, { id: admin, roles: ['ADMIN'] }, { kind: 'agent', agent });
+    expect(access).toMatchObject({ canRead: false, canWrite: false, canManage: false });
+    await expect(requireOwnerOrOrgRole(as(owner), agent, 'ADMIN', 'agent')).resolves.toBeUndefined();
+  });
   it.each(['personal', 'private'] as const)('platform roles never bypass %s owner gates', async cls => {
     const mem = await memory(cls);
     for (const role of ['ADMIN', 'OWNER'] as const) {

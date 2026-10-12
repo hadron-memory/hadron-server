@@ -738,7 +738,7 @@ describe('castWorker — user-owned App (spec 047)', () => {
     expect(memory.urn).toBe(`${owner.handle}:team-zoe`);
   });
 
-  it('anyone else — including a platform admin — is denied (strict owner-only)', async () => {
+  it('an outsider is denied; an admin cannot cast an unreadable user-owned Agent (#8878)', async () => {
     await expectCode(
       M.castWorker({}, { appRef: personalApp.id, agentRef: personalAgent.id, name: 'Zoe' }, ctx(outsider.id)),
       'FORBIDDEN',
@@ -985,11 +985,10 @@ describe('#1344 — heldWorkers across readable Apps', () => {
     const holderView = await Q.heldWorkers({}, { userRef: appMember.id }, ctx(appMember.id));
     expect(holderView.items.map((row: { id: string }) => row.id)).toEqual([orgWorker.id]);
 
-    // Platform authority applies to org Apps, never to another user's
-    // strict-owner App (spec 047).
+    // #1734: platform authority reaches user-owned Apps too.
     const platformAdmin: Context = { db, userId: outsider.id, roles: ['ADMIN'] };
     const platformView = await Q.heldWorkers({}, { userRef: appMember.id }, platformAdmin);
-    expect(platformView.items.map((row: { id: string }) => row.id)).toEqual([orgWorker.id]);
+    expect(new Set(platformView.items.map((row: { id: string }) => row.id))).toEqual(new Set([orgWorker.id, personalWorker.id]));
   });
 
   it('a pure App key is bounded to its own App; a foreign key sees no relation', async () => {

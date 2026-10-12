@@ -60,7 +60,7 @@ export const agentQueries = {
       // memories PUBLIC carve-out, #362). Non-public falls through to the
       // membership gate.
       if (agent.visibility !== 'PUBLIC') {
-        await requireOwnerOrOrgRole(ctx, agent, 'READER');
+        await requireOwnerOrOrgRole(ctx, agent, 'READER', 'agent');
       }
       return agent;
     },
@@ -212,7 +212,7 @@ export const agentQueries = {
       const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentRef);
       const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
       // Org ADMIN on the agent's org can read the decrypted key.
-      await requireOwnerOrOrgRole(ctx, agent, 'ADMIN');
+      await requireOwnerOrOrgRole(ctx, agent, 'ADMIN', 'agent');
       // 036-ai-service-config: registry-backed — the Agent's 'default'
       // config (single-entity contract preserved; no resolution walk).
       const config = await ctx.db.aiServiceConfig.findFirst({
@@ -311,7 +311,7 @@ export const agentQueries = {
           effectiveOrgId = app.organizationId;
           appOwnerUserId = app.ownerUserId;
           // The same owner-aware gate protects appAIConfig's decrypted key.
-          await requireOwnerOrOrgRole(ctx, app, 'ADMIN');
+          await requireOwnerOrOrgRole(ctx, app, 'ADMIN', 'app');
         }
         if (agentRef) {
           const { id } = await resolveAgentRef(ctx.db, agentRef);
@@ -323,7 +323,7 @@ export const agentQueries = {
           if (userOwnedAgent) {
             // A personal Agent is strictly owner-only, even for platform
             // admins and impersonated sessions (spec 047).
-            await requireOwnerOrOrgRole(ctx, agent, 'ADMIN');
+            await requireOwnerOrOrgRole(ctx, agent, 'ADMIN', 'agent');
           }
           if (!effectiveOrgId) {
             effectiveOrgId = agent.organizationId;
@@ -361,7 +361,7 @@ export const agentQueries = {
           if (ownerType === 'ORGANIZATION') {
             await requireOrgRole(ctx, config.organizationId!, 'ADMIN');
           } else if (ownerType === 'AGENT' && agentOwner) {
-            await requireOwnerOrOrgRole(ctx, agentOwner, 'ADMIN');
+            await requireOwnerOrOrgRole(ctx, agentOwner, 'ADMIN', 'agent');
           } else if (ownerType === 'HADRON_SERVER') {
             throw new NoAiConfigAvailableError(name ?? DEFAULT_AI_CONFIG_NAME, 'this App');
           }
@@ -453,7 +453,7 @@ export const agentQueries = {
       // 007-entity-id-or-urn: agentRef may be ID, bare URN, or prefixed URN.
       const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentRef);
       const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
-      await requireOwnerOrOrgRole(ctx, agent, 'ADMIN');
+      await requireOwnerOrOrgRole(ctx, agent, 'ADMIN', 'agent');
       return ctx.db.agentSubscription.findMany({
         where: { agentId: resolvedAgentId },
         orderBy: { createdAt: 'desc' },

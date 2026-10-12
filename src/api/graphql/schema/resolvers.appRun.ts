@@ -134,7 +134,7 @@ async function requireScheduleAdmin(ctx: Context, appRef: string) {
   if (!app) {
     throw new GraphQLError('App not found.', { extensions: { code: 'NOT_FOUND' } });
   }
-  await requireOwnerOrOrgRole(ctx, app, 'ADMIN');
+  await requireOwnerOrOrgRole(ctx, app, 'ADMIN', 'app');
   // Schedules, webhooks, and the policy-debug surface all key off an
   // organization (AgentSchedule/AgentWebhook.organizationId are still
   // required non-null columns) — not yet modeled for a user-owned App.
@@ -265,7 +265,7 @@ async function requireManualRunAccess(ctx: Context, appRef: string) {
     // Otherwise fall back to the owner-or-org-ADMIN gate: admits org admins
     // who aren't AppMembers (or the App's own owner-user), and yields the
     // standard typed Forbidden for callers with no relationship at all.
-    await requireOwnerOrOrgRole(ctx, app, 'ADMIN');
+    await requireOwnerOrOrgRole(ctx, app, 'ADMIN', 'app');
   }
   // AppRun.organizationId is still a required non-null column — manual runs
   // aren't yet modeled for a user-owned App.
@@ -1057,7 +1057,7 @@ export const appRunQueries = {
     if (!isPlatformAdmin(ctx)) {
       try {
         // Owner-or-org READER — App may be org-owned or user-owned (spec 047).
-        await requireOwnerOrOrgRole(ctx, app, 'READER');
+        await requireOwnerOrOrgRole(ctx, app, 'READER', 'app');
       } catch {
         // Denied ≡ not-found (no existence oracle for foreign apps).
         throw new GraphQLError('App not found.', { extensions: { code: 'NOT_FOUND' } });

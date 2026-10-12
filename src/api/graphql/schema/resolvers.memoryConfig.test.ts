@@ -141,9 +141,9 @@ describe('T7 — the MANAGE gate, and a non-manager is answered like a missing m
     expect(code(await gql(as(platformAdmin, { roles: ['ADMIN'] }), CONFIG, { m: personal.id }))).toBe('MEMORY_NOT_FOUND');
   });
 
-  it('a user-owned memory is managed by its owner only, not a platform admin', async () => {
+  it('a non-strict user-owned memory is managed by its owner and a platform admin', async () => {
     expect((await gql(as(personalOwner), CONFIG, { m: userOwned.id })).errors).toBeUndefined();
-    expect(code(await gql(as(platformAdmin, { roles: ['ADMIN'] }), CONFIG, { m: userOwned.id }))).toBe('MEMORY_NOT_FOUND');
+    expect((await gql(as(platformAdmin, { roles: ['ADMIN'] }), CONFIG, { m: userOwned.id })).errors).toBeUndefined();
   });
 
   it('impersonation never manages a personal memory, and never writes', async () => {

@@ -59,26 +59,34 @@ export interface AdapterCtx {
 // the base `where` is returned untouched — no empty-`AND` wrapper.
 
 /** Memory scope as a Memory `where` (used by the Memory slice + encrypted count). */
-function memoryScopeWhere(p: SearchPrincipal): AnyWhere {
+async function memoryScopeWhere(db: PrismaClient, p: SearchPrincipal): Promise<AnyWhere> {
   const base: AnyWhere =
     p.accessibleMemoryIds !== null
       ? { id: { in: p.accessibleMemoryIds } }
       // Admin: everything except OTHER users' personal/private (034 carve-out)
-      // AND other users' user-owned memories (spec 047 strict ownership).
+      // and user-owned Agent definitions (#1734, #8898).
       : {
-          NOT: foreignIdentityScopedMemoryFilter(p.viewerUserId),
+          NOT: await foreignIdentityScopedMemoryFilter(p.viewerUserId, {
+            userId: p.viewerUserId ?? undefined,
+            roles: p.isPlatformAdmin ? ['ADMIN'] : [],
+            impersonation: p.impersonationOrgId,
+          }, db),
         };
   return p.orgScopeId ? { AND: [base, { organizationId: p.orgScopeId }] } : base;
 }
 
 /** Memory scope projected onto a Node `where`. */
-function nodeScopeWhere(p: SearchPrincipal): AnyWhere {
+async function nodeScopeWhere(db: PrismaClient, p: SearchPrincipal): Promise<AnyWhere> {
   const base: AnyWhere =
     p.accessibleMemoryIds !== null
       ? { memoryId: { in: p.accessibleMemoryIds } }
       : {
           memory: {
-            NOT: foreignIdentityScopedMemoryFilter(p.viewerUserId),
+            NOT: await foreignIdentityScopedMemoryFilter(p.viewerUserId, {
+            userId: p.viewerUserId ?? undefined,
+            roles: p.isPlatformAdmin ? ['ADMIN'] : [],
+            impersonation: p.impersonationOrgId,
+          }, db),
           },
         };
   return p.orgScopeId ? { AND: [base, { memory: { organizationId: p.orgScopeId } }] } : base;
@@ -227,7 +235,7 @@ async function searchMemories(ctx: AdapterCtx): Promise<GlobalSearchHit[]> {
 
   const rows = await ctx.db.memory.findMany({
     where: {
-      AND: [memoryScopeWhere(principal), { deletedAt: null }, { OR: preds }],
+      AND: [await memoryScopeWhere(ctx.db, principal), { deletedAt: null }, { OR: preds }],
     } as Prisma.MemoryWhereInput,
     select: { id: true, urn: true, name: true, description: true, organizationId: true },
     take: ctx.cap,
@@ -289,7 +297,7 @@ async function searchNodes(ctx: AdapterCtx): Promise<GlobalSearchHit[]> {
 
   if (fields.has('content')) {
     const encCount = await ctx.db.memory.count({
-      where: { AND: [memoryScopeWhere(principal), { deletedAt: null }, { isEncrypted: true }] } as Prisma.MemoryWhereInput,
+      where: { AND: [await memoryScopeWhere(ctx.db, principal), { deletedAt: null }, { isEncrypted: true }] } as Prisma.MemoryWhereInput,
     });
     if (encCount > 0) {
       ctx.degraded.push(
@@ -314,7 +322,7 @@ async function searchNodes(ctx: AdapterCtx): Promise<GlobalSearchHit[]> {
     where: {
       // #1608 (cor:dmo:110:08) — global search is content only; comments are
       // searched by asking for them (findNodes contentScope COMMENTS/ALL).
-      AND: [nodeScopeWhere(principal), { deletedAt: null }, { nodeType: { not: COMMENT_NODE_TYPE } }, { OR: preds }],
+      AND: [await nodeScopeWhere(ctx.db, principal), { deletedAt: null }, { nodeType: { not: COMMENT_NODE_TYPE } }, { OR: preds }],
     } as Prisma.NodeWhereInput,
     select: nodeSelect,
     take: ctx.cap,

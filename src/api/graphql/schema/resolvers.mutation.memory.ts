@@ -424,7 +424,7 @@ export const memoryMutations = {
             );
           }
         } else {
-          await requireOwnerOrOrgRole(ctx, sourceMem, 'ADMIN');
+          await requireOwnerOrOrgRole(ctx, sourceMem, 'ADMIN', 'memory');
         }
       }
 
@@ -1746,7 +1746,7 @@ export const memoryMutations = {
       const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentRef);
       const { id: resolvedMemoryId } = await resolveMemoryRef(ctx.db, memoryRef);
       const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
-      await requireOwnerOrOrgRole(ctx, agent, 'ADMIN');
+      await requireOwnerOrOrgRole(ctx, agent, 'ADMIN', 'agent');
       // #1349: the role is validated before anything is stored (the column is
       // a free String, so an unknown value used to persist as an inert grant)
       // — by the gate below, AFTER its concealment decision (@copilot, PR #1357).
@@ -1769,7 +1769,7 @@ export const memoryMutations = {
               lockedPair.agent.ownerUserId !== agent.ownerUserId) {
             throw new Error('Agent ownership changed; retry the operation');
           }
-          await requireOwnerOrOrgRole(txCtx, lockedPair.agent, 'ADMIN');
+          await requireOwnerOrOrgRole(txCtx, lockedPair.agent, 'ADMIN', 'agent');
           grantedRole = await requireAgentMemoryGrant(txCtx, lockedPair.agent, lockedPair.memory, role, memoryRef);
         },
         async (tx) => {
@@ -1805,7 +1805,7 @@ export const memoryMutations = {
       const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentRef);
       const { id: resolvedMemoryId } = await resolveMemoryRef(ctx.db, memoryRef);
       const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
-      await requireOwnerOrOrgRole(ctx, agent, 'ADMIN');
+      await requireOwnerOrOrgRole(ctx, agent, 'ADMIN', 'agent');
       // #1349: re-role is its own escalation path — an existing `read` row
       // becomes the write cap here — so the NEW role gets the same memory-side
       // gate as a fresh attach, not merely the agent gate. The new role is
@@ -1828,7 +1828,7 @@ export const memoryMutations = {
               lockedPair.agent.ownerUserId !== agent.ownerUserId) {
             throw new Error('Agent ownership changed; retry the operation');
           }
-          await requireOwnerOrOrgRole(txCtx, lockedPair.agent, 'ADMIN');
+          await requireOwnerOrOrgRole(txCtx, lockedPair.agent, 'ADMIN', 'agent');
           grantedRole = await requireAgentMemoryGrant(txCtx, lockedPair.agent, lockedPair.memory, role, memoryRef);
         },
         async (tx) => {
@@ -1868,7 +1868,7 @@ export const memoryMutations = {
       const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentRef);
       const { id: resolvedMemoryId } = await resolveMemoryRef(ctx.db, memoryRef);
       const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
-      await requireOwnerOrOrgRole(ctx, agent, 'ADMIN');
+      await requireOwnerOrOrgRole(ctx, agent, 'ADMIN', 'agent');
       let lockedPair: Awaited<ReturnType<typeof lockAttachmentPair>>;
       await withAuthorizedMemoryTx(
         ctx, resolvedMemoryId,
@@ -1882,7 +1882,7 @@ export const memoryMutations = {
               lockedPair.agent.ownerUserId !== agent.ownerUserId) {
             throw new Error('Agent ownership changed; retry the operation');
           }
-          await requireOwnerOrOrgRole(txCtx, lockedPair.agent, 'ADMIN');
+          await requireOwnerOrOrgRole(txCtx, lockedPair.agent, 'ADMIN', 'agent');
         },
         (tx) => tx.agentMemoryItem.delete({
           where: { agentId_memoryId: { agentId: resolvedAgentId, memoryId: resolvedMemoryId } },

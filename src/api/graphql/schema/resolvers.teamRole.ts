@@ -215,7 +215,7 @@ async function buildTeamRole(
       roleAgent = entry.agent;
     } else {
       try {
-        await requireOwnerOrOrgRole(ctx, agent, 'READER');
+        await requireOwnerOrOrgRole(ctx, agent, 'READER', 'agent');
         roleAgent = entry.agent;
       } catch {
         roleAgent = null;

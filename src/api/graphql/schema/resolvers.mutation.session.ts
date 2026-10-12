@@ -273,23 +273,11 @@ export async function writeSessionHandoff(
       select: { id: true, name: true, slug: true, memoryId: true, appId: true },
     });
 
-    // AUTHORITY. The caller has already cleared `requireSessionWriteAccess` on
-    // the session being ended, and the target memory is DERIVED from the worker
-    // that session is bound to — the caller names no memory, so this elevation
-    // cannot be steered anywhere. Without it the operation refuses the very
-    // principal it exists for: `requireMemoryWriteAccess` grants an org-owned
-    // app-class memory to org CONTRIBUTORs, and an AppMember who is not an org
-    // member is most of this team. That is the same gap `createTeamChatMessage`
-    // meets and answers the same way (gate on the operation's own predicate,
-    // then write); the difference is that it writes rows by hand, while this
-    // delegates to `writeNodeCore` so encryption, the revision snapshot, the
-    // abstract hash and re-embedding all still happen
-    // (findings:node-write-surface-invariants).
-    //
-    // Deliberately does NOT reach a user-owned App's worker memory: strict
-    // ownership (spec 047) refuses even a platform admin there, and it needs no
-    // help — a user-owned App's workers are driven by its owner.
-    const writerCtx: Context = { ...ctx, roles: ['ADMIN'] as Context['roles'] };
+    // #1734: don't synthesize a platform role for an internal write. The
+    // canonical memory gate admits the real Worker holder and App managers,
+    // and still checks the working row's tenant provenance. Elevating a
+    // non-admin here would turn a foreign user-owned row into a writable one.
+    const writerCtx = ctx;
 
     // Provisioning is best-effort at cast time (the spec allows it lazily), so
     // a legally cast worker can reach here with no memory. Provision it now
@@ -403,7 +391,7 @@ export const sessionMutations = {
           throw new GraphQLError(`Agent not found: ${agentRef}`, { extensions: { code: 'BAD_USER_INPUT' } });
         }
         if (agent.visibility !== 'PUBLIC') {
-          await requireOwnerOrOrgRole(ctx, agent, 'READER');
+          await requireOwnerOrOrgRole(ctx, agent, 'READER', 'agent');
         }
         agentId = resolvedAgentId;
       }
@@ -1663,7 +1651,7 @@ export const sessionMutations = {
       // 007-entity-id-or-urn: agentId may be ID, bare URN, or prefixed URN.
       const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentId);
       const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
-      await requireOwnerOrOrgRole(ctx, agent, 'ADMIN');
+      await requireOwnerOrOrgRole(ctx, agent, 'ADMIN', 'agent');
       const sysMemId = (agent as any).systemMemoryId as string;
       if (!sysMemId) throw new Error('Agent has no system memory');
 
@@ -1740,7 +1728,7 @@ export const sessionMutations = {
       // 007-entity-id-or-urn: agentId may be ID, bare URN, or prefixed URN.
       const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentId);
       const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
-      await requireOwnerOrOrgRole(ctx, agent, 'ADMIN');
+      await requireOwnerOrOrgRole(ctx, agent, 'ADMIN', 'agent');
       const sysMemId = (agent as any).systemMemoryId as string;
       if (!sysMemId) throw new Error('Agent has no system memory');
 
@@ -1775,7 +1763,7 @@ export const sessionMutations = {
       // 007-entity-id-or-urn: agentId may be ID, bare URN, or prefixed URN.
       const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentId);
       const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
-      await requireOwnerOrOrgRole(ctx, agent, 'ADMIN');
+      await requireOwnerOrOrgRole(ctx, agent, 'ADMIN', 'agent');
       const sysMemId = (agent as any).systemMemoryId as string;
       if (!sysMemId) throw new Error('Agent has no system memory');
 
@@ -1958,7 +1946,7 @@ export const sessionMutations = {
       // 007-entity-id-or-urn: agentId may be ID, bare URN, or prefixed URN.
       const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentId);
       const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
-      await requireOwnerOrOrgRole(ctx, agent, 'ADMIN');
+      await requireOwnerOrOrgRole(ctx, agent, 'ADMIN', 'agent');
 
       const now = new Date();
       const lockExpiry = (agent as any).editorLockExpiresAt as Date | null;
@@ -1987,7 +1975,7 @@ export const sessionMutations = {
       // 007-entity-id-or-urn: agentId may be ID, bare URN, or prefixed URN.
       const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentId);
       const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
-      await requireOwnerOrOrgRole(ctx, agent, 'ADMIN');
+      await requireOwnerOrOrgRole(ctx, agent, 'ADMIN', 'agent');
 
       await ctx.db.agent.update({
         where: { id: resolvedAgentId },

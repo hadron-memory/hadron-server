@@ -1,3 +1,4 @@
+import { canBypassUserOwnership, canBypassMemoryOwnership } from './platformAdminBypass.js';
 /**
  * effectiveAccess — the authoritative "what access does user X have to
  * resource Y?" composition (issue #323).
@@ -196,6 +197,10 @@ async function memoryGrants(
     select: { ownerUserId: true },
   });
   const isWorkerRow = Boolean(workerApp && workerApp.ownerUserId === memory.ownerUserId);
+
+  if (memory.ownerUserId !== null && await canBypassMemoryOwnership(db, { userId: subject.id, roles: subject.roles }, memory)) {
+    return [{ source: 'PLATFORM_ROLE', role: subject.roles.includes('OWNER') ? 'OWNER' : 'ADMIN', via: null, caps: FULL }];
+  }
 
   // spec 047: user-owned non-strict memories are owner-only except a Worker's
   // working memory, which also grants its current holder read and write. The
@@ -406,8 +411,10 @@ async function appGrants(
 ): Promise<InternalGrant[]> {
   const grants: InternalGrant[] = [];
 
-  // spec 047: a USER-owned App is STRICTLY owner-only (v1). Only the owner has
-  // grants; return before the platform/org paths, mirroring memoryGrants.
+  // #1734: platform managers reach user-owned Apps as well as org-owned Apps.
+  if (app.ownerUserId !== null && canBypassUserOwnership({ userId: subject.id, roles: subject.roles }, 'app')) {
+    return [{ source: 'PLATFORM_ROLE', role: subject.roles.includes('OWNER') ? 'OWNER' : 'ADMIN', via: null, caps: FULL }];
+  }
   if (app.ownerUserId !== null) {
     if (app.ownerUserId === subject.id) {
       grants.push({ source: 'PRINCIPAL_GRANT', role: 'owner', via: null, caps: FULL });

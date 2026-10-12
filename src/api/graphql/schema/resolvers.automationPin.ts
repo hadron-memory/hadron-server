@@ -28,7 +28,7 @@ async function load(ctx: Context, input: AutomationTriggerRef) {
   if (row.userId !== null) {
     if (!isStrictOwner(ctx, row.userId) || !await hasAppRelationship(ctx.db, row.appId, row.userId)) throw denied();
   } else {
-    await requireOwnerOrOrgRole(ctx, app, 'ADMIN');
+    await requireOwnerOrOrgRole(ctx, app, 'ADMIN', 'app');
   }
   return row;
 }

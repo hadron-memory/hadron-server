@@ -143,7 +143,7 @@ describe('nested App read gates', () => {
     expect(platformAdmin.data?.memory?.organization?.policy).toEqual({ confidential: 'SYNTHETIC-ORG-POLICY' });
   });
 
-  it('keeps a platform admin from seeing another user’s App through a public Agent install', async () => {
+  it('admits a platform admin to a user-owned App directly and through a public Agent install (#1734)', async () => {
     const publicAgent = await db.agent.create({ data: {
       id: generateId(), ownerUserId: owner.id, urn: '@synthetic-owner:public-agent',
       name: 'Public Agent', visibility: 'PUBLIC',
@@ -160,14 +160,14 @@ describe('nested App read gates', () => {
     } });
 
     const directResult = await gql(holder.id, direct, privateApp.id, ['ADMIN']);
-    expect(directResult.data?.app).toBeNull();
+    expect(directResult.data?.app?.id).toBe(privateApp.id);
     const nestedResult = await gql(holder.id, `query($ref: ID!) { agent(ref: $ref) { apps { id systemPrompt keys { keyPreview } } appAgents { app { id systemPrompt keys { keyPreview } } } } }`, publicAgent.id, ['ADMIN']);
     expect(nestedResult.errors).toBeUndefined();
-    expect(nestedResult.data?.agent?.apps).toEqual([]);
-    expect(nestedResult.data?.agent?.appAgents).toEqual([]);
+    expect(nestedResult.data?.agent?.apps.map(row => row.id)).toContain(privateApp.id);
+    expect(nestedResult.data?.agent?.appAgents?.[0]?.app?.id).toBe(privateApp.id);
 
     const adminCtx = { db, userId: holder.id, roles: ['ADMIN'] } as Context;
-    expect(await resolvers.AppAgent.app({ appId: privateApp.id, app: privateApp } as { appId: string }, {}, adminCtx)).toBeNull();
+    expect((await resolvers.AppAgent.app({ appId: privateApp.id, app: privateApp } as { appId: string }, {}, adminCtx))?.id).toBe(privateApp.id);
 
     const ownerResult = await gql(owner.id, `query($ref: ID!) { agent(ref: $ref) { apps { id } appAgents { app { id } } } }`, publicAgent.id, ['ADMIN']);
     expect(ownerResult.errors).toBeUndefined();

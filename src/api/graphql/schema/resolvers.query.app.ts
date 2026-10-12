@@ -1,3 +1,4 @@
+import { canBypassUserOwnership } from '../../../lib/auth/platformAdminBypass.js';
 // appQueries — extracted from resolvers.ts Query (split step 3). No behavior change.
 import { decryptToken } from '../../../lib/tokenCrypto.js';
 import { DEFAULT_AI_CONFIG_NAME } from '../../../lib/aiConfig.js';
@@ -61,12 +62,13 @@ export const appQueries = {
         // Admin unscoped reach applies only WITHOUT an orgId — the active-org
         // selection is a membership concept (cor:api:100:01).
         if (isPlatformAdmin && !scopedToOrg) {
-          // Every live App EXCEPT another user's user-owned App — spec 047
-          // strict ownership (a user-owned App is owner-only; an admin sees
-          // only their own). "org-owned OR mine" as a flat OR.
+          // #1734: a direct platform admin discovers all live Apps. Other
+          // principal shapes retain their org-owned/own-user-owned boundary.
           where = {
             deletedAt: null,
-            OR: [{ ownerUserId: null }, { ownerUserId: ctx.userId ?? '__none__' }],
+            ...(canBypassUserOwnership(ctx, 'app') ? {} : {
+              OR: [{ ownerUserId: null }, { ownerUserId: ctx.userId ?? '__none__' }],
+            }),
           };
         } else {
           // Org-scoped view. In the DEFAULT (no orgId) view, also surface the
@@ -114,7 +116,7 @@ export const appQueries = {
       // pre-473 org-ADMIN gate was stricter than the list a plain member
       // could already read this App through. Admin-only material (keys,
       // decrypted AI config) keeps its own gates (appKeys / appAIConfig).
-      await requireOwnerOrOrgRole(ctx, app, 'READER');
+      await requireOwnerOrOrgRole(ctx, app, 'READER', 'app');
       return app;
     },
 
@@ -131,11 +133,9 @@ export const appQueries = {
       // 007-entity-id-or-urn: appRef may be ID, bare URN, or prefixed URN.
       const { id: resolvedAppId } = await resolveAppRef(ctx.db, appRef);
       const app = await ctx.db.app.findUniqueOrThrow({ where: { id: resolvedAppId } });
-      // Auth via the shared gate (unconditional): it grants a platform admin on
-      // an ORG-owned App but enforces OWNER-ONLY on a user-owned App. The old
-      // `if (!isPlatformAdmin)` skip leaked a user-owned App's decrypted AI key
-      // to a platform admin (spec 047 blocker 3, #682 security review).
-      await requireOwnerOrOrgRole(ctx, app, 'ADMIN');
+      // App-owned configuration follows the shared manager gate (#1734).
+      // User-owned Secrets and Agent-owned configuration keep their own gates.
+      await requireOwnerOrOrgRole(ctx, app, 'ADMIN', 'app');
       // 036-ai-service-config: registry-backed — the App's 'default'
       // config (single-entity contract preserved; no resolution walk).
       const config = await ctx.db.aiServiceConfig.findFirst({
@@ -156,7 +156,7 @@ export const appQueries = {
       // Unconditional shared gate — platform admin on ORG-owned, OWNER-ONLY on
       // user-owned (spec 047 blocker 3). The old skip leaked a user-owned App's
       // key metadata to a platform admin.
-      await requireOwnerOrOrgRole(ctx, app, 'ADMIN');
+      await requireOwnerOrOrgRole(ctx, app, 'ADMIN', 'app');
       return ctx.db.appKey.findMany({
         where: { appId: resolvedAppId, revokedAt: null },
         orderBy: { createdAt: 'desc' },

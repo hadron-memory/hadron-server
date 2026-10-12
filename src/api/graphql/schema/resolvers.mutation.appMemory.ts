@@ -85,7 +85,7 @@ async function loadAppAndAuthorize(
 
   if (klass === 'app' || klass === 'knowledge') {
     // Shared data (deployment config / reference knowledge) — org-management.
-    await requireOwnerOrOrgRole(ctx, app, 'ADMIN');
+    await requireOwnerOrOrgRole(ctx, app, 'ADMIN', 'app');
   } else {
     // personal/private: the caller OWNS the resulting memory, so App membership
     // is the bar (not org admin) and the membership must be genuine — no

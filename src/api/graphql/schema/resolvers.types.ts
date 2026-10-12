@@ -1,3 +1,4 @@
+import { canBypassUserOwnership } from '../../../lib/auth/platformAdminBypass.js';
 // typeResolvers — GraphQL type-level field resolvers extracted from resolvers.ts
 // (split step 3). No behavior change.
 import { isLifecycleActive } from '@hadron-memory/access-control';
@@ -225,7 +226,7 @@ async function readableNestedAgent<T extends NestedAgentRow>(ctx: Context, agent
     if (await isAgentInstalledAndLicensed(ctx.db, ctx.appId, agent.id)) return agent;
   }
   try {
-    await requireOwnerOrOrgRole(ctx, agent, 'READER');
+    await requireOwnerOrOrgRole(ctx, agent, 'READER', 'agent');
     return agent;
   } catch (error) {
     if (error instanceof GraphQLError && error.extensions.code === 'FORBIDDEN') return null;
@@ -267,7 +268,7 @@ async function loadReadableNestedApp(ctx: Context, appId: string) {
   const app = await loadApp(ctx, appId);
   if (!app || app.deletedAt) return null;
   try {
-    await requireOwnerOrOrgRole(ctx, app, 'READER');
+    await requireOwnerOrOrgRole(ctx, app, 'READER', 'app');
   } catch (error) {
     if (error instanceof GraphQLError && error.extensions.code === 'FORBIDDEN') return null;
     throw error;
@@ -292,6 +293,7 @@ async function filterReadableAppRows<T extends {
   const platformAdmin = ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER');
   return apps.filter((app) => {
     if (app.deletedAt) return false;
+    if (canBypassUserOwnership(ctx, 'app')) return true;
     if (app.ownerUserId !== null) {
       return !ctx.impersonation && !!ctx.userId && app.ownerUserId === ctx.userId;
     }
@@ -1131,7 +1133,7 @@ export const typeResolvers = {
       // common case the caller already cleared org-READER on the run's org and
       // this passes; it is the cross-org and user-owned shapes that need it.
       try {
-        await requireOwnerOrOrgRole(ctx, app, 'READER');
+        await requireOwnerOrOrgRole(ctx, app, 'READER', 'app');
       } catch {
         return null;
       }
@@ -2177,8 +2179,7 @@ export const typeResolvers = {
     // foreign App here leaks data even though keys and members re-check.
     // Scope them to
     // Apps in orgs the CALLER belongs to, then apply each App's own read
-    // gate. Platform ADMIN/OWNER can read org-owned Apps but not another
-    // user's user-owned App (spec 047 strict ownership).
+    // gate. #1734 also admits a direct platform admin to user-owned Apps.
     apps: async (a: { id: string }, _: unknown, ctx: Context) => {
       const where: Record<string, unknown> = {
         appAgents: { some: { agentId: a.id } },

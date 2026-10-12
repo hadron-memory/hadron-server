@@ -166,7 +166,7 @@ describe('createApp — user-owned (no orgId), installing a PUBLIC agent', () =>
 });
 
 describe('Query.apps — user-owned App listing', () => {
-  it('the owner sees their user-owned App; another user + admin-unscoped do not', async () => {
+  it('the owner and platform admin see a user-owned App; an ordinary outsider does not', async () => {
     const app = await resolvers.Mutation.createApp(
       {}, { agentRef: publicAgentId, name: 'Mine' }, ctx({ userId: ownerId, roles: ['READER'] }),
     );
@@ -177,7 +177,7 @@ describe('Query.apps — user-owned App listing', () => {
     expect(otherList.items.map((a: { id: string }) => a.id)).not.toContain(app.id);
 
     const adminList = await resolvers.Query.apps(null, {}, ctx({ userId: otherId, roles: ['ADMIN'] }));
-    expect(adminList.items.map((a: { id: string }) => a.id)).not.toContain(app.id);
+    expect(adminList.items.map((a: { id: string }) => a.id)).toContain(app.id);
   });
 
   // #782 — the owner-only "My apps" slice: apps(filter: { ownedByMe: true })
@@ -227,21 +227,21 @@ describe('Query.apps — user-owned App listing', () => {
   });
 });
 
-describe('user-owned App is owner-only (blocker 3 — no platform-admin bypass)', () => {
+describe('user-owned App platform administration (#1734)', () => {
   async function makeApp() {
     return resolvers.Mutation.createApp(
       {}, { agentRef: publicAgentId, name: 'Private App' }, ctx({ userId: ownerId, roles: ['READER'] }),
     );
   }
 
-  it('appKeys / appAIConfig deny a non-owner platform admin', async () => {
+  it('appKeys / appAIConfig admit a non-owner platform admin', async () => {
     const app = await makeApp();
     const adminCtx = ctx({ userId: otherId, roles: ['ADMIN'] });
-    await expect(resolvers.Query.appKeys(null, { appRef: app.id }, adminCtx)).rejects.toThrow('Forbidden');
-    await expect(resolvers.Query.appAIConfig(null, { appRef: app.id }, adminCtx)).rejects.toThrow('Forbidden');
+    await expect(resolvers.Query.appKeys(null, { appRef: app.id }, adminCtx)).resolves.toEqual(expect.any(Array));
+    await expect(resolvers.Query.appAIConfig(null, { appRef: app.id }, adminCtx)).resolves.toBeNull();
   });
 
-  it('regenerateAppKey + ensureAppMember deny a non-owner platform admin', async () => {
+  it('regenerateAppKey + ensureAppMember re-read a claimed platform role and deny a non-admin', async () => {
     const app = await makeApp();
     const adminCtx = ctx({ userId: otherId, roles: ['ADMIN'] });
     await expect(resolvers.Mutation.regenerateAppKey(null, { appRef: app.id }, adminCtx)).rejects.toThrow('Forbidden');

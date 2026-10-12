@@ -284,7 +284,7 @@ describe('resolveAIConfig precedence (US1)', () => {
 });
 
 describe('resolveAIConfig user-owned App decrypt gate (#1487)', () => {
-  it('matches appAIConfig: owner succeeds, unrelated org admin and platform admin are denied', async () => {
+  it('matches appAIConfig: owner and platform admin succeed; unrelated org admin is denied', async () => {
     const owner = await db.user.create({
       data: { id: generateId(), handle: 'cfg-victim', githubId: 36006, name: 'Victim' },
     });
@@ -302,12 +302,14 @@ describe('resolveAIConfig user-owned App decrypt gate (#1487)', () => {
       {}, { appRef: 'hrn:app:cfg-victim:private-app' }, ownerCtx,
     )).apiKey).toBe('sk-victim-only');
 
-    for (const deniedCtx of [ctxFor(admin.id), platformAdminCtx()]) {
+    for (const deniedCtx of [ctxFor(admin.id)]) {
       await expect(resolvers.Query.appAIConfig({}, { appRef: victimApp.id }, deniedCtx))
         .rejects.toThrow(/Forbidden/);
       await expect(resolvers.Query.resolveAIConfig({}, { appRef: victimApp.id }, deniedCtx))
         .rejects.toThrow(/Forbidden/);
     }
+    expect((await resolvers.Query.appAIConfig({}, { appRef: victimApp.id }, platformAdminCtx()))?.apiKey).toBe('sk-victim-only');
+    expect((await resolvers.Query.resolveAIConfig({}, { appRef: victimApp.id }, platformAdminCtx())).apiKey).toBe('sk-victim-only');
     // R1/R1e: an unrelated org ADMIN cannot borrow their own Agent's org
     // as authority for the victim App, by either id or published URN.
     for (const refs of [

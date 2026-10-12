@@ -1,3 +1,4 @@
+import { managesApp } from '../../../lib/auth/appManagement.js';
 import { detachAppOwnerMemories } from '../../../controller/operations/detachAppOwnerMemories.js';
 // appMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
 import {
@@ -66,7 +67,6 @@ import { ensureDefaultChannelForApp } from '../../../lib/channels.js';
 import { recordUrnRename } from '../../../lib/urnAlias.js';
 import { assertNoMintedCorpusCascade } from '../../../lib/mintedSpecPermanence.js';
 import { requireEndpointFor, requireKeyFor } from '../../../lib/aiEndpoint.js';
-import { LIVE_ORG_MEMBERSHIP } from '../../../lib/auth/liveOrgMembership.js';
 import { withAuthorizedTx } from './authorizedTx.js';
 
 /**
@@ -92,41 +92,15 @@ async function assertNoWorkers(
 }
 
 /**
- * Can the caller manage this App's members by ROLE alone — independent of any
- * target user? Platform ADMIN/OWNER for an ORG-owned App, the user-owner of a
- * user-owned App, an org ADMIN/OWNER of the App's org, or an owner-role
- * AppMember. spec 047 (blocker 3): the platform-admin bypass applies ONLY to an
- * org-owned App (a user-owned App is strictly owner-only). Shared by
- * ensureAppMember + removeAppMember so the role gate is evaluated BEFORE the
- * target user is resolved — a non-authorized caller can't turn user-ref
- * resolution into an existence oracle (#816 review).
+ * The shared App-manager predicate, independent of the target member. Evaluate
+ * before resolving that user so an unauthorized caller gets no existence oracle.
  */
 export async function callerManagesAppMembers(
   ctx: Context,
   app: { ownerUserId: string | null; organizationId: string | null },
   resolvedAppId: string,
 ): Promise<boolean> {
-  const isPlatformAdmin = ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER');
-  if (isPlatformAdmin && app.ownerUserId === null) return true;
-  const isAppOwnerUser = app.ownerUserId !== null && !!ctx.userId && ctx.userId === app.ownerUserId;
-  if (isAppOwnerUser) return true;
-  if (app.organizationId) {
-    const orgMember = await ctx.db.orgMember.findFirst({
-      where: {
-        organizationId: app.organizationId,
-        userId: ctx.userId ?? '',
-        ...LIVE_ORG_MEMBERSHIP,
-        role: { in: ['ADMIN', 'OWNER'] },
-      },
-    });
-    if (orgMember) return true;
-  }
-  const ownerMember = ctx.userId
-    ? await ctx.db.appMember.findUnique({
-        where: { appId_userId: { appId: resolvedAppId, userId: ctx.userId } },
-      })
-    : null;
-  return ownerMember?.role === 'owner';
+  return managesApp(ctx, { ...app, id: resolvedAppId });
 }
 
 /**
@@ -189,7 +163,7 @@ export const appMutations = {
       // grants a platform admin on an ORG-owned App (its own admin branch) but
       // enforces OWNER-ONLY on a user-owned App — the old `if (!isPlatformAdmin)`
       // skip bypassed that owner-only rule.
-      await requireOwnerOrOrgRole(ctx, existing, 'ADMIN');
+      await requireOwnerOrOrgRole(ctx, existing, 'ADMIN', 'app');
       const rawKey = `${APP_KEY_PREFIX}${randomBytes(32).toString('hex')}`;
       const keyHash = createHash('sha256').update(rawKey).digest('hex');
       return withAuthorizedTx(
@@ -202,7 +176,7 @@ export const appMutations = {
           if (current.organizationId !== existing.organizationId || current.ownerUserId !== existing.ownerUserId) {
             throw new Error('App ownership changed; retry key regeneration');
           }
-          await requireOwnerOrOrgRole(txCtx, current, 'ADMIN');
+          await requireOwnerOrOrgRole(txCtx, current, 'ADMIN', 'app');
         },
         async (tx) => {
           // Revocation and replacement are one atomic authority change.
@@ -743,7 +717,7 @@ export const appMutations = {
       // 007-entity-id-or-urn: ref may be ID, bare URN, or prefixed URN.
       const { id: resolvedId } = await resolveAppRef(ctx.db, ref);
       const app = await ctx.db.app.findUniqueOrThrow({ where: { id: resolvedId } });
-      await requireOwnerOrOrgRole(ctx, app, 'ADMIN');
+      await requireOwnerOrOrgRole(ctx, app, 'ADMIN', 'app');
       // #510: the app-layer action-policy link (cor:acl:040:02) — validate
       // shape before storing; explicit null clears (= no restriction).
       if (policy !== undefined && policy !== null && parsePolicyLink(policy) == null) {
@@ -927,7 +901,7 @@ export const appMutations = {
       // 007-entity-id-or-urn: ref may be ID, bare URN, or prefixed URN.
       const { id: resolvedId } = await resolveAppRef(ctx.db, ref);
       const app = await ctx.db.app.findUniqueOrThrow({ where: { id: resolvedId } });
-      await requireOwnerOrOrgRole(ctx, app, 'ADMIN');
+      await requireOwnerOrOrgRole(ctx, app, 'ADMIN', 'app');
       // Soft-delete the App. Secrets are org/user-owned only (#696), so there
       // are no app-owned secrets to sweep here anymore. The deletedAt-null guard
       // keeps the original deletedAt under a concurrent double-delete.
@@ -943,7 +917,7 @@ export const appMutations = {
           if (current.organizationId !== app.organizationId || current.ownerUserId !== app.ownerUserId) {
             throw new Error('App ownership changed; retry deletion');
           }
-          await requireOwnerOrOrgRole(txCtx, current, 'ADMIN');
+          await requireOwnerOrOrgRole(txCtx, current, 'ADMIN', 'app');
         },
         (tx) => tx.app.updateMany({
           where: { id: resolvedId, deletedAt: null },
@@ -1285,7 +1259,7 @@ export const appMutations = {
       // 007-entity-id-or-urn: appRef may be ID, bare URN, or prefixed URN.
       const { id: resolvedAppId } = await resolveAppRef(ctx.db, appRef);
       const app = await ctx.db.app.findUniqueOrThrow({ where: { id: resolvedAppId } });
-      await requireOwnerOrOrgRole(ctx, app, 'ADMIN');
+      await requireOwnerOrOrgRole(ctx, app, 'ADMIN', 'app');
       // Raw key format: hdr_app_<64 hex chars> (256 bits of entropy)
       const rawKey = APP_KEY_PREFIX + randomBytes(32).toString('hex');
       const keyHash = hashAppKey(rawKey);
@@ -1300,7 +1274,7 @@ export const appMutations = {
           if (current.organizationId !== app.organizationId || current.ownerUserId !== app.ownerUserId) {
             throw new Error('App ownership changed; retry key creation');
           }
-          await requireOwnerOrOrgRole(txCtx, current, 'ADMIN');
+          await requireOwnerOrOrgRole(txCtx, current, 'ADMIN', 'app');
         },
         (tx) => tx.appKey.create({
           data: {
@@ -1323,7 +1297,7 @@ export const appMutations = {
         where: { id },
         include: { app: true },
       });
-      await requireOwnerOrOrgRole(ctx, key.app, 'ADMIN');
+      await requireOwnerOrOrgRole(ctx, key.app, 'ADMIN', 'app');
       await withAuthorizedTx(
         ctx,
         [
@@ -1336,7 +1310,7 @@ export const appMutations = {
           if (current.organizationId !== key.app.organizationId || current.ownerUserId !== key.app.ownerUserId) {
             throw new Error('App ownership changed; retry key revocation');
           }
-          await requireOwnerOrOrgRole(txCtx, current, 'ADMIN');
+          await requireOwnerOrOrgRole(txCtx, current, 'ADMIN', 'app');
         },
         (tx) => tx.appKey.update({ where: { id }, data: { revokedAt: new Date() } }),
         { lockMode: 'exclusive' },
