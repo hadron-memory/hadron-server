@@ -249,6 +249,35 @@ describe('resolveAppleUser', () => {
     expect(await db.user.count()).toBe(1);
   });
 
+  it('flags (never blocks) a returning sign-in whose stored address differs from the verified claim', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const existing = await db.user.create({
+        data: { appleId: identity.sub, email: 'other@example.com', identityProvider: 'APPLE', roles: ['READER'] },
+      });
+      const user = await resolveAppleUser(identity, null);
+      expect(user.id).toBe(existing.id);
+      expect(user.email).toBe('other@example.com');
+      expect(warn).toHaveBeenCalledTimes(1);
+      const line = String(warn.mock.calls[0][0]);
+      expect(line).toContain(existing.id);
+      expect(line).not.toMatch(/example\.com/i);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('no mismatch flag when the stored address matches the verified claim', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      await db.user.create({ data: { appleId: identity.sub, email: 'ada@example.com', identityProvider: 'APPLE', roles: ['READER'] } });
+      await resolveAppleUser(identity, null);
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it('(b) links an existing user by verified email, keeping provider and name', async () => {
     const existing = await db.user.create({
       data: { email: 'ada@example.com', identityProvider: 'EMAIL', name: 'Ada', roles: ['READER'] },

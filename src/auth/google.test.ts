@@ -190,6 +190,39 @@ describe('resolveGoogleUser', () => {
     expect(await db.user.count()).toBe(1);
   });
 
+  it('flags (never blocks) a returning sign-in whose stored address differs from the verified claim', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const existing = await db.user.create({
+        data: { googleId: identity.sub, email: 'Other@Example.com', identityProvider: 'GOOGLE', roles: ['READER'] },
+      });
+      const user = await resolveGoogleUser(identity);
+      expect(user.id).toBe(existing.id);
+      expect(user.email).toBe('Other@Example.com');
+      expect(warn).toHaveBeenCalledTimes(1);
+      const line = String(warn.mock.calls[0][0]);
+      expect(line).toContain(existing.id);
+      expect(line).not.toMatch(/example\.com/i);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it.each([
+    ['the same address in another case', 'ADA@example.com ', true],
+    ['no stored address', null, true],
+    ['an unverified claim', 'other@example.com', false],
+  ])('no mismatch flag for %s', async (_label, stored, verified) => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      await db.user.create({ data: { googleId: identity.sub, email: stored, identityProvider: 'GOOGLE', roles: ['READER'] } });
+      await resolveGoogleUser({ ...identity, emailVerified: verified });
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it('(b) links an existing user by email when Google verified it', async () => {
     const existing = await db.user.create({
       data: {
