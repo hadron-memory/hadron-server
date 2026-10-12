@@ -497,7 +497,7 @@ export function registerAgentTaskTools(server: McpServer, deps: { db: PrismaClie
   server.tool(
     'hadron_team_availability',
     'Read a team App\'s availability records (cor:agt:060:02 / :03): each worker or model family marked, and whether ' +
-      'the mark is in effect now. A worker or family with no record is available. Readers: the App\'s participants.',
+      'the mark is in effect now. A worker or family with no record is available. Readers: the App\'s participants and the App\'s own key.',
     { appRef: z.string().describe('The team App (id or URN).'), session: SESSION_READ },
     async ({ session, appRef }) =>
       read(session, async (ctx) => {

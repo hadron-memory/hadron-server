@@ -17,8 +17,8 @@
 //                           evaluator; the host arm is T6 (#1709).
 //   set model-family availability  whoever manages the App (060:09, Proposed)
 //   set the stall schedule  whoever manages the App (#1706)
-//   read all of the above  the App's task audience (050:21, Proposed; #1706
-//                           interim for 060:02 / :03's open read question)
+//   read all of the above  the App's task audience: every participant and the
+//                           App's own key, read-only (050:21, 060:02, :03; #1767)
 // "Whoever manages the App" stays T1's INTERIM reading: a person acting as
 // themselves, never a worker acting through its session (team chat #7508).
 //
@@ -40,6 +40,7 @@ import {
   partyView,
   requireWritable,
   resolveParticipatedApp,
+  withReadableApp,
   resolveTaskActor,
   resolveTaskWorkerId,
   taskError,
@@ -335,25 +336,26 @@ export const agentTaskAlarmQueries = {
 
   /**
    * Every availability record in an App — its workers' and its model
-   * families' — for its task audience (#1706 interim: 060:02 / :03 leave the
-   * reader open). Each says whether it is in effect right now.
+   * families' — for every App participant and the App's own key, read-only
+   * (cor:agt:060:02, :03; the tasks audience, cor:agt:050:23; #1767). Each says
+   * whether it is in effect right now.
    */
-  teamAvailability: async (_: unknown, { appRef }: { appRef: string }, ctx: Context) => {
-    const { app } = await resolveParticipatedApp(ctx, appRef);
-    const now = new Date();
-    const [workers, families] = await Promise.all([
-      ctx.db.workerAvailability.findMany({ where: { worker: { appId: app.id } }, orderBy: { workerId: 'asc' } }),
-      ctx.db.modelFamilyAvailability.findMany({ where: { appId: app.id }, orderBy: { family: 'asc' } }),
-    ]);
-    const activity = await loadWorkersActivity(ctx, workers.map((w) => w.workerId), now);
-    return {
-      workers: workers.map((w) => ({
-        ...w,
-        __inEffect: recordInEffect(w, now, activity.get(w.workerId)?.lastActiveAt ?? null),
-      })),
-      families: families.map((f) => ({ ...f, __inEffect: recordInEffect(f, now) })),
-    };
-  },
+  teamAvailability: async (_: unknown, { appRef }: { appRef: string }, ctx: Context) =>
+    withReadableApp(ctx, appRef, async (c, app) => {
+      const now = new Date();
+      const [workers, families] = await Promise.all([
+        c.db.workerAvailability.findMany({ where: { worker: { appId: app.id } }, orderBy: { workerId: 'asc' } }),
+        c.db.modelFamilyAvailability.findMany({ where: { appId: app.id }, orderBy: { family: 'asc' } }),
+      ]);
+      const activity = await loadWorkersActivity(c, workers.map((w) => w.workerId), now);
+      return {
+        workers: workers.map((w) => ({
+          ...w,
+          __inEffect: recordInEffect(w, now, activity.get(w.workerId)?.lastActiveAt ?? null),
+        })),
+        families: families.map((f) => ({ ...f, __inEffect: recordInEffect(f, now) })),
+      };
+    }),
 };
 
 // ── Field resolvers ───────────────────────────────────────────────────────
