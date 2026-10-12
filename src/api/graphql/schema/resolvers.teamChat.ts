@@ -910,7 +910,7 @@ async function postToChannelRoot(
   incarnation: ChannelIncarnation,
   args: { body: string; replyToSeq: number | null; sessionRef: string | null },
   /** #1791: the platform's own post. No principal authors it, no mention in it expands, and no one is credited. */
-  opts: { system?: boolean } = {},
+  opts: { system?: boolean; claim?: (tx: Prisma.TransactionClient) => Promise<boolean> } = {},
 ): Promise<TeamChatMessageOut> {
   const { body, replyToSeq, sessionRef } = args;
   let envelope: Record<string, unknown>;
@@ -975,6 +975,9 @@ async function postToChannelRoot(
     ) {
       throw channelNotFound(root.loc);
     }
+    // #1791: the platform's once-a-day claim is taken in THIS transaction, after the Channel is seen live, so the claim and
+    // the notice commit together or not at all: an exit between them leaves neither.
+    if (opts.claim && !(await opts.claim(tx))) throw new NoticeNotClaimed();
     // #1748 (N3): who may wake everyone is decided NOW, here, on live authority held through the commit, and
     // stamped; nothing re-decides it later. The authority is taken BEFORE the resume below (which locks the Worker
     // row FOR UPDATE) and the stamps after it, so the Worker row is never taken SHARE then upgraded (Diego, cycle 3).
@@ -1097,36 +1100,60 @@ async function postToChannelRoot(
  * mentions, and any `@` in it is shown as a plain full-width sign. Returns false (posting nothing) when the App has no
  * team chat to post into or is gone; it never creates one.
  */
-/** Does this App have a team chat a notice could be posted into? (Read-only; nothing is created.) */
-export async function teamChatExists(db: Context['db'], appId: string): Promise<boolean> {
-  const app = await db.app.findUnique({ where: { id: appId } });
-  if (!app || app.deletedAt || app.uninstalledAt) return false;
-  return (await locateTeamChatRoot({ db } as Context, app as AppRow)) !== null;
+class NoticeNotClaimed extends Error {}
+
+/**
+ * Could a notice be posted into this App's team chat right now? (Read-only; nothing is created or restored.) Needs a
+ * live root AND a live Channel, and a host memory the platform can write: an encrypted chat is skipped, because the
+ * notice would have to be sealed with a session key this request did not carry (Rook #1799).
+ */
+export async function canPostSystemNotice(db: Context['db'], appId: string): Promise<boolean> {
+  return (await systemNoticeTarget(db, appId)) !== null;
 }
 
-export async function postSystemNotice(db: Context['db'], appId: string, body: string): Promise<boolean> {
-  const ctx = { db } as Context;
+async function systemNoticeTarget(db: Context['db'], appId: string) {
   const app = await db.app.findUnique({ where: { id: appId } });
-  if (!app || app.deletedAt || app.uninstalledAt) return false;
-  const located = await locateTeamChatRoot(ctx, app as AppRow);
-  if (!located) return false;
-  const { channel, rootId } = await ensureChannelWithRoot(db, {
-    memoryId: located.memoryId,
-    loc: located.loc,
-    name: DEFAULT_CHANNEL_NAME,
-    description: `Team chat — ${app.name}`,
-    createdBy: null,
-    asDefaultOfAppId: app.id,
-    hostLabel: app.name,
-  });
-  await postToChannelRoot(
-    ctx,
-    app as AppRow,
-    { ...located, id: rootId },
-    { id: channel.id, value: channel.incarnation },
-    { body: body.replace(/@/g, '\uFF20'), replyToSeq: null, sessionRef: null },
-    { system: true },
-  );
+  if (!app || app.deletedAt || app.uninstalledAt) return null;
+  const root = await locateTeamChatRoot({ db } as Context, app as AppRow);
+  if (!root) return null;
+  const channel = await db.channel.findFirst({ where: { chatRootNodeId: root.id, deletedAt: null }, select: { id: true, incarnation: true } });
+  if (!channel) return null;
+  if ((await getMemoryEncryptionInfo(db, root.memoryId)).isEncrypted) return null;
+  return { app: app as AppRow, root, incarnation: { id: channel.id, value: channel.incarnation } };
+}
+
+/**
+ * Post into an App's team chat AS THE PLATFORM (#1791, cor:agt:080:15). A system author that is neither a user nor a
+ * worker: no principal is credited or checked, because none is acting — which is why this is a server-internal door,
+ * never a resolver, and takes the database and an App id, not a request context. The text is plain: the post carries no
+ * mentions, and any `@` in it is shown as a plain full-width sign. It posts only into the LIVE Channel that exists now,
+ * and the append re-checks that under the Channel's lock, so it never creates, restores or revives a chat: a deleted one
+ * stays deleted. Returns false (posting nothing) when there is no such chat, or when `claim` (run in the append's own
+ * transaction) refuses.
+ */
+export async function postSystemNotice(
+  db: Context['db'],
+  appId: string,
+  body: string,
+  claim?: (tx: Prisma.TransactionClient) => Promise<boolean>,
+): Promise<boolean> {
+  const target = await systemNoticeTarget(db, appId);
+  if (!target) return false;
+  try {
+    await postToChannelRoot(
+      { db } as Context,
+      target.app,
+      target.root,
+      target.incarnation,
+      { body: body.replace(/@/g, '\uFF20'), replyToSeq: null, sessionRef: null },
+      { system: true, claim },
+    );
+  } catch (e) {
+    // The chat was deleted after we looked, or the claim was lost: nothing was written.
+    if (e instanceof NoticeNotClaimed) return false;
+    if (e instanceof GraphQLError && e.extensions?.code === 'CHANNEL_NOT_FOUND') return false;
+    throw e;
+  }
   return true;
 }
 

@@ -1,4 +1,5 @@
 import { registerAutomationPinTools } from './automationPinTools.js';
+import { chatByline } from './chatByline.js';
 import { boundSessionPrivacyFilter } from '../lib/auth/sessionPrivacy.js';
 import { createHmac, randomUUID } from 'crypto';
 // Spec 049 S4 — the protected-loc gate on hadron_update_node (no lock on that path).
@@ -9190,7 +9191,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       const lines = page.items.map((m) => {
         const reply = m.replyToSeq != null ? ` (reply to #${m.replyToSeq})` : '';
         const cross = m.authorAppId ? ' [cross-App]' : '';
-        return `#${m.seq} [${m.authorName ?? 'unknown'}]${cross} ${m.at.toISOString()}${reply}:\n${m.body}`;
+        return `#${m.seq} ${chatByline(m)}${cross} ${m.at.toISOString()}${reply}:\n${m.body}`;
       });
       return textResult(`${page.total} message(s) total, showing ${page.items.length}:\n\n${lines.join('\n\n')}`);
     } catch (e) {
@@ -9464,7 +9465,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         const cross = message.authorAppId ? ' [cross-App]' : '';
         const mentionLine = message.mentions.length ? `\nmentions: ${message.mentions.map((mention) => `@${mention}`).join(', ')}` : '';
         routed.push(
-          `#${message.seq} [${message.authorName ?? 'unknown'}]${cross} ${message.at.toISOString()}${reply}:\n${message.body}` +
+          `#${message.seq} ${chatByline(message)}${cross} ${message.at.toISOString()}${reply}:\n${message.body}` +
           `${mentionLine}\nroute to: ${routes.map((route) => route.urn).join(', ')}`,
         );
       }
@@ -9775,7 +9776,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         if (page.total === 0) return textResult('The team chat has no matching messages.');
         const lines = page.items.map((m) => {
           const reply = m.replyToSeq != null ? ` (reply to #${m.replyToSeq})` : '';
-          return `#${m.seq} [${m.authorName ?? 'unknown'}] ${m.at.toISOString()}${reply}:\n${m.body}`;
+          return `#${m.seq} ${chatByline(m)} ${m.at.toISOString()}${reply}:\n${m.body}`;
         });
         return textResult(
           `${page.total} message(s) total, showing ${page.items.length}:\n\n${lines.join('\n\n')}`,

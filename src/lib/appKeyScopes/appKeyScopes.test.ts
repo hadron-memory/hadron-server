@@ -460,6 +460,66 @@ describe('the wake-budget notice is posted by the platform, key-only reads inclu
     expect(await db.appWakeDay.count({ where: { noticePostedAt: { not: null } } })).toBe(0);
   });
 
+  it('a chat deleted after the notice chose it stays deleted: nothing is restored, posted or claimed (Riana P2)', async () => {
+    const { postSystemNotice } = await import('../../api/graphql/schema/resolvers.teamChat.js');
+    let tripped = false;
+    // The supported delete lands in the gap after the root was selected and before the append.
+    const racing = new Proxy(db, {
+      get(target, prop, receiver) {
+        const v = Reflect.get(target, prop, receiver);
+        if (prop === 'channel' && tripped === false) {
+          return new Proxy(v as object, {
+            get(t, p, r) {
+              const f = Reflect.get(t, p, r);
+              if (p !== 'findFirst') return f;
+              return async (...a: unknown[]) => {
+                const out = await (f as (...x: unknown[]) => Promise<unknown>).apply(t, a);
+                if (!tripped) {
+                  tripped = true;
+                  await db.channel.update({ where: { id: channel.id }, data: { deletedAt: new Date() } });
+                  await db.node.updateMany({ where: { id: channel.chatRootNodeId }, data: { deletedAt: new Date() } });
+                }
+                return out;
+              };
+            },
+          });
+        }
+        return typeof v === 'function' ? (v as (...x: unknown[]) => unknown).bind(target) : v;
+      },
+    }) as typeof db;
+    const claim = vi.fn(async () => true);
+    expect(await postSystemNotice(racing, app.id, 'late', claim)).toBe(false);
+    expect(tripped).toBe(true);
+    expect(claim).not.toHaveBeenCalled();
+    expect((await db.channel.findUniqueOrThrow({ where: { id: channel.id } })).deletedAt).not.toBeNull();
+    expect((await db.node.findUniqueOrThrow({ where: { id: channel.chatRootNodeId } })).deletedAt).not.toBeNull();
+    expect(await systemOnes()).toHaveLength(0);
+  });
+
+  it('the day\'s claim and the notice commit together: an exit after the claim leaves neither', async () => {
+    const { postSystemNotice } = await import('../../api/graphql/schema/resolvers.teamChat.js');
+    await expect(postSystemNotice(db, app.id, 'x', async (tx) => {
+      await tx.$executeRaw`INSERT INTO app_wake_days (app_id, day, wakes, notice_posted_at) VALUES (${app.id}, now()::date, 0, now() AT TIME ZONE 'utc')
+        ON CONFLICT (app_id, day) DO UPDATE SET notice_posted_at = now() AT TIME ZONE 'utc'`;
+      throw new Error('process exit');
+    })).rejects.toThrow('process exit');
+    expect(await db.appWakeDay.count({ where: { noticePostedAt: { not: null } } })).toBe(0);
+    expect(await systemOnes()).toHaveLength(0);
+    await due(keyCtx(key, app.id));
+    expect(await systemOnes()).toHaveLength(1);
+  });
+
+  it('an encrypted team chat is skipped: no notice is sealed with a key the request did not carry', async () => {
+    const { postSystemNotice, canPostSystemNotice } = await import('../../api/graphql/schema/resolvers.teamChat.js');
+    const mem = await db.node.findUniqueOrThrow({ where: { id: channel.chatRootNodeId }, select: { memoryId: true } });
+    await db.memory.update({ where: { id: mem.memoryId }, data: { isEncrypted: true } });
+    const claim = vi.fn(async () => true);
+    expect(await canPostSystemNotice(db, app.id)).toBe(false);
+    expect(await postSystemNotice(db, app.id, 'x', claim)).toBe(false);
+    expect(claim).not.toHaveBeenCalled();
+    expect(await systemOnes()).toHaveLength(0);
+  });
+
   it('a failed post hands the day\'s claim back', async () => {
     const mod = await import('../../api/graphql/schema/resolvers.teamChat.js');
     const spy = vi.spyOn(mod, 'postSystemNotice').mockRejectedValueOnce(new Error('boom'));
