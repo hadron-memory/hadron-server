@@ -82,6 +82,7 @@ import type { AuthorityAnchor } from '../../../lib/auth/authorityAnchors.js';
 import { mayStillDriveWorkerApp } from '../../../lib/teamAttention.js';
 import { withAuthorizedTx } from './authorizedTx.js';
 import { currentActor } from '../../../lib/requestActor.js';
+import { appKeyCaller, refuseSessionBound } from '../../../lib/appKeyScopes/scopes.js';
 import {
   appendTaskEvent,
   eventActor,
@@ -204,6 +205,44 @@ export async function resolveParticipatedApp(ctx: Context, appRef: string): Prom
   return { app, actor };
 }
 
+/**
+ * cor:agt:050:21 (#1755): a pure App key reads the tasks and events of its OWN
+ * App, and nothing else. READ-ONLY by construction: it yields no `TaskActor`,
+ * so every write path (which needs one) still refuses it, and it never acts as a
+ * worker. A foreign, deleted or revoked-key App answers like a missing one; only
+ * then is a session refused, so a key learns nothing about an App not its own.
+ */
+async function keyMayReadApp(ctx: Context, app: TaskApp): Promise<boolean> {
+  const key = appKeyCaller(ctx);
+  if (!key || app.deletedAt || app.id !== key.appId) return false;
+  const live = await ctx.db.appKey.findFirst({
+    where: { id: key.appKeyId, appId: app.id, revokedAt: null },
+    select: { id: true },
+  });
+  if (!live) return false;
+  // A key never narrows or widens its read through a session (Holger #8097).
+  refuseSessionBound(ctx);
+  if (currentActor().workerId) {
+    throw taskError('APP_KEY_SESSION_BOUND', 'An App key does not act as a worker. Send no session.');
+  }
+  return true;
+}
+
+/** An App the caller may READ tasks and events of: a participant, or the App's own key. */
+async function resolveReadableApp(ctx: Context, appRef: string): Promise<TaskApp> {
+  if (!appKeyCaller(ctx)) return (await resolveParticipatedApp(ctx, appRef)).app;
+  let appId: string;
+  try {
+    ({ id: appId } = await resolveAppRef(ctx.db, appRef));
+  } catch (e) {
+    if (e instanceof AppNotFoundError) throw appNotFound(appRef);
+    throw e;
+  }
+  const app = await loadApp(ctx, appId);
+  if (!app || !(await keyMayReadApp(ctx, app))) throw appNotFound(appRef);
+  return app;
+}
+
 /** Load a task the caller may read, with its App and the actor — or null (concealed as missing). */
 async function loadReadableTask(
   ctx: Context,
@@ -217,6 +256,15 @@ async function loadReadableTask(
   const actor = await resolveTaskActor(ctx, app);
   if (!actor) return null;
   return { task, app, actor };
+}
+
+/** The read-only variant of loadReadableTask for the query surfaces: it also admits the App's own key (#1755). */
+async function loadTaskForRead(ctx: Context, taskId: string): Promise<{ task: TaskRow; app: TaskApp } | null> {
+  if (!appKeyCaller(ctx)) return loadReadableTask(ctx, taskId);
+  if (typeof taskId !== 'string' || !isId(taskId)) return null;
+  const task = await ctx.db.agentTask.findUnique({ where: { id: taskId } });
+  const app = task ? await loadApp(ctx, task.appId) : null;
+  return task && app && (await keyMayReadApp(ctx, app)) ? { task, app } : null;
 }
 
 /** Is the actor this party? A person never matches a worker party, nor the reverse. */
@@ -901,13 +949,13 @@ async function partyFilter(ctx: Context, app: TaskApp, input: PartyInput, prefix
 export const agentTaskQueries = {
   /** One task, or null when it does not exist or the caller may not read it (cor:agt:050:21). */
   agentTask: async (_: unknown, { id }: { id: string }, ctx: Context) => {
-    const readable = await loadReadableTask(ctx, id);
+    const readable = await loadTaskForRead(ctx, id);
     return readable?.task ?? null;
   },
 
   /** An App's tasks, newest first, for its participants (cor:agt:050:21). */
   agentTasks: async (_: unknown, args: ListArgs, ctx: Context) => {
-    const { app } = await resolveParticipatedApp(ctx, args.appRef);
+    const app = await resolveReadableApp(ctx, args.appRef);
     const statuses = args.status?.map((s) => STATUS_FROM_GQL[s] ?? s);
     const where: Prisma.AgentTaskWhereInput = {
       appId: app.id,
@@ -932,7 +980,7 @@ export const agentTaskQueries = {
    * root is missing or unreadable. Bounded at TASK_TREE_MAX rows.
    */
   agentTaskTree: async (_: unknown, { root }: { root: string }, ctx: Context) => {
-    const readable = await loadReadableTask(ctx, root);
+    const readable = await loadTaskForRead(ctx, root);
     if (!readable) return null;
     const rows = await ctx.db.$queryRaw<{ id: string; depth: number }[]>`
       WITH RECURSIVE tree AS (
@@ -964,7 +1012,7 @@ export const agentTaskQueries = {
     args: { appRef: string; since?: unknown; after?: string | null; types?: string[] | null; alarmsOnly?: boolean | null; taskId?: string | null; limit?: number | null },
     ctx: Context,
   ) => {
-    const { app } = await resolveParticipatedApp(ctx, args.appRef);
+    const app = await resolveReadableApp(ctx, args.appRef);
     const since = args.since == null ? null : parseStartBy(args.since);
     let afterWhere: Prisma.AgentTeamEventWhereInput = {};
     if (args.after) {

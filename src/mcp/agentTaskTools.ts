@@ -213,7 +213,10 @@ export function registerAgentTaskTools(server: McpServer, deps: { db: PrismaClie
     clientId: auth.clientId ?? undefined,
     userId: auth.userId ?? undefined,
     appId: auth.appId ?? undefined,
-    sessionId: auth.sessionId ?? undefined,
+    appKeyId: auth.appKeyId ?? undefined,
+    // An App key's session state is the current request's (as in the ticker tools); anyone else's is the connection's.
+    sessionId: (auth.requestSession ? auth.requestSession.sessionId : auth.sessionId) ?? undefined,
+    sessionBindingRefused: auth.requestSession ? auth.requestSession.refused : auth.sessionBindingRefused,
     roles: auth.roles as Context['roles'],
     organizationId: auth.organizationId ?? undefined,
     impersonation: auth.impersonation,
