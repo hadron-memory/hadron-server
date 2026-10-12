@@ -6,7 +6,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir, uptime } from 'node:os';
 import { join } from 'node:path';
-import {
+import { nudgeText,
   type Config, type Runner, type RunResult, RouterError, State, breakStaleLock, describeOutcome, loadConfig, pollOnce,
   promptLineIsEmpty, status,
 } from './router.js';
@@ -451,6 +451,30 @@ describe('Orca attention router — untracked terminals: unknown is not busy (#7
     fake.screens.set('term_eli', { tail: CLAUDE_IDLE_COMPACTED });
     const out = poll(c);
     expect(out).toMatchObject({ nudged: ['Eli'], adopted: true });
+  });
+});
+
+describe('nudgeText read anchor (#1805 P2s)', () => {
+  it('present anchor: names the first unread, BOTH forms, bounded — no --all', () => {
+    const t = nudgeText(worker('w-eli', 'Eli', { mentions: 2, unread: 5, first: 100, relevant: 110, head: 120 }));
+    expect(t).toContain('START AT #100 (your first unread message of any kind)');
+    expect(t).toContain('--since 99 --limit 200');
+    expect(t).toContain('nextSince');
+    expect(t).toContain('hadron_team_chat_read');
+    expect(t).toContain('sinceSeq=99');
+    expect(t).not.toContain('--all');
+    expect(t).not.toContain('\n');
+  });
+  it('null anchor (defensive): no firstUnreadSeq means the old generic text, no START clause', () => {
+    const t = nudgeText({ worker: 'w-eli', workerName: 'Eli', channel: CHANNEL, unread: 3, unreadMentions: 1, firstUnreadSeq: null, lastRelevantSeq: 110, lastSeq: 120 });
+    expect(t).not.toContain('START AT');
+    expect(t).toContain('Read team chat unfiltered');
+  });
+  it('first unread 1 (cursor-0 worker): since clamps to 0, still bounded', () => {
+    const t = nudgeText(worker('w-eli', 'Eli', { mentions: 2, unread: 9000, first: 1, relevant: 110, head: 9001 }));
+    expect(t).toContain('--since 0 --limit 200');
+    expect(t).toContain('sinceSeq=0');
+    expect(t).not.toContain('--all');
   });
 });
 
