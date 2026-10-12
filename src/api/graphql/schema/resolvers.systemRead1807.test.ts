@@ -95,4 +95,9 @@ describe('#1807 mapped read gates', () => {
     expect(await record(participantId)).toBeNull();
   });
 
+  it('retains a licensed App read within the impersonation scope', async () => {
+    const scoped = { ...ctx(participantId), appId, impersonation: { orgId } } as Context;
+    expect((await resolvers.Query.memory({}, { ref: memoryId }, scoped))?.id).toBe(memoryId);
+  });
+
 });

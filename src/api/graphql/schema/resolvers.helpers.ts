@@ -1141,7 +1141,7 @@ export async function canReadMemoryRecord(
   // System records follow the installed/licensed Agent or manager audience,
   // never the record-only org-member shortcut (#1807).
   if (memory.class === 'system') {
-    if (ctx.sessionId || isRunPrincipal(ctx) || !ctx.userId) {
+    if (ctx.sessionId || ctx.impersonation || isRunPrincipal(ctx) || !ctx.userId) {
       const ids = await accessible();
       return ids === null || ids.includes(memory.id);
     }
