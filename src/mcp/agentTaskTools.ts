@@ -23,7 +23,7 @@ import { z } from 'zod';
 import { GraphQLError } from 'graphql';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
-import { agentTaskFieldResolvers } from '../api/graphql/schema/resolvers.agentTask.js';
+import { agentTaskFieldResolvers, taskError } from '../api/graphql/schema/resolvers.agentTask.js';
 import { agentTaskAlarmFieldResolvers } from '../api/graphql/schema/resolvers.agentTaskAlarms.js';
 import { type AuthContext, validateSessionBinding } from '../middleware/auth.js';
 import { runAsActor } from '../lib/requestActor.js';
@@ -207,13 +207,17 @@ const taskId = z.string().describe('The task id.');
  */
 export function registerAgentTaskTools(server: McpServer, deps: { db: PrismaClient; auth: AuthContext }): void {
   const { db, auth } = deps;
+  const keyCaller = Boolean(auth.appKeyId && !auth.userId);
   const ctxOf = (): Context => ({
     db,
     transport: 'mcp',
     clientId: auth.clientId ?? undefined,
     userId: auth.userId ?? undefined,
     appId: auth.appId ?? undefined,
-    sessionId: auth.sessionId ?? undefined,
+    appKeyId: auth.appKeyId ?? undefined,
+    // An App key's session state is the current request's; anyone else's is the connection's.
+    sessionId: (keyCaller && auth.requestSession ? auth.requestSession.sessionId : auth.sessionId) ?? undefined,
+    sessionBindingRefused: keyCaller && auth.requestSession ? auth.requestSession.refused : auth.sessionBindingRefused,
     roles: auth.roles as Context['roles'],
     organizationId: auth.organizationId ?? undefined,
     impersonation: auth.impersonation,
@@ -276,6 +280,11 @@ export function registerAgentTaskTools(server: McpServer, deps: { db: PrismaClie
   async function read(session: string | undefined, fn: (ctx: Context) => Promise<ReturnType<typeof textResult>>) {
     const ctx = ctxOf();
     try {
+      // An App key reads without a session: whatever it names (plain, worker or invalid) is refused here, never
+      // dropped, so the read cannot be served as if the key were unbound (#1785 cycle 1).
+      if (keyCaller && session) {
+        throw taskError('APP_KEY_SESSION_BOUND', 'An App key does not act through a session. Send no session.');
+      }
       if (!session) return await fn(ctx);
       const valid = await validateSessionBinding(db, auth, session);
       if (!valid) return textResult(`[session_not_bound] session "${session}" is not one of your open sessions.`, true);
