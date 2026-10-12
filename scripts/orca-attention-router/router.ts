@@ -58,7 +58,9 @@ export const DEFAULT_CONFIG = join(homedir(), '.config', 'hadron-orca-attention-
  * The one line a worker receives: fresh counts with the seq range they cover —
  * never a message body, and never a token. The seqs let the recipient check
  * the nudge against its own read cursor, so it stays true when delivered (#1616).
- * Kept SHORT: it is typed into a working terminal (Holger, 2026-10-05).
+ * Kept short but COMPLETE (Holger, 2026-10-05): it is typed into a working
+ * terminal, so every word earns its place — but the read anchor (where to
+ * start, both CLI and MCP forms, bounded) is load-bearing and stays.
  */
 export function nudgeText(a: AttentionItem): string {
   const where = [
@@ -73,7 +75,7 @@ export function nudgeText(a: AttentionItem): string {
   const from =
     a.firstUnreadSeq === null
       ? ''
-      : ` START AT #${a.firstUnreadSeq} (your first unread message) with \`hadron team chat read --since ${Math.max(0, a.firstUnreadSeq - 1)} --all\` — NOT the newest page;`;
+      : ` START AT #${a.firstUnreadSeq} (your first unread message of any kind) — CLI: \`hadron team chat read --since ${Math.max(0, a.firstUnreadSeq - 1)} --limit 200\` then follow nextSince; MCP: \`hadron_team_chat_read\` with your session and \`sinceSeq=${Math.max(0, a.firstUnreadSeq - 1)}\` then the returned cursor — NOT the newest page alone;`;
   return (
     `Hadron team attention: ${a.unread} relevant unread (${a.unreadMentions} mention${a.unreadMentions === 1 ? '' : 's'}${where ? `; ${where}` : ''}).` +
     `${from} ` +
