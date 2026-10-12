@@ -983,7 +983,7 @@ export async function canWriteToMemory(
     if (auth.impersonation) return false;
     if (auth.userId === memory.ownerUserId) return true;
     // #1764: and the team space of a user-owned App admits that App's members.
-    if (await isUserOwnedTeamSpaceMember(db, auth, { id: memoryId, ...memory }, { hold: true })) return true;
+    if (await isUserOwnedTeamSpaceMember(db, auth, memory, { hold: true })) return true;
     return memory.class === 'app' &&
       (await getWorkerMemoryAccess(db, auth)).includes(memoryId);
   }
