@@ -199,10 +199,11 @@ describe('resolveGoogleUser', () => {
       const user = await resolveGoogleUser(identity);
       expect(user.id).toBe(existing.id);
       expect(user.email).toBe('Other@Example.com');
-      expect(warn).toHaveBeenCalledTimes(1);
-      const line = String(warn.mock.calls[0][0]);
-      expect(line).toContain(existing.id);
-      expect(line).not.toMatch(/example\.com/i);
+      // Exact text: non-leakage is the point, so no part of either address
+      // (local part, domain, length or hash) may appear in the line.
+      expect(warn.mock.calls).toEqual([[
+        `[auth] google sign-in for user ${existing.id}: the stored address differs from the provider's verified address; review per #1802`,
+      ]]);
     } finally {
       warn.mockRestore();
     }
