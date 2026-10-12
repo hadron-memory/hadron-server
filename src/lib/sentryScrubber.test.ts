@@ -44,6 +44,7 @@ describe('scrubSentryEvent', () => {
             authorization: 'Bearer hdr_user_secret',
             cookie: 'hadron_token=cookie-secret',
             'x-hadron-memory-keys': '[{"dataKey":"memory-secret"}]',
+            'x-hadron-operation-key': 'operation-header-secret',
             'x-api-key': 'custom-secret',
           },
           cookies: { hadron_token: 'cookie-secret' },
@@ -77,6 +78,7 @@ describe('scrubSentryEvent', () => {
       headers: {
         authorization: 'Bearer hdr_user_secret',
         'x-hadron-memory-keys': '[{"dataKey":"memory-secret"}]',
+            'x-hadron-operation-key': 'operation-header-secret',
       },
       data: {
         variables: { passphrase: 'body-secret' },
@@ -113,6 +115,7 @@ describe('scrubSentryEvent', () => {
       'hdr_user_secret',
       'cookie-secret',
       'memory-secret',
+      'operation-header-secret',
       'custom-secret',
       'query-secret',
       'body-secret',

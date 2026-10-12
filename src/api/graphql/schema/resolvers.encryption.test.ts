@@ -1,3 +1,4 @@
+import { withOperationKey } from '../../../test/operationKey.js';
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
@@ -85,7 +86,7 @@ beforeEach(async () => {
 });
 
 // ---------------------------------------------------------------------------
-// startAgentSession with dataKey
+// startAgentSession with a request-supplied key
 // ---------------------------------------------------------------------------
 
 describe('startAgentSession with encryption', () => {
@@ -96,27 +97,27 @@ describe('startAgentSession with encryption', () => {
         { agentId: agent.id, externalUserId: 'mm-1' },
         appCtx(secretApp.id),
       ),
-    ).rejects.toThrow(/dataKey is required/);
+    ).rejects.toMatchObject({ extensions: { code: 'BAD_UNLOCK_INPUT' } });
   });
 
   it('rejects a dataKey when the app is in USER_ID mode', async () => {
     const key = generateDataKey().raw.toString('base64');
     await expect(
-      resolvers.Mutation.startAgentSession(
+      withOperationKey(key, () => resolvers.Mutation.startAgentSession(
         {},
-        { agentId: agent.id, externalUserId: 'mm-1', dataKey: key },
+        { agentId: agent.id, externalUserId: 'mm-1' },
         appCtx(plaintextApp.id),
-      ),
-    ).rejects.toThrow(/only accepted when/);
+      )),
+    ).rejects.toMatchObject({ extensions: { code: 'BAD_UNLOCK_INPUT' } });
   });
 
   it('creates an encrypted memory and caches the key', async () => {
     const key = generateDataKey().raw.toString('base64');
-    const session = await resolvers.Mutation.startAgentSession(
+    const session = await withOperationKey(key, () => resolvers.Mutation.startAgentSession(
       {},
-      { agentId: agent.id, externalUserId: 'mm-1', dataKey: key },
+      { agentId: agent.id, externalUserId: 'mm-1' },
       appCtx(secretApp.id),
-    );
+    ));
     const mem = await db.memory.findUnique({ where: { id: session.memoryId! } });
     expect(mem?.isEncrypted).toBe(true);
     expect(mem?.keyVerifier).toMatch(/^enc:v1:/);
@@ -139,11 +140,11 @@ describe('startAgentSession with encryption', () => {
 
   it('requires the key on subsequent sessions for an already-encrypted memory', async () => {
     const key = generateDataKey().raw.toString('base64');
-    await resolvers.Mutation.startAgentSession(
+    await withOperationKey(key, () => resolvers.Mutation.startAgentSession(
       {},
-      { agentId: agent.id, externalUserId: 'mm-1', dataKey: key },
+      { agentId: agent.id, externalUserId: 'mm-1' },
       appCtx(secretApp.id),
-    );
+    ));
 
     // Second session for the same user without dataKey
     await expect(
@@ -152,54 +153,54 @@ describe('startAgentSession with encryption', () => {
         { agentId: agent.id, externalUserId: 'mm-1' },
         appCtx(secretApp.id),
       ),
-    ).rejects.toThrow(/dataKey is required/);
+    ).rejects.toMatchObject({ extensions: { code: 'BAD_UNLOCK_INPUT' } });
   });
 
   it('rejects mismatched keys for concurrent sessions on the same memory', async () => {
     const k1 = generateDataKey().raw.toString('base64');
     const k2 = generateDataKey().raw.toString('base64');
-    await resolvers.Mutation.startAgentSession(
+    await withOperationKey(k1, () => resolvers.Mutation.startAgentSession(
       {},
-      { agentId: agent.id, externalUserId: 'mm-1', dataKey: k1 },
+      { agentId: agent.id, externalUserId: 'mm-1' },
       appCtx(secretApp.id),
-    );
+    ));
     await expect(
-      resolvers.Mutation.startAgentSession(
+      withOperationKey(k2, () => resolvers.Mutation.startAgentSession(
         {},
-        { agentId: agent.id, externalUserId: 'mm-1', dataKey: k2 },
+        { agentId: agent.id, externalUserId: 'mm-1' },
         appCtx(secretApp.id),
-      ),
-    ).rejects.toThrow(/Wrong dataKey|conflict/);
+      )),
+    ).rejects.toMatchObject({ extensions: { code: 'WRONG_KEY' } });
   });
 
   it('rejects the wrong key after the original SECRET session ends', async () => {
     const key = generateDataKey().raw.toString('base64');
     const wrong = generateDataKey().raw.toString('base64');
-    const first = await resolvers.Mutation.startAgentSession(
-      {}, { agentId: agent.id, externalUserId: 'mm-1', dataKey: key }, appCtx(secretApp.id),
-    );
+    const first = await withOperationKey(key, () => resolvers.Mutation.startAgentSession(
+      {}, { agentId: agent.id, externalUserId: 'mm-1' }, appCtx(secretApp.id),
+    ));
     await resolvers.Mutation.endAgentSession({}, { sessionId: first.id }, appCtx(secretApp.id));
-    await expect(resolvers.Mutation.startAgentSession(
-      {}, { agentId: agent.id, externalUserId: 'mm-1', dataKey: wrong }, appCtx(secretApp.id),
-    )).rejects.toThrow(/Wrong dataKey/);
+    await expect(withOperationKey(wrong, () => resolvers.Mutation.startAgentSession(
+      {}, { agentId: agent.id, externalUserId: 'mm-1' }, appCtx(secretApp.id),
+    ))).rejects.toMatchObject({ extensions: { code: 'WRONG_KEY' } });
   });
 
   it('refuses new sessions for a verifier-less encrypted memory before caching either key', async () => {
     const originalKey = generateDataKey().raw.toString('base64');
     const wrongKey = generateDataKey().raw.toString('base64');
-    const first = await resolvers.Mutation.startAgentSession(
-      {}, { agentId: agent.id, externalUserId: 'legacy-session', dataKey: originalKey },
+    const first = await withOperationKey(originalKey, () => resolvers.Mutation.startAgentSession(
+      {}, { agentId: agent.id, externalUserId: 'legacy-session' },
       appCtx(secretApp.id),
-    );
+    ));
     await db.memory.update({ where: { id: first.memoryId! }, data: { keyVerifier: null } });
     await resolvers.Mutation.endAgentSession({}, { sessionId: first.id }, appCtx(secretApp.id));
     const sessionCount = await db.session.count({ where: { memoryId: first.memoryId! } });
 
     for (const dataKey of [originalKey, wrongKey]) {
-      await expect(resolvers.Mutation.startAgentSession(
-        {}, { agentId: agent.id, externalUserId: 'legacy-session', dataKey },
+      await expect(withOperationKey(dataKey, () => resolvers.Mutation.startAgentSession(
+        {}, { agentId: agent.id, externalUserId: 'legacy-session' },
         appCtx(secretApp.id),
-      )).rejects.toMatchObject({ extensions: { code: 'BAD_UNLOCK_INPUT', memoryId: first.memoryId } });
+      ))).rejects.toMatchObject({ extensions: { code: 'BAD_UNLOCK_INPUT', memoryId: first.memoryId } });
       expect(sessionKeyCache.getByMemoryId(first.memoryId!)).toBeNull();
     }
     expect(await db.session.count({ where: { memoryId: first.memoryId! } })).toBe(sessionCount);
@@ -207,16 +208,16 @@ describe('startAgentSession with encryption', () => {
 
   it('accepts the same key on concurrent sessions (ref count increments)', async () => {
     const key = generateDataKey().raw.toString('base64');
-    const s1 = await resolvers.Mutation.startAgentSession(
+    const s1 = await withOperationKey(key, () => resolvers.Mutation.startAgentSession(
       {},
-      { agentId: agent.id, externalUserId: 'mm-1', dataKey: key },
+      { agentId: agent.id, externalUserId: 'mm-1' },
       appCtx(secretApp.id),
-    );
-    const s2 = await resolvers.Mutation.startAgentSession(
+    ));
+    const s2 = await withOperationKey(key, () => resolvers.Mutation.startAgentSession(
       {},
-      { agentId: agent.id, externalUserId: 'mm-1', dataKey: key },
+      { agentId: agent.id, externalUserId: 'mm-1' },
       appCtx(secretApp.id),
-    );
+    ));
     expect(sessionKeyCache.refCount(s1.memoryId!)).toBe(2);
     await resolvers.Mutation.endAgentSession({}, { sessionId: s1.id }, appCtx(secretApp.id));
     expect(sessionKeyCache.refCount(s2.memoryId!)).toBe(1);
@@ -233,11 +234,11 @@ describe('startAgentSession with encryption', () => {
 describe('createNode with encryption', () => {
   it('stores ciphertext in the DB and returns plaintext to the caller', async () => {
     const key = generateDataKey().raw.toString('base64');
-    const session = await resolvers.Mutation.startAgentSession(
+    const session = await withOperationKey(key, () => resolvers.Mutation.startAgentSession(
       {},
-      { agentId: agent.id, externalUserId: 'mm-1', dataKey: key },
+      { agentId: agent.id, externalUserId: 'mm-1' },
       appCtx(secretApp.id),
-    );
+    ));
     const sessionCtx = await sessionOwnerCtx(secretApp.id, session.id);
 
     const upserted = await resolvers.Mutation.createNode(
@@ -267,11 +268,11 @@ describe('createNode with encryption', () => {
 
   it('issue #366 — updateNodeData decrypts, merges, and re-encrypts `data` at rest', async () => {
     const key = generateDataKey().raw.toString('base64');
-    const session = await resolvers.Mutation.startAgentSession(
+    const session = await withOperationKey(key, () => resolvers.Mutation.startAgentSession(
       {},
-      { agentId: agent.id, externalUserId: 'mm-1', dataKey: key },
+      { agentId: agent.id, externalUserId: 'mm-1' },
       appCtx(secretApp.id),
-    );
+    ));
     const sessionCtx = await sessionOwnerCtx(secretApp.id, session.id);
 
     const node = await resolvers.Mutation.createNode(
@@ -302,11 +303,11 @@ describe('createNode with encryption', () => {
 
   it('spec 031 — abstract is encrypted at rest and returned plaintext to the caller', async () => {
     const key = generateDataKey().raw.toString('base64');
-    const session = await resolvers.Mutation.startAgentSession(
+    const session = await withOperationKey(key, () => resolvers.Mutation.startAgentSession(
       {},
-      { agentId: agent.id, externalUserId: 'mm-1', dataKey: key },
+      { agentId: agent.id, externalUserId: 'mm-1' },
       appCtx(secretApp.id),
-    );
+    ));
     const sessionCtx = await sessionOwnerCtx(secretApp.id, session.id);
 
     const ABSTRACT_PLAINTEXT =
@@ -344,9 +345,9 @@ describe('createNode with encryption', () => {
 
   it('re-affirms against the locked encrypted body after an interleaved edit', async () => {
     const key = generateDataKey().raw.toString('base64');
-    const session = await resolvers.Mutation.startAgentSession(
-      {}, { agentId: agent.id, externalUserId: 'mm-locked-reaffirm', dataKey: key }, appCtx(secretApp.id),
-    );
+    const session = await withOperationKey(key, () => resolvers.Mutation.startAgentSession(
+      {}, { agentId: agent.id, externalUserId: 'mm-locked-reaffirm' }, appCtx(secretApp.id),
+    ));
     const sessionCtx = await sessionOwnerCtx(secretApp.id, session.id);
     const node = await resolvers.Mutation.createNode({}, {
       input: { memoryId: session.memoryId!, loc: 'locked-reaffirm', name: 'locked-reaffirm',
@@ -381,11 +382,11 @@ describe('createNode with encryption', () => {
 
   it('throws when writing to an encrypted memory without an active session', async () => {
     const key = generateDataKey().raw.toString('base64');
-    const session = await resolvers.Mutation.startAgentSession(
+    const session = await withOperationKey(key, () => resolvers.Mutation.startAgentSession(
       {},
-      { agentId: agent.id, externalUserId: 'mm-1', dataKey: key },
+      { agentId: agent.id, externalUserId: 'mm-1' },
       appCtx(secretApp.id),
-    );
+    ));
     // End the session — key evicted
     await resolvers.Mutation.endAgentSession({}, { sessionId: session.id }, appCtx(secretApp.id));
 
@@ -407,11 +408,11 @@ describe('createNode with encryption', () => {
 
   it('issue #366 — updateNodeData throws SESSION_EXPIRED on an encrypted memory with no active session', async () => {
     const key = generateDataKey().raw.toString('base64');
-    const session = await resolvers.Mutation.startAgentSession(
+    const session = await withOperationKey(key, () => resolvers.Mutation.startAgentSession(
       {},
-      { agentId: agent.id, externalUserId: 'mm-1', dataKey: key },
+      { agentId: agent.id, externalUserId: 'mm-1' },
       appCtx(secretApp.id),
-    );
+    ));
     const sessionCtx = await sessionOwnerCtx(secretApp.id, session.id);
     const node = await resolvers.Mutation.createNode(
       {},
@@ -432,11 +433,11 @@ describe('createNode with encryption', () => {
 
   it('#742 — updateNodeProperties merges plaintext `properties` in-session on an encrypted memory', async () => {
     const key = generateDataKey().raw.toString('base64');
-    const session = await resolvers.Mutation.startAgentSession(
+    const session = await withOperationKey(key, () => resolvers.Mutation.startAgentSession(
       {},
-      { agentId: agent.id, externalUserId: 'mm-1', dataKey: key },
+      { agentId: agent.id, externalUserId: 'mm-1' },
       appCtx(secretApp.id),
-    );
+    ));
     const sessionCtx = await sessionOwnerCtx(secretApp.id, session.id);
     const node = await resolvers.Mutation.createNode(
       {},
@@ -456,11 +457,11 @@ describe('createNode with encryption', () => {
 
   it('#742 — updateNodeProperties throws SESSION_EXPIRED on an encrypted memory with no active session (the write round-trips the encrypted fields)', async () => {
     const key = generateDataKey().raw.toString('base64');
-    const session = await resolvers.Mutation.startAgentSession(
+    const session = await withOperationKey(key, () => resolvers.Mutation.startAgentSession(
       {},
-      { agentId: agent.id, externalUserId: 'mm-1', dataKey: key },
+      { agentId: agent.id, externalUserId: 'mm-1' },
       appCtx(secretApp.id),
-    );
+    ));
     const sessionCtx = await sessionOwnerCtx(secretApp.id, session.id);
     const node = await resolvers.Mutation.createNode(
       {},
@@ -487,11 +488,11 @@ describe('createNode with encryption', () => {
 describe('read path decryption', () => {
   it('nodeById returns plaintext when the session key is active', async () => {
     const key = generateDataKey().raw.toString('base64');
-    const session = await resolvers.Mutation.startAgentSession(
+    const session = await withOperationKey(key, () => resolvers.Mutation.startAgentSession(
       {},
-      { agentId: agent.id, externalUserId: 'mm-1', dataKey: key },
+      { agentId: agent.id, externalUserId: 'mm-1' },
       appCtx(secretApp.id),
-    );
+    ));
     const sessionCtx = await sessionOwnerCtx(secretApp.id, session.id);
     const written = await resolvers.Mutation.createNode(
       {},
@@ -508,11 +509,11 @@ describe('read path decryption', () => {
 
   it('nodeById returns ciphertext when the session is over (no hard failure)', async () => {
     const key = generateDataKey().raw.toString('base64');
-    const session = await resolvers.Mutation.startAgentSession(
+    const session = await withOperationKey(key, () => resolvers.Mutation.startAgentSession(
       {},
-      { agentId: agent.id, externalUserId: 'mm-1', dataKey: key },
+      { agentId: agent.id, externalUserId: 'mm-1' },
       appCtx(secretApp.id),
-    );
+    ));
     const sessionCtx = await sessionOwnerCtx(secretApp.id, session.id);
     const written = await resolvers.Mutation.createNode(
       {},
@@ -584,11 +585,11 @@ describe('encryptMemory', () => {
 
   it('completes an already-encrypted SECRET memory under its birth key', async () => {
     const key = generateDataKey().raw.toString('base64');
-    const session = await resolvers.Mutation.startAgentSession(
+    const session = await withOperationKey(key, () => resolvers.Mutation.startAgentSession(
       {},
-      { agentId: agent.id, externalUserId: 'mm-1', dataKey: key },
+      { agentId: agent.id, externalUserId: 'mm-1' },
       appCtx(secretApp.id),
-    );
+    ));
     const completed = await resolvers.Mutation.encryptMemory(
       {},
       { memoryId: session.memoryId!, dataKey: key },
@@ -599,10 +600,10 @@ describe('encryptMemory', () => {
 
   it('refuses to claim a verifier for an empty legacy encrypted memory', async () => {
     const key = generateDataKey().raw.toString('base64');
-    const session = await resolvers.Mutation.startAgentSession(
-      {}, { agentId: agent.id, externalUserId: 'empty-legacy', dataKey: key },
+    const session = await withOperationKey(key, () => resolvers.Mutation.startAgentSession(
+      {}, { agentId: agent.id, externalUserId: 'empty-legacy' },
       appCtx(secretApp.id),
-    );
+    ));
     await db.memory.update({ where: { id: session.memoryId! }, data: { keyVerifier: null } });
     await expect(resolvers.Mutation.encryptMemory(
       {}, { memoryId: session.memoryId!, dataKey: key }, await sessionOwnerCtx(secretApp.id, session.id),
@@ -612,10 +613,10 @@ describe('encryptMemory', () => {
   it('refuses a mixed-key legacy witness without rewriting nodes or history (#1441)', async () => {
     const originalKey = generateDataKey().raw.toString('base64');
     const wrongKey = generateDataKey().raw.toString('base64');
-    const first = await resolvers.Mutation.startAgentSession(
-      {}, { agentId: agent.id, externalUserId: 'mixed-legacy', dataKey: originalKey },
+    const first = await withOperationKey(originalKey, () => resolvers.Mutation.startAgentSession(
+      {}, { agentId: agent.id, externalUserId: 'mixed-legacy' },
       appCtx(secretApp.id),
-    );
+    ));
     const original = await resolvers.Mutation.createNode(
       {}, { input: { memoryId: first.memoryId!, loc: 'original', name: 'original', content: 'original secret' } },
       await sessionOwnerCtx(secretApp.id, first.id),
@@ -760,10 +761,10 @@ describe('linkMemoryToUser with encryption', () => {
       return rows;
     }) as typeof db.node.findMany);
     try {
-      await expect(resolvers.Mutation.linkMemoryToUser(
-        {}, { memoryId: anon.memoryId!, externalUserId: 'claimant', dataKey: generateDataKey().raw.toString('base64') },
+      await expect(withOperationKey(generateDataKey().raw.toString('base64'), () => resolvers.Mutation.linkMemoryToUser(
+        {}, { memoryId: anon.memoryId!, externalUserId: 'claimant' },
         appCtx(plaintextApp.id),
-      )).rejects.toMatchObject({ extensions: { code: 'MEMORY_WRITE_CONFLICT' } });
+      ))).rejects.toMatchObject({ extensions: { code: 'MEMORY_WRITE_CONFLICT' } });
     } finally {
       scan.mockRestore();
     }
@@ -812,15 +813,11 @@ describe('linkMemoryToUser with encryption', () => {
 
     // Link with a dataKey → memory is promoted to encrypted
     const key = generateDataKey().raw.toString('base64');
-    await resolvers.Mutation.linkMemoryToUser(
+    await withOperationKey(key, () => resolvers.Mutation.linkMemoryToUser(
       {},
-      {
-        memoryId: anonSession.memoryId!,
-        externalUserId: 'mm-registered',
-        dataKey: key,
-      },
+      { memoryId: anonSession.memoryId!, externalUserId: 'mm-registered' },
       appCtx(plaintextApp.id),
-    );
+    ));
 
     mem = await db.memory.findUnique({ where: { id: anonSession.memoryId! } });
     expect(mem?.isEncrypted).toBe(true);

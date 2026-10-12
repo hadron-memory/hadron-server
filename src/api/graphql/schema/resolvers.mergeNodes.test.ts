@@ -1,3 +1,4 @@
+import { withOperationKey } from '../../../test/operationKey.js';
 /**
  * mergeNodes — fold a source node into a target node. Covers per-field merge
  * strategy (text concat, tag union, JSON shallow-merge), field selection via
@@ -317,11 +318,11 @@ describe('mergeNodes — encryption', () => {
 
     const key = generateDataKey().raw.toString('base64');
     const appCtx: Context = { db, appId: app.id, roles: [], organizationId: org.id };
-    const session = await resolvers.Mutation.startAgentSession(
+    const session = await withOperationKey(key, () => resolvers.Mutation.startAgentSession(
       {},
-      { agentId: agent.id, externalUserId: 'mm-1', dataKey: key },
+      { agentId: agent.id, externalUserId: 'mm-1' },
       appCtx,
-    );
+    ));
     const memId = session.memoryId!;
     const driver = await db.session.findUniqueOrThrow({ where: { id: session.id }, select: { userId: true } });
     const sCtx: Context = { ...appCtx, userId: driver.userId!, sessionId: session.id };
@@ -357,9 +358,9 @@ describe('mergeNodes — encryption', () => {
 
     const key = generateDataKey().raw.toString('base64');
     const appCtx: Context = { db, appId: app.id, roles: [], organizationId: org.id };
-    const session = await resolvers.Mutation.startAgentSession(
-      {}, { agentId: agent.id, externalUserId: 'mm-eo', dataKey: key }, appCtx,
-    );
+    const session = await withOperationKey(key, () => resolvers.Mutation.startAgentSession(
+      {}, { agentId: agent.id, externalUserId: 'mm-eo' }, appCtx,
+    ));
     const memId = session.memoryId!;
     const driver = await db.session.findUniqueOrThrow({ where: { id: session.id }, select: { userId: true } });
     const sCtx: Context = { ...appCtx, userId: driver.userId!, sessionId: session.id };

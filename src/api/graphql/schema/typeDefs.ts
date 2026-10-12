@@ -11296,28 +11296,29 @@ export const typeDefs = `#graphql
     """
     Multi-user-agent session lifecycle (renamed to avoid collision with
     the developer/guided startSession and endSession mutations).
-    dataKey is base64-encoded, 32 bytes, required when the app is
-    configured with identifyUserMethod: SECRET and the target memory is
-    (or will become) encrypted.
+    Supply a base64-encoded 32-byte key beside the operation through the
+    x-hadron-operation-key header when identifyUserMethod is SECRET.
+    The key is verified for an existing encrypted memory and held only
+    after the new session commits; USER_ID mode rejects this header.
     """
     startAgentSession(
       agentId: ID!
       externalUserId: String
       sessionTimeoutSeconds: Int
-      dataKey: String
     ): Session!
     endAgentSession(sessionId: ID!): Boolean!
 
     """
     Link this App's live plaintext anonymous memory to a real user.
-    Providing dataKey claims private ownership and encrypts the enumerated live
-    nodes with the link; remaining fields and history complete in bounded passes. After a committed claim,
+    Providing x-hadron-operation-key in the request header claims private
+    ownership and encrypts live nodes; remaining fields and history complete
+    in bounded passes. After a committed claim,
     interrupted completion allows the strict owner or owning App key to call
     encryptMemory with the existing key. A registered holding cannot be linked again.
 
     Accepts the entity's ID or URN.
     """
-    linkMemoryToUser(memoryId: ID!, externalUserId: String!, dataKey: String): Memory!
+    linkMemoryToUser(memoryId: ID!, externalUserId: String!): Memory!
 
     """
     Convert a plaintext PRIVATE memory to encrypted (spec 041, caller-held
