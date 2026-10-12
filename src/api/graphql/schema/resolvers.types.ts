@@ -246,10 +246,15 @@ function loadReadableAgent(ctx: Context, agentId: string): Promise<unknown | nul
   const cache = (ctx.readableAgentCache ??= new Map<string, Promise<unknown | null>>());
   let pending = cache.get(agentId);
   if (!pending) {
-    if (ctx.appId && !ctx.userId && !ctx.impersonation) {
+    if ((ctx.appId && !ctx.userId && !ctx.impersonation) ||
+        (!ctx.impersonation && (ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER')))) {
       // Pure App keys have a live installed-Agent exception to Query.agent's
       // user/org gate. The SQL audience filter cannot express grant lifecycle,
       // so use the same checked path as eager nested Agent relations.
+      // #1787 (cor:dmo:050:13): a platform admin takes the same checked path —
+      // the admin may MANAGE a user-owned Agent, so its nested point-read
+      // routes through the gate, while the SQL filter (which also feeds the
+      // LIST surfaces) keeps excluding other users' user-owned agents (#782).
       pending = ctx.db.agent.findUnique({ where: { id: agentId } })
         .then((agent) => readableNestedAgent(ctx, agent));
     } else {
