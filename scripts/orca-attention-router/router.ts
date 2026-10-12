@@ -947,10 +947,12 @@ export function resolveTerminal(
   if (agents.length > 1) return [null, `${agents.length} agent terminals in its worktree (ambiguous)`, 'none'];
   if (agents.length === 1) return [agents[0].handle, agents[0].agentIdentity ?? '', 'identity'];
   if (cfg && run) {
-    const verified = inWorktree
-      .map((t) => [t, screenAgentFamily(readScreen(cfg, t.handle, run))] as const)
-      .filter(([, family]) => family !== null);
-    if (verified.length === 1) return [verified[0][0].handle, verified[0][1], 'screen'];
+    const verified: Array<{ handle: string; family: string }> = [];
+    for (const t of inWorktree) {
+      const family = screenAgentFamily(readScreen(cfg, t.handle, run));
+      if (family) verified.push({ handle: t.handle, family });
+    }
+    if (verified.length === 1) return [verified[0].handle, verified[0].family, 'screen'];
   }
   return [null, 'no live agent terminal in its worktree', 'none'];
 }
