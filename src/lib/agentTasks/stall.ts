@@ -423,9 +423,19 @@ export async function raiseStallAlarm(
       })),
     });
 
-    // cor:agt:060:07 — a person assignee is never marked (availability is a worker's).
-    if (MARKS_ASSIGNEE.has(again.rule) && subjectWorkerId) {
-      await markStalled(tx, { workerId: subjectWorkerId, appId: again.appId, alarmEventId: eventId, now });
+    // cor:agt:060:07 — not-started / no-progress mark the task's assignee;
+    // owner-unreactive marks the FINISHED CHILD's owner (#1758), who is the
+    // parent's assignee only until the parent is reassigned. A person is never
+    // marked (availability is a worker's).
+    let markWorkerId = subjectWorkerId;
+    if (again.rule === 'owner-unreactive') {
+      const child = again.childTaskId
+        ? await tx.agentTask.findUnique({ where: { id: again.childTaskId }, select: { ownerWorkerId: true } })
+        : null;
+      markWorkerId = child?.ownerWorkerId ?? null;
+    }
+    if (MARKS_ASSIGNEE.has(again.rule) && markWorkerId) {
+      await markStalled(tx, { workerId: markWorkerId, appId: again.appId, alarmEventId: eventId, now });
     }
     return eventId;
   }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
