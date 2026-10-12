@@ -2154,7 +2154,7 @@ export const memoryMutations = {
 
     linkMemoryToUser: async (
       _: unknown,
-      { memoryId, externalUserId }: { memoryId: string; externalUserId: string },
+      { memoryId, externalUserId, dataKey }: { memoryId: string; externalUserId: string; dataKey?: string },
       ctx: Context,
     ) => {
       if (!ctx.appId) throw new Error('Forbidden: App Key required');
@@ -2175,7 +2175,8 @@ export const memoryMutations = {
         }
       });
 
-      const suppliedKey = getRequestOperationKey();
+      // #1796 transition: header wins, including over a conflicting legacy key.
+      const suppliedKey = getRequestOperationKey() ?? (dataKey ? parseDataKey(dataKey) : null);
 
       // Resolve or create user
       let user = await ctx.db.user.findFirst({

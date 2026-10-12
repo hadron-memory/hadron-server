@@ -58,29 +58,25 @@ const startQuery = 'mutation($agent: ID!, $user: String) { startAgentSession(age
 const linkQuery = 'mutation($memory: ID!, $user: String!) { linkMemoryToUser(memoryId: $memory, externalUserId: $user) { id isEncrypted class } }';
 
 describe('#1796 schema boundary', () => {
-  it('allows only the explicitly deferred encryptMemory secret arguments across the schema', () => {
+  it('confines the temporary secret arguments and deprecates both migrating operations', () => {
     const found: string[] = [];
+    const deprecated: string[] = [];
     for (const definition of parse(typeDefs).definitions) {
       if (definition.kind !== Kind.OBJECT_TYPE_DEFINITION && definition.kind !== Kind.OBJECT_TYPE_EXTENSION) continue;
       if (!['Query', 'Mutation'].includes(definition.name.value)) continue;
       for (const field of definition.fields ?? []) for (const arg of field.arguments ?? []) {
         if (['dataKey', 'passphrase'].includes(arg.name.value) || arg.directives?.some(d => /keyMaterial/i.test(d.name.value))) {
-          found.push(definition.name.value + '.' + field.name.value + '.' + arg.name.value);
+          const name = definition.name.value + '.' + field.name.value + '.' + arg.name.value;
+          found.push(name);
+          if (arg.directives?.some(d => d.name.value === 'deprecated' && d.arguments?.some(a => a.name.value === 'reason' && a.value.kind === Kind.STRING && a.value.value.includes(header)))) deprecated.push(name);
         }
       }
     }
-    expect(found.sort()).toEqual(['Mutation.encryptMemory.dataKey', 'Mutation.encryptMemory.passphrase']);
+    expect(found.sort()).toEqual(['Mutation.encryptMemory.dataKey', 'Mutation.encryptMemory.passphrase', 'Mutation.linkMemoryToUser.dataKey', 'Mutation.startAgentSession.dataKey']);
+    expect(deprecated.sort()).toEqual(['Mutation.linkMemoryToUser.dataKey', 'Mutation.startAgentSession.dataKey']);
   });
 
-  it.each(['startAgentSession', 'linkMemoryToUser'])('refuses the removed %s key argument before any resolver writes', async operation => {
-    const before = { sessions: await db.session.count(), users: await db.user.count(), memories: await db.memory.count() };
-    const query = operation === 'startAgentSession'
-      ? 'mutation($id: ID!, $key: String) { startAgentSession(agentId: $id, externalUserId: "legacy", dataKey: $key) { id } }'
-      : 'mutation($id: ID!, $key: String) { linkMemoryToUser(memoryId: $id, externalUserId: "legacy", dataKey: $key) { id } }';
-    const result = await request(query, { id: agentId, key }, key);
-    expect(result.body.errors?.[0]?.extensions?.code).toBe('GRAPHQL_VALIDATION_FAILED');
-    expect({ sessions: await db.session.count(), users: await db.user.count(), memories: await db.memory.count() }).toEqual(before);
-  });
+
 });
 
 describe('#1796 real HTTP header operations', () => {
@@ -182,6 +178,42 @@ describe('#1796 real HTTP header operations', () => {
     expect(result.body.errors?.[0]?.extensions?.code).toBe('BAD_UNLOCK_INPUT');
     expect(await db.session.count()).toBe(0);
     expect(await db.user.count({ where: { externalId: 'wrong-mode' } })).toBe(0);
+  });
+
+  it('retains legacy session key supply during the named migration window', async () => {
+    const query = 'mutation($id: ID!, $key: String) { startAgentSession(agentId: $id, externalUserId: "legacy-session", dataKey: $key) { id memoryId } }';
+    const result = await request(query, { id: agentId, key });
+    expect(result.body.errors).toBeUndefined();
+    const memory = await db.memory.findUniqueOrThrow({ where: { id: result.body.data?.startAgentSession.memoryId } });
+    expect(verifyDataKey(memory.keyVerifier!, parseDataKey(key))).toBe(true);
+  });
+
+  it.each([undefined, wrongKey])('header wins over the legacy session argument: legacy=%s', legacy => {
+    return (async () => {
+      const query = 'mutation($id: ID!, $key: String) { startAgentSession(agentId: $id, externalUserId: "precedence", dataKey: $key) { id memoryId } }';
+      const result = await request(query, { id: agentId, key: legacy }, key);
+      expect(result.body.errors).toBeUndefined();
+      const memory = await db.memory.findUniqueOrThrow({ where: { id: result.body.data?.startAgentSession.memoryId } });
+      expect(verifyDataKey(memory.keyVerifier!, parseDataKey(key))).toBe(true);
+      if (legacy) expect(verifyDataKey(memory.keyVerifier!, parseDataKey(legacy))).toBe(false);
+      const refused = await request(query, { id: agentId, key }, wrongKey);
+      expect(refused.body.errors?.[0]?.extensions?.code).toBe('WRONG_KEY');
+    })();
+  });
+
+  it.each(['plaintext', 'legacy-key', 'header-preferred'])('keeps promotion callers working in transition: %s', async mode => {
+    await db.app.update({ where: { id: appId }, data: { identifyUserMethod: 'USER_ID' } });
+    const anonymous = await request(startQuery, { agent: agentId });
+    expect(anonymous.body.errors).toBeUndefined();
+    const memoryId = anonymous.body.data?.startAgentSession.memoryId;
+    const query = 'mutation($id: ID!, $key: String) { linkMemoryToUser(memoryId: $id, externalUserId: "legacy-promotion", dataKey: $key) { id isEncrypted class } }';
+    const result = await request(query, { id: memoryId, key: mode === 'plaintext' ? null : mode === 'legacy-key' ? key : wrongKey }, mode === 'header-preferred' ? key : undefined);
+    expect(result.body.errors).toBeUndefined();
+    expect(result.body.data?.linkMemoryToUser.isEncrypted).toBe(mode !== 'plaintext');
+    if (mode !== 'plaintext') {
+      const memory = await db.memory.findUniqueOrThrow({ where: { id: memoryId } });
+      expect(verifyDataKey(memory.keyVerifier!, parseDataKey(key))).toBe(true);
+    }
   });
 
 });
