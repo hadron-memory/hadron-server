@@ -82,8 +82,14 @@ describe('the predicate', () => {
   });
 
   it('the SET agrees with the predicate for every principal and App (the chatLocFilter case)', async () => {
+    // Org-owned Apps too (live and deleted-org), so the `ownerUserId: null` + org-liveness arm is in the same sweep.
+    const liveOrg = await db.organization.create({ data: { id: generateId(), name: 'lo', urn: `lo-${generateId().toLowerCase()}` } });
+    const deadOrg = await db.organization.create({ data: { id: generateId(), name: 'do', urn: `do-${generateId().toLowerCase()}`, deletedAt: new Date() } });
+    const orgApp = await db.app.create({ data: { id: generateId(), organizationId: liveOrg.id, name: 'LiveOrgApp', urn: `${liveOrg.urn}:a` } });
+    const deadOrgApp = await db.app.create({ data: { id: generateId(), organizationId: deadOrg.id, name: 'DeadOrgApp', urn: `${deadOrg.urn}:a` } });
+    for (const a of [orgApp, deadOrgApp]) await db.appMember.create({ data: { appId: a.id, userId: member.id, role: 'member' } });
     for (const u of [owner, member, outsider, otherOwner, otherMember]) {
-      for (const a of [app, otherApp]) {
+      for (const a of [app, otherApp, orgApp, deadOrgApp]) {
         const row = await db.app.findUniqueOrThrow({ where: { id: a.id }, select: { id: true, organizationId: true, ownerUserId: true } });
         const viaPredicate = await isAppParticipant(ctx(u.id), row);
         const viaSet = (await participantAppIds(db, { userId: u.id }, { includeMemberships: true })).includes(a.id);
@@ -141,6 +147,13 @@ describe('the team space: members read and write it; everyone else still cannot'
     expect(appMember.canWrite).toBe(true);
     expect(appMember.canManage).toBe(false);
     expect((await computeEffectiveAccess(db, { id: outsider.id, roles: ['READER'] }, { kind: 'app', app: appRow as never })).canRead).toBe(false);
+    // An owner-ROLE member manages by the enforced gate (managesApp, #7790); the audit labels the role and does not
+    // lift it (the module's under-reporting direction) — pinned so the two are not mistaken for the same thing.
+    await db.appMember.update({ where: { appId_userId: { appId: app.id, userId: member.id } }, data: { role: 'owner' } });
+    const asOwnerRole = await computeEffectiveAccess(db, { id: member.id, roles: ['READER'] }, { kind: 'app', app: appRow as never });
+    expect(asOwnerRole.role).toBe('owner');
+    expect(asOwnerRole.canWrite).toBe(true);
+    expect(asOwnerRole.canManage).toBe(false);
   });
 });
 
@@ -156,6 +169,17 @@ describe('what stays strict', () => {
     await db.agentMemoryItem.create({ data: { agentId: agent.id, memoryId: ownersMemory.id, role: 'read' } });
     expect((await getMemoryAccess(db, auth(member.id))).has(ownersMemory.id)).toBe(false);
     expect(await getAccessibleMemoryIds(ctx(member.id))).not.toContain(ownersMemory.id);
+  });
+
+  it('a user-owned agent\'s system memory is the agent\'s definition: never a member\'s, though the agent is installed in the App', async () => {
+    const agent = await db.agent.create({ data: { id: generateId(), ownerUserId: owner.id, name: 'Sys', urn: `own${generateId().toLowerCase()}:sys`, visibility: 'ORGANIZATION' } as never });
+    const sys = await db.memory.create({ data: { id: generateId(), class: 'system', ownerUserId: owner.id, name: 'Sys memory', urn: `${agent.urn}-system` } });
+    await db.agent.update({ where: { id: agent.id }, data: { systemMemoryId: sys.id } });
+    await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
+    expect(await canReadMemory(db, auth(member.id), sys.id)).toBe(false);
+    expect(await canWriteToMemory(db, auth(member.id), sys.id)).toBe(false);
+    expect((await getMemoryAccess(db, auth(member.id))).has(sys.id)).toBe(false);
+    expect(await getAccessibleMemoryIds(ctx(member.id))).not.toContain(sys.id);
   });
 
   it('an app-class row of THIS App that belongs to someone other than the App owner is nobody\'s team space', async () => {
@@ -211,6 +235,21 @@ describe('tasks and the team chat', () => {
     expect(await code(M.createAgentTask({}, { input: { appRef: app.id, title: 'nope' } }, ctx(outsider.id)))).toBe('APP_NOT_FOUND');
   });
 
+  it('a member reads the App\'s events', async () => {
+    const made = await M.createAgentTask({}, { input: { appRef: app.id, title: 'Owner task' } }, ctx(owner.id));
+    const events = await Q.agentTeamEvents({}, { appRef: app.id }, ctx(member.id));
+    expect(events.map((e: any) => e.taskId)).toContain(made.id);
+    expect(await code(Q.agentTeamEvents({}, { appRef: app.id }, ctx(outsider.id)))).toBe('APP_NOT_FOUND');
+    expect(await code(Q.agentTeamEvents({}, { appRef: app.id }, ctx(otherMember.id)))).toBe('APP_NOT_FOUND');
+  });
+
+  it('a member starts a plain session in the App (no worker name taken); a non-member cannot', async () => {
+    const s = await M.startSession({}, { input: { id: generateId(), appRef: app.id } }, ctx(member.id));
+    expect(s.id).toBeTruthy();
+    expect(await code(M.startSession({}, { input: { id: generateId(), appRef: app.id } }, ctx(outsider.id)))).toBe('FORBIDDEN');
+    expect(await code(M.startSession({}, { input: { id: generateId(), appRef: app.id } }, ctx(otherMember.id)))).toBe('FORBIDDEN');
+  });
+
   it('the team chat: a member reads and posts; a non-member is refused; impersonation never reaches it', async () => {
     // The team chat's root lives in the team space (the Team Agent bootstrap is not what is under test).
     await ensureChannelWithRoot(db, { memoryId: teamSpace.id, loc: 'chats:team', name: 'team', createdBy: owner.id, asDefaultOfAppId: app.id });
@@ -221,5 +260,160 @@ describe('tasks and the team chat', () => {
     expect(await code(Q.teamChatMessages({}, { appRef: app.id }, ctx(otherMember.id)))).toBe('FORBIDDEN');
     expect(await code(M.createTeamChatMessage({}, { appRef: app.id, body: 'x' }, ctx(outsider.id)))).toBe('FORBIDDEN');
     expect(await code(Q.teamChatMessages({}, { appRef: app.id }, ctx(member.id, { impersonation: { orgId: 'x' } as any })))).toBe('FORBIDDEN');
+  });
+});
+
+describe('taking a worker\'s name on a user-owned App (Rook P2, #8886; interim (b), #8897)', () => {
+  let workerId: string;
+  const bind = (userId: string) =>
+    M.startSession({}, { input: { id: generateId(), workerRef: workerId, appRef: app.id } }, ctx(userId));
+  beforeEach(async () => {
+    const agent = await db.agent.create({ data: { id: generateId(), ownerUserId: owner.id, name: 'Mine3', urn: `own${generateId().toLowerCase()}:mine3`, visibility: 'ORGANIZATION' } as never });
+    await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
+    workerId = (await db.worker.create({ data: { id: generateId(), appId: app.id, agentId: agent.id, name: 'Iris', slug: 'iris' }, select: { id: true } })).id;
+  });
+
+  it('being a member does not make you a holder: a member cannot take the owner\'s unheld worker', async () => {
+    expect(await code(bind(member.id))).toBe('FORBIDDEN');
+    expect((await db.worker.findUniqueOrThrow({ where: { id: workerId } })).heldByUserId).toBeNull();
+    expect(await db.session.count({ where: { workerId } })).toBe(0);
+    // ...nor a non-member, nor a member of another user's App.
+    expect(await code(bind(outsider.id))).toBe('FORBIDDEN');
+    expect(await code(bind(otherMember.id))).toBe('FORBIDDEN');
+  });
+
+  it('the owner takes it, and then it is held against the member (the existing gate)', async () => {
+    const s = await bind(owner.id);
+    expect(s.id).toBeTruthy();
+    expect((await db.worker.findUniqueOrThrow({ where: { id: workerId } })).heldByUserId).toBe(owner.id);
+    expect(await code(bind(member.id))).toBe('WORKER_HELD');
+  });
+
+  it('whoever manages the App takes it: a member with the owner role', async () => {
+    await db.appMember.update({ where: { appId_userId: { appId: app.id, userId: member.id } }, data: { role: 'owner' } });
+    const s = await bind(member.id);
+    expect(s.id).toBeTruthy();
+    expect((await db.worker.findUniqueOrThrow({ where: { id: workerId } })).heldByUserId).toBe(member.id);
+  });
+
+  it('an org-owned App is unchanged: a plain member still takes an unheld name', async () => {
+    const org = await db.organization.create({ data: { id: generateId(), name: 'o', urn: `o-${generateId().toLowerCase()}` } });
+    const orgApp = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'Org', urn: `${org.urn}:org` } });
+    const agent = await db.agent.create({ data: { id: generateId(), organizationId: org.id, name: 'OA', urn: `${org.urn}:oa`, visibility: 'ORGANIZATION' } });
+    await db.appAgent.create({ data: { appId: orgApp.id, agentId: agent.id } });
+    await db.appMember.create({ data: { appId: orgApp.id, userId: member.id, role: 'member' } });
+    const w = await db.worker.create({ data: { id: generateId(), appId: orgApp.id, agentId: agent.id, name: 'Orgy', slug: 'orgy' }, select: { id: true } });
+    const s = await M.startSession({}, { input: { id: generateId(), workerRef: w.id, appRef: orgApp.id } }, ctx(member.id));
+    expect(s.id).toBeTruthy();
+  });
+});
+
+describe('nested content behind the widened Worker gate (Riana P1, #1786)', () => {
+  async function fixture() {
+    const agent = await db.agent.create({ data: { id: generateId(), ownerUserId: owner.id, name: 'Secret role', urn: `own${generateId().toLowerCase()}:secret-role`, visibility: 'ORGANIZATION', systemPrompt: 'synthetic-agent-secret' } as never });
+    await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
+    const mem = await db.memory.create({ data: { id: generateId(), class: 'app', appId: app.id, ownerUserId: owner.id, name: 'Strict worker state', urn: `own${generateId().toLowerCase()}:worker-state` } });
+    const worker = await db.worker.create({ data: { id: generateId(), appId: app.id, agentId: agent.id, name: 'SecretWorker', slug: 'secretworker', memoryId: mem.id, heldByUserId: owner.id, heldAt: new Date() } });
+    await db.node.create({ data: { id: generateId(), memoryId: mem.id, loc: 'handoffs:2026-10-12-001', name: 'Synthetic handoff', nodeType: 'info', content: 'synthetic-worker-secret', data: { reviewMarker: 'synthetic-private-state' } } });
+    return { agent, mem, worker };
+  }
+  async function graph(workerId: string, as: string) {
+    const { ApolloServer } = await import('@apollo/server');
+    const { typeDefs } = await import('../../api/graphql/schema/typeDefs.js');
+    const server = new ApolloServer({ typeDefs, resolvers });
+    try {
+      const result = await server.executeOperation(
+        { query: 'query($ref: ID!) { worker(ref: $ref) { id agent { id systemPrompt } prompt continuity { handoff { id content data } } } }', variables: { ref: workerId } },
+        { contextValue: ctx(as) },
+      );
+      const body = (result.body as any).singleResult;
+      expect(body.errors).toBeUndefined();
+      return body.data.worker;
+    } finally { await server.stop(); }
+  }
+
+  it('a member gets neither the owner\'s agent template through Worker.prompt nor the strict worker-memory handoff through continuity', async () => {
+    const f = await fixture();
+    expect(await code(Q.agent({}, { ref: f.agent.id }, ctx(member.id)))).toBeDefined();
+    expect(await canReadMemory(db, auth(member.id), f.mem.id)).toBe(false);
+    const w = await graph(f.worker.id, member.id);
+    expect(w.agent).toBeNull();
+    expect(JSON.stringify(w)).not.toContain('synthetic-agent-secret');
+    expect(w.prompt ?? '').not.toContain('synthetic-agent-secret');
+    expect(w.continuity?.handoff ?? null).toBeNull();
+    expect(JSON.stringify(w)).not.toContain('synthetic-worker-secret');
+    expect(JSON.stringify(w)).not.toContain('synthetic-private-state');
+  });
+
+  it('the owner (and the worker\'s holder) still get both', async () => {
+    const f = await fixture();
+    const w = await graph(f.worker.id, owner.id);
+    expect(w.prompt).toContain('synthetic-agent-secret');
+    expect(w.continuity.handoff.content).toBe('synthetic-worker-secret');
+    // A member who holds the worker (an owner-role member may take it) is its holder.
+    await db.appMember.update({ where: { appId_userId: { appId: app.id, userId: member.id } }, data: { role: 'owner' } });
+    await db.worker.update({ where: { id: f.worker.id }, data: { heldByUserId: member.id } });
+    const asHolder = await graph(f.worker.id, member.id);
+    expect(asHolder.prompt).toContain('synthetic-agent-secret');
+    expect(asHolder.continuity.handoff.content).toBe('synthetic-worker-secret');
+  });
+});
+
+describe('membership-backed write authority is held through commit (Riana P2, #1786)', () => {
+  it('a membership removal that completes after the authority read but before the write is seen: the write is refused', async () => {
+    let removed = false;
+    const wrapped = new Proxy(db, { get(target, prop) {
+      if (prop === '$transaction') return (fn: any, opts: any) => target.$transaction(async (tx) => {
+        const members = new Proxy(tx.appMember, { get(delegate, method) {
+          if (method === 'findMany') return async (args: any) => {
+            const rows = await (delegate as any).findMany(args);
+            if (!removed && rows.some((r: any) => r.appId === app.id)) {
+              removed = true;
+              await M.removeAppMember({}, { appRef: app.id, userRef: member.id }, ctx(owner.id));
+            }
+            return rows;
+          };
+          const v = (delegate as any)[method]; return typeof v === 'function' ? v.bind(delegate) : v;
+        } });
+        return fn(new Proxy(tx, { get(t, method) {
+          if (method === 'appMember') return members;
+          const v = (t as any)[method]; return typeof v === 'function' ? v.bind(t) : v;
+        } }));
+      }, opts);
+      const v = (target as any)[prop]; return typeof v === 'function' ? v.bind(target) : v;
+    } });
+    let refused = false;
+    try {
+      await M.createNode({}, { input: { memoryId: teamSpace.id, loc: 'review-race', name: 'race', content: 'queued-write' } }, ctx(member.id, { db: wrapped as any }));
+    } catch { refused = true; }
+    expect(removed).toBe(true);
+    expect({ refused, memberRows: await db.appMember.count({ where: { appId: app.id, userId: member.id } }), nodeRows: await db.node.count({ where: { memoryId: teamSpace.id, loc: 'review-race' } }) })
+      .toEqual({ refused: true, memberRows: 0, nodeRows: 0 });
+  });
+
+  it('a removal that starts while an authorized write is in flight waits for its commit; an unrevoked member writes', async () => {
+    const results: string[] = [];
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    let ready!: () => void;
+    const held = new Promise<void>((r) => { ready = r; });
+    const writer = db.$transaction(async (tx) => {
+      expect(await canWriteToMemory(tx as never, auth(member.id), teamSpace.id)).toBe(true);
+      ready();
+      await gate;
+      results.push('write committed');
+    });
+    await held;
+    const removal = M.removeAppMember({}, { appRef: app.id, userRef: member.id }, ctx(owner.id)).then(() => results.push('removed'));
+    await new Promise((r) => setTimeout(r, 500));
+    expect(results).toEqual([]); // the removal is waiting for the writer
+    release();
+    await writer;
+    await removal;
+    expect(results).toEqual(['write committed', 'removed']);
+    // An unrevoked member just writes (control).
+    await db.appMember.create({ data: { appId: app.id, userId: member.id, role: 'reader' } });
+    const made = await M.createNode({}, { input: { memoryId: teamSpace.id, loc: 'control', name: 'control', content: 'ok' } }, ctx(member.id));
+    expect(made.id).toBeTruthy();
   });
 });

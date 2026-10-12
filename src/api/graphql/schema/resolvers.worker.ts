@@ -66,6 +66,7 @@ import {
   isPlatformAdmin,
   clampListTake,
   safeCanonicalUrn,
+  isMemoryReadableCached,
 } from './resolvers.helpers.js';
 
 /** Loc prefix of the role-definition branch in a Team Agent's system memory. */
@@ -1986,8 +1987,15 @@ export async function composeWorkerPrompt(
   }
   const agent = await ctx.db.agent.findUnique({
     where: { id: worker.agentId },
-    select: { systemPrompt: true, personaRole: true, updatedAt: true },
+    select: { systemPrompt: true, personaRole: true, updatedAt: true, ownerUserId: true },
   });
+  // #1764 (Riana P1): the App's participants now include a user-owned App's members, but a USER-owned Agent stays
+  // owner-only (spec 047) — its template is read by the owner, or by whoever holds the worker cast from it (the person
+  // driving the name), never by a member through this nested field. The gate above is App participation; this is the
+  // underlying entity's. An org-owned Agent's template is unchanged.
+  if (agent?.ownerUserId != null && !(await mayReadUserOwnedAgentTemplate(ctx, worker.id, agent.ownerUserId))) {
+    return { text: null, renderedAt: new Date(), roleAgentUpdatedAt: null };
+  }
   const template = agent?.systemPrompt ?? null;
   const role = worker.role ?? agent?.personaRole ?? '';
   const bound = template ? applyPersonaTemplate(template, worker.name, role) : null;
@@ -2004,6 +2012,14 @@ export async function composeWorkerPrompt(
   // render time. Down here, renderedAt is a lower bound the printed text and
   // its Agent stamp both satisfy.
   return { text, renderedAt: new Date(), roleAgentUpdatedAt: agent?.updatedAt ?? null };
+}
+
+/** The owner of a user-owned Agent, or the person holding the worker cast from it; never under impersonation. */
+async function mayReadUserOwnedAgentTemplate(ctx: Context, workerId: string, agentOwnerUserId: string): Promise<boolean> {
+  if (!ctx.userId || ctx.impersonation) return false;
+  if (ctx.userId === agentOwnerUserId) return true;
+  const w = await ctx.db.worker.findUnique({ where: { id: workerId }, select: { heldByUserId: true } });
+  return w?.heldByUserId === ctx.userId;
 }
 
 async function maySeeWorkerInternals(ctx: Context, appId: string): Promise<boolean> {
@@ -2561,7 +2577,14 @@ export const workerFieldResolvers = {
       // No working memory means no sequence to have written to — which is a
       // real state (provisioning is best-effort at cast), not an error. The
       // status still reports honestly on the previous stint.
-      const handoffRow = worker.memoryId
+      // #1764 (Riana P1): a USER-owned working memory is read through its own gate (the owner, or the worker's holder),
+      // not through App participation: a member of a user-owned App is a participant but not a reader of it. An
+      // unreadable one is treated as having no handoff to show, so neither its content nor its existence is told.
+      const handoffReadable = !worker.memoryId ? false : await (async () => {
+        const mem = await ctx.db.memory.findUnique({ where: { id: worker.memoryId! }, select: { ownerUserId: true } });
+        return mem?.ownerUserId == null || (await isMemoryReadableCached(ctx, worker.memoryId!));
+      })();
+      const handoffRow = worker.memoryId && handoffReadable
         ? await newestHandoff(ctx.db, worker.memoryId)
         : null;
       const status = continuityStatusOf({

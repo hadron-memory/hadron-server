@@ -62,6 +62,7 @@ export type {
   Subject,
 } from '@hadron-memory/access-control';
 import { LIVE_ORG_MEMBERSHIP } from './liveOrgMembership.js';
+import { isUserOwnedTeamSpaceMember } from './appParticipation.js';
 
 // ─── Resource resolution ────────────────────────────────────────────────────
 
@@ -206,18 +207,14 @@ async function memoryGrants(
     } else if (isWorkerRow && memory.workerOf.some((w) =>
       w.appId === memory.appId && w.retiredAt === null && w.heldByUserId === subject.id)) {
       grants.push({ source: 'MEMORY_PRINCIPAL', role: 'worker-holder', via: null, caps: WRITE });
-    } else if (memory.class === 'app' && memory.appId !== null && memory.userMemoryOfAgentId === null &&
-      memory.workerOf.length === 0) {
-      // #1764: the team space of a user-owned App (the App owner's own app-class row, no Worker or session shape)
-      // admits that App's members, read+write; everything else user-owned stays the owner's alone.
-      const app = await db.app.findFirst({
-        where: { id: memory.appId, deletedAt: null, uninstalledAt: null, ownerUserId: memory.ownerUserId },
-        select: { urn: true },
-      });
-      const member = app ? await db.appMember.findUnique({
-        where: { appId_userId: { appId: memory.appId, userId: subject.id } }, select: { role: true },
-      }) : null;
-      if (app && member) grants.push({ source: 'APP_MEMBER', role: member.role, via: app.urn, caps: WRITE });
+    } else if (await isUserOwnedTeamSpaceMember(db, { userId: subject.id }, memory)) {
+      // #1764: the team space of a user-owned App admits that App's members, read+write — the same one rule the
+      // gates ask (appParticipation.ts); everything else user-owned stays the owner's alone.
+      const [app, member] = await Promise.all([
+        db.app.findUnique({ where: { id: memory.appId! }, select: { urn: true } }),
+        db.appMember.findUnique({ where: { appId_userId: { appId: memory.appId!, userId: subject.id } }, select: { role: true } }),
+      ]);
+      grants.push({ source: 'APP_MEMBER', role: member?.role ?? 'member', via: app?.urn ?? memory.appId, caps: WRITE });
     }
     return grants;
   }
@@ -428,7 +425,9 @@ async function appGrants(
         where: { appId_userId: { appId: app.id, userId: subject.id } }, select: { role: true },
       });
       // #1764 (Holger "A", cor:acl:010:01): a user-owned App's participants are its owner AND its members. Membership
-      // confers use (read+write at the App level), as on an org-owned App; managing stays the owner's.
+      // confers use (read+write at the App level), as on an org-owned App. Managing is the owner's — and, as the
+      // enforced gate (`managesApp`, #7790) has it, an owner-ROLE AppMember's, which this audit does not lift: the
+      // free-form role string only labels the grant here, the module's safe under-reporting direction.
       if (member) grants.push({ source: 'APP_MEMBER', role: member.role, via: null, caps: WRITE });
     }
     return grants;
