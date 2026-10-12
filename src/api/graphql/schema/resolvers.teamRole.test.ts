@@ -223,7 +223,7 @@ describe('#960 — createTeamRole', () => {
     const role = await M.createTeamRole(
       {},
       { appRef: app.id, role: 'qa-engineer', description: 'Quality work' },
-      ctx(contrib.id),
+      ctx(admin.id),
     );
     expect(role.role).toBe('qa-engineer');
     const node = await db.node.findUniqueOrThrow({
@@ -240,7 +240,7 @@ describe('#960 — createTeamRole', () => {
       M.createTeamRole(
         {},
         { appRef: app.id, role: 'backend-engineer' },
-        ctx(contrib.id),
+        ctx(admin.id),
       ),
       'TEAM_ROLE_EXISTS',
     );
@@ -248,7 +248,7 @@ describe('#960 — createTeamRole', () => {
 
   it('rejects a multi-atom role slug', async () => {
     await expectCode(
-      M.createTeamRole({}, { appRef: app.id, role: 'a:b', names: ['X'] }, ctx(contrib.id)),
+      M.createTeamRole({}, { appRef: app.id, role: 'a:b', names: ['X'] }, ctx(admin.id)),
       'BAD_USER_INPUT',
     );
   });
@@ -259,8 +259,8 @@ describe('#960 — createTeamRole', () => {
     // role would otherwise both pass the TEAM_ROLE_EXISTS check and both
     // write. Renamed withRegisterLock → withRoleWriteLock to say so.
     const results = await Promise.allSettled([
-      M.createTeamRole({}, { appRef: app.id, role: 'ops' }, ctx(contrib.id)),
-      M.createTeamRole({}, { appRef: app.id, role: 'ops' }, ctx(contrib.id)),
+      M.createTeamRole({}, { appRef: app.id, role: 'ops' }, ctx(admin.id)),
+      M.createTeamRole({}, { appRef: app.id, role: 'ops' }, ctx(admin.id)),
     ]);
     const rejected = results.filter((r) => r.status === 'rejected') as PromiseRejectedResult[];
     expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
@@ -329,7 +329,7 @@ describe('#960 — createTeamRole', () => {
     await db.appAgent.create({ data: { appId: app.id, agentId: second.id } });
     // A participant sees the real refusal…
     await expectCode(
-      M.createTeamRole({}, { appRef: app.id, role: 'ops' }, ctx(contrib.id)),
+      M.createTeamRole({}, { appRef: app.id, role: 'ops' }, ctx(admin.id)),
       'TEAM_AGENT_AMBIGUOUS',
     );
     // …an outsider gets FORBIDDEN, never the candidate list.
@@ -339,14 +339,15 @@ describe('#960 — createTeamRole', () => {
     );
   });
 
-  it('write gate is the definition-edit gate: org READER refused, CONTRIBUTOR admitted', async () => {
+  it('write gate is the definition-edit gate: org READER and CONTRIBUTOR refused, ADMIN admitted', async () => {
     await expect(
       M.createTeamRole({}, { appRef: app.id, role: 'ops', names: ['Uma'] }, ctx(reader.id)),
     ).rejects.toThrow(/Forbidden/);
+    await expectCode(M.createTeamRole({}, { appRef: app.id, role: 'ops' }, ctx(contrib.id)), 'FORBIDDEN');
     const role = await M.createTeamRole(
       {},
       { appRef: app.id, role: 'ops', names: ['Uma'] },
-      ctx(contrib.id),
+      ctx(admin.id),
     );
     expect(role.role).toBe('ops');
   });
@@ -360,7 +361,7 @@ describe('#960 — updateTeamRole (#1050: description only)', () => {
     const role = await M.updateTeamRole(
       {},
       { appRef: app.id, role: 'backend-engineer', description: 'Server and API work' },
-      ctx(contrib.id),
+      ctx(admin.id),
     );
     expect(role.description).toBe('Server and API work');
 
@@ -394,7 +395,7 @@ describe('#960 — updateTeamRole (#1050: description only)', () => {
       await M.updateTeamRole(
         {},
         { appRef: app.id, role: 'backend-engineer', description: 'edited' },
-        ctx(contrib.id),
+        ctx(admin.id),
       );
       expect(spy).toHaveBeenCalled();
       for (const call of spy.mock.calls) {
@@ -414,11 +415,11 @@ describe('#960 — updateTeamRole (#1050: description only)', () => {
 
   // ── #1024: repo affinity ──────────────────────────────────────────────────
   it('reads data.repos, and sets it through the surface rather than by hand', async () => {
-    await M.createTeamRole({}, { appRef: app.id, role: 'ios-app-engineer' }, ctx(contrib.id));
+    await M.createTeamRole({}, { appRef: app.id, role: 'ios-app-engineer' }, ctx(admin.id));
     const created = await M.updateTeamRole(
       {},
       { appRef: app.id, role: 'ios-app-engineer', repos: ['hadron-memory/hadron-ios'] },
-      ctx(contrib.id),
+      ctx(admin.id),
     );
     expect(created.repos).toEqual(['hadron-memory/hadron-ios']);
 
@@ -429,7 +430,7 @@ describe('#960 — updateTeamRole (#1050: description only)', () => {
         role: 'ios-app-engineer',
         repos: ['hadron-memory/hadron-ios', 'hadron-memory/hadron-macapp'],
       },
-      ctx(contrib.id),
+      ctx(admin.id),
     );
     expect(updated.repos).toEqual([
       'hadron-memory/hadron-ios',
@@ -438,17 +439,17 @@ describe('#960 — updateTeamRole (#1050: description only)', () => {
   });
 
   it('omitted PRESERVES; an empty array CLEARS', async () => {
-    await M.createTeamRole({}, { appRef: app.id, role: 'qa' }, ctx(contrib.id));
+    await M.createTeamRole({}, { appRef: app.id, role: 'qa' }, ctx(admin.id));
     await M.updateTeamRole(
       {},
       { appRef: app.id, role: 'qa', repos: ['acme/qa'] },
-      ctx(contrib.id),
+      ctx(admin.id),
     );
     // A description-only edit must not disturb affinity.
     const desc = await M.updateTeamRole(
       {},
       { appRef: app.id, role: 'qa', description: 'Quality' },
-      ctx(contrib.id),
+      ctx(admin.id),
     );
     expect(desc.repos).toEqual(['acme/qa']);
     expect(desc.description).toBe('Quality');
@@ -456,7 +457,7 @@ describe('#960 — updateTeamRole (#1050: description only)', () => {
     const cleared = await M.updateTeamRole(
       {},
       { appRef: app.id, role: 'qa', repos: [] },
-      ctx(contrib.id),
+      ctx(admin.id),
     );
     expect(cleared.repos).toEqual([]);
   });
@@ -464,16 +465,16 @@ describe('#960 — updateTeamRole (#1050: description only)', () => {
   it('explicit null is OMITTED, not a clear (#1071 review)', async () => {
     // A client whose variables default to null must not silently wipe
     // affinity. The two readings differ and the SDL now says which.
-    await M.createTeamRole({}, { appRef: app.id, role: 'qa2' }, ctx(contrib.id));
+    await M.createTeamRole({}, { appRef: app.id, role: 'qa2' }, ctx(admin.id));
     await M.updateTeamRole(
       {},
       { appRef: app.id, role: 'qa2', repos: ['acme/qa'] },
-      ctx(contrib.id),
+      ctx(admin.id),
     );
     const kept = await M.updateTeamRole(
       {},
       { appRef: app.id, role: 'qa2', repos: null },
-      ctx(contrib.id),
+      ctx(admin.id),
     );
     expect(kept.repos).toEqual(['acme/qa']);
   });
@@ -490,7 +491,7 @@ describe('#960 — updateTeamRole (#1050: description only)', () => {
     await M.updateTeamRole(
       {},
       { appRef: app.id, role: 'backend-engineer', repos: ['acme/api'] },
-      ctx(contrib.id),
+      ctx(admin.id),
     );
 
     const after = await db.node.findUniqueOrThrow({ where: { id: before.id } });
@@ -528,7 +529,7 @@ describe('#960 — updateTeamRole (#1050: description only)', () => {
         M.updateTeamRole(
           {},
           { appRef: app.id, role: 'backend-engineer', repos: ['acme/api'] },
-          ctx(contrib.id),
+          ctx(admin.id),
         ),
         'TEAM_ROLE_DATA_CONFLICT',
       );
@@ -550,7 +551,7 @@ describe('#960 — updateTeamRole (#1050: description only)', () => {
       await M.updateTeamRole(
         {},
         { appRef: app.id, role: 'backend-engineer', description: 'just words' },
-        ctx(contrib.id),
+        ctx(admin.id),
       );
       const opts = spy.mock.calls.at(-1)?.[3] as { guardRevSeq?: number } | undefined;
       expect(opts?.guardRevSeq).toBeUndefined();
@@ -585,7 +586,7 @@ describe('#960 — updateTeamRole (#1050: description only)', () => {
     // The cache lives for the whole request. A multi-field mutation that reads
     // affinity, writes it, then reads again would otherwise deterministically
     // see the pre-update map (PR #1071 review, Codex).
-    const shared = ctx(contrib.id);
+    const shared = ctx(admin.id);
     const { loadAppRepoAffinity } = await import('./resolvers.teamRole.js');
 
     await M.updateTeamRole(
@@ -617,8 +618,8 @@ describe('#960 — updateTeamRole (#1050: description only)', () => {
     const legacyNames = (before.data as { names?: string[] }).names;
     expect(legacyNames?.length).toBeGreaterThan(0);
 
-    await M.deleteTeamRole({}, { appRef: app.id, role: 'backend-engineer' }, ctx(contrib.id));
-    await M.createTeamRole({}, { appRef: app.id, role: 'backend-engineer' }, ctx(contrib.id));
+    await M.deleteTeamRole({}, { appRef: app.id, role: 'backend-engineer' }, ctx(admin.id));
+    await M.createTeamRole({}, { appRef: app.id, role: 'backend-engineer' }, ctx(admin.id));
 
     const after = await db.node.findUniqueOrThrow({ where: { id: before.id } });
     expect(after.deletedAt).toBeNull();
@@ -638,7 +639,7 @@ describe('#960 — updateTeamRole (#1050: description only)', () => {
       M.updateTeamRole(
         {},
         { appRef: app.id, role: 'frontend-engineer', repos: ['acme/x'] },
-        ctx(contrib.id),
+        ctx(admin.id),
       ),
       'TEAM_ROLE_DATA_NOT_OBJECT',
     );
@@ -654,7 +655,7 @@ describe('#960 — updateTeamRole (#1050: description only)', () => {
     // invalidating only from the TeamRole mutations would leave the memo stale
     // for exactly the writers that do not know about it. The shared write seam
     // clears it instead.
-    const shared = ctx(contrib.id);
+    const shared = ctx(admin.id);
     const { loadAppRepoAffinity } = await import('./resolvers.teamRole.js');
     await M.updateTeamRole(
       {},
@@ -684,7 +685,7 @@ describe('#960 — updateTeamRole (#1050: description only)', () => {
       await M.updateTeamRole(
         {},
         { appRef: app.id, role: 'no-such-role', description: 'x' },
-        ctx(contrib.id),
+        ctx(admin.id),
       );
       expect.fail('expected WORKER_ROLE_NOT_FOUND');
     } catch (e) {
@@ -715,7 +716,7 @@ describe('#960 — updateTeamRole (#1050: description only)', () => {
         nameRange: 'A-C',
         expectedNames: ['wrong'],
       } as any,
-      ctx(contrib.id),
+      ctx(admin.id),
     );
     const after = await db.node.findUniqueOrThrow({
       where: { loc_memoryId: { loc: 'roles:backend-engineer', memoryId: teamAgent.systemMemoryId } },
@@ -723,16 +724,16 @@ describe('#960 — updateTeamRole (#1050: description only)', () => {
     expect(after.data).toEqual(before.data);
   });
 
-  it('write gate: org READER refused, CONTRIBUTOR admitted', async () => {
-    // requireMemoryWriteAccess signals denial with a plain Error('Forbidden…'),
-    // matching how the other definition-edit auth tests here assert it.
+  it('write gate: org READER and CONTRIBUTOR refused, ADMIN admitted', async () => {
+    // Definition edits use the same management boundary as Agent edits.
     await expect(
       M.updateTeamRole({}, { appRef: app.id, role: 'backend-engineer', description: 'x' }, ctx(reader.id)),
     ).rejects.toThrow(/Forbidden/);
+    await expectCode(M.updateTeamRole({}, { appRef: app.id, role: 'backend-engineer', description: 'x' }, ctx(contrib.id)), 'FORBIDDEN');
     const ok = await M.updateTeamRole(
       {},
       { appRef: app.id, role: 'backend-engineer', description: 'ok' },
-      ctx(contrib.id),
+      ctx(admin.id),
     );
     expect(ok.description).toBe('ok');
   });
@@ -741,6 +742,11 @@ describe('#960 — updateTeamRole (#1050: description only)', () => {
 describe('deleteTeamRole (#1002, simplified by #1050)', () => {
   const del = (c: Context, args: Record<string, unknown>) =>
     M.deleteTeamRole({}, { appRef: app.id, ...args }, c);
+
+  it('definition removal requires an authorized manager', async () => {
+    await expectCode(del(ctx(contrib.id), { role: 'backend-engineer' }), 'FORBIDDEN');
+    await expectCode(del(ctx(reader.id), { role: 'backend-engineer' }), 'FORBIDDEN');
+  });
 
   /** Mint a worker holding `name`, as a real cast would. */
   const mintWorker = (name: string) =>
@@ -758,7 +764,7 @@ describe('deleteTeamRole (#1002, simplified by #1050)', () => {
 
   it('deletes a role and its sub-nodes, unconditionally', async () => {
     // The fixture already gives backend-engineer a roles:<role>:notes child.
-    const res = await del(ctx(contrib.id), { role: 'backend-engineer' });
+    const res = await del(ctx(admin.id), { role: 'backend-engineer' });
     expect(res.role).toBe('backend-engineer');
     // Definition + its notes: a roles:<role>:notes is content OF the role and
     // retires with it.
@@ -779,7 +785,7 @@ describe('deleteTeamRole (#1002, simplified by #1050)', () => {
     const res = await M.deleteTeamRole(
       {},
       { appRef: app.id, role: 'backend-engineer' },
-      ctx(contrib.id),
+      ctx(admin.id),
     );
     expect(res.role).toBe('backend-engineer');
     // The payload no longer carries a transfer.
@@ -789,7 +795,7 @@ describe('deleteTeamRole (#1002, simplified by #1050)', () => {
 
   it('refuses an unknown role → WORKER_ROLE_NOT_FOUND', async () => {
     await expectCode(
-      M.deleteTeamRole({}, { appRef: app.id, role: 'no-such-role' }, ctx(contrib.id)),
+      M.deleteTeamRole({}, { appRef: app.id, role: 'no-such-role' }, ctx(admin.id)),
       'WORKER_ROLE_NOT_FOUND',
     );
   });
@@ -800,7 +806,7 @@ describe('deleteTeamRole (#1002, simplified by #1050)', () => {
     // workers_app_name_uniq, not by any register or role bookkeeping. Deleting
     // the role that "owned" a name changes nothing about the name.
     await mintWorker('Kira');
-    await del(ctx(contrib.id), { role: 'frontend-engineer' });
+    await del(ctx(admin.id), { role: 'frontend-engineer' });
 
     await expect(
       db.worker.create({
