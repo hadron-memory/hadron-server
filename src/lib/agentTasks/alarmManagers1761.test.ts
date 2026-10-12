@@ -86,8 +86,8 @@ describe('#1761 — a root task\'s alarm chain continues to the App\'s managers 
     const ids = (a.chain as { workerId?: string; userId?: string }[]);
     expect(ids[0]).toEqual({ workerId: ada.id });
     expect(ids.slice(1)).toEqual([
-      { userId: appOwnerMember.id },
-      ...[orgAdmin.id, orgOwner.id].sort().map((userId) => ({ userId })),
+      { userId: appOwnerMember.id, via: 'manager' },
+      ...[orgAdmin.id, orgOwner.id].sort().map((userId) => ({ userId, via: 'manager' })),
     ]);
   });
 
@@ -103,7 +103,7 @@ describe('#1761 — a root task\'s alarm chain continues to the App\'s managers 
   it('a manager who already owns the task appears once, at the owner\'s position', async () => {
     const t = await task({ ownerUserId: orgAdmin.id, assigneeWorkerId: anne.id, assignedAt: at('10:00'), createdAt: at('10:00') });
     const chain = await ownerChain(db, t.id);
-    expect(chain[0]).toEqual({ userId: orgAdmin.id });
+    expect(chain[0]).toEqual({ userId: orgAdmin.id }); // the owner, not a manager entry
     expect(chain.filter((p) => p.userId === orgAdmin.id)).toHaveLength(1);
     expect(chain).toHaveLength(3);
   });
@@ -228,5 +228,37 @@ describe('#1762 — any chain owner, or whoever manages the App, may acknowledge
       } as any,
     });
     await expect(M.acknowledgeAlarm({}, { eventId: a.id }, ctx(orgAdmin.id))).resolves.toMatchObject({ acknowledgedByUserId: orgAdmin.id });
+  });
+});
+
+describe('provenance: a manager entry is not an owner (Diego P2 on #1816)', () => {
+  it('a manager demoted after the alarm was raised can no longer acknowledge it, while a true owner and a current manager can', async () => {
+    const { a } = await rootAlarm();
+    // Demote the org admin to a plain org member; they stay an App participant.
+    await db.orgMember.updateMany({ where: { userId: orgAdmin.id }, data: { role: 'CONTRIBUTOR' } });
+    await db.appMember.create({ data: { appId: app.id, userId: orgAdmin.id, role: 'member' } });
+    expect((a.chain as { userId?: string }[]).some((p) => p.userId === orgAdmin.id)).toBe(true);
+    await expectCode(M.acknowledgeAlarm({}, { eventId: a.id }, ctx(orgAdmin.id)), 'ALARM_NOT_IN_CHAIN');
+    expect((await db.agentTeamEvent.findUniqueOrThrow({ where: { id: a.id } })).acknowledgedAt).toBeNull();
+    // A current manager still acknowledges.
+    await expect(M.acknowledgeAlarm({}, { eventId: a.id }, ctx(orgOwner.id))).resolves.toMatchObject({ acknowledgedByUserId: orgOwner.id });
+  });
+
+  it('a person who OWNS the task and is later demoted keeps the owner\'s standing; the same person as a manager entry does not', async () => {
+    const t = await task({ ownerUserId: orgAdmin.id, assigneeWorkerId: anne.id, assignedAt: at('10:00'), createdAt: at('10:00') });
+    await taskStallTick(db, at('10:15'));
+    const [a] = await alarmsList();
+    expect(a.taskId).toBe(t.id);
+    expect((a.chain as unknown[])[0]).toEqual({ userId: orgAdmin.id });
+    await db.orgMember.updateMany({ where: { userId: orgAdmin.id }, data: { role: 'CONTRIBUTOR' } });
+    await db.appMember.create({ data: { appId: app.id, userId: orgAdmin.id, role: 'member' } });
+    await expect(M.acknowledgeAlarm({}, { eventId: a.id }, ctx(orgAdmin.id))).resolves.toMatchObject({ acknowledgedByUserId: orgAdmin.id });
+  });
+
+  it('a chain entry\'s provenance still blocks a merge (containment on userId)', async () => {
+    const { a } = await rootAlarm();
+    const [{ count }] = await db.$queryRaw<{ count: number }[]>`
+      SELECT count(*)::int AS count FROM agent_team_events WHERE id = ${a.id} AND chain @> ${JSON.stringify([{ userId: orgAdmin.id }])}::jsonb`;
+    expect(count).toBe(1);
   });
 });

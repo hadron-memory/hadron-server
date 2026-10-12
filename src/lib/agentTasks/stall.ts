@@ -322,7 +322,7 @@ export async function ownerChain(db: Db, taskId: string): Promise<AlarmChain> {
       const key = `u:${userId}`;
       if (seen.has(key)) continue;
       seen.add(key);
-      chain.push({ userId });
+      chain.push({ userId, via: 'manager' });
     }
   }
   return chain;

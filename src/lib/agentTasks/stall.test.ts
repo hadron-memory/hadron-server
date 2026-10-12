@@ -86,7 +86,7 @@ beforeEach(async () => {
 });
 
 /** The fixture's one App manager (an org ADMIN): every alarm chain ends with it (cor:agt:050:25, #1761). */
-const manager = () => ({ userId: admin.id });
+const manager = () => ({ userId: admin.id, via: 'manager' });
 
 // ── Fixtures with explicit times ──────────────────────────────────────────
 

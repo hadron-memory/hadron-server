@@ -44,7 +44,7 @@ export const ASSIGNMENT_EVENT_TYPES = ['assignment.queued', 'assignment.matched'
 export const ASSIGNED_EVENT_TYPES = ['task.assigned', 'task.reassigned', 'assignment.matched'] as const;
 
 /** A party to a task: exactly one of a Worker or a User. */
-export type TaskParty = { workerId: string; userId?: never } | { userId: string; workerId?: never };
+export type TaskParty = { workerId: string; userId?: never; via?: never } | { userId: string; workerId?: never; via?: 'manager' };
 
 /** Who acted: the human credential, and the Worker / Agent the request's session is bound to (#1610). */
 export type EventActor = { userId: string | null; workerId: string | null; agentId: string | null };
@@ -68,7 +68,10 @@ export function eventActor(userId: string | null | undefined): EventActor {
 }
 
 function partyJson(p: TaskParty): Prisma.InputJsonObject {
-  return p.workerId ? { workerId: p.workerId } : { userId: p.userId as string };
+  if (p.workerId) return { workerId: p.workerId };
+  // `via: 'manager'` marks a chain entry that is there only because the person managed the App (#1761): it is
+  // provenance, so a later demotion cannot turn it into an owner's standing to acknowledge.
+  return p.via ? { userId: p.userId as string, via: p.via } : { userId: p.userId as string };
 }
 
 /** The stored `payload` for a typed event. Exhaustive over the union, so a new type must be built here. */

@@ -105,11 +105,16 @@ function setByColumns(ctx: Context) {
   return { setByUserId: ctx.userId ?? null, setByWorkerId: a.workerId, setByAgentId: a.agentId };
 }
 
-/** Is the actor this chain entry? A person never matches a worker entry, nor the reverse (T1's `actorIs`). */
+/**
+ * Is the actor this chain entry? A person never matches a worker entry, nor the reverse (T1's `actorIs`). An entry
+ * marked `via: 'manager'` (#1761) is NOT an owner: it stands for "managed the App when the alarm was raised", so it
+ * grants nothing here, and a manager acknowledges through the live `managesApp` check instead (Diego P2, #1816).
+ */
 function inChain(actor: TaskActor, chain: unknown): boolean {
   if (!Array.isArray(chain)) return false;
   return chain.some((entry) => {
-    const e = (entry ?? {}) as { workerId?: unknown; userId?: unknown };
+    const e = (entry ?? {}) as { workerId?: unknown; userId?: unknown; via?: unknown };
+    if (e.via === 'manager') return false;
     return actor.kind === 'worker'
       ? typeof e.workerId === 'string' && e.workerId === actor.workerId
       : e.workerId == null && typeof e.userId === 'string' && e.userId === actor.userId;
