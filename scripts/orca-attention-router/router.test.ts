@@ -1457,14 +1457,16 @@ describe('Orca attention router — coordinator/lifecycle liveness rule (#1826)'
     expect(fake.sent[0][0]).toBe('term_ada');
     const text = fake.sent[0][1];
     expect(text).toContain('liveness');
+    expect(text).toContain('idle-watch rule'); // it names its rule — why it arrived with no mention (Taylor #9748)
     expect(text).toContain('#100'); // its cursor, named
     expect(text).toContain('#120'); // the head, named
     expect(text).toContain('--since 100');
     expect(text).toContain('sinceSeq=100');
     expect(text).toContain('mark read');
+    expect((text.match(/mark read/g) ?? []).length).toBe(1); // once, not twice (Taylor #9748)
     expect(text).toContain('as of send');
     expect(text).not.toContain('relevant unread'); // its own literal: never a counts claim
-    expect(text).not.toContain('mention');
+    expect(text).not.toMatch(/\d+ mention/); // identifying the rule is fine; a count claim never is
     // The full guard chain ran, in order, with the cheap probe / full gate / recheck waits.
     const verbs = fake.calls.map((a) => a.slice(1, 3).join(' '));
     expect(verbs.indexOf('terminal wait')).toBeLessThan(verbs.indexOf('terminal read'));

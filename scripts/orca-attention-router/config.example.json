@@ -52,7 +52,8 @@
     {
       "worker": "01a00918116073139ebb081b1d70b87c",
       "name": "Dara",
-      "worktree": "/Users/holger/orca/workspaces/hadron-server/dara"
+      "worktree": "/Users/holger/orca/workspaces/hadron-server/dara",
+      "lifecycle": true
     },
     {
       "worker": "01a0ef40baf07dac8ce23c6b330d93c3",

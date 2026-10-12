@@ -134,17 +134,19 @@ export function nudgeText(a: AttentionItem): string {
  * #1826 — the one line a FLAGGED worker receives from the liveness rule. Its
  * own literal, never `nudgeText`'s mention shape: the wake is not about
  * mentions at all (zero pending mentions is the normal case — that is the
- * point), so it makes NO unread/mention count claim. It names the two
- * positions it is true for — the worker's cursor and the head, both read
- * fresh immediately before the send — and anchors an unfiltered catch-up
- * from the watermark, mentions or not.
+ * point), so it makes NO unread/mention count claim. It NAMES ITS RULE (the
+ * idle watch — a recipient must be able to tell why it arrived with no
+ * mention anywhere, Taylor #9748), names the two positions it is true for —
+ * the worker's cursor and the head, both read fresh immediately before the
+ * send — and anchors an unfiltered catch-up from the watermark, mentions or
+ * not. "Mark read" appears exactly once.
  */
 export function livenessNudgeText(cursor: number, head: number): string {
-  return 'Hadron team liveness check: the team chat has moved past your read watermark '
-    + `(your cursor #${cursor} < head #${head}) — catch up, then mark read. `
-    + `Read team chat unfiltered with your own live session — CLI: \`hadron team chat read --since ${cursor} --limit 200\` then follow nextSince; MCP: \`hadron_team_chat_read\` with your session and \`sinceSeq=${cursor}\` then the returned cursor. `
-    + 'Then mark read through your OWN session. '
-    + 'If nothing needs action, mark read and finish silently — no chat post. '
+  return 'Hadron team liveness check — the idle-watch rule for your roster flag, not a mention nudge: '
+    + `the team chat has moved past your read watermark (your cursor #${cursor} < head #${head}). `
+    + `Catch up: read team chat unfiltered with your own live session — CLI: \`hadron team chat read --since ${cursor} --limit 200\` then follow nextSince; MCP: \`hadron_team_chat_read\` with your session and \`sinceSeq=${cursor}\` then the returned cursor — `
+    + 'then mark read through your OWN session. '
+    + 'If nothing needs action, finish silently — no chat post. '
     + '(Orca attention router; liveness nudge; cursor and head as of send.)';
 }
 
@@ -243,7 +245,7 @@ export function loadConfig(path: string): Config {
   // product must stay finite, or a huge value would silently disable delivery.
   const watchRaw = raw.coordinatorWatchMinutes;
   if (watchRaw !== undefined && typeof watchRaw !== 'number') {
-    throw new RouterError(`coordinatorWatchMinutes must be a number (got ${JSON.stringify(watchRaw)})`);
+    throw new RouterError(`coordinatorWatchMinutes must be a JSON number (got ${JSON.stringify(watchRaw)})`);
   }
   const watchMinutes = watchRaw ?? 20;
   if (!Number.isFinite(watchMinutes) || watchMinutes <= 0 || !Number.isFinite(watchMinutes * 60_000)) {
