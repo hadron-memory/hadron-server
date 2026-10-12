@@ -5,6 +5,7 @@ import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
 import { canReadMemory } from '../../../mcp/access-control.js';
+import { getManagedSystemMemoryIds } from '../../../lib/auth/managedSystemMemory.js';
 
 const Q = resolvers.Query;
 const M = resolvers.Mutation;
@@ -30,6 +31,13 @@ beforeEach(async () => {
 });
 
 describe('#1808 ruled system task audience', () => {
+  it('the shared manager arm is scoped and fails closed without a user', async () => {
+    expect(await getManagedSystemMemoryIds(db, '')).toEqual([]);
+    expect(await getManagedSystemMemoryIds(db, users.admin, memoryId)).toEqual([memoryId]);
+    expect(await getManagedSystemMemoryIds(db, users.admin, generateId())).toEqual([]);
+    expect(await getManagedSystemMemoryIds(db, users.admin, memoryId, foreignOrgId)).toEqual([]);
+    expect((await search({ ...context('admin'), impersonation: { orgId: foreignOrgId } as Context['impersonation'] })).hits).toEqual([]);
+  });
   it.each(['admin', 'owner'])('%s can independently select a system memory for export', async (who) => {
     const created = await scope(context(who));
     expect((await Q.scopeExplain({}, { scopeRef: created.id }, context(who)))?.memories.map(memory => memory.id)).toEqual([memoryId]);

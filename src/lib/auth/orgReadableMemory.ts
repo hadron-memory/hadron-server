@@ -24,13 +24,17 @@
  *     `app_id IS NULL` — an app-scoped one is App-internal, not org-wide; #653)
  *   - cross-org subscribed non-personal memories (never app-scoped)
  *   - `PUBLIC` non-personal, non-app-scoped memories (always — even with no orgs)
+ *   - a live Agent's matching system memory for its manager (#8995/#1808),
+ *     through the shared batched manager predicate; ordinary membership is
+ *     insufficient. Installed/licensed App reach remains in the App fold.
  *
- * **Read-only by nature.** Org membership confers READ; write stays gated by
+ * **Read-only by nature.** These grants confer READ; write stays gated by
  * the App/agent-role path in each caller. `personal`/`private` memories are
  * NEVER returned here — callers gate those by strict ownership.
  */
 
 import type { PrismaClient } from '../../generated/prisma/index.js';
+import { getManagedSystemMemoryIds } from './managedSystemMemory.js';
 import { LIVE_ORG_MEMBERSHIP } from './liveOrgMembership.js';
 
 export async function getOrgReadableMemoryIds(
@@ -132,5 +136,8 @@ export async function getOrgReadableMemoryIds(
     },
     select: { id: true },
   });
-  return memories.map((m: { id: string }) => m.id);
+  // #1808: a live Agent's manager reads its matching system definition.
+  // Shared by GraphQL search/scope projection and MCP, never org-member-wide.
+  const managed = await getManagedSystemMemoryIds(db, userId, onlyMemoryId, restrictToOrgId);
+  return [...new Set([...memories.map((m: { id: string }) => m.id), ...managed])];
 }
