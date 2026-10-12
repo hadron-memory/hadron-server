@@ -15,10 +15,7 @@ import { mintMemoryUrnV2 } from '../../../lib/mintMemoryUrnV2.js';
 import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
 import { canReadMemory, filterReadableMemoryIds } from '../../../mcp/access-control.js';
 import { isAgentInstalled } from '../../../lib/appAgent.js';
-import {
-  parseDataKey,
-  type EncryptionKey,
-} from '../../../lib/crypto.js';
+import { hasRequestOperationKey, resolveRequestOperationKey } from '../../../lib/requestOperationKey.js';
 import { sessionKeyCache } from '../../../lib/sessionKeyCache.js';
 import { makeKeyVerifier, verifyDataKey } from '../../../lib/memoryUnlock.js';
 import { decryptNodesBatch } from '../../../lib/nodeCrypto.js';
@@ -1424,6 +1421,7 @@ export const sessionMutations = {
     ) => {
       const appId = ctx.appId;
       if (!appId) throw new Error('Forbidden: App Key required');
+      const hasSuppliedKey = hasRequestOperationKey();
       // Lock the App before provisioning any dependent row. The lock and all
       // writes commit together, so uninstall cannot pass the check mid-flight.
       const { session, memoryId, parsedKey } = await ctx.db.$transaction(async (tx) => {
@@ -1448,15 +1446,16 @@ export const sessionMutations = {
           throw new GraphQLError('startAgentSession is not supported for a user-owned Agent yet.', { extensions: { code: 'BAD_USER_INPUT' } });
         }
 
-        // SECRET mode requires a data key; USER_ID mode rejects it.
-        if (app.identifyUserMethod === 'SECRET' && !dataKey) {
-          throw new Error('dataKey is required when the app uses identifyUserMethod: SECRET');
+        // SECRET mode requires a supplied key; USER_ID mode rejects it.
+        if (app.identifyUserMethod === 'SECRET' && !(hasSuppliedKey || dataKey)) {
+          throw new GraphQLError('A supplied operation key is required in SECRET mode.', { extensions: { code: 'BAD_UNLOCK_INPUT' } });
         }
-        if (app.identifyUserMethod === 'USER_ID' && dataKey) {
-          throw new Error('dataKey is only accepted when the app uses identifyUserMethod: SECRET');
+        if (app.identifyUserMethod === 'USER_ID' && (hasSuppliedKey || dataKey)) {
+          throw new GraphQLError('An operation key is only accepted in SECRET mode.', { extensions: { code: 'BAD_UNLOCK_INPUT' } });
         }
 
-        const parsedKey: EncryptionKey | null = dataKey ? parseDataKey(dataKey) : null;
+        // #1796: matching dual supply only, before any provisioning writes.
+        const parsedKey = resolveRequestOperationKey(dataKey);
 
         // Resolve user (optional — null means anonymous session)
         let userId: string | null = null;
@@ -1595,10 +1594,10 @@ export const sessionMutations = {
         }
 
         // If the memory is encrypted, the caller must provide a matching key.
-        // (In SECRET mode we already required a dataKey above; this check also
+        // (In SECRET mode we already required a supplied key above; this check also
         // handles a later call with USER_ID mode on an already-encrypted mem.)
         if (memoryIsEncrypted && !parsedKey) {
-          throw new Error('Memory is encrypted; dataKey is required');
+          throw new GraphQLError('A supplied operation key is required for the encrypted memory.', { extensions: { code: 'BAD_UNLOCK_INPUT' } });
         }
         if (memoryIsEncrypted && parsedKey) {
           const keyProof = await tx.memory.findUniqueOrThrow({
@@ -1610,7 +1609,7 @@ export const sessionMutations = {
             });
           }
           if (!verifyDataKey(keyProof.keyVerifier, parsedKey)) {
-            throw new Error('Wrong dataKey for encrypted memory');
+            throw new GraphQLError('Wrong key for encrypted memory.', { extensions: { code: 'WRONG_KEY' } });
           }
         }
 
