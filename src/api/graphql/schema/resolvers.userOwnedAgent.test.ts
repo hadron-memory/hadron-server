@@ -272,6 +272,19 @@ describe('#1787 — a platform admin manages a user-owned Agent (cor:dmo:050:13,
     expect(await db.memory.findFirst({ where: { id: agent.systemMemoryId!, deletedAt: null } })).toBeNull();
   });
 
+  it('an org-owned agent still reads for a platform admin through the wrapper (Emerson P3: delegation pin)', async () => {
+    const org = await db.organization.create({ data: { id: generateId(), name: 'Org1787', urn: `org1787-${generateId().slice(0, 6)}.test` } });
+    const orgAgent = await db.agent.create({
+      data: { id: generateId(), organizationId: org.id, urn: `org1787.test:helper`, name: 'Org Helper', visibility: 'ORGANIZATION' },
+    });
+    // The wrapper must delegate org-owned agents unchanged: the platform-admin
+    // arm fires only on the user-owned shape.
+    expect((await resolvers.Query.agent(null, { ref: orgAgent.id }, admin()))?.id).toBe(orgAgent.id);
+    await expect(
+      resolvers.Query.agent(null, { ref: orgAgent.id }, ctx({ userId: otherId, roles: ['READER'] })),
+    ).rejects.toThrow();
+  });
+
   it('an ordinary non-owner is still refused everywhere', async () => {
     const agent = await rogueAgent();
     const ordinary = ctx({ userId: otherId, roles: ['READER'] });

@@ -11,8 +11,10 @@ export async function isUserOwnedAgentDefinition(
   db: PrismaClient,
   memoryId: string,
 ): Promise<boolean> {
+  // Live agent only (#1818 review, Xylon note 2): a soft-deleted agent's
+  // dangling systemMemoryId must not keep admitting its definition.
   const agent = await db.agent.findFirst({
-    where: { systemMemoryId: memoryId },
+    where: { systemMemoryId: memoryId, deletedAt: null },
     select: { ownerUserId: true },
   });
   return agent !== null && agent.ownerUserId !== null;
