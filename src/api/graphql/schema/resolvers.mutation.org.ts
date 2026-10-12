@@ -61,7 +61,7 @@ function rethrowRootNameTaken(err: unknown): never {
 export const orgMutations = {
     updateMyProfile: async (
       _: unknown,
-      { name, handle, email }: { name?: string; handle?: string | null; email?: string },
+      { name, handle, email }: { name?: string; handle?: string | null; email?: string | null },
       ctx: Context,
     ) => {
       if (!ctx.userId) throw new Error('Unauthenticated');
@@ -90,11 +90,18 @@ export const orgMutations = {
           // concurrent updateMyProfile can't let us read a stale handle and then
           // skip / mis-target the propagation (gemini review, #686 — mirrors the
           // org-rename lock). A plain SELECT would not serialize the two writers.
-          const locked = await tx.$queryRaw<{ handle: string | null; principal_id: string | null }[]>`
-            SELECT handle, principal_id FROM users WHERE id = ${userId} FOR UPDATE
+          const locked = await tx.$queryRaw<{ handle: string | null; principal_id: string | null; email: string | null }[]>`
+            SELECT handle, principal_id, email FROM users WHERE id = ${userId} FOR UPDATE
           `;
           if (locked.length === 0) throw new Error('Unauthenticated');
           const current = locked[0];
+          // Identity addresses require proof of control. Profile edits cannot
+          // establish or replace one; an unchanged form field is a no-op.
+          if (email !== undefined && (email?.trim().toLowerCase() || null) !== (current.email?.trim().toLowerCase() || null)) {
+            throw new GraphQLError('Email changes require verification and cannot be made through profile updates.', {
+              extensions: { code: 'BAD_USER_INPUT' },
+            });
+          }
           // `normalizeHandleOrNull` on the stored handle is a defensive no-op
           // (already normalized) that also yields the null oldHandle the
           // propagation uses to skip the entry_node_urn rewrites.
@@ -113,7 +120,6 @@ export const orgMutations = {
             data: {
               ...(name !== undefined ? { name } : {}),
               ...handleData,
-              ...(email !== undefined ? { email } : {}),
               ...principalData,
             },
           });
@@ -914,6 +920,12 @@ export const orgMutations = {
       if (app.createUserPermission === 'DENY') {
         throw new Error('Forbidden: this app cannot create users');
       }
+      // App-provided profile data cannot establish a verified identity.
+      if (email?.trim()) {
+        throw new GraphQLError('Email cannot be established through App user provisioning.', {
+          extensions: { code: 'BAD_USER_INPUT' },
+        });
+      }
       // Idempotent: return existing user if already created under this app
       const existing = await ctx.db.user.findFirst({
         where: { externalAppId: ctx.appId, externalId, deletedAt: null },
@@ -940,7 +952,6 @@ export const orgMutations = {
               identityProvider: 'APP',
               handle: handle_,
               name: name ?? null,
-              email: email ?? null,
               createdBy: ctx.appId,
             },
           });

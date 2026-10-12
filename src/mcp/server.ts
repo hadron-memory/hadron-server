@@ -1,4 +1,5 @@
 import { registerAutomationPinTools } from './automationPinTools.js';
+import { chatByline } from './chatByline.js';
 import { boundSessionPrivacyFilter } from '../lib/auth/sessionPrivacy.js';
 import { createHmac, randomUUID } from 'crypto';
 // Spec 049 S4 — the protected-loc gate on hadron_update_node (no lock on that path).
@@ -120,6 +121,8 @@ import {
   type AppSelectionErrorEnvelope,
 } from './app-selection-errors.js';
 import { mcpLog } from './mcp-log.js';
+import { toolErrorResult, withToolErrorBoundary } from './toolError.js';
+import { textResult } from './textResult.js';
 import { tagsInputSchema } from './tagsInput.js';
 import { foreignIdentityScopedMemoryFilter } from '../lib/auth/memoryOwnership.js';
 
@@ -273,10 +276,6 @@ import { Prisma, type PrismaClient, type SessionType, type NodeContentValidation
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-function textResult(text: string) {
-  return { content: [{ type: 'text' as const, text }] };
-}
 
 /** A duration as "Nd Nh", "Nh Nm" or "Nm", for a human reading a deadline. */
 function formatDuration(ms: number): string {
@@ -2054,7 +2053,14 @@ export function createMcpServerInstance(
 
   {
     type ToolCallback = (args: unknown, extra: unknown) => unknown;
-    const registerTool = server.tool.bind(server) as (...args: unknown[]) => unknown;
+    const sdkRegisterTool = server.tool.bind(server) as (...args: unknown[]) => unknown;
+    // Every registered handler (including reads and caller-session settlement)
+    // gets this outer boundary before the SDK can stringify a database fault.
+    const registerTool = (...args: unknown[]) => {
+      const cbIndex = args.length - 1;
+      args[cbIndex] = withToolErrorBoundary(args[0] as string, args[cbIndex] as ToolCallback);
+      return sdkRegisterTool(...args);
+    };
     (server as unknown as { tool: (...args: unknown[]) => unknown }).tool = (...args: unknown[]) => {
       const name = args[0] as string;
       if (ACTOR_NEUTRAL_TOOLS.has(name)) return registerTool(...args);
@@ -3747,7 +3753,7 @@ export function createMcpServerInstance(
       try {
         validateLoc(loc);
       } catch (e) {
-        return textResult((e as Error).message);
+        return toolErrorResult(e, () => (e as Error).message, 'hadron_create_parent_node:validateLoc');
       }
 
       if (!(await canWriteToMemory(db, auth, memoryId, EXPLICIT_REF))) {
@@ -5559,7 +5565,7 @@ export function createMcpServerInstance(
       try {
         validateLoc(loc);
       } catch (e) {
-        return textResult((e as Error).message);
+        return toolErrorResult(e, () => (e as Error).message, 'hadron_create_node:validateLoc');
       }
 
       if (!(await canWriteToMemory(db, auth, memoryId, EXPLICIT_REF))) {
@@ -6581,7 +6587,7 @@ export function createMcpServerInstance(
       assertFullyQualifiedUrn(rawUrn, 'node');
       ({ memoryUrn, loc, fragment } = splitNodeUrn(rawUrn));
     } catch (e) {
-      return textResult((e as Error).message);
+      return toolErrorResult(e, () => (e as Error).message, `hadron_${mode}_${kind}:parseUrn`);
     }
     const fragRefusal = nodeFragmentRefusal(rawUrn, fragment);
     if (fragRefusal) return textResult(fragRefusal);
@@ -6593,7 +6599,7 @@ export function createMcpServerInstance(
     try {
       validateLoc(loc);
     } catch (e) {
-      return textResult((e as Error).message);
+      return toolErrorResult(e, () => (e as Error).message, `hadron_${mode}_${kind}:validateLoc`);
     }
 
     // `name` is optional in the shared arg set because an UPDATE preserves it,
@@ -6645,8 +6651,10 @@ export function createMcpServerInstance(
       );
       return textResult(`${kind} node ${mode === 'create' ? 'created' : 'updated'}: ${rawUrn} (id: ${node.id})`);
     } catch (e) {
-      const code = (e as { extensions?: { code?: string } }).extensions?.code;
-      return textResult(code ? `[${String(code).toLowerCase()}] ${(e as Error).message}` : `Error: ${(e as Error).message}`);
+      return toolErrorResult(e, () => {
+        const code = (e as { extensions?: { code?: string } }).extensions?.code;
+        return code ? `[${String(code).toLowerCase()}] ${(e as Error).message}` : `Error: ${(e as Error).message}`;
+      }, `hadron_${mode}_${kind}:resolver`);
     }
   }
 
@@ -6764,7 +6772,7 @@ export function createMcpServerInstance(
         const urn = await nodeUrn(node.loc, node.memoryId);
         return textResult(`Node data merged: ${urn} (id: ${node.id})`);
       } catch (e) {
-        return textResult(`Error: ${e instanceof Error ? e.message : 'update failed'}`);
+        return toolErrorResult(e, () => `Error: ${e instanceof Error ? e.message : 'update failed'}`, 'hadron_update_node_data:resolver');
       }
     },
   );
@@ -6808,7 +6816,7 @@ export function createMcpServerInstance(
         );
         return textResult(JSON.stringify(obj, null, 2));
       } catch (e) {
-        return textResult(`Error: ${e instanceof Error ? e.message : 'create failed'}`);
+        return toolErrorResult(e, () => `Error: ${e instanceof Error ? e.message : 'create failed'}`, 'hadron_create_object:resolver');
       }
     },
   );
@@ -6824,7 +6832,7 @@ export function createMcpServerInstance(
         const obj = await resolvers.Query.object({}, { ref }, objectCtx());
         return obj ? textResult(JSON.stringify(obj, null, 2)) : textResult('Object not found.');
       } catch (e) {
-        return textResult(`Error: ${e instanceof Error ? e.message : 'read failed'}`);
+        return toolErrorResult(e, () => `Error: ${e instanceof Error ? e.message : 'read failed'}`, 'hadron_get_object:resolver');
       }
     },
   );
@@ -6842,7 +6850,7 @@ export function createMcpServerInstance(
         const obj = await resolvers.Mutation.updateObject({}, { ref, fields: fields ?? {}, reason }, objectCtx());
         return textResult(JSON.stringify(obj, null, 2));
       } catch (e) {
-        return textResult(`Error: ${e instanceof Error ? e.message : 'update failed'}`);
+        return toolErrorResult(e, () => `Error: ${e instanceof Error ? e.message : 'update failed'}`, 'hadron_update_object:resolver');
       }
     },
   );
@@ -6859,7 +6867,7 @@ export function createMcpServerInstance(
         await resolvers.Mutation.deleteObject({}, { ref, hard }, objectCtx());
         return textResult(`Object deleted${hard ? ' (hard)' : ''}: ${ref}`);
       } catch (e) {
-        return textResult(`Error: ${e instanceof Error ? e.message : 'delete failed'}`);
+        return toolErrorResult(e, () => `Error: ${e instanceof Error ? e.message : 'delete failed'}`, 'hadron_delete_object:resolver');
       }
     },
   );
@@ -6886,7 +6894,7 @@ export function createMcpServerInstance(
         // Return { objects, total } so agents can page deterministically with limit/offset.
         return textResult(JSON.stringify({ objects: result.objects, total: result.total }, null, 2));
       } catch (e) {
-        return textResult(`Error: ${e instanceof Error ? e.message : 'query failed'}`);
+        return toolErrorResult(e, () => `Error: ${e instanceof Error ? e.message : 'query failed'}`, 'hadron_find_objects:resolver');
       }
     },
   );
@@ -6976,7 +6984,7 @@ export function createMcpServerInstance(
           lines.length ? `${header}\n${coverage}\n${lines.join('\n')}` : `${header}\n${coverage}`,
         );
       } catch (e) {
-        return textResult(`Error: ${e instanceof Error ? e.message : 'search-and-replace failed'}`);
+        return toolErrorResult(e, () => `Error: ${e instanceof Error ? e.message : 'search-and-replace failed'}`, 'hadron_replace_text:resolver');
       }
     },
   );
@@ -9190,7 +9198,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       const lines = page.items.map((m) => {
         const reply = m.replyToSeq != null ? ` (reply to #${m.replyToSeq})` : '';
         const cross = m.authorAppId ? ' [cross-App]' : '';
-        return `#${m.seq} [${m.authorName ?? 'unknown'}]${cross} ${m.at.toISOString()}${reply}:\n${m.body}`;
+        return `#${m.seq} ${chatByline(m)}${cross} ${m.at.toISOString()}${reply}:\n${m.body}`;
       });
       return textResult(`${page.total} message(s) total, showing ${page.items.length}:\n\n${lines.join('\n\n')}`);
     } catch (e) {
@@ -9464,7 +9472,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         const cross = message.authorAppId ? ' [cross-App]' : '';
         const mentionLine = message.mentions.length ? `\nmentions: ${message.mentions.map((mention) => `@${mention}`).join(', ')}` : '';
         routed.push(
-          `#${message.seq} [${message.authorName ?? 'unknown'}]${cross} ${message.at.toISOString()}${reply}:\n${message.body}` +
+          `#${message.seq} ${chatByline(message)}${cross} ${message.at.toISOString()}${reply}:\n${message.body}` +
           `${mentionLine}\nroute to: ${routes.map((route) => route.urn).join(', ')}`,
         );
       }
@@ -9775,7 +9783,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         if (page.total === 0) return textResult('The team chat has no matching messages.');
         const lines = page.items.map((m) => {
           const reply = m.replyToSeq != null ? ` (reply to #${m.replyToSeq})` : '';
-          return `#${m.seq} [${m.authorName ?? 'unknown'}] ${m.at.toISOString()}${reply}:\n${m.body}`;
+          return `#${m.seq} ${chatByline(m)} ${m.at.toISOString()}${reply}:\n${m.body}`;
         });
         return textResult(
           `${page.total} message(s) total, showing ${page.items.length}:\n\n${lines.join('\n\n')}`,

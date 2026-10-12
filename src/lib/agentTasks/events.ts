@@ -54,7 +54,7 @@ export type EventActor = { userId: string | null; workerId: string | null; agent
 
 /** The payload each type carries. Ids, counts, outcome words and flags only — never text. */
 export type TaskEventPayload =
-  | { type: 'task.created'; parentTaskId: string | null; hasAssignee: boolean }
+  | { type: 'task.created'; parentTaskId: string | null; owner: TaskParty; hasAssignee: boolean }
   | { type: 'task.assigned'; assignee: TaskParty; closeSessionWhenDone: boolean }
   | { type: 'task.reassigned'; from: TaskParty; to: TaskParty; closeSessionWhenDone: boolean }
   | { type: 'task.started' }
@@ -80,7 +80,9 @@ function partyJson(p: TaskParty): Prisma.InputJsonObject {
 function payloadJson(e: TaskEventPayload): Prisma.InputJsonObject {
   switch (e.type) {
     case 'task.created':
-      return { parentTaskId: e.parentTaskId, hasAssignee: e.hasAssignee };
+      // The owner rides task.created (#1757, cor:agt:050:01): a creator-named
+      // owner is visible to the event stream from creation.
+      return { parentTaskId: e.parentTaskId, owner: partyJson(e.owner), hasAssignee: e.hasAssignee };
     case 'task.assigned':
       return { assignee: partyJson(e.assignee), closeSessionWhenDone: e.closeSessionWhenDone };
     case 'task.reassigned':

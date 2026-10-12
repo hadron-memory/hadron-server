@@ -18,6 +18,7 @@ import {
 import { db } from '../integrations/db/client.js';
 import { generateUniqueHandle, isHandleTaken } from '../lib/userHandle.js';
 import { ensureUserPrincipal, RootNameTakenError } from '../lib/principal/mintPrincipal.js';
+import { flagProviderEmailMismatch } from './providerEmailMismatch.js';
 
 /** Identity claims extracted from a verified Google ID token. */
 export interface GoogleIdentity {
@@ -133,6 +134,7 @@ export async function verifyGoogleIdToken(
 export async function resolveGoogleUser(identity: GoogleIdentity) {
   const bySub = await db.user.findUnique({ where: { googleId: identity.sub } });
   if (bySub) {
+    flagProviderEmailMismatch('google', bySub, identity);
     return db.user.update({
       where: { id: bySub.id },
       data: {

@@ -60,4 +60,7 @@ jobs:
       - run: pnpm prisma generate
 
       - name: tsc --noEmit
+        env:
+          # The full source + test graph exceeds Node's default 2 GiB heap.
+          NODE_OPTIONS: --max-old-space-size=4096
         run: pnpm tsc --noEmit -p .

@@ -249,6 +249,40 @@ describe('resolveAppleUser', () => {
     expect(await db.user.count()).toBe(1);
   });
 
+  it('flags (never blocks) a returning sign-in whose stored address differs from the verified claim', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const existing = await db.user.create({
+        data: { appleId: identity.sub, email: 'other@example.com', identityProvider: 'APPLE', roles: ['READER'] },
+      });
+      const user = await resolveAppleUser(identity, null);
+      expect(user.id).toBe(existing.id);
+      expect(user.email).toBe('other@example.com');
+      // Exact text: non-leakage is the point, so no part of either address
+      // (local part, domain, length or hash) may appear in the line.
+      expect(warn.mock.calls).toEqual([[
+        `[auth] apple sign-in for user ${existing.id}: the stored address differs from the provider's verified address; review per #1802`,
+      ]]);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it.each([
+    ['the same address in another case', 'ADA@example.com ', true],
+    ['no stored address', null, true],
+    ['an unverified claim', 'other@example.com', false],
+  ])('no mismatch flag for %s', async (_label, stored, verified) => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      await db.user.create({ data: { appleId: identity.sub, email: stored, identityProvider: 'APPLE', roles: ['READER'] } });
+      await resolveAppleUser({ ...identity, emailVerified: verified }, null);
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it('(b) links an existing user by verified email, keeping provider and name', async () => {
     const existing = await db.user.create({
       data: { email: 'ada@example.com', identityProvider: 'EMAIL', name: 'Ada', roles: ['READER'] },
