@@ -89,6 +89,7 @@ const reads = (): Array<[string, Record<string, unknown>]> => [
   ['hadron_task_get', { taskId, tree: true }],
   ['hadron_task_list', { appRef: appId }],
   ['hadron_team_events', { appRef: appId }],
+  ['hadron_team_availability', { appRef: appId }],
 ];
 
 describe('an App key reads tasks and events over MCP, and never through a session (#1755)', () => {

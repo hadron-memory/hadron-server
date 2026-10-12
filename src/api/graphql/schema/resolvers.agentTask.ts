@@ -267,7 +267,7 @@ async function inKeyReadTx<T>(
 }
 
 /** Run a read over an App the caller may READ tasks and events of: a participant, or the App's own key. */
-async function withReadableApp<T>(ctx: Context, appRef: string, body: (c: Context, app: TaskApp) => Promise<T>): Promise<T> {
+export async function withReadableApp<T>(ctx: Context, appRef: string, body: (c: Context, app: TaskApp) => Promise<T>): Promise<T> {
   const key = appKeyCaller(ctx);
   if (!key) {
     const { app } = await resolveParticipatedApp(ctx, appRef);
