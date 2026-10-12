@@ -213,6 +213,19 @@ describe('createAgentTask — root tasks: any App participant (cor:agt:050:06)',
     expect(t.createdByWorkerId).toBe(anne.id);
   });
 
+  it('#1757∘#1764 compose: a user-owned App\'s member — a participant since #1786 — names and is named as owner', async () => {
+    const uoOwner = await user(`uo-${Date.now()}`, 70);
+    const uoMember = await user(`um-${Date.now()}`, 71);
+    const uoApp = await db.app.create({
+      data: { id: generateId(), ownerUserId: uoOwner.id, name: 'UO', urn: `uo${generateId().toLowerCase()}:app` },
+    });
+    await db.appMember.create({ data: { appId: uoApp.id, userId: uoMember.id, role: 'member' } });
+    const mk = (c: Context, input: Record<string, unknown>) =>
+      M.createAgentTask({}, { input: { appRef: uoApp.id, title: 't', ...input } }, c);
+    expect((await mk(ctx(uoMember.id), { owner: { user: uoOwner.id } })).ownerUserId).toBe(uoOwner.id);
+    expect((await mk(ctx(uoOwner.id), { owner: { user: uoMember.id } })).ownerUserId).toBe(uoMember.id);
+  });
+
   it('#1757: the named owner appears in the task.created event and the alarm chain (B4)', async () => {
     const t = await create(ctx(member.id), { owner: { worker: 'Liam' } });
     const ev = await events(t.id);
