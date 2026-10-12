@@ -324,13 +324,59 @@ describe('#1787 — a platform admin manages a user-owned Agent (cor:dmo:050:13,
     expect(page.items ?? []).toEqual([]);
   });
 
-  it('MCP canReadMemory admits the platform admin for the definition, and nobody else new (parity with Query.memory)', async () => {
+  it('MCP node content of the definition stays CLOSED to the platform admin (#1818 review, Chip #9695 / Rook P2-2)', async () => {
     const agent = await rogueAgent();
     const memId = agent.systemMemoryId!;
-    expect(await canReadMemory(db, { userId: otherId, roles: ['ADMIN'] } as never, memId)).toBe(true);
+    // hadron_get_node / hadron_list_nodes gate through canReadMemory ->
+    // canReadMemoryRow; the admin's definition reach is the RECORD read
+    // (Query.memory) plus the audit surfaces, NOT node content — on either
+    // surface. GraphQL's node gate was never widened; MCP's now matches.
+    expect(await canReadMemory(db, { userId: otherId, roles: ['ADMIN'] } as never, memId)).toBe(false);
     expect(await canReadMemory(db, { userId: otherId, roles: ['READER'] } as never, memId)).toBe(false);
-    // The write side gains no arm: the definition is read-only.
     expect(await canWriteToMemory(db, { userId: otherId, roles: ['ADMIN'] } as never, memId)).toBe(false);
+    // The record read the ruling grants stays open over GraphQL.
+    expect((await resolvers.Query.memory(null, { ref: memId }, admin()))?.id).toBe(memId);
+  });
+
+  it("the stored key cannot be moved: config set/update/test stay owner-only on a user-owned Agent (Rook P2-1)", async () => {
+    const agent = await rogueAgent();
+    const cfg = await db.aiServiceConfig.create({
+      data: {
+        id: generateId(), agentId: agent.id, name: 'default', provider: 'openai', model: 'gpt-test',
+        apiKeyEncrypted: encryptToken('sk-owner-secret'), createdBy: ownerId,
+      },
+    });
+    // The registry gate (update / test / delete) is owner-only for a user-owned
+    // Agent: an update that keeps the key under a changed endpoint, or a test
+    // with an override, would send the user's stored key to a caller-chosen
+    // endpoint — exactly what cor:dmo:050:13 withholds (#8075).
+    await expect(resolvers.Mutation.updateAiServiceConfig(
+      null, { id: cfg.id, endpoint: 'https://attacker.example' }, admin(),
+    )).rejects.toThrow();
+    await expect(resolvers.Mutation.testAiServiceConfig(null, { id: cfg.id }, admin())).rejects.toThrow();
+    await expect(resolvers.Mutation.deleteAiServiceConfig(null, { id: cfg.id }, admin())).rejects.toThrow();
+    // The agentAIConfig upsert has the same kept-key shape — owner-only too.
+    await expect(resolvers.Mutation.updateAgentAIConfig(
+      null, { agentId: agent.id, provider: 'openai', model: 'gpt-x' }, admin(),
+    )).rejects.toThrow();
+    // Clearing is pure deletion (no exfil): the admin arm holds, covering shutdown.
+    expect(await resolvers.Mutation.clearAgentAIConfig(null, { agentId: agent.id }, admin())).not.toBeNull();
+    // Owner control: set still works for the owner (with a key — the admin's
+    // clear above removed the stored one). The test operation is not exercised
+    // for the owner: it would call the real provider; its owner path is
+    // unchanged by this diff and covered by the 036 suites.
+    const set = await resolvers.Mutation.updateAgentAIConfig(
+      null, { agentId: agent.id, provider: 'openai', model: 'gpt-x', apiKey: 'sk-owner-new' },
+      ctx({ userId: ownerId, roles: ['READER'] }),
+    );
+    expect(set).not.toBeNull();
+    expect(await db.aiServiceConfig.findFirst({ where: { agentId: agent.id, name: 'default', apiKeyEncrypted: { not: null } } })).not.toBeNull();
+  });
+
+  it('the admin may update the definition through the revision surface (within "update it"; PR body corrected)', async () => {
+    const agent = await rogueAgent();
+    const revision = await resolvers.Mutation.createRevision(null, { agentId: agent.id, description: 'admin snapshot' }, admin());
+    expect(revision).not.toBeNull();
   });
 });
 

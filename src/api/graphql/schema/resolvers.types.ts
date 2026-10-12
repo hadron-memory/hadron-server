@@ -55,6 +55,7 @@ import {
   loadAppUrn,
   loadApp,
   requireOrgRole,
+  isPlatformAdmin,
   requireAgentAccess,
   requireOwnerOrOrgRole,
   defaultAiConfigOf,
@@ -247,7 +248,7 @@ function loadReadableAgent(ctx: Context, agentId: string): Promise<unknown | nul
   let pending = cache.get(agentId);
   if (!pending) {
     if ((ctx.appId && !ctx.userId && !ctx.impersonation) ||
-        (!ctx.impersonation && (ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER')))) {
+        (!ctx.impersonation && isPlatformAdmin(ctx))) {
       // Pure App keys have a live installed-Agent exception to Query.agent's
       // user/org gate. The SQL audience filter cannot express grant lifecycle,
       // so use the same checked path as eager nested Agent relations.

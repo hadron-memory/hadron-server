@@ -1733,7 +1733,11 @@ export async function requireAiConfigOwnerAdmin(
     case 'AGENT': {
       const { id } = await resolveAgentRef(ctx.db, ownerId);
       const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id } });
-      await requireAgentAccess(ctx, agent, 'ADMIN');
+      // #1787 review (Rook P2-1): the config registry stays on the TENANT gate —
+      // update/test can send the stored key to a caller-chosen endpoint, so for a
+      // user-owned Agent these are owner-only (manage yes, move the key no);
+      // requireAgentAccess is not used here on purpose.
+      await requireOwnerOrOrgRole(ctx, agent, 'ADMIN');
       return { ownerWhere: { agentId: id }, resolvedOwnerId: id };
     }
   }

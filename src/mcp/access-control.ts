@@ -36,7 +36,6 @@ import { getOrgWritableMemoryIds } from '../lib/auth/orgWritableMemory.js';
 import { sessionScopedMemoryIds } from '../lib/auth/sessionScopedMemoryIds.js';
 import { LIVE_ORG_MEMBERSHIP } from '../lib/auth/liveOrgMembership.js';
 import { isRunPrincipal } from '../lib/auth/runPrincipal.js';
-import { isUserOwnedAgentDefinition } from '../lib/auth/userOwnedAgentDefinition.js';
 
 // ---------------------------------------------------------------------------
 // Shared fold algorithm
@@ -1103,15 +1102,6 @@ async function canReadMemoryRow(
     if (auth.userId === memory.ownerUserId) return true;
     // #1764: and the team space of a user-owned App admits that App's members.
     if (await isUserOwnedTeamSpaceMember(db, auth, memory)) return true;
-    // #1787 (cor:dmo:050:13): a platform admin may read a user-owned Agent's
-    // system memory — its definition — as part of managing the Agent; the
-    // GraphQL record gate (canReadMemoryRecord) admits the same row. Every
-    // other user-owned class stays owner-only, and the definition is
-    // read-only (canWriteToMemory gains no arm).
-    if (
-      memory.class === 'system' && (auth.roles?.includes('ADMIN') || auth.roles?.includes('OWNER')) &&
-      await isUserOwnedAgentDefinition(db, memory.id)
-    ) return true;
     return memory.class === 'app' &&
       (opts.workerMemoryIds ?? new Set(await getWorkerMemoryAccess(db, auth))).has(memory.id);
   }
