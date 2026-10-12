@@ -6,6 +6,7 @@ import type { AddressInfo } from 'node:net';
 import { createServer } from '../../server.js';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../helpers.js';
+import { hashAppKey } from '../../middleware/auth.js';
 import { signJwt } from '../../auth/jwt.js';
 
 let server: Server;
@@ -67,6 +68,40 @@ describe('restricted #1794 HTTP regression', () => {
     const me = await fetch(baseUrl + '/auth/me', { headers: { authorization: `Bearer ${session.token}` } });
     expect((await me.json() as { id: string }).id).toBe(original.id);
     expect(session.isNew).toBe(false);
+  });
+
+  it('keeps app-provisioned and verified identities separate at the HTTP boundary', async () => {
+    const owner = await db.user.create({ data: { handle: 'security1794-app-owner', roles: ['READER'] } });
+    const app = await db.app.create({ data: { name: 'Security fixture', urn: 'security1794-app-owner:fixture', ownerUserId: owner.id } });
+    const key = 'hdr_app_security1794syntheticfixture';
+    await db.appKey.create({ data: { appId: app.id, keyHash: hashAppKey(key), keyPreview: key.slice(-4) } });
+    const email = 'app-fresh@security1794.test';
+    const edited = await post('/graphql', { query: 'mutation($email:String){createAppUser(externalId:"fixture",email:$email){id email}}', variables: { email } }, key);
+    const response = await edited.json() as { errors?: { extensions?: { code?: string } }[] };
+    expect.soft(response.errors?.[0]?.extensions?.code).toBe('BAD_USER_INPUT');
+    const claimed = await db.user.findFirst({ where: { externalAppId: app.id, externalId: 'fixture' } });
+    expect.soft(claimed).toBeNull();
+
+    const clientState = 'security1794-app-browser';
+    const token = 'security1794-app-link';
+    await db.emailVerificationToken.create({ data: { email, token, expiresAt: new Date(Date.now() + 60000), clientStateHash: createHash('sha256').update(clientState).digest('hex') } });
+    const verified = await fetch(baseUrl + '/auth/email/verify?token=' + token, { redirect: 'manual' });
+    expect(verified.status).toBe(302);
+    const code = new URL(verified.headers.get('location')!, baseUrl).searchParams.get('code');
+    const redeemed = await post('/auth/session', { code, clientState });
+    expect(redeemed.status).toBe(200);
+    const session = await redeemed.json() as { token: string; isNew: boolean };
+    const me = await fetch(baseUrl + '/auth/me', { headers: { authorization: 'Bearer ' + session.token } });
+    const current = await me.json() as { id: string };
+    expect(current.id).not.toBe(claimed?.id);
+    expect(session.isNew).toBe(true);
+
+    const ordinary = await post('/graphql', { query: 'mutation{createAppUser(externalId:"ordinary",name:"Fixture"){id email}}' }, key);
+    const ordinaryResult = await ordinary.json() as { data?: { createAppUser: { id: string; email: string | null } }; errors?: unknown };
+    expect(ordinaryResult.errors).toBeUndefined();
+    expect(ordinaryResult.data?.createAppUser.email).toBeNull();
+    const repeated = await post('/graphql', { query: 'mutation{createAppUser(externalId:"ordinary"){id}}' }, key);
+    expect((await repeated.json() as { data: { createAppUser: { id: string } } }).data.createAppUser.id).toBe(ordinaryResult.data?.createAppUser.id);
   });
 
 });

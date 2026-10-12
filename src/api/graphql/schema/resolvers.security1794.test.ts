@@ -31,4 +31,28 @@ describe('restricted #1794 profile boundary', () => {
     expect(result.name).toBe('Changed');
     expect(result.email).toBe(user.email);
   });
+  it.each([' current@security1794.test ', 'CURRENT@SECURITY1794.TEST'])('accepts an equivalent legacy form value %s without rewriting it', async email => {
+    const stored = ' Current@Security1794.test ';
+    const user = await db.user.create({ data: { handle: 'security1794-user', email: stored, roles: ['READER'] } });
+    const result = await resolvers.Mutation.updateMyProfile({}, { name: 'Changed', email }, { db, userId: user.id, roles: ['READER'] });
+    expect(result.name).toBe('Changed');
+    expect(result.email).toBe(stored);
+  });
+
+  it.each([null, '', '  '])('refuses clearing an existing value with %s', async email => {
+    const user = await db.user.create({ data: { handle: 'security1794-user', email: 'current@security1794.test', roles: ['READER'] } });
+    await expect(resolvers.Mutation.updateMyProfile({}, { email, name: 'Changed' }, { db, userId: user.id, roles: ['READER'] }))
+      .rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
+    const saved = await db.user.findUniqueOrThrow({ where: { id: user.id } });
+    expect(saved.email).toBe(user.email);
+    expect(saved.name).toBeNull();
+  });
+
+  it.each([null, '', '  '])('treats absent legacy form value %s as a no-op', async email => {
+    const user = await db.user.create({ data: { handle: 'security1794-user', roles: ['READER'] } });
+    const result = await resolvers.Mutation.updateMyProfile({}, { name: 'Changed', email }, { db, userId: user.id, roles: ['READER'] });
+    expect(result.email).toBeNull();
+    expect(result.name).toBe('Changed');
+  });
+
 });

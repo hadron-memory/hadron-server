@@ -61,7 +61,7 @@ function rethrowRootNameTaken(err: unknown): never {
 export const orgMutations = {
     updateMyProfile: async (
       _: unknown,
-      { name, handle, email }: { name?: string; handle?: string | null; email?: string },
+      { name, handle, email }: { name?: string; handle?: string | null; email?: string | null },
       ctx: Context,
     ) => {
       if (!ctx.userId) throw new Error('Unauthenticated');
@@ -97,7 +97,7 @@ export const orgMutations = {
           const current = locked[0];
           // Identity addresses require proof of control. Profile edits cannot
           // establish or replace one; an unchanged form field is a no-op.
-          if (email !== undefined && email !== current.email) {
+          if (email !== undefined && (email?.trim().toLowerCase() || null) !== (current.email?.trim().toLowerCase() || null)) {
             throw new GraphQLError('Email changes require verification and cannot be made through profile updates.', {
               extensions: { code: 'BAD_USER_INPUT' },
             });
@@ -920,6 +920,12 @@ export const orgMutations = {
       if (app.createUserPermission === 'DENY') {
         throw new Error('Forbidden: this app cannot create users');
       }
+      // App-provided profile data cannot establish a verified identity.
+      if (email?.trim()) {
+        throw new GraphQLError('Email cannot be established through App user provisioning.', {
+          extensions: { code: 'BAD_USER_INPUT' },
+        });
+      }
       // Idempotent: return existing user if already created under this app
       const existing = await ctx.db.user.findFirst({
         where: { externalAppId: ctx.appId, externalId, deletedAt: null },
@@ -946,7 +952,6 @@ export const orgMutations = {
               identityProvider: 'APP',
               handle: handle_,
               name: name ?? null,
-              email: email ?? null,
               createdBy: ctx.appId,
             },
           });
