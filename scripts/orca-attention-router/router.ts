@@ -65,8 +65,18 @@ export function nudgeText(a: AttentionItem): string {
     a.firstUnreadSeq === null ? '' : `unread #${a.firstUnreadSeq}–#${a.lastSeq}`,
     a.lastRelevantSeq === null ? '' : `latest mention #${a.lastRelevantSeq}`,
   ].filter(Boolean).join(', ');
+  // Watermark-anchored read instruction (production lesson 2026-10-12, Eden's
+  // #9017/#9035: workers with a stale read mark got count-only nudges, read the
+  // NEWEST page as every recovery brief teaches, found nothing addressed to
+  // them there, and concluded "nothing needs action" — while fresh mentions
+  // sat unread at their watermark. Name the mark; tell them where to start.)
+  const from =
+    a.firstUnreadSeq === null
+      ? ''
+      : ` START AT #${a.firstUnreadSeq} (your read mark) with \`hadron team chat read --since ${Math.max(0, a.firstUnreadSeq - 1)} --all\` — NOT the newest page;`;
   return (
-    `Hadron team attention: ${a.unread} relevant unread (${a.unreadMentions} mention${a.unreadMentions === 1 ? '' : 's'}${where ? `; ${where}` : ''}). ` +
+    `Hadron team attention: ${a.unread} relevant unread (${a.unreadMentions} mention${a.unreadMentions === 1 ? '' : 's'}${where ? `; ${where}` : ''}).` +
+    `${from} ` +
     'Read team chat unfiltered with your own live session; if nothing needs action, ' +
     "mark read and finish silently — no chat post or 'read/no-action' comment. (Orca attention router; counts as of send.)"
   );
