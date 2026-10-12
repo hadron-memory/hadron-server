@@ -11736,6 +11736,8 @@ export const typeDefs = `#graphql
     assignedBy: AgentTaskParty
     createdAt: DateTime!
     createdBy: AgentTaskParty
+    "The headless run that created the task (hrn:node:hadronmemory.com:specs:cor:agt:050:06); then createdBy is null."
+    createdByRunId: ID
     updatedAt: DateTime
   }
 

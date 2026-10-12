@@ -47,7 +47,11 @@ export const ASSIGNED_EVENT_TYPES = ['task.assigned', 'task.reassigned', 'assign
 export type TaskParty = { workerId: string; userId?: never } | { userId: string; workerId?: never };
 
 /** Who acted: the human credential, and the Worker / Agent the request's session is bound to (#1610). */
-export type EventActor = { userId: string | null; workerId: string | null; agentId: string | null };
+export type EventActor = {
+  userId: string | null; workerId: string | null; agentId: string | null;
+  /** #1756: the headless run that acted. Then the three above are null. */
+  runId?: string | null;
+};
 
 /** The payload each type carries. Ids, counts, outcome words and flags only — never text. */
 export type TaskEventPayload =
@@ -120,6 +124,7 @@ export async function appendTaskEvent(
       actorUserId: args.actor.userId,
       actorWorkerId: args.actor.workerId,
       actorAgentId: args.actor.agentId,
+      actorRunId: args.actor.runId ?? null,
       subjectWorkerId: subjectWorkerId(args.event),
       payload: payloadJson(args.event),
       ...(args.createdAt ? { createdAt: args.createdAt } : {}),
