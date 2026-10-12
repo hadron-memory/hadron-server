@@ -7,8 +7,8 @@ import { existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, 
 import { tmpdir, uptime } from 'node:os';
 import { join } from 'node:path';
 import { nudgeText,
-  type Config, type Runner, type RunResult, RouterError, State, breakStaleLock, describeOutcome, loadConfig, pollOnce,
-  promptLineIsEmpty, screenAgentFamily, status,
+  type Config, type Runner, type RunResult, type Terminal, RouterError, State, breakStaleLock, describeOutcome, loadConfig, pollOnce,
+  promptLineIsEmpty, resolveTerminal, screenAgentFamily, status,
 } from './router.js';
 
 /** Rendered screens as Orca returned them on 2026-10-01 (idle, nobody typing). */
@@ -845,6 +845,46 @@ describe('Orca attention router — identity-flap fallback: the screen resolves 
     expect(fake.sent).toEqual([]);
   });
 
+  // Blind review P2 (#1823, Anne): a plain shell in the bound worktree `cat`s a
+  // captured Claude idle screen and returns to its own prompt. The box and the
+  // hint are HISTORY, not a live composer — the whole counterexample that
+  // passed both post-recompute gates when the status check read only the FIRST
+  // nonblank line below the closing rule.
+  it('a shell printing a CAPTURED Claude idle screen then its own prompt HOLDS — no send (blind P2, #1823)', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli', null, 'term_eli', false); // identity lost, untracked: the fallback's regime
+    fake.screens.set('term_eli', { tail: [...CLAUDE_IDLE, 'orca@orca1:~/ws/eli$ '] });
+    fake.attention.workers = [worker('w-eli', 'Eli')];
+    const out = poll(c);
+    expect(out.nudged).toEqual([]);
+    expect(fake.sent).toEqual([]);
+    expect(out.held.Eli).toContain('screen shows text in the prompt');
+  });
+
+  it('a WRONG family guess is caught one gate later: banner chrome without a composer holds (blind P2 pin, #1823)', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli', null, 'term_eli', false);
+    // Classifies 'claude' on the banner line; there is no Claude composer box,
+    // so the family-specific empty-prompt gate must refuse what it resolved.
+    fake.screens.set('term_eli', { tail: ['  Claude Code v2.1.296 — a captured banner line', '  ordinary output', 'orca@orca1:~/ws/eli$ '] });
+    fake.attention.workers = [worker('w-eli', 'Eli')];
+    const out = poll(c);
+    expect(out.nudged).toEqual([]);
+    expect(fake.sent).toEqual([]);
+    expect(out.held.Eli).toContain('screen shows text in the prompt');
+  });
+
+  it('codex side: a captured Codex screen with an appended shell prompt holds at the footer check (blind P2 pin, #1823)', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli', null, 'term_eli', false);
+    fake.screens.set('term_eli', { tail: [...CODEX_IDLE, 'orca@orca1:~/ws/eli$ '] });
+    fake.attention.workers = [worker('w-eli', 'Eli')];
+    const out = poll(c);
+    expect(out.nudged).toEqual([]);
+    expect(fake.sent).toEqual([]);
+    expect(out.held.Eli).toContain('screen shows text in the prompt');
+  });
+
   it('an unreadable screen holds', () => {
     const c = cfg(['w-eli', 'Eli']);
     fake.terminal('eli', null);
@@ -882,6 +922,26 @@ describe('Orca attention router — identity-flap fallback: the screen resolves 
     const out = poll(c);
     expect(out.nudged).toEqual(['Eli']);
     expect(logs.some((l) => l.includes('resolved by screen'))).toBe(false);
+    // Resolution itself must not read: the FIRST screen read belongs to the
+    // gates, so it strictly follows the first idle wait (blind P3, #1823 —
+    // the absent fallback log alone could not tell a resolve-time read apart
+    // from a gate read).
+    const verb = (a: string[]) => a.slice(1, 3).join(' ');
+    const firstWait = fake.calls.findIndex((a) => verb(a) === 'terminal wait');
+    const firstRead = fake.calls.findIndex((a) => verb(a) === 'terminal read');
+    expect(firstWait).toBeGreaterThanOrEqual(0);
+    expect(firstRead).toBeGreaterThan(firstWait);
+  });
+
+  it('resolveTerminal with a verified identity never touches the screen: a read-trap runner proves it (blind P3, #1823)', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli', 'claude', 'term_eli');
+    const trap: Runner = (argv) => {
+      if (argv.slice(1, 3).join(' ') === 'terminal read') throw new Error('resolution read the screen');
+      return fake.run(argv);
+    };
+    const entry = { worker: 'w-eli', name: 'Eli', worktree: join(root, 'workspaces', 'eli') };
+    expect(resolveTerminal(entry, fake.terminals as unknown as Terminal[], c, trap)).toEqual(['term_eli', 'claude', 'identity']);
   });
 });
 
@@ -903,6 +963,14 @@ describe('screenAgentFamily — positive family chrome only', () => {
     expect(screenAgentFamily(term(['─'.repeat(60)]))).toBeNull(); // one rule is not the composer box
     expect(screenAgentFamily(undefined)).toBeNull();
     expect(screenAgentFamily({ source: 'stream', tail: ['x'] })).toBeNull();
+    // Ordinary output MENTIONING the markers is not chrome: banner/completion
+    // markers anchor to banner-chrome line starts, never after arbitrary
+    // content, and a bare `›` glyph is a shell theme as easily as a composer
+    // (blind review P2, #1823).
+    expect(screenAgentFamily(term(['orca$ echo "Worked for 33s"', 'orca$ ']))).toBeNull();
+    expect(screenAgentFamily(term(['orca$ echo "Claude Code v2.1.296"', 'orca$ ']))).toBeNull();
+    expect(screenAgentFamily(term(['orca$ echo "Ask Codex to do anything"', 'orca$ ']))).toBeNull();
+    expect(screenAgentFamily(term(['› ', '']))).toBeNull();
   });
 });
 
@@ -1146,6 +1214,18 @@ describe('Orca attention router — a human typing: never appended to; hold the 
     }
     // No status line at all cannot prove it.
     expect(promptLineIsEmpty([RULE, '❯', RULE], 'claude')).toBe(false);
+  });
+
+  it('Claude: the composer status line is the terminal BOTTOM — trailing non-chrome content holds (blind P2, #1823)', () => {
+    // The blind-review counterexample: a shell `cat`s a captured Claude idle
+    // screen and returns to its own prompt. Reading only the FIRST nonblank
+    // line below the closing rule passed this — the trailing shell prompt is
+    // the evidence that the box is history, not a live composer.
+    expect(promptLineIsEmpty([...CLAUDE_IDLE, 'orca@orca1:~/ws/eli$ '], 'claude')).toBe(false);
+    // Any unexplained content after the hint holds, shell-shaped or not.
+    expect(promptLineIsEmpty([RULE, '❯', RULE, CLAUDE_HINT, '  some trailing output'], 'claude')).toBe(false);
+    // Trailing BLANK lines are just the scroll buffer: still empty.
+    expect(promptLineIsEmpty([...CLAUDE_IDLE, '', '   '], 'claude')).toBe(true);
   });
 
   it('Codex: only the placeholder proves empty; a bare prompt or a dialog holds (live 2026-10-01)', () => {

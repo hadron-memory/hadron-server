@@ -653,9 +653,15 @@ export function promptLineIsEmpty(lines: string[], agent: string): boolean {
     // typed spaces as nothing. The status line's empty-input hint is the
     // proof — `· ← for agents` shows exactly while the composer is empty, in
     // every permission mode (live probe, 2026-10-01), since ← only switches
-    // agents when there is no text for it to move through.
-    const status = lines.slice(close + 1).find((l) => squash(l) !== '');
-    return status !== undefined && squash(status).endsWith(CLAUDE_EMPTY_HINT);
+    // agents when there is no text for it to move through. And the status
+    // line is the terminal's LAST content: Claude draws nothing below its
+    // composer footer, so unexplained trailing content — a shell prompt after
+    // `cat`ing a captured idle screen — fails here even though the box and
+    // hint above it look perfect. The FIRST nonblank line below the closing
+    // rule proved nothing about what sits at the terminal bottom (blind
+    // review P2, #1823).
+    const below = lines.slice(close + 1).map(squash).filter((l) => l !== '');
+    return below.length === 1 && below[0].endsWith(CLAUDE_EMPTY_HINT);
   }
   if (agent !== 'codex') return false;
   let at = -1;
@@ -805,6 +811,15 @@ export function promptIsEmptyFromTerm(terminal: Record<string, any> | undefined,
 }
 
 /**
+ * Banner/completion markers anchor to the START of a line, optionally behind
+ * banner chrome (box-art glyphs, spaces, Codex's `>_` launcher glyph, the
+ * composer `›`) — never after arbitrary content. `orca$ echo "Worked for 33s"`
+ * is ordinary output mentioning a marker, not Codex completion chrome (blind
+ * review P2, #1823).
+ */
+const BANNER_CHROME = '[│╭╮╰╯─▐▛█▝▜▀ >_› ]*';
+
+/**
  * The agent family a rendered screen POSITIVELY shows, or null — the
  * identity-flap fallback's evidence. Orca's per-terminal tracking degrades
  * mid-life: `lastOutputAt` goes null (the #7398 gate's premise) and, in the
@@ -815,13 +830,16 @@ export function promptIsEmptyFromTerm(terminal: Record<string, any> | undefined,
  * the flap is in Orca's tracking, not in the terminal). The screen is the
  * surviving positive evidence.
  *
- * Markers are the agents' OWN chrome at column 0 (typed text is indented
- * onto continuation lines — promptLineIsEmpty's convention), so a plain
- * shell draws none of them: the composer box is Claude's pair of `───`
- * rules, `›` is Codex's composer glyph, and the rest are banners or
- * completion chrome only the agent itself renders. A glyph a shell theme
- * could draw (a bare `❯`, a single rule) is deliberately NOT family
- * evidence. A screen carrying BOTH families' markers (an agent displaying
+ * Markers are the agents' OWN chrome: banner/completion lines anchored to
+ * banner-chrome line starts, strong glyphs (`✻`, `⏺`, `permissions:`) at
+ * column 0, the composer box Claude's pair of `───` rules, and Codex's `›`
+ * composer only WITH content after the glyph — a bare `›` is a shell-theme
+ * prompt as easily as a composer. Typed text is indented onto continuation
+ * lines (promptLineIsEmpty's convention), so a plain shell draws none of
+ * these: `orca$ echo "Claude Code v2.1.296"` never classifies. A glyph a
+ * shell theme could draw (a bare `❯`, a bare `›`, a single rule) is
+ * deliberately NOT family evidence.
+ * A screen carrying BOTH families' markers (an agent displaying
  * the other family's chrome in its output) reads null: hold, never guess.
  * A wrong family is caught one gate later anyway — promptLineIsEmpty and
  * idleProofAbovePrompt prove their shapes per family and hold anything
@@ -834,11 +852,14 @@ export function screenAgentFamily(terminal: Record<string, any> | undefined): st
   const rules = lines.filter((l) => /^─{3,}[\s ]*$/.test(l)).length;
   let claude = rules >= 2; // the composer box promptLineIsEmpty itself keys on
   let codex = false;
+  const claudeBanner = new RegExp(`^${BANNER_CHROME}(Claude Code v\\d|glm-[\\d.]|/clear to save|※ recap:)`);
+  const codexBanner = new RegExp(`^${BANNER_CHROME}(OpenAI Codex \\(v|Worked for |Ask Codex to do anything)`);
   for (const l of lines) {
-    if (/Claude Code v\d|glm-[\d.]|\/clear to save|※ recap:/.test(l)) claude = true;
-    if (/^✻ /.test(l) || /^⏺ /.test(l)) claude = true;
-    if (l.startsWith('›') || /^permissions: /.test(l)) codex = true;
-    if (/OpenAI Codex \(v|Worked for |Ask Codex to do anything/.test(l)) codex = true;
+    if (/^✻ /.test(l) || /^⏺ /.test(l) || claudeBanner.test(l)) claude = true;
+    // A BARE `›` is a shell-theme glyph as easily as Codex's composer: only
+    // `›` with content after it — the idle placeholder, a submitted echo, a
+    // menu line — is family evidence (blind review P2, #1823).
+    if ((l.startsWith('›') && squash(l.slice(1)) !== '') || /^permissions: /.test(l) || codexBanner.test(l)) codex = true;
   }
   if (claude && !codex) return 'claude';
   if (codex && !claude) return 'codex';
