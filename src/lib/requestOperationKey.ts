@@ -25,7 +25,7 @@ export function getRequestOperationKey(): EncryptionKey | null {
     });
   }
   // Claim even a failed attempt: retaining the staged key and its consumed
-  // flag prevents a later field from falling back to its legacy argument.
+  // flag ensures a later consuming field refuses before its own writes.
   store.consumed = true;
   return store.key;
 }
