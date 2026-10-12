@@ -1,4 +1,3 @@
-import { withOperationKey } from '../../../test/operationKey.js';
 /** #1644: encryption transitions retain strict ownership (cor:acl:010:02, DT). */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
@@ -127,7 +126,7 @@ describe('#1644 encryption authority', () => {
     await db.memory.update({ where: { id: memoryId }, data: { appId, userMemoryOfAgentId: agent.id } });
     const before = await snapshot();
     const usersBefore = await db.user.count();
-    await expect(withOperationKey(promotionKey, () => resolvers.Mutation.linkMemoryToUser({}, { memoryId, externalUserId: 'new-user' }, { db, appId, roles: [] })))
+    await expect(resolvers.Mutation.linkMemoryToUser({}, { memoryId, externalUserId: 'new-user', dataKey: promotionKey }, { db, appId, roles: [] }))
       .rejects.toMatchObject({ code: 'MEMORY_NOT_FOUND' });
     expect(await snapshot()).toEqual(before);
     expect(await db.user.count()).toBe(usersBefore);
@@ -138,7 +137,7 @@ describe('#1644 encryption authority', () => {
     const anon = await db.memory.create({ data: { name: 'Anonymous', urn: 'enc-owner.test:anon', organizationId: orgId, appId, userMemoryOfAgentId: agent.id, anonymousExpiresAt: new Date(Date.now() + 86400000), class: 'app' } });
     const before = await db.memory.findUniqueOrThrow({ where: { id: anon.id } });
     const usersBefore = await db.user.count();
-    await expect(withOperationKey(promotionKey, () => resolvers.Mutation.linkMemoryToUser({}, { memoryId: anon.id, externalUserId: 'sibling-user' }, { db, appId: otherAppId, roles: [] })))
+    await expect(resolvers.Mutation.linkMemoryToUser({}, { memoryId: anon.id, externalUserId: 'sibling-user', dataKey: promotionKey }, { db, appId: otherAppId, roles: [] }))
       .rejects.toMatchObject({ code: 'MEMORY_NOT_FOUND' });
     expect(await db.memory.findUniqueOrThrow({ where: { id: anon.id } })).toEqual(before);
     expect(await db.user.count()).toBe(usersBefore);
@@ -186,7 +185,7 @@ describe('#1644 encryption authority', () => {
       return row;
     }) as typeof db.memory.findUniqueOrThrow);
     try {
-      await expect(withOperationKey(promotionKey, () => resolvers.Mutation.linkMemoryToUser({}, { memoryId: anon.id, externalUserId: 'race-user' }, { db, appId, roles: [] })))
+      await expect(resolvers.Mutation.linkMemoryToUser({}, { memoryId: anon.id, externalUserId: 'race-user', dataKey: promotionKey }, { db, appId, roles: [] }))
         .rejects.toMatchObject({ extensions: { code: 'MEMORY_WRITE_CONFLICT' } });
     } finally { read.mockRestore(); }
     expect(await db.memory.findUniqueOrThrow({ where: { id: anon.id } })).toMatchObject({
@@ -207,7 +206,7 @@ describe('#1644 encryption authority', () => {
     const usersBefore = await db.user.count();
     const ctx: Context = { db, appId, roles: [], ...(denial === 'impersonation'
       ? { impersonation: { orgId, actorUserId: otherId } as Context['impersonation'] } : {}) };
-    await expect(withOperationKey(promotionKey, () => resolvers.Mutation.linkMemoryToUser({}, { memoryId, externalUserId: 'denied-user' }, ctx))).rejects.toThrow();
+    await expect(resolvers.Mutation.linkMemoryToUser({}, { memoryId, externalUserId: 'denied-user', dataKey: promotionKey }, ctx)).rejects.toThrow();
     expect(await snapshot()).toEqual(before);
     expect(await db.user.count()).toBe(usersBefore);
   });
@@ -220,7 +219,7 @@ describe('#1644 encryption authority', () => {
     } });
     const before = await snapshot();
     const usersBefore = await db.user.count();
-    await expect(withOperationKey(promotionKey, () => resolvers.Mutation.linkMemoryToUser({}, { memoryId, externalUserId: 'expired-user' }, { db, appId, roles: [] }))).rejects.toThrow();
+    await expect(resolvers.Mutation.linkMemoryToUser({}, { memoryId, externalUserId: 'expired-user', dataKey: promotionKey }, { db, appId, roles: [] })).rejects.toThrow();
     expect(await snapshot()).toEqual(before);
     expect(await db.user.count()).toBe(usersBefore);
   });
@@ -254,7 +253,7 @@ describe('#1644 encryption authority', () => {
       })), options);
     }) as typeof db.$transaction);
     try {
-      await expect(withOperationKey(promotionKey, () => resolvers.Mutation.linkMemoryToUser({}, { memoryId, externalUserId: 'late-expiry-user' }, { db, appId, roles: [] })))
+      await expect(resolvers.Mutation.linkMemoryToUser({}, { memoryId, externalUserId: 'late-expiry-user', dataKey: promotionKey }, { db, appId, roles: [] }))
         .rejects.toMatchObject({ extensions: { code: 'MEMORY_WRITE_CONFLICT' } });
     } finally { intercept.mockRestore(); }
     expect(crossed).toBe(true);
@@ -315,7 +314,7 @@ describe('#1644 encryption authority', () => {
     await db.memory.update({ where: { id: memoryId }, data: { class: 'knowledge', userId: null, appId: null, userMemoryOfAgentId: agent.id, anonymousExpiresAt: null } });
     const before = await snapshot();
     const usersBefore = await db.user.count();
-    await expect(withOperationKey(promotionKey, () => resolvers.Mutation.linkMemoryToUser({}, { memoryId, externalUserId: 'legacy-user' }, { db, appId, roles: [] })))
+    await expect(resolvers.Mutation.linkMemoryToUser({}, { memoryId, externalUserId: 'legacy-user', dataKey: promotionKey }, { db, appId, roles: [] }))
       .rejects.toThrow();
     expect(await snapshot()).toEqual(before);
     expect(await db.user.count()).toBe(usersBefore);
@@ -333,13 +332,13 @@ describe('#1644 encryption authority', () => {
     await db.memory.update({ where: { id: memoryId }, data: { class: 'app', userId: null, appId, userMemoryOfAgentId: agent.id, anonymousExpiresAt: new Date(Date.now() + 86400000) } });
     const completion = vi.spyOn(memoryMutations, 'encryptMemory').mockRejectedValueOnce(new Error('ENCRYPTION_INCOMPLETE'));
     try {
-      await expect(withOperationKey(dataKey, () => resolvers.Mutation.linkMemoryToUser({}, { memoryId, externalUserId: 'recovery-owner' }, { db, appId, roles: [] })))
+      await expect(resolvers.Mutation.linkMemoryToUser({}, { memoryId, externalUserId: 'recovery-owner', dataKey }, { db, appId, roles: [] }))
         .rejects.toThrow('ENCRYPTION_INCOMPLETE');
     } finally { completion.mockRestore(); }
     const claimed = await snapshot();
     expect(claimed.memory.isEncrypted).toBe(true);
     expect(claimed.memory.userId).toBeTruthy();
-    await expect(withOperationKey(dataKey, () => resolvers.Mutation.linkMemoryToUser({}, { memoryId, externalUserId: 'recovery-owner' }, { db, appId, roles: [] })))
+    await expect(resolvers.Mutation.linkMemoryToUser({}, { memoryId, externalUserId: 'recovery-owner', dataKey }, { db, appId, roles: [] }))
       .rejects.toMatchObject({ code: 'MEMORY_NOT_FOUND' });
     expect(await snapshot()).toEqual(claimed);
     await resolvers.Mutation.encryptMemory({}, { memoryId, dataKey }, { db, appId, roles: [] });

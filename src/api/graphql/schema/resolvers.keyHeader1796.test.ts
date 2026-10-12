@@ -188,26 +188,46 @@ describe('#1796 real HTTP header operations', () => {
     expect(verifyDataKey(memory.keyVerifier!, parseDataKey(key))).toBe(true);
   });
 
-  it.each([undefined, wrongKey])('header wins over the legacy session argument: legacy=%s', legacy => {
-    return (async () => {
-      const query = 'mutation($id: ID!, $key: String) { startAgentSession(agentId: $id, externalUserId: "precedence", dataKey: $key) { id memoryId } }';
-      const result = await request(query, { id: agentId, key: legacy }, key);
-      expect(result.body.errors).toBeUndefined();
-      const memory = await db.memory.findUniqueOrThrow({ where: { id: result.body.data?.startAgentSession.memoryId } });
-      expect(verifyDataKey(memory.keyVerifier!, parseDataKey(key))).toBe(true);
-      if (legacy) expect(verifyDataKey(memory.keyVerifier!, parseDataKey(legacy))).toBe(false);
-      const refused = await request(query, { id: agentId, key }, wrongKey);
-      expect(refused.body.errors?.[0]?.extensions?.code).toBe('WRONG_KEY');
-    })();
+  it('accepts matching supplies on session creation', async () => {
+    const query = 'mutation($id: ID!, $key: String) { startAgentSession(agentId: $id, externalUserId: "matching", dataKey: $key) { id memoryId } }';
+    const result = await request(query, { id: agentId, key }, key);
+    expect(result.body.errors).toBeUndefined();
+    const memory = await db.memory.findUniqueOrThrow({ where: { id: result.body.data?.startAgentSession.memoryId } });
+    expect(verifyDataKey(memory.keyVerifier!, parseDataKey(key))).toBe(true);
   });
 
-  it.each(['plaintext', 'legacy-key', 'header-preferred'])('keeps promotion callers working in transition: %s', async mode => {
+  it.each(['session', 'promotion'])('refuses differing supplies before %s writes', async operation => {
+    let memoryId: string | undefined;
+    if (operation === 'promotion') {
+      await db.app.update({ where: { id: appId }, data: { identifyUserMethod: 'USER_ID' } });
+      const anonymous = await request(startQuery, { agent: agentId });
+      expect(anonymous.body.errors).toBeUndefined();
+      memoryId = anonymous.body.data?.startAgentSession.memoryId;
+    }
+    const snapshot = async () => ({
+      users: await db.user.findMany({ orderBy: { id: 'asc' } }),
+      memories: await db.memory.findMany({ orderBy: { id: 'asc' } }),
+      sessions: await db.session.findMany({ orderBy: { id: 'asc' } }),
+    });
+    const before = await snapshot();
+    const query = operation === 'session'
+      ? 'mutation($id: ID!, $key: String) { startAgentSession(agentId: $id, externalUserId: "mismatch", dataKey: $key) { id } }'
+      : 'mutation($id: ID!, $key: String) { linkMemoryToUser(memoryId: $id, externalUserId: "mismatch", dataKey: $key) { id } }';
+    const result = await request(query, { id: memoryId ?? agentId, key: wrongKey }, key);
+    expect(result.body.errors?.[0]?.extensions?.code).toBe('BAD_UNLOCK_INPUT');
+    expect(JSON.stringify(result.body)).not.toContain(key);
+    expect(JSON.stringify(result.body)).not.toContain(wrongKey);
+    expect(await snapshot()).toEqual(before);
+    expect(sessionKeyCache.getByMemoryId(memoryId ?? '')).toBeNull();
+  });
+
+  it.each(['plaintext', 'legacy-key', 'matching'])('keeps promotion callers working in transition: %s', async mode => {
     await db.app.update({ where: { id: appId }, data: { identifyUserMethod: 'USER_ID' } });
     const anonymous = await request(startQuery, { agent: agentId });
     expect(anonymous.body.errors).toBeUndefined();
     const memoryId = anonymous.body.data?.startAgentSession.memoryId;
     const query = 'mutation($id: ID!, $key: String) { linkMemoryToUser(memoryId: $id, externalUserId: "legacy-promotion", dataKey: $key) { id isEncrypted class } }';
-    const result = await request(query, { id: memoryId, key: mode === 'plaintext' ? null : mode === 'legacy-key' ? key : wrongKey }, mode === 'header-preferred' ? key : undefined);
+    const result = await request(query, { id: memoryId, key: mode === 'plaintext' ? null : key }, mode === 'matching' ? key : undefined);
     expect(result.body.errors).toBeUndefined();
     expect(result.body.data?.linkMemoryToUser.isEncrypted).toBe(mode !== 'plaintext');
     if (mode !== 'plaintext') {

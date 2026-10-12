@@ -63,7 +63,7 @@ import {
   type MemoryVisibility,
 } from '../../../generated/prisma/index.js';
 import { parseDataKey } from '../../../lib/crypto.js';
-import { getRequestOperationKey } from '../../../lib/requestOperationKey.js';
+import { resolveRequestOperationKey } from '../../../lib/requestOperationKey.js';
 import { isStrictOwner } from '../../../lib/auth/strictOwner.js';
 import {
   generateKdfSalt,
@@ -2175,8 +2175,8 @@ export const memoryMutations = {
         }
       });
 
-      // #1796 transition: header wins, including over a conflicting legacy key.
-      const suppliedKey = getRequestOperationKey() ?? (dataKey ? parseDataKey(dataKey) : null);
+      // #1796: dual supply must agree before any provisioning writes.
+      const suppliedKey = resolveRequestOperationKey(dataKey);
 
       // Resolve or create user
       let user = await ctx.db.user.findFirst({

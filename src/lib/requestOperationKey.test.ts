@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { getRequestOperationKey, requestOperationKeyStorage, stageRequestOperationKey } from './requestOperationKey.js';
+import { getRequestOperationKey, requestOperationKeyStorage, resolveRequestOperationKey, stageRequestOperationKey } from './requestOperationKey.js';
 
 const key = Buffer.alloc(32, 71).toString('base64');
 describe('operation key transport', () => {
@@ -28,5 +28,11 @@ describe('operation key transport', () => {
     });
     expect(getRequestOperationKey()).toBeNull();
     requestOperationKeyStorage.run({}, () => expect(getRequestOperationKey()).toBeNull());
+  });
+  it.each(['', 'not-base64', Buffer.alloc(32, 72).toString('base64')])('dual supply refuses invalid or different material generically: %s', legacy => {
+    requestOperationKeyStorage.run({}, () => {
+      stageRequestOperationKey(key, { appId: 'app' });
+      expect(() => resolveRequestOperationKey(legacy)).toThrow(expect.objectContaining({ extensions: { code: 'BAD_UNLOCK_INPUT' } }));
+    });
   });
 });

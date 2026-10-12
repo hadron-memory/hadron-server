@@ -15,8 +15,7 @@ import { mintMemoryUrnV2 } from '../../../lib/mintMemoryUrnV2.js';
 import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
 import { canReadMemory, filterReadableMemoryIds } from '../../../mcp/access-control.js';
 import { isAgentInstalled } from '../../../lib/appAgent.js';
-import { parseDataKey } from '../../../lib/crypto.js';
-import { getRequestOperationKey } from '../../../lib/requestOperationKey.js';
+import { getRequestOperationKey, resolveRequestOperationKey } from '../../../lib/requestOperationKey.js';
 import { sessionKeyCache } from '../../../lib/sessionKeyCache.js';
 import { makeKeyVerifier, verifyDataKey } from '../../../lib/memoryUnlock.js';
 import { decryptNodesBatch } from '../../../lib/nodeCrypto.js';
@@ -1447,15 +1446,16 @@ export const sessionMutations = {
           throw new GraphQLError('startAgentSession is not supported for a user-owned Agent yet.', { extensions: { code: 'BAD_USER_INPUT' } });
         }
 
-        // #1796 transition: header wins; legacy input lasts until caller migration.
-        const parsedKey = suppliedKey ?? (dataKey ? parseDataKey(dataKey) : null);
         // SECRET mode requires a supplied key; USER_ID mode rejects it.
-        if (app.identifyUserMethod === 'SECRET' && !parsedKey) {
+        if (app.identifyUserMethod === 'SECRET' && !(suppliedKey || dataKey)) {
           throw new GraphQLError('A supplied operation key is required in SECRET mode.', { extensions: { code: 'BAD_UNLOCK_INPUT' } });
         }
-        if (app.identifyUserMethod === 'USER_ID' && parsedKey) {
+        if (app.identifyUserMethod === 'USER_ID' && (suppliedKey || dataKey)) {
           throw new GraphQLError('An operation key is only accepted in SECRET mode.', { extensions: { code: 'BAD_UNLOCK_INPUT' } });
         }
+
+        // #1796: matching dual supply only, before any provisioning writes.
+        const parsedKey = resolveRequestOperationKey(dataKey);
 
         // Resolve user (optional — null means anonymous session)
         let userId: string | null = null;
