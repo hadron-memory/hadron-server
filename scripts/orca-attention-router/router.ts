@@ -76,11 +76,13 @@ const LARGE_GAP_SPAN = 400;
  * Two anchors (#1811): at or below the large-gap span, the #1805 watermark
  * anchor (start at the first unread of any kind, walk forward); above it, the
  * mentions-only anchor — walk the MENTIONS filter from the first unread to
- * the head, then mark read through the worker's own session at the highest
- * seq the walk actually returned (a mentions-filtered read does not auto-mark,
- * so the mark is a separate deliberate step; an incomplete walk marks NOTHING
- * and anything past the last read page stays unread — nothing is silently
- * acknowledged).
+ * the head THE NUDGE NAMED (frozen as every page's --before bound, so a
+ * message arriving mid-walk can neither enter a page nor be acknowledged),
+ * then mark read through the worker's own session at the highest seq
+ * actually delivered, never above the named head (a mentions-filtered read
+ * does not auto-mark, so the mark is a separate deliberate step; an
+ * incomplete walk marks NOTHING and anything outside the walked bound stays
+ * unread — nothing is silently acknowledged).
  */
 export function nudgeText(a: AttentionItem): string {
   const where = [
@@ -90,12 +92,18 @@ export function nudgeText(a: AttentionItem): string {
   const head = `Hadron team attention: ${a.unread} relevant unread (${a.unreadMentions} mention${a.unreadMentions === 1 ? '' : 's'}${where ? `; ${where}` : ''}).`;
   if (a.firstUnreadSeq !== null && a.lastSeq - a.firstUnreadSeq > LARGE_GAP_SPAN) {
     const since = Math.max(0, a.firstUnreadSeq - 1);
+    // The walk's upper bound is the head THIS nudge named (a.lastSeq), frozen
+    // for every page: a message posted during the walk — an H+1 mention —
+    // must not enter a later page and be acknowledged by the mark, which
+    // would contradict the arrival-stays-unread acceptance (blind review P2,
+    // #1827). `--since` and `--before` compose on the CLI and MCP read.
+    const bound = a.lastSeq + 1;
     return (
       head +
-      ` LARGE GAP (unread span ${a.lastSeq - a.firstUnreadSeq} > ${LARGE_GAP_SPAN}): walk MENTIONS ONLY from your first unread — every unread mention is on the path; the rest is history.` +
-      ` CLI: \`hadron team chat read --mentions-me --since ${since} --limit 200\` then follow nextSince pages to the head; MCP: \`hadron_team_chat_read\` with your session, \`sinceSeq=${since}\` + the mentions filter, paged to the head.` +
-      ' Then mark read through your OWN session at the HIGHEST seq you actually received (CLI: `hadron team chat mark-read --through <that seq>` — a mentions-filtered read does not auto-mark).' +
-      ' An incomplete walk marks NOTHING; anything past your last read page stays unread. If no mention needs action, mark read and finish silently — no chat post.' +
+      ` LARGE GAP (unread span ${a.lastSeq - a.firstUnreadSeq} > ${LARGE_GAP_SPAN}): walk MENTIONS ONLY from your first unread to the head named here — every unread mention is on the path; the rest is history.` +
+      ` CLI: \`hadron team chat read --mentions-me --since ${since} --before ${bound} --limit 200\` then follow nextSince pages up to that bound; MCP: \`hadron_team_chat_read\` with your session, \`sinceSeq=${since}\`, \`beforeSeq=${bound}\`, its mentions filter and page limit, paged to the bound.` +
+      ` Then mark read through your OWN session at the highest seq actually delivered to you, never above #${a.lastSeq} (CLI: \`hadron team chat mark-read --through <that seq>\`; MCP: \`hadron_team_chat_mark_read\` — a mentions-filtered read never auto-marks).` +
+      ' An incomplete walk marks NOTHING; anything outside the walked bound — messages arriving now included — stays unread. If no mention needs action, mark read and finish silently — no chat post.' +
       ' (Orca attention router; counts as of send.)'
     );
   }

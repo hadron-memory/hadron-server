@@ -480,8 +480,9 @@ describe('nudgeText read anchor (#1805 P2s, #1811 large-gap branch)', () => {
   });
   it('cursor-0 worker with a LARGE gap: the mentions walk starts at 0 too — clamped, filtered, bounded (#1811)', () => {
     const t = nudgeText(worker('w-eli', 'Eli', { mentions: 2, unread: 9000, first: 1, relevant: 110, head: 9001 }));
-    expect(t).toContain('--mentions-me --since 0 --limit 200');
+    expect(t).toContain('--mentions-me --since 0 --before 9002 --limit 200');
     expect(t).toContain('sinceSeq=0');
+    expect(t).toContain('beforeSeq=9002');
     expect(t).not.toContain('--all');
     expect(t).not.toContain('START AT');
   });
@@ -489,15 +490,29 @@ describe('nudgeText read anchor (#1805 P2s, #1811 large-gap branch)', () => {
     const t = nudgeText(worker('w-eli', 'Eli', { mentions: 2, unread: 9841, first: 61, relevant: 9750, head: 9901 }));
     expect(t).toContain('LARGE GAP');
     expect(t).toContain('unread #61–#9901, latest mention #9750');
-    expect(t).toContain('--mentions-me --since 60 --limit 200');
+    expect(t).toContain('--mentions-me --since 60 --before 9902 --limit 200');
     expect(t).toContain('sinceSeq=60');
+    expect(t).toContain('hadron_team_chat_read');
     expect(t).toContain('mark-read --through');
-    expect(t).toContain('does not auto-mark');
+    expect(t).toContain('hadron_team_chat_mark_read');
+    expect(t).toContain('never auto-marks');
     expect(t).toContain('marks NOTHING');
+    expect(t).toContain('your OWN session');
     expect(t).not.toContain('START AT');
     expect(t).not.toContain('Read team chat unfiltered');
     expect(t).not.toContain('--all');
     expect(t).not.toContain('\n');
+  });
+  it('a mention arriving mid-walk stays outside the FROZEN sample: every page is bounded at the head the nudge named (#1827 P2)', () => {
+    // Anne's counterexample: page 1 samples head 9901; a mention posted at
+    // 9902 during the walk must not enter any later page, and the mark must
+    // never reach it. The walk's upper bound is the nudge's OWN head value.
+    const t = nudgeText(worker('w-eli', 'Eli', { mentions: 2, unread: 9841, first: 61, relevant: 9750, head: 9901 }));
+    expect(t).toContain('--before 9902');
+    expect(t).toContain('beforeSeq=9902');
+    expect(t).toContain('never above #9901');
+    expect(t).toContain('actually delivered');
+    expect(t).not.toContain('--before 9903');
   });
   it('the boundary is deterministic: span 399 and exactly 400 keep the unfiltered anchor, 401 switches (#1811)', () => {
     for (const head of [499, 500]) {
