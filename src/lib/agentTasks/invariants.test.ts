@@ -34,10 +34,12 @@ const event = (data: Record<string, unknown> = {}) =>
   db.agentTeamEvent.create({ data: { appId: app.id, type: 'task.created', ...data } });
 
 describe('agent-task-invariants.sql', () => {
-  it('the migration carries a byte-identical copy of the invariants file', () => {
+  // #1754 moved the pin to the latest agent-tasks migration: the file is the
+  // source of truth, and the newest migration carries its current copy.
+  it('the latest agent-tasks migration carries a byte-identical copy of the invariants file', () => {
     const source = readFileSync(new URL('../../../prisma/agent-task-invariants.sql', import.meta.url), 'utf8');
     const migration = readFileSync(
-      new URL('../../../prisma/migrations/20261008010000_agent_tasks/migration.sql', import.meta.url),
+      new URL('../../../prisma/migrations/20261012020000_agent_task_backlog_status/migration.sql', import.meta.url),
       'utf8',
     );
     expect(migration.endsWith(source)).toBe(true);
@@ -87,6 +89,15 @@ describe('chk_agent_tasks_shape (cor:agt:050:01)', () => {
   it('a started or finished task has an assignee', async () => {
     const now = new Date();
     await expectCheckViolation(task({ status: 'started', startedAt: now }), /chk_agent_tasks_shape/);
+  });
+
+  it('#1754 (cor:agt:050:02): a backlog task has no assignee, no assignment and no timestamps', async () => {
+    await expect(task({ status: 'backlog' })).resolves.toMatchObject({ status: 'backlog' });
+    const w = await workerRow();
+    await expectCheckViolation(task({ status: 'backlog', assigneeWorkerId: w, assignedAt: new Date() }), /chk_agent_tasks_shape/);
+    await expectCheckViolation(task({ status: 'backlog', assigneeUserId: owner.id }), /chk_agent_tasks_shape/);
+    await expectCheckViolation(task({ status: 'backlog', assignedAt: new Date() }), /chk_agent_tasks_shape/);
+    await expectCheckViolation(task({ status: 'backlog', startedAt: new Date() }), /chk_agent_tasks_shape/);
   });
 });
 

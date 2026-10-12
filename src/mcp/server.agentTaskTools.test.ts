@@ -153,3 +153,24 @@ describe('agent-task tools: reads', () => {
     expect(code(text(await s.callTool('hadron_task_get', { taskId: id, session: hostSession.id })))).toBe('TASK_NOT_FOUND');
   });
 });
+
+describe('agent-task tools: backlog (#1754)', () => {
+  it('create parked, park a queued task, make it ready, and filter by BACKLOG', async () => {
+    const s = mcp(authOf(member.id));
+    const plain = await session({ userId: member.id });
+    const created = text(await s.callTool('hadron_task_create', {
+      appRef: app.id, title: 'Later', status: 'BACKLOG', session: plain.id,
+    }));
+    expect(created).toMatch(/status: backlog/);
+    const id = idOf(created);
+    expect(code(text(await s.callTool('hadron_task_create', {
+      appRef: app.id, title: 'Nope', status: 'BACKLOG', assignee: { worker: 'Anne' }, session: plain.id,
+    })))).toBe('BAD_USER_INPUT');
+    const ready = text(await s.callTool('hadron_task_make_ready', { taskId: id, session: plain.id }));
+    expect(ready).toMatch(/status: pending/);
+    const parked = text(await s.callTool('hadron_task_park', { taskId: id, session: plain.id }));
+    expect(parked).toMatch(/status: backlog/);
+    const list = text(await s.callTool('hadron_task_list', { appRef: app.id, status: ['BACKLOG'] }));
+    expect(list).toMatch(/Later/);
+  });
+});

@@ -63,6 +63,7 @@ import {
   type MemoryVisibility,
 } from '../../../generated/prisma/index.js';
 import { parseDataKey } from '../../../lib/crypto.js';
+import { getRequestOperationKey } from '../../../lib/requestOperationKey.js';
 import { isStrictOwner } from '../../../lib/auth/strictOwner.js';
 import {
   generateKdfSalt,
@@ -2154,7 +2155,7 @@ export const memoryMutations = {
 
     linkMemoryToUser: async (
       _: unknown,
-      { memoryId, externalUserId, dataKey }: { memoryId: string; externalUserId: string; dataKey?: string },
+      { memoryId, externalUserId }: { memoryId: string; externalUserId: string },
       ctx: Context,
     ) => {
       if (!ctx.appId) throw new Error('Forbidden: App Key required');
@@ -2174,6 +2175,9 @@ export const memoryMutations = {
           });
         }
       });
+
+      // #1796: consume request-only supply before any provisioning writes.
+      const suppliedKey = getRequestOperationKey();
 
       // Resolve or create user
       let user = await ctx.db.user.findFirst({
@@ -2223,15 +2227,15 @@ export const memoryMutations = {
         authorRoot: agentSlug,
       });
 
-      // If a dataKey is provided and the memory isn't already encrypted,
+      // If a request key is provided and the memory isn't already encrypted,
       // encrypt every node in a single transaction, then flip isEncrypted.
       // This is the anonymous → registered promotion path.
       // 041 (#516): 'private' is the only encryptable class, so an encrypted
       // promotion lands the memory as class='private' owned by the registered
       // user (the anon scratch memory was class='app', userId NULL). The
       // plaintext branch below leaves the App-scoped class untouched.
-      if (dataKey && !memory.isEncrypted) {
-        const key = parseDataKey(dataKey);
+      if (suppliedKey && !memory.isEncrypted) {
+        const key = suppliedKey;
         const nodes = await ctx.db.node.findMany({
           where: { memoryId: resolvedMemoryId, deletedAt: null },
           // abstract encrypts alongside content since spec 031 — selecting only
@@ -2306,7 +2310,7 @@ export const memoryMutations = {
         // proving possession of this existing key; it cannot repeat promotion
         // or choose a replacement verifier (Holger's #1644 completion ruling).
         await memoryMutations.encryptMemory(
-          {}, { memoryId: resolvedMemoryId, dataKey }, ctx,
+          {}, { memoryId: resolvedMemoryId, dataKey: key.raw.toString('base64') }, ctx,
         );
         return ctx.db.memory.findUniqueOrThrow({ where: { id: resolvedMemoryId } });
       }

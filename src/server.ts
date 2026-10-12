@@ -86,6 +86,7 @@ import {
   REQUEST_KEYS_HEADER,
 } from './lib/memoryUnlock.js';
 import { requestKeyStorage } from './lib/requestKeys.js';
+import { OPERATION_KEY_HEADER, requestOperationKeyStorage, stageRequestOperationKey } from './lib/requestOperationKey.js';
 import { emptyActor, requestActorStorage } from './lib/requestActor.js';
 import { isEmbeddingConfigured } from './lib/embedding/index.js';
 import { getBusClient } from './lib/bus/index.js';
@@ -1183,6 +1184,7 @@ export async function createServer(): Promise<Express> {
     // invisible to concurrent requests and vanish with the request's async
     // context — aborted responses included (PR-514 review, Codex P1 ×2).
     (_req, _res, next) => requestKeyStorage.run(new Map(), next),
+    (_req, _res, next) => requestOperationKeyStorage.run({}, next),
     // #1610: the Worker / Agent behind this request's writes, filled by
     // resolveAuthContext from the validated session binding.
     (_req, _res, next) => requestActorStorage.run(emptyActor(), next),
@@ -1199,6 +1201,7 @@ export async function createServer(): Promise<Express> {
             extensions: { code: 'FORBIDDEN', ...surfaceRefusal, http: { status: 403 } },
           });
         }
+        stageRequestOperationKey(req.headers[OPERATION_KEY_HEADER], auth);
         // Stage caller-held unlock keys from the request header. Every
         // encrypt/decrypt call site consults sessionKeyCache.getByMemoryId,
         // which checks the request store first — this is the whole
