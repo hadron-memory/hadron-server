@@ -3254,7 +3254,9 @@ model AppKey {
   lastUsedAt DateTime? @map("last_used_at")
   revokedAt  DateTime? @map("revoked_at")
 
-  app App @relation(fields: [appId], references: [id], onDelete: Cascade)
+  app    App                @relation(fields: [appId], references: [id], onDelete: Cascade)
+  scopes AppKeyScope[]
+  reads  AppKeyWakeRead[]
 
   @@index([appId])
   @@map("app_keys")
@@ -5410,4 +5412,36 @@ model AppGrant {
   @@index([appId])
   @@index([granteeWorkerId])
   @@map("app_grants")
+}
+
+/// A scope an App key holds (cor:aut:010:03, #1749). A closed list; today only `attention:deliver`. At most one LIVE
+/// row per key and scope (a partial unique index, prisma/app-key-scope-invariants.sql). Granted and revoked only by
+/// whoever manages the App; read from the database on every call it gates, never cached in the auth context.
+model AppKeyScope {
+  id              String    @id
+  appKeyId        String    @map("app_key_id")
+  scope           String
+  grantedByUserId String    @map("granted_by_user_id")
+  grantedAt       DateTime  @default(now()) @map("granted_at")
+  revokedByUserId String?   @map("revoked_by_user_id")
+  revokedAt       DateTime? @map("revoked_at")
+
+  appKey AppKey @relation(fields: [appKeyId], references: [id], onDelete: Cascade)
+
+  @@index([appKeyId])
+  @@map("app_key_scopes")
+}
+
+/// One row per App-key `dueWakes` call: which key read, how many workers it was shown, when (#1749, cor:agt:080:23).
+model AppKeyWakeRead {
+  id          String   @id
+  appKeyId    String   @map("app_key_id")
+  appId       String   @map("app_id")
+  workerCount Int      @map("worker_count")
+  readAt      DateTime @default(now()) @map("read_at")
+
+  appKey AppKey @relation(fields: [appKeyId], references: [id], onDelete: Cascade)
+
+  @@index([appKeyId, readAt])
+  @@map("app_key_wake_reads")
 }

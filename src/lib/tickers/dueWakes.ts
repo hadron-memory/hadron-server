@@ -275,6 +275,12 @@ export async function computeDueWakes(args: {
   now?: Date;
   /** Page size and per-channel ceiling of the message scan (tests lower them). */
   scan?: { pageRows: number; maxRows: number };
+  /**
+   * Re-decides the caller's right to be handed wakes at all, first in the transaction that issues them (before the
+   * budget lock). An App key's scope is checked here, under the App's authority anchor, so a revocation either
+   * committed before this read or waits for it (N4, #1749).
+   */
+  authorize?: (tx: Prisma.TransactionClient) => Promise<void>;
 }): Promise<DueWakesResult> {
   const { ctx, app, reader, requester } = args;
   const now = args.now ?? new Date();
@@ -476,6 +482,7 @@ export async function computeDueWakes(args: {
   const passes = (i: (typeof issued)[number]) => { const { exempt: _e, ...out } = i; wakes.push(out); };
   if (issued.length > 0) {
     await db.$transaction(async (tx) => {
+      await args.authorize?.(tx);
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${'wakebudget:' + app.id}, 0))`;
       const used = (await tx.appWakeDay.findUnique({ where: { appId_day: { appId: app.id, day } } }))?.wakes ?? 0;
       const cutoff = toNaiveUtc(new Date(now.getTime() - WAKE_PROOF_MAX_AGE_MS));

@@ -3011,6 +3011,15 @@ export const typeDefs = `#graphql
     createdAt: DateTime!
     lastUsedAt: DateTime
     revokedAt: DateTime
+    "#1749 — the scopes this key holds now (hrn:node:hadronmemory.com:specs:cor:aut:010:03). Whoever manages the App only."
+    scopes: [AppKeyScope!]!
+  }
+
+  "#1749 — a scope an App key holds. A closed list; today only attention:deliver."
+  type AppKeyScope {
+    scope: String!
+    grantedAt: DateTime!
+    grantedBy: ID!
   }
 
   """
@@ -11222,6 +11231,14 @@ export const typeDefs = `#graphql
     AppKey is keyed by raw ID — no urn column. Stays ID-only.
     """
     revokeAppKey(id: ID!): Boolean!
+    """
+    #1749 — give an App key a scope (hrn:node:hadronmemory.com:specs:cor:aut:010:04). Only whoever manages the App, as
+    themselves: never an App key, a worker's session or an impersonation. Granting a scope the key holds changes nothing.
+    A new key, and a rotated one, holds none. Unknown scope: BAD_USER_INPUT.
+    """
+    grantAppKeyScope(id: ID!, scope: String!): AppKey!
+    "#1749 — take a scope back. The key's next call is refused. Revoking a scope it does not hold changes nothing."
+    revokeAppKeyScope(id: ID!, scope: String!): AppKey!
 
     """
     025-oauth-for-mcp FR-004: mint a new user-scoped API key for the

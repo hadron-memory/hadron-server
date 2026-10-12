@@ -15,6 +15,7 @@
  * and follows the write rule; calling `hadron_worker_wake_settings` with nothing
  * to set reads them.
  */
+import { appKeyCaller } from '../lib/appKeyScopes/scopes.js';
 import { z } from 'zod';
 import { GraphQLError } from 'graphql';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -121,7 +122,11 @@ export function registerTickerTools(server: McpServer, deps: { db: PrismaClient;
     clientId: auth.clientId ?? undefined,
     userId: auth.userId ?? undefined,
     appId: auth.appId ?? undefined,
-    sessionId: auth.sessionId ?? undefined,
+    appKeyId: auth.appKeyId ?? undefined,
+    // An App key's session state is the current request's (the transport refreshes it per request); anyone else's is
+    // the connection's, as before.
+    sessionId: (auth.requestSession ? auth.requestSession.sessionId : auth.sessionId) ?? undefined,
+    sessionBindingRefused: auth.requestSession ? auth.requestSession.refused : auth.sessionBindingRefused,
     roles: auth.roles as Context['roles'],
     organizationId: auth.organizationId ?? undefined,
     impersonation: auth.impersonation,
@@ -164,6 +169,20 @@ export function registerTickerTools(server: McpServer, deps: { db: PrismaClient;
       const valid = await validateSessionBinding(db, auth, session);
       if (!valid) return textResult(`[session_not_bound] session "${session}" is not one of your open sessions.`, true);
       return textResult(await runAsActor(valid.actor, () => fn(ctx)));
+    } catch (e) {
+      return refusal(e);
+    }
+  }
+
+  /**
+   * A wake tool as an App key (#1749): it acts as itself, with no session, so a `session` argument is a session the
+   * key carries and is refused, never ignored and never narrowed (#8097). Anyone else is served by `read`.
+   */
+  async function readWakes(session: string | undefined, fn: (ctx: Context) => Promise<string>) {
+    const ctx = ctxOf();
+    if (!appKeyCaller(ctx)) return read(session, fn);
+    try {
+      return textResult(await fn(session ? { ...ctx, sessionId: session } : ctx));
     } catch (e) {
       return refusal(e);
     }
@@ -326,7 +345,7 @@ export function registerTickerTools(server: McpServer, deps: { db: PrismaClient;
       session: SESSION_READ,
     },
     async ({ session, appRef, ...rest }) =>
-      read(session, async (ctx) => {
+      readWakes(session, async (ctx) => {
         const page = await Q.dueWakes({}, { appRef, ...rest }, ctx);
         const lines: string[] = [];
         for (const w of page.wakes) {
@@ -356,10 +375,14 @@ export function registerTickerTools(server: McpServer, deps: { db: PrismaClient;
       'named in a proof may acknowledge it, within 15 minutes; a stale, foreign or unknown-version proof is refused and ' +
       'nothing is written. A wake you do not acknowledge stays due.',
     { proofs: z.array(z.string()).describe('Wake proofs from hadron_due_wakes.'), session: SESSION_WRITE },
-    async ({ session, proofs }) =>
-      write('hadron_ack_wakes', session, async (ctx) => {
+    async ({ session, proofs }) => {
+      const ack = async (ctx: Context) => {
         const r = await M.acknowledgeWakes({}, { proofs }, ctx);
         return `Acknowledged ${r.acknowledged}${r.unchanged ? ` (${r.unchanged} already delivered)` : ''}.`;
-      }),
+      };
+      // An App key (#1749) acts as itself and names no session; the resolver holds the scope and session rules.
+      if (appKeyCaller(ctxOf())) return readWakes(session, ack);
+      return write('hadron_ack_wakes', session, ack);
+    },
   );
 }

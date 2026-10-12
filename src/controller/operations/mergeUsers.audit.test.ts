@@ -46,6 +46,7 @@ describe('mergeUsers audit actor registry', () => {
           OR (table_name = 'agent_tasks' AND column_name = 'assigned_by')
           OR (table_name = 'ticker_subscriptions' AND column_name IN ('ended_by', 'via_grant_person_id', 'ended_via_grant_person_id'))
           OR (table_name = 'app_grants' AND column_name = 'granted_by')
+          OR (table_name = 'app_key_scopes' AND column_name IN ('granted_by_user_id', 'revoked_by_user_id'))
           OR (table_name = 'agent_team_events' AND column_name IN ('actor_user_id', 'acknowledged_by_user_id')))
     `;
     const schemaPairs = new Set(columns.map(({ table_name, column_name }) => `${table_name}.${column_name}`));
