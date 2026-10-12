@@ -44,12 +44,13 @@ describe('scrubSentryEvent', () => {
             authorization: 'Bearer hdr_user_secret',
             cookie: 'hadron_token=cookie-secret',
             'x-hadron-memory-keys': '[{"dataKey":"memory-secret"}]',
+            'x-hadron-operation-key': 'operation-header-secret',
             'x-api-key': 'custom-secret',
           },
           cookies: { hadron_token: 'cookie-secret' },
           data: {
             query: 'mutation Encrypt($passphrase: String!) { encryptMemory(passphrase: $passphrase) }',
-            variables: { passphrase: 'body-secret' },
+            variables: { passphrase: 'body-secret', dataKey: 'legacy-operation-variable-secret' },
           },
           env: { HTTP_AUTHORIZATION: 'Bearer env-secret' },
         },
@@ -77,9 +78,10 @@ describe('scrubSentryEvent', () => {
       headers: {
         authorization: 'Bearer hdr_user_secret',
         'x-hadron-memory-keys': '[{"dataKey":"memory-secret"}]',
+            'x-hadron-operation-key': 'operation-header-secret',
       },
       data: {
-        variables: { passphrase: 'body-secret' },
+        variables: { passphrase: 'body-secret', dataKey: 'legacy-operation-variable-secret' },
       },
       query_string: 'token=query-secret',
     });
@@ -113,9 +115,11 @@ describe('scrubSentryEvent', () => {
       'hdr_user_secret',
       'cookie-secret',
       'memory-secret',
+      'operation-header-secret',
       'custom-secret',
       'query-secret',
       'body-secret',
+      'legacy-operation-variable-secret',
       'env-secret',
       'breadcrumb-secret',
       'operation-tag-secret',

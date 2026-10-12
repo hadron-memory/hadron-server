@@ -96,7 +96,7 @@ describe('startAgentSession with encryption', () => {
         { agentId: agent.id, externalUserId: 'mm-1' },
         appCtx(secretApp.id),
       ),
-    ).rejects.toThrow(/dataKey is required/);
+    ).rejects.toMatchObject({ extensions: { code: 'BAD_UNLOCK_INPUT' } });
   });
 
   it('rejects a dataKey when the app is in USER_ID mode', async () => {
@@ -107,7 +107,7 @@ describe('startAgentSession with encryption', () => {
         { agentId: agent.id, externalUserId: 'mm-1', dataKey: key },
         appCtx(plaintextApp.id),
       ),
-    ).rejects.toThrow(/only accepted when/);
+    ).rejects.toMatchObject({ extensions: { code: 'BAD_UNLOCK_INPUT' } });
   });
 
   it('creates an encrypted memory and caches the key', async () => {
@@ -152,7 +152,7 @@ describe('startAgentSession with encryption', () => {
         { agentId: agent.id, externalUserId: 'mm-1' },
         appCtx(secretApp.id),
       ),
-    ).rejects.toThrow(/dataKey is required/);
+    ).rejects.toMatchObject({ extensions: { code: 'BAD_UNLOCK_INPUT' } });
   });
 
   it('rejects mismatched keys for concurrent sessions on the same memory', async () => {
@@ -169,7 +169,7 @@ describe('startAgentSession with encryption', () => {
         { agentId: agent.id, externalUserId: 'mm-1', dataKey: k2 },
         appCtx(secretApp.id),
       ),
-    ).rejects.toThrow(/Wrong dataKey|conflict/);
+    ).rejects.toMatchObject({ extensions: { code: 'WRONG_KEY' } });
   });
 
   it('rejects the wrong key after the original SECRET session ends', async () => {
@@ -181,7 +181,7 @@ describe('startAgentSession with encryption', () => {
     await resolvers.Mutation.endAgentSession({}, { sessionId: first.id }, appCtx(secretApp.id));
     await expect(resolvers.Mutation.startAgentSession(
       {}, { agentId: agent.id, externalUserId: 'mm-1', dataKey: wrong }, appCtx(secretApp.id),
-    )).rejects.toThrow(/Wrong dataKey/);
+    )).rejects.toMatchObject({ extensions: { code: 'WRONG_KEY' } });
   });
 
   it('refuses new sessions for a verifier-less encrypted memory before caching either key', async () => {

@@ -8424,9 +8424,11 @@ export const typeDefs = `#graphql
     revokeAppGrant(appRef: String!, workerRef: String!, name: AppGrantName!): AppGrant!
 
     """
-    #1705 — assign a queued task (pending, no assignee): the task's owner or
-    whoever manages the App (hrn:node:hadronmemory.com:specs:cor:agt:050:09). closeSessionWhenDone, when
-    given, replaces the task's value. Refusals: TASK_NOT_FOUND, TASK_NOT_OWNER,
+    #1705 — assign a task with no assignee — a queued task (pending) or a BACKLOG task: the
+    task's owner, a worker the owner reports to, or whoever manages the App
+    (hrn:node:hadronmemory.com:specs:cor:agt:050:09). closeSessionWhenDone, when
+    given, replaces the task's value. Assigning a BACKLOG task moves it to
+    pending (hrn:node:hadronmemory.com:specs:cor:agt:050:02, #1754). Refusals: TASK_NOT_FOUND, TASK_NOT_OWNER,
     TASK_ENDED, TASK_INVALID_TRANSITION (already assigned: use
     reassignAgentTask), TASK_ASSIGNEE_INVALID, SESSION_NOT_BOUND, APP_UNINSTALLED.
     """
@@ -8462,17 +8464,40 @@ export const typeDefs = `#graphql
     finishAgentTask(taskId: ID!, result: AgentTaskResultInput!): AgentTask!
 
     """
-    #1705 — cancel a pending or started task: its owner, or whoever manages
-    the App (hrn:node:hadronmemory.com:specs:cor:agt:050:09). Refusals: TASK_NOT_FOUND, TASK_NOT_OWNER,
-    TASK_ENDED, SESSION_NOT_BOUND, APP_UNINSTALLED.
+    #1705 — cancel a pending, started or backlog task: its owner, a worker the owner reports
+    to, or whoever manages the App (hrn:node:hadronmemory.com:specs:cor:agt:050:09; a backlog task directly,
+    Holger team chat #8150). Refusals:
+    TASK_NOT_FOUND, TASK_NOT_OWNER, TASK_ENDED, SESSION_NOT_BOUND, APP_UNINSTALLED.
     """
     cancelAgentTask(taskId: ID!): AgentTask!
 
     """
+    #1754 — park a queued task in the backlog (hrn:node:hadronmemory.com:specs:cor:agt:050:02): pending
+    with no assignee becomes BACKLOG — unassigned, never matched, never waited
+    on, no alarms. Whoever may assign a task may park it: its owner, a worker
+    the owner reports to, or whoever manages the App
+    (hrn:node:hadronmemory.com:specs:cor:agt:050:09). Refusals: TASK_NOT_FOUND, TASK_NOT_OWNER,
+    TASK_ENDED, TASK_INVALID_TRANSITION (not pending, or an assignee),
+    SESSION_NOT_BOUND, APP_UNINSTALLED.
+    """
+    parkAgentTask(taskId: ID!): AgentTask!
+
+    """
+    #1754 — make a backlog task ready to be worked
+    (hrn:node:hadronmemory.com:specs:cor:agt:050:02): BACKLOG becomes PENDING and the task enters
+    the queue. Whoever may assign a task may make it ready: its owner, a worker
+    the owner reports to, or whoever manages the App
+    (hrn:node:hadronmemory.com:specs:cor:agt:050:09). Refusals: TASK_NOT_FOUND, TASK_NOT_OWNER,
+    TASK_ENDED, TASK_INVALID_TRANSITION (not backlog), SESSION_NOT_BOUND, APP_UNINSTALLED.
+    """
+    makeAgentTaskReady(taskId: ID!): AgentTask!
+
+    """
     #1706 — acknowledge an alarm (hrn:node:hadronmemory.com:specs:cor:agt:050:20): it stops waking higher
     owners; the stall episode goes on until the task moves. Any owner in the
-    alarm's chain, and nobody else (Proposed); the time is the server's.
-    Refusals: ALARM_NOT_FOUND (also for an App you do not participate in),
+    alarm's chain, or whoever manages the App (hrn:node:hadronmemory.com:specs:cor:agt:050:24), and nobody
+    else; the time is the server's.
+    Refusals: ALARM_NOT_FOUND (also for an App you cannot read),
     NOT_AN_ALARM, ALARM_NOT_IN_CHAIN, ALARM_ALREADY_ACKNOWLEDGED (the first
     stands), SESSION_NOT_BOUND, APP_UNINSTALLED.
     """
@@ -11296,28 +11321,36 @@ export const typeDefs = `#graphql
     """
     Multi-user-agent session lifecycle (renamed to avoid collision with
     the developer/guided startSession and endSession mutations).
-    dataKey is base64-encoded, 32 bytes, required when the app is
-    configured with identifyUserMethod: SECRET and the target memory is
-    (or will become) encrypted.
+    Supply a base64-encoded 32-byte key beside the operation through the
+    x-hadron-operation-key header when identifyUserMethod is SECRET.
+    The key is verified for an existing encrypted memory and held only
+    after the new session commits; USER_ID mode rejects key supply.
+    The deprecated dataKey argument remains during caller migration;
+    dual supply must carry the same key. Only one key-consuming operation
+    may use the header in a request; a second attempt is BAD_UNLOCK_INPUT.
     """
     startAgentSession(
       agentId: ID!
       externalUserId: String
       sessionTimeoutSeconds: Int
-      dataKey: String
+      dataKey: String @deprecated(reason: "Use x-hadron-operation-key; removal follows caller migration.")
     ): Session!
     endAgentSession(sessionId: ID!): Boolean!
 
     """
     Link this App's live plaintext anonymous memory to a real user.
-    Providing dataKey claims private ownership and encrypts the enumerated live
-    nodes with the link; remaining fields and history complete in bounded passes. After a committed claim,
+    Providing x-hadron-operation-key in the request header claims private
+    ownership and encrypts live nodes; remaining fields and history complete
+    in bounded passes. The deprecated dataKey argument remains during caller
+    migration; dual supply must carry the same key. Only one key-consuming
+    operation may use the header per request; a second is BAD_UNLOCK_INPUT.
+    After a committed claim,
     interrupted completion allows the strict owner or owning App key to call
     encryptMemory with the existing key. A registered holding cannot be linked again.
 
     Accepts the entity's ID or URN.
     """
-    linkMemoryToUser(memoryId: ID!, externalUserId: String!, dataKey: String): Memory!
+    linkMemoryToUser(memoryId: ID!, externalUserId: String!, dataKey: String @deprecated(reason: "Use x-hadron-operation-key; removal follows caller migration.")): Memory!
 
     """
     Convert a plaintext PRIVATE memory to encrypted (spec 041, caller-held
@@ -11393,12 +11426,23 @@ export const typeDefs = `#graphql
 
   # ── #1705 Agent tasks (Task Management T1, epic #1704; hrn:node:hadronmemory.com:specs:cor:agt:050) ──────
 
-  "An agent task's status (hrn:node:hadronmemory.com:specs:cor:agt:050:02). FINISHED and CANCELLED are the end states."
+  """
+  An agent task's status (hrn:node:hadronmemory.com:specs:cor:agt:050:02). FINISHED and CANCELLED are the end states.
+  BACKLOG (#1754) is parked: no assignee, never matched, never waited on, no alarms; assigning it or making it
+  ready moves it to PENDING.
+  """
   enum AgentTaskStatus {
+    BACKLOG
     PENDING
     STARTED
     FINISHED
     CANCELLED
+  }
+
+  "The statuses a task may be CREATED in (#1754, hrn:node:hadronmemory.com:specs:cor:agt:050:02): every other status is reached by a move."
+  enum AgentTaskCreateStatus {
+    BACKLOG
+    PENDING
   }
 
   "Whether a task party is a team Worker or a person."
@@ -12011,5 +12055,11 @@ export const typeDefs = `#graphql
     tags: [String!]
     "Defaults to true (hrn:node:hadronmemory.com:specs:cor:agt:050:10)."
     closeSessionWhenDone: Boolean
+    """
+    #1754 — PENDING (the default) or BACKLOG
+    (hrn:node:hadronmemory.com:specs:cor:agt:050:02). A BACKLOG task is parked: it takes no assignee (BAD_USER_INPUT),
+    never enters the queue, and is moved to pending by assigning it or making it ready.
+    """
+    status: AgentTaskCreateStatus
   }
 `;

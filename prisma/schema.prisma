@@ -4973,7 +4973,8 @@ model AgentTask {
   assigneeUserId       String?   @map("assignee_user_id")
   /// For the matcher (T3): `{ role?, familyIn?, familyNotIn?, excludeWorkerIds? }`.
   requirements         Json?
-  /// 'pending' | 'started' | 'finished' | 'cancelled' (cor:agt:050:02).
+  /// 'backlog' | 'pending' | 'started' | 'finished' | 'cancelled' (cor:agt:050:02).
+  /// 'backlog' (#1754): parked — no assignee, not matched, never waited on, no alarms.
   status               String    @default("pending")
   startBy              DateTime? @map("start_by")
   startedAt            DateTime? @map("started_at")
