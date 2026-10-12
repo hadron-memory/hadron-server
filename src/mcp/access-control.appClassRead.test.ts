@@ -280,7 +280,7 @@ describe('#1003 — App members can read the App team space', () => {
     expect(await canWriteToMemory(db, auth, shared.id)).toBe(true);
   });
 
-  it('a USER-OWNED App: the owner reads its team space, another member does not (spec 047)', async () => {
+  it('a USER-OWNED App: the owner AND its members read its team space; another user-owned memory stays with its owner (spec 047, #1764)', async () => {
     // Copilot on PR #1004: every other fixture here is org-owned, so the
     // spec-047 blocker-2 guard (`row.ownerUserId !== app.ownerUserId`) was
     // never exercised. A user-owned App's team space is minted WITH the owner
@@ -321,17 +321,28 @@ describe('#1003 — App members can read the App team space', () => {
     expect((await getMemoryAccess(db, ownerAuth)).has(shared.id)).toBe(true);
     expect(await canReadMemory(db, ownerAuth, shared.id)).toBe(true);
 
-    // The co-member does not — not in the map, not listed, not readable. The
-    // strict owner-only branch of canReadMemory and the listing surface must
-    // agree; a leak in either is the spec-047 blocker.
-    expect((await getMemoryAccess(db, coMemberAuth)).has(shared.id)).toBe(false);
-    expect(await canReadMemory(db, coMemberAuth, shared.id)).toBe(false);
-    expect(await canWriteToMemory(db, coMemberAuth, shared.id)).toBe(false);
+    // #1764 (Holger "A", #8151/#8155, cor:acl:010:01): a user-owned App's participants are its owner AND its
+    // members, so the co-member reaches the TEAM SPACE — in the map, listed, readable, writable. The map, the point
+    // gates and the listing surface must agree, as they did when the answer was "no".
+    expect((await getMemoryAccess(db, coMemberAuth)).has(shared.id)).toBe(true);
+    expect(await canReadMemory(db, coMemberAuth, shared.id)).toBe(true);
+    expect(await canWriteToMemory(db, coMemberAuth, shared.id)).toBe(true);
     const listed = await createTestableMcpServer(coMemberAuth).callToolText(
       'hadron_list_memories',
       {},
     );
-    expect(listed).not.toContain('solo-app-shared');
+    expect(listed).toContain('solo-app-shared');
+
+    // The spec-047 strictness it must NOT loosen: the owner's other user-owned memory, even one the App's agent
+    // carries, is the owner's alone — not in the map, not listed, not readable, not writable by the co-member.
+    const notes = await db.memory.create({
+      data: { id: generateId(), class: 'knowledge', name: 'solo-owner-notes', urn: `${owner.id}:solo-owner-notes`, ownerUserId: owner.id },
+    });
+    await db.agentMemoryItem.create({ data: { agentId: agent.id, memoryId: notes.id, role: 'read' } });
+    expect((await getMemoryAccess(db, coMemberAuth)).has(notes.id)).toBe(false);
+    expect(await canReadMemory(db, coMemberAuth, notes.id)).toBe(false);
+    expect(await canWriteToMemory(db, coMemberAuth, notes.id)).toBe(false);
+    expect(await createTestableMcpServer(coMemberAuth).callToolText('hadron_list_memories', {})).not.toContain('solo-owner-notes');
   });
 
   it('a user-owned App Worker holder reaches only their working memory (#1513)', async () => {

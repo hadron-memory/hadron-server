@@ -1396,11 +1396,11 @@ export async function isOrgMemberOrAdmin(ctx: Context, orgId: string): Promise<b
  * (#939's team-chat gate, generalized in #943 so `startSession`'s `appRef`
  * gate is the SAME predicate rather than a second copy of it).
  *
- * Admits: an AppMember at ANY role (participation follows the host memory's
+ * Admits: an AppMember at ANY role (of a user-owned App too, #1764) (participation follows the host memory's
  * audience — `cor:acl:030:01`, so a 'reader' member counts), an org member
  * with CONTRIBUTOR+ on the App's owning org (parity with the persona-mint
  * gate's org branch, and platform ADMIN/OWNER via `requireOrgRole`), or the
- * owner of a user-owned App.
+ * owner of a user-owned App (whose AppMembers are covered by the first arm).
  *
  * Under IMPERSONATION this narrows to the session's ONE shared org (#1094):
  * every arm answers about the TARGET, so an unbounded one would admit an App in
@@ -1423,16 +1423,20 @@ export async function isAppParticipant(
   if (!ctx.userId) return false;
   if (canBypassUserOwnership(ctx, 'app')) return true;
   if (app.ownerUserId !== null) {
-    // spec 047: a user-owned App admits its owner and nobody else
-    // (findings:org-xor-owner-null-comparison-bypass — branch on the
-    // ownership CLASS first; for two different users' entities BOTH
-    // `organizationId`s are NULL, so an org comparison would read
-    // `null !== null` and admit exactly the cross-tenant case).
-    // Identity-scoped, so never via impersonation (isOwnerOrOrgMember's rule;
-    // the team-chat caller already denies org-less Apps under impersonation —
-    // this keeps the predicate safe for any future caller that doesn't).
+    // spec 047 + cor:acl:010:01 (Holger "A", #8151/#8155, #1764): a user-owned App admits its owner and every
+    // AppMember at any role, and nobody else. The App has no org, so no org arm exists and no platform-admin arm either
+    // (findings:org-xor-owner-null-comparison-bypass — branch on the ownership CLASS first; for two different users'
+    // entities BOTH `organizationId`s are NULL, so an org comparison would read `null !== null` and admit exactly the
+    // cross-tenant case). Identity-scoped, so never via impersonation (isOwnerOrOrgMember's rule; the team-chat caller
+    // already denies org-less Apps under impersonation — this keeps the predicate safe for any future caller that
+    // doesn't). User-owned MEMORIES and AGENTS stay strictly owner-only; this is the App's participation alone.
     if (ctx.impersonation) return false;
-    return ctx.userId === app.ownerUserId;
+    if (ctx.userId === app.ownerUserId) return true;
+    const member = await ctx.db.appMember.findUnique({
+      where: { appId_userId: { appId: app.id, userId: ctx.userId } },
+      select: { userId: true },
+    });
+    return member !== null;
   }
   // #1094 — impersonation NARROWS this predicate to the session's ONE shared
   // org, stated once here rather than per arm. `ctx.userId` is the TARGET under

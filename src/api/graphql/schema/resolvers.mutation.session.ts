@@ -1077,6 +1077,19 @@ export const sessionMutations = {
               );
             }
 
+            // #1764 (Rook P2, #8886; Ada's interim (b), #8897): on a USER-owned App, being a participant does not make
+            // you a holder. A worker carries its holder's working memory, posting identity and grants, and a user-owned
+            // App's participants now include every member at any role; so taking a name there needs the owner or
+            // whoever manages the App (managesApp: the owner-role AppMember arm included). Org-owned Apps are unchanged.
+            // Whether members may hold the owner's workers at all is Holger's call (#8897); until he rules, the gate.
+            if (app.ownerUserId !== null && ctx.userId !== app.ownerUserId &&
+                !(await managesApp({ ...ctx, db: tx as unknown as Context['db'] }, app))) {
+              throw new GraphQLError(
+                'Only the owner of this App, or whoever manages it, can take one of its worker names.',
+                { extensions: { code: 'FORBIDDEN' } },
+              );
+            }
+
             // A SOFT-DELETED claimant must not take a name (Codex P2): a start
             // already in flight when `deleteUserAccount` runs could otherwise
             // land its claim after the deletion released everything, leaving an
