@@ -530,6 +530,12 @@ describe('nudgeText read anchor (#1805 P2s, #1811 large-gap branch)', () => {
     expect(t).toContain('beforeSeq=9902');
     expect(t).toContain('never above #9901'); // the H+1 arrival stays outside sample and mark
     expect(t).not.toContain('--before 9903');
+    // The MCP tool returns numbered pages with NO prevBefore field (Anne and
+    // Colin, independently): its instruction must say to re-call with
+    // beforeSeq = the smallest seq on the last page, not "follow prevBefore".
+    expect(t).toContain('the smallest seq on your last page');
+    expect(t).toContain('no prevBefore field');
+    expect(t).toContain('limit 200'); // the MCP page limit spelled with its value
   });
   it('the boundary is deterministic: span 399 and exactly 400 keep the unfiltered anchor, 401 switches (#1811)', () => {
     for (const head of [499, 500]) {
