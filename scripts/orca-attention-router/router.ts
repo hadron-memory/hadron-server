@@ -55,18 +55,50 @@ import { fileURLToPath } from 'node:url';
 export const DEFAULT_CONFIG = join(homedir(), '.config', 'hadron-orca-attention-router', 'config.json');
 
 /**
+ * Above this sequence span between the first unread and the head, the
+ * unfiltered walk switches to the mentions-only anchor (#1811). The SPAN, not
+ * the unread count, is what the unfiltered instruction would page through —
+ * and a cursor-0 or stale-watermark worker following it to the head re-reads
+ * the whole history. The mentions walk still covers EVERY unread mention: the
+ * filter skips non-mention history, never mentions (Eden #9616 — "a mention
+ * that misses its worker is exactly the failure #1811 exists to fix").
+ */
+const LARGE_GAP_SPAN = 400;
+
+/**
  * The one line a worker receives: fresh counts with the seq range they cover —
  * never a message body, and never a token. The seqs let the recipient check
  * the nudge against its own read cursor, so it stays true when delivered (#1616).
  * Kept short but COMPLETE (Holger, 2026-10-05): it is typed into a working
  * terminal, so every word earns its place — but the read anchor (where to
  * start, both CLI and MCP forms, bounded) is load-bearing and stays.
+ *
+ * Two anchors (#1811): at or below the large-gap span, the #1805 watermark
+ * anchor (start at the first unread of any kind, walk forward); above it, the
+ * mentions-only anchor — walk the MENTIONS filter from the first unread to
+ * the head, then mark read through the worker's own session at the highest
+ * seq the walk actually returned (a mentions-filtered read does not auto-mark,
+ * so the mark is a separate deliberate step; an incomplete walk marks NOTHING
+ * and anything past the last read page stays unread — nothing is silently
+ * acknowledged).
  */
 export function nudgeText(a: AttentionItem): string {
   const where = [
     a.firstUnreadSeq === null ? '' : `unread #${a.firstUnreadSeq}–#${a.lastSeq}`,
     a.lastRelevantSeq === null ? '' : `latest mention #${a.lastRelevantSeq}`,
   ].filter(Boolean).join(', ');
+  const head = `Hadron team attention: ${a.unread} relevant unread (${a.unreadMentions} mention${a.unreadMentions === 1 ? '' : 's'}${where ? `; ${where}` : ''}).`;
+  if (a.firstUnreadSeq !== null && a.lastSeq - a.firstUnreadSeq > LARGE_GAP_SPAN) {
+    const since = Math.max(0, a.firstUnreadSeq - 1);
+    return (
+      head +
+      ` LARGE GAP (unread span ${a.lastSeq - a.firstUnreadSeq} > ${LARGE_GAP_SPAN}): walk MENTIONS ONLY from your first unread — every unread mention is on the path; the rest is history.` +
+      ` CLI: \`hadron team chat read --mentions-me --since ${since} --limit 200\` then follow nextSince pages to the head; MCP: \`hadron_team_chat_read\` with your session, \`sinceSeq=${since}\` + the mentions filter, paged to the head.` +
+      ' Then mark read through your OWN session at the HIGHEST seq you actually received (CLI: `hadron team chat mark-read --through <that seq>` — a mentions-filtered read does not auto-mark).' +
+      ' An incomplete walk marks NOTHING; anything past your last read page stays unread. If no mention needs action, mark read and finish silently — no chat post.' +
+      ' (Orca attention router; counts as of send.)'
+    );
+  }
   // Watermark-anchored read instruction (production lesson 2026-10-12, Eden's
   // #9017/#9035: workers with a stale read mark got count-only nudges, read the
   // NEWEST page as every recovery brief teaches, found nothing addressed to
@@ -77,7 +109,7 @@ export function nudgeText(a: AttentionItem): string {
       ? ''
       : ` START AT #${a.firstUnreadSeq} (your first unread message of any kind) — CLI: \`hadron team chat read --since ${Math.max(0, a.firstUnreadSeq - 1)} --limit 200\` then follow nextSince; MCP: \`hadron_team_chat_read\` with your session and \`sinceSeq=${Math.max(0, a.firstUnreadSeq - 1)}\` then the returned cursor — NOT the newest page alone;`;
   return (
-    `Hadron team attention: ${a.unread} relevant unread (${a.unreadMentions} mention${a.unreadMentions === 1 ? '' : 's'}${where ? `; ${where}` : ''}).` +
+    head +
     `${from} ` +
     'Read team chat unfiltered with your own live session; if nothing needs action, ' +
     "mark read and finish silently — no chat post or 'read/no-action' comment. (Orca attention router; counts as of send.)"
