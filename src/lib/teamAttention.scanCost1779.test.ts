@@ -18,7 +18,7 @@ import { generateId } from './id.js';
 import { ensureChannelWithRoot } from './channels.js';
 import { sessionKeyCache } from './sessionKeyCache.js';
 import type { Context } from '../api/graphql/schema/resolvers.js';
-import { teamAttentionPage } from './teamAttention.js';
+import { aggregatePlaintextWindow, teamAttentionPage } from './teamAttention.js';
 
 vi.mock('./bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
@@ -135,6 +135,15 @@ describe('#1779 — scan cost is independent of backlog depth', () => {
     expect(elapsed).toBeLessThan(15_000);
     // Only relevance since the watermark is emitted: every target gains the one new message.
     expect(next.items.length).toBeGreaterThan(0);
+    // Counts stay exact on the headline production scenario: a dormant cursor still reports its
+    // whole backlog (now including the new message), a near-head one just its tail.
+    const byWorker = new Map(next.items.map((i) => [i.worker, i]));
+    expect(byWorker.get(workerIds[0])).toMatchObject({
+      unread: HEAD + 1 - 2, firstUnreadSeq: 3, lastSeq: HEAD + 1,
+    });
+    expect(byWorker.get(workerIds[STALE + 1])).toMatchObject({
+      unread: HEAD + 1 - NEAR_HEAD, firstUnreadSeq: NEAR_HEAD + 1, lastSeq: HEAD + 1,
+    });
   }, 120_000);
 });
 
@@ -289,4 +298,52 @@ describe('#1779 — the per-request plaintext ceiling', () => {
       expect(items.find((i) => i.worker === workerIds[10] && i.channel === id)).toMatchObject({ unread: 450 });
     }
   }, 120_000);
+});
+
+describe('#1779 — an empty target list is a no-op, not a malformed query', () => {
+  it('aggregatePlaintextWindow with no targets returns an empty result without touching SQL VALUES', async () => {
+    await expect(aggregatePlaintextWindow(db, channel.id, 0, 100, [])).resolves.toEqual({
+      perTarget: [], cursor: null, frontierLoc: null,
+    });
+  });
+});
+
+describe('#1783 — aggregatePlaintextWindow edge semantics', () => {
+  const target = (over: Partial<Parameters<typeof aggregatePlaintextWindow>[4][number]> = {}) => ({
+    index: 0, seen: 0, head: 100, workerId: 'w-target', mentionOnly: false, tokens: ['all', 'team', 'w00'], ...over,
+  });
+  const put = (seq: number, data: object, locSuffix = String(seq)) => db.node.create({
+    data: {
+      id: generateId(), memoryId: channel.memoryId, loc: `${channel.loc}:messages:${locSuffix}`, name: locSuffix,
+      nodeType: 'chat-message', seq, messageChannelId: channel.id, content: 'x', data,
+    },
+  });
+  beforeEach(async () => { await resetTeamChannel(0); });
+
+  it('never counts a row above the target\'s frozen head', async () => {
+    for (let seq = 1; seq <= 10; seq++) await put(seq, { mentions: [] });
+    const r = await aggregatePlaintextWindow(db, channel.id, 0, 10, [target({ head: 6 })]);
+    expect(r.perTarget).toEqual([{ index: 0, unread: 6, mentions: 0, first: 1, lastRelevant: 6 }]);
+  });
+
+  it('mention-only: lastRelevant is the last MENTIONING row, and null with none', async () => {
+    for (let seq = 1; seq <= 9; seq++) await put(seq, { mentions: seq === 4 ? ['w00'] : [] });
+    const only = await aggregatePlaintextWindow(db, channel.id, 0, 9, [target({ mentionOnly: true })]);
+    expect(only.perTarget[0]).toMatchObject({ unread: 9, mentions: 1, lastRelevant: 4 });
+    const none = await aggregatePlaintextWindow(db, channel.id, 0, 3, [target({ mentionOnly: true })]);
+    expect(none.perTarget[0]).toMatchObject({ unread: 3, mentions: 0, lastRelevant: null });
+    const both = await aggregatePlaintextWindow(db, channel.id, 0, 9, [target()]);
+    expect(both.perTarget[0]).toMatchObject({ lastRelevant: 9 });
+  });
+
+  it('the frontier row is one a target actually COUNTED, as the row walk had it (duplicate seqs)', async () => {
+    // Two rows at seq 5 (a pre-#919 artifact): the higher loc is the target's own post, which the
+    // walk skipped, so the counted frontier is the lower-loc row.
+    await put(4, { mentions: [] });
+    await put(5, { mentions: [] }, '5a');
+    await put(5, { authorWorkerId: 'w-target', mentions: [] }, '5b');
+    const r = await aggregatePlaintextWindow(db, channel.id, 0, 10, [target()]);
+    expect(r.frontierLoc).toBe(`${channel.loc}:messages:5a`);
+    expect(r.perTarget[0]).toMatchObject({ unread: 2, lastRelevant: 5 });
+  });
 });
