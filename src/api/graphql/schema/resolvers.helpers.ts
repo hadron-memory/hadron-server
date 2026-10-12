@@ -78,6 +78,7 @@ import {
 } from '../../../generated/prisma/index.js';
 import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
 import { LIVE_ORG_MEMBERSHIP } from '../../../lib/auth/liveOrgMembership.js';
+import { isUserOwnedAgentDefinition } from '../../../lib/auth/userOwnedAgentDefinition.js';
 
 /**
  * The STORED (uncompiled) content of a Node whose `content` a read resolver
@@ -1152,6 +1153,16 @@ export async function canReadMemoryRecord(
     // invisible for the same reason as personal/private above.
     if (ctx.impersonation) return false;
     if (ctx.userId && memory.ownerUserId === ctx.userId) return true;
+    // #1787 (cor:dmo:050:13): a platform admin may read a user-owned Agent's
+    // system memory — its definition — as part of managing the Agent. This is
+    // the ONLY user-owned memory a platform admin reads: every other
+    // user-owned class stays owner-only here (the wider #1734 bypass is a
+    // separate, unbuilt change), personal/private were handled above, and the
+    // definition is read-only (its editor is the agent-ownership surface).
+    if (
+      memory.class === 'system' && isPlatformAdmin(ctx) &&
+      await isUserOwnedAgentDefinition(ctx.db, memory.id)
+    ) return true;
     // A user-owned App's Worker row is also visible to its current holder.
     // The shared content gate checks the casting and excludes team/session rows.
     if (memory.class !== 'app') return false;
@@ -1330,6 +1341,33 @@ export async function requireOwnerOrOrgRole(
     return;
   }
   throw authorizationDenied();
+}
+
+/**
+ * The Agent-management gate (#1787, cor:dmo:050:13 — Holger, team chat #8895:
+ * "we have to be able to shut down a rogue agent"). Whatever an org's
+ * ADMIN/OWNER may do to an org-owned Agent, a platform ADMIN/OWNER may do to
+ * a USER-owned one: read it (definition and prompt), update it, delete it.
+ * One shared predicate every Agent caller of {@link requireOwnerOrOrgRole}
+ * goes through — the arm is not re-derived per resolver. Everything else
+ * keeps the tenant gate's shape: the owner and org arms unchanged,
+ * org-owned behavior unchanged (platform admins already pass
+ * requireOrgRole's bypass), and impersonation gains nothing (identity-scoped
+ * like the owner arm it extends).
+ *
+ * NOT routed through here: the decrypted AI-config reads (`agentAIConfig`,
+ * `resolveAIConfig`'s user-owned arm) — a user's own provider key on their
+ * own Agent is a user-owned credential and stays owner-only (Holger #8075,
+ * the same split Ada ruled for Apps on #1734 at #9051: manage yes, read the
+ * key no). Set/clear of the config IS management and uses this gate.
+ */
+export async function requireAgentAccess(
+  ctx: Context,
+  agent: { organizationId: string | null; ownerUserId: string | null },
+  required: 'OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER',
+): Promise<void> {
+  if (agent.ownerUserId !== null && !ctx.impersonation && isPlatformAdmin(ctx)) return;
+  return requireOwnerOrOrgRole(ctx, agent, required);
 }
 
 /**
@@ -1695,7 +1733,7 @@ export async function requireAiConfigOwnerAdmin(
     case 'AGENT': {
       const { id } = await resolveAgentRef(ctx.db, ownerId);
       const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id } });
-      await requireOwnerOrOrgRole(ctx, agent, 'ADMIN');
+      await requireAgentAccess(ctx, agent, 'ADMIN');
       return { ownerWhere: { agentId: id }, resolvedOwnerId: id };
     }
   }

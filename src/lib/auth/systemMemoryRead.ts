@@ -33,6 +33,17 @@ export async function systemMemoryReadGrants(
   if (agent.ownerUserId !== null) {
     if (managed && !principal.impersonation) {
       grants.push({ source: 'MEMORY_PRINCIPAL', role: 'owner', via: null, caps: FULL });
+    } else if (!principal.impersonation && (principal.roles?.includes('ADMIN') || principal.roles?.includes('OWNER'))) {
+      // #1787 (cor:dmo:050:13): a platform admin who may manage the Agent
+      // (requireAgentAccess) reads its definition — read-only, exactly what
+      // canReadMemoryRecord admits. Every other user-owned memory stays the
+      // owner's alone, and impersonation carries no platform role.
+      grants.push({
+        source: 'PLATFORM_ROLE',
+        role: principal.roles!.includes('OWNER') ? 'OWNER' : 'ADMIN',
+        via: null,
+        caps: READ,
+      });
     }
     return grants;
   }

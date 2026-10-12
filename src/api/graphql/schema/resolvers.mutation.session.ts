@@ -78,6 +78,7 @@ import {
   isAppParticipant,
   requireRole,
   requireOrgRole,
+  requireAgentAccess,
   requireOwnerOrOrgRole,
   requireSessionWriteAccess,
   resolveReadableNodeByLoc,
@@ -403,7 +404,7 @@ export const sessionMutations = {
           throw new GraphQLError(`Agent not found: ${agentRef}`, { extensions: { code: 'BAD_USER_INPUT' } });
         }
         if (agent.visibility !== 'PUBLIC') {
-          await requireOwnerOrOrgRole(ctx, agent, 'READER');
+          await requireAgentAccess(ctx, agent, 'READER');
         }
         agentId = resolvedAgentId;
       }
@@ -1676,7 +1677,7 @@ export const sessionMutations = {
       // 007-entity-id-or-urn: agentId may be ID, bare URN, or prefixed URN.
       const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentId);
       const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
-      await requireOwnerOrOrgRole(ctx, agent, 'ADMIN');
+      await requireAgentAccess(ctx, agent, 'ADMIN');
       const sysMemId = (agent as any).systemMemoryId as string;
       if (!sysMemId) throw new Error('Agent has no system memory');
 
@@ -1753,7 +1754,7 @@ export const sessionMutations = {
       // 007-entity-id-or-urn: agentId may be ID, bare URN, or prefixed URN.
       const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentId);
       const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
-      await requireOwnerOrOrgRole(ctx, agent, 'ADMIN');
+      await requireAgentAccess(ctx, agent, 'ADMIN');
       const sysMemId = (agent as any).systemMemoryId as string;
       if (!sysMemId) throw new Error('Agent has no system memory');
 
@@ -1788,7 +1789,7 @@ export const sessionMutations = {
       // 007-entity-id-or-urn: agentId may be ID, bare URN, or prefixed URN.
       const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentId);
       const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
-      await requireOwnerOrOrgRole(ctx, agent, 'ADMIN');
+      await requireAgentAccess(ctx, agent, 'ADMIN');
       const sysMemId = (agent as any).systemMemoryId as string;
       if (!sysMemId) throw new Error('Agent has no system memory');
 
@@ -1971,7 +1972,7 @@ export const sessionMutations = {
       // 007-entity-id-or-urn: agentId may be ID, bare URN, or prefixed URN.
       const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentId);
       const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
-      await requireOwnerOrOrgRole(ctx, agent, 'ADMIN');
+      await requireAgentAccess(ctx, agent, 'ADMIN');
 
       const now = new Date();
       const lockExpiry = (agent as any).editorLockExpiresAt as Date | null;
@@ -2000,7 +2001,7 @@ export const sessionMutations = {
       // 007-entity-id-or-urn: agentId may be ID, bare URN, or prefixed URN.
       const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentId);
       const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
-      await requireOwnerOrOrgRole(ctx, agent, 'ADMIN');
+      await requireAgentAccess(ctx, agent, 'ADMIN');
 
       await ctx.db.agent.update({
         where: { id: resolvedAgentId },

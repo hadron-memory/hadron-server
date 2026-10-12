@@ -55,6 +55,7 @@ import {
   loadAppUrn,
   loadApp,
   requireOrgRole,
+  requireAgentAccess,
   requireOwnerOrOrgRole,
   defaultAiConfigOf,
   isOrgMemberOrAdmin,
@@ -225,7 +226,7 @@ async function readableNestedAgent<T extends NestedAgentRow>(ctx: Context, agent
     if (await isAgentInstalledAndLicensed(ctx.db, ctx.appId, agent.id)) return agent;
   }
   try {
-    await requireOwnerOrOrgRole(ctx, agent, 'READER');
+    await requireAgentAccess(ctx, agent, 'READER');
     return agent;
   } catch (error) {
     if (error instanceof GraphQLError && error.extensions.code === 'FORBIDDEN') return null;

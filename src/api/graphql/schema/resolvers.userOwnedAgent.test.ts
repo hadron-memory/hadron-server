@@ -20,6 +20,8 @@ import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
 import { emitEntityUrnV2 } from '../../../lib/urnEmit.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
+import { canReadMemory, canWriteToMemory } from '../../../mcp/access-control.js';
+import { encryptToken } from '../../../lib/tokenCrypto.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -125,15 +127,21 @@ describe('user-owned agent — read/list/audit surfaces are owner-only', () => {
     );
   }
 
-  it('Query.memory: the owner reads the system memory; a platform admin does NOT (blocker #676)', async () => {
+  it('Query.memory: the owner reads the system memory; so does a platform admin (#1787 flips #676); another user does not', async () => {
     const agent = await makeUserOwnedAgent();
     const memId = agent.systemMemoryId!;
 
     const asOwner = await resolvers.Query.memory(null, { ref: memId }, ctx({ userId: ownerId, roles: ['READER'] }));
     expect(asOwner?.id).toBe(memId);
 
+    // #1787 (cor:dmo:050:13): the definition is readable by a platform admin
+    // who may manage the Agent — flipping #676's owner-only pin. Read-only:
+    // the definition's editor stays the agent-ownership surface.
+    const asAdmin = await resolvers.Query.memory(null, { ref: memId }, ctx({ userId: otherId, roles: ['ADMIN'] }));
+    expect(asAdmin?.id).toBe(memId);
+
     await expect(
-      resolvers.Query.memory(null, { ref: memId }, ctx({ userId: otherId, roles: ['ADMIN'] })),
+      resolvers.Query.memory(null, { ref: memId }, ctx({ userId: otherId, roles: ['READER'] })),
     ).resolves.toBeNull();
   });
 
@@ -210,17 +218,119 @@ describe('user-owned agent — read/list/audit surfaces are owner-only', () => {
     expect(asOwner.canRead).toBe(true);
     expect(asOwner.canManage).toBe(true);
 
-    // A platform admin auditing their OWN access to someone else's user-owned
-    // agent: before #1381 this reported "no access"; since the 2026-09-26
-    // amendment of cor:acl:060:01 a self-audit of a resource the caller cannot
-    // OPEN answers as missing — and a user-owned agent is owner-only to open.
+    // #1787 (cor:dmo:050:13): the admin can now OPEN the agent, so the
+    // self-audit (cor:acl:060:01's 2026-09-26 amendment keys on openability)
+    // answers with the manage grant instead of missing — and the audit
+    // surface agrees with the gate. The subject's platform role is re-read
+    // from the user row (#1731), so the fixture carries a real grant.
+    await db.user.update({ where: { id: otherId }, data: { roles: ['ADMIN'] } });
+    const asAdmin = await resolvers.Query.effectiveAccess(
+      null,
+      { user: otherId, resource: agentUrn },
+      ctx({ userId: otherId, roles: ['ADMIN'] }),
+    );
+    expect(asAdmin.canRead).toBe(true);
+    expect(asAdmin.canManage).toBe(true);
+
+    // An ordinary user still cannot open it — the self-audit stays missing.
     await expect(
       resolvers.Query.effectiveAccess(
         null,
         { user: otherId, resource: agentUrn },
-        ctx({ userId: otherId, roles: ['ADMIN'] }),
+        ctx({ userId: otherId, roles: ['READER'] }),
       ),
     ).rejects.toThrow('Resource not found');
+  });
+});
+
+
+
+// ── #1787 — platform admins manage user-owned Agents (cor:dmo:050:13) ──────
+
+describe('#1787 — a platform admin manages a user-owned Agent (cor:dmo:050:13, ruling #8895)', () => {
+  async function rogueAgent() {
+    return resolvers.Mutation.createAgent(
+      {}, { name: 'Rogue Helper' }, ctx({ userId: ownerId, roles: ['READER'] }),
+    );
+  }
+  const admin = () => ctx({ userId: otherId, roles: ['ADMIN'] });
+
+  it('reads, updates and deletes a user-owned Agent it does not own', async () => {
+    const agent = await rogueAgent();
+
+    const read = await resolvers.Query.agent(null, { ref: agent.id }, admin());
+    expect(read?.id).toBe(agent.id);
+
+    const updated = await resolvers.Mutation.updateAgent(
+      null, { ref: agent.id, name: 'Shut down by admin' }, admin(),
+    );
+    expect(updated.name).toBe('Shut down by admin');
+    expect((await db.agent.findUniqueOrThrow({ where: { id: agent.id } })).ownerUserId).toBe(ownerId);
+
+    expect(await resolvers.Mutation.deleteAgent(null, { ref: agent.id }, admin())).toBe(true);
+    expect(await db.agent.findFirst({ where: { id: agent.id, deletedAt: null } })).toBeNull();
+    expect(await db.memory.findFirst({ where: { id: agent.systemMemoryId!, deletedAt: null } })).toBeNull();
+  });
+
+  it('an ordinary non-owner is still refused everywhere', async () => {
+    const agent = await rogueAgent();
+    const ordinary = ctx({ userId: otherId, roles: ['READER'] });
+    await expect(resolvers.Query.agent(null, { ref: agent.id }, ordinary)).rejects.toThrow();
+    await expect(resolvers.Mutation.updateAgent(null, { ref: agent.id, name: 'X' }, ordinary)).rejects.toThrow();
+    await expect(resolvers.Mutation.deleteAgent(null, { ref: agent.id }, ordinary)).rejects.toThrow();
+    await expect(resolvers.Query.memory(null, { ref: agent.systemMemoryId! }, ordinary)).resolves.toBeNull();
+  });
+
+  it("the decrypted AI key stays owner-only: agentAIConfig refuses the admin (#8075 split, manage yes / read the key no)", async () => {
+    const agent = await rogueAgent();
+    await db.aiServiceConfig.create({
+      data: {
+        id: generateId(), agentId: agent.id, name: 'default', provider: 'openai',
+        apiKeyEncrypted: encryptToken('sk-live-1787'), model: 'gpt-test', createdBy: ownerId,
+      },
+    });
+    await expect(resolvers.Query.agentAIConfig(null, { agentRef: agent.id }, admin())).rejects.toThrow();
+    const ownerCfg = await resolvers.Query.agentAIConfig(
+      null, { agentRef: agent.id }, ctx({ userId: ownerId, roles: ['READER'] }),
+    );
+    expect(ownerCfg?.apiKey).toBe('sk-live-1787');
+  });
+
+  it('an impersonated platform-admin session gains nothing', async () => {
+    const agent = await rogueAgent();
+    const imp = { orgId: 'some-org', sessionId: 'imp-session', actorUserId: otherId };
+    const impAdmin = ctx({ userId: otherId, roles: ['ADMIN'], impersonation: imp as never });
+    await expect(resolvers.Query.agent(null, { ref: agent.id }, impAdmin)).rejects.toThrow();
+    await expect(resolvers.Mutation.deleteAgent(null, { ref: agent.id }, impAdmin)).rejects.toThrow();
+    await expect(resolvers.Query.memory(null, { ref: agent.systemMemoryId! }, impAdmin)).resolves.toBeNull();
+  });
+
+  it("the owner's personal memories and user secrets stay closed to the platform admin", async () => {
+    const agent = await rogueAgent();
+    const personal = await db.memory.create({
+      data: {
+        id: generateId(), class: 'personal', userId: ownerId,
+        ownerUserId: ownerId, organizationId: null,
+        urn: `owner-one:diary-${generateId().slice(0, 6)}`, name: 'Diary',
+      },
+    });
+    await expect(resolvers.Query.memory(null, { ref: personal.id }, admin())).resolves.toBeNull();
+    await db.secret.create({
+      data: { ownerType: 'user', ownerId, name: 'api', kind: 'bearer', metadata: {}, valueEncrypted: encryptToken('sekret') },
+    });
+    const page = await resolvers.Query.secrets(
+      null, { ownerType: 'user', ownerRef: ownerId }, admin(),
+    );
+    expect(page.items ?? []).toEqual([]);
+  });
+
+  it('MCP canReadMemory admits the platform admin for the definition, and nobody else new (parity with Query.memory)', async () => {
+    const agent = await rogueAgent();
+    const memId = agent.systemMemoryId!;
+    expect(await canReadMemory(db, { userId: otherId, roles: ['ADMIN'] } as never, memId)).toBe(true);
+    expect(await canReadMemory(db, { userId: otherId, roles: ['READER'] } as never, memId)).toBe(false);
+    // The write side gains no arm: the definition is read-only.
+    expect(await canWriteToMemory(db, { userId: otherId, roles: ['ADMIN'] } as never, memId)).toBe(false);
   });
 });
 
