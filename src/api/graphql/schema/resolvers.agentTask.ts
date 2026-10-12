@@ -70,7 +70,7 @@
 
 import { GraphQLError } from 'graphql';
 import { Prisma } from '../../../generated/prisma/index.js';
-import { type Context, isAppParticipant, clampListTake } from './resolvers.helpers.js';
+import { type Context, isAppParticipant, clampListTake, withoutRequestCaches } from './resolvers.helpers.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { AppNotFoundError, WorkerNotFoundError } from '../../../lib/entityRef/errors.js';
 import { isId } from '../../../lib/entityRef/shape.js';
@@ -82,6 +82,8 @@ import type { AuthorityAnchor } from '../../../lib/auth/authorityAnchors.js';
 import { mayStillDriveWorkerApp } from '../../../lib/teamAttention.js';
 import { withAuthorizedTx } from './authorizedTx.js';
 import { currentActor } from '../../../lib/requestActor.js';
+import { appKeyCaller, refuseSessionBound } from '../../../lib/appKeyScopes/scopes.js';
+import { lockAuthorityAnchors } from '../../../lib/auth/authorityAnchors.js';
 import {
   appendTaskEvent,
   eventActor,
@@ -217,6 +219,82 @@ export async function resolveParticipatedApp(ctx: Context, appRef: string): Prom
   return { app, actor };
 }
 
+/**
+ * cor:agt:050:21 (#1755): a pure App key reads the tasks and events of its OWN
+ * App, and nothing else. READ-ONLY by construction: it yields no `TaskActor`,
+ * so every write path (which needs one) still refuses it, and it never acts as a
+ * worker. A foreign, deleted or revoked-key App answers like a missing one; only
+ * then is a session refused, so a key learns nothing about an App not its own.
+ * Judged on `ctx.db`, which for a key's read is the read's own transaction.
+ */
+async function keyMayReadApp(ctx: Context, app: TaskApp): Promise<boolean> {
+  const key = appKeyCaller(ctx);
+  if (!key || app.deletedAt || app.id !== key.appId) return false;
+  const live = await ctx.db.appKey.findFirst({
+    where: { id: key.appKeyId, appId: app.id, revokedAt: null },
+    select: { id: true },
+  });
+  if (!live) return false;
+  if (app.organizationId) {
+    const org = await ctx.db.organization.findFirst({ where: { id: app.organizationId, deletedAt: null }, select: { id: true } });
+    if (!org) return false;
+  }
+  // A key never narrows or widens its read through a session (Holger #8097).
+  refuseSessionBound(ctx);
+  if (currentActor().workerId) {
+    throw taskError('APP_KEY_SESSION_BOUND', 'An App key does not act as a worker. Send no session.');
+  }
+  return true;
+}
+
+/**
+ * A key's whole read in ONE transaction that holds the App's authority anchors
+ * SHARED: whoever revokes the key or deletes the App takes them exclusively, so
+ * either the revocation committed first and the key is refused here, or it waits
+ * for this read. The App and the key are re-read after the lock. `onGone` runs
+ * (and its refusal propagates) when the key may not read.
+ */
+async function inKeyReadTx<T>(
+  ctx: Context,
+  appId: string,
+  onGone: () => T,
+  body: (txCtx: Context, app: TaskApp) => Promise<T>,
+): Promise<T> {
+  const head = await loadApp(ctx, appId);
+  if (!head) return onGone();
+  return ctx.db.$transaction(async (tx) => {
+    await lockAuthorityAnchors(tx, [
+      { kind: 'app', id: head.id },
+      ...(head.organizationId ? [{ kind: 'org' as const, id: head.organizationId }] : []),
+      ...(head.ownerUserId ? [{ kind: 'user' as const, id: head.ownerUserId }] : []),
+    ], 'shared');
+    const txCtx = withoutRequestCaches(ctx, tx);
+    const app = await loadApp(txCtx, appId);
+    // Ownership moved while we waited for the anchors: the locks we hold are the wrong ones, so answer as missing.
+    if (!app || app.organizationId !== head.organizationId || app.ownerUserId !== head.ownerUserId) return onGone();
+    if (!(await keyMayReadApp(txCtx, app))) return onGone();
+    return body(txCtx, app);
+  });
+}
+
+/** Run a read over an App the caller may READ tasks and events of: a participant, or the App's own key. */
+async function withReadableApp<T>(ctx: Context, appRef: string, body: (c: Context, app: TaskApp) => Promise<T>): Promise<T> {
+  const key = appKeyCaller(ctx);
+  if (!key) {
+    const { app } = await resolveParticipatedApp(ctx, appRef);
+    return body(ctx, app);
+  }
+  let appId: string;
+  try {
+    ({ id: appId } = await resolveAppRef(ctx.db, appRef));
+  } catch (e) {
+    if (e instanceof AppNotFoundError) throw appNotFound(appRef);
+    throw e;
+  }
+  if (appId !== key.appId) throw appNotFound(appRef);
+  return inKeyReadTx(ctx, appId, () => { throw appNotFound(appRef); }, body);
+}
+
 /** Load a task the caller may read, with its App and the actor — or null (concealed as missing). */
 async function loadReadableTask(
   ctx: Context,
@@ -230,6 +308,26 @@ async function loadReadableTask(
   const actor = await resolveTaskActor(ctx, app);
   if (!actor) return null;
   return { task, app, actor };
+}
+
+/** A task the caller may READ, with its App: a participant, or the App's own key (#1755). Null when missing or unreadable. */
+async function withReadableTask<T>(
+  ctx: Context,
+  taskId: string,
+  body: (c: Context, r: { task: TaskRow; app: TaskApp }) => Promise<T>,
+): Promise<T | null> {
+  const key = appKeyCaller(ctx);
+  if (!key) {
+    const readable = await loadReadableTask(ctx, taskId);
+    return readable ? body(ctx, readable) : null;
+  }
+  if (typeof taskId !== 'string' || !isId(taskId)) return null;
+  const head = await ctx.db.agentTask.findUnique({ where: { id: taskId }, select: { appId: true } });
+  if (!head || head.appId !== key.appId) return null;
+  return inKeyReadTx<T | null>(ctx, head.appId, () => null, async (txCtx, app) => {
+    const task = await txCtx.db.agentTask.findUnique({ where: { id: taskId } });
+    return task && task.appId === app.id ? body(txCtx, { task, app }) : null;
+  });
 }
 
 /** Is the actor this party? A person never matches a worker party, nor the reverse. */
@@ -1018,13 +1116,12 @@ async function partyFilter(ctx: Context, app: TaskApp, input: PartyInput, prefix
 export const agentTaskQueries = {
   /** One task, or null when it does not exist or the caller may not read it (cor:agt:050:21). */
   agentTask: async (_: unknown, { id }: { id: string }, ctx: Context) => {
-    const readable = await loadReadableTask(ctx, id);
-    return readable?.task ?? null;
+    return withReadableTask(ctx, id, async (_c, { task }) => task);
   },
 
-  /** An App's tasks, newest first, for its participants (cor:agt:050:21). */
-  agentTasks: async (_: unknown, args: ListArgs, ctx: Context) => {
-    const { app } = await resolveParticipatedApp(ctx, args.appRef);
+  /** An App's tasks, newest first, for its participants and the App's own key (cor:agt:050:21, #1755). */
+  agentTasks: async (_: unknown, args: ListArgs, ctx: Context) =>
+    withReadableApp(ctx, args.appRef, async (c, app) => {
     const statuses = args.status?.map((s) => STATUS_FROM_GQL[s] ?? s);
     const where: Prisma.AgentTaskWhereInput = {
       appId: app.id,
@@ -1034,24 +1131,23 @@ export const agentTaskQueries = {
       ...(args.rootsOnly ? { parentTaskId: null } : {}),
       ...(args.queued ? { status: 'pending', assigneeWorkerId: null, assigneeUserId: null } : {}),
     };
-    const ownerWhere = await partyFilter(ctx, app, args.owner, 'owner');
-    const assigneeWhere = await partyFilter(ctx, app, args.assignee, 'assignee');
-    return ctx.db.agentTask.findMany({
+    const ownerWhere = await partyFilter(c, app, args.owner, 'owner');
+    const assigneeWhere = await partyFilter(c, app, args.assignee, 'assignee');
+    return c.db.agentTask.findMany({
       where: { AND: [where, ownerWhere, assigneeWhere] },
       orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       take: clampListTake(args.limit),
       skip: Math.max(0, args.offset ?? 0),
     });
-  },
+    }),
 
   /**
    * A task and every task below it, root first then by creation. Null when the
    * root is missing or unreadable. Bounded at TASK_TREE_MAX rows.
    */
-  agentTaskTree: async (_: unknown, { root }: { root: string }, ctx: Context) => {
-    const readable = await loadReadableTask(ctx, root);
-    if (!readable) return null;
-    const rows = await ctx.db.$queryRaw<{ id: string; depth: number }[]>`
+  agentTaskTree: async (_: unknown, { root }: { root: string }, ctx: Context) =>
+    withReadableTask(ctx, root, async (c, readable) => {
+    const rows = await c.db.$queryRaw<{ id: string; depth: number }[]>`
       WITH RECURSIVE tree AS (
         SELECT id, 0 AS depth FROM agent_tasks WHERE id = ${readable.task.id}
         UNION ALL
@@ -1060,13 +1156,13 @@ export const agentTaskQueries = {
         WHERE t.app_id = ${readable.app.id} AND tree.depth < 64
       )
       SELECT id, depth FROM tree LIMIT ${TASK_TREE_MAX}`;
-    const tasks = await ctx.db.agentTask.findMany({
+    const tasks = await c.db.agentTask.findMany({
       where: { id: { in: rows.map((r) => r.id) }, appId: readable.app.id },
     });
     const depth = new Map(rows.map((r) => [r.id, r.depth]));
     return tasks.sort((a, b) =>
       (depth.get(a.id)! - depth.get(b.id)!) || a.createdAt.getTime() - b.createdAt.getTime() || a.id.localeCompare(b.id));
-  },
+    }),
 
   /**
    * An App's team event stream (cor:agt:050:11, :21), in (createdAt, id)
@@ -1080,14 +1176,13 @@ export const agentTaskQueries = {
     _: unknown,
     args: { appRef: string; since?: unknown; after?: string | null; types?: string[] | null; alarmsOnly?: boolean | null; taskId?: string | null; limit?: number | null },
     ctx: Context,
-  ) => {
-    const { app } = await resolveParticipatedApp(ctx, args.appRef);
+  ) => withReadableApp(ctx, args.appRef, async (c, app) => {
     const since = args.since == null ? null : parseStartBy(args.since);
     let afterWhere: Prisma.AgentTeamEventWhereInput = {};
     if (args.after) {
       // Scoped to this App: another App's event id is just an unknown cursor.
       const cursor = isId(args.after)
-        ? await ctx.db.agentTeamEvent.findFirst({
+        ? await c.db.agentTeamEvent.findFirst({
             where: { id: args.after, appId: app.id },
             select: { id: true, createdAt: true },
           })
@@ -1100,7 +1195,7 @@ export const agentTaskQueries = {
         ],
       };
     }
-    return ctx.db.agentTeamEvent.findMany({
+    return c.db.agentTeamEvent.findMany({
       where: {
         appId: app.id,
         ...afterWhere,
@@ -1112,7 +1207,7 @@ export const agentTaskQueries = {
       orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
       take: clampListTake(args.limit),
     });
-  },
+  }),
 };
 
 // ── Field resolvers ───────────────────────────────────────────────────────

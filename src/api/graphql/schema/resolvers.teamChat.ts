@@ -212,7 +212,6 @@ async function locateTeamChatRoot(ctx: Context, app: AppRow): Promise<ChatRootRo
         ...teamSpaceAudienceFilter,
         ...teamSpaceOwnerFilter({
           appOwnerUserId: app.ownerUserId,
-          callerUserId: ctx.userId ?? null,
           impersonating: !!ctx.impersonation,
         }),
       },
@@ -834,7 +833,6 @@ async function resolveChannelTarget(ctx: Context, channelRef: string, mode: 'pos
     hostApp &&
     isTeamSpaceRow(mem, {
       appOwnerUserId: hostApp.ownerUserId,
-      callerUserId: ctx.userId ?? null,
       impersonating: !!ctx.impersonation,
     })
       ? hostApp
