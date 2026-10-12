@@ -307,3 +307,43 @@ describe('#1779 — an empty target list is a no-op, not a malformed query', () 
     });
   });
 });
+
+describe('#1783 — aggregatePlaintextWindow edge semantics', () => {
+  const target = (over: Partial<Parameters<typeof aggregatePlaintextWindow>[4][number]> = {}) => ({
+    index: 0, seen: 0, head: 100, workerId: 'w-target', mentionOnly: false, tokens: ['all', 'team', 'w00'], ...over,
+  });
+  const put = (seq: number, data: object, locSuffix = String(seq)) => db.node.create({
+    data: {
+      id: generateId(), memoryId: channel.memoryId, loc: `${channel.loc}:messages:${locSuffix}`, name: locSuffix,
+      nodeType: 'chat-message', seq, messageChannelId: channel.id, content: 'x', data,
+    },
+  });
+  beforeEach(async () => { await resetTeamChannel(0); });
+
+  it('never counts a row above the target\'s frozen head', async () => {
+    for (let seq = 1; seq <= 10; seq++) await put(seq, { mentions: [] });
+    const r = await aggregatePlaintextWindow(db, channel.id, 0, 10, [target({ head: 6 })]);
+    expect(r.perTarget).toEqual([{ index: 0, unread: 6, mentions: 0, first: 1, lastRelevant: 6 }]);
+  });
+
+  it('mention-only: lastRelevant is the last MENTIONING row, and null with none', async () => {
+    for (let seq = 1; seq <= 9; seq++) await put(seq, { mentions: seq === 4 ? ['w00'] : [] });
+    const only = await aggregatePlaintextWindow(db, channel.id, 0, 9, [target({ mentionOnly: true })]);
+    expect(only.perTarget[0]).toMatchObject({ unread: 9, mentions: 1, lastRelevant: 4 });
+    const none = await aggregatePlaintextWindow(db, channel.id, 0, 3, [target({ mentionOnly: true })]);
+    expect(none.perTarget[0]).toMatchObject({ unread: 3, mentions: 0, lastRelevant: null });
+    const both = await aggregatePlaintextWindow(db, channel.id, 0, 9, [target()]);
+    expect(both.perTarget[0]).toMatchObject({ lastRelevant: 9 });
+  });
+
+  it('the frontier row is one a target actually COUNTED, as the row walk had it (duplicate seqs)', async () => {
+    // Two rows at seq 5 (a pre-#919 artifact): the higher loc is the target's own post, which the
+    // walk skipped, so the counted frontier is the lower-loc row.
+    await put(4, { mentions: [] });
+    await put(5, { mentions: [] }, '5a');
+    await put(5, { authorWorkerId: 'w-target', mentions: [] }, '5b');
+    const r = await aggregatePlaintextWindow(db, channel.id, 0, 10, [target()]);
+    expect(r.frontierLoc).toBe(`${channel.loc}:messages:5a`);
+    expect(r.perTarget[0]).toMatchObject({ unread: 2, lastRelevant: 5 });
+  });
+});
