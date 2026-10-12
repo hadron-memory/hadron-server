@@ -888,7 +888,7 @@ describe('#1754 — backlog and the stall rules (cor:agt:050:02, :17)', () => {
     await tick('08:31');
     const [a] = await alarms('assignment.unassignable');
     expect(a).toBeTruthy();
-    expect(await wakes(a.id)).toHaveLength(2); // ada (child owner), then liam (root owner)
+    expect(await wakes(a.id)).toHaveLength(3); // ada (child owner), liam (root owner), then the App manager (#1761)
     await db.agentTask.update({ where: { id: child.id }, data: { status: 'backlog' } });
     // Row 1 fell due at 09:01; the 09:10 pass wakes it, and raises nothing new.
     expect(await tick('09:10')).toEqual({ raised: 0, woken: 1, cleared: 0 });
