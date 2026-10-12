@@ -9220,6 +9220,11 @@ export const typeDefs = `#graphql
     regenerateAppKey(appRef: ID!): AppCreated!
 
     # User management
+    """
+    Update display name and handle. A supplied email must match the existing
+    address (ignoring case and surrounding whitespace); it is not rewritten
+    or cleared by this call.
+    """
     updateMyProfile(name: String, handle: String, email: String): User!
     updateUserRoles(userId: ID!, roles: [Role!]!): User!
     """
@@ -11282,6 +11287,8 @@ export const typeDefs = `#graphql
     App Key callers only: vouch for a user, creating (or returning) the User
     this App knows by \`externalId\`. Managing that user's SESSIONS is the
     startAgentSession / endAgentSession pair below, not this call.
+    The legacy email argument accepts only empty values; identity addresses
+    are established through verified sign-in.
     """
     createAppUser(externalId: String!, handle: String, name: String, email: String): User!
 
