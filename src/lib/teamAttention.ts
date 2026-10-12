@@ -697,13 +697,15 @@ type PlaintextWindowResult = {
  * aggregates leave SQL, never a message body, and a target is counted against
  * its own register's cursor and head alone.
  */
-async function aggregatePlaintextWindow(
+export async function aggregatePlaintextWindow(
   db: Context['db'],
   channelId: string,
   lo: number,
   hi: number,
   targets: PlaintextTarget[],
 ): Promise<PlaintextWindowResult> {
+  // A VALUES list needs a row: with no targets there is nothing to count.
+  if (targets.length === 0) return { perTarget: [], cursor: null, frontierLoc: null };
   const values = Prisma.join(
     targets.map((t) => Prisma.sql`(${t.index}::int, ${t.seen}::int, ${t.head}::int, ${t.workerId}::text, ${t.mentionOnly}::boolean, ${t.tokens}::text[])`),
   );
@@ -750,20 +752,27 @@ async function aggregatePlaintextWindow(
   let frontierLoc: string | null = null;
   const frontierSeq = rows.reduce((m, r) => Math.max(m, r.last_counted), 0);
   if (frontierSeq > 0) {
-    if (last[0] && last[0].seq === frontierSeq) {
-      frontierLoc = last[0].loc;
-    } else {
-      const found = await db.$queryRaw<Array<{ loc: string }>>(Prisma.sql`
-        SELECT n.loc FROM nodes n
-        WHERE n.message_channel_id = ${channelId}
-          AND n.node_type = 'chat-message'
-          AND n.deleted_at IS NULL
-          AND n.seq = ${frontierSeq}
-        ORDER BY n.loc COLLATE "C" DESC
-        LIMIT 1
-      `);
-      frontierLoc = found[0]?.loc ?? null;
-    }
+    // The row walk only advanced its counted frontier on a row some target
+    // COUNTED; with duplicate seqs (pre-#919) the highest loc at that seq can be
+    // an uncounted own post, so pick the highest-loc row a target counted.
+    const found = await db.$queryRaw<Array<{ loc: string }>>(Prisma.sql`
+      WITH t(idx, seen, head, worker_id) AS (VALUES ${Prisma.join(
+        targets.map((t) => Prisma.sql`(${t.index}::int, ${t.seen}::int, ${t.head}::int, ${t.workerId}::text)`),
+      )})
+      SELECT n.loc FROM nodes n
+      WHERE n.message_channel_id = ${channelId}
+        AND n.node_type = 'chat-message'
+        AND n.deleted_at IS NULL
+        AND n.seq = ${frontierSeq}
+        AND EXISTS (
+          SELECT 1 FROM t
+          WHERE n.seq > t.seen AND n.seq <= t.head
+            AND COALESCE(n.data ->> 'authorWorkerId', '') <> t.worker_id
+        )
+      ORDER BY n.loc COLLATE "C" DESC
+      LIMIT 1
+    `);
+    frontierLoc = found[0]?.loc ?? null;
   }
   return {
     perTarget: rows.map((r) => ({
@@ -827,6 +836,7 @@ async function pagedScanStep(
       const plainRequest = plainWindow * PLAINTEXT_REQUEST_WINDOWS;
       if (plainSpent >= plainRequest) continue; // ceiling reached; resume next page
       const list = targetsOfChannel.get(k) ?? [];
+      if (list.length === 0) { state.cDone[k] = true; continue; } // no target to count for
       const lo = state.cCursorSeq[k] === -1 ? state.cMin[k] : Math.max(state.cCursorSeq[k], state.cMin[k]);
       const hi = Math.min(state.cMax[k], lo + Math.min(plainWindow, plainRequest - plainSpent));
       if (hi > lo) {
