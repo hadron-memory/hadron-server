@@ -542,6 +542,38 @@ describe('backlog — parked, unassigned (#1754, cor:agt:050:02)', () => {
     const seen = await Q.agentTasks({}, { appRef: app.id, status: ['BACKLOG'] }, ctx(member.id));
     expect(seen.map((t: any) => t.id)).toEqual([bl.id]);
   });
+
+  it('assigning a backlog task writes task.ready beside task.assigned (the uniform left-backlog signal)', async () => {
+    const t = await create(ctx(member.id), { status: 'BACKLOG' });
+    await M.assignAgentTask({}, { taskId: t.id, assignee: { worker: 'Liam' } }, ctx(member.id));
+    expect((await events(t.id)).map((e) => e.type)).toEqual(['task.created', 'task.ready', 'task.assigned']);
+  });
+
+  it('two concurrent make-ready calls: one typed refusal, never a duplicate event pair', async () => {
+    const t = await create(ctx(member.id), { status: 'BACKLOG' });
+    const codes = await Promise.all([ctx(member.id), ctx(admin.id)].map((c) =>
+      M.makeAgentTaskReady({}, { taskId: t.id }, c).then(() => 'NO_ERROR', (e: GraphQLError) => String(e.extensions?.code))));
+    expect(codes.sort()).toEqual(['NO_ERROR', 'TASK_INVALID_TRANSITION']);
+    const ev = (await events(t.id)).map((e) => e.type);
+    expect(ev.filter((t2) => t2 === 'task.ready')).toHaveLength(1);
+    expect(ev.filter((t2) => t2 === 'assignment.queued')).toHaveLength(1);
+    expect((await db.agentTask.findUniqueOrThrow({ where: { id: t.id } })).status).toBe('pending');
+  });
+
+  it('a backlog child counts as not open in a parent cancel (openChildCount)', async () => {
+    const parent = await anneTask();
+    await asWorker(anne, () =>
+      M.createAgentTask({}, { input: { parentTaskId: parent.id, title: 'later', status: 'BACKLOG' } }, ctx(member.id)));
+    const out = await M.cancelAgentTask({}, { taskId: parent.id }, ctx(member.id));
+    expect(out.status).toBe('cancelled');
+    expect((await events(parent.id)).at(-1)!.payload).toEqual({ fromStatus: 'pending', openChildCount: 0 });
+  });
+
+  it('a backlog task may carry a startBy already past (no alarm while parked)', async () => {
+    const t = await create(ctx(member.id), { status: 'BACKLOG', startBy: new Date(Date.now() - 86_400_000).toISOString() });
+    expect(t.status).toBe('backlog');
+    expect(t.startBy).toBeInstanceOf(Date);
+  });
 });
 
 // ── Start, progress, finish (cor:agt:050:08, :05, :02) ────────────────────

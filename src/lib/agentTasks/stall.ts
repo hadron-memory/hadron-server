@@ -29,8 +29,9 @@
  *     assignee last moved (activity, a still-working note, the parent's start
  *     or its assignment). A second child finishing in the same silence is the
  *     same episode: the condition has held since the first.
- *   - unassignable: when the task was queued, its creation (nothing unassigns
- *     a task in T1–T2).
+ *   - unassignable: when the task entered its current queue stint — its latest
+ *     `assignment.queued` event (#1754: make-ready re-queues a parked task),
+ *     falling back to creation for rows seeded past the resolvers.
  *
  * ACTIVITY is cor:agt:050:12: the worker's sessions, through the one SQL
  * derivation the roster uses (`loadWorkersActivity`, lib/sessionActivity.ts's
@@ -136,6 +137,14 @@ export type StallInputs = {
   lastProgressAt: Date | null;
   /** The worker assignee's last session activity; null for a person or a queued task. */
   assigneeActivityAt: Date | null;
+  /**
+   * When the task entered its CURRENT queue stint: the latest
+   * `assignment.queued` event (#1754 — make-ready re-queues a parked task, so
+   * creation is no longer the queue entry). Null when no such event exists, a
+   * row seeded past the resolvers; `unassignable` then falls back to creation,
+   * the pre-#1754 episode start.
+   */
+  queuedAt: Date | null;
 };
 
 /**
@@ -151,7 +160,7 @@ export async function loadStallInputs(db: Db, where: Prisma.AgentTaskWhereInput,
   if (tasks.length === 0) return [];
   const ids = tasks.map((t) => t.id);
   const workerIds = [...new Set(tasks.map((t) => t.assigneeWorkerId).filter((w): w is string => !!w))];
-  const [children, progress, activity] = await Promise.all([
+  const [children, progress, queued, activity] = await Promise.all([
     db.agentTask.findMany({
       where: { parentTaskId: { in: ids } },
       select: { id: true, parentTaskId: true, status: true, finishedAt: true, cancelledAt: true },
@@ -161,9 +170,15 @@ export async function loadStallInputs(db: Db, where: Prisma.AgentTaskWhereInput,
       where: { taskId: { in: ids }, type: 'task.progress' },
       _max: { createdAt: true },
     }),
+    db.agentTeamEvent.groupBy({
+      by: ['taskId'],
+      where: { taskId: { in: ids }, type: 'assignment.queued' },
+      _max: { createdAt: true },
+    }),
     loadWorkersActivity({ db } as unknown as Context, workerIds, now),
   ]);
   const progressBy = new Map(progress.map((p) => [p.taskId, p._max.createdAt]));
+  const queuedBy = new Map(queued.map((q) => [q.taskId, q._max.createdAt]));
   const childrenBy = new Map<string, typeof children>();
   for (const c of children) {
     const list = childrenBy.get(c.parentTaskId as string) ?? [];
@@ -183,6 +198,7 @@ export async function loadStallInputs(db: Db, where: Prisma.AgentTaskWhereInput,
         .sort((a, b) => a.finishedAt.getTime() - b.finishedAt.getTime() || a.id.localeCompare(b.id)),
       lastProgressAt: progressBy.get(task.id) ?? null,
       assigneeActivityAt: task.assigneeWorkerId ? activity.get(task.assigneeWorkerId)?.lastActiveAt ?? null : null,
+      queuedAt: queuedBy.get(task.id) ?? null,
     };
   });
 }
@@ -232,9 +248,16 @@ export function stallCandidates(inputs: StallInputs, windows: StallWindows, now:
     });
   };
 
-  // cor:agt:050:17 — queued: pending with no assignee.
+  // cor:agt:050:17 — queued: pending with no assignee. The episode starts when
+  // the task entered the queue — its latest `assignment.queued` event: #1754
+  // made queue entry a move (make-ready re-queues a parked task), so `createdAt`
+  // would arm an aged backlog's alarm the moment it is made ready, and a second
+  // stint would share the first alarm's episode key and be silenced. Rows with
+  // no queue event (seeded past the resolvers) fall back to creation, the
+  // pre-#1754 start.
   if (task.status === 'pending' && !assignee) {
-    add('unassignable', task.createdAt, plus(task.createdAt, windows.assignmentMinutes));
+    const queuedAt = inputs.queuedAt ?? task.createdAt;
+    add('unassignable', queuedAt, plus(queuedAt, windows.assignmentMinutes));
   }
 
   // cor:agt:050:14 — assigned and still pending. A still-working note does not

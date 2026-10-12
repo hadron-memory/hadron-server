@@ -8423,8 +8423,9 @@ export const typeDefs = `#graphql
     revokeAppGrant(appRef: String!, workerRef: String!, name: AppGrantName!): AppGrant!
 
     """
-    #1705 — assign a queued task (pending, no assignee): the task's owner or
-    whoever manages the App (hrn:node:hadronmemory.com:specs:cor:agt:050:09). closeSessionWhenDone, when
+    #1705 — assign a task with no assignee — a queued task (pending) or a BACKLOG task: the
+    task's owner, a worker the owner reports to, or whoever manages the App
+    (hrn:node:hadronmemory.com:specs:cor:agt:050:09). closeSessionWhenDone, when
     given, replaces the task's value. Assigning a BACKLOG task moves it to
     pending (hrn:node:hadronmemory.com:specs:cor:agt:050:02, #1754). Refusals: TASK_NOT_FOUND, TASK_NOT_OWNER,
     TASK_ENDED, TASK_INVALID_TRANSITION (already assigned: use
@@ -8462,8 +8463,9 @@ export const typeDefs = `#graphql
     finishAgentTask(taskId: ID!, result: AgentTaskResultInput!): AgentTask!
 
     """
-    #1705 — cancel a pending, started or backlog task: its owner, or whoever manages
-    the App (hrn:node:hadronmemory.com:specs:cor:agt:050:09; a backlog task directly, Holger team chat #8150). Refusals:
+    #1705 — cancel a pending, started or backlog task: its owner, a worker the owner reports
+    to, or whoever manages the App (hrn:node:hadronmemory.com:specs:cor:agt:050:09; a backlog task directly,
+    Holger team chat #8150). Refusals:
     TASK_NOT_FOUND, TASK_NOT_OWNER, TASK_ENDED, SESSION_NOT_BOUND, APP_UNINSTALLED.
     """
     cancelAgentTask(taskId: ID!): AgentTask!
@@ -8471,7 +8473,8 @@ export const typeDefs = `#graphql
     """
     #1754 — park a queued task in the backlog (hrn:node:hadronmemory.com:specs:cor:agt:050:02): pending
     with no assignee becomes BACKLOG — unassigned, never matched, never waited
-    on, no alarms. Whoever may assign a task may park it
+    on, no alarms. Whoever may assign a task may park it: its owner, a worker
+    the owner reports to, or whoever manages the App
     (hrn:node:hadronmemory.com:specs:cor:agt:050:09). Refusals: TASK_NOT_FOUND, TASK_NOT_OWNER,
     TASK_ENDED, TASK_INVALID_TRANSITION (not pending, or an assignee),
     SESSION_NOT_BOUND, APP_UNINSTALLED.
@@ -8481,7 +8484,8 @@ export const typeDefs = `#graphql
     """
     #1754 — make a backlog task ready to be worked
     (hrn:node:hadronmemory.com:specs:cor:agt:050:02): BACKLOG becomes PENDING and the task enters
-    the queue. Whoever may assign a task may make it ready
+    the queue. Whoever may assign a task may make it ready: its owner, a worker
+    the owner reports to, or whoever manages the App
     (hrn:node:hadronmemory.com:specs:cor:agt:050:09). Refusals: TASK_NOT_FOUND, TASK_NOT_OWNER,
     TASK_ENDED, TASK_INVALID_TRANSITION (not backlog), SESSION_NOT_BOUND, APP_UNINSTALLED.
     """

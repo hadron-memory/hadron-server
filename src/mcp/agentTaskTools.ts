@@ -320,7 +320,9 @@ export function registerAgentTaskTools(server: McpServer, deps: { db: PrismaClie
 
   server.tool(
     'hadron_task_assign',
-    'Assign a queued task (pending, no assignee): the task\'s owner, or whoever manages the App (cor:agt:050:09). Assigning a BACKLOG task moves it to pending. A task that already has an assignee is moved with hadron_task_reassign.',
+    'Assign a task with no assignee — a queued task (pending) or a BACKLOG task: the task\'s owner, a worker the owner ' +
+      'reports to, or whoever manages the App (cor:agt:050:09). Assigning a BACKLOG task moves it to pending. A task that ' +
+      'already has an assignee is moved with hadron_task_reassign.',
     { taskId, assignee: party, closeSessionWhenDone: z.boolean().optional(), session: SESSION_WRITE },
     async ({ session, ...args }) =>
       write('hadron_task_assign', session, 'Assigned', (ctx) => M.assignAgentTask({}, args, ctx)),
@@ -367,7 +369,7 @@ export function registerAgentTaskTools(server: McpServer, deps: { db: PrismaClie
 
   server.tool(
     'hadron_task_cancel',
-    'Cancel a pending, started or backlog task: its owner, or whoever manages the App (cor:agt:050:09).',
+    'Cancel a pending, started or backlog task: its owner, a worker the owner reports to, or whoever manages the App (cor:agt:050:09).',
     { taskId, session: SESSION_WRITE },
     async ({ session, taskId: id }) =>
       write('hadron_task_cancel', session, 'Cancelled', (ctx) => M.cancelAgentTask({}, { taskId: id }, ctx)),
@@ -378,7 +380,7 @@ export function registerAgentTaskTools(server: McpServer, deps: { db: PrismaClie
   server.tool(
     'hadron_task_park',
     'Park a queued task (pending, no assignee) in the backlog (cor:agt:050:02): unassigned, never matched, never waited on, ' +
-      'no alarms. Whoever may assign a task may park it (cor:agt:050:09).',
+      'no alarms. Whoever may assign a task may park it: its owner, a worker the owner reports to, or whoever manages the App (cor:agt:050:09).',
     { taskId, session: SESSION_WRITE },
     async ({ session, taskId: id }) =>
       write('hadron_task_park', session, 'Parked', (ctx) => M.parkAgentTask({}, { taskId: id }, ctx)),
@@ -387,7 +389,7 @@ export function registerAgentTaskTools(server: McpServer, deps: { db: PrismaClie
   server.tool(
     'hadron_task_make_ready',
     'Make a backlog task ready to be worked (cor:agt:050:02): it becomes pending and enters the queue. Whoever may assign ' +
-      'a task may make it ready (cor:agt:050:09).',
+      'a task may make it ready: its owner, a worker the owner reports to, or whoever manages the App (cor:agt:050:09).',
     { taskId, session: SESSION_WRITE },
     async ({ session, taskId: id }) =>
       write('hadron_task_make_ready', session, 'Ready', (ctx) => M.makeAgentTaskReady({}, { taskId: id }, ctx)),

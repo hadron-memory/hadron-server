@@ -722,10 +722,11 @@ export const agentTaskMutations = {
   },
 
   /**
-   * Assign a queued task — pending, with no assignee (cor:agt:050:09). The
-   * owner, or whoever manages the App. A task that already has an assignee is
-   * moved with `reassignAgentTask` instead. Assigning a BACKLOG task moves it
-   * to pending (cor:agt:050:02, #1754).
+   * Assign a task with no assignee — a queued task (pending) or a BACKLOG task
+   * (cor:agt:050:09): the owner, whoever manages the App, or a worker the
+   * owner reports to. Assigning a BACKLOG task moves it to pending
+   * (cor:agt:050:02, #1754), writing `task.ready` beside `task.assigned`. A
+   * task that already has an assignee is moved with `reassignAgentTask` instead.
    */
   assignAgentTask: async (
     _: unknown,
@@ -743,17 +744,34 @@ export const agentTaskMutations = {
       }
       party ??= await resolveParty(txCtx, app, assignee, 'TASK_ASSIGNEE_INVALID');
       const close = closeSessionWhenDone ?? task.closeSessionWhenDone;
-      await tx.agentTask.update({
-        where: { id: task.id },
+      // #1754 (cor:agt:050:02): assigning a backlog task makes it ready work.
+      // The write is a guarded updateMany on the consumed state (no assignee,
+      // and the status the snapshot decided from) — the same discipline as the
+      // matcher's assignment — so a state that moved under the write matches
+      // no row and refuses typed instead of surfacing a CHECK violation.
+      const fromBacklog = task.status === 'backlog';
+      const n = await tx.agentTask.updateMany({
+        where: {
+          id: task.id, appId: app.id, assigneeWorkerId: null, assigneeUserId: null,
+          status: fromBacklog ? 'backlog' : 'pending',
+        },
         data: {
           ...partyColumns('assignee', party),
-          // #1754 (cor:agt:050:02): assigning a backlog task makes it ready work.
-          ...(task.status === 'backlog' ? { status: 'pending' as const } : {}),
+          ...(fromBacklog ? { status: 'pending' as const } : {}),
           closeSessionWhenDone: close, ...assignedStamp(ctx, new Date()), ...updatedStamp(ctx),
         },
       });
+      if (n.count === 0) {
+        throw taskError('TASK_INVALID_TRANSITION', 'This task already has an assignee; reassign it instead.', { taskId });
+      }
+      const evActor = eventActor(ctx.userId);
+      if (fromBacklog) {
+        // The uniform left-the-backlog signal (#1790 review, Emerson P3-1):
+        // make-ready writes task.ready, and so does assigning a backlog task.
+        await appendTaskEvent(tx, { appId: app.id, taskId: task.id, actor: evActor, event: { type: 'task.ready' } });
+      }
       await appendTaskEvent(tx, {
-        appId: app.id, taskId: task.id, actor: eventActor(ctx.userId),
+        appId: app.id, taskId: task.id, actor: evActor,
         event: { type: 'task.assigned', assignee: party, closeSessionWhenDone: close },
       });
     });
@@ -776,7 +794,17 @@ export const agentTaskMutations = {
       if (assigneeOf(task)) {
         throw taskError('TASK_INVALID_TRANSITION', 'A backlog task has no assignee; this one is assigned (cor:agt:050:02).', { taskId });
       }
-      await tx.agentTask.update({ where: { id: task.id }, data: { status: 'backlog', ...updatedStamp(ctx) } });
+      // A guarded updateMany on the consumed state (#1790 review, Xylon P2-1):
+      // the task row is locked (lockTask), and the write re-asserts what it
+      // consumes, so a state that moved anyway matches no row and refuses
+      // typed rather than surfacing a CHECK violation.
+      const n = await tx.agentTask.updateMany({
+        where: { id: task.id, appId: app.id, status: 'pending', assigneeWorkerId: null, assigneeUserId: null },
+        data: { status: 'backlog', ...updatedStamp(ctx) },
+      });
+      if (n.count === 0) {
+        throw taskError('TASK_INVALID_TRANSITION', 'Only a pending task with no assignee can be parked in the backlog.', { taskId });
+      }
       await appendTaskEvent(tx, {
         appId: app.id, taskId: task.id, actor: eventActor(ctx.userId), event: { type: 'task.parked' },
       });
@@ -796,10 +824,22 @@ export const agentTaskMutations = {
       if (task.status !== 'backlog') {
         throw taskError('TASK_INVALID_TRANSITION', 'Only a backlog task is made ready to be worked.', { taskId, status: task.status });
       }
+      // A guarded updateMany on the consumed state (#1790 review, Xylon P2-1):
+      // two concurrent make-ready calls cannot both append task.ready and
+      // assignment.queued — the loser's update matches no row and refuses
+      // typed, so the append-only stream never takes a duplicate pair.
+      const n = await tx.agentTask.updateMany({
+        where: { id: task.id, appId: app.id, status: 'backlog' },
+        data: { status: 'pending', ...updatedStamp(ctx) },
+      });
+      if (n.count === 0) {
+        throw taskError('TASK_INVALID_TRANSITION', 'Only a backlog task is made ready to be worked.', { taskId });
+      }
       const evActor = eventActor(ctx.userId);
-      await tx.agentTask.update({ where: { id: task.id }, data: { status: 'pending', ...updatedStamp(ctx) } });
       await appendTaskEvent(tx, { appId: app.id, taskId: task.id, actor: evActor, event: { type: 'task.ready' } });
-      // #1707: it enters the queue now, exactly like a task created ready.
+      // #1707: it enters the queue now, exactly like a task created ready —
+      // and this event is the stall rule's queue-entry stamp for the new stint
+      // (cor:agt:050:17; the unassignable episode starts here, not at creation).
       await appendTaskEvent(tx, { appId: app.id, taskId: task.id, actor: evActor, event: { type: 'assignment.queued' } });
     });
     // #1707 (cor:agt:060:06): a free worker may take it right away.
