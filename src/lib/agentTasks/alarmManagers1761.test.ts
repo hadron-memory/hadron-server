@@ -231,6 +231,42 @@ describe('#1762 — any chain owner, or whoever manages the App, may acknowledge
   });
 });
 
+describe('set equality: the chain\'s managers are managesApp\'s users minus the platform arm (Xylon P2-1 on #1816)', () => {
+  /** Every candidate in `pool` that `managesApp` admits WITHOUT the platform-role arm (callers hold plain roles). */
+  const managersByGate = async (a: typeof app, pool: { id: string }[]) => {
+    const out: string[] = [];
+    for (const u of pool) if (await managesApp({ db, userId: u.id, roles: ['READER'] }, a)) out.push(u.id);
+    return out.sort();
+  };
+
+  it('org-owned: owner-role members and live org ADMIN/OWNER, nobody else', async () => {
+    const gone = await mkUser('gone');
+    await db.orgMember.create({ data: { id: generateId(), organizationId: org.id, userId: gone.id, role: 'ADMIN', deletedAt: new Date() } });
+    const contributor = await mkUser('co');
+    await db.orgMember.create({ data: { id: generateId(), organizationId: org.id, userId: contributor.id, role: 'CONTRIBUTOR' } });
+    const pool = [orgAdmin, orgOwner, appOwnerMember, plain, platformAdmin, gone, contributor];
+    expect((await appManagerUserIds(db, app)).sort()).toEqual(await managersByGate(app, pool));
+  });
+
+  it('user-owned: the owner and owner-role members, never an org arm', async () => {
+    const owner = await mkUser('uo');
+    const co = await mkUser('uco');
+    const member = await mkUser('um');
+    const userApp = await db.app.create({ data: { id: generateId(), ownerUserId: owner.id, name: 'U2', urn: `am-u2-${generateId().toLowerCase()}` } });
+    await db.appMember.create({ data: { appId: userApp.id, userId: co.id, role: 'owner' } });
+    await db.appMember.create({ data: { appId: userApp.id, userId: member.id, role: 'member' } });
+    const pool = [owner, co, member, orgAdmin, orgOwner, platformAdmin];
+    expect((await appManagerUserIds(db, userApp)).sort()).toEqual(await managersByGate(userApp, pool));
+    // The both-owner shape does not exist: an App is owned by a user XOR an org (chk_app_owner_xor).
+    await expect(db.app.create({ data: { id: generateId(), ownerUserId: owner.id, organizationId: org.id, name: 'B', urn: `am-b-${generateId().toLowerCase()}` } })).rejects.toBeDefined();
+  });
+
+  it('the one asymmetry is the platform-admin arm: it gates, and is never listed', async () => {
+    expect(await managesApp({ db, userId: platformAdmin.id, roles: ['ADMIN'] }, app)).toBe(true);
+    expect(await appManagerUserIds(db, app)).not.toContain(platformAdmin.id);
+  });
+});
+
 describe('provenance: a manager entry is not an owner (Diego P2 on #1816)', () => {
   it('a manager demoted after the alarm was raised can no longer acknowledge it, while a true owner and a current manager can', async () => {
     const { a } = await rootAlarm();

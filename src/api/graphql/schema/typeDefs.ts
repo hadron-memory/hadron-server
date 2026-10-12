@@ -8473,7 +8473,7 @@ export const typeDefs = `#graphql
     owners; the stall episode goes on until the task moves. Any owner in the
     alarm's chain, or whoever manages the App (cor:agt:050:24), and nobody
     else; the time is the server's.
-    Refusals: ALARM_NOT_FOUND (also for an App you do not participate in),
+    Refusals: ALARM_NOT_FOUND (also for an App you cannot read),
     NOT_AN_ALARM, ALARM_NOT_IN_CHAIN, ALARM_ALREADY_ACKNOWLEDGED (the first
     stands), SESSION_NOT_BOUND, APP_UNINSTALLED.
     """
