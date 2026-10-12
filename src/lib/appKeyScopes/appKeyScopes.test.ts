@@ -396,31 +396,79 @@ describe('N4 — the scope is read from the database at every call', () => {
   });
 });
 
-describe('the budget notice with a key-only reader (Chip #1781)', () => {
+describe('the wake-budget notice is posted by the platform, key-only reads included (#1791, cor:agt:080:15)', () => {
+  const notices = () => db.node.findMany({ where: { messageChannelId: channel.id, nodeType: 'chat-message' }, orderBy: { seq: 'asc' } });
   beforeEach(async () => {
     await grant(key);
     const rook = await db.worker.create({ data: { id: generateId(), appId: app.id, agentId: agent.id, name: 'Rook', slug: 'rook', heldByUserId: member.id, heldAt: new Date() }, select: { id: true } });
     await db.registerEntry.create({ data: { id: generateId(), appId: app.id, channelId: channel.id, attendeeWorkerId: rook.id, role: 'BOTH' } });
     await db.app.update({ where: { id: app.id }, data: { wakeDailyBudget: 1 } });
+    // The team chat the notice goes to: the channel of the team space, as the App's default.
+    await db.channel.update({ where: { id: channel.id }, data: {} });
     await say(channel, 'both', mention('liam', 'rook'));
   });
+  const systemOnes = async () => (await notices()).filter((n) => (n.data as any)?.authorSystem === true);
 
-  it('a key neither posts nor claims the notice, however often it reads; it still sees the budget status', async () => {
+  it('a key-only read that exhausts the budget produces exactly one system-authored notice that day', async () => {
     for (let i = 0; i < 3; i++) {
       const page = await due(keyCtx(key, app.id));
       expect(page.status).toBe('WAKE_BUDGET_EXHAUSTED');
-      expect(page.withheld).toBe(1);
     }
+    const ones = await systemOnes();
+    expect(ones).toHaveLength(1);
+    expect(ones[0]!.content).toContain('daily wake budget');
+    // A person's read the same day adds none, and the chat mock saw no user-authored post either.
+    await due(userCtx(manager.id));
+    await due(userCtx(manager.id));
+    expect(await systemOnes()).toHaveLength(1);
     expect(post).not.toHaveBeenCalled();
+    expect(await db.appWakeDay.count({ where: { noticePostedAt: { not: null } } })).toBe(1);
+  });
+
+  it('the author is the platform: not the key, a user or a worker; no mentions; no creator', async () => {
+    await due(keyCtx(key, app.id));
+    const [n] = await systemOnes();
+    const data = n!.data as Record<string, unknown>;
+    expect(data).toMatchObject({ authorSystem: true, authorName: 'Hadron (platform)' });
+    for (const k of ['authorUserId', 'authorWorkerId', 'sessionId', 'authorAppId', 'mentions', 'broadcastWakes', 'managerPost']) expect(data[k]).toBeUndefined();
+    expect(n!.createdBy).toBeNull();
+    // As a reader sees it.
+    const page = await Q.teamChatMessages({}, { appRef: app.id }, userCtx(holder.id));
+    const shown = page.items.find((m: any) => m.authorSystem);
+    expect(shown).toMatchObject({ authorSystem: true, authorUserId: null, authorWorkerId: null, authorName: 'Hadron (platform)', mentions: [] });
+    expect(page.items.filter((m: any) => !m.authorSystem).every((m: any) => m.authorSystem === false)).toBe(true);
+  });
+
+  it('two concurrent triggering reads, a key and a person, produce one notice', async () => {
+    await Promise.all([due(keyCtx(key, app.id)), due(userCtx(manager.id)), due(keyCtx(key, app.id)), due(userCtx(manager.id))]);
+    expect(await systemOnes()).toHaveLength(1);
+  });
+
+  it('notice text never expands a mention, whatever it says', async () => {
+    const { postSystemNotice } = await import('../../api/graphql/schema/resolvers.teamChat.js');
+    expect(await postSystemNotice(db, app.id, '@liam @all hello <@rook>')).toBe(true);
+    const ones = await systemOnes();
+    const data = ones[ones.length - 1]!.data as Record<string, unknown>;
+    expect(data.mentions).toBeUndefined();
+    expect(ones[ones.length - 1]!.content).not.toMatch(/@/);
+  });
+
+  it('with no team chat there is nothing to post to: no claim is taken, so the next read tries again', async () => {
+    await db.channel.update({ where: { id: channel.id }, data: { deletedAt: new Date() } });
+    await db.node.updateMany({ where: { id: channel.chatRootNodeId }, data: { deletedAt: new Date() } });
+    await due(keyCtx(key, app.id));
     expect(await db.appWakeDay.count({ where: { noticePostedAt: { not: null } } })).toBe(0);
   });
 
-  it('the next person to read posts it, once for the day', async () => {
+  it('a failed post hands the day\'s claim back', async () => {
+    const mod = await import('../../api/graphql/schema/resolvers.teamChat.js');
+    const spy = vi.spyOn(mod, 'postSystemNotice').mockRejectedValueOnce(new Error('boom'));
+    try {
+      await due(keyCtx(key, app.id));
+      expect(await db.appWakeDay.count({ where: { noticePostedAt: { not: null } } })).toBe(0);
+    } finally { spy.mockRestore(); }
     await due(keyCtx(key, app.id));
-    await due(userCtx(manager.id));
-    await due(userCtx(manager.id));
-    expect(post).toHaveBeenCalledTimes(1);
-    expect(await db.appWakeDay.count({ where: { noticePostedAt: { not: null } } })).toBe(1);
+    expect(await systemOnes()).toHaveLength(1);
   });
 });
 

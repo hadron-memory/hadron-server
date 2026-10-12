@@ -4082,7 +4082,8 @@ export const typeDefs = `#graphql
 
   """
   One message in a team App's chat (#939, Worker envelope since #974). Exactly
-  one of authorUserId / authorWorkerId is set: a human post carries the user, a
+  one of authorUserId / authorWorkerId is set, or authorSystem is true (#1791, the
+  platform's own notice, which has neither): a human post carries the user, a
   worker post carries the Worker (the named casting, cor:dmo:050:11) plus the
   driving sessionId. mentions holds the lowercased tokens extracted
   server-side at write time (the '@worker-name / @handle' format, stored
@@ -4108,6 +4109,8 @@ export const typeDefs = `#graphql
     at: DateTime!
     authorUserId: ID
     authorWorkerId: ID
+    "#1791 — posted by the platform itself (a system author, neither a user nor a worker): the wake-budget notice. Carries no mentions."
+    authorSystem: Boolean!
     "Display convenience: the worker name or the user handle."
     authorName: String
     "Spec 049 Phase 8 (item J): the Worker's App when the post crossed Apps — visible as one in the transcript."

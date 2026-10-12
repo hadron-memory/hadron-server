@@ -179,6 +179,12 @@ async function requireTeamChatAccess(
   throw forbidden();
 }
 
+/**
+ * How the platform's own posts render (#1791). A name no handle can take (handles carry no spaces or parentheses), so
+ * it cannot be mistaken for a person; the structured flag `authorSystem` is what clients key on.
+ */
+export const SYSTEM_AUTHOR_NAME = 'Hadron (platform)';
+
 type ChatRootRow = { id: string; memoryId: string; loc: string };
 type ChannelIncarnation = { id: string; value: number };
 
@@ -345,6 +351,8 @@ export interface TeamChatMessageOut {
   at: Date;
   authorUserId: string | null;
   authorWorkerId: string | null;
+  /** #1791: posted by the platform itself, a system author that is neither a user nor a worker. */
+  authorSystem: boolean;
   authorName: string | null;
   /** Item J: the Worker's App when a post crossed Apps; null otherwise. */
   authorAppId: string | null;
@@ -398,6 +406,7 @@ function projectMessage(row: MessageRow, memEncInfo: MemoryEncryptionInfo, memBa
     at: row.createdAt,
     authorUserId: typeof env.authorUserId === 'string' ? env.authorUserId : null,
     authorWorkerId: typeof env.authorWorkerId === 'string' ? env.authorWorkerId : null,
+    authorSystem: env.authorSystem === true,
     authorName: typeof env.authorName === 'string' ? env.authorName : null,
     authorAppId: typeof env.authorAppId === 'string' ? env.authorAppId : null,
     sessionId: typeof env.sessionId === 'string' ? env.sessionId : null,
@@ -900,13 +909,18 @@ async function postToChannelRoot(
   root: ChatRootRow,
   incarnation: ChannelIncarnation,
   args: { body: string; replyToSeq: number | null; sessionRef: string | null },
+  /** #1791: the platform's own post. No principal authors it, no mention in it expands, and no one is credited. */
+  opts: { system?: boolean } = {},
 ): Promise<TeamChatMessageOut> {
   const { body, replyToSeq, sessionRef } = args;
   let envelope: Record<string, unknown>;
   let authorLabel: string;
   // #1617 B: the lapsed session this post resumes, inside its append transaction.
   let resumeSessionId: string | null = null;
-  if (sessionRef) {
+  if (opts.system) {
+    authorLabel = SYSTEM_AUTHOR_NAME;
+    envelope = { authorSystem: true, authorName: SYSTEM_AUTHOR_NAME };
+  } else if (sessionRef) {
     const author = await resolveSessionAuthor(ctx, app, root.memoryId, sessionRef);
     if (author.resume) resumeSessionId = author.sessionId;
     authorLabel = author.name;
@@ -927,7 +941,8 @@ async function postToChannelRoot(
     envelope = { authorUserId: ctx.userId, authorName: user.handle };
   }
 
-  const mentions = extractMentions(body);
+  // A system post carries NO mentions, whatever its text says: the platform never pages anyone through a notice.
+  const mentions = opts.system ? [] : extractMentions(body);
   if (mentions.length > 0) {
     envelope.mentions = mentions;
   }
@@ -941,7 +956,7 @@ async function postToChannelRoot(
   const memBareUrn = await hostMemoryUrn(ctx, root.memoryId);
 
   const messageId = generateId();
-  const createdBy = ctx.userId ?? null;
+  const createdBy = opts.system ? null : (ctx.userId ?? null);
   let messageLoc: string | null = null;
   const { seq, inserted: createdAt } = await appendChatMessage(ctx.db, root, memEncInfo, async ({ tx, seq, msgNum }) => {
     // The Channel is re-checked LIVE under the lock (Copilot on PR #1169):
@@ -1050,11 +1065,13 @@ async function postToChannelRoot(
   // shared chat memory. This was one of the largest blind spots in the old
   // instrumentation: `hadron_team_chat_post` created more nodes on a busy day
   // than every instrumented write tool combined, and counted for none of it.
-  recordNodeWrite(
-    ctx.db,
-    messageLoc ? { id: messageId, loc: messageLoc, memoryId: root.memoryId } : null,
-    ctx,
-  );
+  if (!opts.system) {
+    recordNodeWrite(
+      ctx.db,
+      messageLoc ? { id: messageId, loc: messageLoc, memoryId: root.memoryId } : null,
+      ctx,
+    );
+  }
 
   return {
     nodeId: messageId,
@@ -1064,12 +1081,53 @@ async function postToChannelRoot(
     at: createdAt,
     authorUserId: (envelope.authorUserId as string | undefined) ?? null,
     authorWorkerId: (envelope.authorWorkerId as string | undefined) ?? null,
+    authorSystem: envelope.authorSystem === true,
     authorName: authorLabel,
     authorAppId: (envelope.authorAppId as string | undefined) ?? null,
     sessionId: (envelope.sessionId as string | undefined) ?? null,
     replyToSeq: replyToSeq ?? null,
     mentions,
   };
+}
+
+/**
+ * Post into an App's team chat AS THE PLATFORM (#1791, cor:agt:080:15). A system author that is neither a user nor a
+ * worker: no principal is credited or checked, because none is acting — which is why this is a server-internal door,
+ * never a resolver, and takes the database and an App id, not a request context. The text is plain: the post carries no
+ * mentions, and any `@` in it is shown as a plain full-width sign. Returns false (posting nothing) when the App has no
+ * team chat to post into or is gone; it never creates one.
+ */
+/** Does this App have a team chat a notice could be posted into? (Read-only; nothing is created.) */
+export async function teamChatExists(db: Context['db'], appId: string): Promise<boolean> {
+  const app = await db.app.findUnique({ where: { id: appId } });
+  if (!app || app.deletedAt || app.uninstalledAt) return false;
+  return (await locateTeamChatRoot({ db } as Context, app as AppRow)) !== null;
+}
+
+export async function postSystemNotice(db: Context['db'], appId: string, body: string): Promise<boolean> {
+  const ctx = { db } as Context;
+  const app = await db.app.findUnique({ where: { id: appId } });
+  if (!app || app.deletedAt || app.uninstalledAt) return false;
+  const located = await locateTeamChatRoot(ctx, app as AppRow);
+  if (!located) return false;
+  const { channel, rootId } = await ensureChannelWithRoot(db, {
+    memoryId: located.memoryId,
+    loc: located.loc,
+    name: DEFAULT_CHANNEL_NAME,
+    description: `Team chat — ${app.name}`,
+    createdBy: null,
+    asDefaultOfAppId: app.id,
+    hostLabel: app.name,
+  });
+  await postToChannelRoot(
+    ctx,
+    app as AppRow,
+    { ...located, id: rootId },
+    { id: channel.id, value: channel.incarnation },
+    { body: body.replace(/@/g, '\uFF20'), replyToSeq: null, sessionRef: null },
+    { system: true },
+  );
+  return true;
 }
 
 /**
