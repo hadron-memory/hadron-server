@@ -373,6 +373,31 @@ describe('#1787 — a platform admin manages a user-owned Agent (cor:dmo:050:13,
     expect(await db.aiServiceConfig.findFirst({ where: { agentId: agent.id, name: 'default', apiKeyEncrypted: { not: null } } })).not.toBeNull();
   });
 
+  it('first-attach of a system memory on a user-owned Agent is the owner\'s act (Emerson P2-C)', async () => {
+    const agent = await rogueAgent();
+    // An unattached user-owned memory of the SAME owner — the admin must not
+    // be able to promote it to the agent's "definition" and thereby read it.
+    const victimMemory = await db.memory.create({
+      data: {
+        id: generateId(), class: 'knowledge', ownerUserId: ownerId, organizationId: null,
+        urn: `owner-one:notes-${generateId().slice(0, 6)}`, name: 'Owner notes',
+      },
+    });
+    await db.agent.update({ where: { id: agent.id }, data: { systemMemoryId: null } });
+    await expect(
+      resolvers.Mutation.updateAgent(null, { ref: agent.id, systemMemoryId: victimMemory.id }, admin()),
+    ).rejects.toThrow();
+    const untouched = await db.memory.findUniqueOrThrow({ where: { id: victimMemory.id } });
+    expect(untouched.class).toBe('knowledge');
+    expect((await db.agent.findUniqueOrThrow({ where: { id: agent.id } })).systemMemoryId).toBeNull();
+    // Owner control: the wizard-flow first-attach still works for the owner.
+    const ownerAttach = await resolvers.Mutation.updateAgent(
+      null, { ref: agent.id, systemMemoryId: victimMemory.id }, ctx({ userId: ownerId, roles: ['READER'] }),
+    );
+    expect(ownerAttach.systemMemoryId).toBe(victimMemory.id);
+    expect((await db.memory.findUniqueOrThrow({ where: { id: victimMemory.id } })).class).toBe('system');
+  });
+
   it('the admin may update the definition through the revision surface (within "update it"; PR body corrected)', async () => {
     const agent = await rogueAgent();
     const revision = await resolvers.Mutation.createRevision(null, { agentId: agent.id, description: 'admin snapshot' }, admin());

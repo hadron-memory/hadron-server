@@ -488,6 +488,16 @@ export const agentMutations = {
           throw new Error('Cannot unset or change an agent\'s system memory. Delete the agent to replace it.');
         }
         if (!agent.systemMemoryId && incoming) {
+          // #1818 review (Emerson P2-C): on a USER-owned agent, first-attach is
+          // the OWNER's act. An admin managing the agent (#1787) must not
+          // re-point its definition at one of the owner's other memories — the
+          // promotion would manufacture a "definition" the admin's read arm
+          // then reaches, and deleteAgent would destroy it.
+          if (agent.ownerUserId !== null && ctx.userId !== agent.ownerUserId) {
+            throw new GraphQLError("Attaching a system memory to a user-owned Agent is its owner's act.", {
+              extensions: { code: 'FORBIDDEN' },
+            });
+          }
           // First-attach: verify the target memory exists, belongs to this
           // org, and isn't already another agent's system memory. These are
           // READS ONLY — the promotion WRITE now happens in the deciding
