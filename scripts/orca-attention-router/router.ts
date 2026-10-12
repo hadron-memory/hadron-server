@@ -238,11 +238,16 @@ export function loadConfig(path: string): Config {
   if (typeof raw.app !== 'string' || typeof raw.stateDir !== 'string' || typeof raw.channel !== 'string') {
     throw new RouterError('config needs "app", "channel" and "stateDir"');
   }
-  // An explicit null is a PRESENT invalid value, not an absent one — only a
-  // missing key takes the default (invalid values fail loudly, #1826).
-  const watchMinutes = Number(raw.coordinatorWatchMinutes === undefined ? 20 : raw.coordinatorWatchMinutes);
-  if (!Number.isFinite(watchMinutes) || watchMinutes <= 0) {
-    throw new RouterError(`coordinatorWatchMinutes must be a positive finite number (got ${JSON.stringify(raw.coordinatorWatchMinutes)})`);
+  // A JSON NUMBER or absent — never a coerced true/"20" (a boolean watch of
+  // one minute is a typo passing silently, #1829 local P2-7) — and the ms
+  // product must stay finite, or a huge value would silently disable delivery.
+  const watchRaw = raw.coordinatorWatchMinutes;
+  if (watchRaw !== undefined && typeof watchRaw !== 'number') {
+    throw new RouterError(`coordinatorWatchMinutes must be a number (got ${JSON.stringify(watchRaw)})`);
+  }
+  const watchMinutes = watchRaw ?? 20;
+  if (!Number.isFinite(watchMinutes) || watchMinutes <= 0 || !Number.isFinite(watchMinutes * 60_000)) {
+    throw new RouterError(`coordinatorWatchMinutes must be a positive finite number of minutes (got ${JSON.stringify(watchRaw)})`);
   }
   return {
     app: raw.app,
@@ -357,13 +362,37 @@ export class State {
     atomicWrite(this.ledgerPath, JSON.stringify(ledger, null, 1));
   }
 
-  /** The liveness clocks (#1826); an unreadable file starts empty. Keyed by worker id. */
+  /**
+   * The liveness clocks (#1826), SANITIZED on read (a corrupt file can never
+   * fail open, #1829 local P2-2): a non-object top level (including null)
+   * reads as fresh rather than crashing, a non-object record reads as reset,
+   * and only typed fields survive — a finite non-negative `idleSince`, a
+   * non-empty string `handle`, an integer `coveredFrontier` within the seq
+   * ceiling. A syntactically-valid but corrupt value (a huge frontier) is
+   * DROPPED, so corruption can cost at most one repeated nudge, never a
+   * suppressed worker. Unreadable/malformed JSON reads as {} — a fresh clock.
+   */
   liveness(): Record<string, LivenessRecord> {
+    let parsed: unknown;
     try {
-      return JSON.parse(readFileSync(this.livenessPath, 'utf8')) as Record<string, LivenessRecord>;
+      parsed = JSON.parse(readFileSync(this.livenessPath, 'utf8'));
     } catch {
       return {};
     }
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+    const out: Record<string, LivenessRecord> = {};
+    for (const [worker, raw] of Object.entries(parsed as Record<string, unknown>)) {
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) continue;
+      const r = raw as Record<string, unknown>;
+      const rec: LivenessRecord = {};
+      if (Number.isInteger(r.idleSince) && (r.idleSince as number) >= 0) rec.idleSince = r.idleSince as number;
+      if (typeof r.handle === 'string' && r.handle) rec.handle = r.handle;
+      if (Number.isInteger(r.coveredFrontier) && (r.coveredFrontier as number) >= 0 && (r.coveredFrontier as number) <= SEQ_MAX) {
+        rec.coveredFrontier = r.coveredFrontier as number;
+      }
+      out[worker] = rec;
+    }
+    return out;
   }
 
   saveLiveness(workers: Record<string, LivenessRecord>): void {
@@ -373,13 +402,18 @@ export class State {
   /** #1826 — each worker's last LOGGED fail-closed reason, so a persistently
    * unreadable liveness source is logged once per reason, not once per poll.
    * Deliberately its own file: the ledger's `reported` map is token-scoped
-   * (cleared on adopt) and a source outage outlives tokens. */
+   * (cleared on adopt) and a source outage outlives tokens. A non-object file
+   * reads as empty (#1829 local P2-2). */
   livenessNotes(): Record<string, string> {
+    let parsed: unknown;
     try {
-      return JSON.parse(readFileSync(this.notesPath, 'utf8')) as Record<string, string>;
+      parsed = JSON.parse(readFileSync(this.notesPath, 'utf8'));
     } catch {
       return {};
     }
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? (parsed as Record<string, string>)
+      : {};
   }
 
   saveLivenessNotes(notes: Record<string, string>): void {
@@ -671,13 +705,33 @@ export function hasMentionOnlyRow(cfg: Config, workerId: string, run: Runner): b
   return Boolean(winning && winning.namedBy === 'WORKER' && winning.entry?.mentionOnly);
 }
 
-/** parse(), but null instead of a throw — the fail-closed liveness reads report, they don't fail the poll. */
-function parseOrNull(res: RunResult): Record<string, any> | null {
+/**
+ * The highest value a Channel seq can be (the 32-bit seq column ceiling): a
+ * "position" above it is corruption, not a place in the chat. Both liveness
+ * reads and the sanitized liveness state bound checked values by it (#1829
+ * local P1-1/P2-2).
+ */
+const SEQ_MAX = 2_147_483_647;
+
+/**
+ * A chat position from a `hadron api` response, or null when the response is
+ * not POSITIVELY a live value. Fail-closed on every ambiguity (#1829 local
+ * P1-1): a non-zero exit can still print a JSON body; a GraphQL errors array
+ * is legal WITH partial data, and the integer fragment in it is not a verdict;
+ * a negative or beyond-ceiling integer is not a cursor. Absence of evidence is
+ * not evidence of a position.
+ */
+function seqFromResponse(res: RunResult, pick: (data: Record<string, any>) => unknown): number | null {
+  if (res.code !== 0) return null;
+  let data: Record<string, any> | null = null;
   try {
-    return JSON.parse(res.stdout) as Record<string, any>;
+    data = JSON.parse(res.stdout) as Record<string, any>;
   } catch {
     return null;
   }
+  if (Array.isArray(data?.errors) && data.errors.length > 0) return null;
+  const v = pick(data?.data ?? {});
+  return Number.isInteger(v) && (v as number) >= 0 && (v as number) <= SEQ_MAX ? (v as number) : null;
 }
 
 const CURSOR_QUERY = 'query($w: ID!, $a: ID, $c: ID!) { channelReadState(attendeeRef: $w, appRef: $a, channelRef: $c) '
@@ -696,9 +750,10 @@ const CURSOR_QUERY = 'query($w: ID!, $a: ID, $c: ID!) { channelReadState(attende
  * state confers no access (cor:dmo:090:06) — this is reuse, not new law.
  */
 export function readCursor(cfg: Config, workerId: string, run: Runner): number | null {
-  const data = parseOrNull(run([cfg.hadronCli, 'api', CURSOR_QUERY, '-F', `w=${workerId}`, '-F', `a=${cfg.app}`, '-F', `c=${cfg.channel}`]));
-  const lastSeen = data?.data?.channelReadState?.lastSeenSeq;
-  return Number.isInteger(lastSeen) ? (lastSeen as number) : null;
+  return seqFromResponse(
+    run([cfg.hadronCli, 'api', CURSOR_QUERY, '-F', `w=${workerId}`, '-F', `a=${cfg.app}`, '-F', `c=${cfg.channel}`]),
+    (d) => d.channelReadState?.lastSeenSeq,
+  );
 }
 
 const HEAD_QUERY = 'query($c: ID!) { channel(ref: $c) { lastSeq } }';
@@ -708,9 +763,10 @@ const HEAD_QUERY = 'query($c: ID!) { channel(ref: $c) { lastSeq } }';
  * any unknown or error. Same fail-closed contract as `readCursor`.
  */
 export function channelHead(cfg: Config, run: Runner): number | null {
-  const data = parseOrNull(run([cfg.hadronCli, 'api', HEAD_QUERY, '-F', `c=${cfg.channel}`]));
-  const last = data?.data?.channel?.lastSeq;
-  return Number.isInteger(last) ? (last as number) : null;
+  return seqFromResponse(
+    run([cfg.hadronCli, 'api', HEAD_QUERY, '-F', `c=${cfg.channel}`]),
+    (d) => d.channel?.lastSeq,
+  );
 }
 
 interface Terminal {
@@ -1232,6 +1288,8 @@ export function pollOnce(cfg: Config, run: Runner = runCommand, log: (line: stri
 
     const outcome: Outcome = { nudged: [], dropped: [], covered: [], held: {}, adopted: false, liveness: [], livenessDropped: [] };
     const terminals = targets.length || flagged.length ? listTerminals(cfg, run) : [];
+    /** The handle each worker's mention nudge was DELIVERED to (#1829 local P2-5): the collapse write reuses it, so a first-ever liveness record is born with its terminal and the next probe keeps the clock. */
+    const mentionHandles = new Map<string, string>();
     for (const [entry, seen] of targets) {
       if (!hasMentionOnlyRow(cfg, entry.worker, run)) {
         // A configuration error, not a delivery: never nudge on every message.
@@ -1330,9 +1388,11 @@ export function pollOnce(cfg: Config, run: Runner = runCommand, log: (line: stri
       ledger.nudged[entry.worker] = { relevantSeq: now.lastRelevantSeq!, at: nowMs(), stages: how };
       delete (ledger.heldSince ?? {})[entry.worker];
       delete (ledger.heldLoggedAt ?? {})[entry.worker];
-      // Persisted at once: a crash or a later failure in this poll must not
-      // cause the same nudge to be sent again (@codex P2, #1490).
+      // Persisted immediately after the send, before any other step in the
+      // poll: a crash or a later failure here must not cause the same nudge to
+      // be sent again (@codex P2, #1490).
       state.saveLedger(ledger);
+      mentionHandles.set(entry.worker, handle);
       outcome.nudged.push(entry.name);
     }
 
@@ -1395,8 +1455,10 @@ export function pollOnce(cfg: Config, run: Runner = runCommand, log: (line: stri
           if (touched.has(entry.worker)) {
             if (outcome.nudged.includes(entry.name)) {
               // The mention nudge's own gates proved the terminal idle just
-              // now: the liveness episode restarts at that send.
-              rec = { ...rec, idleSince: nowMs() };
+              // now: the liveness episode restarts at that send, ON the
+              // terminal it was delivered to (#1829 local P2-5).
+              const viaHandle = mentionHandles.get(entry.worker);
+              rec = { ...rec, idleSince: nowMs(), ...(viaHandle !== undefined ? { handle: viaHandle } : {}) };
               save();
             } else {
               resetClock();
@@ -1459,6 +1521,13 @@ export function pollOnce(cfg: Config, run: Runner = runCommand, log: (line: stri
             resetClock();
             continue;
           }
+          if (sendHandle !== rec.handle) {
+            // The terminal was REPLACED between the probe and the chain
+            // (#1829 local P2-4): the accumulated idle minutes belong to the
+            // OLD terminal's episode. Reset; the new terminal earns its own.
+            resetClock();
+            continue;
+          }
           const sendTracked = fresh.find((t) => t.handle === sendHandle)?.lastOutputAt;
           const [gate, gateWhy] = provesIdle(cfg, sendHandle, sendDetail, sendTracked, cfg.busyWaitMs, run);
           if (!gate) {
@@ -1506,9 +1575,13 @@ export function pollOnce(cfg: Config, run: Runner = runCommand, log: (line: stri
             outcome.held[entry.name] = `liveness: ${how}`;
             continue; // a failed send holds the token; the clock stands — retried next poll
           }
-          // Persisted at once (the mention-nudge discipline): a crash after
-          // the send must not resend it. The clock restarts AT the send and
-          // the frontier covers everything through the head it named.
+          // Persisted immediately after the send, before any other step in the
+          // poll (#1829 local P1-2): a crash or a LATER failure in this poll
+          // cannot resend it. The sub-second window between the send and this
+          // write is the same one every nudge in this router carries —
+          // persist-before-send would need an undecidable "maybe sent"
+          // reconciliation instead. The clock restarts AT the send; the
+          // frontier covers everything through the head it named.
           rec = { idleSince: nowMs(), handle: sendHandle, coveredFrontier: nowHead };
           save();
           outcome.liveness.push(entry.name);

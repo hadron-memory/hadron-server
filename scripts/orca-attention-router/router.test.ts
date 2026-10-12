@@ -91,6 +91,10 @@ class FakeCLIs {
   /** channelReadState answers null (unreadable/unknown) for these workers. */
   cursorNulls = new Set<string>();
   cursorFails = new Set<string>();
+  /** #1829 P1-1 — serve errors WITH partial data for these workers (legal GraphQL). */
+  cursorErrors = new Set<string>();
+  /** #1829 P2-4 — from this `terminal list` call on, every handle gains a suffix (a mid-poll replacement). */
+  renameTerminalsFromList = 0;
   /** `terminal list` calls at and beyond this count serve an EMPTY list (#1826 chain re-resolution). */
   hideTerminalsFromList = 0;
   pages = 1;
@@ -158,6 +162,11 @@ class FakeCLIs {
         const n = (this.cursorQueries.get(w) ?? 0) + 1;
         this.cursorQueries.set(w, n);
         if (this.cursorFails.has(w)) return out({ errors: [{ message: 'read-state down' }] }, 1);
+        if (this.cursorErrors.has(w)) {
+          // Legal GraphQL: a field error rides WITH partial data. The integer
+          // fragment must not pass as live (#1829 local P1-1).
+          return out({ errors: [{ message: 'partial' }], data: { channelReadState: { lastSeenSeq: this.cursors.get(w) ?? 100 } } });
+        }
         if (n >= 2 && this.freshCursors.has(w)) {
           return out({ data: { channelReadState: { lastSeenSeq: this.freshCursors.get(w) } } });
         }
@@ -187,10 +196,11 @@ class FakeCLIs {
       if (this.hideTerminalsFromList && this.listCalls >= this.hideTerminalsFromList) {
         return out({ ok: true, result: { terminals: [] } });
       }
+      const renamed = this.renameTerminalsFromList && this.listCalls >= this.renameTerminalsFromList;
       const terminals = this.listCalls > 1 && this.healTracking.size
         ? this.terminals.map((t) => (this.healTracking.has(t.handle as string) ? { ...t, lastOutputAt: Date.now() } : t))
         : this.terminals;
-      return out({ ok: true, result: { terminals } });
+      return out({ ok: true, result: { terminals: renamed ? terminals.map((t) => ({ ...t, handle: `${t.handle}_r` })) : terminals } });
     }
     const handle = argv[argv.indexOf('--terminal') + 1];
     if (verb === 'terminal wait') {
@@ -1679,7 +1689,7 @@ describe('Orca attention router — coordinator/lifecycle liveness rule (#1826)'
     expect(rec.coveredFrontier).toBeUndefined();
   });
 
-  it('a held token (busy mention worker) neither ages nor resets a pending liveness clock; both deliver when clear', () => {
+  it('a held token (busy mention worker) neither restarts nor resets a pending liveness clock; both deliver when clear', () => {
     const c = mcfg([['w-ada', 'Ada', 'coordinator'], ['w-baloo', 'Baloo', undefined]]);
     fake.terminal('ada');
     fake.terminal('baloo');
@@ -1788,6 +1798,127 @@ describe('Orca attention router — coordinator/lifecycle liveness rule (#1826)'
     const unflagged = mcfg([['w-ada', 'Ada', undefined]]); // same stateDir
     poll(unflagged);
     expect(readLiveness(unflagged)).toEqual({}); // pruned: no flagged workers ⇒ no records
+  });
+
+  // ── #1829 local-seat cycle 1 (Xylon #9736) ─────────────────────────────
+
+  it('P1-1: a GraphQL errors+data response never passes as live — no candidate, clock kept', () => {
+    const c = mcfg([['w-ada', 'Ada', 'coordinator']]);
+    fake.terminal('ada');
+    fake.cursors.set('w-ada', 100);
+    const seeded = Date.now() - AGO_21MIN;
+    seedLiveness(c, { 'w-ada': { idleSince: seeded, handle: 'term_ada' } });
+    fake.cursorErrors.add('w-ada'); // partial data WITH an error rides the same integer
+    const out = poll(c);
+    expect(out.liveness).toEqual([]);
+    expect(fake.sent).toEqual([]);
+    expect(readLiveness(c)['w-ada'].idleSince).toBe(seeded); // fail-closed, not a reset
+    fake.cursorErrors.clear();
+    expect(poll(c).liveness).toEqual(['Ada']); // fires on recovery
+  });
+
+  it('P1-1: a NEGATIVE lastSeenSeq is not a cursor — no candidate', () => {
+    const c = mcfg([['w-ada', 'Ada', 'coordinator']]);
+    fake.terminal('ada');
+    fake.cursors.set('w-ada', -5); // parsed, integer, nonsense
+    seedLiveness(c, { 'w-ada': { idleSince: Date.now() - AGO_21MIN, handle: 'term_ada' } });
+    expect(poll(c).liveness).toEqual([]);
+    expect(fake.sent).toEqual([]);
+  });
+
+  it('P1-1: a non-zero exit with parsable stdout fails the RECOMPUTE, so the poll throws and nothing sends', () => {
+    const c = mcfg([['w-ada', 'Ada', 'coordinator']]);
+    fake.terminal('ada');
+    fake.cursors.set('w-ada', 100);
+    seedLiveness(c, { 'w-ada': { idleSince: Date.now() - AGO_21MIN, handle: 'term_ada' } });
+    // Candidacy passes on the clean read; the recompute's head query then exits
+    // non-zero while still printing a JSON body.
+    const base = fake.run;
+    let served = false;
+    fake.run = (argv) => {
+      const r = base(argv);
+      if (argv[1] === 'api' && argv[2].includes('channel(ref') && served) return { ...r, code: 1 };
+      if (argv[1] === 'api' && argv[2].includes('channelReadState')) served = true;
+      return r;
+    };
+    expect(() => poll(c)).toThrow(RouterError);
+    expect(fake.sent).toEqual([]);
+  });
+
+  it('P2-2: a syntactically-valid CORRUPT record never suppresses delivery — only typed fields survive the read', () => {
+    const c = mcfg([['w-ada', 'Ada', 'coordinator']]);
+    fake.terminal('ada');
+    fake.cursors.set('w-ada', 100);
+    // A huge frontier (above any real seq) and a string handle: both drop on
+    // read, so the worker cannot look covered forever (fail-closed direction).
+    seedLiveness(c, { 'w-ada': { idleSince: Date.now() - AGO_21MIN, handle: 'term_ada', coveredFrontier: 9007199254740991 } });
+    expect(poll(c).liveness).toEqual(['Ada']);
+    expect(readLiveness(c)['w-ada'].coveredFrontier).toBe(120); // the honest frontier the send recorded
+  });
+
+  it('P2-2: a corrupt liveness.json top level (null / array / non-object record) reads as fresh and never crashes', () => {
+    const c = mcfg([['w-ada', 'Ada', 'coordinator'], ['w-baloo', 'Baloo', 'coordinator']]);
+    fake.terminal('ada');
+    fake.terminal('baloo');
+    fake.cursors.set('w-ada', 100);
+    mkdirSync(c.stateDir, { recursive: true });
+    writeFileSync(join(c.stateDir, 'liveness.json'), 'null'); // top-level null once crashed Object.keys
+    expect(poll(c).liveness).toEqual([]); // fresh clocks, no throw
+    expect(typeof readLiveness(c)['w-ada'].idleSince).toBe('number');
+    seedLiveness(c, { 'w-ada': 5, 'w-baloo': ['x'] }); // non-object records
+    const out = poll(c);
+    expect(out.liveness).toEqual([]);
+    expect(out.held).toEqual({});
+    const rec = readLiveness(c)['w-ada'];
+    expect(rec.idleSince).toBeGreaterThan(Date.now() - 60_000); // re-seeded by the probe, not carried
+  });
+
+  it('P2-4: a terminal replaced between the probe and the chain RESETS the clock — the episode is one terminal\'s', () => {
+    const c = mcfg([['w-ada', 'Ada', 'coordinator']]);
+    fake.terminal('ada');
+    fake.cursors.set('w-ada', 100);
+    seedLiveness(c, { 'w-ada': { idleSince: Date.now() - AGO_21MIN, handle: 'term_ada' } });
+    fake.renameTerminalsFromList = 2; // the probe's list shows term_ada; the chain's shows term_ada_r
+    const out = poll(c);
+    expect(out.liveness).toEqual([]);
+    expect(fake.sent).toEqual([]);
+    expect(out.held).toEqual({}); // a reset, not a delivery failure
+    expect(readLiveness(c)['w-ada'].idleSince).toBeUndefined();
+  });
+
+  it('P2-5: a FIRST-EVER record born from a mention collapse carries the handle — the next probe keeps the clock', () => {
+    const c = mcfg([['w-ada', 'Ada', 'coordinator']]);
+    fake.terminal('ada');
+    fake.attention.workers = [worker('w-ada', 'Ada', { mentions: 1, unread: 4 })];
+    fake.cursors.set('w-ada', 100);
+    const out = poll(c); // no seeded record: the collapse write is its first
+    expect(out.nudged).toEqual(['Ada']);
+    const born = readLiveness(c)['w-ada'];
+    expect(born.handle).toBe('term_ada');
+    const at = born.idleSince;
+    expect(at).toBeGreaterThan(Date.now() - 60_000);
+    fake.attention.workers = []; // nothing new; the clock must survive the next probe
+    poll(c);
+    expect(readLiveness(c)['w-ada'].idleSince).toBe(at); // NOT restarted by a handle mismatch
+  });
+
+  it('P2-7: coordinatorWatchMinutes must be a JSON number whose ms product is finite — true, "20" and the overflow class throw', () => {
+    const path = join(root, 'c.json');
+    const write = (over: Record<string, unknown>) => {
+      writeFileSync(path, JSON.stringify({
+        app: 'a', channel: 'c', stateDir: join(root, 's'),
+        roster: [{ worker: 'w', name: 'E', worktree: '/x' }], ...over,
+      }));
+      return path;
+    };
+    expect(loadConfig(write({})).coordinatorWatchMinutes).toBe(20);
+    expect(loadConfig(write({ coordinatorWatchMinutes: 5.5 })).coordinatorWatchMinutes).toBe(5.5);
+    // 1e307 × 60_000 overflows to Infinity — the class whose comparison
+    // against elapsed time silently disables delivery. (A finite-but-huge
+    // window stays legal: it is coherent config, equivalent to the rule off.)
+    for (const bad of [true, '20', 1e307, [20]]) {
+      expect(() => loadConfig(write({ coordinatorWatchMinutes: bad }))).toThrow(RouterError);
+    }
   });
 });
 
