@@ -8,7 +8,7 @@ import { tmpdir, uptime } from 'node:os';
 import { join } from 'node:path';
 import { nudgeText,
   type Config, type Runner, type RunResult, RouterError, State, breakStaleLock, describeOutcome, loadConfig, pollOnce,
-  promptLineIsEmpty, status,
+  promptLineIsEmpty, screenAgentFamily, status,
 } from './router.js';
 
 /** Rendered screens as Orca returned them on 2026-10-01 (idle, nobody typing). */
@@ -807,6 +807,102 @@ describe('Orca attention router — resolution never guesses', () => {
     bind('w-eli');
     fake.attention.workers = [worker('w-eli', 'Eli')];
     expect(poll(c).nudged).toEqual(['Eli']);
+  });
+});
+
+describe('Orca attention router — identity-flap fallback: the screen resolves what tracking lost', () => {
+  // Orca's per-terminal tracking degrades mid-life: agentIdentity reads null
+  // on a terminal that is running its agent right now (2026-10-12: held
+  // "no live agent terminal" ~6.5h while the agent worked; the same CLI, env
+  // and cwd read 'claude' stable in 40 consecutive polls). Same degradation
+  // family as the null lastOutputAt the #7398 gate already survives.
+  it('a null-identity terminal whose screen shows claude chrome still nudges', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli', null);
+    fake.attention.workers = [worker('w-eli', 'Eli')];
+    const out = poll(c);
+    expect(out.nudged).toEqual(['Eli']);
+    expect(fake.sent[0][0]).toBe('term_eli');
+    expect(logs.some((l) => l.includes('resolved by screen'))).toBe(true);
+  });
+
+  it('a codex screen resolves as codex, so the family flows to the gates', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli', null);
+    fake.screens.set('term_eli', { tail: CODEX_IDLE });
+    fake.attention.workers = [worker('w-eli', 'Eli')];
+    const out = poll(c);
+    expect(out.nudged).toEqual(['Eli']);
+  });
+
+  it('a plain shell screen is never resolved by the fallback', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli', null);
+    fake.screens.set('term_eli', { tail: ['orca@orca1:~/ws/eli$ '] });
+    fake.attention.workers = [worker('w-eli', 'Eli')];
+    const out = poll(c);
+    expect(out.held.Eli).toBe('no live agent terminal in its worktree');
+    expect(fake.sent).toEqual([]);
+  });
+
+  it('an unreadable screen holds', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli', null);
+    fake.screens.set('term_eli', { tail: CLAUDE_IDLE, ok: false });
+    fake.attention.workers = [worker('w-eli', 'Eli')];
+    expect(poll(c).held.Eli).toBe('no live agent terminal in its worktree');
+    expect(fake.sent).toEqual([]);
+  });
+
+  it('a screen showing BOTH families holds rather than guess', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli', null);
+    fake.screens.set('term_eli', { tail: [...CLAUDE_IDLE, '› Ask Codex to do anything'] });
+    fake.attention.workers = [worker('w-eli', 'Eli')];
+    expect(poll(c).held.Eli).toBe('no live agent terminal in its worktree');
+    expect(fake.sent).toEqual([]);
+  });
+
+  it('two screen-verified terminals in one worktree hold (ambiguous)', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli', null, 'term_a');
+    fake.terminal('eli', null, 'term_b');
+    fake.attention.workers = [worker('w-eli', 'Eli')];
+    expect(poll(c).held.Eli).toBe('no live agent terminal in its worktree');
+    expect(fake.sent).toEqual([]);
+  });
+
+  it('a verified identity still resolves without the fallback (no screen read at resolve time)', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli', 'claude', 'term_eli');
+    fake.screens.delete('term_eli'); // identity path must not need a screen
+    fake.attention.workers = [worker('w-eli', 'Eli')];
+    // The gates then read the screen; serve it back only for the gate reads.
+    fake.screens.set('term_eli', { tail: CLAUDE_IDLE });
+    const out = poll(c);
+    expect(out.nudged).toEqual(['Eli']);
+    expect(logs.some((l) => l.includes('resolved by screen'))).toBe(false);
+  });
+});
+
+describe('screenAgentFamily — positive family chrome only', () => {
+  const term = (tail: string[]) => ({ source: 'screen', tail });
+  it('claude idle, fresh-launch, compacted and real captured screens read claude', () => {
+    for (const screen of [CLAUDE_IDLE, CLAUDE_FRESH, CLAUDE_IDLE_COMPACTED, CLAUDE_IDLE_REAL_XAN, CLAUDE_IDLE_REAL_LIAM, CLAUDE_BUSY_EMPTY, CLAUDE_UNKNOWN_QUIET]) {
+      expect(screenAgentFamily(term(screen))).toBe('claude');
+    }
+  });
+  it('codex idle and fresh-launch screens read codex', () => {
+    for (const screen of [CODEX_IDLE, CODEX_FRESH, CODEX_BUSY_EMPTY]) {
+      expect(screenAgentFamily(term(screen))).toBe('codex');
+    }
+  });
+  it('a plain shell reads null', () => {
+    expect(screenAgentFamily(term(['orca@orca1:~/workspaces/eli$ ', '']))).toBeNull();
+    expect(screenAgentFamily(term(['❯ ']))).toBeNull(); // starship-like glyph alone is not claude
+    expect(screenAgentFamily(term(['─'.repeat(60)]))).toBeNull(); // one rule is not the composer box
+    expect(screenAgentFamily(undefined)).toBeNull();
+    expect(screenAgentFamily({ source: 'stream', tail: ['x'] })).toBeNull();
   });
 });
 
