@@ -120,6 +120,7 @@ import {
   type AppSelectionErrorEnvelope,
 } from './app-selection-errors.js';
 import { mcpLog } from './mcp-log.js';
+import { toolErrorResult } from './toolError.js';
 import { tagsInputSchema } from './tagsInput.js';
 import { foreignIdentityScopedMemoryFilter } from '../lib/auth/memoryOwnership.js';
 
@@ -3747,7 +3748,7 @@ export function createMcpServerInstance(
       try {
         validateLoc(loc);
       } catch (e) {
-        return textResult((e as Error).message);
+        return toolErrorResult(e, () => (e as Error).message);
       }
 
       if (!(await canWriteToMemory(db, auth, memoryId, EXPLICIT_REF))) {
@@ -5559,7 +5560,7 @@ export function createMcpServerInstance(
       try {
         validateLoc(loc);
       } catch (e) {
-        return textResult((e as Error).message);
+        return toolErrorResult(e, () => (e as Error).message);
       }
 
       if (!(await canWriteToMemory(db, auth, memoryId, EXPLICIT_REF))) {
@@ -6581,7 +6582,7 @@ export function createMcpServerInstance(
       assertFullyQualifiedUrn(rawUrn, 'node');
       ({ memoryUrn, loc, fragment } = splitNodeUrn(rawUrn));
     } catch (e) {
-      return textResult((e as Error).message);
+      return toolErrorResult(e, () => (e as Error).message);
     }
     const fragRefusal = nodeFragmentRefusal(rawUrn, fragment);
     if (fragRefusal) return textResult(fragRefusal);
@@ -6593,7 +6594,7 @@ export function createMcpServerInstance(
     try {
       validateLoc(loc);
     } catch (e) {
-      return textResult((e as Error).message);
+      return toolErrorResult(e, () => (e as Error).message);
     }
 
     // `name` is optional in the shared arg set because an UPDATE preserves it,
@@ -6646,7 +6647,7 @@ export function createMcpServerInstance(
       return textResult(`${kind} node ${mode === 'create' ? 'created' : 'updated'}: ${rawUrn} (id: ${node.id})`);
     } catch (e) {
       const code = (e as { extensions?: { code?: string } }).extensions?.code;
-      return textResult(code ? `[${String(code).toLowerCase()}] ${(e as Error).message}` : `Error: ${(e as Error).message}`);
+      return toolErrorResult(e, () => code ? `[${String(code).toLowerCase()}] ${(e as Error).message}` : `Error: ${(e as Error).message}`);
     }
   }
 
@@ -6764,7 +6765,7 @@ export function createMcpServerInstance(
         const urn = await nodeUrn(node.loc, node.memoryId);
         return textResult(`Node data merged: ${urn} (id: ${node.id})`);
       } catch (e) {
-        return textResult(`Error: ${e instanceof Error ? e.message : 'update failed'}`);
+        return toolErrorResult(e, () => `Error: ${e instanceof Error ? e.message : 'update failed'}`);
       }
     },
   );
@@ -6808,7 +6809,7 @@ export function createMcpServerInstance(
         );
         return textResult(JSON.stringify(obj, null, 2));
       } catch (e) {
-        return textResult(`Error: ${e instanceof Error ? e.message : 'create failed'}`);
+        return toolErrorResult(e, () => `Error: ${e instanceof Error ? e.message : 'create failed'}`);
       }
     },
   );
@@ -6824,7 +6825,7 @@ export function createMcpServerInstance(
         const obj = await resolvers.Query.object({}, { ref }, objectCtx());
         return obj ? textResult(JSON.stringify(obj, null, 2)) : textResult('Object not found.');
       } catch (e) {
-        return textResult(`Error: ${e instanceof Error ? e.message : 'read failed'}`);
+        return toolErrorResult(e, () => `Error: ${e instanceof Error ? e.message : 'read failed'}`);
       }
     },
   );
@@ -6842,7 +6843,7 @@ export function createMcpServerInstance(
         const obj = await resolvers.Mutation.updateObject({}, { ref, fields: fields ?? {}, reason }, objectCtx());
         return textResult(JSON.stringify(obj, null, 2));
       } catch (e) {
-        return textResult(`Error: ${e instanceof Error ? e.message : 'update failed'}`);
+        return toolErrorResult(e, () => `Error: ${e instanceof Error ? e.message : 'update failed'}`);
       }
     },
   );
@@ -6859,7 +6860,7 @@ export function createMcpServerInstance(
         await resolvers.Mutation.deleteObject({}, { ref, hard }, objectCtx());
         return textResult(`Object deleted${hard ? ' (hard)' : ''}: ${ref}`);
       } catch (e) {
-        return textResult(`Error: ${e instanceof Error ? e.message : 'delete failed'}`);
+        return toolErrorResult(e, () => `Error: ${e instanceof Error ? e.message : 'delete failed'}`);
       }
     },
   );
@@ -6886,7 +6887,7 @@ export function createMcpServerInstance(
         // Return { objects, total } so agents can page deterministically with limit/offset.
         return textResult(JSON.stringify({ objects: result.objects, total: result.total }, null, 2));
       } catch (e) {
-        return textResult(`Error: ${e instanceof Error ? e.message : 'query failed'}`);
+        return toolErrorResult(e, () => `Error: ${e instanceof Error ? e.message : 'query failed'}`);
       }
     },
   );
@@ -6976,7 +6977,7 @@ export function createMcpServerInstance(
           lines.length ? `${header}\n${coverage}\n${lines.join('\n')}` : `${header}\n${coverage}`,
         );
       } catch (e) {
-        return textResult(`Error: ${e instanceof Error ? e.message : 'search-and-replace failed'}`);
+        return toolErrorResult(e, () => `Error: ${e instanceof Error ? e.message : 'search-and-replace failed'}`);
       }
     },
   );
