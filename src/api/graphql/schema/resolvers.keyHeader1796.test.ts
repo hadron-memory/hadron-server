@@ -58,22 +58,26 @@ const startQuery = 'mutation($agent: ID!, $user: String) { startAgentSession(age
 const linkQuery = 'mutation($memory: ID!, $user: String!) { linkMemoryToUser(memoryId: $memory, externalUserId: $user) { id isEncrypted class } }';
 
 describe('#1796 schema boundary', () => {
-  it('confines the temporary secret arguments and deprecates both migrating operations', () => {
+  it('removes provisioning key arguments and allow-lists encryptMemory by name', () => {
     const found: string[] = [];
-    const deprecated: string[] = [];
+    const encryptionArgs: string[] = [];
     for (const definition of parse(typeDefs).definitions) {
       if (definition.kind !== Kind.OBJECT_TYPE_DEFINITION && definition.kind !== Kind.OBJECT_TYPE_EXTENSION) continue;
       if (!['Query', 'Mutation'].includes(definition.name.value)) continue;
-      for (const field of definition.fields ?? []) for (const arg of field.arguments ?? []) {
-        if (['dataKey', 'passphrase'].includes(arg.name.value) || arg.directives?.some(d => /keyMaterial/i.test(d.name.value))) {
-          const name = definition.name.value + '.' + field.name.value + '.' + arg.name.value;
-          found.push(name);
-          if (arg.directives?.some(d => d.name.value === 'deprecated' && d.arguments?.some(a => a.name.value === 'reason' && a.value.kind === Kind.STRING && a.value.value.includes(header)))) deprecated.push(name);
+      for (const field of definition.fields ?? []) {
+        if (['startAgentSession', 'linkMemoryToUser'].includes(field.name.value)) {
+          expect(field.arguments?.map(arg => arg.name.value)).not.toContain('dataKey');
+        }
+        for (const arg of field.arguments ?? []) {
+          if (field.name.value === 'encryptMemory') encryptionArgs.push(arg.name.value);
+          if (['dataKey', 'passphrase'].includes(arg.name.value) || arg.directives?.some(d => /keyMaterial/i.test(d.name.value))) {
+            found.push(definition.name.value + '.' + field.name.value + '.' + arg.name.value);
+          }
         }
       }
     }
-    expect(found.sort()).toEqual(['Mutation.encryptMemory.dataKey', 'Mutation.encryptMemory.passphrase', 'Mutation.linkMemoryToUser.dataKey', 'Mutation.startAgentSession.dataKey']);
-    expect(deprecated.sort()).toEqual(['Mutation.linkMemoryToUser.dataKey', 'Mutation.startAgentSession.dataKey']);
+    expect(encryptionArgs.sort()).toEqual(['dataKey', 'memoryId', 'passphrase']);
+    expect(found.sort()).toEqual(['Mutation.encryptMemory.dataKey', 'Mutation.encryptMemory.passphrase']);
   });
 
 
