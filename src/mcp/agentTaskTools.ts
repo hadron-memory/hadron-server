@@ -296,16 +296,16 @@ export function registerAgentTaskTools(server: McpServer, deps: { db: PrismaClie
 
   server.tool(
     'hadron_task_create',
-    'Create an agent task in a team App (cor:agt:050). A ROOT task names appRef; any App participant may create one, ' +
-      'and owns it unless an App manager names another owner. A CHILD task names parentTaskId; only the parent\'s ' +
-      'assignee may create one, and owns it. Omit assignee to leave it queued.',
+    'Create an agent task in a team App (cor:agt:050). A ROOT task names appRef; any App participant may create one. ' +
+      'It owns it unless it names another owner, which any participating worker or person may be (#1757, cor:agt:050:01). ' +
+      'A CHILD task names parentTaskId; only the parent\'s assignee may create one, and owns it. Omit assignee to leave it queued.',
     {
       appRef: z.string().optional().describe('The team App (id or URN). Required for a root task.'),
       parentTaskId: z.string().optional().describe('The parent task, for a child task.'),
       title: z.string().describe('What is asked, in the team\'s own words.'),
       description: z.string().optional(),
       source: z.string().optional().describe('Where the work came from: an issue URL, a node URN.'),
-      owner: party.optional().describe('Defaults to you. Only an App manager may name someone else, and never for a child task.'),
+      owner: party.optional().describe('Defaults to you. For a root task, any participating worker or person; a ref outside the App\'s participants is refused. Never for a child task.'),
       assignee: party.optional(),
       requirements: z.object({
         role: z.string().optional(),

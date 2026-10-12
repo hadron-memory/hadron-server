@@ -42,7 +42,9 @@
 // (participation, holder, App live), not trust the assignment it was queued from.
 //
 // AUTHORIZATION (cor:agt:050:06–:09, plan §10, rulings on epic #1704):
-//   create root     any App participant (050:06)
+//   create root     any App participant (050:06); the creator may name the
+//                   owner at creation — any participating worker or person
+//                   (050:01, Holger team chat #8183; #1757)
 //   create child    the parent's assignee, who owns the child (050:07)
 //   assign/cancel   the task's owner, or whoever manages the App (050:09, Proposed)
 //   reassign        the task's owner (ruled, D-2026-10-07-004), or an App manager (Proposed)
@@ -678,11 +680,12 @@ type CreateInput = {
 export const agentTaskMutations = {
   /**
    * Create a task (cor:agt:050:06 root, :07 child). A root task: any App
-   * participant; its owner defaults to the creator, and an explicit other
-   * owner is accepted only from whoever manages the App (050:01 open question;
-   * #1705 interim). A child task: only the parent's assignee, who owns it, and
-   * naming another owner is refused TASK_CHILD_OWNER_MISMATCH; not under an
-   * ended parent (TASK_ENDED, 050:07 open question; #1705 interim).
+   * participant; its owner defaults to the creator, and the creator may name
+   * any other participating worker or person as owner (cor:agt:050:01, Holger
+   * team chat #8183; #1757). A child task: only the parent's assignee, who
+   * owns it, and naming another owner is refused TASK_CHILD_OWNER_MISMATCH;
+   * not under an ended parent (TASK_ENDED, 050:07 open question; #1705
+   * interim).
    */
   createAgentTask: async (_: unknown, { input }: { input: CreateInput }, ctx: Context) => {
     if (!input) throw badInput('input is required.');
@@ -728,24 +731,24 @@ export const agentTaskMutations = {
       const requirements = await normalizeRequirements(txCtx, app, input.requirements);
       let owner: TaskParty = actorParty(actor);
       if (input.owner) {
-        // Only an App manager may name another owner, so for anyone else every
-        // outcome but "that is you" is the same refusal: a non-manager learns
-        // nothing about which refs are valid parties (no participation oracle).
-        const manages = !parentId && (await actorManagesApp(txCtx, app, actor));
+        // #1757 (cor:agt:050:01, Holger team chat #8183): a root task's
+        // creator — any participant, worker or person — may name its owner,
+        // so long as the named party participates in the App too. A ref that
+        // names nobody, a non-participant or another App's worker is
+        // TASK_OWNER_INVALID — the same refusal either way. A child task's
+        // owner is its parent's assignee, so naming anybody but yourself is
+        // TASK_CHILD_OWNER_MISMATCH, valid ref or not (no oracle).
         let named: TaskParty | null = null;
         try {
           named = await resolveParty(txCtx, app, input.owner, 'TASK_OWNER_INVALID');
         } catch (e) {
-          if (manages || !(e instanceof GraphQLError && e.extensions?.code === 'TASK_OWNER_INVALID')) throw e;
+          if (!parentId || !(e instanceof GraphQLError && e.extensions?.code === 'TASK_OWNER_INVALID')) throw e;
         }
         if (!named || !sameParty(named, owner)) {
           if (parentId) {
             throw taskError('TASK_CHILD_OWNER_MISMATCH', "A child task is owned by the parent's assignee who creates it; it cannot name another owner.");
           }
-          if (!manages || !named) {
-            throw taskError('TASK_NOT_OWNER', 'Only whoever manages the App may create a task owned by someone else.');
-          }
-          owner = named;
+          owner = named as TaskParty;
         }
       }
       const assignee = input.assignee ? await resolveParty(txCtx, app, input.assignee, 'TASK_ASSIGNEE_INVALID') : null;
@@ -780,7 +783,9 @@ export const agentTaskMutations = {
       });
       await appendTaskEvent(tx, {
         appId: app.id, taskId: created.id, actor: evActor,
-        event: { type: 'task.created', parentTaskId: parentId, hasAssignee: assignee !== null },
+        // The owner rides the event (#1757): a named owner is visible to the
+        // event stream — and so to the alarm chain — from creation.
+        event: { type: 'task.created', parentTaskId: parentId, owner, hasAssignee: assignee !== null },
       });
       if (assignee) {
         await appendTaskEvent(tx, {
