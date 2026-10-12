@@ -11325,15 +11325,13 @@ export const typeDefs = `#graphql
     x-hadron-operation-key header when identifyUserMethod is SECRET.
     The key is verified for an existing encrypted memory and held only
     after the new session commits; USER_ID mode rejects key supply.
-    The deprecated dataKey argument remains during caller migration;
-    dual supply must carry the same key. Only one key-consuming operation
+    Only one key-consuming operation
     may use the header in a request; a second attempt is BAD_UNLOCK_INPUT.
     """
     startAgentSession(
       agentId: ID!
       externalUserId: String
       sessionTimeoutSeconds: Int
-      dataKey: String @deprecated(reason: "Use x-hadron-operation-key; removal follows caller migration.")
     ): Session!
     endAgentSession(sessionId: ID!): Boolean!
 
@@ -11341,8 +11339,7 @@ export const typeDefs = `#graphql
     Link this App's live plaintext anonymous memory to a real user.
     Providing x-hadron-operation-key in the request header claims private
     ownership and encrypts live nodes; remaining fields and history complete
-    in bounded passes. The deprecated dataKey argument remains during caller
-    migration; dual supply must carry the same key. Only one key-consuming
+    in bounded passes. Only one key-consuming
     operation may use the header per request; a second is BAD_UNLOCK_INPUT.
     After a committed claim,
     interrupted completion allows the strict owner or owning App key to call
@@ -11350,7 +11347,7 @@ export const typeDefs = `#graphql
 
     Accepts the entity's ID or URN.
     """
-    linkMemoryToUser(memoryId: ID!, externalUserId: String!, dataKey: String @deprecated(reason: "Use x-hadron-operation-key; removal follows caller migration.")): Memory!
+    linkMemoryToUser(memoryId: ID!, externalUserId: String!): Memory!
 
     """
     Convert a plaintext PRIVATE memory to encrypted (spec 041, caller-held
