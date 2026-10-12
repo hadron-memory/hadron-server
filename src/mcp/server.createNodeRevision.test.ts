@@ -336,12 +336,16 @@ describe('hadron_create_node over an existing loc — revision history (#976/#11
       },
     });
 
-    await expect(
-      createTestableMcpServer(adminAuth()).callToolText('hadron_update_node', {
+    // The transaction still aborts, but #1695 now catches the database fault
+    // before the SDK can expose its revision-table diagnostics to the caller.
+    const result = await createTestableMcpServer(adminAuth()).callTool('hadron_update_node', {
         urn: `hrn:node:${fx.memory.urn}:${node.loc}`,
         content: 'must not land',
-      }),
-    ).rejects.toThrow();
+    });
+    expect(result).toEqual({
+      isError: true,
+      content: [{ type: 'text', text: '[internal_server_error] Unable to complete this request. Please try again.' }],
+    });
 
     const after = await db.node.findUniqueOrThrow({ where: { id: node.id } });
     expect(after.content).toBe('Original content');
