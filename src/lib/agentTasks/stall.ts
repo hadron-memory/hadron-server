@@ -57,6 +57,7 @@ import { loadWorkersActivity } from '../../api/graphql/schema/resolvers.worker.j
 import { toNaiveUtc } from '../sessionActivity.js';
 import { appendAlarmEvent, type AlarmChain, type AlarmEventType, type TaskParty } from './events.js';
 import { markStalled } from './availability.js';
+import { appManagerUserIds } from '../auth/appManagement.js';
 
 export const STALL_RULES = ['not-started', 'no-progress', 'owner-unreactive', 'unassignable'] as const;
 export type StallRule = (typeof STALL_RULES)[number];
@@ -281,8 +282,10 @@ export function unreactedChild(inputs: StallInputs): { id: string; finishedAt: D
 
 /**
  * cor:agt:050:18 — the task's owner, then its parent's owner, up to the root
- * owner, nearest first. An owner who appears more than once is kept at their
- * nearest position only, so escalation never wakes the same party twice.
+ * owner, nearest first; then, cor:agt:050:25 (#1761), whoever manages the App
+ * (`appManagerUserIds`), because a root task has no parent owner to escalate to.
+ * A party who appears more than once is kept at their nearest position only, so
+ * escalation never wakes the same party twice.
  */
 export async function ownerChain(db: Db, taskId: string): Promise<AlarmChain> {
   const rows = await db.$queryRaw<{ ownerWorkerId: string | null; ownerUserId: string | null }[]>`
@@ -309,6 +312,18 @@ export async function ownerChain(db: Db, taskId: string): Promise<AlarmChain> {
     if (seen.has(key)) continue;
     seen.add(key);
     chain.push(party);
+  }
+  const app = await db.agentTask.findUnique({
+    where: { id: taskId },
+    select: { app: { select: { id: true, organizationId: true, ownerUserId: true } } },
+  });
+  if (app) {
+    for (const userId of await appManagerUserIds(db, app.app)) {
+      const key = `u:${userId}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      chain.push({ userId });
+    }
   }
   return chain;
 }

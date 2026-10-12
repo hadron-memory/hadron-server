@@ -8471,7 +8471,8 @@ export const typeDefs = `#graphql
     """
     #1706 — acknowledge an alarm (hrn:node:hadronmemory.com:specs:cor:agt:050:20): it stops waking higher
     owners; the stall episode goes on until the task moves. Any owner in the
-    alarm's chain, and nobody else (Proposed); the time is the server's.
+    alarm's chain, or whoever manages the App (cor:agt:050:24), and nobody
+    else; the time is the server's.
     Refusals: ALARM_NOT_FOUND (also for an App you do not participate in),
     NOT_AN_ALARM, ALARM_NOT_IN_CHAIN, ALARM_ALREADY_ACKNOWLEDGED (the first
     stands), SESSION_NOT_BOUND, APP_UNINSTALLED.

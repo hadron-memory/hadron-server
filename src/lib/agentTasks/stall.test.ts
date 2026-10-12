@@ -85,6 +85,9 @@ beforeEach(async () => {
   liam = await worker('Liam');
 });
 
+/** The fixture's one App manager (an org ADMIN): every alarm chain ends with it (cor:agt:050:25, #1761). */
+const manager = () => ({ userId: admin.id });
+
 // ── Fixtures with explicit times ──────────────────────────────────────────
 
 type TaskData = Record<string, unknown>;
@@ -139,7 +142,7 @@ describe('cor:agt:050:14 — a task not started in time raises an alarm', () => 
     expect(rest).toEqual([]);
     expect(a).toMatchObject({
       type: 'stall.not-started', taskId: t.id, severity: 'alarm', subjectWorkerId: anne.id,
-      episodeStart: at('10:00'), createdAt: at('10:15'), chain: [{ workerId: ada.id }],
+      episodeStart: at('10:00'), createdAt: at('10:15'), chain: [{ workerId: ada.id }, manager()],
       payload: { windowMinutes: 15, assignee: { workerId: anne.id } },
       acknowledgedAt: null,
     });
@@ -289,7 +292,7 @@ describe('cor:agt:050:16 r2 — an owner who doesn\'t react to a finished child 
     await tick('10:20');
     expect(await alarms('stall.owner-unreactive')).toEqual([expect.objectContaining({
       taskId: parent.id, episodeStart: at('10:00'), subjectWorkerId: anne.id,
-      chain: [{ workerId: ada.id }], payload: { windowMinutes: 20, assignee: { workerId: anne.id }, childTaskId: child.id },
+      chain: [{ workerId: ada.id }, manager()], payload: { windowMinutes: 20, assignee: { workerId: anne.id }, childTaskId: child.id },
     })]);
     const [w] = await wakes((await alarms('stall.owner-unreactive'))[0].id);
     expect(w).toMatchObject({ chainIndex: 0, wokenAt: at('10:20') });
@@ -354,7 +357,7 @@ describe('cor:agt:050:17 — a task nobody could be assigned raises an alarm', (
     await tick('10:30');
     expect(await alarms()).toEqual([expect.objectContaining({
       type: 'assignment.unassignable', taskId: t.id, episodeStart: at('10:00'), subjectWorkerId: null,
-      chain: [{ workerId: ada.id }], payload: { windowMinutes: 30 },
+      chain: [{ workerId: ada.id }, manager()], payload: { windowMinutes: 30 },
     })]);
   });
 
@@ -390,7 +393,7 @@ describe('cor:agt:050:13 — exactly one alarm per stall episode', () => {
     const results = await Promise.all([evaluateStalls(db, at('10:15')), evaluateStalls(db, at('10:15'))]);
     expect(results[0].length + results[1].length).toBe(5);
     expect(await alarms()).toHaveLength(5);
-    expect(await db.agentTeamAlarmSchedule.count()).toBe(5);
+    expect(await db.agentTeamAlarmSchedule.count()).toBe(10); // five alarms, each woken owner then the App manager
     expect(await db.agentTeamEvent.count({ where: { type: 'availability.changed' } })).toBe(1);
   });
 
@@ -416,7 +419,7 @@ describe('cor:agt:050:13 — exactly one alarm per stall episode', () => {
     const t = await assignedToAnne('10:00');
     const row = {
       appId: app.id, taskId: t.id, type: 'stall.not-started', severity: 'alarm',
-      chain: [{ workerId: ada.id }], episodeStart: at('10:00'),
+      chain: [{ workerId: ada.id }, manager()], episodeStart: at('10:00'),
     };
     await db.agentTeamEvent.create({ data: row });
     await expect(db.agentTeamEvent.create({ data: row })).rejects.toThrow(/agent_team_events_episode_uniq|Unique constraint/);
@@ -438,7 +441,7 @@ describe('cor:agt:050:18 / :19 — every owner up the chain sees it; only the ne
 
   it('050:18 S1: both Anne and Ada are in the chain, nearest first', async () => {
     const { review, alarm } = await stalledReview();
-    expect(alarm).toMatchObject({ taskId: review.id, chain: [{ workerId: anne.id }, { workerId: ada.id }] });
+    expect(alarm).toMatchObject({ taskId: review.id, chain: [{ workerId: anne.id }, { workerId: ada.id }, manager()] });
   });
 
   it('050:18 S2: Liam, owning nothing in the chain, reads the alarm only as any reader of the events', async () => {
@@ -456,7 +459,7 @@ describe('cor:agt:050:18 / :19 — every owner up the chain sees it; only the ne
     await task({ parentTaskId: mid.id, ownerWorkerId: ada.id, assigneeWorkerId: rook.id, assignedAt: at('10:00') });
     await tick('10:15');
     const [a] = await alarms('stall.not-started');
-    expect(a.chain).toEqual([{ workerId: ada.id }, { workerId: anne.id }]);
+    expect(a.chain).toEqual([{ workerId: ada.id }, { workerId: anne.id }, manager()]);
   });
 
   it('050:19 S1–S3: Anne is woken at once; Ada not before the window passes again, then she is', async () => {
@@ -464,6 +467,7 @@ describe('cor:agt:050:18 / :19 — every owner up the chain sees it; only the ne
     expect(await wakes(alarm.id)).toEqual([
       expect.objectContaining({ chainIndex: 0, dueAt: at('10:15'), wokenAt: at('10:15') }),
       expect.objectContaining({ chainIndex: 1, dueAt: at('10:30'), wokenAt: null }),
+      expect.objectContaining({ chainIndex: 2, dueAt: at('10:45'), wokenAt: null }), // the App manager (#1761)
     ]);
     await tick('10:29:59.999'); // S3: Ada may read it, but is not woken
     expect((await wakes(alarm.id))[1].wokenAt).toBeNull();
@@ -471,12 +475,12 @@ describe('cor:agt:050:18 / :19 — every owner up the chain sees it; only the ne
     expect((await wakes(alarm.id))[1].wokenAt).toEqual(at('10:30'));
   });
 
-  it('the root task\'s owner ends the chain (interim: nobody beyond is woken)', async () => {
+  it('the root task\'s owner is followed by the App manager, and nobody beyond (#1761)', async () => {
     const t = await assignedToAnne('10:00');
     await tick('10:15');
     const [a] = await alarms();
     expect(a.taskId).toBe(t.id);
-    expect(await wakes(a.id)).toHaveLength(1);
+    expect(await wakes(a.id)).toHaveLength(2);
   });
 });
 
@@ -670,7 +674,7 @@ describe('per-App stall windows and scope', () => {
     await task({ parentTaskId: root.id, ownerWorkerId: anne.id, createdAt: at('10:00') });
     await tick('10:10');
     const [a] = await alarms('assignment.unassignable');
-    expect((await wakes(a.id)).map((w) => w.dueAt)).toEqual([at('10:10'), at('10:20')]);
+    expect((await wakes(a.id)).map((w) => w.dueAt)).toEqual([at('10:10'), at('10:20'), at('10:30')]);
     expect((await taskStallTick(db, new Date(at('10:20').getTime() - MINUTE))).woken).toBe(0);
   });
 });
@@ -691,7 +695,7 @@ describe('Diego P2 on #1720 — an account merge never strands an alarm\'s ackno
     const t = await task({ ownerUserId: mia.id, assigneeWorkerId: anne.id, assignedAt: at('10:00'), createdAt: at('10:00') });
     await tick('10:15');
     const [a] = await alarms();
-    expect(a.chain).toEqual([{ userId: mia.id }]);
+    expect(a.chain).toEqual([{ userId: mia.id }, manager()]);
     return { t, a };
   }
 
@@ -721,8 +725,10 @@ describe('Diego P2 on #1720 — an account merge never strands an alarm\'s ackno
     await db.agentTask.update({ where: { id: t.id }, data: { assigneeWorkerId: liam.id, assignedAt: at('11:00') } });
     await tick('11:15');
     const next = (await alarms())[1];
-    expect(next.chain).toEqual([{ userId: tUser.id }]);
-    await expectCode(M.acknowledgeAlarm({}, { eventId: next.id }, ctx(admin.id)), 'ALARM_NOT_IN_CHAIN');
+    expect(next.chain).toEqual([{ userId: tUser.id }, manager()]);
+    const plain = await db.user.create({ data: { githubId: 950_000 + Math.floor(Math.random() * 99_999), githubUsername: `st-p-${generateId()}`, roles: ['READER'] } });
+    await db.appMember.create({ data: { appId: app.id, userId: plain.id, role: 'member' } });
+    await expectCode(M.acknowledgeAlarm({}, { eventId: next.id }, ctx(plain.id)), 'ALARM_NOT_IN_CHAIN');
     await expect(M.acknowledgeAlarm({}, { eventId: next.id }, ctx(tUser.id))).resolves.toMatchObject({ acknowledgedByUserId: tUser.id });
   });
 
@@ -755,7 +761,7 @@ describe('Diego P2 on #1720 — an account merge never strands an alarm\'s ackno
     expect((await db.user.findUniqueOrThrow({ where: { id: mia.id } })).deletedAt).not.toBeNull();
     await tick('10:16');
     const [a] = await alarms('stall.not-started');
-    expect(a.chain).toEqual([{ workerId: anne.id }, { userId: tUser.id }]);
+    expect(a.chain).toEqual([{ workerId: anne.id }, { userId: tUser.id }, manager()]);
   });
 });
 
@@ -801,7 +807,7 @@ describe('Rook P3-4 on #1720 — the chain never leaves the task\'s App', () => 
     const foreign = await db.agentTask.create({ data: { appId: elsewhere.id, title: 'F', ownerUserId: outsider.id }, select: { id: true } });
     await task({ parentTaskId: foreign.id, ownerWorkerId: anne.id, assigneeWorkerId: rook.id, assignedAt: at('10:00') });
     await tick('10:15');
-    expect((await alarms('stall.not-started'))[0].chain).toEqual([{ workerId: anne.id }]);
+    expect((await alarms('stall.not-started'))[0].chain).toEqual([{ workerId: anne.id }, manager()]);
   });
 });
 

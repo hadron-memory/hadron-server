@@ -233,7 +233,8 @@ describe('createAgentTask — root tasks: any App participant (cor:agt:050:06)',
     const payload = ev[0].payload as { owner: { workerId: string }; hasAssignee: boolean };
     expect(payload.owner).toEqual({ workerId: liam.id });
     expect(payload.hasAssignee).toBe(false);
-    expect(await ownerChain(db, t.id)).toEqual([{ workerId: liam.id }]);
+    // The owner first; the App's managers follow (cor:agt:050:25, #1761).
+    expect((await ownerChain(db, t.id))[0]).toEqual({ workerId: liam.id });
   });
 
   it("naming a non-participant, another App's worker, a retired worker or nobody at all answers TASK_OWNER_INVALID — the same refusal", async () => {
