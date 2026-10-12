@@ -37,6 +37,7 @@ import {
   isAgentInstalled,
 } from '../../../lib/appAgent.js';
 import { getOrgReadableMemoryIds } from '../../../lib/auth/orgReadableMemory.js';
+import { getOrgWritableMemoryIds } from '../../../lib/auth/orgWritableMemory.js';
 import { ROLE_ORDER } from '../../../lib/auth/orgRole.js';
 import { sessionScopedMemoryIds } from '../../../lib/auth/sessionScopedMemoryIds.js';
 import { getMemberOrgIds } from '../../../lib/auth/memberOrgIds.js';
@@ -2382,6 +2383,7 @@ export async function requireMemoryWriteAccess(ctx: Context, memoryId: string): 
       class: true,
       appId: true,
       userMemoryOfAgentId: true,
+      createdBy: true,
     },
   });
 
@@ -2430,37 +2432,27 @@ export async function requireMemoryWriteAccess(ctx: Context, memoryId: string): 
     throw memoryWriteForbidden();
   }
 
-  // #1208 / cor:acl:010:01 — GROUP write is MemoryMember writer/owner ONLY.
-  // The plain org-CONTRIBUTOR path below must not fire for group: an org
-  // contributor the narrowed read gates no longer admit could otherwise
-  // still WRITE the memory (write wider than read — the incoherent state
-  // Baloo's #3677 review caught). Falls through to the cross-org
-  // subscription grant below, which stays: it is the subscription grant
-  // surface, symmetric with the read gates' subscription clause. MemoryMember
-  // rows hard-delete (FR-038), so existence is liveness.
-  if (memory.class === 'group') {
-    const groupWrite =
-      ctx.userId &&
-      (await ctx.db.memoryMember.findUnique({
-        where: { memoryId_userId: { memoryId, userId: ctx.userId } },
-        select: { role: true },
-      }));
-    if (groupWrite && (groupWrite.role === 'writer' || groupWrite.role === 'owner')) return;
-  } else {
-    // Direct org member with CONTRIBUTOR+? findFirst + deletedAt so a REVOKED
-    // membership no longer grants write access (same rule as requireOrgRole).
-    const member = await ctx.db.orgMember.findFirst({
-      where: { organizationId: memory.organizationId, userId: ctx.userId, ...LIVE_ORG_MEMBERSHIP },
-    });
-    if (member && (ROLE_ORDER[member.role] ?? -1) >= ROLE_ORDER['CONTRIBUTOR']) return;
+  // Identity-scoped records do not inherit shared org grants. Match the
+  // existing creator-scoped read audience, with impersonation excluded.
+  if (memory.class === 'knowledge' && memory.userMemoryOfAgentId !== null) {
+    if (!ctx.impersonation && memory.createdBy === ctx.userId) return;
+    throw memoryWriteForbidden();
   }
 
-  // Cross-org subscription with CONTRIBUTOR role — for every class EXCEPT
-  // group (#3781): createMemorySubscription only admits PUBLIC memories and
-  // group visibility is CHECK-forced to GROUP, so a group-subscription row
-  // is API-invalid legacy state. For group, the MemoryMember writer/owner
-  // check above is the exclusive write grant (cor:acl:010:01).
-  if (memory.class !== 'group') {
+  // Definition authoring uses the same org-management gate as Agent edits.
+  // User-owned and platform-admin cases were already decided above.
+  if (memory.class === 'system') {
+    await requireOrgRole(ctx, memory.organizationId, 'ADMIN');
+    return;
+  }
+
+  // One shared predicate for GraphQL and MCP: free-standing knowledge via
+  // live org CONTRIBUTOR+, group via its MemoryMember writer/owner grant.
+  if ((await getOrgWritableMemoryIds(ctx.db, ctx.userId, memoryId)).includes(memoryId)) return;
+
+  // A subscription grants writes only to ordinary shared knowledge. Group
+  // membership stays the exclusive group-write arm (cor:acl:010:01).
+  if (memory.class === 'knowledge' && memory.userMemoryOfAgentId === null) {
     const userOrgs = await ctx.db.orgMember.findMany({
       where: {
         userId: ctx.userId,
@@ -2473,7 +2465,7 @@ export async function requireMemoryWriteAccess(ctx: Context, memoryId: string): 
       const memorySub = await ctx.db.memorySubscription.findUnique({
         where: { memoryId_organizationId: { memoryId, organizationId: uo.organizationId } },
       });
-      if (memorySub && (ROLE_ORDER[memorySub.role] ?? -1) >= ROLE_ORDER['CONTRIBUTOR']) return;
+      if (memorySub && memorySub.deletedAt === null && (ROLE_ORDER[memorySub.role] ?? -1) >= ROLE_ORDER['CONTRIBUTOR']) return;
     }
   }
 

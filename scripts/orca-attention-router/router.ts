@@ -58,15 +58,27 @@ export const DEFAULT_CONFIG = join(homedir(), '.config', 'hadron-orca-attention-
  * The one line a worker receives: fresh counts with the seq range they cover —
  * never a message body, and never a token. The seqs let the recipient check
  * the nudge against its own read cursor, so it stays true when delivered (#1616).
- * Kept SHORT: it is typed into a working terminal (Holger, 2026-10-05).
+ * Kept short but COMPLETE (Holger, 2026-10-05): it is typed into a working
+ * terminal, so every word earns its place — but the read anchor (where to
+ * start, both CLI and MCP forms, bounded) is load-bearing and stays.
  */
 export function nudgeText(a: AttentionItem): string {
   const where = [
     a.firstUnreadSeq === null ? '' : `unread #${a.firstUnreadSeq}–#${a.lastSeq}`,
     a.lastRelevantSeq === null ? '' : `latest mention #${a.lastRelevantSeq}`,
   ].filter(Boolean).join(', ');
+  // Watermark-anchored read instruction (production lesson 2026-10-12, Eden's
+  // #9017/#9035: workers with a stale read mark got count-only nudges, read the
+  // NEWEST page as every recovery brief teaches, found nothing addressed to
+  // them there, and concluded "nothing needs action" — while fresh mentions
+  // sat unread at their watermark. Name the mark; tell them where to start.)
+  const from =
+    a.firstUnreadSeq === null
+      ? ''
+      : ` START AT #${a.firstUnreadSeq} (your first unread message of any kind) — CLI: \`hadron team chat read --since ${Math.max(0, a.firstUnreadSeq - 1)} --limit 200\` then follow nextSince; MCP: \`hadron_team_chat_read\` with your session and \`sinceSeq=${Math.max(0, a.firstUnreadSeq - 1)}\` then the returned cursor — NOT the newest page alone;`;
   return (
-    `Hadron team attention: ${a.unread} relevant unread (${a.unreadMentions} mention${a.unreadMentions === 1 ? '' : 's'}${where ? `; ${where}` : ''}). ` +
+    `Hadron team attention: ${a.unread} relevant unread (${a.unreadMentions} mention${a.unreadMentions === 1 ? '' : 's'}${where ? `; ${where}` : ''}).` +
+    `${from} ` +
     'Read team chat unfiltered with your own live session; if nothing needs action, ' +
     "mark read and finish silently — no chat post or 'read/no-action' comment. (Orca attention router; counts as of send.)"
   );
