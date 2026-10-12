@@ -353,8 +353,8 @@ export async function ownerChain(db: Db, taskId: string): Promise<AlarmChain> {
 
 // ── Raising ───────────────────────────────────────────────────────────────
 
-/** The rules whose alarm marks a worker assignee unavailable (cor:agt:060:07, Proposed). */
-const MARKS_ASSIGNEE: ReadonlySet<StallRule> = new Set(['not-started', 'no-progress']);
+/** The rules whose alarm marks a worker assignee unavailable (cor:agt:060:07, Proposed; #1758 added owner-unreactive). */
+const MARKS_ASSIGNEE: ReadonlySet<StallRule> = new Set(['not-started', 'no-progress', 'owner-unreactive']);
 
 /**
  * Raise one candidate's alarm, once per episode. Re-evaluates the task under

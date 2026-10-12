@@ -619,12 +619,71 @@ describe('cor:agt:060:07 — a stall makes the assignee unavailable until it act
     expect((await tick('11:07')).cleared).toBe(0);
   });
 
-  it('a not-started alarm marks too; owner-unreactive and unassignable mark nobody (interim)', async () => {
+  it('a not-started alarm marks too; unassignable marks nobody', async () => {
     await assignedToAnne('10:00');
     await task({ ownerWorkerId: ada.id, createdAt: at('09:00') });
     await tick('10:15');
     expect((await alarms()).map((a) => a.type).sort()).toEqual(['assignment.unassignable', 'stall.not-started']);
     expect((await db.workerAvailability.findMany()).map((r) => r.workerId)).toEqual([anne.id]);
+  });
+
+  describe('#1758 — an owner-unreactive alarm marks the worker assignee too', () => {
+    async function unreactive() {
+      const parent = await assignedToAnne('09:00', { status: 'started', startedAt: at('09:10') });
+      await task({
+        parentTaskId: parent.id, ownerWorkerId: anne.id, assigneeWorkerId: rook.id, assignedAt: at('09:20'),
+        status: 'finished', startedAt: at('09:30'), finishedAt: at('10:00'), resultOutcome: 'succeeded',
+      });
+      await drive(anne, '09:45');
+      return parent;
+    }
+
+    it('Anne, silent after the child finished, is made unavailable (stalled, by the stall rule) when the alarm is raised', async () => {
+      await unreactive();
+      await tick('10:19');
+      expect(await db.workerAvailability.findUnique({ where: { workerId: anne.id } })).toBeNull();
+      await tick('10:20');
+      const [a] = await alarms('stall.owner-unreactive');
+      expect(await db.workerAvailability.findUnique({ where: { workerId: anne.id } })).toMatchObject({
+        state: 'unavailable', reason: 'stalled', setBy: 'stall-rule', setAt: at('10:20'), until: null,
+      });
+      expect(await db.agentTeamEvent.findMany({ where: { type: 'availability.changed' } })).toEqual([
+        expect.objectContaining({ subjectWorkerId: anne.id, payload: expect.objectContaining({ reason: 'stalled', alarmEventId: a.id }) }),
+      ]);
+    });
+
+    it('episode-once: later passes write no second alarm and no second mark; her next call clears it', async () => {
+      await unreactive();
+      await tick('10:20');
+      await tick('10:40');
+      await tick('11:20');
+      expect(await alarms('stall.owner-unreactive')).toHaveLength(1);
+      expect(await db.agentTeamEvent.count({ where: { type: 'availability.changed' } })).toBe(1);
+      await drive(anne, '11:30');
+      expect((await tick('11:31')).cleared).toBe(1);
+    });
+
+    it('a person who owns the parent is alarmed and never marked', async () => {
+      const parent = await task({
+        ownerWorkerId: ada.id, assigneeUserId: mia.id, assignedAt: at('09:00'), status: 'started', startedAt: at('09:10'),
+      });
+      await task({
+        parentTaskId: parent.id, ownerUserId: mia.id, assigneeWorkerId: rook.id, assignedAt: at('09:20'),
+        status: 'finished', startedAt: at('09:30'), finishedAt: at('10:00'), resultOutcome: 'succeeded',
+      });
+      await tick('10:20');
+      expect(await alarms('stall.owner-unreactive')).toHaveLength(1);
+      expect(await db.workerAvailability.count()).toBe(0);
+    });
+
+    it('a mark in effect for another reason is not overwritten', async () => {
+      await db.workerAvailability.create({
+        data: { workerId: anne.id, state: 'unavailable', reason: 'out-of-tokens', until: at('18:00'), setAt: at('09:00'), setBy: 'holder', setByUserId: mia.id },
+      });
+      await unreactive();
+      await tick('10:20');
+      expect(await db.workerAvailability.findUnique({ where: { workerId: anne.id } })).toMatchObject({ reason: 'out-of-tokens' });
+    });
   });
 
   it('a stall never overwrites a mark in effect for another reason', async () => {
