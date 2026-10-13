@@ -264,9 +264,20 @@ describe('follow-ups to #1756 (#1832, #1833)', () => {
       expect(await code(createRootTaskForRun(runContext(db, run), run, { title: 'x', status } as any))).toBe('BAD_USER_INPUT');
     }
     expect(await db.agentTask.count()).toBe(0);
+    // A typed caller cannot pass a status at all (Colin P2): this line fails to compile if the type admits one.
+    // @ts-expect-error status is `never` on the helper's input
+    void (() => createRootTaskForRun(runContext(db, run), run, { title: 'x', status: 'backlog' }));
     // Absent or null is the ordinary case: pending and queued.
-    await createRootTaskForRun(runContext(db, run), run, { title: 'x', status: null });
+    await createRootTaskForRun(runContext(db, run), run, { title: 'x', status: null } as any);
     expect((await tasks())[0]).toMatchObject({ status: 'pending' });
+  });
+
+  it('#1832: the run tool forwards a status to the helper, so the refusal fires on the wire (Greta QA)', async () => {
+    const run = await mintRun({ userId: person.id });
+    for (const status of ['BACKLOG', 'backlog', 'pending', 'PENDING', 'finished', '']) {
+      expect(await code(hadronTaskCreate.execute(toolCtx(run), { title: 'x', status }))).toBe('BAD_USER_INPUT');
+    }
+    expect(await db.agentTask.count()).toBe(0);
   });
 
   it('#1833: a run-created event names its run on the event read; the SDL declares the field', async () => {
