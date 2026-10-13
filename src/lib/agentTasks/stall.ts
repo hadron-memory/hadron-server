@@ -353,8 +353,8 @@ export async function ownerChain(db: Db, taskId: string): Promise<AlarmChain> {
 
 // ── Raising ───────────────────────────────────────────────────────────────
 
-/** The rules whose alarm marks a worker assignee unavailable (cor:agt:060:07, Proposed). */
-const MARKS_ASSIGNEE: ReadonlySet<StallRule> = new Set(['not-started', 'no-progress']);
+/** The rules whose alarm marks a worker assignee unavailable (cor:agt:060:07, Proposed; #1758 added owner-unreactive). */
+const MARKS_ASSIGNEE: ReadonlySet<StallRule> = new Set(['not-started', 'no-progress', 'owner-unreactive']);
 
 /**
  * Raise one candidate's alarm, once per episode. Re-evaluates the task under
@@ -423,9 +423,19 @@ export async function raiseStallAlarm(
       })),
     });
 
-    // cor:agt:060:07 — a person assignee is never marked (availability is a worker's).
-    if (MARKS_ASSIGNEE.has(again.rule) && subjectWorkerId) {
-      await markStalled(tx, { workerId: subjectWorkerId, appId: again.appId, alarmEventId: eventId, now });
+    // cor:agt:060:07 — not-started / no-progress mark the task's assignee;
+    // owner-unreactive marks the FINISHED CHILD's owner (#1758), who is the
+    // parent's assignee only until the parent is reassigned. A person is never
+    // marked (availability is a worker's).
+    let markWorkerId = subjectWorkerId;
+    if (again.rule === 'owner-unreactive') {
+      const child = again.childTaskId
+        ? await tx.agentTask.findUnique({ where: { id: again.childTaskId }, select: { ownerWorkerId: true } })
+        : null;
+      markWorkerId = child?.ownerWorkerId ?? null;
+    }
+    if (MARKS_ASSIGNEE.has(again.rule) && markWorkerId) {
+      await markStalled(tx, { workerId: markWorkerId, appId: again.appId, alarmEventId: eventId, now });
     }
     return eventId;
   }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });

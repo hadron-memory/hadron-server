@@ -496,6 +496,18 @@ async function agentGrants(
   if (agent.ownerUserId !== null) {
     if (agent.ownerUserId === subject.id) {
       grants.push({ source: 'PRINCIPAL_GRANT', role: 'owner', via: null, caps: FULL });
+    } else if (isPlatformAdmin(subject.roles)) {
+      // #1787 (cor:dmo:050:13): a platform admin manages a user-owned Agent
+      // (read, update, delete) — the audit surface agrees with the gate
+      // (`requireAgentAccess`). The decrypted AI config is a separate
+      // resource and stays owner-only. Impersonation carries no platform
+      // role, so an impersonated admin gets nothing here either.
+      grants.push({
+        source: 'PLATFORM_ROLE',
+        role: subject.roles.includes('OWNER') ? 'OWNER' : 'ADMIN',
+        via: null,
+        caps: FULL,
+      });
     }
     return grants;
   }

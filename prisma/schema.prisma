@@ -4996,6 +4996,10 @@ model AgentTask {
   createdBy            String?   @map("created_by")
   createdByWorkerId    String?   @map("created_by_worker_id")
   createdByAgentId     String?   @map("created_by_agent_id")
+  /// #1756 (cor:agt:050:06): the headless run that created the task, when one did.
+  /// Then createdBy / createdByWorkerId / createdByAgentId are all null. A plain
+  /// id, not a foreign key: a run is pruned long before its tasks are.
+  createdByRunId       String?   @map("created_by_run_id")
   updatedAt            DateTime? @updatedAt @map("updated_at")
   updatedBy            String?   @map("updated_by")
   updatedByWorkerId    String?   @map("updated_by_worker_id")
@@ -5040,6 +5044,8 @@ model AgentTeamEvent {
   actorUserId             String?   @map("actor_user_id")
   actorWorkerId           String?   @map("actor_worker_id")
   actorAgentId            String?   @map("actor_agent_id")
+  /// #1756: the headless run that acted, when one did; the other actor columns are then null.
+  actorRunId              String?   @map("actor_run_id")
   /// The worker the event concerns, if any (e.g. the new assignee).
   subjectWorkerId         String?   @map("subject_worker_id")
   /// null for an ordinary event, 'alarm' for an alarm.

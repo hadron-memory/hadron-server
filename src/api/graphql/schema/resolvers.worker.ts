@@ -60,6 +60,7 @@ import { eventActor } from '../../../lib/agentTasks/events.js';
 import {
   type Context,
   requireOrgRole,
+  requireAgentAccess,
   requireOwnerOrOrgRole,
   isNonReaderAppMember,
   isAppParticipant,
@@ -2504,7 +2505,7 @@ export const workerFieldResolvers = {
       if (!agent || agent.deletedAt) return null;
       if (agent.visibility !== 'PUBLIC') {
         try {
-          await requireOwnerOrOrgRole(ctx, agent, 'READER');
+          await requireAgentAccess(ctx, agent, 'READER');
         } catch {
           return null;
         }
