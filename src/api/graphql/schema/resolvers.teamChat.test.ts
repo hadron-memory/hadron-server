@@ -452,6 +452,38 @@ describe('#1842 — a reply notifies the replied-to worker (cor:agt:020:04 rev17
     // The early reply keeps exactly its own fold; the new one added nothing to it.
     expect(await envOf(early.nodeId)).toMatchObject({ mentions: ['iris'] });
   });
+
+  // Riana §10 P2 (#10533): the fold must never widen a wake. A worker whose
+  // token IS a broadcast word ('all'/'team') cannot be reply-notified, because
+  // the stored broadcast token wakes everyone (broadcastWakes, and every
+  // mention-filtered reader matches it for every worker). The fold skips such
+  // tokens; an explicit @all in the body keeps its existing broadcast meaning.
+  it('a worker named "All" is never fold-notified — no broadcast token, no broadcastWakes stamp', async () => {
+    const allWorker = await workerSession(appMember.id, 'All');
+    const first = await post(ctx(appMember.id), { body: 'q', sessionRef: allWorker.sessionId });
+    // appMember is the App owner (created it via the org ADMIN) — a manager
+    // author, the exact shape whose tagless reply must not broadcast.
+    const reply = await post(ctx(admin.id), { body: 'answer', replyToSeq: first.seq });
+    const env = await envOf(reply.nodeId);
+    expect(env.mentions).toBeUndefined();
+    expect(env.broadcastWakes).toBeUndefined();
+  });
+
+  it('a worker named "Team" is likewise never fold-notified', async () => {
+    const teamWorker = await workerSession(appMember.id, 'Team');
+    const first = await post(ctx(appMember.id), { body: 'q', sessionRef: teamWorker.sessionId });
+    const reply = await post(ctx(admin.id), { body: 'answer', replyToSeq: first.seq });
+    const env = await envOf(reply.nodeId);
+    expect(env.mentions).toBeUndefined();
+    expect(env.broadcastWakes).toBeUndefined();
+  });
+
+  it('an explicit @all in the body still broadcasts — the one-format contract is unchanged', async () => {
+    await post(ctx(appMember.id), { body: 'seed' });
+    const reply = await post(ctx(admin.id), { body: '@all heads up', replyToSeq: 1 });
+    const env = await envOf(reply.nodeId);
+    expect(env.mentions).toEqual(['all']);
+  });
 });
 
 describe('createTeamChatMessage — sessionRef author derivation', () => {

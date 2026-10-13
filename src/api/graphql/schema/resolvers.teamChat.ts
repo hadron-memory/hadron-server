@@ -56,7 +56,7 @@ import {
 } from './resolvers.helpers.js';
 import { isSessionLive, loadLastEventBySession, touchLiveSession } from '../../../lib/sessionActivity.js';
 import { findOrCreateAppClassMemory } from './chat-scope.js';
-import { mentionTokenOf } from '../../../lib/mentionToken.js';
+import { mentionTokenOf, BROADCAST_MENTION_TOKENS } from '../../../lib/mentionToken.js';
 import { extractMentions } from '../../../lib/teamChatMentions.js';
 import { TEAM_CHAT_LOC, TEAM_CHAT_MESSAGES_LOC } from '../../../lib/teamChatLoc.js';
 import { isTeamSpaceRow, teamSpaceAudienceFilter, teamSpaceOwnerFilter } from '../../../lib/auth/teamSpace.js';
@@ -1031,7 +1031,20 @@ async function postToChannelRoot(
           select: { name: true },
         });
         const token = targetAuthor ? mentionTokenOf(targetAuthor.name) : null;
-        if (token && !mentions.includes(token)) mentions = [...mentions, token];
+        // A token that is a BROADCAST word ('all'/'team' — a worker literally
+        // named "All") is never folded (Riana §10, #10533): the fold's intent
+        // is to notify ONE worker, but a stored broadcast token wakes everyone
+        // (broadcastWakes + every mention-filtered reader matches it for every
+        // worker) — a widening the ruling forbids. Such a worker is simply not
+        // reply-notifiable; an explicit @all in the body keeps its existing
+        // broadcast meaning, unchanged.
+        if (
+          token &&
+          !(BROADCAST_MENTION_TOKENS as readonly string[]).includes(token) &&
+          !mentions.includes(token)
+        ) {
+          mentions = [...mentions, token];
+        }
       }
     }
     if (mentions.length > 0) {
