@@ -11862,6 +11862,8 @@ export const typeDefs = `#graphql
     STALL_RULE
     "A host that registered the worker (the host-operations slice)."
     HOST
+    "#1766 — the platform, recording that an until passed (hrn:node:hadronmemory.com:specs:cor:agt:060:02): the record is then AVAILABLE, set at the instant it lapsed."
+    LAPSE
   }
 
   """
@@ -11873,11 +11875,11 @@ export const typeDefs = `#graphql
     state: AvailabilityState!
     "Set exactly when unavailable."
     reason: AvailabilityReason
-    "When an unavailable record lapses. A passed until reads as available (interim, until ruled)."
+    "When an unavailable record lapses. A passed until reads as available at once; within a minute the record is rewritten to AVAILABLE, set by LAPSE, and one availability.changed event records it (hrn:node:hadronmemory.com:specs:cor:agt:060:02)."
     until: DateTime
     setAt: DateTime!
     setBy: AvailabilitySetter!
-    "Who acted, when a worker or a person set it; null when the stall rule did."
+    "Who acted, when a worker or a person set it; null when the stall rule or a lapse did."
     setByParty: AgentTaskParty
     """
     Whether this record makes the worker unavailable right now: unavailable,
