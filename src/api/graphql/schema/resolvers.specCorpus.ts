@@ -230,7 +230,7 @@ async function loadScannableCorpus(ctx: Context, memoryRef: string): Promise<Sca
     select: { urn: true, isEncrypted: true },
   });
   if (memory.isEncrypted) {
-    throw new GraphQLError('Reference scans do not support encrypted memories yet.', {
+    throw new GraphQLError('Reference scans do not support encrypted memories.', {
       extensions: { code: 'SPEC_CORPUS_ENCRYPTED_UNSUPPORTED', memoryId: id },
     });
   }

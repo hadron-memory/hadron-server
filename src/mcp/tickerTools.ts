@@ -349,7 +349,9 @@ export function registerTickerTools(server: McpServer, deps: { db: PrismaClient;
         const page = await Q.dueWakes({}, { appRef, ...rest }, ctx);
         const lines: string[] = [];
         for (const w of page.wakes) {
-          const why = (w.reasons as Row[]).map((r) => (r.kind === 'TICK' ? `tick ${r.ticker?.name ?? ''}` : 'mention')).join(' + ');
+          const why = (w.reasons as Row[])
+            .map((r) => (r.kind === 'TICK' ? `tick ${r.ticker?.name ?? ''}` : r.kind === 'TASK' ? `task ${JSON.stringify(r.task.title)} (${r.task.ref})` : 'mention'))
+            .join(' + ');
           const ch = (w.channels as Row[]).map((c) => `${c.channel.name} ${c.fromSeq}-${c.throughSeq}`).join(', ');
           lines.push(
             `- ${w.worker.name}: ${why} · ${w.unread} unread (${w.unreadMentions} mention${w.unreadMentions === 1 ? '' : 's'}) · ${ch}` +

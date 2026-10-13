@@ -313,6 +313,18 @@ export async function withReadableApp<T>(ctx: Context, appRef: string, body: (c:
   return inKeyReadTx(ctx, appId, () => { throw appNotFound(appRef); }, body);
 }
 
+/**
+ * #1708 — may this caller read the App's tasks and events (cor:agt:050:21)? The arms of `withReadableApp`,
+ * as a boolean: a participant (a person, or a worker session whose credential may still drive the App), or
+ * the App's own live key. App-wide: whoever reads one of the App's tasks reads them all.
+ */
+export async function mayReadAppTasks(ctx: Context, appId: string): Promise<boolean> {
+  const app = await loadApp(ctx, appId);
+  if (!app || app.deletedAt) return false;
+  if (appKeyCaller(ctx)) return keyMayReadApp(ctx, app);
+  return (await resolveTaskActor(ctx, app)) !== null;
+}
+
 /** Load a task the caller may read, with its App and the actor — or null (concealed as missing). */
 async function loadReadableTask(
   ctx: Context,

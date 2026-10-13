@@ -3677,6 +3677,7 @@ model Worker {
   wakeSettings        WorkerWakeSettings?
   deliveryChannels    WorkerDeliveryChannel[]
   deliveryTicks       WorkerDeliveryTick[]
+  deliveryTaskEvents  WorkerDeliveryTaskEvent[]
   wakeReservation     AppWakeReservation?
   appGrants           AppGrant[]
   launchableVia      HostRegistrationWorker[]
@@ -5188,6 +5189,7 @@ model AgentTeamEvent {
   app   App         @relation(fields: [appId], references: [id], onDelete: Cascade)
   task  AgentTask?  @relation(fields: [taskId], references: [id], onDelete: Cascade)
   wakes AgentTeamAlarmSchedule[]
+  deliveries WorkerDeliveryTaskEvent[]
 
   @@unique([taskId, type, episodeStart], map: "agent_team_events_episode_uniq")
   @@index([appId, createdAt])
@@ -5480,6 +5482,35 @@ model WorkerDeliveryTick {
 
   @@id([workerId, tickerId])
   @@map("worker_delivery_ticks")
+}
+
+/// #1708 (Task Management T5) — the delivery record, part 3: one row per
+/// (worker, task event, alarm chain position). `deliveredAt` is set ONLY by
+/// `acknowledgeWakes` (a wake proof naming the event), and is the receipt that
+/// the nudge for this event reached this worker. It is never an alarm
+/// acknowledgement (cor:agt:050:20): that stays `acknowledgeAlarm`'s.
+/// `undeliverableAt` is set by the stall-evaluator tick when the subject is
+/// dormant (cor:agt:080:11); a later delivery still records `deliveredAt`.
+/// `chainIndex` is 0 for an ordinary event and the woken position for an alarm.
+model WorkerDeliveryTaskEvent {
+  workerId            String    @map("worker_id")
+  eventId             String    @map("event_id")
+  chainIndex          Int       @default(0) @map("chain_index")
+  deliveredAt         DateTime? @map("delivered_at")
+  ackedByUserId       String?   @map("acked_by_user_id")
+  ackedByWorkerId     String?   @map("acked_by_worker_id")
+  ackedByAppKeyId     String?   @map("acked_by_app_key_id")
+  undeliverableAt     DateTime? @map("undeliverable_at")
+  /// 'dormant' — the only reason this slice records.
+  undeliverableReason String?   @map("undeliverable_reason")
+
+  worker Worker         @relation(fields: [workerId], references: [id], onDelete: Cascade)
+  event  AgentTeamEvent @relation(fields: [eventId], references: [id], onDelete: Cascade)
+
+  @@id([workerId, eventId, chainIndex])
+  @@index([workerId, deliveredAt])
+  @@index([eventId])
+  @@map("worker_delivery_task_events")
 }
 
 /// #1748 — wakes acknowledged per App per UTC day (cor:agt:080:15). `wakes` is

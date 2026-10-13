@@ -11,6 +11,13 @@
 // without a trace, and a wake none of whose channels the caller can read is not
 // returned. A worker nobody holds has no reader of its own, so for it the
 // caller's reading right is the whole gate.
+//
+// TASK REASONS (#1708, Task Management T5): task events are the second
+// relevance source (src/lib/agentTasks/taskWakes.ts). One rides a wake only
+// when the caller may read the App's tasks (cor:agt:050:21) and, for a held
+// worker, its holder is still a participant of the App, the same holder test
+// the channels pass. They wake at once like a mention, under the same floor
+// and budget, and are acknowledged per event through the v2 proof.
 
 import { Prisma } from '../../generated/prisma/index.js';
 import type { Context } from '../../api/graphql/schema/resolvers.helpers.js';
@@ -29,7 +36,12 @@ import {
   type SubscriptionInput,
   type WorkerWake,
 } from './wakeRule.js';
-import { signWakeProof, wakeIdentity, WAKE_PROOF_MAX_AGE_MS, type WakeRequester } from './wakeProof.js';
+import { MAX_PROOF_CHARS, signWakeProof, wakeIdentity, WAKE_PROOF_MAX_AGE_MS, WAKE_PROOF_VERSION, type WakeRequester } from './wakeProof.js';
+import { mayReadAppTasks } from '../../api/graphql/schema/resolvers.agentTask.js';
+import { withoutRequestCaches } from '../../api/graphql/schema/resolvers.helpers.js';
+import { liveTxContext } from '../../api/graphql/schema/authorizedTx.js';
+import { lockAuthorityAnchors, type AuthorityAnchor } from '../auth/authorityAnchors.js';
+import { pendingTaskWakes, type PendingTaskWake } from '../agentTasks/taskWakes.js';
 
 /**
  * Messages read per channel per page, and the most one request reads from one channel. Scanning goes on past a
@@ -41,6 +53,12 @@ export const WAKE_SCAN_ROWS_PER_CHANNEL = 5_000;
 export const WAKE_SCAN_MAX_ROWS_PER_CHANNEL = 50_000;
 export const DUE_WAKES_PAGE_DEFAULT = 100;
 export const DUE_WAKES_PAGE_MAX = 200;
+/**
+ * #1708 (Colin, Riana P2-2 on #1859): the most task reasons one wake carries. A worker with more pending gets the
+ * oldest this many; the rest stay pending and are the next wake once this one is acknowledged (and the floor has
+ * passed). Bounds the proof well under the verifier's MAX_PROOF_CHARS; a size guard below enforces the cap itself.
+ */
+export const WAKE_TASK_REASONS_MAX = 50;
 
 export type DueWakeOut = {
   workerId: string;
@@ -59,10 +77,22 @@ export type DueWakesResult = {
   budgetNotice: { appId: string; day: Date; withheld: number } | null;
 };
 
+const tasksOf = (wake: WorkerWake) =>
+  wake.reasons.flatMap((r) => (r.kind === 'TASK' ? [{ eventId: r.eventId, chainIndex: r.chainIndex }] : []));
+
 const identityOf = (wake: WorkerWake) => ({
   channels: wake.channels.map((c) => ({ channelId: c.channelId, incarnation: c.incarnation, through: c.throughSeq })),
   ticks: wake.reasons.flatMap((r) => (r.kind === 'TICK' ? [{ tickerId: r.tickerId, k: r.k }] : [])),
+  tasks: tasksOf(wake),
 });
+
+const taskKey = (t: { eventId: string; chainIndex: number }) => `${t.eventId}#${t.chainIndex}`;
+
+/** The wake without its task reasons, or null when nothing else was in it. */
+function withoutTasks(wake: WorkerWake): WorkerWake | null {
+  const reasons = wake.reasons.filter((r) => r.kind !== 'TASK');
+  return reasons.length === 0 ? null : { ...wake, reasons };
+}
 
 const utcDay = (d: Date): Date => new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
 
@@ -97,6 +127,14 @@ async function readableWorkers(
     take,
     select: { id: true, name: true, heldByUserId: true },
   });
+}
+
+/** Is the holder a live user who still participates in the App (the register's attendee rule)? */
+async function holderParticipates(ctx: Context, app: AppLike, holderId: string): Promise<{ id: string; roles: string[] } | null> {
+  const holder = await ctx.db.user.findFirst({ where: { id: holderId, deletedAt: null }, select: { id: true, roles: true } });
+  if (!holder) return null;
+  const actor: Context = { db: ctx.db, userId: holder.id, roles: holder.roles } as Context;
+  return (await isAppParticipant(actor, app)) ? holder : null;
 }
 
 async function holderAccess(
@@ -300,7 +338,7 @@ export async function computeDueWakes(args: {
   const nextAfter = hasMore ? workers[workers.length - 1]!.id : null;
   const ids = workers.map((w) => w.id);
 
-  const [wakeSettings, availability, activity, subs, deliveryChannels, deliveryTicks, readStates] = await Promise.all([
+  const [wakeSettings, availability, activity, subs, deliveryChannels, deliveryTicks, readStates, deliveryTasks] = await Promise.all([
     db.workerWakeSettings.findMany({ where: { workerId: { in: ids } } }),
     db.workerAvailability.findMany({ where: { workerId: { in: ids } } }),
     loadWorkersActivity(ctx, ids, now),
@@ -311,7 +349,10 @@ export async function computeDueWakes(args: {
     db.workerDeliveryChannel.findMany({ where: { workerId: { in: ids } } }),
     db.workerDeliveryTick.findMany({ where: { workerId: { in: ids } } }),
     db.channelReadState.findMany({ where: { workerId: { in: ids } }, select: { workerId: true, channelId: true, lastSeenSeq: true } }),
+    // #1708: the latest task-event delivery per worker, for the floor (cor:agt:080:13).
+    db.workerDeliveryTaskEvent.groupBy({ by: ['workerId'], where: { workerId: { in: ids }, deliveredAt: { not: null } }, _max: { deliveredAt: true } }),
   ]);
+  const taskDeliveredOf = new Map(deliveryTasks.map((d) => [d.workerId, d._max.deliveredAt?.getTime() ?? 0]));
   const settingsOf = new Map(wakeSettings.map((s) => [s.workerId, s]));
   const availabilityOf = new Map(availability.map((a) => [a.workerId, a]));
   const subsOf = new Map<string, typeof subs>();
@@ -333,6 +374,13 @@ export async function computeDueWakes(args: {
   const callerIds = await getAccessibleMemoryIds(ctx);
   const callerCan = (memoryId: string) => callerIds === null || callerIds.includes(memoryId);
   const holderCache = new Map<string, Set<string> | 'all' | null>();
+  const holderOf = new Map<string, Set<string> | 'all' | null>();
+
+  // #1708: task reasons, only for a caller who may read the App's tasks (cor:agt:050:21). App-wide, so one check.
+  const taskReader = await mayReadAppTasks(ctx, app.id);
+  const pendingTasks = taskReader ? await pendingTaskWakes(db, ids, now) : new Map<string, PendingTaskWake[]>();
+  /** A held worker's task reasons need its holder to be a participant still (the channels' holder test). */
+  const tasksFor = (workerId: string): PendingTaskWake[] => (holderOf.get(workerId) === null ? [] : pendingTasks.get(workerId) ?? []);
 
   // Per worker: the channels it counts that BOTH readers may read.
   type Counted = { channelId: string; mentionOnly: boolean; seen: number; delivered: number; head: number };
@@ -340,6 +388,7 @@ export async function computeDueWakes(args: {
   for (const w of workers) {
     const rows = registers.find(([id]) => id === w.id)?.[1]?.rows ?? [];
     const holder = w.heldByUserId ? await holderAccess(ctx, app, w.heldByUserId, holderCache) : 'all';
+    holderOf.set(w.id, holder);
     const list: Counted[] = [];
     for (const r of rows) {
       if (r.role === 'POST') continue;
@@ -392,13 +441,14 @@ export async function computeDueWakes(args: {
   const floorMs = settings.tickerMinCadenceSeconds * 1000;
   const signFor = (workerId: string, wake: WorkerWake): string =>
     signWakeProof({
-      v: 1,
+      v: WAKE_PROOF_VERSION,
       kind: 'wake-proof',
       appId: app.id,
       workerId,
       requester,
       channels: wake.channels.map((c) => ({ channelId: c.channelId, incarnation: c.incarnation, through: c.throughSeq })),
       ticks: wake.reasons.flatMap((r) => (r.kind === 'TICK' ? [{ tickerId: r.tickerId, k: r.k }] : [])),
+      tasks: tasksOf(wake),
       exempt: wake.exempt,
       issuedAt: now.getTime(),
     });
@@ -446,6 +496,9 @@ export async function computeDueWakes(args: {
       mentionsImmediate: (ws?.mentions ?? 'IMMEDIATE') === 'IMMEDIATE',
       channels: inputs,
       subscriptions,
+      tasks: tasksFor(w.id)
+        .slice(0, WAKE_TASK_REASONS_MAX)
+        .map(({ taskId, eventId, chainIndex, event, title }) => ({ taskId, eventId, chainIndex, event, title })),
       now,
     });
     if (!wake) continue;
@@ -455,11 +508,20 @@ export async function computeDueWakes(args: {
       0,
       ...deliveryChannels.filter((d) => d.workerId === w.id).map((d) => d.deliveredAt.getTime()),
       ...deliveryTicks.filter((d) => d.workerId === w.id).map((d) => d.ackedAt.getTime()),
+      taskDeliveredOf.get(w.id) ?? 0,
     );
     if (last > 0 && now.getTime() - last < floorMs) continue;
 
     const a = availabilityOf.get(w.id);
-    const proof = signFor(w.id, wake);
+    let proof = signFor(w.id, wake);
+    // The proof must verify (MAX_PROOF_CHARS) or the wake could never be acknowledged and would wedge the worker:
+    // shed the NEWEST task reasons until it fits. They stay pending for the next wake.
+    while (proof.length > MAX_PROOF_CHARS && tasksOf(wake).length > 0) {
+      const lastTask = wake.reasons.map((r) => r.kind).lastIndexOf('TASK');
+      wake.reasons.splice(lastTask, 1);
+      proof = signFor(w.id, wake);
+    }
+    if (wake.reasons.length === 0) continue;
     issued.push({
       workerId: w.id,
       wake,
@@ -482,6 +544,48 @@ export async function computeDueWakes(args: {
   const passes = (i: (typeof issued)[number]) => { const { exempt: _e, ...out } = i; wakes.push(out); };
   if (issued.length > 0) {
     await db.$transaction(async (tx) => {
+      // #1708 (Riana P2-1 on #1859): task reasons are decided again HERE, under the authority anchors a revoker takes
+      // exclusively (removeAppMember: the App, its org and owner, the removed user), so a revocation either committed
+      // before these locks and is seen, or waits for this issue. One sorted call, before any other lock (the key's
+      // `authorize` re-takes the App's anchors, which this transaction already holds). The reader decided before the
+      // transaction is only a pre-filter; the answer rests on `taskOk`.
+      const holderIdOf = new Map(workers.map((w) => [w.id, w.heldByUserId]));
+      let taskReaderNow = false;
+      const holderNow = new Map<string, boolean>();
+      if (taskReader) {
+        const holders = [...new Set(workers.map((w) => w.heldByUserId).filter((h): h is string => !!h))];
+        const anchors: AuthorityAnchor[] = [
+          { kind: 'app', id: app.id },
+          ...(app.organizationId ? [{ kind: 'org' as const, id: app.organizationId }] : []),
+          ...(app.ownerUserId ? [{ kind: 'user' as const, id: app.ownerUserId }] : []),
+          ...(ctx.userId ? [{ kind: 'user' as const, id: ctx.userId }] : []),
+          ...holders.map((id) => ({ kind: 'user' as const, id })),
+        ];
+        await lockAuthorityAnchors(tx, anchors, 'shared');
+        // The caller's platform roles are re-read under its user anchor (updateUserRoles takes it exclusively), so a
+        // demotion that committed first is seen (Riana, #1859 delta); a deleted caller or revoked key reads no task.
+        const txCtx = withoutRequestCaches(ctx, tx);
+        const liveCtx = await liveTxContext(ctx, tx).catch((e: unknown) => {
+          if (e instanceof Error && e.message === 'Forbidden') return null; // the shared gates' denial; anything else is loud
+          throw e;
+        });
+        taskReaderNow = liveCtx !== null && (await mayReadAppTasks(liveCtx, app.id));
+        for (const h of holders) holderNow.set(h, (await holderParticipates(txCtx, app, h)) !== null);
+      }
+      const taskOk = (workerId: string): boolean => {
+        if (!taskReaderNow) return false;
+        const h = holderIdOf.get(workerId);
+        return !h || holderNow.get(h) === true;
+      };
+      // A fresh wake whose task reasons are no longer the caller's to see keeps only its other reasons, re-signed.
+      for (let n = issued.length - 1; n >= 0; n--) {
+        const i = issued[n]!;
+        if (tasksOf(i.wake).length === 0 || taskOk(i.workerId)) continue;
+        const rest = withoutTasks(i.wake);
+        if (!rest) { issued.splice(n, 1); continue; }
+        i.wake = rest;
+        i.proof = signFor(i.workerId, rest);
+      }
       await args.authorize?.(tx);
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${'wakebudget:' + app.id}, 0))`;
       const used = (await tx.appWakeDay.findUnique({ where: { appId_day: { appId: app.id, day } } }))?.wakes ?? 0;
@@ -502,14 +606,21 @@ export async function computeDueWakes(args: {
         // A channel recreated since the wake was issued restarted its seqs: the stored wake can no longer be
         // acknowledged (WAKE_PROOF_STALE), so it is void, not outstanding. Dropped here, or re-issuing it would wedge
         // the worker for as long as a router polls (Rook, #1751 cycle 3).
-        if (stored && !stored.wake.channels.every((c) => channelOf.get(c.channelId)?.incarnation === c.incarnation)) {
+        // #1708: so is one carrying a task event that no longer asks anything of the worker (the task ended, the alarm's
+        // episode passed, the worker acted): re-handing it would deliver exactly what the pre-delivery re-checks refuse.
+        // Judged only by a reader of the App's tasks; for anyone else the stored wake is not theirs to see (below).
+        const stillPending = new Set(tasksFor(i.workerId).map(taskKey));
+        const staleTask = taskOk(i.workerId) && !!stored && tasksOf(stored.wake).some((t) => !stillPending.has(taskKey(t)));
+        if (stored && (staleTask || !stored.wake.channels.every((c) => channelOf.get(c.channelId)?.incarnation === c.incarnation))) {
           await tx.$executeRaw`DELETE FROM app_wake_reservations WHERE worker_id = ${i.workerId}`;
           live.delete(i.workerId);
           consumed--;
           stored = undefined;
         }
         const readable = new Set((countedOf.get(i.workerId) ?? []).map((c) => c.channelId));
-        const have = stored && stored.wake.channels.every((c) => readable.has(c.channelId)) ? stored : undefined;
+        const have = stored && stored.wake.channels.every((c) => readable.has(c.channelId)) && (taskOk(i.workerId) || tasksOf(stored.wake).length === 0)
+          ? stored
+          : undefined;
         if (stored && !have) {
           // Another wake for the worker is outstanding, and a reservation holds one wake per worker. A second
           // non-exempt wake here would be a delivery no slot paid for (and, with room, a second inside one floor),

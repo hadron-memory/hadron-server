@@ -11635,6 +11635,35 @@ export const typeDefs = `#graphql
   enum WakeKind {
     MENTION
     TICK
+    "#1708 — a task event the worker must act on (an assignment, a child's finish, an alarm's woken position). Wakes at once, like a mention."
+    TASK
+  }
+
+  "#1708 — which task event a TASK reason is for."
+  enum TaskWakeEvent {
+    ASSIGNED
+    REASSIGNED
+    "The platform's matcher assigned it (hrn:node:hadronmemory.com:specs:cor:agt:060:06)."
+    MATCHED
+    "A child task finished; the reason names the child (hrn:node:hadronmemory.com:specs:cor:agt:050:16)."
+    CHILD_FINISHED
+    "An unacknowledged alarm's currently-woken chain position (hrn:node:hadronmemory.com:specs:cor:agt:050:19). Delivering it never acknowledges the alarm."
+    ALARM
+  }
+
+  "#1708 — the task a TASK reason is for: shown only to a caller who may read the App's tasks (hrn:node:hadronmemory.com:specs:cor:agt:050:21)."
+  type DueTaskReason {
+    "The task's id (for CHILD_FINISHED, the child's)."
+    id: ID!
+    "The event delivered; acknowledging the wake records delivery on it."
+    eventId: ID!
+    "0, or the alarm chain position woken."
+    chainIndex: Int!
+    event: TaskWakeEvent!
+    "The task's title, for the nudge text."
+    title: String!
+    "A stable label for the reason, e.g. TASK:<id>:assigned."
+    ref: String!
   }
 
   "#1748 — one page of due wakes. Counts and ranges only (hrn:node:hadronmemory.com:specs:cor:agt:080:23)."
@@ -11688,6 +11717,8 @@ export const typeDefs = `#graphql
   type WakeReason {
     kind: WakeKind!
     ticker: Ticker
+    "Set for kind TASK."
+    task: DueTaskReason
   }
 
   type AcknowledgeWakesResult {
