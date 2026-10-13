@@ -16,6 +16,7 @@ import { generateId } from '../lib/id.js';
 import { mintUserApiKey, type AuthContext } from '../middleware/auth.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import { createTestableMcpServer } from './server.js';
+import { signWakeProof } from '../lib/tickers/wakeProof.js';
 
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -30,6 +31,7 @@ let admin: { id: string };
 let member: { id: string };
 let memory: { id: string; urn: string };
 let app: { id: string };
+let workerId: string;
 
 beforeEach(async () => {
   await cleanDb(db);
@@ -43,6 +45,14 @@ beforeEach(async () => {
   memory = await M.createMemory(null, { orgId: org.id, name: 'discussion' }, as(admin.id));
   app = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'Team', urn: `${org.id.toLowerCase()}:team` } });
   await db.appMember.create({ data: { appId: app.id, userId: member.id, role: 'member' } });
+  const agent = await M.createAgent({}, { orgId: org.id, name: 'Team Agent' }, as(admin.id));
+  workerId = (await db.worker.create({ data: { appId: app.id, agentId: agent.id, name: 'Anne', slug: 'anne', heldByUserId: member.id }, select: { id: true } })).id;
+});
+
+/** A genuine, signed wake proof issued to `userId` for the App's worker: it passes every check before the transaction. */
+const proofFor = (userId: string) => signWakeProof({
+  v: 2, kind: 'wake-proof', appId: app.id, workerId, requester: { userId },
+  channels: [], ticks: [], tasks: [], exempt: false, issuedAt: Date.now(),
 });
 
 /** A connection authenticated by `userId`'s user API key, and a way to revoke that key. */
@@ -68,16 +78,18 @@ describe('#1868: a revoked hdr_user_ key cannot write through the delegating MCP
     const { mcp, revoke } = await keyedConnection(member.id);
     await revoke();
     const t = text(await mcp.callTool('hadron_task_create', { appRef: app.id, title: 'after revocation', session: plain.id }));
-    expect(code(t)).toBe('FORBIDDEN');
+    // The agent-task resolvers conceal an authority denial as the App being unknown.
+    expect(code(t)).toBe('APP_NOT_FOUND');
     expect(await db.agentTask.count()).toBe(0);
   });
 
-  it('tickerTools: hadron_ack_wakes is refused at the key check, before any proof is judged', async () => {
+  it('tickerTools: hadron_ack_wakes with a genuine proof is refused at the key check', async () => {
     const plain = await db.session.create({ data: { id: generateId(), userId: member.id }, select: { id: true } });
     const { mcp, revoke } = await keyedConnection(member.id);
     await revoke();
-    const t = text(await mcp.callTool('hadron_ack_wakes', { proofs: ['x'], session: plain.id }));
-    expect(code(t)).toBe('FORBIDDEN');
+    const t = text(await mcp.callTool('hadron_ack_wakes', { proofs: [proofFor(member.id)], session: plain.id }));
+    // acknowledgeWakes maps the transaction's denial to the requester-mismatch refusal.
+    expect(code(t)).toBe('WAKE_PROOF_REQUESTER_MISMATCH');
   });
 
   it('a live key still writes through the same tools (the control)', async () => {
@@ -86,6 +98,6 @@ describe('#1868: a revoked hdr_user_ key cannot write through the delegating MCP
     const { mcp } = await keyedConnection(member.id);
     expect(code(text(await mcp.callTool('hadron_create_comment', { targetRef: target.id, body: 'live key' })))).toBe('NO_ERROR');
     expect(code(text(await mcp.callTool('hadron_task_create', { appRef: app.id, title: 'live key', session: plain.id })))).toBe('NO_ERROR');
-    expect(code(text(await mcp.callTool('hadron_ack_wakes', { proofs: ['x'], session: plain.id })))).toBe('WAKE_PROOF_INVALID');
+    expect(text(await mcp.callTool('hadron_ack_wakes', { proofs: [proofFor(member.id)], session: plain.id }))).toMatch(/^Acknowledged /);
   });
 });

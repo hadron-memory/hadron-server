@@ -6599,6 +6599,9 @@ export function createMcpServerInstance(
     ...(canReplay ? { governedCanReplay: canReplay } : {}),
     clientId: auth.clientId ?? undefined,
     userId: auth.userId ?? undefined,
+    // #1868: the presented hdr_user_ key, for any gate on the door's path that
+    // re-checks it (consistency with the other delegating contexts).
+    apiKeyId: auth.apiKeyId ?? undefined,
     appId: auth.appId ?? undefined,
     sessionId: auth.sessionId ?? undefined,
     roles: auth.roles as Context['roles'],
