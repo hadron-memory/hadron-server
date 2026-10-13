@@ -24,6 +24,37 @@ ALTER TABLE host_registration_workers ADD CONSTRAINT chk_host_registration_worke
   family ~ '^[a-z0-9][a-z0-9._-]{0,63}$'
 );
 
+-- #1709 — the token every host-operation name argument has (a repo, a branch,
+-- a worktree, a label; cor:agt:070:03): letters, digits and . _ / @ + -,
+-- starting with a letter or digit (so never an option), up to 256 characters,
+-- with no "..", "//" or trailing "/" (so never a path escape or an empty
+-- step), and nothing a shell or git would read specially. The writer checks
+-- the same shape (src/lib/hostOperations/types.ts HOST_TOKEN_PATTERN); this
+-- makes it a database fact. Defined here, before its first use below;
+-- prisma/host-operation-invariants.sql uses it too.
+CREATE OR REPLACE FUNCTION host_operation_token_ok(t text) RETURNS boolean
+LANGUAGE sql IMMUTABLE AS $$
+  SELECT t IS NOT NULL
+    AND t ~ '^[A-Za-z0-9][A-Za-z0-9._/@+-]{0,255}$'
+    AND position('..' IN t) = 0
+    AND position('//' IN t) = 0
+    AND right(t, 1) <> '/'
+$$;
+
+CREATE OR REPLACE FUNCTION host_operation_token_array_ok(ts text[]) RETURNS boolean
+LANGUAGE sql IMMUTABLE AS $$
+  SELECT coalesce(bool_and(host_operation_token_ok(t)), true) FROM unnest(ts) AS t
+$$;
+
+-- #1709 — a worker's existing worktrees on the host (cor:agt:070:06, :08):
+-- tokens the host resolves from its own configuration, at most 32, no NULLs.
+ALTER TABLE host_registration_workers DROP CONSTRAINT IF EXISTS chk_host_registration_workers_worktrees;
+ALTER TABLE host_registration_workers ADD CONSTRAINT chk_host_registration_workers_worktrees CHECK (
+  cardinality(worktrees) <= 32 AND
+  array_position(worktrees, NULL) IS NULL AND
+  host_operation_token_array_ok(worktrees)
+);
+
 -- cor:agt:070:01 — a registration names only workers of its own App. The
 -- writer checks this too; the trigger makes it a database fact, so no later
 -- writer can make a host launchable for another tenant's worker.

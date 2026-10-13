@@ -3193,6 +3193,7 @@ model App {
   agentTaskStallSchedule  AgentTaskStallSchedule?
   /// #1707 — hosts that registered which workers they can launch (cor:agt:070:01).
   hostRegistrations       HostRegistration[]
+  hostOperations          HostOperation[]
   mcpSessionStates McpSessionState[]
   scopes           Scope[]
   registerEntries  RegisterEntry[] @relation("RegisterOwnerApp")
@@ -3269,6 +3270,7 @@ model AppKey {
   app    App                @relation(fields: [appId], references: [id], onDelete: Cascade)
   scopes AppKeyScope[]
   reads  AppKeyWakeRead[]
+  hostUses HostKeyUse[]
 
   @@index([appId])
   @@map("app_keys")
@@ -3681,6 +3683,7 @@ model Worker {
   wakeReservation     AppWakeReservation?
   appGrants           AppGrant[]
   launchableVia      HostRegistrationWorker[]
+  hostOperations     HostOperation[]
 
   /// The URN atom's uniqueness. Unfiltered on retirement, like
   /// `workers_app_name_uniq`: a retired worker's URN must keep resolving.
@@ -5247,6 +5250,9 @@ model WorkerAvailability {
   setByUserId   String?   @map("set_by_user_id")
   setByWorkerId String?   @map("set_by_worker_id")
   setByAgentId  String?   @map("set_by_agent_id")
+  /// #1709 — the host whose key set this record (`setBy = host` only), so a
+  /// host clears only its own marks (cor:agt:060:08).
+  setByHostId   String?   @map("set_by_host_id")
 
   worker Worker @relation(fields: [workerId], references: [id], onDelete: Cascade)
 
@@ -5301,9 +5307,9 @@ model AgentTaskStallSchedule {
 /// Identified within its App by `hostId` (Proposed); `label` is for display.
 ///
 /// The host's identity comes from its key, never from a request: the public
-/// `registerHost` path ships with the host-operations slice's `host:operate`
-/// key (T6). Until then only the internal writer
-/// (src/lib/agentTasks/hosts.ts) writes here.
+/// `registerHost` mutation (#1709) takes the host id from the calling key's
+/// `host:operate` scope row (cor:agt:070:04). The writer is
+/// src/lib/agentTasks/hosts.ts.
 ///
 /// A registration not refreshed within LAPSE_POLLS poll intervals has lapsed
 /// (plan default 3, cor:agt:070:01 open question): its workers stop counting as
@@ -5333,6 +5339,11 @@ model HostRegistrationWorker {
   registrationId String @map("registration_id")
   workerId       String @map("worker_id")
   family         String
+  /// #1709 — the worker's existing worktrees on this host, as the host names
+  /// them (tokens the host resolves from its own configuration, never paths the
+  /// platform invents). A worker is started only in one of these
+  /// (cor:agt:070:06, :08); empty means it has none here.
+  worktrees      String[] @default([])
 
   registration HostRegistration @relation(fields: [registrationId], references: [id], onDelete: Cascade)
   worker       Worker           @relation(fields: [workerId], references: [id], onDelete: Cascade)
@@ -5342,6 +5353,68 @@ model HostRegistrationWorker {
   @@map("host_registration_workers")
 }
 
+
+/// #1709 (Task Management T6) — one typed operation the platform issued to one
+/// host of a team App (cor:agt:070:02). `type` is one of the closed set of
+/// cor:agt:070:03 and `args` its typed arguments, validated at issue
+/// (src/lib/hostOperations/types.ts); there is no free-form type.
+///
+/// Status (070:02, `collected` Proposed by #1709): `issued` → `collected` (the
+/// host took it) → `succeeded` | `failed` (the host reported; a failure carries
+/// a reason). Each outcome also writes `host.operation.succeeded` / `.failed`.
+/// Only the host it names collects or reports it (070:04). The issuer is a
+/// person, a worker (through its session) or the platform (`issuedBy`).
+/// Shape: prisma/host-operation-invariants.sql.
+model HostOperation {
+  id               String    @id
+  appId            String    @map("app_id")
+  hostId           String    @map("host_id")
+  type             String
+  args             Json
+  /// The worker the operation is for; every type names one.
+  workerId         String    @map("worker_id")
+  status           String    @default("issued")
+  /// `user` | `worker` | `platform`.
+  issuedBy         String    @map("issued_by")
+  issuedByUserId   String?   @map("issued_by_user_id")
+  issuedByWorkerId String?   @map("issued_by_worker_id")
+  issuedByAgentId  String?   @map("issued_by_agent_id")
+  issuedAt         DateTime  @default(now()) @map("issued_at")
+  collectedAt      DateTime? @map("collected_at")
+  finishedAt       DateTime? @map("finished_at")
+  /// The typed result a success reports (e.g. the created worktree).
+  result           Json?
+  /// Why it failed, as the host said it; failures only.
+  failureReason    String?   @map("failure_reason")
+
+  app    App    @relation(fields: [appId], references: [id], onDelete: Cascade)
+  worker Worker @relation(fields: [workerId], references: [id], onDelete: Cascade)
+
+  @@index([appId, hostId, status])
+  @@index([workerId])
+  @@map("host_operations")
+}
+
+/// #1709 — one use of a host key (cor:agt:070:07: every use is recorded):
+/// which key, for which App and host, what it did, and when. `operationId`
+/// names the operation a report was about; `count` how many operations a
+/// collection returned or workers a registration listed.
+model HostKeyUse {
+  id          String   @id
+  appKeyId    String   @map("app_key_id")
+  appId       String   @map("app_id")
+  hostId      String   @map("host_id")
+  /// `register` | `collect` | `report` | `availability`.
+  action      String
+  operationId String?  @map("operation_id")
+  count       Int?
+  usedAt      DateTime @default(now()) @map("used_at")
+
+  appKey AppKey @relation(fields: [appKeyId], references: [id], onDelete: Cascade)
+
+  @@index([appKeyId, usedAt])
+  @@map("host_key_uses")
+}
 
 /// #1719: mutable manual-trigger consent kept apart from the immutable run snapshot.
 model ManualAutomationPin {
@@ -5589,6 +5662,9 @@ model AppKeyScope {
   grantedAt       DateTime  @default(now()) @map("granted_at")
   revokedByUserId String?   @map("revoked_by_user_id")
   revokedAt       DateTime? @map("revoked_at")
+  /// #1709 — the one host a `host:operate` scope is bound to (cor:agt:070:04):
+  /// required for that scope, absent for every other (chk_app_key_scopes_shape).
+  hostId          String?   @map("host_id")
 
   appKey AppKey @relation(fields: [appKeyId], references: [id], onDelete: Cascade)
 

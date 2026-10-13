@@ -10,8 +10,8 @@
 import { GraphQLError } from 'graphql';
 import type { Prisma, PrismaClient } from '../../generated/prisma/index.js';
 
-/** The closed list. T6 (#1709) adds `host:operate`. */
-export const APP_KEY_SCOPES = ['attention:deliver'] as const;
+/** The closed list. `host:operate` (#1709) is bound to one host: src/lib/hostOperations/hostKey.ts. */
+export const APP_KEY_SCOPES = ['attention:deliver', 'host:operate'] as const;
 export type AppKeyScopeName = (typeof APP_KEY_SCOPES)[number];
 
 export const isAppKeyScope = (v: unknown): v is AppKeyScopeName =>

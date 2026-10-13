@@ -6,6 +6,11 @@
 // key's reads hold shared, so a revocation either committed before a read or
 // waits for it, and the key's next call is refused. A new key holds none, and a
 // rotated key (`regenerateAppKey`) is a new key, so it starts with none.
+//
+// #1709: `host:operate` is granted FOR ONE HOST (cor:agt:070:04): the grant names
+// the host, the row keeps it, and every host surface takes the host from it. A
+// key operates as one host at a time: granting it for a second host is refused
+// until the first is revoked. No other scope takes a host.
 
 import { GraphQLError } from 'graphql';
 import type { Prisma } from '../../../generated/prisma/index.js';
@@ -14,6 +19,8 @@ import { actorManagesApp, inTaskWriteTx, loadApp, requireWritable, resolveTaskAc
 import { managesApp } from '../../../lib/auth/appManagement.js';
 import { APP_KEY_SCOPES, isAppKeyScope, type AppKeyScopeName } from '../../../lib/appKeyScopes/scopes.js';
 import { generateId } from '../../../lib/id.js';
+import { HOST_ID_PATTERN } from '../../../lib/agentTasks/hosts.js';
+import { appKeyHostUses } from './resolvers.hostOperation.js';
 
 const keyNotFound = (id: string) => taskError('APP_KEY_NOT_FOUND', 'App key not found.', { id });
 
@@ -31,12 +38,14 @@ async function changeScope(
   id: string,
   scope: string,
   apply: (tx: Prisma.TransactionClient, keyId: string, scope: AppKeyScopeName, userId: string) => Promise<void>,
+  hostId?: string | null,
 ) {
   const { key, app, actor } = await resolveKey(ctx, id);
   requireWritable(ctx, app);
   if (!isAppKeyScope(scope)) {
     throw new GraphQLError(`Unknown scope "${scope}". The scopes are: ${APP_KEY_SCOPES.join(', ')}.`, { extensions: { code: 'BAD_USER_INPUT' } });
   }
+  if (hostId !== undefined) checkHostArg(scope, hostId);
   await inTaskWriteTx(ctx, app, actor, () => keyNotFound(id), async (tx, txCtx, fresh) => {
     // Whoever manages the App, as a person: not a worker's session, not a key, not an impersonation.
     if (!(await actorManagesApp(txCtx, fresh, actor)) || actor.kind !== 'user') {
@@ -50,12 +59,19 @@ async function changeScope(
 }
 
 export const appKeyScopeMutations = {
-  grantAppKeyScope: (_: unknown, a: { id: string; scope: string }, ctx: Context) =>
+  grantAppKeyScope: (_: unknown, a: { id: string; scope: string; hostId?: string | null }, ctx: Context) =>
     changeScope(ctx, a.id, a.scope, async (tx, keyId, scope, userId) => {
+      const hostId = scope === 'host:operate' ? a.hostId!.trim() : null;
       // One live row per key and scope: granting again changes nothing, and keeps the first grant's record.
-      const have = await tx.appKeyScope.findFirst({ where: { appKeyId: keyId, scope, revokedAt: null }, select: { id: true } });
-      if (!have) await tx.appKeyScope.create({ data: { id: generateId(), appKeyId: keyId, scope, grantedByUserId: userId } });
-    }),
+      const have = await tx.appKeyScope.findFirst({ where: { appKeyId: keyId, scope, revokedAt: null }, select: { id: true, hostId: true } });
+      if (have && have.hostId !== hostId) {
+        throw taskError(
+          'APP_KEY_SCOPE_HOST_CONFLICT',
+          `This key already operates as host ${have.hostId}. A host key reaches one host: revoke host:operate first, or use another key.`,
+        );
+      }
+      if (!have) await tx.appKeyScope.create({ data: { id: generateId(), appKeyId: keyId, scope, grantedByUserId: userId, hostId } });
+    }, a.hostId ?? null),
   revokeAppKeyScope: (_: unknown, a: { id: string; scope: string }, ctx: Context) =>
     changeScope(ctx, a.id, a.scope, async (tx, keyId, scope, userId) => {
       await tx.appKeyScope.updateMany({
@@ -64,6 +80,17 @@ export const appKeyScopeMutations = {
       });
     }),
 };
+
+/** #1709: host:operate names exactly one host (cor:agt:070:04); no other scope takes one. */
+function checkHostArg(scope: AppKeyScopeName, hostId: string | null): void {
+  if (scope === 'host:operate') {
+    if (!hostId || !HOST_ID_PATTERN.test(hostId.trim())) {
+      throw new GraphQLError('host:operate is granted for one host: name it with hostId (a host token).', { extensions: { code: 'BAD_USER_INPUT' } });
+    }
+  } else if (hostId != null) {
+    throw new GraphQLError(`${scope} is not granted for a host; send no hostId.`, { extensions: { code: 'BAD_USER_INPUT' } });
+  }
+}
 
 export const appKeyScopeFieldResolvers = {
   AppKey: {
@@ -78,6 +105,8 @@ export const appKeyScopeFieldResolvers = {
       }
       return ctx.db.appKeyScope.findMany({ where: { appKeyId: key.id, revokedAt: null }, orderBy: { grantedAt: 'asc' } });
     },
+    /** #1709 — what the key did as a host (cor:agt:070:07). Gated the same way, for the same reason. */
+    hostUses: (key: { id: string; appId: string }, a: { first?: number | null }, ctx: Context) => appKeyHostUses(key, a, ctx),
   },
   AppKeyScope: {
     grantedBy: (s: { grantedByUserId: string }) => s.grantedByUserId,

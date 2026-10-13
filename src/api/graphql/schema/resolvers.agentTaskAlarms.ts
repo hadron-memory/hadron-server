@@ -91,10 +91,10 @@ function parseDate(value: unknown, field: string): Date | null {
   return d;
 }
 
-type AvailabilityInput = { state: string; reason?: string | null; until?: unknown };
+export type AvailabilityInput = { state: string; reason?: string | null; until?: unknown };
 
 /** cor:agt:060:02 shape: a reason (from the closed set) exactly when unavailable; an `until` only then, in the future. */
-function normalizeAvailability(input: AvailabilityInput, now: Date) {
+export function normalizeAvailability(input: AvailabilityInput, now: Date) {
   const state = STATE_FROM_GQL[input.state];
   if (!state) throw badInput('state is AVAILABLE or UNAVAILABLE.');
   const reason = input.reason == null ? null : REASON_FROM_GQL[input.reason] ?? null;
@@ -287,7 +287,8 @@ export const agentTaskAlarmMutations = {
       } else {
         throw notPermitted("Only the worker itself, the person holding its name, or whoever manages the App sets a worker's availability.");
       }
-      const data = { ...value, setAt: now, setBy, ...setByColumns(ctx) };
+      // #1709: a person's or a worker's write replaces a host's mark, and no longer names the host.
+      const data = { ...value, setAt: now, setBy, ...setByColumns(ctx), setByHostId: null };
       await tx.workerAvailability.upsert({
         where: { workerId },
         create: { workerId, ...data },

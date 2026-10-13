@@ -1,0 +1,61 @@
+/**
+ * #1709 (Task Management T6) — the `host:operate` App-key scope, bound to one
+ * host (cor:agt:070:04), and the record of every use of it (cor:agt:070:07).
+ *
+ * THE HOST'S IDENTITY COMES FROM THE KEY, NEVER FROM THE REQUEST: the host id is
+ * the one on the key's live `host:operate` scope row, read from the database at
+ * every call (like every scope, src/lib/appKeyScopes/scopes.ts), so a revoked
+ * scope or key is refused from its next call. No host surface accepts a host id
+ * from its caller.
+ */
+
+import type { Prisma, PrismaClient } from '../../generated/prisma/index.js';
+import { generateId } from '../id.js';
+
+type Db = PrismaClient | Prisma.TransactionClient;
+
+/** An App key operating as one host of its App. */
+export type HostKey = { appKeyId: string; appId: string; hostId: string };
+
+/** What a host key did, for the use record (cor:agt:070:07). */
+export type HostKeyAction = 'register' | 'collect' | 'report' | 'availability';
+
+/**
+ * The host this key operates as RIGHT NOW: the host id on its live
+ * `host:operate` scope, on an unrevoked key of this App, whose App is
+ * installed. Null when it holds none. Callers that must not race a revocation
+ * run this inside a transaction holding the App's authority anchor shared; the
+ * revokers of a scope, of the key and of the App take it exclusively.
+ */
+export async function keyHostId(db: Db, key: { appKeyId: string; appId: string }): Promise<string | null> {
+  const row = await db.appKeyScope.findFirst({
+    where: {
+      appKeyId: key.appKeyId,
+      scope: 'host:operate',
+      revokedAt: null,
+      appKey: { revokedAt: null, appId: key.appId, app: { deletedAt: null, uninstalledAt: null } },
+    },
+    select: { hostId: true },
+  });
+  return row?.hostId ?? null;
+}
+
+/** Record one use of a host key, in the caller's transaction, so it commits exactly when the use does. */
+export async function recordHostKeyUse(
+  tx: Prisma.TransactionClient,
+  key: HostKey,
+  action: HostKeyAction,
+  detail: { operationId?: string; count?: number } = {},
+): Promise<void> {
+  await tx.hostKeyUse.create({
+    data: {
+      id: generateId(),
+      appKeyId: key.appKeyId,
+      appId: key.appId,
+      hostId: key.hostId,
+      action,
+      operationId: detail.operationId ?? null,
+      count: detail.count ?? null,
+    },
+  });
+}
