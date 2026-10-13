@@ -37,7 +37,7 @@ async function expectCode(p: Promise<unknown>, code: string) {
 
 let n = 0;
 const mkUser = (label: string, extra: Record<string, unknown> = {}) =>
-  db.user.create({ data: { githubId: 700_000 + ++n + Math.floor(Math.random() * 90_000), githubUsername: `am-${label}-${generateId()}`, roles: ['READER'], ...extra }, select: { id: true } });
+  db.user.create({ data: { githubId: 7_000_000 + ++n, githubUsername: `am-${label}-${generateId()}`, roles: ['READER'], ...extra }, select: { id: true } });
 
 let org: { id: string; urn: string };
 let app: { id: string; organizationId: string | null; ownerUserId: string | null };
