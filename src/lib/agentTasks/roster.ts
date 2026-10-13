@@ -70,7 +70,7 @@ export type RosterEntry = {
   waitingSince: Date | null;
   /** YOUR_MOVE: unacknowledged alarms it has been woken on, nearest first. */
   alarmEventIds: string[];
-  /** YOUR_MOVE: a finished child it hasn't reacted to, on a task it is the assignee of. */
+  /** YOUR_MOVE: a finished or cancelled child it hasn't reacted to, on a task it is the assignee of. */
   unreactedChildTaskId: string | null;
   lastActiveAt: Date | null;
   lastAssignedAt: Date | null;

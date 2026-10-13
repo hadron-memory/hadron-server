@@ -6,7 +6,7 @@
  * |-------------------|---------------------------------------------------|---------|-------------|
  * | not-started       | pending, assigned, past start-by or the window     | 15 min  | 050:14      |
  * | no-progress       | started, no open child, no assignee activity       | 60 min  | 050:15      |
- * | owner-unreactive  | a child finished; no activity since by the         | 20 min  | 050:16 (r2) |
+ * | owner-unreactive  | a child finished or cancelled; no activity by the | 20 min  | 050:16 (r2) |
  * |                   | parent's assignee (the child's owner)              |         |             |
  * | unassignable      | queued: pending with no assignee                   | 30 min  | 050:17      |
  *
@@ -25,9 +25,9 @@
  *     reassignment while started, 050:15 edge case), the moment the last open
  *     child ended (050:15 edge case), the assignee's last activity, and its
  *     latest still-working note (`task.progress`; cor:agt:050:12).
- *   - owner-unreactive: the EARLIEST child finish after the parent's
+ *   - owner-unreactive: the EARLIEST child end (finish or cancel, #1760) after the parent's
  *     assignee last moved (activity, a still-working note, the parent's start
- *     or its assignment). A second child finishing in the same silence is the
+ *     or its assignment). A second child ending in the same silence is the
  *     same episode: the condition has held since the first.
  *   - unassignable: when the task entered its current queue stint — its latest
  *     `assignment.queued` event (#1754: make-ready re-queues a parked task),
@@ -45,8 +45,7 @@
  * locked; a call landing in the same instant as the alarm can lose that race,
  * and the alarm stands.
  *
- * Interim readings carried from the issue until Holger rules: only a FINISHED
- * child starts the owner-unreactive window (050:16 open question); no alarm on
+ * Interim readings carried from the issue until Holger rules: no alarm on
  * an ended parent (it is not open, so it is never evaluated); a root task's
  * chain ends at its owner (050:18 open question); escalation steps by the
  * alarm's own window (050:19, Proposed).
@@ -132,8 +131,8 @@ export type StallInputs = {
   openChildCount: number;
   /** When the last child ended (finished or cancelled), if any has. */
   lastChildEndedAt: Date | null;
-  /** Finished children, earliest finish first. */
-  finishedChildren: { id: string; finishedAt: Date }[];
+  /** Children that ended by finishing or being cancelled (cor:agt:050:16, #1760), earliest end first. */
+  endedChildren: { id: string; endedAt: Date }[];
   /** The latest still-working note on the task (cor:agt:050:12). */
   lastProgressAt: Date | null;
   /** The worker assignee's last session activity; null for a person or a queued task. */
@@ -193,10 +192,12 @@ export async function loadStallInputs(db: Db, where: Prisma.AgentTaskWhereInput,
       task,
       openChildCount: kids.filter((c) => OPEN_STATUSES.includes(c.status)).length,
       lastChildEndedAt: latest(...ends),
-      finishedChildren: kids
-        .filter((c) => c.status === 'finished' && c.finishedAt)
-        .map((c) => ({ id: c.id, finishedAt: c.finishedAt as Date }))
-        .sort((a, b) => a.finishedAt.getTime() - b.finishedAt.getTime() || a.id.localeCompare(b.id)),
+      endedChildren: kids
+        .flatMap((c) => {
+          const endedAt = c.status === 'finished' ? c.finishedAt : c.status === 'cancelled' ? c.cancelledAt : null;
+          return endedAt ? [{ id: c.id, endedAt }] : [];
+        })
+        .sort((a, b) => a.endedAt.getTime() - b.endedAt.getTime() || a.id.localeCompare(b.id)),
       lastProgressAt: progressBy.get(task.id) ?? null,
       assigneeActivityAt: task.assigneeWorkerId ? activity.get(task.assigneeWorkerId)?.lastActiveAt ?? null : null,
       queuedAt: queuedBy.get(task.id) ?? null,
@@ -282,7 +283,7 @@ export function stallCandidates(inputs: StallInputs, windows: StallWindows, now:
   // assignee, has not moved since. The alarm is about THIS (the parent) task.
   const first = assignee ? unreactedChild(inputs) : null;
   if (first) {
-    add('owner-unreactive', first.finishedAt, plus(first.finishedAt, windows.ownerReactionMinutes), {
+    add('owner-unreactive', first.endedAt, plus(first.endedAt, windows.ownerReactionMinutes), {
       childTaskId: first.id,
     });
   }
@@ -294,11 +295,11 @@ export function stallCandidates(inputs: StallInputs, windows: StallWindows, now:
  * after its assignee last moved, or null. The owner-unreactive episode starts
  * there; the roster (#1707) reads the same answer as "your move".
  */
-export function unreactedChild(inputs: StallInputs): { id: string; finishedAt: Date } | null {
+export function unreactedChild(inputs: StallInputs): { id: string; endedAt: Date } | null {
   const { task } = inputs;
-  if (!inputs.finishedChildren.length) return null;
+  if (!inputs.endedChildren.length) return null;
   const moved = latest(task.assignedAt, task.startedAt, inputs.lastProgressAt, inputs.assigneeActivityAt);
-  return inputs.finishedChildren.find((c) => !moved || c.finishedAt.getTime() > moved.getTime()) ?? null;
+  return inputs.endedChildren.find((c) => !moved || c.endedAt.getTime() > moved.getTime()) ?? null;
 }
 
 // ── The owner chain ───────────────────────────────────────────────────────
