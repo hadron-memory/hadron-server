@@ -34,6 +34,12 @@ export async function systemMemoryReadGrants(
     if (managed && !principal.impersonation) {
       grants.push({ source: 'MEMORY_PRINCIPAL', role: 'owner', via: null, caps: FULL });
     } else if (!principal.impersonation && (principal.roles?.includes('ADMIN') || principal.roles?.includes('OWNER'))) {
+      // (#1841, Rook P3-3 — the documented inline pair, deliberately kept:)
+      // the shared package's isPlatformAdmin is Role-typed
+      // ((@hadron-memory/access-control).isPlatformAdmin(roles: Role[])),
+      // while this principal carries plain strings from the request context;
+      // widening the package helper for a no-behavior-change pin was ruled
+      // out at #1841. Keep these two lines equivalent to isPlatformAdmin.
       // #1787 (cor:dmo:050:13): a platform admin who may manage the Agent
       // (requireAgentAccess) reads its definition — read-only, exactly what
       // canReadMemoryRecord admits. Every other user-owned memory stays the

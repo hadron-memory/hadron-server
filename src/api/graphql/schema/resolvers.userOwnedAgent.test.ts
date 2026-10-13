@@ -282,15 +282,15 @@ describe('#1787 — a platform admin manages a user-owned Agent (cor:dmo:050:13,
     expect((await resolvers.Query.agent(null, { ref: orgAgent.id }, admin()))?.id).toBe(orgAgent.id);
     await expect(
       resolvers.Query.agent(null, { ref: orgAgent.id }, ctx({ userId: otherId, roles: ['READER'] })),
-    ).rejects.toThrow();
+    ).rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
   });
 
   it('an ordinary non-owner is still refused everywhere', async () => {
     const agent = await rogueAgent();
     const ordinary = ctx({ userId: otherId, roles: ['READER'] });
-    await expect(resolvers.Query.agent(null, { ref: agent.id }, ordinary)).rejects.toThrow();
-    await expect(resolvers.Mutation.updateAgent(null, { ref: agent.id, name: 'X' }, ordinary)).rejects.toThrow();
-    await expect(resolvers.Mutation.deleteAgent(null, { ref: agent.id }, ordinary)).rejects.toThrow();
+    await expect(resolvers.Query.agent(null, { ref: agent.id }, ordinary)).rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
+    await expect(resolvers.Mutation.updateAgent(null, { ref: agent.id, name: 'X' }, ordinary)).rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
+    await expect(resolvers.Mutation.deleteAgent(null, { ref: agent.id }, ordinary)).rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
     await expect(resolvers.Query.memory(null, { ref: agent.systemMemoryId! }, ordinary)).resolves.toBeNull();
   });
 
@@ -302,7 +302,7 @@ describe('#1787 — a platform admin manages a user-owned Agent (cor:dmo:050:13,
         apiKeyEncrypted: encryptToken('sk-live-1787'), model: 'gpt-test', createdBy: ownerId,
       },
     });
-    await expect(resolvers.Query.agentAIConfig(null, { agentRef: agent.id }, admin())).rejects.toThrow();
+    await expect(resolvers.Query.agentAIConfig(null, { agentRef: agent.id }, admin())).rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
     const ownerCfg = await resolvers.Query.agentAIConfig(
       null, { agentRef: agent.id }, ctx({ userId: ownerId, roles: ['READER'] }),
     );
@@ -313,8 +313,8 @@ describe('#1787 — a platform admin manages a user-owned Agent (cor:dmo:050:13,
     const agent = await rogueAgent();
     const imp = { orgId: 'some-org', sessionId: 'imp-session', actorUserId: otherId };
     const impAdmin = ctx({ userId: otherId, roles: ['ADMIN'], impersonation: imp as never });
-    await expect(resolvers.Query.agent(null, { ref: agent.id }, impAdmin)).rejects.toThrow();
-    await expect(resolvers.Mutation.deleteAgent(null, { ref: agent.id }, impAdmin)).rejects.toThrow();
+    await expect(resolvers.Query.agent(null, { ref: agent.id }, impAdmin)).rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
+    await expect(resolvers.Mutation.deleteAgent(null, { ref: agent.id }, impAdmin)).rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
     await expect(resolvers.Query.memory(null, { ref: agent.systemMemoryId! }, impAdmin)).resolves.toBeNull();
   });
 
@@ -363,15 +363,20 @@ describe('#1787 — a platform admin manages a user-owned Agent (cor:dmo:050:13,
     // Agent: an update that keeps the key under a changed endpoint, or a test
     // with an override, would send the user's stored key to a caller-chosen
     // endpoint — exactly what cor:dmo:050:13 withholds (#8075).
+    // The typed code each op actually carries on the wire (#1841): update and
+    // delete refuse at the gate (FORBIDDEN); test CONCEALS the refusal as
+    // AiServiceConfigNotFoundError (testAiServiceConfig.ts:360 — no oracle
+    // over config ids). Each is the refusal — pinned per op, not assumed
+    // uniform.
     await expect(resolvers.Mutation.updateAiServiceConfig(
       null, { id: cfg.id, endpoint: 'https://attacker.example' }, admin(),
-    )).rejects.toThrow();
-    await expect(resolvers.Mutation.testAiServiceConfig(null, { id: cfg.id }, admin())).rejects.toThrow();
-    await expect(resolvers.Mutation.deleteAiServiceConfig(null, { id: cfg.id }, admin())).rejects.toThrow();
+    )).rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
+    await expect(resolvers.Mutation.testAiServiceConfig(null, { id: cfg.id }, admin())).rejects.toMatchObject({ extensions: { code: 'AiServiceConfigNotFoundError' } });
+    await expect(resolvers.Mutation.deleteAiServiceConfig(null, { id: cfg.id }, admin())).rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
     // The agentAIConfig upsert has the same kept-key shape — owner-only too.
     await expect(resolvers.Mutation.updateAgentAIConfig(
       null, { agentId: agent.id, provider: 'openai', model: 'gpt-x' }, admin(),
-    )).rejects.toThrow();
+    )).rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
     // Clearing is pure deletion (no exfil): the admin arm holds, covering shutdown.
     expect(await resolvers.Mutation.clearAgentAIConfig(null, { agentId: agent.id }, admin())).not.toBeNull();
     // Owner control: set still works for the owner (with a key — the admin's
@@ -399,7 +404,7 @@ describe('#1787 — a platform admin manages a user-owned Agent (cor:dmo:050:13,
     await db.agent.update({ where: { id: agent.id }, data: { systemMemoryId: null } });
     await expect(
       resolvers.Mutation.updateAgent(null, { ref: agent.id, systemMemoryId: victimMemory.id }, admin()),
-    ).rejects.toThrow();
+    ).rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
     const untouched = await db.memory.findUniqueOrThrow({ where: { id: victimMemory.id } });
     expect(untouched.class).toBe('knowledge');
     expect((await db.agent.findUniqueOrThrow({ where: { id: agent.id } })).systemMemoryId).toBeNull();
@@ -415,6 +420,14 @@ describe('#1787 — a platform admin manages a user-owned Agent (cor:dmo:050:13,
     const agent = await rogueAgent();
     const revision = await resolvers.Mutation.createRevision(null, { agentId: agent.id, description: 'admin snapshot' }, admin());
     expect(revision).not.toBeNull();
+  });
+
+  it('the admin restores a definition revision too (#1841: the revision surface is pinned at both ends)', async () => {
+    const agent = await rogueAgent();
+    const revision = await resolvers.Mutation.createRevision(null, { agentId: agent.id, description: 'to restore' }, admin());
+    expect(revision.revisionLoc).toMatch(/^revisions:/);
+    const restored = await resolvers.Mutation.restoreRevision(null, { agentId: agent.id, revisionLoc: revision.revisionLoc }, admin());
+    expect(restored).not.toBeNull();
   });
 });
 
