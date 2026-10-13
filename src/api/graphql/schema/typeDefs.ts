@@ -11698,7 +11698,7 @@ export const typeDefs = `#graphql
   enum WakeKind {
     MENTION
     TICK
-    "#1708 — a task event the worker must act on (an assignment, a child's finish, an alarm's woken position). Wakes at once, like a mention."
+    "#1708 — a task event the worker must act on (an assignment, a child's finish, an alarm's woken position, #1709 a request to end its session). Wakes at once, like a mention."
     TASK
   }
 
@@ -11712,6 +11712,8 @@ export const typeDefs = `#graphql
     CHILD_FINISHED
     "An unacknowledged alarm's currently-woken chain position (hrn:node:hadronmemory.com:specs:cor:agt:050:19). Delivering it never acknowledges the alarm."
     ALARM
+    "#1709 — the task was cancelled and asks its assignee to end its session (hrn:node:hadronmemory.com:specs:cor:agt:050:10). Due while that session is open and the platform has not yet ended it through a host."
+    END_SESSION
   }
 
   "#1708 — the task a TASK reason is for: shown only to a caller who may read the App's tasks (hrn:node:hadronmemory.com:specs:cor:agt:050:21)."
@@ -11966,11 +11968,17 @@ export const typeDefs = `#graphql
     result: AgentTaskResult
     tags: [String!]!
     """
-    Whether finishing asks the assignee to end its worker session
-    (hrn:node:hadronmemory.com:specs:cor:agt:050:10). Set by whoever assigns; stored only in this release,
-    carried out by the host-operations slice.
+    Whether finishing or cancelling asks the assignee to end its worker session
+    (hrn:node:hadronmemory.com:specs:cor:agt:050:10). Set by whoever assigns. #1709: carried out; see sessionEndRequest.
     """
     closeSessionWhenDone: Boolean!
+    """
+    #1709 — the request this task's finish or cancellation made that its worker assignee end its session
+    (hrn:node:hadronmemory.com:specs:cor:agt:050:10); null when none was made (closeSessionWhenDone false, a person
+    assignee, or no open session). A worker that finishes its own task reads it here: end the session, with a handoff,
+    before dueAt, or the platform ends it through a live host.
+    """
+    sessionEndRequest: AgentTaskSessionEndRequest
     assignedAt: DateTime
     assignedBy: AgentTaskParty
     createdAt: DateTime!
@@ -11978,6 +11986,26 @@ export const typeDefs = `#graphql
     "The headless run that created the task (hrn:node:hadronmemory.com:specs:cor:agt:050:06); then createdBy is null."
     createdByRunId: ID
     updatedAt: DateTime
+  }
+
+  "#1709 — a task's request that its assignee end its session (hrn:node:hadronmemory.com:specs:cor:agt:050:10)."
+  type AgentTaskSessionEndRequest {
+    "The session asked to end: only this one is ever ended, never a later replacement."
+    sessionId: ID!
+    requestedAt: DateTime!
+    "When the App's grace runs out (default 10 minutes after the request)."
+    dueAt: DateTime!
+    "Null while open; else ENDED (the session ended), END_ISSUED (the platform issued worker.end through a live host) or NO_LIVE_HOST (nothing more happens)."
+    resolution: AgentTaskSessionEndResolution
+    resolvedAt: DateTime
+    "The worker.end operation the platform issued (END_ISSUED)."
+    operationId: ID
+  }
+
+  enum AgentTaskSessionEndResolution {
+    ENDED
+    END_ISSUED
+    NO_LIVE_HOST
   }
 
   """
@@ -12330,17 +12358,20 @@ export const typeDefs = `#graphql
     assignmentMinutes: Int!
     "#1763 — how many of a host's own check-in intervals may pass without a refresh before its registration in this App lapses (hrn:node:hadronmemory.com:specs:cor:agt:070:01): 2 to 10, default 3."
     hostLapseCheckIns: Int!
+    "#1709 — how many minutes a worker asked to end its session on its task's finish or cancellation has before the platform ends it through its host (hrn:node:hadronmemory.com:specs:cor:agt:050:10): 1 to 1440, default 10."
+    sessionEndGraceMinutes: Int!
     "When the App last changed them; null while every window is the default."
     updatedAt: DateTime
   }
 
-  "An omitted field keeps its value; null returns it to the platform default. Each window is 1 to 10080 minutes; hostLapseCheckIns is 2 to 10."
+  "An omitted field keeps its value; null returns it to the platform default. Each window is 1 to 10080 minutes; hostLapseCheckIns is 2 to 10; sessionEndGraceMinutes is 1 to 1440."
   input AgentTaskStallScheduleInput {
     notStartedMinutes: Int
     noProgressMinutes: Int
     ownerReactionMinutes: Int
     assignmentMinutes: Int
     hostLapseCheckIns: Int
+    sessionEndGraceMinutes: Int
   }
 
   input SetWorkerAvailabilityInput {
