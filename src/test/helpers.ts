@@ -27,6 +27,8 @@ export async function cleanDb(db: PrismaClient): Promise<void> {
   // can deadlock with their DELETE/SetNull cascades. Finish all recorder chunks
   // before deleting any fixture; deleting usage rows last alone is not enough.
   await drainNodeUsage(db);
+  // #1631: test-only cleanup bypasses row-delete guards, before deleting owners.
+  await db.$executeRawUnsafe('TRUNCATE TABLE passkey_credentials');
   // Pending first-party login states (FK-free; keyed on the OAuth state).
   await db.pendingLoginState.deleteMany();
   // #1079 — the URN alias map. Deliberately FK-FREE: it must outlive the row it

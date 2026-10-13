@@ -428,6 +428,7 @@ model User {
   // 025-oauth-for-mcp: user-level credential + OAuth back-relations.
   userApiKeys                   UserApiKey[]
   authCodes                     AuthCode[]
+  passkeyCredentials            PasskeyCredential[]
   authHandoffCodes              AuthHandoffCode[]
   // #620: revisions this user approved (NodeRevision.approvedBy).
   approvedNodeRevisions         NodeRevision[]             @relation("NodeRevisionApprover")
@@ -3952,6 +3953,43 @@ model AuthCode {
   @@index([userId])
   @@index([clientId])
   @@map("auth_codes")
+}
+
+/// #1631 schema-first: shared credential registry (cor:aut:040:05), no enrollment route yet.
+/// Identity/public-key fields are immutable; records are never deleted, revokedAt is set once.
+model PasskeyCredential {
+  id                 String    @id @default(cuid())
+  ownerId            String    @map("owner_id")
+  /// Raw WebAuthn identifier bytes: encoding aliases cannot create duplicate records.
+  credentialId       Bytes     @unique @map("credential_id")
+  publicKey          Bytes     @map("public_key")
+  algorithm          Int
+  /// Random authenticator user handle, not an email, User.id or session bearer.
+  userHandle         Bytes     @map("user_handle")
+  label              String
+  registeredAt       DateTime  @default(dbgenerated("(CURRENT_TIMESTAMP AT TIME ZONE 'UTC'::text)")) @map("registered_at")
+  lastUsedAt         DateTime? @map("last_used_at")
+  revokedAt          DateTime? @map("revoked_at")
+  /// WebAuthn's unsigned 32-bit counter does not fit a signed PostgreSQL Int.
+  counter            BigInt    @default(0)
+  transports         String[]  @default([])
+  backupEligible     Boolean   @default(false) @map("backup_eligible")
+  backedUp           Boolean   @default(false) @map("backed_up")
+  /// First credential only: the verified sign-in method used for registration.
+  registrationMethod String?   @map("registration_method")
+  windowEndsAt       DateTime? @map("window_ends_at")
+  windowEndedAt      DateTime? @map("window_ended_at")
+  /// null while open (or not first); ran-out | ended-early | cancelled once closed.
+  windowOutcome      String?   @map("window_outcome")
+  /// SEC-9: provenance of a cancel-link use, distinct from other revocation routes.
+  cancelledAt        DateTime? @map("cancelled_at")
+  cancelIp           String?   @map("cancel_ip")
+  cancelUserAgent    String?   @map("cancel_user_agent")
+
+  owner User @relation(fields: [ownerId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  @@index([ownerId])
+  @@map("passkey_credentials")
 }
 
 /// Short-lived, single-use handoff codes that keep the session JWT out of
