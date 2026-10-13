@@ -47,6 +47,16 @@ try {
   assert.equal(replayNew.status, 400);
   assert.equal(replayNew.body.code, 'REPLAY_REFUSED');
 
+  const aliasOptions = await page.evaluate(() => window.spike.request('/authentication/options', {}));
+  const alias = structuredClone(response);
+  for (const field of ['clientDataJSON', 'authenticatorData', 'signature']) {
+    alias.response[field] += '=';
+    assert.deepEqual(Buffer.from(alias.response[field], 'base64url'), Buffer.from(response.response[field], 'base64url'));
+  }
+  const replayAlias = await page.evaluate(body => window.spike.post('/authentication/verify', body), { id: aliasOptions.id, response: alias });
+  assert.equal(replayAlias.status, 400);
+  assert.equal(replayAlias.body.code, 'REPLAY_REFUSED');
+
   // A hostile client weakens its browser preference. The verifier must still require UV.
   await cdp.send('WebAuthn.setUserVerified', { authenticatorId, isUserVerified: false });
   const noUv = await page.evaluate(() => window.spike.request('/authentication/options', {}));
@@ -74,7 +84,7 @@ try {
   console.log(JSON.stringify({ localLeg: 'PASS', browser: await browser.version(), rpID: 'localhost',
     origin: primary.origin, fixture: 'spec-retention-example', discoverable: true,
     registrationUV: true, authenticationUV: true, customChallengeMatchesS0: true,
-    refusals: ['UV=false', 'wrong origin', 'spent ceremony replay', 'new ceremony stored assertion replay', 'wrong RP control', 'wrong challenge control'],
+    refusals: ['UV=false', 'wrong origin', 'spent ceremony replay', 'new ceremony stored assertion replay (canonical and encoding alias)', 'wrong RP control', 'wrong challenge control'],
     limits: ['synthetic authenticator', 'no production/device/sync/hybrid proof', 'deterministic payload replay contract is outside this spike'] }, null, 2));
 } finally {
   await browser?.close();
