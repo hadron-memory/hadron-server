@@ -1,8 +1,8 @@
 /**
  * #1707 — host registrations (cor:agt:070:01): the internal writer, what makes
  * a worker launchable, and the lapse after the App's count of poll intervals (default 3, #1763)
- * (`host.lost`, once). There is no public mutation in this slice: the host's
- * identity will come from T6's `host:operate` key, never from a request.
+ * (`host.lost`, once). The public mutation (#1709) takes the host's identity
+ * from its `host:operate` key, never from a request: resolvers.hostOperation.test.ts.
  */
 
 import { beforeEach, describe, expect, it } from 'vitest';
@@ -93,8 +93,11 @@ describe('cor:agt:070:01 — a host registers which workers it can launch, and a
     await expect(registerHost(db, ORCA1(), at('10:00'))).rejects.toMatchObject({ code: 'APP_NOT_LIVE' });
   });
 
-  it('has no public mutation: the host identity comes from T6\'s key, never a request', () => {
-    expect(typeDefs).not.toMatch(/registerHost|hostRegistration/i);
+  it('#1709: the public registerHost takes no host id: the host identity comes from the key, never a request', () => {
+    const input = /input RegisterHostInput \{([^}]*)\}/.exec(typeDefs)?.[1] ?? '';
+    expect(input).toMatch(/appRef/);
+    expect(input).not.toMatch(/hostId/);
+    expect(typeDefs).toMatch(/registerHost\(input: RegisterHostInput!\): HostRegistration!/);
   });
 });
 

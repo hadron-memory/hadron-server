@@ -185,8 +185,9 @@ describe('cor:agt:060:11 — the worker a stalled worker reports to may clear th
 
   it('S4: a mark the host, the holder or a manager set stays, whatever its reason', async () => {
     for (const data of [
-      { reason: 'out-of-tokens', setBy: 'host' },
-      { reason: 'stalled', setBy: 'host' },
+      // #1709: a host's mark names its host, and is only ever out of tokens or host down (chk_worker_availability_shape).
+      { reason: 'out-of-tokens', setBy: 'host', setByHostId: 'orca1' },
+      { reason: 'host-down', setBy: 'host', setByHostId: 'orca1' },
       { reason: 'stalled', setBy: 'holder', setByUserId: holder.id },
       { reason: 'stalled', setBy: 'app-manager', setByUserId: admin.id },
       { reason: 'other', setBy: 'worker', setByWorkerId: liam.id },

@@ -237,6 +237,8 @@ export type AvailabilityEvent =
       alarmEventId?: string;
       /** #1766: the `until` that passed, when the lapse made the worker available (cor:agt:060:02). */
       lapsedAt?: Date;
+      /** #1709: the host whose key set it (`setBy: 'host'`, cor:agt:060:08). */
+      hostId?: string;
     }
   | {
       kind: 'family';
@@ -259,6 +261,7 @@ export async function appendAvailabilityEvent(
         setBy: e.setBy,
         ...(e.alarmEventId ? { alarmEventId: e.alarmEventId } : {}),
         ...(e.lapsedAt ? { lapsedAt: e.lapsedAt.toISOString() } : {}),
+        ...(e.hostId ? { hostId: e.hostId } : {}),
       }
     : { ...common, family: e.family };
   await tx.agentTeamEvent.create({
@@ -300,6 +303,36 @@ export async function appendHostEvent(
       actorWorkerId: null,
       actorAgentId: null,
       payload: { registrationId: args.registrationId, hostId: args.hostId, workerCount: args.workerCount },
+      createdAt: args.createdAt,
+    },
+  });
+}
+
+// ── #1709: host operation outcomes ─────────────────────────────────────────
+
+/** A host operation's outcome (cor:agt:070:02: each outcome is also an event). */
+export const HOST_OPERATION_EVENT_TYPES = ['host.operation.succeeded', 'host.operation.failed'] as const;
+export type HostOperationEventType = (typeof HOST_OPERATION_EVENT_TYPES)[number];
+
+/**
+ * Append a host operation's outcome event, in the report's transaction. Ids
+ * and the operation's type only: never its arguments (branch and repo names)
+ * or the host's failure reason, which is free text the host wrote and stays
+ * on the operation row (cor:agt:050:11).
+ */
+export async function appendHostOperationEvent(
+  tx: Prisma.TransactionClient,
+  args: { appId: string; type: HostOperationEventType; operationId: string; hostId: string; operationType: string; workerId: string; createdAt: Date },
+): Promise<void> {
+  await tx.agentTeamEvent.create({
+    data: {
+      appId: args.appId,
+      type: args.type,
+      actorUserId: null,
+      actorWorkerId: null,
+      actorAgentId: null,
+      subjectWorkerId: args.workerId,
+      payload: { operationId: args.operationId, hostId: args.hostId, operationType: args.operationType },
       createdAt: args.createdAt,
     },
   });

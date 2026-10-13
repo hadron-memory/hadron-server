@@ -2,12 +2,12 @@
  * #1707 — host registrations (cor:agt:070:01): which workers a host can launch
  * in its team App, each with the model family it would run as.
  *
- * THE HOST'S IDENTITY COMES FROM ITS KEY, NEVER FROM THE REQUEST. This slice
- * ships the model and this internal writer only; there is no public mutation.
- * The public `registerHost` path ships with T6's `host:operate` App key (#1709),
- * which names one App and one host, so a caller can never register as another
- * host. Until then `registerHost` is reachable from tests and server code only,
- * and its caller is trusted to supply the host id.
+ * THE HOST'S IDENTITY COMES FROM ITS KEY, NEVER FROM THE REQUEST. The public
+ * `registerHost` mutation (#1709, src/api/graphql/schema/resolvers.hostOperation.ts)
+ * takes the host id from the calling key's `host:operate` scope row, which
+ * names one App and one host (cor:agt:070:04), and re-checks that scope inside
+ * this writer's transaction through `authorize`. Server code and tests call
+ * this writer directly and are trusted to supply the host id.
  *
  * A registration is LIVE while it has been refreshed within its App's lapse
  * count of its own poll intervals (cor:agt:070:01, #1763: 2 to 10, default
@@ -23,6 +23,7 @@ import { toNaiveUtc } from '../sessionActivity.js';
 import { appendHostEvent } from './events.js';
 import { FAMILY_PATTERN } from './availability.js';
 import { normalizeFamily } from './family.js';
+import { HOST_WORKTREES_MAX, isHostToken } from '../hostOperations/types.js';
 
 /**
  * cor:agt:070:01 (#1763; Holger, team chat #10405) — a registration lapses
@@ -74,7 +75,16 @@ export type HostRegistrationInput = {
   hostId: string;
   label: string;
   pollIntervalSeconds: number;
-  workers: { workerId: string; family: string }[];
+  /** #1709: `worktrees` are the worker's existing worktrees on this host (cor:agt:070:06, :08); none when omitted. */
+  workers: { workerId: string; family: string; worktrees?: string[] }[];
+};
+
+/** #1709: hooks a key-authenticated caller runs inside the registration's transaction, after the App's anchor. */
+export type RegisterHostHooks = {
+  /** Re-check the caller's authority under the anchor; throws to refuse (nothing is written). */
+  authorize?: (tx: Prisma.TransactionClient) => Promise<void>;
+  /** Runs after the write, in the same transaction (the host-key use record). */
+  afterWrite?: (tx: Prisma.TransactionClient, r: { registrationId: string; workerCount: number }) => Promise<void>;
 };
 
 /**
@@ -90,6 +100,7 @@ export async function registerHost(
   db: PrismaClient,
   input: HostRegistrationInput,
   now = new Date(),
+  hooks: RegisterHostHooks = {},
 ): Promise<{ registrationId: string; registered: boolean }> {
   const hostId = (input.hostId ?? '').trim();
   const label = (input.label ?? '').trim();
@@ -105,7 +116,7 @@ export async function registerHost(
   if (input.workers.length > HOST_WORKERS_MAX) {
     throw new HostRegistrationError('BAD_HOST_REGISTRATION', `A host registers at most ${HOST_WORKERS_MAX} workers.`);
   }
-  const workers = new Map<string, string>();
+  const workers = new Map<string, { family: string; worktrees: string[] }>();
   for (const w of input.workers) {
     const family = normalizeFamily(w.family);
     if (!family || !FAMILY_PATTERN.test(family)) {
@@ -114,11 +125,27 @@ export async function registerHost(
     if (workers.has(w.workerId)) {
       throw new HostRegistrationError('BAD_HOST_REGISTRATION', `Worker ${w.workerId} is listed twice; a host launches a worker as one family.`);
     }
-    workers.set(w.workerId, family);
+    const worktrees = w.worktrees ?? [];
+    if (worktrees.length > HOST_WORKTREES_MAX) {
+      throw new HostRegistrationError('BAD_HOST_REGISTRATION', `A worker has at most ${HOST_WORKTREES_MAX} worktrees on one host.`);
+    }
+    if (new Set(worktrees).size !== worktrees.length) {
+      throw new HostRegistrationError('BAD_HOST_REGISTRATION', `Worker ${w.workerId} lists a worktree twice.`);
+    }
+    for (const t of worktrees) {
+      if (!isHostToken(t)) {
+        throw new HostRegistrationError(
+          'BAD_HOST_REGISTRATION',
+          'A worktree is a name token: letters, digits and . _ / @ + -, starting with a letter or digit, with no "..", "//" or trailing "/".',
+        );
+      }
+    }
+    workers.set(w.workerId, { family, worktrees });
   }
 
   return db.$transaction(async (tx) => {
     await lockAuthorityAnchors(tx, [{ kind: 'app', id: input.appId }], 'shared');
+    if (hooks.authorize) await hooks.authorize(tx);
     // #1863: the App's lapse count, stable for this transaction, taken BEFORE
     // the registration row (the lock order of recordHostLost).
     const checkIns = await lockAppLapseCheckIns(tx, input.appId);
@@ -160,9 +187,10 @@ export async function registerHost(
     await tx.hostRegistrationWorker.deleteMany({ where: { registrationId: cur.id } });
     if (workers.size) {
       await tx.hostRegistrationWorker.createMany({
-        data: [...workers].map(([workerId, family]) => ({ registrationId: cur.id, workerId, family })),
+        data: [...workers].map(([workerId, w]) => ({ registrationId: cur.id, workerId, family: w.family, worktrees: w.worktrees })),
       });
     }
+    if (hooks.afterWrite) await hooks.afterWrite(tx, { registrationId: cur.id, workerCount: workers.size });
     const registered = isNew || wasLapsed;
     if (registered) {
       await appendHostEvent(tx, {
