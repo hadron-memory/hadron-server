@@ -5,6 +5,7 @@
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { GraphQLError } from 'graphql';
+import { Prisma } from '../../../generated/prisma/index.js';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
@@ -41,6 +42,9 @@ const errorOf = async (p: Promise<unknown>): Promise<GraphQLError> => {
 };
 /** The observable shape of a refusal: message plus extensions, nothing else. */
 const shapeOf = (e: GraphQLError) => ({ message: e.message, extensions: e.extensions });
+/** SQLSTATE 55P03 (lock_not_available) on a NOWAIT probe — matched by code, not message text (#1853). */
+const isLockNotAvailable = (error: unknown): boolean =>
+  error instanceof Prisma.PrismaClientKnownRequestError && (error.meta as { code?: string } | undefined)?.code === '55P03';
 
 beforeEach(async () => {
   await cleanDb(db);
@@ -184,31 +188,38 @@ describe('#1765 — the author may always delete their own (cor:dmo:110:16)', ()
       await tx.$queryRaw`SELECT id FROM nodes WHERE id = ${mine.id} FOR UPDATE`;
       await held;
     }, { timeout: 20_000 });
-    // Barrier (#1846): prove the holder has ACQUIRED the lock before the
-    // delete races it, so the race cannot pass vacuously by outrunning the
-    // acquisition. A NOWAIT probe succeeds (and, in its own implicit
-    // transaction, releases instantly) while the row is free; its failure is
-    // the holder holding it.
-    let lockHeld = false;
-    for (let i = 0; i < 200 && !lockHeld; i += 1) {
-      try {
-        await db.$queryRaw`SELECT id FROM nodes WHERE id = ${mine.id} FOR UPDATE NOWAIT`;
-        await new Promise((r) => setTimeout(r, 20));
-      } catch (error) {
-        if (error instanceof Error && /could not obtain lock/i.test(error.message)) lockHeld = true;
-        else throw error;
+    // The try opens at the HOLDER, not at the race (#1855 fix, Bob's P2): a
+    // failed barrier must release it too, or the 20s transaction leaks and
+    // whatever it was holding back rejects unhandled.
+    try {
+      // Barrier (#1846): prove the holder has ACQUIRED the lock before the
+      // delete races it, so the race cannot pass vacuously by outrunning the
+      // acquisition. A NOWAIT probe succeeds (and, in its own implicit
+      // transaction, releases instantly) while the row is free; its failure is
+      // the holder holding it — matched by SQLSTATE, not message text (#1853;
+      // the fenceCorpusForMint precedent).
+      let lockHeld = false;
+      for (let i = 0; i < 200 && !lockHeld; i += 1) {
+        try {
+          await db.$queryRaw`SELECT id FROM nodes WHERE id = ${mine.id} FOR UPDATE NOWAIT`;
+          await new Promise((r) => setTimeout(r, 20));
+        } catch (error) {
+          if (isLockNotAvailable(error)) lockHeld = true;
+          else throw error;
+        }
       }
+      expect(lockHeld).toBe(true);
+      // While the row is locked: the refusal must answer without waiting on it.
+      const outcome = await Promise.race([
+        errorOf(M.deleteComment(null, { commentRef: mine.id, expectedRevision: mine.revSeq }, as(writer.id))),
+        new Promise((resolve) => setTimeout(() => resolve('STILL WAITING ON THE LOCK'), 2_000)),
+      ]);
+      expect(outcome).toBeInstanceOf(GraphQLError);
+      expect((outcome as GraphQLError).extensions.code).toBe('COMMENT_NOT_FOUND');
+    } finally {
+      release();
+      await holder;
     }
-    expect(lockHeld).toBe(true);
-    // While the row is locked: the refusal must answer without waiting on it.
-    const outcome = await Promise.race([
-      errorOf(M.deleteComment(null, { commentRef: mine.id, expectedRevision: mine.revSeq }, as(writer.id))),
-      new Promise((resolve) => setTimeout(() => resolve('STILL WAITING ON THE LOCK'), 2_000)),
-    ]);
-    release();
-    await holder;
-    expect(outcome).toBeInstanceOf(GraphQLError);
-    expect((outcome as GraphQLError).extensions.code).toBe('COMMENT_NOT_FOUND');
     expect((await live(mine.id)).deletedAt).toBeNull();
   });
 
