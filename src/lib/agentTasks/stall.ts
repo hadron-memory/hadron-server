@@ -136,8 +136,9 @@ export type StallInputs = {
    * Children that ended by finishing or being cancelled (cor:agt:050:16, #1760),
    * earliest end first, each with its OWNER's last session activity (#1831):
    * the owner-unreactive window tests the child owner's silence, never the
-   * parent's assignee's. A person owner has no session, so `ownerActivityAt`
-   * is null for them.
+   * parent's assignee's. A worker owner's activity is its session activity; a
+   * person owner has no session, so theirs is the latest task call they made
+   * (cor:agt:050:12, #1848): the task events they caused, in this App.
    */
   endedChildren: { id: string; endedAt: Date; ownerWorkerId: string | null; ownerActivityAt: Date | null }[];
   /** The latest still-working note on the task (cor:agt:050:12). */
@@ -168,13 +169,14 @@ export async function loadStallInputs(db: Db, where: Prisma.AgentTaskWhereInput,
   const ids = tasks.map((t) => t.id);
   const children = await db.agentTask.findMany({
     where: { parentTaskId: { in: ids } },
-    select: { id: true, parentTaskId: true, status: true, finishedAt: true, cancelledAt: true, ownerWorkerId: true },
+    select: { id: true, parentTaskId: true, status: true, finishedAt: true, cancelledAt: true, ownerWorkerId: true, ownerUserId: true },
   });
   const workerIds = [...new Set([
     ...tasks.map((t) => t.assigneeWorkerId),
     ...children.map((c) => c.ownerWorkerId),
   ].filter((w): w is string => !!w))];
-  const [progress, queued, activity] = await Promise.all([
+  const ownerUserIds = [...new Set(children.map((c) => c.ownerUserId).filter((u): u is string => !!u))];
+  const [progress, queued, activity, userCalls] = await Promise.all([
     db.agentTeamEvent.groupBy({
       by: ['taskId'],
       where: { taskId: { in: ids }, type: 'task.progress' },
@@ -186,7 +188,21 @@ export async function loadStallInputs(db: Db, where: Prisma.AgentTaskWhereInput,
       _max: { createdAt: true },
     }),
     loadWorkersActivity({ db } as unknown as Context, workerIds, now),
+    // cor:agt:050:12 — "a person's activity is any task call they make". The
+    // record of a call is the task event it caused (create, assign, start,
+    // progress, finish, cancel, park, ready); a read leaves none (#1848), and
+    // an event with no task (availability, host) is not a task call.
+    ownerUserIds.length
+      ? db.agentTeamEvent.groupBy({
+        by: ['appId', 'actorUserId'],
+        // actorWorkerId null: a worker-bound call made under the person's credential
+        // carries their user id too, but it is the WORKER's activity, not theirs.
+        where: { actorUserId: { in: ownerUserIds }, actorWorkerId: null, taskId: { not: null }, type: { startsWith: 'task.' } },
+        _max: { createdAt: true },
+      })
+      : Promise.resolve([]),
   ]);
+  const userCallAt = new Map(userCalls.map((r) => [`${r.appId}:${r.actorUserId}`, r._max.createdAt]));
   const progressBy = new Map(progress.map((p) => [p.taskId, p._max.createdAt]));
   const queuedBy = new Map(queued.map((q) => [q.taskId, q._max.createdAt]));
   const childrenBy = new Map<string, typeof children>();
@@ -208,7 +224,9 @@ export async function loadStallInputs(db: Db, where: Prisma.AgentTaskWhereInput,
           return endedAt
             ? [{
               id: c.id, endedAt, ownerWorkerId: c.ownerWorkerId,
-              ownerActivityAt: c.ownerWorkerId ? activity.get(c.ownerWorkerId)?.lastActiveAt ?? null : null,
+              ownerActivityAt: c.ownerWorkerId
+                ? activity.get(c.ownerWorkerId)?.lastActiveAt ?? null
+                : c.ownerUserId ? userCallAt.get(`${task.appId}:${c.ownerUserId}`) ?? null : null,
             }]
             : [];
         })

@@ -379,16 +379,73 @@ describe('cor:agt:050:16 r2 — an owner who doesn\'t react to a finished child 
     expect(await alarms()).toEqual([]);
   });
 
-  it('a person-owned child: alarmed and never marked (a person has no session to measure; a move on the parent is no reaction)', async () => {
-    const parent = await task({ ownerWorkerId: ada.id, assigneeUserId: mia.id, assignedAt: at('09:00'), status: 'started', startedAt: at('09:10') });
-    await task({
-      parentTaskId: parent.id, ownerUserId: mia.id, assigneeWorkerId: rook.id, assignedAt: at('09:20'),
-      status: 'finished', startedAt: at('09:30'), finishedAt: at('10:00'), resultOutcome: 'succeeded',
+  describe('#1848 — a person owner\'s own task calls end the window (cor:agt:050:12)', () => {
+    /** Mia owns Rook's child under Ada's parent; the child finishes at 10:00. */
+    async function personOwned() {
+      const parent = await task({ ownerWorkerId: ada.id, assigneeUserId: mia.id, assignedAt: at('09:00'), status: 'started', startedAt: at('09:10') });
+      await task({
+        parentTaskId: parent.id, ownerUserId: mia.id, assigneeWorkerId: rook.id, assignedAt: at('09:20'),
+        status: 'finished', startedAt: at('09:30'), finishedAt: at('10:00'), resultOutcome: 'succeeded',
+      });
+      return parent;
+    }
+    const call = (taskId: string | null, by: { id: string }, t: string, type = 'task.progress', worker?: { id: string }) =>
+      db.agentTeamEvent.create({
+        data: { appId: app.id, taskId, type, actorUserId: by.id, ...(worker ? { actorWorkerId: worker.id } : {}), createdAt: at(t) },
+      });
+
+    it('silent: alarmed after the window, never marked (cor:agt:060:07: a person is not marked); a move on the parent is no reaction', async () => {
+      const parent = await personOwned();
+      await db.agentTask.update({ where: { id: parent.id }, data: { assignedAt: at('10:05') } });
+      await tick('10:20');
+      expect(await alarms('stall.owner-unreactive')).toEqual([expect.objectContaining({ taskId: parent.id, subjectWorkerId: null })]);
+      expect(await db.workerAvailability.count()).toBe(0);
     });
-    await db.agentTask.update({ where: { id: parent.id }, data: { assignedAt: at('10:05') } });
-    await tick('10:20');
-    expect(await alarms('stall.owner-unreactive')).toEqual([expect.objectContaining({ taskId: parent.id, subjectWorkerId: null })]);
+
+    it('a task call Mia makes after the end clears it', async () => {
+      const parent = await personOwned();
+      await call(parent.id, mia, '10:05');
+      await tick('10:20');
+      expect(await alarms('stall.owner-unreactive')).toEqual([]);
+    });
+
+    it('a task call on ANOTHER task in the App counts too ("any task call they make")', async () => {
+      await personOwned();
+      const other = await task({ ownerWorkerId: ada.id, createdAt: at('09:00') });
+      await call(other.id, mia, '10:05', 'task.created');
+      await tick('10:20');
+      expect(await alarms('stall.owner-unreactive')).toEqual([]);
+    });
+
+    it('a call before the end does not count', async () => {
+      const parent = await personOwned();
+      await call(parent.id, mia, '09:59');
+      await tick('10:20');
+      expect(await alarms('stall.owner-unreactive')).toHaveLength(1);
+    });
+
+    it('someone else\'s call does not clear it', async () => {
+      const parent = await personOwned();
+      await call(parent.id, admin, '10:05');
+      await tick('10:20');
+      expect(await alarms('stall.owner-unreactive')).toHaveLength(1);
+    });
+
+    it('a WORKER-bound call under Mia\'s credential is the worker\'s activity, not Mia\'s (Riana P2)', async () => {
+      const parent = await personOwned();
+      await call(parent.id, mia, '10:05', 'task.created', anne); // Anne acting through Mia's credential
+      await tick('10:20');
+      expect(await alarms('stall.owner-unreactive')).toHaveLength(1);
+    });
+
+    it('Mia\'s NON-task activity does not clear it (an event with no task, e.g. availability)', async () => {
+      await personOwned();
+      await call(null, mia, '10:05', 'availability.changed');
+      await tick('10:20');
+      expect(await alarms('stall.owner-unreactive')).toHaveLength(1);
+    });
   });
+
 
   describe('#1831 — the window tests the CHILD OWNER\'s silence, not the parent assignee\'s', () => {
     /** Anne owns Rook's child, which ends at 10:00; the parent (Ada's) is reassigned to Liam at 09:40. */
