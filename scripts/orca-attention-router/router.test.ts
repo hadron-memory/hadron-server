@@ -7,8 +7,8 @@ import { existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, 
 import { tmpdir, uptime } from 'node:os';
 import { join } from 'node:path';
 import { nudgeText,
-  type Config, type Runner, type RunResult, RouterError, State, breakStaleLock, describeOutcome, loadConfig, pollOnce,
-  promptLineIsEmpty, status,
+  type Config, type Runner, type RunResult, type Terminal, RouterError, State, breakStaleLock, describeOutcome, loadConfig, pollOnce,
+  promptLineIsEmpty, resolveTerminal, screenAgentFamily, status,
 } from './router.js';
 
 /** Rendered screens as Orca returned them on 2026-10-01 (idle, nobody typing). */
@@ -454,7 +454,7 @@ describe('Orca attention router — untracked terminals: unknown is not busy (#7
   });
 });
 
-describe('nudgeText read anchor (#1805 P2s)', () => {
+describe('nudgeText read anchor (#1805 P2s, #1811 large-gap branch)', () => {
   it('present anchor: names the first unread, BOTH forms, bounded — no --all', () => {
     const t = nudgeText(worker('w-eli', 'Eli', { mentions: 2, unread: 5, first: 100, relevant: 110, head: 120 }));
     expect(t).toContain('START AT #100 (your first unread message of any kind)');
@@ -465,16 +465,85 @@ describe('nudgeText read anchor (#1805 P2s)', () => {
     expect(t).not.toContain('--all');
     expect(t).not.toContain('\n');
   });
-  it('null anchor (defensive): no firstUnreadSeq means the old generic text, no START clause', () => {
+  it('null anchor (defensive): no firstUnreadSeq means the old generic text, no START clause, no mentions walk', () => {
     const t = nudgeText({ worker: 'w-eli', workerName: 'Eli', channel: CHANNEL, unread: 3, unreadMentions: 1, firstUnreadSeq: null, lastRelevantSeq: 110, lastSeq: 120 });
     expect(t).not.toContain('START AT');
     expect(t).toContain('Read team chat unfiltered');
+    expect(t).not.toContain('--mentions-me');
   });
-  it('first unread 1 (cursor-0 worker): since clamps to 0, still bounded', () => {
-    const t = nudgeText(worker('w-eli', 'Eli', { mentions: 2, unread: 9000, first: 1, relevant: 110, head: 9001 }));
+  it('first unread 1, SMALL span (cursor-0 worker near the head): since clamps to 0, still bounded', () => {
+    const t = nudgeText(worker('w-eli', 'Eli', { mentions: 2, unread: 349, first: 1, relevant: 110, head: 350 }));
     expect(t).toContain('--since 0 --limit 200');
     expect(t).toContain('sinceSeq=0');
     expect(t).not.toContain('--all');
+    expect(t).not.toContain('--mentions-me');
+  });
+  it('cursor-0 worker with a LARGE gap: the mentions walk starts at 0 too — clamped, filtered, bounded (#1811)', () => {
+    const t = nudgeText(worker('w-eli', 'Eli', { mentions: 2, unread: 9000, first: 1, relevant: 110, head: 9001 }));
+    expect(t).toContain('--mentions-me --since 0 --before 9002 --limit 200');
+    expect(t).toContain('sinceSeq=0');
+    expect(t).toContain('beforeSeq=9002');
+    expect(t).not.toContain('--all');
+    expect(t).not.toContain('START AT');
+  });
+  it('LARGE GAP (span > 400): mentions-only anchor — filter, both forms, own-session mark ceiling, failure discipline (#1811)', () => {
+    const t = nudgeText(worker('w-eli', 'Eli', { mentions: 2, unread: 9841, first: 61, relevant: 9750, head: 9901 }));
+    expect(t).toContain('LARGE GAP');
+    expect(t).toContain('unread #61–#9901, latest mention #9750');
+    expect(t).toContain('--mentions-me --since 60 --before 9902 --limit 200');
+    expect(t).toContain('sinceSeq=60');
+    expect(t).toContain('hadron_team_chat_read');
+    expect(t).toContain('mark-read --through');
+    expect(t).toContain('hadron_team_chat_mark_read');
+    expect(t).toContain('never auto-marks');
+    expect(t).toContain('marks NOTHING');
+    expect(t).toContain('your OWN session');
+    expect(t).not.toContain('START AT');
+    expect(t).not.toContain('Read team chat unfiltered');
+    expect(t).not.toContain('--all');
+    expect(t).not.toContain('\n');
+  });
+  it('a mention arriving mid-walk stays outside the FROZEN sample: every page is bounded at the head the nudge named (#1827 P2)', () => {
+    // Anne's counterexample: page 1 samples head 9901; a mention posted at
+    // 9902 during the walk must not enter any later page, and the mark must
+    // never reach it. The walk's upper bound is the nudge's OWN head value.
+    const t = nudgeText(worker('w-eli', 'Eli', { mentions: 2, unread: 9841, first: 61, relevant: 9750, head: 9901 }));
+    expect(t).toContain('--before 9902');
+    expect(t).toContain('beforeSeq=9902');
+    expect(t).toContain('never above #9901');
+    expect(t).toContain('actually delivered');
+    expect(t).not.toContain('--before 9903');
+  });
+  it('MORE than one page of mentions incl. the OLDEST: the walk runs BACKWARD via prevBefore — beforeSeq selects the newest page under the bound (#1827 cycle-1 P2)', () => {
+    // Anne's trace + Colin's live control (#9687/#9689): beforeSeq forces
+    // NEWEST-page selection, so a forward nextSince walk with 201 unread
+    // mentions returns 2..201, an empty next page, and a mark that
+    // acknowledges the unseen oldest #1. The instruction must walk BACKWARD
+    // (prevBefore, decreasing beforeSeq) down to the fixed since floor —
+    // Colin's control returned all 201 that way, excluding the H+1 arrival.
+    const t = nudgeText(worker('w-eli', 'Eli', { mentions: 201, unread: 9841, first: 61, relevant: 9750, head: 9901 }));
+    expect(t).toContain('prevBefore');
+    expect(t).toContain('BACKWARD');
+    expect(t).not.toContain('nextSince'); // the forward cursor is what lost the oldest mention
+    expect(t).toContain('--mentions-me --since 60 --before 9902 --limit 200');
+    expect(t).toContain('sinceSeq=60');
+    expect(t).toContain('beforeSeq=9902');
+    expect(t).toContain('never above #9901'); // the H+1 arrival stays outside sample and mark
+    expect(t).not.toContain('--before 9903');
+    // The MCP tool returns numbered pages with NO prevBefore field (Anne and
+    // Colin, independently): its instruction must say to re-call with
+    // beforeSeq = the smallest seq on the last page, not "follow prevBefore".
+    expect(t).toContain('the smallest seq on your last page');
+    expect(t).toContain('no prevBefore field');
+    expect(t).toContain('limit 200'); // the MCP page limit spelled with its value
+  });
+  it('the boundary is deterministic: span 399 and exactly 400 keep the unfiltered anchor, 401 switches (#1811)', () => {
+    for (const head of [499, 500]) {
+      const t = nudgeText(worker('w-eli', 'Eli', { first: 100, head }));
+      expect(t).toContain('START AT #100');
+      expect(t).not.toContain('--mentions-me');
+    }
+    expect(nudgeText(worker('w-eli', 'Eli', { first: 100, head: 501 }))).toContain('--mentions-me');
   });
 });
 
@@ -810,6 +879,170 @@ describe('Orca attention router — resolution never guesses', () => {
   });
 });
 
+describe('Orca attention router — identity-flap fallback: the screen resolves what tracking lost', () => {
+  // Orca's per-terminal tracking degrades mid-life: agentIdentity reads null
+  // on a terminal that is running its agent right now (2026-10-12: held
+  // "no live agent terminal" ~6.5h while the agent worked; the same CLI, env
+  // and cwd read 'claude' stable in 40 consecutive polls). Same degradation
+  // family as the null lastOutputAt the #7398 gate already survives.
+  it('a null-identity terminal whose screen shows claude chrome still nudges', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli', null);
+    fake.attention.workers = [worker('w-eli', 'Eli')];
+    const out = poll(c);
+    expect(out.nudged).toEqual(['Eli']);
+    expect(fake.sent[0][0]).toBe('term_eli');
+    expect(logs.some((l) => l.includes('resolved by screen'))).toBe(true);
+  });
+
+  it('a codex screen resolves as codex, so the family flows to the gates', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli', null);
+    fake.screens.set('term_eli', { tail: CODEX_IDLE });
+    fake.attention.workers = [worker('w-eli', 'Eli')];
+    const out = poll(c);
+    expect(out.nudged).toEqual(['Eli']);
+  });
+
+  it('a plain shell screen is never resolved by the fallback', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli', null);
+    fake.screens.set('term_eli', { tail: ['orca@orca1:~/ws/eli$ '] });
+    fake.attention.workers = [worker('w-eli', 'Eli')];
+    const out = poll(c);
+    expect(out.held.Eli).toBe('no live agent terminal in its worktree');
+    expect(fake.sent).toEqual([]);
+  });
+
+  // Blind review P2 (#1823, Anne): a plain shell in the bound worktree `cat`s a
+  // captured Claude idle screen and returns to its own prompt. The box and the
+  // hint are HISTORY, not a live composer — the whole counterexample that
+  // passed both post-recompute gates when the status check read only the FIRST
+  // nonblank line below the closing rule.
+  it('a shell printing a CAPTURED Claude idle screen then its own prompt HOLDS — no send (blind P2, #1823)', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli', null, 'term_eli', false); // identity lost, untracked: the fallback's regime
+    fake.screens.set('term_eli', { tail: [...CLAUDE_IDLE, 'orca@orca1:~/ws/eli$ '] });
+    fake.attention.workers = [worker('w-eli', 'Eli')];
+    const out = poll(c);
+    expect(out.nudged).toEqual([]);
+    expect(fake.sent).toEqual([]);
+    expect(out.held.Eli).toContain('screen shows text in the prompt');
+  });
+
+  it('a WRONG family guess is caught one gate later: banner chrome without a composer holds (blind P2 pin, #1823)', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli', null, 'term_eli', false);
+    // Classifies 'claude' on the banner line; there is no Claude composer box,
+    // so the family-specific empty-prompt gate must refuse what it resolved.
+    fake.screens.set('term_eli', { tail: ['  Claude Code v2.1.296 — a captured banner line', '  ordinary output', 'orca@orca1:~/ws/eli$ '] });
+    fake.attention.workers = [worker('w-eli', 'Eli')];
+    const out = poll(c);
+    expect(out.nudged).toEqual([]);
+    expect(fake.sent).toEqual([]);
+    expect(out.held.Eli).toContain('screen shows text in the prompt');
+  });
+
+  it('codex side: a captured Codex screen with an appended shell prompt holds at the footer check (blind P2 pin, #1823)', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli', null, 'term_eli', false);
+    fake.screens.set('term_eli', { tail: [...CODEX_IDLE, 'orca@orca1:~/ws/eli$ '] });
+    fake.attention.workers = [worker('w-eli', 'Eli')];
+    const out = poll(c);
+    expect(out.nudged).toEqual([]);
+    expect(fake.sent).toEqual([]);
+    expect(out.held.Eli).toContain('screen shows text in the prompt');
+  });
+
+  it('an unreadable screen holds', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli', null);
+    fake.screens.set('term_eli', { tail: CLAUDE_IDLE, ok: false });
+    fake.attention.workers = [worker('w-eli', 'Eli')];
+    expect(poll(c).held.Eli).toBe('no live agent terminal in its worktree');
+    expect(fake.sent).toEqual([]);
+  });
+
+  it('a screen showing BOTH families holds rather than guess', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli', null);
+    fake.screens.set('term_eli', { tail: [...CLAUDE_IDLE, '› Ask Codex to do anything'] });
+    fake.attention.workers = [worker('w-eli', 'Eli')];
+    expect(poll(c).held.Eli).toBe('no live agent terminal in its worktree');
+    expect(fake.sent).toEqual([]);
+  });
+
+  it('two screen-verified terminals in one worktree hold (ambiguous)', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli', null, 'term_a');
+    fake.terminal('eli', null, 'term_b');
+    fake.attention.workers = [worker('w-eli', 'Eli')];
+    expect(poll(c).held.Eli).toBe('no live agent terminal in its worktree');
+    expect(fake.sent).toEqual([]);
+  });
+
+  it('a verified identity still resolves without the fallback (no screen read at resolve time)', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli', 'claude', 'term_eli');
+    fake.screens.delete('term_eli'); // identity path must not need a screen
+    fake.attention.workers = [worker('w-eli', 'Eli')];
+    // The gates then read the screen; serve it back only for the gate reads.
+    fake.screens.set('term_eli', { tail: CLAUDE_IDLE });
+    const out = poll(c);
+    expect(out.nudged).toEqual(['Eli']);
+    expect(logs.some((l) => l.includes('resolved by screen'))).toBe(false);
+    // Resolution itself must not read: the FIRST screen read belongs to the
+    // gates, so it strictly follows the first idle wait (blind P3, #1823 —
+    // the absent fallback log alone could not tell a resolve-time read apart
+    // from a gate read).
+    const verb = (a: string[]) => a.slice(1, 3).join(' ');
+    const firstWait = fake.calls.findIndex((a) => verb(a) === 'terminal wait');
+    const firstRead = fake.calls.findIndex((a) => verb(a) === 'terminal read');
+    expect(firstWait).toBeGreaterThanOrEqual(0);
+    expect(firstRead).toBeGreaterThan(firstWait);
+  });
+
+  it('resolveTerminal with a verified identity never touches the screen: a read-trap runner proves it (blind P3, #1823)', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli', 'claude', 'term_eli');
+    const trap: Runner = (argv) => {
+      if (argv.slice(1, 3).join(' ') === 'terminal read') throw new Error('resolution read the screen');
+      return fake.run(argv);
+    };
+    const entry = { worker: 'w-eli', name: 'Eli', worktree: join(root, 'workspaces', 'eli') };
+    expect(resolveTerminal(entry, fake.terminals as unknown as Terminal[], c, trap)).toEqual(['term_eli', 'claude', 'identity']);
+  });
+});
+
+describe('screenAgentFamily — positive family chrome only', () => {
+  const term = (tail: string[]) => ({ source: 'screen', tail });
+  it('claude idle, fresh-launch, compacted and real captured screens read claude', () => {
+    for (const screen of [CLAUDE_IDLE, CLAUDE_FRESH, CLAUDE_IDLE_COMPACTED, CLAUDE_IDLE_REAL_XAN, CLAUDE_IDLE_REAL_LIAM, CLAUDE_BUSY_EMPTY, CLAUDE_UNKNOWN_QUIET]) {
+      expect(screenAgentFamily(term(screen))).toBe('claude');
+    }
+  });
+  it('codex idle and fresh-launch screens read codex', () => {
+    for (const screen of [CODEX_IDLE, CODEX_FRESH, CODEX_BUSY_EMPTY]) {
+      expect(screenAgentFamily(term(screen))).toBe('codex');
+    }
+  });
+  it('a plain shell reads null', () => {
+    expect(screenAgentFamily(term(['orca@orca1:~/workspaces/eli$ ', '']))).toBeNull();
+    expect(screenAgentFamily(term(['❯ ']))).toBeNull(); // starship-like glyph alone is not claude
+    expect(screenAgentFamily(term(['─'.repeat(60)]))).toBeNull(); // one rule is not the composer box
+    expect(screenAgentFamily(undefined)).toBeNull();
+    expect(screenAgentFamily({ source: 'stream', tail: ['x'] })).toBeNull();
+    // Ordinary output MENTIONING the markers is not chrome: banner/completion
+    // markers anchor to banner-chrome line starts, never after arbitrary
+    // content, and a bare `›` glyph is a shell theme as easily as a composer
+    // (blind review P2, #1823).
+    expect(screenAgentFamily(term(['orca$ echo "Worked for 33s"', 'orca$ ']))).toBeNull();
+    expect(screenAgentFamily(term(['orca$ echo "Claude Code v2.1.296"', 'orca$ ']))).toBeNull();
+    expect(screenAgentFamily(term(['orca$ echo "Ask Codex to do anything"', 'orca$ ']))).toBeNull();
+    expect(screenAgentFamily(term(['› ', '']))).toBeNull();
+  });
+});
+
 describe('Orca attention router — the mention-only register prerequisite', () => {
   it('a roster worker without a mention-only row is held and reported, never nudged on every message', () => {
     const c = cfg(['w-eli', 'Eli']);
@@ -1050,6 +1283,18 @@ describe('Orca attention router — a human typing: never appended to; hold the 
     }
     // No status line at all cannot prove it.
     expect(promptLineIsEmpty([RULE, '❯', RULE], 'claude')).toBe(false);
+  });
+
+  it('Claude: the composer status line is the terminal BOTTOM — trailing non-chrome content holds (blind P2, #1823)', () => {
+    // The blind-review counterexample: a shell `cat`s a captured Claude idle
+    // screen and returns to its own prompt. Reading only the FIRST nonblank
+    // line below the closing rule passed this — the trailing shell prompt is
+    // the evidence that the box is history, not a live composer.
+    expect(promptLineIsEmpty([...CLAUDE_IDLE, 'orca@orca1:~/ws/eli$ '], 'claude')).toBe(false);
+    // Any unexplained content after the hint holds, shell-shaped or not.
+    expect(promptLineIsEmpty([RULE, '❯', RULE, CLAUDE_HINT, '  some trailing output'], 'claude')).toBe(false);
+    // Trailing BLANK lines are just the scroll buffer: still empty.
+    expect(promptLineIsEmpty([...CLAUDE_IDLE, '', '   '], 'claude')).toBe(true);
   });
 
   it('Codex: only the placeholder proves empty; a bare prompt or a dialog holds (live 2026-10-01)', () => {
