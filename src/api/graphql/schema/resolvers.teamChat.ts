@@ -56,7 +56,7 @@ import {
 } from './resolvers.helpers.js';
 import { isSessionLive, loadLastEventBySession, touchLiveSession } from '../../../lib/sessionActivity.js';
 import { findOrCreateAppClassMemory } from './chat-scope.js';
-import { mentionTokenOf } from '../../../lib/mentionToken.js';
+import { mentionTokenOf, BROADCAST_MENTION_TOKENS } from '../../../lib/mentionToken.js';
 import { extractMentions } from '../../../lib/teamChatMentions.js';
 import { TEAM_CHAT_LOC, TEAM_CHAT_MESSAGES_LOC } from '../../../lib/teamChatLoc.js';
 import { isTeamSpaceRow, teamSpaceAudienceFilter, teamSpaceOwnerFilter } from '../../../lib/auth/teamSpace.js';
@@ -942,10 +942,11 @@ async function postToChannelRoot(
   }
 
   // A system post carries NO mentions, whatever its text says: the platform never pages anyone through a notice.
-  const mentions = opts.system ? [] : extractMentions(body);
-  if (mentions.length > 0) {
-    envelope.mentions = mentions;
-  }
+  // #1842: the body tokens are only HALF the notified set — inside the append
+  // transaction the reply target's author joins it (cor:agt:020:04 rev17), so
+  // `mentions` is finalized there, before authority, stamps and sealing.
+  const bodyMentions = opts.system ? [] : extractMentions(body);
+  let mentions = bodyMentions;
   if (replyToSeq != null) envelope.replyToSeq = replyToSeq;
 
   const messagesLoc = `${root.loc}:messages`;
@@ -978,6 +979,77 @@ async function postToChannelRoot(
     // #1791: the platform's once-a-day claim is taken in THIS transaction, after the Channel is seen live, so the claim and
     // the notice commit together or not at all: an exit between them leaves neither.
     if (opts.claim && !(await opts.claim(tx))) throw new NoticeNotClaimed();
+    // replyToSeq is validated INSIDE the allocating transaction, under the
+    // chat lock, so the target can't be soft-deleted out from under us and
+    // a reply can never cite its own (still-uncommitted) seq. #1842 moved the
+    // resolution BEFORE mention authority, wake stamps and envelope sealing:
+    // an invalid target now refuses before any stamp authority is taken, and
+    // the target's author joins the notified set (cor:agt:020:04 rev17).
+    let replyTarget: { id: string; loc: string; data: unknown } | null = null;
+    if (replyToSeq != null) {
+      replyTarget = await tx.node.findFirst({
+        // nodeType-constrained (Copilot on PR #941): the generic write
+        // surface may put off-road nodes under the prefix
+        // (D-2026-08-10-003) — a reply must cite a canonical message.
+        where: {
+          memoryId: root.memoryId,
+          loc: { startsWith: escapePrismaLikePattern(`${messagesLoc}:`) },
+          nodeType: 'chat-message',
+          seq: replyToSeq,
+          deletedAt: null,
+        },
+        select: { id: true, loc: true, data: true },
+      });
+      if (!replyTarget) {
+        throw new GraphQLError(
+          `replyToSeq ${replyToSeq} does not name a message in this Channel.`,
+          { extensions: { code: 'TEAM_CHAT_REPLY_NOT_FOUND', replyToSeq } },
+        );
+      }
+    }
+    // #1842 — the reply-target fold (Holger, #10394): when the target was
+    // authored by a WORKER, that worker counts as mentioned, recorded at
+    // posting time into this message's mentions. Workers only (a human or
+    // system target is never force-notified); no self-notification; the
+    // DIRECT target only. The token is derived from the worker's CURRENT
+    // name (not the envelope's authorName snapshot), because every reader
+    // computes the worker's own token from the live name — a renamed worker
+    // must still be notified. Skipped entirely on an encrypted memory: the
+    // stored envelope is ciphertext there, and mention-filtered reads don't
+    // exist on encrypted channels anyway, so there is nobody to fold for.
+    // The fold can never refuse a reply — a target whose author can't be
+    // resolved simply isn't folded.
+    if (!opts.system && replyTarget && !memEncInfo.isEncrypted) {
+      const targetEnv = replyTarget.data as Record<string, unknown> | null;
+      const targetAuthorId =
+        targetEnv && typeof targetEnv === 'object' && typeof targetEnv.authorWorkerId === 'string'
+          ? targetEnv.authorWorkerId
+          : null;
+      if (targetAuthorId && targetAuthorId !== envelope.authorWorkerId) {
+        const targetAuthor = await tx.worker.findUnique({
+          where: { id: targetAuthorId },
+          select: { name: true },
+        });
+        const token = targetAuthor ? mentionTokenOf(targetAuthor.name) : null;
+        // A token that is a BROADCAST word ('all'/'team' — a worker literally
+        // named "All") is never folded (Riana §10, #10533): the fold's intent
+        // is to notify ONE worker, but a stored broadcast token wakes everyone
+        // (broadcastWakes + every mention-filtered reader matches it for every
+        // worker) — a widening the ruling forbids. Such a worker is simply not
+        // reply-notifiable; an explicit @all in the body keeps its existing
+        // broadcast meaning, unchanged.
+        if (
+          token &&
+          !(BROADCAST_MENTION_TOKENS as readonly string[]).includes(token) &&
+          !mentions.includes(token)
+        ) {
+          mentions = [...mentions, token];
+        }
+      }
+    }
+    if (mentions.length > 0) {
+      envelope.mentions = mentions;
+    }
     // #1748 (N3): who may wake everyone is decided NOW, here, on live authority held through the commit, and
     // stamped; nothing re-decides it later. The authority is taken BEFORE the resume below (which locks the Worker
     // row FOR UPDATE) and the stamps after it, so the Worker row is never taken SHARE then upgraded (Diego, cycle 3).
@@ -995,31 +1067,6 @@ async function postToChannelRoot(
     const msgFields = translateSessionExpired(memEncInfo, () =>
       encryptNodeFields({ content: body, data: envelope }, memEncInfo),
     );
-    // replyToSeq is validated INSIDE the allocating transaction, under the
-    // chat lock, so the target can't be soft-deleted out from under us and
-    // a reply can never cite its own (still-uncommitted) seq.
-    let replyTarget: { id: string; loc: string } | null = null;
-    if (replyToSeq != null) {
-      replyTarget = await tx.node.findFirst({
-        // nodeType-constrained (Copilot on PR #941): the generic write
-        // surface may put off-road nodes under the prefix
-        // (D-2026-08-10-003) — a reply must cite a canonical message.
-        where: {
-          memoryId: root.memoryId,
-          loc: { startsWith: escapePrismaLikePattern(`${messagesLoc}:`) },
-          nodeType: 'chat-message',
-          seq: replyToSeq,
-          deletedAt: null,
-        },
-        select: { id: true, loc: true },
-      });
-      if (!replyTarget) {
-        throw new GraphQLError(
-          `replyToSeq ${replyToSeq} does not name a message in this Channel.`,
-          { extensions: { code: 'TEAM_CHAT_REPLY_NOT_FOUND', replyToSeq } },
-        );
-      }
-    }
     // The random component is the #916 backstop, not the uniqueness carrier
     // (#919 makes seq unique); the suffix atom is the author label, a
     // display convenience in an address that lands in URNs and search.
