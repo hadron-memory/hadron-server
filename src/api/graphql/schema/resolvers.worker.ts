@@ -27,6 +27,7 @@ import { isEmailUserRef, resolveUserRefOrEmail } from '../../../lib/entityRef/us
 import { mintMemoryUrnV2 } from '../../../lib/mintMemoryUrnV2.js';
 import { portalUrlForUrn } from '../../../lib/portalUrl.js';
 import { normalizeUrnForLookup, hasSchemePrefix } from '../../../lib/urn.js';
+import { BROADCAST_MENTION_TOKENS, mentionTokenOf } from '../../../lib/mentionToken.js';
 import { isId } from '../../../lib/entityRef/shape.js';
 import { nextFreeWorkerSlug } from '../../../lib/workerSlug.js';
 import {
@@ -715,6 +716,20 @@ async function resolveCastTarget(ctx: Context, args: CastArgs): Promise<CastTarg
   // cor:agt:020:02 blank-is-absent: a whitespace-only name is no name.
   const requestedName = (name ?? '').trim() || null;
   const override = (promptOverride ?? '').trim() === '' ? null : (promptOverride as string);
+  // #1870 (Holger, 2026-10-13, #10579): a worker whose MENTION TOKEN is a
+  // broadcast word would wake every registered destination on a reply to it,
+  // so casting refuses such names — by token (Vera #10580), not raw name:
+  // All, TEAM and All! all slug to 'all'/'team' and are refused, while a name
+  // that merely contains the word ("teamster") is not. A validation refusal
+  // like WORKER_NAME_REQUIRED; a worker already so named keeps the narrow
+  // reply-exception of #1867 instead (cor:agt:020:04).
+  const token = requestedName != null ? mentionTokenOf(requestedName) : null;
+  if (token != null && (BROADCAST_MENTION_TOKENS as readonly string[]).includes(token)) {
+    throw new GraphQLError(
+      `A worker named ${JSON.stringify(requestedName)} would mention-broadcast: its token @${token} routes a reply to every registered destination. Choose another name.`,
+      { extensions: { code: 'WORKER_NAME_RESERVED', token } },
+    );
+  }
 
   // 1. Resolve the App (cor:api:140 — PK or URN) and gate.
   const { id: appId } = await resolveAppRef(ctx.db, appRef);
