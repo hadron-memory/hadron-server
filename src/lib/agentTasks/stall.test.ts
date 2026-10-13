@@ -379,15 +379,68 @@ describe('cor:agt:050:16 r2 — an owner who doesn\'t react to a finished child 
     expect(await alarms()).toEqual([]);
   });
 
-  it('a person as the parent\'s assignee: only a move on the parent stops it (interim)', async () => {
+  it('a person-owned child: alarmed and never marked (a person has no session to measure; a move on the parent is no reaction)', async () => {
     const parent = await task({ ownerWorkerId: ada.id, assigneeUserId: mia.id, assignedAt: at('09:00'), status: 'started', startedAt: at('09:10') });
     await task({
       parentTaskId: parent.id, ownerUserId: mia.id, assigneeWorkerId: rook.id, assignedAt: at('09:20'),
       status: 'finished', startedAt: at('09:30'), finishedAt: at('10:00'), resultOutcome: 'succeeded',
     });
+    await db.agentTask.update({ where: { id: parent.id }, data: { assignedAt: at('10:05') } });
     await tick('10:20');
     expect(await alarms('stall.owner-unreactive')).toEqual([expect.objectContaining({ taskId: parent.id, subjectWorkerId: null })]);
   });
+
+  describe('#1831 — the window tests the CHILD OWNER\'s silence, not the parent assignee\'s', () => {
+    /** Anne owns Rook's child, which ends at 10:00; the parent (Ada's) is reassigned to Liam at 09:40. */
+    async function reassigned() {
+      const parent = await assignedToAnne('09:00', { status: 'started', startedAt: at('09:10') });
+      const child = await task({
+        parentTaskId: parent.id, ownerWorkerId: anne.id, assigneeWorkerId: rook.id, assignedAt: at('09:20'),
+        status: 'finished', startedAt: at('09:30'), finishedAt: at('10:00'), resultOutcome: 'succeeded',
+      });
+      await db.agentTask.update({ where: { id: parent.id }, data: { assigneeWorkerId: liam.id, assignedAt: at('09:40') } });
+      return { parent, child };
+    }
+
+    it('Liam (the parent\'s new assignee) acting does not clear it; the alarm raises on Anne\'s silence and marks Anne', async () => {
+      const { parent } = await reassigned();
+      await drive(liam, '10:05');
+      await tick('10:20');
+      expect(await alarms('stall.owner-unreactive')).toEqual([expect.objectContaining({ taskId: parent.id, episodeStart: at('10:00') })]);
+      expect((await db.workerAvailability.findMany()).map((r) => r.workerId)).toEqual([anne.id]);
+    });
+
+    it('Anne acting after the end clears it, whoever the parent is assigned to', async () => {
+      await reassigned();
+      await drive(anne, '10:05');
+      await tick('10:20');
+      expect(await alarms('stall.owner-unreactive')).toEqual([]);
+    });
+
+    it('a move on the parent after the end (reassignment, start, progress note) is no reaction', async () => {
+      const parent = await assignedToAnne('09:00', { status: 'pending' });
+      await task({
+        parentTaskId: parent.id, ownerWorkerId: liam.id, assigneeWorkerId: rook.id, assignedAt: at('09:20'),
+        status: 'finished', startedAt: at('09:30'), finishedAt: at('10:00'), resultOutcome: 'succeeded',
+      });
+      // Rook finishes Liam's child at 10:00; the parent is then reassigned to Anne (10:10), started and noted (10:12).
+      await db.agentTask.update({ where: { id: parent.id }, data: {
+        assigneeWorkerId: anne.id, assignedAt: at('10:10'), status: 'started', startedAt: at('10:11'),
+      } });
+      await note(parent.id, '10:12', anne);
+      await tick('10:20');
+      expect(await alarms('stall.owner-unreactive')).toEqual([expect.objectContaining({ taskId: parent.id, episodeStart: at('10:00') })]);
+      expect((await db.workerAvailability.findMany()).map((r) => r.workerId)).toEqual([liam.id]);
+    });
+
+    it('the episode boundaries are unchanged: activity before the end does not count', async () => {
+      await reassigned();
+      await drive(anne, '09:59');
+      await tick('10:20');
+      expect(await alarms('stall.owner-unreactive')).toHaveLength(1);
+    });
+  });
+
 });
 
 // ── cor:agt:050:17 — couldn't be assigned ─────────────────────────────────
