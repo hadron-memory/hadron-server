@@ -14,7 +14,7 @@ import { cleanDb } from '../../test/helpers.js';
 import { generateId } from '../id.js';
 import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
 import { taskMatcherTick } from '../../jobs/taskMatcher.js';
-import { recordLapsedAvailability } from './availability.js';
+import { __lapseTesting, recordLapsedAvailability } from './availability.js';
 
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -95,6 +95,20 @@ describe('cor:agt:060:02 — a passed until is recorded, exactly once', () => {
     expect(await availabilityEvents(rook)).toHaveLength(1);
   });
 
+  it('with a read barrier: six passes ALL read both records before any writes, and exactly one write lands per record (#1851 review, Colin P3)', async () => {
+    await outOfTokens(baloo, at('18:00'));
+    await outOfTokens(rook, at('17:30'));
+    const { readLapsed, recordLapse } = __lapseTesting;
+    // Every pass has read both candidates before any pass writes: the guarded update alone decides.
+    const reads = await Promise.all(Array.from({ length: 6 }, () => readLapsed(db, at('18:01'), null)));
+    for (const page of reads) expect(page.map((r) => r.workerId).sort()).toEqual([baloo.id, rook.id].sort());
+    const wins = await Promise.all(reads.flatMap((page) => page.map((r) => recordLapse(db, r, at('18:01')).then((ok) => (ok ? r.workerId : null)))));
+    expect(wins.filter((w) => w === baloo.id)).toHaveLength(1);
+    expect(wins.filter((w) => w === rook.id)).toHaveLength(1);
+    expect(await availabilityEvents(baloo)).toHaveLength(1);
+    expect(await availabilityEvents(rook)).toHaveLength(1);
+  });
+
   it('an until still in the future does not lapse; it does once it passes', async () => {
     await outOfTokens(baloo, at('18:00'));
     expect((await taskMatcherTick(db, at('17:59'))).lapsed).toBe(0);
@@ -128,13 +142,40 @@ describe('cor:agt:060:02 — a passed until is recorded, exactly once', () => {
     expect(await availabilityEvents(baloo)).toHaveLength(0);
   });
 
-  it('a record changed after the sweep read it is not overwritten (the guarded update)', async () => {
+  it('a record re-marked before the sweep reads it is not a candidate', async () => {
     await outOfTokens(baloo, at('18:00'));
-    // The holder re-marks the worker (a new setAt and a new until) before the sweep runs: that record is the
-    // current one, it has not lapsed, and the sweep must not flip it.
     await db.workerAvailability.update({ where: { workerId: baloo.id }, data: { until: at('20:00'), setAt: at('17:59') } });
     expect((await taskMatcherTick(db, at('18:01'))).lapsed).toBe(0);
     expect((await db.workerAvailability.findUniqueOrThrow({ where: { workerId: baloo.id } })).state).toBe('unavailable');
+  });
+
+  // #1851 review (Colin P2): the re-mark lands AFTER the sweep read the record and BEFORE its write, so the
+  // guarded update itself must refuse. One case per guard column: dropping `setAt` or `until` from the guard
+  // turns the matching case red.
+  describe('a record re-marked after the sweep read it is not overwritten (the guarded update)', () => {
+    const { readLapsed, recordLapse } = __lapseTesting;
+
+    async function remarkAfterRead(change: { until?: Date; setAt?: Date }) {
+      await outOfTokens(baloo, at('18:00'));
+      const [read] = await readLapsed(db, at('18:01'), null);
+      expect(read).toMatchObject({ workerId: baloo.id, until: at('18:00'), setAt: at('10:00') });
+      await db.workerAvailability.update({ where: { workerId: baloo.id }, data: change });
+      const before = await db.workerAvailability.findUniqueOrThrow({ where: { workerId: baloo.id } });
+      expect(await recordLapse(db, read, at('18:01'))).toBe(false);
+      expect(await db.workerAvailability.findUniqueOrThrow({ where: { workerId: baloo.id } })).toEqual(before);
+      expect(await availabilityEvents(baloo)).toHaveLength(0);
+    }
+
+    it('a new until and a new setAt (the holder re-marks it until 20:00)', () => remarkAfterRead({ until: at('20:00'), setAt: at('18:00') }));
+    it('a new setAt, same until (pins the setAt guard)', () => remarkAfterRead({ setAt: at('18:00') }));
+    it('a new until, same setAt (pins the until guard)', () => remarkAfterRead({ until: at('20:00') }));
+
+    it('control: unchanged after the read, the same write lands', async () => {
+      await outOfTokens(baloo, at('18:00'));
+      const [read] = await readLapsed(db, at('18:01'), null);
+      expect(await recordLapse(db, read, at('18:01'))).toBe(true);
+      expect(await availabilityEvents(baloo)).toHaveLength(1);
+    });
   });
 
   it('a later manual set after a recorded lapse is unchanged: its own event, its own setter', async () => {

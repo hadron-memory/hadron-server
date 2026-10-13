@@ -257,37 +257,55 @@ export async function recordLapsedAvailability(db: PrismaClient, now: Date): Pro
   // predicate, but one re-marked in between could still match it.
   let after: string | null = null;
   for (;;) {
-    const lapsed: { workerId: string; until: Date | null; setAt: Date; worker: { appId: string } }[] =
-      await db.workerAvailability.findMany({
-        where: { state: 'unavailable', until: { lte: now }, ...(after ? { workerId: { gt: after } } : {}) },
-        select: { workerId: true, until: true, setAt: true, worker: { select: { appId: true } } },
-        orderBy: { workerId: 'asc' },
-        take: CLEAR_PAGE,
-      });
+    const lapsed = await readLapsed(db, now, after);
     if (lapsed.length === 0) break;
     after = lapsed[lapsed.length - 1].workerId;
     for (const r of lapsed) {
-      const until = r.until as Date;
-      const done = await db.$transaction(async (tx) => {
-        const n = await tx.workerAvailability.updateMany({
-          where: { workerId: r.workerId, state: 'unavailable', until, setAt: r.setAt },
-          data: {
-            state: 'available', reason: null, until: null, setAt: until, setBy: 'lapse',
-            setByUserId: null, setByWorkerId: null, setByAgentId: null,
-          },
-        });
-        if (n.count === 0) return false;
-        await appendAvailabilityEvent(tx, {
-          appId: r.worker.appId,
-          actor: PLATFORM_ACTOR,
-          event: { kind: 'worker', workerId: r.workerId, state: 'available', reason: null, until: null, setBy: 'lapse', lapsedAt: until },
-          createdAt: now,
-        });
-        return true;
-      });
-      if (done) recorded += 1;
+      if (await recordLapse(db, r, now)) recorded += 1;
     }
     if (lapsed.length < CLEAR_PAGE) break;
   }
   return recorded;
 }
+
+/** A worker availability record whose `until` has passed, as the sweep read it. */
+type LapsedRecord = { workerId: string; until: Date; setAt: Date; appId: string };
+
+/** One page of records whose `until` has passed, after the `after` cursor. */
+async function readLapsed(db: PrismaClient, now: Date, after: string | null): Promise<LapsedRecord[]> {
+  const rows = await db.workerAvailability.findMany({
+    where: { state: 'unavailable', until: { lte: now }, ...(after ? { workerId: { gt: after } } : {}) },
+    select: { workerId: true, until: true, setAt: true, worker: { select: { appId: true } } },
+    orderBy: { workerId: 'asc' },
+    take: CLEAR_PAGE,
+  });
+  return rows.map((r) => ({ workerId: r.workerId, until: r.until as Date, setAt: r.setAt, appId: r.worker.appId }));
+}
+
+/**
+ * Record one lapse: rewrite the record only if it is still exactly as read
+ * (the guarded update), and write its event in the same transaction. Returns
+ * whether this call recorded it.
+ */
+async function recordLapse(db: PrismaClient, r: LapsedRecord, now: Date): Promise<boolean> {
+  return db.$transaction(async (tx) => {
+    const n = await tx.workerAvailability.updateMany({
+      where: { workerId: r.workerId, state: 'unavailable', until: r.until, setAt: r.setAt },
+      data: {
+        state: 'available', reason: null, until: null, setAt: r.until, setBy: 'lapse',
+        setByUserId: null, setByWorkerId: null, setByAgentId: null,
+      },
+    });
+    if (n.count === 0) return false;
+    await appendAvailabilityEvent(tx, {
+      appId: r.appId,
+      actor: PLATFORM_ACTOR,
+      event: { kind: 'worker', workerId: r.workerId, state: 'available', reason: null, until: null, setBy: 'lapse', lapsedAt: r.until },
+      createdAt: now,
+    });
+    return true;
+  });
+}
+
+/** Test seam (#1851 review): the sweep's read and its per-record write, so a test can act between them. */
+export const __lapseTesting = { readLapsed, recordLapse };
