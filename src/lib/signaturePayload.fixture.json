@@ -1,5 +1,5 @@
 {
-  "description": "S0 #1629 plaintext signing conformance vectors for cor:dmo:130:01. Generated independently with Python hashlib. Fields are plaintext inputs to the existing approval v1 codec. canonical is base64 of the exact UTF-8 payload bytes; challengeHex and challengeBase64url encode the raw SHA-256 digest of those bytes. Every line including the last ends with LF. No runtime ceremony, key derivation, approval requirement or encrypted-memory support is implemented here. DM keyed v2 requires a separate decided codec and fixture; never use these vectors for encrypted memories.",
+  "description": "S0 #1629 plaintext signing conformance vectors for cor:dmo:130:01. Generated independently with Python hashlib. Fields are plaintext inputs to the existing approval v1 codec. canonical is base64 of the exact UTF-8 payload bytes; challengeHex and challengeBase64url encode the raw SHA-256 digest of those bytes. Every line including the last ends with LF. No runtime ceremony, key derivation, approval requirement or encrypted-memory support is implemented here. v1 is the only payload: approval, minting and signing are refused in encrypted memories (cor:dmo:120:00), so never use these vectors to hash encrypted-memory plaintext.",
   "version": "hadron-signature-v1",
   "approvalVersion": "hadron-approval-v1",
   "memoryMode": "plaintext",
