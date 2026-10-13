@@ -7,9 +7,12 @@
  * `isAvailableForWork`, the ONE derivation T3's matcher and T4's roster share;
  * a second copy would drift (the cor:agt:020:11 lesson).
  *
- * Interim readings, until Holger rules (each labelled where it applies):
- *   - an `until` that has passed reads as AVAILABLE, and the row is kept for
- *     history (cor:agt:060:02 open question);
+ * An `until` that has passed reads as AVAILABLE at once (cor:agt:060:02), and
+ * the matcher's sweep writes the lapse down (`recordLapsedAvailability`, #1766):
+ * the record becomes `available`, set by `lapse`, with exactly one
+ * `availability.changed` event.
+ *
+ * Interim reading, until Holger rules:
  *   - a `stalled` record stops counting once the worker acts again
  *     (cor:agt:060:07, Proposed). The predicate applies that at read time, so
  *     a matcher never waits a minute for the evaluator; the evaluator also
@@ -47,7 +50,7 @@ export type AvailabilityRecord = {
  */
 export function recordInEffect(record: AvailabilityRecord, now: Date, lastActivityAt: Date | null = null): boolean {
   if (!record || record.state !== 'unavailable') return false;
-  // #1706 interim (cor:agt:060:02 open question): a lapsed `until` reads as available.
+  // cor:agt:060:02: a passed `until` reads as available, before the sweep records the lapse (#1766).
   if (record.until && record.until.getTime() <= now.getTime()) return false;
   // cor:agt:060:07 (Proposed): the worker's next activity ends a stall mark.
   if (record.reason === 'stalled' && lastActivityAt && lastActivityAt.getTime() > record.setAt.getTime()) return false;
@@ -232,3 +235,59 @@ export async function clearStalledMarks(db: PrismaClient, now: Date): Promise<nu
 
 /** Stalled records per page of `clearStalledMarks`. */
 const CLEAR_PAGE = 500;
+
+/**
+ * #1766 (cor:agt:060:02) — write down every worker availability record whose
+ * `until` has passed: the record becomes `available`, set by `lapse` at the
+ * instant it lapsed, and exactly one `availability.changed` event records it
+ * (`setBy: 'lapse'`, `lapsedAt` = the passed `until`, written at `now` by the
+ * platform). The predicate already reads such a record as available; this
+ * makes the change a recorded fact, as `clearStalledMarks` does for a stall.
+ *
+ * Exactly once: each rewrite is a conditional update on the record as read
+ * (unavailable, same `until`, same `setAt`), so a second pass, a second
+ * instance, or a person re-marking the worker in between finds no row to
+ * change and writes no event. A record with no `until` (a stall mark among
+ * them) never lapses. Model-family records (cor:agt:060:03) are not swept
+ * here. Returns how many it recorded.
+ */
+export async function recordLapsedAvailability(db: PrismaClient, now: Date): Promise<number> {
+  let recorded = 0;
+  // A stable cursor: a record lost to a concurrent pass stays out of the
+  // predicate, but one re-marked in between could still match it.
+  let after: string | null = null;
+  for (;;) {
+    const lapsed: { workerId: string; until: Date | null; setAt: Date; worker: { appId: string } }[] =
+      await db.workerAvailability.findMany({
+        where: { state: 'unavailable', until: { lte: now }, ...(after ? { workerId: { gt: after } } : {}) },
+        select: { workerId: true, until: true, setAt: true, worker: { select: { appId: true } } },
+        orderBy: { workerId: 'asc' },
+        take: CLEAR_PAGE,
+      });
+    if (lapsed.length === 0) break;
+    after = lapsed[lapsed.length - 1].workerId;
+    for (const r of lapsed) {
+      const until = r.until as Date;
+      const done = await db.$transaction(async (tx) => {
+        const n = await tx.workerAvailability.updateMany({
+          where: { workerId: r.workerId, state: 'unavailable', until, setAt: r.setAt },
+          data: {
+            state: 'available', reason: null, until: null, setAt: until, setBy: 'lapse',
+            setByUserId: null, setByWorkerId: null, setByAgentId: null,
+          },
+        });
+        if (n.count === 0) return false;
+        await appendAvailabilityEvent(tx, {
+          appId: r.worker.appId,
+          actor: PLATFORM_ACTOR,
+          event: { kind: 'worker', workerId: r.workerId, state: 'available', reason: null, until: null, setBy: 'lapse', lapsedAt: until },
+          createdAt: now,
+        });
+        return true;
+      });
+      if (done) recorded += 1;
+    }
+    if (lapsed.length < CLEAR_PAGE) break;
+  }
+  return recorded;
+}

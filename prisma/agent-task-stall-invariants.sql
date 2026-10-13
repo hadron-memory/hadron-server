@@ -22,7 +22,8 @@ ALTER TABLE agent_team_alarm_schedule ADD CONSTRAINT chk_agent_team_alarm_schedu
 
 -- cor:agt:060:02 — available or unavailable; a reason only when unavailable
 -- (Proposed), from the closed set (`held` was dropped, team chat #7449); an
--- `until` only on an unavailable record; one of cor:agt:060:08's setters.
+-- `until` only on an unavailable record; one of cor:agt:060:08's setters, or
+-- `lapse` (#1766): the platform recording that an `until` passed.
 ALTER TABLE worker_availability DROP CONSTRAINT IF EXISTS chk_worker_availability_shape;
 ALTER TABLE worker_availability ADD CONSTRAINT chk_worker_availability_shape CHECK (
   CASE state
@@ -30,7 +31,7 @@ ALTER TABLE worker_availability ADD CONSTRAINT chk_worker_availability_shape CHE
     WHEN 'unavailable' THEN reason IS NOT NULL AND reason IN ('stalled', 'out-of-tokens', 'host-down', 'other')
     ELSE false
   END AND
-  set_by IN ('worker', 'holder', 'app-manager', 'stall-rule', 'host')
+  set_by IN ('worker', 'holder', 'app-manager', 'stall-rule', 'host', 'lapse')
 );
 
 -- cor:agt:060:03 — the same state / reason shape per App and model family; a
