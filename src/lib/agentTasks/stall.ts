@@ -25,10 +25,11 @@
  *     reassignment while started, 050:15 edge case), the moment the last open
  *     child ended (050:15 edge case), the assignee's last activity, and its
  *     latest still-working note (`task.progress`; cor:agt:050:12).
- *   - owner-unreactive: the EARLIEST child end (finish or cancel, #1760) after the parent's
- *     assignee last moved (activity, a still-working note, the parent's start
- *     or its assignment). A second child ending in the same silence is the
- *     same episode: the condition has held since the first.
+ *   - owner-unreactive: the EARLIEST child end (finish or cancel, #1760) after
+ *     the CHILD'S OWNER last acted (#1831: its own session activity only; a
+ *     move on the parent, such as a reassignment, start or progress, is no
+ *     reaction). A second child ending in the same silence is the same episode:
+ *     the condition has held since the first.
  *   - unassignable: when the task entered its current queue stint — its latest
  *     `assignment.queued` event (#1754: make-ready re-queues a parked task),
  *     falling back to creation for rows seeded past the resolvers.
@@ -131,8 +132,14 @@ export type StallInputs = {
   openChildCount: number;
   /** When the last child ended (finished or cancelled), if any has. */
   lastChildEndedAt: Date | null;
-  /** Children that ended by finishing or being cancelled (cor:agt:050:16, #1760), earliest end first. */
-  endedChildren: { id: string; endedAt: Date }[];
+  /**
+   * Children that ended by finishing or being cancelled (cor:agt:050:16, #1760),
+   * earliest end first, each with its OWNER's last session activity (#1831):
+   * the owner-unreactive window tests the child owner's silence, never the
+   * parent's assignee's. A person owner has no session, so `ownerActivityAt`
+   * is null for them.
+   */
+  endedChildren: { id: string; endedAt: Date; ownerWorkerId: string | null; ownerActivityAt: Date | null }[];
   /** The latest still-working note on the task (cor:agt:050:12). */
   lastProgressAt: Date | null;
   /** The worker assignee's last session activity; null for a person or a queued task. */
@@ -159,12 +166,15 @@ export async function loadStallInputs(db: Db, where: Prisma.AgentTaskWhereInput,
   });
   if (tasks.length === 0) return [];
   const ids = tasks.map((t) => t.id);
-  const workerIds = [...new Set(tasks.map((t) => t.assigneeWorkerId).filter((w): w is string => !!w))];
-  const [children, progress, queued, activity] = await Promise.all([
-    db.agentTask.findMany({
-      where: { parentTaskId: { in: ids } },
-      select: { id: true, parentTaskId: true, status: true, finishedAt: true, cancelledAt: true },
-    }),
+  const children = await db.agentTask.findMany({
+    where: { parentTaskId: { in: ids } },
+    select: { id: true, parentTaskId: true, status: true, finishedAt: true, cancelledAt: true, ownerWorkerId: true },
+  });
+  const workerIds = [...new Set([
+    ...tasks.map((t) => t.assigneeWorkerId),
+    ...children.map((c) => c.ownerWorkerId),
+  ].filter((w): w is string => !!w))];
+  const [progress, queued, activity] = await Promise.all([
     db.agentTeamEvent.groupBy({
       by: ['taskId'],
       where: { taskId: { in: ids }, type: 'task.progress' },
@@ -195,7 +205,12 @@ export async function loadStallInputs(db: Db, where: Prisma.AgentTaskWhereInput,
       endedChildren: kids
         .flatMap((c) => {
           const endedAt = c.status === 'finished' ? c.finishedAt : c.status === 'cancelled' ? c.cancelledAt : null;
-          return endedAt ? [{ id: c.id, endedAt }] : [];
+          return endedAt
+            ? [{
+              id: c.id, endedAt, ownerWorkerId: c.ownerWorkerId,
+              ownerActivityAt: c.ownerWorkerId ? activity.get(c.ownerWorkerId)?.lastActiveAt ?? null : null,
+            }]
+            : [];
         })
         .sort((a, b) => a.endedAt.getTime() - b.endedAt.getTime() || a.id.localeCompare(b.id)),
       lastProgressAt: progressBy.get(task.id) ?? null,
@@ -295,11 +310,18 @@ export function stallCandidates(inputs: StallInputs, windows: StallWindows, now:
  * after its assignee last moved, or null. The owner-unreactive episode starts
  * there; the roster (#1707) reads the same answer as "your move".
  */
-export function unreactedChild(inputs: StallInputs): { id: string; endedAt: Date } | null {
-  const { task } = inputs;
-  if (!inputs.endedChildren.length) return null;
-  const moved = latest(task.assignedAt, task.startedAt, inputs.lastProgressAt, inputs.assigneeActivityAt);
-  return inputs.endedChildren.find((c) => !moved || c.endedAt.getTime() > moved.getTime()) ?? null;
+export function unreactedChild(inputs: StallInputs): StallInputs['endedChildren'][number] | null {
+  return unreactedChildren(inputs)[0] ?? null;
+}
+
+/**
+ * Every ended child whose owner has not been active since it ended, earliest
+ * end first. Only the CHILD OWNER's own activity counts (cor:agt:050:16,
+ * #1831): the parent's reassignment, start or progress by its assignee is not
+ * a reaction, so the answer does not depend on who the parent is assigned to.
+ */
+export function unreactedChildren(inputs: StallInputs): StallInputs['endedChildren'] {
+  return inputs.endedChildren.filter((c) => !c.ownerActivityAt || c.endedAt.getTime() > c.ownerActivityAt.getTime());
 }
 
 // ── The owner chain ───────────────────────────────────────────────────────
