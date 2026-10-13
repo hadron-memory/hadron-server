@@ -1,7 +1,7 @@
 {
   "name": "@hadron/controller",
   "version": "0.1.0",
-  "description": "Hadron Controller \u2014 GraphQL API, usage DB, and node collection",
+  "description": "Hadron Controller — GraphQL API, usage DB, and node collection",
   "type": "module",
   "main": "dist/index.js",
   "packageManager": "pnpm@11.5.2+sha512.71c631e382066efc25625d5cf029075de07b61b37f6e27350fbd84b1bda5864c8c1967adc280776b45c30a715c0359a3be08fef42d5bb09e2b99029979692916",
@@ -51,6 +51,7 @@
     "@nats-io/transport-node": "^3.4.0",
     "@prisma/client": "^6.19.2",
     "@sentry/node": "^10.67.0",
+    "@simplewebauthn/server": "14.0.3",
     "@types/pg": "^8.20.0",
     "ai": "^7.0.14",
     "bcrypt": "^5.1.1",

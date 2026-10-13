@@ -1329,6 +1329,14 @@ model Node {
   mintedByInfo       String?   @map("minted_by_info")
   mintedRevNo        Int?      @map("minted_rev_no")
   mintedHash         String?   @map("minted_hash")
+  /// #1632 / cor:dmo:130:04 — when the node's title, abstract or content last
+  /// changed, from the DB clock. Set only by the signing trigger
+  /// (prisma/signing-invariants.sql), never by application code, and never
+  /// decreases. A signature verified at or before this time reads EARLIER, so
+  /// restoring earlier text never revives it (#9824). Null = unchanged since
+  /// creation. A timestamp rather than a revision number, so pruning, history
+  /// clears and revSeq reconciliation cannot move it.
+  contentChangedAt   DateTime? @map("content_changed_at")
   createdAt          DateTime  @default(now()) @map("created_at")
   createdBy          String?   @map("created_by")
   updatedAt          DateTime  @updatedAt @map("updated_at")
@@ -1361,6 +1369,9 @@ model Node {
   /// Spec 049 Phase 4: the Channel whose chat root this node is, if any.
   channel       Channel?        @relation("ChannelRoot")
   embeddings    NodeEmbedding[] // 033: 1 abstract row + N chunk rows; Cascade delete
+
+  signingRequests    SigningRequest[]
+  signatures         NodeSignature[]
 
   @@unique([loc, memoryId])
   @@index([loc])
@@ -3987,9 +3998,79 @@ model PasskeyCredential {
   cancelUserAgent    String?   @map("cancel_user_agent")
 
   owner User @relation(fields: [ownerId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  signatures NodeSignature[]
 
   @@index([ownerId])
   @@map("passkey_credentials")
+}
+
+/// #1632 / cor:dmo:130:03 — a request for a person to sign one node's content.
+/// Pinned at creation and immutable: the node, its revision, the v1 approval
+/// hash and the payload version. It is open, then ends exactly once:
+/// completed | declined | expired | stale | withdrawn. Ended requests are kept
+/// for the node's lifetime (#10019). Every timestamp comes from the DB clock,
+/// set by the guard trigger (prisma/signing-invariants.sql), which also
+/// enforces the single end; application code only names the end state.
+/// User / App / worker ids are sealed history with no FK (an FK action would
+/// be a write the guard refuses): see conventions:append-only-table-trigger.
+model SigningRequest {
+  /// 128 bits of randomness, base64url (plan SEC-8): never guessable.
+  id                 String    @id
+  nodeId             String    @map("node_id")
+  revision           Int
+  approvalHash       String    @map("approval_hash")
+  payloadVersion     String    @map("payload_version")
+  /// Null = any eligible signer (a writer of the node's memory).
+  namedSignerId      String?   @map("named_signer_id")
+  /// The requester ACCOUNT is requesterUserId, else requesterAppId (#10397).
+  requesterUserId    String?   @map("requester_user_id")
+  requesterAppId     String?   @map("requester_app_id")
+  requesterWorkerId  String?   @map("requester_worker_id")
+  requesterSessionId String?   @map("requester_session_id")
+  /// open | completed | declined | expired | stale | withdrawn
+  state              String    @default("open")
+  createdAt          DateTime  @default(dbgenerated("(clock_timestamp() AT TIME ZONE 'UTC'::text)")) @map("created_at")
+  expiresAt          DateTime  @map("expires_at")
+  endedAt            DateTime? @map("ended_at")
+
+  node      Node           @relation(fields: [nodeId], references: [id], onDelete: Cascade, onUpdate: Restrict)
+  signature NodeSignature?
+
+  @@index([nodeId, createdAt])
+  @@map("signing_requests")
+}
+
+/// #1632 / cor:dmo:130:07 — an append-only signature record: no update or
+/// delete surface at all (cor:dmo:130:05). Removed only with its node (hard
+/// delete, memory delete). State is never stored; it is derived on every read
+/// by re-verifying the stored assertion (src/lib/signing/state.ts).
+model NodeSignature {
+  id                  String   @id @default(cuid())
+  nodeId              String   @map("node_id")
+  /// The request it completed; one record per request.
+  signingRequestId    String   @unique @map("signing_request_id")
+  /// A person, always. Sealed history: no FK.
+  signerId            String   @map("signer_id")
+  passkeyCredentialId String   @map("passkey_credential_id")
+  revision            Int
+  approvalHash        String   @map("approval_hash")
+  payloadVersion      String   @map("payload_version")
+  /// The WebAuthn RP ID the signature was made under, from config at
+  /// completion. Re-verification uses this, never the current PASSKEY_RP_ID,
+  /// so a domain change cannot invalidate old signatures (#10469/#10470). The
+  /// guard requires the assertion's rpIdHash to match it.
+  rpId                String   @map("rp_id")
+  authenticatorData   Bytes    @map("authenticator_data")
+  clientDataJson      Bytes    @map("client_data_json")
+  signature           Bytes
+  verifiedAt          DateTime @default(dbgenerated("(clock_timestamp() AT TIME ZONE 'UTC'::text)")) @map("verified_at")
+
+  node           Node              @relation(fields: [nodeId], references: [id], onDelete: Cascade, onUpdate: Restrict)
+  signingRequest SigningRequest    @relation(fields: [signingRequestId], references: [id], onDelete: Cascade, onUpdate: Restrict)
+  passkey        PasskeyCredential @relation(fields: [passkeyCredentialId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  @@index([nodeId])
+  @@map("node_signatures")
 }
 
 /// Short-lived, single-use handoff codes that keep the session JWT out of
