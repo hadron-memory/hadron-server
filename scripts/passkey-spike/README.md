@@ -51,13 +51,22 @@ presence, device sync, hybrid/cross-device flow or production RP/origin. Holger'
 AL device session and a separate production-host proposal remain later legs;
 this is not a shipped enrollment flow or an epic-wide production GO.
 
-Replay is ceremony-level: pending attempts are consumed before verification;
-accepted assertion bytes are deduplicated within the ephemeral session. The
-S0 challenge is deterministic as mandated by the current fixture. This does
-**not** solve Marco's #10005/#10033 payload-contract question (e.g. an assertion
-whose completion was dropped and never recorded, later replayed on restored
-content). That ruling/nonce-format work is outside this spike. Restarting or
-expiring this demo discards all state; it makes no durable replay guarantee.
+Replay evidence is limited to the probe's incrementing-counter virtual
+credential. A pending attempt is consumed before verification, and the probe
+refuses a replay of the same accepted assertion bytes (including encoding
+aliases). This is **not sound per-assertion deduplication** under the deterministic
+S0 challenge: the fingerprint includes the ES256 signature, whose `(r, n-s)`
+twin can still verify in server 14.0.3 but has a different fingerprint. A
+counter-zero synced credential supplies no counter backstop. Omitting the
+signature instead collides with honest re-signing of the same payload. Also,
+the fingerprint check and insertion straddle an await, so concurrent requests
+can both pass that check. The probe does not establish resistance to either
+case, nor to replay of a completion that was dropped and never recorded.
+
+A per-ceremony nonce needs the separate payload-contract ruling (#10005/#10033);
+that work is outside this spike. Local synthetic protocol GO is unaffected,
+but does not authorize production replay guarantees. Restarting or expiring
+this demo discards all state; it makes no durable replay guarantee.
 
 Primary implementation references:
 [server API](https://simplewebauthn.dev/docs/packages/server),
