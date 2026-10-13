@@ -4,7 +4,7 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { orgMutations } from './resolvers.mutation.org.js';
 import {
-  approveUserMergeConsent, beginUserMergeConsent, MERGE_CONSENT_LIVE_CAP, sweepRetiredMergeConsents,
+  approveUserMergeConsent, beginUserMergeConsent, MERGE_CONSENT_LIVE_CAP, mergeConsentAlreadyApplied, sweepRetiredMergeConsents,
 } from '../../../lib/userMergeConsent.js';
 import { mergeUsers } from '../../../controller/operations/mergeUsers.js';
 import type { Context } from './resolvers.helpers.js';
@@ -126,7 +126,7 @@ describe('#1770 retention sweep (30 days after the later of expiry and consumpti
     expect(removed).toBe(s.eligible.length);
     expect(await db.userMergeConsent.count({ where: { id: { in: s.eligible.map(r => r.id) } } })).toBe(0);
     expect(await db.userMergeConsent.findMany({ where: { id: { in: s.kept.map(r => r.id) } }, orderBy: { id: 'asc' } })).toEqual(keptBefore);
-    expect(await db.userMerge.findUniqueOrThrow({ where: { id: s.merge.id } })).toEqual(s.merge);
+    expect(await db.userMerge.findUniqueOrThrow({ where: { sourceUserId: s.merge.sourceUserId } })).toEqual(s.merge);
   });
 
   it('bounded passes converge without exceeding the batch size', async () => {
@@ -155,7 +155,7 @@ describe('#1770 concurrent merge loser', () => {
     }
   });
 
-  it('a sequential reuse of a spent proof stays MERGE_CONSENT_REQUIRED-or-refused, never ALREADY_APPLIED to another requester', async () => {
+  it('another admin reusing a spent proof is refused, never as MERGE_ALREADY_APPLIED', async () => {
     const p = await parties();
     const proof = await approvedProof(p);
     await mergeUsers(db, { sourceUserId: p.source.id, targetUserId: p.target.id, actorUserId: p.admin.id, mergeGlobalRoles: true, consentProof: proof });
@@ -164,6 +164,21 @@ describe('#1770 concurrent merge loser', () => {
       mergeGlobalRoles: true, consentProof: proof }).catch(e => e);
     expect(err?.extensions?.code).not.toBe('MERGE_ALREADY_APPLIED');
     expect(await db.userMerge.count()).toBe(1);
+  });
+});
+
+describe('#1770 the loser check reveals only the caller’s own applied proof', () => {
+  it('true only for this proof, this ordered pair and this requester', async () => {
+    const p = await parties();
+    const proof = await approvedProof(p);
+    const other = await db.user.create({ data: { handle: 'other-admin', roles: ['ADMIN'] } });
+    expect(await mergeConsentAlreadyApplied(db, proof, p.source.id, p.target.id, p.admin.id)).toBe(false);
+    await mergeUsers(db, { sourceUserId: p.source.id, targetUserId: p.target.id, actorUserId: p.admin.id, mergeGlobalRoles: true, consentProof: proof });
+    expect(await mergeConsentAlreadyApplied(db, proof, p.source.id, p.target.id, p.admin.id)).toBe(true);
+    expect(await mergeConsentAlreadyApplied(db, proof, p.source.id, p.target.id, other.id)).toBe(false);
+    expect(await mergeConsentAlreadyApplied(db, proof, p.source.id, p.target.id, null)).toBe(false);
+    expect(await mergeConsentAlreadyApplied(db, proof, p.target.id, p.source.id, p.admin.id)).toBe(false);
+    expect(await mergeConsentAlreadyApplied(db, 'not-the-proof', p.source.id, p.target.id, p.admin.id)).toBe(false);
   });
 });
 
