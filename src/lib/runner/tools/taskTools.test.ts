@@ -12,6 +12,9 @@ import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../id.js';
 import { runContext } from '../../../jobs/appRunDeps.js';
 import { hadronTaskCreate, resolveRunTools } from './index.js';
+import { createRootTaskForRun } from '../../../api/graphql/schema/resolvers.agentTask.js';
+import { resolvers } from '../../../api/graphql/schema/resolvers.js';
+import { typeDefs } from '../../../api/graphql/schema/typeDefs.js';
 import { lockAuthorityAnchors } from '../../auth/authorityAnchors.js';
 import type { AppRun } from '../../../generated/prisma/index.js';
 import type { RunToolContext } from './types.js';
@@ -251,5 +254,28 @@ describe('commit-time guarantees under interleaving', () => {
     const created = (await tasks()).length;
     expect(created).toBe(results[0]!.status === 'fulfilled' ? 1 : 0);
     if (results[0]!.status === 'rejected') expect(String((results[0].reason as GraphQLError).extensions?.code)).toBe('APP_NOT_FOUND');
+  });
+});
+
+describe('follow-ups to #1756 (#1832, #1833)', () => {
+  it('#1832: a run-created root task takes no status: it is refused, not dropped', async () => {
+    const run = await mintRun({ userId: person.id });
+    for (const status of ['backlog', 'pending', 'BACKLOG', 'finished']) {
+      expect(await code(createRootTaskForRun(runContext(db, run), run, { title: 'x', status } as any))).toBe('BAD_USER_INPUT');
+    }
+    expect(await db.agentTask.count()).toBe(0);
+    // Absent or null is the ordinary case: pending and queued.
+    await createRootTaskForRun(runContext(db, run), run, { title: 'x', status: null });
+    expect((await tasks())[0]).toMatchObject({ status: 'pending' });
+  });
+
+  it('#1833: a run-created event names its run on the event read; the SDL declares the field', async () => {
+    const run = await mintRun({ userId: person.id });
+    await hadronTaskCreate.execute(toolCtx(run), { title: 'x' });
+    const Q = resolvers.Query as any;
+    const events = await Q.agentTeamEvents({}, { appRef: appId }, { db, userId: person.id, roles: ['READER'] });
+    expect(events.length).toBeGreaterThan(0);
+    expect(events.map((e: any) => e.actorRunId)).toEqual(events.map(() => run.id));
+    expect(typeDefs).toMatch(/type AgentTeamEvent \{[^}]*\bactorRunId: ID\b/);
   });
 });
