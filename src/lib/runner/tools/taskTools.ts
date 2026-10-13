@@ -42,6 +42,8 @@ export const hadronTaskCreate: RunToolDef = {
     const task = await createRootTaskForRun(ctx.principal, ctx.run, {
       appRef: typeof args.appRef === 'string' ? args.appRef : null,
       parentTaskId: args.parentTaskId,
+      // Forwarded only to be refused (#1832): the helper turns any non-null status away, so it is never silently dropped here.
+      status: args.status as never,
       title: args.title as string,
       description: args.description as string | undefined,
       source: args.source as string | undefined,

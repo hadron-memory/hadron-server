@@ -11795,6 +11795,8 @@ export const typeDefs = `#graphql
     taskId: ID
     "Who acted: the Worker when the request was bound to a worker session, else the person."
     actor: AgentTaskParty
+    "#1833 — the headless run that acted, when a run made this event (actor is then null: a run is never a person or a worker). Null otherwise. Matches AgentTask.createdByRunId for the task a run created."
+    actorRunId: ID
     "The worker the event concerns, e.g. a new assignee."
     subjectWorker: AgentTaskParty
     "ALARM for an alarm; null for an ordinary event."
