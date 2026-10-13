@@ -300,20 +300,28 @@ export const hostOperationMutations = {
     if (state === 'unavailable' && reason !== 'out-of-tokens' && reason !== 'host-down') {
       throw taskError('AVAILABILITY_NOT_PERMITTED', 'A host marks a worker unavailable only as OUT_OF_TOKENS or HOST_DOWN.');
     }
-    const { app } = await hostKeyEntry(ctx, input.appRef);
-    const workerId = await resolveTaskWorkerId(ctx, app.id, input.worker);
     const notRegistered = () => taskError('WORKER_NOT_FOUND', 'This host does not register that worker.', { worker: input.worker });
-    if (!workerId) throw notRegistered();
-    await asHost(ctx, input.appRef, async (tx, freshApp, host) => {
+    let workerId: string | null = null;
+    // One gate (Greta P3-2): the host key's entry runs once, in asHost; the worker resolves after it.
+    const app = await asHost(ctx, input.appRef, async (tx, freshApp, host) => {
+      workerId = await resolveTaskWorkerId(ctx, freshApp.id, input.worker);
+      if (!workerId) throw notRegistered();
       const [w] = await tx.$queryRaw<{ appId: string; retiredAt: Date | null }[]>`
         SELECT app_id AS "appId", retired_at AS "retiredAt" FROM workers WHERE id = ${workerId} FOR UPDATE`;
       // FOR UPDATE, not SHARE (#1876 review, Diego P2-3): the worker row exists before any availability row, so it is
       // the per-worker lock for a FIRST mark too, where a FOR UPDATE on the absent availability row would lock nothing.
       // It conflicts with the FOR SHARE every other availability writer takes, in their order (worker, then record).
-      const listed = await tx.hostRegistrationWorker.findFirst({
-        where: { workerId, registration: { appId: freshApp.id, hostId: host.hostId } },
-        select: { workerId: true },
-      });
+      //
+      // Then the host's REGISTRATION row FOR SHARE, before reading whether it lists the worker (#1876 review, Riana
+      // P2, #10733): registerHost replaces the worker list under that row FOR UPDATE, and a refresh to an empty list
+      // locks no worker row, so without this fence it could drop the worker between the read and the mark. Lock order
+      // worker, then registration, never the reverse: registerHost takes the workers it lists FOR SHARE before its
+      // registration row, so the two orders never cycle.
+      const [reg] = await tx.$queryRaw<{ id: string }[]>`
+        SELECT id FROM host_registrations WHERE app_id = ${freshApp.id} AND host_id = ${host.hostId} FOR SHARE`;
+      const listed = reg
+        ? await tx.hostRegistrationWorker.findFirst({ where: { registrationId: reg.id, workerId }, select: { workerId: true } })
+        : null;
       if (!w || w.appId !== freshApp.id || w.retiredAt || !listed) throw notRegistered();
       const [cur] = await tx.$queryRaw<{ state: string; reason: string | null; until: Date | null; setAt: Date; setBy: string; setByHostId: string | null }[]>`
         SELECT state, reason, until, set_at AS "setAt", set_by AS "setBy", set_by_host_id AS "setByHostId"
@@ -339,9 +347,10 @@ export const hostOperationMutations = {
         },
       });
       await recordHostKeyUse(tx, host, 'availability', { count: 1 });
+      return freshApp;
     });
     await matchAfterChange(ctx.db, app.id);
-    return ctx.db.workerAvailability.findUniqueOrThrow({ where: { workerId } });
+    return ctx.db.workerAvailability.findUniqueOrThrow({ where: { workerId: workerId! } });
   },
 
   /**

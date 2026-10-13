@@ -363,6 +363,43 @@ describe('the host arm of cor:agt:060:08: out of tokens or host down, its own ma
     expect(await db.hostKeyUse.count({ where: { action: 'availability' } })).toBe(0);
   });
 
+  it('Riana P2 (#10733): a refresh dropping the worker, in flight, fences the mark: it waits, then is refused', async () => {
+    // orca1's registerHost(workers: []) in flight: its registration row FOR UPDATE and Kit's membership deleted,
+    // uncommitted, locking no worker row (an empty list locks none), as the writer does.
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    let ready!: () => void;
+    const locked = new Promise<void>((r) => { ready = r; });
+    const refresh = db.$transaction(async (tx) => {
+      const [reg] = await tx.$queryRaw<{ id: string }[]>`SELECT id FROM host_registrations WHERE app_id = ${app.id} AND host_id = 'orca1' FOR UPDATE`;
+      await tx.hostRegistrationWorker.deleteMany({ where: { registrationId: reg!.id } });
+      ready();
+      await gate;
+    });
+    await locked;
+    let settled = false;
+    const mark = code(setAs(orca1, { state: 'UNAVAILABLE', reason: 'HOST_DOWN' })).finally(() => { settled = true; });
+    await new Promise((r) => setTimeout(r, 400));
+    expect(settled).toBe(false);
+    release();
+    await refresh;
+    expect(await mark).toBe('WORKER_NOT_FOUND');
+    expect(await db.workerAvailability.count()).toBe(0);
+    expect(await db.agentTeamEvent.count({ where: { type: 'availability.changed' } })).toBe(0);
+    expect(await db.hostKeyUse.count({ where: { action: 'availability' } })).toBe(0);
+  });
+
+  it('the real refresh to no workers, then a mark: refused, and no deadlock with a refresh that lists the worker', async () => {
+    await register(orca1, []);
+    expect(await code(setAs(orca1, { state: 'UNAVAILABLE', reason: 'HOST_DOWN' }))).toBe('WORKER_NOT_FOUND');
+    // Concurrent refreshes that keep Kit and marks by the same host all settle (the lock orders never cycle).
+    const runs = await Promise.allSettled(Array.from({ length: 6 }, (_, i) =>
+      i % 2 ? register(orca1, [{ worker: kit.id, family: 'claude' }]) : setAs(orca1, { state: 'UNAVAILABLE', reason: 'HOST_DOWN' })));
+    for (const r of runs) {
+      if (r.status === 'rejected') expect((r.reason as GraphQLError).extensions?.code).toBe('WORKER_NOT_FOUND');
+    }
+  });
+
   it('a worker the host does not register is "not found"; a person replacing a host mark clears its host', async () => {
     expect(await code(M.setHostWorkerAvailability({}, { input: { appRef: app.id, worker: ada.id, state: 'UNAVAILABLE', reason: 'HOST_DOWN' } }, keyCtx(orca1))))
       .toBe('WORKER_NOT_FOUND');
