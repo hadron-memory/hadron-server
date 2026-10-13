@@ -52,9 +52,11 @@ export async function compileTemplate(
   // 1. Build the view: node's own data
   const view: Record<string, unknown> = {};
 
+  // #1835: every bare lookup holds BOTH the includer memory and the caller's
+  // read filter. Spreading the filter here would overwrite memoryId.
   // 2. Load memory's default data node (loc: "data")
   const defaultDataNode = await db.node.findFirst({
-    where: { loc: 'data', memoryId, deletedAt: null, ...accessFilter },
+    where: { loc: 'data', memoryId, deletedAt: null, AND: [accessFilter] },
     select: { data: true, content: true, memoryId: true },
   });
   if (defaultDataNode) {
@@ -86,7 +88,7 @@ export async function compileTemplate(
 
   for (const ref of refs) {
     const refNode = await db.node.findFirst({
-      where: { loc: ref, memoryId, deletedAt: null, ...accessFilter },
+      where: { loc: ref, memoryId, deletedAt: null, AND: [accessFilter] },
       select: { data: true, content: true, memoryId: true },
     });
     if (refNode) {
@@ -103,7 +105,7 @@ export async function compileTemplate(
 
   for (const partialLoc of partialRefs) {
     const partialNode = await db.node.findFirst({
-      where: { loc: partialLoc, memoryId, deletedAt: null, ...accessFilter },
+      where: { loc: partialLoc, memoryId, deletedAt: null, AND: [accessFilter] },
       select: { content: true, data: true, memoryId: true },
     });
     if (partialNode) {
