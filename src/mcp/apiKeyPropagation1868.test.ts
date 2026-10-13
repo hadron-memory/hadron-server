@@ -9,6 +9,7 @@
  * only a revoke landing inside one in-flight request reaches this layer (the
  * residual #1868 hardens). The test drives that layer directly.
  */
+import { readdirSync, readFileSync } from 'node:fs';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
@@ -32,6 +33,7 @@ let member: { id: string };
 let memory: { id: string; urn: string };
 let app: { id: string };
 let workerId: string;
+let rookId: string;
 
 beforeEach(async () => {
   await cleanDb(db);
@@ -47,6 +49,7 @@ beforeEach(async () => {
   await db.appMember.create({ data: { appId: app.id, userId: member.id, role: 'member' } });
   const agent = await M.createAgent({}, { orgId: org.id, name: 'Team Agent' }, as(admin.id));
   workerId = (await db.worker.create({ data: { appId: app.id, agentId: agent.id, name: 'Anne', slug: 'anne', heldByUserId: member.id }, select: { id: true } })).id;
+  rookId = (await db.worker.create({ data: { appId: app.id, agentId: agent.id, name: 'Rook', slug: 'rook' }, select: { id: true } })).id;
 });
 
 /** A genuine, signed wake proof issued to `userId` for the App's worker: it passes every check before the transaction. */
@@ -92,6 +95,15 @@ describe('#1868: a revoked hdr_user_ key cannot write through the delegating MCP
     expect(code(t)).toBe('WAKE_PROOF_REQUESTER_MISMATCH');
   });
 
+  it('server.ts worker tools: hadron_set_worker_reports_to is refused and changes nothing (Anne #1872 sweep)', async () => {
+    const { mcp, revoke } = await keyedConnection(admin.id);
+    await revoke();
+    const t = text(await mcp.callTool('hadron_set_worker_reports_to', { workerRef: workerId, reportsTo: rookId, app: app.id }));
+    // The tool renders the transaction's denial as the reports-to refusal text.
+    expect(t).toMatch(/may change who it reports to/);
+    expect((await db.worker.findUniqueOrThrow({ where: { id: workerId } })).reportsToWorkerId).toBeNull();
+  });
+
   it('a live key still writes through the same tools (the control)', async () => {
     const target = await db.node.create({ data: { id: generateId(), memoryId: memory.id, loc: 't:2', name: 'Target', content: 'Body' } });
     const plain = await db.session.create({ data: { id: generateId(), userId: member.id }, select: { id: true } });
@@ -99,5 +111,31 @@ describe('#1868: a revoked hdr_user_ key cannot write through the delegating MCP
     expect(code(text(await mcp.callTool('hadron_create_comment', { targetRef: target.id, body: 'live key' })))).toBe('NO_ERROR');
     expect(code(text(await mcp.callTool('hadron_task_create', { appRef: app.id, title: 'live key', session: plain.id })))).toBe('NO_ERROR');
     expect(text(await mcp.callTool('hadron_ack_wakes', { proofs: [proofFor(member.id)], session: plain.id }))).toMatch(/^Acknowledged /);
+  });
+
+  it('a live key sets reports-to (the worker-tool control)', async () => {
+    const { mcp } = await keyedConnection(admin.id);
+    expect(code(text(await mcp.callTool('hadron_set_worker_reports_to', { workerRef: workerId, reportsTo: rookId, app: app.id })))).toBe('NO_ERROR');
+    expect((await db.worker.findUniqueOrThrow({ where: { id: workerId } })).reportsToWorkerId).toBe(rookId);
+  });
+});
+
+describe('#1868: no MCP GraphQL context drops the presented key (source audit)', () => {
+  // Every Context literal the MCP surface builds from the connection's auth
+  // carries auth.apiKeyId, so a new builder cannot silently skip the shared
+  // transaction's key re-check (Anne's #1872 sweep found ten that did).
+  it('every `userId: auth.userId ?? undefined` context in src/mcp also sets apiKeyId', () => {
+    const missing: string[] = [];
+    for (const file of readdirSync('src/mcp').filter((f) => f.endsWith('.ts') && !f.endsWith('.test.ts'))) {
+      const lines = readFileSync(`src/mcp/${file}`, 'utf8').split('\n');
+      lines.forEach((line, i) => {
+        if (!/^\s*userId: auth\.userId \?\? undefined,/.test(line)) return;
+        // The literal's own lines: up to its closing brace.
+        const end = lines.findIndex((l, j) => j > i && /^\s*}\)?[,;)]*\s*$/.test(l));
+        const body = lines.slice(Math.max(0, i - 8), end === -1 ? i + 20 : end + 1).join('\n');
+        if (!/apiKeyId: auth\.apiKeyId/.test(body)) missing.push(`src/mcp/${file}:${i + 1}`);
+      });
+    }
+    expect(missing).toEqual([]);
   });
 });
