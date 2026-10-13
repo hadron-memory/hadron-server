@@ -39,6 +39,7 @@ import {
 import { MAX_PROOF_CHARS, signWakeProof, wakeIdentity, WAKE_PROOF_MAX_AGE_MS, WAKE_PROOF_VERSION, type WakeRequester } from './wakeProof.js';
 import { mayReadAppTasks } from '../../api/graphql/schema/resolvers.agentTask.js';
 import { withoutRequestCaches } from '../../api/graphql/schema/resolvers.helpers.js';
+import { liveTxContext } from '../../api/graphql/schema/authorizedTx.js';
 import { lockAuthorityAnchors, type AuthorityAnchor } from '../auth/authorityAnchors.js';
 import { pendingTaskWakes, type PendingTaskWake } from '../agentTasks/taskWakes.js';
 
@@ -561,8 +562,14 @@ export async function computeDueWakes(args: {
           ...holders.map((id) => ({ kind: 'user' as const, id })),
         ];
         await lockAuthorityAnchors(tx, anchors, 'shared');
+        // The caller's platform roles are re-read under its user anchor (updateUserRoles takes it exclusively), so a
+        // demotion that committed first is seen (Riana, #1859 delta); a deleted caller or revoked key reads no task.
         const txCtx = withoutRequestCaches(ctx, tx);
-        taskReaderNow = await mayReadAppTasks(txCtx, app.id);
+        const liveCtx = await liveTxContext(ctx, tx).catch((e: unknown) => {
+          if (e instanceof Error && e.message === 'Forbidden') return null; // the shared gates' denial; anything else is loud
+          throw e;
+        });
+        taskReaderNow = liveCtx !== null && (await mayReadAppTasks(liveCtx, app.id));
         for (const h of holders) holderNow.set(h, (await holderParticipates(txCtx, app, h)) !== null);
       }
       const taskOk = (workerId: string): boolean => {

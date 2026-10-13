@@ -470,6 +470,35 @@ describe('authority is decided at issuance, not before it (Riana P2-1 on #1859)'
     expect(await db.appMember.count({ where: { appId: app.id, userId: holder.id } })).toBe(0);
   });
 
+  it('a platform ADMIN demoted while the read is in flight gets no task title or proof (Riana delta on #1859)', async () => {
+    // Not a member of the App: a reader of its tasks only by the ADMIN role.
+    const admin = await db.user.update({ where: { id: (await mkUser(4)).id }, data: { roles: ['ADMIN'] }, select: { id: true } });
+    const demoter = await db.user.update({ where: { id: (await mkUser(5)).id }, data: { roles: ['ADMIN'] }, select: { id: true } });
+    await assignedTo(liam);
+    const adminCtx = { db, userId: admin.id, roles: ['ADMIN'] } as unknown as Context;
+    expect(taskReasons(await dueFor(adminCtx), liam.id)).toHaveLength(1); // the control: the role reads it
+    await db.appWakeReservation.deleteMany();
+    const original = db.$transaction.bind(db);
+    let fired = false;
+    const spy = vi.spyOn(db, '$transaction').mockImplementation(((arg: unknown, opts?: unknown) => {
+      if (!fired && typeof arg === 'function') {
+        fired = true;
+        const demoterCtx = { db, userId: demoter.id, roles: ['ADMIN'] } as unknown as Context;
+        return M.updateUserRoles({}, { userId: admin.id, roles: ['READER'] }, demoterCtx).then(() => original(arg as never, opts as never));
+      }
+      return original(arg as never, opts as never);
+    }) as never);
+    try {
+      const page = await Q.dueWakes({}, { appRef: app.id }, adminCtx);
+      expect(fired).toBe(true);
+      expect(JSON.stringify(page)).not.toContain('Review #42');
+      expect(page.wakes).toEqual([]);
+    } finally {
+      spy.mockRestore();
+    }
+    expect((await db.user.findUniqueOrThrow({ where: { id: admin.id } })).roles).toEqual(['READER']);
+  });
+
   it('the same read with the holder still a member does carry the task (the control)', async () => {
     await assignedTo(liam);
     const page = await Q.dueWakes({}, { appRef: app.id }, ctx(holder.id));
