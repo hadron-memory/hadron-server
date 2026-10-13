@@ -85,14 +85,16 @@ describe('requestNodeSignature: what a request pins (cor:dmo:130:03)', () => {
     expect(req.approvalHash).toBe(computeApprovalHash({ title: 'Retention', abstract: null, content: 'Retention is 30 days.' }));
     expect(req.requesterUserId).toBe(requesterId);
     expect(req.id).toMatch(/^[A-Za-z0-9_-]{22}$/); // 128 bits, base64url
+    // created_at is stamped by the guard a moment after expires_at is computed,
+    // so allow the statement's own runtime.
     const ttl = req.expiresAt.getTime() - req.createdAt.getTime();
-    expect(ttl).toBe(24 * 60 * 60 * 1000);
+    expect(Math.abs(ttl - 24 * 60 * 60 * 1000)).toBeLessThan(1000);
   });
 
   it('honours SIGNING_REQUEST_TTL_SECONDS', async () => {
     process.env.SIGNING_REQUEST_TTL_SECONDS = '600';
     const req = await create();
-    expect(req.expiresAt.getTime() - req.createdAt.getTime()).toBe(600_000);
+    expect(Math.abs(req.expiresAt.getTime() - req.createdAt.getTime() - 600_000)).toBeLessThan(1000);
   });
 
   it('pins a named signer, and refuses one that does not exist', async () => {
@@ -281,6 +283,22 @@ describe('signature state on read (cor:dmo:130:04)', () => {
     await complete(await create());
     expect((await status()).signatures[0].state).toBe('PENDING');
     expect((await status()).state).toBe('PENDING');
+  });
+
+  it('automatic pruning keeps the revision a signature was made on (cor:dmo:130:05, #9901)', async () => {
+    await db.memory.update({ where: { id: memoryId }, data: { maxRevCount: 1 } });
+    await complete(await create());
+    const { createNodeRevision } = await import('../nodeRevisionSnapshot.js');
+    const snap = async (content: string) => {
+      const live = await db.node.findUniqueOrThrow({ where: { id: nodeId } });
+      await createNodeRevision(db, { nodeId, memoryId, loc: live.loc, name: live.name, content: live.content, tags: [] });
+      await db.node.update({ where: { id: nodeId }, data: { content } });
+    };
+    await snap('edit one');   // snapshots r1, the signed revision
+    await snap('edit two');   // snapshots r2; the cap of 1 would prune r1
+    await snap('edit three'); // snapshots r3; prunes r2, still keeps r1
+    const kept = (await db.nodeRevision.findMany({ where: { nodeId }, select: { revNo: true } })).map((r) => r.revNo).sort();
+    expect(kept).toEqual([1, 3]);
   });
 
   it('a node with no records has the empty status', async () => {

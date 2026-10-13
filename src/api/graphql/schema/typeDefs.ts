@@ -1329,9 +1329,9 @@ export const typeDefs = `#graphql
     approvalStatus: NodeApprovalStatus!
     "#1591 — whether this node is minted, and the record of it."
     mintStatus: NodeMintStatus!
-    "#1632 (cor:dmo:130:06) — the node's signatures and their derived states, current signers first. Batch-loaded on list and search reads. An encrypted node reads NOT_APPLICABLE and lists none."
+    "#1632 (hrn:node:hadronmemory.com:specs:cor:dmo:130:06) — the node's signatures and their derived states, current signers first. Batch-loaded on list and search reads. An encrypted node reads NOT_APPLICABLE and lists none."
     signatureStatus: NodeSignatureStatus!
-    "#1632 (cor:dmo:130:03) — the node's signing requests, newest first, including ended ones (#10019). state filters on the effective state (an open request past its deadline is EXPIRED). first: 1–100, default 20."
+    "#1632 (hrn:node:hadronmemory.com:specs:cor:dmo:130:03) — the node's signing requests, newest first, including ended ones (#10019). state filters on the effective state (an open request past its deadline is EXPIRED). first: 1–100, default 20."
     signingRequests(state: SigningRequestState, first: Int = 20): [SigningRequest!]!
     "#1610 — the Worker that created this node, when it was written in a worker session. The user is createdBy. Null for a write with no worker behind it, and for nodes written before #1610."
     createdByWorker: ActorRef
@@ -1842,7 +1842,7 @@ export const typeDefs = `#graphql
     hash: String
   }
 
-  "#1632 (cor:dmo:130:03) — a signing request: open, then ends exactly once."
+  "#1632 (hrn:node:hadronmemory.com:specs:cor:dmo:130:03) — a signing request: open, then ends exactly once."
   enum SigningRequestState {
     OPEN
     "A signature was verified and recorded."
@@ -1857,7 +1857,7 @@ export const typeDefs = `#graphql
     WITHDRAWN
   }
 
-  "#1632 (cor:dmo:130:04) — a signature's state, derived on every read. An invalid record is never a signature: it is counted in NodeSignatureStatus.integrityProblems instead."
+  "#1632 (hrn:node:hadronmemory.com:specs:cor:dmo:130:04) — a signature's state, derived on every read. An invalid record is never a signature: it is counted in NodeSignatureStatus.integrityProblems instead."
   enum SignatureState {
     "Verifies, and the title/abstract/content has not changed since it was made."
     CURRENT
@@ -1883,7 +1883,7 @@ export const typeDefs = `#graphql
     sessionId: ID
   }
 
-  "#1632 (cor:dmo:130:03) — a request for a person to sign one node's content, pinned at creation."
+  "#1632 (hrn:node:hadronmemory.com:specs:cor:dmo:130:03) — a request for a person to sign one node's content, pinned at creation."
   type SigningRequest {
     "128 bits of randomness."
     id: ID!
@@ -1908,7 +1908,7 @@ export const typeDefs = `#graphql
     signature: NodeSignature
   }
 
-  "#1632 (cor:dmo:130:06/:07) — one signature on a node. Only the passkey's label is ever shown."
+  "#1632 (hrn:node:hadronmemory.com:specs:cor:dmo:130:06, hrn:node:hadronmemory.com:specs:cor:dmo:130:07) — one signature on a node. Only the passkey's label is ever shown."
   type NodeSignature {
     id: ID!
     signer: NodeRevisionEditor
@@ -9004,7 +9004,7 @@ export const typeDefs = `#graphql
     """
     approveNode(nodeRef: ID!, revision: Int): NodeApprovalReceipt!
     """
-    #1632 (cor:dmo:130:03) — ask for a node's current content to be signed. Any reader of the node may ask, agents included; agents never sign. expectedRevision, when given, must still be current (REVISION_MISMATCH). signerRef names one signer (a user id); omitted, any writer of the memory may sign. Refusals: NODE_NOT_FOUND, ENCRYPTED_MEMORY_NOT_APPLICABLE, and (provisional, #10424) COMMENT_NOT_SIGNABLE, NODE_IS_PLACEHOLDER, REVISION_MISMATCH, SIGNER_NOT_FOUND. No call takes an assertion: the signer signs on the server-hosted ceremony page (S2b-2).
+    #1632 (hrn:node:hadronmemory.com:specs:cor:dmo:130:03) — ask for a node's current content to be signed. Any reader of the node may ask, agents included; agents never sign. expectedRevision, when given, must still be current (REVISION_MISMATCH). signerRef names one signer (a user id); omitted, any writer of the memory may sign. Refusals: NODE_NOT_FOUND, ENCRYPTED_MEMORY_NOT_APPLICABLE, and (provisional, #10424) COMMENT_NOT_SIGNABLE, NODE_IS_PLACEHOLDER, REVISION_MISMATCH, SIGNER_NOT_FOUND. No call takes an assertion: the signer signs on the server-hosted ceremony page (S2b-2).
     """
     requestNodeSignature(nodeRef: ID!, expectedRevision: Int, signerRef: ID): SigningRequest!
     "#1632 — withdraw an open signing request. Only the requester account, from any of its sessions (#10397). Refusals (provisional, #10424): SIGNING_REQUEST_NOT_FOUND, SIGNING_REQUEST_NOT_REQUESTER, SIGNING_REQUEST_ENDED (extensions.state)."
