@@ -43,16 +43,19 @@ CRLF/lone CR, unnormalized Unicode, field-boundary-like text, whitespace) and
 the same content on a different stable node. The fixture contains only
 synthetic public text and identifiers; no keys or user data.
 
-## Encrypted memory is a separate contract
+## Encrypted memories have no payload hash
 
-**Do not use these v1 vectors to hash encrypted-memory plaintext.** Holger's
-DM=D ruling selects a keyed v2 fingerprint derived from the memory key, with no
-retrofit or stop-gap. The precise KDF parameters/domain labels, v2 serialization
-and signed-payload encoding must be settled by the spec owners before v2
-vectors are published. The draft spec text currently still describes v1;
-that gap was routed to Ada before this artifact was written. A new version
-must have its own prefix and fixture, never change these v1 bytes.
+**v1 is the only approval fingerprint and the only signature payload.** There is
+no keyed or encrypted-memory variant. Approval, minting and signing are refused
+on a node in an encrypted memory, always (`cor:dmo:120:00`, Scope; Holger,
+2026-10-13, team chat #9837), so no fingerprint or payload is ever computed for
+encrypted-memory plaintext, and these vectors must not be used to compute one.
+(The approval refusal is not built yet: hadron-server#1637.)
+This retires the earlier keyed-v2 plan (the DM=D ruling) that this section used
+to describe; `cor:dmo:120:00` and `cor:dmo:130:04` record the replacement. Any
+future payload change gets its own prefix and fixture and never changes these v1
+bytes.
 
-This S0 artifact adds no runtime signing endpoint, schema, dependency, credential
-registry or encrypted-hash implementation. DL registration/activation policy and
-DN's parked secrets service are not encoded in content-fingerprint bytes.
+This S0 artifact adds no runtime signing endpoint, schema, dependency or
+credential registry. DL registration/activation policy and DN's parked secrets
+service are not encoded in content-fingerprint bytes.
