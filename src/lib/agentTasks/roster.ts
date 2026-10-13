@@ -128,7 +128,9 @@ export async function loadTeamRoster(db: Db, appId: string, now: Date): Promise<
   const states = await loadWorkerWorkStates(db, appId, now);
   if (states.length === 0) return [];
   const [inputs, woken, structure] = await Promise.all([
-    loadStallInputs(db, { appId, assigneeWorkerId: { not: null } }, now),
+    // A parent assigned to a PERSON still has worker-owned children whose end is
+    // that worker's move (#1831), so person-assigned parents are read too.
+    loadStallInputs(db, { appId, OR: [{ assigneeWorkerId: { not: null } }, { assigneeUserId: { not: null } }] }, now),
     loadWokenAlarms(db, appId),
     // #1726: every worker of the App, retired too, so a claim on a retired one resolves.
     db.worker.findMany({ where: { appId }, select: { id: true, name: true, slug: true, retiredAt: true, reportsToWorkerId: true } }),
@@ -157,8 +159,8 @@ export async function loadTeamRoster(db: Db, appId: string, now: Date): Promise<
   }
   const byWorker = new Map<string, typeof inputs>();
   for (const i of inputs) {
-    const id = i.task.assigneeWorkerId as string;
-    byWorker.set(id, [...(byWorker.get(id) ?? []), i]);
+    const id = i.task.assigneeWorkerId;
+    if (id) byWorker.set(id, [...(byWorker.get(id) ?? []), i]);
   }
 
   return states
