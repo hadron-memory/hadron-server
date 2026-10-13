@@ -26,9 +26,29 @@ ALTER TABLE passkey_credentials ADD CONSTRAINT chk_passkey_shape CHECK (
 );
 CREATE OR REPLACE FUNCTION hadron_guard_passkey_credential() RETURNS trigger
 LANGUAGE plpgsql AS $$
+DECLARE platform_now timestamp(3) := (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::timestamp(3);
 BEGIN
   IF TG_OP = 'DELETE' THEN
     RAISE EXCEPTION 'Passkey credentials are never deleted' USING ERRCODE = '23514';
+  END IF;
+  IF TG_OP = 'INSERT' AND NEW.registered_at IS DISTINCT FROM platform_now THEN
+    RAISE EXCEPTION 'Passkey registration must use the platform clock' USING ERRCODE = '23514';
+  END IF;
+  IF NEW.revoked_at IS NOT NULL AND (TG_OP = 'INSERT' OR OLD.revoked_at IS NULL) AND NEW.revoked_at IS DISTINCT FROM platform_now THEN
+    RAISE EXCEPTION 'Passkey revocation must use the platform clock' USING ERRCODE = '23514';
+  END IF;
+  IF NEW.cancelled_at IS NOT NULL AND (TG_OP = 'INSERT' OR OLD.cancelled_at IS NULL) AND NEW.cancelled_at IS DISTINCT FROM platform_now THEN
+    RAISE EXCEPTION 'Passkey cancellation must use the platform clock' USING ERRCODE = '23514';
+  END IF;
+  IF NEW.window_ended_at IS NOT NULL AND (TG_OP = 'INSERT' OR OLD.window_ended_at IS NULL) AND NEW.window_ended_at IS DISTINCT FROM platform_now THEN
+    RAISE EXCEPTION 'Passkey window closure must use the platform clock' USING ERRCODE = '23514';
+  END IF;
+  IF TG_OP = 'INSERT' THEN RETURN NEW; END IF;
+  IF OLD.revoked_at IS NOT NULL AND ROW(NEW.last_used_at,NEW.counter,NEW.backed_up) IS DISTINCT FROM ROW(OLD.last_used_at,OLD.counter,OLD.backed_up) THEN
+    RAISE EXCEPTION 'Revoked passkey cannot be used' USING ERRCODE = '23514';
+  END IF;
+  IF OLD.revoked_at IS NOT NULL AND OLD.cancelled_at IS NULL AND ROW(NEW.cancelled_at,NEW.cancel_ip,NEW.cancel_user_agent) IS DISTINCT FROM ROW(OLD.cancelled_at,OLD.cancel_ip,OLD.cancel_user_agent) THEN
+    RAISE EXCEPTION 'Cancel provenance cannot be attached after revocation' USING ERRCODE = '23514';
   END IF;
   IF ROW(NEW.id,NEW.owner_id,NEW.credential_id,NEW.public_key,NEW.algorithm,NEW.user_handle,NEW.registered_at,NEW.backup_eligible,NEW.registration_method,NEW.window_ends_at)
     IS DISTINCT FROM ROW(OLD.id,OLD.owner_id,OLD.credential_id,OLD.public_key,OLD.algorithm,OLD.user_handle,OLD.registered_at,OLD.backup_eligible,OLD.registration_method,OLD.window_ends_at) THEN
@@ -49,5 +69,5 @@ BEGIN
   RETURN NEW;
 END $$;
 DROP TRIGGER IF EXISTS passkey_credential_guard ON passkey_credentials;
-CREATE TRIGGER passkey_credential_guard BEFORE UPDATE OR DELETE ON passkey_credentials
+CREATE TRIGGER passkey_credential_guard BEFORE INSERT OR UPDATE OR DELETE ON passkey_credentials
 FOR EACH ROW EXECUTE FUNCTION hadron_guard_passkey_credential();

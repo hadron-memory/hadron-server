@@ -3954,21 +3954,6 @@ model AuthCode {
   @@map("auth_codes")
 }
 
-/// Short-lived, single-use handoff codes that keep the session JWT out of
-/// browser-visible URLs (#477). Two kinds share the same shape:
-///   - 'login'          — minted after GitHub/email auth; the portal's server
-///                        `load` redeems it at POST /auth/session for the JWT,
-///                        which it sets as an HttpOnly cookie. For the GitHub
-///                        flow `clientStateHash` binds the finishing browser to
-///                        the login it started (session-fixation defense); the
-///                        email flow leaves it null (magic links open cross-device).
-///   - 'exchange_start' — minted by POST /auth/microsoft/start (Bearer-authed,
-///                        server-to-server) so the long-lived JWT never rides in
-///                        the /auth/microsoft redirect URL.
-/// The raw code is only ever handed out once; the DB stores its SHA-256 hash.
-/// Single use is enforced by an atomic `updateMany(redeemedAt: null)` claim,
-/// mirroring AuthCode. DB-backed (not in-memory) so it survives multi-worker
-/// deploys, unlike the legacy pendingStates maps.
 /// #1631 schema-first: shared credential registry (cor:aut:040:05), no enrollment route yet.
 /// Identity/public-key fields are immutable; records are never deleted, revokedAt is set once.
 model PasskeyCredential {
@@ -3981,7 +3966,7 @@ model PasskeyCredential {
   /// Random authenticator user handle, not an email, User.id or session bearer.
   userHandle         Bytes     @map("user_handle")
   label              String
-  registeredAt       DateTime  @default(now()) @map("registered_at")
+  registeredAt       DateTime  @default(dbgenerated("(CURRENT_TIMESTAMP AT TIME ZONE 'UTC')")) @map("registered_at")
   lastUsedAt         DateTime? @map("last_used_at")
   revokedAt          DateTime? @map("revoked_at")
   /// WebAuthn's unsigned 32-bit counter does not fit a signed PostgreSQL Int.
@@ -4006,6 +3991,21 @@ model PasskeyCredential {
   @@map("passkey_credentials")
 }
 
+/// Short-lived, single-use handoff codes that keep the session JWT out of
+/// browser-visible URLs (#477). Two kinds share the same shape:
+///   - 'login'          — minted after GitHub/email auth; the portal's server
+///                        `load` redeems it at POST /auth/session for the JWT,
+///                        which it sets as an HttpOnly cookie. For the GitHub
+///                        flow `clientStateHash` binds the finishing browser to
+///                        the login it started (session-fixation defense); the
+///                        email flow leaves it null (magic links open cross-device).
+///   - 'exchange_start' — minted by POST /auth/microsoft/start (Bearer-authed,
+///                        server-to-server) so the long-lived JWT never rides in
+///                        the /auth/microsoft redirect URL.
+/// The raw code is only ever handed out once; the DB stores its SHA-256 hash.
+/// Single use is enforced by an atomic `updateMany(redeemedAt: null)` claim,
+/// mirroring AuthCode. DB-backed (not in-memory) so it survives multi-worker
+/// deploys, unlike the legacy pendingStates maps.
 model AuthHandoffCode {
   id              String    @id @default(cuid())
   /// SHA-256 hash of the raw code handed to the browser/portal.
