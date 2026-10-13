@@ -1329,6 +1329,10 @@ export const typeDefs = `#graphql
     approvalStatus: NodeApprovalStatus!
     "#1591 — whether this node is minted, and the record of it."
     mintStatus: NodeMintStatus!
+    "#1632 (cor:dmo:130:06) — the node's signatures and their derived states, current signers first. Batch-loaded on list and search reads. An encrypted node reads NOT_APPLICABLE and lists none."
+    signatureStatus: NodeSignatureStatus!
+    "#1632 (cor:dmo:130:03) — the node's signing requests, newest first, including ended ones (#10019). state filters on the effective state (an open request past its deadline is EXPIRED). first: 1–100, default 20."
+    signingRequests(state: SigningRequestState, first: Int = 20): [SigningRequest!]!
     "#1610 — the Worker that created this node, when it was written in a worker session. The user is createdBy. Null for a write with no worker behind it, and for nodes written before #1610."
     createdByWorker: ActorRef
     "#1610 — the Agent behind this node's creation: a worker's role agent, an agent session, or a headless App run. Null when no agent was behind it."
@@ -1836,6 +1840,97 @@ export const typeDefs = `#graphql
     revision: Int
     "The approval hash of the minted revision. Null for backfilled nodes, which were never approved."
     hash: String
+  }
+
+  "#1632 (cor:dmo:130:03) — a signing request: open, then ends exactly once."
+  enum SigningRequestState {
+    OPEN
+    "A signature was verified and recorded."
+    COMPLETED
+    "The eligible signer turned it down."
+    DECLINED
+    "Its lifetime passed (SIGNING_REQUEST_TTL_SECONDS, default 24h); endedAt is the deadline."
+    EXPIRED
+    "The node's title, abstract or content changed, or it entered an encrypted memory."
+    STALE
+    "The requester account withdrew it."
+    WITHDRAWN
+  }
+
+  "#1632 (cor:dmo:130:04) — a signature's state, derived on every read. An invalid record is never a signature: it is counted in NodeSignatureStatus.integrityProblems instead."
+  enum SignatureState {
+    "Verifies, and the title/abstract/content has not changed since it was made."
+    CURRENT
+    "Verifies, but the content changed since; restoring the old text never makes it current again."
+    EARLIER
+    "Made by a first passkey still in its cooling-off window; never counts until the window ends normally."
+    PENDING
+    "Made by a first passkey revoked inside its window; never counts."
+    CANCELLED
+    "The node is in an encrypted memory, where signing does not apply."
+    NOT_APPLICABLE
+    "The node left an encrypted memory it carried this signature into; never counts again. (Derivation lands with E2.)"
+    ENDED_ENCRYPTED_MEMORY
+  }
+
+  "#1632 — who asked for a signature. The requester account is userId, else appId (#10397)."
+  type SigningRequester {
+    userId: ID
+    "Set only when an App key itself asked."
+    appId: ID
+    "The Worker whose session made the request, when one did."
+    workerId: ID
+    sessionId: ID
+  }
+
+  "#1632 (cor:dmo:130:03) — a request for a person to sign one node's content, pinned at creation."
+  type SigningRequest {
+    "128 bits of randomness."
+    id: ID!
+    nodeId: ID!
+    nodeUrn: String
+    "The revision pinned at creation."
+    revision: Int!
+    "The approval hash v1 of the pinned content (64 lowercase hex)."
+    approvalHash: String!
+    "The signature payload version the signer signs: hadron-signature-v1 until S2b-2's v3."
+    payloadVersion: String!
+    "The effective state."
+    state: SigningRequestState!
+    "Null: any writer of the node's memory may sign."
+    namedSigner: NodeRevisionEditor
+    requestedBy: SigningRequester!
+    createdAt: DateTime!
+    expiresAt: DateTime!
+    "Null while OPEN. EXPIRED ends at expiresAt; every other end at the moment it happened (DB clock)."
+    endedAt: DateTime
+    "The signature that completed it; null unless COMPLETED (and when the record does not verify)."
+    signature: NodeSignature
+  }
+
+  "#1632 (cor:dmo:130:06/:07) — one signature on a node. Only the passkey's label is ever shown."
+  type NodeSignature {
+    id: ID!
+    signer: NodeRevisionEditor
+    passkeyLabel: String!
+    "When the signer's passkey was revoked, if it was; the signature keeps its state."
+    passkeyRevokedAt: DateTime
+    "The revision it was made on."
+    revision: Int!
+    verifiedAt: DateTime!
+    signingRequestId: ID!
+    payloadVersion: String!
+    state: SignatureState!
+  }
+
+  "#1632 — a node's signatures."
+  type NodeSignatureStatus {
+    "CURRENT if any signature is current, else the best of PENDING, EARLIER, CANCELLED; NOT_APPLICABLE on an encrypted node; null with no signatures."
+    state: SignatureState
+    "Current signers first, then newest first."
+    signatures: [NodeSignature!]!
+    "Records that fail re-verification: reported, never listed as signatures."
+    integrityProblems: Int!
   }
 
   "#1591 — a node's approval state plus its latest approval."
@@ -7061,6 +7156,8 @@ export const typeDefs = `#graphql
     nodeRevisions(nodeRef: ID!, limit: Int): [NodeRevision!]!
     "#1591 — the tamper check: recompute the node's approval hash from its current title/abstract/content and compare it with the approval on record. A pure read; an encrypted memory needs its session key (SESSION_EXPIRED otherwise)."
     verifyNode(nodeRef: ID!): NodeIntegrityCheck!
+    "#1632 — one signing request; null when unknown or when its node is not readable to the caller."
+    signingRequest(id: ID!): SigningRequest
     "#1591 — the tamper check over every live node of a memory (ID or fully-qualified URN)."
     verifyMemoryNodes(memoryRef: String!): MemoryIntegrityReport!
 
@@ -8906,6 +9003,12 @@ export const typeDefs = `#graphql
     SESSION_EXPIRED on an encrypted memory without its session key.
     """
     approveNode(nodeRef: ID!, revision: Int): NodeApprovalReceipt!
+    """
+    #1632 (cor:dmo:130:03) — ask for a node's current content to be signed. Any reader of the node may ask, agents included; agents never sign. expectedRevision, when given, must still be current (REVISION_MISMATCH). signerRef names one signer (a user id); omitted, any writer of the memory may sign. Refusals: NODE_NOT_FOUND, ENCRYPTED_MEMORY_NOT_APPLICABLE, and (provisional, #10424) COMMENT_NOT_SIGNABLE, NODE_IS_PLACEHOLDER, REVISION_MISMATCH, SIGNER_NOT_FOUND. No call takes an assertion: the signer signs on the server-hosted ceremony page (S2b-2).
+    """
+    requestNodeSignature(nodeRef: ID!, expectedRevision: Int, signerRef: ID): SigningRequest!
+    "#1632 — withdraw an open signing request. Only the requester account, from any of its sessions (#10397). Refusals (provisional, #10424): SIGNING_REQUEST_NOT_FOUND, SIGNING_REQUEST_NOT_REQUESTER, SIGNING_REQUEST_ENDED (extensions.state)."
+    withdrawSigningRequest(id: ID!): SigningRequest!
     "#1591 — approve the current revision of every live, unminted node of a memory (ID or fully-qualified URN) that isn't approved yet, in one transaction. Placeholders are skipped and reported."
     approveMemoryNodes(memoryRef: String!): ApproveMemoryNodesResult!
 
