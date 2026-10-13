@@ -16,11 +16,14 @@ import { computeDueWakes } from './dueWakes.js';
 import { signWakeProof, verifyWakeProof } from './wakeProof.js';
 import { evaluateStalls, wakeDueOwners } from '../agentTasks/stall.js';
 import { recordUndeliverableTaskWakes } from '../agentTasks/taskWakes.js';
+import { APP_KEY_PREFIX, hashAppKey } from '../../middleware/auth.js';
+import { randomBytes } from 'node:crypto';
 
 vi.mock('../bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 
 const M = resolvers.Mutation as any;
+const Q = resolvers.Query as any;
 const MIN = 60_000;
 const DAY = 86_400_000;
 
@@ -73,7 +76,7 @@ const dueIds = (page: Awaited<ReturnType<typeof dueFor>>) => page.wakes.map((w) 
 async function task(data: Record<string, unknown>) {
   return db.agentTask.create({ data: { appId: app.id, title: 'Review #42', ...data }, select: { id: true } });
 }
-async function event(data: Record<string, unknown>) {
+async function event(data: Record<string, unknown> & { type: string }) {
   return db.agentTeamEvent.create({ data: { appId: app.id, ...data }, select: { id: true } });
 }
 /** A task assigned to `w` now, with its assignment event, owned by Rook. */
@@ -151,7 +154,7 @@ describe("a child's finish wakes the child's owner (the parent's assignee, 050:1
   });
 
   it('the owner reacting on the parent after the finish ends the wake', async () => {
-    const parent = await task({ ownerWorkerId: rook.id, assigneeWorkerId: liam.id, status: 'started', startedAt: new Date(Date.now() - 60 * MIN) });
+    const parent = await task({ ownerWorkerId: rook.id, assigneeWorkerId: liam.id, status: 'started', startedAt: new Date(Date.now() - 60 * MIN), assignedAt: new Date(Date.now() - 60 * MIN) });
     const child = await task({ parentTaskId: parent.id, ownerWorkerId: liam.id, assigneeWorkerId: rook.id, assignedAt: new Date(Date.now() - 20 * MIN), ...FINISHED() });
     await event({ taskId: child.id, type: 'task.finished', actorUserId: manager.id });
     await event({ taskId: parent.id, type: 'task.progress', actorWorkerId: liam.id, actorUserId: holder.id, createdAt: new Date(Date.now() + 1000) });
@@ -167,6 +170,16 @@ describe("a child's finish wakes the child's owner (the parent's assignee, 050:1
 });
 
 describe('under the mention ceiling and budget (cor:agt:080:13, :15)', () => {
+  it('a task wakes whatever the mentions setting (it is not a mention); a pause silences it like everything else', async () => {
+    await db.workerWakeSettings.create({ data: { workerId: liam.id, mentions: 'OFF' } });
+    await assignedTo(liam);
+    expect(dueIds(await dueFor())).toEqual([liam.id]);
+    await db.appWakeReservation.deleteMany();
+    await db.workerWakeSettings.update({ where: { workerId: liam.id }, data: { pausedUntil: new Date(Date.now() + 3600_000) } });
+    expect(dueIds(await dueFor())).toEqual([]);
+  });
+
+
   it('a second task event inside the floor waits; past it, it is due', async () => {
     await assignedTo(liam);
     const first = await dueFor();
@@ -343,6 +356,15 @@ describe('pre-delivery re-checks (Rook §10 P3-1 on #1720): a stale or revoked a
     expect(dueIds(await dueFor())).toEqual([]);
   });
 
+  it('a wake issued (reserved) before the episode passed is not handed out again after it (the stored-wake path)', async () => {
+    const { taskId } = await stalledAlarm();
+    expect(dueIds(await dueFor())).toEqual([liam.id]); // issued: its budget slot is reserved, not yet acknowledged
+    await db.agentTask.update({ where: { id: taskId }, data: { status: 'started', startedAt: new Date() } });
+    await assignedTo(liam); // something new is due, so the stored wake would otherwise be re-handed in its place
+    const page = await dueFor();
+    expect(taskReasons(page, liam.id).map((r) => r.event)).toEqual(['ASSIGNED']);
+  });
+
   it('an acknowledged alarm is not delivered', async () => {
     const { eventId } = await stalledAlarm();
     await db.agentTeamEvent.update({ where: { id: eventId }, data: { acknowledgedAt: new Date(), acknowledgedByUserId: manager.id } });
@@ -370,4 +392,23 @@ describe('a dormant subject is undeliverable: recorded, never launched (cor:agt:
     expect(await recordUndeliverableTaskWakes(db, new Date())).toBe(0);
     expect(dueIds(await dueFor())).toEqual([liam.id, rook.id].sort());
   });
+});
+
+describe("the router's surface: an App key with attention:deliver (cor:agt:080:22, #1755's read arm)", () => {
+  it('reads the task reason through GraphQL, with the ref and title, and acknowledges it per event', async () => {
+    const raw = `${APP_KEY_PREFIX}${randomBytes(32).toString('hex')}`;
+    const key = await db.appKey.create({ data: { id: generateId(), appId: app.id, keyHash: hashAppKey(raw), keyPreview: raw.slice(-4), label: 'router' } });
+    await db.appKeyScope.create({ data: { id: generateId(), appKeyId: key.id, scope: 'attention:deliver', grantedByUserId: manager.id } });
+    const keyCtx = { db, appId: app.id, appKeyId: key.id, organizationId: org.id, roles: [] } as unknown as Context;
+    const { taskId, eventId } = await assignedTo(liam);
+    const page = await Q.dueWakes({}, { appRef: app.id }, keyCtx);
+    expect(page.wakes).toHaveLength(1);
+    expect(page.wakes[0].reasons).toEqual([
+      { kind: 'TASK', ticker: null, task: { id: taskId, eventId, chainIndex: 0, event: 'ASSIGNED', title: 'Review #42', ref: `TASK:${taskId}:assigned` } },
+    ]);
+    expect(await M.acknowledgeWakes({}, { proofs: [page.wakes[0].proof] }, keyCtx)).toEqual({ acknowledged: 1, unchanged: 0 });
+    const row = await db.workerDeliveryTaskEvent.findFirstOrThrow({ where: { eventId } });
+    expect(row).toMatchObject({ workerId: liam.id, ackedByAppKeyId: key.id, ackedByUserId: null });
+  });
+
 });

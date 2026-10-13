@@ -190,7 +190,7 @@ describe('ticks and relevance through the whole loader', () => {
     await say(channel, 'plain news');
     const page = await due(ctx(manager.id));
     expect(page.wakes).toHaveLength(1);
-    expect(page.wakes[0].reasons).toEqual([{ kind: 'TICK', ticker: expect.objectContaining({ id: t.id }) }]);
+    expect(page.wakes[0].reasons).toEqual([{ kind: 'TICK', ticker: expect.objectContaining({ id: t.id }), task: null }]);
     expect(page.wakes[0].channels[0]).toMatchObject({ fromSeq: 1, throughSeq: 1 });
     expect(page.wakes[0]).toMatchObject({ unread: 1, unreadMentions: 0 });
   });
@@ -332,7 +332,7 @@ describe('delivery record: acknowledging, never reading', () => {
     expect(await code(M.acknowledgeWakes({}, { proofs: [w.proof] }, ctx(holderB.id)))).toBe('WAKE_PROOF_REQUESTER_MISMATCH');
     expect(await code(M.acknowledgeWakes({}, { proofs: ['garbage'] }, ctx(holderA.id)))).toBe('WAKE_PROOF_INVALID');
     const p = verifyWakeProof(w.proof);
-    expect(await code(M.acknowledgeWakes({}, { proofs: [signWakeProof({ ...p, v: 2 } as never)] }, ctx(holderA.id)))).toBe('WAKE_PROOF_INVALID');
+    expect(await code(M.acknowledgeWakes({}, { proofs: [signWakeProof({ ...p, v: 3 } as never)] }, ctx(holderA.id)))).toBe('WAKE_PROOF_INVALID');
     const old = signWakeProof({ ...p, issuedAt: Date.now() - 16 * 60_000 });
     expect(await code(M.acknowledgeWakes({}, { proofs: [old] }, ctx(holderA.id)))).toBe('WAKE_PROOF_STALE');
     // A channel recreated since issue.
