@@ -770,8 +770,10 @@ async function insertTask(
 export async function createRootTaskForRun(
   principal: Context,
   run: { id: string; appId: string },
-  input: Omit<CreateInput, 'parentTaskId'> & { parentTaskId?: unknown },
+  input: Omit<CreateInput, 'parentTaskId' | 'status'> & { parentTaskId?: unknown; status?: never },
 ) {
+  // #1832: a run's root task is created pending (queued unless an assignee is named); a status is refused, never silently dropped. The type is `never` so a typed caller cannot pass one; an untyped one (the run tool) is caught here.
+  if (input.status != null) throw badInput('A run-created task takes no status; it is created pending.');
   if (input.parentTaskId != null && input.parentTaskId !== '') throw badInput('A run creates root tasks only; it names no parentTaskId.');
   if (input.appRef) {
     let namedAppId: string | null = null;
