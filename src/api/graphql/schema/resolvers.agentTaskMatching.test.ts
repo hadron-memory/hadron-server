@@ -93,7 +93,7 @@ describe('teamRoster — each state on its own (plan §7.4)', () => {
   });
 
   it('AVAILABLE: unbound, but a live host can launch it (free for work, cor:agt:060:04 / :05)', async () => {
-    await registerHost(db, { appId: app.id, hostId: 'orca1', label: 'orca1', pollIntervalSeconds: 60, workers: [{ workerId: w.Kit.id, family: 'glm' }] });
+    await registerHost(db, { appId: app.id, hostId: 'orca1', label: 'orca1', pollIntervalSeconds: 60, workers: [{ workerId: w.Kit.id, family: 'glm', worktrees: ['repo/kit'] }] });
     expect(await entry('Kit')).toMatchObject({ state: 'AVAILABLE', bound: false, family: null, launchableFamilies: ['glm'], freeFamilies: ['glm'] });
   });
 

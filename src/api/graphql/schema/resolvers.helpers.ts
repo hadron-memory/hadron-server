@@ -3790,6 +3790,8 @@ export interface SessionInput {
   reportsTo?: string | null;
   // #940: explicit informed-takeover override for a WORKER_TAKEN refusal.
   force?: boolean;
+  // #1709: a host-launched agent's single-use launch grant (cor:agt:070:08).
+  launchGrant?: string | null;
   // The session's stated intent (Session.plan) — MCP's hadron_start_session
   // description lands here since it delegates to startSession (#940 parity).
   plan?: string;

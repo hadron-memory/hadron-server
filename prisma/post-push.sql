@@ -656,6 +656,11 @@ CREATE INDEX IF NOT EXISTS "nodes_msg_channel_seq_loc_c_idx"
 -- whose host_operation_token_ok it uses.
 \ir host-operation-invariants.sql
 
+-- #1709 slice 2: launch grants and host-launched sessions. One source, shared
+-- verbatim with migration 20261014030000_host_launch (pinned by
+-- src/lib/hostOperations/launch.test.ts).
+\ir host-launch-invariants.sql
+
 -- #1631: shared passkey registry invariant guards.
 \ir passkey-invariants.sql
 

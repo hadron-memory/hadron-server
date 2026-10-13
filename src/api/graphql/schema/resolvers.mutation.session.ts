@@ -87,6 +87,7 @@ import {
 } from './resolvers.helpers.js';
 import { assertNoMintedSpecRemoval, assertNoMintedSpecUnmark } from '../../../lib/mintedSpecPermanence.js';
 import { preserveHeartbeatIfLapsed } from '../../../lib/sessionActivity.js';
+import { consumeGrant, failOperation, loadLiveGrant, type LoadedGrant } from '../../../lib/hostOperations/launch.js';
 import { withAuthorizedTx } from './authorizedTx.js';
 import { deriveFamily, normalizeFamily } from '../../../lib/agentTasks/family.js';
 
@@ -167,6 +168,58 @@ async function lockSessionAppActive(tx: Prisma.TransactionClient, appId: string)
  * proof this call did the ending — and the receipt is decided from the row as
  * it stands afterwards, never from the row as it was before.
  */
+// ── #1709: redeeming a launch grant ────────────────────────────────────────
+
+type LaunchCtx = { grant: LoadedGrant; issuedBy: 'platform' | 'manager' };
+
+const launchGrantInvalid = () =>
+  new GraphQLError('This launch grant is not valid: unknown, expired, already used, or not yours.', { extensions: { code: 'LAUNCH_GRANT_INVALID' } });
+
+/** The bind refusals that mean something changed since the start was issued: they fail the start (Holger via Vera #10775). */
+const LAUNCH_STATE_REFUSALS: Record<string, string> = {
+  LAUNCH_REFUSED: 'The hold changed after this start was issued.',
+  WORKER_HELD: 'The hold changed after this start was issued.',
+  WORKER_TAKEN: 'The worker already has a live session.',
+  FORBIDDEN: 'The holder may no longer hold this worker.',
+  WORKER_RETIRED: 'The worker was retired.',
+  APP_UNINSTALLED: 'The App was uninstalled.',
+};
+
+/**
+ * cor:agt:070:08 / Holger's ruling A (Vera #10761): a host-launched agent binds with its HOLDER's own token and the
+ * grant its host was given. The grant is checked against the caller, never trusted for identity: only the holder it
+ * was minted for redeems it, a pure App key (a host's among them) never does, and the takeover override cannot force
+ * a launch. A bind refused because something changed since the start was issued (#10775) fails that start with the
+ * reason and spends the grant; a grant that is unknown, expired, used or someone else's reads as one refusal and
+ * changes nothing (no oracle, and no way to fail another's start).
+ */
+async function withLaunch<T>(given: SessionInput, ctx: Context, run: (input: SessionInput, launch: LaunchCtx | null) => Promise<T>): Promise<T> {
+  if (given.launchGrant == null) return run(given, null);
+  if (!ctx.userId || ctx.impersonation) throw launchGrantInvalid();
+  if (given.force) {
+    throw new GraphQLError('A launch cannot be forced: a worker with a live session is not started again.', { extensions: { code: 'BAD_USER_INPUT' } });
+  }
+  const now = new Date();
+  const grant = await loadLiveGrant(ctx.db, given.launchGrant, now);
+  if (!grant || grant.holderUserId !== ctx.userId) throw launchGrantInvalid();
+  const op = await ctx.db.hostOperation.findUniqueOrThrow({ where: { id: grant.operationId }, select: { issuedBy: true } });
+  const launch: LaunchCtx = { grant, issuedBy: op.issuedBy === 'platform' ? 'platform' : 'manager' };
+  try {
+    return await run({ ...given, workerRef: given.workerRef ?? grant.workerId }, launch);
+  } catch (e) {
+    const code = e instanceof GraphQLError ? String(e.extensions?.code ?? '') : '';
+    const reason = LAUNCH_STATE_REFUSALS[code];
+    if (!reason) throw e;
+    // A concurrent redemption of the same grant that WON bound the session this one now finds live: that is a spent
+    // grant, not a changed world, and must not fail the start that succeeded.
+    if (await ctx.db.session.findUnique({ where: { launchOperationId: grant.operationId }, select: { id: true } })) throw launchGrantInvalid();
+    await ctx.db.$transaction((tx) => failOperation(tx, grant.operationId, new Date(), reason));
+    throw new GraphQLError(`This launch is refused: ${reason} The start has failed with that reason.`, {
+      extensions: { code: 'LAUNCH_REFUSED', reason: code, operationId: grant.operationId },
+    });
+  }
+}
+
 export async function endSessionFirstWins(
   db: Context['db'],
   id: string,
@@ -372,7 +425,7 @@ export async function writeSessionHandoff(
 }
 
 export const sessionMutations = {
-    startSession: async (_: unknown, { input }: { input: SessionInput }, ctx: Context) => {
+    startSession: async (_: unknown, { input: given }: { input: SessionInput }, ctx: Context) => withLaunch(given, ctx, async (input, launch) => {
       // #928: optional persona link. `agentRef` (PK or URN, cor:api:140)
       // resolves to Session.agentId. Gate mirrors Query.agent's read gate —
       // a PUBLIC agent attaches for any caller, otherwise owner / org member
@@ -629,6 +682,9 @@ export const sessionMutations = {
             extensions: { code: 'WORKER_NOT_FOUND' },
           });
         }
+        // #1709: a grant starts the worker it names, and no other; checked before any gate whose refusal would
+        // fail the start, so a mismatched ref is the caller's mistake, never a change in the world.
+        if (launch && worker.id !== launch.grant.workerId) throw launchGrantInvalid();
         if (worker.retiredAt) {
           throw new GraphQLError(
             'This worker is retired — its name stays reserved, but it takes no new sessions.',
@@ -1034,6 +1090,12 @@ export const sessionMutations = {
               { extensions: { code: 'WORKER_HELD', workerId, heldBy: locked.held_by_user_id, heldByName: who } },
             );
           }
+          // #1709 (Holger via Vera #10775): a launch binds only a worker its
+          // holder still holds. A hold released or moved since the start was
+          // issued refuses the bind (never a claim), and nothing forces it.
+          if (launch && locked.held_by_user_id !== ctx.userId) {
+            throw new GraphQLError('The hold changed after this start was issued.', { extensions: { code: 'LAUNCH_REFUSED', reason: 'hold-changed' } });
+          }
           // Released during the wait: an unheld name is claimed by this bind,
           // through the same compare-and-set path as a never-held one.
           if (!locked.held_by_user_id) claimWorkerId = workerId;
@@ -1196,9 +1258,19 @@ export const sessionMutations = {
           host: input.host,
           tool: input.tool,
           family,
+          // #1709 (cor:agt:070:08): the launch, recorded on the session; the hold is unchanged.
+          ...(launch ? {
+            launchHostId: launch.grant.hostId,
+            launchOperationId: launch.grant.operationId,
+            launchTaskId: launch.grant.taskId,
+            launchIssuedBy: launch.issuedBy,
+          } : {}),
         },
         include: SESSION_INCLUDE,
         });
+        // #1709: the grant is spent by THIS bind, atomically: of two concurrent redemptions one loses here, and its
+        // whole bind rolls back.
+        if (launch && !(await consumeGrant(tx, launch.grant.id, created.id, new Date()))) throw launchGrantInvalid();
         // #1726: set who the worker reports to, in one step with the bind (a
         // spawn brief). Only onto a worker that reports to nobody, or to the
         // same worker (nothing to do): naming a different one would move a
@@ -1244,7 +1316,7 @@ export const sessionMutations = {
       });
       for (const id of supersededIds) sessionKeyCache.evict(id);
       return bound;
-    },
+    }),
 
     // #931: set a live session's mutable provenance fields mid-session — a PR
     // usually gets opened AFTER startSession already ran, so prNumber needs a
@@ -1369,7 +1441,7 @@ export const sessionMutations = {
           await tx.$queryRaw`SELECT id FROM sessions WHERE id = ${event.sessionId} FOR SHARE`;
           const session = await tx.session.findUnique({
             where: { id: event.sessionId },
-            select: { userId: true, appId: true, deletedAt: true },
+            select: { userId: true, appId: true, deletedAt: true, launchOperationId: true },
           });
           if (session && !session.deletedAt && ownsSession(ctx, session)) sessionId = event.sessionId;
         }
