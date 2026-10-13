@@ -217,10 +217,11 @@ export async function appendAlarmEvent(
 
 /**
  * cor:agt:060:02 / :03 — who set an availability record: cor:agt:060:08's
- * setter classes, plus `lapse` (#1766): the platform writing down that an
- * `until` passed (cor:agt:060:02).
+ * setter classes (`reports-to`, #1759: the worker it reports to, clearing a
+ * stall), plus `lapse` (#1766): the platform writing down that an `until`
+ * passed (cor:agt:060:02).
  */
-export type AvailabilitySetter = 'worker' | 'holder' | 'app-manager' | 'stall-rule' | 'host' | 'lapse';
+export type AvailabilitySetter = 'worker' | 'holder' | 'app-manager' | 'reports-to' | 'stall-rule' | 'host' | 'lapse';
 export type AvailabilityReason = 'stalled' | 'out-of-tokens' | 'host-down' | 'other';
 
 /** `availability.changed`: a worker's or a model family's record changed. Words and ids only. */

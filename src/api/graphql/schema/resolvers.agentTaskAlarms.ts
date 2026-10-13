@@ -12,9 +12,11 @@
 // AUTHORIZATION (plan design:agent-tasks §10):
 //   acknowledge an alarm   any owner in its chain, and nobody else (050:20, Proposed)
 //   set worker availability   the worker itself (only to unavailable); the
-//                           person holding its name; whoever manages the App
-//                           (060:08, Proposed). The stall rule sets it from the
-//                           evaluator; the host arm is T6 (#1709).
+//                           person holding its name; whoever manages the App;
+//                           the worker it reports to DIRECTLY, only to clear a
+//                           mark the stall rule set (060:08, Proposed; 060:11;
+//                           #1759). The stall rule sets it from the evaluator;
+//                           the host arm is T6 (#1709).
 //   set model-family availability  whoever manages the App (060:09, Proposed)
 //   set the stall schedule  whoever manages the App (#1706)
 //   read all of the above  the App's task audience: every participant and the
@@ -150,6 +152,28 @@ async function resolveAvailabilityWorker(
   return { workerId, app, actor };
 }
 
+/**
+ * cor:agt:060:11 (#1759) — may the worker a target reports to DIRECTLY make this
+ * write? Only to set it available, and only when the target's current record is
+ * a mark the stall rule set (cor:agt:060:07: unavailable, `stalled`, set by
+ * `stall-rule`). A mark anyone else set stays for them, whatever its reason
+ * (Victor, team chat #10324). The record is locked FOR UPDATE, so the stall
+ * evaluator's clearance or a holder's write cannot slip in between this check
+ * and the upsert. Throws AVAILABILITY_NOT_PERMITTED otherwise.
+ */
+async function authorizeReportsToClear(tx: Prisma.TransactionClient, workerId: string, state: 'available' | 'unavailable'): Promise<void> {
+  if (state !== 'available') {
+    throw notPermitted('The worker another reports to may only clear its stall, never mark it unavailable.');
+  }
+  const [cur] = await tx.$queryRaw<{ state: string; reason: string | null; setBy: string }[]>`
+    SELECT state, reason, set_by AS "setBy" FROM worker_availability WHERE worker_id = ${workerId} FOR UPDATE`;
+  if (!cur || cur.state !== 'unavailable' || cur.reason !== 'stalled' || cur.setBy !== 'stall-rule') {
+    throw notPermitted(
+      'The worker another reports to may clear only a mark the stall rule set; this record is for its holder or whoever manages the App.',
+    );
+  }
+}
+
 // ── Mutations ─────────────────────────────────────────────────────────────
 
 export const agentTaskAlarmMutations = {
@@ -205,7 +229,9 @@ export const agentTaskAlarmMutations = {
   /**
    * cor:agt:060:08 — set a worker's availability for work: the worker itself
    * (only to unavailable), the person holding its name, or whoever manages the
-   * App. Another worker never may (S2). Writes `availability.changed`.
+   * App. Another worker may only when the target reports to it directly, and
+   * then only to clear a stall (cor:agt:060:11, #1759): see
+   * {@link authorizeReportsToClear}. Writes `availability.changed`.
    */
   setWorkerAvailability: async (
     _: unknown,
@@ -219,21 +245,34 @@ export const agentTaskAlarmMutations = {
     requireWritable(ctx, app);
     await inTaskWriteTx(ctx, app, actor, () => workerNotFound(input.worker), async (tx, txCtx, freshApp) => {
       // The holder and retirement are read under a lock: releaseWorker and
-      // retireWorker update this row.
-      const [target] = await tx.$queryRaw<{ appId: string; heldByUserId: string | null; retiredAt: Date | null }[]>`
-        SELECT app_id AS "appId", held_by_user_id AS "heldByUserId", retired_at AS "retiredAt"
+      // retireWorker update this row. Who it reports to is read under the
+      // App's reportsTo graph lock, which inTaskWriteTx holds SHARED, so no
+      // writer can move the line before this commits (#1726 lock protocol).
+      const [target] = await tx.$queryRaw<{
+        appId: string; heldByUserId: string | null; retiredAt: Date | null; reportsToWorkerId: string | null;
+      }[]>`
+        SELECT app_id AS "appId", held_by_user_id AS "heldByUserId", retired_at AS "retiredAt",
+               reports_to_worker_id AS "reportsToWorkerId"
         FROM workers WHERE id = ${workerId} FOR SHARE`;
       if (!target || target.appId !== freshApp.id) throw workerNotFound(input.worker);
       if (target.retiredAt) throw taskError('WORKER_RETIRED', 'This worker is retired.', { workerId });
       let setBy: AvailabilitySetter;
       if (actor.kind === 'worker') {
         if (actor.workerId !== workerId) {
-          throw notPermitted("A worker sets only its own availability; another worker's is set by its holder or whoever manages the App.");
+          if (target.reportsToWorkerId !== actor.workerId) {
+            throw notPermitted(
+              "A worker sets only its own availability; another worker's is set by its holder, whoever manages the App, " +
+                'or, to clear a stall, the worker it reports to.',
+            );
+          }
+          await authorizeReportsToClear(tx, workerId, value.state);
+          setBy = 'reports-to';
+        } else {
+          if (value.state !== 'unavailable') {
+            throw notPermitted('A worker may mark itself unavailable, never available: its holder or whoever manages the App does that.');
+          }
+          setBy = 'worker';
         }
-        if (value.state !== 'unavailable') {
-          throw notPermitted('A worker may mark itself unavailable, never available: its holder or whoever manages the App does that.');
-        }
-        setBy = 'worker';
       } else if (target.heldByUserId !== null && target.heldByUserId === actor.userId) {
         setBy = 'holder';
       } else if (await actorManagesApp(txCtx, freshApp, actor)) {

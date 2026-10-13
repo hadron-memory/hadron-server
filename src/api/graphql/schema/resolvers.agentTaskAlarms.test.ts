@@ -189,6 +189,8 @@ describe('cor:agt:060:11 — the worker a stalled worker reports to may clear th
       { reason: 'stalled', setBy: 'holder', setByUserId: holder.id },
       { reason: 'stalled', setBy: 'app-manager', setByUserId: admin.id },
       { reason: 'other', setBy: 'worker', setByWorkerId: liam.id },
+      // The stall rule never writes another reason today; if it ever did, it is not a stall to clear.
+      { reason: 'other', setBy: 'stall-rule' },
     ]) {
       await db.workerAvailability.deleteMany();
       await mark(data);
