@@ -535,7 +535,7 @@ describe('cor:agt:050:13 — exactly one alarm per stall episode', () => {
   it('a re-run of the same pass is a no-op', async () => {
     await assignedToAnne('10:00');
     expect((await tick('10:15')).raised).toBe(1);
-    expect(await tick('10:15')).toEqual({ raised: 0, woken: 0, cleared: 0 });
+    expect(await tick('10:15')).toEqual({ raised: 0, woken: 0, cleared: 0, undeliverable: 0 });
     expect(await alarms()).toHaveLength(1);
   });
 
@@ -1060,12 +1060,13 @@ describe('Rook P3-4 on #1720 — the chain never leaves the task\'s App', () => 
   });
 });
 
-describe('PINNED until T5 (Rook P3-1 on #1720): escalation continues after the task moves', () => {
-  it('an unacknowledged alarm keeps waking up the chain after the task starts, and in an uninstalled App', async () => {
-    // As 050:19 / :20 read today, only an acknowledgement stops escalation. A wake only stamps
-    // agent_team_alarm_schedule.woken_at; nothing is delivered in T2. T5 (delivery) must re-check, before
-    // delivering, that the episode is current, the task open, the App installed, and the party's
-    // CURRENT access (isAppParticipant / mayStillDriveWorkerApp). Change this test deliberately.
+describe('Escalation stamps continue after the task moves; DELIVERY is re-checked (T5, #1708; Rook P3-1 on #1720)', () => {
+  it('an unacknowledged alarm keeps stamping up the chain after the task starts, and in an uninstalled App', async () => {
+    // As 050:19 / :20 read, only an acknowledgement stops escalation, so the schedule's woken_at stamps go on.
+    // Replaced deliberately in T5 (#1708): a stamp is no longer what reaches anyone. Delivery is the due-wake
+    // read, which re-checks the episode, the open task, the live App and the worker's current standing before
+    // handing a wake out (src/lib/agentTasks/taskWakes.ts). Pinned there: taskWakes1708.test.ts, "pre-delivery
+    // re-checks", including this exact case (the task started; the App uninstalled).
     const root = await assignedToAnne('09:00', { status: 'started', startedAt: at('09:05') });
     await drive(anne, '10:15');
     const review = await task({ parentTaskId: root.id, ownerWorkerId: anne.id, assigneeWorkerId: rook.id, assignedAt: at('10:00') });
@@ -1139,7 +1140,7 @@ describe('#1754 — backlog and the stall rules (cor:agt:050:02, :17)', () => {
     expect(await wakes(a.id)).toHaveLength(3); // ada (child owner), liam (root owner), then the App manager (#1761)
     await db.agentTask.update({ where: { id: child.id }, data: { status: 'backlog' } });
     // Row 1 fell due at 09:01; the 09:10 pass wakes it, and raises nothing new.
-    expect(await tick('09:10')).toEqual({ raised: 0, woken: 1, cleared: 0 });
+    expect(await tick('09:10')).toEqual({ raised: 0, woken: 1, cleared: 0, undeliverable: 0 });
     expect(await alarms('assignment.unassignable')).toHaveLength(1);
     expect((await wakes(a.id))[1].wokenAt).toEqual(at('09:10'));
   });
