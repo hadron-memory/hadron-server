@@ -9,6 +9,7 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
+import { sessionKeyCache } from '../../../lib/sessionKeyCache.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -126,5 +127,79 @@ describe('#1765 — the author may always delete their own (cor:dmo:110:16)', ()
     const ctx = { db, userId: platformAdmin.id, roles: ['ADMIN'] } as Context;
     expect(await codeOf(M.deleteComment(null, { commentRef: c.id, expectedRevision: c.revSeq }, ctx))).toBe('COMMENT_NOT_FOUND');
     expect((await live(c.id)).deletedAt).toBeNull();
+  });
+
+  // Cycle 1 (Anne blind P2-1 / Xylon local P2-2): the no-access acknowledgment
+  // must carry no live memory data.
+  it("the no-access acknowledgment reflects no post-revocation rename, resolve or revision", async () => {
+    const target = await node('b:1');
+    const c = await comment(target.id, 'mine');
+    await M.replyToComment(null, { commentRef: c.id, body: 'r1' }, as(admin.id));
+    await revoke(writer.id);
+    // Memory activity after the revocation, none of which the response may reflect.
+    await db.node.update({ where: { id: target.id }, data: { name: 'Renamed after revocation', revSeq: { increment: 1 } } });
+    await M.resolveCommentThread(null, { commentRef: c.id, expectedRevision: c.revSeq }, as(admin.id));
+    const deleted = await M.deleteComment(null, { commentRef: c.id, expectedRevision: c.revSeq }, as(writer.id));
+    expect(deleted).toMatchObject({ deleted: true, body: null, quote: null, state: null, resolvedAt: null });
+    expect(deleted.target.id).toBe(target.id);
+    expect(deleted.target.name).not.toBe('Renamed after revocation');
+    // The author-known anchor revision, not the live row's.
+    expect(deleted.target.revSeq).toBe(c.anchorRevision);
+  });
+
+  // Cycle 1 (Anne blind P2-2): the author may always delete — session or not.
+  it('an author deletes in an encrypted memory with no session key, stub and vanish both', async () => {
+    const gone = await comment((await node('b:2')).id, 'vanishes');
+    const kept = await comment((await node('b:3')).id, 'stubbed');
+    await M.replyToComment(null, { commentRef: kept.id, body: 'r1' }, as(admin.id));
+    // The memory turns encrypted with no active session key cached (a vector
+    // index would need its encryption ack; this memory carries none).
+    await db.memory.update({ where: { id: memory.id }, data: { isEncrypted: true, vectorIndexEnabled: false } });
+    expect(sessionKeyCache.getByMemoryId(memory.id)).toBeNull();
+    await expect(M.deleteComment(null, { commentRef: gone.id, expectedRevision: gone.revSeq }, as(writer.id)))
+      .resolves.toMatchObject({ deleted: true, body: null });
+    await expect(M.deleteComment(null, { commentRef: kept.id, expectedRevision: kept.revSeq }, as(writer.id)))
+      .resolves.toMatchObject({ deleted: true, body: null, quote: null });
+    // The stub's row is blanked: no text survives for the generic surfaces.
+    expect((await live(kept.id)).content).toBeNull();
+  });
+
+  // The §10 claim behind the authorKey peek: the database keeps it immutable.
+  it("a comment's author_key is immutable in the database", async () => {
+    const target = await node('b:4');
+    const c = await comment(target.id);
+    await expect(db.$executeRaw`UPDATE comment_meta SET author_key = ${`u:${admin.id}`} WHERE node_id = ${c.id}`)
+      .rejects.toThrow(/immutable/);
+  });
+
+  // Cycle 1 (Rook §10 P2-1): a non-author never enters the authority bracket —
+  // the unlocked peek conceals them before any lock is taken.
+  it("a non-author's concealed refusal takes no locks on the comment (Rook P2-1)", async () => {
+    const target = await node('c:1');
+    const mine = await comment(target.id, 'not yours', admin.id);
+    await revoke(writer.id);
+    let release!: () => void;
+    const held = new Promise<void>((r) => { release = r; });
+    const holder = db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM nodes WHERE id = ${mine.id} FOR UPDATE`;
+      await held;
+    }, { timeout: 20_000 });
+    // While the row is locked: the refusal must answer without waiting on it.
+    const outcome = await Promise.race([
+      errorOf(M.deleteComment(null, { commentRef: mine.id, expectedRevision: mine.revSeq }, as(writer.id))),
+      new Promise((resolve) => setTimeout(() => resolve('STILL WAITING ON THE LOCK'), 2_000)),
+    ]);
+    release();
+    await holder;
+    expect(outcome).toBeInstanceOf(GraphQLError);
+    expect((outcome as GraphQLError).extensions.code).toBe('COMMENT_NOT_FOUND');
+    expect((await live(mine.id)).deletedAt).toBeNull();
+  });
+
+  // Rook P2-1: the unlocked peek only routes; the locked row still decides.
+  it('the locked row re-checks authorship inside the transaction (text pin)', async () => {
+    const { readFileSync } = await import('node:fs');
+    const source = readFileSync(new URL('./resolvers.comments.ts', import.meta.url), 'utf8');
+    expect(source).toContain("if (row.commentMeta!.authorKey !== authorKey) throw commentMissing();");
   });
 });

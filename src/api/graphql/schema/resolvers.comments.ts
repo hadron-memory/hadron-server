@@ -120,6 +120,17 @@ async function keyForMemory(db: Context['db'] | Tx, memoryId: string): Promise<E
   return key;
 }
 
+/**
+ * #1765 — the memory's session key only while one is cached. No delete path
+ * needs to decrypt author content (a stub blanks it, a vanish never touches
+ * it), so an author may always delete their own comment, session or not —
+ * `keyForMemory`'s SESSION_EXPIRED never gates the delete.
+ */
+async function cachedKeyFor(db: Context['db'] | Tx, memoryId: string): Promise<EncryptionKey | null> {
+  const memory = await db.memory.findUniqueOrThrow({ where: { id: memoryId }, select: { isEncrypted: true } });
+  return memory.isEncrypted ? sessionKeyCache.getByMemoryId(memoryId) : null;
+}
+
 function decryptComment(row: { content: string | null; data: unknown }, key: EncryptionKey | null) {
   const plain = key
     ? decryptNodeFieldsWithKey({ content: row.content, data: row.data }, key)
@@ -683,7 +694,7 @@ async function deleteCommentReadable(
   if (await isMemoryHiddenForWrite(ctx, head.memoryId, 'node')) throw commentMissing();
   await requireCommentableClass(ctx.db, head.memoryId);
   await mayDeleteComment(ctx, head.memoryId, authorKey, head.id);
-  const key = await keyForMemory(ctx.db, head.memoryId);
+  const key = await cachedKeyFor(ctx.db, head.memoryId);
   let vanished = false;
   await withAuthorizedMemoryTx(ctx, head.memoryId, [],
     (txCtx) => mayDeleteComment(txCtx, head.memoryId, authorKey, head.id),
@@ -697,15 +708,71 @@ async function deleteCommentReadable(
 }
 
 /**
+ * #1765 — the no-access acknowledgment (cycle-1 seats: Anne P2-1, Xylon
+ * P2-2): the deleted comment's own record, and nothing else. Everything
+ * served is the comment's own data, the author-known anchor record, or the
+ * deletion itself. The target's identity is read for the URN; its name is
+ * blanked (the SDL field is non-null) and its revision is the anchor's, so
+ * no post-revocation rename or edit is reflected; the thread state reads
+ * null, never its live value. Read on the transaction, after the delete.
+ */
+async function frozenDeletedViewOf(tx: Tx, commentId: string): Promise<CommentView> {
+  const row = await tx.node.findUnique({ where: { id: commentId }, select: COMMENT_NODE_SELECT });
+  const meta = row?.commentMeta;
+  if (!row || !meta) throw commentMissing();
+  const [anchor, target] = await Promise.all([
+    tx.edge.findUnique({
+      where: { loc_memoryId: { loc: commentEdgeLoc(meta.threadRootId ?? row.id, 'anchor'), memoryId: row.memoryId } },
+      select: { anchorRevNo: true, anchorApprovalHash: true },
+    }),
+    tx.node.findUnique({
+      where: { id: meta.targetNodeId },
+      select: { id: true, loc: true, memoryId: true, nodeType: true },
+    }),
+  ]);
+  // The DB invariants make a comment without its anchor or target unreachable.
+  if (!anchor?.anchorRevNo || !anchor.anchorApprovalHash || !target) throw commentMissing();
+  const data = commentDataOf(row.data);
+  return {
+    id: row.id,
+    memoryId: row.memoryId,
+    loc: row.loc,
+    threadRootId: meta.threadRootId,
+    isTopLevel: meta.threadRootId == null,
+    anchorRevision: anchor.anchorRevNo,
+    anchorApprovalHash: anchor.anchorApprovalHash,
+    quote: null,
+    body: null,
+    state: null,
+    deleted: true,
+    deletedAt: meta.retractedAt ?? row.deletedAt,
+    deletedByKey: meta.retractedBy ?? meta.threadDeletedBy,
+    resolvedAt: null,
+    resolvedByKey: null,
+    authorKey: meta.authorKey,
+    createdBy: row.createdBy,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+    editedAt: data.lastEdit ? new Date(data.lastEdit.at) : null,
+    editedByKey: data.lastEdit?.by ?? null,
+    revSeq: row.revSeq,
+    target: { ...target, name: '', revSeq: anchor.anchorRevNo },
+  };
+}
+
+/**
  * #1765 — the author's carried right (cor:dmo:110:16): delete their own
- * comment with no memory access at all. The only authority is authorship of
- * the locked row — `author_key` is immutable, so the branch that landed here
- * cannot have gone stale — held inside the memory's authority bracket, which
- * still fences caller liveness and a concurrent ownership transfer. Anything
- * else about the memory is concealed: a non-author meets the same
- * COMMENT_NOT_FOUND as a missing comment (decided on the locked row, before
- * the revision can leak), and an authority denial (the memory gone mid-call)
- * answers as missing too.
+ * comment with no memory access at all. A non-author is turned away by the
+ * UNLOCKED authorKey peek below, before any transaction or lock is taken on
+ * a memory they cannot read (#9888, Rook P2-1 — the locked row still
+ * re-checks); `author_key` is immutable, so the peek cannot go stale. The
+ * author proceeds inside the memory's authority bracket, which fences caller
+ * liveness and a concurrent ownership transfer. Anything else about the
+ * memory is concealed: a non-author meets the same COMMENT_NOT_FOUND as a
+ * missing comment (before the revision can leak), and an authority denial
+ * (the memory gone mid-call) answers as missing too. The process-wide cached
+ * key, when one exists, encrypts only the stub write — nothing in the frozen
+ * acknowledgment is decrypted with it.
  */
 async function deleteOwnCommentWithoutAccess(
   ctx: Context,
@@ -713,29 +780,28 @@ async function deleteOwnCommentWithoutAccess(
   authorKey: string,
   expectedRevision: number,
 ): Promise<CommentView> {
-  let key: EncryptionKey | null = null;
-  let vanished = false;
+  const meta = await ctx.db.commentMeta.findUnique({ where: { nodeId: head.id }, select: { authorKey: true } });
+  if (meta?.authorKey !== authorKey) throw commentMissing();
+  let view: CommentView;
   try {
-    await withAuthorizedMemoryTx(ctx, head.memoryId, [], async () => {
+    view = await withAuthorizedMemoryTx(ctx, head.memoryId, [], async () => {
       // No access gate to re-run: authorship of the locked row below is the
       // whole gate, so there is nothing access-shaped to recheck here.
     }, async (tx, txCtx) => {
-      // An encrypted memory's key is used only while one is cached: the
-      // author may delete without a session (a vanished comment needs no key,
-      // and a stub's blanked data carries nothing to protect).
-      const memory = await tx.memory.findUniqueOrThrow({ where: { id: head.memoryId }, select: { isEncrypted: true } });
-      key = memory.isEncrypted ? sessionKeyCache.getByMemoryId(head.memoryId) : null;
+      const key = await cachedKeyFor(tx, head.memoryId);
       const { addressed: row } = await lockInThread(tx, head.id, head.memoryId);
       if (row.commentMeta!.authorKey !== authorKey) throw commentMissing();
       requireRevision(row, expectedRevision);
-      vanished = await deleteLockedComment(tx, txCtx, row, authorKey, key);
+      await deleteLockedComment(tx, txCtx, row, authorKey, key);
+      return frozenDeletedViewOf(tx, head.id);
     });
   } catch (error) {
     if (isAuthorizationDenial(error)) throw commentMissing();
     throw error;
   }
-  const view = await viewOf(ctx, head.id, key);
-  return vanished ? view : indexed(ctx, view);
+  // Nothing to re-index for a no-access caller: the delete already removed
+  // the vectors, and the acknowledgment serves no text.
+  return view;
 }
 
 /** Live (not deleted) replies under a top-level comment. */
