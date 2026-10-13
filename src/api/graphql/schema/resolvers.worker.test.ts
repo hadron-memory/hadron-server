@@ -292,6 +292,32 @@ describe('castWorker — confusable naming (#1677)', () => {
   });
 });
 
+describe('castWorker — broadcast-word names refused (#1870, cor:agt:020:02)', () => {
+  it('refuses a name whose MENTION TOKEN is a broadcast word, any spelling, and writes nothing', async () => {
+    // The refusal matches the token, not the raw name (#1870 brief, Vera
+    // #10580): All, TEAM and All! all slug to a broadcast token, so each
+    // would wake every registered destination on a tagless reply (#1867).
+    for (const name of ['All', 'TEAM', 'All!']) {
+      await expectCode(cast({ role: 'backend-engineer', name }), 'WORKER_NAME_RESERVED');
+    }
+    expect(await db.worker.count({ where: { appId: app.id } })).toBe(0);
+  });
+
+  it('a name that merely CONTAINS the word is allowed ("teamster")', async () => {
+    await expect(cast({ role: 'backend-engineer', name: 'teamster' })).resolves.toMatchObject({
+      name: 'teamster',
+    });
+  });
+
+  it('the preview refuses the same names — shared resolution, no drift (#964)', async () => {
+    const Q = (resolvers as unknown as { Query: Record<string, (p: unknown, a: unknown, c: Context) => Promise<unknown>> }).Query;
+    await expectCode(
+      Q.castWorkerPreview({}, { appRef: app.id, role: 'backend-engineer', name: 'All' }, ctx(admin.id)),
+      'WORKER_NAME_RESERVED',
+    );
+  });
+});
+
 describe('castWorker — agent resolution', () => {
   it('role picks the single installed agent whose personaRole matches', async () => {
     const worker = await cast({ role: 'backend-engineer', name: 'Zoe' });
