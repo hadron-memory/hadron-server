@@ -1014,17 +1014,28 @@ async function postToChannelRoot(
     // DIRECT target only. The token is derived from the worker's CURRENT
     // name (not the envelope's authorName snapshot), because every reader
     // computes the worker's own token from the live name — a renamed worker
-    // must still be notified. Skipped entirely on an encrypted memory: the
-    // stored envelope is ciphertext there, and mention-filtered reads don't
-    // exist on encrypted channels anyway, so there is nobody to fold for.
-    // The fold can never refuse a reply — a target whose author can't be
-    // resolved simply isn't folded.
-    if (!opts.system && replyTarget && !memEncInfo.isEncrypted) {
-      const targetEnv = replyTarget.data as Record<string, unknown> | null;
-      const targetAuthorId =
-        targetEnv && typeof targetEnv === 'object' && typeof targetEnv.authorWorkerId === 'string'
-          ? targetEnv.authorWorkerId
-          : null;
+    // must still be notified.
+    // #1874: an ENCRYPTED memory folds too (cor:agt:020:04 has no encrypted
+    // exception): the stored target envelope is ciphertext there, so it is
+    // decrypted with the SAME in-process session key the post itself already
+    // requires for sealing — no new key acquisition. A decrypt failure (key
+    // absent, or a corrupt envelope) skips the fold and NEVER refuses the
+    // reply; the typed-field guards apply to the decrypted object exactly as
+    // to a plaintext one.
+    if (!opts.system && replyTarget) {
+      let targetEnv: Record<string, unknown> | null = null;
+      if (memEncInfo.isEncrypted) {
+        try {
+          const resolved = decryptNodeFields({ data: replyTarget.data }, memEncInfo).data;
+          targetEnv = resolved && typeof resolved === 'object' ? (resolved as Record<string, unknown>) : null;
+        } catch {
+          targetEnv = null;
+        }
+      } else {
+        const raw = replyTarget.data;
+        targetEnv = raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : null;
+      }
+      const targetAuthorId = typeof targetEnv?.authorWorkerId === 'string' ? targetEnv.authorWorkerId : null;
       if (targetAuthorId && targetAuthorId !== envelope.authorWorkerId) {
         const targetAuthor = await tx.worker.findUnique({
           where: { id: targetAuthorId },
