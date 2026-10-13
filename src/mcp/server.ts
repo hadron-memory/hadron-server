@@ -1577,6 +1577,7 @@ async function renderNodeReadProjection(
   scope: 'content' | 'abstract' | 'all',
   opts: {
     locked?: boolean;
+    encryptedMemory?: boolean;
     auth?: AuthContext;
     batch?: {
       reports: ReadonlyMap<string, ReadValidationReport>;
@@ -1680,8 +1681,8 @@ async function renderNodeReadProjection(
 
   // #1591: the approval line. Approver by handle when a user is known, else
   // the stored principal info.
-  let approvalLine = `Approval: not approved (r${revision})`;
-  if (node.approvedRevNo != null && node.approvedAt) {
+  let approvalLine = opts.encryptedMemory ? 'Approval: not applicable (encrypted memory)' : `Approval: not approved (r${revision})`;
+  if (!opts.encryptedMemory && node.approvedRevNo != null && node.approvedAt) {
     const handle = node.approvedBy
       ? (opts.batch
         ? opts.batch.humanNames.get(node.approvedBy)
@@ -1696,8 +1697,8 @@ async function renderNodeReadProjection(
   }
 
   // #1591: the mint line. A node backfilled as minted has no minted revision.
-  let mintLine = 'Minted: no';
-  if (node.mintedAt) {
+  let mintLine = opts.encryptedMemory ? 'Minted: not applicable (encrypted memory)' : 'Minted: no';
+  if (!opts.encryptedMemory && node.mintedAt) {
     const at = node.mintedAt.toISOString();
     if (node.mintedRevNo == null) {
       mintLine = `Minted: at ${at} (backfilled)`;
@@ -4570,6 +4571,7 @@ export function createMcpServerInstance(
       // drift between the single-read and batch-read surfaces (cor:api:040:01).
       const projection = await renderNodeReadProjection(current, scope, {
         locked: lockState === 'locked',
+        encryptedMemory: lockState !== 'plaintext',
         auth,
       });
 
@@ -4976,6 +4978,7 @@ export function createMcpServerInstance(
         const lockState = mcpDecryptOrMark(n); // spec 041 — same posture as hadron_get_node
         const projection = await renderNodeReadProjection(n, scope, {
           locked: lockState === 'locked',
+          encryptedMemory: lockState !== 'plaintext',
           auth,
           batch: batchProvenance,
           memoryUrnOf,

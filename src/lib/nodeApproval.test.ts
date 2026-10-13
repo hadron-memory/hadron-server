@@ -363,32 +363,112 @@ describe('findNodes approvalState filter (#1591)', () => {
 });
 
 describe('approvals on an encrypted memory (#1591)', () => {
-  it('hashes the plaintext, and refuses SESSION_EXPIRED without the session key', async () => {
+  it('refuses encrypted approval and integrity reads, cached key or not, without writes', async () => {
     const enc = await resolvers.Mutation.createMemory(null, {
       orgId: (await db.memory.findUniqueOrThrow({ where: { id: memory.id } })).organizationId!,
       name: 'approvals-encrypted', memoryClass: 'private',
     }, as());
-    const n = await db.node.create({
-      data: { id: generateId(), memoryId: enc.id, loc: 'e:1', name: 'Secret', abstract: 'Hidden summary', content: 'Hidden body' },
-    });
+    const n = await db.node.create({data: {id: generateId(), memoryId: enc.id, loc: 'e:1', name: 'Secret', content: 'Hidden body'}});
     const dataKey = Buffer.alloc(32, 7).toString('base64');
     await resolvers.Mutation.encryptMemory(null, { memoryId: enc.id, dataKey }, as());
-    const stored = await db.node.findUniqueOrThrow({ where: { id: n.id } });
+    const stored = await db.node.findUniqueOrThrow({where: {id: n.id}});
     expect(isCiphertext(stored.content)).toBe(true);
-
-    sessionKeyCache.clear();
-    expect(await codeOf(approve(n.id))).toBe('SESSION_EXPIRED');
-    expect(await codeOf(verify(n.id))).toBe('SESSION_EXPIRED');
-
-    sessionKeyCache.set('approval-test', enc.id, parseDataKey(dataKey));
     try {
-      const { approval } = await approve(n.id);
-      expect(approval.hash).toBe(hashOf({ name: 'Secret', abstract: 'Hidden summary', content: 'Hidden body' }));
-      expect((await verify(n.id)).state).toBe('INTACT');
-    } finally {
-      sessionKeyCache.clear();
+      for (const cached of [false, true]) {
+        sessionKeyCache.clear();
+        if (cached) sessionKeyCache.set('approval-test', enc.id, parseDataKey(dataKey));
+        expect(await codeOf(approve(n.id))).toBe('ENCRYPTED_MEMORY_NOT_APPLICABLE');
+        expect(await codeOf(resolvers.Mutation.approveMemoryNodes(null, {memoryRef: enc.id}, as()))).toBe('ENCRYPTED_MEMORY_NOT_APPLICABLE');
+        expect(await codeOf(verify(n.id))).toBe('ENCRYPTED_MEMORY_NOT_APPLICABLE');
+        for (const operation of ['mintMemoryNodes', 'mintSpecCorpus'] as const) {
+          for (const dryRun of [false, true]) {
+            expect(await codeOf(resolvers.Mutation[operation](null, {memoryRef: enc.id, dryRun}, as()))).toBe('SPEC_CORPUS_ENCRYPTED_UNSUPPORTED');
+          }
+        }
+        expect(await db.node.findUniqueOrThrow({where: {id: n.id}})).toEqual(stored);
+        expect(await resolvers.Node.approvalStatus(stored, {}, as())).toEqual({state: 'NOT_APPLICABLE', approval: null});
+        expect((await resolvers.Node.mintStatus(stored, {}, as())).minted).toBe(false);
+        const mcp = createTestableMcpServer({userId:admin.id,roles:[],clientId:`user:${admin.id}`});
+        const text = await mcp.callToolText('hadron_get_node',{urn:`hrn:node:${enc.urn}:e:1`});
+        expect(text).toContain('Approval: not applicable (encrypted memory)');
+        expect(text).toContain('Minted: not applicable (encrypted memory)');
+
+      }
+    } finally { sessionKeyCache.clear(); }
+  });
+
+  it('hides retained approval metadata from list and by-id encrypted revision reads with and without a key', async () => {
+    memory = await resolvers.Mutation.createMemory(null, {
+      orgId: (await db.memory.findUniqueOrThrow({where:{id:memory.id}})).organizationId!,
+      name:'encrypted-history',memoryClass:'private',
+    }, as());
+    const n = await node('history');
+    await approve(n.id);
+    await edit(n.id, 'changed');
+    const retained = await db.nodeRevision.findFirstOrThrow({where:{nodeId:n.id,approvalHash:{not:null}}});
+    const dataKey = Buffer.alloc(32,9).toString('base64');
+    await resolvers.Mutation.encryptMemory(null,{memoryId:memory.id,dataKey},as());
+    try {
+      for (const cached of [false,true]) {
+        sessionKeyCache.clear();
+        if(cached) sessionKeyCache.set('history-key',memory.id,parseDataKey(dataKey));
+        const ctx: Context = {...as(),roles:['READER']};
+        const list = await resolvers.Query.nodeRevisions(null,{nodeRef:n.id},ctx);
+        const single = await resolvers.Query.nodeRevision(null,{revisionId:retained.id},ctx);
+        expect(list.some((r:{id:string})=>r.id===retained.id)).toBe(true);
+        for(const r of [...list,single]) {
+          expect(r).not.toBeNull();
+          expect(r!.approvalHash).toBeNull();
+          expect(r!.approvedAt).toBeNull();
+          expect(r!.approvedBy).toBeNull();
+          expect(r!.approvedByInfo).toBeNull();
+        }
+      }
+      expect((await db.nodeRevision.findUniqueOrThrow({where:{id:retained.id}})).approvalHash).toBe(retained.approvalHash);
+    } finally {sessionKeyCache.clear();}
+  });
+
+  it('rechecks encryption after the initial write authorization', async () => {
+    const n = await node('race');
+    const before = await db.node.findUniqueOrThrow({where:{id:n.id}});
+    const transaction = db.$transaction.bind(db);
+    const spy = vi.spyOn(db, '$transaction').mockImplementationOnce(async (...args: any[]) => {
+      await db.memory.update({where:{id:memory.id},data:{isEncrypted:true,vectorIndexEnabled:false}});
+      return (transaction as any)(...args);
+    });
+    try {
+      expect(await codeOf(approve(n.id))).toBe('ENCRYPTED_MEMORY_NOT_APPLICABLE');
+      expect(await db.node.findUniqueOrThrow({where:{id:n.id}})).toEqual(before);
+    } finally { spy.mockRestore(); }
+  });
+
+  it('ignores retained records in encrypted status and both approval filter paths', async () => {
+    const n = await node('retained');
+    await approve(n.id);
+    await db.node.update({where:{id:n.id},data:{mintedAt:new Date(),mintedHash:'retained',mintedRevNo:1,mintedBy:admin.id}});
+    await db.node.update({where:{id:n.id},data:{properties:{marker:'yes'}}});
+    await db.memory.update({where:{id:memory.id},data:{isEncrypted:true,vectorIndexEnabled:false}});
+    const row = await db.node.findUniqueOrThrow({where:{id:n.id}});
+    expect(await resolvers.Node.approvalStatus(row, {}, as())).toEqual({state:'NOT_APPLICABLE',approval:null});
+    expect((await resolvers.Node.mintStatus(row, {}, as())).hash).toBeNull();
+    const mcp = createTestableMcpServer({userId:admin.id,roles:[],clientId:`user:${admin.id}`});
+    const text = await mcp.callToolText('hadron_get_node', {urn:`hrn:node:${memory.urn}:retained`});
+    expect(text).toContain('Approval: not applicable (encrypted memory)');
+    expect(text).toContain('Minted: not applicable (encrypted memory)');
+
+    for (const viaSql of [false,true]) {
+      for (const minted of [false,true]) {
+        const result = await resolvers.Query.findNodes(null,{filter:{memoryIds:[memory.id],minted,...(viaSql?{where:{path:['marker'],eq:'yes'}}:{})}},as());
+        expect(result.hits.some((h:{node:{id:string}})=>h.node.id===n.id)).toBe(!minted);
+      }
+
+      for (const state of ['APPROVED','SUPERSEDED','NOT_APPROVED','NOT_APPLICABLE'] as NodeApprovalState[]) {
+        const result = await resolvers.Query.findNodes(null, {filter:{memoryIds:[memory.id],approvalState:state,...(viaSql?{where:{path:['marker'],eq:'yes'}}:{})}}, as());
+        expect(result.hits.some((h: {node:{id:string}})=>h.node.id===n.id)).toBe(state==='NOT_APPLICABLE');
+      }
     }
   });
+
 });
 
 describe('hadron_get_node Approval line (#1591)', () => {

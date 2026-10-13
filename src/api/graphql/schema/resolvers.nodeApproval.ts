@@ -51,18 +51,11 @@ export async function mayMintNodes(ctx: Context, memoryId: string): Promise<void
   await requireMemoryWriteAccess(ctx, memoryId);
 }
 
-/** The session key of an encrypted memory, or `SESSION_EXPIRED`; null for a plaintext memory. */
-async function keyForMemory(ctx: Context, memoryId: string): Promise<EncryptionKey | null> {
+/** E1: no approval-derived hashes for encrypted memories, even with a cached key. */
+async function requirePlainApprovalMemory(ctx: Context, memoryId: string): Promise<null> {
   const memory = await ctx.db.memory.findUniqueOrThrow({ where: { id: memoryId }, select: { isEncrypted: true } });
   if (!memory.isEncrypted) return null;
-  const key = sessionKeyCache.getByMemoryId(memoryId);
-  if (!key) {
-    throw new GraphQLError(
-      `SESSION_EXPIRED: memory ${memoryId} is encrypted but no active session key is available.`,
-      { extensions: { code: 'SESSION_EXPIRED', memoryId } },
-    );
-  }
-  return key;
+  throw new GraphQLError('Approval and integrity verification are not applicable to encrypted memories.', { extensions: { code: 'ENCRYPTED_MEMORY_NOT_APPLICABLE', memoryId } });
 }
 
 function nodeNotFound(nodeRef: string): GraphQLError {
@@ -139,7 +132,7 @@ export const nodeApprovalQueries = {
   verifyNode: async (_: unknown, { nodeRef }: { nodeRef: string }, ctx: Context) => {
     const { id, memoryId } = await resolveLiveNode(ctx, nodeRef);
     if (!(await isMemoryReadableCached(ctx, memoryId))) throw nodeNotFound(nodeRef);
-    const key = await keyForMemory(ctx, memoryId);
+    const key = await requirePlainApprovalMemory(ctx, memoryId);
     // Pinned to the memory the read gate admitted, and live: a node moved into
     // another memory since the gate must not disclose that memory's loc or a
     // hash of its text (Atilla/Chip, PR #1592).
@@ -156,7 +149,7 @@ export const nodeApprovalQueries = {
   verifyMemoryNodes: async (_: unknown, { memoryRef }: { memoryRef: string }, ctx: Context) => {
     const { id: memoryId } = await resolveMemoryRef(ctx.db, memoryRef);
     if (!(await isMemoryReadableCached(ctx, memoryId))) throw new MemoryNotFoundError(memoryRef);
-    const key = await keyForMemory(ctx, memoryId);
+    const key = await requirePlainApprovalMemory(ctx, memoryId);
     // #1607 — comments are never approved, so they are outside the tamper
     // check entirely (cor:dmo:110:06), not reported as NOT_APPROVED.
     const nodes = await ctx.db.node.findMany({
@@ -197,11 +190,13 @@ export const nodeApprovalMutations = {
     // encrypted memory meets FORBIDDEN whether or not a key is cached
     // (@copilot, PR #1592). Re-checked inside the fenced transaction below.
     await mayApproveNodes(ctx, memoryId);
-    const key = await keyForMemory(ctx, memoryId);
+    await requirePlainApprovalMemory(ctx, memoryId);
+    // E1 intentionally never supplies a decryption key to the approval writer.
+    const key = null;
     try {
       const { node } = await withAuthorizedMemoryTx(
         ctx, memoryId, [],
-        (txCtx) => mayApproveNodes(txCtx, memoryId),
+        async (txCtx) => { await mayApproveNodes(txCtx, memoryId); await requirePlainApprovalMemory(txCtx, memoryId); },
         (tx) => approveNodeInTransaction(tx, id, {
           memoryId, approver: editorFromAuth(ctx), key, expectedRevision: revision,
         }),
@@ -223,10 +218,12 @@ export const nodeApprovalMutations = {
   approveMemoryNodes: async (_: unknown, { memoryRef }: { memoryRef: string }, ctx: Context) => {
     const { id: memoryId } = await resolveMemoryRef(ctx.db, memoryRef);
     await concealUnreadableDenial(ctx, memoryId, memoryRef, () => mayApproveNodes(ctx, memoryId));
-    const key = await keyForMemory(ctx, memoryId);
+    await requirePlainApprovalMemory(ctx, memoryId);
+    // E1 intentionally never supplies a decryption key to the approval writer.
+    const key = null;
     const outcome = await withAuthorizedMemoryTx(
       ctx, memoryId, [],
-      (txCtx) => mayApproveNodes(txCtx, memoryId),
+      async (txCtx) => { await mayApproveNodes(txCtx, memoryId); await requirePlainApprovalMemory(txCtx, memoryId); },
       async (tx) => {
         // Lock in id order, so two bulk approvals cannot deadlock each other.
         // #1591: only unminted nodes are approved in bulk; a minted node's
@@ -381,6 +378,13 @@ async function flushStatusColumns(ctx: Context, kind: StatusColumns, batch: Colu
   }
 }
 
+/** Read the memory state rather than trusting decrypted parent projections. */
+async function encryptedStatusParent(ctx: Context, n: { id: string; memoryId?: string }): Promise<boolean> {
+  const memoryId = n.memoryId ?? (await ctx.db.node.findUnique({where:{id:n.id},select:{memoryId:true}}))?.memoryId;
+  if (!memoryId) return false;
+  return (await ctx.db.memory.findUnique({where:{id:memoryId},select:{isEncrypted:true}}))?.isEncrypted === true;
+}
+
 export const nodeApprovalFieldResolvers = {
   Node: {
     /**
@@ -394,6 +398,7 @@ export const nodeApprovalFieldResolvers = {
      * from paying one transaction per row.
      */
     approvalStatus: async (n: ApprovalParent, args: unknown, ctx: Context) => {
+      if (await encryptedStatusParent(ctx, n)) return { state: 'NOT_APPLICABLE', approval: null };
       const row = 'approvedRevNo' in n && n.approvedRevNo !== undefined
         ? n
         : await loadStatusColumns(ctx, 'approval', n.id, n.memoryId);
@@ -404,6 +409,7 @@ export const nodeApprovalFieldResolvers = {
     },
     /** #1591 — whether the node is minted, and the record of it. */
     mintStatus: async (n: MintParent & { memoryId?: string }, _: unknown, ctx: Context) => {
+      if (await encryptedStatusParent(ctx, n)) return mintStatusOf(null);
       const row = n.mintedAt !== undefined
         ? n
         : await loadStatusColumns(ctx, 'mint', n.id, n.memoryId);
