@@ -2,7 +2,8 @@
 -- this SQL: included verbatim by prisma/post-push.sql (dev DB, test template,
 -- CI) and copied into the newest comment migration (prod, which does not run
 -- post-push.sql): 20261005200000_comment_nodes, then #1721's
--- 20261010100000_comment_rulings. Change it only together with a new
+-- 20261010100000_comment_rulings, then the anchor CHECK in #1857
+-- 20261013170000_encrypted_comment_anchor_nullable. Change it only together with a new
 -- migration that carries the new text. Idempotent.
 --
 -- The application path refuses every case first with a typed error; these are
@@ -14,11 +15,12 @@ ALTER TABLE "nodes" ADD CONSTRAINT "chk_nodes_comment_unapproved" CHECK (
   "node_type" <> 'comment'
   OR ("approved_rev_no" IS NULL AND "approval_hash" IS NULL AND "minted_at" IS NULL AND "minted_hash" IS NULL));
 
--- An anchor edge carries its revision and hash; no other edge does (cor:dmo:110:01).
+-- An anchor carries its revision and an optional hash; other edges carry neither (cor:dmo:110:01).
 ALTER TABLE "edges" DROP CONSTRAINT IF EXISTS "chk_edges_governed_anchor";
 ALTER TABLE "edges" ADD CONSTRAINT "chk_edges_governed_anchor" CHECK (
   ("governed_kind" IS NOT DISTINCT FROM 'COMMENT_ANCHOR')
-    = ("anchor_rev_no" IS NOT NULL AND "anchor_approval_hash" IS NOT NULL)
+    = ("anchor_rev_no" IS NOT NULL)
+  AND ("governed_kind" IS NOT DISTINCT FROM 'COMMENT_ANCHOR' OR "anchor_approval_hash" IS NULL)
   AND ("anchor_rev_no" IS NULL OR "anchor_rev_no" > 0)
   AND ("anchor_approval_hash" IS NULL OR "anchor_approval_hash" ~ '^[0-9a-f]{64}$'));
 

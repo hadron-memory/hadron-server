@@ -2396,8 +2396,8 @@ export const typeDefs = `#graphql
     isTopLevel: Boolean!
     "The target revision the thread was written against (replies inherit their thread's)."
     anchorRevision: Int!
-    "The approval hash of the target's title/abstract/content at anchorRevision: 64 lowercase hex."
-    anchorApprovalHash: String!
+    "The target fingerprint at anchorRevision: 64 lowercase hex, or null for encrypted targets (hrn:node:hadronmemory.com:specs:cor:dmo:110:01)."
+    anchorApprovalHash: String
     "anchorRevision equals the target's current revision. When false, show the comment as about an older revision (hrn:node:hadronmemory.com:specs:cor:dmo:110:01)."
     anchorIsCurrent: Boolean!
     "Null when deleted."
