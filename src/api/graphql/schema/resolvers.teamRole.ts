@@ -39,6 +39,7 @@ import { writeNodeCore, nodeMutations } from './resolvers.mutation.node.js';
 import {
   type Context,
   requireMemoryWriteAccess,
+  requireAgentAccess,
   requireOwnerOrOrgRole,
   clampListTake,
 } from './resolvers.helpers.js';
@@ -215,7 +216,7 @@ async function buildTeamRole(
       roleAgent = entry.agent;
     } else {
       try {
-        await requireOwnerOrOrgRole(ctx, agent, 'READER', 'agent');
+        await requireAgentAccess(ctx, agent, 'READER');
         roleAgent = entry.agent;
       } catch {
         roleAgent = null;

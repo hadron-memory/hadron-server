@@ -234,11 +234,11 @@ describe('user-owned App platform administration (#1734)', () => {
     );
   }
 
-  it('appKeys / appAIConfig admit a non-owner platform admin', async () => {
+  it('appKeys admit a non-owner platform admin; provider credentials remain owner-only (#10659)', async () => {
     const app = await makeApp();
     const adminCtx = ctx({ userId: otherId, roles: ['ADMIN'] });
     await expect(resolvers.Query.appKeys(null, { appRef: app.id }, adminCtx)).resolves.toEqual(expect.any(Array));
-    await expect(resolvers.Query.appAIConfig(null, { appRef: app.id }, adminCtx)).resolves.toBeNull();
+    await expect(resolvers.Query.appAIConfig(null, { appRef: app.id }, adminCtx)).rejects.toThrow('Forbidden');
   });
 
   it('regenerateAppKey + ensureAppMember re-read a claimed platform role and deny a non-admin', async () => {

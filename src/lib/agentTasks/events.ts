@@ -24,6 +24,9 @@ export const TASK_EVENT_TYPES = [
   'task.progress',
   'task.finished',
   'task.cancelled',
+  // #1754 — the backlog moves (cor:agt:050:02).
+  'task.parked',
+  'task.ready',
 ] as const;
 export type TaskEventType = (typeof TASK_EVENT_TYPES)[number];
 
@@ -44,20 +47,26 @@ export const ASSIGNMENT_EVENT_TYPES = ['assignment.queued', 'assignment.matched'
 export const ASSIGNED_EVENT_TYPES = ['task.assigned', 'task.reassigned', 'assignment.matched'] as const;
 
 /** A party to a task: exactly one of a Worker or a User. */
-export type TaskParty = { workerId: string; userId?: never } | { userId: string; workerId?: never };
+export type TaskParty = { workerId: string; userId?: never; via?: never } | { userId: string; workerId?: never; via?: 'manager' };
 
 /** Who acted: the human credential, and the Worker / Agent the request's session is bound to (#1610). */
-export type EventActor = { userId: string | null; workerId: string | null; agentId: string | null };
+export type EventActor = {
+  userId: string | null; workerId: string | null; agentId: string | null;
+  /** #1756: the headless run that acted. Then the three above are null. */
+  runId?: string | null;
+};
 
 /** The payload each type carries. Ids, counts, outcome words and flags only — never text. */
 export type TaskEventPayload =
-  | { type: 'task.created'; parentTaskId: string | null; hasAssignee: boolean }
+  | { type: 'task.created'; parentTaskId: string | null; owner: TaskParty; hasAssignee: boolean }
   | { type: 'task.assigned'; assignee: TaskParty; closeSessionWhenDone: boolean }
   | { type: 'task.reassigned'; from: TaskParty; to: TaskParty; closeSessionWhenDone: boolean }
   | { type: 'task.started' }
   | { type: 'task.progress' }
   | { type: 'task.finished'; outcome: string }
-  | { type: 'task.cancelled'; fromStatus: 'pending' | 'started'; openChildCount: number }
+  | { type: 'task.cancelled'; fromStatus: 'backlog' | 'pending' | 'started'; openChildCount: number }
+  | { type: 'task.parked' }
+  | { type: 'task.ready' }
   | { type: 'assignment.queued' }
   | { type: 'assignment.matched'; assignee: { workerId: string }; family: string; closeSessionWhenDone: boolean };
 
@@ -68,14 +77,19 @@ export function eventActor(userId: string | null | undefined): EventActor {
 }
 
 function partyJson(p: TaskParty): Prisma.InputJsonObject {
-  return p.workerId ? { workerId: p.workerId } : { userId: p.userId as string };
+  if (p.workerId) return { workerId: p.workerId };
+  // `via: 'manager'` marks a chain entry that is there only because the person managed the App (#1761): it is
+  // provenance, so a later demotion cannot turn it into an owner's standing to acknowledge.
+  return p.via ? { userId: p.userId as string, via: p.via } : { userId: p.userId as string };
 }
 
 /** The stored `payload` for a typed event. Exhaustive over the union, so a new type must be built here. */
 function payloadJson(e: TaskEventPayload): Prisma.InputJsonObject {
   switch (e.type) {
     case 'task.created':
-      return { parentTaskId: e.parentTaskId, hasAssignee: e.hasAssignee };
+      // The owner rides task.created (#1757, cor:agt:050:01): a creator-named
+      // owner is visible to the event stream from creation.
+      return { parentTaskId: e.parentTaskId, owner: partyJson(e.owner), hasAssignee: e.hasAssignee };
     case 'task.assigned':
       return { assignee: partyJson(e.assignee), closeSessionWhenDone: e.closeSessionWhenDone };
     case 'task.reassigned':
@@ -87,6 +101,8 @@ function payloadJson(e: TaskEventPayload): Prisma.InputJsonObject {
       return { outcome: e.outcome };
     case 'task.cancelled':
       return { fromStatus: e.fromStatus, openChildCount: e.openChildCount };
+    case 'task.parked':
+    case 'task.ready':
     case 'assignment.queued':
       return {};
     case 'assignment.matched':
@@ -118,6 +134,7 @@ export async function appendTaskEvent(
       actorUserId: args.actor.userId,
       actorWorkerId: args.actor.workerId,
       actorAgentId: args.actor.agentId,
+      actorRunId: args.actor.runId ?? null,
       subjectWorkerId: subjectWorkerId(args.event),
       payload: payloadJson(args.event),
       ...(args.createdAt ? { createdAt: args.createdAt } : {}),
@@ -198,8 +215,13 @@ export async function appendAlarmEvent(
   return rows[0]?.id ?? null;
 }
 
-/** cor:agt:060:02 / :03 — who set an availability record (cor:agt:060:08 setter classes). */
-export type AvailabilitySetter = 'worker' | 'holder' | 'app-manager' | 'stall-rule' | 'host';
+/**
+ * cor:agt:060:02 / :03 — who set an availability record: cor:agt:060:08's
+ * setter classes (`reports-to`, #1759: the worker it reports to, clearing a
+ * stall), plus `lapse` (#1766): the platform writing down that an `until`
+ * passed (cor:agt:060:02).
+ */
+export type AvailabilitySetter = 'worker' | 'holder' | 'app-manager' | 'reports-to' | 'stall-rule' | 'host' | 'lapse';
 export type AvailabilityReason = 'stalled' | 'out-of-tokens' | 'host-down' | 'other';
 
 /** `availability.changed`: a worker's or a model family's record changed. Words and ids only. */
@@ -213,6 +235,8 @@ export type AvailabilityEvent =
       setBy: AvailabilitySetter;
       /** The alarm that made the worker unavailable (cor:agt:060:07). */
       alarmEventId?: string;
+      /** #1766: the `until` that passed, when the lapse made the worker available (cor:agt:060:02). */
+      lapsedAt?: Date;
     }
   | {
       kind: 'family';
@@ -230,7 +254,12 @@ export async function appendAvailabilityEvent(
   const e = args.event;
   const common = { state: e.state, reason: e.reason, until: e.until ? e.until.toISOString() : null };
   const payload: Prisma.InputJsonObject = e.kind === 'worker'
-    ? { ...common, setBy: e.setBy, ...(e.alarmEventId ? { alarmEventId: e.alarmEventId } : {}) }
+    ? {
+        ...common,
+        setBy: e.setBy,
+        ...(e.alarmEventId ? { alarmEventId: e.alarmEventId } : {}),
+        ...(e.lapsedAt ? { lapsedAt: e.lapsedAt.toISOString() } : {}),
+      }
     : { ...common, family: e.family };
   await tx.agentTeamEvent.create({
     data: {
@@ -246,7 +275,7 @@ export async function appendAvailabilityEvent(
   });
 }
 
-/** The actor of a platform-made change (the stall evaluator): nobody. */
+/** The actor of a platform-made change (the stall evaluator, a lapse): nobody. */
 export const PLATFORM_ACTOR: EventActor = { userId: null, workerId: null, agentId: null };
 
 // ── #1707: host registrations ──────────────────────────────────────────────

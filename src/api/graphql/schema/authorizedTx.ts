@@ -106,31 +106,7 @@ export async function withAuthorizedTx<T>(
       }
     }
 
-    const actor = ctx.userId
-      ? await tx.user.findUnique({ where: { id: ctx.userId }, select: { roles: true, deletedAt: true } })
-      : null;
-    if (ctx.userId && (!actor || actor.deletedAt)) throw authorizationDenied();
-    // Middleware authenticated this particular hdr_user_ key before the
-    // transaction began. Its owner can revoke it while this request waits on
-    // the user anchor, so validate the presented credential again here. The
-    // locking read also forces a SERIALIZABLE stale snapshot to retry if the
-    // key's revoked_at changed during the wait.
-    if (ctx.apiKeyId) {
-      if (!ctx.userId) throw authorizationDenied();
-      const keys = await tx.$queryRaw<Array<{ id: string }>>`
-        SELECT id FROM user_api_keys
-        WHERE id = ${ctx.apiKeyId} AND user_id = ${ctx.userId} AND revoked_at IS NULL
-        FOR SHARE`;
-      if (keys.length !== 1) throw authorizationDenied();
-    }
-
-    const txCtx: Context = {
-      ...withoutRequestCaches(ctx, tx),
-      // An impersonation token deliberately has no platform roles, even when
-      // its target User row does. The read-only support context must not gain
-      // the target's platform authority during a delegated helper call.
-      roles: ctx.impersonation ? [] : actor ? actor.roles : ctx.roles,
-    };
+    const txCtx = await liveTxContext(ctx, tx);
     await authorize(txCtx);
     return write(tx, txCtx);
   }, {
@@ -194,4 +170,39 @@ export async function withAuthorizedMemoryTx<T>(
     }
   }
   throw new Error('Memory ownership changed repeatedly; retry the operation');
+}
+
+/**
+ * The caller's context for a decision taken INSIDE `tx`, after the caller's authority anchors are held:
+ * request caches dropped, the db bound to `tx`, platform roles re-read from the user row (a demotion that
+ * committed first is seen), and a presented `hdr_user_` key re-validated. Throws `authorizationDenied` for a
+ * deleted user or a revoked key. The one place this is decided, for `withAuthorizedTx` and for a transaction
+ * that takes its anchors itself (#1708, Riana's demotion P2 on #1859).
+ */
+export async function liveTxContext(ctx: Context, tx: Prisma.TransactionClient): Promise<Context> {
+  const actor = ctx.userId
+    ? await tx.user.findUnique({ where: { id: ctx.userId }, select: { roles: true, deletedAt: true } })
+    : null;
+  if (ctx.userId && (!actor || actor.deletedAt)) throw authorizationDenied();
+  // Middleware authenticated this particular hdr_user_ key before the
+  // transaction began. Its owner can revoke it while this request waits on
+  // the user anchor, so validate the presented credential again here. The
+  // locking read also forces a SERIALIZABLE stale snapshot to retry if the
+  // key's revoked_at changed during the wait.
+  if (ctx.apiKeyId) {
+    if (!ctx.userId) throw authorizationDenied();
+    const keys = await tx.$queryRaw<Array<{ id: string }>>`
+      SELECT id FROM user_api_keys
+      WHERE id = ${ctx.apiKeyId} AND user_id = ${ctx.userId} AND revoked_at IS NULL
+      FOR SHARE`;
+    if (keys.length !== 1) throw authorizationDenied();
+  }
+
+  return {
+    ...withoutRequestCaches(ctx, tx),
+    // An impersonation token deliberately has no platform roles, even when
+    // its target User row does. The read-only support context must not gain
+    // the target's platform authority during a delegated helper call.
+    roles: ctx.impersonation ? [] : actor ? actor.roles : ctx.roles,
+  };
 }

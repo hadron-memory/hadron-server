@@ -6,9 +6,9 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir, uptime } from 'node:os';
 import { join } from 'node:path';
-import {
-  type Config, type Runner, type RunResult, RouterError, State, breakStaleLock, describeOutcome, loadConfig, pollOnce,
-  promptLineIsEmpty, status,
+import { nudgeText,
+  type Config, type Runner, type RunResult, type Terminal, RouterError, State, breakStaleLock, describeOutcome, loadConfig, pollOnce,
+  promptLineIsEmpty, resolveTerminal, screenAgentFamily, status,
 } from './router.js';
 
 /** Rendered screens as Orca returned them on 2026-10-01 (idle, nobody typing). */
@@ -77,6 +77,26 @@ class FakeCLIs {
   sent: Array<[string, string]> = [];
   /** Workers with a mention-only row; `null` = every worker queried has one. */
   mentionOnly: Set<string> | null = null;
+  /** #1826 — the team Channel's head served to `channel(ref:)`; `headOk=false` errors. */
+  head = 120;
+  headOk = true;
+  headReads = 0;
+  /** Served on the SECOND+ head query (the recompute at send); undefined = always base. */
+  freshHead?: number;
+  /** #1826 — the worker's cursor (channelReadState.lastSeenSeq); absent = 0 (never checkpointed). */
+  cursors = new Map<string, number>();
+  cursorQueries = new Map<string, number>();
+  /** Served on the worker's SECOND+ cursor query (the recompute at send). */
+  freshCursors = new Map<string, number>();
+  /** channelReadState answers null (unreadable/unknown) for these workers. */
+  cursorNulls = new Set<string>();
+  cursorFails = new Set<string>();
+  /** #1829 P1-1 — serve errors WITH partial data for these workers (legal GraphQL). */
+  cursorErrors = new Set<string>();
+  /** #1829 P2-4 — from this `terminal list` call on, every handle gains a suffix (a mid-poll replacement). */
+  renameTerminalsFromList = 0;
+  /** `terminal list` calls at and beyond this count serve an EMPTY list (#1826 chain re-resolution). */
+  hideTerminalsFromList = 0;
   pages = 1;
   dropFinalToken = false;
   incompleteFinal = false;
@@ -136,6 +156,32 @@ class FakeCLIs {
     }
     if (argv[1] === 'api') {
       this.sawWait = false; // a new target begins; its fresh scan (if any) follows its idle gate
+      if (argv[2].includes('channelReadState')) {
+        // #1826 — the worker's read cursor (the liveness source attention cannot see).
+        const w = argv[argv.indexOf('-F') + 1].replace(/^w=/, '');
+        const n = (this.cursorQueries.get(w) ?? 0) + 1;
+        this.cursorQueries.set(w, n);
+        if (this.cursorFails.has(w)) return out({ errors: [{ message: 'read-state down' }] }, 1);
+        if (this.cursorErrors.has(w)) {
+          // Legal GraphQL: a field error rides WITH partial data. The integer
+          // fragment must not pass as live (#1829 local P1-1).
+          return out({ errors: [{ message: 'partial' }], data: { channelReadState: { lastSeenSeq: this.cursors.get(w) ?? 100 } } });
+        }
+        if (n >= 2 && this.freshCursors.has(w)) {
+          return out({ data: { channelReadState: { lastSeenSeq: this.freshCursors.get(w) } } });
+        }
+        if (this.cursorNulls.has(w)) return out({ data: { channelReadState: null } });
+        return out({ data: { channelReadState: { lastSeenSeq: this.cursors.get(w) ?? 0 } } });
+      }
+      if (argv[2].includes('channel(ref')) {
+        // #1826 — the team Channel's watermark.
+        this.headReads++;
+        if (!this.headOk) return out({ errors: [{ message: 'channel query down' }] }, 1);
+        if (this.headReads >= 2 && this.freshHead !== undefined) {
+          return out({ data: { channel: { lastSeq: this.freshHead } } });
+        }
+        return out({ data: { channel: { lastSeq: this.head } } });
+      }
       if (this.registerFails.size && this.registerFails.has(argv[argv.indexOf('-F') + 1].replace(/^w=/, ''))) {
         return out({ errors: [{ message: 'register down' }] }, 1);
       }
@@ -147,10 +193,14 @@ class FakeCLIs {
     }
     if (verb === 'terminal list') {
       this.listCalls++;
+      if (this.hideTerminalsFromList && this.listCalls >= this.hideTerminalsFromList) {
+        return out({ ok: true, result: { terminals: [] } });
+      }
+      const renamed = this.renameTerminalsFromList && this.listCalls >= this.renameTerminalsFromList;
       const terminals = this.listCalls > 1 && this.healTracking.size
         ? this.terminals.map((t) => (this.healTracking.has(t.handle as string) ? { ...t, lastOutputAt: Date.now() } : t))
         : this.terminals;
-      return out({ ok: true, result: { terminals } });
+      return out({ ok: true, result: { terminals: renamed ? terminals.map((t) => ({ ...t, handle: `${t.handle}_r` })) : terminals } });
     }
     const handle = argv[argv.indexOf('--terminal') + 1];
     if (verb === 'terminal wait') {
@@ -207,10 +257,10 @@ function cfg(...entries: Array<[string, string]>): Config {
   return {
     app: 'hrn:app:x:team', channel: CHANNEL, hadronCli: 'hadron', orcaCli: 'orca', stateDir: join(root, 'state'),
     roster: entries.map(([worker, name]) => ({ worker, name, worktree: join(root, 'workspaces', name.toLowerCase()) })),
-    busyWaitMs: 10, submitWaitS: 1,
+    busyWaitMs: 10, submitWaitS: 1, coordinatorWatchMinutes: 20,
   };
 }
-const poll = (c: Config) => pollOnce(c, fake.run, (l) => logs.push(l));
+const poll = (c: Config, now?: () => number) => pollOnce(c, fake.run, (l) => logs.push(l), now);
 const adopted = (c: Config) => new State(c.stateDir).token();
 const sentHandles = () => fake.sent.map(([h]) => h);
 
@@ -451,6 +501,99 @@ describe('Orca attention router — untracked terminals: unknown is not busy (#7
     fake.screens.set('term_eli', { tail: CLAUDE_IDLE_COMPACTED });
     const out = poll(c);
     expect(out).toMatchObject({ nudged: ['Eli'], adopted: true });
+  });
+});
+
+describe('nudgeText read anchor (#1805 P2s, #1811 large-gap branch)', () => {
+  it('present anchor: names the first unread, BOTH forms, bounded — no --all', () => {
+    const t = nudgeText(worker('w-eli', 'Eli', { mentions: 2, unread: 5, first: 100, relevant: 110, head: 120 }));
+    expect(t).toContain('START AT #100 (your first unread message of any kind)');
+    expect(t).toContain('--since 99 --limit 200');
+    expect(t).toContain('nextSince');
+    expect(t).toContain('hadron_team_chat_read');
+    expect(t).toContain('sinceSeq=99');
+    expect(t).not.toContain('--all');
+    expect(t).not.toContain('\n');
+  });
+  it('null anchor (defensive): no firstUnreadSeq means the old generic text, no START clause, no mentions walk', () => {
+    const t = nudgeText({ worker: 'w-eli', workerName: 'Eli', channel: CHANNEL, unread: 3, unreadMentions: 1, firstUnreadSeq: null, lastRelevantSeq: 110, lastSeq: 120 });
+    expect(t).not.toContain('START AT');
+    expect(t).toContain('Read team chat unfiltered');
+    expect(t).not.toContain('--mentions-me');
+  });
+  it('first unread 1, SMALL span (cursor-0 worker near the head): since clamps to 0, still bounded', () => {
+    const t = nudgeText(worker('w-eli', 'Eli', { mentions: 2, unread: 349, first: 1, relevant: 110, head: 350 }));
+    expect(t).toContain('--since 0 --limit 200');
+    expect(t).toContain('sinceSeq=0');
+    expect(t).not.toContain('--all');
+    expect(t).not.toContain('--mentions-me');
+  });
+  it('cursor-0 worker with a LARGE gap: the mentions walk starts at 0 too — clamped, filtered, bounded (#1811)', () => {
+    const t = nudgeText(worker('w-eli', 'Eli', { mentions: 2, unread: 9000, first: 1, relevant: 110, head: 9001 }));
+    expect(t).toContain('--mentions-me --since 0 --before 9002 --limit 200');
+    expect(t).toContain('sinceSeq=0');
+    expect(t).toContain('beforeSeq=9002');
+    expect(t).not.toContain('--all');
+    expect(t).not.toContain('START AT');
+  });
+  it('LARGE GAP (span > 400): mentions-only anchor — filter, both forms, own-session mark ceiling, failure discipline (#1811)', () => {
+    const t = nudgeText(worker('w-eli', 'Eli', { mentions: 2, unread: 9841, first: 61, relevant: 9750, head: 9901 }));
+    expect(t).toContain('LARGE GAP');
+    expect(t).toContain('unread #61–#9901, latest mention #9750');
+    expect(t).toContain('--mentions-me --since 60 --before 9902 --limit 200');
+    expect(t).toContain('sinceSeq=60');
+    expect(t).toContain('hadron_team_chat_read');
+    expect(t).toContain('mark-read --through');
+    expect(t).toContain('hadron_team_chat_mark_read');
+    expect(t).toContain('never auto-marks');
+    expect(t).toContain('marks NOTHING');
+    expect(t).toContain('your OWN session');
+    expect(t).not.toContain('START AT');
+    expect(t).not.toContain('Read team chat unfiltered');
+    expect(t).not.toContain('--all');
+    expect(t).not.toContain('\n');
+  });
+  it('a mention arriving mid-walk stays outside the FROZEN sample: every page is bounded at the head the nudge named (#1827 P2)', () => {
+    // Anne's counterexample: page 1 samples head 9901; a mention posted at
+    // 9902 during the walk must not enter any later page, and the mark must
+    // never reach it. The walk's upper bound is the nudge's OWN head value.
+    const t = nudgeText(worker('w-eli', 'Eli', { mentions: 2, unread: 9841, first: 61, relevant: 9750, head: 9901 }));
+    expect(t).toContain('--before 9902');
+    expect(t).toContain('beforeSeq=9902');
+    expect(t).toContain('never above #9901');
+    expect(t).toContain('actually delivered');
+    expect(t).not.toContain('--before 9903');
+  });
+  it('MORE than one page of mentions incl. the OLDEST: the walk runs BACKWARD via prevBefore — beforeSeq selects the newest page under the bound (#1827 cycle-1 P2)', () => {
+    // Anne's trace + Colin's live control (#9687/#9689): beforeSeq forces
+    // NEWEST-page selection, so a forward nextSince walk with 201 unread
+    // mentions returns 2..201, an empty next page, and a mark that
+    // acknowledges the unseen oldest #1. The instruction must walk BACKWARD
+    // (prevBefore, decreasing beforeSeq) down to the fixed since floor —
+    // Colin's control returned all 201 that way, excluding the H+1 arrival.
+    const t = nudgeText(worker('w-eli', 'Eli', { mentions: 201, unread: 9841, first: 61, relevant: 9750, head: 9901 }));
+    expect(t).toContain('prevBefore');
+    expect(t).toContain('BACKWARD');
+    expect(t).not.toContain('nextSince'); // the forward cursor is what lost the oldest mention
+    expect(t).toContain('--mentions-me --since 60 --before 9902 --limit 200');
+    expect(t).toContain('sinceSeq=60');
+    expect(t).toContain('beforeSeq=9902');
+    expect(t).toContain('never above #9901'); // the H+1 arrival stays outside sample and mark
+    expect(t).not.toContain('--before 9903');
+    // The MCP tool returns numbered pages with NO prevBefore field (Anne and
+    // Colin, independently): its instruction must say to re-call with
+    // beforeSeq = the smallest seq on the last page, not "follow prevBefore".
+    expect(t).toContain('the smallest seq on your last page');
+    expect(t).toContain('no prevBefore field');
+    expect(t).toContain('limit 200'); // the MCP page limit spelled with its value
+  });
+  it('the boundary is deterministic: span 399 and exactly 400 keep the unfiltered anchor, 401 switches (#1811)', () => {
+    for (const head of [499, 500]) {
+      const t = nudgeText(worker('w-eli', 'Eli', { first: 100, head }));
+      expect(t).toContain('START AT #100');
+      expect(t).not.toContain('--mentions-me');
+    }
+    expect(nudgeText(worker('w-eli', 'Eli', { first: 100, head: 501 }))).toContain('--mentions-me');
   });
 });
 
@@ -786,6 +929,170 @@ describe('Orca attention router — resolution never guesses', () => {
   });
 });
 
+describe('Orca attention router — identity-flap fallback: the screen resolves what tracking lost', () => {
+  // Orca's per-terminal tracking degrades mid-life: agentIdentity reads null
+  // on a terminal that is running its agent right now (2026-10-12: held
+  // "no live agent terminal" ~6.5h while the agent worked; the same CLI, env
+  // and cwd read 'claude' stable in 40 consecutive polls). Same degradation
+  // family as the null lastOutputAt the #7398 gate already survives.
+  it('a null-identity terminal whose screen shows claude chrome still nudges', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli', null);
+    fake.attention.workers = [worker('w-eli', 'Eli')];
+    const out = poll(c);
+    expect(out.nudged).toEqual(['Eli']);
+    expect(fake.sent[0][0]).toBe('term_eli');
+    expect(logs.some((l) => l.includes('resolved by screen'))).toBe(true);
+  });
+
+  it('a codex screen resolves as codex, so the family flows to the gates', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli', null);
+    fake.screens.set('term_eli', { tail: CODEX_IDLE });
+    fake.attention.workers = [worker('w-eli', 'Eli')];
+    const out = poll(c);
+    expect(out.nudged).toEqual(['Eli']);
+  });
+
+  it('a plain shell screen is never resolved by the fallback', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli', null);
+    fake.screens.set('term_eli', { tail: ['orca@orca1:~/ws/eli$ '] });
+    fake.attention.workers = [worker('w-eli', 'Eli')];
+    const out = poll(c);
+    expect(out.held.Eli).toBe('no live agent terminal in its worktree');
+    expect(fake.sent).toEqual([]);
+  });
+
+  // Blind review P2 (#1823, Anne): a plain shell in the bound worktree `cat`s a
+  // captured Claude idle screen and returns to its own prompt. The box and the
+  // hint are HISTORY, not a live composer — the whole counterexample that
+  // passed both post-recompute gates when the status check read only the FIRST
+  // nonblank line below the closing rule.
+  it('a shell printing a CAPTURED Claude idle screen then its own prompt HOLDS — no send (blind P2, #1823)', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli', null, 'term_eli', false); // identity lost, untracked: the fallback's regime
+    fake.screens.set('term_eli', { tail: [...CLAUDE_IDLE, 'orca@orca1:~/ws/eli$ '] });
+    fake.attention.workers = [worker('w-eli', 'Eli')];
+    const out = poll(c);
+    expect(out.nudged).toEqual([]);
+    expect(fake.sent).toEqual([]);
+    expect(out.held.Eli).toContain('screen shows text in the prompt');
+  });
+
+  it('a WRONG family guess is caught one gate later: banner chrome without a composer holds (blind P2 pin, #1823)', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli', null, 'term_eli', false);
+    // Classifies 'claude' on the banner line; there is no Claude composer box,
+    // so the family-specific empty-prompt gate must refuse what it resolved.
+    fake.screens.set('term_eli', { tail: ['  Claude Code v2.1.296 — a captured banner line', '  ordinary output', 'orca@orca1:~/ws/eli$ '] });
+    fake.attention.workers = [worker('w-eli', 'Eli')];
+    const out = poll(c);
+    expect(out.nudged).toEqual([]);
+    expect(fake.sent).toEqual([]);
+    expect(out.held.Eli).toContain('screen shows text in the prompt');
+  });
+
+  it('codex side: a captured Codex screen with an appended shell prompt holds at the footer check (blind P2 pin, #1823)', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli', null, 'term_eli', false);
+    fake.screens.set('term_eli', { tail: [...CODEX_IDLE, 'orca@orca1:~/ws/eli$ '] });
+    fake.attention.workers = [worker('w-eli', 'Eli')];
+    const out = poll(c);
+    expect(out.nudged).toEqual([]);
+    expect(fake.sent).toEqual([]);
+    expect(out.held.Eli).toContain('screen shows text in the prompt');
+  });
+
+  it('an unreadable screen holds', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli', null);
+    fake.screens.set('term_eli', { tail: CLAUDE_IDLE, ok: false });
+    fake.attention.workers = [worker('w-eli', 'Eli')];
+    expect(poll(c).held.Eli).toBe('no live agent terminal in its worktree');
+    expect(fake.sent).toEqual([]);
+  });
+
+  it('a screen showing BOTH families holds rather than guess', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli', null);
+    fake.screens.set('term_eli', { tail: [...CLAUDE_IDLE, '› Ask Codex to do anything'] });
+    fake.attention.workers = [worker('w-eli', 'Eli')];
+    expect(poll(c).held.Eli).toBe('no live agent terminal in its worktree');
+    expect(fake.sent).toEqual([]);
+  });
+
+  it('two screen-verified terminals in one worktree hold (ambiguous)', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli', null, 'term_a');
+    fake.terminal('eli', null, 'term_b');
+    fake.attention.workers = [worker('w-eli', 'Eli')];
+    expect(poll(c).held.Eli).toBe('no live agent terminal in its worktree');
+    expect(fake.sent).toEqual([]);
+  });
+
+  it('a verified identity still resolves without the fallback (no screen read at resolve time)', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli', 'claude', 'term_eli');
+    fake.screens.delete('term_eli'); // identity path must not need a screen
+    fake.attention.workers = [worker('w-eli', 'Eli')];
+    // The gates then read the screen; serve it back only for the gate reads.
+    fake.screens.set('term_eli', { tail: CLAUDE_IDLE });
+    const out = poll(c);
+    expect(out.nudged).toEqual(['Eli']);
+    expect(logs.some((l) => l.includes('resolved by screen'))).toBe(false);
+    // Resolution itself must not read: the FIRST screen read belongs to the
+    // gates, so it strictly follows the first idle wait (blind P3, #1823 —
+    // the absent fallback log alone could not tell a resolve-time read apart
+    // from a gate read).
+    const verb = (a: string[]) => a.slice(1, 3).join(' ');
+    const firstWait = fake.calls.findIndex((a) => verb(a) === 'terminal wait');
+    const firstRead = fake.calls.findIndex((a) => verb(a) === 'terminal read');
+    expect(firstWait).toBeGreaterThanOrEqual(0);
+    expect(firstRead).toBeGreaterThan(firstWait);
+  });
+
+  it('resolveTerminal with a verified identity never touches the screen: a read-trap runner proves it (blind P3, #1823)', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli', 'claude', 'term_eli');
+    const trap: Runner = (argv) => {
+      if (argv.slice(1, 3).join(' ') === 'terminal read') throw new Error('resolution read the screen');
+      return fake.run(argv);
+    };
+    const entry = { worker: 'w-eli', name: 'Eli', worktree: join(root, 'workspaces', 'eli') };
+    expect(resolveTerminal(entry, fake.terminals as unknown as Terminal[], c, trap)).toEqual(['term_eli', 'claude', 'identity']);
+  });
+});
+
+describe('screenAgentFamily — positive family chrome only', () => {
+  const term = (tail: string[]) => ({ source: 'screen', tail });
+  it('claude idle, fresh-launch, compacted and real captured screens read claude', () => {
+    for (const screen of [CLAUDE_IDLE, CLAUDE_FRESH, CLAUDE_IDLE_COMPACTED, CLAUDE_IDLE_REAL_XAN, CLAUDE_IDLE_REAL_LIAM, CLAUDE_BUSY_EMPTY, CLAUDE_UNKNOWN_QUIET]) {
+      expect(screenAgentFamily(term(screen))).toBe('claude');
+    }
+  });
+  it('codex idle and fresh-launch screens read codex', () => {
+    for (const screen of [CODEX_IDLE, CODEX_FRESH, CODEX_BUSY_EMPTY]) {
+      expect(screenAgentFamily(term(screen))).toBe('codex');
+    }
+  });
+  it('a plain shell reads null', () => {
+    expect(screenAgentFamily(term(['orca@orca1:~/workspaces/eli$ ', '']))).toBeNull();
+    expect(screenAgentFamily(term(['❯ ']))).toBeNull(); // starship-like glyph alone is not claude
+    expect(screenAgentFamily(term(['─'.repeat(60)]))).toBeNull(); // one rule is not the composer box
+    expect(screenAgentFamily(undefined)).toBeNull();
+    expect(screenAgentFamily({ source: 'stream', tail: ['x'] })).toBeNull();
+    // Ordinary output MENTIONING the markers is not chrome: banner/completion
+    // markers anchor to banner-chrome line starts, never after arbitrary
+    // content, and a bare `›` glyph is a shell theme as easily as a composer
+    // (blind review P2, #1823).
+    expect(screenAgentFamily(term(['orca$ echo "Worked for 33s"', 'orca$ ']))).toBeNull();
+    expect(screenAgentFamily(term(['orca$ echo "Claude Code v2.1.296"', 'orca$ ']))).toBeNull();
+    expect(screenAgentFamily(term(['orca$ echo "Ask Codex to do anything"', 'orca$ ']))).toBeNull();
+    expect(screenAgentFamily(term(['› ', '']))).toBeNull();
+  });
+});
+
 describe('Orca attention router — the mention-only register prerequisite', () => {
   it('a roster worker without a mention-only row is held and reported, never nudged on every message', () => {
     const c = cfg(['w-eli', 'Eli']);
@@ -1028,6 +1335,18 @@ describe('Orca attention router — a human typing: never appended to; hold the 
     expect(promptLineIsEmpty([RULE, '❯', RULE], 'claude')).toBe(false);
   });
 
+  it('Claude: the composer status line is the terminal BOTTOM — trailing non-chrome content holds (blind P2, #1823)', () => {
+    // The blind-review counterexample: a shell `cat`s a captured Claude idle
+    // screen and returns to its own prompt. Reading only the FIRST nonblank
+    // line below the closing rule passed this — the trailing shell prompt is
+    // the evidence that the box is history, not a live composer.
+    expect(promptLineIsEmpty([...CLAUDE_IDLE, 'orca@orca1:~/ws/eli$ '], 'claude')).toBe(false);
+    // Any unexplained content after the hint holds, shell-shaped or not.
+    expect(promptLineIsEmpty([RULE, '❯', RULE, CLAUDE_HINT, '  some trailing output'], 'claude')).toBe(false);
+    // Trailing BLANK lines are just the scroll buffer: still empty.
+    expect(promptLineIsEmpty([...CLAUDE_IDLE, '', '   '], 'claude')).toBe(true);
+  });
+
   it('Codex: only the placeholder proves empty; a bare prompt or a dialog holds (live 2026-10-01)', () => {
     // Whitespace typed into Codex: the placeholder vanished, and Orca reported no draft.
     expect(promptLineIsEmpty(['  Got a minute and a mildly unreasonable idea?', '›', '  GPT-6-Sol high · ~/orca/workspaces/hadron-server/eli'], 'codex')).toBe(false);
@@ -1098,5 +1417,535 @@ describe('Orca attention router — a human typing: never appended to; hold the 
     const out = poll(c);
     expect(out.held).toEqual({ Eli: 'prompt not empty (text in the composer draft)' });
     expect(fake.sent).toEqual([]);
+  });
+});
+
+describe('Orca attention router — coordinator/lifecycle liveness rule (#1826)', () => {
+  /** A config whose roster carries liveness flags: [worker, name, flag?]. */
+  const mcfg = (
+    entries: Array<[string, string, 'coordinator' | 'lifecycle' | undefined]>,
+    watchMinutes = 20,
+  ): Config => ({
+    ...cfg(...entries.map(([w, n]) => [w, n] as [string, string])),
+    coordinatorWatchMinutes: watchMinutes,
+    roster: entries.map(([worker, name, flag]) => ({
+      worker, name, worktree: join(root, 'workspaces', name.toLowerCase()),
+      ...(flag === 'coordinator' ? { coordinator: true } : {}),
+      ...(flag === 'lifecycle' ? { lifecycle: true } : {}),
+    })),
+  });
+  /** Seed liveness.json directly — the durable file is the contract, not an API. */
+  const seedLiveness = (c: Config, workers: Record<string, unknown>) => {
+    mkdirSync(c.stateDir, { recursive: true });
+    writeFileSync(join(c.stateDir, 'liveness.json'), JSON.stringify(workers));
+  };
+  const readLiveness = (c: Config): Record<string, any> =>
+    JSON.parse(readFileSync(join(c.stateDir, 'liveness.json'), 'utf8'));
+  const AGO_21MIN = 21 * 60_000;
+
+  it('an idle flagged worker whose watermark fell behind — ZERO mentions — is woken through the full guard chain', () => {
+    const c = mcfg([['w-ada', 'Ada', 'coordinator']]);
+    fake.terminal('ada');
+    fake.attention.workers = []; // attention sees nothing relevant: the suppressed-row gap (#1826 delta 1)
+    fake.cursors.set('w-ada', 100); // watermark 100 < head 120, no mention anywhere in the span
+    seedLiveness(c, { 'w-ada': { idleSince: Date.now() - AGO_21MIN, handle: 'term_ada' } });
+    const out = poll(c);
+    expect(out.liveness).toEqual(['Ada']);
+    expect(out.nudged).toEqual([]);
+    expect(out.adopted).toBe(true);
+    expect(fake.sent).toHaveLength(1);
+    expect(fake.sent[0][0]).toBe('term_ada');
+    const text = fake.sent[0][1];
+    expect(text).toContain('liveness');
+    expect(text).toContain('idle-watch rule'); // it names its rule — why it arrived with no mention (Taylor #9748)
+    expect(text).toContain('#100'); // its cursor, named
+    expect(text).toContain('#120'); // the head, named
+    expect(text).toContain('--since 100');
+    expect(text).toContain('sinceSeq=100');
+    expect(text).toContain('mark read');
+    expect((text.match(/mark read/g) ?? []).length).toBe(1); // once, not twice (Taylor #9748)
+    expect(text).toContain('as of send');
+    expect(text).not.toContain('relevant unread'); // its own literal: never a counts claim
+    expect(text).not.toMatch(/\d+ mention/); // identifying the rule is fine; a count claim never is
+    // The full guard chain ran, in order, with the cheap probe / full gate / recheck waits.
+    const verbs = fake.calls.map((a) => a.slice(1, 3).join(' '));
+    expect(verbs.indexOf('terminal wait')).toBeLessThan(verbs.indexOf('terminal read'));
+    expect(verbs.indexOf('terminal read')).toBeLessThan(verbs.indexOf('terminal send'));
+    const waits = fake.calls.filter((a) => a.slice(1, 3).join(' ') === 'terminal wait');
+    const ms = (a: string[]) => Number(a[a.indexOf('--timeout-ms') + 1]);
+    expect(waits).toHaveLength(3);
+    expect(ms(waits[0])).toBeLessThanOrEqual(1_000); // cheap per-poll probe
+    expect(ms(waits[1])).toBe(c.busyWaitMs); // the full gate before the send
+    expect(ms(waits[2])).toBeLessThanOrEqual(1_000); // fail-closed post-recompute recheck
+    // Persisted at once: frontier = the head at send, clock restarted at the send.
+    const rec = readLiveness(c)['w-ada'];
+    expect(rec.coveredFrontier).toBe(120);
+    expect(rec.idleSince).toBeGreaterThan(Date.now() - 60_000);
+  });
+
+  it('a NON-flagged worker with the same idle + unread backlog gets nothing: liveness is opt-in per roster flag', () => {
+    const c = mcfg([['w-eli', 'Eli', undefined]]);
+    fake.terminal('eli');
+    fake.attention.workers = [];
+    fake.cursors.set('w-eli', 100);
+    seedLiveness(c, { 'w-eli': { idleSince: Date.now() - AGO_21MIN, handle: 'term_eli' } });
+    const out = poll(c);
+    expect(out.liveness).toEqual([]);
+    expect(fake.sent).toEqual([]);
+    expect(out.adopted).toBe(true);
+  });
+
+  it('fires only at STRICTLY more than N minutes of continuous idle — never at exactly N', () => {
+    const c = mcfg([['w-ada', 'Ada', 'coordinator']]); // N = 20 min
+    fake.terminal('ada');
+    fake.cursors.set('w-ada', 100);
+    const frozen = Date.now();
+    seedLiveness(c, { 'w-ada': { idleSince: frozen - 20 * 60_000, handle: 'term_ada' } });
+    expect(poll(c, () => frozen).liveness).toEqual([]); // exactly N: never fires
+    seedLiveness(c, { 'w-ada': { idleSince: frozen - 20 * 60_000 - 1, handle: 'term_ada' } });
+    expect(poll(c, () => frozen).liveness).toEqual(['Ada']); // one tick past N: fires
+  });
+
+  it('a busy screen at the full gate HOLDS with its reason and resets the clock', () => {
+    const c = mcfg([['w-ada', 'Ada', 'coordinator']]);
+    fake.terminal('ada');
+    fake.cursors.set('w-ada', 100);
+    seedLiveness(c, { 'w-ada': { idleSince: Date.now() - AGO_21MIN, handle: 'term_ada' } });
+    fake.busyRecheck.add('term_ada'); // idle at the probe, busy at the full gate
+    const out = poll(c);
+    expect(out.liveness).toEqual([]);
+    expect(out.held.Ada).toContain('liveness');
+    expect(out.held.Ada).toContain('busy for');
+    expect(out.adopted).toBe(false); // a held liveness nudge holds the token like a held mention nudge
+    expect(fake.sent).toEqual([]);
+    expect(readLiveness(c)['w-ada'].idleSince).toBeUndefined();
+  });
+
+  it('a non-empty draft at the full gate HOLDS with its reason and resets the clock', () => {
+    const c = mcfg([['w-ada', 'Ada', 'coordinator']]);
+    fake.terminal('ada');
+    fake.cursors.set('w-ada', 100);
+    seedLiveness(c, { 'w-ada': { idleSince: Date.now() - AGO_21MIN, handle: 'term_ada' } });
+    fake.recheckScreens.set('term_ada', { tail: withPrompt(CLAUDE_IDLE, '❯', 'typed mid-watch'), draft: 'typed mid-watch' });
+    const out = poll(c);
+    expect(out.held.Ada).toContain('liveness');
+    expect(out.held.Ada).toContain('prompt not empty');
+    expect(fake.sent).toEqual([]);
+    expect(readLiveness(c)['w-ada'].idleSince).toBeUndefined();
+    expect(logs.join('\n')).not.toContain('typed mid-watch'); // the reason never quotes the text
+  });
+
+  it('an unreadable screen at the full gate HOLDS with its reason', () => {
+    const c = mcfg([['w-ada', 'Ada', 'coordinator']]);
+    fake.terminal('ada');
+    fake.cursors.set('w-ada', 100);
+    seedLiveness(c, { 'w-ada': { idleSince: Date.now() - AGO_21MIN, handle: 'term_ada' } });
+    fake.recheckScreens.set('term_ada', { ok: false });
+    const out = poll(c);
+    expect(out.held.Ada).toContain('liveness');
+    expect(out.held.Ada).toContain('screen unreadable');
+    expect(fake.sent).toEqual([]);
+  });
+
+  it('an ambiguous resolution at the send HOLDS with its reason (fresh re-resolution on the chain)', () => {
+    const c = mcfg([['w-ada', 'Ada', 'coordinator']]);
+    fake.terminal('ada');
+    fake.cursors.set('w-ada', 100);
+    seedLiveness(c, { 'w-ada': { idleSince: Date.now() - AGO_21MIN, handle: 'term_ada' } });
+    fake.hideTerminalsFromList = 2; // the probe's list sees it; the chain's fresh list does not
+    const out = poll(c);
+    expect(out.held.Ada).toContain('liveness');
+    expect(out.held.Ada).toContain('no live agent terminal');
+    expect(fake.sent).toEqual([]);
+    expect(readLiveness(c)['w-ada'].idleSince).toBeUndefined();
+  });
+
+  it('the idle clock survives token adoption: adopt clears the ledger, never liveness.json', () => {
+    const c = mcfg([['w-ada', 'Ada', 'coordinator'], ['w-eli', 'Eli', undefined]]);
+    fake.terminal('ada');
+    fake.terminal('eli');
+    fake.attention.workers = [worker('w-eli', 'Eli')]; // a mention nudge adopts the token
+    fake.cursors.set('w-ada', 100);
+    const seeded = Date.now() - 5 * 60_000; // behind, but only 5 idle minutes — not yet eligible
+    seedLiveness(c, { 'w-ada': { idleSince: seeded, handle: 'term_ada' } });
+    const out = poll(c);
+    expect(out).toMatchObject({ nudged: ['Eli'], liveness: [], adopted: true });
+    expect(readLiveness(c)['w-ada'].idleSince).toBe(seeded); // EXACTLY untouched by adoption
+  });
+
+  it('the idle clock survives a restart mid-wait and keeps aging the same episode across polls', () => {
+    const c = mcfg([['w-ada', 'Ada', 'coordinator']]);
+    fake.terminal('ada');
+    fake.cursors.set('w-ada', 100);
+    const seeded = Date.now() - 19 * 60_000; // one minute short of N
+    seedLiveness(c, { 'w-ada': { idleSince: seeded, handle: 'term_ada' } });
+    expect(poll(c).liveness).toEqual([]); // 19 < 20
+    expect(readLiveness(c)['w-ada'].idleSince).toBe(seeded); // a poll is a restart: same episode
+    expect(poll(c).liveness).toEqual([]);
+    expect(readLiveness(c)['w-ada'].idleSince).toBe(seeded); // still the same episode, not restarted
+  });
+
+  it('interrupted idle: a busy probe observation resets the clock to zero and preserves coveredFrontier', () => {
+    const c = mcfg([['w-ada', 'Ada', 'coordinator']]);
+    fake.terminal('ada');
+    fake.busy.add('term_ada');
+    fake.cursors.set('w-ada', 100);
+    seedLiveness(c, { 'w-ada': { idleSince: Date.now() - AGO_21MIN, handle: 'term_ada', coveredFrontier: 90 } });
+    const out = poll(c);
+    expect(out.liveness).toEqual([]);
+    expect(out.held).toEqual({}); // a probe reset is silent — no delivery was attempted
+    expect(fake.sent).toEqual([]);
+    const rec = readLiveness(c)['w-ada'];
+    expect(rec.idleSince).toBeUndefined();
+    expect(rec.coveredFrontier).toBe(90); // the delivered frontier still dedupes
+    fake.busy.clear();
+    expect(poll(c).liveness).toEqual([]); // clock restarted at the idle poll — N more minutes needed
+    expect(typeof readLiveness(c)['w-ada'].idleSince).toBe('number');
+  });
+
+  it('a half-typed prompt at the probe is interrupted idle: silent reset, no send, no hold', () => {
+    const c = mcfg([['w-ada', 'Ada', 'coordinator']]);
+    fake.terminal('ada');
+    fake.screens.set('term_ada', { tail: withPrompt(CLAUDE_IDLE, '❯', 'Holger typing here'), draft: 'Holger typing here' });
+    fake.cursors.set('w-ada', 100);
+    seedLiveness(c, { 'w-ada': { idleSince: Date.now() - AGO_21MIN, handle: 'term_ada' } });
+    const out = poll(c);
+    expect(out.liveness).toEqual([]);
+    expect(out.held).toEqual({});
+    expect(fake.sent).toEqual([]);
+    expect(readLiveness(c)['w-ada'].idleSince).toBeUndefined();
+  });
+
+  it('an ambiguous resolution at the probe resets the clock silently', () => {
+    const c = mcfg([['w-ada', 'Ada', 'coordinator']]);
+    fake.terminal('ada', 'claude', 'term_a');
+    fake.terminal('ada', 'codex', 'term_b');
+    fake.cursors.set('w-ada', 100);
+    seedLiveness(c, { 'w-ada': { idleSince: Date.now() - AGO_21MIN, handle: 'term_a' } });
+    const out = poll(c);
+    expect(out.liveness).toEqual([]);
+    expect(out.held).toEqual({}); // the watch never resolved a terminal; nothing was owed a send
+    expect(fake.sent).toEqual([]);
+    expect(readLiveness(c)['w-ada'].idleSince).toBeUndefined();
+  });
+
+  it('a repeated unchanged backlog never re-nudges; an advancing head re-arms after idle', () => {
+    const c = mcfg([['w-ada', 'Ada', 'coordinator']]);
+    fake.terminal('ada');
+    fake.cursors.set('w-ada', 100);
+    seedLiveness(c, { 'w-ada': { idleSince: Date.now() - AGO_21MIN, handle: 'term_ada' } });
+    expect(poll(c).liveness).toEqual(['Ada']); // delivered at head 120
+    // Twenty more idle minutes pass, but the head has not moved past the frontier.
+    seedLiveness(c, { 'w-ada': { idleSince: Date.now() - AGO_21MIN, handle: 'term_ada', coveredFrontier: 120 } });
+    expect(poll(c).liveness).toEqual([]);
+    expect(fake.sent).toHaveLength(1);
+    // New content past the frontier: eligible again once idle > N measured from the send.
+    fake.head = 130;
+    seedLiveness(c, { 'w-ada': { idleSince: Date.now() - AGO_21MIN, handle: 'term_ada', coveredFrontier: 120 } });
+    expect(poll(c).liveness).toEqual(['Ada']);
+    expect(fake.sent).toHaveLength(2);
+    expect(fake.sent[1][1]).toContain('#130');
+  });
+
+  it('mention-first collapse: a delivered mention nudge skips the liveness send and restarts the clock', () => {
+    const c = mcfg([['w-ada', 'Ada', 'coordinator']]);
+    fake.terminal('ada');
+    fake.attention.workers = [worker('w-ada', 'Ada', { mentions: 1, unread: 4 })];
+    fake.cursors.set('w-ada', 100);
+    seedLiveness(c, { 'w-ada': { idleSince: Date.now() - AGO_21MIN, handle: 'term_ada' } });
+    const out = poll(c);
+    expect(out).toMatchObject({ nudged: ['Ada'], liveness: [] });
+    expect(fake.sent).toHaveLength(1); // exactly one send — the mention nudge
+    expect(fake.sent[0][1]).toContain('relevant unread (1 mention'); // the mention shape, not the liveness text
+    const rec = readLiveness(c)['w-ada'];
+    expect(rec.idleSince).toBeGreaterThan(Date.now() - 60_000); // clock restarted at the send
+    expect(rec.coveredFrontier).toBeUndefined(); // no liveness frontier claimed
+  });
+
+  it('a HELD mention observation is non-idle evidence: the liveness clock restarts and no liveness send happens', () => {
+    const c = mcfg([['w-ada', 'Ada', 'coordinator']]);
+    fake.terminal('ada');
+    fake.busy.add('term_ada');
+    fake.attention.workers = [worker('w-ada', 'Ada')];
+    fake.cursors.set('w-ada', 100);
+    seedLiveness(c, { 'w-ada': { idleSince: Date.now() - AGO_21MIN, handle: 'term_ada' } });
+    const out = poll(c);
+    expect(out.held.Ada).toBeTruthy(); // the mention hold
+    expect(out.liveness).toEqual([]);
+    expect(readLiveness(c)['w-ada'].idleSince).toBeUndefined();
+  });
+
+  it('read-while-waiting: the recompute right before the send re-checks head > cursor and drops the nudge', () => {
+    const c = mcfg([['w-ada', 'Ada', 'coordinator']]);
+    fake.terminal('ada');
+    fake.cursors.set('w-ada', 100);
+    seedLiveness(c, { 'w-ada': { idleSince: Date.now() - AGO_21MIN, handle: 'term_ada' } });
+    fake.freshCursors.set('w-ada', 120); // the worker caught up while the gates ran
+    const out = poll(c);
+    expect(out.liveness).toEqual([]);
+    expect(out.livenessDropped).toEqual(['Ada']);
+    expect(describeOutcome(out)).toContain('liveness dropped');
+    expect(fake.sent).toEqual([]);
+    const rec = readLiveness(c)['w-ada'];
+    expect(rec.idleSince).toBeUndefined(); // reset — the worker demonstrably acted
+    expect(rec.coveredFrontier).toBeUndefined();
+  });
+
+  it('a held token (busy mention worker) neither restarts nor resets a pending liveness clock; both deliver when clear', () => {
+    const c = mcfg([['w-ada', 'Ada', 'coordinator'], ['w-baloo', 'Baloo', undefined]]);
+    fake.terminal('ada');
+    fake.terminal('baloo');
+    fake.busy.add('term_baloo');
+    fake.attention.workers = [worker('w-baloo', 'Baloo')];
+    fake.cursors.set('w-ada', 100);
+    const seeded = Date.now() - 10 * 60_000;
+    seedLiveness(c, { 'w-ada': { idleSince: seeded, handle: 'term_ada' } });
+    const first = poll(c);
+    expect(first.adopted).toBe(false); // Baloo's mention hold holds the token
+    expect(first.liveness).toEqual([]); // 10 idle minutes < N — clock pending
+    expect(readLiveness(c)['w-ada'].idleSince).toBe(seeded); // untouched by the held poll
+    fake.busy.clear();
+    seedLiveness(c, { 'w-ada': { idleSince: Date.now() - AGO_21MIN, handle: 'term_ada' } });
+    const second = poll(c);
+    expect(second).toMatchObject({ nudged: ['Baloo'], liveness: ['Ada'], adopted: true });
+  });
+
+  it('a delivered liveness nudge is persisted at once: a failure later in the same poll cannot resend it', () => {
+    const c = mcfg([['w-ada', 'Ada', 'coordinator'], ['w-yuri', 'Yuri', 'lifecycle']]);
+    fake.terminal('ada');
+    fake.terminal('yuri');
+    fake.cursors.set('w-ada', 100);
+    fake.cursors.set('w-yuri', 100);
+    seedLiveness(c, {
+      'w-ada': { idleSince: Date.now() - AGO_21MIN, handle: 'term_ada' },
+      'w-yuri': { idleSince: Date.now() - AGO_21MIN, handle: 'term_yuri' },
+    });
+    // Ada delivers; Yuri's recompute then fails hard — a failed fresh check fails the poll.
+    const base = fake.run;
+    let armed = false;
+    fake.run = (argv) => {
+      if (argv[1] === 'api' && argv[2].includes('channelReadState')
+        && argv[argv.indexOf('-F') + 1] === 'w=w-yuri') armed = true;
+      if (armed && argv[1] === 'api' && argv[2].includes('channel(ref')) return { code: 1, stdout: '', stderr: 'gateway 502' };
+      return base(argv);
+    };
+    expect(() => poll(c)).toThrow(RouterError);
+    expect(sentHandles()).toEqual(['term_ada']);
+    expect(readLiveness(c)['w-ada'].coveredFrontier).toBe(120); // persisted at once
+    fake.run = base;
+    expect(poll(c).liveness).toEqual(['Yuri']); // Yuri delivers on the retry
+    expect(sentHandles()).toEqual(['term_ada', 'term_yuri']);
+    expect(fake.sent.filter(([h]) => h === 'term_ada')).toHaveLength(1); // Ada NOT re-nudged
+  });
+
+  it('fail-closed liveness source: an unreadable cursor is no candidate this poll — logged once, clock kept, poll healthy', () => {
+    const c = mcfg([['w-ada', 'Ada', 'coordinator']]);
+    fake.terminal('ada');
+    fake.cursors.set('w-ada', 100);
+    const seeded = Date.now() - AGO_21MIN;
+    seedLiveness(c, { 'w-ada': { idleSince: seeded, handle: 'term_ada' } });
+    fake.cursorNulls.add('w-ada'); // channelReadState: null — unknown, not zero
+    const out = poll(c);
+    expect(out.liveness).toEqual([]);
+    expect(fake.sent).toEqual([]);
+    expect(out.adopted).toBe(true); // the poll itself is healthy; only the candidate is suppressed
+    expect(logs.filter((l) => l.includes('liveness')).length).toBeGreaterThan(0); // the reason logged
+    logs.length = 0;
+    poll(c);
+    expect(logs.filter((l) => l.includes('liveness'))).toHaveLength(0); // once per reason, not per poll
+    expect(readLiveness(c)['w-ada'].idleSince).toBe(seeded); // the clock kept aging through the outage
+    fake.cursorNulls.clear();
+    expect(poll(c).liveness).toEqual(['Ada']); // fires on recovery — the episode never restarted
+  });
+
+  it('fail-closed liveness source: a failed channel-head query is no candidate this poll and does not throw', () => {
+    const c = mcfg([['w-ada', 'Ada', 'coordinator']]);
+    fake.terminal('ada');
+    fake.cursors.set('w-ada', 100);
+    seedLiveness(c, { 'w-ada': { idleSince: Date.now() - AGO_21MIN, handle: 'term_ada' } });
+    fake.headOk = false;
+    expect(poll(c).liveness).toEqual([]);
+    expect(fake.sent).toEqual([]);
+    expect(poll(c).adopted).toBe(true); // still a healthy poll
+  });
+
+  it('an UNTRACKED flagged terminal still wakes: the #1823 screen fallback proves idle at probe and gates', () => {
+    const c = mcfg([['w-ada', 'Ada', 'coordinator']]);
+    fake.terminal('ada', 'claude', undefined, false); // lastOutputAt null — tracking lost
+    fake.cursors.set('w-ada', 100);
+    seedLiveness(c, { 'w-ada': { idleSince: Date.now() - AGO_21MIN, handle: 'term_ada' } });
+    expect(poll(c).liveness).toEqual(['Ada']);
+  });
+
+  it('a replaced terminal restarts the clock: the idle episode is measured on one continuous terminal', () => {
+    const c = mcfg([['w-ada', 'Ada', 'coordinator']]);
+    fake.terminal('ada', 'claude', 'term_new');
+    fake.cursors.set('w-ada', 100);
+    seedLiveness(c, { 'w-ada': { idleSince: Date.now() - AGO_21MIN, handle: 'term_old' } });
+    const out = poll(c);
+    expect(out.liveness).toEqual([]); // handle mismatch ⇒ fresh clock on the new terminal
+    const rec = readLiveness(c)['w-ada'];
+    expect(rec.handle).toBe('term_new');
+    expect(rec.idleSince).toBeGreaterThan(Date.now() - 60_000);
+  });
+
+  it('removing the roster flag resets the watch: records are pruned from liveness.json', () => {
+    const c = mcfg([['w-ada', 'Ada', 'coordinator']]);
+    fake.terminal('ada');
+    fake.cursors.set('w-ada', 100);
+    seedLiveness(c, {
+      'w-ada': { idleSince: Date.now() - AGO_21MIN, handle: 'term_ada' },
+      'w-gone': { idleSince: 1, handle: 'x' },
+    });
+    const unflagged = mcfg([['w-ada', 'Ada', undefined]]); // same stateDir
+    poll(unflagged);
+    expect(readLiveness(unflagged)).toEqual({}); // pruned: no flagged workers ⇒ no records
+  });
+
+  // ── #1829 local-seat cycle 1 (Xylon #9736) ─────────────────────────────
+
+  it('P1-1: a GraphQL errors+data response never passes as live — no candidate, clock kept', () => {
+    const c = mcfg([['w-ada', 'Ada', 'coordinator']]);
+    fake.terminal('ada');
+    fake.cursors.set('w-ada', 100);
+    const seeded = Date.now() - AGO_21MIN;
+    seedLiveness(c, { 'w-ada': { idleSince: seeded, handle: 'term_ada' } });
+    fake.cursorErrors.add('w-ada'); // partial data WITH an error rides the same integer
+    const out = poll(c);
+    expect(out.liveness).toEqual([]);
+    expect(fake.sent).toEqual([]);
+    expect(readLiveness(c)['w-ada'].idleSince).toBe(seeded); // fail-closed, not a reset
+    fake.cursorErrors.clear();
+    expect(poll(c).liveness).toEqual(['Ada']); // fires on recovery
+  });
+
+  it('P1-1: a NEGATIVE lastSeenSeq is not a cursor — no candidate', () => {
+    const c = mcfg([['w-ada', 'Ada', 'coordinator']]);
+    fake.terminal('ada');
+    fake.cursors.set('w-ada', -5); // parsed, integer, nonsense
+    seedLiveness(c, { 'w-ada': { idleSince: Date.now() - AGO_21MIN, handle: 'term_ada' } });
+    expect(poll(c).liveness).toEqual([]);
+    expect(fake.sent).toEqual([]);
+  });
+
+  it('P1-1: a non-zero exit with parsable stdout fails the RECOMPUTE, so the poll throws and nothing sends', () => {
+    const c = mcfg([['w-ada', 'Ada', 'coordinator']]);
+    fake.terminal('ada');
+    fake.cursors.set('w-ada', 100);
+    seedLiveness(c, { 'w-ada': { idleSince: Date.now() - AGO_21MIN, handle: 'term_ada' } });
+    // Candidacy passes on the clean read; the recompute's head query then exits
+    // non-zero while still printing a JSON body.
+    const base = fake.run;
+    let served = false;
+    fake.run = (argv) => {
+      const r = base(argv);
+      if (argv[1] === 'api' && argv[2].includes('channel(ref') && served) return { ...r, code: 1 };
+      if (argv[1] === 'api' && argv[2].includes('channelReadState')) served = true;
+      return r;
+    };
+    expect(() => poll(c)).toThrow(RouterError);
+    expect(fake.sent).toEqual([]);
+  });
+
+  it('P2-2: a syntactically-valid CORRUPT record never suppresses delivery — only typed fields survive the read', () => {
+    const c = mcfg([['w-ada', 'Ada', 'coordinator']]);
+    fake.terminal('ada');
+    fake.cursors.set('w-ada', 100);
+    // A huge frontier (above any real seq) and a string handle: both drop on
+    // read, so the worker cannot look covered forever (fail-closed direction).
+    seedLiveness(c, { 'w-ada': { idleSince: Date.now() - AGO_21MIN, handle: 'term_ada', coveredFrontier: 9007199254740991 } });
+    expect(poll(c).liveness).toEqual(['Ada']);
+    expect(readLiveness(c)['w-ada'].coveredFrontier).toBe(120); // the honest frontier the send recorded
+  });
+
+  it('P2-2: a corrupt liveness.json top level (null / array / non-object record) reads as fresh and never crashes', () => {
+    const c = mcfg([['w-ada', 'Ada', 'coordinator'], ['w-baloo', 'Baloo', 'coordinator']]);
+    fake.terminal('ada');
+    fake.terminal('baloo');
+    fake.cursors.set('w-ada', 100);
+    mkdirSync(c.stateDir, { recursive: true });
+    writeFileSync(join(c.stateDir, 'liveness.json'), 'null'); // top-level null once crashed Object.keys
+    expect(poll(c).liveness).toEqual([]); // fresh clocks, no throw
+    expect(typeof readLiveness(c)['w-ada'].idleSince).toBe('number');
+    seedLiveness(c, { 'w-ada': 5, 'w-baloo': ['x'] }); // non-object records
+    const out = poll(c);
+    expect(out.liveness).toEqual([]);
+    expect(out.held).toEqual({});
+    const rec = readLiveness(c)['w-ada'];
+    expect(rec.idleSince).toBeGreaterThan(Date.now() - 60_000); // re-seeded by the probe, not carried
+  });
+
+  it('P2-4: a terminal replaced between the probe and the chain RESETS the clock — the episode is one terminal\'s', () => {
+    const c = mcfg([['w-ada', 'Ada', 'coordinator']]);
+    fake.terminal('ada');
+    fake.cursors.set('w-ada', 100);
+    seedLiveness(c, { 'w-ada': { idleSince: Date.now() - AGO_21MIN, handle: 'term_ada' } });
+    fake.renameTerminalsFromList = 2; // the probe's list shows term_ada; the chain's shows term_ada_r
+    const out = poll(c);
+    expect(out.liveness).toEqual([]);
+    expect(fake.sent).toEqual([]);
+    expect(out.held).toEqual({}); // a reset, not a delivery failure
+    expect(readLiveness(c)['w-ada'].idleSince).toBeUndefined();
+  });
+
+  it('P2-5: a FIRST-EVER record born from a mention collapse carries the handle — the next probe keeps the clock', () => {
+    const c = mcfg([['w-ada', 'Ada', 'coordinator']]);
+    fake.terminal('ada');
+    fake.attention.workers = [worker('w-ada', 'Ada', { mentions: 1, unread: 4 })];
+    fake.cursors.set('w-ada', 100);
+    const out = poll(c); // no seeded record: the collapse write is its first
+    expect(out.nudged).toEqual(['Ada']);
+    const born = readLiveness(c)['w-ada'];
+    expect(born.handle).toBe('term_ada');
+    const at = born.idleSince;
+    expect(at).toBeGreaterThan(Date.now() - 60_000);
+    fake.attention.workers = []; // nothing new; the clock must survive the next probe
+    poll(c);
+    expect(readLiveness(c)['w-ada'].idleSince).toBe(at); // NOT restarted by a handle mismatch
+  });
+
+  it('P2-7: coordinatorWatchMinutes must be a JSON number whose ms product is finite — true, "20" and the overflow class throw', () => {
+    const path = join(root, 'c.json');
+    const write = (over: Record<string, unknown>) => {
+      writeFileSync(path, JSON.stringify({
+        app: 'a', channel: 'c', stateDir: join(root, 's'),
+        roster: [{ worker: 'w', name: 'E', worktree: '/x' }], ...over,
+      }));
+      return path;
+    };
+    expect(loadConfig(write({})).coordinatorWatchMinutes).toBe(20);
+    expect(loadConfig(write({ coordinatorWatchMinutes: 5.5 })).coordinatorWatchMinutes).toBe(5.5);
+    // 1e307 × 60_000 overflows to Infinity — the class whose comparison
+    // against elapsed time silently disables delivery. (A finite-but-huge
+    // window stays legal: it is coherent config, equivalent to the rule off.)
+    for (const bad of [true, '20', 1e307, [20]]) {
+      expect(() => loadConfig(write({ coordinatorWatchMinutes: bad }))).toThrow(RouterError);
+    }
+  });
+});
+
+describe('loadConfig — liveness configuration (#1826)', () => {
+  const write = (over: Record<string, unknown>) => {
+    const path = join(root, 'c.json');
+    writeFileSync(path, JSON.stringify({
+      app: 'a', channel: 'c', stateDir: join(root, 's'),
+      roster: [{ worker: 'w', name: 'E', worktree: '/x' }], ...over,
+    }));
+    return path;
+  };
+  it('defaults coordinatorWatchMinutes to 20 and accepts positive finite numbers', () => {
+    expect(loadConfig(write({})).coordinatorWatchMinutes).toBe(20);
+    expect(loadConfig(write({ coordinatorWatchMinutes: 5.5 })).coordinatorWatchMinutes).toBe(5.5);
+  });
+  it('rejects a non-positive or non-finite coordinatorWatchMinutes, loudly', () => {
+    for (const bad of [0, -3, 'abc', null]) {
+      expect(() => loadConfig(write({ coordinatorWatchMinutes: bad }))).toThrow(RouterError);
+    }
+  });
+  it('roster flags must be booleans', () => {
+    const flagged = loadConfig(write({ roster: [{ worker: 'w', name: 'E', worktree: '/x', coordinator: true }] }));
+    expect(flagged.roster[0].coordinator).toBe(true);
+    expect(() => loadConfig(write({ roster: [{ worker: 'w', name: 'E', worktree: '/x', coordinator: 'yes' }] }))).toThrow(RouterError);
+    expect(() => loadConfig(write({ roster: [{ worker: 'w', name: 'E', worktree: '/x', lifecycle: 1 }] }))).toThrow(RouterError);
   });
 });

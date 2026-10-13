@@ -310,7 +310,7 @@ function approvalForSnapshot(node: NodeApprovalColumns | null, revNo: number) {
  * pre-move history belonged there).
  */
 export async function createNodeRevision(
-  db: Pick<PrismaClient, 'nodeRevision' | 'memory' | 'node'>,
+  db: Pick<PrismaClient, 'nodeRevision' | 'memory' | 'node' | 'nodeSignature'>,
   data: Prisma.NodeRevisionUncheckedCreateInput,
 ): Promise<void> {
   // #696/#1323: Node.revSeq names the LIVE state. Snapshot the pre-edit state
@@ -376,13 +376,22 @@ export async function createNodeRevision(
   )[0];
   if (!cutoff) return; // fewer than `max` rows for this memory → nothing to prune
 
+  // #1632 (cor:dmo:130:05, Holger #9901): automatic pruning never removes a
+  // revision a signature was made on; deliberate history clears still may.
+  // A legacy row with no revNo can carry no signature and stays prunable.
+  const signedRevisions = (await db.nodeSignature.findMany({
+    where: { nodeId: data.nodeId }, select: { revision: true }, distinct: ['revision'],
+  })).map((s) => s.revision);
   await db.nodeRevision.deleteMany({
     where: {
       nodeId: data.nodeId,
       memoryId,
-      OR: [
-        { createdAt: { lt: cutoff.createdAt } },
-        { createdAt: cutoff.createdAt, id: { lt: cutoff.id } },
+      AND: [
+        { OR: [
+          { createdAt: { lt: cutoff.createdAt } },
+          { createdAt: cutoff.createdAt, id: { lt: cutoff.id } },
+        ] },
+        ...(signedRevisions.length ? [{ OR: [{ revNo: null }, { revNo: { notIn: signedRevisions } }] }] : []),
       ],
     },
   });

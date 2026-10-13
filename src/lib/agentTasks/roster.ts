@@ -33,7 +33,7 @@
 import type { Prisma, PrismaClient } from '../../generated/prisma/index.js';
 import type { AvailabilityRecord } from './availability.js';
 import { loadWorkerWorkStates, type WorkerWorkState } from './matcher.js';
-import { loadStallInputs, unreactedChild } from './stall.js';
+import { loadStallInputs, unreactedChildren } from './stall.js';
 
 export const ROSTER_STATES = [
   'YOUR_MOVE', 'UNAVAILABLE', 'WAITING', 'WORKING', 'ASSIGNED_NOT_STARTED', 'AVAILABLE', 'NO_FAMILY', 'NOT_LAUNCHABLE',
@@ -70,7 +70,7 @@ export type RosterEntry = {
   waitingSince: Date | null;
   /** YOUR_MOVE: unacknowledged alarms it has been woken on, nearest first. */
   alarmEventIds: string[];
-  /** YOUR_MOVE: a finished child it hasn't reacted to, on a task it is the assignee of. */
+  /** YOUR_MOVE: a finished or cancelled child it owns and hasn't reacted to (#1831). */
   unreactedChildTaskId: string | null;
   lastActiveAt: Date | null;
   lastAssignedAt: Date | null;
@@ -128,7 +128,9 @@ export async function loadTeamRoster(db: Db, appId: string, now: Date): Promise<
   const states = await loadWorkerWorkStates(db, appId, now);
   if (states.length === 0) return [];
   const [inputs, woken, structure] = await Promise.all([
-    loadStallInputs(db, { appId, assigneeWorkerId: { not: null } }, now),
+    // A parent assigned to a PERSON still has worker-owned children whose end is
+    // that worker's move (#1831), so person-assigned parents are read too.
+    loadStallInputs(db, { appId, OR: [{ assigneeWorkerId: { not: null } }, { assigneeUserId: { not: null } }] }, now),
     loadWokenAlarms(db, appId),
     // #1726: every worker of the App, retired too, so a claim on a retired one resolves.
     db.worker.findMany({ where: { appId }, select: { id: true, name: true, slug: true, retiredAt: true, reportsToWorkerId: true } }),
@@ -148,10 +150,17 @@ export async function loadTeamRoster(db: Db, appId: string, now: Date): Promise<
         orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
       })
     : [];
+  // cor:agt:050:16 (#1831): the unreacted child is its OWNER's move, wherever the parent is assigned.
+  const unreactedByOwner = new Map<string, { id: string }>();
+  for (const i of inputs) {
+    for (const c of unreactedChildren(i)) {
+      if (c.ownerWorkerId && !unreactedByOwner.has(c.ownerWorkerId)) unreactedByOwner.set(c.ownerWorkerId, c);
+    }
+  }
   const byWorker = new Map<string, typeof inputs>();
   for (const i of inputs) {
-    const id = i.task.assigneeWorkerId as string;
-    byWorker.set(id, [...(byWorker.get(id) ?? []), i]);
+    const id = i.task.assigneeWorkerId;
+    if (id) byWorker.set(id, [...(byWorker.get(id) ?? []), i]);
   }
 
   return states
@@ -160,7 +169,7 @@ export async function loadTeamRoster(db: Db, appId: string, now: Date): Promise<
       const startedIds = mine.filter((i) => i.task.status === 'started').map((i) => i.task.id);
       const pendingIds = mine.filter((i) => i.task.status === 'pending').map((i) => i.task.id);
       const kids = children.filter((c) => startedIds.includes(c.parentTaskId as string));
-      const unreacted = mine.map((i) => unreactedChild(i)).find((c) => c !== null) ?? null;
+      const unreacted = unreactedByOwner.get(w.id) ?? null;
       const unavailable = ownUnavailable(w);
       const unavailableFamilies = w.families.filter((f) => w.availability.familyAvailable.get(f) !== true);
       const alarmEventIds = woken.get(w.id) ?? [];

@@ -8,7 +8,7 @@
  * pgvector helpers.
  */
 import { contentScopeSql, effectiveContentScope } from '../comments/scope.js';
-import { approvalStateSql } from '../nodeApproval.js';
+import { approvalStateSql, mintedSql } from '../nodeApproval.js';
 import type {
   NodeRetrievalProvider,
   LexicalHit,
@@ -57,7 +57,8 @@ function filterClause(f: NodeSqlFilter | undefined, bind: (v: unknown) => string
   if (flt.where) parts.push(`(${compileNodeWhere(flt.where, bind)})`);
   const approval = approvalStateSql(flt.approvalState); // #1591
   if (approval) parts.push(approval);
-  if (flt.minted != null) parts.push(flt.minted ? 'minted_at IS NOT NULL' : 'minted_at IS NULL'); // #1591
+  const mint = mintedSql(flt.minted);
+  if (mint) parts.push(mint);
   // #1607 (cor:dmo:110:06) — approval and mint status sets never contain comments.
   if (approval || flt.minted != null) parts.push("node_type <> 'comment'");
   // #1608 (cor:dmo:110:08) — content, comments or both; CONTENT by default.

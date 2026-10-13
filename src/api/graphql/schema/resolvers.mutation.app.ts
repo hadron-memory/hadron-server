@@ -1,3 +1,4 @@
+import { requireProviderCredentialOwner } from './resolvers.helpers.js';
 import { managesApp } from '../../../lib/auth/appManagement.js';
 import { detachAppOwnerMemories } from '../../../controller/operations/detachAppOwnerMemories.js';
 // appMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
@@ -718,6 +719,11 @@ export const appMutations = {
       const { id: resolvedId } = await resolveAppRef(ctx.db, ref);
       const app = await ctx.db.app.findUniqueOrThrow({ where: { id: resolvedId } });
       await requireOwnerOrOrgRole(ctx, app, 'ADMIN', 'app');
+      // Legacy config edits remain credential operations. Admin shutdown uses
+      // clearAppAIConfig, which removes every named config (#10755).
+      if (aiProvider !== undefined || aiModel !== undefined || aiApiKey !== undefined) {
+        await requireProviderCredentialOwner(ctx, app);
+      }
       // #510: the app-layer action-policy link (cor:acl:040:02) — validate
       // shape before storing; explicit null clears (= no restriction).
       if (policy !== undefined && policy !== null && parsePolicyLink(policy) == null) {
@@ -928,6 +934,36 @@ export const appMutations = {
         } },
       );
       return true;
+    },
+
+    clearAppAIConfig: async (_: unknown, { appRef }: { appRef: string }, ctx: Context) => {
+      const { id } = await resolveAppRef(ctx.db, appRef);
+      const app = await ctx.db.app.findUniqueOrThrow({ where: { id } });
+      await requireOwnerOrOrgRole(ctx, app, 'ADMIN', 'app');
+      return withAuthorizedTx(
+        ctx,
+        [
+          { kind: 'app', id },
+          ...(app.organizationId ? [{ kind: 'org' as const, id: app.organizationId }] : []),
+          ...(app.ownerUserId ? [{ kind: 'user' as const, id: app.ownerUserId }] : []),
+        ],
+        async txCtx => {
+          const current = await txCtx.db.app.findUniqueOrThrow({ where: { id } });
+          if (current.organizationId !== app.organizationId || current.ownerUserId !== app.ownerUserId) {
+            throw new Error('App ownership changed; retry clearing AI configuration');
+          }
+          await requireOwnerOrOrgRole(txCtx, current, 'ADMIN', 'app');
+        },
+        async tx => {
+          // No key is decrypted or returned. User-owned Apps lose every named
+          // config so a backup cannot keep a rogue agent running (#10755).
+          await tx.aiServiceConfig.deleteMany({ where: {
+            appId: id,
+            ...(app.ownerUserId === null ? { name: DEFAULT_AI_CONFIG_NAME } : {}),
+          } });
+          return tx.app.findUniqueOrThrow({ where: { id }, include: APP_INCLUDE });
+        },
+      );
     },
 
     installAgentIntoApp: async (

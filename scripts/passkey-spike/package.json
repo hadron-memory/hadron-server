@@ -1,0 +1,8 @@
+{
+  "name": "hadron-passkey-local-spike",
+  "private": true,
+  "type": "module",
+  "scripts": { "start": "node preview.mjs", "test": "node probe.mjs" },
+  "dependencies": { "@simplewebauthn/server": "14.0.3", "@simplewebauthn/browser": "14.0.0" },
+  "devDependencies": { "playwright": "1.64.0" }
+}

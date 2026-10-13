@@ -42,7 +42,9 @@
 // (participation, holder, App live), not trust the assignment it was queued from.
 //
 // AUTHORIZATION (cor:agt:050:06–:09, plan §10, rulings on epic #1704):
-//   create root     any App participant (050:06)
+//   create root     any App participant (050:06); the creator may name the
+//                   owner at creation — any participating worker or person
+//                   (050:01, Holger team chat #8183; #1757)
 //   create child    the parent's assignee, who owns the child (050:07)
 //   assign/cancel   the task's owner, or whoever manages the App (050:09, Proposed)
 //   reassign        the task's owner (ruled, D-2026-10-07-004), or an App manager (Proposed)
@@ -88,6 +90,7 @@ import {
   appendTaskEvent,
   eventActor,
   TASK_EVENT_TYPES,
+  type EventActor,
   type TaskParty,
 } from '../../../lib/agentTasks/events.js';
 import { matchAfterChange } from '../../../lib/agentTasks/matcher.js';
@@ -110,10 +113,23 @@ export const TASK_REQUIREMENT_LIST_MAX = 32;
 export const TASK_OUTCOME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/;
 const TASK_TREE_MAX = 1_000;
 
-const STATUSES = ['pending', 'started', 'finished', 'cancelled'] as const;
+const STATUSES = ['backlog', 'pending', 'started', 'finished', 'cancelled'] as const;
 type TaskStatus = (typeof STATUSES)[number];
 const ENDED: readonly string[] = ['finished', 'cancelled'];
 const OPEN: TaskStatus[] = ['pending', 'started'];
+
+/**
+ * #1754 (cor:agt:050:02): a task enters as backlog or pending — every other
+ * status is reached by a move, never at creation. A backlog task is parked: no
+ * assignee (so never matched, never waited on, no alarms); assigning it or
+ * making it ready moves it to pending.
+ */
+function normalizeCreateStatus(value: string | null | undefined): 'backlog' | 'pending' {
+  if (value == null || value === '') return 'pending';
+  const s = value.toLowerCase();
+  if (s === 'backlog' || s === 'pending') return s;
+  throw badInput('status at creation is PENDING (the default) or BACKLOG; every other status is reached by a move.');
+}
 
 // ── Errors ────────────────────────────────────────────────────────────────
 
@@ -139,6 +155,21 @@ type TaskRow = Prisma.AgentTaskGetPayload<Record<string, never>>;
 export type TaskActor =
   | { kind: 'worker'; workerId: string; agentId: string | null; userId: string | null }
   | { kind: 'user'; userId: string };
+
+/**
+ * #1756 (cor:agt:050:06): a headless run of the App creating a root task. Not a `TaskActor`: a run is never an
+ * owner, an assignee or a participant, so no read or transition path ever sees one. It exists for the one write it
+ * is allowed, and `inTaskWriteTx` re-gates it under the App's anchors like any other creator.
+ */
+export type RunCreator = { kind: 'run'; runId: string };
+
+/** The run is this App's, and still running, judged under the write's locks (a finished run creates nothing). */
+async function requireRunLive(txCtx: Context, app: TaskApp, runId: string): Promise<void> {
+  if (app.deletedAt) throw new TaskGateRefused();
+  const rows = await txCtx.db.$queryRaw<Array<{ app_id: string; status: string }>>`
+    SELECT app_id, status::text AS status FROM app_runs WHERE id = ${runId} FOR SHARE`;
+  if (rows.length !== 1 || rows[0]!.app_id !== app.id || rows[0]!.status !== 'RUNNING') throw new TaskGateRefused();
+}
 
 // ── The access gate ───────────────────────────────────────────────────────
 
@@ -265,7 +296,7 @@ async function inKeyReadTx<T>(
 }
 
 /** Run a read over an App the caller may READ tasks and events of: a participant, or the App's own key. */
-async function withReadableApp<T>(ctx: Context, appRef: string, body: (c: Context, app: TaskApp) => Promise<T>): Promise<T> {
+export async function withReadableApp<T>(ctx: Context, appRef: string, body: (c: Context, app: TaskApp) => Promise<T>): Promise<T> {
   const key = appKeyCaller(ctx);
   if (!key) {
     const { app } = await resolveParticipatedApp(ctx, appRef);
@@ -280,6 +311,18 @@ async function withReadableApp<T>(ctx: Context, appRef: string, body: (c: Contex
   }
   if (appId !== key.appId) throw appNotFound(appRef);
   return inKeyReadTx(ctx, appId, () => { throw appNotFound(appRef); }, body);
+}
+
+/**
+ * #1708 — may this caller read the App's tasks and events (cor:agt:050:21)? The arms of `withReadableApp`,
+ * as a boolean: a participant (a person, or a worker session whose credential may still drive the App), or
+ * the App's own live key. App-wide: whoever reads one of the App's tasks reads them all.
+ */
+export async function mayReadAppTasks(ctx: Context, appId: string): Promise<boolean> {
+  const app = await loadApp(ctx, appId);
+  if (!app || app.deletedAt) return false;
+  if (appKeyCaller(ctx)) return keyMayReadApp(ctx, app);
+  return (await resolveTaskActor(ctx, app)) !== null;
 }
 
 /** Load a task the caller may read, with its App and the actor — or null (concealed as missing). */
@@ -576,7 +619,7 @@ class TaskGateRefused extends Error {}
 export async function inTaskWriteTx<T>(
   ctx: Context,
   app: TaskApp,
-  actor: TaskActor,
+  actor: TaskActor | RunCreator,
   refused: () => GraphQLError,
   write: (tx: Prisma.TransactionClient, txCtx: Context, app: TaskApp) => Promise<T>,
   /** `exclusive` for a writer that UPDATEs the anchored App row itself: it cannot upgrade a shared hold without deadlocking its peers. */
@@ -596,8 +639,12 @@ export async function inTaskWriteTx<T>(
       async (txCtx) => {
         fresh = await txCtx.db.app.findUnique({ where: { id: app.id }, select: APP_SELECT });
         if (!fresh) throw new TaskGateRefused();
-        const again = await resolveTaskActor(txCtx, fresh);
-        if (!again || !sameActor(again, actor)) throw new TaskGateRefused();
+        if (actor.kind === 'run') {
+          await requireRunLive(txCtx, fresh, actor.runId);
+        } else {
+          const again = await resolveTaskActor(txCtx, fresh);
+          if (!again || !sameActor(again, actor)) throw new TaskGateRefused();
+        }
         requireWritable(txCtx, fresh);
       },
       (tx, txCtx) => write(tx, txCtx, fresh as TaskApp),
@@ -673,16 +720,120 @@ type CreateInput = {
   startBy?: unknown;
   tags?: string[] | null;
   closeSessionWhenDone?: boolean | null;
+  status?: string | null;
 };
+
+/**
+ * The one place a new task row, its events and its queue entry are written (cor:agt:050:03, :11), for a task made
+ * by a person, a worker's session or a headless run. The caller has authorized and resolved the parties.
+ */
+async function insertTask(
+  tx: Prisma.TransactionClient,
+  a: {
+    app: TaskApp; parentId: string | null; title: string; description: string | null; source: string | null;
+    tags: string[]; startBy: Date | null; closeSessionWhenDone: boolean;
+    requirements: Prisma.InputJsonObject | null; owner: TaskParty; assignee: TaskParty | null;
+    created: Record<string, unknown>; assigned: Record<string, unknown>; evActor: EventActor;
+    /** #1754: a backlog task is parked, never queued (cor:agt:050:02). Default pending. */
+    status?: 'backlog' | 'pending';
+  },
+): Promise<{ id: string; queued: boolean }> {
+  const created = await tx.agentTask.create({
+    data: {
+      appId: a.app.id,
+      title: a.title, description: a.description, source: a.source, tags: a.tags, startBy: a.startBy,
+      closeSessionWhenDone: a.closeSessionWhenDone,
+      status: a.status ?? 'pending',
+      parentTaskId: a.parentId,
+      requirements: a.requirements ?? Prisma.DbNull,
+      ...partyColumns('owner', a.owner),
+      ...partyColumns('assignee', a.assignee),
+      ...(a.assignee ? a.assigned : {}),
+      ...a.created,
+    },
+    select: { id: true },
+  });
+  await appendTaskEvent(tx, {
+    appId: a.app.id, taskId: created.id, actor: a.evActor,
+    // The owner rides the event (#1757): a named owner is visible to the
+    // event stream — and so to the alarm chain — from creation.
+    event: { type: 'task.created', parentTaskId: a.parentId, owner: a.owner, hasAssignee: a.assignee !== null },
+  });
+  if (a.assignee) {
+    await appendTaskEvent(tx, {
+      appId: a.app.id, taskId: created.id, actor: a.evActor,
+      event: { type: 'task.assigned', assignee: a.assignee, closeSessionWhenDone: a.closeSessionWhenDone },
+    });
+  } else if ((a.status ?? 'pending') === 'pending') {
+    // #1707: the task enters the queue (cor:agt:050:03, :11). A backlog task
+    // never does — it is parked (#1754, cor:agt:050:02).
+    await appendTaskEvent(tx, { appId: a.app.id, taskId: created.id, actor: a.evActor, event: { type: 'assignment.queued' } });
+  }
+  return { id: created.id, queued: a.assignee === null && (a.status ?? 'pending') === 'pending' };
+}
+
+/**
+ * #1756 (cor:agt:050:06, Holger team chat #7799): a headless run creates a root task in its OWN App, attributed to
+ * the run. Roots only; the run is recorded as creator (no person, worker or agent is credited); the owner is named,
+ * or defaults to the person the run acts for, and must participate like any owner (a run is never a party itself).
+ * Judged under the App's authority anchors with the run row held, so a run that finished, an App that was
+ * uninstalled or deleted, or a participant who left cannot be written around.
+ */
+export async function createRootTaskForRun(
+  principal: Context,
+  run: { id: string; appId: string },
+  input: Omit<CreateInput, 'parentTaskId' | 'status'> & { parentTaskId?: unknown; status?: never },
+) {
+  // #1832: a run's root task is created pending (queued unless an assignee is named); a status is refused, never silently dropped. The type is `never` so a typed caller cannot pass one; an untyped one (the run tool) is caught here.
+  if (input.status != null) throw badInput('A run-created task takes no status; it is created pending.');
+  if (input.parentTaskId != null && input.parentTaskId !== '') throw badInput('A run creates root tasks only; it names no parentTaskId.');
+  if (input.appRef) {
+    let namedAppId: string | null = null;
+    try {
+      namedAppId = (await resolveAppRef(principal.db, input.appRef)).id;
+    } catch (e) {
+      if (!(e instanceof AppNotFoundError)) throw e;
+    }
+    // Another App, or none: the same answer as a missing one.
+    if (namedAppId !== run.appId) throw appNotFound(input.appRef);
+  }
+  const app = await loadApp(principal, run.appId);
+  if (!app || app.deletedAt) throw appNotFound(run.appId);
+  const title = normalizeTitle(input.title);
+  const description = optionalText(input.description, TASK_DESCRIPTION_MAX, 'description');
+  const source = optionalText(input.source, TASK_SOURCE_MAX, 'source');
+  const tags = normalizeTags(input.tags);
+  const startBy = parseStartBy(input.startBy);
+  const closeSessionWhenDone = input.closeSessionWhenDone ?? true;
+  const now = new Date();
+  const evActor: EventActor = { userId: null, workerId: null, agentId: null, runId: run.id };
+  const made = await inTaskWriteTx(principal, app, { kind: 'run', runId: run.id }, () => appNotFound(run.appId), async (tx, txCtx, fresh) => {
+    const requirements = await normalizeRequirements(txCtx, fresh, input.requirements);
+    let owner: TaskParty;
+    if (input.owner) owner = await resolveParty(txCtx, fresh, input.owner, 'TASK_OWNER_INVALID');
+    else if (principal.userId) owner = await resolveParty(txCtx, fresh, { user: principal.userId }, 'TASK_OWNER_INVALID');
+    else throw taskError('TASK_OWNER_REQUIRED', 'A run that acts for no person names the task\'s owner: a worker of the App or a person who participates in it.');
+    const assignee = input.assignee ? await resolveParty(txCtx, fresh, input.assignee, 'TASK_ASSIGNEE_INVALID') : null;
+    return insertTask(tx, {
+      app: fresh, parentId: null, title, description, source, tags, startBy, closeSessionWhenDone, requirements, owner, assignee,
+      created: { createdBy: null, createdByWorkerId: null, createdByAgentId: null, createdByRunId: run.id, updatedBy: null, updatedByWorkerId: null, updatedByAgentId: null },
+      assigned: { assignedAt: now, assignedBy: null, assignedByWorkerId: null, assignedByAgentId: null },
+      evActor,
+    });
+  });
+  if (made.queued) await matchAfterChange(principal.db, app.id);
+  return principal.db.agentTask.findUniqueOrThrow({ where: { id: made.id } });
+}
 
 export const agentTaskMutations = {
   /**
    * Create a task (cor:agt:050:06 root, :07 child). A root task: any App
-   * participant; its owner defaults to the creator, and an explicit other
-   * owner is accepted only from whoever manages the App (050:01 open question;
-   * #1705 interim). A child task: only the parent's assignee, who owns it, and
-   * naming another owner is refused TASK_CHILD_OWNER_MISMATCH; not under an
-   * ended parent (TASK_ENDED, 050:07 open question; #1705 interim).
+   * participant; its owner defaults to the creator, and the creator may name
+   * any other participating worker or person as owner (cor:agt:050:01, Holger
+   * team chat #8183; #1757). A child task: only the parent's assignee, who
+   * owns it, and naming another owner is refused TASK_CHILD_OWNER_MISMATCH;
+   * not under an ended parent (TASK_ENDED, 050:07 open question; #1705
+   * interim).
    */
   createAgentTask: async (_: unknown, { input }: { input: CreateInput }, ctx: Context) => {
     if (!input) throw badInput('input is required.');
@@ -715,6 +866,11 @@ export const agentTaskMutations = {
     const tags = normalizeTags(input.tags);
     const startBy = parseStartBy(input.startBy);
     const closeSessionWhenDone = input.closeSessionWhenDone ?? true;
+    // #1754: backlog or pending — and a backlog task carries no assignee.
+    const status = normalizeCreateStatus(input.status);
+    if (status === 'backlog' && input.assignee) {
+      throw badInput('A backlog task has no assignee (cor:agt:050:02). Make it ready, then assign it.');
+    }
     const now = new Date();
     const evActor = eventActor(ctx.userId);
 
@@ -728,24 +884,24 @@ export const agentTaskMutations = {
       const requirements = await normalizeRequirements(txCtx, app, input.requirements);
       let owner: TaskParty = actorParty(actor);
       if (input.owner) {
-        // Only an App manager may name another owner, so for anyone else every
-        // outcome but "that is you" is the same refusal: a non-manager learns
-        // nothing about which refs are valid parties (no participation oracle).
-        const manages = !parentId && (await actorManagesApp(txCtx, app, actor));
+        // #1757 (cor:agt:050:01, Holger team chat #8183): a root task's
+        // creator — any participant, worker or person — may name its owner,
+        // so long as the named party participates in the App too. A ref that
+        // names nobody, a non-participant or another App's worker is
+        // TASK_OWNER_INVALID — the same refusal either way. A child task's
+        // owner is its parent's assignee, so naming anybody but yourself is
+        // TASK_CHILD_OWNER_MISMATCH, valid ref or not (no oracle).
         let named: TaskParty | null = null;
         try {
           named = await resolveParty(txCtx, app, input.owner, 'TASK_OWNER_INVALID');
         } catch (e) {
-          if (manages || !(e instanceof GraphQLError && e.extensions?.code === 'TASK_OWNER_INVALID')) throw e;
+          if (!parentId || !(e instanceof GraphQLError && e.extensions?.code === 'TASK_OWNER_INVALID')) throw e;
         }
         if (!named || !sameParty(named, owner)) {
           if (parentId) {
             throw taskError('TASK_CHILD_OWNER_MISMATCH', "A child task is owned by the parent's assignee who creates it; it cannot name another owner.");
           }
-          if (!manages || !named) {
-            throw taskError('TASK_NOT_OWNER', 'Only whoever manages the App may create a task owned by someone else.');
-          }
-          owner = named;
+          owner = named as TaskParty;
         }
       }
       const assignee = input.assignee ? await resolveParty(txCtx, app, input.assignee, 'TASK_ASSIGNEE_INVALID') : null;
@@ -765,33 +921,10 @@ export const agentTaskMutations = {
         refuseEnded(parent);
       }
       const { requirements, owner, assignee } = await resolveParties(txCtx, app);
-      const created = await tx.agentTask.create({
-        data: {
-          appId: app.id,
-          title, description, source, tags, startBy, closeSessionWhenDone,
-          parentTaskId: parentId,
-          requirements: requirements ?? Prisma.DbNull,
-          ...partyColumns('owner', owner),
-          ...partyColumns('assignee', assignee),
-          ...(assignee ? assignedStamp(ctx, now) : {}),
-          ...createdStamp(ctx),
-        },
-        select: { id: true },
+      return insertTask(tx, {
+        app, parentId, title, description, source, tags, startBy, closeSessionWhenDone, requirements, owner, assignee, status,
+        created: createdStamp(ctx), assigned: assignedStamp(ctx, now), evActor,
       });
-      await appendTaskEvent(tx, {
-        appId: app.id, taskId: created.id, actor: evActor,
-        event: { type: 'task.created', parentTaskId: parentId, hasAssignee: assignee !== null },
-      });
-      if (assignee) {
-        await appendTaskEvent(tx, {
-          appId: app.id, taskId: created.id, actor: evActor,
-          event: { type: 'task.assigned', assignee, closeSessionWhenDone },
-        });
-      } else {
-        // #1707: the task enters the queue (cor:agt:050:03, :11).
-        await appendTaskEvent(tx, { appId: app.id, taskId: created.id, actor: evActor, event: { type: 'assignment.queued' } });
-      }
-      return { id: created.id, queued: assignee === null };
     });
     // #1707 (cor:agt:060:06): a queued task is matched now, after its create
     // committed; the returned task shows the assignee when one was free.
@@ -800,9 +933,11 @@ export const agentTaskMutations = {
   },
 
   /**
-   * Assign a queued task — pending, with no assignee (cor:agt:050:09). The
-   * owner, or whoever manages the App. A task that already has an assignee is
-   * moved with `reassignAgentTask` instead.
+   * Assign a task with no assignee — a queued task (pending) or a BACKLOG task
+   * (cor:agt:050:09): the owner, whoever manages the App, or a worker the
+   * owner reports to. Assigning a BACKLOG task moves it to pending
+   * (cor:agt:050:02, #1754), writing `task.ready` beside `task.assigned`. A
+   * task that already has an assignee is moved with `reassignAgentTask` instead.
    */
   assignAgentTask: async (
     _: unknown,
@@ -820,15 +955,107 @@ export const agentTaskMutations = {
       }
       party ??= await resolveParty(txCtx, app, assignee, 'TASK_ASSIGNEE_INVALID');
       const close = closeSessionWhenDone ?? task.closeSessionWhenDone;
-      await tx.agentTask.update({
-        where: { id: task.id },
-        data: { ...partyColumns('assignee', party), closeSessionWhenDone: close, ...assignedStamp(ctx, new Date()), ...updatedStamp(ctx) },
+      // #1754 (cor:agt:050:02): assigning a backlog task makes it ready work.
+      // The write is a guarded updateMany on the consumed state (no assignee,
+      // and the status the snapshot decided from) — the same discipline as the
+      // matcher's assignment — so a state that moved under the write matches
+      // no row and refuses typed instead of surfacing a CHECK violation.
+      const fromBacklog = task.status === 'backlog';
+      const n = await tx.agentTask.updateMany({
+        where: {
+          id: task.id, appId: app.id, assigneeWorkerId: null, assigneeUserId: null,
+          status: fromBacklog ? 'backlog' : 'pending',
+        },
+        data: {
+          ...partyColumns('assignee', party),
+          ...(fromBacklog ? { status: 'pending' as const } : {}),
+          closeSessionWhenDone: close, ...assignedStamp(ctx, new Date()), ...updatedStamp(ctx),
+        },
       });
+      if (n.count === 0) {
+        throw taskError('TASK_INVALID_TRANSITION', 'This task already has an assignee; reassign it instead.', { taskId });
+      }
+      const evActor = eventActor(ctx.userId);
+      if (fromBacklog) {
+        // The uniform left-the-backlog signal (#1790 review, Emerson P3-1):
+        // make-ready writes task.ready, and so does assigning a backlog task.
+        await appendTaskEvent(tx, { appId: app.id, taskId: task.id, actor: evActor, event: { type: 'task.ready' } });
+      }
       await appendTaskEvent(tx, {
-        appId: app.id, taskId: task.id, actor: eventActor(ctx.userId),
+        appId: app.id, taskId: task.id, actor: evActor,
         event: { type: 'task.assigned', assignee: party, closeSessionWhenDone: close },
       });
     });
+  },
+
+  /**
+   * Park a queued task in the backlog (#1754, cor:agt:050:02): pending with no
+   * assignee becomes BACKLOG — unassigned, never matched, never waited on, no
+   * alarms. Whoever may assign a task may park it (cor:agt:050:09).
+   */
+  parkAgentTask: async (_: unknown, { taskId }: { taskId: string }, ctx: Context) =>
+    mutateTask(ctx, taskId, async (tx, task, actor, app, txCtx) => {
+      if (!(await mayDirectTask(tx, txCtx, app, actor, task))) {
+        throw taskError('TASK_NOT_OWNER', "Only the task's owner, a worker the owner reports to, or whoever manages the App, parks it in the backlog.", { taskId });
+      }
+      refuseEnded(task);
+      if (task.status !== 'pending') {
+        throw taskError('TASK_INVALID_TRANSITION', 'Only a pending task can be parked in the backlog.', { taskId, status: task.status });
+      }
+      if (assigneeOf(task)) {
+        throw taskError('TASK_INVALID_TRANSITION', 'A backlog task has no assignee; this one is assigned (cor:agt:050:02).', { taskId });
+      }
+      // A guarded updateMany on the consumed state (#1790 review, Xylon P2-1):
+      // the task row is locked (lockTask), and the write re-asserts what it
+      // consumes, so a state that moved anyway matches no row and refuses
+      // typed rather than surfacing a CHECK violation.
+      const n = await tx.agentTask.updateMany({
+        where: { id: task.id, appId: app.id, status: 'pending', assigneeWorkerId: null, assigneeUserId: null },
+        data: { status: 'backlog', ...updatedStamp(ctx) },
+      });
+      if (n.count === 0) {
+        throw taskError('TASK_INVALID_TRANSITION', 'Only a pending task with no assignee can be parked in the backlog.', { taskId });
+      }
+      await appendTaskEvent(tx, {
+        appId: app.id, taskId: task.id, actor: eventActor(ctx.userId), event: { type: 'task.parked' },
+      });
+    }),
+
+  /**
+   * Make a backlog task ready to be worked (#1754, cor:agt:050:02): BACKLOG
+   * becomes pending and the task enters the queue. Whoever may assign a task
+   * may make it ready (cor:agt:050:09).
+   */
+  makeAgentTaskReady: async (_: unknown, { taskId }: { taskId: string }, ctx: Context) => {
+    const ready = await mutateTask(ctx, taskId, async (tx, task, actor, app, txCtx) => {
+      if (!(await mayDirectTask(tx, txCtx, app, actor, task))) {
+        throw taskError('TASK_NOT_OWNER', "Only the task's owner, a worker the owner reports to, or whoever manages the App, makes a backlog task ready.", { taskId });
+      }
+      refuseEnded(task);
+      if (task.status !== 'backlog') {
+        throw taskError('TASK_INVALID_TRANSITION', 'Only a backlog task is made ready to be worked.', { taskId, status: task.status });
+      }
+      // A guarded updateMany on the consumed state (#1790 review, Xylon P2-1):
+      // two concurrent make-ready calls cannot both append task.ready and
+      // assignment.queued — the loser's update matches no row and refuses
+      // typed, so the append-only stream never takes a duplicate pair.
+      const n = await tx.agentTask.updateMany({
+        where: { id: task.id, appId: app.id, status: 'backlog' },
+        data: { status: 'pending', ...updatedStamp(ctx) },
+      });
+      if (n.count === 0) {
+        throw taskError('TASK_INVALID_TRANSITION', 'Only a backlog task is made ready to be worked.', { taskId });
+      }
+      const evActor = eventActor(ctx.userId);
+      await appendTaskEvent(tx, { appId: app.id, taskId: task.id, actor: evActor, event: { type: 'task.ready' } });
+      // #1707: it enters the queue now, exactly like a task created ready —
+      // and this event is the stall rule's queue-entry stamp for the new stint
+      // (cor:agt:050:17; the unassignable episode starts here, not at creation).
+      await appendTaskEvent(tx, { appId: app.id, taskId: task.id, actor: evActor, event: { type: 'assignment.queued' } });
+    });
+    // #1707 (cor:agt:060:06): a free worker may take it right away.
+    await matchAfterChange(ctx.db, ready.appId);
+    return ready;
   },
 
   /**
@@ -942,7 +1169,10 @@ export const agentTaskMutations = {
     return finished;
   },
 
-  /** Cancel a pending or started task: its owner, or whoever manages the App (cor:agt:050:09, Proposed). */
+  /**
+   * Cancel a pending, started or backlog task: its owner, or whoever manages
+   * the App (cor:agt:050:09, Proposed; backlog directly, Holger team chat #8150).
+   */
   cancelAgentTask: async (_: unknown, { taskId }: { taskId: string }, ctx: Context) => {
     const cancelled = await mutateTask(ctx, taskId, async (tx, task, actor, app, txCtx) => {
       if (!(await mayDirectTask(tx, txCtx, app, actor, task))) {
@@ -956,7 +1186,7 @@ export const agentTaskMutations = {
       });
       await appendTaskEvent(tx, {
         appId: app.id, taskId: task.id, actor: eventActor(ctx.userId),
-        event: { type: 'task.cancelled', fromStatus: task.status as 'pending' | 'started', openChildCount },
+        event: { type: 'task.cancelled', fromStatus: task.status as 'backlog' | 'pending' | 'started', openChildCount },
       });
     });
     // #1707: a worker may have freed up (cor:agt:060:06).
@@ -981,7 +1211,7 @@ type ListArgs = {
 };
 
 const STATUS_FROM_GQL: Record<string, TaskStatus> = {
-  PENDING: 'pending', STARTED: 'started', FINISHED: 'finished', CANCELLED: 'cancelled',
+  BACKLOG: 'backlog', PENDING: 'pending', STARTED: 'started', FINISHED: 'finished', CANCELLED: 'cancelled',
 };
 
 /** A party filter: names a party of the App, or matches nothing (never refuses — a filter, not a write). */

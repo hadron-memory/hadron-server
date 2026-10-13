@@ -86,11 +86,20 @@ describe('sanitizeHandleSeed', () => {
   });
 
   it('truncates to the 32-char suffix-safe cap', () => {
-    expect(sanitizeHandleSeed('a'.repeat(50))).toHaveLength(32);
+    expect(sanitizeHandleSeed('z'.repeat(50))).toHaveLength(32);
   });
 });
 
 describe('generateUniqueHandle', () => {
+  it.each(['hrn', 'urn', 'cabcdefghijklmnopqrstuvwx', '0193a1b2c3d4e5f60718293a4b5c6d7e'])('skips a new forbidden registration seed %s', async (seed) => {
+    expect(await generateUniqueHandle(mockDb(), { seeds: [seed, 'Alice'] })).toBe('alice');
+    const fallback = await generateUniqueHandle(mockDb(), { seeds: [seed] });
+    expect(fallback).not.toBe(seed);
+    expect(() => normalizeHandle(fallback)).not.toThrow();
+    // Stored handles keep their read/cascade normalization.
+    expect(normalizeHandleOrNull(seed)).toBe(seed);
+  });
+
   it('returns the first legal seed when free', async () => {
     expect(await generateUniqueHandle(mockDb(), { seeds: ['Holger Selover'] })).toBe(
       'holger-selover',

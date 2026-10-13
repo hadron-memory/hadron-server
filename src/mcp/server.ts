@@ -1,4 +1,5 @@
 import { registerAutomationPinTools } from './automationPinTools.js';
+import { chatByline } from './chatByline.js';
 import { boundSessionPrivacyFilter } from '../lib/auth/sessionPrivacy.js';
 import { createHmac, randomUUID } from 'crypto';
 // Spec 049 S4 — the protected-loc gate on hadron_update_node (no lock on that path).
@@ -60,9 +61,11 @@ import {
 import { portalUrlForUrn } from '../lib/portalUrl.js';
 import { userUrn } from '../lib/userHandle.js';
 import { registerCommentTools } from './commentTools.js';
+import { registerSigningTools } from './signingTools.js';
 import { registerAgentTaskTools } from './agentTaskTools.js';
 import { registerTickerTools } from './tickerTools.js';
 import { openThreadCounts, type CommentCounts } from '../lib/comments/summary.js';
+import { loadSignatureStatuses, type NodeSignatureStatusView } from '../lib/signing/status.js';
 import { nodeContentValidationState } from '../lib/nodeContentValidation.js';
 import { findLiveUrnAliasTargets, dedupeById } from '../lib/urnAlias.js';
 import { validateParentRel, InvalidParentRelError } from '../lib/parentRel.js';
@@ -120,6 +123,8 @@ import {
   type AppSelectionErrorEnvelope,
 } from './app-selection-errors.js';
 import { mcpLog } from './mcp-log.js';
+import { toolErrorResult, withToolErrorBoundary } from './toolError.js';
+import { textResult } from './textResult.js';
 import { tagsInputSchema } from './tagsInput.js';
 import { foreignIdentityScopedMemoryFilter } from '../lib/auth/memoryOwnership.js';
 
@@ -273,10 +278,6 @@ import { Prisma, type PrismaClient, type SessionType, type NodeContentValidation
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-function textResult(text: string) {
-  return { content: [{ type: 'text' as const, text }] };
-}
 
 /** A duration as "Nd Nh", "Nh Nm" or "Nm", for a human reading a deadline. */
 function formatDuration(ms: number): string {
@@ -1525,12 +1526,47 @@ async function batchReadableTaskRefs(
   return new Map(refs);
 }
 
-async function batchHumanNames(nodes: readonly ReadProjectionNode[]): Promise<Map<string, string>> {
-  // #1591: approvers render by handle too, from the same lookup.
-  const ids = [...new Set(nodes.flatMap((n) => [n.authoredByHuman, n.approvedBy, n.mintedBy]).filter((id): id is string => !!id))];
+async function batchHumanNames(nodes: readonly ReadProjectionNode[], extraUserIds: readonly string[] = []): Promise<Map<string, string>> {
+  // #1591: approvers render by handle too, from the same lookup; #1632 signers too.
+  const ids = [...new Set([...nodes.flatMap((n) => [n.authoredByHuman, n.approvedBy, n.mintedBy]), ...extraUserIds].filter((id): id is string => !!id))];
   if (ids.length === 0) return new Map();
   const users = await db.user.findMany({ where: { id: { in: ids }, deletedAt: null }, select: { id: true, handle: true } });
   return new Map(users.filter((user) => !!user.handle).map((user) => [user.id, user.handle!]));
+}
+
+const SIGNATURE_LINE_ORDER = ['CURRENT', 'PENDING', 'EARLIER', 'CANCELLED'] as const;
+
+/**
+ * #1632 (cor:dmo:130:06) — `Signatures:` for an MCP node read. Current and
+ * pending signers are named (user URN by handle, the revision, the passkey
+ * label only, JSON-escaped so a label can never forge another line); earlier
+ * and cancelled ones are counted. Integrity problems are reported, never shown
+ * as signatures (#9853).
+ */
+async function renderSignatureLine(status: NodeSignatureStatusView, names?: ReadonlyMap<string, string>): Promise<string> {
+  if (status.signatures.length === 0 && status.integrityProblems === 0) return 'Signatures: none';
+  const missing = status.signatures.map((sig) => sig.signerId).filter((id) => !names?.has(id));
+  const looked = missing.length
+    ? new Map((await db.user.findMany({ where: { id: { in: missing }, deletedAt: null }, select: { id: true, handle: true } }))
+      .filter((u) => !!u.handle).map((u) => [u.id, u.handle!]))
+    : new Map<string, string>();
+  const who = (id: string) => {
+    const handle = names?.get(id) ?? looked.get(id);
+    return (handle ? userUrn(handle) : null) ?? 'a former user';
+  };
+  const parts: string[] = [];
+  for (const state of SIGNATURE_LINE_ORDER) {
+    const sigs = status.signatures.filter((sig) => sig.state === state);
+    if (sigs.length === 0) continue;
+    const label = state.toLowerCase();
+    parts.push(state === 'CURRENT' || state === 'PENDING'
+      ? `${sigs.length} ${label} — ${sigs.map((sig) => `${who(sig.signerId)} (r${sig.revision}, ${JSON.stringify(sig.passkeyLabel)}${state === 'PENDING' ? ', first passkey in its window' : ''})`).join(', ')}`
+      : `${sigs.length} ${label}`);
+  }
+  const problems = status.integrityProblems
+    ? `${status.integrityProblems} integrity problem${status.integrityProblems === 1 ? '' : 's'} (a signature record failed verification)`
+    : '';
+  return `Signatures: ${[parts.join('; '), problems].filter(Boolean).join(' · ')}`;
 }
 
 // #1610: one name/URN lookup per actor per batch read.
@@ -1578,6 +1614,7 @@ async function renderNodeReadProjection(
   scope: 'content' | 'abstract' | 'all',
   opts: {
     locked?: boolean;
+    encryptedMemory?: boolean;
     auth?: AuthContext;
     batch?: {
       reports: ReadonlyMap<string, ReadValidationReport>;
@@ -1585,6 +1622,8 @@ async function renderNodeReadProjection(
       humanNames: ReadonlyMap<string, string>;
       /** #1609 — comment counts per node, one grouped query for the batch. */
       feedback: ReadonlyMap<string, CommentCounts>;
+      /** #1632 — signature status per node, one batched load. */
+      signatures?: ReadonlyMap<string, NodeSignatureStatusView>;
     };
     memoryUrnOf?: (memoryId: string) => Promise<string>;
   } = {},
@@ -1681,8 +1720,8 @@ async function renderNodeReadProjection(
 
   // #1591: the approval line. Approver by handle when a user is known, else
   // the stored principal info.
-  let approvalLine = `Approval: not approved (r${revision})`;
-  if (node.approvedRevNo != null && node.approvedAt) {
+  let approvalLine = opts.encryptedMemory ? 'Approval: not applicable (encrypted memory)' : `Approval: not approved (r${revision})`;
+  if (!opts.encryptedMemory && node.approvedRevNo != null && node.approvedAt) {
     const handle = node.approvedBy
       ? (opts.batch
         ? opts.batch.humanNames.get(node.approvedBy)
@@ -1697,8 +1736,8 @@ async function renderNodeReadProjection(
   }
 
   // #1591: the mint line. A node backfilled as minted has no minted revision.
-  let mintLine = 'Minted: no';
-  if (node.mintedAt) {
+  let mintLine = opts.encryptedMemory ? 'Minted: not applicable (encrypted memory)' : 'Minted: no';
+  if (!opts.encryptedMemory && node.mintedAt) {
     const at = node.mintedAt.toISOString();
     if (node.mintedRevNo == null) {
       mintLine = `Minted: at ${at} (backfilled)`;
@@ -1712,6 +1751,15 @@ async function renderNodeReadProjection(
       mintLine = `Minted: r${node.mintedRevNo} at ${at} by ${minter}`;
     }
   }
+
+  // #1632 (cor:dmo:130:06): the signatures line, beside Approval. An encrypted
+  // node loads nothing (no hash-dependent work there).
+  const signatureLine = opts.encryptedMemory
+    ? 'Signatures: not applicable (encrypted memory)'
+    : renderSignatureLine(
+      opts.batch?.signatures?.get(node.id) ?? (await loadSignatureStatuses(db, [node.id])).get(node.id)!,
+      opts.batch?.humanNames,
+    );
 
   // #1609: the unresolved-feedback cue (cor:dmo:110:07), so an agent reading a
   // node knows a discussion exists beside it without being told to look. The
@@ -1748,6 +1796,7 @@ async function renderNodeReadProjection(
     authorshipLine,
     validationLine,
     approvalLine,
+    await signatureLine,
     mintLine,
     feedbackLine,
     createdByLine,
@@ -2054,7 +2103,14 @@ export function createMcpServerInstance(
 
   {
     type ToolCallback = (args: unknown, extra: unknown) => unknown;
-    const registerTool = server.tool.bind(server) as (...args: unknown[]) => unknown;
+    const sdkRegisterTool = server.tool.bind(server) as (...args: unknown[]) => unknown;
+    // Every registered handler (including reads and caller-session settlement)
+    // gets this outer boundary before the SDK can stringify a database fault.
+    const registerTool = (...args: unknown[]) => {
+      const cbIndex = args.length - 1;
+      args[cbIndex] = withToolErrorBoundary(args[0] as string, args[cbIndex] as ToolCallback);
+      return sdkRegisterTool(...args);
+    };
     (server as unknown as { tool: (...args: unknown[]) => unknown }).tool = (...args: unknown[]) => {
       const name = args[0] as string;
       if (ACTOR_NEUTRAL_TOOLS.has(name)) return registerTool(...args);
@@ -3258,6 +3314,9 @@ export function createMcpServerInstance(
   // ── #1609 — comment nodes (cor:dmo:110): thin over the GraphQL comment resolvers ──
   registerCommentTools(server, { db, auth });
 
+  // ── #1632 — signing requests (cor:dmo:130): request and read, never sign ──
+  registerSigningTools(server, { db, auth });
+
   // ── #1705 — agent tasks (cor:agt:050): thin over the GraphQL agent-task resolvers ──
   registerAgentTaskTools(server, { db, auth });
   registerTickerTools(server, { db, auth });
@@ -3747,7 +3806,7 @@ export function createMcpServerInstance(
       try {
         validateLoc(loc);
       } catch (e) {
-        return textResult((e as Error).message);
+        return toolErrorResult(e, () => (e as Error).message, 'hadron_create_parent_node:validateLoc');
       }
 
       if (!(await canWriteToMemory(db, auth, memoryId, EXPLICIT_REF))) {
@@ -4564,6 +4623,7 @@ export function createMcpServerInstance(
       // drift between the single-read and batch-read surfaces (cor:api:040:01).
       const projection = await renderNodeReadProjection(current, scope, {
         locked: lockState === 'locked',
+        encryptedMemory: lockState !== 'plaintext',
         auth,
       });
 
@@ -4956,12 +5016,16 @@ export function createMcpServerInstance(
       // render, and gate each distinct task memory before exposing its URN.
       const reports = await batchValidationReports(visible);
       const memoryUrnOf = memoizedMemoryUrnLookup();
+      // #1632: signatures for the batch in one load; their signers join the
+      // one human-name lookup.
+      const signatures = await loadSignatureStatuses(db, visible.map((n) => n.id));
+      const signerIds = [...signatures.values()].flatMap((st) => st.signatures.map((sig) => sig.signerId));
       const [taskRefs, humanNames, feedback] = await Promise.all([
         batchReadableTaskRefs(visible, reports, auth, memoryUrnOf),
-        batchHumanNames(visible),
+        batchHumanNames(visible, signerIds),
         openThreadCounts(db, visible.map((n) => n.id)),
       ]);
-      const batchProvenance = { reports, taskRefs, humanNames, feedback };
+      const batchProvenance = { reports, taskRefs, humanNames, feedback, signatures };
       for (const n of visible) {
         if (truncated) {
           omitted.push(await nodeUrn(n.loc, n.memoryId, memoryUrnOf));
@@ -4970,6 +5034,7 @@ export function createMcpServerInstance(
         const lockState = mcpDecryptOrMark(n); // spec 041 — same posture as hadron_get_node
         const projection = await renderNodeReadProjection(n, scope, {
           locked: lockState === 'locked',
+          encryptedMemory: lockState !== 'plaintext',
           auth,
           batch: batchProvenance,
           memoryUrnOf,
@@ -5559,7 +5624,7 @@ export function createMcpServerInstance(
       try {
         validateLoc(loc);
       } catch (e) {
-        return textResult((e as Error).message);
+        return toolErrorResult(e, () => (e as Error).message, 'hadron_create_node:validateLoc');
       }
 
       if (!(await canWriteToMemory(db, auth, memoryId, EXPLICIT_REF))) {
@@ -6581,7 +6646,7 @@ export function createMcpServerInstance(
       assertFullyQualifiedUrn(rawUrn, 'node');
       ({ memoryUrn, loc, fragment } = splitNodeUrn(rawUrn));
     } catch (e) {
-      return textResult((e as Error).message);
+      return toolErrorResult(e, () => (e as Error).message, `hadron_${mode}_${kind}:parseUrn`);
     }
     const fragRefusal = nodeFragmentRefusal(rawUrn, fragment);
     if (fragRefusal) return textResult(fragRefusal);
@@ -6593,7 +6658,7 @@ export function createMcpServerInstance(
     try {
       validateLoc(loc);
     } catch (e) {
-      return textResult((e as Error).message);
+      return toolErrorResult(e, () => (e as Error).message, `hadron_${mode}_${kind}:validateLoc`);
     }
 
     // `name` is optional in the shared arg set because an UPDATE preserves it,
@@ -6645,8 +6710,10 @@ export function createMcpServerInstance(
       );
       return textResult(`${kind} node ${mode === 'create' ? 'created' : 'updated'}: ${rawUrn} (id: ${node.id})`);
     } catch (e) {
-      const code = (e as { extensions?: { code?: string } }).extensions?.code;
-      return textResult(code ? `[${String(code).toLowerCase()}] ${(e as Error).message}` : `Error: ${(e as Error).message}`);
+      return toolErrorResult(e, () => {
+        const code = (e as { extensions?: { code?: string } }).extensions?.code;
+        return code ? `[${String(code).toLowerCase()}] ${(e as Error).message}` : `Error: ${(e as Error).message}`;
+      }, `hadron_${mode}_${kind}:resolver`);
     }
   }
 
@@ -6764,7 +6831,7 @@ export function createMcpServerInstance(
         const urn = await nodeUrn(node.loc, node.memoryId);
         return textResult(`Node data merged: ${urn} (id: ${node.id})`);
       } catch (e) {
-        return textResult(`Error: ${e instanceof Error ? e.message : 'update failed'}`);
+        return toolErrorResult(e, () => `Error: ${e instanceof Error ? e.message : 'update failed'}`, 'hadron_update_node_data:resolver');
       }
     },
   );
@@ -6808,7 +6875,7 @@ export function createMcpServerInstance(
         );
         return textResult(JSON.stringify(obj, null, 2));
       } catch (e) {
-        return textResult(`Error: ${e instanceof Error ? e.message : 'create failed'}`);
+        return toolErrorResult(e, () => `Error: ${e instanceof Error ? e.message : 'create failed'}`, 'hadron_create_object:resolver');
       }
     },
   );
@@ -6824,7 +6891,7 @@ export function createMcpServerInstance(
         const obj = await resolvers.Query.object({}, { ref }, objectCtx());
         return obj ? textResult(JSON.stringify(obj, null, 2)) : textResult('Object not found.');
       } catch (e) {
-        return textResult(`Error: ${e instanceof Error ? e.message : 'read failed'}`);
+        return toolErrorResult(e, () => `Error: ${e instanceof Error ? e.message : 'read failed'}`, 'hadron_get_object:resolver');
       }
     },
   );
@@ -6842,7 +6909,7 @@ export function createMcpServerInstance(
         const obj = await resolvers.Mutation.updateObject({}, { ref, fields: fields ?? {}, reason }, objectCtx());
         return textResult(JSON.stringify(obj, null, 2));
       } catch (e) {
-        return textResult(`Error: ${e instanceof Error ? e.message : 'update failed'}`);
+        return toolErrorResult(e, () => `Error: ${e instanceof Error ? e.message : 'update failed'}`, 'hadron_update_object:resolver');
       }
     },
   );
@@ -6859,7 +6926,7 @@ export function createMcpServerInstance(
         await resolvers.Mutation.deleteObject({}, { ref, hard }, objectCtx());
         return textResult(`Object deleted${hard ? ' (hard)' : ''}: ${ref}`);
       } catch (e) {
-        return textResult(`Error: ${e instanceof Error ? e.message : 'delete failed'}`);
+        return toolErrorResult(e, () => `Error: ${e instanceof Error ? e.message : 'delete failed'}`, 'hadron_delete_object:resolver');
       }
     },
   );
@@ -6886,7 +6953,7 @@ export function createMcpServerInstance(
         // Return { objects, total } so agents can page deterministically with limit/offset.
         return textResult(JSON.stringify({ objects: result.objects, total: result.total }, null, 2));
       } catch (e) {
-        return textResult(`Error: ${e instanceof Error ? e.message : 'query failed'}`);
+        return toolErrorResult(e, () => `Error: ${e instanceof Error ? e.message : 'query failed'}`, 'hadron_find_objects:resolver');
       }
     },
   );
@@ -6976,7 +7043,7 @@ export function createMcpServerInstance(
           lines.length ? `${header}\n${coverage}\n${lines.join('\n')}` : `${header}\n${coverage}`,
         );
       } catch (e) {
-        return textResult(`Error: ${e instanceof Error ? e.message : 'search-and-replace failed'}`);
+        return toolErrorResult(e, () => `Error: ${e instanceof Error ? e.message : 'search-and-replace failed'}`, 'hadron_replace_text:resolver');
       }
     },
   );
@@ -9190,7 +9257,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       const lines = page.items.map((m) => {
         const reply = m.replyToSeq != null ? ` (reply to #${m.replyToSeq})` : '';
         const cross = m.authorAppId ? ' [cross-App]' : '';
-        return `#${m.seq} [${m.authorName ?? 'unknown'}]${cross} ${m.at.toISOString()}${reply}:\n${m.body}`;
+        return `#${m.seq} ${chatByline(m)}${cross} ${m.at.toISOString()}${reply}:\n${m.body}`;
       });
       return textResult(`${page.total} message(s) total, showing ${page.items.length}:\n\n${lines.join('\n\n')}`);
     } catch (e) {
@@ -9464,7 +9531,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         const cross = message.authorAppId ? ' [cross-App]' : '';
         const mentionLine = message.mentions.length ? `\nmentions: ${message.mentions.map((mention) => `@${mention}`).join(', ')}` : '';
         routed.push(
-          `#${message.seq} [${message.authorName ?? 'unknown'}]${cross} ${message.at.toISOString()}${reply}:\n${message.body}` +
+          `#${message.seq} ${chatByline(message)}${cross} ${message.at.toISOString()}${reply}:\n${message.body}` +
           `${mentionLine}\nroute to: ${routes.map((route) => route.urn).join(', ')}`,
         );
       }
@@ -9775,7 +9842,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         if (page.total === 0) return textResult('The team chat has no matching messages.');
         const lines = page.items.map((m) => {
           const reply = m.replyToSeq != null ? ` (reply to #${m.replyToSeq})` : '';
-          return `#${m.seq} [${m.authorName ?? 'unknown'}] ${m.at.toISOString()}${reply}:\n${m.body}`;
+          return `#${m.seq} ${chatByline(m)} ${m.at.toISOString()}${reply}:\n${m.body}`;
         });
         return textResult(
           `${page.total} message(s) total, showing ${page.items.length}:\n\n${lines.join('\n\n')}`,

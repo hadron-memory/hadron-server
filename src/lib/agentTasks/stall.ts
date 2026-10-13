@@ -6,7 +6,7 @@
  * |-------------------|---------------------------------------------------|---------|-------------|
  * | not-started       | pending, assigned, past start-by or the window     | 15 min  | 050:14      |
  * | no-progress       | started, no open child, no assignee activity       | 60 min  | 050:15      |
- * | owner-unreactive  | a child finished; no activity since by the         | 20 min  | 050:16 (r2) |
+ * | owner-unreactive  | a child finished or cancelled; no activity by the | 20 min  | 050:16 (r2) |
  * |                   | parent's assignee (the child's owner)              |         |             |
  * | unassignable      | queued: pending with no assignee                   | 30 min  | 050:17      |
  *
@@ -25,12 +25,14 @@
  *     reassignment while started, 050:15 edge case), the moment the last open
  *     child ended (050:15 edge case), the assignee's last activity, and its
  *     latest still-working note (`task.progress`; cor:agt:050:12).
- *   - owner-unreactive: the EARLIEST child finish after the parent's
- *     assignee last moved (activity, a still-working note, the parent's start
- *     or its assignment). A second child finishing in the same silence is the
- *     same episode: the condition has held since the first.
- *   - unassignable: when the task was queued, its creation (nothing unassigns
- *     a task in T1–T2).
+ *   - owner-unreactive: the EARLIEST child end (finish or cancel, #1760) after
+ *     the CHILD'S OWNER last acted (#1831: its own session activity only; a
+ *     move on the parent, such as a reassignment, start or progress, is no
+ *     reaction). A second child ending in the same silence is the same episode:
+ *     the condition has held since the first.
+ *   - unassignable: when the task entered its current queue stint — its latest
+ *     `assignment.queued` event (#1754: make-ready re-queues a parked task),
+ *     falling back to creation for rows seeded past the resolvers.
  *
  * ACTIVITY is cor:agt:050:12: the worker's sessions, through the one SQL
  * derivation the roster uses (`loadWorkersActivity`, lib/sessionActivity.ts's
@@ -44,8 +46,7 @@
  * locked; a call landing in the same instant as the alarm can lose that race,
  * and the alarm stands.
  *
- * Interim readings carried from the issue until Holger rules: only a FINISHED
- * child starts the owner-unreactive window (050:16 open question); no alarm on
+ * Interim readings carried from the issue until Holger rules: no alarm on
  * an ended parent (it is not open, so it is never evaluated); a root task's
  * chain ends at its owner (050:18 open question); escalation steps by the
  * alarm's own window (050:19, Proposed).
@@ -57,6 +58,7 @@ import { loadWorkersActivity } from '../../api/graphql/schema/resolvers.worker.j
 import { toNaiveUtc } from '../sessionActivity.js';
 import { appendAlarmEvent, type AlarmChain, type AlarmEventType, type TaskParty } from './events.js';
 import { markStalled } from './availability.js';
+import { appManagerUserIds } from '../auth/appManagement.js';
 
 export const STALL_RULES = ['not-started', 'no-progress', 'owner-unreactive', 'unassignable'] as const;
 export type StallRule = (typeof STALL_RULES)[number];
@@ -130,12 +132,27 @@ export type StallInputs = {
   openChildCount: number;
   /** When the last child ended (finished or cancelled), if any has. */
   lastChildEndedAt: Date | null;
-  /** Finished children, earliest finish first. */
-  finishedChildren: { id: string; finishedAt: Date }[];
+  /**
+   * Children that ended by finishing or being cancelled (cor:agt:050:16, #1760),
+   * earliest end first, each with its OWNER's last session activity (#1831):
+   * the owner-unreactive window tests the child owner's silence, never the
+   * parent's assignee's. A worker owner's activity is its session activity; a
+   * person owner has no session, so theirs is the latest task call they made
+   * (cor:agt:050:12, #1848): the task events they caused, in this App.
+   */
+  endedChildren: { id: string; endedAt: Date; ownerWorkerId: string | null; ownerActivityAt: Date | null }[];
   /** The latest still-working note on the task (cor:agt:050:12). */
   lastProgressAt: Date | null;
   /** The worker assignee's last session activity; null for a person or a queued task. */
   assigneeActivityAt: Date | null;
+  /**
+   * When the task entered its CURRENT queue stint: the latest
+   * `assignment.queued` event (#1754 — make-ready re-queues a parked task, so
+   * creation is no longer the queue entry). Null when no such event exists, a
+   * row seeded past the resolvers; `unassignable` then falls back to creation,
+   * the pre-#1754 episode start.
+   */
+  queuedAt: Date | null;
 };
 
 /**
@@ -150,20 +167,44 @@ export async function loadStallInputs(db: Db, where: Prisma.AgentTaskWhereInput,
   });
   if (tasks.length === 0) return [];
   const ids = tasks.map((t) => t.id);
-  const workerIds = [...new Set(tasks.map((t) => t.assigneeWorkerId).filter((w): w is string => !!w))];
-  const [children, progress, activity] = await Promise.all([
-    db.agentTask.findMany({
-      where: { parentTaskId: { in: ids } },
-      select: { id: true, parentTaskId: true, status: true, finishedAt: true, cancelledAt: true },
-    }),
+  const children = await db.agentTask.findMany({
+    where: { parentTaskId: { in: ids } },
+    select: { id: true, parentTaskId: true, status: true, finishedAt: true, cancelledAt: true, ownerWorkerId: true, ownerUserId: true },
+  });
+  const workerIds = [...new Set([
+    ...tasks.map((t) => t.assigneeWorkerId),
+    ...children.map((c) => c.ownerWorkerId),
+  ].filter((w): w is string => !!w))];
+  const ownerUserIds = [...new Set(children.map((c) => c.ownerUserId).filter((u): u is string => !!u))];
+  const [progress, queued, activity, userCalls] = await Promise.all([
     db.agentTeamEvent.groupBy({
       by: ['taskId'],
       where: { taskId: { in: ids }, type: 'task.progress' },
       _max: { createdAt: true },
     }),
+    db.agentTeamEvent.groupBy({
+      by: ['taskId'],
+      where: { taskId: { in: ids }, type: 'assignment.queued' },
+      _max: { createdAt: true },
+    }),
     loadWorkersActivity({ db } as unknown as Context, workerIds, now),
+    // cor:agt:050:12 — "a person's activity is any task call they make". The
+    // record of a call is the task event it caused (create, assign, start,
+    // progress, finish, cancel, park, ready); a read leaves none (#1848), and
+    // an event with no task (availability, host) is not a task call.
+    ownerUserIds.length
+      ? db.agentTeamEvent.groupBy({
+        by: ['appId', 'actorUserId'],
+        // actorWorkerId null: a worker-bound call made under the person's credential
+        // carries their user id too, but it is the WORKER's activity, not theirs.
+        where: { actorUserId: { in: ownerUserIds }, actorWorkerId: null, taskId: { not: null }, type: { startsWith: 'task.' } },
+        _max: { createdAt: true },
+      })
+      : Promise.resolve([]),
   ]);
+  const userCallAt = new Map(userCalls.map((r) => [`${r.appId}:${r.actorUserId}`, r._max.createdAt]));
   const progressBy = new Map(progress.map((p) => [p.taskId, p._max.createdAt]));
+  const queuedBy = new Map(queued.map((q) => [q.taskId, q._max.createdAt]));
   const childrenBy = new Map<string, typeof children>();
   for (const c of children) {
     const list = childrenBy.get(c.parentTaskId as string) ?? [];
@@ -177,12 +218,22 @@ export async function loadStallInputs(db: Db, where: Prisma.AgentTaskWhereInput,
       task,
       openChildCount: kids.filter((c) => OPEN_STATUSES.includes(c.status)).length,
       lastChildEndedAt: latest(...ends),
-      finishedChildren: kids
-        .filter((c) => c.status === 'finished' && c.finishedAt)
-        .map((c) => ({ id: c.id, finishedAt: c.finishedAt as Date }))
-        .sort((a, b) => a.finishedAt.getTime() - b.finishedAt.getTime() || a.id.localeCompare(b.id)),
+      endedChildren: kids
+        .flatMap((c) => {
+          const endedAt = c.status === 'finished' ? c.finishedAt : c.status === 'cancelled' ? c.cancelledAt : null;
+          return endedAt
+            ? [{
+              id: c.id, endedAt, ownerWorkerId: c.ownerWorkerId,
+              ownerActivityAt: c.ownerWorkerId
+                ? activity.get(c.ownerWorkerId)?.lastActiveAt ?? null
+                : c.ownerUserId ? userCallAt.get(`${task.appId}:${c.ownerUserId}`) ?? null : null,
+            }]
+            : [];
+        })
+        .sort((a, b) => a.endedAt.getTime() - b.endedAt.getTime() || a.id.localeCompare(b.id)),
       lastProgressAt: progressBy.get(task.id) ?? null,
       assigneeActivityAt: task.assigneeWorkerId ? activity.get(task.assigneeWorkerId)?.lastActiveAt ?? null : null,
+      queuedAt: queuedBy.get(task.id) ?? null,
     };
   });
 }
@@ -232,9 +283,16 @@ export function stallCandidates(inputs: StallInputs, windows: StallWindows, now:
     });
   };
 
-  // cor:agt:050:17 — queued: pending with no assignee.
+  // cor:agt:050:17 — queued: pending with no assignee. The episode starts when
+  // the task entered the queue — its latest `assignment.queued` event: #1754
+  // made queue entry a move (make-ready re-queues a parked task), so `createdAt`
+  // would arm an aged backlog's alarm the moment it is made ready, and a second
+  // stint would share the first alarm's episode key and be silenced. Rows with
+  // no queue event (seeded past the resolvers) fall back to creation, the
+  // pre-#1754 start.
   if (task.status === 'pending' && !assignee) {
-    add('unassignable', task.createdAt, plus(task.createdAt, windows.assignmentMinutes));
+    const queuedAt = inputs.queuedAt ?? task.createdAt;
+    add('unassignable', queuedAt, plus(queuedAt, windows.assignmentMinutes));
   }
 
   // cor:agt:050:14 — assigned and still pending. A still-working note does not
@@ -258,7 +316,7 @@ export function stallCandidates(inputs: StallInputs, windows: StallWindows, now:
   // assignee, has not moved since. The alarm is about THIS (the parent) task.
   const first = assignee ? unreactedChild(inputs) : null;
   if (first) {
-    add('owner-unreactive', first.finishedAt, plus(first.finishedAt, windows.ownerReactionMinutes), {
+    add('owner-unreactive', first.endedAt, plus(first.endedAt, windows.ownerReactionMinutes), {
       childTaskId: first.id,
     });
   }
@@ -270,19 +328,28 @@ export function stallCandidates(inputs: StallInputs, windows: StallWindows, now:
  * after its assignee last moved, or null. The owner-unreactive episode starts
  * there; the roster (#1707) reads the same answer as "your move".
  */
-export function unreactedChild(inputs: StallInputs): { id: string; finishedAt: Date } | null {
-  const { task } = inputs;
-  if (!inputs.finishedChildren.length) return null;
-  const moved = latest(task.assignedAt, task.startedAt, inputs.lastProgressAt, inputs.assigneeActivityAt);
-  return inputs.finishedChildren.find((c) => !moved || c.finishedAt.getTime() > moved.getTime()) ?? null;
+export function unreactedChild(inputs: StallInputs): StallInputs['endedChildren'][number] | null {
+  return unreactedChildren(inputs)[0] ?? null;
+}
+
+/**
+ * Every ended child whose owner has not been active since it ended, earliest
+ * end first. Only the CHILD OWNER's own activity counts (cor:agt:050:16,
+ * #1831): the parent's reassignment, start or progress by its assignee is not
+ * a reaction, so the answer does not depend on who the parent is assigned to.
+ */
+export function unreactedChildren(inputs: StallInputs): StallInputs['endedChildren'] {
+  return inputs.endedChildren.filter((c) => !c.ownerActivityAt || c.endedAt.getTime() > c.ownerActivityAt.getTime());
 }
 
 // ── The owner chain ───────────────────────────────────────────────────────
 
 /**
  * cor:agt:050:18 — the task's owner, then its parent's owner, up to the root
- * owner, nearest first. An owner who appears more than once is kept at their
- * nearest position only, so escalation never wakes the same party twice.
+ * owner, nearest first; then, cor:agt:050:25 (#1761), whoever manages the App
+ * (`appManagerUserIds`), because a root task has no parent owner to escalate to.
+ * A party who appears more than once is kept at their nearest position only, so
+ * escalation never wakes the same party twice.
  */
 export async function ownerChain(db: Db, taskId: string): Promise<AlarmChain> {
   const rows = await db.$queryRaw<{ ownerWorkerId: string | null; ownerUserId: string | null }[]>`
@@ -310,13 +377,25 @@ export async function ownerChain(db: Db, taskId: string): Promise<AlarmChain> {
     seen.add(key);
     chain.push(party);
   }
+  const app = await db.agentTask.findUnique({
+    where: { id: taskId },
+    select: { app: { select: { id: true, organizationId: true, ownerUserId: true } } },
+  });
+  if (app) {
+    for (const userId of await appManagerUserIds(db, app.app)) {
+      const key = `u:${userId}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      chain.push({ userId, via: 'manager' });
+    }
+  }
   return chain;
 }
 
 // ── Raising ───────────────────────────────────────────────────────────────
 
-/** The rules whose alarm marks a worker assignee unavailable (cor:agt:060:07, Proposed). */
-const MARKS_ASSIGNEE: ReadonlySet<StallRule> = new Set(['not-started', 'no-progress']);
+/** The rules whose alarm marks a worker assignee unavailable (cor:agt:060:07, Proposed; #1758 added owner-unreactive). */
+const MARKS_ASSIGNEE: ReadonlySet<StallRule> = new Set(['not-started', 'no-progress', 'owner-unreactive']);
 
 /**
  * Raise one candidate's alarm, once per episode. Re-evaluates the task under
@@ -385,9 +464,19 @@ export async function raiseStallAlarm(
       })),
     });
 
-    // cor:agt:060:07 — a person assignee is never marked (availability is a worker's).
-    if (MARKS_ASSIGNEE.has(again.rule) && subjectWorkerId) {
-      await markStalled(tx, { workerId: subjectWorkerId, appId: again.appId, alarmEventId: eventId, now });
+    // cor:agt:060:07 — not-started / no-progress mark the task's assignee;
+    // owner-unreactive marks the FINISHED CHILD's owner (#1758), who is the
+    // parent's assignee only until the parent is reassigned. A person is never
+    // marked (availability is a worker's).
+    let markWorkerId = subjectWorkerId;
+    if (again.rule === 'owner-unreactive') {
+      const child = again.childTaskId
+        ? await tx.agentTask.findUnique({ where: { id: again.childTaskId }, select: { ownerWorkerId: true } })
+        : null;
+      markWorkerId = child?.ownerWorkerId ?? null;
+    }
+    if (MARKS_ASSIGNEE.has(again.rule) && markWorkerId) {
+      await markStalled(tx, { workerId: markWorkerId, appId: again.appId, alarmEventId: eventId, now });
     }
     return eventId;
   }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
@@ -448,6 +537,35 @@ export async function evaluateStalls(db: PrismaClient, now = new Date()): Promis
     if (page.length < EVALUATION_PAGE) break;
   }
   return raised;
+}
+
+/** An alarm's episode key: its task, its type (the rule) and its episode start. */
+export const alarmEpisodeKey = (taskId: string, type: string, episodeStart: Date): string =>
+  `${taskId}|${type}|${episodeStart.getTime()}`;
+
+/**
+ * #1708 (Rook §10 P3-1 on #1720) — which of these alarms' episodes still hold
+ * NOW: the same rule still fires for the task with the same episode start, by
+ * the evaluator's own `stallCandidates`. `loadStallInputs` reads only open tasks
+ * of live, installed Apps, so an ended task or an uninstalled App is not
+ * current either. Returns the current alarms' `alarmEpisodeKey`s.
+ */
+export async function currentAlarmEpisodes(
+  db: Db,
+  alarms: { taskId: string; type: string; episodeStart: Date | null }[],
+  now: Date,
+): Promise<Set<string>> {
+  const out = new Set<string>();
+  const taskIds = [...new Set(alarms.filter((a) => a.episodeStart).map((a) => a.taskId))];
+  if (taskIds.length === 0) return out;
+  const inputs = await loadStallInputs(db, { id: { in: taskIds } }, now);
+  const windows = await loadWindows(db, [...new Set(inputs.map((i) => i.task.appId))]);
+  for (const i of inputs) {
+    for (const c of stallCandidates(i, windows.get(i.task.appId) as StallWindows, now)) {
+      out.add(alarmEpisodeKey(c.taskId, STALL_EVENT_TYPE[c.rule], c.episodeStart));
+    }
+  }
+  return out;
 }
 
 // ── Escalation ────────────────────────────────────────────────────────────

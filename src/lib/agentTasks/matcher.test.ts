@@ -108,7 +108,7 @@ describe('cor:agt:060:06 — a queued task goes to the matching worker free for 
     await lastAssigned(baloo, '09:00');
     await lastAssigned(liam, '10:00');
     const t = await queued('11:00', NOT_CLAUDE_REVIEWER);
-    expect(await taskMatcherTick(db, at('11:01'))).toEqual({ lost: 0, matched: 1 });
+    expect(await taskMatcherTick(db, at('11:01'))).toEqual({ lost: 0, lapsed: 0, matched: 1 });
     expect(await assigneeOf(t.id)).toBe(baloo.id);
     const task = await db.agentTask.findUniqueOrThrow({ where: { id: t.id } });
     expect(task).toMatchObject({ status: 'pending', assignedAt: at('11:01'), assignedBy: null, assignedByWorkerId: null });
@@ -222,7 +222,7 @@ describe('cor:agt:060:06 — a queued task goes to the matching worker free for 
       })),
     });
     const last = await queued('10:00', { role: 'reviewer' });
-    expect(await taskMatcherTick(db, at('11:01'))).toEqual({ lost: 0, matched: 1 });
+    expect(await taskMatcherTick(db, at('11:01'))).toEqual({ lost: 0, lapsed: 0, matched: 1 });
     expect(await assigneeOf(last.id)).toBe(baloo.id);
   });
 });
@@ -547,5 +547,55 @@ describe('concurrent runs never double-assign a task or a worker', () => {
     expect(await first).toBe('task-gone');
     expect(await assigneeOf(t.id)).toBe(liam.id);
     expect(await db.agentTeamEvent.count({ where: { type: 'assignment.matched' } })).toBe(1);
+  });
+});
+
+// ── #1754 — a backlog task is never matched (cor:agt:050:02) ──────────────
+
+describe('#1754 — a backlog task is never matched (cor:agt:050:02)', () => {
+  /** A REAL queued stint, as create leaves it: the row and its queue-entry event, both at `t`. */
+  async function queuedAt(t: string, extra: Record<string, unknown> = {}) {
+    const row = await db.agentTask.create({
+      data: { appId: app.id, title: 'Review', ownerUserId: mia.id, createdAt: at(t), ...extra },
+      select: { id: true },
+    });
+    await db.agentTeamEvent.create({
+      data: { appId: app.id, taskId: row.id, type: 'assignment.queued', createdAt: at(t) },
+    });
+    return row;
+  }
+
+  it('a free, matching worker and a born-backlog task: the tick assigns nothing and writes no event', async () => {
+    await bind(baloo, 'codex', at('11:00'));
+    const t = await db.agentTask.create({
+      data: { appId: app.id, title: 'Parked', ownerUserId: mia.id, status: 'backlog', createdAt: at('11:00') },
+      select: { id: true },
+    });
+    expect(await taskMatcherTick(db, at('11:01'))).toEqual({ lost: 0, lapsed: 0, matched: 0 });
+    expect(await db.agentTask.findUniqueOrThrow({ where: { id: t.id } }))
+      .toMatchObject({ status: 'backlog', assigneeWorkerId: null, assigneeUserId: null });
+    expect(await db.agentTeamEvent.findMany({ where: { taskId: t.id } })).toEqual([]);
+  });
+
+  it('a task parked FROM THE QUEUE (a real queue stint behind it) is not matched (#1790 Xylon P2-2)', async () => {
+    await bind(baloo, 'codex', at('11:00'));
+    const t = await queuedAt('10:00', { status: 'backlog' }); // queued at 10:00, parked since
+    expect(await taskMatcherTick(db, at('11:01'))).toEqual({ lost: 0, lapsed: 0, matched: 0 });
+    expect(await db.agentTask.findUniqueOrThrow({ where: { id: t.id } }))
+      .toMatchObject({ status: 'backlog', assigneeWorkerId: null, assigneeUserId: null });
+  });
+
+  it('a task made ready again re-enters the queue and KEEPS ITS CREATION RANK (createdAt order, by design)', async () => {
+    await bind(baloo, 'codex', at('11:00'));
+    const older = await queuedAt('10:00'); // queued, parked, made ready again before the tick
+    await db.agentTask.update({ where: { id: older.id }, data: { status: 'backlog' } });
+    await db.agentTeamEvent.create({
+      data: { appId: app.id, taskId: older.id, type: 'assignment.queued', createdAt: at('11:30') },
+    });
+    await db.agentTask.update({ where: { id: older.id }, data: { status: 'pending' } });
+    const younger = await queuedAt('11:00'); // queued continuously
+    expect(await taskMatcherTick(db, at('11:31'))).toEqual({ lost: 0, lapsed: 0, matched: 1 });
+    expect(await assigneeOf(older.id)).toBe(baloo.id);
+    expect(await assigneeOf(younger.id)).toBeNull();
   });
 });

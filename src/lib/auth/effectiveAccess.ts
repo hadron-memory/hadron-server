@@ -1,4 +1,5 @@
 import { canBypassUserOwnership, canBypassMemoryOwnership } from './platformAdminBypass.js';
+import { systemMemoryReadGrants } from './systemMemoryRead.js';
 /**
  * effectiveAccess — the authoritative "what access does user X have to
  * resource Y?" composition (issue #323).
@@ -146,7 +147,14 @@ async function memoryGrants(
   db: PrismaClient,
   subject: Subject,
   memory: MemoryForAccess,
+  restrictOrgId?: string,
 ): Promise<InternalGrant[]> {
+  if (memory.class === 'system') {
+    return systemMemoryReadGrants(db, {
+      userId: subject.id, roles: subject.roles,
+      impersonation: restrictOrgId ? { orgId: restrictOrgId } : null,
+    }, memory.id);
+  }
   const grants: InternalGrant[] = [];
   const strictOwnerClass = memory.class === 'personal' || memory.class === 'private';
 
@@ -226,15 +234,6 @@ async function memoryGrants(
   // After the user-owned early return, the org-XOR-owner CHECK guarantees an org
   // owner — narrow organizationId to non-null for the org-role paths below.
   if (memory.organizationId === null) return grants;
-
-  // System memory is universally readable, and is never written or managed
-  // through this surface — its only editor is the agent-ownership surface, and
-  // deleteMemory explicitly refuses to remove it. So it is read-only here, with
-  // no platform/org/member write or manage grant layered on.
-  if (memory.class === 'system') {
-    grants.push({ source: 'PUBLIC_VISIBILITY', role: 'reader', via: null, caps: READ });
-    return grants;
-  }
 
   // Platform admin bypass — read/write/manage on every non-strict class
   // (requireMemoryWriteAccess + deleteMemory both honor the global role).
@@ -504,6 +503,18 @@ async function agentGrants(
   if (agent.ownerUserId !== null) {
     if (agent.ownerUserId === subject.id) {
       grants.push({ source: 'PRINCIPAL_GRANT', role: 'owner', via: null, caps: FULL });
+    } else if (isPlatformAdmin(subject.roles)) {
+      // #1787 (cor:dmo:050:13): a platform admin manages a user-owned Agent
+      // (read, update, delete) — the audit surface agrees with the gate
+      // (`requireAgentAccess`). The decrypted AI config is a separate
+      // resource and stays owner-only. Impersonation carries no platform
+      // role, so an impersonated admin gets nothing here either.
+      grants.push({
+        source: 'PLATFORM_ROLE',
+        role: subject.roles.includes('OWNER') ? 'OWNER' : 'ADMIN',
+        via: null,
+        caps: FULL,
+      });
     }
     return grants;
   }
@@ -744,14 +755,14 @@ export async function computeEffectiveAccess(
 ): Promise<EffectiveAccessResult> {
   switch (resolved.kind) {
     case 'memory': {
-      const grants = await memoryGrants(db, subject, resolved.memory);
+      const grants = await memoryGrants(db, subject, resolved.memory, opts?.restrictOrgId);
       return assemble(subject.id, safeEntityUrnV2('memory', resolved.memory.urn), 'memory', grants);
     }
     case 'node': {
       // A node's access IS its memory's access (memoryAccessFilter coupling).
       // Re-tag each memory grant as NODE_INHERITED, with `via` pointing at the
       // memory the node inherits from.
-      const memGrants = await memoryGrants(db, subject, resolved.memory);
+      const memGrants = await memoryGrants(db, subject, resolved.memory, opts?.restrictOrgId);
       const inherited: InternalGrant[] = memGrants.map((g) => ({
         source: 'NODE_INHERITED',
         role: g.role,

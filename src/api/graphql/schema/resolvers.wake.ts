@@ -28,6 +28,9 @@ import { generateId } from '../../../lib/id.js';
 
 type Reader = { manager: boolean; userId: string | null };
 
+/** `TASK:<id>:<event>`, the event lower-kebab: `TASK:t1:assigned`, `TASK:t1:child-finished`. */
+export const taskReasonRef = (taskId: string, event: string): string => `TASK:${taskId}:${event.toLowerCase().replace(/_/g, '-')}`;
+
 async function readerFor(ctx: Context, app: TaskApp, actor: Awaited<ReturnType<typeof resolveParticipatedApp>>['actor']): Promise<Reader> {
   // Concealed like any App the caller cannot reach: no oracle, and no key or impersonated session reads wakes here.
   // Nor does a worker's session: it is the worker, not the person behind it, and a holder's reading right is theirs
@@ -107,10 +110,6 @@ export async function dueWakesFor(
     ctx, app, reader, requester: key ? { appKeyId: key.appKeyId } : { userId: reader.userId! },
     workerIds: only, first: a.first, after: a.after, authorize,
   });
-  // The budget notice is a team-chat post, which a key cannot make (an App key is read-only in chat), so a key reader
-  // neither posts nor claims it: the claim stays for the next person's read, and the page itself carries the status and
-  // the count of the wakes withheld for the router to act on (Chip, #1781).
-  if (result.budgetNotice && !key) await postBudgetNotice(ctx, app, result.budgetNotice);
 
   const workerIds = [...new Set([...result.wakes.map((w) => w.workerId), ...result.dormant.map((d) => d.workerId)])];
   // An App key's answer is decided under the App's authority anchor on EVERY path, not only when a wake is issued:
@@ -118,6 +117,9 @@ export async function dueWakesFor(
   // The same transaction writes the audit row (key, App, workers shown, time), so a read is recorded exactly when it
   // is allowed to be returned (cor:agt:080:23).
   if (key) await decideKeyAnswer(ctx, app, key, workerIds.length);
+  // The budget notice is posted by the platform itself, once a day per App, whoever's read triggered it: a person's or an
+  // App key's (#1791, cor:agt:080:15). Posted only once an App key's answer is decided: a read that is refused posts nothing (Rook #1799).
+  if (result.budgetNotice) await postBudgetNotice(ctx, app, result.budgetNotice);
   const workers = new Map((await ctx.db.worker.findMany({ where: { id: { in: workerIds } } })).map((w) => [w.id, w]));
   const channelIds = [...new Set(result.wakes.flatMap((w) => w.wake.channels.map((c) => c.channelId)))];
   const channels = new Map((await ctx.db.channel.findMany({ where: { id: { in: channelIds } } })).map((c) => [c.id, c]));
@@ -129,7 +131,14 @@ export async function dueWakesFor(
     withheld: result.withheld,
     wakes: result.wakes.map((w) => ({
       worker: workers.get(w.workerId)!,
-      reasons: w.wake.reasons.map((r) => ({ kind: r.kind, ticker: r.kind === 'TICK' ? tickers.get(r.tickerId) ?? null : null })),
+      reasons: w.wake.reasons.map((r) => ({
+        kind: r.kind,
+        ticker: r.kind === 'TICK' ? tickers.get(r.tickerId) ?? null : null,
+        // #1708: the task is gated in computeDueWakes (a reader of the App's tasks only), so it is shown as is.
+        task: r.kind === 'TASK'
+          ? { id: r.taskId, eventId: r.eventId, chainIndex: r.chainIndex, event: r.event, title: r.title, ref: taskReasonRef(r.taskId, r.event) }
+          : null,
+      })),
       channels: w.wake.channels.map((c) => ({
         channel: channels.get(c.channelId)!,
         fromSeq: c.fromSeq,
@@ -146,30 +155,32 @@ export async function dueWakesFor(
   };
 }
 
-/** One notice per App per UTC day (cor:agt:080:15). Claimed atomically; best-effort, never fails the read. */
+/**
+ * One notice per App per UTC day (cor:agt:080:15), posted AS THE PLATFORM (#1791): a system author, so the reader's own
+ * rights (a key cannot post in chat) decide nothing. Best-effort, never fails the read. The day's claim is taken INSIDE the
+ * notice's own append transaction, so the claim and the message commit together or not at all: an App with no live team
+ * chat takes no claim, a failed post leaves none, and a process exit between the two cannot use up the day's notice.
+ */
 async function postBudgetNotice(ctx: Context, app: TaskApp, n: { appId: string; day: Date; withheld: number }): Promise<void> {
+  const dayLit = n.day.toISOString().slice(0, 10);
   try {
-    const claimed = await ctx.db.$executeRaw(Prisma.sql`
-      INSERT INTO app_wake_days (app_id, day, wakes, notice_posted_at) VALUES (${n.appId}, ${n.day.toISOString().slice(0, 10)}::date, 0, now() AT TIME ZONE 'utc')
-      ON CONFLICT (app_id, day) DO UPDATE SET notice_posted_at = now() AT TIME ZONE 'utc'
-      WHERE app_wake_days.notice_posted_at IS NULL`);
-    if (claimed === 0) return;
-    const { teamChatMutations } = await import('./resolvers.teamChat.js');
-    await teamChatMutations.createTeamChatMessage(
-      {},
-      {
-        appRef: app.id,
-        body:
-          `This App's daily wake budget is spent: ${n.withheld} wake${n.withheld === 1 ? ' is' : 's are'} waiting until tomorrow (UTC). ` +
-          'Mentions by whoever manages the App still go through. Whoever manages the App can raise the budget.',
-        replyToSeq: null,
-        sessionRef: null,
-      },
-      ctx,
+    // Already posted today: the common case on a spent App, answered by one cheap read. The claim below is still the gate.
+    const today = await ctx.db.appWakeDay.findFirst({ where: { appId: n.appId, day: n.day }, select: { noticePostedAt: true } });
+    if (today?.noticePostedAt) return;
+    // Lazy: resolvers.teamChat imports a long chain of resolvers.
+    const { postSystemNotice } = await import('./resolvers.teamChat.js');
+    await postSystemNotice(
+      ctx.db,
+      app.id,
+      `This App's daily wake budget is spent: ${n.withheld} wake${n.withheld === 1 ? ' is' : 's are'} waiting until tomorrow (UTC). ` +
+        'Mentions by whoever manages the App still go through. Whoever manages the App can raise the budget.',
+      async (tx) =>
+        (await tx.$executeRaw(Prisma.sql`
+          INSERT INTO app_wake_days (app_id, day, wakes, notice_posted_at) VALUES (${n.appId}, ${dayLit}::date, 0, now() AT TIME ZONE 'utc')
+          ON CONFLICT (app_id, day) DO UPDATE SET notice_posted_at = now() AT TIME ZONE 'utc'
+          WHERE app_wake_days.notice_posted_at IS NULL`)) > 0,
     );
   } catch (e) {
-    // A failed post must not use up the day's one notice: hand the claim back so the next read tries again.
-    await ctx.db.$executeRaw`UPDATE app_wake_days SET notice_posted_at = NULL WHERE app_id = ${n.appId} AND day = ${n.day.toISOString().slice(0, 10)}::date`.catch(() => undefined);
     console.warn('[tickers] wake-budget notice failed:', e instanceof Error ? e.message : e);
   }
 }

@@ -18,7 +18,8 @@ export function isNonStrictMemoryClass(memoryClass?: string): boolean {
 
 /**
  * The caller must be a user acting directly. User-owned Agents are explicitly
- * outside #1734 (Ada's provisional scope ruling, team chat #8878). Memory
+ * outside this tenant bypass; main #1818 handles their definition management
+ * through its separate shared gate. Memory
  * callers must supply the class: personal/private never get a role bypass.
  */
 export function canBypassUserOwnership(
@@ -44,7 +45,7 @@ export async function userOwnedAgentSystemMemoryIds(
   return new Set(agents.flatMap(agent => agent.systemMemoryId ? [agent.systemMemoryId] : []));
 }
 
-/** #8898: a user-owned Agent's system memory stays with its definition. */
+/** Agent system-memory content is outside this bypass; main #1818 governs record reads. */
 export async function canBypassMemoryOwnership(
   db: Pick<PrismaClient, 'agent'>,
   caller: PlatformCaller,

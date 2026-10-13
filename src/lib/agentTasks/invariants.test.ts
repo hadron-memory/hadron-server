@@ -34,10 +34,12 @@ const event = (data: Record<string, unknown> = {}) =>
   db.agentTeamEvent.create({ data: { appId: app.id, type: 'task.created', ...data } });
 
 describe('agent-task-invariants.sql', () => {
-  it('the migration carries a byte-identical copy of the invariants file', () => {
+  // #1754 moved the pin to the latest agent-tasks migration: the file is the
+  // source of truth, and the newest migration carries its current copy.
+  it('the latest agent-tasks migration carries a byte-identical copy of the invariants file', () => {
     const source = readFileSync(new URL('../../../prisma/agent-task-invariants.sql', import.meta.url), 'utf8');
     const migration = readFileSync(
-      new URL('../../../prisma/migrations/20261008010000_agent_tasks/migration.sql', import.meta.url),
+      new URL('../../../prisma/migrations/20261012020000_agent_task_backlog_status/migration.sql', import.meta.url),
       'utf8',
     );
     expect(migration.endsWith(source)).toBe(true);
@@ -87,6 +89,15 @@ describe('chk_agent_tasks_shape (cor:agt:050:01)', () => {
   it('a started or finished task has an assignee', async () => {
     const now = new Date();
     await expectCheckViolation(task({ status: 'started', startedAt: now }), /chk_agent_tasks_shape/);
+  });
+
+  it('#1754 (cor:agt:050:02): a backlog task has no assignee, no assignment and no timestamps', async () => {
+    await expect(task({ status: 'backlog' })).resolves.toMatchObject({ status: 'backlog' });
+    const w = await workerRow();
+    await expectCheckViolation(task({ status: 'backlog', assigneeWorkerId: w, assignedAt: new Date() }), /chk_agent_tasks_shape/);
+    await expectCheckViolation(task({ status: 'backlog', assigneeUserId: owner.id }), /chk_agent_tasks_shape/);
+    await expectCheckViolation(task({ status: 'backlog', assignedAt: new Date() }), /chk_agent_tasks_shape/);
+    await expectCheckViolation(task({ status: 'backlog', startedAt: new Date() }), /chk_agent_tasks_shape/);
   });
 });
 
@@ -172,10 +183,10 @@ async function workerRow(): Promise<string> {
 // ── #1706: prisma/agent-task-stall-invariants.sql ─────────────────────────
 
 describe('agent-task-stall-invariants.sql (#1706)', () => {
-  it('the T2 migration carries a byte-identical copy of the invariants file', () => {
+  it('the latest stall-invariants migration carries a byte-identical copy of the invariants file', () => {
     const source = readFileSync(new URL('../../../prisma/agent-task-stall-invariants.sql', import.meta.url), 'utf8');
     const migration = readFileSync(
-      new URL('../../../prisma/migrations/20261009010000_agent_task_stalls/migration.sql', import.meta.url),
+      new URL('../../../prisma/migrations/20261013160000_host_lapse_check_ins/migration.sql', import.meta.url),
       'utf8',
     );
     expect(migration.endsWith(source)).toBe(true);
@@ -236,6 +247,20 @@ describe('agent-task-stall-invariants.sql (#1706)', () => {
     await expectCheckViolation(row({ state: 'away' }), /chk_worker_availability_shape/);
     await expectCheckViolation(row({ setBy: 'coordinator' }), /chk_worker_availability_shape/);
     await expect(row({ reason: 'stalled', setBy: 'stall-rule' })).resolves.toBeTruthy();
+  });
+
+  it('worker_availability (#1766): `lapse` is a setter, for the record a passed until left available', async () => {
+    const w = await workerRow();
+    await expect(
+      db.workerAvailability.create({ data: { workerId: w, state: 'available', setAt: new Date(), setBy: 'lapse' } }),
+    ).resolves.toBeTruthy();
+  });
+
+  it('worker_availability (#1759): `reports-to` is a setter, for the stall mark the reports-to worker cleared', async () => {
+    const w = await workerRow();
+    await expect(
+      db.workerAvailability.create({ data: { workerId: w, state: 'available', setAt: new Date(), setBy: 'reports-to' } }),
+    ).resolves.toBeTruthy();
   });
 
   it('model_family_availability (cor:agt:060:03): a lowercase family token and the same state shape', async () => {

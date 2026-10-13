@@ -1,3 +1,4 @@
+import { requireProviderCredentialOwner } from './resolvers.helpers.js';
 // agentQueries — extracted from resolvers.ts Query (split step 3). No behavior change.
 import { GraphQLError } from 'graphql';
 import { decryptToken } from '../../../lib/tokenCrypto.js';
@@ -18,6 +19,7 @@ import {
   aiConfigOwnerOf,
   clampListTake,
   requireOrgRole,
+  requireAgentAccess,
   requireOwnerOrOrgRole,
   resolveOrgScope,
   isPlatformAdmin,
@@ -60,7 +62,7 @@ export const agentQueries = {
       // memories PUBLIC carve-out, #362). Non-public falls through to the
       // membership gate.
       if (agent.visibility !== 'PUBLIC') {
-        await requireOwnerOrOrgRole(ctx, agent, 'READER', 'agent');
+        await requireAgentAccess(ctx, agent, 'READER');
       }
       return agent;
     },
@@ -310,8 +312,8 @@ export const agentQueries = {
           const app = await ctx.db.app.findUniqueOrThrow({ where: { id } });
           effectiveOrgId = app.organizationId;
           appOwnerUserId = app.ownerUserId;
-          // The same owner-aware gate protects appAIConfig's decrypted key.
-          await requireOwnerOrOrgRole(ctx, app, 'ADMIN', 'app');
+          // Decrypted user-owned App credentials never receive the management bypass.
+          await requireProviderCredentialOwner(ctx, app);
         }
         if (agentRef) {
           const { id } = await resolveAgentRef(ctx.db, agentRef);
@@ -453,7 +455,7 @@ export const agentQueries = {
       // 007-entity-id-or-urn: agentRef may be ID, bare URN, or prefixed URN.
       const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentRef);
       const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
-      await requireOwnerOrOrgRole(ctx, agent, 'ADMIN', 'agent');
+      await requireAgentAccess(ctx, agent, 'ADMIN');
       return ctx.db.agentSubscription.findMany({
         where: { agentId: resolvedAgentId },
         orderBy: { createdAt: 'desc' },

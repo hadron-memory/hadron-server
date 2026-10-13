@@ -27,6 +27,10 @@ export async function cleanDb(db: PrismaClient): Promise<void> {
   // can deadlock with their DELETE/SetNull cascades. Finish all recorder chunks
   // before deleting any fixture; deleting usage rows last alone is not enough.
   await drainNodeUsage(db);
+  // #1631: test-only cleanup bypasses row-delete guards, before deleting owners.
+  // #1632: signature records reference passkeys and requests; both refuse a row
+  // DELETE while their node exists, so they are truncated with them.
+  await db.$executeRawUnsafe('TRUNCATE TABLE node_signatures, signing_requests, passkey_credentials');
   // Pending first-party login states (FK-free; keyed on the OAuth state).
   await db.pendingLoginState.deleteMany();
   // #1079 — the URN alias map. Deliberately FK-FREE: it must outlive the row it
@@ -74,8 +78,8 @@ export async function cleanDb(db: PrismaClient): Promise<void> {
   // before both. TRUNCATE, not deleteMany: the team event stream's trigger
   // refuses a row DELETE while its App exists (append-only), and TRUNCATE
   // fires no row triggers. #1706: agent_team_alarm_schedule references the events, so it is
-  // truncated with them.
-  await db.$executeRawUnsafe('TRUNCATE agent_team_alarm_schedule, agent_team_events, agent_tasks');
+  // truncated with them. #1708: so is worker_delivery_task_events, for the same reason.
+  await db.$executeRawUnsafe('TRUNCATE worker_delivery_task_events, agent_team_alarm_schedule, agent_team_events, agent_tasks');
   // #974 Workers before agents: workers_agent_id_fkey is RESTRICT.
   await db.worker.deleteMany();
   await db.node.deleteMany();

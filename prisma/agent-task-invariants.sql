@@ -2,8 +2,10 @@
 -- Source of truth for these objects; the migration carries a byte-identical copy
 -- (pinned by src/lib/agentTasks/invariants.test.ts) and post-push.sql includes this file.
 
--- cor:agt:050:01 / :02 — one owner, at most one assignee, the four statuses,
--- per-status timestamps, and a result only on a finished task.
+-- cor:agt:050:01 / :02 — one owner, at most one assignee, the status
+-- vocabulary, per-status timestamps, and a result only on a finished task.
+-- #1754: 'backlog' is the parked status — no assignee, no assignment, and no
+-- per-status timestamps (cor:agt:050:02, Holger team chat #8133).
 ALTER TABLE agent_tasks DROP CONSTRAINT IF EXISTS chk_agent_tasks_shape;
 ALTER TABLE agent_tasks ADD CONSTRAINT chk_agent_tasks_shape CHECK (
   num_nonnulls(owner_worker_id, owner_user_id) = 1 AND
@@ -12,6 +14,10 @@ ALTER TABLE agent_tasks ADD CONSTRAINT chk_agent_tasks_shape CHECK (
   (parent_task_id IS NULL OR parent_task_id <> id) AND
   length(title) BETWEEN 1 AND 500 AND
   CASE status
+    WHEN 'backlog' THEN
+      started_at IS NULL AND finished_at IS NULL AND cancelled_at IS NULL AND
+      assigned_at IS NULL AND
+      num_nonnulls(assignee_worker_id, assignee_user_id) = 0
     WHEN 'pending' THEN
       started_at IS NULL AND finished_at IS NULL AND cancelled_at IS NULL
     WHEN 'started' THEN

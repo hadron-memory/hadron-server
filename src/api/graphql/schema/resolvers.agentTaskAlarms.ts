@@ -12,13 +12,16 @@
 // AUTHORIZATION (plan design:agent-tasks §10):
 //   acknowledge an alarm   any owner in its chain, and nobody else (050:20, Proposed)
 //   set worker availability   the worker itself (only to unavailable); the
-//                           person holding its name; whoever manages the App
-//                           (060:08, Proposed). The stall rule sets it from the
-//                           evaluator; the host arm is T6 (#1709).
+//                           person holding its name; whoever manages the App;
+//                           the worker it reports to DIRECTLY, only to clear a
+//                           mark the stall rule set (060:08, Proposed; 060:11;
+//                           #1759). The stall rule sets it from the evaluator;
+//                           the host arm is T6 (#1709).
 //   set model-family availability  whoever manages the App (060:09, Proposed)
-//   set the stall schedule  whoever manages the App (#1706)
-//   read all of the above  the App's task audience (050:21, Proposed; #1706
-//                           interim for 060:02 / :03's open read question)
+//   set the stall schedule  whoever manages the App (#1706); with it the host
+//                           lapse count (cor:agt:070:01, #1763)
+//   read all of the above  the App's task audience: every participant and the
+//                           App's own key, read-only (050:21, 060:02, :03; #1767)
 // "Whoever manages the App" stays T1's INTERIM reading: a person acting as
 // themselves, never a worker acting through its session (team chat #7508).
 //
@@ -40,6 +43,7 @@ import {
   partyView,
   requireWritable,
   resolveParticipatedApp,
+  withReadableApp,
   resolveTaskActor,
   resolveTaskWorkerId,
   taskError,
@@ -58,6 +62,12 @@ import {
 import { FAMILY_PATTERN, recordInEffect } from '../../../lib/agentTasks/availability.js';
 import { effectiveWindows, STALL_WINDOW_DEFAULTS, type StallWindows } from '../../../lib/agentTasks/stall.js';
 import { matchAfterChange } from '../../../lib/agentTasks/matcher.js';
+import {
+  HOST_LAPSE_CHECK_INS_DEFAULT,
+  HOST_LAPSE_CHECK_INS_MAX,
+  HOST_LAPSE_CHECK_INS_MIN,
+  lockAppHostLapse,
+} from '../../../lib/agentTasks/hosts.js';
 
 // ── Errors and parsing ────────────────────────────────────────────────────
 
@@ -104,11 +114,16 @@ function setByColumns(ctx: Context) {
   return { setByUserId: ctx.userId ?? null, setByWorkerId: a.workerId, setByAgentId: a.agentId };
 }
 
-/** Is the actor this chain entry? A person never matches a worker entry, nor the reverse (T1's `actorIs`). */
+/**
+ * Is the actor this chain entry? A person never matches a worker entry, nor the reverse (T1's `actorIs`). An entry
+ * marked `via: 'manager'` (#1761) is NOT an owner: it stands for "managed the App when the alarm was raised", so it
+ * grants nothing here, and a manager acknowledges through the live `managesApp` check instead (Diego P2, #1816).
+ */
 function inChain(actor: TaskActor, chain: unknown): boolean {
   if (!Array.isArray(chain)) return false;
   return chain.some((entry) => {
-    const e = (entry ?? {}) as { workerId?: unknown; userId?: unknown };
+    const e = (entry ?? {}) as { workerId?: unknown; userId?: unknown; via?: unknown };
+    if (e.via === 'manager') return false;
     return actor.kind === 'worker'
       ? typeof e.workerId === 'string' && e.workerId === actor.workerId
       : e.workerId == null && typeof e.userId === 'string' && e.userId === actor.userId;
@@ -144,13 +159,35 @@ async function resolveAvailabilityWorker(
   return { workerId, app, actor };
 }
 
+/**
+ * cor:agt:060:11 (#1759) — may the worker a target reports to DIRECTLY make this
+ * write? Only to set it available, and only when the target's current record is
+ * a mark the stall rule set (cor:agt:060:07: unavailable, `stalled`, set by
+ * `stall-rule`). A mark anyone else set stays for them, whatever its reason
+ * (Victor, team chat #10324). The record is locked FOR UPDATE, so the stall
+ * evaluator's clearance or a holder's write cannot slip in between this check
+ * and the upsert. Throws AVAILABILITY_NOT_PERMITTED otherwise.
+ */
+async function authorizeReportsToClear(tx: Prisma.TransactionClient, workerId: string, state: 'available' | 'unavailable'): Promise<void> {
+  if (state !== 'available') {
+    throw notPermitted('The worker another reports to may only clear its stall, never mark it unavailable.');
+  }
+  const [cur] = await tx.$queryRaw<{ state: string; reason: string | null; setBy: string }[]>`
+    SELECT state, reason, set_by AS "setBy" FROM worker_availability WHERE worker_id = ${workerId} FOR UPDATE`;
+  if (!cur || cur.state !== 'unavailable' || cur.reason !== 'stalled' || cur.setBy !== 'stall-rule') {
+    throw notPermitted(
+      'The worker another reports to may clear only a mark the stall rule set; this record is for its holder or whoever manages the App.',
+    );
+  }
+}
+
 // ── Mutations ─────────────────────────────────────────────────────────────
 
 export const agentTaskAlarmMutations = {
   /**
    * cor:agt:050:20 — acknowledge an alarm: stops it waking higher owners; does
-   * not end the stall episode. Any owner in the alarm's chain, and nobody
-   * else (Proposed). A second acknowledgement is refused and the first stands
+   * not end the stall episode. Any owner in the alarm's chain, or whoever
+   * manages the App (cor:agt:050:24), and nobody else. A second acknowledgement is refused and the first stands
    * (050:20 edge case, Proposed).
    */
   acknowledgeAlarm: async (_: unknown, { eventId }: { eventId: string }, ctx: Context) => {
@@ -163,7 +200,7 @@ export const agentTaskAlarmMutations = {
     // An event of an App the caller does not participate in reads as missing.
     if (!app || !actor) throw alarmNotFound(id);
     requireWritable(ctx, app);
-    await inTaskWriteTx(ctx, app, actor, () => alarmNotFound(id), async (tx, _txCtx, freshApp) => {
+    await inTaskWriteTx(ctx, app, actor, () => alarmNotFound(id), async (tx, txCtx, freshApp) => {
       const [row] = await tx.$queryRaw<{ appId: string; severity: string | null; chain: unknown; acknowledgedAt: Date | null }[]>`
         SELECT app_id AS "appId", severity, chain, acknowledged_at AS "acknowledgedAt"
         FROM agent_team_events WHERE id = ${id} FOR UPDATE`;
@@ -172,8 +209,13 @@ export const agentTaskAlarmMutations = {
         throw taskError('NOT_AN_ALARM', 'This event is not an alarm; only an alarm is acknowledged.', { eventId: id });
       }
       // Membership is checked against the chain ON THE LOCKED ROW (Rook P3-2).
-      if (!inChain(actor, row.chain)) {
-        throw taskError('ALARM_NOT_IN_CHAIN', "Only an owner in the alarm's chain acknowledges it (cor:agt:050:20).", { eventId: id });
+      // cor:agt:050:24 (#1762): an owner in the chain, or whoever manages the App, for any alarm in it.
+      if (!inChain(actor, row.chain) && !(await actorManagesApp(txCtx, freshApp, actor))) {
+        throw taskError(
+          'ALARM_NOT_IN_CHAIN',
+          "Only an owner in the alarm's chain, or whoever manages the App, acknowledges it (cor:agt:050:24).",
+          { eventId: id },
+        );
       }
       if (row.acknowledgedAt) {
         throw taskError('ALARM_ALREADY_ACKNOWLEDGED', 'This alarm is already acknowledged; the first acknowledgement stands.', { eventId: id });
@@ -194,7 +236,9 @@ export const agentTaskAlarmMutations = {
   /**
    * cor:agt:060:08 — set a worker's availability for work: the worker itself
    * (only to unavailable), the person holding its name, or whoever manages the
-   * App. Another worker never may (S2). Writes `availability.changed`.
+   * App. Another worker may only when the target reports to it directly, and
+   * then only to clear a stall (cor:agt:060:11, #1759): see
+   * {@link authorizeReportsToClear}. Writes `availability.changed`.
    */
   setWorkerAvailability: async (
     _: unknown,
@@ -208,21 +252,34 @@ export const agentTaskAlarmMutations = {
     requireWritable(ctx, app);
     await inTaskWriteTx(ctx, app, actor, () => workerNotFound(input.worker), async (tx, txCtx, freshApp) => {
       // The holder and retirement are read under a lock: releaseWorker and
-      // retireWorker update this row.
-      const [target] = await tx.$queryRaw<{ appId: string; heldByUserId: string | null; retiredAt: Date | null }[]>`
-        SELECT app_id AS "appId", held_by_user_id AS "heldByUserId", retired_at AS "retiredAt"
+      // retireWorker update this row. Who it reports to is read under the
+      // App's reportsTo graph lock, which inTaskWriteTx holds SHARED, so no
+      // writer can move the line before this commits (#1726 lock protocol).
+      const [target] = await tx.$queryRaw<{
+        appId: string; heldByUserId: string | null; retiredAt: Date | null; reportsToWorkerId: string | null;
+      }[]>`
+        SELECT app_id AS "appId", held_by_user_id AS "heldByUserId", retired_at AS "retiredAt",
+               reports_to_worker_id AS "reportsToWorkerId"
         FROM workers WHERE id = ${workerId} FOR SHARE`;
       if (!target || target.appId !== freshApp.id) throw workerNotFound(input.worker);
       if (target.retiredAt) throw taskError('WORKER_RETIRED', 'This worker is retired.', { workerId });
       let setBy: AvailabilitySetter;
       if (actor.kind === 'worker') {
         if (actor.workerId !== workerId) {
-          throw notPermitted("A worker sets only its own availability; another worker's is set by its holder or whoever manages the App.");
+          if (target.reportsToWorkerId !== actor.workerId) {
+            throw notPermitted(
+              "A worker sets only its own availability; another worker's is set by its holder, whoever manages the App, " +
+                'or, to clear a stall, the worker it reports to.',
+            );
+          }
+          await authorizeReportsToClear(tx, workerId, value.state);
+          setBy = 'reports-to';
+        } else {
+          if (value.state !== 'unavailable') {
+            throw notPermitted('A worker may mark itself unavailable, never available: its holder or whoever manages the App does that.');
+          }
+          setBy = 'worker';
         }
-        if (value.state !== 'unavailable') {
-          throw notPermitted('A worker may mark itself unavailable, never available: its holder or whoever manages the App does that.');
-        }
-        setBy = 'worker';
       } else if (target.heldByUserId !== null && target.heldByUserId === actor.userId) {
         setBy = 'holder';
       } else if (await actorManagesApp(txCtx, freshApp, actor)) {
@@ -285,16 +342,17 @@ export const agentTaskAlarmMutations = {
 
   /**
    * #1706 — an App's stall windows, in minutes (cor:agt:050:14–:17 "What Can
-   * Change"): whoever manages the App. An omitted field keeps its value; null
-   * returns it to the platform default.
+   * Change"), and (#1763) its host-registration lapse in check-ins
+   * (cor:agt:070:01, 2 to 10): whoever manages the App. An omitted field keeps
+   * its value; null returns it to the platform default.
    */
   setAgentTaskStallSchedule: async (
     _: unknown,
-    { appRef, input }: { appRef: string; input: Partial<Record<keyof StallWindows, number | null>> },
+    { appRef, input }: { appRef: string; input: Partial<Record<keyof StallWindows | 'hostLapseCheckIns', number | null>> },
     ctx: Context,
   ) => {
     if (!input) throw badInput('input is required.');
-    const data: Partial<Record<keyof StallWindows, number | null>> = {};
+    const data: Partial<Record<keyof StallWindows | 'hostLapseCheckIns', number | null>> = {};
     for (const key of Object.keys(STALL_WINDOW_DEFAULTS) as (keyof StallWindows)[]) {
       if (!(key in input)) continue;
       const v = input[key];
@@ -303,12 +361,25 @@ export const agentTaskAlarmMutations = {
       }
       data[key] = v ?? null;
     }
+    // cor:agt:070:01 (#1763): the host-registration lapse, in check-ins.
+    if ('hostLapseCheckIns' in input) {
+      const v = input.hostLapseCheckIns;
+      if (v != null && (!Number.isInteger(v) || v < HOST_LAPSE_CHECK_INS_MIN || v > HOST_LAPSE_CHECK_INS_MAX)) {
+        throw badInput(
+          `hostLapseCheckIns is a whole number of check-ins from ${HOST_LAPSE_CHECK_INS_MIN} to ${HOST_LAPSE_CHECK_INS_MAX}, ` +
+            `or null for the default (${HOST_LAPSE_CHECK_INS_DEFAULT}).`,
+        );
+      }
+      data.hostLapseCheckIns = v ?? null;
+    }
     const { app, actor } = await resolveParticipatedApp(ctx, appRef);
     requireWritable(ctx, app);
     await inTaskWriteTx(ctx, app, actor, () => taskError('APP_NOT_FOUND', 'App not found.', { appRef }), async (tx, txCtx, freshApp) => {
       if (!(await actorManagesApp(txCtx, freshApp, actor))) {
         throw taskError('APP_MANAGER_REQUIRED', "Only whoever manages the App sets its stall windows.");
       }
+      // #1863: a lapse decision in flight either finishes under the old count or waits for this one.
+      if ('hostLapseCheckIns' in data) await lockAppHostLapse(tx, freshApp.id, 'exclusive');
       await tx.agentTaskStallSchedule.upsert({
         where: { appId: freshApp.id },
         create: { appId: freshApp.id, ...data, updatedBy: ctx.userId ?? null },
@@ -321,7 +392,12 @@ export const agentTaskAlarmMutations = {
 
 async function stallWindowsView(ctx: Context, appId: string) {
   const row = await ctx.db.agentTaskStallSchedule.findUnique({ where: { appId } });
-  return { appId, ...effectiveWindows(row), updatedAt: row?.updatedAt ?? null };
+  return {
+    appId,
+    ...effectiveWindows(row),
+    hostLapseCheckIns: row?.hostLapseCheckIns ?? HOST_LAPSE_CHECK_INS_DEFAULT,
+    updatedAt: row?.updatedAt ?? null,
+  };
 }
 
 // ── Queries ───────────────────────────────────────────────────────────────
@@ -335,25 +411,26 @@ export const agentTaskAlarmQueries = {
 
   /**
    * Every availability record in an App — its workers' and its model
-   * families' — for its task audience (#1706 interim: 060:02 / :03 leave the
-   * reader open). Each says whether it is in effect right now.
+   * families' — for every App participant and the App's own key, read-only
+   * (cor:agt:060:02, :03; the tasks audience, cor:agt:050:23; #1767). Each says
+   * whether it is in effect right now.
    */
-  teamAvailability: async (_: unknown, { appRef }: { appRef: string }, ctx: Context) => {
-    const { app } = await resolveParticipatedApp(ctx, appRef);
-    const now = new Date();
-    const [workers, families] = await Promise.all([
-      ctx.db.workerAvailability.findMany({ where: { worker: { appId: app.id } }, orderBy: { workerId: 'asc' } }),
-      ctx.db.modelFamilyAvailability.findMany({ where: { appId: app.id }, orderBy: { family: 'asc' } }),
-    ]);
-    const activity = await loadWorkersActivity(ctx, workers.map((w) => w.workerId), now);
-    return {
-      workers: workers.map((w) => ({
-        ...w,
-        __inEffect: recordInEffect(w, now, activity.get(w.workerId)?.lastActiveAt ?? null),
-      })),
-      families: families.map((f) => ({ ...f, __inEffect: recordInEffect(f, now) })),
-    };
-  },
+  teamAvailability: async (_: unknown, { appRef }: { appRef: string }, ctx: Context) =>
+    withReadableApp(ctx, appRef, async (c, app) => {
+      const now = new Date();
+      const [workers, families] = await Promise.all([
+        c.db.workerAvailability.findMany({ where: { worker: { appId: app.id } }, orderBy: { workerId: 'asc' } }),
+        c.db.modelFamilyAvailability.findMany({ where: { appId: app.id }, orderBy: { family: 'asc' } }),
+      ]);
+      const activity = await loadWorkersActivity(c, workers.map((w) => w.workerId), now);
+      return {
+        workers: workers.map((w) => ({
+          ...w,
+          __inEffect: recordInEffect(w, now, activity.get(w.workerId)?.lastActiveAt ?? null),
+        })),
+        families: families.map((f) => ({ ...f, __inEffect: recordInEffect(f, now) })),
+      };
+    }),
 };
 
 // ── Field resolvers ───────────────────────────────────────────────────────

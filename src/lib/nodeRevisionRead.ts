@@ -16,12 +16,15 @@ export async function decryptReadableRevisions<
   return revisions.map((revision) => {
     const memoryId = revision.memoryId ?? fallbackMemoryId;
     if (!encrypted.has(memoryId)) return revision;
+    // E1: retained approval values are inapplicable even when a key is held.
+    const projected = { ...revision, approvedBy: null,
+      approvedByInfo: null, approvedAt: null, approvalHash: null };
     const key = sessionKeyCache.getByMemoryId(memoryId);
-    if (key) return decryptNodeFieldsWithKey({ ...revision }, key);
+    if (key) return decryptNodeFieldsWithKey(projected, key);
     // A marker-shaped old plaintext value is indistinguishable from an
     // envelope without the key. Conceal every encrypted field while locked;
     // otherwise an interrupted conversion can expose that plaintext.
-    const locked = { ...revision };
+    const locked = projected;
     locked.content = null;
     locked.abstract = null;
     locked.data = null;

@@ -190,7 +190,7 @@ describe('#1734 categorical exceptions', () => {
       await expect(M.createComment(null, { targetRef: node.id, body: 'denied' }, ctx)).rejects.toThrow();
     }
   });
-  it('a user-owned Agent system memory stays owner-only across record/content/write/manage/discovery/search/report (#8898)', async () => {
+  it('Agent definition records follow #1818 while content and memory writes stay closed', async () => {
     const mem = await db.memory.create({ data: { id: generateId(), name: 'Agent definition', urn: 'owner1734:system', class: 'system', ownerUserId: owner } });
     await db.agent.create({ data: { id: generateId(), name: 'Owned agent', urn: 'owner1734:definition', ownerUserId: owner, systemMemoryId: mem.id } });
     const node = await db.node.create({ data: { id: generateId(), memoryId: mem.id, loc: 'prompt', name: 'protected1734' } });
@@ -201,34 +201,18 @@ describe('#1734 categorical exceptions', () => {
     expect(await canReadMemory(db, ctx, mem.id)).toBe(false);
     expect(await canWriteToMemory(db, ctx, mem.id)).toBe(false);
     expect(await getAccessibleMemoryIds(ctx, mem.id)).not.toContain(mem.id);
-    expect(await resolvers.Query.memory(null, { ref: mem.id }, ctx)).toBeNull();
+    expect(await resolvers.Query.memory(null, { ref: mem.id }, ctx)).toMatchObject({ id: mem.id });
     const result = await globalSearch(db, { query: 'protected1734', entityTypes: ['node'] }, {
       viewerUserId: admin, isPlatformAdmin: true, accessibleMemoryIds: null, orgIds: null, viewerOrgIds: [],
     });
     expect(result.hits.map(hit => hit.id)).not.toContain(node.id);
     const access = await computeEffectiveAccess(db, { id: admin, roles: ['ADMIN'] }, { kind: 'memory', memory: { ...mem, workerOf: [] } });
-    expect(access).toMatchObject({ canRead: false, canWrite: false, canManage: false });
+    expect(access).toMatchObject({ canRead: true, canWrite: false, canManage: false });
     expect(await canReadMemory(db, as(owner), mem.id)).toBe(true);
     expect(await canWriteToMemory(db, as(owner), mem.id)).toBe(true);
   });
-  it('user-owned Agents stay owner-only at the shared gates, read/write resolvers and access report (#8878)', async () => {
-    const agent = await db.agent.create({ data: { id: generateId(), name: 'Owner Agent', urn: 'owner1734:agent', visibility: 'PERSONAL', ownerUserId: owner } });
-    const ctx = as(admin, ['ADMIN']);
-    await expect(requireOwnerOrOrgRole(ctx, agent, 'ADMIN', 'agent')).rejects.toThrow('Forbidden');
-    expect(await isOwnerOrOrgMember(ctx, agent, 'agent')).toBe(false);
-    await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
-    expect(await resolvers.App.agent(app, {}, ctx)).toBeNull();
-    expect(await resolvers.App.agents(app, {}, ctx)).toEqual([]);
-    await db.agent.update({ where: { id: agent.id }, data: { systemPrompt: 'protected definition {{name}}' } });
-    const worker = await db.worker.create({ data: { id: generateId(), appId: app.id, agentId: agent.id, name: 'Owner worker', slug: 'owner-worker' } });
-    expect((await composeWorkerPrompt(ctx, worker)).text).toBeNull();
-    await expect(resolvers.Query.castWorkerPreview(null, { appRef: app.id, agentRef: agent.id, name: 'Denied preview' }, ctx)).rejects.toThrow('Forbidden');
-    await expect(resolvers.Query.agent(null, { ref: agent.id }, ctx)).rejects.toThrow('Forbidden');
-    await expect(M.updateAgent(null, { ref: agent.id, name: 'denied' }, ctx)).rejects.toThrow('Forbidden');
-    const access = await computeEffectiveAccess(db, { id: admin, roles: ['ADMIN'] }, { kind: 'agent', agent });
-    expect(access).toMatchObject({ canRead: false, canWrite: false, canManage: false });
-    await expect(requireOwnerOrOrgRole(as(owner), agent, 'ADMIN', 'agent')).resolves.toBeUndefined();
-  });
+  // Main #1818 carries the Agent definition-management matrix; #10659 keeps
+  // its separate provider-credential gate owner-only.
   it.each(['personal', 'private'] as const)('platform roles never bypass %s owner gates', async cls => {
     const mem = await memory(cls);
     for (const role of ['ADMIN', 'OWNER'] as const) {
@@ -261,5 +245,67 @@ describe('#1734 categorical exceptions', () => {
   it('user-owned secrets remain unreadable to a platform admin', async () => {
     const secret = await M.createSecret(null, { ownerType: 'user', ownerRef: owner, name: 'token', kind: 'generic', value: 'synthetic-secret' }, as(owner));
     expect(await resolvers.Query.secret(null, { ref: secret.id }, as(admin, ['ADMIN']))).toBeNull();
+  });
+});
+
+describe('#10659 user-owned App provider keys', () => {
+  it.each(['ADMIN', 'OWNER'] as const)('platform %s clears all named App configs without reaching another App (#10755)', async role => {
+    for (const name of ['default', 'backup']) await M.createAiServiceConfig(null, {
+      ownerType: 'APP', ownerId: app.id, name, provider: 'openai', model: 'gpt-4o', apiKey: 'sk-owner-only',
+    }, as(owner));
+    const other = await db.app.create({ data: { id: generateId(), name: 'Other', urn: 'owner1734:other', ownerUserId: owner } });
+    const control = await M.createAiServiceConfig(null, {
+      ownerType: 'APP', ownerId: other.id, name: 'backup', provider: 'openai', model: 'gpt-4o', apiKey: 'sk-control',
+    }, as(owner));
+    const ctx = as(admin, [role]);
+    await expect(M.clearAppAIConfig(null, { appRef: app.id }, ctx)).resolves.toMatchObject({ id: app.id });
+    expect(await db.aiServiceConfig.count({ where: { appId: app.id } })).toBe(0);
+    expect(await db.aiServiceConfig.findUnique({ where: { id: control.id } })).toBeTruthy();
+    await expect(M.clearAppAIConfig(null, { appRef: app.id }, ctx)).resolves.toMatchObject({ id: app.id });
+  });
+  it('only ownerUserId manages credentials; owner-role members do not (#10752)', async () => {
+    await db.appMember.create({ data: { appId: app.id, userId: admin, role: 'owner' } });
+    await expect(M.createAiServiceConfig(null, {
+      ownerType: 'APP', ownerId: app.id, name: 'default', provider: 'openai', model: 'gpt-4o', apiKey: 'sk-member',
+    }, as(admin))).rejects.toThrow('Forbidden');
+  });
+  it('App clearing refuses an outsider, impersonated admin, run principal and stale platform role', async () => {
+    const config = await M.createAiServiceConfig(null, {
+      ownerType: 'APP', ownerId: app.id, name: 'backup', provider: 'openai', model: 'gpt-4o', apiKey: 'sk-owner-only',
+    }, as(owner));
+    for (const ctx of [as(admin), { ...as(admin, ['ADMIN']), impersonation: { orgId: generateId() } },
+      { ...as(admin, ['ADMIN']), clientId: 'run:synthetic' }]) {
+      await expect(M.clearAppAIConfig(null, { appRef: app.id }, ctx as Context)).rejects.toThrow();
+    }
+    await db.user.update({ where: { id: admin }, data: { roles: [] } });
+    await expect(M.clearAppAIConfig(null, { appRef: app.id }, as(admin, ['ADMIN']))).rejects.toThrow();
+    expect(await db.aiServiceConfig.findUnique({ where: { id: config.id } })).toBeTruthy();
+    await expect(M.clearAppAIConfig(null, { appRef: app.id }, as(owner))).resolves.toMatchObject({ id: app.id });
+  });
+
+  it.each(['ADMIN', 'OWNER'] as const)('a foreign platform %s cannot create, update or test App provider credentials', async role => {
+    const config = await M.createAiServiceConfig(null, {
+      ownerType: 'APP', ownerId: app.id, name: 'named', provider: 'openai', model: 'gpt-4o', apiKey: 'sk-synthetic-owner-only',
+    }, as(owner));
+    const ctx = as(admin, [role]);
+    await expect(M.createAiServiceConfig(null, {
+      ownerType: 'APP', ownerId: app.id, name: 'foreign', provider: 'openai', model: 'gpt-4o', apiKey: 'sk-foreign',
+    }, ctx)).rejects.toThrow('Forbidden');
+    await expect(M.updateAiServiceConfig(null, { id: config.id, apiKey: 'sk-foreign' }, ctx)).rejects.toThrow('Forbidden');
+    // The test surface conceals an inaccessible config before any provider call.
+    await expect(M.testAiServiceConfig(null, { id: config.id }, ctx)).rejects.toThrow('AI service config not found');
+    expect((await db.aiServiceConfig.findUniqueOrThrow({ where: { id: config.id } })).updatedBy).not.toBe(admin);
+    expect(await db.aiServiceConfig.count({ where: { appId: app.id } })).toBe(1);
+  });
+  it('owner config reads and changes survive; foreign admins only clear', async () => {
+    await M.updateApp(null, { ref: app.id, aiProvider: 'openai', aiModel: 'gpt-4o', aiApiKey: 'sk-synthetic-owner-only' }, as(owner));
+    for (const role of ['ADMIN', 'OWNER'] as const) {
+      await expect(resolvers.Query.appAIConfig(null, { appRef: app.id }, as(admin, [role]))).rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
+      await expect(resolvers.Query.resolveAIConfig(null, { appRef: app.id }, as(admin, [role]))).rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
+      await expect(M.updateApp(null, { ref: app.id, aiModel: 'changed-model' }, as(admin, [role]))).rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
+      await expect(M.updateApp(null, { ref: app.id, aiApiKey: 'sk-other-key' }, as(admin, [role]))).rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
+    }
+    await expect(resolvers.Query.appAIConfig(null, { appRef: app.id }, as(owner))).resolves.toMatchObject({ apiKey: 'sk-synthetic-owner-only' });
+    await expect(M.updateApp(null, { ref: app.id, aiApiKey: '' }, as(admin, ['ADMIN']))).rejects.toThrow('Forbidden');
   });
 });

@@ -1,3 +1,4 @@
+import { requireProviderCredentialOwner } from './resolvers.helpers.js';
 import { canBypassUserOwnership } from '../../../lib/auth/platformAdminBypass.js';
 // appQueries — extracted from resolvers.ts Query (split step 3). No behavior change.
 import { decryptToken } from '../../../lib/tokenCrypto.js';
@@ -133,9 +134,9 @@ export const appQueries = {
       // 007-entity-id-or-urn: appRef may be ID, bare URN, or prefixed URN.
       const { id: resolvedAppId } = await resolveAppRef(ctx.db, appRef);
       const app = await ctx.db.app.findUniqueOrThrow({ where: { id: resolvedAppId } });
-      // App-owned configuration follows the shared manager gate (#1734).
+      // Provider credentials stay owner-only for user-owned Apps (#10659).
       // User-owned Secrets and Agent-owned configuration keep their own gates.
-      await requireOwnerOrOrgRole(ctx, app, 'ADMIN', 'app');
+      await requireProviderCredentialOwner(ctx, app);
       // 036-ai-service-config: registry-backed — the App's 'default'
       // config (single-entity contract preserved; no resolution walk).
       const config = await ctx.db.aiServiceConfig.findFirst({
