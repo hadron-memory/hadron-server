@@ -3,7 +3,8 @@
 -- CI) and copied into the newest comment migration (prod, which does not run
 -- post-push.sql): 20261005200000_comment_nodes, then #1721's
 -- 20261010100000_comment_rulings, then the anchor CHECK in #1857
--- 20261013170000_encrypted_comment_anchor_nullable. Change it only together with a new
+-- 20261013170000_encrypted_comment_anchor_nullable, then #1869's insert check in
+-- 20261013180000_encrypted_anchor_hash_scrub. Change it only together with a new
 -- migration that carries the new text. Idempotent.
 --
 -- The application path refuses every case first with a typed error; these are
@@ -94,7 +95,7 @@ END $$;
 
 CREATE OR REPLACE FUNCTION hadron_comment_node_changed() RETURNS trigger
 LANGUAGE plpgsql AS $$
-DECLARE c RECORD;
+DECLARE c RECORD; target_encrypted BOOLEAN;
 BEGIN
   IF TG_TABLE_NAME = 'nodes' THEN
     PERFORM hadron_check_comment_node(NEW.id);
@@ -107,6 +108,18 @@ BEGIN
   ELSIF TG_TABLE_NAME = 'comment_meta' THEN
     PERFORM hadron_check_comment_node(CASE WHEN TG_OP = 'DELETE' THEN OLD.node_id ELSE NEW.node_id END);
   ELSIF TG_TABLE_NAME = 'edges' THEN
+    -- An anchor is born with a hash exactly when its target is plaintext
+    -- (cor:dmo:110:01; #1869, Rook's #1866 P3-3). Checked at insert only: a
+    -- thread that later moves, or whose memory is later encrypted, keeps its row.
+    IF NEW.governed_kind = 'COMMENT_ANCHOR' THEN
+      SELECT m.is_encrypted INTO target_encrypted
+        FROM nodes t JOIN memories m ON m.id = t.memory_id WHERE t.id = NEW.target_id;
+      IF target_encrypted AND NEW.anchor_approval_hash IS NOT NULL THEN
+        RAISE EXCEPTION 'COMMENT_INVARIANT: anchor % of comment % carries a hash, but its target is in an encrypted memory', NEW.id, NEW.source_id USING ERRCODE = 'check_violation';
+      ELSIF NOT target_encrypted AND NEW.anchor_approval_hash IS NULL THEN
+        RAISE EXCEPTION 'COMMENT_INVARIANT: anchor % of comment % has no hash, but its target is in a plaintext memory', NEW.id, NEW.source_id USING ERRCODE = 'check_violation';
+      END IF;
+    END IF;
     PERFORM hadron_check_comment_node(NEW.source_id);
   ELSIF TG_TABLE_NAME = 'memories' THEN
     FOR c IN SELECT cm.node_id FROM comment_meta cm JOIN nodes n ON n.id = cm.node_id WHERE n.memory_id = NEW.id LOOP
