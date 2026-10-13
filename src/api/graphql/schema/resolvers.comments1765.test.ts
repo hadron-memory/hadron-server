@@ -184,6 +184,22 @@ describe('#1765 — the author may always delete their own (cor:dmo:110:16)', ()
       await tx.$queryRaw`SELECT id FROM nodes WHERE id = ${mine.id} FOR UPDATE`;
       await held;
     }, { timeout: 20_000 });
+    // Barrier (#1846): prove the holder has ACQUIRED the lock before the
+    // delete races it, so the race cannot pass vacuously by outrunning the
+    // acquisition. A NOWAIT probe succeeds (and, in its own implicit
+    // transaction, releases instantly) while the row is free; its failure is
+    // the holder holding it.
+    let lockHeld = false;
+    for (let i = 0; i < 200 && !lockHeld; i += 1) {
+      try {
+        await db.$queryRaw`SELECT id FROM nodes WHERE id = ${mine.id} FOR UPDATE NOWAIT`;
+        await new Promise((r) => setTimeout(r, 20));
+      } catch (error) {
+        if (error instanceof Error && /could not obtain lock/i.test(error.message)) lockHeld = true;
+        else throw error;
+      }
+    }
+    expect(lockHeld).toBe(true);
     // While the row is locked: the refusal must answer without waiting on it.
     const outcome = await Promise.race([
       errorOf(M.deleteComment(null, { commentRef: mine.id, expectedRevision: mine.revSeq }, as(writer.id))),
