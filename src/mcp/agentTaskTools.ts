@@ -104,7 +104,7 @@ export function renderRosterEntry(r: RosterRow): string {
     r.pendingTaskIds.length ? `pending ${r.pendingTaskIds.join(', ')}` : null,
     r.waitingOnTaskIds.length ? `waiting on ${r.waitingOnTaskIds.join(', ')} since ${r.waitingSince?.toISOString()}` : null,
     r.alarmEventIds.length ? `woken on alarm ${r.alarmEventIds.join(', ')}` : null,
-    r.unreactedChildTaskId ? `child ${r.unreactedChildTaskId} finished` : null,
+    r.unreactedChildTaskId ? `child ${r.unreactedChildTaskId} ended (finished or cancelled)` : null,
     r.lastAssignedAt ? `last assigned ${r.lastAssignedAt.toISOString()}` : 'never assigned',
     // #1726: beside last activity, so a stale claim is easy to spot.
     r.reportsTo ? `reports to ${r.reportsTo.name}${r.reportsTo.retired ? ' (retired)' : ''}` : null,

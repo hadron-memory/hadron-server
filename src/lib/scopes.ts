@@ -32,6 +32,7 @@ import {
   isOwnerOrOrgMember,
   isPlatformAdmin,
   requireOrgRole,
+  requireAgentAccess,
   requireOwnerOrOrgRole,
 } from '../api/graphql/schema/resolvers.helpers.js';
 import { resolveAgentRef } from './entityRef/agentRef.js';
@@ -112,7 +113,7 @@ export async function resolveScopeOwnerForWrite(
       select: { organizationId: true, ownerUserId: true },
     });
     if (!agent) throw new Error('Forbidden');
-    await requireOwnerOrOrgRole(ctx, agent, 'ADMIN');
+    await requireAgentAccess(ctx, agent, 'ADMIN');
     return { organizationId: null, agentId: id, appId: null };
   }
   const { id } = await resolveAppRef(ctx.db, input.appRef!.trim());
@@ -136,7 +137,7 @@ export async function requireScopeWrite(ctx: Context, scope: ScopeOwnerColumns):
       select: { organizationId: true, ownerUserId: true },
     });
     if (!agent) throw new Error('Forbidden');
-    return requireOwnerOrOrgRole(ctx, agent, 'ADMIN');
+    return requireAgentAccess(ctx, agent, 'ADMIN');
   }
   const app = await ctx.db.app.findFirst({
     where: { id: scope.appId!, deletedAt: null, uninstalledAt: null },

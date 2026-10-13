@@ -11325,15 +11325,13 @@ export const typeDefs = `#graphql
     x-hadron-operation-key header when identifyUserMethod is SECRET.
     The key is verified for an existing encrypted memory and held only
     after the new session commits; USER_ID mode rejects key supply.
-    The deprecated dataKey argument remains during caller migration;
-    dual supply must carry the same key. Only one key-consuming operation
-    may use the header in a request; a second attempt is BAD_UNLOCK_INPUT.
+    Only one key-consuming operation may use the header in a request;
+    a second attempt is BAD_UNLOCK_INPUT.
     """
     startAgentSession(
       agentId: ID!
       externalUserId: String
       sessionTimeoutSeconds: Int
-      dataKey: String @deprecated(reason: "Use x-hadron-operation-key; removal follows caller migration.")
     ): Session!
     endAgentSession(sessionId: ID!): Boolean!
 
@@ -11341,16 +11339,14 @@ export const typeDefs = `#graphql
     Link this App's live plaintext anonymous memory to a real user.
     Providing x-hadron-operation-key in the request header claims private
     ownership and encrypts live nodes; remaining fields and history complete
-    in bounded passes. The deprecated dataKey argument remains during caller
-    migration; dual supply must carry the same key. Only one key-consuming
-    operation may use the header per request; a second is BAD_UNLOCK_INPUT.
-    After a committed claim,
+    in bounded passes. Only one key-consuming operation may use the header
+    per request; a second is BAD_UNLOCK_INPUT. After a committed claim,
     interrupted completion allows the strict owner or owning App key to call
     encryptMemory with the existing key. A registered holding cannot be linked again.
 
     Accepts the entity's ID or URN.
     """
-    linkMemoryToUser(memoryId: ID!, externalUserId: String!, dataKey: String @deprecated(reason: "Use x-hadron-operation-key; removal follows caller migration.")): Memory!
+    linkMemoryToUser(memoryId: ID!, externalUserId: String!): Memory!
 
     """
     Convert a plaintext PRIVATE memory to encrypted (spec 041, caller-held
@@ -11780,6 +11776,8 @@ export const typeDefs = `#graphql
     assignedBy: AgentTaskParty
     createdAt: DateTime!
     createdBy: AgentTaskParty
+    "The headless run that created the task (hrn:node:hadronmemory.com:specs:cor:agt:050:06); then createdBy is null."
+    createdByRunId: ID
     updatedAt: DateTime
   }
 
@@ -11907,7 +11905,7 @@ export const typeDefs = `#graphql
   several at once; it is shown in the first that holds, in this order.
   """
   enum TeamRosterState {
-    "Woken on an unacknowledged alarm (hrn:node:hadronmemory.com:specs:cor:agt:050:19), or a child of a task it is the assignee of finished after it last moved (hrn:node:hadronmemory.com:specs:cor:agt:050:16)."
+    "Woken on an unacknowledged alarm (hrn:node:hadronmemory.com:specs:cor:agt:050:19), or a child of a task it is the assignee of finished or was cancelled after it last moved (hrn:node:hadronmemory.com:specs:cor:agt:050:16)."
     YOUR_MOVE
     "Its own availability record, or every model family it can run as, says unavailable now (hrn:node:hadronmemory.com:specs:cor:agt:060:01); a stall mark included (hrn:node:hadronmemory.com:specs:cor:agt:060:07)."
     UNAVAILABLE
@@ -11957,7 +11955,7 @@ export const typeDefs = `#graphql
     waitingSince: DateTime
     "YOUR_MOVE: unacknowledged alarms it has been woken on."
     alarms: [ID!]!
-    "YOUR_MOVE: a finished child it hasn't reacted to."
+    "YOUR_MOVE: a finished or cancelled child it hasn't reacted to."
     unreactedChildTask: ID
     lastActiveAt: DateTime
     "When it was last assigned a task; the matcher picks the least recent (hrn:node:hadronmemory.com:specs:cor:agt:060:06)."
@@ -11991,7 +11989,7 @@ export const typeDefs = `#graphql
     notStartedMinutes: Int!
     "No progress (hrn:node:hadronmemory.com:specs:cor:agt:050:15). Also the escalation step for that alarm."
     noProgressMinutes: Int!
-    "Owner didn't react to a finished child task (hrn:node:hadronmemory.com:specs:cor:agt:050:16)."
+    "Owner didn't react to a finished or cancelled child task (hrn:node:hadronmemory.com:specs:cor:agt:050:16)."
     ownerReactionMinutes: Int!
     "Couldn't be assigned (hrn:node:hadronmemory.com:specs:cor:agt:050:17)."
     assignmentMinutes: Int!
