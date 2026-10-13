@@ -389,8 +389,10 @@ describe('cor:agt:050:16 r2 — an owner who doesn\'t react to a finished child 
       });
       return parent;
     }
-    const call = (taskId: string | null, by: { id: string }, t: string, type = 'task.progress') =>
-      db.agentTeamEvent.create({ data: { appId: app.id, taskId, type, actorUserId: by.id, createdAt: at(t) } });
+    const call = (taskId: string | null, by: { id: string }, t: string, type = 'task.progress', worker?: { id: string }) =>
+      db.agentTeamEvent.create({
+        data: { appId: app.id, taskId, type, actorUserId: by.id, ...(worker ? { actorWorkerId: worker.id } : {}), createdAt: at(t) },
+      });
 
     it('silent: alarmed after the window, never marked (cor:agt:060:07: a person is not marked); a move on the parent is no reaction', async () => {
       const parent = await personOwned();
@@ -425,6 +427,13 @@ describe('cor:agt:050:16 r2 — an owner who doesn\'t react to a finished child 
     it('someone else\'s call does not clear it', async () => {
       const parent = await personOwned();
       await call(parent.id, admin, '10:05');
+      await tick('10:20');
+      expect(await alarms('stall.owner-unreactive')).toHaveLength(1);
+    });
+
+    it('a WORKER-bound call under Mia\'s credential is the worker\'s activity, not Mia\'s (Riana P2)', async () => {
+      const parent = await personOwned();
+      await call(parent.id, mia, '10:05', 'task.created', anne); // Anne acting through Mia's credential
       await tick('10:20');
       expect(await alarms('stall.owner-unreactive')).toHaveLength(1);
     });

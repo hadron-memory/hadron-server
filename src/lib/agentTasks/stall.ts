@@ -195,7 +195,9 @@ export async function loadStallInputs(db: Db, where: Prisma.AgentTaskWhereInput,
     ownerUserIds.length
       ? db.agentTeamEvent.groupBy({
         by: ['appId', 'actorUserId'],
-        where: { actorUserId: { in: ownerUserIds }, taskId: { not: null }, type: { startsWith: 'task.' } },
+        // actorWorkerId null: a worker-bound call made under the person's credential
+        // carries their user id too, but it is the WORKER's activity, not theirs.
+        where: { actorUserId: { in: ownerUserIds }, actorWorkerId: null, taskId: { not: null }, type: { startsWith: 'task.' } },
         _max: { createdAt: true },
       })
       : Promise.resolve([]),
