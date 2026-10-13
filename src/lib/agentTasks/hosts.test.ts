@@ -6,11 +6,12 @@
  */
 
 import { beforeEach, describe, expect, it } from 'vitest';
+import { Client } from 'pg';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../../test/helpers.js';
 import { generateId } from '../id.js';
 import { typeDefs } from '../../api/graphql/schema/typeDefs.js';
-import { HostRegistrationError, isRegistrationLive, loadLaunchableFamilies, registerHost, sweepLostHosts } from './hosts.js';
+import { __lostHostTesting, HostRegistrationError, isRegistrationLive, loadLaunchableFamilies, registerHost, sweepLostHosts } from './hosts.js';
 
 const DAY = '2026-10-09';
 const at = (hhmm: string): Date => new Date(`${DAY}T${hhmm.length === 5 ? `${hhmm}:00` : hhmm}Z`);
@@ -145,6 +146,50 @@ describe('lapse (cor:agt:070:01 open question: 3 poll intervals)', () => {
     expect((await loadLaunchableFamilies(db, { appId: other.id }, at('10:03'))).size).toBe(1);
     expect(await sweepLostHosts(db, at('10:02:30'))).toBe(1);
     expect((await registerHost(db, ORCA1(), at('10:02:40'))).registered).toBe(true);
+  });
+
+  it('#1763 (Anne P2): a count raised after the sweep\'s read is honoured at its write; the host stays live', async () => {
+    await db.agentTaskStallSchedule.create({ data: { appId: app.id, hostLapseCheckIns: 2 } });
+    const { registrationId } = await registerHost(db, ORCA1(), at('10:00'));
+    const [candidate] = await __lostHostTesting.readLostCandidates(db, at('10:02:30'));
+    expect(candidate).toMatchObject({ id: registrationId });
+    // The manager raises the count to 5 between the read and the write.
+    await db.agentTaskStallSchedule.update({ where: { appId: app.id }, data: { hostLapseCheckIns: 5 } });
+    expect(await __lostHostTesting.recordHostLost(db, candidate, at('10:02:30'))).toBe(false);
+    expect((await db.hostRegistration.findUniqueOrThrow({ where: { id: registrationId } })).lostAt).toBeNull();
+    expect((await hostEvents()).map((e) => e.type)).toEqual(['host.registered']);
+    // Controls: an unchanged count, and a refresh after the read.
+    await db.agentTaskStallSchedule.update({ where: { appId: app.id }, data: { hostLapseCheckIns: 2 } });
+    const [again] = await __lostHostTesting.readLostCandidates(db, at('10:02:30'));
+    await registerHost(db, ORCA1(), at('10:01:50'));
+    expect(await __lostHostTesting.recordHostLost(db, again, at('10:02:30'))).toBe(false);
+    const [later] = await __lostHostTesting.readLostCandidates(db, at('10:05'));
+    expect(await __lostHostTesting.recordHostLost(db, later, at('10:05'))).toBe(true);
+    // A second pass holding the same candidate records nothing more.
+    expect(await __lostHostTesting.recordHostLost(db, later, at('10:06'))).toBe(false);
+    expect((await hostEvents()).map((e) => e.type)).toEqual(['host.registered', 'host.lost']);
+  });
+
+  it('#1763 (Anne P2): the write waits for an in-flight count change and then honours it (FOR SHARE)', async () => {
+    await db.agentTaskStallSchedule.create({ data: { appId: app.id, hostLapseCheckIns: 2 } });
+    const { registrationId } = await registerHost(db, ORCA1(), at('10:00'));
+    const [candidate] = await __lostHostTesting.readLostCandidates(db, at('10:02:30'));
+    // A manager's change, row-locked and not yet committed, on its own connection.
+    const manager = new Client({ connectionString: process.env.DATABASE_URL });
+    await manager.connect();
+    try {
+      await manager.query('BEGIN');
+      await manager.query('UPDATE agent_task_stall_schedule SET host_lapse_check_ins = 5 WHERE app_id = $1', [app.id]);
+      let settled = false;
+      const write = __lostHostTesting.recordHostLost(db, candidate, at('10:02:30')).finally(() => { settled = true; });
+      await new Promise((r) => setTimeout(r, 300));
+      expect(settled).toBe(false);
+      await manager.query('COMMIT');
+      expect(await write).toBe(false);
+    } finally {
+      await manager.end();
+    }
+    expect((await db.hostRegistration.findUniqueOrThrow({ where: { id: registrationId } })).lostAt).toBeNull();
   });
 
   it('#1763: an App\'s schedule row with no lapse set keeps the default of 3', async () => {

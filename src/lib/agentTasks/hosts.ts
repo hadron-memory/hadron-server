@@ -149,11 +149,7 @@ export async function registerHost(
       SELECT id, refreshed_at AS "refreshedAt", poll_interval_seconds AS "pollIntervalSeconds", lost_at AS "lostAt"
       FROM host_registrations WHERE app_id = ${input.appId} AND host_id = ${hostId} FOR UPDATE`;
     const isNew = inserted.length > 0;
-    const schedule = isNew
-      ? null
-      : await tx.agentTaskStallSchedule.findUnique({ where: { appId: input.appId }, select: { hostLapseCheckIns: true } });
-    const checkIns = schedule?.hostLapseCheckIns ?? HOST_LAPSE_CHECK_INS_DEFAULT;
-    const wasLapsed = !isNew && (cur.lostAt !== null || !isRegistrationLive(cur, now, checkIns));
+    const wasLapsed = !isNew && (cur.lostAt !== null || !isRegistrationLive(cur, now, await lockAppLapseCheckIns(tx, input.appId)));
     await tx.hostRegistration.update({
       where: { id: cur.id },
       data: { label, pollIntervalSeconds: input.pollIntervalSeconds, refreshedAt: now, lostAt: null },
@@ -212,8 +208,19 @@ export async function loadLaunchableFamilies(
  * many it recorded.
  */
 export async function sweepLostHosts(db: PrismaClient, now: Date): Promise<number> {
-  const lapsed = await db.$queryRaw<{ id: string; appId: string; hostId: string; refreshedAt: Date; workerCount: number }[]>`
-    SELECT r.id, r.app_id AS "appId", r.host_id AS "hostId", r.refreshed_at AS "refreshedAt",
+  let lost = 0;
+  for (const r of await readLostCandidates(db, now)) {
+    if (await recordHostLost(db, r, now)) lost += 1;
+  }
+  return lost;
+}
+
+type LostCandidate = { id: string; appId: string; hostId: string; workerCount: number };
+
+/** The sweep's read: registrations that looked lapsed under their App's count at `now` (at most 500). */
+async function readLostCandidates(db: PrismaClient, now: Date): Promise<LostCandidate[]> {
+  return db.$queryRaw<LostCandidate[]>`
+    SELECT r.id, r.app_id AS "appId", r.host_id AS "hostId",
            (SELECT count(*)::int FROM host_registration_workers w WHERE w.registration_id = r.id) AS "workerCount"
     FROM host_registrations r
     LEFT JOIN agent_task_stall_schedule s ON s.app_id = r.app_id
@@ -221,20 +228,44 @@ export async function sweepLostHosts(db: PrismaClient, now: Date): Promise<numbe
       AND r.refreshed_at + make_interval(secs => r.poll_interval_seconds * ${LAPSE_SQL}) < ${toNaiveUtc(now)}::timestamp
     ORDER BY r.id
     LIMIT 500`;
-  let lost = 0;
-  for (const r of lapsed) {
-    const done = await db.$transaction(async (tx) => {
-      const n = await tx.hostRegistration.updateMany({
-        where: { id: r.id, lostAt: null, refreshedAt: r.refreshedAt },
-        data: { lostAt: now },
-      });
-      if (n.count === 0) return false;
-      await appendHostEvent(tx, {
-        appId: r.appId, type: 'host.lost', registrationId: r.id, hostId: r.hostId, workerCount: r.workerCount, createdAt: now,
-      });
-      return true;
-    });
-    if (done) lost += 1;
-  }
-  return lost;
 }
+
+/**
+ * The sweep's write for one candidate: stamp `lostAt` and write `host.lost`,
+ * only if the registration is STILL lapsed when decided again under locks.
+ *
+ * The candidate was read under the App's lapse count as it was then; a manager
+ * may have raised it since (#1863 review, Anne P2). So the App's count is read
+ * again FOR SHARE (a concurrent `setAgentTaskStallSchedule` either committed
+ * first and is seen, or waits for this transaction), the registration is locked
+ * FOR UPDATE, and the lapse is re-decided on both, so a refresh since the read
+ * leaves it alone too, as does an earlier stamp. Lock order:
+ * the App's schedule row, then the registration (registerHost takes the
+ * registration, then the schedule row, both compatible with this: the schedule
+ * is SHARE on both sides).
+ */
+async function recordHostLost(db: PrismaClient, r: LostCandidate, now: Date): Promise<boolean> {
+  return db.$transaction(async (tx) => {
+    const checkIns = await lockAppLapseCheckIns(tx, r.appId);
+    const [cur] = await tx.$queryRaw<{ refreshedAt: Date; pollIntervalSeconds: number; lostAt: Date | null }[]>`
+      SELECT refreshed_at AS "refreshedAt", poll_interval_seconds AS "pollIntervalSeconds", lost_at AS "lostAt"
+      FROM host_registrations WHERE id = ${r.id} FOR UPDATE`;
+    if (!cur || cur.lostAt !== null) return false;
+    if (isRegistrationLive(cur, now, checkIns)) return false;
+    await tx.hostRegistration.update({ where: { id: r.id }, data: { lostAt: now } });
+    await appendHostEvent(tx, {
+      appId: r.appId, type: 'host.lost', registrationId: r.id, hostId: r.hostId, workerCount: r.workerCount, createdAt: now,
+    });
+    return true;
+  });
+}
+
+/** The App's lapse count, its schedule row held FOR SHARE so a concurrent change waits or is seen (#1863). */
+async function lockAppLapseCheckIns(tx: Prisma.TransactionClient, appId: string): Promise<number> {
+  const [row] = await tx.$queryRaw<{ checkIns: number | null }[]>`
+    SELECT host_lapse_check_ins AS "checkIns" FROM agent_task_stall_schedule WHERE app_id = ${appId} FOR SHARE`;
+  return row?.checkIns ?? HOST_LAPSE_CHECK_INS_DEFAULT;
+}
+
+/** The sweep's read and per-candidate write, apart, so a test can change the App's count between them. */
+export const __lostHostTesting = { readLostCandidates, recordHostLost };
