@@ -86,3 +86,6 @@ export async function consumeUserMergeConsent(tx: Prisma.TransactionClient, proo
     targetLoginAt: c.targetLoginAt!.toISOString(), targetLoginMethod: c.targetLoginMethod!, consumedAt: c.consumedAt!.toISOString(),
   } };
 }
+
+export const MERGE_CONSENT_LIVE_CAP = 10;
+export async function sweepRetiredMergeConsents(_db: PrismaClient, _opts: { now?: Date; batchSize?: number } = {}): Promise<number> { return 0; }
