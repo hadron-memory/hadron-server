@@ -119,6 +119,9 @@ export async function registerHost(
 
   return db.$transaction(async (tx) => {
     await lockAuthorityAnchors(tx, [{ kind: 'app', id: input.appId }], 'shared');
+    // #1863: the App's lapse count, stable for this transaction, taken BEFORE
+    // the registration row (the lock order of recordHostLost).
+    const checkIns = await lockAppLapseCheckIns(tx, input.appId);
     const app = await tx.app.findUnique({ where: { id: input.appId }, select: { deletedAt: true, uninstalledAt: true } });
     if (!app || app.deletedAt || app.uninstalledAt) {
       throw new HostRegistrationError('APP_NOT_LIVE', 'The App does not exist or is uninstalled.');
@@ -149,7 +152,7 @@ export async function registerHost(
       SELECT id, refreshed_at AS "refreshedAt", poll_interval_seconds AS "pollIntervalSeconds", lost_at AS "lostAt"
       FROM host_registrations WHERE app_id = ${input.appId} AND host_id = ${hostId} FOR UPDATE`;
     const isNew = inserted.length > 0;
-    const wasLapsed = !isNew && (cur.lostAt !== null || !isRegistrationLive(cur, now, await lockAppLapseCheckIns(tx, input.appId)));
+    const wasLapsed = !isNew && (cur.lostAt !== null || !isRegistrationLive(cur, now, checkIns));
     await tx.hostRegistration.update({
       where: { id: cur.id },
       data: { label, pollIntervalSeconds: input.pollIntervalSeconds, refreshedAt: now, lostAt: null },
@@ -236,13 +239,12 @@ async function readLostCandidates(db: PrismaClient, now: Date): Promise<LostCand
  *
  * The candidate was read under the App's lapse count as it was then; a manager
  * may have raised it since (#1863 review, Anne P2). So the App's count is read
- * again FOR SHARE (a concurrent `setAgentTaskStallSchedule` either committed
- * first and is seen, or waits for this transaction), the registration is locked
- * FOR UPDATE, and the lapse is re-decided on both, so a refresh since the read
- * leaves it alone too, as does an earlier stamp. Lock order:
- * the App's schedule row, then the registration (registerHost takes the
- * registration, then the schedule row, both compatible with this: the schedule
- * is SHARE on both sides).
+ * again under {@link lockAppLapseCheckIns} (a concurrent change either committed
+ * first and is seen, or waits for this transaction, whether or not the App had
+ * a schedule row yet), the registration is locked FOR UPDATE, and the lapse is
+ * re-decided on both, so a refresh since the read leaves it alone too, as does
+ * an earlier stamp. Lock order, here and in registerHost: the App's lapse lock,
+ * then the registration.
  */
 async function recordHostLost(db: PrismaClient, r: LostCandidate, now: Date): Promise<boolean> {
   return db.$transaction(async (tx) => {
@@ -260,8 +262,27 @@ async function recordHostLost(db: PrismaClient, r: LostCandidate, now: Date): Pr
   });
 }
 
-/** The App's lapse count, its schedule row held FOR SHARE so a concurrent change waits or is seen (#1863). */
+/**
+ * #1863 — the App's host-lapse lock: `exclusive` for a writer of the App's
+ * lapse count (setAgentTaskStallSchedule), `shared` for a reader deciding a
+ * lapse from it. An advisory lock, not a row lock, because an App that has
+ * never set its schedule has no row to lock: a `SELECT … FOR SHARE` that finds
+ * nothing locks nothing, and the App's FIRST setting would slip past it (Anne's
+ * round-2 P2). Transaction-scoped; re-entrant; never upgrade.
+ */
+export async function lockAppHostLapse(tx: Prisma.TransactionClient, appId: string, mode: 'exclusive' | 'shared'): Promise<void> {
+  const key = 'host-lapse:' + appId;
+  if (mode === 'shared') await tx.$executeRaw`SELECT pg_advisory_xact_lock_shared(hashtext(${key}))`;
+  else await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${key}))`;
+}
+
+/**
+ * The App's lapse count for a lapse decision, stable until the transaction
+ * ends: the host-lapse lock SHARED, then the schedule row FOR SHARE (which also
+ * holds off a writer that skips the advisory lock, e.g. direct SQL).
+ */
 async function lockAppLapseCheckIns(tx: Prisma.TransactionClient, appId: string): Promise<number> {
+  await lockAppHostLapse(tx, appId, 'shared');
   const [row] = await tx.$queryRaw<{ checkIns: number | null }[]>`
     SELECT host_lapse_check_ins AS "checkIns" FROM agent_task_stall_schedule WHERE app_id = ${appId} FOR SHARE`;
   return row?.checkIns ?? HOST_LAPSE_CHECK_INS_DEFAULT;

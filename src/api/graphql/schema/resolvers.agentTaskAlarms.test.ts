@@ -8,6 +8,7 @@
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { GraphQLError } from 'graphql';
+import { Client } from 'pg';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
@@ -336,6 +337,31 @@ describe('reading availability and stall windows (the App\'s task audience)', ()
     expect((await db.agentTaskStallSchedule.findUniqueOrThrow({ where: { appId: app.id } })).hostLapseCheckIns).toBe(10);
     await expect(M.setAgentTaskStallSchedule({}, { appRef: app.id, input: { hostLapseCheckIns: null } }, ctx(admin.id)))
       .resolves.toMatchObject({ hostLapseCheckIns: 3, noProgressMinutes: 90 });
+  });
+
+  it('#1763 (Anne P2, round 2): setting the lapse count waits for a lapse decision in flight, even with no schedule row', async () => {
+    expect(await db.agentTaskStallSchedule.count()).toBe(0);
+    const sweep = new Client({ connectionString: process.env.DATABASE_URL });
+    await sweep.connect();
+    try {
+      await sweep.query('BEGIN');
+      await sweep.query("SELECT pg_advisory_xact_lock_shared(hashtext('host-lapse:' || $1))", [app.id]);
+      let settled = false;
+      const set = M.setAgentTaskStallSchedule({}, { appRef: app.id, input: { hostLapseCheckIns: 5 } }, ctx(admin.id))
+        .finally(() => { settled = true; });
+      await new Promise((r) => setTimeout(r, 300));
+      expect(settled).toBe(false);
+      await sweep.query('COMMIT');
+      await expect(set).resolves.toMatchObject({ hostLapseCheckIns: 5 });
+      // A windows-only change does not take the host-lapse lock.
+      await sweep.query('BEGIN');
+      await sweep.query("SELECT pg_advisory_xact_lock_shared(hashtext('host-lapse:' || $1))", [app.id]);
+      await expect(M.setAgentTaskStallSchedule({}, { appRef: app.id, input: { noProgressMinutes: 90 } }, ctx(admin.id)))
+        .resolves.toMatchObject({ noProgressMinutes: 90 });
+      await sweep.query('COMMIT');
+    } finally {
+      await sweep.end();
+    }
   });
 
   it('#1763: the database refuses a lapse count outside 2 to 10, whatever the writer', async () => {

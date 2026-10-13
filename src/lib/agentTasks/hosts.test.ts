@@ -192,6 +192,30 @@ describe('lapse (cor:agt:070:01 open question: 3 poll intervals)', () => {
     expect((await db.hostRegistration.findUniqueOrThrow({ where: { id: registrationId } })).lostAt).toBeNull();
   });
 
+  it('#1763 (Anne P2, round 2): with NO schedule row yet, the write waits for the App\'s first setting and honours it', async () => {
+    const { registrationId } = await registerHost(db, ORCA1(), at('10:00'));
+    const [candidate] = await __lostHostTesting.readLostCandidates(db, at('10:03:30'));
+    expect(candidate).toMatchObject({ id: registrationId });
+    expect(await db.agentTaskStallSchedule.count()).toBe(0);
+    // The App's FIRST setting (5), in flight on its own connection, under the setter's lock protocol.
+    const manager = new Client({ connectionString: process.env.DATABASE_URL });
+    await manager.connect();
+    try {
+      await manager.query('BEGIN');
+      await manager.query("SELECT pg_advisory_xact_lock(hashtext('host-lapse:' || $1))", [app.id]);
+      await manager.query('INSERT INTO agent_task_stall_schedule (app_id, host_lapse_check_ins, updated_at) VALUES ($1, 5, now())', [app.id]);
+      let settled = false;
+      const write = __lostHostTesting.recordHostLost(db, candidate, at('10:03:30')).finally(() => { settled = true; });
+      await new Promise((r) => setTimeout(r, 300));
+      expect(settled).toBe(false);
+      await manager.query('COMMIT');
+      expect(await write).toBe(false);
+    } finally {
+      await manager.end();
+    }
+    expect((await db.hostRegistration.findUniqueOrThrow({ where: { id: registrationId } })).lostAt).toBeNull();
+  });
+
   it('#1763: an App\'s schedule row with no lapse set keeps the default of 3', async () => {
     await db.agentTaskStallSchedule.create({ data: { appId: app.id, noProgressMinutes: 90 } });
     await registerHost(db, ORCA1(), at('10:00'));

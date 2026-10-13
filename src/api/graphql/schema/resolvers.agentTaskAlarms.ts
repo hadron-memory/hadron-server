@@ -66,6 +66,7 @@ import {
   HOST_LAPSE_CHECK_INS_DEFAULT,
   HOST_LAPSE_CHECK_INS_MAX,
   HOST_LAPSE_CHECK_INS_MIN,
+  lockAppHostLapse,
 } from '../../../lib/agentTasks/hosts.js';
 
 // ── Errors and parsing ────────────────────────────────────────────────────
@@ -377,6 +378,8 @@ export const agentTaskAlarmMutations = {
       if (!(await actorManagesApp(txCtx, freshApp, actor))) {
         throw taskError('APP_MANAGER_REQUIRED', "Only whoever manages the App sets its stall windows.");
       }
+      // #1863: a lapse decision in flight either finishes under the old count or waits for this one.
+      if ('hostLapseCheckIns' in data) await lockAppHostLapse(tx, freshApp.id, 'exclusive');
       await tx.agentTaskStallSchedule.upsert({
         where: { appId: freshApp.id },
         create: { appId: freshApp.id, ...data, updatedBy: ctx.userId ?? null },
