@@ -262,8 +262,9 @@ describe('collect and report: a key reaches only its own host (cor:agt:070:04)',
     expect(events.map((e) => [e.type, e.subjectWorkerId, e.payload])).toEqual([
       ['host.operation.succeeded', kit.id, { operationId: op1.id, hostId: 'orca1', operationType: 'worktree.create' }],
     ]);
+    // The idempotent second report is a use too (Diego P2-2); one outcome event either way.
     const reports = await db.hostKeyUse.findMany({ where: { action: 'report' } });
-    expect(reports.map((u) => u.operationId)).toEqual([op1.id]);
+    expect(reports.map((u) => u.operationId)).toEqual([op1.id, op1.id]);
   });
 
   it('S3 (070:03): a failure carries its reason on the operation, never in the event', async () => {
@@ -273,6 +274,10 @@ describe('collect and report: a key reaches only its own host (cor:agt:070:04)',
     expect(failed).toMatchObject({ status: 'failed', failureReason: 'branch kit/1709-x already exists', result: null });
     const [e] = await db.agentTeamEvent.findMany({ where: { type: 'host.operation.failed' } });
     expect(JSON.stringify(e!.payload)).not.toMatch(/already exists|kit\/1709/);
+    // A repeated failure: a second use row, still one outcome event, the first reason kept.
+    expect(await report(orca1, { id: op1.id, outcome: 'FAILED', failureReason: 'retry' })).toMatchObject({ failureReason: 'branch kit/1709-x already exists' });
+    expect(await db.hostKeyUse.count({ where: { action: 'report', operationId: op1.id } })).toBe(2);
+    expect(await db.agentTeamEvent.count({ where: { type: 'host.operation.failed' } })).toBe(1);
   });
 
   it('S3 (070:04): a revoked key collects nothing, and the revocation is not raced by a collection already waiting', async () => {
@@ -328,6 +333,35 @@ describe('the host arm of cor:agt:060:08: out of tokens or host down, its own ma
     expect(await code(setAs(orca1, { state: 'AVAILABLE' }))).toBe('AVAILABILITY_NOT_PERMITTED');
     expect(await code(setAs(orca1, { state: 'UNAVAILABLE', reason: 'HOST_DOWN' }))).toBe('AVAILABILITY_NOT_PERMITTED');
     expect(await db.workerAvailability.findUniqueOrThrow({ where: { workerId: kit.id } })).toMatchObject({ reason: 'stalled', setBy: 'stall-rule' });
+  });
+
+  it('Diego P2-3: two hosts\' FIRST marks serialize on the worker; the second sees the first and is refused', async () => {
+    // Host A's first mark, uncommitted, holding the worker row only as every OTHER availability writer does (FOR
+    // SHARE): so it is host B's own lock that must order the two. Before the fix B also took FOR SHARE, found no row,
+    // and replaced A's mark.
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    let ready!: () => void;
+    const locked = new Promise<void>((r) => { ready = r; });
+    const hostA = db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM workers WHERE id = ${kit.id} FOR SHARE`;
+      await tx.workerAvailability.create({
+        data: { workerId: kit.id, state: 'unavailable', reason: 'host-down', setAt: new Date(), setBy: 'host', setByHostId: 'orca1' },
+      });
+      ready();
+      await gate;
+    });
+    await locked;
+    let settled = false;
+    const b = code(setAs(orca2, { state: 'UNAVAILABLE', reason: 'OUT_OF_TOKENS' })).finally(() => { settled = true; });
+    await new Promise((r) => setTimeout(r, 400));
+    expect(settled).toBe(false);
+    release();
+    await hostA;
+    expect(await b).toBe('AVAILABILITY_NOT_PERMITTED');
+    expect(await db.workerAvailability.findUniqueOrThrow({ where: { workerId: kit.id } })).toMatchObject({ reason: 'host-down', setByHostId: 'orca1' });
+    expect(await db.agentTeamEvent.count({ where: { type: 'availability.changed' } })).toBe(0);
+    expect(await db.hostKeyUse.count({ where: { action: 'availability' } })).toBe(0);
   });
 
   it('a worker the host does not register is "not found"; a person replacing a host mark clears its host', async () => {
