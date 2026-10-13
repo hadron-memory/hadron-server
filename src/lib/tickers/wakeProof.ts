@@ -7,26 +7,35 @@
 // requester is bound in: only that principal may acknowledge. Freshness (15
 // minutes) and the channel incarnation are checked by the acknowledger, which
 // has the database.
+//
+// v2 (#1708, Task Management T5) adds `tasks`: the task events the wake
+// delivers, acknowledged per (event, worker, chain position). A v1 proof (no
+// `tasks`) still verifies, read as delivering none, so a proof issued before
+// the deploy can still be acknowledged inside its 15 minutes.
 
 import { createHash, createHmac } from 'node:crypto';
 import { GraphQLError } from 'graphql';
 import { attentionTokenSecret } from '../teamAttention.js';
 import { safeEqual } from '../constantTime.js';
 
-export const WAKE_PROOF_VERSION = 1;
+export const WAKE_PROOF_VERSION = 2;
+const ACCEPTED_VERSIONS: ReadonlySet<unknown> = new Set([1, 2]);
 export const WAKE_PROOF_MAX_AGE_MS = 15 * 60 * 1000;
-const MAX_PROOF_CHARS = 16_384;
+/** The longest proof the verifier accepts; the issuer keeps every proof within it (#1708). */
+export const MAX_PROOF_CHARS = 16_384;
 
 export type WakeRequester = { userId: string } | { appKeyId: string };
 
 export type WakeProof = {
-  v: 1;
+  v: 1 | 2;
   kind: 'wake-proof';
   appId: string;
   workerId: string;
   requester: WakeRequester;
   channels: Array<{ channelId: string; incarnation: number; through: number }>;
   ticks: Array<{ tickerId: string; k: number }>;
+  /** v2: the task events delivered, by event and alarm chain position (0 for an ordinary event). Empty for v1. */
+  tasks: Array<{ eventId: string; chainIndex: number }>;
   /** Manager-authored mentions are exempt from the daily budget (cor:agt:080:15); decided when the wake is issued. */
   exempt: boolean;
   issuedAt: number;
@@ -61,13 +70,16 @@ export function verifyWakeProof(token: unknown): WakeProof {
     return invalid();
   }
   if (value.kind !== 'wake-proof') return invalid();
-  // An unknown version is refused, not guessed at: T5 adds per-event acknowledgement as v2.
-  if (value.v !== WAKE_PROOF_VERSION) return invalid();
+  // An unknown version is refused, not guessed at.
+  if (!ACCEPTED_VERSIONS.has(value.v)) return invalid();
+  if (value.v === 1) value.tasks = [];
   const r = value.requester as { userId?: unknown; appKeyId?: unknown } | undefined;
   if (
     typeof value.appId !== 'string' || typeof value.workerId !== 'string' ||
     typeof value.issuedAt !== 'number' || typeof value.exempt !== 'boolean' ||
     !Array.isArray(value.channels) || !Array.isArray(value.ticks) ||
+    !Array.isArray(value.tasks) ||
+    !value.tasks.every((t) => t && typeof t.eventId === 'string' && Number.isInteger(t.chainIndex) && t.chainIndex >= 0) ||
     !r || (typeof r.userId !== 'string' && typeof r.appKeyId !== 'string')
   ) return invalid();
   return value as WakeProof;
@@ -86,10 +98,14 @@ export function sameRequester(proof: WakeProof, who: WakeRequester): boolean {
  * Two reads of an unchanged wake share a key; a wake with newer messages or a later tick has another. A budget
  * reservation carries it, so an acknowledgement spends exactly the reservation of the wake it delivers.
  */
-export function wakeIdentity(p: Pick<WakeProof, 'channels' | 'ticks'>): string {
-  const canon = JSON.stringify([
+export function wakeIdentity(p: Pick<WakeProof, 'channels' | 'ticks'> & { tasks?: WakeProof['tasks'] }): string {
+  const parts: unknown[] = [
     [...p.channels].map((c) => [c.channelId, c.incarnation, c.through]).sort(),
     [...p.ticks].map((t) => [t.tickerId, t.k]).sort(),
-  ]);
+  ];
+  // Only when present, so a wake with no task in it keeps the key it had under v1 (a reservation made just before
+  // the deploy still matches its acknowledgement).
+  if (p.tasks && p.tasks.length > 0) parts.push([...p.tasks].map((t) => [t.eventId, t.chainIndex]).sort());
+  const canon = JSON.stringify(parts);
   return createHash('sha256').update(canon).digest('hex').slice(0, 32);
 }
