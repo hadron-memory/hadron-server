@@ -21,7 +21,8 @@ import { safeEqual } from '../constantTime.js';
 export const WAKE_PROOF_VERSION = 2;
 const ACCEPTED_VERSIONS: ReadonlySet<unknown> = new Set([1, 2]);
 export const WAKE_PROOF_MAX_AGE_MS = 15 * 60 * 1000;
-const MAX_PROOF_CHARS = 16_384;
+/** The longest proof the verifier accepts; the issuer keeps every proof within it (#1708). */
+export const MAX_PROOF_CHARS = 16_384;
 
 export type WakeRequester = { userId: string } | { appKeyId: string };
 

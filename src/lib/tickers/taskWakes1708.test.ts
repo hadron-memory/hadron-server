@@ -12,8 +12,9 @@ import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../../test/helpers.js';
 import { generateId } from '../id.js';
 import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
-import { computeDueWakes } from './dueWakes.js';
-import { signWakeProof, verifyWakeProof } from './wakeProof.js';
+import { computeDueWakes, WAKE_TASK_REASONS_MAX } from './dueWakes.js';
+import { MAX_PROOF_CHARS, signWakeProof, verifyWakeProof } from './wakeProof.js';
+import { taskStallTick } from '../../jobs/taskStallEvaluator.js';
 import { evaluateStalls, wakeDueOwners } from '../agentTasks/stall.js';
 import { recordUndeliverableTaskWakes } from '../agentTasks/taskWakes.js';
 import { APP_KEY_PREFIX, hashAppKey } from '../../middleware/auth.js';
@@ -411,4 +412,87 @@ describe("the router's surface: an App key with attention:deliver (cor:agt:080:2
     expect(row).toMatchObject({ workerId: liam.id, ackedByAppKeyId: key.id, ackedByUserId: null });
   });
 
+});
+
+describe('a task backlog drains in bounded batches (Colin / Riana P2-2 on #1859)', () => {
+  it('120 pending assignments: wakes of 50, 50 and 20, each proof within the verifier\'s cap and acknowledgeable', async () => {
+    const created = new Date(Date.now() - 60 * MIN);
+    const tasks = Array.from({ length: 120 }, (_, n) => ({
+      id: generateId(), appId: app.id, title: `Task ${n}`, ownerWorkerId: rook.id, assigneeWorkerId: liam.id, assignedAt: created,
+    }));
+    await db.agentTask.createMany({ data: tasks });
+    await db.agentTeamEvent.createMany({
+      data: tasks.map((t, n) => ({ appId: app.id, taskId: t.id, type: 'task.assigned', subjectWorkerId: liam.id, actorUserId: manager.id, createdAt: new Date(created.getTime() + n) })),
+    });
+    const sizes: number[] = [];
+    let at = Date.now();
+    try {
+      for (;;) {
+        const page = await dueFor(ctx(manager.id), new Date(at));
+        if (page.wakes.length === 0) break;
+        const w = page.wakes[0]!;
+        expect(w.proof.length).toBeLessThanOrEqual(MAX_PROOF_CHARS);
+        sizes.push(taskReasons(page, liam.id).length);
+        // Acknowledged now; then the clock moves past the floor for the next batch.
+        expect(await ack(w.proof)).toEqual({ acknowledged: 1, unchanged: 0 });
+        at = Date.now() + 3 * MIN;
+        vi.setSystemTime(new Date(at));
+      }
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(sizes).toEqual([WAKE_TASK_REASONS_MAX, WAKE_TASK_REASONS_MAX, 20]);
+    expect(await db.workerDeliveryTaskEvent.count({ where: { workerId: liam.id, deliveredAt: { not: null } } })).toBe(120);
+  });
+});
+
+describe('authority is decided at issuance, not before it (Riana P2-1 on #1859)', () => {
+  it("a holder removed from the App while the read is in flight gets no task title or proof", async () => {
+    await assignedTo(liam);
+    // The removal commits at the issue transaction's entry: after every pre-transaction read, before the issue.
+    const original = db.$transaction.bind(db);
+    let fired = false;
+    const spy = vi.spyOn(db, '$transaction').mockImplementation(((arg: unknown, opts?: unknown) => {
+      if (!fired && typeof arg === 'function') {
+        fired = true;
+        return M.removeAppMember({}, { appId: app.id, userId: holder.id }, ctx(manager.id)).then(() => original(arg as never, opts as never));
+      }
+      return original(arg as never, opts as never);
+    }) as never);
+    try {
+      const page = await Q.dueWakes({}, { appRef: app.id }, ctx(holder.id));
+      expect(fired).toBe(true);
+      expect(JSON.stringify(page)).not.toContain('Review #42');
+      expect(page.wakes).toEqual([]);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(await db.appMember.count({ where: { appId: app.id, userId: holder.id } })).toBe(0);
+  });
+
+  it('the same read with the holder still a member does carry the task (the control)', async () => {
+    await assignedTo(liam);
+    const page = await Q.dueWakes({}, { appRef: app.id }, ctx(holder.id));
+    expect(page.wakes.map((w: any) => w.reasons.map((r: any) => r.task?.title))).toEqual([['Review #42']]);
+  });
+});
+
+describe('dueness follows Tickers, not session liveness (Colin P3 on #1859)', () => {
+  it('a worker idle for two days (session lapsed, not dormant) is woken by a MATCHED assignment', async () => {
+    await db.session.create({ data: { id: generateId(), appId: app.id, userId: holder.id, workerId: liam.id, agentId: agent.id, type: 'DEVELOPER', startedAt: new Date(Date.now() - 2 * DAY), updatedAt: new Date(Date.now() - 2 * DAY) } });
+    await assignedTo(liam, 'assignment.matched');
+    const page = await dueFor();
+    expect(taskReasons(page, liam.id).map((r) => r.event)).toEqual(['MATCHED']);
+    expect((await taskStallTick(db, new Date())).undeliverable).toBe(0);
+  });
+
+  it('a dormant subject: the read writes nothing; the full stall tick records it once', async () => {
+    await db.session.create({ data: { id: generateId(), appId: app.id, userId: holder.id, workerId: liam.id, agentId: agent.id, type: 'DEVELOPER', startedAt: new Date(Date.now() - 100 * DAY), updatedAt: new Date(Date.now() - 100 * DAY), endedAt: new Date(Date.now() - 100 * DAY) } });
+    await assignedTo(liam);
+    expect(dueIds(await dueFor())).toEqual([]);
+    expect(await db.workerDeliveryTaskEvent.count()).toBe(0); // a read never records
+    expect((await taskStallTick(db, new Date())).undeliverable).toBe(1);
+    expect((await taskStallTick(db, new Date(Date.now() + MIN))).undeliverable).toBe(0);
+    expect(await db.workerDeliveryTaskEvent.count({ where: { undeliverableReason: 'dormant', deliveredAt: null } })).toBe(1);
+  });
 });
