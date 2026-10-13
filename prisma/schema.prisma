@@ -5147,8 +5147,9 @@ model AgentTeamAlarmSchedule {
 /// row to `available`, set by `lapse`, with one event (#1766).
 ///
 /// `setBy` names the setter class of cor:agt:060:08: `worker` (itself, only to
-/// unavailable), `holder`, `app-manager`, `stall-rule` (060:07) or `host` (T6);
-/// or `lapse` (#1766), the platform recording a passed `until`.
+/// unavailable), `holder`, `app-manager`, `reports-to` (#1759: the worker it
+/// reports to, only clearing a stall-rule mark, 060:11), `stall-rule` (060:07)
+/// or `host` (T6); or `lapse` (#1766), the platform recording a passed `until`.
 /// The actor ids follow the #1610 shape. Shape: chk_worker_availability_shape
 /// (prisma/agent-task-stall-invariants.sql).
 model WorkerAvailability {

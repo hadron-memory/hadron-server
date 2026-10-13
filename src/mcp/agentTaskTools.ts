@@ -495,7 +495,8 @@ export function registerAgentTaskTools(server: McpServer, deps: { db: PrismaClie
     'hadron_worker_availability_set',
     'Set a worker\'s availability for work (cor:agt:060:08). A worker, through its own session, may mark ITSELF ' +
       'unavailable (never available); the person holding the worker\'s name, or whoever manages the App, may set ' +
-      'either. A worker is never chosen for new work while unavailable.',
+      'either. The worker it reports to directly may set it AVAILABLE, only to clear a mark the stall rule set ' +
+      '(cor:agt:060:11). A worker is never chosen for new work while unavailable.',
     {
       worker: z.string().describe('The worker: id or URN, or its name with appRef.'),
       appRef: z.string().optional().describe('The team App (id or URN); needed when worker is a name.'),

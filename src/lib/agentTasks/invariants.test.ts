@@ -186,7 +186,7 @@ describe('agent-task-stall-invariants.sql (#1706)', () => {
   it('the latest stall-invariants migration carries a byte-identical copy of the invariants file', () => {
     const source = readFileSync(new URL('../../../prisma/agent-task-stall-invariants.sql', import.meta.url), 'utf8');
     const migration = readFileSync(
-      new URL('../../../prisma/migrations/20261013080000_worker_availability_lapse/migration.sql', import.meta.url),
+      new URL('../../../prisma/migrations/20261013140000_worker_availability_reports_to/migration.sql', import.meta.url),
       'utf8',
     );
     expect(migration.endsWith(source)).toBe(true);
@@ -253,6 +253,13 @@ describe('agent-task-stall-invariants.sql (#1706)', () => {
     const w = await workerRow();
     await expect(
       db.workerAvailability.create({ data: { workerId: w, state: 'available', setAt: new Date(), setBy: 'lapse' } }),
+    ).resolves.toBeTruthy();
+  });
+
+  it('worker_availability (#1759): `reports-to` is a setter, for the stall mark the reports-to worker cleared', async () => {
+    const w = await workerRow();
+    await expect(
+      db.workerAvailability.create({ data: { workerId: w, state: 'available', setAt: new Date(), setBy: 'reports-to' } }),
     ).resolves.toBeTruthy();
   });
 
