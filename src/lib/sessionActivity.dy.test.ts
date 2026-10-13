@@ -9,7 +9,7 @@
  *    session, and routing drops it; only a rebind brings the worker back;
  *  - DY-4: a locked-memory error says how to get the key back.
  */
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
 import { generateId } from './id.js';
@@ -17,7 +17,7 @@ import type { Context } from '../api/graphql/schema/resolvers.helpers.js';
 import { resolvers } from '../api/graphql/schema/resolvers.js';
 import { isSessionDormant, isSessionLive, loadLastEventBySession, usageEventCountsAsActivity } from './sessionActivity.js';
 import { attributedRequestActivity, recordNodeUsage } from './usageRecorder.js';
-import { lapsedResumeVerdict, resumableOwnWorkerIds } from './teamAttention.js';
+import { lapsedResumeVerdict, resumeOwnLapsedSessionInTx, resumableOwnWorkerIds } from './teamAttention.js';
 import { sessionKeyReleasedHint } from './sessionKeyCache.js';
 import { decryptNodeFields } from './nodeCrypto.js';
 
@@ -120,7 +120,8 @@ describe('DY-2 (#1653): a usage event on a lapsed session is attribution, never 
   it('recordUsage with SOMEONE ELSE\'S session id never keeps it live', async () => {
     const lapsed = await session({ idleMs: 30 * H, userId: holder.id });
     await M.recordUsage({}, { event: { type: 'read', sessionId: lapsed.id } }, userCtx(other.id));
-    const [ev] = await eventsFor(lapsed.id);
+    const ev = await db.usageEvent.findFirstOrThrow({ where: { userId: other.id } });
+    expect(ev.sessionId).toBeNull();
     expect(ev.countsAsActivity).toBe(false);
     expect(await live(lapsed.id)).toBe(false);
   });
@@ -274,5 +275,73 @@ describe('DY-4: a locked encrypted memory says how to get its key back', () => {
     expect(() => decryptNodeFields({ content: 'x' }, { id: generateId(), isEncrypted: true } as never))
       .toThrow(sessionKeyReleasedHint());
     expect(sessionKeyReleasedHint()).toMatch(/released after [\d.]+h unused .* hadron_unlock_memory/);
+  });
+});
+
+
+describe('#1741: recordUsage follows App → Worker → Session lifecycle lock order', () => {
+  // Ordinary App keys still fail READER. Supplying that role here reaches
+  // the internal App-resume branch without widening the HTTP auth contract.
+  const recorderCtx = () => ({ ...appKeyCtx(app.id), roles: ['READER'] }) as Context;
+
+  it('does not hold the Session while waiting for the resume Worker lock', async () => {
+    const s = await session({ idleMs: 30 * H, userId: null });
+    let release!: () => void;
+    let locked!: () => void;
+    const ready = new Promise<void>((r) => { locked = r; });
+    const gate = new Promise<void>((r) => { release = r; });
+    const binder = db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM workers WHERE id = ${worker.id} FOR UPDATE`;
+      locked();
+      await gate;
+    }, { timeout: 10000 });
+    await ready;
+    const recording = M.recordUsage({}, { event: { type: 'read', sessionId: s.id } }, recorderCtx());
+    try {
+      let waiting = false;
+      for (let i = 0; i < 100; i++) {
+        const rows = await db.$queryRaw<{ waiting: boolean }[]>`
+          SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE datname = current_database()
+            AND wait_event_type = 'Lock' AND query LIKE '%FROM workers%FOR UPDATE%') AS waiting`;
+        if (rows[0].waiting) { waiting = true; break; }
+        await new Promise((r) => setTimeout(r, 10));
+      }
+      expect(waiting).toBe(true);
+      // A bind holding Worker must be free to update its Sessions next.
+      await db.$transaction(async (tx) => {
+        await tx.$queryRaw`SELECT id FROM sessions WHERE id = ${s.id} FOR UPDATE NOWAIT`;
+      });
+    } finally {
+      release();
+      await binder;
+      await recording;
+    }
+    expect(await live(s.id)).toBe(true);
+    expect(await db.usageEvent.findFirstOrThrow({ where: { sessionId: s.id } }))
+      .toMatchObject({ countsAsActivity: true });
+  });
+
+  it('concurrent own-App recorders resume without a Session lock upgrade', async () => {
+    const s = await session({ idleMs: 30 * H, userId: null });
+    const results = await Promise.all(Array.from({ length: 4 }, () =>
+      M.recordUsage({}, { event: { type: 'read', sessionId: s.id } }, recorderCtx())));
+    expect(results).toEqual([true, true, true, true]);
+    expect(await db.usageEvent.count({ where: { sessionId: s.id, countsAsActivity: true } })).toBe(4);
+    expect(await live(s.id)).toBe(true);
+  });
+});
+
+
+describe('#1741 Rook P3: resume refuses foreign ownership before lifecycle locks', () => {
+  it.each(['foreign-App', 'foreign-user', 'App-end-user'] as const)('%s takes no App or Worker locks', async (kind) => {
+    const s = await session({ idleMs: 30 * H, userId: kind === 'App-end-user' ? holder.id : null });
+    const principal = kind === 'foreign-App' ? appKeyCtx(otherApp.id)
+      : kind === 'foreign-user' ? userCtx(other.id) : appKeyCtx(app.id);
+    await db.$transaction(async (tx) => {
+      const sql = vi.spyOn(tx, '$queryRaw');
+      expect(await resumeOwnLapsedSessionInTx(principal, tx, s.id)).toBe(false);
+      expect(sql).not.toHaveBeenCalled();
+    });
+    expect(await live(s.id)).toBe(false);
   });
 });

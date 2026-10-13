@@ -1,13 +1,27 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../../test/helpers.js';
-import { mergeUsers, AUDIT_USER_COLUMNS } from './mergeUsers.js';
+import { mergeUsers } from '../../test/mergeConsent.js';
+import { AUDIT_USER_COLUMNS } from './mergeUsers.js';
 
 type AuditColumn = { table_name: string; column_name: string };
 
-// Spec 048 retired auto-personal organizations, so even organizations.created_by
-// is an ordinary actor stamp. There are currently no intentional exemptions.
-const EXEMPT_AUDIT_COLUMNS = new Set<string>();
+// Ordinary audit stamps follow the surviving identity (spec 048). Compiled
+// automation identities are sealed consent/provenance snapshots instead:
+// rewriting them would violate the immutable evidence and silently change its
+// historical actor. Source Users are soft-deleted, so these remain resolvable
+// history; execution must fail closed for a merged-away run-as/signer.
+// The behavioral user-merge test in automation/versions.test.ts pins this.
+const EXEMPT_AUDIT_COLUMNS = new Set([
+  'automation_versions.published_by',
+  'automation_versions.approved_by',
+  'automation_versions.revoked_by',
+  // #1705 — the agent team event stream is append-only (a trigger refuses the
+  // UPDATE a retarget would need): who acted, and who acknowledged an alarm,
+  // is a sealed record of the time. Pinned in agentTasks/agentTasks.test.ts.
+  'agent_team_events.actor_user_id',
+  'agent_team_events.acknowledged_by_user_id',
+]);
 
 function coveredPairs(registry: Readonly<Record<string, readonly string[]>>): Set<string> {
   return new Set(Object.entries(registry).flatMap(([table, columns]) => columns.map((column) => `${table}.${column}`)));
@@ -27,7 +41,13 @@ describe('mergeUsers audit actor registry', () => {
     const columns = await db.$queryRaw<AuditColumn[]>`
       SELECT table_name, column_name FROM information_schema.columns
       WHERE table_schema = 'public'
-        AND column_name IN ('created_by', 'updated_by', 'deleted_by', 'revoked_by')
+        AND (column_name IN ('created_by', 'updated_by', 'deleted_by', 'revoked_by')
+          OR (table_name = 'automation_versions' AND column_name IN ('published_by', 'approved_by'))
+          OR (table_name = 'agent_tasks' AND column_name = 'assigned_by')
+          OR (table_name = 'ticker_subscriptions' AND column_name IN ('ended_by', 'via_grant_person_id', 'ended_via_grant_person_id'))
+          OR (table_name = 'app_grants' AND column_name = 'granted_by')
+          OR (table_name = 'app_key_scopes' AND column_name IN ('granted_by_user_id', 'revoked_by_user_id'))
+          OR (table_name = 'agent_team_events' AND column_name IN ('actor_user_id', 'acknowledged_by_user_id')))
     `;
     const schemaPairs = new Set(columns.map(({ table_name, column_name }) => `${table_name}.${column_name}`));
     const covered = coveredPairs(AUDIT_USER_COLUMNS);
@@ -50,7 +70,7 @@ describe('mergeUsers audit actor registry', () => {
     const [source, target, actor] = await Promise.all([
       db.user.create({ data: { handle: 'audit-merge-source' } }),
       db.user.create({ data: { handle: 'audit-merge-target' } }),
-      db.user.create({ data: { handle: 'audit-merge-actor' } }),
+      db.user.create({ data: { handle: 'audit-merge-actor', roles: ['ADMIN'] } }),
     ]);
     await db.user.update({ where: { id: source.id }, data: { createdBy: source.id } });
     const stampedUser = await db.user.create({

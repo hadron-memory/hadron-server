@@ -330,6 +330,8 @@ export const nodeQueries = {
             loadMemoryUrn(ctx, memoryId).then((u: string | null) => u ?? memoryId),
           compileTemplate: (content: string, data: Record<string, string> | null, memoryId: string) =>
             compileTemplate(content, data, memoryId, ctx.db, {}),
+          // visibleEdges was already filtered through this caller's read gate.
+          includeTarget: target => !!target,
           onTargetInlined: (target) => inlined.push(target),
         },
       );
@@ -2036,7 +2038,7 @@ export const nodeQueries = {
       // No read on the current memory ⇒ [] (no existence disclosure, matching
       // memoryUsageSummary).
       if (!canRead(node.memoryId)) return [];
-      // #1663 — a retracted/hidden comment's history is for memory admins.
+      // #1663 — a comment stub's history is for memory managers.
       if (await isConcealedCommentHistory(ctx, nodeId)) return [];
 
       const revisions = await ctx.db.nodeRevision.findMany({

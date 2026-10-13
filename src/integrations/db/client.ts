@@ -14,6 +14,7 @@ import { ATTRIBUTED_NODE_FIELDS } from '../../lib/nodeRevisionSnapshot.js';
 // durable-login-state: PendingLoginState (the OAuth `state` is the PK).
 const MODELS_WITHOUT_ID = new Set<string>([
   'AgentSubscription',
+  'ManualAutomationPin',
   'AppMember',
   'AgentImport',
   'AgentOrgGrant',
@@ -27,6 +28,19 @@ const MODELS_WITHOUT_ID = new Set<string>([
   'PendingLoginState',
   // #1606 — keyed by its node (1:1 with a comment node).
   'CommentMeta',
+  // #1706 — keyed by their owner (event + chain index, worker, App + family, App).
+  'AgentTeamAlarmSchedule',
+  'WorkerAvailability',
+  'ModelFamilyAvailability',
+  'AgentTaskStallSchedule',
+  // #1707 — keyed by its registration and worker.
+  'HostRegistrationWorker',
+  // #1715 — keyed by the merged-away account.
+  'UserMerge',
+  // #1747 — keyed by their worker (and channel / ticker).
+  'WorkerWakeSettings',
+  'WorkerDeliveryChannel',
+  'WorkerDeliveryTick', 'AppWakeDay', 'AppWakeReservation',
 ]);
 
 const basePrisma = new PrismaClient();

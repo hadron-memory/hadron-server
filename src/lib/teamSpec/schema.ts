@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { GraphQLError } from 'graphql';
+import { ownRecordIssues } from './recordEntries.js';
 
 export const TEAM_API_VERSION = 'hadron.dev/team/v1alpha1';
 export type TeamSpecForm = 'SERVER' | 'CLIENT_INPUT';
@@ -75,7 +76,8 @@ export function validateTeamSpec(input: unknown, form: TeamSpecForm = 'SERVER'):
       && typeof input.apiVersion === 'string' && input.apiVersion !== TEAM_API_VERSION) {
     unsupportedVersion(input.apiVersion);
   }
-  const parsed = teamSpecSchema(form).safeParse(input);
+  const definition = teamSpecSchema(form);
+  const parsed = definition.safeParse(input);
   if (!parsed.success) throw new GraphQLError('Invalid team spec', { extensions: {
     code: 'TEAM_SPEC_INVALID', issues: parsed.error.issues.map((i) => ({
       pointer: pointer(i.path), code: i.code, message: i.message,
@@ -85,6 +87,14 @@ export function validateTeamSpec(input: unknown, form: TeamSpecForm = 'SERVER'):
   // annotations permit every JSON key, including keys a schema library may
   // otherwise omit while copying a record (e.g. __proto__).
   const spec = input as TeamSpec;
+  const recordIssues = [
+    ...ownRecordIssues(definition.shape.spec.shape.roles, spec.spec.roles, ['spec', 'roles']),
+    ...ownRecordIssues(annotations, spec.metadata.annotations, ['metadata', 'annotations']),
+    ...spec.spec.workers.flatMap((worker, i) => ownRecordIssues(annotations, worker.annotations, ['spec', 'workers', i, 'annotations'])),
+  ];
+  if (recordIssues.length) throw new GraphQLError('Invalid team spec', { extensions: {
+    code: 'TEAM_SPEC_INVALID', issues: recordIssues.map((i) => ({ pointer: pointer(i.path), code: i.code, message: i.message })),
+  } });
   const issues: TeamSpecIssue[] = [];
   const seen = new Set<string>();
   spec.spec.workers.forEach((worker, i) => {

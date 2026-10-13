@@ -1,4 +1,4 @@
-/** #1606 — the comment path (cor:dmo:110): create, reply, edit, retract, resolve, hide, delete, reads. */
+/** #1606 — the comment path (cor:dmo:110): create, reply, edit, delete, resolve, thread delete, reads. */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { GraphQLError } from 'graphql';
 import { db } from '../../../integrations/db/client.js';
@@ -67,7 +67,7 @@ describe('createComment (cor:dmo:110:01–05)', () => {
     expect(c).toMatchObject({
       memoryId: memory.id, isTopLevel: true, threadRootId: null, state: 'OPEN',
       body: 'Is this right?', quote: 'the passage', anchorRevision: 1, anchorApprovalHash: hashOf(target),
-      retracted: false, hidden: false, authorKey: `u:${writer.id}`, revSeq: 1,
+      deleted: false, authorKey: `u:${writer.id}`, revSeq: 1,
     });
     expect(c.loc).toBe(`comments:${c.id}`);
     expect(C.anchorIsCurrent(c, {}, as())).toBe(true);
@@ -129,7 +129,7 @@ describe('createComment (cor:dmo:110:01–05)', () => {
 });
 
 describe('one open thread per author (cor:dmo:110:05)', () => {
-  it('refuses a second open thread, per author; resolving or retracting frees the allowance', async () => {
+  it('refuses a second open thread, per author; resolving or deleting frees the allowance', async () => {
     const target = await node('t:1');
     const first = await comment(target.id);
     const refused = await errorOf(comment(target.id, 'again'));
@@ -145,7 +145,7 @@ describe('one open thread per author (cor:dmo:110:05)', () => {
 
     await M.resolveCommentThread(null, { commentRef: first.id, expectedRevision: 1 }, as(writer.id));
     const second = await comment(target.id, 'new text');
-    await M.retractComment(null, { commentRef: second.id, expectedRevision: 1 }, as(writer.id));
+    await M.deleteComment(null, { commentRef: second.id, expectedRevision: 1 }, as(writer.id));
     await comment(target.id, 'third');
   });
 
@@ -154,7 +154,8 @@ describe('one open thread per author (cor:dmo:110:05)', () => {
     const first = await comment(target.id);
     await M.resolveCommentThread(null, { commentRef: first.id, expectedRevision: 1 }, as(writer.id));
     const second = await comment(target.id, 'second');
-    const refused = await errorOf(M.reopenCommentThread(null, { commentRef: first.id, expectedRevision: 2 }, as(admin.id)));
+    // #1721: resolve writes only the thread state, so the revision stays 1.
+    const refused = await errorOf(M.reopenCommentThread(null, { commentRef: first.id, expectedRevision: 1 }, as(admin.id)));
     expect(refused.extensions).toMatchObject({ code: 'COMMENT_OPEN_THREAD_EXISTS', threadId: second.id });
   });
 
@@ -170,7 +171,7 @@ describe('one open thread per author (cor:dmo:110:05)', () => {
 });
 
 describe('threads, edits and moderation (cor:dmo:110:05)', () => {
-  it('replies inherit the thread, are allowed on a resolved thread without reopening it (DAB), and refuse on a retracted root', async () => {
+  it('replies inherit the thread, are allowed on a resolved thread without reopening it (DAB), and refuse on a deleted stub', async () => {
     const target = await node('r:1');
     const root = await comment(target.id);
     const reply = await M.replyToComment(null, { commentRef: root.id, body: 'agree' }, as(admin.id));
@@ -187,12 +188,18 @@ describe('threads, edits and moderation (cor:dmo:110:05)', () => {
     expect(late.threadRootId).toBe(root.id);
     expect((await Q.comment(null, { ref: root.id }, as())).state).toBe('RESOLVED');
 
+    // A stub (deleted while it had replies) takes no new replies; #1721: a
+    // comment deleted with no replies is gone, so it is not found at all.
     const other = await comment(target.id, 'second thread', admin.id);
-    await M.retractComment(null, { commentRef: other.id, expectedRevision: 1 }, as(admin.id));
-    expect(await codeOf(M.replyToComment(null, { commentRef: other.id, body: 'x' }, as(writer.id)))).toBe('COMMENT_RETRACTED');
+    await M.replyToComment(null, { commentRef: other.id, body: 'keep' }, as(writer.id));
+    await M.deleteComment(null, { commentRef: other.id, expectedRevision: 1 }, as(admin.id));
+    expect(await codeOf(M.replyToComment(null, { commentRef: other.id, body: 'x' }, as(writer.id)))).toBe('COMMENT_DELETED');
+    const lone = await comment(target.id, 'third thread', admin.id);
+    await M.deleteComment(null, { commentRef: lone.id, expectedRevision: 1 }, as(admin.id));
+    expect(await codeOf(M.replyToComment(null, { commentRef: lone.id, body: 'x' }, as(writer.id)))).toBe('COMMENT_NOT_FOUND');
   });
 
-  it('only the author edits or retracts; edits are revisions with history; a stub hides the text', async () => {
+  it('only the author edits; a writer who is neither author nor manager cannot delete; edits overwrite with no history (#1721); a stub hides the text', async () => {
     const target = await node('e:1');
     const c = await comment(target.id, 'v1', writer.id, { quote: 'q1' });
     expect(await codeOf(M.editComment(null, { commentRef: c.id, body: 'hijack', expectedRevision: 1 }, as(admin.id)))).toBe('COMMENT_NOT_AUTHOR');
@@ -201,16 +208,16 @@ describe('threads, edits and moderation (cor:dmo:110:05)', () => {
     expect(edited).toMatchObject({ body: 'v2', quote: 'q1', revSeq: 2 });
     const cleared = await M.editComment(null, { commentRef: c.id, quote: null, expectedRevision: 2 }, as(writer.id));
     expect(cleared).toMatchObject({ body: 'v2', quote: null, revSeq: 3 });
-    const history = await db.nodeRevision.findMany({ where: { nodeId: c.id }, orderBy: { revNo: 'asc' } });
-    expect(history.map((h) => [h.revNo, h.content, h.revLabel, h.editedBy])).toEqual([
-      [1, 'v1', 'edit', writer.id],
-      [2, 'v2', 'edit', writer.id],
-    ]);
+    expect(await db.nodeRevision.count({ where: { nodeId: c.id } })).toBe(0);
+    await M.replyToComment(null, { commentRef: c.id, body: 'keeps the stub' }, as(admin.id));
 
-    expect(await codeOf(M.retractComment(null, { commentRef: c.id, expectedRevision: 3 }, as(admin.id)))).toBe('COMMENT_NOT_AUTHOR');
-    const retracted = await M.retractComment(null, { commentRef: c.id, expectedRevision: 3 }, as(writer.id));
-    expect(retracted).toMatchObject({ retracted: true, body: null, quote: null, revSeq: 4 });
-    expect(await codeOf(M.editComment(null, { commentRef: c.id, body: 'v3', expectedRevision: 4 }, as(writer.id)))).toBe('COMMENT_RETRACTED');
+    const peer = await db.user.create({ data: { githubId: 160605, githubUsername: 'cm-peer', roles: [] } });
+    await db.orgMember.create({ data: { organizationId: orgId, userId: peer.id, role: 'CONTRIBUTOR' } });
+    expect(await codeOf(M.deleteComment(null, { commentRef: c.id, expectedRevision: 3 }, as(peer.id)))).toBe('COMMENT_NOT_AUTHOR');
+    expect(await codeOf(M.deleteComment(null, { commentRef: c.id, expectedRevision: 3 }, as(reader.id)))).toBe('COMMENT_FORBIDDEN');
+    const deleted = await M.deleteComment(null, { commentRef: c.id, expectedRevision: 3 }, as(writer.id));
+    expect(deleted).toMatchObject({ deleted: true, deletedByKey: `u:${writer.id}`, body: null, quote: null, revSeq: 4 });
+    expect(await codeOf(M.editComment(null, { commentRef: c.id, body: 'v3', expectedRevision: 4 }, as(writer.id)))).toBe('COMMENT_DELETED');
   });
 
   it('resolve/reopen: writers only, top-level only, state-checked', async () => {
@@ -223,18 +230,18 @@ describe('threads, edits and moderation (cor:dmo:110:05)', () => {
     expect((await errorOf(M.reopenCommentThread(null, { commentRef: root.id, expectedRevision: 1 }, as(admin.id)))).extensions)
       .toMatchObject({ code: 'COMMENT_THREAD_STATE', state: 'OPEN' });
     await M.resolveCommentThread(null, { commentRef: root.id, expectedRevision: 1 }, as(admin.id));
-    const reopened = await M.reopenCommentThread(null, { commentRef: root.id, expectedRevision: 2 }, as(writer.id));
+    const reopened = await M.reopenCommentThread(null, { commentRef: root.id, expectedRevision: 1 }, as(writer.id));
     expect(reopened).toMatchObject({ state: 'OPEN', resolvedAt: null, resolvedByKey: null });
   });
 
-  it('hide is admin-only and leaves a stub; thread delete is admin-only and removes the thread from every read', async () => {
+  it("a manager deletes another's comment (a stub while it has replies); thread delete is manager-only and removes the thread from every read", async () => {
     const target = await node('h:1');
     const root = await comment(target.id, 'abusive');
     const reply = await M.replyToComment(null, { commentRef: root.id, body: 'r' }, as(admin.id));
-    expect(await codeOf(M.hideComment(null, { commentRef: root.id, reason: 'abuse', expectedRevision: 1 }, as(writer.id)))).toBe('COMMENT_ADMIN_REQUIRED');
-    const hidden = await M.hideComment(null, { commentRef: root.id, reason: 'abuse', expectedRevision: 1 }, as(admin.id));
-    expect(hidden).toMatchObject({ hidden: true, body: null });
-    expect(await codeOf(M.replyToComment(null, { commentRef: root.id, body: 'x' }, as(writer.id)))).toBe('COMMENT_HIDDEN');
+    expect(await codeOf(M.deleteComment(null, { commentRef: reply.id, expectedRevision: 1 }, as(writer.id)))).toBe('COMMENT_NOT_AUTHOR');
+    const stub = await M.deleteComment(null, { commentRef: root.id, expectedRevision: 1 }, as(admin.id));
+    expect(stub).toMatchObject({ deleted: true, deletedByKey: `u:${admin.id}`, body: null });
+    expect(await codeOf(M.replyToComment(null, { commentRef: root.id, body: 'x' }, as(writer.id)))).toBe('COMMENT_DELETED');
 
     expect(await codeOf(M.deleteCommentThread(null, { commentRef: reply.id, reason: 'cleanup' }, as(writer.id)))).toBe('COMMENT_ADMIN_REQUIRED');
     expect(await M.deleteCommentThread(null, { commentRef: reply.id, reason: 'cleanup' }, as(admin.id))).toBe(true);

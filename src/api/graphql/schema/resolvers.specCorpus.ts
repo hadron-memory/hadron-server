@@ -31,6 +31,7 @@ import { MemoryNotFoundError } from '../../../lib/asset/gate.js';
 import { editorFromAuth, ensureCurrentNodeRevisionInTransaction } from '../../../lib/nodeRevisionSnapshot.js';
 import { mayMintNodes } from './resolvers.nodeApproval.js';
 import { COMMENT_NODE_TYPE } from '../../../lib/comments/index.js';
+import { NOT_DECISION_FAMILY_WHERE } from '../../../lib/decisions/index.js';
 import { unresolvedFeedbackOf, type UnresolvedFeedbackRow } from '../../../lib/comments/summary.js';
 import { computeApprovalHash } from '../../../lib/approvalHash.js';
 import { SubtreeMoveMintedError } from '../../../lib/nodeSubtreeMove.js';
@@ -1212,9 +1213,11 @@ async function mintMemoryNodes(
     // Re-reads encryption under the lock just taken.
     const corpus = await loadScannableCorpus(txCtx, id);
     // #1607 (cor:dmo:110:06, 120:06) — comments are outside minting entirely:
-    // not in scope, not linted, never a blocker, never stamped.
+    // not in scope, not linted, never a blocker, never stamped. #1641 — nor
+    // decisions and their logs: a decision's evidence is its deciders'
+    // approval or signature, never a corpus mint.
     const nodes = await tx.node.findMany({
-      where: { memoryId: id, deletedAt: null, nodeType: { not: COMMENT_NODE_TYPE } },
+      where: { memoryId: id, deletedAt: null, nodeType: { not: COMMENT_NODE_TYPE }, AND: [NOT_DECISION_FAMILY_WHERE] },
       orderBy: { loc: 'asc' },
       select: {
         id: true, loc: true, nodeType: true, tags: true, role: true, isPlaceholder: true, revSeq: true,

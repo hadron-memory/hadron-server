@@ -55,6 +55,8 @@ import {
   loadAppUrn,
   loadApp,
   requireOrgRole,
+  isPlatformAdmin,
+  requireAgentAccess,
   requireOwnerOrOrgRole,
   defaultAiConfigOf,
   isOrgMemberOrAdmin,
@@ -225,7 +227,7 @@ async function readableNestedAgent<T extends NestedAgentRow>(ctx: Context, agent
     if (await isAgentInstalledAndLicensed(ctx.db, ctx.appId, agent.id)) return agent;
   }
   try {
-    await requireOwnerOrOrgRole(ctx, agent, 'READER');
+    await requireAgentAccess(ctx, agent, 'READER');
     return agent;
   } catch (error) {
     if (error instanceof GraphQLError && error.extensions.code === 'FORBIDDEN') return null;
@@ -245,10 +247,15 @@ function loadReadableAgent(ctx: Context, agentId: string): Promise<unknown | nul
   const cache = (ctx.readableAgentCache ??= new Map<string, Promise<unknown | null>>());
   let pending = cache.get(agentId);
   if (!pending) {
-    if (ctx.appId && !ctx.userId && !ctx.impersonation) {
+    if ((ctx.appId && !ctx.userId && !ctx.impersonation) ||
+        (!ctx.impersonation && isPlatformAdmin(ctx))) {
       // Pure App keys have a live installed-Agent exception to Query.agent's
       // user/org gate. The SQL audience filter cannot express grant lifecycle,
       // so use the same checked path as eager nested Agent relations.
+      // #1787 (cor:dmo:050:13): a platform admin takes the same checked path —
+      // the admin may MANAGE a user-owned Agent, so its nested point-read
+      // routes through the gate, while the SQL filter (which also feeds the
+      // LIST surfaces) keeps excluding other users' user-owned agents (#782).
       pending = ctx.db.agent.findUnique({ where: { id: agentId } })
         .then((agent) => readableNestedAgent(ctx, agent));
     } else {
@@ -2194,10 +2201,17 @@ export const typeResolvers = {
       const apps = await ctx.db.app.findMany({ where, orderBy: { createdAt: 'asc' } });
       return filterReadableAppRows(ctx, apps);
     },
-    // Adoption count — the agent's owning-org view only (a bare number, but
-    // still "who uses this"); non-members get 0.
-    appCount: async (a: { id: string; organizationId: string }, _: unknown, ctx: Context) => {
-      if (!(await isOrgMemberOrAdmin(ctx, a.organizationId))) return 0;
+    // Adoption count — the agent's owning-TENANT view only (a bare number, but
+    // still "who uses this"); everyone else gets 0. The owning tenant of an
+    // org agent is its org's members; of a user-owned agent (spec 047), its
+    // owner (#1693: they saw 0 for their own agent installed in their own
+    // Apps). Not under impersonation, and not a platform admin for an org-less
+    // agent (#1692: nothing org-derived to show).
+    appCount: async (a: { id: string; organizationId: string | null; ownerUserId?: string | null }, _: unknown, ctx: Context) => {
+      const owningTenant = a.organizationId === null
+        ? !ctx.impersonation && !!ctx.userId && a.ownerUserId === ctx.userId
+        : await isOrgMemberOrAdmin(ctx, a.organizationId);
+      if (!owningTenant) return 0;
       return ctx.db.app.count({
         where: { appAgents: { some: { agentId: a.id } }, deletedAt: null },
       });
@@ -2224,8 +2238,8 @@ export const typeResolvers = {
     },
     // The agent's customer list (which orgs were granted it) — owning-org view
     // only; non-members get [].
-    orgGrants: async (a: { id: string; organizationId: string }, _: unknown, ctx: Context) => {
-      if (!(await isOrgMemberOrAdmin(ctx, a.organizationId))) return [];
+    orgGrants: async (a: { id: string; organizationId: string | null }, _: unknown, ctx: Context) => {
+      if (a.organizationId === null || !(await isOrgMemberOrAdmin(ctx, a.organizationId))) return [];
       return ctx.db.agentOrgGrant.findMany({
         where: { agentId: a.id },
         orderBy: { createdAt: 'asc' },

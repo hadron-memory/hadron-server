@@ -237,12 +237,12 @@ describe('#1674 review cycle (Jane)', () => {
     expect(ids(res)).toEqual([deep.id]);
   });
 
-  it('P2-4: a hidden or retracted comment is never a vector hit or passage, even while its vectors linger', async () => {
+  it('P2-4: a deleted stub is never a vector hit or passage, even while its vectors linger', async () => {
     await db.memory.update({ where: { id: memory.id }, data: { vectorIndexEnabled: true, embeddingSource: 'contentChunks' } });
     const { comments } = await seed(1);
     await sweep();
     // Simulate pending cleanup: conceal at the meta level only, leaving vectors.
-    await db.commentMeta.update({ where: { nodeId: comments[1] }, data: { hiddenAt: new Date(), hiddenBy: `u:${admin.id}` } });
+    await db.commentMeta.update({ where: { nodeId: comments[1] }, data: { retractedAt: new Date(), retractedBy: `u:${admin.id}` } });
     expect(await db.nodeEmbedding.count({ where: { nodeId: comments[1] } })).toBeGreaterThan(0);
     for (const granularity of ['node', 'chunk']) {
       for (const contentScope of ['COMMENTS', 'ALL']) {
@@ -252,7 +252,7 @@ describe('#1674 review cycle (Jane)', () => {
       }
     }
     // Through the mutation, the vectors go in the same transaction.
-    await M.retractComment(null, { commentRef: comments[2], expectedRevision: 1 }, as());
+    await M.deleteComment(null, { commentRef: comments[2], expectedRevision: 1 }, as());
     expect(await db.nodeEmbedding.count({ where: { nodeId: comments[2] } })).toBe(0);
   });
 });

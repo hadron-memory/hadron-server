@@ -1,5 +1,6 @@
 import type { PrismaClient } from '../../generated/prisma/index.js';
 import { COMMENT_NODE_TYPE } from '../../lib/comments/index.js';
+import { NOT_DECISION_FAMILY_WHERE } from '../../lib/decisions/index.js';
 import { Prisma } from '../../generated/prisma/index.js';
 import { generateId } from '../../lib/id.js';
 import { ensureCurrentNodeRevisionInTransaction, jsonOrDbNull } from '../../lib/nodeRevisionSnapshot.js';
@@ -194,7 +195,9 @@ export async function cloneMemoryGraph(
       // cor:dmo:110:04). Their governed edges drop with them below, since an
       // edge is copied only from a cloned source.
       const selectedNodes = await tx.node.findMany({
-        where: { memoryId: source.id, deletedAt: null, nodeType: { not: COMMENT_NODE_TYPE } },
+        // #1641 §3.2 — nor decisions or their logs: a copy would mint decisions
+        // no decision operation wrote, under codes that belong to the source log.
+        where: { memoryId: source.id, deletedAt: null, nodeType: { not: COMMENT_NODE_TYPE }, AND: [NOT_DECISION_FAMILY_WHERE] },
       });
       // A raw writer may have changed a stamped source without advancing its
       // revision. Reconcile and refetch stamped rows before the destination

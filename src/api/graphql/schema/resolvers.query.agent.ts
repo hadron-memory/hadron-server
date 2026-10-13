@@ -18,6 +18,7 @@ import {
   aiConfigOwnerOf,
   clampListTake,
   requireOrgRole,
+  requireAgentAccess,
   requireOwnerOrOrgRole,
   resolveOrgScope,
   isPlatformAdmin,
@@ -60,7 +61,7 @@ export const agentQueries = {
       // memories PUBLIC carve-out, #362). Non-public falls through to the
       // membership gate.
       if (agent.visibility !== 'PUBLIC') {
-        await requireOwnerOrOrgRole(ctx, agent, 'READER');
+        await requireAgentAccess(ctx, agent, 'READER');
       }
       return agent;
     },
@@ -453,7 +454,7 @@ export const agentQueries = {
       // 007-entity-id-or-urn: agentRef may be ID, bare URN, or prefixed URN.
       const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentRef);
       const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
-      await requireOwnerOrOrgRole(ctx, agent, 'ADMIN');
+      await requireAgentAccess(ctx, agent, 'ADMIN');
       return ctx.db.agentSubscription.findMany({
         where: { agentId: resolvedAgentId },
         orderBy: { createdAt: 'desc' },

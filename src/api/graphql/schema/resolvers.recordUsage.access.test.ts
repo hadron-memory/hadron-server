@@ -30,6 +30,7 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb, createDbAppWithKey } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
+import { validateSessionBinding } from '../../../middleware/auth.js';
 
 const SHARED_LOC = 'shared-loc';
 
@@ -206,5 +207,154 @@ describe('recordUsage — link vs real node', () => {
     expect(e!.nodeId).toBe(nodeA.id);
     expect(e!.memoryId).toBe(memA.id);
     expect(nodeB.id).not.toBe(e!.nodeId); // orgB never in play
+  });
+});
+
+/** #1662: session attribution follows ownership, independently of liveness. */
+describe('recordUsage — session attribution ownership', () => {
+  async function makeSession(overrides: Record<string, unknown> = {}) {
+    return db.session.create({ data: {
+      id: generateId(), userId: userMember.id, appId: appKeyApp.id,
+      ...overrides,
+    } });
+  }
+  async function recordSession(sessionId: string | undefined, c: Context) {
+    await (resolvers.Mutation as any).recordUsage({}, {
+      event: { type: 'read', sessionId, tokensIn: 42, tokensOut: 7 },
+    }, c);
+    return lastEvent();
+  }
+
+  it('keeps the owning user attribution and live activity', async () => {
+    const s = await makeSession();
+    const e = await recordSession(s.id, asMember());
+    expect(e).toMatchObject({ sessionId: s.id, countsAsActivity: true, tokensIn: 42 });
+  });
+
+  it('drops another user session without changing its history, totals or liveness', async () => {
+    const at = new Date(Date.now() - 30 * 60 * 60 * 1000);
+    const s = await makeSession({ startedAt: at, updatedAt: at });
+    const e = await recordSession(s.id, asOther());
+    expect(e).toMatchObject({ sessionId: null, countsAsActivity: false, userId: userOther.id });
+    expect(await db.usageEvent.count({ where: { sessionId: s.id } })).toBe(0);
+    expect(await db.usageEvent.aggregate({ where: { sessionId: s.id }, _sum: { tokensIn: true } }))
+      .toMatchObject({ _sum: { tokensIn: null } });
+    expect(await db.session.findUnique({ where: { id: s.id } })).toEqual(s);
+  });
+
+  it('does not let a platform admin attribute to another user', async () => {
+    const s = await makeSession();
+    const e = await recordSession(s.id, ctx({ userId: userOther.id, roles: ['ADMIN'] }));
+    expect(e!.sessionId).toBeNull();
+  });
+
+  it('drops impersonated ownership', async () => {
+    const s = await makeSession();
+    const e = await recordSession(s.id, ctx({ ...asMember(), impersonation: {
+      sessionId: generateId(), actorUserId: userOther.id, orgId: orgA.id,
+      expiresAt: new Date(Date.now() + 60000),
+    } }));
+    expect(e).toMatchObject({ sessionId: null, countsAsActivity: false });
+  });
+
+  it('a hybrid user does not inherit the selected App ownership', async () => {
+    const s = await makeSession();
+    const e = await recordSession(s.id, ctx({ ...asOther(), appId: appKeyApp.id }));
+    expect(e!.sessionId).toBeNull();
+  });
+
+  it('a hybrid user retains their own session attribution', async () => {
+    const s = await makeSession();
+    const e = await recordSession(s.id, ctx({ ...asMember(), appId: appKeyApp.id }));
+    expect(e!.sessionId).toBe(s.id);
+  });
+
+  it('a hybrid user cannot attribute to a person-less selected-App session', async () => {
+    const s = await makeSession({ userId: null });
+    const e = await recordSession(s.id, ctx({ ...asMember(), appId: appKeyApp.id }));
+    expect(e!.sessionId).toBeNull();
+  });
+
+  it.each(['lapsed', 'ended', 'expired'] as const)('keeps late owned %s attribution without activity', async (state) => {
+    const at = new Date(Date.now() - 30 * 60 * 60 * 1000);
+    const s = await makeSession({ startedAt: at, updatedAt: at,
+      ...(state === 'ended' ? { endedAt: at } : {}),
+      ...(state === 'expired' ? { expiresAt: at } : {}),
+    });
+    const e = await recordSession(s.id, asMember());
+    expect(e).toMatchObject({ sessionId: s.id, countsAsActivity: false });
+    expect(await db.session.findUnique({ where: { id: s.id } })).toEqual(s);
+  });
+
+  it('missing, deleted and denied session references all drop attribution', async () => {
+    const deleted = await makeSession({ deletedAt: new Date() });
+    const foreign = await makeSession({ userId: userOther.id });
+    for (const id of [generateId(), deleted.id, foreign.id]) {
+      const e = await recordSession(id, asMember());
+      expect(e).toMatchObject({ sessionId: null, countsAsActivity: false });
+    }
+  });
+
+  it.each(['delete', 'reassign'] as const)('rechecks ownership after a concurrent %s commits', async (change) => {
+    const s = await makeSession();
+    let release!: () => void;
+    let locked!: () => void;
+    const ready = new Promise<void>((resolve) => { locked = resolve; });
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const writer = db.$transaction(async (tx) => {
+      await tx.session.update({ where: { id: s.id }, data: change === 'delete'
+        ? { deletedAt: new Date() } : { userId: userOther.id } });
+      locked();
+      await gate;
+    }, { timeout: 10000 });
+    await ready;
+    const recording = recordSession(s.id, asMember());
+    try {
+      let waited = false;
+      for (let i = 0; i < 100; i++) {
+        const rows = await db.$queryRaw<{ waiting: boolean }[]>`
+          SELECT EXISTS (SELECT 1 FROM pg_stat_activity
+            WHERE datname = current_database() AND wait_event_type = 'Lock'
+            AND query LIKE '%SELECT id FROM sessions%' AND query LIKE '%FOR SHARE%') AS waiting`;
+        if (rows[0].waiting) { waited = true; break; }
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect(waited).toBe(true);
+    } finally {
+      release();
+      await writer;
+    }
+    expect(await recording).toMatchObject({ sessionId: null, countsAsActivity: false });
+    expect(await db.usageEvent.count({ where: { sessionId: s.id } })).toBe(0);
+  });
+
+  it('omitting the session still records usage without session attribution', async () => {
+    expect(await recordSession(undefined, asMember())).toMatchObject({ sessionId: null, countsAsActivity: false });
+  });
+
+  it('binding rejects impersonation for user and malformed pure-App shapes', async () => {
+    const s = await makeSession();
+    const impersonation = { sessionId: generateId(), actorUserId: userOther.id,
+      orgId: orgA.id, expiresAt: new Date(Date.now() + 60000) };
+    expect(await validateSessionBinding(db, { userId: userMember.id }, s.id))
+      .toMatchObject({ sessionId: s.id });
+    expect(await validateSessionBinding(db, { userId: userMember.id, impersonation }, s.id)).toBeNull();
+    // This shape cannot be emitted by auth, but the shared helper hardens it.
+    expect(await validateSessionBinding(db, { appId: appKeyApp.id, impersonation }, s.id)).toBeNull();
+  });
+
+  it('binding keeps pure App-key ownership including end-user sessions', async () => {
+    for (const userId of [userMember.id, null]) {
+      const s = await makeSession({ userId });
+      expect(await validateSessionBinding(db, { appId: appKeyApp.id }, s.id))
+        .toMatchObject({ sessionId: s.id });
+      expect(await validateSessionBinding(db, { appId: generateId() }, s.id)).toBeNull();
+    }
+  });
+
+  it('does not widen the existing App-key READER gate', async () => {
+    const s = await makeSession({ userId: null });
+    await expect(recordSession(s.id, asAppKey())).rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
+    expect(await db.usageEvent.count()).toBe(0);
   });
 });

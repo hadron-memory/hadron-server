@@ -19,8 +19,9 @@
  * | Free-standing app memory | none of the below | App participants, as the team space |
  *
  * …plus spec 047's orthogonal axis: a **user-owned** row (`ownerUserId`) is
- * strictly owner-only whatever its class, and `getAppTeamSpaceAccess` excludes
- * it from the App's map for exactly that reason.
+ * strictly owner-only whatever its class — EXCEPT the team space of a user-owned
+ * App, the App owner's own app-class row, whose audience is the App's
+ * participants (its owner and its members, #1764).
  *
  * **Why a module and not four inline copies.** PR #1207 wrote this narrowing
  * out once, in `resolveChannelTarget`, over four review rounds — and left the
@@ -80,24 +81,20 @@ export interface TeamSpaceRowShape {
  * review, and the first inside a predicate I had just extracted to stop exactly
  * this.
  *
- * So a user-owned row is a team space only when BOTH hold — the same pair
- * `getAppTeamSpaceAccess` has always applied, restated here rather than
- * approximated:
- *
- *   1. it is owned by the APP's owner (an org-owned App's team space is
- *      `ownerUserId: null`, full stop), and
- *   2. the CALLER is that owner — a co-member does not get the owner's row.
- *
- * And never under impersonation: arm 2 is identity-scoped, and `ctx.userId` is
- * not the caller there.
+ * So a user-owned row is a team space only when it is owned by the APP's owner
+ * (an org-owned App's team space is `ownerUserId: null`, full stop) and the
+ * context is not an impersonated support session. WHO may open it is the
+ * participation gate's question, asked after this classification: since #1764
+ * (Holger "A", #8151/#8155) a user-owned App's participants are its owner AND
+ * its members, so the caller is no longer part of the classification — the
+ * earlier "the CALLER is that owner" clause answered an access question inside
+ * a classification.
  */
 export function isTeamSpaceRow(
   mem: TeamSpaceRowShape,
   opts: {
     /** `App.ownerUserId` — null for an org-owned App. */
     appOwnerUserId: string | null;
-    /** The acting user, or null for a principal with no user identity. */
-    callerUserId: string | null;
     /** True when the context is an impersonated support session. */
     impersonating: boolean;
   },
@@ -105,30 +102,26 @@ export function isTeamSpaceRow(
   if (mem.class !== 'app' || mem.appId === null) return false;
   if (mem.userMemoryOfAgentId !== null || mem.workerOf.length > 0) return false;
   if (mem.ownerUserId === null) return true;
-  // spec 047: strictly owner-only — no participation path, no admin path, and
-  // no support-session path.
+  // spec 047: the App owner's row is the team space of a user-owned App, and no support-session path reaches it.
+  // Everyone else's user-owned row is not (strict owner-only memories, whatever their class).
   if (opts.impersonating) return false;
-  return mem.ownerUserId === opts.appOwnerUserId && mem.ownerUserId === opts.callerUserId;
+  return mem.ownerUserId === opts.appOwnerUserId;
 }
 
 /**
  * The ownership half of {@link teamSpaceAudienceFilter}, as a `where` fragment —
- * for the query-shaped callers, which must apply the same pair.
+ * for the query-shaped callers, which must apply the same rule as
+ * {@link isTeamSpaceRow}.
  *
- * An org-owned App's team space is `ownerUserId: null`. A user-owned App's may
- * be its owner's row, and only that owner may see it, so the caller must equal
- * the App's owner for the second arm to exist at all.
+ * An org-owned App's team space is `ownerUserId: null`. A user-owned App's is
+ * its owner's row; whether the caller may open it is the participation gate's
+ * question (#1764), so the fragment no longer depends on who asks.
  */
 export function teamSpaceOwnerFilter(opts: {
   appOwnerUserId: string | null;
-  callerUserId: string | null;
   impersonating: boolean;
 }): Prisma.MemoryWhereInput {
-  const ownerArmApplies =
-    !opts.impersonating &&
-    opts.appOwnerUserId !== null &&
-    opts.appOwnerUserId === opts.callerUserId;
-  return ownerArmApplies
+  return !opts.impersonating && opts.appOwnerUserId !== null
     ? { OR: [{ ownerUserId: null }, { ownerUserId: opts.appOwnerUserId }] }
     : { ownerUserId: null };
 }

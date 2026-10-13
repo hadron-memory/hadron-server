@@ -622,3 +622,30 @@ CREATE INDEX IF NOT EXISTS "nodes_msg_channel_seq_loc_c_idx"
 -- #1606 / #1607 — comment-node invariants. One source, shared verbatim with
 -- migration 20261005200000_comment_nodes (pinned by src/lib/comments/invariantsSql.test.ts).
 \ir comment-invariants.sql
+
+-- #1655: compiled automation versions.
+\ir automation-invariants.sql
+
+-- #1705: agent task shape + the append-only team event stream. One source,
+-- shared verbatim with migration 20261008010000_agent_tasks (pinned by
+-- src/lib/agentTasks/invariants.test.ts).
+\ir agent-task-invariants.sql
+
+-- #1706: stall alarms (one per episode), alarm wakes, availability for work and
+-- per-App stall windows. One source, shared verbatim with migration
+-- 20261009010000_agent_task_stalls (pinned by src/lib/agentTasks/invariants.test.ts).
+\ir agent-task-stall-invariants.sql
+
+-- #1707: a session's model family and host registrations. One source, shared
+-- verbatim with migration 20261010010000_agent_task_matching (pinned by
+-- src/lib/agentTasks/invariants.test.ts).
+\ir agent-task-matching-invariants.sql
+
+-- #1747: tickers, subscriptions, wake settings, the may-subscribe-workers grant
+-- and the App ticker-settings bounds. One source, shared verbatim with migration
+-- 20261011020000_tickers (pinned by src/lib/tickers/invariants.test.ts).
+\ir ticker-invariants.sql
+
+-- #1749: App key scopes (cor:aut:010:03). One source, shared verbatim with migration
+-- 20261011190000_app_key_scopes (pinned by src/lib/appKeyScopes/appKeyScopes.test.ts).
+\ir app-key-scope-invariants.sql

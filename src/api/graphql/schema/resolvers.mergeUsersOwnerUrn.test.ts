@@ -12,7 +12,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
-import { mergeUsers } from '../../../controller/operations/mergeUsers.js';
+import { mergeUsers } from '../../../test/mergeConsent.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { resolvers, type Context } from './resolvers.js';
 

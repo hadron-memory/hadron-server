@@ -13,12 +13,13 @@ import {
 import { propagateOrgUrnRename } from '../../../lib/org/propagateOrgUrnRename.js';
 import { renameOwnerNamespacedUrns } from '../../../lib/ownerUrnRename.js';
 import { mergeUsers } from '../../../controller/operations/mergeUsers.js';
+import { beginUserMergeConsent, approveUserMergeConsent } from '../../../lib/userMergeConsent.js';
 import {
   deleteUserAccount,
   SoleOrgOwnerError,
 } from '../../../controller/operations/deleteUser.js';
 import { softDeleteOrganizationCore } from '../../../controller/operations/softDeleteOrganization.js';
-import { validateOrgSlug } from '../../../lib/urn.js';
+import { validateOrgRoot } from '../../../lib/org/orgRoot.js';
 import { retryOnSerializationFailure } from '../../../lib/serializableRetry.js';
 import {
   mintPrincipal,
@@ -60,7 +61,7 @@ function rethrowRootNameTaken(err: unknown): never {
 export const orgMutations = {
     updateMyProfile: async (
       _: unknown,
-      { name, handle, email }: { name?: string; handle?: string | null; email?: string },
+      { name, handle, email }: { name?: string; handle?: string | null; email?: string | null },
       ctx: Context,
     ) => {
       if (!ctx.userId) throw new Error('Unauthenticated');
@@ -89,11 +90,18 @@ export const orgMutations = {
           // concurrent updateMyProfile can't let us read a stale handle and then
           // skip / mis-target the propagation (gemini review, #686 — mirrors the
           // org-rename lock). A plain SELECT would not serialize the two writers.
-          const locked = await tx.$queryRaw<{ handle: string | null; principal_id: string | null }[]>`
-            SELECT handle, principal_id FROM users WHERE id = ${userId} FOR UPDATE
+          const locked = await tx.$queryRaw<{ handle: string | null; principal_id: string | null; email: string | null }[]>`
+            SELECT handle, principal_id, email FROM users WHERE id = ${userId} FOR UPDATE
           `;
           if (locked.length === 0) throw new Error('Unauthenticated');
           const current = locked[0];
+          // Identity addresses require proof of control. Profile edits cannot
+          // establish or replace one; an unchanged form field is a no-op.
+          if (email !== undefined && (email?.trim().toLowerCase() || null) !== (current.email?.trim().toLowerCase() || null)) {
+            throw new GraphQLError('Email changes require verification and cannot be made through profile updates.', {
+              extensions: { code: 'BAD_USER_INPUT' },
+            });
+          }
           // `normalizeHandleOrNull` on the stored handle is a defensive no-op
           // (already normalized) that also yields the null oldHandle the
           // propagation uses to skip the entry_node_urn rewrites.
@@ -112,7 +120,6 @@ export const orgMutations = {
             data: {
               ...(name !== undefined ? { name } : {}),
               ...handleData,
-              ...(email !== undefined ? { email } : {}),
               ...principalData,
             },
           });
@@ -149,14 +156,26 @@ export const orgMutations = {
       );
     },
 
+    beginMergeUsersConsent: async (_: unknown, { source, target }: { source: string; target: string }, ctx: Context) => {
+      requireRole(ctx, 'ADMIN');
+      if (!ctx.userId || ctx.apiKeyId || ctx.sessionId || ctx.impersonation || ctx.appId) throw new GraphQLError('Forbidden', { extensions: { code: 'FORBIDDEN' } });
+      const [s, t] = await Promise.all([resolveUserRef(ctx.db, source), resolveUserRef(ctx.db, target)]);
+      return beginUserMergeConsent(ctx.db, s.id, t.id, ctx.userId);
+    },
+
+    approveMergeUsersConsent: async (_: unknown, { proof, source, target }: { proof: string; source: string; target: string }, ctx: Context) =>
+      approveUserMergeConsent(ctx, proof, source, target),
+
     mergeUsers: async (
       _: unknown,
-      { input }: { input: { source: string; target: string } },
+      { input }: { input: { source: string; target: string; consentProof?: string } },
       ctx: Context,
     ) => {
-      // #1642 / DU-1: containment until source-user consent is designed.
+      // #1642: platform administration plus both accounts' fresh-login consent.
       // Gate before resolving either account so denied callers learn no refs.
       requireRole(ctx, 'ADMIN');
+      if (!input.consentProof) throw new GraphQLError('Both accounts must consent before merging.', { extensions: { code: 'MERGE_CONSENT_REQUIRED' } });
+      if (!ctx.userId || ctx.apiKeyId || ctx.sessionId || ctx.impersonation || ctx.appId) throw new GraphQLError('Forbidden', { extensions: { code: 'FORBIDDEN' } });
       const [{ id: sourceUserId }, { id: targetUserId }] = await Promise.all([
         resolveUserRef(ctx.db, input.source),
         resolveUserRef(ctx.db, input.target),
@@ -171,6 +190,7 @@ export const orgMutations = {
         targetUserId,
         actorUserId: ctx.userId ?? null,
         mergeGlobalRoles: true,
+        consentProof: input.consentProof,
       });
     },
 
@@ -244,8 +264,8 @@ export const orgMutations = {
       requireRole(ctx, 'READER');
       // #376: store only a bare org slug — a scheme-prefixed / colon-bearing
       // value would later cascade a corrupt `<orgUrn>:` prefix into children.
-      // #692: a new org root must be a dotted domain (validateOrgSlug enforces).
-      validateOrgSlug(urn);
+      // #1733: a bare, legal org root, dotted or not (validateOrgRoot).
+      validateOrgRoot(urn);
       // #692: mint the org's principal (cross-kind pool uniqueness) and create
       // the org + owner in ONE transaction, so a name can never be half-claimed.
       const org = await ctx.db
@@ -302,7 +322,7 @@ export const orgMutations = {
       // `String` GraphQL arg permits) so malformed input is rejected loudly
       // rather than silently dropped by the `if (!urn)` no-change fast-path;
       // only an omitted / explicit-null urn skips validation.
-      if (urn != null) validateOrgSlug(urn);
+      if (urn != null) validateOrgRoot(urn);
 
       const data = {
         ...(name ? { name } : {}),
@@ -900,6 +920,12 @@ export const orgMutations = {
       if (app.createUserPermission === 'DENY') {
         throw new Error('Forbidden: this app cannot create users');
       }
+      // App-provided profile data cannot establish a verified identity.
+      if (email?.trim()) {
+        throw new GraphQLError('Email cannot be established through App user provisioning.', {
+          extensions: { code: 'BAD_USER_INPUT' },
+        });
+      }
       // Idempotent: return existing user if already created under this app
       const existing = await ctx.db.user.findFirst({
         where: { externalAppId: ctx.appId, externalId, deletedAt: null },
@@ -926,7 +952,6 @@ export const orgMutations = {
               identityProvider: 'APP',
               handle: handle_,
               name: name ?? null,
-              email: email ?? null,
               createdBy: ctx.appId,
             },
           });

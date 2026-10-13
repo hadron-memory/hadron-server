@@ -60,6 +60,17 @@ export const MAX_TARGETS_PUBLIC = MAX_TARGETS;
 const MAX_TOKEN_CHARS = 65_536;
 const SWITCHOVER_PROOF_TTL_MS = 10 * 60 * 1000;
 const ENCRYPTED_MESSAGE_PAGE_SIZE = 50;
+/** #1779 — plaintext Channels are counted by per-target aggregate SQL over a
+ * bounded seq window, not by streaming rows through JS. Their cost is one
+ * indexed range query (no decryption), so they do not spend the decrypted-row
+ * budget; the work one request can do is still bounded and still scales with
+ * the caller's `scanLimit` (Codex P1 on #1428: an unbounded aggregate is
+ * row-linear server work): each budget unit buys this many plaintext seqs per
+ * Channel visit, and twice that per request. At the default 50 that is a
+ * 10,000-seq window and 20,000 per request; a deeper backlog continues on the
+ * next page. */
+const PLAINTEXT_SEQS_PER_BUDGET_UNIT = 200;
+const PLAINTEXT_REQUEST_WINDOWS = 2;
 
 type AppRow = {
   id: string;
@@ -393,12 +404,18 @@ export async function resumeOwnLapsedSessionInTx(
   tx: Prisma.TransactionClient,
   sessionId: string,
 ): Promise<boolean> {
-  if (!resumingPrincipal(ctx)) return false;
+  const principal = resumingPrincipal(ctx);
+  if (!principal) return false;
   const pre = await tx.session.findUnique({
     where: { id: sessionId },
-    select: { workerId: true, worker: { select: { appId: true } } },
+    select: { userId: true, appId: true, workerId: true, worker: { select: { appId: true } } },
   });
   if (!pre?.workerId || !pre.worker) return false;
+  // Refuse foreign refs before taking another tenant's lifecycle locks
+  // (#1741, Rook P3). This is only an early rejection: resumeVerdict and the
+  // guarded update still re-check ownership after the App/Worker lock wait.
+  if (principal === 'user' ? pre.userId !== ctx.userId
+    : pre.userId !== null || pre.appId !== ctx.appId || pre.worker.appId !== ctx.appId) return false;
   const [app] = await tx.$queryRaw<Array<{ deleted_at: Date | null; uninstalled_at: Date | null }>>`
     SELECT deleted_at, uninstalled_at FROM apps WHERE id = ${pre.worker.appId} FOR SHARE`;
   if (!app || app.deleted_at || app.uninstalled_at) return false;
@@ -646,6 +663,126 @@ export interface PagedScanState {
   next: number;
 }
 
+type PlaintextTarget = {
+  index: number;
+  seen: number;
+  head: number;
+  workerId: string;
+  mentionOnly: boolean;
+  tokens: string[];
+};
+
+type PlaintextWindowResult = {
+  perTarget: Array<{
+    index: number;
+    unread: number;
+    mentions: number;
+    first: number;
+    lastRelevant: number | null;
+  }>;
+  /** Last row of the window (seq, then C-collated loc) — the keyset position. */
+  cursor: { seq: number; loc: string } | null;
+  /** Loc of a row at the highest seq any target counted — the stale-frontier check row. */
+  frontierLoc: string | null;
+};
+
+/**
+ * #1779 — the counts the row walk produced, computed in the database.
+ *
+ * For one plaintext Channel and the seq window (lo, hi], each target's unread
+ * is the rows above ITS seen cursor and at or below ITS frozen head, skipping
+ * its own posts; a row mentions it when `data.mentions` is an array holding one
+ * of its tokens (the same test the row walk applied in JS). The ranges are the
+ * ones the walk already used, so this reads nothing it did not: only integer
+ * aggregates leave SQL, never a message body, and a target is counted against
+ * its own register's cursor and head alone.
+ */
+export async function aggregatePlaintextWindow(
+  db: Context['db'],
+  channelId: string,
+  lo: number,
+  hi: number,
+  targets: PlaintextTarget[],
+): Promise<PlaintextWindowResult> {
+  // A VALUES list needs a row: with no targets there is nothing to count.
+  if (targets.length === 0) return { perTarget: [], cursor: null, frontierLoc: null };
+  const values = Prisma.join(
+    targets.map((t) => Prisma.sql`(${t.index}::int, ${t.seen}::int, ${t.head}::int, ${t.workerId}::text, ${t.mentionOnly}::boolean, ${t.tokens}::text[])`),
+  );
+  const rows = await db.$queryRaw<Array<{
+    idx: number; unread: number; mentions: number; first_seq: number; last_relevant: number | null; last_counted: number;
+  }>>(Prisma.sql`
+    WITH t(idx, seen, head, worker_id, mention_only, tokens) AS (VALUES ${values}),
+    m AS (
+      SELECT n.seq::int AS seq, n.data
+      FROM nodes n
+      WHERE n.message_channel_id = ${channelId}
+        AND n.node_type = 'chat-message'
+        AND n.deleted_at IS NULL
+        AND n.seq > ${lo}
+        AND n.seq <= ${hi}
+    ),
+    j AS (
+      SELECT t.idx, t.mention_only, m.seq,
+        (jsonb_typeof(m.data -> 'mentions') = 'array' AND (m.data -> 'mentions') ?| t.tokens) AS mentioned
+      FROM m
+      JOIN t ON m.seq > t.seen AND m.seq <= t.head
+        AND COALESCE(m.data ->> 'authorWorkerId', '') <> t.worker_id
+    )
+    SELECT idx,
+      count(*)::int AS unread,
+      (count(*) FILTER (WHERE mentioned))::int AS mentions,
+      min(seq)::int AS first_seq,
+      (max(seq) FILTER (WHERE NOT mention_only OR mentioned))::int AS last_relevant,
+      max(seq)::int AS last_counted
+    FROM j
+    GROUP BY idx
+  `);
+  const last = await db.$queryRaw<Array<{ seq: number; loc: string }>>(Prisma.sql`
+    SELECT n.seq::int AS seq, n.loc
+    FROM nodes n
+    WHERE n.message_channel_id = ${channelId}
+      AND n.node_type = 'chat-message'
+      AND n.deleted_at IS NULL
+      AND n.seq > ${lo}
+      AND n.seq <= ${hi}
+    ORDER BY n.seq DESC, n.loc COLLATE "C" DESC
+    LIMIT 1
+  `);
+  let frontierLoc: string | null = null;
+  const frontierSeq = rows.reduce((m, r) => Math.max(m, r.last_counted), 0);
+  if (frontierSeq > 0) {
+    // The row walk only advanced its counted frontier on a row some target
+    // COUNTED; with duplicate seqs (pre-#919) the highest loc at that seq can be
+    // an uncounted own post, so pick the highest-loc row a target counted.
+    const found = await db.$queryRaw<Array<{ loc: string }>>(Prisma.sql`
+      WITH t(idx, seen, head, worker_id) AS (VALUES ${Prisma.join(
+        targets.map((t) => Prisma.sql`(${t.index}::int, ${t.seen}::int, ${t.head}::int, ${t.workerId}::text)`),
+      )})
+      SELECT n.loc FROM nodes n
+      WHERE n.message_channel_id = ${channelId}
+        AND n.node_type = 'chat-message'
+        AND n.deleted_at IS NULL
+        AND n.seq = ${frontierSeq}
+        AND EXISTS (
+          SELECT 1 FROM t
+          WHERE n.seq > t.seen AND n.seq <= t.head
+            AND COALESCE(n.data ->> 'authorWorkerId', '') <> t.worker_id
+        )
+      ORDER BY n.loc COLLATE "C" DESC
+      LIMIT 1
+    `);
+    frontierLoc = found[0]?.loc ?? null;
+  }
+  return {
+    perTarget: rows.map((r) => ({
+      index: r.idx, unread: r.unread, mentions: r.mentions, first: r.first_seq, lastRelevant: r.last_relevant,
+    })),
+    cursor: last[0] ?? null,
+    frontierLoc,
+  };
+}
+
 /** One bounded work step. `budget` is the GLOBAL decrypted-row allowance for
  * this request; plaintext channels complete in one aggregate visit without
  * charging the budget (their cost is one indexed query, not row decryption).
@@ -672,6 +809,7 @@ async function pagedScanStep(
   });
 
   let spent = 0;
+  let plainSpent = 0;
   let visits = 0;
   // Guard against a pathological loop when channels keep drifting away: a
   // full lap that only retires vanished channels still counts as visits.
@@ -690,6 +828,40 @@ async function pagedScanStep(
     const geometry = channelGeometry.get(k);
     if (!geometry) {
       state.cDone[k] = true;
+      continue;
+    }
+    if (!geometry.encrypted) {
+      // #1779 — plaintext Channel: aggregate a bounded seq window in SQL.
+      const plainWindow = budget * PLAINTEXT_SEQS_PER_BUDGET_UNIT;
+      const plainRequest = plainWindow * PLAINTEXT_REQUEST_WINDOWS;
+      if (plainSpent >= plainRequest) continue; // ceiling reached; resume next page
+      const list = targetsOfChannel.get(k) ?? [];
+      if (list.length === 0) { state.cDone[k] = true; continue; } // no target to count for
+      const lo = state.cCursorSeq[k] === -1 ? state.cMin[k] : Math.max(state.cCursorSeq[k], state.cMin[k]);
+      const hi = Math.min(state.cMax[k], lo + Math.min(plainWindow, plainRequest - plainSpent));
+      if (hi > lo) {
+        const aggregated = await aggregatePlaintextWindow(db, geometry.channelId, lo, hi, list.map((ti) => ({
+          index: ti, seen: targets[ti].seen, head: targets[ti].head, workerId: targets[ti].workerId,
+          mentionOnly: targets[ti].mentionOnly, tokens: mentionTokensByTarget[ti],
+        })));
+        for (const row of aggregated.perTarget) {
+          state.aUnread[row.index] += row.unread;
+          state.aMent[row.index] += row.mentions;
+          state.aFirst[row.index] = state.aFirst[row.index] === 0 ? row.first : Math.min(state.aFirst[row.index], row.first);
+          if (row.lastRelevant != null) state.aLast[row.index] = Math.max(state.aLast[row.index], row.lastRelevant);
+        }
+        // Keep the keyset cursor valid should this Channel turn encrypted
+        // mid-scan, and the counted frontier valid for the resume check.
+        state.cCursorSeq[k] = aggregated.cursor?.seq ?? hi;
+        state.cCursorLoc[k] = aggregated.cursor ? aggregated.cursor.loc.slice(geometry.locPrefix.length) : '';
+        if (aggregated.frontierLoc) state.cFrontNum[k] = aggregated.frontierLoc.slice(geometry.locPrefix.length);
+        plainSpent += hi - lo;
+      }
+      if (hi >= state.cMax[k]) {
+        state.cDone[k] = true;
+        list.sort((a, b) => targets[a].workerId.localeCompare(targets[b].workerId));
+        state.pending.push(...list);
+      }
       continue;
     }
     // Fairness quantum (#3051 finding 7): no single channel may consume the

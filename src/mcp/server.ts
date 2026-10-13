@@ -1,9 +1,12 @@
+import { registerAutomationPinTools } from './automationPinTools.js';
+import { chatByline } from './chatByline.js';
 import { boundSessionPrivacyFilter } from '../lib/auth/sessionPrivacy.js';
 import { createHmac, randomUUID } from 'crypto';
 // Spec 049 S4 — the protected-loc gate on hadron_update_node (no lock on that path).
 import { COMMENT_NODE_TYPE, assertNotCommentWrite, commentGovernedError, isCommentGovernedError } from '../lib/comments/index.js';
 import { commentHitInfo, commentHitLabel } from '../lib/comments/hitLabel.js';
 import { commentIdsAmong, hardDeleteThreadsOfTargets, softDeleteThreadsOfTargets } from '../lib/comments/lifecycle.js';
+import { decisionContainedError, decisionFamilyAmong, isDecisionFamilyRole, refuseDecisionFamily } from '../lib/decisions/index.js';
 import { assertLocWritable, LocProtectedError } from '../lib/protectedLoc.js';
 import {
   assertGovernedWrite,
@@ -45,7 +48,7 @@ import {
   UrnNotQualifiedError,
 } from '../lib/urn.js';
 import { composeWorkerUrn } from '../lib/entityRef/workerRef.js';
-import { publishActor } from '../lib/requestActor.js';
+import { currentActorAmbiguity, publishActor, publishAmbiguousActor, runInChildActorScope } from '../lib/requestActor.js';
 import {
   emitEntityUrnV2,
   emitNodeUrnV2,
@@ -58,6 +61,8 @@ import {
 import { portalUrlForUrn } from '../lib/portalUrl.js';
 import { userUrn } from '../lib/userHandle.js';
 import { registerCommentTools } from './commentTools.js';
+import { registerAgentTaskTools } from './agentTaskTools.js';
+import { registerTickerTools } from './tickerTools.js';
 import { openThreadCounts, type CommentCounts } from '../lib/comments/summary.js';
 import { nodeContentValidationState } from '../lib/nodeContentValidation.js';
 import { findLiveUrnAliasTargets, dedupeById } from '../lib/urnAlias.js';
@@ -116,6 +121,8 @@ import {
   type AppSelectionErrorEnvelope,
 } from './app-selection-errors.js';
 import { mcpLog } from './mcp-log.js';
+import { toolErrorResult, withToolErrorBoundary } from './toolError.js';
+import { textResult } from './textResult.js';
 import { tagsInputSchema } from './tagsInput.js';
 import { foreignIdentityScopedMemoryFilter } from '../lib/auth/memoryOwnership.js';
 
@@ -133,6 +140,7 @@ import {
   canReadMemory,
   canWriteToMemory,
   EXPLICIT_REF,
+  explainWriteRefusal,
   filterReadableMemoryIds,
   getAccessibleMemoryIds,
   getMemoryAccess,
@@ -268,10 +276,6 @@ import { Prisma, type PrismaClient, type SessionType, type NodeContentValidation
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-function textResult(text: string) {
-  return { content: [{ type: 'text' as const, text }] };
-}
 
 /** A duration as "Nd Nh", "Nh Nm" or "Nm", for a human reading a deadline. */
 function formatDuration(ms: number): string {
@@ -797,7 +801,7 @@ export async function addEdge(args: {
   }
 
   if (!(await canWriteToMemory(db, auth, sourceNode.memoryId, EXPLICIT_REF))) {
-    return { error: 'Write access denied for source memory.' };
+    return { error: `Write access denied for source memory.${await explainWriteRefusal(db, auth, sourceNode.memoryId)}` };
   }
 
   let targetNodeId: string;
@@ -851,7 +855,7 @@ export async function addEdge(args: {
       return `Source node not found: "${rawSource}".`;
     }
     if (!(await canWriteToMemory(tx as typeof db, auth, sourceNode.memoryId, EXPLICIT_REF))) {
-      return 'Write access denied for source memory.';
+      return `Write access denied for source memory.${await explainWriteRefusal(tx as typeof db, auth, sourceNode.memoryId)}`;
     }
     if (!(await canReadMemory(tx as typeof db, auth, target.memoryId, EXPLICIT_REF))) {
       return `Edge target not found: "${rawTarget}"`;
@@ -1897,6 +1901,212 @@ export function createMcpServerInstance(
     { name: 'hadron', version: HADRON_SERVER_VERSION },
     { capabilities: { tools: {} } },
   );
+
+  /**
+   * "Worker Name (session <id>)" for each session, in order — for refusals and
+   * receipts that must let the caller recognise which binding is theirs.
+   */
+  const describeBoundSessions = async (sessionIds: readonly string[]): Promise<string> => {
+    const rows = await db.session.findMany({
+      where: { id: { in: [...sessionIds] } },
+      select: { id: true, worker: { select: { name: true } }, agent: { select: { name: true } } },
+    });
+    const byId = new Map(rows.map((r) => [r.id, r]));
+    return sessionIds
+      .map((id) => {
+        const r = byId.get(id);
+        const who = r?.worker?.name ?? (r?.agent?.name ? `agent ${r.agent.name}` : r ? 'no worker (plain session)' : 'unknown');
+        return `${who} (session ${id})`;
+      })
+      .join(', ');
+  };
+
+  /**
+   * #1701 — the start-session receipt's warning when this bind left the
+   * connection bound to MORE than one actor. Best-effort: it runs after the
+   * session committed, so a failure costs the note, never the session id.
+   */
+  const sharedConnectionWarning = async (mcpSessionId: string, startedId: string): Promise<string> => {
+    try {
+      const live = await liveConnectionBindings(mcpSessionId, auth);
+      if (!connectionIsAmbiguous(mcpSessionId, live)) return '';
+      const others = live.filter((b) => b.sessionId !== startedId).map((b) => b.sessionId);
+      const already = others.length
+        ? `was already bound to ${await describeBoundSessions(others)}`
+        : 'has carried other callers whose sessions have since ended';
+      return (
+        `\n\n⚠ SHARED CONNECTION: this MCP connection ${already}. ` +
+        'Your host is carrying more than one chat session over it, so it can no longer tell which of them sends ' +
+        `a request. Pass session: "${startedId}" on EVERY write (node, edge, comment, task and object tools, ` +
+        'team chat, worklog). A write without it is refused SESSION_AMBIGUOUS rather than credited to the wrong ' +
+        'worker (#1701). Reads need nothing.'
+      );
+    } catch {
+      return '';
+    }
+  };
+
+  // ── #1701: the caller-session gate on every writing tool ─────────────────
+  //
+  // The connection binding (DAC) credits writes to the worker a connection is
+  // bound to. A host that multiplexes several chat sessions over ONE
+  // connection breaks that silently: every chat session's writes went to
+  // whichever worker bound last. So every tool that can write takes an
+  // optional `session` — the caller saying who it is, validated by the same
+  // shared gate as the X-Hadron-Session header — and, on a connection bound
+  // to more than one actor, a writing call that does not say is REFUSED
+  // instead of guessed at.
+  //
+  // FAIL-CLOSED by construction: a tool is gated unless it is listed below as
+  // one that writes nothing on the caller's behalf. A new tool therefore gets
+  // the gate without anyone remembering to add it; forgetting the other way
+  // only costs an ambiguous caller one `session` argument.
+  const ACTOR_NEUTRAL_TOOLS = new Set([
+    // Reads and searches.
+    'hadron_search', 'hadron_list_memories', 'hadron_server_info', 'hadron_list_apps', 'hadron_list_scopes',
+    'hadron_scope_explain', 'hadron_list_channels', 'hadron_register_list', 'hadron_find_nodes', 'hadron_get_node',
+    'hadron_get_nodes', 'hadron_get_next_node', 'hadron_list_nodes', 'hadron_get_object', 'hadron_find_objects',
+    'hadron_get_run', 'hadron_whoami', 'hadron_channel_read', 'hadron_team_chat_read', 'hadron_team_attention',
+    'hadron_team_attention_page', 'hadron_list_workers', 'hadron_get_worker', 'hadron_team_work_items',
+    'hadron_list_comments', 'hadron_get_comment', 'hadron_team_chat_mark_read',
+    // #1705 — agent-task reads (each takes its own optional session).
+    'hadron_task_get', 'hadron_task_list', 'hadron_team_events',
+    // #1706 — availability read (its own optional session).
+    'hadron_team_availability',
+    // #1707 — the team roster read (its own optional session).
+    'hadron_team_roster',
+    // #1747 — ticker reads (each takes its own optional session; wake settings enforces the write rule itself).
+    'hadron_ticker_list', 'hadron_worker_wake_settings', 'hadron_due_wakes',
+    // Per-connection selections and key handling: nothing authored.
+    'hadron_set_active_memory', 'hadron_set_active_app', 'hadron_set_active_org', 'hadron_set_active_scope',
+    'hadron_unlock_memory', 'hadron_lock_memory',
+    // Binding itself: it is how a caller SAYS who it is.
+    'hadron_start_session',
+  ]);
+  /** Tools whose own required argument names the caller's session under another name. */
+  const SESSION_ARGUMENT: Record<string, string> = { hadron_end_session: 'id' };
+  /**
+   * #1697 — tools with an explicit "write as the HUMAN" argument. `true`
+   * there (with no session named) answers the ambiguity question itself: the
+   * caller chose nobody, so the call proceeds with the actor cleared rather
+   * than refused SESSION_AMBIGUOUS on a shared connection. It picks no
+   * worker and changes no credential or session scope (`auth` is untouched).
+   * A session named alongside it is settled as usual, and the tool refuses
+   * the conflict.
+   */
+  const EXPLICIT_HUMAN_ARGUMENT: Record<string, string> = { hadron_channel_post: 'asMe' };
+  const SESSION_PARAM_DESCRIPTION =
+    'Your worker session id (from hadron_start_session or hadron_whoami). Attributes this write to that ' +
+    'session\'s worker. Optional on a connection bound to one worker; REQUIRED when the connection carries ' +
+    'more than one worker\'s session (several chat sessions on one host), where a write without it is ' +
+    'refused SESSION_AMBIGUOUS (#1701).';
+
+  /**
+   * Settle the actor for one tool call (#1701). A named session that validates
+   * becomes the actor; a named session that does not is refused when the
+   * argument is the gate's own, and left to the tool when the tool defines it
+   * (its handler already refuses an unusable session) — either way the call
+   * never writes as the connection's worker. With no session named, an
+   * ambiguous connection refuses. Returns a refusal, or null to proceed.
+   */
+  const settleCallerSession = async (
+    toolName: string,
+    named: unknown,
+    toolOwnsArgument: boolean,
+  ): Promise<{ isError: true; content: Array<{ type: 'text'; text: string }> } | null> => {
+    if (typeof named === 'string' && named.length > 0) {
+      const valid = await validateSessionBinding(db, auth, named);
+      if (valid) {
+        publishActor(valid.actor);
+        return null;
+      }
+      publishActor({ workerId: null, agentId: null });
+      if (toolOwnsArgument) return null;
+      return {
+        isError: true as const,
+        content: [{
+          type: 'text' as const,
+          text:
+            `[session_not_bound] ${toolName}: session "${named}" is not one of your open sessions that can ` +
+            'attribute a write (it may have ended, gone dormant, or belong to someone else). Nothing was ' +
+            'written. Check hadron_whoami for your open sessions, or omit session to write as yourself on a ' +
+            'connection that is not shared.',
+        }],
+      };
+    }
+    const ambiguous = currentActorAmbiguity();
+    if (!ambiguous) return null;
+    return {
+      isError: true as const,
+      content: [{
+        type: 'text' as const,
+        text:
+          `[session_ambiguous] ${toolName}: this MCP connection carries live sessions for ` +
+          `${await describeBoundSessions(ambiguous)}, and has carried more than one caller (a chat session ` +
+          'whose own session has ended may still be calling). Your host is sharing one connection between ' +
+          'several chat sessions, so the server cannot tell which of them sent this call, and will not guess. Nothing ' +
+          'was written. Pass session: "<your session id>" (hadron_whoami lists yours; it is the id ' +
+          'hadron_start_session returned to YOU), or end the sessions that are no longer in use (#1701).',
+      }],
+    };
+  };
+
+  {
+    type ToolCallback = (args: unknown, extra: unknown) => unknown;
+    const sdkRegisterTool = server.tool.bind(server) as (...args: unknown[]) => unknown;
+    // Every registered handler (including reads and caller-session settlement)
+    // gets this outer boundary before the SDK can stringify a database fault.
+    const registerTool = (...args: unknown[]) => {
+      const cbIndex = args.length - 1;
+      args[cbIndex] = withToolErrorBoundary(args[0] as string, args[cbIndex] as ToolCallback);
+      return sdkRegisterTool(...args);
+    };
+    (server as unknown as { tool: (...args: unknown[]) => unknown }).tool = (...args: unknown[]) => {
+      const name = args[0] as string;
+      if (ACTOR_NEUTRAL_TOOLS.has(name)) return registerTool(...args);
+      const cbIndex = args.length - 1;
+      const callback = args[cbIndex] as ToolCallback;
+      // The parameter shape is the first plain object after the name (a
+      // description string may precede it; annotations may follow it).
+      const shapeIndex = args.findIndex((a, i) => i > 0 && i < cbIndex && typeof a === 'object' && a !== null);
+      if (shapeIndex < 0) {
+        throw new Error(`#1701: tool ${name} is gated as a writer but declares no parameter shape to carry session`);
+      }
+      const argumentName = SESSION_ARGUMENT[name] ?? 'session';
+      const shape = args[shapeIndex] as Record<string, unknown>;
+      const toolOwnsArgument = argumentName in shape;
+      if (!toolOwnsArgument) {
+        args[shapeIndex] = { ...shape, session: z.string().optional().describe(SESSION_PARAM_DESCRIPTION) };
+      }
+      // Each call settles its actor in a scope of its OWN (PR #1702 review,
+      // Codex P1): the SDK dispatches a JSON-RPC batch's calls concurrently
+      // under the POST's one holder, so publishing into that holder let one
+      // call's named session stamp a sibling's write, or clear the ambiguity
+      // an unnamed sibling was about to be refused on.
+      args[cbIndex] = (input: unknown, extra: unknown) =>
+        runInChildActorScope(async () => {
+          const named = (input as Record<string, unknown> | undefined)?.[argumentName];
+          const humanArgument = EXPLICIT_HUMAN_ARGUMENT[name];
+          const asHuman = humanArgument !== undefined && (input as Record<string, unknown> | undefined)?.[humanArgument] === true;
+          if (asHuman && !(typeof named === 'string' && named.length > 0)) {
+            publishActor({ workerId: null, agentId: null });
+            return await callback(input, extra);
+          }
+          const refusal = await settleCallerSession(name, named, toolOwnsArgument);
+          if (refusal) return refusal;
+          // #1769: the gate's own argument is spent once the actor is settled.
+          // A tool that spreads its args into a write (the governed doors) would
+          // otherwise carry it into the node row. Only when the gate added it:
+          // a tool that declares the argument itself still receives it.
+          if (!toolOwnsArgument && input && typeof input === 'object') {
+            const { [argumentName]: _settled, ...rest } = input as Record<string, unknown>;
+            return await callback(rest, extra);
+          }
+          return await callback(input, extra);
+        });
+      return registerTool(...args);
+    };
+  }
 
   // Per-session state — this server instance is built once per MCP session
   // (see the createMcpServerInstance call sites), so this closure variable is
@@ -3054,6 +3264,11 @@ export function createMcpServerInstance(
   // ── #1609 — comment nodes (cor:dmo:110): thin over the GraphQL comment resolvers ──
   registerCommentTools(server, { db, auth });
 
+  // ── #1705 — agent tasks (cor:agt:050): thin over the GraphQL agent-task resolvers ──
+  registerAgentTaskTools(server, { db, auth });
+  registerTickerTools(server, { db, auth });
+  registerAutomationPinTools(server, { db, auth });
+
   // ── Spec 049 Phase 2 — scopes: list / create / update / delete / explain ──────
   //
   // Thin over the SAME resolvers GraphQL serves (`resolvers.scope.ts` →
@@ -3538,11 +3753,11 @@ export function createMcpServerInstance(
       try {
         validateLoc(loc);
       } catch (e) {
-        return textResult((e as Error).message);
+        return toolErrorResult(e, () => (e as Error).message, 'hadron_create_parent_node:validateLoc');
       }
 
       if (!(await canWriteToMemory(db, auth, memoryId, EXPLICIT_REF))) {
-        return textResult('Write access denied for this memory.');
+        return textResult(`Write access denied for this memory.${await explainWriteRefusal(db, auth, memoryId)}`);
       }
 
       const parentMemoryState = await db.memory.findUniqueOrThrow({
@@ -5307,7 +5522,7 @@ export function createMcpServerInstance(
       nodeType: z.string().optional().describe('Node classification (free-form; canonical values: abstract, chat, data, info (default), prompt, record, reference, system). Running is gated by isRunnable, independent of nodeType.'),
       objectType: z.string().optional().describe('#725 — collection this node belongs to (the domain-object discriminator, e.g. "competitor" / "insight"), orthogonal to nodeType. On a memory with a property schema, it MUST name a declared collection and the node\'s properties are validated against it; free-form on an unschema\'d memory. Omit for an ordinary node.'),
       isRunnable: z.boolean().optional().describe('#1201 — REFUSED on this tool if true: a write producing a runnable node must go through hadron_create_task, because authoring something the platform will EXECUTE is not the same act as writing prose. Accepted only as false/omitted (the default). Independent of nodeType — a runnable node may carry any nodeType.'),
-      role: z.string().optional().describe('#1201/#1322 — what this node is FOR (open string). NOT nodeType (the platform-kind axis) and NOT objectType (the collection discriminator); role does not affect default ranking, though hadron_find_nodes can filter by its dotted family. Most values are inert, but the GOVERNED families — "review" / "review.*" and "spec" / "spec.*" — are refused on this tool. Use hadron_create_review for a review; a spec is authored with the `hadron spec` CLI, its only authoring surface. The same applies to isRunnable — this tool cannot create a runnable node; use hadron_create_task.'),
+      role: z.string().optional().describe('#1201/#1322 — what this node is FOR (open string). NOT nodeType (the platform-kind axis) and NOT objectType (the collection discriminator); role does not affect default ranking, though hadron_find_nodes can filter by its dotted family. Most values are inert, but the GOVERNED families — "review" / "review.*", "spec" / "spec.*" and "decision" / "decision.*" — are refused on this tool. Use hadron_create_review for a review; a spec is authored with the `hadron spec` CLI, its only authoring surface; a decision is asked with the GraphQL askDecision operation (#1641). The same applies to isRunnable — this tool cannot create a runnable node; use hadron_create_task.'),
       description: z.string().optional().describe('Short description'),
       abstract: z.string().optional().describe('Paragraph-length summary (max 2000 chars). Opt-in on hadron_get_node via the contentScope parameter. (hadron_find_nodes preview surfacing of abstract ships in spec 031 US2 — not yet live.) Empty + whitespace-only values normalize to null. Spec 031.'),
       content: z.string().optional().describe('Markdown content'),
@@ -5350,11 +5565,11 @@ export function createMcpServerInstance(
       try {
         validateLoc(loc);
       } catch (e) {
-        return textResult((e as Error).message);
+        return toolErrorResult(e, () => (e as Error).message, 'hadron_create_node:validateLoc');
       }
 
       if (!(await canWriteToMemory(db, auth, memoryId, EXPLICIT_REF))) {
-        return textResult('Write access denied for this memory.');
+        return textResult(`Write access denied for this memory.${await explainWriteRefusal(db, auth, memoryId)}`);
       }
 
       // #1201 — the GOVERNED-KIND gate, on the state this create would PRODUCE.
@@ -5876,7 +6091,7 @@ export function createMcpServerInstance(
       nodeType: z.string().optional().describe('Node classification (free-form; canonical values: abstract, chat, data, info (default), prompt, record, reference, system). Changing nodeType does NOT change isRunnable or properties (e.g. claudeSkill) — a retyped runnable node stays runnable until you clear isRunnable yourself. Running is gated by isRunnable, not nodeType.'),
       objectType: z.string().optional().describe('#725 — collection this node belongs to (e.g. "competitor" / "insight"), orthogonal to nodeType. On a schema-governed memory it must name a declared collection and the resulting properties are validated against it. Omit to preserve.'),
       isRunnable: z.boolean().optional().describe('#1201 — REFUSED on this tool: making a node runnable, and RETIRING a runnable one, both go through hadron_update_task. Editing a node that is already runnable is refused here too, whatever this field says, because the result is still a runnable node. Omit to preserve. Independent of nodeType — retyping the node never changes this flag.'),
-      role: z.string().nullable().optional().describe('#1201/#1322 — what this node is FOR (open string). NOT nodeType and NOT objectType. Omit to preserve; null to clear. GOVERNED families ("review" / "review.*", "spec" / "spec.*") are refused here — use hadron_update_review, or the `hadron spec` CLI for a spec — and so is EDITING a node that already carries one — the gate reads the resulting state, not the change — because a governed node must not be rewritable through the generic surface.'),
+      role: z.string().nullable().optional().describe('#1201/#1322 — what this node is FOR (open string). NOT nodeType and NOT objectType. Omit to preserve; null to clear. GOVERNED families ("review" / "review.*", "spec" / "spec.*", "decision" / "decision.*") are refused here — use hadron_update_review, the `hadron spec` CLI for a spec, or the decision operations (amendDecision, …) for a decision — and so is EDITING a node that already carries one — the gate reads the resulting state, not the change — because a governed node must not be rewritable through the generic surface.'),
       description: z.string().optional().describe('New short description'),
       abstract: z.string().nullable().optional().describe('New paragraph-length summary (max 2000 chars). Pass `null` to clear; omit to preserve. Empty + whitespace-only normalize to null. Surfaced on hadron_get_node via contentScope; hadron_find_nodes preview surfacing ships in spec 031 US2. STALENESS: the abstract is fingerprinted against the content AS OF THIS CALL, so passing `abstract` and `content` TOGETHER keeps them in sync and needs no ordering. If you instead change `content` in a LATER call, this abstract is marked `abstract-stale` on read until you re-save it (re-sending the identical text is enough) or assert `abstractStillAccurate`. It also arms for an abstract that was NEVER fingerprinted — one saved against an empty node, where a body arrived later (#1128). Read the ABSENCE of the marker narrowly: it means "checked against this exact content" ONLY on a read that could have shown it — `contentScope` of `abstract` or `all`, on a memory that is unencrypted or unlocked. Under the default `content` scope, or on a locked memory, no marker is emitted either way and its absence says nothing at all. Spec 031/032.'),
       content: z.string().nullable().optional().describe('New markdown content. Pass `null` to clear; omit to preserve. Spec 032 widened the schema from string-only to allow null per the consistent partial-update convention; clearing content interacts with abstractOriginHash maintenance (FR-006/FR-007). Changing content WITHOUT also passing `abstract` arms the `abstract-stale` marker on this node — that is intended (the abstract was written against the old content and may no longer describe it). Pass both together, or assert `abstractStillAccurate` if you have re-read the abstract and it survives the edit.'),
@@ -5919,7 +6134,7 @@ export function createMcpServerInstance(
       // a membership oracle (Gemini review). Gate on the resolved memory.id
       // first — matches hadron_create_node's auth-first ordering.
       if (!(await canWriteToMemory(db, auth, memory.id, EXPLICIT_REF))) {
-        return textResult('Write access denied for this memory.');
+        return textResult(`Write access denied for this memory.${await explainWriteRefusal(db, auth, memory.id)}`);
       }
       // Spec 049 S4: an in-place update takes no lock, so the gate is explicit.
       try {
@@ -6351,11 +6566,20 @@ export function createMcpServerInstance(
   async function callGovernedDoor(
     kind: 'task' | 'review',
     mode: 'create' | 'update',
+    shape: Record<string, unknown>,
     args: Record<string, unknown>,
   ): Promise<{ content: { type: 'text'; text: string }[] }> {
     const entry = GOVERNED_KINDS.find((e) => e.kind === kind)!;
     const doorName = entry.doors[mode];
-    const { urn: rawUrn, ...fields } = args as { urn: string } & Record<string, unknown>;
+    const { urn: rawUrn, ...rest } = args as { urn: string } & Record<string, unknown>;
+    // #1769: these doors hand `fields` to the resolver directly, so GraphQL's
+    // input type never filters them. Admit only what this tool advertises, so
+    // a stray key (the settlement `session`, or one that happens to match a
+    // real node column) is dropped instead of written or crashing the upsert.
+    const fields: Record<string, unknown> = {};
+    for (const key of Object.keys(shape)) {
+      if (key !== 'urn' && key !== 'session' && key in rest) fields[key] = rest[key];
+    }
     let memoryUrn: string;
     let loc: string;
     let fragment: string | undefined;
@@ -6363,7 +6587,7 @@ export function createMcpServerInstance(
       assertFullyQualifiedUrn(rawUrn, 'node');
       ({ memoryUrn, loc, fragment } = splitNodeUrn(rawUrn));
     } catch (e) {
-      return textResult((e as Error).message);
+      return toolErrorResult(e, () => (e as Error).message, `hadron_${mode}_${kind}:parseUrn`);
     }
     const fragRefusal = nodeFragmentRefusal(rawUrn, fragment);
     if (fragRefusal) return textResult(fragRefusal);
@@ -6375,7 +6599,7 @@ export function createMcpServerInstance(
     try {
       validateLoc(loc);
     } catch (e) {
-      return textResult((e as Error).message);
+      return toolErrorResult(e, () => (e as Error).message, `hadron_${mode}_${kind}:validateLoc`);
     }
 
     // `name` is optional in the shared arg set because an UPDATE preserves it,
@@ -6427,8 +6651,10 @@ export function createMcpServerInstance(
       );
       return textResult(`${kind} node ${mode === 'create' ? 'created' : 'updated'}: ${rawUrn} (id: ${node.id})`);
     } catch (e) {
-      const code = (e as { extensions?: { code?: string } }).extensions?.code;
-      return textResult(code ? `[${String(code).toLowerCase()}] ${(e as Error).message}` : `Error: ${(e as Error).message}`);
+      return toolErrorResult(e, () => {
+        const code = (e as { extensions?: { code?: string } }).extensions?.code;
+        return code ? `[${String(code).toLowerCase()}] ${(e as Error).message}` : `Error: ${(e as Error).message}`;
+      }, `hadron_${mode}_${kind}:resolver`);
     }
   }
 
@@ -6436,7 +6662,7 @@ export function createMcpServerInstance(
     'hadron_create_task',
     'Create a RUNNABLE node — a task `hadron_run_task` can execute. This is the only way to author one: `hadron_create_node` refuses a write that would produce a runnable node, because authoring something the platform will EXECUTE is not the same act as writing prose. The runnable flag is set by this tool, so you do not pass it. Use it when you are deliberately writing a procedure for an agent to run; for ordinary notes, docs or findings use hadron_create_node.',
     governedDoorArgs,
-    async (args) => callGovernedDoor('task', 'create', args),
+    async (args) => callGovernedDoor('task', 'create', governedDoorArgs, args),
   );
 
   /**
@@ -6483,21 +6709,21 @@ export function createMcpServerInstance(
     'hadron_update_task',
     'Edit an existing RUNNABLE node. Needed because `hadron_update_node` refuses ANY edit whose result is still a runnable node — including one that changes only prose — so that a procedure the platform executes cannot be rewritten through the generic surface. Omitted fields are preserved. Pass isRunnable: false to RETIRE the task.',
     taskUpdateArgs,
-    async (args) => callGovernedDoor('task', 'update', args),
+    async (args) => callGovernedDoor('task', 'update', taskUpdateArgs, args),
   );
 
   server.tool(
     'hadron_create_review',
     'Create a REVIEW node — a check on work performed. Reviews are not coding-specific: any work can be reviewed, and a review may be a SAFETY check, which is why removing or rewriting one is treated as an attack and why `hadron_create_node` refuses to author one. The review role is set by this tool: "review" by default, or pass a dotted review sub-role such as "review.security". Reach for this when recording what must be verified about a piece of work, not when writing up the work itself.',
     reviewCreateArgs,
-    async (args) => callGovernedDoor('review', 'create', args),
+    async (args) => callGovernedDoor('review', 'create', reviewCreateArgs, args),
   );
 
   server.tool(
     'hadron_update_review',
     'Edit an existing REVIEW node. Needed because `hadron_update_node` refuses any edit whose result is still a review node — a safety check must not be rewritable through the generic surface. Omitted fields are preserved. Pass role: null to RETIRE the node from the review kind.',
     reviewUpdateArgs,
-    async (args) => callGovernedDoor('review', 'update', args),
+    async (args) => callGovernedDoor('review', 'update', reviewUpdateArgs, args),
   );
 
   // ── hadron_update_node_data ───────────────────────────────────────────
@@ -6546,7 +6772,7 @@ export function createMcpServerInstance(
         const urn = await nodeUrn(node.loc, node.memoryId);
         return textResult(`Node data merged: ${urn} (id: ${node.id})`);
       } catch (e) {
-        return textResult(`Error: ${e instanceof Error ? e.message : 'update failed'}`);
+        return toolErrorResult(e, () => `Error: ${e instanceof Error ? e.message : 'update failed'}`, 'hadron_update_node_data:resolver');
       }
     },
   );
@@ -6590,7 +6816,7 @@ export function createMcpServerInstance(
         );
         return textResult(JSON.stringify(obj, null, 2));
       } catch (e) {
-        return textResult(`Error: ${e instanceof Error ? e.message : 'create failed'}`);
+        return toolErrorResult(e, () => `Error: ${e instanceof Error ? e.message : 'create failed'}`, 'hadron_create_object:resolver');
       }
     },
   );
@@ -6606,7 +6832,7 @@ export function createMcpServerInstance(
         const obj = await resolvers.Query.object({}, { ref }, objectCtx());
         return obj ? textResult(JSON.stringify(obj, null, 2)) : textResult('Object not found.');
       } catch (e) {
-        return textResult(`Error: ${e instanceof Error ? e.message : 'read failed'}`);
+        return toolErrorResult(e, () => `Error: ${e instanceof Error ? e.message : 'read failed'}`, 'hadron_get_object:resolver');
       }
     },
   );
@@ -6624,7 +6850,7 @@ export function createMcpServerInstance(
         const obj = await resolvers.Mutation.updateObject({}, { ref, fields: fields ?? {}, reason }, objectCtx());
         return textResult(JSON.stringify(obj, null, 2));
       } catch (e) {
-        return textResult(`Error: ${e instanceof Error ? e.message : 'update failed'}`);
+        return toolErrorResult(e, () => `Error: ${e instanceof Error ? e.message : 'update failed'}`, 'hadron_update_object:resolver');
       }
     },
   );
@@ -6641,7 +6867,7 @@ export function createMcpServerInstance(
         await resolvers.Mutation.deleteObject({}, { ref, hard }, objectCtx());
         return textResult(`Object deleted${hard ? ' (hard)' : ''}: ${ref}`);
       } catch (e) {
-        return textResult(`Error: ${e instanceof Error ? e.message : 'delete failed'}`);
+        return toolErrorResult(e, () => `Error: ${e instanceof Error ? e.message : 'delete failed'}`, 'hadron_delete_object:resolver');
       }
     },
   );
@@ -6668,7 +6894,7 @@ export function createMcpServerInstance(
         // Return { objects, total } so agents can page deterministically with limit/offset.
         return textResult(JSON.stringify({ objects: result.objects, total: result.total }, null, 2));
       } catch (e) {
-        return textResult(`Error: ${e instanceof Error ? e.message : 'query failed'}`);
+        return toolErrorResult(e, () => `Error: ${e instanceof Error ? e.message : 'query failed'}`, 'hadron_find_objects:resolver');
       }
     },
   );
@@ -6758,7 +6984,7 @@ export function createMcpServerInstance(
           lines.length ? `${header}\n${coverage}\n${lines.join('\n')}` : `${header}\n${coverage}`,
         );
       } catch (e) {
-        return textResult(`Error: ${e instanceof Error ? e.message : 'search-and-replace failed'}`);
+        return toolErrorResult(e, () => `Error: ${e instanceof Error ? e.message : 'search-and-replace failed'}`, 'hadron_replace_text:resolver');
       }
     },
   );
@@ -6951,6 +7177,7 @@ Refuses if the node has descendants under its URN prefix unless \`recursive: tru
         | { refused: 'access' }
         | { refused: 'mintedSpec'; message: string }
         | { refused: 'comment'; message: string }
+        | { refused: 'decision'; message: string }
         | { ok: true; descendantCount: number };
 
       // #449 — source memories whose pending-edge count a hard delete changed.
@@ -7021,6 +7248,11 @@ Refuses if the node has descendants under its URN prefix unless \`recursive: tru
         if ((await commentIdsAmong(tx, affectedIds)).length > 0) {
           return { refused: 'comment', message: commentGovernedError('delete', 'removes').message };
         }
+        // #1641 §3.2 — a decision is withdrawn, never deleted.
+        const decisions = await decisionFamilyAmong(tx, affectedIds);
+        if (decisions.length > 0) {
+          return { refused: 'decision', message: decisionContainedError('Deleting this node', decisions.map((d) => d.loc)).message };
+        }
         if (hard) await hardDeleteThreadsOfTargets(tx, affectedIds);
         else await softDeleteThreadsOfTargets(tx, affectedIds, { deletedBy: auth.userId ?? auth.clientId ?? null, at: new Date() });
 
@@ -7075,7 +7307,9 @@ Refuses if the node has descendants under its URN prefix unless \`recursive: tru
         }
 
         return { ok: true, descendantCount };
-      });
+      // #1619 — the 5 s default expires on a large cascade. Same accepted pool/lock
+      // trade-off as GraphQL deleteNode (see the comment there).
+      }, { timeout: 120_000 });
       await reconcilePendingEdgeCounts(db, pendingSourceMemories).catch((err) =>
         console.warn('[hadron_delete_node] pending-edge count reconcile failed (the periodic repair will fix it):', err),
       );
@@ -7092,6 +7326,9 @@ Refuses if the node has descendants under its URN prefix unless \`recursive: tru
         }
         if (result.refused === 'comment') {
           return textResult(`[role_governed] ${result.message}`);
+        }
+        if (result.refused === 'decision') {
+          return textResult(`[decision_contained] ${result.message}`);
         }
         if (result.refused === 'descendants') {
           const mode = hard ? 'hard delete' : 'soft delete';
@@ -7200,10 +7437,10 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       if (!existing) return textResult(`Node "${rawFrom}" not found.`);
 
       if (!(await canWriteToMemory(db, auth, fromMemory.id, EXPLICIT_REF))) {
-        return textResult('Write access denied for source memory.');
+        return textResult(`Write access denied for source memory.${await explainWriteRefusal(db, auth, fromMemory.id)}`);
       }
       if (toMemory.id !== fromMemory.id && !(await canWriteToMemory(db, auth, toMemory.id, EXPLICIT_REF))) {
-        return textResult('Write access denied for target memory.');
+        return textResult(`Write access denied for target memory.${await explainWriteRefusal(db, auth, toMemory.id)}`);
       }
 
       const isSameSlot = toLoc === fromLoc && toMemory.id === fromMemory.id;
@@ -7302,6 +7539,9 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
               }
               await ensureCurrentNodeRevisionInTransaction(tx, existing.id, { expectedMemoryId: fromMemory.id });
               const locked = await tx.node.findUniqueOrThrow({ where: { id: existing.id } });
+              // #1641 — a decision's name is its rendered `<code>: <title>`,
+              // which its approval covers; only the decision doors change it.
+              if (isDecisionFamilyRole(locked.role)) throw decisionContainedError('Renaming this node', [locked.loc]);
               await createNodeRevision(tx, {
                 id: generateId(),
                 ...buildNodeRevisionSnapshot(locked, editorFromAuth(auth), {
@@ -7385,6 +7625,8 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
             // whole transaction back.
             if (existingTarget) {
               await assertNoMintedSpecRemoval(tx, toMemory.id, [existingTarget.id], 'overwrite');
+              // #1641 §3.2 — evicting a decision would delete it.
+              await refuseDecisionFamily(tx, [existingTarget.id], 'Overwriting this node');
             }
           }
 
@@ -8190,7 +8432,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
 
   server.tool(
     'hadron_start_session',
-    'Start a session — and when workerRef is passed, a WORKER SESSION: the binding that makes work attributable to that named teammate. Two different things are called a session: the WORKER SESSION is this binding, held server-side; your CHAT SESSION is the conversation you are in — the Claude Desktop window, the Claude Code session, the IDE chat. ENDING YOUR CHAT SESSION DOES NOT END A WORKER SESSION (#1034): closing, archiving or losing the conversation leaves this binding open until hadron_end_session. Since #1114 the reaper no longer ends a session for inactivity — silence is not evidence of abandonment. What DOES change while it sits idle is how it is DESCRIBED: liveness is derived from recent driving, so a session that remains untouched past its idle window reads as not-live and stops blocking a bind, WITHOUT being ended and with its handoff still unwritten rather than lost. That changes no HOLD: a human-held name stays held until explicit release, so only its holder can bind it again. All subsequent tool calls can reference this session ID for attribution. A worker or agent session also BINDS THIS MCP CONNECTION (DAC): every later node write on it records that Worker / Agent as its author beside you (Node.createdByWorker / updatedByWorker), checked afresh on each call, so ending the session stops it at once; a reconnect starts unbound until you start or name a session again. Starting a session PINS its App as this session\'s active App, so no hadron_set_active_app is needed afterwards; if the MCP connection is later re-established (which happens transparently), pass the session id back to the team tools to restore that App context. Pass workerRef — the worker\'s NAME ("Iris", resolved within the active App), its id, or its URN (hrn:worker:<root>:<app-slug>:<slug>) — to work AS that named casting, which is required for worker-attributed team chat posts and worklog records. An id or URN workerRef names its own App, so it needs no App selected first; a bare NAME does, since a name is unique only within an App. On success the worker\'s resolved BOOT BRIEFING comes back with the session: adopt it for the rest of this stint, and never cache or copy it — it is rendered live from the role agent\'s prompt template, so a copy goes stale silently. Binding a worker someone is actively DRIVING refuses WORKER_TAKEN (#1114: an OPEN session is not necessarily a live one — a session whose most recent activity is outside its idle window is not being driven, so that session does not refuse) with who last drove it and when (informed takeover, cor:agt:020:03) — note an open worker session does not by itself mean someone is at the keyboard, since it outlives the chat session that started it; retry with force: true ONLY after surfacing that to the user and getting an explicit override. Binding a worker ENDS your own other open sessions on that same worker (#1617), the lapsed ones and any a force displaces: they are marked "superseded by session <new id>" and end WITHOUT a handoff, so write the handoff with hadron_end_session first if one is owed. Do not bind a second session to recover from a context compaction; recover the existing one with hadron_whoami. A LAPSED session of yours does not need a rebind at all: if you hold the name and nobody else is driving the worker, your next team-chat post, read or mark-read through it resumes it.',
+    'Start a session — and when workerRef is passed, a WORKER SESSION: the binding that makes work attributable to that named teammate. Two different things are called a session: the WORKER SESSION is this binding, held server-side; your CHAT SESSION is the conversation you are in — the Claude Desktop window, the Claude Code session, the IDE chat. ENDING YOUR CHAT SESSION DOES NOT END A WORKER SESSION (#1034): closing, archiving or losing the conversation leaves this binding open until hadron_end_session. Since #1114 the reaper no longer ends a session for inactivity — silence is not evidence of abandonment. What DOES change while it sits idle is how it is DESCRIBED: liveness is derived from recent driving, so a session that remains untouched past its idle window reads as not-live and stops blocking a bind, WITHOUT being ended and with its handoff still unwritten rather than lost. That changes no HOLD: a human-held name stays held until explicit release, so only its holder can bind it again. All subsequent tool calls can reference this session ID for attribution. A worker or agent session also BINDS THIS MCP CONNECTION (DAC): every later node write on it records that Worker / Agent as its author beside you (Node.createdByWorker / updatedByWorker), checked afresh on each call, so ending the session stops it at once; a reconnect starts unbound until you start or name a session again. A host may carry SEVERAL chat sessions over one connection (#1701): binding a second worker there (or starting a plain session) does not displace the first, and once more than one worker has been bound on the connection (a plain session counting as a binding to no worker), even one after another, the server cannot tell which chat session is calling, so every writing tool takes an optional `session` argument — pass the id this call returned on each write, or the write is refused SESSION_AMBIGUOUS rather than credited to the wrong worker. The receipt warns you when this bind made the connection shared. Starting a session PINS its App as this session\'s active App, so no hadron_set_active_app is needed afterwards; if the MCP connection is later re-established (which happens transparently), pass the session id back to the team tools to restore that App context. Pass workerRef — the worker\'s NAME ("Iris", resolved within the active App), its id, or its URN (hrn:worker:<root>:<app-slug>:<slug>) — to work AS that named casting, which is required for worker-attributed team chat posts and worklog records. An id or URN workerRef names its own App, so it needs no App selected first; a bare NAME does, since a name is unique only within an App. On success the worker\'s resolved BOOT BRIEFING comes back with the session: adopt it for the rest of this stint, and never cache or copy it — it is rendered live from the role agent\'s prompt template, so a copy goes stale silently. Binding a worker someone is actively DRIVING refuses WORKER_TAKEN (#1114: an OPEN session is not necessarily a live one — a session whose most recent activity is outside its idle window is not being driven, so that session does not refuse) with who last drove it and when (informed takeover, cor:agt:020:03) — note an open worker session does not by itself mean someone is at the keyboard, since it outlives the chat session that started it; retry with force: true ONLY after surfacing that to the user and getting an explicit override. Binding a worker ENDS your own other open sessions on that same worker (#1617), the lapsed ones and any a force displaces: they are marked "superseded by session <new id>" and end WITHOUT a handoff, so write the handoff with hadron_end_session first if one is owed. Do not bind a second session to recover from a context compaction; recover the existing one with hadron_whoami. A LAPSED session of yours does not need a rebind at all: if you hold the name and nobody else is driving the worker, your next team-chat post, read or mark-read through it resumes it.',
     {
       description: z.string().describe("What this session is about"),
       type: z.string().optional().describe('Session type: DEVELOPER, CHATBOT, AUTOMATION, EDGE'),
@@ -8200,12 +8442,14 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       customerId: z.string().optional().describe('Customer ID for chatbot sessions'),
       language: z.string().optional().describe('Programming language'),
       llmModel: z.string().optional().describe('LLM model being used'),
+      family: z.string().optional().describe('The model family this session runs as (cor:agt:060:04), e.g. claude, codex or glm. Omit to derive it from llmModel; a session nothing classifies gets no family, and its worker is not matched to queued tasks until one is given. A matching input only, never authorization.'),
       parentSessionId: z.string().optional().describe('Parent session ID'),
       prevSessionId: z.string().optional().describe('Previous session ID'),
       workerRef: z.string().optional().describe('The Worker (named casting) this session works as. Three forms resolve: the worker\'s NAME ("Iris" — unique within the App, case-insensitive, and what a human will say), its URN (hrn:worker:<root>:<app-slug>:<slug>), or its bare id. Prefer the name for a human-driven pickup; the URN when addressing a worker across App context. Must belong to this App; stamps the session\'s agentId from the casting and returns the worker\'s boot briefing.'),
+      reportsTo: z.string().optional().describe('#1726 — the worker this worker reports to (its name in this App, URN or id), set in the same step as the bind, as a spawn brief would. Sets it only when the worker reports to nobody, or already to that worker; naming a different one refuses the bind (WORKER_REPORTS_TO_HELD) unless you manage the App. Omit to leave it unchanged.'),
       force: z.boolean().optional().describe('Take over a WORKER_TAKEN worker — one someone drove RECENTLY (#1114: a merely-open session no longer refuses, so if you are seeing this refusal the session is live rather than just unclosed). That open session may be someone else\'s live work, or your own left behind by a chat session that ended without ending it (ending a chat session never ends a worker session); the server cannot tell which, so neither should you assume. Use only on the user\'s explicit override, after showing who last drove it.'),
     },
-    async ({ description, type, repo, branch, prNumber, customerId, language, llmModel, parentSessionId, prevSessionId, workerRef, force }) => {
+    async ({ description, type, repo, branch, prNumber, customerId, language, llmModel, family, parentSessionId, prevSessionId, workerRef, reportsTo, force }) => {
       // Spec 026 / D-2026-05-21-003 strict tool: session-start needs App
       // context to attribute the session. Errors with typed [no_active_app]
       // envelope for multi-App OAuth callers without selection.
@@ -8265,9 +8509,11 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
               customerId: customerId ?? undefined,
               language: language ?? undefined,
               llmModel: llmModel ?? undefined,
+              family: family ?? undefined,
               parentSessionId: parentSessionId ?? undefined,
               prevSessionId: prevSessionId ?? undefined,
               workerRef: workerRef ?? undefined,
+              reportsTo: reportsTo ?? undefined,
               force: force ?? undefined,
             },
           },
@@ -8314,12 +8560,29 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         // DAC: bind this MCP connection to the new session, so every later
         // write on it is attributed to its Worker / Agent (#1610). Only a
         // session with someone behind it; plain sessions attribute nothing.
+        //
+        // #1701: the binding is APPENDED to the connection's list, never
+        // swapped in for the previous one — a host may be multiplexing
+        // several chat sessions over this one connection, and the previous
+        // binder may be another of them, still at work. When that leaves the
+        // connection bound to more than one actor, the receipt says so, since
+        // it is the one moment the caller is certain to read.
+        //
+        // A PLAIN session (no worker, no agent) is appended too, as a binding
+        // whose actor is nobody (#1702 QA, Cody P2). It used to REPLACE the
+        // connection's bindings (#1665 review), which on a shared connection
+        // let one chat session silently strip every other chat session's
+        // worker: their unnamed writes then landed as the human alone. A
+        // plain start does still stop a previous worker's credit, as #1665
+        // wanted, but by making the connection ambiguous, so the next
+        // unnamed write is refused rather than quietly re-attributed.
+        let sharedConnectionNote = '';
         {
           const sid = getSessionId();
-          // A plain session REPLACES an earlier binding: later writes are
-          // the user's own again, not the previous worker's (#1665 review).
-          if (sid && (session.workerId || session.agentId)) workerSessionByMcpSession.set(sid, session.id);
-          else if (sid) workerSessionByMcpSession.delete(sid);
+          if (sid) {
+            rememberConnectionBinding(sid, session.id, { workerId: session.workerId ?? null, agentId: session.agentId ?? null });
+            sharedConnectionNote = await sharedConnectionWarning(sid, session.id);
+          }
         }
 
         // #990: when a worker is bound, ALWAYS return its resolved boot
@@ -8394,7 +8657,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
               '\n\n(The boot briefing could not be rendered just now — the session IS started and bound. Retry with hadron_get_node on the role agent, or start again after ending this session; do NOT retry hadron_start_session, which would refuse WORKER_TAKEN.)';
           }
         }
-        return textResult(`Session started: ${session.id}\n> ${description}${workerLine}`);
+        return textResult(`Session started: ${session.id}\n> ${description}${sharedConnectionNote}${workerLine}`);
       } catch (e) {
         return textResult(`Error: ${e instanceof Error ? e.message : 'session start failed'}`);
       }
@@ -8775,7 +9038,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
 
   server.tool(
     'hadron_cast_worker',
-    'Cast a Worker (#974, spec cor:agt:020 / cor:dmo:050:11): create a named AI team member — the casting of an agent already installed in the team App under a name ("Iris"). The agent carries the persona dressing (personaRole + the systemPrompt template with {{name}}/{{role}} placeholders); the Worker is the local named identity that does attributable work. Pass agent to cast a specific installed agent, or role to pick the single installed agent with that personaRole. The name is REQUIRED (#1050): a worker\'s name is permanent within the App, so it is chosen, never derived — a nameless cast refuses WORKER_NAME_REQUIRED rather than inventing a permanent identifier nobody picked. Names are unique per App, case-insensitively, FOREVER (two Apps may each have an Iris; a name already taken here — including a retired worker\'s — refuses with WORKER_NAME_TAKEN). Returns the worker\'s id, name, URN (hrn:worker:<root>:<app-slug>:<slug>, #991) and resolved prompt — print the prompt as the worker\'s boot briefing, and pass the URN (or the id) as workerRef when starting sessions. Casting is a one-time mint, so record the URN: it is the ref that gets you back to this worker later.',
+    'Cast a Worker (#974, spec cor:agt:020 / cor:dmo:050:11): create a named AI team member — the casting of an agent already installed in the team App under a name ("Iris"). The agent carries the persona dressing (personaRole + the systemPrompt template with {{name}}/{{role}} placeholders); the Worker is the local named identity that does attributable work. Pass agent to cast a specific installed agent, or role to pick the single installed agent with that personaRole. The name is REQUIRED (#1050): a worker\'s name is permanent within the App, so it is chosen, never derived — a nameless cast refuses WORKER_NAME_REQUIRED rather than inventing a permanent identifier nobody picked. Names are unique per App, case-insensitively, FOREVER (two Apps may each have an Iris; a name already taken here — including a retired worker\'s — refuses with WORKER_NAME_TAKEN). NFKC-normalized Unicode 16 UTS #39 skeletons (original-case and caseless) must also be distinct here, retired workers included: WORKER_NAME_CONFUSABLE names the colliding worker; display spelling is preserved. Returns the worker\'s id, name, URN (hrn:worker:<root>:<app-slug>:<slug>, #991) and resolved prompt — print the prompt as the worker\'s boot briefing, and pass the URN (or the id) as workerRef when starting sessions. Casting is a one-time mint, so record the URN: it is the ref that gets you back to this worker later.',
     {
       role: z.string().optional().describe('The role ("backend-engineer") — picks the installed agent by its personaRole when agent is omitted, and becomes the casting\'s role label. Not validated against defined roles: cast lists are ergonomics, never a gate (cor:agt:020:00).'),
       name: z.string().optional().describe('The worker\'s name — REQUIRED in effect (#1050): omitting it refuses WORKER_NAME_REQUIRED rather than deriving one, because a name is permanent within the App. Optional in the schema only so that refusal carries its reason instead of arriving as a bare validation error.'),
@@ -8840,6 +9103,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
             `\nBoot briefing:\n\n${prompt ?? ''}`,
         );
       } catch (e) {
+        if (e instanceof ScopeGraphQLError) return textResult(`Error: [${String(e.extensions?.code ?? 'ERROR')}] ${e.message}`);
         return textResult(`Error: ${e instanceof Error ? e.message : 'worker casting failed'}`);
       }
     },
@@ -8934,7 +9198,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       const lines = page.items.map((m) => {
         const reply = m.replyToSeq != null ? ` (reply to #${m.replyToSeq})` : '';
         const cross = m.authorAppId ? ' [cross-App]' : '';
-        return `#${m.seq} [${m.authorName ?? 'unknown'}]${cross} ${m.at.toISOString()}${reply}:\n${m.body}`;
+        return `#${m.seq} ${chatByline(m)}${cross} ${m.at.toISOString()}${reply}:\n${m.body}`;
       });
       return textResult(`${page.total} message(s) total, showing ${page.items.length}:\n\n${lines.join('\n\n')}`);
     } catch (e) {
@@ -9208,7 +9472,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         const cross = message.authorAppId ? ' [cross-App]' : '';
         const mentionLine = message.mentions.length ? `\nmentions: ${message.mentions.map((mention) => `@${mention}`).join(', ')}` : '';
         routed.push(
-          `#${message.seq} [${message.authorName ?? 'unknown'}]${cross} ${message.at.toISOString()}${reply}:\n${message.body}` +
+          `#${message.seq} ${chatByline(message)}${cross} ${message.at.toISOString()}${reply}:\n${message.body}` +
           `${mentionLine}\nroute to: ${routes.map((route) => route.urn).join(', ')}`,
         );
       }
@@ -9240,18 +9504,63 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     }
   };
 
+  /**
+   * #1697 — the worker session this request already speaks for, if any: the
+   * validated X-Hadron-Session header, else the connection's one live binding
+   * (DAC, #1610). Null when neither names a Worker. An ambiguous connection
+   * never reaches here unnamed: the #1701 gate refuses it first.
+   */
+  const boundWorkerSession = async (): Promise<string | null> => {
+    if (auth.sessionId) {
+      const valid = await validateSessionBinding(db, auth, auth.sessionId);
+      return valid?.actor.workerId ? valid.sessionId : null;
+    }
+    const mcpSessionId = getSessionId();
+    if (!mcpSessionId) return null;
+    const live = await liveConnectionBindings(mcpSessionId, auth);
+    if (!live.length || connectionIsAmbiguous(mcpSessionId, live)) return null;
+    const bound = live[live.length - 1];
+    return bound.actor.workerId ? bound.sessionId : null;
+  };
+
   server.tool(
     'hadron_channel_post',
-    'Post a message into a Channel by id or ADDRESS — the chat-root URN hadron_list_channels prints (spec 049 — Channels are the durable, server-ordered streams hadron_list_channels shows; every App\'s default `team` Channel is what hadron_team_chat_post writes). Same contract as hadron_team_chat_post: mentions extracted server-side, replyToSeq wires a reply, session posts AS that session\'s Worker. Item J: a Worker of ANOTHER App authors here only when you (its driver) may write the Channel\'s host memory — the post is then marked cross-App. A Channel you may not read is [channel_not_found].',
+    'Post a message into a Channel by id or ADDRESS — the chat-root URN hadron_list_channels prints (spec 049 — Channels are the durable, server-ordered streams hadron_list_channels shows; every App\'s default `team` Channel is what hadron_team_chat_post writes). Same contract as hadron_team_chat_post: mentions extracted server-side, replyToSeq wires a reply, session posts AS that session\'s Worker. AUTHORSHIP IS EXPLICIT (#1697, parity with the CLI\'s `channel post --session | --as-me`): with no session, a connection bound to one worker session (hadron_start_session) posts as that Worker; otherwise pass asMe: true to post as yourself, or the post is refused [authorship_required] — never silently recorded under your name. Item J: a Worker of ANOTHER App authors here only when you (its driver) may write the Channel\'s host memory — the post is then marked cross-App. A Channel you may not read is [channel_not_found].',
     {
       channel: z.string().describe('The Channel — its id, or its address (the chat root node URN hadron_list_channels prints). Copy one of those; a ref naming nothing reads as a Channel you may not see.'),
       body: z.string().describe('The message text (max 65536 characters). Mention teammates as @worker-name or @handle.'),
       replyToSeq: z.number().int().optional().describe('seq of the message this replies to.'),
-      session: z.string().optional().describe('A session id — the message is authored by that session\'s bound Worker. Omit to post as yourself.'),
+      session: z.string().optional().describe('A session id — the message is authored by that session\'s bound Worker. Omit it on a connection bound to ONE worker session to post as that Worker; on a SHARED connection (several of your sessions bound on it, e.g. several chat sessions on one host) an omitted session is refused SESSION_AMBIGUOUS (#1701). Not combinable with asMe.'),
+      asMe: z.boolean().optional().describe('true posts as YOU, the human, even on a connection bound to a worker (#1697). Required to post as yourself when no worker session is bound or named; without it such a post is refused [authorship_required]. Not combinable with session.'),
     },
-    async ({ channel, body, replyToSeq, session }) => {
+    async ({ channel, body, replyToSeq, session, asMe }) => {
       await heartbeatSession(session);
-      return postToChannel(channel, body, replyToSeq ?? null, session ?? null);
+      // #1697 — never default to the human. The server treats sessionRef as
+      // optional, so an omitted one used to record the caller as the author
+      // with no error: wrong provenance that reads as success (cor:agt:020:03).
+      if (session && asMe) {
+        return {
+          isError: true as const,
+          content: [{ type: 'text' as const, text: '[bad_user_input] hadron_channel_post: pass session OR asMe, not both — one says a Worker authors, the other that you do. Nothing was posted.' }],
+        };
+      }
+      let author = session ?? null;
+      if (!author && !asMe) {
+        author = await boundWorkerSession();
+        if (!author) {
+          return {
+            isError: true as const,
+            content: [{
+              type: 'text' as const,
+              text:
+                '[authorship_required] hadron_channel_post: no worker session is named or bound on this connection, ' +
+                'so this post would be recorded under YOUR name. Nothing was posted. Pass session: "<your worker ' +
+                'session id>" (hadron_whoami lists yours) to post as that Worker, or asMe: true to post as yourself (#1697).',
+            }],
+          };
+        }
+      }
+      return postToChannel(channel, body, replyToSeq ?? null, author);
     },
   );
 
@@ -9283,7 +9592,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     {
       body: z.string().describe('The message text (max 65536 characters). Mention teammates as @worker-name or @handle.'),
       replyToSeq: z.number().int().optional().describe('seq of the message this replies to (a replies-to edge is wired).'),
-      session: z.string().optional().describe('A session id — the message is authored by that session\'s bound Worker. Omit to post as yourself.'),
+      session: z.string().optional().describe('A session id — the message is authored by that session\'s bound Worker. Omit to post as yourself — except on a SHARED connection (several of your sessions bound on it, e.g. several chat sessions on one host), where an omitted session is refused SESSION_AMBIGUOUS (#1701): pass the id of the session you are, a plain one to post as yourself.'),
       app: z.string().optional().describe('The team App — an App URN or ID. Omit to use the session\'s active App.'),
       channel: z.string().optional().describe('Spec 049: post into THIS Channel (its id or address, from hadron_list_channels) instead of the App\'s default team chat. Item J: your worker authors there when its App is the Channel\'s, or when you may write the Channel\'s host memory.'),
     },
@@ -9474,7 +9783,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         if (page.total === 0) return textResult('The team chat has no matching messages.');
         const lines = page.items.map((m) => {
           const reply = m.replyToSeq != null ? ` (reply to #${m.replyToSeq})` : '';
-          return `#${m.seq} [${m.authorName ?? 'unknown'}] ${m.at.toISOString()}${reply}:\n${m.body}`;
+          return `#${m.seq} ${chatByline(m)} ${m.at.toISOString()}${reply}:\n${m.body}`;
         });
         return textResult(
           `${page.total} message(s) total, showing ${page.items.length}:\n\n${lines.join('\n\n')}`,
@@ -10149,6 +10458,53 @@ function ageOf(at: Date, now: Date = new Date()): string {
     },
   );
 
+
+  // ── hadron_set_worker_reports_to ───────────────────────────────────────────
+
+  server.tool(
+    'hadron_set_worker_reports_to',
+    "#1726 — set, hand over or clear who a worker reports to: one other, non-retired worker of the same App (never itself, never a cycle). It belongs to the casting, not to a session, so it outlasts session rotation and a dormant team; every change is a `worker.reports-to` team event. Who may change it: whoever manages the App; the worker it reports to now (handing it over or clearing it is its agreement); for a worker that reports to nobody, also a worker claiming it for itself when one person holds both, or its own holder (interim rule, pending a ruling). A worker acts through its bound session, so pass `session`. Informational: nothing is refused on the strength of it except the task authority cor:agt:050:09 gives a worker over the tasks of workers that report to it.",
+    {
+      workerRef: z.string().describe('The worker whose value changes: its NAME (within the App), URN or id.'),
+      reportsTo: z.string().nullable().describe('The worker it reports to (name, URN or id), or null to clear.'),
+      app: z.string().optional().describe('The team App (URN or id). Only needed for the NAME forms; omit to use the session\'s App.'),
+    },
+    async ({ workerRef, reportsTo, app }) => {
+      const trimmed = workerRef.trim();
+      if (trimmed === '') return textResult('Pass workerRef — a worker name, URN, or id.');
+      const target = typeof reportsTo === 'string' ? reportsTo.trim() : null;
+      const needsApp = [trimmed, target].some((r) => r && !(isId(r) || hasSchemePrefix(r)));
+      let appRef = app;
+      if (needsApp && !appRef) {
+        const appScopeError = requireAppScope();
+        if (appScopeError) return appScopeError;
+        appRef = auth.appId ?? undefined;
+      }
+      const ctx: Context = {
+        db,
+        clientId: auth.clientId ?? undefined,
+        userId: auth.userId ?? undefined,
+        appId: auth.appId ?? undefined,
+        sessionId: auth.sessionId ?? undefined,
+        roles: auth.roles as Context['roles'],
+        organizationId: auth.organizationId ?? undefined,
+      };
+      try {
+        const resolveRef = async (ref: string) => {
+          const w = await resolvers.Query.worker({}, { ref, appRef: isId(ref) || hasSchemePrefix(ref) ? null : appRef }, ctx);
+          if (!w) throw new Error(`Worker not found: ${ref}`);
+          return w.id as string;
+        };
+        const workerId = await resolveRef(trimmed);
+        const toId = target ? await resolveRef(target) : null;
+        const worker = await resolvers.Mutation.setWorkerReportsTo({}, { workerRef: workerId, reportsTo: toId }, ctx);
+        const to = worker.reportsToWorkerId ? await db.worker.findUnique({ where: { id: worker.reportsToWorkerId }, select: { name: true } }) : null;
+        return textResult(to ? `**${worker.name}** now reports to **${to.name}**.` : `**${worker.name}** now reports to nobody.`);
+      } catch (e) {
+        return textResult(`Error: ${e instanceof Error ? e.message : 'changing who the worker reports to failed'}`);
+      }
+    },
+  );
   // ── hadron_record_work / hadron_team_work_items ───────────────────────────────
 
   server.tool(
@@ -10501,32 +10857,141 @@ const activeAppByMcpSession = new Map<
 >();
 
 /**
- * DAC (Holger, 2026-10-05; #1610 follow-on): the Hadron session
- * `hadron_start_session` bound on this MCP connection. Later requests on the
- * connection write as that session's Worker / Agent, re-validated every time
- * through the same ownership check as the X-Hadron-Session header, so a
- * session that has since ended or changed hands stops attributing at once.
- * An explicit header on a request wins. Per transport, like the active App:
- * a reconnect starts unbound until the client starts or names a session again.
+ * DAC (Holger, 2026-10-05; #1610 follow-on): the Hadron sessions
+ * `hadron_start_session` bound on this MCP connection, oldest first. Later
+ * requests on the connection write as the bound Worker / Agent, re-validated
+ * every time through the same ownership check as the X-Hadron-Session header,
+ * so a session that has since ended or changed hands stops attributing at
+ * once. An explicit header, or a tool call's own `session` argument, wins. Per
+ * transport, like the active App: a reconnect starts unbound until the client
+ * starts or names a session again.
+ *
+ * A LIST, not one id (#1701): a desktop host can carry several chat sessions
+ * over ONE MCP connection, each binding its own worker. Keeping only the last
+ * bind credited every chat session's writes to whoever bound last (Gil's node
+ * read "Created by: worker Cody"). With every binding kept, a connection whose
+ * live bindings name more than one actor is AMBIGUOUS, and a write that does
+ * not say which caller it is gets refused rather than guessed at.
  */
-const workerSessionByMcpSession = new Map<string, string>();
+const workerSessionsByMcpSession = new Map<string, string[]>();
 
 /**
- * Publish the connection's bound session as this request's actor (DAC). A
- * request that NAMES a session in X-Hadron-Session has spoken for itself even
- * when that header failed validation: it then writes as nobody, never as the
+ * Connections that may be shared: ones on which two different actors have
+ * EVER been bound, overlapping or not (PR #1702 reviews, Codex P1 twice).
+ * Sticky until the transport goes away.
+ *
+ * Ending a Hadron session does not end the chat session that drove it, so
+ * the live-binding list proves nothing about who is still calling. Chat A
+ * binds Iris and ends it, chat B binds Dara, and A's next unnamed write looks
+ * EXACTLY like one chat session that switched from Iris to Dara: the server
+ * cannot tell the two apart, so it must not pick one. On a connection in this
+ * set, a caller whose session has ended is one more possible caller, its
+ * actor nobody, so an unnamed write is refused while any worker or agent
+ * binding is live, and the caller must name its session. The price is that a
+ * single chat session that switches workers names its session too. Re-binding
+ * the SAME worker (a rotation) never marks a connection.
+ */
+const sharedMcpConnections = new Set<string>();
+
+/** Every actor ever bound on a connection, keyed by {@link actorKey}. */
+const actorsSeenByMcpSession = new Map<string, Set<string>>();
+
+/**
+ * Record a session bound on this connection (#1701: appended, never
+ * replacing). A plain session is recorded too: its actor is nobody, and it
+ * counts as one more candidate when the connection's bindings are compared.
+ *
+ * UNCAPPED on purpose (PR #1702 review, Codex P2): a cap that dropped the
+ * oldest entry could drop a LIVE binding — bind A, then supersede B's session
+ * 32 times — and hand A's chat session's writes to B, the very failure this
+ * list exists to prevent. The list stays short without one: each bind runs
+ * liveConnectionBindings for its receipt, and every header-less request runs
+ * it before dispatch, and both prune the entries that no longer validate. So
+ * the list holds the connection's live bindings plus at most the one being
+ * added. A superseded session is ended, so it validates no longer.
+ */
+function rememberConnectionBinding(
+  mcpSessionId: string,
+  hadronSessionId: string,
+  actor: { workerId: string | null; agentId: string | null },
+): void {
+  const list = (workerSessionsByMcpSession.get(mcpSessionId) ?? []).filter((id) => id !== hadronSessionId);
+  list.push(hadronSessionId);
+  workerSessionsByMcpSession.set(mcpSessionId, list);
+  const seen = actorsSeenByMcpSession.get(mcpSessionId) ?? new Set<string>();
+  seen.add(actorKey(actor));
+  actorsSeenByMcpSession.set(mcpSessionId, seen);
+  if (seen.size > 1) sharedMcpConnections.add(mcpSessionId);
+}
+
+/**
+ * The connection's bindings that still validate, oldest first, pruning the
+ * rest from the map. One validation per remembered session, each through the
+ * shared {@link validateSessionBinding} gate.
+ */
+async function liveConnectionBindings(
+  mcpSessionId: string,
+  principal: AuthContext,
+): Promise<Array<{ sessionId: string; actor: { workerId: string | null; agentId: string | null } }>> {
+  const remembered = workerSessionsByMcpSession.get(mcpSessionId);
+  if (!remembered?.length) return [];
+  const live = [];
+  for (const id of remembered) {
+    const valid = await validateSessionBinding(db, principal, id);
+    if (valid) live.push(valid);
+  }
+  if (live.length) workerSessionsByMcpSession.set(mcpSessionId, live.map((b) => b.sessionId));
+  else workerSessionsByMcpSession.delete(mcpSessionId);
+  return live;
+}
+
+/**
+ * Is the next unnamed write on this connection ambiguous? It is when its live
+ * bindings name more than one actor, or when the connection is known shared
+ * and any live binding names a worker or agent, since "a caller whose session
+ * ended" (nobody) is then a candidate too. Never ambiguous with no live
+ * binding: every candidate is nobody.
+ */
+function connectionIsAmbiguous(
+  mcpSessionId: string,
+  live: Array<{ actor: { workerId: string | null; agentId: string | null } }>,
+): boolean {
+  if (!live.length) return false;
+  if (distinctActorCount(live) > 1) return true;
+  return sharedMcpConnections.has(mcpSessionId) && live.some((b) => b.actor.workerId || b.actor.agentId);
+}
+
+/** One actor's identity for comparison: its Worker and Agent ids ("/" for nobody). */
+function actorKey(actor: { workerId: string | null; agentId: string | null }): string {
+  return `${actor.workerId ?? ''}/${actor.agentId ?? ''}`;
+}
+
+/** The distinct Worker / Agent identities among a set of bindings. */
+function distinctActorCount(bindings: Array<{ actor: { workerId: string | null; agentId: string | null } }>): number {
+  return new Set(bindings.map((b) => actorKey(b.actor))).size;
+}
+
+/**
+ * Publish the connection's bound actor for this request (DAC). A request that
+ * NAMES a session in X-Hadron-Session has spoken for itself even when that
+ * header failed validation: it then writes as nobody, never as the
  * connection's worker (#1665 review).
+ *
+ * #1701: when the live bindings name more than one actor, nothing here can
+ * tell which chat session sent the request, so it publishes an AMBIGUOUS
+ * actor (nobody, with the candidates) and the per-tool gate in
+ * createMcpServerInstance decides: a call naming its `session` proceeds as
+ * that session, a writing call without one is refused SESSION_AMBIGUOUS.
  */
 async function publishConnectionActor(mcpSessionId: string, presented: AuthContext, headerPresented: boolean): Promise<void> {
   if (headerPresented || presented.sessionId) return;
-  const bound = workerSessionByMcpSession.get(mcpSessionId);
-  if (!bound) return;
-  const valid = await validateSessionBinding(db, presented, bound);
-  if (!valid) {
-    workerSessionByMcpSession.delete(mcpSessionId);
+  const live = await liveConnectionBindings(mcpSessionId, presented);
+  if (!live.length) return;
+  if (connectionIsAmbiguous(mcpSessionId, live)) {
+    publishAmbiguousActor(live.map((b) => b.sessionId));
     return;
   }
-  publishActor(valid.actor);
+  publishActor(live[live.length - 1].actor);
 }
 
 function respondMcpSessionNotFound(res: Response): void {
@@ -10540,6 +11005,9 @@ function respondMcpSessionNotFound(res: Response): void {
 /** A transport session belongs to the principal that authenticated its initialize request. */
 function sameMcpPrincipal(bound: AuthContext, presented: AuthContext): boolean {
   if (bound.userId) return presented.userId === bound.userId && !presented.impersonation;
+  // An App key's scopes distinguish keys of one App (#1749): a transport belongs to the EXACT key that opened it, so a
+  // returning request signed with another key of the same App can borrow neither its scope, its proof identity nor its audit.
+  if (bound.appKeyId) return presented.appKeyId === bound.appKeyId && !presented.userId;
   if (bound.appId) return presented.appId === bound.appId && !presented.userId;
   return !!bound.clientId && presented.clientId === bound.clientId;
 }
@@ -10616,7 +11084,9 @@ function unregisterMcpTransport(
   if (registered && registered.transport !== transport) return false;
   transports.delete(sessionId);
   activeAppByMcpSession.delete(sessionId);
-  workerSessionByMcpSession.delete(sessionId);
+  workerSessionsByMcpSession.delete(sessionId);
+  sharedMcpConnections.delete(sessionId);
+  actorsSeenByMcpSession.delete(sessionId);
   sessionKeyCache.evict(`mcp:${sessionId}`);
   return true;
 }
@@ -10699,6 +11169,11 @@ export async function handleMcpRequest(req: Request, res: Response): Promise<voi
       // Credential resolution re-reads the live user after the liveness check
       // above. A demotion between those reads must win before tool dispatch.
       active.auth.roles = presented.roles ?? [];
+      // An App key carries no session of its own across requests: THIS request's header (valid, or named and refused)
+      // is what the wake tools' session-bound refusal reads, not the one the transport opened with (#1749, N5).
+      if (active.auth.appKeyId) {
+        active.auth.requestSession = { sessionId: presented.sessionId, refused: presented.sessionBindingRefused === true };
+      }
       await publishConnectionActor(sessionId, presented, req.headers['x-hadron-session'] !== undefined);
       await active.transport.handleRequest(req, res, req.body);
     } finally {

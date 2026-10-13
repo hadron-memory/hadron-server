@@ -146,3 +146,74 @@ describe('#1682 review cycle', () => {
     expect((await db.node.findUniqueOrThrow({ where: { id: a.id } })).memoryId).toBe(src.id);
   });
 });
+
+// #1684 / #1710 review (Diego P2): carried DELETED comments keep their locs, so
+// a target tombstone at one of them collides on the total (loc, memory) index.
+describe('mergeMemories: a target tombstone at a carried comment\'s loc (#1684)', () => {
+  /** A live parent with one DELETED thread; returns the parent and the comment row. */
+  async function parentWithDeletedThread(loc: string) {
+    const parent = await node(src.id, loc);
+    const c = await M.createComment(null, { targetRef: parent.id, body: 'old' }, as());
+    await M.deleteCommentThread(null, { commentRef: c.id, reason: 'old' }, as());
+    return { parent, comment: await db.node.findUniqueOrThrow({ where: { id: c.id } }) };
+  }
+  const tombstoneAt = (loc: string) => db.node.create({
+    data: { id: generateId(), memoryId: dst.id, loc, name: 'gone', deletedAt: new Date() },
+  });
+
+  it('refuses MERGE_TARGET_LOC_TOMBSTONED for a NON-colliding parent\'s deleted comment, before any batch relocates', async () => {
+    const bystander = await node(src.id, 'aaa-bystander');
+    const { parent, comment } = await parentWithDeletedThread('p');
+    expect(comment.deletedAt).not.toBeNull();
+    await tombstoneAt(comment.loc);
+
+    const err = await errorOf(merge());
+    expect(err).toBeInstanceOf(GraphQLError);
+    expect(err.extensions).toMatchObject({ code: 'MERGE_TARGET_LOC_TOMBSTONED', memoryId: dst.id, loc: comment.loc, count: 1 });
+    // Batch and page size 1, yet nothing committed: the preflight refused.
+    for (const id of [bystander.id, parent.id, comment.id]) {
+      expect((await db.node.findUniqueOrThrow({ where: { id } })).memoryId).toBe(src.id);
+    }
+  });
+
+  it('a tombstone at a carried comment\'s loc that appears AFTER the preflight is refused by the carry, not a raw P2002', async () => {
+    const { parent, comment } = await parentWithDeletedThread('p');
+    // The relocate page re-reads the target schema between the preflight and
+    // its batch transaction; plant the tombstone there.
+    const real = db.memory.findUnique.bind(db.memory);
+    let planted = false;
+    const spy = vi.spyOn(db.memory, 'findUnique').mockImplementation((async (args: { select?: { schema?: boolean } }) => {
+      if (!planted && args?.select?.schema) {
+        planted = true;
+        await tombstoneAt(comment.loc);
+      }
+      return real(args as never);
+    }) as never);
+    try {
+      const err = await errorOf(merge());
+      expect(planted).toBe(true);
+      expect(err.extensions).toMatchObject({ code: 'MERGE_TARGET_LOC_TOMBSTONED', loc: comment.loc });
+    } finally {
+      spy.mockRestore();
+    }
+    // The parent's batch rolled back with its thread.
+    expect((await db.node.findUniqueOrThrow({ where: { id: parent.id } })).memoryId).toBe(src.id);
+    expect((await db.node.findUniqueOrThrow({ where: { id: comment.id } })).memoryId).toBe(src.id);
+  });
+
+  it('a FOLDING parent\'s deleted thread is destroyed, not carried, so a tombstone at its loc does not refuse', async () => {
+    const { comment } = await parentWithDeletedThread('shared');
+    await node(dst.id, 'shared');
+    const tomb = await tombstoneAt(comment.loc);
+    await merge();
+    expect(await db.node.findUnique({ where: { id: comment.id } })).toBeNull();
+    expect((await db.node.findUniqueOrThrow({ where: { id: tomb.id } })).memoryId).toBe(dst.id);
+  });
+
+  it('an ordinary deleted source node never moves, so a target tombstone at its loc does not refuse', async () => {
+    const gone = await db.node.create({ data: { id: generateId(), memoryId: src.id, loc: 'gone', name: 'g', deletedAt: new Date() } });
+    await tombstoneAt('gone');
+    await merge();
+    expect((await db.node.findUniqueOrThrow({ where: { id: gone.id } })).memoryId).toBe(src.id);
+  });
+});

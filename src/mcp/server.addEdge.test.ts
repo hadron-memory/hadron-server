@@ -202,11 +202,17 @@ describe('addEdge — happy path', () => {
       await resolvers.Mutation.transferMemoryOwnership(null, {
         memoryRef: owned.id, orgRef: destination.id, targetClass: 'knowledge',
       }, { db, userId: owner.id, roles: ['READER'] });
+      // The transfer needed ADMIN in the destination, and an org CONTRIBUTOR+
+      // may write org knowledge on both surfaces (#1640). Drop the former
+      // owner to READER so only the lapsed ownership could still admit a write.
+      await db.orgMember.updateMany({
+        where: { organizationId: destination.id, userId: owner.id }, data: { role: 'READER' },
+      });
       expect(await canReadMemory(db, auth, owned.id)).toBe(true);
       expect(await canWriteToMemory(db, auth, owned.id)).toBe(false);
       release();
       await holder;
-      await expect(adding).resolves.toEqual({ error: 'Write access denied for source memory.' });
+      await expect(adding).resolves.toEqual({ error: 'Write access denied for source memory. Your org role is READER; writing org memories needs CONTRIBUTOR or above.' });
       expect(await db.edge.count({ where: { sourceId: from.id } })).toBe(0);
     } finally {
       release();

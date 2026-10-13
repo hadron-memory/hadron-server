@@ -1,18 +1,42 @@
+import { ownsSession } from '../lib/sessionOwnership.js';
 import { createHash, randomBytes } from 'crypto';
 import { DEFAULT_SESSION_DORMANCY_DAYS, isSessionDormant, loadLastEventBySession } from '../lib/sessionActivity.js';
 import type { Request } from 'express';
 import type { Prisma, PrismaClient, UserApiKey } from '../generated/prisma/index.js';
 import { lockAuthorityAnchors } from '../lib/auth/authorityAnchors.js';
 import { verifyJwt } from '../auth/jwt.js';
+import type { HadronJwtPayload } from '../auth/jwt.js';
 import { canImpersonate, type ImpersonationContext } from '../lib/auth/impersonation.js';
 import { LIVE_ORG_MEMBERSHIP } from '../lib/auth/liveOrgMembership.js';
 import { publishActor } from '../lib/requestActor.js';
 
 export interface AuthContext {
+  login?: HadronJwtPayload['login'];
   clientId?: string;       // "github:<username>" / "email:<addr>" — only set for OAuth/JWT users
   userId?: string;         // User.id — only set for OAuth/JWT users
   appId?: string;          // App.id — set when caller authenticated via an App Key
+  /**
+   * AppKey.id — set ONLY when the caller authenticated with an `hdr_app_` key (#1749). `appId` alone cannot say which:
+   * a person's active-App selection sets it too. The wake proof binds this, and the audit names it. A scope the key
+   * holds is never copied here: it is read from the database at every surface it gates, so a revocation holds over a
+   * transport that keeps this context open.
+   */
+  appKeyId?: string;
   sessionId?: string;      // Session.id — set when operating inside an active session
+  /**
+   * #1705 — the request NAMED a session (X-Hadron-Session) that did not
+   * validate, so `sessionId` is unset and the request proceeds unbound (the
+   * pre-existing silent-drop behaviour, unchanged). A surface whose actor is
+   * the session's worker reads this to refuse rather than act as the bare
+   * credential: a worker whose session ended must not silently become its
+   * human driver (agent tasks, cor:agt:050:08).
+   */
+  sessionBindingRefused?: boolean;
+  /**
+   * An MCP transport keeps the context it opened with. For an App key, the session state of the CURRENT request
+   * (refreshed by the transport before each dispatch): the wake tools read this, not `sessionId` above (#1749, N5).
+   */
+  requestSession?: { sessionId?: string; refused: boolean };
   // Current User-row roles for ordinary user principals. HTTP auth resolves
   // them per request; an existing MCP transport refreshes them before every
   // request because its AuthContext otherwise outlives the credential check.
@@ -214,7 +238,10 @@ async function bindSession(
   sessionId: string,
 ): Promise<void> {
   const bound = await validateSessionBinding(db, ctx, sessionId);
-  if (!bound) return;
+  if (!bound) {
+    ctx.sessionBindingRefused = true;
+    return;
+  }
   ctx.sessionId = bound.sessionId;
   // #1610: the Worker / Agent behind this request's writes comes from the
   // binding just validated — the one thing a client cannot assert.
@@ -248,10 +275,7 @@ export async function validateSessionBinding(
   if (!session || session.endedAt) return null;
   const now = new Date();
   if (session.expiresAt && session.expiresAt <= now) return null;
-  const owned = isPureAppKey
-    ? session.appId === principal.appId
-    : session.userId === principal.userId;
-  if (!owned) return null;
+  if (!ownsSession(principal, session)) return null;
   // Ruling DY-5, completed for sessions with NO hard expiry (#1661 review,
   // Rook P2-1): a session nobody has driven for longer than its App's
   // dormancy threshold no longer binds. Without this, an App with
@@ -295,6 +319,7 @@ async function resolveAppKey(
   // `bindSession` — #934 unified it across principal shapes.
   return {
     appId: appKey.app.id,
+    appKeyId: appKey.id,
     // A user-owned App (spec 047) has no organizationId — undefined
     // matches the field's existing "unscoped" convention.
     organizationId: appKey.app.organizationId ?? undefined,
@@ -519,6 +544,7 @@ async function resolveJwt(token: string, db: PrismaClient): Promise<AuthContext>
     return {
       clientId,
       userId: payload.sub,
+      login: payload.login,
       roles: validatedUserRoles(user.roles),
     };
   } catch {

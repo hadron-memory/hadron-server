@@ -1,3 +1,5 @@
+import { configSelection } from '../../../lib/automation/identities.js';
+import { captureSetupConsent } from '../../../lib/automation/pins.js';
 // Headless-run surfaces (spec 040 plan §9): schedule CRUD, the run audit
 // read surface (cor:api:120-shaped), manual trigger, and the kill switch.
 
@@ -30,6 +32,7 @@ import { isId } from '../../../lib/entityRef/shape.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { type Context, requireOrgRole, requireOwnerOrOrgRole, isPlatformAdmin } from './resolvers.helpers.js';
 import { withAuthorizedTx } from './authorizedTx.js';
+import { hasAppRelationship } from '../../../lib/auth/appRelationship.js';
 import { isStrictOwner } from '../../../lib/auth/strictOwner.js';
 
 /** Orderable columns on the appRuns list (#833). Mirrors the SDL enum. */
@@ -200,51 +203,6 @@ async function requireRunIdentityRelationship(ctx: Context, appId: string, userI
 }
 
 /**
- * Interactive / import MANUAL-run gate (#530, cor:acl). Ad-hoc runs
- * (`triggerAppRun`, `runTask(appRef:)`, `importNode(taskRef:)`) are the
- * end-user features these paths exist for, so — unlike schedules and webhooks,
- * which keep the stricter org-ADMIN gate (`requireScheduleAdmin`) — a run may be
- * triggered by anyone with a real relationship to the App:
- *   - a platform admin, or the App acting under its own key (`ctx.appId`),
- *   - an org ADMIN of the App's org,
- *   - an AppMember of the App, or
- *   - a user with an active AgentSubscription to one of the App's agents.
- * `mintAppRun` re-verifies the on-behalf-of *user* at launch (appRuns.ts); this
- * authorizes the *triggering caller*.
- */
-/**
- * True if `userId` has a live relationship with the App: an AppMember, or an
- * ACTIVE AgentSubscription to one of the App's agents. Active is the data-model
- * predicate (activatedAt set, not revoked, not expired) — not merely
- * `revokedAt: null` — so a not-yet-activated or expired subscription does NOT
- * authorize a run (Codex/Copilot #566). Shared by the trigger gate and the
- * runAsSelf on-behalf-of pre-check so both agree with mintAppRun.
- */
-async function hasAppRelationship(
-  db: Context['db'],
-  appId: string,
-  userId: string,
-): Promise<boolean> {
-  const member = await db.appMember.findFirst({
-    where: { appId, userId },
-    select: { userId: true },
-  });
-  if (member) return true;
-  const now = new Date();
-  const sub = await db.agentSubscription.findFirst({
-    where: {
-      userId,
-      activatedAt: { not: null },
-      revokedAt: null,
-      OR: [{ expiresAt: null }, { expiresAt: { gt: now } }],
-      agent: { appAgents: { some: { appId } } },
-    },
-    select: { userId: true },
-  });
-  return !!sub;
-}
-
-/**
  * #1565 (Codex-worker P1, Jane): who may read a run WITHOUT an org READER row.
  * `hadron_run_task` lets an App's own key and a user with a live App
  * relationship (AppMember or active subscriber) launch a run, and points them
@@ -276,6 +234,19 @@ export async function mayReadAppRunWithoutOrgRole(
   return own && (await hasAppRelationship(ctx.db, run.appId, ctx.userId));
 }
 
+/**
+ * Interactive / import MANUAL-run gate (#530, cor:acl). Ad-hoc runs
+ * (`triggerAppRun`, `runTask(appRef:)`, `importNode(taskRef:)`) are the
+ * end-user features these paths exist for, so — unlike schedules and webhooks,
+ * which keep the stricter org-ADMIN gate (`requireScheduleAdmin`) — a run may be
+ * triggered by anyone with a real relationship to the App:
+ *   - a platform admin, or the App acting under its own key (`ctx.appId`),
+ *   - an org ADMIN of the App's org,
+ *   - an AppMember of the App, or
+ *   - a user with an active AgentSubscription to one of the App's agents.
+ * `mintAppRun` re-verifies the on-behalf-of *user* at launch (appRuns.ts); this
+ * authorizes the *triggering caller*.
+ */
 async function requireManualRunAccess(ctx: Context, appRef: string) {
   const { id } = await resolveAppRef(ctx.db, appRef);
   const app = await ctx.db.app.findFirst({
@@ -384,6 +355,7 @@ export async function mintManualRun(
       appId: app.id,
       userId: resolveRunAsSelf(ctx, input.runAsSelf),
       triggerKind: 'MANUAL',
+      consentPrincipal: ctx,
       entryNodeUrn: input.entryNodeUrn,
       eventData: {
         ...(input.eventData ?? {}),
@@ -470,6 +442,7 @@ export const appRunMutations = {
     // Spec 049 Phase 3b: the trigger's scope — readable by the caller and owned
     // by this App's context; snapshotted onto each run at mint.
     const scopeId = input.scopeRef?.trim() ? await resolveScopeForTrigger(ctx, app.id, input.scopeRef) : null;
+    const automationPin = await captureSetupConsent(ctx.db, app.id, resolveRunAsSelf(ctx, input.runAsSelf), input.entryNodeUrn, app.organizationId, ctx, configSelection({ ...input, agentId }));
     return ctx.db.agentSchedule.create({
       data: {
         id: generateId(),
@@ -486,6 +459,7 @@ export const appRunMutations = {
         runAt: input.runAt != null ? validatedRunAt(input.runAt) : null,
         timezone,
         entryNodeUrn: input.entryNodeUrn,
+        automationPin: automationPin as never,
         eventData: (input.eventData ?? undefined) as never,
         policy: (input.policy ?? undefined) as never,
         aiConfigName: input.aiConfigName ?? null,
@@ -572,6 +546,9 @@ export const appRunMutations = {
             ...modeFields,
             ...(input.timezone != null ? { timezone } : {}),
             ...(input.entryNodeUrn != null ? { entryNodeUrn: input.entryNodeUrn } : {}),
+            ...(input.entryNodeUrn != null || input.runAsSelf != null || input.aiConfigName !== undefined || agentId !== undefined ? { automationPin: await captureSetupConsent(tx as never, existing.appId,
+              input.runAsSelf != null ? resolveRunAsSelf(txCtx, input.runAsSelf) : existing.userId,
+              input.entryNodeUrn ?? existing.entryNodeUrn, existing.organizationId, txCtx, configSelection({ ...existing, ...input, agentId: agentId === undefined ? existing.agentId : agentId })) as never } : {}),
             ...(input.eventData !== undefined ? { eventData: input.eventData as never } : {}),
             ...(input.policy !== undefined ? { policy: input.policy as never } : {}),
             ...(input.aiConfigName !== undefined ? { aiConfigName: input.aiConfigName } : {}),
@@ -688,7 +665,7 @@ export const appRunMutations = {
         if (agentId) await resolveInstalledAgent(txCtx, app.id, input.agentRef);
         if (input.scopeRef?.trim()) await resolveScopeForTrigger(txCtx, app.id, input.scopeRef);
       },
-      (tx) => tx.agentWebhook.create({
+      async (tx) => tx.agentWebhook.create({
         data: {
         id: generateId(),
         organizationId: app.organizationId,
@@ -699,6 +676,7 @@ export const appRunMutations = {
         name: input.name,
         secret: generateWebhookSecret(),
         argsSchema: (input.argsSchema ?? undefined) as never,
+        automationPin: await captureSetupConsent(tx as never, app.id, resolveRunAsSelf(ctx, input.runAsSelf), input.entryNodeUrn, app.organizationId, ctx, configSelection({ ...input, agentId })) as never,
         entryNodeUrn: input.entryNodeUrn,
         eventData: (input.eventData ?? undefined) as never,
         policy: (input.policy ?? undefined) as never,

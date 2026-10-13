@@ -1588,6 +1588,13 @@ export const typeDefs = `#graphql
     host: String
     "#928: the tool driving the session ('claude-code', 'codex', ...)."
     tool: String
+    """
+    #1707 — the model family this session runs as (hrn:node:hadronmemory.com:specs:cor:agt:060:04): given at
+    start, or derived from llmModel then tool; null when it could not be
+    classified. A bound worker's family is its newest open session's. A matching
+    input only, never an authorization input: it is self-declared.
+    """
+    family: String
     inputTokens: Int
     outputTokens: Int
     turnCount: Int
@@ -1891,6 +1898,10 @@ export const typeDefs = `#graphql
     alreadyApprovedCount: Int!
     "Locs of reserved placeholders, which have no spec to approve yet."
     skippedPlaceholders: [String!]!
+    "#1641 — decisions and decision logs in this memory, which bulk approval never approves: a decision is approved individually by one of its deciders."
+    skippedDecisionCount: Int!
+    "#1641 — the first 50 of those, by loc."
+    skippedDecisions: [String!]!
     "#1607 — unminted nodes of this memory with open discussion: a warning, never a blocker (hrn:node:hadronmemory.com:specs:cor:dmo:110:07). Ordered by loc."
     unresolvedFeedback: [UnresolvedFeedback!]!
   }
@@ -1901,6 +1912,323 @@ export const typeDefs = `#graphql
     name: String!
     "The canonical hrn:worker:/hrn:agent: URN. Null when it cannot be composed."
     urn: String
+  }
+
+  "#1641 — a decision's derived state (hrn:node:hadronmemory.com:hadron-server:design:decision-nodes §6.3). Computed by the one evaluation on every read, never stored. Precedence: TAMPERED, UNVERIFIABLE, WITHDRAWN, SUPERSEDED, STALE, DECIDED, ANSWERED_UNCONFIRMED, OPEN."
+  enum DecisionState {
+    "Not every part is answered."
+    OPEN
+    "Every part is answered; the tier's evidence (a decider's approval, or later a signature) is missing at the current revision."
+    ANSWERED_UNCONFIRMED
+    "Answered, and the tier's evidence by a decider is intact at the current revision. The only state a ruling may be relied on in."
+    DECIDED
+    "Evidence exists, but for an earlier revision: the decision changed after it was approved."
+    STALE
+    "The rendered content, the structured payload and the approval hash disagree: changed outside the decision operations."
+    TAMPERED
+    "Written by a codec or renderer this server does not know, so it cannot be verified (fail closed)."
+    UNVERIFIABLE
+    WITHDRAWN
+    SUPERSEDED
+  }
+
+  "#1641 — the assurance a decision's answer needs. APPROVED: a decider's approval. SIGNED: a decider's passkey signature (#1614; not available yet, so a SIGNED decision stays ANSWERED_UNCONFIRMED)."
+  enum DecisionTier {
+    APPROVED
+    SIGNED
+  }
+
+  enum DecisionUrgency {
+    NORMAL
+    URGENT
+  }
+
+  "#1641 — list order. PORTAL_DEFAULT: urgent first, then open before answered, then newest ask. CODE: code order."
+  enum DecisionSort {
+    PORTAL_DEFAULT
+    CODE
+  }
+
+  "#1641 — where an answer was given, as the answering caller states it (a claim)."
+  enum DecisionAnswerVia {
+    PORTAL
+    CLI
+    MCP
+    CHAT_RECORDED
+    IMPORT
+  }
+
+  "#1641 — a reference: exactly one of an external ref (hadron-server#1640, team:6783), a node id or URN, or a spec citation."
+  type DecisionRef {
+    ref: String
+    node: String
+    spec: String
+  }
+
+  input DecisionRefInput {
+    ref: String
+    node: String
+    spec: String
+  }
+
+  "#1641 — an authenticated actor: taken from the principal, never supplied by a client. Public projections only (#552)."
+  type DecisionActor {
+    userId: ID
+    workerId: ID
+    appId: ID
+    user: CommentActorRef
+    worker: CommentActorRef
+    app: CommentActorRef
+  }
+
+  type DecisionOption {
+    "The option id an answer names."
+    key: String!
+    label: String!
+    meaning: String
+    cost: String
+  }
+
+  type DecisionRecommendation {
+    key: String!
+    "Who recorded the recommendation (authenticated)."
+    by: DecisionActor!
+    reason: String
+    "A relayed recommendation's original author, as a claim."
+    attributedTo: String
+  }
+
+  type DecisionAnswer {
+    "The chosen option; null for a free-text answer."
+    key: String
+    text: String
+    freeform: Boolean!
+    "The decider whose credential recorded it."
+    byUserId: ID!
+    at: DateTime!
+    via: DecisionAnswerVia!
+    "Where the answer was given (a claim)."
+    source: DecisionRef
+    reason: String
+    "An imported answer's recorded speaker (a claim, never rendered as the authenticated answerer)."
+    claimedBy: String
+    recordedByUserId: ID
+  }
+
+  type DecisionPart {
+    "Permanent within the decision; amendments add parts, never renumber."
+    n: Int!
+    "The citation of this part, e.g. DU-1."
+    citation: String!
+    question: String!
+    options: [DecisionOption!]!
+    "Null when the asker deliberately gave none (see noRecommendationReason). Never pre-selected."
+    recommendation: DecisionRecommendation
+    noRecommendationReason: String
+    answer: DecisionAnswer
+    "Earlier answers to this part, oldest first: a re-answer appends, never replaces quietly."
+    answerHistory: [DecisionAnswer!]!
+  }
+
+  type DecisionApprovalEvidence {
+    byUserId: ID
+    by: CommentActorRef
+    "The revision approved."
+    revision: Int!
+    approvedAt: DateTime!
+    "INTACT, TAMPERED, SUPERSEDED or NOT_APPROVED: the approval hash checked against the live text."
+    integrity: String!
+    "Whether the approver is one of the decision's deciders (only then does it count)."
+    byDecider: Boolean!
+  }
+
+  type DecisionEvidence {
+    "The latest approval on record, whoever gave it."
+    approval: DecisionApprovalEvidence
+  }
+
+  type DecisionWithdrawal {
+    by: DecisionActor!
+    at: DateTime!
+    reason: String!
+  }
+
+  """
+  #1641 — a human decision: a governed node (role decision) under a decision log, written only by the
+  decision operations. Its content is rendered from this structured payload, so an approval covers
+  exactly what was asked and answered. Plan: hrn:node:hadronmemory.com:hadron-server:design:decision-nodes.
+  """
+  type Decision {
+    id: ID!
+    urn: String!
+    "The decision's own page, where its card renders. Copy it; never build it."
+    portalUrl: String
+    "Permanent: DA, DB, … issued in sequence by its log, never reused."
+    code: String!
+    n: Int!
+    logId: ID
+    title: String!
+    urgency: DecisionUrgency!
+    tier: DecisionTier!
+    authorizes: Boolean!
+    "Migrated history that is never usable as an authorization."
+    archival: Boolean!
+    "DERIVED on every read. Rely on a ruling only while it is DECIDED."
+    state: DecisionState!
+    context: String
+    parts: [DecisionPart!]!
+    "What is waiting on this decision."
+    blocks: [DecisionRef!]!
+    sources: [DecisionRef!]!
+    "Spec citations the ruling must reach."
+    followUps: [DecisionRef!]!
+    deciderIds: [ID!]!
+    deciders: [CommentActorRef!]!
+    "True when the caller is a decider, including through an account merged into theirs (#1715)."
+    viewerIsDecider: Boolean!
+    "Account merges the stored user ids follow: the record keeps the merged-away id (#1715)."
+    identityMerges: [DecisionIdentityMerge!]!
+    askedBy: DecisionActor!
+    askedAt: DateTime
+    "When the last part was answered; null while any part is open."
+    answeredAt: DateTime
+    withdrawn: DecisionWithdrawal
+    evidence: DecisionEvidence!
+    "The node's current revision: the expectedRevision of the next change."
+    revSeq: Int!
+    node: Node
+  }
+
+  type DecisionPage {
+    items: [Decision!]!
+    "Matching decisions before paging."
+    total: Int!
+  }
+
+  type DecisionPurge {
+    code: String!
+    byUserId: ID!
+    by: CommentActorRef
+    at: DateTime!
+    reason: String!
+    "sha256 of the purged decision's rendered content."
+    contentHash: String!
+  }
+
+  "#1641 — a decision log's settings (never a decision, never approved)."
+  type DecisionLog {
+    id: ID!
+    urn: String!
+    portalUrl: String
+    loc: String!
+    name: String!
+    "Codes are this prefix plus letters: D → DA, DB, …"
+    prefix: String!
+    "How many codes have been issued (withdrawn and purged ones included)."
+    lastCode: Int!
+    defaultDeciderIds: [ID!]!
+    eligibleDeciderIds: [ID!]!
+    "Who decides a decision asked without naming deciders."
+    defaultDeciders: [CommentActorRef!]!
+    "Who else a decision may name as a decider. A decision's deciders are narrowed from these, never widened."
+    eligibleDeciders: [CommentActorRef!]!
+    purges: [DecisionPurge!]!
+    "Account merges the stored user ids follow: the record keeps the merged-away id (#1715)."
+    identityMerges: [DecisionIdentityMerge!]!
+    revSeq: Int!
+  }
+
+  """
+  #1715 — an account merge that a user id stored in a decision or a log follows.
+  Stored ids are never rewritten by mergeUsers, because they are part of the
+  authenticated record: the record still names fromUserId, and that account now
+  acts as toUserId. A chain of merges is listed link by link, oldest first.
+  """
+  type DecisionIdentityMerge {
+    fromUserId: ID!
+    from: CommentActorRef
+    toUserId: ID!
+    to: CommentActorRef
+    mergedAt: DateTime!
+  }
+
+  "#1641 — verifyDecision: the one evaluation's findings."
+  type DecisionVerification {
+    state: DecisionState!
+    "NO_BLOCK, BLOCK_INVALID, UNKNOWN_CODEC, UNKNOWN_RENDERER, RENDER_MISMATCH, DATA_MISMATCH, APPROVAL_HASH_MISMATCH."
+    findings: [String!]!
+    codec: String
+    renderer: String
+    revision: Int!
+    approvedRevision: Int
+    approvalIntegrity: String!
+    approvalByDecider: Boolean!
+  }
+
+  input DecisionOptionInput {
+    key: String!
+    label: String!
+    meaning: String
+    cost: String
+  }
+
+  input DecisionRecommendationInput {
+    key: String!
+    reason: String
+    "Relaying someone else's recommendation: who (recorded as a claim)."
+    attributedTo: String
+  }
+
+  input DecisionNoRecommendationInput {
+    reason: String!
+  }
+
+  "#1641 — one part of a decision. Give options or yesno, and a recommendation or noRecommendation."
+  input DecisionPartInput {
+    question: String!
+    options: [DecisionOptionInput!]
+    yesno: Boolean
+    recommendation: DecisionRecommendationInput
+    noRecommendation: DecisionNoRecommendationInput
+  }
+
+  input AskDecisionInput {
+    title: String!
+    urgency: DecisionUrgency
+    "Default APPROVED; SIGNED when authorizes is true (APPROVED is then refused: DECISION_TIER_TOO_LOW)."
+    tier: DecisionTier
+    authorizes: Boolean
+    "The authorization a grant decision carries (authorizes: true only)."
+    grant: JSON
+    "Narrows the log's default deciders; never widens past its eligible set."
+    deciders: [ID!]
+    context: String
+    blocks: [DecisionRefInput!]
+    sources: [DecisionRefInput!]
+    followUps: [DecisionRefInput!]
+    parts: [DecisionPartInput!]!
+  }
+
+  "#1641 — a change to an existing part (by its permanent number). Omitted fields are unchanged; answers never change here."
+  input DecisionPartPatchInput {
+    n: Int!
+    question: String
+    options: [DecisionOptionInput!]
+    yesno: Boolean
+    recommendation: DecisionRecommendationInput
+    noRecommendation: DecisionNoRecommendationInput
+  }
+
+  input AmendDecisionInput {
+    title: String
+    urgency: DecisionUrgency
+    tier: DecisionTier
+    context: String
+    blocks: [DecisionRefInput!]
+    sources: [DecisionRefInput!]
+    followUps: [DecisionRefInput!]
+    parts: [DecisionPartPatchInput!]
+    addParts: [DecisionPartInput!]
   }
 
   "#1606 — a comment thread's state (hrn:node:hadronmemory.com:specs:cor:dmo:110:05). Top-level comments only."
@@ -1975,26 +2303,32 @@ export const typeDefs = `#graphql
     anchorApprovalHash: String!
     "anchorRevision equals the target's current revision. When false, show the comment as about an older revision (hrn:node:hadronmemory.com:specs:cor:dmo:110:01)."
     anchorIsCurrent: Boolean!
-    "Null when retracted or hidden."
+    "Null when deleted."
     quote: String
-    "Null when retracted or hidden: the stub shows the state, not the text."
+    "Null when deleted: the stub shows the state, not the text."
     body: String
     "Top-level only; null for a reply."
     state: CommentThreadState
-    retracted: Boolean!
-    retractedAt: DateTime
-    hidden: Boolean!
-    hiddenAt: DateTime
+    "#1721 — deleted with deleteComment. A deleted comment is shown only as a stub with no text, kept while it has live replies (hrn:node:hadronmemory.com:specs:cor:dmo:110:05)."
+    deleted: Boolean!
+    deletedAt: DateTime
+    "Who deleted it: its author, or a memory manager."
+    deletedBy: CommentActorRef
     resolvedAt: DateTime
     resolvedBy: CommentActorRef
     author: CommentAuthor!
-    "Whether the caller is this comment's author (the edit/retract right). Computed with the same author key the server enforces."
+    "Whether the caller is this comment's author (the edit and delete right). Computed with the same author key the server enforces."
     viewerIsAuthor: Boolean!
     "Worker comments only: the user who bound the worker session, shown as provenance, never as author. Null for other comments, and for callers who cannot write the memory."
     provenanceUser: CommentActorRef
     createdAt: DateTime!
+    "When the comment row last changed: an edit, or a delete that leaves a stub. Resolve and reopen never change it. To show a comment as edited, use editedAt."
     updatedAt: DateTime
-    "The comment's own revision. Pass it as expectedRevision to edit, retract, resolve, reopen or hide."
+    "When the body or quote was last edited; null when it never was. Only an edit sets it (hrn:node:hadronmemory.com:specs:cor:dmo:110:12)."
+    editedAt: DateTime
+    "Who last edited the body or quote; null when it never was."
+    editedBy: CommentActorRef
+    "The comment's write counter. Pass it as expectedRevision to edit, delete, resolve or reopen. A comment keeps no revision history, so there are no earlier revisions to read."
     revSeq: Int!
   }
 
@@ -2016,7 +2350,7 @@ export const typeDefs = `#graphql
   type CommentSummary {
     openThreads: Int!
     resolvedThreads: Int!
-    "Every live comment, top-level and replies, retracted and hidden stubs included."
+    "Every live comment, top-level and replies, deleted stubs included."
     comments: Int!
     "The caller's own open, live top-level thread on this node, if any: one per author (hrn:node:hadronmemory.com:specs:cor:dmo:110:05)."
     viewerOpenThreadId: ID
@@ -2677,6 +3011,15 @@ export const typeDefs = `#graphql
     createdAt: DateTime!
     lastUsedAt: DateTime
     revokedAt: DateTime
+    "#1749 — the scopes this key holds now (hrn:node:hadronmemory.com:specs:cor:aut:010:03). Whoever manages the App only."
+    scopes: [AppKeyScope!]!
+  }
+
+  "#1749 — a scope an App key holds. A closed list; today only attention:deliver."
+  type AppKeyScope {
+    scope: String!
+    grantedAt: DateTime!
+    grantedBy: ID!
   }
 
   """
@@ -3488,7 +3831,7 @@ export const typeDefs = `#graphql
     caller-org scope as apps — never exposes a foreign org's App.
     """
     appAgents: [AppAgent!]!
-    "Adoption count. #551: the agent owning-org members' view (0 otherwise)."
+    "Adoption count. #551: the owning tenant's view (0 otherwise): the owning org's members, or for a user-owned agent its owner (#1693)."
     appCount: Int!
     """
     Org grants for this Agent (which orgs were granted it). #551: the agent's
@@ -3739,7 +4082,8 @@ export const typeDefs = `#graphql
 
   """
   One message in a team App's chat (#939, Worker envelope since #974). Exactly
-  one of authorUserId / authorWorkerId is set: a human post carries the user, a
+  one of authorUserId / authorWorkerId is set, or authorSystem is true (#1791, the
+  platform's own notice, which has neither): a human post carries the user, a
   worker post carries the Worker (the named casting, cor:dmo:050:11) plus the
   driving sessionId. mentions holds the lowercased tokens extracted
   server-side at write time (the '@worker-name / @handle' format, stored
@@ -3765,6 +4109,8 @@ export const typeDefs = `#graphql
     at: DateTime!
     authorUserId: ID
     authorWorkerId: ID
+    "#1791 — posted by the platform itself (a system author, neither a user nor a worker): the wake-budget notice. Carries no mentions."
+    authorSystem: Boolean!
     "Display convenience: the worker name or the user handle."
     authorName: String
     "Spec 049 Phase 8 (item J): the Worker's App when the post crossed Apps — visible as one in the transcript."
@@ -3924,6 +4270,18 @@ export const typeDefs = `#graphql
     """
     heldAt: DateTime
     """
+    #1726 — the one Worker this worker reports to: a non-retired Worker of the
+    same App, never itself, never a cycle. Null reports to nobody. A property of
+    the casting, not of a session, so binding or ending a session leaves it
+    alone. Changed with setWorkerReportsTo (or reportsTo at startSession); every
+    change is a \`worker.reports-to\` team event. Masked on deny, like heldByUserId.
+    """
+    reportsToWorkerId: ID
+    "#1726 — the Worker named by reportsToWorkerId; masked likewise."
+    reportsTo: Worker
+    "#1726 — true when this worker reports to a worker that has since retired (a stale claim nothing clears automatically)."
+    reportsToRetired: Boolean!
+    """
     hadron-cli#487 — whether anyone is DRIVING this name right now.
 
     Not availability: availability is the HOLD above (\`cor:agt:020:09\`), and an
@@ -3954,6 +4312,15 @@ export const typeDefs = `#graphql
     than answering false, which would state a fact the server never computed.
     """
     hasLiveSession: Boolean
+    """
+    #1707 — the model family of this worker's binding (hrn:node:hadronmemory.com:specs:cor:agt:060:04):
+    its newest open session's family. It follows the binding, not activity: a
+    quiet session keeps it, and it is cleared when the session ends or replaced
+    by a newer bind. Null when unbound, when the binding reported none, or on
+    the same read gate as hasLiveSession. A matching input, never an
+    authorization input.
+    """
+    family: String
     """
     hadron-cli#487 — when this worker was last DRIVEN, over every session it has
     ever had. Null for a worker nobody has ever bound, and that null is the
@@ -5523,7 +5890,14 @@ export const typeDefs = `#graphql
     deleteSourceMem: Boolean = false
   }
 
+  type UserMergeConsentRequest {
+    proof: String!
+    expiresAt: DateTime!
+  }
+
   input MergeUsersInput {
+    "Single-use dual-login proof from beginMergeUsersConsent, approved by both accounts. Required at execution; absent refuses MERGE_CONSENT_REQUIRED."
+    consentProof: String
     "Source user — ID, bare handle, or fully-qualified user URN. Folded into 'target' and soft-deleted."
     source: String!
     "Target user — ID, bare handle, or fully-qualified user URN. The surviving user; target wins non-combinable conflicts while roles preserve the strongest live entitlement."
@@ -5547,6 +5921,15 @@ export const typeDefs = `#graphql
     transcriptPath: String
     host: String
     tool: String
+    """
+    #1707 / hrn:node:hadronmemory.com:specs:cor:agt:060:04: the model family this session runs as, e.g.
+    claude, codex or glm (a lowercase token). Omitted: derived from llmModel
+    first, then tool — tool alone never classifies claude-code, since GLM runs
+    inside it too — and a session nothing classifies gets no family, so its
+    worker is not matched to queued tasks until one is given. A matching input,
+    never an authorization input.
+    """
+    family: String
     """
     #928 / cor:api:140: the role-Agent driving this session, as a PK or URN.
     Resolves to Session.agentId. The caller must be able to READ the agent
@@ -5591,6 +5974,15 @@ export const typeDefs = `#graphql
     proceed only on explicit override, never silently).
     """
     workerRef: String
+    """
+    #1726 — the worker this bind's worker reports to: an id, URN or name of a
+    worker in the session's App. Sets it in the same step as the bind (a spawn
+    brief), only when the worker reports to nobody or already to this one;
+    naming a different worker is refused (WORKER_REPORTS_TO_HELD) unless the
+    caller manages the App, and refuses the bind with it. Omitted leaves the
+    value unchanged. Needs workerRef and a person behind the request.
+    """
+    reportsTo: String
     """
     #940: take over a worker whose binding would otherwise refuse WORKER_TAKEN.
     Only meaningful with workerRef. Clients must surface the WORKER_TAKEN
@@ -6241,7 +6633,98 @@ export const typeDefs = `#graphql
 
   enum TeamSpecForm { SERVER CLIENT_INPUT }
 
+  enum AutomationTriggerKind { SCHEDULE WEBHOOK MANUAL }
+
   type Query {
+    "#1719: review exact automation graph bytes and digest. triggerRef is the trigger row ID; MANUAL uses the origin AppRun ID. Only its run-as user or the manager of an App-only trigger may preview."
+    previewAutomation(triggerKind: AutomationTriggerKind!, triggerRef: String!): JSON!
+
+    """
+    #1705 — one agent task, or null when it does not exist or the caller may
+    not read it (no existence oracle). Readers: the App's participants, workers
+    acting through their sessions included (hrn:node:hadronmemory.com:specs:cor:agt:050:21).
+    """
+    agentTask(id: ID!): AgentTask
+
+    "#1747 — the live tickers of an App the caller participates in. An App the caller cannot reach reads as APP_NOT_FOUND (hrn:node:hadronmemory.com:specs:cor:agt:080:18)."
+    tickers(appRef: String!): [Ticker!]!
+
+    "#1747 — one ticker by id or hrn:ticker: URN; null when it does not exist or the caller may not reach it."
+    ticker(ref: String!): Ticker
+
+    "#1747 — an App's ticker settings: the cadence floor, the default self-subscription cadence, the live-ticker cap and the daily wake budget (hrn:node:hadronmemory.com:specs:cor:agt:080:05)."
+    appTickerSettings(appRef: String!): AppTickerSettings!
+
+    "#1747 — one worker's wake settings (defaults when it has none), readable by the App's participants (hrn:node:hadronmemory.com:specs:cor:agt:080:03)."
+    workerWakeSettings(workerRef: String!): WorkerWakeSettings!
+    "#1748 — the wakes due now (hrn:node:hadronmemory.com:specs:cor:agt:080:08). Counts and seq ranges only; reads nothing it does not return."
+    dueWakes(appRef: String!, workerRefs: [String!], first: Int, after: String): DueWakePage!
+
+    """
+    #1705 — a team App's agent tasks, newest first. Filters combine with AND;
+    owner / assignee name a party of the App (a ref naming nobody matches
+    nothing). queued: pending with no assignee. limit defaults to 50 (cap 200).
+    Readers: the App's participants (hrn:node:hadronmemory.com:specs:cor:agt:050:21); a pure App key is refused.
+    An App you do not participate in answers APP_NOT_FOUND, exactly like an
+    absent one.
+    """
+    agentTasks(
+      appRef: ID!
+      status: [AgentTaskStatus!]
+      owner: AgentTaskPartyInput
+      assignee: AgentTaskPartyInput
+      tag: String
+      parentTaskId: ID
+      rootsOnly: Boolean
+      queued: Boolean
+      limit: Int
+      offset: Int
+    ): [AgentTask!]!
+
+    """
+    #1705 — a task and every task below it, the root first, then by depth and
+    creation. Null when the root is missing or unreadable. Bounded at 1000 rows.
+    """
+    agentTaskTree(root: ID!): [AgentTask!]
+
+    """
+    #1705 — a team App's event stream (hrn:node:hadronmemory.com:specs:cor:agt:050:11), in (createdAt, id)
+    order. To read the next page pass after: the id of the last event you
+    read; the cursor is the (createdAt, id) pair, so events sharing a
+    timestamp are never skipped. since is a coarse time filter (strictly
+    after), not a continuation. limit defaults to 50 (cap 200).
+    """
+    agentTeamEvents(
+      appRef: ID!
+      since: DateTime
+      "The id of the last event read: the page continues strictly after it. An id that is not an event of this App is refused BAD_USER_INPUT."
+      after: ID
+      types: [String!]
+      alarmsOnly: Boolean
+      taskId: ID
+      limit: Int
+    ): [AgentTeamEvent!]!
+
+    """
+    #1706 — an App's effective stall windows (hrn:node:hadronmemory.com:specs:cor:agt:050:14–:17). Readers:
+    the App's task audience (hrn:node:hadronmemory.com:specs:cor:agt:050:21).
+    """
+    agentTaskStallSchedule(appRef: ID!): AgentTaskStallSchedule!
+
+    """
+    #1706 — every worker and model-family availability record in an App
+    (hrn:node:hadronmemory.com:specs:cor:agt:060:02 / :03), each with whether it is in effect now. Readers: the
+    App's task audience (interim until hrn:node:hadronmemory.com:specs:cor:agt:060:02's read question is ruled).
+    """
+    teamAvailability(appRef: ID!): TeamAvailability!
+
+    """
+    #1707 — every worker's derived state in an App (plan design:agent-tasks
+    §7.4), computed server-side so the CLI and portal render one answer. Plan-
+    derived, not a spec (hrn:node:hadronmemory.com:specs:cor:agt:050 leaves the roster out of scope). Readers:
+    the App's task audience (hrn:node:hadronmemory.com:specs:cor:agt:050:21). Retired workers are left out.
+    """
+    teamRoster(appRef: ID!): TeamRoster!
     "Declarative team JSON Schema (2020-12). apiVersion is the full identifier hadron.dev/team/v1alpha1; HTTP discovery uses /schemas/team/v1alpha1.json. CLIENT_INPUT additionally permits file parts for clients to inline; the server accepts SERVER only."
     teamSpecSchema(apiVersion: String!, form: TeamSpecForm = SERVER): String!
     """
@@ -6583,6 +7066,29 @@ export const typeDefs = `#graphql
     commentThreads(targetRef: ID!, state: [CommentThreadState!], limit: Int = 50, offset: Int = 0): CommentThreadPage!
     "#1606 — one comment by ID or URN; null when missing or unreadable."
     comment(ref: ID!): Comment
+
+    "#1641 — a decision log's settings by ID or URN; null when missing or unreadable."
+    decisionLog(ref: ID!): DecisionLog
+    "#1641 — one decision by ref (ID or URN), or by code (DU, or a citation DU-1) within logRef. Null when missing or unreadable."
+    decision(ref: ID, code: String, logRef: ID): Decision
+    """
+    #1641 — the decisions of one log (logRef), or with awaitingMe the OPEN decisions the caller
+    decides across every memory they can read. State is derived for every candidate BEFORE the
+    filters, sort and paging; a list above 5000 candidates refuses (DECISION_LOG_TOO_LARGE_FOR_FILTER).
+    """
+    decisions(
+      logRef: ID
+      awaitingMe: Boolean
+      state: [DecisionState!]
+      tier: DecisionTier
+      urgency: [DecisionUrgency!]
+      authorizes: Boolean
+      sort: DecisionSort = PORTAL_DEFAULT
+      limit: Int = 50
+      offset: Int = 0
+    ): DecisionPage!
+    "#1641 — re-render a decision from its payload and check it against its content, data and approval: the findings behind its state."
+    verifyDecision(ref: ID!): DecisionVerification!
 
     """
     A single node-revision snapshot by its id (#617 Display).
@@ -7281,7 +7787,9 @@ export const typeDefs = `#graphql
     """
     #1384 paged (v2) attention poll — the bounded successor to teamAttention
     (v1 answers UPGRADE_REQUIRED). Each call decrypts at most scanLimit rows
-    and emits at most limit Worker/Channel pairs; continue with page while
+    (encrypted Channels), counts plaintext Channels with bounded SQL
+    aggregates (#1779: a window of 200 seqs per scanLimit unit per Channel
+    visit, 400 per call), and emits at most limit Worker/Channel pairs; continue with page while
     nextPage is present. The final page alone carries adoptableSince — adopt
     it only after EVERY listed nudge was accepted; on any partial failure
     retain the prior watermark and restart the scan (duplicates, never loss).
@@ -7593,7 +8101,8 @@ export const typeDefs = `#graphql
     """
     Dry-run castWorker (#964): run the cast's exact resolution — same
     arguments, same typed refusals (WORKER_AGENT_NOT_FOUND / _AMBIGUOUS /
-    _NOT_INSTALLED, WORKER_NAME_REQUIRED, WORKER_NAME_TAKEN, APP_UNINSTALLED),
+    _NOT_INSTALLED, WORKER_NAME_REQUIRED, WORKER_NAME_TAKEN,
+    WORKER_NAME_CONFUSABLE, APP_UNINSTALLED),
     same MINT gate — up to but not
     including the writes, and return what would be created. A Query, not a
     dryRun flag: casting a name is the one irreversible act in the team
@@ -7849,6 +8358,174 @@ export const typeDefs = `#graphql
   }
 
   type Mutation {
+    "#1719: rebind a trigger to its reviewed graph. expectedHash must match previewAutomation; edits since preview refuse adoption."
+    reAdoptAutomation(triggerKind: AutomationTriggerKind!, triggerRef: String!, expectedHash: String!): Boolean!
+
+    """
+    #1705 — create an agent task (hrn:node:hadronmemory.com:specs:cor:agt:050:06 root, :07 child). Writes
+    task.created, and task.assigned when an assignee is named. A worker acts
+    through its session (X-Hadron-Session); a person acts as themselves.
+    A root task's creator may name its owner at creation — any participating
+    worker or person (#1757, hrn:node:hadronmemory.com:specs:cor:agt:050:01, ruled 2026-10-11).
+    Typed refusals: TASK_NOT_FOUND (a parent the caller cannot read, or in
+    another App), TASK_NOT_ASSIGNEE, TASK_ENDED, TASK_CHILD_OWNER_MISMATCH,
+    TASK_OWNER_INVALID, TASK_ASSIGNEE_INVALID, SESSION_NOT_BOUND,
+    APP_NOT_FOUND (an App that does not exist or that you do not participate
+    in, alike), APP_UNINSTALLED, FORBIDDEN (impersonation), BAD_USER_INPUT.
+    Every write re-checks the caller's participation and the App's state
+    inside its transaction.
+    """
+    createAgentTask(input: CreateAgentTaskInput!): AgentTask!
+
+    """
+    #1747 — create a ticker in an App (hrn:node:hadronmemory.com:specs:cor:agt:080:01, :18). Any App participant, or a
+    session bound to a worker of the App, up to the App live-ticker cap. The owner is the
+    caller, never an argument. Refusals: TICKER_NAME_TAKEN, TICKER_CADENCE_OUT_OF_RANGE,
+    TICKER_LIMIT_REACHED, TICKER_QUIET_HOURS_INVALID, APP_NOT_FOUND, APP_UNINSTALLED.
+    """
+    createTicker(appRef: String!, input: TickerInput!): Ticker!
+
+    "#1747 — change a ticker. Its owner, the holder of its owning worker, or whoever manages the App. The slug never changes."
+    updateTicker(ref: String!, input: TickerPatch!): Ticker!
+
+    "#1747 — delete a ticker. Its live subscriptions end with reason TICKER_DELETED; its name may be reused, its slug never."
+    deleteTicker(ref: String!): Boolean!
+
+    """
+    #1747 — change an App ticker settings (hrn:node:hadronmemory.com:specs:cor:agt:080:05, :19). Whoever manages the App only.
+    Refusals: TICKER_SETTINGS_OUT_OF_RANGE, TICKER_SETTINGS_CONFLICT (a floor above a live ticker cadence).
+    """
+    setAppTickerSettings(appRef: String!, input: AppTickerSettingsInput!): AppTickerSettings!
+
+    """
+    #1747 — subscribe a worker to a ticker (hrn:node:hadronmemory.com:specs:cor:agt:080:20, :25). Its holder and whoever manages
+    the App, to any ticker; the worker itself only at or slower than the App self-subscription cadence
+    (SUBSCRIBE_CADENCE_NEEDS_HOLDER); a worker holding the may-subscribe-workers grant, with a person
+    behind the call, for OTHER workers only. Idempotent for a live subscription. A grant use is announced
+    to the team chat, best-effort: announcement says POSTED or FAILED, and the subscription stands either way.
+    """
+    subscribeWorker(tickerRef: String!, workerRef: String!): SubscribeResult!
+
+    "#1747 — end a worker subscription. The same callers as subscribeWorker, and the worker itself, always."
+    unsubscribeWorker(tickerRef: String!, workerRef: String!): SubscribeResult!
+
+    """
+    #1747 — change a worker wake settings (hrn:node:hadronmemory.com:specs:cor:agt:080:03, :21): the worker itself, its holder, or whoever manages
+    the App, in either direction. Never the may-subscribe-workers grant.
+    """
+    setWorkerWakeSettings(workerRef: String!, input: WorkerWakeSettingsInput!): WorkerWakeSettings!
+    "#1748 — record that wakes were delivered (hrn:node:hadronmemory.com:specs:cor:agt:080:16). Never moves a read position."
+    acknowledgeWakes(proofs: [String!]!): AcknowledgeWakesResult!
+
+    "#1747 — give a worker a named App grant (hrn:node:hadronmemory.com:specs:cor:agt:080:24). Whoever manages the App only. Idempotent."
+    grantApp(appRef: String!, workerRef: String!, name: AppGrantName!): AppGrant!
+
+    "#1747 — revoke a grant. Whoever manages the App only. Takes effect at the grantee next call."
+    revokeAppGrant(appRef: String!, workerRef: String!, name: AppGrantName!): AppGrant!
+
+    """
+    #1705 — assign a task with no assignee — a queued task (pending) or a BACKLOG task: the
+    task's owner, a worker the owner reports to, or whoever manages the App
+    (hrn:node:hadronmemory.com:specs:cor:agt:050:09). closeSessionWhenDone, when
+    given, replaces the task's value. Assigning a BACKLOG task moves it to
+    pending (hrn:node:hadronmemory.com:specs:cor:agt:050:02, #1754). Refusals: TASK_NOT_FOUND, TASK_NOT_OWNER,
+    TASK_ENDED, TASK_INVALID_TRANSITION (already assigned: use
+    reassignAgentTask), TASK_ASSIGNEE_INVALID, SESSION_NOT_BOUND, APP_UNINSTALLED.
+    """
+    assignAgentTask(taskId: ID!, assignee: AgentTaskPartyInput!, closeSessionWhenDone: Boolean): AgentTask!
+
+    """
+    #1705 — move a task to another assignee: the task's owner, or whoever
+    manages the App (hrn:node:hadronmemory.com:specs:cor:agt:050:09). A started task stays started; the former
+    assignee can no longer move it. Refusals: TASK_NOT_FOUND, TASK_NOT_OWNER,
+    TASK_ENDED, TASK_INVALID_TRANSITION (no assignee yet, or the same one),
+    TASK_ASSIGNEE_INVALID, SESSION_NOT_BOUND, APP_UNINSTALLED.
+    """
+    reassignAgentTask(taskId: ID!, assignee: AgentTaskPartyInput!, closeSessionWhenDone: Boolean): AgentTask!
+
+    """
+    #1705 — start a pending task: its assignee only (hrn:node:hadronmemory.com:specs:cor:agt:050:08).
+    Refusals: TASK_NOT_FOUND, TASK_NOT_ASSIGNEE, TASK_ENDED,
+    TASK_INVALID_TRANSITION, SESSION_NOT_BOUND, APP_UNINSTALLED.
+    """
+    startAgentTask(taskId: ID!): AgentTask!
+
+    """
+    #1705 — record progress on a started task: its assignee only
+    (hrn:node:hadronmemory.com:specs:cor:agt:050:08). Carries no text. Refusals as startAgentTask.
+    """
+    recordAgentTaskProgress(taskId: ID!): AgentTask!
+
+    """
+    #1705 — finish a started task with its result: its assignee only
+    (hrn:node:hadronmemory.com:specs:cor:agt:050:08). A pending task is refused: start it first. Refusals as
+    startAgentTask, plus BAD_USER_INPUT for an outcome that is not one word.
+    """
+    finishAgentTask(taskId: ID!, result: AgentTaskResultInput!): AgentTask!
+
+    """
+    #1705 — cancel a pending, started or backlog task: its owner, a worker the owner reports
+    to, or whoever manages the App (hrn:node:hadronmemory.com:specs:cor:agt:050:09; a backlog task directly,
+    Holger team chat #8150). Refusals:
+    TASK_NOT_FOUND, TASK_NOT_OWNER, TASK_ENDED, SESSION_NOT_BOUND, APP_UNINSTALLED.
+    """
+    cancelAgentTask(taskId: ID!): AgentTask!
+
+    """
+    #1754 — park a queued task in the backlog (hrn:node:hadronmemory.com:specs:cor:agt:050:02): pending
+    with no assignee becomes BACKLOG — unassigned, never matched, never waited
+    on, no alarms. Whoever may assign a task may park it: its owner, a worker
+    the owner reports to, or whoever manages the App
+    (hrn:node:hadronmemory.com:specs:cor:agt:050:09). Refusals: TASK_NOT_FOUND, TASK_NOT_OWNER,
+    TASK_ENDED, TASK_INVALID_TRANSITION (not pending, or an assignee),
+    SESSION_NOT_BOUND, APP_UNINSTALLED.
+    """
+    parkAgentTask(taskId: ID!): AgentTask!
+
+    """
+    #1754 — make a backlog task ready to be worked
+    (hrn:node:hadronmemory.com:specs:cor:agt:050:02): BACKLOG becomes PENDING and the task enters
+    the queue. Whoever may assign a task may make it ready: its owner, a worker
+    the owner reports to, or whoever manages the App
+    (hrn:node:hadronmemory.com:specs:cor:agt:050:09). Refusals: TASK_NOT_FOUND, TASK_NOT_OWNER,
+    TASK_ENDED, TASK_INVALID_TRANSITION (not backlog), SESSION_NOT_BOUND, APP_UNINSTALLED.
+    """
+    makeAgentTaskReady(taskId: ID!): AgentTask!
+
+    """
+    #1706 — acknowledge an alarm (hrn:node:hadronmemory.com:specs:cor:agt:050:20): it stops waking higher
+    owners; the stall episode goes on until the task moves. Any owner in the
+    alarm's chain, or whoever manages the App (hrn:node:hadronmemory.com:specs:cor:agt:050:24), and nobody
+    else; the time is the server's.
+    Refusals: ALARM_NOT_FOUND (also for an App you cannot read),
+    NOT_AN_ALARM, ALARM_NOT_IN_CHAIN, ALARM_ALREADY_ACKNOWLEDGED (the first
+    stands), SESSION_NOT_BOUND, APP_UNINSTALLED.
+    """
+    acknowledgeAlarm(eventId: ID!): AgentTeamEvent!
+
+    """
+    #1706 — set a worker's availability for work (hrn:node:hadronmemory.com:specs:cor:agt:060:08): the worker
+    itself, acting through its session, and only to UNAVAILABLE; the person
+    holding its name; or whoever manages the App. Writes availability.changed.
+    Refusals: WORKER_NOT_FOUND, AVAILABILITY_NOT_PERMITTED, WORKER_RETIRED,
+    BAD_USER_INPUT, SESSION_NOT_BOUND, APP_UNINSTALLED.
+    """
+    setWorkerAvailability(input: SetWorkerAvailabilityInput!): WorkerAvailability!
+
+    """
+    #1706 — set a model family's availability for work in an App
+    (hrn:node:hadronmemory.com:specs:cor:agt:060:09): whoever manages the App only. Writes availability.changed.
+    Refusals: APP_NOT_FOUND, AVAILABILITY_NOT_PERMITTED, BAD_USER_INPUT,
+    SESSION_NOT_BOUND, APP_UNINSTALLED.
+    """
+    setModelFamilyAvailability(input: SetModelFamilyAvailabilityInput!): ModelFamilyAvailability!
+
+    """
+    #1706 — set an App's stall windows: whoever manages the App. Refusals:
+    APP_NOT_FOUND, APP_MANAGER_REQUIRED, BAD_USER_INPUT, SESSION_NOT_BOUND,
+    APP_UNINSTALLED.
+    """
+    setAgentTaskStallSchedule(appRef: ID!, input: AgentTaskStallScheduleInput!): AgentTaskStallSchedule!
     """
     Start impersonating another member of orgRef (admin support/diagnostics).
     Caller must be a live ADMIN/OWNER of the org (platform ADMIN/OWNER is
@@ -8245,16 +8922,44 @@ export const typeDefs = `#graphql
     replyToComment(commentRef: ID!, body: String!): Comment!
     "#1606 — the author edits a comment's body and/or quote. COMMENT_NOT_AUTHOR otherwise."
     editComment(commentRef: ID!, body: String, quote: String, expectedRevision: Int!): Comment!
-    "#1606 — the author retracts a comment, leaving a stub (hrn:node:hadronmemory.com:specs:cor:dmo:110:05)."
-    retractComment(commentRef: ID!, expectedRevision: Int!): Comment!
+    """
+    #1721 — delete one comment: its author (with write access), or anyone who may delete others' comments (the memory's manager, or a platform admin outside personal and private memories). A top-level comment with live replies stays as a deleted stub with no text; any other comment is soft-deleted and gone from every read, and a stub goes with its last live reply (hrn:node:hadronmemory.com:specs:cor:dmo:110:05). Returns the comment as deleted. COMMENT_NOT_AUTHOR for a writer who is not the author; COMMENT_DELETED for a stub.
+    """
+    deleteComment(commentRef: ID!, expectedRevision: Int!): Comment!
     "#1606 — resolve a thread: its author or any writer of the memory. commentRef is the top-level comment; returns it."
     resolveCommentThread(commentRef: ID!, expectedRevision: Int!): Comment!
     "#1606 — reopen a resolved thread: its author or any writer of the memory."
     reopenCommentThread(commentRef: ID!, expectedRevision: Int!): Comment!
-    "#1606 — a memory admin hides an abusive comment, leaving a stub."
-    hideComment(commentRef: ID!, reason: String!, expectedRevision: Int!): Comment!
-    "#1606 — a memory admin deletes a whole thread (soft: gone from every read, limit and check; history kept). commentRef may be any comment of it."
+    "#1606 — a memory admin deletes a whole thread (soft: gone from every read, limit and check; the rows stay for audit, with no revision history, #1721). commentRef may be any comment of it."
     deleteCommentThread(commentRef: ID!, reason: String!): Boolean!
+
+    """
+    #1641 — create a decision log at loc in a memory: needs management rights on the memory, or the
+    owner role in the App the memory belongs to (Holger's ruling, team chat #7790). Refused
+    in an encrypted memory (DECISION_LOG_ENCRYPTED), a git-mirrored one (DECISION_LOG_MIRRORED), a
+    system memory (DECISION_LOG_SYSTEM_MEMORY), an anonymous one (DECISION_LOG_ANONYMOUS_MEMORY), at an
+    occupied loc (DECISION_LOG_EXISTS), or inside a decision's subtree. Deciders are user ids, each able
+    to read the memory (DECISION_DECIDER_NOT_ELIGIBLE).
+    """
+    createDecisionLog(memoryRef: ID!, loc: String!, name: String, prefix: String, defaultDeciders: [ID!]!, eligibleDeciders: [ID!]): DecisionLog!
+    "#1641 — replace a log's default (and, when given, other eligible) deciders, as an audited revision of the log. Existing decisions keep theirs. Needs management rights on the memory, or the owner role in its App."
+    setDecisionLogDeciders(logRef: ID!, defaultDeciders: [ID!]!, eligibleDeciders: [ID!], expectedRevision: Int!, reason: String!): DecisionLog!
+    """
+    #1641 — ask a decision in a log: the server issues the next code (DA, DB, …) and renders the
+    content. Any writer of the log's memory, agents included. Refusals: DECISION_INVALID (with JSON
+    pointers), DECISION_RECOMMENDATION_MISSING, DECISION_TIER_TOO_LOW, DECISION_DECIDER_NOT_ELIGIBLE.
+    """
+    askDecision(logRef: ID!, input: AskDecisionInput!): Decision!
+    """
+    #1641 — amend a decision. Before any answer, any writer; after one, a decider only. Urgency is a
+    decider's to change; lowering the tier is a decider's, before an answer, never when it authorizes.
+    Refusals: NODE_WRITE_CONFLICT, DECISION_PART_RENUMBER, DECISION_ANSWER_IMMUTABLE, DECISION_NOT_DECIDER.
+    """
+    amendDecision(ref: ID!, input: AmendDecisionInput!, expectedRevision: Int!, reason: String!): Decision!
+    "#1641 — withdraw a decision (terminal; the code stays consumed): the asker or a decider, a decider once answered. DECIDED ones are superseded instead (DECISION_ANSWERED_DECIDED)."
+    withdrawDecision(ref: ID!, reason: String!, expectedRevision: Int!): Decision!
+    "#1641 — a platform admin hard-deletes a decision that was never answered, recorded on its log (DECISION_ANSWERED otherwise). The code stays consumed."
+    purgeUnansweredDecision(ref: ID!, reason: String!): Boolean!
 
     """
     Delete ALL NodeRevision rows for a node, returning the count deleted (#617).
@@ -8307,7 +9012,26 @@ export const typeDefs = `#graphql
     selects which fields); source nodes with no counterpart move over with
     their loc unchanged. Edges follow. The source memory ends up empty;
     'deleteSourceMem: true' then deletes it. v1 rejects encrypted source or
-    target memories and system/app classes.
+    target memories and system/app classes. An address the merge would move
+    a node or a carried comment into, but which the target holds with a
+    SOFT-DELETED node, refuses MERGE_TARGET_LOC_TOMBSTONED (the tombstone
+    still owns the address; up to 25 locs named, with the full count). A
+    tombstone present when the merge starts refuses before any batch commits;
+    one that appears mid-merge refuses the batch it hits, and batches already
+    committed stay committed (re-running completes the merge). Hard-delete the
+    tombstone, or recreate a node there so it folds, then re-run.
+
+    The merge commits in batches, and is resumable. A refusal raised after
+    some batches committed (#1686) says so: it carries
+    extensions.partialMerge { applied, relocated, folded, edgesMoved,
+    edgesDropped, remainingSourceNodes, sourceIntact, remedy } and keeps its
+    own code, or is MERGE_PARTIALLY_APPLIED (with causeCode) when the cause
+    was untyped. The source memory is never deleted by a refused merge;
+    resolve the blocker and re-run the same merge to finish it. A failure
+    after the merge completed (re-indexing or reading back the target)
+    carries partialMerge too, with remainingSourceNodes 0 and sourceIntact
+    false when deleteSourceMem had removed the source. A refusal with no
+    partialMerge applied nothing.
     """
     mergeMemories(input: MergeMemoriesInput!): Memory!
 
@@ -8505,7 +9229,11 @@ export const typeDefs = `#graphql
     endSession(id: ID!, summary: String, handoff: String, inputTokens: Int, outputTokens: Int, turnCount: Int, errorCount: Int): Session!
 
     """
-    Record a usage event
+    Record a usage event. A supplied session is attributed only when owned
+    by the caller (no admin or impersonation bypass). Missing, deleted or
+    unowned session references are recorded without session attribution.
+    Owned ended, expired or idle sessions accept late attribution without
+    counting it as activity. The existing READER role gate still applies.
     """
     recordUsage(event: UsageEventInput!): Boolean!
 
@@ -8518,16 +9246,41 @@ export const typeDefs = `#graphql
     regenerateAppKey(appRef: ID!): AppCreated!
 
     # User management
+    """
+    Update display name and handle. A supplied email must match the existing
+    address (ignoring case and surrounding whitespace); it is not rewritten
+    or cleared by this call.
+    """
     updateMyProfile(name: String, handle: String, email: String): User!
     updateUserRoles(userId: ID!, roles: [Role!]!): User!
     """
     Consolidate a duplicate account into a surviving user. Source-only
     identities and relationships move; duplicate role-bearing relationships
     preserve the strongest live entitlement. The source is soft-deleted.
-    Platform admin only. The resulting merge is global; organization
-    administration does not authorize account consolidation.
+    Platform admin with an unbound user JWT only; API keys, Apps, impersonation
+    and session-bound callers refuse FORBIDDEN. The resulting merge is global;
+    organization administration does not authorize account consolidation. Both accounts must
+    approve the exact ordered pair after fresh login, within 15 minutes.
+    The proof is single-use, consumed atomically before transfers, and recorded
+    with the merge. Invalid or missing proof refuses MERGE_CONSENT_REQUIRED.
+    There is no administrator substitute or recovery path.
+
+    Records the merge (#1715). User ids stored inside decisions and decision
+    logs are never rewritten, since they are authenticated; readers follow
+    them to the surviving account, so it is the asker or decider they name.
+
+    Refused with MERGE_USER_IN_OPEN_ALARMS (extension alarmCount; never the
+    alarms, tasks or Apps, which the caller may not be able to read) while
+    either account is named in the owner chain of an unacknowledged agent-task
+    alarm, whose sealed chain cannot follow a merge yet. Acknowledge
+    the alarms, then merge.
     """
     mergeUsers(input: MergeUsersInput!): User!
+
+    "A platform admin using an unbound user JWT begins an exact ordered-pair, full-consolidation consent, valid for 15 minutes; API keys, Apps, impersonation and session-bound callers refuse FORBIDDEN. Returns its opaque proof once."
+    beginMergeUsersConsent(source: String!, target: String!): UserMergeConsentRequest!
+    "Each account approves with its own JWT from a verified login at or after consent creation (millisecond resolution). API keys, Apps, impersonation and any session-bound caller cannot approve. Source and target name the exact ordered pair. No admin substitute."
+    approveMergeUsersConsent(proof: String!, source: String!, target: String!): Boolean!
 
     """
     Delete a user account (self-serve account deletion, Apple 5.1.1(v) /
@@ -9790,6 +10543,10 @@ export const typeDefs = `#graphql
     identifier nobody picked. The workers_app_name_uniq constraint IS the
     arbiter. Names are unique per App, case-insensitively, FOREVER (two Apps
     may each have an Iris; retirement and uninstall never free a name).
+    #1677: NFKC-normalized Unicode 16 UTS #39 skeletons (original-case and
+    caseless) must also be distinct within the App, including retired workers. A collision refuses
+    WORKER_NAME_CONFUSABLE and names the existing worker; the chosen display
+    spelling is preserved. Existing workers are not renamed or invalidated.
 
     A worker-scoped working memory is provisioned in the App's container
     (Worker.memoryId; best-effort — a failed provision leaves it null for
@@ -9799,7 +10556,7 @@ export const typeDefs = `#graphql
     AppMember of the App whose role is not 'reader', or the owner of a
     user-owned App. Pure App-key principals are denied.
 
-    Error codes (extensions.code): WORKER_NAME_TAKEN,
+    Error codes (extensions.code): WORKER_NAME_TAKEN, WORKER_NAME_CONFUSABLE,
     WORKER_NAME_REQUIRED, WORKER_AGENT_NOT_INSTALLED,
     WORKER_AGENT_NOT_FOUND, WORKER_AGENT_AMBIGUOUS, APP_UNINSTALLED.
 
@@ -9839,10 +10596,24 @@ export const typeDefs = `#graphql
     and refuses new session bindings; the row and its name reservation
     survive. Idempotent — retiring an already-retired worker returns it
     unchanged. Same authorization as castWorker. workerRef is the worker's id
-    or its URN (#991).
+    or its URN (#991). Retiring clears the worker's own reportsTo (#1726);
+    workers that report to it keep theirs and read reportsToRetired.
     """
     retireWorker(workerRef: ID!): Worker!
 
+    """
+    #1726 — set, hand over or clear (reportsTo: null) who a worker reports to:
+    a non-retired worker of the same App, never itself, never a cycle
+    (WORKER_REPORTS_TO_SELF / _OTHER_APP / _RETIRED / _CYCLE; WORKER_RETIRED
+    for a retired worker). Allowed for whoever manages the App, and for the
+    worker it reports to now (handing over or clearing is its agreement). A
+    worker that reports to nobody may also be claimed by a worker for itself
+    when one person holds both, or placed under any worker by its own holder
+    (interim, pending a ruling). WORKER_REPORTS_TO_FORBIDDEN otherwise. A worker acts through its bound
+    session, with a person behind the request. Each change is a
+    \`worker.reports-to\` team event; setting the current value changes nothing.
+    """
+    setWorkerReportsTo(workerRef: ID!, reportsTo: ID): Worker!
     """
     #1050 — release a HELD name, so somebody else can hold it.
 
@@ -10229,21 +11000,23 @@ export const typeDefs = `#graphql
     so this works for B2C / consumer / therapy use cases where the
     end-user is not in the App's operator org.
 
-    Role defaults to the first value in the Agent's
-    installationPolicy.memberRoles (the conventional "guest" or "owner"
-    slot). Idempotent — if the user is already an AppMember of the App,
-    the existing row is returned.
+    #1714: self-join is closed by default. It is open only when the App's
+    primary Agent declares installation_policy.selfJoinRole, which must be
+    one of its memberRoles and is never "owner"; the joiner gets that role.
+    Promotion to owner or any privileged role is ensureAppMember, by an App
+    manager. Idempotent — if the user is already an AppMember of the App,
+    the existing row is returned, before the gate is consulted.
 
     Error codes (GraphQLError extensions.code, Error.name style):
       - UNAUTHENTICATED — no logged-in user in context.
       - AppNotFoundError — the App does not exist or is soft-deleted.
       - AppUninstalledError — the App is in the spec-021 soft-uninstall
         lifecycle phase.
-      - OrphanAppError — the App has no installed Agents (so there's
-        no Agent.installationPolicy to consult).
-      - NoMemberRolesError — the primary Agent's
-        installation_policy.memberRoles is empty, so joinApp can't
-        pick a default role.
+      - SelfJoinNotAllowedError — the App's Agent has not opted into
+        self-service joining (including an App with no installed Agent).
+        Checked before capacity, so it reveals nothing about maxMembers.
+      - OrphanAppError — the App lost its installed Agents while the
+        join was in flight.
       - MaxMembersExceededError — the Agent's maxMembers limit is hit.
       - InvalidRoleError — the picked default role isn't accepted by
         the Agent's policy (rare; would indicate a policy update
@@ -10489,6 +11262,14 @@ export const typeDefs = `#graphql
     AppKey is keyed by raw ID — no urn column. Stays ID-only.
     """
     revokeAppKey(id: ID!): Boolean!
+    """
+    #1749 — give an App key a scope (hrn:node:hadronmemory.com:specs:cor:aut:010:04). Only whoever manages the App, as
+    themselves: never an App key, a worker's session or an impersonation. Granting a scope the key holds changes nothing.
+    A new key, and a rotated one, holds none. Unknown scope: BAD_USER_INPUT.
+    """
+    grantAppKeyScope(id: ID!, scope: String!): AppKey!
+    "#1749 — take a scope back. The key's next call is refused. Revoking a scope it does not hold changes nothing."
+    revokeAppKeyScope(id: ID!, scope: String!): AppKey!
 
     """
     025-oauth-for-mcp FR-004: mint a new user-scoped API key for the
@@ -10532,40 +11313,50 @@ export const typeDefs = `#graphql
     App Key callers only: vouch for a user, creating (or returning) the User
     this App knows by \`externalId\`. Managing that user's SESSIONS is the
     startAgentSession / endAgentSession pair below, not this call.
+    The legacy email argument accepts only empty values; identity addresses
+    are established through verified sign-in.
     """
     createAppUser(externalId: String!, handle: String, name: String, email: String): User!
 
     """
     Multi-user-agent session lifecycle (renamed to avoid collision with
     the developer/guided startSession and endSession mutations).
-    dataKey is base64-encoded, 32 bytes, required when the app is
-    configured with identifyUserMethod: SECRET and the target memory is
-    (or will become) encrypted.
+    Supply a base64-encoded 32-byte key beside the operation through the
+    x-hadron-operation-key header when identifyUserMethod is SECRET.
+    The key is verified for an existing encrypted memory and held only
+    after the new session commits; USER_ID mode rejects key supply.
+    Only one key-consuming operation may use the header in a request;
+    a second attempt is BAD_UNLOCK_INPUT.
     """
     startAgentSession(
       agentId: ID!
       externalUserId: String
       sessionTimeoutSeconds: Int
-      dataKey: String
     ): Session!
     endAgentSession(sessionId: ID!): Boolean!
 
     """
-    Link an anonymous memory to a real user (converts session memory
-    ownership). Providing dataKey encrypts the memory in place atomically
-    with the link.
+    Link this App's live plaintext anonymous memory to a real user.
+    Providing x-hadron-operation-key in the request header claims private
+    ownership and encrypts live nodes; remaining fields and history complete
+    in bounded passes. Only one key-consuming operation may use the header
+    per request; a second is BAD_UNLOCK_INPUT. After a committed claim,
+    interrupted completion allows the strict owner or owning App key to call
+    encryptMemory with the existing key. A registered holding cannot be linked again.
 
     Accepts the entity's ID or URN.
     """
-    linkMemoryToUser(memoryId: ID!, externalUserId: String!, dataKey: String): Memory!
+    linkMemoryToUser(memoryId: ID!, externalUserId: String!): Memory!
 
     """
     Convert a plaintext PRIVATE memory to encrypted (spec 041, caller-held
     keys). Exactly one of dataKey (base64, 32 bytes) / passphrase (scrypt-
     derived; salt + params stored on the memory, the key itself never).
-    Owner or org-App-key. All node content/abstract/data is re-written as
-    ciphertext in one transaction. One-way without the key: the server
-    cannot recover the content.
+    First encryption requires the strict owner. The owning App key may only
+    complete already-encrypted private memory using its existing dataKey and
+    matching verifier; impersonation and sibling Apps grant no authority. Live and
+    historical node fields are converted in bounded locked passes. One-way
+    without the key: the server cannot recover the content.
 
     Accepts the entity's ID or URN.
     """
@@ -10627,5 +11418,644 @@ export const typeDefs = `#graphql
     locked: Boolean!
     lockedBy: String
     expiresAt: DateTime
+  }
+
+  # ── #1705 Agent tasks (Task Management T1, epic #1704; hrn:node:hadronmemory.com:specs:cor:agt:050) ──────
+
+  """
+  An agent task's status (hrn:node:hadronmemory.com:specs:cor:agt:050:02). FINISHED and CANCELLED are the end states.
+  BACKLOG (#1754) is parked: no assignee, never matched, never waited on, no alarms; assigning it or making it
+  ready moves it to PENDING.
+  """
+  enum AgentTaskStatus {
+    BACKLOG
+    PENDING
+    STARTED
+    FINISHED
+    CANCELLED
+  }
+
+  "The statuses a task may be CREATED in (#1754, hrn:node:hadronmemory.com:specs:cor:agt:050:02): every other status is reached by a move."
+  enum AgentTaskCreateStatus {
+    BACKLOG
+    PENDING
+  }
+
+  "Whether a task party is a team Worker or a person."
+  enum AgentTaskPartyKind {
+    WORKER
+    USER
+  }
+
+  """
+  A task's owner, assignee or audit actor, as a sanitized projection: the
+  Worker's name and URN, or the person's handle. Never the User object, so a
+  task never exposes another person's account fields.
+  """
+  type AgentTaskParty {
+    kind: AgentTaskPartyKind!
+    id: ID!
+    "The Worker's name, or the person's handle."
+    name: String
+    "The Worker's URN; null for a person."
+    urn: String
+  }
+
+  """
+  Names exactly one task party: a worker of the task's App (its id, URN or
+  name), or a person who participates in the App (their user id or handle).
+  """
+  input AgentTaskPartyInput {
+    worker: String
+    user: String
+  }
+
+  "What the platform's matcher must respect when it chooses an assignee (plan design:agent-tasks section 3.1; consumed by T3)."
+  type AgentTaskRequirements {
+    role: String
+    familyIn: [String!]
+    familyNotIn: [String!]
+    excludeWorkerIds: [ID!]
+  }
+
+  input AgentTaskRequirementsInput {
+    role: String
+    "Model families the assignee must run as. Give this or familyNotIn, not both."
+    familyIn: [String!]
+    familyNotIn: [String!]
+    "Workers of this App (id, URN or name) the matcher must not pick."
+    excludeWorkers: [String!]
+  }
+
+  "A finished task's result (hrn:node:hadronmemory.com:specs:cor:agt:050:01)."
+  type AgentTaskResult {
+    "One word: succeeded, failed, or a word the team chooses."
+    outcome: String!
+    summary: String
+    "A URL or a node URN."
+    evidence: String
+  }
+
+  input AgentTaskResultInput {
+    "One word (letters, digits, underscore, hyphen or dot; up to 64 characters), e.g. succeeded or failed. It is copied into the event stream, which never holds free text."
+    outcome: String!
+    summary: String
+    evidence: String
+  }
+
+  "#1747 — how a ticker relevance narrows what can make a subscriber due (hrn:node:hadronmemory.com:specs:cor:agt:080:01)."
+  enum TickerRelevance {
+    ALL
+    MENTIONS
+  }
+
+  "#1747 — whether a mention wakes a worker at once. There is no ON_TICK mode."
+  enum MentionWake {
+    IMMEDIATE
+    OFF
+  }
+
+  "#1747 — the closed list of named App grants."
+  enum AppGrantName {
+    "Subscribe and unsubscribe OTHER workers of the App, at any cadence."
+    TICKER_SUBSCRIBE_WORKERS
+  }
+
+  enum DueWakeStatus {
+    OK
+    "The App's daily wake budget is spent; the withheld wakes stay due (hrn:node:hadronmemory.com:specs:cor:agt:080:15)."
+    WAKE_BUDGET_EXHAUSTED
+  }
+
+  enum WakeKind {
+    MENTION
+    TICK
+  }
+
+  "#1748 — one page of due wakes. Counts and ranges only (hrn:node:hadronmemory.com:specs:cor:agt:080:23)."
+  type DueWakePage {
+    status: DueWakeStatus!
+    "Wakes held back by the daily budget; each stays due."
+    withheld: Int!
+    wakes: [DueWake!]!
+    "Dormant workers with relevant mentions, and how many: withheld, never dropped silently."
+    dormant: [DormantWithheld!]!
+    pageInfo: DueWakePageInfo!
+  }
+
+  type DueWakePageInfo {
+    hasNextPage: Boolean!
+    endCursor: String
+  }
+
+  "One merged wake: every reason, one seq range per channel. A wake never moves a read position."
+  type DueWake {
+    worker: Worker!
+    reasons: [WakeReason!]!
+    channels: [DueChannel!]!
+    unread: Int!
+    unreadMentions: Int!
+    "Carried, never an exclusion (hrn:node:hadronmemory.com:specs:cor:agt:060:02)."
+    availability: DueWakeAvailability
+    "Hand this back to acknowledgeWakes after delivering. Bound to the requester; good for 15 minutes."
+    proof: String!
+  }
+
+  type DueWakeAvailability {
+    state: String!
+    reason: String
+    until: DateTime
+    setAt: DateTime!
+  }
+
+  type DueChannel {
+    channel: Channel!
+    fromSeq: Int!
+    throughSeq: Int!
+    latestMentionSeq: Int
+  }
+
+  type DormantWithheld {
+    worker: Worker!
+    mentions: Int!
+  }
+
+  type WakeReason {
+    kind: WakeKind!
+    ticker: Ticker
+  }
+
+  type AcknowledgeWakesResult {
+    "Wakes that moved the delivery record."
+    acknowledged: Int!
+    "Repeats: already delivered, counted nowhere twice."
+    unchanged: Int!
+  }
+
+  "#1747 — whether the team-chat post for a grant use went out."
+  enum GrantAnnouncement {
+    POSTED
+    FAILED
+  }
+
+  "#1747 — why a subscription ended. Never dormancy."
+  enum TickerSubscriptionEndReason {
+    UNSUBSCRIBED
+    WORKER_RETIRED
+    TICKER_DELETED
+  }
+
+  """
+  #1747 — a named wake schedule owned by one team App (hrn:node:hadronmemory.com:specs:cor:agt:080:01). Its URN is hrn:ticker:ROOT:APP-SLUG:SLUG,
+  computed from the App and the permanent slug. Ticks are computed, not stored; nothing reads a ticker until due wakes ship.
+  """
+  type Ticker {
+    id: ID!
+    "The canonical URN. Null when it cannot be composed."
+    urn: String
+    name: String!
+    "Permanent: a re-created name gets a new slug (engineering-2)."
+    slug: String!
+    app: App!
+    cadenceSeconds: Int!
+    anchorAt: DateTime!
+    "A timezone and weekly windows; null when none."
+    quietHours: JSON
+    "The channels named, limited to those the reader can read. Empty means every channel the subscriber watches."
+    channels: [Channel!]!
+    relevance: TickerRelevance!
+    enabled: Boolean!
+    owner: ActorRef
+    "The next moment this ticker ticks, quiet hours skipped; null when disabled."
+    nextTickAt: DateTime
+    "The moment of the current tick; null when none has fired or it cannot tick."
+    lastTickAt: DateTime
+    "Live subscriptions."
+    subscribers(first: Int, after: String): TickerSubscriptionPage!
+    createdAt: DateTime!
+    updatedAt: DateTime
+  }
+
+  type TickerSubscriptionPage {
+    items: [TickerSubscription!]!
+    hasNextPage: Boolean!
+    endCursor: String
+  }
+
+  "#1747 — a worker subscription to one ticker (hrn:node:hadronmemory.com:specs:cor:agt:080:02)."
+  type TickerSubscription {
+    id: ID!
+    ticker: Ticker!
+    worker: Worker!
+    "Who subscribed the worker."
+    createdBy: ActorRef
+    "True when made through the may-subscribe-workers grant."
+    viaGrant: Boolean!
+    createdAt: DateTime!
+    endedAt: DateTime
+    endedReason: TickerSubscriptionEndReason
+  }
+
+  type SubscribeResult {
+    subscription: TickerSubscription!
+    "Set only when the call used the grant: whether the team-chat post went out."
+    announcement: GrantAnnouncement
+  }
+
+  "#1747 — a worker wake settings (hrn:node:hadronmemory.com:specs:cor:agt:080:03)."
+  type WorkerWakeSettings {
+    worker: Worker!
+    mentions: MentionWake!
+    "A pause belongs to the worker, not to a session."
+    pausedUntil: DateTime
+    "Live subscriptions."
+    subscriptions: [TickerSubscription!]!
+    "The fastest live subscription on an enabled ticker; null when none."
+    effectiveCadenceSeconds: Int
+    "None of the worker's sessions has had activity within the App's dormancy period (hrn:node:hadronmemory.com:specs:cor:agt:080:07). A dormant worker is never woken."
+    dormant: Boolean!
+  }
+
+  "#1747 — an App ticker settings (hrn:node:hadronmemory.com:specs:cor:agt:080:05)."
+  type AppTickerSettings {
+    minCadenceSeconds: Int!
+    selfSubscribeCadenceSeconds: Int!
+    liveCap: Int!
+    dailyWakeBudget: Int!
+    "True when the budget is derived from the roster rather than set."
+    dailyWakeBudgetDerived: Boolean!
+  }
+
+  "#1747 — a narrow, named permission held by one worker (hrn:node:hadronmemory.com:specs:cor:agt:080:24)."
+  type AppGrant {
+    id: ID!
+    app: App!
+    worker: Worker!
+    name: AppGrantName!
+    grantedAt: DateTime!
+    revokedAt: DateTime
+  }
+
+  input TickerInput {
+    name: String!
+    cadenceSeconds: Int!
+    "Tick counting starts here. Defaults to now."
+    anchorAt: DateTime
+    quietHours: JSON
+    channelIds: [ID!]
+    relevance: TickerRelevance
+    enabled: Boolean
+  }
+
+  "Absent fields are unchanged. Use clearQuietHours / clearChannels to remove those."
+  input TickerPatch {
+    name: String
+    cadenceSeconds: Int
+    anchorAt: DateTime
+    quietHours: JSON
+    clearQuietHours: Boolean
+    channelIds: [ID!]
+    clearChannels: Boolean
+    relevance: TickerRelevance
+    enabled: Boolean
+  }
+
+  input AppTickerSettingsInput {
+    minCadenceSeconds: Int
+    selfSubscribeCadenceSeconds: Int
+    liveCap: Int
+    wakeDailyBudget: Int
+    "Return to the derived budget."
+    clearWakeDailyBudget: Boolean
+  }
+
+  input WorkerWakeSettingsInput {
+    mentions: MentionWake
+    pausedUntil: DateTime
+    clearPause: Boolean
+  }
+
+  """
+  One piece of work a team App has assigned, or wants assigned
+  (hrn:node:hadronmemory.com:specs:cor:agt:050:01). The platform records who holds it, since when and how it
+  ended; it never reads what the work is. Readable by the App's participants,
+  workers acting through their sessions included (hrn:node:hadronmemory.com:specs:cor:agt:050:21).
+  """
+  type AgentTask {
+    id: ID!
+    appId: ID!
+    title: String!
+    description: String
+    "Opaque origin reference (an issue URL, a node URN). Not interpreted."
+    source: String
+    "Null for a root task."
+    parentTaskId: ID
+    owner: AgentTaskParty!
+    "Null while the task is queued."
+    assignee: AgentTaskParty
+    requirements: AgentTaskRequirements
+    status: AgentTaskStatus!
+    "Derived (hrn:node:hadronmemory.com:specs:cor:agt:050:03): pending with no assignee. Never stored."
+    queued: Boolean!
+    "Derived (hrn:node:hadronmemory.com:specs:cor:agt:050:04): started with at least one pending or started child task. Never stored."
+    waitingOnChildren: Boolean!
+    startBy: DateTime
+    startedAt: DateTime
+    finishedAt: DateTime
+    cancelledAt: DateTime
+    "Set only on a finished task."
+    result: AgentTaskResult
+    tags: [String!]!
+    """
+    Whether finishing asks the assignee to end its worker session
+    (hrn:node:hadronmemory.com:specs:cor:agt:050:10). Set by whoever assigns; stored only in this release,
+    carried out by the host-operations slice.
+    """
+    closeSessionWhenDone: Boolean!
+    assignedAt: DateTime
+    assignedBy: AgentTaskParty
+    createdAt: DateTime!
+    createdBy: AgentTaskParty
+    "The headless run that created the task (hrn:node:hadronmemory.com:specs:cor:agt:050:06); then createdBy is null."
+    createdByRunId: ID
+    updatedAt: DateTime
+  }
+
+  """
+  One append-only record of something that happened in a team App's task work
+  (hrn:node:hadronmemory.com:specs:cor:agt:050:11). Never changed or removed; an alarm's acknowledgement is the
+  one thing added later. payload carries ids, counts and outcome words only,
+  never message or description text.
+  """
+  type AgentTeamEvent {
+    id: ID!
+    appId: ID!
+    "e.g. task.created, task.assigned, task.reassigned, task.started, task.progress, task.finished, task.cancelled; the alarms stall.not-started, stall.no-progress, stall.owner-unreactive, assignment.unassignable; availability.changed; assignment.queued, assignment.matched (the platform's assignment, hrn:node:hadronmemory.com:specs:cor:agt:060:06); host.registered, host.lost."
+    type: String!
+    taskId: ID
+    "Who acted: the Worker when the request was bound to a worker session, else the person."
+    actor: AgentTaskParty
+    "The worker the event concerns, e.g. a new assignee."
+    subjectWorker: AgentTaskParty
+    "ALARM for an alarm; null for an ordinary event."
+    severity: AgentTeamEventSeverity
+    "Alarms only: the owner chain when the alarm was raised, nearest first."
+    chain: JSON
+    acknowledgedBy: AgentTaskParty
+    acknowledgedAt: DateTime
+    payload: JSON!
+    createdAt: DateTime!
+    """
+    #1706 — stall alarms only: when the stall episode began (hrn:node:hadronmemory.com:specs:cor:agt:050:13),
+    the instant of the move that began the condition. One alarm per task,
+    rule and episodeStart.
+    """
+    episodeStart: DateTime
+    "#1706 — alarms only: who the alarm wakes and when, nearest owner first (hrn:node:hadronmemory.com:specs:cor:agt:050:19). Null for an ordinary event."
+    wakes: [AgentTeamAlarmSchedule!]
+  }
+
+  enum AgentTeamEventSeverity {
+    ALARM
+  }
+
+  """
+  #1706 — one owner in an alarm's chain, and when the alarm wakes them
+  (hrn:node:hadronmemory.com:specs:cor:agt:050:19). The nearest owner is woken when the alarm is raised; owner
+  i falls due i windows later, and is woken only while the alarm is
+  unacknowledged (hrn:node:hadronmemory.com:specs:cor:agt:050:20). This is the platform's record that the owner
+  is due a wake-up; delivering it is the heartbeat slice's.
+  """
+  type AgentTeamAlarmSchedule {
+    "The owner's position in the chain, 0 for the nearest."
+    chainIndex: Int!
+    owner: AgentTaskParty
+    dueAt: DateTime!
+    "Null until woken; stays null on an alarm acknowledged before it fell due."
+    wokenAt: DateTime
+  }
+
+  enum AvailabilityState {
+    AVAILABLE
+    UNAVAILABLE
+  }
+
+  "Why a worker or a model family is unavailable for work (hrn:node:hadronmemory.com:specs:cor:agt:060:02; held was dropped, team chat #7449)."
+  enum AvailabilityReason {
+    STALLED
+    OUT_OF_TOKENS
+    HOST_DOWN
+    OTHER
+  }
+
+  "Who set a worker's availability (hrn:node:hadronmemory.com:specs:cor:agt:060:08)."
+  enum AvailabilitySetter {
+    "The worker itself; only ever to unavailable."
+    WORKER
+    "The person holding the worker's name."
+    HOLDER
+    "Whoever manages the App."
+    APP_MANAGER
+    "The stall rule (hrn:node:hadronmemory.com:specs:cor:agt:060:07): an alarm marked it, or its next activity cleared it."
+    STALL_RULE
+    "A host that registered the worker (the host-operations slice)."
+    HOST
+  }
+
+  """
+  #1706 — one worker's availability for work (hrn:node:hadronmemory.com:specs:cor:agt:060:02). A worker with
+  no record is available.
+  """
+  type WorkerAvailability {
+    worker: AgentTaskParty!
+    state: AvailabilityState!
+    "Set exactly when unavailable."
+    reason: AvailabilityReason
+    "When an unavailable record lapses. A passed until reads as available (interim, until ruled)."
+    until: DateTime
+    setAt: DateTime!
+    setBy: AvailabilitySetter!
+    "Who acted, when a worker or a person set it; null when the stall rule did."
+    setByParty: AgentTaskParty
+    """
+    Whether this record makes the worker unavailable right now: unavailable,
+    not lapsed, and (for STALLED) the worker has not acted since it was set
+    (hrn:node:hadronmemory.com:specs:cor:agt:060:07).
+    """
+    inEffect: Boolean!
+  }
+
+  "#1706 — one model family's availability for work in one App (hrn:node:hadronmemory.com:specs:cor:agt:060:03). A family with no record is available."
+  type ModelFamilyAvailability {
+    appId: ID!
+    "The model family, e.g. claude or codex (hrn:node:hadronmemory.com:specs:cor:agt:060:04)."
+    family: String!
+    state: AvailabilityState!
+    reason: AvailabilityReason
+    until: DateTime
+    setAt: DateTime!
+    setBy: AgentTaskParty
+    "Unavailable and not lapsed."
+    inEffect: Boolean!
+  }
+
+  """
+  #1707 — a worker's derived state on the team roster (plan
+  design:agent-tasks §7.4). Plan-derived, not a spec. A worker can be in
+  several at once; it is shown in the first that holds, in this order.
+  """
+  enum TeamRosterState {
+    "Woken on an unacknowledged alarm (hrn:node:hadronmemory.com:specs:cor:agt:050:19), or a child of a task it is the assignee of finished after it last moved (hrn:node:hadronmemory.com:specs:cor:agt:050:16)."
+    YOUR_MOVE
+    "Its own availability record, or every model family it can run as, says unavailable now (hrn:node:hadronmemory.com:specs:cor:agt:060:01); a stall mark included (hrn:node:hadronmemory.com:specs:cor:agt:060:07)."
+    UNAVAILABLE
+    "The assignee of a started task with open children (hrn:node:hadronmemory.com:specs:cor:agt:050:04)."
+    WAITING
+    "The assignee of a started task."
+    WORKING
+    "The assignee of a pending task."
+    ASSIGNED_NOT_STARTED
+    "Free for work (hrn:node:hadronmemory.com:specs:cor:agt:060:05), including an unbound worker a live host can launch and a bound worker whose session is quiet, which the matcher leaves alone until the host-operations slice (see liveSession)."
+    AVAILABLE
+    "Bound, but its session reported no model family, so it can't be matched until one is given (hrn:node:hadronmemory.com:specs:cor:agt:060:04)."
+    NO_FAMILY
+    "Unbound, and no live host registration lists it."
+    NOT_LAUNCHABLE
+  }
+
+  "#1707 — one worker on the team roster."
+  type TeamRosterEntry {
+    worker: AgentTaskParty!
+    role: String
+    state: TeamRosterState!
+    "Bound: has an open session, live or quiet. Going quiet never unbinds; ending the session does."
+    bound: Boolean!
+    "Has a live session (hrn:node:hadronmemory.com:specs:cor:agt:020:11). Until the host-operations slice, the matcher assigns only to a worker with one."
+    liveSession: Boolean!
+    "The binding's model family: its newest open session's (hrn:node:hadronmemory.com:specs:cor:agt:060:04), kept while the session is quiet. Null when unbound or none was reported."
+    family: String
+    "Families a live host registration can launch it as (hrn:node:hadronmemory.com:specs:cor:agt:070:01)."
+    launchableFamilies: [String!]!
+    "Free for work (hrn:node:hadronmemory.com:specs:cor:agt:060:05)."
+    freeForWork: Boolean!
+    "The families it is free for work as now; empty when not free."
+    freeFamilies: [String!]!
+    "Set when its own availability record makes it unavailable now."
+    unavailableReason: AvailabilityReason
+    unavailableUntil: DateTime
+    "Families it could run as that are unavailable in the App now (hrn:node:hadronmemory.com:specs:cor:agt:060:03)."
+    unavailableFamilies: [String!]!
+    "Started tasks it is the assignee of."
+    startedTasks: [ID!]!
+    "Pending tasks it is the assignee of."
+    pendingTasks: [ID!]!
+    "WAITING: the open children of its started tasks."
+    waitingOn: [ID!]!
+    "WAITING: when the oldest of those was created."
+    waitingSince: DateTime
+    "YOUR_MOVE: unacknowledged alarms it has been woken on."
+    alarms: [ID!]!
+    "YOUR_MOVE: a finished child it hasn't reacted to."
+    unreactedChildTask: ID
+    lastActiveAt: DateTime
+    "When it was last assigned a task; the matcher picks the least recent (hrn:node:hadronmemory.com:specs:cor:agt:060:06)."
+    lastAssignedAt: DateTime
+    "#1726 — the worker it reports to; group by this for the team's structure. Read it with lastActiveAt: nothing clears a claim automatically."
+    reportsTo: AgentTaskParty
+    "#1726 — it reports to a worker that has since retired (retirement leaves the claim; the roster flags it)."
+    reportsToRetired: Boolean!
+  }
+
+  "#1707 — the team roster of one App."
+  type TeamRoster {
+    appId: ID!
+    asOf: DateTime!
+    workers: [TeamRosterEntry!]!
+  }
+
+  "#1706 — every availability record in one App."
+  type TeamAvailability {
+    workers: [WorkerAvailability!]!
+    families: [ModelFamilyAvailability!]!
+  }
+
+  """
+  #1706 — an App's effective stall windows, in minutes (hrn:node:hadronmemory.com:specs:cor:agt:050:14–:17).
+  Tunables, not contract: the platform defaults are 15, 60, 20 and 30.
+  """
+  type AgentTaskStallSchedule {
+    appId: ID!
+    "Not started (hrn:node:hadronmemory.com:specs:cor:agt:050:14): counted from the assignment when the task has no later start-by time."
+    notStartedMinutes: Int!
+    "No progress (hrn:node:hadronmemory.com:specs:cor:agt:050:15). Also the escalation step for that alarm."
+    noProgressMinutes: Int!
+    "Owner didn't react to a finished child task (hrn:node:hadronmemory.com:specs:cor:agt:050:16)."
+    ownerReactionMinutes: Int!
+    "Couldn't be assigned (hrn:node:hadronmemory.com:specs:cor:agt:050:17)."
+    assignmentMinutes: Int!
+    "When the App last changed them; null while every window is the default."
+    updatedAt: DateTime
+  }
+
+  "An omitted field keeps its value; null returns it to the platform default. Each is 1 to 10080 minutes."
+  input AgentTaskStallScheduleInput {
+    notStartedMinutes: Int
+    noProgressMinutes: Int
+    ownerReactionMinutes: Int
+    assignmentMinutes: Int
+  }
+
+  input SetWorkerAvailabilityInput {
+    "The worker: its id or URN, or its name together with appRef."
+    worker: String!
+    appRef: ID
+    state: AvailabilityState!
+    "Required when UNAVAILABLE; refused when AVAILABLE."
+    reason: AvailabilityReason
+    "Optional, UNAVAILABLE only, in the future."
+    until: DateTime
+  }
+
+  input SetModelFamilyAvailabilityInput {
+    appRef: ID!
+    "A lowercase token, e.g. claude or codex."
+    family: String!
+    state: AvailabilityState!
+    reason: AvailabilityReason
+    until: DateTime
+  }
+
+  """
+  createAgentTask input. A ROOT task names appRef; any App participant may
+  create one (hrn:node:hadronmemory.com:specs:cor:agt:050:06). A CHILD task names parentTaskId; only the
+  parent's assignee may create one, and it owns it (hrn:node:hadronmemory.com:specs:cor:agt:050:07).
+  """
+  input CreateAgentTaskInput {
+    "The team App (id or URN). Required for a root task; for a child task it is taken from the parent and, if given, must match."
+    appRef: ID
+    parentTaskId: ID
+    title: String!
+    description: String
+    source: String
+    """
+    Defaults to the creator. A root task's creator may name any other
+    participating worker or person as owner (#1757, hrn:node:hadronmemory.com:specs:cor:agt:050:01);
+    a ref outside the App's participants is TASK_OWNER_INVALID. Never for a
+    child task, whose owner is its parent's assignee (TASK_CHILD_OWNER_MISMATCH).
+    """
+    owner: AgentTaskPartyInput
+    "Omit to leave the task queued."
+    assignee: AgentTaskPartyInput
+    requirements: AgentTaskRequirementsInput
+    startBy: DateTime
+    tags: [String!]
+    "Defaults to true (hrn:node:hadronmemory.com:specs:cor:agt:050:10)."
+    closeSessionWhenDone: Boolean
+    """
+    #1754 — PENDING (the default) or BACKLOG
+    (hrn:node:hadronmemory.com:specs:cor:agt:050:02). A BACKLOG task is parked: it takes no assignee (BAD_USER_INPUT),
+    never enters the queue, and is moved to pending by assigning it or making it ready.
+    """
+    status: AgentTaskCreateStatus
   }
 `;

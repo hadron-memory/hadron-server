@@ -5,7 +5,8 @@
 // supersedes `createTeamPersona`'s minting semantics: it no longer mints an
 // Agent at all — it casts an EXISTING installed agent under a name, allocating
 // that name against the `workers_app_name_uniq` constraint (the allocation
-// primitive — no lease, no lock; cor:agt:020:02).
+// primitive; cor:agt:020:02). #1677 adds a serialized Unicode confusable
+// check at casting; it creates no lease and preserves existing identities.
 //
 // Cast lists stay ergonomics, never gates (cor:agt:020:01): role definitions
 // and name registers remain CONTENT in the Team Agent's system memory
@@ -13,6 +14,7 @@
 // the caller names no explicit worker name. Casting with an explicit name
 // needs no Team Agent at all.
 import { GraphQLError } from 'graphql';
+import { assertWorkerNameNotConfusable, lockWorkerNames } from '../../../lib/workerName.js';
 import { Prisma } from '../../../generated/prisma/index.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
@@ -48,15 +50,24 @@ import { idleCutoffs, toNaiveUtc } from '../../../lib/sessionActivity.js';
 import { userUrn } from '../../../lib/userHandle.js';
 import { canSeeUserPersonalFields } from '../../../lib/auth/userVisibility.js';
 import { participantAppWhere } from '../../../lib/auth/appParticipation.js';
+import { lockAppReportsTo, writeReportsTo } from '../../../lib/workerReportsTo.js';
+import { currentActor } from '../../../lib/requestActor.js';
+import { managesApp } from '../../../lib/auth/appManagement.js';
+import { withAuthorizedTx } from './authorizedTx.js';
+import { resolveTaskActor, type TaskApp } from './resolvers.agentTask.js';
+import type { AuthorityAnchor } from '../../../lib/auth/authorityAnchors.js';
+import { eventActor } from '../../../lib/agentTasks/events.js';
 import {
   type Context,
   requireOrgRole,
+  requireAgentAccess,
   requireOwnerOrOrgRole,
   isNonReaderAppMember,
   isAppParticipant,
   isPlatformAdmin,
   clampListTake,
   safeCanonicalUrn,
+  isMemoryReadableCached,
 } from './resolvers.helpers.js';
 
 /** Loc prefix of the role-definition branch in a Team Agent's system memory. */
@@ -153,6 +164,18 @@ export async function requireWorkerReadAccess(ctx: Context, app: AppRow): Promis
   }
   if (await isAppParticipant(ctx, app)) return;
   throw forbidden();
+}
+
+/** #1705 — does any agent task name this worker as its owner or assignee? */
+async function workerHasAgentTasks(
+  db: Pick<Context['db'], 'agentTask'>,
+  workerId: string,
+): Promise<boolean> {
+  const row = await db.agentTask.findFirst({
+    where: { OR: [{ ownerWorkerId: workerId }, { assigneeWorkerId: workerId }] },
+    select: { id: true },
+  });
+  return row !== null;
 }
 
 /**
@@ -347,7 +370,7 @@ async function resolveWorkerRefRow(ctx: Context, workerRef: string): Promise<Wor
  * constraint.
  */
 export async function takenWorkersByName(
-  db: Context['db'],
+  db: Pick<Context['db'], '$queryRaw'>,
   appId: string,
   names: string[],
 ): Promise<Map<string, string>> {
@@ -443,6 +466,32 @@ export async function resolveWorkerIdByNameGated(
     return null;
   }
   return resolveWorkerIdByName(ctx.db, appId, name);
+}
+
+/**
+ * #1726 — resolve a `reportsTo` target WITHIN the subject worker's App: its
+ * id, URN or name. A worker of any other App answers exactly like a missing
+ * one, WORKER_NOT_FOUND with no id, so the setter and the bind are never an
+ * existence oracle across tenants (#1737 QA, Chip's P2). The caller has
+ * already passed the App's worker read gate, which lists every worker here.
+ */
+export async function resolveReportsToTarget(ctx: Context, appId: string, ref: string): Promise<string> {
+  const trimmed = ref.trim();
+  let id: string | null = null;
+  if (isId(trimmed) || hasSchemePrefix(trimmed)) {
+    try {
+      const resolved = (await resolveWorkerRefId(ctx.db, trimmed)).id;
+      const row = await ctx.db.worker.findUnique({ where: { id: resolved }, select: { appId: true } });
+      id = row?.appId === appId ? resolved : null;
+    } catch {
+      // A malformed URN, an unresolvable App and an absent worker collapse to
+      // one refusal, as resolveWorkerRefRow does.
+    }
+  } else {
+    id = await resolveWorkerIdByNameGated(ctx, appId, trimmed);
+  }
+  if (!id) throw new GraphQLError(`Worker not found in this App: "${trimmed}"`, { extensions: { code: 'WORKER_NOT_FOUND' } });
+  return id;
 }
 
 /** True when the refusal is the per-App name unique (`workers_app_name_uniq`). */
@@ -812,26 +861,39 @@ export const workerMutations = {
       candidate: string,
     ): Promise<{ id: string; name: string; slug: string } | typeof NAME_TAKEN> => {
       for (let attempt = 0; attempt < SLUG_RACE_RETRY_LIMIT; attempt++) {
-        const slug = await nextFreeWorkerSlug(ctx.db, appId, candidate);
         try {
-          return await ctx.db.worker.create({
-            data: {
-              appId,
-              agentId: agent.id,
-              name: candidate,
-              slug,
-              role: workerRole,
-              promptOverride: override,
-              createdBy: ctx.userId ?? null,
-              // #1050 — casting does NOT hold. A name is held by the person
-              // who WORKS as it, and the canonical setup flow is a coordinator
-              // casting a roster that other people then bind: making the
-              // caster the holder would block every one of them on a release
-              // they should never have needed. So a cast worker is born UNHELD
-              // and the first bind claims it.
-            },
-            select: { id: true, name: true, slug: true },
-          });
+          return await ctx.db.$transaction(async (tx) => {
+            await lockWorkerNames(tx, appId);
+            const freshApp = await tx.app.findUniqueOrThrow({ where: { id: appId } });
+            if (freshApp.deletedAt) throw forbidden();
+            await requireWorkerStaffAccess({ ...ctx, db: tx as unknown as Context['db'] }, freshApp);
+            if (freshApp.uninstalledAt) {
+              throw new GraphQLError('Cannot cast a worker in an uninstalled App.', { extensions: { code: 'APP_UNINSTALLED', appId } });
+            }
+            // Preserve PostgreSQL lower(name)'s existing typed refusal before
+            // applying the additional DAP naming-equivalence check.
+            if ((await takenWorkersByName(tx, appId, [candidate])).has(candidate)) return NAME_TAKEN;
+            await assertWorkerNameNotConfusable(tx, appId, candidate);
+            const slug = await nextFreeWorkerSlug(tx, appId, candidate);
+            return tx.worker.create({
+              data: {
+                appId,
+                agentId: agent.id,
+                name: candidate,
+                slug,
+                role: workerRole,
+                promptOverride: override,
+                createdBy: ctx.userId ?? null,
+                // #1050 — casting does NOT hold. A name is held by the person
+                // who WORKS as it, and the canonical setup flow is a coordinator
+                // casting a roster that other people then bind: making the
+                // caster the holder would block every one of them on a release
+                // they should never have needed. So a cast worker is born UNHELD
+                // and the first bind claims it.
+              },
+              select: { id: true, name: true, slug: true },
+            });
+          }, { timeout: 30_000 });
         } catch (e) {
           // Order matters: a slug race is private and retried; a name
           // collision is the caller-visible allocation signal.
@@ -908,10 +970,137 @@ export const workerMutations = {
     const worker = await resolveWorkerRefRow(ctx, workerRef);
     const app = await ctx.db.app.findUniqueOrThrow({ where: { id: worker.appId } });
     await requireWorkerStaffAccess(ctx, app);
-    await ctx.db.worker.updateMany({
-      where: { id: worker.id, retiredAt: null },
-      data: { retiredAt: new Date(), retiredBy: ctx.userId ?? null },
+    await ctx.db.$transaction(async (tx) => {
+      // #1726: the reportsTo graph lock BEFORE the worker row (the lock
+      // protocol in src/lib/workerReportsTo.ts; #1737 review, Diego P2-2).
+      await lockAppReportsTo(tx, worker.appId);
+      const retired = await tx.worker.updateMany({
+        where: { id: worker.id, retiredAt: null },
+        data: { retiredAt: new Date(), retiredBy: ctx.userId ?? null },
+      });
+      // #1726: a retired worker reports to nobody. Workers that report TO it
+      // keep their value; the roster flags them (`reportsToRetired`) rather
+      // than the platform silently clearing a structure someone set.
+      if (retired.count > 0) {
+        await writeReportsTo(tx, { workerId: worker.id, appId: worker.appId, to: null, actor: eventActor(ctx.userId), setBy: 'retirement' });
+        // #1747 / cor:agt:080:02: a retired worker's ticker subscriptions end
+        // with it, reason WORKER_RETIRED (history kept, never deleted).
+        const actor = currentActor();
+        await tx.tickerSubscription.updateMany({
+          where: { workerId: worker.id, endedAt: null },
+          data: {
+            endedAt: new Date(), endedReason: 'WORKER_RETIRED',
+            endedBy: ctx.userId ?? null, endedByWorkerId: actor.workerId, endedByAgentId: actor.agentId,
+          },
+        });
+      }
     });
+    return ctx.db.worker.findUniqueOrThrow({ where: { id: worker.id } });
+  },
+
+  /**
+   * setWorkerReportsTo — #1726: set, hand over or clear who a worker reports
+   * to (`reportsTo: null` clears). Well-formedness is the writer's
+   * (src/lib/workerReportsTo.ts: same App, not itself, not retired, no cycle);
+   * authority is decided here, on the value as it stands under the writer's
+   * lock:
+   *
+   * - whoever manages the App (#7790: its user-owner, owner-role members, org
+   *   ADMIN/OWNER, platform admins) may make any change;
+   * - the worker it reports to now may hand it over or clear it: doing so is
+   *   that worker's agreement;
+   * - a worker that reports to nobody may be claimed by a worker for itself
+   *   only when one person holds both, or placed under any worker by its own
+   *   holder (INTERIM, Ada #7981, pending Holger's ruling on Rook's
+   *   claim-scope question; #7931 had allowed any worker to claim).
+   *
+   * "A worker" is the caller's bound session's worker, in the same App, with a
+   * person behind the request (the #1713 interim: a bare App key may bind any
+   * session of its App, so its worker id alone proves nothing). Refused with
+   * WORKER_REPORTS_TO_FORBIDDEN otherwise.
+   */
+  setWorkerReportsTo: async (
+    _: unknown,
+    { workerRef, reportsTo }: { workerRef: string; reportsTo?: string | null },
+    ctx: Context,
+  ) => {
+    // Identity-scoped: a support session never changes the team's structure
+    // (#1737 review, Diego P2-1; the read-only plugin refuses it too).
+    if (ctx.impersonation) {
+      throw new GraphQLError('Impersonation sessions are read-only.', { extensions: { code: 'FORBIDDEN' } });
+    }
+    const worker = await resolveWorkerRefRow(ctx, workerRef);
+    const app = await ctx.db.app.findUniqueOrThrow({ where: { id: worker.appId } });
+    await requireWorkerReadAccess(ctx, app);
+    const to = reportsTo ? await resolveReportsToTarget(ctx, worker.appId, reportsTo) : null;
+    const forbidden = () => new GraphQLError(
+      'Only the worker this one reports to, a worker claiming an unclaimed one for itself, or whoever manages the App may change who it reports to.',
+      { extensions: { code: 'WORKER_REPORTS_TO_FORBIDDEN', workerId: worker.id } },
+    );
+    // #1737 review (Rook P2-1, Diego P2-1): the authority is decided under the
+    // App's anchors, on the transaction context (platform roles re-read from
+    // the user row, a deleted or uninstalled App refused), with the caller's
+    // App membership held FOR SHARE, so a demotion, an org-role change or an
+    // uninstall either committed first and is seen, or waits for this write.
+    // Lock order per src/lib/workerReportsTo.ts: anchors, the graph, then rows.
+    const anchors: AuthorityAnchor[] = [
+      { kind: 'app', id: app.id },
+      ...(app.organizationId ? [{ kind: 'org' as const, id: app.organizationId }] : []),
+      ...(app.ownerUserId ? [{ kind: 'user' as const, id: app.ownerUserId }] : []),
+    ];
+    try {
+      await withAuthorizedTx(
+        ctx,
+        anchors,
+        async () => {},
+        async (tx, txCtx) => {
+          const fresh = await tx.app.findUniqueOrThrow({ where: { id: app.id } });
+          await writeReportsTo(tx, {
+            workerId: worker.id, appId: worker.appId, to, actor: eventActor(ctx.userId), setBy: 'app-manager',
+            authorize: async (from) => {
+              // The worker arms: the request's bound worker, re-resolved here
+              // (a person behind it, not retired, still able to drive this App).
+              const actor = await resolveTaskActor(txCtx, fresh as unknown as TaskApp);
+              const acting = actor?.kind === 'worker' ? actor.workerId : null;
+              if (acting && from !== null && acting === from) return 'current';
+              if (from === null && to !== null) {
+                // A claim on a worker that reports to nobody. INTERIM rule (Ada
+                // #7981, narrowing #7931 until Holger rules on Rook's claim-scope
+                // question): a worker claims it only when ONE person holds both;
+                // otherwise the claim is the target's holder's to make (or a
+                // manager's). The writer holds both rows FOR UPDATE by now, so
+                // neither hold can change under this decision.
+                const holds = await tx.worker.findMany({
+                  where: { id: { in: [worker.id, ...(acting ? [acting] : [])] } },
+                  select: { id: true, heldByUserId: true },
+                });
+                const holderOf = (id: string) => holds.find((h) => h.id === id)?.heldByUserId ?? null;
+                const targetHolder = holderOf(worker.id);
+                if (acting && to === acting && targetHolder !== null && targetHolder === holderOf(acting)) return 'claimant';
+                if (ctx.userId && targetHolder === ctx.userId) return 'holder';
+              }
+              if (await managesApp(txCtx, fresh)) return 'app-manager';
+              throw forbidden();
+            },
+          });
+        },
+        {
+          afterLock: async (tx) => {
+            await lockAppReportsTo(tx, app.id);
+            if (ctx.userId) {
+              await tx.$queryRaw`SELECT 1 FROM app_members WHERE app_id = ${app.id} AND user_id = ${ctx.userId} FOR SHARE`;
+            }
+          },
+        },
+      );
+    } catch (e) {
+      if (!(e instanceof Error && e.message === 'Forbidden')) throw e;
+      const now = await ctx.db.app.findUnique({ where: { id: app.id }, select: { deletedAt: true, uninstalledAt: true } });
+      if (now && !now.deletedAt && now.uninstalledAt) {
+        throw new GraphQLError('This App is uninstalled; its team structure is read-only.', { extensions: { code: 'APP_UNINSTALLED' } });
+      }
+      throw forbidden();
+    }
     return ctx.db.worker.findUniqueOrThrow({ where: { id: worker.id } });
   },
 
@@ -1295,6 +1484,14 @@ export const workerMutations = {
         { extensions: { code: 'WORKER_IN_USE', workerId: worker.id } },
       );
     }
+    // #1705 — owning or holding an agent task is doing something, too (and
+    // the task's worker reference must not dangle).
+    if (await workerHasAgentTasks(ctx.db, worker.id)) {
+      throw new GraphQLError(
+        'This worker owns or is assigned agent tasks. Retire it instead.',
+        { extensions: { code: 'WORKER_IN_USE', workerId: worker.id } },
+      );
+    }
     if (worker.memoryId) {
       const [nodes, assets] = await Promise.all([
         ctx.db.node.count({ where: { memoryId: worker.memoryId } }),
@@ -1317,6 +1514,12 @@ export const workerMutations = {
         if (inTxSessions > 0) {
           throw new GraphQLError(
             'This worker has driven sessions — its name is bound to that history forever. Retire it instead.',
+            { extensions: { code: 'WORKER_IN_USE', workerId: worker.id } },
+          );
+        }
+        if (await workerHasAgentTasks(tx, worker.id)) {
+          throw new GraphQLError(
+            'This worker owns or is assigned agent tasks. Retire it instead.',
             { extensions: { code: 'WORKER_IN_USE', workerId: worker.id } },
           );
         }
@@ -1509,6 +1712,8 @@ export const workerQueries = {
         __heldWorkerActivity: activity.get(row.id) ?? {
           hasLiveSession: false,
           lastActiveAt: null,
+          bound: false,
+          bindingFamily: null,
         },
       })),
     };
@@ -1546,6 +1751,7 @@ export const workerQueries = {
       if (taken.has(requestedName)) {
         throw nameTaken(requestedName, appId);
       }
+      await assertWorkerNameNotConfusable(ctx.db, appId, requestedName);
       name = requestedName;
     } else {
       // #1050: same refusal as castWorker, and deliberately the SAME code —
@@ -1576,8 +1782,23 @@ export const workerQueries = {
   },
 };
 
-/** Per-worker driving state: is a session open, and when was it last driven. */
-export type WorkerActivity = { hasLiveSession: boolean; lastActiveAt: Date | null };
+/**
+ * Per-worker driving state: is a session live, and when was it last driven.
+ *
+ * #1707 (cor:agt:060:04) adds the BINDING, which is not the same fact as
+ * liveness: a worker is `bound` while it has an OPEN session (not ended), and
+ * `bindingFamily` is the model family of the newest open session — the latest
+ * bind — or null when that session reported none. Going quiet never unbinds
+ * (#1114; cor:agt:020:03 separates inactivity from ending a stint), so a
+ * lapsed but open session keeps its family; only an end, or a newer bind,
+ * clears or replaces it (#1723 review, Diego P2-2).
+ */
+export type WorkerActivity = {
+  hasLiveSession: boolean;
+  lastActiveAt: Date | null;
+  bound: boolean;
+  bindingFamily: string | null;
+};
 
 /**
  * Database-side activity fold shared by one-App rosters and the cross-App
@@ -1616,26 +1837,33 @@ async function queryWorkerActivity(
   // the column using the session timezone and is only accidentally correct on
   // a UTC server (findings:prisma-naive-timestamp-raw-sql).
   const cut = idleCutoffs(now);
-  const rows = await ctx.db.$queryRaw<
-    { workerId: string; live: boolean; lastActiveAt: Date | null }[]
-  >`
-    SELECT s.worker_id AS "workerId",
-           -- LIVE IS DERIVED, not stored. An open row proves only that nobody
-           -- closed it, so activity must also fall inside the type's idle
-           -- window (cor:agt:020:11 — reader and binder share one predicate).
-           bool_or(
-             s.ended_at IS NULL
-             AND GREATEST(
+  const activityAt = Prisma.sql`GREATEST(
                    s.started_at,
                    CASE WHEN s.auto_expired_at IS NULL THEN s.updated_at END,
                    ue.max_created
-                 ) >= (CASE s.type::text
+                 )`;
+  // LIVE IS DERIVED, not stored. An open row proves only that nobody closed
+  // it, so activity must also fall inside the type's idle window
+  // (cor:agt:020:11 — reader and binder share one predicate).
+  const sessionLive = Prisma.sql`(
+             s.ended_at IS NULL
+             AND ${activityAt} >= (CASE s.type::text
                          WHEN 'DEVELOPER'  THEN ${toNaiveUtc(cut.DEVELOPER)}::timestamp
                          WHEN 'CHATBOT'    THEN ${toNaiveUtc(cut.CHATBOT)}::timestamp
                          WHEN 'AUTOMATION' THEN ${toNaiveUtc(cut.AUTOMATION)}::timestamp
                          WHEN 'EDGE'       THEN ${toNaiveUtc(cut.EDGE)}::timestamp
-                       END)
-           ) AS "live",
+                       END))`;
+  const rows = await ctx.db.$queryRaw<
+    { workerId: string; live: boolean; lastActiveAt: Date | null; bound: boolean; bindingFamily: string | null }[]
+  >`
+    SELECT s.worker_id AS "workerId",
+           bool_or(${sessionLive}) AS "live",
+           -- #1707: the BINDING is any open session, live or quiet; its family
+           -- is the newest open session's (the latest bind), null included —
+           -- a newer bind that reported none does not inherit an older one's.
+           bool_or(s.ended_at IS NULL) AS "bound",
+           (array_agg(s.family ORDER BY s.started_at DESC, s.id DESC)
+              FILTER (WHERE s.ended_at IS NULL))[1] AS "bindingFamily",
            max(LEAST(GREATEST(
              s.started_at,
              -- The reaper advances updated_at while setting auto_expired_at.
@@ -1662,13 +1890,18 @@ async function queryWorkerActivity(
   return new Map<string, WorkerActivity>(
     rows.map((row) => [
       row.workerId,
-      { hasLiveSession: row.live, lastActiveAt: row.lastActiveAt },
+      {
+        hasLiveSession: row.live,
+        lastActiveAt: row.lastActiveAt,
+        bound: row.bound,
+        bindingFamily: row.bindingFamily ?? null,
+      },
     ]),
   );
 }
 
 /** One aggregate query for the bounded #1344 page, never one per App/worker. */
-async function loadWorkersActivity(
+export async function loadWorkersActivity(
   ctx: Context,
   workerIds: string[],
   now = new Date(),
@@ -1755,8 +1988,15 @@ export async function composeWorkerPrompt(
   }
   const agent = await ctx.db.agent.findUnique({
     where: { id: worker.agentId },
-    select: { systemPrompt: true, personaRole: true, updatedAt: true },
+    select: { systemPrompt: true, personaRole: true, updatedAt: true, ownerUserId: true },
   });
+  // #1764 (Riana P1): the App's participants now include a user-owned App's members, but a USER-owned Agent stays
+  // owner-only (spec 047) — its template is read by the owner, or by whoever holds the worker cast from it (the person
+  // driving the name), never by a member through this nested field. The gate above is App participation; this is the
+  // underlying entity's. An org-owned Agent's template is unchanged.
+  if (agent?.ownerUserId != null && !(await mayReadUserOwnedAgentTemplate(ctx, worker.id, agent.ownerUserId))) {
+    return { text: null, renderedAt: new Date(), roleAgentUpdatedAt: null };
+  }
   const template = agent?.systemPrompt ?? null;
   const role = worker.role ?? agent?.personaRole ?? '';
   const bound = template ? applyPersonaTemplate(template, worker.name, role) : null;
@@ -1773,6 +2013,14 @@ export async function composeWorkerPrompt(
   // render time. Down here, renderedAt is a lower bound the printed text and
   // its Agent stamp both satisfy.
   return { text, renderedAt: new Date(), roleAgentUpdatedAt: agent?.updatedAt ?? null };
+}
+
+/** The owner of a user-owned Agent, or the person holding the worker cast from it; never under impersonation. */
+async function mayReadUserOwnedAgentTemplate(ctx: Context, workerId: string, agentOwnerUserId: string): Promise<boolean> {
+  if (!ctx.userId || ctx.impersonation) return false;
+  if (ctx.userId === agentOwnerUserId) return true;
+  const w = await ctx.db.worker.findUnique({ where: { id: workerId }, select: { heldByUserId: true } });
+  return w?.heldByUserId === ctx.userId;
 }
 
 async function maySeeWorkerInternals(ctx: Context, appId: string): Promise<boolean> {
@@ -2128,6 +2376,39 @@ export const workerFieldResolvers = {
       worker.heldByUserId && (await maySeeWorkerInternals(ctx, worker.appId))
         ? worker.heldAt
         : null,
+    /**
+     * #1726 — who this worker reports to. Staffing, like the hold: behind the
+     * worker read gate and masked on deny (see heldByUserId), since
+     * Session.worker reaches this type through a wider audience.
+     */
+    reportsToWorkerId: async (
+      worker: { appId: string; reportsToWorkerId?: string | null },
+      _: unknown,
+      ctx: Context,
+    ) => ((await maySeeWorkerInternals(ctx, worker.appId)) ? (worker.reportsToWorkerId ?? null) : null),
+    /** #1726 — the Worker this one reports to (same App, so the same gate), masked as reportsToWorkerId. */
+    reportsTo: async (
+      worker: { appId: string; reportsToWorkerId?: string | null },
+      _: unknown,
+      ctx: Context,
+    ) => {
+      if (!worker.reportsToWorkerId || !(await maySeeWorkerInternals(ctx, worker.appId))) return null;
+      return ctx.db.worker.findUnique({ where: { id: worker.reportsToWorkerId } });
+    },
+    /**
+     * #1726 — the worker reports to a RETIRED worker. Retirement clears the
+     * retired worker's own reportsTo but leaves the workers reporting to it
+     * alone, so a stale claim is flagged here instead of cleared silently.
+     */
+    reportsToRetired: async (
+      worker: { appId: string; reportsToWorkerId?: string | null },
+      _: unknown,
+      ctx: Context,
+    ) => {
+      if (!worker.reportsToWorkerId || !(await maySeeWorkerInternals(ctx, worker.appId))) return false;
+      const to = await ctx.db.worker.findUnique({ where: { id: worker.reportsToWorkerId }, select: { retiredAt: true } });
+      return !!to?.retiredAt;
+    },
     /** Working-state field — worker read gate, masked to null (see maySeeWorkerInternals). */
     memoryId: async (
       worker: { appId: string; memoryId: string | null },
@@ -2161,6 +2442,26 @@ export const workerFieldResolvers = {
         memoize: info?.operation?.operation === 'query',
       });
       return activity.get(worker.id)?.hasLiveSession ?? false;
+    },
+    /**
+     * #1707 (cor:agt:060:04) — the model family of this worker's binding: its
+     * newest open session's family, kept while the session is quiet and
+     * cleared when it ends. Null when unbound, when the binding reported none,
+     * or when the caller may not see the worker's working state (the same gate
+     * as hasLiveSession). A matching input, never authorization.
+     */
+    family: async (
+      worker: { id: string; appId: string; __heldWorkerActivity?: WorkerActivity },
+      _: unknown,
+      ctx: Context,
+      info?: { operation?: { operation?: string } },
+    ): Promise<string | null> => {
+      if (!(await maySeeWorkerInternals(ctx, worker.appId))) return null;
+      if (worker.__heldWorkerActivity) return worker.__heldWorkerActivity.bindingFamily;
+      const activity = await loadAppWorkerActivity(ctx, worker.appId, {
+        memoize: info?.operation?.operation === 'query',
+      });
+      return activity.get(worker.id)?.bindingFamily ?? null;
     },
     /**
      * hadron-cli#487 — when this worker was last DRIVEN, across every session
@@ -2204,7 +2505,7 @@ export const workerFieldResolvers = {
       if (!agent || agent.deletedAt) return null;
       if (agent.visibility !== 'PUBLIC') {
         try {
-          await requireOwnerOrOrgRole(ctx, agent, 'READER');
+          await requireAgentAccess(ctx, agent, 'READER');
         } catch {
           return null;
         }
@@ -2277,7 +2578,14 @@ export const workerFieldResolvers = {
       // No working memory means no sequence to have written to — which is a
       // real state (provisioning is best-effort at cast), not an error. The
       // status still reports honestly on the previous stint.
-      const handoffRow = worker.memoryId
+      // #1764 (Riana P1): a USER-owned working memory is read through its own gate (the owner, or the worker's holder),
+      // not through App participation: a member of a user-owned App is a participant but not a reader of it. An
+      // unreadable one is treated as having no handoff to show, so neither its content nor its existence is told.
+      const handoffReadable = !worker.memoryId ? false : await (async () => {
+        const mem = await ctx.db.memory.findUnique({ where: { id: worker.memoryId! }, select: { ownerUserId: true } });
+        return mem?.ownerUserId == null || (await isMemoryReadableCached(ctx, worker.memoryId!));
+      })();
+      const handoffRow = worker.memoryId && handoffReadable
         ? await newestHandoff(ctx.db, worker.memoryId)
         : null;
       const status = continuityStatusOf({

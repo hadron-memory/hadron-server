@@ -1,6 +1,7 @@
 // nodeMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
 import { COMMENT_NODE_TYPE, assertNotCommentWrite, commentError, commentGovernedError } from '../../../lib/comments/index.js';
 import { commentIdsAmong, hardDeleteThreadsOfTargets, restoreThreadsOfTargets, softDeleteThreadsOfTargets } from '../../../lib/comments/lifecycle.js';
+import { decisionContainedError, isDecisionFamilyRole, refuseDecisionFamily, refuseUnderDecisionLog } from '../../../lib/decisions/index.js';
 import { refuseLiveThreadsOnFold } from '../../../lib/comments/merge.js';
 import { generateId } from '../../../lib/id.js';
 // Spec 049 S4 — the protected-loc gate on the in-place update paths and the bulk skip.
@@ -90,6 +91,7 @@ import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { resolveNodeRefForCaller } from './resolvers.nodeRefAccess.js';
 import { resolveEdgeRef } from '../../../lib/entityRef/edgeRef.js';
 import { GraphQLError } from 'graphql';
+import { mapDeadlockToWriteConflict } from '../../../lib/memoryLockConflict.js';
 import { convertHtmlToMarkdown, convertPdfToMarkdown } from '../../../lib/pdfClient.js';
 import { type InputJsonValue } from '../../../generated/prisma/runtime/library.js';
 import { Prisma } from '../../../generated/prisma/index.js';
@@ -509,6 +511,11 @@ export async function writeNodeCore(
       // it). Every caller of the core — createNode/updateNode, the kind doors,
       // updateNodeData/Properties, importNode, cloneNode — passes through here.
       assertNotCommentWrite(existing?.nodeType, input.nodeType, mode === 'update' ? 'update' : 'create');
+      // #1641 — a log's child locs are its decision codes: only the decision
+      // doors write there, so a squatter can never block a code.
+      if (!existing && opts?.ownsKind !== 'decision') {
+        await refuseUnderDecisionLog(ctx.db, input.memoryId, input.loc, 'Creating this node');
+      }
       assertGovernedWrite(
         existing,
         mergedGovernedState(existing, { role: input.role, isRunnable: input.isRunnable }),
@@ -852,7 +859,9 @@ export async function writeNodeCore(
         incomingEdges: { include: { source: true } },
       };
       const inWriteTransaction = <T>(work: (tx: Prisma.TransactionClient) => Promise<T>): Promise<T> =>
-        opts?.transaction ? work(opts.transaction.tx) : ctx.db.$transaction(work);
+        opts?.transaction
+          ? work(opts.transaction.tx)
+          : mapDeadlockToWriteConflict(input.memoryId, () => ctx.db.$transaction(work));
 
       // encryptMemory and ownership transfer both change what this writer may
       // commit. Hold a shared memory-row lock through the write, then recheck
@@ -1110,6 +1119,9 @@ export async function writeNodeCore(
             });
             const candidate = await assertTargetStillWritable(tx);
             if (!candidate) return { conflict: false, node: null };
+            // #1753 — memory row BEFORE the node row, the order promotion's
+            // memory FOR UPDATE already uses, so the two cannot cycle.
+            await tx.$queryRaw`SELECT id FROM memories WHERE id = ${input.memoryId} FOR SHARE`;
             await tx.$queryRaw`SELECT "id" FROM "nodes" WHERE "id" = ${candidate.id} FOR UPDATE`;
             await assertMemoryWriteStateStable(tx);
             let current = await assertTargetStillWritable(tx);
@@ -2159,8 +2171,10 @@ export const nodeMutations = {
     // hadron_update_review, …) that delegate here; specs have none, by design.
     // That no mutation is an MCP tool is pinned per door by a test that
     // iterates this same register.
+    // #1641: an operations-only kind (decision) gets NO generic-shaped door
+    // here; its own operations live in resolvers.decisions.ts.
     ...Object.fromEntries(
-      GOVERNED_KINDS.flatMap((entry) => [
+      GOVERNED_KINDS.filter((entry) => !entry.operationsOnly).flatMap((entry) => [
         [
           entry.doors.create,
           async (_: unknown, { input }: { input: CreateNodeInput }, ctx: Context) =>
@@ -2636,7 +2650,7 @@ export const nodeMutations = {
       if (dryRun) return buildResult();
 
       // ── Write pass: revision snapshot + node update, all-or-nothing ──
-      await ctx.db.$transaction(async (tx) => {
+      await mapDeadlockToWriteConflict(plans[0]?.raw.memoryId ?? '', () => ctx.db.$transaction(async (tx) => {
         // A Channel can claim an ancestor after selection but before this
         // transaction. Take its per-memory key BEFORE any node row lock (the
         // Channel/create and delete paths use the same order), then classify
@@ -2676,11 +2690,10 @@ export const nodeMutations = {
         // whose tracked state changed since then refuses the whole batch
         // (all-or-nothing, as below) instead of overwriting the newer write.
         const planMemory = new Map(plans.map((p) => [p.raw.id, p.raw.memoryId]));
-        for (const id of [...planMemory.keys()].sort()) {
-          await tx.$queryRaw`SELECT id FROM nodes WHERE id = ${id} FOR UPDATE`;
-        }
-        // Hold the memory state through this batch after the node locks: a
-        // pre-flip plan must not write plaintext after encryptMemory flips it.
+        // #1753 — memory rows BEFORE node rows (promotion's order). Holding the
+        // memory state through the batch still stops a pre-flip plan writing
+        // plaintext after encryptMemory flips it: the flip needs the memory
+        // UPDATE lock, which this SHARE excludes until commit.
         const plannedEncryption = new Map(plans.map((plan) => [plan.raw.memoryId, plan.isEncrypted]));
         for (const memoryId of [...plannedEncryption.keys()].sort()) {
           await tx.$queryRaw`SELECT id FROM memories WHERE id = ${memoryId} FOR SHARE`;
@@ -2692,6 +2705,9 @@ export const nodeMutations = {
               extensions: { code: 'NODE_WRITE_CONFLICT', memoryId },
             });
           }
+        }
+        for (const id of [...planMemory.keys()].sort()) {
+          await tx.$queryRaw`SELECT id FROM nodes WHERE id = ${id} FOR UPDATE`;
         }
         // #1468 — a tag replace must not strip the spec marker off a minted
         // spec; one refusal refuses the whole batch, like every check here.
@@ -2761,7 +2777,7 @@ export const nodeMutations = {
           Object.assign(data, clearNodeAuthorship());
           await tx.node.update({ where: { id: raw.id }, data });
         }
-      });
+      }));
 
       // ── Post-commit side effects (best-effort, mirror upsertNode) ──
       // #1061 — one `write` event per node the bulk edit actually rewrote. The
@@ -2989,6 +3005,9 @@ export const nodeMutations = {
           // #1606 (cor:dmo:110:04/05) — a comment is removed only by the comment
           // path's thread delete; a target takes its threads with it.
           if ((await commentIdsAmong(tx, affectedIds)).length > 0) throw commentGovernedError('delete', 'removes');
+          // #1641 §3.2 — a decision is withdrawn, never deleted, and deleting a
+          // log or an ancestor of one would erase decision history.
+          await refuseDecisionFamily(tx, affectedIds, 'Deleting this node');
           if (hard) await hardDeleteThreadsOfTargets(tx, affectedIds);
           else await softDeleteThreadsOfTargets(tx, affectedIds, { deletedBy, at: now });
 
@@ -3054,7 +3073,16 @@ export const nodeMutations = {
               });
             }
           }
-        });
+        // #1619 — a hard delete cascades every node's edges, revisions and
+        // derived rows; a few dozen nodes outlast Prisma's 5 s default and
+        // the transaction expired partway ("Transaction already closed").
+        // Trade-off, accepted: the 5 s default also capped how long one slow
+        // delete pins a pool connection and its row/advisory locks. At 120 s
+        // a few concurrent huge deletes could starve the pool (others fail
+        // fast at maxWait). Large recursive deletes are rare, operator-driven
+        // calls, so we take that over failing every legitimate one; chunking
+        // or a concurrency cap is the follow-up if it ever bites.
+        }, { timeout: 120_000 });
       } catch (e) {
         if (e instanceof GraphQLError) throw e; // typed NODE_HAS_DESCENDANTS
         // Prisma P2025 = record not found — wrap so a missing node surfaces a
@@ -3825,7 +3853,7 @@ export const nodeMutations = {
       // ── Atomic write: revision snapshot → target update → edge re-point →
       //    source delete ──────────────────────────────────────────────────
       let pendingSourceMemories: string[] = []; // #449
-      await ctx.db.$transaction(async (tx) => {
+      await mapDeadlockToWriteConflict(target.memoryId, () => ctx.db.$transaction(async (tx) => {
         // #1187 — DECLARE the complete key set first, in the one global order.
         // A merge takes two keys and used to take them target-then-source,
         // which inverted against move's destination-then-source; sorting only
@@ -3846,11 +3874,9 @@ export const nodeMutations = {
         if (takesSource) {
           await lockNodeForDelete(tx, source.memoryId, source.loc);
         }
-        for (const id of [source.id, target.id].sort()) {
-          await tx.$queryRaw`SELECT id FROM nodes WHERE id = ${id} FOR UPDATE`;
-        }
         // A merge plans encrypted fields before this transaction. Keep both
         // memory flags stable through the write or refuse the stale plan.
+        // #1753 — memory rows BEFORE node rows (promotion's order).
         for (const memoryId of [...new Set([source.memoryId, target.memoryId])].sort()) {
           await tx.$queryRaw`SELECT id FROM memories WHERE id = ${memoryId} FOR SHARE`;
           const memory = await tx.memory.findUniqueOrThrow({
@@ -3863,9 +3889,13 @@ export const nodeMutations = {
             });
           }
         }
+        for (const id of [source.id, target.id].sort()) {
+          await tx.$queryRaw`SELECT id FROM nodes WHERE id = ${id} FOR UPDATE`;
+        }
         // #1468 — `deleteSource` hard-deletes the source, so a minted spec
-        // may not be the source (supersede it instead). Same node-then-memory
-        // order as the locks just taken, which the guard re-enters.
+        // may not be the source (supersede it instead). Runs after the memory
+        // locks and then the node locks just taken (memory, then node, #1753),
+        // which the guard re-enters.
         if (deleteSource) {
           await assertNoMintedSpecRemoval(tx, source.memoryId, [source.id], 'merge-and-delete');
         }
@@ -3897,6 +3927,10 @@ export const nodeMutations = {
         // (cor:dmo:110:06), so revisionStateMatches can't see one that landed in
         // between, and the delete below would destroy it.
         if (deleteSource) await refuseLiveThreadsOnFold(tx, [source.id]);
+        // #1641 §3.2 — a decision is never merged, as source or target: its
+        // content is rendered from its payload, and a fold would rewrite it.
+        const mergedDecisions = [lockedSource, lockedTarget].filter((n) => isDecisionFamilyRole(n.role));
+        if (mergedDecisions.length > 0) throw decisionContainedError('Merging these nodes', mergedDecisions.map((n) => n.loc));
         await createNodeRevision(
           tx,
           buildNodeRevisionSnapshot(target, editorFromAuth(ctx), {
@@ -4035,7 +4069,7 @@ export const nodeMutations = {
           await hardDeleteThreadsOfTargets(tx, [source.id]); // #1606 — deleted threads go with it
           await tx.node.delete({ where: { id: source.id } });
         }
-      });
+      }));
       await reconcilePendingEdgeCounts(ctx.db, pendingSourceMemories).catch((err) =>
         console.warn('[mergeNodes] pending-edge count reconcile failed (the periodic repair will fix it):', err),
       );
@@ -4060,7 +4094,8 @@ export const nodeMutations = {
       // Announce the write (git mirror rides the event — so a later
       // repo-wins sync can't revert the merge). Encrypted memories keep the
       // direct mirror below, using whatever plaintext this request could
-      // decrypt (keyless merges mirrored ciphertext before the pivot too).
+      // decrypt. The shared checkout defers a keyless encrypted export
+      // without touching the existing mirror (#1273).
       void publishNodeWritten({
         nodeId: finalNode.id,
         memoryId: target.memoryId,
@@ -4445,6 +4480,9 @@ export const nodeMutations = {
       }
       const node = await ctx.db.node.findUniqueOrThrow({ where: { id: revision.nodeId } });
       await requireMemoryWriteAccess(ctx, node.memoryId);
+      // #1641 §3.2 — a decision's history is its audit trail. Unlocked: no
+      // write ever turns an existing node into a decision or back.
+      if (isDecisionFamilyRole(node.role)) throw decisionContainedError("Deleting a decision's revision", [node.loc]);
       // No protected-loc gate: a revision row is history, not the address.
       await ctx.db.nodeRevision.delete({ where: { id: revisionId } });
       return true;
@@ -4517,9 +4555,11 @@ export const nodeMutations = {
       }
       const node = await ctx.db.node.findUniqueOrThrow({
         where: { id: nodeId },
-        select: { memoryId: true },
+        select: { memoryId: true, role: true, loc: true },
       });
       await requireMemoryWriteAccess(ctx, node.memoryId);
+      // #1641 §3.2 — a decision's history is its audit trail (as deleteNodeRevision).
+      if (isDecisionFamilyRole(node.role)) throw decisionContainedError("Clearing a decision's history", [node.loc]);
       const { count } = await ctx.db.nodeRevision.deleteMany({ where: { nodeId } });
       return count;
     },

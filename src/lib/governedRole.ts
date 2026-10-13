@@ -68,10 +68,10 @@ import { GraphQLError } from 'graphql';
 import type { NodeRoleRule, Prisma, PrismaClient } from '../generated/prisma/index.js';
 
 /** The closed governed subset of `Node.role` plus the capability-gated kind. */
-export type GovernedKind = 'task' | 'review' | 'spec';
+export type GovernedKind = 'task' | 'review' | 'spec' | 'decision';
 
 /** How strong a kind's gate actually is — carried so nobody has to infer it. */
-export type GateStrength = 'capability' | 'security' | 'diligence';
+export type GateStrength = 'capability' | 'security' | 'diligence' | 'authority';
 
 export interface GovernedKindEntry {
   kind: GovernedKind;
@@ -91,6 +91,14 @@ export interface GovernedKindEntry {
   mcpDoors: { create: string; update: string } | null;
   /** Extra CLI guidance for this kind, beyond `hadron node create|update`. */
   cliNote?: string;
+  /**
+   * #1641 — the kind is written only by its own purpose-built OPERATIONS, one
+   * per state change, never by a generic-shaped create/update pair: no door
+   * mutation is generated for it, and a refusal names no replay route (no
+   * door takes a generic node write). `doors` then names its ask and amend
+   * operations, for tooling that reads `extensions.door`.
+   */
+  operationsOnly?: true;
 }
 
 /**
@@ -167,6 +175,20 @@ export const GOVERNED_KINDS: readonly GovernedKindEntry[] = [
     // By design (#1201): an agent's node surface cannot author platform law.
     mcpDoors: null,
     cliNote: '`hadron spec new` and `hadron spec edit` are the spec commands',
+  },
+  {
+    // #1641 — a human decision (`decision`) and its log (`decision.log`), one
+    // family. AUTHORITY: a decision can carry an authorization, which is
+    // stronger than a review. Its content is server-rendered from structured
+    // data, so the approval hash covers exactly what the decider answered; the
+    // generic surface would let content and data drift apart.
+    kind: 'decision',
+    signal: { field: 'role', value: 'decision' },
+    strength: 'authority',
+    doors: { create: 'askDecision', update: 'amendDecision' },
+    mcpDoors: null,
+    cliNote: 'decisions are written only through the decision operations (askDecision, amendDecision, withdrawDecision, …)',
+    operationsOnly: true,
   },
 ] as const;
 
@@ -512,6 +534,7 @@ export class RoleGovernedError extends GraphQLError {
     // `extensions.mcpDoor`: a client routing from extensions must not be sent
     // where the message declined to send a reader.
     const routable =
+      !entry.operationsOnly &&
       context === 'node-write' &&
       !multi &&
       !(op === 'create' && refusal === 'removes') &&

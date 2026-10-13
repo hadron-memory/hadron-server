@@ -1,3 +1,6 @@
+// Unit-only materialization fixtures mock the consent seam; real pin tests
+// exercise this guard against persisted adoption and the loaded registry row.
+vi.mock('../../automation/pins.js', () => ({ assertPinnedToolIdentity: vi.fn() }));
 /**
  * Dynamic Home Assistant run tools (hadrontool-home-assistant) — what
  * this file pins (mirrors mcpTools.test.ts):

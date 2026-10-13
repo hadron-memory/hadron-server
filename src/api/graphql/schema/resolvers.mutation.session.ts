@@ -1,4 +1,5 @@
 // sessionMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
+import { ownsSession } from '../../../lib/sessionOwnership.js';
 import { generateId } from '../../../lib/id.js';
 import {
   buildNodeRevisionSnapshot,
@@ -11,12 +12,10 @@ import {
 import { authoredContentChanged, clearNodeAuthorship } from '../../../lib/nodeAuthorship.js';
 import { lockAncestorsForCreate, lockAncestorsForCreateMany } from '../../../lib/nodeSubtreeLock.js';
 import { mintMemoryUrnV2 } from '../../../lib/mintMemoryUrnV2.js';
-import { canReadMemory } from '../../../mcp/access-control.js';
+import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
+import { canReadMemory, filterReadableMemoryIds } from '../../../mcp/access-control.js';
 import { isAgentInstalled } from '../../../lib/appAgent.js';
-import {
-  parseDataKey,
-  type EncryptionKey,
-} from '../../../lib/crypto.js';
+import { hasRequestOperationKey, getRequestOperationKey } from '../../../lib/requestOperationKey.js';
 import { sessionKeyCache } from '../../../lib/sessionKeyCache.js';
 import { makeKeyVerifier, verifyDataKey } from '../../../lib/memoryUnlock.js';
 import { decryptNodesBatch } from '../../../lib/nodeCrypto.js';
@@ -33,7 +32,10 @@ import {
 import { emitNodeUrnV2 } from '../../../lib/urnEmit.js';
 import { resolveWorkerRef as resolveWorkerRefId } from '../../../lib/entityRef/workerRef.js';
 import { isId } from '../../../lib/entityRef/shape.js';
-import { resolveWorkerIdByNameGated, provisionWorkerMemory } from './resolvers.worker.js';
+import { resolveWorkerIdByNameGated, provisionWorkerMemory, resolveReportsToTarget } from './resolvers.worker.js';
+import { lockAppReportsTo, writeReportsTo } from '../../../lib/workerReportsTo.js';
+import { eventActor } from '../../../lib/agentTasks/events.js';
+import { managesApp } from '../../../lib/auth/appManagement.js';
 import { writeNodeCore } from './resolvers.mutation.node.js';
 import { attributedRequestActivity, recordNodeUsage, toUsageNodeRefs, trackUsageWrite } from '../../../lib/usageRecorder.js';
 import {
@@ -63,6 +65,7 @@ import {
   loadLastEventBySession,
   mostRecentlyActive,
   isSessionLive,
+  usageEventCountsAsActivity,
   recentlyTouchedFilter,
   OPEN_SESSION_SCAN_CAP,
 } from '../../../lib/sessionActivity.js';
@@ -72,6 +75,7 @@ import {
   isAppParticipant,
   requireRole,
   requireOrgRole,
+  requireAgentAccess,
   requireOwnerOrOrgRole,
   requireSessionWriteAccess,
   resolveReadableNodeByLoc,
@@ -84,6 +88,7 @@ import {
 import { assertNoMintedSpecRemoval, assertNoMintedSpecUnmark } from '../../../lib/mintedSpecPermanence.js';
 import { preserveHeartbeatIfLapsed } from '../../../lib/sessionActivity.js';
 import { withAuthorizedTx } from './authorizedTx.js';
+import { deriveFamily, normalizeFamily } from '../../../lib/agentTasks/family.js';
 
 /**
  * Strip explicit GraphQL nulls from a CalendarEventTimeInput so the tool's
@@ -396,7 +401,7 @@ export const sessionMutations = {
           throw new GraphQLError(`Agent not found: ${agentRef}`, { extensions: { code: 'BAD_USER_INPUT' } });
         }
         if (agent.visibility !== 'PUBLIC') {
-          await requireOwnerOrOrgRole(ctx, agent, 'READER');
+          await requireAgentAccess(ctx, agent, 'READER');
         }
         agentId = resolvedAgentId;
       }
@@ -517,6 +522,22 @@ export const sessionMutations = {
       // #1625 review (Baloo P2-2): set when this bind names a worker, and
       // re-run inside the transaction under the Worker lock.
       let assertWorkerNotTaken: ((db: Context['db']) => Promise<void>) | null = null;
+      // #1707 (cor:agt:060:04): the session's model family — given, or derived
+      // from the model, then the tool. Refused before anything is written when
+      // given in a shape no family has; a matching input, never authorization.
+      let family: string | null = null;
+      if (input.family != null && input.family.trim() !== '') {
+        family = normalizeFamily(input.family);
+        if (!family) {
+          throw new GraphQLError(
+            'family is a model family token: lowercase letters, digits, ".", "_" or "-", up to 64 characters (e.g. claude, codex, glm).',
+            { extensions: { code: 'BAD_USER_INPUT' } },
+          );
+        }
+      } else {
+        family = deriveFamily({ llmModel: input.llmModel, tool: input.tool });
+      }
+
       const workerRef = input.workerRef?.trim();
       if (workerRef) {
         // #991: a Worker id OR an hrn:worker:<root>:<app-slug>:<worker-slug>
@@ -939,6 +960,18 @@ export const sessionMutations = {
         }
       }
 
+      // #1726: `reportsTo` at bind names a worker of the session's App (id,
+      // URN or name). Resolved here; written in the bind's transaction below.
+      const reportsToRef = input.reportsTo?.trim();
+      let reportsToId: string | null = null;
+      if (reportsToRef) {
+        if (!workerId || !appId) {
+          throw new GraphQLError('reportsTo needs a worker bind (workerRef).', { extensions: { code: 'BAD_USER_INPUT' } });
+        }
+        // Within the session's App only: another App's worker reads as missing (#1737 QA, Chip's P2).
+        reportsToId = await resolveReportsToTarget(ctx, appId, reportsToRef);
+      }
+
       // #1617 C: sessions this bind ended as superseded. Their cached keys
       // are evicted only after the transaction commits, as endSessionFirstWins
       // does for an explicit end.
@@ -951,6 +984,22 @@ export const sessionMutations = {
         // have replaced a stale selection above; only the final App matters.
         if (appId) {
           await lockSessionAppActive(tx, appId);
+        }
+        // #1726: a bind that sets reportsTo is a reportsTo WRITER. It takes the
+        // App's graph lock, then holds the caller's own authority rows (users,
+        // app_members, org_members) FOR SHARE, all BEFORE the worker row below
+        // (the lock protocol, src/lib/workerReportsTo.ts; #1737 review, Diego
+        // P2-2, Rook P2-1). A demotion or role removal then commits first and is
+        // seen, or waits for this bind.
+        if (reportsToId && appId) {
+          await lockAppReportsTo(tx, appId);
+          if (ctx.userId) {
+            await tx.$queryRaw`SELECT 1 FROM users WHERE id = ${ctx.userId} FOR SHARE`;
+            await tx.$queryRaw`SELECT 1 FROM app_members WHERE app_id = ${appId} AND user_id = ${ctx.userId} FOR SHARE`;
+            await tx.$queryRaw`
+              SELECT 1 FROM org_members m JOIN apps a ON a.organization_id = m.organization_id
+              WHERE a.id = ${appId} AND m.user_id = ${ctx.userId} FOR SHARE OF m`;
+          }
         }
         // #1625 review (Baloo P2-2, P2-3): EVERY worker bind takes the Worker
         // row lock, the same lock a lapsed-session resume takes (after the App
@@ -1034,6 +1083,19 @@ export const sessionMutations = {
             if (!app || !(await isAppParticipant({ ...ctx, db: tx as unknown as Context['db'] }, app))) {
               throw new GraphQLError(
                 'You are not a member of this worker\'s App, so you cannot take one of its names.',
+                { extensions: { code: 'FORBIDDEN' } },
+              );
+            }
+
+            // #1764 (Rook P2, #8886; Ada's interim (b), #8897): on a USER-owned App, being a participant does not make
+            // you a holder. A worker carries its holder's working memory, posting identity and grants, and a user-owned
+            // App's participants now include every member at any role; so taking a name there needs the owner or
+            // whoever manages the App (managesApp: the owner-role AppMember arm included). Org-owned Apps are unchanged.
+            // Whether members may hold the owner's workers at all is Holger's call (#8897); until he rules, the gate.
+            if (app.ownerUserId !== null && ctx.userId !== app.ownerUserId &&
+                !(await managesApp({ ...ctx, db: tx as unknown as Context['db'] }, app))) {
+              throw new GraphQLError(
+                'Only the owner of this App, or whoever manages it, can take one of its worker names.',
                 { extensions: { code: 'FORBIDDEN' } },
               );
             }
@@ -1133,9 +1195,37 @@ export const sessionMutations = {
           transcriptPath: input.transcriptPath,
           host: input.host,
           tool: input.tool,
+          family,
         },
         include: SESSION_INCLUDE,
         });
+        // #1726: set who the worker reports to, in one step with the bind (a
+        // spawn brief). Only onto a worker that reports to nobody, or to the
+        // same worker (nothing to do): naming a different one would move a
+        // claimed worker, which takes whoever manages the App
+        // (WORKER_REPORTS_TO_HELD otherwise). A person must be behind the bind.
+        if (reportsToId && workerId && appId) {
+          const bindAppId = appId;
+          await writeReportsTo(tx, {
+            workerId, appId: bindAppId, to: reportsToId, actor: eventActor(ctx.userId), setBy: 'bind',
+            authorize: async (from) => {
+              if (!ctx.userId || ctx.impersonation) {
+                throw new GraphQLError('reportsTo at bind needs a person behind the request.', { extensions: { code: 'WORKER_REPORTS_TO_FORBIDDEN', workerId } });
+              }
+              if (from === null) return 'bind';
+              const bindApp = await tx.app.findUniqueOrThrow({ where: { id: bindAppId }, select: { id: true, ownerUserId: true, organizationId: true } });
+              // Platform roles as the user row holds them now (held FOR SHARE
+              // above), never the request's: a stale token grants nothing.
+              const me = await tx.user.findUnique({ where: { id: ctx.userId }, select: { roles: true, deletedAt: true } });
+              const roles = me && !me.deletedAt ? (me.roles as Context['roles']) : [];
+              if (await managesApp({ ...ctx, roles, db: tx }, bindApp)) return 'app-manager';
+              throw new GraphQLError(
+                'This worker already reports to another worker. Its current one hands it over (setWorkerReportsTo), or whoever manages the App changes it.',
+                { extensions: { code: 'WORKER_REPORTS_TO_HELD', workerId, reportsTo: from } },
+              );
+            },
+          });
+        }
         if (supersedes.length > 0) {
           const ids = supersedes.map((r) => r.id).filter((id) => id !== created.id);
           const endedAt = new Date();
@@ -1263,51 +1353,75 @@ export const sessionMutations = {
       // it earns commits in the SAME transaction (rolled back if the insert
       // fails), and the row is stamped at the instant activity was judged
       // (local P2-1).
-      const at = new Date();
-      await ctx.db.$transaction(async (tx) => tx.usageEvent.create({
-        data: {
-          type: event.type,
-          nodeLoc: event.nodeLoc,
-          nodeId: node?.id,
-          // #796: derived from the same row `nodeId` comes from — now a row the
-          // caller demonstrably can read, so the memory attribution is theirs
-          // to make. Keeping it derived leaves UsageEventInput unchanged.
-          memoryId: node?.memoryId,
-          actionArgs: serializeJson(event.actionArgs) as InputJsonValue | undefined,
-          appId: ctx.appId,
-          // Attribution from auth (spec 046 FR-001), as the MCP recorders do.
-          // This path only ever set the audit `createdBy` string, so a signed-in
-          // user's reads/writes recorded here were invisible to any query
-          // filtering on `userId` — including #796's own-activity scope.
-          userId: ctx.userId ?? null,
-          createdBy: ctx.userId ?? ctx.clientId ?? null,
-          sessionId: event.sessionId,
-          // #1653 / DY-2: the session id here is CLIENT-SUPPLIED, so it counts
-          // as activity only for a live session this caller owns. Before this,
-          // any reader could keep someone else's session live, or revive it,
-          // by recording usage against its id.
-          countsAsActivity: await attributedRequestActivity(ctx.db, ctx, event.sessionId, { at, tx }),
-          createdAt: at,
-          model: event.model,
-          tokensIn: event.tokensIn,
-          tokensOut: event.tokensOut,
-        },
-      }));
+      await ctx.db.$transaction(async (tx) => {
+        // The App-key resume must run BEFORE any Session share lock: it takes
+        // App SHARE → Worker UPDATE → Session UPDATE, like bind. Taking
+        // Session SHARE first inverts that order and concurrent resumes also
+        // deadlock while upgrading their share locks (#1741, Bob P2).
+        if (event.sessionId && !ctx.userId && ctx.appId && !ctx.impersonation) {
+          await attributedRequestActivity(ctx.db, ctx, event.sessionId, { tx });
+        }
+        // #1662: denied, missing and deleted refs all record without a session.
+        // Hold the row through the insert so deletion/account reassignment
+        // cannot invalidate ownership between the check and attribution.
+        let sessionId: string | null = null;
+        if (event.sessionId) {
+          await tx.$queryRaw`SELECT id FROM sessions WHERE id = ${event.sessionId} FOR SHARE`;
+          const session = await tx.session.findUnique({
+            where: { id: event.sessionId },
+            select: { userId: true, appId: true, deletedAt: true },
+          });
+          if (session && !session.deletedAt && ownsSession(ctx, session)) sessionId = event.sessionId;
+        }
+        // Re-judge activity under the ownership row hold without attempting
+        // another resume (which could acquire a Worker after the Session).
+        const at = new Date();
+        const countsAsActivity = await usageEventCountsAsActivity(tx as never, ctx, sessionId, at);
+        return tx.usageEvent.create({
+          data: {
+            type: event.type,
+            nodeLoc: event.nodeLoc,
+            nodeId: node?.id,
+            // #796: derived from the same row `nodeId` comes from — now a row the
+            // caller demonstrably can read, so the memory attribution is theirs
+            // to make. Keeping it derived leaves UsageEventInput unchanged.
+            memoryId: node?.memoryId,
+            actionArgs: serializeJson(event.actionArgs) as InputJsonValue | undefined,
+            appId: ctx.appId,
+            // Attribution from auth (spec 046 FR-001), as the MCP recorders do.
+            // This path only ever set the audit `createdBy` string, so a signed-in
+            // user's reads/writes recorded here were invisible to any query
+            // filtering on `userId` — including #796's own-activity scope.
+            userId: ctx.userId ?? null,
+            createdBy: ctx.userId ?? ctx.clientId ?? null,
+            sessionId,
+            // #1653 / DY-2: the session id here is CLIENT-SUPPLIED, so it counts
+            // as activity only for a live session this caller owns. Before this,
+            // any reader could keep someone else's session live, or revive it,
+            // by recording usage against its id.
+            countsAsActivity,
+            createdAt: at,
+            model: event.model,
+            tokensIn: event.tokensIn,
+            tokensOut: event.tokensOut,
+          },
+        });
+      });
       return true;
     },
 
     startAgentSession: async (
       _: unknown,
-      { agentId, externalUserId, sessionTimeoutSeconds, dataKey }: {
+      { agentId, externalUserId, sessionTimeoutSeconds }: {
         agentId: string;
         externalUserId?: string;
         sessionTimeoutSeconds?: number;
-        dataKey?: string;
       },
       ctx: Context,
     ) => {
       const appId = ctx.appId;
       if (!appId) throw new Error('Forbidden: App Key required');
+      const hasSuppliedKey = hasRequestOperationKey();
       // Lock the App before provisioning any dependent row. The lock and all
       // writes commit together, so uninstall cannot pass the check mid-flight.
       const { session, memoryId, parsedKey } = await ctx.db.$transaction(async (tx) => {
@@ -1332,15 +1446,16 @@ export const sessionMutations = {
           throw new GraphQLError('startAgentSession is not supported for a user-owned Agent yet.', { extensions: { code: 'BAD_USER_INPUT' } });
         }
 
-        // SECRET mode requires a data key; USER_ID mode rejects it.
-        if (app.identifyUserMethod === 'SECRET' && !dataKey) {
-          throw new Error('dataKey is required when the app uses identifyUserMethod: SECRET');
+        // SECRET mode requires a supplied key; USER_ID mode rejects it.
+        if (app.identifyUserMethod === 'SECRET' && !hasSuppliedKey) {
+          throw new GraphQLError('A supplied operation key is required in SECRET mode.', { extensions: { code: 'BAD_UNLOCK_INPUT' } });
         }
-        if (app.identifyUserMethod === 'USER_ID' && dataKey) {
-          throw new Error('dataKey is only accepted when the app uses identifyUserMethod: SECRET');
+        if (app.identifyUserMethod === 'USER_ID' && hasSuppliedKey) {
+          throw new GraphQLError('An operation key is only accepted in SECRET mode.', { extensions: { code: 'BAD_UNLOCK_INPUT' } });
         }
 
-        const parsedKey: EncryptionKey | null = dataKey ? parseDataKey(dataKey) : null;
+        // #1796: consume request-only supply before any provisioning writes.
+        const parsedKey = getRequestOperationKey();
 
         // Resolve user (optional — null means anonymous session)
         let userId: string | null = null;
@@ -1479,10 +1594,10 @@ export const sessionMutations = {
         }
 
         // If the memory is encrypted, the caller must provide a matching key.
-        // (In SECRET mode we already required a dataKey above; this check also
+        // (In SECRET mode we already required a supplied key above; this check also
         // handles a later call with USER_ID mode on an already-encrypted mem.)
         if (memoryIsEncrypted && !parsedKey) {
-          throw new Error('Memory is encrypted; dataKey is required');
+          throw new GraphQLError('A supplied operation key is required for the encrypted memory.', { extensions: { code: 'BAD_UNLOCK_INPUT' } });
         }
         if (memoryIsEncrypted && parsedKey) {
           const keyProof = await tx.memory.findUniqueOrThrow({
@@ -1494,7 +1609,7 @@ export const sessionMutations = {
             });
           }
           if (!verifyDataKey(keyProof.keyVerifier, parsedKey)) {
-            throw new Error('Wrong dataKey for encrypted memory');
+            throw new GraphQLError('Wrong key for encrypted memory.', { extensions: { code: 'WRONG_KEY' } });
           }
         }
 
@@ -1560,7 +1675,7 @@ export const sessionMutations = {
       // 007-entity-id-or-urn: agentId may be ID, bare URN, or prefixed URN.
       const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentId);
       const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
-      await requireOwnerOrOrgRole(ctx, agent, 'ADMIN');
+      await requireAgentAccess(ctx, agent, 'ADMIN');
       const sysMemId = (agent as any).systemMemoryId as string;
       if (!sysMemId) throw new Error('Agent has no system memory');
 
@@ -1637,7 +1752,7 @@ export const sessionMutations = {
       // 007-entity-id-or-urn: agentId may be ID, bare URN, or prefixed URN.
       const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentId);
       const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
-      await requireOwnerOrOrgRole(ctx, agent, 'ADMIN');
+      await requireAgentAccess(ctx, agent, 'ADMIN');
       const sysMemId = (agent as any).systemMemoryId as string;
       if (!sysMemId) throw new Error('Agent has no system memory');
 
@@ -1672,7 +1787,7 @@ export const sessionMutations = {
       // 007-entity-id-or-urn: agentId may be ID, bare URN, or prefixed URN.
       const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentId);
       const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
-      await requireOwnerOrOrgRole(ctx, agent, 'ADMIN');
+      await requireAgentAccess(ctx, agent, 'ADMIN');
       const sysMemId = (agent as any).systemMemoryId as string;
       if (!sysMemId) throw new Error('Agent has no system memory');
 
@@ -1855,7 +1970,7 @@ export const sessionMutations = {
       // 007-entity-id-or-urn: agentId may be ID, bare URN, or prefixed URN.
       const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentId);
       const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
-      await requireOwnerOrOrgRole(ctx, agent, 'ADMIN');
+      await requireAgentAccess(ctx, agent, 'ADMIN');
 
       const now = new Date();
       const lockExpiry = (agent as any).editorLockExpiresAt as Date | null;
@@ -1884,7 +1999,7 @@ export const sessionMutations = {
       // 007-entity-id-or-urn: agentId may be ID, bare URN, or prefixed URN.
       const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentId);
       const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
-      await requireOwnerOrOrgRole(ctx, agent, 'ADMIN');
+      await requireAgentAccess(ctx, agent, 'ADMIN');
 
       await ctx.db.agent.update({
         where: { id: resolvedAgentId },
@@ -2292,6 +2407,7 @@ export const sessionMutations = {
         sessionId: ctx.sessionId,
         roles: ctx.roles,
         organizationId: ctx.organizationId,
+        impersonation: ctx.impersonation,
       };
 
       const loadAndRender = async (targetNodeUrn: string) => {
@@ -2335,13 +2451,24 @@ export const sessionMutations = {
 
         const node = await ctx.db.node.findUnique({
           where: { loc_memoryId: { loc, memoryId: memory.id } },
-          include: { outgoingEdges: { include: { target: true } } },
+          include: { outgoingEdges: { where: { deletedAt: null, target: { deletedAt: null } }, include: { target: true } } },
         });
         if (!node) {
           throw new GraphQLError(`Node "${targetNodeUrn}" not found.`, {
             extensions: { code: 'NOT_FOUND' },
           });
         }
+
+        // #1719/#1730: reference edges are reads of their target memory.
+        // A run fails loudly rather than executing a silently shortened flow;
+        // interactive render omits unreadable targets as the preview does.
+        const readableTargets = await filterReadableMemoryIds(ctx.db, auth,
+          node.outgoingEdges.flatMap(e => e.target ? [e.target.memoryId] : []));
+        if (isRunPrincipal(auth) && node.outgoingEdges.some(e => e.target &&
+            !isRoutingName(routingNameOf(e, loc)) && !readableTargets.has(e.target.memoryId))) {
+          throw new GraphQLError('Referenced dependency is not readable by the run principal; the run was refused.', { extensions: { code: 'FORBIDDEN' } });
+        }
+        node.outgoingEdges = node.outgoingEdges.filter(e => e.target && readableTargets.has(e.target.memoryId));
 
         // Decrypt the node and its outgoing edge targets if the memory is encrypted.
         // An edge whose target was deleted can surface a null `target`; filter
@@ -2371,6 +2498,7 @@ export const sessionMutations = {
               (await ctx.db.memory.findUniqueOrThrow({ where: { id: memoryId }, select: { urn: true } })).urn,
             compileTemplate: (content, data, memoryId) =>
               compileTemplate(content, data, memoryId, ctx.db, {}),
+            includeTarget: target => !!target && readableTargets.has(target.memoryId),
             onTargetInlined: (target) => inlined.push(target),
           },
         );

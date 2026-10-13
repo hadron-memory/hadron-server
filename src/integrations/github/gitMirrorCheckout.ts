@@ -60,6 +60,9 @@ export async function withMirrorCheckout(
     memoryId?: string;
     ownerRepo?: string;
     clientId?: string | null;
+    /** Node-file writes capture request-scoped key presence at dispatch. Path-only
+     * removals omit it: deleting a stale file needs no decryption key. */
+    nodeWriteKeyAvailable?: boolean;
     /** Commit subject line; `[hadron-server]` is appended as the body. */
     commitSubject: string;
     /** Log-line prefix identifying the calling mirror path. */
@@ -130,6 +133,15 @@ export async function withMirrorCheckout(
         where: { id: resolvedMemoryId }, include: { organization: true },
       });
       if (!memory || !memory.organization || !memory.source) return 'skipped';
+      // #1273 / cor:sec:040:05: a keyless structural merge is legal in the
+      // DB, but cannot export either ciphertext or plaintext. Check the live
+      // encryption state after the checkout wait, before ANY Git/filesystem
+      // mutation, and record the deferral. The next keyed write can mirror
+      // the latest state; this fire-and-forget path has no durable retry queue.
+      if (memory.isEncrypted && opts.nodeWriteKeyAvailable === false) {
+        console.warn(`[git-mirror] Deferring node write for memory ${memory.id}: no request-carried key at dispatch`);
+        return 'skipped';
+      }
       try {
         validateMemorySource(memory.source);
       } catch (e) {
@@ -197,6 +209,18 @@ export async function withMirrorCheckout(
 
       // 5. Let the caller reshape the working tree.
       try {
+        // Git preparation can wait on the remote. An encryption flip during
+        // that wait must also stop a previously-plaintext keyless snapshot.
+        if (opts.nodeWriteKeyAvailable === false) {
+          const current = await db.memory.findUnique({
+            where: { id: resolvedMemoryId }, select: { isEncrypted: true },
+          });
+          if (!current || current.isEncrypted) {
+            console.warn(`[git-mirror] Deferring node write for memory ${resolvedMemoryId}: memory changed during preparation, no request-carried key at dispatch`);
+            await restoreRemote(localPath, memory.source);
+            return 'skipped';
+          }
+        }
         const shouldCommit = await mutate({ localPath, branch });
         if (shouldCommit === false) {
           await restoreRemote(localPath, memory.source);

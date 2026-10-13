@@ -1,0 +1,443 @@
+{
+  "observedAt": "2026-10-12",
+  "organization": "hadron-memory",
+  "method": "Visible organization repository default-branch tarballs pinned by commit; textual startAgentSession|linkMemoryToUser|x-hadron-operation-key search. Binary files and files over 10 MB excluded. Empty repository recorded explicitly. Not a census of private external clients, installed versions, branches or runtime traffic.",
+  "repositories": [
+    {
+      "repo": "urn-lib-go",
+      "head": "199e6cfdbd69b03a001d99bbb4eb20fba649ce8c",
+      "branch": "main",
+      "archived": false,
+      "files": 17,
+      "matchingPaths": {}
+    },
+    {
+      "repo": "urn-lib-js",
+      "head": "0a4090f237ce6ca464a4d52aef8c71a6eb32869a",
+      "branch": "main",
+      "archived": false,
+      "files": 24,
+      "matchingPaths": {}
+    },
+    {
+      "repo": "hadron-server",
+      "head": "36eee4808cd04e90bdafcee6536468ea7d500116",
+      "branch": "main",
+      "archived": false,
+      "files": 1416,
+      "matchingPaths": {
+        "CLAUDE.md": 1,
+        "prisma/migrations/20261005020000_app_agent_sessions_expire/migration.sql": 1,
+        "prisma/schema.prisma": 3,
+        "scripts/check-urn-rename-aliased.mjs": 1,
+        "src/api/graphql/schema/resolvers.decisions.ts": 1,
+        "src/api/graphql/schema/resolvers.encryption.test.ts": 40,
+        "src/api/graphql/schema/resolvers.encryptionOwner1644.test.ts": 11,
+        "src/api/graphql/schema/resolvers.findNodes.test.ts": 1,
+        "src/api/graphql/schema/resolvers.keyHeader1796.test.ts": 33,
+        "src/api/graphql/schema/resolvers.mergeNodes.test.ts": 2,
+        "src/api/graphql/schema/resolvers.multiUserAgent.test.ts": 31,
+        "src/api/graphql/schema/resolvers.mutation.memory.ts": 3,
+        "src/api/graphql/schema/resolvers.mutation.session.ts": 4,
+        "src/api/graphql/schema/resolvers.sessionIsolationScope.test.ts": 5,
+        "src/api/graphql/schema/resolvers.startChatGate1581.test.ts": 4,
+        "src/api/graphql/schema/typeDefs.ts": 7,
+        "src/jobs/reapSessions.ts": 1,
+        "src/lib/auth/sessionScopedMemoryIds.ts": 6,
+        "src/lib/crypto.ts": 1,
+        "src/lib/memoryUnlock.ts": 1,
+        "src/lib/requestOperationKey.ts": 1,
+        "src/lib/sentryScrubber.test.ts": 2,
+        "src/lib/sessionActivity.dy.test.ts": 1,
+        "src/lib/sessionActivity.ts": 1,
+        "src/mcp/access-control.appClassRead.test.ts": 1,
+        "src/mcp/access-control.ts": 1,
+        "src/mcp/server.callerSessionReach1701.test.ts": 1,
+        "src/test/integration/008-multi-install-isolation.test.ts": 1,
+        "src/test/integration/008-personal-memory.test.ts": 1,
+        "src/test/integration/033-us5-encrypted.test.ts": 1
+      }
+    },
+    {
+      "repo": "hadron-cli",
+      "head": "88f86855840e1e59f9dd1350d4d127ad4051315e",
+      "branch": "main",
+      "archived": false,
+      "files": 756,
+      "matchingPaths": {
+        "docs/plans/memory-access.md": 1,
+        "docs/plans/memory-link-user.md": 3,
+        "internal/api/gen/generated.go": 2,
+        "internal/api/queries/memories.graphql": 1,
+        "internal/api/unbound-ops.txt": 1,
+        "internal/cmd/memory/linkuser.go": 2,
+        "internal/cmd/memory_link_user_cmd_test.go": 2,
+        "schema/schema.graphql": 4
+      }
+    },
+    {
+      "repo": "hadron-portal",
+      "head": "f6396664ec6a3c9d17b2c284ef56b2a8335b6d5c",
+      "branch": "main",
+      "archived": false,
+      "files": 1017,
+      "matchingPaths": {
+        "schema/schema.graphql": 4
+      }
+    },
+    {
+      "repo": "hadron-docs",
+      "head": "e5d79f957d65a0b7de04bc8340e7b592f0549720",
+      "branch": "main",
+      "archived": false,
+      "files": 163,
+      "matchingPaths": {
+        "docs/explanation/teams-personas-and-sessions.md": 1,
+        "docs/reference/authorization.md": 1,
+        "docs/reference/graphql/schema.graphql": 4,
+        "docs/reference/graphql/schema.md": 4,
+        "docs/reference/prisma/entities.md": 1
+      }
+    },
+    {
+      "repo": "hadron-concept",
+      "head": "453830b0a1fea882d245c639d1b4492ba7c23a85",
+      "branch": "main",
+      "archived": false,
+      "files": 1791,
+      "matchingPaths": {
+        "design-discussions/_registry/decisions.md": 1,
+        "design-discussions/agent-team/2026-04-13-multi-user-agent/004-assistant.md": 1,
+        "design-discussions/agent-team/2026-04-13-multi-user-agent/summary.md": 1,
+        "design-discussions/hadron-client/2026-04-22-hadron-client-app-mode/002-assistant.md": 3,
+        "design-discussions/hadron-client/2026-04-22-hadron-client-app-mode/004-assistant.md": 1,
+        "design-discussions/hadron-client/2026-04-22-hadron-client-app-mode/010-assistant.md": 1,
+        "design-discussions/hadron-client/2026-04-22-hadron-client-app-mode/012-assistant.md": 1,
+        "design-discussions/hadron-client/2026-04-22-hadron-client-app-mode/014-assistant.md": 2,
+        "design-discussions/hadron-client/2026-04-22-hadron-client-app-mode/016-assistant.md": 1,
+        "design-discussions/hadron-client/2026-04-22-hadron-client-app-mode/018-assistant.md": 2,
+        "design-discussions/hadron-client/2026-04-22-hadron-client-app-mode/summary.md": 1,
+        "design-discussions/hadron-platform/2026-08-25-assistant-agents/012-assistant.md": 1,
+        "design-discussions/hadron-platform/2026-08-25-assistant-agents/014-assistant.md": 1,
+        "design-discussions/hadron-platform/2026-08-25-assistant-agents/016-assistant.md": 1,
+        "design-discussions/memory/STUBBED-encryption-of-personal-memory/001-assistant.md": 1,
+        "design-discussions/next.md": 1,
+        "hadron-specs/Features/Multi-User-Agents.md": 7,
+        "implementation-plans/2026-04-13-multi-user-agents.md": 3,
+        "implementation-plans/2026-04-15-portal-agent-chat.md": 3,
+        "implementation-plans/2026-06-24-encrypted-private-memories.md": 5
+      }
+    },
+    {
+      "repo": "homebrew-hadron-cli",
+      "head": "3572058ecc2cc993d93634f95dc72652fe6481aa",
+      "branch": "main",
+      "archived": false,
+      "files": 2,
+      "matchingPaths": {}
+    },
+    {
+      "repo": "hadron-cloud",
+      "head": "05c9ac28d9686a67c8b49ba09a8684797a9cb78c",
+      "branch": "main",
+      "archived": false,
+      "files": 23,
+      "matchingPaths": {}
+    },
+    {
+      "repo": "hadrontool-pdf",
+      "head": "ec825c5c6f6ab78a97cd7449d275ad336e6db490",
+      "branch": "main",
+      "archived": false,
+      "files": 30,
+      "matchingPaths": {}
+    },
+    {
+      "repo": "hadron-relay",
+      "head": "c385f2ea9f82281fce5cd6a80a958abc5e22deb9",
+      "branch": "main",
+      "archived": false,
+      "files": 24,
+      "matchingPaths": {}
+    },
+    {
+      "repo": "hadrontool-scan",
+      "head": "08315a52745cb6b25b9c58a0269311e06096f1cc",
+      "branch": "main",
+      "archived": false,
+      "files": 23,
+      "matchingPaths": {}
+    },
+    {
+      "repo": "hadrontool-websearch",
+      "head": "f81cb7f273ed60d455a8e86ddf4f4040f255b9a5",
+      "branch": "main",
+      "archived": false,
+      "files": 27,
+      "matchingPaths": {}
+    },
+    {
+      "repo": "hadrontool-slack",
+      "head": "8373838e8bf4572514d132d2d301fb57558cbd91",
+      "branch": "main",
+      "archived": false,
+      "files": 37,
+      "matchingPaths": {}
+    },
+    {
+      "repo": "hadrontool-twilio",
+      "head": "26730041ceddea870926025f012aa594a48dfd91",
+      "branch": "main",
+      "archived": false,
+      "files": 24,
+      "matchingPaths": {}
+    },
+    {
+      "repo": "hadrontool-webfetch",
+      "head": "35adbb16102c43dbeb7e8ac95f369609e7a8608b",
+      "branch": "main",
+      "archived": false,
+      "files": 40,
+      "matchingPaths": {}
+    },
+    {
+      "repo": "hadrontool-mcp",
+      "head": "57c5951356048ba77cb448d8647bd84e22799c08",
+      "branch": "main",
+      "archived": false,
+      "files": 26,
+      "matchingPaths": {}
+    },
+    {
+      "repo": "hadrontool-gmail",
+      "head": "d7ebde1ac892380189ad1ee973ebfb592826f08e",
+      "branch": "main",
+      "archived": false,
+      "files": 45,
+      "matchingPaths": {}
+    },
+    {
+      "repo": "hadron-client",
+      "head": "b562b7e291c03aa03f593b9de2840ca1ed2435e1",
+      "branch": "main",
+      "archived": false,
+      "files": 111,
+      "matchingPaths": {}
+    },
+    {
+      "repo": "hadron-macapp",
+      "head": "53f9628515cb04f7ec3f8b10d6a881cec49d2a7e",
+      "branch": "main",
+      "archived": false,
+      "files": 22,
+      "matchingPaths": {}
+    },
+    {
+      "repo": "hadrontool-google-drive",
+      "head": "2aae14f38a64923d7aa0c815c17ae59a019a2e66",
+      "branch": "main",
+      "archived": false,
+      "files": 34,
+      "matchingPaths": {}
+    },
+    {
+      "repo": "hadrontool-billing",
+      "head": "b6329b80ad42c371eead62bae522236c191fa239",
+      "branch": "main",
+      "archived": false,
+      "files": 22,
+      "matchingPaths": {}
+    },
+    {
+      "repo": "hadrontool-ms-exchange",
+      "head": "492d04d08ce8a1423223b31ceb7088cbae447bf8",
+      "branch": "main",
+      "archived": false,
+      "files": 42,
+      "matchingPaths": {}
+    },
+    {
+      "repo": "hadrontool-telegram",
+      "head": "1c28308b513e6a233b9a7de36c373b6e86185f30",
+      "branch": "main",
+      "archived": false,
+      "files": 34,
+      "matchingPaths": {}
+    },
+    {
+      "repo": "hadron-ios",
+      "head": "9253e851f4c3588cc01dbdced6f0b37c7c29673e",
+      "branch": "main",
+      "archived": false,
+      "files": 42,
+      "matchingPaths": {}
+    },
+    {
+      "repo": "hadron-android",
+      "head": "ed8c0e784ace985787f964d5155d8f2c1dc9a70e",
+      "branch": "main",
+      "archived": false,
+      "files": 65,
+      "matchingPaths": {}
+    },
+    {
+      "repo": "hadrontool-resend",
+      "head": "2fe4bf184e0aee0177ed71b37a21d18a649e9b40",
+      "branch": "main",
+      "archived": false,
+      "files": 24,
+      "matchingPaths": {}
+    },
+    {
+      "repo": "hadron-chrome-extension",
+      "head": "6ef58aff90ed78f93e6225d30aed78baafd360f3",
+      "branch": "main",
+      "archived": false,
+      "files": 20,
+      "matchingPaths": {}
+    },
+    {
+      "repo": "hadrontool-home-assistant",
+      "head": "2ede8d5e5e3867317ec278e1e1e3406597902371",
+      "branch": "main",
+      "archived": false,
+      "files": 24,
+      "matchingPaths": {}
+    },
+    {
+      "repo": "ha-hadron",
+      "head": "719e333a07fc4ac9872e0c5eb303ce6b25664365",
+      "branch": "main",
+      "archived": false,
+      "files": 2,
+      "matchingPaths": {}
+    },
+    {
+      "repo": "hadrontool-google-cal",
+      "head": "0d190726f376be62f8f4009d5a590db363680604",
+      "branch": "main",
+      "archived": false,
+      "files": 35,
+      "matchingPaths": {}
+    },
+    {
+      "repo": "access-control",
+      "head": "bda8f74a52457c567180eba908416ff1e430689a",
+      "branch": "main",
+      "archived": false,
+      "files": 19,
+      "matchingPaths": {}
+    },
+    {
+      "repo": "hadron-assets",
+      "head": "53e58c0df41d9a4ac240f3cbbe9b945912c2184b",
+      "branch": "main",
+      "archived": false,
+      "files": 2,
+      "matchingPaths": {}
+    },
+    {
+      "repo": "spec-kits",
+      "head": "7bf523bf899fc66ea3ca6df5a147c614eef81c50",
+      "branch": "main",
+      "archived": false,
+      "files": 265,
+      "matchingPaths": {
+        "specs/005-agent-subscription/spec.md": 2,
+        "specs/005-agent-subscription/tasks.md": 2,
+        "specs/021-urn-composition/contracts/slug-validation.md": 1,
+        "system/api-surface.md": 2
+      }
+    },
+    {
+      "repo": "hadron-plugins",
+      "head": "1e01888da0534e2641322e7d6bb5d03eb336e38f",
+      "branch": "main",
+      "archived": false,
+      "files": 6,
+      "matchingPaths": {}
+    },
+    {
+      "repo": "hadronmem-specs",
+      "head": "ca5d72e377e633cae9d7adf61a4ca23a0c6a6a4d",
+      "branch": "main",
+      "archived": false,
+      "files": 132,
+      "matchingPaths": {
+        "cor/api/010/01.md": 2
+      }
+    },
+    {
+      "repo": "distri-machine",
+      "head": "a57dcaeccc68c4d3c31a8563416e540db5029c49",
+      "branch": "main",
+      "archived": false,
+      "files": 12,
+      "matchingPaths": {}
+    },
+    {
+      "repo": "hadronmem-mcp",
+      "head": "b311ad7281e663df0a3eae0de29557a55ada46a7",
+      "branch": "main",
+      "archived": false,
+      "files": 1,
+      "matchingPaths": {}
+    },
+    {
+      "repo": "agent-pong",
+      "head": "EMPTY",
+      "branch": "main",
+      "archived": false,
+      "files": 0,
+      "matchingPaths": {}
+    },
+    {
+      "repo": "hadron-compass",
+      "head": "2654a270ff41ea9dcdee7964ca422ca42e25baaf",
+      "branch": "main",
+      "archived": false,
+      "files": 49,
+      "matchingPaths": {}
+    },
+    {
+      "repo": "hadron-web-content",
+      "head": "216168598edf1e1861b2f13ff57ffe5e067a4239",
+      "branch": "main",
+      "archived": false,
+      "files": 41,
+      "matchingPaths": {}
+    },
+    {
+      "repo": "hadron-cms",
+      "head": "1a32281707defe0542bb32bbaa1b661486b030b8",
+      "branch": "main",
+      "archived": false,
+      "files": 7,
+      "matchingPaths": {}
+    },
+    {
+      "repo": "hadronmem-core",
+      "head": "7843ad66f55fff961d5237fb8d5afa2350fad916",
+      "branch": "main",
+      "archived": false,
+      "files": 20,
+      "matchingPaths": {}
+    },
+    {
+      "repo": "hadronmem-dev",
+      "head": "ac18dbc0ad847104ffa671f3cf05516d5627fff3",
+      "branch": "main",
+      "archived": false,
+      "files": 45,
+      "matchingPaths": {}
+    },
+    {
+      "repo": "hadronmem-mealplan",
+      "head": "8e046c95addd01fa9270c2f374979153181ef17e",
+      "branch": "main",
+      "archived": false,
+      "files": 32,
+      "matchingPaths": {}
+    }
+  ]
+}

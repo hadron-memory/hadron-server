@@ -1,3 +1,4 @@
+import { verifyAutomationPin, checkAutomationRevisions, assertPinnedAiIdentity, type AutomationPreview } from '../lib/automation/pins.js';
 /**
  * Production RunExecutionDeps (spec 040 plan §6 + plan-multi-node §4) — the
  * seams between the run kernel and the platform:
@@ -38,20 +39,12 @@ import {
   unknownHaToolNames,
 } from '../lib/runner/tools/haTools.js';
 import { splitNodeUrn } from '../lib/urn.js';
-import { RUN_CLIENT_PREFIX } from '../lib/auth/runPrincipal.js';
+import { runAuthContext } from '../lib/auth/runPrincipal.js';
 import type { RunExecutionDeps, RunNodeSpec } from './appRuns.js';
 import { dispatchRunCallback } from '../api/webhooks.js';
 
 export function runContext(db: PrismaClient, run: AppRun): Context {
-  // The run principal (cor:agt:010:01): App + optional on-behalf-of user.
-  // No roles — a run never carries platform-admin authority.
-  return {
-    db,
-    appId: run.appId,
-    userId: run.userId ?? undefined,
-    organizationId: run.organizationId,
-    clientId: `${RUN_CLIENT_PREFIX}${run.id}`,
-  };
+  return { db, ...runAuthContext(run) };
 }
 
 interface OutputSpec {
@@ -63,7 +56,15 @@ interface OutputSpec {
 // (shared with the run tools) — same tenant-scoping + encrypted-memory guards.
 
 export function makeProdRunDeps(db: PrismaClient): RunExecutionDeps {
+  const proofs = new Map<string, AutomationPreview>();
   return {
+    verifyAutomation: async (run, nodeUrn) => { proofs.set(run.id, await verifyAutomationPin(db, run, nodeUrn)); },
+    releaseAutomationProof: run => { proofs.delete(run.id); },
+    checkAutomationEffect: async run => {
+      const proof = proofs.get(run.id);
+      if (!proof) throw new Error('Automation hop has no verified revision proof');
+      await checkAutomationRevisions(db, run, proof);
+    },
     assemble: async (run, nodeUrn, view) => {
       return resolvers.Mutation.runTask(
         {},
@@ -73,7 +74,7 @@ export function makeProdRunDeps(db: PrismaClient): RunExecutionDeps {
     },
 
     loadNodeSpec: async (run, nodeUrn): Promise<RunNodeSpec> => {
-      const { node } = await loadFlowNode(db, nodeUrn, run.organizationId);
+      const { node } = await loadFlowNode(db, nodeUrn, run.organizationId, runContext(db, run));
       const data =
         node.data && typeof node.data === 'object' && !Array.isArray(node.data)
           ? (node.data as Record<string, unknown>)
@@ -144,7 +145,7 @@ export function makeProdRunDeps(db: PrismaClient): RunExecutionDeps {
     },
 
     selectNext: async (run, nodeUrn, view) => {
-      const { memory, loc, node } = await loadFlowNode(db, nodeUrn, run.organizationId);
+      const { memory, loc, node } = await loadFlowNode(db, nodeUrn, run.organizationId, runContext(db, run));
       return selectNextEdge(db, {
         sourceNode: { id: node.id, memoryId: memory.id, loc, urn: nodeUrn },
         view,
@@ -159,11 +160,13 @@ export function makeProdRunDeps(db: PrismaClient): RunExecutionDeps {
         run.eventData && typeof run.eventData === 'object'
           ? ((run.eventData as Record<string, unknown>).__aiConfigName as string | undefined)
           : undefined;
-      return resolveAiConfigWithFallback(db, override ?? null, {
+      const resolved = await resolveAiConfigWithFallback(db, override ?? null, {
         appId: run.appId,
         agentId: run.agentId ?? undefined,
         organizationId: run.organizationId,
       });
+      assertPinnedAiIdentity(run, resolved.config);
+      return resolved;
     },
 
     llm: (resolved, req) => generateText(resolved, req),
@@ -189,7 +192,7 @@ export function makeProdRunDeps(db: PrismaClient): RunExecutionDeps {
     onTerminal: (run) => dispatchRunCallback(db, run),
 
     writeOutput: async (run, nodeUrn, text) => {
-      const { memory, loc, node } = await loadFlowNode(db, nodeUrn, run.organizationId);
+      const { memory, loc, node } = await loadFlowNode(db, nodeUrn, run.organizationId, runContext(db, run));
       const spec: OutputSpec =
         node.data && typeof node.data === 'object' && !Array.isArray(node.data)
           ? ((node.data as Record<string, unknown>).output as OutputSpec) ?? {}

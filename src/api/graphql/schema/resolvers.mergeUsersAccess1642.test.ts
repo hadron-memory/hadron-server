@@ -11,7 +11,7 @@ vi.mock('../../../controller/operations/mergeUsers.js', () => ({ mergeUsers: vi.
 const lookup = vi.mocked(resolveUserRef);
 const consolidate = vi.mocked(mergeUsers);
 const request = (roles: Context['roles'], userId?: string) => orgMutations.mergeUsers(
-  {}, { input: { source: 'source-ref', target: 'target-ref' } },
+  {}, { input: { source: 'source-ref', target: 'target-ref', consentProof: 'mock-proof' } },
   { db: {} as Context['db'], roles, userId },
 );
 
@@ -41,7 +41,7 @@ describe('#1642 mergeUsers containment', () => {
     expect(lookup).toHaveBeenCalledTimes(2);
     expect(consolidate).toHaveBeenCalledWith(expect.anything(), {
       sourceUserId: 'source-id', targetUserId: 'target-id',
-      actorUserId: 'platform-admin-id', mergeGlobalRoles: true,
+      actorUserId: 'platform-admin-id', mergeGlobalRoles: true, consentProof: 'mock-proof',
     });
   });
 });

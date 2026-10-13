@@ -1,3 +1,4 @@
+import { ownsSession } from './sessionOwnership.js';
 /**
  * When a session was last DRIVEN — the platform's one derivation of it
  * (`cor:agt:020:03`).
@@ -434,10 +435,7 @@ export async function usageEventCountsAsActivity(
     // startAgentSession chatbot session that carries its end user's id, so an
     // App driving such a session keeps it live. Only DY-1's RESUME narrows to
     // person-less worker sessions; counting a drive does not.
-    const owned = principal.userId
-      ? !principal.impersonation && s.userId === principal.userId
-      : !!principal.appId && s.appId === principal.appId;
-    if (!owned) return false;
+    if (!ownsSession(principal, s)) return false;
     const lastEvent = (await loadLastEventBySession(db, [sessionId])).get(sessionId);
     return isSessionLive(s, lastEvent, now);
   } catch {
@@ -466,14 +464,35 @@ export function isSessionDormant(
   dormancyDays: number,
   now: Date,
 ): boolean {
+  return sessionActivityAt(session, lastEventAt).getTime() < now.getTime() - dormancyThresholdMs(dormancyDays);
+}
+
+/**
+ * The dormancy threshold in milliseconds for an App's `sessionDormancyDays`.
+ * ONE definition for `isSessionDormant` and for worker dormancy (#1748,
+ * cor:agt:080:07: "never a separate threshold for workers").
+ */
+export function dormancyThresholdMs(dormancyDays: number): number {
   const days = Number.isFinite(dormancyDays) && dormancyDays > 0 ? dormancyDays : DEFAULT_SESSION_DORMANCY_DAYS;
   // Never shorter than the widest idle window (#1660 review, Baloo P2-2).
   // Dormancy is only consulted for a session that is NOT live, so a
   // threshold below the window would leave a session idle past dormancy
   // still reading live, and acting, with no check at all. Flooring it at the
   // window makes every dormant session also a lapsed one.
-  const thresholdMs = Math.max(days * 24 * 60 * 60 * 1000, widestIdleWindowMs());
-  return sessionActivityAt(session, lastEventAt).getTime() < now.getTime() - thresholdMs;
+  return Math.max(days * 24 * 60 * 60 * 1000, widestIdleWindowMs());
+}
+
+/**
+ * Is a WORKER dormant (cor:agt:080:07)? None of its sessions has had activity
+ * within the dormancy period: equivalently, its most recent session activity is
+ * older than the threshold. A worker that has never had a session
+ * (`lastActiveAt` null) is not dormant. `lastActiveAt` is the database fold of
+ * `sessionActivityAt` over the worker's sessions (`loadWorkersActivity`),
+ * pinned to `isSessionDormant` by a differential test.
+ */
+export function isWorkerDormant(lastActiveAt: Date | null | undefined, dormancyDays: number, now: Date): boolean {
+  if (!lastActiveAt) return false;
+  return lastActiveAt.getTime() < now.getTime() - dormancyThresholdMs(dormancyDays);
 }
 
 /** The widest configured idle window across every session type. */

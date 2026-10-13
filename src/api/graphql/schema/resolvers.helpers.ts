@@ -1,3 +1,5 @@
+import { systemMemoryReadGrants } from '../../../lib/auth/systemMemoryRead.js';
+import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
 // Helpers extracted from resolvers.ts (Step 1 of the resolver split).
 // Pure mechanical move: shared auth/include/AI-config/chat/asset helpers used
 // by the GraphQL resolver map. No behavior change. The `Context` interface
@@ -20,6 +22,7 @@ import {
 } from '../../../lib/aiConfig.js';
 import { effectiveApiStyle, effectiveEndpoint } from '../../../lib/aiEndpoint.js';
 import {
+  canReadMemory,
   canWriteToMemory,
   EXPLICIT_REF,
   filterReadableMemoryIds,
@@ -35,6 +38,7 @@ import {
   isAgentInstalled,
 } from '../../../lib/appAgent.js';
 import { getOrgReadableMemoryIds } from '../../../lib/auth/orgReadableMemory.js';
+import { getOrgWritableMemoryIds } from '../../../lib/auth/orgWritableMemory.js';
 import { ROLE_ORDER } from '../../../lib/auth/orgRole.js';
 import { sessionScopedMemoryIds } from '../../../lib/auth/sessionScopedMemoryIds.js';
 import { getMemberOrgIds } from '../../../lib/auth/memberOrgIds.js';
@@ -74,6 +78,7 @@ import {
 } from '../../../generated/prisma/index.js';
 import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
 import { LIVE_ORG_MEMBERSHIP } from '../../../lib/auth/liveOrgMembership.js';
+import { isUserOwnedAgentDefinition } from '../../../lib/auth/userOwnedAgentDefinition.js';
 
 /**
  * The STORED (uncompiled) content of a Node whose `content` a read resolver
@@ -86,6 +91,7 @@ import { LIVE_ORG_MEMBERSHIP } from '../../../lib/auth/liveOrgMembership.js';
 export const STORED_NODE_CONTENT: unique symbol = Symbol('storedNodeContent');
 
 export interface Context {
+  login?: import('../../../auth/jwt.js').HadronJwtPayload['login'];
   db: PrismaClient;
   /**
    * #1301 — set by an MCP handler that DELEGATES to a GraphQL resolver (e.g.
@@ -100,11 +106,14 @@ export interface Context {
    * its caller sent, so it answers; a refusal that cannot be replayed on MCP
    * names no MCP door (@codex, PR #1305).
    */
-  governedCanReplay?: (kind: 'task' | 'review' | 'spec') => boolean;
+  governedCanReplay?: (kind: 'task' | 'review' | 'spec' | 'decision') => boolean;
   clientId?: string;       // "github:<username>" / "email:<addr>" — only set for OAuth/JWT users
   userId?: string;         // User.id — only set for OAuth/JWT users
   appId?: string;          // App.id — set when caller authenticated via an App Key
+  appKeyId?: string;       // AppKey.id — set only when authenticated with an hdr_app_ key (#1749)
   sessionId?: string;      // Session.id — set when operating inside an active session
+  /** #1705 — a named X-Hadron-Session failed validation (see AuthContext.sessionBindingRefused). */
+  sessionBindingRefused?: boolean;
   roles?: ('OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER')[];
   organizationId?: string; // set when the Client is scoped to an organization
   apiKeyId?: string;       // UserApiKey.id — set when a user authenticated via an hdr_user_ key (#562)
@@ -147,6 +156,9 @@ export interface Context {
   // Request-scoped memo for AppRun.app (#831) — same rationale as appUrnCache,
   // for the full row rather than just the urn (lazily created; see loadApp).
   appRowCache?: Map<string, Promise<AppRow | null>>;
+  // #1715 — the caller's merge-aware identities (their id plus every account
+  // merged into them; src/lib/userMerges.ts), memoized per request.
+  mergedIdentityCache?: Promise<Set<string>>;
   // Spec 049 Phase 3b — AppRun.scope memo, keyed on the serialized snapshot
   // (lazily created in the field resolver): a run page repeats one trigger's
   // snapshot across its rows.
@@ -1047,21 +1059,23 @@ export async function filterReadableMemoryRecords<T extends Parameters<typeof ca
  * `isMemoryReadableCached` above, which answers "may they read its NODES?".
  *
  * The two are deliberately different (see that function's note): the record
- * gate keeps an org-member fast-path for system/knowledge memory RECORDS which
+ * gate keeps an org-member fast-path for ordinary knowledge memory RECORDS which
  * `getOrgReadableMemoryIds` excludes from the node-content set. App-class
- * records now use their shape-aware content audience.
+ * records use their shape-aware content audience; system records use the
+ * installed/licensed Agent or manager audience (#1807).
  * Using the node gate for a record-level question silently drops memories the
  * caller can open directly via `Query.memory` — the #759 review finding
  * (Codex P1 / Copilot on PR #846).
  *
  * Extracted from `Query.memory` so the two callers cannot drift (AGENTS.md:
  * "reuse the shared access gate; a bespoke per-resolver gate drifts"). Order is
- * load-bearing and preserved exactly:
+ * load-bearing:
  *   1. personal/private → strict owner, or a MemoryShare grantee (#778).
- *   2. spec 047 user-owned → owner, or a Worker row's current holder under
+ *   2. system → shared Agent/App read grants, or the scoped content gate.
+ *   3. spec 047 user-owned → owner, or a Worker row's current holder under
  *      cor:acl:010:01, BEFORE the platform-admin path (#676).
- *   3. app class → the shared node gate (team, Worker, session audiences).
- *   4. other non-strict classes → platform ADMIN/OWNER, a live org membership,
+ *   4. app class → the shared node gate (team, Worker, session audiences).
+ *   5. other non-strict classes → platform ADMIN/OWNER, a live org membership,
  *      or whatever the shared node gate already admits (PUBLIC, subscription).
  */
 export async function canReadMemoryRecord(
@@ -1119,16 +1133,36 @@ export async function canReadMemoryRecord(
     // TARGET owns them — the shared-org scope excludes all identity-scoped
     // resources (the target-as-owner check below would otherwise admit them).
     if (ctx.impersonation) return false;
+    if (memory.class === 'private' && isRunPrincipal(ctx) && !await canReadMemory(ctx.db, ctx, memory.id)) return false;
     if (isStrictOwner(ctx, memory.userId)) return true;
     // No `as never`: the cast is what let a caller omit the fields this reads.
     if (ctx.userId && (await granteeShareAccess(ctx.db, ctx.userId, memory))) return true;
     return false;
+  }
+  // System records follow the installed/licensed Agent or manager audience,
+  // never the record-only org-member shortcut (#1807).
+  if (memory.class === 'system') {
+    if (ctx.sessionId || ctx.impersonation || isRunPrincipal(ctx) || !ctx.userId) {
+      const ids = await accessible();
+      return ids === null || ids.includes(memory.id);
+    }
+    return (await systemMemoryReadGrants(ctx.db, ctx, memory.id)).length > 0;
   }
   if (memory.ownerUserId != null) {
     // Impersonation: user-owned (spec 047) records are identity-scoped —
     // invisible for the same reason as personal/private above.
     if (ctx.impersonation) return false;
     if (ctx.userId && memory.ownerUserId === ctx.userId) return true;
+    // #1787 (cor:dmo:050:13): a platform admin may read a user-owned Agent's
+    // system memory — its definition — as part of managing the Agent. This is
+    // the ONLY user-owned memory a platform admin reads: every other
+    // user-owned class stays owner-only here (the wider #1734 bypass is a
+    // separate, unbuilt change), personal/private were handled above, and the
+    // definition is read-only (its editor is the agent-ownership surface).
+    if (
+      memory.class === 'system' && isPlatformAdmin(ctx) &&
+      await isUserOwnedAgentDefinition(ctx.db, memory.id)
+    ) return true;
     // A user-owned App's Worker row is also visible to its current holder.
     // The shared content gate checks the casting and excludes team/session rows.
     if (memory.class !== 'app') return false;
@@ -1158,7 +1192,7 @@ export async function canReadMemoryRecord(
   const member =
     ctx.userId &&
     memory.organizationId &&
-    memory.class !== 'group' &&
+    memory.class !== 'group' && memory.class !== 'system' &&
     (!ctx.impersonation || ctx.impersonation.orgId === memory.organizationId)
       ? batch
         ? (await (batch.memberOrgIds ??= getMemberOrgIds(ctx.db, ctx.userId, ctx.impersonation?.orgId))).includes(memory.organizationId)
@@ -1310,6 +1344,33 @@ export async function requireOwnerOrOrgRole(
 }
 
 /**
+ * The Agent-management gate (#1787, cor:dmo:050:13 — Holger, team chat #8895:
+ * "we have to be able to shut down a rogue agent"). Whatever an org's
+ * ADMIN/OWNER may do to an org-owned Agent, a platform ADMIN/OWNER may do to
+ * a USER-owned one: read it (definition and prompt), update it, delete it.
+ * One shared predicate every Agent caller of {@link requireOwnerOrOrgRole}
+ * goes through — the arm is not re-derived per resolver. Everything else
+ * keeps the tenant gate's shape: the owner and org arms unchanged,
+ * org-owned behavior unchanged (platform admins already pass
+ * requireOrgRole's bypass), and impersonation gains nothing (identity-scoped
+ * like the owner arm it extends).
+ *
+ * NOT routed through here: the decrypted AI-config reads (`agentAIConfig`,
+ * `resolveAIConfig`'s user-owned arm) — a user's own provider key on their
+ * own Agent is a user-owned credential and stays owner-only (Holger #8075,
+ * the same split Ada ruled for Apps on #1734 at #9051: manage yes, read the
+ * key no). Set/clear of the config IS management and uses this gate.
+ */
+export async function requireAgentAccess(
+  ctx: Context,
+  agent: { organizationId: string | null; ownerUserId: string | null },
+  required: 'OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER',
+): Promise<void> {
+  if (agent.ownerUserId !== null && !ctx.impersonation && isPlatformAdmin(ctx)) return;
+  return requireOwnerOrOrgRole(ctx, agent, required);
+}
+
+/**
  * Manage a Memory's settings and operational controls. Personal/private
  * memories have a strict owner in `userId` (cor:acl:010:02), independent of
  * the tenant owner in `ownerUserId`; every other class uses the tenant gate.
@@ -1376,11 +1437,11 @@ export async function isOrgMemberOrAdmin(ctx: Context, orgId: string): Promise<b
  * (#939's team-chat gate, generalized in #943 so `startSession`'s `appRef`
  * gate is the SAME predicate rather than a second copy of it).
  *
- * Admits: an AppMember at ANY role (participation follows the host memory's
+ * Admits: an AppMember at ANY role (of a user-owned App too, #1764) (participation follows the host memory's
  * audience — `cor:acl:030:01`, so a 'reader' member counts), an org member
  * with CONTRIBUTOR+ on the App's owning org (parity with the persona-mint
  * gate's org branch, and platform ADMIN/OWNER via `requireOrgRole`), or the
- * owner of a user-owned App.
+ * owner of a user-owned App (whose AppMembers are covered by the first arm).
  *
  * Under IMPERSONATION this narrows to the session's ONE shared org (#1094):
  * every arm answers about the TARGET, so an unbounded one would admit an App in
@@ -1402,16 +1463,20 @@ export async function isAppParticipant(
 ): Promise<boolean> {
   if (!ctx.userId) return false;
   if (app.ownerUserId !== null) {
-    // spec 047: a user-owned App admits its owner and nobody else
-    // (findings:org-xor-owner-null-comparison-bypass — branch on the
-    // ownership CLASS first; for two different users' entities BOTH
-    // `organizationId`s are NULL, so an org comparison would read
-    // `null !== null` and admit exactly the cross-tenant case).
-    // Identity-scoped, so never via impersonation (isOwnerOrOrgMember's rule;
-    // the team-chat caller already denies org-less Apps under impersonation —
-    // this keeps the predicate safe for any future caller that doesn't).
+    // spec 047 + cor:acl:010:01 (Holger "A", #8151/#8155, #1764): a user-owned App admits its owner and every
+    // AppMember at any role, and nobody else. The App has no org, so no org arm exists and no platform-admin arm either
+    // (findings:org-xor-owner-null-comparison-bypass — branch on the ownership CLASS first; for two different users'
+    // entities BOTH `organizationId`s are NULL, so an org comparison would read `null !== null` and admit exactly the
+    // cross-tenant case). Identity-scoped, so never via impersonation (isOwnerOrOrgMember's rule; the team-chat caller
+    // already denies org-less Apps under impersonation — this keeps the predicate safe for any future caller that
+    // doesn't). User-owned MEMORIES and AGENTS stay strictly owner-only; this is the App's participation alone.
     if (ctx.impersonation) return false;
-    return ctx.userId === app.ownerUserId;
+    if (ctx.userId === app.ownerUserId) return true;
+    const member = await ctx.db.appMember.findUnique({
+      where: { appId_userId: { appId: app.id, userId: ctx.userId } },
+      select: { userId: true },
+    });
+    return member !== null;
   }
   // #1094 — impersonation NARROWS this predicate to the session's ONE shared
   // org, stated once here rather than per arm. `ctx.userId` is the TARGET under
@@ -1668,6 +1733,10 @@ export async function requireAiConfigOwnerAdmin(
     case 'AGENT': {
       const { id } = await resolveAgentRef(ctx.db, ownerId);
       const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id } });
+      // #1787 review (Rook P2-1): the config registry stays on the TENANT gate —
+      // update/test can send the stored key to a caller-chosen endpoint, so for a
+      // user-owned Agent these are owner-only (manage yes, move the key no);
+      // requireAgentAccess is not used here on purpose.
       await requireOwnerOrOrgRole(ctx, agent, 'ADMIN');
       return { ownerWhere: { agentId: id }, resolvedOwnerId: id };
     }
@@ -2134,6 +2203,11 @@ export async function getAccessibleMemoryIds(
     if (!options?.excludeAppDerived && !(onlyMemoryId && accessibleIds.has(onlyMemoryId))) {
       for (const id of await appDerivedMemoryIds(ctx, onlyMemoryId)) accessibleIds.add(id);
     }
+    if (isRunPrincipal(ctx)) {
+      const privateCandidates = await ctx.db.memory.findMany({ where: { id: { in: [...accessibleIds] }, class: 'private' }, select: { id: true } });
+      const readable = await filterReadableMemoryIds(ctx.db, ctx, privateCandidates.map(m => m.id));
+      for (const m of privateCandidates) if (!readable.has(m.id)) accessibleIds.delete(m.id);
+    }
     return [...accessibleIds];
   }
 
@@ -2363,6 +2437,7 @@ export async function requireMemoryWriteAccess(ctx: Context, memoryId: string): 
       class: true,
       appId: true,
       userMemoryOfAgentId: true,
+      createdBy: true,
     },
   });
 
@@ -2371,6 +2446,7 @@ export async function requireMemoryWriteAccess(ctx: Context, memoryId: string): 
   // #778 `writer` MemoryShare grantee on a personal memory (private is never
   // shareable, so this only widens personal).
   if (memory.class === 'personal' || memory.class === 'private') {
+    if (memory.class === 'private' && isRunPrincipal(ctx) && !await canWriteToMemory(ctx.db, ctx, memory.id)) throw memoryWriteForbidden();
     if (isStrictOwner(ctx, memory.userId)) return;
     if (await granteeShareAccess(ctx.db, ctx.userId, memory, { requireWrite: true })) return;
     throw memoryWriteForbidden();
@@ -2410,37 +2486,27 @@ export async function requireMemoryWriteAccess(ctx: Context, memoryId: string): 
     throw memoryWriteForbidden();
   }
 
-  // #1208 / cor:acl:010:01 — GROUP write is MemoryMember writer/owner ONLY.
-  // The plain org-CONTRIBUTOR path below must not fire for group: an org
-  // contributor the narrowed read gates no longer admit could otherwise
-  // still WRITE the memory (write wider than read — the incoherent state
-  // Baloo's #3677 review caught). Falls through to the cross-org
-  // subscription grant below, which stays: it is the subscription grant
-  // surface, symmetric with the read gates' subscription clause. MemoryMember
-  // rows hard-delete (FR-038), so existence is liveness.
-  if (memory.class === 'group') {
-    const groupWrite =
-      ctx.userId &&
-      (await ctx.db.memoryMember.findUnique({
-        where: { memoryId_userId: { memoryId, userId: ctx.userId } },
-        select: { role: true },
-      }));
-    if (groupWrite && (groupWrite.role === 'writer' || groupWrite.role === 'owner')) return;
-  } else {
-    // Direct org member with CONTRIBUTOR+? findFirst + deletedAt so a REVOKED
-    // membership no longer grants write access (same rule as requireOrgRole).
-    const member = await ctx.db.orgMember.findFirst({
-      where: { organizationId: memory.organizationId, userId: ctx.userId, ...LIVE_ORG_MEMBERSHIP },
-    });
-    if (member && (ROLE_ORDER[member.role] ?? -1) >= ROLE_ORDER['CONTRIBUTOR']) return;
+  // Identity-scoped records do not inherit shared org grants. Match the
+  // existing creator-scoped read audience, with impersonation excluded.
+  if (memory.class === 'knowledge' && memory.userMemoryOfAgentId !== null) {
+    if (!ctx.impersonation && memory.createdBy === ctx.userId) return;
+    throw memoryWriteForbidden();
   }
 
-  // Cross-org subscription with CONTRIBUTOR role — for every class EXCEPT
-  // group (#3781): createMemorySubscription only admits PUBLIC memories and
-  // group visibility is CHECK-forced to GROUP, so a group-subscription row
-  // is API-invalid legacy state. For group, the MemoryMember writer/owner
-  // check above is the exclusive write grant (cor:acl:010:01).
-  if (memory.class !== 'group') {
+  // Definition authoring uses the same org-management gate as Agent edits.
+  // User-owned and platform-admin cases were already decided above.
+  if (memory.class === 'system') {
+    await requireOrgRole(ctx, memory.organizationId, 'ADMIN');
+    return;
+  }
+
+  // One shared predicate for GraphQL and MCP: free-standing knowledge via
+  // live org CONTRIBUTOR+, group via its MemoryMember writer/owner grant.
+  if ((await getOrgWritableMemoryIds(ctx.db, ctx.userId, memoryId)).includes(memoryId)) return;
+
+  // A subscription grants writes only to ordinary shared knowledge. Group
+  // membership stays the exclusive group-write arm (cor:acl:010:01).
+  if (memory.class === 'knowledge' && memory.userMemoryOfAgentId === null) {
     const userOrgs = await ctx.db.orgMember.findMany({
       where: {
         userId: ctx.userId,
@@ -2453,7 +2519,7 @@ export async function requireMemoryWriteAccess(ctx: Context, memoryId: string): 
       const memorySub = await ctx.db.memorySubscription.findUnique({
         where: { memoryId_organizationId: { memoryId, organizationId: uo.organizationId } },
       });
-      if (memorySub && (ROLE_ORDER[memorySub.role] ?? -1) >= ROLE_ORDER['CONTRIBUTOR']) return;
+      if (memorySub && memorySub.deletedAt === null && (ROLE_ORDER[memorySub.role] ?? -1) >= ROLE_ORDER['CONTRIBUTOR']) return;
     }
   }
 
@@ -3698,6 +3764,9 @@ export interface SessionInput {
   transcriptPath?: string;
   host?: string;
   tool?: string;
+  // #1707 / cor:agt:060:04: the model family this session runs as. Omitted:
+  // derived from llmModel, then tool (src/lib/agentTasks/family.ts).
+  family?: string | null;
   // #928 / cor:api:140: the role-Agent driving this session (PK or URN).
   agentRef?: string;
   // #943 / cor:api:140: the App this session is a unit of work for (PK or URN),
@@ -3716,6 +3785,9 @@ export interface SessionInput {
   // Gated for all three: the worker must belong to the session's App; a retired
   // worker refuses; a taken worker refuses WORKER_TAKEN unless force (#940).
   workerRef?: string;
+  // #1726: the worker this bind's worker reports to (id, URN or name in the
+  // session's App). Sets it only when unset; omitted leaves it unchanged.
+  reportsTo?: string | null;
   // #940: explicit informed-takeover override for a WORKER_TAKEN refusal.
   force?: boolean;
   // The session's stated intent (Session.plan) — MCP's hadron_start_session

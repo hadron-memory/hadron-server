@@ -1,4 +1,5 @@
 import type { PrismaClient } from '../generated/prisma/index.js';
+import { DECISION_FAMILY_WHERE } from '../lib/decisions/index.js';
 
 /**
  * Deletes expired anonymous memories. A memory is "anonymous" when it was
@@ -16,6 +17,8 @@ export async function cleanupAnonymousMemories(db: PrismaClient): Promise<number
       // memories are not created as draft corpora, so none should ever be
       // stamped; the exclusion keeps this bulk delete safe if one is.
       corpusMintedAt: null,
+      // #1641 §3.2 — nor one holding a decision or a decision log (Q17).
+      nodes: { none: DECISION_FAMILY_WHERE },
     },
   });
   return result.count;

@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { graphql, buildSchema } from 'graphql';
 import { parseTeamSpec } from './parse.js';
 import { canonicalizeTeamJson } from './canonicalize.js';
-import { publishedTeamSpecSchema, TEAM_API_VERSION, validateTeamSpec } from './schema.js';
+import { publishedTeamSpecSchema, publishedTeamSpecSchemaText, TEAM_API_VERSION, validateTeamSpec } from './schema.js';
 import { teamSpecQueries } from '../../api/graphql/schema/resolvers.teamSpec.js';
 import express from 'express';
 import { once } from 'node:events';
@@ -46,6 +46,18 @@ describe('team schema S1', () => {
     const client = JSON.stringify(publishedTeamSpecSchema(TEAM_API_VERSION, 'CLIENT_INPUT'));
     expect(server).not.toContain('"file"'); expect(client).toContain('"file"');
     expect(JSON.parse(server).$schema).toBe('https://json-schema.org/draft/2020-12/schema');
+  });
+  it('#1675 carry: cached public text preserves the CLIENT_INPUT/SERVER distinction', async () => {
+    const server = publishedTeamSpecSchemaText(TEAM_API_VERSION, 'SERVER');
+    const client = publishedTeamSpecSchemaText(TEAM_API_VERSION, 'CLIENT_INPUT');
+    expect(server).not.toContain('"file"');
+    expect(client).toContain('"file"');
+    expect(client).not.toBe(server);
+    const schema = buildSchema(typeDefs);
+    const result = await graphql({ schema, source: 'query($v:String!){server:teamSpecSchema(apiVersion:$v,form:SERVER) client:teamSpecSchema(apiVersion:$v,form:CLIENT_INPUT)}',
+      variableValues: { v: TEAM_API_VERSION }, rootValue: { teamSpecSchema: (args: { apiVersion: string; form: 'SERVER' | 'CLIENT_INPUT' }) => teamSpecQueries.teamSpecSchema(null, args) } });
+    expect(result.errors).toBeUndefined();
+    expect(result.data).toMatchObject({ server, client });
   });
   it('pins the nesting boundary and value refusal codes separately from shape errors', () => {
     // The envelope itself has shallower nesting; annotation text may contain
@@ -140,6 +152,19 @@ describe('team schema S1', () => {
     const input = spec();
     Object.assign(input.metadata, { annotations: JSON.parse('{"__proto__":"note","constructor":"note"}') });
     expect(parseTeamSpec(JSON.stringify(input))).toEqual(input);
+  });
+  it('validates every preserved record entry, including __proto__', () => {
+    for (const annotation of [17, null, { note: 'not a string' }]) {
+      const input = spec();
+      Object.assign(input.metadata, { annotations: JSON.parse(JSON.stringify({ ['__proto__']: annotation })) });
+      expect(errors(() => parseTeamSpec(JSON.stringify(input))).issues).toEqual([
+        expect.objectContaining({ pointer: '/metadata/annotations/__proto__' }),
+      ]);
+    }
+    const input = spec();
+    // Construct the original JSON record directly, as the server receives it.
+    input.spec.roles = JSON.parse('{"__proto__":null}');
+    expect(errors(() => parseTeamSpec(JSON.stringify(input))).code).toBe('TEAM_SPEC_INVALID');
   });
   it('serves versioned discovery and refuses unknown versions over HTTP', async () => {
     const app = express(); mountTeamSpecSchemaRoutes(app);

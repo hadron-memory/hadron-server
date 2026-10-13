@@ -205,8 +205,7 @@ beforeAll(async () => {
     data: { id: generateId(), organizationId: org.id, urn: `${orgUrn}:system-${suffix}`, name: 'sys', class: 'system' },
   });
   target.systemUrn = { existing: `hrn:mem:${system.urn}`, missing: `hrn:mem:${orgUrn}:absent-system-${suffix}` };
-  // A node in it: the READER may open the system memory's RECORD (org member)
-  // but not its NODES — the case that separates the node gate from the record gate.
+  // Neither this record nor its nodes admit an uninstalled org reader (#1807).
   await db.node.create({ data: { id: generateId(), memoryId: system.id, loc: 'brain', name: 'brain' } });
   ids.systemSlug = `system-${suffix}`;
   ids.victimOrgUrn = `hrn:org:${orgUrn}`;
@@ -427,7 +426,16 @@ describe('#1381 — combinations cannot rebuild the oracle', () => {
 });
 
 describe('#1381 — controls: what concealment must not change', () => {
-  it.each(PROBES.filter((p) => p.readerDenied !== false && p.on !== 'personalUrn').map((p) => [p.name, p] as const))(
+  it('an uninstalled system-memory reader gets the same refusal as a missing source', async () => {
+    const probe = PROBES.find(p => p.on === 'systemUrn')!;
+    const t = target.systemUrn!;
+    const existing = await gql('reader', probe.query, probe.vars(t.existing, 'reader'));
+    const missing = await gql('reader', probe.query, probe.vars(t.missing, 'reader'));
+    expect(code(existing)).toBe(probe.missingCode);
+    expect(wire(existing, t.existing)).toBe(wire(missing, t.missing));
+  });
+
+  it.each(PROBES.filter((p) => p.readerDenied !== false && p.on !== 'personalUrn' && p.on !== 'systemUrn').map((p) => [p.name, p] as const))(
     '%s: a reader who can open the memory keeps an actionable refusal',
     async (_n, p) => {
       const t = target[p.on]!;
@@ -577,7 +585,7 @@ describe('#1381 — effectiveAccess (cor:acl:060:01, amended 2026-09-26)', () =>
     expect(wire(existing, ids.victimAppUrn!)).toBe(wire(missing, `hrn:app:${orgUrn}:no-such-app-${suffix}`));
   });
 
-  it('a node is judged by the NODE gate: a reader who can open the system memory\'s record still gets NOT_FOUND for its node', async () => {
+  it('a node is judged by the NODE gate: an uninstalled system-memory reader gets NOT_FOUND for its node', async () => {
     const existing = await audit('reader', ids.reader!, nodeUrn(ids.systemSlug!, 'brain'));
     const missing = await audit('reader', ids.reader!, nodeUrn(ids.systemSlug!, 'no-such-loc'));
     expect(code(missing)).toBe('NOT_FOUND');

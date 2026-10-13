@@ -35,6 +35,7 @@ import type { Prisma } from '../../../generated/prisma/index.js';
 import type { InputJsonValue } from '../../../generated/prisma/runtime/library.js';
 import { generateId } from '../../../lib/id.js';
 import { appendChatMessage } from '../../../lib/chatRoot.js';
+import { lockStampAuthority, wakeStampsFor } from '../../../lib/tickers/postStamp.js';
 import { deriveEdgeLoc, sanitizeLocAtom } from '../../../lib/edgeLoc.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { resolveChannelRefId } from '../../../lib/entityRef/channelRef.js';
@@ -178,6 +179,12 @@ async function requireTeamChatAccess(
   throw forbidden();
 }
 
+/**
+ * How the platform's own posts render (#1791). A name no handle can take (handles carry no spaces or parentheses), so
+ * it cannot be mistaken for a person; the structured flag `authorSystem` is what clients key on.
+ */
+export const SYSTEM_AUTHOR_NAME = 'Hadron (platform)';
+
 type ChatRootRow = { id: string; memoryId: string; loc: string };
 type ChannelIncarnation = { id: string; value: number };
 
@@ -211,7 +218,6 @@ async function locateTeamChatRoot(ctx: Context, app: AppRow): Promise<ChatRootRo
         ...teamSpaceAudienceFilter,
         ...teamSpaceOwnerFilter({
           appOwnerUserId: app.ownerUserId,
-          callerUserId: ctx.userId ?? null,
           impersonating: !!ctx.impersonation,
         }),
       },
@@ -345,6 +351,8 @@ export interface TeamChatMessageOut {
   at: Date;
   authorUserId: string | null;
   authorWorkerId: string | null;
+  /** #1791: posted by the platform itself, a system author that is neither a user nor a worker. */
+  authorSystem: boolean;
   authorName: string | null;
   /** Item J: the Worker's App when a post crossed Apps; null otherwise. */
   authorAppId: string | null;
@@ -398,6 +406,7 @@ function projectMessage(row: MessageRow, memEncInfo: MemoryEncryptionInfo, memBa
     at: row.createdAt,
     authorUserId: typeof env.authorUserId === 'string' ? env.authorUserId : null,
     authorWorkerId: typeof env.authorWorkerId === 'string' ? env.authorWorkerId : null,
+    authorSystem: env.authorSystem === true,
     authorName: typeof env.authorName === 'string' ? env.authorName : null,
     authorAppId: typeof env.authorAppId === 'string' ? env.authorAppId : null,
     sessionId: typeof env.sessionId === 'string' ? env.sessionId : null,
@@ -833,7 +842,6 @@ async function resolveChannelTarget(ctx: Context, channelRef: string, mode: 'pos
     hostApp &&
     isTeamSpaceRow(mem, {
       appOwnerUserId: hostApp.ownerUserId,
-      callerUserId: ctx.userId ?? null,
       impersonating: !!ctx.impersonation,
     })
       ? hostApp
@@ -901,13 +909,18 @@ async function postToChannelRoot(
   root: ChatRootRow,
   incarnation: ChannelIncarnation,
   args: { body: string; replyToSeq: number | null; sessionRef: string | null },
+  /** #1791: the platform's own post. No principal authors it, no mention in it expands, and no one is credited. */
+  opts: { system?: boolean; claim?: (tx: Prisma.TransactionClient) => Promise<boolean> } = {},
 ): Promise<TeamChatMessageOut> {
   const { body, replyToSeq, sessionRef } = args;
   let envelope: Record<string, unknown>;
   let authorLabel: string;
   // #1617 B: the lapsed session this post resumes, inside its append transaction.
   let resumeSessionId: string | null = null;
-  if (sessionRef) {
+  if (opts.system) {
+    authorLabel = SYSTEM_AUTHOR_NAME;
+    envelope = { authorSystem: true, authorName: SYSTEM_AUTHOR_NAME };
+  } else if (sessionRef) {
     const author = await resolveSessionAuthor(ctx, app, root.memoryId, sessionRef);
     if (author.resume) resumeSessionId = author.sessionId;
     authorLabel = author.name;
@@ -928,8 +941,11 @@ async function postToChannelRoot(
     envelope = { authorUserId: ctx.userId, authorName: user.handle };
   }
 
-  const mentions = extractMentions(body);
-  if (mentions.length > 0) envelope.mentions = mentions;
+  // A system post carries NO mentions, whatever its text says: the platform never pages anyone through a notice.
+  const mentions = opts.system ? [] : extractMentions(body);
+  if (mentions.length > 0) {
+    envelope.mentions = mentions;
+  }
   if (replyToSeq != null) envelope.replyToSeq = replyToSeq;
 
   const messagesLoc = `${root.loc}:messages`;
@@ -938,12 +954,9 @@ async function postToChannelRoot(
   // follow the commit, or a transient failure reports an error for a message
   // that was written, and the client's retry posts it twice.
   const memBareUrn = await hostMemoryUrn(ctx, root.memoryId);
-  const msgFields = translateSessionExpired(memEncInfo, () =>
-    encryptNodeFields({ content: body, data: envelope }, memEncInfo),
-  );
 
   const messageId = generateId();
-  const createdBy = ctx.userId ?? null;
+  const createdBy = opts.system ? null : (ctx.userId ?? null);
   let messageLoc: string | null = null;
   const { seq, inserted: createdAt } = await appendChatMessage(ctx.db, root, memEncInfo, async ({ tx, seq, msgNum }) => {
     // The Channel is re-checked LIVE under the lock (Copilot on PR #1169):
@@ -962,12 +975,26 @@ async function postToChannelRoot(
     ) {
       throw channelNotFound(root.loc);
     }
+    // #1791: the platform's once-a-day claim is taken in THIS transaction, after the Channel is seen live, so the claim and
+    // the notice commit together or not at all: an exit between them leaves neither.
+    if (opts.claim && !(await opts.claim(tx))) throw new NoticeNotClaimed();
+    // #1748 (N3): who may wake everyone is decided NOW, here, on live authority held through the commit, and
+    // stamped; nothing re-decides it later. The authority is taken BEFORE the resume below (which locks the Worker
+    // row FOR UPDATE) and the stamps after it, so the Worker row is never taken SHARE then upgraded (Diego, cycle 3).
+    const stampAuthority = mentions.length > 0 ? { authority: await lockStampAuthority(ctx, tx, app) } : null;
     // #1617 B — resume the author's lapsed session in THIS transaction, so it
     // commits with the message or not at all (#1625 review, Baloo P2-1). Every
     // condition is re-decided under the App and Worker locks.
     if (resumeSessionId && !(await resumeOwnLapsedSessionInTx(ctx, tx, resumeSessionId))) {
       throw sessionNotLiveError(sessionRef!);
     }
+    if (stampAuthority) {
+      Object.assign(envelope, await wakeStampsFor(ctx, tx, app, typeof envelope.authorWorkerId === 'string' ? envelope.authorWorkerId : null, mentions, stampAuthority));
+    }
+    // The envelope is sealed after the stamps are in it.
+    const msgFields = translateSessionExpired(memEncInfo, () =>
+      encryptNodeFields({ content: body, data: envelope }, memEncInfo),
+    );
     // replyToSeq is validated INSIDE the allocating transaction, under the
     // chat lock, so the target can't be soft-deleted out from under us and
     // a reply can never cite its own (still-uncommitted) seq.
@@ -1041,11 +1068,13 @@ async function postToChannelRoot(
   // shared chat memory. This was one of the largest blind spots in the old
   // instrumentation: `hadron_team_chat_post` created more nodes on a busy day
   // than every instrumented write tool combined, and counted for none of it.
-  recordNodeWrite(
-    ctx.db,
-    messageLoc ? { id: messageId, loc: messageLoc, memoryId: root.memoryId } : null,
-    ctx,
-  );
+  if (!opts.system) {
+    recordNodeWrite(
+      ctx.db,
+      messageLoc ? { id: messageId, loc: messageLoc, memoryId: root.memoryId } : null,
+      ctx,
+    );
+  }
 
   return {
     nodeId: messageId,
@@ -1055,12 +1084,77 @@ async function postToChannelRoot(
     at: createdAt,
     authorUserId: (envelope.authorUserId as string | undefined) ?? null,
     authorWorkerId: (envelope.authorWorkerId as string | undefined) ?? null,
+    authorSystem: envelope.authorSystem === true,
     authorName: authorLabel,
     authorAppId: (envelope.authorAppId as string | undefined) ?? null,
     sessionId: (envelope.sessionId as string | undefined) ?? null,
     replyToSeq: replyToSeq ?? null,
     mentions,
   };
+}
+
+/**
+ * Post into an App's team chat AS THE PLATFORM (#1791, cor:agt:080:15). A system author that is neither a user nor a
+ * worker: no principal is credited or checked, because none is acting — which is why this is a server-internal door,
+ * never a resolver, and takes the database and an App id, not a request context. The text is plain: the post carries no
+ * mentions, and any `@` in it is shown as a plain full-width sign. Returns false (posting nothing) when the App has no
+ * team chat to post into or is gone; it never creates one.
+ */
+class NoticeNotClaimed extends Error {}
+
+/**
+ * Could a notice be posted into this App's team chat right now? (Read-only; nothing is created or restored.) Needs a
+ * live root AND a live Channel, and a host memory the platform can write: an encrypted chat is skipped, because the
+ * notice would have to be sealed with a session key this request did not carry (Rook #1799).
+ */
+export async function canPostSystemNotice(db: Context['db'], appId: string): Promise<boolean> {
+  return (await systemNoticeTarget(db, appId)) !== null;
+}
+
+async function systemNoticeTarget(db: Context['db'], appId: string) {
+  const app = await db.app.findUnique({ where: { id: appId } });
+  if (!app || app.deletedAt || app.uninstalledAt) return null;
+  const root = await locateTeamChatRoot({ db } as Context, app as AppRow);
+  if (!root) return null;
+  const channel = await db.channel.findFirst({ where: { chatRootNodeId: root.id, deletedAt: null }, select: { id: true, incarnation: true } });
+  if (!channel) return null;
+  if ((await getMemoryEncryptionInfo(db, root.memoryId)).isEncrypted) return null;
+  return { app: app as AppRow, root, incarnation: { id: channel.id, value: channel.incarnation } };
+}
+
+/**
+ * Post into an App's team chat AS THE PLATFORM (#1791, cor:agt:080:15). A system author that is neither a user nor a
+ * worker: no principal is credited or checked, because none is acting — which is why this is a server-internal door,
+ * never a resolver, and takes the database and an App id, not a request context. The text is plain: the post carries no
+ * mentions, and any `@` in it is shown as a plain full-width sign. It posts only into the LIVE Channel that exists now,
+ * and the append re-checks that under the Channel's lock, so it never creates, restores or revives a chat: a deleted one
+ * stays deleted. Returns false (posting nothing) when there is no such chat, or when `claim` (run in the append's own
+ * transaction) refuses.
+ */
+export async function postSystemNotice(
+  db: Context['db'],
+  appId: string,
+  body: string,
+  claim?: (tx: Prisma.TransactionClient) => Promise<boolean>,
+): Promise<boolean> {
+  const target = await systemNoticeTarget(db, appId);
+  if (!target) return false;
+  try {
+    await postToChannelRoot(
+      { db } as Context,
+      target.app,
+      target.root,
+      target.incarnation,
+      { body: body.replace(/@/g, '\uFF20'), replyToSeq: null, sessionRef: null },
+      { system: true, claim },
+    );
+  } catch (e) {
+    // The chat was deleted after we looked, or the claim was lost: nothing was written.
+    if (e instanceof NoticeNotClaimed) return false;
+    if (e instanceof GraphQLError && e.extensions?.code === 'CHANNEL_NOT_FOUND') return false;
+    throw e;
+  }
+  return true;
 }
 
 /**

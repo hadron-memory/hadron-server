@@ -1,5 +1,7 @@
+import { verifiedLoginEvidence } from './auth/loginEvidence.js';
 import crypto from 'crypto';
 import { mountTeamSpecSchemaRoutes } from './api/teamSpecSchema.js';
+import { readTeamRecordKeys } from './lib/teamSpec/record.js';
 import * as Sentry from '@sentry/node';
 import { ApolloServer, type ApolloServerPlugin, type BaseContext } from '@apollo/server';
 import { expressMiddleware } from '@apollo/server/express4';
@@ -84,12 +86,15 @@ import {
   REQUEST_KEYS_HEADER,
 } from './lib/memoryUnlock.js';
 import { requestKeyStorage } from './lib/requestKeys.js';
+import { OPERATION_KEY_HEADER, requestOperationKeyStorage, stageRequestOperationKey } from './lib/requestOperationKey.js';
 import { emptyActor, requestActorStorage } from './lib/requestActor.js';
 import { isEmbeddingConfigured } from './lib/embedding/index.js';
 import { getBusClient } from './lib/bus/index.js';
 import { startAppRunBusListener, startAppRunSweepLoop } from './jobs/appRuns.js';
 import { makeProdRunDeps } from './jobs/appRunDeps.js';
 import { startSchedulerLoop } from './jobs/scheduler.js';
+import { startTaskStallEvaluatorLoop } from './jobs/taskStallEvaluator.js';
+import { startTaskMatcherLoop } from './jobs/taskMatcher.js';
 import { mountWebhookRoutes } from './api/webhooks.js';
 import { mountPublicAssetRoutes } from './api/assetPublic.js';
 import { mountEmailEventRoutes } from './api/emailEvents.js';
@@ -160,6 +165,9 @@ const sentryApolloPlugin: ApolloServerPlugin<BaseContext> = {
 };
 
 export async function createServer(): Promise<Express> {
+  // AM Q13: absent leaves team record operations unavailable; an invalid
+  // configured keyring refuses boot without echoing secret values.
+  readTeamRecordKeys();
   const app = express();
 
   // Trust-proxy for spec 025-oauth-for-mcp (FR-006). Express must know
@@ -477,7 +485,9 @@ export async function createServer(): Promise<Express> {
       const isNew = user.createdAt.getTime() >= startedAt;
 
       // Issue JWT
+      const login = await verifiedLoginEvidence(db, 'github');
       const jwt = await signJwt({
+        login,
         sub: user.id,
         githubUsername: user.githubUsername ?? undefined,
         roles: user.roles as ('OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER')[],
@@ -527,6 +537,7 @@ export async function createServer(): Promise<Express> {
       // itself. redirect + isNew ride in the code record, not the URL. The
       // GitHub-flow clientState binds the finishing browser (session fixation).
       const handoffCode = await issueLoginCode({
+        login,
         userId: user.id,
         redirect: pending.redirect,
         isNew,
@@ -626,7 +637,9 @@ export async function createServer(): Promise<Express> {
       const isNew = user.createdAt.getTime() >= startedAt;
 
       // Same claim shape POST /auth/session rebuilds from the user row.
+      const login = await verifiedLoginEvidence(db, 'google');
       const jwt = await signJwt({
+        login,
         sub: user.id,
         roles: user.roles as ('OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER')[],
         ...(user.email ? { email: user.email } : {}),
@@ -650,6 +663,7 @@ export async function createServer(): Promise<Express> {
 
       // #477 Sink 1: single-use handoff code; the JWT never rides a URL.
       const handoffCode = await issueLoginCode({
+        login,
         userId: user.id,
         redirect: pending.redirect,
         isNew,
@@ -769,7 +783,9 @@ export async function createServer(): Promise<Express> {
       const isNew = user.createdAt.getTime() >= startedAt;
 
       // Same claim shape POST /auth/session rebuilds from the user row.
+      const login = await verifiedLoginEvidence(db, 'apple');
       const jwt = await signJwt({
+        login,
         sub: user.id,
         roles: user.roles as ('OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER')[],
         ...(user.email ? { email: user.email } : {}),
@@ -793,6 +809,7 @@ export async function createServer(): Promise<Express> {
 
       // #477 Sink 1: single-use handoff code; the JWT never rides a URL.
       const handoffCode = await issueLoginCode({
+        login,
         userId: user.id,
         redirect: pending.redirect,
         isNew,
@@ -960,8 +977,10 @@ export async function createServer(): Promise<Express> {
       // standard code+PKCE dance. Cookie maxAge derived from the JWT exp so
       // both expire together (see the GitHub callback for the full
       // rationale). Option-C honors return_to regardless of isNew.
+      const login = await verifiedLoginEvidence(db, 'email');
       if (isOptionC) {
         const jwt = await signJwt({
+          login,
           sub: user.id,
           roles: user.roles as ('OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER')[],
           ...(user.email ? { email: user.email } : {}),
@@ -995,6 +1014,7 @@ export async function createServer(): Promise<Express> {
       // redirect (PR #770 review, Copilot). Falls back to `/` when not local.
       const dest = redirectParam && isServerLocalPath(redirectParam) ? redirectParam : '/';
       const code = await issueLoginCode({
+        login,
         userId: user.id,
         redirect: dest,
         isNew,
@@ -1048,6 +1068,7 @@ export async function createServer(): Promise<Express> {
     // Rebuild the same claim set the GitHub/email flows used to mint, from the
     // authoritative user row (roles may have changed since the code was issued).
     const jwt = await signJwt({
+      login: redeemed.login,
       sub: user.id,
       roles: user.roles as ('OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER')[],
       ...(user.githubUsername ? { githubUsername: user.githubUsername } : {}),
@@ -1163,6 +1184,7 @@ export async function createServer(): Promise<Express> {
     // invisible to concurrent requests and vanish with the request's async
     // context — aborted responses included (PR-514 review, Codex P1 ×2).
     (_req, _res, next) => requestKeyStorage.run(new Map(), next),
+    (_req, _res, next) => requestOperationKeyStorage.run({}, next),
     // #1610: the Worker / Agent behind this request's writes, filled by
     // resolveAuthContext from the validated session binding.
     (_req, _res, next) => requestActorStorage.run(emptyActor(), next),
@@ -1179,6 +1201,7 @@ export async function createServer(): Promise<Express> {
             extensions: { code: 'FORBIDDEN', ...surfaceRefusal, http: { status: 403 } },
           });
         }
+        stageRequestOperationKey(req.headers[OPERATION_KEY_HEADER], auth);
         // Stage caller-held unlock keys from the request header. Every
         // encrypt/decrypt call site consults sessionKeyCache.getByMemoryId,
         // which checks the request store first — this is the whole
@@ -1814,6 +1837,20 @@ export async function createServer(): Promise<Express> {
   // nothing else.
   if (process.env.NODE_ENV !== 'test' && process.env.DISABLE_SESSION_REAPER !== 'true') {
     startSessionReaperLoop(db);
+  }
+
+  // #1706 — agent-task stall evaluator: the four stall rules, owner-chain
+  // escalation, and clearing stall marks. Idempotent per episode, so it needs
+  // no claim race across instances.
+  if (process.env.NODE_ENV !== 'test' && process.env.DISABLE_TASK_STALL_EVALUATOR !== 'true') {
+    startTaskStallEvaluatorLoop(db);
+  }
+
+  // #1707 — the matcher's sweep: records lapsed host registrations and assigns
+  // queued tasks to workers free for work. Each assignment is a guarded update
+  // under a per-worker lock, so overlapping runs never double-assign.
+  if (process.env.NODE_ENV !== 'test' && process.env.DISABLE_TASK_MATCHER !== 'true') {
+    startTaskMatcherLoop(db);
   }
 
   // PendingEdge rows retargeted to stable node ids are durable retry work.

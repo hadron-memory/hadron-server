@@ -13,10 +13,17 @@
  *
  *  - A prompt typed into a BUSY Codex agent steers its turn, and it silently
  *    drops the rest of its task. So a nudge is sent only after
- *    `orca terminal wait --for tui-idle` proves the terminal idle.
+ *    `orca terminal wait --for tui-idle` proves the terminal idle — except
+ *    that an UNTRACKED terminal (Orca lost its output stream; happens
+ *    fleet-wide on a serve restart) can never satisfy the wait, so its
+ *    timeout reads as unknown and the idle-prompt screen shape decides.
  *  - `tui-idle` also reports idle while a HUMAN is typing, so a nudge got
  *    appended to Holger's half-typed text and submitted it (#5473). So the
- *    screen read must also prove the prompt empty (`promptIsEmpty`).
+ *    screen read must also prove the prompt empty (`promptIsEmpty`). Orca's
+ *    `draft` state can go STALE — carrying text no client shows (#6736,
+ *    twice on 2026-10-05, pinning workers for hours) — so for Claude, where
+ *    typed text provably renders on the `❯` line, a screen that proves the
+ *    composer empty REFUTES the draft; Codex's draft stays authoritative.
  *  - Tab titles are not identity (agents retitle their own tabs), and a
  *    worktree's name does not prove which worker drives it. So each roster
  *    entry names its worktree; the terminal is the ONE agent terminal there,
@@ -48,18 +55,76 @@ import { fileURLToPath } from 'node:url';
 export const DEFAULT_CONFIG = join(homedir(), '.config', 'hadron-orca-attention-router', 'config.json');
 
 /**
+ * Above this sequence span between the first unread and the head, the
+ * unfiltered walk switches to the mentions-only anchor (#1811). The SPAN, not
+ * the unread count, is what the unfiltered instruction would page through —
+ * and a cursor-0 or stale-watermark worker following it to the head re-reads
+ * the whole history. The mentions walk still covers EVERY unread mention: the
+ * filter skips non-mention history, never mentions (Eden #9616 — "a mention
+ * that misses its worker is exactly the failure #1811 exists to fix").
+ */
+const LARGE_GAP_SPAN = 400;
+
+/**
  * The one line a worker receives: fresh counts with the seq range they cover —
  * never a message body, and never a token. The seqs let the recipient check
  * the nudge against its own read cursor, so it stays true when delivered (#1616).
- * Kept SHORT: it is typed into a working terminal (Holger, 2026-10-05).
+ * Kept short but COMPLETE (Holger, 2026-10-05): it is typed into a working
+ * terminal, so every word earns its place — but the read anchor (where to
+ * start, both CLI and MCP forms, bounded) is load-bearing and stays.
+ *
+ * Two anchors (#1811): at or below the large-gap span, the #1805 watermark
+ * anchor (start at the first unread of any kind, walk forward); above it, the
+ * mentions-only anchor — a BACKWARD walk of the MENTIONS filter from the
+ * head THE NUDGE NAMED (frozen as every page's --before ceiling; prevBefore
+ * pages down to the fixed since floor, because beforeSeq selects the newest
+ * page and a forward walk would lose the oldest mention) through the worker's
+ * own session, then marking at the highest seq actually delivered, never
+ * above the named head (a mentions-filtered read does not auto-mark, so the
+ * mark is a separate deliberate step; an incomplete walk marks NOTHING and
+ * anything outside the walked bound stays unread — nothing is silently
+ * acknowledged).
  */
 export function nudgeText(a: AttentionItem): string {
   const where = [
     a.firstUnreadSeq === null ? '' : `unread #${a.firstUnreadSeq}–#${a.lastSeq}`,
     a.lastRelevantSeq === null ? '' : `latest mention #${a.lastRelevantSeq}`,
   ].filter(Boolean).join(', ');
+  const head = `Hadron team attention: ${a.unread} relevant unread (${a.unreadMentions} mention${a.unreadMentions === 1 ? '' : 's'}${where ? `; ${where}` : ''}).`;
+  if (a.firstUnreadSeq !== null && a.lastSeq - a.firstUnreadSeq > LARGE_GAP_SPAN) {
+    const since = Math.max(0, a.firstUnreadSeq - 1);
+    // The walk is bounded BOTH ways by values this nudge named: the ceiling is
+    // the head (a.lastSeq, frozen for every page — an H+1 mention posted
+    // during the walk can neither enter a page nor be acknowledged), and the
+    // floor is the first unread. And the walk runs BACKWARD from the ceiling:
+    // beforeSeq forces NEWEST-page selection (resolvers.teamChat.ts, blind
+    // review P2 cycle 1, #1827), so a forward nextSince walk with more than
+    // one page of mentions returns the newest page, an empty next page, and a
+    // mark that acknowledges the unseen OLDEST mention. Following prevBefore
+    // down to the fixed since floor delivers every mention in the window
+    // (live control: 201 mentions, pages 200/1/0, the H+1 arrival excluded).
+    const bound = a.lastSeq + 1;
+    return (
+      head +
+      ` LARGE GAP (unread span ${a.lastSeq - a.firstUnreadSeq} > ${LARGE_GAP_SPAN}): walk MENTIONS ONLY from your first unread to the head named here — every unread mention is on the path; the rest is history.` +
+      ` CLI: \`hadron team chat read --mentions-me --since ${since} --before ${bound} --limit 200\`, then follow each page's prevBefore BACKWARD to your first unread — beforeSeq selects the NEWEST page under the bound, so page down to the floor and stop at an empty or floor page; MCP: \`hadron_team_chat_read\` with your session, \`sinceSeq=${since}\`, \`beforeSeq=${bound}\`, its mentions filter and limit 200, then re-call with \`beforeSeq\` = the smallest seq on your last page until the floor (MCP pages carry no prevBefore field).` +
+      ` Then mark read through your OWN session at the highest seq actually delivered to you, never above #${a.lastSeq} (CLI: \`hadron team chat mark-read --through <that seq>\`; MCP: \`hadron_team_chat_mark_read\` — a mentions-filtered read never auto-marks).` +
+      ' An incomplete walk marks NOTHING; anything outside the walked bound — messages arriving now included — stays unread. If no mention needs action, mark read and finish silently — no chat post.' +
+      ' (Orca attention router; counts as of send.)'
+    );
+  }
+  // Watermark-anchored read instruction (production lesson 2026-10-12, Eden's
+  // #9017/#9035: workers with a stale read mark got count-only nudges, read the
+  // NEWEST page as every recovery brief teaches, found nothing addressed to
+  // them there, and concluded "nothing needs action" — while fresh mentions
+  // sat unread at their watermark. Name the mark; tell them where to start.)
+  const from =
+    a.firstUnreadSeq === null
+      ? ''
+      : ` START AT #${a.firstUnreadSeq} (your first unread message of any kind) — CLI: \`hadron team chat read --since ${Math.max(0, a.firstUnreadSeq - 1)} --limit 200\` then follow nextSince; MCP: \`hadron_team_chat_read\` with your session and \`sinceSeq=${Math.max(0, a.firstUnreadSeq - 1)}\` then the returned cursor — NOT the newest page alone;`;
   return (
-    `Hadron team attention: ${a.unread} relevant unread (${a.unreadMentions} mention${a.unreadMentions === 1 ? '' : 's'}${where ? `; ${where}` : ''}). ` +
+    head +
+    `${from} ` +
     'Read team chat unfiltered with your own live session; if nothing needs action, ' +
     "mark read and finish silently — no chat post or 'read/no-action' comment. (Orca attention router; counts as of send.)"
   );
@@ -155,6 +220,12 @@ interface Ledger {
   base: string;
   nudged: Record<string, NudgeRecord>;
   reported: Record<string, string>;
+  /** Stale-draft discard notes already logged under this token (worker -> note). */
+  draftNotes?: Record<string, string>;
+  /** Epoch ms a worker's current hold began (cleared on delivery), for long-hold visibility. */
+  heldSince?: Record<string, number>;
+  /** Epoch ms the last long-hold line was logged per worker (re-log at most every 30 min). */
+  heldLoggedAt?: Record<string, number>;
 }
 
 /**
@@ -200,8 +271,15 @@ export class State {
     } catch {
       ledger = {};
     }
-    if (ledger.base !== base) return { base, nudged: {}, reported: {} };
-    return { base, nudged: ledger.nudged ?? {}, reported: ledger.reported ?? {} };
+    if (ledger.base !== base) return { base, nudged: {}, reported: {}, draftNotes: {}, heldSince: {}, heldLoggedAt: {} };
+    return {
+      base,
+      nudged: ledger.nudged ?? {},
+      reported: ledger.reported ?? {},
+      draftNotes: ledger.draftNotes ?? {},
+      heldSince: ledger.heldSince ?? {},
+      heldLoggedAt: ledger.heldLoggedAt ?? {},
+    };
   }
 
   saveLedger(ledger: Ledger): void {
@@ -499,6 +577,8 @@ interface Terminal {
   agentIdentity?: string | null;
   connected?: boolean;
   writable?: boolean;
+  /** Epoch ms of the last OUTPUT Orca saw; null when tracking is lost. */
+  lastOutputAt?: number | null;
 }
 
 /** Orca's live terminals. */
@@ -523,6 +603,43 @@ export function isIdle(cfg: Config, handle: string, timeoutMs: number, run: Runn
   } catch {
     return false;
   }
+}
+
+/**
+ * [verdict, why]: whether the terminal may be typed into, with THREE outcomes
+ * where tui-idle alone gave two (#7398 incident class).
+ *
+ * A tui-idle timeout means "busy" only when Orca is TRACKING the terminal's
+ * output (lastOutputAt set). Orca loses tracking fleet-wide on a serve restart
+ * and degrades it in smaller sets mid-life (observed 2026-10-07: 28/40 null
+ * from ~03:10Z with the serve continuously up); an untracked terminal can
+ * NEVER satisfy tui-idle, so reading the timeout as "busy" pins every idle
+ * untracked worker forever — exactly the workers awaiting nudges. For an
+ * untracked terminal the timeout is UNKNOWN, and the rendered screen is the
+ * fallback proof: the idle-prompt shape (bare box + the agent's empty-input
+ * marker, no draft) is the same live evidence the empty-prompt gate trusts.
+ */
+export function provesIdle(
+  cfg: Config, handle: string, agent: string, lastOutputAt: number | null | undefined,
+  timeoutMs: number, run: Runner,
+): [boolean, string] {
+  if (isIdle(cfg, handle, timeoutMs, run)) return [true, ''];
+  if (lastOutputAt === null || lastOutputAt === undefined) {
+    const term = readScreen(cfg, handle, run);
+    const [empty, why] = promptIsEmptyFromTerm(term, agent);
+    if (!empty) return [false, `unknown idle state — no output tracking, screen shows ${why}`];
+    // An empty composer proves nobody has TYPED; it does not prove the agent
+    // is not WORKING — both agents render an empty prompt box mid-turn (the
+    // #1490 steering hazard; live evidence 2026-10-09/10: '✽ Bunning… (5m 55s
+    // · ↓ 15.6k tokens)' above an empty Claude box, '• Working (6s • esc to
+    // interrupt)' above the Codex placeholder). The fallback requires positive
+    // quiet: no running-turn indicator above the prompt (@codex P2, #1700).
+    const proof = term ? idleProofAbovePrompt(term.tail as string[], agent) : (['unknown', 'screen unreadable'] as const);
+    if (proof[0] === 'busy') return [false, 'unknown idle state — no output tracking, a running turn is drawn above the prompt'];
+    if (proof[0] === 'unknown') return [false, `unknown idle state — no output tracking, ${proof[1]}`];
+    return [true, 'untracked terminal, screen proves idle (empty prompt, positive idle chrome)'];
+  }
+  return [false, `busy for ${Math.round(timeoutMs / 1000)}s`];
 }
 
 /**
@@ -582,9 +699,15 @@ export function promptLineIsEmpty(lines: string[], agent: string): boolean {
     // typed spaces as nothing. The status line's empty-input hint is the
     // proof — `· ← for agents` shows exactly while the composer is empty, in
     // every permission mode (live probe, 2026-10-01), since ← only switches
-    // agents when there is no text for it to move through.
-    const status = lines.slice(close + 1).find((l) => squash(l) !== '');
-    return status !== undefined && squash(status).endsWith(CLAUDE_EMPTY_HINT);
+    // agents when there is no text for it to move through. And the status
+    // line is the terminal's LAST content: Claude draws nothing below its
+    // composer footer, so unexplained trailing content — a shell prompt after
+    // `cat`ing a captured idle screen — fails here even though the box and
+    // hint above it look perfect. The FIRST nonblank line below the closing
+    // rule proved nothing about what sits at the terminal bottom (blind
+    // review P2, #1823).
+    const below = lines.slice(close + 1).map(squash).filter((l) => l !== '');
+    return below.length === 1 && below[0].endsWith(CLAUDE_EMPTY_HINT);
   }
   if (agent !== 'codex') return false;
   let at = -1;
@@ -603,6 +726,102 @@ export function promptLineIsEmpty(lines: string[], agent: string): boolean {
 }
 
 /**
+ * The terminal's rendered screen, or undefined when unreadable. A full-frame
+ * `--screen` read (the default stream read returns repaint fragments, useless
+ * for shape checks).
+ */
+export function readScreen(cfg: Config, handle: string, run: Runner): Record<string, any> | undefined {
+  try {
+    const data = JSON.parse(run([cfg.orcaCli, 'terminal', 'read', '--terminal', handle, '--screen', '--json']).stdout);
+    return data.ok ? data.result?.terminal : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** True when the line carries a parenthesized elapsed timer (a running spinner). */
+const spinnerTimer = (s: string): boolean => /[（(]\d/.test(s) && /\d\s*[mh]?\s*\d*s/.test(s) && !/done/i.test(s) && !/worked for/i.test(s);
+
+/**
+ * Lines that POSITIVELY prove the agent is not working - a completed turn, or
+ * the chrome a freshly launched (never-worked) terminal draws. Live evidence
+ * 2026-10-10, one per family:
+ *  - Claude/GLM fresh: the 'Claude Code v2.1.296' / 'glm-5.3' welcome banner;
+ *    post-trust: 'Share Claude Code ... /passes'.
+ *  - Claude done: the '✻ … for 1m 12s · done 3:52 PM' completed-turn line,
+ *    '⏺ Done.', the '※ recap:' block, '/clear to save N tokens'.
+ *  - Codex fresh: the 'OpenAI Codex (v...)' banner and its 'Update
+ *    available!' box. Codex done: 'Worked for '.
+ */
+const IDLE_MARKERS: readonly RegExp[] = [
+  /· done/, /^⏺ Done/, /^Done\./, /^✻ \w+ for \d+[ms]/, /^✻ Compacted while idle/,
+  /\/clear to save/, /recap:/, /Share Claude Code/,
+  /Claude Code v\d/, /glm-[\d.]/,
+  /OpenAI Codex \(v/, /Update available!/, /Worked for /,
+  /Update installed/,
+];
+
+/**
+ * Chrome that may surround a strong marker without explaining it away: a
+ * historical submitted-prompt echo (Claude renders past prompts with a
+ * leading `❯`), and the banner layout lines around a launch logo (box-art
+ * glyphs plus the worktree path) or Codex's `permissions:`/path lines.
+ * Weak evidence on its own — it never substitutes for a strong marker.
+ */
+const isWeakChrome = (s: string): boolean =>
+  /^❯ /.test(s) || /^[▐▛█▝▜▀│╭╮╰╯ ]*[~❯]/.test(s) || /^permissions: /.test(s);
+
+/**
+ * [verdict, detail] on the window directly above the prompt chrome: 'busy'
+ * (a running-turn line is drawn), 'idle' (the NEWEST non-weak line is a
+ * positive idle/completed/fresh-launch marker — everything older is then
+ * history), or 'unknown' (the newest line is unrecognized, the window holds
+ * only weak chrome with no strong marker, or there is no window at all:
+ * missing evidence, not quiet — all hold rather than nudge, because a busy
+ * presentation we failed to enumerate looks exactly like this; @codex P2
+ * #1700 r2/r3, production calibration #1746). The window is bounded because
+ * both agents PIN their running-turn line directly above the prompt while a
+ * turn runs.
+ */
+export function idleProofAbovePrompt(lines: string[], agent: string): ['busy' | 'idle' | 'unknown', string] {
+  let at: number; // the first line of the prompt chrome
+  if (agent === 'claude') {
+    const rules = lines.flatMap((l, i) => (/^─{3,}[\s ]*$/.test(l) ? [i] : []));
+    if (rules.length < 2) return ['unknown', 'no prompt box'];
+    at = rules[rules.length - 2];
+  } else if (agent === 'codex') {
+    let p = -1;
+    for (let i = lines.length - 1; i >= 0; i--) {
+      if (lines[i].startsWith('\u203a')) { p = i; break; }
+    }
+    if (p < 0) return ['unknown', 'no prompt line'];
+    at = p;
+  } else {
+    return ['unknown', `unknown agent ${agent}`];
+  }
+  const window = lines.slice(Math.max(0, at - 8), at).map(squash).filter((l) => l !== '');
+  for (const l of window) {
+    if (l.includes('to interrupt') || l.includes('run in background') || l.includes('Working (') || /^calling [a-z]/i.test(l)) return ['busy', l];
+    if (spinnerTimer(l)) return ['busy', l];
+  }
+  // Judge the NEWEST content positionally (production calibration, 2026-10-11:
+  // Yuri's first-night report — real idle terminals carry ordinary assistant
+  // output text above the done-marker, which a whole-window rule fail-closes
+  // to unknown and the router delivers ~nothing after a restart). The newest
+  // non-weak line decides: a STRONG marker there means everything older is
+  // history (safe); weak chrome may TRAIL a strong marker (banner tail lines)
+  // without hiding it. An unrecognized newest line still holds — @codex P2
+  // #1700 r3's counterexample stands: a busy presentation that drifted format
+  // looks exactly like that, and old completion text must not rescue it. An
+  // absent or weak-only window is missing evidence, not quiet.
+  let i = window.length - 1;
+  while (i >= 0 && isWeakChrome(window[i])) i--;
+  if (i < 0) return ['unknown', 'no positive liveness evidence above the prompt'];
+  if (IDLE_MARKERS.some((re) => re.test(window[i]))) return ['idle', 'completed or fresh-launch chrome'];
+  return ['unknown', 'unrecognized chrome above the prompt'];
+}
+
+/**
  * [empty, detail]: whether the terminal's rendered prompt is empty right now.
  *
  * Two signals, and each agent needs a different one (live probe, 2026-10-01,
@@ -615,18 +834,82 @@ export function promptLineIsEmpty(lines: string[], agent: string): boolean {
  * here). Never logs the text.
  */
 export function promptIsEmpty(cfg: Config, handle: string, agent: string, run: Runner): [boolean, string] {
-  let terminal: Record<string, any> | undefined;
-  try {
-    const data = JSON.parse(run([cfg.orcaCli, 'terminal', 'read', '--terminal', handle, '--screen', '--json']).stdout);
-    terminal = data.ok ? data.result?.terminal : undefined;
-  } catch {
-    terminal = undefined;
-  }
+  return promptIsEmptyFromTerm(readScreen(cfg, handle, run), agent);
+}
+
+/** promptIsEmpty over an already-read screen (the untracked gate reads once). */
+export function promptIsEmptyFromTerm(terminal: Record<string, any> | undefined, agent: string): [boolean, string] {
   if (!terminal || terminal.source !== 'screen' || !Array.isArray(terminal.tail)) return [false, 'screen unreadable'];
-  // ANY draft holds, whitespace included: this gate promises "nobody is
-  // typing", not "nothing meaningful typed" (Gene, #1555).
-  if (terminal.draft !== undefined && terminal.draft !== null && terminal.draft !== '') return [false, 'text in the composer draft'];
+  // A draft pins the nudge only when the agent's own rendering cannot refute
+  // it. Claude Code draws typed-but-unsent text on its `❯` line (#1555), so a
+  // screen that proves the composer empty — bare `❯` box plus the
+  // `· ← for agents` hint (#5756) — REFUTES the draft: Orca's draft state was
+  // observed twice on 2026-10-05 carrying text no client showed, pinning
+  // workers for hours. Codex renders its composer empty while text is pending
+  // (the draft is the ONLY signal there), so its draft stays authoritative.
+  const draft = terminal.draft;
+  if (draft !== undefined && draft !== null && draft !== '') {
+    if (agent !== 'claude') return [false, 'text in the composer draft'];
+    if (!promptLineIsEmpty(terminal.tail as string[], agent)) return [false, 'text in the composer draft'];
+    return [true, 'stale draft (screen proves the composer empty)'];
+  }
   return promptLineIsEmpty(terminal.tail as string[], agent) ? [true, ''] : [false, 'text in the prompt'];
+}
+
+/**
+ * Banner/completion markers anchor to the START of a line, optionally behind
+ * banner chrome (box-art glyphs, spaces, Codex's `>_` launcher glyph, the
+ * composer `›`) — never after arbitrary content. `orca$ echo "Worked for 33s"`
+ * is ordinary output mentioning a marker, not Codex completion chrome (blind
+ * review P2, #1823).
+ */
+const BANNER_CHROME = '[│╭╮╰╯─▐▛█▝▜▀ >_› ]*';
+
+/**
+ * The agent family a rendered screen POSITIVELY shows, or null — the
+ * identity-flap fallback's evidence. Orca's per-terminal tracking degrades
+ * mid-life: `lastOutputAt` goes null (the #7398 gate's premise) and, in the
+ * same degradation family, `agentIdentity` reads null on a terminal that is
+ * running its agent right now (observed 2026-10-12: Hugo's terminal was held
+ * "no live agent terminal" ~6.5h while the agent worked, while the same CLI,
+ * env and cwd read agentIdentity 'claude' stable in 40 consecutive polls —
+ * the flap is in Orca's tracking, not in the terminal). The screen is the
+ * surviving positive evidence.
+ *
+ * Markers are the agents' OWN chrome: banner/completion lines anchored to
+ * banner-chrome line starts, strong glyphs (`✻`, `⏺`, `permissions:`) at
+ * column 0, the composer box Claude's pair of `───` rules, and Codex's `›`
+ * composer only WITH content after the glyph — a bare `›` is a shell-theme
+ * prompt as easily as a composer. Typed text is indented onto continuation
+ * lines (promptLineIsEmpty's convention), so a plain shell draws none of
+ * these: `orca$ echo "Claude Code v2.1.296"` never classifies. A glyph a
+ * shell theme could draw (a bare `❯`, a bare `›`, a single rule) is
+ * deliberately NOT family evidence.
+ * A screen carrying BOTH families' markers (an agent displaying
+ * the other family's chrome in its output) reads null: hold, never guess.
+ * A wrong family is caught one gate later anyway — promptLineIsEmpty and
+ * idleProofAbovePrompt prove their shapes per family and hold anything
+ * unrecognized — so this classifier needs recall on real agent screens more
+ * than it needs perfection.
+ */
+export function screenAgentFamily(terminal: Record<string, any> | undefined): string | null {
+  if (!terminal || terminal.source !== 'screen' || !Array.isArray(terminal.tail)) return null;
+  const lines = terminal.tail as string[];
+  const rules = lines.filter((l) => /^─{3,}[\s ]*$/.test(l)).length;
+  let claude = rules >= 2; // the composer box promptLineIsEmpty itself keys on
+  let codex = false;
+  const claudeBanner = new RegExp(`^${BANNER_CHROME}(Claude Code v\\d|glm-[\\d.]|/clear to save|※ recap:)`);
+  const codexBanner = new RegExp(`^${BANNER_CHROME}(OpenAI Codex \\(v|Worked for |Ask Codex to do anything)`);
+  for (const l of lines) {
+    if (/^✻ /.test(l) || /^⏺ /.test(l) || claudeBanner.test(l)) claude = true;
+    // A BARE `›` is a shell-theme glyph as easily as Codex's composer: only
+    // `›` with content after it — the idle placeholder, a submitted echo, a
+    // menu line — is family evidence (blind review P2, #1823).
+    if ((l.startsWith('›') && squash(l.slice(1)) !== '') || /^permissions: /.test(l) || codexBanner.test(l)) codex = true;
+  }
+  if (claude && !codex) return 'claude';
+  if (codex && !claude) return 'codex';
+  return null;
 }
 
 /** The first `requestId` anywhere in a receipt: Orca reports it for a durable retry. */
@@ -707,18 +990,38 @@ export function boundWorker(worktree: string): string | null {
   }
 }
 
-/** [handle, detail]: the ONE agent terminal in this worker's worktree, or why not. */
-export function resolveTerminal(entry: RosterEntry, terminals: Terminal[]): [string | null, string] {
+/**
+ * [handle, agent-or-reason, via]: the ONE agent terminal in this worker's
+ * worktree, or why not. The identity path is unchanged: the terminal whose
+ * `agentIdentity` is claude/codex. When identity resolves NOTHING and cfg/run
+ * are given, the identity-flap fallback tries the screen: Orca's
+ * agentIdentity tracking degrades mid-life (see screenAgentFamily), so ONE
+ * remaining connected terminal in the worktree whose screen positively shows
+ * an agent family still resolves — with via='screen' so the caller can log
+ * it. The fallback never runs when identity resolves; an ambiguous screen
+ * count, an unclassifiable screen, or a plain shell holds exactly as before.
+ */
+export function resolveTerminal(
+  entry: RosterEntry, terminals: Terminal[], cfg?: Config, run?: Runner,
+): [string | null, string, 'identity' | 'screen' | 'none'] {
   const worktree = real(entry.worktree);
   const bound = boundWorker(worktree);
-  if (bound && bound !== entry.worker) return [null, `worktree is bound to another worker (${bound})`];
-  const agents = terminals.filter(
-    (t) => t.worktreePath && real(t.worktreePath) === worktree && AGENT_IDENTITIES.has(t.agentIdentity ?? '')
-      && t.connected !== false && t.writable !== false,
+  if (bound && bound !== entry.worker) return [null, `worktree is bound to another worker (${bound})`, 'none'];
+  const inWorktree = terminals.filter(
+    (t) => t.worktreePath && real(t.worktreePath) === worktree && t.connected !== false && t.writable !== false,
   );
-  if (agents.length === 0) return [null, 'no live agent terminal in its worktree'];
-  if (agents.length > 1) return [null, `${agents.length} agent terminals in its worktree (ambiguous)`];
-  return [agents[0].handle, agents[0].agentIdentity ?? ''];
+  const agents = inWorktree.filter((t) => AGENT_IDENTITIES.has(t.agentIdentity ?? ''));
+  if (agents.length > 1) return [null, `${agents.length} agent terminals in its worktree (ambiguous)`, 'none'];
+  if (agents.length === 1) return [agents[0].handle, agents[0].agentIdentity ?? '', 'identity'];
+  if (cfg && run) {
+    const verified: Array<{ handle: string; family: string }> = [];
+    for (const t of inWorktree) {
+      const family = screenAgentFamily(readScreen(cfg, t.handle, run));
+      if (family) verified.push({ handle: t.handle, family });
+    }
+    if (verified.length === 1) return [verified[0].handle, verified[0].family, 'screen'];
+  }
+  return [null, 'no live agent terminal in its worktree', 'none'];
 }
 
 /**
@@ -786,13 +1089,22 @@ export function pollOnce(cfg: Config, run: Runner = runCommand, log: (line: stri
         outcome.covered.push(entry.name);
         continue;
       }
-      const [handle, detail] = resolveTerminal(entry, terminals);
+      const [handle, detail, via] = resolveTerminal(entry, terminals, cfg, run);
+      if (via === 'screen') {
+        // Not a held reason (those are deduped per token): a resolution note,
+        // logged each time it carries a nudge attempt. These lines are also
+        // the flap-incidence record for the upstream Orca report — grep
+        // 'resolved by screen' in loop.log.
+        log(`orca-attention-router: ${entry.name}: terminal resolved by screen (Orca agentIdentity tracking lost)`);
+      }
       if (!handle) {
         outcome.held[entry.name] = detail;
         continue;
       }
-      if (!isIdle(cfg, handle, cfg.busyWaitMs, run)) {
-        outcome.held[entry.name] = `busy for ${Math.round(cfg.busyWaitMs / 1000)}s`;
+      const tracked = new Map(terminals.map((t) => [t.handle, t.lastOutputAt]));
+      const [gate, gateWhy] = provesIdle(cfg, handle, detail, tracked.get(handle), cfg.busyWaitMs, run);
+      if (!gate) {
+        outcome.held[entry.name] = gateWhy;
         continue;
       }
       // Checked AFTER idle, as close to the send as possible: idle says the
@@ -801,6 +1113,16 @@ export function pollOnce(cfg: Config, run: Runner = runCommand, log: (line: stri
       if (!empty) {
         outcome.held[entry.name] = `prompt not empty (${why})`;
         continue;
+      }
+      if (why) {
+        // The gate passed by DISCARDING a screen-refuted draft. Visible once
+        // per token per worker; the draft's text is never logged.
+        const note = 'stale Orca draft discarded (screen proves the composer empty)';
+        if ((ledger.draftNotes ?? {})[entry.worker] !== note) {
+          ledger.draftNotes[entry.worker] = note;
+          state.saveLedger(ledger);
+          log(`orca-attention-router: ${entry.name}: ${note}`);
+        }
       }
       mustOwn();
       // Recomputed after every gate, as close to the send as possible: the
@@ -813,6 +1135,8 @@ export function pollOnce(cfg: Config, run: Runner = runCommand, log: (line: stri
         // it every poll; a NEW mention has a higher seq and is never mistaken
         // for covered (same argument as `alreadyNudged`).
         ledger.nudged[entry.worker] = { relevantSeq: seen.lastRelevantSeq!, at: Date.now(), stages: 'dropped: read while waiting' };
+        delete (ledger.heldSince ?? {})[entry.worker];
+        delete (ledger.heldLoggedAt ?? {})[entry.worker];
         state.saveLedger(ledger);
         outcome.dropped.push(entry.name);
         continue;
@@ -823,9 +1147,20 @@ export function pollOnce(cfg: Config, run: Runner = runCommand, log: (line: stri
       // screen alone cannot catch it) or a human may have started typing
       // (#5473). Re-prove both, as close to the send as possible — the idle
       // recheck FAIL-CLOSED (see RECHECK_IDLE_TIMEOUT_MS): busy here holds,
-      // and the next poll recomputes everything.
-      if (!isIdle(cfg, handle, RECHECK_IDLE_TIMEOUT_MS, run)) {
-        outcome.held[entry.name] = 'busy again after the recompute (fail-closed, not waited)';
+      // and the next poll recomputes everything. An UNTRACKED terminal gets
+      // the screen fallback again (it can never satisfy tui-idle) — but on
+      // RELOADED tracking (@codex P2, #1700): the gate's snapshot is as old
+      // as the busy-wait was long, and a terminal that produced output since
+      // (healing its tracking) must get the ordinary failed-wait hold back,
+      // not the untracked fallback. A vanished terminal falls to the fallback,
+      // which re-resolves its screen and holds unless it positively proves idle.
+      const recheckTracked = listTerminals(cfg, run).find((t) => t.handle === handle)?.lastOutputAt;
+      const [recheckIdle, recheckWhy] = provesIdle(cfg, handle, detail, recheckTracked, RECHECK_IDLE_TIMEOUT_MS, run);
+      if (!recheckIdle) {
+        // The raw reason distinguishes the two holds: 'busy for Ns' (tracked
+        // again — the ordinary failed-wait hold, #1700) vs 'unknown idle
+        // state — …' (still untracked, screen shows work or text).
+        outcome.held[entry.name] = `busy again after the recompute (${recheckWhy})`;
         continue;
       }
       const [stillEmpty, whyNow] = promptIsEmpty(cfg, handle, detail, run);
@@ -840,6 +1175,8 @@ export function pollOnce(cfg: Config, run: Runner = runCommand, log: (line: stri
         continue;
       }
       ledger.nudged[entry.worker] = { relevantSeq: now.lastRelevantSeq!, at: Date.now(), stages: how };
+      delete (ledger.heldSince ?? {})[entry.worker];
+      delete (ledger.heldLoggedAt ?? {})[entry.worker];
       // Persisted at once: a crash or a later failure in this poll must not
       // cause the same nudge to be sent again (@codex P2, #1490).
       state.saveLedger(ledger);
@@ -851,8 +1188,23 @@ export function pollOnce(cfg: Config, run: Runner = runCommand, log: (line: stri
       // Report each held worker's reason once per token, not every poll.
       const fresh = held.filter(([n, r]) => ledger.reported[n] !== r);
       Object.assign(ledger.reported, outcome.held);
+      // Long-hold visibility (#6736): a worker pinned with mentions pending for
+      // 30+ minutes says so in the log, at most once every 30 minutes.
+      const longHolds: string[] = [];
+      for (const [n] of held) {
+        const w = cfg.roster.find((e) => e.name === n)?.worker ?? n;
+        const since = (ledger.heldSince ?? {})[w] ?? Date.now();
+        ledger.heldSince[w] = since;
+        const minutes = Math.floor((Date.now() - since) / 60_000);
+        const last = (ledger.heldLoggedAt ?? {})[w] ?? 0;
+        if (minutes >= 30 && Date.now() - last >= 30 * 60_000) {
+          ledger.heldLoggedAt[w] = Date.now();
+          longHolds.push(`${n} held ${minutes} min with mentions pending (${outcome.held[n]})`);
+        }
+      }
       state.saveLedger(ledger);
       if (fresh.length) log(`orca-attention-router: ${fresh.map(([n, r]) => `${n}: ${r}`).join('; ')}`);
+      if (longHolds.length) log(`orca-attention-router: ${longHolds.join('; ')}`);
     } else {
       mustOwn();
       // Adoption clears the ledger, but a nudge may have carried a frontier

@@ -14,3 +14,9 @@ export const RUN_CLIENT_PREFIX = 'run:';
 export function isRunPrincipal(auth: { clientId?: string | null }): boolean {
   return auth.clientId?.startsWith(RUN_CLIENT_PREFIX) === true;
 }
+
+/** One definition of the authority carried by a headless activation or setup. */
+export function runAuthContext(run: { id: string; appId: string; userId: string | null; organizationId: string }): import('../../middleware/auth.js').AuthContext {
+  return { appId: run.appId, userId: run.userId ?? undefined, organizationId: run.organizationId,
+    clientId: `${RUN_CLIENT_PREFIX}${run.id}`, roles: [] };
+}
