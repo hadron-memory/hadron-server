@@ -188,28 +188,28 @@ describe('#1765 — the author may always delete their own (cor:dmo:110:16)', ()
       await tx.$queryRaw`SELECT id FROM nodes WHERE id = ${mine.id} FOR UPDATE`;
       await held;
     }, { timeout: 20_000 });
-    // Barrier (#1846): prove the holder has ACQUIRED the lock before the
-    // delete races it, so the race cannot pass vacuously by outrunning the
-    // acquisition. A NOWAIT probe succeeds (and, in its own implicit
-    // transaction, releases instantly) while the row is free; its failure is
-    // the holder holding it — matched by SQLSTATE, not message text (#1853;
-    // the fenceCorpusForMint precedent).
-    let lockHeld = false;
-    for (let i = 0; i < 200 && !lockHeld; i += 1) {
-      try {
-        await db.$queryRaw`SELECT id FROM nodes WHERE id = ${mine.id} FOR UPDATE NOWAIT`;
-        await new Promise((r) => setTimeout(r, 20));
-      } catch (error) {
-        if (isLockNotAvailable(error)) lockHeld = true;
-        else throw error;
-      }
-    }
-    expect(lockHeld).toBe(true);
-    // While the row is locked: the refusal must answer without waiting on it.
-    // The finally releases the holder however this concludes (#1853): a
-    // failed barrier or race must not leave the 20s transaction open with
-    // the raced delete still pending behind it.
+    // The try opens at the HOLDER, not at the race (#1855 fix, Bob's P2): a
+    // failed barrier must release it too, or the 20s transaction leaks and
+    // whatever it was holding back rejects unhandled.
     try {
+      // Barrier (#1846): prove the holder has ACQUIRED the lock before the
+      // delete races it, so the race cannot pass vacuously by outrunning the
+      // acquisition. A NOWAIT probe succeeds (and, in its own implicit
+      // transaction, releases instantly) while the row is free; its failure is
+      // the holder holding it — matched by SQLSTATE, not message text (#1853;
+      // the fenceCorpusForMint precedent).
+      let lockHeld = false;
+      for (let i = 0; i < 200 && !lockHeld; i += 1) {
+        try {
+          await db.$queryRaw`SELECT id FROM nodes WHERE id = ${mine.id} FOR UPDATE NOWAIT`;
+          await new Promise((r) => setTimeout(r, 20));
+        } catch (error) {
+          if (isLockNotAvailable(error)) lockHeld = true;
+          else throw error;
+        }
+      }
+      expect(lockHeld).toBe(true);
+      // While the row is locked: the refusal must answer without waiting on it.
       const outcome = await Promise.race([
         errorOf(M.deleteComment(null, { commentRef: mine.id, expectedRevision: mine.revSeq }, as(writer.id))),
         new Promise((resolve) => setTimeout(() => resolve('STILL WAITING ON THE LOCK'), 2_000)),
