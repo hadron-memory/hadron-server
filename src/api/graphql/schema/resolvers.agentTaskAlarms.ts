@@ -18,7 +18,8 @@
 //                           #1759). The stall rule sets it from the evaluator;
 //                           the host arm is T6 (#1709).
 //   set model-family availability  whoever manages the App (060:09, Proposed)
-//   set the stall schedule  whoever manages the App (#1706)
+//   set the stall schedule  whoever manages the App (#1706); with it the host
+//                           lapse count (cor:agt:070:01, #1763)
 //   read all of the above  the App's task audience: every participant and the
 //                           App's own key, read-only (050:21, 060:02, :03; #1767)
 // "Whoever manages the App" stays T1's INTERIM reading: a person acting as
@@ -61,6 +62,12 @@ import {
 import { FAMILY_PATTERN, recordInEffect } from '../../../lib/agentTasks/availability.js';
 import { effectiveWindows, STALL_WINDOW_DEFAULTS, type StallWindows } from '../../../lib/agentTasks/stall.js';
 import { matchAfterChange } from '../../../lib/agentTasks/matcher.js';
+import {
+  HOST_LAPSE_CHECK_INS_DEFAULT,
+  HOST_LAPSE_CHECK_INS_MAX,
+  HOST_LAPSE_CHECK_INS_MIN,
+  lockAppHostLapse,
+} from '../../../lib/agentTasks/hosts.js';
 
 // ── Errors and parsing ────────────────────────────────────────────────────
 
@@ -335,16 +342,17 @@ export const agentTaskAlarmMutations = {
 
   /**
    * #1706 — an App's stall windows, in minutes (cor:agt:050:14–:17 "What Can
-   * Change"): whoever manages the App. An omitted field keeps its value; null
-   * returns it to the platform default.
+   * Change"), and (#1763) its host-registration lapse in check-ins
+   * (cor:agt:070:01, 2 to 10): whoever manages the App. An omitted field keeps
+   * its value; null returns it to the platform default.
    */
   setAgentTaskStallSchedule: async (
     _: unknown,
-    { appRef, input }: { appRef: string; input: Partial<Record<keyof StallWindows, number | null>> },
+    { appRef, input }: { appRef: string; input: Partial<Record<keyof StallWindows | 'hostLapseCheckIns', number | null>> },
     ctx: Context,
   ) => {
     if (!input) throw badInput('input is required.');
-    const data: Partial<Record<keyof StallWindows, number | null>> = {};
+    const data: Partial<Record<keyof StallWindows | 'hostLapseCheckIns', number | null>> = {};
     for (const key of Object.keys(STALL_WINDOW_DEFAULTS) as (keyof StallWindows)[]) {
       if (!(key in input)) continue;
       const v = input[key];
@@ -353,12 +361,25 @@ export const agentTaskAlarmMutations = {
       }
       data[key] = v ?? null;
     }
+    // cor:agt:070:01 (#1763): the host-registration lapse, in check-ins.
+    if ('hostLapseCheckIns' in input) {
+      const v = input.hostLapseCheckIns;
+      if (v != null && (!Number.isInteger(v) || v < HOST_LAPSE_CHECK_INS_MIN || v > HOST_LAPSE_CHECK_INS_MAX)) {
+        throw badInput(
+          `hostLapseCheckIns is a whole number of check-ins from ${HOST_LAPSE_CHECK_INS_MIN} to ${HOST_LAPSE_CHECK_INS_MAX}, ` +
+            `or null for the default (${HOST_LAPSE_CHECK_INS_DEFAULT}).`,
+        );
+      }
+      data.hostLapseCheckIns = v ?? null;
+    }
     const { app, actor } = await resolveParticipatedApp(ctx, appRef);
     requireWritable(ctx, app);
     await inTaskWriteTx(ctx, app, actor, () => taskError('APP_NOT_FOUND', 'App not found.', { appRef }), async (tx, txCtx, freshApp) => {
       if (!(await actorManagesApp(txCtx, freshApp, actor))) {
         throw taskError('APP_MANAGER_REQUIRED', "Only whoever manages the App sets its stall windows.");
       }
+      // #1863: a lapse decision in flight either finishes under the old count or waits for this one.
+      if ('hostLapseCheckIns' in data) await lockAppHostLapse(tx, freshApp.id, 'exclusive');
       await tx.agentTaskStallSchedule.upsert({
         where: { appId: freshApp.id },
         create: { appId: freshApp.id, ...data, updatedBy: ctx.userId ?? null },
@@ -371,7 +392,12 @@ export const agentTaskAlarmMutations = {
 
 async function stallWindowsView(ctx: Context, appId: string) {
   const row = await ctx.db.agentTaskStallSchedule.findUnique({ where: { appId } });
-  return { appId, ...effectiveWindows(row), updatedAt: row?.updatedAt ?? null };
+  return {
+    appId,
+    ...effectiveWindows(row),
+    hostLapseCheckIns: row?.hostLapseCheckIns ?? HOST_LAPSE_CHECK_INS_DEFAULT,
+    updatedAt: row?.updatedAt ?? null,
+  };
 }
 
 // ── Queries ───────────────────────────────────────────────────────────────
