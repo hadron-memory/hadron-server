@@ -1801,6 +1801,8 @@ export const typeDefs = `#graphql
 
   "#1591 — whether a node's current revision is approved."
   enum NodeApprovalState {
+    "Approval is not applicable in an encrypted memory."
+    NOT_APPLICABLE
     "Never approved."
     NOT_APPROVED
     "The current revision is approved."

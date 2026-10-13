@@ -20,7 +20,7 @@ import { ensureCurrentNodeRevisionInTransaction, type SnapshotEditor } from './n
  */
 
 /** Whether the node's current revision is approved (contract on #1591). */
-export type NodeApprovalState = 'NOT_APPROVED' | 'APPROVED' | 'SUPERSEDED';
+export type NodeApprovalState = 'NOT_APPROVED' | 'APPROVED' | 'SUPERSEDED' | 'NOT_APPLICABLE';
 
 /** Outcome of the tamper check. */
 export type NodeIntegrityState = 'INTACT' | 'TAMPERED' | 'SUPERSEDED' | 'NOT_APPROVED';
@@ -276,17 +276,21 @@ export function approvalStatePrismaWhere(
   db: Pick<PrismaClient, 'node'>,
 ): Prisma.NodeWhereInput {
   if (state == null) return {};
-  if (state === 'NOT_APPROVED') return { approvedRevNo: null };
-  // A NULL approvedRevNo compares as unknown, so both column predicates
-  // already exclude never-approved nodes.
-  return state === 'APPROVED'
-    ? { approvedRevNo: { equals: db.node.fields.revSeq } }
-    : { approvedRevNo: { lt: db.node.fields.revSeq } };
+  if (state === 'NOT_APPLICABLE') return { memory: { isEncrypted: true } };
+  const memory = { isEncrypted: false };
+  if (state === 'NOT_APPROVED') return { memory, approvedRevNo: null };
+  if (state === 'APPROVED') return { memory, approvedRevNo: { equals: db.node.fields.revSeq } };
+  if (state === 'SUPERSEDED') return { memory, approvedRevNo: { lt: db.node.fields.revSeq } };
+  return { id: { in: [] } }; // Unknown wire values grant no approved matches.
 }
 
-/** #1591 — the `NodeFilter.approvalState` predicate as SQL over `nodes` (no parameters). */
+/** Approval filters consult the current memory state, including retained records. */
 export function approvalStateSql(state: NodeApprovalState | null | undefined): string | null {
   if (state == null) return null;
-  if (state === 'NOT_APPROVED') return 'approved_rev_no IS NULL';
-  return state === 'APPROVED' ? 'approved_rev_no = rev_seq' : 'approved_rev_no < rev_seq';
+  const encrypted = 'EXISTS (SELECT 1 FROM memories approval_memory WHERE approval_memory.id = nodes.memory_id AND approval_memory.is_encrypted)';
+  if (state === 'NOT_APPLICABLE') return encrypted;
+  const predicate = state === 'NOT_APPROVED' ? 'approved_rev_no IS NULL'
+    : state === 'APPROVED' ? 'approved_rev_no = rev_seq'
+    : state === 'SUPERSEDED' ? 'approved_rev_no < rev_seq' : 'FALSE';
+  return `(NOT ${encrypted} AND ${predicate})`;
 }
