@@ -143,4 +143,37 @@ describe('passkey credential schema (#1631)', () => {
     expect(row.same).toBe(true);
   }));
 
+  it('inserts only unused, unrevoked credentials with an open first window', async () => fixture(async (tx,id) => {
+    for (const extra of [
+      "window_outcome,window_ended_at", "revoked_at,window_outcome,window_ended_at",
+      "last_used_at", "counter",
+    ]) {
+      const now = "(CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::timestamp(3)";
+      const values = extra==='window_outcome,window_ended_at'?`'ended-early',${now}`:
+        extra==='revoked_at,window_outcome,window_ended_at'?`${now},'cancelled',${now}`:extra==='counter'?'1':now;
+      await refused(tx,()=>tx.$executeRawUnsafe(`INSERT INTO passkey_credentials
+        (id,owner_id,credential_id,public_key,algorithm,user_handle,label,registration_method,window_ends_at,${extra})
+        SELECT $1,owner_id,decode('aabb','hex'),public_key,algorithm,user_handle,label,'github',registered_at+interval '72 hours',${values}
+        FROM passkey_credentials WHERE id=$2`,generateId(),id));
+    }
+    await refused(tx,()=>tx.$executeRaw`INSERT INTO passkey_credentials
+      (id,owner_id,credential_id,public_key,algorithm,user_handle,label,registration_method,window_ends_at,
+       revoked_at,window_outcome,window_ended_at,cancelled_at,cancel_ip,cancel_user_agent)
+      SELECT ${generateId()},owner_id,decode('aabb','hex'),public_key,algorithm,user_handle,label,'github',registered_at+interval '72 hours',
+       registered_at,'cancelled',registered_at,registered_at,'127.0.0.1','born-cancelled' FROM passkey_credentials WHERE id=${id}`);
+  }));
+  it('refuses a backdated early closure in a later transaction', async () => {
+    const row = await db.$transaction(async tx => {
+      const id = generateId();
+      await tx.$executeRaw`INSERT INTO passkey_credentials
+        (id,owner_id,credential_id,public_key,algorithm,user_handle,label,registration_method,window_ends_at)
+        VALUES (${id},${ownerId},decode('aabb','hex'),decode('0102','hex'),-7,${Buffer.alloc(32,5)},'closure','github',
+          (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::timestamp(3)+interval '72 hours')`;
+      return tx.passkeyCredential.findUniqueOrThrow({where:{id}});
+    });
+    await new Promise(resolve=>setTimeout(resolve,20));
+    await db.$transaction(async tx=>refused(tx,()=>tx.$executeRaw`UPDATE passkey_credentials
+      SET window_outcome='ended-early',window_ended_at=${row.registeredAt} WHERE id=${row.id}`));
+  });
+
 });

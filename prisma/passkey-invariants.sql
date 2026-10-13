@@ -31,6 +31,11 @@ BEGIN
   IF TG_OP = 'DELETE' THEN
     RAISE EXCEPTION 'Passkey credentials are never deleted' USING ERRCODE = '23514';
   END IF;
+  IF TG_OP = 'INSERT' AND (NEW.window_outcome IS NOT NULL OR NEW.window_ended_at IS NOT NULL
+    OR NEW.revoked_at IS NOT NULL OR NEW.cancelled_at IS NOT NULL OR NEW.cancel_ip IS NOT NULL
+    OR NEW.cancel_user_agent IS NOT NULL OR NEW.last_used_at IS NOT NULL OR NEW.counter <> 0) THEN
+    RAISE EXCEPTION 'Passkey credentials must begin with unused, open lifecycle state' USING ERRCODE = '23514';
+  END IF;
   IF TG_OP = 'INSERT' AND NEW.registered_at IS DISTINCT FROM platform_now THEN
     RAISE EXCEPTION 'Passkey registration must use the platform clock' USING ERRCODE = '23514';
   END IF;

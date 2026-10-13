@@ -3966,7 +3966,7 @@ model PasskeyCredential {
   /// Random authenticator user handle, not an email, User.id or session bearer.
   userHandle         Bytes     @map("user_handle")
   label              String
-  registeredAt       DateTime  @default(dbgenerated("(CURRENT_TIMESTAMP AT TIME ZONE 'UTC')")) @map("registered_at")
+  registeredAt       DateTime  @default(dbgenerated("(CURRENT_TIMESTAMP AT TIME ZONE 'UTC'::text)")) @map("registered_at")
   lastUsedAt         DateTime? @map("last_used_at")
   revokedAt          DateTime? @map("revoked_at")
   /// WebAuthn's unsigned 32-bit counter does not fit a signed PostgreSQL Int.
