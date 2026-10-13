@@ -11,6 +11,8 @@ import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
 import { sessionKeyCache } from '../../../lib/sessionKeyCache.js';
+import { isCiphertext, parseDataKey } from '../../../lib/crypto.js';
+import { encryptNodeFieldsWithKey } from '../../../lib/nodeCrypto.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -166,6 +168,32 @@ describe('#1765 — the author may always delete their own (cor:dmo:110:16)', ()
       .resolves.toMatchObject({ deleted: true, body: null, quote: null, anchorApprovalHash: null });
     // The stub's row is blanked: no text survives for the generic surfaces.
     expect((await live(kept.id)).content).toBeNull();
+  });
+
+  // Rook P3-2 (#1866): a legacy hash really exists when the frozen response is built.
+  it.each([false, true])('keyless no-access delete hides a stored legacy fingerprint (stub=%s)', async (stub) => {
+    const target = await node('b:legacy');
+    const c = await comment(target.id, 'legacy feedback');
+    if (stub) await M.replyToComment(null, { commentRef: c.id, body: 'reply' }, as(admin.id));
+    const edge = await db.edge.findFirstOrThrow({ where: { sourceId: c.id, governedKind: 'COMMENT_ANCHOR' } });
+    expect(edge.anchorApprovalHash).toMatch(/^[0-9a-f]{64}$/);
+    const key = parseDataKey(Buffer.alloc(32, 23).toString('base64'));
+    // Real ciphertext fixture; the public encryption lifecycle is outside this pin.
+    for (const row of await db.node.findMany({ where: { memoryId: memory.id } })) {
+      const fields = encryptNodeFieldsWithKey({ content: row.content, abstract: row.abstract, data: row.data }, key);
+      await db.node.update({ where: { id: row.id }, data: {
+        ...fields, data: fields.data === null ? Prisma.DbNull : fields.data as Prisma.InputJsonValue,
+      } });
+    }
+    await db.memory.update({ where: { id: memory.id }, data: { isEncrypted: true, vectorIndexEnabled: false } });
+    expect(isCiphertext((await live(target.id)).content)).toBe(true);
+    sessionKeyCache.clear();
+    await revoke(writer.id);
+    expect(await Q.comment(null, { ref: c.id }, as(writer.id))).toBeNull();
+    expect(sessionKeyCache.getByMemoryId(memory.id)).toBeNull();
+    const deleted = await M.deleteComment(null, { commentRef: c.id, expectedRevision: c.revSeq }, as(writer.id));
+    expect(deleted).toMatchObject({ deleted: true, body: null, quote: null, anchorRevision: 1, anchorApprovalHash: null });
+    expect((await db.edge.findUniqueOrThrow({ where: { id: edge.id } })).anchorApprovalHash).toBe(edge.anchorApprovalHash);
   });
 
   // The §10 claim behind the authorKey peek: the database keeps it immutable.

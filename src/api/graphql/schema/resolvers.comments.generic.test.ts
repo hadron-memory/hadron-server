@@ -292,6 +292,34 @@ describe('#1663 review — encrypted memories (local P2-2)', () => {
     }
   });
 
+  // Rook P3-1 (#1866): the retained snapshot arm must never compute a fingerprint.
+  it('an older revision in the same encrypted memory anchors without computing or storing a hash', async () => {
+    const enc = await resolvers.Mutation.createMemory(null, { orgId, name: 'enc-old-revision' }, as());
+    const key = parseDataKey(dataKey);
+    await db.memory.update({ where: { id: enc.id }, data: { isEncrypted: true, vectorIndexEnabled: false } });
+    const target = await db.node.create({ data: {
+      id: generateId(), memoryId: enc.id, loc: 'e:old', name: 'Old revision target',
+      ...encryptNodeFieldsWithKey({ content: 'first secret' }, key),
+    } });
+    sessionKeyCache.set('comment-old-revision', enc.id, key);
+    try {
+      await M.updateNode(null, { input: { id: target.id, content: 'second secret' } }, as());
+      expect((await db.node.findUniqueOrThrow({ where: { id: target.id } })).revSeq).toBe(2);
+      const snapshot = await db.nodeRevision.findFirstOrThrow({ where: { nodeId: target.id, revNo: 1 } });
+      expect(snapshot.memoryId).toBe(enc.id);
+      expect(isCiphertext(snapshot.content)).toBe(true);
+      const hashSpy = vi.spyOn(approvalHash, 'computeApprovalHash');
+      const c = await M.createComment(null, { targetRef: target.id, body: 'older feedback', anchorRevision: 1 }, as());
+      expect(hashSpy).not.toHaveBeenCalled();
+      expect(c).toMatchObject({ anchorRevision: 1, anchorApprovalHash: null });
+      expect((await db.edge.findFirstOrThrow({ where: { sourceId: c.id, governedKind: 'COMMENT_ANCHOR' } })))
+        .toMatchObject({ anchorRevNo: 1, anchorApprovalHash: null });
+    } finally {
+      vi.restoreAllMocks();
+      sessionKeyCache.clear();
+    }
+  });
+
   it('migration retains existing encrypted fingerprints and leaves their immutability guard intact', async () => {
     const target = await node('e:legacy');
     const c = await comment(target.id);
