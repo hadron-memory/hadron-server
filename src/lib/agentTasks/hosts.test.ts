@@ -1,6 +1,6 @@
 /**
  * #1707 — host registrations (cor:agt:070:01): the internal writer, what makes
- * a worker launchable, and the lapse after LAPSE_POLLS poll intervals
+ * a worker launchable, and the lapse after the App's count of poll intervals (default 3, #1763)
  * (`host.lost`, once). There is no public mutation in this slice: the host's
  * identity will come from T6's `host:operate` key, never from a request.
  */

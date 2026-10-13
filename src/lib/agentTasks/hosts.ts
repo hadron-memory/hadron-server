@@ -9,8 +9,9 @@
  * host. Until then `registerHost` is reachable from tests and server code only,
  * and its caller is trusted to supply the host id.
  *
- * A registration is LIVE while it has been refreshed within LAPSE_POLLS of its
- * own poll intervals (plan default; cor:agt:070:01 open question). Liveness is
+ * A registration is LIVE while it has been refreshed within its App's lapse
+ * count of its own poll intervals (cor:agt:070:01, #1763: 2 to 10, default
+ * HOST_LAPSE_CHECK_INS_DEFAULT; the App's stall schedule holds it). Liveness is
  * derived at read time, like a session's; `sweepLostHosts` only writes down
  * that one lapsed (`host.lost`, once, stamping `lostAt`).
  */
@@ -23,8 +24,17 @@ import { appendHostEvent } from './events.js';
 import { FAMILY_PATTERN } from './availability.js';
 import { normalizeFamily } from './family.js';
 
-/** A registration lapses after this many of its poll intervals without a refresh (plan §3.4). */
-export const LAPSE_POLLS = 3;
+/**
+ * cor:agt:070:01 (#1763; Holger, team chat #10405) — a registration lapses
+ * after its App's number of poll intervals without a refresh: a whole number
+ * from MIN to MAX, set on the App's stall schedule, DEFAULT when unset.
+ */
+export const HOST_LAPSE_CHECK_INS_DEFAULT = 3;
+export const HOST_LAPSE_CHECK_INS_MIN = 2;
+export const HOST_LAPSE_CHECK_INS_MAX = 10;
+
+/** The App's lapse count, in SQL: `s` is a LEFT JOIN of agent_task_stall_schedule on the registration's App. */
+const LAPSE_SQL = Prisma.sql`COALESCE(s.host_lapse_check_ins, ${HOST_LAPSE_CHECK_INS_DEFAULT})`;
 export const HOST_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 export const HOST_LABEL_MAX = 128;
 export const HOST_POLL_SECONDS_MAX = 86_400;
@@ -41,14 +51,21 @@ export class HostRegistrationError extends Error {
   }
 }
 
-/** When a registration lapses: its last refresh plus LAPSE_POLLS poll intervals. */
-export function registrationLapsesAt(r: { refreshedAt: Date; pollIntervalSeconds: number }): Date {
-  return new Date(r.refreshedAt.getTime() + LAPSE_POLLS * r.pollIntervalSeconds * 1000);
+/** When a registration lapses: its last refresh plus `checkIns` of its poll intervals (its App's count). */
+export function registrationLapsesAt(
+  r: { refreshedAt: Date; pollIntervalSeconds: number },
+  checkIns: number = HOST_LAPSE_CHECK_INS_DEFAULT,
+): Date {
+  return new Date(r.refreshedAt.getTime() + checkIns * r.pollIntervalSeconds * 1000);
 }
 
-/** Is the registration live at `now`? Inclusive, like a session's window. */
-export function isRegistrationLive(r: { refreshedAt: Date; pollIntervalSeconds: number }, now: Date): boolean {
-  return registrationLapsesAt(r).getTime() >= now.getTime();
+/** Is the registration live at `now`, under its App's lapse count? Inclusive, like a session's window. */
+export function isRegistrationLive(
+  r: { refreshedAt: Date; pollIntervalSeconds: number },
+  now: Date,
+  checkIns: number = HOST_LAPSE_CHECK_INS_DEFAULT,
+): boolean {
+  return registrationLapsesAt(r, checkIns).getTime() >= now.getTime();
 }
 
 export type HostRegistrationInput = {
@@ -132,7 +149,11 @@ export async function registerHost(
       SELECT id, refreshed_at AS "refreshedAt", poll_interval_seconds AS "pollIntervalSeconds", lost_at AS "lostAt"
       FROM host_registrations WHERE app_id = ${input.appId} AND host_id = ${hostId} FOR UPDATE`;
     const isNew = inserted.length > 0;
-    const wasLapsed = !isNew && (cur.lostAt !== null || !isRegistrationLive(cur, now));
+    const schedule = isNew
+      ? null
+      : await tx.agentTaskStallSchedule.findUnique({ where: { appId: input.appId }, select: { hostLapseCheckIns: true } });
+    const checkIns = schedule?.hostLapseCheckIns ?? HOST_LAPSE_CHECK_INS_DEFAULT;
+    const wasLapsed = !isNew && (cur.lostAt !== null || !isRegistrationLive(cur, now, checkIns));
     await tx.hostRegistration.update({
       where: { id: cur.id },
       data: { label, pollIntervalSeconds: input.pollIntervalSeconds, refreshedAt: now, lostAt: null },
@@ -171,8 +192,9 @@ export async function loadLaunchableFamilies(
     FROM host_registration_workers w
     JOIN host_registrations r ON r.id = w.registration_id
     JOIN apps a ON a.id = r.app_id AND a.deleted_at IS NULL AND a.uninstalled_at IS NULL
+    LEFT JOIN agent_task_stall_schedule s ON s.app_id = r.app_id
     WHERE ${where}
-      AND r.refreshed_at + make_interval(secs => r.poll_interval_seconds * ${LAPSE_POLLS}) >= ${toNaiveUtc(now)}::timestamp
+      AND r.refreshed_at + make_interval(secs => r.poll_interval_seconds * ${LAPSE_SQL}) >= ${toNaiveUtc(now)}::timestamp
     ORDER BY 1, 2`;
   const out = new Map<string, string[]>();
   for (const r of rows) {
@@ -194,8 +216,9 @@ export async function sweepLostHosts(db: PrismaClient, now: Date): Promise<numbe
     SELECT r.id, r.app_id AS "appId", r.host_id AS "hostId", r.refreshed_at AS "refreshedAt",
            (SELECT count(*)::int FROM host_registration_workers w WHERE w.registration_id = r.id) AS "workerCount"
     FROM host_registrations r
+    LEFT JOIN agent_task_stall_schedule s ON s.app_id = r.app_id
     WHERE r.lost_at IS NULL
-      AND r.refreshed_at + make_interval(secs => r.poll_interval_seconds * ${LAPSE_POLLS}) < ${toNaiveUtc(now)}::timestamp
+      AND r.refreshed_at + make_interval(secs => r.poll_interval_seconds * ${LAPSE_SQL}) < ${toNaiveUtc(now)}::timestamp
     ORDER BY r.id
     LIMIT 500`;
   let lost = 0;

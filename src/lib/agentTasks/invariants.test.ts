@@ -186,7 +186,7 @@ describe('agent-task-stall-invariants.sql (#1706)', () => {
   it('the latest stall-invariants migration carries a byte-identical copy of the invariants file', () => {
     const source = readFileSync(new URL('../../../prisma/agent-task-stall-invariants.sql', import.meta.url), 'utf8');
     const migration = readFileSync(
-      new URL('../../../prisma/migrations/20261013140000_worker_availability_reports_to/migration.sql', import.meta.url),
+      new URL('../../../prisma/migrations/20261013160000_host_lapse_check_ins/migration.sql', import.meta.url),
       'utf8',
     );
     expect(migration.endsWith(source)).toBe(true);

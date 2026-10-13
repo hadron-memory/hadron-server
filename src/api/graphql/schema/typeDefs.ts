@@ -6708,7 +6708,8 @@ export const typeDefs = `#graphql
     ): [AgentTeamEvent!]!
 
     """
-    #1706 — an App's effective stall windows (hrn:node:hadronmemory.com:specs:cor:agt:050:14–:17). Readers:
+    #1706 — an App's effective stall windows (hrn:node:hadronmemory.com:specs:cor:agt:050:14–:17), and (#1763) its
+    host-registration lapse (hrn:node:hadronmemory.com:specs:cor:agt:070:01). Readers:
     the App's task audience (hrn:node:hadronmemory.com:specs:cor:agt:050:21).
     """
     agentTaskStallSchedule(appRef: ID!): AgentTaskStallSchedule!
@@ -8523,7 +8524,7 @@ export const typeDefs = `#graphql
     setModelFamilyAvailability(input: SetModelFamilyAvailabilityInput!): ModelFamilyAvailability!
 
     """
-    #1706 — set an App's stall windows: whoever manages the App. Refusals:
+    #1706 — set an App's stall windows, and (#1763) its host-registration lapse: whoever manages the App. Refusals:
     APP_NOT_FOUND, APP_MANAGER_REQUIRED, BAD_USER_INPUT, SESSION_NOT_BOUND,
     APP_UNINSTALLED.
     """
@@ -12001,16 +12002,19 @@ export const typeDefs = `#graphql
     ownerReactionMinutes: Int!
     "Couldn't be assigned (hrn:node:hadronmemory.com:specs:cor:agt:050:17)."
     assignmentMinutes: Int!
+    "#1763 — how many of a host's own check-in intervals may pass without a refresh before its registration in this App lapses (hrn:node:hadronmemory.com:specs:cor:agt:070:01): 2 to 10, default 3."
+    hostLapseCheckIns: Int!
     "When the App last changed them; null while every window is the default."
     updatedAt: DateTime
   }
 
-  "An omitted field keeps its value; null returns it to the platform default. Each is 1 to 10080 minutes."
+  "An omitted field keeps its value; null returns it to the platform default. Each window is 1 to 10080 minutes; hostLapseCheckIns is 2 to 10."
   input AgentTaskStallScheduleInput {
     notStartedMinutes: Int
     noProgressMinutes: Int
     ownerReactionMinutes: Int
     assignmentMinutes: Int
+    hostLapseCheckIns: Int
   }
 
   input SetWorkerAvailabilityInput {

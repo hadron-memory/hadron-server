@@ -5201,6 +5201,10 @@ model AgentTaskStallSchedule {
   noProgressMinutes    Int?     @map("no_progress_minutes")
   ownerReactionMinutes Int?     @map("owner_reaction_minutes")
   assignmentMinutes    Int?     @map("assignment_minutes")
+  /// #1763 (cor:agt:070:01) — how many of a host's own check-in intervals may
+  /// pass without a refresh before its registration in this App lapses: 2 to
+  /// 10 (chk_agent_task_stall_schedule_range); null is the default, 3.
+  hostLapseCheckIns    Int?     @map("host_lapse_check_ins")
   updatedAt            DateTime @updatedAt @map("updated_at")
   updatedBy            String?  @map("updated_by")
 
