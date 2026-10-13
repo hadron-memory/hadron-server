@@ -101,6 +101,7 @@ async function provision(admin: Client) {
 
 /** The CHECK constraints `prisma db push` cannot express. Source of truth: prisma/post-push.sql. */
 async function applyTemplateConstraints(client: Client) {
+  await client.query(readFileSync(new URL('../../prisma/passkey-invariants.sql', import.meta.url), 'utf8'));
   await client.query(readFileSync(new URL('../../prisma/automation-invariants.sql', import.meta.url), 'utf8'));
   // #1705 — agent task shape + append-only team events.
   await client.query(readFileSync(new URL('../../prisma/agent-task-invariants.sql', import.meta.url), 'utf8'));
