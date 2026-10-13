@@ -11891,6 +11891,8 @@ export const typeDefs = `#graphql
     HOLDER
     "Whoever manages the App."
     APP_MANAGER
+    "#1759 — the worker it reports to directly, clearing a mark the stall rule set (hrn:node:hadronmemory.com:specs:cor:agt:060:11): only to AVAILABLE."
+    REPORTS_TO
     "The stall rule (hrn:node:hadronmemory.com:specs:cor:agt:060:07): an alarm marked it, or its next activity cleared it."
     STALL_RULE
     "A host that registered the worker (the host-operations slice)."
