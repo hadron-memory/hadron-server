@@ -539,6 +539,35 @@ export async function evaluateStalls(db: PrismaClient, now = new Date()): Promis
   return raised;
 }
 
+/** An alarm's episode key: its task, its type (the rule) and its episode start. */
+export const alarmEpisodeKey = (taskId: string, type: string, episodeStart: Date): string =>
+  `${taskId}|${type}|${episodeStart.getTime()}`;
+
+/**
+ * #1708 (Rook §10 P3-1 on #1720) — which of these alarms' episodes still hold
+ * NOW: the same rule still fires for the task with the same episode start, by
+ * the evaluator's own `stallCandidates`. `loadStallInputs` reads only open tasks
+ * of live, installed Apps, so an ended task or an uninstalled App is not
+ * current either. Returns the current alarms' `alarmEpisodeKey`s.
+ */
+export async function currentAlarmEpisodes(
+  db: Db,
+  alarms: { taskId: string; type: string; episodeStart: Date | null }[],
+  now: Date,
+): Promise<Set<string>> {
+  const out = new Set<string>();
+  const taskIds = [...new Set(alarms.filter((a) => a.episodeStart).map((a) => a.taskId))];
+  if (taskIds.length === 0) return out;
+  const inputs = await loadStallInputs(db, { id: { in: taskIds } }, now);
+  const windows = await loadWindows(db, [...new Set(inputs.map((i) => i.task.appId))]);
+  for (const i of inputs) {
+    for (const c of stallCandidates(i, windows.get(i.task.appId) as StallWindows, now)) {
+      out.add(alarmEpisodeKey(c.taskId, STALL_EVENT_TYPE[c.rule], c.episodeStart));
+    }
+  }
+  return out;
+}
+
 // ── Escalation ────────────────────────────────────────────────────────────
 
 /**
