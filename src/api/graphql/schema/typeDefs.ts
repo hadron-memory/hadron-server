@@ -11903,7 +11903,7 @@ export const typeDefs = `#graphql
   several at once; it is shown in the first that holds, in this order.
   """
   enum TeamRosterState {
-    "Woken on an unacknowledged alarm (hrn:node:hadronmemory.com:specs:cor:agt:050:19), or a child of a task it is the assignee of finished or was cancelled after it last moved (hrn:node:hadronmemory.com:specs:cor:agt:050:16)."
+    "Woken on an unacknowledged alarm (hrn:node:hadronmemory.com:specs:cor:agt:050:19), or a child task it owns finished or was cancelled after it last acted (hrn:node:hadronmemory.com:specs:cor:agt:050:16)."
     YOUR_MOVE
     "Its own availability record, or every model family it can run as, says unavailable now (hrn:node:hadronmemory.com:specs:cor:agt:060:01); a stall mark included (hrn:node:hadronmemory.com:specs:cor:agt:060:07)."
     UNAVAILABLE

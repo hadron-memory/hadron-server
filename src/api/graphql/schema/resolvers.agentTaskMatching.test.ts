@@ -191,6 +191,20 @@ describe('teamRoster — each state on its own (plan §7.4)', () => {
     expect(await entry('Kit')).toMatchObject({ state: 'WORKING', unreactedChildTaskId: null });
   });
 
+  it('YOUR_MOVE: the CHILD OWNER\'s move, not the parent assignee\'s, after a reassignment (#1831)', async () => {
+    await bind('Kit', 'codex', 40);
+    await bind('Rook', 'codex', 1);
+    const parent = await task({ assigneeWorkerId: w.Rook.id, assignedAt: ago(30), status: 'started', startedAt: ago(29) });
+    const child = await db.agentTask.create({
+      data: {
+        appId: app.id, title: 'child', parentTaskId: parent.id, ownerWorkerId: w.Kit.id, assigneeWorkerId: w.Anne.id,
+        assignedAt: ago(44), status: 'finished', startedAt: ago(43), finishedAt: ago(5), resultOutcome: 'succeeded',
+      },
+    });
+    expect(await entry('Kit')).toMatchObject({ state: 'YOUR_MOVE', unreactedChildTaskId: child.id });
+    expect(await entry('Rook')).toMatchObject({ unreactedChildTaskId: null });
+  });
+
   it('YOUR_MOVE: a cancelled child counts the same (#1760)', async () => {
     await bind('Kit', 'codex', 40);
     const parent = await task({ assigneeWorkerId: w.Kit.id, assignedAt: ago(50), status: 'started', startedAt: ago(45) });
