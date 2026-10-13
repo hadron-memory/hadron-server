@@ -318,6 +318,32 @@ describe('reading availability and stall windows (the App\'s task audience)', ()
     await expectCode(Q.agentTaskStallSchedule({}, { appRef: app.id }, ctx(outsider.id)), 'APP_NOT_FOUND');
   });
 
+  it('#1763 (cor:agt:070:01): the host lapse count — default 3, a manager sets 2 to 10, null restores the default', async () => {
+    expect(await Q.agentTaskStallSchedule({}, { appRef: app.id }, ctx(member.id))).toMatchObject({ hostLapseCheckIns: 3 });
+    await expect(M.setAgentTaskStallSchedule({}, { appRef: app.id, input: { hostLapseCheckIns: 5 } }, ctx(admin.id)))
+      .resolves.toMatchObject({ hostLapseCheckIns: 5, noProgressMinutes: 60 });
+    // An omitted field keeps its value, both ways.
+    await expect(M.setAgentTaskStallSchedule({}, { appRef: app.id, input: { noProgressMinutes: 90 } }, ctx(admin.id)))
+      .resolves.toMatchObject({ hostLapseCheckIns: 5, noProgressMinutes: 90 });
+    for (const v of [2, 10]) {
+      await expect(M.setAgentTaskStallSchedule({}, { appRef: app.id, input: { hostLapseCheckIns: v } }, ctx(admin.id)))
+        .resolves.toMatchObject({ hostLapseCheckIns: v });
+    }
+    for (const v of [1, 11, 0, -3, 2.5, 3.0001]) {
+      await expectCode(M.setAgentTaskStallSchedule({}, { appRef: app.id, input: { hostLapseCheckIns: v } }, ctx(admin.id)), 'BAD_USER_INPUT');
+    }
+    await expectCode(M.setAgentTaskStallSchedule({}, { appRef: app.id, input: { hostLapseCheckIns: 4 } }, ctx(member.id)), 'APP_MANAGER_REQUIRED');
+    expect((await db.agentTaskStallSchedule.findUniqueOrThrow({ where: { appId: app.id } })).hostLapseCheckIns).toBe(10);
+    await expect(M.setAgentTaskStallSchedule({}, { appRef: app.id, input: { hostLapseCheckIns: null } }, ctx(admin.id)))
+      .resolves.toMatchObject({ hostLapseCheckIns: 3, noProgressMinutes: 90 });
+  });
+
+  it('#1763: the database refuses a lapse count outside 2 to 10, whatever the writer', async () => {
+    for (const v of [1, 11]) {
+      await expect(db.agentTaskStallSchedule.create({ data: { appId: app.id, hostLapseCheckIns: v } })).rejects.toThrow(/chk_agent_task_stall_schedule_range/);
+    }
+  });
+
   it('#1731 (#7790): an owner-role AppMember sets the stall windows; demoted to member, it is refused', async () => {
     await db.appMember.upsert({
       where: { appId_userId: { appId: app.id, userId: member.id } },

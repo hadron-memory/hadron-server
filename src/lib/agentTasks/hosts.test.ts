@@ -124,6 +124,36 @@ describe('lapse (cor:agt:070:01 open question: 3 poll intervals)', () => {
     expect((await registerHost(db, ORCA1(), at('10:10'))).registered).toBe(true);
   });
 
+  it('#1763: an App that sets 5 check-ins keeps a registration live through 4 missed ones', async () => {
+    await db.agentTaskStallSchedule.create({ data: { appId: app.id, hostLapseCheckIns: 5 } });
+    const { registrationId } = await registerHost(db, ORCA1(), at('10:00'));
+    expect((await loadLaunchableFamilies(db, { appId: app.id }, at('10:04'))).size).toBe(3);
+    expect((await loadLaunchableFamilies(db, { workerIds: [anne.id] }, at('10:05'))).get(anne.id)).toEqual(['codex']);
+    expect((await loadLaunchableFamilies(db, { appId: app.id }, at('10:05:00.001'))).size).toBe(0);
+    expect(await sweepLostHosts(db, at('10:05'))).toBe(0);
+    // A refresh inside the App's window is ordinary, not a re-registration.
+    expect((await registerHost(db, ORCA1(), at('10:04'))).registered).toBe(false);
+    expect(await sweepLostHosts(db, at('10:09:00.001'))).toBe(1);
+    expect((await db.hostRegistration.findUniqueOrThrow({ where: { id: registrationId } })).lostAt).toEqual(at('10:09:00.001'));
+  });
+
+  it('#1763: the setting is the App\'s own; another App keeps the default of 3, and 2 shortens it', async () => {
+    await db.agentTaskStallSchedule.create({ data: { appId: app.id, hostLapseCheckIns: 2 } });
+    await registerHost(db, ORCA1(), at('10:00'));
+    await registerHost(db, { appId: other.id, hostId: 'orca1', label: 'Other', pollIntervalSeconds: 60, workers: [{ workerId: stranger.id, family: 'claude' }] }, at('10:00'));
+    expect((await loadLaunchableFamilies(db, { appId: app.id }, at('10:02:00.001'))).size).toBe(0);
+    expect((await loadLaunchableFamilies(db, { appId: other.id }, at('10:03'))).size).toBe(1);
+    expect(await sweepLostHosts(db, at('10:02:30'))).toBe(1);
+    expect((await registerHost(db, ORCA1(), at('10:02:40'))).registered).toBe(true);
+  });
+
+  it('#1763: an App\'s schedule row with no lapse set keeps the default of 3', async () => {
+    await db.agentTaskStallSchedule.create({ data: { appId: app.id, noProgressMinutes: 90 } });
+    await registerHost(db, ORCA1(), at('10:00'));
+    expect((await loadLaunchableFamilies(db, { appId: app.id }, at('10:03'))).size).toBe(3);
+    expect((await loadLaunchableFamilies(db, { appId: app.id }, at('10:03:00.001'))).size).toBe(0);
+  });
+
   it('an uninstalled App\'s registrations launch nothing', async () => {
     await registerHost(db, ORCA1(), at('10:00'));
     await db.app.update({ where: { id: app.id }, data: { uninstalledAt: at('10:01') } });
