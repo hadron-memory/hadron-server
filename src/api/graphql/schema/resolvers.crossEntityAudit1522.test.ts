@@ -282,7 +282,7 @@ describe('#1522 nested Agent read parity', () => {
     expect(await resolvers.AppRun.agent({ agentId: privateAgent.id }, {}, contextValue)).toBeNull();
   });
 
-  it('keeps user-owned Agent definitions private from unrelated platform admins', async () => {
+  it('#1787 (cor:dmo:050:13): a platform admin reads a user-owned Agent definition (direct and nested); the owner control holds', async () => {
     const owner = await db.user.create({
       data: { githubId: 9182206, githubUsername: 'nested-agent-personal-owner', handle: 'nested-agent-owner' },
     });
@@ -298,14 +298,21 @@ describe('#1522 nested Agent read parity', () => {
       },
     });
     const adminCtx = { db, userId: admin.id, roles: ['ADMIN'] } as Context;
+    // #1787 flips this file's original #1522 pin: the platform admin may
+    // MANAGE a user-owned Agent, so it reads the definition and prompt —
+    // the rogue-agent shutdown capability. The license/customer paths this
+    // file polices (an unrelated READER riding an App's license) stay closed
+    // in the tests above.
     const direct = await server.executeOperation(
       { query: 'query ($ref: ID!) { agent(ref: $ref) { systemPrompt } }', variables: { ref: agent.id } },
       { contextValue: adminCtx },
     );
     expect(direct.body.kind).toBe('single');
     if (direct.body.kind !== 'single') return;
-    expect(direct.body.singleResult.errors?.[0]?.extensions?.code).toBe('FORBIDDEN');
-    expect(await resolvers.AppRun.agent({ agentId: agent.id }, {}, adminCtx)).toBeNull();
+    expect(direct.body.singleResult.errors).toBeUndefined();
+    expect(direct.body.singleResult.data?.agent).toMatchObject({ systemPrompt: 'synthetic-owner-only-prompt' });
+    expect(await resolvers.AppRun.agent({ agentId: agent.id }, {}, adminCtx))
+      .toMatchObject({ id: agent.id, systemPrompt: 'synthetic-owner-only-prompt' });
     expect(await resolvers.AppRun.agent(
       { agentId: agent.id },
       {},
