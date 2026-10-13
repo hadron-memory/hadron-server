@@ -3,13 +3,17 @@
  * (cor:dmo:110:04), and a target's lifecycle carries its threads (110:02/05).
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { GraphQLError } from 'graphql';
+import { GraphQLError, buildSchema, graphql } from 'graphql';
+import { typeDefs } from './typeDefs.js';
+import { readFileSync } from 'node:fs';
+import { Client } from 'pg';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
 import { createTestableMcpServer } from '../../../mcp/server.js';
 import { computeApprovalHash } from '../../../lib/approvalHash.js';
+import * as approvalHash from '../../../lib/approvalHash.js';
 import { isCiphertext, parseDataKey } from '../../../lib/crypto.js';
 import { sessionKeyCache } from '../../../lib/sessionKeyCache.js';
 import { encryptNodeFieldsWithKey } from '../../../lib/nodeCrypto.js';
@@ -256,10 +260,22 @@ describe('#1663 review — encrypted memories (local P2-2)', () => {
     });
     sessionKeyCache.set('comment-test', enc.id, key);
     try {
+      const hashSpy = vi.spyOn(approvalHash, 'computeApprovalHash');
       const c = await M.createComment(null, { targetRef: target.id, body: 'private feedback', quote: 'quoted' }, as());
+      expect(hashSpy).not.toHaveBeenCalled();
+      hashSpy.mockRestore();
       expect(c).toMatchObject({ body: 'private feedback', quote: 'quoted' });
-      // The anchor hashes PLAINTEXT, never ciphertext.
-      expect(c.anchorApprovalHash).toBe(computeApprovalHash({ title: 'Title e:1', abstract: null, content: 'Body e:1' }));
+      // #1857: the revision anchors encrypted feedback without a fingerprint.
+      expect(c.anchorApprovalHash).toBeNull();
+      expect((await db.edge.findFirstOrThrow({ where: { sourceId: c.id, governedKind: 'COMMENT_ANCHOR' } })).anchorApprovalHash).toBeNull();
+      const reply = await M.replyToComment(null, { commentRef: c.id, body: 'reply' }, as());
+      expect(reply.anchorApprovalHash).toBeNull();
+      expect((await Q.comment(null, { ref: c.id }, as())).anchorApprovalHash).toBeNull();
+      const response = await graphql({ schema: buildSchema(typeDefs),
+        source: '{ comment(ref: "ignored") { anchorRevision anchorApprovalHash } }',
+        rootValue: { comment: () => c } });
+      expect(response.errors).toBeUndefined();
+      expect(response.data?.comment).toEqual({ anchorRevision: 1, anchorApprovalHash: null });
       const stored = await db.node.findUniqueOrThrow({ where: { id: c.id } });
       expect(isCiphertext(stored.content)).toBe(true);
       expect(JSON.stringify(stored.data)).not.toContain('quoted');
@@ -271,11 +287,27 @@ describe('#1663 review — encrypted memories (local P2-2)', () => {
       expect((await errorOf(M.createComment(null, { targetRef: target.id, body: 'x' }, as()))).extensions).toMatchObject({ code: 'SESSION_EXPIRED' });
       expect((await errorOf(Q.commentThreads(null, { targetRef: target.id }, as()))).extensions).toMatchObject({ code: 'SESSION_EXPIRED' });
     } finally {
+      vi.restoreAllMocks();
       sessionKeyCache.clear();
     }
   });
 
-  it('an old-revision snapshot in another, now-encrypted memory hashes its plaintext with that memory\'s key, else UNAVAILABLE', async () => {
+  it('migration retains existing encrypted fingerprints and leaves their immutability guard intact', async () => {
+    const target = await node('e:legacy');
+    const c = await comment(target.id);
+    const edge = await db.edge.findFirstOrThrow({ where: { sourceId: c.id, governedKind: 'COMMENT_ANCHOR' } });
+    await db.memory.update({ where: { id: memory.id }, data: { isEncrypted: true, vectorIndexEnabled: false } });
+    const client = new Client({ connectionString: process.env.DATABASE_URL });
+    await client.connect();
+    try {
+      await client.query(readFileSync(new URL('../../../../prisma/migrations/20261013170000_encrypted_comment_anchor_nullable/migration.sql', import.meta.url), 'utf8'));
+    } finally { await client.end(); }
+    expect((await db.edge.findUniqueOrThrow({ where: { id: edge.id } })).anchorApprovalHash).toBe(edge.anchorApprovalHash);
+    await expect(db.$executeRaw`UPDATE edges SET anchor_approval_hash = NULL WHERE id = ${edge.id}`)
+      .rejects.toThrow(/immutable/);
+  });
+
+  it('a plaintext target still hashes an old-revision snapshot in another, encrypted memory with its key, else UNAVAILABLE', async () => {
     const src = await resolvers.Mutation.createMemory(null, { orgId, name: 'enc-src' }, as());
     const target = await node('e:2', src.id);
     await M.updateNode(null, { input: { id: target.id, content: 'second' } }, as());

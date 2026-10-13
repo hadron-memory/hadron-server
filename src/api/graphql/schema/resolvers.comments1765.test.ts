@@ -161,9 +161,9 @@ describe('#1765 — the author may always delete their own (cor:dmo:110:16)', ()
     await db.memory.update({ where: { id: memory.id }, data: { isEncrypted: true, vectorIndexEnabled: false } });
     expect(sessionKeyCache.getByMemoryId(memory.id)).toBeNull();
     await expect(M.deleteComment(null, { commentRef: gone.id, expectedRevision: gone.revSeq }, as(writer.id)))
-      .resolves.toMatchObject({ deleted: true, body: null });
+      .resolves.toMatchObject({ deleted: true, body: null, anchorApprovalHash: null });
     await expect(M.deleteComment(null, { commentRef: kept.id, expectedRevision: kept.revSeq }, as(writer.id)))
-      .resolves.toMatchObject({ deleted: true, body: null, quote: null });
+      .resolves.toMatchObject({ deleted: true, body: null, quote: null, anchorApprovalHash: null });
     // The stub's row is blanked: no text survives for the generic surfaces.
     expect((await live(kept.id)).content).toBeNull();
   });
