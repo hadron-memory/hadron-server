@@ -9004,10 +9004,10 @@ export const typeDefs = `#graphql
     """
     approveNode(nodeRef: ID!, revision: Int): NodeApprovalReceipt!
     """
-    #1632 (hrn:node:hadronmemory.com:specs:cor:dmo:130:03) — ask for a node's current content to be signed. Any reader of the node may ask, agents included; agents never sign. expectedRevision, when given, must still be current (REVISION_MISMATCH). signerRef names one signer (a user id); omitted, any writer of the memory may sign. Refusals: NODE_NOT_FOUND, ENCRYPTED_MEMORY_NOT_APPLICABLE, and (provisional, #10424) COMMENT_NOT_SIGNABLE, NODE_IS_PLACEHOLDER, REVISION_MISMATCH, SIGNER_NOT_FOUND. No call takes an assertion: the signer signs on the server-hosted ceremony page (S2b-2).
+    #1632 (hrn:node:hadronmemory.com:specs:cor:dmo:130:03) — ask for a node's current content to be signed. Any reader of the node may ask, agents included; agents never sign. expectedRevision, when given, must still be current (REVISION_MISMATCH). signerRef names one signer (a user id); omitted, any writer of the memory may sign. Refusals: NODE_NOT_FOUND, ENCRYPTED_MEMORY_NOT_APPLICABLE, and (hrn:node:hadronmemory.com:specs:cor:dmo:130:02, Holger #10430) COMMENT_NOT_SIGNABLE, NODE_IS_PLACEHOLDER, REVISION_MISMATCH, SIGNER_NOT_FOUND. No call takes an assertion: the signer signs on the server-hosted ceremony page (S2b-2).
     """
     requestNodeSignature(nodeRef: ID!, expectedRevision: Int, signerRef: ID): SigningRequest!
-    "#1632 — withdraw an open signing request. Only the requester account, from any of its sessions (#10397). Refusals (provisional, #10424): SIGNING_REQUEST_NOT_FOUND, SIGNING_REQUEST_NOT_REQUESTER, SIGNING_REQUEST_ENDED (extensions.state)."
+    "#1632 — withdraw an open signing request. Only the requester account, from any of its sessions (#10397). Refusals (hrn:node:hadronmemory.com:specs:cor:dmo:130:03, Holger #10430): SIGNING_REQUEST_NOT_FOUND, SIGNING_REQUEST_NOT_REQUESTER, SIGNING_REQUEST_ENDED (extensions.state)."
     withdrawSigningRequest(id: ID!): SigningRequest!
     "#1591 — approve the current revision of every live, unminted node of a memory (ID or fully-qualified URN) that isn't approved yet, in one transaction. Placeholders are skipped and reported."
     approveMemoryNodes(memoryRef: String!): ApproveMemoryNodesResult!

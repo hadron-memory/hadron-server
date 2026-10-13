@@ -23,8 +23,8 @@ import { loadSignatureStatuses, type NodeSignatureStatusView, type SignatureView
  * - read requests and signatures: the node's readers (#10019, 130:06).
  * No call here takes an assertion or a record (130:02 S2): completion and
  * decline are reached only through S2b-2's ceremony page.
- * The refusal codes beyond ENCRYPTED_MEMORY_NOT_APPLICABLE are provisional,
- * queued for Holger by Vera (#10424).
+ * The refusal codes are ruled (Holger, #10430; cor:dmo:130:02/:03). Still
+ * unruled and so provisional: which refusal wins when several apply (#10437).
  */
 
 type SigningRequestRow = {
