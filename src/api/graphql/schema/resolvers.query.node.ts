@@ -87,7 +87,7 @@ import {
   toUsageNodeRefs,
 } from '../../../lib/usageRecorder.js';
 import { ensureCurrentNodeRevisionInTransaction } from '../../../lib/nodeRevisionSnapshot.js';
-import { approvalStatePrismaWhere, type NodeApprovalState } from '../../../lib/nodeApproval.js';
+import { approvalStatePrismaWhere, mintedPrismaWhere, type NodeApprovalState } from '../../../lib/nodeApproval.js';
 import { LIVE_ORG_MEMBERSHIP } from '../../../lib/auth/liveOrgMembership.js';
 
 /** findNodes' arguments (cor:api:090), shared by the resolver and its spec-049 scope wrapper. */
@@ -1087,11 +1087,11 @@ export const nodeQueries = {
             } }
           : {}),
         ...approvalStatePrismaWhere(f.approvalState, ctx.db),
-        ...(f.minted != null ? { mintedAt: f.minted ? { not: null } : null } : {}),
         // #1607 (cor:dmo:110:06) — approval and mint status sets never contain
         // comments; #1608 (cor:dmo:110:08) — content, comments or both, CONTENT
         // by default. Both ride AND so neither clobbers the nodeType key above.
         AND: [
+          ...(f.minted != null ? [mintedPrismaWhere(f.minted)] : []),
           ...(f.approvalState != null || f.minted != null ? [{ nodeType: { not: COMMENT_NODE_TYPE } }] : []),
           ...(scopeWhere ? [scopeWhere] : []),
         ],
@@ -2292,11 +2292,11 @@ export const nodeQueries = {
               } }
             : {}),
           ...approvalStatePrismaWhere(f.approvalState, ctx.db),
-          ...(f.minted != null ? { mintedAt: f.minted ? { not: null } : null } : {}),
           // #1607 (cor:dmo:110:06) — approval and mint status sets never contain comments.
           // #1607 + #1608 — no comments in status sets; content, comments or
           // both by contentScope (CONTENT by default, cor:dmo:110:08).
           AND: [
+            ...(f.minted != null ? [mintedPrismaWhere(f.minted)] : []),
             ...(f.approvalState != null || f.minted != null ? [{ nodeType: { not: COMMENT_NODE_TYPE } }] : []),
             ...((sw) => (sw ? [sw] : []))(contentScopeWhere(effectiveContentScope(f))),
           ],

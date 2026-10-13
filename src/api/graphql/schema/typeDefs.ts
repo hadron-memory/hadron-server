@@ -1824,7 +1824,7 @@ export const typeDefs = `#graphql
     hash: String!
   }
 
-  "#1591 — whether a node is minted, and the record of it. Minting protects nothing by itself (permanence is off for now)."
+  "#1591 — whether a node is minted, and the record of it. Encrypted memories read not-minted with all record fields null; not-applicable is distinguished by approvalStatus. Minting protects nothing by itself (permanence is off for now)."
   type NodeMintStatus {
     minted: Boolean!
     mintedAt: DateTime
@@ -1841,7 +1841,7 @@ export const typeDefs = `#graphql
   "#1591 — a node's approval state plus its latest approval."
   type NodeApprovalStatus {
     state: NodeApprovalState!
-    "The latest approval on record; null when NOT_APPROVED."
+    "The latest approval on record; null when NOT_APPROVED or NOT_APPLICABLE."
     approval: NodeApproval
   }
 

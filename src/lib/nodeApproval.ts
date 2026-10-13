@@ -294,3 +294,17 @@ export function approvalStateSql(state: NodeApprovalState | null | undefined): s
     : state === 'SUPERSEDED' ? 'approved_rev_no < rev_seq' : 'FALSE';
   return `(NOT ${encrypted} AND ${predicate})`;
 }
+
+/** Mint status is inapplicable in encrypted memories, regardless of retained columns. */
+export function mintedPrismaWhere(minted: boolean | null | undefined): Prisma.NodeWhereInput {
+  if (minted == null) return {};
+  return minted
+    ? { memory: { isEncrypted: false }, mintedAt: { not: null } }
+    : { OR: [{ memory: { isEncrypted: true } }, { mintedAt: null }] };
+}
+
+export function mintedSql(minted: boolean | null | undefined): string | null {
+  if (minted == null) return null;
+  const encrypted = 'EXISTS (SELECT 1 FROM memories mint_memory WHERE mint_memory.id = nodes.memory_id AND mint_memory.is_encrypted)';
+  return minted ? `(NOT ${encrypted} AND minted_at IS NOT NULL)` : `(${encrypted} OR minted_at IS NULL)`;
+}

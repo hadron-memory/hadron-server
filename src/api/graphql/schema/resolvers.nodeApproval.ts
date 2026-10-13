@@ -191,6 +191,7 @@ export const nodeApprovalMutations = {
     // (@copilot, PR #1592). Re-checked inside the fenced transaction below.
     await mayApproveNodes(ctx, memoryId);
     await requirePlainApprovalMemory(ctx, memoryId);
+    // E1 intentionally never supplies a decryption key to the approval writer.
     const key = null;
     try {
       const { node } = await withAuthorizedMemoryTx(
@@ -218,6 +219,7 @@ export const nodeApprovalMutations = {
     const { id: memoryId } = await resolveMemoryRef(ctx.db, memoryRef);
     await concealUnreadableDenial(ctx, memoryId, memoryRef, () => mayApproveNodes(ctx, memoryId));
     await requirePlainApprovalMemory(ctx, memoryId);
+    // E1 intentionally never supplies a decryption key to the approval writer.
     const key = null;
     const outcome = await withAuthorizedMemoryTx(
       ctx, memoryId, [],

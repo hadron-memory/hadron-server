@@ -4978,7 +4978,7 @@ export function createMcpServerInstance(
         const lockState = mcpDecryptOrMark(n); // spec 041 — same posture as hadron_get_node
         const projection = await renderNodeReadProjection(n, scope, {
           locked: lockState === 'locked',
-        encryptedMemory: lockState !== 'plaintext',
+          encryptedMemory: lockState !== 'plaintext',
           auth,
           batch: batchProvenance,
           memoryUrnOf,
