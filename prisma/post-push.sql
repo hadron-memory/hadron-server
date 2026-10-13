@@ -652,3 +652,7 @@ CREATE INDEX IF NOT EXISTS "nodes_msg_channel_seq_loc_c_idx"
 
 -- #1631: shared passkey registry invariant guards.
 \ir passkey-invariants.sql
+
+-- #1632: signing requests, append-only signature records, the content-change
+-- marker. One source, shared verbatim with migration 20261013160000_signing_requests.
+\ir signing-invariants.sql
