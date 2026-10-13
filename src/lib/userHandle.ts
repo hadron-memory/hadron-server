@@ -73,8 +73,8 @@ export function normalizeHandleOrNull(input: string | null | undefined): string 
  * end-alnum atom, and truncates to 32 chars (a handle-specific sub-cap that
  * leaves room for a disambiguating suffix under the grammar's `MAX_ATOM_LEN`
  * (64) cap — #715). The result is re-validated through
- * {@link normalizeHandleOrNull}, so a base that lands on a reserved word (e.g.
- * `system`) returns `null` and the caller falls through to the next seed. Spec
+ * the new-handle registration policy, so reserved or ID-shaped bases return
+ * `null` and the caller falls through to the next seed. Spec
  * 047 (handle generation for the `@<handle>` owner namespace).
  */
 export function sanitizeHandleSeed(input: string | null | undefined): string | null {
@@ -89,7 +89,11 @@ export function sanitizeHandleSeed(input: string | null | undefined): string | n
     .replace(/[^a-z0-9]+$/, '') // …and end alnum
     .slice(0, 32)
     .replace(/[^a-z0-9]+$/, ''); // re-trim a trailing sep exposed by the slice
-  return normalizeHandleOrNull(base);
+  try {
+    return normalizeHandle(base);
+  } catch {
+    return null;
+  }
 }
 
 /** Minimal DB surface the handle probe + generator need. */
@@ -146,7 +150,13 @@ export async function generateUniqueHandle(
     const candidate = stem
       ? `${stem.slice(0, 40)}-${randomBytes(4).toString('hex')}`
       : randomBytes(6).toString('hex');
-    const legal = normalizeHandleOrNull(candidate);
+    // Fresh candidates use registration policy; stored-handle reads stay lenient.
+    let legal: string | null;
+    try {
+      legal = normalizeHandle(candidate);
+    } catch {
+      legal = null;
+    }
     if (legal && !(await isHandleTaken(db, legal))) return legal;
   }
   throw new Error('generateUniqueHandle: could not find a free handle');

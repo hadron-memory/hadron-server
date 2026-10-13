@@ -101,6 +101,8 @@ describe('#1733: the shared pool and the bare-root rules still hold', () => {
     ['a colon', 'mini:coders', 'org-urn-not-bare'],
     ['upper case', 'MiniCoders', 'slug-not-lowercase'],
     ['a reserved word', 'hadron', null],
+    ['the scheme word hrn', 'hrn', 'reserved-word-slug'],
+    ['the scheme word urn', 'urn', 'reserved-word-slug'],
   ])('still refuses %s', async (_label, urn, reason) => {
     const got = await reasonOf(create(urn));
     expect(got).not.toBe('NO_ERROR');
