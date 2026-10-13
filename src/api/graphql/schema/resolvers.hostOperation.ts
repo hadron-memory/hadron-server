@@ -227,7 +227,11 @@ export const hostOperationMutations = {
       const op = locked ? await tx.hostOperation.findUnique({ where: { id: input.id } }) : null;
       if (!op || op.appId !== app.id || op.hostId !== host.hostId) throw opNotFound(input.id);
       if (op.status === 'succeeded' || op.status === 'failed') {
-        if (op.status === status) return op;
+        if (op.status === status) {
+          // An idempotent re-report is still a use of the key (070:07; #1876 review, Diego P2-2). Nothing else changes.
+          await recordHostKeyUse(tx, host, 'report', { operationId: op.id });
+          return op;
+        }
         throw taskError('HOST_OPERATION_ALREADY_REPORTED', `This operation was already reported ${op.status}.`, { id: op.id });
       }
       if (op.status !== 'collected') {
@@ -302,7 +306,10 @@ export const hostOperationMutations = {
     if (!workerId) throw notRegistered();
     await asHost(ctx, input.appRef, async (tx, freshApp, host) => {
       const [w] = await tx.$queryRaw<{ appId: string; retiredAt: Date | null }[]>`
-        SELECT app_id AS "appId", retired_at AS "retiredAt" FROM workers WHERE id = ${workerId} FOR SHARE`;
+        SELECT app_id AS "appId", retired_at AS "retiredAt" FROM workers WHERE id = ${workerId} FOR UPDATE`;
+      // FOR UPDATE, not SHARE (#1876 review, Diego P2-3): the worker row exists before any availability row, so it is
+      // the per-worker lock for a FIRST mark too, where a FOR UPDATE on the absent availability row would lock nothing.
+      // It conflicts with the FOR SHARE every other availability writer takes, in their order (worker, then record).
       const listed = await tx.hostRegistrationWorker.findFirst({
         where: { workerId, registration: { appId: freshApp.id, hostId: host.hostId } },
         select: { workerId: true },
