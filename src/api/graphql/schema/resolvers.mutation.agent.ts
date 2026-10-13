@@ -56,6 +56,7 @@ import {
 import {
   type Context,
   requireOrgRole,
+  requireAgentAccess,
   requireOwnerOrOrgRole,
   aiConfigOwnerOf,
   toGqlAiServiceConfig,
@@ -436,7 +437,7 @@ export const agentMutations = {
       // requireOwnerOrOrgRole below still runs on the RESOLVED agent.
       const { id } = await resolveAgentRef(ctx.db, ref);
       const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id } });
-      await requireOwnerOrOrgRole(ctx, agent, 'ADMIN');
+      await requireAgentAccess(ctx, agent, 'ADMIN');
       // spec 047 (codex review, #682): a user-owned agent is owner-only in v1 —
       // it must NEVER become non-PERSONAL. The create-time guard alone is
       // insufficient: without this, an owner could create a PERSONAL agent and
@@ -487,6 +488,16 @@ export const agentMutations = {
           throw new Error('Cannot unset or change an agent\'s system memory. Delete the agent to replace it.');
         }
         if (!agent.systemMemoryId && incoming) {
+          // #1818 review (Emerson P2-C): on a USER-owned agent, first-attach is
+          // the OWNER's act. An admin managing the agent (#1787) must not
+          // re-point its definition at one of the owner's other memories — the
+          // promotion would manufacture a "definition" the admin's read arm
+          // then reaches, and deleteAgent would destroy it.
+          if (agent.ownerUserId !== null && ctx.userId !== agent.ownerUserId) {
+            throw new GraphQLError("Attaching a system memory to a user-owned Agent is its owner's act.", {
+              extensions: { code: 'FORBIDDEN' },
+            });
+          }
           // First-attach: verify the target memory exists, belongs to this
           // org, and isn't already another agent's system memory. These are
           // READS ONLY — the promotion WRITE now happens in the deciding
@@ -805,7 +816,7 @@ export const agentMutations = {
       // #789 / cor:api:140 — see updateAgent: resolution is not authorization.
       const { id } = await resolveAgentRef(ctx.db, ref);
       const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id } });
-      await requireOwnerOrOrgRole(ctx, agent, 'ADMIN');
+      await requireAgentAccess(ctx, agent, 'ADMIN');
       // Soft-delete the agent and its owned system memory (if any) in the
       // same pass. System memories are owned by the agent and cannot be
       // detached, so deleting the agent is the only way they get cleaned up.
@@ -1007,7 +1018,7 @@ export const agentMutations = {
         where: { id: resolvedParentId },
       });
       // Authorization: ADMIN/OWNER of the parent Agent's owning org.
-      await requireOwnerOrOrgRole(ctx, parent, 'ADMIN');
+      await requireAgentAccess(ctx, parent, 'ADMIN');
 
       try {
         return await publishAgentImport(ctx.db, {
@@ -1042,7 +1053,7 @@ export const agentMutations = {
       const parent = await ctx.db.agent.findUniqueOrThrow({
         where: { id: resolvedParentId },
       });
-      await requireOwnerOrOrgRole(ctx, parent, 'ADMIN');
+      await requireAgentAccess(ctx, parent, 'ADMIN');
       await removeAgentImport(ctx.db, resolvedParentId, resolvedImportedId);
       return true;
     },
@@ -1066,7 +1077,7 @@ export const agentMutations = {
       // the agent + owner-gate FIRST, then resolve the user.
       const resolvedAgentId = await resolveAgentRefArg(ctx.db, { ref: agentRef, id: agentId });
       const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
-      await requireOwnerOrOrgRole(ctx, agent, 'ADMIN');
+      await requireAgentAccess(ctx, agent, 'ADMIN');
       const resolvedUserId = await resolveUserRefArg(ctx.db, { ref: userRef, id: userId });
 
       // #1573: the revoker of the subscription writers (startChat, personal
@@ -1087,7 +1098,7 @@ export const agentMutations = {
           if (current.organizationId !== agent.organizationId || current.ownerUserId !== agent.ownerUserId) {
             throw new Error('Agent ownership changed; retry the operation');
           }
-          await requireOwnerOrOrgRole(txCtx, current, 'ADMIN');
+          await requireAgentAccess(txCtx, current, 'ADMIN');
         },
         (tx) => tx.agentSubscription.update({
           where: { userId_agentId: { userId: resolvedUserId, agentId: resolvedAgentId } },
@@ -1129,6 +1140,9 @@ export const agentMutations = {
       // 007-entity-id-or-urn: agentId may be ID, bare URN, or prefixed URN.
       const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentId);
       const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
+      // #1787 review (Rook P2-1): updating config can keep the stored key under a
+      // changed endpoint/provider — same exfil shape as the registry gate — so on a
+      // user-owned Agent this stays owner-only (clearAgentAIConfig keeps the arm).
       await requireOwnerOrOrgRole(ctx, agent, 'ADMIN');
       // 036-ai-service-config: upsert the Agent's 'default' registry
       // config. Legacy key semantics preserved: a provided apiKey is
@@ -1222,7 +1236,7 @@ export const agentMutations = {
       // 007-entity-id-or-urn: agentId may be ID, bare URN, or prefixed URN.
       const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentId);
       const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
-      await requireOwnerOrOrgRole(ctx, agent, 'ADMIN');
+      await requireAgentAccess(ctx, agent, 'ADMIN');
       // 036-ai-service-config: clearing deletes the 'default' registry
       // config (idempotent).
       await ctx.db.aiServiceConfig.deleteMany({
@@ -1417,7 +1431,7 @@ async function requireAgentOrgGrantRevokeRole(
     return;
   } catch (subscriberErr) {
     try {
-      await requireOwnerOrOrgRole(ctx, agentOwner, 'ADMIN');
+      await requireAgentAccess(ctx, agentOwner, 'ADMIN');
       return;
     } catch {
       throw subscriberErr;
