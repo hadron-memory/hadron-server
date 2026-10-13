@@ -31,6 +31,7 @@ CREATE TABLE "node_signatures" (
     "revision" INTEGER NOT NULL,
     "approval_hash" TEXT NOT NULL,
     "payload_version" TEXT NOT NULL,
+    "rp_id" TEXT NOT NULL,
     "authenticator_data" BYTEA NOT NULL,
     "client_data_json" BYTEA NOT NULL,
     "signature" BYTEA NOT NULL,
@@ -85,7 +86,10 @@ ALTER TABLE node_signatures ADD CONSTRAINT chk_node_signature_shape CHECK (
   approval_hash ~ '^[0-9a-f]{64}$'
   AND payload_version IN ('hadron-signature-v1','hadron-signature-v3')
   AND revision >= 1
+  AND rp_id IS NOT NULL AND rp_id <> ''
   AND octet_length(authenticator_data) >= 37
+  -- The assertion was made under the recorded RP ID: its rpIdHash is SHA-256(rp_id) (#10470).
+  AND substring(authenticator_data FROM 1 FOR 32) = sha256(convert_to(rp_id, 'UTF8'))
   AND octet_length(client_data_json) > 0
   AND octet_length(signature) > 0
 );

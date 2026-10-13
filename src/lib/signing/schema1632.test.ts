@@ -4,6 +4,7 @@
  * record, the content-change marker and staleness triggers. Raw SQL on
  * purpose: these guards must hold for every write path, not just ours.
  */
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { db } from '../../integrations/db/client.js';
@@ -12,6 +13,9 @@ import { generateId } from '../id.js';
 
 const HASH = 'a'.repeat(64);
 const OTHER_HASH = 'b'.repeat(64);
+const RP = 'example.test';
+/** authenticatorData whose rpIdHash is SHA-256(rp), as the guard requires. */
+const authData = (rp = RP) => Buffer.concat([createHash('sha256').update(rp).digest(), Buffer.alloc(5)]);
 
 let signerId: string;
 let otherUserId: string;
@@ -50,13 +54,14 @@ async function request(opts: { ttl?: string; named?: string | null; node?: strin
   return id;
 }
 
-async function sign(requestId: string, opts: { signer?: string; key?: string; hash?: string } = {}) {
+async function sign(requestId: string, opts: { signer?: string; key?: string; hash?: string; rpId?: string; authRp?: string } = {}) {
   const id = generateId();
   await db.$executeRaw`INSERT INTO node_signatures
     (id, node_id, signing_request_id, signer_id, passkey_credential_id, revision, approval_hash, payload_version,
-     authenticator_data, client_data_json, signature)
+     rp_id, authenticator_data, client_data_json, signature)
     VALUES (${id}, ${nodeId}, ${requestId}, ${opts.signer ?? signerId}, ${opts.key ?? (await passkey())}, 1,
-      ${opts.hash ?? HASH}, 'hadron-signature-v1', ${Buffer.alloc(37)}, ${Buffer.from('{}')}, ${Buffer.from('sig')})`;
+      ${opts.hash ?? HASH}, 'hadron-signature-v1', ${opts.rpId ?? RP}, ${authData(opts.authRp ?? opts.rpId ?? RP)},
+      ${Buffer.from('{}')}, ${Buffer.from('sig')})`;
   return id;
 }
 
@@ -149,7 +154,7 @@ describe('signature records: append-only (#1632, cor:dmo:130:05/:07)', () => {
   it('never updates and never deletes while the node exists', async () => {
     const id = await sign(await request());
     for (const set of ['revision = 2', `approval_hash = '${OTHER_HASH}'`, "signature = decode('00','hex')",
-      `signer_id = '${otherUserId}'`, "verified_at = verified_at - interval '1 day'"]) {
+      `signer_id = '${otherUserId}'`, "verified_at = verified_at - interval '1 day'", "rp_id = 'other.test'"]) {
       await refused(db.$executeRawUnsafe(`UPDATE node_signatures SET ${set} WHERE id = $1`, id));
     }
     await refused(db.$executeRaw`DELETE FROM node_signatures WHERE id = ${id}`);
@@ -182,6 +187,13 @@ describe('signature records: append-only (#1632, cor:dmo:130:05/:07)', () => {
     const key = await passkey();
     await db.$executeRaw`UPDATE passkey_credentials SET revoked_at = (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::timestamp(3) WHERE id = ${key}`;
     await refused(sign(await request(), { key }));
+  });
+
+  it('records the RP ID the assertion was made under, and refuses one that does not match its rpIdHash (#10470)', async () => {
+    const id = await sign(await request());
+    expect((await db.nodeSignature.findUniqueOrThrow({ where: { id } })).rpId).toBe(RP);
+    await refused(sign(await request(), { rpId: 'other.test', authRp: RP }));
+    await refused(sign(await request(), { rpId: '' }));
   });
 
   it('allows one record per request only', async () => {

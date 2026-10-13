@@ -10,7 +10,7 @@ import { insertSoftPasskey, softPasskey, type SoftPasskey } from '../../test/sof
 import { computeApprovalHash } from '../approvalHash.js';
 import { signaturePayloadBytes, SIGNATURE_PAYLOAD_V1 } from './payload.js';
 import { SigningNotConfiguredError } from './config.js';
-import { clearSignatureVerifyCache } from './verify.js';
+import { clearSignatureVerifyCache, signatureRecordVerifies } from './verify.js';
 import { loadSignatureStatuses } from './status.js';
 import {
   completeSigningRequestInTransaction, createSigningRequestInTransaction, declineSigningRequestInTransaction,
@@ -176,7 +176,7 @@ describe('complete: server-side verification, one record, one end (cor:dmo:130:0
     expect(done.state).toBe('completed');
     const records = await db.nodeSignature.findMany();
     expect(records).toHaveLength(1);
-    expect(records[0]).toMatchObject({ signerId, revision: 1, approvalHash: req.approvalHash, signingRequestId: req.id });
+    expect(records[0]).toMatchObject({ signerId, revision: 1, approvalHash: req.approvalHash, signingRequestId: req.id, rpId: RP });
     const s = await status();
     expect(s.state).toBe('CURRENT');
     expect(s.signatures[0]).toMatchObject({ signerId, passkeyLabel: 'YubiKey 5C', revision: 1, state: 'CURRENT' });
@@ -259,10 +259,37 @@ describe('signature state on read (cor:dmo:130:04)', () => {
     expect((await status()).state).toBe('CURRENT');
   });
 
-  it('a record that no longer verifies is an integrity problem, never a signature', async () => {
+  it('stays valid after PASSKEY_RP_ID changes: a domain change never invalidates old signatures (#10469/#10470)', async () => {
     await complete(await create());
+    expect((await db.nodeSignature.findFirstOrThrow()).rpId).toBe(RP);
     clearSignatureVerifyCache();
-    process.env.PASSKEY_RP_ID = 'other.test'; // the stored rpIdHash no longer matches
+    process.env.PASSKEY_RP_ID = 'renamed.test';
+    const s = await status();
+    expect(s.state).toBe('CURRENT');
+    expect(s.integrityProblems).toBe(0);
+  });
+
+  it('re-verification uses the record\'s RP ID: any other RP ID does not verify', async () => {
+    await complete(await create());
+    const r = await db.nodeSignature.findFirstOrThrow({ include: { passkey: true } });
+    const record = { id: r.id, nodeId: r.nodeId, approvalHash: r.approvalHash, payloadVersion: r.payloadVersion, requestId: r.signingRequestId,
+      authenticatorData: Buffer.from(r.authenticatorData), clientDataJson: Buffer.from(r.clientDataJson), signature: Buffer.from(r.signature) };
+    const cred = { credentialId: Buffer.from(r.passkey.credentialId), publicKey: Buffer.from(r.passkey.publicKey), counter: 0n };
+    clearSignatureVerifyCache();
+    expect(await signatureRecordVerifies(record, cred, r.rpId)).toBe(true);
+    expect(await signatureRecordVerifies(record, cred, 'other.test')).toBe(false);
+  });
+
+  it('a record that does not verify is an integrity problem, never a signature', async () => {
+    const req = await create();
+    const credential = await db.passkeyCredential.findFirstOrThrow({ where: { ownerId: signerId } });
+    const good = assertionFor(req);
+    // A forged record inserted beneath the API: right RP hash, wrong signature bytes.
+    await db.$executeRaw`INSERT INTO node_signatures
+      (id, node_id, signing_request_id, signer_id, passkey_credential_id, revision, approval_hash, payload_version,
+       rp_id, authenticator_data, client_data_json, signature)
+      VALUES ('forged', ${nodeId}, ${req.id}, ${signerId}, ${credential.id}, 1, ${req.approvalHash}, 'hadron-signature-v1',
+        ${RP}, ${good.authenticatorData}, ${good.clientDataJson}, ${Buffer.from('not-a-signature')})`;
     const s = await status();
     expect(s.signatures).toEqual([]);
     expect(s.integrityProblems).toBe(1);

@@ -5,7 +5,6 @@
  * has already authorized the reader for each node; this reads nothing else.
  */
 import type { PrismaClient, Prisma } from '../../generated/prisma/index.js';
-import { passkeyRpId } from './config.js';
 import { signatureRecordVerifies } from './verify.js';
 import { compareSignaturesForDisplay, deriveSignatureState, rollUpSignatureState, type SignatureState } from './state.js';
 
@@ -52,7 +51,6 @@ export async function loadSignatureStatuses(db: Db, nodeIds: string[]): Promise<
     return out;
   }
   const [{ now }] = await db.$queryRaw<Array<{ now: Date }>>`SELECT hadron_signing_now() AS now`;
-  const rpId = passkeyRpId();
   const byNode = new Map<string, { views: SignatureView[]; problems: number }>();
   for (const r of records) {
     const node = nodeOf.get(r.nodeId);
@@ -64,7 +62,9 @@ export async function loadSignatureStatuses(db: Db, nodeIds: string[]): Promise<
       { id: r.id, nodeId: r.nodeId, approvalHash: r.approvalHash, payloadVersion: r.payloadVersion, requestId: r.signingRequestId,
         authenticatorData: Buffer.from(r.authenticatorData), clientDataJson: Buffer.from(r.clientDataJson), signature: Buffer.from(r.signature) },
       { credentialId: Buffer.from(r.passkey.credentialId), publicKey: Buffer.from(r.passkey.publicKey), counter: 0n },
-      rpId,
+      // The record's own RP ID, never the current config: a domain change
+      // must not invalidate signatures made before it (#10470).
+      r.rpId,
     );
     const state = deriveSignatureState({
       verifiedAt: r.verifiedAt, valid, passkey: r.passkey, contentChangedAt: node.contentChangedAt, memoryEncrypted: encrypted, now,

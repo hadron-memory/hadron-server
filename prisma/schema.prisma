@@ -4054,6 +4054,11 @@ model NodeSignature {
   revision            Int
   approvalHash        String   @map("approval_hash")
   payloadVersion      String   @map("payload_version")
+  /// The WebAuthn RP ID the signature was made under, from config at
+  /// completion. Re-verification uses this, never the current PASSKEY_RP_ID,
+  /// so a domain change cannot invalidate old signatures (#10469/#10470). The
+  /// guard requires the assertion's rpIdHash to match it.
+  rpId                String   @map("rp_id")
   authenticatorData   Bytes    @map("authenticator_data")
   clientDataJson      Bytes    @map("client_data_json")
   signature           Bytes

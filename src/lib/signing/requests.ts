@@ -251,13 +251,14 @@ export async function completeSigningRequestInTransaction(
     throw new SigningRefusal('SIGNATURE_NOT_VERIFIED', 'The signature did not verify.');
   }
   const payload = signaturePayloadBytes(row.payloadVersion, { nodeId: row.nodeId, approvalHash: row.approvalHash, requestId: row.id });
+  const rpId = passkeyRpId();
   let newCounter: number;
   try {
     ({ newCounter } = await verifySigningAssertion({
       assertion: opts.assertion,
       credential: { credentialId: credential.credential_id, publicKey: credential.public_key, counter: credential.counter },
       payload,
-      rpId: passkeyRpId(),
+      rpId,
       origins: signingCeremonyOrigins(),
     }));
   } catch (e) {
@@ -273,6 +274,7 @@ export async function completeSigningRequestInTransaction(
       revision: row.revision,
       approvalHash: row.approvalHash,
       payloadVersion: row.payloadVersion,
+      rpId,
       authenticatorData: new Uint8Array(opts.assertion.authenticatorData),
       clientDataJson: new Uint8Array(opts.assertion.clientDataJson),
       signature: new Uint8Array(opts.assertion.signature),

@@ -15,6 +15,7 @@ import { resolvers } from '../api/graphql/schema/resolvers.js';
 import type { Context } from '../api/graphql/schema/resolvers.helpers.js';
 import { maySignInMemory } from '../api/graphql/schema/resolvers.signing.js';
 import { createTestableMcpServer } from './server.js';
+import { mintUserApiKey } from '../middleware/auth.js';
 
 const ORIGIN = 'https://sign.example.test';
 const RP = 'example.test';
@@ -92,6 +93,34 @@ describe('signing tools (#1632)', () => {
     const mcp = mcpAs(reader.id);
     expect(await mcp.callToolText('hadron_request_signature', { nodeRef: nodeUrn('p:3'), expectedRevision: 5 })).toMatch(/\[revision_mismatch\]/);
     expect(await mcp.callToolText('hadron_get_signing_request', { id: 'nope' })).toMatch(/\[signing_request_not_found\]/);
+  });
+});
+
+describe('a revoked hdr_user_ key cannot write through the signing tools (Riana #1864 P2-1)', () => {
+  /** An MCP connection authenticated by `userId`'s user API key, which is then revoked before the call. */
+  async function revokedKeyConnection(userId: string) {
+    const { userApiKey } = await mintUserApiKey(db, { userId, createdBy: userId, label: 'presented key', issuedVia: 'portal' });
+    const mcp = createTestableMcpServer({ userId, apiKeyId: userApiKey.id, roles: [], clientId: `user:${userId}` });
+    return { mcp, revoke: () => M.revokeUserApiKey(null, { id: userApiKey.id }, as(userId)) };
+  }
+  const M = resolvers.Mutation as unknown as Record<string, (p: unknown, a: unknown, c: Context) => Promise<unknown>>;
+
+  it('creation is refused and leaves no request', async () => {
+    await node('k:1');
+    const { mcp, revoke } = await revokedKeyConnection(reader.id);
+    await revoke();
+    const text = await mcp.callToolText('hadron_request_signature', { nodeRef: nodeUrn('k:1') });
+    expect(text).toMatch(/\[forbidden\]/i);
+    expect(await db.signingRequest.count()).toBe(0);
+  });
+
+  it('withdrawal is refused and the request stays open', async () => {
+    await node('k:2');
+    const { mcp, revoke } = await revokedKeyConnection(reader.id);
+    const id = requestIdOf(await mcp.callToolText('hadron_request_signature', { nodeRef: nodeUrn('k:2') }));
+    await revoke();
+    expect(await mcp.callToolText('hadron_withdraw_signing_request', { id })).toMatch(/\[forbidden\]/i);
+    expect((await db.signingRequest.findUniqueOrThrow({ where: { id } })).state).toBe('open');
   });
 });
 
