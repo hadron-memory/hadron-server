@@ -1,0 +1,14 @@
+# File-provider snippet: replace CHOSEN_HOST and PRIVATE_HOST_GATEWAY after approval.
+http:
+  routers:
+    passkey-al:
+      rule: "Host(`CHOSEN_HOST`) && PathPrefix(`/__passkey-al/`)"
+      priority: 10000
+      entryPoints: [EXISTING_HTTPS_ENTRYPOINT]
+      tls: {}
+      service: passkey-al
+  services:
+    passkey-al:
+      loadBalancer:
+        servers:
+          - url: "http://PRIVATE_HOST_GATEWAY:4380"

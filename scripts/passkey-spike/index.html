@@ -1,7 +1,11 @@
 <!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Hadron passkey spike</title><link rel="stylesheet" href="/style.css"></head>
-<body><main><h1>Sign a revision</h1><p>Local spike using synthetic Retention text. This page shows the exact S0 payload.</p>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Hadron passkey spike</title><link rel="stylesheet" href="style.css"></head>
+<body><main><h1>Sign a revision</h1><p>Synthetic spike using synthetic Retention text. This page shows the exact S0 payload.</p>
 <h2>What you will sign</h2><dl><dt>Title</dt><dd id="title"></dd><dt>Content</dt><dd><pre id="content"></pre></dd><dt>Stable node ID</dt><dd id="node"></dd></dl>
 <h2>Signing payload</h2><pre id="payload"></pre><p>Challenge: SHA-256 of the payload’s UTF-8 bytes, including the final line feed.</p><code id="challenge"></code>
+<p>Choose the provider in the system prompt. This selection is a human evidence label, not automatic provider detection.</p>
+<label>Actual provider <select id="provider"><option>iCloud Keychain</option><option>1Password</option><option>Phone via QR/hybrid</option><option>Hardware key (later)</option><option>Synthetic virtual authenticator</option></select></label>
+<p>For a second device: register first, create a one-use pairing code, open this same page on the second device and paste the code within 60 seconds. State expires after five minutes; repeat registration if needed.</p>
+<button id="pair">Create pairing code</button> <input id="pair-code" autocomplete="off" aria-label="Pairing code"><button id="join">Join synthetic session</button>
 <p id="status" role="status">Loading fixture…</p><button id="register" disabled>Register passkey</button> <button id="sign" disabled>Sign this payload</button>
-<p>Standalone loopback experiment. Synthetic data; credentials expire after five minutes. This is not a production enrollment or signing flow.</p></main><script src="/browser.js"></script><script type="module" src="/page.js"></script></body></html>
+<p>Standalone synthetic experiment. Synthetic data; credentials expire after five minutes. This is not a production enrollment or signing flow.</p></main><script src="browser.js"></script><script type="module" src="page.js"></script></body></html>

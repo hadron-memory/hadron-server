@@ -58,10 +58,7 @@ aliases). This is **not sound per-assertion deduplication** under the determinis
 S0 challenge: the fingerprint includes the ES256 signature, whose `(r, n-s)`
 twin can still verify in server 14.0.3 but has a different fingerprint. A
 counter-zero synced credential supplies no counter backstop. Omitting the
-signature instead collides with honest re-signing of the same payload. Also,
-the fingerprint check and insertion straddle an await, so concurrent requests
-can both pass that check. The probe does not establish resistance to either
-case, nor to replay of a completion that was dropped and never recorded.
+signature instead collides with honest re-signing of the same payload. The fingerprint is now reserved synchronously before verification, so identical concurrent submissions cannot both pass; failed verification also spends those bytes. The probe does not establish resistance to signature twins or replay of a completion that was dropped and never recorded.
 
 A per-ceremony nonce needs the separate payload-contract ruling (#10005/#10033);
 that work is outside this spike. Local synthetic protocol GO is unaffected,
@@ -72,3 +69,21 @@ Primary implementation references:
 [server API](https://simplewebauthn.dev/docs/packages/server),
 [custom challenges](https://simplewebauthn.dev/docs/advanced/server/custom-challenges),
 [Chromium virtual authenticators](https://chromedevtools.github.io/devtools-protocol/tot/WebAuthn/).
+
+
+## Temporary hosted AL preparation
+
+See [AL-PREP.md](AL-PREP.md). Hosted mode requires explicit `PASSKEY_SPIKE_ORIGIN`
+(HTTPS, exact origin) and `PASSKEY_SPIKE_RP_ID=hadronmemory.com`. No production
+origin is inferred. The standalone page can live below `/__passkey-al/`, with
+Secure, HttpOnly, SameSite=Strict path-scoped cookies. Its random WebAuthn user
+handle is independent of that cookie. One-use, 60-second pairing codes let a
+second browser sign with the same synthetic credential; the session still
+expires five minutes after registration. No account, token, portal or database
+is involved. Stopping the process erases credentials and pairing state.
+
+The page reports verified UV, exact origin, RP, backup eligibility/state and
+counter. Its provider label is human-declared; it is not a verified provider
+identity. The synthetic S0 payload remains a v1 fixture; this page never creates
+production signing requests, signatures or v3 payloads. A synced counter of zero
+must be captured on real devices; virtual Chromium evidence is not that proof.
