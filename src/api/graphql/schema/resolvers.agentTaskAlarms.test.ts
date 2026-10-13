@@ -156,6 +156,82 @@ describe('cor:agt:060:08 — who may set a worker\'s availability', () => {
   });
 });
 
+describe('cor:agt:060:11 — the worker a stalled worker reports to may clear the stall (#1759)', () => {
+  // Liam reports to Rook directly; Rook reports to Ada. Victor's rulings
+  // (team chat #10319, corrected #10324): only the DIRECT reports-to worker,
+  // only to available, and only a mark the stall rule set (060:07).
+  let ada: { id: string };
+  const mark = (data: Record<string, unknown>) =>
+    db.workerAvailability.create({ data: { workerId: liam.id, state: 'unavailable', reason: 'stalled', setAt: new Date(), setBy: 'stall-rule', ...data } });
+  const clear = (w: { id: string }) => asWorker(w, () => setWorker(ctx(holder.id), { state: 'AVAILABLE', reason: null }));
+  const record = () => db.workerAvailability.findUniqueOrThrow({ where: { workerId: liam.id } });
+
+  beforeEach(async () => {
+    ada = await db.worker.create({ data: { appId: app.id, agentId, name: 'Ada', slug: 'ada', heldByUserId: holder.id }, select: { id: true } });
+    await db.worker.update({ where: { id: rook.id }, data: { reportsToWorkerId: ada.id } });
+    await db.worker.update({ where: { id: liam.id }, data: { reportsToWorkerId: rook.id } });
+  });
+
+  it('S2: Rook, whom Liam reports to, clears the stall mark; it is recorded as his', async () => {
+    await mark({});
+    await expect(clear(rook)).resolves.toMatchObject({
+      workerId: liam.id, state: 'available', reason: null, until: null, setBy: 'reports-to', setByWorkerId: rook.id, setByAgentId: agentId,
+    });
+    const [e] = await db.agentTeamEvent.findMany({ where: { type: 'availability.changed', subjectWorkerId: liam.id } });
+    expect(e).toMatchObject({ appId: app.id, actorWorkerId: rook.id, payload: { state: 'available', reason: null, until: null, setBy: 'reports-to' } });
+    expect(F.WorkerAvailability.setBy(await record())).toBe('REPORTS_TO');
+  });
+
+  it('S4: a mark the host, the holder or a manager set stays, whatever its reason', async () => {
+    for (const data of [
+      { reason: 'out-of-tokens', setBy: 'host' },
+      { reason: 'stalled', setBy: 'host' },
+      { reason: 'stalled', setBy: 'holder', setByUserId: holder.id },
+      { reason: 'stalled', setBy: 'app-manager', setByUserId: admin.id },
+      { reason: 'other', setBy: 'worker', setByWorkerId: liam.id },
+    ]) {
+      await db.workerAvailability.deleteMany();
+      await mark(data);
+      await expectCode(clear(rook), 'AVAILABILITY_NOT_PERMITTED');
+      expect(await record()).toMatchObject({ state: 'unavailable', ...data });
+    }
+  });
+
+  it('S5: Rook may not mark Liam unavailable, whether Liam is available or stalled', async () => {
+    await expectCode(asWorker(rook, () => setWorker(ctx(holder.id), {})), 'AVAILABILITY_NOT_PERMITTED');
+    expect(await db.workerAvailability.count()).toBe(0);
+    await mark({});
+    await expectCode(asWorker(rook, () => setWorker(ctx(holder.id), { reason: 'OTHER' })), 'AVAILABILITY_NOT_PERMITTED');
+    expect(await record()).toMatchObject({ state: 'unavailable', reason: 'stalled', setBy: 'stall-rule' });
+  });
+
+  it('the line is direct: Ada, higher up the chain, and an unrelated worker are refused', async () => {
+    await mark({});
+    const nobody = await db.worker.create({ data: { appId: app.id, agentId, name: 'Nia', slug: 'nia', heldByUserId: holder.id }, select: { id: true } });
+    await expectCode(clear(ada), 'AVAILABILITY_NOT_PERMITTED');
+    await expectCode(clear(nobody), 'AVAILABILITY_NOT_PERMITTED');
+    expect(await record()).toMatchObject({ state: 'unavailable', setBy: 'stall-rule' });
+    expect(await db.agentTeamEvent.count({ where: { type: 'availability.changed' } })).toBe(0);
+  });
+
+  it('there must be a stall mark to clear: no record, or one the stall rule already cleared, is refused', async () => {
+    await expectCode(clear(rook), 'AVAILABILITY_NOT_PERMITTED');
+    expect(await db.workerAvailability.count()).toBe(0);
+    await mark({ state: 'available', reason: null, setBy: 'stall-rule' });
+    await expectCode(clear(rook), 'AVAILABILITY_NOT_PERMITTED');
+    await db.workerAvailability.deleteMany();
+    await mark({ state: 'available', reason: null, setBy: 'lapse' });
+    await expectCode(clear(rook), 'AVAILABILITY_NOT_PERMITTED');
+  });
+
+  it('the line is read at the write: once Liam reports to someone else, Rook may no longer clear it', async () => {
+    await mark({});
+    await db.worker.update({ where: { id: liam.id }, data: { reportsToWorkerId: ada.id } });
+    await expectCode(clear(rook), 'AVAILABILITY_NOT_PERMITTED');
+    await expect(clear(ada)).resolves.toMatchObject({ state: 'available', setBy: 'reports-to', setByWorkerId: ada.id });
+  });
+});
+
 describe('cor:agt:060:09 — who may set a model family\'s availability', () => {
   it('S1: whoever manages the App pauses the claude family', async () => {
     await expect(setFamily(ctx(admin.id), {})).resolves.toMatchObject({ appId: app.id, family: 'claude', state: 'unavailable', setByUserId: admin.id });
