@@ -20,6 +20,7 @@ import { resolvers, type Context } from './resolvers.js';
 import {
   extractMentions,
   mentionTokenOf,
+  postSystemNotice,
   TEAM_CHAT_LOC,
   TEAM_CHAT_MESSAGES_LOC,
   TEAM_CHAT_BODY_MAX_CHARS,
@@ -346,6 +347,110 @@ describe('createTeamChatMessage — replyToSeq', () => {
       where: { memoryId: root!.memoryId, loc: { startsWith: `${TEAM_CHAT_MESSAGES_LOC}:` } },
     });
     expect(messages).toBe(1);
+  });
+
+  it('a soft-deleted target is the same typed refusal (the deletedAt filter holds)', async () => {
+    const first = await post(ctx(appMember.id), { body: 'gone soon' });
+    await db.node.update({ where: { id: first.nodeId }, data: { deletedAt: new Date() } });
+    await expectCode(
+      post(ctx(appMember.id), { body: 'reply to deleted', replyToSeq: first.seq }),
+      'TEAM_CHAT_REPLY_NOT_FOUND',
+    );
+  });
+});
+
+describe('#1842 — a reply notifies the replied-to worker (cor:agt:020:04 rev17)', () => {
+  const envOf = async (nodeId: string) =>
+    ((await db.node.findUnique({ where: { id: nodeId }, select: { data: true } }))!.data) as Record<string, unknown>;
+
+  it('an untagged reply to a worker message records that worker as mentioned (the #1842 red on main)', async () => {
+    const iris = await workerSession(appMember.id, 'Iris');
+    const target = await post(ctx(appMember.id), { body: 'the blocking question', sessionRef: iris.sessionId });
+    const reply = await post(ctx(admin.id), { body: 'ruling: A', replyToSeq: target.seq });
+    expect(await envOf(reply.nodeId)).toMatchObject({ mentions: ['iris'] });
+  });
+
+  it('direct target only — a reply to a reply never notifies the grandparent author (no thread propagation)', async () => {
+    const iris = await workerSession(appMember.id, 'Iris');
+    const henry = await workerSession(admin.id, 'Henry');
+    const first = await post(ctx(appMember.id), { body: 'q', sessionRef: iris.sessionId });
+    const second = await post(ctx(admin.id), { body: 'a', replyToSeq: first.seq, sessionRef: henry.sessionId });
+    expect(await envOf(second.nodeId)).toMatchObject({ mentions: ['iris'] });
+    const third = await post(ctx(appMember.id), { body: 'thanks', replyToSeq: second.seq });
+    expect(await envOf(third.nodeId)).toMatchObject({ mentions: ['henry'] });
+  });
+
+  it('no self-notification — a worker replying to its own message records no mention', async () => {
+    const iris = await workerSession(appMember.id, 'Iris');
+    const first = await post(ctx(appMember.id), { body: 'note', sessionRef: iris.sessionId });
+    const reply = await post(ctx(appMember.id), { body: 'update', replyToSeq: first.seq, sessionRef: iris.sessionId });
+    expect((await envOf(reply.nodeId)).mentions).toBeUndefined();
+  });
+
+  it('workers only — a reply to a HUMAN message records no mention for the human', async () => {
+    const human = await post(ctx(appMember.id), { body: 'human asking' });
+    const iris = await workerSession(admin.id, 'Iris');
+    const reply = await post(ctx(admin.id), { body: 'worker answering', replyToSeq: human.seq, sessionRef: iris.sessionId });
+    expect((await envOf(reply.nodeId)).mentions).toBeUndefined();
+  });
+
+  it('workers only — a reply to a SYSTEM message records no mention', async () => {
+    // The Channel bootstraps lazily on the first ordinary post; a system
+    // notice only posts into a LIVE Channel (#1791), so seed one first.
+    await post(ctx(appMember.id), { body: 'seed' });
+    expect(await postSystemNotice(db, app.id, 'platform notice')).toBe(true);
+    const root = await db.node.findFirst({
+      // loc-scope-ok: scoped to the fixture App via the memory relation
+      where: { loc: TEAM_CHAT_LOC, memory: { appId: app.id, class: 'app' } },
+    });
+    const notice = await db.node.findFirst({
+      where: {
+        memoryId: root!.memoryId,
+        loc: { startsWith: `${TEAM_CHAT_MESSAGES_LOC}:` },
+        nodeType: 'chat-message',
+      },
+      orderBy: { seq: 'desc' },
+      select: { seq: true },
+    });
+    const iris = await workerSession(admin.id, 'Iris');
+    const reply = await post(ctx(admin.id), { body: 'noted', replyToSeq: notice!.seq, sessionRef: iris.sessionId });
+    expect((await envOf(reply.nodeId)).mentions).toBeUndefined();
+  });
+
+  it('set semantics — a body @token and the fold of the same worker record exactly one mention', async () => {
+    const iris = await workerSession(appMember.id, 'Iris');
+    const first = await post(ctx(appMember.id), { body: 'q', sessionRef: iris.sessionId });
+    const reply = await post(ctx(admin.id), { body: '@iris agreed', replyToSeq: first.seq });
+    expect(await envOf(reply.nodeId)).toMatchObject({ mentions: ['iris'] });
+  });
+
+  it("the token follows the worker's CURRENT name — a renamed worker is still notified", async () => {
+    const mary = await workerSession(appMember.id, 'Mary Jane');
+    const first = await post(ctx(appMember.id), { body: 'q', sessionRef: mary.sessionId });
+    await db.worker.update({ where: { id: mary.workerId }, data: { name: 'Mary Jane Smith' } });
+    const reply = await post(ctx(admin.id), { body: 'answer', replyToSeq: first.seq });
+    expect(await envOf(reply.nodeId)).toMatchObject({ mentions: ['mary-jane-smith'] });
+  });
+
+  it('a target whose worker row no longer exists posts without a fold (the fold never refuses a reply)', async () => {
+    const iris = await workerSession(appMember.id, 'Iris');
+    const first = await post(ctx(appMember.id), { body: 'q', sessionRef: iris.sessionId });
+    await db.session.delete({ where: { id: iris.sessionId } });
+    await db.worker.delete({ where: { id: iris.workerId } });
+    const reply = await post(ctx(admin.id), { body: 'late answer', replyToSeq: first.seq });
+    expect((await envOf(reply.nodeId)).mentions).toBeUndefined();
+  });
+
+  it('no backfill — a later folded reply never touches existing messages', async () => {
+    const iris = await workerSession(appMember.id, 'Iris');
+    const first = await post(ctx(appMember.id), { body: 'q', sessionRef: iris.sessionId });
+    const early = await post(ctx(admin.id), { body: 'early reply', replyToSeq: first.seq });
+    const before = JSON.stringify(await envOf(first.nodeId));
+    const henry = await workerSession(admin.id, 'Henry');
+    await post(ctx(admin.id), { body: 'later reply', replyToSeq: first.seq, sessionRef: henry.sessionId });
+    expect(JSON.stringify(await envOf(first.nodeId))).toBe(before);
+    // The early reply keeps exactly its own fold; the new one added nothing to it.
+    expect(await envOf(early.nodeId)).toMatchObject({ mentions: ['iris'] });
   });
 });
 
