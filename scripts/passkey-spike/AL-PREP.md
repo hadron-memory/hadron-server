@@ -20,13 +20,13 @@ Remove: delete the proxy snippet and confirm the path no longer resolves to the 
 
 ## Shared live preflight and evidence
 
-Greta owns evidence under `sprints:sprint-2:qa:hadron-server-1630:al-session`. Confirm HTTPS URL exactly, RP `hadronmemory.com`, browser versions, OS versions, and no portal session required. Capture each verify JSON (verified, userVerified, origin, rpID, counter, backupEligible, backedUp, deviceType), actual provider chosen, and screenshot of provider prompt/result. Provider in the page is a human label, not cryptographic provider identification. Do not capture private-key material, raw cookie or pairing codes. All physical legs require UV=true; wrong origin/RP or UV=false is a failure. Distinguish user cancellation/environment setup failure from a completed assertion that violates the rule. A failed actual-device leg is reported to Holger for the feature GO/NO-GO decision; it is never silently replaced by the synthetic dry run.
+Greta owns evidence under `sprints:sprint-2:qa:hadron-server-1630:al-session`. Confirm HTTPS URL exactly, RP `hadronmemory.com`, browser versions, OS versions, and no portal session required. Capture each verify JSON (verified, userVerified, credentialIdHash, origin, rpID, counter, backupEligible, backedUp, deviceType), actual provider chosen, and screenshot of provider prompt/result. Provider in the page is a human label, not cryptographic provider identification. Do not capture private-key material, raw cookie or pairing codes. All physical legs require UV=true; wrong origin/RP or UV=false is a failure. Distinguish user cancellation/environment setup failure from a completed assertion that violates the rule. A failed actual-device leg is reported to Holger for the feature GO/NO-GO decision; it is never silently replaced by the synthetic dry run.
 
 The demo session lasts five minutes, options one minute; pair codes are single-use and last 60 seconds. Register afresh after expiry. For every leg, choose the page's evidence label AND explicitly select the real provider in the browser/system prompt. If the prompt selected a different provider, mark that attempt misrouted and repeat; do not count it as the requested leg.
 
 ### 1 — iCloud Keychain, Mac → iPhone sync
 
-On Mac, choose Apple's Passwords/iCloud Keychain rather than 1Password (use the prompt's other-options/Passwords picker; temporarily disable the 1Password extension for this leg if it intercepts). Register with Touch ID/device authentication. Create a pairing code. On iPhone, open the exact same HTTPS page, paste/join within 60 seconds, select Apple's Passwords/iCloud Keychain, then sign using Face ID/Touch ID/device passcode. Show that the credential registered on Mac is the one used on phone; no second registration before signing. Capture both verify results and the actual provider. If quick, repeat in reverse with a fresh session. Expected: both verified, UV=true, exact origin/RP, backup flags captured, synced credential counter captured. Fail: the registered credential cannot sign on the other device, UV=false, wrong origin/RP, or provider ambiguous. Pairing failure/expiry is a setup retry, not a sync pass or fail.
+On Mac, choose Apple's Passwords/iCloud Keychain rather than 1Password (use the prompt's other-options/Passwords picker; temporarily disable the 1Password extension for this leg if it intercepts). Register with Touch ID/device authentication. Create a pairing code. On iPhone, open the exact same HTTPS page, paste/join within 60 seconds, select Apple's Passwords/iCloud Keychain, then sign using Face ID/Touch ID/device passcode. Compare credentialIdHash in the Mac registration and phone signing responses; they must match. Signing uses an empty allowCredentials list (discoverable selection). A second registration is refused by the server; use a new browser session after expiry to register again. Capture both verify results and the actual provider. If quick, repeat in reverse with a fresh session. Expected: both verified, UV=true, exact origin/RP, backup flags captured, synced credential counter captured. Fail: credentialIdHash differs, the registered credential cannot sign on the other device, UV=false, wrong origin/RP, or provider ambiguous. Pairing failure/expiry is a setup retry, not a sync pass or fail.
 
 ### 2 — cross-device QR/hybrid
 
@@ -47,3 +47,18 @@ Chromium 145.0.7632.6, virtual CTAP2 authenticator, RP localhost and ephemeral e
 Leg 1 dry run emulates the two-browser workflow by copying a virtual credential; this does not prove iCloud sync. Leg 2 exercises assertion/verification UI but the local virtual browser has no real phone QR/hybrid leg. Leg 3 exercises UV/backup/counter reporting, without the real 1Password extension/provider. These are rehearsal coverage and stated limits, not three device PASS results. Real-provider/physical dry runs cannot be completed before Holger supplies the devices; if literal physical loopback rehearsal is required before the meeting, that portion slips. No alpha state has been touched.
 
 Remaining replay limit: synchronous reservation closes identical concurrent submissions, but the deterministic S0 fixture is not a production replay design (ES256 signature twins/counter-zero replay remain outside this spike). Production uses the separately ruled v3 request binding. No production GO is claimed by this preparation.
+
+
+## Review follow-up before rescheduled AL
+
+Bindi P2s are fixed: every authentication requests discoverable selection with
+`allowCredentials: []`; verify still checks the selected response id against the
+registered credential. Both verifies return SHA-256 of the raw credential ID,
+so compare `credentialIdHash` across Mac/phone/provider evidence. Registration
+options and verify reject a second registration, including options pre-issued
+before first completion; a synchronous in-flight reservation also prevents two
+completions replacing each other. These are tested synthetically, and do not
+claim a real-device session has run. Rook's hosting conditions remain: dedicated
+subdomain without production-session cookies, random base path or allowlist,
+proxy-network confirmation, and delete each throwaway credential from Apple
+Passwords/iCloud and 1Password on both devices after capture.

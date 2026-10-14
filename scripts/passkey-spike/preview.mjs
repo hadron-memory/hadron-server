@@ -77,13 +77,14 @@ export async function startSpike({ port = 0, expectedOrigin, rpID = 'localhost',
       if (url.pathname === '/registration/options' || url.pathname === '/authentication/options') {
         if (session.pending.size >= 16 || session.usedAssertions.size >= 128) return json(res, 400, { code: 'DEMO_LIMIT' });
         const registration = url.pathname === '/registration/options';
+        if (registration && (session.credential || session.registering)) return json(res,400,{code:'ALREADY_REGISTERED'});
         if (!registration && !session.credential) return json(res, 400, { code: 'REGISTER_FIRST' });
         const options = registration
           ? await generateRegistrationOptions({ rpName: 'Hadron synthetic AL spike', rpID, userName: 'synthetic-retention-user',
             userID: session.userHandle, attestationType: 'none', timeout: 20000,
             authenticatorSelection: { residentKey: 'required', userVerification: 'required' } })
           : await generateAuthenticationOptions({ rpID, challenge: Buffer.from(example.challengeHex, 'hex'), timeout: 20000,
-            userVerification: 'required', allowCredentials: [{ id: session.credential.id, transports: [...new Set([...(session.credential.transports ?? []), 'hybrid'])] }] });
+            userVerification: 'required', allowCredentials: [] });
         const id = randomBytes(24).toString('base64url');
         session.pending.set(id, { type: registration ? 'registration' : 'authentication', challenge: options.challenge, expiresAt: Date.now() + 60000 });
         return json(res, 200, { id, options });
@@ -94,14 +95,19 @@ export async function startSpike({ port = 0, expectedOrigin, rpID = 'localhost',
       session.pending.delete(body.id);
       if (!pending || pending.expiresAt < Date.now() || url.pathname !== `/${pending.type}/verify`) return json(res, 400, { code: 'CEREMONY_SPENT' });
       if (pending.type === 'registration') {
+        if (session.credential || session.registering) return json(res,400,{code:'ALREADY_REGISTERED'});
+        session.registering = true;
+        try {
         const result = await verifyRegistrationResponse({ response: body.response, expectedChallenge: pending.challenge,
           expectedOrigin: origin, expectedRPID: rpID, requireUserVerification: true });
         if (!result.verified) throw new Error('Refused');
         session.credential = result.registrationInfo.credential;
         session.backupEligible = result.registrationInfo.credentialDeviceType === 'multiDevice';
         return json(res, 200, { verified: true, userVerified: result.registrationInfo.userVerified,
+          credentialIdHash: createHash('sha256').update(Buffer.from(session.credential.id,'base64url')).digest('hex'),
           origin, rpID, counter: session.credential.counter, backupEligible: session.backupEligible,
           deviceType: result.registrationInfo.credentialDeviceType, backedUp: result.registrationInfo.credentialBackedUp });
+        } finally { session.registering = false; }
       }
       const assertionHash = createHash('sha256');
       for (const value of [body.response.response.clientDataJSON, body.response.response.authenticatorData, body.response.response.signature]) {
@@ -119,6 +125,7 @@ export async function startSpike({ port = 0, expectedOrigin, rpID = 'localhost',
       if (!result.verified) throw new Error('Refused');
       session.credential.counter = result.authenticationInfo.newCounter;
       return json(res, 200, { verified: true, userVerified: result.authenticationInfo.userVerified,
+        credentialIdHash: createHash('sha256').update(Buffer.from(session.credential.id,'base64url')).digest('hex'),
         origin: result.authenticationInfo.origin, rpID: result.authenticationInfo.rpID,
         counter: result.authenticationInfo.newCounter, backupEligible: result.authenticationInfo.credentialDeviceType === 'multiDevice',
         backedUp: result.authenticationInfo.credentialBackedUp, deviceType: result.authenticationInfo.credentialDeviceType, payloadUtf8: example.payloadUtf8 });
