@@ -197,13 +197,14 @@ describe('issueHostOperation: the closed set (cor:agt:070:03) and who issues (co
     expect(await db.hostOperation.count()).toBe(0);
   });
 
-  it('S4: starting or ending a worker is not issuable in this slice, by anyone; worker.deliver waits for a delivery path', async () => {
-    expect(await code(create(ctx(manager.id), { type: 'worker.start', args: { worktree: 'hadron-server/kit', family: 'claude' } }))).toBe('HOST_OPERATION_NOT_ISSUABLE');
-    expect(await code(asWorker(ada, () => create(ctx(adaHolder.id), { type: 'worker.start', args: { worktree: 'hadron-server/kit', family: 'claude' } }))))
-      .toBe('HOST_OPERATION_NOT_ISSUABLE');
-    expect(await code(create(ctx(manager.id), { type: 'worker.end', args: { sessionId: 's1' } }))).toBe('HOST_OPERATION_NOT_ISSUABLE');
+  it('S4: the worker Kit reports to may not start Kit (only whoever manages the App); worker.deliver is not issuable here (worker.end: sessionEnd.test.ts)', async () => {
+    const start = { type: 'worker.start', args: { worktree: 'hadron-server/kit', family: 'claude' } };
+    expect(await code(asWorker(ada, () => create(ctx(adaHolder.id), start)))).toBe('HOST_OPERATION_NOT_PERMITTED');
+    expect(await code(create(ctx(holder.id), start))).toBe('HOST_OPERATION_NOT_PERMITTED');
     expect(await code(create(ctx(manager.id), { type: 'worker.deliver', args: { sessionId: 's1', eventId: 'e1' } }))).toBe('HOST_OPERATION_NOT_ISSUABLE');
     expect(await db.hostOperation.count()).toBe(0);
+    // Whoever manages the App starts it (slice 2: launch.test.ts carries the rest).
+    expect(await create(ctx(manager.id), start)).toMatchObject({ type: 'worker.start', issuedBy: 'user', args: { workerId: kit.id, worktree: 'hadron-server/kit', family: 'claude' } });
   });
 
   it('S1 (070:05): the holder removes a worktree the host registers for Kit; one it does not register is refused', async () => {
@@ -427,23 +428,49 @@ describe('reads', () => {
     expect(await code(Q.hostRegistrations({}, { appRef: app.id }, keyCtx(foreignKey, otherApp.id)))).toBe('APP_NOT_FOUND');
   });
 
-  it('Holger #10805 (Riana\'s repro): a host key sees only its own host\'s operations; participants and non-host keys see all', async () => {
+  it('ruling 0 (#1894, cor:agt:070:04 S5): a host key is refused the App-wide listing; participants and non-host keys see all', async () => {
     await register(orca2, [{ worker: kit.id, family: 'claude' }]);
     const op1 = (await db.hostOperation.findFirstOrThrow({ where: { hostId: 'orca1' } })).id;
     const op2 = (await create(ctx(manager.id), { hostId: 'orca2' })).id;
     const ids = async (c: Context, extra: Record<string, unknown> = {}) =>
       (await Q.hostOperations({}, { appRef: app.id, ...extra }, c)).items.map((o: any) => o.id).sort();
-    // orca1's key: its own only, whatever it asks for; a cursor naming orca2's operation is no cursor (no oracle).
-    expect(await ids(keyCtx(orca1))).toEqual([op1]);
-    expect(await ids(keyCtx(orca1), { hostId: 'orca2' })).toEqual([]);
-    expect(await code(Q.hostOperations({}, { appRef: app.id, after: op2 }, keyCtx(orca1)))).toBe('BAD_USER_INPUT');
-    expect(await ids(keyCtx(orca2))).toEqual([op2]);
-    // Controls: a participant and the App's non-host key see the whole App.
+    const refusal = async (c: Context, extra: Record<string, unknown>) => {
+      try {
+        await Q.hostOperations({}, { appRef: app.id, ...extra }, c);
+      } catch (e: any) {
+        return { code: e.extensions?.code, message: e.message };
+      }
+      return null;
+    };
+    // Riana's orca1/orca2 case, now refused. One refusal, whatever the key passes: its own host, another host's, a
+    // cursor naming its own or another host's operation, a missing id, a bad status. Nothing in the answer depends on
+    // what exists, so the refusal is no oracle for other hosts' operations.
+    const asked: Record<string, unknown>[] = [
+      {}, { hostId: 'orca1' }, { hostId: 'orca2' }, { hostId: 'nohost' },
+      { after: op1 }, { after: op2 }, { after: generateId() }, { status: 'BOGUS' }, { worker: 'nobody' },
+    ];
+    const expected = await refusal(keyCtx(orca1), {});
+    expect(expected?.code).toBe('FORBIDDEN');
+    for (const extra of asked) {
+      expect(await refusal(keyCtx(orca1), extra)).toEqual(expected);
+      expect(await refusal(keyCtx(orca2), extra)).toEqual(expected);
+    }
+    // Controls: a participant and the App's non-host key see the whole App, as before.
     expect(await ids(ctx(member.id))).toEqual([op1, op2].sort());
     expect(await ids(keyCtx(plainKey))).toEqual([op1, op2].sort());
-    // Revoking host:operate does not widen the key's read: it stays held to its host.
+    expect(await ids(keyCtx(plainKey), { hostId: 'orca2' })).toEqual([op2]);
+    // A key whose host:operate grant was revoked is still a host key here: revoking never opens the listing.
     await M.revokeAppKeyScope({}, { id: orca1.id, scope: 'host:operate' }, ctx(manager.id));
-    expect(await ids(keyCtx(orca1))).toEqual([op1]);
+    expect(await refusal(keyCtx(orca1), {})).toEqual(expected);
+    expect(await refusal(keyCtx(orca1), { after: op2 })).toEqual(expected);
+  });
+
+  it('ruling 0: collect stays the host key\'s way to its own operations, unchanged', async () => {
+    await register(orca2, [{ worker: kit.id, family: 'claude' }]);
+    const op1 = (await db.hostOperation.findFirstOrThrow({ where: { hostId: 'orca1' } })).id;
+    const op2 = (await create(ctx(manager.id), { hostId: 'orca2' })).id;
+    expect((await collect(orca1)).map((o: any) => o.id)).toEqual([op1]);
+    expect((await collect(orca2)).map((o: any) => o.id)).toEqual([op2]);
   });
 
   it('cor:agt:070:07 S3: whoever manages the App reads every use of a host key; a member does not', async () => {

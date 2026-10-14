@@ -12,6 +12,7 @@
  * | task.assigned / .reassigned / assignment.matched | the new assignee (the task's LATEST assignment only) | ASSIGNED / REASSIGNED / MATCHED |
  * | a child's task.finished                 | the child's owner (050:16 r2)             | CHILD_FINISHED  |
  * | an unacknowledged alarm                 | its currently-woken chain position, a worker (050:19) | ALARM |
+ * | task.session-end-requested (#1709), when someone else ended the task | the assignee, while that session is open and the request unresolved (050:10) | END_SESSION |
  *
  * A wake for an event stays due until a wake proof naming it is acknowledged
  * (`worker_delivery_task_events.delivered_at`), or until it no longer asks
@@ -41,7 +42,7 @@ import { alarmEpisodeKey, currentAlarmEpisodes } from './stall.js';
 
 type Db = PrismaClient | Prisma.TransactionClient;
 
-export type TaskWakeEvent = 'ASSIGNED' | 'REASSIGNED' | 'MATCHED' | 'CHILD_FINISHED' | 'ALARM';
+export type TaskWakeEvent = 'ASSIGNED' | 'REASSIGNED' | 'MATCHED' | 'CHILD_FINISHED' | 'ALARM' | 'END_SESSION';
 
 /** One event a worker is due a wake for. `chainIndex` is 0 except for an alarm's woken position. */
 export type PendingTaskWake = {
@@ -87,7 +88,7 @@ export async function pendingTaskWakes(db: Db, workerIds: string[], now: Date): 
   const assignedTypes = Prisma.join([...ASSIGNED_EVENT_TYPES]);
 
   type Row = { workerId: string; taskId: string; eventId: string; type: string; title: string; at: Date };
-  const [assigned, finished, alarms] = await Promise.all([
+  const [assigned, finished, alarms, endSession] = await Promise.all([
     // The task's LATEST assignment event, to its current worker assignee, who has not acted on the task since
     // (an assignment the worker made itself counts as acting: `>=` includes the event).
     db.$queryRaw<Row[]>(Prisma.sql`
@@ -134,6 +135,20 @@ export async function pendingTaskWakes(db: Db, workerIds: string[], now: Date): 
         AND (e.chain -> s.idx ->> 'workerId') IN (${ids})
         AND ${liveApp('t')}
         AND ${undelivered("(e.chain -> s.idx ->> 'workerId')", 'e.id', 's.idx')}`),
+    // #1709 (cor:agt:050:10): a request that the assignee end its session, while the request is open and that
+    // session still is. Only when someone else ended the task (a cancellation): a worker that finished its own task
+    // reads the request on the task it just finished.
+    db.$queryRaw<Row[]>(Prisma.sql`
+      SELECT q.worker_id AS "workerId", t.id AS "taskId", q.event_id AS "eventId", 'task.session-end-requested' AS type,
+             t.title, q.requested_at AS at
+      FROM task_session_end_requests q
+      JOIN agent_tasks t ON t.id = q.task_id
+      JOIN sessions s ON s.id = q.session_id AND s.ended_at IS NULL AND s.deleted_at IS NULL
+      JOIN workers w ON w.id = q.worker_id AND w.app_id = t.app_id
+      WHERE q.worker_id IN (${ids}) AND q.resolved_at IS NULL
+        AND q.requested_by_worker_id IS DISTINCT FROM q.worker_id
+        AND ${liveApp('t')}
+        AND ${undelivered('q.worker_id', 'q.event_id', '0')}`),
   ]);
 
   const current = await currentAlarmEpisodes(db, alarms, now);
@@ -142,6 +157,7 @@ export async function pendingTaskWakes(db: Db, workerIds: string[], now: Date): 
     push({ ...r, chainIndex: 0, event: ASSIGNED_KIND[r.type as keyof typeof ASSIGNED_KIND] });
   }
   for (const r of finished) push({ ...r, chainIndex: 0, event: 'CHILD_FINISHED' });
+  for (const r of endSession) push({ ...r, chainIndex: 0, event: 'END_SESSION' });
   for (const r of alarms) {
     if (!r.episodeStart || !current.has(alarmEpisodeKey(r.taskId, r.type, r.episodeStart))) continue;
     push({ workerId: r.workerId, taskId: r.taskId, eventId: r.eventId, title: r.title, at: r.at, chainIndex: r.chainIndex, event: 'ALARM' });

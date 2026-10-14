@@ -1,0 +1,25 @@
+services:
+  passkey-al:
+    build:
+      context: ../..
+      dockerfile: scripts/passkey-spike/Dockerfile
+    image: hadron-passkey-al:temporary
+    restart: "no"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    environment:
+      PASSKEY_SPIKE_BASE_PATH: ${AL_BASE_PATH:?Holger must choose a random path or an allowlisted path}
+      PASSKEY_SPIKE_ORIGIN: ${AL_ORIGIN:?Holger must choose the exact ceremony origin}
+    networks: [proxy]
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.passkey-al.rule: "Host(`${AL_HOST:?Set the chosen origin hostname}`) && PathPrefix(`${AL_BASE_PATH:?Holger must choose a random path or an allowlisted path}`)"
+      traefik.http.routers.passkey-al.priority: "10000"
+      traefik.http.routers.passkey-al.entrypoints: ${AL_ENTRYPOINT:?Existing HTTPS entrypoint}
+      traefik.http.routers.passkey-al.tls: "true"
+      traefik.http.services.passkey-al.loadbalancer.server.port: "4380"
+networks:
+  proxy:
+    external: true
+    name: ${AL_PROXY_NETWORK:?Existing Traefik Docker network}

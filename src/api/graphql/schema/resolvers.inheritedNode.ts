@@ -20,21 +20,45 @@
  * rather than each surface, keeps one place for it: a field added later is
  * either listed here or reviewed against this list.
  *
- * Inherited edges (a base's edges resolved through the child, the way #10932
- * resolves its bare-loc links) are a follow-up; until then an inherited node
- * reads as having none.
+ * #1893: an inherited node's EDGES are the exception. Read through a child
+ * (a stamp carrying `via`), they resolve through that child the way bare-loc
+ * links do (resolveInheritedEdges): an overridden endpoint becomes the
+ * child's node, an endpoint not in effect drops the edge, and an endpoint
+ * outside the chain shows only when the reader may read its memory. An
+ * inherited node without `via` still reads as having none.
  */
+
+import { resolveInheritedEdges, type InheritedFrom } from '../../../lib/effectiveSystemMemory.js';
+import { isMemoryReadableCached } from './resolvers.helpers.js';
+import type { Context } from './resolvers.js';
 
 type Resolver = (parent: any, args?: any, ctx?: any, info?: any) => unknown;
 
 const none = () => null;
 const empty = () => [];
 
+/** An inherited node's edges in one direction, resolved through its child. */
+async function inheritedEdges(parent: { id: string; inheritedFrom?: InheritedFrom }, ctx: Context, direction: 'out' | 'in') {
+  const via = parent.inheritedFrom?.via;
+  if (!via) return [];
+  const resolved = await resolveInheritedEdges(ctx.db, {
+    nodeId: parent.id,
+    via,
+    direction,
+    canReadMemory: (memoryId) => isMemoryReadableCached(ctx, memoryId),
+  });
+  // Both endpoints are set, so Edge.source/target never re-load them by FK:
+  // the parent and a resolved endpoint are admitted through the child.
+  return resolved.map(({ edge, endpoint }) => direction === 'out'
+    ? { ...edge, sourceId: parent.id, source: parent, targetId: endpoint.id, target: endpoint }
+    : { ...edge, sourceId: endpoint.id, source: endpoint, targetId: parent.id, target: parent });
+}
+
 /** Field → what an inherited node returns, given the field's normal value. */
-const INHERITED_PROJECTION: Record<string, (value: () => Promise<any>) => unknown> = {
+const INHERITED_PROJECTION: Record<string, (value: () => Promise<any>, parent: any, ctx: any) => unknown> = {
   memory: none,
-  outgoingEdges: empty,
-  incomingEdges: empty,
+  outgoingEdges: (_value, parent, ctx) => inheritedEdges(parent, ctx, 'out'),
+  incomingEdges: (_value, parent, ctx) => inheritedEdges(parent, ctx, 'in'),
   moveLinkWarnings: none,
   authorship: none,
   createdByWorker: none,
@@ -73,7 +97,7 @@ export function withInheritedNodeProjection<T extends Record<string, any>>(node:
     const original: Resolver = node[field] ?? ((parent) => parent[field]);
     out[field] = (parent, args, ctx, info) =>
       parent?.inheritedFrom
-        ? project(async () => original(parent, args, ctx, info))
+        ? project(async () => original(parent, args, ctx, info), parent, ctx)
         : original(parent, args, ctx, info);
   }
   return out as T;

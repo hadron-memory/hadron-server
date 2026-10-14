@@ -1708,6 +1708,15 @@ model Session {
   /// could not be classified. A worker's family is its live bound session's.
   /// A matching input only, never an authorization input: it is self-declared.
   family          String?
+  /// #1709 (cor:agt:070:08; Holger via Vera #10773) — a host-launched session:
+  /// the host that started it, the `worker.start` operation, the task it was
+  /// launched for (none for a manager's start without one), and who issued the
+  /// start (`platform` | `manager`). Bound on the holder's own token; the hold
+  /// is unchanged. All four null for a session a person started by hand.
+  launchHostId      String?   @map("launch_host_id")
+  launchOperationId String?   @unique @map("launch_operation_id")
+  launchTaskId      String?   @map("launch_task_id")
+  launchIssuedBy    String?   @map("launch_issued_by")
   /// Total prompt tokens across the session.
   inputTokens     Int?        @map("input_tokens")
   /// Total completion tokens across the session.
@@ -1864,6 +1873,10 @@ model UsageEvent {
   @@index([userId, createdAt])
   @@index([memoryId, createdAt])
   @@index([organizationId, createdAt])
+  // #1903: session liveness also needs the PARTIAL index
+  // usage_events_session_activity_idx (session_id, created_at) WHERE
+  // counts_as_activity. Prisma can't model a partial index, so it lives in
+  // prisma/post-push.sql and migration 20261014040000.
   @@map("usage_events")
 }
 
@@ -3220,6 +3233,8 @@ model App {
   /// #1707 — hosts that registered which workers they can launch (cor:agt:070:01).
   hostRegistrations       HostRegistration[]
   hostOperations          HostOperation[]
+  launchGrants            LaunchGrant[]
+  sessionEndRequests      TaskSessionEndRequest[]
   mcpSessionStates McpSessionState[]
   scopes           Scope[]
   registerEntries  RegisterEntry[] @relation("RegisterOwnerApp")
@@ -5320,6 +5335,10 @@ model AgentTaskStallSchedule {
   /// pass without a refresh before its registration in this App lapses: 2 to
   /// 10 (chk_agent_task_stall_schedule_range); null is the default, 3.
   hostLapseCheckIns    Int?     @map("host_lapse_check_ins")
+  /// #1709 (cor:agt:050:10) — how many minutes a worker asked to end its
+  /// session on its task's finish or cancellation has before the platform ends
+  /// it through its host: 1 to 1440; null is the default, 10.
+  sessionEndGraceMinutes Int?   @map("session_end_grace_minutes")
   updatedAt            DateTime @updatedAt @map("updated_at")
   updatedBy            String?  @map("updated_by")
 
@@ -5412,6 +5431,13 @@ model HostOperation {
   result           Json?
   /// Why it failed, as the host said it; failures only.
   failureReason    String?   @map("failure_reason")
+  /// #1709 slice 2 (#1883 review, Diego P2-1) — `worker.start` only: the hold
+  /// that authorized the start, as (holder, held-at) when it was issued. A
+  /// grant is minted, and a bind made, only while the worker's hold is still
+  /// exactly this one: a release and re-hold changes `heldAt`, a move or an
+  /// account merge changes the holder (Holger via Vera #10775).
+  holdUserId       String?   @map("hold_user_id")
+  holdAt           DateTime? @map("hold_at")
 
   app    App    @relation(fields: [appId], references: [id], onDelete: Cascade)
   worker Worker @relation(fields: [workerId], references: [id], onDelete: Cascade)
@@ -5419,6 +5445,70 @@ model HostOperation {
   @@index([appId, hostId, status])
   @@index([workerId])
   @@map("host_operations")
+}
+
+/// #1709 (T6 slice 2; Holger's ruling A, Vera #10761) — a single-use launch
+/// grant: the proof a host passes to the agent it starts, which the agent
+/// redeems at `startSession` for an ordinary worker session. Minted when the
+/// host COLLECTS a `worker.start` (so no secret is stored in the operation),
+/// bound to (worker, host, task, holder), short-lived, stored only as a hash.
+/// Redeemable only by the holder, judged by the caller's token, never by the
+/// grant; consumed atomically. A re-collection revokes the unconsumed grant
+/// before minting a new one. Never a credential: it authorizes nothing the
+/// holder's own token does not.
+model LaunchGrant {
+  id           String    @id
+  appId        String    @map("app_id")
+  operationId  String    @map("operation_id")
+  workerId     String    @map("worker_id")
+  hostId       String    @map("host_id")
+  taskId       String?   @map("task_id")
+  holderUserId String    @map("holder_user_id")
+  tokenHash    String    @unique @map("token_hash")
+  issuedAt     DateTime  @default(now()) @map("issued_at")
+  expiresAt    DateTime  @map("expires_at")
+  consumedAt   DateTime? @map("consumed_at")
+  sessionId    String?   @map("session_id")
+  revokedAt    DateTime? @map("revoked_at")
+
+  app App @relation(fields: [appId], references: [id], onDelete: Cascade)
+
+  @@index([operationId])
+  @@map("launch_grants")
+}
+
+/// #1709 (cor:agt:050:10) — a task's request that its assignee end its worker
+/// session: written when a task with `closeSessionWhenDone` finishes or is
+/// cancelled while its worker assignee has an open session. One per task.
+///
+/// The worker is asked first; at `dueAt` (the App's grace, default 10 minutes)
+/// the sweep resolves it: `ended` (the session ended, by the worker or
+/// otherwise), `end-issued` (still open: the platform issued `worker.end` for
+/// that exact session to a live host registering the worker; `operationId`),
+/// or `no-live-host` (still open, no live host: nothing more happens). A
+/// replacement session is never touched: only `sessionId` is ever ended.
+model TaskSessionEndRequest {
+  id          String    @id
+  appId       String    @map("app_id")
+  taskId      String    @unique @map("task_id")
+  workerId    String    @map("worker_id")
+  sessionId   String    @map("session_id")
+  /// The `task.session-end-requested` event this request wrote.
+  eventId     String    @map("event_id")
+  /// The worker that finished or cancelled the task, when a worker did.
+  requestedByWorkerId String? @map("requested_by_worker_id")
+  requestedAt DateTime  @map("requested_at")
+  dueAt       DateTime  @map("due_at")
+  resolvedAt  DateTime? @map("resolved_at")
+  /// `ended` | `end-issued` | `no-live-host`; null while open.
+  resolution  String?
+  operationId String?   @map("operation_id")
+
+  app App @relation(fields: [appId], references: [id], onDelete: Cascade)
+
+  @@index([resolvedAt, dueAt])
+  @@index([workerId])
+  @@map("task_session_end_requests")
 }
 
 /// #1709 — one use of a host key (cor:agt:070:07: every use is recorded):

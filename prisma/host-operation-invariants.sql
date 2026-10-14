@@ -151,3 +151,14 @@ DROP TRIGGER IF EXISTS trg_host_key_uses_append_only ON host_key_uses;
 CREATE TRIGGER trg_host_key_uses_append_only
   BEFORE UPDATE OR DELETE ON host_key_uses
   FOR EACH ROW EXECUTE FUNCTION host_key_use_append_only();
+
+-- cor:agt:050:10 — a request that a task's assignee end its session is open
+-- until resolved once: the session ended, the platform issued worker.end for it
+-- (naming that operation), or there was no live host. Its grace runs forward.
+ALTER TABLE task_session_end_requests DROP CONSTRAINT IF EXISTS chk_task_session_end_requests_shape;
+ALTER TABLE task_session_end_requests ADD CONSTRAINT chk_task_session_end_requests_shape CHECK (
+  due_at >= requested_at AND
+  ((resolved_at IS NULL) = (resolution IS NULL)) AND
+  (resolution IS NULL OR resolution IN ('ended', 'end-issued', 'no-live-host')) AND
+  ((resolution IS NOT DISTINCT FROM 'end-issued') = (operation_id IS NOT NULL))
+);

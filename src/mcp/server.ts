@@ -1,6 +1,6 @@
 import { registerAutomationPinTools } from './automationPinTools.js';
 import { registerAgentDefinitionTools } from './agentDefinitionTools.js';
-import { effectiveScope, findEffectiveNodeIdByLoc, markInherited, retainEffective, stillInherited, type InheritedFrom } from '../lib/effectiveSystemMemory.js';
+import { effectiveScope, findEffectiveNodeIdByLoc, markInherited, resolveInheritedEdges, retainEffective, stillInherited, type InheritedFrom } from '../lib/effectiveSystemMemory.js';
 import { chatByline } from './chatByline.js';
 import { boundSessionPrivacyFilter } from '../lib/auth/sessionPrivacy.js';
 import { createHmac, randomUUID } from 'crypto';
@@ -63,6 +63,7 @@ import {
 import { portalUrlForUrn } from '../lib/portalUrl.js';
 import { userUrn } from '../lib/userHandle.js';
 import { registerCommentTools } from './commentTools.js';
+import { signingSurfacePolicy } from '../lib/signing/surface.js';
 import { registerSigningTools } from './signingTools.js';
 import { registerAgentTaskTools } from './agentTaskTools.js';
 import { registerTickerTools } from './tickerTools.js';
@@ -1657,7 +1658,22 @@ async function renderNodeReadProjection(
   // people and records behind it are not (resolvers.inheritedNode.ts has the
   // GraphQL side and the reasons). Stripped here, once, before any line reads them.
   const inheritedFrom = (node as { inheritedFrom?: InheritedFrom }).inheritedFrom;
-  if (inheritedFrom) node = inheritedReadRow(node);
+  if (inheritedFrom) {
+    // #1893 — its edges come through the child it was read through, resolved
+    // like bare-loc links; never the base's raw edges.
+    const via = inheritedFrom.via;
+    const canRead = (memoryId: string) =>
+      opts.auth ? canReadMemory(db, opts.auth, memoryId, EXPLICIT_REF) : Promise.resolve(false);
+    const resolve = (direction: 'out' | 'in') => via
+      ? resolveInheritedEdges(db, { nodeId: node.id, via, direction, canReadMemory: canRead })
+      : Promise.resolve([]);
+    const [outgoing, incoming] = await Promise.all([resolve('out'), resolve('in')]);
+    node = {
+      ...inheritedReadRow(node),
+      outgoingEdges: outgoing.map(({ edge, endpoint }) => ({ ...edge, target: endpoint })),
+      incomingEdges: incoming.map(({ edge, endpoint }) => ({ ...edge, source: endpoint })),
+    } as typeof node;
+  }
   const revision = node.revSeq;
   const memoryUrnOf = opts.memoryUrnOf ?? memoizedMemoryUrnLookup();
   const { urn, fellBack: urnFellBack } = await nodeUrnResult(node.loc, node.memoryId, memoryUrnOf);
@@ -1794,7 +1810,7 @@ async function renderNodeReadProjection(
 
   // #1632 (cor:dmo:130:06): the signatures line, beside Approval. An encrypted
   // node loads nothing (no hash-dependent work there).
-  const signatureLine = inheritedFrom
+  const signatureLine = inheritedFrom || !signingSurfacePolicy().signing
     ? ''
     : opts.encryptedMemory
     ? 'Signatures: not applicable (encrypted memory)'
@@ -3063,6 +3079,8 @@ export function createMcpServerInstance(
         `version: ${dep.version}`,
         `capabilities: ${[
           ...MCP_SURFACE_CAPABILITIES,
+          ...(dep.signing ? ['node-signing'] : []),
+          ...(dep.passkeyRegistration ? ['passkey-registration'] : []),
           // Probed exactly as the tools will admit the call: allowlists, a
           // live App and current participation (#1362 review).
           ...(auth.appId && (await teamAttentionAvailable(chatCtx(), auth.appId))
@@ -4473,10 +4491,20 @@ export function createMcpServerInstance(
         if (n.tags?.length) parts.push(`  Tags: ${n.tags.join(', ')}`);
         // Brief edge rendering — hide edges whose target is soft-deleted
         // (#180 Bug 2); findNodes includes them, so filter here.
-        if (brief && !hitInheritedFrom) {
-          const edges = (n.outgoingEdges ?? []).filter(
-            (e) => e.target && e.target.deletedAt == null,
-          );
+        if (brief) {
+          // #1893 — an inherited hit's edges come through its child, never raw.
+          const edges = hitInheritedFrom
+            ? (hitInheritedFrom.via
+              ? (await resolveInheritedEdges(db, {
+                  nodeId: n.id,
+                  via: hitInheritedFrom.via,
+                  direction: 'out',
+                  canReadMemory: (memoryId) => canReadMemory(db, auth, memoryId, EXPLICIT_REF),
+                })).map(({ edge, endpoint }) => ({ ...edge, target: endpoint }))
+              : [])
+            : (n.outgoingEdges ?? []).filter(
+                (e) => e.target && e.target.deletedAt == null,
+              );
           if (edges.length) {
             const edgeStrs = await Promise.all(
               edges.map(async (e) => {
@@ -5142,8 +5170,13 @@ export function createMcpServerInstance(
       const reports = await batchValidationReports(visible);
       const memoryUrnOf = memoizedMemoryUrnLookup();
       // #1632: signatures for the batch in one load; their signers join the
-      // one human-name lookup.
-      const signatures = await loadSignatureStatuses(db, visible.map((n) => n.id));
+      // one human-name lookup. #1885: never for an inherited node, whose line
+      // is blank, so the base's signers are not even looked up.
+      const signatures = signingSurfacePolicy().signing
+        ? await loadSignatureStatuses(db, visible
+          .filter((n) => !(n as { inheritedFrom?: InheritedFrom }).inheritedFrom)
+          .map((n) => n.id))
+        : new Map<string, NodeSignatureStatusView>();
       const signerIds = [...signatures.values()].flatMap((st) => st.signatures.map((sig) => sig.signerId));
       const [taskRefs, humanNames, feedback] = await Promise.all([
         batchReadableTaskRefs(visible, reports, auth, memoryUrnOf),
@@ -8660,8 +8693,9 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       workerRef: z.string().optional().describe('The Worker (named casting) this session works as. Three forms resolve: the worker\'s NAME ("Iris" — unique within the App, case-insensitive, and what a human will say), its URN (hrn:worker:<root>:<app-slug>:<slug>), or its bare id. Prefer the name for a human-driven pickup; the URN when addressing a worker across App context. Must belong to this App; stamps the session\'s agentId from the casting and returns the worker\'s boot briefing.'),
       reportsTo: z.string().optional().describe('#1726 — the worker this worker reports to (its name in this App, URN or id), set in the same step as the bind, as a spawn brief would. Sets it only when the worker reports to nobody, or already to that worker; naming a different one refuses the bind (WORKER_REPORTS_TO_HELD) unless you manage the App. Omit to leave it unchanged.'),
       force: z.boolean().optional().describe('Take over a WORKER_TAKEN worker — one someone drove RECENTLY (#1114: a merely-open session no longer refuses, so if you are seeing this refusal the session is live rather than just unclosed). That open session may be someone else\'s live work, or your own left behind by a chat session that ended without ending it (ending a chat session never ends a worker session); the server cannot tell which, so neither should you assume. Use only on the user\'s explicit override, after showing who last drove it.'),
+      launchGrant: z.string().optional().describe('#1709: the single-use launch grant your host gave you when it started you (cor:agt:070:08). Pass it with your holder\'s own credential; it binds the worker it names, so workerRef may be omitted. It cannot be combined with force.'),
     },
-    async ({ description, type, repo, branch, prNumber, customerId, language, llmModel, family, parentSessionId, prevSessionId, workerRef, reportsTo, force }) => {
+    async ({ description, type, repo, branch, prNumber, customerId, language, llmModel, family, parentSessionId, prevSessionId, workerRef, reportsTo, force, launchGrant }) => {
       // Spec 026 / D-2026-05-21-003 strict tool: session-start needs App
       // context to attribute the session. Errors with typed [no_active_app]
       // envelope for multi-App OAuth callers without selection.
@@ -8682,7 +8716,8 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       const workerRefTrimmed = workerRef?.trim();
       const workerRefNamesItsApp =
         !!workerRefTrimmed && (isId(workerRefTrimmed) || hasSchemePrefix(workerRefTrimmed));
-      if (!workerRefNamesItsApp) {
+      // #1709: a launch grant names its own worker, and so its App.
+      if (!workerRefNamesItsApp && !launchGrant) {
         const appScopeError = requireAppScope();
         if (appScopeError) return appScopeError;
       }
@@ -8728,6 +8763,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
               workerRef: workerRef ?? undefined,
               reportsTo: reportsTo ?? undefined,
               force: force ?? undefined,
+              launchGrant: launchGrant ?? undefined,
             },
           },
           mcpCtx,

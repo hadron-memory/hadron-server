@@ -249,11 +249,20 @@ export async function retainEffective<T extends { id: string; memoryId: string; 
   if (scope.inheritedFrom.size === 0) return rows;
   const candidates = rows.filter((r) => scope.inheritedFrom.has(r.memoryId));
   if (candidates.length === 0) return rows;
-  const live = new Set<string>();
+  // node id -> the first root (in scope order) that inherits it now: the
+  // child each kept row is read through, so its edges resolve there (#1893).
+  const viaById = new Map<string, string>();
   for (const root of scope.roots) {
-    for (const id of (await inheritedNodeIds(db, await systemMemoryChain(db, root))).keys()) live.add(id);
+    for (const id of (await inheritedNodeIds(db, await systemMemoryChain(db, root))).keys()) {
+      if (!viaById.has(id)) viaById.set(id, root);
+    }
   }
-  return rows.filter((r) => !scope.inheritedFrom.has(r.memoryId) || (live.has(r.id) && !isNotInheritedRole(r.role)));
+  const kept = rows.filter((r) => !scope.inheritedFrom.has(r.memoryId) || (viaById.has(r.id) && !isNotInheritedRole(r.role)));
+  for (const r of kept) {
+    const from = scope.inheritedFrom.get(r.memoryId);
+    if (from) (r as T & { inheritedFrom?: InheritedFrom }).inheritedFrom = { ...from, via: viaById.get(r.id)! };
+  }
+  return kept;
 }
 
 /**
@@ -270,4 +279,84 @@ export async function stillInherited(
   if (!from.via || isNotInheritedRole(row.role)) return false;
   const effective = await findEffectiveNodeIdByLoc(db, from.via, row.loc);
   return effective?.id === row.id && effective.inheritedFrom !== null;
+}
+
+/**
+ * Is the endpoint row `resolveInheritedEdges` is about to serve, AS READ, still
+ * the node `via`'s effective memory selects at `loc`? (Diego's P2 on #1899.)
+ * The selection and the read are separate queries, so a concurrent write can
+ * land between them in either order: a selected override turned boot prompt,
+ * moved, or replaced before it is hydrated; or an endpoint the edge query
+ * preloaded as a boot prompt that stopped being one before the selection.
+ * So the version actually read must sit at the selected memory and loc, and
+ * a fresh lookup must still resolve the loc to it, not as a boot prompt when
+ * inherited. Anything else drops the edge; it is never served under the
+ * selection's stale stamp.
+ */
+async function servedEndpointInEffect(
+  db: Db,
+  via: string,
+  loc: string,
+  selected: { id: string; memoryId: string; inheritedFrom: InheritedFrom | null },
+  row: { id: string; memoryId: string; loc: string; role?: string | null; deletedAt?: Date | null },
+): Promise<boolean> {
+  if (row.deletedAt || row.id !== selected.id || row.memoryId !== selected.memoryId || row.loc !== loc) return false;
+  if (selected.inheritedFrom) return stillInherited(db, selected.inheritedFrom, row);
+  return (await findEffectiveNodeIdByLoc(db, via, loc))?.id === row.id;
+}
+
+/** An edge of an inherited node, resolved through its child (#1893). */
+export type ResolvedInheritedEdge<E, N> = { edge: E; endpoint: N & { inheritedFrom?: InheritedFrom } };
+
+/**
+ * #1893 (cor:dmo:050:14; Holger, team chat #10968 item 2) — an inherited
+ * node's edges, read through the child it came through, resolved the way
+ * bare-loc links are (#10932):
+ *
+ * - an endpoint in the child's chain resolves BY LOC through the child's
+ *   effective memory: the child's override wins, and an endpoint that isn't
+ *   in effect there (overridden away to nothing, a base boot prompt) drops
+ *   the edge. A resolved endpoint that is inherited is stamped, `via` the
+ *   same child, so its own fields are the sanitized projection too;
+ * - an endpoint outside the chain shows only when `canReadMemory` admits its
+ *   own memory: never widened.
+ *
+ * Both directions follow the same rule. So no edge ever hands over a base
+ * node that is not in effect for the child (S7 stays shut).
+ */
+export async function resolveInheritedEdges(
+  db: Pick<PrismaClient, '$queryRaw' | 'edge' | 'node'>,
+  args: {
+    nodeId: string;
+    via: string;
+    direction: 'out' | 'in';
+    canReadMemory: (memoryId: string) => Promise<boolean>;
+  },
+) {
+  const chain = await systemMemoryChain(db as Db, args.via);
+  const inChain = new Set(chain.map((l) => l.memoryId));
+  const far = args.direction === 'out' ? 'target' : 'source';
+  const edges = await db.edge.findMany({
+    where: args.direction === 'out'
+      ? { sourceId: args.nodeId, deletedAt: null, target: { deletedAt: null } }
+      : { targetId: args.nodeId, deletedAt: null, source: { deletedAt: null } },
+    include: { [far]: true } as { target: true } | { source: true },
+    orderBy: { loc: 'asc' },
+  });
+  type EdgeRow = (typeof edges)[number];
+  type NodeRow = NonNullable<Awaited<ReturnType<typeof db.node.findUnique>>>;
+  const out: Array<ResolvedInheritedEdge<EdgeRow, NodeRow>> = [];
+  for (const edge of edges) {
+    const endpoint = (edge as unknown as Record<string, NodeRow>)[far]!;
+    if (!inChain.has(endpoint.memoryId)) {
+      if (await args.canReadMemory(endpoint.memoryId)) out.push({ edge, endpoint });
+      continue;
+    }
+    const effective = await findEffectiveNodeIdByLoc(db as Db, args.via, endpoint.loc);
+    if (!effective) continue;
+    const row = effective.id === endpoint.id ? endpoint : await db.node.findUnique({ where: { id: effective.id } });
+    if (!row || !(await servedEndpointInEffect(db as Db, args.via, endpoint.loc, effective, row))) continue;
+    out.push({ edge, endpoint: effective.inheritedFrom ? { ...row, inheritedFrom: effective.inheritedFrom } : row });
+  }
+  return out;
 }
