@@ -13,7 +13,7 @@
  * `setAgentIndexRefs` as they are. The gate (whoever manages the child), the
  * refusals and their order, the concealment and the in-transaction
  * re-authorization all stay the resolver's; a refusal comes back with the
- * resolver's own code and message. Nothing is validated here beyond the
+ * code and message GraphQL's formatter gives it. Nothing is validated here beyond the
  * arguments' shape.
  */
 import { z } from 'zod';
@@ -22,8 +22,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { PrismaClient } from '../generated/prisma/index.js';
 import type { AuthContext } from '../middleware/auth.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
-import { EntityNotFoundError } from '../lib/entityRef/errors.js';
-import { UrnNotQualifiedError } from '../lib/urn.js';
+import { formatGraphQLError } from '../api/graphql/formatError.js';
 import { canReadMemory, EXPLICIT_REF } from './access-control.js';
 import { resolveAgentRef } from '../lib/entityRef/agentRef.js';
 import { listAgentProcesses, listAgentTasks, type ListedNode } from '../lib/agentDefinitionLists.js';
@@ -38,17 +37,22 @@ function errorResult(e: unknown) {
 }
 
 /**
- * #1936 — a write's refusal as `[<code>] <message>`, the code being the one
- * GraphQL puts on the wire (a GraphQLError's, or a not-found's own). Anything
- * else is a server fault, rethrown to the shared tool error boundary.
+ * #1936 — a write's refusal as `[<code>] <message>`, exactly as GraphQL sends
+ * it: the error goes through `formatGraphQLError`, the server's own formatter,
+ * so every code it assigns (a not-found's, URN_NOT_QUALIFIED, the ambiguous
+ * legacy alias, and any it gains later) is classified once, there, and the
+ * code is written as it is on the wire (Andi's P2 on #1943). An error the
+ * formatter leaves untyped, or types INTERNAL_SERVER_ERROR, is a server fault:
+ * rethrown to the shared tool error boundary, which redacts a database one.
  */
 function refusalResult(e: unknown) {
-  const code = e instanceof GraphQLError ? e.extensions?.code
-    : e instanceof EntityNotFoundError ? e.code
-    : e instanceof UrnNotQualifiedError ? 'BAD_USER_INPUT'
-    : undefined;
-  if (!code) throw e;
-  return { isError: true as const, content: [{ type: 'text' as const, text: `[${String(code).toLowerCase()}] ${(e as Error).message}` }] };
+  const wire = formatGraphQLError(
+    { message: e instanceof Error ? e.message : String(e), extensions: e instanceof GraphQLError ? e.extensions : {} },
+    e,
+  );
+  const code = wire.extensions?.code;
+  if (typeof code !== 'string' || code === 'INTERNAL_SERVER_ERROR') throw e;
+  return { isError: true as const, content: [{ type: 'text' as const, text: `[${code}] ${wire.message}` }] };
 }
 
 type AgentRow = { id: string; urn: string; extendsAgentId: string | null; tasksIndexRef: string | null; processesIndexRef: string | null };
