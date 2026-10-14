@@ -427,6 +427,25 @@ describe('reads', () => {
     expect(await code(Q.hostRegistrations({}, { appRef: app.id }, keyCtx(foreignKey, otherApp.id)))).toBe('APP_NOT_FOUND');
   });
 
+  it('Holger #10805 (Riana\'s repro): a host key sees only its own host\'s operations; participants and non-host keys see all', async () => {
+    await register(orca2, [{ worker: kit.id, family: 'claude' }]);
+    const op1 = (await db.hostOperation.findFirstOrThrow({ where: { hostId: 'orca1' } })).id;
+    const op2 = (await create(ctx(manager.id), { hostId: 'orca2' })).id;
+    const ids = async (c: Context, extra: Record<string, unknown> = {}) =>
+      (await Q.hostOperations({}, { appRef: app.id, ...extra }, c)).items.map((o: any) => o.id).sort();
+    // orca1's key: its own only, whatever it asks for; a cursor naming orca2's operation is no cursor (no oracle).
+    expect(await ids(keyCtx(orca1))).toEqual([op1]);
+    expect(await ids(keyCtx(orca1), { hostId: 'orca2' })).toEqual([]);
+    expect(await code(Q.hostOperations({}, { appRef: app.id, after: op2 }, keyCtx(orca1)))).toBe('BAD_USER_INPUT');
+    expect(await ids(keyCtx(orca2))).toEqual([op2]);
+    // Controls: a participant and the App's non-host key see the whole App.
+    expect(await ids(ctx(member.id))).toEqual([op1, op2].sort());
+    expect(await ids(keyCtx(plainKey))).toEqual([op1, op2].sort());
+    // Revoking host:operate does not widen the key's read: it stays held to its host.
+    await M.revokeAppKeyScope({}, { id: orca1.id, scope: 'host:operate' }, ctx(manager.id));
+    expect(await ids(keyCtx(orca1))).toEqual([op1]);
+  });
+
   it('cor:agt:070:07 S3: whoever manages the App reads every use of a host key; a member does not', async () => {
     const uses = await F.AppKey.hostUses({ id: orca1.id, appId: app.id }, {}, ctx(manager.id));
     expect(uses.map((u: any) => u.action)).toEqual(['register']);

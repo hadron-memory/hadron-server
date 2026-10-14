@@ -483,6 +483,12 @@ export const hostOperationQueries = {
       if (status && !['issued', 'collected', 'succeeded', 'failed'].includes(status)) {
         throw badInput('status is ISSUED, COLLECTED, SUCCEEDED or FAILED.');
       }
+      // Holger via Vera #10805 (cor:agt:070:04): a host key sees only its OWN host's operations; the App-wide listing is
+      // for the App's participants and its other keys. A key that has ever been granted host:operate is a host key
+      // here, held to the host of its latest grant even once revoked, so revoking the scope never widens its read.
+      const ownHost = await hostOfKey(c);
+      const hostFilter = ownHost ?? a.hostId ?? null;
+      if (ownHost && a.hostId && a.hostId !== ownHost) return { items: [], hasNextPage: false, endCursor: null };
       let workerId: string | null = null;
       if (a.worker) {
         workerId = await resolveTaskWorkerId(c, app.id, a.worker);
@@ -490,14 +496,18 @@ export const hostOperationQueries = {
       }
       let cursor: { issuedAt: Date; id: string } | null = null;
       if (a.after) {
-        const at = await c.db.hostOperation.findFirst({ where: { id: a.after, appId: app.id }, select: { issuedAt: true, id: true } });
+        // Scoped like the list, so a cursor naming another host's operation reads as no cursor at all (no oracle).
+        const at = await c.db.hostOperation.findFirst({
+          where: { id: a.after, appId: app.id, ...(ownHost ? { hostId: ownHost } : {}) },
+          select: { issuedAt: true, id: true },
+        });
         if (!at) throw badInput('after is not a cursor of this list.');
         cursor = at;
       }
       const rows: HostOperationRow[] = await c.db.hostOperation.findMany({
         where: {
           appId: app.id,
-          ...(a.hostId ? { hostId: a.hostId } : {}),
+          ...(hostFilter ? { hostId: hostFilter } : {}),
           ...(status ? { status } : {}),
           ...(workerId ? { workerId } : {}),
           ...(cursor ? { OR: [{ issuedAt: { lt: cursor.issuedAt } }, { issuedAt: cursor.issuedAt, id: { lt: cursor.id } }] } : {}),
@@ -509,6 +519,21 @@ export const hostOperationQueries = {
       return { items, hasNextPage: rows.length > first, endCursor: items.length ? items[items.length - 1]!.id : null };
     }),
 };
+
+/**
+ * The host a calling App key is bound to for reads, or null for a person or a key that was never a host's: the host
+ * of the key's latest host:operate grant, live or revoked (#10805).
+ */
+async function hostOfKey(c: Context): Promise<string | null> {
+  const key = appKeyCaller(c);
+  if (!key) return null;
+  const row = await c.db.appKeyScope.findFirst({
+    where: { appKeyId: key.appKeyId, scope: 'host:operate' },
+    orderBy: [{ grantedAt: 'desc' }, { id: 'desc' }],
+    select: { hostId: true },
+  });
+  return row?.hostId ?? null;
+}
 
 export const hostOperationFieldResolvers = {
   HostOperation: {
