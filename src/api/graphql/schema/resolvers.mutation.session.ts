@@ -706,7 +706,8 @@ export const sessionMutations = {
         // SESSION_WORKER_NOT_IN_APP with both Apps' ids, the participant FORBIDDEN) is therefore reachable only
         // by a reader; anyone else gets exactly the absent ref's envelope. One exception: the worker a launch
         // grant names, whose holder the grant has already told it exists. A holder who has since lost the App
-        // must still reach the FORBIDDEN that fails the start (#10775), not a not-found that leaves it hanging.
+        // must still reach the FORBIDDEN that fails the start (#10775), not a not-found that leaves it hanging. The
+        // accepted marginal (#1945): that holder can also learn their own grant's worker was retired, and no other's.
         if (!(launch && worker.id === launch.grant.workerId)) await requireWorkerVisibleOrNotFound(ctx, worker.appId, workerRef);
         // #1709: a grant starts the worker it names, and no other; checked before any gate whose refusal would
         // fail the start, so a mismatched ref is the caller's mistake, never a change in the world.

@@ -6153,7 +6153,11 @@ export const typeDefs = `#graphql
     role-agent. The worker must belong to the session's App: with appRef (or an
     App-key credential) it must match the worker's App; without one, the
     worker's App becomes the session's, behind the same membership gate as
-    appRef. A retired worker refuses (WORKER_RETIRED). #940: a worker with an
+    appRef. A retired worker refuses (WORKER_RETIRED). #1937: an id or URN
+    naming a worker in an App the caller cannot read refuses exactly like an
+    absent ref (WORKER_NOT_FOUND, same message and extensions), so no other
+    refusal here tells an outsider the worker exists. The one exception is the
+    worker the caller's own launchGrant names (see launchGrant). #940: a worker with an
     ACTIVE session refuses WORKER_TAKEN — extensions carry workerId, sessionId,
     lastDriver, lastSeenAt, everything the takeover prompt needs — unless
     force is true (informed takeover, cor:agt:020:03: show who last drove it,
@@ -6184,6 +6188,9 @@ export const typeDefs = `#graphql
     LAUNCH_GRANT_INVALID when unknown, expired, used or not minted for the caller (an App key never redeems one);
     LAUNCH_REFUSED, failing the start with the reason, when the hold changed, the holder may no longer hold the
     worker, or it already has a live session. Never forced: with force it is BAD_USER_INPUT.
+    The grant's own worker skips the #1937 worker read gate, because the grant already told its holder that worker
+    exists: a holder who has lost the App gets LAUNCH_REFUSED with its reason rather than WORKER_NOT_FOUND, and so
+    may learn that this one worker was retired (#1945). Any other workerRef sent with a grant is gated first.
     """
     launchGrant: String
     "The session's stated intent (Session.plan) - what this session is about. MCP's hadron_start_session description lands here."
