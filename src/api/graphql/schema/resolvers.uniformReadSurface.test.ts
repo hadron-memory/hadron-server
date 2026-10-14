@@ -149,8 +149,8 @@ describe('Query.agent(ref) — the uniform single-agent read', () => {
     expect((await Q.agent(null, { ref: agentA.id }, ctx(admin.id, ['ADMIN'])))?.id).toBe(agentA.id);
   });
 
-  it('throws Forbidden for a non-member; null for a missing agent', async () => {
-    await expect(Q.agent(null, { ref: agentA.id }, ctx(stranger.id))).rejects.toThrow('Forbidden');
+  it('null for a non-member and for a missing agent alike (#1944: no existence oracle)', async () => {
+    expect(await Q.agent(null, { ref: agentA.id }, ctx(stranger.id))).toBeNull();
     expect(await Q.agent(null, { ref: generateId() }, ctx(member.id))).toBeNull();
   });
 
@@ -166,7 +166,7 @@ describe('Query.agent(ref) — the uniform single-agent read', () => {
       where: { organizationId: orgA.id, userId: member.id },
       data: { deletedAt: new Date() },
     });
-    await expect(Q.agent(null, { ref: agentA.id }, ctx(member.id))).rejects.toThrow('Forbidden');
+    expect(await Q.agent(null, { ref: agentA.id }, ctx(member.id))).toBeNull(); // #1944: as absent
     await expect(Q.app(null, { ref: app.id }, ctx(member.id))).rejects.toThrow('Forbidden');
   });
 

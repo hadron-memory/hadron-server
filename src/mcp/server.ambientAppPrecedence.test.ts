@@ -171,21 +171,19 @@ describe('#1037 — the bind', () => {
     // (findings:auth-appid-credential-vs-selection), so a workerRef naming
     // another App is a client bug, not stale connection state. Asserted at the
     // resolver, where a Context with appId and no userId is exactly that shape.
+    //
+    // #1937: and since a key reads only its own App's staff, the refusal is the absent ref's envelope. It used to
+    // be SESSION_WORKER_NOT_IN_APP with the worker's and its App's ids, which told the key's holder the worker exists.
     const keyCtx = { db, appId: appB.id, roles: [] } as unknown as Context;
-    await expect(
-      resolvers.Mutation.startSession(
-        {}, { input: { id: generateId(), workerRef: DARA_URN() } }, keyCtx,
-      ),
-    ).rejects.toThrow(/different App/);
-
     try {
       await resolvers.Mutation.startSession(
         {}, { input: { id: generateId(), workerRef: DARA_URN() } }, keyCtx,
       );
+      expect.fail('expected a refusal');
     } catch (e) {
       const err = e as GraphQLError;
-      expect(err.extensions?.appSource).toBe('credential');
-      expect(err.message).toContain('App key');
+      expect(err.message).toBe(`Worker not found: ${DARA_URN()}`);
+      expect(err.extensions).toEqual({ code: 'WORKER_NOT_FOUND' });
     }
 
     // Nothing was created — the refusal is not a partial bind.

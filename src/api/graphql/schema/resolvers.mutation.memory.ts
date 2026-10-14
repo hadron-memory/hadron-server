@@ -87,7 +87,6 @@ import {
   UserNotFoundError,
   AmbiguousUserRefError,
 } from '../../../lib/entityRef/errors.js';
-import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { resolveNodeRefForCaller } from './resolvers.nodeRefAccess.js';
 import { resolveUserRefOrEmail } from '../../../lib/entityRef/userRef.js';
@@ -126,6 +125,7 @@ import {
   requireRole,
   requireOrgRole,
   requireAgentAccess,
+  resolveReadableAgentRef,
   requireOwnerOrOrgRole,
   requireMemoryManageAccess,
   concealUnreadableDenial,
@@ -1744,10 +1744,11 @@ export const memoryMutations = {
     ) => {
       // 007-entity-id-or-urn: agentId and memoryId may be IDs, bare URNs,
       // or prefixed URNs. Resolve both to definite IDs before any
-      // subsequent checks.
-      const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentRef);
+      // subsequent checks. #1944: the Agent through the read gate, so one
+      // the caller can't read answers as absent.
+      const agent = await resolveReadableAgentRef(ctx, agentRef);
+      const resolvedAgentId = agent.id;
       const { id: resolvedMemoryId } = await resolveMemoryRef(ctx.db, memoryRef);
-      const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
       await requireAgentAccess(ctx, agent, 'ADMIN');
       // #1349: the role is validated before anything is stored (the column is
       // a free String, so an unknown value used to persist as an inert grant)
@@ -1804,9 +1805,10 @@ export const memoryMutations = {
       { agentRef, memoryRef, role }: { agentRef: string; memoryRef: string; role: string },
       ctx: Context,
     ) => {
-      const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentRef);
+      // #1944: an Agent the caller can't read answers as absent.
+      const agent = await resolveReadableAgentRef(ctx, agentRef);
+      const resolvedAgentId = agent.id;
       const { id: resolvedMemoryId } = await resolveMemoryRef(ctx.db, memoryRef);
-      const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
       await requireAgentAccess(ctx, agent, 'ADMIN');
       // #1349: re-role is its own escalation path — an existing `read` row
       // becomes the write cap here — so the NEW role gets the same memory-side
@@ -1867,9 +1869,10 @@ export const memoryMutations = {
       { agentRef, memoryRef }: { agentRef: string; memoryRef: string },
       ctx: Context,
     ) => {
-      const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentRef);
+      // #1944: an Agent the caller can't read answers as absent.
+      const agent = await resolveReadableAgentRef(ctx, agentRef);
+      const resolvedAgentId = agent.id;
       const { id: resolvedMemoryId } = await resolveMemoryRef(ctx.db, memoryRef);
-      const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
       await requireAgentAccess(ctx, agent, 'ADMIN');
       let lockedPair: Awaited<ReturnType<typeof lockAttachmentPair>>;
       await withAuthorizedMemoryTx(
