@@ -199,12 +199,13 @@ export const hostOperationMutations = {
         await tx.hostOperation.updateMany({ where: { id: { in: ids }, status: 'issued' }, data: { status: 'collected', collectedAt: now } });
       }
       // #1709 slice 2: each worker.start collected gets a fresh single-use launch grant, shown in this answer only.
-      // One whose worker is no longer held fails here instead, and is left out.
+      // One whose worker is no longer held fails here instead, and is left out. #1928: one whose grant is still live
+      // is left out too, so a re-collect never revokes a launch in flight.
       const starts = ids.length ? await tx.hostOperation.findMany({ where: { id: { in: ids }, type: 'worker.start' } }) : [];
-      const grants = await mintLaunchGrants(tx, starts, now);
+      const { grants, withheld } = await mintLaunchGrants(tx, starts, now);
       const ops = ids.length ? await tx.hostOperation.findMany({ where: { id: { in: ids }, status: 'collected' } }) : [];
-      await recordHostKeyUse(tx, host, 'collect', { count: ops.length });
-      const byId = new Map(ops.map((o) => [o.id, o]));
+      const byId = new Map(ops.filter((o) => !withheld.has(o.id)).map((o) => [o.id, o]));
+      await recordHostKeyUse(tx, host, 'collect', { count: byId.size });
       return ids.filter((id) => byId.has(id)).map((id) => ({ ...byId.get(id)!, launchGrant: grants.get(id) ?? null }));
     });
   },
