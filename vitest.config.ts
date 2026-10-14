@@ -10,7 +10,7 @@ export default defineConfig({
     // test files would otherwise be collected into THIS run (and race on the
     // shared hadron_test DB; see findings:parallel-vitest-shared-test-db).
     // Disposable-stack regressions use node:test, not Vitest.
-    exclude: ['dist/**', 'node_modules/**', '.claude/**', 'scripts/e2e/**'],
+    exclude: ['dist/**', '**/node_modules/**', '.claude/**', 'scripts/e2e/**'],
     pool: 'forks',
     // Parallel by default: perWorkerDb.ts points each worker at its own cloned
     // DB (hadron_test_<VITEST_POOL_ID>), so files no longer race and can run

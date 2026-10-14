@@ -6,6 +6,7 @@
  * GraphQL exactly.
  */
 import { z } from 'zod';
+import { signingSurfacePolicy } from '../lib/signing/surface.js';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { PrismaClient } from '../generated/prisma/index.js';
 import type { AuthContext } from '../middleware/auth.js';
@@ -37,6 +38,7 @@ async function renderRequest(row: RequestRow, ctx: Context): Promise<string> {
 }
 
 export function registerSigningTools(server: McpServer, deps: { db: PrismaClient; auth: AuthContext }): void {
+  if (!signingSurfacePolicy().signing) return;
   const { db, auth } = deps;
   const ctxOf = (): Context => ({
     db,

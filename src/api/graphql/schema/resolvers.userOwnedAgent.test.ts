@@ -256,6 +256,9 @@ describe('#1787 — a platform admin manages a user-owned Agent (cor:dmo:050:13,
   const admin = () => ctx({ userId: otherId, roles: ['ADMIN'] });
 
   it('reads, updates and deletes a user-owned Agent it does not own', async () => {
+    // Mutations re-read platform roles under the authority fence; the positive
+    // fixture must persist its ADMIN grant rather than only claiming it in ctx.
+    await db.user.update({ where: { id: otherId }, data: { roles: ['ADMIN'] } });
     const agent = await rogueAgent();
 
     const read = await resolvers.Query.agent(null, { ref: agent.id }, admin());
