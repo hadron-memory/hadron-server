@@ -30,6 +30,7 @@ export class SigningRefusal extends Error {
       | 'COMMENT_NOT_SIGNABLE'
       | 'ENCRYPTED_MEMORY_NOT_APPLICABLE'
       | 'SIGNER_NOT_FOUND'
+      | 'SIGNER_NOT_A_WRITER'
       | 'SIGNING_REQUEST_NOT_FOUND'
       | 'SIGNING_REQUEST_NOT_REQUESTER'
       | 'SIGNING_REQUEST_ENDED'
@@ -84,11 +85,20 @@ async function lockedEncrypted(tx: Prisma.TransactionClient, memoryId: string): 
 /**
  * Open a signing request on a node's current content (cor:dmo:130:03).
  * The caller has authorized the requester as a READER of `memoryId`.
+ * `mayWrite` is the same signer policy completion and decline take
+ * (`maySignInMemory`): a named signer who may not write the memory is refused
+ * now, so no request is created that can never complete (#1904, Holger #11094).
  */
 export async function createSigningRequestInTransaction(
   tx: Prisma.TransactionClient,
   nodeId: string,
-  opts: { memoryId: string; requester: SigningRequester; namedSignerId?: string | null; expectedRevision?: number | null },
+  opts: {
+    memoryId: string;
+    requester: SigningRequester;
+    namedSignerId?: string | null;
+    expectedRevision?: number | null;
+    mayWrite: (userId: string, memoryId: string) => Promise<boolean>;
+  },
 ) {
   const revision = await ensureCurrentNodeRevisionInTransaction(tx, nodeId, { expectedMemoryId: opts.memoryId });
   if (revision == null) throw new SigningRefusal('NODE_NOT_FOUND', 'Node not found');
@@ -116,6 +126,10 @@ export async function createSigningRequestInTransaction(
   if (opts.namedSignerId) {
     const signer = await tx.user.findFirst({ where: { id: opts.namedSignerId }, select: { id: true } });
     if (!signer) throw new SigningRefusal('SIGNER_NOT_FOUND', 'The named signer was not found.');
+    // Checked again at completion and decline (requireSigner): write access can change in between.
+    if (!(await opts.mayWrite(signer.id, opts.memoryId))) {
+      throw new SigningRefusal('SIGNER_NOT_A_WRITER', 'The named signer may not write this node\'s memory, so they could never sign it.');
+    }
   }
   const id = newSigningRequestId();
   const ttl = signingRequestTtlSeconds();

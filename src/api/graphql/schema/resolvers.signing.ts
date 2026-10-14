@@ -106,7 +106,8 @@ export const signingMutations = {
    * #1632 — open a signing request on a node's current content (cor:dmo:130:03).
    * `expectedRevision`, when given, must still be current, so a requester asks
    * for a signature on the text they read. `signerRef` names one signer (a
-   * user id); omitted, any writer of the memory may sign.
+   * user id); omitted, any writer of the memory may sign. A named signer who
+   * may not write the memory is refused with SIGNER_NOT_A_WRITER (#1904).
    */
   requestNodeSignature: async (
     _: unknown,
@@ -121,6 +122,7 @@ export const signingMutations = {
         async (txCtx) => { if (!(await isMemoryReadableCached(txCtx, memoryId))) throw nodeNotFound(nodeRef); },
         (tx) => createSigningRequestInTransaction(tx, id, {
           memoryId, requester: requesterOf(ctx), namedSignerId: signerRef ?? null, expectedRevision,
+          mayWrite: maySignInMemory(ctx.db),
         }),
       );
     } catch (error) {
