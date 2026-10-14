@@ -128,7 +128,7 @@ export async function createSigningRequestInTransaction(
     if (!signer) throw new SigningRefusal('SIGNER_NOT_FOUND', 'The named signer was not found.');
     // Checked again at completion and decline (requireSigner): write access can change in between.
     if (!(await opts.mayWrite(signer.id, opts.memoryId))) {
-      throw new SigningRefusal('SIGNER_NOT_A_WRITER', 'The named signer may not write this node\'s memory, so they could never sign it.');
+      throw new SigningRefusal('SIGNER_NOT_A_WRITER', 'The named signer cannot currently write this node\'s memory, so they cannot sign it.');
     }
   }
   const id = newSigningRequestId();
