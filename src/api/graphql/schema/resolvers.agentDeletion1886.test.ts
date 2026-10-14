@@ -110,7 +110,8 @@ function pauseWrite(model: 'agent' | 'appAgent' | 'agentImport' | 'app', operati
         return new Proxy(delegate, { get(d, method) {
           if (method !== operation) return Reflect.get(d, method);
           return async (args: any) => {
-            const result = await Reflect.get(d, method).call(d, args);
+            const invoke = Reflect.get(d, method) as (args: unknown) => Promise<unknown>;
+            const result = await invoke.call(d, args);
             signal();
             await gate;
             return result;
