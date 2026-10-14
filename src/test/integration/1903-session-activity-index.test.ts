@@ -8,7 +8,7 @@
  * whole 10.7M-row index; 12+ minutes per roster read exhausted the pool
  * (ops:alpha:incident-2026-10-14-pool-exhaustion-liveness-query). The fix is
  * the partial index below, which Prisma can't model: it lives in
- * post-push.sql and migration 20261014020000.
+ * post-push.sql and migration 20261014040000.
  *
  * Pinned here: the index exists with its exact shape, and the liveness query
  * PLANS onto it. The plan pin disables sequential and bitmap scans so a tiny

@@ -667,7 +667,7 @@ CREATE INDEX IF NOT EXISTS "nodes_msg_channel_seq_loc_c_idx"
 -- counts_as_activity events. Partial, so Prisma's schema language can't model
 -- it; `db push` and `migrate diff` leave it alone (verified on Prisma 6.19), so
 -- this file is what builds it on push-managed DBs. Same definition as migration
--- 20261014020000_usage_events_session_activity_idx, which builds it
+-- 20261014040000_usage_events_session_activity_idx, which builds it
 -- CONCURRENTLY for production; production went down for an hour without it
 -- (ops:alpha:incident-2026-10-14-pool-exhaustion-liveness-query).
 CREATE INDEX IF NOT EXISTS usage_events_session_activity_idx

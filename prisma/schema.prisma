@@ -1864,7 +1864,7 @@ model UsageEvent {
   // #1903: session liveness also needs the PARTIAL index
   // usage_events_session_activity_idx (session_id, created_at) WHERE
   // counts_as_activity. Prisma can't model a partial index, so it lives in
-  // prisma/post-push.sql and migration 20261014020000.
+  // prisma/post-push.sql and migration 20261014040000.
   @@map("usage_events")
 }
 
