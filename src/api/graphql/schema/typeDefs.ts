@@ -1599,6 +1599,14 @@ export const typeDefs = `#graphql
     input only, never an authorization input: it is self-declared.
     """
     family: String
+    "#1709 — a host-launched session (hrn:node:hadronmemory.com:specs:cor:agt:070:08): the host that started it. Null for a session started by hand."
+    launchHostId: String
+    "#1709 — the worker.start operation that launched it."
+    launchOperationId: ID
+    "#1709 — the task it was launched for; null for a manager's start without one."
+    launchTaskId: ID
+    "#1709 — who issued the start: platform (an assignment) or manager."
+    launchIssuedBy: String
     inputTokens: Int
     outputTokens: Int
     turnCount: Int
@@ -6110,6 +6118,15 @@ export const typeDefs = `#graphql
     never the default.
     """
     force: Boolean
+    """
+    #1709 — the single-use launch grant a host passed to the agent it started (hrn:node:hadronmemory.com:specs:cor:agt:070:08).
+    Redeemed with the HOLDER's own token: it binds that worker on the holder's behalf and records the launching host,
+    operation and task; the hold is unchanged. workerRef may be omitted (the grant names the worker). Refused
+    LAUNCH_GRANT_INVALID when unknown, expired, used or not minted for the caller (an App key never redeems one);
+    LAUNCH_REFUSED, failing the start with the reason, when the hold changed, the holder may no longer hold the
+    worker, or it already has a live session. Never forced: with force it is BAD_USER_INPUT.
+    """
+    launchGrant: String
     "The session's stated intent (Session.plan) - what this session is about. MCP's hadron_start_session description lands here."
     plan: String
     """
@@ -8578,10 +8595,12 @@ export const typeDefs = `#graphql
     """
     #1709 — issue an operation to one of the App's registered hosts (hrn:node:hadronmemory.com:specs:cor:agt:070:05).
     A type outside the closed set is HOST_OPERATION_TYPE_UNKNOWN (hrn:node:hadronmemory.com:specs:cor:agt:070:03), a
-    missing, extra or malformed argument BAD_HOST_OPERATION_ARGS. Issued today: worktree.create and worktree.remove, by
-    the worker's holder, the worker it reports to, or whoever manages the App (else HOST_OPERATION_NOT_PERMITTED).
-    worker.start and worker.end ship with #1709's next slices, and worker.deliver with a host delivery path:
-    HOST_OPERATION_NOT_ISSUABLE until then. An unregistered host is HOST_NOT_FOUND.
+    missing, extra or malformed argument BAD_HOST_OPERATION_ARGS. worktree.create and worktree.remove: the worker's
+    holder, the worker it reports to, or whoever manages the App (else HOST_OPERATION_NOT_PERMITTED). worker.start:
+    whoever manages the App only, with an optional taskId, for a held worker with no live session and no start in
+    flight, in a worktree and family the live host registers for it (WORKER_NOT_HELD, WORKER_LIVE,
+    WORKER_START_PENDING). worker.end ships with #1709's close-on-finish slice, and worker.deliver with a host delivery
+    path: HOST_OPERATION_NOT_ISSUABLE until then. An unregistered host is HOST_NOT_FOUND.
     """
     issueHostOperation(input: IssueHostOperationInput!): HostOperation!
 
@@ -12218,6 +12237,12 @@ export const typeDefs = `#graphql
     result: JSON
     "Why it failed, as the host said it."
     failureReason: String
+    """
+    #1709 — worker.start only, and only in collectHostOperations' answer: the single-use launch grant to pass to the
+    agent the host starts (it redeems it at startSession with its holder's own token). Minted at each collection, which
+    revokes the previous one; short-lived; never stored in clear and never shown again. Null everywhere else.
+    """
+    launchGrant: String
   }
 
   type HostOperationPage {

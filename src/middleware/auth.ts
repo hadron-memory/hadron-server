@@ -268,7 +268,7 @@ export async function validateSessionBinding(
     where: { id: sessionId },
     select: {
       id: true, appId: true, userId: true, expiresAt: true, endedAt: true, workerId: true, agentId: true,
-      startedAt: true, updatedAt: true, autoExpiredAt: true,
+      startedAt: true, updatedAt: true, autoExpiredAt: true, launchOperationId: true,
       app: { select: { sessionDormancyDays: true } },
     },
   });

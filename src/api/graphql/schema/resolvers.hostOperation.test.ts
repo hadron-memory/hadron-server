@@ -197,12 +197,14 @@ describe('issueHostOperation: the closed set (cor:agt:070:03) and who issues (co
     expect(await db.hostOperation.count()).toBe(0);
   });
 
-  it('S4: starting a worker is not issuable yet, by anyone; worker.deliver waits for a delivery path (worker.end: sessionEnd.test.ts)', async () => {
-    expect(await code(create(ctx(manager.id), { type: 'worker.start', args: { worktree: 'hadron-server/kit', family: 'claude' } }))).toBe('HOST_OPERATION_NOT_ISSUABLE');
-    expect(await code(asWorker(ada, () => create(ctx(adaHolder.id), { type: 'worker.start', args: { worktree: 'hadron-server/kit', family: 'claude' } }))))
-      .toBe('HOST_OPERATION_NOT_ISSUABLE');
+  it('S4: the worker Kit reports to may not start Kit (only whoever manages the App); worker.deliver is not issuable here (worker.end: sessionEnd.test.ts)', async () => {
+    const start = { type: 'worker.start', args: { worktree: 'hadron-server/kit', family: 'claude' } };
+    expect(await code(asWorker(ada, () => create(ctx(adaHolder.id), start)))).toBe('HOST_OPERATION_NOT_PERMITTED');
+    expect(await code(create(ctx(holder.id), start))).toBe('HOST_OPERATION_NOT_PERMITTED');
     expect(await code(create(ctx(manager.id), { type: 'worker.deliver', args: { sessionId: 's1', eventId: 'e1' } }))).toBe('HOST_OPERATION_NOT_ISSUABLE');
     expect(await db.hostOperation.count()).toBe(0);
+    // Whoever manages the App starts it (slice 2: launch.test.ts carries the rest).
+    expect(await create(ctx(manager.id), start)).toMatchObject({ type: 'worker.start', issuedBy: 'user', args: { workerId: kit.id, worktree: 'hadron-server/kit', family: 'claude' } });
   });
 
   it('S1 (070:05): the holder removes a worktree the host registers for Kit; one it does not register is refused', async () => {

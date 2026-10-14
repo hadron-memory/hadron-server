@@ -203,7 +203,9 @@ export async function registerHost(
 
 /**
  * The families each worker is launchable as through a LIVE registration
- * (cor:agt:060:04 for an unbound worker): workerId → families, sorted.
+ * (cor:agt:060:04 for an unbound worker): workerId → families, sorted. #1709:
+ * only a held, unretired worker with an existing worktree on that host is
+ * launchable (060:05: a host launches only a worker someone holds; 070:06).
  */
 export async function loadLaunchableFamilies(
   db: Db,
@@ -218,6 +220,9 @@ export async function loadLaunchableFamilies(
     SELECT DISTINCT w.worker_id AS "workerId", w.family
     FROM host_registration_workers w
     JOIN host_registrations r ON r.id = w.registration_id
+    -- #1709 (cor:agt:060:05, 070:08): a host launches only a worker someone holds, in a worktree it already has.
+    JOIN workers wk ON wk.id = w.worker_id AND wk.held_by_user_id IS NOT NULL AND wk.retired_at IS NULL
+      AND cardinality(w.worktrees) > 0
     JOIN apps a ON a.id = r.app_id AND a.deleted_at IS NULL AND a.uninstalled_at IS NULL
     LEFT JOIN agent_task_stall_schedule s ON s.app_id = r.app_id
     WHERE ${where}
