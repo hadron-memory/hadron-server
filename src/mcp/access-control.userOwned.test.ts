@@ -1,14 +1,4 @@
-/**
- * spec 047 — user-owned memory access (owner-only) at the MCP access-control
- * layer.
- *
- * A user-owned memory (`ownerUserId` set, `organizationId` NULL — the org-XOR-
- * owner model) is STRICTLY owner-only: only its owner can read or write it, and
- * NOT even a platform admin (parity with the personal/private strict-owner
- * carve-out, cor:acl:010:02). These tests pin that no other principal — a
- * different user, a platform ADMIN, or an App-Key caller — ever reaches a
- * user-owned memory, and that the owner discovers it over the listing surfaces.
- */
+/** #1734: user-owned non-strict memories admit platform admins; ordinary users and App keys retain their boundaries. */
 
 import { describe, it, expect, beforeEach } from 'vitest';
 import { db } from '../integrations/db/client.js';
@@ -62,11 +52,11 @@ describe('user-owned memory — canReadMemory / canWriteToMemory', () => {
     expect(await canWriteToMemory(db, auth, mem.id)).toBe(false);
   });
 
-  it('denies a platform ADMIN read + write (strict ownership — NO admin bypass)', async () => {
+  it('admits a platform ADMIN read + write on a non-strict memory (#1734)', async () => {
     const mem = await createUserOwnedKnowledge(ownerId);
     const auth: AuthContext = { userId: otherUserId, roles: ['ADMIN'] };
-    expect(await canReadMemory(db, auth, mem.id)).toBe(false);
-    expect(await canWriteToMemory(db, auth, mem.id)).toBe(false);
+    expect(await canReadMemory(db, auth, mem.id)).toBe(true);
+    expect(await canWriteToMemory(db, auth, mem.id)).toBe(true);
   });
 
   it('denies an App-Key caller (no userId)', async () => {

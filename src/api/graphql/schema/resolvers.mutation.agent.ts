@@ -1166,7 +1166,7 @@ export const agentMutations = {
       // #1787 review (Rook P2-1): updating config can keep the stored key under a
       // changed endpoint/provider — same exfil shape as the registry gate — so on a
       // user-owned Agent this stays owner-only (clearAgentAIConfig keeps the arm).
-      await requireOwnerOrOrgRole(ctx, agent, 'ADMIN');
+      await requireOwnerOrOrgRole(ctx, agent, 'ADMIN', 'agent');
       // 036-ai-service-config: upsert the Agent's 'default' registry
       // config. Legacy key semantics preserved: a provided apiKey is
       // encrypted with a preview; omitted/blank keeps the stored key,

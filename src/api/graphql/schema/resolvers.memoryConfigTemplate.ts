@@ -133,7 +133,7 @@ async function canManageOwner(ctx: Context, owner: OwnerColumns): Promise<boolea
   }
   if (owner.ownerUserId) return !ctx.impersonation && !!ctx.userId && ctx.userId === owner.ownerUserId;
   const app = await liveApp(ctx, owner.appId!);
-  return !!app && (await allowed(() => requireOwnerOrOrgRole(ctx, app, 'ADMIN')));
+  return !!app && (await allowed(() => requireOwnerOrOrgRole(ctx, app, 'ADMIN', 'app')));
 }
 
 /**
@@ -205,7 +205,7 @@ async function resolveOwnerForWrite(ctx: Context, ownerType: TemplateOwnerType, 
       const { id } = await resolveAppRef(ctx.db, ref);
       const app = await liveApp(ctx, id);
       if (!app) throw new Error('Forbidden');
-      await requireOwnerOrOrgRole(ctx, app, 'ADMIN');
+      await requireOwnerOrOrgRole(ctx, app, 'ADMIN', 'app');
       return { ...none, appId: id };
     }
     default:

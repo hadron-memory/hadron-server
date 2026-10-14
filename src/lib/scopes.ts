@@ -124,7 +124,7 @@ export async function resolveScopeOwnerForWrite(
     select: { organizationId: true, ownerUserId: true },
   });
   if (!app) throw new Error('Forbidden');
-  await requireOwnerOrOrgRole(ctx, app, 'ADMIN');
+  await requireOwnerOrOrgRole(ctx, app, 'ADMIN', 'app');
   return { organizationId: null, agentId: null, appId: id };
 }
 
@@ -144,7 +144,7 @@ export async function requireScopeWrite(ctx: Context, scope: ScopeOwnerColumns):
     select: { organizationId: true, ownerUserId: true },
   });
   if (!app) throw new Error('Forbidden');
-  return requireOwnerOrOrgRole(ctx, app, 'ADMIN');
+  return requireOwnerOrOrgRole(ctx, app, 'ADMIN', 'app');
 }
 
 /**
@@ -183,7 +183,7 @@ export async function canReadScope(ctx: Context, scope: ScopeOwnerColumns): Prom
   // Agent elsewhere is outside the support view, whatever its visibility
   // (Copilot on PR #1160).
   if (ctx.impersonation && agent.organizationId !== ctx.impersonation.orgId) return false;
-  return agent.visibility === 'PUBLIC' || isOwnerOrOrgMember(ctx, agent);
+  return agent.visibility === 'PUBLIC' || isOwnerOrOrgMember(ctx, agent, 'agent');
 }
 
 /**

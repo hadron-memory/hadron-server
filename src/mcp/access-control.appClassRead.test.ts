@@ -376,7 +376,7 @@ describe('#1003 — App members can read the App team space', () => {
     } });
     const workingRow = await db.memory.findUniqueOrThrow({ where: { id: working.id }, include: { workerOf: true } });
     const holderAuth = { userId: holder.id, roles: [] } as AuthContext;
-    const memberAuth = { userId: member.id, roles: ['ADMIN'] } as AuthContext;
+    const memberAuth = { userId: member.id, roles: [] } as AuthContext;
     const ownerAuth = { userId: owner.id, roles: [] } as AuthContext;
 
     expect((await getMemoryAccess(db, holderAuth)).get(working.id)).toBe('READ_WRITE');
@@ -411,6 +411,9 @@ describe('#1003 — App members can read the App team space', () => {
       expect(await getAccessibleMemoryIds({ db, ...principal } as Context, working.id)).not.toContain(working.id);
       expect(await canReadMemoryRecord({ db, ...principal } as Context, working)).toBe(false);
     }
+    const platformAuth = { userId: member.id, roles: ['ADMIN'] } as AuthContext;
+    expect(await canReadMemory(db, platformAuth, working.id)).toBe(true);
+    expect(await canWriteToMemory(db, platformAuth, working.id)).toBe(true);
     expect(await canReadMemory(db, ownerAuth, working.id)).toBe(true);
     expect(await canWriteToMemory(db, ownerAuth, working.id)).toBe(true);
     expect(await getWorkerMemoryAccess(db, ownerAuth)).toContain(working.id);

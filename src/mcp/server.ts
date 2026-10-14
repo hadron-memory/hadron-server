@@ -5306,7 +5306,7 @@ export function createMcpServerInstance(
         // memoryId resolved. Mirror the globalSearch admin carve-out (codex
         // review, #676).
         where.memory = {
-          NOT: foreignIdentityScopedMemoryFilter(auth.userId),
+          NOT: await foreignIdentityScopedMemoryFilter(auth.userId, auth, db),
         };
       }
       // NB: the runnable filter (cor:api:060) is applied IN-MEMORY below, not
@@ -8065,7 +8065,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       const all = await db.memory.findMany({
         where: {
           deletedAt: null,
-          NOT: foreignIdentityScopedMemoryFilter(auth.userId),
+          NOT: await foreignIdentityScopedMemoryFilter(auth.userId, auth, db),
         },
         select: { id: true, urn: true, name: true },
       });

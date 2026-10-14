@@ -1,13 +1,4 @@
-/**
- * spec 047 — user-owned memory access (owner-only) at the PORTAL (JWT) layer.
- *
- * A user-owned memory (`ownerUserId` set, `organizationId` NULL) is STRICTLY
- * owner-only: the owner reads + writes it, and NOT even a platform ADMIN/OWNER
- * (parity with the personal/private strict-owner carve-out). These tests pin
- * the shared JWT gates — requireMemoryWriteAccess, getAccessibleMemoryIds, and
- * the effectiveAccess audit — so a widening of any of them can't silently admit
- * a non-owner to another user's user-owned memory.
- */
+/** #1734: user-owned non-strict memories admit platform admins; ordinary users and App keys retain their boundaries. */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
@@ -70,20 +61,19 @@ describe('requireMemoryWriteAccess — user-owned memory', () => {
     ).rejects.toThrow('Forbidden');
   });
 
-  it('throws for a platform ADMIN (strict ownership — NO admin bypass)', async () => {
+  it('admits a platform ADMIN to a non-strict memory (#1734)', async () => {
     const mem = await createUserOwnedKnowledge(ownerId);
     await expect(
       requireMemoryWriteAccess(ctx({ userId: otherId, roles: ['ADMIN'] }), mem.id),
-    ).rejects.toThrow('Forbidden');
+    ).resolves.toBeUndefined();
   });
 
-  it('throws for an App-keyed ADMIN caller (the App-path must not short-circuit)', async () => {
-    // gemini #676: the App-keyed path previously returned early for ADMIN/OWNER
-    // BEFORE canWriteToMemory, bypassing strict ownership. It must now delegate.
+  it('admits a platform ADMIN user with an active App selection (#1734)', async () => {
+    // A user with an App selection is a user principal, not a pure App key.
     const mem = await createUserOwnedKnowledge(ownerId);
     await expect(
       requireMemoryWriteAccess(ctx({ appId: 'some-app', userId: otherId, roles: ['ADMIN'] }), mem.id),
-    ).rejects.toThrow('Forbidden');
+    ).resolves.toBeUndefined();
   });
 });
 
@@ -100,13 +90,12 @@ describe('getAccessibleMemoryIds — user-owned memory', () => {
     expect(ids ?? []).not.toContain(mem.id);
   });
 
-  it('excludes another user’s user-owned memory even from a platform ADMIN', async () => {
+  it('includes another user’s non-strict memory for a platform ADMIN', async () => {
     const mem = await createUserOwnedKnowledge(ownerId);
     const ids = await getAccessibleMemoryIds(ctx({ userId: otherId, roles: ['ADMIN'] }));
-    // The ADMIN "see all" branch returns an explicit id list; it must NOT
-    // contain another user's user-owned memory.
+    // Admin discovery is broad, while still retaining an explicit privacy-filtered set.
     expect(ids).not.toBeNull();
-    expect(ids ?? []).not.toContain(mem.id);
+    expect(ids ?? []).toContain(mem.id);
   });
 
   it('DOES include a platform ADMIN’s OWN user-owned memory', async () => {
@@ -128,15 +117,15 @@ describe('computeEffectiveAccess — user-owned memory grants', () => {
     expect(res.canWrite).toBe(true);
   });
 
-  it('grants a platform ADMIN nothing (strict ownership)', async () => {
+  it('grants a platform ADMIN full access to a non-strict memory', async () => {
     const mem = await createUserOwnedKnowledge(ownerId);
     const res = await computeEffectiveAccess(
       db,
       { id: otherId, roles: ['ADMIN'] },
       { kind: 'memory', memory: mem as any },
     );
-    expect(res.canRead).toBe(false);
-    expect(res.canWrite).toBe(false);
+    expect(res.canRead).toBe(true);
+    expect(res.canWrite).toBe(true);
   });
 });
 
@@ -181,10 +170,10 @@ describe('user-owned memory set PUBLIC stays owner-only (#758)', () => {
     expect(ids).not.toContain(mem.id);
   });
 
-  it('is excluded from a platform ADMIN’s set (strict ownership, no bypass)', async () => {
+  it('is included in a platform ADMIN’s set (#1734)', async () => {
     const mem = await createPublicUserOwned(ownerId);
     const ids = await getAccessibleMemoryIds(ctx({ userId: otherId, roles: ['ADMIN'] }));
-    expect(ids).not.toContain(mem.id);
+    expect(ids).toContain(mem.id);
   });
 
   it('the OWNER still reads their own PUBLIC user-owned memory', async () => {

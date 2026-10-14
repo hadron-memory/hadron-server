@@ -119,13 +119,13 @@ describe('owner gates on create (H4: the owner\'s managers)', () => {
     expect(await db.memoryConfigTemplate.count({ where: { ownerUserId: userB } })).toBe(0);
   });
 
-  it('APP: an org App to its org admins, a user-owned App to its owner only; an uninstalled App to no one', async () => {
+  it('APP: org admins manage an org App; owner/platform manage a user-owned App; an uninstalled App admits no one', async () => {
     expect((await create(as(orgAdmin), 'APP', orgApp.id, { name: 'a1' })).errors).toBeUndefined();
     expect((await create(as(contributor), 'APP', orgApp.id, { name: 'a2' })).errors).toBeDefined();
     expect((await create(as(userA), 'APP', userApp.id, { name: 'a3' })).errors).toBeUndefined();
-    expect((await create(admin(), 'APP', userApp.id, { name: 'a4' })).errors).toBeDefined();
+    expect((await create(admin(), 'APP', userApp.id, { name: 'a4' })).errors).toBeUndefined();
     expect((await create(as(orgAdmin), 'APP', goneApp.id, { name: 'a5' })).errors).toBeDefined();
-    expect(await db.memoryConfigTemplate.count()).toBe(2);
+    expect(await db.memoryConfigTemplate.count()).toBe(3);
   });
 
   it('HADRON_SERVER: a platform admin, no ownerRef; the server id is not exposed', async () => {

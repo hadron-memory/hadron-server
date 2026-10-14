@@ -1,3 +1,4 @@
+import { canBypassMemoryOwnership, userOwnedAgentSystemMemoryIds } from '../lib/auth/platformAdminBypass.js';
 /**
  * MCP access-control: which memories can the caller read/write?
  *
@@ -900,7 +901,7 @@ export async function canWriteToMemory(
   const memory = await db.memory.findUnique({
     where: { id: memoryId },
     select: {
-      class: true, userId: true, userMemoryOfAgentId: true, appId: true,
+      id: true, class: true, userId: true, userMemoryOfAgentId: true, appId: true,
       ownerUserId: true, workerOf: { select: { id: true } },
     },
   });
@@ -973,13 +974,16 @@ export async function canWriteToMemory(
     return true;
   }
 
-  // spec 047: user-owned non-personal memories are owner-only, except a
+  if (await canBypassMemoryOwnership(db, auth, memory)) return true;
+
+  // After the shared platform bypass, user-owned rows are owner-only except a
   // Worker's working memory also admits its current holder. The shared Worker
   // gate checks the live casting, row shape, and matching App tenant owner.
   if (memory.ownerUserId !== null) {
+    if (auth.impersonation) return false;
     if (auth.userId === memory.ownerUserId) return true;
     // #1764: and the team space of a user-owned App admits that App's members.
-    if (await isUserOwnedTeamSpaceMember(db, auth, { id: memoryId, ...memory }, { hold: true })) return true;
+    if (await isUserOwnedTeamSpaceMember(db, auth, memory, { hold: true })) return true;
     return memory.class === 'app' &&
       (await getWorkerMemoryAccess(db, auth)).includes(memoryId);
   }
@@ -1036,6 +1040,7 @@ type SubscriptionReadRow = Pick<AgentSubscription, 'activatedAt' | 'expiresAt' |
 interface MemoryReadRowOptions extends MemoryGateOptions {
   access?: Map<string, string>;
   workerMemoryIds?: ReadonlySet<string>;
+  protectedSystemMemoryIds?: ReadonlySet<string>;
   installedAgentIds?: ReadonlySet<string>;
   subscriptionsByAgentId?: ReadonlyMap<string, SubscriptionReadRow>;
 }
@@ -1096,9 +1101,12 @@ async function canReadMemoryRow(
     return true;
   }
 
-  // The only non-owner reach into a user-owned non-strict memory is the
-  // current holder of a live Worker's working memory.
+  if (await canBypassMemoryOwnership(db, auth, memory, opts.protectedSystemMemoryIds)) return true;
+
+  // After the shared platform bypass, the only non-owner reach is a live
+  // Worker's current holder. Agent definitions remain owner-only (#8898).
   if (memory.ownerUserId !== null) {
+    if (auth.impersonation) return false;
     if (auth.userId === memory.ownerUserId) return true;
     // #1764: and the team space of a user-owned App admits that App's members.
     if (await isUserOwnedTeamSpaceMember(db, auth, memory)) return true;
@@ -1242,12 +1250,16 @@ export async function filterReadableMemoryIds(
     );
   }
 
+  const protectedSystemMemoryIds = isPlatformAdmin
+    ? await userOwnedAgentSystemMemoryIds(db, memories.filter(memory => memory.class === 'system' && memory.ownerUserId !== null).map(memory => memory.id))
+    : undefined;
   const readable = new Set<string>();
   for (const memory of memories) {
     if (
       await canReadMemoryRow(db, auth, memory, {
         access,
         workerMemoryIds,
+        protectedSystemMemoryIds,
         installedAgentIds,
         subscriptionsByAgentId,
       })

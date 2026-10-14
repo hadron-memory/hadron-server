@@ -661,7 +661,7 @@ export const teamWorkMutations = {
     // collect a FORBIDDEN afterwards, with the writes already committed. The
     // App's owner is the memory's owner (findOrCreateAppClassMemory inherits
     // it), so this is the same tenancy question asked before the side effect.
-    await requireOwnerOrOrgRole(ctx, app, 'ADMIN');
+    await requireOwnerOrOrgRole(ctx, app, 'ADMIN', 'app');
     // The memory exists from App-install time (#951); bootstrap covers Apps
     // created before that, and is idempotent either way.
     const root = (await locateWorklogRoot(ctx, appId)) ?? (await bootstrapWorklog(ctx, app));

@@ -10616,10 +10616,14 @@ export const typeDefs = `#graphql
       policy: JSON
     ): App!
 
+    "Clear AI configuration without returning credentials. User-owned Apps: owner or platform admin, every named config. Org-owned Apps: org admin, default config. Idempotent."
+    clearAppAIConfig(appRef: ID!): App!
+
     """
     Update an App.
 
-    Accepts the entity's ID or URN.
+    Accepts the entity's ID or URN. User-owned provider configuration edits
+    require App.ownerUserId; administrative shutdown uses clearAppAIConfig.
     """
     updateApp(
       ref: ID!

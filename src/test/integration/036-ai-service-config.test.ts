@@ -284,7 +284,7 @@ describe('resolveAIConfig precedence (US1)', () => {
 });
 
 describe('resolveAIConfig user-owned App decrypt gate (#1487)', () => {
-  it('matches appAIConfig: owner succeeds, unrelated org admin and platform admin are denied', async () => {
+  it('matches appAIConfig: only the owner decrypts a user-owned App key (#10659)', async () => {
     const owner = await db.user.create({
       data: { id: generateId(), handle: 'cfg-victim', githubId: 36006, name: 'Victim' },
     });

@@ -86,7 +86,7 @@ export async function canChatWithAgent(
   if (agent.ownerUserId !== null && agent.ownerUserId === ctx.userId) return true;
   if (agent.organizationId !== null) {
     try {
-      await requireOwnerOrOrgRole(ctx, agent, 'READER');
+      await requireOwnerOrOrgRole(ctx, agent, 'READER', 'agent');
       return true;
     } catch (error) {
       if (!isAuthorizationDenial(error)) throw error;

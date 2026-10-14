@@ -104,7 +104,7 @@ export async function requireRegisterOwnerWrite(ctx: Context, owner: RegisterOwn
     select: { organizationId: true, ownerUserId: true },
   });
   if (!app) throw new Error('Forbidden');
-  return requireOwnerOrOrgRole(ctx, app, 'ADMIN');
+  return requireOwnerOrOrgRole(ctx, app, 'ADMIN', 'app');
 }
 
 /**

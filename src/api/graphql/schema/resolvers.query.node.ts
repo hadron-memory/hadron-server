@@ -484,7 +484,7 @@ export const nodeQueries = {
           // #551: a PUBLIC agent resolves for any caller (marketplace share
           // links), mirroring the agent(ref:) gate; otherwise fall back to the
           // owner-or-org-membership check.
-          if (agent.visibility !== 'PUBLIC' && !(await isOwnerOrOrgMember(ctx, agent))) {
+          if (agent.visibility !== 'PUBLIC' && !(await isOwnerOrOrgMember(ctx, agent, 'agent'))) {
             return null;
           }
           return { kind: 'agent', id };
@@ -507,7 +507,7 @@ export const nodeQueries = {
           // already open directly. isOwnerOrOrgMember covers the
           // global-admin bypass, the App's owner-user, and the
           // revoked-membership (deletedAt) rule.
-          if (!(await isOwnerOrOrgMember(ctx, app))) return null;
+          if (!(await isOwnerOrOrgMember(ctx, app, 'app'))) return null;
           return { kind: 'app', id, organizationId: app.organizationId };
         }
         case 'user': {
@@ -2174,11 +2174,11 @@ export const nodeQueries = {
       // downgrade an org member to the participant scope — a narrower answer
       // returned as though it were the right one. `isOwnerOrOrgMember` is the
       // same predicate `requireOwnerOrOrgRole` throws on, and it answers.
-      const orgAuthorized = !!isPlatformAdmin || (await isOwnerOrOrgMember(ctx, app));
+      const orgAuthorized = !!isPlatformAdmin || (await isOwnerOrOrgMember(ctx, app, 'app'));
       if (!orgAuthorized && !admitAsParticipant) {
         // Unchanged refusal, from the original predicate, for anyone who is
         // neither — so the error a stranger sees is the one they saw before.
-        await requireOwnerOrOrgRole(ctx, app, 'READER');
+        await requireOwnerOrOrgRole(ctx, app, 'READER', 'app');
       }
       // Keep appNodes' historical multi-Agent scope while using the same live
       // item, stored-role, App-scope and install-license fold as MCP reads.

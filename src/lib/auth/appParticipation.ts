@@ -1,3 +1,4 @@
+import { canBypassUserOwnership } from './platformAdminBypass.js';
 /**
  * App PARTICIPATION as a SET — "which Apps does this user participate in?" — for
  * the gates that need a `where` clause rather than a yes/no about one App.
@@ -24,11 +25,8 @@
  * implementations are pinned against each other by a differential test in
  * `mcp/access-control.participation.test.ts`.
  *
- * NOT here: the platform-ADMIN arm. `isAppParticipant` inherits one through
- * `requireOrgRole`, but every consumer of this set answers platform admins in
- * its own branch ABOVE the App fold, so an arm here would be unreachable code
- * carrying real risk. The differential test is scoped to non-admin principals
- * and says so.
+ * #1734: the shared platform bypass is included so point and set gates agree
+ * on user-owned Apps too. Impersonation and App-key boundaries are unchanged.
  */
 
 import type { Prisma, PrismaClient } from '../../generated/prisma/index.js';
@@ -54,7 +52,7 @@ import { LIVE_ORG_MEMBERSHIP } from './liveOrgMembership.js';
  */
 export async function participantAppIds(
   db: Pick<PrismaClient, 'orgMember' | 'app' | 'appMember'>,
-  principal: { userId?: string | null; impersonation?: { orgId: string } | null },
+  principal: { userId?: string | null; roles?: readonly string[] | null; clientId?: string | null; impersonation?: { orgId: string } | null },
   opts: { includeMemberships?: boolean; includeUninstalled?: boolean } = {},
 ): Promise<string[]> {
   const where = await participantAppWhere(db, principal, opts);
@@ -73,11 +71,14 @@ export async function participantAppIds(
  */
 export async function participantAppWhere(
   db: Pick<PrismaClient, 'orgMember'>,
-  principal: { userId?: string | null; impersonation?: { orgId: string } | null },
+  principal: { userId?: string | null; roles?: readonly string[] | null; clientId?: string | null; impersonation?: { orgId: string } | null },
   opts: { includeMemberships?: boolean; includeUninstalled?: boolean } = {},
 ): Promise<Prisma.AppWhereInput | null> {
   const userId = principal.userId;
   if (!userId) return null;
+  if (canBypassUserOwnership({ ...principal, userId }, 'app')) {
+    return { deletedAt: null, ...(opts.includeUninstalled ? {} : { uninstalledAt: null }) };
+  }
 
   // findMany + `deletedAt: null`, never findUnique on the composite PK: a
   // REVOKED org membership must not authorize

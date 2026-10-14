@@ -1,3 +1,4 @@
+import { canBypassUserOwnership, canBypassMemoryOwnership, isNonStrictMemoryClass, type TenantResourceKind } from '../../../lib/auth/platformAdminBypass.js';
 import { systemMemoryReadGrants } from '../../../lib/auth/systemMemoryRead.js';
 import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
 // Helpers extracted from resolvers.ts (Step 1 of the resolver split).
@@ -739,7 +740,7 @@ async function sameAppAttachAdmitted(
   // A licensed foreign Agent is permitted below for this App's read audience,
   // so the caller must explicitly administer this App as well as the Agent.
   try {
-    await requireOwnerOrOrgRole(ctx, app, 'ADMIN');
+    await requireOwnerOrOrgRole(ctx, app, 'ADMIN', 'app');
   } catch (error) {
     if (!isAuthorizationDenial(error)) throw error;
     return false;
@@ -1139,6 +1140,7 @@ export async function canReadMemoryRecord(
     if (ctx.userId && (await granteeShareAccess(ctx.db, ctx.userId, memory))) return true;
     return false;
   }
+  if (await canBypassMemoryOwnership(ctx.db, ctx, memory)) return true;
   // System records follow the installed/licensed Agent or manager audience,
   // never the record-only org-member shortcut (#1807).
   if (memory.class === 'system') {
@@ -1309,10 +1311,12 @@ export function isPlatformAdmin(ctx: Context): boolean {
  * `requireOrgRole(ctx, entity.organizationId, role)` on those entities so a
  * user-owned row is authorized by its owner, not by an org role.
  *
- *   - Platform ADMIN/OWNER: bypass only for org-owned entities. Memory
- *     personal/private strict ownership is handled by
- *     `requireMemoryManageAccess`, not by this tenant-only helper.
- *   - `ownerUserId` set (user-owned): owner-only — `ctx.userId === ownerUserId`;
+ *   - Platform ADMIN/OWNER: bypass for Apps and non-strict memories; user-owned
+ *     Agent credentials stay owner-only; Agent management uses requireAgentAccess
+ *     from main #1818. Agent system-memory content is outside this bypass.
+ *     `kind` is mandatory so callers cannot silently widen Agent access.
+ *     `requireMemoryManageAccess` protects personal/private management.
+ *   - `ownerUserId` set (user-owned): owner or the permitted platform bypass;
  *     no org-role path, and the `required` role is moot (the owner has full
  *     authority over their own entity).
  *   - else `organizationId` set (org-owned): delegate to `requireOrgRole`.
@@ -1322,12 +1326,15 @@ export function isPlatformAdmin(ctx: Context): boolean {
  */
 export async function requireOwnerOrOrgRole(
   ctx: Context,
-  entity: { organizationId: string | null; ownerUserId: string | null },
+  entity: { organizationId: string | null; ownerUserId: string | null; class?: string; id?: string },
   required: 'OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER',
+  kind: TenantResourceKind,
 ): Promise<void> {
-  // spec 047 (Holger 2026-07-14): a user-owned entity is STRICTLY owner-only —
-  // NO platform-admin bypass, consistent with personal/private strict ownership
-  // (cor:acl:010:02). The owner check runs BEFORE the admin/org path.
+  // #1734/#8878: only Apps and non-strict memories get the user-owner bypass.
+  // Explicit kinds keep Agents owner-only even at this shared gate.
+  // Strict memories must use requireMemoryManageAccess, with their userId.
+  if (kind === 'memory' && !isNonStrictMemoryClass(entity.class)) throw authorizationDenied();
+  if (kind === 'memory' ? await canBypassMemoryOwnership(ctx.db, ctx, entity) : canBypassUserOwnership(ctx, kind)) return;
   if (entity.ownerUserId !== null) {
     // Impersonation: user-owned entities are identity-scoped — the target
     // owning it does NOT admit the impersonated (shared-org-only) session.
@@ -1341,6 +1348,18 @@ export async function requireOwnerOrOrgRole(
     return;
   }
   throw authorizationDenied();
+}
+
+/** #10659: user-owned provider credentials are owner-only; admin management only clears. */
+export async function requireProviderCredentialOwner(
+  ctx: Context,
+  entity: { organizationId: string | null; ownerUserId: string | null },
+): Promise<void> {
+  if (entity.ownerUserId !== null) {
+    if (!ctx.userId || ctx.userId !== entity.ownerUserId || ctx.impersonation || isRunPrincipal(ctx)) throw authorizationDenied();
+    return;
+  }
+  await requireOwnerOrOrgRole(ctx, entity, 'ADMIN', 'app');
 }
 
 /**
@@ -1359,7 +1378,8 @@ export async function requireOwnerOrOrgRole(
  * `resolveAIConfig`'s user-owned arm) — a user's own provider key on their
  * own Agent is a user-owned credential and stays owner-only (Holger #8075,
  * the same split Ada ruled for Apps on #1734 at #9051: manage yes, read the
- * key no). Set/clear of the config IS management and uses this gate.
+ * key no). Only clearing is management; setting/updating/testing a user-owned
+ * provider key remains owner-only (#10659).
  */
 export async function requireAgentAccess(
   ctx: Context,
@@ -1367,7 +1387,7 @@ export async function requireAgentAccess(
   required: 'OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER',
 ): Promise<void> {
   if (agent.ownerUserId !== null && !ctx.impersonation && isPlatformAdmin(ctx)) return;
-  return requireOwnerOrOrgRole(ctx, agent, required);
+  return requireOwnerOrOrgRole(ctx, agent, required, 'agent');
 }
 
 /**
@@ -1378,6 +1398,7 @@ export async function requireAgentAccess(
 export async function requireMemoryManageAccess(
   ctx: Context,
   memory: {
+    id?: string;
     class: string;
     userId: string | null;
     organizationId: string | null;
@@ -1389,20 +1410,23 @@ export async function requireMemoryManageAccess(
     if (!ctx.impersonation && ctx.userId && memory.userId === ctx.userId) return;
     throw authorizationDenied();
   }
-  await requireOwnerOrOrgRole(ctx, memory, required);
+  await requireOwnerOrOrgRole(ctx, memory, required, 'memory');
 }
 
 /**
  * Boolean form of {@link requireOwnerOrOrgRole} (graceful, no throw) — true for
  * a platform admin, the entity's user owner, or a live member of its owning org.
  * Mirrors `isOrgMemberOrAdmin` for user-or-org-owned entities. A user-owned
- * entity is strictly owner-only (no platform-admin bypass — see the throwing
- * form), so the owner check precedes the admin path.
+ * entity uses the same resource-kind and memory-class exclusions as the
+ * throwing form; impersonation never gets the user-owned bypass.
  */
 export async function isOwnerOrOrgMember(
   ctx: Context,
-  entity: { organizationId: string | null; ownerUserId: string | null },
+  entity: { organizationId: string | null; ownerUserId: string | null; class?: string; id?: string },
+  kind: TenantResourceKind,
 ): Promise<boolean> {
+  if (kind === 'memory' && !isNonStrictMemoryClass(entity.class)) return false;
+  if (kind === 'memory' ? await canBypassMemoryOwnership(ctx.db, ctx, entity) : canBypassUserOwnership(ctx, kind)) return true;
   // Impersonation: user-owned entities are identity-scoped and invisible.
   if (entity.ownerUserId !== null) {
     return !ctx.impersonation && !!ctx.userId && ctx.userId === entity.ownerUserId;
@@ -1462,6 +1486,7 @@ export async function isAppParticipant(
   app: { id: string; organizationId: string | null; ownerUserId: string | null },
 ): Promise<boolean> {
   if (!ctx.userId) return false;
+  if (canBypassUserOwnership(ctx, 'app')) return true;
   if (app.ownerUserId !== null) {
     // spec 047 + cor:acl:010:01 (Holger "A", #8151/#8155, #1764): a user-owned App admits its owner and every
     // AppMember at any role, and nobody else. The App has no org, so no org arm exists and no platform-admin arm either
@@ -1727,7 +1752,7 @@ export async function requireAiConfigOwnerAdmin(
     case 'APP': {
       const { id } = await resolveAppRef(ctx.db, ownerId);
       const app = await ctx.db.app.findUniqueOrThrow({ where: { id } });
-      await requireOwnerOrOrgRole(ctx, app, 'ADMIN');
+      await requireProviderCredentialOwner(ctx, app);
       return { ownerWhere: { appId: id }, resolvedOwnerId: id };
     }
     case 'AGENT': {
@@ -1737,7 +1762,7 @@ export async function requireAiConfigOwnerAdmin(
       // update/test can send the stored key to a caller-chosen endpoint, so for a
       // user-owned Agent these are owner-only (manage yes, move the key no);
       // requireAgentAccess is not used here on purpose.
-      await requireOwnerOrOrgRole(ctx, agent, 'ADMIN');
+      await requireOwnerOrOrgRole(ctx, agent, 'ADMIN', 'agent');
       return { ownerWhere: { agentId: id }, resolvedOwnerId: id };
     }
   }
@@ -1983,6 +2008,20 @@ async function appDerivedMemoryIds(ctx: Context, onlyMemoryId?: string): Promise
   return onlyMemoryId ? all.filter((id) => id === onlyMemoryId) : all;
 }
 
+/** Personal shares retain their own capabilities, including for platform-role users. */
+async function sharedPersonalMemoryIds(ctx: Context, scope: { id?: string }): Promise<Array<{ id: string }>> {
+  if (!ctx.userId || ctx.impersonation) return [];
+  const memberOrgIds = await getMemberOrgIds(ctx.db, ctx.userId);
+  return ctx.db.memory.findMany({
+    where: {
+      ...scope, deletedAt: null, class: 'personal', userMemoryOfAgentId: null,
+      shares: { some: { granteeId: ctx.userId } },
+      OR: [{ organizationId: null }, { organizationId: { in: memberOrgIds } }],
+    },
+    select: { id: true },
+  });
+}
+
 /**
  * Returns the memory IDs accessible to the current caller, or null if the
  * caller has unrestricted access (global ADMIN/OWNER).
@@ -2043,7 +2082,7 @@ export async function getAccessibleMemoryIds(
         // #1217 — one predicate shared with MCP browse/task discovery and both
         // global-search slices. The strict owner of personal/private is userId;
         // ownerUserId is only authoritative for the other classes.
-        NOT: foreignIdentityScopedMemoryFilter(ctx.userId),
+        NOT: await foreignIdentityScopedMemoryFilter(ctx.userId, ctx, ctx.db),
       },
       select: { id: true },
     });
@@ -2051,7 +2090,11 @@ export async function getAccessibleMemoryIds(
       .filter((id) => !onlyMemoryId || id === onlyMemoryId);
     const candidates = [...new Set([...all.map((memory) => memory.id), ...workerIds])];
     const readable = await filterReadableMemoryIds(ctx.db, ctx, candidates);
-    return candidates.filter((id) => readable.has(id));
+    const admitted = candidates.filter((id) => readable.has(id));
+    if (onlyMemoryId && readable.has(onlyMemoryId)) return admitted;
+    // This is the existing share grant, not a platform bypass into privacy.
+    const shared = await sharedPersonalMemoryIds(ctx, scope);
+    return [...new Set([...admitted, ...shared.map(memory => memory.id)])];
   }
 
   // App Key without an active session — the App's installed-agent reach:
@@ -2162,18 +2205,7 @@ export async function getAccessibleMemoryIds(
     // granteeShareAccess). Org-owned shares are additionally membership-gated so
     // a legacy/revoked cross-org share can't admit a non-member — mirrors the
     // create rule and keeps this node-read gate in lockstep with Query.memory.
-    const memberOrgIds = await getMemberOrgIds(ctx.db, ctx.userId);
-    const sharedWithMe = await ctx.db.memory.findMany({
-      where: {
-        ...scope,
-        deletedAt: null,
-        class: 'personal',
-        userMemoryOfAgentId: null,
-        shares: { some: { granteeId: ctx.userId } },
-        OR: [{ organizationId: null }, { organizationId: { in: memberOrgIds } }],
-      },
-      select: { id: true },
-    });
+    const sharedWithMe = await sharedPersonalMemoryIds(ctx, scope);
     const accessibleIds = new Set(orgPublicIds);
     for (const g of ownAndHoldings as { id: string }[]) accessibleIds.add(g.id);
     for (const g of sharedWithMe as { id: string }[]) accessibleIds.add(g.id);
@@ -2400,25 +2432,22 @@ export function safeCanonicalUrn(type: CanonicalUrnType, raw: string): string {
  *    shared classes through their own membership, org, or subscription rules
  */
 export async function requireMemoryWriteAccess(ctx: Context, memoryId: string): Promise<void> {
-  // App-keyed callers: delegate to the class-aware MCP gate. The ADMIN/OWNER
-  // shortcut applies only to non-strict org memories. A platform-admin USER
+  // App-selected callers: use the shared class-aware platform bypass, then
+  // delegate all other principals to the canonical MCP gate. A platform-admin USER
   // with an active App still cannot write another user's personal/private
   // memory (#1492); ownerUserId is null on those org-anchored rows.
   if (ctx.appId) {
     const memory = await ctx.db.memory.findUnique({
       where: { id: memoryId },
-      select: { ownerUserId: true, userId: true, class: true },
+      select: { id: true, ownerUserId: true, userId: true, class: true },
     });
     if (!memory) throw memoryWriteForbidden();
-    const strictOwner = memory.class === 'personal' || memory.class === 'private';
     // A strict owner's rights under App selection are decided by the shared
     // gate below, the same rule MCP applies (#1503, ruling (c)): an explicit
     // reference to the owner's memory in another App is evaluated as that App,
     // with isolation and the subscription check. An inline identity shortcut
     // here (#1500) let GraphQL drift from MCP, so there is no second copy.
-    if (!strictOwner && memory.ownerUserId === null &&
-        !(ctx.appId && ctx.sessionId && !ctx.userId) &&
-        (ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER'))) return;
+    if (await canBypassMemoryOwnership(ctx.db, ctx, memory)) return;
     // A write always names its target: an explicit reference (#1503).
     if (await canWriteToMemory(ctx.db, ctx, memoryId, EXPLICIT_REF)) return;
     throw memoryWriteForbidden();
@@ -2452,11 +2481,13 @@ export async function requireMemoryWriteAccess(ctx: Context, memoryId: string): 
     throw memoryWriteForbidden();
   }
 
-  // spec 047: user-owned non-strict memories are owner-only, with the narrow
-  // cor:acl:010:01 exception for a Worker's current holder. This runs BEFORE
-  // the ADMIN/OWNER bypass: a platform admin does not gain another user's
-  // user-owned memory merely from that role.
+  if (await canBypassMemoryOwnership(ctx.db, ctx, memory)) return;
+
+  // After the shared bypass, user-owned rows admit their owner and a
+  // Worker's current holder (cor:acl:010:01). Agent system memories reach
+  // this branch because their definition remains owner-only (#8898).
   if (memory.ownerUserId !== null) {
+    if (ctx.impersonation) throw memoryWriteForbidden();
     if (ctx.userId === memory.ownerUserId) return;
     if (memory.class === 'app' && await canWriteToMemory(ctx.db, ctx, memoryId)) return;
     throw memoryWriteForbidden();
@@ -2942,7 +2973,7 @@ export async function installAgentIntoAppCore(
   // findings:broadening-read-gate-leaks-nested-objects class. Widening this
   // needs a deliberate call on that exposure, not an inference from the
   // roster-composition use case.
-  await requireOwnerOrOrgRole(ctx, app, 'CONTRIBUTOR');
+  await requireOwnerOrOrgRole(ctx, app, 'CONTRIBUTOR', 'app');
   const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
   // #756: an org-owned App and a user-owned App have DIFFERENT accessibility
   // rules, and the org comparison alone cannot express the second one. Both
@@ -2998,7 +3029,7 @@ export async function installAgentIntoAppCore(
           extensions: { code: 'APP_UNINSTALLED', appId: resolvedAppId },
         });
       }
-      await requireOwnerOrOrgRole(txCtx, currentApp, 'CONTRIBUTOR');
+      await requireOwnerOrOrgRole(txCtx, currentApp, 'CONTRIBUTOR', 'app');
       const ownAgent = currentAgent.ownerUserId !== null && currentAgent.ownerUserId === currentApp.ownerUserId;
       if (currentApp.organizationId === null) {
         if (currentAgent.visibility !== 'PUBLIC' && !ownAgent) {
@@ -3066,7 +3097,7 @@ export async function uninstallAgentFromAppCore(
   const app = await ctx.db.app.findUniqueOrThrow({ where: { id: resolvedAppId } });
   // #551: symmetric with install — a CONTRIBUTOR+ member of the App's org can
   // uninstall an Agent (was ADMIN-only).
-  await requireOwnerOrOrgRole(ctx, app, 'CONTRIBUTOR');
+  await requireOwnerOrOrgRole(ctx, app, 'CONTRIBUTOR', 'app');
   // Idempotent delete — `deleteMany` returns a count, never throws on
   // absent rows. The (App, Agent, *) memories persist as orphans per
   // spec 023 FR-005.
@@ -3083,7 +3114,7 @@ export async function uninstallAgentFromAppCore(
       if (current.organizationId !== app.organizationId || current.ownerUserId !== app.ownerUserId) {
         throw new Error('App ownership changed; retry the uninstall');
       }
-      await requireOwnerOrOrgRole(txCtx, current, 'CONTRIBUTOR');
+      await requireOwnerOrOrgRole(txCtx, current, 'CONTRIBUTOR', 'app');
     },
     async (tx) => {
       await tx.appAgent.deleteMany({ where: { appId: resolvedAppId, agentId: resolvedAgentId } });

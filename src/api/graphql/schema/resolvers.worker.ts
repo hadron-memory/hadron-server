@@ -1,3 +1,4 @@
+import { canBypassUserOwnership } from '../../../lib/auth/platformAdminBypass.js';
 // Workers — #974 (re-cut): the named casting of an installed Agent into an
 // App (cor:dmo:050:11, cor:agt:020:01/:02). A persona is universal DRESSING on
 // an Agent (`personaRole` + the `systemPrompt` template); the Worker is the
@@ -114,6 +115,7 @@ const forbidden = (): GraphQLError =>
 async function requireWorkerStaffAccess(ctx: Context, app: AppRow): Promise<void> {
   if (ctx.impersonation) throw forbidden();
   if (!ctx.userId) throw forbidden();
+  if (canBypassUserOwnership(ctx, 'app')) return;
   if (app.ownerUserId !== null) {
     // spec 047: user-owned entities are strictly owner-only —
     // findings:org-xor-owner-null-comparison-bypass: branch on the ownership
@@ -185,7 +187,7 @@ async function workerHasAgentTasks(
  * (`participantAppWhere`, the builder `participantAppIds` itself runs) rather
  * than spelling its AppMember / org-CONTRIBUTOR / user-owner arms again.
  * The two caller-specific arms stay here: a pure App key reaches only itself,
- * while a platform admin reaches every org App plus their own user-owned Apps.
+ * while the same participation set admits platform admins to every live App.
  *
  * Every arm is a RELATION filter, not an id list (#1347 review): as id lists
  * the platform arm materialized every org App on the server, and an org
@@ -196,30 +198,12 @@ async function workerReadableWhere(ctx: Context): Promise<Prisma.WorkerWhereInpu
   if (!ctx.userId) {
     return { appId: { in: ctx.appId ? [ctx.appId] : [] } };
   }
-  if (!isPlatformAdmin(ctx)) {
-    const apps = await participantAppWhere(ctx.db, ctx, {
-      includeMemberships: true,
-      // Worker history remains legible after uninstall; this surface lists
-      // current holds from that retained roster too.
-      includeUninstalled: true,
-    });
-    return apps ? { app: { is: apps } } : { id: { in: [] } };
-  }
-  // `participantAppIds` deliberately omits the platform-role arm because its
-  // existing consumers answer admins above their fold. Supply that caller arm
-  // here while preserving strict ownership for user-owned Apps.
-  return {
-    app: {
-      is: {
-        OR: [
-          ...(ctx.impersonation ? [] : [{ ownerUserId: ctx.userId }]),
-          ctx.impersonation
-            ? { organizationId: ctx.impersonation.orgId }
-            : { organizationId: { not: null } },
-        ],
-      },
-    },
-  };
+  const apps = await participantAppWhere(ctx.db, ctx, {
+    includeMemberships: true,
+    // Worker history remains legible after uninstall.
+    includeUninstalled: true,
+  });
+  return apps ? { app: { is: apps } } : { id: { in: [] } };
 }
 
 type TeamAgentRow = {
@@ -688,7 +672,7 @@ type CastArgs = {
 type CastTarget = {
   appId: string;
   app: AppRow & { deletedAt: Date | null };
-  agent: { id: string; name: string; personaRole: string | null; systemPrompt: string | null };
+  agent: { id: string; name: string; personaRole: string | null; systemPrompt: string | null; ownerUserId: string | null; organizationId: string | null };
   workerRole: string | null;
   requestedName: string | null;
   override: string | null;
@@ -762,7 +746,7 @@ async function resolveCastTarget(ctx: Context, args: CastArgs): Promise<CastTarg
       where: { appId_agentId: { appId, agentId: id } },
       select: {
         agent: {
-          select: { id: true, name: true, personaRole: true, systemPrompt: true, deletedAt: true },
+          select: { id: true, name: true, personaRole: true, systemPrompt: true, deletedAt: true, ownerUserId: true, organizationId: true },
         },
       },
     });
@@ -772,6 +756,7 @@ async function resolveCastTarget(ctx: Context, args: CastArgs): Promise<CastTarg
         { extensions: { code: 'WORKER_AGENT_NOT_INSTALLED', appId, agentId: id } },
       );
     }
+    if (row.agent.ownerUserId !== null) await requireOwnerOrOrgRole(ctx, row.agent, 'READER', 'agent');
     agent = row.agent;
   } else {
     if (!roleNorm) {
@@ -784,7 +769,7 @@ async function resolveCastTarget(ctx: Context, args: CastArgs): Promise<CastTarg
       orderBy: { createdAt: 'asc' },
       select: {
         agent: {
-          select: { id: true, name: true, urn: true, personaRole: true, systemPrompt: true, deletedAt: true },
+          select: { id: true, name: true, urn: true, personaRole: true, systemPrompt: true, deletedAt: true, ownerUserId: true, organizationId: true },
         },
       },
     });
@@ -793,7 +778,7 @@ async function resolveCastTarget(ctx: Context, args: CastArgs): Promise<CastTarg
     const matches = installed
       .map((r) => r.agent)
       .filter(
-        (a) => a && !a.deletedAt && (a.personaRole ?? '').toLowerCase() === roleNorm.toLowerCase(),
+        (a) => a && !a.deletedAt && (a.ownerUserId === null || a.ownerUserId === ctx.userId) && (a.personaRole ?? '').toLowerCase() === roleNorm.toLowerCase(),
       );
     if (matches.length === 0) {
       throw new GraphQLError(
@@ -1243,7 +1228,7 @@ export const workerMutations = {
       if (app.ownerUserId !== null) {
         // spec 047 strict ownership, branching on the ownership CLASS before
         // comparing owner columns (findings:org-xor-owner-null-comparison-bypass).
-        if (ctx.userId !== app.ownerUserId) throw forbidden();
+        if (ctx.userId !== app.ownerUserId && !canBypassUserOwnership(ctx, 'app')) throw forbidden();
       } else if (app.organizationId !== null) {
         try {
           await requireOrgRole(ctx, app.organizationId, 'ADMIN');
@@ -2537,7 +2522,7 @@ export const workerFieldResolvers = {
       const app = await ctx.db.app.findUnique({ where: { id: worker.appId } });
       if (!app || app.deletedAt) return null;
       try {
-        await requireOwnerOrOrgRole(ctx, app, 'READER');
+        await requireOwnerOrOrgRole(ctx, app, 'READER', 'app');
       } catch {
         return null;
       }

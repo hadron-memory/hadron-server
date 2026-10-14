@@ -426,7 +426,7 @@ export const memoryMutations = {
             );
           }
         } else {
-          await requireOwnerOrOrgRole(ctx, sourceMem, 'ADMIN');
+          await requireOwnerOrOrgRole(ctx, sourceMem, 'ADMIN', 'memory');
         }
       }
 

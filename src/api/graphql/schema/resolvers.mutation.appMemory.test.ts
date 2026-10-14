@@ -268,7 +268,7 @@ describe('#1405 — createMemoryInApp inherits a user-owned App tenant', () => {
   });
 
   it.each(['app', 'knowledge'] as const)(
-    'creates %s under the App owner and keeps owner-only read/write access',
+    'creates %s under the App owner; permits platform admins but conceals it from ordinary outsiders',
     async (memoryClass) => {
       const mem = await createMemoryInApp(
         null,
@@ -288,7 +288,7 @@ describe('#1405 — createMemoryInApp inherits a user-owned App tenant', () => {
 
       expect(await resolvers.Query.memory(null, { ref: mem.id }, asUser(owner.id))).toMatchObject({ id: mem.id });
       expect(await resolvers.Query.memory(null, { ref: mem.id }, asUser(outsiderUser.id))).toBeNull();
-      expect(await resolvers.Query.memory(null, { ref: mem.id }, { ...asUser(outsiderUser.id), roles: ['ADMIN'] })).toBeNull();
+      expect(await resolvers.Query.memory(null, { ref: mem.id }, { ...asUser(outsiderUser.id), roles: ['ADMIN'] })).toMatchObject({ id: mem.id });
       expect(await getAccessibleMemoryIds(asUser(owner.id))).toContain(mem.id);
       expect(await getAccessibleMemoryIds(asUser(outsiderUser.id))).not.toContain(mem.id);
       await expect(requireMemoryWriteAccess(asUser(owner.id), mem.id)).resolves.toBeUndefined();
@@ -300,7 +300,7 @@ describe('#1405 — createMemoryInApp inherits a user-owned App tenant', () => {
       expect(link?.role ?? null).toBe(memoryClass === 'knowledge' ? 'read' : null);
       expect((await getAppMemoryAccess(db, ownedApp.id, { callerUserId: owner.id })).get(mem.id)).toBe('READ_ONLY');
       expect(await canReadMemory(db, { userId: owner.id, roles: [] }, mem.id)).toBe(true);
-      expect(await canReadMemory(db, { userId: outsiderUser.id, roles: ['ADMIN'] }, mem.id)).toBe(false);
+      expect(await canReadMemory(db, { userId: outsiderUser.id, roles: ['ADMIN'] }, mem.id)).toBe(true);
       expect(await canReadMemory(db, { appId: ownedApp.id, roles: [] }, mem.id)).toBe(false);
     },
   );

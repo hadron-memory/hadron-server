@@ -20,6 +20,7 @@ import {
   requireOrgRole,
   requireAgentAccess,
   requireOwnerOrOrgRole,
+  requireProviderCredentialOwner,
   resolveOrgScope,
   isPlatformAdmin,
   toGqlAiServiceConfig,
@@ -213,7 +214,7 @@ export const agentQueries = {
       const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentRef);
       const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
       // Org ADMIN on the agent's org can read the decrypted key.
-      await requireOwnerOrOrgRole(ctx, agent, 'ADMIN');
+      await requireOwnerOrOrgRole(ctx, agent, 'ADMIN', 'agent');
       // 036-ai-service-config: registry-backed — the Agent's 'default'
       // config (single-entity contract preserved; no resolution walk).
       const config = await ctx.db.aiServiceConfig.findFirst({
@@ -311,8 +312,8 @@ export const agentQueries = {
           const app = await ctx.db.app.findUniqueOrThrow({ where: { id } });
           effectiveOrgId = app.organizationId;
           appOwnerUserId = app.ownerUserId;
-          // The same owner-aware gate protects appAIConfig's decrypted key.
-          await requireOwnerOrOrgRole(ctx, app, 'ADMIN');
+          // Decrypted user-owned App credentials never receive the management bypass.
+          await requireProviderCredentialOwner(ctx, app);
         }
         if (agentRef) {
           const { id } = await resolveAgentRef(ctx.db, agentRef);
@@ -324,7 +325,7 @@ export const agentQueries = {
           if (userOwnedAgent) {
             // A personal Agent is strictly owner-only, even for platform
             // admins and impersonated sessions (spec 047).
-            await requireOwnerOrOrgRole(ctx, agent, 'ADMIN');
+            await requireOwnerOrOrgRole(ctx, agent, 'ADMIN', 'agent');
           }
           if (!effectiveOrgId) {
             effectiveOrgId = agent.organizationId;
@@ -362,7 +363,7 @@ export const agentQueries = {
           if (ownerType === 'ORGANIZATION') {
             await requireOrgRole(ctx, config.organizationId!, 'ADMIN');
           } else if (ownerType === 'AGENT' && agentOwner) {
-            await requireOwnerOrOrgRole(ctx, agentOwner, 'ADMIN');
+            await requireOwnerOrOrgRole(ctx, agentOwner, 'ADMIN', 'agent');
           } else if (ownerType === 'HADRON_SERVER') {
             throw new NoAiConfigAvailableError(name ?? DEFAULT_AI_CONFIG_NAME, 'this App');
           }
