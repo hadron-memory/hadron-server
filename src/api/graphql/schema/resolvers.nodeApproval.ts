@@ -378,11 +378,83 @@ async function flushStatusColumns(ctx: Context, kind: StatusColumns, batch: Colu
   }
 }
 
-/** Read the memory state rather than trusting decrypted parent projections. */
-async function encryptedStatusParent(ctx: Context, n: { id: string; memoryId?: string }): Promise<boolean> {
-  const memoryId = n.memoryId ?? (await ctx.db.node.findUnique({where:{id:n.id},select:{memoryId:true}}))?.memoryId;
-  if (!memoryId) return false;
-  return (await ctx.db.memory.findUnique({where:{id:memoryId},select:{isEncrypted:true}}))?.isEncrypted === true;
+/**
+ * #1856 — one tick of keyed lookups for a request, flushed in ONE query. The same shape as
+ * {@link loadStatusColumns}: keyed on the request's Context, opened on the first key, flushed on the next
+ * macrotask, and DELETED at flush. Nothing survives the tick: a later call opens a fresh batch and reads
+ * the database again, so no answer is reused across ticks, let alone across requests (the issue's
+ * guard). A failed flush rejects every waiter; nothing falls back to a default.
+ */
+type TickBatch<V> = { pending: Map<string, Array<(v: V) => void>>; failures: Array<(e: unknown) => void> };
+
+function tickLoad<V>(
+  registry: WeakMap<Context, TickBatch<V>>,
+  ctx: Context,
+  key: string,
+  flush: (keys: string[]) => Promise<Map<string, V>>,
+  absent: V,
+): Promise<V> {
+  let batch = registry.get(ctx);
+  if (!batch) {
+    const fresh: TickBatch<V> = { pending: new Map(), failures: [] };
+    batch = fresh;
+    registry.set(ctx, fresh);
+    setImmediate(() => {
+      registry.delete(ctx);
+      flush([...fresh.pending.keys()]).then(
+        (found) => {
+          for (const [k, waiters] of fresh.pending) for (const resolve of waiters) resolve(found.has(k) ? found.get(k)! : absent);
+        },
+        (error) => {
+          for (const reject of fresh.failures) reject(error);
+        },
+      );
+    });
+  }
+  const target = batch;
+  return new Promise<V>((resolve, reject) => {
+    const waiters = target.pending.get(key) ?? [];
+    waiters.push(resolve);
+    target.pending.set(key, waiters);
+    target.failures.push(reject);
+  });
+}
+
+const encryptedBatches = new WeakMap<Context, TickBatch<boolean>>();
+
+/**
+ * Read the memory state rather than trusting decrypted parent projections. #1856: batched per request,
+ * so a page asking both status fields pays one memory query, plus one node query for the parents
+ * selected without their memoryId, instead of about two per node. Both steps run in the SAME flush, so a
+ * page that mixes the two parent shapes still pays one memory query. The flag is always the STORED
+ * `memory.isEncrypted`, never a field on the parent; a missing node or memory reads as not encrypted,
+ * exactly as the per-node lookups this replaces did.
+ */
+function encryptedStatusParent(ctx: Context, n: { id: string; memoryId?: string }): Promise<boolean> {
+  const key = n.memoryId ? `m:${n.memoryId}` : `n:${n.id}`;
+  return tickLoad(encryptedBatches, ctx, key, async (keys) => {
+    const nodeIds = keys.filter((k) => k.startsWith('n:')).map((k) => k.slice(2));
+    const memoryOfNode = new Map<string, string>();
+    if (nodeIds.length > 0) {
+      const rows = await ctx.db.node.findMany({ where: { id: { in: nodeIds } }, select: { id: true, memoryId: true } });
+      for (const r of rows) memoryOfNode.set(r.id, r.memoryId);
+    }
+    const memoryIds = new Set([
+      ...keys.filter((k) => k.startsWith('m:')).map((k) => k.slice(2)),
+      ...memoryOfNode.values(),
+    ]);
+    const encrypted = new Set<string>();
+    if (memoryIds.size > 0) {
+      const rows = await ctx.db.memory.findMany({ where: { id: { in: [...memoryIds] } }, select: { id: true, isEncrypted: true } });
+      for (const r of rows) if (r.isEncrypted === true) encrypted.add(r.id);
+    }
+    const out = new Map<string, boolean>();
+    for (const k of keys) {
+      const memoryId = k.startsWith('m:') ? k.slice(2) : memoryOfNode.get(k.slice(2));
+      out.set(k, memoryId !== undefined && encrypted.has(memoryId));
+    }
+    return out;
+  }, false);
 }
 
 export const nodeApprovalFieldResolvers = {
