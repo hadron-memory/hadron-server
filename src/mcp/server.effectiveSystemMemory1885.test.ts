@@ -12,7 +12,7 @@
  * through, by any address.
  */
 
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
 import { createTestableMcpServer } from './server.js';
@@ -24,6 +24,20 @@ vi.mock('../integrations/github/writeNodeToGit.js', () => ({
 vi.mock('../integrations/github/syncGraphFromGithub.js', () => ({
   syncGraphFromGithub: vi.fn().mockResolvedValue({ error: null }),
 }));
+
+// Every node id a signature status is loaded for, so a pin can say an
+// inherited node loads none (#1891 x #1902), not only that none is printed.
+const signatureLoads = vi.hoisted(() => [] as string[][]);
+vi.mock('../lib/signing/status.js', async (importOriginal) => {
+  const mod = await importOriginal<typeof import('../lib/signing/status.js')>();
+  return {
+    ...mod,
+    loadSignatureStatuses: (d: Parameters<typeof mod.loadSignatureStatuses>[0], ids: string[]) => {
+      signatureLoads.push([...ids]);
+      return mod.loadSignatureStatuses(d, ids);
+    },
+  };
+});
 
 let n: number;
 let org: { id: string; urn: string };
@@ -169,5 +183,55 @@ describe('P2-2 (Diego, #1891) — an inherited node\'s validation shows state on
       expect(out).not.toContain('validator');
       expect(out).not.toContain(childUrn('tasks:open-pr'));
     }
+  });
+});
+
+describe('the Signatures line: inherited sanitization and the #1902 switch, combined', () => {
+  const idAt = async (memoryId: string, loc: string) =>
+    (await db.node.findFirstOrThrow({ where: { memoryId, loc }, select: { id: true } })).id;
+  const loaded = () => signatureLoads.flat();
+  const lines = (out: string) => out.split('\n').filter((l) => l.startsWith('Signatures:'));
+
+  beforeEach(() => { signatureLoads.length = 0; });
+  afterEach(() => { vi.unstubAllEnvs(); });
+
+  it('switch on: an inherited node shows no line and loads no status; the child\'s own node shows it', async () => {
+    vi.stubEnv('PASSKEY_SIGNING_ENABLED', 'true');
+    const inheritedId = await idAt(engineer.mem, 'processes:release');
+    const ownId = await idAt(backend.mem, 'notes:own');
+
+    const inherited = await call('hadron_get_node', { urn: childUrn('processes:release') });
+    expect(inherited).toContain('Inherited from');
+    expect(lines(inherited)).toEqual([]);
+
+    const own = await call('hadron_get_node', { urn: childUrn('notes:own') });
+    expect(lines(own)).toEqual(['Signatures: none']);
+
+    expect(loaded()).toContain(ownId);
+    expect(loaded()).not.toContain(inheritedId);
+  });
+
+  it('switch on, batch read: the same, in one hadron_get_nodes', async () => {
+    vi.stubEnv('PASSKEY_SIGNING_ENABLED', 'true');
+    const inheritedId = await idAt(engineer.mem, 'processes:release');
+    const ownId = await idAt(backend.mem, 'notes:own');
+
+    const out = await call('hadron_get_nodes', { refs: [childUrn('processes:release'), childUrn('notes:own')] });
+    expect(out).toContain('EngRelease body');
+    expect(out).toContain('BackOwn body');
+    expect(lines(out)).toEqual(['Signatures: none']);
+    expect(loaded()).toContain(ownId);
+    expect(loaded()).not.toContain(inheritedId);
+  });
+
+  it('switch off: neither node shows a line, and nothing is loaded', async () => {
+    vi.stubEnv('PASSKEY_SIGNING_ENABLED', '');
+    const single = [
+      await call('hadron_get_node', { urn: childUrn('processes:release') }),
+      await call('hadron_get_node', { urn: childUrn('notes:own') }),
+    ];
+    const batch = await call('hadron_get_nodes', { refs: [childUrn('processes:release'), childUrn('notes:own')] });
+    for (const out of [...single, batch]) expect(lines(out)).toEqual([]);
+    expect(loaded()).toEqual([]);
   });
 });
