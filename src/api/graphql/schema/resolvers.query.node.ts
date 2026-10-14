@@ -2,7 +2,7 @@
 import { contentScopeWhere, effectiveContentScope, type ContentScope } from '../../../lib/comments/scope.js';
 import { isConcealedCommentHistory } from './resolvers.comments.js';
 import { COMMENT_NODE_TYPE } from '../../../lib/comments/index.js';
-import { effectiveScope, findEffectiveNodeIdByLoc, markInherited, type InheritedFrom } from '../../../lib/effectiveSystemMemory.js';
+import { effectiveScope, findEffectiveNodeIdByLoc, markInherited, retainEffective, stillInherited, type InheritedFrom } from '../../../lib/effectiveSystemMemory.js';
 import {
   renderNodeExport,
   type NodeExportFormat,
@@ -676,6 +676,10 @@ export const nodeQueries = {
           current.loc !== selected.loc ||
           (!inheritedFrom && !allowed(current.memoryId))
         ) return null;
+        // An inherited selection is re-checked on the version actually served:
+        // a base node turned boot prompt, or a child override added, since
+        // the selection is no longer the child's to show (Diego, #1891 P2-1).
+        if (inheritedFrom && !(await stillInherited(ctx.db, inheritedFrom, current))) return null;
         const node = inheritedFrom ? Object.assign(current, { inheritedFrom }) : current;
         // #1061 — every dispatch form of this query funnels its ONE successful
         // return through `finish`, so this is the single place a `read` is
@@ -1168,7 +1172,13 @@ export const nodeQueries = {
       // so a caller that reads 30 nodes through one search and one that reads
       // them one at a time land in the same place. Every branch has already
       // scoped its rows to the caller's readable memories before reaching here.
-      const recordSearchHits = (hits: readonly { node: unknown }[]): void => {
+      const recordSearchHits = async (hits: { node: unknown }[]): Promise<void> => {
+        // #1885 — the exclusion list was a snapshot taken before this query:
+        // re-check every inherited hit on the version read (P2-1), in place.
+        if (inheritance.inheritedFrom.size > 0) {
+          const kept = new Set((await retainEffective(ctx.db, hits.map((h) => h.node as { id: string; memoryId: string; role?: string | null }), inheritance)).map((n) => n.id));
+          for (let i = hits.length - 1; i >= 0; i--) if (!kept.has((hits[i]!.node as { id: string }).id)) hits.splice(i, 1);
+        }
         markInherited(hits.map((h) => h.node as { memoryId: string }), inheritance.inheritedFrom);
         recordNodeUsage(ctx.db, 'read', toUsageNodeRefs(hits.map((h) => h.node)), ctx);
       };
@@ -1203,7 +1213,7 @@ export const nodeQueries = {
           const byId = new Map(rows.map((n) => [n.id, n]));
           const ordered = ids.map((id) => byId.get(id)).filter((n): n is NonNullable<typeof n> => !!n);
           const browseHits = ordered.map((n) => ({ node: n, score: null, vector: null }));
-          recordSearchHits(browseHits);
+          await recordSearchHits(browseHits);
           return { hits: browseHits, passages: [], total: null, reason: null, degraded: null };
         }
         const orderBy =
@@ -1219,7 +1229,7 @@ export const nodeQueries = {
         });
         await decryptNodesBatch(ctx.db, rows);
         const listHits = rows.map((n) => ({ node: n, score: null, vector: null }));
-        recordSearchHits(listHits);
+        await recordSearchHits(listHits);
         return {
           hits: listHits,
           passages: [],
@@ -1377,7 +1387,7 @@ export const nodeQueries = {
             }
           }
         }
-        recordSearchHits(hits);
+        await recordSearchHits(hits);
         return { hits, passages: [], total: null, reason, degraded };
       };
 
@@ -1431,7 +1441,7 @@ export const nodeQueries = {
             for (const id of neighbourIds) { const n = nById.get(id); if (n) hits.push({ node: n, score: null, vector: null }); }
           }
         }
-        recordSearchHits(hits);
+        await recordSearchHits(hits);
         return { hits, passages: [], total: null, reason, degraded };
       };
 
@@ -1809,6 +1819,13 @@ export const nodeQueries = {
       // `unavailable` / `omitted` report back what the caller actually sent.
       // Null for the prefix form, where there are no caller refs (ids there).
       let refByNodeId: Map<string, string> | null = null;
+      // #1885 — explicit refs that read through a child's effective system
+      // memory (as node(ref:) does), with the child each came through.
+      const explicitInherited = new Map<string, InheritedFrom>();
+      const memoryAllowed = (memoryId: string) => {
+        const scoped = access.memoryId as { in: string[] } | undefined;
+        return !scoped || scoped.in.includes(memoryId);
+      };
 
       if (hasSet) {
         // Count cap (cor:api:040:02) — caller knows the count; fail loud up front.
@@ -1854,9 +1871,23 @@ export const nodeQueries = {
               const { id } = await resolveNodeRefForCaller(ctx, ref);
               return { ref, id: id as string | null };
             } catch (e) {
-              if (e instanceof NodeNotFoundError || e instanceof AmbiguousLegacyUrnError)
+              if (e instanceof AmbiguousLegacyUrnError) return { ref, id: null };
+              if (!(e instanceof NodeNotFoundError)) throw e;
+              // #1885 (cor:dmo:050:14) — no node of its own and none moved:
+              // a child URN reads through to the base that passes the loc
+              // down, gated on the child's memory (Diego, #1891 P2-3).
+              let parts: { memoryUrn: string; loc: string };
+              try {
+                parts = splitNodeUrn(ref);
+              } catch {
                 return { ref, id: null };
-              throw e;
+              }
+              const child = await resolveMemoryRef(ctx.db, parts.memoryUrn).catch(() => null);
+              if (!child || !memoryAllowed(child.id)) return { ref, id: null };
+              const effective = await findEffectiveNodeIdByLoc(ctx.db, child.id, parts.loc);
+              if (!effective?.inheritedFrom) return { ref, id: null };
+              explicitInherited.set(effective.id, effective.inheritedFrom);
+              return { ref, id: effective.id as string | null };
             }
           }),
         );
@@ -1874,7 +1905,9 @@ export const nodeQueries = {
         // simply absent from the result — reported indistinguishably from a
         // ref that never resolved.
         const rows = await ctx.db.node.findMany({
-          where: { id: { in: [...refByNodeId.keys()] }, deletedAt: null, ...access },
+          where: explicitInherited.size > 0
+            ? { id: { in: [...refByNodeId.keys()] }, deletedAt: null, OR: [access, { id: { in: [...explicitInherited.keys()] } }] }
+            : { id: { in: [...refByNodeId.keys()] }, deletedAt: null, ...access },
           include,
         });
         const byId = new Map(rows.map((n) => [n.id, n]));
@@ -1932,16 +1965,28 @@ export const nodeQueries = {
       }
       // #1885 — inherited rows were admitted through the child's memory, so
       // the re-check admits exactly those ids alongside the caller's access.
-      const inheritedIds = batchInheritance
-        ? ordered.filter((n) => batchInheritance!.inheritedFrom.has(n.memoryId)).map((n) => n.id)
-        : [];
+      const inheritedIds = [
+        ...(batchInheritance ? ordered.filter((n) => batchInheritance!.inheritedFrom.has(n.memoryId)).map((n) => n.id) : []),
+        ...explicitInherited.keys(),
+      ];
       const currentRows = await ctx.db.node.findMany({
         where: inheritedIds.length > 0
           ? { id: { in: liveIds }, deletedAt: null, OR: [access, { id: { in: inheritedIds } }] }
           : { id: { in: liveIds }, deletedAt: null, ...access },
         include,
       });
-      if (batchInheritance) markInherited(currentRows, batchInheritance.inheritedFrom);
+      if (batchInheritance) {
+        const kept = new Set((await retainEffective(ctx.db, currentRows, batchInheritance)).map((n) => n.id));
+        for (let i = currentRows.length - 1; i >= 0; i--) if (!kept.has(currentRows[i]!.id)) currentRows.splice(i, 1);
+        markInherited(currentRows, batchInheritance.inheritedFrom);
+      }
+      for (let i = currentRows.length - 1; i >= 0; i--) {
+        const row = currentRows[i]!;
+        const from = explicitInherited.get(row.id);
+        if (!from) continue;
+        if (await stillInherited(ctx.db, from, row)) Object.assign(row, { inheritedFrom: from });
+        else currentRows.splice(i, 1);
+      }
       const currentById = new Map(currentRows.map((n) => [n.id, n]));
       ordered = ordered.flatMap((selected) => {
         const current = currentById.get(selected.id);
@@ -2370,6 +2415,9 @@ export const nodeQueries = {
           memory: { select: { id: true, urn: true, name: true, organizationId: true } },
         },
       });
+      // The exclusion list was a snapshot: re-check what was read (P2-1).
+      const kept = new Set((await retainEffective(ctx.db, results, inheritance)).map((r) => r.id));
+      for (let i = results.length - 1; i >= 0; i--) if (!kept.has(results[i]!.id)) results.splice(i, 1);
       await decryptNodesBatch(ctx.db, results);
       markInherited(results, inheritance.inheritedFrom);
       // #1061 — the App-scoped node list returns full node projections, so each

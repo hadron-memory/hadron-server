@@ -1,5 +1,5 @@
 import { registerAutomationPinTools } from './automationPinTools.js';
-import { effectiveScope, findEffectiveNodeIdByLoc, markInherited, type InheritedFrom } from '../lib/effectiveSystemMemory.js';
+import { effectiveScope, findEffectiveNodeIdByLoc, markInherited, retainEffective, stillInherited, type InheritedFrom } from '../lib/effectiveSystemMemory.js';
 import { chatByline } from './chatByline.js';
 import { boundSessionPrivacyFilter } from '../lib/auth/sessionPrivacy.js';
 import { createHmac, randomUUID } from 'crypto';
@@ -1743,7 +1743,10 @@ async function renderNodeReadProjection(
       });
   const validationState = nodeContentValidationState(revision, report);
   const validatorRef = report ? await readableTask(report.validationTaskId) : null;
-  const validationLine = report
+  const validationLine = inheritedFrom
+    // The base's report names its validator and records: state only (P2-2).
+    ? `Validation: ${validationState.toLowerCase()}`
+    : report
     ? `Validation: ${validationState.toLowerCase()} (node revision ${report.nodeRevSeq}; validator ${validatorRef ? `${validatorRef} @ revision ${report.validationTaskRevSeq}` : 'restricted'})`
     : 'Validation: unvalidated';
 
@@ -4683,6 +4686,11 @@ export function createMcpServerInstance(
       ) {
         return textResult(`Node "${rawUrn}" not found.`);
       }
+      // The version actually served must still be the child's to show
+      // (Diego, #1891 P2-1): not turned boot prompt, not overridden since.
+      if (inheritedFrom && !(await stillInherited(db, inheritedFrom, current))) {
+        return textResult(`Node "${rawUrn}" not found.`);
+      }
       if (inheritedFrom) markInherited([current], new Map([[current.memoryId, inheritedFrom]]));
       // Spec 041: decrypt when this session holds the key; mark locked
       // otherwise (blanked fields + Locked meta line, never raw ciphertext).
@@ -4795,6 +4803,7 @@ export function createMcpServerInstance(
       /** resolved node id -> caller ref; prefix reads naturally fall back to id. */
       const echoByNodeId = new Map<string, string>();
       const unavailable: string[] = [];
+      let prefixInheritance: Awaited<ReturnType<typeof effectiveScope>> | null = null;
 
       if (hasPrefix) {
         // ── Prefix subtree (one memory, gated once) ──────────────────────────
@@ -4808,6 +4817,7 @@ export function createMcpServerInstance(
         // #1885 (cor:dmo:050:14) — the subtree of an Agent's system memory
         // reads as its effective memory, as hadron_list_nodes does.
         const inheritance = await effectiveScope(db, [mem.id]);
+        prefixInheritance = inheritance;
         const rows = await db.node.findMany({
           where: {
             memoryId: { in: inheritance.memoryIds },
@@ -5104,6 +5114,17 @@ export function createMcpServerInstance(
           n.loc !== selected.loc ||
           (!inheritedFrom && !(await canReadMemory(db, auth, n.memoryId, EXPLICIT_REF)))
         ) {
+          unavailable.push(echoByNodeId.get(selected.id) ?? selected.id);
+          continue;
+        }
+        // Re-check the version actually served (Diego, #1891 P2-1): a single
+        // ref against the child it came through, a prefix row against the
+        // prefix's whole scope.
+        const stillShown = !inheritedFrom
+          || (inheritedFrom.via
+            ? await stillInherited(db, inheritedFrom, n)
+            : prefixInheritance !== null && (await retainEffective(db, [n], prefixInheritance)).length === 1);
+        if (!stillShown) {
           unavailable.push(echoByNodeId.get(selected.id) ?? selected.id);
           continue;
         }
@@ -5426,6 +5447,8 @@ export function createMcpServerInstance(
 
       let allNodes: Array<Awaited<ReturnType<typeof db.node.findMany>>[number] & { realMemoryId?: string; inheritedFrom?: InheritedFrom }> =
         await db.node.findMany({ where, orderBy: { loc: 'asc' } });
+      // The exclusion list was a snapshot: re-check what was read (P2-1).
+      if (inheritance && inheritance.inheritedFrom.size > 0) allNodes = await retainEffective(db, allNodes, inheritance);
       if (inheritance && memoryId && inheritance.inheritedFrom.size > 0) {
         allNodes = allNodes.map((n) => {
           const from = inheritance.inheritedFrom.get(n.memoryId);

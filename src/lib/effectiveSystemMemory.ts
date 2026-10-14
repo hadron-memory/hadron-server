@@ -119,7 +119,16 @@ export async function descendantMemoriesInheriting(
 }
 
 /** The base Agent an inherited node comes from (cor:dmo:050:14, #10929's marking). */
-export type InheritedFrom = { agentId: string; agentUrn: string };
+export type InheritedFrom = {
+  agentId: string;
+  agentUrn: string;
+  /**
+   * The child system memory a single read came through, so the row it
+   * finally serves can be re-checked against that child (never served).
+   * Unset on listing stamps, which re-check against their whole scope.
+   */
+  via?: string;
+};
 
 /**
  * A memory scope widened by inheritance, for a listing scoped to memories.
@@ -141,18 +150,20 @@ export type EffectiveScope = {
   memoryIds: string[];
   excludeNodeIds: string[];
   inheritedFrom: Map<string, InheritedFrom>;
+  /** The requested memories that widened the scope, for {@link retainEffective}. */
+  roots: string[];
 };
 
 export async function effectiveScope(db: Db, memoryIds: string[]): Promise<EffectiveScope> {
   const requested = new Set(memoryIds);
   const inheritedFrom = new Map<string, InheritedFrom>();
-  if (memoryIds.length === 0) return { memoryIds, excludeNodeIds: [], inheritedFrom };
+  if (memoryIds.length === 0) return { memoryIds, excludeNodeIds: [], inheritedFrom, roots: [] };
   // Only the requested memories that are a live Agent's system memory AND whose
   // Agent extends something can widen the scope; one query finds them.
   const roots = await db.$queryRaw<Array<{ memory_id: string }>>`
     SELECT system_memory_id AS memory_id FROM agents
     WHERE system_memory_id = ANY(${memoryIds}::text[]) AND deleted_at IS NULL AND extends_agent_id IS NOT NULL`;
-  if (roots.length === 0) return { memoryIds, excludeNodeIds: [], inheritedFrom };
+  if (roots.length === 0) return { memoryIds, excludeNodeIds: [], inheritedFrom, roots: [] };
 
   const inherited = new Set<string>();
   const added: string[] = [];
@@ -165,12 +176,12 @@ export async function effectiveScope(db: Db, memoryIds: string[]): Promise<Effec
     }
     for (const id of (await inheritedNodeIds(db, chain)).keys()) inherited.add(id);
   }
-  if (added.length === 0) return { memoryIds, excludeNodeIds: [], inheritedFrom };
+  if (added.length === 0) return { memoryIds, excludeNodeIds: [], inheritedFrom, roots: [] };
   const keep = [...inherited];
   const excluded = await db.$queryRaw<Array<{ id: string }>>`
     SELECT id FROM nodes
     WHERE memory_id = ANY(${added}::text[]) AND NOT (id = ANY(${keep}::text[]))`;
-  return { memoryIds: [...memoryIds, ...added], excludeNodeIds: excluded.map((r) => r.id), inheritedFrom };
+  return { memoryIds: [...memoryIds, ...added], excludeNodeIds: excluded.map((r) => r.id), inheritedFrom, roots: roots.map((r) => r.memory_id) };
 }
 
 /**
@@ -197,7 +208,7 @@ export async function findEffectiveNodeIdByLoc(
   const hit = rows[0];
   if (!hit) return null;
   const link = links[hit.pos - 1]!;
-  return { id: hit.id, memoryId: hit.memory_id, inheritedFrom: hit.pos === 1 ? null : { agentId: link.agentId, agentUrn: link.agentUrn } };
+  return { id: hit.id, memoryId: hit.memory_id, inheritedFrom: hit.pos === 1 ? null : { agentId: link.agentId, agentUrn: link.agentUrn, via: memoryId } };
 }
 
 /**
@@ -216,4 +227,47 @@ export function markInherited<T extends { memoryId: string }>(
       (row as T & { inheritedFrom?: InheritedFrom }).inheritedFrom = from;
     }
   }
+}
+
+const isNotInheritedRole = (role: string | null | undefined): boolean =>
+  role === NOT_INHERITED_ROLE || role?.startsWith(`${NOT_INHERITED_ROLE}.`) === true;
+
+/**
+ * Re-check rows a listing fetched through {@link effectiveScope} (Diego's P2-1
+ * on #1891). The scope's exclusion list is a snapshot, taken before the
+ * listing's own query: a boot prompt inserted, a node turned into one, a child
+ * override added or a base cleared in between would otherwise ride through.
+ * So every row from an added base memory is kept only if, NOW, it is still
+ * inherited by one of the scope's roots, and the version actually read is not
+ * a boot prompt. Rows from the requested memories pass untouched. Order kept.
+ */
+export async function retainEffective<T extends { id: string; memoryId: string; role?: string | null }>(
+  db: Db,
+  rows: T[],
+  scope: EffectiveScope,
+): Promise<T[]> {
+  if (scope.inheritedFrom.size === 0) return rows;
+  const candidates = rows.filter((r) => scope.inheritedFrom.has(r.memoryId));
+  if (candidates.length === 0) return rows;
+  const live = new Set<string>();
+  for (const root of scope.roots) {
+    for (const id of (await inheritedNodeIds(db, await systemMemoryChain(db, root))).keys()) live.add(id);
+  }
+  return rows.filter((r) => !scope.inheritedFrom.has(r.memoryId) || (live.has(r.id) && !isNotInheritedRole(r.role)));
+}
+
+/**
+ * Is `row`, as read, still the node its child passes down at its loc? For a
+ * single read that selected an inherited node and then re-fetched it (the
+ * reconcile): the re-fetched version must not be a boot prompt, and the
+ * child's effective memory must still resolve the loc to this very node.
+ */
+export async function stillInherited(
+  db: Db,
+  from: InheritedFrom,
+  row: { id: string; loc: string; role?: string | null },
+): Promise<boolean> {
+  if (!from.via || isNotInheritedRole(row.role)) return false;
+  const effective = await findEffectiveNodeIdByLoc(db, from.via, row.loc);
+  return effective?.id === row.id && effective.inheritedFrom !== null;
 }
