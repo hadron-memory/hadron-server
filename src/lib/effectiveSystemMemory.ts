@@ -291,9 +291,10 @@ export async function stillInherited(
  * So the version actually read must sit at the selected memory and loc, and
  * a fresh lookup must still resolve the loc to it, not as a boot prompt when
  * inherited. Anything else drops the edge; it is never served under the
- * selection's stale stamp.
+ * selection's stale stamp. Exported for #1941: the Agent lists resolve
+ * in-chain sources the same way and run the same check (Andi's P2 on #1949).
  */
-async function servedEndpointInEffect(
+export async function servedEndpointInEffect(
   db: Db,
   via: string,
   loc: string,
