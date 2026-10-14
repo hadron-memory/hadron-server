@@ -352,5 +352,11 @@
     "family": "codex",
     "worktreeSlug": "ruin",
     "workerUrn": "hrn:worker:hadronmemory.com:hadron-dev-team:ruin"
+  },
+  {
+    "workerId": "01a00918116073139ebb081b1d70b87c",
+    "family": "codex",
+    "worktreeSlug": "dara",
+    "workerUrn": "hrn:worker:hadronmemory.com:hadron-dev-team:dara"
   }
 ]
