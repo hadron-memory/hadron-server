@@ -8,10 +8,12 @@
  */
 export function ownsSession(
   principal: { userId?: string | null; appId?: string | null; impersonation?: unknown },
-  session: { userId: string | null; appId: string | null },
+  session: { userId: string | null; appId: string | null; launchOperationId?: string | null },
 ): boolean {
   if (principal.impersonation) return false;
-  return principal.userId
-    ? session.userId === principal.userId
-    : !!principal.appId && session.appId === principal.appId;
+  if (principal.userId) return session.userId === principal.userId;
+  // #1709 (Rook #10734, Holger's ruling A): a host-launched session is its holder's alone. No App key owns it, so none
+  // binds it, attributes usage to it or keeps it live: not the host key that started it, nor another key of the App.
+  if (session.launchOperationId) return false;
+  return !!principal.appId && session.appId === principal.appId;
 }

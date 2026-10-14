@@ -11,7 +11,7 @@ import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../../test/helpers.js';
 import { generateId } from '../id.js';
 import { typeDefs } from '../../api/graphql/schema/typeDefs.js';
-import { __lostHostTesting, HostRegistrationError, isRegistrationLive, loadLaunchableFamilies, registerHost, sweepLostHosts } from './hosts.js';
+import { __lostHostTesting, HostRegistrationError, isRegistrationLive, loadLaunchableFamilies, registerHost, sweepLostHosts, type HostRegistrationInput } from './hosts.js';
 
 const DAY = '2026-10-09';
 const at = (hhmm: string): Date => new Date(`${DAY}T${hhmm.length === 5 ? `${hhmm}:00` : hhmm}Z`);
@@ -32,7 +32,8 @@ beforeEach(async () => {
   other = await mkApp('Other');
   const agent = await db.agent.create({ data: { id: generateId(), name: 'A', urn: `hosts-agent-${generateId().toLowerCase()}`, ownerUserId: owner.id }, select: { id: true } });
   const worker = (appId: string, name: string) =>
-    db.worker.create({ data: { appId, agentId: agent.id, name, slug: name.toLowerCase() }, select: { id: true } });
+    // #1709: held, so a host can launch them (cor:agt:060:05).
+    db.worker.create({ data: { appId, agentId: agent.id, name, slug: name.toLowerCase(), heldByUserId: owner.id }, select: { id: true } });
   anne = await worker(app.id, 'Anne');
   liam = await worker(app.id, 'Liam');
   rook = await worker(app.id, 'Rook');
@@ -41,7 +42,7 @@ beforeEach(async () => {
 
 const ORCA1 = () => ({
   appId: app.id, hostId: 'orca1', label: 'Orca host 1', pollIntervalSeconds: 60,
-  workers: [{ workerId: anne.id, family: 'codex' }, { workerId: liam.id, family: 'glm' }, { workerId: rook.id, family: 'claude' }],
+  workers: [{ workerId: anne.id, family: 'codex', worktrees: ['repo/anne'] }, { workerId: liam.id, family: 'glm', worktrees: ['repo/liam'] }, { workerId: rook.id, family: 'claude', worktrees: ['repo/rook'] }],
 });
 const hostEvents = () => db.agentTeamEvent.findMany({ where: { type: { startsWith: 'host.' } }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] });
 
@@ -59,7 +60,7 @@ describe('cor:agt:070:01 — a host registers which workers it can launch, and a
 
   it('a refresh replaces the worker list and writes no event; identity is (App, host)', async () => {
     const first = await registerHost(db, ORCA1(), at('10:00'));
-    const again = await registerHost(db, { ...ORCA1(), label: 'renamed', workers: [{ workerId: anne.id, family: 'claude' }] }, at('10:01'));
+    const again = await registerHost(db, { ...ORCA1(), label: 'renamed', workers: [{ workerId: anne.id, family: 'claude', worktrees: ['repo/anne'] }] }, at('10:01'));
     expect(again).toEqual({ registrationId: first.registrationId, registered: false });
     expect(Object.fromEntries(await loadLaunchableFamilies(db, { appId: app.id }, at('10:02')))).toEqual({ [anne.id]: ['claude'] });
     expect(await hostEvents()).toHaveLength(1);
@@ -68,19 +69,19 @@ describe('cor:agt:070:01 — a host registers which workers it can launch, and a
 
   it('a worker may be launchable through several hosts, as different families', async () => {
     await registerHost(db, ORCA1(), at('10:00'));
-    await registerHost(db, { ...ORCA1(), hostId: 'orca2', label: 'orca2', workers: [{ workerId: anne.id, family: 'glm' }] }, at('10:00'));
+    await registerHost(db, { ...ORCA1(), hostId: 'orca2', label: 'orca2', workers: [{ workerId: anne.id, family: 'glm', worktrees: ['repo/anne'] }] }, at('10:00'));
     expect((await loadLaunchableFamilies(db, { workerIds: [anne.id] }, at('10:01'))).get(anne.id)).toEqual(['codex', 'glm']);
   });
 
   it('refuses a worker of another App, a retired worker, a bad family, or a worker listed twice — writing nothing', async () => {
-    const refused = async (input: ReturnType<typeof ORCA1>) => {
+    const refused = async (input: HostRegistrationInput) => {
       await expect(registerHost(db, input, at('10:00'))).rejects.toBeInstanceOf(HostRegistrationError);
     };
     await refused({ ...ORCA1(), workers: [{ workerId: stranger.id, family: 'codex' }] });
     await db.worker.update({ where: { id: liam.id }, data: { retiredAt: at('09:00') } });
-    await refused({ ...ORCA1(), workers: [{ workerId: liam.id, family: 'glm' }] });
+    await refused({ ...ORCA1(), workers: [{ workerId: liam.id, family: 'glm', worktrees: ['repo/liam'] }] });
     await refused({ ...ORCA1(), workers: [{ workerId: anne.id, family: 'not a family' }] });
-    await refused({ ...ORCA1(), workers: [{ workerId: anne.id, family: 'codex' }, { workerId: anne.id, family: 'glm' }] });
+    await refused({ ...ORCA1(), workers: [{ workerId: anne.id, family: 'codex', worktrees: ['repo/anne'] }, { workerId: anne.id, family: 'glm', worktrees: ['repo/anne'] }] });
     await refused({ ...ORCA1(), hostId: 'has space' });
     await refused({ ...ORCA1(), label: '' });
     await refused({ ...ORCA1(), pollIntervalSeconds: 0 });
@@ -144,7 +145,7 @@ describe('lapse (cor:agt:070:01 open question: 3 poll intervals)', () => {
   it('#1763: the setting is the App\'s own; another App keeps the default of 3, and 2 shortens it', async () => {
     await db.agentTaskStallSchedule.create({ data: { appId: app.id, hostLapseCheckIns: 2 } });
     await registerHost(db, ORCA1(), at('10:00'));
-    await registerHost(db, { appId: other.id, hostId: 'orca1', label: 'Other', pollIntervalSeconds: 60, workers: [{ workerId: stranger.id, family: 'claude' }] }, at('10:00'));
+    await registerHost(db, { appId: other.id, hostId: 'orca1', label: 'Other', pollIntervalSeconds: 60, workers: [{ workerId: stranger.id, family: 'claude', worktrees: ['repo/stranger'] }] }, at('10:00'));
     expect((await loadLaunchableFamilies(db, { appId: app.id }, at('10:02:00.001'))).size).toBe(0);
     expect((await loadLaunchableFamilies(db, { appId: other.id }, at('10:03'))).size).toBe(1);
     expect(await sweepLostHosts(db, at('10:02:30'))).toBe(1);

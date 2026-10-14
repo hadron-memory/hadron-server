@@ -1315,6 +1315,16 @@ export const typeDefs = `#graphql
     status: NodeMoveLinkStatus!
   }
 
+  """
+  #1885 (hrn:node:hadronmemory.com:specs:cor:dmo:050:14) - the base Agent an
+  inherited node comes from.
+  """
+  type InheritedFrom {
+    agentId: ID!
+    "The base Agent's URN, fully qualified."
+    agentUrn: String!
+  }
+
   type Node {
     id: ID!
     "#1392 — warnings from a cross-memory move. Null on other Node reads; [] when a move changes no local content links. Raw content is preserved."
@@ -1379,6 +1389,14 @@ export const typeDefs = `#graphql
     clients render the field only when present.
     """
     portalUrl: String
+    """
+    #1885 (hrn:node:hadronmemory.com:specs:cor:dmo:050:14) - set when this node
+    was read through an Agent that extends a base: the node belongs to that
+    base's system memory and comes into the Agent's effective system memory by
+    inheritance. The node keeps its own address (its urn is the base's); this
+    names the base it comes from. Null for a node read in its own memory.
+    """
+    inheritedFrom: InheritedFrom
     """
     #1450 — true for a RESERVED spec citation that has no spec written yet (a
     placeholder in a draft corpus, created by reserveSpecCitation). Set only by
@@ -1599,6 +1617,14 @@ export const typeDefs = `#graphql
     input only, never an authorization input: it is self-declared.
     """
     family: String
+    "#1709 — a host-launched session (hrn:node:hadronmemory.com:specs:cor:agt:070:08): the host that started it. Null for a session started by hand."
+    launchHostId: String
+    "#1709 — the worker.start operation that launched it."
+    launchOperationId: ID
+    "#1709 — the task it was launched for; null for a manager's start without one."
+    launchTaskId: ID
+    "#1709 — who issued the start: platform (an assignment) or manager."
+    launchIssuedBy: String
     inputTokens: Int
     outputTokens: Int
     turnCount: Int
@@ -3913,6 +3939,11 @@ export const typeDefs = `#graphql
     # field here. Pure metadata: no server behavior forks on these fields.
     "Persona role - free string with conventions ('backend-engineer')."
     personaRole: String
+    """
+    #1885 (hrn:node:hadronmemory.com:specs:cor:dmo:050:14) - the id of the one base Agent this Agent extends,
+    or null. Set, change or clear it with setAgentBase.
+    """
+    extendsAgentId: ID
     # 036-ai-service-config: the four AI fields below are registry-backed
     # reads of the Agent's config named 'default' (legacy columns dropped).
     aiProvider: String
@@ -6105,6 +6136,15 @@ export const typeDefs = `#graphql
     never the default.
     """
     force: Boolean
+    """
+    #1709 — the single-use launch grant a host passed to the agent it started (hrn:node:hadronmemory.com:specs:cor:agt:070:08).
+    Redeemed with the HOLDER's own token: it binds that worker on the holder's behalf and records the launching host,
+    operation and task; the hold is unchanged. workerRef may be omitted (the grant names the worker). Refused
+    LAUNCH_GRANT_INVALID when unknown, expired, used or not minted for the caller (an App key never redeems one);
+    LAUNCH_REFUSED, failing the start with the reason, when the hold changed, the holder may no longer hold the
+    worker, or it already has a live session. Never forced: with force it is BAD_USER_INPUT.
+    """
+    launchGrant: String
     "The session's stated intent (Session.plan) - what this session is about. MCP's hadron_start_session description lands here."
     plan: String
     """
@@ -8469,6 +8509,10 @@ export const typeDefs = `#graphql
   Identity of the running hadron-server (see Query.serverInfo).
   """
   type ServerInfo {
+    "Present and true only when this deployment offers node signing. Discovery never grants access to sign."
+    signing: Boolean!
+    "Present and true only when passkey registration is enabled separately from node signing."
+    passkeyRegistration: Boolean!
     """
     HADRON_SERVER_VERSION — the MCP/API-surface contract version.
     """
@@ -8569,10 +8613,12 @@ export const typeDefs = `#graphql
     """
     #1709 — issue an operation to one of the App's registered hosts (hrn:node:hadronmemory.com:specs:cor:agt:070:05).
     A type outside the closed set is HOST_OPERATION_TYPE_UNKNOWN (hrn:node:hadronmemory.com:specs:cor:agt:070:03), a
-    missing, extra or malformed argument BAD_HOST_OPERATION_ARGS. Issued today: worktree.create and worktree.remove, by
-    the worker's holder, the worker it reports to, or whoever manages the App (else HOST_OPERATION_NOT_PERMITTED).
-    worker.start and worker.end ship with #1709's next slices, and worker.deliver with a host delivery path:
-    HOST_OPERATION_NOT_ISSUABLE until then. An unregistered host is HOST_NOT_FOUND.
+    missing, extra or malformed argument BAD_HOST_OPERATION_ARGS. worktree.create and worktree.remove: the worker's
+    holder, the worker it reports to, or whoever manages the App (else HOST_OPERATION_NOT_PERMITTED). worker.start:
+    whoever manages the App only, with an optional taskId, for a held worker with no live session and no start in
+    flight, in a worktree and family the live host registers for it (WORKER_NOT_HELD, WORKER_LIVE,
+    WORKER_START_PENDING). worker.end ships with #1709's close-on-finish slice, and worker.deliver with a host delivery
+    path: HOST_OPERATION_NOT_ISSUABLE until then. An unregistered host is HOST_NOT_FOUND.
     """
     issueHostOperation(input: IssueHostOperationInput!): HostOperation!
 
@@ -9821,14 +9867,31 @@ export const typeDefs = `#graphql
 
     """
     Soft-delete an Agent and its owned system memory. Refuses while a live
-    App install or live parent Agent import references it. AgentMemoryItem
-    attachments do not block deletion.
+    App install or live parent Agent import references it, or a live Agent
+    extends it as its base. AgentMemoryItem attachments do not block deletion.
 
     See hrn:node:hadronmemory.com:specs:cor:dmo:050:14.
 
     Accepts the entity's ID or URN.
     """
     deleteAgent(ref: ID!): Boolean!
+
+    """
+    #1885 (hrn:node:hadronmemory.com:specs:cor:dmo:050:14) - set, change or clear the one base Agent this
+    Agent extends. The Agent then inherits its base chain's system-memory
+    nodes, except boot prompts. A null baseRef clears the base.
+
+    Whoever manages this Agent may call it. Extending another organization's
+    Agent needs the organization's active AgentOrgGrant for it (a same-org base
+    provisions one, never reactivating a revoked grant); a user-owned Agent
+    extending someone else's needs its owner's active AgentSubscription.
+    Refused, changing nothing, with AGENT_BASE_CYCLE when the base is this
+    Agent or extends it, and AGENT_BASE_CHAIN_TOO_LONG when a chain through
+    this Agent, its own or any Agent's that extends it, would hold more than 4.
+
+    Accepts each Agent's ID or URN.
+    """
+    setAgentBase(ref: ID!, baseRef: ID): Agent!
 
     """
     #949 — re-own an Agent's class=system memory to the Agent's own owner
@@ -12192,6 +12255,12 @@ export const typeDefs = `#graphql
     result: JSON
     "Why it failed, as the host said it."
     failureReason: String
+    """
+    #1709 — worker.start only, and only in collectHostOperations' answer: the single-use launch grant to pass to the
+    agent the host starts (it redeems it at startSession with its holder's own token). Minted at each collection, which
+    revokes the previous one; short-lived; never stored in clear and never shown again. Null everywhere else.
+    """
+    launchGrant: String
   }
 
   type HostOperationPage {

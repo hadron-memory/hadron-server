@@ -15,8 +15,11 @@ afterEach(async () => {
   vi.unstubAllEnvs();
 });
 
-it.each(['false', 'true'])('#1895 real HTTP schema/execution and nonexistent REST at signing=%s', async value => {
+it.each([['false', 'true'], ['malformed', 'true'], ['true', undefined], ['true', 'true']])('#1895/#1900 real HTTP schema and capability signing=%s registration=%s', async (value, registration) => {
   vi.stubEnv('PASSKEY_SIGNING_ENABLED', value);
+  vi.stubEnv('PASSKEY_REGISTRATION_ENABLED', registration);
+  const signingOn = value === 'true';
+  const registrationOn = signingOn && registration === 'true';
   await cleanDb(db);
   const user = await db.user.create({ data: { handle: 'switch-reader', roles: [] } });
   server = httpServer(await createServer());
@@ -28,10 +31,19 @@ it.each(['false', 'true'])('#1895 real HTTP schema/execution and nonexistent RES
   const sdl = await schemaResponse.text();
   expect(sdl.includes('signatureStatus:')).toBe(value === 'true');
   expect(sdl.includes('SigningRequest')).toBe(value === 'true');
+  expect(/\bsigning: Boolean!/.test(sdl)).toBe(signingOn);
+  expect(/\bpasskeyRegistration: Boolean!/.test(sdl)).toBe(registrationOn);
+  const infoQuery = `{serverInfo{version baseUrl ${signingOn ? 'signing' : ''} ${registrationOn ? 'passkeyRegistration' : ''}}}`;
+  const infoResponse = await fetch(`${base}/graphql`, { method: 'POST', headers, body: JSON.stringify({ query: infoQuery }) });
+  expect(infoResponse.status).toBe(200);
+  const info = (await infoResponse.json() as any).data.serverInfo;
+  expect(info.signing).toBe(signingOn ? true : undefined);
+  expect(info.passkeyRegistration).toBe(registrationOn ? true : undefined);
+  if (!signingOn) expect(Object.keys(info)).toEqual(['version', 'baseUrl']);
   const query = '{ signingRequest(id:"opaque") { id } }';
   const response = await fetch(`${base}/graphql`, { method: 'POST', headers, body: JSON.stringify({ query }) });
   const result = await response.json() as any;
-  if (value === 'false') {
+  if (!signingOn) {
     expect(response.status).toBe(400);
     expect(result.errors[0].message).toBe('Cannot query field "signingRequest" on type "Query".');
     for (const query of ['mutation { requestNodeSignature(nodeRef:"opaque") { id } }', 'mutation { withdrawSigningRequest(id:"opaque") { id } }']) {
@@ -46,10 +58,15 @@ it.each(['false', 'true'])('#1895 real HTTP schema/execution and nonexistent RES
   const client = new Client({ name: 'signing-switch-probe', version: '1' });
   try {
     await client.connect(new StreamableHTTPClientTransport(new URL(`${base}/mcp`), { requestInit: { headers } }));
+    const capability = await client.callTool({ name: 'hadron_server_info', arguments: {} });
+    const capabilityText = (capability.content as Array<{text: string}>).map(c => c.text).join('\n');
+    const tokens = /^capabilities: (.*)$/m.exec(capabilityText)![1].split(', ');
+    expect(tokens.includes('node-signing')).toBe(signingOn);
+    expect(tokens.includes('passkey-registration')).toBe(registrationOn);
     const names = (await client.listTools()).tools.map(t => t.name);
     for (const name of ['hadron_request_signature', 'hadron_get_signing_request', 'hadron_withdraw_signing_request']) {
       expect(names.includes(name)).toBe(value === 'true');
-      if (value === 'false') {
+      if (!signingOn) {
         const missing = await client.callTool({ name, arguments: {} }).catch(e => e);
         const control = await client.callTool({ name: 'hadron_absent_control', arguments: {} }).catch(e => e);
         expect(missing.isError).toBe(true);
