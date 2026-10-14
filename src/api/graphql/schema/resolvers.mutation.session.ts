@@ -87,7 +87,7 @@ import {
 } from './resolvers.helpers.js';
 import { assertNoMintedSpecRemoval, assertNoMintedSpecUnmark } from '../../../lib/mintedSpecPermanence.js';
 import { preserveHeartbeatIfLapsed } from '../../../lib/sessionActivity.js';
-import { consumeGrant, failOperation, loadLiveGrant, type LoadedGrant } from '../../../lib/hostOperations/launch.js';
+import { consumeGrant, failOperation, loadLiveGrant, sameHold, type LoadedGrant } from '../../../lib/hostOperations/launch.js';
 import { withAuthorizedTx } from './authorizedTx.js';
 import { deriveFamily, normalizeFamily } from '../../../lib/agentTasks/family.js';
 
@@ -170,7 +170,7 @@ async function lockSessionAppActive(tx: Prisma.TransactionClient, appId: string)
  */
 // ── #1709: redeeming a launch grant ────────────────────────────────────────
 
-type LaunchCtx = { grant: LoadedGrant; issuedBy: 'platform' | 'manager' };
+type LaunchCtx = { grant: LoadedGrant; issuedBy: 'platform' | 'manager'; hold: { holdUserId: string | null; holdAt: Date | null } };
 
 const launchGrantInvalid = () =>
   new GraphQLError('This launch grant is not valid: unknown, expired, already used, or not yours.', { extensions: { code: 'LAUNCH_GRANT_INVALID' } });
@@ -202,8 +202,10 @@ async function withLaunch<T>(given: SessionInput, ctx: Context, run: (input: Ses
   const now = new Date();
   const grant = await loadLiveGrant(ctx.db, given.launchGrant, now);
   if (!grant || grant.holderUserId !== ctx.userId) throw launchGrantInvalid();
-  const op = await ctx.db.hostOperation.findUniqueOrThrow({ where: { id: grant.operationId }, select: { issuedBy: true } });
-  const launch: LaunchCtx = { grant, issuedBy: op.issuedBy === 'platform' ? 'platform' : 'manager' };
+  const op = await ctx.db.hostOperation.findUniqueOrThrow({ where: { id: grant.operationId }, select: { issuedBy: true, holdUserId: true, holdAt: true } });
+  const launch: LaunchCtx = {
+    grant, issuedBy: op.issuedBy === 'platform' ? 'platform' : 'manager', hold: { holdUserId: op.holdUserId, holdAt: op.holdAt },
+  };
   try {
     return await run({ ...given, workerRef: given.workerRef ?? grant.workerId }, launch);
   } catch (e) {
@@ -1064,9 +1066,19 @@ export const sessionMutations = {
         // sessions — WORKER_TAKEN and the superseded set — is re-read below,
         // after it, so two binds, or a bind and a resume, of one worker
         // serialize instead of each deciding on a stale view.
+        // #1883 review (Diego P2-3): a launch binds on the holder's behalf, so the holder's standing in the App is
+        // held for the bind like a reportsTo writer's (#1726 protocol): their user row and membership rows FOR SHARE,
+        // BEFORE the worker row. A removal or demotion committed first and is seen by the re-check below, or waits.
+        if (launch && appId && ctx.userId && !reportsToId) {
+          await tx.$queryRaw`SELECT 1 FROM users WHERE id = ${ctx.userId} FOR SHARE`;
+          await tx.$queryRaw`SELECT 1 FROM app_members WHERE app_id = ${appId} AND user_id = ${ctx.userId} FOR SHARE`;
+          await tx.$queryRaw`
+            SELECT 1 FROM org_members m JOIN apps a ON a.organization_id = m.organization_id
+            WHERE a.id = ${appId} AND m.user_id = ${ctx.userId} FOR SHARE OF m`;
+        }
         if (workerId) {
-          const [locked] = await tx.$queryRaw<Array<{ name: string; held_by_user_id: string | null; retired_at: Date | null }>>`
-            SELECT name, held_by_user_id, retired_at FROM workers WHERE id = ${workerId} FOR UPDATE`;
+          const [locked] = await tx.$queryRaw<Array<{ name: string; held_by_user_id: string | null; held_at: Date | null; retired_at: Date | null }>>`
+            SELECT name, held_by_user_id, held_at, retired_at FROM workers WHERE id = ${workerId} FOR UPDATE`;
           // #1625 review (Baloo, residual P2): the HOLD and retirement are
           // re-validated under the lock for EVERY bind, force included. The
           // checks far above read a snapshot; a release, a claim by someone
@@ -1093,8 +1105,22 @@ export const sessionMutations = {
           // #1709 (Holger via Vera #10775): a launch binds only a worker its
           // holder still holds. A hold released or moved since the start was
           // issued refuses the bind (never a claim), and nothing forces it.
-          if (launch && locked.held_by_user_id !== ctx.userId) {
+          if (launch && (locked.held_by_user_id !== ctx.userId ||
+              !sameHold(launch.hold, { userId: locked.held_by_user_id, at: locked.held_at }))) {
+            // Diego P2-1: not only the holder, the very hold the start was issued under (a release and re-hold, or
+            // a move and back, is a changed hold).
             throw new GraphQLError('The hold changed after this start was issued.', { extensions: { code: 'LAUNCH_REFUSED', reason: 'hold-changed' } });
+          }
+          if (launch && appId) {
+            // Diego P2-3: the holder must still be able to hold this worker, judged on the transaction's view under
+            // the rows held above: a participant, and on a user-owned App its owner or whoever manages it (#1764).
+            const txCtx = { ...ctx, db: tx as unknown as Context['db'] };
+            const bindApp = await tx.app.findUnique({ where: { id: appId }, select: { id: true, organizationId: true, ownerUserId: true } });
+            const may = !!bindApp && (await isAppParticipant(txCtx, bindApp)) &&
+              (bindApp.ownerUserId === null || ctx.userId === bindApp.ownerUserId || (await managesApp(txCtx, bindApp)));
+            if (!may) {
+              throw new GraphQLError('The holder may no longer hold this worker.', { extensions: { code: 'FORBIDDEN' } });
+            }
           }
           // Released during the wait: an unheld name is claimed by this bind,
           // through the same compare-and-set path as a never-held one.

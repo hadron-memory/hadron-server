@@ -295,6 +295,108 @@ describe('Holger #10775: anything that changed between issue and redemption refu
   });
 });
 
+describe('#1883 review (Diego): the start is fenced from issue to bind', () => {
+  function holdOpen(work: (tx: Parameters<Parameters<typeof db.$transaction>[0]>[0]) => Promise<void>) {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    let ready!: () => void;
+    const locked = new Promise<void>((r) => { ready = r; });
+    const done = db.$transaction(async (tx) => { await work(tx); ready(); await gate; });
+    return { locked, release, done };
+  }
+  async function against<T>(hold: ReturnType<typeof holdOpen>, run: () => Promise<T>): Promise<T> {
+    await hold.locked;
+    let settled = false;
+    const p = run().finally(() => { settled = true; });
+    await new Promise((res) => setTimeout(res, 400));
+    expect(settled).toBe(false);
+    hold.release();
+    await hold.done;
+    return p;
+  }
+  const reHold = (userId: string) =>
+    db.worker.update({ where: { id: kit.id }, data: { heldByUserId: userId, heldAt: new Date(Date.now() + Math.floor(Math.random() * 100_000)) } });
+  const dropKitFromOrca1 = async (tx: any) => {
+    const [reg] = await tx.$queryRaw`SELECT id FROM host_registrations WHERE app_id = ${app.id} AND host_id = 'orca1' FOR UPDATE`;
+    await tx.hostRegistrationWorker.deleteMany({ where: { registrationId: reg.id } });
+  };
+
+  it('P2-1: the start records the hold it was issued under', async () => {
+    const op = await issueStart();
+    const w = await db.worker.findUniqueOrThrow({ where: { id: kit.id }, select: { heldByUserId: true, heldAt: true } });
+    expect(await opOf(op.id)).toMatchObject({ holdUserId: w.heldByUserId, holdAt: w.heldAt });
+  });
+
+  it('P2-1: a hold moved BEFORE the first collection fails the start there; the new holder gets nothing', async () => {
+    const op = await issueStart();
+    await reHold(other.id);
+    expect(await collect()).toEqual([]);
+    expect(await opOf(op.id)).toMatchObject({ status: 'failed', failureReason: 'The hold changed after this start was issued.' });
+    expect(await db.launchGrant.count()).toBe(0);
+  });
+
+  it('P2-1: a release and re-hold by the SAME holder is a changed hold, before collection and between re-collections', async () => {
+    const op = await issueStart();
+    await reHold(holder.id);
+    expect(await collect()).toEqual([]);
+    expect((await opOf(op.id)).status).toBe('failed');
+    // Between re-collections: the first grant is minted, then the name is released and re-held.
+    const again = await issueStart();
+    const [first] = await collect();
+    expect(first!.launchGrant).toBeTruthy();
+    await reHold(holder.id);
+    expect(await collect()).toEqual([]);
+    expect((await opOf(again.id)).status).toBe('failed');
+    expect(await code(redeem(holder.id, first!.launchGrant!))).toBe('LAUNCH_GRANT_INVALID');
+    expect(await db.session.count({ where: { workerId: kit.id } })).toBe(0);
+  });
+
+  it('P2-1: a re-hold after collection refuses the bind and fails the start', async () => {
+    const { opId, grant } = await collectedStart();
+    await reHold(holder.id);
+    await expect(redeem(holder.id, grant)).rejects.toMatchObject({ extensions: { code: 'LAUNCH_REFUSED', reason: 'LAUNCH_REFUSED' } });
+    expect(await opOf(opId)).toMatchObject({ status: 'failed' });
+    expect(await db.session.count({ where: { launchOperationId: opId } })).toBe(0);
+  });
+
+  it('P2-2: a refresh dropping the worker, in flight, is waited for: the manager\'s start is refused, nothing queued', async () => {
+    const hold = holdOpen(dropKitFromOrca1);
+    expect(await against(hold, () => code(issueStart()))).toBe('HOST_NOT_FOUND');
+    expect(await db.hostOperation.count()).toBe(0);
+  });
+
+  it('P2-2: a lapse count lowered in flight is waited for: the platform starts nothing, and the assignment stands', async () => {
+    await db.hostRegistration.updateMany({ data: { refreshedAt: new Date(Date.now() - 25 * 60_000) } });
+    const t = await db.agentTask.create({ data: { appId: app.id, title: 'T', ownerUserId: manager.id, closeSessionWhenDone: false }, select: { id: true } });
+    const hold = holdOpen(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${'host-lapse:' + app.id}))`;
+      await tx.agentTaskStallSchedule.upsert({ where: { appId: app.id }, create: { appId: app.id, hostLapseCheckIns: 2 }, update: { hostLapseCheckIns: 2 } });
+    });
+    await against(hold, () => M.assignAgentTask({}, { taskId: t.id, assignee: { worker: kit.id } }, ctx(manager.id)));
+    expect(await db.hostOperation.count()).toBe(0);
+    expect((await db.agentTask.findUniqueOrThrow({ where: { id: t.id } })).assigneeWorkerId).toBe(kit.id);
+  });
+
+  it('P2-2: the platform\'s start also waits for a refresh dropping the worker', async () => {
+    const t = await db.agentTask.create({ data: { appId: app.id, title: 'T', ownerUserId: manager.id, closeSessionWhenDone: false }, select: { id: true } });
+    const hold = holdOpen(dropKitFromOrca1);
+    await against(hold, () => M.assignAgentTask({}, { taskId: t.id, assignee: { worker: kit.id } }, ctx(manager.id)));
+    expect(await db.hostOperation.count()).toBe(0);
+  });
+
+  it('P2-3: the holder removed from the App while the bind waits: the bind is refused and the start fails', async () => {
+    const { opId, grant } = await collectedStart();
+    const hold = holdOpen(async (tx) => {
+      await tx.appMember.delete({ where: { appId_userId: { appId: app.id, userId: holder.id } } });
+    });
+    const err = await against<GraphQLError | null>(hold, () => redeem(holder.id, grant).then(() => null, (e: GraphQLError) => e));
+    expect(err?.extensions).toMatchObject({ code: 'LAUNCH_REFUSED', reason: 'FORBIDDEN' });
+    expect(await opOf(opId)).toMatchObject({ status: 'failed' });
+    expect(await db.session.count({ where: { launchOperationId: opId } })).toBe(0);
+    expect(await db.agentTeamEvent.count({ where: { type: 'host.operation.failed' } })).toBe(1);
+  });
+});
+
 describe('the platform starts an assigned worker with no live session (cor:agt:070:08; #10773 (6): by hand too)', () => {
   const task = (assigneeWorkerId: string | null = null) =>
     db.agentTask.create({ data: { appId: app.id, title: 'Do it', ownerUserId: manager.id, assigneeWorkerId, closeSessionWhenDone: false }, select: { id: true } });

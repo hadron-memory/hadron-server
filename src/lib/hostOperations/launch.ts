@@ -31,7 +31,8 @@ import { createHash, randomBytes } from 'node:crypto';
 import { Prisma, type PrismaClient } from '../../generated/prisma/index.js';
 import { generateId } from '../id.js';
 import { toNaiveUtc } from '../sessionActivity.js';
-import { HOST_LAPSE_CHECK_INS_DEFAULT } from '../agentTasks/hosts.js';
+import { HOST_LAPSE_CHECK_INS_DEFAULT, lockAppHostLapse } from '../agentTasks/hosts.js';
+import { lockAuthorityAnchors } from '../auth/authorityAnchors.js';
 import type { Context } from '../../api/graphql/schema/resolvers.helpers.js';
 
 /** A grant lives this long after it is minted (Proposed: long enough to start an agent, short enough to be useless later). */
@@ -81,9 +82,10 @@ async function hasLiveSession(db: Db, workerId: string, now: Date): Promise<bool
  * the App, not retired, held, has no live session and no start in flight. Throws
  * {@link LaunchRefusal}.
  */
-export async function lockStartableWorker(tx: Prisma.TransactionClient, appId: string, workerId: string, now: Date): Promise<{ heldByUserId: string }> {
-  const [w] = await tx.$queryRaw<{ appId: string; retiredAt: Date | null; heldByUserId: string | null }[]>`
-    SELECT app_id AS "appId", retired_at AS "retiredAt", held_by_user_id AS "heldByUserId" FROM workers WHERE id = ${workerId} FOR UPDATE`;
+export async function lockStartableWorker(tx: Prisma.TransactionClient, appId: string, workerId: string, now: Date): Promise<StartHold> {
+  const [w] = await tx.$queryRaw<{ appId: string; retiredAt: Date | null; heldByUserId: string | null; heldAt: Date | null }[]>`
+    SELECT app_id AS "appId", retired_at AS "retiredAt", held_by_user_id AS "heldByUserId", held_at AS "heldAt"
+    FROM workers WHERE id = ${workerId} FOR UPDATE`;
   if (!w || w.appId !== appId) throw new LaunchRefusal('WORKER_NOT_FOUND', 'Worker not found.');
   if (w.retiredAt) throw new LaunchRefusal('WORKER_RETIRED', 'This worker is retired.');
   // cor:agt:070:08: a worker nobody holds is never started; there is nobody to bind it on behalf of.
@@ -94,7 +96,28 @@ export async function lockStartableWorker(tx: Prisma.TransactionClient, appId: s
     select: { id: true },
   });
   if (pending) throw new LaunchRefusal('WORKER_START_PENDING', 'A start of this worker is already in flight.');
-  return { heldByUserId: w.heldByUserId };
+  return { userId: w.heldByUserId, at: w.heldAt };
+}
+
+/** The hold that authorizes a start: its holder and when the hold was taken (a re-hold changes it). */
+export type StartHold = { userId: string; at: Date | null };
+
+/** Is the worker's hold now exactly the one a start was issued under (#1883 review, Diego P2-1)? */
+export function sameHold(issued: { holdUserId: string | null; holdAt: Date | null }, now: { userId: string | null; at: Date | null }): boolean {
+  return issued.holdUserId !== null && issued.holdUserId === now.userId && (issued.holdAt?.getTime() ?? null) === (now.at?.getTime() ?? null);
+}
+
+/**
+ * Fence the host decision a start makes, through its insert (#1883 review, Diego P2-2; the #1877 fallback's
+ * protocol): the App's host-lapse lock SHARED with its count (a count change waits), then every registration of the
+ * App FOR SHARE (a refresh that would drop the worker or its worktree waits), BEFORE the separate read of which hosts
+ * are live and list the worker. Taken after the worker row: registerHost takes the workers it lists FOR SHARE before
+ * its registration row, so the orders never cycle.
+ */
+export async function fenceHostDecision(tx: Prisma.TransactionClient, appId: string): Promise<void> {
+  await lockAppHostLapse(tx, appId, 'shared');
+  await tx.$queryRaw`SELECT app_id FROM agent_task_stall_schedule WHERE app_id = ${appId} FOR SHARE`;
+  await tx.$queryRaw`SELECT id FROM host_registrations WHERE app_id = ${appId} ORDER BY id FOR SHARE`;
 }
 
 /** Insert a worker.start for a validated host, worktree and family. */
@@ -103,6 +126,7 @@ export async function insertWorkerStart(
   a: {
     appId: string; hostId: string; workerId: string; worktree: string; family: string; taskId: string | null;
     issuer: { issuedBy: 'platform' } | { issuedBy: 'user'; issuedByUserId: string; issuedByAgentId: string | null };
+    hold: StartHold;
   },
 ): Promise<string> {
   const id = generateId();
@@ -115,6 +139,8 @@ export async function insertWorkerStart(
       args: { workerId: a.workerId, worktree: a.worktree, family: a.family, ...(a.taskId ? { taskId: a.taskId } : {}) },
       workerId: a.workerId,
       ...a.issuer,
+      holdUserId: a.hold.userId,
+      holdAt: a.hold.at,
     },
   });
   return id;
@@ -130,23 +156,32 @@ export async function insertWorkerStart(
  */
 export async function launchForAssignment(db: PrismaClient, a: { appId: string; taskId: string; workerId: string }, now = new Date()): Promise<string | null> {
   try {
+    const owner = await db.app.findUnique({ where: { id: a.appId }, select: { organizationId: true, ownerUserId: true } });
     return await db.$transaction(async (tx) => {
+      // The App's authority anchor SHARED: an uninstall or delete committed first and is seen, or waits.
+      await lockAuthorityAnchors(tx, [
+        { kind: 'app', id: a.appId },
+        ...(owner?.organizationId ? [{ kind: 'org' as const, id: owner.organizationId }] : []),
+        ...(owner?.ownerUserId ? [{ kind: 'user' as const, id: owner.ownerUserId }] : []),
+      ], 'shared');
       const app = await tx.app.findUnique({ where: { id: a.appId }, select: { deletedAt: true, uninstalledAt: true } });
       if (!app || app.deletedAt || app.uninstalledAt) return null;
       // Still this worker's open task: a reassignment or an end since the assignment launches nothing.
       const task = await tx.agentTask.findUnique({ where: { id: a.taskId }, select: { assigneeWorkerId: true, status: true } });
       if (!task || task.assigneeWorkerId !== a.workerId || !['pending', 'started'].includes(task.status)) return null;
+      let hold: StartHold;
       try {
-        await lockStartableWorker(tx, a.appId, a.workerId, now);
+        hold = await lockStartableWorker(tx, a.appId, a.workerId, now);
       } catch (e) {
         if (e instanceof LaunchRefusal) return null;
         throw e;
       }
+      await fenceHostDecision(tx, a.appId);
       const reg = (await liveRegistrationsFor(tx, a.appId, a.workerId, now)).find((r) => r.worktrees.length > 0);
       if (!reg) return null;
       return insertWorkerStart(tx, {
         appId: a.appId, hostId: reg.hostId, workerId: a.workerId, worktree: reg.worktrees[0]!, family: reg.family,
-        taskId: a.taskId, issuer: { issuedBy: 'platform' },
+        taskId: a.taskId, issuer: { issuedBy: 'platform' }, hold,
       });
     });
   } catch (err) {
@@ -157,22 +192,28 @@ export async function launchForAssignment(db: PrismaClient, a: { appId: string; 
 
 /**
  * At collection: a fresh grant for each `worker.start` collected, bound to the
- * worker's CURRENT holder; a re-collection revokes the unconsumed one first.
- * An operation whose worker is no longer held fails instead (its reason says
- * so). Returns operation id → raw grant, shown once.
+ * holder the start was ISSUED under (#1883 review, Diego P2-1: never a
+ * replacement holder adopted now); a re-collection revokes the unconsumed one
+ * first. An operation whose worker's hold is no longer exactly that one
+ * (released, moved, or released and re-held), or whose worker is retired,
+ * fails instead, with the reason. Returns operation id → raw grant, shown once.
  */
 export async function mintLaunchGrants(
   tx: Prisma.TransactionClient,
-  ops: { id: string; appId: string; hostId: string; workerId: string; args: Prisma.JsonValue }[],
+  ops: { id: string; appId: string; hostId: string; workerId: string; args: Prisma.JsonValue; holdUserId: string | null; holdAt: Date | null }[],
   now: Date,
 ): Promise<Map<string, string>> {
   const out = new Map<string, string>();
   for (const op of ops) {
-    const [w] = await tx.$queryRaw<{ heldByUserId: string | null; retiredAt: Date | null }[]>`
-      SELECT held_by_user_id AS "heldByUserId", retired_at AS "retiredAt" FROM workers WHERE id = ${op.workerId} FOR SHARE`;
+    const [w] = await tx.$queryRaw<{ heldByUserId: string | null; heldAt: Date | null; retiredAt: Date | null }[]>`
+      SELECT held_by_user_id AS "heldByUserId", held_at AS "heldAt", retired_at AS "retiredAt" FROM workers WHERE id = ${op.workerId} FOR SHARE`;
     await tx.launchGrant.updateMany({ where: { operationId: op.id, consumedAt: null, revokedAt: null }, data: { revokedAt: now } });
-    if (!w?.heldByUserId || w.retiredAt) {
-      await failOperation(tx, op.id, now, w?.retiredAt ? 'The worker was retired before its start was collected.' : 'Nobody holds the worker any more, so it is not started.');
+    if (!w || w.retiredAt) {
+      await failOperation(tx, op.id, now, 'The worker was retired before its start was collected.');
+      continue;
+    }
+    if (!sameHold(op, { userId: w.heldByUserId, at: w.heldAt })) {
+      await failOperation(tx, op.id, now, 'The hold changed after this start was issued.');
       continue;
     }
     const raw = LAUNCH_GRANT_PREFIX + randomBytes(32).toString('hex');
@@ -180,7 +221,7 @@ export async function mintLaunchGrants(
     await tx.launchGrant.create({
       data: {
         id: generateId(), appId: op.appId, operationId: op.id, workerId: op.workerId, hostId: op.hostId,
-        taskId: args.taskId ?? null, holderUserId: w.heldByUserId, tokenHash: hashLaunchGrant(raw),
+        taskId: args.taskId ?? null, holderUserId: op.holdUserId!, tokenHash: hashLaunchGrant(raw),
         issuedAt: now, expiresAt: new Date(now.getTime() + LAUNCH_GRANT_TTL_MS),
       },
     });

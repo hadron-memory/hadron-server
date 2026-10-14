@@ -61,7 +61,7 @@ import {
 import { appendAvailabilityEvent, appendHostOperationEvent, eventActor, PLATFORM_ACTOR } from '../../../lib/agentTasks/events.js';
 import { recordInEffect } from '../../../lib/agentTasks/availability.js';
 import { matchAfterChange } from '../../../lib/agentTasks/matcher.js';
-import { insertWorkerStart, LaunchRefusal, liveRegistrationsFor, lockStartableWorker, mintLaunchGrants } from '../../../lib/hostOperations/launch.js';
+import { fenceHostDecision, insertWorkerStart, LaunchRefusal, liveRegistrationsFor, lockStartableWorker, mintLaunchGrants } from '../../../lib/hostOperations/launch.js';
 import { normalizeAvailability, type AvailabilityInput } from './resolvers.agentTaskAlarms.js';
 
 const appNotFound = (appRef: string): GraphQLError => taskError('APP_NOT_FOUND', 'App not found.', { appRef });
@@ -447,7 +447,9 @@ async function issueWorkerStart(
         throw taskError('HOST_OPERATION_NOT_PERMITTED', 'Only whoever manages the App starts a worker through its host.');
       }
       const now = new Date();
-      await lockStartableWorker(tx, freshApp.id, workerId, now);
+      const hold = await lockStartableWorker(tx, freshApp.id, workerId, now);
+      // Diego P2-2: the registration, its worktree and the lapse count hold still through the insert.
+      await fenceHostDecision(tx, freshApp.id);
       const [reg] = await liveRegistrationsFor(tx, freshApp.id, workerId, now, hostId);
       if (!reg) throw taskError('HOST_NOT_FOUND', 'No live host with that id registers this worker.', { hostId });
       if (!reg.worktrees.includes(args.worktree!)) {
@@ -465,7 +467,7 @@ async function issueWorkerStart(
       const e = issuer(ctx, actor);
       id = await insertWorkerStart(tx, {
         appId: freshApp.id, hostId, workerId, worktree: args.worktree!, family: args.family!, taskId: args.taskId ?? null,
-        issuer: { issuedBy: 'user', issuedByUserId: e.issuedByUserId!, issuedByAgentId: e.issuedByAgentId },
+        issuer: { issuedBy: 'user', issuedByUserId: e.issuedByUserId!, issuedByAgentId: e.issuedByAgentId }, hold,
       });
     });
   } catch (e) {

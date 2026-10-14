@@ -5,6 +5,9 @@ ADD COLUMN "launch_issued_by" TEXT,
 ADD COLUMN "launch_operation_id" TEXT,
 ADD COLUMN "launch_task_id" TEXT;
 
+ALTER TABLE "host_operations" ADD COLUMN "hold_at" TIMESTAMP(3),
+ADD COLUMN "hold_user_id" TEXT;
+
 CREATE TABLE "launch_grants" (
     "id" TEXT NOT NULL,
     "app_id" TEXT NOT NULL,
@@ -57,3 +60,26 @@ ALTER TABLE sessions ADD CONSTRAINT chk_sessions_launch CHECK (
   (launch_issued_by IS NULL OR launch_issued_by IN ('platform', 'manager')) AND
   (launch_operation_id IS NULL OR worker_id IS NOT NULL)
 );
+
+-- #1883 review (Diego P2-1): a worker.start records the hold that authorized it, and
+-- only a worker.start does; it never changes after issue.
+ALTER TABLE host_operations DROP CONSTRAINT IF EXISTS chk_host_operations_hold;
+ALTER TABLE host_operations ADD CONSTRAINT chk_host_operations_hold CHECK (
+  (type = 'worker.start') = (hold_user_id IS NOT NULL) AND
+  (hold_at IS NULL OR hold_user_id IS NOT NULL)
+);
+
+CREATE OR REPLACE FUNCTION host_operation_hold_fixed() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+  IF (NEW.hold_user_id, NEW.hold_at) IS DISTINCT FROM (OLD.hold_user_id, OLD.hold_at) THEN
+    RAISE EXCEPTION 'A start''s authorizing hold never changes' USING ERRCODE = '23514';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_host_operations_hold_fixed ON host_operations;
+CREATE TRIGGER trg_host_operations_hold_fixed
+  BEFORE UPDATE ON host_operations
+  FOR EACH ROW EXECUTE FUNCTION host_operation_hold_fixed();

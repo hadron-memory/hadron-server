@@ -5396,6 +5396,13 @@ model HostOperation {
   result           Json?
   /// Why it failed, as the host said it; failures only.
   failureReason    String?   @map("failure_reason")
+  /// #1709 slice 2 (#1883 review, Diego P2-1) — `worker.start` only: the hold
+  /// that authorized the start, as (holder, held-at) when it was issued. A
+  /// grant is minted, and a bind made, only while the worker's hold is still
+  /// exactly this one: a release and re-hold changes `heldAt`, a move or an
+  /// account merge changes the holder (Holger via Vera #10775).
+  holdUserId       String?   @map("hold_user_id")
+  holdAt           DateTime? @map("hold_at")
 
   app    App    @relation(fields: [appId], references: [id], onDelete: Cascade)
   worker Worker @relation(fields: [workerId], references: [id], onDelete: Cascade)
