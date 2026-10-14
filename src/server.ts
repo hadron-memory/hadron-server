@@ -96,6 +96,7 @@ import { startSchedulerLoop } from './jobs/scheduler.js';
 import { startTaskStallEvaluatorLoop } from './jobs/taskStallEvaluator.js';
 import { startTaskMatcherLoop } from './jobs/taskMatcher.js';
 import { mountWebhookRoutes } from './api/webhooks.js';
+import { mountHealthRoutes } from './api/health.js';
 import { mountPublicAssetRoutes } from './api/assetPublic.js';
 import { mountEmailEventRoutes } from './api/emailEvents.js';
 import { mountSlackEventRoutes } from './api/slackEvents.js';
@@ -1792,9 +1793,9 @@ export async function createServer(): Promise<Express> {
   // src/api/assetPublic.ts before touching or extending it.
   mountPublicAssetRoutes(app, db);
 
-  app.get('/health', (_req, res) => {
-    res.json({ ok: true });
-  });
+  // #1906: /health runs SELECT 1 through this pool, so a wedged pool reads
+  // unhealthy. See src/api/health.ts.
+  mountHealthRoutes(app, db);
 
   // Background job: purge expired anonymous memories hourly.
   // Skipped in test environments to avoid leaking timers.
