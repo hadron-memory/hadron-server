@@ -41,9 +41,9 @@
  *  - Q6 a process both owned and staged → listed once, as `STARTS`.
  *  - Q7 owned processes union the chain, nearest wins, as tasks do.
  *
- * Not built here: stage edges whose source is a BASE's process, read through
- * the child. Those are an inherited node's edges, which #1893 resolves; until
- * it lands they are skipped (Eden, #10969).
+ * A stage edge whose source is a BASE's process is an inherited node's edge,
+ * read through the child as #1899 serves it (#1941): the process in effect at
+ * that loc is the one involved, inherited or the child's own override.
  */
 
 import type { Prisma, PrismaClient } from '../generated/prisma/index.js';
@@ -130,8 +130,14 @@ async function agentContext(db: Db, agent: GatedAgent) {
   const chainMemoryIds = new Set(links.map((l) => l.memoryId));
   const scope = await effectiveScope(db, [agent.systemMemoryId]);
 
-  /** The node in effect at `node`'s loc for this Agent, or null when none is. */
-  const effectiveAt = async (node: { id: string; memoryId: string; loc: string }): Promise<ListedNode | null> => {
+  /**
+   * The node in effect at `node`'s loc for this Agent, with its role as read,
+   * or null when none is. This is the in-chain half of 050:14's served-edge
+   * rule (#1899): the child's override wins, and a node not in effect drops.
+   */
+  const effectiveRowAt = async (
+    node: { id: string; memoryId: string; loc: string },
+  ): Promise<{ node: ListedNode; role: string | null } | null> => {
     const hit = await findEffectiveNodeIdByLoc(db, agent.systemMemoryId, node.loc);
     if (!hit) return null;
     const row = await db.node.findFirst({ where: { id: hit.id, deletedAt: null }, select: LIST_NODE_SELECT });
@@ -139,8 +145,12 @@ async function agentContext(db: Db, agent: GatedAgent) {
     // #1891's re-check on the version read: an inherited node that became a
     // boot prompt, or was overridden, since the lookup is not passed down.
     if (hit.inheritedFrom && !(await stillInherited(db, hit.inheritedFrom, row))) return null;
-    return { ...pick(row), inheritedFrom: hit.inheritedFrom };
+    return { node: { ...pick(row), inheritedFrom: hit.inheritedFrom }, role: row.role };
   };
+
+  /** The node in effect at `node`'s loc for this Agent, or null when none is. */
+  const effectiveAt = async (node: { id: string; memoryId: string; loc: string }): Promise<ListedNode | null> =>
+    (await effectiveRowAt(node))?.node ?? null;
 
   /** The base an inherited row comes from, carrying the child it was read through. */
   const inheritedOf = (memoryId: string): InheritedFrom | null => {
@@ -148,7 +158,7 @@ async function agentContext(db: Db, agent: GatedAgent) {
     return from ? { ...from, via: agent.systemMemoryId } : null;
   };
 
-  return { links, chainMemoryIds, scope, effectiveAt, inheritedOf };
+  return { links, chainMemoryIds, scope, effectiveAt, effectiveRowAt, inheritedOf };
 }
 
 /**
@@ -325,19 +335,30 @@ export async function listAgentProcesses(
     source: { deletedAt: null },
   };
   const stages = await db.edge.findMany({ where: stageWhere, select: { source: { select: LIST_NODE_SELECT } } });
-  // #1893 — a base's process, read through the child, brings its edges only
-  // once inherited edges resolve; until then a source in a base memory of the
-  // chain is skipped. The Agent's own memory and memories outside the chain
-  // are read directly, under the caller's own gate (Q4).
+  // #1941 — a stage source in a BASE's memory is an inherited node's edge, so
+  // it is read through the child as #1899 serves it (050:14; Holger #10968
+  // item 2, #11663): resolved by loc through the effective memory, the
+  // child's override winning, a node not in effect dropped, and the version
+  // read re-checked. What is in effect there must itself be a process. The
+  // audience is the list's own (readers of the child's system memory); a
+  // base memory's own gate is never consulted, and never widened. Sources in
+  // the Agent's own memory and outside the chain are read directly, under the
+  // caller's own gate (Q4), as before.
   const baseMemoryIds = new Set(ctx.links.slice(1).map((l) => l.memoryId));
-  const candidates = stages
-    .map((s) => s.source)
-    .filter((s) => isProcessRole(s.role) && !baseMemoryIds.has(s.memoryId));
-  const readable = await filterReadableMemoryIds(db, auth, candidates.map((s) => s.memoryId));
+  const candidates = stages.map((s) => s.source).filter((s) => isProcessRole(s.role));
+  const direct = candidates.filter((s) => !baseMemoryIds.has(s.memoryId));
+  const readable = await filterReadableMemoryIds(db, auth, direct.map((s) => s.memoryId));
   const involved = new Map<string, ListedNode>();
   for (const s of candidates) {
-    if (out.has(s.id) || involved.has(s.id) || !readable.has(s.memoryId)) continue;
-    involved.set(s.id, { ...pick(s), inheritedFrom: null });
+    let node: ListedNode | null;
+    if (baseMemoryIds.has(s.memoryId)) {
+      const inEffect = await ctx.effectiveRowAt(s);
+      node = inEffect && isProcessRole(inEffect.role) ? inEffect.node : null;
+    } else {
+      node = readable.has(s.memoryId) ? { ...pick(s), inheritedFrom: null } : null;
+    }
+    if (!node || out.has(node.id) || involved.has(node.id)) continue;
+    involved.set(node.id, node);
   }
   for (const node of [...involved.values()].sort((a, b) => byLoc({ node: a }, { node: b }))) {
     out.set(node.id, { node, kind: 'INVOLVED', trigger: null });
