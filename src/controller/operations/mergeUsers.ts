@@ -1,6 +1,6 @@
 import { randomBytes } from 'crypto';
 import { GraphQLError } from 'graphql';
-import { consumeUserMergeConsent } from '../../lib/userMergeConsent.js';
+import { consumeUserMergeConsent, mergeConsentAlreadyApplied } from '../../lib/userMergeConsent.js';
 import { Prisma, type PrismaClient, type User } from '../../generated/prisma/index.js';
 import { mergeOwnerNamespacedUrns } from '../../lib/mergeOwnerNamespacedUrns.js';
 
@@ -114,6 +114,16 @@ function isUniqueViolation(e: unknown): boolean {
   return e.code === 'P2010' && ((e.meta as { code?: string } | undefined)?.code === '23505' || /23505/.test(e.message));
 }
 
+/**
+ * A serialization abort: P2034 for the transaction, or P2010 / SQLSTATE 40001
+ * when a raw statement (the account FOR UPDATE) hits it. The second form is
+ * how a concurrent execution of the same proof loses (#1770).
+ */
+function isSerializationAbort(e: unknown): boolean {
+  if (!(e instanceof Prisma.PrismaClientKnownRequestError)) return false;
+  return e.code === 'P2034' || (e.code === 'P2010' && (e.meta as { code?: string } | undefined)?.code === '40001');
+}
+
 /** The template-name grammar's length cap (`validateAiConfigName`). */
 const TEMPLATE_NAME_MAX = 64;
 
@@ -221,14 +231,21 @@ export async function mergeUsers(
   if (sourceUserId === targetUserId) {
     throw new Error('mergeUsers: source and target must be different users');
   }
+  let aborted = false;
   for (let attempt = 1; ; attempt++) {
     try {
       return await runMergeTxn(db, { sourceUserId, targetUserId, actorUserId, mergeGlobalRoles, consentProof });
     } catch (e) {
-      const retryable =
-        e instanceof MergeRaceError ||
-        (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2034');
-      if (!retryable || attempt > MERGE_RETRIES) throw e;
+      const serialization = isSerializationAbort(e);
+      aborted ||= serialization;
+      if ((e instanceof MergeRaceError || serialization) && attempt <= MERGE_RETRIES) continue;
+      // #1770 (cor:api:010:02): after losing a race, if the winner was a merge
+      // of this very proof, say so with a typed refusal; never surface the raw
+      // 40001 or the tombstoned source the re-run meets.
+      if (aborted && consentProof && await mergeConsentAlreadyApplied(db, consentProof, sourceUserId, targetUserId, actorUserId))
+        throw new GraphQLError('This merge was already applied by a concurrent request.',
+          { extensions: { code: 'MERGE_ALREADY_APPLIED' } });
+      throw e;
     }
   }
 }
