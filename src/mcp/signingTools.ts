@@ -6,6 +6,7 @@
  * GraphQL exactly.
  */
 import { z } from 'zod';
+import { signingSurfacePolicy } from '../lib/signing/surface.js';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { PrismaClient } from '../generated/prisma/index.js';
 import type { AuthContext } from '../middleware/auth.js';
@@ -37,6 +38,7 @@ async function renderRequest(row: RequestRow, ctx: Context): Promise<string> {
 }
 
 export function registerSigningTools(server: McpServer, deps: { db: PrismaClient; auth: AuthContext }): void {
+  if (!signingSurfacePolicy().signing) return;
   const { db, auth } = deps;
   const ctxOf = (): Context => ({
     db,
@@ -60,7 +62,7 @@ export function registerSigningTools(server: McpServer, deps: { db: PrismaClient
     {
       nodeRef: z.string().describe('The node to sign: its URN or id.'),
       expectedRevision: z.number().int().positive().optional().describe('Refuse (REVISION_MISMATCH) unless this is still the current revision.'),
-      signer: z.string().optional().describe('A user id to name as the only signer. Omitted: any writer of the memory.'),
+      signer: z.string().optional().describe('A user id to name as the only signer; they must be able to write the node\'s memory (SIGNER_NOT_A_WRITER otherwise). Omitted: any writer of the memory.'),
     },
     async ({ nodeRef, expectedRevision, signer }) => {
       const ctx = ctxOf();

@@ -3,7 +3,7 @@
  * "Signatures:" line on node reads (single and batch). Agents request and read;
  * no tool produces a signature.
  */
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
 import { insertSoftPasskey, softPasskey } from '../test/softPasskey.js';
@@ -43,6 +43,7 @@ async function signAs(requestId: string, label: string, userId = writer.id) {
 }
 
 beforeEach(async () => {
+  vi.stubEnv('PASSKEY_SIGNING_ENABLED', 'true');
   await cleanDb(db);
   clearSignatureVerifyCache();
   process.env.SIGNING_CEREMONY_ORIGINS = ORIGIN;
@@ -59,6 +60,7 @@ beforeEach(async () => {
   memory = await resolvers.Mutation.createMemory(null, { orgId: org.id, name: 'policies' }, as(admin.id));
 });
 afterEach(() => {
+  vi.unstubAllEnvs();
   delete process.env.SIGNING_CEREMONY_ORIGINS;
   delete process.env.PASSKEY_RP_ID;
 });
@@ -94,6 +96,15 @@ describe('signing tools (#1632)', () => {
     expect(await mcp.callToolText('hadron_request_signature', { nodeRef: nodeUrn('p:3'), expectedRevision: 5 })).toMatch(/\[revision_mismatch\]/);
     expect(await mcp.callToolText('hadron_get_signing_request', { id: 'nope' })).toMatch(/\[signing_request_not_found\]/);
   });
+
+  it('refuses a named non-writer with [signer_not_a_writer] and creates nothing (#1904)', async () => {
+    await node('p:4');
+    const mcp = mcpAs(writer.id);
+    expect(await mcp.callToolText('hadron_request_signature', { nodeRef: nodeUrn('p:4'), signer: reader.id }))
+      .toMatch(/\[signer_not_a_writer\]/);
+    expect(await db.signingRequest.count()).toBe(0);
+    expect(await mcp.callToolText('hadron_request_signature', { nodeRef: nodeUrn('p:4'), signer: admin.id })).toMatch(/State: open/);
+  });
 });
 
 describe('a revoked hdr_user_ key cannot write through the signing tools (Riana #1864 P2-1)', () => {
@@ -125,6 +136,28 @@ describe('a revoked hdr_user_ key cannot write through the signing tools (Riana 
 });
 
 describe('the Signatures: line on node reads (cor:dmo:130:06)', () => {
+  it('off omits the line and status queries on single and batch reads even with stored signatures', async () => {
+    await node('off:1');
+    await node('off:2');
+    const enabled = mcpAs(reader.id);
+    await signAs(requestIdOf(await enabled.callToolText('hadron_request_signature', { nodeRef: nodeUrn('off:1') })), 'Hidden label');
+    vi.stubEnv('PASSKEY_SIGNING_ENABLED', 'false');
+    const query = vi.spyOn(db.nodeSignature, 'findMany');
+    try {
+      const disabled = mcpAs(reader.id);
+      for (const text of [
+        await disabled.callToolText('hadron_get_node', { urn: nodeUrn('off:1') }),
+        await disabled.callToolText('hadron_get_nodes', { refs: [nodeUrn('off:1'), nodeUrn('off:2')] }),
+      ]) {
+        expect(text).not.toMatch(/Signatures:|Hidden label|Signing request/i);
+        expect(text).toContain('Approval:');
+      }
+      expect(query).not.toHaveBeenCalled();
+    } finally {
+      query.mockRestore();
+    }
+  });
+
   it('reads none, then names the current signer with the label JSON-escaped, then counts it earlier', async () => {
     await node('s:1');
     const mcp = mcpAs(reader.id);

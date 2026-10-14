@@ -1635,6 +1635,15 @@ export const nodeQueries = {
           },
           include: { memory: { select: { urn: true } } },
         });
+        // #1885 (Diego, #1891 P2-1, chunk mode): the scope's exclusions were a
+        // snapshot, so re-check every hydrated parent against the effective
+        // set now, before eligibility, paging, usage and passage text. A base
+        // node a child override or a boot-prompt turn took out after the
+        // snapshot keeps its indexed chunks, and its text must not come back.
+        if (inheritance.inheritedFrom.size > 0) {
+          const kept = new Set((await retainEffective(ctx.db, parents, inheritance)).map((p) => p.id));
+          for (let i = parents.length - 1; i >= 0; i--) if (!kept.has(parents[i]!.id)) parents.splice(i, 1);
+        }
         const eligible = new Set(parents.map((p) => p.id));
         const chunkHits = scoredChunks.filter((c) => eligible.has(c.nodeId)).slice(off, off + finalLimit);
         const pageParentIds = new Set(chunkHits.map((c) => c.nodeId));

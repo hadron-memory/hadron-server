@@ -126,8 +126,9 @@ describe('agent-task tools: who acts', () => {
     expect(done).toMatch(/result: succeeded/);
     expect(code(text(await s.callTool('hadron_task_cancel', { taskId: id, session: plain.id })))).toBe('TASK_ENDED');
     const ev = text(await s.callTool('hadron_team_events', { appRef: app.id, taskId: id }));
-    expect(ev.split('\n').map((l) => /Z (task\.[a-z]+)/.exec(l)?.[1])).toEqual([
-      'task.created', 'task.assigned', 'task.started', 'task.finished',
+    // #1709: the task closes its session when done (the default), so finishing asks Anne to end it (cor:agt:050:10).
+    expect(ev.split('\n').map((l) => /Z (task\.[a-z-]+)/.exec(l)?.[1])).toEqual([
+      'task.created', 'task.assigned', 'task.started', 'task.finished', 'task.session-end-requested',
     ]);
   });
 });

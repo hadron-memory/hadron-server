@@ -194,6 +194,18 @@ export interface RosterEntry {
    */
   coordinator?: boolean;
   lifecycle?: boolean;
+  /**
+   * #1845 — the handle of this worker's MAIN terminal, pinned at
+   * provisioning and kept fresh at every replacement (host-side edits; the
+   * router never writes it). A pin resolves FIRST, before identity and the
+   * screen fallback: it survives the agentIdentity flap (#1823's target)
+   * and disambiguates worktrees that host more than one agent family (review
+   * spawns). The pin only ever resolves a terminal that is IN this row's
+   * worktree, connected and writable — a stale pin pointing elsewhere falls
+   * through to the next resolver with its reason. Absent means unpinned;
+   * nothing changes for unpinned rows.
+   */
+  terminal?: string;
 }
 
 export interface Config {
@@ -231,8 +243,16 @@ export function loadConfig(path: string): Config {
         throw new RouterError(`roster entry ${JSON.stringify(entry)}: "${flag}" must be a boolean`);
       }
     }
+    // #1845 — the terminal pin is a non-empty string handle or absent.
+    if (entry.terminal !== undefined && (typeof entry.terminal !== 'string' || !entry.terminal.trim())) {
+      throw new RouterError(`roster entry ${JSON.stringify(entry)}: "terminal" must be a non-empty terminal handle string`);
+    }
   }
   if (new Set(roster.map((e) => e.worker)).size !== roster.length) throw new RouterError('roster names a worker twice');
+  // Two rows pinning the SAME terminal would deliver one worker's nudge to
+  // another's terminal — the one-worktree rule's exact failure, one layer up.
+  const pins = roster.map((e) => e.terminal).filter((p): p is string => typeof p === 'string');
+  if (new Set(pins).size !== pins.length) throw new RouterError('roster pins one terminal for two workers');
   // Two workers on one worktree would resolve to the same terminal: one
   // nudge recorded as delivered twice, one worker never told (@codex P2, #1490).
   const worktrees = roster.map((e) => real(e.worktree));
@@ -1203,15 +1223,41 @@ export function boundWorker(worktree: string): string | null {
  */
 export function resolveTerminal(
   entry: RosterEntry, terminals: Terminal[], cfg?: Config, run?: Runner,
-): [string | null, string, 'identity' | 'screen' | 'none'] {
+): [string | null, string, 'pin' | 'identity' | 'screen' | 'none'] {
   const worktree = real(entry.worktree);
   const bound = boundWorker(worktree);
   if (bound && bound !== entry.worker) return [null, `worktree is bound to another worker (${bound})`, 'none'];
   const inWorktree = terminals.filter(
     (t) => t.worktreePath && real(t.worktreePath) === worktree && t.connected !== false && t.writable !== false,
   );
+  // #1845 — a pinned terminal resolves FIRST, before identity and the screen:
+  // the pin names this worker's MAIN terminal (host-side, kept fresh at every
+  // replacement), so it survives the agentIdentity flap and disambiguates
+  // two-family worktrees without any screen guesswork. The pin is TRUSTED ONLY
+  // within this row's worktree: a pin whose handle is missing, disconnected,
+  // or living in another worktree is stale, and resolution falls through to
+  // the next resolver with the reason — it can never redirect a nudge at
+  // another worker's terminal.
+  if (entry.terminal) {
+    const pinned = inWorktree.find((t) => t.handle === entry.terminal);
+    if (pinned) {
+      // The detail carries the pinned terminal's FAMILY for the
+      // untracked-terminal idle proof (provesIdle needs a family to prove
+      // prompt shapes when output tracking is lost): Orca's identity when it
+      // still reports one, else ONE screen read of this KNOWN terminal —
+      // family detection, not terminal selection. Unknown family holds
+      // fail-closed in provesIdle; a pin never widens a gate.
+      const family = AGENT_IDENTITIES.has(pinned.agentIdentity ?? '')
+        ? (pinned.agentIdentity as string)
+        : (cfg && run ? (screenAgentFamily(readScreen(cfg, pinned.handle, run)) ?? '') : '');
+      return [pinned.handle, family || 'pinned main terminal', 'pin'];
+    }
+  }
   const agents = inWorktree.filter((t) => AGENT_IDENTITIES.has(t.agentIdentity ?? ''));
-  if (agents.length > 1) return [null, `${agents.length} agent terminals in its worktree (ambiguous)`, 'none'];
+  if (agents.length > 1) {
+    if (entry.terminal) return [null, `${agents.length} agent terminals in its worktree and the pinned handle is stale`, 'none'];
+    return [null, `${agents.length} agent terminals in its worktree (ambiguous)`, 'none'];
+  }
   if (agents.length === 1) return [agents[0].handle, agents[0].agentIdentity ?? '', 'identity'];
   if (cfg && run) {
     const verified: Array<{ handle: string; family: string }> = [];
@@ -1221,6 +1267,7 @@ export function resolveTerminal(
     }
     if (verified.length === 1) return [verified[0].handle, verified[0].family, 'screen'];
   }
+  if (entry.terminal) return [null, 'no live agent terminal in its worktree and the pinned handle is stale', 'none'];
   return [null, 'no live agent terminal in its worktree', 'none'];
 }
 

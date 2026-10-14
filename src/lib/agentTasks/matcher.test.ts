@@ -235,7 +235,7 @@ describe('the family follows the BINDING, not activity (#1723 review, Diego P2-2
   it('a quiet, still-open binding keeps its family — and a live host family does not replace it', async () => {
     // Bound as codex at 10:00, quiet ever since; a host can launch Baloo as glm.
     await bind(baloo, 'codex', new Date(Date.now() - 25 * 3_600_000));
-    await registerHost(db, { appId: app.id, hostId: 'orca1', label: 'orca1', pollIntervalSeconds: 60, workers: [{ workerId: baloo.id, family: 'glm' }] });
+    await registerHost(db, { appId: app.id, hostId: 'orca1', label: 'orca1', pollIntervalSeconds: 60, workers: [{ workerId: baloo.id, family: 'glm', worktrees: ['repo/baloo'] }] });
     expect(await familyOf(baloo)).toBe('codex');
     const [state] = (await loadWorkerWorkStates(db, app.id, new Date())).filter((w) => w.id === baloo.id);
     expect(state).toMatchObject({ bound: true, live: false, bindingFamily: 'codex', launchableFamilies: ['glm'], families: ['codex'], freeFamilies: ['codex'] });
@@ -249,7 +249,7 @@ describe('the family follows the BINDING, not activity (#1723 review, Diego P2-2
 
   it('an actual end clears it; only then does a host family apply', async () => {
     const s = await bind(baloo, 'codex', new Date(Date.now() - 25 * 3_600_000));
-    await registerHost(db, { appId: app.id, hostId: 'orca1', label: 'orca1', pollIntervalSeconds: 60, workers: [{ workerId: baloo.id, family: 'glm' }] });
+    await registerHost(db, { appId: app.id, hostId: 'orca1', label: 'orca1', pollIntervalSeconds: 60, workers: [{ workerId: baloo.id, family: 'glm', worktrees: ['repo/baloo'] }] });
     await db.session.update({ where: { id: s.id }, data: { endedAt: new Date() } });
     expect(await familyOf(baloo)).toBeNull();
     const [state] = (await loadWorkerWorkStates(db, app.id, new Date())).filter((w) => w.id === baloo.id);
@@ -377,11 +377,23 @@ describe('cor:agt:060:05 — free for work: each disqualifier on its own', () =>
     })).toBe(false);
   });
 
-  it('UNTIL T6: unbound but launchable by a live host → free for work, but NOT matched', async () => {
+  it('#1709 (T6): unbound but launchable by a live host → matched, and its host is asked to start it in its worktree', async () => {
+    await registerHost(db, { appId: app.id, hostId: 'orca1', label: 'orca1', pollIntervalSeconds: 60, workers: [{ workerId: baloo.id, family: 'codex', worktrees: ['repo/baloo'] }] }, at('11:00'));
+    const t = await queued('11:00', { role: 'reviewer' });
+    await matchQueuedTasks(db, at('11:01'), { appId: app.id });
+    expect(await assigneeOf(t.id)).toBe(baloo.id);
+    const ops = await db.hostOperation.findMany();
+    expect(ops.map((o) => [o.type, o.hostId, o.issuedBy, o.args])).toEqual([
+      ['worker.start', 'orca1', 'platform', { workerId: baloo.id, worktree: 'repo/baloo', family: 'codex', taskId: t.id }],
+    ]);
+  });
+
+  it('#1709: a registered worker with no worktree on the host is not launchable, so not matched; the task waits', async () => {
     await registerHost(db, { appId: app.id, hostId: 'orca1', label: 'orca1', pollIntervalSeconds: 60, workers: [{ workerId: baloo.id, family: 'codex' }] }, at('11:00'));
     const t = await queued('11:00', { role: 'reviewer' });
     await matchQueuedTasks(db, at('11:01'), { appId: app.id });
     expect(await assigneeOf(t.id)).toBeNull();
+    expect(await db.hostOperation.count()).toBe(0);
   });
 });
 
@@ -436,10 +448,26 @@ describe('matching triggers (060:06 interim): create, finish, cancel, availabili
   it('cancelling a task frees its worker', async () => {
     await bind(baloo, 'codex');
     const busy = await db.agentTask.create({
-      data: { appId: app.id, title: 'Busy', ownerUserId: mia.id, assigneeWorkerId: baloo.id, assignedAt: new Date() },
+      data: { appId: app.id, title: 'Busy', ownerUserId: mia.id, assigneeWorkerId: baloo.id, assignedAt: new Date(), closeSessionWhenDone: false },
     });
     const waiting = await queued('09:00', { role: 'reviewer' });
     await M.cancelAgentTask({}, { taskId: busy.id }, ctx(mia.id));
+    expect(await assigneeOf(waiting.id)).toBe(baloo.id);
+  });
+
+  it('#1709: a worker asked to end its session gets no new work until that session ends (Proposed)', async () => {
+    const s = await bind(baloo, 'codex');
+    const busy = await db.agentTask.create({
+      data: { appId: app.id, title: 'Busy', ownerUserId: mia.id, assigneeWorkerId: baloo.id, assignedAt: new Date(), closeSessionWhenDone: true },
+    });
+    const waiting = await queued('09:00', { role: 'reviewer' });
+    await M.cancelAgentTask({}, { taskId: busy.id }, ctx(mia.id));
+    expect(await db.taskSessionEndRequest.count({ where: { workerId: baloo.id, sessionId: s.id } })).toBe(1);
+    expect(await assigneeOf(waiting.id)).toBeNull();
+    // The session ends: the worker is matched again, on its next session.
+    await db.session.update({ where: { id: s.id }, data: { endedAt: new Date() } });
+    await bind(baloo, 'codex');
+    await matchQueuedTasks(db, new Date(), { appId: app.id });
     expect(await assigneeOf(waiting.id)).toBe(baloo.id);
   });
 
