@@ -15,6 +15,7 @@ import { APP_KEY_PREFIX, hashAppKey } from '../../middleware/auth.js';
 import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
 import { HOST_REPORT_TIMEOUT_DEFAULT_MINUTES, sweepUnreportedHostOperations } from './settle.js';
 import { taskStallTick } from '../../jobs/taskStallEvaluator.js';
+import { lockAppHostLapse } from '../agentTasks/hosts.js';
 
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
@@ -119,6 +120,32 @@ describe('a collected operation with no report fails after the App\'s timeout (0
     expect((await taskStallTick(db, new Date(at + minutes(5)))).hostOperationsSettled).toBe(1);
     expect((await opOf(op.id)).failureReason).toBe('No report within 5 minutes of collection.');
     expect((await set(null)).hostReportTimeoutMinutes).toBe(HOST_REPORT_TIMEOUT_DEFAULT_MINUTES);
+  });
+
+  it('never early under a concurrent raise (Anne #1932 P3): a sweep waiting on the setter decides under the NEW timeout', async () => {
+    await M.setAgentTaskStallSchedule({}, { appRef: app.id, input: { hostReportTimeoutMinutes: 5 } }, ctx(manager.id));
+    const op = await issueCreate();
+    await collect();
+    const at = (await opOf(op.id)).collectedAt!.getTime();
+    let release!: () => void;
+    const held = new Promise<void>((r) => { release = r; });
+    let locked!: () => void;
+    const isLocked = new Promise<void>((r) => { locked = r; });
+    // The setter's shape: the App's host-lapse lock exclusive, the timeout raised to 60, not yet committed.
+    const raiser = db.$transaction(async (tx) => {
+      await lockAppHostLapse(tx, app.id, 'exclusive');
+      await tx.agentTaskStallSchedule.update({ where: { appId: app.id }, data: { hostReportTimeoutMinutes: 60 } });
+      locked();
+      await held;
+    }, { timeout: 20_000 });
+    await isLocked;
+    // Read at +6 minutes, the old 5-minute timeout has passed; the sweep's decision waits for the raise.
+    const sweep = sweepUnreportedHostOperations(db, new Date(at + minutes(6)));
+    await new Promise((r) => setTimeout(r, 300));
+    release();
+    await raiser;
+    expect(await sweep).toBe(0);
+    expect((await opOf(op.id)).status).toBe('collected');
   });
 
   it('a timed-out start: failed with its grant revoked, or succeeded when its session is bound (a FAILED report\'s rules)', async () => {
