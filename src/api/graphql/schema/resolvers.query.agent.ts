@@ -1,4 +1,3 @@
-import { requireProviderCredentialOwner } from './resolvers.helpers.js';
 // agentQueries — extracted from resolvers.ts Query (split step 3). No behavior change.
 import { GraphQLError } from 'graphql';
 import { decryptToken } from '../../../lib/tokenCrypto.js';
@@ -21,6 +20,7 @@ import {
   requireOrgRole,
   requireAgentAccess,
   requireOwnerOrOrgRole,
+  requireProviderCredentialOwner,
   resolveOrgScope,
   isPlatformAdmin,
   toGqlAiServiceConfig,

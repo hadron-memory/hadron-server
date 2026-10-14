@@ -249,6 +249,28 @@ describe('#1734 categorical exceptions', () => {
 });
 
 describe('#10659 user-owned App provider keys', () => {
+  it.each(['impersonation', 'run'] as const)('both decrypted-key reads refuse the owner identity under %s', async principal => {
+    await M.updateApp(null, { ref: app.id, aiProvider: 'openai', aiModel: 'gpt-4o', aiApiKey: 'sk-synthetic-owner-only' }, as(owner));
+    const ctx: Context = principal === 'impersonation'
+      ? { ...as(owner, ['ADMIN']), impersonation: { orgId: generateId() } } as Context
+      : { ...as(owner), appId: app.id, clientId: 'run:synthetic' };
+    for (const read of [resolvers.Query.appAIConfig, resolvers.Query.resolveAIConfig]) {
+      await expect(read(null, { appRef: app.id }, ctx)).rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
+    }
+    await expect(resolvers.Query.appAIConfig(null, { appRef: app.id }, as(owner))).resolves.toMatchObject({ apiKey: 'sk-synthetic-owner-only' });
+  });
+  it('an org-owned App clear removes only the default config', async () => {
+    const org = await db.organization.create({ data: { id: generateId(), name: 'Org', urn: 'org1734.com' } });
+    await db.orgMember.create({ data: { organizationId: org.id, userId: owner, role: 'ADMIN' } });
+    const orgApp = await db.app.create({ data: { id: generateId(), name: 'Org App', urn: 'org1734.com:app', organizationId: org.id } });
+    for (const name of ['default', 'backup']) await M.createAiServiceConfig(null, {
+      ownerType: 'APP', ownerId: orgApp.id, name, provider: 'openai', model: 'gpt-4o', apiKey: 'sk-org-only',
+    }, as(owner));
+    const backup = await db.aiServiceConfig.findFirstOrThrow({ where: { appId: orgApp.id, name: 'backup' } });
+    await expect(M.clearAppAIConfig(null, { appRef: orgApp.id }, as(owner))).resolves.toMatchObject({ id: orgApp.id });
+    expect(await db.aiServiceConfig.findMany({ where: { appId: orgApp.id } })).toEqual([backup]);
+  });
+
   it.each(['ADMIN', 'OWNER'] as const)('platform %s clears all named App configs without reaching another App (#10755)', async role => {
     for (const name of ['default', 'backup']) await M.createAiServiceConfig(null, {
       ownerType: 'APP', ownerId: app.id, name, provider: 'openai', model: 'gpt-4o', apiKey: 'sk-owner-only',

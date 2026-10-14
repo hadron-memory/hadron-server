@@ -1,6 +1,5 @@
-import { requireProviderCredentialOwner } from './resolvers.helpers.js';
-import { canBypassUserOwnership } from '../../../lib/auth/platformAdminBypass.js';
 // appQueries — extracted from resolvers.ts Query (split step 3). No behavior change.
+import { canBypassUserOwnership } from '../../../lib/auth/platformAdminBypass.js';
 import { decryptToken } from '../../../lib/tokenCrypto.js';
 import { DEFAULT_AI_CONFIG_NAME } from '../../../lib/aiConfig.js';
 import { getDeploymentInfo } from '../../../mcp/deploymentInfo.js';
@@ -11,6 +10,7 @@ import {
   clampListTake,
   requireOrgRole,
   requireOwnerOrOrgRole,
+  requireProviderCredentialOwner,
   resolveOrgScope,
   APP_INCLUDE,
 } from './resolvers.helpers.js';

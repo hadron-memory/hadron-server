@@ -1,7 +1,6 @@
-import { requireProviderCredentialOwner } from './resolvers.helpers.js';
+// appMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
 import { managesApp } from '../../../lib/auth/appManagement.js';
 import { detachAppOwnerMemories } from '../../../controller/operations/detachAppOwnerMemories.js';
-// appMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
 import {
   createHash,
   randomBytes,
@@ -55,6 +54,7 @@ import {
   type Context,
   requireOrgRole,
   requireOwnerOrOrgRole,
+  requireProviderCredentialOwner,
   rethrowAiConfigTyped,
   resolveUserRefArg,
   resolveAppRefArg,
