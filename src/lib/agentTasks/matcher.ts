@@ -52,10 +52,11 @@ import { lockAuthorityAnchors } from '../auth/authorityAnchors.js';
 import { loadAvailabilityByFamily, type WorkerAvailabilityView } from './availability.js';
 import { appendTaskEvent, ASSIGNED_EVENT_TYPES, PLATFORM_ACTOR } from './events.js';
 import { loadLaunchableFamilies } from './hosts.js';
+import { launchForAssignment } from '../hostOperations/launch.js';
 import { PENDING_SESSION_END_SQL } from '../hostOperations/sessionEnd.js';
 
 /** T6 flips this once a host can start an unbound worker (see the file header). */
-export const MATCH_UNBOUND_LAUNCHABLE = false;
+export const MATCH_UNBOUND_LAUNCHABLE = true;
 /** Queued tasks considered per App per run, oldest first. */
 const QUEUE_PAGE = 500;
 const OPEN_STATUSES = ['pending', 'started'];
@@ -360,7 +361,11 @@ async function matchApp(db: PrismaClient, appId: string, now: Date, hooks: Match
         const outcome = await tryAssign(db, task, w.id, family, now, hooks);
         // Assigned, or no longer free: either way this worker is spent for this run.
         if (outcome !== 'task-gone') spent.add(w.id);
-        if (outcome === 'assigned') out.push({ taskId: task.id, workerId: w.id, family });
+        if (outcome === 'assigned') {
+          out.push({ taskId: task.id, workerId: w.id, family });
+          // #1709 (cor:agt:070:08): a matched worker with no live session is started through its host.
+          if (!w.live) await launchForAssignment(db, { appId, taskId: task.id, workerId: w.id }, now);
+        }
         if (outcome !== 'worker-not-free') break;
       }
     }
