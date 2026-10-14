@@ -1674,12 +1674,20 @@ export function pollOnce(cfg: Config, run: Runner = runCommand, log: (line: stri
       // yesterday's epoch ("held 2442 min" on a 5-minute-old stall), which
       // reads as an incident that never happened.
       const heldWorkers = new Set(held.map(([n]) => cfg.roster.find((e) => e.name === n)?.worker ?? n));
+      // `reported` is keyed by NAME (Object.assign from outcome.held), unlike
+      // heldSince/heldLoggedAt which are keyed by worker id — prune it by name
+      // (Joshua, found while porting to Go: the id-keyed delete was a no-op,
+      // so a re-held worker with a repeat reason stayed silent instead of
+      // logging the fresh incident's hold line).
+      const heldNames = new Set(held.map(([n]) => n));
       for (const w of Object.keys(ledger.heldSince ?? {})) {
         if (!heldWorkers.has(w)) {
           delete ledger.heldSince[w];
           delete (ledger.heldLoggedAt ?? {})[w];
-          delete ledger.reported[w];
         }
+      }
+      for (const n of Object.keys(ledger.reported ?? {})) {
+        if (!heldNames.has(n)) delete ledger.reported[n];
       }
       const longHolds: string[] = [];
       for (const [n] of held) {

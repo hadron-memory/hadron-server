@@ -2114,3 +2114,26 @@ describe('per-call hard timeout (2026-10-14 wedged-cycle incidents)', () => {
     expect(runCommand(['/nonexistent/binary']).stdout).toBe('');
   });
 });
+
+describe('#1940 — reported prune is keyed by NAME (Joshua port-find)', () => {
+  it('a worker re-held with a REPEAT reason after leaving the held set logs the fresh hold line', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli');
+    fake.busy.add('term_eli');
+    fake.screens.set('term_eli', { tail: CLAUDE_BUSY_EMPTY });
+    fake.attention.workers = [worker('w-eli', 'Eli')];
+    poll(c); // held once: reported['Eli'] = <busy reason>
+    const st = new State(c.stateDir);
+    const ledger = st.ledger();
+    expect(Object.keys(ledger.reported ?? {})).toContain('Eli'); // keyed by NAME
+    // The worker recovers (leaves the held set entirely): the prune must drop
+    // the reported entry by name, or a later SAME-reason hold stays silent.
+    fake.busy.clear();
+    fake.screens.set('term_eli', { tail: CLAUDE_IDLE });
+    fake.attention.workers = [worker('w-eli', 'Eli', { mentions: 1, unread: 3, relevant: 105 })];
+    poll(c); // nudged: leaves the held set
+    const after = new State(c.stateDir).ledger();
+    expect(after.heldSince['w-eli']).toBeUndefined();
+    expect(after.reported['Eli']).toBeUndefined(); // the id-keyed delete was a no-op before this fix
+  });
+});
