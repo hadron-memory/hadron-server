@@ -1,6 +1,6 @@
 const status = document.getElementById('status');
 const post = async (url, body) => {
-  const response = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  const response = await fetch(url.replace(/^\//, ''), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
   return { status: response.status, body: await response.json() };
 };
 const request = async (url, body) => {
@@ -22,7 +22,7 @@ const api = window.spike = { ready: false, post, request,
   },
 };
 try {
-  const response = await fetch('/fixture');
+  const response = await fetch('fixture');
   if (!response.ok) throw new Error('Fixture unavailable');
   const example = api.fixture = await response.json();
   for (const [id, value] of Object.entries({ title: example.input.fields.title, content: example.input.fields.content, node: example.input.nodeId, payload: example.payloadUtf8, challenge: example.challengeHex })) document.getElementById(id).textContent = value;
@@ -35,9 +35,19 @@ try {
     const button = document.getElementById(id); button.disabled = false;
     button.onclick = async () => {
       button.disabled = true;
-      try { status.textContent = JSON.stringify(await action(), null, 2); }
+      try { status.textContent = JSON.stringify({providerDeclared:provider.value,...await action()}, null, 2); }
       catch (error) { status.textContent = `Refused: ${error.message}`; }
       finally { button.disabled = false; }
     };
   }
 } catch (error) { status.textContent = `Spike failed: ${error.message}`; }
+
+const provider = document.getElementById('provider');
+document.getElementById('pair').onclick = async () => {
+  try { status.textContent = JSON.stringify(await request('/pairing/options',{}),null,2); }
+  catch(e) { status.textContent = e.message; }
+};
+document.getElementById('join').onclick = async () => {
+  try { status.textContent = JSON.stringify(await request('/pairing/join',{code:document.getElementById('pair-code').value.trim()})); }
+  catch(e) { status.textContent = e.message; }
+};
