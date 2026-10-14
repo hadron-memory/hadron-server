@@ -391,6 +391,11 @@ async function resolveEdgeEndpoint(
       ? pre
       : ((await loadEdgeEndpointNode(ctx, wantId)) as { memoryId?: string } | null);
   if (!node || typeof node.memoryId !== 'string') return null;
+  // #1893 — an endpoint stamped inherited was admitted through the child it
+  // was read through (resolveInheritedEdges); its own memory is the base's,
+  // which a child-only reader can't read, and must not be re-gated here.
+  // The stamp is transient: no row loaded by FK ever carries it.
+  if ((node as { inheritedFrom?: unknown }).inheritedFrom) return node;
 
   // Fast path: the edge and BOTH endpoints share one memory ⇒ that authorized
   // memory holds both endpoints, no per-endpoint check needed.

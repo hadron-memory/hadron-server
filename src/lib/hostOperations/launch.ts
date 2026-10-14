@@ -193,20 +193,41 @@ export async function launchForAssignment(db: PrismaClient, a: { appId: string; 
 /**
  * At collection: a fresh grant for each `worker.start` collected, bound to the
  * holder the start was ISSUED under (#1883 review, Diego P2-1: never a
- * replacement holder adopted now); a re-collection revokes the unconsumed one
- * first. An operation whose worker's hold is no longer exactly that one
- * (released, moved, or released and re-held), or whose worker is retired,
- * fails instead, with the reason. Returns operation id → raw grant, shown once.
+ * replacement holder adopted now). An operation whose worker's hold is no
+ * longer exactly that one (released, moved, or released and re-held), or whose
+ * worker is retired, fails instead, with the reason; that check runs on EVERY
+ * collect, so a live grant is revoked with its start.
+ *
+ * #1928: a re-collect must not break a launch in flight. While the start's
+ * grant is live (unconsumed, unrevoked, unexpired) the start is held back from
+ * the answer (`withheld`) and nothing is minted; once it has expired, the
+ * expired one is revoked and a fresh one minted. A consumed grant (the session
+ * bound) mints nothing: the start is delivered without a grant, so a restarted
+ * host can still report it. `grants` maps operation id → raw grant (shown
+ * once), or null for a bound start.
  */
 export async function mintLaunchGrants(
   tx: Prisma.TransactionClient,
   ops: { id: string; appId: string; hostId: string; workerId: string; args: Prisma.JsonValue; holdUserId: string | null; holdAt: Date | null }[],
   now: Date,
-): Promise<Map<string, string>> {
-  const out = new Map<string, string>();
+): Promise<{ grants: Map<string, string | null>; withheld: Set<string> }> {
+  const out = new Map<string, string | null>();
+  const withheld = new Set<string>();
   for (const op of ops) {
+    if (await tx.launchGrant.findFirst({ where: { operationId: op.id, consumedAt: { not: null } }, select: { id: true } })) {
+      out.set(op.id, null);
+      continue;
+    }
     const [w] = await tx.$queryRaw<{ heldByUserId: string | null; heldAt: Date | null; retiredAt: Date | null }[]>`
       SELECT held_by_user_id AS "heldByUserId", held_at AS "heldAt", retired_at AS "retiredAt" FROM workers WHERE id = ${op.workerId} FOR SHARE`;
+    const live = await tx.launchGrant.findFirst({
+      where: { operationId: op.id, consumedAt: null, revokedAt: null, expiresAt: { gt: now } },
+      select: { id: true },
+    });
+    if (live && w && !w.retiredAt && sameHold(op, { userId: w.heldByUserId, at: w.heldAt })) {
+      withheld.add(op.id);
+      continue;
+    }
     await tx.launchGrant.updateMany({ where: { operationId: op.id, consumedAt: null, revokedAt: null }, data: { revokedAt: now } });
     if (!w || w.retiredAt) {
       await failOperation(tx, op.id, now, 'The worker was retired before its start was collected.');
@@ -227,7 +248,7 @@ export async function mintLaunchGrants(
     });
     out.set(op.id, raw);
   }
-  return out;
+  return { grants: out, withheld };
 }
 
 /**

@@ -113,6 +113,26 @@ describe('requestNodeSignature (cor:dmo:130:03)', () => {
     expect((await request(n.id, reader.id, { signerRef: writer.id })).namedSignerId).toBe(writer.id);
     expect(await codeOf(request(n.id, reader.id, { signerRef: 'ghost' }))).toBe('SIGNER_NOT_FOUND');
   });
+
+  it('refuses a named signer who may not write the memory with SIGNER_NOT_A_WRITER, writing nothing (#1904, cor:dmo:130:03 S17)', async () => {
+    const n = await node('p:7');
+    // A READER of the memory, and someone outside its org entirely.
+    expect(await codeOf(request(n.id, writer.id, { signerRef: reader.id }))).toBe('SIGNER_NOT_A_WRITER');
+    expect(await codeOf(request(n.id, reader.id, { signerRef: outsider.id }))).toBe('SIGNER_NOT_A_WRITER');
+    expect(await db.signingRequest.count()).toBe(0);
+    // Writers are accepted: a CONTRIBUTOR and an org ADMIN.
+    expect((await request(n.id, reader.id, { signerRef: writer.id })).namedSignerId).toBe(writer.id);
+    expect((await request(n.id, reader.id, { signerRef: admin.id })).namedSignerId).toBe(admin.id);
+  });
+
+  it('a named writer demoted after the request is still refused when they sign (the completion re-check is unchanged)', async () => {
+    const n = await node('p:8');
+    const req = await request(n.id, reader.id, { signerRef: writer.id });
+    await db.orgMember.updateMany({ where: { userId: writer.id }, data: { role: 'READER' } });
+    await expect(signAs(req, writer.id)).rejects.toMatchObject({ code: 'SIGNER_NOT_ELIGIBLE' });
+    expect((await db.signingRequest.findUniqueOrThrow({ where: { id: req.id } })).state).toBe('open');
+    expect(await db.nodeSignature.count()).toBe(0);
+  });
 });
 
 describe('withdrawSigningRequest (#10024, #10397)', () => {

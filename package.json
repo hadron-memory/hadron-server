@@ -16,7 +16,7 @@
     "db:seed": "tsx prisma/seed.ts",
     "db:dev-reset": "scripts/reset-db.sh",
     "db:dev-setup": "scripts/dev-setup.sh",
-    "db:test-setup": "psql postgresql://holger@localhost:5432/hadron_test -v ON_ERROR_STOP=1 -f prisma/pre-push.sql && DATABASE_URL=postgresql://holger@localhost:5432/hadron_test prisma db push --accept-data-loss --skip-generate && psql postgresql://holger@localhost:5432/hadron_test -v ON_ERROR_STOP=1 -f prisma/post-push.sql",
+    "db:test-setup": "tsx src/test/setupTestDb.ts",
     "db:dev-from-prod": "scripts/dev-from-prod-snapshot.sh",
     "schema:export": "tsx scripts/export-graphql-sdl.mjs",
     "check:loc-scope": "node scripts/check-loc-scope.mjs",

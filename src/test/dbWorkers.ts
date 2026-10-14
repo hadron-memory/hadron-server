@@ -5,9 +5,10 @@ import type { Client } from 'pg';
  * PARALLEL without racing on one shared `hadron_test` DB (the constraint that
  * forced `fileParallelism: false`; see findings:parallel-vitest-shared-test-db).
  *
- * Model: `globalSetup` provisions the base `hadron_test` template (schema +
- * pgvector + tsv column/index + CHECK constraints), then clones it into one DB
- * per worker (`hadron_test_r<runId>_<poolId>`). `perWorkerDb.ts` (a setupFile)
+ * Model: `globalSetup` clones the schema template built from empty for this
+ * checkout (`hadron_test_s<fingerprint>`, #1922, see schemaTemplate.ts) into a
+ * run template, applies its CHECK constraints, and workers clone that into one
+ * DB each (`hadron_test_r<runId>_<poolId>`). `perWorkerDb.ts` (a setupFile)
  * points each worker's `DATABASE_URL` at its own clone before the Prisma client
  * is constructed. Every worker still runs `cleanDb` per test — but only against
  * its own DB, so files never collide.
@@ -68,7 +69,7 @@ export function baseTestDbUrl(): string {
 }
 
 /** Rewrite only the database name (last path segment) of a pg connection string. */
-function withDbName(url: string, dbName: string): string {
+export function withDbName(url: string, dbName: string): string {
   const u = new URL(url);
   u.pathname = `/${dbName}`;
   return u.toString();

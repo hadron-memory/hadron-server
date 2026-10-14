@@ -32,7 +32,7 @@ import {
 import { emitNodeUrnV2 } from '../../../lib/urnEmit.js';
 import { resolveWorkerRef as resolveWorkerRefId } from '../../../lib/entityRef/workerRef.js';
 import { isId } from '../../../lib/entityRef/shape.js';
-import { resolveWorkerIdByNameGated, provisionWorkerMemory, resolveReportsToTarget } from './resolvers.worker.js';
+import { resolveWorkerIdByNameGated, provisionWorkerMemory, requireWorkerReadAccess, resolveReportsToTarget } from './resolvers.worker.js';
 import { lockAppReportsTo, writeReportsTo } from '../../../lib/workerReportsTo.js';
 import { eventActor } from '../../../lib/agentTasks/events.js';
 import { managesApp } from '../../../lib/auth/appManagement.js';
@@ -51,7 +51,6 @@ import { generateUniqueHandle } from '../../../lib/userHandle.js';
 import { ensureUserPrincipal } from '../../../lib/principal/mintPrincipal.js';
 import { isRoutingName, routingNameOf } from '../../../lib/runner/selectNextEdge.js';
 import { compileTemplate } from '../../../lib/template.js';
-import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { resolveNodeRefForCaller } from './resolvers.nodeRefAccess.js';
 import { NodeNotFoundError, AgentNotFoundError, AppNotFoundError } from '../../../lib/entityRef/errors.js';
@@ -76,6 +75,7 @@ import {
   requireRole,
   requireOrgRole,
   requireAgentAccess,
+  resolveReadableAgentRef,
   requireOwnerOrOrgRole,
   requireSessionWriteAccess,
   resolveReadableNodeByLoc,
@@ -175,6 +175,31 @@ type LaunchCtx = { grant: LoadedGrant; issuedBy: 'platform' | 'manager'; hold: {
 
 const launchGrantInvalid = () =>
   new GraphQLError('This launch grant is not valid: unknown, expired, already used, or not yours.', { extensions: { code: 'LAUNCH_GRANT_INVALID' } });
+
+/** startSession's answer for a worker ref that names nothing the caller may see: one envelope for absent and unreadable alike. */
+const workerRefNotFound = (workerRef: string) =>
+  new GraphQLError(`Worker not found: ${workerRef}`, { extensions: { code: 'WORKER_NOT_FOUND' } });
+
+/**
+ * #1937 — the worker read gate for an id/URN ref, collapsed: a caller who may not read the worker's App's staff
+ * gets `workerRefNotFound`, byte-identical to an absent ref, as do a missing and a soft-deleted App. NARROW catch
+ * (#1019, review:narrow-catch-blocks): only the gate's own FORBIDDEN collapses; anything else, a database failure
+ * inside the participation lookup included, propagates, since reporting an outage as a missing worker is the one
+ * thing this collapse must never hide.
+ */
+async function requireWorkerVisibleOrNotFound(ctx: Context, appId: string, workerRef: string): Promise<void> {
+  const app = await ctx.db.app.findUnique({
+    where: { id: appId },
+    select: { id: true, name: true, urn: true, organizationId: true, ownerUserId: true, uninstalledAt: true, deletedAt: true },
+  });
+  if (!app) throw workerRefNotFound(workerRef);
+  try {
+    await requireWorkerReadAccess(ctx, app);
+  } catch (e) {
+    if (!(e instanceof GraphQLError && e.extensions?.code === 'FORBIDDEN')) throw e;
+    throw workerRefNotFound(workerRef);
+  }
+}
 
 /** The bind refusals that mean something changed since the start was issued: they fail the start (Holger via Vera #10775). */
 const LAUNCH_STATE_REFUSALS: Record<string, string> = {
@@ -440,9 +465,10 @@ export const sessionMutations = {
       // absent, not as a malformed URN (#929 review).
       const agentRef = input.agentRef?.trim();
       if (agentRef) {
-        let resolvedAgentId: string;
         try {
-          ({ id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentRef));
+          // #1944: Query.agent's read gate, shared, with a denial answered
+          // exactly like an absent (or retired) Agent.
+          agentId = (await resolveReadableAgentRef(ctx, agentRef)).id;
         } catch (e) {
           // A mutation input error surfaces loudly (contrast Query.agent,
           // which masks not-found to null); malformed URNs propagate their
@@ -452,14 +478,6 @@ export const sessionMutations = {
           }
           throw e;
         }
-        const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
-        if (agent.deletedAt) {
-          throw new GraphQLError(`Agent not found: ${agentRef}`, { extensions: { code: 'BAD_USER_INPUT' } });
-        }
-        if (agent.visibility !== 'PUBLIC') {
-          await requireAgentAccess(ctx, agent, 'READER');
-        }
-        agentId = resolvedAgentId;
       }
 
       // #943: optional App pivot. Before this, `Session.appId` was stamped
@@ -612,9 +630,7 @@ export const sessionMutations = {
           try {
             ({ id: resolvedWorkerId } = await resolveWorkerRefId(ctx.db, workerRef));
           } catch {
-            throw new GraphQLError(`Worker not found: ${workerRef}`, {
-              extensions: { code: 'WORKER_NOT_FOUND' },
-            });
+            throw workerRefNotFound(workerRef);
           }
         } else {
           // NAME (#990). A name is unique only WITHIN an App, so this form
@@ -666,11 +682,7 @@ export const sessionMutations = {
           // must be self-sufficient rather than relying on an ordering above it
           // that a later change could reshuffle.
           const byName = await resolveWorkerIdByNameGated(ctx, appId, workerRef);
-          if (!byName) {
-            throw new GraphQLError(`Worker not found: ${workerRef}`, {
-              extensions: { code: 'WORKER_NOT_FOUND' },
-            });
-          }
+          if (!byName) throw workerRefNotFound(workerRef);
           resolvedWorkerId = byName;
         }
         const worker = await ctx.db.worker.findUnique({
@@ -680,11 +692,15 @@ export const sessionMutations = {
             name: true, heldByUserId: true, heldAt: true,
           },
         });
-        if (!worker) {
-          throw new GraphQLError(`Worker not found: ${workerRef}`, {
-            extensions: { code: 'WORKER_NOT_FOUND' },
-          });
-        }
+        if (!worker) throw workerRefNotFound(workerRef);
+        // #1937 (cor:agt:020:03, the #1742 oracle class): an id or URN names a worker in ANY App, so before any
+        // refusal below can answer differently for a worker that exists, the caller must be able to read that
+        // App's workers. Every downstream refusal (the grant mismatch, WORKER_RETIRED with its id,
+        // SESSION_WORKER_NOT_IN_APP with both Apps' ids, the participant FORBIDDEN) is therefore reachable only
+        // by a reader; anyone else gets exactly the absent ref's envelope. One exception: the worker a launch
+        // grant names, whose holder the grant has already told it exists. A holder who has since lost the App
+        // must still reach the FORBIDDEN that fails the start (#10775), not a not-found that leaves it hanging.
+        if (!(launch && worker.id === launch.grant.workerId)) await requireWorkerVisibleOrNotFound(ctx, worker.appId, workerRef);
         // #1709: a grant starts the worker it names, and no other; checked before any gate whose refusal would
         // fail the start, so a mismatched ref is the caller's mistake, never a change in the world.
         if (launch && worker.id !== launch.grant.workerId) throw launchGrantInvalid();
@@ -753,11 +769,7 @@ export const sessionMutations = {
             where: { id: worker.appId },
             select: { id: true, organizationId: true, ownerUserId: true, deletedAt: true, uninstalledAt: true },
           });
-          if (app.deletedAt) {
-            throw new GraphQLError(`Worker not found: ${workerRef}`, {
-              extensions: { code: 'WORKER_NOT_FOUND' },
-            });
-          }
+          if (app.deletedAt) throw workerRefNotFound(workerRef);
           if (app.uninstalledAt) {
             throw new GraphQLError('Cannot start a session in an uninstalled App.', {
               extensions: { code: 'APP_UNINSTALLED', appId: worker.appId },
@@ -1802,8 +1814,9 @@ export const sessionMutations = {
       ctx: Context,
     ) => {
       // 007-entity-id-or-urn: agentId may be ID, bare URN, or prefixed URN.
-      const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentId);
-      const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
+      // #1944: through the read gate, so an unreadable Agent answers as absent.
+      const agent = await resolveReadableAgentRef(ctx, agentId);
+      const resolvedAgentId = agent.id;
       await requireAgentAccess(ctx, agent, 'ADMIN');
       const sysMemId = (agent as any).systemMemoryId as string;
       if (!sysMemId) throw new Error('Agent has no system memory');
@@ -1879,8 +1892,9 @@ export const sessionMutations = {
       ctx: Context,
     ) => {
       // 007-entity-id-or-urn: agentId may be ID, bare URN, or prefixed URN.
-      const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentId);
-      const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
+      // #1944: through the read gate, so an unreadable Agent answers as absent.
+      const agent = await resolveReadableAgentRef(ctx, agentId);
+      const resolvedAgentId = agent.id;
       await requireAgentAccess(ctx, agent, 'ADMIN');
       const sysMemId = (agent as any).systemMemoryId as string;
       if (!sysMemId) throw new Error('Agent has no system memory');
@@ -1914,8 +1928,9 @@ export const sessionMutations = {
       ctx: Context,
     ) => {
       // 007-entity-id-or-urn: agentId may be ID, bare URN, or prefixed URN.
-      const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentId);
-      const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
+      // #1944: through the read gate, so an unreadable Agent answers as absent.
+      const agent = await resolveReadableAgentRef(ctx, agentId);
+      const resolvedAgentId = agent.id;
       await requireAgentAccess(ctx, agent, 'ADMIN');
       const sysMemId = (agent as any).systemMemoryId as string;
       if (!sysMemId) throw new Error('Agent has no system memory');
@@ -2097,8 +2112,9 @@ export const sessionMutations = {
       ctx: Context,
     ) => {
       // 007-entity-id-or-urn: agentId may be ID, bare URN, or prefixed URN.
-      const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentId);
-      const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
+      // #1944: through the read gate, so an unreadable Agent answers as absent.
+      const agent = await resolveReadableAgentRef(ctx, agentId);
+      const resolvedAgentId = agent.id;
       await requireAgentAccess(ctx, agent, 'ADMIN');
 
       const now = new Date();
@@ -2126,8 +2142,9 @@ export const sessionMutations = {
       ctx: Context,
     ) => {
       // 007-entity-id-or-urn: agentId may be ID, bare URN, or prefixed URN.
-      const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentId);
-      const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
+      // #1944: through the read gate, so an unreadable Agent answers as absent.
+      const agent = await resolveReadableAgentRef(ctx, agentId);
+      const resolvedAgentId = agent.id;
       await requireAgentAccess(ctx, agent, 'ADMIN');
 
       await ctx.db.agent.update({

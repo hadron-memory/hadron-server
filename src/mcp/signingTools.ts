@@ -62,7 +62,7 @@ export function registerSigningTools(server: McpServer, deps: { db: PrismaClient
     {
       nodeRef: z.string().describe('The node to sign: its URN or id.'),
       expectedRevision: z.number().int().positive().optional().describe('Refuse (REVISION_MISMATCH) unless this is still the current revision.'),
-      signer: z.string().optional().describe('A user id to name as the only signer. Omitted: any writer of the memory.'),
+      signer: z.string().optional().describe('A user id to name as the only signer; they must be able to write the node\'s memory (SIGNER_NOT_A_WRITER otherwise). Omitted: any writer of the memory.'),
     },
     async ({ nodeRef, expectedRevision, signer }) => {
       const ctx = ctxOf();

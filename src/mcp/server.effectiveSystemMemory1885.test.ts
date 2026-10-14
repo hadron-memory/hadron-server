@@ -85,13 +85,14 @@ beforeEach(async () => {
 });
 
 describe('hadron_get_node through the child', () => {
-  it('reads engineer\'s release process under its own URN, marked, with no edges', async () => {
+  it('reads engineer\'s release process under its own URN, marked, its edge resolved to the child\'s override', async () => {
     const out = await call('hadron_get_node', { urn: childUrn('processes:release') });
     expect(out).toContain('EngRelease body');
     expect(out).toContain(baseUrn('processes:release'));
     expect(out).toContain(`Inherited from: hrn:agent:${engineer.urn}`);
-    // The stage edge leads to engineer's overridden tasks:open-pr: never shown.
-    expect(out).not.toContain('Related:');
+    // The stage edge leads to engineer's overridden tasks:open-pr: never shown;
+    // it resolves through the child to the child's own node (#1893).
+    expect(out).toContain(`Related:\n  - ${childUrn('tasks:open-pr')}`);
     expect(out).not.toContain(baseUrn('tasks:open-pr'));
   });
 
@@ -179,9 +180,9 @@ describe('P2-2 (Diego, #1891) — an inherited node\'s validation shows state on
       await call('hadron_get_nodes', { memoryUrn: `hrn:mem:${backend.memUrn}`, locPrefix: 'processes:' }),
     ]) {
       expect(out).toContain('EngRelease body');
-      expect(out).toMatch(/Validation: \w+/);
+      const line = out.split('\n').find((l) => l.startsWith('Validation:'))!;
+      expect(line).toMatch(/^Validation: \w+$/);
       expect(out).not.toContain('validator');
-      expect(out).not.toContain(childUrn('tasks:open-pr'));
     }
   });
 });
