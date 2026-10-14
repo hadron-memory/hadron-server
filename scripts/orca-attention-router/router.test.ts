@@ -334,13 +334,37 @@ describe('Orca attention router — untracked terminals: unknown is not busy (#7
     expect(fake.sent).toEqual([]);
   });
 
-  it('a TRACKED terminal that times out still holds as busy — the fallback never widens that', () => {
+  it('#1845 — a TRACKED terminal that times out NUDGES when the screen proves a completed turn (the busy-misread fix)', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli'); // tracked; the tui-idle wait times out below
+    fake.busy.add('term_eli');
+    fake.screens.set('term_eli', { tail: CLAUDE_IDLE }); // completed turn, empty composer
+    fake.attention.workers = [worker('w-eli', 'Eli')];
+    const out = poll(c);
+    expect(out.nudged).toEqual(['Eli']);
+    expect(sentHandles()).toEqual(['term_eli']);
+  });
+
+  it('#1845 codex shape — tracked timeout over a Worked-for frame nudges (Atilla/Chip, held 2442/877 min as busy)', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli', 'codex');
+    fake.busy.add('term_eli');
+    fake.screens.set('term_eli', { tail: CODEX_IDLE });
+    fake.attention.workers = [worker('w-eli', 'Eli')];
+    const out = poll(c);
+    expect(out.nudged).toEqual(['Eli']);
+    expect(sentHandles()).toEqual(['term_eli']);
+  });
+
+  it('a TRACKED terminal that times out still HOLDS on a live working indicator — the screen vetoes', () => {
     const c = cfg(['w-eli', 'Eli']);
     fake.terminal('eli'); // tracked
     fake.busy.add('term_eli');
+    fake.screens.set('term_eli', { tail: CLAUDE_BUSY_EMPTY });
     fake.attention.workers = [worker('w-eli', 'Eli')];
     const out = poll(c);
-    expect(out.held.Eli).toContain('busy for');
+    expect(out.nudged).toEqual([]);
+    expect(out.held.Eli).toContain('a running turn is drawn above the prompt');
     expect(fake.sent).toEqual([]);
   });
 
@@ -401,9 +425,10 @@ describe('Orca attention router — untracked terminals: unknown is not busy (#7
     fake.attention.workers = [worker('w-eli', 'Eli')];
     fake.healTracking.add('term_eli'); // produced output after the gate: the recheck's list shows it tracked
     fake.busyRecheck.add('term_eli');  // and its recheck wait times out
+    fake.recheckScreens.set('term_eli', { tail: CLAUDE_BUSY_EMPTY }); // #1845: a live indicator, not just the wait
     const out = poll(c);
     expect(out.nudged).toEqual([]);
-    expect(out.held.Eli).toContain('busy again after the recompute (busy for');
+    expect(out.held.Eli).toContain('busy again after the recompute (a running turn is drawn above the prompt');
     expect(out.held.Eli).not.toContain('unknown');
     expect(fake.sent).toEqual([]);
   });
@@ -614,6 +639,8 @@ describe('Orca attention router — fresh counts at send time (#1616)', () => {
     fake.terminal('eli');
     fake.terminal('baloo');
     fake.busy.add('term_baloo');
+    fake.screens.set('term_baloo', { tail: CLAUDE_BUSY_EMPTY });
+    fake.screens.set('term_baloo', { tail: CLAUDE_BUSY_EMPTY });
     fake.attention.workers = [worker('w-eli', 'Eli', { relevant: 110 }), worker('w-baloo', 'Baloo')];
     fake.fresh = [worker('w-baloo', 'Baloo')]; // Eli read its chat; Baloo still has its mention
     const first = poll(c);
@@ -631,7 +658,9 @@ describe('Orca attention router — fresh counts at send time (#1616)', () => {
     const c = cfg(['w-eli', 'Eli'], ['w-baloo', 'Baloo']);
     fake.terminal('eli');
     fake.terminal('baloo');
-    fake.busy.add('term_baloo'); // hold the token so the ledger's base (and its rows) survive to be read
+    fake.busy.add('term_baloo');
+    fake.screens.set('term_baloo', { tail: CLAUDE_BUSY_EMPTY });
+    fake.screens.set('term_baloo', { tail: CLAUDE_BUSY_EMPTY }); fake.screens.set('term_baloo', { tail: CLAUDE_BUSY_EMPTY }); // hold the token so the ledger's base (and its rows) survive to be read
     fake.attention.workers = [worker('w-eli', 'Eli', { mentions: 2, unread: 5, relevant: 110, head: 120 }), worker('w-baloo', 'Baloo')];
     fake.fresh = [worker('w-eli', 'Eli', { mentions: 3, unread: 9, relevant: 118, head: 121 })];
     const out = poll(c);
@@ -702,6 +731,7 @@ describe('Orca attention router — fresh counts at send time (#1616)', () => {
     const c = cfg(['w-eli', 'Eli']);
     fake.terminal('eli');
     fake.busy.add('term_eli');
+    fake.screens.set('term_eli', { tail: CLAUDE_BUSY_EMPTY });
     fake.attention.workers = [worker('w-eli', 'Eli')];
     poll(c); // held: busy
     const st = new State(c.stateDir);
@@ -710,7 +740,7 @@ describe('Orca attention router — fresh counts at send time (#1616)', () => {
     st.saveLedger(ledger);
     logs.length = 0;
     poll(c);
-    expect(logs.join('\n')).toMatch(/Eli held 4[01] min with mentions pending \(busy/);
+    expect(logs.join('\n')).toMatch(/Eli held 4[01] min with mentions pending \(a running turn/);
     logs.length = 0;
     poll(c); // within 30 min of the last long-hold line: silent
     expect(logs.join('\n')).not.toMatch(/held \d+ min/);
@@ -736,6 +766,7 @@ describe('Orca attention router — fresh counts at send time (#1616)', () => {
     fake.terminal('eli');
     fake.attention.workers = [worker('w-eli', 'Eli', { mentions: 1, unread: 2, relevant: 110 })];
     fake.busyRecheck.add('term_eli'); // the agent went busy during the fresh scan
+    fake.recheckScreens.set('term_eli', { tail: CLAUDE_BUSY_EMPTY }); // #1845: busy needs the live indicator on screen
     const out = poll(c);
     expect(out.nudged).toEqual([]);
     expect(out.held.Eli).toContain('busy again after the recompute');
@@ -788,6 +819,7 @@ describe('Orca attention router — busy: never typed into; hold the token', () 
     fake.terminal('eli');
     fake.terminal('baloo', 'codex');
     fake.busy.add('term_baloo');
+    fake.screens.set('term_baloo', { tail: CODEX_BUSY_EMPTY });
     fake.attention.workers = [worker('w-eli', 'Eli'), worker('w-baloo', 'Baloo')];
     let out = poll(c);
     expect(out.nudged).toEqual(['Eli']);
@@ -807,6 +839,8 @@ describe('Orca attention router — busy: never typed into; hold the token', () 
     fake.terminal('eli');
     fake.terminal('baloo');
     fake.busy.add('term_baloo');
+    fake.screens.set('term_baloo', { tail: CLAUDE_BUSY_EMPTY });
+    fake.screens.set('term_baloo', { tail: CLAUDE_BUSY_EMPTY });
     fake.attention.workers = [worker('w-eli', 'Eli', { relevant: 110 }), worker('w-baloo', 'Baloo')];
     poll(c);
     // Unrelated chat moved the head; Eli's latest mention is still 110.
@@ -820,6 +854,8 @@ describe('Orca attention router — busy: never typed into; hold the token', () 
     fake.terminal('eli');
     fake.terminal('baloo');
     fake.busy.add('term_baloo');
+    fake.screens.set('term_baloo', { tail: CLAUDE_BUSY_EMPTY });
+    fake.screens.set('term_baloo', { tail: CLAUDE_BUSY_EMPTY });
     fake.attention.workers = [worker('w-eli', 'Eli', { first: 100, relevant: 110, head: 120 }), worker('w-baloo', 'Baloo')];
     poll(c);
     // Eli read only its mention: firstUnreadSeq is still 100 (at or below the old head),
@@ -1512,10 +1548,11 @@ describe('Orca attention router — coordinator/lifecycle liveness rule (#1826)'
     fake.cursors.set('w-ada', 100);
     seedLiveness(c, { 'w-ada': { idleSince: Date.now() - AGO_21MIN, handle: 'term_ada' } });
     fake.busyRecheck.add('term_ada'); // idle at the probe, busy at the full gate
+    fake.recheckScreens.set('term_ada', { tail: CLAUDE_BUSY_EMPTY }); // #1845: busy needs the live indicator
     const out = poll(c);
     expect(out.liveness).toEqual([]);
     expect(out.held.Ada).toContain('liveness');
-    expect(out.held.Ada).toContain('busy for');
+    expect(out.held.Ada).toContain('a running turn is drawn above the prompt');
     expect(out.adopted).toBe(false); // a held liveness nudge holds the token like a held mention nudge
     expect(fake.sent).toEqual([]);
     expect(readLiveness(c)['w-ada'].idleSince).toBeUndefined();
@@ -1589,6 +1626,7 @@ describe('Orca attention router — coordinator/lifecycle liveness rule (#1826)'
     const c = mcfg([['w-ada', 'Ada', 'coordinator']]);
     fake.terminal('ada');
     fake.busy.add('term_ada');
+    fake.screens.set('term_ada', { tail: CODEX_BUSY_EMPTY });
     fake.cursors.set('w-ada', 100);
     seedLiveness(c, { 'w-ada': { idleSince: Date.now() - AGO_21MIN, handle: 'term_ada', coveredFrontier: 90 } });
     const out = poll(c);
@@ -1599,6 +1637,7 @@ describe('Orca attention router — coordinator/lifecycle liveness rule (#1826)'
     expect(rec.idleSince).toBeUndefined();
     expect(rec.coveredFrontier).toBe(90); // the delivered frontier still dedupes
     fake.busy.clear();
+    fake.screens.set('term_ada', { tail: CLAUDE_IDLE }); // the turn finished: the probe can prove idle again (family-matched)
     expect(poll(c).liveness).toEqual([]); // clock restarted at the idle poll — N more minutes needed
     expect(typeof readLiveness(c)['w-ada'].idleSince).toBe('number');
   });
@@ -1666,6 +1705,7 @@ describe('Orca attention router — coordinator/lifecycle liveness rule (#1826)'
     const c = mcfg([['w-ada', 'Ada', 'coordinator']]);
     fake.terminal('ada');
     fake.busy.add('term_ada');
+    fake.screens.set('term_ada', { tail: CODEX_BUSY_EMPTY });
     fake.attention.workers = [worker('w-ada', 'Ada')];
     fake.cursors.set('w-ada', 100);
     seedLiveness(c, { 'w-ada': { idleSince: Date.now() - AGO_21MIN, handle: 'term_ada' } });
@@ -1696,6 +1736,8 @@ describe('Orca attention router — coordinator/lifecycle liveness rule (#1826)'
     fake.terminal('ada');
     fake.terminal('baloo');
     fake.busy.add('term_baloo');
+    fake.screens.set('term_baloo', { tail: CLAUDE_BUSY_EMPTY });
+    fake.screens.set('term_baloo', { tail: CLAUDE_BUSY_EMPTY });
     fake.attention.workers = [worker('w-baloo', 'Baloo')];
     fake.cursors.set('w-ada', 100);
     const seeded = Date.now() - 10 * 60_000;
@@ -2023,6 +2065,7 @@ describe('#1845 — the terminal pin: a roster row may name its MAIN terminal', 
     const c = pinned('term_eli');
     fake.terminal('eli', 'codex');
     fake.busy.add('term_eli');
+    fake.screens.set('term_eli', { tail: CLAUDE_BUSY_EMPTY });
     fake.attention.workers = [worker('w-eli', 'Eli', { mentions: 1, unread: 3 })];
     const out = poll(c);
     expect(out.nudged).toEqual([]);
