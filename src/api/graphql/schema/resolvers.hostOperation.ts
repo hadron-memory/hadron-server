@@ -525,17 +525,17 @@ export const hostOperationQueries = {
     ctx: Context,
   ) =>
     withReadableApp(ctx, a.appRef, async (c, app) => {
+      // Ruling 0 (Holger via Vera #10955; cor:agt:070:04 S5): a host key does not read the App-wide listing; it sees
+      // its own host's operations only by collecting them. Refused before any argument is read, so the answer is the
+      // same whatever hostId, status, worker or cursor it passes: no oracle for another host's operations.
+      if (await wasEverHostKey(c)) {
+        throw taskError('FORBIDDEN', "A host key reads its own host's operations by collecting them, not from the App's listing.");
+      }
       const first = Math.min(Math.max(a.first ?? 50, 1), PAGE_MAX);
       const status = a.status ? a.status.toLowerCase() : null;
       if (status && !['issued', 'collected', 'succeeded', 'failed'].includes(status)) {
         throw badInput('status is ISSUED, COLLECTED, SUCCEEDED or FAILED.');
       }
-      // Holger via Vera #10805 (cor:agt:070:04): a host key sees only its OWN host's operations; the App-wide listing is
-      // for the App's participants and its other keys. A key that has ever been granted host:operate is a host key
-      // here, held to the host of its latest grant even once revoked, so revoking the scope never widens its read.
-      const ownHost = await hostOfKey(c);
-      const hostFilter = ownHost ?? a.hostId ?? null;
-      if (ownHost && a.hostId && a.hostId !== ownHost) return { items: [], hasNextPage: false, endCursor: null };
       let workerId: string | null = null;
       if (a.worker) {
         workerId = await resolveTaskWorkerId(c, app.id, a.worker);
@@ -543,9 +543,8 @@ export const hostOperationQueries = {
       }
       let cursor: { issuedAt: Date; id: string } | null = null;
       if (a.after) {
-        // Scoped like the list, so a cursor naming another host's operation reads as no cursor at all (no oracle).
         const at = await c.db.hostOperation.findFirst({
-          where: { id: a.after, appId: app.id, ...(ownHost ? { hostId: ownHost } : {}) },
+          where: { id: a.after, appId: app.id },
           select: { issuedAt: true, id: true },
         });
         if (!at) throw badInput('after is not a cursor of this list.');
@@ -554,7 +553,7 @@ export const hostOperationQueries = {
       const rows: HostOperationRow[] = await c.db.hostOperation.findMany({
         where: {
           appId: app.id,
-          ...(hostFilter ? { hostId: hostFilter } : {}),
+          ...(a.hostId ? { hostId: a.hostId } : {}),
           ...(status ? { status } : {}),
           ...(workerId ? { workerId } : {}),
           ...(cursor ? { OR: [{ issuedAt: { lt: cursor.issuedAt } }, { issuedAt: cursor.issuedAt, id: { lt: cursor.id } }] } : {}),
@@ -568,18 +567,17 @@ export const hostOperationQueries = {
 };
 
 /**
- * The host a calling App key is bound to for reads, or null for a person or a key that was never a host's: the host
- * of the key's latest host:operate grant, live or revoked (#10805).
+ * Is the caller an App key that has ever been granted host:operate, live or revoked? Such a key is a host key for the
+ * listing's refusal, so revoking the scope never opens the App-wide read (#1894; it replaces #1884's host binding).
  */
-async function hostOfKey(c: Context): Promise<string | null> {
+async function wasEverHostKey(c: Context): Promise<boolean> {
   const key = appKeyCaller(c);
-  if (!key) return null;
+  if (!key) return false;
   const row = await c.db.appKeyScope.findFirst({
     where: { appKeyId: key.appKeyId, scope: 'host:operate' },
-    orderBy: [{ grantedAt: 'desc' }, { id: 'desc' }],
-    select: { hostId: true },
+    select: { id: true },
   });
-  return row?.hostId ?? null;
+  return row !== null;
 }
 
 export const hostOperationFieldResolvers = {
