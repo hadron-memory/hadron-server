@@ -203,3 +203,84 @@ describe('#1944 controls: readers keep their answers', () => {
     }
   });
 });
+
+/**
+ * The sweep (Eden, #11795): every other surface that resolves an Agent ref and
+ * then refuses on access to THAT Agent. A memory or import ref these take is
+ * a live row the caller names, so the only thing varying is the Agent.
+ */
+const SWEEP: Array<[string, (agentRef: string) => { query: string; variables: Record<string, unknown> }]> = [
+  ['addMemoryToAgent', (ref) => ({ query: 'mutation($ref: ID!, $mem: ID!) { addMemoryToAgent(agentRef: $ref, memoryRef: $mem, role: "read") { id } }', variables: { ref, mem: knowledge } })],
+  ['updateAgentMemoryRole', (ref) => ({ query: 'mutation($ref: ID!, $mem: ID!) { updateAgentMemoryRole(agentRef: $ref, memoryRef: $mem, role: "read") { id } }', variables: { ref, mem: knowledge } })],
+  ['removeMemoryFromAgent', (ref) => ({ query: 'mutation($ref: ID!, $mem: ID!) { removeMemoryFromAgent(agentRef: $ref, memoryRef: $mem) { id } }', variables: { ref, mem: knowledge } })],
+  ['createRevision', (ref) => ({ query: 'mutation($ref: ID!) { createRevision(agentId: $ref) { revisionLoc } }', variables: { ref } })],
+  ['publishRevision', (ref) => ({ query: 'mutation($ref: ID!) { publishRevision(agentId: $ref, revisionLoc: "revisions:r1") { revisionLoc } }', variables: { ref } })],
+  ['restoreRevision', (ref) => ({ query: 'mutation($ref: ID!) { restoreRevision(agentId: $ref, revisionLoc: "revisions:r1") { revisionLoc } }', variables: { ref } })],
+  ['acquireEditorLock', (ref) => ({ query: 'mutation($ref: ID!) { acquireEditorLock(agentId: $ref) { locked } }', variables: { ref } })],
+  ['releaseEditorLock', (ref) => ({ query: 'mutation($ref: ID!) { releaseEditorLock(agentId: $ref) }', variables: { ref } })],
+  ['agentAIConfig', (ref) => ({ query: 'query($ref: ID!) { agentAIConfig(agentRef: $ref) { provider } }', variables: { ref } })],
+  ['agentSubscriptions', (ref) => ({ query: 'query($ref: ID!) { agentSubscriptions(agentRef: $ref) { agentId } }', variables: { ref } })],
+  ['publishAgentImport', (ref) => ({ query: 'mutation($ref: ID!, $imp: ID!) { publishAgentImport(parentAgentRef: $ref, importedAgentRef: $imp, position: 0) { parentAgentId } }', variables: { ref, imp: urnOf(pub) } })],
+];
+
+let knowledge: string;
+
+async function askWith(c: Context, req: { query: string; variables: Record<string, unknown> }): Promise<Answer> {
+  const res = await graphql.executeOperation(req, { contextValue: c });
+  if (res.body.kind !== 'single') throw new Error('unexpected incremental response');
+  const { data, errors } = res.body.singleResult;
+  const e = errors?.[0];
+  const { stacktrace: _drop, ...extensions } = (e?.extensions ?? {}) as Record<string, unknown>;
+  return { data: data ? Object.values(data)[0] ?? null : null, error: e ? { message: e.message, extensions } : null };
+}
+
+/** An answer with the caller-supplied ref masked, so a real and a guessed Agent compare whole. */
+const masked = (a: Answer, ref: string) => JSON.parse(JSON.stringify(a).split(ref).join('<ref>'));
+
+describe('#1944 the sweep: every surface gated on the Agent answers an unreadable one as absent', () => {
+  beforeEach(async () => {
+    knowledge = (await db.memory.create({ data: { class: 'knowledge', organizationId: orgB.id, name: 'Theirs', urn: `${orgB.urn}:theirs` } })).id;
+  });
+
+  for (const [surface, req] of SWEEP) {
+    it(`${surface}: another org's ADMIN gets exactly AGENT_NOT_FOUND for a real Agent and a guessed one`, async () => {
+      expect(await askWith(ctx(foreignAdmin), req(nobody()))).toEqual(absentAnswer(surface, nobody()));
+      expect(await askWith(ctx(foreignAdmin), req(urnOf(secret)))).toEqual(absentAnswer(surface, urnOf(secret)));
+    });
+
+    for (const [who, as] of OUTSIDERS) {
+      it(`${surface}, ${who}: a real Agent and a guessed one read the same`, async () => {
+        expect(masked(await askWith(as(), req(urnOf(secret))), urnOf(secret)))
+          .toEqual(masked(await askWith(as(), req(nobody())), nobody()));
+      });
+    }
+
+    it(`${surface}: the same ref answers byte-identically before and after its Agent is deleted`, async () => {
+      const before = await askWith(ctx(foreignAdmin), req(urnOf(secret)));
+      await db.agent.update({ where: { id: secret.id }, data: { deletedAt: new Date() } });
+      const after = await askWith(ctx(foreignAdmin), req(urnOf(secret)));
+      expect(JSON.stringify(before)).toBe(JSON.stringify(after));
+    });
+
+    it(`${surface}: the PUBLIC boundary holds — a foreign caller on a PUBLIC Agent still gets FORBIDDEN`, async () => {
+      expect((await askWith(ctx(foreignAdmin), req(urnOf(pub)))).error?.extensions.code).toBe('FORBIDDEN');
+    });
+
+    it(`${surface}: a member who can read but not manage still gets FORBIDDEN`, async () => {
+      expect((await askWith(ctx(member), req(urnOf(secret)))).error?.extensions.code).toBe('FORBIDDEN');
+    });
+
+    it(`${surface}: an outage inside the read gate propagates`, async () => {
+      const down = () => { throw new Error('database unavailable'); };
+      const broken = new Proxy(db, {
+        get(target, prop, receiver) {
+          if (prop === 'orgMember') return new Proxy({}, { get: () => down });
+          return Reflect.get(target, prop, receiver);
+        },
+      }) as Context['db'];
+      const a = await askWith({ db: broken, userId: foreignAdmin, roles: ['READER'] } as Context, req(urnOf(secret)));
+      expect(a.error).not.toBeNull();
+      expect(a.error?.extensions.code).not.toBe('AGENT_NOT_FOUND');
+    });
+  }
+});
