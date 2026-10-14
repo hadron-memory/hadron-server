@@ -1091,6 +1091,16 @@ export const sessionMutations = {
             SELECT 1 FROM org_members m JOIN apps a ON a.organization_id = m.organization_id
             WHERE a.id = ${appId} AND m.user_id = ${ctx.userId} FOR SHARE OF m`;
         }
+        // #1883 review (Riana P2): the bind and the host's report of the same start serialize on the OPERATION row,
+        // taken before the worker row (collection's order: operation, then worker). A report that marked the start
+        // failed first is seen here and the grant is spent; a report that comes later waits for this bind, then finds
+        // its session and records the start as succeeded. Without it both could commit: a failed start beside its
+        // launched session.
+        if (launch) {
+          const [op] = await tx.$queryRaw<Array<{ status: string }>>`
+            SELECT status FROM host_operations WHERE id = ${launch.grant.operationId} FOR SHARE`;
+          if (op?.status !== 'collected') throw launchGrantInvalid();
+        }
         if (workerId) {
           const [locked] = await tx.$queryRaw<Array<{ name: string; held_by_user_id: string | null; held_at: Date | null; retired_at: Date | null }>>`
             SELECT name, held_by_user_id, held_at, retired_at FROM workers WHERE id = ${workerId} FOR UPDATE`;

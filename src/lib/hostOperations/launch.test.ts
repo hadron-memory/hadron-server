@@ -397,6 +397,39 @@ describe('#1883 review (Diego): the start is fenced from issue to bind', () => {
   });
 });
 
+describe('#1883 review (Riana P2): the bind and the host\'s report serialize on the operation', () => {
+  it('a FAILED report in flight is waited for: the bind then refuses, so no session sits beside a failed start', async () => {
+    const { opId, grant } = await collectedStart();
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    let ready!: () => void;
+    const locked = new Promise<void>((r) => { ready = r; });
+    // The report's first write, held open: the operation locked and marked failed, the grant not yet revoked.
+    const report = db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM host_operations WHERE id = ${opId} FOR UPDATE`;
+      await tx.hostOperation.update({ where: { id: opId }, data: { status: 'failed', finishedAt: new Date(), failureReason: 'terminal died' } });
+      ready();
+      await gate;
+    });
+    await locked;
+    let settled = false;
+    const bind = redeem(holder.id, grant).then(() => null, (e: GraphQLError) => e).finally(() => { settled = true; });
+    await new Promise((r) => setTimeout(r, 400));
+    expect(settled).toBe(false);
+    release();
+    await report;
+    expect((await bind)?.extensions?.code).toBe('LAUNCH_GRANT_INVALID');
+    expect(await db.session.count({ where: { launchOperationId: opId } })).toBe(0);
+    expect((await opOf(opId)).status).toBe('failed');
+  });
+
+  it('a report after the bind finds its session: a FAILED report is recorded as the success it is', async () => {
+    const { opId, grant } = await collectedStart();
+    const s = await redeem(holder.id, grant);
+    expect(await report(opId, { outcome: 'FAILED', failureReason: 'thought it died' })).toMatchObject({ status: 'succeeded', result: { sessionId: s.id } });
+  });
+});
+
 describe('#1883 review (Diego delta P2): the holder\'s standing is re-read live at the bind', () => {
   it('a holder admitted only by a platform role, demoted while the bind waits: refused, the start fails, no session', async () => {
     // Kit's holder is a platform ADMIN with no App or org membership: participation rests on the role alone.
