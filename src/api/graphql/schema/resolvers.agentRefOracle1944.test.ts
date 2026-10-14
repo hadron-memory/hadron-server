@@ -309,3 +309,68 @@ describe('#1944 startSession\'s optional agentRef: an unreadable Agent answers l
     expect((await askWith(ctx(member), start(urnOf(secret)))).error).toBeNull();
   });
 });
+
+/**
+ * Group A (Eden, #11808): the remaining surfaces gated on the Agent itself.
+ * revokeAgentSubscription answers an absent Agent with resolveRefArg's own
+ * envelope, so a denied one must get that same envelope; the rest answer
+ * AGENT_NOT_FOUND.
+ */
+const GROUP_A: Array<[string, (agentRef: string) => { query: string; variables: Record<string, unknown> }, (ref: string) => Answer]> = [
+  ['revokeAgentSubscription',
+    (ref) => ({ query: 'mutation($ref: String, $user: String) { revokeAgentSubscription(agentRef: $ref, userRef: $user) { agentId } }', variables: { ref, user: member } }),
+    (ref) => ({ data: null, error: { message: `No match for agentRef "${ref}".`, extensions: { code: 'NOT_FOUND' } } })],
+  ['removeAgentImport',
+    (ref) => ({ query: 'mutation($ref: ID!, $imp: ID!) { removeAgentImport(parentAgentRef: $ref, importedAgentRef: $imp) }', variables: { ref, imp: urnOf(pub) } }),
+    (ref) => absentAnswer('removeAgentImport', ref)],
+  ['createAiServiceConfig (AGENT owner)',
+    (ref) => ({ query: 'mutation($ref: ID!) { createAiServiceConfig(ownerType: AGENT, ownerId: $ref, name: "probe", provider: "anthropic", model: "m") { id } }', variables: { ref } }),
+    (ref) => absentAnswer('createAiServiceConfig', ref)],
+  ['aiServiceConfigs (AGENT owner)',
+    (ref) => ({ query: 'query($ref: ID!) { aiServiceConfigs(filter: { ownerType: AGENT, ownerId: $ref }) { total } }', variables: { ref } }),
+    (ref) => absentAnswer('aiServiceConfigs', ref)],
+  ['resolveAIConfig (agentRef, no appRef)',
+    (ref) => ({ query: 'query($ref: ID!) { resolveAIConfig(agentRef: $ref) { configId } }', variables: { ref } }),
+    (ref) => absentAnswer('resolveAIConfig', ref)],
+];
+
+describe('#1944 group A: the remaining surfaces gated on the Agent answer an unreadable one as absent', () => {
+  for (const [surface, req, absent] of GROUP_A) {
+    it(`${surface}: another org's ADMIN gets exactly the absent answer for a real Agent and a guessed one`, async () => {
+      expect(await askWith(ctx(foreignAdmin), req(nobody()))).toEqual(absent(nobody()));
+      expect(await askWith(ctx(foreignAdmin), req(urnOf(secret)))).toEqual(absent(urnOf(secret)));
+    });
+
+    for (const [who, as] of OUTSIDERS) {
+      it(`${surface}, ${who}: a real Agent and a guessed one read the same`, async () => {
+        expect(masked(await askWith(as(), req(urnOf(secret))), urnOf(secret)))
+          .toEqual(masked(await askWith(as(), req(nobody())), nobody()));
+      });
+    }
+
+    it(`${surface}: the same ref answers byte-identically before and after its Agent is deleted`, async () => {
+      const before = await askWith(ctx(foreignAdmin), req(urnOf(secret)));
+      await db.agent.update({ where: { id: secret.id }, data: { deletedAt: new Date() } });
+      expect(JSON.stringify(await askWith(ctx(foreignAdmin), req(urnOf(secret))))).toBe(JSON.stringify(before));
+    });
+
+    it(`${surface}: a foreign caller on a PUBLIC Agent, and a member who can read but not manage, still get FORBIDDEN`, async () => {
+      expect((await askWith(ctx(foreignAdmin), req(urnOf(pub)))).error?.extensions.code).toBe('FORBIDDEN');
+      expect((await askWith(ctx(member), req(urnOf(secret)))).error?.extensions.code).toBe('FORBIDDEN');
+    });
+
+    it(`${surface}: an outage inside the read gate propagates`, async () => {
+      const down = () => { throw new Error('database unavailable'); };
+      const broken = new Proxy(db, {
+        get(target, prop, receiver) {
+          if (prop === 'orgMember') return new Proxy({}, { get: () => down });
+          return Reflect.get(target, prop, receiver);
+        },
+      }) as Context['db'];
+      const a = await askWith({ db: broken, userId: foreignAdmin, roles: ['READER'] } as Context, req(urnOf(secret)));
+      expect(a.error).not.toBeNull();
+      expect(a.error?.extensions.code).not.toBe('AGENT_NOT_FOUND');
+      expect(a.error?.extensions.code).not.toBe('NOT_FOUND');
+    });
+  }
+});
