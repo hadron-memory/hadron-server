@@ -9826,8 +9826,8 @@ export const typeDefs = `#graphql
 
     """
     Soft-delete an Agent and its owned system memory. Refuses while a live
-    App install or live parent Agent import references it. AgentMemoryItem
-    attachments do not block deletion.
+    App install or live parent Agent import references it, or a live Agent
+    extends it as its base. AgentMemoryItem attachments do not block deletion.
 
     See hrn:node:hadronmemory.com:specs:cor:dmo:050:14.
 
