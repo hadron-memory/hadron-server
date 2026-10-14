@@ -28,6 +28,7 @@ import {
   parseWorkerDbName,
   type WorkerCloneName,
 } from './dbWorkers.js';
+import { prepareRunGraphRoot, removeRunGraphRoot } from './graphRoot.js';
 import { assertBaseMatchesSchema, ensureSchemaTemplate } from './schemaTemplate.js';
 
 export async function setup() {
@@ -37,6 +38,29 @@ export async function setup() {
   // Set unconditionally rather than defaulted, so a stale value exported into
   // the shell cannot quietly make two runs share a name-space again.
   process.env.HADRON_TEST_RUN_ID = String(process.pid);
+  const runId = testRunId();
+
+  // This run's graph-fixture root (#1951), in BOTH modes: serial runs write
+  // nodes to disk too. Created (and dead runs' roots swept) before the
+  // databases, and removed at teardown even when the database teardown fails.
+  prepareRunGraphRoot(runId);
+  let dbTeardown: (() => Promise<void>) | undefined;
+  try {
+    dbTeardown = await setupDatabases();
+  } catch (e) {
+    removeRunGraphRoot(runId);
+    throw e;
+  }
+  return async function teardown() {
+    try {
+      await dbTeardown?.();
+    } finally {
+      removeRunGraphRoot(runId);
+    }
+  };
+}
+
+async function setupDatabases(): Promise<(() => Promise<void>) | undefined> {
 
   // SERIAL MODE touches the test database and NOTHING ELSE (#1136 review, Codex
   // P2). `HADRON_TEST_PARALLEL=0` is the escape hatch for a setup that has no
