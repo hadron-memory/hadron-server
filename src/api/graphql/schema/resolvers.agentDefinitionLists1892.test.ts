@@ -41,6 +41,7 @@ vi.mock('../../../integrations/github/syncGraphFromGithub.js', () => ({
 const Q = resolvers.Query as any;
 const M = resolvers.Mutation as any;
 const N = (resolvers as any).Node;
+const E = (resolvers as any).Edge;
 
 let n: number;
 let org: { id: string; urn: string };
@@ -178,11 +179,17 @@ describe('050:15 — an Agent\'s tasks', () => {
     expect((await taskView()).map(([, trigger]) => trigger)).toEqual([null, null, null, null]);
   });
 
-  it('an inherited task keeps the base\'s URN and shows none of the base\'s edges', async () => {
+  it('an inherited task keeps the base\'s URN, and its edges resolve through the child (#1893)', async () => {
     const openPr = (await tasks()).find((t) => t.node.id === ids.engOpenPr)!;
-    expect(await N.urn(openPr.node, {}, ctx(reader))).toBe(nodeUrn(engineer.memUrn, 'tasks:open-pr'));
-    expect(await N.outgoingEdges(openPr.node, {}, ctx(reader))).toEqual([]);
-    expect(await N.incomingEdges(openPr.node, {}, ctx(reader))).toEqual([]);
+    const c = ctx(reader);
+    expect(await N.urn(openPr.node, {}, c)).toBe(nodeUrn(engineer.memUrn, 'tasks:open-pr'));
+    // #1899 serves an inherited node's edges by loc through the child: the
+    // base's own index link lands on backend's index, which overrides `tasks`.
+    const out = await Promise.all((await N.outgoingEdges(openPr.node, {}, c)).map(async (e: any) => [e.name, (await E.target(e, {}, c)).id]));
+    expect(out).toEqual([['when a PR is ready', ids.backIndex]]);
+    // The base's stage source is in effect for the child; the team process is readable on its own memory.
+    const inc = await Promise.all((await N.incomingEdges(openPr.node, {}, c)).map(async (e: any) => [e.name, (await E.source(e, {}, c)).id]));
+    expect(inc.sort()).toEqual([['Stage 1: open it', ids.shipIt], ['stage 1: open the PR', ids.engBaseRelease]].sort());
   });
 
   it('a base adds a task: it is on the child\'s list on the next read', async () => {
