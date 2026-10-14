@@ -166,6 +166,7 @@ describe('hadron_agent_set_base — every refusal, as the resolver gives it, in 
     const engineer = await orgAgent(orgA, 'engineer');
     const backend = await orgAgent(orgA, 'backend-engineer');
     const err = await wireBase(memberA, backend.id, engineer.id);
+    expect(err.startsWith('[FORBIDDEN] '), err).toBe(true); // as the tool description says
     const got = await call(memberA, tool, { agentRef: backend.id, baseRef: engineer.id });
     expect(got).toEqual({ isError: true, text: err });
     expect(await baseOf(backend.id)).toBeNull();
@@ -308,6 +309,7 @@ describe('hadron_agent_set_index_refs — refusals, as the resolver gives them',
 
   it('a member who does not manage the Agent', async () => {
     const err = await wireIndex(memberA, { ref: backend.id, tasksIndexRef: null });
+    expect(err.startsWith('[FORBIDDEN] '), err).toBe(true); // as the tool description says
     expect(await call(memberA, 'hadron_agent_set_index_refs', { agentRef: backend.id, tasksIndexRef: null })).toEqual({ isError: true, text: err });
     expect((await refsOf(backend.id)).tasksIndexRef).toBe(index);
   });
