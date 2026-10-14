@@ -235,6 +235,24 @@ describe('serial mode base (#1922)', BUILD_TIMEOUT, () => {
     await expect(onDb(serial, (c) => assertBaseMatchesSchema(c))).resolves.toBeUndefined();
   });
 
+  it('a failed rebuild of a stamped base leaves it unstamped, so no checkout accepts it (Diego P2)', async () => {
+    // The base is stamped for this checkout from the case above.
+    await expect(onDb(serial, (c) => assertBaseMatchesSchema(c))).resolves.toBeUndefined();
+    const failing = async () => {
+      throw new Error('simulated build failure');
+    };
+    await expect(rebuildBaseTestDb(withDbName(maintenanceUrl(), serial), { build: failing })).rejects.toThrow(
+      /simulated build failure/,
+    );
+    // Half-built (public was emptied) and no longer vouched for.
+    expect(await routineExists(serial, 'host_operation_forward_only')).toBe(false);
+    await expect(onDb(serial, (c) => assertBaseMatchesSchema(c))).rejects.toThrow(/not built by/);
+
+    // A successful rebuild restores it.
+    await rebuildBaseTestDb(withDbName(maintenanceUrl(), serial));
+    await expect(onDb(serial, (c) => assertBaseMatchesSchema(c))).resolves.toBeUndefined();
+  });
+
   it('refuses a base stamped for another schema', async () => {
     await expect(onDb(serial, (c) => assertBaseMatchesSchema(c, '0'.repeat(16)))).rejects.toThrow(
       /built for schema/,

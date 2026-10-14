@@ -256,8 +256,17 @@ export async function assertBaseMatchesSchema(
  * `pnpm db:test-setup`: rebuild the serial-mode base from EMPTY and stamp it.
  * Empties the `public` schema rather than dropping the database, so it works
  * without CREATE DATABASE, which is the setup serial mode exists for.
+ *
+ * The old stamp is cleared BEFORE anything is dropped and the new one written
+ * only after the build succeeds (#1923 review, Diego P2). Otherwise a rebuild
+ * that fails or is interrupted part-way leaves a half-built database still
+ * stamped for the previous schema, and that checkout's serial guard accepts it.
+ * Unstamped, a failed rebuild is refused by every checkout until one succeeds.
  */
-export async function rebuildBaseTestDb(url = baseTestDbUrl()): Promise<string> {
+export async function rebuildBaseTestDb(
+  url = baseTestDbUrl(),
+  { build = buildTestSchema }: { build?: (url: string) => Promise<void> } = {},
+): Promise<string> {
   const dbName = new URL(url).pathname.replace(/^\//, '');
   // This wipes the database, so refuse anything that is not a test database.
   if (!/test/.test(dbName)) {
@@ -270,8 +279,9 @@ export async function rebuildBaseTestDb(url = baseTestDbUrl()): Promise<string> 
   const client = new Client({ connectionString: url });
   await client.connect();
   try {
+    await client.query(`COMMENT ON DATABASE ${quoteDbIdent(dbName)} IS NULL`);
     await client.query('DROP SCHEMA public CASCADE; CREATE SCHEMA public;');
-    await buildTestSchema(url);
+    await build(url);
     await client.query(
       `COMMENT ON DATABASE ${quoteDbIdent(dbName)} IS '${templateStamp(fingerprint, Date.now())}'`,
     );
