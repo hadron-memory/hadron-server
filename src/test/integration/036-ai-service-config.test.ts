@@ -507,6 +507,14 @@ describe('resolveAIConfig for a user-owned Agent (#1363)', () => {
     // An App context must not let an org admin bypass strict ownership of
     // the named personal Agent, even if the App has its own config.
     await createConfig({ appId: app.id }, 'default', { apiKey: 'sk-app' });
+    // #1946 (Atilla's P2 on #1955): not installed in the named App answers as
+    // absent, decided before the owner gate (ruling A)...
+    await expect(resolvers.Query.resolveAIConfig(
+      {}, { appRef: app.id, agentRef: personalAgent.id }, ctxFor(admin.id),
+    )).rejects.toThrow(/AGENT_NOT_FOUND/);
+    // ...and once it IS installed there, strict ownership still refuses the
+    // org admin: the App context never bypasses the owner gate.
+    await db.appAgent.create({ data: { appId: app.id, agentId: personalAgent.id } });
     await expect(resolvers.Query.resolveAIConfig(
       {}, { appRef: app.id, agentRef: personalAgent.id }, ctxFor(admin.id),
     )).rejects.toThrow(/Forbidden/);

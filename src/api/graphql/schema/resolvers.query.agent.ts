@@ -377,6 +377,13 @@ export const agentQueries = {
             : await resolveReadableAgentRef(ctx, agentRef);
           const { id } = agent;
           resolvedAgentId = id;
+          // #1946 (Atilla's P2 on #1955): with an App named, "not installed
+          // here" is decided BEFORE any Agent-specific denial below (the
+          // personal-Agent owner gate), so a foreign Agent answers exactly as
+          // an absent one (ruling A).
+          if (resolvedAppId && !(await isAgentInstalled(ctx.db, resolvedAppId, id))) {
+            throw new AgentNotFoundError(agentRef);
+          }
           agentOwner = agent;
           userOwnedAgent = agent.ownerUserId !== null;
           personalAgentOwnerId = agent.ownerUserId;

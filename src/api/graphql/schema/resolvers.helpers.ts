@@ -47,6 +47,7 @@ import { isStrictOwner } from '../../../lib/auth/strictOwner.js';
 import { boundSessionPrivacyFilter } from '../../../lib/auth/sessionPrivacy.js';
 import {
   formatCanonicalUrn,
+  UrnNotQualifiedError,
   type CanonicalUrnType,
 } from '../../../lib/urn.js';
 import { safeEntityUrnV2 } from '../../../lib/urnEmit.js';
@@ -66,6 +67,7 @@ import {
   OrganizationNotFoundError,
   AppNotFoundError,
   AgentNotFoundError,
+  AmbiguousLegacyUrnError,
 } from '../../../lib/entityRef/errors.js';
 import { MemoryNotFoundError } from '../../../lib/asset/gate.js';
 import { assertLinkAllowedForPublicAgent, isExcludedFromCoveredSet } from '../../../lib/agentPublicCongruence.js';
@@ -1440,8 +1442,13 @@ export async function requireReadableAgentForAssetOp(ctx: Context, agentRef: str
   let id: string;
   try {
     ({ id } = await resolveAgentRef(ctx.db, agentRef));
-  } catch {
-    return;
+  } catch (e) {
+    // NARROW (Atilla's P2 on #1955, the #1019 convention): only a ref that
+    // names nothing, or a malformed one, is left to the op, which answers it
+    // its own way. Anything else (an outage) propagates, so the op never runs
+    // with this gate skipped.
+    if (e instanceof AgentNotFoundError || e instanceof UrnNotQualifiedError || e instanceof AmbiguousLegacyUrnError) return;
+    throw e;
   }
   try {
     await requireReadableAgent(ctx, await ctx.db.agent.findUnique({ where: { id } }), agentRef);
