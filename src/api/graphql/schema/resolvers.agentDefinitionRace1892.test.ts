@@ -56,6 +56,13 @@ vi.mock('../../../lib/agentDefinitionLists.js', async (importOriginal) => {
       if (hook) await hook();
       return out;
     },
+    listAgentProcesses: async (...args: Parameters<typeof mod.listAgentProcesses>) => {
+      const out = await mod.listAgentProcesses(...args);
+      const hook = hooks.afterList;
+      hooks.afterList = undefined;
+      if (hook) await hook();
+      return out;
+    },
   };
 });
 // setAgentIndexRefs resolves its targets before its transaction: the hook runs
@@ -253,5 +260,63 @@ describe('setAgentIndexRefs re-authorizes inside its transaction (Anne P2-2)', (
     };
     await expect(set({ tasksIndexRef: ids.backDeploy })).rejects.toThrow();
     expect(await pointer()).toBeNull();
+  });
+});
+
+describe('#1941: an inherited INVOLVED process, on the version served', () => {
+  const involved = async () =>
+    ((await Q.agentProcessList({}, { ref: backend.id }, ctx())) as Array<{ node: { id: string }; kind: string }>)
+      .filter((p) => p.kind === 'INVOLVED').map((p) => p.node.id);
+  const mcpProcesses = () =>
+    createTestableMcpServer({ userId: reader, roles: ['READER'], clientId: `user:${reader}` })
+      .callToolText('hadron_agent_processes', { agentRef: backend.id });
+  const toBootPrompt = async () => { await db.node.update({ where: { id: ids.engRelease }, data: { role: 'boot-prompt' } }); };
+
+  beforeEach(async () => {
+    await node('engRelease', engineer.mem, 'processes:release', { role: 'process' });
+    await db.edge.create({ data: { memoryId: engineer.mem, sourceId: ids.engRelease, targetId: ids.engOpenPr, name: 'stage 1: open the PR', loc: 'e3' } });
+  });
+
+  it('control: listed, on both surfaces', async () => {
+    expect(await involved()).toEqual([ids.engRelease]);
+    expect(await mcpProcesses()).toContain('processes:release');
+  });
+
+  it('turned boot prompt between the loc lookup and the read: dropped', async () => {
+    hooks.afterLoc = { loc: 'processes:release', run: toBootPrompt };
+    expect(await involved()).toEqual([]);
+  });
+
+  it('the same on MCP, which serves the list without a second read', async () => {
+    hooks.afterLoc = { loc: 'processes:release', run: toBootPrompt };
+    expect(await mcpProcesses()).not.toContain('processes:release');
+  });
+
+  it('overridden by the child between the loc lookup and the read: the base\'s node is never served', async () => {
+    hooks.afterLoc = { loc: 'processes:release', run: async () => { await node('backNote', backend.mem, 'processes:release'); } };
+    expect(await involved()).toEqual([]);
+  });
+
+  it('overridden then on MCP, which has no second read: only the as-read re-check keeps the base\'s node out', async () => {
+    hooks.afterLoc = { loc: 'processes:release', run: async () => { await node('backNote', backend.mem, 'processes:release'); } };
+    expect(await mcpProcesses()).not.toContain('processes:release');
+  });
+
+  it('Andi P2: the child\'s override, moved to an unreadable memory between the loc lookup and the read, is never served', async () => {
+    await node('backOwnRelease', backend.mem, 'processes:release', { role: 'process' });
+    const moveAway = async () => { await db.node.update({ where: { id: ids.backOwnRelease }, data: { memoryId: privateMem.id } }); };
+    expect(await involved()).toEqual([ids.backOwnRelease]); // control: the override counts, as the child's
+    hooks.afterLoc = { loc: 'processes:release', run: moveAway };
+    expect(await involved()).not.toContain(ids.backOwnRelease);
+    await db.node.update({ where: { id: ids.backOwnRelease }, data: { memoryId: backend.mem } });
+    hooks.afterLoc = { loc: 'processes:release', run: moveAway };
+    const text = await mcpProcesses();
+    expect(text).not.toContain('backOwnRelease');
+    expect(text).not.toContain(ids.backOwnRelease);
+  });
+
+  it('overridden by the child after the list is built: GraphQL drops the base\'s row', async () => {
+    hooks.afterList = async () => { await node('backNote', backend.mem, 'processes:release'); };
+    expect(await involved()).toEqual([]);
   });
 });

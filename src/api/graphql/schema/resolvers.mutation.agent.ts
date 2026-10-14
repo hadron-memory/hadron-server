@@ -43,7 +43,7 @@ import { ensureAgentOrgGrant } from '../../../controller/operations/ensureAgentO
 import { removeAgentImport } from '../../../controller/operations/removeAgentImport.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { writeAgentBase } from '../../../lib/agentBase.js';
-import { AgentNotFoundError, NodeNotFoundError } from '../../../lib/entityRef/errors.js';
+import { NodeNotFoundError } from '../../../lib/entityRef/errors.js';
 import { canReadMemory } from '../../../mcp/access-control.js';
 import { resolveNodeRefForCaller } from './resolvers.nodeRefAccess.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
@@ -61,13 +61,14 @@ import {
   type Context,
   requireOrgRole,
   requireAgentAccess,
+  resolveReadableAgentRef,
   requireOwnerOrOrgRole,
   aiConfigOwnerOf,
   toGqlAiServiceConfig,
   requireAiConfigOwnerAdmin,
   rethrowAiConfigTyped,
   resolveUserRefArg,
-  resolveAgentRefArg,
+  resolveReadableAgentRefArg,
   AGENT_INCLUDE,
 } from './resolvers.helpers.js';
 import { recordUrnRename } from '../../../lib/urnAlias.js';
@@ -437,11 +438,12 @@ export const agentMutations = {
       // #929 review: normalize persona dressing (blank-after-trim clears).
       const personaRoleNorm = normalizePersonaField(personaRole);
       // #789 / cor:api:140 — was a PK-only findUniqueOrThrow, so a caller
-      // holding a URN or handle had to pre-resolve it. resolveAgentRef is a
-      // pure lookup and does NOT authorize (#554): the resource-scoped
-      // requireOwnerOrOrgRole below still runs on the RESOLVED agent.
-      const { id } = await resolveAgentRef(ctx.db, ref);
-      const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id } });
+      // holding a URN or handle had to pre-resolve it. Resolution is not
+      // authorization (#554): the resource-scoped gate below still runs on the
+      // RESOLVED agent. #1944: resolved through the read gate, so a caller who
+      // can't read the Agent is answered as if it were absent.
+      const agent = await resolveReadableAgentRef(ctx, ref);
+      const { id } = agent;
       await requireAgentAccess(ctx, agent, 'ADMIN');
       // spec 047 (codex review, #682): a user-owned agent is owner-only in v1 —
       // it must NEVER become non-PERSONAL. The create-time guard alone is
@@ -819,8 +821,9 @@ export const agentMutations = {
 
     deleteAgent: async (_: unknown, { ref }: { ref: string }, ctx: Context) => {
       // #789 / cor:api:140 — see updateAgent: resolution is not authorization.
-      const { id } = await resolveAgentRef(ctx.db, ref);
-      const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id } });
+      // #1944: an Agent the caller can't read answers as absent.
+      const agent = await resolveReadableAgentRef(ctx, ref);
+      const { id } = agent;
       await requireAgentAccess(ctx, agent, 'ADMIN');
       // Soft-delete the agent and its owned system memory (if any) in the
       // same pass. System memories are owned by the agent and cannot be
@@ -879,9 +882,11 @@ export const agentMutations = {
      * managers change the child, never the base.
      */
     setAgentBase: async (_: unknown, { ref, baseRef }: { ref: string; baseRef?: string | null }, ctx: Context) => {
-      // #789 / cor:api:140 — resolution is not authorization.
-      const { id } = await resolveAgentRef(ctx.db, ref);
-      const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id } });
+      // #789 / cor:api:140 — resolution is not authorization. #1944: an
+      // Agent the caller can't read answers as absent (the base ref already
+      // conceals, in writeAgentBase).
+      const agent = await resolveReadableAgentRef(ctx, ref);
+      const { id } = agent;
       await requireAgentAccess(ctx, agent, 'ADMIN');
       const baseId = baseRef ? (await resolveAgentRef(ctx.db, baseRef)).id : null;
       await ctx.db.$transaction((tx) =>
@@ -911,10 +916,10 @@ export const agentMutations = {
       args: { ref: string; tasksIndexRef?: string | null; processesIndexRef?: string | null },
       ctx: Context,
     ) => {
-      // #789 / cor:api:140 — resolution is not authorization.
-      const { id } = await resolveAgentRef(ctx.db, args.ref);
-      const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id } });
-      if (agent.deletedAt) throw new AgentNotFoundError(args.ref);
+      // #789 / cor:api:140 — resolution is not authorization. #1944: an
+      // Agent the caller can't read answers as absent, as a retired one does.
+      const agent = await resolveReadableAgentRef(ctx, args.ref);
+      const { id } = agent;
       await requireAgentAccess(ctx, agent, 'ADMIN');
       // Resolve each target to its node and memory; the gates run again below,
       // inside the transaction, on what is current there.
@@ -1138,11 +1143,12 @@ export const agentMutations = {
       },
       ctx: Context,
     ) => {
-      const { id: resolvedParentId } = await resolveAgentRef(ctx.db, parentAgentRef);
+      // #1944: the parent through the read gate FIRST, so an outsider learns
+      // nothing about it (an unreadable parent answers as absent) and never
+      // reaches the imported ref's lookup.
+      const parent = await resolveReadableAgentRef(ctx, parentAgentRef);
+      const resolvedParentId = parent.id;
       const { id: resolvedImportedId } = await resolveAgentRef(ctx.db, importedAgentRef);
-      const parent = await ctx.db.agent.findUniqueOrThrow({
-        where: { id: resolvedParentId },
-      });
       // Authorization: ADMIN/OWNER of the parent Agent's owning org.
       await requireAgentAccess(ctx, parent, 'ADMIN');
 
@@ -1174,11 +1180,10 @@ export const agentMutations = {
       { parentAgentRef, importedAgentRef }: { parentAgentRef: string; importedAgentRef: string },
       ctx: Context,
     ) => {
-      const { id: resolvedParentId } = await resolveAgentRef(ctx.db, parentAgentRef);
+      // #1944: the parent through the read gate FIRST, as publishAgentImport.
+      const parent = await resolveReadableAgentRef(ctx, parentAgentRef);
+      const resolvedParentId = parent.id;
       const { id: resolvedImportedId } = await resolveAgentRef(ctx.db, importedAgentRef);
-      const parent = await ctx.db.agent.findUniqueOrThrow({
-        where: { id: resolvedParentId },
-      });
       await requireAgentAccess(ctx, parent, 'ADMIN');
       await removeAgentImport(ctx.db, resolvedParentId, resolvedImportedId);
       return true;
@@ -1201,8 +1206,9 @@ export const agentMutations = {
     ) => {
       // #764: agentRef/userRef accept id / URN / (user) handle / email. Resolve
       // the agent + owner-gate FIRST, then resolve the user.
-      const resolvedAgentId = await resolveAgentRefArg(ctx.db, { ref: agentRef, id: agentId });
-      const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
+      // #1944: an Agent the caller can't read answers as absent.
+      const agent = await resolveReadableAgentRefArg(ctx, { ref: agentRef, id: agentId });
+      const resolvedAgentId = agent.id;
       await requireAgentAccess(ctx, agent, 'ADMIN');
       const resolvedUserId = await resolveUserRefArg(ctx.db, { ref: userRef, id: userId });
 
@@ -1264,8 +1270,9 @@ export const agentMutations = {
       ctx: Context,
     ) => {
       // 007-entity-id-or-urn: agentId may be ID, bare URN, or prefixed URN.
-      const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentId);
-      const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
+      // #1944: through the read gate, so an unreadable Agent answers as absent.
+      const agent = await resolveReadableAgentRef(ctx, agentId);
+      const resolvedAgentId = agent.id;
       // #1787 review (Rook P2-1): updating config can keep the stored key under a
       // changed endpoint/provider — same exfil shape as the registry gate — so on a
       // user-owned Agent this stays owner-only (clearAgentAIConfig keeps the arm).
@@ -1360,8 +1367,9 @@ export const agentMutations = {
 
     clearAgentAIConfig: async (_: unknown, { agentId }: { agentId: string }, ctx: Context) => {
       // 007-entity-id-or-urn: agentId may be ID, bare URN, or prefixed URN.
-      const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentId);
-      const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
+      // #1944: through the read gate, so an unreadable Agent answers as absent.
+      const agent = await resolveReadableAgentRef(ctx, agentId);
+      const resolvedAgentId = agent.id;
       await requireAgentAccess(ctx, agent, 'ADMIN');
       // 036-ai-service-config: clearing deletes the 'default' registry
       // config (idempotent).

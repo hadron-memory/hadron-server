@@ -361,3 +361,25 @@ describe('codes the GraphQL formatter assigns reach the tool exactly as on the w
       () => wireBase(adminA, backend.id, legacy()), 'AmbiguousLegacyUrnError');
   });
 });
+
+describe('#1944 — an Agent the caller can\'t read answers like an absent one, through both tools', () => {
+  it('another org\'s ADMIN reads the same text for a real non-PUBLIC child and a guessed one', async () => {
+    const secret = await orgAgent(orgA, 'secret');
+    const nobody = `hrn:agent:${orgA.urn}:nobody`;
+    for (const [tool, args] of [
+      ['hadron_agent_set_base', (ref: string) => ({ agentRef: ref, baseRef: null })],
+      ['hadron_agent_set_index_refs', (ref: string) => ({ agentRef: ref, tasksIndexRef: null })],
+    ] as const) {
+      const real = await call(adminB, tool, args(`hrn:agent:${secret.urn}`));
+      const guessed = await call(adminB, tool, args(nobody));
+      expect(guessed).toEqual({ isError: true, text: `[AGENT_NOT_FOUND] AGENT_NOT_FOUND: ${nobody}` });
+      expect(real).toEqual({ isError: true, text: `[AGENT_NOT_FOUND] AGENT_NOT_FOUND: hrn:agent:${secret.urn}` });
+    }
+  });
+
+  it('a member who can read the child but not manage it still gets FORBIDDEN, as the descriptions say', async () => {
+    const backend = await orgAgent(orgA, 'backend-engineer');
+    expect((await call(memberA, 'hadron_agent_set_base', { agentRef: backend.id, baseRef: null })).text).toMatch(/^\[FORBIDDEN\] /);
+    expect((await call(memberA, 'hadron_agent_set_index_refs', { agentRef: backend.id, tasksIndexRef: null })).text).toMatch(/^\[FORBIDDEN\] /);
+  });
+});

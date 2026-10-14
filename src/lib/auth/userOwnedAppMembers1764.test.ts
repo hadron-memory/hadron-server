@@ -334,7 +334,8 @@ describe('nested content behind the widened Worker gate (Riana P1, #1786)', () =
 
   it('a member gets neither the owner\'s agent template through Worker.prompt nor the strict worker-memory handoff through continuity', async () => {
     const f = await fixture();
-    expect(await code(Q.agent({}, { ref: f.agent.id }, ctx(member.id)))).toBeDefined();
+    // The member can't read the owner's Agent (#1944: it reads as absent, null).
+    expect(await Q.agent({}, { ref: f.agent.id }, ctx(member.id))).toBeNull();
     expect(await canReadMemory(db, auth(member.id), f.mem.id)).toBe(false);
     const w = await graph(f.worker.id, member.id);
     expect(w.agent).toBeNull();
