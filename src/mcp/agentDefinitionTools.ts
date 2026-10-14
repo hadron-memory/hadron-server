@@ -7,11 +7,24 @@
  * chain walk, the dedupe and the triggers are computed once, so the two
  * surfaces return the same list (050:15 S3, 050:16 S4). Nothing here
  * re-checks or re-derives any of them.
+ *
+ * #1936 — and the two writes: `hadron_agent_set_base` and
+ * `hadron_agent_set_index_refs`, which call GraphQL's `setAgentBase` /
+ * `setAgentIndexRefs` as they are. The gate (whoever manages the child), the
+ * refusals and their order, the concealment and the in-transaction
+ * re-authorization all stay the resolver's; a refusal comes back with the
+ * resolver's own code and message. Nothing is validated here beyond the
+ * arguments' shape.
  */
 import { z } from 'zod';
+import { GraphQLError } from 'graphql';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { PrismaClient } from '../generated/prisma/index.js';
 import type { AuthContext } from '../middleware/auth.js';
+import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
+import { EntityNotFoundError } from '../lib/entityRef/errors.js';
+import { UrnNotQualifiedError } from '../lib/urn.js';
+import { canReadMemory, EXPLICIT_REF } from './access-control.js';
 import { resolveAgentRef } from '../lib/entityRef/agentRef.js';
 import { listAgentProcesses, listAgentTasks, type ListedNode } from '../lib/agentDefinitionLists.js';
 import { emitEntityUrnV2, safeNodeUrnV2 } from '../lib/urnEmit.js';
@@ -22,6 +35,43 @@ function textResult(text: string) {
 
 function errorResult(e: unknown) {
   return { isError: true, content: [{ type: 'text' as const, text: e instanceof Error ? e.message : String(e) }] };
+}
+
+/**
+ * #1936 — a write's refusal as `[<code>] <message>`, the code being the one
+ * GraphQL puts on the wire (a GraphQLError's, or a not-found's own). Anything
+ * else is a server fault, rethrown to the shared tool error boundary.
+ */
+function refusalResult(e: unknown) {
+  const code = e instanceof GraphQLError ? e.extensions?.code
+    : e instanceof EntityNotFoundError ? e.code
+    : e instanceof UrnNotQualifiedError ? 'BAD_USER_INPUT'
+    : undefined;
+  if (!code) throw e;
+  return { isError: true as const, content: [{ type: 'text' as const, text: `[${String(code).toLowerCase()}] ${(e as Error).message}` }] };
+}
+
+type AgentRow = { id: string; urn: string; extendsAgentId: string | null; tasksIndexRef: string | null; processesIndexRef: string | null };
+type Resolver<A> = (parent: unknown, args: A, ctx: Context) => Promise<AgentRow>;
+const M = resolvers.Mutation as unknown as {
+  setAgentBase: Resolver<{ ref: string; baseRef: string | null }>;
+  setAgentIndexRefs: Resolver<{ ref: string; tasksIndexRef?: string | null; processesIndexRef?: string | null }>;
+};
+
+/** The GraphQL Context for the connection's principal, as the other delegating tools build it. */
+function contextOf(db: PrismaClient, auth: AuthContext): Context {
+  return {
+    db,
+    transport: 'mcp',
+    clientId: auth.clientId ?? undefined,
+    userId: auth.userId ?? undefined,
+    apiKeyId: auth.apiKeyId ?? undefined,
+    appId: auth.appId ?? undefined,
+    sessionId: auth.sessionId ?? undefined,
+    roles: auth.roles as Context['roles'],
+    organizationId: auth.organizationId ?? undefined,
+    impersonation: auth.impersonation,
+  };
 }
 
 /** Each listed node's URN, from its memory's URN: one memory query per list. */
@@ -103,6 +153,70 @@ export function registerAgentDefinitionTools(server: McpServer, deps: { db: Pris
         return textResult(lines.join('\n'));
       } catch (e) {
         return errorResult(e);
+      }
+    },
+  );
+
+  const indexRef = (which: 'tasks' | 'processes', spec: string) => z.string().min(1).nullable().optional().describe(
+    `The ${which}-index node (${spec}): its ID or fully-qualified URN. Omit it to leave the pointer as it is; ` +
+    'null clears it. The node must be live and readable to you, or the call is refused as NODE_NOT_FOUND.',
+  );
+
+  /** A pointer as the caller may see it: the node's URN when its memory is readable to them, else the bare id GraphQL returns. */
+  const pointer = async (nodeId: string | null): Promise<string> => {
+    if (!nodeId) return 'none';
+    const node = await db.node.findUnique({ where: { id: nodeId }, select: { id: true, memoryId: true, loc: true, name: true } });
+    if (!node || !(await canReadMemory(db, auth, node.memoryId, EXPLICIT_REF))) return nodeId;
+    return (await nodeUrns(db, [node as ListedNode])).get(node.id)!;
+  };
+
+  server.tool(
+    'hadron_agent_set_base',
+    "Set, change or clear an Agent's base (cor:dmo:050:14): the one Agent it extends and inherits from (Agent.extendsAgentId). Pass the base's ID or URN to set or change it, or null to clear it. Only whoever manages the Agent may change its base; managing the base is not enough. Refusals, in this order: AGENT_NOT_FOUND (an Agent or base that doesn't exist, is retired, or that you hold no licence to: not found rather than forbidden); AGENT_ORG_GRANT_REQUIRED, AGENT_ORG_GRANT_INACTIVE or AGENT_SUBSCRIPTION_REQUIRED (extending another organisation's Agent needs the grant a cross-organisation include needs); then AGENT_BASE_CYCLE (an Agent can't extend itself or an Agent that extends it) and AGENT_BASE_CHAIN_TOO_LONG (at most 4 Agents in a chain, counting every Agent that already extends this one). The same mutation as GraphQL setAgentBase. Read what it now inherits with hadron_agent_tasks / hadron_agent_processes.",
+    {
+      agentRef: agentRef.describe('The Agent whose base to change (the child): its ID or fully-qualified URN (hrn:agent:<root>:<slug>).'),
+      baseRef: z.string().min(1).nullable().describe('The base Agent: its ID or fully-qualified URN. null clears the base. Required, so leaving it out never clears one by accident.'),
+    },
+    async ({ agentRef: ref, baseRef }) => {
+      try {
+        const agent = await M.setAgentBase({}, { ref, baseRef }, contextOf(db, auth));
+        const base = agent.extendsAgentId
+          ? await db.agent.findUnique({ where: { id: agent.extendsAgentId }, select: { urn: true } })
+          : null;
+        return textResult([
+          `Agent ${emitEntityUrnV2('agent', agent.urn)} (id: ${agent.id})`,
+          `Base: ${base ? emitEntityUrnV2('agent', base.urn) : 'none'}`,
+        ].join('\n'));
+      } catch (e) {
+        return refusalResult(e);
+      }
+    },
+  );
+
+  server.tool(
+    'hadron_agent_set_index_refs',
+    "Set or clear an Agent's tasks-index and processes-index pointers (cor:dmo:050:15, :16; Agent.tasksIndexRef and Agent.processesIndexRef). The index node's incoming edges, named for their trigger, are what hadron_agent_tasks and hadron_agent_processes list as Triggers. Each pointer has three states: omit it to leave it as it is, pass null to clear it, or pass a node's ID or URN to set it. Only whoever manages the Agent may change them. Refusals: AGENT_NOT_FOUND (the Agent doesn't exist or is retired), and NODE_NOT_FOUND for an index node that doesn't exist or that you can't read. The same mutation as GraphQL setAgentIndexRefs.",
+    {
+      agentRef,
+      tasksIndexRef: indexRef('tasks', 'cor:dmo:050:15'),
+      processesIndexRef: indexRef('processes', 'cor:dmo:050:16'),
+    },
+    async ({ agentRef: ref, tasksIndexRef, processesIndexRef }) => {
+      try {
+        // Only what the caller passed: an omitted pointer stays omitted, so the
+        // resolver leaves it as it is.
+        const agent = await M.setAgentIndexRefs({}, {
+          ref,
+          ...(tasksIndexRef !== undefined ? { tasksIndexRef } : {}),
+          ...(processesIndexRef !== undefined ? { processesIndexRef } : {}),
+        }, contextOf(db, auth));
+        return textResult([
+          `Agent ${emitEntityUrnV2('agent', agent.urn)} (id: ${agent.id})`,
+          `Tasks index: ${await pointer(agent.tasksIndexRef)}`,
+          `Processes index: ${await pointer(agent.processesIndexRef)}`,
+        ].join('\n'));
+      } catch (e) {
+        return refusalResult(e);
       }
     },
   );
