@@ -368,8 +368,8 @@ export const agentQueries = {
           // one the caller can't read answers as absent; the owner/org gates
           // below still apply. With an App named, the App ADMIN gate above and
           // the installation check below are the authority: an App's admin
-          // resolves an Agent installed from another org they can't read
-          // directly (the Juno pattern), so the read gate must not run there.
+          // legitimately resolves an Agent installed from another org that
+          // they can't read directly, so the read gate must not run there.
           // (Whether an App admin may tell absent from not-installed is
           // #1946's open question.)
           const agent = resolvedAppId
