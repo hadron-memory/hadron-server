@@ -267,3 +267,45 @@ describe('#1946 controls: the legitimate callers keep their answers', () => {
     expect((await ask(ctx(adminB), 'mutation($a: ID!, $r: ID!) { createMemoryInApp(appRef: $a, agentRef: $r, memoryClass: personal, name: "Mine") { id } }', { a: appB.id, r: agentB.id })).error).toBeNull();
   });
 });
+
+describe('#1946 fix head (Atilla\'s P2s on #1955)', () => {
+  it('P2-1: a fault while resolving the Agent surfaces; the asset ops never run without their read gate', async () => {
+    let tripped = false;
+    const faulty = new Proxy(db, {
+      get(target, prop, receiver) {
+        const value = Reflect.get(target, prop, receiver);
+        if (prop !== 'agent') return typeof value === 'function' ? value.bind(target) : value;
+        return new Proxy(value, {
+          get(t, p) {
+            const fn = Reflect.get(t, p);
+            if (p !== 'findFirst') return typeof fn === 'function' ? fn.bind(t) : fn;
+            return async (args: unknown) => {
+              if (!tripped) { tripped = true; throw new Error('database unavailable'); }
+              return fn.call(t, args);
+            };
+          },
+        });
+      },
+    }) as Context['db'];
+    for (const req of [
+      { query: 'mutation($r: String!) { beginAssetUpload(input: { agentUrn: $r, filename: "a.png", mimeType: "image/png", sizeBytes: 10, uploadIntent: USER }) { uploadId } }', variables: { r: urnOf(secret) } },
+      { query: 'query($r: String!) { agentAssets(agentUrn: $r) { total } }', variables: { r: urnOf(secret) } },
+      { query: 'mutation($r: String!) { setAgentAssetUploadEnabled(input: { agentUrn: $r, enabled: true }) { id } }', variables: { r: urnOf(secret) } },
+    ]) {
+      tripped = false;
+      const a = await ask({ db: faulty, userId: adminB, roles: ['READER'] } as Context, req.query, req.variables);
+      expect(tripped).toBe(true);
+      expect(a.error?.message).toContain('database unavailable');
+    }
+  });
+
+  it('P2-2: resolveAIConfig with an App named answers a foreign personal Agent exactly as an absent one', async () => {
+    const personal = await db.agent.create({ data: { ownerUserId: ana, name: 'anas', urn: `ana-p-${generateId().slice(-6)}:anas`, visibility: 'PERSONAL' } });
+    const q = 'query($a: ID!, $r: ID!) { resolveAIConfig(appRef: $a, agentRef: $r) { configId } }';
+    const real = await ask(ctx(adminB), q, { a: appB.id, r: personal.id });
+    const absentId = generateId();
+    const guessed = await ask(ctx(adminB), q, { a: appB.id, r: absentId });
+    expect(masked(real, personal.id)).toEqual(masked(guessed, absentId));
+    expect(real.error?.extensions.code).toBe('AGENT_NOT_FOUND');
+  });
+});
