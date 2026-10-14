@@ -96,6 +96,15 @@ describe('signing tools (#1632)', () => {
     expect(await mcp.callToolText('hadron_request_signature', { nodeRef: nodeUrn('p:3'), expectedRevision: 5 })).toMatch(/\[revision_mismatch\]/);
     expect(await mcp.callToolText('hadron_get_signing_request', { id: 'nope' })).toMatch(/\[signing_request_not_found\]/);
   });
+
+  it('refuses a named non-writer with [signer_not_a_writer] and creates nothing (#1904)', async () => {
+    await node('p:4');
+    const mcp = mcpAs(writer.id);
+    expect(await mcp.callToolText('hadron_request_signature', { nodeRef: nodeUrn('p:4'), signer: reader.id }))
+      .toMatch(/\[signer_not_a_writer\]/);
+    expect(await db.signingRequest.count()).toBe(0);
+    expect(await mcp.callToolText('hadron_request_signature', { nodeRef: nodeUrn('p:4'), signer: admin.id })).toMatch(/State: open/);
+  });
 });
 
 describe('a revoked hdr_user_ key cannot write through the signing tools (Riana #1864 P2-1)', () => {

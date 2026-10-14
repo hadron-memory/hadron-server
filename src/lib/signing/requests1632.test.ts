@@ -39,7 +39,7 @@ async function refusal(p: Promise<unknown>): Promise<SigningRefusal> {
 
 const create = (opts: Partial<Parameters<typeof createSigningRequestInTransaction>[2]> & { node?: string } = {}) =>
   db.$transaction((tx) => createSigningRequestInTransaction(tx, opts.node ?? nodeId, {
-    memoryId, requester: asUser(requesterId), ...opts,
+    memoryId, requester: asUser(requesterId), mayWrite: writer, ...opts,
   }));
 
 function assertionFor(req: { nodeId: string; approvalHash: string }, over: Partial<Parameters<SoftPasskey['assert']>[0]> = {}) {
@@ -102,6 +102,30 @@ describe('requestNodeSignature: what a request pins (cor:dmo:130:03)', () => {
     expect((await refusal(create({ namedSignerId: 'no-such-user' }))).code).toBe('SIGNER_NOT_FOUND');
   });
 
+  it('refuses a named signer who may not write the memory (SIGNER_NOT_A_WRITER, #1904) and writes nothing', async () => {
+    const asked: Array<[string, string]> = [];
+    const recordingNotWriter = async (u: string, m: string) => { asked.push([u, m]); return false; };
+    const r = await refusal(create({ namedSignerId: signerId, mayWrite: recordingNotWriter }));
+    expect(r.code).toBe('SIGNER_NOT_A_WRITER');
+    // The shared policy is asked about the named signer in the node's memory, not the requester.
+    expect(asked).toEqual([[signerId, memoryId]]);
+    expect(await db.signingRequest.count()).toBe(0);
+  });
+
+  it('a missing signer is still SIGNER_NOT_FOUND, decided before the write check', async () => {
+    let consulted = false;
+    const r = await refusal(create({ namedSignerId: 'no-such-user', mayWrite: async () => { consulted = true; return false; } }));
+    expect(r.code).toBe('SIGNER_NOT_FOUND');
+    expect(consulted).toBe(false);
+  });
+
+  it('an unnamed request does not consult the write policy: any writer may sign later', async () => {
+    let consulted = false;
+    const req = await create({ mayWrite: async () => { consulted = true; return false; } });
+    expect(req.state).toBe('open');
+    expect(consulted).toBe(false);
+  });
+
   it('records an App as the requester only when the App itself asks', async () => {
     const app = await create({ requester: { userId: null, appId: 'app-1', workerId: 'w-1', sessionId: 's-1' } });
     expect(app.requesterAppId).toBe('app-1');
@@ -117,7 +141,7 @@ describe('requestNodeSignature: what a request pins (cor:dmo:130:03)', () => {
     expect((await refusal(create({ expectedRevision: 7 }))).code).toBe('REVISION_MISMATCH');
     const other = (await createDbOrgAndGraph(db, { orgName: 'sig-org-2', graphName: 'other' })).graph;
     expect((await refusal(db.$transaction((tx) => createSigningRequestInTransaction(tx, nodeId, {
-      memoryId: other.id, requester: asUser(requesterId) })))).code).toBe('NODE_NOT_FOUND');
+      memoryId: other.id, requester: asUser(requesterId), mayWrite: writer })))).code).toBe('NODE_NOT_FOUND');
     await db.memory.update({ where: { id: memoryId }, data: { isEncrypted: true } });
     const enc = await refusal(create());
     expect(enc.code).toBe('ENCRYPTED_MEMORY_NOT_APPLICABLE');
