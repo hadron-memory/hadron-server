@@ -1,4 +1,5 @@
 import { registerAutomationPinTools } from './automationPinTools.js';
+import { registerAgentDefinitionTools } from './agentDefinitionTools.js';
 import { effectiveScope, findEffectiveNodeIdByLoc, markInherited, retainEffective, stillInherited, type InheritedFrom } from '../lib/effectiveSystemMemory.js';
 import { chatByline } from './chatByline.js';
 import { boundSessionPrivacyFilter } from '../lib/auth/sessionPrivacy.js';
@@ -3367,6 +3368,8 @@ export function createMcpServerInstance(
   registerAgentTaskTools(server, { db, auth });
   registerTickerTools(server, { db, auth });
   registerAutomationPinTools(server, { db, auth });
+  // #1892 — an Agent's task and process lists (cor:dmo:050:15, :16).
+  registerAgentDefinitionTools(server, { db, auth });
 
   // ── Spec 049 Phase 2 — scopes: list / create / update / delete / explain ──────
   //

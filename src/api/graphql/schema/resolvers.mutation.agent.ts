@@ -43,6 +43,9 @@ import { ensureAgentOrgGrant } from '../../../controller/operations/ensureAgentO
 import { removeAgentImport } from '../../../controller/operations/removeAgentImport.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { writeAgentBase } from '../../../lib/agentBase.js';
+import { AgentNotFoundError, NodeNotFoundError } from '../../../lib/entityRef/errors.js';
+import { canReadMemory } from '../../../mcp/access-control.js';
+import { resolveNodeRefForCaller } from './resolvers.nodeRefAccess.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
 import { deriveSlugFromName } from '../../../lib/urn.js';
 import { normalizeHandleOrNull } from '../../../lib/userHandle.js';
@@ -868,6 +871,46 @@ export const agentMutations = {
         }),
       );
       return ctx.db.agent.findUniqueOrThrow({ where: { id }, include: AGENT_INCLUDE });
+    },
+
+    /**
+     * #1892 (cor:dmo:050:15, :16) — set or clear the Agent's tasks-index and
+     * processes-index pointers. An omitted argument leaves its pointer as it
+     * is; null clears it. Whoever manages the Agent decides, as for its base
+     * (cor:dmo:050:13).
+     *
+     * PROPOSED (050:15's open "what the pointer may name"): the target must be
+     * a live node the caller may read, and nothing more; a node the caller
+     * can't read is refused as not found, so the write is no existence oracle.
+     */
+    setAgentIndexRefs: async (
+      _: unknown,
+      args: { ref: string; tasksIndexRef?: string | null; processesIndexRef?: string | null },
+      ctx: Context,
+    ) => {
+      // #789 / cor:api:140 — resolution is not authorization.
+      const { id } = await resolveAgentRef(ctx.db, args.ref);
+      const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id } });
+      if (agent.deletedAt) throw new AgentNotFoundError(args.ref);
+      await requireAgentAccess(ctx, agent, 'ADMIN');
+      const target = async (ref: string | null | undefined): Promise<string | null | undefined> => {
+        if (ref === undefined || ref === null) return ref;
+        const { id: nodeId } = await resolveNodeRefForCaller(ctx, ref);
+        const node = await ctx.db.node.findFirst({ where: { id: nodeId, deletedAt: null }, select: { memoryId: true } });
+        if (!node || !(await canReadMemory(ctx.db, ctx, node.memoryId))) throw new NodeNotFoundError(ref);
+        return nodeId;
+      };
+      const tasksIndexRef = await target(args.tasksIndexRef);
+      const processesIndexRef = await target(args.processesIndexRef);
+      return ctx.db.agent.update({
+        where: { id },
+        data: {
+          ...(tasksIndexRef !== undefined ? { tasksIndexRef } : {}),
+          ...(processesIndexRef !== undefined ? { processesIndexRef } : {}),
+          updatedBy: ctx.userId ?? ctx.clientId ?? null,
+        },
+        include: AGENT_INCLUDE,
+      });
     },
 
     /**

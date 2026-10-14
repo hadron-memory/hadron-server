@@ -1372,6 +1372,9 @@ model Node {
 
   signingRequests    SigningRequest[]
   signatures         NodeSignature[]
+  /// #1892 — the Agents whose tasks / processes index this node is.
+  tasksIndexOf       Agent[]   @relation("AgentTasksIndex")
+  processesIndexOf   Agent[]   @relation("AgentProcessesIndex")
 
   @@unique([loc, memoryId])
   @@index([loc])
@@ -1974,6 +1977,14 @@ model Agent {
   /// by `agent_base_guard` (prisma/agent-base-invariants.sql). `Restrict`, as
   /// for an imported Agent: a live child keeps its base from being removed.
   extendsAgentId       String?         @map("extends_agent_id")
+  /// #1892 (cor:dmo:050:15) — the index node whose incoming, trigger-labelled
+  /// edges list this Agent's own tasks; null when it names none. Written only
+  /// by `setAgentIndexRefs`, read by src/lib/agentDefinitionLists.ts.
+  /// `SetNull`: removing the index node unsets the pointer.
+  tasksIndexRef        String?         @map("tasks_index_ref")
+  /// #1892 (cor:dmo:050:16) — the index node whose incoming, trigger-labelled
+  /// edges list the processes this Agent starts or owns; null when none.
+  processesIndexRef    String?         @map("processes_index_ref")
   createdAt            DateTime        @default(now()) @map("created_at")
   createdBy            String?         @map("created_by")
   updatedAt            DateTime?       @updatedAt @map("updated_at")
@@ -2017,6 +2028,9 @@ model Agent {
   /// that extend it. Never called a parent: that word belongs to imports.
   extendsAgent      Agent?              @relation("AgentBase", fields: [extendsAgentId], references: [id], onDelete: Restrict)
   extendedBy        Agent[]             @relation("AgentBase")
+  /// #1892 — the nodes `tasksIndexRef` / `processesIndexRef` name.
+  tasksIndex        Node?               @relation("AgentTasksIndex", fields: [tasksIndexRef], references: [id], onDelete: SetNull)
+  processesIndex    Node?               @relation("AgentProcessesIndex", fields: [processesIndexRef], references: [id], onDelete: SetNull)
 
   @@index([ownerUserId])
   @@index([extendsAgentId])
