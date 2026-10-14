@@ -257,8 +257,10 @@ export const agentQueries = {
     agentAIConfig: async (_: unknown, { agentRef }: { agentRef: string }, ctx: Context) => {
       if (!ctx.userId) throw new Error('Unauthenticated');
       // 007-entity-id-or-urn: agentRef may be ID, bare URN, or prefixed URN.
-      const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentRef);
-      const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
+      // #1944: through the read gate first, so an unreadable Agent answers as
+      // absent; the key read itself stays owner/org-ADMIN only, below.
+      const agent = await resolveReadableAgentRef(ctx, agentRef);
+      const resolvedAgentId = agent.id;
       // Org ADMIN on the agent's org can read the decrypted key.
       await requireOwnerOrOrgRole(ctx, agent, 'ADMIN');
       // 036-ai-service-config: registry-backed — the Agent's 'default'
@@ -499,8 +501,9 @@ export const agentQueries = {
       ctx: Context,
     ) => {
       // 007-entity-id-or-urn: agentRef may be ID, bare URN, or prefixed URN.
-      const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentRef);
-      const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id: resolvedAgentId } });
+      // #1944: an Agent the caller can't read answers as absent.
+      const agent = await resolveReadableAgentRef(ctx, agentRef);
+      const resolvedAgentId = agent.id;
       await requireAgentAccess(ctx, agent, 'ADMIN');
       return ctx.db.agentSubscription.findMany({
         where: { agentId: resolvedAgentId },

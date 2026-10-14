@@ -43,7 +43,7 @@ import { ensureAgentOrgGrant } from '../../../controller/operations/ensureAgentO
 import { removeAgentImport } from '../../../controller/operations/removeAgentImport.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { writeAgentBase } from '../../../lib/agentBase.js';
-import { AgentNotFoundError, NodeNotFoundError } from '../../../lib/entityRef/errors.js';
+import { NodeNotFoundError } from '../../../lib/entityRef/errors.js';
 import { canReadMemory } from '../../../mcp/access-control.js';
 import { resolveNodeRefForCaller } from './resolvers.nodeRefAccess.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
@@ -1143,11 +1143,12 @@ export const agentMutations = {
       },
       ctx: Context,
     ) => {
-      const { id: resolvedParentId } = await resolveAgentRef(ctx.db, parentAgentRef);
+      // #1944: the parent through the read gate FIRST, so an outsider learns
+      // nothing about it (an unreadable parent answers as absent) and never
+      // reaches the imported ref's lookup.
+      const parent = await resolveReadableAgentRef(ctx, parentAgentRef);
+      const resolvedParentId = parent.id;
       const { id: resolvedImportedId } = await resolveAgentRef(ctx.db, importedAgentRef);
-      const parent = await ctx.db.agent.findUniqueOrThrow({
-        where: { id: resolvedParentId },
-      });
       // Authorization: ADMIN/OWNER of the parent Agent's owning org.
       await requireAgentAccess(ctx, parent, 'ADMIN');
 
