@@ -16,6 +16,8 @@ import {
   bestEffortFlatNodeUrn,
 } from '../../../lib/urnEmit.js';
 import { portalUrlForUrn } from '../../../lib/portalUrl.js';
+import { emitEntityUrnV2 } from '../../../lib/urnEmit.js';
+import type { InheritedFrom } from '../../../lib/effectiveSystemMemory.js';
 import { nodeContentValidationState } from '../../../lib/nodeContentValidation.js';
 // Spec 049 Phase 3b — AppRun.scope: the mint snapshot as the caller may read it.
 import { parseRunScopeSnapshot, resolveRunScope, scopeInfoOf } from '../../../lib/scopes.js';
@@ -971,6 +973,10 @@ export const typeResolvers = {
       _: unknown,
       ctx: Context,
     ) => portalUrlForUrn(await resolveNodeUrnField(n, ctx)),
+    // #1885 — stamped by the effective-system-memory reads (markInherited);
+    // absent everywhere else, which reads as not inherited.
+    inheritedFrom: (n: { inheritedFrom?: InheritedFrom }) =>
+      n.inheritedFrom ? { agentId: n.inheritedFrom.agentId, agentUrn: emitEntityUrnV2('agent', n.inheritedFrom.agentUrn) } : null,
   },
   Edge: {
     // `Edge.source` / `Edge.target` are NULLABLE (`Node`) in the schema, for two

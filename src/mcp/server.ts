@@ -1,4 +1,5 @@
 import { registerAutomationPinTools } from './automationPinTools.js';
+import { effectiveScope, findEffectiveNodeIdByLoc, markInherited, type InheritedFrom } from '../lib/effectiveSystemMemory.js';
 import { chatByline } from './chatByline.js';
 import { boundSessionPrivacyFilter } from '../lib/auth/sessionPrivacy.js';
 import { createHmac, randomUUID } from 'crypto';
@@ -1609,6 +1610,28 @@ async function actorMetaLine(
   return name ? `${label}: ${kind} ${name}` : '';
 }
 
+/** #1885 — an inherited node's read row: its content, without its edges or the people behind it. */
+function inheritedReadRow<T extends ReadProjectionNode>(node: T): T {
+  return {
+    ...node,
+    outgoingEdges: [],
+    incomingEdges: [],
+    createdByWorkerId: null,
+    createdByAgentId: null,
+    updatedByWorkerId: null,
+    updatedByAgentId: null,
+    authorshipKind: null,
+    authoredByTask: null,
+    authoredByRevision: null,
+    authoredByHuman: null,
+    authoredAt: null,
+    approvedBy: null,
+    approvedByInfo: null,
+    mintedBy: null,
+    mintedByInfo: null,
+  };
+}
+
 async function renderNodeReadProjection(
   node: ReadProjectionNode,
   scope: 'content' | 'abstract' | 'all',
@@ -1628,6 +1651,12 @@ async function renderNodeReadProjection(
     memoryUrnOf?: (memoryId: string) => Promise<string>;
   } = {},
 ): Promise<string> {
+  // #1885 (cor:dmo:050:14) — a node read through a child's effective system
+  // memory is the base tenant's: its content is served, its edges and the
+  // people and records behind it are not (resolvers.inheritedNode.ts has the
+  // GraphQL side and the reasons). Stripped here, once, before any line reads them.
+  const inheritedFrom = (node as { inheritedFrom?: InheritedFrom }).inheritedFrom;
+  if (inheritedFrom) node = inheritedReadRow(node);
   const revision = node.revSeq;
   const memoryUrnOf = opts.memoryUrnOf ?? memoizedMemoryUrnLookup();
   const { urn, fellBack: urnFellBack } = await nodeUrnResult(node.loc, node.memoryId, memoryUrnOf);
@@ -1735,6 +1764,12 @@ async function renderNodeReadProjection(
       : `Approval: not approved (r${revision}; last approved ${record})`;
   }
 
+  if (inheritedFrom) {
+    approvalLine = node.approvedRevNo != null && node.approvedRevNo === revision
+      ? `Approval: approved r${node.approvedRevNo}`
+      : `Approval: not approved (r${revision})`;
+  }
+
   // #1591: the mint line. A node backfilled as minted has no minted revision.
   let mintLine = opts.encryptedMemory ? 'Minted: not applicable (encrypted memory)' : 'Minted: no';
   if (!opts.encryptedMemory && node.mintedAt) {
@@ -1751,10 +1786,13 @@ async function renderNodeReadProjection(
       mintLine = `Minted: r${node.mintedRevNo} at ${at} by ${minter}`;
     }
   }
+  if (inheritedFrom) mintLine = node.mintedAt ? (node.mintedRevNo == null ? 'Minted: yes' : `Minted: r${node.mintedRevNo}`) : 'Minted: no';
 
   // #1632 (cor:dmo:130:06): the signatures line, beside Approval. An encrypted
   // node loads nothing (no hash-dependent work there).
-  const signatureLine = opts.encryptedMemory
+  const signatureLine = inheritedFrom
+    ? ''
+    : opts.encryptedMemory
     ? 'Signatures: not applicable (encrypted memory)'
     : renderSignatureLine(
       opts.batch?.signatures?.get(node.id) ?? (await loadSignatureStatuses(db, [node.id])).get(node.id)!,
@@ -1767,7 +1805,9 @@ async function renderNodeReadProjection(
   // same predicate as Node.commentSummary. Omitted when there are none. A
   // comment read through the generic node tools says what it is instead.
   let feedbackLine = '';
-  if (node.nodeType === COMMENT_NODE_TYPE) {
+  if (inheritedFrom) {
+    // The base's comment threads are the base tenant's; none are shown.
+  } else if (node.nodeType === COMMENT_NODE_TYPE) {
     feedbackLine = 'Feedback: this node is a comment — reader feedback on another node, not authoritative content (read it with hadron_get_comment)';
   } else {
     const counts = opts.batch ? opts.batch.feedback.get(node.id) : (await openThreadCounts(db, [node.id])).get(node.id);
@@ -1793,6 +1833,9 @@ async function renderNodeReadProjection(
     `ID: ${node.id}`,
     `Revision: ${revision}`,
     portalUrl ? `URL: ${portalUrl}` : '',
+    inheritedFrom
+      ? `Inherited from: ${emitEntityUrnV2('agent', inheritedFrom.agentUrn)} (a base of the Agent read; its edges and records are not shown)`
+      : '',
     authorshipLine,
     validationLine,
     approvalLine,
@@ -4410,6 +4453,10 @@ export function createMcpServerInstance(
           const hitPortalUrl = portalUrlForUrn(urn);
           if (hitPortalUrl) parts.push(`  URL: ${hitPortalUrl}`);
         }
+        // #1885 — a hit read through a child's effective system memory names
+        // its base, and shows none of the base's edges.
+        const hitInheritedFrom = (n as { inheritedFrom?: InheritedFrom }).inheritedFrom;
+        if (hitInheritedFrom) parts.push(`  Inherited from: ${emitEntityUrnV2('agent', hitInheritedFrom.agentUrn)}`);
         if (n.description) parts.push(`  ${n.description}`);
         // Spec 031 US2 — surface the abstract as a two-space-indented block
         // beneath the description (excluded from brief mode). `/\r?\n/` so
@@ -4420,7 +4467,7 @@ export function createMcpServerInstance(
         if (n.tags?.length) parts.push(`  Tags: ${n.tags.join(', ')}`);
         // Brief edge rendering — hide edges whose target is soft-deleted
         // (#180 Bug 2); findNodes includes them, so filter here.
-        if (brief) {
+        if (brief && !hitInheritedFrom) {
           const edges = (n.outgoingEdges ?? []).filter(
             (e) => e.target && e.target.deletedAt == null,
           );
@@ -4557,6 +4604,8 @@ export function createMcpServerInstance(
           include: nodeReadInclude,
         });
       }
+      let inheritedFrom: InheritedFrom | null = null;
+      let movedId: string | undefined;
       if (!node) {
         // #1391 — the old memory or loc can have vanished on a move. Resolve
         // the full address (LIVE first, alias on miss) before gating the node
@@ -4565,7 +4614,6 @@ export function createMcpServerInstance(
         const aliasRefs = literalLoc && fragment
           ? [rawUrn, rawUrn.slice(0, rawUrn.lastIndexOf('#'))]
           : [rawUrn];
-        let movedId: string | undefined;
         for (const aliasRef of aliasRefs) {
           try {
             ({ id: movedId } = await resolveNodeRefForAuth(aliasRef, auth));
@@ -4576,7 +4624,22 @@ export function createMcpServerInstance(
             throw e;
           }
         }
-        if (!movedId) return missing();
+        if (!movedId) {
+          // #1885 (cor:dmo:050:14) — no node of its own at the loc, and none
+          // moved from it: an Agent's system memory reads through to the
+          // nearest base that passes one down (GraphQL's node(ref:) resolves
+          // in the same order). The answer keeps the base's address and says
+          // it is inherited.
+          const effective = sourceReadable && memory
+            ? await findEffectiveNodeIdByLoc(db, memory.id, literalLoc ?? loc)
+            : null;
+          if (!effective?.inheritedFrom) return missing();
+          node = await db.node.findFirst({ where: { id: effective.id, deletedAt: null }, include: nodeReadInclude });
+          if (!node) return missing();
+          inheritedFrom = effective.inheritedFrom;
+        }
+      }
+      if (!node && movedId) {
         const target = await db.node.findFirst({
           where: { id: movedId, deletedAt: null },
           select: { memoryId: true },
@@ -4588,6 +4651,7 @@ export function createMcpServerInstance(
         });
         if (!node) return missing();
       }
+      if (!node) return missing();
 
       // Spec 031 — contentScope-driven response shape. Default 'content'
       // preserves pre-spec output byte-for-byte. Defensive enum check: zod
@@ -4614,10 +4678,12 @@ export function createMcpServerInstance(
         !current ||
         current.memoryId !== node.memoryId ||
         current.loc !== node.loc ||
-        !(await canReadMemory(db, auth, current.memoryId, EXPLICIT_REF))
+        // An inherited node was admitted through the child's memory above.
+        (!inheritedFrom && !(await canReadMemory(db, auth, current.memoryId, EXPLICIT_REF)))
       ) {
         return textResult(`Node "${rawUrn}" not found.`);
       }
+      if (inheritedFrom) markInherited([current], new Map([[current.memoryId, inheritedFrom]]));
       // Spec 041: decrypt when this session holds the key; mark locked
       // otherwise (blanked fields + Locked meta line, never raw ciphertext).
       const lockState = mcpDecryptOrMark(current);
@@ -4739,12 +4805,21 @@ export function createMcpServerInstance(
         }
         // Count cap (cor:api:040:02): take MAX+1 to detect overflow, then fail
         // loud rather than silently returning a truncated subtree.
+        // #1885 (cor:dmo:050:14) — the subtree of an Agent's system memory
+        // reads as its effective memory, as hadron_list_nodes does.
+        const inheritance = await effectiveScope(db, [mem.id]);
         const rows = await db.node.findMany({
-          where: { memoryId: mem.id, loc: { startsWith: locPrefix! }, deletedAt: null },
+          where: {
+            memoryId: { in: inheritance.memoryIds },
+            loc: { startsWith: locPrefix! },
+            deletedAt: null,
+            ...(inheritance.excludeNodeIds.length > 0 ? { id: { notIn: inheritance.excludeNodeIds } } : {}),
+          },
           orderBy: { loc: 'asc' },
           take: BATCH_READ_MAX_NODES + 1,
           include: readProjectionInclude,
         });
+        markInherited(rows, inheritance.inheritedFrom);
         if (rows.length > BATCH_READ_MAX_NODES) {
           return textResult(
             `hadron_get_nodes: prefix "${locPrefix}" matches more than the ${BATCH_READ_MAX_NODES}-node cap. Narrow the prefix (or page by sub-prefix); the batch read does not silently truncate.`,
@@ -4919,11 +4994,32 @@ export function createMcpServerInstance(
             })
           : [];
         const movedRowById = new Map(movedRows.map((n) => [n.id, n]));
+        // #1885 (cor:dmo:050:14) — a ref with no live node and no moved one
+        // reads through an Agent's system memory to the nearest base that
+        // passes one down, exactly as hadron_get_node does (cor:api:040:01).
+        const childReadable = new Map<string, string | null>();
         for (const r of movedFallbacks) {
           const id = movedIdByRef.get(r.raw);
           const row = id && movedRowById.get(id);
-          if (row) nodeByRef.set(r.raw, row as unknown as ReadProjectionNode & { id: string });
-          else unavailable.push(r.raw);
+          if (row) {
+            nodeByRef.set(r.raw, row as unknown as ReadProjectionNode & { id: string });
+            continue;
+          }
+          if (!childReadable.has(r.memoryUrn)) {
+            const mem = await resolveMemoryByUrn(r.memoryUrn).catch(() => null);
+            childReadable.set(r.memoryUrn, mem && (await canReadMemory(db, auth, mem.id, EXPLICIT_REF)) ? mem.id : null);
+          }
+          const childId = childReadable.get(r.memoryUrn);
+          const effective = childId ? await findEffectiveNodeIdByLoc(db, childId, r.literalLoc ?? r.loc) : null;
+          const inherited = effective?.inheritedFrom
+            ? await db.node.findFirst({ where: { id: effective.id, deletedAt: null }, include: projectionInclude })
+            : null;
+          if (inherited && effective?.inheritedFrom) {
+            markInherited([inherited], new Map([[inherited.memoryId, effective.inheritedFrom]]));
+            nodeByRef.set(r.raw, inherited as unknown as ReadProjectionNode & { id: string });
+          } else {
+            unavailable.push(r.raw);
+          }
         }
 
         // PK refs: gate BEFORE fetching the projection, mirroring the URN path
@@ -5000,15 +5096,18 @@ export function createMcpServerInstance(
       const visible: ReadProjectionNode[] = [];
       for (const selected of ordered) {
         const n = await loadCurrentReadProjection(selected.id, selected.memoryId);
+        // #1885 — an inherited row was admitted through the child's memory.
+        const inheritedFrom = (selected as { inheritedFrom?: InheritedFrom }).inheritedFrom;
         if (
           !n ||
           n.memoryId !== selected.memoryId ||
           n.loc !== selected.loc ||
-          !(await canReadMemory(db, auth, n.memoryId, EXPLICIT_REF))
+          (!inheritedFrom && !(await canReadMemory(db, auth, n.memoryId, EXPLICIT_REF)))
         ) {
           unavailable.push(echoByNodeId.get(selected.id) ?? selected.id);
           continue;
         }
+        if (inheritedFrom) markInherited([n], new Map([[n.memoryId, inheritedFrom]]));
         visible.push(n);
       }
       // #1326: the single-node renderer queries one latest report and up to
@@ -5315,7 +5414,24 @@ export function createMcpServerInstance(
       // isRunnable=null), so the synthesize-parent walk would mislabel them as
       // "(missing — materialize)" even though they exist.
 
-      let allNodes = await db.node.findMany({ where, orderBy: { loc: 'asc' } });
+      // #1885 (cor:dmo:050:14) — one memory listed reads as its effective
+      // memory: an Agent's system memory gains its bases' inherited nodes,
+      // without their overridden nodes or boot prompts. They are listed in the
+      // child's tree, under their own URNs, marked (realMemoryId below).
+      const inheritance = memoryId ? await effectiveScope(db, [memoryId]) : null;
+      if (inheritance && inheritance.memoryIds.length > 1) {
+        where.memoryId = { in: inheritance.memoryIds };
+        if (inheritance.excludeNodeIds.length > 0) where.id = { notIn: inheritance.excludeNodeIds };
+      }
+
+      let allNodes: Array<Awaited<ReturnType<typeof db.node.findMany>>[number] & { realMemoryId?: string; inheritedFrom?: InheritedFrom }> =
+        await db.node.findMany({ where, orderBy: { loc: 'asc' } });
+      if (inheritance && memoryId && inheritance.inheritedFrom.size > 0) {
+        allNodes = allNodes.map((n) => {
+          const from = inheritance.inheritedFrom.get(n.memoryId);
+          return from ? { ...n, memoryId, realMemoryId: n.memoryId, inheritedFrom: from } : n;
+        });
+      }
 
       // A bare parentRel can match the same loc in more than one memory. For
       // An unpinned parent can match the same loc in more than one memory. The
@@ -5463,9 +5579,11 @@ export function createMcpServerInstance(
           c.loc.split(':').length === rowSegCount + 1,
         ).length;
         const childInfo = childCount > 0 ? ` (${childCount} children)` : '';
-        const nUrn = await nodeUrn(row.loc, row.memoryId, memoryUrnOf);
+        const real = row.node as { realMemoryId?: string; inheritedFrom?: InheritedFrom } | null | undefined;
+        const nUrn = await nodeUrn(row.loc, real?.realMemoryId ?? row.memoryId, memoryUrnOf);
         if (row.node) {
-          return `${indent}├── ${nUrn} — ${row.node.name}${childInfo}`;
+          const inherited = real?.inheritedFrom ? ` (inherited from ${emitEntityUrnV2('agent', real.inheritedFrom.agentUrn)})` : '';
+          return `${indent}├── ${nUrn} — ${row.node.name}${inherited}${childInfo}`;
         }
         // Synthesized intermediate. Surface the gap explicitly rather
         // than silently rendering it as a real row.

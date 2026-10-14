@@ -1315,6 +1315,16 @@ export const typeDefs = `#graphql
     status: NodeMoveLinkStatus!
   }
 
+  """
+  #1885 (hrn:node:hadronmemory.com:specs:cor:dmo:050:14) - the base Agent an
+  inherited node comes from.
+  """
+  type InheritedFrom {
+    agentId: ID!
+    "The base Agent's URN, fully qualified."
+    agentUrn: String!
+  }
+
   type Node {
     id: ID!
     "#1392 — warnings from a cross-memory move. Null on other Node reads; [] when a move changes no local content links. Raw content is preserved."
@@ -1379,6 +1389,14 @@ export const typeDefs = `#graphql
     clients render the field only when present.
     """
     portalUrl: String
+    """
+    #1885 (hrn:node:hadronmemory.com:specs:cor:dmo:050:14) - set when this node
+    was read through an Agent that extends a base: the node belongs to that
+    base's system memory and comes into the Agent's effective system memory by
+    inheritance. The node keeps its own address (its urn is the base's); this
+    names the base it comes from. Null for a node read in its own memory.
+    """
+    inheritedFrom: InheritedFrom
     """
     #1450 — true for a RESERVED spec citation that has no spec written yet (a
     placeholder in a draft corpus, created by reserveSpecCitation). Set only by
