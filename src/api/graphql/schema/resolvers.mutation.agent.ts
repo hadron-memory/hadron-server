@@ -43,6 +43,9 @@ import { ensureAgentOrgGrant } from '../../../controller/operations/ensureAgentO
 import { removeAgentImport } from '../../../controller/operations/removeAgentImport.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { writeAgentBase } from '../../../lib/agentBase.js';
+import { AgentNotFoundError, NodeNotFoundError } from '../../../lib/entityRef/errors.js';
+import { canReadMemory } from '../../../mcp/access-control.js';
+import { resolveNodeRefForCaller } from './resolvers.nodeRefAccess.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
 import { deriveSlugFromName } from '../../../lib/urn.js';
 import { normalizeHandleOrNull } from '../../../lib/userHandle.js';
@@ -891,6 +894,79 @@ export const agentMutations = {
         }),
       );
       return ctx.db.agent.findUniqueOrThrow({ where: { id }, include: AGENT_INCLUDE });
+    },
+
+    /**
+     * #1892 (cor:dmo:050:15, :16) — set or clear the Agent's tasks-index and
+     * processes-index pointers. An omitted argument leaves its pointer as it
+     * is; null clears it. Whoever manages the Agent decides, as for its base
+     * (cor:dmo:050:13).
+     *
+     * PROPOSED (050:15's open "what the pointer may name"): the target must be
+     * a live node the caller may read, and nothing more; a node the caller
+     * can't read is refused as not found, so the write is no existence oracle.
+     */
+    setAgentIndexRefs: async (
+      _: unknown,
+      args: { ref: string; tasksIndexRef?: string | null; processesIndexRef?: string | null },
+      ctx: Context,
+    ) => {
+      // #789 / cor:api:140 — resolution is not authorization.
+      const { id } = await resolveAgentRef(ctx.db, args.ref);
+      const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id } });
+      if (agent.deletedAt) throw new AgentNotFoundError(args.ref);
+      await requireAgentAccess(ctx, agent, 'ADMIN');
+      // Resolve each target to its node and memory; the gates run again below,
+      // inside the transaction, on what is current there.
+      const resolve = async (ref: string | null | undefined) => {
+        if (ref === undefined || ref === null) return ref;
+        const { id: nodeId } = await resolveNodeRefForCaller(ctx, ref);
+        const node = await ctx.db.node.findFirst({ where: { id: nodeId, deletedAt: null }, select: { memoryId: true } });
+        if (!node) throw new NodeNotFoundError(ref);
+        return { ref, nodeId, memoryId: node.memoryId };
+      };
+      const tasks = await resolve(args.tasksIndexRef);
+      const processes = await resolve(args.processesIndexRef);
+      const targets = [tasks, processes].filter((t): t is { ref: string; nodeId: string; memoryId: string } => !!t);
+
+      // Anne's P2-2 on #1896: authorize and write in one transaction, behind
+      // the authority anchors a revoker takes, re-reading the Agent, the
+      // caller's roles and each target fresh, so a demotion, an Agent's
+      // removal or a target becoming unreadable can't slip between the check
+      // and the write.
+      return withAuthorizedTx(
+        ctx,
+        [
+          { kind: 'agent', id },
+          ...(agent.organizationId ? [{ kind: 'org' as const, id: agent.organizationId }] : []),
+          ...(agent.ownerUserId ? [{ kind: 'user' as const, id: agent.ownerUserId }] : []),
+          ...targets.map((t) => ({ kind: 'memory' as const, id: t.memoryId })),
+        ],
+        async (txCtx) => {
+          // The agent anchor has already refused a deleted Agent.
+          const current = await txCtx.db.agent.findUniqueOrThrow({ where: { id } });
+          if (current.organizationId !== agent.organizationId || current.ownerUserId !== agent.ownerUserId) {
+            throw new Error('Agent ownership changed; retry the operation');
+          }
+          await requireAgentAccess(txCtx, current, 'ADMIN');
+          for (const t of targets) {
+            const [node] = await txCtx.db.$queryRaw<Array<{ memory_id: string }>>`
+              SELECT memory_id FROM nodes WHERE id = ${t.nodeId} AND deleted_at IS NULL FOR SHARE`;
+            if (!node || node.memory_id !== t.memoryId || !(await canReadMemory(txCtx.db, txCtx, t.memoryId))) {
+              throw new NodeNotFoundError(t.ref);
+            }
+          }
+        },
+        (tx) => tx.agent.update({
+          where: { id },
+          data: {
+            ...(tasks !== undefined ? { tasksIndexRef: tasks?.nodeId ?? null } : {}),
+            ...(processes !== undefined ? { processesIndexRef: processes?.nodeId ?? null } : {}),
+            updatedBy: ctx.userId ?? ctx.clientId ?? null,
+          },
+          include: AGENT_INCLUDE,
+        }),
+      );
     },
 
     /**

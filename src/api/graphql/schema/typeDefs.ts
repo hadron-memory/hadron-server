@@ -1325,6 +1325,34 @@ export const typeDefs = `#graphql
     agentUrn: String!
   }
 
+  """
+  #1892 (hrn:node:hadronmemory.com:specs:cor:dmo:050:15) - one task on an Agent's task list.
+  """
+  type AgentListedTask {
+    "The task. A base's task, listed through the Agent, keeps its own URN and carries inheritedFrom."
+    node: Node!
+    "The name of the index edge that lists it; null for a task no index edge lists."
+    trigger: String
+  }
+
+  "#1892 (hrn:node:hadronmemory.com:specs:cor:dmo:050:16) - how an Agent takes part in a process."
+  enum AgentProcessKind {
+    "Listed in the Agent's processes index: a process it starts or owns."
+    STARTS
+    "Derived: the process has a stage edge to one of the Agent's tasks."
+    INVOLVED
+  }
+
+  """
+  #1892 (hrn:node:hadronmemory.com:specs:cor:dmo:050:16) - one process on an Agent's process list.
+  """
+  type AgentListedProcess {
+    node: Node!
+    kind: AgentProcessKind!
+    "The name of the index edge that lists it, for STARTS; always null for INVOLVED."
+    trigger: String
+  }
+
   type Node {
     id: ID!
     "#1392 — warnings from a cross-memory move. Null on other Node reads; [] when a move changes no local content links. Raw content is preserved."
@@ -3944,6 +3972,19 @@ export const typeDefs = `#graphql
     or null. Set, change or clear it with setAgentBase.
     """
     extendsAgentId: ID
+    """
+    #1892 (hrn:node:hadronmemory.com:specs:cor:dmo:050:15) - the id of the index node whose incoming,
+    trigger-labelled edges list this Agent's own tasks, or null. Set or clear
+    it with setAgentIndexRefs; read the Agent's whole task list with agentTaskList.
+    """
+    tasksIndexRef: ID
+    """
+    #1892 (hrn:node:hadronmemory.com:specs:cor:dmo:050:16) - the id of the index node whose incoming,
+    trigger-labelled edges list the processes this Agent starts or owns, or
+    null. Set or clear it with setAgentIndexRefs; read the Agent's processes
+    with agentProcessList.
+    """
+    processesIndexRef: ID
     # 036-ai-service-config: the four AI fields below are registry-backed
     # reads of the Agent's config named 'default' (legacy columns dropped).
     aiProvider: String
@@ -7697,6 +7738,25 @@ export const typeDefs = `#graphql
     'ref' accepts the entity's ID or URN.
     """
     agent(ref: ID!): Agent
+    """
+    #1892 (hrn:node:hadronmemory.com:specs:cor:dmo:050:15) - an Agent's tasks, across its base chain:
+    every runnable node in its effective system memory, and every task the
+    tasks index of an Agent in the chain lists, each once. A task an index
+    lists carries that edge's name as its trigger, the nearest index's where
+    two list it. Readable by whoever may read the Agent's system memory; a
+    listed task outside the chain's memories is returned only when its own
+    memory is readable too. Refused as AGENT_NOT_FOUND otherwise. The MCP tool
+    hadron_agent_tasks returns the same list. Accepts the Agent's ID or URN.
+    """
+    agentTaskList(ref: ID!): [AgentListedTask!]!
+    """
+    #1892 (hrn:node:hadronmemory.com:specs:cor:dmo:050:16) - an Agent's processes: the ones its own
+    processes index lists (STARTS, with the edge's trigger), then the ones with
+    a stage edge (named 'stage ...') to one of its agentTaskList tasks (INVOLVED, no
+    trigger), each once. Same gate as agentTaskList; the MCP tool
+    hadron_agent_processes returns the same list. Accepts the Agent's ID or URN.
+    """
+    agentProcessList(ref: ID!): [AgentListedProcess!]!
 
     """
     Uniform paginated agent list (#473). Scope: Agents owned by the caller's
@@ -9893,6 +9953,16 @@ export const typeDefs = `#graphql
     Accepts each Agent's ID or URN.
     """
     setAgentBase(ref: ID!, baseRef: ID): Agent!
+
+    """
+    #1892 (hrn:node:hadronmemory.com:specs:cor:dmo:050:15, hrn:node:hadronmemory.com:specs:cor:dmo:050:16) - set or clear
+    this Agent's tasks-index and processes-index pointers. An omitted argument
+    leaves that pointer unchanged; null clears it. Each target is a node ID or
+    fully-qualified URN, and must be a live node the caller may read (refused
+    as NODE_NOT_FOUND otherwise). Whoever manages this Agent may call it.
+    Accepts the Agent's ID or URN.
+    """
+    setAgentIndexRefs(ref: ID!, tasksIndexRef: ID, processesIndexRef: ID): Agent!
 
     """
     #949 — re-own an Agent's class=system memory to the Agent's own owner

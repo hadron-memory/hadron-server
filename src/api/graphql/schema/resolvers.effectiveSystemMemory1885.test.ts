@@ -200,15 +200,16 @@ describe('appNodes over an App that installs the child', () => {
 });
 
 describe('an inherited node shows its content and none of the base tenant\'s records', () => {
-  it('no edges (so never a base\'s overridden node), no memory, no people', async () => {
+  it('edges never reach a base\'s overridden node (#1893 resolves them to the child\'s), no memory, no people', async () => {
     // engineer's release process links engineer's tasks:open-pr, which the child overrides.
     await db.edge.create({
       data: { memoryId: engineer.mem, sourceId: ids.engRelease, targetId: ids.engOpenPr, name: 'stage', loc: 'processes:release:stage:tasks:open-pr' },
     });
     const got = await Q.node({}, { ref: 'processes:release', memoryRef: backend.mem }, ctx(reader));
     expect(got.id).toBe(ids.engRelease);
-    expect(got.outgoingEdges.length).toBe(1); // loaded on the row …
-    expect(await N.outgoingEdges(got, {}, ctx(reader))).toEqual([]); // … never served
+    expect(got.outgoingEdges.map((e: any) => e.targetId)).toEqual([ids.engOpenPr]); // the raw row …
+    const served = await N.outgoingEdges(got, {}, ctx(reader)); // … is never served raw:
+    expect(served.map((e: any) => e.target.id)).toEqual([ids.backOpenPr]); // the child's override (#1893)
     expect(await N.incomingEdges(got, {}, ctx(reader))).toEqual([]);
     expect(await N.memory(got, {}, ctx(reader))).toBeNull();
     expect(await N.authorship(got, {}, ctx(reader))).toBeNull();
