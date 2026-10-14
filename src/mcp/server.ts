@@ -1,5 +1,5 @@
 import { registerAutomationPinTools } from './automationPinTools.js';
-import { effectiveScope, findEffectiveNodeIdByLoc, markInherited, retainEffective, stillInherited, type InheritedFrom } from '../lib/effectiveSystemMemory.js';
+import { effectiveScope, findEffectiveNodeIdByLoc, markInherited, resolveInheritedEdges, retainEffective, stillInherited, type InheritedFrom } from '../lib/effectiveSystemMemory.js';
 import { chatByline } from './chatByline.js';
 import { boundSessionPrivacyFilter } from '../lib/auth/sessionPrivacy.js';
 import { createHmac, randomUUID } from 'crypto';
@@ -1657,7 +1657,22 @@ async function renderNodeReadProjection(
   // people and records behind it are not (resolvers.inheritedNode.ts has the
   // GraphQL side and the reasons). Stripped here, once, before any line reads them.
   const inheritedFrom = (node as { inheritedFrom?: InheritedFrom }).inheritedFrom;
-  if (inheritedFrom) node = inheritedReadRow(node);
+  if (inheritedFrom) {
+    // #1893 — its edges come through the child it was read through, resolved
+    // like bare-loc links; never the base's raw edges.
+    const via = inheritedFrom.via;
+    const canRead = (memoryId: string) =>
+      opts.auth ? canReadMemory(db, opts.auth, memoryId, EXPLICIT_REF) : Promise.resolve(false);
+    const resolve = (direction: 'out' | 'in') => via
+      ? resolveInheritedEdges(db, { nodeId: node.id, via, direction, canReadMemory: canRead })
+      : Promise.resolve([]);
+    const [outgoing, incoming] = await Promise.all([resolve('out'), resolve('in')]);
+    node = {
+      ...inheritedReadRow(node),
+      outgoingEdges: outgoing.map(({ edge, endpoint }) => ({ ...edge, target: endpoint })),
+      incomingEdges: incoming.map(({ edge, endpoint }) => ({ ...edge, source: endpoint })),
+    } as typeof node;
+  }
   const revision = node.revSeq;
   const memoryUrnOf = opts.memoryUrnOf ?? memoizedMemoryUrnLookup();
   const { urn, fellBack: urnFellBack } = await nodeUrnResult(node.loc, node.memoryId, memoryUrnOf);
@@ -4473,10 +4488,20 @@ export function createMcpServerInstance(
         if (n.tags?.length) parts.push(`  Tags: ${n.tags.join(', ')}`);
         // Brief edge rendering — hide edges whose target is soft-deleted
         // (#180 Bug 2); findNodes includes them, so filter here.
-        if (brief && !hitInheritedFrom) {
-          const edges = (n.outgoingEdges ?? []).filter(
-            (e) => e.target && e.target.deletedAt == null,
-          );
+        if (brief) {
+          // #1893 — an inherited hit's edges come through its child, never raw.
+          const edges = hitInheritedFrom
+            ? (hitInheritedFrom.via
+              ? (await resolveInheritedEdges(db, {
+                  nodeId: n.id,
+                  via: hitInheritedFrom.via,
+                  direction: 'out',
+                  canReadMemory: (memoryId) => canReadMemory(db, auth, memoryId, EXPLICIT_REF),
+                })).map(({ edge, endpoint }) => ({ ...edge, target: endpoint }))
+              : [])
+            : (n.outgoingEdges ?? []).filter(
+                (e) => e.target && e.target.deletedAt == null,
+              );
           if (edges.length) {
             const edgeStrs = await Promise.all(
               edges.map(async (e) => {
