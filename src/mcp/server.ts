@@ -5140,9 +5140,12 @@ export function createMcpServerInstance(
       const reports = await batchValidationReports(visible);
       const memoryUrnOf = memoizedMemoryUrnLookup();
       // #1632: signatures for the batch in one load; their signers join the
-      // one human-name lookup.
+      // one human-name lookup. #1885: never for an inherited node, whose line
+      // is blank, so the base's signers are not even looked up.
       const signatures = signingSurfacePolicy().signing
-        ? await loadSignatureStatuses(db, visible.map((n) => n.id))
+        ? await loadSignatureStatuses(db, visible
+          .filter((n) => !(n as { inheritedFrom?: InheritedFrom }).inheritedFrom)
+          .map((n) => n.id))
         : new Map<string, NodeSignatureStatusView>();
       const signerIds = [...signatures.values()].flatMap((st) => st.signatures.map((sig) => sig.signerId));
       const [taskRefs, humanNames, feedback] = await Promise.all([
