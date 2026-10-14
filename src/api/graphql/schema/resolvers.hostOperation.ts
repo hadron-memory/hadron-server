@@ -14,13 +14,14 @@
 // exclusively), and records the use in that same transaction (cor:agt:070:07).
 // The host starts every exchange; the server never connects to a host.
 //
-// A PERSON OR A WORKER, issuing (cor:agt:070:05): `issueHostOperation`. This
-// slice issues the worktree operations only: the worker's holder, the worker it
-// reports to, or whoever manages the App. `worker.start` and `worker.end` ship
-// with the launch grant and the close-on-finish fallback (#1709's later
-// slices); `worker.deliver` waits for the router port's delivery path
-// (hadron-cli#829). A task never issues a worktree operation (cor:agt:070:06):
-// nothing on the task paths calls this.
+// A PERSON OR A WORKER, issuing (cor:agt:070:05): `issueHostOperation`. The
+// worktree operations: the worker's holder, the worker it reports to, or whoever
+// manages the App. `worker.end` (slice 3): whoever manages the App, for an open
+// session of the worker. `worker.start` ships with the launch grant (slice 2);
+// `worker.deliver` waits for the router port's delivery path (hadron-cli#829).
+// A task never issues a worktree operation (cor:agt:070:06): nothing on the task
+// paths calls this. The platform's own `worker.end`, after a finished task's
+// grace, is src/lib/hostOperations/sessionEnd.ts.
 
 import { GraphQLError } from 'graphql';
 import { Prisma } from '../../../generated/prisma/index.js';
@@ -62,6 +63,8 @@ import { appendAvailabilityEvent, appendHostOperationEvent, eventActor, PLATFORM
 import { recordInEffect } from '../../../lib/agentTasks/availability.js';
 import { matchAfterChange } from '../../../lib/agentTasks/matcher.js';
 import { fenceHostDecision, insertWorkerStart, LaunchRefusal, liveRegistrationsFor, lockStartableWorker, mintLaunchGrants } from '../../../lib/hostOperations/launch.js';
+import { sessionKeyCache } from '../../../lib/sessionKeyCache.js';
+import { handoffSessionId, newestHandoff } from '../../../lib/workerHandoff.js';
 import { normalizeAvailability, type AvailabilityInput } from './resolvers.agentTaskAlarms.js';
 
 const appNotFound = (appRef: string): GraphQLError => taskError('APP_NOT_FOUND', 'App not found.', { appRef });
@@ -224,7 +227,8 @@ export const hostOperationMutations = {
       throw badInput(`A failure says why, in 1 to ${HOST_FAILURE_REASON_MAX} characters.`);
     }
     if (status === 'succeeded' && input.failureReason != null) throw badInput('Only a failure carries a reason.');
-    return asHost(ctx, input.appRef, async (tx, app, host) => {
+    const endedSessions: string[] = [];
+    const reported = await asHost(ctx, input.appRef, async (tx, app, host) => {
       const [locked] = await tx.$queryRaw<{ id: string }[]>`SELECT id FROM host_operations WHERE id = ${input.id} FOR UPDATE`;
       const op = locked ? await tx.hostOperation.findUnique({ where: { id: input.id } }) : null;
       if (!op || op.appId !== app.id || op.hostId !== host.hostId) throw opNotFound(input.id);
@@ -241,6 +245,7 @@ export const hostOperationMutations = {
       }
       if (status === 'failed' && input.worktree != null) throw badInput('A failure carries no result.');
       let result = status === 'succeeded' ? successResult(op.type as HostOperationType, input.worktree) : null;
+      const now = new Date();
       let outcome = status;
       if (op.type === 'worker.start') {
         // #1709 slice 2: done means an agent runs in that worktree AND its worker session is bound (#1709's table: a
@@ -254,7 +259,23 @@ export const hostOperationMutations = {
           result = { sessionId: bound.id };
         }
       }
-      const now = new Date();
+      if (op.type === 'worker.end') {
+        // cor:agt:020:10 / #1709: worker.end FAILS ONLY IF THE SESSION DID NOT END. A success ends the session if the
+        // worker had not (a host-ended stint, recorded without a handoff); a reported failure on a session that did
+        // end is recorded as the success it is. Either way the result says whether a handoff was written.
+        const args = op.args as { workerId: string; sessionId: string };
+        const [session] = await tx.$queryRaw<{ endedAt: Date | null }[]>`
+          SELECT ended_at AS "endedAt" FROM sessions WHERE id = ${args.sessionId} FOR UPDATE`;
+        if (status === 'succeeded' && session && !session.endedAt) {
+          await tx.session.updateMany({ where: { id: args.sessionId, endedAt: null }, data: { endedAt: now } });
+          endedSessions.push(args.sessionId);
+        }
+        const ended = status === 'succeeded' || Boolean(session?.endedAt);
+        if (ended) {
+          outcome = 'succeeded';
+          result = { handoff: await sessionHasHandoff(tx, args.workerId, args.sessionId) };
+        }
+      }
       const updated = await tx.hostOperation.update({
         where: { id: op.id },
         data: {
@@ -279,6 +300,9 @@ export const hostOperationMutations = {
       await recordHostKeyUse(tx, host, 'report', { operationId: op.id });
       return updated;
     });
+    // A session the host ended releases its memory keys once its end is durable, as every end does.
+    for (const id of endedSessions) sessionKeyCache.evict(id);
+    return reported;
   },
 
   /**
@@ -373,12 +397,10 @@ export const hostOperationMutations = {
       if (e instanceof HostOperationArgsError) throw taskError(e.code, e.message);
       throw e;
     }
-    if (validated.type === 'worker.deliver' || validated.type === 'worker.end') {
+    if (validated.type === 'worker.deliver') {
       throw taskError(
         'HOST_OPERATION_NOT_ISSUABLE',
-        validated.type === 'worker.deliver'
-          ? 'worker.deliver is not issued until a host has a delivery path for it (hadron-cli#829).'
-          : "worker.end is not issued by hand yet: it ships with #1709's close-on-finish slice.",
+        'worker.deliver is not issued until a host has a delivery path for it (hadron-cli#829).',
       );
     }
     const hostId = (input.hostId ?? '').trim();
@@ -400,7 +422,17 @@ export const hostOperationMutations = {
         FROM workers WHERE id = ${workerId} FOR SHARE`;
       if (!target || target.appId !== freshApp.id) throw workerNotFound();
       if (target.retiredAt) throw taskError('WORKER_RETIRED', 'This worker is retired.', { workerId });
-      if (!(await mayIssueWorktreeOp(txCtx, freshApp, actor, target))) {
+      if (validated.type === 'worker.end') {
+        // Starting or ending a worker is whoever manages the App's (070:05); worktree authority alone is not enough.
+        if (!(await actorManagesApp(txCtx, freshApp, actor))) {
+          throw taskError('HOST_OPERATION_NOT_PERMITTED', "Only whoever manages the App ends a worker's session through its host.");
+        }
+        const [session] = await tx.$queryRaw<{ workerId: string | null; endedAt: Date | null; deletedAt: Date | null }[]>`
+          SELECT worker_id AS "workerId", ended_at AS "endedAt", deleted_at AS "deletedAt" FROM sessions WHERE id = ${args.sessionId} FOR SHARE`;
+        if (!session || session.workerId !== workerId || session.endedAt || session.deletedAt) {
+          throw taskError('BAD_HOST_OPERATION_ARGS', 'worker.end names an open session of this worker.');
+        }
+      } else if (!(await mayIssueWorktreeOp(txCtx, freshApp, actor, target))) {
         throw taskError(
           'HOST_OPERATION_NOT_PERMITTED',
           "A worktree is created or removed by the worker's holder, the worker it reports to, or whoever manages the App.",
@@ -409,6 +441,10 @@ export const hostOperationMutations = {
       const [reg] = await tx.$queryRaw<{ id: string }[]>`
         SELECT id FROM host_registrations WHERE app_id = ${freshApp.id} AND host_id = ${hostId} FOR SHARE`;
       if (!reg) throw taskError('HOST_NOT_FOUND', 'No host with that id is registered in this App.', { hostId });
+      if (validated.type === 'worker.end') {
+        const listed = await tx.hostRegistrationWorker.findFirst({ where: { registrationId: reg.id, workerId }, select: { workerId: true } });
+        if (!listed) throw taskError('BAD_HOST_OPERATION_ARGS', 'That host does not register this worker.');
+      }
       if (validated.type === 'worktree.remove') {
         const listed = await tx.hostRegistrationWorker.findFirst({
           where: { registrationId: reg.id, workerId, worktrees: { has: args.worktree } },
@@ -496,6 +532,14 @@ function issuer(ctx: Context, actor: TaskActor) {
     : { issuedBy: 'user', issuedByUserId: actor.userId, issuedByWorkerId: null, issuedByAgentId: null };
 }
 
+/** Did the worker write its closing handoff for this session (cor:agt:020:10)? Its newest handoff names the session. */
+async function sessionHasHandoff(tx: Prisma.TransactionClient, workerId: string, sessionId: string): Promise<boolean> {
+  const worker = await tx.worker.findUnique({ where: { id: workerId }, select: { memoryId: true } });
+  if (!worker?.memoryId) return false;
+  const newest = await newestHandoff(tx, worker.memoryId);
+  return Boolean(newest && handoffSessionId(newest.data) === sessionId);
+}
+
 /** A success's typed result: the created worktree for `worktree.create`; nothing for the others in this slice. */
 function successResult(type: HostOperationType, worktree: string | null | undefined): Prisma.InputJsonObject | null {
   if (type === 'worktree.create') {
@@ -551,6 +595,12 @@ export const hostOperationQueries = {
       if (status && !['issued', 'collected', 'succeeded', 'failed'].includes(status)) {
         throw badInput('status is ISSUED, COLLECTED, SUCCEEDED or FAILED.');
       }
+      // Holger via Vera #10805 (cor:agt:070:04): a host key sees only its OWN host's operations; the App-wide listing is
+      // for the App's participants and its other keys. A key that has ever been granted host:operate is a host key
+      // here, held to the host of its latest grant even once revoked, so revoking the scope never widens its read.
+      const ownHost = await hostOfKey(c);
+      const hostFilter = ownHost ?? a.hostId ?? null;
+      if (ownHost && a.hostId && a.hostId !== ownHost) return { items: [], hasNextPage: false, endCursor: null };
       let workerId: string | null = null;
       if (a.worker) {
         workerId = await resolveTaskWorkerId(c, app.id, a.worker);
@@ -558,14 +608,18 @@ export const hostOperationQueries = {
       }
       let cursor: { issuedAt: Date; id: string } | null = null;
       if (a.after) {
-        const at = await c.db.hostOperation.findFirst({ where: { id: a.after, appId: app.id }, select: { issuedAt: true, id: true } });
+        // Scoped like the list, so a cursor naming another host's operation reads as no cursor at all (no oracle).
+        const at = await c.db.hostOperation.findFirst({
+          where: { id: a.after, appId: app.id, ...(ownHost ? { hostId: ownHost } : {}) },
+          select: { issuedAt: true, id: true },
+        });
         if (!at) throw badInput('after is not a cursor of this list.');
         cursor = at;
       }
       const rows: HostOperationRow[] = await c.db.hostOperation.findMany({
         where: {
           appId: app.id,
-          ...(a.hostId ? { hostId: a.hostId } : {}),
+          ...(hostFilter ? { hostId: hostFilter } : {}),
           ...(status ? { status } : {}),
           ...(workerId ? { workerId } : {}),
           ...(cursor ? { OR: [{ issuedAt: { lt: cursor.issuedAt } }, { issuedAt: cursor.issuedAt, id: { lt: cursor.id } }] } : {}),
@@ -577,6 +631,21 @@ export const hostOperationQueries = {
       return { items, hasNextPage: rows.length > first, endCursor: items.length ? items[items.length - 1]!.id : null };
     }),
 };
+
+/**
+ * The host a calling App key is bound to for reads, or null for a person or a key that was never a host's: the host
+ * of the key's latest host:operate grant, live or revoked (#10805).
+ */
+async function hostOfKey(c: Context): Promise<string | null> {
+  const key = appKeyCaller(c);
+  if (!key) return null;
+  const row = await c.db.appKeyScope.findFirst({
+    where: { appKeyId: key.appKeyId, scope: 'host:operate' },
+    orderBy: [{ grantedAt: 'desc' }, { id: 'desc' }],
+    select: { hostId: true },
+  });
+  return row?.hostId ?? null;
+}
 
 export const hostOperationFieldResolvers = {
   HostOperation: {

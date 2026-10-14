@@ -651,7 +651,7 @@ CREATE INDEX IF NOT EXISTS "nodes_msg_channel_seq_loc_c_idx"
 \ir app-key-scope-invariants.sql
 
 -- #1709: host operations and the record of host-key use. One source, shared
--- verbatim with migration 20261014010300_host_operations (pinned by
+-- verbatim with migration 20261014020000_task_session_end_requests (the newest to carry it) (pinned by
 -- src/lib/hostOperations/invariants.test.ts). After agent-task-matching-invariants.sql,
 -- whose host_operation_token_ok it uses.
 \ir host-operation-invariants.sql

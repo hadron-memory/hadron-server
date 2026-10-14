@@ -86,6 +86,7 @@ import { withAuthorizedTx } from './authorizedTx.js';
 import { currentActor } from '../../../lib/requestActor.js';
 import { appKeyCaller, refuseSessionBound } from '../../../lib/appKeyScopes/scopes.js';
 import { launchForAssignment } from '../../../lib/hostOperations/launch.js';
+import { requestSessionEnd } from '../../../lib/hostOperations/sessionEnd.js';
 import { lockAuthorityAnchors } from '../../../lib/auth/authorityAnchors.js';
 import {
   appendTaskEvent,
@@ -1140,7 +1141,8 @@ export const agentTaskMutations = {
   /**
    * Finish a started task with its result: the assignee only (cor:agt:050:08).
    * Finishing without starting is refused (050:02 Proposed; #1705 interim).
-   * `closeSessionWhenDone` is stored, not acted on here — T6 carries out 050:10.
+   * #1709: with `closeSessionWhenDone`, the assignee is asked to end its session
+   * (cor:agt:050:10, src/lib/hostOperations/sessionEnd.ts).
    */
   finishAgentTask: async (
     _: unknown,
@@ -1172,6 +1174,8 @@ export const agentTaskMutations = {
       await appendTaskEvent(tx, {
         appId: app.id, taskId: task.id, actor: eventActor(ctx.userId), event: { type: 'task.finished', outcome },
       });
+      // #1709 (cor:agt:050:10): ask the assignee to end its session when the task says so.
+      await requestSessionEnd(tx, { appId: app.id, task, actor: eventActor(ctx.userId), now: new Date() });
     });
     // #1707: a worker may have freed up (cor:agt:060:06).
     await matchAfterChange(ctx.db, finished.appId);
@@ -1197,6 +1201,8 @@ export const agentTaskMutations = {
         appId: app.id, taskId: task.id, actor: eventActor(ctx.userId),
         event: { type: 'task.cancelled', fromStatus: task.status as 'backlog' | 'pending' | 'started', openChildCount },
       });
+      // #1709 (cor:agt:050:10): cancelling asks the assignee to end its session too.
+      await requestSessionEnd(tx, { appId: app.id, task, actor: eventActor(ctx.userId), now: new Date() });
     });
     // #1707: a worker may have freed up (cor:agt:060:06).
     await matchAfterChange(ctx.db, cancelled.appId);
@@ -1381,6 +1387,11 @@ export const agentTaskFieldResolvers = {
         familyNotIn: (r.familyNotIn as string[]) ?? null,
         excludeWorkerIds: (r.excludeWorkerIds as string[]) ?? null,
       };
+    },
+    /** #1709 (cor:agt:050:10) — the request this task's end made; the task was already read, so its readers read it. */
+    sessionEndRequest: async (t: TaskRow, _: unknown, ctx: Context) => {
+      const r = await ctx.db.taskSessionEndRequest.findUnique({ where: { taskId: t.id } });
+      return r ? { ...r, resolution: r.resolution ? r.resolution.toUpperCase().replace(/-/g, '_') : null } : null;
     },
     /** cor:agt:050:03 — pending with no assignee. Derived, never stored. */
     queued: (t: TaskRow) => t.status === 'pending' && !t.assigneeWorkerId && !t.assigneeUserId,
