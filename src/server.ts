@@ -71,6 +71,7 @@ import { controller } from './controller/controller.js';
 import { syncGraphFromGithub } from './integrations/github/syncGraphFromGithub.js';
 import { handleMcpRequest, handleMcpDelete } from './mcp/server.js';
 import { startAnonymousMemoryCleanupLoop } from './jobs/cleanupAnonymousMemories.js';
+import { startMergeConsentSweepLoop } from './jobs/sweepMergeConsents.js';
 import { startAssetJanitorLoop } from './jobs/janitorAssets.js';
 import { startAssetScanSweepLoop } from './jobs/scanPendingAssets.js';
 import { startOrphanObjectReaperLoop } from './jobs/reapOrphanAssetObjects.js';
@@ -1799,6 +1800,13 @@ export async function createServer(): Promise<Express> {
   // Skipped in test environments to avoid leaking timers.
   if (process.env.NODE_ENV !== 'test' && process.env.DISABLE_ANON_CLEANUP !== 'true') {
     startAnonymousMemoryCleanupLoop(db);
+  }
+
+  // #1770 — retention for account-merge consent requests: a retired request
+  // is deleted 30 days after the later of its expiry and consumption
+  // (cor:api:010:02), in bounded batches. Live proofs and sealed receipts stay.
+  if (process.env.NODE_ENV !== 'test' && process.env.DISABLE_MERGE_CONSENT_SWEEP !== 'true') {
+    startMergeConsentSweepLoop(db);
   }
 
   // Background job: purge soft-deleted assets past their 24h recovery
