@@ -276,6 +276,19 @@ describe('hadron_agent_set_index_refs — the three states (cor:dmo:050:15, :16)
     expect(await refsOf(backend.id)).toEqual({ tasksIndexRef: ids['tasks-two'], processesIndexRef: null });
   });
 
+  it('a pointer to a node in a memory the caller can\'t read prints as the bare id, never its URN (Basil\'s P3 on #1943)', async () => {
+    // Set by someone who could read it; the manager now can't.
+    const theirs = await db.memory.create({ data: { class: 'personal', userId: memberA, ownerUserId: memberA, name: 'm', urn: `${orgA.urn}:m-${n}` } });
+    const hidden = (await db.node.create({ data: { memoryId: theirs.id, loc: 'secret-index', name: 'secret', content: 'x' } })).id;
+    await db.agent.update({ where: { id: backend.id }, data: { processesIndexRef: hidden } });
+    const out = await call(adminA, 'hadron_agent_set_index_refs', { agentRef: backend.id, tasksIndexRef: nodeUrn('tasks-two') });
+    expect(out.isError).toBe(false);
+    expect(out.text).toContain(`Processes index: ${hidden}`);
+    expect(out.text).not.toContain(theirs.urn);
+    expect(out.text).not.toContain('secret-index');
+    expect(out.text).toContain(`Tasks index: ${nodeUrn('tasks-two')}`);
+  });
+
   it('both omitted changes nothing', async () => {
     const out = await call(adminA, 'hadron_agent_set_index_refs', { agentRef: backend.id });
     expect(out.isError).toBe(false);
