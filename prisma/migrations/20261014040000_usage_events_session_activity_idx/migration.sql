@@ -1,0 +1,21 @@
+-- #1903: codify the index created by hand on production during the
+-- 2026-10-14 pool-exhaustion outage (ops:alpha:incident-2026-10-14-pool-exhaustion-liveness-query).
+-- Session liveness reads max(created_at) of a session's ACTIVITY events
+-- (#1653). With only the single-column indexes, the planner served that max
+-- by walking usage_events_created_at_idx backwards, and a session with no or
+-- ancient activity rows walked the whole table; 12+ minutes per roster read
+-- exhausted the pool. This index answers each probe with one descent.
+--
+-- Production already has it, so IF NOT EXISTS makes this a no-op there.
+--
+-- CONCURRENTLY cannot run inside a transaction block. `prisma migrate deploy`
+-- sends a migration file as ONE simple query, which Postgres runs as one
+-- implicit transaction when it holds several statements (SQLSTATE 25001) but
+-- not when it holds one. So this file must stay a single statement: add
+-- nothing else here.
+--
+-- A failed CONCURRENTLY build leaves an INVALID index under this name, which
+-- IF NOT EXISTS would then skip. If `\d usage_events` ever shows it INVALID,
+-- drop it and re-run this statement by hand.
+CREATE INDEX CONCURRENTLY IF NOT EXISTS usage_events_session_activity_idx
+  ON usage_events (session_id, created_at) WHERE counts_as_activity;
