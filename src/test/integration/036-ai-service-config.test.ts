@@ -272,7 +272,8 @@ describe('resolveAIConfig precedence (US1)', () => {
     await createConfig({ agentId: agent.id }, 'default');
     await expect(
       resolvers.Query.resolveAIConfig({}, { agentRef: agent.id }, ctxFor(outsider.id)),
-    ).rejects.toThrow(/Forbidden/);
+    // #1944: an outsider can't read the Agent, so it answers as absent.
+    ).rejects.toThrow(/AGENT_NOT_FOUND/);
     await expect(
       resolvers.Query.resolveAIConfig({}, {}, ctxFor(admin.id)),
     ).rejects.toThrow(/Forbidden/);
@@ -491,10 +492,15 @@ describe('resolveAIConfig for a user-owned Agent (#1363)', () => {
     const impersonated = ctxFor(owner.id, {
       impersonation: { sessionId: 'synthetic', actorUserId: admin.id, orgId: org.id, expiresAt: new Date(Date.now() + 60_000) },
     });
-    for (const deniedCtx of [ctxFor(outsider.id), platformAdminCtx(), impersonated]) {
+    // #1944: the outsider and the impersonated session can't read the personal
+    // Agent, so it answers as absent; the platform admin can read it (#1787)
+    // but the key stays owner-only, so it is refused FORBIDDEN.
+    for (const deniedCtx of [ctxFor(outsider.id), impersonated]) {
       await expect(resolvers.Query.resolveAIConfig({}, { agentRef: personalAgent.id }, deniedCtx))
-        .rejects.toThrow(/Forbidden/);
+        .rejects.toThrow(/AGENT_NOT_FOUND/);
     }
+    await expect(resolvers.Query.resolveAIConfig({}, { agentRef: personalAgent.id }, platformAdminCtx()))
+      .rejects.toThrow(/Forbidden/);
 
     // An App context must not let an org admin bypass strict ownership of
     // the named personal Agent, even if the App has its own config.
@@ -970,10 +976,10 @@ describe('legacy surface shims (US3)', () => {
     expect(cfg?.model).toBe('claude-haiku-4-5-20251001');
     expect(cfg?.apiKey).toBe('sk-legacy');
 
-    // Auth: outsider denied (same gate as before).
+    // Auth: outsider denied; #1944: an Agent they can't read answers as absent.
     await expect(
       resolvers.Query.agentAIConfig({}, { agentRef: agent.id }, ctxFor(outsider.id)),
-    ).rejects.toThrow(/Forbidden/);
+    ).rejects.toThrow(/AGENT_NOT_FOUND/);
   });
 
   it('clearAgentAIConfig deletes the default registry row', async () => {

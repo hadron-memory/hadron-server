@@ -65,7 +65,7 @@ should not be changed.
 | DB | Purpose | Owner | Connection string |
 |---|---|---|---|
 | `hadron` | Local development — **the canonical dev DB.** `.env` `DATABASE_URL` points here; the app, `prisma/seed.ts`, and `prisma db push` all use it. | `holger` | `postgresql://holger@localhost:5432/hadron` |
-| `hadron_test` | Vitest test runs (cleared between tests) | `holger` | `postgresql://holger@localhost:5432/hadron_test` |
+| `hadron_test` | Vitest's base name. **Parallel mode (default) never reads it** (#1922): each run clones `hadron_test_s<fingerprint>`, a template globalSetup builds from EMPTY for the checkout's schema. Serial mode (`HADRON_TEST_PARALLEL=0`) runs against `hadron_test` itself, rebuilt by `pnpm db:test-setup`. | `holger` | `postgresql://holger@localhost:5432/hadron_test` |
 | `hadron_dev` | **Deprecated / unused.** Older docs + the `db:dev-reset` script pointed here while `.env` actually used `hadron`; that split caused a long-running "phantom drift" confusion. Don't rely on it. | `holger` | `postgresql://holger@localhost:5432/hadron_dev` |
 
 Both `hadron` and `hadron_test` are managed via `prisma db push` (no migration
@@ -91,12 +91,17 @@ that drift is what the deprecated `hadron_dev` row above warns about).
 > HNSW index) to sync schema without wiping, or **`pnpm db:dev-reset`** for a
 > clean wipe + reseed. Both follow `.env`.
 >
-> `pnpm db:test-setup` rebuilds the `hadron_test` template the same way, and
-> needs `--accept-data-loss` for the same reason (added #796): post-push.sql
-> also creates the `nodes.tsv` GENERATED column, which Prisma can't model, so a
-> push against an established test DB always proposes dropping it and aborts on
-> the prompt. Both objects are rebuilt by post-push.sql moments later, and
-> neither holds row data — `tsv` is derived from other columns.
+> **Test databases are built from empty, per schema (#1922).** Pushing one
+> checkout's schema over a database another checkout built mixes two versions:
+> an older push silently drops newer columns, and no push removes the newer
+> branch's raw-SQL triggers and functions. So parallel runs clone
+> `hadron_test_s<fingerprint>`, which globalSetup builds from `template0`. The
+> fingerprint (`src/test/schemaTemplate.ts`) covers `schema.prisma`, every
+> `prisma/*.sql` and the Prisma version. It is built once per fingerprint
+> (about 5s), reused after that, and dropped after 7 idle days. `pnpm
+> db:test-setup` is only for serial mode: it empties `public`, rebuilds, and
+> stamps the fingerprint, and a serial run refuses a base stamped for another
+> schema. Never push into a test template by hand.
 
 ## Disposable E2E stacks
 
@@ -109,11 +114,13 @@ dev DB or `hadron_test`. Use distinct names and ports for concurrent stacks.
 
 ```bash
 # Run the test suite. Files run in PARALLEL, each vitest worker against its own
-# clone of hadron_test (`hadron_test_r<runId>_<poolId>`, created lazily from the
-# template by src/test/perWorkerDb.ts and dropped at teardown) — ~6-7x faster
-# than the old serial mode. `hadron_test` is still the template you build with
-# `pnpm db:test-setup`. Set HADRON_TEST_PARALLEL=0 to fall back to the single-DB
-# serial mode (e.g. to debug a suspected cross-file ordering issue). A test that
+# clone (`hadron_test_r<runId>_<poolId>`, created lazily by
+# src/test/perWorkerDb.ts and dropped at teardown) — ~6-7x faster than the old
+# serial mode. The clones come from `hadron_test_s<fingerprint>`, which
+# globalSetup builds from empty for this checkout's schema (#1922), so no setup
+# step is needed. Set HADRON_TEST_PARALLEL=0 to fall back to the single-DB
+# serial mode (e.g. to debug a suspected cross-file ordering issue); that mode
+# needs `pnpm db:test-setup` after any schema change. A test that
 # opens its OWN raw pg connection must read `process.env.DATABASE_URL` (the
 # per-worker URL), NOT `TEST_DATABASE_URL`, or it splits across two DBs.
 #

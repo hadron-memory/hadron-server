@@ -14,7 +14,8 @@
  *                            ← review  "when asked to review"
  *              tasks:open-pr, tasks:review (runnable), prompts:boot (boot
  *              prompt, runnable: never inherited), processes:base-release
- *              (a base process, staging tasks:open-pr: #1893's, skipped)
+ *              (a base process, staging tasks:open-pr: involved through
+ *              the child since #1941)
  *   backend:   tasks (index)  ← deploy "when deploying"
  *                             ← review "when reviewing backend code"
  *              tasks:deploy, tasks:review, tasks:hotfix (runnable; hotfix
@@ -245,6 +246,7 @@ describe('050:16 — an Agent\'s processes', () => {
   it('S1/S2: what it starts or owns, with its trigger, then what it is involved in, without', async () => {
     expect((await processes()).map((p) => [p.node.id, p.kind, p.trigger])).toEqual([
       [ids.backRelease, 'STARTS', 'when I cut a release'],
+      [ids.engBaseRelease, 'INVOLVED', null],
       [ids.drive, 'INVOLVED', null],
       [ids.shipIt, 'INVOLVED', null],
     ]);
@@ -262,7 +264,7 @@ describe('050:16 — an Agent\'s processes', () => {
 
   it('S3: removing the stage edge drops the process from the involved list, nothing else edited', async () => {
     await db.edge.deleteMany({ where: { sourceId: ids.drive } });
-    expect((await processes()).map((p) => p.node.id)).toEqual([ids.backRelease, ids.shipIt]);
+    expect((await processes()).map((p) => p.node.id)).toEqual([ids.backRelease, ids.engBaseRelease, ids.shipIt]);
   });
 
   it('Q3: a `stage …` edge from a node that is not a process does not count, nor does a non-stage edge from a process', async () => {
@@ -272,11 +274,44 @@ describe('050:16 — an Agent\'s processes', () => {
     expect((await processes()).map((p) => p.node.id)).not.toContain(ids.stagedNote);
   });
 
-  it('a base\'s process staging an inherited task waits for #1893: not listed, even to a reader of the base', async () => {
+  it('#1941: a base\'s process staging an inherited task is INVOLVED through the child, marked inherited, on both surfaces', async () => {
+    // The reader holds no read on engineer's memory: the child's system memory is the whole audience (050:14).
+    expect(await Q.memory({}, { ref: engineer.mem }, ctx(reader))).toBeNull();
+    const row = (await processes()).find((p) => p.node.id === ids.engBaseRelease);
+    expect([row?.kind, row?.trigger, N.inheritedFrom(row!.node)?.agentUrn]).toEqual(['INVOLVED', null, agentUrn(engineer)]);
+    expect(await N.urn(row!.node, {}, ctx(reader))).toBe(nodeUrn(engineer.memUrn, 'processes:base-release'));
+    const text = await mcp(reader, 'hadron_agent_processes', { agentRef: backend.id });
+    expect(text).toContain('processes:base-release');
+  });
+
+  it('#1941: a base process the child overrides counts once, as the child\'s node, even when only the base\'s edge stages the task', async () => {
+    await node('backBaseRelease', backend.mem, 'processes:base-release', { role: 'process' });
+    const got = (await processes()).filter((p) => p.node.loc === 'processes:base-release');
+    expect(got.map((p) => [p.node.id, p.kind, N.inheritedFrom(p.node)])).toEqual([[ids.backBaseRelease, 'INVOLVED', null]]);
+  });
+
+  it('#1941: an override that is not a process puts nothing in the list at that loc', async () => {
+    await node('backBaseNote', backend.mem, 'processes:base-release');
+    expect((await processes()).filter((p) => p.node.loc === 'processes:base-release')).toEqual([]);
+  });
+
+  it('#1941: a base process turned boot prompt is not in effect, so it is not involved', async () => {
+    await db.node.update({ where: { id: ids.engBaseRelease }, data: { role: 'boot-prompt' } });
     expect((await processes()).map((p) => p.node.id)).not.toContain(ids.engBaseRelease);
-    // The manager may read engineer's memory directly, so only the #1893 skip keeps it out.
-    expect((await Q.memory({}, { ref: engineer.mem }, ctx(manager)))?.id).toBe(engineer.mem);
-    expect((await processes(manager)).map((p) => p.node.id)).not.toContain(ids.engBaseRelease);
+  });
+
+  it('#1941: a base process staging a base task the child overrides is involved, through the child\'s task', async () => {
+    await node('engBaseReview', engineer.mem, 'processes:base-review', { role: 'process' });
+    await edge('engBaseReview', 'engReview', 'stage 2: review');
+    const row = (await processes()).find((p) => p.node.id === ids.engBaseReview);
+    expect([row?.kind, N.inheritedFrom(row!.node)?.agentUrn]).toEqual(['INVOLVED', agentUrn(engineer)]);
+  });
+
+  it('#1941 control: a stranger to the child still gets nothing, and own and outside-chain sources are unchanged', async () => {
+    await expect(Q.agentProcessList({}, { ref: backend.id }, ctx(stranger))).rejects.toMatchObject({ code: 'AGENT_NOT_FOUND' });
+    const kinds = new Map((await processes()).map((p) => [p.node.id, [p.kind, N.inheritedFrom(p.node)]]));
+    expect(kinds.get(ids.drive)).toEqual(['INVOLVED', null]);
+    expect(kinds.get(ids.shipIt)).toEqual(['INVOLVED', null]);
   });
 
   it('Q4: a process the reader may not read is not listed', async () => {
