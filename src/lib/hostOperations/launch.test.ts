@@ -223,6 +223,14 @@ describe('the grant (Holger\'s ruling A, Rook #10734)', () => {
     expect((await redeem(holder.id, grant)).launchOperationId).toBe(opId);
   });
 
+  it('#1928 (Diego P2): a withheld start never takes a page slot: with first:1 the later operation is delivered on every collect', async () => {
+    const { opId, grant } = await collectedStart();
+    const later = await M.issueHostOperation({}, { input: { appRef: app.id, hostId: 'orca1', worker: kit.id, type: 'worktree.create', args: { repo: 'hadron-server', baseBranch: 'main', branchName: 'kit-3', label: 'kit-3' } } }, ctx(manager.id));
+    const one = () => M.collectHostOperations({}, { appRef: app.id, first: 1 }, keyCtx(orca1)) as Promise<Array<{ id: string }>>;
+    for (let i = 0; i < 3; i += 1) expect((await one()).map((o) => o.id)).toEqual([later.id]);
+    expect((await redeem(holder.id, grant)).launchOperationId).toBe(opId);
+  });
+
   it('#1928: once the grant has expired, a re-collection delivers the start with a fresh grant and the old one is revoked', async () => {
     const { opId, grant: first } = await collectedStart();
     await db.launchGrant.updateMany({ where: { operationId: opId }, data: { expiresAt: new Date(Date.now() - 1000), issuedAt: new Date(Date.now() - 2000) } });
