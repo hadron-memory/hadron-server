@@ -1949,3 +1949,107 @@ describe('loadConfig — liveness configuration (#1826)', () => {
     expect(() => loadConfig(write({ roster: [{ worker: 'w', name: 'E', worktree: '/x', lifecycle: 1 }] }))).toThrow(RouterError);
   });
 });
+
+describe('#1845 — the terminal pin: a roster row may name its MAIN terminal', () => {
+  // The pin resolves FIRST, before identity and the screen, so it survives the
+  // agentIdentity flap and the two-family ambiguity — the Atilla case: five
+  // busy-misread holds in one day on a terminal whose identity was lost, where
+  // every screen fallback failed on completed-turn chrome (Yuri #10736).
+  const pinned = (handle?: string) => {
+    const c = cfg(['w-eli', 'Eli']);
+    if (handle) c.roster[0]!.terminal = handle;
+    return c;
+  };
+
+  it('a pin resolves a TWO-AGENT worktree the identity resolver must refuse as ambiguous (the review-spawn case)', () => {
+    const c = pinned('term_eli');
+    fake.terminal('eli', 'claude');
+    // A codex review spawn in the SAME worktree: two agent identities, one
+    // worktree — the identity resolver holds 'ambiguous' without a pin, and
+    // the screen fallback would too (both families present = hold).
+    const eliWt = fake.terminals[fake.terminals.length - 1]!.worktreePath!;
+    fake.terminals.push({
+      handle: 'term_spawn', worktreePath: eliWt, agentIdentity: 'codex', connected: true, writable: true,
+      lastOutputAt: Date.now(),
+    });
+    fake.screens.set('term_spawn', { tail: CODEX_IDLE });
+    fake.attention.workers = [worker('w-eli', 'Eli', { mentions: 1, unread: 3 })];
+    const unpinned = cfg(['w-eli', 'Eli']);
+    expect(poll(unpinned).held.Eli).toContain('ambiguous');
+    expect(fake.sent).toEqual([]);
+    const out = poll(c);
+    expect(out.nudged).toEqual(['Eli']);
+    expect(sentHandles()).toEqual(['term_eli']);
+  });
+
+  it('a pin whose handle lives in ANOTHER worktree never resolves — it falls through as stale', () => {
+    const c = pinned('term_other');
+    fake.terminal('eli', null);
+    fake.terminal('other', 'claude'); // exists, but not in Eli's worktree
+    // A plain shell screen: the fallback refuses shells, so the stale pin
+    // surfaces in the hold reason instead of being silently rescued.
+    fake.screens.set('term_eli', { tail: ['orca@orca1:~/ws/eli$ '] });
+    fake.attention.workers = [worker('w-eli', 'Eli', { mentions: 1, unread: 3 })];
+    const out = poll(c);
+    expect(out.nudged).toEqual([]);
+    expect(fake.sent).toEqual([]);
+    expect(out.held.Eli).toContain('pinned handle is stale');
+  });
+
+  it('a pin and a healthy identity agree on the same terminal — the pin simply wins first', () => {
+    const c = pinned('term_eli');
+    fake.terminal('eli', 'codex');
+    fake.attention.workers = [worker('w-eli', 'Eli', { mentions: 1, unread: 3 })];
+    const out = poll(c);
+    expect(out.nudged).toEqual(['Eli']);
+    expect(sentHandles()).toEqual(['term_eli']);
+    // The identity flows as the family for the idle gates.
+    const [h, detail, via] = resolveTerminal(c.roster[0]!, fake.terminals as unknown as Terminal[], c, fake.run);
+    expect([h, via]).toEqual(['term_eli', 'pin']);
+    expect(detail).toBe('codex');
+  });
+
+  it('a pin on an identity-lost, UNTRACKED terminal derives the family from ONE screen read and still proves idle', () => {
+    const c = pinned('term_eli');
+    fake.terminal('eli', null, 'term_eli', false); // flap AND untracked (#7398 regime)
+    fake.screens.set('term_eli', { tail: CODEX_IDLE });
+    fake.attention.workers = [worker('w-eli', 'Eli', { mentions: 1, unread: 3 })];
+    const out = poll(c);
+    expect(out.nudged).toEqual(['Eli']);
+    expect(sentHandles()).toEqual(['term_eli']);
+  });
+
+  it('a pin never bypasses the guard chain: a busy pinned terminal holds', () => {
+    const c = pinned('term_eli');
+    fake.terminal('eli', 'codex');
+    fake.busy.add('term_eli');
+    fake.attention.workers = [worker('w-eli', 'Eli', { mentions: 1, unread: 3 })];
+    const out = poll(c);
+    expect(out.nudged).toEqual([]);
+    expect(fake.sent).toEqual([]);
+    expect(out.held.Eli).toBeTruthy();
+  });
+
+  it('loadConfig rejects a non-string pin and two rows pinning one terminal', () => {
+    const write = (roster: unknown) => {
+      const path = join(root, 'c.json');
+      writeFileSync(path, JSON.stringify({ app: 'a', channel: 'c', stateDir: join(root, 's'), roster }));
+      return path;
+    };
+    expect(() => loadConfig(write([{ worker: 'w', name: 'E', worktree: '/x', terminal: 7 }]))).toThrow(/"terminal" must be a non-empty/);
+    expect(() => loadConfig(write([
+      { worker: 'w1', name: 'E', worktree: '/x', terminal: 'term_t' },
+      { worker: 'w2', name: 'F', worktree: '/y', terminal: 'term_t' },
+    ]))).toThrow(/pins one terminal for two workers/);
+  });
+
+  it('an unpinned row is untouched — resolution order and reasons identical to before', () => {
+    const c = pinned(); // no terminal field
+    fake.terminal('eli', 'claude');
+    fake.attention.workers = [worker('w-eli', 'Eli', { mentions: 1, unread: 3 })];
+    const out = poll(c);
+    expect(out.nudged).toEqual(['Eli']);
+    const [, , via] = resolveTerminal(c.roster[0]!, fake.terminals as unknown as Terminal[], c, fake.run);
+    expect(via).toBe('identity');
+  });
+});

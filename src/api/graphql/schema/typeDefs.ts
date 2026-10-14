@@ -9820,7 +9820,11 @@ export const typeDefs = `#graphql
     updateAgent(ref: ID!, name: String, urn: String, description: String, systemPrompt: String, systemMemoryId: String, visibility: AgentVisibility, listedOnMarketplace: Boolean, type: AgentType, surfaces: [String!], personaRole: String, registerDefaults: RegisterDefaultsInput): Agent!
 
     """
-    Soft-delete an Agent.
+    Soft-delete an Agent and its owned system memory. Refuses while a live
+    App install or live parent Agent import references it. AgentMemoryItem
+    attachments do not block deletion.
+
+    See hrn:node:hadronmemory.com:specs:cor:dmo:050:14.
 
     Accepts the entity's ID or URN.
     """
