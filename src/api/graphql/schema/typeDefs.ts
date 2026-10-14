@@ -8491,6 +8491,10 @@ export const typeDefs = `#graphql
   Identity of the running hadron-server (see Query.serverInfo).
   """
   type ServerInfo {
+    "Present and true only when this deployment offers node signing. Discovery never grants access to sign."
+    signing: Boolean!
+    "Present and true only when passkey registration is enabled separately from node signing."
+    passkeyRegistration: Boolean!
     """
     HADRON_SERVER_VERSION — the MCP/API-surface contract version.
     """
@@ -9845,8 +9849,8 @@ export const typeDefs = `#graphql
 
     """
     Soft-delete an Agent and its owned system memory. Refuses while a live
-    App install or live parent Agent import references it. AgentMemoryItem
-    attachments do not block deletion.
+    App install or live parent Agent import references it, or a live Agent
+    extends it as its base. AgentMemoryItem attachments do not block deletion.
 
     See hrn:node:hadronmemory.com:specs:cor:dmo:050:14.
 
