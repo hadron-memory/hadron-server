@@ -284,3 +284,28 @@ describe('#1944 the sweep: every surface gated on the Agent answers an unreadabl
     });
   }
 });
+
+describe('#1944 startSession\'s optional agentRef: an unreadable Agent answers like an absent one', () => {
+  const start = (ref: string) => ({
+    query: 'mutation($input: SessionInput!) { startSession(input: $input) { id } }',
+    variables: { input: { id: generateId(), agentRef: ref } },
+  });
+  const absent = (ref: string): Answer => ({ data: null, error: { message: `Agent not found: ${ref}`, extensions: { code: 'BAD_USER_INPUT' } } });
+
+  it('another org\'s ADMIN gets exactly the absent answer for a real Agent and a guessed one, and no session is written', async () => {
+    expect(await askWith(ctx(foreignAdmin), start(nobody()))).toEqual(absent(nobody()));
+    expect(await askWith(ctx(foreignAdmin), start(urnOf(secret)))).toEqual(absent(urnOf(secret)));
+    expect(await db.session.count({ where: { userId: foreignAdmin } })).toBe(0);
+  });
+
+  it('the same ref answers byte-identically before and after its Agent is deleted', async () => {
+    const before = await askWith(ctx(foreignAdmin), start(urnOf(secret)));
+    await db.agent.update({ where: { id: secret.id }, data: { deletedAt: new Date() } });
+    expect(JSON.stringify(await askWith(ctx(foreignAdmin), start(urnOf(secret))))).toBe(JSON.stringify(before));
+  });
+
+  it('controls: a PUBLIC Agent attaches for anyone; a member attaches the org\'s Agent', async () => {
+    expect((await askWith(ctx(foreignAdmin), start(urnOf(pub)))).error).toBeNull();
+    expect((await askWith(ctx(member), start(urnOf(secret)))).error).toBeNull();
+  });
+});
