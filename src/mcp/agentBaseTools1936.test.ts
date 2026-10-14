@@ -10,14 +10,21 @@
  * and the tool on the same state and compares), and the same three states for
  * an index pointer (omitted leaves it, null clears it, a value sets it),
  * through the registered schema as well as the handler.
+ *
+ * The parity oracle is the GraphQL WIRE (Andi's P2 on #1943): each refusal is
+ * also run as a real GraphQL request through `formatGraphQLError`, the server's
+ * own formatter, so a code the formatter assigns (URN_NOT_QUALIFIED, the
+ * ambiguous legacy alias) is what the tool must say too, exactly as written.
  */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { GraphQLError } from 'graphql';
+import { ApolloServer } from '@apollo/server';
 import { db } from '../integrations/db/client.js';
 import { cleanDb, createDbAgentOrgGrant } from '../test/helpers.js';
 import { generateId } from '../lib/id.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
+import { typeDefs } from '../api/graphql/schema/typeDefs.js';
+import { formatGraphQLError } from '../api/graphql/formatError.js';
 import { createTestableMcpServer } from './server.js';
 
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({
@@ -27,7 +34,7 @@ vi.mock('../integrations/github/syncGraphFromGithub.js', () => ({
   syncGraphFromGithub: vi.fn().mockResolvedValue({ error: null }),
 }));
 
-const M = resolvers.Mutation as any;
+const graphql = new ApolloServer<Context>({ typeDefs, resolvers, formatError: formatGraphQLError });
 const ctxOf = (userId: string): Context => ({ db, userId, roles: ['READER'] });
 const server = (userId: string) => createTestableMcpServer({ userId, roles: ['READER'], clientId: `user:${userId}` });
 const call = async (userId: string, tool: string, args: Record<string, unknown>) => {
@@ -35,26 +42,32 @@ const call = async (userId: string, tool: string, args: Record<string, unknown>)
   return { isError: out.isError === true, text: out.content.map((c) => c.text).join('\n') };
 };
 
-/** What the resolver refuses with, on the current state: `[code] message`. */
-async function resolverRefusal(p: Promise<unknown>): Promise<string> {
-  const err = await p.then(() => null, (e: unknown) => e);
-  expect(err, 'expected the resolver to refuse').not.toBeNull();
-  const code = err instanceof GraphQLError ? err.extensions?.code : (err as { code?: string }).code;
+/** What GraphQL sends a client for this mutation on the current state: `[code] message`, off the wire. */
+async function wireRefusal(userId: string, query: string, variables: Record<string, unknown>): Promise<string> {
+  const res = await graphql.executeOperation({ query, variables }, { contextValue: ctxOf(userId) });
+  const errors = res.body.kind === 'single' ? res.body.singleResult.errors : undefined;
+  expect(errors?.length, 'expected GraphQL to refuse').toBe(1);
+  const code = errors![0]!.extensions?.code;
   expect(code, 'a typed refusal').toBeTruthy();
-  return `[${String(code).toLowerCase()}] ${(err as Error).message}`;
+  expect(code).not.toBe('INTERNAL_SERVER_ERROR');
+  return `[${String(code)}] ${errors![0]!.message}`;
 }
+const wireBase = (userId: string, ref: string, baseRef: string | null) =>
+  wireRefusal(userId, 'mutation($ref: ID!, $baseRef: ID) { setAgentBase(ref: $ref, baseRef: $baseRef) { id } }', { ref, baseRef });
+const wireIndex = (userId: string, args: { ref: string; tasksIndexRef?: string | null; processesIndexRef?: string | null }) =>
+  wireRefusal(userId, 'mutation($ref: ID!, $tasksIndexRef: ID, $processesIndexRef: ID) { setAgentIndexRefs(ref: $ref, tasksIndexRef: $tasksIndexRef, processesIndexRef: $processesIndexRef) { id } }', args);
 
-/** The tool refuses exactly as the resolver does, and nothing changes. */
+/** The tool refuses exactly as GraphQL's wire does, code as written, and nothing changes. */
 async function expectParity(
   userId: string,
   tool: string,
   args: Record<string, unknown>,
-  resolver: () => Promise<unknown>,
+  wire: () => Promise<string>,
   code: string,
 ) {
   const before = await db.agent.findMany({ orderBy: { id: 'asc' }, select: { id: true, extendsAgentId: true, tasksIndexRef: true, processesIndexRef: true } });
-  const expected = await resolverRefusal(resolver());
-  expect(expected.startsWith(`[${code.toLowerCase()}]`), expected).toBe(true);
+  const expected = await wire();
+  expect(expected.startsWith(`[${code}] `), expected).toBe(true);
   const got = await call(userId, tool, args);
   expect(got.isError).toBe(true);
   expect(got.text).toBe(expected);
@@ -147,12 +160,12 @@ describe('hadron_agent_set_base — set, change, clear (cor:dmo:050:14)', () => 
 
 describe('hadron_agent_set_base — every refusal, as the resolver gives it, in its order', () => {
   const tool = 'hadron_agent_set_base';
-  const viaResolver = (userId: string, ref: string, baseRef: string | null) => () => M.setAgentBase({}, { ref, baseRef }, ctxOf(userId));
+  const viaResolver = (userId: string, ref: string, baseRef: string | null) => () => wireBase(userId, ref, baseRef);
 
   it('a member who does not manage the child', async () => {
     const engineer = await orgAgent(orgA, 'engineer');
     const backend = await orgAgent(orgA, 'backend-engineer');
-    const err = await resolverRefusal(M.setAgentBase({}, { ref: backend.id, baseRef: engineer.id }, ctxOf(memberA)));
+    const err = await wireBase(memberA, backend.id, engineer.id);
     const got = await call(memberA, tool, { agentRef: backend.id, baseRef: engineer.id });
     expect(got).toEqual({ isError: true, text: err });
     expect(await baseOf(backend.id)).toBeNull();
@@ -281,7 +294,7 @@ describe('hadron_agent_set_index_refs — refusals, as the resolver gives them',
   });
 
   it('a member who does not manage the Agent', async () => {
-    const err = await resolverRefusal(M.setAgentIndexRefs({}, { ref: backend.id, tasksIndexRef: null }, ctxOf(memberA)));
+    const err = await wireIndex(memberA, { ref: backend.id, tasksIndexRef: null });
     expect(await call(memberA, 'hadron_agent_set_index_refs', { agentRef: backend.id, tasksIndexRef: null })).toEqual({ isError: true, text: err });
     expect((await refsOf(backend.id)).tasksIndexRef).toBe(index);
   });
@@ -290,12 +303,46 @@ describe('hadron_agent_set_index_refs — refusals, as the resolver gives them',
     const theirs = await db.memory.create({ data: { class: 'personal', userId: memberA, ownerUserId: memberA, name: 'm', urn: `${orgA.urn}:m-${n}` } });
     const hidden = (await db.node.create({ data: { memoryId: theirs.id, loc: 'idx', name: 'idx', content: 'x' } })).id;
     await expectParity(adminA, 'hadron_agent_set_index_refs', { agentRef: backend.id, tasksIndexRef: hidden },
-      () => M.setAgentIndexRefs({}, { ref: backend.id, tasksIndexRef: hidden }, ctxOf(adminA)), 'NODE_NOT_FOUND');
+      () => wireIndex(adminA, { ref: backend.id, tasksIndexRef: hidden }), 'NODE_NOT_FOUND');
   });
 
   it('AGENT_NOT_FOUND: a retired Agent', async () => {
     await db.agent.update({ where: { id: backend.id }, data: { deletedAt: new Date() } });
     await expectParity(adminA, 'hadron_agent_set_index_refs', { agentRef: backend.id, tasksIndexRef: null },
-      () => M.setAgentIndexRefs({}, { ref: backend.id, tasksIndexRef: null }, ctxOf(adminA)), 'AGENT_NOT_FOUND');
+      () => wireIndex(adminA, { ref: backend.id, tasksIndexRef: null }), 'AGENT_NOT_FOUND');
+  });
+});
+
+describe('codes the GraphQL formatter assigns reach the tool exactly as on the wire (Andi\'s P2 on #1943)', () => {
+  let backend: Awaited<ReturnType<typeof orgAgent>>;
+  const legacy = () => `hrn:agent:old-${n}.example::dup`;
+
+  beforeEach(async () => {
+    backend = await orgAgent(orgA, 'backend-engineer');
+    // Two live Agents answering one legacy URN: resolving it must refuse loudly (#697).
+    for (const k of [1, 2]) {
+      await db.agent.create({ data: { organizationId: orgA.id, name: `dup-${k}`, urn: `${orgA.urn}:dup-${k}`, legacyUrn: `old-${n}.example:dup` } });
+    }
+  });
+
+  it('URN_NOT_QUALIFIED: a bare slug as the child, both tools', async () => {
+    await expectParity(adminA, 'hadron_agent_set_base', { agentRef: 'backend-engineer', baseRef: null },
+      () => wireBase(adminA, 'backend-engineer', null), 'URN_NOT_QUALIFIED');
+    await expectParity(adminA, 'hadron_agent_set_index_refs', { agentRef: 'backend-engineer', tasksIndexRef: null },
+      () => wireIndex(adminA, { ref: 'backend-engineer', tasksIndexRef: null }), 'URN_NOT_QUALIFIED');
+  });
+
+  it('URN_NOT_QUALIFIED: a bare slug as the base', async () => {
+    await expectParity(adminA, 'hadron_agent_set_base', { agentRef: backend.id, baseRef: 'engineer' },
+      () => wireBase(adminA, backend.id, 'engineer'), 'URN_NOT_QUALIFIED');
+  });
+
+  it('the ambiguous legacy alias, as the child (both tools) and as the base', async () => {
+    await expectParity(adminA, 'hadron_agent_set_base', { agentRef: legacy(), baseRef: null },
+      () => wireBase(adminA, legacy(), null), 'AmbiguousLegacyUrnError');
+    await expectParity(adminA, 'hadron_agent_set_index_refs', { agentRef: legacy(), processesIndexRef: null },
+      () => wireIndex(adminA, { ref: legacy(), processesIndexRef: null }), 'AmbiguousLegacyUrnError');
+    await expectParity(adminA, 'hadron_agent_set_base', { agentRef: backend.id, baseRef: legacy() },
+      () => wireBase(adminA, backend.id, legacy()), 'AmbiguousLegacyUrnError');
   });
 });
