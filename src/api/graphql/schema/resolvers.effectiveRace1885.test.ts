@@ -10,7 +10,10 @@
  * come through; untouched inherited content still does.
  */
 
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { EmbeddingClient } from '../../../lib/embedding/index.js';
+import { setEmbeddingClientForTests, resetEmbeddingClientForTests } from '../../../lib/embedding/index.js';
+import { embedNode } from '../../../jobs/embedNodes.js';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { resolvers, type Context } from './resolvers.js';
@@ -167,5 +170,48 @@ describe('single reads re-check the version they serve against the child they ca
     const out = await mcp('hadron_get_nodes', { refs: [`hrn:node:${backend.memUrn}:tasks:ship`] });
     expect(out).not.toContain('EngShip body');
     expect(out).not.toContain('TURNED body');
+  });
+});
+
+describe('P2-1 in chunk mode (Diego, #1891 at 65d3ce85): passages re-check their parents', () => {
+  // Every text embeds on one axis, so every indexed chunk is a candidate and
+  // only the effective-set re-check can keep a passage out.
+  const stub: EmbeddingClient = {
+    provider: 'test', model: 'stub-model', dim: 768,
+    async embed(texts: string[]) { return texts.map(() => { const v = new Array(768).fill(0); v[1] = 1; return v; }); },
+  };
+  const parentIds = async () => (await Q.findNodes({}, {
+    query: 'q', mode: 'vector', granularity: 'chunk', filter: { memoryIds: [backend.mem] },
+  }, ctx())).passages.map((p: any) => p.parentNodeId);
+
+  beforeEach(async () => {
+    process.env.EMBEDDING_API_URL = 'http://stub.local/api/embed';
+    setEmbeddingClientForTests(stub);
+    await db.memory.updateMany({ where: { id: { in: [engineer.mem, backend.mem] } }, data: { vectorIndexEnabled: true, embeddingSource: 'contentChunks' } });
+    for (const id of [ids.engRelease, ids.engShip, ids.engKeep]) {
+      await db.node.update({ where: { id }, data: { embeddingPendingAt: new Date() } });
+      expect(await embedNode(db, id)).toBe('embedded');
+    }
+  });
+  afterAll(() => { resetEmbeddingClientForTests(); delete process.env.EMBEDDING_API_URL; });
+
+  it('control: with nothing changed, every inherited parent\'s passage comes through', async () => {
+    expect(new Set(await parentIds())).toEqual(new Set([ids.engRelease, ids.engShip, ids.engKeep]));
+  });
+
+  it('GraphQL findNodes: a node turned boot prompt and a node overridden after the snapshot serve no passage', async () => {
+    hooks.afterScope = async () => { await turnReleaseIntoBootPrompt(); await overrideShip(); };
+    const got = await parentIds();
+    expect(got).toContain(ids.engKeep);
+    expect(got).not.toContain(ids.engRelease);
+    expect(got).not.toContain(ids.engShip);
+  });
+
+  it('MCP hadron_find_nodes granularity:chunk, the same', async () => {
+    hooks.afterScope = async () => { await turnReleaseIntoBootPrompt(); await overrideShip(); };
+    const out = await mcp('hadron_find_nodes', { query: 'q', mode: 'vector', granularity: 'chunk', memoryUrn: backend.memUrn });
+    expect(out).toContain('EngKeep body');
+    expect(out).not.toContain('EngRelease body');
+    expect(out).not.toContain('EngShip body');
   });
 });
