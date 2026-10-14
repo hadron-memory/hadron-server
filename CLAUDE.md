@@ -123,6 +123,14 @@ dev DB or `hadron_test`. Use distinct names and ports for concurrent stacks.
 # claim the same databases and delete from each other's tables mid-test. Two
 # concurrent runs are now safe. Orphan clones from a crashed run are collected
 # by the next run whose pid is not alive; nothing is dropped while its run is.
+#
+# Graph fixtures (#1951): createNode writes every node to disk under
+# GRAPHS_PATH, which tests point at `<tmpdir>/hadron-test-graph-runs/r<runId>`
+# (src/test/graphRoot.ts). globalSetup creates it, teardown removes it (and
+# fails the run if it can't), and a dead run's root is swept by the next run,
+# on the same pid-liveness rule as the clones. The old shared
+# /tmp/hadron-test-graphs is no longer written by this checkout; it can be
+# deleted once no pre-#1951 checkout runs suites on the host.
 pnpm test
 
 # Drop pre-#1091 `hadron_test_<n>` clones (from a checkout older than run-scoped
