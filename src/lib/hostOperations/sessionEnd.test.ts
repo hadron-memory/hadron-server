@@ -222,10 +222,16 @@ describe('the fallback is fenced through the insert (#1877 review, Colin P2-1, G
     await hold.locked;
     let settled = false;
     const p = resolveSessionEndRequest(db, r.id, r.dueAt).finally(() => { settled = true; });
-    await new Promise((res) => setTimeout(res, 400));
-    expect(settled).toBe(false);
-    hold.release();
-    await hold.done;
+    try {
+      await new Promise((res) => setTimeout(res, 400));
+      expect(settled).toBe(false);
+    } finally {
+      // Colin P3 (#10860): release and drain the holder even when the assertion fails, so a red run never leaves a
+      // transaction (and its locks) open behind it for the next test.
+      hold.release();
+      await hold.done;
+      await p.catch(() => undefined);
+    }
     return p;
   }
 
