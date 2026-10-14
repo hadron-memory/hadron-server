@@ -436,10 +436,26 @@ describe('matching triggers (060:06 interim): create, finish, cancel, availabili
   it('cancelling a task frees its worker', async () => {
     await bind(baloo, 'codex');
     const busy = await db.agentTask.create({
-      data: { appId: app.id, title: 'Busy', ownerUserId: mia.id, assigneeWorkerId: baloo.id, assignedAt: new Date() },
+      data: { appId: app.id, title: 'Busy', ownerUserId: mia.id, assigneeWorkerId: baloo.id, assignedAt: new Date(), closeSessionWhenDone: false },
     });
     const waiting = await queued('09:00', { role: 'reviewer' });
     await M.cancelAgentTask({}, { taskId: busy.id }, ctx(mia.id));
+    expect(await assigneeOf(waiting.id)).toBe(baloo.id);
+  });
+
+  it('#1709: a worker asked to end its session gets no new work until that session ends (Proposed)', async () => {
+    const s = await bind(baloo, 'codex');
+    const busy = await db.agentTask.create({
+      data: { appId: app.id, title: 'Busy', ownerUserId: mia.id, assigneeWorkerId: baloo.id, assignedAt: new Date(), closeSessionWhenDone: true },
+    });
+    const waiting = await queued('09:00', { role: 'reviewer' });
+    await M.cancelAgentTask({}, { taskId: busy.id }, ctx(mia.id));
+    expect(await db.taskSessionEndRequest.count({ where: { workerId: baloo.id, sessionId: s.id } })).toBe(1);
+    expect(await assigneeOf(waiting.id)).toBeNull();
+    // The session ends: the worker is matched again, on its next session.
+    await db.session.update({ where: { id: s.id }, data: { endedAt: new Date() } });
+    await bind(baloo, 'codex');
+    await matchQueuedTasks(db, new Date(), { appId: app.id });
     expect(await assigneeOf(waiting.id)).toBe(baloo.id);
   });
 

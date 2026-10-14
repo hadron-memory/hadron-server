@@ -55,10 +55,9 @@ import {
 import { initCloudflareIps } from './auth/cloudflare-ips.js';
 import { isServerLocalPath } from './auth/server-local-path.js';
 import { mountOAuthRoutes } from './auth/oauth.js';
-import { resolvers } from './api/graphql/schema/resolvers.js';
 import { impersonationReadOnlyPlugin } from './api/graphql/impersonationReadOnlyPlugin.js';
 import { requireOrgRole } from './api/graphql/schema/resolvers.helpers.js';
-import { typeDefs } from './api/graphql/schema/typeDefs.js';
+import { deploymentSchema } from './api/graphql/schema/deploymentSchema.js';
 import {
   formatGraphQLError,
   isExpectedClientError,
@@ -97,6 +96,7 @@ import { startSchedulerLoop } from './jobs/scheduler.js';
 import { startTaskStallEvaluatorLoop } from './jobs/taskStallEvaluator.js';
 import { startTaskMatcherLoop } from './jobs/taskMatcher.js';
 import { mountWebhookRoutes } from './api/webhooks.js';
+import { mountHealthRoutes } from './api/health.js';
 import { mountPublicAssetRoutes } from './api/assetPublic.js';
 import { mountEmailEventRoutes } from './api/emailEvents.js';
 import { mountSlackEventRoutes } from './api/slackEvents.js';
@@ -1124,9 +1124,10 @@ export async function createServer(): Promise<Express> {
   // GraphQL
   // ---------------------------------------------------------------------------
 
+  const { typeDefs, resolvers: deploymentResolvers } = deploymentSchema();
   const apollo = new ApolloServer({
     typeDefs,
-    resolvers,
+    resolvers: deploymentResolvers,
     plugins: [sentryApolloPlugin, impersonationReadOnlyPlugin],
     // #918 — typed client errors carry their stable `extensions.code`.
     // The mapping list lives beside the Sentry predicate that reads it.
@@ -1792,9 +1793,9 @@ export async function createServer(): Promise<Express> {
   // src/api/assetPublic.ts before touching or extending it.
   mountPublicAssetRoutes(app, db);
 
-  app.get('/health', (_req, res) => {
-    res.json({ ok: true });
-  });
+  // #1906: /health runs SELECT 1 through this pool, so a wedged pool reads
+  // unhealthy. See src/api/health.ts.
+  mountHealthRoutes(app, db);
 
   // Background job: purge expired anonymous memories hourly.
   // Skipped in test environments to avoid leaking timers.

@@ -69,6 +69,7 @@ import {
 } from './resolvers.helpers.js';
 import { recordUrnRename } from '../../../lib/urnAlias.js';
 import { withAuthorizedTx } from './authorizedTx.js';
+import { assertNoLiveAgentReferences } from '../../../lib/agentLiveReferences.js';
 import { assertNoMintedCorpusRemoval, reclaimTombstonedMemory } from '../../../lib/mintedSpecPermanence.js';
 
 /**
@@ -826,20 +827,42 @@ export const agentMutations = {
       // (createAgent may promote an existing memory into it), and deleting
       // the agent would take the corpus with it. Refused in the same
       // transaction as both soft-deletes, under the memory row lock.
-      await ctx.db.$transaction(async (tx) => {
+      await withAuthorizedTx(ctx, [
+        { kind: 'agent', id },
+        ...(agent.organizationId ? [{ kind: 'org' as const, id: agent.organizationId }] : []),
+        ...(agent.ownerUserId ? [{ kind: 'user' as const, id: agent.ownerUserId }] : []),
+        ...(agent.systemMemoryId ? [{ kind: 'memory' as const, id: agent.systemMemoryId }] : []),
+      ], async txCtx => {
+        const current = await txCtx.db.agent.findUniqueOrThrow({ where: { id } });
+        if (current.organizationId !== agent.organizationId || current.ownerUserId !== agent.ownerUserId ||
+            current.systemMemoryId !== agent.systemMemoryId) {
+          throw new Error('Agent ownership or system memory changed; retry the deletion');
+        }
+        await requireAgentAccess(txCtx, current, 'ADMIN');
+      }, async tx => {
+        await assertNoLiveAgentReferences(tx, id);
         if (agent.systemMemoryId) {
-          // FOR UPDATE first: see deleteMemory — no spec may appear between
-          // the scan and the tombstone.
-          await tx.$queryRaw`SELECT id FROM memories WHERE id = ${agent.systemMemoryId} FOR UPDATE`;
           await assertNoMintedCorpusRemoval(tx, agent.systemMemoryId, 'delete the agent whose system memory holds', {
             includeTombstones: false,
             remedy: 'Deleting the agent would delete its minted corpus; keep the agent.',
           });
         }
-        await tx.agent.update({ where: { id }, data: { deletedAt: new Date() } });
+        const deletedAt = new Date();
+        await tx.agent.update({ where: { id }, data: { deletedAt } });
         if (agent.systemMemoryId) {
-          await tx.memory.updateMany({ where: { id: agent.systemMemoryId }, data: { deletedAt: new Date() } });
+          await tx.memory.updateMany({ where: { id: agent.systemMemoryId }, data: { deletedAt } });
         }
+      }, {
+        // An exclusive authority bracket prevents two deleters from upgrading
+        // the same SHARE row locks concurrently. Memory precedes Agent, as in
+        // publication/attachment; set-base and install/import writers share Agent.
+        lockMode: 'exclusive', allowDeletedMemory: true,
+        afterLock: async tx => {
+          if (agent.systemMemoryId) {
+            await tx.$queryRaw`SELECT id FROM memories WHERE id = ${agent.systemMemoryId} FOR UPDATE`;
+          }
+          await tx.$queryRaw`SELECT id FROM agents WHERE id = ${id} FOR UPDATE`;
+        },
       });
       return true;
     },
@@ -1054,7 +1077,7 @@ export const agentMutations = {
           position,
           required: required ?? true,
           actorId: ctx.userId ?? null,
-        });
+        }, ctx);
       } catch (e: unknown) {
         if (
           e instanceof SelfImportError ||

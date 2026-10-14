@@ -197,11 +197,10 @@ describe('issueHostOperation: the closed set (cor:agt:070:03) and who issues (co
     expect(await db.hostOperation.count()).toBe(0);
   });
 
-  it('S4: starting or ending a worker is not issuable in this slice, by anyone; worker.deliver waits for a delivery path', async () => {
+  it('S4: starting a worker is not issuable yet, by anyone; worker.deliver waits for a delivery path (worker.end: sessionEnd.test.ts)', async () => {
     expect(await code(create(ctx(manager.id), { type: 'worker.start', args: { worktree: 'hadron-server/kit', family: 'claude' } }))).toBe('HOST_OPERATION_NOT_ISSUABLE');
     expect(await code(asWorker(ada, () => create(ctx(adaHolder.id), { type: 'worker.start', args: { worktree: 'hadron-server/kit', family: 'claude' } }))))
       .toBe('HOST_OPERATION_NOT_ISSUABLE');
-    expect(await code(create(ctx(manager.id), { type: 'worker.end', args: { sessionId: 's1' } }))).toBe('HOST_OPERATION_NOT_ISSUABLE');
     expect(await code(create(ctx(manager.id), { type: 'worker.deliver', args: { sessionId: 's1', eventId: 'e1' } }))).toBe('HOST_OPERATION_NOT_ISSUABLE');
     expect(await db.hostOperation.count()).toBe(0);
   });
