@@ -28,6 +28,7 @@ import {
   parseWorkerDbName,
   type WorkerCloneName,
 } from './dbWorkers.js';
+import { assertBaseMatchesSchema, ensureSchemaTemplate } from './schemaTemplate.js';
 
 export async function setup() {
   // Stamp this run's id BEFORE any worker is forked (#1091). globalSetup runs
@@ -49,6 +50,9 @@ export async function setup() {
     await client.connect();
     try {
       await client.query('SELECT pg_advisory_lock($1)', [templateLockKey()]);
+      // #1922: serial mode runs against the base itself, so it must have been
+      // built for this checkout's schema (`pnpm db:test-setup` stamps it).
+      await assertBaseMatchesSchema(client);
       await applyTemplateConstraints(client);
     } finally {
       await client.end();
@@ -518,12 +522,17 @@ async function provisionParallel(admin: Client, base: string, runId: string) {
   //
   // One extra `CREATE DATABASE` per run against ~13 worker clones. The template
   // holds schema, not rows.
+  //
+  // #1922: the source is no longer the shared base but the template built from
+  // EMPTY for this checkout's schema fingerprint, so another branch's setup can
+  // neither drop our columns nor leave its triggers in our run.
+  const schemaTemplate = await ensureSchemaTemplate(admin, base);
   const runTemplate = runTemplateDbName(runId, base);
   await admin.query(`DROP DATABASE IF EXISTS ${quoteDbIdent(runTemplate)} WITH (FORCE)`);
-  // Waits on a busy base rather than aborting setup — a developer's open psql
-  // against the test DB blocks CREATE ... TEMPLATE, and the previous code
-  // handled that at the worker-clone site only (#1136 review, Codex P2).
-  await createDatabaseFromTemplate(admin, runTemplate, base);
+  // Waits on a busy source rather than aborting setup — a developer's open psql
+  // against it blocks CREATE ... TEMPLATE, and the previous code handled that
+  // at the worker-clone site only (#1136 review, Codex P2).
+  await createDatabaseFromTemplate(admin, runTemplate, schemaTemplate);
 
   // This checkout's constraints, applied to this run's copy.
   const client = new Client({ connectionString: runTemplateUrl(runId, base) });

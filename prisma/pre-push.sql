@@ -14,7 +14,8 @@
 -- second run. After it has run, `db push` sees the column already in its target
 -- shape and does nothing.
 --
--- Wired into scripts/dev-setup.sh and the db:test-setup script, both of which
+-- Wired into scripts/dev-setup.sh and src/test/schemaTemplate.ts (the test
+-- template build and db:test-setup), all of which
 -- run this → push → post-push.sql.
 
 -- ─── #991: workers.slug ─────────────────────────────────────────────────────
