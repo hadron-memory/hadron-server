@@ -893,24 +893,57 @@ export const agentMutations = {
       const agent = await ctx.db.agent.findUniqueOrThrow({ where: { id } });
       if (agent.deletedAt) throw new AgentNotFoundError(args.ref);
       await requireAgentAccess(ctx, agent, 'ADMIN');
-      const target = async (ref: string | null | undefined): Promise<string | null | undefined> => {
+      // Resolve each target to its node and memory; the gates run again below,
+      // inside the transaction, on what is current there.
+      const resolve = async (ref: string | null | undefined) => {
         if (ref === undefined || ref === null) return ref;
         const { id: nodeId } = await resolveNodeRefForCaller(ctx, ref);
         const node = await ctx.db.node.findFirst({ where: { id: nodeId, deletedAt: null }, select: { memoryId: true } });
-        if (!node || !(await canReadMemory(ctx.db, ctx, node.memoryId))) throw new NodeNotFoundError(ref);
-        return nodeId;
+        if (!node) throw new NodeNotFoundError(ref);
+        return { ref, nodeId, memoryId: node.memoryId };
       };
-      const tasksIndexRef = await target(args.tasksIndexRef);
-      const processesIndexRef = await target(args.processesIndexRef);
-      return ctx.db.agent.update({
-        where: { id },
-        data: {
-          ...(tasksIndexRef !== undefined ? { tasksIndexRef } : {}),
-          ...(processesIndexRef !== undefined ? { processesIndexRef } : {}),
-          updatedBy: ctx.userId ?? ctx.clientId ?? null,
+      const tasks = await resolve(args.tasksIndexRef);
+      const processes = await resolve(args.processesIndexRef);
+      const targets = [tasks, processes].filter((t): t is { ref: string; nodeId: string; memoryId: string } => !!t);
+
+      // Anne's P2-2 on #1896: authorize and write in one transaction, behind
+      // the authority anchors a revoker takes, re-reading the Agent, the
+      // caller's roles and each target fresh, so a demotion, an Agent's
+      // removal or a target becoming unreadable can't slip between the check
+      // and the write.
+      return withAuthorizedTx(
+        ctx,
+        [
+          { kind: 'agent', id },
+          ...(agent.organizationId ? [{ kind: 'org' as const, id: agent.organizationId }] : []),
+          ...(agent.ownerUserId ? [{ kind: 'user' as const, id: agent.ownerUserId }] : []),
+          ...targets.map((t) => ({ kind: 'memory' as const, id: t.memoryId })),
+        ],
+        async (txCtx) => {
+          // The agent anchor has already refused a deleted Agent.
+          const current = await txCtx.db.agent.findUniqueOrThrow({ where: { id } });
+          if (current.organizationId !== agent.organizationId || current.ownerUserId !== agent.ownerUserId) {
+            throw new Error('Agent ownership changed; retry the operation');
+          }
+          await requireAgentAccess(txCtx, current, 'ADMIN');
+          for (const t of targets) {
+            const [node] = await txCtx.db.$queryRaw<Array<{ memory_id: string }>>`
+              SELECT memory_id FROM nodes WHERE id = ${t.nodeId} AND deleted_at IS NULL FOR SHARE`;
+            if (!node || node.memory_id !== t.memoryId || !(await canReadMemory(txCtx.db, txCtx, t.memoryId))) {
+              throw new NodeNotFoundError(t.ref);
+            }
+          }
         },
-        include: AGENT_INCLUDE,
-      });
+        (tx) => tx.agent.update({
+          where: { id },
+          data: {
+            ...(tasks !== undefined ? { tasksIndexRef: tasks?.nodeId ?? null } : {}),
+            ...(processes !== undefined ? { processesIndexRef: processes?.nodeId ?? null } : {}),
+            updatedBy: ctx.userId ?? ctx.clientId ?? null,
+          },
+          include: AGENT_INCLUDE,
+        }),
+      );
     },
 
     /**

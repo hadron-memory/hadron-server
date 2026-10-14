@@ -15,7 +15,12 @@ import { cleanDb } from '../../../test/helpers.js';
 import { resolvers, type Context } from './resolvers.js';
 import { createTestableMcpServer } from '../../../mcp/server.js';
 
-const hooks: { afterScope?: () => Promise<void>; afterLoc?: { loc: string; run: () => Promise<void> }; afterList?: () => Promise<void> } = {};
+const hooks: {
+  afterScope?: () => Promise<void>;
+  afterLoc?: { loc: string; run: () => Promise<void> };
+  afterList?: () => Promise<void>;
+  afterTargetResolved?: () => Promise<void>;
+} = {};
 
 vi.mock('../../../lib/effectiveSystemMemory.js', async (importOriginal) => {
   const mod = await importOriginal<typeof import('../../../lib/effectiveSystemMemory.js')>();
@@ -47,6 +52,22 @@ vi.mock('../../../lib/agentDefinitionLists.js', async (importOriginal) => {
       const out = await mod.listAgentTasks(...args);
       const hook = hooks.afterList;
       hooks.afterList = undefined;
+  hooks.afterTargetResolved = undefined;
+      if (hook) await hook();
+      return out;
+    },
+  };
+});
+// setAgentIndexRefs resolves its targets before its transaction: the hook runs
+// in that window, as a concurrent revoker would.
+vi.mock('./resolvers.nodeRefAccess.js', async (importOriginal) => {
+  const mod = await importOriginal<typeof import('./resolvers.nodeRefAccess.js')>();
+  return {
+    ...mod,
+    resolveNodeRefForCaller: async (...args: Parameters<typeof mod.resolveNodeRefForCaller>) => {
+      const out = await mod.resolveNodeRefForCaller(...args);
+      const hook = hooks.afterTargetResolved;
+      hooks.afterTargetResolved = undefined;
       if (hook) await hook();
       return out;
     },
@@ -60,10 +81,14 @@ vi.mock('../../../integrations/github/syncGraphFromGithub.js', () => ({
 }));
 
 const Q = resolvers.Query as any;
+const M = resolvers.Mutation as any;
 
 let n: number;
 let org: { id: string; urn: string };
 let reader: string;
+let manager: string;
+let team: { id: string };
+let privateMem: { id: string };
 let engineer: { id: string; mem: string; memUrn: string };
 let backend: { id: string; mem: string; memUrn: string };
 const ids: Record<string, string> = {};
@@ -92,10 +117,15 @@ beforeEach(async () => {
   hooks.afterScope = undefined;
   hooks.afterLoc = undefined;
   hooks.afterList = undefined;
+  hooks.afterTargetResolved = undefined;
   n = Math.floor(Math.random() * 1_000_000);
   org = await db.organization.create({ data: { name: 'Race', urn: `race1892-${n}.example` }, select: { id: true, urn: true } });
   reader = (await db.user.create({ data: { handle: `race1892-${n}`, roles: ['READER'] } })).id;
   await db.orgMember.create({ data: { organizationId: org.id, userId: reader, role: 'READER' } });
+  manager = (await db.user.create({ data: { handle: `race1892m-${n}`, roles: ['READER'] } })).id;
+  await db.orgMember.create({ data: { organizationId: org.id, userId: manager, role: 'ADMIN' } });
+  team = await db.memory.create({ data: { class: 'knowledge', visibility: 'ORGANIZATION', organizationId: org.id, name: 'team', urn: `${org.urn}:team` }, select: { id: true } });
+  privateMem = await db.memory.create({ data: { class: 'personal', userId: manager, ownerUserId: manager, name: 'mine', urn: `${org.urn}:mine-${n}` }, select: { id: true } });
   engineer = await agent('engineer');
   backend = await agent('backend-engineer', engineer.id);
   const app = await db.app.create({ data: { name: 'App', urn: `${org.urn}:app`, organizationId: org.id } });
@@ -108,6 +138,8 @@ beforeEach(async () => {
   await db.edge.create({ data: { memoryId: engineer.mem, sourceId: ids.engOpenPr, targetId: ids.engIndex, name: 'when a PR is ready', loc: 'e1' } });
   await db.agent.update({ where: { id: engineer.id }, data: { tasksIndexRef: ids.engIndex } });
   await node('backDeploy', backend.mem, 'tasks:deploy', { isRunnable: true });
+  await node('teamTask', team.id, 'tasks:team-task');
+  await db.edge.create({ data: { memoryId: team.id, sourceId: ids.teamTask, targetId: ids.engIndex, name: 'when the team asks', loc: 'e2' } });
 });
 
 describe('after the scope snapshot', () => {
@@ -115,7 +147,7 @@ describe('after the scope snapshot', () => {
     const insert = async () => node('lateBoot', engineer.mem, 'tasks:late-boot', { role: 'boot-prompt', isRunnable: true });
     hooks.afterScope = insert;
     expect(await listed()).not.toContain(ids.lateBoot);
-    expect(await listed()).toEqual([ids.backDeploy, ids.engOpenPr, ids.engShip]); // untouched content still comes through
+    expect(await listed()).toEqual([ids.backDeploy, ids.engOpenPr, ids.engShip, ids.teamTask]); // untouched content still comes through
     await db.node.delete({ where: { id: ids.lateBoot } });
     hooks.afterScope = insert;
     expect(await mcp({ agentRef: backend.id })).not.toContain('tasks:late-boot');
@@ -123,14 +155,14 @@ describe('after the scope snapshot', () => {
 
   it('a child override added then (not runnable) hides the base\'s task', async () => {
     hooks.afterScope = async () => node('backShip', backend.mem, 'tasks:ship', { isRunnable: false });
-    expect(await listed()).toEqual([ids.backDeploy, ids.engOpenPr]);
+    expect(await listed()).toEqual([ids.backDeploy, ids.engOpenPr, ids.teamTask]);
   });
 });
 
 describe('after one loc lookup', () => {
   it('an index-listed base task turned boot prompt then is not listed', async () => {
     hooks.afterLoc = { loc: 'tasks:open-pr', run: turnOpenPrIntoBootPrompt };
-    expect(await listed()).toEqual([ids.backDeploy, ids.engShip]);
+    expect(await listed()).toEqual([ids.backDeploy, ids.engShip, ids.teamTask]);
   });
 
   it('on MCP too, which serves the list without a second read', async () => {
@@ -147,6 +179,79 @@ describe('after the list is built (GraphQL re-reads the rows it serves)', () => 
       await turnOpenPrIntoBootPrompt();
       await db.node.update({ where: { id: ids.backDeploy }, data: { deletedAt: new Date() } });
     };
-    expect(await listed()).toEqual([ids.engShip]);
+    expect(await listed()).toEqual([ids.engShip, ids.teamTask]);
+  });
+});
+
+describe('after the list is built: GraphQL re-authorizes the rows it serves (Anne P2-1)', () => {
+  it('a readable outside-chain task moved into an unreadable memory is dropped; the rest is served', async () => {
+    expect(await listed()).toContain(ids.teamTask); // control
+    hooks.afterList = async () => {
+      await db.node.update({ where: { id: ids.teamTask }, data: { memoryId: privateMem.id } });
+    };
+    expect(await listed()).toEqual([ids.backDeploy, ids.engOpenPr, ids.engShip]);
+  });
+
+  it('an inherited task the child overrides after the list is dropped, never served as the base\'s', async () => {
+    hooks.afterList = async () => {
+      await node('backShip', backend.mem, 'tasks:ship', { isRunnable: false });
+    };
+    expect(await listed()).toEqual([ids.backDeploy, ids.engOpenPr, ids.teamTask]);
+  });
+
+  it('a reader who loses the Agent\'s system memory after the list gets nothing', async () => {
+    hooks.afterList = async () => {
+      await db.appMember.deleteMany({ where: { userId: reader } });
+    };
+    expect(await listed()).toEqual([]);
+  });
+});
+
+describe('setAgentIndexRefs re-authorizes inside its transaction (Anne P2-2)', () => {
+  const set = (args: Record<string, unknown>) => M.setAgentIndexRefs({}, { ref: backend.id, ...args }, { db, userId: manager, roles: ['READER'] } as Context);
+  const pointer = async () => (await db.agent.findUniqueOrThrow({ where: { id: backend.id } })).tasksIndexRef;
+
+  it('control: an ADMIN sets the pointer', async () => {
+    expect((await set({ tasksIndexRef: ids.backDeploy })).tasksIndexRef).toBe(ids.backDeploy);
+  });
+
+  it('an ADMIN demoted after the first check and before the transaction is refused, and nothing changes', async () => {
+    // The target is the team memory's, which a READER still reads, so only the manage gate can refuse.
+    hooks.afterTargetResolved = async () => {
+      await db.orgMember.updateMany({ where: { userId: manager, organizationId: org.id }, data: { role: 'READER' } });
+    };
+    const err = await set({ tasksIndexRef: ids.teamTask }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect((err as { code?: string }).code).not.toBe('NODE_NOT_FOUND');
+    expect(await pointer()).toBeNull();
+  });
+
+  it('control: the same team-memory target is accepted when nobody is demoted', async () => {
+    expect((await set({ tasksIndexRef: ids.teamTask })).tasksIndexRef).toBe(ids.teamTask);
+  });
+
+  it('a target deleted in that window is refused as not found, and nothing changes', async () => {
+    hooks.afterTargetResolved = async () => {
+      await db.node.update({ where: { id: ids.backDeploy }, data: { deletedAt: new Date() } });
+    };
+    await expect(set({ tasksIndexRef: ids.backDeploy })).rejects.toMatchObject({ code: 'NODE_NOT_FOUND' });
+    expect(await pointer()).toBeNull();
+  });
+
+  it('a target moved into a memory the ADMIN can\'t read in that window is refused, and nothing changes', async () => {
+    const theirs = await db.memory.create({ data: { class: 'personal', userId: reader, ownerUserId: reader, name: 'r', urn: `${org.urn}:r-${n}` } });
+    hooks.afterTargetResolved = async () => {
+      await db.node.update({ where: { id: ids.teamTask }, data: { memoryId: theirs.id } });
+    };
+    await expect(set({ tasksIndexRef: ids.teamTask })).rejects.toMatchObject({ code: 'NODE_NOT_FOUND' });
+    expect(await pointer()).toBeNull();
+  });
+
+  it('the Agent deleted in that window is refused, and nothing changes', async () => {
+    hooks.afterTargetResolved = async () => {
+      await db.agent.update({ where: { id: backend.id }, data: { deletedAt: new Date() } });
+    };
+    await expect(set({ tasksIndexRef: ids.backDeploy })).rejects.toThrow();
+    expect(await pointer()).toBeNull();
   });
 });

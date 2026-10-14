@@ -16,9 +16,10 @@
  * listed (050:15 S2, S4), and each node is listed once.
  *
  * PROCESSES (050:16). The processes the Agent starts or owns (`STARTS`: the
- * sources of the edges into its own processes index, with their triggers),
- * then the processes it's involved in (`INVOLVED`: the sources of `stage …`
- * edges into one of its tasks, with no trigger).
+ * sources of the edges into the processes index of each Agent in the chain,
+ * each read through its own pointer and resolved like tasks, with their
+ * triggers), then the processes it's involved in (`INVOLVED`: the sources of
+ * `stage …` edges into one of its tasks, with no trigger).
  *
  * The effective memory, the chain and the inherited marking are #1885's
  * (src/lib/effectiveSystemMemory.ts); this module adds no chain walk of its
@@ -27,17 +28,18 @@
  * node from outside the chain is returned only when that gate admits its own
  * memory, so nothing here widens a read.
  *
- * PROPOSED placeholders (#10970, queued for Holger as Q1–Q7; Eden #10971). Each
- * is one named constant or branch below, so a ruling is a contained change:
+ * Holger's rulings on Bob's #10970 questions (team chat #10955 item 3, #11002,
+ * #11005), each one branch below:
  *  - Q1 one task, triggers in two chain indexes → the nearest index's trigger.
- *  - Q2 an index source outside every chain memory → listed iff readable.
+ *  - Q2 an index source outside every chain memory → listed only if the reader
+ *    may already read it through the shared gate.
  *  - Q3 an involved process → a `stage …` edge whose source has role family
  *    `process` ({@link PROCESS_ROLE}).
- *  - Q4 where involved processes come from → any memory the reader may read.
- *  - Q5 an Agent with no pointer → its tasks are still its effective runnable
- *    nodes; it starts or owns no process.
+ *  - Q4 involved processes come from any memory the reader may already read.
+ *  - Q5 an Agent with no pointer → its tasks are still its effective tasks,
+ *    its bases' indexes included; its owned processes are its bases'.
  *  - Q6 a process both owned and staged → listed once, as `STARTS`.
- *  - Q7 owned processes → the Agent's own pointer only, not its bases'.
+ *  - Q7 owned processes union the chain, nearest wins, as tasks do.
  *
  * Not built here: stage edges whose source is a BASE's process, read through
  * the child. Those are an inherited node's edges, which #1893 resolves; until
@@ -140,7 +142,39 @@ async function agentContext(db: Db, agent: GatedAgent) {
     return { ...pick(row), inheritedFrom: hit.inheritedFrom };
   };
 
-  return { links, chainMemoryIds, scope, effectiveAt };
+  /** The base an inherited row comes from, carrying the child it was read through. */
+  const inheritedOf = (memoryId: string): InheritedFrom | null => {
+    const from = scope.inheritedFrom.get(memoryId);
+    return from ? { ...from, via: agent.systemMemoryId } : null;
+  };
+
+  return { links, chainMemoryIds, scope, effectiveAt, inheritedOf };
+}
+
+/**
+ * The index nodes the chain's Agents name in `field`, nearest Agent first,
+ * each Agent's through its own pointer (050:15). An index two Agents share
+ * keeps its NEAREST place (Anne's P3 on #1896), so Q1's nearest trigger is
+ * the nearest Agent's.
+ */
+async function chainIndexIds(
+  db: Db,
+  agent: GatedAgent,
+  ctx: Awaited<ReturnType<typeof agentContext>>,
+  field: 'tasksIndexRef' | 'processesIndexRef',
+): Promise<string[]> {
+  const pointers = await db.agent.findMany({
+    where: { id: { in: ctx.links.map((l) => l.agentId) } },
+    select: { id: true, tasksIndexRef: true, processesIndexRef: true },
+  });
+  const pointerOf = new Map(pointers.map((p) => [p.id, p[field]]));
+  pointerOf.set(agent.id, agent[field]);
+  const out: string[] = [];
+  for (const l of ctx.links) {
+    const id = pointerOf.get(l.agentId);
+    if (id && !out.includes(id)) out.push(id);
+  }
+  return out;
 }
 
 function pick(row: { id: string; memoryId: string; loc: string; name: string }) {
@@ -213,16 +247,7 @@ async function tasksOf(
   agent: GatedAgent,
   ctx: Awaited<ReturnType<typeof agentContext>>,
 ): Promise<AgentTaskEntry[]> {
-  // Each chain Agent's own pointer, nearest first (050:15: "each base's index
-  // is read through its own pointer").
-  const pointers = await db.agent.findMany({
-    where: { id: { in: ctx.links.map((l) => l.agentId) } },
-    select: { id: true, tasksIndexRef: true },
-  });
-  const pointerOf = new Map(pointers.map((p) => [p.id, p.tasksIndexRef]));
-  pointerOf.set(agent.id, agent.tasksIndexRef);
-  const indexIds = ctx.links.map((l) => pointerOf.get(l.agentId)).filter((id): id is string => !!id);
-
+  const indexIds = await chainIndexIds(db, agent, ctx, 'tasksIndexRef');
   const listed = await resolveIndexSources(db, auth, ctx, await indexEdgeSources(db, indexIds));
 
   // S5 — every runnable node in the effective memory is a task, edge or not.
@@ -240,7 +265,7 @@ async function tasksOf(
   const out = new Map<string, AgentTaskEntry>(listed);
   for (const row of runnable) {
     if (out.has(row.id)) continue;
-    out.set(row.id, { node: { ...pick(row), inheritedFrom: ctx.scope.inheritedFrom.get(row.memoryId) ?? null }, trigger: null });
+    out.set(row.id, { node: { ...pick(row), inheritedFrom: ctx.inheritedOf(row.memoryId) }, trigger: null });
   }
   return [...out.values()].sort(byLoc);
 }
@@ -254,8 +279,8 @@ function isProcessRole(role: string | null): boolean {
 }
 
 /**
- * An Agent's processes (cor:dmo:050:16): those it starts or owns, through its
- * own processes index (Q7), then those it's involved in, derived from `stage …`
+ * An Agent's processes (cor:dmo:050:16): those it starts or owns, through the
+ * chain's processes indexes (Q7), then those it's involved in, from `stage …`
  * edges into its tasks (050:15's list). A process in both is listed once, as
  * `STARTS` (Q6).
  */
@@ -270,7 +295,7 @@ export async function listAgentProcesses(
 
   const owned = await resolveIndexSources(
     db, auth, ctx,
-    await indexEdgeSources(db, agent.processesIndexRef ? [agent.processesIndexRef] : []),
+    await indexEdgeSources(db, await chainIndexIds(db, agent, ctx, 'processesIndexRef')),
   );
   const out = new Map<string, AgentProcessEntry>();
   for (const { node, trigger } of [...owned.values()].sort(byLoc)) out.set(node.id, { node, kind: 'STARTS', trigger });
@@ -318,4 +343,37 @@ export async function listAgentProcesses(
     out.set(node.id, { node, kind: 'INVOLVED', trigger: null });
   }
   return [...out.values()];
+}
+
+/**
+ * Anne's P2-1 on #1896: a surface that re-reads the rows it serves (GraphQL
+ * hydrates full Node rows after the list is built) must re-authorize what it
+ * actually read, not what the list saw. A row is served only if it is still
+ * live, the reader may still read the Agent's system memory, and then:
+ *  - an inherited row is still the node the child passes down at its loc
+ *    (#1891's {@link stillInherited}: not overridden since, not a boot prompt);
+ *  - any other row's CURRENT memory is still readable through the shared gate.
+ * Returns the ids that pass.
+ */
+export async function reverifyServed(
+  db: Db,
+  auth: AuthContext,
+  agentSystemMemoryId: string,
+  listed: ListedNode[],
+  rows: Array<{ id: string; memoryId: string; loc: string; role: string | null; deletedAt: Date | null }>,
+): Promise<Set<string>> {
+  const ok = new Set<string>();
+  if (!(await canReadMemory(db, auth, agentSystemMemoryId))) return ok;
+  const byId = new Map(rows.map((r) => [r.id, r]));
+  const direct = listed.filter((n) => !n.inheritedFrom).map((n) => byId.get(n.id)?.memoryId).filter((m): m is string => !!m);
+  const readable = await filterReadableMemoryIds(db, auth, direct);
+  for (const n of listed) {
+    const row = byId.get(n.id);
+    if (!row || row.deletedAt) continue;
+    const pass = n.inheritedFrom
+      ? await stillInherited(db, { ...n.inheritedFrom, via: n.inheritedFrom.via ?? agentSystemMemoryId }, row)
+      : readable.has(row.memoryId);
+    if (pass) ok.add(n.id);
+  }
+  return ok;
 }

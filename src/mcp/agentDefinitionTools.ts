@@ -34,11 +34,27 @@ async function nodeUrns(db: PrismaClient, nodes: ListedNode[]): Promise<Map<stri
   return new Map(nodes.map((n) => [n.id, safeNodeUrnV2(memUrn.get(n.memoryId)!, n.loc)]));
 }
 
-/** One entry's lines: name and URN, then whatever of trigger, kind and base it has. */
-function entryLines(node: ListedNode, urn: string, extra: string[]): string[] {
+/**
+ * One entry's lines: name and URN, then whatever of trigger, kind and base it
+ * has. An inherited entry also says where to read it: at its loc in the
+ * Agent's own system memory, which reads through to the base (#1891). Its
+ * base URN may be closed to a reader of the child only (ruling (B), #10968;
+ * Anne's P3 on #1896).
+ */
+function entryLines(node: ListedNode, urn: string, extra: string[], childMemoryUrn: string | null): string[] {
   const lines = [`- ${node.name} — ${urn}`, ...extra.map((l) => `  ${l}`)];
-  if (node.inheritedFrom) lines.push(`  Inherited from: ${emitEntityUrnV2('agent', node.inheritedFrom.agentUrn)}`);
+  if (node.inheritedFrom) {
+    lines.push(`  Inherited from: ${emitEntityUrnV2('agent', node.inheritedFrom.agentUrn)}`);
+    if (childMemoryUrn) lines.push(`  Read through: ${safeNodeUrnV2(childMemoryUrn, node.loc)}`);
+  }
   return lines;
+}
+
+/** The bare URN of the Agent's system memory, for the Read through line. */
+async function systemMemoryUrn(db: PrismaClient, agentId: string): Promise<string | null> {
+  const agent = await db.agent.findUnique({ where: { id: agentId }, select: { systemMemoryId: true } });
+  if (!agent?.systemMemoryId) return null;
+  return (await db.memory.findUnique({ where: { id: agent.systemMemoryId }, select: { urn: true } }))?.urn ?? null;
 }
 
 export function registerAgentDefinitionTools(server: McpServer, deps: { db: PrismaClient; auth: AuthContext }): void {
@@ -47,7 +63,7 @@ export function registerAgentDefinitionTools(server: McpServer, deps: { db: Pris
 
   server.tool(
     'hadron_agent_tasks',
-    "List an Agent's tasks (cor:dmo:050:15): every runnable node in its effective system memory, across its base chain, and every task the tasks index (Agent.tasksIndexRef) of an Agent in the chain lists, each once. A task an index lists carries that edge's name as its Trigger; a task no index lists has none. A base's task keeps its own URN and says which Agent it is inherited from. Readable by whoever may read the Agent's system memory. Returns the same list as GraphQL agentTaskList. To act on a task, follow the Trigger that matches your situation and read the task by its URN.",
+    "List an Agent's tasks (cor:dmo:050:15): every runnable node in its effective system memory, across its base chain, and every task the tasks index (Agent.tasksIndexRef) of an Agent in the chain lists, each once. A task an index lists carries that edge's name as its Trigger; a task no index lists has none. A base's task keeps its own URN and says which Agent it is inherited from. Readable by whoever may read the Agent's system memory. Returns the same list as GraphQL agentTaskList. To act on a task, follow the Trigger that matches your situation and read the task by its URN; for an inherited one, read it at its 'Read through' address (the same loc in this Agent's own system memory), since you may be able to read the Agent and not its base.",
     { agentRef },
     async ({ agentRef: ref }) => {
       try {
@@ -55,9 +71,10 @@ export function registerAgentDefinitionTools(server: McpServer, deps: { db: Pris
         const entries = await listAgentTasks(db, auth, id, ref);
         if (entries.length === 0) return textResult(`No tasks for Agent ${ref}.`);
         const urns = await nodeUrns(db, entries.map((e) => e.node));
+        const child = await systemMemoryUrn(db, id);
         const lines = [`${entries.length} task(s) for Agent ${ref}:`];
         for (const e of entries) {
-          lines.push(...entryLines(e.node, urns.get(e.node.id)!, e.trigger ? [`Trigger: ${e.trigger}`] : []));
+          lines.push(...entryLines(e.node, urns.get(e.node.id)!, e.trigger ? [`Trigger: ${e.trigger}`] : [], child));
         }
         return textResult(lines.join('\n'));
       } catch (e) {
@@ -68,7 +85,7 @@ export function registerAgentDefinitionTools(server: McpServer, deps: { db: Pris
 
   server.tool(
     'hadron_agent_processes',
-    "List an Agent's processes (cor:dmo:050:16): the ones it starts or owns, listed in its processes index (Agent.processesIndexRef) with each edge's Trigger, then the ones it's involved in, derived from stage edges (named 'stage …') to one of its tasks, which carry no trigger. Each is listed once, with its Kind. Same gate as hadron_agent_tasks; returns the same list as GraphQL agentProcessList.",
+    "List an Agent's processes (cor:dmo:050:16): the ones it starts or owns, listed in its processes index (Agent.processesIndexRef) with each edge's Trigger, then the ones it's involved in, derived from stage edges (named 'stage …') to one of its tasks, which carry no trigger. Each is listed once, with its Kind. Same gate as hadron_agent_tasks; returns the same list as GraphQL agentProcessList. A base's process the Agent inherits says 'Inherited from' and gives a 'Read through' address in this Agent's own system memory.",
     { agentRef },
     async ({ agentRef: ref }) => {
       try {
@@ -76,11 +93,12 @@ export function registerAgentDefinitionTools(server: McpServer, deps: { db: Pris
         const entries = await listAgentProcesses(db, auth, id, ref);
         if (entries.length === 0) return textResult(`No processes for Agent ${ref}.`);
         const urns = await nodeUrns(db, entries.map((e) => e.node));
+        const child = await systemMemoryUrn(db, id);
         const lines = [`${entries.length} process(es) for Agent ${ref}:`];
         for (const e of entries) {
           const extra = [`Kind: ${e.kind === 'STARTS' ? 'starts or owns' : 'involved'}`];
           if (e.trigger) extra.push(`Trigger: ${e.trigger}`);
-          lines.push(...entryLines(e.node, urns.get(e.node.id)!, extra));
+          lines.push(...entryLines(e.node, urns.get(e.node.id)!, extra, child));
         }
         return textResult(lines.join('\n'));
       } catch (e) {

@@ -198,8 +198,22 @@ describe('050:15 — an Agent\'s tasks', () => {
     const listed = await tasks();
     expect(listed.find((t) => t.node.id === ids.teamTask)?.trigger).toBe('when the team asks');
     expect(listed.map((t) => t.node.id)).not.toContain(ids.privTask);
+    // MCP serves the core's list with no second read: the core's own gate is what keeps it out.
+    const text = await mcp(reader, 'hadron_agent_tasks', { agentRef: backend.id });
+    expect(text).toContain('tasks:team-task');
+    expect(text).not.toContain('tasks:private-task');
     // The manager, who owns the private memory, does see it.
     expect((await tasks(manager)).map((t) => t.node.id)).toContain(ids.privTask);
+  });
+
+  it('an index two chain Agents share keeps its nearest place, so its trigger beats a farther Agent\'s (Anne P3)', async () => {
+    // staff → backend → engineer; staff points at engineer's own index.
+    const staffMem = await db.memory.create({ data: { class: 'system', organizationId: org.id, name: 'staff system', urn: `${org.urn}:staff-system` } });
+    const staff = await db.agent.create({ data: { organizationId: org.id, name: 'staff', urn: `${org.urn}:staff`, visibility: 'ORGANIZATION', systemMemoryId: staffMem.id, extendsAgentId: backend.id, tasksIndexRef: ids.engIndex } });
+    const list = (await Q.agentTaskList({}, { ref: staff.id }, ctx(manager))) as Array<{ node: any; trigger: string | null }>;
+    const review = list.filter((t) => t.node.loc === 'tasks:review');
+    // backend's own review node is in effect; the nearest index listing it is the shared one, at staff.
+    expect(review.map((t) => [t.node.id, t.trigger])).toEqual([[ids.backReview, 'when asked to review']]);
   });
 
   it('Q5: an Agent with no tasks index still lists its effective runnable nodes', async () => {
@@ -262,14 +276,25 @@ describe('050:16 — an Agent\'s processes', () => {
     await node('privProc', privateMem.id, 'processes:private', { role: 'process' });
     await edge('privProc', 'backDeploy', 'stage 1: private');
     expect((await processes()).map((p) => p.node.id)).not.toContain(ids.privProc);
+    expect(await mcp(reader, 'hadron_agent_processes', { agentRef: backend.id })).not.toContain('processes:private');
+    expect(await mcp(manager, 'hadron_agent_processes', { agentRef: backend.id })).toContain('processes:private');
     expect((await processes(manager)).map((p) => p.node.id)).toContain(ids.privProc);
   });
 
-  it('Q7: a base\'s processes index is not the child\'s', async () => {
+  it('Q7 (Holger #11002): a base\'s owned processes are the child\'s too, inherited, nearest trigger winning', async () => {
     await node('engProcIndex', engineer.mem, 'processes');
     await edge('engBaseRelease', 'engProcIndex', 'when the base releases');
     await db.agent.update({ where: { id: engineer.id }, data: { processesIndexRef: ids.engProcIndex } });
-    expect((await processes()).map((p) => p.node.id)).not.toContain(ids.engBaseRelease);
+    const got = (await processes()).map((p) => [p.node.id, p.kind, p.trigger, N.inheritedFrom(p.node)?.agentUrn ?? null]);
+    expect(got).toEqual([
+      [ids.engBaseRelease, 'STARTS', 'when the base releases', agentUrn(engineer)],
+      [ids.backRelease, 'STARTS', 'when I cut a release', null],
+      [ids.drive, 'INVOLVED', null, null],
+      [ids.shipIt, 'INVOLVED', null, null],
+    ]);
+    // Q5: with no processes index of its own, the child still owns its base's.
+    await db.agent.update({ where: { id: backend.id }, data: { processesIndexRef: null } });
+    expect((await processes()).filter((p) => p.kind === 'STARTS').map((p) => p.node.id)).toEqual([ids.engBaseRelease]);
   });
 });
 
@@ -316,6 +341,17 @@ describe('050:15 S3 / 050:16 S4 — MCP returns the same lists', () => {
     const text = await mcp(reader, 'hadron_agent_tasks', { agentRef: `hrn:agent:${backend.urn}` });
     expect(parse(text)).toEqual(gql);
     expect(text).toContain(`Inherited from: ${agentUrn(engineer)}`);
+  });
+
+  it('an inherited entry\'s Read through address works for a reader of the child only (Anne P3, ruling (B))', async () => {
+    const text = await mcp(reader, 'hadron_agent_tasks', { agentRef: backend.id });
+    const through = nodeUrn(backend.memUrn, 'tasks:open-pr');
+    expect(text).toContain(`Read through: ${through}`);
+    expect(await mcp(reader, 'hadron_get_node', { urn: through })).toContain('engOpenPr');
+    // The base URN itself is closed to this reader, which is why the line exists.
+    expect(await mcp(reader, 'hadron_get_node', { urn: nodeUrn(engineer.memUrn, 'tasks:open-pr') })).toContain('not found');
+    // Own entries carry no such line.
+    expect(text).not.toContain(`Read through: ${nodeUrn(backend.memUrn, 'tasks:deploy')}`);
   });
 
   it('processes: the same entries, kinds and triggers', async () => {
