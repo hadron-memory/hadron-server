@@ -274,11 +274,9 @@ describe('Orca attention router — the happy path', () => {
     expect(adopted(c)).toBe(TOKEN_1);
     expect(fake.sent).toHaveLength(1);
     expect(fake.sent[0][0]).toBe('term_eli');
-    expect(fake.sent[0][1]).toContain('5 relevant unread (2 mentions');
-    expect(fake.sent[0][1]).toContain('unread #100–#120');
-    expect(fake.sent[0][1]).toContain('latest mention #110');
-    expect(fake.sent[0][1]).toContain('as of send');
-    expect(fake.sent[0][1]).toContain("no chat post or 'read/no-action' comment");
+    expect(fake.sent[0][1]).toContain('5 unread, 2 mentions');
+    expect(fake.sent[0][1]).toContain('#100–#120');
+    expect(fake.sent[0][1]).toContain('mark read, finish silently, no post');
     const verbs = fake.calls.map((a) => a.slice(1, 3).join(' '));
     expect(verbs.indexOf('terminal wait')).toBeLessThan(verbs.indexOf('terminal read'));
     expect(verbs.indexOf('terminal read')).toBeLessThan(verbs.indexOf('terminal send'));
@@ -507,24 +505,27 @@ describe('Orca attention router — untracked terminals: unknown is not busy (#7
 describe('nudgeText read anchor (#1805 P2s, #1811 large-gap branch)', () => {
   it('present anchor: names the first unread, BOTH forms, bounded — no --all', () => {
     const t = nudgeText(worker('w-eli', 'Eli', { mentions: 2, unread: 5, first: 100, relevant: 110, head: 120 }));
-    expect(t).toContain('START AT #100 (your first unread message of any kind)');
+    expect(t).toContain('Start at #100');
     expect(t).toContain('--since 99 --limit 200');
     expect(t).toContain('nextSince');
-    expect(t).toContain('hadron_team_chat_read');
-    expect(t).toContain('sinceSeq=99');
+    expect(t).toContain('never the newest page alone');
+    expect(t).toContain('⇒ mark read, finish silently, no post');
+    // The MCP variant is deliberately gone from the every-cycle nudge: the
+    // router only nudges Orca terminals, and every roster worker is CLI-bound.
+    expect(t).not.toContain('hadron_team_chat_read');
+    expect(t).not.toContain('sinceSeq');
     expect(t).not.toContain('--all');
     expect(t).not.toContain('\n');
   });
   it('null anchor (defensive): no firstUnreadSeq means the old generic text, no START clause, no mentions walk', () => {
     const t = nudgeText({ worker: 'w-eli', workerName: 'Eli', channel: CHANNEL, unread: 3, unreadMentions: 1, firstUnreadSeq: null, lastRelevantSeq: 110, lastSeq: 120 });
-    expect(t).not.toContain('START AT');
-    expect(t).toContain('Read team chat unfiltered');
+    expect(t).not.toContain('Start at');
+    expect(t).toContain('Read the newest page unfiltered');
     expect(t).not.toContain('--mentions-me');
   });
   it('first unread 1, SMALL span (cursor-0 worker near the head): since clamps to 0, still bounded', () => {
     const t = nudgeText(worker('w-eli', 'Eli', { mentions: 2, unread: 349, first: 1, relevant: 110, head: 350 }));
     expect(t).toContain('--since 0 --limit 200');
-    expect(t).toContain('sinceSeq=0');
     expect(t).not.toContain('--all');
     expect(t).not.toContain('--mentions-me');
   });
@@ -534,12 +535,13 @@ describe('nudgeText read anchor (#1805 P2s, #1811 large-gap branch)', () => {
     expect(t).toContain('sinceSeq=0');
     expect(t).toContain('beforeSeq=9002');
     expect(t).not.toContain('--all');
-    expect(t).not.toContain('START AT');
+    expect(t).not.toContain('Start at');
   });
   it('LARGE GAP (span > 400): mentions-only anchor — filter, both forms, own-session mark ceiling, failure discipline (#1811)', () => {
     const t = nudgeText(worker('w-eli', 'Eli', { mentions: 2, unread: 9841, first: 61, relevant: 9750, head: 9901 }));
     expect(t).toContain('LARGE GAP');
-    expect(t).toContain('unread #61–#9901, latest mention #9750');
+    expect(t).toContain('#61–#9901');
+    expect(t).toContain('Latest mention #9750');
     expect(t).toContain('--mentions-me --since 60 --before 9902 --limit 200');
     expect(t).toContain('sinceSeq=60');
     expect(t).toContain('hadron_team_chat_read');
@@ -548,7 +550,7 @@ describe('nudgeText read anchor (#1805 P2s, #1811 large-gap branch)', () => {
     expect(t).toContain('never auto-marks');
     expect(t).toContain('marks NOTHING');
     expect(t).toContain('your OWN session');
-    expect(t).not.toContain('START AT');
+    expect(t).not.toContain('Start at');
     expect(t).not.toContain('Read team chat unfiltered');
     expect(t).not.toContain('--all');
     expect(t).not.toContain('\n');
@@ -590,7 +592,7 @@ describe('nudgeText read anchor (#1805 P2s, #1811 large-gap branch)', () => {
   it('the boundary is deterministic: span 399 and exactly 400 keep the unfiltered anchor, 401 switches (#1811)', () => {
     for (const head of [499, 500]) {
       const t = nudgeText(worker('w-eli', 'Eli', { first: 100, head }));
-      expect(t).toContain('START AT #100');
+      expect(t).toContain('Start at #100');
       expect(t).not.toContain('--mentions-me');
     }
     expect(nudgeText(worker('w-eli', 'Eli', { first: 100, head: 501 }))).toContain('--mentions-me');
@@ -637,10 +639,9 @@ describe('Orca attention router — fresh counts at send time (#1616)', () => {
     const out = poll(c);
     expect(out).toMatchObject({ nudged: ['Eli'] });
     expect(out.held.Baloo).toBeTruthy();
-    expect(fake.sent[0][1]).toContain('9 relevant unread (3 mentions');
-    expect(fake.sent[0][1]).toContain('unread #100–#121');
-    expect(fake.sent[0][1]).toContain('latest mention #118');
-    expect(fake.sent[0][1]).not.toContain('5 relevant unread');
+    expect(fake.sent[0][1]).toContain('9 unread, 3 mentions');
+    expect(fake.sent[0][1]).toContain('#100–#121');
+    expect(fake.sent[0][1]).not.toContain('5 unread');
     expect(new State(c.stateDir).ledger().nudged['w-eli'].relevantSeq).toBe(118);
     expect(adopted(c)).toBeNull(); // held, and the fresh scan's own token is never adopted
   });
@@ -768,7 +769,6 @@ describe('Orca attention router — fresh counts at send time (#1616)', () => {
     fake.fresh = [worker('w-eli', 'Eli', { relevant: 125 }), worker('w-baloo', 'Baloo', { relevant: 115 })];
     const first = poll(c);
     expect(first).toMatchObject({ nudged: ['Eli', 'Baloo'], adopted: true });
-    expect(fake.sent[0][1]).toContain('latest mention #125');
     // Only Eli's record outlives the adopted token (125 above its 110
     // horizon); Baloo's 115 equals its horizon, so the token covers it.
     expect(Object.keys(new State(c.stateDir).ledger().nudged)).toEqual(['w-eli']);
@@ -1465,7 +1465,7 @@ describe('Orca attention router — coordinator/lifecycle liveness rule (#1826)'
     expect(text).toContain('mark read');
     expect((text.match(/mark read/g) ?? []).length).toBe(1); // once, not twice (Taylor #9748)
     expect(text).toContain('as of send');
-    expect(text).not.toContain('relevant unread'); // its own literal: never a counts claim
+    expect(text).not.toContain('unread,'); // its own literal: never a counts claim
     expect(text).not.toMatch(/\d+ mention/); // identifying the rule is fine; a count claim never is
     // The full guard chain ran, in order, with the cheap probe / full gate / recheck waits.
     const verbs = fake.calls.map((a) => a.slice(1, 3).join(' '));
@@ -1656,7 +1656,7 @@ describe('Orca attention router — coordinator/lifecycle liveness rule (#1826)'
     const out = poll(c);
     expect(out).toMatchObject({ nudged: ['Ada'], liveness: [] });
     expect(fake.sent).toHaveLength(1); // exactly one send — the mention nudge
-    expect(fake.sent[0][1]).toContain('relevant unread (1 mention'); // the mention shape, not the liveness text
+    expect(fake.sent[0][1]).toContain('1 mention'); // the mention shape, not the liveness text
     const rec = readLiveness(c)['w-ada'];
     expect(rec.idleSince).toBeGreaterThan(Date.now() - 60_000); // clock restarted at the send
     expect(rec.coveredFrontier).toBeUndefined(); // no liveness frontier claimed
