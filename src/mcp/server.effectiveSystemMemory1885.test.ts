@@ -1,0 +1,133 @@
+/**
+ * #1885 slice 2 — reading an Agent's effective system memory over MCP
+ * (cor:dmo:050:14; addressing per team chat #10929). Same fixture and reader as
+ * the GraphQL file: a participant of an App that installs only
+ * `backend-engineer` reads its system memory and holds no access to
+ * `engineer`'s, so every engineer node they see came through the child.
+ *
+ * Pinned: hadron_get_node, hadron_get_nodes (both forms), hadron_list_nodes and
+ * hadron_find_nodes return the effective memory; inherited nodes keep their own
+ * URN, say `Inherited from`, and show none of the base's edges or records; the
+ * child's own node wins; a base's boot prompt and overridden nodes never come
+ * through, by any address.
+ */
+
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { db } from '../integrations/db/client.js';
+import { cleanDb } from '../test/helpers.js';
+import { createTestableMcpServer } from './server.js';
+import type { AuthContext } from '../middleware/auth.js';
+
+vi.mock('../integrations/github/writeNodeToGit.js', () => ({
+  writeNodeToGit: vi.fn().mockResolvedValue(undefined),
+}));
+vi.mock('../integrations/github/syncGraphFromGithub.js', () => ({
+  syncGraphFromGithub: vi.fn().mockResolvedValue({ error: null }),
+}));
+
+let n: number;
+let org: { id: string; urn: string };
+let reader: string;
+let engineer: { id: string; urn: string; mem: string; memUrn: string };
+let backend: { id: string; urn: string; mem: string; memUrn: string };
+
+const auth = (): AuthContext => ({ userId: reader, roles: ['READER'], clientId: `user:${reader}` });
+const call = (tool: string, params: Record<string, unknown>) => createTestableMcpServer(auth()).callToolText(tool, params);
+const childUrn = (loc: string) => `hrn:node:${backend.memUrn}:${loc}`;
+const baseUrn = (loc: string) => `hrn:node:${engineer.memUrn}:${loc}`;
+
+async function agent(slug: string, base?: { id: string }) {
+  const memUrn = `${org.urn}:${slug}-system`;
+  const mem = await db.memory.create({ data: { class: 'system', organizationId: org.id, name: `${slug} system`, urn: memUrn } });
+  const a = await db.agent.create({
+    data: { organizationId: org.id, name: slug, urn: `${org.urn}:${slug}`, visibility: 'ORGANIZATION', systemMemoryId: mem.id, extendsAgentId: base?.id ?? null },
+  });
+  return { id: a.id, urn: a.urn, mem: mem.id, memUrn };
+}
+
+async function node(memoryId: string, loc: string, name: string, data: { role?: string; isRunnable?: boolean } = {}) {
+  return (await db.node.create({ data: { memoryId, loc, name, content: `${name} body`, role: data.role ?? null, isRunnable: data.isRunnable ?? null } })).id;
+}
+
+beforeEach(async () => {
+  await cleanDb(db);
+  n = Math.floor(Math.random() * 1_000_000);
+  org = await db.organization.create({ data: { name: 'Eff', urn: `effmcp-${n}.example` }, select: { id: true, urn: true } });
+  reader = (await db.user.create({ data: { handle: `effmcp-reader-${n}`, roles: ['READER'] } })).id;
+  await db.orgMember.create({ data: { organizationId: org.id, userId: reader, role: 'READER' } });
+  engineer = await agent('engineer');
+  backend = await agent('backend-engineer', engineer);
+  const app = await db.app.create({ data: { name: 'App', urn: `${org.urn}:app`, organizationId: org.id } });
+  await db.appAgent.create({ data: { appId: app.id, agentId: backend.id } });
+  await db.appMember.create({ data: { appId: app.id, userId: reader, role: 'member' } });
+
+  const engOpenPr = await node(engineer.mem, 'tasks:open-pr', 'EngOpenPr', { isRunnable: true });
+  const engRelease = await node(engineer.mem, 'processes:release', 'EngRelease', { role: 'process.release' });
+  await node(engineer.mem, 'tasks:ship', 'EngShip', { isRunnable: true });
+  await node(engineer.mem, 'prompts:boot', 'EngBoot', { role: 'boot-prompt' });
+  await node(backend.mem, 'tasks:open-pr', 'BackOpenPr', { isRunnable: true });
+  await node(backend.mem, 'notes:own', 'BackOwn');
+  await db.edge.create({ data: { memoryId: engineer.mem, sourceId: engRelease, targetId: engOpenPr, name: 'stage', loc: 'processes:release:stage:tasks:open-pr' } });
+});
+
+describe('hadron_get_node through the child', () => {
+  it('reads engineer\'s release process under its own URN, marked, with no edges', async () => {
+    const out = await call('hadron_get_node', { urn: childUrn('processes:release') });
+    expect(out).toContain('EngRelease body');
+    expect(out).toContain(baseUrn('processes:release'));
+    expect(out).toContain(`Inherited from: hrn:agent:${engineer.urn}`);
+    // The stage edge leads to engineer's overridden tasks:open-pr: never shown.
+    expect(out).not.toContain('Related:');
+    expect(out).not.toContain(baseUrn('tasks:open-pr'));
+  });
+
+  it('the child\'s own node wins; a base boot prompt and an overridden node are not reachable', async () => {
+    const own = await call('hadron_get_node', { urn: childUrn('tasks:open-pr') });
+    expect(own).toContain('BackOpenPr body');
+    expect(own).not.toContain('Inherited from');
+    expect(await call('hadron_get_node', { urn: childUrn('prompts:boot') })).toMatch(/not found/);
+    // S7: by its own URN, the overridden node, and (until the A/B ruling) every base node.
+    expect(await call('hadron_get_node', { urn: baseUrn('tasks:open-pr') })).toMatch(/not found/i);
+    expect(await call('hadron_get_node', { urn: baseUrn('processes:release') })).toMatch(/not found/i);
+  });
+});
+
+describe('hadron_get_nodes matches the single read', () => {
+  it('an explicit set through the child returns the inherited node marked, the own node, and lists the rest unavailable', async () => {
+    const out = await call('hadron_get_nodes', {
+      refs: [childUrn('processes:release'), childUrn('tasks:open-pr'), childUrn('prompts:boot'), baseUrn('tasks:open-pr')],
+    });
+    expect(out).toContain('EngRelease body');
+    expect(out).toContain(`Inherited from: hrn:agent:${engineer.urn}`);
+    expect(out).toContain('BackOpenPr body');
+    expect(out).not.toContain('EngOpenPr body');
+    expect(out).not.toContain('EngBoot body');
+    expect(out).toContain(childUrn('prompts:boot'));
+  });
+
+  it('a prefix read of the child\'s tasks is its effective tasks', async () => {
+    const out = await call('hadron_get_nodes', { memoryUrn: `hrn:mem:${backend.memUrn}`, locPrefix: 'tasks:' });
+    expect(out).toContain('BackOpenPr body');
+    expect(out).toContain('EngShip body');
+    expect(out).not.toContain('EngOpenPr body');
+  });
+});
+
+describe('hadron_list_nodes and hadron_find_nodes over the child', () => {
+  it('lists the effective tree, inherited rows under their own URN and marked', async () => {
+    const out = await call('hadron_list_nodes', { memoryUrn: `hrn:mem:${backend.memUrn}`, depth: 3 });
+    expect(out).toContain(`${baseUrn('processes:release')} — EngRelease (inherited from hrn:agent:${engineer.urn})`);
+    expect(out).toContain(`${baseUrn('tasks:ship')} — EngShip (inherited`);
+    expect(out).toContain(`${childUrn('tasks:open-pr')} — BackOpenPr`);
+    expect(out).not.toContain('EngOpenPr');
+    expect(out).not.toContain('EngBoot');
+  });
+
+  it('finds runnable tasks across the effective memory', async () => {
+    const out = await call('hadron_find_nodes', { query: '*', memoryUrn: `hrn:mem:${backend.memUrn}`, isRunnable: true });
+    expect(out).toContain('BackOpenPr');
+    expect(out).toContain('EngShip');
+    expect(out).toContain(`Inherited from: hrn:agent:${engineer.urn}`);
+    expect(out).not.toContain('EngOpenPr');
+  });
+});
