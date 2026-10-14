@@ -12,6 +12,8 @@ import {
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { AgentNotFoundError } from '../../../lib/entityRef/errors.js';
+import { listAgentProcesses, listAgentTasks, reverifyServed, type ListedNode } from '../../../lib/agentDefinitionLists.js';
+import { decryptNodesBatch } from '../../../lib/nodeCrypto.js';
 import { isAgentInstalled } from '../../../lib/appAgent.js';
 import {
   type Context,
@@ -30,7 +32,53 @@ import {
   AGENT_INCLUDE,
 } from './resolvers.helpers.js';
 
+/**
+ * #1892 — the full Node rows behind a list's entries, in list order, each
+ * stamped `inheritedFrom` where the list marked it, so the inherited-node
+ * projection (resolvers.inheritedNode.ts) applies to every Node field. The
+ * rows are re-read here, so what is served is re-authorized on the version
+ * read (`reverifyServed`, Anne's P2-1 on #1896): an entry deleted, moved,
+ * overridden, turned boot prompt or made unreadable since the list was built
+ * is dropped rather than served.
+ */
+async function listedEntries<E extends { node: ListedNode }>(ctx: Context, agentId: string, entries: E[]) {
+  if (entries.length === 0) return [];
+  const { systemMemoryId } = await ctx.db.agent.findUniqueOrThrow({ where: { id: agentId }, select: { systemMemoryId: true } });
+  const rows = await ctx.db.node.findMany({ where: { id: { in: entries.map((e) => e.node.id) } } });
+  const ok = systemMemoryId ? await reverifyServed(ctx.db, ctx, systemMemoryId, entries.map((e) => e.node), rows) : new Set<string>();
+  const served = rows.filter((r) => ok.has(r.id));
+  await decryptNodesBatch(ctx.db, served);
+  const byId = new Map(served.map((r) => [r.id, r]));
+  return entries.flatMap((e) => {
+    const row = byId.get(e.node.id);
+    if (!row) return [];
+    return [{ ...e, node: e.node.inheritedFrom ? Object.assign(row, { inheritedFrom: e.node.inheritedFrom }) : row }];
+  });
+}
+
 export const agentQueries = {
+    /**
+     * #1892 (cor:dmo:050:15) — an Agent's tasks across its base chain: every
+     * runnable node of its effective system memory and every task a chain
+     * index lists, each once, with the listing edge's trigger where one exists.
+     * hadron_agent_tasks returns the same list (src/lib/agentDefinitionLists.ts).
+     */
+    agentTaskList: async (_: unknown, { ref }: { ref: string }, ctx: Context) => {
+      const { id } = await resolveAgentRef(ctx.db, ref);
+      return listedEntries(ctx, id, await listAgentTasks(ctx.db, ctx, id, ref));
+    },
+
+    /**
+     * #1892 (cor:dmo:050:16) — an Agent's processes: those it starts or owns
+     * (its processes index, with triggers), then those it's involved in
+     * (derived from stage edges into its tasks). hadron_agent_processes
+     * returns the same list.
+     */
+    agentProcessList: async (_: unknown, { ref }: { ref: string }, ctx: Context) => {
+      const { id } = await resolveAgentRef(ctx.db, ref);
+      return listedEntries(ctx, id, await listAgentProcesses(ctx.db, ctx, id, ref));
+    },
+
     // #473 — the uniform single-agent read; the first top-level Agent query
     // (previously reachable only via Organization.agents / App.agents
     // nesting). Gate mirrors resolveUrn's agent branch: a PUBLIC agent
