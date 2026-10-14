@@ -203,11 +203,11 @@ describe('Mutation.createAgentOrgGrant', () => {
   });
 
   it('rejects foreign non-public Agents', async () => {
+    // #1946: one the subscriber's admin can't read answers as absent (no
+    // AGENT_NOT_PUBLIC, no agentId); AGENT_NOT_PUBLIC stays for a reader.
     await expect(
       M.createAgentOrgGrant(null, { agentRef: privateAgent.id, orgRef: subscriberOrg.id }, ctx(subscriberAdmin.id)),
-    ).rejects.toMatchObject({
-      extensions: expect.objectContaining({ code: 'AGENT_NOT_PUBLIC' }),
-    });
+    ).rejects.toMatchObject({ code: 'AGENT_NOT_FOUND' });
   });
 
   it('rejects the owning org self-subscribe path', async () => {

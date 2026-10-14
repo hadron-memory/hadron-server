@@ -187,25 +187,37 @@ export const hostOperationMutations = {
   collectHostOperations: async (_: unknown, a: { appRef: string; first?: number | null }, ctx: Context) => {
     const first = Math.min(Math.max(a.first ?? 50, 1), PAGE_MAX);
     return asHost(ctx, a.appRef, async (tx, app, host) => {
-      const rows = await tx.$queryRaw<{ id: string }[]>`
-        SELECT id FROM host_operations
-        WHERE app_id = ${app.id} AND host_id = ${host.hostId} AND status IN ('issued', 'collected')
-        ORDER BY issued_at, id
-        LIMIT ${first}
-        FOR UPDATE`;
-      const ids = rows.map((r) => r.id);
       const now = new Date();
-      if (ids.length) {
+      const out: Array<HostOperationRow & { launchGrant: string | null }> = [];
+      // #1928 (Diego P2): a start held back (its grant still live) or failed at collection takes no page slot, so the
+      // page is refilled past it, oldest first, until `first` operations are delivered or the host has no more.
+      // The cursor is the last row's id, compared through the row itself (no JS Date bound against a naive column).
+      let afterId: string | null = null;
+      while (out.length < first) {
+        const want = first - out.length;
+        const rows: { id: string }[] = await tx.$queryRaw`
+          SELECT id FROM host_operations
+          WHERE app_id = ${app.id} AND host_id = ${host.hostId} AND status IN ('issued', 'collected')
+            ${afterId ? Prisma.sql`AND (issued_at, id) > (SELECT issued_at, id FROM host_operations WHERE id = ${afterId})` : Prisma.empty}
+          ORDER BY issued_at, id
+          LIMIT ${want}
+          FOR UPDATE`;
+        if (rows.length === 0) break;
+        const ids = rows.map((r) => r.id);
         await tx.hostOperation.updateMany({ where: { id: { in: ids }, status: 'issued' }, data: { status: 'collected', collectedAt: now } });
+        // #1709 slice 2: each worker.start collected gets a fresh single-use launch grant, shown in this answer only.
+        // One whose worker is no longer held fails here instead, and is left out. #1928: one whose grant is still live
+        // is left out too, so a re-collect never revokes a launch in flight.
+        const starts = await tx.hostOperation.findMany({ where: { id: { in: ids }, type: 'worker.start' } });
+        const { grants, withheld } = await mintLaunchGrants(tx, starts, now);
+        const ops = await tx.hostOperation.findMany({ where: { id: { in: ids }, status: 'collected' } });
+        const byId = new Map(ops.filter((o) => !withheld.has(o.id)).map((o) => [o.id, o]));
+        for (const id of ids) if (byId.has(id)) out.push({ ...byId.get(id)!, launchGrant: grants.get(id) ?? null });
+        if (rows.length < want) break;
+        afterId = rows[rows.length - 1]!.id;
       }
-      // #1709 slice 2: each worker.start collected gets a fresh single-use launch grant, shown in this answer only.
-      // One whose worker is no longer held fails here instead, and is left out.
-      const starts = ids.length ? await tx.hostOperation.findMany({ where: { id: { in: ids }, type: 'worker.start' } }) : [];
-      const grants = await mintLaunchGrants(tx, starts, now);
-      const ops = ids.length ? await tx.hostOperation.findMany({ where: { id: { in: ids }, status: 'collected' } }) : [];
-      await recordHostKeyUse(tx, host, 'collect', { count: ops.length });
-      const byId = new Map(ops.map((o) => [o.id, o]));
-      return ids.filter((id) => byId.has(id)).map((id) => ({ ...byId.get(id)!, launchGrant: grants.get(id) ?? null }));
+      await recordHostKeyUse(tx, host, 'collect', { count: out.length });
+      return out;
     });
   },
 

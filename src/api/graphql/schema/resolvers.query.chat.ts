@@ -4,6 +4,7 @@ import {
   getMemoryEncryptionInfo,
 } from '../../../lib/nodeCrypto.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
+import { AgentNotFoundError } from '../../../lib/entityRef/errors.js';
 import { chatLocFilter, pickChatNode } from '../../../lib/chatLoc.js';
 import { recordNodeUsage, toUsageNodeRefs } from '../../../lib/usageRecorder.js';
 import { excludeTeamChat, excludeChannelRoots } from '../../../lib/teamChatLoc.js';
@@ -31,7 +32,16 @@ export const chatQueries = {
       // v1 justifies reading someone's private AI conversations.
       if (ctx.impersonation) throw new Error('Forbidden');
       // 007-entity-id-or-urn: agentRef may be ID, bare URN, or prefixed URN.
-      const { id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentRef);
+      // #1946: an Agent that doesn't exist answers the same empty list as one
+      // the caller has no chats with (and can't read), so the list is no
+      // existence oracle. A malformed ref still surfaces as the caller's input.
+      let resolvedAgentId: string;
+      try {
+        ({ id: resolvedAgentId } = await resolveAgentRef(ctx.db, agentRef));
+      } catch (e) {
+        if (e instanceof AgentNotFoundError) return [];
+        throw e;
+      }
 
       // Spec 017 — collect the memories the caller may read chats from:
       //  - the caller's own personal memory for this agent (private chats)

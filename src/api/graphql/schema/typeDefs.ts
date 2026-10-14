@@ -8660,7 +8660,8 @@ export const typeDefs = `#graphql
     registerHost(input: RegisterHostInput!): HostRegistration!
     """
     #1709 — a host collects its own operations, oldest first: those still ISSUED (now marked COLLECTED) and those it
-    collected and has not reported. Only its own host's, in its own App (hrn:node:hadronmemory.com:specs:cor:agt:070:04).
+    collected and has not reported, except a worker.start whose launch grant is still live (#1928: a re-collection never
+    revokes a launch in flight). Only its own host's, in its own App (hrn:node:hadronmemory.com:specs:cor:agt:070:04).
     first: at most 200, default 50.
     """
     collectHostOperations(appRef: String!, first: Int): [HostOperation!]!
@@ -12334,8 +12335,10 @@ export const typeDefs = `#graphql
     failureReason: String
     """
     #1709 — worker.start only, and only in collectHostOperations' answer: the single-use launch grant to pass to the
-    agent the host starts (it redeems it at startSession with its holder's own token). Minted at each collection, which
-    revokes the previous one; short-lived; never stored in clear and never shown again. Null everywhere else.
+    agent the host starts (it redeems it at startSession with its holder's own token). Short-lived; never stored in clear
+    and never shown again. #1928: while it is live, a re-collection leaves the start out of the answer; once it expires,
+    the next collection revokes it and delivers the start with a fresh one; once redeemed, the start is delivered with
+    null here, so a restarted host can still report it. Null everywhere else.
     """
     launchGrant: String
   }

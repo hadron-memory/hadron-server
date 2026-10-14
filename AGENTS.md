@@ -72,7 +72,7 @@ should not be changed.
 | DB | Purpose | Owner | Connection string |
 |---|---|---|---|
 | `hadron` | Local development — **the canonical dev DB.** `.env` `DATABASE_URL` points here; the app, `prisma/seed.ts`, and `prisma db push` all use it. | `holger` | `postgresql://holger@localhost:5432/hadron` |
-| `hadron_test` | Vitest test runs (cleared between tests) | `holger` | `postgresql://holger@localhost:5432/hadron_test` |
+| `hadron_test` | Vitest's base name. **Parallel mode (default) never reads it** (#1922): each run clones `hadron_test_s<fingerprint>`, a template globalSetup builds from EMPTY for the checkout's schema. Serial mode (`HADRON_TEST_PARALLEL=0`) runs against `hadron_test` itself, rebuilt by `pnpm db:test-setup`. | `holger` | `postgresql://holger@localhost:5432/hadron_test` |
 | `hadron_dev` | **Deprecated / unused.** Older docs + the `db:dev-reset` script pointed here while `.env` actually used `hadron`; that split caused a long-running "phantom drift" confusion. Don't rely on it. | `holger` | `postgresql://holger@localhost:5432/hadron_dev` |
 
 Both `hadron` and `hadron_test` are managed via `prisma db push` (no migration
