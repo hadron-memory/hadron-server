@@ -9,8 +9,9 @@
  *     nor any other key of the App. The same rule #1883 put on binding, liveness and usage (`ownsSession`).
  *  2. A key that holds, or EVER held, `host:operate` writes no session of its App, launched or not (#1919's rule).
  *
- * #932's App branch is otherwise unchanged: a plain App key still writes its App's ordinary sessions, pending
- * Holger's ruling on whether it keeps that power (the open question on #1934).
+ * 3. Otherwise an App key writes only USER-LESS sessions of its App, the ones App keys start: never a session a person
+ *    is behind, worker sessions included (Holger's ruling A via Vera, team chat #11860). #932's purpose, an App
+ *    closing the sessions it runs, survives.
  */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -71,6 +72,16 @@ async function ordinarySession(): Promise<{ id: string }> {
   const s = await M.startSession({}, { input: { id: generateId(), tool: 'vitest' } }, keyCtx(plainKey));
   expect(s.launchOperationId ?? null).toBeNull();
   return { id: s.id };
+}
+
+/** A person's session of the App: attributed to the holder, bound to no worker. */
+async function personSession(): Promise<{ id: string }> {
+  return db.session.create({ data: { id: generateId(), appId: app.id, userId: holder.id, tool: 'vitest' }, select: { id: true } });
+}
+
+/** A worker session a person holds: Kit, bound by its holder (not launched). */
+async function heldWorkerSession(): Promise<{ id: string }> {
+  return db.session.create({ data: { id: generateId(), appId: app.id, userId: holder.id, workerId: kit.id, tool: 'vitest' }, select: { id: true } });
 }
 
 const update = (c: Context, id: string) => M.updateSession({}, { id, prNumber: 1934, branch: 'driven' }, c);
@@ -155,10 +166,35 @@ describe('GraphQL: a key that ever held host:operate writes no session of its Ap
     expect(await row(s.id)).toEqual(before);
   });
 
-  it('control (#932, unchanged pending Holger\'s ruling): a plain App key still updates and ends its App\'s ordinary session', async () => {
+  it('control (#932\'s purpose, #11860): a plain App key still updates and ends a user-less session of its App', async () => {
     const s = await ordinarySession();
     expect((await update(keyCtx(plainKey), s.id)).prNumber).toBe(1934);
     await end(keyCtx(plainKey), s.id);
+    expect((await row(s.id)).endedAt).not.toBeNull();
+  });
+});
+
+describe('GraphQL: a plain App key writes only user-less sessions (Holger\'s ruling A, #11860)', () => {
+  it('refused on a person\'s session', async () => {
+    const s = await personSession();
+    const before = await row(s.id);
+    expect(await code(update(keyCtx(plainKey), s.id))).toBe('FORBIDDEN');
+    expect(await code(end(keyCtx(plainKey), s.id))).toBe('FORBIDDEN');
+    expect(await row(s.id)).toEqual(before);
+  });
+
+  it('refused on a worker session a person holds', async () => {
+    const s = await heldWorkerSession();
+    const before = await row(s.id);
+    expect(await code(update(keyCtx(plainKey), s.id))).toBe('FORBIDDEN');
+    expect(await code(end(keyCtx(plainKey), s.id))).toBe('FORBIDDEN');
+    expect(await row(s.id)).toEqual(before);
+  });
+
+  it('control: the person still updates and ends their own session', async () => {
+    const s = await heldWorkerSession();
+    expect((await update(ctx(holder.id), s.id)).prNumber).toBe(1934);
+    await end(ctx(holder.id), s.id);
     expect((await row(s.id)).endedAt).not.toBeNull();
   });
 });
@@ -177,7 +213,14 @@ describe('MCP hadron_end_session shares the gate', () => {
     expect((await row(s.id)).endedAt).toBeNull();
   });
 
-  it('control (#932): a plain App key still ends its App\'s ordinary session', async () => {
+  it('a plain App key cannot end a person\'s session or a held worker session (#11860)', async () => {
+    for (const s of [await personSession(), await heldWorkerSession()]) {
+      expect(await createTestableMcpServer(keyAuth(plainKey)).callToolText('hadron_end_session', { id: s.id })).toContain('Forbidden');
+      expect((await row(s.id)).endedAt).toBeNull();
+    }
+  });
+
+  it('control (#11860): a plain App key still ends a user-less session of its App', async () => {
     const s = await ordinarySession();
     expect(await createTestableMcpServer(keyAuth(plainKey)).callToolText('hadron_end_session', { id: s.id })).toContain('Session ended');
   });
