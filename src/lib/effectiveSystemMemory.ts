@@ -249,11 +249,20 @@ export async function retainEffective<T extends { id: string; memoryId: string; 
   if (scope.inheritedFrom.size === 0) return rows;
   const candidates = rows.filter((r) => scope.inheritedFrom.has(r.memoryId));
   if (candidates.length === 0) return rows;
-  const live = new Set<string>();
+  // node id -> the first root (in scope order) that inherits it now: the
+  // child each kept row is read through, so its edges resolve there (#1893).
+  const viaById = new Map<string, string>();
   for (const root of scope.roots) {
-    for (const id of (await inheritedNodeIds(db, await systemMemoryChain(db, root))).keys()) live.add(id);
+    for (const id of (await inheritedNodeIds(db, await systemMemoryChain(db, root))).keys()) {
+      if (!viaById.has(id)) viaById.set(id, root);
+    }
   }
-  return rows.filter((r) => !scope.inheritedFrom.has(r.memoryId) || (live.has(r.id) && !isNotInheritedRole(r.role)));
+  const kept = rows.filter((r) => !scope.inheritedFrom.has(r.memoryId) || (viaById.has(r.id) && !isNotInheritedRole(r.role)));
+  for (const r of kept) {
+    const from = scope.inheritedFrom.get(r.memoryId);
+    if (from) (r as T & { inheritedFrom?: InheritedFrom }).inheritedFrom = { ...from, via: viaById.get(r.id)! };
+  }
+  return kept;
 }
 
 /**
@@ -270,4 +279,60 @@ export async function stillInherited(
   if (!from.via || isNotInheritedRole(row.role)) return false;
   const effective = await findEffectiveNodeIdByLoc(db, from.via, row.loc);
   return effective?.id === row.id && effective.inheritedFrom !== null;
+}
+
+/** An edge of an inherited node, resolved through its child (#1893). */
+export type ResolvedInheritedEdge<E, N> = { edge: E; endpoint: N & { inheritedFrom?: InheritedFrom } };
+
+/**
+ * #1893 (cor:dmo:050:14; Holger, team chat #10968 item 2) — an inherited
+ * node's edges, read through the child it came through, resolved the way
+ * bare-loc links are (#10932):
+ *
+ * - an endpoint in the child's chain resolves BY LOC through the child's
+ *   effective memory: the child's override wins, and an endpoint that isn't
+ *   in effect there (overridden away to nothing, a base boot prompt) drops
+ *   the edge. A resolved endpoint that is inherited is stamped, `via` the
+ *   same child, so its own fields are the sanitized projection too;
+ * - an endpoint outside the chain shows only when `canReadMemory` admits its
+ *   own memory: never widened.
+ *
+ * Both directions follow the same rule. So no edge ever hands over a base
+ * node that is not in effect for the child (S7 stays shut).
+ */
+export async function resolveInheritedEdges(
+  db: Pick<PrismaClient, '$queryRaw' | 'edge' | 'node'>,
+  args: {
+    nodeId: string;
+    via: string;
+    direction: 'out' | 'in';
+    canReadMemory: (memoryId: string) => Promise<boolean>;
+  },
+) {
+  const chain = await systemMemoryChain(db as Db, args.via);
+  const inChain = new Set(chain.map((l) => l.memoryId));
+  const far = args.direction === 'out' ? 'target' : 'source';
+  const edges = await db.edge.findMany({
+    where: args.direction === 'out'
+      ? { sourceId: args.nodeId, deletedAt: null, target: { deletedAt: null } }
+      : { targetId: args.nodeId, deletedAt: null, source: { deletedAt: null } },
+    include: { [far]: true } as { target: true } | { source: true },
+    orderBy: { loc: 'asc' },
+  });
+  type EdgeRow = (typeof edges)[number];
+  type NodeRow = NonNullable<Awaited<ReturnType<typeof db.node.findUnique>>>;
+  const out: Array<ResolvedInheritedEdge<EdgeRow, NodeRow>> = [];
+  for (const edge of edges) {
+    const endpoint = (edge as unknown as Record<string, NodeRow>)[far]!;
+    if (!inChain.has(endpoint.memoryId)) {
+      if (await args.canReadMemory(endpoint.memoryId)) out.push({ edge, endpoint });
+      continue;
+    }
+    const effective = await findEffectiveNodeIdByLoc(db as Db, args.via, endpoint.loc);
+    if (!effective) continue;
+    const row = effective.id === endpoint.id ? endpoint : await db.node.findUnique({ where: { id: effective.id } });
+    if (!row || row.deletedAt) continue;
+    out.push({ edge, endpoint: effective.inheritedFrom ? { ...row, inheritedFrom: effective.inheritedFrom } : row });
+  }
+  return out;
 }
